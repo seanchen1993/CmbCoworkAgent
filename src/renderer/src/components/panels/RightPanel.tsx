@@ -25,14 +25,15 @@ import {
   Sparkles,
   Puzzle,
   Plug,
-  Power
+  Power,
+  Webhook
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
 import { useThreadState } from "@/lib/thread-context"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import type { Todo, SkillMetadata, PluginMetadata } from "@/types"
+import type { Todo, SkillMetadata, PluginMetadata, HookConfig } from "@/types"
 import { SubagentCard } from "@/components/panels/SubagentPanel"
 
 const HEADER_HEIGHT = 52 // px
@@ -136,9 +137,11 @@ export function RightPanel(): React.JSX.Element {
   const [agentsOpen, setAgentsOpen] = useState(false)
   const [skillsOpen, setSkillsOpen] = useState(false)
   const [pluginsOpen, setPluginsOpen] = useState(false)
+  const [hooksOpen, setHooksOpen] = useState(false)
   const [skills, setSkills] = useState<SkillMetadata[]>([])
   const [disabledSkills, setDisabledSkills] = useState<Set<string>>(new Set())
   const [plugins, setPlugins] = useState<PluginMetadata[]>([])
+  const [hooks, setHooks] = useState<HookConfig[]>([])
 
   useEffect(() => {
     async function load(): Promise<void> {
@@ -159,6 +162,10 @@ export function RightPanel(): React.JSX.Element {
   useEffect(() => {
     window.api.plugins.list().then(setPlugins).catch(console.error)
   }, [pluginVersion])
+
+  useEffect(() => {
+    window.api.hooks.list().then(setHooks).catch(console.error)
+  }, [])
 
   // Store content heights in pixels (null = auto/equal distribution)
   const [tasksHeight, setTasksHeight] = useState<number | null>(null)
@@ -559,6 +566,22 @@ export function RightPanel(): React.JSX.Element {
         {pluginsOpen && (
           <div className="overflow-auto right-panel-scroll" style={{ height: heights.plugins }}>
             <PluginsContent plugins={plugins} />
+          </div>
+        )}
+      </div>
+
+      {/* HOOKS */}
+      <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
+        <SectionHeader
+          title="钩子"
+          icon={Webhook}
+          badge={hooks.length}
+          isOpen={hooksOpen}
+          onToggle={() => setHooksOpen((prev) => !prev)}
+        />
+        {hooksOpen && (
+          <div className="overflow-auto right-panel-scroll max-h-[200px]">
+            <HooksContent hooks={hooks} />
           </div>
         )}
       </div>
@@ -1306,6 +1329,75 @@ function PluginsContent({ plugins }: { plugins: PluginMetadata[] }): React.JSX.E
             </Badge>
           </div>
           {disabled.map(renderPluginCard)}
+        </div>
+      )}
+    </div>
+  )
+}
+
+const HOOK_EVENT_COLORS: Record<string, string> = {
+  PreToolUse: "bg-blue-500/15 text-blue-600 dark:text-blue-400",
+  PostToolUse: "bg-green-500/15 text-green-600 dark:text-green-400",
+  Stop: "bg-amber-500/15 text-amber-600 dark:text-amber-400",
+  Notification: "bg-purple-500/15 text-purple-600 dark:text-purple-400"
+}
+
+function HooksContent({ hooks }: { hooks: HookConfig[] }): React.JSX.Element {
+  if (hooks.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center text-center text-sm text-muted-foreground py-8 px-4">
+        <Webhook className="size-8 mb-2 opacity-50" />
+        <span>暂无钩子</span>
+        <span className="text-xs mt-1">在自定义面板中添加钩子</span>
+      </div>
+    )
+  }
+
+  const enabled = hooks.filter((h) => h.enabled)
+  const disabled = hooks.filter((h) => !h.enabled)
+
+  const renderHookCard = (hook: HookConfig): React.JSX.Element => (
+    <div
+      key={hook.id}
+      className={cn(
+        "p-3 rounded-sm border border-border",
+        !hook.enabled && "opacity-60"
+      )}
+    >
+      <div className="flex items-center gap-2 text-sm">
+        <span
+          className={cn(
+            "text-[10px] font-medium px-1.5 py-0.5 rounded-full shrink-0",
+            HOOK_EVENT_COLORS[hook.event] ?? "bg-muted text-muted-foreground"
+          )}
+        >
+          {hook.event}
+        </span>
+        <span className={cn("flex-1 truncate font-mono text-xs", !hook.enabled && "text-muted-foreground")}>
+          {hook.command}
+        </span>
+        <Power className={cn("size-3 shrink-0", hook.enabled ? "text-status-nominal" : "text-muted-foreground")} />
+      </div>
+      {hook.matcher && (
+        <p className="text-[10px] text-muted-foreground mt-1 font-mono">匹配: {hook.matcher}</p>
+      )}
+    </div>
+  )
+
+  return (
+    <div className="p-3 space-y-2">
+      {enabled.length > 0 && enabled.map(renderHookCard)}
+      {disabled.length > 0 && (
+        <div className="space-y-2 pt-1">
+          <div className="flex items-center justify-between px-1">
+            <span className="text-[11px] text-muted-foreground tracking-wider font-medium">
+              已禁用
+            </span>
+            <Badge variant="outline" className="text-[10px] h-5">
+              {disabled.length}
+            </Badge>
+          </div>
+          {disabled.map(renderHookCard)}
         </div>
       )}
     </div>

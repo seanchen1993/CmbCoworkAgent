@@ -52,7 +52,7 @@ import { getMemoryStore, closeMemoryStore } from "../memory/store"
 import { createMemorySearchTool, createMemoryGetTool } from "../memory/tools"
 import { createSchedulerTool } from "./tools/scheduler-tool"
 import { createGitWorkflowTool } from "./tools/git-workflow-tool"
-import { getWindowsSandboxMode, getYoloMode } from "../storage"
+import { getWindowsSandboxMode, getYoloMode, getEnabledHooks } from "../storage"
 
 /** Decompress codex.exe.gz → codex.exe if needed (re-extract if .gz is newer than .exe). */
 async function ensureCodexExe(exePath: string): Promise<void> {
@@ -494,13 +494,17 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const windowsSandbox = process.platform === "win32" ? getWindowsSandboxMode() : "none"
   console.log(`[Runtime] codex.exe: ${codexExePath}, exists: ${codexExists}, sandboxMode: ${windowsSandbox}`)
 
+  const enabledHooks = getEnabledHooks()
+  console.log(`[Runtime] Loaded ${enabledHooks.length} enabled hooks`)
+
   const backend = new LocalSandbox({
     rootDir: workspacePath,
     virtualMode: false,
     timeout: 600_000,
     maxOutputBytes,
     windowsSandbox,
-    codexExePath: codexExists ? codexExePath : undefined
+    codexExePath: codexExists ? codexExePath : undefined,
+    hooks: enabledHooks
   })
 
   let systemPrompt = getSystemPrompt(workspacePath, windowsSandbox)

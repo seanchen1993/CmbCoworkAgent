@@ -12,7 +12,9 @@ import type {
   ScheduledTaskUpsert,
   HeartbeatConfig,
   PluginMetadata,
-  PluginManifest
+  PluginManifest,
+  HookConfig,
+  HookUpsert
 } from "../main/types"
 
 // Simple electron API - replaces @electron-toolkit/preload
@@ -487,6 +489,16 @@ const api = {
       ipcRenderer.on("sandbox:changed", handler)
       return () => { ipcRenderer.removeListener("sandbox:changed", handler) }
     }
+  },
+  hooks: {
+    list: (): Promise<HookConfig[]> => ipcRenderer.invoke("hooks:list"),
+    create: (config: HookUpsert): Promise<{ id: string }> =>
+      ipcRenderer.invoke("hooks:create", config),
+    update: (config: HookUpsert & { id: string }): Promise<{ id: string }> =>
+      ipcRenderer.invoke("hooks:update", config),
+    delete: (id: string): Promise<void> => ipcRenderer.invoke("hooks:delete", id),
+    setEnabled: (id: string, enabled: boolean): Promise<void> =>
+      ipcRenderer.invoke("hooks:setEnabled", { id, enabled })
   }
 }
 

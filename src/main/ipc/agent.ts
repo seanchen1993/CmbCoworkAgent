@@ -8,6 +8,8 @@ import { getMemoryStore } from "../memory/store"
 import { ChatOpenAI } from "@langchain/openai"
 import { getCustomModelConfigs, isMemoryEnabled } from "../storage"
 import { notifyIfBackground } from "../services/notify"
+import { getEnabledHooks } from "../storage"
+import { runHooks } from "../hooks/runner"
 import type {
   AgentInvokeParams,
   AgentResumeParams,
@@ -139,6 +141,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
 
       if (!abortController.signal.aborted) {
+        // Run Stop hooks before signaling done
+        runHooks(getEnabledHooks(), "Stop", {
+          workspacePath
+        }).catch((e) => console.warn("[Agent] Stop hook error:", e))
+
         window.webContents.send(channel, { type: "done" })
         notifyIfBackground("✅ 任务完成", assistantText.trim() || "对话已完成")
 

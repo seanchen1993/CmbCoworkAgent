@@ -28,6 +28,8 @@ import * as iconv from "iconv-lite"
 import * as chardet from "jschardet"
 import micromatch from "micromatch"
 import { replace } from "./replace"
+import type { HookConfig } from "../hooks/types"
+import { runHooks } from "../hooks/runner"
 
 /**
  * Options for LocalSandbox configuration.
@@ -49,6 +51,8 @@ export interface LocalSandboxOptions {
   windowsSandbox?: "none" | "unelevated" | "readonly"
   /** Full path to codex.exe for Windows sandbox. Falls back to 'codex' on PATH if not provided. */
   codexExePath?: string
+  /** Hook configurations for PreToolUse/PostToolUse lifecycle events */
+  hooks?: HookConfig[]
 }
 
 /**
@@ -80,6 +84,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
   private readonly workingDir: string
   private readonly windowsSandbox: "none" | "unelevated" | "readonly"
   private readonly codexExePath: string
+  private readonly hooks: HookConfig[]
   /** Cached from parent's private fields to avoid (this as any) scattered everywhere */
   private readonly _resolvePath: (key: string) => string
   private readonly _virtualMode: boolean
@@ -107,6 +112,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     this.workingDir = options.rootDir ?? process.cwd()
     this.windowsSandbox = options.windowsSandbox ?? "none"
     this.codexExePath = options.codexExePath ?? "codex"
+    this.hooks = options.hooks ?? []
 
     // Eagerly cache the elevation check during construction to avoid blocking
     // the event loop on the first file-write hot path (execSync("net session")).
@@ -569,7 +575,24 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     if (this.isWriteBlocked(filePath)) {
       return { error: this.readonlyBlockedError(filePath, "写入") }
     }
-    return super.write(filePath, content)
+    // PreToolUse hook
+    const preResult = await runHooks(this.hooks, "PreToolUse", {
+      toolName: "write_file",
+      toolArgs: { filePath, content },
+      workspacePath: this.workingDir
+    })
+    if (preResult?.blocked) {
+      return { error: `[Hook blocked] ${preResult.stdout || "write_file was blocked by a hook"}` }
+    }
+    const result = await super.write(filePath, content)
+    // PostToolUse hook (fire-and-forget for write)
+    runHooks(this.hooks, "PostToolUse", {
+      toolName: "write_file",
+      toolArgs: { filePath, content },
+      toolResult: JSON.stringify(result),
+      workspacePath: this.workingDir
+    }).catch((e) => console.warn("[Hooks] PostToolUse write error:", e))
+    return result
   }
 
   /**
@@ -614,6 +637,15 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     if (this.isWriteBlocked(filePath)) {
       return { error: this.readonlyBlockedError(filePath, "编辑") }
     }
+    // PreToolUse hook
+    const preResult = await runHooks(this.hooks, "PreToolUse", {
+      toolName: "edit_file",
+      toolArgs: { filePath, oldString, newString, replaceAll },
+      workspacePath: this.workingDir
+    })
+    if (preResult?.blocked) {
+      return { error: `[Hook blocked] ${preResult.stdout || "edit_file was blocked by a hook"}` }
+    }
     try {
       const { buffer, resolvedPath } = await this.readFileBuffer(filePath)
       const ext = path.extname(resolvedPath).toLowerCase()
@@ -622,14 +654,30 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
 
       if (content === "" && oldString === "") {
         await this.writeFileEncoded(resolvedPath, newString, encoding)
-        return { path: filePath, filesUpdate: null, occurrences: 0 }
+        const result: EditResult = { path: filePath, filesUpdate: null, occurrences: 0 }
+        // PostToolUse hook (fire-and-forget for edit)
+        runHooks(this.hooks, "PostToolUse", {
+          toolName: "edit_file",
+          toolArgs: { filePath, oldString, newString, replaceAll },
+          toolResult: JSON.stringify(result),
+          workspacePath: this.workingDir
+        }).catch((e) => console.warn("[Hooks] PostToolUse edit error:", e))
+        return result
       }
 
       const { newContent, occurrences } = replace(content, oldString, newString, replaceAll)
 
       await this.writeFileEncoded(resolvedPath, newContent, encoding)
 
-      return { path: filePath, filesUpdate: null, occurrences }
+      const result: EditResult = { path: filePath, filesUpdate: null, occurrences }
+      // PostToolUse hook (fire-and-forget for edit)
+      runHooks(this.hooks, "PostToolUse", {
+        toolName: "edit_file",
+        toolArgs: { filePath, oldString, newString, replaceAll },
+        toolResult: JSON.stringify(result),
+        workspacePath: this.workingDir
+      }).catch((e) => console.warn("[Hooks] PostToolUse edit error:", e))
+      return result
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
       return { error: `Error editing file '${filePath}': ${msg}` }
@@ -989,40 +1037,73 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       }
     }
 
-    if (process.platform === "win32" && this.windowsSandbox !== "none") {
-      return this.executeInWindowsSandbox(command)
-    }
-
-    const isWindows = process.platform === "win32"
-    const shell = LocalSandbox.resolveShell()
-    const shellBase = path.basename(shell).replace(/\.exe$/i, "")
-    const isBashLikeShell = ["bash", "sh", "zsh"].includes(shellBase)
-
-    // On Windows with cmd.exe, force UTF-8 code page so CJK output isn't garbled.
-    // For Git Bash, encoding detection handles the conversion instead (see collectAndResolve).
-    const effectiveCommand = isWindows && !isBashLikeShell
-      ? `chcp 65001 >nul & ${command}`
-      : command
-
-    // On Windows, spawn can transiently fail with EPERM (antivirus file lock, handle
-    // contention). Retry up to SPAWN_RETRY_COUNT times with a short delay.
-    const maxAttempts = isWindows ? LocalSandbox.SPAWN_RETRY_COUNT + 1 : 1
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const result = await this.executeOnce(effectiveCommand, shell, isWindows)
-      const isSpawnEperm =
-        result.exitCode === 1
-        && result.output.startsWith("Error: Failed to execute command:")
-        && result.output.includes("EPERM")
-      if (isSpawnEperm && attempt < maxAttempts) {
-        console.warn(
-          `[LocalSandbox] spawn EPERM on attempt ${attempt}/${maxAttempts}, retrying in ${LocalSandbox.SPAWN_RETRY_DELAY_MS}ms…`
-        )
-        await new Promise<void>((r) => setTimeout(r, LocalSandbox.SPAWN_RETRY_DELAY_MS))
-        continue
+    // PreToolUse hook
+    const preResult = await runHooks(this.hooks, "PreToolUse", {
+      toolName: "execute",
+      toolArgs: { command },
+      workspacePath: this.workingDir
+    })
+    if (preResult?.blocked) {
+      return {
+        output: `[Hook blocked] ${preResult.stdout || "execute was blocked by a hook"}`,
+        exitCode: 1,
+        truncated: false
       }
-      return result
     }
-    return { output: "Error: Unexpected retry loop exit.", exitCode: 1, truncated: false }
+
+    let result: ExecuteResponse
+
+    if (process.platform === "win32" && this.windowsSandbox !== "none") {
+      result = await this.executeInWindowsSandbox(command)
+    } else {
+      const isWindows = process.platform === "win32"
+      const shell = LocalSandbox.resolveShell()
+      const shellBase = path.basename(shell).replace(/\.exe$/i, "")
+      const isBashLikeShell = ["bash", "sh", "zsh"].includes(shellBase)
+
+      // On Windows with cmd.exe, force UTF-8 code page so CJK output isn't garbled.
+      // For Git Bash, encoding detection handles the conversion instead (see collectAndResolve).
+      const effectiveCommand = isWindows && !isBashLikeShell
+        ? `chcp 65001 >nul & ${command}`
+        : command
+
+      // On Windows, spawn can transiently fail with EPERM (antivirus file lock, handle
+      // contention). Retry up to SPAWN_RETRY_COUNT times with a short delay.
+      const maxAttempts = isWindows ? LocalSandbox.SPAWN_RETRY_COUNT + 1 : 1
+      let found = false
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const attemptResult = await this.executeOnce(effectiveCommand, shell, isWindows)
+        const isSpawnEperm =
+          attemptResult.exitCode === 1
+          && attemptResult.output.startsWith("Error: Failed to execute command:")
+          && attemptResult.output.includes("EPERM")
+        if (isSpawnEperm && attempt < maxAttempts) {
+          console.warn(
+            `[LocalSandbox] spawn EPERM on attempt ${attempt}/${maxAttempts}, retrying in ${LocalSandbox.SPAWN_RETRY_DELAY_MS}ms…`
+          )
+          await new Promise<void>((r) => setTimeout(r, LocalSandbox.SPAWN_RETRY_DELAY_MS))
+          continue
+        }
+        result = attemptResult
+        found = true
+        break
+      }
+      if (!found) {
+        result = { output: "Error: Unexpected retry loop exit.", exitCode: 1, truncated: false }
+      }
+    }
+
+    // PostToolUse hook
+    const postResult = await runHooks(this.hooks, "PostToolUse", {
+      toolName: "execute",
+      toolArgs: { command },
+      toolResult: result.output,
+      workspacePath: this.workingDir
+    })
+    if (postResult?.stdout) {
+      result = { ...result, output: result.output + "\n\n[Hook output]\n" + postResult.stdout }
+    }
+    return result
   }
 
   /**

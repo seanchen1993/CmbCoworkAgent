@@ -1,4 +1,6 @@
 import { BrowserWindow, Notification } from "electron"
+import { getEnabledHooks } from "../storage"
+import { runHooks } from "../hooks/runner"
 
 const BODY_MAX = 200
 
@@ -11,6 +13,11 @@ export function notifyIfBackground(title: string, body: string): void {
 
   const win = BrowserWindow.getFocusedWindow()
   if (win && win.isFocused()) return
+
+  // Fire Notification hooks
+  runHooks(getEnabledHooks(), "Notification", {
+    toolArgs: { title, body }
+  }).catch((e) => console.warn("[Notify] Notification hook error:", e))
 
   sendNotification(title, body)
 }

@@ -11,7 +11,9 @@ import type {
   ScheduledTaskUpsert,
   HeartbeatConfig,
   PluginMetadata,
-  PluginManifest
+  PluginManifest,
+  HookConfig,
+  HookUpsert
 } from "../main/types"
 
 interface ElectronAPI {
@@ -244,6 +246,13 @@ interface CustomAPI {
     getYoloMode: () => Promise<boolean>
     setYoloMode: (yolo: boolean) => Promise<void>
     onChanged: (callback: () => void) => () => void
+  }
+  hooks: {
+    list: () => Promise<HookConfig[]>
+    create: (config: HookUpsert) => Promise<{ id: string }>
+    update: (config: HookUpsert & { id: string }) => Promise<{ id: string }>
+    delete: (id: string) => Promise<void>
+    setEnabled: (id: string, enabled: boolean) => Promise<void>
   }
 }
 

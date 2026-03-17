@@ -314,3 +314,6 @@ export interface SkillMetadata {
   allowedTools?: string[]
 }
 
+// Hooks types (re-exported from hooks/types.ts)
+export type { HookConfig, HookEvent, HookUpsert } from "./hooks/types"
+

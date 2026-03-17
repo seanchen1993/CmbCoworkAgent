@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "
 import { readdir, readFile, rm, mkdir, stat as fsStat } from "fs/promises"
 import { app } from "electron"
 import type { PluginMetadata, PluginMcpServerConfig } from "./types"
+import type { HookConfig, HookUpsert } from "./hooks/types"
 import { copyDirRecursive } from "./utils/fs"
 const OPENWORK_DIR = join(homedir(), ".cmbcoworkagent")
 const ENV_FILE = join(OPENWORK_DIR, ".env")
@@ -1227,4 +1228,74 @@ export function getYoloMode(): boolean {
 
 export function setYoloMode(yolo: boolean): void {
   updateSandboxSettings({ yolo })
+}
+
+// ── Hooks ─────────────────────────────────────────────────────────────────────
+
+const HOOKS_FILE = join(OPENWORK_DIR, "hooks.json")
+
+export function getHooks(): HookConfig[] {
+  getOpenworkDir()
+  if (!existsSync(HOOKS_FILE)) return []
+  try {
+    const content = readFileSync(HOOKS_FILE, "utf-8")
+    const parsed = JSON.parse(content) as unknown
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter(
+      (item): item is HookConfig =>
+        item != null &&
+        typeof item === "object" &&
+        typeof (item as Record<string, unknown>).id === "string" &&
+        typeof (item as Record<string, unknown>).event === "string" &&
+        typeof (item as Record<string, unknown>).command === "string"
+    )
+  } catch {
+    return []
+  }
+}
+
+export function getEnabledHooks(): HookConfig[] {
+  return getHooks().filter((h) => h.enabled)
+}
+
+export function upsertHook(config: HookUpsert & { id?: string }): string {
+  getOpenworkDir()
+  const items = getHooks()
+  const now = new Date().toISOString()
+  const id = config.id ?? uuid()
+  const existing = items.find((i) => i.id === id)
+  const next: HookConfig = {
+    id,
+    event: config.event,
+    matcher: config.matcher,
+    command: config.command.trim(),
+    timeout: config.timeout,
+    enabled: config.enabled ?? true,
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now
+  }
+  const index = items.findIndex((i) => i.id === id)
+  if (index >= 0) {
+    items[index] = next
+  } else {
+    items.push(next)
+  }
+  writeFileSync(HOOKS_FILE, JSON.stringify(items, null, 2))
+  return id
+}
+
+export function deleteHook(id: string): void {
+  getOpenworkDir()
+  const items = getHooks().filter((i) => i.id !== id)
+  writeFileSync(HOOKS_FILE, JSON.stringify(items, null, 2))
+}
+
+export function setHookEnabled(id: string, enabled: boolean): void {
+  getOpenworkDir()
+  const items = getHooks()
+  if (!items.some((i) => i.id === id)) return
+  const next = items.map((i) =>
+    i.id === id ? { ...i, enabled, updatedAt: new Date().toISOString() } : i
+  )
+  writeFileSync(HOOKS_FILE, JSON.stringify(next, null, 2))
 }

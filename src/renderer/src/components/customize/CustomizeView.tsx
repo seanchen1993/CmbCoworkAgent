@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { ArrowLeft, Brain, Clock, HeartPulse, Plug, Puzzle, Sparkles, ShoppingBag, Shield } from "lucide-react"
+import { ArrowLeft, Brain, Clock, HeartPulse, Plug, Puzzle, Sparkles, ShoppingBag, Shield, Webhook } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useAppStore } from "@/lib/store"
 import { cn } from "@/lib/utils"
@@ -11,8 +11,9 @@ import { HeartbeatPanel } from "./HeartbeatPanel"
 import { PluginsPanel } from "./PluginsPanel"
 import { MarketPanel } from "./MarketPanel"
 import { SandboxPanel } from "./SandboxPanel"
+import { HooksPanel } from "./HooksPanel"
 
-type CustomizeTab = "skills" | "connectors" | "plugins" | "scheduled" | "heartbeat" | "memory" | "market" | "sandbox"
+type CustomizeTab = "skills" | "connectors" | "plugins" | "scheduled" | "heartbeat" | "memory" | "market" | "hooks" | "sandbox"
 
 export function CustomizeView(): React.JSX.Element {
   const { setShowCustomizeView, customizeInitialTab } = useAppStore()
@@ -128,6 +129,18 @@ export function CustomizeView(): React.JSX.Element {
           <button
             className={cn(
               "flex items-center gap-3 w-full rounded-md px-2.5 py-1.5 text-sm transition-colors",
+              activeTab === "hooks"
+                ? "bg-muted font-medium"
+                : "text-muted-foreground hover:bg-muted/50"
+            )}
+            onClick={() => setActiveTab("hooks")}
+          >
+            <Webhook className="size-4 shrink-0" />
+            钩子
+          </button>
+          <button
+            className={cn(
+              "flex items-center gap-3 w-full rounded-md px-2.5 py-1.5 text-sm transition-colors",
               activeTab === "sandbox"
                 ? "bg-muted font-medium"
                 : "text-muted-foreground hover:bg-muted/50"
@@ -155,6 +168,8 @@ export function CustomizeView(): React.JSX.Element {
         <MemoryPanel />
       ) : activeTab === "market" ? (
         <MarketPanel />
+      ) : activeTab === "hooks" ? (
+        <HooksPanel />
       ) : activeTab === "sandbox" ? (
         <SandboxPanel />
       ) : null}
