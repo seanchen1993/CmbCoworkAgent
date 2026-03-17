@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { Plug, Power, Trash2 } from "lucide-react"
+import { Plug, Power, Trash2, Database } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
@@ -8,10 +8,11 @@ import type { McpConnectorConfig } from "@/types"
 export function MCPConnectorDetail(props: {
   connector: McpConnectorConfig | null
   onToggleEnabled: (id: string, enabled: boolean) => void
+  onToggleLazyLoad: (id: string, lazyLoad: boolean) => void
   onDelete: (connector: McpConnectorConfig) => void
   onEdit: (connector: McpConnectorConfig) => void
 }): React.JSX.Element {
-  const { connector, onToggleEnabled, onDelete, onEdit } = props
+  const { connector, onToggleEnabled, onToggleLazyLoad, onDelete, onEdit } = props
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<{ success: boolean; tools?: string[]; error?: string } | null>(null)
   const prevConnectorId = useRef<string | null>(null)
@@ -147,6 +148,28 @@ export function MCPConnectorDetail(props: {
             )}
           </div>
         )}
+      </div>
+
+      <div className="px-4 py-3 border-b border-border">
+        <div className="flex items-center justify-between">
+          <div className="space-y-0.5">
+            <p className="text-sm font-medium">懒加载</p>
+            <p className="text-xs text-muted-foreground">
+              {connector.lazyLoad
+                ? "工具通过 search_tool 搜索后按需加载"
+                : "所有工具直接加载到上下文中"}
+            </p>
+          </div>
+          <Button
+            variant={connector.lazyLoad ? "default" : "outline"}
+            size="sm"
+            className="h-7 gap-1.5 text-xs"
+            onClick={() => onToggleLazyLoad(connector.id, !connector.lazyLoad)}
+          >
+            <Database className="size-3" />
+            {connector.lazyLoad ? "已开启" : "已关闭"}
+          </Button>
+        </div>
       </div>
 
       <div className="px-4 py-3 border-b border-border">

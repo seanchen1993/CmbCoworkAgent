@@ -48,11 +48,16 @@ import { createReadStream } from "fs"
 import { createGunzip } from "zlib"
 import { pipeline } from "stream/promises"
 import { app } from "electron"
-import { BASE_SYSTEM_PROMPT, MEMORY_SYSTEM_PROMPT } from "./system-prompt"
+import { BASE_SYSTEM_PROMPT, MEMORY_SYSTEM_PROMPT, LAZY_MCP_SYSTEM_PROMPT } from "./system-prompt"
 import { getMemoryStore, closeMemoryStore } from "../memory/store"
 import { createMemorySearchTool, createMemoryGetTool } from "../memory/tools"
 import { createSchedulerTool } from "./tools/scheduler-tool"
 import { createGitWorkflowTool } from "./tools/git-workflow-tool"
+import {
+  McpToolRegistry,
+  createToolSearchTools,
+  fixMcpToolSchema
+} from "./tools/tool-search-tool"
 import { getWindowsSandboxMode, getYoloMode } from "../storage"
 
 /** Decompress codex.exe.gz → codex.exe if needed (re-extract if .gz is newer than .exe). */
@@ -351,14 +356,20 @@ ${shellGuidance}
 // Per-thread checkpointer cache
 const checkpointers = new Map<string, SqlJsSaver>()
 
-// Global MCP tools cache: single shared client, lifecycle managed here (not per-thread)
+// Global MCP tools cache: single shared client for both eager and lazy tools
+// Lifecycle managed here (not per-thread), reused across all sessions
+// Note: toolsByServer is cached, but eager/lazy distribution is decided at runtime
+// based on current config (lazyLoad may change without rebuilding client)
 const MCP_TOOLS_CACHE_TTL_MS = 5 * 60 * 1000
 let _mcpToolsCache: {
   fingerprint: string
-  tools: Awaited<ReturnType<MultiServerMCPClient["getTools"]>>
+  toolsByServer: Record<string, Awaited<ReturnType<MultiServerMCPClient["getTools"]>>>
   client: MultiServerMCPClient
   createdAt: number
 } | null = null
+
+// Pending promise to prevent concurrent MCP client initialization
+let _mcpInitPromise: Promise<void> | null = null
 
 // Retired MCP clients: kept alive for agents still referencing their tools.
 // Closed on app exit via closeRuntime().
@@ -367,6 +378,50 @@ const _retiredMcpClients = new Set<MultiServerMCPClient>()
 function computeMcpConfigFingerprint(connectors: { id: string; url: string; advanced?: unknown }[]): string {
   const payload = connectors.map((c) => `${c.id}:${c.url}:${JSON.stringify(c.advanced ?? {})}`).join("|")
   return createHash("sha256").update(payload).digest("hex").slice(0, 16)
+}
+
+/**
+ * Distribute MCP tools between eager tools and lazy registry based on lazyLoad config.
+ * - Plugin servers: always eager
+ * - User connectors: check lazyLoad setting
+ */
+function distributeMcpTools(
+  toolsByServer: Record<string, Awaited<ReturnType<MultiServerMCPClient["getTools"]>>>,
+  mcpConnectors: { id: string; name?: string; lazyLoad?: boolean }[],
+  registry: McpToolRegistry,
+  logLazyTools = false
+): Awaited<ReturnType<MultiServerMCPClient["getTools"]>> {
+  const eagerTools: Awaited<ReturnType<MultiServerMCPClient["getTools"]>> = []
+
+  for (const [serverId, tools] of Object.entries(toolsByServer)) {
+    // Plugin servers: always eager (plugins don't support lazyLoad)
+    if (serverId.startsWith("plugin:")) {
+      eagerTools.push(...tools)
+      continue
+    }
+
+    // User-configured connectors: check lazyLoad setting
+    const connector = mcpConnectors.find(c => c.id === serverId)
+    if (!connector) {
+      // Connector was deleted or not found, skip its tools
+      continue
+    }
+
+    const isLazy = connector.lazyLoad ?? false
+    if (isLazy) {
+      const serverName = connector.name || serverId
+      if (tools.length > 0) {
+        registry.register(serverName, tools)
+        if (logLazyTools) {
+          console.log("[Runtime] Lazy MCP tools from:", serverName, "count:", tools.length)
+        }
+      }
+    } else {
+      eagerTools.push(...tools)
+    }
+  }
+
+  return eagerTools
 }
 
 export async function getCheckpointer(threadId: string): Promise<SqlJsSaver> {
@@ -578,67 +633,110 @@ The workspace root is: ${workspacePath}`
 
   const mcpConnectors = getEnabledMcpConnectors()
   const pluginMcpConfigs = getEnabledPluginMcpConfigs()
+
+  // Create instance-level registry for lazy tools (avoid global state)
+  const registry = new McpToolRegistry()
   let mcpTools: Awaited<ReturnType<MultiServerMCPClient["getTools"]>> = []
+
+  // Unified MCP client for both eager and lazy tools
   if (mcpConnectors.length > 0 || Object.keys(pluginMcpConfigs).length > 0) {
+    // Build fingerprint including all connectors (both eager and lazy)
     const fingerprint = computeMcpConfigFingerprint([
       ...mcpConnectors,
       ...Object.entries(pluginMcpConfigs).map(([k, v]) => ({ id: k, url: v.url ?? v.command ?? "", advanced: v }))
     ])
+
+    // Wait for any pending initialization to complete (prevents concurrent init)
+    if (_mcpInitPromise) {
+      await _mcpInitPromise
+    }
+
+    // Re-check cache validity after waiting for pending init
     const cached = _mcpToolsCache
     const cacheValid = cached
       && cached.fingerprint === fingerprint
       && (Date.now() - cached.createdAt) < MCP_TOOLS_CACHE_TTL_MS
 
     if (cacheValid) {
-      mcpTools = cached.tools
-      console.log("[Runtime] MCP tools from cache:", mcpTools.length)
+      // Reuse cached client - redistribute tools based on CURRENT lazyLoad config
+      // (lazyLoad may have changed since cache was created)
+      mcpTools = distributeMcpTools(cached.toolsByServer, mcpConnectors, registry, false)
+      console.log("[Runtime] MCP tools from cache, eager:", mcpTools.length, "lazy:", registry.getToolCount())
     } else {
-      let mcpClient: MultiServerMCPClient | null = null
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const mcpServers: Record<string, any> = {}
-        for (const c of mcpConnectors) {
-          mcpServers[c.id] = buildMcpServerConfig({ url: c.url, advanced: c.advanced })
-        }
-        // Add plugin MCP servers
-        for (const [name, cfg] of Object.entries(pluginMcpConfigs)) {
-          if (cfg.command) {
-            mcpServers[name] = {
-              command: cfg.command,
-              args: cfg.args ?? []
-            }
-          } else if (cfg.url) {
-            mcpServers[name] = buildMcpServerConfig({
-              url: cfg.url,
-              advanced: { headers: cfg.headers, transport: cfg.transport }
-            })
-          }
-        }
-        mcpClient = new MultiServerMCPClient({
-          throwOnLoadError: false,
-          onConnectionError: "ignore",
-          useStandardContentBlocks: true,
-          mcpServers
-        })
-        mcpTools = await mcpClient.getTools()
+      // Create new client with all connectors
+      // Use a shared promise to prevent concurrent initialization
+      _mcpInitPromise = (async () => {
+        let mcpClient: MultiServerMCPClient | null = null
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const mcpServers: Record<string, any> = {}
 
-        const oldClient = _mcpToolsCache?.client
-        _mcpToolsCache = { fingerprint, tools: mcpTools, client: mcpClient, createdAt: Date.now() }
-        if (oldClient && oldClient !== mcpClient) {
-          _retiredMcpClients.add(oldClient)
+          // Add user-configured MCP connectors
+          for (const c of mcpConnectors) {
+            mcpServers[c.id] = buildMcpServerConfig({ url: c.url, advanced: c.advanced })
+          }
+          // Add plugin MCP servers
+          for (const [name, cfg] of Object.entries(pluginMcpConfigs)) {
+            if (cfg.command) {
+              mcpServers[name] = {
+                command: cfg.command,
+                args: cfg.args ?? []
+              }
+            } else if (cfg.url) {
+              mcpServers[name] = buildMcpServerConfig({
+                url: cfg.url,
+                advanced: { headers: cfg.headers, transport: cfg.transport }
+              })
+            }
+          }
+          mcpClient = new MultiServerMCPClient({
+            throwOnLoadError: false,
+            onConnectionError: "ignore",
+            useStandardContentBlocks: true,
+            mcpServers
+          })
+
+          // Get tools grouped by server
+          const toolsByServer = await mcpClient.initializeConnections()
+
+          // Distribute tools based on lazyLoad setting
+          mcpTools = distributeMcpTools(toolsByServer, mcpConnectors, registry, true)
+
+          // Update cache - store toolsByServer for redistribution on cache hit
+          const oldClient = _mcpToolsCache?.client
+          _mcpToolsCache = {
+            fingerprint,
+            toolsByServer,
+            client: mcpClient,
+            createdAt: Date.now()
+          }
+          if (oldClient && oldClient !== mcpClient) {
+            _retiredMcpClients.add(oldClient)
+          }
+          console.log("[Runtime] MCP tools loaded, eager:", mcpTools.length, "lazy:", registry.getToolCount())
+        } catch (e) {
+          if (mcpClient) {
+            mcpClient.close().catch(() => {})
+          }
+          console.warn("[Runtime] MCP client init failed:", e)
+        } finally {
+          _mcpInitPromise = null
         }
-        console.log("[Runtime] MCP tools loaded:", mcpTools.length)
-      } catch (e) {
-        if (mcpClient) {
-          mcpClient.close().catch(() => {})
-        }
-        console.warn("[Runtime] MCP client init failed:", e)
-      }
+      })()
+      await _mcpInitPromise
     }
-  } else if (_mcpToolsCache && Object.keys(pluginMcpConfigs).length === 0) {
+  } else if (_mcpToolsCache) {
+    // No connectors enabled, retire the cached client
     _retiredMcpClients.add(_mcpToolsCache.client)
     _mcpToolsCache = null
     console.log("[Runtime] MCP connectors disabled, retired cached client")
+  }
+
+  // Fix MCP tool schemas: some MCP servers return `required: null` instead of `required: []`
+  // which causes API errors. Normalize null/undefined to empty array.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  for (const t of mcpTools as any[]) {
+    fixMcpToolSchema(t)
   }
 
   // Wrap MCP tools so that any ToolException/McpError is caught and returned
@@ -675,6 +773,14 @@ The workspace root is: ${workspacePath}`
   // todo 暂时注释掉git_workflow工具，后续完善权限控制和安全措施后再放开
   extraTools.push(createGitWorkflowTool(workspacePath))
 
+  // Add tool search tools if there are lazy-loaded MCP tools
+  const toolSearchTools = registry.getToolCount() > 0 ? createToolSearchTools(registry) : []
+  if (toolSearchTools.length > 0) {
+    console.log("[Runtime] Added tool search tools for lazy MCP tools:", registry.getToolCount())
+    // Add lazy MCP system prompt so LLM knows how to use search_tool
+    systemPrompt += LAZY_MCP_SYSTEM_PROMPT
+  }
+
   const triggerTokens = Math.floor(maxTokens * 0.75)
   const keepTokens = Math.max(Math.floor(maxTokens * 0.08), 4_000)
   const toolEvictLimit = Math.min(6_000, Math.max(Math.floor(maxTokens * 0.05), 3_000))
@@ -683,7 +789,7 @@ The workspace root is: ${workspacePath}`
 
   const agent = createDeepAgent({
     model,
-    tools: [...mcpTools, ...memoryTools, ...extraTools],
+    tools: [...mcpTools, ...memoryTools, ...extraTools, ...toolSearchTools],
     checkpointer,
     backend,
     systemPrompt,

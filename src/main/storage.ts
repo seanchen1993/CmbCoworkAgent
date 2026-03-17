@@ -747,6 +747,7 @@ export function upsertMcpConnector(
     url: config.url.trim(),
     enabled: config.enabled ?? true,
     advanced: config.advanced,
+    lazyLoad: config.lazyLoad ?? false,
     createdAt: existing?.createdAt ?? now,
     updatedAt: now
   }

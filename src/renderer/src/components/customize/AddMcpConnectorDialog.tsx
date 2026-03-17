@@ -39,6 +39,7 @@ export function AddMcpConnectorDialog(props: {
   const [reconnectDelayMs, setReconnectDelayMs] = useState(
     String(editConnector?.advanced?.reconnect?.delayMs ?? 1000)
   )
+  const [lazyLoad, setLazyLoad] = useState(editConnector?.lazyLoad ?? false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -51,6 +52,7 @@ export function AddMcpConnectorDialog(props: {
       setReconnectEnabled(editConnector.advanced?.reconnect?.enabled ?? false)
       setReconnectMaxAttempts(String(editConnector.advanced?.reconnect?.maxAttempts ?? 3))
       setReconnectDelayMs(String(editConnector.advanced?.reconnect?.delayMs ?? 1000))
+      setLazyLoad(editConnector.lazyLoad ?? false)
     } else if (open && !editConnector) {
       setName("")
       setUrl("")
@@ -59,6 +61,7 @@ export function AddMcpConnectorDialog(props: {
       setReconnectEnabled(false)
       setReconnectMaxAttempts("3")
       setReconnectDelayMs("1000")
+      setLazyLoad(false)
     }
   }, [open, editConnector])
 
@@ -71,6 +74,7 @@ export function AddMcpConnectorDialog(props: {
       setReconnectEnabled(editConnector.advanced?.reconnect?.enabled ?? false)
       setReconnectMaxAttempts(String(editConnector.advanced?.reconnect?.maxAttempts ?? 3))
       setReconnectDelayMs(String(editConnector.advanced?.reconnect?.delayMs ?? 1000))
+      setLazyLoad(editConnector.lazyLoad ?? false)
     } else {
       setName("")
       setUrl("")
@@ -79,6 +83,7 @@ export function AddMcpConnectorDialog(props: {
       setReconnectEnabled(false)
       setReconnectMaxAttempts("3")
       setReconnectDelayMs("1000")
+      setLazyLoad(false)
     }
     setError(null)
   }, [editConnector])
@@ -130,7 +135,8 @@ export function AddMcpConnectorDialog(props: {
           name: trimmedName,
           url: trimmedUrl,
           enabled: editConnector ? editConnector.enabled : false,
-          advanced: Object.keys(advanced).length > 0 ? advanced : undefined
+          advanced: Object.keys(advanced).length > 0 ? advanced : undefined,
+          lazyLoad: lazyLoad
         }
         console.log('mcp submit config', config, JSON.stringify(config))
       if (editConnector) {
@@ -153,6 +159,7 @@ export function AddMcpConnectorDialog(props: {
     reconnectEnabled,
     reconnectMaxAttempts,
     reconnectDelayMs,
+    lazyLoad,
     editConnector,
     onSuccess,
     handleOpenChange
@@ -293,6 +300,22 @@ export function AddMcpConnectorDialog(props: {
                       />
                     </div>
                   )}
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      id="lazy-load"
+                      checked={lazyLoad}
+                      onChange={(e) => setLazyLoad(e.target.checked)}
+                    />
+                    <label htmlFor="lazy-load" className="text-xs font-medium">
+                      懒加载
+                    </label>
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    启用后，工具不会立即加载到上下文中，而是通过 search_tool 搜索后按需加载。适合工具数量较多的MCP server。
+                  </p>
                 </div>
               </div>
             )}

@@ -139,3 +139,53 @@ Your memory files are stored as Markdown in the memory directory. You can update
 - Capture the **why** behind corrections, not just the fix
 - Never store API keys, passwords, or credentials in memory files
 `
+
+export const LAZY_MCP_SYSTEM_PROMPT = `
+
+## Lazy-Loaded MCP Tools
+
+Some MCP (Model Context Protocol) tools are available but not loaded in your immediate context. These tools must be discovered and loaded on-demand.
+
+### Tool Discovery Workflow
+
+To use these tools, follow this 3-step process:
+
+1. **Search for tools** using \`search_tool\`:
+   \`search_tool(query="search for tools that can help with X", mode="bm25")\`
+   - \`query\`: Describe the capability you need (e.g., "github issues", "web search", "database query")
+   - \`mode\`: "bm25" (recommended), "keyword", or "regex"
+   - Returns a list of matching tools with their IDs and descriptions
+
+2. **Load tool schema** using \`load_tool\`:
+   \`load_tool(tool_ids=["serverName.toolName"])\`
+   - Returns the tool's parameter schema so you know what arguments to provide
+
+3. **Execute the tool** using \`mcp_call\`:
+   \`mcp_call(tool_id="serverName.toolName", arguments={...})\`
+   - Execute the tool with the required parameters
+
+### When to Use
+
+- When you need capabilities beyond the built-in tools (file operations, shell, etc.)
+- When the user mentions external services (GitHub, databases, web APIs, etc.)
+- When you encounter a task that might benefit from specialized tools
+
+### Example
+
+\`\`\`
+# User asks: "Create a GitHub issue for this bug"
+
+# Step 1: Search for GitHub tools
+search_tool(query="github create issue", mode="bm25")
+# Returns: [{ tool_id: "github.create_issue", description: "Create a new issue..." }]
+
+# Step 2: Load the schema
+load_tool(tool_ids=["github.create_issue"])
+# Returns: { schema: { properties: { title: {...}, body: {...} }, required: ["title"] } }
+
+# Step 3: Execute
+mcp_call(tool_id="github.create_issue", arguments={ title: "Bug: ...", body: "..." })
+\`\`\`
+
+Always search first when you need external tool capabilities.
+`

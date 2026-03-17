@@ -198,6 +198,7 @@ export interface McpConnectorConfig {
   url: string
   enabled: boolean
   advanced?: McpConnectorAdvanced
+  lazyLoad?: boolean  // true = lazy load tools, false/undefined = load all tools
   createdAt: string
   updatedAt: string
 }
@@ -207,6 +208,7 @@ export interface McpConnectorUpsert {
   url: string
   enabled?: boolean
   advanced?: McpConnectorAdvanced
+  lazyLoad?: boolean  // true = lazy load tools, false/undefined = load all tools
 }
 
 // Scheduled Task types

@@ -43,6 +43,19 @@ export function McpPanel(): React.JSX.Element {
     setSelectedMcpConnector((prev) => (prev?.id === id ? { ...prev, enabled } : prev))
   }, [])
 
+  const handleMcpToggleLazyLoad = useCallback((id: string, lazyLoad: boolean) => {
+    // Use functional update to avoid stale closure over mcpConnectors
+    setMcpConnectors((prevConnectors) => {
+      const connector = prevConnectors.find((c) => c.id === id)
+      if (!connector) return prevConnectors
+
+      window.api.mcp.update({ ...connector, lazyLoad }).catch(console.error)
+
+      setSelectedMcpConnector((prev) => (prev?.id === id ? { ...prev, lazyLoad } : prev))
+      return prevConnectors.map((c) => (c.id === id ? { ...c, lazyLoad } : c))
+    })
+  }, [])
+
   const handleMcpDelete = useCallback(async (connector: McpConnectorConfig) => {
     try {
       await window.api.mcp.delete(connector.id)
@@ -136,6 +149,7 @@ export function McpPanel(): React.JSX.Element {
       <MCPConnectorDetail
         connector={selectedMcpConnector}
         onToggleEnabled={handleMcpToggleEnabled}
+        onToggleLazyLoad={handleMcpToggleLazyLoad}
         onDelete={handleMcpDelete}
         onEdit={(c) => {
           setEditMcpConnector(c)
