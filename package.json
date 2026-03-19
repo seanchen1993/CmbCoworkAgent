@@ -110,6 +110,7 @@
     "langchain": "^1.2.28",
     "lucide-react": "^0.469.0",
     "micromatch": "^4.0.8",
+    "nodejieba": "^2.5.2",
     "react-diff-viewer-continued": "^4.1.2",
     "react-markdown": "^10.1.0",
     "react-resizable-panels": "^4.4.0",

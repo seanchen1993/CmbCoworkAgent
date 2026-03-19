@@ -9,6 +9,7 @@
 
 import { tool } from "langchain"
 import { z } from "zod"
+import * as nodejieba from "nodejieba"
 
 // =============================================================================
 // Types
@@ -129,11 +130,43 @@ class SimpleBM25 {
   }
 
   private tokenize(text: string): string[] {
-    // Simple tokenization: lowercase + split on whitespace/punctuation + filter short tokens
-    return text.toLowerCase()
-      .replace(/[-_]/g, " ")
-      .split(/[\s\-_.,;:!?()[\]{}'"\/\\]+/)
-      .filter(t => t.length > 1)
+    const tokens: string[] = []
+
+    // Regex to detect Chinese characters (CJK Unified Ideographs)
+    const chineseRegex = /[\u4e00-\u9fff]/
+
+    // Split text into Chinese and non-Chinese segments
+    // Pattern: match continuous Chinese or continuous non-Chinese
+    const segmentPattern = /([\u4e00-\u9fff]+)|([^\u4e00-\u9fff]+)/g
+
+    let match
+    while ((match = segmentPattern.exec(text)) !== null) {
+      const segment = match[0]
+
+      if (chineseRegex.test(segment)) {
+        // Chinese segment: use jieba for word segmentation
+        const chineseTokens = nodejieba.cut(segment)
+        for (const token of chineseTokens) {
+          const trimmed = token.trim().toLowerCase()
+          if (trimmed.length > 0) {
+            tokens.push(trimmed)
+          }
+        }
+      } else {
+        // Non-Chinese segment: use original tokenization logic
+        const englishTokens = segment.toLowerCase()
+          // Handle camelCase and PascalCase: insert space before uppercase letters
+          .replace(/([a-z])([A-Z])/g, "$1 $2")      // camelCase: "testName" → "test Name"
+          .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2") // PascalCase/ACRONYM: "APIResponse" → "API Response"
+          .replace(/[-_]/g, " ")
+          .split(/[\s\-_.,;:!?()[\]{}'"\/\\]+/)
+          .filter(t => t.length > 1)
+
+        tokens.push(...englishTokens)
+      }
+    }
+
+    return tokens
   }
 
   clear(): void {
@@ -196,8 +229,8 @@ export class McpToolRegistry {
       this.registeredToolNames.add(dedupeKey)
       registered++
 
-      // Index in BM25 using tool name and description
-      const searchText = `${toolName} ${description}`
+      // Index in BM25 using server name, tool name and description
+      const searchText = `${serverName} ${toolName} ${description}`
       this.bm25.index(toolId, searchText, metadata)
     }
 
@@ -242,16 +275,19 @@ export class McpToolRegistry {
     const results: { doc: McpToolMetadata, score: number }[] = []
 
     for (const { metadata } of this.tools.values()) {
+      const serverMatch = metadata.serverName.toLowerCase().includes(queryLower)
       const nameMatch = metadata.toolName.toLowerCase().includes(queryLower)
       const descMatch = metadata.description.toLowerCase().includes(queryLower)
 
-      if (nameMatch || descMatch) {
-        // Score: exact name match > name contains > description contains
+      if (serverMatch || nameMatch || descMatch) {
+        // Score: exact name match > name contains > server contains > description contains
         let score = 0
         if (metadata.toolName.toLowerCase() === queryLower) {
           score = 100
         } else if (nameMatch) {
           score = 50
+        } else if (serverMatch) {
+          score = 30
         } else {
           score = 10
         }
@@ -278,7 +314,7 @@ export class McpToolRegistry {
 
     for (const { metadata } of this.tools.values()) {
       try {
-        if (regex.test(metadata.toolName) || regex.test(metadata.description)) {
+        if (regex.test(metadata.serverName) || regex.test(metadata.toolName) || regex.test(metadata.description)) {
           results.push(metadata)
           if (results.length >= limit) break
         }
