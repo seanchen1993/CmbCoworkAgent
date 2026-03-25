@@ -158,6 +158,26 @@ Your memory files are stored as Markdown in the memory directory. You can update
 - Never store API keys, passwords, or credentials in memory files
 `
 
+export const CODE_INDEX_SYSTEM_PROMPT = `
+
+## Codebase Search
+
+You have access to a semantic code index of the workspace. Use the \`codebase_search\` tool to find relevant code before reading files.
+
+**When to use codebase_search:**
+- Finding where a function, class, or variable is defined
+- Understanding how a feature is implemented
+- Finding usage patterns or examples
+- Locating configuration or setup code
+- Any time you need to find code related to a concept
+
+**Tips:**
+- Use natural language: "authentication middleware" works better than "auth"
+- Be specific: "React component that renders the sidebar" > "sidebar"
+- After finding relevant results, use read_file to see full context
+- Use \`codebase_index_status\` to check the current index state
+`
+
 export const LAZY_MCP_SYSTEM_PROMPT = `
 
 ## Lazy-Loaded MCP Tools

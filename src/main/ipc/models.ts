@@ -12,10 +12,17 @@ import type {
   WorkspaceFileParams
 } from "../types"
 import { startWatching, stopWatching } from "../services/workspace-watcher"
+import { tryStartCodeIndex as _tryStartCodeIndex } from "../code-index/manager"
+import { getCodeIndexSettings } from "../storage"
 
 const execFileAsync = promisify(execFile)
 
 const MAX_WORKTREES = 10
+
+/** Fire-and-forget: start code indexing for a workspace if enabled */
+function tryStartCodeIndex(workspacePath: string): void {
+  _tryStartCodeIndex(workspacePath, getCodeIndexSettings())
+}
 
 export interface WorktreeInfo {
   path: string
@@ -324,6 +331,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       // Update file watcher
       if (newPath) {
         startWatching(threadId, newPath)
+        // Start code indexing in background if enabled
+        tryStartCodeIndex(newPath)
       } else {
         stopWatching(threadId)
       }
@@ -356,10 +365,13 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
         // Start watching the new workspace
         startWatching(threadId, selectedPath)
+        // Start code indexing in background if enabled
+        tryStartCodeIndex(selectedPath)
       }
     } else {
       // Fallback to global
       store.set("workspacePath", selectedPath)
+      tryStartCodeIndex(selectedPath)
     }
 
     return selectedPath

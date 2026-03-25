@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { ArrowLeft, Brain, Clock, GitBranch, HeartPulse, Plug, Puzzle, Sparkles, ShoppingBag, Shield, Cpu, CircleUser, Webhook } from "lucide-react"
+import { ArrowLeft, Brain, Clock, GitBranch, HeartPulse, Plug, Puzzle, Sparkles, ShoppingBag, Shield, Cpu, CircleUser, Webhook, Database } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useAppStore } from "@/lib/store"
 import { cn } from "@/lib/utils"
@@ -15,6 +15,7 @@ import { EvolutionPanel } from "./EvolutionPanel"
 import { ChatXPanel } from "./ChatXPanel"
 import { UserInfoPanel } from "./UserInfoPanel"
 import { HooksPanel } from "./HooksPanel"
+import { CodeIndexPanel } from "./CodeIndexPanel"
 
 type CustomizeTab =
   | "skills"
@@ -29,6 +30,7 @@ type CustomizeTab =
   | "chatx"
   | "userinfo"
   | "hooks"
+  | "codeindex"
 
 export function CustomizeView(): React.JSX.Element {
   const { setShowCustomizeView, customizeInitialTab, pendingEvolution, setPendingEvolution } = useAppStore()
@@ -212,6 +214,19 @@ export function CustomizeView(): React.JSX.Element {
             <Webhook className="size-4 shrink-0" />
             钩子
           </button>
+          <button
+            className={cn(
+              "flex items-center gap-3 w-full rounded-md px-2.5 py-1.5 text-sm transition-colors",
+              activeTab === "codeindex"
+                ? "bg-muted font-medium"
+                : "text-muted-foreground hover:bg-muted/50"
+            )}
+            onClick={() => setActiveTab("codeindex")}
+          >
+            <Database className="size-4 shrink-0" />
+            语义搜索
+            <span className="ml-auto text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400">Beta</span>
+          </button>
         </nav>
       </div>
 
@@ -241,6 +256,8 @@ export function CustomizeView(): React.JSX.Element {
         <div className="flex flex-1 overflow-hidden">
           <HooksPanel />
         </div>
+      ) : activeTab === "codeindex" ? (
+        <CodeIndexPanel />
       ) : null}
     </div>
   )

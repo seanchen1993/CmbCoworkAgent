@@ -69,6 +69,7 @@ import { registerHeartbeatHandlers } from "./ipc/heartbeat"
 import { registerMemoryHandlers } from "./ipc/memory"
 import { registerGitHandlers } from "./ipc/git"
 import { registerPluginHandlers } from "./ipc/plugins"
+import { registerCodeIndexHandlers } from "./ipc/code-index"
 import { registerSandboxHandlers } from "./ipc/sandbox"
 import { registerOptimizerHandlers } from "./ipc/optimizer"
 import { registerChatXHandlers } from "./ipc/chatx"
@@ -78,6 +79,8 @@ import { startScheduler, stopScheduler } from "./services/scheduler"
 import { startHeartbeat, stopHeartbeat } from "./services/heartbeat"
 import { startChatX, stopChatX } from "./services/chatx"
 import { LocalSandbox } from "./agent/local-sandbox"
+import { getCodeIndexSettings } from "./storage"
+import { startIndexingForRecentWorkspaces } from "./code-index/manager"
 import { closeRuntime } from "./agent/runtime"
 import  os from "os";
 
@@ -244,6 +247,7 @@ if (!gotTheLock) {
     registerMemoryHandlers(ipcMain)
     registerGitHandlers()
     registerPluginHandlers(ipcMain)
+    registerCodeIndexHandlers()
     registerSandboxHandlers(ipcMain)
     registerOptimizerHandlers(ipcMain)
     registerChatXHandlers(ipcMain)
@@ -327,6 +331,10 @@ if (!gotTheLock) {
     startScheduler()
     startHeartbeat()
     startChatX()
+
+    // Start code indexing for recently active workspaces in background
+    startIndexingForRecentWorkspaces(getCodeIndexSettings())
+      .catch((e) => console.warn("[CodeIndex] startup init failed:", e))
 
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) {

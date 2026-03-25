@@ -452,6 +452,34 @@ const api = {
       return () => { ipcRenderer.removeListener("memory:changed", handler) }
     }
   },
+  codeIndex: {
+    getSettings: (): Promise<unknown> =>
+      ipcRenderer.invoke("code-index:getSettings"),
+    setSettings: (settings: Record<string, unknown>): Promise<void> =>
+      ipcRenderer.invoke("code-index:setSettings", settings),
+    getStatus: (workspacePath: string): Promise<unknown> =>
+      ipcRenderer.invoke("code-index:getStatus", workspacePath),
+    reindex: (workspacePath: string): Promise<void> =>
+      ipcRenderer.invoke("code-index:reindex", workspacePath),
+    stop: (workspacePath: string): Promise<void> =>
+      ipcRenderer.invoke("code-index:stop", workspacePath),
+    getEnabled: (): Promise<boolean> =>
+      ipcRenderer.invoke("code-index:getEnabled"),
+    getAllStatuses: (): Promise<unknown[]> =>
+      ipcRenderer.invoke("code-index:getAllStatuses"),
+    cleanup: (): Promise<number> =>
+      ipcRenderer.invoke("code-index:cleanup"),
+    onStatusChanged: (callback: (status: unknown) => void): (() => void) => {
+      const handler = (_: unknown, status: unknown): void => { callback(status) }
+      ipcRenderer.on("code-index:status", handler)
+      return () => { ipcRenderer.removeListener("code-index:status", handler) }
+    },
+    onChanged: (callback: () => void): (() => void) => {
+      const handler = (): void => { callback() }
+      ipcRenderer.on("code-index:changed", handler)
+      return () => { ipcRenderer.removeListener("code-index:changed", handler) }
+    },
+  },
   heartbeat: {
     getConfig: (): Promise<HeartbeatConfig> =>
       ipcRenderer.invoke("heartbeat:getConfig") as Promise<HeartbeatConfig>,

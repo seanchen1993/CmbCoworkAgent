@@ -254,6 +254,43 @@ export function setMemoryEnabled(enabled: boolean): void {
   writeFileSync(MEMORY_SETTINGS_FILE, JSON.stringify({ enabled }, null, 2))
 }
 
+// ── Code Index settings ──
+
+import type { CodeIndexSettings } from "./code-index/types"
+
+const CODE_INDEX_SETTINGS_FILE = join(OPENWORK_DIR, "code-index-settings.json")
+
+const DEFAULT_CODE_INDEX_SETTINGS: CodeIndexSettings = {
+  enabled: false,
+  embeddingProvider: "openai-compatible",
+  embeddingBaseUrl: "",
+  embeddingApiKey: "",
+  embeddingModel: "",
+  embeddingDimensions: 1024,
+  vectorWeight: 0.7,
+  ftsWeight: 0.3,
+}
+
+export function getCodeIndexSettings(): CodeIndexSettings {
+  if (!existsSync(CODE_INDEX_SETTINGS_FILE)) return { ...DEFAULT_CODE_INDEX_SETTINGS }
+  try {
+    const parsed = JSON.parse(readFileSync(CODE_INDEX_SETTINGS_FILE, "utf-8"))
+    return { ...DEFAULT_CODE_INDEX_SETTINGS, ...parsed }
+  } catch {
+    return { ...DEFAULT_CODE_INDEX_SETTINGS }
+  }
+}
+
+export function setCodeIndexSettings(settings: Partial<CodeIndexSettings>): void {
+  getOpenworkDir()
+  const current = getCodeIndexSettings()
+  writeFileSync(CODE_INDEX_SETTINGS_FILE, JSON.stringify({ ...current, ...settings }, null, 2))
+}
+
+export function isCodeIndexEnabled(): boolean {
+  return getCodeIndexSettings().enabled
+}
+
 // ── Skills ──
 
 const DISABLED_SKILLS_FILE = join(OPENWORK_DIR, "disabled-skills.json")

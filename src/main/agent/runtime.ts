@@ -49,9 +49,12 @@ import { createReadStream } from "fs"
 import { createGunzip } from "zlib"
 import { pipeline } from "stream/promises"
 import { app, BrowserWindow } from "electron"
-import { BASE_SYSTEM_PROMPT, MEMORY_SYSTEM_PROMPT, LAZY_MCP_SYSTEM_PROMPT } from "./system-prompt"
+import { BASE_SYSTEM_PROMPT, MEMORY_SYSTEM_PROMPT, CODE_INDEX_SYSTEM_PROMPT, LAZY_MCP_SYSTEM_PROMPT } from "./system-prompt"
 import { getMemoryStore, closeMemoryStore } from "../memory/store"
 import { createMemorySearchTool, createMemoryGetTool } from "../memory/tools"
+import { getCodeIndexManager, closeAllCodeIndexManagers } from "../code-index/manager"
+import { createCodebaseSearchTool, createCodebaseStatusTool } from "../code-index/tools"
+import { getCodeIndexSettings } from "../storage"
 import { createSchedulerTool } from "./tools/scheduler-tool"
 import { createSkillEvolutionTool } from "./tools/skill-evolution-tool"
 import { getThread } from "../db/index"
@@ -830,6 +833,32 @@ The workspace root is: ${workspacePath}`
     console.log("[Runtime] Memory disabled by user setting")
   }
 
+  // Initialize code index (gated by user setting)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let codeIndexTools: any[] = []
+  const codeIndexSettings = getCodeIndexSettings()
+  if (codeIndexSettings.enabled && codeIndexSettings.embeddingBaseUrl && codeIndexSettings.embeddingModel && workspacePath) {
+    try {
+      const codeIndexManager = await getCodeIndexManager(workspacePath, codeIndexSettings)
+      if (codeIndexManager) {
+        codeIndexTools = [
+          createCodebaseSearchTool(codeIndexManager, codeIndexSettings),
+          createCodebaseStatusTool(codeIndexManager),
+        ]
+        // Start background indexing if not already indexed
+        const ciStatus = codeIndexManager.getStatus()
+        if (ciStatus.state === "idle") {
+          codeIndexManager.fullIndex().catch((e) => console.error("[Runtime] Code index error:", e))
+        }
+        codeIndexManager.startWatching() // idempotent, ensures watcher is always running
+        systemPrompt += CODE_INDEX_SYSTEM_PROMPT
+        console.log("[Runtime] Code index initialized for:", workspacePath)
+      }
+    } catch (e) {
+      console.warn("[Runtime] Code index init failed:", e)
+    }
+  }
+
   const mcpConnectors = getEnabledMcpConnectors()
   const pluginMcpConfigs = getEnabledPluginMcpConfigs()
 
@@ -1002,7 +1031,7 @@ The workspace root is: ${workspacePath}`
 
   const agent = createDeepAgent({
     model,
-    tools: [...mcpTools, ...memoryTools, ...extraTools, ...toolSearchTools],
+    tools: [...mcpTools, ...memoryTools, ...codeIndexTools, ...extraTools, ...toolSearchTools],
     checkpointer,
     backend,
     systemPrompt,
@@ -1037,6 +1066,7 @@ export async function closeRuntime(): Promise<void> {
   }
   _retiredMcpClients.clear()
   closePromises.push(closeMemoryStore())
+  closePromises.push(closeAllCodeIndexManagers())
   await Promise.all(closePromises)
   checkpointers.clear()
 }
