@@ -86,7 +86,8 @@ function getDefaultModel(): ChatOpenAI | null {
     apiKey: config.apiKey,
     configuration: { baseURL: config.baseUrl },
     maxTokens: 4096,
-    temperature: 0.3
+    temperature: 0.3,
+    streaming: true
   })
 }
 
@@ -154,6 +155,12 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
 
       const runMode = opts?.mode ?? "auto"
 
+      // Emit stream events to renderer
+      notifyRenderer("optimizer:streamStart")
+      const onChunk = (chunk: string): void => {
+        notifyRenderer("optimizer:streamChunk", { chunk })
+      }
+
       if (runMode === "selected") {
         const selectedIds = [...new Set(opts?.traceIds ?? [])]
         const selectedTraces = selectedIds
@@ -161,6 +168,7 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
           .filter((trace): trace is AgentTrace => !!trace)
 
         if (selectedTraces.length === 0) {
+          notifyRenderer("optimizer:streamEnd", { success: false, error: "未找到可分析的 trace，请重新选择后再试。" })
           return {
             startedAt: new Date().toISOString(),
             endedAt: new Date().toISOString(),
@@ -170,12 +178,27 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
           }
         }
 
-        const optimizer = new SkillOptimizer({
-          model,
-          traces: selectedTraces
-        })
-        const runResult = await optimizer.run()
+        let runResult: OptimizationRunResult
+        try {
+          const optimizer = new SkillOptimizer({
+            model,
+            traces: selectedTraces,
+            onChunk
+          })
+          runResult = await optimizer.run()
+        } catch (e) {
+          const errMsg = String(e)
+          notifyRenderer("optimizer:streamEnd", { success: false, error: errMsg })
+          return {
+            startedAt: new Date().toISOString(),
+            endedAt: new Date().toISOString(),
+            tracesAnalyzed: 0,
+            candidates: [],
+            summary: `LLM 调用失败: ${errMsg}`
+          }
+        }
 
+        notifyRenderer("optimizer:streamEnd", { success: true })
         return {
           startedAt: runResult.startedAt,
           endedAt: runResult.endedAt,
@@ -185,13 +208,28 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
         }
       }
 
-      const optimizer = new SkillOptimizer({
-        model,
-        traceLimit: opts?.traceLimit ?? 30,
-        threadId: opts?.threadId
-      })
+      let result: OptimizationRunResult
+      try {
+        const optimizer = new SkillOptimizer({
+          model,
+          traceLimit: opts?.traceLimit ?? 30,
+          threadId: opts?.threadId,
+          onChunk
+        })
+        result = await optimizer.run()
+      } catch (e) {
+        const errMsg = String(e)
+        notifyRenderer("optimizer:streamEnd", { success: false, error: errMsg })
+        return {
+          startedAt: new Date().toISOString(),
+          endedAt: new Date().toISOString(),
+          tracesAnalyzed: 0,
+          candidates: [],
+          summary: `LLM 调用失败: ${errMsg}`
+        }
+      }
 
-      const result = await optimizer.run()
+      notifyRenderer("optimizer:streamEnd", { success: true })
       result.candidates = mergePendingCandidates(result.candidates)
       console.log(`[Optimizer] Run complete: ${result.summary}`)
       return result

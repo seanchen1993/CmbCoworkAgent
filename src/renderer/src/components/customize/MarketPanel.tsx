@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import {
   Search,
   ShoppingBag,
@@ -32,11 +32,13 @@ import {
 } from "@/components/ui/dialog"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { UniversalUploadDialog } from "./UniversalUploadDialog"
-import { marketApi, MarketApiResponse, MarketItem, MarketItemType } from "../../api/market";
-
+import { marketApi, MarketApiResponse, MarketItem, MarketItemType } from "../../api/market"
+import { getMarketMockResponse } from "./MarketMockData"
 
 // Local storage helper functions for tracking user uploads
 const UPLOADED_ITEMS_KEY = "marketplace_uploaded_items"
+const USE_MARKET_MOCK_ON_ERROR =
+  String(import.meta.env.VITE_MARKET_MOCK_ON_ERROR || "false").toLowerCase() === "true"
 
 interface UploadedItemRecord {
   name: string
@@ -65,7 +67,7 @@ const localStorageHelper = {
         uploadedAt: new Date().toISOString()
       }
       // Remove existing item with same name and type if exists
-      const filteredItems = items.filter(item => !(item.name === name && item.type === type))
+      const filteredItems = items.filter((item) => !(item.name === name && item.type === type))
       filteredItems.push(newItem)
       localStorage.setItem(UPLOADED_ITEMS_KEY, JSON.stringify(filteredItems))
     } catch (error) {
@@ -77,7 +79,7 @@ const localStorageHelper = {
   removeUploadedItem(name: string, type: MarketItemType): void {
     try {
       const items = this.getUploadedItems()
-      const filteredItems = items.filter(item => !(item.name === name && item.type === type))
+      const filteredItems = items.filter((item) => !(item.name === name && item.type === type))
       localStorage.setItem(UPLOADED_ITEMS_KEY, JSON.stringify(filteredItems))
     } catch (error) {
       console.error("Failed to remove uploaded item from localStorage:", error)
@@ -87,7 +89,7 @@ const localStorageHelper = {
   // Check if user can delete this item (user uploaded it)
   canDeleteItem(name: string, type: MarketItemType): boolean {
     const items = this.getUploadedItems()
-    return items.some(item => item.name === name && item.type === type)
+    return items.some((item) => item.name === name && item.type === type)
   }
 }
 
@@ -97,13 +99,23 @@ interface MarketItemCardProps {
   onUpdate: (item: MarketItem) => void
   onDownload: (item: MarketItem, downloadToLocal?: boolean) => void
   onUpdateInstall: (item: MarketItem) => void
-  onUninstall: (item: MarketItem) => void  // 新增卸载回调
+  onUninstall: (item: MarketItem) => void // 新增卸载回调
   isDownloading?: boolean
-  isInstalled?: boolean  // 新增已安装状态
-  isUpdating?: boolean   // 新增更新中状态
+  isInstalled?: boolean // 新增已安装状态
+  isUpdating?: boolean // 新增更新中状态
 }
 
-function MarketItemCard({ item, onDelete, onUpdate, onDownload, onUpdateInstall, onUninstall, isDownloading = false, isInstalled = false, isUpdating = false }: MarketItemCardProps) {
+function MarketItemCard({
+  item,
+  onDelete,
+  onUpdate,
+  onDownload,
+  onUpdateInstall,
+  onUninstall,
+  isDownloading = false,
+  isInstalled = false,
+  isUpdating = false
+}: MarketItemCardProps) {
   const handleInstallDownload = () => {
     onDownload(item, false) // Install to application
   }
@@ -113,14 +125,14 @@ function MarketItemCard({ item, onDelete, onUpdate, onDownload, onUpdateInstall,
   }
 
   const handleUpdateInstall = () => {
-    onUpdateInstall(item)  // 更新安装
+    onUpdateInstall(item) // 更新安装
   }
 
   const handleUninstall = () => {
     onUninstall(item)
   }
 
-  const ip = localStorage.getItem('localIp')
+  const ip = localStorage.getItem("localIp")
   const isFeatured = item.featured === "精品"
 
   return (
@@ -273,7 +285,9 @@ function MarketItemCard({ item, onDelete, onUpdate, onDownload, onUpdateInstall,
         )}
         {item.featured && (
           <div className="flex items-center gap-1" title="推荐标签">
-            <Star className={`size-3 shrink-0 ${isFeatured ? "text-yellow-500" : "text-muted-foreground"}`} />
+            <Star
+              className={`size-3 shrink-0 ${isFeatured ? "text-yellow-500" : "text-muted-foreground"}`}
+            />
             <span className={isFeatured ? "text-yellow-600 font-medium" : ""}>{item.featured}</span>
           </div>
         )}
@@ -297,9 +311,9 @@ export function MarketPanel(): React.JSX.Element {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [downloadingItems, setDownloadingItems] = useState<Set<string>>(new Set())
-  const [updatingItems, setUpdatingItems] = useState<Set<string>>(new Set())  // 新增更新中状态
-  const [installedSkills, setInstalledSkills] = useState<string[]>([])  // 新增已安装skills列表
-  const [installedMcps, setInstalledMcps] = useState<string[]>([])      // 新增已安装MCPs列表
+  const [updatingItems, setUpdatingItems] = useState<Set<string>>(new Set()) // 新增更新中状态
+  const [installedSkills, setInstalledSkills] = useState<string[]>([]) // 新增已安装skills列表
+  const [installedMcps, setInstalledMcps] = useState<string[]>([]) // 新增已安装MCPs列表
   const [installedPlugins, setInstalledPlugins] = useState<string[]>([]) // 新增已安装Plugins列表
   const [deleteDialog, setDeleteDialog] = useState<{ open: boolean; item: MarketItem | null }>({
     open: false,
@@ -318,13 +332,21 @@ export function MarketPanel(): React.JSX.Element {
     open: false,
     type: "skill"
   })
+  const [reloadToken, setReloadToken] = useState(0)
+  const installedSkillsRef = useRef<string[]>([])
+  const installedMcpsRef = useRef<string[]>([])
+  const installedPluginsRef = useRef<string[]>([])
+
+  const triggerReload = () => {
+    setReloadToken((prev) => prev + 1)
+  }
 
   // 新增：加载已安装的skills列表
   const loadInstalledSkills = async () => {
     try {
       if (window.api?.skills?.list) {
         const skillsMetadata = await window.api.skills.list()
-        const skillNames = skillsMetadata.map(skill => skill.name)
+        const skillNames = skillsMetadata.map((skill) => skill.name)
         setInstalledSkills(skillNames)
       }
     } catch (error) {
@@ -337,7 +359,7 @@ export function MarketPanel(): React.JSX.Element {
     try {
       if (window.api?.mcp?.list) {
         const mcpsMetadata = await window.api.mcp.list()
-        const mcpNames = mcpsMetadata.map(mcp => mcp.name)
+        const mcpNames = mcpsMetadata.map((mcp) => mcp.name)
         setInstalledMcps(mcpNames)
       }
     } catch (error) {
@@ -350,7 +372,7 @@ export function MarketPanel(): React.JSX.Element {
     try {
       if (window.api?.plugins?.list) {
         const pluginsMetadata = await window.api.plugins.list()
-        const pluginNames = pluginsMetadata.map(plugin => plugin.name)
+        const pluginNames = pluginsMetadata.map((plugin) => plugin.name)
         setInstalledPlugins(pluginNames)
       }
     } catch (error) {
@@ -365,15 +387,60 @@ export function MarketPanel(): React.JSX.Element {
     loadInstalledPlugins()
   }, [])
 
+  // 同步已安装状态，不触发额外的 market 接口请求
+  useEffect(() => {
+    setSkillsData((prev) =>
+      prev.map((item) => ({
+        ...item,
+        canDelete: localStorageHelper.canDeleteItem(item.name, "skill"),
+        installed:
+          installedSkills.includes(item.name) ||
+          installedSkills.some((str) => item.name === str || item.filename?.includes(str))
+      }))
+    )
+  }, [installedSkills])
+
+  useEffect(() => {
+    installedSkillsRef.current = installedSkills
+  }, [installedSkills])
+
+  useEffect(() => {
+    setMcpsData((prev) =>
+      prev.map((item) => ({
+        ...item,
+        canDelete: localStorageHelper.canDeleteItem(item.name, "mcp"),
+        installed: installedMcps.includes(item.name)
+      }))
+    )
+  }, [installedMcps])
+
+  useEffect(() => {
+    installedMcpsRef.current = installedMcps
+  }, [installedMcps])
+
+  useEffect(() => {
+    setPluginsData((prev) =>
+      prev.map((item) => ({
+        ...item,
+        canDelete: localStorageHelper.canDeleteItem(item.name, "plugin"),
+        installed: installedPlugins.includes(item.name)
+      }))
+    )
+  }, [installedPlugins])
+
+  useEffect(() => {
+    installedPluginsRef.current = installedPlugins
+  }, [installedPlugins])
+
   // 新增：更新安装功能
   const handleUpdateInstall = async (item: MarketItem) => {
     const itemKey = item.id || item.name
 
     // 添加到更新中集合
-    setUpdatingItems(prev => new Set(prev).add(itemKey))
+    setUpdatingItems((prev) => new Set(prev).add(itemKey))
 
     try {
-      const itemName = item.name || item.id || ''
+      const itemName = item.name || item.id || ""
 
       if (!itemName) {
         console.error("Item name is required for update install")
@@ -385,7 +452,7 @@ export function MarketPanel(): React.JSX.Element {
         try {
           // 查找已安装的skill路径
           const skillsMetadata = await window.api.skills.list()
-          const existingSkill = skillsMetadata.find(skill => skill.name === itemName)
+          const existingSkill = skillsMetadata.find((skill) => skill.name === itemName)
 
           if (existingSkill) {
             console.log(`Deleting existing skill: ${existingSkill.path}`)
@@ -398,7 +465,7 @@ export function MarketPanel(): React.JSX.Element {
         try {
           // 查找已安装的mcp路径
           const mcpsMetadata = await window.api.mcp.list()
-          const existingMcp = mcpsMetadata.find(mcp => mcp.name === itemName)
+          const existingMcp = mcpsMetadata.find((mcp) => mcp.name === itemName)
 
           if (existingMcp) {
             console.log(`Deleting existing mcp: ${existingMcp.id}`)
@@ -411,7 +478,7 @@ export function MarketPanel(): React.JSX.Element {
         try {
           // 查找已安装的plugin路径
           const pluginsMetadata = await window.api.plugins.list()
-          const existingPlugin = pluginsMetadata.find(plugin => plugin.name === itemName)
+          const existingPlugin = pluginsMetadata.find((plugin) => plugin.name === itemName)
 
           if (existingPlugin) {
             console.log(`Deleting existing plugin: ${existingPlugin.path}`)
@@ -446,7 +513,7 @@ export function MarketPanel(): React.JSX.Element {
       setError(error instanceof Error ? error.message : "更新安装失败")
     } finally {
       // 从更新中集合移除
-      setUpdatingItems(prev => {
+      setUpdatingItems((prev) => {
         const newSet = new Set(prev)
         newSet.delete(itemKey)
         return newSet
@@ -456,70 +523,90 @@ export function MarketPanel(): React.JSX.Element {
 
   // Load data for current tab
   useEffect(() => {
+    const getMarketDataByTab = async (tab: MarketItemType): Promise<MarketApiResponse> => {
+      switch (tab) {
+        case "skill":
+          return marketApi.getSkills()
+        case "mcp":
+          return marketApi.getMcps()
+        case "plugin":
+          return marketApi.getPlugins()
+        default:
+          return { success: false, error: "未知资源类型" }
+      }
+    }
+
+    const addItemFlags = (items: MarketItem[], type: MarketItemType): MarketItem[] => {
+      return items.map((item) => {
+        const isInstalled =
+          type === "skill"
+            ? installedSkillsRef.current.includes(item.name) ||
+              installedSkillsRef.current.some(
+                (str) => item.name === str || item.filename?.includes(str)
+              )
+            : type === "mcp"
+              ? installedMcpsRef.current.includes(item.name)
+              : installedPluginsRef.current.includes(item.name)
+
+        return {
+          ...item,
+          canDelete: localStorageHelper.canDeleteItem(item.name, type),
+          installed: isInstalled
+        }
+      })
+    }
+
+    const setTabData = (type: MarketItemType, items: MarketItem[]) => {
+      switch (type) {
+        case "skill":
+          setSkillsData(items)
+          break
+        case "mcp":
+          setMcpsData(items)
+          break
+        case "plugin":
+          setPluginsData(items)
+          break
+      }
+    }
+
     const loadData = async () => {
       setLoading(true)
       setError(null)
       try {
-        let response: MarketApiResponse
-        switch (activeTab) {
-          case "skill":
+        let response = await getMarketDataByTab(activeTab)
 
-              response = await marketApi.getSkills()
-              if (response.success && response.data) {
-                // Add canDelete flag and installed status to each item
-
-                const dataWithFlags = response.data.map(item => {
-                  let installTarget =  installedSkills.includes(item.name) ||
-                    installedSkills.some(str => item.name === str || item.filename?.includes(str))
-                  return {
-                    ...item,
-                    canDelete: localStorageHelper.canDeleteItem(item.name, "skill"),
-                    installed: installTarget // 添加已安装状态
-                  }
-                })
-                setSkillsData(dataWithFlags)
-              }
-
-            break
-          case "mcp":
-
-              response = await marketApi.getMcps()
-              if (response.success && response.data) {
-                // Add canDelete flag and installed status to each item
-                const dataWithFlags = response.data.map(item => ({
-                  ...item,
-                  canDelete: localStorageHelper.canDeleteItem(item.name, "mcp"),
-                  installed: installedMcps.includes(item.name)  // 添加已安装状态
-                }))
-                setMcpsData(dataWithFlags)
-              }
-
-            break
-          case "plugin":
-
-              response = await marketApi.getPlugins()
-              if (response.success && response.data) {
-                // Add canDelete flag and installed status to each item
-                const dataWithFlags = response.data.map(item => ({
-                  ...item,
-                  canDelete: localStorageHelper.canDeleteItem(item.name, "plugin"),
-                  installed: installedPlugins.includes(item.name)  // 添加已安装状态
-                }))
-                setPluginsData(dataWithFlags)
-              }
-
-            break
+        if ((!response.success || !response.data) && USE_MARKET_MOCK_ON_ERROR) {
+          console.warn(
+            `[MarketPanel] API failed on ${activeTab}, fallback to mock data. error=${response.error}`
+          )
+          response = getMarketMockResponse(activeTab)
+          setError(null)
+        } else if (!response.success || !response.data) {
+          setError(response.error || "加载数据失败")
+          setTabData(activeTab, [])
+          return
         }
+
+        setTabData(activeTab, addItemFlags(response.data || [], activeTab))
       } catch (error) {
         console.error("Failed to load market data:", error)
-        setError(error instanceof Error ? error.message : "加载数据失败")
+        if (USE_MARKET_MOCK_ON_ERROR) {
+          console.warn(`[MarketPanel] Exception on ${activeTab}, fallback to mock data.`, error)
+          const mockResponse = getMarketMockResponse(activeTab)
+          setTabData(activeTab, addItemFlags(mockResponse.data || [], activeTab))
+          setError(null)
+        } else {
+          setError(error instanceof Error ? error.message : "加载数据失败")
+          setTabData(activeTab, [])
+        }
       } finally {
         setLoading(false)
       }
     }
 
     loadData()
-  }, [activeTab, skillsData.length, mcpsData.length, pluginsData.length, installedSkills, installedMcps, installedPlugins])
+  }, [activeTab, reloadToken])
 
   const getCurrentData = () => {
     switch (activeTab) {
@@ -545,27 +632,27 @@ export function MarketPanel(): React.JSX.Element {
   }
 
   const handleUninstall = async (item: MarketItem) => {
-    const itemName = item.name || item.id || ''
+    const itemName = item.name || item.id || ""
     if (!itemName) return
 
     try {
       if (activeTab === "skill" && window.api?.skills?.delete) {
         const skillsMetadata = await window.api.skills.list()
-        const existingSkill = skillsMetadata.find(skill => skill.name === itemName)
+        const existingSkill = skillsMetadata.find((skill) => skill.name === itemName)
         if (existingSkill) {
           await window.api.skills.delete(existingSkill.path)
         }
         await loadInstalledSkills()
       } else if (activeTab === "mcp" && window.api?.mcp?.delete) {
         const mcpsMetadata = await window.api.mcp.list()
-        const existingMcp = mcpsMetadata.find(mcp => mcp.name === itemName)
+        const existingMcp = mcpsMetadata.find((mcp) => mcp.name === itemName)
         if (existingMcp) {
           await window.api.mcp.delete(existingMcp.id)
         }
         await loadInstalledMcps()
       } else if (activeTab === "plugin" && window.api?.plugins?.delete) {
         const pluginsMetadata = await window.api.plugins.list()
-        const existingPlugin = pluginsMetadata.find(plugin => plugin.name === itemName)
+        const existingPlugin = pluginsMetadata.find((plugin) => plugin.name === itemName)
         if (existingPlugin) {
           await window.api.plugins.delete(existingPlugin.path)
         }
@@ -581,7 +668,7 @@ export function MarketPanel(): React.JSX.Element {
     if (!deleteDialog.item) return
 
     try {
-      const itemName = deleteDialog.item.name || deleteDialog.item.id || ''
+      const itemName = deleteDialog.item.name || deleteDialog.item.id || ""
       // 修复type=undefined的问题：使用当前activeTab作为type
       const itemType = deleteDialog.item.type || activeTab
 
@@ -621,10 +708,10 @@ export function MarketPanel(): React.JSX.Element {
     const itemKey = item.id || item.name
 
     // Add to downloading set
-    setDownloadingItems(prev => new Set(prev).add(itemKey))
+    setDownloadingItems((prev) => new Set(prev).add(itemKey))
 
     try {
-      const itemName = item.name || item.id || ''
+      const itemName = item.name || item.id || ""
 
       if (!itemName) {
         console.error("Item name is required for download")
@@ -662,7 +749,7 @@ export function MarketPanel(): React.JSX.Element {
       setError(error instanceof Error ? error.message : "下载失败")
     } finally {
       // Remove from downloading set
-      setDownloadingItems(prev => {
+      setDownloadingItems((prev) => {
         const newSet = new Set(prev)
         newSet.delete(itemKey)
         return newSet
@@ -673,17 +760,7 @@ export function MarketPanel(): React.JSX.Element {
   const handleUploadSuccess = () => {
     setUploadSuccess({ open: true, type: activeTab })
     // Reload the current tab data
-    switch (activeTab) {
-      case "skill":
-        setSkillsData([])
-        break
-      case "mcp":
-        setMcpsData([])
-        break
-      case "plugin":
-        setPluginsData([])
-        break
-    }
+    triggerReload()
   }
 
   const handleUploadClick = () => {
@@ -784,17 +861,7 @@ export function MarketPanel(): React.JSX.Element {
     setUploadSuccess({ open: true, type: activeTab })
     setUpdateDialog({ open: false, item: null })
     // Reload the current tab data
-    switch (activeTab) {
-      case "skill":
-        setSkillsData([])
-        break
-      case "mcp":
-        setMcpsData([])
-        break
-      case "plugin":
-        setPluginsData([])
-        break
-    }
+    triggerReload()
   }
 
   return (
@@ -805,11 +872,7 @@ export function MarketPanel(): React.JSX.Element {
             <ShoppingBag className="size-5" />
             <h2 className="font-semibold">公共市场</h2>
           </div>
-          <Button
-            size="sm"
-            onClick={handleUploadClick}
-            className="flex items-center gap-2"
-          >
+          <Button size="sm" onClick={handleUploadClick} className="flex items-center gap-2">
             <Plus className="size-4" />
             {activeTab === "skill" ? "上传技能" : activeTab === "mcp" ? "上传连接器" : "上传插件"}
           </Button>
@@ -861,18 +924,8 @@ export function MarketPanel(): React.JSX.Element {
                       size="sm"
                       onClick={() => {
                         setError(null)
-                        // Trigger reload by clearing data
-                        switch (activeTab) {
-                          case "skill":
-                            setSkillsData([])
-                            break
-                          case "mcp":
-                            setMcpsData([])
-                            break
-                          case "plugin":
-                            setPluginsData([])
-                            break
-                        }
+                        // Trigger reload explicitly
+                        triggerReload()
                       }}
                     >
                       重试
@@ -890,11 +943,11 @@ export function MarketPanel(): React.JSX.Element {
                       onDelete={handleDelete}
                       onUpdate={handleUpdate}
                       onDownload={handleDownload}
-                      onUpdateInstall={handleUpdateInstall}  // 修正：使用正确的handleUpdateInstall函数
-                      onUninstall={handleUninstall}  // 传递卸载回调
+                      onUpdateInstall={handleUpdateInstall} // 修正：使用正确的handleUpdateInstall函数
+                      onUninstall={handleUninstall} // 传递卸载回调
                       isDownloading={downloadingItems.has(item.id || item.name)}
-                      isInstalled={item.installed}  // 传递已安装状态
-                      isUpdating={updatingItems.has(item.id || item.name)}  // 修正：使用updatingItems而不是downloadingItems
+                      isInstalled={item.installed} // 传递已安装状态
+                      isUpdating={updatingItems.has(item.id || item.name)} // 修正：使用updatingItems而不是downloadingItems
                     />
                   ))
                 )}
@@ -937,14 +990,13 @@ export function MarketPanel(): React.JSX.Element {
               下载成功
             </DialogTitle>
             <DialogDescription>
-              &quot;{downloadSuccess.itemName}&quot; 已成功下载并添加到您的{activeTab === "skill" ? "技能" : activeTab === "mcp" ? "MCP连接器" : "插件"}中。
+              &quot;{downloadSuccess.itemName}&quot; 已成功下载并添加到您的
+              {activeTab === "skill" ? "技能" : activeTab === "mcp" ? "MCP连接器" : "插件"}中。
               {activeTab === "skill" && " 您可以在技能面板中找到它。"}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button onClick={() => setDownloadSuccess({ open: false, itemName: "" })}>
-              确定
-            </Button>
+            <Button onClick={() => setDownloadSuccess({ open: false, itemName: "" })}>确定</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -969,13 +1021,17 @@ export function MarketPanel(): React.JSX.Element {
               上传成功
             </DialogTitle>
             <DialogDescription>
-              您的{uploadSuccess.type === "skill" ? "技能" : uploadSuccess.type === "mcp" ? "MCP连接器" : "插件"}已成功上传到Market！
+              您的
+              {uploadSuccess.type === "skill"
+                ? "技能"
+                : uploadSuccess.type === "mcp"
+                  ? "MCP连接器"
+                  : "插件"}
+              已成功上传到Market！
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button onClick={() => setUploadSuccess({ open: false, type: "skill" })}>
-              确认
-            </Button>
+            <Button onClick={() => setUploadSuccess({ open: false, type: "skill" })}>确认</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -988,14 +1044,18 @@ export function MarketPanel(): React.JSX.Element {
         resourceType={activeTab}
         onUpload={handleUniversalUpdate}
         isUpdate={true}
-        existingItem={updateDialog.item ? {
-          name: updateDialog.item.name,
-          description: updateDialog.item.description,
-          category: updateDialog.item.category || "研发场景",
-          guidance: updateDialog.item.guidance,
-          chinese_name: updateDialog.item.chinese_name,
-          user_id: updateDialog.item.user_id
-        } : undefined}
+        existingItem={
+          updateDialog.item
+            ? {
+                name: updateDialog.item.name,
+                description: updateDialog.item.description,
+                category: updateDialog.item.category || "研发场景",
+                guidance: updateDialog.item.guidance,
+                chinese_name: updateDialog.item.chinese_name,
+                user_id: updateDialog.item.user_id
+              }
+            : undefined
+        }
       />
     </div>
   )

@@ -43,7 +43,7 @@ import type * as _lcZodTypes from "@langchain/core/utils/types"
 
 import { createHash } from "crypto"
 import path from "path"
-import { join, delimiter } from "path"
+import { join, resolve, delimiter } from "path"
 import { existsSync, createWriteStream, statSync, unlinkSync } from "fs"
 import { createReadStream } from "fs"
 import { createGunzip } from "zlib"
@@ -59,6 +59,9 @@ import { createSchedulerTool } from "./tools/scheduler-tool"
 import { createSkillEvolutionTool } from "./tools/skill-evolution-tool"
 import { getThread } from "../db/index"
 import { createGitWorkflowTool } from "./tools/git-workflow-tool"
+import { createAgentBrowserTool } from "./tools/agent-browser-tool"
+import { createPlaywrightTool } from "./tools/playwright-tool"
+import { createPlaywrightCliTool } from "./tools/playwright-cli-tool"
 import {
   McpToolRegistry,
   createToolSearchTools,
@@ -111,6 +114,42 @@ export function getOrCreateApprovalStore(threadId: string): ApprovalStore {
 
 const BASE_PROMPT =
   "In order to complete the objective that the user asks of you, you have access to a number of standard tools."
+
+const BUILTIN_MCP_CHROME_URL = "http://127.0.0.1:12306/mcp"
+const BUILTIN_MCP_CHROME_ID = "__builtin_mcp_chrome__"
+const BUILTIN_MCP_CHROME_NAME = "mcp-chrome"
+
+function normalizeMcpUrl(url: string): string {
+  return url.trim().replace(/\/+$/, "").toLowerCase()
+}
+
+function isChromeToolName(toolName: unknown): boolean {
+  if (typeof toolName !== "string") return false
+  const normalized = toolName.trim().toLowerCase()
+  return (
+    normalized.startsWith("chrome_")
+    || normalized.includes("chrome_computer")
+    || normalized === "computer"
+    || normalized === "computer_use"
+  )
+}
+
+function isChromeMcpUnavailableError(message: string): boolean {
+  const msg = message.toLowerCase()
+  return (
+    msg.includes("econnrefused") ||
+    msg.includes("127.0.0.1:12306") ||
+    msg.includes("connect") ||
+    msg.includes("connection") ||
+    msg.includes("timed out") ||
+    msg.includes("timeout") ||
+    msg.includes("fetch failed") ||
+    msg.includes("server disconnected") ||
+    msg.includes("socket hang up") ||
+    msg.includes("mcp") ||
+    msg.includes("transport")
+  )
+}
 
 const SEQUENTIAL_TASK_PROMPT = `## \`task\` (subagent spawner)
 
@@ -281,24 +320,63 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
       console.log("[Runtime] execute tool patched: added run_in_background support")
     }
 
-    // Add task_output tool for retrieving background task results
-    const taskOutputTool = lcTool(async (input: { task_id: string }) => {
-      const result = (filesystemBackend as LocalSandbox).getTaskOutput(input.task_id)
-      if (!result) return `Error: No background task found with id "${input.task_id}".`
-      if (!result.completed) {
-        return `Task ${input.task_id} is still running. Try again later.`
+    // Add task_output tool for retrieving background task results.
+    // Mirrors Claude Code's TaskOutput: blocks internally (100ms poll loop)
+    // until the task completes or the timeout expires, so the LLM only needs
+    // one tool call per check instead of burning tokens on repeated polls.
+    const taskOutputTool = lcTool(async (input: { task_id: string; block?: boolean; timeout?: number }) => {
+      const sandbox = filesystemBackend as LocalSandbox
+      const block = input.block !== false  // default true
+      const timeout = input.timeout ?? 30_000 // default 30s, max 600s
+
+      // Non-blocking: return immediately
+      if (!block) {
+        const result = sandbox.getTaskOutput(input.task_id)
+        if (!result) return `Error: No background task found with id "${input.task_id}".`
+        if (!result.completed) {
+          return JSON.stringify({ retrieval_status: "not_ready", elapsed: result.elapsedSeconds, command: result.command })
+        }
+        const status = result.exitCode === 0 ? "succeeded" : "failed"
+        return `${result.output ?? "<no output>"}\n[Command ${status} with exit code ${result.exitCode}, elapsed: ${result.elapsedSeconds}s]`
       }
-      const status = result.exitCode === 0 ? "succeeded" : "failed"
-      const parts = [result.output ?? "<no output>"]
-      if (result.exitCode !== null && result.exitCode !== undefined) {
-        parts.push(`\n[Command ${status} with exit code ${result.exitCode}]`)
+
+      // Blocking: poll with progressive interval until completed, timeout, or abort.
+      // First 2s at 100ms for snappy response, then 500ms to reduce CPU spin.
+      const start = Date.now()
+      while (Date.now() - start < timeout) {
+        if (sandbox.isAborted) {
+          return "Task polling aborted: conversation was cancelled by user."
+        }
+        const result = sandbox.getTaskOutput(input.task_id)
+        if (!result) return `Error: No background task found with id "${input.task_id}".`
+        if (result.completed) {
+          const status = result.exitCode === 0 ? "succeeded" : "failed"
+          return `${result.output ?? "<no output>"}\n[Command ${status} with exit code ${result.exitCode}, elapsed: ${result.elapsedSeconds}s]`
+        }
+        const elapsed = Date.now() - start
+        await new Promise<void>(r => setTimeout(r, elapsed < 2000 ? 100 : 500))
       }
-      return parts.join("")
+
+      // Timeout — return current status so the LLM can decide to call again
+      const final = sandbox.getTaskOutput(input.task_id)
+      if (!final) return `Error: No background task found with id "${input.task_id}".`
+      if (final.completed) {
+        const status = final.exitCode === 0 ? "succeeded" : "failed"
+        return `${final.output ?? "<no output>"}\n[Command ${status} with exit code ${final.exitCode}, elapsed: ${final.elapsedSeconds}s]`
+      }
+      return JSON.stringify({ retrieval_status: "timeout", elapsed: final.elapsedSeconds, command: final.command })
     }, {
       name: "task_output",
-      description: "Retrieve the output of a background task started with execute(run_in_background=true).",
+      description:
+        "Retrieve the output of a background task started with execute(run_in_background=true). " +
+        "By default blocks up to 30 seconds waiting for the task to complete. " +
+        "If the task finishes within the timeout, returns the full output. " +
+        "If it times out, returns current status — call again to continue waiting. " +
+        "Set block=false for a non-blocking status check.",
       schema: z.object({
-        task_id: z.string().describe("The task ID returned by execute when run_in_background was true")
+        task_id: z.string().describe("The task ID returned by execute when run_in_background was true"),
+        block: z.boolean().optional().describe("Whether to wait for completion (default: true)"),
+        timeout: z.number().min(0).max(600_000).optional().describe("Max wait time in ms (default: 30000)")
       })
     })
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -403,7 +481,15 @@ function getSystemPrompt(workspacePath: string, windowsSandbox?: "none" | "unele
   const shellGuidance = isBashLike
     ? "- Use Unix/bash commands for shell operations (ls, cat, grep, etc.)"
     : isPowerShell
-      ? "- Use PowerShell syntax: $env:VAR for environment variables, ` for line continuation, -and/-or for logic operators"
+      ? `- **CRITICAL: Commands run in PowerShell (not bash).** You MUST use PowerShell syntax:
+  - Chain commands: use \`; \` instead of \`&&\` (PowerShell 5.1 does NOT support \`&&\`)
+  - Logic operators: use \`-and\`, \`-or\` instead of \`&&\`, \`||\`
+  - Environment variables: use \`$env:VAR\` instead of \`$VAR\`
+  - Null redirect: use \`$null\` or \`Out-Null\` instead of \`/dev/null\`
+  - Line continuation: use backtick \` instead of \`\\\`
+  - Common equivalents: \`Get-ChildItem\` (ls), \`Get-Content\` (cat), \`Select-String\` (grep), \`Remove-Item\` (rm)
+  - You may also use standard Windows commands: dir, type, findstr, del, copy, move, mkdir, rmdir
+  - NEVER use bash-specific syntax: $(), \${}, <<<, <(), 2>&1 |, [[ ]], etc.`
       : "- Use cmd.exe syntax for shell commands (e.g., dir instead of ls, type instead of cat)\n- Use && to chain commands, use ^ for line continuation, use %VAR% for environment variables"
 
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
@@ -423,6 +509,25 @@ ${shellGuidance}
 - Example: \`${examplePath}\`
 - To list the workspace root, use \`ls("${workspacePath}")\`
 - Always use full absolute paths for all file operations
+`
+
+  const backgroundExecSection = `
+### 长时间命令执行
+
+**重要提示：** execute 工具默认超时 60 秒。对于可能超过 60 秒的命令，**必须**使用 \`run_in_background: true\` 参数：
+- 项目编译/构建：mvn, gradle, npm run build, dotnet build, cargo build, make 等
+- 依赖安装：mvn dependency:resolve, npm install, pip install, go mod download 等
+- 测试套件：mvn test, npm test, pytest, cargo test 等
+- 代码生成、Docker 构建等耗时操作
+
+使用方法：
+1. 调用 execute({ command: "mvn clean package -DskipTests", run_in_background: true })
+2. 获得 task_id 后，调用 task_output({ task_id: "..." }) 获取结果
+3. task_output 默认会阻塞等待最多 30 秒，如果任务在 30 秒内完成则直接返回结果
+4. 如果返回 timeout，再次调用 task_output 继续等待即可
+5. 对于预计非常长的任务，可以设置更大的 timeout：task_output({ task_id: "...", timeout: 120000 })
+
+**切勿**对编译、安装依赖等命令使用前台执行，否则会因超时被终止。
 `
 
   const sandboxSection = windowsSandbox === "readonly"
@@ -448,7 +553,7 @@ ${shellGuidance}
     : ""
 
   const memorySection = isMemoryEnabled() ? MEMORY_SYSTEM_PROMPT : ""
-  return workingDirSection + sandboxSection + BASE_SYSTEM_PROMPT + memorySection
+  return workingDirSection + backgroundExecSection + sandboxSection + BASE_SYSTEM_PROMPT + memorySection
 }
 
 // Per-thread checkpointer cache
@@ -676,11 +781,20 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const maxOutputBytes = Math.max(30_000, Math.min(80_000, Math.floor(maxTokens * 4 * 0.2)))
 
   // Inject bundled ripgrep into PATH so deepagents' ripgrepSearch can find it
-  const rgDir = join(
-    app.isPackaged ? process.resourcesPath : join(__dirname, "../../resources"),
-    "bin",
-    process.platform
-  )
+  let resourceBase: string
+  if (app.isPackaged) {
+    resourceBase = process.resourcesPath
+  } else {
+    // Dev mode: __dirname may be relative on some machines.
+    // Try multiple strategies to find the resources directory.
+    const candidates = [
+      resolve(__dirname, "../../resources"),
+      join(app.getAppPath(), "resources"),
+      join(app.getAppPath(), "..", "resources"),
+    ]
+    resourceBase = candidates.find(c => existsSync(join(c, "bin"))) ?? resolve(__dirname, "../../resources")
+  }
+  const rgDir = join(resourceBase, "bin", process.platform)
   const rgBin = join(rgDir, process.platform === "win32" ? "rg.exe" : "rg")
   const rgExists = existsSync(rgBin)
   // Mutate process.env.PATH so deepagents' internal ripgrepSearch
@@ -710,7 +824,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     codexExePath: codexExists ? codexExePath : undefined,
     // Pass a getter so hooks are always read fresh from storage at call time
     hooks: getEnabledHooks,
-    abortSignal: options.abortSignal
+    abortSignal: options.abortSignal,
+    runId: threadId
   })
 
   // ── Wire up the approval orchestrator ──
@@ -773,7 +888,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const subagentShellGuidance = isBashLike
     ? "- Use Unix/bash commands for shell operations (ls, cat, grep, etc.)"
     : isPowerShell
-      ? "- Use PowerShell syntax: $env:VAR for environment variables, ` for line continuation, -and/-or for logic operators"
+      ? `- **CRITICAL: Commands run in PowerShell (not bash).** Use \`; \` instead of \`&&\`, \`$env:VAR\` instead of \`$VAR\`, \`-and\`/\`-or\` instead of \`&&\`/\`||\`. NEVER use bash syntax.`
       : "- Use cmd.exe syntax for shell commands (e.g., dir instead of ls, type instead of cat)\n- Use && to chain commands, use ^ for line continuation, use %VAR% for environment variables"
 
   const filesystemSystemPrompt = `You have access to a filesystem. All file paths use fully qualified absolute system paths.
@@ -799,6 +914,13 @@ ${subagentShellGuidance}
 - glob: find files matching a pattern (e.g., "**/*.py")
 - grep: search for literal text within files (NOT regex). Do NOT use "|", ".*" or other regex syntax — call grep once per term instead.
 - git_workflow: get git info silently without any response or commentary. After calling this tool, output：成功！你可以展开本工具进行提交。.
+- When git_workflow is available, do NOT use execute to run git add/git commit/git push. Submit code only via git_workflow.
+- chrome_*: browser automation and page interaction tools provided by mcp-chrome via MCP (http://127.0.0.1:12306/mcp). These tools become available after the mcp-chrome extension bridge is connected.
+- browser_playwright: browser automation and page interaction tool powered by project-local Playwright (no extra global install step required).
+- playwright_cli: browser automation via @playwright/cli command interface.
+- agent_browser: legacy browser automation tool powered by vercel-labs/agent-browser CLI.
+- Browser tool priority: always prefer chrome_* tools first for browser tasks; if chrome_* is unavailable/unreachable, fallback to browser_playwright first, then playwright_cli; only use agent_browser when explicitly requested or other browser tools are unavailable.
+- If any chrome_* call fails because MCP is unavailable/unreachable, immediately fallback to browser_playwright for the same browsing task.
 
 The workspace root is: ${workspacePath}`
 
@@ -859,7 +981,28 @@ The workspace root is: ${workspacePath}`
     }
   }
 
-  const mcpConnectors = getEnabledMcpConnectors()
+  const enabledMcpConnectors = getEnabledMcpConnectors()
+  const hasBuiltinChromeConnector = enabledMcpConnectors.some((c) => {
+    const byUrl = normalizeMcpUrl(c.url) === normalizeMcpUrl(BUILTIN_MCP_CHROME_URL)
+    const byName = c.name.trim().toLowerCase().includes("mcp-chrome")
+      || c.name.trim().toLowerCase().includes("chrome mcp")
+    return byUrl || byName
+  })
+  const mcpConnectors = hasBuiltinChromeConnector
+    ? enabledMcpConnectors
+    : [
+      ...enabledMcpConnectors,
+      {
+        id: BUILTIN_MCP_CHROME_ID,
+        name: BUILTIN_MCP_CHROME_NAME,
+        url: BUILTIN_MCP_CHROME_URL,
+        enabled: true,
+        advanced: { transport: "streamable-http" as const },
+        lazyLoad: false,
+        createdAt: "",
+        updatedAt: ""
+      }
+    ]
   const pluginMcpConfigs = getEnabledPluginMcpConfigs()
 
   // Create instance-level registry for lazy tools (avoid global state)
@@ -979,9 +1122,13 @@ The workspace root is: ${workspacePath}`
           return await originalFunc(...args)
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e)
-          console.warn(`[Runtime] MCP tool "${t.name}" error (non-fatal):`, msg)
+          const shouldFallbackToAgentBrowser = isChromeToolName(t.name) && isChromeMcpUnavailableError(msg)
+          const finalMsg = shouldFallbackToAgentBrowser
+            ? `${msg}\nFallback: chrome MCP seems unavailable. Please use browser_playwright (or playwright_cli) for this browser task.`
+            : msg
+          console.warn(`[Runtime] MCP tool "${t.name}" error (non-fatal):`, finalMsg)
           // MCP tools use responseFormat: "content_and_artifact", must return [content, artifact]
-          return [`MCP tool error: ${msg}`, []]
+          return [`MCP tool error: ${finalMsg}`, []]
         }
       }
     }
@@ -1008,12 +1155,15 @@ The workspace root is: ${workspacePath}`
     }))
   }
   if (!options.noSkillEvolutionTool) {
-    extraTools.push(createSkillEvolutionTool())
+    extraTools.push(createSkillEvolutionTool({ threadId: options.threadId }))
   }
 
   // Add git_push tool
   // todo 暂时注释掉git_workflow工具，后续完善权限控制和安全措施后再放开
   extraTools.push(createGitWorkflowTool(workspacePath))
+  extraTools.push(createPlaywrightTool(workspacePath))
+  extraTools.push(createPlaywrightCliTool(workspacePath))
+  extraTools.push(createAgentBrowserTool(workspacePath))
 
   // Add tool search tools if there are lazy-loaded MCP tools
   const toolSearchTools = registry.getToolCount() > 0 ? createToolSearchTools(registry) : []
@@ -1029,9 +1179,14 @@ The workspace root is: ${workspacePath}`
   const trimForSummary = Math.min(12_000, Math.floor(maxTokens * 0.25))
   console.log("[Runtime] Context window:", maxTokens, "→ summarization trigger:", triggerTokens, "→ keep:", keepTokens, "→ tool evict limit:", toolEvictLimit, "→ trim for summary:", trimForSummary, "→ max output bytes:", maxOutputBytes)
 
+  const finalTools = [...mcpTools, ...memoryTools, ...extraTools, ...toolSearchTools]
+  const hasGitWorkflowTool = finalTools.some((t) => (t as { name?: string }).name === "git_workflow")
+  backend.setGitWorkflowCommitOnly(hasGitWorkflowTool)
+  console.log("[Runtime] Final tool list:", finalTools.map((t) => (t as { name?: string }).name ?? "(unnamed)"))
+
   const agent = createDeepAgent({
     model,
-    tools: [...mcpTools, ...memoryTools, ...codeIndexTools, ...extraTools, ...toolSearchTools],
+    tools: [...finalTools, ...codeIndexTools],
     checkpointer,
     backend,
     systemPrompt,

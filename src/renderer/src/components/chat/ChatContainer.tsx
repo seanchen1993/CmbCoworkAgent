@@ -72,6 +72,8 @@ interface SkillIntentBannerRequest {
   toolCallCount: number
   mode: "mode_a_rule" | "mode_b_llm"
   recommendationReason?: string
+  /** Opaque context — cached so the retry button can replay generation without a new threshold. */
+  context: unknown
 }
 
 const THINKING_MESSAGES = [
@@ -124,8 +126,12 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
   const [skillIntentRequest, setSkillIntentRequest] = useState<SkillIntentBannerRequest | null>(null)
 
   // Skill generation state stored globally so RightPanel can render the virtual subagent card
-  const { setSkillGenerationPhase, appendSkillGenerationToken } = useAppStore(
-    useShallow((s) => ({ setSkillGenerationPhase: s.setSkillGenerationPhase, appendSkillGenerationToken: s.appendSkillGenerationToken }))
+  const { setSkillGenerationPhase, appendSkillGenerationToken, setSkillRetryContext } = useAppStore(
+    useShallow((s) => ({
+      setSkillGenerationPhase: s.setSkillGenerationPhase,
+      appendSkillGenerationToken: s.appendSkillGenerationToken,
+      setSkillRetryContext: s.setSkillRetryContext
+    }))
   )
   const [yoloMode, setYoloMode] = useState(false)
   const [showCopyNotification, setShowCopyNotification] = useState(false)
@@ -407,7 +413,9 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
     }
   }, [threadId])
 
-  // Check if NUX (first-run sandbox setup) is needed, then auto-start elevated setup
+  // Check if NUX (first-run sandbox setup) is needed, then auto-start elevated setup.
+  // If elevated setup fails (UAC cancelled, setup exe missing, etc.), the main process
+  // automatically falls back to unelevated mode — so the app is always usable.
   useEffect(() => {
     window.api.sandbox.isNuxNeeded().then((needed) => {
       if (!needed) return
@@ -416,9 +424,9 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
       setNuxError(null)
       window.api.sandbox.completeNux("elevated")
         .then(() => setShowNux(false))
-        .catch((e) => {
-          setNuxError(e instanceof Error ? e.message : String(e))
-          setNuxLoading(false)
+        .catch(() => {
+          // Elevated failed but main process already fell back to unelevated — just close NUX
+          setShowNux(false)
         })
     }).catch((e) => console.warn("[NUX] Failed to check:", e))
   }, [])
@@ -808,6 +816,8 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
   useEffect(() => {
     console.log("[ChatContainer] Registering skill confirm listener")
     const cleanup = window.api.skillEvolution.onConfirmRequest((req) => {
+      // Ignore events that belong to a different thread (stale background run)
+      if (req.threadId && req.threadId !== useAppStore.getState().currentThreadId) return
       console.log("[ChatContainer] Received skill confirm request:", req.requestId, req.name)
       setSkillConfirmRequest(req)
       // Mark generation as done — RightPanel will switch the card to "completed"
@@ -832,6 +842,8 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
   useEffect(() => {
     console.log("[ChatContainer] Registering skill intent listener")
     const cleanup = window.api.skillEvolution.onIntentRequest((req) => {
+      // Ignore events that belong to a different thread (stale background run)
+      if (req.threadId && req.threadId !== useAppStore.getState().currentThreadId) return
       console.log(
         "[ChatContainer] Received skill intent request:",
         req.requestId,
@@ -843,22 +855,28 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
     return cleanup
   }, [])
 
-  const handleSkillIntentYes = useCallback((requestId: string): void => {
-    console.log("[ChatContainer] Accepting skill intent request:", requestId)
+  const handleSkillIntentYes = useCallback((): void => {
+    if (!skillIntentRequest) return
+    console.log("[ChatContainer] Accepting skill intent request:", skillIntentRequest.requestId)
+    // Cache the proposal context so the user can retry if generation hangs or fails
+    setSkillRetryContext({ context: skillIntentRequest.context, intentMode: skillIntentRequest.mode })
     setSkillGenerationPhase("generating")
     setSkillIntentRequest(null)
-    void window.api.skillEvolution.intentResponse(requestId, true)
-  }, [setSkillGenerationPhase])
+    void window.api.skillEvolution.intentResponse(skillIntentRequest.requestId, true)
+  }, [skillIntentRequest, setSkillGenerationPhase, setSkillRetryContext])
 
-  const handleSkillIntentNo = useCallback((requestId: string): void => {
-    console.log("[ChatContainer] Skipping skill intent request:", requestId)
+  const handleSkillIntentNo = useCallback((): void => {
+    if (!skillIntentRequest) return
+    console.log("[ChatContainer] Skipping skill intent request:", skillIntentRequest.requestId)
     setSkillIntentRequest(null)
-    void window.api.skillEvolution.intentResponse(requestId, false)
-  }, [])
+    void window.api.skillEvolution.intentResponse(skillIntentRequest.requestId, false)
+  }, [skillIntentRequest])
 
   // ── Skill generation streaming progress — update global store so RightPanel shows progress ──
   useEffect(() => {
     const cleanup = window.api.skillEvolution.onGenerating((evt) => {
+      // Ignore events that belong to a different thread (stale background run)
+      if (evt.threadId && evt.threadId !== useAppStore.getState().currentThreadId) return
       if (evt.phase === "start") {
         setSkillGenerationPhase("generating")
       } else if (evt.phase === "token") {
@@ -1286,13 +1304,13 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
           </div>
           <button
             className="shrink-0 rounded px-2.5 py-1 bg-violet-500 text-white hover:bg-violet-600 transition-colors font-medium"
-            onClick={() => handleSkillIntentYes(skillIntentRequest.requestId)}
+            onClick={handleSkillIntentYes}
           >
             创建技能
           </button>
           <button
             className="shrink-0 rounded px-2.5 py-1 text-muted-foreground hover:text-foreground transition-colors"
-            onClick={() => handleSkillIntentNo(skillIntentRequest.requestId)}
+            onClick={handleSkillIntentNo}
           >
             跳过
           </button>
@@ -1350,24 +1368,36 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
             {/* Error state */}
             {nuxError && (
               <div className="rounded-md border border-red-500/20 bg-red-500/5 p-3 text-sm text-red-600 dark:text-red-400 space-y-2">
-                <p className="font-medium">管理员沙箱配置失败</p>
+                <p className="font-medium">强隔离沙箱配置失败</p>
                 <p className="text-xs opacity-80">{nuxError}</p>
-                <p className="text-xs">如重试仍失败，请联系管理员。</p>
-                <button
-                  className="mt-1 px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors"
-                  onClick={() => {
-                    setNuxError(null)
-                    setNuxLoading(true)
-                    window.api.sandbox.completeNux("elevated")
-                      .then(() => setShowNux(false))
-                      .catch((e) => {
-                        setNuxError(e instanceof Error ? e.message : String(e))
-                        setNuxLoading(false)
-                      })
-                  }}
-                >
-                  重试
-                </button>
+                <p className="text-xs">可重试或选择受限沙箱模式继续使用。</p>
+                <div className="flex gap-2 mt-1">
+                  <button
+                    className="px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors"
+                    onClick={() => {
+                      setNuxError(null)
+                      setNuxLoading(true)
+                      window.api.sandbox.completeNux("elevated")
+                        .then(() => setShowNux(false))
+                        .catch(() => {
+                          // Main process falls back to unelevated on failure
+                          setShowNux(false)
+                        })
+                    }}
+                  >
+                    重试强隔离模式
+                  </button>
+                  <button
+                    className="px-3 py-1.5 text-xs border border-border rounded-md hover:bg-accent transition-colors"
+                    onClick={() => {
+                      window.api.sandbox.completeNux("unelevated")
+                        .then(() => setShowNux(false))
+                        .catch(() => setShowNux(false))
+                    }}
+                  >
+                    使用受限沙箱模式
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -1677,91 +1707,7 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
 
 
 
-            {/* Orchestrator approval request — shown as standalone bar when pending */}
-            {pendingApproval && (pendingApproval as Record<string, unknown>)._orchestratorRequestId && (
-              <div className={`rounded-lg border-2 p-4 space-y-3 ${
-                (pendingApproval as Record<string, unknown>).operation === "write_file" || (pendingApproval as Record<string, unknown>).operation === "edit_file"
-                  ? "border-blue-500/50 bg-blue-500/5"
-                  : "border-amber-500/50 bg-amber-500/5"
-              }`}>
-                <div className="flex items-center gap-2">
-                  {(pendingApproval as Record<string, unknown>).operation === "write_file" || (pendingApproval as Record<string, unknown>).operation === "edit_file"
-                    ? <FilePenLine className="size-4 text-blue-500" />
-                    : <ShieldCheck className="size-4 text-amber-500" />}
-                  <span className="text-sm font-medium">
-                    {(pendingApproval as Record<string, unknown>).operation === "write_file"
-                      ? "写入文件需要审批"
-                      : (pendingApproval as Record<string, unknown>).operation === "edit_file"
-                        ? "编辑文件需要审批"
-                        : "命令需要审批"}
-                  </span>
-                </div>
-                <div className="rounded-md bg-muted/50 px-3 py-2 font-mono text-sm">
-                  {(pendingApproval as Record<string, unknown>).operation === "write_file" || (pendingApproval as Record<string, unknown>).operation === "edit_file"
-                    ? `${(pendingApproval as Record<string, unknown>).operation === "write_file" ? "写入" : "编辑"}: ${String((pendingApproval as Record<string, unknown>).filePath || pendingApproval.tool_call?.args?.filePath || "unknown")}`
-                    : (pendingApproval as Record<string, unknown>).command
-                      ? String((pendingApproval as Record<string, unknown>).command)
-                      : pendingApproval.tool_call?.args?.command
-                        ? String(pendingApproval.tool_call.args.command)
-                        : "unknown command"}
-                </div>
-                {(pendingApproval as Record<string, unknown>)._retryReason && (
-                  <div className="text-xs text-amber-600 dark:text-amber-400">
-                    {String((pendingApproval as Record<string, unknown>)._retryReason)}
-                  </div>
-                )}
-                {(pendingApproval as Record<string, unknown>).reason && (
-                  <div className="text-xs text-muted-foreground">
-                    原因：{String((pendingApproval as Record<string, unknown>).reason)}
-                  </div>
-                )}
-                <div className="flex items-center gap-2">
-                  {(pendingApproval as Record<string, unknown>)._retryReason ? (
-                    <>
-                      <button
-                        className="px-3 py-1.5 text-xs bg-amber-500 text-white rounded-md hover:bg-amber-600 transition-colors"
-                        onClick={() => handleApprovalDecision("approve")}
-                      >
-                        无沙箱重试
-                      </button>
-                      <button
-                        className="px-3 py-1.5 text-xs border border-border rounded-md hover:bg-muted transition-colors"
-                        onClick={() => handleApprovalDecision("reject")}
-                      >
-                        拒绝
-                      </button>
-                    </>
-                  ) : (
-                    <>
-                      <button
-                        className="px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors"
-                        onClick={() => handleApprovalDecision("approve")}
-                      >
-                        {(pendingApproval as Record<string, unknown>).operation === "write_file" || (pendingApproval as Record<string, unknown>).operation === "edit_file" ? "允许" : "运行"}
-                      </button>
-                      <button
-                        className="px-3 py-1.5 text-xs bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
-                        onClick={() => handleApprovalDecision("approve_session")}
-                      >
-                        本会话允许
-                      </button>
-                      <button
-                        className="px-3 py-1.5 text-xs bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors"
-                        onClick={() => handleApprovalDecision("approve_permanent")}
-                      >
-                        始终允许
-                      </button>
-                      <button
-                        className="px-3 py-1.5 text-xs border border-border rounded-md hover:bg-muted transition-colors"
-                        onClick={() => handleApprovalDecision("reject")}
-                      >
-                        拒绝
-                      </button>
-                    </>
-                  )}
-                </div>
-              </div>
-            )}
+            {/* Orchestrator standalone approval bar moved outside ScrollArea — see below */}
             {/* Streaming indicator and inline TODOs */}
             {isLoading && (
               <div className="space-y-3">
@@ -1799,6 +1745,93 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
           </div>
         </div>
       </ScrollArea>
+      {/* Orchestrator approval bar — placed outside ScrollArea so it's always visible */}
+      {pendingApproval && (pendingApproval as Record<string, unknown>)._orchestratorRequestId && (
+        <div className="px-4 pb-2">
+          <div className={`max-w-3xl mx-auto rounded-lg border-2 p-4 space-y-3 ${
+            (pendingApproval as Record<string, unknown>).operation === "write_file" || (pendingApproval as Record<string, unknown>).operation === "edit_file"
+              ? "border-blue-500/50 bg-blue-500/5"
+              : "border-amber-500/50 bg-amber-500/5"
+          }`}>
+            <div className="flex items-center gap-2">
+              {(pendingApproval as Record<string, unknown>).operation === "write_file" || (pendingApproval as Record<string, unknown>).operation === "edit_file"
+                ? <FilePenLine className="size-4 text-blue-500" />
+                : <ShieldCheck className="size-4 text-amber-500" />}
+              <span className="text-sm font-medium">
+                {(pendingApproval as Record<string, unknown>).operation === "write_file"
+                  ? "写入文件需要审批"
+                  : (pendingApproval as Record<string, unknown>).operation === "edit_file"
+                    ? "编辑文件需要审批"
+                    : "命令需要审批"}
+              </span>
+            </div>
+            <div className="rounded-md bg-muted/50 px-3 py-2 font-mono text-sm break-all overflow-hidden">
+              {(pendingApproval as Record<string, unknown>).operation === "write_file" || (pendingApproval as Record<string, unknown>).operation === "edit_file"
+                ? `${(pendingApproval as Record<string, unknown>).operation === "write_file" ? "写入" : "编辑"}: ${String((pendingApproval as Record<string, unknown>).filePath || pendingApproval.tool_call?.args?.filePath || "unknown")}`
+                : (pendingApproval as Record<string, unknown>).command
+                  ? String((pendingApproval as Record<string, unknown>).command)
+                  : pendingApproval.tool_call?.args?.command
+                    ? String(pendingApproval.tool_call.args.command)
+                    : "unknown command"}
+            </div>
+            {(pendingApproval as Record<string, unknown>)._retryReason && (
+              <div className="text-xs text-amber-600 dark:text-amber-400">
+                {String((pendingApproval as Record<string, unknown>)._retryReason)}
+              </div>
+            )}
+            {(pendingApproval as Record<string, unknown>).reason && (
+              <div className="text-xs text-muted-foreground">
+                原因：{String((pendingApproval as Record<string, unknown>).reason)}
+              </div>
+            )}
+            <div className="flex items-center gap-2">
+              {(pendingApproval as Record<string, unknown>)._retryReason ? (
+                <>
+                  <button
+                    className="px-3 py-1.5 text-xs bg-amber-500 text-white rounded-md hover:bg-amber-600 transition-colors"
+                    onClick={() => handleApprovalDecision("approve")}
+                  >
+                    无沙箱重试
+                  </button>
+                  <button
+                    className="px-3 py-1.5 text-xs border border-border rounded-md hover:bg-muted transition-colors"
+                    onClick={() => handleApprovalDecision("reject")}
+                  >
+                    拒绝
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    className="px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors"
+                    onClick={() => handleApprovalDecision("approve")}
+                  >
+                    {(pendingApproval as Record<string, unknown>).operation === "write_file" || (pendingApproval as Record<string, unknown>).operation === "edit_file" ? "允许" : "运行"}
+                  </button>
+                  <button
+                    className="px-3 py-1.5 text-xs bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
+                    onClick={() => handleApprovalDecision("approve_session")}
+                  >
+                    本会话允许
+                  </button>
+                  <button
+                    className="px-3 py-1.5 text-xs bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors"
+                    onClick={() => handleApprovalDecision("approve_permanent")}
+                  >
+                    始终允许
+                  </button>
+                  <button
+                    className="px-3 py-1.5 text-xs border border-border rounded-md hover:bg-muted transition-colors"
+                    onClick={() => handleApprovalDecision("reject")}
+                  >
+                    拒绝
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
       {/* Input */}
       <div className="p-4">
         <form onSubmit={handleSubmit} className="max-w-3xl mx-auto">

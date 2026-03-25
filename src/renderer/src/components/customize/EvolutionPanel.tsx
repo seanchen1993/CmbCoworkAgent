@@ -24,7 +24,8 @@ import {
   Trash2,
   Wrench,
   XCircle,
-  Ban
+  Ban,
+  RotateCcw
 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -352,7 +353,7 @@ function TraceDetailView({ detail, onClose }: { detail: TraceDetail; onClose: ()
   }, [nodes])
 
   return (
-    <div className="flex flex-col h-full overflow-hidden bg-background">
+    <div className="flex flex-1 min-w-0 flex-col h-full overflow-hidden bg-background">
       <div className="shrink-0 flex items-center gap-2 px-4 py-2.5 border-b border-border">
         <button className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground" onClick={onClose}>
           <ArrowLeft className="size-3.5" />
@@ -572,6 +573,80 @@ function TraceThreadGroupCard({
   )
 }
 
+function OptimizeStreamCard({
+  running,
+  runningSummary,
+  streamedText,
+  streamError,
+  onRetry
+}: {
+  running: boolean
+  runningSummary: string | null
+  streamedText: string
+  streamError: string | null
+  onRetry: () => void
+}): React.JSX.Element {
+  const [expanded, setExpanded] = useState(false)
+  const hasContent = streamedText.length > 0
+
+  // Status label: prefer runningSummary when running, otherwise fallback
+  const statusLabel = streamError
+    ? "生成失败"
+    : running
+      ? (runningSummary ?? "正在生成优化候选...")
+      : "生成完成"
+
+  return (
+    <div className={cn(
+      "shrink-0 border-b border-violet-500/20 bg-violet-500/10 px-4 py-2"
+    )}>
+      <div className="flex items-center gap-2">
+        {running && !streamError ? (
+          <Loader2 className="size-3.5 text-violet-600 animate-spin shrink-0" />
+        ) : streamError ? (
+          <XCircle className="size-3.5 text-destructive shrink-0" />
+        ) : (
+          <Sparkles className="size-3.5 text-violet-600 shrink-0" />
+        )}
+        <span className={cn(
+          "text-xs flex-1",
+          streamError ? "text-destructive" : "text-violet-700 dark:text-violet-300"
+        )}>
+          {statusLabel}
+        </span>
+        <div className="flex items-center gap-2">
+          {(running || streamError) && (
+            <button
+              onClick={onRetry}
+              className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded border border-violet-400/40 text-violet-700 dark:text-violet-300 hover:bg-violet-500/10 transition-colors"
+            >
+              <RotateCcw className="size-2.5" />
+              重试
+            </button>
+          )}
+          {hasContent && (
+            <button
+              onClick={() => setExpanded((v) => !v)}
+              className="flex items-center gap-0.5 text-[10px] text-muted-foreground hover:text-foreground transition-colors"
+            >
+              {expanded ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+              {expanded ? "收起" : "查看内容"}
+            </button>
+          )}
+        </div>
+      </div>
+      {streamError && (
+        <p className="text-[11px] text-destructive mt-1 pl-5">{streamError}</p>
+      )}
+      {expanded && hasContent && (
+        <div className="mt-2 border border-violet-500/20 rounded px-2 py-1.5 max-h-48 overflow-y-auto bg-background/60">
+          <pre className="text-[10px] text-foreground/80 whitespace-pre-wrap break-all font-mono">{streamedText}</pre>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function CandidateCard({
   candidate,
   onApprove,
@@ -726,7 +801,20 @@ function CandidateCard({
                   }}
                 />
               )}
-              {(candidate.action === "create" || candidate.action === "patch" && oldContentStatus === "failed") && (
+              {candidate.action === "patch" && oldContentStatus === "failed" && (
+                <div className="px-3 pt-2 pb-1">
+                  <p className="text-[11px] text-amber-600 dark:text-amber-400 mb-2 flex items-center gap-1">
+                    <AlertCircle className="size-3 shrink-0" />
+                    未找到原始技能文件（{candidate.skillId}），无法显示 diff，仅展示新内容
+                  </p>
+                  <div className="prose prose-sm dark:prose-invert max-w-none text-xs">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                      {candidate.proposedContent}
+                    </ReactMarkdown>
+                  </div>
+                </div>
+              )}
+              {candidate.action === "create" && (
                 <div className="p-3">
                   <div className="prose prose-sm dark:prose-invert max-w-none text-xs">
                     <ReactMarkdown remarkPlugins={[remarkGfm]}>
@@ -779,7 +867,14 @@ export function EvolutionPanel(): React.JSX.Element {
     setEvolutionSelectedTraceIds,
     evolutionRunProgress: runProgress,
     setEvolutionRunProgress,
-    mergeEvolutionRunProgress
+    mergeEvolutionRunProgress,
+    evolutionStreamedText: streamedText,
+    setEvolutionStreamedText,
+    appendEvolutionStreamedText,
+    evolutionStreamError: streamError,
+    setEvolutionStreamError,
+    evolutionLastRunOpts: lastRunOpts,
+    setEvolutionLastRunOpts
   } = useAppStore()
 
   const pendingCount = candidates.filter((c) => c.status === "pending").length
@@ -810,6 +905,9 @@ export function EvolutionPanel(): React.JSX.Element {
     },
     pendingMessage = "正在分析选中内容，请稍候..."
   ) => {
+    setEvolutionLastRunOpts(opts ?? null)
+    setEvolutionStreamedText("")
+    setEvolutionStreamError(null)
     setRunning(true)
     setRunningSummary(pendingMessage)
     setSummary(null)
@@ -824,7 +922,7 @@ export function EvolutionPanel(): React.JSX.Element {
       setRunning(false)
       setRunningSummary(null)
     }
-  }, [setEvolutionRunProgress, setRunning, setRunningSummary, setSummary])
+  }, [setEvolutionLastRunOpts, setEvolutionRunProgress, setEvolutionStreamedText, setEvolutionStreamError, setRunning, setRunningSummary, setSummary])
 
   useEffect(() => {
     if (threads.length === 0) {
@@ -856,6 +954,24 @@ export function EvolutionPanel(): React.JSX.Element {
       mergeEvolutionRunProgress(payload)
     })
   }, [mergeEvolutionRunProgress])
+
+  useEffect(() => {
+    const offStart = window.api.optimizer.onStreamStart(() => {
+      setEvolutionStreamedText("")
+      setEvolutionStreamError(null)
+    })
+    const offChunk = window.api.optimizer.onStreamChunk(({ chunk }) => {
+      appendEvolutionStreamedText(chunk)
+    })
+    const offEnd = window.api.optimizer.onStreamEnd(({ success, error }) => {
+      if (!success && error) setEvolutionStreamError(error)
+    })
+    return () => {
+      offStart()
+      offChunk()
+      offEnd()
+    }
+  }, [appendEvolutionStreamedText, setEvolutionStreamedText, setEvolutionStreamError])
 
   const toggleOnlineSkillEvolution = useCallback(async () => {
     const next = !onlineSkillEvolutionEnabled
@@ -1024,6 +1140,13 @@ export function EvolutionPanel(): React.JSX.Element {
     setTab("candidates")
   }, [runOptimizer, selectedTraceIds, selectedThreadCount])
 
+  const handleRetryOptimizer = useCallback(() => {
+    const pendingMessage = lastRunOpts?.traceIds
+      ? `正在重试分析（${lastRunOpts.traceIds.length} 条 trace），请稍候...`
+      : "正在重试分析，请稍候..."
+    runOptimizer(lastRunOpts ?? undefined, pendingMessage).catch(console.warn)
+  }, [lastRunOpts, runOptimizer])
+
   const toggleSelectAll = useCallback(() => {
     if (allTraceIds.length === 0) return
     if (allTraceIds.every((id) => selectedTraceIds.has(id))) {
@@ -1051,7 +1174,7 @@ export function EvolutionPanel(): React.JSX.Element {
 
   if (detailLoading) {
     return (
-      <div className="flex items-center justify-center h-full">
+      <div className="flex flex-1 min-w-0 items-center justify-center h-full">
         <Loader2 className="size-6 animate-spin text-muted-foreground" />
       </div>
     )
@@ -1190,13 +1313,6 @@ export function EvolutionPanel(): React.JSX.Element {
         </div>
       </div>
 
-      {running && runningSummary && (
-        <div className="shrink-0 px-4 py-2 bg-violet-500/10 border-b border-violet-500/20 flex items-center gap-2">
-          <Loader2 className="size-3.5 text-violet-600 animate-spin shrink-0" />
-          <p className="text-xs text-violet-700 dark:text-violet-300">{runningSummary}</p>
-        </div>
-      )}
-
       {summary && (
         <div className="shrink-0 px-4 py-2 bg-muted/50 border-b border-border">
           <p className="text-xs text-muted-foreground">{summary}</p>
@@ -1220,6 +1336,16 @@ export function EvolutionPanel(): React.JSX.Element {
             ))}
           </div>
         </div>
+      )}
+
+      {(running || streamError || streamedText.length > 0) && (
+        <OptimizeStreamCard
+          running={running}
+          runningSummary={runningSummary}
+          streamedText={streamedText}
+          streamError={streamError}
+          onRetry={handleRetryOptimizer}
+        />
       )}
 
       <div className="shrink-0 flex border-b border-border px-4">

@@ -1,7 +1,7 @@
 import { app, BrowserWindow, IpcMain } from "electron"
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from "fs"
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, unlinkSync } from "fs"
 import { execFile, execSync } from "child_process"
-import { homedir } from "os"
+import { homedir, tmpdir } from "os"
 import { join, resolve } from "path"
 import {
   getWindowsSandboxMode,
@@ -25,6 +25,11 @@ const SETUP_VERSION = 5
 /** Persistent + session cache of workspace dirs that have had elevated ACL setup done. */
 const elevatedSetupDirs = new Set<string>()
 
+/** Normalize a directory path for consistent cache lookups (lowercase, no trailing slash, backslashes). */
+export function normalizeDirKey(dir: string): string {
+  return resolve(dir).replace(/\/+/g, "\\").replace(/\\+$/, "").toLowerCase()
+}
+
 /** Load previously configured workspace paths from disk into the in-memory set. */
 function loadElevatedWorkspaceDirs(): void {
   try {
@@ -32,7 +37,7 @@ function loadElevatedWorkspaceDirs(): void {
     const data = JSON.parse(readFileSync(ELEVATED_WORKSPACES_PATH, "utf-8"))
     if (Array.isArray(data.paths)) {
       for (const p of data.paths) {
-        if (typeof p === "string") elevatedSetupDirs.add(p)
+        if (typeof p === "string") elevatedSetupDirs.add(normalizeDirKey(p))
       }
     }
   } catch {
@@ -95,9 +100,21 @@ function notifyChanged(): void {
 
 /** Resolve the directory containing codex.exe and the sandbox helper binaries. */
 function resolveCodexBinDir(): string {
-  // electron-vite bundles everything into out/main/index.js, so __dirname = out/main/
-  const base = app.isPackaged ? process.resourcesPath : join(__dirname, "../../resources")
-  return join(base, "bin", "win32")
+  if (app.isPackaged) {
+    return join(process.resourcesPath, "bin", "win32")
+  }
+  // Dev mode: electron-vite bundles into out/main/index.js. __dirname may be relative
+  // on some machines, so try multiple strategies to find the resources directory.
+  const candidates = [
+    resolve(__dirname, "../../resources"),       // out/main → project root
+    join(app.getAppPath(), "resources"),          // app.getAppPath() = project root in dev
+    join(app.getAppPath(), "..", "resources"),    // fallback
+  ]
+  for (const c of candidates) {
+    if (existsSync(join(c, "bin", "win32"))) return join(c, "bin", "win32")
+  }
+  // Last resort: use __dirname-based path even if it doesn't exist
+  return join(resolve(__dirname, "../../resources"), "bin", "win32")
 }
 
 /** Check whether the elevated sandbox setup has been completed (marker exists with correct version). */
@@ -122,8 +139,15 @@ function psEscape(s: string): string {
   return s.replace(/'/g, "''")
 }
 
+let _cachedIsCurrentProcessElevated: boolean | null = null
+
 function isCurrentProcessElevated(): boolean {
-  if (process.platform !== "win32") return false
+  if (_cachedIsCurrentProcessElevated !== null) return _cachedIsCurrentProcessElevated
+
+  if (process.platform !== "win32") {
+    _cachedIsCurrentProcessElevated = false
+    return false
+  }
 
   // Use whoami /groups to check for High Mandatory Level SID (S-1-16-12288).
   // This is the only reliable way to confirm the process is truly elevated.
@@ -133,10 +157,11 @@ function isCurrentProcessElevated(): boolean {
   const safeCwd = process.env.SYSTEMROOT || process.env.windir || "C:\\Windows"
   try {
     const output = execSync("whoami /groups", { encoding: "utf-8", windowsHide: true, cwd: safeCwd })
-    return output.includes("S-1-16-12288")
+    _cachedIsCurrentProcessElevated = output.includes("S-1-16-12288")
   } catch {
-    return false
+    _cachedIsCurrentProcessElevated = false
   }
+  return _cachedIsCurrentProcessElevated
 }
 
 /**
@@ -261,27 +286,38 @@ export async function runElevatedSetupForPaths(
         })
       })
     } else {
-      // Use array-based arguments to avoid PowerShell parsing issues with special characters
-      const psScript = `
-        $p = Start-Process -FilePath "${setupExe.replace(/"/g, '`"')}" \`
-          -ArgumentList "${b64.replace(/"/g, '`"')}" \`
-          -Verb RunAs \`
-          -Wait \`
-          -PassThru \`
-          -WindowStyle Hidden
-        if ($null -eq $p) { exit 1 }
-        exit $p.ExitCode
-      `.trim()
+      // Write PS script to a temp file to avoid command-line length limits and encoding
+      // corruption that occur when passing long base64 payloads via -Command inline.
+      const tmpScript = join(tmpdir(), `sandbox-setup-${process.pid}-${Date.now()}.ps1`)
+      const psScript = [
+        `$p = Start-Process -FilePath '${setupExe.replace(/'/g, "''")}' \``,
+        `  -ArgumentList '${b64}' \``,
+        `  -Verb RunAs \``,
+        `  -Wait \``,
+        `  -PassThru \``,
+        `  -WindowStyle Hidden`,
+        `if ($null -eq $p) { exit 1 }`,
+        `exit $p.ExitCode`,
+      ].join("\r\n")
+      writeFileSync(tmpScript, psScript, "utf-8")
 
-      await new Promise<void>((resolve, reject) => {
-        execFile("powershell", ["-NoProfile", "-NonInteractive", "-Command", psScript], {
-          timeout: 120_000,
-          windowsHide: false
-        }, (err) => {
-          if (err) reject(err)
-          else resolve()
+      try {
+        await new Promise<void>((resolve, reject) => {
+          execFile("powershell", [
+            "-NoProfile", "-NonInteractive",
+            "-ExecutionPolicy", "Bypass",
+            "-File", tmpScript
+          ], {
+            timeout: 120_000,
+            windowsHide: false
+          }, (err) => {
+            if (err) reject(err)
+            else resolve()
+          })
         })
-      })
+      } finally {
+        try { unlinkSync(tmpScript) } catch {}
+      }
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
@@ -294,7 +330,7 @@ export async function runElevatedSetupForPaths(
   // Mark these directories as set up for this session
   if (workspacePaths) {
     for (const p of workspacePaths) {
-      if (p) elevatedSetupDirs.add(p)
+      if (p) elevatedSetupDirs.add(normalizeDirKey(p))
     }
   }
 
@@ -304,14 +340,13 @@ export async function runElevatedSetupForPaths(
   return { success: false, error: "沙箱配置未完成，请重试" }
 }
 
-/** Check if a workspace directory has had elevated ACL setup in this session. */
 export function isWorkspaceElevatedSetupDone(dir: string): boolean {
-  return elevatedSetupDirs.has(dir)
+  return elevatedSetupDirs.has(normalizeDirKey(dir))
 }
 
 /** Mark a workspace directory as having elevated ACL setup done, and persist to disk. */
 export function markWorkspaceElevatedSetupDone(dir: string): void {
-  elevatedSetupDirs.add(dir)
+  elevatedSetupDirs.add(normalizeDirKey(dir))
   saveElevatedWorkspaceDirs()
 }
 
@@ -367,7 +402,12 @@ export function registerSandboxHandlers(ipcMain: IpcMain): void {
         if (!isElevatedSetupComplete()) {
           const result = await runElevatedSetupForPaths()
           if (!result.success) {
-            throw new Error(result.error || "管理员沙箱配置失败")
+            // Elevated setup failed — fall back to unelevated mode instead of blocking the app
+            console.warn(`[Sandbox NUX] elevated setup failed, falling back to unelevated: ${result.error}`)
+            setWindowsSandboxMode("unelevated")
+            setSandboxNuxCompleted()
+            notifyChanged()
+            return
           }
         }
         setWindowsSandboxMode(mode)

@@ -23,14 +23,15 @@ import {
   Plug,
   Power,
   AlertCircle,
+  Loader2,
+  RotateCcw,
   Webhook
 } from "lucide-react"
 import { cn } from "@/lib/utils"
-import { useAppStore } from "@/lib/store"
+import { useAppStore, selectSkillGenerationAgent, selectSkillRetryContext } from "@/lib/store"
 import { useShallow } from "zustand/react/shallow"
 import { useThreadState } from "@/lib/thread-context"
 import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
 import type { Todo, SkillMetadata, PluginMetadata } from "@/types"
 import { SubagentCard } from "@/components/panels/SubagentPanel"
 
@@ -125,13 +126,19 @@ function ResizeHandle({ onDrag }: ResizeHandleProps): React.JSX.Element {
 }
 
 export function RightPanel(): React.JSX.Element {
-  const { currentThreadId, pluginVersion, skillGenerationAgent, setSkillGenerationPhase } = useAppStore(
+  const { currentThreadId, pluginVersion, skillGenerationByThread, setSkillGenerationPhase } = useAppStore(
     useShallow((s) => ({
       currentThreadId: s.currentThreadId,
       pluginVersion: s.pluginVersion,
-      skillGenerationAgent: s.skillGenerationAgent,
+      // Subscribe to the whole map so we re-render when any thread's card changes
+      skillGenerationByThread: s.skillGenerationByThread,
       setSkillGenerationPhase: s.setSkillGenerationPhase
     }))
+  )
+  // Derive the current thread's card state from the per-thread map
+  const skillGenerationAgent = selectSkillGenerationAgent(
+    { skillGenerationByThread } as Parameters<typeof selectSkillGenerationAgent>[0],
+    currentThreadId
   )
   const threadState = useThreadState(currentThreadId)
   const todos = threadState?.todos ?? []
@@ -177,7 +184,9 @@ export function RightPanel(): React.JSX.Element {
     }
   }, [skillGenerationAgent.phase])
 
-  // When confirmRequest arrives (phase becomes "done"), clear virtual card after short delay
+  // Auto-clear only for "done" phase (3 s brief confirmation).
+  // "error" is intentionally NOT auto-cleared — it stays visible so the user
+  // can read the error, and must be dismissed manually via the ✕ button on the card.
   useEffect(() => {
     if (skillGenerationAgent.phase === "done") {
       const t = setTimeout(() => setSkillGenerationPhase(null), 3000)
@@ -185,6 +194,13 @@ export function RightPanel(): React.JSX.Element {
     }
     return undefined
   }, [skillGenerationAgent.phase, setSkillGenerationPhase])
+
+  // Log skill generation errors to the console for easier diagnosis on Windows
+  useEffect(() => {
+    if (skillGenerationAgent.phase === "error") {
+      console.error("[SkillGen] 技能生成失败:", skillGenerationAgent.errorText)
+    }
+  }, [skillGenerationAgent.phase, skillGenerationAgent.errorText])
 
   useEffect(() => {
     if (hooksOpen) {
@@ -1176,11 +1192,17 @@ function FileIcon({
 function SkillGenerationCard({
   phase,
   streamedText,
-  errorText
+  errorText,
+  onDismiss,
+  onRetry
 }: {
   phase: "generating" | "done" | "error"
   streamedText: string
   errorText: string
+  /** Called when the user dismisses an error card. */
+  onDismiss?: () => void
+  /** Called when the user clicks the retry button on an error card. */
+  onRetry?: () => void
 }): React.JSX.Element {
   const [expanded, setExpanded] = useState(false)
 
@@ -1188,7 +1210,7 @@ function SkillGenerationCard({
     ? { icon: Loader2, variant: "info" as const, label: "生成中", spin: true }
     : phase === "done"
       ? { icon: CheckCircle2, variant: "nominal" as const, label: "已完成", spin: false }
-      : { icon: AlertCircle, variant: "critical" as const, label: "失败", spin: false }
+      : { icon: AlertCircle, variant: "critical" as const, label: "执行失败", spin: false }
 
   const StatusIcon = statusBadge.icon
 
@@ -1220,7 +1242,29 @@ function SkillGenerationCard({
       {/* Body */}
       <div className="px-3 pb-3 space-y-2">
         {phase === "error" ? (
-          <p className="text-xs text-destructive">{errorText}</p>
+          <>
+            <p className="text-xs text-destructive">{errorText}</p>
+            <div className="flex items-center justify-end gap-2 pt-1">
+              {onRetry && (
+                <button
+                  onClick={onRetry}
+                  className="flex items-center gap-1 rounded px-2 py-1 text-[11px] font-medium bg-violet-500/10 text-violet-600 dark:text-violet-400 hover:bg-violet-500/20 transition-colors"
+                >
+                  <RotateCcw className="size-3" />
+                  重试
+                </button>
+              )}
+              {onDismiss && (
+                <button
+                  onClick={onDismiss}
+                  className="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  <XCircle className="size-3" />
+                  关闭
+                </button>
+              )}
+            </div>
+          </>
         ) : (
           <>
             <p className="text-xs text-muted-foreground">
@@ -1245,6 +1289,17 @@ function SkillGenerationCard({
                 )}
               </div>
             )}
+            {phase === "generating" && onRetry && (
+              <div className="flex justify-end pt-1">
+                <button
+                  onClick={onRetry}
+                  className="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  <RotateCcw className="size-3" />
+                  重新生成
+                </button>
+              </div>
+            )}
           </>
         )}
       </div>
@@ -1253,16 +1308,38 @@ function SkillGenerationCard({
 }
 
 function AgentsContent(): React.JSX.Element {
-  const { currentThreadId, skillGenerationAgent } = useAppStore(
+  const { currentThreadId, skillGenerationByThread, skillRetryContextByThread, setSkillGenerationPhase } = useAppStore(
     useShallow((s) => ({
       currentThreadId: s.currentThreadId,
-      skillGenerationAgent: s.skillGenerationAgent
+      skillGenerationByThread: s.skillGenerationByThread,
+      skillRetryContextByThread: s.skillRetryContextByThread,
+      setSkillGenerationPhase: s.setSkillGenerationPhase
     }))
   )
+  const skillGenerationAgent = selectSkillGenerationAgent(
+    { skillGenerationByThread } as Parameters<typeof selectSkillGenerationAgent>[0],
+    currentThreadId
+  )
+  const skillRetryContext = selectSkillRetryContext(
+    { skillRetryContextByThread } as Parameters<typeof selectSkillRetryContext>[0],
+    currentThreadId
+  )
+  const retryInFlightRef = useRef(false)
   const threadState = useThreadState(currentThreadId)
   const subagents = threadState?.subagents ?? []
 
   const hasSkillGen = skillGenerationAgent.phase !== null
+
+  const handleRetry = useCallback((): void => {
+    if (!currentThreadId || !skillRetryContext || retryInFlightRef.current) return
+    retryInFlightRef.current = true
+    void window.api.skillEvolution.retryGeneration(currentThreadId, skillRetryContext)
+      .catch((err: unknown) => {
+        console.error("[SkillGen] Retry IPC failed:", err)
+        setSkillGenerationPhase("error", err instanceof Error ? err.message : "重试失败")
+      })
+      .finally(() => { retryInFlightRef.current = false })
+  }, [currentThreadId, skillRetryContext, setSkillGenerationPhase])
 
   if (subagents.length === 0 && !hasSkillGen) {
     return (
@@ -1282,6 +1359,16 @@ function AgentsContent(): React.JSX.Element {
           phase={skillGenerationAgent.phase!}
           streamedText={skillGenerationAgent.streamedText}
           errorText={skillGenerationAgent.errorText}
+          onDismiss={
+            skillGenerationAgent.phase === "error"
+              ? () => setSkillGenerationPhase(null)
+              : undefined
+          }
+          onRetry={
+            (skillGenerationAgent.phase === "error" || skillGenerationAgent.phase === "generating") && skillRetryContext
+              ? handleRetry
+              : undefined
+          }
         />
       )}
       {subagents.map((agent) => (

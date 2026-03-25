@@ -1,7 +1,7 @@
 {
   "name": "CMBDevClaw",
-  "version": "0.1.4",
-  "description": "A tactical agent interface for deepagentsjs",
+  "version": "0.1.8",
+  "description": "CMBDevClaw description",
   "main": "./out/main/index.js",
   "files": [
     "out/",
@@ -14,16 +14,7 @@
   "bin": {
     "openwork": "./bin/cli.js"
   },
-  "author": "LangChain",
   "license": "MIT",
-  "homepage": "https://github.com/langchain-ai/openwork",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/langchain-ai/openwork.git"
-  },
-  "bugs": {
-    "url": "https://github.com/langchain-ai/openwork/issues"
-  },
   "keywords": [
     "ai",
     "agent",
@@ -34,7 +25,7 @@
     "desktop"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=18 <24"
   },
   "scripts": {
     "format": "prettier --write .",
@@ -50,7 +41,7 @@
     "dist:mac": "npm run build && electron-builder --mac"
   },
   "build": {
-    "appId": "com.langchain.openwork",
+    "appId": "com.cmbdevclaw.com",
     "productName": "CMBDevClaw",
     "directories": {
       "output": "dist"
@@ -86,6 +77,7 @@
     "@langchain/mcp-adapters": "^1.1.3",
     "@langchain/openai": "^1.2.11",
     "@modelcontextprotocol/sdk": "^1.27.1",
+    "@playwright/cli": "^0.1.1",
     "@radix-ui/react-context-menu": "^2.2.16",
     "@radix-ui/react-dialog": "^1.1.15",
     "@radix-ui/react-dropdown-menu": "^2.1.16",
@@ -112,6 +104,8 @@
     "langchain": "^1.2.28",
     "lucide-react": "^0.469.0",
     "micromatch": "^4.0.8",
+    "nodejieba": "^3.5.8",
+    "playwright": "^1.58.2",
     "react-diff-viewer-continued": "^4.1.2",
     "react-markdown": "^10.1.0",
     "react-resizable-panels": "^4.4.0",
@@ -142,6 +136,7 @@
     "@types/uuid": "^10.0.0",
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^5.1.1",
+    "agent-browser": "^0.21.4",
     "electron": "^39.2.6",
     "electron-builder": "^26.8.1",
     "electron-vite": "^5.0.0",
@@ -149,6 +144,7 @@
     "eslint-plugin-react": "^7.37.5",
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.4.24",
+    "mcp-chrome-bridge": "^1.0.31",
     "prettier": "^3.7.4",
     "react": "^19.2.1",
     "react-dom": "^19.2.1",

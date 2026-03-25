@@ -23,6 +23,7 @@ import {
 import { BrowserWindow, ipcMain } from "electron"
 import { getCustomSkillsDir, invalidateEnabledSkillsCache } from "../../storage"
 import { v4 as uuid } from "uuid"
+import type { SkillProposalWindowContext } from "../skill-evolution/proposal-window"
 
 // ─────────────────────────────────────────────────────────
 // Helpers
@@ -55,6 +56,7 @@ function notifyRenderer(channel: string, payload?: unknown): void {
 // ─────────────────────────────────────────────────────────
 
 export interface SkillConfirmRequest {
+  threadId: string
   requestId: string
   skillId: string
   name: string
@@ -115,6 +117,7 @@ function waitForResponse(requestId: string, timeoutMs = 5 * 60 * 1000): Promise<
 // ─────────────────────────────────────────────────────────
 
 export interface SkillIntentRequest {
+  threadId: string
   requestId: string
   /** Short summary of what the conversation accomplished */
   summary: string
@@ -124,6 +127,8 @@ export interface SkillIntentRequest {
   mode: "mode_a_rule" | "mode_b_llm"
   /** Optional model recommendation reason for Mode B */
   recommendationReason?: string
+  /** Full proposal context — forwarded to renderer so the retry button can replay generation */
+  context: SkillProposalWindowContext
 }
 
 /**
@@ -264,7 +269,13 @@ const skillEvolveSchema = z.object({
 // Tool factory
 // ─────────────────────────────────────────────────────────
 
-export function createSkillEvolutionTool() {
+interface SkillEvolutionToolContext {
+  /** The thread that owns this agent run — forwarded into IPC events so the
+   *  renderer can filter out events that belong to a different thread. */
+  threadId?: string
+}
+
+export function createSkillEvolutionTool(context: SkillEvolutionToolContext = {}) {
   return tool(
     async (input) => {
       switch (input.action) {
@@ -322,6 +333,7 @@ export function createSkillEvolutionTool() {
           const requestId = uuid()
           console.log(`[SkillEvolution] Requesting user confirmation for skill: "${input.name}" (${requestId})`)
           const approved = await requestSkillConfirmation({
+            threadId: context.threadId ?? "",
             requestId,
             skillId,
             name: input.name,

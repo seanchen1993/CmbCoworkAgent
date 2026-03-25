@@ -1,25 +1,13 @@
 import type { Message, HITLRequest } from "@/types"
 import { ToolCallRenderer } from "./ToolCallRenderer";
 import { StreamingMarkdown } from "./StreamingMarkdown"
+import { getToolLabel } from "@/lib/tool-labels"
 import { useState } from "react"
 import { ChevronDown, ChevronRight, Wrench } from "lucide-react"
 
 // 获取工具调用的简要描述
 function getToolCallSummary(toolCall: { name: string; args?: Record<string, unknown> }): string {
-  const toolLabels: Record<string, string> = {
-    read_file: "读取文件",
-    write_file: "写入文件",
-    edit_file: "编辑文件",
-    execute: "执行命令",
-    ls: "列出目录",
-    glob: "查找文件",
-    grep: "搜索内容",
-    write_todos: "更新任务",
-    task: "子任务执行",
-    git_workflow:"git代码批量提交（点击展开）"
-  }
-
-  const label = toolLabels[toolCall.name] || toolCall.name
+  const label = getToolLabel(toolCall.name)
   const args = toolCall.args || {}
 
   // 获取主要参数用于显示
@@ -35,6 +23,15 @@ function getToolCallSummary(toolCall: { name: string; args?: Record<string, unkn
   }
 
   return param ? `${label}: ${param}` : label
+}
+
+function isHtmlRenderToolCall(toolCall: { name: string; args?: Record<string, unknown> }): boolean {
+  if (toolCall.name !== "write_file" && toolCall.name !== "edit_file") return false
+  const args = toolCall.args || {}
+  const path = (args.path || args.file_path) as string | undefined
+  if (!path) return false
+  const lowerPath = path.toLowerCase()
+  return lowerPath.endsWith(".html") || lowerPath.endsWith(".htm")
 }
 
 interface ToolResultInfo {
@@ -61,7 +58,8 @@ export function MessageBubble({
   onApprovalDecision,
   threadId
 }: MessageBubbleProps): React.JSX.Element | null {
-  const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set())
+  const [collapsedTools, setCollapsedTools] = useState<Set<string>>(new Set())
+  const [collapsedHtmlTools, setCollapsedHtmlTools] = useState<Set<string>>(new Set())
   const isUser = message.role === "user"
   const isTool = message.role === "tool"
 
@@ -69,8 +67,21 @@ export function MessageBubble({
   const shouldShowMessageHead = !isUser && (!previousMessage || previousMessage.role === "user")
 
   // 切换工具调用详情的展开状态
-  const toggleToolExpansion = (toolId: string) => {
-    setExpandedTools((prev) => {
+  const toggleToolExpansion = (toolId: string, defaultExpanded = false) => {
+    if (defaultExpanded) {
+      setCollapsedHtmlTools((prev) => {
+        const newSet = new Set(prev)
+        if (newSet.has(toolId)) {
+          newSet.delete(toolId)
+        } else {
+          newSet.add(toolId)
+        }
+        return newSet
+      })
+      return
+    }
+
+    setCollapsedTools((prev) => {
       const newSet = new Set(prev)
       if (newSet.has(toolId)) {
         newSet.delete(toolId)
@@ -196,7 +207,8 @@ export function MessageBubble({
                   ? pendingIds.includes(toolCall.id)
                   : pendingApproval?.tool_call?.id && pendingApproval.tool_call.id === toolCall.id
               );
-              const isExpanded = expandedTools.has(toolId);
+              const isHtmlTool = isHtmlRenderToolCall(toolCall);
+              const isExpanded = isHtmlTool ? collapsedHtmlTools.has(toolId) : collapsedTools.has(toolId);
               const summary = getToolCallSummary(toolCall);
 
               // 如果工具需要审批，使用原来的ToolCallRenderer（批量时隐藏按钮）
@@ -223,7 +235,7 @@ export function MessageBubble({
                 <div key={toolId} className="rounded-sm border overflow-hidden border-border bg-background-elevated">
                   {/* 可折叠的工具标题 */}
                   <button
-                    onClick={() => toggleToolExpansion(toolId)}
+                    onClick={() => toggleToolExpansion(toolId, isHtmlTool)}
                     className="flex w-full items-center gap-2 px-3 py-2 hover:bg-background-interactive transition-colors"
                   >
                     {isExpanded ? (

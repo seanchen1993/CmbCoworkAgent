@@ -15,12 +15,18 @@ interface UserInfoConfig {
 
 const UserInfoPanel: React.FC = () => {
     const [user, setUser] = useState<UserInfoConfig>({} as UserInfoConfig);
-
+    const [initFlag, setInitFlag] = useState(false)//初始化标志，用于判断是否已经初始化
     useEffect(() => {
+        window.electron.onNotifyMsg(() => {
+            initUser()
+        })
+        initUser()
+    }, []);
+    const initUser = () => {
         window.api.models.getUserInfo().then(user => {
             const userInfo = user as UserInfoConfig || {}
             if (userInfo.sapId) {
-                fetch('https://archguardservice.paas.twf.cn/cowork/login-info', {
+                fetch(`https://archguardservice.paas.${import.meta.env.VITE_LOGIN_PT}.cn/cowork/login-info`, {
                     method: 'GET',
                     headers: {
                         ystCode: userInfo.ystCode,
@@ -42,10 +48,14 @@ const UserInfoPanel: React.FC = () => {
                     }
                 }).catch(err => {
                     console.log(err)
+                }).finally(() => {
+                    setInitFlag(true)
                 })
+            } else {
+                setInitFlag(true)
             }
         });
-    }, []);
+    };
 
     const handleLogin = async () => {
         window.electron.openLoginWindow()
@@ -71,25 +81,29 @@ const UserInfoPanel: React.FC = () => {
         if (!name) return ''
         return name.split(' ').map(word => word[0]).join('').toUpperCase();
     };
+
+    if (!initFlag) {
+        return null
+    }
     return (
         <Card className="w-full">
             <CardContent>
-                {user ? (
+                {user.sapId ? (
                     // 登录状态
-                    <div className="text-center space-y-4">
-                        <div className="flex items-center ">
+                    <div className="space-y-4">
+                        <div className="flex items-center mt-2">
                             <div className="w-12 h-12 rounded-full bg-blue-100 flex items-center justify-center">
                                 <span className="text-blue-600 font-semibold text-lg">
                                     {getInitials(user.userName)}
                                 </span>
                             </div>
-                            <div className="flex-1 min-w-0">
+                            <div className="flex-1 min-w-0 ml-2">
                                 <h3 className="text-lg font-semibold truncate">{user.userName}</h3>
                                 <p className="text-sm text-gray-600 truncate">{user.orgName}</p >
                             </div>
                         </div>
 
-                        <Button variant="outline" onClick={handleLogout} className="w-full">
+                        <Button variant="outline" onClick={handleLogout} className="w-40">
                             退出登录
                         </Button>
                     </div>

@@ -1,12 +1,164 @@
 import { ipcMain } from "electron"
 import { execSync } from "child_process"
 import { platform } from "os"
+import { readdirSync, rmSync } from "fs"
+import path from "path"
 
 interface GitStatus {
   hasChanges: boolean
   changedFiles: string[]
   untrackedFiles: string[]
   stagedFiles: string[]
+}
+
+interface ExecCommandError extends Error {
+  stderr?: unknown
+  stdout?: unknown
+  code?: string
+  signal?: string
+}
+
+function isPushCommand(command: string): boolean {
+  return /^git(\s+-C\s+"[^"]*")?\s+push(\s|$)/.test(command.trim())
+}
+
+function isPullLikeCommand(command: string): boolean {
+  return /^git(\s+-C\s+"[^"]*")?\s+(pull|fetch)(\s|$)/.test(command.trim())
+}
+
+function getGitCommandTimeout(command: string): number {
+  if (isPushCommand(command)) {
+    return 3 * 60 * 1000
+  }
+
+  if (isPullLikeCommand(command)) {
+    return 2 * 60 * 1000
+  }
+
+  return 30 * 1000
+}
+
+function getCommandWorkingDir(command: string, fallbackCwd: string): string {
+  const match = command.match(/git\s+-C\s+(?:"([^"]+)"|'([^']+)'|([^\s]+))/i)
+  const parsedDir = match?.[1] || match?.[2] || match?.[3]
+  if (parsedDir) {
+    return parsedDir
+  }
+
+  return fallbackCwd
+}
+
+function normalizeGitDirPath(rawGitDir: string, workingDir: string): string {
+  const trimmed = rawGitDir.trim().replace(/^"(.*)"$/, "$1")
+
+  if (platform() === "win32") {
+    const posixDriveMatch = trimmed.match(/^\/([a-zA-Z])\/(.*)$/)
+    if (posixDriveMatch) {
+      const windowsPath = `${posixDriveMatch[1].toUpperCase()}:\\${posixDriveMatch[2].replace(/\//g, "\\")}`
+      return path.resolve(windowsPath)
+    }
+  }
+
+  return path.isAbsolute(trimmed) ? trimmed : path.resolve(workingDir, trimmed)
+}
+
+function resolveGitDir(command: string, fallbackCwd: string): string | null {
+  const workingDir = getCommandWorkingDir(command, fallbackCwd)
+
+  try {
+    const gitDir = execSync(`git -C "${workingDir}" rev-parse --git-dir`, {
+      encoding: "utf-8",
+      cwd: workingDir,
+      shell: platform() === "win32" ? "cmd.exe" : "/bin/bash"
+    }).trim()
+
+    return normalizeGitDirPath(gitDir, workingDir)
+  } catch {
+    return null
+  }
+}
+
+function collectGitLockFiles(gitDir: string): string[] {
+  const stack = [gitDir]
+  const lockFiles: string[] = []
+
+  while (stack.length > 0) {
+    const current = stack.pop()
+    if (!current) {
+      continue
+    }
+
+    let entries: Array<{
+      isDirectory: () => boolean
+      isFile: () => boolean
+      name: string
+    }>
+    try {
+      entries = readdirSync(current, { withFileTypes: true })
+    } catch {
+      continue
+    }
+
+    for (const entry of entries) {
+      const fullPath = path.join(current, entry.name)
+      if (entry.isDirectory()) {
+        stack.push(fullPath)
+        continue
+      }
+
+      if (entry.isFile() && entry.name.toLowerCase().endsWith(".lock")) {
+        lockFiles.push(fullPath)
+      }
+    }
+  }
+
+  return lockFiles
+}
+
+function cleanupGitLockFiles(command: string, fallbackCwd: string): string[] {
+  const gitDir = resolveGitDir(command, fallbackCwd)
+  if (!gitDir) {
+    return []
+  }
+
+  const lockFiles = collectGitLockFiles(gitDir)
+  const removed: string[] = []
+
+  for (const lockFile of lockFiles) {
+    try {
+      rmSync(lockFile, { force: true })
+      removed.push(lockFile)
+    } catch {
+      // Ignore single file cleanup errors and continue
+    }
+  }
+
+  return removed
+}
+
+function isTimeoutError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false
+  }
+
+  const message = error.message.toLowerCase()
+  const withCode = error as Error & { code?: string; signal?: string }
+  return (
+    withCode.code === "ETIMEDOUT" ||
+    withCode.signal === "SIGTERM" ||
+    message.includes("timed out") ||
+    message.includes("timeout")
+  )
+}
+
+function isLockFileErrorText(text: string): boolean {
+  const normalized = text.toLowerCase()
+  return (
+    normalized.includes(".lock") &&
+    (normalized.includes("file exists") ||
+      normalized.includes("unable to create") ||
+      normalized.includes("another git process"))
+  )
 }
 
 // Check Git version and capabilities
@@ -51,18 +203,11 @@ function getCurrentWorkingDirectory(): string {
 function executeGitCommand(command: string, cwd?: string): string {
   try {
     const workingDir = cwd || getCurrentWorkingDirectory()
-
-    // Windows-specific command handling
-    let processedCommand = command
-    if (platform() === 'win32') {
-      // Handle Windows path issues and ensure proper quoting
-      processedCommand = command.replace(/([a-zA-Z]:[\\/][^\s"]*)/g, '"$1"')
-    }
-
-    const result = execSync(processedCommand, {
+    const timeout = getGitCommandTimeout(command)
+    const result = execSync(command, {
       encoding: "utf-8",
       cwd: workingDir,
-      timeout: 30000, // 30秒超时
+      timeout,
       shell: platform() === 'win32' ? 'cmd.exe' : '/bin/bash',
       env: {
         ...process.env,
@@ -71,13 +216,17 @@ function executeGitCommand(command: string, cwd?: string): string {
       }
     })
     return result.trim()
-  } catch (error: any) {
+  } catch (rawError: unknown) {
+    const error = rawError as ExecCommandError
     // Enhanced error handling for common Windows Git issues
     let errorMessage = error.message
+    const stderr = typeof error.stderr === "string" ? error.stderr.trim() : String(error.stderr || "").trim()
+    const timeoutError = isTimeoutError(error)
+    const lockError = isLockFileErrorText(`${stderr}\n${error.message || ""}`)
+    const originalCommand = command
+    const workingDir = cwd || getCurrentWorkingDirectory()
 
-    if (error.stderr) {
-      const stderr = error.stderr.toString().trim()
-
+    if (stderr) {
       // Handle Git LFS version errors
       if (stderr.includes("git version >= 1.8.2 is required for Git LFS")) {
         const gitInfo = checkGitVersion()
@@ -95,7 +244,44 @@ function executeGitCommand(command: string, cwd?: string): string {
         errorMessage = stderr
       }
     } else if (error.stdout) {
-      return error.stdout.toString().trim()
+      return String(error.stdout).trim()
+    }
+
+    if (timeoutError || lockError) {
+      const removedLocks = cleanupGitLockFiles(originalCommand, workingDir)
+      if (removedLocks.length > 0) {
+        console.warn("[Git] cleaned stale lock files:", removedLocks)
+      }
+
+      if (lockError) {
+        try {
+          const timeout = getGitCommandTimeout(originalCommand)
+          const retryResult = execSync(originalCommand, {
+            encoding: "utf-8",
+            cwd: workingDir,
+            timeout,
+            shell: platform() === "win32" ? "cmd.exe" : "/bin/bash",
+            env: {
+              ...process.env,
+              GIT_LFS_SKIP_SMUDGE: "1"
+            }
+          })
+          return retryResult.trim()
+        } catch (retryRawError: unknown) {
+          const retryError = retryRawError as ExecCommandError
+          const retryStderr =
+            typeof retryError.stderr === "string"
+              ? retryError.stderr.trim()
+              : String(retryError.stderr || "").trim()
+          const retryMsg =
+            retryStderr || retryError.message || "Git command retry failed after lock cleanup"
+          throw new Error(retryMsg)
+        }
+      }
+
+      if (timeoutError && removedLocks.length > 0) {
+        errorMessage = `${errorMessage}\n命令超时后已自动清理 ${removedLocks.length} 个 Git 锁文件，请重试。`
+      }
     }
 
     throw new Error(errorMessage)
@@ -238,12 +424,13 @@ export function registerGitHandlers(): void {
 
       console.log("[IPC] 命令执行成功:", command, "结果:", result.trim())
       return result.trim()
-    } catch (error: any) {
+    } catch (rawError: unknown) {
+      const error = rawError as ExecCommandError
       console.error("[IPC] execute-command error:", error)
       if (error.stderr) {
-        throw new Error(error.stderr.toString().trim())
+        throw new Error(String(error.stderr).trim())
       } else if (error.stdout) {
-        return error.stdout.toString().trim()
+        return String(error.stdout).trim()
       } else {
         throw new Error(`命令执行失败: ${error.message}`)
       }

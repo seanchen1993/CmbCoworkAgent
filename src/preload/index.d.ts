@@ -21,6 +21,7 @@ interface ElectronAPI {
   openExternal: Promise
   openLoginWindow:()=>void
   closeLoginWindow:()=>void
+  onNotifyMsg: (callback: (msg:string)=>void)=>void
   ipcRenderer: {
     send: (channel: string, ...args: unknown[]) => void
     on: (channel: string, listener: (...args: unknown[]) => void) => () => void
@@ -278,17 +279,29 @@ interface CustomAPI {
     /** Phase 1 — intent banner: "Want to save this as a skill?" */
     onIntentRequest: (
       callback: (req: {
+        threadId?: string
         requestId: string
         summary: string
         toolCallCount: number
         mode: "mode_a_rule" | "mode_b_llm"
         recommendationReason?: string
+        /** Opaque context payload — cache in renderer and pass back on retry */
+        context: unknown
       }) => void
     ) => () => void
     intentResponse: (requestId: string, accepted: boolean) => Promise<void>
+    /**
+     * Manually retry a failed skill generation. Skips the intent banner and
+     * jumps straight to generate → confirm → write.
+     */
+    retryGeneration: (
+      threadId: string,
+      retryContext: { context: unknown; intentMode: string }
+    ) => Promise<void>
     /** Phase 2 — full detail dialog: show skill preview for final adoption */
     onConfirmRequest: (
       callback: (req: {
+        threadId?: string
         requestId: string
         skillId: string
         name: string
@@ -299,7 +312,11 @@ interface CustomAPI {
     confirmResponse: (requestId: string, approved: boolean) => Promise<void>
     /** Listen to streaming generation progress from the main process */
     onGenerating: (
-      callback: (event: { phase: "start" | "token" | "done" | "error"; text: string }) => void
+      callback: (event: {
+        threadId?: string
+        phase: "start" | "token" | "done" | "error"
+        text: string
+      }) => void
     ) => () => void
   }
   optimizer: {
@@ -337,6 +354,9 @@ interface CustomAPI {
         candidateCount?: number
       }) => void
     ) => () => void
+    onStreamStart: (cb: () => void) => () => void
+    onStreamChunk: (cb: (payload: { chunk: string }) => void) => () => void
+    onStreamEnd: (cb: (payload: { success: boolean; error?: string }) => void) => () => void
     getCandidates: () => Promise<Array<{
       candidateId: string
       action: "create" | "patch"

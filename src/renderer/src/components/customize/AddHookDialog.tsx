@@ -12,10 +12,10 @@ import {
 import type { HookConfig, HookEvent, HookUpsert } from "@/types"
 
 const HOOK_EVENTS: { value: HookEvent; label: string; description: string }[] = [
-  { value: "PreToolUse", label: "PreToolUse", description: "工具调用前触发，exit!=0 可阻止执行" },
-  { value: "PostToolUse", label: "PostToolUse", description: "工具调用后触发" },
-  { value: "Stop", label: "Stop", description: "Agent 停止时触发" },
-  { value: "Notification", label: "Notification", description: "通知事件触发" }
+  { value: "PreToolUse", label: "工具调用前", description: "在工具执行前触发，脚本 exit!=0 可阻止工具执行，stdout 作为反馈返回给 Agent" },
+  { value: "PostToolUse", label: "工具调用后", description: "在工具执行后触发，可用于日志记录、结果校验或后处理" },
+  { value: "Stop", label: "Agent 停止时", description: "Agent 完成任务停止时触发，可用于清理临时文件或发送通知" },
+  { value: "Notification", label: "通知事件", description: "通知事件触发，可用于自定义提醒或消息推送" }
 ]
 
 export function AddHookDialog(props: {

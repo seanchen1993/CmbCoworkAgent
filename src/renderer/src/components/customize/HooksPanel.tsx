@@ -8,10 +8,10 @@ import type { HookConfig, HookEvent } from "@/types"
 import { AddHookDialog } from "./AddHookDialog"
 
 const EVENT_BADGE: Record<HookEvent, { label: string; className: string }> = {
-  PreToolUse: { label: "Pre", className: "bg-blue-500/15 text-blue-600 dark:text-blue-400" },
-  PostToolUse: { label: "Post", className: "bg-green-500/15 text-green-600 dark:text-green-400" },
-  Stop: { label: "Stop", className: "bg-amber-500/15 text-amber-600 dark:text-amber-400" },
-  Notification: { label: "Notify", className: "bg-purple-500/15 text-purple-600 dark:text-purple-400" }
+  PreToolUse: { label: "调用前", className: "bg-blue-500/15 text-blue-600 dark:text-blue-400" },
+  PostToolUse: { label: "调用后", className: "bg-green-500/15 text-green-600 dark:text-green-400" },
+  Stop: { label: "停止", className: "bg-amber-500/15 text-amber-600 dark:text-amber-400" },
+  Notification: { label: "通知", className: "bg-purple-500/15 text-purple-600 dark:text-purple-400" }
 }
 
 export function HooksPanel(): React.JSX.Element {
@@ -223,7 +223,7 @@ function HookDetail(props: {
                 badge.className
               )}
             >
-              {hook.event}
+              {badge.label}
             </span>
             {hook.matcher && (
               <span className="text-xs text-muted-foreground font-mono">
@@ -264,7 +264,7 @@ function HookDetail(props: {
 
       {/* Details */}
       <div className="space-y-4">
-        <DetailRow label="事件类型" value={hook.event} />
+        <DetailRow label="事件类型" value={badge.label} />
         {hook.matcher && <DetailRow label="工具匹配" value={hook.matcher} mono />}
         <DetailRow label="命令" value={hook.command} mono />
         <DetailRow label="超时" value={`${hook.timeout ?? 10000}ms`} />
@@ -304,20 +304,20 @@ function EmptyState(): React.JSX.Element {
       </p>
       <div className="text-left text-sm text-muted-foreground space-y-2 max-w-md">
         <p>
-          <span className="font-medium text-blue-600 dark:text-blue-400">PreToolUse</span>
-          {" — 工具调用前触发，exit!=0 可阻止执行"}
+          <span className="font-medium text-blue-600 dark:text-blue-400">工具调用前</span>
+          {" — 在工具执行前触发，脚本退出码非0可阻止执行，stdout 反馈给 Agent"}
         </p>
         <p>
-          <span className="font-medium text-green-600 dark:text-green-400">PostToolUse</span>
-          {" — 工具调用后触发，可用于日志或后处理"}
+          <span className="font-medium text-green-600 dark:text-green-400">工具调用后</span>
+          {" — 在工具执行后触发，可用于日志记录、结果校验或后处理"}
         </p>
         <p>
-          <span className="font-medium text-amber-600 dark:text-amber-400">Stop</span>
-          {" — Agent 停止时触发，可用于清理或通知"}
+          <span className="font-medium text-amber-600 dark:text-amber-400">Agent 停止时</span>
+          {" — Agent 完成任务停止时触发，可用于清理临时文件或发送通知"}
         </p>
         <p>
-          <span className="font-medium text-purple-600 dark:text-purple-400">Notification</span>
-          {" — 通知事件触发，可用于自定义提醒"}
+          <span className="font-medium text-purple-600 dark:text-purple-400">通知事件</span>
+          {" — 通知事件触发，可用于自定义提醒或消息推送"}
         </p>
       </div>
     </div>

@@ -311,6 +311,8 @@ export interface SkillOptimizerOptions {
   threadId?: string
   /** Explicit traces to analyze as one aggregated offline batch (optional) */
   traces?: AgentTrace[]
+  /** Called with each streamed text chunk from the LLM */
+  onChunk?: (text: string) => void
 }
 
 export class SkillOptimizer {
@@ -319,6 +321,7 @@ export class SkillOptimizer {
   private readonly minInterestScore: number
   private readonly threadId?: string
   private readonly traces?: AgentTrace[]
+  private readonly onChunk?: (text: string) => void
 
   constructor(opts: SkillOptimizerOptions) {
     this.model = opts.model
@@ -326,6 +329,7 @@ export class SkillOptimizer {
     this.minInterestScore = opts.minInterestScore ?? 4
     this.threadId = opts.threadId
     this.traces = opts.traces
+    this.onChunk = opts.onChunk
   }
 
   /**
@@ -392,16 +396,43 @@ When updating an existing skill, set action="patch" and keep skillId exactly equ
 Only suggest skills that are NOT already covered by existing custom skills above.
 Output JSON array only.`
 
-    // Call LLM
+    // Call LLM (streaming with 60s per-chunk idle timeout)
     let rawResponse = ""
     try {
-      const response = await this.model.invoke([
-        new SystemMessage(ANALYZER_SYSTEM_PROMPT),
-        new HumanMessage(userPrompt)
-      ])
-      rawResponse = typeof response.content === "string"
-        ? response.content
-        : JSON.stringify(response.content)
+      const TOKEN_IDLE_TIMEOUT_MS = 60_000
+      const innerAbort = new AbortController()
+      let timedOut = false
+      let idleTimer: ReturnType<typeof setTimeout> = setTimeout(() => {
+        timedOut = true
+        innerAbort.abort()
+      }, TOKEN_IDLE_TIMEOUT_MS)
+      const resetIdleTimer = (): void => {
+        clearTimeout(idleTimer)
+        idleTimer = setTimeout(() => {
+          timedOut = true
+          innerAbort.abort()
+        }, TOKEN_IDLE_TIMEOUT_MS)
+      }
+
+      const stream = await this.model.stream(
+        [new SystemMessage(ANALYZER_SYSTEM_PROMPT), new HumanMessage(userPrompt)],
+        { signal: innerAbort.signal }
+      )
+      try {
+        for await (const chunk of stream) {
+          resetIdleTimer()
+          const text = typeof chunk.content === "string" ? chunk.content : ""
+          if (text) {
+            rawResponse += text
+            this.onChunk?.(text)
+          }
+        }
+      } catch (streamErr) {
+        if (timedOut) throw new Error("LLM 生成超时（60s 无新内容），请点击重试")
+        throw streamErr
+      } finally {
+        clearTimeout(idleTimer)
+      }
     } catch (e) {
       return {
         startedAt,

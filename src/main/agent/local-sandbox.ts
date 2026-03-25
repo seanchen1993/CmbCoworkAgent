@@ -29,6 +29,14 @@ import * as chardet from "jschardet"
 import micromatch from "micromatch"
 import { replace } from "./replace"
 import type { ToolOrchestrator } from "./tool-orchestrator"
+import { assessCommandSafety } from "./exec-policy"
+import {
+  isWorkspaceElevatedSetupDone,
+  isElevatedSetupComplete,
+  runElevatedSetupForPaths,
+  markWorkspaceElevatedSetupDone,
+  normalizeDirKey
+} from "../ipc/sandbox"
 import { homedir, tmpdir } from "node:os"
 import type { HookConfig } from "../hooks/types"
 import { runHooks } from "../hooks/runner"
@@ -100,6 +108,8 @@ export interface LocalSandboxOptions {
    *  When signalled, any in-flight execute() will kill its child process immediately
    *  (SIGTERM → 200ms → SIGKILL), matching OpenCode/Codex abort behaviour. */
   abortSignal?: AbortSignal
+  /** Unique run/thread identifier used for ACL ref-counting across concurrent runs. */
+  runId?: string
 }
 
 /**
@@ -124,6 +134,8 @@ export interface LocalSandboxOptions {
 export class LocalSandbox extends FilesystemBackend implements SandboxBackendProtocol {
   /** Unique identifier for this sandbox instance */
   readonly id: string
+  /** Run/thread identifier for ACL ref-counting (falls back to this.id). */
+  readonly runId: string
 
   private readonly timeout: number
   private readonly maxOutputBytes: number
@@ -138,8 +150,12 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
   private readonly _realUserHome: string
   /** Optional orchestrator for fine-grained approval + sandbox retry */
   private orchestrator?: ToolOrchestrator
+  /** When true, block direct git add/commit/push and force git_workflow usage. */
+  private enforceGitWorkflowCommitOnly = false
   /** AbortSignal: when signalled, in-flight child processes are killed immediately. */
   private abortSignal?: AbortSignal
+  /** Whether the conversation-level abort signal has been triggered. */
+  get isAborted(): boolean { return this.abortSignal?.aborted ?? false }
   /** Cached from parent's private fields to avoid (this as any) scattered everywhere */
   private readonly _resolvePath: (key: string) => string
   private readonly _virtualMode: boolean
@@ -225,6 +241,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     })
 
     this.id = `local-sandbox-${randomUUID().slice(0, 8)}`
+    this.runId = options.runId ?? this.id
     this.timeout = options.timeout ?? 60_000 // 1 minute default
     this.maxOutputBytes = options.maxOutputBytes ?? 100_000 // ~100KB default
     const baseEnv = options.env ?? ({ ...process.env } as Record<string, string>)
@@ -287,6 +304,11 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
   /** Inject the approval orchestrator (called from runtime.ts). */
   setOrchestrator(orch: ToolOrchestrator): void {
     this.orchestrator = orch
+  }
+
+  /** Toggle direct git submit command blocking when git_workflow is available. */
+  setGitWorkflowCommitOnly(enabled: boolean): void {
+    this.enforceGitWorkflowCommitOnly = enabled
   }
 
   /** Expose the sandbox mode for the orchestrator. */
@@ -1126,21 +1148,58 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
    * Git Bash (MSYS2) crashes under restricted tokens (NtSetInformationToken fails),
    * so we must skip it and use PowerShell or cmd.exe instead.
    */
+  private static _cachedSandboxShell: { shell: string; flags: string[] } | null = null
+
   private static resolveWindowsSandboxShell(): { shell: string; flags: string[] } {
+    if (LocalSandbox._cachedSandboxShell) return LocalSandbox._cachedSandboxShell
     for (const ps of ["pwsh", "powershell"]) {
       const fullPath = LocalSandbox.whichSync(ps)
       if (fullPath) {
-        // -NoProfile: skip user profile scripts to avoid side-effects in output
-        // -Command: accept command string (consistent with Codex SDK behavior)
-        return { shell: fullPath, flags: ["-NoProfile", "-Command"] }
+        LocalSandbox._cachedSandboxShell = { shell: fullPath, flags: ["-NoProfile", "-Command"] }
+        return LocalSandbox._cachedSandboxShell
       }
     }
-    return { shell: process.env.COMSPEC || "cmd.exe", flags: ["/c"] }
+    LocalSandbox._cachedSandboxShell = { shell: process.env.COMSPEC || "cmd.exe", flags: ["/c"] }
+    return LocalSandbox._cachedSandboxShell
   }
 
   /** Public accessor for the Windows sandbox shell (PowerShell or cmd.exe). */
   static resolvedWindowsSandboxShell(): string {
     return LocalSandbox.resolveWindowsSandboxShell().shell
+  }
+
+  /**
+   * Build a sandbox-safe copy of env with PATH reordered:
+   * System32 and System32\Wbem are moved to the front so native Windows
+   * executables (whoami, find, sort, etc.) are found before MSYS2/Git
+   * equivalents that crash under restricted tokens (STATUS_DLL_NOT_FOUND).
+   */
+  private static buildSandboxEnv(env: Record<string, string>): Record<string, string> {
+    const result = { ...env }
+    const sep = path.delimiter
+    const sys32 = (env.SystemRoot || env.windir || "C:\\Windows") + "\\System32"
+    const sys32Lower = sys32.toLowerCase()
+    const parts = (result.PATH || result.Path || "").split(sep)
+    // Partition: system32 paths first, then the rest (filtering out Git usr/bin MSYS2 paths)
+    const system: string[] = []
+    const rest: string[] = []
+    for (const p of parts) {
+      const lower = p.toLowerCase()
+      if (lower.startsWith(sys32Lower)) {
+        system.push(p)
+      } else if (lower.includes("\\usr\\bin") && lower.includes("git")) {
+        // Skip Git MSYS2 usr/bin — these binaries crash under restricted tokens
+      } else {
+        rest.push(p)
+      }
+    }
+    // Ensure System32 is present even if not in original PATH
+    if (!system.some(s => s.toLowerCase() === sys32Lower)) {
+      system.unshift(sys32)
+    }
+    const pathKey = result.PATH !== undefined ? "PATH" : "Path"
+    result[pathKey] = [...system, ...rest].join(sep)
+    return result
   }
 
   private static resolveShell(): string {
@@ -1277,38 +1336,120 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     return false
   }
 
-  /** Grant Everyone Modify on dir (for sandbox restricted token). Returns when done. */
-  private static grantSandboxWriteAcl(dir: string): Promise<void> {
+  /** Directories that currently have the Everyone ACE granted, with reference count.
+   *  Key = normalized dir path, value = number of active runs using that grant.
+   *  ACL is only revoked when the count drops to 0. */
+  private static readonly _grantedAclRefCount = new Map<string, number>()
+  /** Per-run tracking: which dirs each runId has granted (for correct decrement on cleanup). */
+  private static readonly _runAclDirs = new Map<string, Set<string>>()
+  /** Directories that should never be revoked (e.g. TEMP — public dir, safe to leave open). */
+  private static readonly _permanentAclDirs = new Set<string>()
+
+  /** Grant Everyone Modify on dir (for sandbox restricted token). Returns when done.
+   *  @param runId — identifies the agent run requesting the grant (for ref-counting). */
+  private static grantSandboxWriteAcl(dir: string, runId: string): Promise<void> {
+    const key = normalizeDirKey(dir)
+    // Track this dir for the given run (so cleanup decrements correctly).
+    let runDirs = LocalSandbox._runAclDirs.get(runId)
+    if (!runDirs) {
+      runDirs = new Set()
+      LocalSandbox._runAclDirs.set(runId, runDirs)
+    }
+    // Only increment ref count once per (run, dir) pair — the same run may
+    // call grantSandboxWriteAcl multiple times for the same workingDir.
+    if (!runDirs.has(key)) {
+      runDirs.add(key)
+      const prevCount = LocalSandbox._grantedAclRefCount.get(key) ?? 0
+      LocalSandbox._grantedAclRefCount.set(key, prevCount + 1)
+      // If already granted by another run, skip the icacls call.
+      if (prevCount > 0) {
+        return Promise.resolve()
+      }
+    } else {
+      // Same run already granted this dir — skip entirely.
+      return Promise.resolve()
+    }
     // (OI)(CI) = inherit to files & subdirs so the restricted token can
     // read/write/delete at any depth. Uses async spawn to avoid blocking
     // the event loop on large repos (NTFS propagates inherited ACEs to
     // all existing descendants, which can take tens of seconds).
     return new Promise<void>((resolve) => {
       const proc = spawn("icacls", [dir, "/grant", `${LocalSandbox.EVERYONE_SID}:(OI)(CI)(M)`], { stdio: "ignore" })
+      const timeoutId = setTimeout(() => {
+        console.warn(`[LocalSandbox] icacls grant timed out after ${LocalSandbox.ICACLS_TIMEOUT_MS}ms on ${dir}, killing`)
+        try { proc.kill() } catch { /* already exited */ }
+        resolve()
+      }, LocalSandbox.ICACLS_TIMEOUT_MS)
       proc.on("exit", (code) => {
-        if (code !== 0) console.warn(`[LocalSandbox] icacls grant exited ${code} on ${dir}`)
+        clearTimeout(timeoutId)
+        if (code !== 0) {
+          console.warn(`[LocalSandbox] icacls grant exited ${code} on ${dir}`)
+        }
         resolve()
       })
       proc.on("error", (err) => {
+        clearTimeout(timeoutId)
         console.warn(`[LocalSandbox] icacls grant error on ${dir}:`, err.message)
         resolve()
       })
     })
   }
 
-  /** Remove the Everyone ACE added by grantSandboxWriteAcl. Returns when done. */
+  /** Remove the Everyone ACE added by grantSandboxWriteAcl. Only actually calls
+   *  icacls when the ref count drops to 0 (no other runs using this dir). */
   private static revokeSandboxWriteAcl(dir: string): Promise<void> {
+    const key = normalizeDirKey(dir)
+    const count = LocalSandbox._grantedAclRefCount.get(key) ?? 0
+    // Nothing to revoke if we never granted (or already revoked).
+    if (count <= 0) {
+      LocalSandbox._grantedAclRefCount.delete(key)
+      return Promise.resolve()
+    }
+    // Still in use by other runs — don't revoke yet.
+    if (count > 1) {
+      LocalSandbox._grantedAclRefCount.set(key, count - 1)
+      return Promise.resolve()
+    }
+    // count === 1 → last user, actually revoke
+    LocalSandbox._grantedAclRefCount.delete(key)
     return new Promise<void>((resolve) => {
       const proc = spawn("icacls", [dir, "/remove:g", LocalSandbox.EVERYONE_SID], { stdio: "ignore" })
+      const timeoutId = setTimeout(() => {
+        console.warn(`[LocalSandbox] icacls revoke timed out after ${LocalSandbox.ICACLS_TIMEOUT_MS}ms on ${dir}, killing`)
+        try { proc.kill() } catch { /* already exited */ }
+        resolve()
+      }, LocalSandbox.ICACLS_TIMEOUT_MS)
       proc.on("exit", (code) => {
+        clearTimeout(timeoutId)
         if (code !== 0) console.warn(`[LocalSandbox] icacls revoke exited ${code} on ${dir}`)
         resolve()
       })
       proc.on("error", (err) => {
+        clearTimeout(timeoutId)
         console.warn(`[LocalSandbox] icacls revoke error on ${dir}:`, err.message)
         resolve()
       })
     })
+  }
+
+  /**
+   * Release ACL grants for a specific run. Decrements ref counts and only
+   * actually revokes the ACL when no other runs are using the directory.
+   * @param runId — the agent run that is ending.
+   */
+  static async revokeGrantedAclsForRun(runId: string): Promise<void> {
+    const runDirs = LocalSandbox._runAclDirs.get(runId)
+    if (!runDirs || runDirs.size === 0) {
+      LocalSandbox._runAclDirs.delete(runId)
+      return
+    }
+    const dirsToRevoke = [...runDirs].filter(
+      (key) => !LocalSandbox._permanentAclDirs.has(key)
+    )
+    LocalSandbox._runAclDirs.delete(runId)
+    if (dirsToRevoke.length === 0) return
+    console.log(`[LocalSandbox] revokeGrantedAclsForRun(${runId}): releasing ${dirsToRevoke.length} dirs`)
+    await Promise.all(dirsToRevoke.map((dir) => LocalSandbox.revokeSandboxWriteAcl(dir)))
   }
 
   /** Sandbox user names used by elevated mode. */
@@ -1318,25 +1459,42 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
    * Grant elevated sandbox users read+write ACL on a workspace directory via icacls.
    * No UAC needed — the current user owns the directory so they can modify its ACLs.
    */
+  /** Timeout for icacls ACL operations (30 seconds). */
+  private static readonly ICACLS_TIMEOUT_MS = 30_000
+
   private static grantElevatedWorkspaceAcl(dir: string): Promise<void> {
     return new Promise<void>((resolve, reject) => {
-      // Grant both sandbox users Modify permission with inheritance
+      // Grant both sandbox users Modify permission with inheritance.
+      // (OI)(CI) = Object Inherit + Container Inherit — new files/dirs inherit automatically.
+      // Intentionally NO /T flag: /T recursively touches every existing file's ACL, which
+      // can take minutes on large repos (node_modules alone can have 100k+ files).
+      // codex.exe handles existing-file access internally; we only need the top-level grant
+      // so the sandbox user can enter the directory and inheritance covers the rest.
       const args: string[] = [dir]
       for (const user of LocalSandbox.ELEVATED_SANDBOX_USERS) {
         args.push("/grant", `${user}:(OI)(CI)(M)`)
       }
-      args.push("/T", "/Q")
+      args.push("/Q")
       const proc = spawn("icacls", args, { stdio: "pipe" })
       let stderr = ""
+      const timeoutId = setTimeout(() => {
+        console.warn(`[LocalSandbox] icacls elevated grant timed out after ${LocalSandbox.ICACLS_TIMEOUT_MS}ms on ${dir}, killing`)
+        try { proc.kill() } catch { /* already exited */ }
+        resolve() // Don't block execution — codex.exe will handle ACL internally
+      }, LocalSandbox.ICACLS_TIMEOUT_MS)
       proc.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString() })
       proc.on("exit", (code) => {
+        clearTimeout(timeoutId)
         if (code === 0) {
           resolve()
         } else {
           reject(new Error(`icacls exited ${code}: ${stderr.trim()}`))
         }
       })
-      proc.on("error", (err) => reject(err))
+      proc.on("error", (err) => {
+        clearTimeout(timeoutId)
+        reject(err)
+      })
     })
   }
 
@@ -1401,34 +1559,59 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
   /** Maximum timeout for background tasks (10 minutes). */
   private static readonly BACKGROUND_TIMEOUT_MS = 600_000
 
-  /** Active background tasks. */
-  private backgroundTasks = new Map<string, {
+  /** Active background tasks (static — shared across instances so tasks survive re-creation). */
+  private static backgroundTasks = new Map<string, {
     id: string
+    threadId: string
     command: string
     startedAt: number
     completed: boolean
+    outputChunks: string[]
+    abortController: AbortController
     result?: ExecuteResponse
   }>()
 
   /**
    * Execute a command in the background — returns immediately with a task ID.
    * The command runs asynchronously with a long timeout.
-   * Use `getTaskOutput(taskId)` to retrieve the result.
+   * Use `getTaskOutput(taskId)` to retrieve the result or check progress.
    */
   async executeBackground(command: string): Promise<string> {
     const taskId = randomUUID().slice(0, 8)
-    const task = { id: taskId, command, startedAt: Date.now(), completed: false as boolean, result: undefined as ExecuteResponse | undefined }
-    this.backgroundTasks.set(taskId, task)
+    const taskAbortController = new AbortController()
+    const task = {
+      id: taskId, threadId: this.runId, command, startedAt: Date.now(), completed: false as boolean,
+      outputChunks: [] as string[], abortController: taskAbortController,
+      result: undefined as ExecuteResponse | undefined
+    }
+    LocalSandbox.backgroundTasks.set(taskId, task)
 
     // Fire and forget — don't await. Uses extended timeout for background execution.
-    this.executeRaw(command, undefined, LocalSandbox.BACKGROUND_TIMEOUT_MS).then(result => {
+    // Background tasks use their own AbortController (not the conversation's abortSignal)
+    // so they survive conversation switches but can still be cancelled explicitly.
+    this.executeRaw(command, undefined, LocalSandbox.BACKGROUND_TIMEOUT_MS, taskAbortController.signal).then(result => {
+      // Guard: if already completed (e.g. cancelled via cancelBackgroundTasks), don't overwrite.
+      if (task.completed) return
       task.result = result
+      // Append final output to chunks for completeness
+      if (result.output) task.outputChunks.push(result.output)
       task.completed = true
       console.log(`[LocalSandbox] background task ${taskId} completed: exitCode=${result.exitCode}`)
+      // Auto-cleanup completed tasks after 10 minutes to prevent memory leaks.
+      // The agent has plenty of time to poll for the result before it expires.
+      setTimeout(() => {
+        LocalSandbox.backgroundTasks.delete(taskId)
+        console.log(`[LocalSandbox] background task ${taskId} expired, cleaned up`)
+      }, 10 * 60 * 1000)
     }).catch(err => {
+      // Guard: if already completed (e.g. cancelled via cancelBackgroundTasks), don't overwrite.
+      if (task.completed) return
       task.result = { output: `Error: ${err instanceof Error ? err.message : String(err)}`, exitCode: 1, truncated: false }
       task.completed = true
       console.log(`[LocalSandbox] background task ${taskId} errored: ${err}`)
+      setTimeout(() => {
+        LocalSandbox.backgroundTasks.delete(taskId)
+      }, 10 * 60 * 1000)
     })
 
     return taskId
@@ -1436,12 +1619,48 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
 
   /**
    * Retrieve a background task's current status and output.
+   * When still running, returns elapsed time and command info so the agent can report progress.
    */
-  getTaskOutput(taskId: string): { completed: boolean; output?: string; exitCode?: number | null } | null {
-    const task = this.backgroundTasks.get(taskId)
+  getTaskOutput(taskId: string): {
+    completed: boolean
+    output?: string
+    exitCode?: number | null
+    elapsedSeconds?: number
+    command?: string
+  } | null {
+    const task = LocalSandbox.backgroundTasks.get(taskId)
     if (!task) return null
-    if (!task.completed) return { completed: false }
-    return { completed: true, output: task.result?.output, exitCode: task.result?.exitCode }
+    const elapsedSeconds = Math.round((Date.now() - task.startedAt) / 1000)
+    if (!task.completed) {
+      return { completed: false, elapsedSeconds, command: task.command }
+    }
+    return { completed: true, output: task.result?.output, exitCode: task.result?.exitCode, elapsedSeconds }
+  }
+
+  /**
+   * Cancel all running background tasks for a given thread (conversation).
+   * Called when the user explicitly stops the current conversation.
+   */
+  static cancelBackgroundTasks(threadId: string): void {
+    for (const [taskId, task] of LocalSandbox.backgroundTasks) {
+      if (task.threadId === threadId && !task.completed) {
+        console.log(`[LocalSandbox] cancelling background task ${taskId} (command: ${task.command}) for thread ${threadId}`)
+        task.abortController.abort()
+        // Mark as completed immediately to prevent zombie entries if the
+        // process kill path doesn't trigger the .then/.catch callbacks.
+        task.completed = true
+        task.result = task.result ?? {
+          output: "Task cancelled by user.",
+          exitCode: 130,
+          truncated: false
+        }
+        // Schedule cleanup (mirrors the auto-cleanup in the normal completion path).
+        setTimeout(() => {
+          LocalSandbox.backgroundTasks.delete(taskId)
+          console.log(`[LocalSandbox] cancelled background task ${taskId} expired, cleaned up`)
+        }, 10 * 60 * 1000)
+      }
+    }
   }
 
   async execute(command: string): Promise<ExecuteResponse> {
@@ -1456,9 +1675,9 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     console.log(`[LocalSandbox] execute: hasOrchestrator=${!!this.orchestrator} sandbox=${this.windowsSandbox}`)
 
     // Always check forbidden commands, even without orchestrator (YOLO mode safety net)
-    const { assessCommandSafety } = await import("./exec-policy")
     const safety = assessCommandSafety(command, this.workingDir, {
-      windowsShell: process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown"
+      windowsShell: process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown",
+      enforceGitWorkflowCommitOnly: this.enforceGitWorkflowCommitOnly
     })
     if (safety.level === "forbidden") {
       console.log(`[LocalSandbox] execute: FORBIDDEN — ${safety.reason}`)
@@ -1519,14 +1738,14 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
    * Called directly by the orchestrator after approval is granted,
    * or as fallback when no orchestrator is configured.
    */
-  async executeRaw(command: string, sandboxModeOverride?: string, timeoutMs?: number): Promise<ExecuteResponse> {
+  async executeRaw(command: string, sandboxModeOverride?: string, timeoutMs?: number, overrideAbortSignal?: AbortSignal): Promise<ExecuteResponse> {
     const effectiveSandboxMode = (sandboxModeOverride ?? this.windowsSandbox) as typeof this.windowsSandbox
     const effectiveTimeout = timeoutMs ?? this.timeout
-    console.log(`[LocalSandbox] executeRaw: command="${command}" effectiveMode=${effectiveSandboxMode} override=${sandboxModeOverride} timeout=${effectiveTimeout}ms`)
+    console.log(`[LocalSandbox] executeRaw: command="${command}" effectiveMode=${effectiveSandboxMode} override=${sandboxModeOverride} timeout=${effectiveTimeout}ms overrideAbort=${!!overrideAbortSignal}`)
 
     if (process.platform === "win32" && effectiveSandboxMode !== "none") {
       console.log(`[LocalSandbox] → executeInWindowsSandbox (elevated path)`)
-      return this.executeInWindowsSandbox(command, 1, effectiveSandboxMode, effectiveTimeout)
+      return this.executeInWindowsSandbox(command, 1, effectiveSandboxMode, effectiveTimeout, overrideAbortSignal)
     }
 
     const isWindows = process.platform === "win32"
@@ -1544,7 +1763,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     // contention). Retry up to SPAWN_RETRY_COUNT times with a short delay.
     const maxAttempts = isWindows ? LocalSandbox.SPAWN_RETRY_COUNT + 1 : 1
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const result = await this.executeOnce(effectiveCommand, shell, isWindows, effectiveTimeout)
+      const result = await this.executeOnce(effectiveCommand, shell, isWindows, effectiveTimeout, overrideAbortSignal)
       const isSpawnEperm =
         result.exitCode === 1
         && result.output.startsWith("Error: Failed to execute command:")
@@ -1568,7 +1787,8 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
    * - elevated: dedicated sandbox user + strong ACL isolation; codex.exe manages credentials and ACLs internally
    * Retries on EPERM (antivirus transient lock); reports error on other failures.
    */
-  private async executeInWindowsSandbox(command: string, attempt = 1, sandboxModeOverride?: "none" | "unelevated" | "readonly" | "elevated", timeoutMs?: number): Promise<ExecuteResponse> {
+  private async executeInWindowsSandbox(command: string, attempt = 1, sandboxModeOverride?: "none" | "unelevated" | "readonly" | "elevated", timeoutMs?: number, overrideAbortSignal?: AbortSignal): Promise<ExecuteResponse> {
+    const methodStartMs = Date.now()
     const effectiveMode = sandboxModeOverride ?? this.windowsSandbox
     const isElevatedSandbox = effectiveMode === "elevated"
 
@@ -1577,8 +1797,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     // "setup refresh failed" (which triggers a reactive UAC mid-command).
     // Using persistent cache so workspaces only need setup once, across restarts.
     if (isElevatedSandbox && attempt === 1) {
-      const { isWorkspaceElevatedSetupDone, isElevatedSetupComplete, runElevatedSetupForPaths, markWorkspaceElevatedSetupDone } =
-        await import("../ipc/sandbox")
+      console.log(`[LocalSandbox] elevated: checking workspace setup at +${Date.now() - methodStartMs}ms`)
       if (!isWorkspaceElevatedSetupDone(this.workingDir)) {
         if (isElevatedSetupComplete()) {
           // Initial setup already done (sandbox user exists). For new workspaces, just grant
@@ -1611,6 +1830,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     }
 
     // Git Bash (MSYS2) crashes under restricted tokens — always use PowerShell/cmd
+    console.log(`[LocalSandbox] elevated: pre-setup done at +${Date.now() - methodStartMs}ms, resolving shell...`)
     const { shell, flags: shellFlags } = LocalSandbox.resolveWindowsSandboxShell()
 
     // Force UTF-8 for all output streams (stdout + stderr).
@@ -1685,14 +1905,18 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       if (!isReadonly || elevated) {
         aclDirs.push(this.workingDir)
       }
-      // Always grant TEMP write for non-elevated sandbox modes — even readonly non-admin
-      // needs it for commands that create temp files.
+      // TEMP is granted once and marked permanent — never revoked because it's a public
+      // temp directory. This avoids 2 icacls spawns (grant + revoke) per command.
       const tmpDir = process.env.TEMP || process.env.TMP
-      if (tmpDir && !aclDirs.includes(tmpDir)) {
-        aclDirs.push(tmpDir)
+      if (tmpDir) {
+        const tmpKey = normalizeDirKey(tmpDir)
+        if (!LocalSandbox._permanentAclDirs.has(tmpKey)) {
+          aclDirs.push(tmpDir)
+          LocalSandbox._permanentAclDirs.add(tmpKey)
+        }
       }
       const aclGrantStart = Date.now()
-      await Promise.all(aclDirs.map((dir) => LocalSandbox.grantSandboxWriteAcl(dir)))
+      await Promise.all(aclDirs.map((dir) => LocalSandbox.grantSandboxWriteAcl(dir, this.runId)))
       console.log(`[LocalSandbox] ACL grant took ${Date.now() - aclGrantStart}ms for ${aclDirs.length} dirs`)
     }
 
@@ -1706,8 +1930,11 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       let exited = false
       let firstDataAt = 0 // timestamp of first stdout/stderr data
 
+      // Effective abort signal: per-task override (for background tasks) or conversation-level signal.
+      const effectiveAbortSignal = overrideAbortSignal ?? this.abortSignal
+
       // Early return if already aborted — avoid spawning a process just to kill it.
-      if (this.abortSignal?.aborted) {
+      if (effectiveAbortSignal?.aborted) {
         resolve({ output: "<execute_metadata>\nUser aborted the command, process has been killed\n</execute_metadata>\n\n<no output>", exitCode: 130, truncated: false })
         return
       }
@@ -1715,10 +1942,16 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       console.log(`[LocalSandbox] spawn: ${this.codexExePath} ${JSON.stringify(sandboxArgs)}`)
       console.log(`[LocalSandbox] cwd: ${this.workingDir}`)
 
+      // Build sandbox-safe env: ensure System32 is before Git usr/bin in PATH.
+      // MSYS2 binaries (from Git usr/bin) crash under restricted tokens due to
+      // DLL load failures (0xC0000135). Prioritizing System32 ensures native
+      // Windows executables (whoami, find, sort, etc.) are found first.
+      const sandboxEnv = LocalSandbox.buildSandboxEnv(this.env)
+
       // spawn() reports ENOENT asynchronously via the "error" event, not by throwing
       const proc = spawn(this.codexExePath, sandboxArgs, {
         cwd: this.workingDir,
-        env: this.env,
+        env: sandboxEnv,
         stdio: ["ignore", "pipe", "pipe"]
       })
 
@@ -1760,8 +1993,8 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
           collectAndResolve(null, "SIGKILL")
         }, LocalSandbox.IO_DRAIN_TIMEOUT_MS)
       }
-      if (this.abortSignal) {
-        this.abortSignal.addEventListener("abort", abortHandler, { once: true })
+      if (effectiveAbortSignal) {
+        effectiveAbortSignal.addEventListener("abort", abortHandler, { once: true })
       }
 
       proc.stdout?.on("data", (chunk: Buffer) => {
@@ -1795,7 +2028,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
           clearTimeout(timeoutId)
           if (drainTimerId) clearTimeout(drainTimerId)
           if (windowsExitTimerId) clearTimeout(windowsExitTimerId)
-          if (this.abortSignal) this.abortSignal.removeEventListener("abort", abortHandler)
+          if (effectiveAbortSignal) effectiveAbortSignal.removeEventListener("abort", abortHandler)
 
           const stdoutBuf = Buffer.concat(stdoutChunks)
           const stderrBuf = Buffer.concat(stderrChunks)
@@ -1835,7 +2068,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
           clearTimeout(timeoutId)
           if (drainTimerId) clearTimeout(drainTimerId)
           if (windowsExitTimerId) clearTimeout(windowsExitTimerId)
-          if (this.abortSignal) this.abortSignal.removeEventListener("abort", abortHandler)
+          if (effectiveAbortSignal) effectiveAbortSignal.removeEventListener("abort", abortHandler)
           resolve({
             output: `Error processing command output: ${err instanceof Error ? err.message : String(err)}`,
             exitCode: code ?? 1,
@@ -1867,7 +2100,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
         clearTimeout(timeoutId)
         if (drainTimerId) clearTimeout(drainTimerId)
         if (windowsExitTimerId) clearTimeout(windowsExitTimerId)
-        if (this.abortSignal) this.abortSignal.removeEventListener("abort", abortHandler)
+        if (effectiveAbortSignal) effectiveAbortSignal.removeEventListener("abort", abortHandler)
 
         const errno = err as NodeJS.ErrnoException
         if (errno.code === "EPERM" && attempt <= LocalSandbox.SPAWN_RETRY_COUNT) {
@@ -1889,15 +2122,16 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       })
     })
 
-    // Elevated mode: if "setup refresh failed", run elevated setup for this workspace (one-time UAC) and retry
-    if (isElevatedSandbox && result.exitCode !== 0 && result.output.includes("setup refresh failed")) {
-      console.log(`[LocalSandbox] elevated: setup refresh failed for ${this.workingDir}, running elevated setup with UAC...`)
-      const { runElevatedSetupForPaths, markWorkspaceElevatedSetupDone } = await import("../ipc/sandbox")
+    // Elevated mode: if "setup refresh failed", run elevated setup for this workspace (one-time UAC) and retry.
+    // Only retry once (attempt === 1) to prevent infinite recursion if setup succeeds but codex.exe keeps failing.
+    if (isElevatedSandbox && result.exitCode !== 0 && result.output.includes("setup refresh failed") && attempt <= 1) {
+      console.log(`[LocalSandbox] elevated: setup refresh failed for ${this.workingDir}, running elevated setup with UAC (attempt=${attempt})...`)
+      // runElevatedSetupForPaths / markWorkspaceElevatedSetupDone already imported statically
       const setupResult = await runElevatedSetupForPaths([this.workingDir])
       if (setupResult.success) {
         markWorkspaceElevatedSetupDone(this.workingDir)
-        // Retry the command now that ACLs are in place
-        return this.executeInWindowsSandbox(command, attempt, sandboxModeOverride)
+        // Retry the command once now that ACLs are in place (increment attempt to prevent further retries)
+        return this.executeInWindowsSandbox(command, attempt + 1, sandboxModeOverride, timeoutMs, overrideAbortSignal)
       }
       return {
         output: `沙箱工作目录配置失败: ${setupResult.error || "未知错误"}。\n请在设置中切换沙箱模式或以管理员身份运行应用。`,
@@ -1912,22 +2146,19 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       && sandboxModeOverride !== "unelevated"
       && LocalSandbox.shouldFallbackToUnelevatedForNetworkAuth(result.output)
     ) {
-      console.warn("[LocalSandbox] elevated network auth failed; blocking instead of auto-fallback")
-      return {
-        output: `⚠️ 操作被沙箱拦截：Elevated 沙箱用户缺少企业网络认证凭据，无法执行此命令。\n\n如需执行网络相关操作，请在设置中切换到 Unelevated 沙箱模式后重试。`,
-        exitCode: 1,
-        truncated: false
-      }
+      // Auto-fallback to unelevated mode: elevated sandbox user lacks enterprise network
+      // credentials (Kerberos/NTLM), so commands accessing corporate repos (Maven, npm, etc.)
+      // will fail. Retry with unelevated sandbox which inherits the real user's credentials.
+      console.warn("[LocalSandbox] elevated network auth failed; auto-retrying with unelevated sandbox")
+      return this.executeInWindowsSandbox(command, 1, "unelevated", timeoutMs)
     }
 
     console.log(`[LocalSandbox] executeInWindowsSandbox total: ${Date.now() - execStartMs}ms, command="${command.slice(0, 80)}"`)
     return result
     } finally {
-      if (aclDirs.length > 0) {
-        const aclRevokeStart = Date.now()
-        await Promise.all(aclDirs.map((dir) => LocalSandbox.revokeSandboxWriteAcl(dir)))
-        console.log(`[LocalSandbox] ACL revoke took ${Date.now() - aclRevokeStart}ms`)
-      }
+      // ACL revoke is deferred — kept granted across commands in the same session
+      // to avoid redundant icacls spawns. Cleanup happens in revokeGrantedAclsForRun()
+      // which is called when the agent run ends (decrements ref-count per run).
     }
   }
 
@@ -1935,7 +2166,8 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     command: string,
     shell: string,
     isWindows: boolean,
-    timeoutMs?: number
+    timeoutMs?: number,
+    overrideAbortSignal?: AbortSignal
   ): Promise<ExecuteResponse> {
     const onceStartMs = Date.now()
     return new Promise<ExecuteResponse>((resolve) => {
@@ -1946,6 +2178,9 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       let resolved = false
       let exited = false
       let firstDataAt = 0
+
+      // Effective abort signal: per-task override (for background tasks) or conversation-level signal.
+      const effectiveAbortSignal = overrideAbortSignal ?? this.abortSignal
 
       // On Windows with bash-like shells (Git Bash / MSYS2), non-ASCII
       // characters in command-line arguments get corrupted: MSYS2's runtime
@@ -1961,7 +2196,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       // so changing to "pipe" has no practical side effects.
 
       // Early return if already aborted — avoid spawning a process just to kill it.
-      if (this.abortSignal?.aborted) {
+      if (effectiveAbortSignal?.aborted) {
         resolve({ output: "<execute_metadata>\nUser aborted the command, process has been killed\n</execute_metadata>\n\n<no output>", exitCode: 130, truncated: false })
         return
       }
@@ -2027,8 +2262,8 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
           collectAndResolve(null, "SIGKILL")
         }, LocalSandbox.IO_DRAIN_TIMEOUT_MS)
       }
-      if (this.abortSignal) {
-        this.abortSignal.addEventListener("abort", abortHandler, { once: true })
+      if (effectiveAbortSignal) {
+        effectiveAbortSignal.addEventListener("abort", abortHandler, { once: true })
       }
 
       proc.stdout.on("data", (chunk: Buffer) => {
@@ -2062,7 +2297,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
           clearTimeout(timeoutId)
           if (drainTimerId) clearTimeout(drainTimerId)
           if (windowsExitTimerId) clearTimeout(windowsExitTimerId)
-          if (this.abortSignal) this.abortSignal.removeEventListener("abort", abortHandler)
+          if (effectiveAbortSignal) effectiveAbortSignal.removeEventListener("abort", abortHandler)
 
           const stdoutBuf = Buffer.concat(stdoutChunks)
           const stderrBuf = Buffer.concat(stderrChunks)
@@ -2121,7 +2356,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
           clearTimeout(timeoutId)
           if (drainTimerId) clearTimeout(drainTimerId)
           if (windowsExitTimerId) clearTimeout(windowsExitTimerId)
-          if (this.abortSignal) this.abortSignal.removeEventListener("abort", abortHandler)
+          if (effectiveAbortSignal) effectiveAbortSignal.removeEventListener("abort", abortHandler)
           resolve({
             output: `Error processing command output: ${err instanceof Error ? err.message : String(err)}`,
             exitCode: code ?? 1,
@@ -2158,7 +2393,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
         clearTimeout(timeoutId)
         if (drainTimerId) clearTimeout(drainTimerId)
         if (windowsExitTimerId) clearTimeout(windowsExitTimerId)
-        if (this.abortSignal) this.abortSignal.removeEventListener("abort", abortHandler)
+        if (effectiveAbortSignal) effectiveAbortSignal.removeEventListener("abort", abortHandler)
         resolve({
           output: `Error: Failed to execute command: ${err.message}`,
           exitCode: 1,

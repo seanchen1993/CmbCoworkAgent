@@ -211,11 +211,18 @@ const DANGEROUS_INDICATORS: DangerousIndicator[] = [
 export function assessCommandSafety(
   command: string,
   _cwd: string,
-  options?: { windowsShell?: WindowsShellKind }
+  options?: { windowsShell?: WindowsShellKind; enforceGitWorkflowCommitOnly?: boolean }
 ): SafetyAssessment {
   const trimmed = command.trim()
   if (!trimmed) {
     return { level: "safe" }
+  }
+
+  if (options?.enforceGitWorkflowCommitOnly && containsDirectGitSubmitCommand(trimmed)) {
+    return {
+      level: "forbidden",
+      reason: "git_workflow tool is available — use git_workflow instead of direct git add/commit/push"
+    }
   }
 
   // 1. Check forbidden patterns first
@@ -251,6 +258,10 @@ export function assessCommandSafety(
     level: "needs_approval",
     reason: hasShellMetacharacters ? "complex shell expression — requires review" : "unknown command — requires review"
   }
+}
+
+function containsDirectGitSubmitCommand(command: string): boolean {
+  return /\bgit\s+(add|commit|push)\b/i.test(command)
 }
 
 export function derivePermanentApprovalPattern(command: string): string | null {

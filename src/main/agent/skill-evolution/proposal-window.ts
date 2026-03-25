@@ -39,6 +39,43 @@ function cloneTurn(turn: SkillProposalWindowTurn): SkillProposalWindowTurn {
   }
 }
 
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string")
+}
+
+function isSkillProposalWindowTurn(value: unknown): value is SkillProposalWindowTurn {
+  if (!value || typeof value !== "object") return false
+  const t = value as Record<string, unknown>
+  return (
+    typeof t.userMessage === "string" &&
+    typeof t.assistantText === "string" &&
+    isStringArray(t.toolCallNames) &&
+    typeof t.toolCallCount === "number" &&
+    (t.status === "success" || t.status === "error") &&
+    (t.errorMessage === undefined || typeof t.errorMessage === "string") &&
+    isStringArray(t.usedSkills) &&
+    typeof t.finishedAt === "string"
+  )
+}
+
+/** Type-guard for SkillProposalWindowContext. Safe to use on untrusted IPC payloads. */
+export function isSkillProposalWindowContext(value: unknown): value is SkillProposalWindowContext {
+  if (!value || typeof value !== "object") return false
+  const c = value as Record<string, unknown>
+  return (
+    Array.isArray(c.turns) &&
+    c.turns.every(isSkillProposalWindowTurn) &&
+    typeof c.transcript === "string" &&
+    isStringArray(c.toolCallNames) &&
+    typeof c.toolCallCount === "number" &&
+    typeof c.toolCallSummary === "string" &&
+    typeof c.turnCount === "number" &&
+    typeof c.successCount === "number" &&
+    typeof c.errorCount === "number" &&
+    isStringArray(c.usedSkills)
+  )
+}
+
 function buildTranscript(turns: SkillProposalWindowTurn[]): string {
   return turns
     .map((turn, index) => {

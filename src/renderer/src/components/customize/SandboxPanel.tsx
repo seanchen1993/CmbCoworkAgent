@@ -324,7 +324,7 @@ export function SandboxPanel(): React.JSX.Element {
 
           <div className={cn("flex flex-col gap-3 max-w-lg", !isWindows && "opacity-40")}>
             {MODE_OPTIONS.map((opt) => {
-              const isRestricted = opt.value !== "elevated" && !unlocked
+              const isRestricted = opt.value !== "elevated" && opt.value !== "unelevated" && !unlocked
               const isDisabled = !isWindows || modePending || isRestricted
               return (
                 <div key={opt.value} className="relative">

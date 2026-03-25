@@ -1,4 +1,5 @@
 import { app, shell, BrowserWindow, ipcMain, nativeImage } from "electron"
+import { existsSync } from "fs"
 import { join } from "path"
 import { writeMainLog, writeRendererLog } from "./logging"
 
@@ -74,6 +75,8 @@ import { registerSandboxHandlers } from "./ipc/sandbox"
 import { registerOptimizerHandlers } from "./ipc/optimizer"
 import { registerChatXHandlers } from "./ipc/chatx"
 import { registerHooksHandlers } from "./ipc/hooks"
+import { setTraceReporter } from "./agent/trace/collector"
+import { S3TraceReporter } from "./agent/trace/s3-reporter"
 import { initializeDatabase, flush } from "./db"
 import { startScheduler, stopScheduler } from "./services/scheduler"
 import { startHeartbeat, stopHeartbeat } from "./services/heartbeat"
@@ -89,6 +92,26 @@ let loginWindow: BrowserWindow | null = null
 
 // Simple dev check - replaces @electron-toolkit/utils is.dev
 const isDev = !app.isPackaged
+
+function getFirstExistingPath(paths: string[]): string | undefined {
+  return paths.find((path) => existsSync(path))
+}
+
+function getBuildIconPath(fileName: string): string | undefined {
+  return getFirstExistingPath([
+    join(app.getAppPath(), `build/${fileName}`),
+    join(process.cwd(), `build/${fileName}`),
+    join(__dirname, `../../build/${fileName}`)
+  ])
+}
+
+function getDevWindowsIconPath(): string | undefined {
+  return getBuildIconPath("icon.ico")
+}
+
+function getDevMacDockIconPath(): string | undefined {
+  return getBuildIconPath("icon.png") ?? getBuildIconPath("icon.ico")
+}
 
 function getLocalIP() {
   const interfaces = os.networkInterfaces();
@@ -111,6 +134,8 @@ function getLocalIP() {
 }
 
 function createWindow(): void {
+  const devWindowIcon = process.platform === "win32" && isDev ? getDevWindowsIconPath() : undefined
+
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -124,6 +149,7 @@ function createWindow(): void {
       preload: join(__dirname, "../preload/index.js"),
       sandbox: false
     },
+    ...(devWindowIcon ? { icon: devWindowIcon } : {}),
     autoHideMenuBar: true // 自动隐藏菜单栏
   })
 
@@ -210,13 +236,29 @@ if (!gotTheLock) {
 
     // Set dock icon on macOS
     if (process.platform === "darwin" && app.dock) {
-      const iconPath = join(__dirname, "../../resources/icon.png")
+      const iconPath = getFirstExistingPath([
+        ...(isDev ? [getDevMacDockIconPath()] : []),
+        join(__dirname, "../../resources/icon.png"),
+        join(app.getAppPath(), "resources/icon.png"),
+        join(__dirname, "../resources/icon.png")
+      ].filter((path): path is string => Boolean(path)))
+      if (isDev) {
+        console.log(`[icon] mac dock icon path: ${iconPath ?? "not found"}`)
+      }
       try {
-        const icon = nativeImage.createFromPath(iconPath)
-        if (!icon.isEmpty()) {
+        const icon = iconPath ? nativeImage.createFromPath(iconPath) : null
+        if (icon && !icon.isEmpty()) {
           app.dock.setIcon(icon)
+          if (isDev) {
+            console.log("[icon] mac dock icon applied")
+          }
+        } else if (isDev) {
+          console.log("[icon] mac dock icon is empty")
         }
       } catch {
+        if (isDev) {
+          console.log("[icon] mac dock icon apply failed")
+        }
         // Icon not found, use default
       }
     }
@@ -231,6 +273,13 @@ if (!gotTheLock) {
           }
         })
       })
+    }
+
+    // Register S3 trace reporter if API base URL is configured
+    const apiBaseUrl = import.meta.env.VITE_API_BASE_URL as string | undefined
+    if (apiBaseUrl) {
+      setTraceReporter(new S3TraceReporter(apiBaseUrl))
+      console.log("[Main] S3TraceReporter registered, uploading traces to:", apiBaseUrl)
     }
 
     // Initialize database
@@ -309,9 +358,9 @@ if (!gotTheLock) {
           },
         })
       }
-      loginWindow.loadURL("https://oa-auth.paas.twf.com/auth/sso-login" +
+      loginWindow.loadURL(`https://oa-auth.paas.${import.meta.env.VITE_LOGIN_PT}.com/auth/sso-login` +
         "?client_id=5221ab160e0145d9b0736c2f8fb84229" +
-        "&redirect_uri=" + encodeURIComponent(`https://cmbdevclawweb.paas.twf.cn/login.html`) +
+        "&redirect_uri=" + encodeURIComponent(`https://cmbdevclawweb.paas.${import.meta.env.VITE_LOGIN_PT}.cn/login.html`) +
         "&response_type=code")
     })
 
@@ -321,7 +370,7 @@ if (!gotTheLock) {
         loginWindow = null
       }
       if(mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.reload()
+        mainWindow.webContents.send("notify-login-msg",'login')
       }
     })
 
