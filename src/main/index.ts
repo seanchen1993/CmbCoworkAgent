@@ -3,6 +3,9 @@ import { existsSync } from "fs"
 import { join } from "path"
 import { writeMainLog, writeRendererLog } from "./logging"
 
+// Raise file descriptor limit for file watchers on large workspaces (macOS default is 256)
+try { process.setFdLimit(10240) } catch { /* not available on all platforms */ }
+
 function getConsoleLevelName(level: number): string {
   switch (level) {
     case 0:

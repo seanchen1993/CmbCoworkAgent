@@ -555,8 +555,8 @@ export function tryStartCodeIndex(workspacePath: string, settings: CodeIndexSett
  */
 export async function startIndexingForRecentWorkspaces(settings: CodeIndexSettings, maxCount = 3): Promise<void> {
   if (!settings.enabled || !settings.embeddingBaseUrl || !settings.embeddingModel) return
-  const { listThreads } = await import("../db")
-  const threads = listThreads()
+  const { getAllThreads } = await import("../db")
+  const threads = getAllThreads()
   const seen = new Set<string>()
   for (const t of threads) {
     if (seen.size >= maxCount) break
