@@ -200,7 +200,7 @@ export function CodeIndexPanel(): React.JSX.Element {
               <input
                 type="text"
                 className="px-3 py-2 text-sm border border-border rounded-md bg-background focus:outline-none focus:border-primary transition-colors"
-                placeholder="http://open-llm.uat.cmbchina.cn/llm/bge-m3-mx/v1"
+                placeholder="http://your-embedding-server.example.com/v1"
                 value={baseUrl}
                 onChange={(e) => setBaseUrl(e.target.value)}
               />
