@@ -1,0 +1,2 @@
+[console_scripts]
+trace-evolver = trace_evolver.__main__:main
