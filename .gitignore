@@ -15,6 +15,7 @@ src/renderer/.vite/
 __pycache__/
 *.pyc
 .trace-evolver-state/
+*.egg-info/
 
 # Codex local files
 .codex/
