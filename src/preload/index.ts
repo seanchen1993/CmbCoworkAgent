@@ -77,7 +77,8 @@ const api = {
       message: string,
       command: unknown,
       onEvent: (event: StreamEvent) => void,
-      modelId?: string
+      modelId?: string,
+      slashCommand?: string
     ): (() => void) => {
       const channel = `agent:stream:${threadId}`
 
@@ -93,7 +94,7 @@ const api = {
       if (command) {
         ipcRenderer.send("agent:resume", { threadId, command, modelId })
       } else {
-        ipcRenderer.send("agent:invoke", { threadId, message, modelId })
+        ipcRenderer.send("agent:invoke", { threadId, message, modelId, slashCommand })
       }
 
       return () => {

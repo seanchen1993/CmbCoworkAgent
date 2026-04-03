@@ -839,6 +839,36 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
     clearError()
   }
 
+  const resolveSlashCommand = useCallback(
+    (rawText: string): { slashCommand?: string; userText: string; displayPrefix?: string } => {
+      const trimmed = rawText.trim()
+      if (!trimmed.startsWith("/")) {
+        return { userText: trimmed }
+      }
+
+      const commandMatch = trimmed.match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/)
+      if (!commandMatch) {
+        return { userText: trimmed }
+      }
+
+      const slashCommand = commandMatch[1].trim().toLowerCase()
+      const matchedSkill = skills.find(
+        (skill) => skill.slash_command?.trim().replace(/^\/+/, "").toLowerCase() === slashCommand
+      )
+      if (!matchedSkill) {
+        return { userText: trimmed }
+      }
+
+      const remainingText = (commandMatch[2] || "").trim()
+      return {
+        slashCommand,
+        userText: remainingText || "请执行该技能任务。",
+        displayPrefix: `/${slashCommand}`
+      }
+    },
+    [skills]
+  )
+
   const handleSubmit = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault()
     if ((!input.trim() && attachments.length === 0) || isLoading || !stream) return
@@ -883,9 +913,10 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
     }
 
     const rawMessage = input.trim()
+    const slashSelection = resolveSlashCommand(rawMessage)
     const currentAttachments = attachments.length > 0 ? [...attachments] : undefined
     // If user only uploaded files without text, add a default prompt
-    const userText = rawMessage || (currentAttachments ? "请分析以下文件内容。" : "")
+    const userText = slashSelection.userText || (currentAttachments ? "请分析以下文件内容。" : "")
     setInput("")
     setAttachments([])
     insertLog('send: '+userText)
@@ -910,6 +941,11 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
       const fileNames = currentAttachments.map((a) => `📎 ${a.filename}`).join("\n")
       displayContent = `${fileNames}\n\n${userText}`
     }
+    if (slashSelection.displayPrefix) {
+      displayContent = displayContent
+        ? `${slashSelection.displayPrefix}\n\n${displayContent}`
+        : slashSelection.displayPrefix
+    }
 
     const userMessage: Message = {
       id: crypto.randomUUID(),
@@ -933,7 +969,11 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
       },
       {
         config: {
-          configurable: { thread_id: threadId, model_id: currentModel }
+          configurable: {
+            thread_id: threadId,
+            model_id: currentModel,
+            slash_command: slashSelection.slashCommand
+          }
         }
       }
     )

@@ -132,6 +132,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     this.completedToolCallsByName.clear()
     const threadId = payload.config?.configurable?.thread_id
     const modelId = payload.config?.configurable?.model_id as string | undefined
+    const slashCommand = payload.config?.configurable?.slash_command as string | undefined
     if (!threadId) {
       return this.createErrorGenerator("MISSING_THREAD_ID", "Thread ID is required")
     }
@@ -159,7 +160,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
       messageContent,
       payload.command,
       payload.signal,
-      modelId
+      modelId,
+      slashCommand
     )
   }
 
@@ -175,7 +177,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
     message: string,
     command: unknown,
     signal: AbortSignal,
-    modelId?: string
+    modelId?: string,
+    slashCommand?: string
   ): AsyncGenerator<StreamEvent> {
     // Create a queue to buffer events from IPC
     const eventQueue: StreamEvent[] = []
@@ -220,7 +223,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
           }
         }
       },
-      modelId
+      modelId,
+      slashCommand
     )
 
     // Handle abort signal

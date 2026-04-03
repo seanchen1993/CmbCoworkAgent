@@ -47,7 +47,8 @@ interface CustomAPI {
       message: string,
       command: unknown,
       onEvent: (event: StreamEvent) => void,
-      modelId?: string
+      modelId?: string,
+      slashCommand?: string
     ) => () => void
     interrupt: (
       threadId: string,

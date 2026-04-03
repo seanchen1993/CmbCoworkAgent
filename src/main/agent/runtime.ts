@@ -691,6 +691,8 @@ export interface CreateAgentRuntimeOptions {
   workspacePath: string
   /** Extra content appended to the system prompt (e.g. HEARTBEAT.md context) */
   extraSystemPrompt?: string
+  /** Exact skill routing derived from a UI slash command, e.g. /code-review */
+  slashCommand?: string
   /** Skip the manage_scheduler tool (used by scheduled task / heartbeat execution to prevent recursive scheduling) */
   noSchedulerTool?: boolean
   /** Skip the manage_skill tool (disable skill evolution for scheduled/heartbeat agents) */
@@ -703,7 +705,7 @@ export interface CreateAgentRuntimeOptions {
 export type AgentRuntime = ReturnType<typeof createAgent>
 
 export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Promise<DeepAgent> {
-  const { threadId, workspacePath, modelId, extraSystemPrompt } = options
+  const { threadId, workspacePath, modelId, extraSystemPrompt, slashCommand } = options
 
   if (!threadId) {
     throw new Error("Thread ID is required for checkpointing.")
@@ -879,7 +881,7 @@ ${subagentShellGuidance}
 
 The workspace root is: ${workspacePath}`
 
-  const skillsSources = await getEnabledSkillsSources()
+  const skillsSources = await getEnabledSkillsSources({ workspacePath, slashCommand })
   console.log("[Runtime] Raw skills sources from getEnabledSkillsSources():", skillsSources)
   console.log("[Runtime] Raw skills sources count:", skillsSources.length)
   console.log("[Runtime] Raw skills sources content:", JSON.stringify(skillsSources, null, 2))

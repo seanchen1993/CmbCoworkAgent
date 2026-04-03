@@ -173,6 +173,11 @@ export interface SkillMetadata {
   compatibility?: string | null
   metadata?: Record<string, string>
   allowedTools?: string[]
+  category?: string
+  tags?: string[]
+  workspace?: string
+  depends_on?: string[]
+  slash_command?: string
 }
 
 

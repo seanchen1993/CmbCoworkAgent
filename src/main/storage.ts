@@ -7,6 +7,12 @@ import type { HookConfig, HookUpsert } from "./hooks/types"
 import { readdir, readFile, rm, mkdir, stat as fsStat } from "fs/promises"
 import { app } from "electron"
 import type { PluginMetadata, PluginMcpServerConfig } from "./types"
+import fg from "fast-glob"
+import {
+  getFrontmatterString,
+  getFrontmatterStringArray,
+  parseSkillFrontmatter
+} from "./skills/frontmatter"
 import { copyDirRecursive } from "./utils/fs"
 const OPENWORK_DIR = join(homedir(), ".cmbcoworkagent")
 const ENV_FILE = join(OPENWORK_DIR, ".env")
@@ -276,25 +282,8 @@ export function setDisabledSkills(skillNames: string[]): void {
   invalidateEnabledSkillsCache()
 }
 
-function parseSkillNameFromFrontmatter(content: string): string | null {
-  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/)
-  if (!match) return null
-  for (const line of match[1].split("\n")) {
-    const colonIdx = line.indexOf(":")
-    if (colonIdx > 0 && line.slice(0, colonIdx).trim().toLowerCase() === "name") {
-      return line.slice(colonIdx + 1).trim()
-    }
-  }
-  return null
-}
-
-const ENABLED_SKILLS_DIR = join(OPENWORK_DIR, "enabled-skills")
-const ENABLED_SKILLS_BUILTIN_DIR = join(OPENWORK_DIR, "enabled-skills-builtin")
-const ENABLED_SKILLS_CUSTOM_DIR = join(OPENWORK_DIR, "enabled-skills-custom")
-
-// Fingerprints for separate builtin and custom enabled skills
-let _enabledSkillsBuiltinFingerprint: string | null = null
-let _enabledSkillsCustomFingerprint: string | null = null
+const ENABLED_SKILLS_BUILTIN_ROOT = join(OPENWORK_DIR, "enabled-skills-builtin")
+const ENABLED_SKILLS_CUSTOM_ROOT = join(OPENWORK_DIR, "enabled-skills-custom")
 
 async function computeEnabledSkillsFingerprint(disabledList: string[], sourceDirs: string[]): Promise<string> {
   const parts = [disabledList.sort().join(","), sourceDirs.join("|")]
@@ -318,38 +307,164 @@ async function computeEnabledSkillsFingerprint(disabledList: string[], sourceDir
   return createHash("sha256").update(parts.join(":")).digest("hex").slice(0, 16)
 }
 
-async function copyEnabledSkillsFromSourceAsync(sourceDir: string, disabled: Set<string>, destDir?: string): Promise<number> {
-  let count = 0
-  const entries = await readdir(sourceDir, { withFileTypes: true })
-
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue
-    const skillMdPath = join(sourceDir, entry.name, "SKILL.md")
-    if (!existsSync(skillMdPath)) continue
-
-    try {
-      const content = await readFile(skillMdPath, "utf-8")
-      const name = parseSkillNameFromFrontmatter(content) || entry.name
-      if (disabled.has(name.trim().toLowerCase())) continue
-    } catch {
-      continue
-    }
-
-    const srcSkillDir = join(sourceDir, entry.name)
-    const destPath = destDir ? join(destDir, entry.name) : join(ENABLED_SKILLS_DIR, entry.name)
-    try {
-      await copyDirRecursive(srcSkillDir, destPath)
-      count++
-    } catch (e) {
-      console.warn(`[Storage] Failed to copy skill ${entry.name}:`, e)
-      // Clean up partial directory so it doesn't look like a valid skill
-      try { await rm(destPath, { recursive: true, force: true }) } catch { /* ignore */ }
-    }
-  }
-  return count
+interface SkillSourceEntry {
+  name: string
+  normalizedName: string
+  dirName: string
+  sourceDir: string
+  skillDirPath: string
+  skillMdPath: string
+  workspaceMatchers: string[]
+  dependsOn: string[]
+  slashCommand?: string
 }
 
-let _enabledSkillsBuildLock: Promise<string[]> | null = null
+export interface EnabledSkillsOptions {
+  workspacePath?: string
+  slashCommand?: string
+}
+
+function normalizeSkillName(name: string): string {
+  return name.trim().toLowerCase()
+}
+
+function normalizeSlashCommand(command: string): string {
+  return command.trim().replace(/^\/+/, "").toLowerCase()
+}
+
+async function loadEffectiveSkillEntries(sourceDirs: string[]): Promise<Map<string, SkillSourceEntry>> {
+  const entries = new Map<string, SkillSourceEntry>()
+  for (const dir of sourceDirs) {
+    if (!existsSync(dir)) continue
+    try {
+      const dirEntries = await readdir(dir, { withFileTypes: true })
+      for (const entry of dirEntries) {
+        if (!entry.isDirectory()) continue
+        const skillMdPath = join(dir, entry.name, "SKILL.md")
+        if (!existsSync(skillMdPath)) continue
+        try {
+          const content = await readFile(skillMdPath, "utf-8")
+          const frontmatter = parseSkillFrontmatter(content)
+          const name = getFrontmatterString(frontmatter, "name") || entry.name
+          const normalizedName = normalizeSkillName(name)
+          entries.set(normalizedName, {
+            name,
+            normalizedName,
+            dirName: entry.name,
+            sourceDir: dir,
+            skillDirPath: join(dir, entry.name),
+            skillMdPath,
+            workspaceMatchers: getFrontmatterStringArray(frontmatter, "workspace") ?? [],
+            dependsOn: (getFrontmatterStringArray(frontmatter, "depends_on") ?? []).map(normalizeSkillName),
+            slashCommand: getFrontmatterString(frontmatter, "slash_command")
+          })
+        } catch (error) {
+          console.warn(`[Storage] Failed to parse skill frontmatter at ${skillMdPath}:`, error)
+        }
+      }
+    } catch (error) {
+      console.warn(`[Storage] Failed to read skills directory ${dir}:`, error)
+    }
+  }
+  return entries
+}
+
+async function matchesWorkspaceFilters(
+  workspacePath: string,
+  matchers: string[]
+): Promise<boolean> {
+  if (matchers.length === 0) return true
+  if (!existsSync(workspacePath)) return false
+  const matches = await fg(matchers, {
+    cwd: workspacePath,
+    dot: true,
+    onlyFiles: false,
+    unique: true,
+    caseSensitiveMatch: false
+  })
+  return matches.length > 0
+}
+
+async function resolveSelectedSkillEntries(
+  sourceDirs: string[],
+  options: EnabledSkillsOptions
+): Promise<SkillSourceEntry[]> {
+  const registry = await loadEffectiveSkillEntries(sourceDirs)
+  const disabledSet = new Set(getDisabledSkills().map(normalizeSkillName))
+  const workspacePath = options.workspacePath?.trim() || undefined
+  const workspaceEligible = new Set<string>()
+
+  for (const entry of registry.values()) {
+    if (disabledSet.has(entry.normalizedName)) continue
+    if (workspacePath) {
+      const matched = await matchesWorkspaceFilters(workspacePath, entry.workspaceMatchers)
+      if (!matched) continue
+    }
+    workspaceEligible.add(entry.normalizedName)
+  }
+
+  const visit = (
+    skillName: string,
+    selected: Set<string>,
+    visiting: Set<string>,
+    chain: string[]
+  ): void => {
+    if (selected.has(skillName)) return
+    const entry = registry.get(skillName)
+    if (!entry) {
+      throw new Error(`Skill dependency not found: ${chain.join(" -> ")} -> ${skillName}`)
+    }
+    if (!workspaceEligible.has(skillName)) {
+      if (disabledSet.has(skillName)) {
+        throw new Error(`Skill "${entry.name}" is disabled but required by ${chain.join(" -> ")}`)
+      }
+      if (workspacePath) {
+        throw new Error(
+          `Skill "${entry.name}" does not match the current workspace but is required by ${chain.join(" -> ")}`
+        )
+      }
+      throw new Error(`Skill "${entry.name}" is unavailable but required by ${chain.join(" -> ")}`)
+    }
+    if (visiting.has(skillName)) {
+      throw new Error(`Circular skill dependency detected: ${[...chain, entry.name].join(" -> ")}`)
+    }
+
+    visiting.add(skillName)
+    for (const dependency of entry.dependsOn) {
+      visit(dependency, selected, visiting, [...chain, entry.name])
+    }
+    visiting.delete(skillName)
+    selected.add(skillName)
+  }
+
+  const selectedNames = new Set<string>()
+  const normalizedSlashCommand = options.slashCommand
+    ? normalizeSlashCommand(options.slashCommand)
+    : undefined
+
+  if (normalizedSlashCommand) {
+    const slashTarget = Array.from(registry.values()).find(
+      (entry) =>
+        entry.slashCommand &&
+        normalizeSlashCommand(entry.slashCommand) === normalizedSlashCommand &&
+        workspaceEligible.has(entry.normalizedName)
+    )
+    if (!slashTarget) {
+      throw new Error(`Slash command "/${normalizedSlashCommand}" is not available in the current workspace`)
+    }
+    visit(slashTarget.normalizedName, selectedNames, new Set<string>(), [])
+  } else {
+    for (const skillName of workspaceEligible) {
+      visit(skillName, selectedNames, new Set<string>(), [])
+    }
+  }
+
+  return Array.from(selectedNames)
+    .map((name) => registry.get(name))
+    .filter((entry): entry is SkillSourceEntry => Boolean(entry))
+}
+
+const _enabledSkillsBuildLocks = new Map<string, Promise<string[]>>()
 
 /**
  * Ensures separate enabled-skills directories exist for builtin and custom skills.
@@ -357,58 +472,87 @@ let _enabledSkillsBuildLock: Promise<string[]> | null = null
  * Skips rebuild if the disabled list and source dirs haven't changed.
  * Serialized via a Promise lock to prevent concurrent rm/mkdir/copyFile races.
  */
-async function ensureEnabledSkillsDirsAsync(): Promise<string[]> {
-  if (_enabledSkillsBuildLock) return _enabledSkillsBuildLock
-  _enabledSkillsBuildLock = _ensureEnabledSkillsDirsImpl()
+async function ensureEnabledSkillsDirsAsync(options: EnabledSkillsOptions = {}): Promise<string[]> {
+  const lockKey = JSON.stringify({
+    workspacePath: options.workspacePath ?? "",
+    slashCommand: options.slashCommand ?? "",
+    disabled: getDisabledSkills().map(normalizeSkillName).sort()
+  })
+  const existingLock = _enabledSkillsBuildLocks.get(lockKey)
+  if (existingLock) return existingLock
+
+  const buildPromise = _ensureEnabledSkillsDirsImpl(options)
+  _enabledSkillsBuildLocks.set(lockKey, buildPromise)
   try {
-    return await _enabledSkillsBuildLock
+    return await buildPromise
   } finally {
-    _enabledSkillsBuildLock = null
+    _enabledSkillsBuildLocks.delete(lockKey)
   }
 }
 
-async function _ensureEnabledSkillsDirsImpl(): Promise<string[]> {
+async function _ensureEnabledSkillsDirsImpl(options: EnabledSkillsOptions = {}): Promise<string[]> {
   getOpenworkDir()
   const builtinDir = getSkillsDir()
   const customDir = getCustomSkillsDir()
-  const disabled = getDisabledSkills()
-  const disabledSet = new Set(disabled.map((s) => s.trim().toLowerCase()))
+  const sourceDirs = getSkillsSources()
+  const selectedEntries = await resolveSelectedSkillEntries(sourceDirs, options)
+  const selectedNames = selectedEntries.map((entry) => entry.normalizedName)
+  const filterTokens = [
+    ...getDisabledSkills().map((name) => `disabled:${normalizeSkillName(name)}`),
+    ...(options.workspacePath ? [`workspace:${options.workspacePath}`] : []),
+    ...(options.slashCommand ? [`slash:${normalizeSlashCommand(options.slashCommand)}`] : []),
+    ...selectedNames.map((name) => `selected:${name}`)
+  ]
+  const builtinSelected = selectedEntries.filter((entry) => entry.sourceDir === builtinDir)
+  const customSelected = selectedEntries.filter((entry) => entry.sourceDir === customDir)
 
   const results: string[] = []
 
   // Handle builtin skills
   if (existsSync(builtinDir)) {
-    const builtinFingerprint = await computeEnabledSkillsFingerprint(disabled, [builtinDir])
-    if (_enabledSkillsBuiltinFingerprint !== builtinFingerprint || !existsSync(ENABLED_SKILLS_BUILTIN_DIR)) {
-      if (existsSync(ENABLED_SKILLS_BUILTIN_DIR)) {
-        await rm(ENABLED_SKILLS_BUILTIN_DIR, { recursive: true })
+    const builtinFingerprint = await computeEnabledSkillsFingerprint(filterTokens, [builtinDir])
+    const builtinOutputDir = join(ENABLED_SKILLS_BUILTIN_ROOT, builtinFingerprint)
+    if (!existsSync(builtinOutputDir)) {
+      await mkdir(builtinOutputDir, { recursive: true })
+      let count = 0
+      for (const entry of builtinSelected) {
+        const destPath = join(builtinOutputDir, entry.dirName)
+        try {
+          await copyDirRecursive(entry.skillDirPath, destPath)
+          count++
+        } catch (error) {
+          console.warn(`[Storage] Failed to copy builtin skill ${entry.name}:`, error)
+          try { await rm(destPath, { recursive: true, force: true }) } catch { /* ignore */ }
+        }
       }
-      await mkdir(ENABLED_SKILLS_BUILTIN_DIR, { recursive: true })
-
-      const count = await copyEnabledSkillsFromSourceAsync(builtinDir, disabledSet, ENABLED_SKILLS_BUILTIN_DIR)
-      console.log(`[Storage] Copied ${count} enabled builtin skills to ${ENABLED_SKILLS_BUILTIN_DIR}`)
-      _enabledSkillsBuiltinFingerprint = builtinFingerprint
+      console.log(`[Storage] Copied ${count} enabled builtin skills to ${builtinOutputDir}`)
     }
-    if (existsSync(ENABLED_SKILLS_BUILTIN_DIR)) {
-      results.push(ENABLED_SKILLS_BUILTIN_DIR)
+    if (existsSync(builtinOutputDir) && builtinSelected.length > 0) {
+      results.push(builtinOutputDir)
     }
   }
 
   // Handle custom skills
   if (existsSync(customDir)) {
-    const customFingerprint = await computeEnabledSkillsFingerprint(disabled, [customDir])
-    if (_enabledSkillsCustomFingerprint !== customFingerprint || !existsSync(ENABLED_SKILLS_CUSTOM_DIR)) {
-      if (existsSync(ENABLED_SKILLS_CUSTOM_DIR)) {
-        await rm(ENABLED_SKILLS_CUSTOM_DIR, { recursive: true })
+    const customFingerprint = await computeEnabledSkillsFingerprint(filterTokens, [customDir])
+    const customOutputDir = join(ENABLED_SKILLS_CUSTOM_ROOT, customFingerprint)
+    if (!existsSync(customOutputDir)) {
+      await mkdir(customOutputDir, { recursive: true })
+      let count = 0
+      for (const entry of customSelected) {
+        const destPath = join(customOutputDir, entry.dirName)
+        try {
+          await copyDirRecursive(entry.skillDirPath, destPath)
+          count++
+        } catch (error) {
+          console.warn(`[Storage] Failed to copy custom skill ${entry.name}:`, error)
+          try { await rm(destPath, { recursive: true, force: true }) } catch { /* ignore */ }
+        }
       }
-      await mkdir(ENABLED_SKILLS_CUSTOM_DIR, { recursive: true })
-
-      const count = await copyEnabledSkillsFromSourceAsync(customDir, disabledSet, ENABLED_SKILLS_CUSTOM_DIR)
-      console.log(`[Storage] Copied ${count} enabled custom skills to ${ENABLED_SKILLS_CUSTOM_DIR}`)
-      _enabledSkillsCustomFingerprint = customFingerprint
+      console.log(`[Storage] Copied ${count} enabled custom skills to ${customOutputDir}`)
     }
-    if (existsSync(ENABLED_SKILLS_CUSTOM_DIR)) {
-      results.push(ENABLED_SKILLS_CUSTOM_DIR)
+    if (existsSync(customOutputDir) && customSelected.length > 0) {
+      results.push(customOutputDir)
     }
   }
 
@@ -420,8 +564,6 @@ async function _ensureEnabledSkillsDirsImpl(): Promise<string[]> {
  * Should be called when disabled skills list changes.
  */
 export function invalidateEnabledSkillsCache(): void {
-  _enabledSkillsBuiltinFingerprint = null
-  _enabledSkillsCustomFingerprint = null
   _pluginSkillsCache = null
   _pluginMcpCache = null
 }
@@ -429,13 +571,23 @@ export function invalidateEnabledSkillsCache(): void {
 /**
  * Returns skills sources for the agent: either the filtered enabled-skills dirs
  * or the full skills dirs if no skills are disabled.
+ *
+ * `workspacePath` filters skills by workspace-local file/glob matches.
+ * `slashCommand` pins runtime loading to an exact skill plus its declared dependencies.
  */
-export async function getEnabledSkillsSources(): Promise<string[]> {
-  const disabled = getDisabledSkills()
-  if (disabled.length === 0) return getSkillsSources()
+export async function getEnabledSkillsSources(
+  options?: string | EnabledSkillsOptions
+): Promise<string[]> {
+  const resolvedOptions = typeof options === "string" ? { workspacePath: options } : (options ?? {})
+  const sourceDirs = getSkillsSources()
+  const needsFiltering =
+    getDisabledSkills().length > 0 ||
+    Boolean(resolvedOptions.workspacePath) ||
+    Boolean(resolvedOptions.slashCommand)
+  if (!needsFiltering) return sourceDirs
 
-  // When skills are disabled, create separate filtered directories for builtin and custom skills
-  const enabledDirs = await ensureEnabledSkillsDirsAsync()
+  // When filtering is needed, create separate filtered directories
+  const enabledDirs = await ensureEnabledSkillsDirsAsync(resolvedOptions)
   return enabledDirs.filter(dir => existsSync(dir))
 }
 

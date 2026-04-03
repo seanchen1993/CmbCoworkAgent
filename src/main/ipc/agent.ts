@@ -71,6 +71,7 @@ const MIN_CHARS_FOR_MEMORY = 200
 
 // Track active runs for cancellation
 const activeRuns = new Map<string, AbortController>()
+const activeSlashCommands = new Map<string, string>()
 
 // ─────────────────────────────────────────────────────────
 // Auto skill proposal: generate a skill from conversation context
@@ -506,14 +507,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
   )
 
   // Handle agent invocation with streaming
-  ipcMain.on("agent:invoke", async (event, { threadId, message, modelId }: AgentInvokeParams) => {
+  ipcMain.on("agent:invoke", async (event, { threadId, message, modelId, slashCommand }: AgentInvokeParams) => {
     const channel = `agent:stream:${threadId}`
     const window = BrowserWindow.fromWebContents(event.sender)
 
     console.log("[Agent] Received invoke request:", {
       threadId,
       message: message.substring(0, 50),
-      modelId
+      modelId,
+      slashCommand
     })
 
     if (!window) {
@@ -528,6 +530,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       console.log("[Agent] Aborting existing stream for thread:", threadId)
       existingController.abort()
       activeRuns.delete(threadId)
+    }
+
+    if (slashCommand) {
+      activeSlashCommands.set(threadId, slashCommand)
+    } else {
+      activeSlashCommands.delete(threadId)
     }
 
     const abortController = new AbortController()
@@ -660,6 +668,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       let isFirstAttempt = true
       let agent: Awaited<ReturnType<typeof createAgentRuntime>> | null = null
       let stream: AsyncIterable<unknown> | null = null
+      const activeSlashCommand = activeSlashCommands.get(threadId)
 
       for (const candidateId of orderedChain) {
         if (abortController.signal.aborted) break
@@ -668,6 +677,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             threadId,
             workspacePath,
             modelId: candidateId,
+            slashCommand: activeSlashCommand,
             abortSignal: abortController.signal,
             noSkillEvolutionTool: true
           })
@@ -1176,6 +1186,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             threadId,
             workspacePath,
             modelId: nextCandidate,
+            slashCommand: activeSlashCommand,
             abortSignal: abortController.signal,
             noSkillEvolutionTool: true
           })
@@ -1388,6 +1399,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         routingMode: getGlobalRoutingMode()
       }).catch(() => null)
       const effectiveResumeModelId = resumeRoutingResult?.resolvedModelId ?? requestedModelIdResume
+      const activeSlashCommand = activeSlashCommands.get(threadId)
 
       const resumeStreamConfig = {
         configurable: { thread_id: threadId },
@@ -1417,6 +1429,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             threadId,
             workspacePath,
             modelId: candidateId,
+            slashCommand: activeSlashCommand,
             abortSignal: abortController.signal,
             noSkillEvolutionTool: true
           })
@@ -1502,7 +1515,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           const nextCandidate = resumeRemainingCandidates.shift()!
           const nextAgent = await createAgentRuntime({
-            threadId, workspacePath, modelId: nextCandidate,
+            threadId, workspacePath, modelId: nextCandidate, slashCommand: activeSlashCommand,
             abortSignal: abortController.signal, noSkillEvolutionTool: true
           })
           activeResumeStream = await nextAgent.stream(new Command({ resume: resumeValue }), resumeStreamConfig)
@@ -1585,6 +1598,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         routingMode: getGlobalRoutingMode()
       }).catch(() => null)
       const effectiveInterruptModelId = interruptRoutingResult?.resolvedModelId ?? modelId ?? undefined
+      const activeSlashCommand = activeSlashCommands.get(threadId)
 
       const interruptStreamConfig = {
         configurable: { thread_id: threadId },
@@ -1608,6 +1622,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               threadId,
               workspacePath,
               modelId: candidateId,
+              slashCommand: activeSlashCommand,
               abortSignal: abortController.signal,
               noSkillEvolutionTool: true
             })
@@ -1693,7 +1708,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
             const nextCandidate = intRemainingCandidates.shift()!
             const nextAgent = await createAgentRuntime({
-              threadId, workspacePath, modelId: nextCandidate,
+              threadId, workspacePath, modelId: nextCandidate, slashCommand: activeSlashCommand,
               abortSignal: abortController.signal, noSkillEvolutionTool: true
             })
             activeIntStream = await nextAgent.stream(null, interruptStreamConfig)
@@ -1739,6 +1754,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     if (controller) {
       controller.abort()
       activeRuns.delete(threadId)
+      activeSlashCommands.delete(threadId)
       console.log(`[Agent] cancel: aborted controller for thread ${threadId}`)
     } else {
       console.warn(`[Agent] cancel: no active run found for thread ${threadId}`)

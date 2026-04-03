@@ -3,6 +3,11 @@ import { IpcMain } from "electron"
 import * as fs from "fs/promises"
 import * as path from "path"
 import { existsSync, mkdirSync, rmSync } from "fs"
+import {
+  getFrontmatterString,
+  getFrontmatterStringArray,
+  parseSkillFrontmatter
+} from "../skills/frontmatter"
 import { getCustomSkillsDir, getDisabledSkills, getSkillsDir, setDisabledSkills } from "../storage"
 import type { SkillMetadata } from "../types"
 
@@ -48,23 +53,6 @@ function getMimeTypeByPath(filePath: string): string {
   }
 }
 
-function parseYamlFrontmatter(content: string): Record<string, string> {
-  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/)
-  if (!match) return {}
-
-  const yaml = match[1]
-  const result: Record<string, string> = {}
-  for (const line of yaml.split("\n")) {
-    const colonIdx = line.indexOf(":")
-    if (colonIdx > 0) {
-      const key = line.slice(0, colonIdx).trim()
-      const value = line.slice(colonIdx + 1).trim()
-      result[key] = value
-    }
-  }
-  return result
-}
-
 async function loadSkills(
   dirPath: string,
   source: "project" | "user" = "project"
@@ -84,19 +72,28 @@ async function loadSkills(
 
       try {
         const content = await fs.readFile(skillMdPath, "utf-8")
-        const frontmatter = parseYamlFrontmatter(content)
+        const frontmatter = parseSkillFrontmatter(content)
+        const allowedTools =
+          getFrontmatterStringArray(frontmatter, "allowed_tools") ||
+          getFrontmatterString(frontmatter, "allowed_tools")
+            ?.split(/\s+/)
+            .map((tool) => tool.trim())
+            .filter(Boolean)
 
         skills.push({
-          name: frontmatter.name || entry.name,
-          description: frontmatter.description || "",
+          name: getFrontmatterString(frontmatter, "name") || entry.name,
+          description: getFrontmatterString(frontmatter, "description") || "",
           path: skillMdPath,
           source,
-          version: frontmatter.version || "v1.0.0",
-          license: frontmatter.license || null,
-          compatibility: frontmatter.compatibility || null,
-          allowedTools: frontmatter["allowed-tools"]
-            ? frontmatter["allowed-tools"].split(/\s+/)
-            : undefined
+          version: getFrontmatterString(frontmatter, "version") || "v1.0.0",
+          license: getFrontmatterString(frontmatter, "license") || null,
+          compatibility: getFrontmatterString(frontmatter, "compatibility") || null,
+          allowedTools,
+          category: getFrontmatterString(frontmatter, "category"),
+          tags: getFrontmatterStringArray(frontmatter, "tags"),
+          workspace: getFrontmatterString(frontmatter, "workspace"),
+          depends_on: getFrontmatterStringArray(frontmatter, "depends_on"),
+          slash_command: getFrontmatterString(frontmatter, "slash_command")
         })
       } catch (e) {
         console.warn(`[Skills] Failed to parse skill at ${skillMdPath}:`, e)
@@ -308,8 +305,8 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
       try {
         if (ext === ".md") {
           const content = Buffer.from(buffer).toString("utf-8")
-          const frontmatter = parseYamlFrontmatter(content)
-          const name = frontmatter.name?.trim()
+          const frontmatter = parseSkillFrontmatter(content)
+          const name = getFrontmatterString(frontmatter, "name")?.trim()
           if (!name) {
             return { success: false, error: "SKILL.md 必须包含 YAML frontmatter 中的 name 字段" }
           }
@@ -346,8 +343,8 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
           }
 
           const content = skillMdEntry.getData().toString("utf-8")
-          const frontmatter = parseYamlFrontmatter(content)
-          const name = frontmatter.name?.trim()
+          const frontmatter = parseSkillFrontmatter(content)
+          const name = getFrontmatterString(frontmatter, "name")?.trim()
           if (!name) {
             return { success: false, error: "SKILL.md 必须包含 YAML frontmatter 中的 name 字段" }
           }
@@ -402,8 +399,8 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
       try {
         if (ext === ".md") {
           const content = Buffer.from(buffer).toString("utf-8")
-          const frontmatter = parseYamlFrontmatter(content)
-          const name = frontmatter.name?.trim()
+          const frontmatter = parseSkillFrontmatter(content)
+          const name = getFrontmatterString(frontmatter, "name")?.trim()
           if (!name) return { success: false, error: "MD 文件 frontmatter 中未找到 name 字段" }
           return { success: true, name }
         }
@@ -423,8 +420,8 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
           }
           if (!mdEntry) return { success: false, error: "ZIP 中未找到 MD 文件" }
           const content = mdEntry.getData().toString("utf-8")
-          const frontmatter = parseYamlFrontmatter(content)
-          const name = frontmatter.name?.trim()
+          const frontmatter = parseSkillFrontmatter(content)
+          const name = getFrontmatterString(frontmatter, "name")?.trim()
           if (!name) return { success: false, error: "MD 文件 frontmatter 中未找到 name 字段" }
           return { success: true, name }
         }

@@ -10,6 +10,7 @@ export interface AgentInvokeParams {
   threadId: string
   message: string
   modelId?: string
+  slashCommand?: string
 }
 
 export interface AgentResumeParams {
@@ -379,5 +380,15 @@ export interface SkillMetadata {
   compatibility?: string | null
   metadata?: Record<string, string>
   allowedTools?: string[]
+  /** Skill category, e.g. "frontend", "devops" */
+  category?: string
+  /** Comma-separated tags parsed from frontmatter */
+  tags?: string[]
+  /** Glob pattern matched against workspace path — skill is only injected when matched */
+  workspace?: string
+  /** Skill names that must be co-loaded when this skill is active */
+  depends_on?: string[]
+  /** Trigger keyword for slash-command routing, e.g. "code-review" → /code-review */
+  slash_command?: string
 }
 
