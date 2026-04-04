@@ -463,28 +463,6 @@ class TraceEvolutionService:
                     source_visibility="full",
                 ))
 
-        # Enforce atomic create/link pairs for references/*.md:
-        # If a reference file is created but no SKILL.md op links to it, auto-add the link.
-        # If that's not possible (no SKILL.md in visible files), drop the orphan create.
-        created_refs = {op.file_path for op in ops if op.action == "create_file" and op.file_path.startswith("references/")}
-        if created_refs:
-            skill_ops_content = " ".join(op.content for op in ops if op.file_path == "SKILL.md")
-            for ref_path in list(created_refs):
-                if ref_path in skill_ops_content:
-                    continue  # link already present in a SKILL.md edit
-                # Auto-add a link op to SKILL.md
-                ref_name = ref_path.rsplit("/", 1)[-1].replace(".md", "").replace("-", " ").title()
-                link_content = f"\n- [{ref_name}]({ref_path})"
-                ops.append(EditOp(
-                    file_path="SKILL.md",
-                    action="insert_after",
-                    anchor=AnchorSpec(anchor_type="file_end"),
-                    content=link_content,
-                    intent="reference",
-                    source_visibility="full",
-                ))
-                logger.info("Auto-added SKILL.md link for orphan reference create: %s", ref_path)
-
         if not ops:
             return None
 

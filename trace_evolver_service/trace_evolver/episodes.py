@@ -82,13 +82,12 @@ def build_episodes(traces: list[ImportedTrace], gap_minutes: int) -> list[Episod
                 rules_hit += 1
             if jaccard_similarity(_tool_signature(prev), _tool_signature(trace)) >= 0.20:
                 rules_hit += 1
-            is_error_chain = prev.outcome in {"error", "unknown"} and trace.outcome in {"error", "success"}
+            if prev.outcome in {"error", "unknown"} and trace.outcome in {"error", "success"}:
+                # 失败→修正 链路是进化最有价值的信号，给双倍权重
+                # 避免因为时间间隔大、措辞变化等原因被错误切断
+                rules_hit += 2
 
-            # 失败→修正 链路是进化最有价值的信号，降低合并门槛（2 → 1），
-            # 但自己不算分——必须至少有 1 个其他连续性信号配合，
-            # 避免把仅因为先后失败就把不相关 trace 误并。
-            threshold = 1 if is_error_chain else 2
-            if rules_hit >= threshold:
+            if rules_hit >= 2:
                 current.append(trace)
             else:
                 episodes.append(_episode_from_traces(thread_id, current))
