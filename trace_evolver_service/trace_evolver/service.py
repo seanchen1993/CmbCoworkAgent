@@ -388,9 +388,9 @@ class TraceEvolutionService:
                     '  "edits": [\n'
                     "    {\n"
                     '      "file": "SKILL.md or references/xxx.md",\n'
-                    '      "op": "insert_after or create",\n'
-                    '      "target_section": "heading text or null",\n'
-                    '      "content": "markdown content",\n'
+                    '      "op": "insert_after, replace_range, or create",\n'
+                    '      "target_section": "heading text to target, or null for file end / new file",\n'
+                    '      "content": "markdown content (for replace_range: the full replacement text)",\n'
                     '      "intent": "trigger|workflow|guardrail|example|reference|metadata",\n'
                     '      "prevalence": "number of source patches that proposed similar content"\n'
                     "    }\n"
@@ -454,15 +454,17 @@ class TraceEvolutionService:
                 if not is_allowed_markdown_relative_path(file_path):
                     continue
                 anchor = _build_anchor(target_section)
+                action = "replace_range" if op_type == "replace_range" else "insert_after"
                 ops.append(EditOp(
                     file_path=file_path,
-                    action="insert_after",
+                    action=action,
                     anchor=anchor,
                     content=content,
                     intent=intent,
                     source_visibility="full",
                 ))
 
+        ops = self._ensure_atomic_markdown_links(ops, visible_existing_set)
         if not ops:
             return None
 
@@ -491,6 +493,53 @@ class TraceEvolutionService:
             risk_flags=[],
             evidence_spans=all_evidence,
         )
+
+    def _ensure_atomic_markdown_links(self, ops: list[EditOp], visible_existing_set: set[str]) -> list[EditOp]:
+        """Ensure newly created markdown docs remain discoverable from SKILL.md.
+
+        In V1, any new markdown artifact under the bundle should either be linked
+        from SKILL.md or be dropped if SKILL.md is not writable in the merge context.
+        """
+        created_markdown_paths = [
+            op.file_path
+            for op in ops
+            if op.action == "create_file" and op.file_path != "SKILL.md"
+        ]
+        if not created_markdown_paths:
+            return ops
+
+        skill_md_writable = "SKILL.md" in visible_existing_set
+        linked_paths = {
+            created_path
+            for created_path in created_markdown_paths
+            for op in ops
+            if op.file_path == "SKILL.md" and created_path in op.content
+        }
+
+        filtered_ops: list[EditOp] = []
+        dropped_paths: set[str] = set()
+        for op in ops:
+            if op.action == "create_file" and op.file_path in created_markdown_paths and op.file_path not in linked_paths:
+                if not skill_md_writable:
+                    dropped_paths.add(op.file_path)
+                    continue
+            filtered_ops.append(op)
+
+        if skill_md_writable:
+            missing_links = sorted(set(created_markdown_paths) - linked_paths - dropped_paths)
+            for file_path in missing_links:
+                filtered_ops.append(
+                    EditOp(
+                        file_path="SKILL.md",
+                        action="insert_after",
+                        anchor=AnchorSpec(anchor_type="file_end", text_hint="append at file end"),
+                        content=f"\n- See [{file_path}]({file_path}) for additional guidance.\n",
+                        intent="reference",
+                        source_visibility="full",
+                    )
+                )
+
+        return filtered_ops
 
     def _has_conflict(self, bucket, candidate_patch) -> bool:
         existing_keys = {(op.file_path, op.action, _anchor_signature(op.anchor)) for patch in bucket for op in patch.ops}

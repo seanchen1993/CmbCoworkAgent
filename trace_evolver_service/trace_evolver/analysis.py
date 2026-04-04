@@ -461,8 +461,9 @@ class SuccessAnalyst:
                     '  "edits": [\n'
                     "    {\n"
                     '      "file": "SKILL.md or references/*.md",\n'
-                    '      "target_section": "heading text to insert after, or null for new section at end",\n'
-                    '      "content": "markdown content to insert",\n'
+                    '      "op": "insert_after, replace_range, or create",\n'
+                    '      "target_section": "heading text to target, or null for file end / new file",\n'
+                    '      "content": "markdown content (for replace_range: the full replacement text for that section)",\n'
                     '      "intent": "one of: trigger, workflow, guardrail, example, reference, metadata"\n'
                     "    }\n"
                     "  ],\n"
@@ -799,9 +800,9 @@ class ErrorAnalyst:
                     '  "edits": [\n'
                     "    {\n"
                     '      "file": "SKILL.md or references/xxx.md",\n'
-                    '      "op": "insert_after or create",\n'
-                    '      "target_section": "existing heading text to insert after, or null for file end / new file",\n'
-                    '      "content": "markdown content",\n'
+                    '      "op": "insert_after, replace_range, or create",\n'
+                    '      "target_section": "existing heading text to target, or null for file end / new file",\n'
+                    '      "content": "markdown content (for replace_range: the full replacement text for that section)",\n'
                     '      "intent": "one of: trigger, workflow, guardrail, example, reference, metadata"\n'
                     "    }\n"
                     "  ],\n"
@@ -1119,10 +1120,11 @@ def _build_ops_from_llm_edits(
 
             # Build anchor from target_section
             anchor = _build_anchor_from_target_section(target_section)
+            action = "replace_range" if op_type == "replace_range" else "insert_after"
 
             ops.append(EditOp(
                 file_path=file_path,
-                action="insert_after",
+                action=action,
                 anchor=anchor,
                 content=content,
                 intent=intent,

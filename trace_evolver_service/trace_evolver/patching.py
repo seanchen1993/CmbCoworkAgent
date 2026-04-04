@@ -127,7 +127,12 @@ class PatchEngine:
 
         # V1 对 markdown 的修改统一落在“整文件重写”上，避免做脆弱的原地局部写入。
         lines = text.splitlines()
-        anchor_index = self._resolve_anchor(lines, op.anchor)
+        allow_heading_fallback = (
+            op.file_path == "SKILL.md"
+            and op.action == "insert_after"
+            and self._looks_like_new_section(op.content)
+        )
+        anchor_index = self._resolve_anchor(lines, op.anchor, allow_heading_fallback=allow_heading_fallback)
         content_lines = op.content.rstrip("\n").splitlines()
 
         if op.action == "insert_after":
@@ -142,6 +147,15 @@ class PatchEngine:
             return "\n".join(new_lines).rstrip() + "\n"
         raise ValueError(f"unsupported op: {op.action}")
 
+    def _looks_like_new_section(self, content: str) -> bool:
+        """Allow a narrow fallback only for appending a brand-new section to SKILL.md."""
+        for line in content.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            return stripped.startswith("##")
+        return False
+
     def _apply_frontmatter(self, text: str, anchor: AnchorSpec, content: str) -> str:
         post = frontmatter.loads(text)
         if not anchor.field_name:
@@ -149,7 +163,13 @@ class PatchEngine:
         post.metadata[anchor.field_name] = content
         return frontmatter.dumps(post)
 
-    def _resolve_anchor(self, lines: list[str], anchor: AnchorSpec | None) -> int:
+    def _resolve_anchor(
+        self,
+        lines: list[str],
+        anchor: AnchorSpec | None,
+        *,
+        allow_heading_fallback: bool = False,
+    ) -> int:
         # anchor 解析按”从强到弱”顺序进行；越弱的 anchor，误命中的风险越高。
         if anchor is None or anchor.anchor_type == "file_end":
             return len(lines) - 1 if lines else 0
@@ -178,9 +198,14 @@ class PatchEngine:
                     if text_hint in lowered:
                         return index
 
-            # Pass 3: fallback to file end rather than losing the edit entirely
-            logger.warning("heading anchor unresolved (targets=%s, hint=%s), falling back to file end", targets, text_hint)
-            return len(lines) - 1 if lines else 0
+            if allow_heading_fallback:
+                logger.warning(
+                    "heading anchor unresolved (targets=%s, hint=%s), falling back to file end for a new SKILL.md section",
+                    targets,
+                    text_hint,
+                )
+                return len(lines) - 1 if lines else 0
+            raise ValueError("heading anchor unresolved")
         if anchor.anchor_type in {"paragraph", "list_item"}:
             hint = (anchor.text_hint or anchor.fingerprint or "").strip().lower()
             for index, line in enumerate(lines):

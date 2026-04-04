@@ -72,22 +72,27 @@ def build_episodes(traces: list[ImportedTrace], gap_minutes: int) -> list[Episod
                 current = [trace]
                 continue
             prev = current[-1]
-            rules_hit = 0
+            time_continuity = False
+            semantic_rules_hit = 0
+            repair_transition = False
             # This is intentionally heuristic: V1 groups traces by continuity signals, not by exact replay state.
             if (_parse_ts(trace.startedAt) - _parse_ts(prev.endedAt)).total_seconds() <= gap_minutes * 60:
-                rules_hit += 1
+                time_continuity = True
             if jaccard_similarity(tokenize(prev.userMessage), tokenize(trace.userMessage)) >= 0.25:
-                rules_hit += 1
+                semantic_rules_hit += 1
             if set(prev.usedSkills) & set(trace.usedSkills):
-                rules_hit += 1
+                semantic_rules_hit += 1
             if jaccard_similarity(_tool_signature(prev), _tool_signature(trace)) >= 0.20:
-                rules_hit += 1
+                semantic_rules_hit += 1
             if prev.outcome in {"error", "unknown"} and trace.outcome in {"error", "success"}:
-                # 失败→修正 链路是进化最有价值的信号，给双倍权重
-                # 避免因为时间间隔大、措辞变化等原因被错误切断
-                rules_hit += 2
+                # 失败→修正是强信号，但不能单独决定合并。
+                # 否则同一 thread 中短时间切换到另一个问题，也会被错误串成一个 episode。
+                repair_transition = True
 
-            if rules_hit >= 2:
+            base_rules_hit = semantic_rules_hit + int(time_continuity)
+            should_merge = base_rules_hit >= 2 or (repair_transition and semantic_rules_hit >= 1)
+
+            if should_merge:
                 current.append(trace)
             else:
                 episodes.append(_episode_from_traces(thread_id, current))

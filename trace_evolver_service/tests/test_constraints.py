@@ -5,13 +5,19 @@ from pathlib import Path
 from trace_evolver.analysis import BoundedMarkdownReAct, ErrorAnalyst, _build_ops_from_llm_edits
 from trace_evolver.catalog import scan_skill_roots
 from trace_evolver.config import LLMSettings, Settings
+from trace_evolver.db import create_session_factory
+from trace_evolver.episodes import build_episodes
 from trace_evolver.patching import PatchEngine
+from trace_evolver.service import TraceEvolutionService
 from trace_evolver.schemas import (
     EditOp,
     EvidenceSpan,
     Episode,
     FailureHypothesis,
     HypothesisPatch,
+    ImportedTrace,
+    TraceStep,
+    TraceToolCall,
 )
 
 
@@ -34,6 +40,42 @@ def _build_bundle(root: Path) -> Path:
     )
     (bundle / "notes.txt").write_text("plain text\n", encoding="utf-8")
     return bundle
+
+
+def _make_trace(
+    *,
+    trace_id: str,
+    thread_id: str,
+    started_at: str,
+    ended_at: str,
+    user_message: str,
+    outcome: str,
+    used_skills: list[str],
+    tool_names: list[str],
+) -> ImportedTrace:
+    return ImportedTrace(
+        traceId=trace_id,
+        threadId=thread_id,
+        startedAt=started_at,
+        endedAt=ended_at,
+        durationMs=60_000,
+        userMessage=user_message,
+        modelId="test-model",
+        steps=[
+            TraceStep(
+                index=0,
+                startedAt=started_at,
+                assistantText=user_message,
+                toolCalls=[TraceToolCall(name=name) for name in tool_names],
+            )
+        ],
+        totalToolCalls=len(tool_names),
+        outcome=outcome,
+        usedSkills=used_skills,
+        source_path="/tmp/source",
+        local_path="/tmp/source",
+        ingested_at="2025-01-01T00:00:00Z",
+    )
 
 
 def test_llm_edit_builder_only_allows_visible_existing_markdown(tmp_path: Path) -> None:
@@ -212,3 +254,177 @@ def test_error_analyst_can_request_full_read_before_writing_patch(tmp_path: Path
     assert patch is not None
     assert "references/troubleshooting.md" in patch.visible_files
     assert any(op.file_path == "references/troubleshooting.md" for op in patch.ops)
+
+
+def test_build_episodes_does_not_merge_only_on_repair_transition(tmp_path: Path) -> None:
+    traces = [
+        _make_trace(
+            trace_id="trace-a",
+            thread_id="thread-1",
+            started_at="2025-01-01T10:00:00Z",
+            ended_at="2025-01-01T10:01:00Z",
+            user_message="Fix the login validation mismatch",
+            outcome="error",
+            used_skills=["login-skill"],
+            tool_names=["edit_file"],
+        ),
+        _make_trace(
+            trace_id="trace-b",
+            thread_id="thread-1",
+            started_at="2025-01-01T10:02:00Z",
+            ended_at="2025-01-01T10:03:00Z",
+            user_message="Summarize the PDF export issues",
+            outcome="success",
+            used_skills=["pdf-skill"],
+            tool_names=["read_pdf"],
+        ),
+    ]
+
+    episodes = build_episodes(traces, gap_minutes=30)
+    assert len(episodes) == 2
+    assert episodes[0].trace_ids == ["trace-a"]
+    assert episodes[1].trace_ids == ["trace-b"]
+
+
+def test_patch_engine_marks_missing_heading_as_unresolved(tmp_path: Path) -> None:
+    _build_bundle(tmp_path / "skills")
+    bundle = scan_skill_roots([str(tmp_path / "skills")])[0]
+    engine = PatchEngine()
+
+    patch = HypothesisPatch(
+        patch_id="patch-heading-miss",
+        source_kind="error",
+        target_skill_id=bundle.skill_id,
+        family_id="fam-1",
+        source_trace_ids=["trace-1"],
+        source_thread_ids=["thread-1"],
+        base_bundle_hash=bundle.bundle_hash,
+        visible_files=["SKILL.md"],
+        ops=[
+            EditOp(
+                file_path="SKILL.md",
+                action="insert_after",
+                anchor={"anchor_type": "heading", "heading_path": ["Missing Section"], "text_hint": "Missing Section"},
+                content="- This should not silently drift to the file end.\n",
+                intent="guardrail",
+                source_visibility="full",
+            )
+        ],
+        confidence=0.7,
+        rationale="test",
+    )
+
+    result = engine.apply("cand-heading-miss", [patch], bundle, tmp_path / "candidate")
+    assert result.candidate.unresolved_ops
+    assert "heading anchor unresolved" in result.candidate.unresolved_ops[0]
+    skill_text = (Path(result.candidate.full_bundle_path) / "SKILL.md").read_text(encoding="utf-8")
+    assert "This should not silently drift" not in skill_text
+
+
+def test_patch_engine_allows_skill_md_new_section_append_fallback(tmp_path: Path) -> None:
+    _build_bundle(tmp_path / "skills")
+    bundle = scan_skill_roots([str(tmp_path / "skills")])[0]
+    engine = PatchEngine()
+
+    patch = HypothesisPatch(
+        patch_id="patch-skill-append",
+        source_kind="error",
+        target_skill_id=bundle.skill_id,
+        family_id="fam-1",
+        source_trace_ids=["trace-1"],
+        source_thread_ids=["thread-1"],
+        base_bundle_hash=bundle.bundle_hash,
+        visible_files=["SKILL.md"],
+        ops=[
+            EditOp(
+                file_path="SKILL.md",
+                action="insert_after",
+                anchor={"anchor_type": "heading", "heading_path": ["Missing Section"], "text_hint": "Missing Section"},
+                content="## Trace-Grounded Note\n\n- Safe fallback append.\n",
+                intent="reference",
+                source_visibility="full",
+            )
+        ],
+        confidence=0.7,
+        rationale="test",
+    )
+
+    result = engine.apply("cand-skill-append", [patch], bundle, tmp_path / "candidate")
+    assert not result.candidate.unresolved_ops
+    skill_text = (Path(result.candidate.full_bundle_path) / "SKILL.md").read_text(encoding="utf-8")
+    assert "## Trace-Grounded Note" in skill_text
+
+
+def test_merge_batch_adds_skill_link_for_created_markdown(tmp_path: Path, monkeypatch) -> None:
+    settings = Settings(state_dir=tmp_path / "state", llm=LLMSettings(api_key="test-key"))
+    service = TraceEvolutionService(settings, create_session_factory(settings))
+
+    patch_a = HypothesisPatch(
+        patch_id="patch-a",
+        source_kind="error",
+        target_skill_id="skill-a",
+        family_id="fam-1",
+        source_trace_ids=["trace-a"],
+        source_thread_ids=["thread-a"],
+        base_bundle_hash="bundle-hash",
+        visible_files=["SKILL.md"],
+        ops=[
+            EditOp(
+                file_path="SKILL.md",
+                action="insert_after",
+                anchor={"anchor_type": "file_end", "text_hint": "append at file end"},
+                content="- Existing context.\n",
+                intent="guardrail",
+                source_visibility="full",
+            )
+        ],
+        confidence=0.7,
+        rationale="test",
+    )
+    patch_b = HypothesisPatch(
+        patch_id="patch-b",
+        source_kind="error",
+        target_skill_id="skill-a",
+        family_id="fam-1",
+        source_trace_ids=["trace-b"],
+        source_thread_ids=["thread-b"],
+        base_bundle_hash="bundle-hash",
+        visible_files=["SKILL.md"],
+        ops=[
+            EditOp(
+                file_path="SKILL.md",
+                action="insert_after",
+                anchor={"anchor_type": "file_end", "text_hint": "append at file end"},
+                content="- Existing context 2.\n",
+                intent="guardrail",
+                source_visibility="full",
+            )
+        ],
+        confidence=0.8,
+        rationale="test 2",
+    )
+
+    class FakeLLM:
+        def chat_json(self, messages, temperature=None, max_tokens=None):  # noqa: ANN001
+            return {
+                "reasoning": "Create a dedicated reference note.",
+                "edits": [
+                    {
+                        "file": "references/generated-note.md",
+                        "op": "create",
+                        "content": "# Generated note\n\nExtra guidance.\n",
+                        "intent": "reference",
+                    }
+                ],
+                "confidence": 0.8,
+            }
+
+    monkeypatch.setattr(service, "_get_llm", lambda: FakeLLM())
+
+    merged = service._llm_merge_batch([patch_a, patch_b])  # noqa: SLF001 - test merge post-processing directly
+    assert merged is not None
+    assert any(op.file_path == "references/generated-note.md" and op.action == "create_file" for op in merged.ops)
+    assert any(
+        op.file_path == "SKILL.md" and "references/generated-note.md" in op.content
+        for op in merged.ops
+    )
