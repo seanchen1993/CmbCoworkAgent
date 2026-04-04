@@ -31,6 +31,10 @@ from trace_evolver.schemas import AnchorSpec, CandidateBundle, EditOp, Hypothesi
 from trace_evolver.utils import is_allowed_markdown_path, is_allowed_markdown_relative_path, json_dumps, sha256_text, slugify
 
 
+class AnchorFallbackWarning(UserWarning):
+    """Raised when heading anchor couldn't be resolved and fell back to file_end."""
+
+
 @dataclass
 class ApplyResult:
     candidate: CandidateBundle
@@ -66,12 +70,19 @@ class PatchEngine:
         before_texts = self._snapshot_markdown(staging_dir)
 
         unresolved_ops: list[str] = []
+        anchor_fallbacks: list[str] = []
         files_changed: set[str] = set()
         for patch in patch_group:
             for op in patch.ops:
                 try:
-                    changed_file = self._apply_op(staging_dir, op)
-                    files_changed.add(changed_file)
+                    import warnings as _warnings
+                    with _warnings.catch_warnings(record=True) as caught:
+                        _warnings.simplefilter("always", AnchorFallbackWarning)
+                        changed_file = self._apply_op(staging_dir, op)
+                        files_changed.add(changed_file)
+                    for w in caught:
+                        if issubclass(w.category, AnchorFallbackWarning):
+                            anchor_fallbacks.append(f"{op.file_path}:anchor_fallback:{w.message}")
                 except Exception as exc:
                     unresolved_ops.append(f"{op.file_path}:{exc}")
 
@@ -80,6 +91,7 @@ class PatchEngine:
             files_changed.add("SKILL.md")
 
         warnings.extend(unresolved_ops)
+        warnings.extend(anchor_fallbacks)
         self._validate_bundle(staging_dir)
         after_texts = self._snapshot_markdown(staging_dir)
         diff_patch, diff_json = self._diff_markdown(before_texts, after_texts)
@@ -178,8 +190,12 @@ class PatchEngine:
                     if text_hint in lowered:
                         return index
 
-            # Pass 3: fallback to file end rather than losing the edit entirely
-            logger.warning("heading anchor unresolved (targets=%s, hint=%s), falling back to file end", targets, text_hint)
+            # Pass 3: fallback to file end — but emit a warning so the signal is visible
+            # in ApplyResult.warnings and evaluation/review can see the LLM missed the target.
+            import warnings as _warnings
+            msg = f"heading anchor unresolved (targets={targets}, hint={text_hint}), fell back to file_end"
+            logger.warning(msg)
+            _warnings.warn(msg, AnchorFallbackWarning, stacklevel=2)
             return len(lines) - 1 if lines else 0
         if anchor.anchor_type in {"paragraph", "list_item"}:
             hint = (anchor.text_hint or anchor.fingerprint or "").strip().lower()
