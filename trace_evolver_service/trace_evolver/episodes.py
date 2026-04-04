@@ -1,7 +1,7 @@
 """
 thread / episode / family 构建模块。
 
-这层是主流程里最重要的“结构化”步骤：
+这层是主流程里最重要的"结构化"步骤：
 
 - thread:
   按 trace.threadId 直接聚合，是最原始的会话边界
@@ -12,7 +12,7 @@ thread / episode / family 构建模块。
 
 - family:
   将跨 thread 的相似 episode 聚成一组
-  这是 patch merge 和“是否值得沉淀成 skill”判断的最小单元
+  这是 patch merge 和"是否值得沉淀成 skill"判断的最小单元
 
 V1 的切分和聚类都是启发式的，不依赖真实环境状态。
 """
@@ -83,7 +83,9 @@ def build_episodes(traces: list[ImportedTrace], gap_minutes: int) -> list[Episod
             if jaccard_similarity(_tool_signature(prev), _tool_signature(trace)) >= 0.20:
                 rules_hit += 1
             if prev.outcome in {"error", "unknown"} and trace.outcome in {"error", "success"}:
-                rules_hit += 1
+                # 失败→修正 链路是进化最有价值的信号，给双倍权重
+                # 避免因为时间间隔大、措辞变化等原因被错误切断
+                rules_hit += 2
 
             if rules_hit >= 2:
                 current.append(trace)

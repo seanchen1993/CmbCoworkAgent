@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Iterable
 
 
@@ -82,7 +82,18 @@ def is_allowed_markdown_path(bundle_root: Path, file_path: Path) -> bool:
         relative = file_path.resolve().relative_to(bundle_root.resolve())
     except ValueError:
         return False
-    if file_path.suffix.lower() != ".md":
+    return is_allowed_markdown_relative_path(str(relative))
+
+
+def is_allowed_markdown_relative_path(relative_path: str) -> bool:
+    relative = PurePosixPath(relative_path)
+    if relative.is_absolute():
+        return False
+    if not relative.parts:
+        return False
+    if any(part in {"..", ""} for part in relative.parts):
+        return False
+    if relative.suffix.lower() != ".md":
         return False
     return not any(part in EXCLUDED_PARTS for part in relative.parts)
 

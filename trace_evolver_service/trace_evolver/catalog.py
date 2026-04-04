@@ -2,7 +2,7 @@
 skill catalog 与 markdown catalog 构建模块。
 
 这个模块解决两个问题：
-1. 当前本地有哪些可作为“基线 bundle”的 skill
+1. 当前本地有哪些可作为"基线 bundle"的 skill
 2. 每个 bundle 里有哪些 markdown 文件可供 bounded markdown ReAct 选择
 
 注意：
@@ -51,6 +51,18 @@ def _extract_links(text: str) -> list[str]:
     return sorted({match.group(1) for match in LINK_RE.finditer(text)})
 
 
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate supporting CJK text."""
+    if not text:
+        return 1
+    cjk_chars = sum(1 for ch in text if '\u4e00' <= ch <= '\u9fff' or '\u3400' <= ch <= '\u4dbf')
+    word_count = len(text.split())
+    if cjk_chars > word_count:
+        non_cjk_words = max(0, word_count - cjk_chars // 4)
+        return max(1, int(cjk_chars * 1.5) + non_cjk_words)
+    return max(1, word_count)
+
+
 def collect_markdown_files(bundle_root: Path) -> list[Path]:
     markdown_files: list[Path] = []
     for path in sorted(bundle_root.rglob("*.md")):
@@ -67,7 +79,7 @@ def build_markdown_meta(bundle_root: Path, file_path: Path) -> MarkdownFileMeta:
         heading_tree=_extract_heading_tree(text),
         first_paragraph_summary=_extract_summary(text),
         linked_markdown_paths=_extract_links(text),
-        token_estimate=max(1, len(text.split())),
+        token_estimate=_estimate_tokens(text),
         content_hash=sha256_file(file_path),
     )
 
@@ -103,9 +115,18 @@ def scan_skill_roots(skill_roots: list[str]) -> list[SkillBundleMeta]:
 
 
 def match_skill_bundle(used_skills: list[str], bundles: list[SkillBundleMeta]) -> SkillBundleMeta | None:
+    """Match episode's used_skills against available bundles.
+
+    Matching strategy (by priority):
+    1. Exact match on skill_id or display_name (case-insensitive)
+    2. Substring/contains match (e.g. "cowork-excel-skill" matches "excel-skill")
+    3. Token overlap (Jaccard ≥ 0.5 on slugified tokens)
+    """
     normalized = {skill.strip().lower() for skill in used_skills if skill.strip()}
     if not normalized:
         return None
+
+    # Pass 1: exact match
     by_id = {bundle.skill_id.lower(): bundle for bundle in bundles}
     by_name = {bundle.display_name.strip().lower(): bundle for bundle in bundles}
     for value in normalized:
@@ -113,4 +134,32 @@ def match_skill_bundle(used_skills: list[str], bundles: list[SkillBundleMeta]) -
             return by_id[value]
         if value in by_name:
             return by_name[value]
+
+    # Pass 2: substring containment
+    for value in normalized:
+        for bundle in bundles:
+            bid = bundle.skill_id.lower()
+            bname = bundle.display_name.strip().lower()
+            if bid in value or value in bid or bname in value or value in bname:
+                return bundle
+
+    # Pass 3: token overlap
+    from trace_evolver.utils import tokenize
+    query_tokens = set()
+    for value in normalized:
+        query_tokens |= tokenize(value)
+    if query_tokens:
+        best_bundle: SkillBundleMeta | None = None
+        best_score = 0.0
+        for bundle in bundles:
+            bundle_tokens = tokenize(bundle.skill_id) | tokenize(bundle.display_name)
+            if not bundle_tokens:
+                continue
+            overlap = len(query_tokens & bundle_tokens) / len(query_tokens | bundle_tokens)
+            if overlap > best_score:
+                best_score = overlap
+                best_bundle = bundle
+        if best_score >= 0.5:
+            return best_bundle
+
     return None

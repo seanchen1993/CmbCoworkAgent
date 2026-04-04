@@ -16,16 +16,19 @@ V1 明确不允许模型直接生成最终文件并覆盖源 bundle。
 from __future__ import annotations
 
 import difflib
+import logging
 import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 import frontmatter
 from markdown_it import MarkdownIt
 
 from trace_evolver.schemas import AnchorSpec, CandidateBundle, EditOp, HypothesisPatch, SkillBundleMeta
-from trace_evolver.utils import json_dumps, sha256_text, slugify
+from trace_evolver.utils import is_allowed_markdown_path, is_allowed_markdown_relative_path, json_dumps, sha256_text, slugify
 
 
 @dataclass
@@ -97,6 +100,8 @@ class PatchEngine:
 
     def _apply_op(self, staging_dir: Path, op: EditOp) -> str:
         # 所有写入都必须被限制在 candidate bundle 根目录内，避免路径逃逸。
+        if not is_allowed_markdown_relative_path(op.file_path):
+            raise ValueError("target file is outside markdown whitelist")
         target = (staging_dir / op.file_path).resolve()
         try:
             target.relative_to(staging_dir.resolve())
@@ -145,12 +150,14 @@ class PatchEngine:
         return frontmatter.dumps(post)
 
     def _resolve_anchor(self, lines: list[str], anchor: AnchorSpec | None) -> int:
-        # anchor 解析按“从强到弱”顺序进行；越弱的 anchor，误命中的风险越高。
+        # anchor 解析按”从强到弱”顺序进行；越弱的 anchor，误命中的风险越高。
         if anchor is None or anchor.anchor_type == "file_end":
             return len(lines) - 1 if lines else 0
         if anchor.anchor_type == "heading":
             targets = [segment.lower() for segment in (anchor.heading_path or []) if segment]
             text_hint = (anchor.text_hint or "").lower()
+
+            # Pass 1: exact match (heading text == target or hint)
             for index, line in enumerate(lines):
                 stripped = line.strip()
                 if not stripped.startswith("#"):
@@ -158,9 +165,22 @@ class PatchEngine:
                 lowered = stripped.lstrip("#").strip().lower()
                 if targets and lowered == targets[-1]:
                     return index
-                if text_hint and text_hint in lowered:
+                if text_hint and lowered == text_hint:
                     return index
-            raise ValueError("heading anchor unresolved")
+
+            # Pass 2: substring fallback (only if exact match failed)
+            if text_hint:
+                for index, line in enumerate(lines):
+                    stripped = line.strip()
+                    if not stripped.startswith("#"):
+                        continue
+                    lowered = stripped.lstrip("#").strip().lower()
+                    if text_hint in lowered:
+                        return index
+
+            # Pass 3: fallback to file end rather than losing the edit entirely
+            logger.warning("heading anchor unresolved (targets=%s, hint=%s), falling back to file end", targets, text_hint)
+            return len(lines) - 1 if lines else 0
         if anchor.anchor_type in {"paragraph", "list_item"}:
             hint = (anchor.text_hint or anchor.fingerprint or "").strip().lower()
             for index, line in enumerate(lines):
@@ -215,7 +235,8 @@ class PatchEngine:
         parser = MarkdownIt()
         # Parsing every markdown file catches broken candidate output before anything is exported.
         for path in sorted(bundle_dir.rglob("*.md")):
-            parser.parse(path.read_text(encoding="utf-8"))
+            if is_allowed_markdown_path(bundle_dir, path):
+                parser.parse(path.read_text(encoding="utf-8"))
 
     def _snapshot_markdown(self, bundle_dir: Path) -> dict[str, str]:
         # diff 只关注 markdown 文件；其他文件会保留在 bundle 中，但不进入 diff 计算。
@@ -223,7 +244,8 @@ class PatchEngine:
         if not bundle_dir.exists():
             return snapshot
         for path in sorted(bundle_dir.rglob("*.md")):
-            snapshot[str(path.relative_to(bundle_dir))] = path.read_text(encoding="utf-8")
+            if is_allowed_markdown_path(bundle_dir, path):
+                snapshot[str(path.relative_to(bundle_dir))] = path.read_text(encoding="utf-8")
         return snapshot
 
     def _diff_markdown(

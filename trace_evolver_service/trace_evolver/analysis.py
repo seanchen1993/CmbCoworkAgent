@@ -41,7 +41,7 @@ from trace_evolver.schemas import (
     SkillBundleMeta,
     SuccessPattern,
 )
-from trace_evolver.utils import sha256_text, slugify, tokenize, trim_snippet
+from trace_evolver.utils import is_allowed_markdown_relative_path, sha256_text, slugify, tokenize, trim_snippet
 
 logger = logging.getLogger(__name__)
 
@@ -183,6 +183,138 @@ def _build_heading_tree_text(bundle: SkillBundleMeta) -> str:
     return "(no SKILL.md metadata)"
 
 
+def _estimate_token_count(text: str) -> int:
+    """Rough token estimate that works for both English and Chinese text.
+
+    English: ~1 token per word (space-split).
+    Chinese/CJK: ~1.5 tokens per character (no spaces between words).
+    Mixed: sum both estimates.
+    """
+    if not text:
+        return 1
+    # Count CJK characters (Chinese, Japanese, Korean)
+    cjk_chars = sum(1 for ch in text if '\u4e00' <= ch <= '\u9fff' or '\u3400' <= ch <= '\u4dbf')
+    # Count space-separated words (primarily for non-CJK)
+    word_count = len(text.split())
+    if cjk_chars > word_count:
+        # Predominantly CJK: ~1.5 tokens per CJK char + remaining words
+        non_cjk_words = max(0, word_count - cjk_chars // 4)
+        return max(1, int(cjk_chars * 1.5) + non_cjk_words)
+    return max(1, word_count)
+
+
+def _assemble_visible_file_context(
+    bundle: SkillBundleMeta,
+    selected_files: list[str],
+    hard_budget_tokens: int,
+) -> tuple[list[str], dict[str, str], list[str]]:
+    """
+    把候选文件收敛到真正进入 prompt 的"完整可见文件"集合。
+
+    规则：
+    - 已经选中的文件，仍然要经过 hard budget 控制
+    - 只有真正进入 prompt 的文件，才允许后续 patch 修改
+    - 超预算的文件会被剔除，而不是截断后继续当作 full-visible
+    """
+    full_visible_files: list[str] = []
+    file_contents: dict[str, str] = {}
+    notes: list[str] = []
+    used_tokens = 0
+
+    for path in selected_files:
+        content = _read_relative_file_safe(bundle, path)
+        if not content:
+            continue
+        token_count = _estimate_token_count(content)
+        if full_visible_files and used_tokens + token_count > hard_budget_tokens:
+            notes.append(f"skipped {path} because it would exceed markdown hard budget")
+            continue
+        full_visible_files.append(path)
+        file_contents[path] = content
+        used_tokens += token_count
+
+    return full_visible_files, file_contents, notes
+
+
+def _build_markdown_catalog_text(bundle: SkillBundleMeta, visible_files: list[str]) -> str:
+    """Render a compact catalog view for the planner step.
+
+    The planner only sees metadata for non-visible files. This mirrors the
+    bounded ReAct contract: decide whether more context is needed from catalog
+    signals, then request a full read explicitly.
+    """
+    visible_set = set(visible_files)
+    lines: list[str] = []
+    for meta in bundle.markdown_files:
+        visibility = "full" if meta.file_path in visible_set else "catalog"
+        headings = ", ".join(meta.heading_tree[:4]) if meta.heading_tree else "(no headings)"
+        lines.append(
+            f"- {meta.file_path} [{visibility}] tokens≈{meta.token_estimate} "
+            f"headings={headings} summary={trim_snippet(meta.first_paragraph_summary, 120)}"
+        )
+    return "\n".join(lines)
+
+
+def _normalize_read_requests(raw_requests: list[dict], bundle: SkillBundleMeta, visible_files: list[str]) -> list[str]:
+    """Validate planner requests and keep only bundle-local markdown paths.
+
+    The coordinator may let the model decide *what else it wants to read*, but
+    the system decides whether the request is valid and actionable.
+    """
+    known_paths = {meta.file_path for meta in bundle.markdown_files}
+    visible_set = set(visible_files)
+    normalized: list[str] = []
+    for raw in raw_requests[:4]:
+        path = raw.get("file")
+        if not isinstance(path, str):
+            continue
+        if path in visible_set:
+            continue
+        if path not in known_paths:
+            continue
+        if not is_allowed_markdown_relative_path(path):
+            continue
+        normalized.append(path)
+    return normalized
+
+
+def _expand_visible_file_context(
+    bundle: SkillBundleMeta,
+    current_visible_files: list[str],
+    current_contents: dict[str, str],
+    requested_files: list[str],
+    *,
+    hard_budget_tokens: int,
+    max_files: int,
+) -> tuple[list[str], dict[str, str], list[str]]:
+    """Promote planner-approved files from catalog visibility to full visibility."""
+    visible_files = list(current_visible_files)
+    contents = dict(current_contents)
+    notes: list[str] = []
+    used_tokens = sum(_estimate_token_count(text) for text in contents.values())
+
+    for path in requested_files:
+        if path in contents:
+            continue
+        if len(visible_files) >= max_files:
+            notes.append(f"skipped {path} because markdown file limit was reached")
+            continue
+        content = _read_relative_file_safe(bundle, path)
+        if not content:
+            notes.append(f"skipped {path} because the file could not be read")
+            continue
+        token_count = _estimate_token_count(content)
+        if used_tokens + token_count > hard_budget_tokens:
+            notes.append(f"skipped {path} because it would exceed markdown hard budget")
+            continue
+        visible_files.append(path)
+        contents[path] = content
+        used_tokens += token_count
+        notes.append(f"opened {path} after planner request")
+
+    return visible_files, contents, notes
+
+
 # ---------------------------------------------------------------------------
 # BoundedMarkdownReAct (heuristic — no LLM needed)
 # ---------------------------------------------------------------------------
@@ -219,12 +351,15 @@ class BoundedMarkdownReAct:
         selected_files: list[str] = []
         selected_spans: list[SelectedSpan] = []
         notes: list[str] = []
+        soft_budget = self.settings.llm.markdown_soft_budget_tokens
+        used_budget = 0
 
         if "SKILL.md" in file_map:
             selected_files.append("SKILL.md")
             content = _read_relative_file(bundle, "SKILL.md")
             selected_spans.append(_top_snippet(file_map["SKILL.md"], content, query_tokens))
             notes.append("opened SKILL.md as mandatory context")
+            used_budget += file_map["SKILL.md"].token_estimate
 
         turns = 0
         while turns < self.settings.markdown_react_max_turns and len(selected_files) < self.settings.markdown_react_max_files:
@@ -240,12 +375,25 @@ class BoundedMarkdownReAct:
             if not scored or scored[0][0] <= self.MIN_RELEVANCE_SCORE:
                 notes.append("no more relevant markdown files (below score threshold)")
                 break
-            _, path, meta = scored[0]
+            choice = None
+            for score, path, meta in scored:
+                if score <= self.MIN_RELEVANCE_SCORE:
+                    break
+                if used_budget + meta.token_estimate <= soft_budget:
+                    choice = (score, path, meta)
+                    break
+                else:
+                    notes.append(f"skipped {path} (score={score:.2f}, tokens≈{meta.token_estimate}) — exceeds soft budget")
+            if choice is None:
+                notes.append("no more relevant markdown files within soft budget")
+                break
+            score, path, meta = choice
             selected_files.append(path)
             content = _read_relative_file(bundle, path)
             selected_spans.append(_top_snippet(meta, content, query_tokens))
             query_tokens |= tokenize(" ".join(meta.heading_tree[:2] + [meta.first_paragraph_summary]))
-            notes.append(f"opened {path} on turn {turns} (score={scored[0][0]:.2f})")
+            used_budget += meta.token_estimate
+            notes.append(f"opened {path} on turn {turns} (score={score:.2f}, used_budget={used_budget})")
         return selected_files, selected_spans, notes
 
 
@@ -597,12 +745,23 @@ class ErrorAnalyst:
     ) -> HypothesisPatch | None:
         llm = _get_llm(self.settings)
 
-        # Build full file context — no aggressive truncation
-        file_contents: dict[str, str] = {}
-        for path in selected_files:
-            content = _read_relative_file_safe(bundle, path)
-            if content:
-                file_contents[path] = content
+        full_visible_files, file_contents, budget_notes = _assemble_visible_file_context(
+            bundle,
+            selected_files,
+            self.settings.llm.markdown_hard_budget_tokens,
+        )
+        if "SKILL.md" not in full_visible_files:
+            logger.warning("SKILL.md was not fully visible after budget filtering; falling back to heuristic patch writing")
+            return None
+
+        full_visible_files, file_contents, planning_notes = self._coordinate_patch_context_with_llm(
+            episode,
+            bundle,
+            hypothesis,
+            full_visible_files,
+            file_contents,
+            selected_spans,
+        )
 
         files_context = "\n\n".join(
             f"### {path}\n```markdown\n{content}\n```"
@@ -678,7 +837,7 @@ class ErrorAnalyst:
         if not raw_edits:
             return None
 
-        ops = _build_ops_from_llm_edits(raw_edits, bundle, selected_files)
+        ops = _build_ops_from_llm_edits(raw_edits, bundle, full_visible_files)
         if not ops:
             return None
 
@@ -690,13 +849,118 @@ class ErrorAnalyst:
             source_trace_ids=episode.trace_ids,
             source_thread_ids=[episode.thread_id],
             base_bundle_hash=bundle.bundle_hash,
-            visible_files=list(selected_files),
+            visible_files=list(full_visible_files),
             ops=ops,
             confidence=float(result.get("confidence", 0.6)),
             rationale=result.get("rationale", "LLM-generated patch based on trace failure analysis."),
-            risk_flags=[],
+            risk_flags=(
+                ["markdown-budget-limited"] if (budget_notes or planning_notes) else []
+            ),
             evidence_spans=hypothesis.evidence_spans,
         )
+
+    def _coordinate_patch_context_with_llm(
+        self,
+        episode: Episode,
+        bundle: SkillBundleMeta,
+        hypothesis: FailureHypothesis,
+        full_visible_files: list[str],
+        file_contents: dict[str, str],
+        selected_spans: list[SelectedSpan],
+    ) -> tuple[list[str], dict[str, str], list[str]]:
+        """Allow one bounded planning loop where the model can request more files.
+
+        The model does not get to modify a file just because it knows the path.
+        Instead it can request a full read, and the coordinator upgrades the
+        file's visibility only if the request stays within file and token
+        budgets. Patch generation always happens after this visibility pass.
+        """
+        llm = _get_llm(self.settings)
+        notes: list[str] = []
+        current_visible = list(full_visible_files)
+        current_contents = dict(file_contents)
+
+        for round_index in range(self.settings.markdown_patch_planning_max_rounds):
+            visible_summary = "\n".join(f"- {path}" for path in current_visible)
+            selected_span_text = "\n".join(
+                f"- {span.file_path}: {span.reason}; heading={span.heading or '(none)'}"
+                for span in selected_spans[:8]
+            ) or "(none)"
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a bounded markdown planning assistant.\n\n"
+                        "Your job is NOT to write patches yet. First decide whether the currently visible "
+                        "files are sufficient to safely write a patch for the diagnosed failure.\n"
+                        "You may request additional FULL markdown files, but only when they are necessary.\n\n"
+                        "Return JSON only:\n"
+                        "{\n"
+                        '  "action": "read_more or write_patch",\n'
+                        '  "read_requests": [\n'
+                        "    {\n"
+                        '      "file": "bundle-local markdown path",\n'
+                        '      "reason": "why full visibility is needed before editing or linking"\n'
+                        "    }\n"
+                        "  ],\n"
+                        '  "notes": ["optional short planning notes"]\n'
+                        "}\n"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"## Failure Diagnosis\n"
+                        f"Failure surface: {hypothesis.failure_surface}\n"
+                        f"Root cause: {hypothesis.suspected_root_cause}\n\n"
+                        f"## Episode Context\n"
+                        f"User messages: {'; '.join(episode.user_messages[:3])}\n"
+                        f"Skills used: {', '.join(episode.used_skills)}\n\n"
+                        f"## Currently Visible Files\n{visible_summary}\n\n"
+                        f"## Selected Relevant Spans\n{selected_span_text}\n\n"
+                        f"## Markdown Catalog\n{_build_markdown_catalog_text(bundle, current_visible)}\n\n"
+                        "If you need another file in full before writing the patch, request it now. "
+                        "Otherwise return action=write_patch."
+                    ),
+                },
+            ]
+
+            try:
+                result = llm.chat_json(messages, temperature=0.1)
+            except Exception:
+                logger.warning("LLM planning step failed; continuing with current visible files", exc_info=True)
+                notes.append("planner failed; used current visible files")
+                break
+
+            notes.extend(str(note) for note in result.get("notes", [])[:4] if str(note).strip())
+            action = str(result.get("action", "write_patch")).strip().lower()
+            if action != "read_more":
+                break
+
+            requested_files = _normalize_read_requests(
+                result.get("read_requests", []),
+                bundle,
+                current_visible,
+            )
+            if not requested_files:
+                notes.append("planner requested more context without valid file targets")
+                break
+
+            current_visible, current_contents, expand_notes = _expand_visible_file_context(
+                bundle,
+                current_visible,
+                current_contents,
+                requested_files,
+                hard_budget_tokens=self.settings.llm.markdown_hard_budget_tokens,
+                max_files=self.settings.markdown_react_max_files,
+            )
+            notes.extend(expand_notes)
+
+            if not any(note.startswith("opened ") for note in expand_notes):
+                notes.append("planner requests could not be satisfied; continuing with current visible files")
+                break
+
+        return current_visible, current_contents, notes
 
     def _write_patch_heuristic(
         self,
@@ -812,9 +1076,12 @@ def _build_ops_from_llm_edits(
     VALID_INTENTS = {"trigger", "workflow", "guardrail", "example", "reference", "metadata"}
     ops: list[EditOp] = []
     created_refs: set[str] = set()
+    visible_file_set = set(visible_files)
 
     for raw in raw_edits[:6]:  # cap at 6 ops per patch
         file_path = raw.get("file", "SKILL.md")
+        if not isinstance(file_path, str):
+            continue
         content = raw.get("content", "")
         if not content.strip():
             continue
@@ -826,12 +1093,15 @@ def _build_ops_from_llm_edits(
         op_type = raw.get("op", "insert_after")
         target_section = raw.get("target_section")
 
-        # Determine if this is a file creation or an edit
-        is_create = (op_type == "create" or file_path.startswith("references/"))
-        is_existing = file_path in visible_files or file_path in {m.file_path for m in bundle.markdown_files}
+        # Determine if this is a file creation or an edit.
+        # Existing files are only writable when they were fully visible in the prompt.
+        is_existing_in_bundle = file_path in {m.file_path for m in bundle.markdown_files}
+        is_visible_existing = file_path in visible_file_set
+        is_create = op_type == "create" and not is_existing_in_bundle
 
-        if is_create and not is_existing:
-            # Creating a new references/ file
+        if is_create:
+            if not is_allowed_markdown_relative_path(file_path):
+                continue
             ops.append(EditOp(
                 file_path=file_path,
                 action="create_file",
@@ -839,11 +1109,13 @@ def _build_ops_from_llm_edits(
                 intent=intent,
                 source_visibility="created",
             ))
-            created_refs.add(file_path)
+            if file_path.startswith("references/"):
+                created_refs.add(file_path)
         else:
-            # Safety: only allow editing files that exist in the bundle
-            if not is_existing:
-                file_path = "SKILL.md"
+            if not is_visible_existing:
+                continue
+            if not is_allowed_markdown_relative_path(file_path):
+                continue
 
             # Build anchor from target_section
             anchor = _build_anchor_from_target_section(target_section)

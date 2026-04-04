@@ -14,11 +14,14 @@ V1 只支持本地文件系统输入，因此这里的职责很明确：
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 from pathlib import Path
 
 from trace_evolver.schemas import AgentTrace, ImportedTrace
 from trace_evolver.utils import ensure_absolute, utc_now
+
+logger = logging.getLogger(__name__)
 
 
 class LocalTraceSource:
@@ -61,6 +64,9 @@ def load_imported_traces(jsonl_files: list[Path]) -> list[ImportedTrace]:
     imported: list[ImportedTrace] = []
     seen_trace_ids: set[str] = set()
     ingested_at = utc_now()
+    total_lines = 0
+    skipped_lines = 0
+    duplicate_count = 0
 
     for local_file in sorted(jsonl_files):
         with local_file.open("r", encoding="utf-8") as handle:
@@ -68,13 +74,15 @@ def load_imported_traces(jsonl_files: list[Path]) -> list[ImportedTrace]:
                 line = raw_line.strip()
                 if not line:
                     continue
+                total_lines += 1
                 try:
                     payload = json.loads(line)
                     trace = AgentTrace.model_validate(payload)
                 except Exception:
-                    # V1 对脏数据采取“跳过坏行、不中断 run”的策略。
+                    skipped_lines += 1
                     continue
                 if trace.traceId in seen_trace_ids:
+                    duplicate_count += 1
                     continue
                 seen_trace_ids.add(trace.traceId)
                 imported.append(
@@ -85,6 +93,13 @@ def load_imported_traces(jsonl_files: list[Path]) -> list[ImportedTrace]:
                         ingested_at=ingested_at,
                     )
                 )
+
+    logger.info(
+        "Trace ingestion: %d lines read, %d traces imported, %d skipped (bad format), %d duplicates",
+        total_lines, len(imported), skipped_lines, duplicate_count,
+    )
+    if skipped_lines > 0:
+        logger.warning("%d trace lines were skipped due to parse errors", skipped_lines)
 
     imported.sort(key=lambda item: (item.threadId, item.startedAt, item.traceId))
     return imported

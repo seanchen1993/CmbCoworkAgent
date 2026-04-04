@@ -46,6 +46,28 @@ class LLMSettings(BaseModel):
     )
     temperature: float = 0.3
     max_tokens: int = 4096
+    context_window_tokens: int = 128_000
+    system_reserve_tokens: int = 8_000
+    trace_budget_tokens: int = 24_000
+    output_reserve_tokens: int = 12_000
+    markdown_soft_cap_tokens: int = 60_000
+    markdown_hard_cap_tokens: int = 80_000
+
+    @property
+    def markdown_soft_budget_tokens(self) -> int:
+        available = max(
+            8_000,
+            self.context_window_tokens - self.system_reserve_tokens - self.trace_budget_tokens - self.output_reserve_tokens,
+        )
+        return max(8_000, min(self.markdown_soft_cap_tokens, int(available * 0.75)))
+
+    @property
+    def markdown_hard_budget_tokens(self) -> int:
+        available = max(
+            12_000,
+            self.context_window_tokens - self.system_reserve_tokens - self.trace_budget_tokens - self.output_reserve_tokens,
+        )
+        return max(self.markdown_soft_budget_tokens, min(self.markdown_hard_cap_tokens, available))
 
 
 class Settings(BaseModel):
@@ -62,6 +84,7 @@ class Settings(BaseModel):
     markdown_react_max_turns: int = 3
     markdown_react_max_files: int = 4
     markdown_react_max_token_budget: int = 12_000
+    markdown_patch_planning_max_rounds: int = 2
     family_similarity_threshold: float = 0.35
     episode_gap_minutes: int = 30
     host: str = "127.0.0.1"

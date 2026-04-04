@@ -57,12 +57,16 @@ from trace_evolver.schemas import (
     RunResponse,
 )
 from trace_evolver.source import LocalTraceSource, load_imported_traces
-from trace_evolver.utils import json_dumps, sha256_text, slugify, trim_snippet, utc_now
+from trace_evolver.utils import is_allowed_markdown_relative_path, json_dumps, sha256_text, slugify, trim_snippet, utc_now
 
 logger = logging.getLogger(__name__)
 
-# Hierarchical merge batch size (论文 B_merge ≈ 32)
-_MERGE_BATCH_SIZE = 16
+# Hierarchical merge batch size.
+# 论文用 B_merge ≈ 32（Qwen-122B + 128 sub-agents），但我们的场景：
+# - 真实数据，同一技能通常只有 3-15 个 patches
+# - MiniMax-M2.7 处理大量 patch 的能力有限
+# - 适中 batch 让每次 LLM 调用有足够上下文做语义去重，又不至于太长
+_MERGE_BATCH_SIZE = 8
 
 
 class TraceEvolutionService:
@@ -278,18 +282,18 @@ class TraceEvolutionService:
     def _hierarchical_merge(self, bucket: list) -> list:
         """Hierarchical merge following Trace2Skill ℳ operator.
 
-        Merges patches in batches of _MERGE_BATCH_SIZE, level by level,
-        until a single consolidated patch group remains.
+        论文公式: L = ⌈log_{B_merge}|P|⌉ levels
+        每层把 current_level 按 _MERGE_BATCH_SIZE 分组，每组 LLM 合并成 1 个 patch。
+        层层归并直到只剩 1 个 patch（或达到层数上限）。
 
-        At each level, the LLM performs:
-        - Deduplication: keep best version of semantically identical edits
-        - Conflict resolution: choose strongest justification or synthesize
-        - Prevalent pattern bias: recurring edits across patches are prioritized
-        - Unique insight preservation: non-redundant edits are kept
+        LLM merge 失败时的 fallback 策略：
+        - 对失败 batch 做 hash 精确去重（而非直接放弃）
+        - 确保每一层都严格收敛
         """
         current_level = list(bucket)
         level = 0
-        max_levels = max(1, math.ceil(math.log2(max(len(current_level), 2))))
+        # 论文: L = ceil(log_{B_merge}(|P|))，以 batch size 为底
+        max_levels = max(1, math.ceil(math.log(max(len(current_level), 2), max(_MERGE_BATCH_SIZE, 2)))) + 1
 
         while len(current_level) > 1 and level < max_levels:
             next_level: list = []
@@ -302,8 +306,15 @@ class TraceEvolutionService:
                 if merged is not None:
                     next_level.append(merged)
                 else:
-                    # LLM merge failed, fall back to accumulating all patches
-                    next_level.extend(batch)
+                    # LLM merge failed — fall back to hash dedup so the level still converges.
+                    # This guarantees next_level is strictly smaller than current_level.
+                    deduped = self._dedupe_bucket(batch)
+                    next_level.extend(deduped)
+                    logger.warning(
+                        "LLM merge failed for batch of %d patches at level %d; "
+                        "fell back to hash dedup (%d remaining)",
+                        len(batch), level, len(deduped),
+                    )
             current_level = next_level
             level += 1
             logger.info("Hierarchical merge level %d: %d patches remaining", level, len(current_level))
@@ -326,7 +337,7 @@ class TraceEvolutionService:
         patches_description: list[str] = []
         for idx, patch in enumerate(batch):
             ops_text = "\n".join(
-                f"  - [{op.action}] {op.file_path} (intent={op.intent}): {trim_snippet(op.content, 300)}"
+                f"  - [{op.action}] {op.file_path} (intent={op.intent}): {trim_snippet(op.content, 600)}"
                 for op in patch.ops
             )
             patches_description.append(
@@ -339,11 +350,14 @@ class TraceEvolutionService:
         patches_text = "\n\n".join(patches_description)
 
         prevalence_hint = ""
-        if len(batch) >= 4:
+        if len(batch) >= 6:
+            # 只有 batch 足够大时才启用 idiosyncratic 过滤
+            # batch=4 时 "只出现 1 次就丢" 会丢掉 25%，太激进
             prevalence_hint = (
-                "\n**Prevalence rule**: Edits appearing in only 1-2 patches out of "
+                "\n**Prevalence rule**: Edits appearing in only 1 patch out of "
                 f"{len(batch)} should be treated as potentially idiosyncratic and discarded, "
-                "unless they provide clearly unique and valuable guidance.\n"
+                "unless they provide clearly unique and valuable guidance. "
+                "Edits appearing in 2+ patches are considered supported.\n"
             )
 
         messages = [
@@ -409,8 +423,12 @@ class TraceEvolutionService:
         # Build consolidated ops
         VALID_INTENTS = {"trigger", "workflow", "guardrail", "example", "reference", "metadata"}
         ops: list[EditOp] = []
+        visible_existing_files = sorted({f for p in batch for f in p.visible_files})
+        visible_existing_set = set(visible_existing_files)
         for raw in raw_edits[:8]:
             file_path = raw.get("file", "SKILL.md")
+            if not isinstance(file_path, str):
+                continue
             content = raw.get("content", "")
             if not content.strip():
                 continue
@@ -421,6 +439,8 @@ class TraceEvolutionService:
             target_section = raw.get("target_section")
 
             if op_type == "create" and file_path != "SKILL.md":
+                if not is_allowed_markdown_relative_path(file_path):
+                    continue
                 ops.append(EditOp(
                     file_path=file_path,
                     action="create_file",
@@ -429,6 +449,10 @@ class TraceEvolutionService:
                     source_visibility="created",
                 ))
             else:
+                if file_path not in visible_existing_set:
+                    continue
+                if not is_allowed_markdown_relative_path(file_path):
+                    continue
                 anchor = _build_anchor(target_section)
                 ops.append(EditOp(
                     file_path=file_path,
@@ -460,7 +484,7 @@ class TraceEvolutionService:
             source_trace_ids=all_trace_ids,
             source_thread_ids=all_thread_ids,
             base_bundle_hash=batch[0].base_bundle_hash,
-            visible_files=sorted({f for p in batch for f in p.visible_files}),
+            visible_files=visible_existing_files,
             ops=ops,
             confidence=float(result.get("confidence", max(p.confidence for p in batch))),
             rationale=f"Hierarchical merge of {len(batch)} patches. {reasoning}",
