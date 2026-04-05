@@ -159,7 +159,7 @@ V1 明确不支持：
 原因：
 
 - 需要路径白名单
-- 需要 anchor 解析
+- 需要对全文可见文件做精确文本编辑
 - 需要冲突约束
 - 需要 candidate bundle 副本写回
 - 需要后续生成 diff
@@ -496,7 +496,7 @@ pytest trace_evolver_service/tests -q
 
 - `PatchEngine.apply()`
 - `_apply_op()`
-- `_resolve_anchor()`
+- `_apply_exact_edit()`
 - `_validate_bundle()`
 - `_bump_skill_version()`
 
@@ -621,4 +621,3 @@ pytest trace_evolver_service/tests -q
 
 - 在当前框架上继续把 analyst / merge / scoring 做强
 - 保持现有主流程与边界不变
-

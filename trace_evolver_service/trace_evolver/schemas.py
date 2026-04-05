@@ -114,19 +114,13 @@ class SuccessPattern(BaseModel):
     evidence_spans: list[EvidenceSpan]
 
 
-class AnchorSpec(BaseModel):
-    anchor_type: Literal["heading", "paragraph", "list_item", "frontmatter_field", "file_end"]
-    heading_path: list[str] | None = None
-    fingerprint: str | None = None
-    text_hint: str | None = None
-    field_name: str | None = None
-
-
 class EditOp(BaseModel):
     file_path: str
-    action: Literal["insert_after", "insert_before", "replace_range", "create_file"]
-    anchor: AnchorSpec | None = None
-    content: str
+    action: Literal["create_file", "edit", "append_file_end", "frontmatter_field"]
+    content: str = ""
+    old_string: str | None = None
+    new_string: str | None = None
+    field_name: str | None = None
     intent: Literal["trigger", "workflow", "guardrail", "example", "reference", "metadata"]
     source_visibility: Literal["full", "created"]
 

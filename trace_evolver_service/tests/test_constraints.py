@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from trace_evolver.analysis import BoundedMarkdownReAct, ErrorAnalyst, _build_ops_from_llm_edits
+from trace_evolver.analysis import BoundedMarkdownReAct, ErrorAnalyst, SuccessAnalyst, _build_ops_from_llm_edits
 from trace_evolver.catalog import scan_skill_roots
 from trace_evolver.config import LLMSettings, Settings
 from trace_evolver.db import create_session_factory
@@ -86,9 +86,9 @@ def test_llm_edit_builder_only_allows_visible_existing_markdown(tmp_path: Path) 
         [
             {
                 "file": "references/troubleshooting.md",
-                "op": "insert_after",
-                "target_section": "Troubleshooting",
-                "content": "Should be ignored because the file was not fully visible.",
+                "op": "edit",
+                "old_string": "Validation mismatch troubleshooting for submit and resolver paths.",
+                "new_string": "Updated troubleshooting guidance.",
                 "intent": "reference",
             },
             {
@@ -230,8 +230,7 @@ def test_error_analyst_can_request_full_read_before_writing_patch(tmp_path: Path
                 "edits": [
                     {
                         "file": "references/troubleshooting.md",
-                        "op": "insert_after",
-                        "target_section": "Troubleshooting",
+                        "op": "append_file_end",
                         "content": "## Resolver-first check\n\n- Verify resolver behavior before concluding the UI fix is enough.\n",
                         "intent": "reference",
                     }
@@ -286,42 +285,7 @@ def test_build_episodes_does_not_merge_only_on_repair_transition(tmp_path: Path)
     assert episodes[1].trace_ids == ["trace-b"]
 
 
-def test_patch_engine_marks_missing_heading_as_unresolved(tmp_path: Path) -> None:
-    _build_bundle(tmp_path / "skills")
-    bundle = scan_skill_roots([str(tmp_path / "skills")])[0]
-    engine = PatchEngine()
-
-    patch = HypothesisPatch(
-        patch_id="patch-heading-miss",
-        source_kind="error",
-        target_skill_id=bundle.skill_id,
-        family_id="fam-1",
-        source_trace_ids=["trace-1"],
-        source_thread_ids=["thread-1"],
-        base_bundle_hash=bundle.bundle_hash,
-        visible_files=["SKILL.md"],
-        ops=[
-            EditOp(
-                file_path="SKILL.md",
-                action="insert_after",
-                anchor={"anchor_type": "heading", "heading_path": ["Missing Section"], "text_hint": "Missing Section"},
-                content="- This should not silently drift to the file end.\n",
-                intent="guardrail",
-                source_visibility="full",
-            )
-        ],
-        confidence=0.7,
-        rationale="test",
-    )
-
-    result = engine.apply("cand-heading-miss", [patch], bundle, tmp_path / "candidate")
-    assert result.candidate.unresolved_ops
-    assert "heading anchor unresolved" in result.candidate.unresolved_ops[0]
-    skill_text = (Path(result.candidate.full_bundle_path) / "SKILL.md").read_text(encoding="utf-8")
-    assert "This should not silently drift" not in skill_text
-
-
-def test_patch_engine_allows_skill_md_new_section_append_fallback(tmp_path: Path) -> None:
+def test_patch_engine_append_file_end_adds_new_skill_section(tmp_path: Path) -> None:
     _build_bundle(tmp_path / "skills")
     bundle = scan_skill_roots([str(tmp_path / "skills")])[0]
     engine = PatchEngine()
@@ -338,8 +302,7 @@ def test_patch_engine_allows_skill_md_new_section_append_fallback(tmp_path: Path
         ops=[
             EditOp(
                 file_path="SKILL.md",
-                action="insert_after",
-                anchor={"anchor_type": "heading", "heading_path": ["Missing Section"], "text_hint": "Missing Section"},
+                action="append_file_end",
                 content="## Trace-Grounded Note\n\n- Safe fallback append.\n",
                 intent="reference",
                 source_visibility="full",
@@ -353,6 +316,83 @@ def test_patch_engine_allows_skill_md_new_section_append_fallback(tmp_path: Path
     assert not result.candidate.unresolved_ops
     skill_text = (Path(result.candidate.full_bundle_path) / "SKILL.md").read_text(encoding="utf-8")
     assert "## Trace-Grounded Note" in skill_text
+
+
+def test_patch_engine_edit_replaces_unique_visible_text(tmp_path: Path) -> None:
+    _build_bundle(tmp_path / "skills")
+    bundle = scan_skill_roots([str(tmp_path / "skills")])[0]
+    engine = PatchEngine()
+
+    patch = HypothesisPatch(
+        patch_id="patch-edit-unique",
+        source_kind="error",
+        target_skill_id=bundle.skill_id,
+        family_id="fam-1",
+        source_trace_ids=["trace-1"],
+        source_thread_ids=["thread-1"],
+        base_bundle_hash=bundle.bundle_hash,
+        visible_files=["SKILL.md"],
+        ops=[
+            EditOp(
+                file_path="SKILL.md",
+                action="edit",
+                old_string="- Start from the failing path.",
+                new_string="- Compare UI validation, resolver, and submit path before patching.",
+                content="- Compare UI validation, resolver, and submit path before patching.",
+                intent="workflow",
+                source_visibility="full",
+            )
+        ],
+        confidence=0.8,
+        rationale="test",
+    )
+
+    result = engine.apply("cand-edit-unique", [patch], bundle, tmp_path / "candidate")
+    assert not result.candidate.unresolved_ops
+    skill_text = (Path(result.candidate.full_bundle_path) / "SKILL.md").read_text(encoding="utf-8")
+    assert "Compare UI validation, resolver, and submit path before patching." in skill_text
+    assert "- Start from the failing path." not in skill_text
+
+
+def test_patch_engine_edit_requires_unique_old_string(tmp_path: Path) -> None:
+    bundle_path = _build_bundle(tmp_path / "skills")
+    skill_md = bundle_path / "SKILL.md"
+    skill_md.write_text(
+        skill_md.read_text(encoding="utf-8") + "\n- Start from the failing path.\n",
+        encoding="utf-8",
+    )
+    bundle = scan_skill_roots([str(tmp_path / "skills")])[0]
+    engine = PatchEngine()
+
+    patch = HypothesisPatch(
+        patch_id="patch-edit-duplicate",
+        source_kind="error",
+        target_skill_id=bundle.skill_id,
+        family_id="fam-1",
+        source_trace_ids=["trace-1"],
+        source_thread_ids=["thread-1"],
+        base_bundle_hash=bundle.bundle_hash,
+        visible_files=["SKILL.md"],
+        ops=[
+            EditOp(
+                file_path="SKILL.md",
+                action="edit",
+                old_string="- Start from the failing path.",
+                new_string="- Compare every path before patching.",
+                content="- Compare every path before patching.",
+                intent="workflow",
+                source_visibility="full",
+            )
+        ],
+        confidence=0.8,
+        rationale="test",
+    )
+
+    result = engine.apply("cand-edit-duplicate", [patch], bundle, tmp_path / "candidate")
+    assert result.candidate.unresolved_ops
+    assert "not unique" in result.candidate.unresolved_ops[0]
+    skill_text = (Path(result.candidate.full_bundle_path) / "SKILL.md").read_text(encoding="utf-8")
+    assert skill_text.count("- Start from the failing path.") == 2
 
 
 def test_merge_batch_adds_skill_link_for_created_markdown(tmp_path: Path, monkeypatch) -> None:
@@ -371,8 +411,7 @@ def test_merge_batch_adds_skill_link_for_created_markdown(tmp_path: Path, monkey
         ops=[
             EditOp(
                 file_path="SKILL.md",
-                action="insert_after",
-                anchor={"anchor_type": "file_end", "text_hint": "append at file end"},
+                action="append_file_end",
                 content="- Existing context.\n",
                 intent="guardrail",
                 source_visibility="full",
@@ -393,8 +432,7 @@ def test_merge_batch_adds_skill_link_for_created_markdown(tmp_path: Path, monkey
         ops=[
             EditOp(
                 file_path="SKILL.md",
-                action="insert_after",
-                anchor={"anchor_type": "file_end", "text_hint": "append at file end"},
+                action="append_file_end",
                 content="- Existing context 2.\n",
                 intent="guardrail",
                 source_visibility="full",
@@ -428,3 +466,188 @@ def test_merge_batch_adds_skill_link_for_created_markdown(tmp_path: Path, monkey
         op.file_path == "SKILL.md" and "references/generated-note.md" in op.content
         for op in merged.ops
     )
+
+
+def test_error_analyst_llm_can_emit_exact_text_edit(tmp_path: Path, monkeypatch) -> None:
+    _build_bundle(tmp_path)
+    bundle = scan_skill_roots([str(tmp_path)])[0]
+    settings = Settings(llm=LLMSettings(api_key="test-key"))
+    analyst = ErrorAnalyst(settings)
+
+    episode = Episode(
+        episode_id="ep-edit",
+        thread_id="thread-edit",
+        trace_ids=["trace-edit"],
+        start_ts="2025-01-01T10:00:00Z",
+        end_ts="2025-01-01T10:03:00Z",
+        summary="resolver mismatch",
+        used_skills=["validation-skill"],
+        tool_signature=["read_file", "edit_file"],
+        outcomes=["error"],
+        user_messages=["Fix the resolver mismatch in troubleshooting flow"],
+    )
+    hypothesis = FailureHypothesis(
+        failure_surface="Submit still fails after UI validation passes.",
+        suspected_root_cause="The workflow did not call out resolver-specific checks.",
+        evidence_spans=[
+            EvidenceSpan(trace_id="trace-edit", kind="assistant_text", step_index=1, snippet="I only checked the UI path."),
+            EvidenceSpan(trace_id="trace-edit", kind="tool_call", step_index=2, snippet="resolver mismatch"),
+        ],
+        confidence=0.8,
+    )
+
+    class FakeLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat_json(self, messages, temperature=None, max_tokens=None):  # noqa: ANN001
+            self.calls += 1
+            if self.calls == 1:
+                return {"action": "write_patch", "read_requests": [], "notes": []}
+            return {
+                "edits": [
+                    {
+                        "file": "SKILL.md",
+                        "op": "edit",
+                        "old_string": "- Start from the failing path.",
+                        "new_string": "- Start from the failing path.\n- Compare UI validation, resolver, and submit path before patching.",
+                        "intent": "workflow",
+                    }
+                ],
+                "confidence": 0.81,
+                "rationale": "Tightens the workflow with the missing resolver check.",
+            }
+
+    fake_llm = FakeLLM()
+    monkeypatch.setattr("trace_evolver.analysis._get_llm", lambda settings: fake_llm)
+
+    patch = analyst._write_patch_with_llm(  # noqa: SLF001
+        episode,
+        bundle,
+        hypothesis,
+        ["SKILL.md"],
+        [],
+    )
+
+    assert patch is not None
+    assert patch.ops[0].action == "edit"
+    assert patch.ops[0].old_string == "- Start from the failing path."
+    assert "Compare UI validation" in (patch.ops[0].new_string or "")
+
+
+def test_success_analyst_llm_can_emit_exact_text_edit(tmp_path: Path, monkeypatch) -> None:
+    _build_bundle(tmp_path)
+    bundle = scan_skill_roots([str(tmp_path)])[0]
+    settings = Settings(llm=LLMSettings(api_key="test-key"))
+    analyst = SuccessAnalyst(settings)
+
+    episode = Episode(
+        episode_id="ep-success-edit",
+        thread_id="thread-success",
+        trace_ids=["trace-success"],
+        start_ts="2025-01-01T10:00:00Z",
+        end_ts="2025-01-01T10:03:00Z",
+        summary="successful validation fix",
+        used_skills=["validation-skill"],
+        tool_signature=["read_file", "edit_file", "verify"],
+        outcomes=["success"],
+        user_messages=["Fix the validation mismatch in the troubleshooting flow"],
+    )
+    traces = [
+        _make_trace(
+            trace_id="trace-success",
+            thread_id="thread-success",
+            started_at="2025-01-01T10:00:00Z",
+            ended_at="2025-01-01T10:01:00Z",
+            user_message="Fix the validation mismatch in the troubleshooting flow",
+            outcome="success",
+            used_skills=["validation-skill"],
+            tool_names=["read_file", "edit_file", "verify"],
+        )
+    ]
+
+    class FakeLLM:
+        def chat_json(self, messages, temperature=None, max_tokens=None):  # noqa: ANN001
+            return {
+                "patterns": [
+                    {
+                        "title": "Resolver-aware validation workflow",
+                        "description": "Successful runs compare UI validation and resolver paths before patching.",
+                        "frequency_hint": "common",
+                    }
+                ],
+                "edits": [
+                    {
+                        "file": "SKILL.md",
+                        "op": "edit",
+                        "old_string": "- Start from the failing path.",
+                        "new_string": "- Start from the failing path.\n- Compare UI validation and resolver checks before patching.",
+                        "intent": "workflow",
+                    }
+                ],
+                "confidence": 0.82,
+                "rationale": "Captures the reusable validation fix pattern.",
+            }
+
+    monkeypatch.setattr("trace_evolver.analysis._get_llm", lambda settings: FakeLLM())
+
+    patterns, patches = analyst._analyze_with_llm(episode, traces, bundle)  # noqa: SLF001
+    assert patterns
+    assert len(patches) == 1
+    assert patches[0].ops[0].action == "edit"
+    assert patches[0].ops[0].old_string == "- Start from the failing path."
+
+
+def test_merge_batch_can_emit_exact_text_edit(tmp_path: Path, monkeypatch) -> None:
+    settings = Settings(state_dir=tmp_path / "state", llm=LLMSettings(api_key="test-key"))
+    service = TraceEvolutionService(settings, create_session_factory(settings))
+
+    patch_a = HypothesisPatch(
+        patch_id="patch-a",
+        source_kind="success",
+        target_skill_id="skill-a",
+        family_id="fam-1",
+        source_trace_ids=["trace-a"],
+        source_thread_ids=["thread-a"],
+        base_bundle_hash="bundle-hash",
+        visible_files=["SKILL.md"],
+        ops=[
+            EditOp(
+                file_path="SKILL.md",
+                action="edit",
+                old_string="- Start from the failing path.",
+                new_string="- Start from the failing path.\n- Verify resolver behavior before concluding the fix worked.",
+                content="- Start from the failing path.\n- Verify resolver behavior before concluding the fix worked.",
+                intent="workflow",
+                source_visibility="full",
+            )
+        ],
+        confidence=0.8,
+        rationale="test",
+    )
+    patch_b = patch_a.model_copy(update={"patch_id": "patch-b", "source_trace_ids": ["trace-b"], "source_thread_ids": ["thread-b"]})
+
+    class FakeLLM:
+        def chat_json(self, messages, temperature=None, max_tokens=None):  # noqa: ANN001
+            return {
+                "reasoning": "Keep the exact replacement edit because both patches agree.",
+                "edits": [
+                    {
+                        "file": "SKILL.md",
+                        "op": "edit",
+                        "old_string": "- Start from the failing path.",
+                        "new_string": "- Start from the failing path.\n- Verify resolver behavior before concluding the fix worked.",
+                        "intent": "workflow",
+                        "prevalence": 2,
+                    }
+                ],
+                "confidence": 0.86,
+            }
+
+    monkeypatch.setattr(service, "_get_llm", lambda: FakeLLM())
+
+    merged = service._llm_merge_batch([patch_a, patch_b])  # noqa: SLF001
+    assert merged is not None
+    assert len(merged.ops) == 1
+    assert merged.ops[0].action == "edit"
+    assert merged.ops[0].old_string == "- Start from the failing path."
