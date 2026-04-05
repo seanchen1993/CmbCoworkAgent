@@ -11,7 +11,7 @@ analyst 层实现。
 - ErrorAnalyst (𝒜⁻):
   对外仍然是单 analyst，对内分两阶段：
   Phase A: diagnosis + bounded markdown ReAct（论文 4-step mandatory workflow）
-  Phase B: patch planning + patch writing（支持 heading-level 落点 + references/ 路由）
+  Phase B: patch planning + patch writing（以 exact text edit 为主，references/ 路由为辅）
 
 这层的最终输出不是"直接修改文件"，而是结构化 HypothesisPatch。
 真正写文件由 patching.py 中的 Python patch engine 完成。
@@ -29,7 +29,6 @@ from pathlib import Path
 from trace_evolver.config import Settings
 from trace_evolver.llm import LLMClient
 from trace_evolver.schemas import (
-    AnchorSpec,
     EditOp,
     Episode,
     EvidenceSpan,
@@ -445,10 +444,14 @@ class SuccessAnalyst:
                     "1. **Broad Coverage** — every effective behavior in the trajectory must be captured\n"
                     "2. **Frequency Awareness** — patterns covering more instances should be listed first\n"
                     "3. **Generalization** — each pattern must describe a general mechanism, not just replay the specific trace\n\n"
-                    "You must propose WHERE in the skill document each insight belongs.\n"
-                    "Look at the existing heading structure and decide:\n"
-                    "- If a relevant section exists → insert under that heading (use target_section)\n"
-                    "- If no relevant section exists → create a new ## section\n\n"
+                    "Use exact-text edits when you are changing existing guidance.\n"
+                    "- For EXISTING content changes, use op=edit with old_string/new_string.\n"
+                    "- old_string MUST uniquely match in the visible file. If it may repeat, include more "
+                    "surrounding lines in old_string so the match becomes unique.\n"
+                    "- For inserting guidance under an existing heading, use op=edit and keep the existing text in "
+                    "new_string, adding the new guidance around it.\n"
+                    "- Use op=append_file_end only when you are appending a brand-new section to the end of SKILL.md.\n"
+                    "- Use op=create only for new markdown files.\n\n"
                     "Return JSON with exactly these fields:\n"
                     "{\n"
                     '  "patterns": [\n'
@@ -461,9 +464,10 @@ class SuccessAnalyst:
                     '  "edits": [\n'
                     "    {\n"
                     '      "file": "SKILL.md or references/*.md",\n'
-                    '      "op": "insert_after, replace_range, or create",\n'
-                    '      "target_section": "heading text to target, or null for file end / new file",\n'
-                    '      "content": "markdown content (for replace_range: the full replacement text for that section)",\n'
+                    '      "op": "edit, append_file_end, or create",\n'
+                    '      "old_string": "required for edit; exact existing text to replace",\n'
+                    '      "new_string": "required for edit; replacement text",\n'
+                    '      "content": "required for append_file_end/create",\n'
                     '      "intent": "one of: trigger, workflow, guardrail, example, reference, metadata"\n'
                     "    }\n"
                     "  ],\n"
@@ -564,8 +568,7 @@ class SuccessAnalyst:
             ops = [
                 EditOp(
                     file_path="SKILL.md",
-                    action="insert_after",
-                    anchor=AnchorSpec(anchor_type="file_end", text_hint="append at file end"),
+                    action="append_file_end",
                     content=content,
                     intent="workflow",
                     source_visibility="full",
@@ -606,8 +609,10 @@ class ErrorAnalyst:
     3. Cross-check against SKILL.md — ask "if this guidance existed, would the agent have avoided the mistake?"
     4. Assess confidence — rate how certain this diagnosis is given trace-only evidence
 
-    Phase B generates structured patches with heading-level placement
-    and references/ routing for low-prevalence patterns.
+    Phase B generates structured patches whose primary edit primitive is
+    exact-text replacement on fully visible files. Existing markdown changes
+    are expressed via old_string/new_string, while append_file_end is reserved
+    for intentionally adding a brand-new section or note.
     """
 
     def __init__(self, settings: Settings):
@@ -783,9 +788,13 @@ class ErrorAnalyst:
                     "Based on a trace-only failure diagnosis (NOT validated via replay) and the current skill bundle, "
                     "generate patch operations. Your patches are hypotheses grounded in trace evidence, not proven fixes.\n\n"
                     "**Patch placement rules** (critical for quality):\n"
-                    "- Look at the existing heading structure. If a relevant section exists, insert UNDER that heading "
-                    "(set target_section to the heading text). Do NOT always append to file end.\n"
-                    "- If no existing section fits, create a new ## section with a descriptive name.\n"
+                    "- For EXISTING content that must be changed, use op=edit with old_string/new_string.\n"
+                    "- old_string MUST uniquely match in the visible file. If you worry it may repeat, include more "
+                    "surrounding lines in old_string so the match becomes unique.\n"
+                    "- For inserting guidance under an existing heading, still use op=edit: old_string should include "
+                    "the existing text you want to anchor on, and new_string should include that same text plus your insertion.\n"
+                    "- Use op=append_file_end only when you are appending a brand-new section to the end of SKILL.md.\n"
+                    "- Use op=create only for new markdown files.\n"
                     "- For niche/case-specific guidance that doesn't belong in the main workflow, route to "
                     "references/*.md instead of SKILL.md.\n"
                     "- If you create a new references/*.md file, you MUST also add a link to it in SKILL.md "
@@ -800,9 +809,10 @@ class ErrorAnalyst:
                     '  "edits": [\n'
                     "    {\n"
                     '      "file": "SKILL.md or references/xxx.md",\n'
-                    '      "op": "insert_after, replace_range, or create",\n'
-                    '      "target_section": "existing heading text to target, or null for file end / new file",\n'
-                    '      "content": "markdown content (for replace_range: the full replacement text for that section)",\n'
+                    '      "op": "edit, append_file_end, or create",\n'
+                    '      "old_string": "required for edit; exact existing text to replace",\n'
+                    '      "new_string": "required for edit; replacement text",\n'
+                    '      "content": "required for append_file_end/create",\n'
                     '      "intent": "one of: trigger, workflow, guardrail, example, reference, metadata"\n'
                     "    }\n"
                     "  ],\n"
@@ -1008,8 +1018,7 @@ class ErrorAnalyst:
             ops = [
                 EditOp(
                     file_path="SKILL.md",
-                    action="insert_after",
-                    anchor=AnchorSpec(anchor_type="file_end", text_hint="append at file end"),
+                    action="append_file_end",
                     content=primary_content,
                     intent="guardrail",
                     source_visibility="full",
@@ -1032,8 +1041,7 @@ class ErrorAnalyst:
                 ops.append(
                     EditOp(
                         file_path=chosen,
-                        action="insert_after",
-                        anchor=AnchorSpec(anchor_type="file_end", text_hint="append at file end"),
+                        action="append_file_end",
                         content=extra_content,
                         intent="reference",
                         source_visibility="full",
@@ -1071,8 +1079,10 @@ def _build_ops_from_llm_edits(
 ) -> list[EditOp]:
     """Convert LLM-generated edit dicts into validated EditOp objects.
 
-    Supports heading-level target_section anchors and references/ file creation
-    with atomic create/link pair validation.
+    The write protocol is intentionally small:
+    - edit(old_string/new_string) for existing markdown text
+    - append_file_end for appending a brand-new section or note
+    - create for new markdown files
     """
     VALID_INTENTS = {"trigger", "workflow", "guardrail", "example", "reference", "metadata"}
     ops: list[EditOp] = []
@@ -1083,16 +1093,21 @@ def _build_ops_from_llm_edits(
         file_path = raw.get("file", "SKILL.md")
         if not isinstance(file_path, str):
             continue
+        op_type = raw.get("op", "append_file_end")
         content = raw.get("content", "")
-        if not content.strip():
+        old_string = raw.get("old_string")
+        new_string = raw.get("new_string")
+        if op_type == "edit":
+            if not isinstance(old_string, str) or not old_string:
+                continue
+            if not isinstance(new_string, str):
+                continue
+        elif not content.strip():
             continue
 
         intent = raw.get("intent", "guardrail")
         if intent not in VALID_INTENTS:
             intent = "guardrail"
-
-        op_type = raw.get("op", "insert_after")
-        target_section = raw.get("target_section")
 
         # Determine if this is a file creation or an edit.
         # Existing files are only writable when they were fully visible in the prompt.
@@ -1112,24 +1127,38 @@ def _build_ops_from_llm_edits(
             ))
             if file_path.startswith("references/"):
                 created_refs.add(file_path)
-        else:
+        elif op_type == "append_file_end":
             if not is_visible_existing:
                 continue
             if not is_allowed_markdown_relative_path(file_path):
                 continue
-
-            # Build anchor from target_section
-            anchor = _build_anchor_from_target_section(target_section)
-            action = "replace_range" if op_type == "replace_range" else "insert_after"
-
             ops.append(EditOp(
                 file_path=file_path,
-                action=action,
-                anchor=anchor,
+                action="append_file_end",
                 content=content,
                 intent=intent,
                 source_visibility="full",
             ))
+        elif op_type == "edit":
+            if not is_visible_existing:
+                continue
+            if not is_allowed_markdown_relative_path(file_path):
+                continue
+            if not isinstance(old_string, str) or not old_string:
+                continue
+            if not isinstance(new_string, str):
+                continue
+            ops.append(EditOp(
+                file_path=file_path,
+                action="edit",
+                content=new_string,
+                old_string=old_string,
+                new_string=new_string,
+                intent=intent,
+                source_visibility="full",
+            ))
+        else:
+            continue
 
     # Atomic create/link pair: if we created references/ files, ensure SKILL.md has links
     for ref_path in created_refs:
@@ -1141,34 +1170,13 @@ def _build_ops_from_llm_edits(
             link_content = f"\n- See [{ref_path}]({ref_path}) for case-specific guidance.\n"
             ops.append(EditOp(
                 file_path="SKILL.md",
-                action="insert_after",
-                anchor=AnchorSpec(anchor_type="file_end", text_hint="append at file end"),
+                action="append_file_end",
                 content=link_content,
                 intent="reference",
                 source_visibility="full",
             ))
 
     return ops
-
-
-def _build_anchor_from_target_section(target_section: str | None) -> AnchorSpec:
-    """Convert a target_section string from LLM into an AnchorSpec.
-
-    If target_section is a heading (e.g. "Workflow"), build a heading anchor.
-    Otherwise fall back to file_end.
-    """
-    if not target_section or target_section.lower() in ("null", "none", "end", "file_end"):
-        return AnchorSpec(anchor_type="file_end", text_hint="append at file end")
-
-    # Strip leading # if the LLM included markdown heading syntax
-    cleaned = target_section.lstrip("#").strip()
-    if cleaned:
-        return AnchorSpec(
-            anchor_type="heading",
-            heading_path=[cleaned],
-            text_hint=cleaned,
-        )
-    return AnchorSpec(anchor_type="file_end", text_hint="append at file end")
 
 
 # ---------------------------------------------------------------------------

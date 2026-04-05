@@ -11,6 +11,8 @@ candidate bundle 物化与 diff 生成模块。
 3. 生成 unified diff 和结构化 diff 供审阅
 
 V1 明确不允许模型直接生成最终文件并覆盖源 bundle。
+当前主写回路径使用 exact text edit（old_string -> new_string）；
+追加新 section/说明时使用 append_file_end，frontmatter 走结构化字段更新。
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ logger = logging.getLogger(__name__)
 import frontmatter
 from markdown_it import MarkdownIt
 
-from trace_evolver.schemas import AnchorSpec, CandidateBundle, EditOp, HypothesisPatch, SkillBundleMeta
+from trace_evolver.schemas import CandidateBundle, EditOp, HypothesisPatch, SkillBundleMeta
 from trace_evolver.utils import is_allowed_markdown_path, is_allowed_markdown_relative_path, json_dumps, sha256_text, slugify
 
 
@@ -122,107 +124,45 @@ class PatchEngine:
         return op.file_path
 
     def _apply_to_text(self, text: str, op: EditOp) -> str:
-        if op.anchor and op.anchor.anchor_type == "frontmatter_field":
-            return self._apply_frontmatter(text, op.anchor, op.content)
+        if op.action == "frontmatter_field":
+            field_name = op.field_name
+            if not field_name:
+                raise ValueError("frontmatter_field missing field_name")
+            return self._apply_frontmatter(text, field_name, op.content)
 
-        # V1 对 markdown 的修改统一落在“整文件重写”上，避免做脆弱的原地局部写入。
-        lines = text.splitlines()
-        allow_heading_fallback = (
-            op.file_path == "SKILL.md"
-            and op.action == "insert_after"
-            and self._looks_like_new_section(op.content)
-        )
-        anchor_index = self._resolve_anchor(lines, op.anchor, allow_heading_fallback=allow_heading_fallback)
-        content_lines = op.content.rstrip("\n").splitlines()
+        if op.action == "edit":
+            return self._apply_exact_edit(text, op)
 
-        if op.action == "insert_after":
-            new_lines = lines[: anchor_index + 1] + [""] + content_lines + lines[anchor_index + 1 :]
-            return "\n".join(new_lines).rstrip() + "\n"
-        if op.action == "insert_before":
-            new_lines = lines[:anchor_index] + content_lines + [""] + lines[anchor_index:]
-            return "\n".join(new_lines).rstrip() + "\n"
-        if op.action == "replace_range":
-            start, end = self._resolve_replace_range(lines, anchor_index)
-            new_lines = lines[:start] + content_lines + lines[end:]
-            return "\n".join(new_lines).rstrip() + "\n"
+        if op.action == "append_file_end":
+            return self._append_file_end(text, op.content)
         raise ValueError(f"unsupported op: {op.action}")
 
-    def _looks_like_new_section(self, content: str) -> bool:
-        """Allow a narrow fallback only for appending a brand-new section to SKILL.md."""
-        for line in content.splitlines():
-            stripped = line.strip()
-            if not stripped:
-                continue
-            return stripped.startswith("##")
-        return False
+    def _apply_exact_edit(self, text: str, op: EditOp) -> str:
+        if not op.old_string:
+            raise ValueError("edit op missing old_string")
+        if op.new_string is None:
+            raise ValueError("edit op missing new_string")
 
-    def _apply_frontmatter(self, text: str, anchor: AnchorSpec, content: str) -> str:
+        matches = text.count(op.old_string)
+        if matches == 0:
+            raise ValueError("edit old_string unresolved")
+        if matches > 1:
+            raise ValueError("edit old_string is not unique")
+        return text.replace(op.old_string, op.new_string, 1)
+
+    def _append_file_end(self, text: str, content: str) -> str:
+        base = text.rstrip("\n")
+        addition = content.strip("\n")
+        if not addition:
+            raise ValueError("append_file_end content is empty")
+        if not base:
+            return addition + "\n"
+        return f"{base}\n\n{addition}\n"
+
+    def _apply_frontmatter(self, text: str, field_name: str, content: str) -> str:
         post = frontmatter.loads(text)
-        if not anchor.field_name:
-            raise ValueError("frontmatter_field anchor missing field_name")
-        post.metadata[anchor.field_name] = content
+        post.metadata[field_name] = content
         return frontmatter.dumps(post)
-
-    def _resolve_anchor(
-        self,
-        lines: list[str],
-        anchor: AnchorSpec | None,
-        *,
-        allow_heading_fallback: bool = False,
-    ) -> int:
-        # anchor 解析按”从强到弱”顺序进行；越弱的 anchor，误命中的风险越高。
-        if anchor is None or anchor.anchor_type == "file_end":
-            return len(lines) - 1 if lines else 0
-        if anchor.anchor_type == "heading":
-            targets = [segment.lower() for segment in (anchor.heading_path or []) if segment]
-            text_hint = (anchor.text_hint or "").lower()
-
-            # Pass 1: exact match (heading text == target or hint)
-            for index, line in enumerate(lines):
-                stripped = line.strip()
-                if not stripped.startswith("#"):
-                    continue
-                lowered = stripped.lstrip("#").strip().lower()
-                if targets and lowered == targets[-1]:
-                    return index
-                if text_hint and lowered == text_hint:
-                    return index
-
-            # Pass 2: substring fallback (only if exact match failed)
-            if text_hint:
-                for index, line in enumerate(lines):
-                    stripped = line.strip()
-                    if not stripped.startswith("#"):
-                        continue
-                    lowered = stripped.lstrip("#").strip().lower()
-                    if text_hint in lowered:
-                        return index
-
-            if allow_heading_fallback:
-                logger.warning(
-                    "heading anchor unresolved (targets=%s, hint=%s), falling back to file end for a new SKILL.md section",
-                    targets,
-                    text_hint,
-                )
-                return len(lines) - 1 if lines else 0
-            raise ValueError("heading anchor unresolved")
-        if anchor.anchor_type in {"paragraph", "list_item"}:
-            hint = (anchor.text_hint or anchor.fingerprint or "").strip().lower()
-            for index, line in enumerate(lines):
-                if hint and hint in line.lower():
-                    return index
-            raise ValueError("paragraph/list anchor unresolved")
-        raise ValueError("unsupported anchor type")
-
-    def _resolve_replace_range(self, lines: list[str], anchor_index: int) -> tuple[int, int]:
-        # replace_range 的策略是“替换锚点所在的连续文本块”，适合 markdown 段落级 patch。
-        start = anchor_index
-        end = anchor_index + 1
-        while start > 0 and lines[start - 1].strip():
-            start -= 1
-        while end < len(lines) and lines[end].strip():
-            end += 1
-        return start, end
 
     def _bump_skill_version(self, bundle_dir: Path) -> bool:
         """
