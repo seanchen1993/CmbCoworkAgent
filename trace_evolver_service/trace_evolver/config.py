@@ -87,6 +87,12 @@ class Settings(BaseModel):
     markdown_patch_planning_max_rounds: int = 2
     family_similarity_threshold: float = 0.35
     episode_gap_minutes: int = 30
+    enable_episode_route_classifier: bool = True
+    episode_route_confidence_threshold: float = 0.75
+    episode_route_max_traces: int = 3
+    episode_route_user_chars: int = 500
+    episode_route_assistant_chars: int = 700
+    episode_route_error_chars: int = 300
     host: str = "127.0.0.1"
     port: int = 8017
     log_level: str = "info"

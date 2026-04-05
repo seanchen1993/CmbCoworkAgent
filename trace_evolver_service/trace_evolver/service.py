@@ -47,9 +47,11 @@ from trace_evolver.episodes import build_episodes, build_families
 from trace_evolver.evaluate import evaluate_candidate
 from trace_evolver.llm import LLMClient
 from trace_evolver.patching import PatchEngine, generate_summary_markdown
+from trace_evolver.routing import EpisodeRouteClassifier
 from trace_evolver.schemas import (
     CandidateDetailResponse,
     EditOp,
+    EpisodeRouteDecision,
     HypothesisPatch,
     RunCreateRequest,
     RunDetailResponse,
@@ -88,6 +90,7 @@ class TraceEvolutionService:
         self.source = LocalTraceSource()
         self.success_analyst = SuccessAnalyst(settings)
         self.error_analyst = ErrorAnalyst(settings)
+        self.route_classifier = EpisodeRouteClassifier(settings)
         self.patch_engine = PatchEngine()
 
     def create_run(self, request: RunCreateRequest) -> RunResponse:
@@ -198,16 +201,40 @@ class TraceEvolutionService:
             episode_traces = [trace_map[trace_id] for trace_id in episode.trace_ids]
             bundle = match_skill_bundle(episode.used_skills, bundles)
             family_id = family_of_episode.get(episode.episode_id, "")
+            route_decision: EpisodeRouteDecision | None = None
+            selected_analyst = "error"
+            notes: list[str] = []
             if any(outcome != "success" for outcome in episode.outcomes):
                 hypotheses, patches, notes = self.error_analyst.analyze(episode, episode_traces, bundle)
             else:
-                hypotheses, patches = self.success_analyst.analyze(episode, episode_traces, bundle)
-                notes = []
+                route_decision = self._classify_success_episode(episode, episode_traces)
+                if (
+                    route_decision.label == "clean_success"
+                    and route_decision.confidence >= self.settings.episode_route_confidence_threshold
+                ):
+                    selected_analyst = "success"
+                    hypotheses, patches = self.success_analyst.analyze(episode, episode_traces, bundle)
+                else:
+                    notes.append(
+                        "success episode downgraded to ErrorAnalyst by route classifier: "
+                        f"{route_decision.label} ({route_decision.confidence:.2f})"
+                    )
+                    hypotheses, patches, error_notes = self.error_analyst.analyze(episode, episode_traces, bundle)
+                    notes.extend(error_notes)
 
             for patch in patches:
                 patch.family_id = family_id
             all_patches.extend(patches)
-            self._persist_episode_artifacts(run_id, episode, family_id, hypotheses, patches, notes)
+            self._persist_episode_artifacts(
+                run_id,
+                episode,
+                family_id,
+                hypotheses,
+                patches,
+                notes,
+                route_decision=route_decision,
+                selected_analyst=selected_analyst,
+            )
 
         # Stage 3: Conflict-Free Consolidation（Trace2Skill ℳ 算子）
         candidate_groups = self._merge_patches(all_patches)
@@ -619,6 +646,9 @@ class TraceEvolutionService:
         hypotheses,
         patches,
         notes,
+        *,
+        route_decision: EpisodeRouteDecision | None = None,
+        selected_analyst: str = "error",
     ) -> None:
         with session_scope(self.session_factory) as session:
             session.add(
@@ -630,6 +660,8 @@ class TraceEvolutionService:
                         {
                             "episode": episode.model_dump(),
                             "family_id": family_id,
+                            "selected_analyst": selected_analyst,
+                            "route_decision": route_decision.model_dump() if route_decision else None,
                             "notes": notes,
                             "hypotheses": [item.model_dump() for item in hypotheses],
                         }
@@ -647,6 +679,27 @@ class TraceEvolutionService:
                         payload_json=json_dumps(patch.model_dump()),
                     )
                 )
+
+    def _classify_success_episode(
+        self,
+        episode,
+        traces,
+    ) -> EpisodeRouteDecision:
+        if not self.settings.enable_episode_route_classifier or not self._has_llm():
+            return EpisodeRouteDecision(
+                label="clean_success",
+                confidence=1.0,
+                reason="route classifier disabled or no LLM configured",
+            )
+        try:
+            return self.route_classifier.classify(episode, traces)
+        except Exception:
+            logger.warning("Episode route classifier failed; conservatively routing to ErrorAnalyst", exc_info=True)
+            return EpisodeRouteDecision(
+                label="suspect_success",
+                confidence=0.0,
+                reason="route classifier failed",
+            )
 
     def _persist_candidate(self, run_id: str, candidate, report) -> None:
         with session_scope(self.session_factory) as session:

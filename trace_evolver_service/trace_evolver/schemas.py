@@ -173,6 +173,12 @@ class EvaluationReport(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class EpisodeRouteDecision(BaseModel):
+    label: Literal["clean_success", "suspect_success", "error_like"]
+    confidence: float
+    reason: str
+
+
 class RunCreateRequest(BaseModel):
     input_path: str
     skills_roots: list[str]

@@ -7,11 +7,13 @@ from trace_evolver.catalog import scan_skill_roots
 from trace_evolver.config import LLMSettings, Settings
 from trace_evolver.db import create_session_factory
 from trace_evolver.episodes import build_episodes
+from trace_evolver.routing import EpisodeRouteClassifier
 from trace_evolver.patching import PatchEngine
 from trace_evolver.service import TraceEvolutionService
 from trace_evolver.schemas import (
     EditOp,
     EvidenceSpan,
+    EpisodeRouteDecision,
     Episode,
     FailureHypothesis,
     HypothesisPatch,
@@ -316,6 +318,110 @@ def test_patch_engine_append_file_end_adds_new_skill_section(tmp_path: Path) -> 
     assert not result.candidate.unresolved_ops
     skill_text = (Path(result.candidate.full_bundle_path) / "SKILL.md").read_text(encoding="utf-8")
     assert "## Trace-Grounded Note" in skill_text
+
+
+def test_episode_route_classifier_can_downgrade_success_episode(tmp_path: Path, monkeypatch) -> None:
+    _build_bundle(tmp_path)
+    settings = Settings(llm=LLMSettings(api_key="test-key"))
+    classifier = EpisodeRouteClassifier(settings)
+    traces = [
+        _make_trace(
+            trace_id="trace-s1",
+            thread_id="thread-s",
+            started_at="2025-01-01T10:00:00Z",
+            ended_at="2025-01-01T10:01:00Z",
+            user_message="Fix the workflow and tell me when it's fully done",
+            outcome="success",
+            used_skills=["validation-skill"],
+            tool_names=["read_file", "edit_file"],
+        )
+    ]
+    traces[0].steps[-1].assistantText = "I think this should work now, but you may need to verify it manually."
+    episode = Episode(
+        episode_id="ep-route-1",
+        thread_id="thread-s",
+        trace_ids=["trace-s1"],
+        start_ts="2025-01-01T10:00:00Z",
+        end_ts="2025-01-01T10:01:00Z",
+        summary="tentative success",
+        used_skills=["validation-skill"],
+        tool_signature=["read_file", "edit_file"],
+        outcomes=["success"],
+        user_messages=["Fix the workflow and tell me when it's fully done"],
+    )
+
+    class FakeLLM:
+        def chat_json(self, messages, temperature=None, max_tokens=None):  # noqa: ANN001
+            return {
+                "label": "suspect_success",
+                "confidence": 0.88,
+                "reason": "Final assistant text is tentative and does not confirm resolution.",
+            }
+
+    monkeypatch.setattr("trace_evolver.routing.LLMClient", lambda settings: FakeLLM())
+    decision = classifier.classify(episode, traces)
+    assert decision.label == "suspect_success"
+    assert decision.confidence == 0.88
+
+
+def test_service_routes_low_confidence_success_episode_to_error_analyst(tmp_path: Path, monkeypatch) -> None:
+    settings = Settings(state_dir=tmp_path / "state", llm=LLMSettings(api_key="test-key"))
+    session_factory = create_session_factory(settings)
+    service = TraceEvolutionService(settings, session_factory)
+
+    episode = Episode(
+        episode_id="ep-route-2",
+        thread_id="thread-route",
+        trace_ids=["trace-route-1"],
+        start_ts="2025-01-01T10:00:00Z",
+        end_ts="2025-01-01T10:01:00Z",
+        summary="all success but suspicious",
+        used_skills=["validation-skill"],
+        tool_signature=["edit_file"],
+        outcomes=["success"],
+        user_messages=["Please fix this and confirm it is done"],
+    )
+    trace = _make_trace(
+        trace_id="trace-route-1",
+        thread_id="thread-route",
+        started_at="2025-01-01T10:00:00Z",
+        ended_at="2025-01-01T10:01:00Z",
+        user_message="Please fix this and confirm it is done",
+        outcome="success",
+        used_skills=["validation-skill"],
+        tool_names=["edit_file"],
+    )
+
+    calls: list[str] = []
+
+    def fake_classify(ep, traces):  # noqa: ANN001
+        return EpisodeRouteDecision(
+            label="suspect_success",
+            confidence=0.9,
+            reason="Looks unresolved.",
+        )
+
+    def fake_success_analyze(ep, traces, bundle):  # noqa: ANN001
+        calls.append("success")
+        return [], []
+
+    def fake_error_analyze(ep, traces, bundle):  # noqa: ANN001
+        calls.append("error")
+        return [], [], ["downgraded"]
+
+    monkeypatch.setattr(service, "_classify_success_episode", fake_classify)
+    monkeypatch.setattr(service.success_analyst, "analyze", fake_success_analyze)
+    monkeypatch.setattr(service.error_analyst, "analyze", fake_error_analyze)
+
+    decision = service._classify_success_episode(episode, [trace])  # noqa: SLF001
+    assert decision.label == "suspect_success"
+
+    if decision.label == "clean_success" and decision.confidence >= settings.episode_route_confidence_threshold:
+        service.success_analyst.analyze(episode, [trace], None)
+    else:
+        service.error_analyst.analyze(episode, [trace], None)
+
+    assert calls == ["error"]
 
 
 def test_patch_engine_edit_replaces_unique_visible_text(tmp_path: Path) -> None:
