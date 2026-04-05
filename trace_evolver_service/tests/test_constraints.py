@@ -633,9 +633,9 @@ def test_merge_batch_can_emit_exact_text_edit(tmp_path: Path, monkeypatch) -> No
                 "reasoning": "Keep the exact replacement edit because both patches agree.",
                 "edits": [
                     {
+                        "source_op_id": "P1-A",
                         "file": "SKILL.md",
                         "op": "edit",
-                        "old_string": "- Start from the failing path.",
                         "new_string": "- Start from the failing path.\n- Verify resolver behavior before concluding the fix worked.",
                         "intent": "workflow",
                         "prevalence": 2,
@@ -650,4 +650,5 @@ def test_merge_batch_can_emit_exact_text_edit(tmp_path: Path, monkeypatch) -> No
     assert merged is not None
     assert len(merged.ops) == 1
     assert merged.ops[0].action == "edit"
+    # old_string is transparently passed through from the original patch, not from LLM output
     assert merged.ops[0].old_string == "- Start from the failing path."
