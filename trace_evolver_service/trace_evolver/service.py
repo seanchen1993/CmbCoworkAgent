@@ -12,7 +12,7 @@ Stage 2: Parallel Multi-Agent Patch Proposal
 
 Stage 3: Conflict-Free Consolidation
 - 按 (target_skill, family) 分桶
-- 桶内做 patch 冲突拆分；exact-text edits 以 old_string 为主键
+- 桶内做 anchor 级冲突拆分
 - 有 LLM 时走 hierarchical merge（论文 ℳ 算子）：dedup / conflict resolution / prevalent pattern bias
 - 无 LLM 时走 hash 精确去重 fallback
 - PatchEngine 物化 candidate bundle → 评估 → 导出
@@ -48,6 +48,7 @@ from trace_evolver.evaluate import evaluate_candidate
 from trace_evolver.llm import LLMClient
 from trace_evolver.patching import PatchEngine, generate_summary_markdown
 from trace_evolver.schemas import (
+    AnchorSpec,
     CandidateDetailResponse,
     EditOp,
     HypothesisPatch,
@@ -241,7 +242,7 @@ class TraceEvolutionService:
         """Merge analyst patches into candidate groups.
 
         1. Group by (target_skill, family)
-        2. Within each group, split conflicting patch edits into separate buckets
+        2. Within each group, split anchor-level conflicts into separate buckets
         3. Consolidate each bucket:
            - LLM available → hierarchical merge (Trace2Skill ℳ)
            - LLM unavailable → hash-based exact dedup (fallback)
@@ -335,17 +336,10 @@ class TraceEvolutionService:
         # Serialize all patches' ops for the LLM
         patches_description: list[str] = []
         for idx, patch in enumerate(batch):
-            ops_rendered: list[str] = []
-            for op in patch.ops:
-                if op.action == "edit":
-                    detail = (
-                        f"old={trim_snippet(op.old_string or '', 220)} -> "
-                        f"new={trim_snippet(op.new_string or '', 220)}"
-                    )
-                else:
-                    detail = trim_snippet(op.content, 600)
-                ops_rendered.append(f"  - [{op.action}] {op.file_path} (intent={op.intent}): {detail}")
-            ops_text = "\n".join(ops_rendered)
+            ops_text = "\n".join(
+                f"  - [{op.action}] {op.file_path} (intent={op.intent}): {trim_snippet(op.content, 600)}"
+                for op in patch.ops
+            )
             patches_description.append(
                 f"### Patch {idx + 1} (source={patch.source_kind}, confidence={patch.confidence:.2f}, "
                 f"traces={len(patch.source_trace_ids)})\n"
@@ -394,10 +388,9 @@ class TraceEvolutionService:
                     '  "edits": [\n'
                     "    {\n"
                     '      "file": "SKILL.md or references/xxx.md",\n'
-                    '      "op": "edit, append_file_end, or create",\n'
-                    '      "old_string": "required for edit; exact existing text to replace",\n'
-                    '      "new_string": "required for edit; replacement text",\n'
-                    '      "content": "required for append_file_end/create",\n'
+                    '      "op": "insert_after, replace_range, or create",\n'
+                    '      "target_section": "heading text to target, or null for file end / new file",\n'
+                    '      "content": "markdown content (for replace_range: the full replacement text)",\n'
                     '      "intent": "trigger|workflow|guardrail|example|reference|metadata",\n'
                     '      "prevalence": "number of source patches that proposed similar content"\n'
                     "    }\n"
@@ -436,20 +429,14 @@ class TraceEvolutionService:
             file_path = raw.get("file", "SKILL.md")
             if not isinstance(file_path, str):
                 continue
-            op_type = raw.get("op", "append_file_end")
             content = raw.get("content", "")
-            old_string = raw.get("old_string")
-            new_string = raw.get("new_string")
-            if op_type == "edit":
-                if not isinstance(old_string, str) or not old_string:
-                    continue
-                if not isinstance(new_string, str):
-                    continue
-            elif not content.strip():
+            if not content.strip():
                 continue
             intent = raw.get("intent", "guardrail")
             if intent not in VALID_INTENTS:
                 intent = "guardrail"
+            op_type = raw.get("op", "insert_after")
+            target_section = raw.get("target_section")
 
             if op_type == "create" and file_path != "SKILL.md":
                 if not is_allowed_markdown_relative_path(file_path):
@@ -461,34 +448,21 @@ class TraceEvolutionService:
                     intent=intent,
                     source_visibility="created",
                 ))
-            elif op_type == "append_file_end":
+            else:
                 if file_path not in visible_existing_set:
                     continue
                 if not is_allowed_markdown_relative_path(file_path):
                     continue
+                anchor = _build_anchor(target_section)
+                action = "replace_range" if op_type == "replace_range" else "insert_after"
                 ops.append(EditOp(
                     file_path=file_path,
-                    action="append_file_end",
+                    action=action,
+                    anchor=anchor,
                     content=content,
                     intent=intent,
                     source_visibility="full",
                 ))
-            elif op_type == "edit":
-                if file_path not in visible_existing_set:
-                    continue
-                if not is_allowed_markdown_relative_path(file_path):
-                    continue
-                ops.append(EditOp(
-                    file_path=file_path,
-                    action="edit",
-                    content=new_string,
-                    old_string=old_string,
-                    new_string=new_string,
-                    intent=intent,
-                    source_visibility="full",
-                ))
-            else:
-                continue
 
         ops = self._ensure_atomic_markdown_links(ops, visible_existing_set)
         if not ops:
@@ -557,7 +531,8 @@ class TraceEvolutionService:
                 filtered_ops.append(
                     EditOp(
                         file_path="SKILL.md",
-                        action="append_file_end",
+                        action="insert_after",
+                        anchor=AnchorSpec(anchor_type="file_end", text_hint="append at file end"),
                         content=f"\n- See [{file_path}]({file_path}) for additional guidance.\n",
                         intent="reference",
                         source_visibility="full",
@@ -567,10 +542,10 @@ class TraceEvolutionService:
         return filtered_ops
 
     def _has_conflict(self, bucket, candidate_patch) -> bool:
-        existing_keys = {_op_conflict_signature(op) for patch in bucket for op in patch.ops}
+        existing_keys = {(op.file_path, op.action, _anchor_signature(op.anchor)) for patch in bucket for op in patch.ops}
         for op in candidate_patch.ops:
-            key = _op_conflict_signature(op)
-            if key in existing_keys and not _is_low_risk_append(op):
+            key = (op.file_path, op.action, _anchor_signature(op.anchor))
+            if op.anchor and op.anchor.anchor_type != "file_end" and key in existing_keys:
                 return True
         return False
 
@@ -707,16 +682,28 @@ class TraceEvolutionService:
                 )
 
 
-def _op_conflict_signature(op: EditOp) -> tuple[str, str, str]:
-    if op.action == "edit":
-        return (op.file_path, op.action, op.old_string or "")
-    if op.action == "frontmatter_field":
-        return (op.file_path, op.action, op.field_name or "")
-    return (op.file_path, op.action, op.file_path)
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _anchor_signature(anchor) -> str:
+    if anchor is None:
+        return "none"
+    if anchor.anchor_type == "heading":
+        return "|".join(anchor.heading_path or []) or (anchor.text_hint or "heading")
+    if anchor.anchor_type == "frontmatter_field":
+        return anchor.field_name or "frontmatter"
+    return anchor.text_hint or anchor.fingerprint or anchor.anchor_type
 
 
-def _is_low_risk_append(op: EditOp) -> bool:
-    return op.action == "append_file_end"
+def _build_anchor(target_section: str | None) -> AnchorSpec:
+    """Convert target_section from LLM merge into AnchorSpec."""
+    if not target_section or target_section.lower() in ("null", "none", "end", "file_end"):
+        return AnchorSpec(anchor_type="file_end", text_hint="append at file end")
+    cleaned = target_section.lstrip("#").strip()
+    if cleaned:
+        return AnchorSpec(anchor_type="heading", heading_path=[cleaned], text_hint=cleaned)
+    return AnchorSpec(anchor_type="file_end", text_hint="append at file end")
 
 
 def _json_loads(payload: str) -> Any:
