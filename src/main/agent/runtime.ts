@@ -65,6 +65,7 @@ import { getWindowsSandboxMode, getYoloMode, getEnabledHooks } from "../storage"
 import { ApprovalStore } from "./approval-store"
 import { ToolOrchestrator } from "./tool-orchestrator"
 import type { ApprovalRequest, ApprovalDecision } from "../types"
+import { InterleavedThinkingChatOpenAICompletions } from "./interleaved-thinking-completions"
 
 /** Decompress codex.exe.gz → codex.exe if needed (re-extract if .gz is newer than .exe). */
 async function ensureCodexExe(exePath: string): Promise<void> {
@@ -658,6 +659,7 @@ function getModelInstance(
     model: string
     baseUrl: string
     apiKey?: string
+    interleavedThinking?: boolean
   }
 ): ChatOpenAI {
   const apiKey = customConfig.apiKey
@@ -671,7 +673,7 @@ function getModelInstance(
   }
   console.log("[Runtime] Custom model:", resolvedModel, "baseUrl:", customConfig.baseUrl)
 
-  return new ChatOpenAI({
+  const baseFields = {
     model: resolvedModel,
     apiKey,
     maxRetries: 1,
@@ -679,7 +681,16 @@ function getModelInstance(
     configuration: {
       baseURL: customConfig.baseUrl
     }
-  })
+  }
+
+  if (!customConfig.interleavedThinking) {
+    return new ChatOpenAI(baseFields)
+  }
+
+  return new ChatOpenAI({
+    ...baseFields,
+    completions: new InterleavedThinkingChatOpenAICompletions(baseFields)
+  } as never)
 }
 
 export interface CreateAgentRuntimeOptions {

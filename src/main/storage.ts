@@ -447,6 +447,7 @@ export interface CustomModelConfig {
   model: string
   apiKey?: string
   maxTokens?: number
+  interleavedThinking?: boolean
   tier?: "premium" | "economy"
 }
 
@@ -472,6 +473,7 @@ export interface CustomModelPublicConfig {
   model: string
   hasApiKey: boolean
   maxTokens: number
+  interleavedThinking?: boolean
   tier?: "premium" | "economy"
 }
 
@@ -481,6 +483,7 @@ interface StoredCustomModelRecord {
   baseUrl: string
   model: string
   maxTokens?: number
+  interleavedThinking?: boolean
   tier?: "premium" | "economy"
 }
 
@@ -494,6 +497,14 @@ function normalizeMaxTokens(value: unknown): number {
   }
 
   return Math.min(MAX_MAX_TOKENS, Math.max(MIN_MAX_TOKENS, Math.floor(value)))
+}
+
+function defaultInterleavedThinkingForModel(model: string): boolean {
+  return /minimax/i.test(model)
+}
+
+function resolveInterleavedThinkingSetting(model: string, value: unknown): boolean {
+  return typeof value === "boolean" ? value : defaultInterleavedThinkingForModel(model)
 }
 
 function getCustomApiKeyEnvName(id: string): string {
@@ -658,6 +669,7 @@ function toPublicConfig(config: StoredCustomModelRecord, env?: Record<string, st
     model: config.model,
     hasApiKey: !!getCustomModelApiKey(config.id, env),
     maxTokens: normalizeMaxTokens(config.maxTokens),
+    interleavedThinking: resolveInterleavedThinkingSetting(config.model, config.interleavedThinking),
     ...(config.tier !== undefined && { tier: config.tier })
   }
 }
@@ -672,6 +684,7 @@ export function getCustomModelConfigs(): CustomModelConfig[] {
     model: item.model,
     apiKey: getCustomModelApiKey(item.id, env),
     maxTokens: normalizeMaxTokens(item.maxTokens),
+    interleavedThinking: resolveInterleavedThinkingSetting(item.model, item.interleavedThinking),
     ...(item.tier !== undefined && { tier: item.tier })
   }))
 }
@@ -687,6 +700,7 @@ export function getCustomModelConfigById(id: string): CustomModelConfig | null {
     model: record.model,
     apiKey: getCustomModelApiKey(record.id),
     maxTokens: normalizeMaxTokens(record.maxTokens),
+    interleavedThinking: resolveInterleavedThinkingSetting(record.model, record.interleavedThinking),
     ...(record.tier !== undefined && { tier: record.tier })
   }
 }
@@ -740,6 +754,7 @@ export function upsertCustomModelConfig(
     baseUrl: validatedBaseUrl,
     model: normalizedModel,
     maxTokens: validatedMaxTokens,
+    interleavedThinking: resolveInterleavedThinkingSetting(normalizedModel, config.interleavedThinking),
     ...(config.tier !== undefined && { tier: config.tier })
   }
 
