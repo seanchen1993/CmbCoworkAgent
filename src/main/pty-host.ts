@@ -204,9 +204,13 @@ function handleCreate(msg: CreateMsg): void {
     let claudeCmd: string
     if (isJsFile) {
       if (isWin) {
-        // Windows: 用 node.exe（CONSOLE 子系统）替代 electron.exe（GUI 子系统）
-        // electron.exe 在 ConPTY 下 process.stdout.isTTY 为 undefined，Claude Code 会误入 --print 模式
-        claudeCmd = [escapeArg(findNodeExe()), escapeArg(msg.claudePath), ...msg.args.map(escapeArg)].join(" ")
+        // Windows: 用 node.exe（CONSOLE 子系统）替代 electron.exe（GUI 子系统），
+        // electron.exe 在 ConPTY 下 process.stdout.isTTY 为 undefined，Claude Code 会误入 --print 模式。
+        // 通过环境变量传递路径，避免 MSYS2 命令行参数编码损坏中文路径。
+        env._CLAW_NODE = findNodeExe()
+        env._CLAW_SCRIPT = msg.claudePath
+        // 注意：msg.args 仍走命令行参数，当前只含 ASCII flag（--model 等），无中文风险
+        claudeCmd = ['"$_CLAW_NODE"', '"$_CLAW_SCRIPT"', ...msg.args.map(escapeArg)].join(" ")
       } else {
         claudeCmd = [escapeArg(msg.electronPath), escapeArg(msg.claudePath), ...msg.args.map(escapeArg)].join(" ")
         env.ELECTRON_RUN_AS_NODE = "1"
@@ -222,6 +226,9 @@ function handleCreate(msg: CreateMsg): void {
     }
     if (isJsFile && !isWin) {
       varsToUnset.push("ELECTRON_RUN_AS_NODE")
+    }
+    if (isJsFile && isWin) {
+      varsToUnset.push("_CLAW_NODE", "_CLAW_SCRIPT")
     }
 
     const shellCmd = varsToUnset.length > 0

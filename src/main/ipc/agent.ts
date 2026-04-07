@@ -662,7 +662,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
       // ── Failover loop: try models in order, resume from checkpoint on retryable errors ──
       const primaryTier = invokeRoutingResult?.resolvedTier ?? "premium"
-      const orderedChain = buildOrderedChain(effectiveModelId, invokeRoutingResult?.fallbackChain, primaryTier)
+      const orderedChain = buildOrderedChain(
+        effectiveModelId,
+        invokeRoutingResult?.fallbackChain,
+        primaryTier,
+        invokeRoutingResult?.layer !== "pinned"
+      )
       const failoverAttempts: FailoverAttempt[] = []
       usedModelId = effectiveModelId
       let isFirstAttempt = true
@@ -1417,7 +1422,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
       // ── Failover loop for resume ──
       const resumePrimaryTier = resumeRoutingResult?.resolvedTier ?? "premium"
-      const resumeOrderedChain = buildOrderedChain(effectiveResumeModelId, resumeRoutingResult?.fallbackChain, resumePrimaryTier)
+      const resumeOrderedChain = buildOrderedChain(
+        effectiveResumeModelId,
+        resumeRoutingResult?.fallbackChain,
+        resumePrimaryTier,
+        resumeRoutingResult?.layer !== "pinned"
+      )
       const resumeFailoverAttempts: FailoverAttempt[] = []
       let resumeUsedModelId = effectiveResumeModelId
       let resumeStream: AsyncIterable<unknown> | null = null
@@ -1610,7 +1620,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       if (decision.type === "approve") {
         // ── Failover loop for interrupt-continue ──
         const intPrimaryTier = interruptRoutingResult?.resolvedTier ?? "premium"
-        const intOrderedChain = buildOrderedChain(effectiveInterruptModelId, interruptRoutingResult?.fallbackChain, intPrimaryTier)
+        const intOrderedChain = buildOrderedChain(
+          effectiveInterruptModelId,
+          interruptRoutingResult?.fallbackChain,
+          intPrimaryTier,
+          interruptRoutingResult?.layer !== "pinned"
+        )
         const intFailoverAttempts: FailoverAttempt[] = []
         let intUsedModelId = effectiveInterruptModelId
         let intStream: AsyncIterable<unknown> | null = null

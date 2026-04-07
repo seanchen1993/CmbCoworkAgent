@@ -5,19 +5,38 @@ import {
   deleteHook,
   setHookEnabled
 } from "../storage"
-import type { HookConfig, HookEvent, HookUpsert } from "../hooks/types"
+import type { HookConfig, HookEvent, HookType, PromptHookFallback, HookUpsert } from "../hooks/types"
 
 const VALID_EVENTS = new Set<HookEvent>(["PreToolUse", "PostToolUse", "Stop", "Notification"])
+const VALID_TYPES = new Set<HookType>(["command", "prompt"])
+const VALID_FALLBACKS = new Set<PromptHookFallback>(["allow", "block"])
 const TIMEOUT_MIN = 1_000
 const TIMEOUT_MAX = 60_000
 
 function validateHookConfig(config: HookUpsert): void {
-  if (!config.command || typeof config.command !== "string" || !config.command.trim()) {
-    throw new Error("命令不能为空")
-  }
   if (!config.event || !VALID_EVENTS.has(config.event)) {
     throw new Error("无效的事件类型")
   }
+
+  const hookType = config.type ?? "command"
+  if (!VALID_TYPES.has(hookType)) {
+    throw new Error("无效的 Hook 类型，必须为 command 或 prompt")
+  }
+
+  if (hookType === "command") {
+    if (!config.command || typeof config.command !== "string" || !config.command.trim()) {
+      throw new Error("命令不能为空")
+    }
+  } else {
+    // prompt hook
+    if (!config.prompt || typeof config.prompt !== "string" || !config.prompt.trim()) {
+      throw new Error("策略描述不能为空")
+    }
+    if (config.fallback !== undefined && !VALID_FALLBACKS.has(config.fallback)) {
+      throw new Error("fallback 必须为 allow 或 block")
+    }
+  }
+
   if (config.timeout !== undefined) {
     const t = config.timeout
     if (!Number.isInteger(t) || t < TIMEOUT_MIN || t > TIMEOUT_MAX) {

@@ -1,4 +1,11 @@
 import { app, shell, BrowserWindow, ipcMain, nativeImage, powerSaveBlocker } from "electron"
+
+// Fix Linux sandbox error: "The setuid sandbox is not running as root"
+// On Linux the chrome-sandbox binary often lacks setuid permissions in packaged apps.
+if (process.platform === "linux") {
+  app.commandLine.appendSwitch("no-sandbox")
+}
+
 import { existsSync } from "fs"
 import { join } from "path"
 import { writeMainLog, writeRendererLog } from "./logging"

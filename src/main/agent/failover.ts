@@ -123,7 +123,8 @@ export interface FailoverAttempt {
 export function buildOrderedChain(
   primaryModelId: string | undefined,
   fallbackChain: string[] | undefined,
-  primaryTier: "premium" | "economy"
+  primaryTier: "premium" | "economy",
+  allowFailover = true
 ): string[] {
   const configs = getCustomModelConfigs()
   const chain: string[] = []
@@ -138,6 +139,10 @@ export function buildOrderedChain(
 
   // Primary model always first
   if (primaryModelId) add(primaryModelId)
+
+  if (!allowFailover) {
+    return chain
+  }
 
   if (primaryTier === "premium") {
     // Premium fails → only other premium models

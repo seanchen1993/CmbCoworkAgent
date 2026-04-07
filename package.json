@@ -89,7 +89,7 @@
     "electronVersion": "39.8.0"
   },
   "dependencies": {
-    "@anthropic-ai/claude-code": "^2.1.86",
+    "@anthropic-ai/claude-code": "^2.1.92",
     "@fontsource/inter": "^5.2.8",
     "@fontsource/rajdhani": "^5.2.7",
     "@langchain/anthropic": "^1.3.21",

@@ -16,6 +16,7 @@ import { DiffDisplay } from "@/components/chat/ToolCallRenderer"
 import { Badge } from "@/components/ui/badge"
 import { toast } from "sonner"
 import { GitSubmitDialog } from "./GitSubmitDialog"
+import { insertLog } from "../../../js/mmjUtils"
 
 export function GitPanelView({
   threadId,
@@ -162,12 +163,14 @@ export function GitPanelView({
           const result = await window.api.workspace.commitWorktree(threadId, finalMessage)
           if (!result.success) throw new Error(result.error || "提交失败")
           showToast("提交成功", "success")
+          insertLog('commit成功')
         } else {
           const result = hasPendingChanges
             ? await window.api.workspace.pushWorktree(threadId, finalMessage)
             : await window.api.workspace.pushWorktree(threadId)
           if (!result.success) throw new Error(result.error || "推送失败")
           showToast("推送成功", "success")
+          insertLog('push成功')
         }
         setCardNumber("")
         setCommitMessage("")
@@ -270,6 +273,7 @@ export function GitPanelView({
                 </button>
               )}
               <button
+                id={'git-refresh-button'}
                 onClick={() => {
                   void refresh()
                 }}
@@ -283,6 +287,7 @@ export function GitPanelView({
               </button>
               {hasPending && (
                 <button
+                  id={'git-reject-all-button'}
                   onClick={() => {
                     void runReject()
                   }}

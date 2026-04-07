@@ -163,6 +163,7 @@ export function GitSubmitDialog({
           {requiresCommitMetadata ? (
             <>
               <Button
+                id={'git-commit-button'}
                 type="button"
                 className="w-full h-9"
                 variant={action === "push" ? "outline" : "default"}
@@ -183,6 +184,7 @@ export function GitSubmitDialog({
               </Button>
 
               <Button
+                id={'git-commit-push-button'}
                 type="button"
                 className="w-full h-9"
                 variant={action === "push" ? "default" : "outline"}
@@ -204,6 +206,7 @@ export function GitSubmitDialog({
             </>
           ) : (
             <Button
+              id={'git-push-button'}
               type="button"
               className="w-full h-9"
               disabled={anyRunning}
@@ -224,6 +227,7 @@ export function GitSubmitDialog({
           )}
 
           <Button
+            id={'git-cancel-button'}
             type="button"
             variant="ghost"
             className="w-full h-9"

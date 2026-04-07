@@ -1666,12 +1666,14 @@ export function getHooks(): HookConfig[] {
     const parsed = JSON.parse(content) as unknown
     if (!Array.isArray(parsed)) return []
     return parsed.filter(
-      (item): item is HookConfig =>
-        item != null &&
-        typeof item === "object" &&
-        typeof (item as Record<string, unknown>).id === "string" &&
-        typeof (item as Record<string, unknown>).event === "string" &&
-        typeof (item as Record<string, unknown>).command === "string"
+      (item): item is HookConfig => {
+        if (item == null || typeof item !== "object") return false
+        const h = item as Record<string, unknown>
+        if (typeof h.id !== "string" || typeof h.event !== "string") return false
+        const hookType = h.type ?? "command"
+        if (hookType === "prompt") return typeof h.prompt === "string"
+        return typeof h.command === "string"
+      }
     )
   } catch {
     return []
@@ -1694,11 +1696,16 @@ export function upsertHook(config: HookUpsert & { id?: string }): string {
   const now = new Date().toISOString()
   const id = config.id ?? uuid()
   const existing = items.find((i) => i.id === id)
+  const hookType = config.type ?? "command"
   const next: HookConfig = {
     id,
     event: config.event,
     matcher: config.matcher,
-    command: config.command.trim(),
+    type: hookType,
+    command: hookType === "command" ? (config.command ?? "").trim() : undefined,
+    prompt: hookType === "prompt" ? config.prompt?.trim() : undefined,
+    modelId: hookType === "prompt" ? config.modelId : undefined,
+    fallback: hookType === "prompt" ? (config.fallback ?? "allow") : undefined,
     timeout: config.timeout,
     enabled: config.enabled ?? true,
     createdAt: existing?.createdAt ?? now,

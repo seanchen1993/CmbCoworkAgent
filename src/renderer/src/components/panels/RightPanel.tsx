@@ -2089,6 +2089,24 @@ const EVENT_BADGE_COLORS: Record<string, string> = {
   Notification: "bg-purple-500/15 text-purple-600 dark:text-purple-400"
 }
 
+const EVENT_LABEL: Record<string, string> = {
+  PreToolUse: "调用前",
+  PostToolUse: "调用后",
+  Stop: "停止时",
+  Notification: "通知"
+}
+
+const TOOL_LABEL: Record<string, string> = {
+  execute:          "执行命令",
+  write_file:       "写入文件",
+  edit_file:        "编辑文件",
+  read_file:        "读取文件",
+  memory_search:    "搜索记忆",
+  memory_get:       "读取记忆",
+  manage_scheduler: "调度任务",
+  manage_skill:     "技能管理",
+}
+
 function HooksContent({ hooks, onChange }: { hooks: HookConfig[]; onChange: () => void }): React.JSX.Element {
   if (hooks.length === 0) {
     return (
@@ -2112,17 +2130,27 @@ function HooksContent({ hooks, onChange }: { hooks: HookConfig[]; onChange: () =
     }
   }
 
-  const renderHookCard = (hook: HookConfig): React.JSX.Element => (
+  const renderHookCard = (hook: HookConfig): React.JSX.Element => {
+    const isPrompt = hook.type === "prompt"
+    const summary = isPrompt ? (hook.prompt ?? "") : (hook.command ?? "")
+    return (
     <div
       key={hook.id}
       className={cn("p-3 rounded-sm border border-border", !hook.enabled && "opacity-60")}
     >
       <div className="flex items-center gap-2 text-sm">
         <span className={cn("text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0", EVENT_BADGE_COLORS[hook.event] ?? "bg-muted text-muted-foreground")}>
-          {hook.event}
+          {EVENT_LABEL[hook.event] ?? hook.event}
         </span>
+        {isPrompt && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-violet-500/15 text-violet-600 dark:text-violet-400">
+            策略
+          </span>
+        )}
         {hook.matcher && hook.matcher !== "*" && (
-          <span className="text-[10px] text-muted-foreground shrink-0 font-mono">{hook.matcher}</span>
+          <span className="text-[10px] text-muted-foreground shrink-0 font-mono">
+            {TOOL_LABEL[hook.matcher] ?? hook.matcher}
+          </span>
         )}
         <button
           className="ml-auto shrink-0"
@@ -2132,9 +2160,12 @@ function HooksContent({ hooks, onChange }: { hooks: HookConfig[]; onChange: () =
           <Power className={cn("size-3", hook.enabled ? "text-status-nominal" : "text-muted-foreground")} />
         </button>
       </div>
-      <p className="text-xs text-muted-foreground mt-1.5 font-mono break-all line-clamp-2">{hook.command}</p>
+      <p className={cn(
+        "text-xs text-muted-foreground mt-1.5 break-all line-clamp-2",
+        isPrompt ? "italic" : "font-mono"
+      )}>{summary}</p>
     </div>
-  )
+  )}
 
   return (
     <div className="p-3 space-y-2">
