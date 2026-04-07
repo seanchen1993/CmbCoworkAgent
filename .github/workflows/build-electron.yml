@@ -72,8 +72,8 @@ jobs:
       - name: Get package version
         id: pkg
         run: |
-          # read version from package.json and expose as step output
-          echo "version=$(node -p \"require('./package.json').version\")" >> $GITHUB_OUTPUT
+            # read version from package.json and expose as step output
+            echo "version=$(jq -r .version package.json)" >> $GITHUB_OUTPUT
 
       - name: Package
         run: npx electron-builder --${{ matrix.platform == 'linux' && 'linux deb AppImage' || matrix.platform }}
