@@ -1,10 +1,11 @@
-import { IpcMain, BrowserWindow } from "electron"
+import { IpcMain } from "electron"
 import { existsSync, readdirSync, readFileSync, unlinkSync, statSync } from "fs"
 import { join, basename } from "path"
 import { homedir } from "os"
 import { isMemoryEnabled, setMemoryEnabled } from "../storage"
 import { getMemoryStore } from "../memory/store"
 import { removeEntryFromManifest, parseFrontmatter, type MemoryType } from "../memory/manifest"
+import { notifyMemoryChanged } from "../memory/events"
 
 const VALID_TYPES = new Set<MemoryType>(["user", "feedback", "project", "reference"])
 
@@ -27,12 +28,6 @@ export interface MemoryStats {
   totalSize: number
   indexSize: number
   enabled: boolean
-}
-
-function notifyChanged(): void {
-  for (const win of BrowserWindow.getAllWindows()) {
-    win.webContents.send("memory:changed")
-  }
 }
 
 export function registerMemoryHandlers(ipcMain: IpcMain): void {
@@ -119,7 +114,7 @@ export function registerMemoryHandlers(ipcMain: IpcMain): void {
     } catch (e) {
       console.warn("[Memory] Failed to update manifest after delete:", e)
     }
-    notifyChanged()
+    notifyMemoryChanged()
   })
 
   ipcMain.handle("memory:getEnabled", async (): Promise<boolean> => {
@@ -128,7 +123,7 @@ export function registerMemoryHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle("memory:setEnabled", async (_, enabled: boolean): Promise<void> => {
     setMemoryEnabled(enabled)
-    notifyChanged()
+    notifyMemoryChanged()
   })
 
   ipcMain.handle("memory:getStats", async (): Promise<MemoryStats> => {

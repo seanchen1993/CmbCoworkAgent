@@ -75,7 +75,7 @@ function escapeYaml(s: string): string {
   return out.trim()
 }
 
-function parseMemoryType(value: string | undefined): MemoryType | null {
+export function parseMemoryType(value: string | undefined): MemoryType | null {
   if (!value) return null
   const v = value.toLowerCase().trim()
   return VALID_TYPES.has(v as MemoryType) ? (v as MemoryType) : null

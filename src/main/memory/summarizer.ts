@@ -3,6 +3,7 @@ import { HumanMessage, SystemMessage } from "@langchain/core/messages"
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs"
 import { basename, join } from "path"
 import { getMemoryStore } from "./store"
+import { notifyMemoryChanged } from "./events"
 import {
   scanMemoryFiles,
   regenerateManifest,
@@ -10,6 +11,7 @@ import {
   isValidFactFilename,
   generateFactFilename,
   parseFrontmatter,
+  parseMemoryType,
   type MemoryType,
   type MemoryHeader
 } from "./manifest"
@@ -125,14 +127,16 @@ You MUST output a single JSON object with this exact shape:
 - 用与用户相同的语言书写 name/description/content
 `
 
-const MAX_CONVERSATION_CHARS = 12000
 // When truncating long conversations, keep the head AND the tail — the tail
 // usually contains the conclusions/decisions/confirmations worth remembering.
 const CONVERSATION_HEAD_CHARS = 4000
 const CONVERSATION_TAIL_CHARS = 8000
+// Only truncate when there's actually material to drop. The marker text is
+// ~30 chars, so a borderline conversation would otherwise grow after "truncation".
+const MAX_CONVERSATION_CHARS = CONVERSATION_HEAD_CHARS + CONVERSATION_TAIL_CHARS + 200
 const MAX_CONTENT_CHARS = 8000
 const MAX_MEMORY_MD_BYTES = 25_000
-const MAX_CURRENT_MEMORY_MD_PROMPT_BYTES = 25_000
+const MAX_CURRENT_MEMORY_MD_PROMPT_CHARS = 25_000
 
 export interface SummarizeOptions {
   model: ChatOpenAI
@@ -173,16 +177,12 @@ function stripCodeFences(s: string): string {
 }
 
 function stripThinkBlocks(s: string): string {
-  // First pass: strip well-formed <think>...</think> blocks.
-  let out = s.replace(/<think>[\s\S]*?<\/think>\s*/g, "")
-  // Second pass: handle the case where the opening <think> is missing
-  // (some models stream the closing tag only). Skip this if any well-formed
-  // <think> tag remains, otherwise we'd swallow legitimate JSON content that
-  // happens to contain a literal "</think>" inside a string.
-  if (!out.includes("<think>")) {
-    out = out.replace(/^[\s\S]*?<\/think>\s*/, "")
-  }
-  return out
+  // Strip well-formed <think>...</think> blocks. We deliberately do NOT try
+  // to handle "lone closing tag" cases because the LLM's JSON content can
+  // contain a literal "</think>" inside a string, and any heuristic that
+  // greedily eats from start-of-string to "</think>" will swallow legitimate
+  // JSON whenever the tag appears mid-content.
+  return s.replace(/<think>[\s\S]*?<\/think>\s*/g, "")
 }
 
 /**
@@ -297,11 +297,14 @@ function applyUpdate(memoryDir: string, op: UpdateOp): string | null {
     return null
   }
   // Preserve type from existing frontmatter if LLM didn't supply one.
+  // Validate the on-disk value via parseMemoryType — a bare type assertion
+  // would let an invalid string ("Feedback", "memo", etc.) round-trip
+  // and silently break scanMemoryFiles which uses the same validator.
   const existingContent = readFileSync(fullPath, "utf-8")
   const { frontmatter } = parseFrontmatter(existingContent)
-  const type = (frontmatter.type as MemoryType | undefined) ?? null
+  const type = parseMemoryType(frontmatter.type)
   if (!type) {
-    console.warn("[Memory] Update target has no type frontmatter, skipping:", safe)
+    console.warn("[Memory] Update target has invalid/missing type, skipping:", safe)
     return null
   }
   const fm = buildFrontmatter({
@@ -328,11 +331,27 @@ function readCurrentMemoryMd(memoryDir: string): string {
   const memoryMdPath = join(memoryDir, "MEMORY.md")
   if (!existsSync(memoryMdPath)) return ""
   const content = readFileSync(memoryMdPath, "utf-8")
-  if (content.length <= MAX_CURRENT_MEMORY_MD_PROMPT_BYTES) return content
-  return content.slice(0, MAX_CURRENT_MEMORY_MD_PROMPT_BYTES) + "\n...(truncated)"
+  if (content.length <= MAX_CURRENT_MEMORY_MD_PROMPT_CHARS) return content
+  return content.slice(0, MAX_CURRENT_MEMORY_MD_PROMPT_CHARS) + "\n...(truncated)"
 }
 
-export async function summarizeAndSave(options: SummarizeOptions): Promise<void> {
+/**
+ * Module-level serialization queue: ensures two concurrent summarize calls
+ * (e.g. two agent threads ending within seconds of each other) don't
+ * clobber each other's MEMORY.md writes or fight over per-fact slug
+ * collisions. Each call awaits the previous one before starting.
+ */
+let summarizeQueue: Promise<void> = Promise.resolve()
+
+export function summarizeAndSave(options: SummarizeOptions): Promise<void> {
+  const next = summarizeQueue.then(() => summarizeAndSaveInner(options))
+  // Swallow errors in the chain so one failure doesn't block subsequent
+  // calls forever. The inner function already logs its own failures.
+  summarizeQueue = next.catch(() => undefined)
+  return next
+}
+
+async function summarizeAndSaveInner(options: SummarizeOptions): Promise<void> {
   const { model, conversation, memoryDir } = options
 
   if (!conversation.trim()) return
@@ -341,6 +360,7 @@ export async function summarizeAndSave(options: SummarizeOptions): Promise<void>
     mkdirSync(memoryDir, { recursive: true })
   }
 
+  let uiChanged = false
   try {
     const headers = scanMemoryFiles(memoryDir)
     const manifestText = buildManifestForPrompt(headers)
@@ -445,11 +465,28 @@ export async function summarizeAndSave(options: SummarizeOptions): Promise<void>
       }
     }
 
+    if (touched.length > 0 || manifestWritten) {
+      uiChanged = true
+    }
+
     console.log(
       `[Memory] Applied ${creates} create, ${updates} update, ${skips} skip; ` +
         `manifest ${manifestWritten ? (memoryMd ? "rewritten by LLM" : "bootstrapped") : "unchanged"}`
     )
   } catch (e) {
     console.warn("[Memory] Failed to summarize:", e instanceof Error ? e.message : e)
+  } finally {
+    // Notify any open MemoryPanel so it re-loads from disk. Without this,
+    // the renderer never sees background summarizer writes.
+    if (uiChanged) {
+      try {
+        notifyMemoryChanged()
+      } catch (e) {
+        console.warn(
+          "[Memory] Failed to broadcast memory:changed:",
+          e instanceof Error ? e.message : e
+        )
+      }
+    }
   }
 }
