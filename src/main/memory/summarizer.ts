@@ -1,7 +1,7 @@
 import { ChatOpenAI } from "@langchain/openai"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs"
-import { join } from "path"
+import { basename, join } from "path"
 import { getMemoryStore } from "./store"
 import {
   scanMemoryFiles,
@@ -93,6 +93,12 @@ You MUST output a single JSON object with this exact shape:
 - 必须以 type 前缀开头：\`user_\`、\`feedback_\`、\`project_\`、\`reference_\`
 - 例：\`feedback_no_db_mock.md\`、\`user_role_engineer.md\`、\`project_auth_rewrite.md\`
 
+## Content field rules
+
+- \`content\` 字段是**纯正文**，**禁止**包含任何 YAML frontmatter
+- **禁止**在 \`content\` 开头写 \`---\` 分隔符或 \`name:\` / \`type:\` / \`description:\` 这些字段
+- frontmatter 由系统根据 \`name\` / \`description\` / \`type\` 字段自动生成
+
 ## Decision rules
 
 - 如果一条新事实和现有记忆描述的是**同一回事**：用 update（覆盖原文件）
@@ -119,8 +125,12 @@ You MUST output a single JSON object with this exact shape:
 - 用与用户相同的语言书写 name/description/content
 `
 
-const MAX_CONVERSATION_CHARS = 6000
-const MAX_CONTENT_BYTES = 8000
+const MAX_CONVERSATION_CHARS = 12000
+// When truncating long conversations, keep the head AND the tail — the tail
+// usually contains the conclusions/decisions/confirmations worth remembering.
+const CONVERSATION_HEAD_CHARS = 4000
+const CONVERSATION_TAIL_CHARS = 8000
+const MAX_CONTENT_CHARS = 8000
 const MAX_MEMORY_MD_BYTES = 25_000
 const MAX_CURRENT_MEMORY_MD_PROMPT_BYTES = 25_000
 
@@ -163,7 +173,26 @@ function stripCodeFences(s: string): string {
 }
 
 function stripThinkBlocks(s: string): string {
-  return s.replace(/<think>[\s\S]*?<\/think>\s*/g, "").replace(/^[\s\S]*?<\/think>\s*/g, "")
+  // First pass: strip well-formed <think>...</think> blocks.
+  let out = s.replace(/<think>[\s\S]*?<\/think>\s*/g, "")
+  // Second pass: handle the case where the opening <think> is missing
+  // (some models stream the closing tag only). Skip this if any well-formed
+  // <think> tag remains, otherwise we'd swallow legitimate JSON content that
+  // happens to contain a literal "</think>" inside a string.
+  if (!out.includes("<think>")) {
+    out = out.replace(/^[\s\S]*?<\/think>\s*/, "")
+  }
+  return out
+}
+
+/**
+ * If the LLM included a YAML frontmatter block at the top of `op.content`
+ * (often by mirroring the prompt's example), strip it so we don't end up
+ * with two stacked frontmatters in the saved file.
+ */
+function stripLeadingFrontmatter(body: string): string {
+  const m = body.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/)
+  return m ? body.slice(m[0].length) : body
 }
 
 interface ParsedResponse {
@@ -222,8 +251,8 @@ function isValidOperation(o: unknown): boolean {
 }
 
 function clampContent(s: string): string {
-  if (s.length <= MAX_CONTENT_BYTES) return s
-  return s.slice(0, MAX_CONTENT_BYTES) + "\n…(truncated)"
+  if (s.length <= MAX_CONTENT_CHARS) return s
+  return s.slice(0, MAX_CONTENT_CHARS) + "\n…(truncated)"
 }
 
 function applyCreate(memoryDir: string, op: CreateOp, existing: Set<string>): string | null {
@@ -232,14 +261,17 @@ function applyCreate(memoryDir: string, op: CreateOp, existing: Set<string>): st
   if (!filename || !isValidFactFilename(filename, op.type)) {
     filename = generateFactFilename(op.name, op.type)
   }
-  // Avoid clobbering an existing file (race with previous turn or LLM picking a taken slug).
-  if (existing.has(filename)) {
+  // Avoid clobbering an existing file. Check both the in-memory set (known
+  // per-fact files from this scan) and the actual disk (orphan .md files
+  // without valid frontmatter that scanMemoryFiles excluded).
+  const isTaken = (name: string): boolean => existing.has(name) || existsSync(join(memoryDir, name))
+  if (isTaken(filename)) {
     let i = 2
-    while (existing.has(filename.replace(/\.md$/, `_${i}.md`))) i++
+    while (isTaken(filename.replace(/\.md$/, `_${i}.md`))) i++
     filename = filename.replace(/\.md$/, `_${i}.md`)
   }
   const fullPath = join(memoryDir, filename)
-  const body = clampContent(op.content.trim())
+  const body = stripLeadingFrontmatter(clampContent(op.content.trim()))
   const fm = buildFrontmatter({ name: op.name, description: op.description ?? "", type: op.type })
   writeFileSync(fullPath, fm + body + "\n", "utf-8")
   existing.add(filename)
@@ -247,9 +279,21 @@ function applyCreate(memoryDir: string, op: CreateOp, existing: Set<string>): st
 }
 
 function applyUpdate(memoryDir: string, op: UpdateOp): string | null {
-  const fullPath = join(memoryDir, op.filename)
+  // Path-traversal guard: the LLM-supplied filename must be a bare filename
+  // (no slashes, no parent traversal) and must match the per-fact file shape.
+  const safe = basename(op.filename)
+  if (
+    safe !== op.filename ||
+    safe === "MEMORY.md" ||
+    !safe.endsWith(".md") ||
+    safe.startsWith(".")
+  ) {
+    console.warn("[Memory] Update target rejected (unsafe filename):", op.filename)
+    return null
+  }
+  const fullPath = join(memoryDir, safe)
   if (!existsSync(fullPath)) {
-    console.warn("[Memory] Update target not found, skipping:", op.filename)
+    console.warn("[Memory] Update target not found, skipping:", safe)
     return null
   }
   // Preserve type from existing frontmatter if LLM didn't supply one.
@@ -257,15 +301,15 @@ function applyUpdate(memoryDir: string, op: UpdateOp): string | null {
   const { frontmatter } = parseFrontmatter(existingContent)
   const type = (frontmatter.type as MemoryType | undefined) ?? null
   if (!type) {
-    console.warn("[Memory] Update target has no type frontmatter, skipping:", op.filename)
+    console.warn("[Memory] Update target has no type frontmatter, skipping:", safe)
     return null
   }
   const fm = buildFrontmatter({
-    name: op.name || frontmatter.name || op.filename,
+    name: op.name || frontmatter.name || safe,
     description: op.description || frontmatter.description || "",
     type
   })
-  const body = clampContent(op.content.trim())
+  const body = stripLeadingFrontmatter(clampContent(op.content.trim()))
   writeFileSync(fullPath, fm + body + "\n", "utf-8")
   return fullPath
 }
@@ -305,7 +349,9 @@ export async function summarizeAndSave(options: SummarizeOptions): Promise<void>
 
     const truncated =
       conversation.length > MAX_CONVERSATION_CHARS
-        ? conversation.slice(0, MAX_CONVERSATION_CHARS) + "\n...(truncated)"
+        ? conversation.slice(0, CONVERSATION_HEAD_CHARS) +
+          `\n...(${conversation.length - CONVERSATION_HEAD_CHARS - CONVERSATION_TAIL_CHARS} chars truncated)...\n` +
+          conversation.slice(conversation.length - CONVERSATION_TAIL_CHARS)
         : conversation
 
     const userPrompt =

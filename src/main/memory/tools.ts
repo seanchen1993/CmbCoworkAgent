@@ -3,7 +3,7 @@ import { z } from "zod"
 import { existsSync, statSync } from "fs"
 import { isAbsolute, join } from "path"
 import type { MemoryStore } from "./store"
-import { memoryFreshnessText } from "./manifest"
+import { memoryFreshnessText, MEMORY_FRESHNESS_DAYS } from "./manifest"
 
 const SNIPPET_MAX_CHARS = 700
 
@@ -21,11 +21,28 @@ export function createMemorySearchTool(store: MemoryStore) {
       if (results.length === 0) {
         return "No matching memories found."
       }
+      const now = Date.now()
+      const staleMs = MEMORY_FRESHNESS_DAYS * 24 * 60 * 60 * 1000
       return results
         .map((r, i) => {
           const source = `${r.path}#L${r.startLine}-${r.endLine}`
           const snippet = truncateSnippet(r.text, SNIPPET_MAX_CHARS)
-          return `[${i + 1}] (Source: ${source})\n${snippet}`
+          // Tag stale snippets so the agent knows to verify before asserting
+          // — most agents call memory_search and use the snippet directly
+          // without ever calling memory_get, so the caveat must live here too.
+          let staleTag = ""
+          try {
+            if (existsSync(r.path)) {
+              const ageMs = now - statSync(r.path).mtimeMs
+              if (ageMs > staleMs) {
+                const days = Math.floor(ageMs / (24 * 60 * 60 * 1000))
+                staleTag = ` ⚠️ ${days}d old — verify before asserting`
+              }
+            }
+          } catch {
+            /* ignore stat failures */
+          }
+          return `[${i + 1}] (Source: ${source})${staleTag}\n${snippet}`
         })
         .join("\n\n---\n\n")
     },

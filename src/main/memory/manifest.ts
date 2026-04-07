@@ -136,7 +136,7 @@ export function ageSuffix(mtimeMs: number, now: number = Date.now()): string {
  * Caveat shown when a recalled memory is older than `MEMORY_FRESHNESS_DAYS`.
  * The agent should verify against current state before asserting it as fact.
  */
-export const MEMORY_FRESHNESS_DAYS = 1
+export const MEMORY_FRESHNESS_DAYS = 14
 
 export function memoryFreshnessText(mtimeMs: number, now: number = Date.now()): string {
   const days = Math.max(0, Math.floor((now - mtimeMs) / (1000 * 60 * 60 * 24)))

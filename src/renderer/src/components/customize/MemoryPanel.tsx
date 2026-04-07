@@ -171,7 +171,10 @@ export function MemoryPanel(): React.JSX.Element {
         if (mountedRef.current) setFileContent(content)
       })
       .catch(console.error)
-  }, [selectedFile])
+    // Re-read when name OR modifiedAt changes — this catches background
+    // rewrites by the summarizer (which fires memory:changed → loadData →
+    // setSelectedFile with the fresh metadata).
+  }, [selectedFile?.name, selectedFile?.modifiedAt])
 
   const handleToggleEnabled = useCallback(async () => {
     try {
@@ -244,8 +247,16 @@ export function MemoryPanel(): React.JSX.Element {
                     onSelect={setSelectedFile}
                     iconOverride={<FileText className="size-3.5 shrink-0 text-primary" />}
                     primaryLabel="MEMORY.md"
-                    secondaryLabel="自动生成的索引"
+                    secondaryLabel="索引文件 · 注入到每次对话"
                   />
+                )}
+
+                {grouped.legacy.length > 0 && (
+                  <div className="rounded-md border border-amber-500/30 bg-amber-500/5 p-2.5 text-[11px] text-amber-600 dark:text-amber-400 leading-relaxed">
+                    检测到 {grouped.legacy.length} 个旧版按日期归档的记忆文件。新版改为按
+                    <span className="font-medium">类型 + 单事实文件</span>
+                    管理。旧文件仍可被搜索到，但不会出现在 MEMORY.md 索引里。
+                  </div>
                 )}
 
                 {(["user", "feedback", "project", "reference"] as const).map((type) => {
@@ -351,8 +362,10 @@ export function MemoryPanel(): React.JSX.Element {
                 <p className="text-sm font-medium text-foreground/70">记忆如何工作？</p>
                 <p className="text-[13px] text-muted-foreground leading-relaxed">
                   每次对话结束时，AI
-                  会自动提取对话中的关键信息——比如你的偏好、项目背景、讨论过的方案等——并按日期归档保存。下次对话时，AI
-                  会检索与当前话题相关的记忆，就像一位「记忆力很好的助手」。
+                  会自动提取对话中的关键信息——比如你的偏好、项目背景、决策的「为什么」——并按
+                  <span className="font-medium text-foreground/60">类型分类</span>
+                  保存为单独的事实文件（user / feedback / project / reference）。下次对话时，AI
+                  会自动检索相关记忆，并参考 MEMORY.md 索引。
                 </p>
               </div>
 
@@ -361,12 +374,12 @@ export function MemoryPanel(): React.JSX.Element {
                 <ul className="text-[13px] text-muted-foreground space-y-2 leading-relaxed">
                   <li className="flex gap-2">
                     <span className="text-foreground/40 shrink-0">1.</span>
-                    从左侧列表中选择日期文件，查看当天的记忆内容
+                    从左侧按类型浏览记忆，点击查看完整内容
                   </li>
                   <li className="flex gap-2">
                     <span className="text-foreground/40 shrink-0">2.</span>
                     <span className="font-medium text-foreground/60">MEMORY.md</span>{" "}
-                    是记忆索引文件，AI 会优先参考
+                    是 LLM 维护的索引，每次对话都会注入到系统提示词
                   </li>
                   <li className="flex gap-2">
                     <span className="text-foreground/40 shrink-0">3.</span>
