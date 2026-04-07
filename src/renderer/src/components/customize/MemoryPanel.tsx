@@ -1,13 +1,38 @@
-import { useCallback, useEffect, useRef, useState } from "react"
-import { Brain, FileText, Info, Trash2 } from "lucide-react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import {
+  Brain,
+  FileText,
+  Info,
+  Trash2,
+  User,
+  MessageSquare,
+  Folder,
+  BookOpen,
+  Archive
+} from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
+
+type MemoryType = "user" | "feedback" | "project" | "reference"
 
 interface MemoryFile {
   name: string
   size: number
   modifiedAt: string
+  type: MemoryType | null
+  displayName: string | null
+  description: string | null
+}
+
+const TYPE_META: Record<
+  MemoryType,
+  { label: string; icon: React.ComponentType<{ className?: string }>; color: string }
+> = {
+  user: { label: "User", icon: User, color: "text-blue-500" },
+  feedback: { label: "Feedback", icon: MessageSquare, color: "text-amber-500" },
+  project: { label: "Project", icon: Folder, color: "text-emerald-500" },
+  reference: { label: "Reference", icon: BookOpen, color: "text-purple-500" }
 }
 
 interface MemoryStats {
@@ -27,6 +52,69 @@ function formatDate(iso: string): string {
   return new Date(iso).toLocaleString()
 }
 
+interface FileButtonProps {
+  file: MemoryFile
+  selected: boolean
+  onSelect: (f: MemoryFile) => void
+  iconOverride: React.ReactNode
+  primaryLabel: string
+  secondaryLabel: string
+}
+
+function FileButton({
+  file,
+  selected,
+  onSelect,
+  iconOverride,
+  primaryLabel,
+  secondaryLabel
+}: FileButtonProps): React.JSX.Element {
+  return (
+    <button
+      className={cn(
+        "w-full flex items-center gap-2 px-2 py-1.5 rounded-md border border-border/70 text-left transition-colors",
+        selected ? "bg-muted/70" : "hover:bg-muted/50"
+      )}
+      onClick={() => onSelect(file)}
+    >
+      {iconOverride}
+      <div className="flex-1 min-w-0">
+        <span className="text-sm truncate block">{primaryLabel}</span>
+        <span className="text-[10px] text-muted-foreground truncate block">{secondaryLabel}</span>
+      </div>
+    </button>
+  )
+}
+
+interface GroupedFiles {
+  byType: Record<MemoryType, MemoryFile[]>
+  index: MemoryFile | null
+  legacy: MemoryFile[]
+}
+
+function groupFiles(files: MemoryFile[]): GroupedFiles {
+  const byType: Record<MemoryType, MemoryFile[]> = {
+    user: [],
+    feedback: [],
+    project: [],
+    reference: []
+  }
+  let index: MemoryFile | null = null
+  const legacy: MemoryFile[] = []
+  for (const f of files) {
+    if (f.name === "MEMORY.md") {
+      index = f
+      continue
+    }
+    if (f.type) {
+      byType[f.type].push(f)
+    } else {
+      legacy.push(f)
+    }
+  }
+  return { byType, index, legacy }
+}
+
 export function MemoryPanel(): React.JSX.Element {
   const [files, setFiles] = useState<MemoryFile[]>([])
   const [selectedFile, setSelectedFile] = useState<MemoryFile | null>(null)
@@ -34,10 +122,13 @@ export function MemoryPanel(): React.JSX.Element {
   const [stats, setStats] = useState<MemoryStats | null>(null)
   const [enabled, setEnabled] = useState(true)
   const mountedRef = useRef(true)
+  const grouped = useMemo(() => groupFiles(files), [files])
 
   useEffect(() => {
     mountedRef.current = true
-    return () => { mountedRef.current = false }
+    return () => {
+      mountedRef.current = false
+    }
   }, [])
 
   const loadData = useCallback(async () => {
@@ -59,10 +150,14 @@ export function MemoryPanel(): React.JSX.Element {
     }
   }, [])
 
-  useEffect(() => { loadData() }, [loadData])
+  useEffect(() => {
+    loadData()
+  }, [loadData])
 
   useEffect(() => {
-    return window.api.memory.onChanged(() => { loadData() })
+    return window.api.memory.onChanged(() => {
+      loadData()
+    })
   }, [loadData])
 
   useEffect(() => {
@@ -70,9 +165,12 @@ export function MemoryPanel(): React.JSX.Element {
       setFileContent("")
       return
     }
-    window.api.memory.readFile(selectedFile.name).then((content) => {
-      if (mountedRef.current) setFileContent(content)
-    }).catch(console.error)
+    window.api.memory
+      .readFile(selectedFile.name)
+      .then((content) => {
+        if (mountedRef.current) setFileContent(content)
+      })
+      .catch(console.error)
   }, [selectedFile])
 
   const handleToggleEnabled = useCallback(async () => {
@@ -85,17 +183,20 @@ export function MemoryPanel(): React.JSX.Element {
     }
   }, [enabled])
 
-  const handleDelete = useCallback(async (file: MemoryFile) => {
-    if (file.name === "MEMORY.md") return
-    if (!confirm(`确定要删除记忆文件「${file.name}」吗？此操作不可撤销。`)) return
-    try {
-      await window.api.memory.deleteFile(file.name)
-      if (selectedFile?.name === file.name) setSelectedFile(null)
-      await loadData()
-    } catch (e) {
-      console.error(e)
-    }
-  }, [selectedFile, loadData])
+  const handleDelete = useCallback(
+    async (file: MemoryFile) => {
+      if (file.name === "MEMORY.md") return
+      if (!confirm(`确定要删除记忆文件「${file.name}」吗？此操作不可撤销。`)) return
+      try {
+        await window.api.memory.deleteFile(file.name)
+        if (selectedFile?.name === file.name) setSelectedFile(null)
+        await loadData()
+      } catch (e) {
+        console.error(e)
+      }
+    },
+    [selectedFile, loadData]
+  )
 
   return (
     <div className="flex flex-1 overflow-hidden isolate">
@@ -128,34 +229,78 @@ export function MemoryPanel(): React.JSX.Element {
           )}
         </div>
         <ScrollArea className="flex-1">
-          <div className="p-2 space-y-1">
+          <div className="p-2 space-y-3">
             {files.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
                 <Brain className="size-8 opacity-40 mb-2" />
                 <p className="text-xs">暂无记忆文件</p>
               </div>
             ) : (
-              files.map((file) => (
-                <button
-                  key={file.name}
-                  className={cn(
-                    "w-full flex items-center gap-2 px-2 py-1.5 rounded-md border border-border/70 text-left transition-colors",
-                    selectedFile?.name === file.name ? "bg-muted/70" : "hover:bg-muted/50"
-                  )}
-                  onClick={() => setSelectedFile(file)}
-                >
-                  <FileText className={cn(
-                    "size-3.5 shrink-0",
-                    file.name === "MEMORY.md" ? "text-primary" : "text-muted-foreground"
-                  )} />
-                  <div className="flex-1 min-w-0">
-                    <span className="text-sm truncate block">{file.name}</span>
-                    <span className="text-[10px] text-muted-foreground">
-                      {formatSize(file.size)} · {formatDate(file.modifiedAt)}
-                    </span>
+              <>
+                {grouped.index && (
+                  <FileButton
+                    file={grouped.index}
+                    selected={selectedFile?.name === grouped.index.name}
+                    onSelect={setSelectedFile}
+                    iconOverride={<FileText className="size-3.5 shrink-0 text-primary" />}
+                    primaryLabel="MEMORY.md"
+                    secondaryLabel="自动生成的索引"
+                  />
+                )}
+
+                {(["user", "feedback", "project", "reference"] as const).map((type) => {
+                  const items = grouped.byType[type]
+                  if (items.length === 0) return null
+                  const meta = TYPE_META[type]
+                  const Icon = meta.icon
+                  return (
+                    <div key={type} className="space-y-1">
+                      <div className="flex items-center gap-1.5 px-2 pt-1 text-[10px] uppercase tracking-wider text-muted-foreground">
+                        <Icon className={cn("size-3", meta.color)} />
+                        <span>{meta.label}</span>
+                        <span className="text-muted-foreground/60">· {items.length}</span>
+                      </div>
+                      {items.map((file) => (
+                        <FileButton
+                          key={file.name}
+                          file={file}
+                          selected={selectedFile?.name === file.name}
+                          onSelect={setSelectedFile}
+                          iconOverride={<Icon className={cn("size-3.5 shrink-0", meta.color)} />}
+                          primaryLabel={file.displayName ?? file.name}
+                          secondaryLabel={
+                            file.description ??
+                            `${formatSize(file.size)} · ${formatDate(file.modifiedAt)}`
+                          }
+                        />
+                      ))}
+                    </div>
+                  )
+                })}
+
+                {grouped.legacy.length > 0 && (
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-1.5 px-2 pt-1 text-[10px] uppercase tracking-wider text-muted-foreground">
+                      <Archive className="size-3 text-muted-foreground/70" />
+                      <span>历史记录</span>
+                      <span className="text-muted-foreground/60">· {grouped.legacy.length}</span>
+                    </div>
+                    {grouped.legacy.map((file) => (
+                      <FileButton
+                        key={file.name}
+                        file={file}
+                        selected={selectedFile?.name === file.name}
+                        onSelect={setSelectedFile}
+                        iconOverride={
+                          <FileText className="size-3.5 shrink-0 text-muted-foreground" />
+                        }
+                        primaryLabel={file.name}
+                        secondaryLabel={`${formatSize(file.size)} · ${formatDate(file.modifiedAt)}`}
+                      />
+                    ))}
                   </div>
-                </button>
-              ))
+                )}
+              </>
             )}
           </div>
         </ScrollArea>
@@ -182,7 +327,9 @@ export function MemoryPanel(): React.JSX.Element {
             )}
           </div>
           <ScrollArea className="flex-1">
-            <pre className="p-4 text-sm whitespace-pre-wrap font-mono leading-relaxed text-foreground/90">{fileContent || "(空文件)"}</pre>
+            <pre className="p-4 text-sm whitespace-pre-wrap font-mono leading-relaxed text-foreground/90">
+              {fileContent || "(空文件)"}
+            </pre>
           </ScrollArea>
         </div>
       ) : (
@@ -194,7 +341,8 @@ export function MemoryPanel(): React.JSX.Element {
               </div>
               <h3 className="text-lg font-semibold text-foreground/80">Memory 记忆</h3>
               <p className="text-sm text-muted-foreground leading-relaxed">
-                记忆系统让 AI 拥有长期记忆能力。每次对话结束后，AI 会自动总结关键信息并保存为记忆文件，在后续对话中自动回忆相关内容，从而提供更连贯、更个性化的服务。
+                记忆系统让 AI 拥有长期记忆能力。每次对话结束后，AI
+                会自动总结关键信息并保存为记忆文件，在后续对话中自动回忆相关内容，从而提供更连贯、更个性化的服务。
               </p>
             </div>
 
@@ -202,17 +350,32 @@ export function MemoryPanel(): React.JSX.Element {
               <div className="rounded-xl border border-border/60 bg-muted/30 p-4 space-y-3">
                 <p className="text-sm font-medium text-foreground/70">记忆如何工作？</p>
                 <p className="text-[13px] text-muted-foreground leading-relaxed">
-                  每次对话结束时，AI 会自动提取对话中的关键信息——比如你的偏好、项目背景、讨论过的方案等——并按日期归档保存。下次对话时，AI 会检索与当前话题相关的记忆，就像一位「记忆力很好的助手」。
+                  每次对话结束时，AI
+                  会自动提取对话中的关键信息——比如你的偏好、项目背景、讨论过的方案等——并按日期归档保存。下次对话时，AI
+                  会检索与当前话题相关的记忆，就像一位「记忆力很好的助手」。
                 </p>
               </div>
 
               <div className="rounded-xl border border-border/60 bg-muted/30 p-4 space-y-3">
                 <p className="text-sm font-medium text-foreground/70">管理你的记忆</p>
                 <ul className="text-[13px] text-muted-foreground space-y-2 leading-relaxed">
-                  <li className="flex gap-2"><span className="text-foreground/40 shrink-0">1.</span>从左侧列表中选择日期文件，查看当天的记忆内容</li>
-                  <li className="flex gap-2"><span className="text-foreground/40 shrink-0">2.</span><span className="font-medium text-foreground/60">MEMORY.md</span> 是记忆索引文件，AI 会优先参考</li>
-                  <li className="flex gap-2"><span className="text-foreground/40 shrink-0">3.</span>你可以手动删除不准确或不再需要的记忆条目</li>
-                  <li className="flex gap-2"><span className="text-foreground/40 shrink-0">4.</span>通过顶部开关可随时启用或禁用记忆功能</li>
+                  <li className="flex gap-2">
+                    <span className="text-foreground/40 shrink-0">1.</span>
+                    从左侧列表中选择日期文件，查看当天的记忆内容
+                  </li>
+                  <li className="flex gap-2">
+                    <span className="text-foreground/40 shrink-0">2.</span>
+                    <span className="font-medium text-foreground/60">MEMORY.md</span>{" "}
+                    是记忆索引文件，AI 会优先参考
+                  </li>
+                  <li className="flex gap-2">
+                    <span className="text-foreground/40 shrink-0">3.</span>
+                    你可以手动删除不准确或不再需要的记忆条目
+                  </li>
+                  <li className="flex gap-2">
+                    <span className="text-foreground/40 shrink-0">4.</span>
+                    通过顶部开关可随时启用或禁用记忆功能
+                  </li>
                 </ul>
               </div>
 

@@ -1,6 +1,9 @@
 import { tool } from "langchain"
 import { z } from "zod"
+import { existsSync, statSync } from "fs"
+import { isAbsolute, join } from "path"
 import type { MemoryStore } from "./store"
+import { memoryFreshnessText } from "./manifest"
 
 const SNIPPET_MAX_CHARS = 700
 
@@ -32,8 +35,14 @@ export function createMemorySearchTool(store: MemoryStore) {
         "Search your long-term memory for information from past conversations. " +
         "Use this before answering questions about prior work, decisions, dates, people, or preferences.",
       schema: z.object({
-        query: z.string().describe("Search query — use keywords related to what you want to recall"),
-        max_results: z.number().optional().default(5).describe("Maximum number of results to return")
+        query: z
+          .string()
+          .describe("Search query — use keywords related to what you want to recall"),
+        max_results: z
+          .number()
+          .optional()
+          .default(5)
+          .describe("Maximum number of results to return")
       })
     }
   )
@@ -42,7 +51,24 @@ export function createMemorySearchTool(store: MemoryStore) {
 export function createMemoryGetTool(store: MemoryStore) {
   return tool(
     async (input) => {
-      return store.readMemoryFile(input.path, input.from, input.lines)
+      const content = store.readMemoryFile(input.path, input.from, input.lines)
+
+      // Prepend freshness caveat for memories older than the threshold so the
+      // agent verifies stale claims (file paths, decisions, preferences) before
+      // asserting them as live facts.
+      try {
+        const fullPath = isAbsolute(input.path)
+          ? input.path
+          : join(store.getMemoryDir(), input.path)
+        if (existsSync(fullPath)) {
+          const caveat = memoryFreshnessText(statSync(fullPath).mtimeMs)
+          if (caveat) return `${caveat}\n\n${content}`
+        }
+      } catch {
+        // If the freshness check fails, fall through to returning the raw content.
+      }
+
+      return content
     },
     {
       name: "memory_get",
@@ -50,7 +76,9 @@ export function createMemoryGetTool(store: MemoryStore) {
         "Read a specific memory file by path. Use this to get the full content " +
         "of a memory file after finding it via memory_search.",
       schema: z.object({
-        path: z.string().describe("Path to the memory file (e.g., '2026-03-05.md' or absolute path)"),
+        path: z
+          .string()
+          .describe("Path to the memory file (e.g., 'feedback_lang.md' or absolute path)"),
         from: z.number().optional().describe("Start line number (1-indexed)"),
         lines: z.number().optional().describe("Number of lines to read")
       })

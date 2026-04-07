@@ -4,6 +4,9 @@ import { join, basename } from "path"
 import { homedir } from "os"
 import { isMemoryEnabled, setMemoryEnabled } from "../storage"
 import { getMemoryStore } from "../memory/store"
+import { removeEntryFromManifest, parseFrontmatter, type MemoryType } from "../memory/manifest"
+
+const VALID_TYPES = new Set<MemoryType>(["user", "feedback", "project", "reference"])
 
 const MEMORY_DIR = join(homedir(), ".cmbcoworkagent", "memory")
 
@@ -11,6 +14,12 @@ export interface MemoryFileInfo {
   name: string
   size: number
   modifiedAt: string
+  /** Memory category from frontmatter, or null for legacy/index files. */
+  type: MemoryType | null
+  /** Human-readable name from frontmatter. Falls back to filename in the UI. */
+  displayName: string | null
+  /** One-line description from frontmatter. */
+  description: string | null
 }
 
 export interface MemoryStats {
@@ -31,17 +40,46 @@ export function registerMemoryHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle("memory:listFiles", async (): Promise<MemoryFileInfo[]> => {
     if (!existsSync(MEMORY_DIR)) return []
-    const files = readdirSync(MEMORY_DIR)
+    const files: MemoryFileInfo[] = readdirSync(MEMORY_DIR)
       .filter((f) => f.endsWith(".md"))
       .map((name) => {
         const fullPath = join(MEMORY_DIR, name)
         const st = statSync(fullPath)
-        return { name, size: st.size, modifiedAt: st.mtime.toISOString() }
+        let type: MemoryType | null = null
+        let displayName: string | null = null
+        let description: string | null = null
+        // Read just the first ~2KB to extract frontmatter from per-fact files.
+        // MEMORY.md and legacy daily files have no frontmatter — fields stay null.
+        try {
+          const head = readFileSync(fullPath, "utf-8").slice(0, 2048)
+          const { frontmatter } = parseFrontmatter(head)
+          const candidate = frontmatter.type as MemoryType | undefined
+          if (candidate && VALID_TYPES.has(candidate)) type = candidate
+          if (frontmatter.name) displayName = frontmatter.name
+          if (frontmatter.description) description = frontmatter.description
+        } catch {
+          /* unreadable file — leave fields null */
+        }
+        return {
+          name,
+          size: st.size,
+          modifiedAt: st.mtime.toISOString(),
+          type,
+          displayName,
+          description
+        }
       })
-    // MEMORY.md first, then daily files by date descending
+    // MEMORY.md first, then per-fact files by mtime desc, then legacy daily files by name desc.
     files.sort((a, b) => {
       if (a.name === "MEMORY.md") return -1
       if (b.name === "MEMORY.md") return 1
+      const aIsFact = a.type !== null
+      const bIsFact = b.type !== null
+      if (aIsFact && !bIsFact) return -1
+      if (!aIsFact && bIsFact) return 1
+      if (aIsFact && bIsFact) {
+        return new Date(b.modifiedAt).getTime() - new Date(a.modifiedAt).getTime()
+      }
       return b.name.localeCompare(a.name)
     })
     return files
@@ -66,6 +104,20 @@ export function registerMemoryHandlers(ipcMain: IpcMain): void {
       store.removeDocument(fullPath)
     } catch (e) {
       console.warn("[Memory] Failed to remove document from index:", e)
+    }
+    // Surgically remove this entry's line from MEMORY.md so we don't
+    // clobber any other content the summarizer LLM has curated there.
+    try {
+      const removed = removeEntryFromManifest(MEMORY_DIR, safeName)
+      if (removed) {
+        const memoryMd = join(MEMORY_DIR, "MEMORY.md")
+        if (existsSync(memoryMd)) {
+          const store = await getMemoryStore()
+          store.addDocument(memoryMd, readFileSync(memoryMd, "utf-8"))
+        }
+      }
+    } catch (e) {
+      console.warn("[Memory] Failed to update manifest after delete:", e)
     }
     notifyChanged()
   })
