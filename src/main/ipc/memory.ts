@@ -2,10 +2,28 @@ import { IpcMain } from "electron"
 import { existsSync, readdirSync, readFileSync, unlinkSync, statSync } from "fs"
 import { join, basename } from "path"
 import { homedir } from "os"
-import { isMemoryEnabled, setMemoryEnabled } from "../storage"
+import { isMemoryEnabled, setMemoryEnabled, getCustomModelConfigs } from "../storage"
 import { getMemoryStore } from "../memory/store"
 import { removeEntryFromManifest, parseFrontmatter, type MemoryType } from "../memory/manifest"
 import { notifyMemoryChanged } from "../memory/events"
+import { consolidateMemories, type ConsolidateResult } from "../memory/consolidate"
+import { ChatOpenAI } from "@langchain/openai"
+
+const DREAM_STATE_FILE = ".dream_state.json"
+
+function readDreamStateInfo(memoryDir: string): DreamStateInfo {
+  try {
+    const p = join(memoryDir, DREAM_STATE_FILE)
+    if (existsSync(p)) {
+      const raw = JSON.parse(readFileSync(p, "utf-8")) as Partial<DreamStateInfo>
+      return {
+        lastRunAt: raw.lastRunAt ?? 0,
+        sessionsSinceLastRun: raw.sessionsSinceLastRun ?? 0
+      }
+    }
+  } catch { /* ignore */ }
+  return { lastRunAt: 0, sessionsSinceLastRun: 0 }
+}
 
 const VALID_TYPES = new Set<MemoryType>(["user", "feedback", "project", "reference"])
 
@@ -21,6 +39,13 @@ export interface MemoryFileInfo {
   displayName: string | null
   /** One-line description from frontmatter. */
   description: string | null
+  /** How many times this file's chunks were retrieved via memory_search. */
+  recallCount: number
+}
+
+export interface DreamStateInfo {
+  lastRunAt: number
+  sessionsSinceLastRun: number
 }
 
 export interface MemoryStats {
@@ -28,6 +53,7 @@ export interface MemoryStats {
   totalSize: number
   indexSize: number
   enabled: boolean
+  dreamState: DreamStateInfo
 }
 
 export function registerMemoryHandlers(ipcMain: IpcMain): void {
@@ -35,6 +61,14 @@ export function registerMemoryHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle("memory:listFiles", async (): Promise<MemoryFileInfo[]> => {
     if (!existsSync(MEMORY_DIR)) return []
+
+    // Load recall stats once so we can annotate each file without extra I/O.
+    let recallMap: Map<string, { totalRecalls: number }> = new Map()
+    try {
+      const store = await getMemoryStore()
+      recallMap = store.getRecallStats()
+    } catch { /* non-critical */ }
+
     const files: MemoryFileInfo[] = readdirSync(MEMORY_DIR)
       .filter((f) => f.endsWith(".md"))
       .map((name) => {
@@ -55,13 +89,15 @@ export function registerMemoryHandlers(ipcMain: IpcMain): void {
         } catch {
           /* unreadable file — leave fields null */
         }
+        const recallCount = recallMap.get(fullPath)?.totalRecalls ?? 0
         return {
           name,
           size: st.size,
           modifiedAt: st.mtime.toISOString(),
           type,
           displayName,
-          description
+          description,
+          recallCount
         }
       })
     // MEMORY.md first, then per-fact files by mtime desc, then legacy daily files by name desc.
@@ -126,6 +162,26 @@ export function registerMemoryHandlers(ipcMain: IpcMain): void {
     notifyMemoryChanged()
   })
 
+  /**
+   * Manual Dream trigger — consolidates memories immediately, returns a result summary.
+   * The frontend can call this from a "Consolidate memories" button in MemoryPanel.
+   */
+  ipcMain.handle("memory:consolidate", async (): Promise<ConsolidateResult> => {
+    const allConfigs = getCustomModelConfigs()
+    const config = allConfigs[0]
+    if (!config?.apiKey) {
+      return { archived: 0, merged: 0, created: 0, skipped: 0 }
+    }
+    return consolidateMemories({
+      model: new ChatOpenAI({
+        model: config.model,
+        apiKey: config.apiKey,
+        configuration: { baseURL: config.baseUrl }
+      }),
+      memoryDir: MEMORY_DIR
+    })
+  })
+
   ipcMain.handle("memory:getStats", async (): Promise<MemoryStats> => {
     let fileCount = 0
     let totalSize = 0
@@ -142,6 +198,12 @@ export function registerMemoryHandlers(ipcMain: IpcMain): void {
         }
       }
     }
-    return { fileCount, totalSize, indexSize, enabled: isMemoryEnabled() }
+    return {
+      fileCount,
+      totalSize,
+      indexSize,
+      enabled: isMemoryEnabled(),
+      dreamState: readDreamStateInfo(MEMORY_DIR)
+    }
   })
 }

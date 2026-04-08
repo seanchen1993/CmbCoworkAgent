@@ -694,6 +694,7 @@ const api = {
         type: "user" | "feedback" | "project" | "reference" | null
         displayName: string | null
         description: string | null
+        recallCount: number
       }>
     > => ipcRenderer.invoke("memory:listFiles"),
     readFile: (name: string): Promise<string> => ipcRenderer.invoke("memory:readFile", name),
@@ -706,7 +707,14 @@ const api = {
       totalSize: number
       indexSize: number
       enabled: boolean
+      dreamState: { lastRunAt: number; sessionsSinceLastRun: number }
     }> => ipcRenderer.invoke("memory:getStats"),
+    consolidate: (): Promise<{
+      archived: number
+      merged: number
+      created: number
+      skipped: number
+    }> => ipcRenderer.invoke("memory:consolidate"),
     onChanged: (callback: () => void): (() => void) => {
       const handler = (): void => {
         callback()

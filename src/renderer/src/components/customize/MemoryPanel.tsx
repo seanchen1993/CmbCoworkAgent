@@ -8,7 +8,9 @@ import {
   MessageSquare,
   Folder,
   BookOpen,
-  Archive
+  Archive,
+  Sparkles,
+  Loader2
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -23,6 +25,12 @@ interface MemoryFile {
   type: MemoryType | null
   displayName: string | null
   description: string | null
+  recallCount: number
+}
+
+interface DreamStateInfo {
+  lastRunAt: number
+  sessionsSinceLastRun: number
 }
 
 const TYPE_META: Record<
@@ -40,6 +48,31 @@ interface MemoryStats {
   totalSize: number
   indexSize: number
   enabled: boolean
+  dreamState: DreamStateInfo
+}
+
+function formatDreamAge(lastRunAt: number): string {
+  if (!lastRunAt) return "从未整合"
+  const days = Math.floor((Date.now() - lastRunAt) / 86400000)
+  if (days === 0) return "今天"
+  if (days === 1) return "昨天"
+  return `${days} 天前`
+}
+
+function RecallBadge({ count }: { count: number }): React.JSX.Element | null {
+  if (count === 0) return null
+  return (
+    <span
+      className={cn(
+        "ml-auto shrink-0 text-[9px] px-1.5 py-0.5 rounded-full font-medium",
+        count >= 10
+          ? "bg-amber-500/20 text-amber-600 dark:text-amber-400"
+          : "bg-muted text-muted-foreground"
+      )}
+    >
+      {count}×
+    </span>
+  )
 }
 
 function formatSize(bytes: number): string {
@@ -59,6 +92,7 @@ interface FileButtonProps {
   iconOverride: React.ReactNode
   primaryLabel: string
   secondaryLabel: string
+  showRecall?: boolean
 }
 
 function FileButton({
@@ -67,7 +101,8 @@ function FileButton({
   onSelect,
   iconOverride,
   primaryLabel,
-  secondaryLabel
+  secondaryLabel,
+  showRecall
 }: FileButtonProps): React.JSX.Element {
   return (
     <button
@@ -82,6 +117,7 @@ function FileButton({
         <span className="text-sm truncate block">{primaryLabel}</span>
         <span className="text-[10px] text-muted-foreground truncate block">{secondaryLabel}</span>
       </div>
+      {showRecall && <RecallBadge count={file.recallCount} />}
     </button>
   )
 }
@@ -115,12 +151,21 @@ function groupFiles(files: MemoryFile[]): GroupedFiles {
   return { byType, index, legacy }
 }
 
+interface DreamResult {
+  archived: number
+  merged: number
+  created: number
+  skipped: number
+}
+
 export function MemoryPanel(): React.JSX.Element {
   const [files, setFiles] = useState<MemoryFile[]>([])
   const [selectedFile, setSelectedFile] = useState<MemoryFile | null>(null)
   const [fileContent, setFileContent] = useState("")
   const [stats, setStats] = useState<MemoryStats | null>(null)
   const [enabled, setEnabled] = useState(true)
+  const [dreamRunning, setDreamRunning] = useState(false)
+  const [dreamResult, setDreamResult] = useState<DreamResult | null>(null)
   const mountedRef = useRef(true)
   const grouped = useMemo(() => groupFiles(files), [files])
 
@@ -186,6 +231,23 @@ export function MemoryPanel(): React.JSX.Element {
     }
   }, [enabled])
 
+  const handleDream = useCallback(async () => {
+    if (dreamRunning) return
+    setDreamRunning(true)
+    setDreamResult(null)
+    try {
+      const result = await window.api.memory.consolidate()
+      if (mountedRef.current) {
+        setDreamResult(result)
+        await loadData()
+      }
+    } catch (e) {
+      console.error(e)
+    } finally {
+      if (mountedRef.current) setDreamRunning(false)
+    }
+  }, [dreamRunning, loadData])
+
   const handleDelete = useCallback(
     async (file: MemoryFile) => {
       if (file.name === "MEMORY.md") return
@@ -207,18 +269,55 @@ export function MemoryPanel(): React.JSX.Element {
         <div className="p-3 border-b border-border space-y-2">
           <div className="flex items-center justify-between gap-2">
             <h2 className="text-base font-bold">Memory</h2>
-            <button
-              className={cn(
-                "text-xs px-2 py-0.5 rounded-full border transition-colors",
-                enabled
-                  ? "bg-green-500/10 border-green-500/30 text-green-500"
-                  : "bg-muted border-border text-muted-foreground"
-              )}
-              onClick={handleToggleEnabled}
-            >
-              {enabled ? "已启用" : "已禁用"}
-            </button>
+            <div className="flex items-center gap-1.5">
+              <button
+                className={cn(
+                  "text-xs px-2 py-0.5 rounded-full border transition-colors",
+                  enabled
+                    ? "bg-green-500/10 border-green-500/30 text-green-500"
+                    : "bg-muted border-border text-muted-foreground"
+                )}
+                onClick={handleToggleEnabled}
+              >
+                {enabled ? "已启用" : "已禁用"}
+              </button>
+              <button
+                className={cn(
+                  "flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border transition-colors",
+                  dreamRunning
+                    ? "bg-muted border-border text-muted-foreground cursor-not-allowed"
+                    : "bg-purple-500/10 border-purple-500/30 text-purple-500 hover:bg-purple-500/20"
+                )}
+                onClick={handleDream}
+                disabled={dreamRunning}
+                title="对记忆进行 Dream 整合：合并重复条目、提炼模式、归档过期内容"
+              >
+                {dreamRunning ? (
+                  <Loader2 className="size-3 animate-spin" />
+                ) : (
+                  <Sparkles className="size-3" />
+                )}
+                {dreamRunning ? "整合中…" : "Dream"}
+              </button>
+            </div>
           </div>
+
+          {dreamResult && (
+            <div className="flex items-center gap-1.5 px-2 py-1.5 rounded-md bg-purple-500/5 border border-purple-500/20 text-[11px] text-purple-600 dark:text-purple-400">
+              <Sparkles className="size-3 shrink-0" />
+              <span>
+                整合完成：
+                {dreamResult.merged > 0 && `合并 ${dreamResult.merged} 条 · `}
+                {dreamResult.created > 0 && `新增 ${dreamResult.created} 条 · `}
+                {dreamResult.archived > 0 && `归档 ${dreamResult.archived} 条 · `}
+                {dreamResult.skipped > 0 && `跳过 ${dreamResult.skipped} 条`}
+                {dreamResult.merged === 0 && dreamResult.created === 0 && dreamResult.archived === 0
+                  ? "无需整合"
+                  : ""}
+              </span>
+            </div>
+          )}
+
           <div className="flex items-center gap-1.5 px-2 py-1.5 rounded-md bg-muted/50 text-xs text-muted-foreground">
             <Info className="size-3.5 shrink-0" />
             <span>记忆系统会自动总结对话并在后续会话中回忆</span>
@@ -228,6 +327,11 @@ export function MemoryPanel(): React.JSX.Element {
               <span>{stats.fileCount} 个文件</span>
               <span>{formatSize(stats.totalSize)}</span>
               <span>索引 {formatSize(stats.indexSize)}</span>
+              <span className="ml-auto">
+                整合: {formatDreamAge(stats.dreamState.lastRunAt)}
+                {stats.dreamState.sessionsSinceLastRun > 0 &&
+                  ` · ${stats.dreamState.sessionsSinceLastRun} 次对话`}
+              </span>
             </div>
           )}
         </div>
@@ -283,6 +387,7 @@ export function MemoryPanel(): React.JSX.Element {
                             file.description ??
                             `${formatSize(file.size)} · ${formatDate(file.modifiedAt)}`
                           }
+                          showRecall
                         />
                       ))}
                     </div>

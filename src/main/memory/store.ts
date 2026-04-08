@@ -19,6 +19,8 @@ export interface MemoryChunk {
   endLine: number
   text: string
   createdAt: number
+  recallCount: number
+  lastRecalledAt: number | null
 }
 
 export interface SearchResult {
@@ -26,6 +28,11 @@ export interface SearchResult {
   path: string
   startLine: number
   endLine: number
+}
+
+export interface RecallStats {
+  totalRecalls: number
+  lastRecalledAt: number | null
 }
 
 function chunkMarkdown(content: string, filePath: string): Omit<MemoryChunk, "id" | "createdAt">[] {
@@ -202,6 +209,10 @@ export class MemoryStore {
       CREATE INDEX IF NOT EXISTS idx_chunks_path ON chunks(path)
     `)
 
+    // Migration: recall tracking columns (silently ignored if they already exist).
+    try { this.db.run(`ALTER TABLE chunks ADD COLUMN recall_count INTEGER DEFAULT 0`) } catch { /* exists */ }
+    try { this.db.run(`ALTER TABLE chunks ADD COLUMN last_recalled_at INTEGER`) } catch { /* exists */ }
+
     // FTS3 content table — separate from chunks, linked by rowid
     try {
       this.db.run(`
@@ -350,7 +361,22 @@ export class MemoryStore {
 
       allRows.sort((a, b) => b.score - a.score)
 
-      return allRows.slice(0, limit).map(({ text, path, startLine, endLine }) => ({
+      const topRows = allRows.slice(0, limit)
+
+      // Track which files were recalled so Dream can prioritise frequently-used memories.
+      const now = Date.now()
+      for (const row of topRows) {
+        try {
+          this.db!.run(
+            `UPDATE chunks SET recall_count = recall_count + 1, last_recalled_at = ?
+             WHERE path = ? AND start_line = ?`,
+            [now, row.path, row.startLine]
+          )
+        } catch { /* non-critical */ }
+      }
+      this.scheduleSave()
+
+      return topRows.map(({ text, path, startLine, endLine }) => ({
         text,
         path,
         startLine,
@@ -402,6 +428,28 @@ export class MemoryStore {
         if (!diskPaths.has(p)) this.removeDocument(p)
       }
     }
+  }
+
+  /**
+   * Returns recall stats aggregated per file path.
+   * Used by the Dream consolidation job to identify frequently-recalled vs stale memories.
+   */
+  getRecallStats(): Map<string, RecallStats> {
+    if (!this.db) return new Map()
+    const result = this.db.exec(
+      `SELECT path, SUM(recall_count) as total, MAX(last_recalled_at) as last
+       FROM chunks GROUP BY path`
+    )
+    const map = new Map<string, RecallStats>()
+    if (result.length > 0) {
+      for (const row of result[0].values) {
+        map.set(row[0] as string, {
+          totalRecalls: (row[1] as number) ?? 0,
+          lastRecalledAt: (row[2] as number | null) ?? null
+        })
+      }
+    }
+    return map
   }
 
   readMemoryFile(filePath: string, from?: number, lines?: number): string {

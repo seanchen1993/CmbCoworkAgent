@@ -7,6 +7,8 @@ import {
 } from "../agent/runtime"
 import { getThread } from "../db"
 import { summarizeAndSave } from "../memory/summarizer"
+import { consolidateMemories, shouldRunDream, incrementDreamSessions } from "../memory/consolidate"
+import { scanMemoryFiles } from "../memory/manifest"
 import { getMemoryStore } from "../memory/store"
 import { ChatOpenAI } from "@langchain/openai"
 import {
@@ -1272,14 +1274,31 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           if (!config) {
             console.warn("[Agent] No model config available — skipping memory summarization")
           } else if (config?.apiKey) {
+            const memoryModel = new ChatOpenAI({
+              model: config.model,
+              apiKey: config.apiKey,
+              configuration: { baseURL: config.baseUrl }
+            })
+            const memDir = memoryStore.getMemoryDir()
             summarizeAndSave({
-              model: new ChatOpenAI({
-                model: config.model,
-                apiKey: config.apiKey,
-                configuration: { baseURL: config.baseUrl }
-              }),
+              model: memoryModel,
               conversation,
-              memoryDir: memoryStore.getMemoryDir()
+              memoryDir: memDir
+            }).then(() => {
+              // Count this conversation toward the Dream sessions gate.
+              incrementDreamSessions(memDir)
+              // After summarization, check whether Dream consolidation should run.
+              // Dream is an async background job — it must not block the main thread.
+              try {
+                const factCount = scanMemoryFiles(memDir).length
+                if (shouldRunDream(memDir, factCount)) {
+                  console.log("[Agent] Dream auto-trigger: conditions met, starting consolidation")
+                  consolidateMemories({ model: memoryModel, memoryDir: memDir })
+                    .catch((e) => console.warn("[Agent] Dream consolidation failed:", e))
+                }
+              } catch (e) {
+                console.warn("[Agent] Dream check failed:", e instanceof Error ? e.message : e)
+              }
             }).catch((e) => console.warn("[Agent] Memory summarize failed:", e))
           }
         }
