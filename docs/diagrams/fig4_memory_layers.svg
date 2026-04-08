@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="420" viewBox="0 0 860 420">
+<rect width="860" height="420" fill="#f8fafc"/>
+<text x="430" y="36" text-anchor="middle" style="font: 700 22px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #1e293b;">图4  四层记忆结构</text>
+<rect x="60" y="55" width="740" height="82" rx="10" fill="#eff6ff" stroke="#3b82f6" stroke-width="2" opacity="1"/>
+<text x="430" y="88" text-anchor="middle" style="font: 600 15px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #1e293b;">组织记忆层</text>
+<text x="430" y="108" text-anchor="middle" style="font: 400 13px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #475569;">行内规范 · 架构约束 · 安全红线 · 合规要求</text>
+<rect x="710" y="63" width="78" height="24" rx="8" fill="#3b82f6" stroke="#3b82f6" stroke-width="0" opacity="0.85"/>
+<text x="749" y="79" text-anchor="middle" style="font: 600 11px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill:#fff;">跨项目共享</text>
+<rect x="80" y="147" width="700" height="82" rx="10" fill="#f0fdf4" stroke="#22c55e" stroke-width="2" opacity="1"/>
+<text x="430" y="180" text-anchor="middle" style="font: 600 15px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #1e293b;">项目记忆层</text>
+<text x="430" y="200" text-anchor="middle" style="font: 400 13px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #475569;">项目背景 · 技术决策 · 依赖关系 · 接口约束</text>
+<rect x="690" y="155" width="78" height="24" rx="8" fill="#22c55e" stroke="#22c55e" stroke-width="0" opacity="0.85"/>
+<text x="729" y="171" text-anchor="middle" style="font: 600 11px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill:#fff;">项目生命周期</text>
+<rect x="100" y="239" width="660" height="82" rx="10" fill="#fff7ed" stroke="#f97316" stroke-width="2" opacity="1"/>
+<text x="430" y="272" text-anchor="middle" style="font: 600 15px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #1e293b;">线程记忆层</text>
+<text x="430" y="292" text-anchor="middle" style="font: 400 13px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #475569;">会话摘要 · 中间结论 · 代码片段 · 操作历史</text>
+<rect x="670" y="247" width="78" height="24" rx="8" fill="#f97316" stroke="#f97316" stroke-width="0" opacity="0.85"/>
+<text x="709" y="263" text-anchor="middle" style="font: 600 11px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill:#fff;">线程级</text>
+<rect x="120" y="331" width="620" height="82" rx="10" fill="#fdf4ff" stroke="#a855f7" stroke-width="2" opacity="1"/>
+<text x="430" y="364" text-anchor="middle" style="font: 600 15px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #1e293b;">会话记忆层</text>
+<text x="430" y="384" text-anchor="middle" style="font: 400 13px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #475569;">即时上下文 · 当前任务状态 · 临时变量</text>
+<rect x="650" y="339" width="78" height="24" rx="8" fill="#a855f7" stroke="#a855f7" stroke-width="0" opacity="0.85"/>
+<text x="689" y="355" text-anchor="middle" style="font: 600 11px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill:#fff;">当前会话</text>
+</svg>

@@ -631,8 +631,17 @@ const api = {
     }
   },
   memory: {
-    listFiles: (): Promise<Array<{ name: string; size: number; modifiedAt: string }>> =>
-      ipcRenderer.invoke("memory:listFiles"),
+    listFiles: (): Promise<
+      Array<{
+        name: string
+        size: number
+        modifiedAt: string
+        type: "user" | "feedback" | "project" | "reference" | null
+        displayName: string | null
+        description: string | null
+        recallCount: number
+      }>
+    > => ipcRenderer.invoke("memory:listFiles"),
     readFile: (name: string): Promise<string> => ipcRenderer.invoke("memory:readFile", name),
     deleteFile: (name: string): Promise<void> => ipcRenderer.invoke("memory:deleteFile", name),
     getEnabled: (): Promise<boolean> => ipcRenderer.invoke("memory:getEnabled"),
@@ -643,7 +652,14 @@ const api = {
       totalSize: number
       indexSize: number
       enabled: boolean
+      dreamState: { lastRunAt: number; sessionsSinceLastRun: number }
     }> => ipcRenderer.invoke("memory:getStats"),
+    consolidate: (): Promise<{
+      archived: number
+      merged: number
+      created: number
+      skipped: number
+    }> => ipcRenderer.invoke("memory:consolidate"),
     onChanged: (callback: () => void): (() => void) => {
       const handler = (): void => {
         callback()

@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="500" viewBox="0 0 820 500">
+<rect width="820" height="500" fill="#f8fafc"/>
+<defs><marker id="arr" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#94a3b8"/></marker></defs>
+<text x="410" y="36" text-anchor="middle" style="font: 700 22px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #1e293b;">图5  中英双路 BM25 混合检索架构</text>
+<rect x="300" y="58" width="220" height="52" rx="10" fill="#dbeafe" stroke="#3b82f6" stroke-width="2" opacity="1"/>
+<text x="410" y="80" text-anchor="middle" style="font: 600 15px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #1e293b;">用户查询</text>
+<text x="410" y="98" text-anchor="middle" style="font: 400 13px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #475569;">（中英文混合输入）</text>
+<line x1="410" y1="110" x2="220" y2="168" stroke="#94a3b8" stroke-width="2" marker-end="url(#arr)"/>
+<line x1="410" y1="110" x2="600" y2="168" stroke="#94a3b8" stroke-width="2" marker-end="url(#arr)"/>
+<rect x="80" y="170" width="260" height="56" rx="10" fill="#e0f2fe" stroke="#0ea5e9" stroke-width="2" opacity="1"/>
+<text x="210" y="192" text-anchor="middle" style="font: 600 15px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #1e293b;">英文路径</text>
+<text x="210" y="210" text-anchor="middle" style="font: 400 13px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #475569;">SQLite FTS3 全词倒排索引</text>
+<rect x="80" y="256" width="260" height="56" rx="10" fill="#bfdbfe" stroke="#3b82f6" stroke-width="2" opacity="1"/>
+<text x="210" y="278" text-anchor="middle" style="font: 600 15px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #1e293b;">MATCH 精确匹配</text>
+<text x="210" y="296" text-anchor="middle" style="font: 400 13px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #475569;">高效 · 无分词误差</text>
+<rect x="480" y="170" width="260" height="56" rx="10" fill="#fef9c3" stroke="#eab308" stroke-width="2" opacity="1"/>
+<text x="610" y="192" text-anchor="middle" style="font: 600 15px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #1e293b;">中文路径</text>
+<text x="610" y="210" text-anchor="middle" style="font: 400 13px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #475569;">CJK Bigram 双字切片</text>
+<rect x="480" y="256" width="260" height="56" rx="10" fill="#fde68a" stroke="#d97706" stroke-width="2" opacity="1"/>
+<text x="610" y="278" text-anchor="middle" style="font: 600 15px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #1e293b;">LIKE 子句匹配</text>
+<text x="610" y="296" text-anchor="middle" style="font: 400 13px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #475569;">解决中文无词边界问题</text>
+<line x1="210" y1="312" x2="210" y2="362" stroke="#94a3b8" stroke-width="2" marker-end="url(#arr)"/>
+<line x1="610" y1="312" x2="610" y2="362" stroke="#94a3b8" stroke-width="2" marker-end="url(#arr)"/>
+<line x1="210" y1="380" x2="360" y2="418" stroke="#94a3b8" stroke-width="2" marker-end="url(#arr)"/>
+<line x1="610" y1="380" x2="460" y2="418" stroke="#94a3b8" stroke-width="2" marker-end="url(#arr)"/>
+<rect x="200" y="362" width="420" height="54" rx="10" fill="#dcfce7" stroke="#22c55e" stroke-width="2" opacity="1"/>
+<text x="410" y="384" text-anchor="middle" style="font: 600 15px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #1e293b;">结果合并去重 → BM25 相关性排序</text>
+<text x="410" y="402" text-anchor="middle" style="font: 400 13px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #475569;">Top-K 注入 Agent 上下文</text>
+</svg>

@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="660" viewBox="0 0 900 660">
+<rect width="900" height="660" fill="#f8fafc"/>
+<defs><marker id="arr" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#94a3b8"/></marker></defs>
+<text x="450" y="44" text-anchor="middle" style="font: 700 22px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #1e293b;">图1  CmbCoworkAgent 总体架构</text>
+<rect x="60" y="70" width="780" height="70" rx="14" fill="#dbeafe" stroke="#3b82f6" stroke-width="2" opacity="1"/>
+<text x="450" y="97" text-anchor="middle" style="font: 600 15px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #1e293b;">交互展现层 (Renderer)</text>
+<text x="450" y="119" text-anchor="middle" style="font: 400 13px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #475569;">会话界面 · 审批界面 · Hooks 配置 · Skills 管理 · 更新提示</text>
+<rect x="60" y="160" width="780" height="70" rx="14" fill="#e0f2fe" stroke="#0ea5e9" stroke-width="2" opacity="1"/>
+<text x="450" y="187" text-anchor="middle" style="font: 600 15px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #1e293b;">IPC 安全路由层</text>
+<text x="450" y="209" text-anchor="middle" style="font: 400 13px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #475569;">Agent · Sandbox · Routing · Update · Terminal · Hooks · MCP</text>
+<rect x="60" y="250" width="780" height="100" rx="14" fill="#dcfce7" stroke="#22c55e" stroke-width="2" opacity="1"/>
+<text x="450" y="292" text-anchor="middle" style="font: 600 15px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #1e293b;">Agent 运行时层</text>
+<text x="450" y="314" text-anchor="middle" style="font: 400 13px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #475569;">Model · Tools · Skills 中间件 · Memory · MCP 工具注册 · Background Tasks</text>
+<rect x="60" y="370" width="380" height="130" rx="14" fill="#fee2e2" stroke="#ef4444" stroke-width="2" opacity="1"/>
+<text x="250" y="392" text-anchor="middle" style="font: 600 15px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #1e293b;">安全执行控制层</text>
+<text x="250" y="415" text-anchor="middle" style="font: 400 13px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #475569;">Windows 沙箱 / HITL 审批</text>
+<text x="250" y="437" text-anchor="middle" style="font: 400 13px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #475569;">Hooks 引擎 · 凭据隔离</text>
+<text x="250" y="459" text-anchor="middle" style="font: 400 13px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #475569;">敏感目录黑名单</text>
+<rect x="460" y="370" width="380" height="130" rx="14" fill="#fef9c3" stroke="#eab308" stroke-width="2" opacity="1"/>
+<text x="650" y="392" text-anchor="middle" style="font: 600 15px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #1e293b;">智能决策层</text>
+<text x="650" y="415" text-anchor="middle" style="font: 400 13px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #475569;">三层模型路由</text>
+<text x="650" y="437" text-anchor="middle" style="font: 400 13px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #475569;">线程粘性 · 误路由提升</text>
+<text x="650" y="459" text-anchor="middle" style="font: 400 13px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #475569;">故障转移 · 容量保护</text>
+<rect x="60" y="520" width="780" height="100" rx="14" fill="#f3e8ff" stroke="#a855f7" stroke-width="2" opacity="1"/>
+<text x="450" y="545" text-anchor="middle" style="font: 600 15px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #1e293b;">持久化与审计层 · 更新运维层</text>
+<text x="450" y="568" text-anchor="middle" style="font: 400 13px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #475569;">Checkpoint · Thread Metadata · Memory Index · Trace 审计</text>
+<text x="450" y="591" text-anchor="middle" style="font: 400 13px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #475569;">版本完整性校验 · 后台安装 · 自动回滚</text>
+<line x1="450" y1="140" x2="450" y2="160" stroke="#94a3b8" stroke-width="2" marker-end="url(#arr)"/>
+<line x1="450" y1="230" x2="450" y2="250" stroke="#94a3b8" stroke-width="2" marker-end="url(#arr)"/>
+<line x1="450" y1="350" x2="450" y2="370" stroke="#94a3b8" stroke-width="2" marker-end="url(#arr)"/>
+</svg>

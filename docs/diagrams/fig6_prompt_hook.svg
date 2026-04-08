@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="580" viewBox="0 0 820 580">
+<rect width="820" height="580" fill="#f8fafc"/>
+<defs><marker id="arr" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#94a3b8"/></marker></defs>
+<text x="410" y="36" text-anchor="middle" style="font: 700 22px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #1e293b;">图6  自然语言策略 Hook（Prompt Hook）执行流程</text>
+<rect x="170" y="47" width="480" height="58" rx="10" fill="#dbeafe" stroke="#3b82f6" stroke-width="2" opacity="1"/>
+<text x="410" y="66" text-anchor="middle" style="font: 600 15px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #1e293b;">管理员配置自然语言策略</text>
+<text x="410" y="85" text-anchor="middle" style="font: 400 13px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #475569;">"如未标注审批工单号，禁止执行 DDL 操作"</text>
+<rect x="170" y="127" width="480" height="58" rx="10" fill="#e0f2fe" stroke="#0ea5e9" stroke-width="2" opacity="1"/>
+<text x="410" y="156" text-anchor="middle" style="font: 600 15px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #1e293b;">Agent 触发 PreToolUse 事件</text>
+<rect x="170" y="201" width="480" height="58" rx="10" fill="#fef9c3" stroke="#eab308" stroke-width="2" opacity="1"/>
+<text x="410" y="220" text-anchor="middle" style="font: 600 15px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #1e293b;">Hook 引擎提取工具调用上下文</text>
+<text x="410" y="239" text-anchor="middle" style="font: 400 13px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #475569;">工具名 · 完整参数 · 对话历史摘要</text>
+<rect x="170" y="291" width="480" height="58" rx="10" fill="#f3e8ff" stroke="#a855f7" stroke-width="2" opacity="1"/>
+<text x="410" y="310" text-anchor="middle" style="font: 600 15px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #1e293b;">Prompt Hook 执行引擎</text>
+<text x="410" y="329" text-anchor="middle" style="font: 400 13px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #475569;">构造判断 Prompt → 调用行内 LLM → 解析 {"decision":"allow"/"block","reason":"..."}</text>
+<line x1="410" y1="101" x2="410" y2="123" stroke="#94a3b8" stroke-width="2" marker-end="url(#arr)"/>
+<line x1="410" y1="181" x2="410" y2="197" stroke="#94a3b8" stroke-width="2" marker-end="url(#arr)"/>
+<line x1="410" y1="255" x2="410" y2="287" stroke="#94a3b8" stroke-width="2" marker-end="url(#arr)"/>
+<rect x="620" y="264" width="158" height="50" rx="10" fill="#fee2e2" stroke="#ef4444" stroke-width="2" opacity="1"/>
+<text x="699" y="283" text-anchor="middle" style="font: 600 15px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #1e293b;">LLM 超时</text>
+<text x="699" y="300" text-anchor="middle" style="font: 400 13px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #475569;">按 fallback 降级</text>
+<line x1="560" y1="316" x2="620" y2="289" stroke="#ef4444" stroke-width="2" marker-end="url(#arr)"/>
+<line x1="410" y1="345" x2="410" y2="395" stroke="#94a3b8" stroke-width="2" marker-end="url(#arr)"/>
+<rect x="170" y="395" width="220" height="54" rx="10" fill="#dcfce7" stroke="#22c55e" stroke-width="2" opacity="1"/>
+<rect x="430" y="395" width="220" height="54" rx="10" fill="#fee2e2" stroke="#ef4444" stroke-width="2" opacity="1"/>
+<text x="280" y="417" text-anchor="middle" style="font: 600 15px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #1e293b;">allow</text>
+<text x="280" y="435" text-anchor="middle" style="font: 400 13px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #475569;">工具正常执行</text>
+<text x="540" y="417" text-anchor="middle" style="font: 600 15px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #1e293b;">block</text>
+<text x="540" y="435" text-anchor="middle" style="font: 400 13px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #475569;">拦截 · 返回拒绝原因</text>
+<rect x="210" y="478" width="400" height="46" rx="8" fill="#f1f5f9" stroke="#94a3b8" stroke-width="2" opacity="1"/>
+<text x="410" y="496" text-anchor="middle" style="font: 400 13px "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #475569;">决策结果写入 Trace 链路（allow / block / error + reason）</text>
+<line x1="280" y1="449" x2="330" y2="477" stroke="#94a3b8" stroke-width="1" marker-end="url(#arr)"/>
+<line x1="540" y1="449" x2="490" y2="477" stroke="#94a3b8" stroke-width="1" marker-end="url(#arr)"/>
+</svg>

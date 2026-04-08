@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from 
 import { join, dirname, isAbsolute } from "path"
 import { createHash } from "crypto"
 import { homedir } from "os"
+import { regenerateManifest } from "./manifest"
 
 const MEMORY_DIR = join(homedir(), ".cmbcoworkagent", "memory")
 const INDEX_DB_PATH = join(MEMORY_DIR, "index.sqlite")
@@ -18,6 +19,8 @@ export interface MemoryChunk {
   endLine: number
   text: string
   createdAt: number
+  recallCount: number
+  lastRecalledAt: number | null
 }
 
 export interface SearchResult {
@@ -25,6 +28,11 @@ export interface SearchResult {
   path: string
   startLine: number
   endLine: number
+}
+
+export interface RecallStats {
+  totalRecalls: number
+  lastRecalledAt: number | null
 }
 
 function chunkMarkdown(content: string, filePath: string): Omit<MemoryChunk, "id" | "createdAt">[] {
@@ -65,11 +73,44 @@ function chunkMarkdown(content: string, filePath: string): Omit<MemoryChunk, "id
 const CJK_RANGE = /[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/
 
 const STOP_WORDS_ZH = new Set([
-  "我", "你", "他", "她", "它", "我们", "你们", "他们",
-  "的", "了", "在", "是", "有", "和", "与", "或",
-  "这", "那", "就", "也", "都", "把", "被", "让",
-  "什么", "怎么", "哪个", "为什么", "可以", "一下",
-  "之前", "今天", "昨天", "请", "帮", "吗", "呢", "吧"
+  "我",
+  "你",
+  "他",
+  "她",
+  "它",
+  "我们",
+  "你们",
+  "他们",
+  "的",
+  "了",
+  "在",
+  "是",
+  "有",
+  "和",
+  "与",
+  "或",
+  "这",
+  "那",
+  "就",
+  "也",
+  "都",
+  "把",
+  "被",
+  "让",
+  "什么",
+  "怎么",
+  "哪个",
+  "为什么",
+  "可以",
+  "一下",
+  "之前",
+  "今天",
+  "昨天",
+  "请",
+  "帮",
+  "吗",
+  "呢",
+  "吧"
 ])
 
 function tokenize(query: string): string[] {
@@ -107,16 +148,16 @@ function bm25FromMatchinfo(buf: Uint8Array, k1 = 1.2, b = 0.75): number {
   for (let p = 0; p < numPhrases; p++) {
     for (let c = 0; c < numCols; c++) {
       const base = 8 + (p * numCols + c) * 6 * 4
-      const tf = view.getUint32(base, true)          // hits in this row
+      const tf = view.getUint32(base, true) // hits in this row
       const docsWithHits = view.getUint32(base + 8, true)
-      const docLen = view.getUint32(base + 16, true)  // tokens in this doc col
+      const docLen = view.getUint32(base + 16, true) // tokens in this doc col
       const totalDocs = view.getUint32(base + 20, true)
 
       if (tf === 0 || docsWithHits === 0 || totalDocs === 0) continue
 
       const avgDl = view.getUint32(base + 12, true) || 1
       const idf = Math.log((totalDocs - docsWithHits + 0.5) / (docsWithHits + 0.5) + 1)
-      score += idf * (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * docLen / avgDl))
+      score += (idf * (tf * (k1 + 1))) / (tf + k1 * (1 - b + (b * docLen) / avgDl))
     }
   }
   return score
@@ -168,6 +209,10 @@ export class MemoryStore {
       CREATE INDEX IF NOT EXISTS idx_chunks_path ON chunks(path)
     `)
 
+    // Migration: recall tracking columns (silently ignored if they already exist).
+    try { this.db.run(`ALTER TABLE chunks ADD COLUMN recall_count INTEGER DEFAULT 0`) } catch { /* exists */ }
+    try { this.db.run(`ALTER TABLE chunks ADD COLUMN last_recalled_at INTEGER`) } catch { /* exists */ }
+
     // FTS3 content table — separate from chunks, linked by rowid
     try {
       this.db.run(`
@@ -182,13 +227,13 @@ export class MemoryStore {
     if (!this.db) throw new Error("MemoryStore not initialized")
     if (!content.trim()) return
 
-    const contentHash = createHash("sha256").update(CHUNK_VERSION + content).digest("hex").slice(0, 16)
+    const contentHash = createHash("sha256")
+      .update(CHUNK_VERSION + content)
+      .digest("hex")
+      .slice(0, 16)
 
     // Remove old chunks for this path
-    const oldRows = this.db.exec(
-      `SELECT rowid FROM chunks WHERE path = ?`,
-      [filePath]
-    )
+    const oldRows = this.db.exec(`SELECT rowid FROM chunks WHERE path = ?`, [filePath])
     if (oldRows.length > 0 && oldRows[0].values.length > 0) {
       for (const row of oldRows[0].values) {
         this.db.run(`DELETE FROM chunks_fts WHERE rowid = ?`, [row[0]])
@@ -206,27 +251,21 @@ export class MemoryStore {
       )
       const result = this.db.exec(`SELECT last_insert_rowid()`)
       const rowid = result[0]?.values[0]?.[0] as number
-      this.db.run(
-        `INSERT INTO chunks_fts (rowid, text) VALUES (?, ?)`,
-        [rowid, chunk.text]
-      )
+      this.db.run(`INSERT INTO chunks_fts (rowid, text) VALUES (?, ?)`, [rowid, chunk.text])
     }
 
     // Store file content hash for change detection
-    this.db.run(
-      `INSERT OR REPLACE INTO file_hashes (path, hash) VALUES (?, ?)`,
-      [filePath, contentHash]
-    )
+    this.db.run(`INSERT OR REPLACE INTO file_hashes (path, hash) VALUES (?, ?)`, [
+      filePath,
+      contentHash
+    ])
 
     this.scheduleSave()
   }
 
   removeDocument(filePath: string): void {
     if (!this.db) return
-    const oldRows = this.db.exec(
-      `SELECT rowid FROM chunks WHERE path = ?`,
-      [filePath]
-    )
+    const oldRows = this.db.exec(`SELECT rowid FROM chunks WHERE path = ?`, [filePath])
     if (oldRows.length > 0 && oldRows[0].values.length > 0) {
       for (const row of oldRows[0].values) {
         this.db.run(`DELETE FROM chunks_fts WHERE rowid = ?`, [row[0]])
@@ -243,7 +282,13 @@ export class MemoryStore {
     const tokens = tokenize(query)
     if (tokens.length === 0) return []
 
-    type ScoredRow = { text: string; path: string; startLine: number; endLine: number; score: number }
+    type ScoredRow = {
+      text: string
+      path: string
+      startLine: number
+      endLine: number
+      score: number
+    }
     const seen = new Set<string>()
     const allRows: ScoredRow[] = []
 
@@ -271,22 +316,24 @@ export class MemoryStore {
             [ftsQuery]
           )
           if (results.length > 0 && results[0].values.length > 0) {
-            addRows(results[0].values.map((row) => ({
-              text: row[0] as string,
-              path: row[1] as string,
-              startLine: row[2] as number,
-              endLine: row[3] as number,
-              score: row[4] instanceof Uint8Array ? bm25FromMatchinfo(row[4]) : 0
-            })))
+            addRows(
+              results[0].values.map((row) => ({
+                text: row[0] as string,
+                path: row[1] as string,
+                startLine: row[2] as number,
+                endLine: row[3] as number,
+                score: row[4] instanceof Uint8Array ? bm25FromMatchinfo(row[4]) : 0
+              }))
+            )
           }
-        } catch { /* FTS match may fail on special chars */ }
+        } catch {
+          /* FTS match may fail on special chars */
+        }
       }
 
       // Path 2: LIKE search (good for CJK and as fallback for English)
       if (tokens.length > 0) {
-        const scoreExpr = tokens
-          .map(() => `(CASE WHEN text LIKE ? THEN 1 ELSE 0 END)`)
-          .join(" + ")
+        const scoreExpr = tokens.map(() => `(CASE WHEN text LIKE ? THEN 1 ELSE 0 END)`).join(" + ")
         const likeParams = tokens.map((t) => `%${t}%`)
         const results = this.db.exec(
           `SELECT text, path, start_line, end_line, score FROM (
@@ -298,13 +345,15 @@ export class MemoryStore {
           [...likeParams, limit]
         )
         if (results.length > 0 && results[0].values.length > 0) {
-          addRows(results[0].values.map((row) => ({
-            text: row[0] as string,
-            path: row[1] as string,
-            startLine: row[2] as number,
-            endLine: row[3] as number,
-            score: (row[4] as number) ?? 0
-          })))
+          addRows(
+            results[0].values.map((row) => ({
+              text: row[0] as string,
+              path: row[1] as string,
+              startLine: row[2] as number,
+              endLine: row[3] as number,
+              score: (row[4] as number) ?? 0
+            }))
+          )
         }
       }
 
@@ -312,8 +361,26 @@ export class MemoryStore {
 
       allRows.sort((a, b) => b.score - a.score)
 
-      return allRows.slice(0, limit).map(({ text, path, startLine, endLine }) => ({
-        text, path, startLine, endLine
+      const topRows = allRows.slice(0, limit)
+
+      // Track which files were recalled so Dream can prioritise frequently-used memories.
+      const now = Date.now()
+      for (const row of topRows) {
+        try {
+          this.db!.run(
+            `UPDATE chunks SET recall_count = recall_count + 1, last_recalled_at = ?
+             WHERE path = ? AND start_line = ?`,
+            [now, row.path, row.startLine]
+          )
+        } catch { /* non-critical */ }
+      }
+      this.scheduleSave()
+
+      return topRows.map(({ text, path, startLine, endLine }) => ({
+        text,
+        path,
+        startLine,
+        endLine
       }))
     } catch {
       return []
@@ -334,15 +401,16 @@ export class MemoryStore {
       diskPaths.add(filePath)
       try {
         const content = readFileSync(filePath, "utf-8")
-        const contentHash = createHash("sha256").update(CHUNK_VERSION + content).digest("hex").slice(0, 16)
+        const contentHash = createHash("sha256")
+          .update(CHUNK_VERSION + content)
+          .digest("hex")
+          .slice(0, 16)
 
-        const existing = this.db!.exec(
-          `SELECT hash FROM file_hashes WHERE path = ?`,
-          [filePath]
-        )
-        const storedHash = existing.length > 0 && existing[0].values.length > 0
-          ? (existing[0].values[0][0] as string)
-          : ""
+        const existing = this.db!.exec(`SELECT hash FROM file_hashes WHERE path = ?`, [filePath])
+        const storedHash =
+          existing.length > 0 && existing[0].values.length > 0
+            ? (existing[0].values[0][0] as string)
+            : ""
 
         if (storedHash !== contentHash) {
           this.addDocument(filePath, content)
@@ -360,6 +428,28 @@ export class MemoryStore {
         if (!diskPaths.has(p)) this.removeDocument(p)
       }
     }
+  }
+
+  /**
+   * Returns recall stats aggregated per file path.
+   * Used by the Dream consolidation job to identify frequently-recalled vs stale memories.
+   */
+  getRecallStats(): Map<string, RecallStats> {
+    if (!this.db) return new Map()
+    const result = this.db.exec(
+      `SELECT path, SUM(recall_count) as total, MAX(last_recalled_at) as last
+       FROM chunks GROUP BY path`
+    )
+    const map = new Map<string, RecallStats>()
+    if (result.length > 0) {
+      for (const row of result[0].values) {
+        map.set(row[0] as string, {
+          totalRecalls: (row[1] as number) ?? 0,
+          lastRecalledAt: (row[2] as number | null) ?? null
+        })
+      }
+    }
+    return map
   }
 
   readMemoryFile(filePath: string, from?: number, lines?: number): string {
@@ -423,6 +513,20 @@ export async function getMemoryStore(): Promise<MemoryStore> {
   if (!_memoryStore) {
     _memoryStore = new MemoryStore()
     await _memoryStore.init()
+    // Bootstrap MEMORY.md only if it doesn't exist yet — once it does,
+    // the summarizer LLM owns it and we must not clobber its edits.
+    try {
+      const memoryDir = _memoryStore.getMemoryDir()
+      const memoryMd = join(memoryDir, "MEMORY.md")
+      if (!existsSync(memoryMd)) {
+        regenerateManifest(memoryDir)
+      }
+    } catch (e) {
+      console.warn(
+        "[Memory] Failed to bootstrap manifest on init:",
+        e instanceof Error ? e.message : e
+      )
+    }
     _memoryStore.syncMemoryFiles()
   }
   return _memoryStore
