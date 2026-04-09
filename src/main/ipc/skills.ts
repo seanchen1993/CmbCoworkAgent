@@ -151,6 +151,77 @@ export async function listAllSkills(): Promise<SkillMetadata[]> {
   return Array.from(byName.values())
 }
 
+/**
+ * Initialize good skills encryption on app startup.
+ * Scans custom skills directory for skills without license field and encrypts them.
+ * This handles the case where good skills were downloaded but not properly encrypted.
+ */
+export async function initializeGoodSkillsEncryption(): Promise<void> {
+  try {
+    const customDir = getCustomSkillsDir()
+    if (!existsSync(customDir)) return
+
+    const skillDirs = await fs.readdir(customDir, { withFileTypes: true })
+    const skillPathsToEncrypt: string[] = []
+
+    for (const entry of skillDirs) {
+      if (!entry.isDirectory()) continue
+
+      const skillMdPath = path.join(customDir, entry.name, "SKILL.md")
+      if (!existsSync(skillMdPath)) continue
+
+      try {
+        const buffer = await fs.readFile(skillMdPath)
+        const content = decryptSkillBufferIfNeeded(buffer).toString("utf-8")
+        const frontmatter = parseYamlFrontmatter(content)
+
+        // If skill doesn't have license field, mark it for encryption
+        if (!frontmatter.license) {
+          skillPathsToEncrypt.push(skillMdPath)
+        }
+      } catch (e) {
+        console.warn(`[Skills] Failed to check skill at ${skillMdPath}:`, e)
+      }
+    }
+
+    // Encrypt all skills that need it
+    if (skillPathsToEncrypt.length > 0) {
+      console.log(`[Skills] Found ${skillPathsToEncrypt.length} unencrypted skills, encrypting...`)
+
+      for (const skillPath of skillPathsToEncrypt) {
+        try {
+          const buffer = await fs.readFile(skillPath)
+          const content = decryptSkillBufferIfNeeded(buffer).toString("utf-8")
+          const frontmatter = parseYamlFrontmatter(content)
+
+          // Skip if already has license
+          if (frontmatter.license) continue
+
+          let updatedContent = content
+          const frontmatterMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---/)
+          if (frontmatterMatch) {
+            const yamlSection = frontmatterMatch[1]
+            const updatedYaml = yamlSection.trim() + "\nlicense: premium"
+            updatedContent = content.replace(/^---\r?\n[\s\S]*?\r?\n---/, `---\n${updatedYaml}\n---`)
+          } else {
+            updatedContent = `---\nlicense: premium\n---\n${content}`
+          }
+
+          const encryptedBuffer = encryptSkillBuffer(Buffer.from(updatedContent, "utf-8"))
+          await fs.writeFile(skillPath, encryptedBuffer)
+          console.log(`[Skills] Encrypted skill: ${skillPath}`)
+        } catch (e) {
+          console.error(`[Skills] Failed to encrypt skill ${skillPath}:`, e)
+        }
+      }
+
+      console.log(`[Skills] Good skills encryption initialization complete`)
+    }
+  } catch (e) {
+    console.error("[Skills] Error during good skills initialization:", e)
+  }
+}
+
 export function registerSkillsHandlers(ipcMain: IpcMain): void {
   console.log("[Skills] Registering skills handlers...")
 
@@ -470,6 +541,71 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
         return { success: false, error: "仅支持 .md 或 .zip 文件" }
       } catch (e) {
         return { success: false, error: e instanceof Error ? e.message : "Unknown error" }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    "skills:encryptGoodSkills",
+    async (_event, payload: { skillPaths: string[] }): Promise<{ success: boolean; encrypted: number; error?: string }> => {
+      const { skillPaths } = payload
+      if (!Array.isArray(skillPaths)) {
+        return { success: false, error: "Invalid skill paths", encrypted: 0 }
+      }
+
+      let encryptedCount = 0
+      const errors: string[] = []
+
+      for (const skillPath of skillPaths) {
+        try {
+          const resolvedPath = path.resolve(skillPath)
+          if (!isPathUnderAllowedDirs(resolvedPath)) {
+            errors.push(`Path outside allowed dirs: ${skillPath}`)
+            continue
+          }
+
+          // Read current content
+          const buffer = await fs.readFile(resolvedPath)
+          const content = decryptSkillBufferIfNeeded(buffer).toString("utf-8")
+
+          // Parse frontmatter
+          const frontmatter = parseYamlFrontmatter(content)
+
+          // If already has license, skip
+          if (frontmatter.license) {
+            console.log(`[Skills] Skill already has license field: ${skillPath}`)
+            continue
+          }
+
+          // Add license field to frontmatter if not present
+          let updatedContent = content
+          const frontmatterMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---/)
+          if (frontmatterMatch) {
+            const yamlSection = frontmatterMatch[1]
+            // Add license field at the end of YAML
+            const updatedYaml = yamlSection.trim() + "\nlicense: premium"
+            updatedContent = content.replace(/^---\r?\n[\s\S]*?\r?\n---/, `---\n${updatedYaml}\n---`)
+          } else {
+            // No frontmatter, add one
+            updatedContent = `---\nlicense: premium\n---\n${content}`
+          }
+
+          // Encrypt and save
+          const encryptedBuffer = encryptSkillBuffer(Buffer.from(updatedContent, "utf-8"))
+          await fs.writeFile(resolvedPath, encryptedBuffer)
+          console.log(`[Skills] Successfully encrypted good skill: ${skillPath}`)
+          encryptedCount++
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : "Unknown error"
+          errors.push(`${skillPath}: ${msg}`)
+          console.error(`[Skills] Failed to encrypt skill ${skillPath}:`, e)
+        }
+      }
+
+      return {
+        success: errors.length === 0,
+        encrypted: encryptedCount,
+        error: errors.length > 0 ? errors.join("; ") : undefined
       }
     }
   )
