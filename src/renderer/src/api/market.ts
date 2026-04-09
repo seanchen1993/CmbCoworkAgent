@@ -440,7 +440,8 @@ export const marketApi = {
   async downloadItem(
     name: string,
     type: MarketItemType,
-    downloadToLocal = false
+    downloadToLocal = false,
+    special=false // 是否精品技能
   ): Promise<DownloadResponse> {
     console.log(`Downloading ${type} item: ${name}`)
     const { blob, filename } = await this.fetchInstallFile(name, type)
@@ -456,7 +457,8 @@ export const marketApi = {
       try {
         const arrayBuffer = await blob.arrayBuffer()
         if (typeof window.api?.skills?.upload === "function") {
-          const uploadResult = await window.api.skills.upload(arrayBuffer, filename)
+          // Pass the special flag to the main process for encryption handling
+          const uploadResult = await window.api.skills.upload(arrayBuffer, filename, special)
           return {
             success: uploadResult.success,
             error: uploadResult.error

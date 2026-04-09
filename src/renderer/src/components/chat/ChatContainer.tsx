@@ -309,21 +309,10 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
         }
 
         // 下载并安装技能
-        const response = await marketApi.downloadItem(skillName, "skill", false)
+        const response = await marketApi.downloadItem(skillName, "skill", false, true)
 
         if (response.success) {
           console.log(`Successfully installed skill: ${skillName}`)
-
-          // 获取刚安装的技能并记录其路径以供加密
-          try {
-            const updatedSkills = await window.api.skills.list()
-            const installedSkill = updatedSkills.find((s) => s.name === skillName)
-            if (installedSkill && installedSkill.path) {
-              installedSkillPaths.push(installedSkill.path)
-            }
-          } catch (listError) {
-            console.warn(`Failed to get installed skill path for ${skillName}:`, listError)
-          }
         } else {
           console.error(`Failed to install skill ${skillName}:`, response.error)
         }
@@ -332,22 +321,6 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
       }
     }
 
-    // 在所有技能安装完成后，加密它们
-    if (installedSkillPaths.length > 0 && typeof window.api?.skills?.encryptGoodSkills === "function") {
-      try {
-        console.log(`Encrypting ${installedSkillPaths.length} good skills...`)
-        const encryptResult = await window.api.skills.encryptGoodSkills({
-          skillPaths: installedSkillPaths
-        })
-        if (encryptResult.success) {
-          console.log(`Successfully encrypted ${encryptResult.encrypted} skills`)
-        } else {
-          console.warn(`Failed to encrypt some skills:`, encryptResult.error)
-        }
-      } catch (encryptError) {
-        console.error("Error encrypting good skills:", encryptError)
-      }
-    }
 
     console.log("Finished automatic installation of good skills")
   }

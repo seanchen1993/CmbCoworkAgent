@@ -7,8 +7,7 @@ import { getCustomSkillsDir, getDisabledSkills, getSkillsDir, setDisabledSkills 
 import type { SkillMetadata } from "../types"
 import {
   encryptSkillBuffer,
-  decryptSkillBufferIfNeeded,
-  isSkillEncrypted
+  decryptSkillBufferIfNeeded
 } from "../agent/skill-crypto"
 
 function sanitizeSkillName(name: string): string {
@@ -356,9 +355,9 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
     "skills:upload",
     async (
       _event,
-      payload: { buffer: ArrayBuffer; fileName: string }
+      payload: { buffer: ArrayBuffer; fileName: string; special?: boolean }
     ): Promise<{ success: boolean; skillName?: string; error?: string }> => {
-      const { buffer, fileName } = payload
+      const { buffer, fileName, special = false } = payload
       if (!buffer || !fileName || typeof fileName !== "string") {
         return { success: false, error: "Invalid buffer or fileName" }
       }
@@ -403,8 +402,8 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
           const skillDir = path.join(customDir, skillName)
           mkdirSync(skillDir, { recursive: true })
 
-          // Check if this is a premium skill (has license field)
-          const isPremium = !!frontmatter.license
+          // Check if this is a premium skill (has license field or marked as special)
+          const isPremium = special
           const skillMdPath = path.join(skillDir, "SKILL.md")
 
           if (isPremium) {
@@ -454,8 +453,8 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
           const skillDir = path.join(customDir, skillName)
           mkdirSync(skillDir, { recursive: true })
 
-          // Check if this is a premium skill
-          const isPremium = !!frontmatter.license
+          // Check if this is a premium skill (has license field or marked as special)
+          const isPremium = special
 
           const basePrefix = skillMdEntry.entryName.replace("SKILL.md", "")
           for (const entry of entries) {

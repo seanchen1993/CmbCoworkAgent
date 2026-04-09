@@ -569,7 +569,7 @@ export function MarketPanel(): React.JSX.Element {
       }
 
       // 下载并安装最新版本
-      const response = await marketApi.downloadItem(itemName, activeTab, false)
+      const response = await marketApi.downloadItem(itemName, activeTab, false, item.featured === "精品")
 
       if (response.success) {
         console.log(`Successfully updated and installed ${item.name}`)
@@ -908,7 +908,7 @@ export function MarketPanel(): React.JSX.Element {
       }
 
       // Use current activeTab as the type and pass the downloadToLocal flag
-      const response = await marketApi.downloadItem(itemName, activeTab, downloadToLocal)
+      const response = await marketApi.downloadItem(itemName, activeTab, downloadToLocal, item.featured === "精品")
       if (response.success) {
         console.log(`Downloaded ${item.name}`)
 
