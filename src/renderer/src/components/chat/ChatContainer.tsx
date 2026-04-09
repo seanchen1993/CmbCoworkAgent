@@ -279,7 +279,6 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
   const installAllGoodSkills = async (goodSkills: MarketItem[]) => {
     console.log("Starting automatic installation of good skills...")
 
-    const installedSkillPaths: string[] = []
 
     for (const skill of goodSkills) {
       try {
@@ -309,6 +308,7 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
         }
 
         // 下载并安装技能
+        console.log('下载并安装技能=',skill)
         const response = await marketApi.downloadItem(skillName, "skill", false, true)
 
         if (response.success) {
