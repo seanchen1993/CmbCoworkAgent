@@ -5,6 +5,11 @@ import * as path from "path"
 import { existsSync, mkdirSync, rmSync } from "fs"
 import { getCustomSkillsDir, getDisabledSkills, getSkillsDir, setDisabledSkills } from "../storage"
 import type { SkillMetadata } from "../types"
+import {
+  encryptSkillBuffer,
+  decryptSkillBufferIfNeeded,
+  isSkillEncrypted
+} from "../agent/skill-crypto"
 
 function sanitizeSkillName(name: string): string {
   return (
@@ -83,7 +88,11 @@ async function loadSkills(
       if (!existsSync(skillMdPath)) continue
 
       try {
-        const content = await fs.readFile(skillMdPath, "utf-8")
+        // Read the SKILL.md file (may be encrypted)
+        const buffer = await fs.readFile(skillMdPath)
+        // Decrypt if needed, otherwise use as-is
+        const decrypted = decryptSkillBufferIfNeeded(buffer)
+        const content = decrypted.toString("utf-8")
         const frontmatter = parseYamlFrontmatter(content)
 
         skills.push({
@@ -322,7 +331,20 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
           }
           const skillDir = path.join(customDir, skillName)
           mkdirSync(skillDir, { recursive: true })
-          await fs.writeFile(path.join(skillDir, "SKILL.md"), content, "utf-8")
+
+          // Check if this is a premium skill (has license field)
+          const isPremium = !!frontmatter.license
+          const skillMdPath = path.join(skillDir, "SKILL.md")
+
+          if (isPremium) {
+            // Encrypt the SKILL.md file for premium skills
+            const encrypted = encryptSkillBuffer(Buffer.from(content, "utf-8"))
+            await fs.writeFile(skillMdPath, encrypted)
+            console.log(`[Skills] Premium skill "${name}" encrypted and saved`)
+          } else {
+            // Store plaintext for non-premium skills
+            await fs.writeFile(skillMdPath, content, "utf-8")
+          }
           return { success: true, skillName }
         }
 
@@ -361,6 +383,9 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
           const skillDir = path.join(customDir, skillName)
           mkdirSync(skillDir, { recursive: true })
 
+          // Check if this is a premium skill
+          const isPremium = !!frontmatter.license
+
           const basePrefix = skillMdEntry.entryName.replace("SKILL.md", "")
           for (const entry of entries) {
             if (entry.isDirectory) continue
@@ -377,7 +402,20 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
             }
             const destDir = path.dirname(destPath)
             mkdirSync(destDir, { recursive: true })
-            await fs.writeFile(destPath, entry.getData())
+
+            // For premium skills, encrypt all files (especially SKILL.md)
+            if (isPremium && relativePath === "SKILL.md") {
+              const encrypted = encryptSkillBuffer(entry.getData())
+              await fs.writeFile(destPath, encrypted)
+              console.log(`[Skills] Premium skill file "${relativePath}" encrypted`)
+            } else if (isPremium) {
+              // Encrypt other files in premium skills too
+              const encrypted = encryptSkillBuffer(entry.getData())
+              await fs.writeFile(destPath, encrypted)
+            } else {
+              // Non-premium: write plaintext
+              await fs.writeFile(destPath, entry.getData())
+            }
           }
           return { success: true, skillName }
         }
