@@ -256,6 +256,7 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
 
       // 自动安装所有精品技能
       if (goodSkills && goodSkills.length > 0) {
+        localStorage.setItem("goodSkills", JSON.stringify(goodSkills))
         await installAllGoodSkills(goodSkills)
         // 安装完成后重新加载技能列表
         await loadSkills()

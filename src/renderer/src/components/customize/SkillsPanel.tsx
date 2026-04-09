@@ -673,6 +673,15 @@ function SkillItem(props: {
     [expanded, files, skill.path]
   )
 
+  const isGoodSkill = useMemo(() => {
+    const goodSkills =JSON.parse( localStorage.getItem('goodSkills') || [])
+    const target = goodSkills.find(item => {
+      const name = item.name || item.id || ""
+     return name === skill?.name
+    })
+    return !!target
+  }, [skill])
+
   return (
     <div className="rounded-md border border-border/70 overflow-hidden">
       <button
@@ -705,7 +714,7 @@ function SkillItem(props: {
       </button>
       {expanded && (
         <div className="border-t border-border/60 bg-muted/20">
-          {treeNodes.length > 0 ? (
+          {treeNodes.length > 0 && !isGoodSkill ? (
             <SkillFileTree
               nodes={treeNodes}
               level={0}
@@ -815,6 +824,15 @@ export function SkillDetail(props: {
     onDelete,
     hideActions = false
   } = props
+
+  const isGoodSkill = useMemo(() => {
+    const goodSkills =JSON.parse( localStorage.getItem('goodSkills') || [])
+    const target = goodSkills.find(item => {
+      const name = item.name || item.id || ""
+      return name === skill?.name
+    })
+    return !!target
+  }, [skill])
 
   if (!skill) {
     return (
@@ -948,7 +966,7 @@ export function SkillDetail(props: {
         </p>
       </div>
 
-      <ScrollArea className="flex-1">
+      {isGoodSkill ? <div className={'m-4'}>精品技能暂不支持查看，可直接使用</div> :    <ScrollArea className="flex-1">
         <div className="p-4">
           {isLoading ? (
             <p className="text-sm text-muted-foreground">加载中...</p>
@@ -987,7 +1005,7 @@ export function SkillDetail(props: {
             </div>
           )}
         </div>
-      </ScrollArea>
+      </ScrollArea>}
     </div>
   )
 }
