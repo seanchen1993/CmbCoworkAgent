@@ -177,7 +177,7 @@ function MarketItemCard({
             )}
           </div>
           {item.description && (
-            <p className="text-sm text-[#87867f] leading-relaxed line-clamp-2 mt-1">
+            <p className="text-sm text-[#87867f] leading-relaxed line-clamp-2 mt-2">
               {item.description}
             </p>
           )}
@@ -185,12 +185,12 @@ function MarketItemCard({
       </div>
 
       {/* Featured auto-update notice */}
-      {isFeatured && isInstalled && (
-        <div className="text-xs text-[#c4956a] bg-[#fdf3e7] border border-[#f5d9c4] rounded-lg px-3 py-2 mb-3 flex items-center gap-1.5">
-          <Zap className="size-3 shrink-0" />
-          精品技能无需手动更新，系统将自动安装最新版本
-        </div>
-      )}
+      {/*{isFeatured && isInstalled && (*/}
+      {/*  <div className="text-xs text-[#c4956a] bg-[#fdf3e7] border border-[#f5d9c4] rounded-lg px-3 py-2 mb-3 flex items-center gap-1.5">*/}
+      {/*    <Zap className="size-3 shrink-0" />*/}
+      {/*    精品技能无需手动更新，系统将自动安装最新版本*/}
+      {/*  </div>*/}
+      {/*)}*/}
 
       {/* Footer: metadata + actions */}
       <div className="flex items-center justify-between flex-wrap gap-2 pt-3 border-t border-[#f0eee6]">
