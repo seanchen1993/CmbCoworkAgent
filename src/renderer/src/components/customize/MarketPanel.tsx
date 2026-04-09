@@ -158,8 +158,8 @@ function MarketItemCard({
               <h3 className="font-medium text-[15px] leading-snug text-[#141413]">{item.name}</h3>
             )}
             {isFeatured && (
-              <span className="inline-flex items-center gap-1 text-[11px] font-medium bg-[#fdf3e7] text-[#c96442] border border-[#f5d9c4] px-2 py-0.5 rounded-full shrink-0">
-                <Star className="size-3 fill-[#c96442]" />
+              <span className="inline-flex items-center gap-1 text-[11px] font-medium bg-[#fdf3e7] text-[#c4956a] border border-[#f5d9c4] px-2 py-0.5 rounded-full shrink-0">
+                <Star className="size-3 fill-[#c4956a]" />
                 精品
               </span>
             )}
@@ -186,7 +186,7 @@ function MarketItemCard({
 
       {/* Featured auto-update notice */}
       {isFeatured && isInstalled && (
-        <div className="text-xs text-[#c96442] bg-[#fdf3e7] border border-[#f5d9c4] rounded-lg px-3 py-2 mb-3 flex items-center gap-1.5">
+        <div className="text-xs text-[#c4956a] bg-[#fdf3e7] border border-[#f5d9c4] rounded-lg px-3 py-2 mb-3 flex items-center gap-1.5">
           <Zap className="size-3 shrink-0" />
           精品技能无需手动更新，系统将自动安装最新版本
         </div>
@@ -221,7 +221,7 @@ function MarketItemCard({
 
         <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
           {isDownloading || isUpdating ? (
-            <div className="size-4 border-2 border-[#c96442] border-t-transparent rounded-full animate-spin" />
+            <div className="size-4 border-2 border-[#c4956a] border-t-transparent rounded-full animate-spin" />
           ) : (
             <>
               <Button
@@ -235,7 +235,7 @@ function MarketItemCard({
               </Button>
               {isInstalled ? (
                 isFeatured ? (
-                  <span className="text-[11px] bg-[#fdf3e7] border border-[#f5d9c4] text-[#c96442] px-2.5 py-1 rounded-lg inline-flex items-center gap-1">
+                  <span className="text-[11px] bg-[#fdf3e7] border border-[#f5d9c4] text-[#c4956a] px-2.5 py-1 rounded-lg inline-flex items-center gap-1">
                     <Zap className="size-3" />
                     自动保持最新
                   </span>
@@ -253,7 +253,7 @@ function MarketItemCard({
               ) : (
                 <Button
                   size="sm"
-                  className="h-7 px-3 gap-1 text-xs bg-[#c96442] hover:bg-[#b85a3a] text-[#faf9f5] border-0 shadow-[#c96442_0px_0px_0px_0px,#c96442_0px_0px_0px_1px] cursor-pointer rounded-lg"
+                  className="h-7 px-3 gap-1 text-xs bg-[#c4956a] hover:bg-[#b85a3a] text-[#faf9f5] border-0 shadow-[#c4956a_0px_0px_0px_0px,#c4956a_0px_0px_0px_1px] cursor-pointer rounded-lg"
                   onClick={handleInstallDownload}
                 >
                   <Zap className="size-3" />
@@ -1134,7 +1134,7 @@ export function MarketPanel(): React.JSX.Element {
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2.5">
             <div className="size-8 rounded-xl bg-[#fdf3e7] border border-[#f5d9c4] flex items-center justify-center">
-              <ShoppingBag className="size-4 text-[#c96442]" />
+              <ShoppingBag className="size-4 text-[#c4956a]" />
             </div>
             <div>
               <h2 className="font-medium text-[15px] leading-tight text-[#141413]">
@@ -1152,7 +1152,7 @@ export function MarketPanel(): React.JSX.Element {
           {detailMode === "list" ? (
             <Button
               size="sm"
-              className="h-8 px-3 gap-1.5 text-xs bg-[#c96442] hover:bg-[#b85a3a] text-[#faf9f5] border-0 shadow-[#c96442_0px_0px_0px_0px,#c96442_0px_0px_0px_1px] rounded-lg cursor-pointer"
+              className="h-8 px-3 gap-1.5 text-xs bg-[#c4956a] hover:bg-[#b85a3a] text-[#faf9f5] border-0 shadow-[#c4956a_0px_0px_0px_0px,#c4956a_0px_0px_0px_1px] rounded-lg cursor-pointer"
               onClick={handleUploadClick}
             >
               <Plus className="size-3.5" />
@@ -1235,8 +1235,8 @@ export function MarketPanel(): React.JSX.Element {
                       </span>
                     )}
                     {selectedItem.featured === "精品" && (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-[#fdf3e7] border border-[#f5d9c4] text-[#c96442] px-2.5 py-1">
-                        <Star className="size-3 fill-[#c96442]" />
+                      <span className="inline-flex items-center gap-1 rounded-full bg-[#fdf3e7] border border-[#f5d9c4] text-[#c4956a] px-2.5 py-1">
+                        <Star className="size-3 fill-[#c4956a]" />
                         精品
                       </span>
                     )}
@@ -1245,7 +1245,7 @@ export function MarketPanel(): React.JSX.Element {
                   <div className="grid grid-cols-2 gap-2 pt-1">
                     {selectedItem.installed ? (
                       selectedItem.featured === "精品" ? (
-                        <span className="col-span-2 text-xs bg-[#fdf3e7] border border-[#f5d9c4] text-[#c96442] px-3 py-2 rounded-lg inline-flex items-center gap-1.5">
+                        <span className="col-span-2 text-xs bg-[#fdf3e7] border border-[#f5d9c4] text-[#c4956a] px-3 py-2 rounded-lg inline-flex items-center gap-1.5">
                           <Zap className="size-3" />
                           自动保持最新
                         </span>
@@ -1264,7 +1264,7 @@ export function MarketPanel(): React.JSX.Element {
                     ) : (
                       <Button
                         size="sm"
-                        className="h-8 gap-1.5 text-xs bg-[#c96442] hover:bg-[#b85a3a] text-[#faf9f5] border-0 shadow-[#c96442_0px_0px_0px_0px,#c96442_0px_0px_0px_1px] rounded-lg cursor-pointer"
+                        className="h-8 gap-1.5 text-xs bg-[#c4956a] hover:bg-[#b85a3a] text-[#faf9f5] border-0 shadow-[#c4956a_0px_0px_0px_0px,#c4956a_0px_0px_0px_1px] rounded-lg cursor-pointer"
                         onClick={() => handleDownload(selectedItem, false)}
                         disabled={downloadingItems.has(getItemKey(selectedItem))}
                       >
@@ -1313,7 +1313,7 @@ export function MarketPanel(): React.JSX.Element {
 
                 {selectedItem.guidance && (
                   <div className="rounded-xl border border-[#f5d9c4] bg-[#fdf3e7] p-4 text-sm shadow-[rgba(0,0,0,0.03)_0px_2px_8px]">
-                    <div className="flex items-center gap-2 mb-2 text-[11px] uppercase tracking-[0.08em] text-[#c96442] font-medium">
+                    <div className="flex items-center gap-2 mb-2 text-[11px] uppercase tracking-[0.08em] text-[#c4956a] font-medium">
                       <Lightbulb className="size-3.5 shrink-0" />
                       <span>使用指引</span>
                     </div>
@@ -1364,7 +1364,7 @@ export function MarketPanel(): React.JSX.Element {
                 <div className="p-4 space-y-3">
                   {loading ? (
                     <div className="flex flex-col items-center justify-center py-16 text-[#87867f]">
-                      <div className="size-6 border-2 border-[#c96442] border-t-transparent rounded-full animate-spin mb-3" />
+                      <div className="size-6 border-2 border-[#c4956a] border-t-transparent rounded-full animate-spin mb-3" />
                       <span className="text-sm">加载中…</span>
                     </div>
                   ) : error ? (
@@ -1465,7 +1465,7 @@ export function MarketPanel(): React.JSX.Element {
           </DialogHeader>
           <DialogFooter>
             <Button
-              className="bg-[#c96442] hover:bg-[#b85a3a] text-[#faf9f5] border-0 rounded-lg"
+              className="bg-[#c4956a] hover:bg-[#b85a3a] text-[#faf9f5] border-0 rounded-lg"
               onClick={() => setDownloadSuccess({ open: false, itemName: "" })}
             >
               确定
@@ -1505,7 +1505,7 @@ export function MarketPanel(): React.JSX.Element {
           </DialogHeader>
           <DialogFooter>
             <Button
-              className="bg-[#c96442] hover:bg-[#b85a3a] text-[#faf9f5] border-0 rounded-lg"
+              className="bg-[#c4956a] hover:bg-[#b85a3a] text-[#faf9f5] border-0 rounded-lg"
               onClick={() => setUploadSuccess({ open: false, type: "skill" })}
             >
               确认

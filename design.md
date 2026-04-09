@@ -4,14 +4,14 @@
 
 Claude's interface is a literary salon reimagined as a product page — warm, unhurried, and quietly intellectual. The entire experience is built on a parchment-toned canvas (`#f5f4ed`) that deliberately evokes the feeling of high-quality paper rather than a digital surface. Where most AI product pages lean into cold, futuristic aesthetics, Claude's design radiates human warmth, as if the AI itself has good taste in interior design.
 
-The signature move is the custom Anthropic Serif typeface — a medium-weight serif with generous proportions that gives every headline the gravitas of a book title. Combined with organic, hand-drawn-feeling illustrations in terracotta (`#c96442`), black, and muted green, the visual language says "thoughtful companion" rather than "powerful tool." The serif headlines breathe at tight-but-comfortable line-heights (1.10–1.30), creating a cadence that feels more like reading an essay than scanning a product page.
+The signature move is the custom Anthropic Serif typeface — a medium-weight serif with generous proportions that gives every headline the gravitas of a book title. Combined with organic, hand-drawn-feeling illustrations in terracotta (`#c4956a`), black, and muted green, the visual language says "thoughtful companion" rather than "powerful tool." The serif headlines breathe at tight-but-comfortable line-heights (1.10–1.30), creating a cadence that feels more like reading an essay than scanning a product page.
 
 What makes Claude's design truly distinctive is its warm neutral palette. Every gray has a yellow-brown undertone (`#5e5d59`, `#87867f`, `#4d4c48`) — there are no cool blue-grays anywhere. Borders are cream-tinted (`#f0eee6`, `#e8e6dc`), shadows use warm transparent blacks, and even the darkest surfaces (`#141413`, `#30302e`) carry a barely perceptible olive warmth. This chromatic consistency creates a space that feels lived-in and trustworthy.
 
 **Key Characteristics:**
 - Warm parchment canvas (`#f5f4ed`) evoking premium paper, not screens
 - Custom Anthropic type family: Serif for headlines, Sans for UI, Mono for code
-- Terracotta brand accent (`#c96442`) — warm, earthy, deliberately un-tech
+- Terracotta brand accent (`#c4956a`) — warm, earthy, deliberately un-tech
 - Exclusively warm-toned neutrals — every gray has a yellow-brown undertone
 - Organic, editorial illustrations replacing typical tech iconography
 - Ring-based shadow system (`0px 0px 0px 1px`) creating border-like depth without visible borders
@@ -21,7 +21,7 @@ What makes Claude's design truly distinctive is its warm neutral palette. Every 
 
 ### Primary
 - **Anthropic Near Black** (`#141413`): The primary text color and dark-theme surface — not pure black but a warm, almost olive-tinted dark that's gentler on the eyes. The warmest "black" in any major tech brand.
-- **Terracotta Brand** (`#c96442`): The core brand color — a burnt orange-brown used for primary CTA buttons, brand moments, and the signature accent. Deliberately earthy and un-tech.
+- **Terracotta Brand** (`#c4956a`): The core brand color — a burnt orange-brown used for primary CTA buttons, brand moments, and the signature accent. Deliberately earthy and un-tech.
 - **Coral Accent** (`#d97757`): A lighter, warmer variant of the brand color used for text accents, links on dark surfaces, and secondary emphasis.
 
 ### Secondary & Accent
@@ -120,10 +120,10 @@ What makes Claude's design truly distinctive is its warm neutral palette. Every 
 - The inverted variant for dark-on-light emphasis
 
 **Brand Terracotta**
-- Background: Terracotta Brand (`#c96442`)
+- Background: Terracotta Brand (`#c4956a`)
 - Text: Ivory (`#faf9f5`)
 - Radius: 8–12px
-- Shadow: ring-based (`#c96442 0px 0px 0px 0px, #c96442 0px 0px 0px 1px`)
+- Shadow: ring-based (`#c4956a 0px 0px 0px 0px, #c4956a 0px 0px 0px 1px`)
 - The primary CTA — the only button with chromatic color
 
 **Dark Primary**
@@ -232,7 +232,7 @@ What makes Claude's design truly distinctive is its warm neutral palette. Every 
 ### Do
 - Use Parchment (`#f5f4ed`) as the primary light background — the warm cream tone IS the Claude personality
 - Use Anthropic Serif at weight 500 for all headlines — the single-weight consistency is intentional
-- Use Terracotta Brand (`#c96442`) only for primary CTAs and the highest-signal brand moments
+- Use Terracotta Brand (`#c4956a`) only for primary CTAs and the highest-signal brand moments
 - Keep all neutrals warm-toned — every gray should have a yellow-brown undertone
 - Use ring shadows (`0px 0px 0px 1px`) for interactive element states instead of drop shadows
 - Maintain the editorial serif/sans hierarchy — serif for content headlines, sans for UI
@@ -286,7 +286,7 @@ What makes Claude's design truly distinctive is its warm neutral palette. Every 
 ## 9. Agent Prompt Guide
 
 ### Quick Color Reference
-- Brand CTA: "Terracotta Brand (#c96442)"
+- Brand CTA: "Terracotta Brand (#c4956a)"
 - Page Background: "Parchment (#f5f4ed)"
 - Card Surface: "Ivory (#faf9f5)"
 - Primary Text: "Anthropic Near Black (#141413)"
@@ -296,7 +296,7 @@ What makes Claude's design truly distinctive is its warm neutral palette. Every 
 - Dark Surface: "Dark Surface (#30302e)"
 
 ### Example Component Prompts
-- "Create a hero section on Parchment (#f5f4ed) with a headline at 64px Anthropic Serif weight 500, line-height 1.10. Use Anthropic Near Black (#141413) text. Add a subtitle in Olive Gray (#5e5d59) at 20px Anthropic Sans with 1.60 line-height. Place a Terracotta Brand (#c96442) CTA button with Ivory text, 12px radius."
+- "Create a hero section on Parchment (#f5f4ed) with a headline at 64px Anthropic Serif weight 500, line-height 1.10. Use Anthropic Near Black (#141413) text. Add a subtitle in Olive Gray (#5e5d59) at 20px Anthropic Sans with 1.60 line-height. Place a Terracotta Brand (#c4956a) CTA button with Ivory text, 12px radius."
 - "Design a feature card on Ivory (#faf9f5) with a 1px solid Border Cream (#f0eee6) border and comfortably rounded corners (8px). Title in Anthropic Serif at 25px weight 500, description in Olive Gray (#5e5d59) at 16px Anthropic Sans. Add a whisper shadow (rgba(0,0,0,0.05) 0px 4px 24px)."
 - "Build a dark section on Anthropic Near Black (#141413) with Ivory (#faf9f5) headline text in Anthropic Serif at 52px weight 500. Use Warm Silver (#b0aea5) for body text. Borders in Dark Surface (#30302e)."
 - "Create a button in Warm Sand (#e8e6dc) with Charcoal Warm (#4d4c48) text, 8px radius, and a ring shadow (0px 0px 0px 1px #d1cfc5). Padding: 0px 12px 0px 8px."
