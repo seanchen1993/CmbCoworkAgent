@@ -63,7 +63,7 @@ function UploadSkillDialog(props: {
       try {
         const buffer = await file.arrayBuffer()
         const mockSpecial = true
-        const res = await window.api.skills.upload(buffer, file.name, mockSpecial)
+        const res = await window.api.skills.upload(buffer, file.name, false)
         if (res.success) {
           onSuccess()
           onOpenChange(false)
