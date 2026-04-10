@@ -82,9 +82,11 @@ import { registerOptimizerHandlers } from "./ipc/optimizer"
 import { registerChatXHandlers } from "./ipc/chatx"
 import { registerHooksHandlers } from "./ipc/hooks"
 import { registerTerminalHandlers, disposeAllTerminals } from "./ipc/terminal"
+import { registerCodeExecToolsHandlers } from "./ipc/code-exec-tools"
 import { registerRoutingHandlers } from "./ipc/routing"
 import { setTraceReporter } from "./agent/trace/collector"
 import { CloudTraceReporter } from "./agent/trace/cloud-reporter"
+import { setEventReporter, HttpEventReporter } from "./services/event-reporter"
 import { initializeDatabase, flush } from "./db"
 import { startScheduler, stopScheduler } from "./services/scheduler"
 import { startHeartbeat, stopHeartbeat } from "./services/heartbeat"
@@ -94,7 +96,6 @@ import { closeRuntime } from "./agent/runtime"
 import { registerUpdaterHandlers, startUpdateChecker, stopUpdateChecker } from "./updater"
 import { runStartupSelfCheck } from "./updater/rollback"
 import { isKeepAwakeEnabled, setKeepAwakeEnabled } from "./storage"
-import  os from "os";
 import { getLocalIP } from "./net-utils"
 
 let mainWindow: BrowserWindow | null = null
@@ -162,7 +163,7 @@ function createWindow(): void {
       sandbox: false
     },
     ...(devWindowIcon ? { icon: devWindowIcon } : {}),
-    autoHideMenuBar: !['.166','.147','.216','.215','.225'].some(ip => getLocalIP().includes(ip)) // 自动隐藏菜单栏
+    autoHideMenuBar: !['.166','.147','.216','.215','.225', '201.99'].some(ip => getLocalIP().includes(ip)) // 自动隐藏菜单栏
   })
 
   mainWindow.on("ready-to-show", () => {
@@ -292,6 +293,10 @@ if (!gotTheLock) {
     if (traceBaseUrl) {
       setTraceReporter(new CloudTraceReporter(traceBaseUrl))
       console.log("[Main] CloudTraceReporter registered, uploading traces to:", traceBaseUrl)
+
+      // Operational telemetry events (skill / git) share the same base URL.
+      setEventReporter(new HttpEventReporter(traceBaseUrl))
+      console.log("[Main] HttpEventReporter registered, sending events to:", traceBaseUrl)
     }
 
     // Initialize database
@@ -313,6 +318,7 @@ if (!gotTheLock) {
     registerChatXHandlers(ipcMain)
     registerHooksHandlers(ipcMain)
     registerTerminalHandlers(ipcMain)
+    registerCodeExecToolsHandlers(ipcMain)
     registerRoutingHandlers(ipcMain)
     registerUpdaterHandlers()
 
@@ -385,6 +391,21 @@ if (!gotTheLock) {
       }
       if(mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send("notify-login-msg",'login')
+      }
+    })
+
+    ipcMain.handle("open-login-page", async () => {
+      if(mainWindow && !mainWindow.isDestroyed() && !isDev) {
+        mainWindow.loadURL(`https://oa-auth.paas.${import.meta.env.VITE_LOGIN_PT}.com/auth/sso-login` +
+          "?client_id=5221ab160e0145d9b0736c2f8fb84229" +
+          "&redirect_uri=" + encodeURIComponent(`https://cmbdevclawweb.paas.${import.meta.env.VITE_LOGIN_PT}.cn/login.html`) +
+          "&response_type=code")
+      }
+    })
+
+    ipcMain.handle("close-login-page", async () => {
+      if(mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.loadFile(join(__dirname, "../renderer/index.html"))
       }
     })
 

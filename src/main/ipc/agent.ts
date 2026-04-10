@@ -1,9 +1,11 @@
 import { IpcMain, BrowserWindow } from "electron"
+import { nowIsoLocal } from "../util/local-time"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
 import { Command } from "@langchain/langgraph"
 import {
   createAgentRuntime,
-  getSkillEvolutionThreshold
+  getSkillEvolutionThreshold,
+  type ModelRetryHooks
 } from "../agent/runtime"
 import { getThread } from "../db"
 import { summarizeAndSave } from "../memory/summarizer"
@@ -148,6 +150,52 @@ function emitSkillGenerating(
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send("skill:generating", { threadId, phase, text })
   }
+}
+
+/**
+ * Build ModelRetryHooks that forward retry status to the renderer as custom
+ * stream events on the given channel. Used to display the inline "retrying…"
+ * indicator in the chat view.
+ */
+function buildModelRetryHooks(window: BrowserWindow, channel: string): ModelRetryHooks {
+  const safeSend = (payload: unknown): void => {
+    try {
+      if (window.isDestroyed()) return
+      window.webContents.send(channel, payload)
+    } catch {
+      /* ignore — window may be gone */
+    }
+  }
+  return {
+    onRetry: (info) => {
+      safeSend({
+        type: "custom",
+        data: {
+          type: "model_retry",
+          attempt: info.attempt,
+          maxRetries: info.maxRetries,
+          reason: info.reason,
+          delayMs: info.delayMs
+        }
+      })
+    }
+    // No onRetryResolved: the renderer clears the indicator via stream-end
+    // (handleStreamUpdate) and message-delta defensive clears, which together
+    // cover every termination path without needing an explicit clear event.
+  }
+}
+
+/**
+ * Max fetch attempts per model based on the current global routing mode.
+ *
+ * - pinned (no auto-routing): 7 attempts = 6 retries. User has committed to
+ *   a single model; retry harder before giving up since there's no automatic
+ *   fallback to another tier.
+ * - auto: 6 attempts = 5 retries. Failover handles persistent failures by
+ *   switching to the next candidate model, so each attempt retries a bit less.
+ */
+function getMaxRetryAttemptsForRoutingMode(): number {
+  return getGlobalRoutingMode() === "pinned" ? 7 : 6
 }
 
 /**
@@ -560,7 +608,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         status,
         errorMessage,
         usedSkills: skillUsageDetector.getUsedSkillNames(),
-        finishedAt: new Date().toISOString()
+        finishedAt: nowIsoLocal()
       })
 
       const context = buildSkillProposalWindowContext(snapshotSkillProposalWindow(threadId))
@@ -676,7 +724,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             workspacePath,
             modelId: candidateId,
             abortSignal: abortController.signal,
-            noSkillEvolutionTool: true
+            noSkillEvolutionTool: true,
+            retryHooks: buildModelRetryHooks(window, channel),
+            maxRetryAttempts: getMaxRetryAttemptsForRoutingMode()
           })
           // First attempt sends the message; subsequent attempts resume from checkpoint
           const input = isFirstAttempt ? { messages: [humanMessage] } : null
@@ -1008,7 +1058,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
               const llmNodeId = tracer.beginLlmNode({
                 messageId: aiMsgId,
-                startedAt: new Date().toISOString(),
+                startedAt: nowIsoLocal(),
                 input: inputSlice,
                 metadata: {
                   toolCallCount: outputToolCalls.length
@@ -1025,7 +1075,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
               tracer.recordModelCall({
                 messageId: aiMsgId,
-                startedAt: new Date().toISOString(),
+                startedAt: nowIsoLocal(),
                 inputMessages: inputSlice,
                 outputMessage: {
                   role: "assistant",
@@ -1184,7 +1234,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             workspacePath,
             modelId: nextCandidate,
             abortSignal: abortController.signal,
-            noSkillEvolutionTool: true
+            noSkillEvolutionTool: true,
+            retryHooks: buildModelRetryHooks(window, channel),
+            maxRetryAttempts: getMaxRetryAttemptsForRoutingMode()
           })
           activeStream = await agent.stream(null, streamConfig) // resume from checkpoint
           usedModelId = nextCandidate
@@ -1447,7 +1499,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             workspacePath,
             modelId: candidateId,
             abortSignal: abortController.signal,
-            noSkillEvolutionTool: true
+            noSkillEvolutionTool: true,
+            retryHooks: buildModelRetryHooks(window, channel),
+            maxRetryAttempts: getMaxRetryAttemptsForRoutingMode()
           })
           resumeStream = await resumeAgent.stream(new Command({ resume: resumeValue }), resumeStreamConfig)
           resumeUsedModelId = candidateId
@@ -1532,7 +1586,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const nextCandidate = resumeRemainingCandidates.shift()!
           const nextAgent = await createAgentRuntime({
             threadId, workspacePath, modelId: nextCandidate,
-            abortSignal: abortController.signal, noSkillEvolutionTool: true
+            abortSignal: abortController.signal, noSkillEvolutionTool: true,
+            retryHooks: buildModelRetryHooks(window, channel),
+            maxRetryAttempts: getMaxRetryAttemptsForRoutingMode()
           })
           activeResumeStream = await nextAgent.stream(new Command({ resume: resumeValue }), resumeStreamConfig)
           resumeUsedModelId = nextCandidate
@@ -1643,7 +1699,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               workspacePath,
               modelId: candidateId,
               abortSignal: abortController.signal,
-              noSkillEvolutionTool: true
+              noSkillEvolutionTool: true,
+              retryHooks: buildModelRetryHooks(window, channel),
+            maxRetryAttempts: getMaxRetryAttemptsForRoutingMode()
             })
             intStream = await intAgent.stream(null, interruptStreamConfig)
             intUsedModelId = candidateId
@@ -1728,7 +1786,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             const nextCandidate = intRemainingCandidates.shift()!
             const nextAgent = await createAgentRuntime({
               threadId, workspacePath, modelId: nextCandidate,
-              abortSignal: abortController.signal, noSkillEvolutionTool: true
+              abortSignal: abortController.signal, noSkillEvolutionTool: true,
+              retryHooks: buildModelRetryHooks(window, channel),
+            maxRetryAttempts: getMaxRetryAttemptsForRoutingMode()
             })
             activeIntStream = await nextAgent.stream(null, interruptStreamConfig)
             intUsedModelId = nextCandidate

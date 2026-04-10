@@ -254,6 +254,32 @@ export function setMemoryEnabled(enabled: boolean): void {
   writeFileSync(MEMORY_SETTINGS_FILE, JSON.stringify({ enabled }, null, 2))
 }
 
+// ── Code exec settings ──
+
+const CODE_EXEC_SETTINGS_FILE = join(OPENWORK_DIR, "code-exec-settings.json")
+
+interface CodeExecSettings {
+  enabled?: boolean
+}
+
+function readCodeExecSettings(): CodeExecSettings {
+  if (!existsSync(CODE_EXEC_SETTINGS_FILE)) return {}
+  try {
+    return JSON.parse(readFileSync(CODE_EXEC_SETTINGS_FILE, "utf-8")) as CodeExecSettings
+  } catch {
+    return {}
+  }
+}
+
+export function isCodeExecEnabled(): boolean {
+  return readCodeExecSettings().enabled !== false
+}
+
+export function setCodeExecEnabled(enabled: boolean): void {
+  getOpenworkDir()
+  writeFileSync(CODE_EXEC_SETTINGS_FILE, JSON.stringify({ enabled }, null, 2))
+}
+
 // ── Skills ──
 
 const DISABLED_SKILLS_FILE = join(OPENWORK_DIR, "disabled-skills.json")
@@ -447,6 +473,7 @@ export interface CustomModelConfig {
   model: string
   apiKey?: string
   maxTokens?: number
+  interleavedThinking?: boolean
   tier?: "premium" | "economy"
 }
 
@@ -457,6 +484,7 @@ export interface UserInfoConfig {
   originOrgId?: string
   orgName?: string
   ystRefreshToken?: string
+  ystIdToken?: string
   ystCode?: string
   ystAccessToken?: string
 }
@@ -472,6 +500,7 @@ export interface CustomModelPublicConfig {
   model: string
   hasApiKey: boolean
   maxTokens: number
+  interleavedThinking?: boolean
   tier?: "premium" | "economy"
 }
 
@@ -481,6 +510,7 @@ interface StoredCustomModelRecord {
   baseUrl: string
   model: string
   maxTokens?: number
+  interleavedThinking?: boolean
   tier?: "premium" | "economy"
 }
 
@@ -494,6 +524,14 @@ function normalizeMaxTokens(value: unknown): number {
   }
 
   return Math.min(MAX_MAX_TOKENS, Math.max(MIN_MAX_TOKENS, Math.floor(value)))
+}
+
+function defaultInterleavedThinkingForModel(model: string): boolean {
+  return /minimax/i.test(model)
+}
+
+function resolveInterleavedThinkingSetting(model: string, value: unknown): boolean {
+  return typeof value === "boolean" ? value : defaultInterleavedThinkingForModel(model)
 }
 
 function getCustomApiKeyEnvName(id: string): string {
@@ -658,6 +696,7 @@ function toPublicConfig(config: StoredCustomModelRecord, env?: Record<string, st
     model: config.model,
     hasApiKey: !!getCustomModelApiKey(config.id, env),
     maxTokens: normalizeMaxTokens(config.maxTokens),
+    interleavedThinking: resolveInterleavedThinkingSetting(config.model, config.interleavedThinking),
     ...(config.tier !== undefined && { tier: config.tier })
   }
 }
@@ -672,6 +711,7 @@ export function getCustomModelConfigs(): CustomModelConfig[] {
     model: item.model,
     apiKey: getCustomModelApiKey(item.id, env),
     maxTokens: normalizeMaxTokens(item.maxTokens),
+    interleavedThinking: resolveInterleavedThinkingSetting(item.model, item.interleavedThinking),
     ...(item.tier !== undefined && { tier: item.tier })
   }))
 }
@@ -687,6 +727,7 @@ export function getCustomModelConfigById(id: string): CustomModelConfig | null {
     model: record.model,
     apiKey: getCustomModelApiKey(record.id),
     maxTokens: normalizeMaxTokens(record.maxTokens),
+    interleavedThinking: resolveInterleavedThinkingSetting(record.model, record.interleavedThinking),
     ...(record.tier !== undefined && { tier: record.tier })
   }
 }
@@ -740,6 +781,7 @@ export function upsertCustomModelConfig(
     baseUrl: validatedBaseUrl,
     model: normalizedModel,
     maxTokens: validatedMaxTokens,
+    interleavedThinking: resolveInterleavedThinkingSetting(normalizedModel, config.interleavedThinking),
     ...(config.tier !== undefined && { tier: config.tier })
   }
 

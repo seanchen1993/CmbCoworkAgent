@@ -8,6 +8,7 @@ import {
   setMcpConnectorEnabled
 } from "../storage"
 import type { McpConnectorConfig, McpConnectorUpsert } from "../types"
+import { invalidateGlobalMcpCapabilityService } from "../mcp/capability-service"
 
 export function buildMcpServerConfig(config: {
   url: string
@@ -60,6 +61,7 @@ export function registerMcpHandlers(ipcMain: IpcMain): void {
     async (_event, config: McpConnectorUpsert): Promise<{ id: string }> => {
       validateMcpConnectorInput(config)
       const id = upsertMcpConnector(config)
+      await invalidateGlobalMcpCapabilityService("mcp:create")
       return { id }
     }
   )
@@ -69,18 +71,21 @@ export function registerMcpHandlers(ipcMain: IpcMain): void {
     async (_event, config: McpConnectorUpsert & { id: string }): Promise<{ id: string }> => {
       validateMcpConnectorInput(config)
       const id = upsertMcpConnector(config)
+      await invalidateGlobalMcpCapabilityService("mcp:update")
       return { id }
     }
   )
 
   ipcMain.handle("mcp:delete", async (_event, id: string): Promise<void> => {
     deleteMcpConnector(id)
+    await invalidateGlobalMcpCapabilityService("mcp:delete")
   })
 
   ipcMain.handle(
     "mcp:setEnabled",
     async (_event, { id, enabled }: { id: string; enabled: boolean }): Promise<void> => {
       setMcpConnectorEnabled(id, enabled)
+      await invalidateGlobalMcpCapabilityService("mcp:setEnabled")
     }
   )
 

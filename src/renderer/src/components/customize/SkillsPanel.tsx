@@ -4,8 +4,6 @@ import remarkGfm from "remark-gfm"
 import {
   ChevronDown,
   ChevronRight,
-  Code,
-  Eye,
   FileText,
   Folder,
   Plus,
@@ -239,7 +237,6 @@ export function SkillsPanel(): React.JSX.Element {
   const [selectedFilePreviewKind, setSelectedFilePreviewKind] = useState<FilePreviewKind>("text")
   const [selectedBinaryBase64, setSelectedBinaryBase64] = useState<string | null>(null)
   const [selectedBinaryMimeType, setSelectedBinaryMimeType] = useState<string | null>(null)
-  const [showCode, setShowCode] = useState(false)
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false)
   const [disabledSkills, setDisabledSkills] = useState<Set<string>>(new Set())
   const [searchQuery, setSearchQuery] = useState("")
@@ -463,7 +460,7 @@ export function SkillsPanel(): React.JSX.Element {
   )
 
   return (
-    <>
+    <div className="contents">
       <div className="w-[330px] shrink-0 border-r border-border flex flex-col">
         <div className="p-3 border-b border-border space-y-2">
           <div className="flex items-center justify-between gap-2">
@@ -543,9 +540,7 @@ export function SkillsPanel(): React.JSX.Element {
         previewKind={selectedFilePreviewKind}
         binaryBase64={selectedBinaryBase64}
         binaryMimeType={selectedBinaryMimeType}
-        showCode={showCode}
         isDisabled={selectedSkill ? disabledSkills.has(selectedSkill.name) : false}
-        onToggleShowCode={() => setShowCode((v) => !v)}
         onToggleEnabled={() => {
           if (selectedSkill) toggleSkillEnabled(selectedSkill.name)
         }}
@@ -562,7 +557,7 @@ export function SkillsPanel(): React.JSX.Element {
           window.api.skills.list().then(setSkills).catch(console.error)
         }}
       />
-    </>
+    </div>
   )
 }
 
@@ -803,9 +798,7 @@ export function SkillDetail(props: {
   previewKind: FilePreviewKind
   binaryBase64: string | null
   binaryMimeType: string | null
-  showCode: boolean
   isDisabled: boolean
-  onToggleShowCode: () => void
   onToggleEnabled: () => void
   onDelete?: () => void
   hideActions?: boolean
@@ -817,9 +810,7 @@ export function SkillDetail(props: {
     previewKind,
     binaryBase64,
     binaryMimeType,
-    showCode,
     isDisabled,
-    onToggleShowCode,
     onToggleEnabled,
     onDelete,
     hideActions = false
@@ -827,7 +818,15 @@ export function SkillDetail(props: {
 
   if (!skill) {
     return (
-      <div className="flex-1 flex items-center justify-center overflow-y-auto p-8">
+      <div
+        className="flex-1 flex items-center justify-center overflow-y-auto p-8 select-none"
+        onCopy={(e) => e.preventDefault()}
+        onKeyDown={(e) => {
+          if ((e.ctrlKey || e.metaKey) && e.key === "c") {
+            e.preventDefault()
+          }
+        }}
+      >
         <div className="max-w-md space-y-6">
           <div className="text-center space-y-3">
             <div className="size-14 rounded-2xl bg-muted/60 flex items-center justify-center mx-auto">
@@ -901,13 +900,21 @@ export function SkillDetail(props: {
   const isLoading = !!selectedFilePath && content === null && binaryBase64 === null
 
   return (
-    <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+    <div
+      className="flex-1 flex flex-col min-w-0 overflow-hidden select-none"
+      onCopy={(e) => e.preventDefault()}
+      onKeyDown={(e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key === "c") {
+          e.preventDefault()
+        }
+      }}
+    >
       <div className="p-4 border-b border-border flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           <h2 className="text-base font-semibold truncate">{skill.name}</h2>
-          <p className="text-xs text-muted-foreground mt-0.5 truncate">
-            {selectedFilePath ? selectedFilePath.replace(/\\/g, "/") : "未选择文件"}
-          </p>
+          {/*<p className="text-xs text-muted-foreground mt-0.5 truncate">*/}
+          {/*  {selectedFilePath ? selectedFilePath.replace(/\\/g, "/") : "未选择文件"}*/}
+          {/*</p>*/}
         </div>
         {!hideActions && (
           <div className="flex items-center gap-1.5 shrink-0">
@@ -941,37 +948,10 @@ export function SkillDetail(props: {
         </p>
       </div>
 
-      <div className="px-4 py-2 border-b border-border flex items-center gap-2">
-        <Button
-          variant={showCode ? "ghost" : "secondary"}
-          size="sm"
-          className="h-7 gap-1.5 text-xs"
-          onClick={() => showCode && onToggleShowCode()}
-        >
-          <Eye className="size-3" />
-          预览
-        </Button>
-        <Button
-          variant={showCode ? "secondary" : "ghost"}
-          size="sm"
-          className="h-7 gap-1.5 text-xs"
-          onClick={() => !showCode && onToggleShowCode()}
-        >
-          <Code className="size-3" />
-          源码
-        </Button>
-      </div>
-
       <ScrollArea className="flex-1">
         <div className="p-4">
           {isLoading ? (
             <p className="text-sm text-muted-foreground">加载中...</p>
-          ) : showCode ? (
-            <pre className="text-xs font-mono whitespace-pre-wrap break-words leading-relaxed text-muted-foreground bg-muted/30 rounded-md p-3">
-              {previewKind === "image" || previewKind === "pdf"
-                ? "[Binary file] 源码模式暂不展示二进制内容"
-                : content}
-            </pre>
           ) : previewKind === "image" && binaryDataUrl ? (
             <div className="h-full w-full flex items-start justify-center">
               <img

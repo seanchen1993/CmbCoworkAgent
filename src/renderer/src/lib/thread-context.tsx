@@ -40,6 +40,16 @@ export interface RoutingResultState {
   routeReason: string
 }
 
+// Model retry indicator — shown inline in chat while the fetch layer is
+// retrying a transient model error. Cleared when the retry resolves.
+export interface ModelRetryState {
+  attempt: number
+  maxRetries: number
+  reason: string
+  delayMs: number
+  startedAt: Date
+}
+
 // Per-thread state (persisted/restored from checkpoints)
 export interface ThreadState {
   messages: Message[]
@@ -58,6 +68,7 @@ export interface ThreadState {
   scheduledTaskLoading: boolean
   scheduledTaskId: string | null
   routingResult: RoutingResultState | null
+  modelRetry: ModelRetryState | null
 }
 
 // Stream instance type
@@ -123,7 +134,8 @@ const createDefaultThreadState = (): ThreadState => ({
   draftInput: "",
   scheduledTaskLoading: false,
   scheduledTaskId: null,
-  routingResult: null
+  routingResult: null,
+  modelRetry: null
 })
 
 const defaultStreamData: StreamData = {
@@ -161,6 +173,11 @@ interface CustomEventData {
   resolvedModelId?: string
   resolvedTier?: "premium" | "economy"
   routeReason?: string
+  // model_retry fields
+  attempt?: number
+  maxRetries?: number
+  reason?: string
+  delayMs?: number
 }
 
 // Component that holds a stream and notifies subscribers
@@ -268,6 +285,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       setLoadingStates((prev) => {
         if (prev[threadId] === data.isLoading) return prev
         return { ...prev, [threadId]: data.isLoading }
+      })
+      // Defensive clear: drop the retry indicator when the stream stops for
+      // ANY reason (success / error / user cancel) — last-line-of-defense.
+      // Also clear when the stream is still active (isLoading=true) — this
+      // means the retry succeeded and data is flowing again.
+      setThreadStates((prev) => {
+        const cur = prev[threadId]
+        if (!cur || !cur.modelRetry) return prev
+        return { ...prev, [threadId]: { ...cur, modelRetry: null } }
       })
     },
     [notifyStreamSubscribers]
@@ -384,7 +410,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     (threadId: string, error: Error) => {
       console.error("[ThreadContext] Stream error:", { threadId, error })
       const userFriendlyMessage = parseErrorMessage(error)
-      updateThreadState(threadId, () => ({ error: userFriendlyMessage }))
+      updateThreadState(threadId, () => ({ error: userFriendlyMessage, modelRetry: null }))
     },
     [parseErrorMessage, updateThreadState]
   )
@@ -451,6 +477,23 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             }))
           }
           break
+        case "model_retry":
+          if (typeof data.attempt === "number" && typeof data.maxRetries === "number") {
+            updateThreadState(threadId, () => ({
+              modelRetry: {
+                attempt: data.attempt!,
+                maxRetries: data.maxRetries!,
+                reason: data.reason ?? "",
+                delayMs: data.delayMs ?? 0,
+                startedAt: new Date()
+              }
+            }))
+          }
+          break
+        // No `model_retry_clear` case: clearing is handled uniformly by
+        // (1) message-delta defensive clear (mid-stream resumption),
+        // (2) handleStreamUpdate isLoading=false (any stream end),
+        // (3) handleError (explicit error path).
         case "token_usage":
           // Only update if we have meaningful token values (> 0)
           // This prevents resetting the usage when streaming ends
@@ -878,6 +921,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           const finalContent = tracker.accumulatedContent
           updateThreadState(threadId, (prev) => {
             const idx = prev.messages.findIndex((m) => m.id === id)
+            // Defensive clear: any real assistant token means data is flowing
+            // again, so a stale retry indicator must disappear.
+            const clearRetry = prev.modelRetry ? { modelRetry: null } : {}
             if (idx >= 0) {
               const updated = [...prev.messages]
               updated[idx] = {
@@ -885,9 +931,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 content: finalContent,
                 ...(toolCalls?.length && { tool_calls: toolCalls })
               }
-              return { messages: updated }
+              return { ...clearRetry, messages: updated }
             }
             return {
+              ...clearRetry,
               messages: [
                 ...prev.messages,
                 {
@@ -973,6 +1020,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             reason: req.reason,
             operation: req.operation,
             filePath: req.filePath,
+            code: req.code,
+            params: req.params,
+            timeoutMs: req.timeoutMs,
+            savedToolName: req.savedToolName,
+            savedToolId: req.savedToolId,
+            savedToolDescription: req.savedToolDescription,
+            savedToolMetadataError: req.savedToolMetadataError,
             _orchestratorRequestId: req.id,
             _retryReason: req.retry_reason,
             _approvalTypes: req.allowed_approval_types

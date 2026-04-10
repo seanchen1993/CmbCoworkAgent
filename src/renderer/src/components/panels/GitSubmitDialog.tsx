@@ -2,7 +2,26 @@ import { CheckCircle2, Loader2, Upload } from "lucide-react"
 import { Dialog, DialogContent } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue
+} from "@/components/ui/select"
 import { cn } from "@/lib/utils"
+
+const COMMIT_TYPES = [
+  { value: "fix", label: "fix" },
+  { value: "feat", label: "feat" },
+  { value: "refactor", label: "refactor" },
+  { value: "docs", label: "docs" },
+  { value: "style", label: "style" },
+  { value: "test", label: "test" },
+  { value: "chore", label: "chore" }
+] as const
+
+type CommitType = (typeof COMMIT_TYPES)[number]["value"]
 
 type GitSubmitAction = "commit" | "push"
 
@@ -16,9 +35,11 @@ interface GitSubmitDialogProps {
   deletions: number
   requiresCommitMetadata: boolean
   cardNumber: string
+  commitType: CommitType
   commitMessage: string
   onOpenChange: (open: boolean) => void
   onCardNumberChange: (value: string) => void
+  onCommitTypeChange: (value: CommitType) => void
   onCommitMessageChange: (value: string) => void
   onSubmit: (action: GitSubmitAction) => void
 }
@@ -33,9 +54,11 @@ export function GitSubmitDialog({
   deletions,
   requiresCommitMetadata,
   cardNumber,
+  commitType,
   commitMessage,
   onOpenChange,
   onCardNumberChange,
+  onCommitTypeChange,
   onCommitMessageChange,
   onSubmit
 }: GitSubmitDialogProps): React.JSX.Element {
@@ -43,7 +66,7 @@ export function GitSubmitDialog({
   const cardValue = cardNumber.trim()
   const messageValue = commitMessage.trim()
   const finalMessagePreview = cardValue
-    ? `${cardValue} #comment fix:${messageValue || "<message>"} #CMBDevClaw`
+    ? `${cardValue} #comment ${commitType}:${messageValue || "<message>"} #CMBDevClaw`
     : ""
   const cardMissing = requiresCommitMetadata && !cardValue
   const messageMissing = requiresCommitMetadata && !messageValue
@@ -112,6 +135,26 @@ export function GitSubmitDialog({
                     cardMissing && "border-destructive/50 focus-visible:ring-destructive/40"
                   )}
                 />
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-xs">
+                  <label htmlFor="git-commit-type" className="font-medium text-foreground">
+                    提交类型
+                  </label>
+                </div>
+                <Select value={commitType} onValueChange={onCommitTypeChange}>
+                  <SelectTrigger id="git-commit-type" className="w-full">
+                    <SelectValue placeholder="选择提交类型" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {COMMIT_TYPES.map((type) => (
+                      <SelectItem key={type.value} value={type.value}>
+                        {type.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
 
               <div className="space-y-1.5">

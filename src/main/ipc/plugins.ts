@@ -15,6 +15,7 @@ import {
 } from "../storage"
 import { copyDirRecursive, createAsyncMutex } from "../utils/fs"
 import type { PluginManifest, PluginMetadata, PluginMcpServerConfig } from "../types"
+import { invalidateGlobalMcpCapabilityService } from "../mcp/capability-service"
 
 interface ParsedPlugin {
   manifest: PluginManifest | null
@@ -202,6 +203,7 @@ async function installPluginFromDir(
 
     upsertPlugin(meta)
     invalidateEnabledSkillsCache()
+    await invalidateGlobalMcpCapabilityService("plugin:update")
 
     return { success: true, pluginName: parsed.name }
   } catch (e) {
@@ -377,6 +379,7 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
           }
           deletePluginStorage(id)
           invalidateEnabledSkillsCache()
+          await invalidateGlobalMcpCapabilityService("plugin:delete")
           return { success: true }
         } catch (e) {
           return { success: false, error: e instanceof Error ? e.message : "删除失败" }
@@ -395,6 +398,7 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
         const { id, enabled } = payload
         setPluginEnabled(id, enabled)
         invalidateEnabledSkillsCache()
+        await invalidateGlobalMcpCapabilityService("plugin:setEnabled")
         return { success: true }
       } catch (e) {
         return { success: false, error: e instanceof Error ? e.message : "设置失败" }

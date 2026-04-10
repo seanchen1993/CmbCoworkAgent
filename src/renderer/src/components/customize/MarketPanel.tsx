@@ -229,15 +229,15 @@ function MarketItemCard({
                   卸载
                 </Button>
               )}
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-7 w-auto px-2 gap-1 cursor-pointer"
-                onClick={handleLocalDownload}
-              >
-                <HardDrive className="size-3 mr-1" />
-                下载
-              </Button>
+              {/*<Button*/}
+              {/*  variant="outline"*/}
+              {/*  size="sm"*/}
+              {/*  className="h-7 w-auto px-2 gap-1 cursor-pointer"*/}
+              {/*  onClick={handleLocalDownload}*/}
+              {/*>*/}
+              {/*  <HardDrive className="size-3 mr-1" />*/}
+              {/*  下载*/}
+              {/*</Button>*/}
             </>
           )}
           {(item.canDelete || (item.ip && ip && item.ip === ip)) && (
@@ -1267,16 +1267,16 @@ export function MarketPanel(): React.JSX.Element {
                         卸载
                       </Button>
                     )}
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="h-8 gap-1.5"
-                      onClick={() => handleDownload(selectedItem, true)}
-                      disabled={downloadingItems.has(getItemKey(selectedItem))}
-                    >
-                      <HardDrive className="size-3" />
-                      下载
-                    </Button>
+                    {/*<Button*/}
+                    {/*  variant="outline"*/}
+                    {/*  size="sm"*/}
+                    {/*  className="h-8 gap-1.5"*/}
+                    {/*  onClick={() => handleDownload(selectedItem, true)}*/}
+                    {/*  disabled={downloadingItems.has(getItemKey(selectedItem))}*/}
+                    {/*>*/}
+                    {/*  <HardDrive className="size-3" />*/}
+                    {/*  下载*/}
+                    {/*</Button>*/}
                     {(selectedItem.canDelete ||
                       (selectedItem.ip &&
                         localStorage.getItem("localIp") &&

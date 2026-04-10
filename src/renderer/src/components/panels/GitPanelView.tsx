@@ -32,6 +32,7 @@ export function GitPanelView({
   const [error, setError] = useState<string | null>(null)
   const [submitAction, setSubmitAction] = useState<"commit" | "push" | null>(null)
   const [cardNumber, setCardNumber] = useState("")
+  const [commitType, setCommitType] = useState<"fix" | "feat" | "refactor" | "docs" | "style" | "test" | "chore">("fix")
   const [commitMessage, setCommitMessage] = useState("")
   const [expandedFilePaths, setExpandedFilePaths] = useState<Set<string>>(new Set())
   const [revertingFilePath, setRevertingFilePath] = useState<string | null>(null)
@@ -216,14 +217,21 @@ export function GitPanelView({
   const workspaceName = workspacePath
     ? workspacePath.split(/[\\/]/).filter(Boolean).pop() || workspacePath
     : "未关联路径"
-  const headerMeta = `${workspaceName} • ${state?.totals.fileCount ?? 0} files, +${state?.totals.additions ?? 0} / -${state?.totals.deletions ?? 0}`
   const branchName = state?.worktreeBranch || "-"
 
   return (
     <div className="rounded-xl border border-border/70 overflow-hidden bg-background flex flex-col min-h-0 h-full">
       <div className="sticky top-0 z-10 px-3 py-2 border-b border-border/70 bg-background-elevated/80 backdrop-blur shrink-0">
         <div className="rounded-lg border border-border/70 bg-background/90 px-2.5 py-2">
-          <div className="text-[11px] text-muted-foreground truncate">{headerMeta}</div>
+          <div className="text-[11px] text-muted-foreground truncate flex items-center gap-1 flex-wrap">
+            <span className="font-semibold text-foreground">{workspaceName}</span>
+            <span>•</span>
+            <span className="text-blue-600 dark:text-blue-400 font-medium">{state?.totals.fileCount ?? 0} files</span>
+            <span>,</span>
+            <span className="text-emerald-600 dark:text-emerald-400 font-semibold">+{state?.totals.additions ?? 0}</span>
+            <span>/</span>
+            <span className="text-rose-600 dark:text-rose-400 font-semibold">-{state?.totals.deletions ?? 0}</span>
+          </div>
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
             <Badge
               variant="outline"
@@ -261,61 +269,76 @@ export function GitPanelView({
             </p>
           )}
           {hasGitRepo && (
-            <div className="mt-2 pt-2 border-t border-border/60 flex flex-wrap items-center gap-2">
-              {canShowSubmit && (
-                <button
-                  onClick={() => setSubmitAction(hasPending ? "commit" : "push")}
-                  disabled={running !== null}
-                  className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] disabled:opacity-50 disabled:cursor-not-allowed hover:bg-background-interactive transition-colors"
-                >
-                  <GitBranch className="size-3.5" />
-                  Git提交
-                </button>
-              )}
+            <div className="mt-2 pt-2 border-t border-border/60 flex flex-wrap items-center gap-2 justify-between">
+              <div className={'flex space-x-2'}>
+                {canShowSubmit && (
+                  <button
+                    onClick={() => setSubmitAction(hasPending ? "commit" : "push")}
+                    disabled={running !== null}
+                    className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] disabled:opacity-50 disabled:cursor-not-allowed hover:bg-background-interactive transition-colors"
+                  >
+                    <GitBranch className="size-3.5" />
+                    Git提交
+                  </button>
+                )}
+
+                {hasPending && (
+                  <button
+                    id={'git-reject-all-button'}
+                    onClick={() => {
+                      void runReject()
+                    }}
+                    disabled={running !== null}
+                    className="inline-flex items-center gap-1 rounded-md border border-destructive/50 text-destructive px-2 py-1 text-[11px] disabled:opacity-50 disabled:cursor-not-allowed hover:bg-destructive/10 transition-colors"
+                  >
+                    <RotateCcw className="size-3.5" />
+                    {running === "reject" ? "全部回退中..." : "全部回退"}
+                  </button>
+                )}
+              </div>
+
               <button
-                id={'git-refresh-button'}
+                id="git-refresh-button"
                 onClick={() => {
                   void refresh()
                 }}
                 disabled={loading}
                 title="刷新"
                 aria-label="刷新"
-                className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] disabled:opacity-50 disabled:cursor-not-allowed hover:bg-background-interactive transition-colors"
+                className={cn(
+                  "group inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-medium",
+                  "border border-border/80 bg-background/60 text-muted-foreground",
+                  "active:scale-[0.97] transition-all duration-200",
+                  loading && "border-blue-400/60 text-blue-600 dark:text-blue-400 bg-blue-50/50 dark:bg-blue-950/30",
+                  "disabled:cursor-not-allowed"
+                )}
               >
-                <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
-                刷新
+                <RefreshCw
+                  className={cn(
+                    "size-3.5 transition-transform duration-300",
+                    loading ? "animate-spin" : "group-hover:rotate-90"
+                  )}
+                />
+                {loading ? "刷新中..." : "刷新"}
               </button>
-              {hasPending && (
-                <button
-                  id={'git-reject-all-button'}
-                  onClick={() => {
-                    void runReject()
-                  }}
-                  disabled={running !== null}
-                  className="inline-flex items-center gap-1 rounded-md border border-destructive/50 text-destructive px-2 py-1 text-[11px] disabled:opacity-50 disabled:cursor-not-allowed hover:bg-destructive/10 transition-colors"
-                >
-                  <RotateCcw className="size-3.5" />
-                  {running === "reject" ? "全部回退中..." : "全部回退"}
-                </button>
-              )}
             </div>
           )}
         </div>
       </div>
       <div className="overflow-y-auto overflow-x-hidden right-panel-scroll bg-background flex-1 min-h-0 p-3 space-y-3">
         {loading && <div className="text-xs text-muted-foreground">正在加载 Git diff...</div>}
-        {!loading && (error || state?.error) && (
+        {(error || state?.error) && (
           <div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-2 text-xs text-destructive">
             <AlertCircle className="size-3.5 mt-0.5 shrink-0" />
             <span>{error || state?.error}</span>
           </div>
         )}
-        {!loading && state && !hasGitRepo && (
+        {state && !hasGitRepo && (
           <div className="rounded-md border border-border/70 bg-muted/30 p-3 text-xs text-muted-foreground">
             当前任务未关联 Git 仓库。请先在工作区选择器绑定 Git 仓库路径。
           </div>
         )}
-        {!loading && hasGitRepo && (
+        {state !== null && hasGitRepo && (
           <>
             {state.files.length === 0 ? (
               <div className="rounded-xl border border-border/70 bg-muted/20 px-4 py-8">
@@ -435,11 +458,13 @@ export function GitPanelView({
         deletions={state?.totals.deletions ?? 0}
         requiresCommitMetadata={hasPending}
         cardNumber={cardNumber}
+        commitType={commitType}
         commitMessage={commitMessage}
         onOpenChange={(open) => {
           if (!open) setSubmitAction(null)
         }}
         onCardNumberChange={setCardNumber}
+        onCommitTypeChange={setCommitType}
         onCommitMessageChange={setCommitMessage}
         onSubmit={(action) => {
           void runSubmit(action)

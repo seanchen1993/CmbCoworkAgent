@@ -4,8 +4,6 @@ on:
   push:
     tags:
       - "v*"
-    branches:
-      - feature/gitaction
   workflow_dispatch: # 支持手动触发
 
 concurrency:
@@ -16,8 +14,295 @@ permissions:
   contents: write
 
 jobs:
+  # ------------------------------------------------------------------
+  # Linux 专用:在老 glibc 容器里编 node-pty 原生模块
+  # ------------------------------------------------------------------
+  # 背景:node-pty 1.1.0 不带 linux-x64 prebuild,必须现场 node-gyp 编。
+  # ubuntu-latest runner 是 24.04 (glibc 2.39),直接 rebuild 出来的 pty.node
+  # 会链接 GLIBC_2.32+ 符号,跑不了 UOS V20 / 麒麟 V10 (两者都是 glibc 2.28)。
+  #
+  # 解法:把"编译"和"打包"拆开。
+  # - 这个 job 在 manylinux_2_28_x86_64 (AlmaLinux 8 base, glibc 2.28, gcc 14)
+  #   里只跑 @electron/rebuild,产出 pty.node (node-pty 1.1.0 的 Linux 分支
+  #   直接调 forkpty,不编 spawn-helper,只有这一个原生二进制需要出),
+  #   当 artifact 上传。glibc 2.28 刚好是 UOS V20 / 麒麟 V10 的 glibc 版本,
+  #   ABI 前向兼容。
+  # - 后面的 build job 在 ubuntu-latest 宿主上跑(因为 electron-builder 打 deb
+  #   需要 fakeroot/dpkg,manylinux 是 rpm 系没有 dpkg,硬装很脏),
+  #   download artifact 后把 pty.node 覆盖到 node_modules/node-pty/build/Release/,
+  #   再跑 electron-builder。
+  #
+  # 为什么不用 manylinux2014 (CentOS 7 / glibc 2.17) 下限更低:
+  # Node 22 官方 linux-x64 tarball 硬要求 glibc >= 2.28,在 2.17 容器里启动
+  # 就会 "GLIBC_2.28 not found"。要用 2.17 就得降到 Node 18,但 .nvmrc 锁了 22,
+  # 强行降版本会让工具链分叉。所以用 2_28 镜像。余量只有"刚好"这么多 ——
+  # 若未来 node-pty 引入了 GLIBC_2.29+ 符号,CI 会立即红掉,比线上炸好得多。
+  #
+  # ⚠️ 另一个"刚好够"的约束:GitHub Actions runner 会把自己的 Node 20 binary
+  # mount 到容器内的 /__e/node20,给 actions/checkout@v4 / upload-artifact@v4 等
+  # node20 型 action 用。这个 Node 20 binary 同样要求 glibc >= 2.28。
+  # manylinux_2_28 刚好满足,但**不能再往下换** (manylinux2014 / alpine 都不行)。
+  # 换任何 glibc < 2.28 的镜像,第一个 checkout step 就会
+  # "/__e/node20/bin/node: /lib64/libm.so.6: version `GLIBC_2.28' not found"
+  # 直接炸掉。
+  #
+  # 为什么不用 actions/setup-node:setup-node@v4 下载的 Node 同样是 glibc 2.28
+  # 下限的 tarball,但它还依赖 GITHUB_WORKSPACE 权限和 node_modules 缓存的路径
+  # 假设,在 container 里不稳。手动下 tarball 最可控。
+  rebuild-node-pty-linux:
+    name: Rebuild node-pty (manylinux_2_28 / glibc 2.28)
+    runs-on: ubuntu-latest
+    container:
+      image: quay.io/pypa/manylinux_2_28_x86_64
+      options: --user root
+    steps:
+      # 预防 git 2.35.2+ 的 "dubious ownership" 检查:容器内是 root,
+      # 但 GHA mount 的 workspace 目录 owner 是宿主的 runner user,
+      # uid/gid 不匹配 git 会拒绝操作,actions/checkout 直接失败。
+      # manylinux_2_28 的 AlmaLinux 8 base 里 git 版本够新(会触发该检查),
+      # 显式把 workspace 标成 safe 比等 CI 红再加便宜。
+      - name: Mark workspace safe (container uid/gid mismatch)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - uses: actions/checkout@v4
+
+      # manylinux_2_28 没预装 Node,手动装一个 Node 22。
+      # 从 nodejs.org 下 tarball 直接解到 /usr/local,bin 会在 PATH 里。
+      #
+      # NODE_VERSION 锁到具体 patch:.nvmrc 只写 major("22"),tarball URL 必须有完整
+      # x.y.z,这里没法直接读 .nvmrc。锁 patch 反而是好事 —— 让 manylinux job 编译
+      # native module 时的 Node ABI 完全可重现,N-API 虽稳但仍有边角差异。
+      # 升 Node patch 时手动改这一行,顺便重新跑一次 CI 确认没破坏性。
+      - name: Install Node.js 22
+        run: |
+          set -euxo pipefail
+          NODE_VERSION=22.11.0
+          curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" -o /tmp/node.tar.xz
+          tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1
+          node -v
+          npm -v
+
+      # manylinux_2_28 自带 gcc 14 工具链(PEP 600 要求),已经在 PATH 里。
+      # node-gyp 默认调用 python3,manylinux 也预装了。校验一下各工具就位。
+      - name: Verify build toolchain
+        run: |
+          set -eux
+          gcc --version
+          g++ --version
+          python3 --version
+          make --version
+          # glibc 版本(这个是容器内的,不是宿主 ubuntu-latest 的)
+          ldd --version || true
+
+      # 用 --ignore-scripts 跳过 postinstall 的 electron-rebuild。
+      # 我们后面会显式跑一次带正确 Electron 版本的 rebuild,让 postinstall 先跑
+      # 是重复劳动,而且那次是用 npm 默认参数,电子头版本可能飘。
+      # 注意:这一步不需要装全量依赖,但 npm ci 是原子的要装就装全。装全无害,
+      # 反正后面只用 node_modules/node-pty 的产物。
+      - name: Install dependencies (no postinstall)
+        run: npm ci --ignore-scripts --include=optional
+
+      # 审计 --ignore-scripts 的影响范围。
+      #
+      # --ignore-scripts 是全局开关,会跳过 node_modules 里**所有**包的
+      # preinstall/install/postinstall。我们需要它的目的只是为了跳过 node-pty 在
+      # ubuntu/manylinux 宿主上编 pty.node(由 manylinux artifact 替代),但副作用
+      # 会一并跳过其他包的 install 脚本。某些包靠这些脚本下载 prebuild 或编 native
+      # binary,被静默跳过会让最终 deb 缺东西,装到用户机器上启动崩。
+      #
+      # 这一步在 npm ci 之后扫 node_modules,枚举所有带 install/postinstall 的包,
+      # 和下面的 EXPECTED 白名单对比。出现新包就直接 CI 红,强制人类评估:
+      # 这个新包的 install 脚本是干什么的?跳过它会不会让 Linux 打包出坏包?
+      # 评估完确认安全后才能加进白名单。
+      #
+      # 白名单解释(为什么这些包被跳过 install 是安全的):
+      #   - electron: postinstall 下载 Electron 二进制到 node_modules/electron/dist/。
+      #     被跳过没事 —— electron-builder 自己用 app-builder unpack-electron 拉。
+      #   - esbuild: 现已改用 optionalDependencies (@esbuild/linux-x64) 分发 native
+      #     binary,postinstall 跑空。--include=optional 兜住。
+      #   - electron-winstaller: install 是给 Windows installer 选 7z 架构,
+      #     Linux 打 deb 用不到这个工具。
+      #   - node-pty: 正是我们故意要跳过的对象,由 manylinux artifact 替代。
+      - name: Audit packages with install/postinstall scripts
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # 已确认 --ignore-scripts 跳过这些包是安全的(理由见上方注释)
+          EXPECTED="electron electron-winstaller esbuild node-pty"
+
+          actual=$(node -e "
+            const fs = require('fs'), path = require('path');
+            const found = new Set();
+            function scan(dir) {
+              let entries;
+              try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+              for (const e of entries) {
+                if (!e.isDirectory()) continue;
+                if (e.name === '.bin' || e.name === '.cache') continue;
+                const sub = path.join(dir, e.name);
+                if (e.name.startsWith('@')) { scan(sub); continue; }
+                const pj = path.join(sub, 'package.json');
+                if (fs.existsSync(pj)) {
+                  try {
+                    const j = JSON.parse(fs.readFileSync(pj, 'utf8'));
+                    const s = j.scripts || {};
+                    if (s.preinstall || s.install || s.postinstall) found.add(j.name);
+                  } catch {}
+                }
+              }
+            }
+            scan('node_modules');
+            console.log([...found].sort().join('\n'));
+          ")
+
+          echo "=== Packages with install/postinstall scripts ==="
+          echo "$actual"
+          echo "================================================="
+
+          expected_sorted=$(echo "$EXPECTED" | tr ' ' '\n' | sort)
+          unexpected=$(comm -23 <(echo "$actual" | sort) <(echo "$expected_sorted") || true)
+
+          if [ -n "$unexpected" ]; then
+            echo ""
+            echo "ERROR: 发现 EXPECTED 白名单之外的、带 install/postinstall 脚本的包:"
+            echo "$unexpected" | sed 's/^/  - /'
+            echo ""
+            echo "原因:这个 job 用 npm ci --ignore-scripts,会全局跳过这些脚本。"
+            echo "如果新包的脚本负责下载 prebuild 或编译 native binary,跳过会让"
+            echo "最终 Linux deb 缺东西,装到用户机器上启动崩。"
+            echo ""
+            echo "请检查每个新包的 package.json 的 scripts.install / scripts.postinstall:"
+            echo "  - 如果脚本只是日志/无害检查 → 安全,加入 EXPECTED 白名单"
+            echo "  - 如果脚本下载/编译关键产物 → 需要在主 build job 里显式补回来,"
+            echo "    或考虑改方案:不用 --ignore-scripts(让所有 postinstall 跑),"
+            echo "    然后用 manylinux artifact 覆盖 node-pty 的 pty.node 即可"
+            echo ""
+            echo "评估完成后,把新包名加到本步骤的 EXPECTED 列表里,并在上方注释中"
+            echo "记录'为什么这个包被跳过 install 是安全的'。"
+            exit 1
+          fi
+
+          # 也检查白名单里是否有包已经从依赖树里删掉了(陈旧白名单),不致命但提醒
+          stale=$(comm -13 <(echo "$actual" | sort) <(echo "$expected_sorted") || true)
+          if [ -n "$stale" ]; then
+            echo ""
+            echo "NOTE: 白名单里有依赖树里不存在的包(可能已被删除):"
+            echo "$stale" | sed 's/^/  - /'
+            echo "      可以从 EXPECTED 里清理掉。"
+          fi
+
+          echo "OK: 所有带 install/postinstall 的包都在白名单内"
+
+      # 从 package.json 读 build.electronVersion,避免两处硬编码不同步。
+      #
+      # 同时断言 build.electronVersion 的 major 和 lockfile 里实际 electron 的 major 一致。
+      # 背景:manylinux job 用 build.electronVersion 作为 @electron/rebuild 的 -v 参数,
+      # 编出来的 pty.node 的 NODE_MODULE_VERSION(ABI)取决于这个版本。主 build job
+      # 实际打包进 deb 的是 devDependencies.electron 的锁定版本(来自 lockfile)。
+      # 如果未来有人升级 devDependencies.electron 到 40.x 时忘了改 build.electronVersion,
+      # manylinux 会用 Electron 39 的 headers 编 pty.node,deb 里装 Electron 40 —>
+      # 运行时 NODE_MODULE_VERSION mismatch 直接崩,而 SHA256 对比兜不住(它只验字节一致)。
+      # 这里强制同 major,升级时两处必须同步,否则 CI 立即红。
+      - name: Read Electron version from package.json
+        id: electron
+        run: |
+          set -euxo pipefail
+          VERSION=$(node -p "require('./package.json').build.electronVersion")
+          LOCKED=$(node -p "require('./package-lock.json').packages['node_modules/electron'].version")
+          echo "build.electronVersion: ${VERSION}"
+          echo "locked electron       : ${LOCKED}"
+          BUILD_MAJOR=${VERSION%%.*}
+          LOCKED_MAJOR=${LOCKED%%.*}
+          if [ "${BUILD_MAJOR}" != "${LOCKED_MAJOR}" ]; then
+            echo "ERROR: build.electronVersion (${VERSION}) 和 lockfile 里的 electron (${LOCKED}) major 不一致"
+            echo "  这会导致 manylinux job 用错误的 Electron headers 编 pty.node,"
+            echo "  运行时 NODE_MODULE_VERSION mismatch 崩掉。"
+            echo "  升级 Electron 时必须同步改 package.json:"
+            echo "    - devDependencies.electron"
+            echo "    - build.electronVersion"
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      # node-pty 1.1.0 的 binding.gyp 只在 OS=="mac" 时编译 spawn-helper
+      # (src/unix/pty.cc 的 Linux 分支是 #else,直接 forkpty,不走 posix_spawn +
+      # helper 路径),所以 Linux build/Release/ 下只会有 pty.node 一个产物。
+      # 不要加 spawn-helper 的 test -f 检查,那会误红。
+      #
+      # 不加 npx --yes:@electron/rebuild 是 electron-builder 的传递依赖,前面的
+      # npm ci 已经把它装到 node_modules/.bin/electron-rebuild,直接用即可。
+      # --yes 会让 npx 在找不到本地版本时去 registry 拉(且不交互确认),万一
+      # 本地缺了我们想立即红,而不是悄悄拉一个未知版本回来编。
+      - name: Rebuild node-pty against Electron headers
+        run: |
+          set -euxo pipefail
+          npx @electron/rebuild -f -w node-pty -v "${{ steps.electron.outputs.version }}"
+          echo "=== build/Release contents ==="
+          ls -la node_modules/node-pty/build/Release/
+          test -f node_modules/node-pty/build/Release/pty.node
+
+      # 强校验:objdump 读 pty.node 需要的 GLIBC_ 版本符号,取最大值。
+      # 只要 <= 2.28 就说明能跑在 UOS V20 / 麒麟 V10 / Debian 10+ / Ubuntu 18.10+ 上。
+      # 这一步 CI 红 = 编译环境漂了(比如基础镜像悄悄升级),必须人工介入,
+      # 不能沉默出坏包 —— 这是过去 node-pty + glibc 事故的根因。
+      - name: Verify glibc symbol ceiling <= 2.28
+        run: |
+          set -euxo pipefail
+          check_glibc() {
+            local file=$1
+            local max
+            # 不加 || true:依赖 pipefail,objdump/grep/sort/tail 任一环失败
+            # 都直接 trip set -e,stderr 保留真实错误(比如 "not a dynamic object"),
+            # 比落到空值兜底分支报 "no GLIBC symbols" 这种二阶错误信息更易定位。
+            # pty.node 一定有 GLIBC_* 符号,grep 不会空匹配触发误报。
+            max=$(objdump -T "$file" \
+              | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' \
+              | sort -V \
+              | tail -n1)
+            echo "$file -> max GLIBC symbol: ${max:-<none>}"
+            # 兜底:即便上面都成功了,空值还是非法状态,显式报错。
+            if [ -z "$max" ]; then
+              echo "ERROR: no GLIBC symbols found in $file — file may be corrupt or not a Linux ELF"
+              exit 1
+            fi
+            # 取纯数字部分(去掉 GLIBC_ 前缀),和 2.28 比较
+            local ver=${max#GLIBC_}
+            if [ "$(printf '%s\n2.28\n' "$ver" | sort -V | tail -n1)" != "2.28" ]; then
+              echo "ERROR: $file requires $max, exceeds 2.28 floor; won't run on UOS V20 / Kylin V10"
+              exit 1
+            fi
+          }
+          check_glibc node_modules/node-pty/build/Release/pty.node
+
+      # Linux 上 node-pty 的 C++ 代码直接调 forkpty,不走 spawn-helper 路径
+      # (仅 macOS 才用 helper),这里只需要上传 pty.node 一个产物。
+      - name: Upload node-pty binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-pty-linux-x64-glibc228
+          path: node_modules/node-pty/build/Release/pty.node
+          if-no-files-found: error
+          retention-days: 7
+
+  # ------------------------------------------------------------------
+  # 主 build job:Windows 原生,Linux 在 ubuntu-latest 宿主上打 deb
+  # ------------------------------------------------------------------
+  # needs: rebuild-node-pty-linux 让 matrix 两个条目都等上游完成。
+  # Windows build 用不到 manylinux 产物,干等大约 5-8 分钟(容器拉镜像 +
+  # 装 Node + npm ci + electron-rebuild),但 Windows build 本身也要 8-12 分钟,
+  # 所以 wall-clock 只多出 ~5 分钟。接受这个代价换 workflow 文件简洁(拆两个
+  # build job 会重复 checkout/setup-node/upload/release 十几行配置)。
+  # 如果未来推送频率高到这 5 分钟无法忍受,再拆成 build-windows / build-linux
+  # 两个独立 job,只在 build-linux 上加 needs。
   build:
+    needs: rebuild-node-pty-linux
     strategy:
+      # matrix 内部一个平台失败时另一个继续跑,方便定位。
+      # 注意:这只影响 matrix 内部,不影响 needs 链 —— rebuild-node-pty-linux 失败时
+      # Windows/Linux 两个条目都会被 skip(这是 needs 的固定行为,fail-fast 管不到)。
+      # 接受这个代价换 workflow 简洁,若未来 manylinux job 稳定性差到影响 Windows
+      # 迭代,再考虑拆 build-windows / build-linux 两个独立 job。
+      fail-fast: false
       matrix:
         include:
           - os: windows-latest
@@ -44,26 +329,110 @@ jobs:
         env:
           ENV_ENCRYPTION_KEY: ${{ secrets.ENV_ENCRYPTION_KEY }}
 
-      - name: Install dependencies (Windows with optional deps fallback)
+      # 用 npm ci 严格按 lockfile 装。
+      # 历史:曾经有 "缺 @rollup/rollup-win32-x64-msvc 就删 node_modules 重装" 的 fallback,
+      # 那是早期改用 npm install(增量路径有 optional deps 缺失 bug)时加的应急方案。
+      # 现在 lockfile 里已完整收录所有平台的 @rollup/* optional deps,npm ci 走的是
+      # "删 node_modules + 全新解析" 路径,不会触发那个增量 bug,fallback 恒不触发。
+      # 已删除死代码。
+      - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: |
-          npm install --include=optional
-          if (-not (Test-Path "node_modules/@rollup/rollup-win32-x64-msvc")) {
-            Write-Host "Missing @rollup/rollup-win32-x64-msvc, retry with clean install..."
-            Remove-Item -Recurse -Force node_modules -ErrorAction SilentlyContinue
-            Remove-Item -Force package-lock.json -ErrorAction SilentlyContinue
-            npm install --include=optional
-          }
+        run: npm ci --include=optional
 
-      - name: Install dependencies (Linux with optional deps fallback)
+      # Linux 加 --ignore-scripts:跳过 package.json 的 postinstall (electron-rebuild
+      # -f -w node-pty),因为那条会在 ubuntu 24.04 宿主 (glibc 2.39) 上编一份坏的
+      # pty.node,即便后面 artifact 会覆盖也是浪费 + 有一定概率因 node-gyp/python
+      # 环境问题让 npm install 直接红。我们要的 Linux pty.node 由上游 manylinux_2_28
+      # job 产出,artifact 下载过来即可。
+      # Windows 那条保持默认 (不加 --ignore-scripts),因为 Windows 有 prebuild,
+      # electron-rebuild 看到 prebuild 存在会空跑,无害。
+      #
+      # ⚠️ --ignore-scripts 是全局开关,会跳过所有包的 install/postinstall。
+      # 当前依赖树里所有带 install/postinstall 的包都已评估,确认安全。
+      # manylinux job 里有 "Audit packages with install/postinstall scripts" 步骤
+      # 维护白名单,任何新增带 install 脚本的包都会让 CI 立即红,强制重新评估。
+      # 加新依赖时若被那个 step 拦下,请阅读它上方的注释。
+      #
+      # 为什么必须用 npm ci 而不是 npm install:
+      # manylinux job 用 npm ci 严格按 lockfile 装,编出来的 pty.node 对应 lockfile
+      # 锁定的 node-pty 版本(当前 1.1.0)。如果这边用 npm install,它会按 ^1.1.0
+      # 解析 semver,若 registry 发布了 1.1.1/1.2.0,主 job 的 JS 层会 require 新版
+      # node-pty,再去 load 老版本的 pty.node —— JS/native ABI 错配,运行时崩。
+      # 后面的 SHA256 对比只能证明二进制字节是 manylinux 编的那份,无法防御 JS 层
+      # 版本漂移。所以这里必须 npm ci,和 manylinux job 完全同步。
+      #
+      # 同 Windows:历史上有 "缺 @rollup/rollup-linux-x64-gnu 就删重装" 的 fallback,
+      # 是 npm install 增量路径的 workaround,npm ci 下恒不触发,已删除。
+      - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
+        run: npm ci --ignore-scripts --include=optional
+
+      # Windows 侧仅校验 prebuild 已存在,不重新编译。
+      # node-pty 自带 prebuilds/win32-x64/pty.node 可直接用,rebuild 反而需要
+      # Visual Studio Build Tools,徒增失败面。
+      - name: Verify node-pty prebuild (Windows only)
+        if: runner.os == 'Windows'
+        shell: bash
         run: |
-          npm install --include=optional
-          if [ ! -d "node_modules/@rollup/rollup-linux-x64-gnu" ]; then
-            echo "Missing @rollup/rollup-linux-x64-gnu, retry with clean install..."
-            rm -rf node_modules package-lock.json
-            npm install --include=optional
+          echo "=== node-pty prebuilds/win32-x64 ==="
+          ls -la node_modules/node-pty/prebuilds/win32-x64/ 2>&1 || echo "(missing)"
+          test -f node_modules/node-pty/prebuilds/win32-x64/pty.node \
+            || (echo "ERROR: node-pty win32-x64 prebuild missing" && exit 1)
+
+      # Linux 侧:下载上游 job 在 manylinux_2_28 里编好的 pty.node,
+      # 放到 node_modules/node-pty/build/Release/。
+      # 因为前面加了 --ignore-scripts 跳过 node-pty 的 install/postinstall,
+      # node_modules/node-pty/build 目录不会被 npm 创建,显式 mkdir 让意图清晰、
+      # 错误定位更早。actions/download-artifact@v4 本身也会 mkdir -p,这里是双保险。
+      # 注意:Linux 不需要 spawn-helper(node-pty 的 Linux 分支直接用 forkpty)。
+      - name: Prepare node-pty build dir
+        if: runner.os == 'Linux'
+        run: mkdir -p node_modules/node-pty/build/Release
+
+      - name: Download node-pty binary from manylinux_2_28 job
+        if: runner.os == 'Linux'
+        uses: actions/download-artifact@v4
+        with:
+          name: node-pty-linux-x64-glibc228
+          path: node_modules/node-pty/build/Release/
+
+      # 显式确保 binutils (objdump) 可用。ubuntu-latest 当前预装 binutils,
+      # 但这是 runner image 的隐式契约,未来精简可能让 objdump 消失,
+      # 让后面两个 verify 步骤静默炸。这里用 if 显式判断(避免 || && 优先级陷阱
+      # 导致无论是否存在都跑 apt-get)。
+      - name: Ensure binutils (objdump) available
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          if ! command -v objdump >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y binutils
+          fi
+
+      # 二次 glibc 校验,防止 artifact 下载过程中被篡改或和错 job 串了。
+      # pty.node 是 .so,不需要 execute bit,所以不做 chmod。
+      - name: Verify downloaded pty.node
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ls -la node_modules/node-pty/build/Release/
+          file=node_modules/node-pty/build/Release/pty.node
+          # 不加 || true:依赖 pipefail 让 objdump/grep 真实失败直接 trip set -e,
+          # 错误信息保留在 stderr,比落到空值兜底分支更易定位根因。
+          max=$(objdump -T "$file" \
+            | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' \
+            | sort -V | tail -n1)
+          echo "$file -> max GLIBC: ${max:-<none>}"
+          if [ -z "$max" ]; then
+            echo "ERROR: no GLIBC symbols in $file after download — artifact likely corrupt"
+            exit 1
+          fi
+          ver=${max#GLIBC_}
+          if [ "$(printf '%s\n2.28\n' "$ver" | sort -V | tail -n1)" != "2.28" ]; then
+            echo "ERROR: $file requires $max after download, expected <= 2.28"
+            exit 1
           fi
 
       - name: Build
@@ -76,8 +445,84 @@ jobs:
           VERSION=$(node -p "require('./package.json').version")
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      - name: Package
-        run: npx electron-builder --${{ matrix.platform == 'linux' && 'linux deb AppImage' || matrix.platform }}
+      # --config.npmRebuild=false: electron-builder 默认会在打包阶段自动跑一次
+      # app-rebuild (@electron/rebuild) 对齐 Electron ABI,这会用宿主 ubuntu-24.04
+      # 的工具链重新编 node-pty,把我们前面从 manylinux_2_28 artifact 拿来的干净
+      # pty.node 覆盖成 glibc 2.39 版本 —— 整个修复路径就废了。
+      # 这里显式禁用。只影响 Linux,Windows 分支保持默认(Windows 有 nan prebuild,
+      # 内置 rebuild 是锦上添花)。
+      - name: Package (Linux x64)
+        if: matrix.platform == 'linux'
+        run: |
+          npx electron-builder --linux deb --x64 --publish=never --config.npmRebuild=false
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 防御 electron-builder 在未来版本里引入新的原生模块重写路径(比如某个
+      # afterPack hook,或 npmRebuild 以外的新开关)。对比 dist/linux-unpacked/ 里
+      # 实际打进去的 pty.node 和 node_modules/ 里从 manylinux artifact 下载的那份
+      # 的 SHA256,不一致立即红。
+      #
+      # 注:主 build job 已统一用 npm ci(不是 npm install),lockfile 锁死 node-pty
+      # 版本,JS 层和 manylinux job 编的 native 层版本天然一致,SHA256 对比是
+      # electron-builder 内部重写路径的兜底,不再兜 JS/native 版本漂移。
+      - name: Verify packaged pty.node matches manylinux artifact
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          src="node_modules/node-pty/build/Release/pty.node"
+          # electron-builder Linux 默认输出目录是 dist/linux-unpacked,
+          # asarUnpack 把 node-pty 展到 resources/app.asar.unpacked/
+          # 用 mapfile 收集所有匹配,要求恰好 1 份 —— 防御 electron-builder 未来
+          # 版本同时把 node-pty 放到 asarUnpack + extraResources 等多处时,
+          # head -n1 静默只取第一份导致 SHA 对比放过另一份的边缘情况。
+          mapfile -t packed_list < <(find dist/linux-unpacked -type f -name pty.node \
+                                     -path '*/node-pty/build/Release/pty.node')
+          if [ "${#packed_list[@]}" -eq 0 ]; then
+            echo "ERROR: pty.node not found under dist/linux-unpacked/ — asarUnpack config drift?"
+            find dist/linux-unpacked -type f -name pty.node || true
+            exit 1
+          fi
+          if [ "${#packed_list[@]}" -gt 1 ]; then
+            echo "ERROR: found ${#packed_list[@]} pty.node copies under dist/linux-unpacked/ — expected exactly 1"
+            printf '  %s\n' "${packed_list[@]}"
+            exit 1
+          fi
+          packed="${packed_list[0]}"
+          echo "Source  : $src"
+          echo "Packaged: $packed"
+          src_sha=$(sha256sum "$src" | awk '{print $1}')
+          pkg_sha=$(sha256sum "$packed" | awk '{print $1}')
+          echo "src SHA256:  $src_sha"
+          echo "pkg SHA256:  $pkg_sha"
+          if [ "$src_sha" != "$pkg_sha" ]; then
+            echo "ERROR: packaged pty.node differs from manylinux artifact —"
+            echo "       something rebuilt/replaced it during packaging."
+            echo "       Check: --config.npmRebuild=false effective? afterPack hook?"
+            exit 1
+          fi
+          # 最后再对打包后的 pty.node 跑一次 objdump glibc 校验,彻底闭环。
+          # 不加 || true:依赖 pipefail 让真实失败直接 trip set -e。
+          max=$(objdump -T "$packed" \
+            | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' \
+            | sort -V | tail -n1)
+          echo "$packed -> max GLIBC: ${max:-<none>}"
+          if [ -z "$max" ]; then
+            echo "ERROR: no GLIBC symbols in packaged pty.node"
+            exit 1
+          fi
+          ver=${max#GLIBC_}
+          if [ "$(printf '%s\n2.28\n' "$ver" | sort -V | tail -n1)" != "2.28" ]; then
+            echo "ERROR: packaged pty.node requires $max, exceeds 2.28 floor"
+            exit 1
+          fi
+          echo "OK: packaged Linux pty.node matches manylinux artifact and passes glibc check"
+
+      - name: Package (Other platforms)
+        if: matrix.platform != 'linux'
+        run: |
+          npx electron-builder --${{ matrix.platform }} --publish=never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -88,7 +533,6 @@ jobs:
           path: |
             dist/*.exe
             dist/*.msi
-            dist/*.AppImage
             dist/*.deb
             dist/*.rpm
             dist/*.tar.gz
@@ -101,12 +545,17 @@ jobs:
           name: CMBDevClaw-win-unpacked-${{ steps.pkg.outputs.version }}
           path: dist/win-unpacked/
 
+      - name: Package Linux unpacked as tar.gz (preserves file permissions)
+        if: matrix.platform == 'linux'
+        run: |
+          tar -czf CMBDevClaw-linux-unpacked-${{ steps.pkg.outputs.version }}.tar.gz -C dist/linux-unpacked .
+
       - name: Upload unpacked (Linux)
         if: matrix.platform == 'linux'
         uses: actions/upload-artifact@v4
         with:
           name: CMBDevClaw-linux-unpacked-${{ steps.pkg.outputs.version }}
-          path: dist/linux-unpacked/
+          path: CMBDevClaw-linux-unpacked-${{ steps.pkg.outputs.version }}.tar.gz
 
       - name: Upload to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -115,7 +564,6 @@ jobs:
           files: |
             dist/*.exe
             dist/*.msi
-            dist/*.AppImage
             dist/*.deb
             dist/*.rpm
             dist/*.tar.gz

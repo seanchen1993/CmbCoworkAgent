@@ -16,3 +16,7 @@ src/renderer/.vite/
 # Codex local files
 .codex/
 tests/screenshots/
+
+# Claude Code local session artifacts
+.cmbdevclaw/
+AGENTS.md

@@ -352,11 +352,31 @@ export function RightPanel({
     if (!latestResourceEvent) return
     if (lastAppliedPreviewKeyRef.current === latestResourceEvent.key) return
 
-    lastAppliedPreviewKeyRef.current = latestResourceEvent.key
-    setPreviewPath(latestResourceEvent.path)
-    setPreviewDiff(latestResourceEvent.codeDiff ?? null)
-    setPreviewReloadToken((v) => v + 1)
-    onRequestPreviewMode?.()
+    // For git repos without edits (only file reads), don't auto-switch to preview mode
+    // Stay on git panel unless user manually switches
+    const handleResourceEventWithoutEdits = async (): Promise<void> => {
+      try {
+        if (!currentThreadId) return
+        const summary = await window.api.workspace.getGitPanelSummary(currentThreadId)
+        if (summary.isGitRepo ?? summary.isWorktree) {
+          // Git repo: don't auto-switch to preview mode, just update preview content silently
+          lastAppliedPreviewKeyRef.current = latestResourceEvent.key
+          setPreviewPath(latestResourceEvent.path)
+          setPreviewDiff(latestResourceEvent.codeDiff ?? null)
+          setPreviewReloadToken((v) => v + 1)
+          return
+        }
+      } catch {
+        // ignore summary refresh errors
+      }
+      // Non-git repo: switch to preview mode as before
+      lastAppliedPreviewKeyRef.current = latestResourceEvent.key
+      setPreviewPath(latestResourceEvent.path)
+      setPreviewDiff(latestResourceEvent.codeDiff ?? null)
+      setPreviewReloadToken((v) => v + 1)
+      onRequestPreviewMode?.()
+    }
+    void handleResourceEventWithoutEdits()
   }, [streamData.isLoading, latestResourceEvent, latestCompletedLlmBatch, onRequestPreviewMode, onRequestGitMode, currentThreadId])
 
   useEffect(() => {

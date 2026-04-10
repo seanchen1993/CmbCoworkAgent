@@ -68,6 +68,11 @@ import type {
   ChatXConfig,
   ChatXRobotConfig
 } from "../../main/types"
+import type {
+  ManagedSavedCodeExecTool,
+  SavedCodeExecPreviewResult,
+  SavedCodeExecToolUpdatePayload
+} from "../../main/ipc/code-exec-tools"
 
 export type {
   McpConnectorAdvanced,
@@ -83,6 +88,12 @@ export type {
   PluginManifest,
   ChatXConfig,
   ChatXRobotConfig
+}
+
+export type {
+  ManagedSavedCodeExecTool,
+  SavedCodeExecPreviewResult,
+  SavedCodeExecToolUpdatePayload
 }
 
 export type StreamEvent =

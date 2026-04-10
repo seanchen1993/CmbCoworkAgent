@@ -3,631 +3,583 @@
  *
  * This module implements a three-tool architecture for handling large MCP tool libraries:
  * - search_tool: Search for lazily loaded MCP tools
- * - load_tool: Load tool schemas
- * - mcp_call: Execute tools via indirect call
+ * - inspect_tool: Inspect tool schemas and script signatures
+ * - invoke_deferred_tool: Execute a deferred MCP tool or saved tool
  */
 
 import { tool } from "langchain"
 import { z } from "zod"
+import { CodeExecEngine } from "../../code-exec/engine"
+import { LocalProcessRunner } from "../../code-exec/runner"
+import {
+  getSavedCodeExecTool,
+  listSavedCodeExecTools,
+  parseCodeExecOutputValue,
+  type SavedCodeExecTool
+} from "../../code-exec/saved-tool-store"
+import type { McpCapabilityService, McpInvocationResult, McpCapabilityTool } from "../../mcp/capability-types"
+import { getMcpErrorMessage, getUsefulMcpResultData } from "../../mcp/result-utils"
+import { renderToolHints } from "../../mcp/type-hints"
+import { getStoredToolExample } from "../../mcp/tool-example-store"
+import {
+  buildMcpToolSearchDoc,
+  buildSavedToolSearchDoc,
+  findExactToolIdOrNameMatches,
+  matchesExactSearchValue,
+  searchToolDocs,
+  type ToolSearchDoc,
+  type ToolSearchCaller
+} from "./tool-search/search-strategy"
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const Segment = require("segment") as new () => {
-  useDefault(): void
-  doSegment(text: string, options?: { simple?: boolean; stripPunctuation?: boolean }): string[]
+async function invokeWithRetry(
+  service: McpCapabilityService,
+  idOrAlias: string,
+  args: Record<string, unknown>,
+  retries = 1
+): Promise<McpInvocationResult> {
+  try {
+    return await service.invoke(idOrAlias, args)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    const shouldRetry = retries > 0 && (
+      message.includes("terminated") ||
+      message.includes("disconnected") ||
+      message.includes("ECONN")
+    )
+
+    if (!shouldRetry) throw error
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    return invokeWithRetry(service, idOrAlias, args, retries - 1)
+  }
 }
 
-const segmenter = new Segment()
-segmenter.useDefault()
+const invokeDeferredToolSchema = z.object({
+  tool_id: z
+    .string()
+    .describe("Exact deferred-only tool_id returned by search_tool or listed in <deferred-tool-ids>"),
+  tool_args: z
+    .object({})
+    .passthrough()
+    .describe("Tool arguments matching the schema returned by inspect_tool(caller=\"invoke_deferred_tool\")")
+})
 
-// =============================================================================
-// Types
-// =============================================================================
+interface ToolSearchContext {
+  workspacePath: string
+  threadId?: string
+}
 
-export interface McpToolMetadata {
-  toolId: string        // Format: "serverName.toolName"
-  serverName: string
-  toolName: string
+interface ToolSearchOptions {
+  codeExecRouteEnabled: boolean
+  savedToolsEnabled: boolean
+  deferredRouteEnabled: boolean
+}
+
+type SearchToolEntry = {
+  toolId: string
+  source: "mcp" | "saved_tool"
+  allowCallers: ToolSearchCaller[]
+  description?: string
+}
+
+interface SearchDocCacheEntry {
+  snapshot: string
+  docs: ToolSearchDoc[]
+}
+
+function buildMcpSearchSnapshot(tools: McpCapabilityTool[]): string {
+  return JSON.stringify(tools.map((tool) => ([
+    tool.capabilityId,
+    tool.toolId,
+    tool.toolName,
+    tool.providerDisplayName,
+    tool.providerAlias,
+    tool.description ?? "",
+    tool.visibility
+  ])))
+}
+
+function buildSavedToolSearchSnapshot(tools: SavedCodeExecTool[]): string {
+  return JSON.stringify(tools.map((tool) => ([
+    tool.toolId,
+    tool.description,
+    tool.dependencies
+  ])))
+}
+
+function getCachedMcpSearchDocs(
+  cache: SearchDocCacheEntry,
+  tools: McpCapabilityTool[],
+  options: ToolSearchOptions
+): ToolSearchDoc[] {
+  const snapshot = buildMcpSearchSnapshot(tools)
+  if (cache.snapshot === snapshot) return cache.docs
+
+  cache.snapshot = snapshot
+  cache.docs = tools.map((tool) => buildMcpToolSearchDoc(tool, {
+    allowCallers: getMcpToolAllowCallers(tool, options)
+  }))
+  return cache.docs
+}
+
+function getCachedSavedToolSearchDocs(
+  cache: SearchDocCacheEntry,
+  tools: SavedCodeExecTool[]
+): ToolSearchDoc[] {
+  const snapshot = buildSavedToolSearchSnapshot(tools)
+  if (cache.snapshot === snapshot) return cache.docs
+
+  cache.snapshot = snapshot
+  cache.docs = tools.map((tool) => buildSavedToolSearchDoc(tool))
+  return cache.docs
+}
+
+function getMcpToolAllowCallers(
+  tool: McpCapabilityTool,
+  options: ToolSearchOptions
+): ToolSearchCaller[] {
+  const allowCallers: ToolSearchCaller[] = []
+  if (tool.visibility === "lazy") allowCallers.push("invoke_deferred_tool")
+  if (options.codeExecRouteEnabled) allowCallers.push("code_exec")
+  return allowCallers
+}
+
+function toMcpSearchToolEntry(
+  tool: McpCapabilityTool,
+  options: ToolSearchOptions
+): SearchToolEntry {
+  return {
+    toolId: tool.toolId,
+    source: "mcp",
+    allowCallers: getMcpToolAllowCallers(tool, options),
+    description: tool.description
+  }
+}
+
+function toSavedSearchToolEntry(tool: SavedCodeExecTool): SearchToolEntry {
+  return {
+    toolId: tool.toolId,
+    source: "saved_tool",
+    allowCallers: ["invoke_deferred_tool"],
+    description: tool.description
+  }
+}
+
+function findExactSearchMatches(
+  query: string,
+  searchableMcpTools: McpCapabilityTool[],
+  savedTools: SavedCodeExecTool[],
+  options: ToolSearchOptions,
+  maxResults: number
+): SearchToolEntry[] {
+  const exactMatches = new Map<string, SearchToolEntry>()
+
+  const addMcpMatches = (tools: McpCapabilityTool[]): void => {
+    for (const tool of findExactToolIdOrNameMatches(tools, query)) {
+      exactMatches.set(tool.toolId, toMcpSearchToolEntry(tool, options))
+    }
+  }
+
+  const addSavedToolMatches = (): void => {
+    for (const tool of savedTools) {
+      if (!matchesExactSearchValue(tool.toolId, query)) continue
+      exactMatches.set(tool.toolId, toSavedSearchToolEntry(tool))
+    }
+  }
+
+  addMcpMatches(searchableMcpTools)
+  addSavedToolMatches()
+  return Array.from(exactMatches.values()).slice(0, maxResults)
+}
+
+async function getMissingSavedToolDependencies(
+  service: McpCapabilityService,
+  dependencies: string[]
+): Promise<string[]> {
+  if (dependencies.length === 0) return []
+
+  const availableTools = await service.listTools()
+  const availableToolIds = new Set(availableTools.map((tool) => tool.toolId))
+  return dependencies.filter((dependency) => !availableToolIds.has(dependency))
+}
+
+function createCallerSchema(
+  allowedCallers: ToolSearchCaller[],
   description: string
+) {
+  return z.enum(allowedCallers as [ToolSearchCaller, ...ToolSearchCaller[]])
+    .optional()
+    .default(allowedCallers[0])
+    .describe(description)
 }
 
-export interface SearchOptions {
-  topK: number
-  mode: "bm25" | "keyword" | "regex"
-  serverFilter?: string[]
+function createSearchCallerSchema(options: ToolSearchOptions) {
+  const allowedCallers: ToolSearchCaller[] = options.codeExecRouteEnabled
+    ? ["invoke_deferred_tool", "code_exec"]
+    : ["invoke_deferred_tool"]
+
+  return z.object({
+    query: z
+      .string()
+      .describe(
+        "tool in `<deferred-tool-ids>` or normalized capability phrase. For example: 'github issue create', 'search wiki detail', or '团队 风险 列表'. Prefer full words over abbreviations. For caller=invoke_deferred_tool, search only deferred-only tools."
+      ),
+    max_results: z.number().optional().default(5).describe("Maximum number of results to return"),
+    caller: createCallerSchema(
+      allowedCallers,
+      options.codeExecRouteEnabled
+        ? "Which route this search is for. Use invoke_deferred_tool only to discover deferred tools. Use code_exec only after you have already decided to write a code_exec script and need MCP tool_ids for that script."
+        : "Which route this search is for. The only valid value is invoke_deferred_tool, which searches deferred-only tools."
+    )
+  })
 }
 
-interface McpToolEntry {
-  metadata: McpToolMetadata
-  tool: unknown  // The actual tool object
-  schema?: object
+function createInspectCallerSchema(allowedCallers: ToolSearchCaller[]) {
+  return z.object({
+    tool_ids: z.array(z.string()).describe("tool_ids to inspect"),
+    caller: createCallerSchema(
+      allowedCallers,
+      allowedCallers.length === 2
+        ? "Which route this inspection is for. Use invoke_deferred_tool only for deferred tools before invoke_deferred_tool. Use code_exec only after you have already decided to write a code_exec script and need MCP schemas or call examples."
+        : allowedCallers[0] === "code_exec"
+          ? "Which route this inspection is for. The only valid value is code_exec. Use it only when authoring a code_exec script."
+          : "Which route this inspection is for. The only valid value is invoke_deferred_tool, which is only for deferred-only tools and saved tools before invoke_deferred_tool."
+    )
+  })
 }
 
-// =============================================================================
-// Schema Fix Utility
-// =============================================================================
+export function createSearchTool(service: McpCapabilityService, options: ToolSearchOptions) {
+  const lazyMcpDocCache: SearchDocCacheEntry = { snapshot: "", docs: [] }
+  const allMcpDocCache: SearchDocCacheEntry = { snapshot: "", docs: [] }
+  const savedToolDocCache: SearchDocCacheEntry = { snapshot: "", docs: [] }
 
-/**
- * Fix MCP tool schema: some MCP servers return `required: null` instead of `required: []`
- * which causes API errors. Normalize null/undefined to empty array.
- */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function fixMcpToolSchema(tool: any): void {
-  if (tool.schema?.required == null) {
-    tool.schema = { ...tool.schema, required: [] }
-  }
-}
-
-// =============================================================================
-// Simple BM25 Implementation (no external dependencies)
-// =============================================================================
-
-class SimpleBM25 {
-  private documents: Map<string, { tokens: string[], doc: McpToolMetadata }> = new Map()
-  private avgDocLength = 0
-  private documentFrequency: Map<string, number> = new Map()
-  private totalDocs = 0
-
-  // BM25 parameters
-  private readonly k1 = 1.5
-  private readonly b = 0.75
-
-  index(docId: string, text: string, doc: McpToolMetadata): void {
-    const tokens = this.tokenize(text)
-    this.documents.set(docId, { tokens, doc })
-
-    // Update document frequency for each term
-    const uniqueTokens = new Set(tokens)
-    for (const token of uniqueTokens) {
-      this.documentFrequency.set(token, (this.documentFrequency.get(token) ?? 0) + 1)
-    }
-
-    this.totalDocs = this.documents.size
-    this.updateAvgDocLength()
-  }
-
-  private updateAvgDocLength(): void {
-    let totalLength = 0
-    for (const { tokens } of this.documents.values()) {
-      totalLength += tokens.length
-    }
-    this.avgDocLength = this.totalDocs > 0 ? totalLength / this.totalDocs : 0
-  }
-
-  search(query: string, topK: number): McpToolMetadata[] {
-    const queryTokens = this.tokenize(query)
-    const scores: { doc: McpToolMetadata, score: number }[] = []
-
-    for (const [_id, { tokens, doc }] of this.documents) {
-      const score = this.computeScore(queryTokens, tokens)
-      if (score > 0) {
-        scores.push({ doc, score })
-      }
-    }
-
-    return scores
-      .sort((a, b) => b.score - a.score)
-      .slice(0, topK)
-      .map(s => s.doc)
-  }
-
-  private computeScore(queryTokens: string[], docTokens: string[]): number {
-    if (docTokens.length === 0 || queryTokens.length === 0) return 0
-
-    let score = 0
-    const docLength = docTokens.length
-    const termFrequency = new Map<string, number>()
-
-    for (const token of docTokens) {
-      termFrequency.set(token, (termFrequency.get(token) ?? 0) + 1)
-    }
-
-    for (const queryToken of queryTokens) {
-      const tf = termFrequency.get(queryToken) ?? 0
-      if (tf === 0) continue
-
-      const df = this.documentFrequency.get(queryToken) ?? 0
-      const idf = Math.log((this.totalDocs - df + 0.5) / (df + 0.5) + 1)
-
-      const numerator = tf * (this.k1 + 1)
-      const denominator = tf + this.k1 * (1 - this.b + this.b * (docLength / this.avgDocLength))
-
-      score += idf * (numerator / denominator)
-    }
-
-    return score
-  }
-
-  private tokenize(text: string): string[] {
-    const tokens: string[] = []
-
-    // Regex to detect Chinese characters (CJK Unified Ideographs)
-    const chineseRegex = /[\u4e00-\u9fff]/
-
-    // Split text into Chinese and non-Chinese segments
-    // Pattern: match continuous Chinese or continuous non-Chinese
-    const segmentPattern = /([\u4e00-\u9fff]+)|([^\u4e00-\u9fff]+)/g
-
-    let match
-    while ((match = segmentPattern.exec(text)) !== null) {
-      const segment = match[0]
-
-      if (chineseRegex.test(segment)) {
-        // Chinese segment: use segment for word segmentation
-        const chineseTokens = segmenter.doSegment(segment, { simple: true, stripPunctuation: true })
-        for (const token of chineseTokens) {
-          const trimmed = token.trim().toLowerCase()
-          if (trimmed.length > 0) {
-            tokens.push(trimmed)
-          }
-        }
-      } else {
-        // Non-Chinese segment: use original tokenization logic
-        const englishTokens = segment.toLowerCase()
-          // Handle camelCase and PascalCase: insert space before uppercase letters
-          .replace(/([a-z])([A-Z])/g, "$1 $2")      // camelCase: "testName" → "test Name"
-          .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2") // PascalCase/ACRONYM: "APIResponse" → "API Response"
-          .replace(/[-_]/g, " ")
-          .split(/[\s\-_.,;:!?()[\]{}'"\/\\]+/)
-          .filter(t => t.length > 1)
-
-        tokens.push(...englishTokens)
-      }
-    }
-
-    return tokens
-  }
-
-  clear(): void {
-    this.documents.clear()
-    this.documentFrequency.clear()
-    this.totalDocs = 0
-    this.avgDocLength = 0
-  }
-}
-
-// =============================================================================
-// MCP Tool Registry
-// =============================================================================
-
-export class McpToolRegistry {
-  private tools: Map<string, McpToolEntry> = new Map()
-  // Track registered tool names to avoid duplicates from multiple connectors to the same server
-  private registeredToolNames: Set<string> = new Set()
-  private bm25: SimpleBM25 = new SimpleBM25()
-
-  /**
-   * Register MCP tools from a server
-   * Duplicate tools from the same server are skipped (e.g., multiple connectors to same server)
-   * Different servers with same tool names are allowed (e.g., ServerA.search and ServerB.search)
-   */
-  register(serverName: string, tools: unknown[]): void {
-    let registered = 0
-    for (const toolObj of tools) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const t = toolObj as any
-      const toolName = t.name as string
-      const description = (t.description as string) ?? ""
-
-      // Use serverName:toolName as dedupe key to allow same tool names from different servers
-      const dedupeKey = `${serverName}:${toolName}`
-      if (this.registeredToolNames.has(dedupeKey)) {
-        continue
-      }
-
-      const toolId = `${serverName}.${toolName}`
-
-      const metadata: McpToolMetadata = {
-        toolId,
-        serverName,
-        toolName,
-        description
-      }
-
-      // Fix schema: some MCP servers return `required: null` instead of `required: []`
-      fixMcpToolSchema(t)
-      const schema = t.schema
-
-      this.tools.set(toolId, {
-        metadata,
-        tool: t,
-        schema
-      })
-
-      // Mark this server:tool combination as registered
-      this.registeredToolNames.add(dedupeKey)
-      registered++
-
-      // Index in BM25 using server name, tool name and description
-      const searchText = `${serverName} ${toolName} ${description}`
-      this.bm25.index(toolId, searchText, metadata)
-    }
-
-    console.log(`[McpToolRegistry] Registered ${registered} tools from server "${serverName}" (${tools.length - registered} duplicates skipped)`)
-  }
-
-  /**
-   * Search for tools using the specified mode
-   */
-  search(query: string, options: SearchOptions): McpToolMetadata[] {
-    const { topK, mode, serverFilter } = options
-
-    let results: McpToolMetadata[]
-
-    switch (mode) {
-      case "bm25":
-        results = this.bm25.search(query, topK * 2) // Get more results for filtering
-        break
-
-      case "keyword":
-        results = this.searchKeyword(query, topK * 2)
-        break
-
-      case "regex":
-        results = this.searchRegex(query, topK * 2)
-        break
-
-      default:
-        results = this.bm25.search(query, topK * 2)
-    }
-
-    // Apply server filter if specified
-    if (serverFilter && serverFilter.length > 0) {
-      results = results.filter(r => serverFilter.includes(r.serverName))
-    }
-
-    return results.slice(0, topK)
-  }
-
-  private searchKeyword(query: string, limit: number): McpToolMetadata[] {
-    const queryLower = query.toLowerCase()
-    const results: { doc: McpToolMetadata, score: number }[] = []
-
-    for (const { metadata } of this.tools.values()) {
-      const serverMatch = metadata.serverName.toLowerCase().includes(queryLower)
-      const nameMatch = metadata.toolName.toLowerCase().includes(queryLower)
-      const descMatch = metadata.description.toLowerCase().includes(queryLower)
-
-      if (serverMatch || nameMatch || descMatch) {
-        // Score: exact name match > name contains > server contains > description contains
-        let score = 0
-        if (metadata.toolName.toLowerCase() === queryLower) {
-          score = 100
-        } else if (nameMatch) {
-          score = 50
-        } else if (serverMatch) {
-          score = 30
-        } else {
-          score = 10
-        }
-        results.push({ doc: metadata, score })
-      }
-    }
-
-    return results
-      .sort((a, b) => b.score - a.score)
-      .slice(0, limit)
-      .map(r => r.doc)
-  }
-
-  private searchRegex(pattern: string, limit: number): McpToolMetadata[] {
-    let regex: RegExp
-    try {
-      regex = new RegExp(pattern, "i")
-    } catch {
-      // Invalid regex, fall back to keyword search
-      return this.searchKeyword(pattern, limit)
-    }
-
-    const results: McpToolMetadata[] = []
-
-    for (const { metadata } of this.tools.values()) {
-      try {
-        if (regex.test(metadata.serverName) || regex.test(metadata.toolName) || regex.test(metadata.description)) {
-          results.push(metadata)
-          if (results.length >= limit) break
-        }
-      } catch {
-        // Regex execution error, skip this tool
-        continue
-      }
-    }
-
-    return results
-  }
-
-  /**
-   * Load schemas for specified tools
-   */
-  loadSchema(toolIds: string[]): Map<string, object> {
-    const result = new Map<string, object>()
-
-    for (const toolId of toolIds) {
-      const entry = this.tools.get(toolId)
-      if (entry?.schema) {
-        result.set(toolId, entry.schema)
-      }
-    }
-
-    return result
-  }
-
-  /**
-   * Get a tool by ID
-   */
-  getTool(toolId: string): McpToolEntry | undefined {
-    return this.tools.get(toolId)
-  }
-
-  /**
-   * Execute a tool
-   */
-  async call(toolId: string, args: Record<string, unknown>): Promise<unknown> {
-    const entry = this.tools.get(toolId)
-    if (!entry) {
-      throw new Error(`Tool not found: ${toolId}`)
-    }
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const t = entry.tool as any
-
-    if (typeof t.func !== "function") {
-      throw new Error(`Tool ${toolId} is not executable`)
-    }
-
-    try {
-      const result = await t.func(args)
-      return result
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      console.warn(`[McpToolRegistry] Tool "${toolId}" error:`, message)
-      // Return error in MCP tool format (content_and_artifact)
-      return [`MCP tool error: ${message}`, []]
-    }
-  }
-
-  /**
-   * Get all registered tool IDs
-   */
-  getToolIds(): string[] {
-    return Array.from(this.tools.keys())
-  }
-
-  /**
-   * Get count of registered tools
-   */
-  getToolCount(): number {
-    return this.tools.size
-  }
-
-  /**
-   * Check if a tool is registered
-   */
-  hasTool(toolId: string): boolean {
-    return this.tools.has(toolId)
-  }
-
-  /**
-   * Clear all registered tools
-   */
-  clear(): void {
-    this.tools.clear()
-    this.bm25.clear()
-    this.registeredToolNames.clear()
-  }
-}
-
-// =============================================================================
-// Tool Schemas
-// =============================================================================
-
-const searchToolSchema = z.object({
-  query: z.string().describe("Search query describing the tool capability you need"),
-  top_k: z.number().optional().default(5).describe("Maximum number of results to return"),
-  mode: z.enum(["bm25", "keyword", "regex"]).optional().default("bm25").describe(
-    "Search mode: bm25 (semantic ranking), keyword (simple contains match), regex (pattern match)"
-  ),
-  server_filter: z.array(z.string()).optional().describe(
-    "Optional list of server names to filter results"
-  )
-})
-
-const loadToolSchema = z.object({
-  tool_ids: z.array(z.string()).describe("List of tool IDs to load schemas for")
-})
-
-const mcpCallSchema = z.object({
-  tool_id: z.string().describe("The ID of the tool to execute (format: serverName.toolName)"),
-  arguments: z.object({}).passthrough().describe("Tool arguments as key-value pairs")
-})
-
-// =============================================================================
-// Tool Factory Functions
-// =============================================================================
-
-/**
- * Create the search_tool for discovering lazily loaded MCP tools
- */
-export function createSearchTool(registry: McpToolRegistry) {
   return tool(
     async (input) => {
-      const { query, top_k, mode, server_filter } = input
+      const caller = String(input.caller ?? "invoke_deferred_tool")
+      const isCodeExecCaller = options.codeExecRouteEnabled && caller === "code_exec"
+      const allMcpTools = await service.listTools()
+      const searchableMcpTools = allMcpTools.filter(
+        (tool) => isCodeExecCaller || tool.visibility === "lazy"
+      )
+      const savedTools =
+        !options.savedToolsEnabled || isCodeExecCaller ? [] : listSavedCodeExecTools()
+      const exactMatches = findExactSearchMatches(
+        input.query,
+        searchableMcpTools,
+        savedTools,
+        options,
+        input.max_results ?? 5
+      )
 
-      const options: SearchOptions = {
-        topK: top_k ?? 5,
-        mode: mode ?? "bm25",
-        serverFilter: server_filter
+      if (exactMatches.length > 0) {
+        return JSON.stringify(
+          {
+            tools: exactMatches.map((tool) => ({
+              tool_id: tool.toolId,
+              source: tool.source,
+              allow_callers: tool.allowCallers,
+              description: (tool.description ?? "").slice(0, 200)
+            }))
+          },
+          null,
+          2
+        )
       }
 
-      const results = registry.search(query, options)
+      const mcpDocs = getCachedMcpSearchDocs(
+        isCodeExecCaller ? allMcpDocCache : lazyMcpDocCache,
+        searchableMcpTools,
+        options
+      )
+      const savedDocs =
+        savedTools.length > 0 ? getCachedSavedToolSearchDocs(savedToolDocCache, savedTools) : []
 
-      const output = {
-        query,
-        mode: options.mode,
-        total: results.length,
-        tools: results.map(r => ({
-          tool_id: r.toolId,
-          server: r.serverName,
-          name: r.toolName,
-          description: r.description.slice(0, 200) + (r.description.length > 200 ? "..." : "")
-        }))
-      }
+      const tools: SearchToolEntry[] = searchToolDocs(
+        [...mcpDocs, ...savedDocs],
+        input.query,
+        input.max_results ?? 5
+      ).map((doc) => ({
+        toolId: doc.toolId,
+        source: doc.source,
+        allowCallers: doc.allowCallers,
+        description: doc.description
+      }))
 
-      return JSON.stringify(output, null, 2)
+      return JSON.stringify(
+        {
+          tools: tools.map((tool) => ({
+            tool_id: tool.toolId,
+            source: tool.source,
+            allow_callers: tool.allowCallers,
+            description: (tool.description ?? "").slice(0, 200)
+          }))
+        },
+        null,
+        2
+      )
     },
     {
       name: "search_tool",
-      description:
-        "Search for available MCP tools. Use this to discover tools that can help with your task. " +
-        "Returns a list of matching tools with their IDs, names, and descriptions. " +
-        "After finding a tool, use load_tool to get its schema, then use mcp_call to execute it.\n\n" +
-        "Search modes:\n" +
-        "- bm25: Best for natural language queries, ranks results by relevance\n" +
-        "- keyword: Simple text matching, faster but less intelligent\n" +
-        "- regex: Pattern matching using regular expressions",
-      schema: searchToolSchema
+      description: options.codeExecRouteEnabled
+        ? "Search deferred tools by capability phrase or exact tool_id. For caller=invoke_deferred_tool, search only deferred tools. For caller=code_exec, search MCP tools only after you have already decided to author a code_exec script. Returns each tool's source and allow_callers."
+        : "Search deferred tools for invoke_deferred_tool by capability phrase or exact tool_id. Search only deferred tools. Returns each tool's source and allow_callers.",
+      schema: createSearchCallerSchema(options)
     }
   )
 }
 
-/**
- * Create the load_tool for loading tool schemas
- */
-export function createLoadTool(registry: McpToolRegistry) {
+export function createInspectTool(service: McpCapabilityService, options: ToolSearchOptions) {
+  const allowedCallers: ToolSearchCaller[] = [
+    ...(options.deferredRouteEnabled ? ["invoke_deferred_tool" as const] : []),
+    ...(options.codeExecRouteEnabled ? ["code_exec" as const] : [])
+  ]
+
   return tool(
     async (input) => {
-      const { tool_ids } = input
+      const caller = String(input.caller ?? allowedCallers[0])
+      const loadedTools = await Promise.all(input.tool_ids.map(async (idOrAlias) => {
+        const savedTool = getSavedCodeExecTool(idOrAlias, { includeDisabled: true })
+        if (savedTool) {
+          if (!options.savedToolsEnabled) {
+            return {
+              tool_id: savedTool.toolId,
+              source: "saved_tool",
+              allow_callers: ["invoke_deferred_tool"],
+              error: "Saved tools are disabled in settings."
+            }
+          }
 
-      const schemas = registry.loadSchema(tool_ids)
+          if (!savedTool.enabled) {
+            return {
+              tool_id: savedTool.toolId,
+              source: "saved_tool",
+              allow_callers: ["invoke_deferred_tool"],
+              error: "Saved tool is disabled."
+            }
+          }
 
-      const tools: Array<{
-        tool_id: string
-        name: string
-        schema?: object
-        description: string
-        usage: string
-        error?: string
-      }> = []
+          if (caller === "code_exec") {
+            return {
+              tool_id: savedTool.toolId,
+              source: "saved_tool",
+              allow_callers: ["invoke_deferred_tool"],
+              error: "Saved code_exec tools cannot be called from code_exec. Load the underlying MCP tool instead."
+            }
+          }
 
-      for (const toolId of tool_ids) {
-        const entry = registry.getTool(toolId)
-        if (!entry) {
-          tools.push({
-            tool_id: toolId,
-            name: "",
-            description: "",
-            usage: "",
-            error: "Tool not found"
-          })
-          continue
+          return {
+            tool_id: savedTool.toolId,
+            source: "saved_tool",
+            allow_callers: ["invoke_deferred_tool"],
+            schema: savedTool.inputSchema,
+            output_schema: savedTool.outputSchema
+          }
         }
 
-        tools.push({
-          tool_id: toolId,
-          name: entry.metadata.toolName,
-          schema: schemas.get(toolId),
-          description: entry.metadata.description,
-          usage: `To use this tool, call: mcp_call(tool_id="${toolId}", arguments={...})`
-        })
-      }
+        const resolved = await service.getTool(idOrAlias)
+        if (!resolved) {
+          return {
+            tool_id: idOrAlias,
+            source: "mcp",
+            allow_callers: [],
+            error:
+              caller === "code_exec"
+                ? "Only MCP tools may be inspected for code_exec. Saved tools, built-in tools, and other non-MCP tools are not allowed."
+                : "Tool not found"
+          }
+        }
 
-      const result = {
-        loaded_tools: tools,
-        note: "These tools are now ready to use via mcp_call. They are NOT added to your tool_list (this is the lazy-load design to save context). When asked 'what tools do you have', mention that you have access to these lazy-loaded MCP tools via search_tool/mcp_call workflow."
-      }
+        if (caller === "invoke_deferred_tool" && resolved.visibility !== "lazy") {
+          return {
+            tool_id: resolved.toolId,
+            source: "mcp",
+            allow_callers: getMcpToolAllowCallers(resolved, options),
+            error: "This MCP tool is already directly callable from the tool list. Call it directly instead of using the deferred workflow."
+          }
+        }
 
-      return JSON.stringify(result, null, 2)
+        const loadedTool: Record<string, unknown> = {
+          tool_id: resolved.toolId,
+          source: "mcp",
+          allow_callers: getMcpToolAllowCallers(resolved, options),
+          schema: resolved.inputSchema,
+          output_schema: resolved.outputSchema
+        }
+
+        if (caller === "code_exec") {
+          const storedExample = getStoredToolExample(resolved)
+          const hints = renderToolHints(resolved)
+
+          loadedTool.code_exec = {
+            call_example: hints.callExample,
+            ...(storedExample ? { result_example: storedExample.resultExample } : {})
+          }
+        }
+
+        return loadedTool
+      }))
+
+      return JSON.stringify({
+        loaded_tools: loadedTools
+      }, null, 2)
     },
     {
-      name: "load_tool",
+      name: "inspect_tool",
       description:
-        "Load the schema and detailed information for specific MCP tools. " +
-        "Use this after search_tool to get the parameter schema before calling a tool. " +
-        "The schema tells you what parameters the tool accepts. " +
-        "After loading, use mcp_call(tool_id, arguments) to execute the tool.",
-      schema: loadToolSchema
+        allowedCallers.length === 2
+          ? "Inspect discovered tool_ids. Use caller=invoke_deferred_tool only for deferred-only tools and saved tools before invoke_deferred_tool. Use caller=code_exec only after you have already decided to write a code_exec script and need MCP schemas or call examples. Do not use inspect_tool before an ordinary direct call to a callable tool."
+          : allowedCallers[0] === "code_exec"
+            ? "Inspect discovered MCP tool_ids only when authoring a code_exec script. Returns loaded_tools[] with schema, output_schema, and code_exec call hints. Do not use inspect_tool before an ordinary direct call to a callable tool."
+            : "Inspect discovered deferred-only tool_ids and saved tool_ids before invoke_deferred_tool. Do not use inspect_tool for ordinary direct calls to tools already present in the callable tool list.",
+      schema: createInspectCallerSchema(allowedCallers)
     }
   )
 }
 
-/**
- * Create the mcp_call tool for executing MCP tools
- */
-export function createMcpCallTool(registry: McpToolRegistry) {
+export function createInvokeDeferredTool(
+  service: McpCapabilityService,
+  context: ToolSearchContext,
+  options: ToolSearchOptions
+) {
+  const engine = new CodeExecEngine(new LocalProcessRunner(service))
+
   return tool(
     async (input) => {
-      const { tool_id, arguments: args } = input
+      const savedTool = getSavedCodeExecTool(input.tool_id, { includeDisabled: true })
+      if (savedTool) {
+        if (!options.savedToolsEnabled) {
+          return JSON.stringify({
+            ok: false,
+            error: "Saved tools are disabled in settings."
+          }, null, 2)
+        }
 
-      // Verify tool exists
-      if (!registry.hasTool(tool_id)) {
-        return JSON.stringify({
-          error: `Tool not found: ${tool_id}`,
-          hint: "Use search_tool to find available tools"
+        if (!savedTool.enabled) {
+          return JSON.stringify({
+            ok: false,
+            error: "Saved tool is disabled."
+          }, null, 2)
+        }
+
+        const missingDependencies = await getMissingSavedToolDependencies(service, savedTool.dependencies)
+        if (missingDependencies.length > 0) {
+          const dependencyList = missingDependencies.join(", ")
+          return JSON.stringify({
+            ok: false,
+            error:
+              `Saved tool dependency unavailable: ${dependencyList}. ` +
+              "The underlying MCP connector or tool is not currently enabled. " +
+              "Re-enable the connector, then retry this saved tool."
+          }, null, 2)
+        }
+
+        const result = await engine.execute({
+          code: savedTool.code,
+          params: input.tool_args ?? {},
+          timeoutMs: savedTool.timeoutMs,
+          workspacePath: context.workspacePath,
+          threadId: context.threadId
         })
+
+        if (!result.ok) {
+          return JSON.stringify({
+            ok: false,
+            error: result.error || result.output
+          }, null, 2)
+        }
+
+        return JSON.stringify({
+          ok: true,
+          data: parseCodeExecOutputValue(result.output)
+        }, null, 2)
       }
 
-      // Helper to execute with retry on connection errors
-      const executeWithRetry = async (retries = 1): Promise<unknown> => {
-        try {
-          return await registry.call(tool_id, args)
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error)
-          // Retry on connection-related errors (terminated, disconnected, etc.)
-          if (retries > 0 && (message.includes("terminated") || message.includes("disconnected") || message.includes("ECONN"))) {
-            console.log(`[mcp_call] Connection error for ${tool_id}, retrying...`)
-            // Small delay before retry
-            await new Promise(resolve => setTimeout(resolve, 500))
-            return executeWithRetry(retries - 1)
-          }
-          throw error
-        }
+      const resolvedTool = await service.getTool(input.tool_id)
+      if (!resolvedTool) {
+        return JSON.stringify({
+          ok: false,
+          error: `Tool not found: ${input.tool_id}`
+        }, null, 2)
+      }
+
+      if (resolvedTool.visibility !== "lazy") {
+        return JSON.stringify({
+          ok: false,
+          error: `Tool ${resolvedTool.toolId} is already directly callable from the tool list. Call it directly instead of using invoke_deferred_tool.`
+        }, null, 2)
       }
 
       try {
-        const result = await executeWithRetry()
+        const result = await invokeWithRetry(service, input.tool_id, input.tool_args ?? {})
 
-        // Handle MCP tool response format
-        if (Array.isArray(result) && result.length === 2) {
-          const [content, _artifact] = result
+        if (result.isError) {
           return JSON.stringify({
-            tool_id,
-            success: true,
-            result: content
-          })
+            ok: false,
+            error: getMcpErrorMessage(result)
+          }, null, 2)
         }
 
         return JSON.stringify({
-          tool_id,
-          success: true,
-          result
-        })
+          ok: true,
+          data: getUsefulMcpResultData(result)
+        }, null, 2)
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         return JSON.stringify({
-          tool_id,
-          success: false,
+          ok: false,
           error: message
-        })
+        }, null, 2)
       }
     },
     {
-      name: "mcp_call",
+      name: "invoke_deferred_tool",
       description:
-        "Execute an MCP tool by its ID. Use this after:\n" +
-        "1. search_tool to find the tool\n" +
-        "2. load_tool to get its schema\n" +
-        "Then call with the tool_id and required arguments.",
-      schema: mcpCallSchema
+        "Execute a deferred-only MCP tool or saved tool by tool_id. You must inspect the tool first with inspect_tool(caller=\"invoke_deferred_tool\") and use the exact returned schema. Do not use this for tools that are already directly callable from the tool list. Returns { ok: true, data } on success or { ok: false, error } on failure.",
+      schema: invokeDeferredToolSchema
     }
   )
 }
 
-/**
- * Create all three tool search tools
- */
-export function createToolSearchTools(registry: McpToolRegistry): unknown[] {
+export async function createToolSearchTools(
+  service: McpCapabilityService,
+  context: ToolSearchContext,
+  options?: Partial<ToolSearchOptions>
+): Promise<unknown[]> {
+  const codeExecRouteEnabled = options?.codeExecRouteEnabled === true
+  const savedToolsEnabled = options?.savedToolsEnabled !== false
+  const tools = await service.listTools()
+  const savedTools = savedToolsEnabled ? listSavedCodeExecTools() : []
+  const lazyTools = tools.filter((tool) => tool.visibility === "lazy")
+  const hasMcpTools = tools.length > 0
+  const hasLazyTools = lazyTools.length > 0
+  const hasSavedTools = savedTools.length > 0
+  const needsDeferredBridge = hasLazyTools || hasSavedTools
+  const shouldInjectInspectTool = needsDeferredBridge || (codeExecRouteEnabled && hasMcpTools)
+
+  if (!shouldInjectInspectTool) return []
+
+  if (!needsDeferredBridge) {
+    return [createInspectTool(service, {
+      codeExecRouteEnabled,
+      savedToolsEnabled,
+      deferredRouteEnabled: false
+    })]
+  }
+
   return [
-    createSearchTool(registry),
-    createLoadTool(registry),
-    createMcpCallTool(registry)
+    createSearchTool(service, {
+      codeExecRouteEnabled,
+      savedToolsEnabled,
+      deferredRouteEnabled: true
+    }),
+    createInspectTool(service, {
+      codeExecRouteEnabled,
+      savedToolsEnabled,
+      deferredRouteEnabled: true
+    }),
+    createInvokeDeferredTool(service, context, {
+      codeExecRouteEnabled,
+      savedToolsEnabled,
+      deferredRouteEnabled: true
+    })
   ]
 }

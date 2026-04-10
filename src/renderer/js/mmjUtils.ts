@@ -1,3 +1,5 @@
+import { UserInfoConfig } from "../../main/storage"
+
 interface MmjTracker {
   setConfig?: (config: Record<string, string>) => void
   updateUserInfo?: (config: Record<string, string | null>) => void
@@ -55,24 +57,41 @@ export function initMMJ(): void {
     if (window.mmjTrack && !window.mmjStart) {
       window.mmjStart = true
       console.log("初始化MMJ")
+      const ip = localStorage.getItem("localIp")
       window.mmjTrack.setConfig?.({
         env: "prodOA",
         appName: "CMBDevClaw",
         productCode: "LA64.06",
-        userId: localStorage.getItem("localIp") || "游客",
-        org: localStorage.getItem("version") || ""
+        userId: ip || "游客",
+        positionId: localStorage.getItem("version") || ""
       })
+
+      updateMMJUserInfo()
     }
   })
 }
 
 export const updateMMJUserInfo = (): void => {
-  if (window.mmjTrack?.updateUserInfo) {
-    window.mmjTrack.updateUserInfo({
-      userId: localStorage.getItem("localIp"),
-      org: localStorage.getItem("version")
-    })
-  }
+  window.api.models.getUserInfo().then(user => {
+    const userInfo = user || {} as UserInfoConfig
+    console.log('getUserInfo():', userInfo)
+    if (userInfo && (userInfo?.ystId || userInfo?.sapId)){
+      if (window.mmjTrack?.updateUserInfo) {
+        window.mmjTrack.updateUserInfo({
+          userId: localStorage.getItem("localIp")  || "游客",
+          userName: `${userInfo.ystId || userInfo.sapId} / ${userInfo.userName}`,
+          org: userInfo.orgName || '',
+          orgId: userInfo.originOrgId || '',
+          positionId: localStorage.getItem("version") || ""
+        })
+      }
+    }
+  }).catch(e => {
+    console.error('updateMMJUserInfo error:', e)
+  })
+
+
+
 }
 
 export const insertDomLog = ({ id, text }: { id: string; text: string }): void => {

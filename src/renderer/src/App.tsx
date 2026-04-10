@@ -19,6 +19,16 @@ import { useAppStore } from "@/lib/store"
 import { ThreadProvider } from "@/lib/thread-context"
 import { initMMJ } from "../js/mmjUtils"
 import { Toaster } from "sonner"
+interface UserInfoConfig {
+  sapId: '',//8
+  ystId: '',//6
+  userName: '',
+  originOrgId: '',
+  orgName: '',
+  ystRefreshToken: '',
+  ystCode: '',
+  ystAccessToken: '',
+}
 
 async function migrateDisabledSkillsFromLocalStorage(): Promise<void> {
   try {
@@ -62,6 +72,7 @@ function App(): React.JSX.Element {
   const [previewFullscreen, setPreviewFullscreen] = useState(false)
   const [hasPendingGitDiff, setHasPendingGitDiff] = useState(false)
   const [zoomLevel, setZoomLevel] = useState(1)
+  const [bus, setBus] = useState(true)
   const autoOpenedGitForThreadRef = useRef<string | null>(null)
   const panelToggleBaseClass =
     "group inline-flex h-7 items-center justify-center gap-1.5 rounded-md border border-transparent px-2 text-[11px] font-medium whitespace-nowrap transition-all duration-150 outline-none focus-visible:ring-1 focus-visible:ring-border focus-visible:ring-offset-0 active:scale-95"
@@ -69,6 +80,40 @@ function App(): React.JSX.Element {
   const moduleInactiveClass = "text-foreground hover:bg-muted/45"
   const sidebarToggleText = sidebarCollapsed ? "显示侧边栏" : "隐藏侧边栏"
   const rightPanelToggleText = rightPanelCollapsed ? "显示右侧面板" : "隐藏右侧面板"
+
+  useEffect(() => {
+    initUser()
+  }, [])
+
+  const initUser = () => {
+    window.api.models.getUserInfo().then(user => {
+        const userInfo = user || {} as UserInfoConfig
+        if (userInfo.sapId) {
+          fetch(`https://archguardservice.paas.${import.meta.env.VITE_LOGIN_PT}.cn/cowork/login-info`, {
+              method: 'GET',
+              headers: {
+                  ystCode: userInfo.ystCode,
+                  ystRefreshToken: userInfo.ystRefreshToken || '',
+              }
+          }).then(async res => {
+              const result = await res.json()
+              if (result.returnCode === 'SUC0000') {
+                const resBody = result.body
+                const pathName = resBody.pathName||''
+                if(pathName.includes('零售客户经营开发团队')){
+                  setBus(true)
+                }else{
+                  setBus(false)
+                }
+              } else{
+                window.electron.openLoginPage()
+              }
+          })
+        } else {
+          window.electron.openLoginPage()
+        }
+    });
+  };
 
   useEffect(() => {
     document.addEventListener('click', (e) => {
@@ -171,19 +216,40 @@ function App(): React.JSX.Element {
   }, [])
 
   const selectPreviewModule = useCallback(() => {
-    setRightModule("preview")
-    handlePreviewExpand()
-  }, [handlePreviewExpand])
+    if (rightModule === "preview") {
+      toggleRightPanel()
+    } else {
+      if (rightPanelCollapsed) {
+        toggleRightPanel()
+      }
+      setRightModule("preview")
+      handlePreviewExpand()
+    }
+  }, [handlePreviewExpand, rightModule, rightPanelCollapsed, toggleRightPanel])
 
   const selectWorkModule = useCallback(() => {
-    setRightModule("work")
-    handlePreviewCollapse()
-  }, [handlePreviewCollapse])
+    if (rightModule === "work") {
+      toggleRightPanel()
+    } else {
+      if (rightPanelCollapsed) {
+        toggleRightPanel()
+      }
+      setRightModule("work")
+      handlePreviewCollapse()
+    }
+  }, [handlePreviewCollapse, rightModule, rightPanelCollapsed, toggleRightPanel])
 
   const selectGitModule = useCallback(() => {
-    setRightModule("git")
-    handlePreviewExpand()
-  }, [handlePreviewExpand])
+    if (rightModule === "git") {
+      toggleRightPanel()
+    } else {
+      if (rightPanelCollapsed) {
+        toggleRightPanel()
+      }
+      setRightModule("git")
+      handlePreviewExpand()
+    }
+  }, [handlePreviewExpand, rightModule, rightPanelCollapsed, toggleRightPanel])
 
   useEffect(() => {
     let cancelled = false
@@ -332,6 +398,14 @@ function App(): React.JSX.Element {
     )
   }
 
+  if(!bus){
+    return (
+      <div className="flex h-screen items-center justify-center bg-background">
+        <div className="text-muted-foreground">目前仅供零售客户经营开发团队使用，暂不对外提供服务...,有任何疑问请联系 范雄</div>
+      </div>
+    )
+  }
+
   return (
     <ThreadProvider>
       <div className="flex flex-col h-screen overflow-hidden bg-background">
@@ -413,14 +487,14 @@ function App(): React.JSX.Element {
                 <button
                   type="button"
                   className={`${panelToggleBaseClass} ${
-                    rightModule === "preview"
+                    !rightPanelCollapsed && rightModule === "preview"
                       ? moduleActiveClass
                       : moduleInactiveClass
                   }`}
                   onClick={selectPreviewModule}
                   title="文件预览"
                   aria-label="文件预览"
-                  aria-pressed={rightModule === "preview"}
+                  aria-pressed={!rightPanelCollapsed && rightModule === "preview"}
                 >
                   <Eye size={16} className="shrink-0" strokeWidth={1.8} />
                   <span>文件预览</span>
@@ -428,7 +502,7 @@ function App(): React.JSX.Element {
                 <button
                   type="button"
                   className={`${panelToggleBaseClass} ${
-                    rightModule === "git"
+                    !rightPanelCollapsed && rightModule === "git"
                       ? moduleActiveClass
                       : hasPendingGitDiff
                         ? "text-foreground border-status-warning/40 hover:bg-muted/45"
@@ -437,7 +511,7 @@ function App(): React.JSX.Element {
                   onClick={selectGitModule}
                   title="Git 操作"
                   aria-label="Git 操作"
-                  aria-pressed={rightModule === "git"}
+                  aria-pressed={!rightPanelCollapsed && rightModule === "git"}
                 >
                   <GitBranch size={16} className="shrink-0" strokeWidth={1.8} />
                   <span>Git 操作</span>
@@ -445,14 +519,14 @@ function App(): React.JSX.Element {
                 <button
                   type="button"
                   className={`${panelToggleBaseClass} ${
-                    rightModule === "work"
+                    !rightPanelCollapsed && rightModule === "work"
                       ? moduleActiveClass
                       : moduleInactiveClass
                   }`}
                   onClick={selectWorkModule}
                   title="工作目录"
                   aria-label="工作目录"
-                  aria-pressed={rightModule === "work"}
+                  aria-pressed={!rightPanelCollapsed && rightModule === "work"}
                 >
                   <Briefcase size={16} className="shrink-0" strokeWidth={1.8} />
                   <span>工作目录</span>

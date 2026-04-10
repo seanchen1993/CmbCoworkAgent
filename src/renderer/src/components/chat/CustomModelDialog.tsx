@@ -9,6 +9,7 @@ import {
 } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { cn } from "@/lib/utils"
 
 interface CustomModelDialogProps {
   open: boolean
@@ -24,6 +25,7 @@ interface CustomConfig {
   model: string
   apiKey: string
   maxTokensInput: string
+  interleavedThinking: boolean
   tier: "premium" | "economy"
 }
 
@@ -40,6 +42,7 @@ interface CustomModelItem {
   model: string
   hasApiKey: boolean
   maxTokens: number
+  interleavedThinking?: boolean
   tier?: "premium" | "economy"
 }
 
@@ -47,6 +50,10 @@ const FALLBACK_LIMITS: TokenLimits = {
   defaultMaxTokens: 128_000,
   minMaxTokens: 32_000,
   maxMaxTokens: 128_000
+}
+
+function defaultInterleavedThinkingForModel(model: string): boolean {
+  return /minimax/i.test(model)
 }
 
 function parseMaxTokens(value: string): number | null {
@@ -81,6 +88,7 @@ export function CustomModelDialog({
     model: "",
     apiKey: "",
     maxTokensInput: String(FALLBACK_LIMITS.defaultMaxTokens),
+    interleavedThinking: false,
     tier: "premium"
   })
   const [showKey, setShowKey] = useState(false)
@@ -135,6 +143,9 @@ export function CustomModelDialog({
               model: resolvedExisting.model,
               apiKey: "",
               maxTokensInput: String(resolvedExisting.maxTokens ?? limits.defaultMaxTokens),
+              interleavedThinking:
+                resolvedExisting.interleavedThinking ??
+                defaultInterleavedThinkingForModel(resolvedExisting.model),
               tier: resolvedExisting.tier ?? "premium"
             })
             setHasExisting(true)
@@ -147,6 +158,7 @@ export function CustomModelDialog({
               model: "",
               apiKey: "",
               maxTokensInput: String(limits.defaultMaxTokens),
+              interleavedThinking: false,
               tier: "premium"
             })
             setHasExisting(false)
@@ -177,6 +189,8 @@ export function CustomModelDialog({
       model: picked.model,
       apiKey: "",
       maxTokensInput: String(picked.maxTokens ?? tokenLimits.defaultMaxTokens),
+      interleavedThinking:
+        picked.interleavedThinking ?? defaultInterleavedThinkingForModel(picked.model),
       tier: picked.tier ?? "premium"
     })
     setHasExisting(true)
@@ -248,6 +262,7 @@ export function CustomModelDialog({
         model: config.model.trim(),
         apiKey: config.apiKey.trim() || undefined,
         maxTokens: parsedMaxTokens,
+        interleavedThinking: config.interleavedThinking,
         tier: config.tier
       })
       const refreshed = await window.api.models.getCustomConfigs()
@@ -258,6 +273,8 @@ export function CustomModelDialog({
           ...prev,
           id: updated.id,
           name: updated.name,
+          baseUrl: updated.baseUrl,
+          model: updated.model,
           apiKey: ""
         }))
         setHasExisting(true)
@@ -299,6 +316,8 @@ export function CustomModelDialog({
           model: fallback.model,
           apiKey: "",
           maxTokensInput: String(fallback.maxTokens ?? tokenLimits.defaultMaxTokens),
+          interleavedThinking:
+            fallback.interleavedThinking ?? defaultInterleavedThinkingForModel(fallback.model),
           tier: fallback.tier ?? "premium"
         })
         setHasExisting(true)
@@ -312,6 +331,7 @@ export function CustomModelDialog({
           model: "",
           apiKey: "",
           maxTokensInput: String(tokenLimits.defaultMaxTokens),
+          interleavedThinking: false,
           tier: "premium"
         })
         setHasExisting(false)
@@ -349,6 +369,7 @@ export function CustomModelDialog({
                     model: "",
                     apiKey: "",
                     maxTokensInput: String(tokenLimits.defaultMaxTokens),
+                    interleavedThinking: false,
                     tier: "premium"
                   })
                   setHasExisting(false)
@@ -410,7 +431,20 @@ export function CustomModelDialog({
               <label className="text-xs font-medium text-muted-foreground">模型名称（Model）</label>
               <Input
                 value={config.model}
-                onChange={(e) => { setConfig((c) => ({ ...c, model: e.target.value })); setTestResult(null) }}
+                onChange={(e) => {
+                  const nextModel = e.target.value
+                  setConfig((c) => {
+                    const currentDefault = defaultInterleavedThinkingForModel(c.model)
+                    const nextDefault = defaultInterleavedThinkingForModel(nextModel)
+                    return {
+                      ...c,
+                      model: nextModel,
+                      interleavedThinking:
+                        c.interleavedThinking === currentDefault ? nextDefault : c.interleavedThinking
+                    }
+                  })
+                  setTestResult(null)
+                }}
                 placeholder="gpt-4o, deepseek-chat, ..."
               />
             </div>
@@ -433,6 +467,36 @@ export function CustomModelDialog({
                 max={tokenLimits.maxMaxTokens}
               />
               {maxTokensError && <p className="text-xs text-destructive">{maxTokensError}</p>}
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-muted-foreground">交错思考</label>
+              <div className="flex items-center justify-between rounded-md border border-border px-3 py-2">
+                <div className="space-y-1">
+                  <div className="text-sm text-foreground">
+                    {config.interleavedThinking ? "已开启" : "已关闭"}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={config.interleavedThinking}
+                  onClick={() =>
+                    setConfig((c) => ({ ...c, interleavedThinking: !c.interleavedThinking }))
+                  }
+                  className={cn(
+                    "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors",
+                    config.interleavedThinking ? "bg-primary" : "bg-muted-foreground/30"
+                  )}
+                >
+                  <span
+                    className={cn(
+                      "pointer-events-none inline-block size-4 rounded-full bg-white shadow-sm transition-transform",
+                      config.interleavedThinking ? "translate-x-4" : "translate-x-0"
+                    )}
+                  />
+                </button>
+              </div>
             </div>
 
             <div className="space-y-1.5">

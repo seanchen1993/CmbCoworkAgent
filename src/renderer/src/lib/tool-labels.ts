@@ -10,9 +10,10 @@ const TOOL_LABELS: Record<string, string> = {
   task: "子任务执行",
   git_push: "Git 推送",
   browser_playwright: "Playwright 浏览器操作",
-  mcp_call: "调用 MCP 工具",
-  search_tool: "搜索 MCP 工具",
-  load_tool: "加载 MCP 工具"
+  code_exec: "编程式工具调用",
+  invoke_deferred_tool: "调用延迟加载的工具",
+  inspect_tool: "查看工具定义",
+  search_tool: "搜索工具"
 }
 
 interface ToolLabelOptions {

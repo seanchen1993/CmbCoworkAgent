@@ -330,9 +330,16 @@ export type ExecSafetyLevel = "safe" | "needs_approval" | "forbidden"
 export interface ApprovalRequest extends HITLRequest {
   safety_level: ExecSafetyLevel
   /** Operation type: "execute" for shell commands, "write_file"/"edit_file" for file operations */
-  operation?: "execute" | "write_file" | "edit_file"
+  operation?: "execute" | "write_file" | "edit_file" | "code_exec" | "prepare_save_code_exec_tool" | "save_code_exec_tool"
   command?: string           // shell command (for execute operations)
   filePath?: string          // target file path (for write_file/edit_file operations)
+  code?: string              // code_exec script preview
+  params?: unknown           // code_exec params preview
+  timeoutMs?: number         // code_exec timeout preview
+  savedToolName?: string     // proposed saved tool name before slug normalization
+  savedToolId?: string       // proposed saved tool ID
+  savedToolDescription?: string // proposed saved tool description
+  savedToolMetadataError?: string // metadata generation failure message for manual fallback
   cwd: string
   reason?: string           // why approval is needed
   retry_reason?: string     // sandbox-failure retry context
@@ -345,6 +352,8 @@ export type ApprovalDecisionType = "approve" | "approve_session" | "approve_perm
 export interface ApprovalDecision {
   type: ApprovalDecisionType
   tool_call_id: string
+  savedToolName?: string
+  savedToolDescription?: string
 }
 
 // ChatX types
@@ -380,4 +389,3 @@ export interface SkillMetadata {
   metadata?: Record<string, string>
   allowedTools?: string[]
 }
-

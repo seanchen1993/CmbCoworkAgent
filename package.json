@@ -1,6 +1,6 @@
 {
-  "name": "CMBDevClaw",
-  "version": "0.2.0",
+  "name": "cmbdevclaw",
+  "version": "0.2.3",
   "description": "CMBDevClaw description",
   "author": {
     "name": "CMBDevClaw",
@@ -47,6 +47,7 @@
     "dist": "npm run build && electron-builder",
     "dist:win": "npm run build && electron-builder --win",
     "dist:mac": "npm run build && electron-builder --mac",
+    "dist:linux": "npm run build && electron-builder --linux --x64 --publish=never",
     "server:cache": "node scripts/server-cache.js",
     "postinstall": "electron-rebuild -f -w node-pty",
     "env:filter:setup": "node scripts/setup-env-filter.mjs",
@@ -58,6 +59,7 @@
   },
   "build": {
     "appId": "com.cmbdevclaw.com",
+    "afterPack": "scripts/after-pack.js",
     "productName": "CMBDevClaw",
     "directories": {
       "output": "dist"
@@ -79,6 +81,20 @@
     "win": {
       "target": "nsis",
       "icon": "build/icon.ico"
+    },
+    "linux": {
+      "icon": "build/icon.png",
+      "target": [
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "executableArgs": [
+        "--no-sandbox"
+      ]
     },
     "extraResources": [
       {

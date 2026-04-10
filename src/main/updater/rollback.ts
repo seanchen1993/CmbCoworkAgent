@@ -1,12 +1,17 @@
 import { app } from "electron"
-import { existsSync, readFileSync, unlinkSync } from "fs"
-import { join } from "path"
+import { existsSync, readFileSync, rmSync, unlinkSync } from "fs"
+import { dirname, join } from "path"
 import {
   getBackupPath,
   getMarkerPath,
+  getExePath,
   generateRollbackPs1,
+  generateRollbackSh,
   launchDetachedPowerShellScript,
-  writePowerShellScript
+  launchDetachedBashScript,
+  writePowerShellScript,
+  writeBashScript,
+  isWindows
 } from "./installer"
 import { getUpdatesDir, downloadUpdate } from "./downloader"
 import { fetchLatestJson } from "./checker"
@@ -52,6 +57,10 @@ export async function runStartupSelfCheck(): Promise<StartupCheckResult> {
   if (currentVersion === marker.toVersion) {
     console.log(`[Updater] Self-check passed: version ${currentVersion} matches expected ${marker.toVersion}`)
     unlinkSync(markerPath)
+
+    // Clean up backup files after successful update
+    cleanupBackups()
+
     return { updatedFrom: marker.fromVersion, updatedTo: marker.toVersion }
   }
 
@@ -67,21 +76,57 @@ export async function runStartupSelfCheck(): Promise<StartupCheckResult> {
     return {}
   }
 
-  executeRollbackViaPs1(backupPath)
+  executeRollback(backupPath)
   return {}
 }
 
 /**
- * Execute a rollback by spawning a PowerShell script and quitting.
+ * Clean up backup files/directories after a successful update.
+ * Called when self-check confirms the new version is running correctly.
  */
-function executeRollbackViaPs1(backupAsarPath: string): void {
-  const ps1Content = generateRollbackPs1(backupAsarPath)
-  const ps1Path = join(getUpdatesDir(), "rollback.ps1")
+function cleanupBackups(): void {
+  // ASAR backup: app.asar.bak
+  const asarBackup = getBackupPath()
+  if (existsSync(asarBackup)) {
+    try {
+      rmSync(asarBackup, { force: true })
+      console.log("[Updater] Cleaned up ASAR backup:", asarBackup)
+    } catch (e) {
+      console.warn("[Updater] Failed to clean up ASAR backup:", e)
+    }
+  }
 
-  writePowerShellScript(ps1Path, ps1Content)
-  console.log("[Updater] Generated rollback.ps1, executing...")
+  // Full update backup: appDir.bak directory
+  const exePath = getExePath()
+  const appDir = dirname(exePath)
+  const fullBackupDir = `${appDir}.bak`
+  if (existsSync(fullBackupDir)) {
+    try {
+      rmSync(fullBackupDir, { recursive: true, force: true })
+      console.log("[Updater] Cleaned up full update backup dir:", fullBackupDir)
+    } catch (e) {
+      console.warn("[Updater] Failed to clean up full update backup dir:", e)
+    }
+  }
+}
 
-  launchDetachedPowerShellScript(ps1Path)
+/**
+ * Execute a rollback by spawning a platform-specific script and quitting.
+ */
+function executeRollback(backupAsarPath: string): void {
+  if (isWindows) {
+    const ps1Content = generateRollbackPs1(backupAsarPath)
+    const ps1Path = join(getUpdatesDir(), "rollback.ps1")
+    writePowerShellScript(ps1Path, ps1Content)
+    console.log("[Updater] Generated rollback.ps1, executing...")
+    launchDetachedPowerShellScript(ps1Path)
+  } else {
+    const shContent = generateRollbackSh(backupAsarPath)
+    const shPath = join(getUpdatesDir(), "rollback.sh")
+    writeBashScript(shPath, shContent)
+    console.log("[Updater] Generated rollback.sh, executing...")
+    launchDetachedBashScript(shPath)
+  }
 
   app.quit()
 }
@@ -95,7 +140,7 @@ export async function rollbackToPrevious(baseUrl: string): Promise<void> {
 
   if (existsSync(backupPath)) {
     console.log("[Updater] Rolling back using local backup:", backupPath)
-    executeRollbackViaPs1(backupPath)
+    executeRollback(backupPath)
     return
   }
 
@@ -115,7 +160,7 @@ export async function rollbackToPrevious(baseUrl: string): Promise<void> {
     0
   )
 
-  executeRollbackViaPs1(downloadedPath)
+  executeRollback(downloadedPath)
 }
 
 /**

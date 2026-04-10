@@ -13,6 +13,7 @@ import type {
   WorkspaceFileParams
 } from "../types"
 import { startWatching, stopWatching } from "../services/workspace-watcher"
+import { trackEvent } from "../services/event-reporter"
 
 const execFileAsync = promisify(execFile)
 
@@ -1364,6 +1365,29 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         }
         notifyWorkspaceFilesChanged(threadId, worktreePath)
         logGitStep(threadId, "commit", "提交成功")
+
+        // Operational telemetry: git.commit.created
+        try {
+          const insertions = state.files.reduce((acc, f) => acc + (f.additions || 0), 0)
+          const deletions  = state.files.reduce((acc, f) => acc + (f.deletions  || 0), 0)
+          let branch = ""
+          try {
+            branch = (await runGit(worktreePath, ["rev-parse", "--abbrev-ref", "HEAD"], { silent: true })).trim()
+          } catch {
+            // ignore — branch is best-effort metadata
+          }
+          trackEvent("git.commit.created", "git", {
+            repoPath:     worktreePath,
+            branch,
+            filesChanged: state.changedFiles.length,
+            insertions,
+            deletions,
+            triggeredBy:  "manual"
+          })
+        } catch (e) {
+          console.warn("[event] failed to emit git.commit.created:", e)
+        }
+
         return { success: true }
       } catch (e) {
         logGitStep(threadId, "commit", `异常：${getExecErrorText(e) || (e instanceof Error ? e.message : "提交失败")}`)
@@ -1418,6 +1442,22 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
             autoCommitted = true
             autoCommitHead = (await runGit(worktreePath, ["rev-parse", "HEAD"])).trim()
             steps.push({ step: "commit", status: "ok", detail: `自动提交成功：${commitMessage}` })
+
+            // Operational telemetry: git.commit.created (auto-commit before push)
+            try {
+              const insertions = pending.files.reduce((acc, f) => acc + (f.additions || 0), 0)
+              const deletions  = pending.files.reduce((acc, f) => acc + (f.deletions  || 0), 0)
+              trackEvent("git.commit.created", "git", {
+                repoPath:     worktreePath,
+                branch,
+                filesChanged: pending.changedFiles.length,
+                insertions,
+                deletions,
+                triggeredBy:  "manual"
+              })
+            } catch (e) {
+              console.warn("[event] failed to emit git.commit.created (auto):", e)
+            }
           } catch (commitError) {
             const detail = getExecErrorText(commitError)
             steps.push({ step: "commit", status: "failed", detail: detail || "自动提交失败" })
@@ -1551,6 +1591,24 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         steps.push({ step: "final", status: "ok", detail: autoCommitted ? "自动提交并推送成功" : "推送成功" })
         notifyWorkspaceFilesChanged(threadId, worktreePath)
         logGitStep(threadId, "push", "推送流程成功")
+
+        // Operational telemetry: git.push.executed
+        try {
+          let remoteUrl = ""
+          try {
+            remoteUrl = (await runGit(worktreePath, ["remote", "get-url", "origin"], { silent: true })).trim()
+          } catch {
+            // ignore — remote URL is best-effort metadata
+          }
+          trackEvent("git.push.executed", "git", {
+            repoPath: worktreePath,
+            branch,
+            remoteUrl
+          })
+        } catch (e) {
+          console.warn("[event] failed to emit git.push.executed:", e)
+        }
+
         return { success: true, autoCommitted, steps }
       } catch (e) {
         const detail = getExecErrorText(e)
