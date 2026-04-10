@@ -317,12 +317,9 @@ function parseSkillNameFromFrontmatter(content: string): string | null {
 }
 
 const ENABLED_SKILLS_DIR = join(OPENWORK_DIR, "enabled-skills")
-const ENABLED_SKILLS_BUILTIN_DIR = join(OPENWORK_DIR, "enabled-skills-builtin")
-const ENABLED_SKILLS_CUSTOM_DIR = join(OPENWORK_DIR, "enabled-skills-custom")
 
-// Fingerprints for separate builtin and custom enabled skills
-let _enabledSkillsBuiltinFingerprint: string | null = null
-let _enabledSkillsCustomFingerprint: string | null = null
+// Fingerprint for enabled skills
+let _enabledSkillsFingerprint: string | null = null
 
 async function computeEnabledSkillsFingerprint(disabledList: string[], sourceDirs: string[]): Promise<string> {
   const parts = [disabledList.sort().join(","), sourceDirs.join("|")]
@@ -421,7 +418,7 @@ async function decryptSkillFilesInPlace(skillDir: string): Promise<void> {
 let _enabledSkillsBuildLock: Promise<string[]> | null = null
 
 /**
- * Ensures separate enabled-skills directories exist for builtin and custom skills.
+ * Ensures enabled-skills directory exists with all enabled skills from both builtin and custom sources.
  * Uses async I/O to avoid blocking the main process event loop.
  * Skips rebuild if the disabled list and source dirs haven't changed.
  * Serialized via a Promise lock to prevent concurrent rm/mkdir/copyFile races.
@@ -443,45 +440,36 @@ async function _ensureEnabledSkillsDirsImpl(): Promise<string[]> {
   const disabled = getDisabledSkills()
   const disabledSet = new Set(disabled.map((s) => s.trim().toLowerCase()))
 
-  const results: string[] = []
+  // Compute fingerprint for both builtin and custom skills
+  const sourceDirs = [builtinDir, customDir].filter(dir => existsSync(dir))
+  const enabledFingerprint = await computeEnabledSkillsFingerprint(disabled, sourceDirs)
 
-  // Handle builtin skills
-  if (existsSync(builtinDir)) {
-    const builtinFingerprint = await computeEnabledSkillsFingerprint(disabled, [builtinDir])
-    if (_enabledSkillsBuiltinFingerprint !== builtinFingerprint || !existsSync(ENABLED_SKILLS_BUILTIN_DIR)) {
-      if (existsSync(ENABLED_SKILLS_BUILTIN_DIR)) {
-        await rm(ENABLED_SKILLS_BUILTIN_DIR, { recursive: true })
-      }
-      await mkdir(ENABLED_SKILLS_BUILTIN_DIR, { recursive: true })
+  if (_enabledSkillsFingerprint !== enabledFingerprint || !existsSync(ENABLED_SKILLS_DIR)) {
+    if (existsSync(ENABLED_SKILLS_DIR)) {
+      await rm(ENABLED_SKILLS_DIR, { recursive: true })
+    }
+    await mkdir(ENABLED_SKILLS_DIR, { recursive: true })
 
-      const count = await copyEnabledSkillsFromSourceAsync(builtinDir, disabledSet, ENABLED_SKILLS_BUILTIN_DIR)
-      console.log(`[Storage] Copied ${count} enabled builtin skills to ${ENABLED_SKILLS_BUILTIN_DIR}`)
-      _enabledSkillsBuiltinFingerprint = builtinFingerprint
+    // Copy enabled skills from both builtin and custom sources
+    let totalCount = 0
+
+    if (existsSync(builtinDir)) {
+      const count = await copyEnabledSkillsFromSourceAsync(builtinDir, disabledSet, ENABLED_SKILLS_DIR)
+      totalCount += count
+      console.log(`[Storage] Copied ${count} enabled builtin skills to ${ENABLED_SKILLS_DIR}`)
     }
-    if (existsSync(ENABLED_SKILLS_BUILTIN_DIR)) {
-      results.push(ENABLED_SKILLS_BUILTIN_DIR)
+
+    if (existsSync(customDir)) {
+      const count = await copyEnabledSkillsFromSourceAsync(customDir, disabledSet, ENABLED_SKILLS_DIR)
+      totalCount += count
+      console.log(`[Storage] Copied ${count} enabled custom skills to ${ENABLED_SKILLS_DIR}`)
     }
+
+    console.log(`[Storage] Total enabled skills: ${totalCount}`)
+    _enabledSkillsFingerprint = enabledFingerprint
   }
 
-  // Handle custom skills
-  if (existsSync(customDir)) {
-    const customFingerprint = await computeEnabledSkillsFingerprint(disabled, [customDir])
-    if (_enabledSkillsCustomFingerprint !== customFingerprint || !existsSync(ENABLED_SKILLS_CUSTOM_DIR)) {
-      if (existsSync(ENABLED_SKILLS_CUSTOM_DIR)) {
-        await rm(ENABLED_SKILLS_CUSTOM_DIR, { recursive: true })
-      }
-      await mkdir(ENABLED_SKILLS_CUSTOM_DIR, { recursive: true })
-
-      const count = await copyEnabledSkillsFromSourceAsync(customDir, disabledSet, ENABLED_SKILLS_CUSTOM_DIR)
-      console.log(`[Storage] Copied ${count} enabled custom skills to ${ENABLED_SKILLS_CUSTOM_DIR}`)
-      _enabledSkillsCustomFingerprint = customFingerprint
-    }
-    if (existsSync(ENABLED_SKILLS_CUSTOM_DIR)) {
-      results.push(ENABLED_SKILLS_CUSTOM_DIR)
-    }
-  }
-
-  return results
+  return existsSync(ENABLED_SKILLS_DIR) ? [ENABLED_SKILLS_DIR] : []
 }
 
 /**
@@ -489,8 +477,7 @@ async function _ensureEnabledSkillsDirsImpl(): Promise<string[]> {
  * Should be called when disabled skills list changes.
  */
 export function invalidateEnabledSkillsCache(): void {
-  _enabledSkillsBuiltinFingerprint = null
-  _enabledSkillsCustomFingerprint = null
+  _enabledSkillsFingerprint = null
   _pluginSkillsCache = null
   _pluginMcpCache = null
 }
