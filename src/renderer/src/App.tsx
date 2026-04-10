@@ -217,7 +217,7 @@ function App(): React.JSX.Element {
 
   const selectPreviewModule = useCallback(() => {
     if (rightModule === "preview") {
-      toggleRightPanel()
+      // toggleRightPanel()
     } else {
       if (rightPanelCollapsed) {
         toggleRightPanel()
