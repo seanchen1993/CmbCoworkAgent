@@ -30,6 +30,7 @@ import * as iconv from "iconv-lite"
 import * as chardet from "jschardet"
 import micromatch from "micromatch"
 import { replace } from "./replace"
+import { decryptSkillBufferIfNeeded } from "./skill-crypto"
 import type { ToolOrchestrator } from "./tool-orchestrator"
 import { assessCommandSafety } from "./exec-policy"
 import {
@@ -956,6 +957,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
   /**
    * Read a file as a raw Buffer with symlink protection.
    * Shared helper for read(), edit(), and other encoding-aware operations.
+   * Also handles decryption of encrypted skill files.
    */
   private async readFileBuffer(filePath: string): Promise<{ buffer: Buffer; resolvedPath: string }> {
     const resolvedPath: string = this._resolvePath(filePath)
@@ -979,6 +981,15 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       if (stat.isSymbolicLink()) throw new Error(`Symlinks are not allowed: ${filePath}`)
       if (!stat.isFile()) throw new Error(`File '${filePath}' not found`)
       buffer = await fs.readFile(resolvedPath)
+    }
+
+    // 如果文件被加密，先解密
+    try {
+      buffer = decryptSkillBufferIfNeeded(buffer)
+    } catch (decryptError) {
+      // 如果解密失败，记录警告但继续使用原始 buffer
+      // 这样既能处理加密文件，也能处理普通文件
+      console.warn(`[LocalSandbox] Decryption attempted for ${filePath}:`, decryptError instanceof Error ? decryptError.message : String(decryptError))
     }
 
     return { buffer, resolvedPath }
@@ -1520,7 +1531,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
 
       // Derive bash.exe from git.exe install location:
       // git.exe is typically at C:\Program Files\Git\cmd\git.exe
-      // bash.exe is at C:\Program Files\Git\bin\bash.exe
+           // bash.exe is at C:\Program Files\Git\bin\bash.exe
       const gitExe = LocalSandbox.whichSync("git")
       if (gitExe) {
         const bash = path.join(gitExe, "..", "..", "bin", "bash.exe")
@@ -2327,7 +2338,6 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
         clearTimeout(timeoutId)
         killProc()
         drainTimerId = setTimeout(() => {
-          console.log(`[LocalSandbox] drain timeout: pid=${proc.pid}, force-resolving after ${LocalSandbox.IO_DRAIN_TIMEOUT_MS}ms`)
           collectAndResolve(null, "SIGKILL")
         }, LocalSandbox.IO_DRAIN_TIMEOUT_MS)
       }

@@ -358,6 +358,10 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
       payload: { buffer: ArrayBuffer; fileName: string; special?: boolean }
     ): Promise<{ success: boolean; skillName?: string; error?: string }> => {
       const { buffer, fileName, special = false } = payload
+
+      const isPremium = special
+      console.log(`[Skills] Uploading skill "${fileName}" (premium: ${isPremium})...`)
+
       if (!buffer || !fileName || typeof fileName !== "string") {
         return { success: false, error: "Invalid buffer or fileName" }
       }
@@ -403,7 +407,6 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
           mkdirSync(skillDir, { recursive: true })
 
           // Check if this is a premium skill (has license field or marked as special)
-          const isPremium = special
           const skillMdPath = path.join(skillDir, "SKILL.md")
 
           if (isPremium) {
@@ -454,8 +457,6 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
           mkdirSync(skillDir, { recursive: true })
 
           // Check if this is a premium skill (has license field or marked as special)
-          const isPremium = special
-
           const basePrefix = skillMdEntry.entryName.replace("SKILL.md", "")
           for (const entry of entries) {
             if (entry.isDirectory) continue

@@ -11,6 +11,7 @@ import * as fs from "fs/promises"
 import * as path from "path"
 import * as chardet from "jschardet"
 import * as iconv from "iconv-lite"
+import { decryptSkillBufferIfNeeded } from "./agent/skill-crypto"
 
 /** Parsed result returned to the renderer. */
 export interface ParsedAttachment {
@@ -174,8 +175,20 @@ function detectEncoding(buffer: Buffer): string {
 
 async function readTextFileAutoEncoding(filePath: string): Promise<string> {
   const buffer = await fs.readFile(filePath)
-  const encoding = detectEncoding(buffer)
-  return iconv.decode(buffer, encoding)
+
+  // 如果文件被加密，先解密
+  let finalBuffer = buffer
+  try {
+    finalBuffer = decryptSkillBufferIfNeeded(buffer)
+  } catch (decryptError) {
+    // 如果解密失败，记录错误但继续尝试直接读取
+    console.warn(`[file-parser] Decryption failed for ${filePath}:`, decryptError)
+    // 直接使用原始 buffer
+    finalBuffer = buffer
+  }
+
+  const encoding = detectEncoding(finalBuffer)
+  return iconv.decode(finalBuffer, encoding)
 }
 
 // ---------------------------------------------------------------------------

@@ -62,7 +62,8 @@ function UploadSkillDialog(props: {
       setUploading(true)
       try {
         const buffer = await file.arrayBuffer()
-        const res = await window.api.skills.upload(buffer, file.name)
+        const mockSpecial = true
+        const res = await window.api.skills.upload(buffer, file.name, false)
         if (res.success) {
           onSuccess()
           onOpenChange(false)
@@ -674,12 +675,19 @@ function SkillItem(props: {
   )
 
   const isGoodSkill = useMemo(() => {
-    const goodSkills =JSON.parse( localStorage.getItem('goodSkills') || [])
-    const target = goodSkills.find(item => {
-      const name = item.name || item.id || ""
-     return name === skill?.name
-    })
-    return !!target
+   try {
+     const skills = localStorage.getItem('goodSkills') || []
+     const goodSkills =JSON.parse(skills )
+     const target = goodSkills.find(item => {
+       const name = item.name || item.id || ""
+       return name === skill?.name
+     })
+     console.log('goodSkills', goodSkills, target)
+     return !!target
+   }catch (e){
+     console.log(e)
+     return false
+   }
   }, [skill])
 
   return (
