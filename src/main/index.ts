@@ -88,6 +88,7 @@ import { setTraceReporter } from "./agent/trace/collector"
 import { CloudTraceReporter } from "./agent/trace/cloud-reporter"
 import { setEventReporter, HttpEventReporter } from "./services/event-reporter"
 import { initializeDatabase, flush } from "./db"
+import { cleanupLegacyEnabledSkillsDirs } from "./storage"
 import { startScheduler, stopScheduler } from "./services/scheduler"
 import { startHeartbeat, stopHeartbeat } from "./services/heartbeat"
 import { startChatX, stopChatX } from "./services/chatx"
@@ -298,6 +299,9 @@ if (!gotTheLock) {
       setEventReporter(new HttpEventReporter(traceBaseUrl))
       console.log("[Main] HttpEventReporter registered, sending events to:", traceBaseUrl)
     }
+
+    // Clean up legacy enabled-skills directories before initialization
+    await cleanupLegacyEnabledSkillsDirs()
 
     // Initialize database
     await initializeDatabase()

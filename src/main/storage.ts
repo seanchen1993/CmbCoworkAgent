@@ -22,6 +22,29 @@ export function getOpenworkDir(): string {
   return OPENWORK_DIR
 }
 
+/**
+ * Clean up legacy enabled-skills directories (enabled-skills-builtin and enabled-skills-custom)
+ * This is called during initialization to remove old skill cache directories
+ */
+export async function cleanupLegacyEnabledSkillsDirs(): Promise<void> {
+  try {
+    const openworkDir = getOpenworkDir()
+    const legacyDirs = ["enabled-skills-builtin", "enabled-skills-custom"]
+
+    for (const dirName of legacyDirs) {
+      const dirPath = join(openworkDir, dirName)
+      if (existsSync(dirPath)) {
+        console.log(`[Storage] Cleaning up legacy directory: ${dirPath}`)
+        await rm(dirPath, { recursive: true, force: true })
+        console.log(`[Storage] Successfully removed: ${dirPath}`)
+      }
+    }
+  } catch (error) {
+    console.error("[Storage] Error cleaning up legacy enabled-skills directories:", error)
+    // Don't throw - this is a non-critical cleanup operation
+  }
+}
+
 export function getDbPath(): string {
   return join(getOpenworkDir(), "cmbcoworkagent.sqlite")
 }
@@ -355,7 +378,8 @@ async function copyEnabledSkillsFromSourceAsync(sourceDir: string, disabled: Set
     try {
       // Read SKILL.md (may be encrypted)
       const buffer = await readFile(skillMdPath)
-      const decrypted = decryptSkillBufferIfNeeded(buffer)
+      // const decrypted = decryptSkillBufferIfNeeded(buffer)
+      const decrypted = buffer
       const content = decrypted.toString("utf-8")
       const name = parseSkillNameFromFrontmatter(content) || entry.name
       if (disabled.has(name.trim().toLowerCase())) continue
@@ -366,11 +390,7 @@ async function copyEnabledSkillsFromSourceAsync(sourceDir: string, disabled: Set
     const srcSkillDir = join(sourceDir, entry.name)
     const destPath = destDir ? join(destDir, entry.name) : join(ENABLED_SKILLS_DIR, entry.name)
     try {
-      // Copy directory, then decrypt all files if they are encrypted
       await copyDirRecursive(srcSkillDir, destPath)
-
-      // Post-process: decrypt all files in the copied skill directory
-      await decryptSkillFilesInPlace(destPath)
       count++
     } catch (e) {
       console.warn(`[Storage] Failed to copy skill ${entry.name}:`, e)
@@ -381,39 +401,6 @@ async function copyEnabledSkillsFromSourceAsync(sourceDir: string, disabled: Set
   return count
 }
 
-/**
- * Decrypt all encrypted files in a skill directory (in-place).
- * This ensures the agent runtime can read plaintext files.
- */
-async function decryptSkillFilesInPlace(skillDir: string): Promise<void> {
-  const entries = await readdir(skillDir, { withFileTypes: true })
-
-  for (const entry of entries) {
-    const fullPath = join(skillDir, entry.name)
-
-    if (entry.isDirectory()) {
-      // Recurse into subdirectories
-      await decryptSkillFilesInPlace(fullPath)
-    } else {
-      // Try to decrypt the file if it's encrypted
-      try {
-        const buf = await readFile(fullPath)
-        const decrypted = decryptSkillBufferIfNeeded(buf)
-
-        // Only write back if the file was actually encrypted
-        if (decrypted.length !== buf.length || !decrypted.equals(buf)) {
-          await writeFile(fullPath, decrypted)
-        }
-      } catch (e) {
-        // Silently ignore files that can't be decrypted (they're plaintext)
-        // Re-throw actual errors
-        if (!(e instanceof Error) || !e.message.includes("skill-encryption header")) {
-          console.warn(`[Storage] Failed to decrypt skill file ${fullPath}:`, e)
-        }
-      }
-    }
-  }
-}
 
 let _enabledSkillsBuildLock: Promise<string[]> | null = null
 
