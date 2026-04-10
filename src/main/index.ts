@@ -70,7 +70,7 @@ process.on("unhandledRejection", (reason) => {
 import { registerAgentHandlers } from "./ipc/agent"
 import { registerThreadHandlers } from "./ipc/threads"
 import { registerModelHandlers } from "./ipc/models"
-import { registerSkillsHandlers, initializeGoodSkillsEncryption } from "./ipc/skills"
+import { registerSkillsHandlers } from "./ipc/skills"
 import { registerMcpHandlers } from "./ipc/mcp"
 import { registerScheduledTaskHandlers } from "./ipc/scheduled-tasks"
 import { registerHeartbeatHandlers } from "./ipc/heartbeat"
@@ -325,9 +325,6 @@ if (!gotTheLock) {
     registerCodeExecToolsHandlers(ipcMain)
     registerRoutingHandlers(ipcMain)
     registerUpdaterHandlers()
-
-    // Initialize good skills encryption on startup
-    await initializeGoodSkillsEncryption()
 
     // Register file system handlers
     ipcMain.handle("get-platform", async () => {
