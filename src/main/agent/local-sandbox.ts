@@ -32,6 +32,7 @@ import micromatch from "micromatch"
 import { replace } from "./replace"
 import type { ToolOrchestrator } from "./tool-orchestrator"
 import { assessCommandSafety } from "./exec-policy"
+import { app } from "electron"
 import {
   isWorkspaceElevatedSetupDone,
   isElevatedSetupComplete,
@@ -81,6 +82,108 @@ function powershellSingleQuote(value: string): string {
 
 function cmdSetLiteral(value: string): string {
   return value.replace(/"/g, '""')
+}
+
+/** Set to false to disable RTK token optimization globally. */
+const RTK_ENABLED = true
+
+/**
+ * Resolve the bundled RTK binary path for the current platform.
+ */
+function resolveRtkBin(): string {
+  let resourceBase: string
+  if (app.isPackaged) {
+    resourceBase = process.resourcesPath
+  } else {
+    const candidates = [
+      path.resolve(__dirname, "../../resources"),
+      path.join(app.getAppPath(), "resources"),
+      path.join(app.getAppPath(), "..", "resources"),
+    ]
+    resourceBase = candidates.find((c) => existsSync(path.join(c, "bin"))) ?? path.resolve(__dirname, "../../resources")
+  }
+  const bin = process.platform === "win32" ? "rtk.exe" : "rtk"
+  return path.join(resourceBase, "bin", process.platform, bin)
+}
+
+/**
+ * Try to rewrite a command via RTK for token-optimized output.
+ * Returns the rewritten command string, or null if RTK is unavailable
+ * or the command is not supported by RTK.
+ */
+let _rtkBin: string | false | null = null
+let _rtkErrorCount = 0
+const RTK_ERROR_THRESHOLD = 3
+
+// Commands where RTK's filtering destroys critical data (e.g. curl replaces JSON values with schema)
+const RTK_SKIP_COMMANDS = /\bcurl\s|\bwget\s/
+
+async function tryRtkRewrite(command: string): Promise<string | null> {
+  if (!RTK_ENABLED) return null
+  if (RTK_SKIP_COMMANDS.test(command)) return null
+  // Cache RTK binary path
+  if (_rtkBin === false) return null
+  if (_rtkBin === null) {
+    const bin = resolveRtkBin()
+    if (existsSync(bin)) {
+      _rtkBin = bin
+      console.log(`[RTK] found binary at ${bin}`)
+    } else {
+      _rtkBin = false
+      console.log(`[RTK] binary not found at ${bin}, token optimization disabled`)
+      return null
+    }
+  }
+
+  const rtkBin = _rtkBin
+  return new Promise((resolve) => {
+    const child = spawn(rtkBin, ["rewrite", command], {
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 500
+    })
+    const chunks: Buffer[] = []
+    child.stdout!.on("data", (chunk: Buffer) => chunks.push(chunk))
+    child.on("close", (code) => {
+      // exit 0/1/2/3 are all normal RTK responses — reset error count
+      if (code !== null && code >= 0 && code <= 3) {
+        _rtkErrorCount = 0
+        // exit 0 = allowed rewrite, exit 3 = ask-mode rewrite.
+        // RTK's ask-mode (3) is designed for Claude Code's hook system to decide whether
+        // to prompt the user. In CmbCowork, approval happens earlier in execute() via
+        // orchestrator/HITL, so we intentionally treat 3 the same as 0 here.
+        if (code === 0 || code === 3) {
+          const rewritten = Buffer.concat(chunks).toString("utf-8").trim()
+          if (rewritten && rewritten !== command) {
+            const safeBin = rtkBin.replace(/\\/g, "/")
+            const quoted = safeBin.includes(" ") ? `"${safeBin}"` : safeBin
+            // Replace "rtk " only in command positions (start of string or after && || ;)
+            const absolute = rewritten.replace(/(^|&&\s*|\|\|\s*|;\s*)rtk /g, `$1${quoted} `)
+            console.log(`[RTK] rewrite: "${command}" → "${absolute}"`)
+            resolve(absolute)
+            return
+          }
+        }
+        // exit 1 = no equivalent, exit 2 = denied, or 0/3 with no change — passthrough
+        resolve(null)
+        return
+      }
+      // Unexpected failure (crash, signal, timeout) — count toward circuit breaker
+      _rtkErrorCount++
+      if (_rtkErrorCount >= RTK_ERROR_THRESHOLD) {
+        _rtkBin = false
+        console.warn(`[RTK] ${RTK_ERROR_THRESHOLD} consecutive errors, disabling RTK`)
+      }
+      resolve(null)
+    })
+    child.on("error", () => {
+      _rtkErrorCount++
+      if (_rtkErrorCount >= RTK_ERROR_THRESHOLD) {
+        _rtkBin = false
+        console.warn(`[RTK] ${RTK_ERROR_THRESHOLD} consecutive spawn errors, disabling RTK`)
+      }
+      resolve(null)
+    })
+  })
 }
 
 /**
@@ -2022,6 +2125,15 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
    * or as fallback when no orchestrator is configured.
    */
   async executeRaw(command: string, sandboxModeOverride?: string, timeoutMs?: number, overrideAbortSignal?: AbortSignal): Promise<ExecuteResponse> {
+    // RTK token optimization: skip in Windows sandbox (isolated filesystem can't access bundled binary)
+    const effectiveSandbox = (sandboxModeOverride ?? this.windowsSandbox) as typeof this.windowsSandbox
+    const skipRtk = process.platform === "win32" && effectiveSandbox !== "none"
+    const rtkRewritten = skipRtk ? null : await tryRtkRewrite(command)
+    if (rtkRewritten) {
+      console.log(`[RTK] approved command="${command}" → executing as="${rtkRewritten}"`)
+      command = rtkRewritten
+    }
+
     const effectiveSandboxMode = (sandboxModeOverride ?? this.windowsSandbox) as typeof this.windowsSandbox
     const effectiveTimeout = timeoutMs ?? this.timeout
     console.log(`[LocalSandbox] executeRaw: command="${command}" effectiveMode=${effectiveSandboxMode} override=${sandboxModeOverride} timeout=${effectiveTimeout}ms overrideAbort=${!!overrideAbortSignal}`)
