@@ -240,7 +240,13 @@ Output ONLY a valid JSON object (no markdown fences):
   ]
 }
 
-If there is nothing to do, return { "operations": [] }.
+IMPORTANT: recall_count and age_days should NOT prevent merge or create_meta operations.
+Even brand-new files (age_days=0) with recall_count=0 SHOULD be merged if they clearly describe
+the same topic or overlap significantly. Only the "archive" operation requires the age/recall gates
+listed above. When you see files with very similar names, descriptions, or content — merge them.
+When you see 3+ files pointing to a common pattern — create a meta-fact.
+
+If there is genuinely nothing to consolidate, return { "operations": [] }.
 Use the same language as the memory content (Chinese for Chinese content).`
 
 // ─── Prompt builder ─────────────────────────────────────────────────────────
