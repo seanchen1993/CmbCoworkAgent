@@ -973,7 +973,19 @@ export function SkillDetail(props: {
         </p>
       </div>
 
-      {isGoodSkill ? <div className={'m-4'}>精品技能暂不支持查看，可直接使用</div> :    <ScrollArea className="flex-1">
+      {isGoodSkill ? (
+        <div className="flex-1 flex items-center justify-center p-8">
+          <div className="text-center space-y-3 max-w-sm">
+            <div className="size-12 rounded-xl bg-amber-500/10 flex items-center justify-center mx-auto">
+              <Sparkles className="size-6 text-amber-500" />
+            </div>
+            <p className="text-sm text-muted-foreground leading-relaxed">
+              精品技能暂不支持查看内容，可直接在对话中使用
+            </p>
+          </div>
+        </div>
+      ) : (
+        <ScrollArea className="flex-1">
         <div className="p-4">
           {isLoading ? (
             <p className="text-sm text-muted-foreground">加载中...</p>
@@ -1012,7 +1024,8 @@ export function SkillDetail(props: {
             </div>
           )}
         </div>
-      </ScrollArea>}
+      </ScrollArea>
+      )}
     </div>
   )
 }
