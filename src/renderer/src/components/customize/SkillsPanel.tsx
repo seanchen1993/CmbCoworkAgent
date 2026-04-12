@@ -834,7 +834,7 @@ export function SkillDetail(props: {
   } = props
 
   const isGoodSkill = useMemo(() => {
-    const goodSkills =JSON.parse( localStorage.getItem('goodSkills') || [])
+    const goodSkills = JSON.parse(localStorage.getItem('goodSkills') || '[]')
     const target = goodSkills.find(item => {
       const name = item.name || item.id || ""
       return name === skill?.name
