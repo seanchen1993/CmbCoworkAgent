@@ -803,6 +803,17 @@ export function MarketPanel(): React.JSX.Element {
   const openItemDetail = async (item: MarketItem) => {
     setSelectedItemKey(getItemKey(item))
     setDetailMode("detail")
+    if (item.featured === '精品'){
+      if (activeTab === "skill") {
+        setSkillDetailSkill({
+          name: item.name,
+          description:  item.description,
+          path:  '',
+          source: "user"
+        })
+        return
+      }
+    }
     await loadDetailDataForItem(item)
   }
 
