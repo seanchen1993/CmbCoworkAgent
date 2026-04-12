@@ -7,8 +7,8 @@ import { ImageViewer } from "./ImageViewer"
 import { MediaViewer } from "./MediaViewer"
 import { PDFViewer } from "./PDFViewer"
 import { BinaryFileViewer } from "./BinaryFileViewer"
-import MarkdownPreview from "@/components/ui/MarkdownPreview/MarkdownPreview"
-import { HtmlPreview } from "@/components/chat/previews/HtmlPreview"
+import MarkdownPreview from "@/components/tabs/MarkdownPreview/MarkdownPreview"
+import { HtmlPreview } from "@/components/tabs/HtmlPreview"
 
 interface FileViewerProps {
   filePath: string
