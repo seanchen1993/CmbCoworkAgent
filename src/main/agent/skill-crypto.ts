@@ -1,23 +1,22 @@
 /**
- * Base64 encoding for skill files.
+ * Obfuscated encoding for skill files.
  *
  * Design goals
  * ────────────
- * • Encode skill files in Base64 format for easier transport and storage.
- * • Simple encoding-only approach without actual encryption.
+ * • Encode skill files with simple obfuscation for transport and storage.
+ * • Uses Base64 + string reversal to prevent trivial decoding.
  * • Binary-safe: input/output are always Node Buffers; callers handle
  *   string ↔ Buffer conversion.
  *
  * Wire format (text-based)
  * ────────────────────────
- *   MAGIC (8 bytes as text) | Base64_Encoded_Content
- *   Example: "SKENC\x01\x00\x00" + base64_string
+ *   MAGIC (8 bytes) | Reversed_Base64_Content
  */
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
 /** Magic bytes written at the start of every encoded skill file. */
-const MAGIC = Buffer.from("SKENC\x01\x00\x00") // 8 bytes
+const MAGIC = Buffer.from("SKENC\x02\x00\x00") // 8 bytes, version 2
 
 // ── Utility functions ────────────────────────────────────────────────────────
 
@@ -30,20 +29,21 @@ export function isSkillEncrypted(buf: Buffer): boolean {
 }
 
 /**
- * Encodes `plaintext` to Base64 and returns the binary buffer with magic header.
- * Format: MAGIC (8 bytes) | Base64_String (as UTF-8 bytes)
+ * Encodes `plaintext` with obfuscation and returns the binary buffer with magic header.
+ * Process: plaintext -> Base64 -> reverse string -> MAGIC + result
  */
 export function encryptSkillBuffer(plaintext: Buffer): Buffer {
-  // Convert plaintext to Base64
+  // Convert to Base64 then reverse the string
   const base64Content = plaintext.toString("base64")
-  // Create the content: MAGIC + Base64 string (as UTF-8 bytes)
-  const contentBuffer = Buffer.from(base64Content, "utf-8")
+  const reversed = base64Content.split("").reverse().join("")
+  // Create the content: MAGIC + reversed Base64 string
+  const contentBuffer = Buffer.from(reversed, "utf-8")
   return Buffer.concat([MAGIC, contentBuffer])
 }
 
 /**
  * Decodes a buffer that was produced by `encryptSkillBuffer`.
- * Extracts the Base64 content and decodes it back to the original plaintext.
+ * Process: extract reversed Base64 -> reverse back -> decode Base64 -> original plaintext
  * Throws if the magic header is missing.
  */
 export function decryptSkillBuffer(buf: Buffer): Buffer {
@@ -51,10 +51,13 @@ export function decryptSkillBuffer(buf: Buffer): Buffer {
     throw new Error("[SkillCrypto] Buffer does not have a valid skill-encoding header")
   }
 
-  // Extract the Base64 content (everything after the magic header)
-  const base64Content = buf.subarray(MAGIC.length).toString("utf-8")
+  // Extract the reversed Base64 content
+  const reversed = buf.subarray(MAGIC.length).toString("utf-8")
 
-  // Decode from Base64 back to the original plaintext
+  // Reverse it back to get original Base64
+  const base64Content = reversed.split("").reverse().join("")
+
+  // Decode from Base64
   return Buffer.from(base64Content, "base64")
 }
 
@@ -65,4 +68,3 @@ export function decryptSkillBuffer(buf: Buffer): Buffer {
 export function decryptSkillBufferIfNeeded(buf: Buffer): Buffer {
   return isSkillEncrypted(buf) ? decryptSkillBuffer(buf) : buf
 }
-
