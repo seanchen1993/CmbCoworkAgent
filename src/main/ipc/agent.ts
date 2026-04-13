@@ -706,10 +706,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 }
               })
             } else if (event.type === "error") {
-              console.error(`[ACPX] Error event: ${event.message}`)
+              const errorDetail = event.message || event.code || "Unknown ACPX error"
+              console.error(`[ACPX] Error event: ${errorDetail}`)
               window.webContents.send(channel, {
                 type: "error",
-                error: event.message
+                error: errorDetail
               })
             }
             // "done" event is handled by the loop ending naturally
@@ -724,7 +725,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             error instanceof Error &&
             (error.name === "AbortError" || error.message.includes("aborted"))
           if (!isAbortError) {
-            const errMsg = error instanceof Error ? error.message : "Unknown error"
+            // acpx 可能抛出 AcpRuntimeError 或普通对象，尽量提取有用信息
+            let errMsg = "Unknown error"
+            if (error instanceof Error) {
+              errMsg = error.message
+            } else if (typeof error === "object" && error !== null) {
+              const obj = error as Record<string, unknown>
+              errMsg = (obj.message as string) || (obj.code as string) || JSON.stringify(error)
+            } else if (typeof error === "string") {
+              errMsg = error
+            }
             console.error("[ACPX] Error:", error)
             window.webContents.send(channel, { type: "error", error: errMsg })
             notifyIfBackground("❌ 任务失败", errMsg)
