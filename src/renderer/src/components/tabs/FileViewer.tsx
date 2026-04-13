@@ -18,26 +18,13 @@ interface FileViewerProps {
   reloadToken?: number
 }
 
-// 检测content是否是skill加密内容
-// 魔法头: SKENC\x01\x00\x00 (8 bytes)
-const isSkillEncrypted = (str: string): boolean => {
-  if (!str || str.length < 8) return false
+// 检测 content 是否使用了 skill 加密头（与 main/agent/skill-crypto.ts 保持一致）
+// 魔法头: SKENC\x02\x00\x00 (8 bytes, version 2)
+const SKILL_ENCRYPTION_MAGIC = "SKENC\x02\x00\x00"
 
-  const magic = "SKENC\x01\x00\x00"
-
-  try {
-    // 如果是直接的魔法头字符串
-    if (str.startsWith(magic)) {
-      return true
-    }
-
-    // 如果是base64编码的形式，需要先检查解码
-    // Base64编码的魔法头: U0tFTkMBAAA=
-    const base64Magic = Buffer.from(magic, "utf-8").toString("base64")
-    return str.startsWith(base64Magic)
-  } catch {
-    return false
-  }
+const isSkillEncrypted = (content?: string): boolean => {
+  if (!content || content.length < SKILL_ENCRYPTION_MAGIC.length) return false
+  return content.startsWith(SKILL_ENCRYPTION_MAGIC)
 }
 
 // 加密文件提示组件
