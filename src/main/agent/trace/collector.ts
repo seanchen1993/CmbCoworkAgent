@@ -399,6 +399,7 @@ export class TraceCollector {
       }
     }
 
+    const userInfo = getUserInfo()
     const trace: AgentTrace = {
       traceId: this.traceId,
       threadId: this.threadId,
@@ -409,7 +410,11 @@ export class TraceCollector {
       modelId: this.modelId,
       ...(this.modelName ? { modelName: this.modelName } : {}),
       userIp: getLocalIP(),
-      userName: getUserInfo()?.userName,
+      userName: userInfo?.userName,
+      sapId: userInfo?.sapId,
+      ystId: userInfo?.ystId,
+      originOrgId: userInfo?.originOrgId,
+      orgName: userInfo?.orgName,
       appVersion: app.getVersion(),
       steps: this.steps,
       modelCalls: this.modelCalls,

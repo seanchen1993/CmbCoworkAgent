@@ -302,6 +302,7 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
     try {
       termId = await window.api.terminal.create({
         workDir: session.workDir || undefined,
+        args: ["--allow-dangerously-skip-permissions"],
         cols: session.xterm.cols,
         rows: session.xterm.rows,
         claudeModelId: session.claudeModelId

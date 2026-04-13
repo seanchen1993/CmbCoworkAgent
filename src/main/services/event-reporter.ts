@@ -51,6 +51,10 @@ export interface CoworkEvent {
   eventTime:     string
   userName:      string
   userIp:        string
+  sapId?:        string
+  ystId?:        string
+  originOrgId?:  string
+  orgName?:      string
   properties?:   Record<string, unknown>
 }
 
@@ -159,6 +163,10 @@ export function buildEvent(
     eventTime:     nowIsoLocal(),
     userName:      userInfo?.userName || "unknown",
     userIp:        getLocalIP(),
+    sapId:         userInfo?.sapId,
+    ystId:         userInfo?.ystId,
+    originOrgId:   userInfo?.originOrgId,
+    orgName:       userInfo?.orgName,
     properties
   }
 }

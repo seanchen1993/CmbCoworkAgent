@@ -27,9 +27,9 @@ const LOW_WATER_MARK = 1 * 1024 * 1024   // 1MB 恢复
 const pendingBytes = new Map<string, number>()
 const paused = new Map<string, boolean>()
 
-// checkNodeVersion 与 tryCandidate 共享的"版本过旧"标识：
-// 用 sentinel 前缀而非 err.message.includes("too old") 字符串匹配，避免改文案时漏改导致分类静默走错路径
-const NODE_TOO_OLD_TAG = "[NODE_TOO_OLD] "
+// checkNodeVersion 与 tryCandidate 共享的"版本不兼容"标识：
+// 用 sentinel 前缀而非 err.message.includes(...) 字符串匹配，避免改文案时漏改导致分类静默走错路径
+const NODE_INCOMPATIBLE_TAG = "[NODE_INCOMPATIBLE] "
 
 // 剥离 BOM 并 trim
 function stripBomTrim(s: string): string {
@@ -160,11 +160,11 @@ function findNodeExe(): string {
   if (nvmSymlink) candidates.push(join(nvmSymlink, "node.exe"))
 
   // 探测一个已存在的候选路径：校验通过则缓存返回 "ok"，否则返回失败原因。
-  // 不在 too old 时立即抛出 —— 用户可能同时装了旧 MSI 和新 nvm/Volta，旧的不能否决整个搜索。
+  // 不在版本不兼容时立即抛出 —— 用户可能同时装了不兼容旧版和兼容新版，旧的不能否决整个搜索。
   // triedPaths 由外层统一记录，避免双 push 导致最终错误冗长。
-  let tooOldSeen: string | null = null
+  let incompatibleSeen: string | null = null
   let execFailedSeen: string | null = null
-  type TryResult = "ok" | "too-old" | "exec-failed"
+  type TryResult = "ok" | "incompatible" | "exec-failed"
   const tryCandidate = (p: string, label: string): TryResult => {
     try {
       checkNodeVersion(p)
@@ -172,12 +172,12 @@ function findNodeExe(): string {
       return "ok"
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      if (msg.startsWith(NODE_TOO_OLD_TAG)) {
+      if (msg.startsWith(NODE_INCOMPATIBLE_TAG)) {
         // 用户向错误展示时去掉内部 sentinel 前缀
-        const cleanMsg = msg.slice(NODE_TOO_OLD_TAG.length)
-        if (!tooOldSeen) tooOldSeen = `${label} (${p}): ${cleanMsg}`
-        console.warn(`[PtyHost] Skipping ${label} (${p}): version too old, continuing search`)
-        return "too-old"
+        const cleanMsg = msg.slice(NODE_INCOMPATIBLE_TAG.length)
+        if (!incompatibleSeen) incompatibleSeen = `${label} (${p}): ${cleanMsg}`
+        console.warn(`[PtyHost] Skipping ${label} (${p}): incompatible Node.js version, continuing search`)
+        return "incompatible"
       }
       if (!execFailedSeen) execFailedSeen = `${label} (${p}): ${msg}`
       console.warn(`[PtyHost] Skipping ${label} (${p}): ${msg}`)
@@ -187,7 +187,7 @@ function findNodeExe(): string {
 
   // 单条 triedPaths 的状态后缀，避免外层为同一个候选 push 两次
   const trySuffix = (r: TryResult): string =>
-    r === "too-old" ? ":too-old" : r === "exec-failed" ? ":exec-failed" : ""
+    r === "incompatible" ? ":incompatible" : r === "exec-failed" ? ":exec-failed" : ""
 
   for (const p of candidates) {
     if (!existsSync(p)) {
@@ -253,24 +253,25 @@ function findNodeExe(): string {
     } catch { /* key not found */ }
   }
 
-  // 全部候选都失败：如果至少有一个候选是版本过旧，优先报告"升级"，否则报告"找不到"
+  // 全部候选都失败：如果至少有一个候选是版本不兼容，优先报告"升级"，否则报告"找不到"
   // 错误消息只包含摘要（前 3 条 + 总数），完整列表打到日志，避免几 KB 的字符串塞进 IPC/弹窗
   const triedSummary = triedPaths.length <= 3
     ? triedPaths.join("; ")
     : `${triedPaths.slice(0, 3).join("; ")}; ... (+${triedPaths.length - 3} more)`
   console.error(`[PtyHost] findNodeExe failed. All tried paths:\n${triedPaths.join("\n")}`)
 
-  if (tooOldSeen && execFailedSeen) {
-    // 混合失败：有过旧的，也有存在但无法执行的，两类排查方向都给出
+  if (incompatibleSeen && execFailedSeen) {
+    // 混合失败：有版本不兼容的，也有存在但无法执行的，两类排查方向都给出
     throw new Error(
-      `Node.js found but not fully usable. Some are too old: ${tooOldSeen}. Some failed to execute: ${execFailedSeen}. ` +
-      `Tried: ${triedSummary}. Upgrade old versions and check permissions: https://nodejs.org/`
+      `Node.js found but not fully usable. Some versions are incompatible with Claude Code: ${incompatibleSeen}. ` +
+      `Some failed to execute: ${execFailedSeen}. Tried: ${triedSummary}. ` +
+      `Upgrade Node.js and check permissions: https://nodejs.org/`
     )
   }
-  if (tooOldSeen) {
+  if (incompatibleSeen) {
     throw new Error(
-      `All discovered Node.js installations are too old (need >= 18). ` +
-      `First match: ${tooOldSeen}. Tried: ${triedSummary}. ` +
+      `All discovered Node.js installations are incompatible with Claude Code. ` +
+      `First match: ${incompatibleSeen}. Tried: ${triedSummary}. ` +
       `Please upgrade: https://nodejs.org/`
     )
   }
@@ -289,8 +290,8 @@ function findNodeExe(): string {
 }
 
 /**
- * 验证 node.exe 可执行且版本 >= 18。
- * - 版本过旧：抛错（不可恢复，告知用户升级）
+ * 验证 node.exe 可执行且具备 Claude Code 依赖的资源释放能力。
+ * - 版本不兼容：抛错（不可恢复，告知用户升级）
  * - 执行失败（stub/损坏/无权限/架构不匹配）：抛错（让 caller 跳到下一个候选）
  * - 校验通过：返回
  */
@@ -308,13 +309,31 @@ function checkNodeVersion(nodePath: string): void {
   } catch (err) {
     throw new Error(`Could not execute Node.js at ${nodePath}: ${err instanceof Error ? err.message : String(err)}`)
   }
-  const major = parseInt(ver.slice(1), 10)
-  if (Number.isNaN(major)) {
+  // 解析完整版本号 vMAJOR.MINOR.PATCH
+  const verMatch = ver.match(/^v(\d+)\.(\d+)\.(\d+)/)
+  if (!verMatch) {
     throw new Error(`Could not parse Node.js version at ${nodePath}: got "${ver}"`)
   }
-  if (major < 18) {
-    // 前缀 NODE_TOO_OLD_TAG 是 tryCandidate 用来识别"版本过旧"分支的契约，文案改动时务必保留前缀
-    throw new Error(`${NODE_TOO_OLD_TAG}Node.js ${ver} is too old, need >= 18. Please upgrade: https://nodejs.org/`)
+  const major = Number(verMatch[1])
+  const minor = Number(verMatch[2])
+
+  // Claude Code 依赖 Symbol.dispose（Explicit Resource Management），
+  // 该能力的可用性不是简单的 ">=18"：
+  //   18.18.0+  ✅ (LTS 回补)
+  //   19.x      ❌ (奇数非 LTS，2023-04-10 EOL，未回补)
+  //   20.4.0+   ✅
+  //   21.0.0+   ✅ (继承 20.4.0+ 已有能力)
+  //   22.0.0+   ✅
+  const hasDispose =
+    (major === 18 && minor >= 18) ||
+    (major === 20 && minor >= 4) ||
+    major >= 21
+  if (!hasDispose) {
+    // 前缀 NODE_INCOMPATIBLE_TAG 是 tryCandidate 用来识别"版本不兼容"分支的契约，文案改动时务必保留前缀
+    throw new Error(
+      `${NODE_INCOMPATIBLE_TAG}Node.js ${ver} lacks Symbol.dispose support required by Claude Code. ` +
+      `Supported versions: 18.18.0+, 20.4.0+, or any version >= 21. Please upgrade: https://nodejs.org/`
+    )
   }
 }
 

@@ -180,6 +180,14 @@ export interface AgentTrace {
   userIp?: string
   /** Logged-in user's name from UserInfoConfig */
   userName?: string
+  /** SAP employee ID (8-digit) */
+  sapId?: string
+  /** YST user ID (6-digit) */
+  ystId?: string
+  /** Original organization ID */
+  originOrgId?: string
+  /** Organization / department name */
+  orgName?: string
   /** Ordered list of reasoning steps */
   steps: TraceStep[]
   /** Ordered model-call runs (request + response) */
