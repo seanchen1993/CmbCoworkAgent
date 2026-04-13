@@ -50,7 +50,7 @@ export interface IPCToolCallEvent {
 // Raw stream event - forwards LangGraph stream chunks directly
 export interface IPCStreamEvent {
   type: "stream"
-  mode: "messages" | "values"
+  mode: "messages" | "values" | "acpx"
   data: unknown
 }
 

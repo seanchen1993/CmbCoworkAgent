@@ -759,6 +759,48 @@ export class ElectronIPCTransport implements UseStreamTransport {
           })
         }
       }
+    } else if (mode === "acpx") {
+      // ACPX mode: events from external agents (codex/claude/cursor/gemini etc.)
+      const acpxData = data as {
+        type: "text_delta" | "tool_call" | "status"
+        text?: string
+        stream?: "output" | "thought"
+        toolCallId?: string
+        status?: string
+        title?: string
+      }
+
+      if (acpxData.type === "text_delta" && acpxData.text) {
+        // Convert to a standard AI message event so the chat UI renders it
+        const msgId = this.currentMessageId || crypto.randomUUID()
+        this.currentMessageId = msgId
+        events.push({
+          event: "messages",
+          data: [
+            { id: msgId, type: "ai", content: acpxData.text },
+            { langgraph_node: "agent" }
+          ]
+        })
+      } else if (acpxData.type === "tool_call") {
+        events.push({
+          event: "custom",
+          data: {
+            type: "acpx_tool_call",
+            text: acpxData.text || "",
+            toolCallId: acpxData.toolCallId,
+            status: acpxData.status,
+            title: acpxData.title
+          }
+        })
+      } else if (acpxData.type === "status") {
+        events.push({
+          event: "custom",
+          data: {
+            type: "acpx_status",
+            text: acpxData.text || ""
+          }
+        })
+      }
     }
 
     return events

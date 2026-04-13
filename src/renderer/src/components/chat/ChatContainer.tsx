@@ -37,6 +37,7 @@ import { cn } from "@/lib/utils"
 import { useShallow } from "zustand/react/shallow"
 import { useCurrentThread, useThreadStream } from "@/lib/thread-context"
 import { ModelSwitcher } from "./ModelSwitcher"
+import { AgentSwitcher } from "./AgentSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
 import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
@@ -187,6 +188,7 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
       setSkillRetryContext: s.setSkillRetryContext
     }))
   )
+  const [acpxAgent, setAcpxAgent] = useState("")
   const [yoloMode, setYoloMode] = useState(false)
   const [glowVisible, setGlowVisible] = useState(false)
   // NUX (first-run sandbox setup)
@@ -610,6 +612,11 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
         .catch((e) => console.warn("[YoloMode] Failed to fetch:", e))
     }
     fetchYoloMode()
+    // Load acpxAgent from thread metadata
+    window.api.threads.get(threadId).then((thread) => {
+      const metadata = thread?.metadata || {}
+      setAcpxAgent((metadata.acpxAgent as string) || "")
+    })
     return window.api.sandbox.onChanged(fetchYoloMode)
   }, []) // 移除queryRemoteSkills依赖，只在组件挂载时执行一次
 
@@ -929,20 +936,23 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
     e.preventDefault()
     if ((!input.trim() && attachments.length === 0) || isLoading || !stream) return
 
-    if (!currentModel) {
-      setError("请先在下方选择模型后再发送消息。")
-      return
-    }
+    // ACPX 模式下不需要验证模型配置（外部 Agent 自带模型）
+    if (!acpxAgent) {
+      if (!currentModel) {
+        setError("请先在下方选择模型后再发送消息。")
+        return
+      }
 
-    const selectedModel = models.find((m) => m.id === currentModel)
-    if (!selectedModel) {
-      setError("当前线程模型不存在，请重新选择模型。")
-      return
-    }
+      const selectedModel = models.find((m) => m.id === currentModel)
+      if (!selectedModel) {
+        setError("当前线程模型不存在，请重新选择模型。")
+        return
+      }
 
-    if (!selectedModel.available) {
-      setError("当前模型不可用，请先在模型配置中设置 API 密钥。")
-      return
+      if (!selectedModel.available) {
+        setError("当前模型不可用，请先在模型配置中设置 API 密钥。")
+        return
+      }
     }
 
     if (!workspacePath) {
@@ -2346,6 +2356,8 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <ModelSwitcher threadId={threadId} />
+                <div className="w-px h-4 bg-border" />
+                <AgentSwitcher threadId={threadId} onAgentChange={setAcpxAgent} />
                 <div className="w-px h-4 bg-border" />
                 <WorkspacePicker threadId={threadId} />
                 {yoloMode && (

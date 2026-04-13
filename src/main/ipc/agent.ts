@@ -68,6 +68,11 @@ import type {
   AgentInterruptParams,
   AgentCancelParams
 } from "../types"
+import {
+  ensureAcpxSession,
+  runAcpxTurn,
+  cancelAcpxTurn
+} from "../acpx/session"
 
 const MIN_CHARS_FOR_MEMORY = 200
 
@@ -651,6 +656,84 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         })
         await tracer.finish("error", "WORKSPACE_REQUIRED")
         return
+      }
+
+      // ── ACPX 独立会话模式 ──
+      // 当线程 metadata 中标记了 acpxAgent 时，消息直接发给外部 Agent（codex/claude/cursor 等），
+      // 跳过 DeepAgent 的整个流程。
+      const acpxAgent = metadata.acpxAgent as string | undefined
+      if (acpxAgent) {
+        console.log(`[ACPX] Routing to external agent: ${acpxAgent} for thread: ${threadId}`)
+        try {
+          const handle = await ensureAcpxSession(threadId, acpxAgent, workspacePath)
+          console.log(`[ACPX] Session ensured: ${handle.runtimeSessionName}`)
+
+          for await (const event of runAcpxTurn(threadId, message, abortController.signal)) {
+            if (abortController.signal.aborted) break
+
+            if (event.type === "text_delta") {
+              window.webContents.send(channel, {
+                type: "stream",
+                mode: "acpx",
+                data: {
+                  type: "text_delta",
+                  text: event.text,
+                  stream: event.stream // "output" | "thought"
+                }
+              })
+              if (event.stream !== "thought") {
+                assistantText += event.text
+              }
+            } else if (event.type === "tool_call") {
+              window.webContents.send(channel, {
+                type: "stream",
+                mode: "acpx",
+                data: {
+                  type: "tool_call",
+                  text: event.text,
+                  toolCallId: event.toolCallId,
+                  status: event.status,
+                  title: event.title
+                }
+              })
+            } else if (event.type === "status") {
+              window.webContents.send(channel, {
+                type: "stream",
+                mode: "acpx",
+                data: {
+                  type: "status",
+                  text: event.text
+                }
+              })
+            } else if (event.type === "error") {
+              console.error(`[ACPX] Error event: ${event.message}`)
+              window.webContents.send(channel, {
+                type: "error",
+                error: event.message
+              })
+            }
+            // "done" event is handled by the loop ending naturally
+          }
+
+          if (!abortController.signal.aborted) {
+            window.webContents.send(channel, { type: "done" })
+            notifyIfBackground("✅ 任务完成", assistantText.trim() || "对话已完成")
+          }
+        } catch (error) {
+          const isAbortError =
+            error instanceof Error &&
+            (error.name === "AbortError" || error.message.includes("aborted"))
+          if (!isAbortError) {
+            const errMsg = error instanceof Error ? error.message : "Unknown error"
+            console.error("[ACPX] Error:", error)
+            window.webContents.send(channel, { type: "error", error: errMsg })
+            notifyIfBackground("❌ 任务失败", errMsg)
+          }
+        } finally {
+          activeRuns.delete(threadId)
+          window.removeListener("closed", onWindowClosed)
+        }
+        return // acpx 分支处理完毕，不走 DeepAgent 流程
       }
 
       // Sync FTS index with any memory files changed since last invocation
@@ -1811,6 +1894,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     console.log(`[Agent] cancel: threadId=${threadId}, hasController=${!!controller}, activeRuns=[${Array.from(activeRuns.keys()).join(", ")}]`)
     // Cancel any background tasks belonging to this thread (e.g. builds, tests)
     LocalSandbox.cancelBackgroundTasks(threadId)
+    // Also cancel acpx turn if active
+    cancelAcpxTurn(threadId).catch((err) => {
+      console.warn(`[ACPX] cancel failed for thread ${threadId}:`, err)
+    })
     if (controller) {
       controller.abort()
       activeRuns.delete(threadId)
