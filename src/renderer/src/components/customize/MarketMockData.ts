@@ -28,7 +28,7 @@ export const MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
       version: "1.0.0"
     },
     {
-      name: "pinchtab122",
+      name: "pinchtab",
       chinese_name: "pinchtab精品",
       description:
         "用于本地调试的 Market Mock 数据：日志分析技能示例。\n支持异常聚类、根因定位与告警摘要。",
