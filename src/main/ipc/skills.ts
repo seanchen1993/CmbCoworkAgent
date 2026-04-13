@@ -404,17 +404,13 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
             const destDir = path.dirname(destPath)
             mkdirSync(destDir, { recursive: true })
 
-            // For premium skills, encrypt all files (especially SKILL.md)
-            if (isPremium && relativePath === "SKILL.md") {
+            // For premium skills, only encrypt Markdown files (e.g. SKILL.md)
+            if (isPremium && relativePath.toLowerCase().endsWith(".md")) {
               const encrypted = encryptSkillBuffer(entry.getData())
               await fs.writeFile(destPath, encrypted)
-              console.log(`[Skills] Premium skill file "${relativePath}" encrypted`)
-            } else if (isPremium) {
-              // Encrypt other files in premium skills too
-              const encrypted = encryptSkillBuffer(entry.getData())
-              await fs.writeFile(destPath, encrypted)
+              console.log(`[Skills] Premium skill markdown file "${relativePath}" encrypted`)
             } else {
-              // Non-premium: write plaintext
+              // Non-premium OR premium non-markdown: write plaintext
               await fs.writeFile(destPath, entry.getData())
             }
           }
