@@ -4,11 +4,10 @@ import { createHash } from "crypto"
 import { v4 as uuid } from "uuid"
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, renameSync } from "fs"
 import type { HookConfig, HookUpsert } from "./hooks/types"
-import { readdir, readFile, rm, mkdir, stat as fsStat, writeFile } from "fs/promises"
+import { readdir, readFile, rm, mkdir, stat as fsStat } from "fs/promises"
 import { app } from "electron"
 import type { PluginMetadata, PluginMcpServerConfig } from "./types"
 import { copyDirRecursive } from "./utils/fs"
-import { decryptSkillBufferIfNeeded } from "./agent/skill-crypto"
 
 const OPENWORK_DIR = join(homedir(), ".cmbcoworkagent")
 const ENV_FILE = join(OPENWORK_DIR, ".env")
@@ -376,11 +375,10 @@ async function copyEnabledSkillsFromSourceAsync(sourceDir: string, disabled: Set
     if (!existsSync(skillMdPath)) continue
 
     try {
-      // Read SKILL.md (may be encrypted)
+      // Read SKILL.md (may be encrypted). Do NOT decrypt here:
+      // enabled-skills cache must keep files exactly as-is from source.
       const buffer = await readFile(skillMdPath)
-      // const decrypted = decryptSkillBufferIfNeeded(buffer)
-      const decrypted = buffer
-      const content = decrypted.toString("utf-8")
+      const content = buffer.toString("utf-8")
       const name = parseSkillNameFromFrontmatter(content) || entry.name
       if (disabled.has(name.trim().toLowerCase())) continue
     } catch {

@@ -22,6 +22,7 @@ import {
   type SandboxBackendProtocol,
   type GrepMatch,
   type FileInfo,
+  type FileDownloadResponse,
   type FileUploadResponse,
   type FileOperationError
 } from "deepagents"
@@ -1180,6 +1181,52 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       } else {
         results[entry.i] = allowedResults[ai++]
       }
+    }
+    return results
+  }
+
+  /**
+   * Override downloadFiles so encrypted skill files are transparently decrypted
+   * for middleware that reads raw bytes (e.g. skills metadata injection).
+   */
+  async downloadFiles(paths: string[]): Promise<FileDownloadResponse[]> {
+    const indexed = paths.map((filePath, i) => ({
+      filePath,
+      i,
+      sandboxBlocked: this.isBlockedBySandbox(filePath)
+    }))
+    const allowed = indexed.filter((e) => !e.sandboxBlocked)
+
+    const allowedResults = allowed.length > 0
+      ? await super.downloadFiles(allowed.map((e) => e.filePath))
+      : []
+
+    const results: FileDownloadResponse[] = new Array(paths.length)
+    const denied: FileOperationError = "permission_denied"
+    let ai = 0
+    for (const entry of indexed) {
+      if (entry.sandboxBlocked) {
+        results[entry.i] = { path: entry.filePath, content: null, error: denied }
+        continue
+      }
+
+      const raw = allowedResults[ai++] ?? { path: entry.filePath, content: null, error: "file_not_found" as const }
+      if (raw.error !== null || raw.content == null) {
+        results[entry.i] = raw
+        continue
+      }
+
+      let content: Uint8Array = raw.content
+      try {
+        content = decryptSkillBufferIfNeeded(Buffer.from(raw.content))
+      } catch (e) {
+        // Keep original bytes if decryption fails unexpectedly for this file.
+        console.warn(
+          `[LocalSandbox] Failed to decode downloaded file '${entry.filePath}', returning raw bytes:`,
+          e instanceof Error ? e.message : String(e)
+        )
+      }
+      results[entry.i] = { path: raw.path, content, error: raw.error }
     }
     return results
   }
