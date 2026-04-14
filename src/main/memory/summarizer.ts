@@ -424,6 +424,10 @@ async function summarizeAndSaveInner(options: SummarizeOptions): Promise<void> {
     // Write MEMORY.md from the LLM's curated output (preserving its grouping
     // and any user-added notes). Fall back to bootstrap regeneration only if
     // the LLM produced nothing usable AND MEMORY.md doesn't yet exist.
+    // NOTE: This path only runs when the main agent did NOT call write_file /
+    // edit_file on any file inside the memory directory during the conversation
+    // (checked via fileWritePaths in ipc/agent.ts), so there is no risk of
+    // overwriting the agent's mid-conversation edits.
     const memoryMdPath = join(memoryDir, "MEMORY.md")
     let manifestWritten = false
     if (memoryMd && memoryMd.trim()) {

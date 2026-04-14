@@ -138,7 +138,7 @@ Before answering questions about prior work, decisions, dates, people, preferenc
 ### Memory Writing Rules
 Your memory files are stored as Markdown in the memory directory. You can update them using \`edit_file\` or \`write_file\`:
 - **Long-term facts** (user preferences, project context, key decisions): update \`MEMORY.md\` in the memory directory
-- **Session events** (what was discussed/decided today): append to \`memory/YYYY-MM-DD.md\`
+- **Per-fact files**: for important knowledge, also create independent \`.md\` files with type prefix (\`user_\` / \`feedback_\` / \`project_\` / \`reference_\`) and YAML frontmatter (name/description/type). After creating a new per-fact file, always add a one-line pointer in \`MEMORY.md\` so the index stays complete
 - Update memory **immediately** when you learn something worth remembering — before responding to the user
 - Capture the **why** behind corrections, not just the fix
 - Never store API keys, passwords, or credentials in memory files
