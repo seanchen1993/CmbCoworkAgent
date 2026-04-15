@@ -45,7 +45,8 @@ class LLMSettings(BaseModel):
         )
     )
     temperature: float = 0.3
-    max_tokens: int = 4096
+    # 默认不向服务端显式传 max_tokens，避免推理模型在输出 JSON 前被本地上限截断。
+    max_tokens: int | None = None
     context_window_tokens: int = 128_000
     system_reserve_tokens: int = 8_000
     trace_budget_tokens: int = 24_000
@@ -84,7 +85,7 @@ class Settings(BaseModel):
     markdown_react_max_turns: int = 3
     markdown_react_max_files: int = 4
     markdown_react_max_token_budget: int = 12_000
-    markdown_patch_planning_max_rounds: int = 2
+    error_analyst_react_max_reads: int = 3
     family_similarity_threshold: float = 0.35
     episode_gap_minutes: int = 30
     enable_episode_route_classifier: bool = True

@@ -47,11 +47,16 @@ class LLMClient:
         last_exc: Exception | None = None
         for attempt in range(_MAX_RETRIES + 1):
             try:
+                request_kwargs: dict[str, Any] = {
+                    "model": self._settings.model,
+                    "messages": messages,
+                    "temperature": temperature if temperature is not None else self._settings.temperature,
+                }
+                resolved_max_tokens = max_tokens if max_tokens is not None else self._settings.max_tokens
+                if resolved_max_tokens is not None:
+                    request_kwargs["max_tokens"] = resolved_max_tokens
                 resp = self._client.chat.completions.create(
-                    model=self._settings.model,
-                    messages=messages,
-                    temperature=temperature if temperature is not None else self._settings.temperature,
-                    max_tokens=max_tokens or self._settings.max_tokens,
+                    **request_kwargs,
                 )
                 content = resp.choices[0].message.content or ""
                 content = _strip_think_tags(content)

@@ -10,6 +10,7 @@ FastAPI 入口模块。
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import uvicorn
@@ -22,9 +23,29 @@ from trace_evolver.schemas import RunCreateRequest, RunResponse
 from trace_evolver.service import TraceEvolutionService
 
 
+def _configure_logging(settings: Settings) -> None:
+    """Ensure trace_evolver package logs are visible under both uvicorn CLI and uvicorn.run."""
+    level = getattr(logging, settings.log_level.upper(), logging.INFO)
+    package_logger = logging.getLogger("trace_evolver")
+    package_logger.setLevel(level)
+
+    if not package_logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setLevel(level)
+        handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s %(levelname)s [%(name)s] %(message)s",
+                "%Y-%m-%d %H:%M:%S",
+            )
+        )
+        package_logger.addHandler(handler)
+        package_logger.propagate = False
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     # FastAPI 只负责暴露本地调试接口；真正的离线编排逻辑都在 TraceEvolutionService 里。
     resolved = settings or get_settings()
+    _configure_logging(resolved)
     service = TraceEvolutionService(resolved, create_session_factory(resolved))
     app = FastAPI(title="Trace Evolver Service", version="0.1.0")
     app.state.service = service

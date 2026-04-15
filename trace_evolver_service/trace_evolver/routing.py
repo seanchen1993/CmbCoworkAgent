@@ -25,7 +25,7 @@ class EpisodeRouteClassifier:
     def classify(self, episode: Episode, traces: list[ImportedTrace]) -> EpisodeRouteDecision:
         llm = LLMClient(self.settings.llm)
         messages = self._build_messages(episode, traces)
-        result = llm.chat_json(messages, temperature=0.1, max_tokens=512)
+        result = llm.chat_json(messages, temperature=0.1)
         return EpisodeRouteDecision.model_validate(result)
 
     def _build_messages(self, episode: Episode, traces: list[ImportedTrace]) -> list[dict[str, str]]:

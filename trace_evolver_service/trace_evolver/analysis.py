@@ -40,9 +40,59 @@ from trace_evolver.schemas import (
     SkillBundleMeta,
     SuccessPattern,
 )
-from trace_evolver.utils import is_allowed_markdown_relative_path, sha256_text, slugify, tokenize, trim_snippet
+from trace_evolver.utils import is_allowed_markdown_relative_path, sha256_text, tokenize, trim_snippet
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Module-level constants
+# ---------------------------------------------------------------------------
+
+_ERROR_KEYWORDS = frozenset({
+    "error", "fail", "retry", "wrong", "invalid", "mismatch", "exception", "traceback",
+    "错误", "失败", "重试", "异常", "无效", "不匹配",
+})
+
+_VALID_INTENTS = frozenset({"trigger", "workflow", "guardrail", "example", "reference", "metadata"})
+
+_ACTION_READ = "read_file"
+_ACTION_WRITE = "write_patch"
+
+_PATCH_PLACEMENT_RULES = (
+    "**Patch placement rules** (critical for quality):\n"
+    "- For EXISTING content that must be changed, use op=edit with old_string/new_string.\n"
+    "- old_string MUST uniquely match in the visible file. If it may repeat, include more "
+    "surrounding lines in old_string so the match becomes unique.\n"
+    "- For inserting guidance under an existing heading, use op=edit: old_string includes "
+    "existing text to anchor on, new_string includes that text plus your insertion.\n"
+    "- Use op=append_file_end only for appending a brand-new section to the end of a file.\n"
+    "- Use op=create only for new markdown files.\n"
+    "- For niche/case-specific guidance, route to references/*.md instead of SKILL.md.\n"
+    "- If you create a new references/*.md file, you MUST also add a link in SKILL.md "
+    "(atomic create/link pair — keep both or drop both).\n"
+)
+
+_MARKDOWN_FORMAT_RULES = (
+    "**Markdown formatting (CRITICAL)**:\n"
+    "- `old_string`, `new_string`, and `content` MUST preserve markdown line breaks. "
+    "Encode every newline as `\\n` in the JSON string. Never collapse multi-line sections.\n"
+    "- Keep a blank line (`\\n\\n`) before and after every heading and between paragraphs/list blocks, "
+    "exactly as in the source file.\n"
+    "- `old_string` must be byte-identical to the source (including `\\n` line breaks).\n"
+)
+
+_EDIT_JSON_SCHEMA = (
+    '  "edits": [\n'
+    "    {\n"
+    '      "file": "SKILL.md or references/xxx.md",\n'
+    '      "op": "edit, append_file_end, or create",\n'
+    '      "old_string": "required for edit; exact existing text to replace",\n'
+    '      "new_string": "required for edit; replacement text",\n'
+    '      "content": "required for append_file_end/create",\n'
+    '      "intent": "one of: trigger, workflow, guardrail, example, reference, metadata"\n'
+    "    }\n"
+    "  ],\n"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -143,12 +193,11 @@ def _select_error_relevant_steps(trace: ImportedTrace, max_steps: int = 8) -> li
     Strategy: include all error-containing steps + surrounding context,
     then fill remaining budget from the tail of the trace.
     """
-    error_keywords = {"error", "fail", "retry", "wrong", "invalid", "mismatch", "exception", "traceback"}
     error_indices: set[int] = set()
     for i, step in enumerate(trace.steps):
         text = (step.assistantText or "").lower()
         tool_text = " ".join((t.result or "") for t in step.toolCalls).lower()
-        if any(kw in text or kw in tool_text for kw in error_keywords):
+        if any(kw in text or kw in tool_text for kw in _ERROR_KEYWORDS):
             error_indices.add(i)
             # Include one step before and after for context
             if i > 0:
@@ -202,38 +251,6 @@ def _estimate_token_count(text: str) -> int:
     return max(1, word_count)
 
 
-def _assemble_visible_file_context(
-    bundle: SkillBundleMeta,
-    selected_files: list[str],
-    hard_budget_tokens: int,
-) -> tuple[list[str], dict[str, str], list[str]]:
-    """
-    把候选文件收敛到真正进入 prompt 的"完整可见文件"集合。
-
-    规则：
-    - 已经选中的文件，仍然要经过 hard budget 控制
-    - 只有真正进入 prompt 的文件，才允许后续 patch 修改
-    - 超预算的文件会被剔除，而不是截断后继续当作 full-visible
-    """
-    full_visible_files: list[str] = []
-    file_contents: dict[str, str] = {}
-    notes: list[str] = []
-    used_tokens = 0
-
-    for path in selected_files:
-        content = _read_relative_file_safe(bundle, path)
-        if not content:
-            continue
-        token_count = _estimate_token_count(content)
-        if full_visible_files and used_tokens + token_count > hard_budget_tokens:
-            notes.append(f"skipped {path} because it would exceed markdown hard budget")
-            continue
-        full_visible_files.append(path)
-        file_contents[path] = content
-        used_tokens += token_count
-
-    return full_visible_files, file_contents, notes
-
 
 def _build_markdown_catalog_text(bundle: SkillBundleMeta, visible_files: list[str]) -> str:
     """Render a compact catalog view for the planner step.
@@ -253,65 +270,6 @@ def _build_markdown_catalog_text(bundle: SkillBundleMeta, visible_files: list[st
         )
     return "\n".join(lines)
 
-
-def _normalize_read_requests(raw_requests: list[dict], bundle: SkillBundleMeta, visible_files: list[str]) -> list[str]:
-    """Validate planner requests and keep only bundle-local markdown paths.
-
-    The coordinator may let the model decide *what else it wants to read*, but
-    the system decides whether the request is valid and actionable.
-    """
-    known_paths = {meta.file_path for meta in bundle.markdown_files}
-    visible_set = set(visible_files)
-    normalized: list[str] = []
-    for raw in raw_requests[:4]:
-        path = raw.get("file")
-        if not isinstance(path, str):
-            continue
-        if path in visible_set:
-            continue
-        if path not in known_paths:
-            continue
-        if not is_allowed_markdown_relative_path(path):
-            continue
-        normalized.append(path)
-    return normalized
-
-
-def _expand_visible_file_context(
-    bundle: SkillBundleMeta,
-    current_visible_files: list[str],
-    current_contents: dict[str, str],
-    requested_files: list[str],
-    *,
-    hard_budget_tokens: int,
-    max_files: int,
-) -> tuple[list[str], dict[str, str], list[str]]:
-    """Promote planner-approved files from catalog visibility to full visibility."""
-    visible_files = list(current_visible_files)
-    contents = dict(current_contents)
-    notes: list[str] = []
-    used_tokens = sum(_estimate_token_count(text) for text in contents.values())
-
-    for path in requested_files:
-        if path in contents:
-            continue
-        if len(visible_files) >= max_files:
-            notes.append(f"skipped {path} because markdown file limit was reached")
-            continue
-        content = _read_relative_file_safe(bundle, path)
-        if not content:
-            notes.append(f"skipped {path} because the file could not be read")
-            continue
-        token_count = _estimate_token_count(content)
-        if used_tokens + token_count > hard_budget_tokens:
-            notes.append(f"skipped {path} because it would exceed markdown hard budget")
-            continue
-        visible_files.append(path)
-        contents[path] = content
-        used_tokens += token_count
-        notes.append(f"opened {path} after planner request")
-
-    return visible_files, contents, notes
 
 
 # ---------------------------------------------------------------------------
@@ -444,14 +402,9 @@ class SuccessAnalyst:
                     "1. **Broad Coverage** — every effective behavior in the trajectory must be captured\n"
                     "2. **Frequency Awareness** — patterns covering more instances should be listed first\n"
                     "3. **Generalization** — each pattern must describe a general mechanism, not just replay the specific trace\n\n"
-                    "Use exact-text edits when you are changing existing guidance.\n"
-                    "- For EXISTING content changes, use op=edit with old_string/new_string.\n"
-                    "- old_string MUST uniquely match in the visible file. If it may repeat, include more "
-                    "surrounding lines in old_string so the match becomes unique.\n"
-                    "- For inserting guidance under an existing heading, use op=edit and keep the existing text in "
-                    "new_string, adding the new guidance around it.\n"
-                    "- Use op=append_file_end only when you are appending a brand-new section to the end of SKILL.md.\n"
-                    "- Use op=create only for new markdown files.\n\n"
+                    "Use exact-text edits when you are changing existing guidance.\n\n"
+                    f"{_PATCH_PLACEMENT_RULES}\n"
+                    f"{_MARKDOWN_FORMAT_RULES}\n"
                     "Return JSON with exactly these fields:\n"
                     "{\n"
                     '  "patterns": [\n'
@@ -461,16 +414,7 @@ class SuccessAnalyst:
                     '      "frequency_hint": "string — how common this pattern is across the traces"\n'
                     "    }\n"
                     "  ],\n"
-                    '  "edits": [\n'
-                    "    {\n"
-                    '      "file": "SKILL.md or references/*.md",\n'
-                    '      "op": "edit, append_file_end, or create",\n'
-                    '      "old_string": "required for edit; exact existing text to replace",\n'
-                    '      "new_string": "required for edit; replacement text",\n'
-                    '      "content": "required for append_file_end/create",\n'
-                    '      "intent": "one of: trigger, workflow, guardrail, example, reference, metadata"\n'
-                    "    }\n"
-                    "  ],\n"
+                    f"{_EDIT_JSON_SCHEMA}"
                     '  "confidence": "float between 0.5 and 0.95",\n'
                     '  "rationale": "string — why these patterns are worth capturing"\n'
                     "}\n"
@@ -498,12 +442,13 @@ class SuccessAnalyst:
             return self._analyze_heuristic(episode, traces, bundle)
 
         # Build SuccessPatterns
+        evidence = _collect_evidence(traces, prefer_errors=False)
         raw_patterns = result.get("patterns", [])
         patterns = [
             SuccessPattern(
                 pattern_title=p.get("title", "Success pattern"),
                 pattern_description=p.get("description", ""),
-                evidence_spans=_collect_evidence(traces, prefer_errors=False),
+                evidence_spans=evidence,
             )
             for p in raw_patterns[:5]
         ]
@@ -511,7 +456,7 @@ class SuccessAnalyst:
             patterns = [SuccessPattern(
                 pattern_title="Success pattern",
                 pattern_description=result.get("rationale", ""),
-                evidence_spans=_collect_evidence(traces, prefer_errors=False),
+                evidence_spans=evidence,
             )]
 
         if not bundle:
@@ -534,7 +479,7 @@ class SuccessAnalyst:
             ops=ops,
             confidence=float(result.get("confidence", 0.72)),
             rationale=result.get("rationale", "LLM-extracted success pattern."),
-            evidence_spans=_collect_evidence(traces, prefer_errors=False),
+            evidence_spans=evidence,
         )
         return patterns, [patch]
 
@@ -609,15 +554,14 @@ class ErrorAnalyst:
     3. Cross-check against SKILL.md — ask "if this guidance existed, would the agent have avoided the mistake?"
     4. Assess confidence — rate how certain this diagnosis is given trace-only evidence
 
-    Phase B generates structured patches whose primary edit primitive is
-    exact-text replacement on fully visible files. Existing markdown changes
-    are expressed via old_string/new_string, while append_file_end is reserved
-    for intentionally adding a brand-new section or note.
+    Phase B uses a ReAct-style agent loop where the LLM autonomously decides
+    whether to read additional markdown files or write the final patch. This
+    replaces the previous three-layer file selection pipeline (BoundedMarkdownReAct
+    → _assemble_visible_file_context → _coordinate_patch_context_with_llm).
     """
 
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.react = BoundedMarkdownReAct(settings)
 
     def analyze(
         self,
@@ -625,35 +569,37 @@ class ErrorAnalyst:
         traces: list[ImportedTrace],
         bundle: SkillBundleMeta | None,
     ) -> tuple[list[FailureHypothesis], list[HypothesisPatch], list[str]]:
-        failure_surface, root_cause = self._diagnose(traces, bundle)
-        evidence = _collect_evidence(traces, prefer_errors=True)
-        selected_files, selected_spans, notes = self.react.select(failure_surface, episode, bundle)
+        if not _has_llm(self.settings):
+            return [], [], ["LLM unavailable; ErrorAnalyst requires LLM"]
 
+        notes: list[str] = []
+        try:
+            failure_surface, root_cause, diag_confidence = self._diagnose(traces, bundle)
+        except Exception:
+            logger.warning("ErrorAnalyst diagnosis failed", exc_info=True)
+            return [], [], ["diagnosis LLM call failed"]
+
+        evidence = _collect_evidence(traces, prefer_errors=True)
         hypothesis = FailureHypothesis(
             failure_surface=failure_surface,
             suspected_root_cause=root_cause,
             evidence_spans=evidence,
-            confidence=min(0.9, 0.55 + 0.07 * len(evidence)),
+            confidence=diag_confidence,
         )
 
-        if len(evidence) < 2:
-            return [hypothesis], [], notes + ["insufficient evidence spans"]
+        if not bundle:
+            return [hypothesis], [], notes + ["no bundle; skipping patch"]
 
-        patch = self._write_patch(episode, bundle, hypothesis, selected_files, selected_spans)
+        patch, react_notes = self._react_patch_loop(episode, bundle, hypothesis)
+        notes.extend(react_notes)
         return [hypothesis], [patch] if patch else [], notes
 
     # -- Phase A: diagnosis -------------------------------------------------
 
-    def _diagnose(self, traces: list[ImportedTrace], bundle: SkillBundleMeta | None = None) -> tuple[str, str]:
-        if _has_llm(self.settings):
-            return self._diagnose_with_llm(traces, bundle)
-        return self._diagnose_heuristic(traces)
-
-    def _diagnose_with_llm(self, traces: list[ImportedTrace], bundle: SkillBundleMeta | None = None) -> tuple[str, str]:
+    def _diagnose(self, traces: list[ImportedTrace], bundle: SkillBundleMeta | None = None) -> tuple[str, str, float]:
         llm = _get_llm(self.settings)
         traces_text = _format_traces_for_prompt(traces, prefer_errors=True)
 
-        # Include current SKILL.md so LLM can identify what guidance is missing
         skill_context = ""
         if bundle:
             skill_context = _read_relative_file_safe(bundle, "SKILL.md")
@@ -681,6 +627,7 @@ class ErrorAnalyst:
                     "- causal_chain: string (brief: agent did X at step N → skill didn't say Y → result was Z)\n"
                     "- confidence_note: string (how confident is this diagnosis given trace-only evidence? "
                     "mention any ambiguity)\n"
+                    "- diagnosis_confidence: float (0.3-0.9, your confidence level for this diagnosis)\n"
                 ),
             },
             {
@@ -693,379 +640,192 @@ class ErrorAnalyst:
             },
         ]
 
-        try:
-            result = llm.chat_json(messages, temperature=0.2)
-            failure_surface = trim_snippet(result.get("failure_surface", ""), 220)
-            root_cause = result.get("root_cause", "")
-            if failure_surface and root_cause:
-                return failure_surface, root_cause
-        except Exception:
-            logger.warning("LLM call failed for ErrorAnalyst._diagnose, falling back to heuristic", exc_info=True)
+        result = llm.chat_json(messages, temperature=0.2)
+        failure_surface = trim_snippet(result.get("failure_surface", ""), 220)
+        root_cause = result.get("root_cause", "")
+        confidence = float(result.get("diagnosis_confidence", 0.55))
+        if not failure_surface or not root_cause:
+            raise ValueError("LLM diagnosis returned empty failure_surface or root_cause")
+        return failure_surface, root_cause, confidence
 
-        return self._diagnose_heuristic(traces)
+    # -- Phase B: ReAct patch loop ------------------------------------------
 
-    def _diagnose_heuristic(self, traces: list[ImportedTrace]) -> tuple[str, str]:
-        primary = next((trace for trace in reversed(traces) if trace.outcome != "success"), traces[-1])
-        failure_surface = trim_snippet(
-            primary.errorMessage
-            or next((step.assistantText for step in reversed(primary.steps) if step.assistantText.strip()), "")
-            or f"Run ended with outcome={primary.outcome}",
-            220,
-        )
-        all_tools = " ".join(tool.name for trace in traces for step in trace.steps for tool in step.toolCalls).lower()
-        if any(token in all_tools for token in ("write", "edit", "patch", "apply")):
-            root_cause = (
-                "The workflow changed content without enough verification or boundary checks, so the skill should add "
-                "explicit decision points and post-change checks."
-            )
-        else:
-            root_cause = (
-                "The workflow lacked explicit guidance for choosing the next investigation step, so the skill should "
-                "make the diagnosis order and verification criteria more concrete."
-            )
-        return failure_surface, root_cause
-
-    # -- Phase B: patch writing ---------------------------------------------
-
-    def _write_patch(
-        self,
-        episode: Episode,
-        bundle: SkillBundleMeta | None,
-        hypothesis: FailureHypothesis,
-        selected_files: list[str],
-        selected_spans: list[SelectedSpan],
-    ) -> HypothesisPatch | None:
-        if _has_llm(self.settings) and bundle:
-            result = self._write_patch_with_llm(episode, bundle, hypothesis, selected_files, selected_spans)
-            if result is not None:
-                return result
-        return self._write_patch_heuristic(episode, bundle, hypothesis, selected_files, selected_spans)
-
-    def _write_patch_with_llm(
+    def _react_patch_loop(
         self,
         episode: Episode,
         bundle: SkillBundleMeta,
         hypothesis: FailureHypothesis,
-        selected_files: list[str],
-        selected_spans: list[SelectedSpan],
-    ) -> HypothesisPatch | None:
-        llm = _get_llm(self.settings)
+    ) -> tuple[HypothesisPatch | None, list[str]]:
+        """Unified ReAct loop: the LLM reads files and writes patches in one loop.
 
-        full_visible_files, file_contents, budget_notes = _assemble_visible_file_context(
-            bundle,
-            selected_files,
-            self.settings.llm.markdown_hard_budget_tokens,
-        )
-        if "SKILL.md" not in full_visible_files:
-            logger.warning("SKILL.md was not fully visible after budget filtering; falling back to heuristic patch writing")
-            return None
+        Each turn the LLM returns one JSON action:
+        - {"action": "read_file", "file": "path", "reason": "..."} — request a markdown file
+        - {"action": "write_patch", "edits": [...], "confidence": float, "rationale": "..."} — terminal
 
-        full_visible_files, file_contents, planning_notes = self._coordinate_patch_context_with_llm(
-            episode,
-            bundle,
-            hypothesis,
-            full_visible_files,
-            file_contents,
-            selected_spans,
-        )
-
-        files_context = "\n\n".join(
-            f"### {path}\n```markdown\n{content}\n```"
-            for path, content in file_contents.items()
-        )
-
-        heading_tree = _build_heading_tree_text(bundle)
-
-        # List existing references/ files so LLM knows what's available
-        existing_refs = [m.file_path for m in bundle.markdown_files if m.file_path.startswith("references/")]
-        refs_context = ", ".join(existing_refs) if existing_refs else "(none)"
-
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a skill-evolution patch writer (Error Analyst 𝒜⁻, Phase B).\n\n"
-                    "Based on a trace-only failure diagnosis (NOT validated via replay) and the current skill bundle, "
-                    "generate patch operations. Your patches are hypotheses grounded in trace evidence, not proven fixes.\n\n"
-                    "**Patch placement rules** (critical for quality):\n"
-                    "- For EXISTING content that must be changed, use op=edit with old_string/new_string.\n"
-                    "- old_string MUST uniquely match in the visible file. If you worry it may repeat, include more "
-                    "surrounding lines in old_string so the match becomes unique.\n"
-                    "- For inserting guidance under an existing heading, still use op=edit: old_string should include "
-                    "the existing text you want to anchor on, and new_string should include that same text plus your insertion.\n"
-                    "- Use op=append_file_end only when you are appending a brand-new section to the end of SKILL.md.\n"
-                    "- Use op=create only for new markdown files.\n"
-                    "- For niche/case-specific guidance that doesn't belong in the main workflow, route to "
-                    "references/*.md instead of SKILL.md.\n"
-                    "- If you create a new references/*.md file, you MUST also add a link to it in SKILL.md "
-                    "(atomic create/link pair — keep both or drop both).\n\n"
-                    "**Content rules**:\n"
-                    "- Be concise and actionable — every sentence should change agent behavior\n"
-                    "- Use conditional language: 'When X happens, do Y before Z'\n"
-                    "- Include verification steps: 'After doing X, verify Y by checking Z'\n"
-                    "- Ground in the specific failure: reference what went wrong and how to prevent it\n\n"
-                    "Return JSON:\n"
-                    "{\n"
-                    '  "edits": [\n'
-                    "    {\n"
-                    '      "file": "SKILL.md or references/xxx.md",\n'
-                    '      "op": "edit, append_file_end, or create",\n'
-                    '      "old_string": "required for edit; exact existing text to replace",\n'
-                    '      "new_string": "required for edit; replacement text",\n'
-                    '      "content": "required for append_file_end/create",\n'
-                    '      "intent": "one of: trigger, workflow, guardrail, example, reference, metadata"\n'
-                    "    }\n"
-                    "  ],\n"
-                    '  "confidence": "float 0.4-0.9",\n'
-                    '  "rationale": "why these changes prevent the failure"\n'
-                    "}\n"
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"## Failure Diagnosis\n"
-                    f"Failure surface: {hypothesis.failure_surface}\n"
-                    f"Root cause: {hypothesis.suspected_root_cause}\n\n"
-                    f"## Episode Context\n"
-                    f"User messages: {'; '.join(episode.user_messages[:3])}\n"
-                    f"Skills used: {', '.join(episode.used_skills)}\n\n"
-                    f"## SKILL.md heading structure\n{heading_tree}\n\n"
-                    f"## Existing references/ files\n{refs_context}\n\n"
-                    f"## Visible Files (full content)\n{files_context}\n\n"
-                    "Generate patch operations to prevent this failure pattern."
-                ),
-            },
-        ]
-
-        try:
-            result = llm.chat_json(messages, temperature=0.3)
-        except Exception:
-            logger.warning("LLM call failed for ErrorAnalyst._write_patch, falling back to heuristic", exc_info=True)
-            return None
-
-        raw_edits = result.get("edits", [])
-        if not raw_edits:
-            return None
-
-        ops = _build_ops_from_llm_edits(raw_edits, bundle, full_visible_files)
-        if not ops:
-            return None
-
-        return HypothesisPatch(
-            patch_id=f"patch-{sha256_text(episode.episode_id + hypothesis.failure_surface)[:12]}",
-            source_kind="error",
-            target_skill_id=bundle.skill_id,
-            family_id="",
-            source_trace_ids=episode.trace_ids,
-            source_thread_ids=[episode.thread_id],
-            base_bundle_hash=bundle.bundle_hash,
-            visible_files=list(full_visible_files),
-            ops=ops,
-            confidence=float(result.get("confidence", 0.6)),
-            rationale=result.get("rationale", "LLM-generated patch based on trace failure analysis."),
-            risk_flags=(
-                ["markdown-budget-limited"] if (budget_notes or planning_notes) else []
-            ),
-            evidence_spans=hypothesis.evidence_spans,
-        )
-
-    def _coordinate_patch_context_with_llm(
-        self,
-        episode: Episode,
-        bundle: SkillBundleMeta,
-        hypothesis: FailureHypothesis,
-        full_visible_files: list[str],
-        file_contents: dict[str, str],
-        selected_spans: list[SelectedSpan],
-    ) -> tuple[list[str], dict[str, str], list[str]]:
-        """Allow one bounded planning loop where the model can request more files.
-
-        The model does not get to modify a file just because it knows the path.
-        Instead it can request a full read, and the coordinator upgrades the
-        file's visibility only if the request stays within file and token
-        budgets. Patch generation always happens after this visibility pass.
+        The loop enforces max reads and hard token budget.
         """
         llm = _get_llm(self.settings)
         notes: list[str] = []
-        current_visible = list(full_visible_files)
-        current_contents = dict(file_contents)
+        max_reads = self.settings.error_analyst_react_max_reads
+        hard_budget = self.settings.llm.markdown_hard_budget_tokens
 
-        for round_index in range(self.settings.markdown_patch_planning_max_rounds):
-            visible_summary = "\n".join(f"- {path}" for path in current_visible)
-            selected_span_text = "\n".join(
-                f"- {span.file_path}: {span.reason}; heading={span.heading or '(none)'}"
-                for span in selected_spans[:8]
-            ) or "(none)"
+        # file_contents dict tracks visible files; insertion-ordered (Python 3.7+)
+        file_contents: dict[str, str] = {}
+        skill_content = _read_relative_file_safe(bundle, "SKILL.md")
+        if skill_content:
+            file_contents["SKILL.md"] = skill_content
+        else:
+            notes.append("SKILL.md not found or empty")
+            return None, notes
+
+        used_tokens = _estimate_token_count(skill_content)
+        reads_done = 0
+        known_paths = {m.file_path for m in bundle.markdown_files}
+
+        heading_tree = _build_heading_tree_text(bundle)
+        existing_refs = [m.file_path for m in bundle.markdown_files if m.file_path.startswith("references/")]
+        refs_context = ", ".join(existing_refs) if existing_refs else "(none)"
+
+        system_prompt = (
+            "You are a skill-evolution patch writer (Error Analyst 𝒜⁻) operating in a ReAct loop.\n\n"
+            "Each turn you MUST return exactly one JSON action:\n\n"
+            "**Option A — read a file before patching:**\n"
+            '{"action": "read_file", "file": "bundle-relative path", "reason": "why you need it"}\n\n'
+            "**Option B — write the patch (terminal action):**\n"
+            "{\n"
+            '  "action": "write_patch",\n'
+            f"{_EDIT_JSON_SCHEMA}"
+            '  "confidence": "float 0.4-0.9",\n'
+            '  "rationale": "why these changes prevent the failure"\n'
+            "}\n\n"
+            "**Rules:**\n"
+            f"- You may read at most {max_reads} additional files.\n"
+            "- SKILL.md is always visible; do not request it.\n"
+            "- Only request files that appear in the markdown catalog.\n"
+            "- When you have enough context, choose write_patch.\n\n"
+            f"{_PATCH_PLACEMENT_RULES}\n"
+            f"{_MARKDOWN_FORMAT_RULES}\n"
+            "**Content rules**:\n"
+            "- Be concise and actionable — every sentence should change agent behavior.\n"
+            "- Use conditional language: 'When X happens, do Y before Z'.\n"
+            "- Include verification steps: 'After doing X, verify Y by checking Z'.\n"
+            "- Ground in the specific failure: reference what went wrong and how to prevent it.\n"
+        )
+
+        # The loop has two phases:
+        # 1. Read phase: up to max_reads successful reads (invalid reads don't count)
+        #    Protected by a generous turn cap to prevent infinite invalid-read loops.
+        # 2. Write phase: always guaranteed one final write turn after reads are done.
+        max_turns = max_reads * 3 + 1  # generous cap for invalid reads
+        force_write = False
+        rejected_reads: list[str] = []
+
+        for turn in range(max_turns):
+            reads_remaining = max_reads - reads_done
+            files_context = "\n\n".join(
+                f"### {path}\n```markdown\n{content}\n```"
+                for path, content in file_contents.items()
+            )
+            catalog_text = _build_markdown_catalog_text(bundle, list(file_contents))
+
+            user_content = (
+                f"## Failure Diagnosis\n"
+                f"Failure surface: {hypothesis.failure_surface}\n"
+                f"Root cause: {hypothesis.suspected_root_cause}\n\n"
+                f"## Episode Context\n"
+                f"User messages: {'; '.join(episode.user_messages[:3])}\n"
+                f"Skills used: {', '.join(episode.used_skills)}\n\n"
+                f"## SKILL.md heading structure\n{heading_tree}\n\n"
+                f"## Existing references/ files\n{refs_context}\n\n"
+                f"## Markdown Catalog (not-yet-visible files)\n{catalog_text}\n\n"
+                f"## Visible Files (full content)\n{files_context}\n\n"
+                f"Reads remaining: {0 if force_write else reads_remaining}\n"
+                + (f"Previously rejected reads (do not re-request): {', '.join(rejected_reads)}\n" if rejected_reads else "")
+                + f"{'You MUST choose write_patch now.' if force_write else 'Choose your action.'}"
+            )
+
             messages = [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a bounded markdown planning assistant.\n\n"
-                        "Your job is NOT to write patches yet. First decide whether the currently visible "
-                        "files are sufficient to safely write a patch for the diagnosed failure.\n"
-                        "You may request additional FULL markdown files, but only when they are necessary.\n\n"
-                        "Return JSON only:\n"
-                        "{\n"
-                        '  "action": "read_more or write_patch",\n'
-                        '  "read_requests": [\n'
-                        "    {\n"
-                        '      "file": "bundle-local markdown path",\n'
-                        '      "reason": "why full visibility is needed before editing or linking"\n'
-                        "    }\n"
-                        "  ],\n"
-                        '  "notes": ["optional short planning notes"]\n'
-                        "}\n"
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"## Failure Diagnosis\n"
-                        f"Failure surface: {hypothesis.failure_surface}\n"
-                        f"Root cause: {hypothesis.suspected_root_cause}\n\n"
-                        f"## Episode Context\n"
-                        f"User messages: {'; '.join(episode.user_messages[:3])}\n"
-                        f"Skills used: {', '.join(episode.used_skills)}\n\n"
-                        f"## Currently Visible Files\n{visible_summary}\n\n"
-                        f"## Selected Relevant Spans\n{selected_span_text}\n\n"
-                        f"## Markdown Catalog\n{_build_markdown_catalog_text(bundle, current_visible)}\n\n"
-                        "If you need another file in full before writing the patch, request it now. "
-                        "Otherwise return action=write_patch."
-                    ),
-                },
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
             ]
 
             try:
-                result = llm.chat_json(messages, temperature=0.1)
+                result = llm.chat_json(messages, temperature=0.2)
             except Exception:
-                logger.warning("LLM planning step failed; continuing with current visible files", exc_info=True)
-                notes.append("planner failed; used current visible files")
+                logger.warning("ReAct loop LLM call failed on turn %d", turn, exc_info=True)
+                notes.append(f"LLM call failed on turn {turn}")
                 break
 
-            notes.extend(str(note) for note in result.get("notes", [])[:4] if str(note).strip())
-            action = str(result.get("action", "write_patch")).strip().lower()
-            if action != "read_more":
-                break
+            action = str(result.get("action", _ACTION_WRITE)).strip().lower()
 
-            requested_files = _normalize_read_requests(
-                result.get("read_requests", []),
-                bundle,
-                current_visible,
+            # Handle read_file action (only during read phase)
+            if action == _ACTION_READ and not force_write and reads_done < max_reads:
+                file_path = str(result.get("file", ""))
+                reason = str(result.get("reason", ""))
+
+                if file_path not in known_paths or file_path in file_contents:
+                    notes.append(f"invalid/duplicate read request: {file_path}")
+                    rejected_reads.append(file_path)
+                    continue  # doesn't consume a read — retry
+                if not is_allowed_markdown_relative_path(file_path):
+                    notes.append(f"disallowed path: {file_path}")
+                    rejected_reads.append(file_path)
+                    continue
+
+                content = _read_relative_file_safe(bundle, file_path)
+                if not content:
+                    notes.append(f"could not read {file_path}")
+                    rejected_reads.append(file_path)
+                    continue
+
+                token_count = _estimate_token_count(content)
+                if used_tokens + token_count > hard_budget:
+                    notes.append(f"skipped {file_path}: would exceed hard budget ({used_tokens}+{token_count}>{hard_budget})")
+                    rejected_reads.append(file_path)
+                    continue
+
+                file_contents[file_path] = content
+                used_tokens += token_count
+                reads_done += 1
+                notes.append(f"opened {file_path} (reason: {reason}, tokens~{token_count})")
+                continue
+
+            # If LLM returned read_file but reads are exhausted, force a write turn
+            if action == _ACTION_READ:
+                notes.append("max reads exhausted; forcing write_patch turn")
+                force_write = True
+                continue
+
+            # Process write_patch action
+            raw_edits = result.get("edits", [])
+            if not raw_edits:
+                notes.append("LLM returned write_patch with no edits")
+                return None, notes
+
+            ops = _build_ops_from_llm_edits(raw_edits, bundle, list(file_contents))
+            if not ops:
+                notes.append("no valid ops after validation")
+                return None, notes
+
+            patch = HypothesisPatch(
+                patch_id=f"patch-{sha256_text(episode.episode_id + hypothesis.failure_surface)[:12]}",
+                source_kind="error",
+                target_skill_id=bundle.skill_id,
+                family_id="",
+                source_trace_ids=episode.trace_ids,
+                source_thread_ids=[episode.thread_id],
+                base_bundle_hash=bundle.bundle_hash,
+                visible_files=list(file_contents),
+                ops=ops,
+                confidence=float(result.get("confidence", 0.6)),
+                rationale=result.get("rationale", "LLM-generated patch via ReAct loop."),
+                risk_flags=["budget-limited"] if any("budget" in n for n in notes) else [],
+                evidence_spans=hypothesis.evidence_spans,
             )
-            if not requested_files:
-                notes.append("planner requested more context without valid file targets")
-                break
+            return patch, notes
 
-            current_visible, current_contents, expand_notes = _expand_visible_file_context(
-                bundle,
-                current_visible,
-                current_contents,
-                requested_files,
-                hard_budget_tokens=self.settings.llm.markdown_hard_budget_tokens,
-                max_files=self.settings.markdown_react_max_files,
-            )
-            notes.extend(expand_notes)
-
-            if not any(note.startswith("opened ") for note in expand_notes):
-                notes.append("planner requests could not be satisfied; continuing with current visible files")
-                break
-
-        return current_visible, current_contents, notes
-
-    def _write_patch_heuristic(
-        self,
-        episode: Episode,
-        bundle: SkillBundleMeta | None,
-        hypothesis: FailureHypothesis,
-        selected_files: list[str],
-        selected_spans: list[SelectedSpan],
-    ) -> HypothesisPatch | None:
-        family_hint = slugify(" ".join(episode.user_messages[:1] + episode.used_skills[:2]), "trace-family")
-        if bundle is None:
-            skill_name = f"trace-family-{family_hint}"
-            description = trim_snippet(episode.user_messages[0], 120)
-            content = (
-                f"---\nname: {skill_name}\ndescription: {description}\n---\n\n"
-                "# Trace-Grounded Skill\n\n"
-                "## Failure Surface\n\n"
-                f"{hypothesis.failure_surface}\n\n"
-                "## Workflow\n\n"
-                f"- {hypothesis.suspected_root_cause}\n"
-                "- Re-read the relevant markdown guidance before applying edits.\n"
-                "- Verify the final state before concluding the run.\n"
-            )
-            ops = [
-                EditOp(
-                    file_path="SKILL.md",
-                    action="create_file",
-                    content=content,
-                    intent="workflow",
-                    source_visibility="created",
-                )
-            ]
-            visible_files: list[str] = []
-            base_bundle_hash = sha256_text("")
-            target_skill_id = None
-        else:
-            primary_content = (
-                f"## Trace-Grounded Failure Pattern: {trim_snippet(hypothesis.failure_surface, 72)}\n\n"
-                f"- Failure surface: {hypothesis.failure_surface}\n"
-                f"- Suspected root cause: {hypothesis.suspected_root_cause}\n"
-                "- Before editing, identify the exact target and the verification step that will prove the change helped.\n"
-                "- After editing, re-check the final state instead of assuming the first fix is sufficient.\n"
-            )
-            ops = [
-                EditOp(
-                    file_path="SKILL.md",
-                    action="append_file_end",
-                    content=primary_content,
-                    intent="guardrail",
-                    source_visibility="full",
-                )
-            ]
-            visible_files = list(selected_files)
-            base_bundle_hash = bundle.bundle_hash
-            target_skill_id = bundle.skill_id
-
-            extra_targets = [path for path in selected_files if path != "SKILL.md"]
-            if extra_targets:
-                chosen = extra_targets[0]
-                chosen_span = next((span for span in selected_spans if span.file_path == chosen), None)
-                extra_content = (
-                    f"\n## Trace-Grounded Note: {trim_snippet(hypothesis.failure_surface, 64)}\n\n"
-                    f"- Why this file matters: {chosen_span.reason if chosen_span else 'selected by markdown search'}\n"
-                    f"- Observed issue: {hypothesis.failure_surface}\n"
-                    f"- Suggested reminder: {hypothesis.suspected_root_cause}\n"
-                )
-                ops.append(
-                    EditOp(
-                        file_path=chosen,
-                        action="append_file_end",
-                        content=extra_content,
-                        intent="reference",
-                        source_visibility="full",
-                    )
-                )
-
-        return HypothesisPatch(
-            patch_id=f"patch-{sha256_text(episode.episode_id + hypothesis.failure_surface)[:12]}",
-            source_kind="error",
-            target_skill_id=target_skill_id,
-            family_id="",
-            source_trace_ids=episode.trace_ids,
-            source_thread_ids=[episode.thread_id],
-            base_bundle_hash=base_bundle_hash,
-            visible_files=visible_files,
-            ops=ops,
-            confidence=hypothesis.confidence,
-            rationale=(
-                "Patch is grounded in trace-only failure evidence and adds guidance that would have made the failure "
-                "surface explicit earlier in the workflow."
-            ),
-            risk_flags=[],
-            evidence_spans=hypothesis.evidence_spans,
-        )
+        notes.append("ReAct loop ended without producing a patch")
+        return None, notes
 
 
 # ---------------------------------------------------------------------------
@@ -1084,7 +844,6 @@ def _build_ops_from_llm_edits(
     - append_file_end for appending a brand-new section or note
     - create for new markdown files
     """
-    VALID_INTENTS = {"trigger", "workflow", "guardrail", "example", "reference", "metadata"}
     ops: list[EditOp] = []
     created_refs: set[str] = set()
     visible_file_set = set(visible_files)
@@ -1106,7 +865,7 @@ def _build_ops_from_llm_edits(
             continue
 
         intent = raw.get("intent", "guardrail")
-        if intent not in VALID_INTENTS:
+        if intent not in _VALID_INTENTS:
             intent = "guardrail"
 
         # Determine if this is a file creation or an edit.
@@ -1143,10 +902,6 @@ def _build_ops_from_llm_edits(
             if not is_visible_existing:
                 continue
             if not is_allowed_markdown_relative_path(file_path):
-                continue
-            if not isinstance(old_string, str) or not old_string:
-                continue
-            if not isinstance(new_string, str):
                 continue
             ops.append(EditOp(
                 file_path=file_path,
@@ -1185,7 +940,6 @@ def _build_ops_from_llm_edits(
 
 def _collect_evidence(traces: list[ImportedTrace], prefer_errors: bool) -> list[EvidenceSpan]:
     evidence: list[EvidenceSpan] = []
-    keywords = ("error", "fail", "retry", "wrong", "invalid", "mismatch", "exception", "traceback")
     iterable = list(reversed(traces)) if prefer_errors else traces
     for trace in iterable:
         if trace.errorMessage:
@@ -1198,7 +952,7 @@ def _collect_evidence(traces: list[ImportedTrace], prefer_errors: bool) -> list[
             )
         for step in trace.steps:
             text = step.assistantText.strip()
-            if text and any(keyword in text.lower() for keyword in keywords):
+            if text and any(keyword in text.lower() for keyword in _ERROR_KEYWORDS):
                 evidence.append(
                     EvidenceSpan(
                         trace_id=trace.traceId,
@@ -1208,7 +962,7 @@ def _collect_evidence(traces: list[ImportedTrace], prefer_errors: bool) -> list[
                     )
                 )
             for tool in step.toolCalls:
-                if tool.result and any(keyword in tool.result.lower() for keyword in keywords):
+                if tool.result and any(keyword in tool.result.lower() for keyword in _ERROR_KEYWORDS):
                     evidence.append(
                         EvidenceSpan(
                             trace_id=trace.traceId,

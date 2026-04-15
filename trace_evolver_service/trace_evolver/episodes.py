@@ -72,6 +72,7 @@ def build_episodes(traces: list[ImportedTrace], gap_minutes: int) -> list[Episod
                 current = [trace]
                 continue
             prev = current[-1]
+            current_episode_skills = {skill for item in current for skill in item.usedSkills}
             time_continuity = False
             semantic_rules_hit = 0
             repair_transition = False
@@ -80,7 +81,10 @@ def build_episodes(traces: list[ImportedTrace], gap_minutes: int) -> list[Episod
                 time_continuity = True
             if jaccard_similarity(tokenize(prev.userMessage), tokenize(trace.userMessage)) >= 0.25:
                 semantic_rules_hit += 1
-            if set(prev.usedSkills) & set(trace.usedSkills):
+            # Skill continuity should use the whole in-progress episode context, not just the
+            # immediately previous trace. Follow-up feedback traces often omit usedSkills, and a
+            # later correction trace may re-attach the same skill after one empty middle step.
+            if current_episode_skills and set(trace.usedSkills) & current_episode_skills:
                 semantic_rules_hit += 1
             if jaccard_similarity(_tool_signature(prev), _tool_signature(trace)) >= 0.20:
                 semantic_rules_hit += 1

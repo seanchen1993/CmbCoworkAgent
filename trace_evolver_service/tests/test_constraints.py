@@ -219,16 +219,12 @@ def test_error_analyst_can_request_full_read_before_writing_patch(tmp_path: Path
             self.calls += 1
             if self.calls == 1:
                 return {
-                    "action": "read_more",
-                    "read_requests": [
-                        {
-                            "file": "references/troubleshooting.md",
-                            "reason": "Need the troubleshooting guidance before patching it.",
-                        }
-                    ],
-                    "notes": ["need one more reference file"],
+                    "action": "read_file",
+                    "file": "references/troubleshooting.md",
+                    "reason": "Need the troubleshooting guidance before patching it.",
                 }
             return {
+                "action": "write_patch",
                 "edits": [
                     {
                         "file": "references/troubleshooting.md",
@@ -244,12 +240,10 @@ def test_error_analyst_can_request_full_read_before_writing_patch(tmp_path: Path
     fake_llm = FakeLLM()
     monkeypatch.setattr("trace_evolver.analysis._get_llm", lambda settings: fake_llm)
 
-    patch = analyst._write_patch_with_llm(  # noqa: SLF001 - unit test the internal coordinator path directly
+    patch, notes = analyst._react_patch_loop(  # noqa: SLF001
         episode,
         bundle,
         hypothesis,
-        ["SKILL.md"],
-        [],
     )
 
     assert patch is not None
@@ -285,6 +279,45 @@ def test_build_episodes_does_not_merge_only_on_repair_transition(tmp_path: Path)
     assert len(episodes) == 2
     assert episodes[0].trace_ids == ["trace-a"]
     assert episodes[1].trace_ids == ["trace-b"]
+
+
+def test_build_episodes_uses_episode_skill_context_for_followup_feedback(tmp_path: Path) -> None:
+    traces = [
+        _make_trace(
+            trace_id="trace-a",
+            thread_id="thread-skill-context",
+            started_at="2025-01-01T10:00:00Z",
+            ended_at="2025-01-01T10:01:00Z",
+            user_message="帮我做一个客户审批页面，先给业务同事看效果，后面开发也要接进去。",
+            outcome="success",
+            used_skills=["elementui-page-v1.0.0"],
+            tool_names=["write_file"],
+        ),
+        _make_trace(
+            trace_id="trace-b",
+            thread_id="thread-skill-context",
+            started_at="2025-01-01T10:05:00Z",
+            ended_at="2025-01-01T10:06:00Z",
+            user_message="按默认的给我生成一份",
+            outcome="success",
+            used_skills=[],
+            tool_names=["ls"],
+        ),
+        _make_trace(
+            trace_id="trace-c",
+            thread_id="thread-skill-context",
+            started_at="2025-01-01T10:10:00Z",
+            ended_at="2025-01-01T10:11:00Z",
+            user_message="HTML/.vue 不同步呀",
+            outcome="success",
+            used_skills=["elementui-page-v1.0.0"],
+            tool_names=["grep"],
+        ),
+    ]
+
+    episodes = build_episodes(traces, gap_minutes=30)
+    assert len(episodes) == 1
+    assert episodes[0].trace_ids == ["trace-a", "trace-b", "trace-c"]
 
 
 def test_patch_engine_append_file_end_adds_new_skill_section(tmp_path: Path) -> None:
@@ -603,14 +636,9 @@ def test_error_analyst_llm_can_emit_exact_text_edit(tmp_path: Path, monkeypatch)
     )
 
     class FakeLLM:
-        def __init__(self) -> None:
-            self.calls = 0
-
         def chat_json(self, messages, temperature=None, max_tokens=None):  # noqa: ANN001
-            self.calls += 1
-            if self.calls == 1:
-                return {"action": "write_patch", "read_requests": [], "notes": []}
             return {
+                "action": "write_patch",
                 "edits": [
                     {
                         "file": "SKILL.md",
@@ -627,12 +655,10 @@ def test_error_analyst_llm_can_emit_exact_text_edit(tmp_path: Path, monkeypatch)
     fake_llm = FakeLLM()
     monkeypatch.setattr("trace_evolver.analysis._get_llm", lambda settings: fake_llm)
 
-    patch = analyst._write_patch_with_llm(  # noqa: SLF001
+    patch, notes = analyst._react_patch_loop(  # noqa: SLF001
         episode,
         bundle,
         hypothesis,
-        ["SKILL.md"],
-        [],
     )
 
     assert patch is not None
@@ -758,3 +784,182 @@ def test_merge_batch_can_emit_exact_text_edit(tmp_path: Path, monkeypatch) -> No
     assert merged.ops[0].action == "edit"
     # old_string is transparently passed through from the original patch, not from LLM output
     assert merged.ops[0].old_string == "- Start from the failing path."
+
+
+def test_error_analyst_returns_empty_when_llm_unavailable(tmp_path: Path) -> None:
+    """ErrorAnalyst requires LLM; no api_key → empty results with a note."""
+    _build_bundle(tmp_path)
+    bundle = scan_skill_roots([str(tmp_path)])[0]
+    settings = Settings(llm=LLMSettings(api_key=""))
+    analyst = ErrorAnalyst(settings)
+
+    episode = Episode(
+        episode_id="ep-nollm",
+        thread_id="thread-nollm",
+        trace_ids=["trace-nollm"],
+        start_ts="2025-01-01T10:00:00Z",
+        end_ts="2025-01-01T10:01:00Z",
+        summary="test",
+        used_skills=["validation-skill"],
+        tool_signature=["edit_file"],
+        outcomes=["error"],
+        user_messages=["test"],
+    )
+
+    hypotheses, patches, notes = analyst.analyze(episode, [], bundle)
+    assert hypotheses == []
+    assert patches == []
+    assert any("LLM unavailable" in n for n in notes)
+
+
+def test_error_analyst_returns_empty_when_diagnosis_fails(tmp_path: Path, monkeypatch) -> None:
+    """When the diagnosis LLM call raises, analyze() returns empty gracefully."""
+    _build_bundle(tmp_path)
+    bundle = scan_skill_roots([str(tmp_path)])[0]
+    settings = Settings(llm=LLMSettings(api_key="test-key"))
+    analyst = ErrorAnalyst(settings)
+
+    episode = Episode(
+        episode_id="ep-fail",
+        thread_id="thread-fail",
+        trace_ids=["trace-fail"],
+        start_ts="2025-01-01T10:00:00Z",
+        end_ts="2025-01-01T10:01:00Z",
+        summary="test",
+        used_skills=["validation-skill"],
+        tool_signature=["edit_file"],
+        outcomes=["error"],
+        user_messages=["test"],
+    )
+
+    class FailingLLM:
+        def chat_json(self, messages, temperature=None, max_tokens=None):  # noqa: ANN001
+            raise RuntimeError("network error")
+
+    monkeypatch.setattr("trace_evolver.analysis._get_llm", lambda settings: FailingLLM())
+
+    hypotheses, patches, notes = analyst.analyze(episode, [], bundle)
+    assert hypotheses == []
+    assert patches == []
+    assert any("diagnosis" in n for n in notes)
+
+
+def test_error_analyst_react_loop_respects_max_reads(tmp_path: Path, monkeypatch) -> None:
+    """When LLM always returns read_file, loop terminates after max_reads."""
+    _build_bundle(tmp_path)
+    bundle = scan_skill_roots([str(tmp_path)])[0]
+    settings = Settings(llm=LLMSettings(api_key="test-key"), error_analyst_react_max_reads=1)
+    analyst = ErrorAnalyst(settings)
+
+    episode = Episode(
+        episode_id="ep-maxread",
+        thread_id="thread-maxread",
+        trace_ids=["trace-maxread"],
+        start_ts="2025-01-01T10:00:00Z",
+        end_ts="2025-01-01T10:03:00Z",
+        summary="resolver mismatch",
+        used_skills=["validation-skill"],
+        tool_signature=["read_file", "edit_file"],
+        outcomes=["error"],
+        user_messages=["Fix resolver"],
+    )
+    hypothesis = FailureHypothesis(
+        failure_surface="Submit still fails.",
+        suspected_root_cause="Missing resolver check.",
+        evidence_spans=[
+            EvidenceSpan(trace_id="trace-maxread", kind="error_message", snippet="resolver error"),
+        ],
+        confidence=0.7,
+    )
+
+    class FakeLLM:
+        """Always asks to read a file, never writes."""
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat_json(self, messages, temperature=None, max_tokens=None):  # noqa: ANN001
+            self.calls += 1
+            return {
+                "action": "read_file",
+                "file": "references/troubleshooting.md",
+                "reason": "need it",
+            }
+
+    fake_llm = FakeLLM()
+    monkeypatch.setattr("trace_evolver.analysis._get_llm", lambda settings: fake_llm)
+
+    patch, notes = analyst._react_patch_loop(episode, bundle, hypothesis)  # noqa: SLF001
+    # Should terminate without a patch after exhausting reads
+    assert patch is None
+    assert any("max reads" in n or "ended without" in n for n in notes)
+
+
+def test_error_analyst_diagnosis_confidence_passthrough(tmp_path: Path, monkeypatch) -> None:
+    """diagnosis_confidence from LLM is used as FailureHypothesis.confidence."""
+    _build_bundle(tmp_path)
+    bundle = scan_skill_roots([str(tmp_path)])[0]
+    settings = Settings(llm=LLMSettings(api_key="test-key"))
+    analyst = ErrorAnalyst(settings)
+
+    traces = [
+        _make_trace(
+            trace_id="trace-conf",
+            thread_id="thread-conf",
+            started_at="2025-01-01T10:00:00Z",
+            ended_at="2025-01-01T10:01:00Z",
+            outcome="error",
+            user_message="Fix the bug",
+            used_skills=["validation-skill"],
+            tool_names=["edit_file"],
+        ),
+    ]
+    episode = Episode(
+        episode_id="ep-conf",
+        thread_id="thread-conf",
+        trace_ids=["trace-conf"],
+        start_ts="2025-01-01T10:00:00Z",
+        end_ts="2025-01-01T10:01:00Z",
+        summary="test",
+        used_skills=["validation-skill"],
+        tool_signature=["edit_file"],
+        outcomes=["error"],
+        user_messages=["Fix the bug"],
+    )
+
+    class FakeLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat_json(self, messages, temperature=None, max_tokens=None):  # noqa: ANN001
+            self.calls += 1
+            if self.calls == 1:  # diagnosis
+                return {
+                    "failure_surface": "Assertion error in test suite.",
+                    "root_cause": "Missing boundary check in the validation skill.",
+                    "causal_chain": "agent skipped check → error",
+                    "confidence_note": "clear causal chain",
+                    "diagnosis_confidence": 0.82,
+                }
+            # react loop: immediate write_patch
+            return {
+                "action": "write_patch",
+                "edits": [
+                    {
+                        "file": "SKILL.md",
+                        "op": "append_file_end",
+                        "content": "## Boundary check\n\n- Always verify boundaries.\n",
+                        "intent": "guardrail",
+                    }
+                ],
+                "confidence": 0.75,
+                "rationale": "Adds missing boundary check guidance.",
+            }
+
+    fake_llm = FakeLLM()
+    monkeypatch.setattr("trace_evolver.analysis._get_llm", lambda settings: fake_llm)
+
+    hypotheses, patches, notes = analyst.analyze(episode, traces, bundle)
+    assert len(hypotheses) == 1
+    assert hypotheses[0].confidence == 0.82
+    assert len(patches) == 1
+    assert patches[0].confidence == 0.75

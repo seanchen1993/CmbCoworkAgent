@@ -173,21 +173,67 @@ class TraceEvolutionService:
         traces_dir.mkdir(parents=True, exist_ok=True)
         candidates_dir.mkdir(parents=True, exist_ok=True)
 
+        logger.info(
+            "[%s] Run started: input=%s output=%s skills_roots=%s thread_ids=%d max_traces=%s since_ts=%s",
+            run_id,
+            request.input_path,
+            request.output_root,
+            request.skills_roots,
+            len(request.thread_ids or []),
+            request.max_traces,
+            request.since_ts,
+        )
+
         # Stage 1: 输入标准化
+        logger.info("[%s] Stage 1/3: materialize trace input", run_id)
         materialized = self.source.materialize(request.input_path, traces_dir)
+        logger.info("[%s] Stage 1/3: %d jsonl files materialized", run_id, len(materialized))
         imported = load_imported_traces(materialized)
+        logger.info("[%s] Stage 1/3: %d traces imported before filtering", run_id, len(imported))
         if request.thread_ids:
-            imported = [trace for trace in imported if trace.threadId in set(request.thread_ids)]
+            requested_thread_ids = set(request.thread_ids)
+            before = len(imported)
+            imported = [trace for trace in imported if trace.threadId in requested_thread_ids]
+            logger.info(
+                "[%s] Stage 1/3: thread_ids filter kept %d/%d traces across %d requested threads",
+                run_id,
+                len(imported),
+                before,
+                len(requested_thread_ids),
+            )
         if request.since_ts:
+            before = len(imported)
             imported = [trace for trace in imported if trace.startedAt >= request.since_ts]
+            logger.info(
+                "[%s] Stage 1/3: since_ts filter kept %d/%d traces (since=%s)",
+                run_id,
+                len(imported),
+                before,
+                request.since_ts,
+            )
         if request.max_traces:
+            before = len(imported)
             imported = imported[: request.max_traces]
+            logger.info(
+                "[%s] Stage 1/3: max_traces clipped trace list to %d/%d",
+                run_id,
+                len(imported),
+                before,
+            )
 
         bundles = scan_skill_roots(request.skills_roots)
+        logger.info("[%s] Stage 1/3: scanned %d skill bundles", run_id, len(bundles))
         trace_map = {trace.traceId: trace for trace in imported}
 
         episodes = build_episodes(imported, self.settings.episode_gap_minutes)
         families = build_families(episodes, self.settings.family_similarity_threshold)
+        logger.info(
+            "[%s] Stage 1/3 complete: %d traces -> %d episodes -> %d families",
+            run_id,
+            len(imported),
+            len(episodes),
+            len(families),
+        )
         family_by_id = {family.family_id: family for family in families}
         family_of_episode = {
             episode_id: family.family_id
@@ -196,14 +242,26 @@ class TraceEvolutionService:
         }
 
         # Stage 2: 并行 patch 提议（所有 analyst 工作在 frozen S₀ 上，无互相可见性）
+        logger.info("[%s] Stage 2/3: analyze episodes", run_id)
         all_patches = []
-        for episode in episodes:
+        for index, episode in enumerate(episodes, start=1):
             episode_traces = [trace_map[trace_id] for trace_id in episode.trace_ids]
             bundle = match_skill_bundle(episode.used_skills, bundles)
             family_id = family_of_episode.get(episode.episode_id, "")
             route_decision: EpisodeRouteDecision | None = None
             selected_analyst = "error"
             notes: list[str] = []
+            logger.info(
+                "[%s] Stage 2/3: episode %d/%d id=%s thread=%s traces=%d outcomes=%s matched_skill=%s",
+                run_id,
+                index,
+                len(episodes),
+                episode.episode_id,
+                episode.thread_id,
+                len(episode.trace_ids),
+                episode.outcomes,
+                bundle.skill_id if bundle else None,
+            )
             if any(outcome != "success" for outcome in episode.outcomes):
                 hypotheses, patches, notes = self.error_analyst.analyze(episode, episode_traces, bundle)
             else:
@@ -225,6 +283,14 @@ class TraceEvolutionService:
             for patch in patches:
                 patch.family_id = family_id
             all_patches.extend(patches)
+            logger.info(
+                "[%s] Stage 2/3: episode %s analyzed by %s -> %d hypotheses, %d patches",
+                run_id,
+                episode.episode_id,
+                selected_analyst,
+                len(hypotheses),
+                len(patches),
+            )
             self._persist_episode_artifacts(
                 run_id,
                 episode,
@@ -235,12 +301,24 @@ class TraceEvolutionService:
                 route_decision=route_decision,
                 selected_analyst=selected_analyst,
             )
+        logger.info("[%s] Stage 2/3 complete: %d patches proposed", run_id, len(all_patches))
 
         # Stage 3: Conflict-Free Consolidation（Trace2Skill ℳ 算子）
+        logger.info("[%s] Stage 3/3: merge patches into candidate groups", run_id)
         candidate_groups = self._merge_patches(all_patches)
+        logger.info("[%s] Stage 3/3: %d candidate groups after merge", run_id, len(candidate_groups))
         for group_index, patch_group in enumerate(candidate_groups):
             candidate_id = f"cand-{group_index + 1:03d}-{sha256_text(run_id + str(group_index))[:8]}"
             base_bundle = next((bundle for bundle in bundles if bundle.skill_id == patch_group[0].target_skill_id), None)
+            logger.info(
+                "[%s] Stage 3/3: materializing candidate %s (%d/%d) from %d patches for skill=%s",
+                run_id,
+                candidate_id,
+                group_index + 1,
+                len(candidate_groups),
+                len(patch_group),
+                base_bundle.skill_id if base_bundle else None,
+            )
             apply_result = self.patch_engine.apply(candidate_id, patch_group, base_bundle, candidates_dir / candidate_id)
             family_id = patch_group[0].family_id if patch_group else ""
             family_episode_count = len(family_by_id.get(family_id).episode_ids) if family_id in family_by_id else 0
@@ -252,6 +330,14 @@ class TraceEvolutionService:
             )
             self._write_candidate_artifacts(candidates_dir / candidate_id, apply_result, report, base_bundle)
             self._persist_candidate(run_id, apply_result.candidate, report)
+            logger.info(
+                "[%s] Stage 3/3: candidate %s exported with recommendation=%s changed_files=%d unresolved_ops=%d",
+                run_id,
+                candidate_id,
+                report.recommendation,
+                len(apply_result.candidate.files_changed),
+                len(apply_result.candidate.unresolved_ops),
+            )
 
         self._write_run_artifacts(run_dir, imported, episodes, families)
         with session_scope(self.session_factory) as session:
@@ -259,6 +345,15 @@ class TraceEvolutionService:
             if run:
                 run.status = "exported"
                 run.finished_at = utc_now()
+        logger.info(
+            "[%s] Run finished: traces=%d episodes=%d families=%d candidates=%d output=%s",
+            run_id,
+            len(imported),
+            len(episodes),
+            len(families),
+            len(candidate_groups),
+            run_dir,
+        )
 
     # -----------------------------------------------------------------------
     # Stage 3: Merge
@@ -267,11 +362,19 @@ class TraceEvolutionService:
     def _merge_patches(self, patches: list) -> list[list]:
         """Merge analyst patches into candidate groups.
 
-        1. Group by (target_skill, family)
-        2. Within each group, split conflicting patch edits into separate buckets
-        3. Consolidate each bucket:
-           - LLM available → hierarchical merge (Trace2Skill ℳ)
-           - LLM unavailable → hash-based exact dedup (fallback)
+        Goal: one (skill, family) → one final candidate p* (Trace2Skill ℳ).
+
+        Strategy:
+        - LLM available: all patches in a (skill, family) go into ONE bucket and
+          are consolidated by hierarchical merge. The LLM resolves same-anchor
+          conflicts via dedup / conflict resolution / synthesis.
+        - LLM unavailable: fall back to anchor-based bucket splitting +
+          hash dedup, since hash dedup cannot resolve same-anchor conflicts.
+
+        Bucket splitting was the previous default but produced multiple
+        candidates per family because it ran BEFORE the merge LLM had a chance
+        to reconcile conflicts. With LLM available, conflicts are an input to
+        merge, not a reason to split.
         """
         grouped: dict[tuple[str | None, str], list] = {}
         for patch in patches:
@@ -279,7 +382,15 @@ class TraceEvolutionService:
             grouped.setdefault(key, []).append(patch)
 
         all_groups: list[list] = []
+        llm_available = self._has_llm()
         for patches_for_key in grouped.values():
+            if llm_available:
+                # One bucket per (skill, family) — let merge LLM handle conflicts.
+                merged = self._hierarchical_merge(patches_for_key) if len(patches_for_key) > 1 else list(patches_for_key)
+                all_groups.append(merged)
+                continue
+
+            # No-LLM fallback: split by anchor conflict, then hash-dedup each bucket.
             buckets: list[list] = []
             for patch in patches_for_key:
                 placed = False
@@ -292,10 +403,7 @@ class TraceEvolutionService:
                     buckets.append([patch])
 
             for bucket in buckets:
-                if self._has_llm() and len(bucket) > 1:
-                    merged = self._hierarchical_merge(bucket)
-                else:
-                    merged = self._dedupe_bucket(bucket)
+                merged = self._dedupe_bucket(bucket)
                 all_groups.append(merged)
         return all_groups
 
@@ -428,6 +536,10 @@ class TraceEvolutionService:
                     "Do NOT rewrite or guess old_string yourself.\n"
                     "- For **append_file_end** and **create** ops: no source_op_id needed, provide `content` directly.\n"
                     "- You MUST NOT invent edit ops that don't correspond to any source op.\n\n"
+                    "**Markdown formatting (CRITICAL)**:\n"
+                    "- `new_string` and `content` MUST preserve markdown line breaks. "
+                    "Encode every newline as `\\n` in the JSON string. Never collapse a multi-line section into one line.\n"
+                    "- Keep a blank line (`\\n\\n`) before and after every heading and between paragraphs/list blocks.\n\n"
                     "Return JSON:\n"
                     "{\n"
                     '  "reasoning": "string — explain your dedup/conflict/prevalence decisions",\n'
@@ -458,7 +570,7 @@ class TraceEvolutionService:
         ]
 
         try:
-            result = llm.chat_json(messages, temperature=0.2, max_tokens=8192)
+            result = llm.chat_json(messages, temperature=0.2)
         except Exception:
             logger.warning("LLM merge failed, falling back to hash dedup", exc_info=True)
             return None

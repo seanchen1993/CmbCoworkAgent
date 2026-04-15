@@ -31,6 +31,7 @@ class LocalTraceSource:
         if not source.exists():
             raise FileNotFoundError(f"input path does not exist: {source}")
 
+        logger.info("Materializing trace input from %s into %s", source, target_dir)
         target_dir.mkdir(parents=True, exist_ok=True)
         jsonl_files: list[Path] = []
         if source.is_file():
@@ -49,6 +50,7 @@ class LocalTraceSource:
 
         if not jsonl_files:
             raise ValueError(f"no .jsonl files found under: {source}")
+        logger.info("Materialized %d jsonl files from %s", len(jsonl_files), source)
         return jsonl_files
 
 
