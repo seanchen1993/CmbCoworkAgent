@@ -95,8 +95,9 @@ import { startHeartbeat, stopHeartbeat } from "./services/heartbeat"
 import { startChatX, stopChatX } from "./services/chatx"
 import { LocalSandbox } from "./agent/local-sandbox"
 import { closeRuntime } from "./agent/runtime"
-import { registerUpdaterHandlers, startUpdateChecker, stopUpdateChecker } from "./updater"
-import { runStartupSelfCheck } from "./updater/rollback"
+// Updater functionality disabled (注释掉检测更新的功能)
+// import { registerUpdaterHandlers, startUpdateChecker, stopUpdateChecker } from "./updater"
+// import { runStartupSelfCheck } from "./updater/rollback"
 import { isKeepAwakeEnabled, setKeepAwakeEnabled } from "./storage"
 import { getLocalIP } from "./net-utils"
 import { trackEvent } from "./services/event-reporter"
@@ -327,7 +328,7 @@ if (!gotTheLock) {
     registerCodeExecToolsHandlers(ipcMain)
     registerRoutingHandlers(ipcMain)
     registerDashboardHandlers(ipcMain)
-    registerUpdaterHandlers()
+    // registerUpdaterHandlers() // 已禁用：注释掉注册更新相关的 IPC handlers
 
     // Track event handler for client-side telemetry
     ipcMain.handle("track-event", async (_event, payload: any) => {
@@ -432,17 +433,14 @@ if (!gotTheLock) {
 
     createWindow()
 
-    // Run post-update self-check before anything else
-    const selfCheckResult = await runStartupSelfCheck()
-
-    // Expose result to renderer — renderer polls this on mount to show update toast
-    ipcMain.handle("update:get-startup-result", () => selfCheckResult)
+    // 更新自检已禁用（注释掉 runStartupSelfCheck 和对应 IPC）
+    const selfCheckResult = undefined
 
     // Start scheduled task scheduler and heartbeat service
     startScheduler()
     startHeartbeat()
     startChatX()
-    startUpdateChecker()
+    // startUpdateChecker() // 已禁用：注释掉自动检测更新的启动
 
     // ── Keep Awake ──
     applyKeepAwake(isKeepAwakeEnabled())
@@ -473,7 +471,7 @@ if (!gotTheLock) {
     stopScheduler()
     stopHeartbeat()
     stopChatX()
-    stopUpdateChecker()
+    // stopUpdateChecker() // 已禁用：注释掉自动检测更新的停止
     closeRuntime().catch((e) => console.warn("[Main] closeRuntime error:", e))
     flush()
   })

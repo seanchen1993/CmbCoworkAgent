@@ -1920,12 +1920,13 @@ export function ChatContainer({
                           </div>
                         </button>
 
-                        <UpdateStatusCard
-                          hasUpdate={needUpdateVersion}
-                          onClick={() => {
-                            setUpdateDialogOpen(true)
-                          }}
-                        />
+                        {/*beta 注释更新*/}
+                        {/*<UpdateStatusCard*/}
+                        {/*  hasUpdate={needUpdateVersion}*/}
+                        {/*  onClick={() => {*/}
+                        {/*    setUpdateDialogOpen(true)*/}
+                        {/*  }}*/}
+                        {/*/>*/}
 
 
                       </div>
