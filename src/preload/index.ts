@@ -565,9 +565,10 @@ const api = {
     },
     upload: (
       buffer: ArrayBuffer,
-      fileName: string
+      fileName: string,
+      special: boolean
     ): Promise<{ success: boolean; skillName?: string; error?: string }> => {
-      return ipcRenderer.invoke("skills:upload", { buffer, fileName })
+      return ipcRenderer.invoke("skills:upload", { buffer, fileName, special })
     },
     extractMarkdownFromZip: (
       buffer: ArrayBuffer,

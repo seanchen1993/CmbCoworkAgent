@@ -310,6 +310,7 @@ export function ChatContainer({
 
       // 自动安装所有精品技能
       if (goodSkills && goodSkills.length > 0) {
+        localStorage.setItem("goodSkills", JSON.stringify(goodSkills))
         await installAllGoodSkills(goodSkills)
         // 安装完成后重新加载技能列表
         await loadSkills()
@@ -331,6 +332,7 @@ export function ChatContainer({
 
   const installAllGoodSkills = async (goodSkills: MarketItem[]) => {
     console.log("Starting automatic installation of good skills...")
+
 
     for (const skill of goodSkills) {
       try {
@@ -360,7 +362,8 @@ export function ChatContainer({
         }
 
         // 下载并安装技能
-        const response = await marketApi.downloadItem(skillName, "skill", false)
+        console.log('下载并安装技能=',skill)
+        const response = await marketApi.downloadItem(skillName, "skill", false, true)
 
         if (response.success) {
           console.log(`Successfully installed skill: ${skillName}`)
@@ -371,6 +374,7 @@ export function ChatContainer({
         console.error(`Failed to install skill ${skill.name}:`, error)
       }
     }
+
 
     console.log("Finished automatic installation of good skills")
   }

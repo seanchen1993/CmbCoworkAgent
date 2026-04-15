@@ -724,7 +724,7 @@ export function MarketPanel(): React.JSX.Element {
           activeTab === "skill"
             ? "Skill 详情文件仅支持 .zip 或 .md"
             : activeTab === "plugin"
-              ? "Plugin 详情文件仅支持 .zip"
+              ? "Plugin 详情文���仅支持 .zip"
               : "MCP 详情文件仅支持 .json"
         )
       }

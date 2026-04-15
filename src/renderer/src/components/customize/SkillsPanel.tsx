@@ -62,7 +62,7 @@ function UploadSkillDialog(props: {
       setUploading(true)
       try {
         const buffer = await file.arrayBuffer()
-        const res = await window.api.skills.upload(buffer, file.name)
+        const res = await window.api.skills.upload(buffer, file.name, false)
         if (res.success) {
           onSuccess()
           onOpenChange(false)
@@ -673,6 +673,22 @@ function SkillItem(props: {
     [expanded, files, skill.path]
   )
 
+  const isGoodSkill = useMemo(() => {
+   try {
+     const skills = localStorage.getItem('goodSkills') || []
+     const goodSkills =JSON.parse(skills )
+     const target = goodSkills.find(item => {
+       const name = item.name || item.id || ""
+       return name === skill?.name
+     })
+     console.log('goodSkills', goodSkills, target)
+     return !!target
+   }catch (e){
+     console.log(e)
+     return false
+   }
+  }, [skill])
+
   return (
     <div className="rounded-md border border-border/70 overflow-hidden">
       <button
@@ -705,7 +721,7 @@ function SkillItem(props: {
       </button>
       {expanded && (
         <div className="border-t border-border/60 bg-muted/20">
-          {treeNodes.length > 0 ? (
+          {treeNodes.length > 0 && !isGoodSkill ? (
             <SkillFileTree
               nodes={treeNodes}
               level={0}
@@ -815,6 +831,15 @@ export function SkillDetail(props: {
     onDelete,
     hideActions = false
   } = props
+
+  const isGoodSkill = useMemo(() => {
+    const goodSkills = JSON.parse(localStorage.getItem('goodSkills') || '[]')
+    const target = goodSkills.find(item => {
+      const name = item.name || item.id || ""
+      return name === skill?.name
+    })
+    return !!target
+  }, [skill])
 
   if (!skill) {
     return (
@@ -948,7 +973,19 @@ export function SkillDetail(props: {
         </p>
       </div>
 
-      <ScrollArea className="flex-1">
+      {isGoodSkill ? (
+        <div className="flex-1 flex items-center justify-center p-8">
+          <div className="text-center space-y-3 max-w-sm">
+            <div className="size-12 rounded-xl bg-amber-500/10 flex items-center justify-center mx-auto">
+              <Sparkles className="size-6 text-amber-500" />
+            </div>
+            <p className="text-sm text-muted-foreground leading-relaxed">
+              精品技能暂不支持查看内容，可直接在对话中使用
+            </p>
+          </div>
+        </div>
+      ) : (
+        <ScrollArea className="flex-1">
         <div className="p-4">
           {isLoading ? (
             <p className="text-sm text-muted-foreground">加载中...</p>
@@ -988,6 +1025,7 @@ export function SkillDetail(props: {
           )}
         </div>
       </ScrollArea>
+      )}
     </div>
   )
 }

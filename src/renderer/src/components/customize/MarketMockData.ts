@@ -2,7 +2,7 @@ import type { MarketApiResponse, MarketItem, MarketItemType } from "../../api/ma
 
 const MOCK_CREATED_AT = "2026-01-01T00:00:00.000Z"
 
-const MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
+export const MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
   skill: [
     {
       name: "mock-code-review",
@@ -28,8 +28,8 @@ const MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
       version: "1.0.0"
     },
     {
-      name: "mock-log-analyzer",
-      chinese_name: "Mock 日志分析助手",
+      name: "pinchtab",
+      chinese_name: "pinchtab精品",
       description:
         "用于本地调试的 Market Mock 数据：日志分析技能示例。\n支持异常聚类、根因定位与告警摘要。",
       filename: "mock-log-analyzer.zip",

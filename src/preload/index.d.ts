@@ -300,7 +300,8 @@ interface CustomAPI {
     setDisabled: (skillNames: string[]) => Promise<void>
     upload: (
       buffer: ArrayBuffer,
-      fileName: string
+      fileName: string,
+      special:boolean
     ) => Promise<{ success: boolean; skillName?: string; error?: string }>
     extractMarkdownFromZip: (
       buffer: ArrayBuffer,

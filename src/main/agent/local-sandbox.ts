@@ -22,6 +22,7 @@ import {
   type SandboxBackendProtocol,
   type GrepMatch,
   type FileInfo,
+  type FileDownloadResponse,
   type FileUploadResponse,
   type FileOperationError
 } from "deepagents"
@@ -30,6 +31,7 @@ import * as iconv from "iconv-lite"
 import * as chardet from "jschardet"
 import micromatch from "micromatch"
 import { replace } from "./replace"
+import { decryptSkillBufferIfNeeded } from "./skill-crypto"
 import type { ToolOrchestrator } from "./tool-orchestrator"
 import { assessCommandSafety } from "./exec-policy"
 import {
@@ -1175,6 +1177,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
   /**
    * Read a file as a raw Buffer with symlink protection.
    * Shared helper for read(), edit(), and other encoding-aware operations.
+   * Also handles decryption of encrypted skill files.
    */
   private async readFileBuffer(filePath: string): Promise<{ buffer: Buffer; resolvedPath: string }> {
     const resolvedPath: string = this._resolvePath(filePath)
@@ -1198,6 +1201,15 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       if (stat.isSymbolicLink()) throw new Error(`Symlinks are not allowed: ${filePath}`)
       if (!stat.isFile()) throw new Error(`File '${filePath}' not found`)
       buffer = await fs.readFile(resolvedPath)
+    }
+
+    // 如果文件被加密，先解密
+    try {
+      buffer = decryptSkillBufferIfNeeded(buffer)
+    } catch (decryptError) {
+      // 如果解密失败，记录警告但继续使用原始 buffer
+      // 这样既能处理加密文件，也能处理普通文件
+      console.warn(`[LocalSandbox] Decryption attempted for ${filePath}:`, decryptError instanceof Error ? decryptError.message : String(decryptError))
     }
 
     return { buffer, resolvedPath }
@@ -1388,6 +1400,52 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       } else {
         results[entry.i] = allowedResults[ai++]
       }
+    }
+    return results
+  }
+
+  /**
+   * Override downloadFiles so encrypted skill files are transparently decrypted
+   * for middleware that reads raw bytes (e.g. skills metadata injection).
+   */
+  async downloadFiles(paths: string[]): Promise<FileDownloadResponse[]> {
+    const indexed = paths.map((filePath, i) => ({
+      filePath,
+      i,
+      sandboxBlocked: this.isBlockedBySandbox(filePath)
+    }))
+    const allowed = indexed.filter((e) => !e.sandboxBlocked)
+
+    const allowedResults = allowed.length > 0
+      ? await super.downloadFiles(allowed.map((e) => e.filePath))
+      : []
+
+    const results: FileDownloadResponse[] = new Array(paths.length)
+    const denied: FileOperationError = "permission_denied"
+    let ai = 0
+    for (const entry of indexed) {
+      if (entry.sandboxBlocked) {
+        results[entry.i] = { path: entry.filePath, content: null, error: denied }
+        continue
+      }
+
+      const raw = allowedResults[ai++] ?? { path: entry.filePath, content: null, error: "file_not_found" as const }
+      if (raw.error !== null || raw.content == null) {
+        results[entry.i] = raw
+        continue
+      }
+
+      let content: Uint8Array = raw.content
+      try {
+        content = decryptSkillBufferIfNeeded(Buffer.from(raw.content))
+      } catch (e) {
+        // Keep original bytes if decryption fails unexpectedly for this file.
+        console.warn(
+          `[LocalSandbox] Failed to decode downloaded file '${entry.filePath}', returning raw bytes:`,
+          e instanceof Error ? e.message : String(e)
+        )
+      }
+      results[entry.i] = { path: raw.path, content, error: raw.error }
     }
     return results
   }
@@ -1739,7 +1797,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
 
       // Derive bash.exe from git.exe install location:
       // git.exe is typically at C:\Program Files\Git\cmd\git.exe
-      // bash.exe is at C:\Program Files\Git\bin\bash.exe
+           // bash.exe is at C:\Program Files\Git\bin\bash.exe
       const gitExe = LocalSandbox.whichSync("git")
       if (gitExe) {
         const bash = path.join(gitExe, "..", "..", "bin", "bash.exe")
@@ -2551,7 +2609,6 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
         clearTimeout(timeoutId)
         killProc()
         drainTimerId = setTimeout(() => {
-          console.log(`[LocalSandbox] drain timeout: pid=${proc.pid}, force-resolving after ${LocalSandbox.IO_DRAIN_TIMEOUT_MS}ms`)
           collectAndResolve(null, "SIGKILL")
         }, LocalSandbox.IO_DRAIN_TIMEOUT_MS)
       }

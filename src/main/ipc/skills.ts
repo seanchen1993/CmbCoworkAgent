@@ -5,6 +5,10 @@ import * as path from "path"
 import { existsSync, mkdirSync, rmSync } from "fs"
 import { getCustomSkillsDir, getDisabledSkills, getSkillsDir, setDisabledSkills } from "../storage"
 import type { SkillMetadata } from "../types"
+import {
+  encryptSkillBuffer,
+  decryptSkillBufferIfNeeded
+} from "../agent/skill-crypto"
 
 function sanitizeSkillName(name: string): string {
   return (
@@ -83,7 +87,11 @@ async function loadSkills(
       if (!existsSync(skillMdPath)) continue
 
       try {
-        const content = await fs.readFile(skillMdPath, "utf-8")
+        // Read the SKILL.md file (may be encrypted)
+        const buffer = await fs.readFile(skillMdPath)
+        // Decrypt if needed, otherwise use as-is
+        const decrypted = decryptSkillBufferIfNeeded(buffer)
+        const content = decrypted.toString("utf-8")
         const frontmatter = parseYamlFrontmatter(content)
 
         skills.push({
@@ -141,6 +149,7 @@ export async function listAllSkills(): Promise<SkillMetadata[]> {
   for (const s of custom) byName.set(s.name, s)
   return Array.from(byName.values())
 }
+
 
 export function registerSkillsHandlers(ipcMain: IpcMain): void {
   console.log("[Skills] Registering skills handlers...")
@@ -276,9 +285,13 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
     "skills:upload",
     async (
       _event,
-      payload: { buffer: ArrayBuffer; fileName: string }
+      payload: { buffer: ArrayBuffer; fileName: string; special?: boolean }
     ): Promise<{ success: boolean; skillName?: string; error?: string }> => {
-      const { buffer, fileName } = payload
+      const { buffer, fileName, special = false } = payload
+
+      const isPremium = special
+      console.log(`[Skills] Uploading skill "${fileName}" (premium: ${isPremium})...`)
+
       if (!buffer || !fileName || typeof fileName !== "string") {
         return { success: false, error: "Invalid buffer or fileName" }
       }
@@ -322,7 +335,19 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
           }
           const skillDir = path.join(customDir, skillName)
           mkdirSync(skillDir, { recursive: true })
-          await fs.writeFile(path.join(skillDir, "SKILL.md"), content, "utf-8")
+
+          // Check if this is a premium skill (has license field or marked as special)
+          const skillMdPath = path.join(skillDir, "SKILL.md")
+
+          if (isPremium) {
+            // Encrypt the SKILL.md file for premium skills
+            const encrypted = encryptSkillBuffer(Buffer.from(content, "utf-8"))
+            await fs.writeFile(skillMdPath, encrypted)
+            console.log(`[Skills] Premium skill "${name}" encrypted and saved`)
+          } else {
+            // Store plaintext for non-premium skills
+            await fs.writeFile(skillMdPath, content, "utf-8")
+          }
           return { success: true, skillName }
         }
 
@@ -361,6 +386,7 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
           const skillDir = path.join(customDir, skillName)
           mkdirSync(skillDir, { recursive: true })
 
+          // Check if this is a premium skill (has license field or marked as special)
           const basePrefix = skillMdEntry.entryName.replace("SKILL.md", "")
           for (const entry of entries) {
             if (entry.isDirectory) continue
@@ -377,7 +403,16 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
             }
             const destDir = path.dirname(destPath)
             mkdirSync(destDir, { recursive: true })
-            await fs.writeFile(destPath, entry.getData())
+
+            // For premium skills, only encrypt Markdown files (e.g. SKILL.md)
+            if (isPremium && relativePath.toLowerCase().endsWith(".md")) {
+              const encrypted = encryptSkillBuffer(entry.getData())
+              await fs.writeFile(destPath, encrypted)
+              console.log(`[Skills] Premium skill markdown file "${relativePath}" encrypted`)
+            } else {
+              // Non-premium OR premium non-markdown: write plaintext
+              await fs.writeFile(destPath, entry.getData())
+            }
           }
           return { success: true, skillName }
         }
@@ -432,6 +467,71 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
         return { success: false, error: "仅支持 .md 或 .zip 文件" }
       } catch (e) {
         return { success: false, error: e instanceof Error ? e.message : "Unknown error" }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    "skills:encryptGoodSkills",
+    async (_event, payload: { skillPaths: string[] }): Promise<{ success: boolean; encrypted: number; error?: string }> => {
+      const { skillPaths } = payload
+      if (!Array.isArray(skillPaths)) {
+        return { success: false, error: "Invalid skill paths", encrypted: 0 }
+      }
+
+      let encryptedCount = 0
+      const errors: string[] = []
+
+      for (const skillPath of skillPaths) {
+        try {
+          const resolvedPath = path.resolve(skillPath)
+          if (!isPathUnderAllowedDirs(resolvedPath)) {
+            errors.push(`Path outside allowed dirs: ${skillPath}`)
+            continue
+          }
+
+          // Read current content
+          const buffer = await fs.readFile(resolvedPath)
+          const content = decryptSkillBufferIfNeeded(buffer).toString("utf-8")
+
+          // Parse frontmatter
+          const frontmatter = parseYamlFrontmatter(content)
+
+          // If already has license, skip
+          if (frontmatter.license) {
+            console.log(`[Skills] Skill already has license field: ${skillPath}`)
+            continue
+          }
+
+          // Add license field to frontmatter if not present
+          let updatedContent = content
+          const frontmatterMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---/)
+          if (frontmatterMatch) {
+            const yamlSection = frontmatterMatch[1]
+            // Add license field at the end of YAML
+            const updatedYaml = yamlSection.trim() + "\nlicense: premium"
+            updatedContent = content.replace(/^---\r?\n[\s\S]*?\r?\n---/, `---\n${updatedYaml}\n---`)
+          } else {
+            // No frontmatter, add one
+            updatedContent = `---\nlicense: premium\n---\n${content}`
+          }
+
+          // Encrypt and save
+          const encryptedBuffer = encryptSkillBuffer(Buffer.from(updatedContent, "utf-8"))
+          await fs.writeFile(resolvedPath, encryptedBuffer)
+          console.log(`[Skills] Successfully encrypted good skill: ${skillPath}`)
+          encryptedCount++
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : "Unknown error"
+          errors.push(`${skillPath}: ${msg}`)
+          console.error(`[Skills] Failed to encrypt skill ${skillPath}:`, e)
+        }
+      }
+
+      return {
+        success: errors.length === 0,
+        encrypted: encryptedCount,
+        error: errors.length > 0 ? errors.join("; ") : undefined
       }
     }
   )

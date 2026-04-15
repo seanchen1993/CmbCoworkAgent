@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo, useRef, useCallback } from "react"
-import { Loader2, AlertCircle, FileCode } from "lucide-react"
+import { Loader2, AlertCircle, FileCode, Lock } from "lucide-react"
 import { useCurrentThread } from "@/lib/thread-context"
 import { getFileType, isBinaryFile } from "@/lib/file-types"
 import { CodeViewer } from "./CodeViewer"
@@ -7,8 +7,8 @@ import { ImageViewer } from "./ImageViewer"
 import { MediaViewer } from "./MediaViewer"
 import { PDFViewer } from "./PDFViewer"
 import { BinaryFileViewer } from "./BinaryFileViewer"
-import MarkdownPreview from "@/components/ui/MarkdownPreview/MarkdownPreview"
-import { HtmlPreview } from "@/components/chat/previews/HtmlPreview"
+import MarkdownPreview from "@/components/tabs/MarkdownPreview/MarkdownPreview"
+import { HtmlPreview } from "@/components/tabs/HtmlPreview"
 
 interface FileViewerProps {
   filePath: string
@@ -17,6 +17,34 @@ interface FileViewerProps {
   htmlFillHeight?: boolean
   reloadToken?: number
   previewMode?: "preview" | "source"
+}
+
+// 检测 content 是否使用了 skill 加密头（与 main/agent/skill-crypto.ts 保持一致）
+// 魔法头: SKENC\x02\x00\x00 (8 bytes, version 2)
+const SKILL_ENCRYPTION_MAGIC = "SKENC\x02\x00\x00"
+
+const isSkillEncrypted = (content?: string): boolean => {
+  if (!content || content.length < SKILL_ENCRYPTION_MAGIC.length) return false
+  return content.startsWith(SKILL_ENCRYPTION_MAGIC)
+}
+
+// 加密文件提示组件
+function EncryptedFilePrompt({ filePath }: { filePath: string }): React.JSX.Element {
+  return (
+    <div className="flex flex-1 h-full min-h-0 items-center justify-center p-6">
+      <div className="w-full max-w-[560px] rounded-2xl border border-border/60 bg-muted/20 px-5 py-4 shadow-sm">
+        <div className="flex flex-col items-center gap-3 text-center">
+          <div className="mt-0.5 rounded-lg bg-yellow-500/10 p-2 text-yellow-500">
+            <Lock className="size-4" />
+          </div>
+          <div className="min-w-0 flex-1 space-y-2">
+            <div className="text-sm font-semibold text-foreground">这是加密文件</div>
+            <div className="text-sm text-muted-foreground leading-6">暂不支持预览加密内容</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 function formatFileLoadError(rawError: string): {
@@ -70,7 +98,9 @@ export function FileViewer({
 
   // Get file type info
   const fileName = displayPath.split("/").pop() || displayPath
-  const ext = fileName.includes(".") ? fileName.split(".").pop()?.toLowerCase() ?? "" : ""
+  const ext = fileName.includes(".")
+    ? (fileName.split(".").pop()?.toLowerCase() ?? "")
+    : ""
   const markdownLike = ext === "md" || ext === "markdown" || ext === "mdx"
   const htmlLike = ext === "html" || ext === "htm"
   const fileTypeInfo = useMemo(() => getFileType(fileName), [fileName])
@@ -182,10 +212,16 @@ export function FileViewer({
               <AlertCircle className="size-4" />
             </div>
             <div className="min-w-0 flex-1 space-y-2">
-              <div className="text-sm font-semibold text-foreground">{friendlyError.title}</div>
-              <div className="text-sm text-muted-foreground leading-6">{friendlyError.description}</div>
+              <div className="text-sm font-semibold text-foreground">
+                {friendlyError.title}
+              </div>
+              <div className="text-sm text-muted-foreground leading-6">
+                {friendlyError.description}
+              </div>
               {friendlyError.detail ? (
-                <div className="text-xs text-muted-foreground/90 leading-5">{friendlyError.detail}</div>
+                <div className="text-xs text-muted-foreground/90 leading-5">
+                  {friendlyError.detail}
+                </div>
               ) : null}
               {friendlyError.missingPath ? (
                 <div className="rounded-md border border-border/60 bg-background/80 px-3 py-2 text-xs text-muted-foreground break-all text-left">
@@ -206,6 +242,11 @@ export function FileViewer({
         <span>No content</span>
       </div>
     )
+  }
+
+  // 检测加密文件
+  if (isSkillEncrypted(content)) {
+    return <EncryptedFilePrompt filePath={displayPath} />
   }
 
   // Route to appropriate viewer based on file type
