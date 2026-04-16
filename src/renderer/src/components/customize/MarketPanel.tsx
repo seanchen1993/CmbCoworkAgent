@@ -310,6 +310,7 @@ type SkillPreviewKind = "text" | "html" | "image" | "pdf"
 interface PluginDetailData {
   skills: string[]
   mcpServers: string[]
+  hooks: number
   manifest: PluginManifest | null
 }
 
@@ -772,12 +773,14 @@ export function MarketPanel(): React.JSX.Element {
           enabled: false,
           skillCount: 0,
           mcpServerCount: 0,
+          hookCount: 0,
           createdAt: item.created_at,
           updatedAt: item.created_at
         })
         setPluginDetailData({
           skills: [],
           mcpServers: [],
+          hooks: 0,
           manifest: {
             name: item.name,
             version: item.version,
