@@ -31,7 +31,10 @@ export function McpPanel(): React.JSX.Element {
     const q = debouncedQuery.trim().toLowerCase()
     if (!q) return mcpConnectors
     return mcpConnectors.filter(
-      (c) => c.name.toLowerCase().includes(q) || c.url.toLowerCase().includes(q)
+      (c) =>
+        c.name.toLowerCase().includes(q) ||
+        (c.url ?? "").toLowerCase().includes(q) ||
+        (c.command ?? "").toLowerCase().includes(q)
     )
   }, [mcpConnectors, debouncedQuery])
 

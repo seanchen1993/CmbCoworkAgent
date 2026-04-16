@@ -58,6 +58,32 @@ export interface ProductivityData {
   avgCommitsPerUser: number
 }
 
+export interface FeedbackData {
+  totalLikes: number
+  totalDislikes: number
+  totalLikeUsers: number
+  totalDislikeUsers: number
+  totalFeedbacks: number
+  likeRate: number
+  dislikeRate: number
+  byDislikeType: Array<{
+    type: string
+    label: string
+    count: number
+  }>
+  trend: Array<{
+    time: string
+    likes: number
+    dislikes: number
+  }>
+  recentComments: Array<{
+    time: string
+    type: string
+    typeLabel: string
+    text: string
+  }>
+}
+
 // ─────────────────────────────────────────────────────────
 // Time helpers
 // ─────────────────────────────────────────────────────────
@@ -272,6 +298,81 @@ function parseProductivity(raw: any, granularity: Granularity): ProductivityData
   }
 }
 
+const DISLIKE_TYPE_LABELS: Record<string, string> = {
+  slow: "太慢了",
+  not_helpful: "内容不相关",
+  inaccurate: "信息不准确",
+  unclear: "表述不清楚",
+  unsafe: "包含不安全内容",
+  other: "其他原因"
+}
+
+function formatCommentTime(isoStr: string): string {
+  const d = new Date(isoStr)
+  if (isNaN(d.getTime())) return isoStr
+  const mm = String(d.getMonth() + 1).padStart(2, "0")
+  const dd = String(d.getDate()).padStart(2, "0")
+  const hh = String(d.getHours()).padStart(2, "0")
+  const min = String(d.getMinutes()).padStart(2, "0")
+  return `${mm}-${dd} ${hh}:${min}`
+}
+
+function parseFeedback(raw: any, granularity: Granularity): FeedbackData {
+  const aggs = raw?.aggregations ?? {}
+  const totalLikes = aggs.total_likes?.doc_count ?? 0
+  const totalDislikes = aggs.total_dislikes?.doc_count ?? 0
+  const totalLikeUsers = aggs.total_likes?.unique_users?.value ?? 0
+  const totalDislikeUsers = aggs.total_dislikes?.unique_users?.value ?? 0
+  const totalFeedbacks = totalLikes + totalDislikes
+
+  const dislikeBuckets = aggs.dislike_by_type?.buckets ?? {}
+  const byDislikeType: FeedbackData["byDislikeType"] = Object.entries(dislikeBuckets)
+    .map(([type, value]) => ({
+      type,
+      label: DISLIKE_TYPE_LABELS[type] ?? type,
+      count: (value as { doc_count?: number }).doc_count ?? 0
+    }))
+    .sort((a, b) => b.count - a.count)
+
+  const trend: FeedbackData["trend"] = (aggs.trend?.buckets ?? []).map((b: any) => ({
+    time: formatTrendTime(b.key_as_string ?? new Date(b.key).toISOString(), granularity),
+    likes: b.likes?.doc_count ?? 0,
+    dislikes: b.dislikes?.doc_count ?? 0
+  }))
+
+  const recentCommentsHits = aggs.recent_dislike_comments?.latest?.hits?.hits ?? []
+  const recentComments: FeedbackData["recentComments"] = recentCommentsHits
+    .map((hit: any) => {
+      const source = hit?._source ?? {}
+      const properties = source.properties ?? {}
+      const text = String(properties.dislikeText ?? "").trim()
+      const type = String(properties.dislikeType ?? properties.feedbackId ?? "other")
+      const typeLabel = String(
+        properties.dislikeTypeLabel ?? DISLIKE_TYPE_LABELS[type] ?? type
+      )
+      return {
+        time: formatCommentTime(String(source.eventTime ?? "")),
+        type,
+        typeLabel,
+        text
+      }
+    })
+    .filter((item: { text: string }) => Boolean(item.text))
+
+  return {
+    totalLikes,
+    totalDislikes,
+    totalLikeUsers,
+    totalDislikeUsers,
+    totalFeedbacks,
+    likeRate: totalFeedbacks > 0 ? totalLikes / totalFeedbacks : 0,
+    dislikeRate: totalFeedbacks > 0 ? totalDislikes / totalFeedbacks : 0,
+    byDislikeType,
+    trend,
+    recentComments
+  }
+}
+
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
 // ─────────────────────────────────────────────────────────
@@ -288,6 +389,7 @@ export function useDashboard() {
   const [modelStats, setModelStats] = useState<ModelStatsData | null>(null)
   const [userStats, setUserStats] = useState<UserStatsData | null>(null)
   const [productivity, setProductivity] = useState<ProductivityData | null>(null)
+  const [feedback, setFeedback] = useState<FeedbackData | null>(null)
 
   const fetchIdRef = useRef(0)
 
@@ -297,11 +399,12 @@ export function useDashboard() {
     setError(null)
 
     try {
-      const [ovRes, msRes, usRes, prRes] = await Promise.all([
+      const [ovRes, msRes, usRes, prRes, fbRes] = await Promise.all([
         window.api.dashboard.overview(r, g),
         window.api.dashboard.modelStats(r, g),
         window.api.dashboard.userStats(r, g),
-        window.api.dashboard.productivity(r, g)
+        window.api.dashboard.productivity(r, g),
+        window.api.dashboard.feedback(r, g)
       ])
 
       // Stale check
@@ -311,11 +414,13 @@ export function useDashboard() {
       if (!msRes.success) throw new Error(msRes.error ?? "获取模型数据失败")
       if (!usRes.success) throw new Error(usRes.error ?? "获取用户数据失败")
       if (!prRes.success) throw new Error(prRes.error ?? "获取生产力数据失败")
+      if (!fbRes.success) throw new Error(fbRes.error ?? "获取反馈数据失败")
 
       setOverview(parseOverview(ovRes.data, g))
       setModelStats(parseModelStats(msRes.data))
       setUserStats(parseUserStats(usRes.data))
       setProductivity(parseProductivity(prRes.data, g))
+      setFeedback(parseFeedback(fbRes.data, g))
     } catch (e) {
       if (id !== fetchIdRef.current) return
       setError(e instanceof Error ? e.message : String(e))
@@ -362,6 +467,7 @@ export function useDashboard() {
     modelStats,
     userStats,
     productivity,
+    feedback,
     changeGranularity,
     navigate,
     setCustomRange,

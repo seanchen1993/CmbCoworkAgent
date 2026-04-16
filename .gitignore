@@ -17,6 +17,9 @@ src/renderer/.vite/
 .codex/
 tests/screenshots/
 
+# Java LSP VSIX bundles (downloaded via scripts/download-jdtls.sh)
+resources/lsp-vsix/*.vsix
+
 # Claude Code local session artifacts
 .cmbdevclaw/
 AGENTS.md

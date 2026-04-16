@@ -11,6 +11,15 @@ import type {
   ScheduledTask,
   ScheduledTaskUpsert,
   HeartbeatConfig,
+  LspConfig,
+  LspDiagnostic,
+  LspLocation,
+  LspHoverResult,
+  LspSymbol,
+  LspCallHierarchyItem,
+  LspCallHierarchyIncomingCall,
+  LspCallHierarchyOutgoingCall,
+  LspStatus,
   PluginMetadata,
   PluginManifest,
   ChatXConfig
@@ -23,6 +32,17 @@ import type {
   SavedCodeExecPreviewResult,
   SavedCodeExecToolUpdatePayload
 } from "../main/ipc/code-exec-tools"
+
+interface LspDownloadProgress {
+  percent: number
+  transferred: number
+  total: number
+}
+
+interface LspDownloadState {
+  isDownloading: boolean
+  progress: LspDownloadProgress | null
+}
 
 // Simple electron API - replaces @electron-toolkit/preload
 const electronAPI = {
@@ -590,10 +610,74 @@ const api = {
       ipcRenderer.invoke("mcp:setEnabled", { id, enabled }),
     testConnection: (params: {
       id?: string
+      config?: McpConnectorUpsert
       url?: string
       advanced?: McpConnectorConfig["advanced"]
     }): Promise<{ success: boolean; tools?: string[]; error?: string }> =>
       ipcRenderer.invoke("mcp:testConnection", params)
+  },
+  lsp: {
+    getConfig: (): Promise<LspConfig> =>
+      ipcRenderer.invoke("lsp:getConfig") as Promise<LspConfig>,
+    saveConfig: (updates: Partial<LspConfig>): Promise<void> =>
+      ipcRenderer.invoke("lsp:saveConfig", updates) as Promise<void>,
+    resetConfig: (): Promise<LspConfig> =>
+      ipcRenderer.invoke("lsp:resetConfig") as Promise<LspConfig>,
+    start: (projectRoot: string): Promise<void> =>
+      ipcRenderer.invoke("lsp:start", projectRoot) as Promise<void>,
+    stop: (projectRoot: string): Promise<void> =>
+      ipcRenderer.invoke("lsp:stop", projectRoot) as Promise<void>,
+    isRunning: (projectRoot: string): Promise<boolean> =>
+      ipcRenderer.invoke("lsp:isRunning", projectRoot) as Promise<boolean>,
+    getStatus: (projectRoot: string | null): Promise<LspStatus> =>
+      ipcRenderer.invoke("lsp:getStatus", projectRoot) as Promise<LspStatus>,
+    getDownloadTarget: (): Promise<{ name: string; filenames: string[] }> =>
+      ipcRenderer.invoke("lsp:getDownloadTarget") as Promise<{ name: string; filenames: string[] }>,
+    getDownloadState: (): Promise<LspDownloadState> =>
+      ipcRenderer.invoke("lsp:getDownloadState") as Promise<LspDownloadState>,
+    downloadVsix: (): Promise<{ success: boolean; path?: string; error?: string }> =>
+      ipcRenderer.invoke("lsp:downloadVsix") as Promise<{ success: boolean; path?: string; error?: string }>,
+    importVsix: (): Promise<{ success: boolean; path?: string; error?: string }> =>
+      ipcRenderer.invoke("lsp:importVsix") as Promise<{ success: boolean; path?: string; error?: string }>,
+    saveDownloadedVsix: (buffer: ArrayBuffer, fileName?: string): Promise<{ success: boolean; path?: string; error?: string }> =>
+      ipcRenderer.invoke("lsp:saveDownloadedVsix", { buffer, fileName }) as Promise<{ success: boolean; path?: string; error?: string }>,
+    definition: (params: { projectRoot: string; filePath: string; line: number; column: number }): Promise<LspLocation[]> =>
+      ipcRenderer.invoke("lsp:definition", params) as Promise<LspLocation[]>,
+    references: (params: { projectRoot: string; filePath: string; line: number; column: number }): Promise<LspLocation[]> =>
+      ipcRenderer.invoke("lsp:references", params) as Promise<LspLocation[]>,
+    hover: (params: { projectRoot: string; filePath: string; line: number; column: number }): Promise<LspHoverResult | null> =>
+      ipcRenderer.invoke("lsp:hover", params) as Promise<LspHoverResult | null>,
+    implementation: (params: { projectRoot: string; filePath: string; line: number; column: number }): Promise<LspLocation[]> =>
+      ipcRenderer.invoke("lsp:implementation", params) as Promise<LspLocation[]>,
+    documentSymbols: (params: { projectRoot: string; filePath: string }): Promise<LspSymbol[]> =>
+      ipcRenderer.invoke("lsp:documentSymbols", params) as Promise<LspSymbol[]>,
+    workspaceSymbol: (params: { projectRoot: string; query: string }): Promise<LspSymbol[]> =>
+      ipcRenderer.invoke("lsp:workspaceSymbol", params) as Promise<LspSymbol[]>,
+    diagnostics: (params: { projectRoot: string; filePath?: string }): Promise<LspDiagnostic[]> =>
+      ipcRenderer.invoke("lsp:diagnostics", params) as Promise<LspDiagnostic[]>,
+    prepareCallHierarchy: (params: { projectRoot: string; filePath: string; line: number; column: number }): Promise<LspCallHierarchyItem[]> =>
+      ipcRenderer.invoke("lsp:prepareCallHierarchy", params) as Promise<LspCallHierarchyItem[]>,
+    incomingCalls: (params: { projectRoot: string; filePath: string; line: number; column: number }): Promise<LspCallHierarchyIncomingCall[]> =>
+      ipcRenderer.invoke("lsp:incomingCalls", params) as Promise<LspCallHierarchyIncomingCall[]>,
+    outgoingCalls: (params: { projectRoot: string; filePath: string; line: number; column: number }): Promise<LspCallHierarchyOutgoingCall[]> =>
+      ipcRenderer.invoke("lsp:outgoingCalls", params) as Promise<LspCallHierarchyOutgoingCall[]>,
+    detectJavaProject: (dirPath: string): Promise<boolean> =>
+      ipcRenderer.invoke("lsp:detectJavaProject", dirPath) as Promise<boolean>,
+    onDiagnostics: (callback: (diagnostics: LspDiagnostic[]) => void): (() => void) => {
+      const handler = (_: unknown, diagnostics: LspDiagnostic[]): void => { callback(diagnostics) }
+      ipcRenderer.on("lsp:diagnostics", handler)
+      return () => { ipcRenderer.removeListener("lsp:diagnostics", handler) }
+    },
+    onChanged: (callback: () => void): (() => void) => {
+      const handler = (): void => { callback() }
+      ipcRenderer.on("lsp:changed", handler)
+      return () => { ipcRenderer.removeListener("lsp:changed", handler) }
+    },
+    onDownloadState: (callback: (state: LspDownloadState) => void): (() => void) => {
+      const handler = (_: unknown, state: LspDownloadState): void => { callback(state) }
+      ipcRenderer.on("lsp:download-state", handler)
+      return () => { ipcRenderer.removeListener("lsp:download-state", handler) }
+    }
   },
   terminal: {
     create: (opts: { workDir?: string; args?: string[]; cols?: number; rows?: number; claudeModelId?: string; syncSkills?: boolean; syncMemory?: boolean }): Promise<string> =>
@@ -1320,7 +1404,12 @@ const api = {
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom"
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:productivity", range, granularity)
+      ipcRenderer.invoke("dashboard:productivity", range, granularity),
+    feedback: (
+      range: { from: string; to: string },
+      granularity: "day" | "week" | "month" | "custom"
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:feedback", range, granularity)
   },
   update: {
     check: (): Promise<

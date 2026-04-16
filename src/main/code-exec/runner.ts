@@ -3,10 +3,11 @@ import { existsSync } from "fs"
 import { join } from "path"
 import { app } from "electron"
 import type { McpCapabilityService } from "../mcp/capability-types"
+import { CODE_EXEC_DEFAULT_TIMEOUT_MS } from "./constants"
 import { CodeExecBridge } from "./bridge"
 import type { CodeExecHelperRequest, CodeExecResult, CodeExecRunner, CodeExecSession } from "./types"
 
-const DEFAULT_TIMEOUT_MS = 20_000
+const DEFAULT_TIMEOUT_MS = CODE_EXEC_DEFAULT_TIMEOUT_MS
 
 function resolveHelperEntryPath(): string {
   const candidates = [

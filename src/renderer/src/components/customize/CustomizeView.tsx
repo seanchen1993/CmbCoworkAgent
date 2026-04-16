@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { ArrowLeft, Brain, Clock, GitBranch, HeartPulse, Plug, Puzzle, Sparkles, ShoppingBag, Shield, Cpu, CircleUser, Webhook, Wrench } from "lucide-react"
+import { ArrowLeft, Brain, Clock, Code2, GitBranch, HeartPulse, Plug, Puzzle, Sparkles, ShoppingBag, Shield, Cpu, CircleUser, Webhook, Wrench } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useAppStore } from "@/lib/store"
 import { cn } from "@/lib/utils"
@@ -15,6 +15,7 @@ import { EvolutionPanel } from "./EvolutionPanel"
 import { ChatXPanel } from "./ChatXPanel"
 import { UserInfoPanel } from "./UserInfoPanel"
 import { HooksPanel } from "./HooksPanel"
+import { LspPanel } from "./LspPanel"
 import { CodeExecToolsPanel } from "./CodeExecToolsPanel"
 
 type CustomizeTab =
@@ -30,10 +31,17 @@ type CustomizeTab =
   | "chatx"
   | "userinfo"
   | "hooks"
+  | "lsp"
   | "codeExecTools"
 
 export function CustomizeView(): React.JSX.Element {
-  const { setShowCustomizeView, customizeInitialTab, pendingEvolution, setPendingEvolution } = useAppStore()
+  const {
+    setShowCustomizeView,
+    customizeInitialTab,
+    pendingEvolution,
+    setPendingEvolution,
+    currentThreadId
+  } = useAppStore()
   const [activeTab, setActiveTab] = useState<CustomizeTab>(
     (customizeInitialTab as CustomizeTab) || "skills"
   )
@@ -152,6 +160,19 @@ export function CustomizeView(): React.JSX.Element {
           <button
             className={cn(
               "flex items-center gap-3 w-full rounded-md px-2.5 py-1.5 text-sm transition-colors",
+              activeTab === "lsp"
+                ? "bg-muted font-medium"
+                : "text-muted-foreground hover:bg-muted/50"
+            )}
+            onClick={() => setActiveTab("lsp")}
+          >
+            <Code2 className="size-4 shrink-0" />
+            Java LSP
+            <span className="ml-auto text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400">Beta</span>
+          </button>
+          <button
+            className={cn(
+              "flex items-center gap-3 w-full rounded-md px-2.5 py-1.5 text-sm transition-colors",
               activeTab === "evolution"
                 ? "bg-muted font-medium"
                 : "text-muted-foreground hover:bg-muted/50"
@@ -248,6 +269,8 @@ export function CustomizeView(): React.JSX.Element {
         <EvolutionPanel />
       ) : activeTab === "chatx" ? (
         <ChatXPanel />
+      ) : activeTab === "lsp" ? (
+        <LspPanel threadId={currentThreadId} />
       ) : activeTab === "sandbox" ? (
         <SandboxPanel />
       ) : activeTab === "userinfo" ? (

@@ -270,17 +270,16 @@ function App(): React.JSX.Element {
   }, [currentThreadId, mainView, handlePreviewCollapse])
 
   useEffect(() => {
-    if (!currentThreadId || mainView !== "thread") return
-
     const cleanupFs = window.api.workspace.onFilesChanged((data) => {
-      if (data.threadId !== currentThreadId) return
-      if (!isGitWorkspaceByThread[currentThreadId]) return
-      if (rightModule === "git") return
-      setThreadPendingGitDiff(currentThreadId, true)
+      const changedThreadId = data.threadId
+      if (!changedThreadId) return
+      // Keep current behavior: when user is already in current thread's Git panel, don't raise notice.
+      if (rightModule === "git" && changedThreadId === currentThreadId) return
+      setThreadPendingGitDiff(changedThreadId, true)
     })
 
     return cleanupFs
-  }, [currentThreadId, mainView, rightModule, isGitWorkspaceByThread, setThreadPendingGitDiff])
+  }, [currentThreadId, rightModule, setThreadPendingGitDiff])
 
   // Reset drag start on mouse up
   useEffect(() => {
@@ -463,12 +462,12 @@ function App(): React.JSX.Element {
                         : moduleInactiveClass
                   }`}
                   onClick={selectGitModule}
-                  title="Git 操作"
-                  aria-label="Git 操作"
+                  title="Git 面板"
+                  aria-label="Git 面板"
                   aria-pressed={rightModule === "git"}
                 >
                   <GitBranch size={16} className="shrink-0" strokeWidth={1.8} />
-                  <span>Git 操作</span>
+                  <span>Git 面板</span>
                 </button>
                 <button
                   type="button"
