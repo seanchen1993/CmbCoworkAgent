@@ -1320,7 +1320,12 @@ const api = {
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom"
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:productivity", range, granularity)
+      ipcRenderer.invoke("dashboard:productivity", range, granularity),
+    feedback: (
+      range: { from: string; to: string },
+      granularity: "day" | "week" | "month" | "custom"
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:feedback", range, granularity)
   },
   update: {
     check: (): Promise<

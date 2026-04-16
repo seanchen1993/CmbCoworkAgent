@@ -3,7 +3,7 @@ import {
   ChevronRight,
   ChevronDown,
   AlertCircle,
-  RotateCcw,
+  Undo2,
   GitBranch,
   ShieldCheck,
   TriangleAlert,
@@ -320,7 +320,7 @@ export function GitPanelView({
                     disabled={running !== null}
                     className="inline-flex items-center gap-1 rounded-md border border-destructive/50 text-destructive px-2 py-1 text-[11px] disabled:opacity-50 disabled:cursor-not-allowed hover:bg-destructive/10 transition-colors"
                   >
-                    <RotateCcw className="size-3.5" />
+                    <Undo2 className="size-3.5" />
                     {running === "reject" ? "全部回退中..." : "全部回退"}
                   </button>
                 )}
@@ -480,7 +480,7 @@ export function GitPanelView({
                             revertingFilePath === file.path && "opacity-80"
                           )}
                         >
-                          <RotateCcw
+                          <Undo2
                             className={cn(
                               "size-3",
                               revertingFilePath === file.path && "animate-spin"

@@ -6,7 +6,10 @@ import { emitOpenResourcePreview } from "@/lib/resource-preview-events"
 import { useState } from "react"
 import { ChevronDown, ChevronRight, Eye, Wrench, Copy, Check, PencilLine, ThumbsUp, ThumbsDown, Smile, Frown } from "lucide-react"
 import { toast } from "sonner"
-import { MessageFeedbackDialog } from "./MessageFeedbackDialog"
+import {
+  MessageFeedbackDialog,
+  type DislikeFeedbackPayload
+} from "./MessageFeedbackDialog"
 
 function extractMessagePlainText(content: Message["content"]): string {
   if (typeof content === "string") return content
@@ -20,19 +23,6 @@ function extractMessagePlainText(content: Message["content"]): string {
     })
     .filter(Boolean)
     .join("\n")
-}
-
-function formatMessageTime(createdAt: Date): string {
-  const date = createdAt instanceof Date ? createdAt : new Date(createdAt)
-  if (Number.isNaN(date.getTime())) return "--:--:--"
-  return date.toLocaleString("zh-CN", {
-    hour12: false,
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit"
-  })
 }
 
 // 获取工具调用的简要描述
@@ -110,7 +100,6 @@ export function MessageBubble({
   const [feedbackSubmitting, setFeedbackSubmitting] = useState(false)
   const isUser = message.role === "user"
   const isTool = message.role === "tool"
-  const createdAtLabel = formatMessageTime(message.created_at)
 
   // 判断是否显示 MessageHead：如果当前不是用户消息，且是第一条非用户消息
   const shouldShowMessageHead = !isUser && (!previousMessage || previousMessage.role === "user")
@@ -223,7 +212,10 @@ export function MessageBubble({
     }
   }
 
-  const handleFeedbackSubmit = async (type: "like" | "dislike", feedbackId: string) => {
+  const handleFeedbackSubmit = async (
+    type: "like" | "dislike",
+    payload?: DislikeFeedbackPayload
+  ) => {
     setFeedbackSubmitting(true)
     try {
       // Track feedback event
@@ -241,7 +233,11 @@ export function MessageBubble({
           eventName: "message.feedback.dislike.submit",
           eventCategory: "chat",
           properties: {
-            feedbackId: feedbackId,
+            feedbackId: payload?.feedbackId ?? "",
+            dislikeType: payload?.feedbackType ?? payload?.feedbackId ?? "",
+            dislikeTypeLabel: payload?.feedbackTypeLabel ?? "",
+            dislikeText: payload?.feedbackText ?? "",
+            feedbackText: payload?.feedbackText ?? "",
             messageId: message.id,
             threadId: threadId
           }
@@ -347,7 +343,7 @@ export function MessageBubble({
               onClick={() => {
                 setLikedMessageId(message.id)
                 setDislikedMessageId(null)
-                handleFeedbackSubmit("like", "")
+                handleFeedbackSubmit("like")
               }}
               className={`inline-flex items-center justify-center rounded p-1 transition-all transform hover:scale-110 active:scale-95 ${
                 likedMessageId === message.id
@@ -538,8 +534,6 @@ export function MessageBubble({
         onClose={() => setFeedbackDialogOpen(false)}
         onSubmit={handleFeedbackSubmit}
         submitting={feedbackSubmitting}
-        messageId={message.id}
-        threadId={threadId}
       />
     </div>
   )

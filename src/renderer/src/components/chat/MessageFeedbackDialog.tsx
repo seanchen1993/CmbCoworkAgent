@@ -23,35 +23,70 @@ const DEFAULT_FEEDBACK_OPTIONS: FeedbackOption[] = [
   { id: "other", label: "其他原因", emoji: "🤷" },
 ]
 
+export interface DislikeFeedbackPayload {
+  feedbackId: string
+  feedbackType: string
+  feedbackTypeLabel: string
+  feedbackText: string
+}
+
 interface MessageFeedbackDialogProps {
   open: boolean
   onClose: () => void
-  onSubmit: (type: "like" | "dislike", feedbackId: string) => Promise<void>
+  onSubmit: (
+    type: "like" | "dislike",
+    payload?: DislikeFeedbackPayload
+  ) => Promise<void>
   submitting?: boolean
-  messageId?: string
-  threadId?: string
 }
 
 export function MessageFeedbackDialog({
   open,
   onClose,
   onSubmit,
-  submitting = false,
-  messageId,
-  threadId,
+  submitting = false
 }: MessageFeedbackDialogProps) {
   const [selectedFeedback, setSelectedFeedback] = useState<string | null>(null)
+  const [otherText, setOtherText] = useState("")
+
+  const resetForm = () => {
+    setSelectedFeedback(null)
+    setOtherText("")
+  }
 
   const handleSubmit = async () => {
     if (selectedFeedback) {
-      await onSubmit("dislike", selectedFeedback)
-      setSelectedFeedback(null)
+      const selectedOption = DEFAULT_FEEDBACK_OPTIONS.find(
+        (item) => item.id === selectedFeedback
+      )
+      await onSubmit("dislike", {
+        feedbackId: selectedFeedback,
+        feedbackType: selectedFeedback,
+        feedbackTypeLabel: selectedOption?.label ?? selectedFeedback,
+        feedbackText: selectedFeedback === "other" ? otherText.trim() : ""
+      })
+      resetForm()
       onClose()
     }
   }
 
+  const handleSelectFeedback = (optionId: string) => {
+    setSelectedFeedback(optionId)
+    if (optionId !== "other") {
+      setOtherText("")
+    }
+  }
+
   return (
-    <Dialog open={open} onOpenChange={onClose}>
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) {
+          resetForm()
+          onClose()
+        }
+      }}
+    >
       <DialogContent className="sm:max-w-[400px]">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
@@ -68,7 +103,7 @@ export function MessageFeedbackDialog({
           {DEFAULT_FEEDBACK_OPTIONS.map((option) => (
             <button
               key={option.id}
-              onClick={() => setSelectedFeedback(option.id)}
+              onClick={() => handleSelectFeedback(option.id)}
               className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg border-2 transition-all ${
                 selectedFeedback === option.id
                   ? "border-primary bg-primary/10"
@@ -92,13 +127,28 @@ export function MessageFeedbackDialog({
               </div>
             </button>
           ))}
+
+          {selectedFeedback === "other" && (
+            <div className="space-y-1">
+              <textarea
+                value={otherText}
+                onChange={(e) => setOtherText(e.target.value)}
+                placeholder="请补充具体原因（选填）"
+                className="w-full min-h-[96px] rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground outline-none resize-y focus:border-primary"
+                maxLength={500}
+              />
+              <div className="text-[11px] text-muted-foreground text-right">
+                {otherText.length}/500
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="flex gap-2">
           <Button
             variant="outline"
             onClick={() => {
-              setSelectedFeedback(null)
+              resetForm()
               onClose()
             }}
             disabled={submitting}

@@ -1,7 +1,7 @@
 /**
  * Operations Dashboard
  *
- * 4 panels: Overview · Model Analysis · User Analysis · Productivity
+ * 5 panels: Overview · Feedback · Model Analysis · User Analysis · Productivity
  */
 import { useState } from "react"
 import { RefreshCw, Loader2, AlertCircle, ChevronLeft, ChevronRight } from "lucide-react"
@@ -12,6 +12,7 @@ import { OverviewPanel } from "./panels/OverviewPanel"
 import { ModelPanel } from "./panels/ModelPanel"
 import { UserPanel } from "./panels/UserPanel"
 import { ProductivityPanel } from "./panels/ProductivityPanel"
+import { FeedbackPanel } from "./panels/FeedbackPanel"
 
 // ─────────────────────────────────────────────────────────
 // Time control bar
@@ -176,6 +177,7 @@ export function DashboardView(): React.JSX.Element {
     modelStats,
     userStats,
     productivity,
+    feedback,
     changeGranularity,
     navigate,
     setCustomRange,
@@ -225,6 +227,12 @@ export function DashboardView(): React.JSX.Element {
           <section>
             <h2 className="text-sm font-semibold text-foreground mb-3">模型分析</h2>
             <ModelPanel data={modelStats} loading={loading} />
+          </section>
+
+          {/* Feedback */}
+          <section>
+            <h2 className="text-sm font-semibold text-foreground mb-3">点赞 / 点踩反馈</h2>
+            <FeedbackPanel data={feedback} loading={loading} />
           </section>
         </div>
       </ScrollArea>

@@ -93,6 +93,15 @@ interface TimeRange {
 
 type Granularity = "day" | "week" | "month" | "custom"
 
+const DISLIKE_TYPE_OPTIONS = [
+  { id: "slow", label: "太慢了" },
+  { id: "not_helpful", label: "内容不相关" },
+  { id: "inaccurate", label: "信息不准确" },
+  { id: "unclear", label: "表述不清楚" },
+  { id: "unsafe", label: "包含不安全内容" },
+  { id: "other", label: "其他原因" }
+] as const
+
 function getCalendarInterval(granularity: Granularity, from: string, to: string): string {
   if (granularity === "day") return "hour"
   if (granularity === "custom") {
@@ -154,7 +163,8 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
   return esQuery(getEsIndex("trace"), body)
 }
 
-async function fetchModelStats(range: TimeRange, _granularity: Granularity): Promise<unknown> {
+async function fetchModelStats(range: TimeRange, granularity: Granularity): Promise<unknown> {
+  void granularity
   const body = {
     size: 0,
     query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
@@ -177,7 +187,8 @@ async function fetchModelStats(range: TimeRange, _granularity: Granularity): Pro
   return esQuery(getEsIndex("trace"), body)
 }
 
-async function fetchUserStats(range: TimeRange, _granularity: Granularity): Promise<unknown> {
+async function fetchUserStats(range: TimeRange, granularity: Granularity): Promise<unknown> {
+  void granularity
   const body = {
     size: 0,
     query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
@@ -219,6 +230,112 @@ async function fetchProductivity(range: TimeRange, granularity: Granularity): Pr
       total_commits: { value_count: { field: "eventId" } }
     }
   }
+  return esQuery(getEsIndex("event"), body)
+}
+
+async function fetchFeedback(range: TimeRange, granularity: Granularity): Promise<unknown> {
+  const interval = getCalendarInterval(granularity, range.from, range.to)
+  const dislikeTypeFilters = Object.fromEntries(
+    DISLIKE_TYPE_OPTIONS.map((item) => [
+      item.id,
+      {
+        bool: {
+          filter: [
+            { term: { eventName: "message.feedback.dislike.submit" } },
+            {
+              bool: {
+                should: [
+                  { term: { "properties.dislikeType": item.id } },
+                  { term: { "properties.feedbackId": item.id } }
+                ],
+                minimum_should_match: 1
+              }
+            }
+          ]
+        }
+      }
+    ])
+  )
+
+  const body = {
+    size: 0,
+    query: {
+      bool: {
+        filter: [
+          timeRangeFilter("eventTime", range),
+          {
+            terms: {
+              eventName: [
+                "message.feedback.like",
+                "message.feedback.dislike.submit"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    aggs: {
+      total_likes: {
+        filter: { term: { eventName: "message.feedback.like" } },
+        aggs: {
+          unique_users: { cardinality: { field: "sapId" } }
+        }
+      },
+      total_dislikes: {
+        filter: { term: { eventName: "message.feedback.dislike.submit" } },
+        aggs: {
+          unique_users: { cardinality: { field: "sapId" } }
+        }
+      },
+      dislike_by_type: {
+        filters: {
+          filters: dislikeTypeFilters
+        }
+      },
+      trend: {
+        date_histogram: {
+          field: "eventTime",
+          calendar_interval: interval,
+          time_zone: "Asia/Shanghai"
+        },
+        aggs: {
+          likes: {
+            filter: { term: { eventName: "message.feedback.like" } }
+          },
+          dislikes: {
+            filter: { term: { eventName: "message.feedback.dislike.submit" } }
+          }
+        }
+      },
+      recent_dislike_comments: {
+        filter: {
+          bool: {
+            filter: [
+              { term: { eventName: "message.feedback.dislike.submit" } },
+              { exists: { field: "properties.dislikeText" } }
+            ]
+          }
+        },
+        aggs: {
+          latest: {
+            top_hits: {
+              size: 20,
+              sort: [{ eventTime: { order: "desc" } }],
+              _source: {
+                includes: [
+                  "eventTime",
+                  "properties.dislikeType",
+                  "properties.dislikeTypeLabel",
+                  "properties.dislikeText"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
   return esQuery(getEsIndex("event"), body)
 }
 
@@ -424,6 +541,116 @@ function makeMockProductivity(range: TimeRange): unknown {
   }
 }
 
+function makeMockFeedback(range: TimeRange, granularity: Granularity): unknown {
+  const interval = getCalendarInterval(granularity, range.from, range.to)
+  const from = new Date(range.from)
+  const to = new Date(range.to)
+
+  const buckets: Date[] = []
+  if (interval === "hour") {
+    const start = new Date(from)
+    start.setMinutes(0, 0, 0)
+    for (let t = new Date(start); t <= to; t = new Date(t.getTime() + 60 * 60 * 1000)) {
+      buckets.push(new Date(t))
+    }
+  } else if (interval === "day") {
+    const start = new Date(from)
+    start.setHours(0, 0, 0, 0)
+    for (let t = new Date(start); t <= to; t = new Date(t.getTime() + 24 * 60 * 60 * 1000)) {
+      buckets.push(new Date(t))
+    }
+  } else {
+    const start = new Date(from)
+    const day = start.getDay()
+    start.setDate(start.getDate() - (day === 0 ? 6 : day - 1))
+    start.setHours(0, 0, 0, 0)
+    for (let t = new Date(start); t <= to; t = new Date(t.getTime() + 7 * 24 * 60 * 60 * 1000)) {
+      buckets.push(new Date(t))
+    }
+  }
+
+  const trend = buckets.map((t) => {
+    const likes = Math.floor(5 + Math.random() * 20)
+    const dislikes = Math.floor(2 + Math.random() * 12)
+    return {
+      key_as_string: t.toISOString(),
+      key: t.getTime(),
+      doc_count: likes + dislikes,
+      likes: { doc_count: likes },
+      dislikes: { doc_count: dislikes }
+    }
+  })
+
+  const dislikeByType = {
+    slow: { doc_count: 58 },
+    not_helpful: { doc_count: 74 },
+    inaccurate: { doc_count: 39 },
+    unclear: { doc_count: 46 },
+    unsafe: { doc_count: 11 },
+    other: { doc_count: 27 }
+  }
+
+  const recentComments = [
+    {
+      eventTime: new Date(to.getTime() - 10 * 60 * 1000).toISOString(),
+      properties: {
+        dislikeType: "other",
+        dislikeTypeLabel: "其他原因",
+        dislikeText: "希望能支持更精细的输出格式控制。"
+      }
+    },
+    {
+      eventTime: new Date(to.getTime() - 25 * 60 * 1000).toISOString(),
+      properties: {
+        dislikeType: "inaccurate",
+        dislikeTypeLabel: "信息不准确",
+        dislikeText: "依赖版本建议和项目实际不一致。"
+      }
+    },
+    {
+      eventTime: new Date(to.getTime() - 40 * 60 * 1000).toISOString(),
+      properties: {
+        dislikeType: "slow",
+        dislikeTypeLabel: "太慢了",
+        dislikeText: "等待响应时间偏长，尤其在长上下文里。"
+      }
+    },
+    {
+      eventTime: new Date(to.getTime() - 55 * 60 * 1000).toISOString(),
+      properties: {
+        dislikeType: "unclear",
+        dislikeTypeLabel: "表述不清楚",
+        dislikeText: "可以多给一步一步的解释。"
+      }
+    }
+  ]
+
+  return {
+    aggregations: {
+      total_likes: {
+        doc_count: 386,
+        unique_users: { value: 132 }
+      },
+      total_dislikes: {
+        doc_count: 255,
+        unique_users: { value: 96 }
+      },
+      dislike_by_type: { buckets: dislikeByType },
+      trend: { buckets: trend },
+      recent_dislike_comments: {
+        doc_count: recentComments.length,
+        latest: {
+          hits: {
+            hits: recentComments.map((item) => ({
+              _source: item
+            }))
+          }
+        }
+      }
+    }
+  }
+}
+
 // ─────────────────────────────────────────────────────────
 // IPC Registration
 // ─────────────────────────────────────────────────────────
@@ -486,6 +713,19 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data: await fetchProductivity(range, granularity) }
       } catch (e) {
         console.error("[Dashboard] productivity error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:feedback",
+    async (_, range: TimeRange, granularity: Granularity) => {
+      if (import.meta.env.DEV) return { success: true, data: makeMockFeedback(range, granularity) }
+      try {
+        return { success: true, data: await fetchFeedback(range, granularity) }
+      } catch (e) {
+        console.error("[Dashboard] feedback error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }

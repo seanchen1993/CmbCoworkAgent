@@ -71,6 +71,10 @@ import {
 } from "../mcp/capability-service"
 import { createEagerMcpTool } from "../mcp/langchain-tool"
 import { InterleavedThinkingChatOpenAICompletions } from "./interleaved-thinking-completions"
+import {
+  DEFAULT_AGENTS_MAX_BYTES,
+  loadAgentsPromptForWorkspace
+} from "./agents-md"
 
 /** Decompress codex.exe.gz → codex.exe if needed (re-extract if .gz is newer than .exe). */
 async function ensureCodexExe(exePath: string): Promise<void> {
@@ -842,6 +846,8 @@ export interface CreateAgentRuntimeOptions {
   noSchedulerTool?: boolean
   /** Skip the manage_skill tool (disable skill evolution for scheduled/heartbeat agents) */
   noSkillEvolutionTool?: boolean
+  /** Load workspace AGENTS.md hierarchy into the main system prompt. */
+  enableAgentsPrompt?: boolean
   /** AbortSignal — when signalled, any running child process is killed immediately. */
   abortSignal?: AbortSignal
   /** Optional hooks invoked when the model fetch layer retries / resolves. */
@@ -856,8 +862,15 @@ export interface CreateAgentRuntimeOptions {
 export type AgentRuntime = ReturnType<typeof createAgent>
 
 export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Promise<DeepAgent> {
-  const { threadId, workspacePath, modelId, extraSystemPrompt, retryHooks, maxRetryAttempts } =
-    options
+  const {
+    threadId,
+    workspacePath,
+    modelId,
+    extraSystemPrompt,
+    retryHooks,
+    maxRetryAttempts,
+    enableAgentsPrompt = true
+  } = options
 
   if (!threadId) {
     throw new Error("Thread ID is required for checkpointing.")
@@ -994,6 +1007,29 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   }
 
   let systemPrompt = getSystemPrompt(workspacePath, windowsSandbox)
+  let agentsPrompt: Awaited<ReturnType<typeof loadAgentsPromptForWorkspace>> = {
+    prompt: null,
+    projectRoot: workspacePath,
+    loadedPaths: [],
+    truncated: false
+  }
+  if (enableAgentsPrompt) {
+    agentsPrompt = await loadAgentsPromptForWorkspace(workspacePath, DEFAULT_AGENTS_MAX_BYTES)
+    if (agentsPrompt.prompt) {
+      systemPrompt += "\n\n" + agentsPrompt.prompt
+      console.log("[Runtime] Loaded AGENTS.md files:", agentsPrompt.loadedPaths)
+      if (agentsPrompt.truncated) {
+        console.warn(
+          "[Runtime] AGENTS.md content exceeded prompt budget and was truncated:",
+          DEFAULT_AGENTS_MAX_BYTES
+        )
+      }
+    } else {
+      console.log("[Runtime] No AGENTS.md files discovered for workspace:", workspacePath)
+    }
+  } else {
+    console.log("[Runtime] AGENTS.md prompt injection disabled for this runtime")
+  }
   if (extraSystemPrompt) {
     systemPrompt += "\n\n" + extraSystemPrompt
   }
@@ -1032,7 +1068,6 @@ ${subagentShellGuidance}
 - grep: search for literal text within files (NOT regex). Do NOT use "|", ".*" or other regex syntax — call grep once per term instead.
 - Browser strategy: for browser tasks, first follow any matching enabled skill; only if no relevant skill is available, use browser_playwright.
 - browser_playwright: built-in browser automation and page interaction tool powered by project-local Playwright (fallback when no matching browser skill exists).
-
 The workspace root is: ${workspacePath}`
 
   const skillsSources = await getEnabledSkillsSources()
@@ -1182,7 +1217,13 @@ The workspace root is: ${workspacePath}`
     hasCodeExecTool
   })
   systemPrompt += renderAvailableDeferredToolsPrompt(deferredToolIds)
-  console.log("[System prompts", systemPrompt)
+  console.log("[Runtime] System prompt summary:", {
+    chars: systemPrompt.length,
+    hasAgentsPrompt: Boolean(agentsPrompt.prompt),
+    agentsFilesLoaded: agentsPrompt.loadedPaths.length,
+    hasExtraSystemPrompt: Boolean(extraSystemPrompt),
+    deferredToolIds: deferredToolIds.length
+  })
   const triggerTokens = Math.floor(maxTokens * 0.75)
   const keepTokens = Math.max(Math.floor(maxTokens * 0.08), 4_000)
   const toolEvictLimit = Math.min(6_000, Math.max(Math.floor(maxTokens * 0.05), 3_000))

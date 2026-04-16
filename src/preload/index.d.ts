@@ -657,6 +657,10 @@ interface CustomAPI {
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom"
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    feedback: (
+      range: { from: string; to: string },
+      granularity: "day" | "week" | "month" | "custom"
+    ) => Promise<{ success: boolean; data?: unknown; error?: string }>
   }
   update: {
     check: () => Promise<
