@@ -12,16 +12,43 @@ export interface HookContext {
   toolArgs?: Record<string, unknown>
   toolResult?: string
   workspacePath?: string
+  /** Session / thread identifier — exposed to hooks as SESSION_ID and session_id in stdin JSON */
+  sessionId?: string
+  /** User prompt text for UserPromptSubmit — exposed as USER_PROMPT env and prompt in stdin JSON */
+  userPrompt?: string
+  /** Subagent descriptor for SubagentStop — exposed in stdin JSON */
+  subagent?: { id?: string; name?: string; status?: string }
+}
+
+/**
+ * Detect whether a matcher string looks like a regex pattern.
+ *
+ * `.` is deliberately excluded — tool names commonly contain dots (e.g. `mcp.server_name`),
+ * and a matcher like `foo.bar` almost always means "literal foo.bar", not the regex
+ * `foo<any>bar`. Users who actually want regex can signal intent with other metachars
+ * (`*`, `?`, `+`, `|`, anchors, groups, character classes, escapes).
+ */
+function isRegexPattern(matcher: string): boolean {
+  return /[|*+?^$()[\]{}\\]/.test(matcher)
 }
 
 /**
  * Match a hook's matcher against a tool name.
  * - undefined/empty/"*" matches everything
+ * - if matcher contains regex metacharacters, treat as regex (case-insensitive)
  * - otherwise exact case-insensitive match
  */
 function matchesToolName(matcher: string | undefined, toolName: string | undefined): boolean {
   if (!matcher || matcher === "*") return true
   if (!toolName) return false
+  if (isRegexPattern(matcher)) {
+    try {
+      return new RegExp(matcher, "i").test(toolName)
+    } catch {
+      // Invalid regex — fall back to exact match
+      return matcher.toLowerCase() === toolName.toLowerCase()
+    }
+  }
   return matcher.toLowerCase() === toolName.toLowerCase()
 }
 
@@ -35,15 +62,58 @@ function buildHookEnv(event: HookEvent, context: HookContext): Record<string, st
   }
   if (context.toolName) env.TOOL_NAME = context.toolName
   if (context.toolArgs) env.TOOL_ARGS = JSON.stringify(context.toolArgs)
-  if (context.toolResult) env.TOOL_RESULT = JSON.stringify(context.toolResult)
-  if (context.workspacePath) env.WORKSPACE_PATH = context.workspacePath
+  // toolResult is already a JSON string from upstream — passing as-is avoids double encoding.
+  if (context.toolResult) env.TOOL_RESULT = context.toolResult
+  if (context.workspacePath) {
+    env.WORKSPACE_PATH = context.workspacePath
+    // Claude Code compatibility — the canonical env var hooks expect
+    env.CLAUDE_PROJECT_DIR = context.workspacePath
+  }
+  if (context.sessionId) env.SESSION_ID = context.sessionId
+  if (context.userPrompt) env.USER_PROMPT = context.userPrompt
   return env
+}
+
+/**
+ * Build the structured JSON payload written to the hook's stdin (Claude Code protocol).
+ * Keys mirror Claude Code's documented hook input schema so existing community hooks work.
+ */
+function buildHookStdinPayload(event: HookEvent, context: HookContext): string {
+  const payload: Record<string, unknown> = {
+    hook_event_name: event,
+    session_id: context.sessionId ?? "",
+    cwd: context.workspacePath ?? process.cwd()
+  }
+  if (context.toolName) payload.tool_name = context.toolName
+  if (context.toolArgs) payload.tool_input = context.toolArgs
+  if (context.toolResult !== undefined) {
+    // Upstream passes JSON.stringify(result); parse it back so hooks see a real object
+    // (matches Claude Code spec where tool_response is the structured response).
+    // If it's not valid JSON, fall back to the raw string so the data isn't lost.
+    try {
+      payload.tool_response = JSON.parse(context.toolResult)
+    } catch {
+      payload.tool_response = context.toolResult
+    }
+  }
+  if (context.userPrompt) payload.prompt = context.userPrompt
+  if (context.subagent) payload.subagent = context.subagent
+  return JSON.stringify(payload)
+}
+
+function joinHookText(existing: string | undefined, next: string | undefined): string | undefined {
+  if (!next) return existing
+  return existing ? `${existing}\n${next}` : next
 }
 
 /**
  * Execute a single hook command and return its result.
  */
-function executeCommandHook(hook: HookConfig, env: Record<string, string>): Promise<HookResult> {
+function executeCommandHook(
+  hook: HookConfig,
+  env: Record<string, string>,
+  stdinPayload: string
+): Promise<HookResult> {
   return new Promise((resolve) => {
     const command = hook.command ?? ""
     if (!command.trim()) {
@@ -59,10 +129,16 @@ function executeCommandHook(hook: HookConfig, env: Record<string, string>): Prom
     const child = spawn(cmd, args, {
       env,
       shell: isWindows ? true : false,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
       timeout,
       cwd: env.WORKSPACE_PATH || process.cwd()
     })
+
+    // Write the Claude Code JSON payload to stdin so hooks can parse structured input.
+    // Wrapped in try/catch — child may already be dead if spawn failed.
+    try {
+      child.stdin?.end(stdinPayload)
+    } catch { /* ignore — error event will fire */ }
 
     const stdoutChunks: Buffer[] = []
     const stderrChunks: Buffer[] = []
@@ -113,7 +189,7 @@ function executeCommandHook(hook: HookConfig, env: Record<string, string>): Prom
         exitCode,
         stdout: Buffer.concat(stdoutChunks).toString("utf-8").trim(),
         stderr: Buffer.concat(stderrChunks).toString("utf-8").trim() + extraNote,
-        blocked: exitCode !== 0 && exitCode !== null
+        blocked: exitCode === 2
       })
     })
 
@@ -283,25 +359,100 @@ async function executePromptHook(hook: HookConfig, context: HookContext): Promis
   }
 }
 
+// ── JSON Output Protocol ─────────────────────────────────────────────────────
+
+const MAX_JSON_OUTPUT_CHARS = 10_000
+
+/**
+ * Try to parse structured JSON fields from hook stdout (exit 0 only).
+ *
+ * Recognised top-level fields (Claude Code compatible):
+ *   additionalContext, systemMessage, updatedInput, suppressOutput,
+ *   continue, stopReason, decision, reason
+ *
+ * Also reads nested `hookSpecificOutput.{additionalContext,updatedInput,permissionDecision}`
+ * which Claude Code's newer protocol uses for PreToolUse/UserPromptSubmit.
+ *
+ * If stdout is not valid JSON, these fields remain undefined (treated as plain text).
+ */
+function parseHookJsonOutput(result: HookResult): HookResult {
+  if (result.exitCode !== 0 || !result.stdout) return result
+  const raw = result.stdout.slice(0, MAX_JSON_OUTPUT_CHARS)
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return result
+
+    const nested = (typeof parsed.hookSpecificOutput === "object" && parsed.hookSpecificOutput !== null && !Array.isArray(parsed.hookSpecificOutput))
+      ? parsed.hookSpecificOutput as Record<string, unknown>
+      : undefined
+
+    const additionalContext =
+      typeof parsed.additionalContext === "string" ? parsed.additionalContext :
+      (nested && typeof nested.additionalContext === "string" ? nested.additionalContext : undefined)
+
+    const updatedInputSource = parsed.updatedInput ?? nested?.updatedInput
+    const updatedInput = (typeof updatedInputSource === "object" && updatedInputSource !== null && !Array.isArray(updatedInputSource))
+      ? updatedInputSource as Record<string, unknown>
+      : undefined
+
+    const decisionValue = parsed.decision
+    const decision: "block" | "approve" | undefined =
+      decisionValue === "block" ? "block" :
+      decisionValue === "approve" ? "approve" :
+      undefined
+
+    // Nested permissionDecision=deny maps to block for backwards compat with our dispatcher
+    const permDecision = nested && typeof nested.permissionDecision === "string" ? nested.permissionDecision : undefined
+    const effectiveDecision = decision ?? (permDecision === "deny" || permDecision === "ask" ? "block" : permDecision === "allow" ? "approve" : undefined)
+    const effectiveReason =
+      (typeof parsed.reason === "string" ? parsed.reason : undefined) ??
+      (nested && typeof nested.permissionDecisionReason === "string" ? nested.permissionDecisionReason : undefined)
+
+    return {
+      ...result,
+      additionalContext,
+      systemMessage: typeof parsed.systemMessage === "string" ? parsed.systemMessage : undefined,
+      updatedInput,
+      suppressOutput: typeof parsed.suppressOutput === "boolean" ? parsed.suppressOutput : undefined,
+      continue: typeof parsed.continue === "boolean" ? parsed.continue : undefined,
+      stopReason: typeof parsed.stopReason === "string" ? parsed.stopReason : undefined,
+      decision: effectiveDecision,
+      reason: effectiveReason
+    }
+  } catch {
+    // stdout is not JSON — treat as plain text (backwards compatible)
+    return result
+  }
+}
+
 // ── Dispatcher ────────────────────────────────────────────────────────────────
 
 /**
  * Execute a single hook (command or prompt type).
  */
-async function executeHook(hook: HookConfig, env: Record<string, string>, context: HookContext): Promise<HookResult> {
+async function executeHook(
+  hook: HookConfig,
+  env: Record<string, string>,
+  context: HookContext,
+  event: HookEvent
+): Promise<HookResult> {
   const hookType = hook.type ?? "command"
+  let result: HookResult
   if (hookType === "prompt") {
-    return executePromptHook(hook, context)
+    result = await executePromptHook(hook, context)
+  } else {
+    const stdinPayload = buildHookStdinPayload(event, context)
+    result = await executeCommandHook(hook, env, stdinPayload)
   }
-  return executeCommandHook(hook, env)
+  return parseHookJsonOutput(result)
 }
 
 /**
  * Run all matching hooks for a given event.
  *
- * - PreToolUse: if ANY hook exits non-zero, returns blocked=true with the stdout as feedback.
+ * - PreToolUse/UserPromptSubmit: exit code 2 or decision=block stops the turn.
  * - PostToolUse: collects stdout from all hooks as extra context.
- * - Stop/Notification: fire-and-forget; errors are logged but not propagated.
+ * - Stop/SubagentStop/Notification/SessionStart/SessionEnd: fire-and-forget.
  */
 export async function runHooks(
   hooks: HookConfig[],
@@ -316,41 +467,97 @@ export async function runHooks(
 
   const env = buildHookEnv(event, context)
 
-  if (event === "PreToolUse") {
+  if (event === "PreToolUse" || event === "UserPromptSubmit") {
+    let mergedUpdatedInput: Record<string, unknown> | undefined
+    let mergedAdditionalContext: string | undefined
+    let mergedSystemMessage: string | undefined
     for (const hook of matched) {
-      const result = await executeHook(hook, env, context)
+      const result = await executeHook(hook, env, context, event)
       console.log(
-        `[Hooks] PreToolUse hook (${hook.type ?? "command"}) "${(hook.command ?? hook.prompt ?? "").slice(0, 60)}" → exit=${result.exitCode}, blocked=${result.blocked}`
+        `[Hooks] ${event} hook (${hook.type ?? "command"}) "${(hook.command ?? hook.prompt ?? "").slice(0, 60)}" → exit=${result.exitCode}, blocked=${result.blocked}`
       )
+      // continue=false halts the entire agent turn, overrides everything else
+      if (result.continue === false) {
+        const reason = result.stopReason || result.reason || result.stderr || result.stdout || `${event} hook stopped the turn`
+        return { ...result, stdout: reason, blocked: true }
+      }
       if (result.blocked) {
         return result
       }
+      if (result.decision === "block") {
+        const reason = result.reason || result.stopReason || result.stderr || result.stdout || `${event} hook blocked`
+        return {
+          ...result,
+          stdout: reason,
+          blocked: true
+        }
+      }
+      // Non-zero, non-blocking exit (error in hook itself) — log but continue
+      if (result.exitCode !== 0 && result.exitCode !== null) {
+        console.warn(
+          `[Hooks] ${event} hook exited ${result.exitCode} (non-blocking error):`,
+          result.stderr || "(no stderr)"
+        )
+      }
+      if (result.updatedInput) {
+        mergedUpdatedInput = { ...(mergedUpdatedInput ?? {}), ...result.updatedInput }
+      }
+      if (result.additionalContext) {
+        mergedAdditionalContext = joinHookText(mergedAdditionalContext, result.additionalContext)
+      }
+      if (result.systemMessage) {
+        mergedSystemMessage = joinHookText(mergedSystemMessage, result.systemMessage)
+      }
     }
-    return { exitCode: 0, stdout: "", stderr: "", blocked: false }
+    return {
+      exitCode: 0, stdout: "", stderr: "", blocked: false,
+      updatedInput: mergedUpdatedInput,
+      additionalContext: mergedAdditionalContext,
+      systemMessage: mergedSystemMessage
+    }
   }
 
   if (event === "PostToolUse") {
     const outputs: string[] = []
+    const contexts: string[] = []
+    const messages: string[] = []
+    const blockReasons: string[] = []
+    let shouldHalt = false
+    let haltReason: string | undefined
     for (const hook of matched) {
-      const result = await executeHook(hook, env, context)
+      const result = await executeHook(hook, env, context, event)
       console.log(
-        `[Hooks] PostToolUse hook (${hook.type ?? "command"}) → exit=${result.exitCode}`
+        `[Hooks] PostToolUse hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}`
       )
-      if (result.stdout) {
-        outputs.push(result.stdout)
+      if (result.continue === false) {
+        shouldHalt = true
+        haltReason = result.stopReason ?? haltReason
       }
+      // PostToolUse decision=block: feed reason back to agent for reconsideration
+      if (result.decision === "block" && result.reason) {
+        blockReasons.push(result.reason)
+      }
+      if (result.stdout) outputs.push(result.stdout)
+      if (result.additionalContext) contexts.push(result.additionalContext)
+      if (result.systemMessage) messages.push(result.systemMessage)
     }
     return {
       exitCode: 0,
       stdout: outputs.join("\n"),
       stderr: "",
-      blocked: false
+      blocked: shouldHalt,
+      continue: shouldHalt ? false : undefined,
+      stopReason: haltReason,
+      decision: blockReasons.length > 0 ? "block" : undefined,
+      reason: blockReasons.length > 0 ? blockReasons.join("\n") : undefined,
+      additionalContext: contexts.length > 0 ? contexts.join("\n") : undefined,
+      systemMessage: messages.length > 0 ? messages.join("\n") : undefined
     }
   }
 
-  // Stop / Notification: fire-and-forget
+  // Stop / SubagentStop / Notification / SessionStart / SessionEnd: fire-and-forget
   for (const hook of matched) {
-    executeHook(hook, env, context).then((result) => {
+    executeHook(hook, env, context, event).then((result) => {
       console.log(
         `[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}`
       )

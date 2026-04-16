@@ -31,8 +31,12 @@ const CUSTOM_SENTINEL = "custom"
 const HOOK_EVENTS: { value: HookEvent; label: string; description: string }[] = [
   { value: "PreToolUse", label: "工具调用前", description: "在工具执行前触发，拦截后可阻止执行，阻断原因会反馈给 Agent 使其自适应调整" },
   { value: "PostToolUse", label: "工具调用后", description: "在工具执行后触发，stdout 会追加到 Agent 下一轮上下文，外部系统状态可参与 AI 推理" },
+  { value: "UserPromptSubmit", label: "用户提交提示", description: "用户消息进入模型前触发，可阻断、重写提示或注入 additionalContext" },
+  { value: "SessionStart", label: "会话开始", description: "线程首次运行 Agent 时触发一次，适合初始化会话资源" },
+  { value: "SessionEnd", label: "会话结束", description: "线程删除或应用退出时触发，适合清理会话资源" },
   { value: "Stop", label: "Agent 停止时", description: "Agent 完成任务停止时触发，可用于清理临时文件或发送通知" },
-  { value: "Notification", label: "通知事件", description: "通知事件触发，可用于自定义提醒或消息推送" }
+  { value: "Notification", label: "通知事件", description: "通知事件触发，可用于自定义提醒或消息推送" },
+  { value: "SubagentStop", label: "子 Agent 停止", description: "子 Agent 任务结束时触发，可用于记录或同步子任务结果" }
 ]
 
 const FALLBACK_OPTIONS: { value: PromptHookFallback; label: string; description: string }[] = [
@@ -200,7 +204,7 @@ export function AddHookDialog(props: {
             </div>
             <p className="text-xs text-muted-foreground">
               {hookType === "command"
-                ? "执行 Shell 命令，exit!=0 时阻断工具调用"
+                ? "执行 Shell 命令，exit=2 时阻断；exit=0 可返回 Claude Code JSON 输出"
                 : "用自然语言描述合规规则，由行内 LLM 实时判决是否允许执行"}
             </p>
           </div>
@@ -244,13 +248,20 @@ export function AddHookDialog(props: {
                 {COMMON_TOOLS.find((t) => t.value === matcherMode)?.description ?? ""}
               </p>
               {matcherMode === CUSTOM_SENTINEL && (
-                <Input
-                  placeholder="输入工具名称，如 execute"
-                  value={matcher}
-                  onChange={(e) => setMatcher(e.target.value)}
-                  className="h-9 font-mono"
-                  autoFocus
-                />
+                <>
+                  <Input
+                    placeholder="输入工具名称，如 execute 或 write_file|edit_file"
+                    value={matcher}
+                    onChange={(e) => setMatcher(e.target.value)}
+                    className="h-9 font-mono"
+                    autoFocus
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    精确匹配工具名（不区分大小写）。包含 <code className="font-mono">| * + ? ^ $ ( ) [ ] {"{"} {"}"} \</code> 时按
+                    <strong>正则表达式</strong>解析（不是 glob）。例如 <code className="font-mono">write_file|edit_file</code> 命中两个工具，
+                    <code className="font-mono">mcp__.*</code> 命中所有 mcp 工具。
+                  </p>
+                </>
               )}
             </div>
           )}

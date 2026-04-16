@@ -199,18 +199,19 @@ export function ChatContainer({
   const [yoloMode, setYoloMode] = useState(false)
   const [glowVisible, setGlowVisible] = useState(false)
   // NUX (first-run sandbox setup)
-  const [showNux, setShowNux] = useState(false)
+  const [showNux, setShowNux] = useState<boolean>(false)
   const [nuxLoading, setNuxLoading] = useState(false)
   const [nuxError, setNuxError] = useState<string | null>(null)
   const [nuxLoadingStep, setNuxLoadingStep] = useState(0)
 
-  const NUX_LOADING_STEPS = [
+  const NUX_LOADING_STEPS: string[] = [
     "正在准备沙箱环境...",
     "等待管理员授权，请在弹出的窗口中点击「是」...",
     "正在创建沙箱隔离用户...",
     "正在配置目录访问权限...",
     "即将完成，请稍候...",
   ]
+  const nuxLoadingMessage = NUX_LOADING_STEPS[nuxLoadingStep] ?? NUX_LOADING_STEPS[0]
   const thinkingCycleRef = useRef(-1)
   const wasLoadingRef = useRef(false)
   const loadingMessageCountRef = useRef(0)
@@ -1498,10 +1499,16 @@ export function ChatContainer({
     for (const item of goodSkillsData) {
       const localSkill = localSkillMap.get(item.name)
       // if (!localSkill) continue
+      const skill: SkillMetadata = localSkill ?? {
+        name: item.name,
+        description: item.description ?? "",
+        path: "",
+        source: "user"
+      }
       const category = item.category || "精品技能"
       if (!groups.has(category)) groups.set(category, [])
       groups.get(category)!.push({
-        skill: localSkill || {},
+        skill,
         label: item.chinese_name || item.name,
         marketItem: item,
       })
@@ -1596,6 +1603,125 @@ export function ChatContainer({
     },
     [extractMessageText, setInput]
   )
+  // Inlined as JSX (not components) to avoid React remounting on every parent render —
+  // declaring a component inside the parent creates a new function reference each render,
+  // which causes children to lose focus/animation state.
+  const skillIntentBanner = !skillIntentRequest ? null : (
+    <div className="shrink-0 flex items-center gap-3 px-4 py-2.5 bg-violet-500/10 border-b border-violet-500/20 text-xs">
+      <Sparkles className="size-3.5 text-violet-500 shrink-0" />
+      <div className="flex-1 text-violet-700 dark:text-violet-300 leading-snug">
+        {skillIntentRequest.mode === "mode_b_llm" ? (
+          <>
+            <div>
+              大模型判断这段流程具有复用价值，建议将它沉淀为可复用的技能。
+              本次累计使用了 <strong>{skillIntentRequest.toolCallCount}</strong> 次工具调用。
+            </div>
+            {skillIntentRequest.recommendationReason ? (
+              <div className="mt-0.5 text-[11px] text-violet-600/80 dark:text-violet-200/80">
+                推荐依据：{skillIntentRequest.recommendationReason}
+              </div>
+            ) : null}
+          </>
+        ) : (
+          <div>
+            本次对话使用了 <strong>{skillIntentRequest.toolCallCount}</strong> 次工具调用，是否将它沉淀为可复用的技能？
+          </div>
+        )}
+      </div>
+      <button
+        className="shrink-0 rounded px-2.5 py-1 bg-violet-500 text-white hover:bg-violet-600 transition-colors font-medium"
+        onClick={handleSkillIntentYes}
+      >
+        创建技能
+      </button>
+      <button
+        className="shrink-0 rounded px-2.5 py-1 text-muted-foreground hover:text-foreground transition-colors"
+        onClick={handleSkillIntentNo}
+      >
+        跳过
+      </button>
+    </div>
+  )
+
+  const nuxDialog = !showNux ? null : (
+      <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center">
+        <div className="bg-background border border-border rounded-xl shadow-2xl p-6 max-w-md w-full mx-4 space-y-5">
+          <div className="flex items-center gap-2">
+            <ShieldCheck className="size-5 text-primary" />
+            <h2 className="text-lg font-bold">设置 Agent 沙箱环境</h2>
+          </div>
+
+          <div className="flex items-start gap-2.5 rounded-md border border-amber-500/30 bg-amber-500/8 p-3 text-sm text-amber-700 dark:text-amber-400">
+            <Info className="size-4 shrink-0 mt-0.5" />
+            <span>公司安全限制，默认选择 elevated 沙箱模式，确有其他需要请联系管理员。</span>
+          </div>
+
+          {nuxLoading ? (
+            <div className="flex flex-col items-center gap-4 py-6">
+              <div className="relative size-14">
+                <div className="absolute inset-0 size-14 rounded-full border-4 border-primary/15" />
+                <div className="absolute inset-0 size-14 rounded-full border-4 border-primary border-t-transparent animate-spin" />
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <ShieldCheck className="size-5 text-primary" />
+                </div>
+              </div>
+              <div className="text-center space-y-1.5">
+                <div className="text-sm font-medium transition-all duration-500">
+                  {nuxLoadingMessage}
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  首次配置可能需要 1&ndash;3 分钟，请勿关闭窗口
+                </div>
+              </div>
+              <div className="flex gap-1.5">
+                {NUX_LOADING_STEPS.map((_, i) => (
+                  <div
+                    key={i}
+                    className={`size-1.5 rounded-full transition-all duration-500 ${
+                      i <= nuxLoadingStep ? "bg-primary" : "bg-primary/20"
+                    }`}
+                  />
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {nuxError ? (
+            <div className="rounded-md border border-red-500/20 bg-red-500/5 p-3 text-sm text-red-600 dark:text-red-400 space-y-2">
+              <p className="font-medium">强隔离沙箱配置失败</p>
+              <p className="text-xs opacity-80">{nuxError}</p>
+              <p className="text-xs">可重试或选择受限沙箱模式继续使用。</p>
+              <div className="flex gap-2 mt-1">
+                <button
+                  className="px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors"
+                  onClick={() => {
+                    setNuxError(null)
+                    setNuxLoading(true)
+                    window.api.sandbox.completeNux("elevated")
+                      .then(() => setShowNux(false))
+                      .catch(() => {
+                        setShowNux(false)
+                      })
+                  }}
+                >
+                  重试强隔离模式
+                </button>
+                <button
+                  className="px-3 py-1.5 text-xs border border-border rounded-md hover:bg-accent transition-colors"
+                  onClick={() => {
+                    window.api.sandbox.completeNux("unelevated")
+                      .then(() => setShowNux(false))
+                      .catch(() => setShowNux(false))
+                  }}
+                >
+                  使用受限沙箱模式
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      </div>
+    )
 
   return (
     <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
@@ -1606,133 +1732,9 @@ export function ChatContainer({
         onReject={handleSkillReject}
       />
 
-      {/* Skill intent banner — "Want to save this conversation as a skill?" */}
-      {skillIntentRequest && (
-        <div className="shrink-0 flex items-center gap-3 px-4 py-2.5 bg-violet-500/10 border-b border-violet-500/20 text-xs">
-          <Sparkles className="size-3.5 text-violet-500 shrink-0" />
-          <div className="flex-1 text-violet-700 dark:text-violet-300 leading-snug">
-            {skillIntentRequest.mode === "mode_b_llm" ? (
-              <>
-                <div>
-                  大模型判断这段流程具有复用价值，建议将它沉淀为可复用的技能。
-                  本次累计使用了 <strong>{skillIntentRequest.toolCallCount}</strong> 次工具调用。
-                </div>
-                {skillIntentRequest.recommendationReason ? (
-                  <div className="mt-0.5 text-[11px] text-violet-600/80 dark:text-violet-200/80">
-                    推荐依据：{skillIntentRequest.recommendationReason}
-                  </div>
-                ) : null}
-              </>
-            ) : (
-              <div>
-                本次对话使用了 <strong>{skillIntentRequest.toolCallCount}</strong> 次工具调用，是否将它沉淀为可复用的技能？
-              </div>
-            )}
-          </div>
-          <button
-            className="shrink-0 rounded px-2.5 py-1 bg-violet-500 text-white hover:bg-violet-600 transition-colors font-medium"
-            onClick={handleSkillIntentYes}
-          >
-            创建技能
-          </button>
-          <button
-            className="shrink-0 rounded px-2.5 py-1 text-muted-foreground hover:text-foreground transition-colors"
-            onClick={handleSkillIntentNo}
-          >
-            跳过
-          </button>
-        </div>
-      )}
+      {skillIntentBanner}
+      {nuxDialog}
 
-      {/* NUX: First-run sandbox setup dialog */}
-      {showNux && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center">
-          <div className="bg-background border border-border rounded-xl shadow-2xl p-6 max-w-md w-full mx-4 space-y-5">
-            {/* Header */}
-            <div className="flex items-center gap-2">
-              <ShieldCheck className="size-5 text-primary" />
-              <h2 className="text-lg font-bold">设置 Agent 沙箱环境</h2>
-            </div>
-
-            {/* Policy notice */}
-            <div className="flex items-start gap-2.5 rounded-md border border-amber-500/30 bg-amber-500/8 p-3 text-sm text-amber-700 dark:text-amber-400">
-              <Info className="size-4 shrink-0 mt-0.5" />
-              <span>公司安全限制，默认选择 elevated 沙箱模式，确有其他需要请联系管理员。</span>
-            </div>
-
-            {/* Loading state */}
-            {nuxLoading && (
-              <div className="flex flex-col items-center gap-4 py-6">
-                <div className="relative size-14">
-                  <div className="absolute inset-0 size-14 rounded-full border-4 border-primary/15" />
-                  <div className="absolute inset-0 size-14 rounded-full border-4 border-primary border-t-transparent animate-spin" />
-                  <div className="absolute inset-0 flex items-center justify-center">
-                    <ShieldCheck className="size-5 text-primary" />
-                  </div>
-                </div>
-                <div className="text-center space-y-1.5">
-                  <div className="text-sm font-medium transition-all duration-500">
-                    {NUX_LOADING_STEPS[nuxLoadingStep]}
-                  </div>
-                  <div className="text-xs text-muted-foreground">
-                    首次配置可能需要 1&ndash;3 分钟，请勿关闭窗口
-                  </div>
-                </div>
-                {/* Progress dots */}
-                <div className="flex gap-1.5">
-                  {NUX_LOADING_STEPS.map((_, i) => (
-                    <div
-                      key={i}
-                      className={`size-1.5 rounded-full transition-all duration-500 ${
-                        i <= nuxLoadingStep ? "bg-primary" : "bg-primary/20"
-                      }`}
-                    />
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Error state */}
-            {nuxError && (
-              <div className="rounded-md border border-red-500/20 bg-red-500/5 p-3 text-sm text-red-600 dark:text-red-400 space-y-2">
-                <p className="font-medium">强隔离沙箱配置失败</p>
-                <p className="text-xs opacity-80">{nuxError}</p>
-                <p className="text-xs">可重试或选择受限沙箱模式继续使用。</p>
-                <div className="flex gap-2 mt-1">
-                  <button
-                    className="px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors"
-                    onClick={() => {
-                      setNuxError(null)
-                      setNuxLoading(true)
-                      window.api.sandbox.completeNux("elevated")
-                        .then(() => setShowNux(false))
-                        .catch(() => {
-                          // Main process falls back to unelevated on failure
-                          setShowNux(false)
-                        })
-                    }}
-                  >
-                    重试强隔离模式
-                  </button>
-                  <button
-                    className="px-3 py-1.5 text-xs border border-border rounded-md hover:bg-accent transition-colors"
-                    onClick={() => {
-                      window.api.sandbox.completeNux("unelevated")
-                        .then(() => setShowNux(false))
-                        .catch(() => setShowNux(false))
-                    }}
-                  >
-                    使用受限沙箱模式
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Skill generation progress is shown in the right panel's 代理 section */}
-      {/* Messages */}
       <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
         <div className="p-4">
           <div className="max-w-3xl mx-auto space-y-4">
@@ -2033,7 +2035,7 @@ export function ChatContainer({
         </div>
       </ScrollArea>
       {/* Orchestrator approval bar — placed outside ScrollArea so it's always visible */}
-      {pendingApproval && (pendingApproval as unknown as Record<string, unknown>)._orchestratorRequestId && (
+      {pendingApproval && Boolean((pendingApproval as unknown as Record<string, unknown>)._orchestratorRequestId) && (
         <div className="px-4 pb-2">
           {(() => {
             const approval = pendingApproval as unknown as Record<string, unknown>

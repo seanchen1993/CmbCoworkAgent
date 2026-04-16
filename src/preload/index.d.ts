@@ -389,7 +389,7 @@ interface CustomAPI {
     setEnabled: (id: string, enabled: boolean) => Promise<void>
     getDetail: (
       id: string
-    ) => Promise<{ skills: string[]; mcpServers: string[]; manifest: PluginManifest | null }>
+    ) => Promise<{ skills: string[]; mcpServers: string[]; hooks: number; manifest: PluginManifest | null }>
   }
   chatx: {
     getConfig: () => Promise<ChatXConfig>

@@ -17,10 +17,14 @@ import { copyDirRecursive, createAsyncMutex } from "../utils/fs"
 import type { PluginManifest, PluginMetadata, PluginMcpServerConfig } from "../types"
 import { invalidateGlobalMcpCapabilityService } from "../mcp/capability-service"
 
+const DEFAULT_PLUGIN_HOOKS_PATH = "hooks/hooks.json"
+
 interface ParsedPlugin {
   manifest: PluginManifest | null
   skillDirs: string[]
   mcpConfigs: Record<string, PluginMcpServerConfig>
+  hookCount: number
+  hookPath: string
   name: string
 }
 
@@ -50,7 +54,8 @@ function validatePluginManifest(raw: unknown): PluginManifest | null {
     license: typeof obj.license === "string" ? obj.license : undefined,
     keywords: Array.isArray(obj.keywords) ? obj.keywords.filter((k): k is string => typeof k === "string") : undefined,
     skills: typeof obj.skills === "string" ? obj.skills : Array.isArray(obj.skills) ? obj.skills.filter((s): s is string => typeof s === "string") : undefined,
-    mcpServers: typeof obj.mcpServers === "string" ? obj.mcpServers : undefined
+    mcpServers: typeof obj.mcpServers === "string" ? obj.mcpServers : undefined,
+    hooks: typeof obj.hooks === "string" ? obj.hooks : undefined
   }
 }
 
@@ -115,7 +120,18 @@ async function parsePluginDir(dirPath: string): Promise<ParsedPlugin> {
   const mcpJsonPath = path.join(dirPath, ".mcp.json")
   mcpConfigs = parseMcpJsonFile(mcpJsonPath) ?? {}
 
-  return { manifest, skillDirs, mcpConfigs, name }
+  // Count hooks
+  let hookCount = 0
+  const hookPath = manifest?.hooks ?? DEFAULT_PLUGIN_HOOKS_PATH
+  const hooksFilePath = path.join(dirPath, hookPath)
+  if (existsSync(hooksFilePath)) {
+    try {
+      const raw = JSON.parse(await fs.readFile(hooksFilePath, "utf-8"))
+      if (Array.isArray(raw)) hookCount = raw.length
+    } catch { /* ignore invalid hooks file */ }
+  }
+
+  return { manifest, skillDirs, mcpConfigs, hookCount, hookPath, name }
 }
 
 function formatAuthor(author: PluginManifest["author"]): string {
@@ -129,8 +145,8 @@ async function installPluginFromDir(
 ): Promise<{ success: boolean; pluginName?: string; error?: string }> {
   try {
     const parsed = await parsePluginDir(dirPath)
-    if (parsed.skillDirs.length === 0 && Object.keys(parsed.mcpConfigs).length === 0) {
-      return { success: false, error: "未检测到有效的 skills 或 MCP 配置" }
+    if (parsed.skillDirs.length === 0 && Object.keys(parsed.mcpConfigs).length === 0 && parsed.hookCount === 0) {
+      return { success: false, error: "未检测到有效的 skills、MCP 配置或 hooks" }
     }
 
     const pluginsDir = getPluginsDir()
@@ -197,6 +213,8 @@ async function installPluginFromDir(
       enabled: true,
       skillCount: parsed.skillDirs.length,
       mcpServerCount: Object.keys(parsed.mcpConfigs).length,
+      hookCount: parsed.hookCount,
+      hookPath: parsed.hookPath,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now
     }
@@ -416,17 +434,19 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
     ): Promise<{
       skills: string[]
       mcpServers: string[]
+      hooks: number
       manifest: PluginManifest | null
     }> => {
       const plugins = getPlugins()
       const plugin = plugins.find((p) => p.id === id)
       if (!plugin || !existsSync(plugin.path)) {
-        return { skills: [], mcpServers: [], manifest: null }
+        return { skills: [], mcpServers: [], hooks: 0, manifest: null }
       }
       const parsed = await parsePluginDir(plugin.path)
       return {
         skills: parsed.skillDirs,
         mcpServers: Object.keys(parsed.mcpConfigs),
+        hooks: parsed.hookCount,
         manifest: parsed.manifest
       }
     }

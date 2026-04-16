@@ -289,6 +289,8 @@ export interface PluginManifest {
   keywords?: string[]
   skills?: string | string[]
   mcpServers?: string
+  /** Path to hooks config file relative to plugin root (default: "hooks/hooks.json") */
+  hooks?: string
 }
 
 export interface PluginMetadata {
@@ -301,6 +303,9 @@ export interface PluginMetadata {
   enabled: boolean
   skillCount: number
   mcpServerCount: number
+  hookCount?: number
+  /** Cached hooks config path relative to plugin root, read from manifest at install/inspect time. */
+  hookPath?: string
   createdAt: string
   updatedAt: string
 }

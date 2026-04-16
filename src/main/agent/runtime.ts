@@ -61,6 +61,7 @@ import { createToolSearchTools } from "./tools/tool-search-tool"
 import { createCodeExecTool } from "./tools/code-exec-tool"
 import { listSavedCodeExecTools } from "../code-exec/saved-tool-store"
 import { getWindowsSandboxMode, getYoloMode, getEnabledHooks, isCodeExecEnabled } from "../storage"
+import { runHooks } from "../hooks/runner"
 import { ApprovalStore } from "./approval-store"
 import { ToolOrchestrator } from "./tool-orchestrator"
 import type { ApprovalRequest, ApprovalDecision } from "../types"
@@ -978,6 +979,14 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
           targetWebContentsIds: BrowserWindow.getAllWindows().map(w => w.webContents.id)
         })
         console.log(`[Orchestrator] sending approval request on channel: approval:request:${threadId}, reqId=${req.id}, command=${req.command}`)
+        // Fire Notification hook — agent is now waiting on user input.
+        // Fire-and-forget so it doesn't delay the UI prompt.
+        runHooks(getEnabledHooks(), "Notification", {
+          toolName: req.tool_call?.name,
+          toolArgs: { command: req.command, reason: req.reason, filePath: req.filePath },
+          workspacePath,
+          sessionId: threadId
+        }).catch((e) => console.warn("[Hooks] Notification hook error:", e))
         // Broadcast to all windows — the active one will display the approval UI
         for (const win of BrowserWindow.getAllWindows()) {
           win.webContents.send(`approval:request:${threadId}`, req)

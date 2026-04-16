@@ -9,6 +9,7 @@ import {
   Sparkles,
   Trash2,
   Upload,
+  Webhook,
   X
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -30,6 +31,7 @@ import type { PluginMetadata, PluginManifest } from "@/types"
 interface PluginDetail {
   skills: string[]
   mcpServers: string[]
+  hooks: number
   manifest: PluginManifest | null
 }
 
@@ -275,7 +277,7 @@ export function PluginsPanel(): React.JSX.Element {
               .getDetail(updated.id)
               .then(setDetail)
               .catch(() => {
-                setDetail({ skills: [], mcpServers: [], manifest: null })
+                setDetail({ skills: [], mcpServers: [], hooks: 0, manifest: null })
               })
           }
         }
@@ -294,7 +296,7 @@ export function PluginsPanel(): React.JSX.Element {
       const d = await window.api.plugins.getDetail(plugin.id)
       setDetail(d)
     } catch {
-      setDetail({ skills: [], mcpServers: [], manifest: null })
+      setDetail({ skills: [], mcpServers: [], hooks: 0, manifest: null })
     }
   }, [])
 
@@ -595,6 +597,7 @@ export function PluginDetailPanel(props: {
       ? manifest.author
       : manifest.author.name || ""
     : plugin.author
+  const hookCount = detail?.hooks ?? plugin.hookCount ?? 0
 
   return (
     <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
@@ -677,7 +680,7 @@ export function PluginDetailPanel(props: {
           {/* Components summary */}
           <div className="space-y-2">
             <h3 className="text-sm font-medium">组件摘要</h3>
-            <div className="flex items-center gap-4 text-xs">
+            <div className="flex flex-wrap items-center gap-4 text-xs">
               <div className="flex items-center gap-1.5">
                 <Sparkles className="size-3.5 text-amber-500" />
                 <span>{plugin.skillCount} 个 Skills</span>
@@ -685,6 +688,10 @@ export function PluginDetailPanel(props: {
               <div className="flex items-center gap-1.5">
                 <Plug className="size-3.5 text-blue-500" />
                 <span>{plugin.mcpServerCount} 个 MCP Servers</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <Webhook className="size-3.5 text-violet-500" />
+                <span>{hookCount} 个 Hooks</span>
               </div>
             </div>
           </div>

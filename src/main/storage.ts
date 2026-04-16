@@ -450,6 +450,7 @@ export function invalidateEnabledSkillsCache(): void {
   _enabledSkillsCustomFingerprint = null
   _pluginSkillsCache = null
   _pluginMcpCache = null
+  _pluginHooksCache = null
 }
 
 /**
@@ -1297,8 +1298,10 @@ export function saveHeartbeatContent(content: string): void {
 
 const PLUGINS_DIR = join(OPENWORK_DIR, "plugins")
 const PLUGINS_FILE = join(OPENWORK_DIR, "plugins.json")
+const DEFAULT_PLUGIN_HOOKS_PATH = "hooks/hooks.json"
 let _pluginSkillsCache: string[] | null = null
 let _pluginMcpCache: Record<string, PluginMcpServerConfig> | null = null
+let _pluginHooksCache: HookConfig[] | null = null
 
 export function getPluginsDir(): string {
   if (!existsSync(PLUGINS_DIR)) {
@@ -1624,8 +1627,55 @@ export function getHooks(): HookConfig[] {
   }
 }
 
+/**
+ * Load hooks contributed by enabled plugins.
+ * Each plugin may have a hooks file (default: hooks/hooks.json) containing an array of HookConfig-like objects.
+ */
+export function getEnabledPluginHooks(): HookConfig[] {
+  if (_pluginHooksCache) return _pluginHooksCache
+  const plugins = getPlugins().filter((p) => p.enabled && (p.hookCount ?? 0) > 0)
+  const result: HookConfig[] = []
+  for (const plugin of plugins) {
+    const hooksRelPath = plugin.hookPath ?? DEFAULT_PLUGIN_HOOKS_PATH
+    const hooksFilePath = join(plugin.path, hooksRelPath)
+    if (!existsSync(hooksFilePath)) continue
+    try {
+      const parsed = JSON.parse(readFileSync(hooksFilePath, "utf-8"))
+      if (!Array.isArray(parsed)) continue
+      for (const raw of parsed) {
+        if (!raw || typeof raw !== "object") continue
+        const h = raw as Record<string, unknown>
+        if (typeof h.event !== "string") continue
+        const hookType = h.type ?? "command"
+        if (hookType === "prompt" && typeof h.prompt !== "string") continue
+        if (hookType === "command" && typeof h.command !== "string") continue
+        result.push({
+          id: `plugin:${plugin.id}/${typeof h.id === "string" ? h.id : String(result.length)}`,
+          event: h.event as HookConfig["event"],
+          matcher: typeof h.matcher === "string" ? h.matcher : undefined,
+          type: (hookType === "prompt" ? "prompt" : "command") as HookConfig["type"],
+          command: typeof h.command === "string" ? h.command : undefined,
+          prompt: typeof h.prompt === "string" ? h.prompt : undefined,
+          modelId: typeof h.modelId === "string" ? h.modelId : undefined,
+          fallback: h.fallback === "block" ? "block" : "allow",
+          timeout: typeof h.timeout === "number" ? h.timeout : undefined,
+          enabled: h.enabled !== false, // default enabled
+          createdAt: plugin.createdAt,
+          updatedAt: plugin.updatedAt
+        })
+      }
+    } catch {
+      console.warn(`[Plugins] Failed to parse hooks file for plugin ${plugin.name}`)
+    }
+  }
+  _pluginHooksCache = result
+  return result
+}
+
 export function getEnabledHooks(): HookConfig[] {
-  return getHooks().filter((h) => h.enabled)
+  const globalHooks = getHooks().filter((h) => h.enabled)
+  const pluginHooks = getEnabledPluginHooks()
+  return [...globalHooks, ...pluginHooks]
 }
 
 function writeHooksAtomic(items: HookConfig[]): void {

@@ -2137,6 +2137,12 @@ function PluginsContent({ plugins }: { plugins: PluginMetadata[] }): React.JSX.E
             {plugin.mcpServerCount} MCPs
           </span>
         )}
+        {(plugin.hookCount ?? 0) > 0 && (
+          <span className="text-[10px] text-muted-foreground flex items-center gap-1">
+            <Webhook className="size-2.5" />
+            {plugin.hookCount ?? 0} hooks
+          </span>
+        )}
       </div>
     </div>
   )
@@ -2164,15 +2170,23 @@ function PluginsContent({ plugins }: { plugins: PluginMetadata[] }): React.JSX.E
 const EVENT_BADGE_COLORS: Record<string, string> = {
   PreToolUse: "bg-blue-500/15 text-blue-600 dark:text-blue-400",
   PostToolUse: "bg-green-500/15 text-green-600 dark:text-green-400",
+  UserPromptSubmit: "bg-cyan-500/15 text-cyan-600 dark:text-cyan-400",
+  SessionStart: "bg-teal-500/15 text-teal-600 dark:text-teal-400",
+  SessionEnd: "bg-rose-500/15 text-rose-600 dark:text-rose-400",
   Stop: "bg-amber-500/15 text-amber-600 dark:text-amber-400",
-  Notification: "bg-purple-500/15 text-purple-600 dark:text-purple-400"
+  Notification: "bg-purple-500/15 text-purple-600 dark:text-purple-400",
+  SubagentStop: "bg-indigo-500/15 text-indigo-600 dark:text-indigo-400"
 }
 
 const EVENT_LABEL: Record<string, string> = {
   PreToolUse: "调用前",
   PostToolUse: "调用后",
+  UserPromptSubmit: "提交",
+  SessionStart: "会话始",
+  SessionEnd: "会话终",
   Stop: "停止时",
-  Notification: "通知"
+  Notification: "通知",
+  SubagentStop: "子停止"
 }
 
 const TOOL_LABEL: Record<string, string> = {

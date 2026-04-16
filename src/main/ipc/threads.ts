@@ -10,6 +10,7 @@ import {
 import { getCheckpointer, closeCheckpointer } from "../agent/runtime"
 import { deleteThreadCheckpoint } from "../storage"
 import { generateTitle } from "../services/title-generator"
+import { fireSessionEnd } from "../hooks/session-lifecycle"
 import type { Thread, ThreadUpdateParams } from "../types"
 
 export function registerThreadHandlers(ipcMain: IpcMain): void {
@@ -87,6 +88,20 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
   // Delete a thread
   ipcMain.handle("threads:delete", async (_event, threadId: string) => {
     console.log("[Threads] Deleting thread:", threadId)
+
+    // Fire SessionEnd before teardown so hooks can observe a valid thread record.
+    // No-op if SessionStart never fired for this thread.
+    const existingThread = getThread(threadId)
+    let workspacePath: string | undefined
+    if (existingThread?.metadata) {
+      try {
+        const metadata = JSON.parse(existingThread.metadata) as Record<string, unknown>
+        workspacePath = typeof metadata.workspacePath === "string" ? metadata.workspacePath : undefined
+      } catch {
+        workspacePath = undefined
+      }
+    }
+    fireSessionEnd(threadId, workspacePath)
 
     // Delete from our metadata store
     dbDeleteThread(threadId)

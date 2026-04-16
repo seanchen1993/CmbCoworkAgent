@@ -7,7 +7,16 @@ import {
 } from "../storage"
 import type { HookConfig, HookEvent, HookType, PromptHookFallback, HookUpsert } from "../hooks/types"
 
-const VALID_EVENTS = new Set<HookEvent>(["PreToolUse", "PostToolUse", "Stop", "Notification"])
+const VALID_EVENTS = new Set<HookEvent>([
+  "PreToolUse",
+  "PostToolUse",
+  "Stop",
+  "Notification",
+  "UserPromptSubmit",
+  "SessionStart",
+  "SessionEnd",
+  "SubagentStop"
+])
 const VALID_TYPES = new Set<HookType>(["command", "prompt"])
 const VALID_FALLBACKS = new Set<PromptHookFallback>(["allow", "block"])
 const TIMEOUT_MIN = 1_000

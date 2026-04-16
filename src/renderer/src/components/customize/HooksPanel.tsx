@@ -11,8 +11,12 @@ import { AddHookDialog, COMMON_TOOLS } from "./AddHookDialog"
 const EVENT_BADGE: Record<HookEvent, { label: string; className: string }> = {
   PreToolUse:   { label: "调用前", className: "bg-blue-500/15 text-blue-600 dark:text-blue-400" },
   PostToolUse:  { label: "调用后", className: "bg-green-500/15 text-green-600 dark:text-green-400" },
+  UserPromptSubmit: { label: "提交", className: "bg-cyan-500/15 text-cyan-600 dark:text-cyan-400" },
+  SessionStart: { label: "会话始", className: "bg-teal-500/15 text-teal-600 dark:text-teal-400" },
+  SessionEnd:   { label: "会话终", className: "bg-rose-500/15 text-rose-600 dark:text-rose-400" },
   Stop:         { label: "停止",   className: "bg-amber-500/15 text-amber-600 dark:text-amber-400" },
-  Notification: { label: "通知",   className: "bg-purple-500/15 text-purple-600 dark:text-purple-400" }
+  Notification: { label: "通知",   className: "bg-purple-500/15 text-purple-600 dark:text-purple-400" },
+  SubagentStop: { label: "子停止", className: "bg-indigo-500/15 text-indigo-600 dark:text-indigo-400" }
 }
 
 /** Human-readable summary shown in the list item */

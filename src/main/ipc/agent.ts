@@ -18,7 +18,8 @@ import {
   invalidateEnabledSkillsCache,
   isOnlineSkillEvolutionEnabled,
   isSkillAutoProposeEnabled,
-  getGlobalRoutingMode
+  getGlobalRoutingMode,
+  getEnabledHooks
 } from "../storage"
 import { resolveModel, rememberRoutingDecision, rememberRoutingFeedback } from "../routing"
 import { notifyIfBackground, stripThink } from "../services/notify"
@@ -63,6 +64,8 @@ import {
   buildOrderedChain,
   type FailoverAttempt
 } from "../agent/failover"
+import { runHooks } from "../hooks/runner"
+import { fireSessionStartOnce } from "../hooks/session-lifecycle"
 import type {
   AgentInvokeParams,
   AgentResumeParams,
@@ -654,7 +657,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       return context
     }
 
-    // Hoisted so catch block can access them for routing feedback
+    // Hoisted so catch/finally block can access them
+    let sessionWorkspacePath: string | undefined
     let invokeRoutingResult: Awaited<ReturnType<typeof resolveModel>> | null = null
     let toolErrorCount = 0
     // High-water mark of input tokens — hoisted for catch/finally access
@@ -676,6 +680,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       console.log("[Agent] Thread metadata:", metadata)
 
       const workspacePath = metadata.workspacePath as string | undefined
+      sessionWorkspacePath = workspacePath ?? undefined
 
       if (!workspacePath) {
         window.webContents.send(channel, {
@@ -685,6 +690,50 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         })
         await tracer.finish("error", "WORKSPACE_REQUIRED")
         return
+      }
+
+      // Fire SessionStart once per thread lifetime (not per turn). SessionEnd fires when the
+      // thread is deleted (threads:delete) or the app is quitting.
+      fireSessionStartOnce(threadId, sessionWorkspacePath)
+
+      // Fire UserPromptSubmit hook — may block the message, halt the turn, rewrite the prompt,
+      // or inject additional context that the LLM should see alongside the user's message.
+      const promptSubmitResult = await runHooks(getEnabledHooks(), "UserPromptSubmit", {
+        toolArgs: { message },
+        userPrompt: message,
+        workspacePath: workspacePath ?? undefined,
+        sessionId: threadId
+      })
+      if (promptSubmitResult?.blocked || promptSubmitResult?.continue === false) {
+        const reason =
+          promptSubmitResult.stopReason ||
+          promptSubmitResult.stderr ||
+          promptSubmitResult.stdout ||
+          "消息被 Hook 策略拦截"
+        window.webContents.send(channel, {
+          type: "error",
+          error: reason
+        })
+        return
+      }
+      // Apply hook-supplied prompt rewrite / context injection. `message` remains the raw
+      // user input for tracing and proposal capture; `effectiveMessage` is what the LLM sees.
+      let effectiveMessage = message
+      const updatedMessage =
+        promptSubmitResult?.updatedInput?.message ??
+        promptSubmitResult?.updatedInput?.prompt ??
+        promptSubmitResult?.updatedInput?.userPrompt
+      if (typeof updatedMessage === "string" && updatedMessage.length > 0) {
+        effectiveMessage = updatedMessage
+      }
+      if (promptSubmitResult?.additionalContext) {
+        effectiveMessage = `${promptSubmitResult.additionalContext}\n\n${effectiveMessage}`
+      }
+      if (promptSubmitResult?.systemMessage) {
+        window.webContents.send(channel, {
+          type: "custom",
+          data: { type: "hook_notice", message: promptSubmitResult.systemMessage }
+        })
       }
 
       // Sync FTS index with any memory files changed since last invocation
@@ -726,7 +775,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         })
       }
 
-      const humanMessage = new HumanMessage(message)
+      const humanMessage = new HumanMessage(effectiveMessage)
       const streamConfig = {
         configurable: { thread_id: threadId },
         signal: abortController.signal,
@@ -849,6 +898,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const _countedAiMsgIds = new Set<string>()
       const _countedModelMsgIds = new Set<string>()
       const _countedToolResultMsgIds = new Set<string>()
+      // Track which subagent tool-call IDs we've already emitted SubagentStop for (dedupe)
+      const _subagentStopFired = new Set<string>()
       const _llmNodeByMessageId = new Map<string, string>()
       const _toolNodeByRef = new Map<string, string>()
       const MODEL_INPUT_WINDOW = 12
@@ -954,6 +1005,29 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const classId: string[] = Array.isArray(msgChunk.id) ? msgChunk.id : []
           const className = classId[classId.length - 1] || ""
           const isAI = className.includes("AI")
+          const isTool = className.includes("Tool")
+
+          // SubagentStop — a "task" tool message signals subagent completion
+          if (isTool && kwargs.name === "task" && kwargs.tool_call_id) {
+            const toolCallId = kwargs.tool_call_id as string
+            if (!_subagentStopFired.has(toolCallId)) {
+              _subagentStopFired.add(toolCallId)
+              const additionalKwargs = kwargs.additional_kwargs as Record<string, unknown> | undefined
+              const isErr =
+                kwargs.status === "error" ||
+                kwargs.is_error === true ||
+                additionalKwargs?.is_error === true
+              runHooks(getEnabledHooks(), "SubagentStop", {
+                workspacePath: sessionWorkspacePath,
+                sessionId: threadId,
+                subagent: {
+                  id: toolCallId,
+                  status: isErr ? "failed" : "completed"
+                }
+              }).catch((e) => console.warn("[Hooks] SubagentStop hook error:", e))
+            }
+          }
+
           if (!isAI) return
 
           const rawContent = kwargs.content ?? msgChunk.content
@@ -1277,6 +1351,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
 
       if (!abortController.signal.aborted) {
+        // Fire Stop hooks (fire-and-forget)
+        runHooks(getEnabledHooks(), "Stop", {
+          workspacePath: workspacePath ?? undefined,
+          sessionId: threadId
+        }).catch((e) => console.warn("[Hooks] Stop hook error:", e))
+
         window.webContents.send(channel, { type: "done" })
         notifyIfBackground("✅ 任务完成", assistantText.trim() || "对话已完成")
 
@@ -1425,6 +1505,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       LocalSandbox.revokeGrantedAclsForRun(threadId).catch((err) => {
         console.warn("[Agent] ACL cleanup error:", err)
       })
+      // SessionEnd is NOT fired here — it belongs to thread lifecycle (delete / app quit),
+      // not turn completion. See fireSessionEnd call in threads:delete handler.
     }
   })
 
@@ -1612,6 +1694,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
 
       if (!abortController.signal.aborted) {
+        // Fire Stop hooks (fire-and-forget)
+        runHooks(getEnabledHooks(), "Stop", {
+          workspacePath: workspacePath ?? undefined,
+          sessionId: threadId
+        }).catch((e) => console.warn("[Hooks] Stop hook error:", e))
+
         window.webContents.send(channel, { type: "done" })
       }
     } catch (error) {
@@ -1812,6 +1900,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
 
         if (!abortController.signal.aborted) {
+          // Fire Stop hooks (fire-and-forget)
+          runHooks(getEnabledHooks(), "Stop", {
+            workspacePath: workspacePath ?? undefined,
+            sessionId: threadId
+          }).catch((e) => console.warn("[Hooks] Stop hook error:", e))
+
           window.webContents.send(channel, { type: "done" })
         }
       } else if (decision.type === "reject") {

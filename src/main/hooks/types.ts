@@ -1,4 +1,4 @@
-export type HookEvent = "PreToolUse" | "PostToolUse" | "Stop" | "Notification"
+export type HookEvent = "PreToolUse" | "PostToolUse" | "Stop" | "Notification" | "UserPromptSubmit" | "SessionStart" | "SessionEnd" | "SubagentStop"
 
 /** Hook handler type.
  *  - "command": execute a shell command (original behaviour, default)
@@ -31,7 +31,20 @@ export interface HookResult {
   exitCode: number | null
   stdout: string
   stderr: string
-  blocked: boolean          // PreToolUse: exit != 0 blocks the tool
+  blocked: boolean          // exit code 2 = intentional block (PreToolUse / UserPromptSubmit)
+  /** Structured fields parsed from JSON stdout (exit 0 only) */
+  additionalContext?: string    // injected into agent context (invisible to user)
+  systemMessage?: string        // visible warning to user
+  updatedInput?: Record<string, unknown>  // PreToolUse: modify tool args
+  suppressOutput?: boolean      // suppress tool output from agent context
+  /** If false, agent halts the entire turn (not just this tool). */
+  continue?: boolean
+  /** Reason message for halting; shown to user when continue=false. */
+  stopReason?: string
+  /** PostToolUse only: "block" re-feeds the hook reason to the LLM for retry. */
+  decision?: "block" | "approve"
+  /** Explanation paired with decision="block" — forwarded to the agent. */
+  reason?: string
 }
 
 /** Environment variables passed to the hook command */
@@ -41,6 +54,9 @@ export interface HookEnv {
   TOOL_ARGS?: string        // JSON
   TOOL_RESULT?: string      // PostToolUse only
   WORKSPACE_PATH?: string
+  CLAUDE_PROJECT_DIR?: string  // Claude Code compatibility: alias for WORKSPACE_PATH
+  USER_PROMPT?: string         // UserPromptSubmit event
+  SESSION_ID?: string          // threadId
 }
 
 export interface HookUpsert {

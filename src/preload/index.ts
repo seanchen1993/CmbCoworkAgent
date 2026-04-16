@@ -847,10 +847,11 @@ const api = {
       ipcRenderer.invoke("plugins:setEnabled", { id, enabled }) as Promise<void>,
     getDetail: (
       id: string
-    ): Promise<{ skills: string[]; mcpServers: string[]; manifest: PluginManifest | null }> =>
+    ): Promise<{ skills: string[]; mcpServers: string[]; hooks: number; manifest: PluginManifest | null }> =>
       ipcRenderer.invoke("plugins:getDetail", id) as Promise<{
         skills: string[]
         mcpServers: string[]
+        hooks: number
         manifest: PluginManifest | null
       }>
   },
