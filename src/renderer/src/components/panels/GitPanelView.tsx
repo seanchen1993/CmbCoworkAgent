@@ -29,6 +29,7 @@ export function GitPanelView({
   onOpenFileFolder?: (filePath: string) => void
 }): React.JSX.Element {
   const [loading, setLoading] = useState(true)
+  const [summaryStale, setSummaryStale] = useState(false)
   const [running, setRunning] = useState<"commit" | "push" | "reject" | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [submitAction, setSubmitAction] = useState<"commit" | "push" | null>(null)
@@ -58,6 +59,7 @@ export function GitPanelView({
   useEffect(() => {
     setState(null)
     setError(null)
+    setSummaryStale(false)
     setExpandedFilePaths(new Set())
   }, [threadId])
 
@@ -75,6 +77,7 @@ export function GitPanelView({
     try {
       const next = await window.api.workspace.getGitPanelState(threadId)
       setState(next)
+      setSummaryStale(false)
       // showToast("刷新完成", "success")
     } catch (e) {
       const err = e instanceof Error ? e.message : "加载失败"
@@ -84,6 +87,48 @@ export function GitPanelView({
       setLoading(false)
     }
   }, [threadId, showToast])
+
+  const refreshSummary = useCallback(async () => {
+    if (!threadId) return
+    try {
+      const next = await window.api.workspace.getGitPanelSummary(threadId)
+      if (!next.success) return
+      setState((prev) => {
+        if (!prev) return prev
+        if (!next.isGitRepo) {
+          return {
+            ...prev,
+            isGitRepo: false,
+            hasPendingDiff: false,
+            changedFilesTotal: 0,
+            omittedFileCount: 0,
+            files: [],
+            totals: { additions: 0, deletions: 0, fileCount: 0 }
+          }
+        }
+        if (!next.hasPendingDiff) {
+          return {
+            ...prev,
+            isGitRepo: true,
+            hasPendingDiff: false,
+            changedFilesTotal: 0,
+            omittedFileCount: 0,
+            files: [],
+            totals: { additions: 0, deletions: 0, fileCount: 0 }
+          }
+        }
+        return {
+          ...prev,
+          isGitRepo: true,
+          hasPendingDiff: true,
+          changedFilesTotal: next.changedFiles
+        }
+      })
+      setSummaryStale(next.hasPendingDiff)
+    } catch {
+      // Ignore transient summary refresh failures; full refresh can recover state.
+    }
+  }, [threadId])
 
   useEffect(() => {
     refresh()
@@ -120,14 +165,14 @@ export function GitPanelView({
       if (data.threadId !== threadId) return
       if (refreshTimer) clearTimeout(refreshTimer)
       refreshTimer = setTimeout(() => {
-        refresh()
+        void refreshSummary()
       }, 120)
     })
     return () => {
       if (refreshTimer) clearTimeout(refreshTimer)
       cleanup()
     }
-  }, [threadId, refresh])
+  }, [threadId, refreshSummary])
 
   const runReject = useCallback(async () => {
     if (!threadId) return
@@ -409,15 +454,33 @@ export function GitPanelView({
                 当前变更文件较多，为避免卡顿仅展示前 {visibleFilesCount} 个文件。请先提交或回退部分改动后再查看全部详情。
               </div>
             )}
+            {summaryStale && (
+              <div className="rounded-md border border-blue-500/35 bg-blue-500/10 p-2 text-xs text-blue-700 dark:text-blue-300 flex items-center justify-between gap-2">
+                <span>检测到文件变更，当前 diff 列表可能不是最新。点击“刷新”获取最新详情。</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void refresh()
+                  }}
+                  className="shrink-0 rounded-md border border-blue-500/40 px-2 py-1 text-[11px] hover:bg-blue-500/15 transition-colors"
+                >
+                  立即刷新
+                </button>
+              </div>
+            )}
             {state.files.length === 0 ? (
               <div className="rounded-xl border border-border/70 bg-muted/20 px-4 py-8">
                 <div className="mx-auto max-w-[340px] text-center">
                   <div className="mx-auto mb-3 flex size-9 items-center justify-center rounded-full border border-emerald-500/30 bg-emerald-500/10">
                     <CheckCircle2 className="size-4.5 text-emerald-600 dark:text-emerald-400" />
                   </div>
-                  <div className="text-sm font-medium text-foreground">没有待审批改动</div>
+                  <div className="text-sm font-medium text-foreground">
+                    {summaryStale ? "检测到新改动，等待刷新详情" : "没有待审批改动"}
+                  </div>
                   <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                    当前工作区已是最新状态。后续产生文件变更时，这里会自动显示最新 diff。
+                    {summaryStale
+                      ? "当前只更新了变更数量。点击上方“立即刷新”可加载最新文件列表与 diff。"
+                      : "当前工作区已是最新状态。后续产生文件变更时，这里会自动显示最新 diff。"}
                   </p>
                 </div>
               </div>
