@@ -426,6 +426,7 @@ interface GitPanelSummaryStats {
 
 const GIT_CONTEXT_CACHE_TTL_MS = 1000
 const GIT_CONTEXT_QUERY_TIMEOUT_MS = 10_000
+const THREAD_GIT_CONTEXT_CACHE_TTL_MS = 30_000
 const GIT_EXEC_MAX_BUFFER_BYTES = 20 * 1024 * 1024
 // 合成新文件 diff 时的内存保护阈值，避免一次性读取超大文件导致主进程内存抖动。
 const MAX_SYNTHETIC_DIFF_BYTES = 256 * 1024
@@ -438,6 +439,83 @@ const worktreeCache = new Map<string, TimedPromiseCacheEntry<boolean>>()
 const summaryCache = new Map<string, TimedPromiseCacheEntry<GitPanelSummaryStats>>()
 const branchCache = new Map<string, TimedPromiseCacheEntry<string | null>>()
 const headCommitCache = new Map<string, TimedPromiseCacheEntry<string | null>>()
+
+type ThreadGitContextCache = {
+  isGitRepo: boolean
+  isWorktreePath: boolean
+  gitRoot: string | null
+}
+
+function clearThreadGitContextCache(metadata: Record<string, unknown>): void {
+  delete metadata.cachedIsGitRepo
+  delete metadata.cachedIsWorktreePath
+  delete metadata.cachedGitRoot
+  delete metadata.cachedGitContextWorkspacePath
+  delete metadata.cachedGitContextAt
+}
+
+function writeThreadGitContextCache(
+  metadata: Record<string, unknown>,
+  payload: { workspacePath: string; isGitRepo: boolean; isWorktreePath: boolean; gitRoot: string | null }
+): void {
+  metadata.cachedGitContextWorkspacePath = payload.workspacePath
+  metadata.cachedGitContextAt = new Date().toISOString()
+  metadata.cachedIsGitRepo = payload.isGitRepo
+  metadata.cachedIsWorktreePath = payload.isWorktreePath
+  if (payload.gitRoot) {
+    metadata.cachedGitRoot = payload.gitRoot
+  } else {
+    delete metadata.cachedGitRoot
+  }
+}
+
+function readThreadGitContextCache(
+  metadata: Record<string, unknown>,
+  workspacePath: string | null
+): ThreadGitContextCache | null {
+  if (!workspacePath) return null
+  const cachedWorkspacePath =
+    typeof metadata.cachedGitContextWorkspacePath === "string"
+      ? metadata.cachedGitContextWorkspacePath
+      : null
+  if (!cachedWorkspacePath || cachedWorkspacePath !== workspacePath) {
+    return null
+  }
+
+  const cachedAtRaw =
+    typeof metadata.cachedGitContextAt === "string"
+      ? Date.parse(metadata.cachedGitContextAt)
+      : Number.NaN
+  if (!Number.isFinite(cachedAtRaw)) {
+    return null
+  }
+  if (Date.now() - cachedAtRaw > THREAD_GIT_CONTEXT_CACHE_TTL_MS) {
+    return null
+  }
+
+  const cachedIsGitRepo =
+    typeof metadata.cachedIsGitRepo === "boolean"
+      ? metadata.cachedIsGitRepo
+      : null
+  const cachedIsWorktreePath =
+    typeof metadata.cachedIsWorktreePath === "boolean"
+      ? metadata.cachedIsWorktreePath
+      : null
+  const cachedGitRoot =
+    typeof metadata.cachedGitRoot === "string" && metadata.cachedGitRoot.trim()
+      ? metadata.cachedGitRoot
+      : null
+
+  if (cachedIsGitRepo === null && cachedIsWorktreePath === null && !cachedGitRoot) {
+    return null
+  }
+
+  return {
+    isGitRepo: cachedIsGitRepo ?? Boolean(cachedGitRoot),
+    isWorktreePath: cachedIsWorktreePath ?? false,
+    gitRoot: cachedGitRoot
+  }
+}
 
 function collectChangedFilesFromStatus(
   worktreePath: string,
@@ -852,15 +930,29 @@ async function resolveThreadWorkspaceContext(threadId: string): Promise<{
     metadata = {}
   }
   const workspacePath = typeof metadata.workspacePath === "string" ? metadata.workspacePath : null
-  const [gitRoot, detectedWorktree] = workspacePath
-    ? await Promise.all([
+  const metadataMarkedWorktree = Boolean(metadata.isWorktree)
+  const cachedGitContext = readThreadGitContextCache(metadata, workspacePath)
+
+  let isGitRepo = false
+  let detectedWorktree = false
+
+  if (cachedGitContext) {
+    isGitRepo = cachedGitContext.isGitRepo
+    detectedWorktree = cachedGitContext.isWorktreePath
+  } else if (workspacePath) {
+    const [gitRoot, isWorktreePath] = await Promise.all([
       // 这两个探测互不依赖，改为并行可以缩短 GitPanel 首屏准备时间。
       getGitRoot(workspacePath),
       detectIsWorktreePath(workspacePath)
     ])
-    : [null, false]
-  const isGitRepo = Boolean(gitRoot)
-  const metadataMarkedWorktree = Boolean(metadata.isWorktree)
+    isGitRepo = Boolean(gitRoot)
+    detectedWorktree = isWorktreePath
+  }
+
+  if (metadataMarkedWorktree) {
+    // Metadata-marked worktree is authoritative for thread worktree context.
+    isGitRepo = true
+  }
   const isWorktree = metadataMarkedWorktree || detectedWorktree
   const worktreeBaseCommit =
     typeof metadata.worktreeBaseCommit === "string" ? metadata.worktreeBaseCommit : null
@@ -1572,6 +1664,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
       const metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
       metadata.workspacePath = newPath
+      clearThreadGitContextCache(metadata)
       updateThread(threadId, { metadata: JSON.stringify(metadata) })
 
       // Update file watcher
@@ -1605,6 +1698,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       if (thread) {
         const metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
         metadata.workspacePath = selectedPath
+        clearThreadGitContextCache(metadata)
         updateThread(threadId, { metadata: JSON.stringify(metadata) })
 
         // Start watching the new workspace
@@ -1748,17 +1842,48 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     "workspace:isGit",
     async (
       _event,
-      payload: string | { folderPath: string; includeWorktrees?: boolean }
+      payload: string | { folderPath: string; includeWorktrees?: boolean; threadId?: string }
     ) => {
       const folderPath = typeof payload === "string" ? payload : payload.folderPath
       const includeWorktrees = typeof payload === "string" ? true : Boolean(payload.includeWorktrees)
+      const threadId = typeof payload === "string" ? null : (payload.threadId || null)
+
       const gitRoot = await getGitRoot(folderPath)
-      if (!gitRoot) return { isGit: false, gitRoot: null, worktrees: [], isWorktreePath: false }
+      const isGit = Boolean(gitRoot)
+      const isWorktreePath = isGit ? await detectIsWorktreePath(folderPath) : false
+      const worktrees = isGit && includeWorktrees && gitRoot ? await listWorktrees(gitRoot) : []
+      const result = { isGit, gitRoot: gitRoot || null, worktrees, isWorktreePath }
 
-      const isWorktreePath = await detectIsWorktreePath(folderPath)
+      if (threadId) {
+        try {
+          const { getThread, updateThread } = await import("../db")
+          const thread = getThread(threadId)
+          if (thread) {
+            let metadata: Record<string, unknown> = {}
+            try {
+              metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
+            } catch {
+              metadata = {}
+            }
 
-      const worktrees = includeWorktrees ? await listWorktrees(gitRoot) : []
-      return { isGit: true, gitRoot, worktrees, isWorktreePath }
+            const threadWorkspacePath =
+              typeof metadata.workspacePath === "string" ? metadata.workspacePath : null
+            if (threadWorkspacePath && path.resolve(threadWorkspacePath) === path.resolve(folderPath)) {
+              writeThreadGitContextCache(metadata, {
+                workspacePath: threadWorkspacePath,
+                isGitRepo: result.isGit,
+                isWorktreePath: result.isWorktreePath,
+                gitRoot: result.gitRoot
+              })
+              updateThread(threadId, { metadata: JSON.stringify(metadata) })
+            }
+          }
+        } catch {
+          // Cache write is best-effort and should not break git detection response.
+        }
+      }
+
+      return result
     }
   )
 
@@ -1885,6 +2010,15 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       metadata.worktreeBranch = branch
       if (baseBranch) metadata.worktreeBaseBranch = baseBranch
       if (baseCommit) metadata.worktreeBaseCommit = baseCommit
+      const workspacePath = typeof metadata.workspacePath === "string" ? metadata.workspacePath : null
+      if (workspacePath) {
+        writeThreadGitContextCache(metadata, {
+          workspacePath,
+          isGitRepo: true,
+          isWorktreePath: true,
+          gitRoot
+        })
+      }
       metadata.llmModifiedFiles = []
       metadata.llmFileHistory = {}
       metadata.llmRecentlyRevertedFiles = []
@@ -1904,6 +2038,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     delete metadata.worktreeBranch
     delete metadata.worktreeBaseBranch
     delete metadata.worktreeBaseCommit
+    clearThreadGitContextCache(metadata)
     delete metadata.llmModifiedFiles
     delete metadata.llmFileHistory
     delete metadata.llmRecentlyRevertedFiles
