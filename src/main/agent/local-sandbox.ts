@@ -217,18 +217,16 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
    * Apply PostToolUse hook feedback to a file-operation result (write/edit).
    *
    * ⚠️ UPSTREAM CONTRACT — depends on deepagents library internals:
-   *   1. write_file / edit_file tool wrappers return `result.error` verbatim as the
-   *      ToolMessage content when set, skipping the hardcoded "Successfully wrote..."
-   *      string. We piggy-back on that to surface hook feedback to the LLM.
+   *   1. write_file / edit_file tool wrappers treat `result.error` as a failed
+   *      file operation. Only use that channel for real file failures or explicit
+   *      PostToolUse decision=block feedback.
    *   2. FilesystemBackend sets filesUpdate=null on writes (external storage), so
    *      overriding `error` on a successful write does NOT lose any LangGraph state.
    *
-   * If deepagents ever stops short-circuiting on `error`, or switches FilesystemBackend
-   * to in-memory state, hook feedback for write_file/edit_file silently disappears.
-   * Re-verify these two invariants on every deepagents bump. The phrasing below makes
-   * clear that the write itself succeeded, so the LLM doesn't retry the file op.
+   * Non-blocking hook notes are preserved in metadata so they do not turn a
+   * successful edit/write into a failed tool call.
    */
-  private static applyPostHookContext<T extends { error?: string; path?: string }>(
+  private static applyPostHookContext<T extends { error?: string; path?: string; metadata?: Record<string, unknown> }>(
     result: T,
     postResult: HookResult | null,
     fileOpLabel: string
@@ -241,9 +239,24 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     if (postResult.decision === "block" && postResult.reason) {
       notes.push(`[Hook requested review] ${postResult.reason}`)
     }
+    if (postResult.continue === false) {
+      const reason = postResult.stopReason || postResult.reason || "PostToolUse hook stopped the turn"
+      notes.push(`[Hook stopped turn] ${reason}`)
+    }
     if (notes.length === 0) return result
 
     const originallyFailed = !!result.error
+    const shouldSurfaceAsError = originallyFailed || postResult.decision === "block" || postResult.continue === false
+    if (!shouldSurfaceAsError) {
+      return {
+        ...result,
+        metadata: {
+          ...(result.metadata ?? {}),
+          hookFeedback: notes.join("\n")
+        }
+      }
+    }
+
     const statusLine = originallyFailed
       ? result.error
       : `${fileOpLabel} '${result.path ?? ""}' succeeded. File is persisted on disk — do not retry; address the hook feedback below in your next turn.`

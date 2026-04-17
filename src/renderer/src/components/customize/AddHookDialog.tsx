@@ -160,7 +160,7 @@ export function AddHookDialog(props: {
     } finally {
       setSubmitting(false)
     }
-  }, [hookType, event, matcher, command, prompt, modelId, fallback, timeout, editHook, onSuccess, handleOpenChange, showMatcher])
+  }, [hookType, event, matcherMode, matcher, command, prompt, modelId, fallback, timeout, editHook, onSuccess, handleOpenChange, showMatcher])
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
