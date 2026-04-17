@@ -6,7 +6,14 @@
       "Bash(git status:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(find /Users/heyirui/Desktop/cmbCowork/src/main -name *trace* -type f)",
+      "Bash(find /Users/heyirui/Desktop/cmbCowork -name *trace* -type f)",
+      "Bash(npm run:*)",
+      "Bash(git config:*)",
+      "Bash(npx tsc:*)",
+      "Bash(export PATH=\"/usr/local/bin:/opt/homebrew/bin:$HOME/.nvm/versions/node/*/bin:$PATH\")",
+      "Bash(export PATH=\"/opt/homebrew/bin:$PATH\")"
     ]
   }
 }

@@ -3,8 +3,8 @@
  *
  * 5 panels: Overview · Feedback · Model Analysis · User Analysis · Productivity
  */
-import { useState } from "react"
-import { RefreshCw, Loader2, AlertCircle, ChevronLeft, ChevronRight } from "lucide-react"
+import { useState, useCallback } from "react"
+import { RefreshCw, Loader2, AlertCircle, ChevronLeft, ChevronRight, Download } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { useDashboard, type Granularity } from "./use-dashboard"
@@ -47,7 +47,9 @@ function TimeControlBar({
   onNavigate,
   onCustomRange,
   onRefresh,
-  loading
+  onExport,
+  loading,
+  exporting
 }: {
   granularity: Granularity
   range: { from: string; to: string }
@@ -55,7 +57,9 @@ function TimeControlBar({
   onNavigate: (dir: "prev" | "next") => void
   onCustomRange: (from: string, to: string) => void
   onRefresh: () => void
+  onExport: () => void
   loading: boolean
+  exporting: boolean
 }) {
   const [showDatePicker, setShowDatePicker] = useState(false)
   const [customFrom, setCustomFrom] = useState("")
@@ -147,8 +151,18 @@ function TimeControlBar({
         </span>
       )}
 
-      {/* Spacer + Refresh */}
+      {/* Spacer + Export + Refresh */}
       <div className="flex-1" />
+      <Button
+        variant="ghost"
+        size="sm"
+        className="gap-1.5 text-xs"
+        onClick={onExport}
+        disabled={exporting || loading}
+      >
+        {exporting ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
+        导出Excel
+      </Button>
       <Button
         variant="ghost"
         size="sm"
@@ -167,6 +181,13 @@ function TimeControlBar({
 // Main Dashboard View
 // ─────────────────────────────────────────────────────────
 
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`
+  const s = ms / 1000
+  if (s < 60) return `${s.toFixed(1)}s`
+  return `${Math.floor(s / 60)}m${Math.round(s % 60)}s`
+}
+
 export function DashboardView(): React.JSX.Element {
   const {
     granularity,
@@ -184,6 +205,174 @@ export function DashboardView(): React.JSX.Element {
     refresh
   } = useDashboard()
 
+  const [exporting, setExporting] = useState(false)
+
+  const handleExport = useCallback(async () => {
+    if (!overview && !modelStats && !userStats && !productivity) return
+    setExporting(true)
+    try {
+      const sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }> = []
+
+      // 1. Overview summary
+      if (overview) {
+        sheets.push({
+          name: "使用概览",
+          header: ["指标", "值"],
+          rows: [
+            ["调用总次数", overview.totalCalls],
+            ["活跃用户数", overview.activeUsers],
+            ["平均耗时", formatDuration(overview.avgDurationMs)],
+            ["输入 Token", overview.inputTokens],
+            ["输出 Token", overview.outputTokens],
+            ["Skill 种类数", overview.totalSkills],
+            ["Skill 调用次数", overview.totalSkillCalls],
+            ["Tool 种类数", overview.totalTools],
+            ["Tool 调用次数", overview.totalToolCalls]
+          ]
+        })
+
+        // Trend
+        if (overview.trend.length > 0) {
+          sheets.push({
+            name: "调用量趋势",
+            header: ["时间", "调用次数", "活跃用户"],
+            rows: overview.trend.map((t) => [t.time, t.count, t.users])
+          })
+        }
+
+        // Skill Top
+        if (overview.bySkill.length > 0) {
+          sheets.push({
+            name: "Skill使用排行",
+            header: ["排名", "Skill", "调用次数"],
+            rows: [
+              ["Skill 种类数", overview.totalSkills, ""],
+              ["Skill 调用次数", overview.totalSkillCalls, ""],
+              ["", "", ""],
+              ...overview.bySkill.map((s, i) => [i + 1, s.skill, s.count])
+            ]
+          })
+        }
+
+        // Tool Top (filtered)
+        if (overview.byTool.length > 0) {
+          sheets.push({
+            name: "Tool使用排行(已过滤)",
+            header: ["排名", "Tool", "调用次数"],
+            rows: [
+              ["Tool 种类数", overview.totalTools, ""],
+              ["Tool 调用次数", overview.totalToolCalls, ""],
+              ["", "", ""],
+              ...overview.byTool.map((t, i) => [i + 1, t.tool, t.count])
+            ]
+          })
+        }
+
+        // Tool Top (all)
+        if (overview.byToolAll.length > 0) {
+          sheets.push({
+            name: "Tool使用排行(全部)",
+            header: ["排名", "Tool", "调用次数"],
+            rows: [
+              ["Tool 种类数", overview.totalTools, ""],
+              ["Tool 调用次数", overview.totalToolCalls, ""],
+              ["", "", ""],
+              ...overview.byToolAll.map((t, i) => [i + 1, t.tool, t.count])
+            ]
+          })
+        }
+      }
+
+      // 2. Model stats
+      if (modelStats) {
+        if (modelStats.byModel.length > 0) {
+          sheets.push({
+            name: "模型使用统计",
+            header: ["模型", "调用次数", "输入Token", "输出Token", "总Token"],
+            rows: modelStats.byModel.map((m) => [
+              m.model, m.count, m.inputTokens, m.outputTokens, m.inputTokens + m.outputTokens
+            ])
+          })
+        }
+        if (modelStats.byTier.length > 0) {
+          sheets.push({
+            name: "分流统计",
+            header: ["Tier", "调用次数"],
+            rows: modelStats.byTier.map((t) => [t.tier, t.count])
+          })
+        }
+        if (modelStats.byLayer.length > 0) {
+          sheets.push({
+            name: "路由决策层",
+            header: ["决策层", "命中次数"],
+            rows: modelStats.byLayer.map((l) => [l.layer, l.count])
+          })
+        }
+      }
+
+      // 3. User stats
+      if (userStats) {
+        if (userStats.topUsers.length > 0) {
+          sheets.push({
+            name: "用户使用排行",
+            header: ["排名", "SAP ID", "用户名", "部门", "调用次数"],
+            rows: userStats.topUsers.map((u, i) => [
+              i + 1, u.sapId, u.userName, u.orgName || "—", u.count
+            ])
+          })
+        }
+        if (userStats.byOrg.length > 0) {
+          sheets.push({
+            name: "部门分布",
+            header: ["部门", "调用次数"],
+            rows: userStats.byOrg.map((o) => [o.org, o.count])
+          })
+        }
+        if (userStats.byVersion.length > 0) {
+          sheets.push({
+            name: "版本分布",
+            header: ["版本", "调用次数"],
+            rows: userStats.byVersion.map((v) => [v.version, v.count])
+          })
+        }
+      }
+
+      // 4. Productivity
+      if (productivity) {
+        sheets.push({
+          name: "生产力概览",
+          header: ["指标", "值"],
+          rows: [
+            ["Commit 总数", productivity.totalCommits],
+            ["新增行数", productivity.totalInsertions],
+            ["删除行数", productivity.totalDeletions],
+            ["文件变更数", productivity.totalFilesChanged],
+            ["活跃用户数", productivity.activeUsers],
+            ["人均 Commit", Number(productivity.avgCommitsPerUser.toFixed(1))]
+          ]
+        })
+        if (productivity.commitTrend.length > 0) {
+          sheets.push({
+            name: "Commit趋势",
+            header: ["时间", "Commit数"],
+            rows: productivity.commitTrend.map((c) => [c.time, c.count])
+          })
+        }
+      }
+
+      if (sheets.length === 0) return
+
+      const result = await window.api.dashboard.exportExcel(sheets)
+      if (result.success) {
+        console.log("[Dashboard] Exported to:", result.filePath)
+      } else if (!result.canceled && result.error) {
+        console.error("[Dashboard] Export failed:", result.error)
+      }
+    } finally {
+      setExporting(false)
+    }
+  }, [overview, modelStats, userStats, productivity])
+
   return (
     <div className="flex flex-col h-full">
       <TimeControlBar
@@ -193,7 +382,9 @@ export function DashboardView(): React.JSX.Element {
         onNavigate={navigate}
         onCustomRange={setCustomRange}
         onRefresh={refresh}
+        onExport={handleExport}
         loading={loading}
+        exporting={exporting}
       />
 
       {error && (
