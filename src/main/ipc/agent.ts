@@ -19,7 +19,10 @@ import {
   isOnlineSkillEvolutionEnabled,
   isSkillAutoProposeEnabled,
   getGlobalRoutingMode,
-  getEnabledHooks
+  getEnabledHooks,
+  getHooks,
+  getWorkspaceHooks,
+  getEnabledPluginHooks
 } from "../storage"
 import { resolveModel, rememberRoutingDecision, rememberRoutingFeedback } from "../routing"
 import { notifyIfBackground, stripThink } from "../services/notify"
@@ -83,6 +86,50 @@ const STOP_HOOK_REVISION_PROMPT_PREFIX = "[[CMBDEVCLAW_STOP_HOOK_REVISION]]"
 const activeRuns = new Map<string, AbortController>()
 
 type StopHookContext = NonNullable<HookContext["stopContext"]>
+
+interface ActiveHookSummary {
+  global: number
+  plugin: number
+  workspace: number
+  total: number
+}
+
+function getActiveHookSummary(workspacePath?: string): ActiveHookSummary {
+  const global = getHooks().filter((hook) => hook.enabled).length
+  const plugin = getEnabledPluginHooks().filter((hook) => hook.enabled).length
+  const workspace = workspacePath
+    ? getWorkspaceHooks(workspacePath).filter((hook) => hook.enabled).length
+    : 0
+  return {
+    global,
+    plugin,
+    workspace,
+    total: global + plugin + workspace
+  }
+}
+
+function formatActiveHookNotice(summary: ActiveHookSummary): string | null {
+  if (summary.total === 0) return null
+  const parts = [
+    summary.global > 0 ? `全局 ${summary.global}` : "",
+    summary.workspace > 0 ? `工作区 ${summary.workspace}` : "",
+    summary.plugin > 0 ? `插件 ${summary.plugin}` : ""
+  ].filter(Boolean)
+  return `本轮已启用 ${summary.total} 个钩子（${parts.join("，")}）`
+}
+
+function sendHookNotice(window: BrowserWindow, channel: string, message: string): void {
+  window.webContents.send(channel, {
+    type: "custom",
+    data: { type: "hook_notice", message }
+  })
+}
+
+function sendActiveHookNotice(window: BrowserWindow, channel: string, workspacePath?: string): void {
+  const message = formatActiveHookNotice(getActiveHookSummary(workspacePath))
+  if (!message) return
+  sendHookNotice(window, channel, message)
+}
 
 interface SerializedHookMessage {
   id?: string[]
@@ -978,6 +1025,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       // Fire SessionStart once per thread lifetime (not per turn). SessionEnd fires when the
       // thread is deleted (threads:delete) or the app is quitting.
       fireSessionStartOnce(threadId, sessionWorkspacePath)
+      sendActiveHookNotice(window, channel, workspacePath)
 
       // Fire UserPromptSubmit hook — may block the message, halt the turn, rewrite the prompt,
       // or inject additional context that the LLM should see alongside the user's message.
@@ -1873,6 +1921,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       abortController.abort()
     }
     window.once("closed", onWindowClosed)
+    sendActiveHookNotice(window, channel, workspacePath)
 
     try {
       const requestedModelIdResume = modelId || (metadata.model as string | undefined)
@@ -2121,6 +2170,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       abortController.abort()
     }
     window.once("closed", onWindowClosed)
+    sendActiveHookNotice(window, channel, workspacePath)
 
     try {
       const interruptRoutingResult = await resolveModel({

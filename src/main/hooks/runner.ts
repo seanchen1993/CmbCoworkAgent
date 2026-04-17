@@ -261,7 +261,7 @@ function extractFirstJson(text: string): string | null {
  * Get a lightweight ChatOpenAI instance for prompt-hook evaluation.
  * Prefers the modelId specified on the hook; falls back to the first configured model.
  */
-function getPromptHookModel(modelId: string | undefined): ChatOpenAI | null {
+function getPromptHookModel(modelId: string | undefined, timeout: number): ChatOpenAI | null {
   const configs = getCustomModelConfigs()
   if (configs.length === 0) return null
 
@@ -275,7 +275,7 @@ function getPromptHookModel(modelId: string | undefined): ChatOpenAI | null {
     model: config.model,
     apiKey: config.apiKey,
     maxRetries: 0,
-    timeout: 30_000,
+    timeout,
     configuration: { baseURL: config.baseUrl }
   })
 }
@@ -311,7 +311,8 @@ async function executePromptHook(hook: HookConfig, context: HookContext, event: 
     return fallbackResult("[PromptHook] No policy text configured")
   }
 
-  const model = getPromptHookModel(hook.modelId)
+  const timeout = hook.timeout ?? DEFAULT_TIMEOUT
+  const model = getPromptHookModel(hook.modelId, timeout)
   if (!model) {
     return fallbackResult("[PromptHook] No model configured — cannot evaluate prompt hook")
   }
@@ -327,19 +328,26 @@ async function executePromptHook(hook: HookConfig, context: HookContext, event: 
     workspace: context.workspacePath ?? ""
   }, null, 2)
 
-  const timeout = hook.timeout ?? DEFAULT_TIMEOUT
-
+  let timeoutId: ReturnType<typeof setTimeout> | undefined
   try {
-    const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`PromptHook LLM timed out after ${timeout}ms`)), timeout)
-    )
+    const abortController = new AbortController()
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(() => {
+        abortController.abort()
+        reject(new Error(`PromptHook LLM timed out after ${timeout}ms`))
+      }, timeout)
+    })
 
     const invokePromise = model.invoke([
       new SystemMessage(PROMPT_HOOK_SYSTEM),
       new HumanMessage(userMsg)
-    ])
+    ], { signal: abortController.signal })
 
     const response = await Promise.race([invokePromise, timeoutPromise])
+    if (timeoutId) {
+      clearTimeout(timeoutId)
+      timeoutId = undefined
+    }
 
     let raw = typeof response.content === "string"
       ? response.content
@@ -371,6 +379,7 @@ async function executePromptHook(hook: HookConfig, context: HookContext, event: 
       reason: blocked ? reason : undefined
     }
   } catch (err) {
+    if (timeoutId) clearTimeout(timeoutId)
     const msg = err instanceof Error ? err.message : String(err)
     console.warn("[PromptHook] Evaluation error:", msg)
     return fallbackResult(`[PromptHook] Evaluation failed: ${msg}`)

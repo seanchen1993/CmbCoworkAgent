@@ -47,6 +47,7 @@ import { SubagentCard } from "@/components/panels/SubagentPanel"
 import { LspPanel } from "@/components/customize/LspPanel"
 
 type HookConfig = Awaited<ReturnType<typeof window.api.hooks.list>>[number]
+type DisplayHook = HookConfig & { source: "global" | "workspace" }
 
 const FileViewer = lazy(() =>
   import("@/components/tabs/FileViewer").then((m) => ({ default: m.FileViewer }))
@@ -210,7 +211,7 @@ export function RightPanel({
   const [skills, setSkills] = useState<SkillMetadata[]>([])
   const [disabledSkills, setDisabledSkills] = useState<Set<string>>(new Set())
   const [plugins, setPlugins] = useState<PluginMetadata[]>([])
-  const [hooks, setHooks] = useState<HookConfig[]>([])
+  const [hooks, setHooks] = useState<DisplayHook[]>([])
 
   useEffect(() => {
     async function load(): Promise<void> {
@@ -310,11 +311,25 @@ export function RightPanel({
     }
   }, [skillGenerationAgent.phase, skillGenerationAgent.errorText])
 
-  useEffect(() => {
-    if (hooksOpen) {
-      window.api.hooks.list().then(setHooks).catch(console.error)
+  const loadHooks = useCallback(async (): Promise<void> => {
+    try {
+      const workspacePath = threadState?.workspacePath ?? null
+      const [globalHooks, workspaceHooks] = await Promise.all([
+        window.api.hooks.list(),
+        workspacePath ? window.api.hooks.workspace.list(workspacePath) : Promise.resolve([])
+      ])
+      setHooks([
+        ...globalHooks.map((hook): DisplayHook => ({ ...hook, source: "global" })),
+        ...workspaceHooks.map((hook): DisplayHook => ({ ...hook, source: "workspace" }))
+      ])
+    } catch (error) {
+      console.error("[RightPanel] Failed to load hooks:", error)
     }
-  }, [hooksOpen])
+  }, [threadState?.workspacePath])
+
+  useEffect(() => {
+    void loadHooks()
+  }, [loadHooks])
 
   const latestResourceEvent = useMemo(() => {
     const persisted = threadState?.messages ?? []
@@ -1081,7 +1096,7 @@ export function RightPanel({
         />
         {hooksOpen && (
           <div className="overflow-auto right-panel-scroll" style={{ height: heights.hooks }}>
-            <HooksContent hooks={hooks} onChange={() => window.api.hooks.list().then(setHooks).catch(console.error)} />
+            <HooksContent hooks={hooks} onChange={() => { void loadHooks() }} />
           </div>
         )}
       </div>
@@ -2338,13 +2353,13 @@ const TOOL_LABEL: Record<string, string> = {
   manage_skill:     "技能管理",
 }
 
-function HooksContent({ hooks, onChange }: { hooks: HookConfig[]; onChange: () => void }): React.JSX.Element {
+function HooksContent({ hooks, onChange }: { hooks: DisplayHook[]; onChange: () => void }): React.JSX.Element {
   if (hooks.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center text-center text-sm text-muted-foreground py-8 px-4">
         <Webhook className="size-8 mb-2 opacity-50" />
         <span>暂无钩子</span>
-        <span className="text-xs mt-1">在自定义面板中添加钩子</span>
+        <span className="text-xs mt-1">在自定义面板或工作区中添加钩子</span>
       </div>
     )
   }
@@ -2361,8 +2376,10 @@ function HooksContent({ hooks, onChange }: { hooks: HookConfig[]; onChange: () =
     }
   }
 
-  const renderHookCard = (hook: HookConfig): React.JSX.Element => {
+  const renderHookCard = (hook: DisplayHook): React.JSX.Element => {
     const isPrompt = hook.type === "prompt"
+    const isWorkspaceHook = hook.source === "workspace"
+    const isGlobalHook = hook.source === "global"
     const summary = isPrompt ? (hook.prompt ?? "") : (hook.command ?? "")
     return (
     <div
@@ -2373,6 +2390,16 @@ function HooksContent({ hooks, onChange }: { hooks: HookConfig[]; onChange: () =
         <span className={cn("text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0", EVENT_BADGE_COLORS[hook.event] ?? "bg-muted text-muted-foreground")}>
           {EVENT_LABEL[hook.event] ?? hook.event}
         </span>
+        {isGlobalHook && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-sky-500/15 text-sky-600 dark:text-sky-400">
+            全局
+          </span>
+        )}
+        {isWorkspaceHook && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
+            工作区
+          </span>
+        )}
         {isPrompt && (
           <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-violet-500/15 text-violet-600 dark:text-violet-400">
             策略
@@ -2383,13 +2410,17 @@ function HooksContent({ hooks, onChange }: { hooks: HookConfig[]; onChange: () =
             {TOOL_LABEL[hook.matcher] ?? hook.matcher}
           </span>
         )}
-        <button
-          className="ml-auto shrink-0"
-          onClick={() => handleToggle(hook)}
-          title={hook.enabled ? "点击禁用" : "点击启用"}
-        >
-          <Power className={cn("size-3", hook.enabled ? "text-status-nominal" : "text-muted-foreground")} />
-        </button>
+        {isWorkspaceHook ? (
+          <span className="ml-auto text-[10px] text-muted-foreground shrink-0">只读</span>
+        ) : (
+          <button
+            className="ml-auto shrink-0"
+            onClick={() => handleToggle(hook)}
+            title={hook.enabled ? "点击禁用" : "点击启用"}
+          >
+            <Power className={cn("size-3", hook.enabled ? "text-status-nominal" : "text-muted-foreground")} />
+          </button>
+        )}
       </div>
       <p className={cn(
         "text-xs text-muted-foreground mt-1.5 break-all line-clamp-2",

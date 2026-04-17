@@ -16,6 +16,7 @@ import { ElectronIPCTransport } from "./electron-transport"
 import type { Message, Todo, FileInfo, Subagent, HITLRequest } from "@/types"
 import { useAppStore } from "@/lib/store"
 import type { DeepAgent } from "../../../main/agent/types"
+import { toast } from "sonner"
 
 // Open file tab type
 export interface OpenFile {
@@ -177,6 +178,7 @@ interface CustomEventData {
   attempt?: number
   maxRetries?: number
   reason?: string
+  message?: string
   delayMs?: number
 }
 
@@ -494,6 +496,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           break
         case "model_retry_clear":
           updateThreadState(threadId, () => ({ modelRetry: null }))
+          break
+        case "hook_notice":
+          if (typeof data.message === "string" && data.message.trim()) {
+            toast.info(data.message)
+          }
           break
         case "token_usage":
           // Only update if we have meaningful token values (> 0)
