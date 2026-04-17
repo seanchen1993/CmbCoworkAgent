@@ -394,6 +394,8 @@ const api = {
       isGitRepo?: boolean
       taskId: string
       files: Array<{ path: string; diff: string; additions: number; deletions: number }>
+      changedFilesTotal?: number
+      omittedFileCount?: number
       totals: { additions: number; deletions: number; fileCount: number }
       hasPendingDiff: boolean
       hasPushableCommit: boolean
@@ -409,6 +411,8 @@ const api = {
         isGitRepo?: boolean
         taskId: string
         files: Array<{ path: string; diff: string; additions: number; deletions: number }>
+        changedFilesTotal?: number
+        omittedFileCount?: number
         totals: { additions: number; deletions: number; fileCount: number }
         hasPendingDiff: boolean
         hasPushableCommit: boolean
@@ -416,6 +420,17 @@ const api = {
         trackedFiles?: string[]
         worktreeBranch?: string | null
         suggestedCommitMessage?: string
+        error?: string
+      }>
+    },
+    getGitPanelFileDiff: (threadId: string, filePath: string): Promise<{
+      success: boolean
+      file?: { path: string; diff: string; additions: number; deletions: number }
+      error?: string
+    }> => {
+      return ipcRenderer.invoke("workspace:getGitPanelFileDiff", { threadId, filePath }) as Promise<{
+        success: boolean
+        file?: { path: string; diff: string; additions: number; deletions: number }
         error?: string
       }>
     },

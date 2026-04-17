@@ -35,6 +35,8 @@ export function GitPanelView({
   const [cardNumber, setCardNumber] = useState("")
   const [commitType, setCommitType] = useState<"fix" | "feat" | "refactor" | "docs" | "style" | "test" | "chore">("fix")
   const [commitMessage, setCommitMessage] = useState("")
+  const [fileDiffByPath, setFileDiffByPath] = useState<Record<string, string>>({})
+  const [loadingDiffPaths, setLoadingDiffPaths] = useState<Set<string>>(new Set())
   const [expandedFilePaths, setExpandedFilePaths] = useState<Set<string>>(new Set())
   const [revertingFilePath, setRevertingFilePath] = useState<string | null>(null)
   const [pulling, setPulling] = useState(false)
@@ -44,6 +46,8 @@ export function GitPanelView({
     isGitRepo?: boolean
     taskId: string
     files: Array<{ path: string; diff: string; additions: number; deletions: number }>
+    changedFilesTotal?: number
+    omittedFileCount?: number
     totals: { additions: number; deletions: number; fileCount: number }
     hasPendingDiff: boolean
     hasPushableCommit: boolean
@@ -56,6 +60,8 @@ export function GitPanelView({
   useEffect(() => {
     setState(null)
     setError(null)
+    setFileDiffByPath({})
+    setLoadingDiffPaths(new Set())
     setExpandedFilePaths(new Set())
   }, [threadId])
 
@@ -83,6 +89,42 @@ export function GitPanelView({
     }
   }, [threadId, showToast])
 
+  const loadFileDiff = useCallback(
+    async (filePath: string) => {
+      if (!threadId) return
+      if (fileDiffByPath[filePath] !== undefined) return
+
+      let shouldRun = false
+      setLoadingDiffPaths((prev) => {
+        if (prev.has(filePath)) return prev
+        shouldRun = true
+        const next = new Set(prev)
+        next.add(filePath)
+        return next
+      })
+      if (!shouldRun) return
+
+      try {
+        const result = await window.api.workspace.getGitPanelFileDiff(threadId, filePath)
+        if (!result.success || !result.file) {
+          throw new Error(result.error || "加载 diff 失败")
+        }
+        setFileDiffByPath((prev) => ({ ...prev, [filePath]: result.file?.diff || "" }))
+      } catch (e) {
+        const err = e instanceof Error ? e.message : "加载 diff 失败"
+        showToast(err, "error")
+      } finally {
+        setLoadingDiffPaths((prev) => {
+          if (!prev.has(filePath)) return prev
+          const next = new Set(prev)
+          next.delete(filePath)
+          return next
+        })
+      }
+    },
+    [threadId, fileDiffByPath, showToast]
+  )
+
   useEffect(() => {
     refresh()
   }, [refresh])
@@ -98,6 +140,44 @@ export function GitPanelView({
       return next
     })
   }, [state?.files])
+
+  useEffect(() => {
+    const files = state?.files ?? []
+    const validPaths = new Set(files.map((f) => f.path))
+    setFileDiffByPath((prev) => {
+      const next: Record<string, string> = {}
+      let changed = false
+      for (const [path, diff] of Object.entries(prev)) {
+        if (validPaths.has(path)) {
+          next[path] = diff
+        } else {
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+    setLoadingDiffPaths((prev) => {
+      const next = new Set<string>()
+      for (const path of prev) {
+        if (validPaths.has(path)) next.add(path)
+      }
+      if (next.size !== prev.size) return next
+      for (const path of prev) {
+        if (!next.has(path)) return next
+      }
+      return prev
+    })
+  }, [state?.files])
+
+  useEffect(() => {
+    if (!state?.files?.length) return
+    for (const filePath of expandedFilePaths) {
+      if (!state.files.some((f) => f.path === filePath)) continue
+      if (fileDiffByPath[filePath] !== undefined) continue
+      if (loadingDiffPaths.has(filePath)) continue
+      void loadFileDiff(filePath)
+    }
+  }, [expandedFilePaths, fileDiffByPath, loadFileDiff, loadingDiffPaths, state?.files])
 
   const toggleFileExpanded = useCallback((filePath: string): void => {
     setExpandedFilePaths((prev) => {
@@ -247,6 +327,9 @@ export function GitPanelView({
     ? workspacePath.split(/[\\/]/).filter(Boolean).pop() || workspacePath
     : "未关联路径"
   const branchName = state?.worktreeBranch || "-"
+  const totalChangedFiles = state?.changedFilesTotal ?? state?.totals.fileCount ?? 0
+  const omittedFileCount = state?.omittedFileCount ?? 0
+  const visibleFilesCount = state?.totals.fileCount ?? 0
 
   return (
     <div className="rounded-xl border border-border/70 overflow-hidden bg-background flex flex-col min-h-0 h-full">
@@ -255,7 +338,12 @@ export function GitPanelView({
           <div className="text-[11px] text-muted-foreground truncate flex items-center gap-1 flex-wrap">
             <span className="font-semibold text-foreground">{workspaceName}</span>
             <span>•</span>
-            <span className="text-blue-600 dark:text-blue-400 font-medium">{state?.totals.fileCount ?? 0} files</span>
+            <span className="text-blue-600 dark:text-blue-400 font-medium">{totalChangedFiles} files</span>
+            {omittedFileCount > 0 && (
+              <>
+                <span>(仅展示 {visibleFilesCount})</span>
+              </>
+            )}
             <span>,</span>
             <span className="text-emerald-600 dark:text-emerald-400 font-semibold">+{state?.totals.additions ?? 0}</span>
             <span>/</span>
@@ -394,6 +482,11 @@ export function GitPanelView({
         )}
         {state !== null && hasGitRepo && (
           <>
+            {omittedFileCount > 0 && (
+              <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-300">
+                当前变更文件较多，为避免卡顿仅展示前 {visibleFilesCount} 个文件。请先提交或回退部分改动后再查看全部详情。
+              </div>
+            )}
             {state.files.length === 0 ? (
               <div className="rounded-xl border border-border/70 bg-muted/20 px-4 py-8">
                 <div className="mx-auto max-w-[340px] text-center">
@@ -408,15 +501,19 @@ export function GitPanelView({
               </div>
             ) : (
               <>
-                {state.files.filter((file) => file.diff && file.diff.trim() !== "").map((file) => (
-                  <div key={file.path} className="rounded-md border border-border/70 p-2 bg-white">
+                {state.files.map((file) => {
+                  const diff = fileDiffByPath[file.path] ?? file.diff
+                  const isExpanded = expandedFilePaths.has(file.path)
+                  const isDiffLoading = loadingDiffPaths.has(file.path)
+                  return (
+                    <div key={file.path} className="rounded-md border border-border/70 p-2 bg-white">
                     <button
                       type="button"
                       onClick={() => toggleFileExpanded(file.path)}
                       className="w-full flex items-center justify-between gap-2 text-xs"
                     >
                       <span className="flex items-center gap-1.5 min-w-0">
-                        {expandedFilePaths.has(file.path) ? (
+                        {isExpanded ? (
                           <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
                         ) : (
                           <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
@@ -489,13 +586,24 @@ export function GitPanelView({
                         </span>
                       </span>
                     </button>
-                    {expandedFilePaths.has(file.path) && (
+                    {isExpanded && (
                       <div className="mt-2">
-                        <DiffDisplay diff={file.diff} />
+                        {isDiffLoading ? (
+                          <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                            加载 diff 中...
+                          </div>
+                        ) : diff && diff.trim() !== "" ? (
+                          <DiffDisplay diff={diff} />
+                        ) : (
+                          <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                            当前文件暂无可展示 diff（可能已恢复、删除或为二进制文件）。
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
-                ))}
+                  )
+                })}
               </>
             )}
           </>

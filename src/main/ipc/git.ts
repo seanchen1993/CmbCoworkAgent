@@ -31,6 +31,9 @@ const DEFAULT_MAX_BUFFER = 20 * 1024 * 1024
 const MAX_GIT_COMMAND_CONCURRENCY = 1
 const GIT_LOCK_STALE_THRESHOLD_MS = 2 * 60 * 1000
 const MAX_GIT_LOCK_FILES_TO_CLEAN = 50
+// 这里采用短 TTL（1s）做“瞬时缓存”，主要为了吸收 UI 高频轮询带来的重复 rev-parse。
+// 目标不是跨场景长期缓存，而是在不引入陈旧状态风险的前提下减少 Git 子进程数。
+const WORKING_DIRECTORY_CACHE_TTL_MS = 1000
 const ALLOWED_GIT_SUBCOMMANDS = new Set([
   "add",
   "commit",
@@ -49,8 +52,23 @@ const ALLOWED_GIT_SUBCOMMANDS = new Set([
   "rev-parse",
   "ls-files"
 ])
+
+type WorkingDirectoryCacheEntry = {
+  value: string
+  expiresAt: number
+}
+
+type PorcelainStatusEntry = {
+  path: string
+  x: string
+  y: string
+}
+
 let activeGitCommandCount = 0
 const gitCommandQueue: Array<() => void> = []
+// 当前进程级缓存，仅在 main 进程生命周期内有效。
+// 当用户切换仓库或目录后，最多 1s 内自动失效，不需要额外失效机制。
+let workingDirectoryCache: WorkingDirectoryCacheEntry | null = null
 
 /**
  * Git 命令调度器：
@@ -87,6 +105,7 @@ type RunCommandOptions = {
   cwd?: string
   timeout?: number
   env?: NodeJS.ProcessEnv
+  trimOutput?: boolean
 }
 
 type ParsedRawCommand = {
@@ -147,6 +166,69 @@ function normalizeExecOutput(value: unknown): string {
   if (typeof value === "string") return value
   if (Buffer.isBuffer(value)) return value.toString("utf-8")
   return String(value || "")
+}
+
+function isRenameOrCopyStatus(x: string, y: string): boolean {
+  return x === "R" || x === "C" || y === "R" || y === "C"
+}
+
+/**
+ * 解析 `git status --porcelain` 输出（含 `-z` 与非 `-z` 两种格式）。
+ *
+ * 设计意图：
+ * - `getGitStatus` 走“一次 git 子进程 + 本地解析”模式，替代多次 diff/ls-files 调用。
+ * - 优先解析 NUL 分隔（`-z`），避免路径中空格/特殊字符导致歧义。
+ * - 对 rename/copy 的“额外 source token”做跳过，确保 path 集合只保留目标路径。
+ */
+function parsePorcelainStatus(output: string): PorcelainStatusEntry[] {
+  const entries: PorcelainStatusEntry[] = []
+
+  // Prefer NUL-delimited mode for correctness and faster parsing on large status outputs.
+  if (output.includes("\0")) {
+    const chunks = output.split("\0").filter(Boolean)
+    for (let i = 0; i < chunks.length; i += 1) {
+      const chunk = chunks[i]
+      if (chunk.length < 4) {
+        continue
+      }
+
+      const status = chunk.slice(0, 2)
+      const rawPath = chunk.slice(3)
+      if (!rawPath) {
+        continue
+      }
+
+      const x = status[0] || " "
+      const y = status[1] || " "
+      entries.push({ path: rawPath, x, y })
+
+      // In `status -z`, rename/copy records include one extra token for source path.
+      if (isRenameOrCopyStatus(x, y) && i + 1 < chunks.length) {
+        i += 1
+      }
+    }
+    return entries
+  }
+
+  // 兼容旧格式（换行分隔），作为 `-z` 不可用时的降级路径。
+  for (const line of output.split("\n")) {
+    const trimmed = line.trimEnd()
+    if (trimmed.length < 4) {
+      continue
+    }
+    const status = trimmed.slice(0, 2)
+    let rawPath = trimmed.slice(3).trim()
+    const x = status[0] || " "
+    const y = status[1] || " "
+    if (isRenameOrCopyStatus(x, y) && rawPath.includes(" -> ")) {
+      rawPath = rawPath.split(" -> ").pop() || rawPath
+    }
+    if (!rawPath) {
+      continue
+    }
+    entries.push({ path: rawPath, x, y })
+  }
+  return entries
 }
 
 /**
@@ -312,7 +394,10 @@ async function runCommand(
     maxBuffer: DEFAULT_MAX_BUFFER
   })
 
-  return normalizeExecOutput(stdout).trim()
+  // 默认 trim，保证大多数调用点拿到“命令结果文本”而不是原始尾换行；
+  // 仅在需要精确保留分隔符（如 `status -z`）时通过 trimOutput=false 关闭。
+  const text = normalizeExecOutput(stdout)
+  return options?.trimOutput === false ? text : text.trim()
 }
 
 /**
@@ -474,6 +559,14 @@ function isLockFileErrorText(text: string): boolean {
   )
 }
 
+function isNotGitRepoErrorText(text: string): boolean {
+  const normalized = text.toLowerCase()
+  return (
+    normalized.includes("not a git repository") ||
+    normalized.includes("does not appear to be a git repository")
+  )
+}
+
 /**
  * 检测 Git 版本，并给出对 LFS 兼容性的粗略判断。
  * 说明：这里是“提示性”能力，不作为硬阻断条件。
@@ -503,15 +596,30 @@ async function checkGitVersion(): Promise<{ version: string; supportsLFS: boolea
  * - 否则回退到 process.cwd()。
  */
 async function getCurrentWorkingDirectory(): Promise<string> {
+  const now = Date.now()
+  // 命中缓存时可直接避免一次 `git rev-parse --show-toplevel` 子进程开销。
+  if (workingDirectoryCache && now < workingDirectoryCache.expiresAt) {
+    return workingDirectoryCache.value
+  }
+
   try {
     // 尝试获取Git仓库根目录
     const gitRoot = await runGitArgs(["rev-parse", "--show-toplevel"], {
       cwd: process.cwd()
     })
+    workingDirectoryCache = {
+      value: gitRoot,
+      expiresAt: now + WORKING_DIRECTORY_CACHE_TTL_MS
+    }
     return gitRoot
   } catch {
     // 如果不是Git仓库，返回当前工作目录
-    return process.cwd()
+    const cwd = process.cwd()
+    workingDirectoryCache = {
+      value: cwd,
+      expiresAt: now + WORKING_DIRECTORY_CACHE_TTL_MS
+    }
+    return cwd
   }
 }
 
@@ -595,71 +703,75 @@ async function executeGitCommand(command: string, cwd?: string): Promise<string>
  * 返回结果供前端做“是否有改动”的轻量判断。
  */
 async function getGitStatus(): Promise<GitStatus> {
+  const emptyStatus: GitStatus = {
+    hasChanges: false,
+    changedFiles: [],
+    untrackedFiles: [],
+    stagedFiles: []
+  }
+
   try {
-    // 先判仓库，再做后续 diff 查询，减少无效命令噪音。
+    const workingDir = await getCurrentWorkingDirectory()
+    let porcelainOut = ""
+
     try {
-      await executeGitCommand("git rev-parse --git-dir")
+      // Hot path：一次 `status --porcelain` 同时得到 staged/unstaged/untracked 三类信息。
+      // 这一步是本函数最核心的性能优化点：把 3~4 次 Git 调用收敛成 1 次。
+      porcelainOut = await runGitArgs(
+        ["-c", "core.quotepath=false", "status", "--porcelain", "--untracked-files=all", "-z"],
+        { cwd: workingDir, timeout: 15000, trimOutput: false }
+      )
     } catch {
-      return {
-        hasChanges: false,
-        changedFiles: [],
-        untrackedFiles: [],
-        stagedFiles: []
+      // 兼容降级：少量旧环境可能不支持该组合参数。
+      // 注意这里依然只发起一次 status 命令，保证性能模型不退化到多命令模式。
+      try {
+        porcelainOut = await runGitArgs(
+          ["-c", "core.quotepath=false", "status", "--porcelain", "--untracked-files=all"],
+          { cwd: workingDir, timeout: 15000, trimOutput: false }
+        )
+      } catch (rawFallbackError: unknown) {
+        const fallbackError = rawFallbackError as ExecCommandError
+        const fallbackText = `${normalizeExecOutput(fallbackError.stderr)}\n${fallbackError.message || ""}`
+        if (isNotGitRepoErrorText(fallbackText)) {
+          return emptyStatus
+        }
+        throw fallbackError
+      }
+    }
+
+    // 使用 Set 去重，避免 rename/copy 或跨平台路径表现导致重复项。
+    const changedSet = new Set<string>() // 未暂存修改（worktree）
+    const untrackedSet = new Set<string>() // 未跟踪文件
+    const stagedSet = new Set<string>() // 已暂存变更（index）
+
+    for (const entry of parsePorcelainStatus(porcelainOut)) {
+      const filePath = entry.path
+      if (!filePath) {
+        continue
+      }
+      if (entry.x === "?" && entry.y === "?") {
+        untrackedSet.add(filePath)
+        continue
+      }
+      if (entry.x !== " " && entry.x !== "?") {
+        stagedSet.add(filePath)
+      }
+      if (entry.y !== " " && entry.y !== "?") {
+        changedSet.add(filePath)
       }
     }
 
     const status: GitStatus = {
-      hasChanges: false,
-      changedFiles: [],
-      untrackedFiles: [],
-      stagedFiles: []
+      changedFiles: Array.from(changedSet),
+      untrackedFiles: Array.from(untrackedSet),
+      stagedFiles: Array.from(stagedSet),
+      hasChanges: changedSet.size > 0 || untrackedSet.size > 0 || stagedSet.size > 0
     }
-
-    // 获取修改的文件
-    try {
-      const modifiedFiles = await executeGitCommand("git diff --name-only")
-      if (modifiedFiles) {
-        status.changedFiles = modifiedFiles.split("\n").filter((f) => f.trim())
-      }
-    } catch {
-      // 忽略错误，可能没有修改的文件
-    }
-
-    // 获取未跟踪的文件
-    try {
-      const untrackedFiles = await executeGitCommand("git ls-files --others --exclude-standard")
-      if (untrackedFiles) {
-        status.untrackedFiles = untrackedFiles.split("\n").filter((f) => f.trim())
-      }
-    } catch {
-      // 忽略错误
-    }
-
-    // 获取暂存的文件
-    try {
-      const stagedFiles = await executeGitCommand("git diff --cached --name-only")
-      if (stagedFiles) {
-        status.stagedFiles = stagedFiles.split("\n").filter((f) => f.trim())
-      }
-    } catch {
-      // 忽略错误
-    }
-
-    // 检查是否有任何变更
-    status.hasChanges =
-      status.changedFiles.length > 0 ||
-      status.untrackedFiles.length > 0 ||
-      status.stagedFiles.length > 0
 
     return status
   } catch (error) {
     console.error("获取Git状态失败:", error)
-    return {
-      hasChanges: false,
-      changedFiles: [],
-      untrackedFiles: [],
-      stagedFiles: []
-    }
+    return emptyStatus
   }
 }
 

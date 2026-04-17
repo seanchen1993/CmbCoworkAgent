@@ -208,6 +208,8 @@ interface CustomAPI {
       isGitRepo?: boolean
       taskId: string
       files: Array<{ path: string; diff: string; additions: number; deletions: number }>
+      changedFilesTotal?: number
+      omittedFileCount?: number
       totals: { additions: number; deletions: number; fileCount: number }
       hasPendingDiff: boolean
       hasPushableCommit: boolean
@@ -215,6 +217,11 @@ interface CustomAPI {
       trackedFiles?: string[]
       worktreeBranch?: string | null
       suggestedCommitMessage?: string
+      error?: string
+    }>
+    getGitPanelFileDiff: (threadId: string, filePath: string) => Promise<{
+      success: boolean
+      file?: { path: string; diff: string; additions: number; deletions: number }
       error?: string
     }>
     getGitPanelSummary: (threadId: string) => Promise<{
