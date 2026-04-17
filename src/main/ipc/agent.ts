@@ -64,7 +64,8 @@ import {
   buildOrderedChain,
   type FailoverAttempt
 } from "../agent/failover"
-import { runHooks } from "../hooks/runner"
+import { runHooks, type HookContext } from "../hooks/runner"
+import type { HookResult } from "../hooks/types"
 import { fireSessionStartOnce } from "../hooks/session-lifecycle"
 import type {
   AgentInvokeParams,
@@ -74,9 +75,276 @@ import type {
 } from "../types"
 
 const MIN_CHARS_FOR_MEMORY = 200
+const MAX_STOP_HOOK_REVISIONS = 2
+const MAX_STOP_CONTEXT_TEXT_CHARS = 40_000
+const STOP_HOOK_REVISION_PROMPT_PREFIX = "[[CMBDEVCLAW_STOP_HOOK_REVISION]]"
 
 // Track active runs for cancellation
 const activeRuns = new Map<string, AbortController>()
+
+type StopHookContext = NonNullable<HookContext["stopContext"]>
+
+interface SerializedHookMessage {
+  id?: string[]
+  content?: unknown
+  kwargs?: {
+    id?: string
+    type?: string
+    content?: unknown
+    name?: string
+    tool_call_id?: string
+    tool_calls?: Array<{
+      id?: string
+      name?: string
+      args?: Record<string, unknown>
+    }>
+  }
+}
+
+function serializeStreamData(data: unknown): unknown {
+  return JSON.parse(JSON.stringify(data))
+}
+
+function trimStopContextText(text: string): string {
+  const trimmed = text.trim()
+  if (trimmed.length <= MAX_STOP_CONTEXT_TEXT_CHARS) return trimmed
+  return `${trimmed.slice(0, MAX_STOP_CONTEXT_TEXT_CHARS)}\n...(truncated)`
+}
+
+function extractStopContextText(raw: unknown): string {
+  if (typeof raw === "string") return raw
+  if (!Array.isArray(raw)) return ""
+  return raw
+    .map((block) => {
+      if (typeof block === "string") return block
+      if (!block || typeof block !== "object") return ""
+      const item = block as { type?: string; text?: string; content?: string }
+      if (typeof item.text === "string") return item.text
+      if (typeof item.content === "string") return item.content
+      return ""
+    })
+    .filter(Boolean)
+    .join("")
+}
+
+function isStopHookRevisionPrompt(text: string): boolean {
+  return text.trimStart().startsWith(STOP_HOOK_REVISION_PROMPT_PREFIX)
+}
+
+function stopContextRole(
+  className: string,
+  kwargs: SerializedHookMessage["kwargs"]
+): "user" | "assistant" | "tool" | "system" | "unknown" {
+  if (className.includes("Human")) return "user"
+  if (className.includes("AI")) return "assistant"
+  if (className.includes("Tool")) return "tool"
+  if (className.includes("System")) return "system"
+  if (kwargs?.type === "human") return "user"
+  if (kwargs?.type === "ai") return "assistant"
+  if (kwargs?.type === "tool") return "tool"
+  if (kwargs?.type === "system") return "system"
+  return "unknown"
+}
+
+class StopHookContextCollector {
+  private userMessage?: string
+  private readonly assistantChunks: string[] = []
+  private latestFinalAssistantResponse = ""
+  private readonly countedAiMessageIds = new Set<string>()
+  private readonly toolCallCounter = new ToolCallCounter()
+  private readonly skillUsageDetector = new SkillUsageDetector()
+
+  constructor(userMessage?: string) {
+    if (userMessage) this.userMessage = userMessage
+  }
+
+  processStreamChunk(mode: string, payload: unknown): void {
+    try {
+      if (mode === "messages") {
+        this.processMessagePayload(payload)
+        return
+      }
+      if (mode === "values") {
+        this.processValuesPayload(payload)
+      }
+    } catch (error) {
+      console.warn("[Hooks] Failed to collect Stop hook context:", error)
+    }
+  }
+
+  snapshot(overrides: StopHookContext = {}): StopHookContext {
+    const context: StopHookContext = {}
+    const userMessage = overrides.userMessage ?? this.userMessage
+    const assistantResponse =
+      overrides.assistantResponse ??
+      (this.latestFinalAssistantResponse || this.assistantChunks.join("").trim())
+    const toolCalls =
+      overrides.toolCalls && overrides.toolCalls.length > 0
+        ? overrides.toolCalls
+        : this.toolCallCounter.getNames()
+    const usedSkills =
+      overrides.usedSkills && overrides.usedSkills.length > 0
+        ? overrides.usedSkills
+        : this.skillUsageDetector.getUsedSkillNames()
+
+    if (userMessage) context.userMessage = trimStopContextText(userMessage)
+    if (assistantResponse) context.assistantResponse = trimStopContextText(assistantResponse)
+    if (toolCalls.length > 0) context.toolCalls = toolCalls
+    if (usedSkills.length > 0) context.usedSkills = usedSkills
+    return context
+  }
+
+  private processMessagePayload(payload: unknown): void {
+    const [msgChunk] = payload as [SerializedHookMessage]
+    if (!msgChunk) return
+    const kwargs = msgChunk.kwargs || {}
+    const classId = Array.isArray(msgChunk.id) ? msgChunk.id : []
+    const className = classId[classId.length - 1] || ""
+    const role = stopContextRole(className, kwargs)
+    const text = extractStopContextText(kwargs.content ?? msgChunk.content)
+
+    if (role === "user" && text.trim() && !isStopHookRevisionPrompt(text)) {
+      this.userMessage = text.trim()
+    }
+    if (role === "assistant") {
+      if (text) this.assistantChunks.push(text)
+      this.observeToolCalls(kwargs.tool_calls, kwargs.id ?? "")
+    }
+  }
+
+  private processValuesPayload(payload: unknown): void {
+    const state = payload as {
+      skillsMetadata?: Array<{ name?: string; path?: string }>
+      messages?: SerializedHookMessage[]
+    }
+    if (Array.isArray(state.skillsMetadata) && state.skillsMetadata.length > 0) {
+      this.skillUsageDetector.onSkillsMetadata(state.skillsMetadata)
+    }
+    if (!Array.isArray(state.messages)) return
+
+    let lastUserIndex = -1
+    for (let i = state.messages.length - 1; i >= 0; i--) {
+      const msg = state.messages[i]
+      const kwargs = msg?.kwargs || {}
+      const classId = Array.isArray(msg?.id) ? msg.id : []
+      const className = classId[classId.length - 1] || ""
+      if (stopContextRole(className, kwargs) !== "user") continue
+      const text = extractStopContextText(kwargs.content ?? msg.content).trim()
+      if (text && !isStopHookRevisionPrompt(text)) {
+        this.userMessage = text
+        lastUserIndex = i
+        break
+      }
+    }
+
+    const finalResponses: string[] = []
+    const startIndex = lastUserIndex >= 0 ? lastUserIndex + 1 : 0
+    for (let i = startIndex; i < state.messages.length; i++) {
+      const msg = state.messages[i]
+      const kwargs = msg?.kwargs || {}
+      const classId = Array.isArray(msg?.id) ? msg.id : []
+      const className = classId[classId.length - 1] || ""
+      const role = stopContextRole(className, kwargs)
+      if (role !== "assistant") continue
+
+      const aiMessageId = typeof kwargs.id === "string" ? kwargs.id : ""
+      this.observeToolCalls(kwargs.tool_calls, aiMessageId)
+      if (Array.isArray(kwargs.tool_calls) && kwargs.tool_calls.length > 0) continue
+
+      const text = extractStopContextText(kwargs.content ?? msg.content).trim()
+      if (text) finalResponses.push(text)
+    }
+
+    if (finalResponses.length > 0) {
+      this.latestFinalAssistantResponse = finalResponses[finalResponses.length - 1]
+    }
+  }
+
+  private observeToolCalls(
+    toolCalls: Array<{ id?: string; name?: string; args?: Record<string, unknown> }> | undefined,
+    aiMessageId: string
+  ): void {
+    if (!Array.isArray(toolCalls) || toolCalls.length === 0) return
+    if (aiMessageId && this.countedAiMessageIds.has(aiMessageId)) return
+    if (aiMessageId) this.countedAiMessageIds.add(aiMessageId)
+
+    for (let index = 0; index < toolCalls.length; index++) {
+      const toolCall = toolCalls[index]
+      this.toolCallCounter.register(toolCall, aiMessageId, index)
+      if (toolCall.name !== "read_file") continue
+      const readPathRaw =
+        (typeof toolCall.args?.path === "string" && toolCall.args.path) ||
+        (typeof toolCall.args?.file_path === "string" && toolCall.args.file_path) ||
+        ""
+      if (readPathRaw) this.skillUsageDetector.onReadFilePath(readPathRaw)
+    }
+  }
+}
+
+function getStopHookBlockReason(result: HookResult): string {
+  return result.reason || result.stopReason || result.stdout || result.stderr || "Stop hook requested revision"
+}
+
+function buildStopRevisionPrompt(result: HookResult, attempt: number): string {
+  const parts = [
+    `${STOP_HOOK_REVISION_PROMPT_PREFIX} Internal revision request. Do not mention this marker.`,
+    "A completion hook reviewed your previous response and requested a revision.",
+    "Revise the work now. Address the issue directly, run any checks that are needed, and then provide an updated final answer.",
+    `Revision attempt: ${attempt}/${MAX_STOP_HOOK_REVISIONS}`,
+    `Hook reason:\n${getStopHookBlockReason(result)}`
+  ]
+  if (result.additionalContext) {
+    parts.push(`Additional hook context:\n${result.additionalContext}`)
+  }
+  if (result.systemMessage) {
+    parts.push(`Hook message:\n${result.systemMessage}`)
+  }
+  return parts.join("\n\n")
+}
+
+async function runStopHooksWithRevision({
+  threadId,
+  workspacePath,
+  abortSignal,
+  getStopContext,
+  runRevision,
+  sendNotice,
+  sendError
+}: {
+  threadId: string
+  workspacePath?: string
+  abortSignal: AbortSignal
+  getStopContext: () => StopHookContext
+  runRevision: (prompt: string) => Promise<void>
+  sendNotice: (message: string) => void
+  sendError: (message: string) => void
+}): Promise<boolean> {
+  let revisionCount = 0
+  while (!abortSignal.aborted) {
+    const stopResult = await runHooks(getEnabledHooks(workspacePath), "Stop", {
+      workspacePath,
+      sessionId: threadId,
+      stopContext: getStopContext()
+    }).catch((e) => {
+      console.warn("[Hooks] Stop hook error:", e)
+      return null
+    })
+
+    if (stopResult?.systemMessage) sendNotice(stopResult.systemMessage)
+    if (stopResult?.decision !== "block") return true
+
+    const reason = getStopHookBlockReason(stopResult)
+    if (revisionCount >= MAX_STOP_HOOK_REVISIONS) {
+      sendError(`Stop hook blocked completion after ${MAX_STOP_HOOK_REVISIONS} revision attempts: ${reason}`)
+      return false
+    }
+
+    revisionCount += 1
+    sendNotice(`Stop hook requested revision (${revisionCount}/${MAX_STOP_HOOK_REVISIONS}): ${reason}`)
+    await runRevision(buildStopRevisionPrompt(stopResult, revisionCount))
+  }
+  return false
+}
 
 // ─────────────────────────────────────────────────────────
 // Auto skill proposal: generate a skill from conversation context
@@ -630,6 +898,21 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     const skillUsageDetector = new SkillUsageDetector()
     const toolCallCounter = new ToolCallCounter()
     let assistantText = ""
+    const stopContextCollector = new StopHookContextCollector(message)
+
+    const sendHookNotice = (notice: string): void => {
+      window.webContents.send(channel, {
+        type: "custom",
+        data: { type: "hook_notice", message: notice }
+      })
+    }
+
+    const sendStreamError = (error: string): void => {
+      window.webContents.send(channel, {
+        type: "error",
+        error
+      })
+    }
 
     const appendTurnToProposalWindow = (
       status: "success" | "error",
@@ -698,7 +981,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
       // Fire UserPromptSubmit hook — may block the message, halt the turn, rewrite the prompt,
       // or inject additional context that the LLM should see alongside the user's message.
-      const promptSubmitResult = await runHooks(getEnabledHooks(), "UserPromptSubmit", {
+      const promptSubmitResult = await runHooks(getEnabledHooks(workspacePath ?? undefined), "UserPromptSubmit", {
         toolArgs: { message },
         userPrompt: message,
         workspacePath: workspacePath ?? undefined,
@@ -1017,7 +1300,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 kwargs.status === "error" ||
                 kwargs.is_error === true ||
                 additionalKwargs?.is_error === true
-              runHooks(getEnabledHooks(), "SubagentStop", {
+              runHooks(getEnabledHooks(sessionWorkspacePath), "SubagentStop", {
                 workspacePath: sessionWorkspacePath,
                 sessionId: threadId,
                 subagent: {
@@ -1300,24 +1583,29 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       )
       let activeStream: AsyncIterable<unknown> = stream
 
+      const consumeStreamWithSideEffects = async (source: AsyncIterable<unknown>): Promise<void> => {
+        for await (const chunk of source) {
+          if (abortController.signal.aborted) break
+
+          const [mode, data] = chunk as unknown as [string, unknown]
+
+          // Serialize first — live BaseMessage objects must be serialized before
+          // we can inspect the LangChain class path (msgChunk.id becomes the
+          // class array ["langchain_core","messages","AIMessageChunk"] only after
+          // toJSON() / JSON.stringify; on the live object, .id is the msg-id string).
+          const serialized = serializeStreamData(data)
+          // UI forwarding is the primary path. Trace / metrics / skill-evolution
+          // processing below are side effects and must never block streaming.
+          forwardStreamChunk(mode, serialized)
+          processChunkSideEffects(mode, serialized)
+          stopContextCollector.processStreamChunk(mode, serialized)
+        }
+      }
+
       // eslint-disable-next-line no-constant-condition
       while (true) {
         try {
-          for await (const chunk of activeStream) {
-            if (abortController.signal.aborted) break
-
-            const [mode, data] = chunk as unknown as [string, unknown]
-
-            // Serialize first — live BaseMessage objects must be serialized before
-            // we can inspect the LangChain class path (msgChunk.id becomes the
-            // class array ["langchain_core","messages","AIMessageChunk"] only after
-            // toJSON() / JSON.stringify; on the live object, .id is the msg-id string).
-            const serialized = JSON.parse(JSON.stringify(data))
-            // UI forwarding is the primary path. Trace / metrics / skill-evolution
-            // processing below are side effects and must never block streaming.
-            forwardStreamChunk(mode, serialized)
-            processChunkSideEffects(mode, serialized)
-          }
+          await consumeStreamWithSideEffects(activeStream)
           break // Stream completed successfully
         } catch (midStreamErr) {
           if (!isRetryableApiError(midStreamErr) || remainingCandidates.length === 0) {
@@ -1351,14 +1639,36 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
 
       if (!abortController.signal.aborted) {
-        // Fire Stop hooks (fire-and-forget)
-        runHooks(getEnabledHooks(), "Stop", {
+        const stopPassed = await runStopHooksWithRevision({
+          threadId,
           workspacePath: workspacePath ?? undefined,
-          sessionId: threadId
-        }).catch((e) => console.warn("[Hooks] Stop hook error:", e))
+          abortSignal: abortController.signal,
+          getStopContext: () =>
+            stopContextCollector.snapshot({
+              userMessage: message,
+              assistantResponse: lastFinalText || assistantText.trim(),
+              toolCalls: toolCallCounter.getNames(),
+              usedSkills: skillUsageDetector.getUsedSkillNames()
+            }),
+          runRevision: async (revisionPrompt) => {
+            if (!agent) throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
+            const revisionStream = await agent.stream(
+              { messages: [new HumanMessage(revisionPrompt)] },
+              streamConfig
+            )
+            await consumeStreamWithSideEffects(revisionStream)
+          },
+          sendNotice: sendHookNotice,
+          sendError: sendStreamError
+        })
+
+        if (!stopPassed) {
+          await tracer.finish("error", "Stop hook blocked completion")
+          return
+        }
 
         window.webContents.send(channel, { type: "done" })
-        notifyIfBackground("✅ 任务完成", assistantText.trim() || "对话已完成")
+        notifyIfBackground("✅ 任务完成", lastFinalText || assistantText.trim() || "对话已完成")
 
         // Finish trace
         tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
@@ -1544,6 +1854,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
     const abortController = new AbortController()
     activeRuns.set(threadId, abortController)
+    const stopContextCollector = new StopHookContextCollector()
+    const sendHookNotice = (notice: string): void => {
+      window.webContents.send(channel, {
+        type: "custom",
+        data: { type: "hook_notice", message: notice }
+      })
+    }
+    const sendStreamError = (error: string): void => {
+      window.webContents.send(channel, {
+        type: "error",
+        error
+      })
+    }
 
     const onWindowClosed = (): void => {
       console.log("[Agent] Window closed, aborting resume stream for thread:", threadId)
@@ -1587,6 +1910,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const resumeFailoverAttempts: FailoverAttempt[] = []
       let resumeUsedModelId = effectiveResumeModelId
       let resumeStream: AsyncIterable<unknown> | null = null
+      let resumeAgentRuntime: Awaited<ReturnType<typeof createAgentRuntime>> | null = null
 
       for (const candidateId of resumeOrderedChain) {
         if (abortController.signal.aborted) break
@@ -1601,6 +1925,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode()
           })
           resumeStream = await resumeAgent.stream(new Command({ resume: resumeValue }), resumeStreamConfig)
+          resumeAgentRuntime = resumeAgent
           resumeUsedModelId = candidateId
           break
         } catch (err) {
@@ -1659,18 +1984,24 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       )
       let activeResumeStream: AsyncIterable<unknown> = resumeStream
 
+      const consumeResumeStream = async (source: AsyncIterable<unknown>): Promise<void> => {
+        for await (const chunk of source) {
+          if (abortController.signal.aborted) break
+          const [mode, data] = chunk as unknown as [string, unknown]
+          const serialized = serializeStreamData(data)
+          window.webContents.send(channel, {
+            type: "stream",
+            mode,
+            data: serialized
+          })
+          stopContextCollector.processStreamChunk(mode, serialized)
+        }
+      }
+
       // eslint-disable-next-line no-constant-condition
       while (true) {
         try {
-          for await (const chunk of activeResumeStream) {
-            if (abortController.signal.aborted) break
-            const [mode, data] = chunk as unknown as [string, unknown]
-            window.webContents.send(channel, {
-              type: "stream",
-              mode,
-              data: JSON.parse(JSON.stringify(data))
-            })
-          }
+          await consumeResumeStream(activeResumeStream)
           break
         } catch (midErr) {
           if (!isRetryableApiError(midErr) || resumeRemainingCandidates.length === 0) throw midErr
@@ -1688,17 +2019,31 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode()
           })
           activeResumeStream = await nextAgent.stream(new Command({ resume: resumeValue }), resumeStreamConfig)
+          resumeAgentRuntime = nextAgent
           resumeUsedModelId = nextCandidate
           notifyResumeFailover()
         }
       }
 
       if (!abortController.signal.aborted) {
-        // Fire Stop hooks (fire-and-forget)
-        runHooks(getEnabledHooks(), "Stop", {
+        const stopPassed = await runStopHooksWithRevision({
+          threadId,
           workspacePath: workspacePath ?? undefined,
-          sessionId: threadId
-        }).catch((e) => console.warn("[Hooks] Stop hook error:", e))
+          abortSignal: abortController.signal,
+          getStopContext: () => stopContextCollector.snapshot(),
+          runRevision: async (revisionPrompt) => {
+            if (!resumeAgentRuntime) throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
+            const revisionStream = await resumeAgentRuntime.stream(
+              { messages: [new HumanMessage(revisionPrompt)] },
+              resumeStreamConfig
+            )
+            await consumeResumeStream(revisionStream)
+          },
+          sendNotice: sendHookNotice,
+          sendError: sendStreamError
+        })
+
+        if (!stopPassed) return
 
         window.webContents.send(channel, { type: "done" })
       }
@@ -1757,6 +2102,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
     const abortController = new AbortController()
     activeRuns.set(threadId, abortController)
+    const stopContextCollector = new StopHookContextCollector()
+    const sendHookNotice = (notice: string): void => {
+      window.webContents.send(channel, {
+        type: "custom",
+        data: { type: "hook_notice", message: notice }
+      })
+    }
+    const sendStreamError = (error: string): void => {
+      window.webContents.send(channel, {
+        type: "error",
+        error
+      })
+    }
 
     const onWindowClosed = (): void => {
       console.log("[Agent] Window closed, aborting interrupt stream for thread:", threadId)
@@ -1793,6 +2151,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const intFailoverAttempts: FailoverAttempt[] = []
         let intUsedModelId = effectiveInterruptModelId
         let intStream: AsyncIterable<unknown> | null = null
+        let intAgentRuntime: Awaited<ReturnType<typeof createAgentRuntime>> | null = null
 
         for (const candidateId of intOrderedChain) {
           if (abortController.signal.aborted) break
@@ -1804,9 +2163,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               abortSignal: abortController.signal,
               noSkillEvolutionTool: true,
               retryHooks: buildModelRetryHooks(window, channel),
-            maxRetryAttempts: getMaxRetryAttemptsForRoutingMode()
+              maxRetryAttempts: getMaxRetryAttemptsForRoutingMode()
             })
             intStream = await intAgent.stream(null, interruptStreamConfig)
+            intAgentRuntime = intAgent
             intUsedModelId = candidateId
             break
           } catch (err) {
@@ -1865,18 +2225,24 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         )
         let activeIntStream: AsyncIterable<unknown> = intStream
 
+        const consumeInterruptStream = async (source: AsyncIterable<unknown>): Promise<void> => {
+          for await (const chunk of source) {
+            if (abortController.signal.aborted) break
+            const [mode, data] = chunk as unknown as [string, unknown]
+            const serialized = serializeStreamData(data)
+            window.webContents.send(channel, {
+              type: "stream",
+              mode,
+              data: serialized
+            })
+            stopContextCollector.processStreamChunk(mode, serialized)
+          }
+        }
+
         // eslint-disable-next-line no-constant-condition
         while (true) {
           try {
-            for await (const chunk of activeIntStream) {
-              if (abortController.signal.aborted) break
-              const [mode, data] = chunk as unknown as [string, unknown]
-              window.webContents.send(channel, {
-                type: "stream",
-                mode,
-                data: JSON.parse(JSON.stringify(data))
-              })
-            }
+            await consumeInterruptStream(activeIntStream)
             break
           } catch (midErr) {
             if (!isRetryableApiError(midErr) || intRemainingCandidates.length === 0) throw midErr
@@ -1891,20 +2257,34 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               threadId, workspacePath, modelId: nextCandidate,
               abortSignal: abortController.signal, noSkillEvolutionTool: true,
               retryHooks: buildModelRetryHooks(window, channel),
-            maxRetryAttempts: getMaxRetryAttemptsForRoutingMode()
+              maxRetryAttempts: getMaxRetryAttemptsForRoutingMode()
             })
             activeIntStream = await nextAgent.stream(null, interruptStreamConfig)
+            intAgentRuntime = nextAgent
             intUsedModelId = nextCandidate
             notifyIntFailover()
           }
         }
 
         if (!abortController.signal.aborted) {
-          // Fire Stop hooks (fire-and-forget)
-          runHooks(getEnabledHooks(), "Stop", {
+          const stopPassed = await runStopHooksWithRevision({
+            threadId,
             workspacePath: workspacePath ?? undefined,
-            sessionId: threadId
-          }).catch((e) => console.warn("[Hooks] Stop hook error:", e))
+            abortSignal: abortController.signal,
+            getStopContext: () => stopContextCollector.snapshot(),
+            runRevision: async (revisionPrompt) => {
+              if (!intAgentRuntime) throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
+              const revisionStream = await intAgentRuntime.stream(
+                { messages: [new HumanMessage(revisionPrompt)] },
+                interruptStreamConfig
+              )
+              await consumeInterruptStream(revisionStream)
+            },
+            sendNotice: sendHookNotice,
+            sendError: sendStreamError
+          })
+
+          if (!stopPassed) return
 
           window.webContents.send(channel, { type: "done" })
         }

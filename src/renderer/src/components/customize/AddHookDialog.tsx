@@ -9,34 +9,35 @@ import {
   DialogHeader,
   DialogTitle
 } from "@/components/ui/dialog"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
 import type { HookConfig, HookEvent, HookType, PromptHookFallback, HookUpsert } from "@/types"
 
 // ── 常用工具选项 ──────────────────────────────────────────────────────────────
 export const COMMON_TOOLS: { value: string; label: string; description: string }[] = [
-  { value: "*",          label: "所有工具",     description: "匹配任意工具调用" },
-  { value: "execute",    label: "执行命令",     description: "Shell / PowerShell 命令执行（execute）" },
-  { value: "write_file", label: "写入文件",     description: "创建或覆盖文件内容（write_file）" },
-  { value: "edit_file",  label: "编辑文件",     description: "局部替换文件内容（edit_file）" },
-  { value: "read_file",  label: "读取文件",     description: "读取文件内容（read_file）" },
-  { value: "memory_search", label: "搜索记忆",  description: "检索长期记忆（memory_search）" },
-  { value: "memory_get", label: "读取记忆",     description: "读取记忆文件（memory_get）" },
-  { value: "manage_scheduler", label: "调度任务", description: "创建/修改定时任务（manage_scheduler）" },
-  { value: "manage_skill",   label: "技能管理", description: "加载/卸载技能（manage_skill）" },
-  { value: "custom",     label: "自定义…",      description: "手动输入工具名称" },
+  { value: "*",              label: "所有工具（*）",                description: "匹配任意工具调用" },
+  { value: "execute",        label: "执行命令（execute）",          description: "Shell / PowerShell 命令执行" },
+  { value: "write_file",     label: "写入文件（write_file）",      description: "创建或覆盖文件内容" },
+  { value: "edit_file",      label: "编辑文件（edit_file）",       description: "局部替换文件内容" },
+  { value: "read_file",      label: "读取文件（read_file）",       description: "读取文件内容" },
+  { value: "memory_search",  label: "搜索记忆（memory_search）",   description: "检索长期记忆" },
+  { value: "memory_get",     label: "读取记忆（memory_get）",      description: "读取记忆文件" },
+  { value: "manage_scheduler", label: "调度任务（manage_scheduler）", description: "创建/修改定时任务" },
+  { value: "manage_skill",   label: "技能管理（manage_skill）",    description: "加载/卸载技能" },
+  { value: "custom",         label: "自定义…",                     description: "手动输入工具名称或正则表达式" },
 ]
 const CUSTOM_SENTINEL = "custom"
 
 const HOOK_EVENTS: { value: HookEvent; label: string; description: string }[] = [
-  { value: "PreToolUse", label: "工具调用前", description: "在工具执行前触发，拦截后可阻止执行，阻断原因会反馈给 Agent 使其自适应调整" },
-  { value: "PostToolUse", label: "工具调用后", description: "在工具执行后触发，stdout 会追加到 Agent 下一轮上下文，外部系统状态可参与 AI 推理" },
-  { value: "UserPromptSubmit", label: "用户提交提示", description: "用户消息进入模型前触发，可阻断、重写提示或注入 additionalContext" },
-  { value: "SessionStart", label: "会话开始", description: "线程首次运行 Agent 时触发一次，适合初始化会话资源" },
-  { value: "SessionEnd", label: "会话结束", description: "线程删除或应用退出时触发，适合清理会话资源" },
-  { value: "Stop", label: "Agent 停止时", description: "Agent 完成任务停止时触发，可用于清理临时文件或发送通知" },
-  { value: "Notification", label: "通知事件", description: "通知事件触发，可用于自定义提醒或消息推送" },
-  { value: "SubagentStop", label: "子 Agent 停止", description: "子 Agent 任务结束时触发，可用于记录或同步子任务结果" }
+  { value: "PreToolUse", label: "工具调用前（PreToolUse）", description: "在工具执行前触发，拦截后可阻止执行，阻断原因会反馈给 Agent 使其自适应调整" },
+  { value: "PostToolUse", label: "工具调用后（PostToolUse）", description: "在工具执行后触发，stdout 会追加到 Agent 下一轮上下文，外部系统状态可参与 AI 推理" },
+  { value: "UserPromptSubmit", label: "用户提交提示（UserPromptSubmit）", description: "用户消息进入模型前触发，可阻断、重写提示或注入 additionalContext" },
+  { value: "SessionStart", label: "会话开始（SessionStart）", description: "线程首次运行 Agent 时触发一次，适合初始化会话资源" },
+  { value: "SessionEnd", label: "会话结束（SessionEnd）", description: "线程删除或应用退出时触发，适合清理会话资源" },
+  { value: "Stop", label: "Agent 停止时（Stop）", description: "Agent 完成任务停止时触发，可请求 Agent 返工或发送通知" },
+  { value: "Notification", label: "通知事件（Notification）", description: "Agent 等待用户审批时触发，可用于自定义提醒或消息推送" },
+  { value: "SubagentStop", label: "子 Agent 停止（SubagentStop）", description: "子 Agent 任务结束时触发，可用于记录或同步子任务结果" }
 ]
 
 const FALLBACK_OPTIONS: { value: PromptHookFallback; label: string; description: string }[] = [
@@ -211,42 +212,46 @@ export function AddHookDialog(props: {
 
           {/* Event */}
           <div className="space-y-2">
-            <label htmlFor="hook-event" className="text-sm font-medium">事件类型</label>
-            <select
-              id="hook-event"
-              value={event}
-              onChange={(e) => setEvent(e.target.value as HookEvent)}
-              className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
-            >
-              {HOOK_EVENTS.map((ev) => (
-                <option key={ev.value} value={ev.value}>{ev.label}</option>
-              ))}
-            </select>
-            <p className="text-xs text-muted-foreground">
-              {HOOK_EVENTS.find((ev) => ev.value === event)?.description}
-            </p>
+            <label className="text-sm font-medium">事件类型</label>
+            <Select value={event} onValueChange={(v) => setEvent(v as HookEvent)}>
+              <SelectTrigger className="h-9">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {HOOK_EVENTS.map((ev) => (
+                  <SelectItem key={ev.value} value={ev.value} className="py-2">
+                    <div>
+                      <span className="text-sm">{ev.label}</span>
+                      <p className="text-xs text-muted-foreground mt-0.5">{ev.description}</p>
+                    </div>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
 
           {/* Matcher */}
           {showMatcher && (
             <div className="space-y-2">
-              <label htmlFor="hook-matcher-select" className="text-sm font-medium">工具匹配</label>
-              <select
-                id="hook-matcher-select"
-                value={matcherMode}
-                onChange={(e) => {
-                  setMatcherMode(e.target.value)
-                  if (e.target.value !== CUSTOM_SENTINEL) setMatcher("")
-                }}
-                className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
-              >
-                {COMMON_TOOLS.map((t) => (
-                  <option key={t.value} value={t.value}>{t.label}</option>
-                ))}
-              </select>
-              <p className="text-xs text-muted-foreground">
-                {COMMON_TOOLS.find((t) => t.value === matcherMode)?.description ?? ""}
-              </p>
+              <label className="text-sm font-medium">工具匹配</label>
+              <Select value={matcherMode} onValueChange={(v) => {
+                setMatcherMode(v)
+                if (v !== CUSTOM_SENTINEL) setMatcher("")
+              }}>
+                <SelectTrigger className="h-9">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {COMMON_TOOLS.map((t) => (
+                    <SelectItem key={t.value} value={t.value} className="py-2">
+                      <div>
+                        <span className="text-sm">{t.label}</span>
+                        <p className="text-xs text-muted-foreground mt-0.5">{t.description}</p>
+                      </div>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
               {matcherMode === CUSTOM_SENTINEL && (
                 <>
                   <Input

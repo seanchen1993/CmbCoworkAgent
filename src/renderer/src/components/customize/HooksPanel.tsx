@@ -3,20 +3,21 @@ import { Plus, Search, X, Pencil, Trash2, Webhook, Terminal, BrainCircuit } from
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
 import type { HookConfig, HookEvent } from "@/types"
 import { AddHookDialog, COMMON_TOOLS } from "./AddHookDialog"
 
-const EVENT_BADGE: Record<HookEvent, { label: string; className: string }> = {
-  PreToolUse:   { label: "调用前", className: "bg-blue-500/15 text-blue-600 dark:text-blue-400" },
-  PostToolUse:  { label: "调用后", className: "bg-green-500/15 text-green-600 dark:text-green-400" },
-  UserPromptSubmit: { label: "提交", className: "bg-cyan-500/15 text-cyan-600 dark:text-cyan-400" },
-  SessionStart: { label: "会话始", className: "bg-teal-500/15 text-teal-600 dark:text-teal-400" },
-  SessionEnd:   { label: "会话终", className: "bg-rose-500/15 text-rose-600 dark:text-rose-400" },
-  Stop:         { label: "停止",   className: "bg-amber-500/15 text-amber-600 dark:text-amber-400" },
-  Notification: { label: "通知",   className: "bg-purple-500/15 text-purple-600 dark:text-purple-400" },
-  SubagentStop: { label: "子停止", className: "bg-indigo-500/15 text-indigo-600 dark:text-indigo-400" }
+const EVENT_BADGE: Record<HookEvent, { label: string; className: string; english: string; tip: string }> = {
+  PreToolUse:   { label: "调用前", className: "bg-blue-500/15 text-blue-600 dark:text-blue-400",     english: "PreToolUse",        tip: "工具执行前触发，可拦截并阻止执行" },
+  PostToolUse:  { label: "调用后", className: "bg-green-500/15 text-green-600 dark:text-green-400",   english: "PostToolUse",       tip: "工具执行后触发，输出追加到 Agent 上下文" },
+  UserPromptSubmit: { label: "提交", className: "bg-cyan-500/15 text-cyan-600 dark:text-cyan-400",    english: "UserPromptSubmit",  tip: "用户消息进入模型前触发，可阻断或重写" },
+  SessionStart: { label: "会话始", className: "bg-teal-500/15 text-teal-600 dark:text-teal-400",      english: "SessionStart",      tip: "线程首次运行 Agent 时触发一次" },
+  SessionEnd:   { label: "会话终", className: "bg-rose-500/15 text-rose-600 dark:text-rose-400",      english: "SessionEnd",        tip: "线程删除或应用退出时触发" },
+  Stop:         { label: "停止",   className: "bg-amber-500/15 text-amber-600 dark:text-amber-400",   english: "Stop",              tip: "Agent 完成任务停止时触发，可请求返工" },
+  Notification: { label: "通知",   className: "bg-purple-500/15 text-purple-600 dark:text-purple-400", english: "Notification",      tip: "Agent 等待审批时触发，用于自定义提醒" },
+  SubagentStop: { label: "子停止", className: "bg-indigo-500/15 text-indigo-600 dark:text-indigo-400", english: "SubagentStop",      tip: "子 Agent 完成任务时触发" }
 }
 
 /** Human-readable summary shown in the list item */
@@ -148,9 +149,19 @@ export function HooksPanel(): React.JSX.Element {
                     )}
                     onClick={() => setSelectedHook(hook)}
                   >
-                    <span className={cn("text-[10px] font-medium px-1.5 py-0.5 rounded-full shrink-0", badge.className)}>
-                      {badge.label}
-                    </span>
+                    <TooltipProvider delayDuration={200}>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span className={cn("text-[10px] font-medium px-1.5 py-0.5 rounded-full shrink-0 cursor-default", badge.className)}>
+                            {badge.label}
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent side="top">
+                          <p className="font-mono text-xs font-semibold">{badge.english}</p>
+                          <p className="text-xs text-muted-foreground">{badge.tip}</p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
                     {/* type icon */}
                     {isPrompt
                       ? <BrainCircuit className="size-3 shrink-0 text-violet-500" />
@@ -229,9 +240,19 @@ function HookDetail(props: {
             </h3>
           </div>
           <div className="flex items-center gap-2">
-            <span className={cn("text-[10px] font-medium px-1.5 py-0.5 rounded-full", badge.className)}>
-              {badge.label}
-            </span>
+            <TooltipProvider delayDuration={200}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className={cn("text-[10px] font-medium px-1.5 py-0.5 rounded-full cursor-default", badge.className)}>
+                    {badge.label}
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">
+                  <p className="font-mono text-xs font-semibold">{badge.english}</p>
+                  <p className="text-xs text-muted-foreground">{badge.tip}</p>
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
             <span className={cn(
               "text-[10px] font-medium px-1.5 py-0.5 rounded-full",
               isPrompt
@@ -240,11 +261,24 @@ function HookDetail(props: {
             )}>
               {isPrompt ? "自然语言策略" : "Shell 命令"}
             </span>
-            {hook.matcher && (
-              <span className="text-xs text-muted-foreground font-mono">
-                matcher: {hook.matcher}
-              </span>
-            )}
+            {hook.matcher && (() => {
+              const preset = COMMON_TOOLS.find((t) => t.value !== "custom" && t.value === hook.matcher)
+              return (
+                <TooltipProvider delayDuration={200}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span className="text-xs text-muted-foreground font-mono cursor-default">
+                        {preset ? preset.label : hook.matcher}
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom">
+                      <p className="font-mono text-xs font-semibold">{hook.matcher}</p>
+                      {preset && <p className="text-xs text-muted-foreground">{preset.description}</p>}
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              )
+            })()}
           </div>
         </div>
         <div className="flex items-center gap-1 shrink-0">
@@ -267,7 +301,7 @@ function HookDetail(props: {
 
       {/* Details */}
       <div className="space-y-4">
-        <DetailRow label="事件类型" value={badge.label} />
+        <DetailRow label="事件类型" value={`${badge.label}（${badge.english}）`} subtext={badge.tip} />
         {hook.matcher && (() => {
           const preset = COMMON_TOOLS.find((t) => t.value !== "custom" && t.value === hook.matcher)
           return <DetailRow label="工具匹配" value={preset ? `${preset.label}（${hook.matcher}）` : hook.matcher} mono={!preset} />
@@ -299,11 +333,14 @@ function HookDetail(props: {
   )
 }
 
-function DetailRow(props: { label: string; value: string; mono?: boolean }): React.JSX.Element {
+function DetailRow(props: { label: string; value: string; mono?: boolean; subtext?: string }): React.JSX.Element {
   return (
     <div className="flex items-start gap-4">
       <span className="text-sm text-muted-foreground w-20 shrink-0">{props.label}</span>
-      <span className={cn("text-sm break-all", props.mono && "font-mono")}>{props.value}</span>
+      <div>
+        <span className={cn("text-sm break-all", props.mono && "font-mono")}>{props.value}</span>
+        {props.subtext && <p className="text-xs text-muted-foreground mt-0.5">{props.subtext}</p>}
+      </div>
     </div>
   )
 }
@@ -336,10 +373,11 @@ function EmptyState(): React.JSX.Element {
           <p className="text-xs pl-5">用自然语言写合规规则，行内 LLM 逐次判决是否放行，无需编写脚本</p>
         </div>
         <div className="pt-1 border-t border-border/50 space-y-1.5">
-          <p><span className="font-medium text-blue-600 dark:text-blue-400">工具调用前</span>{" — 拦截并阻断，阻断原因反馈给 Agent 使其自适应调整"}</p>
-          <p><span className="font-medium text-green-600 dark:text-green-400">工具调用后</span>{" — 输出追加到 Agent 上下文，外部系统状态参与 AI 推理"}</p>
-          <p><span className="font-medium text-amber-600 dark:text-amber-400">Agent 停止时</span>{" — 清理或通知，fire-and-forget"}</p>
-          <p><span className="font-medium text-purple-600 dark:text-purple-400">通知事件</span>{" — 自定义提醒或消息推送"}</p>
+          <p><span className="font-medium text-blue-600 dark:text-blue-400">调用前</span> <span className="font-mono text-muted-foreground">PreToolUse</span>{" — 拦截并阻断，阻断原因反馈给 Agent 使其自适应调整"}</p>
+          <p><span className="font-medium text-green-600 dark:text-green-400">调用后</span> <span className="font-mono text-muted-foreground">PostToolUse</span>{" — 输出追加到 Agent 上下文，外部系统状态参与 AI 推理"}</p>
+          <p><span className="font-medium text-amber-600 dark:text-amber-400">停止</span> <span className="font-mono text-muted-foreground">Stop</span>{" — 任务完成后复查，可请求 Agent 返工"}</p>
+          <p><span className="font-medium text-cyan-600 dark:text-cyan-400">提交</span> <span className="font-mono text-muted-foreground">UserPromptSubmit</span>{" — 用户消息进入模型前，可阻断或重写"}</p>
+          <p><span className="font-medium text-purple-600 dark:text-purple-400">通知</span> <span className="font-mono text-muted-foreground">Notification</span>{" — 自定义提醒或消息推送"}</p>
         </div>
       </div>
     </div>

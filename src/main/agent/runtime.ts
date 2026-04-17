@@ -943,7 +943,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const windowsSandbox = process.platform === "win32" ? getWindowsSandboxMode() : "none"
   console.log(`[Runtime] codex.exe: ${codexExePath}, exists: ${codexExists}, sandboxMode: ${windowsSandbox}`)
 
-  const enabledHooks = getEnabledHooks()
+  const enabledHooks = getEnabledHooks(workspacePath)
   console.log(`[Runtime] Loaded ${enabledHooks.length} enabled hooks`)
 
   const backend = new LocalSandbox({
@@ -953,8 +953,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     maxOutputBytes,
     windowsSandbox,
     codexExePath: codexExists ? codexExePath : undefined,
-    // Pass a getter so hooks are always read fresh from storage at call time
-    hooks: getEnabledHooks,
+    hooks: () => getEnabledHooks(workspacePath),
     abortSignal: options.abortSignal,
     runId: threadId
   })
@@ -991,7 +990,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       console.log(`[Orchestrator] sending approval request on channel: approval:request:${threadId}, reqId=${req.id}, command=${req.command}`)
       // Fire Notification hook — agent is now waiting on user input.
       // Fire-and-forget so it doesn't delay the UI prompt.
-      runHooks(getEnabledHooks(), "Notification", {
+      runHooks(getEnabledHooks(workspacePath), "Notification", {
         toolName: req.tool_call?.name,
         toolArgs: { command: req.command, reason: req.reason, filePath: req.filePath },
         workspacePath,

@@ -1362,7 +1362,17 @@ const api = {
       ipcRenderer.invoke("hooks:update", config),
     delete: (id: string): Promise<void> => ipcRenderer.invoke("hooks:delete", id),
     setEnabled: (id: string, enabled: boolean): Promise<void> =>
-      ipcRenderer.invoke("hooks:setEnabled", { id, enabled })
+      ipcRenderer.invoke("hooks:setEnabled", { id, enabled }),
+    workspace: {
+      list: (workspacePath: string): Promise<HookConfig[]> =>
+        ipcRenderer.invoke("hooks:workspace:list", workspacePath),
+      untrusted: (workspacePath: string): Promise<{ fileName: string; filePath: string; event: string; command: string }[]> =>
+        ipcRenderer.invoke("hooks:workspace:untrusted", workspacePath),
+      trustAll: (workspacePath: string): Promise<void> =>
+        ipcRenderer.invoke("hooks:workspace:trustAll", workspacePath),
+      trustFile: (workspacePath: string, fileName: string, filePath: string): Promise<void> =>
+        ipcRenderer.invoke("hooks:workspace:trustFile", { workspacePath, fileName, filePath })
+    }
   },
   codeExecTools: {
     list: (): Promise<ManagedSavedCodeExecTool[]> => ipcRenderer.invoke("codeExecTools:list"),

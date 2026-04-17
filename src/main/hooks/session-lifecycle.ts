@@ -16,7 +16,7 @@ export function hasActiveSessions(): boolean {
 export function fireSessionStartOnce(threadId: string, workspacePath?: string): void {
   if (startedSessions.has(threadId)) return
   startedSessions.set(threadId, workspacePath)
-  runHooks(getEnabledHooks(), "SessionStart", {
+  runHooks(getEnabledHooks(workspacePath), "SessionStart", {
     workspacePath,
     sessionId: threadId
   }).catch((e) => console.warn("[Hooks] SessionStart hook error:", e))
@@ -27,8 +27,9 @@ export function fireSessionEnd(threadId: string, workspacePath?: string): void {
   if (!startedSessions.has(threadId)) return
   const startedWorkspacePath = startedSessions.get(threadId)
   startedSessions.delete(threadId)
-  runHooks(getEnabledHooks(), "SessionEnd", {
-    workspacePath: workspacePath ?? startedWorkspacePath,
+  const effectiveWorkspacePath = workspacePath ?? startedWorkspacePath
+  runHooks(getEnabledHooks(effectiveWorkspacePath), "SessionEnd", {
+    workspacePath: effectiveWorkspacePath,
     sessionId: threadId
   }).catch((e) => console.warn("[Hooks] SessionEnd hook error:", e))
 }
@@ -45,7 +46,7 @@ export async function fireSessionEndAll(timeoutMs = 5000): Promise<void> {
   if (entries.length === 0) return
   const all = Promise.allSettled(
     entries.map(([id, workspacePath]) =>
-      runHooks(getEnabledHooks(), "SessionEnd", { sessionId: id, workspacePath })
+      runHooks(getEnabledHooks(workspacePath), "SessionEnd", { sessionId: id, workspacePath })
     )
   )
   const timeout = new Promise<void>((resolve) => setTimeout(resolve, timeoutMs))

@@ -3,8 +3,13 @@ import {
   getHooks,
   upsertHook,
   deleteHook,
-  setHookEnabled
+  setHookEnabled,
+  getWorkspaceHooks,
+  getUntrustedWorkspaceCommandHooks,
+  trustAllWorkspaceHooks,
+  trustWorkspaceHookFile
 } from "../storage"
+import type { UntrustedWorkspaceHook } from "../storage"
 import type { HookConfig, HookEvent, HookType, PromptHookFallback, HookUpsert } from "../hooks/types"
 
 const VALID_EVENTS = new Set<HookEvent>([
@@ -90,6 +95,40 @@ export function registerHooksHandlers(ipcMain: IpcMain): void {
     "hooks:setEnabled",
     async (_event, { id, enabled }: { id: string; enabled: boolean }): Promise<void> => {
       setHookEnabled(id, enabled)
+    }
+  )
+
+  // ── Workspace Hooks ──
+
+  ipcMain.handle(
+    "hooks:workspace:list",
+    async (_event, workspacePath: string): Promise<HookConfig[]> => {
+      if (!workspacePath) return []
+      return getWorkspaceHooks(workspacePath)
+    }
+  )
+
+  ipcMain.handle(
+    "hooks:workspace:untrusted",
+    async (_event, workspacePath: string): Promise<UntrustedWorkspaceHook[]> => {
+      if (!workspacePath) return []
+      return getUntrustedWorkspaceCommandHooks(workspacePath)
+    }
+  )
+
+  ipcMain.handle(
+    "hooks:workspace:trustAll",
+    async (_event, workspacePath: string): Promise<void> => {
+      if (!workspacePath) return
+      trustAllWorkspaceHooks(workspacePath)
+    }
+  )
+
+  ipcMain.handle(
+    "hooks:workspace:trustFile",
+    async (_event, { workspacePath, fileName, filePath }: { workspacePath: string; fileName: string; filePath: string }): Promise<void> => {
+      if (!workspacePath || !fileName || !filePath) return
+      trustWorkspaceHookFile(workspacePath, fileName, filePath)
     }
   )
 }

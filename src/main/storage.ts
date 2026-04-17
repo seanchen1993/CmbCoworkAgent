@@ -2,7 +2,7 @@ import { homedir } from "os"
 import { join } from "path"
 import { createHash } from "crypto"
 import { v4 as uuid } from "uuid"
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, renameSync } from "fs"
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, renameSync, readdirSync } from "fs"
 import type { HookConfig, HookUpsert } from "./hooks/types"
 import { readdir, readFile, rm, mkdir, stat as fsStat } from "fs/promises"
 import { app } from "electron"
@@ -1848,10 +1848,157 @@ export function getEnabledPluginHooks(): HookConfig[] {
   return result
 }
 
-export function getEnabledHooks(): HookConfig[] {
+// ── Workspace Hooks ──────────────────────────────────────────────────────────
+
+const WORKSPACE_HOOKS_DIR = ".cmbdevclaw/hooks"
+const TRUSTED_WS_HOOKS_FILE = join(OPENWORK_DIR, "trusted-workspace-hooks.json")
+
+interface TrustedWorkspaceEntry {
+  fileHashes: Record<string, string> // filename → sha256
+  trustedAt: string
+}
+
+function loadTrustedWorkspaceHooks(): Record<string, TrustedWorkspaceEntry> {
+  if (!existsSync(TRUSTED_WS_HOOKS_FILE)) return {}
+  try {
+    return JSON.parse(readFileSync(TRUSTED_WS_HOOKS_FILE, "utf-8")) as Record<string, TrustedWorkspaceEntry>
+  } catch {
+    return {}
+  }
+}
+
+function saveTrustedWorkspaceHooks(data: Record<string, TrustedWorkspaceEntry>): void {
+  getOpenworkDir()
+  const tmp = TRUSTED_WS_HOOKS_FILE + ".tmp"
+  writeFileSync(tmp, JSON.stringify(data, null, 2))
+  renameSync(tmp, TRUSTED_WS_HOOKS_FILE)
+}
+
+function fileContentHash(filePath: string): string {
+  const content = readFileSync(filePath)
+  return createHash("sha256").update(content).digest("hex")
+}
+
+export function isWorkspaceHookTrusted(workspacePath: string, fileName: string, filePath: string): boolean {
+  const trusted = loadTrustedWorkspaceHooks()
+  const entry = trusted[workspacePath]
+  if (!entry || !entry.fileHashes[fileName]) return false
+  return entry.fileHashes[fileName] === fileContentHash(filePath)
+}
+
+export function trustWorkspaceHookFile(workspacePath: string, fileName: string, filePath: string): void {
+  const trusted = loadTrustedWorkspaceHooks()
+  if (!trusted[workspacePath]) {
+    trusted[workspacePath] = { fileHashes: {}, trustedAt: new Date().toISOString() }
+  }
+  trusted[workspacePath].fileHashes[fileName] = fileContentHash(filePath)
+  trusted[workspacePath].trustedAt = new Date().toISOString()
+  saveTrustedWorkspaceHooks(trusted)
+}
+
+export function trustAllWorkspaceHooks(workspacePath: string): void {
+  const hooksDir = join(workspacePath, WORKSPACE_HOOKS_DIR)
+  if (!existsSync(hooksDir)) return
+  try {
+    const files = readdirSync(hooksDir).filter((f) => f.endsWith(".json"))
+    for (const file of files) {
+      trustWorkspaceHookFile(workspacePath, file, join(hooksDir, file))
+    }
+  } catch { /* ignore */ }
+}
+
+export interface UntrustedWorkspaceHook {
+  fileName: string
+  filePath: string
+  event: string
+  command: string
+}
+
+export function getUntrustedWorkspaceCommandHooks(workspacePath: string): UntrustedWorkspaceHook[] {
+  const hooksDir = join(workspacePath, WORKSPACE_HOOKS_DIR)
+  if (!existsSync(hooksDir)) return []
+  const result: UntrustedWorkspaceHook[] = []
+  try {
+    const files = readdirSync(hooksDir).filter((f) => f.endsWith(".json"))
+    for (const file of files) {
+      const filePath = join(hooksDir, file)
+      try {
+        const raw = JSON.parse(readFileSync(filePath, "utf-8")) as Record<string, unknown>
+        const hookType = resolveWorkspaceHookType(raw)
+        if (hookType !== "command") continue
+        if (typeof raw.command !== "string") continue
+        if (raw.enabled === false) continue
+        if (isWorkspaceHookTrusted(workspacePath, file, filePath)) continue
+        result.push({
+          fileName: file,
+          filePath,
+          event: typeof raw.event === "string" ? raw.event : "unknown",
+          command: raw.command
+        })
+      } catch { /* skip invalid files */ }
+    }
+  } catch { /* dir read error */ }
+  return result
+}
+
+function resolveWorkspaceHookType(raw: Record<string, unknown>): HookConfig["type"] | null {
+  if (raw.type === "prompt" || raw.type === "command") return raw.type
+  if (typeof raw.prompt === "string") return "prompt"
+  if (typeof raw.command === "string") return "command"
+  return null
+}
+
+export function getWorkspaceHooks(workspacePath: string): HookConfig[] {
+  const hooksDir = join(workspacePath, WORKSPACE_HOOKS_DIR)
+  if (!existsSync(hooksDir)) return []
+  const result: HookConfig[] = []
+  try {
+    const files = readdirSync(hooksDir).filter((f) => f.endsWith(".json"))
+    for (const file of files) {
+      const filePath = join(hooksDir, file)
+      try {
+        const raw = JSON.parse(readFileSync(filePath, "utf-8")) as Record<string, unknown>
+        if (typeof raw.event !== "string") continue
+        const hookType = resolveWorkspaceHookType(raw)
+        if (!hookType) continue
+        if (hookType === "prompt" && typeof raw.prompt !== "string") continue
+        if (hookType === "command" && typeof raw.command !== "string") continue
+        if (raw.enabled === false) continue
+        // command hooks require trust confirmation
+        if (hookType === "command" && !isWorkspaceHookTrusted(workspacePath, file, filePath)) {
+          console.log(`[Hooks] Skipping untrusted workspace command hook: ${file}`)
+          continue
+        }
+        const baseName = file.replace(/\.json$/, "")
+        result.push({
+          id: `ws:${baseName}`,
+          event: raw.event as HookConfig["event"],
+          matcher: typeof raw.matcher === "string" ? raw.matcher : undefined,
+          type: (hookType === "prompt" ? "prompt" : "command") as HookConfig["type"],
+          command: typeof raw.command === "string" ? raw.command : undefined,
+          prompt: typeof raw.prompt === "string" ? raw.prompt : undefined,
+          modelId: typeof raw.modelId === "string" ? raw.modelId : undefined,
+          fallback: raw.fallback === "block" ? "block" : "allow",
+          timeout: typeof raw.timeout === "number" ? raw.timeout : undefined,
+          enabled: true,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        })
+      } catch {
+        console.warn(`[Hooks] Failed to parse workspace hook file: ${file}`)
+      }
+    }
+  } catch {
+    console.warn(`[Hooks] Failed to read workspace hooks dir: ${hooksDir}`)
+  }
+  return result
+}
+
+export function getEnabledHooks(workspacePath?: string): HookConfig[] {
   const globalHooks = getHooks().filter((h) => h.enabled)
   const pluginHooks = getEnabledPluginHooks()
-  return [...globalHooks, ...pluginHooks]
+  const workspaceHooks = workspacePath ? getWorkspaceHooks(workspacePath) : []
+  return [...globalHooks, ...pluginHooks, ...workspaceHooks]
 }
 
 function writeHooksAtomic(items: HookConfig[]): void {

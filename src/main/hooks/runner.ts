@@ -18,6 +18,13 @@ export interface HookContext {
   userPrompt?: string
   /** Subagent descriptor for SubagentStop — exposed in stdin JSON */
   subagent?: { id?: string; name?: string; status?: string }
+  /** Stop event context — gives hooks visibility into what the agent did this turn */
+  stopContext?: {
+    userMessage?: string
+    assistantResponse?: string
+    toolCalls?: string[]
+    usedSkills?: string[]
+  }
 }
 
 /**
@@ -98,6 +105,7 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext): string {
   }
   if (context.userPrompt) payload.prompt = context.userPrompt
   if (context.subagent) payload.subagent = context.subagent
+  if (context.stopContext) payload.stop_context = context.stopContext
   return JSON.stringify(payload)
 }
 
@@ -207,8 +215,10 @@ function executeCommandHook(
 // ── Prompt Hook ───────────────────────────────────────────────────────────────
 
 const PROMPT_HOOK_SYSTEM = `You are a compliance policy enforcer for a banking AI agent.
-You will be given a policy rule and a description of a tool call the AI agent is about to make.
-Decide whether to allow or block the tool call based strictly on the policy.
+You will be given a policy rule and a JSON payload describing a hook event.
+For tool events, the payload includes tool_name/tool_args/tool_result.
+For Stop events, the payload includes stop_context with the user's request, the assistant's final response, tool calls, and used skills.
+Decide whether to allow or block the event based strictly on the policy.
 
 Respond with ONLY valid JSON — no explanation, no markdown, no extra text:
 {"decision":"allow"}
@@ -285,13 +295,15 @@ function getPromptHookModel(modelId: string | undefined): ChatOpenAI | null {
  * On timeout / model unavailable / parse failure → falls back to hook.fallback
  * ("allow" by default, configurable to "block" for strict environments).
  */
-async function executePromptHook(hook: HookConfig, context: HookContext): Promise<HookResult> {
+async function executePromptHook(hook: HookConfig, context: HookContext, event: HookEvent): Promise<HookResult> {
   const fallback = hook.fallback ?? "allow"
   const fallbackResult = (reason: string): HookResult => ({
     exitCode: fallback === "block" ? 1 : 0,
     stdout: fallback === "block" ? reason : "",
     stderr: reason,
-    blocked: fallback === "block"
+    blocked: fallback === "block",
+    decision: fallback === "block" ? "block" : "approve",
+    reason: fallback === "block" ? reason : undefined
   })
 
   const policy = hook.prompt?.trim()
@@ -305,10 +317,13 @@ async function executePromptHook(hook: HookConfig, context: HookContext): Promis
   }
 
   const userMsg = JSON.stringify({
+    hook_event_name: event,
     policy,
+    ...(context.userPrompt ? { prompt: context.userPrompt } : {}),
     tool_name: context.toolName ?? "(unknown)",
     tool_args: context.toolArgs ?? {},
     ...(context.toolResult !== undefined ? { tool_result: context.toolResult } : {}),
+    ...(context.stopContext ? { stop_context: context.stopContext } : {}),
     workspace: context.workspacePath ?? ""
   }, null, 2)
 
@@ -340,6 +355,7 @@ async function executePromptHook(hook: HookConfig, context: HookContext): Promis
 
     const parsed = JSON.parse(jsonStr) as { decision: string; reason?: string }
     const blocked = parsed.decision === "block"
+    const reason = parsed.reason ?? "Blocked by prompt hook policy"
 
     console.log(
       `[PromptHook] policy="${policy.slice(0, 60)}…" tool=${context.toolName} → decision=${parsed.decision}` +
@@ -348,9 +364,11 @@ async function executePromptHook(hook: HookConfig, context: HookContext): Promis
 
     return {
       exitCode: blocked ? 1 : 0,
-      stdout: blocked ? (parsed.reason ?? "Blocked by prompt hook policy") : "",
+      stdout: blocked ? reason : "",
       stderr: "",
-      blocked
+      blocked,
+      decision: blocked ? "block" : "approve",
+      reason: blocked ? reason : undefined
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
@@ -439,7 +457,7 @@ async function executeHook(
   const hookType = hook.type ?? "command"
   let result: HookResult
   if (hookType === "prompt") {
-    result = await executePromptHook(hook, context)
+    result = await executePromptHook(hook, context, event)
   } else {
     const stdinPayload = buildHookStdinPayload(event, context)
     result = await executeCommandHook(hook, env, stdinPayload)
@@ -555,7 +573,44 @@ export async function runHooks(
     }
   }
 
-  // Stop / SubagentStop / Notification / SessionStart / SessionEnd: fire-and-forget
+  // Stop: awaited — results can trigger revision or inject feedback
+  if (event === "Stop") {
+    const blockReasons: string[] = []
+    let additionalContext: string | undefined
+    let systemMessage: string | undefined
+    for (const hook of matched) {
+      const result = await executeHook(hook, env, context, event)
+      console.log(
+        `[Hooks] Stop hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}`
+      )
+      if (result.continue === false || result.blocked || result.decision === "block") {
+        blockReasons.push(
+          result.reason || result.stopReason || result.stdout || result.stderr || "Stop hook requested revision"
+        )
+      }
+      if (result.additionalContext) {
+        additionalContext = joinHookText(additionalContext, result.additionalContext)
+      }
+      if (result.systemMessage) {
+        systemMessage = joinHookText(systemMessage, result.systemMessage)
+      }
+    }
+    if (blockReasons.length > 0 || additionalContext || systemMessage) {
+      return {
+        exitCode: 0,
+        stdout: blockReasons.join("\n"),
+        stderr: "",
+        blocked: blockReasons.length > 0,
+        decision: blockReasons.length > 0 ? "block" : undefined,
+        reason: blockReasons.length > 0 ? blockReasons.join("\n") : undefined,
+        additionalContext,
+        systemMessage
+      }
+    }
+    return null
+  }
+
+  // SubagentStop / Notification / SessionStart / SessionEnd: fire-and-forget
   for (const hook of matched) {
     executeHook(hook, env, context, event).then((result) => {
       console.log(

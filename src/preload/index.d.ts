@@ -661,6 +661,12 @@ interface CustomAPI {
     update: (config: HookUpsert & { id: string }) => Promise<{ id: string }>
     delete: (id: string) => Promise<void>
     setEnabled: (id: string, enabled: boolean) => Promise<void>
+    workspace: {
+      list: (workspacePath: string) => Promise<HookConfig[]>
+      untrusted: (workspacePath: string) => Promise<{ fileName: string; filePath: string; event: string; command: string }[]>
+      trustAll: (workspacePath: string) => Promise<void>
+      trustFile: (workspacePath: string, fileName: string, filePath: string) => Promise<void>
+    }
   }
   codeExecTools: {
     list: () => Promise<ManagedSavedCodeExecTool[]>
