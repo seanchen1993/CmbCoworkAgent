@@ -35,8 +35,6 @@ export function GitPanelView({
   const [cardNumber, setCardNumber] = useState("")
   const [commitType, setCommitType] = useState<"fix" | "feat" | "refactor" | "docs" | "style" | "test" | "chore">("fix")
   const [commitMessage, setCommitMessage] = useState("")
-  const [fileDiffByPath, setFileDiffByPath] = useState<Record<string, string>>({})
-  const [loadingDiffPaths, setLoadingDiffPaths] = useState<Set<string>>(new Set())
   const [expandedFilePaths, setExpandedFilePaths] = useState<Set<string>>(new Set())
   const [revertingFilePath, setRevertingFilePath] = useState<string | null>(null)
   const [pulling, setPulling] = useState(false)
@@ -60,8 +58,6 @@ export function GitPanelView({
   useEffect(() => {
     setState(null)
     setError(null)
-    setFileDiffByPath({})
-    setLoadingDiffPaths(new Set())
     setExpandedFilePaths(new Set())
   }, [threadId])
 
@@ -89,42 +85,6 @@ export function GitPanelView({
     }
   }, [threadId, showToast])
 
-  const loadFileDiff = useCallback(
-    async (filePath: string) => {
-      if (!threadId) return
-      if (fileDiffByPath[filePath] !== undefined) return
-
-      let shouldRun = false
-      setLoadingDiffPaths((prev) => {
-        if (prev.has(filePath)) return prev
-        shouldRun = true
-        const next = new Set(prev)
-        next.add(filePath)
-        return next
-      })
-      if (!shouldRun) return
-
-      try {
-        const result = await window.api.workspace.getGitPanelFileDiff(threadId, filePath)
-        if (!result.success || !result.file) {
-          throw new Error(result.error || "加载 diff 失败")
-        }
-        setFileDiffByPath((prev) => ({ ...prev, [filePath]: result.file?.diff || "" }))
-      } catch (e) {
-        const err = e instanceof Error ? e.message : "加载 diff 失败"
-        showToast(err, "error")
-      } finally {
-        setLoadingDiffPaths((prev) => {
-          if (!prev.has(filePath)) return prev
-          const next = new Set(prev)
-          next.delete(filePath)
-          return next
-        })
-      }
-    },
-    [threadId, fileDiffByPath, showToast]
-  )
-
   useEffect(() => {
     refresh()
   }, [refresh])
@@ -140,44 +100,6 @@ export function GitPanelView({
       return next
     })
   }, [state?.files])
-
-  useEffect(() => {
-    const files = state?.files ?? []
-    const validPaths = new Set(files.map((f) => f.path))
-    setFileDiffByPath((prev) => {
-      const next: Record<string, string> = {}
-      let changed = false
-      for (const [path, diff] of Object.entries(prev)) {
-        if (validPaths.has(path)) {
-          next[path] = diff
-        } else {
-          changed = true
-        }
-      }
-      return changed ? next : prev
-    })
-    setLoadingDiffPaths((prev) => {
-      const next = new Set<string>()
-      for (const path of prev) {
-        if (validPaths.has(path)) next.add(path)
-      }
-      if (next.size !== prev.size) return next
-      for (const path of prev) {
-        if (!next.has(path)) return next
-      }
-      return prev
-    })
-  }, [state?.files])
-
-  useEffect(() => {
-    if (!state?.files?.length) return
-    for (const filePath of expandedFilePaths) {
-      if (!state.files.some((f) => f.path === filePath)) continue
-      if (fileDiffByPath[filePath] !== undefined) continue
-      if (loadingDiffPaths.has(filePath)) continue
-      void loadFileDiff(filePath)
-    }
-  }, [expandedFilePaths, fileDiffByPath, loadFileDiff, loadingDiffPaths, state?.files])
 
   const toggleFileExpanded = useCallback((filePath: string): void => {
     setExpandedFilePaths((prev) => {
@@ -502,9 +424,8 @@ export function GitPanelView({
             ) : (
               <>
                 {state.files.map((file) => {
-                  const diff = fileDiffByPath[file.path] ?? file.diff
+                  const diff = file.diff
                   const isExpanded = expandedFilePaths.has(file.path)
-                  const isDiffLoading = loadingDiffPaths.has(file.path)
                   return (
                     <div key={file.path} className="rounded-md border border-border/70 p-2 bg-white">
                     <button
@@ -588,11 +509,7 @@ export function GitPanelView({
                     </button>
                     {isExpanded && (
                       <div className="mt-2">
-                        {isDiffLoading ? (
-                          <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
-                            加载 diff 中...
-                          </div>
-                        ) : diff && diff.trim() !== "" ? (
+                        {diff && diff.trim() !== "" ? (
                           <DiffDisplay diff={diff} />
                         ) : (
                           <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">

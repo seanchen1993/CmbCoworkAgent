@@ -79,6 +79,7 @@ flowchart LR
 | `src/main/db/index.ts` | sql.js 线程元数据存储 |
 | `src/renderer/src/App.tsx` | 顶层布局（Thread / Kanban / Customize） |
 | `src/renderer/src/components/customize/*` | 自定义中心各能力面板 |
+| `docs/claude-code-push-commit-tech-reference.md` | Claude Code `commit/push` 技术方案分析与本项目落地参考 |
 
 ## 数据存储
 

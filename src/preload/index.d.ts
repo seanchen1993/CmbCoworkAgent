@@ -219,11 +219,6 @@ interface CustomAPI {
       suggestedCommitMessage?: string
       error?: string
     }>
-    getGitPanelFileDiff: (threadId: string, filePath: string) => Promise<{
-      success: boolean
-      file?: { path: string; diff: string; additions: number; deletions: number }
-      error?: string
-    }>
     getGitPanelSummary: (threadId: string) => Promise<{
       success: boolean
       isWorktree: boolean

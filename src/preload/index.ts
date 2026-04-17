@@ -423,17 +423,6 @@ const api = {
         error?: string
       }>
     },
-    getGitPanelFileDiff: (threadId: string, filePath: string): Promise<{
-      success: boolean
-      file?: { path: string; diff: string; additions: number; deletions: number }
-      error?: string
-    }> => {
-      return ipcRenderer.invoke("workspace:getGitPanelFileDiff", { threadId, filePath }) as Promise<{
-        success: boolean
-        file?: { path: string; diff: string; additions: number; deletions: number }
-        error?: string
-      }>
-    },
     getGitPanelSummary: (threadId: string): Promise<{
       success: boolean
       isWorktree: boolean

@@ -298,12 +298,15 @@ function parsePorcelainPaths(output: string): string[] {
       const status = entry.slice(0, 2)
       const rawPath = entry.slice(3)
       if (!rawPath) continue
-      files.push(normalizeGitRelativePath(rawPath))
-
-      // In -z mode, rename/copy records are followed by an extra path token
-      // (the source/original path). We only track the destination/current path.
       if (isRenameOrCopyStatus(status) && i + 1 < entries.length) {
+        // In -z mode rename/copy record layout is:
+        //   "R100 <old-path>\0<new-path>\0"
+        // We want the destination/current path.
+        const renamedTo = normalizeGitRelativePath(entries[i + 1] || "")
+        if (renamedTo) files.push(renamedTo)
         i += 1
+      } else {
+        files.push(normalizeGitRelativePath(rawPath))
       }
     }
     return files
@@ -422,6 +425,8 @@ interface GitPanelSummaryStats {
 }
 
 const GIT_CONTEXT_CACHE_TTL_MS = 1000
+const GIT_CONTEXT_QUERY_TIMEOUT_MS = 10_000
+const GIT_EXEC_MAX_BUFFER_BYTES = 20 * 1024 * 1024
 // 合成新文件 diff 时的内存保护阈值，避免一次性读取超大文件导致主进程内存抖动。
 const MAX_SYNTHETIC_DIFF_BYTES = 256 * 1024
 // 进入 GitPanel 时仅返回前 N 个文件，避免大仓库一次性把海量数据塞进渲染层导致卡顿。
@@ -561,16 +566,18 @@ async function addSafeDirectory(worktreePath: string): Promise<void> {
 async function runGit(
   worktreePath: string,
   args: string[],
-  options?: { silent?: boolean; timeoutMs?: number }
+  options?: { silent?: boolean; timeoutMs?: number; maxBufferBytes?: number }
 ): Promise<string> {
   const silent = Boolean(options?.silent)
+  const maxBufferBytes = options?.maxBufferBytes ?? GIT_EXEC_MAX_BUFFER_BYTES
   const baseArgs = ["-C", worktreePath, ...args]
   const command = formatGitCommand(worktreePath, args)
   if (!silent) console.log(`[GitPanel][exec] ${command}`)
   try {
     const { stdout } = await execFileAsync("git", baseArgs, {
       env: GIT_BASE_ENV,
-      timeout: options?.timeoutMs
+      timeout: options?.timeoutMs,
+      maxBuffer: maxBufferBytes
     })
     if (!silent) console.log(`[GitPanel][exec][ok] ${command}`)
     return stdout
@@ -585,7 +592,8 @@ async function runGit(
     await addSafeDirectory(worktreePath)
     const { stdout } = await execFileAsync("git", baseArgs, {
       env: GIT_BASE_ENV,
-      timeout: options?.timeoutMs
+      timeout: options?.timeoutMs,
+      maxBuffer: maxBufferBytes
     })
     if (!silent) console.log(`[GitPanel][exec][ok-after-retry] ${command}`)
     return stdout
@@ -601,7 +609,10 @@ async function detectIsWorktreePath(folderPath: string): Promise<boolean> {
   const cacheKey = getCacheKeyForPath(folderPath)
   return getCachedPromise(worktreeCache, cacheKey, GIT_CONTEXT_CACHE_TTL_MS, async () => {
     try {
-      const stdout = await runGit(folderPath, ["rev-parse", "--git-dir"], { silent: true })
+      const stdout = await runGit(folderPath, ["rev-parse", "--git-dir"], {
+        silent: true,
+        timeoutMs: GIT_CONTEXT_QUERY_TIMEOUT_MS
+      })
       return isGitDirWorktree(stdout)
     } catch {
       return false
@@ -625,7 +636,8 @@ async function getCurrentBranchCached(
   return getCachedPromise(branchCache, cacheKey, GIT_CONTEXT_CACHE_TTL_MS, async () => {
     try {
       const branch = (await runGit(worktreePath, ["rev-parse", "--abbrev-ref", "HEAD"], {
-        silent: Boolean(options?.silent)
+        silent: Boolean(options?.silent),
+        timeoutMs: GIT_CONTEXT_QUERY_TIMEOUT_MS
       })).trim()
       return branch && branch !== "HEAD" ? branch : null
     } catch {
@@ -646,7 +658,8 @@ async function getHeadCommitCached(
   return getCachedPromise(headCommitCache, cacheKey, GIT_CONTEXT_CACHE_TTL_MS, async () => {
     try {
       const head = (await runGit(worktreePath, ["rev-parse", "HEAD"], {
-        silent: Boolean(options?.silent)
+        silent: Boolean(options?.silent),
+        timeoutMs: GIT_CONTEXT_QUERY_TIMEOUT_MS
       })).trim()
       return head || null
     } catch {
@@ -1110,8 +1123,7 @@ async function buildGitPanelState(
     }
   }
 
-  // 对照 claude-code-source-code-main 的分页/限量思路：
-  // 首屏只返回“轻量文件列表 + 统计”，完整 diff 改为按文件懒加载，避免进入面板卡死。
+  // 保留文件数量上限，避免超大仓库一次返回过多数据导致渲染阻塞。
   const visibleChangedFiles = changedFiles.slice(0, GIT_PANEL_MAX_VISIBLE_FILES)
   const omittedFileCount = Math.max(0, changedFiles.length - visibleChangedFiles.length)
 
@@ -1152,13 +1164,13 @@ async function buildGitPanelState(
     if (!normalizedPath) {
       continue
     }
+    const resolvedDiff = await buildGitPanelFileDiff(worktreePath, normalizedPath, { silent })
     const stats = numstatMap.get(normalizedPath) || { additions: 0, deletions: 0 }
     fileDiffs.push({
       path: normalizedPath,
-      // 进入面板时不预加载 patch，避免大仓库首屏卡死；由前端展开时按需请求。
-      diff: "",
-      additions: stats.additions,
-      deletions: stats.deletions
+      diff: truncateGitPanelDiff(resolvedDiff?.diff || ""),
+      additions: resolvedDiff?.additions ?? stats.additions,
+      deletions: resolvedDiff?.deletions ?? stats.deletions
     })
   }
 
@@ -1262,7 +1274,10 @@ async function getGitRoot(folderPath: string): Promise<string | null> {
   const cacheKey = getCacheKeyForPath(folderPath)
   return getCachedPromise(gitRootCache, cacheKey, GIT_CONTEXT_CACHE_TTL_MS, async () => {
     try {
-      const stdout = await runGit(folderPath, ["rev-parse", "--show-toplevel"], { silent: true })
+      const stdout = await runGit(folderPath, ["rev-parse", "--show-toplevel"], {
+        silent: true,
+        timeoutMs: GIT_CONTEXT_QUERY_TIMEOUT_MS
+      })
       return stdout.trim()
     } catch {
       return null
@@ -2020,37 +2035,6 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       }
     }
   })
-
-  ipcMain.handle(
-    "workspace:getGitPanelFileDiff",
-    async (_event, { threadId, filePath }: { threadId: string; filePath: string }) => {
-      try {
-        const context = await resolveThreadWorkspaceContext(threadId)
-        const worktreePath = context.workspacePath
-        if (!worktreePath || !context.isGitRepo) {
-          return { success: false, error: "当前任务不在 Git 仓库中" }
-        }
-
-        const diff = await buildGitPanelFileDiff(worktreePath, filePath, { silent: true })
-        if (!diff) {
-          return { success: false, error: "未找到该文件 diff，可能已被删除或恢复。" }
-        }
-
-        return {
-          success: true,
-          file: {
-            ...diff,
-            diff: truncateGitPanelDiff(diff.diff)
-          }
-        }
-      } catch (error) {
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : "加载文件 diff 失败"
-        }
-      }
-    }
-  )
 
   ipcMain.handle("workspace:getGitPanelSummary", async (_event, { threadId }: { threadId: string }) => {
     try {
