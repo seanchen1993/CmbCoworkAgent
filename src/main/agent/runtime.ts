@@ -60,7 +60,7 @@ import { createPlaywrightTool } from "./tools/playwright-tool"
 import { createToolSearchTools } from "./tools/tool-search-tool"
 import { createCodeExecTool } from "./tools/code-exec-tool"
 import { listSavedCodeExecTools } from "../code-exec/saved-tool-store"
-import { getWindowsSandboxMode, getYoloMode, getEnabledHooks, isCodeExecEnabled } from "../storage"
+import { getWindowsSandboxMode, getYoloMode, getEnabledHooks, isCodeExecEnabled, getLspConfig } from "../storage"
 import { ApprovalStore } from "./approval-store"
 import { ToolOrchestrator } from "./tool-orchestrator"
 import type { ApprovalRequest, ApprovalDecision } from "../types"
@@ -71,6 +71,12 @@ import {
 } from "../mcp/capability-service"
 import { createEagerMcpTool } from "../mcp/langchain-tool"
 import { InterleavedThinkingChatOpenAICompletions } from "./interleaved-thinking-completions"
+import { createLspTool } from "./tools/lsp-tool"
+import { detectJavaProject } from "../lsp"
+import {
+  DEFAULT_AGENTS_MAX_BYTES,
+  loadAgentsPromptForWorkspace
+} from "./agents-md"
 
 /** Decompress codex.exe.gz → codex.exe if needed (re-extract if .gz is newer than .exe). */
 async function ensureCodexExe(exePath: string): Promise<void> {
@@ -842,6 +848,8 @@ export interface CreateAgentRuntimeOptions {
   noSchedulerTool?: boolean
   /** Skip the manage_skill tool (disable skill evolution for scheduled/heartbeat agents) */
   noSkillEvolutionTool?: boolean
+  /** Load workspace AGENTS.md hierarchy into the main system prompt. */
+  enableAgentsPrompt?: boolean
   /** AbortSignal — when signalled, any running child process is killed immediately. */
   abortSignal?: AbortSignal
   /** Optional hooks invoked when the model fetch layer retries / resolves. */
@@ -856,8 +864,15 @@ export interface CreateAgentRuntimeOptions {
 export type AgentRuntime = ReturnType<typeof createAgent>
 
 export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Promise<DeepAgent> {
-  const { threadId, workspacePath, modelId, extraSystemPrompt, retryHooks, maxRetryAttempts } =
-    options
+  const {
+    threadId,
+    workspacePath,
+    modelId,
+    extraSystemPrompt,
+    retryHooks,
+    maxRetryAttempts,
+    enableAgentsPrompt = true
+  } = options
 
   if (!threadId) {
     throw new Error("Thread ID is required for checkpointing.")
@@ -947,43 +962,40 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const yoloMode = getYoloMode()
   let approvalStore: ApprovalStore | undefined
   let requestApproval: ((req: ApprovalRequest) => Promise<ApprovalDecision>) | undefined
+  // Keep the generic approval IPC available even in YOLO mode so code_exec can still
+  // ask for post-run tool promotion confirmation. Shell/file approvals remain gated by
+  // whether the orchestrator is mounted below.
+  const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000
+  requestApproval = (req: ApprovalRequest): Promise<ApprovalDecision> => {
+    return new Promise<ApprovalDecision>((resolve) => {
+      const timeoutId = setTimeout(() => {
+        if (pendingApprovals.has(req.id)) {
+          pendingApprovals.delete(req.id)
+          console.warn(`[Orchestrator] approval request timed out after ${APPROVAL_TIMEOUT_MS / 1000}s: reqId=${req.id}`)
+          for (const win of BrowserWindow.getAllWindows()) {
+            win.webContents.send(`approval:timeout:${threadId}`, { requestId: req.id })
+          }
+          resolve({ type: "reject", tool_call_id: req.tool_call?.id ?? req.id })
+        }
+      }, APPROVAL_TIMEOUT_MS)
+
+      pendingApprovals.set(req.id, {
+        resolve: (decision: ApprovalDecision) => {
+          clearTimeout(timeoutId)
+          resolve(decision)
+        },
+        request: req,
+        targetWebContentsIds: BrowserWindow.getAllWindows().map(w => w.webContents.id)
+      })
+      console.log(`[Orchestrator] sending approval request on channel: approval:request:${threadId}, reqId=${req.id}, command=${req.command}`)
+      for (const win of BrowserWindow.getAllWindows()) {
+        win.webContents.send(`approval:request:${threadId}`, req)
+      }
+    })
+  }
+
   if (!yoloMode) {
     approvalStore = getOrCreateApprovalStore(threadId)
-
-    // The approval requester sends requests to the renderer via BrowserWindow IPC.
-    // It returns a Promise that is resolved when the renderer sends back a decision.
-    // P3 fix: auto-reject after 5 minutes to prevent indefinite hangs.
-    const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000
-
-    requestApproval = (req: ApprovalRequest): Promise<ApprovalDecision> => {
-      return new Promise<ApprovalDecision>((resolve) => {
-        const timeoutId = setTimeout(() => {
-          if (pendingApprovals.has(req.id)) {
-            pendingApprovals.delete(req.id)
-            console.warn(`[Orchestrator] approval request timed out after ${APPROVAL_TIMEOUT_MS / 1000}s: reqId=${req.id}`)
-            // P2 fix: notify renderer that approval timed out so it can clear the UI
-            for (const win of BrowserWindow.getAllWindows()) {
-              win.webContents.send(`approval:timeout:${threadId}`, { requestId: req.id })
-            }
-            resolve({ type: "reject", tool_call_id: req.tool_call?.id ?? req.id })
-          }
-        }, APPROVAL_TIMEOUT_MS)
-
-        pendingApprovals.set(req.id, {
-          resolve: (decision: ApprovalDecision) => {
-            clearTimeout(timeoutId)
-            resolve(decision)
-          },
-          request: req,
-          targetWebContentsIds: BrowserWindow.getAllWindows().map(w => w.webContents.id)
-        })
-        console.log(`[Orchestrator] sending approval request on channel: approval:request:${threadId}, reqId=${req.id}, command=${req.command}`)
-        // Broadcast to all windows — the active one will display the approval UI
-        for (const win of BrowserWindow.getAllWindows()) {
-          win.webContents.send(`approval:request:${threadId}`, req)
-        }
-      })
-    }
 
     const rawExecute = (command: string, sandboxMode?: string): Promise<import("deepagents").ExecuteResponse> => {
       return backend.executeRaw(command, sandboxMode)
@@ -994,6 +1006,29 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   }
 
   let systemPrompt = getSystemPrompt(workspacePath, windowsSandbox)
+  let agentsPrompt: Awaited<ReturnType<typeof loadAgentsPromptForWorkspace>> = {
+    prompt: null,
+    projectRoot: workspacePath,
+    loadedPaths: [],
+    truncated: false
+  }
+  if (enableAgentsPrompt) {
+    agentsPrompt = await loadAgentsPromptForWorkspace(workspacePath, DEFAULT_AGENTS_MAX_BYTES)
+    if (agentsPrompt.prompt) {
+      systemPrompt += "\n\n" + agentsPrompt.prompt
+      console.log("[Runtime] Loaded AGENTS.md files:", agentsPrompt.loadedPaths)
+      if (agentsPrompt.truncated) {
+        console.warn(
+          "[Runtime] AGENTS.md content exceeded prompt budget and was truncated:",
+          DEFAULT_AGENTS_MAX_BYTES
+        )
+      }
+    } else {
+      console.log("[Runtime] No AGENTS.md files discovered for workspace:", workspacePath)
+    }
+  } else {
+    console.log("[Runtime] AGENTS.md prompt injection disabled for this runtime")
+  }
   if (extraSystemPrompt) {
     systemPrompt += "\n\n" + extraSystemPrompt
   }
@@ -1032,7 +1067,6 @@ ${subagentShellGuidance}
 - grep: search for literal text within files (NOT regex). Do NOT use "|", ".*" or other regex syntax — call grep once per term instead.
 - Browser strategy: for browser tasks, first follow any matching enabled skill; only if no relevant skill is available, use browser_playwright.
 - browser_playwright: built-in browser automation and page interaction tool powered by project-local Playwright (fallback when no matching browser skill exists).
-
 The workspace root is: ${workspacePath}`
 
   const skillsSources = await getEnabledSkillsSources()
@@ -1114,6 +1148,17 @@ The workspace root is: ${workspacePath}`
 
   extraTools.push(createPlaywrightTool(workspacePath))
 
+  // Conditionally inject Java LSP tool
+  try {
+    const lspConfig = getLspConfig()
+    if (lspConfig.enabled && detectJavaProject(workspacePath)) {
+      extraTools.push(createLspTool({ workspacePath }))
+      console.log("[Runtime] Java LSP tool injected for:", workspacePath)
+    }
+  } catch (e) {
+    console.warn("[Runtime] Failed to check LSP config:", e)
+  }
+
   // Wrap extra tools so that errors are returned as strings instead of throwing
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function wrapToolErrors(tools: any[]): void {
@@ -1182,7 +1227,13 @@ The workspace root is: ${workspacePath}`
     hasCodeExecTool
   })
   systemPrompt += renderAvailableDeferredToolsPrompt(deferredToolIds)
-  console.log("[System prompts", systemPrompt)
+  console.log("[Runtime] System prompt summary:", {
+    chars: systemPrompt.length,
+    hasAgentsPrompt: Boolean(agentsPrompt.prompt),
+    agentsFilesLoaded: agentsPrompt.loadedPaths.length,
+    hasExtraSystemPrompt: Boolean(extraSystemPrompt),
+    deferredToolIds: deferredToolIds.length
+  })
   const triggerTokens = Math.floor(maxTokens * 0.75)
   const keepTokens = Math.max(Math.floor(maxTokens * 0.08), 4_000)
   const toolEvictLimit = Math.min(6_000, Math.max(Math.floor(maxTokens * 0.05), 3_000))

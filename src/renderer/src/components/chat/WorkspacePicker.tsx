@@ -19,6 +19,7 @@ import { Input } from "@/components/ui/input"
 
 interface WorkspacePickerProps {
   threadId: string
+  onGitStatusChange?: (threadId: string, isGit: boolean) => void
 }
 
 type WorkspaceMode = "local" | "worktree"
@@ -72,7 +73,7 @@ function PathRow({ label, path, highlight = false }: { label: string; path: stri
   )
 }
 
-export function WorkspacePicker({ threadId }: WorkspacePickerProps): React.JSX.Element {
+export function WorkspacePicker({ threadId, onGitStatusChange }: WorkspacePickerProps): React.JSX.Element {
   const { workspacePath, setWorkspacePath, setWorkspaceFiles, messages } = useCurrentThread(threadId)
   const canChangeWorkspace = messages.length === 0
   const [open, setOpen] = useState(false)
@@ -125,6 +126,7 @@ export function WorkspacePicker({ threadId }: WorkspacePickerProps): React.JSX.E
       setWorktreeBaseBranch(null)
       setCreatingWorktree(false)
       setWorktreeError(null)
+      setWorktreeList([])
 
       const p = await window.api.workspace.get(threadId)
       if (cancelled) return
@@ -134,16 +136,12 @@ export function WorkspacePicker({ threadId }: WorkspacePickerProps): React.JSX.E
         if (cancelled) return
         if (result.success && result.files) setWorkspaceFiles(result.files)
 
-        const gitInfo = await window.api.workspace.isGit(p)
+        const gitInfo = await window.api.workspace.isGit(p, { includeWorktrees: false })
         if (cancelled) return
         setIsGit(gitInfo.isGit)
         setGitRoot(gitInfo.isGit ? gitInfo.gitRoot : null)
         setIsWorktreePath(gitInfo.isWorktreePath)
-        if (gitInfo.isGit && gitInfo.gitRoot) {
-          await refreshWorktreeList(gitInfo.gitRoot)
-        } else {
-          setWorktreeList([])
-        }
+        onGitStatusChange?.(threadId, gitInfo.isGit)
 
         // Load worktree context from thread metadata
         const thread = await window.api.threads.get(threadId)
@@ -156,6 +154,8 @@ export function WorkspacePicker({ threadId }: WorkspacePickerProps): React.JSX.E
           setWorktreeBaseBranch((meta.worktreeBaseBranch as string) ?? null)
           setMode("worktree")
         }
+      } else {
+        onGitStatusChange?.(threadId, false)
       }
     }
     loadWorkspace()
@@ -164,19 +164,21 @@ export function WorkspacePicker({ threadId }: WorkspacePickerProps): React.JSX.E
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId])
 
+  useEffect(() => {
+    if (!open || !isGit || !gitRoot) return
+    void refreshWorktreeList(gitRoot)
+  }, [open, isGit, gitRoot])
+
   async function handleSelectFolder(): Promise<void> {
     await selectWorkspaceFolder(threadId, setWorkspacePath, setWorkspaceFiles, setLoading, setOpen)
     const newPath = await window.api.workspace.get(threadId)
     if (newPath) {
-      const gitInfo = await window.api.workspace.isGit(newPath)
+      const gitInfo = await window.api.workspace.isGit(newPath, { includeWorktrees: false })
       setIsGit(gitInfo.isGit)
       setGitRoot(gitInfo.isGit ? gitInfo.gitRoot : null)
       setIsWorktreePath(gitInfo.isWorktreePath)
-      if (gitInfo.isGit && gitInfo.gitRoot) {
-        await refreshWorktreeList(gitInfo.gitRoot)
-      } else {
-        setWorktreeList([])
-      }
+      onGitStatusChange?.(threadId, gitInfo.isGit)
+      setWorktreeList([])
       setMode("local")
       setIsWorktree(false)
       setWorktreeBranch(null)

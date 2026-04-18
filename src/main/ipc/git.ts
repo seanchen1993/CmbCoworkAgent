@@ -358,6 +358,165 @@ function getGitStatus(): GitStatus {
   }
 }
 
+// 获取当前分支名（兼容低版本 git，fallback 到 git branch --show-current 或 rev-parse）
+function getCurrentBranch(cwd?: string): string | null {
+  const workingDir = cwd || getCurrentWorkingDirectory()
+  // git branch --show-current is available since git 2.22
+  try {
+    const result = execSync("git branch --show-current", {
+      encoding: "utf-8",
+      cwd: workingDir,
+      timeout: 10000,
+      shell: platform() === "win32" ? "cmd.exe" : "/bin/bash"
+    }).trim()
+    if (result) return result
+  } catch {
+    // fallback
+  }
+  // Fallback: git rev-parse --abbrev-ref HEAD (available since git 1.7)
+  try {
+    const result = execSync("git rev-parse --abbrev-ref HEAD", {
+      encoding: "utf-8",
+      cwd: workingDir,
+      timeout: 10000,
+      shell: platform() === "win32" ? "cmd.exe" : "/bin/bash"
+    }).trim()
+    if (result && result !== "HEAD") return result
+  } catch {
+    // ignore
+  }
+  return null
+}
+
+// 检查当前工作目录是否是 git 仓库
+function isGitRepo(cwd?: string): boolean {
+  const workingDir = cwd || getCurrentWorkingDirectory()
+  try {
+    execSync("git rev-parse --git-dir", {
+      encoding: "utf-8",
+      cwd: workingDir,
+      timeout: 10000,
+      shell: platform() === "win32" ? "cmd.exe" : "/bin/bash"
+    })
+    return true
+  } catch {
+    return false
+  }
+}
+
+// 检查当前工作目录是否是 git worktree（而非主仓库）
+function isWorktree(cwd?: string): boolean {
+  const workingDir = cwd || getCurrentWorkingDirectory()
+  try {
+    const gitDir = execSync("git rev-parse --git-dir", {
+      encoding: "utf-8",
+      cwd: workingDir,
+      timeout: 10000,
+      shell: platform() === "win32" ? "cmd.exe" : "/bin/bash"
+    }).trim()
+    // 主仓库的 --git-dir 返回 ".git"（相对）或以 "/.git" 结尾的路径
+    // worktree 的 --git-dir 返回类似 "/path/to/main/.git/worktrees/xxx" 的路径
+    const normalized = normalizeGitDirPath(gitDir, workingDir)
+    return normalized.includes(path.join(".git", "worktrees"))
+  } catch {
+    return false
+  }
+}
+
+// 列出所有本地分支（兼容低版本 git）
+function listBranches(cwd?: string): string[] {
+  const workingDir = cwd || getCurrentWorkingDirectory()
+  try {
+    // git branch --format is available since git 2.7; use simple `git branch` as fallback
+    let raw: string
+    try {
+      raw = execSync("git branch --format=%(refname:short)", {
+        encoding: "utf-8",
+        cwd: workingDir,
+        timeout: 10000,
+        shell: platform() === "win32" ? "cmd.exe" : "/bin/bash"
+      })
+    } catch {
+      // fallback: classic `git branch` which prefixes current branch with "* "
+      // and branches checked out in other worktrees with "+ "
+      raw = execSync("git branch", {
+        encoding: "utf-8",
+        cwd: workingDir,
+        timeout: 10000,
+        shell: platform() === "win32" ? "cmd.exe" : "/bin/bash"
+      })
+    }
+    return raw
+      .split("\n")
+      // strip leading "* " (current branch) and "+ " (worktree branch) markers
+      .map((b) => b.replace(/^[*+]\s+/, "").trim())
+      .filter((b) => b.length > 0 && !b.startsWith("(HEAD detached"))
+  } catch {
+    return []
+  }
+}
+
+// 切换分支（兼容 Windows 和低版本 git）
+function switchBranch(branch: string, cwd?: string): { success: boolean; error?: string } {
+  const workingDir = cwd || getCurrentWorkingDirectory()
+  try {
+    execSync(`git checkout "${branch.replace(/"/g, '\\"')}"`, {
+      encoding: "utf-8",
+      cwd: workingDir,
+      timeout: 30000,
+      shell: platform() === "win32" ? "cmd.exe" : "/bin/bash"
+    })
+    return { success: true }
+  } catch (rawError: unknown) {
+    const err = rawError as ExecCommandError
+    const stderr =
+      typeof err.stderr === "string" ? err.stderr.trim() : String(err.stderr || "").trim()
+    return { success: false, error: stderr || err.message || "切换分支失败" }
+  }
+}
+
+// 创建并切换到新分支（兼容 Windows 和低版本 git）
+function createBranch(branch: string, cwd?: string): { success: boolean; error?: string } {
+  const workingDir = cwd || getCurrentWorkingDirectory()
+  const branchName = branch.trim()
+  if (!branchName) {
+    return { success: false, error: "分支名不能为空" }
+  }
+
+  const escapedBranch = branchName.replace(/"/g, '\\"')
+  try {
+    // Validate branch name format before creating.
+    execSync(`git check-ref-format --branch "${escapedBranch}"`, {
+      encoding: "utf-8",
+      cwd: workingDir,
+      timeout: 10000,
+      shell: platform() === "win32" ? "cmd.exe" : "/bin/bash"
+    })
+  } catch {
+    return { success: false, error: "分支名不合法" }
+  }
+
+  try {
+    // `checkout -b` works on older git versions.
+    execSync(`git checkout -b "${escapedBranch}"`, {
+      encoding: "utf-8",
+      cwd: workingDir,
+      timeout: 30000,
+      shell: platform() === "win32" ? "cmd.exe" : "/bin/bash"
+    })
+    return { success: true }
+  } catch (rawError: unknown) {
+    const err = rawError as ExecCommandError
+    const stderr =
+      typeof err.stderr === "string" ? err.stderr.trim() : String(err.stderr || "").trim()
+    const text = (stderr || err.message || "").toLowerCase()
+    if (text.includes("already exists")) {
+      return { success: false, error: "分支已存在" }
+    }
+    return { success: false, error: stderr || err.message || "创建分支失败" }
+  }
+}
+
 // 注册Git相关的IPC处理器
 export function registerGitHandlers(): void {
   // 获取Git状态
@@ -436,6 +595,70 @@ export function registerGitHandlers(): void {
       }
     }
   })
+
+  // 获取当前分支
+  ipcMain.handle(
+    "git:currentBranch",
+    async (_, cwd?: string): Promise<{ isGitRepo: boolean; branch: string | null; isWorktree: boolean }> => {
+      try {
+        const repoCheck = isGitRepo(cwd)
+        if (!repoCheck) return { isGitRepo: false, branch: null, isWorktree: false }
+        const branch = getCurrentBranch(cwd)
+        const worktree = isWorktree(cwd)
+        return { isGitRepo: true, branch, isWorktree: worktree }
+      } catch (error) {
+        console.error("[IPC] git:currentBranch error:", error)
+        return { isGitRepo: false, branch: null, isWorktree: false }
+      }
+    }
+  )
+
+  // 列出所有本地分支
+  ipcMain.handle(
+    "git:listBranches",
+    async (_, cwd?: string): Promise<{ success: boolean; branches: string[]; error?: string }> => {
+      try {
+        if (!isGitRepo(cwd)) return { success: false, branches: [], error: "Not a git repository" }
+        const branches = listBranches(cwd)
+        return { success: true, branches }
+      } catch (error) {
+        console.error("[IPC] git:listBranches error:", error)
+        return { success: false, branches: [], error: String(error) }
+      }
+    }
+  )
+
+  // 切换分支
+  ipcMain.handle(
+    "git:switchBranch",
+    async (
+      _,
+      { branch, cwd }: { branch: string; cwd?: string }
+    ): Promise<{ success: boolean; error?: string }> => {
+      try {
+        return switchBranch(branch, cwd)
+      } catch (error) {
+        console.error("[IPC] git:switchBranch error:", error)
+        return { success: false, error: String(error) }
+      }
+    }
+  )
+
+  // 创建分支并切换
+  ipcMain.handle(
+    "git:createBranch",
+    async (
+      _,
+      { branch, cwd }: { branch: string; cwd?: string }
+    ): Promise<{ success: boolean; error?: string }> => {
+      try {
+        return createBranch(branch, cwd)
+      } catch (error) {
+        console.error("[IPC] git:createBranch error:", error)
+        return { success: false, error: String(error) }
+      }
+    }
+  )
 
   console.log("[IPC] Git handlers registered")
 }

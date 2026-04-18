@@ -10,8 +10,8 @@
  */
 
 import { spawn, execSync, type ChildProcess } from "node:child_process"
-import { randomUUID } from "node:crypto"
-import { constants as fsConstants, existsSync, mkdirSync, realpathSync } from "node:fs"
+import { createHash, randomUUID } from "node:crypto"
+import { constants as fsConstants, existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs"
 import fs from "node:fs/promises"
 import path from "node:path"
 import {
@@ -39,7 +39,7 @@ import {
   markWorkspaceElevatedSetupDone,
   normalizeDirKey
 } from "../ipc/sandbox"
-import { homedir, tmpdir } from "node:os"
+import { homedir } from "node:os"
 import type { HookConfig } from "../hooks/types"
 import { runHooks } from "../hooks/runner"
 
@@ -54,6 +54,40 @@ const SENSITIVE_DIR_NAMES = new Set([
 
 const WINDOWS_SANDBOX_OFFLINE_USERNAME = "CodexSandboxOffline"
 const WINDOWS_SANDBOX_ONLINE_USERNAME = "CodexSandboxOnline"
+
+// Python's tempfile uses private 0o700 directories on Windows. Under Codex's
+// WRITE_RESTRICTED token those DACLs omit the capability SID, so pip cannot
+// reopen its own pip-unpack-* directories. Keep the patch scoped to sandbox TEMP.
+const PYTHON_TEMP_ACL_SITE_CUSTOMIZE = `import os
+
+if os.name == "nt" and os.environ.get("CMB_SANDBOX_FIX_PYTHON_TEMP_ACL") == "1":
+    _orig_mkdir = os.mkdir
+    _roots = []
+    for _key in ("TEMP", "TMP"):
+        _value = os.environ.get(_key)
+        if _value:
+            try:
+                _roots.append(os.path.normcase(os.path.abspath(_value)))
+            except Exception:
+                pass
+
+    def _under_temp(path):
+        try:
+            full = os.path.normcase(os.path.abspath(path))
+        except Exception:
+            return False
+        for root in _roots:
+            if full == root or full.startswith(root + os.sep):
+                return True
+        return False
+
+    def _mkdir_inherit_acl(path, mode=0o777, *args, **kwargs):
+        if mode in (0o600, 0o700) and _under_temp(path):
+            mode = 0o777
+        return _orig_mkdir(path, mode, *args, **kwargs)
+
+    os.mkdir = _mkdir_inherit_acl
+`
 
 /**
  * Check if a path falls within a sensitive directory that should be blocked
@@ -81,6 +115,17 @@ function powershellSingleQuote(value: string): string {
 
 function cmdSetLiteral(value: string): string {
   return value.replace(/"/g, '""')
+}
+
+function tomlBasicString(value: string): string {
+  return `"${value
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, "\\\"")
+    .replace(/\u0008/g, "\\b")
+    .replace(/\t/g, "\\t")
+    .replace(/\n/g, "\\n")
+    .replace(/\f/g, "\\f")
+    .replace(/\r/g, "\\r")}"`
 }
 
 /**
@@ -146,10 +191,10 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
   private readonly windowsSandbox: "none" | "unelevated" | "readonly" | "elevated"
   private readonly codexExePath: string
   private readonly getHooks: () => HookConfig[]
-  /** Host user's TEMP directory — ACL-granted writable by the elevated sandbox user. */
-  private readonly _elevatedMavenTempDir: string
-  /** Host user's real home directory — for locating ~/.m2/settings.xml etc. */
-  private readonly _realUserHome: string
+  /** App-owned persistent cache root granted as a Codex writable root per workspace. */
+  private readonly _sandboxCacheRoot: string
+  /** Shared download/artifact cache root reused across workspaces. */
+  private readonly _sharedSandboxCacheRoot: string
   /** Optional orchestrator for fine-grained approval + sandbox retry */
   private orchestrator?: ToolOrchestrator
   /** When true, block direct git add/commit/push and force git_workflow usage. */
@@ -174,22 +219,262 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     return path.win32.join(systemDrive, "Users", username)
   }
 
-  private static buildElevatedSandboxEnvPreamble(shellBase: string, realTempDir: string, realUserHome: string): string {
+  private static buildSandboxCacheBase(env: Record<string, string>): string {
+    const localAppData = env.LOCALAPPDATA
+      || process.env.LOCALAPPDATA
+      || path.win32.join(homedir(), "AppData", "Local")
+    return path.win32.join(localAppData, "CmbCoworkAgent", "SandboxCaches")
+  }
+
+  private static buildSharedSandboxCacheRoot(env: Record<string, string>): string {
+    return path.win32.join(LocalSandbox.buildSandboxCacheBase(env), "shared")
+  }
+
+  private static buildSandboxCacheRoot(env: Record<string, string>, workingDir: string): string {
+    let canonicalWorkingDir = workingDir
+    try {
+      canonicalWorkingDir = realpathSync(workingDir)
+    } catch {
+      canonicalWorkingDir = path.resolve(workingDir)
+    }
+    const key = canonicalWorkingDir.replace(/\//g, "\\").toLowerCase()
+    const hash = createHash("sha256").update(key).digest("hex").slice(0, 16)
+    const name = path.win32.basename(canonicalWorkingDir).replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").slice(0, 40) || "workspace"
+    return path.win32.join(LocalSandbox.buildSandboxCacheBase(env), `${name}-${hash}`)
+  }
+
+  private static getSandboxToolCacheDirs(cacheRoot: string, sharedCacheRoot = cacheRoot) {
+    const pythonUserBase = path.win32.join(cacheRoot, "python-userbase")
+    const pythonSiteCustomize = path.win32.join(cacheRoot, "python-sitecustomize")
+    const pythonScriptDirs = [
+      path.win32.join(pythonUserBase, "Scripts")
+    ]
+    for (let minor = 8; minor <= 14; minor++) {
+      pythonScriptDirs.push(path.win32.join(pythonUserBase, `Python3${minor}`, "Scripts"))
+    }
+
+    return {
+      root: cacheRoot,
+      sharedRoot: sharedCacheRoot,
+      npmCache: path.win32.join(sharedCacheRoot, "npm-cache"),
+      npmPrefix: path.win32.join(cacheRoot, "npm-prefix"),
+      yarnCache: path.win32.join(sharedCacheRoot, "yarn-cache"),
+      yarnGlobal: path.win32.join(cacheRoot, "yarn-global"),
+      pnpmHome: path.win32.join(cacheRoot, "pnpm-home"),
+      pnpmStore: path.win32.join(sharedCacheRoot, "pnpm-store"),
+      corepackHome: path.win32.join(sharedCacheRoot, "corepack-home"),
+      nodeGypCache: path.win32.join(sharedCacheRoot, "node-gyp-cache"),
+      playwrightBrowsers: path.win32.join(sharedCacheRoot, "playwright-browsers"),
+      puppeteerCache: path.win32.join(sharedCacheRoot, "puppeteer-cache"),
+      cypressCache: path.win32.join(sharedCacheRoot, "cypress-cache"),
+      electronCache: path.win32.join(sharedCacheRoot, "electron-cache"),
+      electronBuilderCache: path.win32.join(sharedCacheRoot, "electron-builder-cache"),
+      goPath: path.win32.join(cacheRoot, "go"),
+      goModCache: path.win32.join(sharedCacheRoot, "go-mod-cache"),
+      goBin: path.win32.join(cacheRoot, "go", "bin"),
+      goBuildCache: path.win32.join(sharedCacheRoot, "go-build-cache"),
+      cargoHome: path.win32.join(cacheRoot, "cargo-home"),
+      rustupHome: path.win32.join(cacheRoot, "rustup-home"),
+      nugetPackages: path.win32.join(sharedCacheRoot, "nuget-packages"),
+      nugetHttpCache: path.win32.join(sharedCacheRoot, "nuget-http-cache"),
+      nugetScratch: path.win32.join(cacheRoot, "nuget-scratch"),
+      dotnetHome: path.win32.join(cacheRoot, "dotnet-home"),
+      gemHome: path.win32.join(cacheRoot, "gem-home"),
+      bundleHome: path.win32.join(cacheRoot, "bundle-home"),
+      pythonUserBase,
+      pythonSiteCustomize,
+      pythonScriptDirs,
+      pipCache: path.win32.join(sharedCacheRoot, "pip-cache"),
+      uvCache: path.win32.join(sharedCacheRoot, "uv-cache"),
+      pipxHome: path.win32.join(cacheRoot, "pipx-home"),
+      pipxBin: path.win32.join(cacheRoot, "pipx-bin"),
+      poetryCache: path.win32.join(sharedCacheRoot, "poetry-cache"),
+      poetryConfig: path.win32.join(cacheRoot, "poetry-config"),
+      poetryData: path.win32.join(cacheRoot, "poetry-data"),
+      condaPkgs: path.win32.join(sharedCacheRoot, "conda-pkgs"),
+      gradleHome: path.win32.join(cacheRoot, "gradle-home"),
+      mavenRepo: path.win32.join(sharedCacheRoot, "m2-repository"),
+      sbtBase: path.win32.join(cacheRoot, "sbt"),
+      ivyHome: path.win32.join(cacheRoot, "ivy2"),
+      coursierCache: path.win32.join(sharedCacheRoot, "coursier-cache"),
+      vcpkgCache: path.win32.join(sharedCacheRoot, "vcpkg-cache"),
+      tempDir: path.win32.join(cacheRoot, "tmp"),
+      xdgCache: path.win32.join(cacheRoot, "xdg-cache")
+    }
+  }
+
+  private static buildSandboxToolEnv(cacheRoot: string, sharedCacheRoot = cacheRoot): { env: Array<[string, string]>; pathEntries: string[] } {
+    const dirs = LocalSandbox.getSandboxToolCacheDirs(cacheRoot, sharedCacheRoot)
+    return {
+      env: [
+        ["NPM_CONFIG_CACHE", dirs.npmCache],
+        ["NPM_CONFIG_PREFIX", dirs.npmPrefix],
+        ["YARN_CACHE_FOLDER", dirs.yarnCache],
+        ["YARN_GLOBAL_FOLDER", dirs.yarnGlobal],
+        ["PNPM_HOME", dirs.pnpmHome],
+        ["PNPM_STORE_DIR", dirs.pnpmStore],
+        ["COREPACK_HOME", dirs.corepackHome],
+        ["NPM_CONFIG_DEVDIR", dirs.nodeGypCache],
+        ["PLAYWRIGHT_BROWSERS_PATH", dirs.playwrightBrowsers],
+        ["PUPPETEER_CACHE_DIR", dirs.puppeteerCache],
+        ["CYPRESS_CACHE_FOLDER", dirs.cypressCache],
+        ["ELECTRON_CACHE", dirs.electronCache],
+        ["ELECTRON_BUILDER_CACHE", dirs.electronBuilderCache],
+        ["GOPATH", dirs.goPath],
+        ["GOMODCACHE", dirs.goModCache],
+        ["GOBIN", dirs.goBin],
+        ["GOCACHE", dirs.goBuildCache],
+        ["CARGO_HOME", dirs.cargoHome],
+        ["RUSTUP_HOME", dirs.rustupHome],
+        ["CARGO_GIT_FETCH_WITH_CLI", "true"],
+        ["CURL_SSL_BACKEND", "openssl"],
+        ["NUGET_PACKAGES", dirs.nugetPackages],
+        ["NUGET_HTTP_CACHE_PATH", dirs.nugetHttpCache],
+        ["NUGET_SCRATCH", dirs.nugetScratch],
+        ["DOTNET_CLI_HOME", dirs.dotnetHome],
+        ["GEM_HOME", dirs.gemHome],
+        ["BUNDLE_PATH", dirs.gemHome],
+        ["BUNDLE_USER_HOME", dirs.bundleHome],
+        ["PYTHONUSERBASE", dirs.pythonUserBase],
+        ["CMB_SANDBOX_FIX_PYTHON_TEMP_ACL", "1"],
+        ["PIP_CACHE_DIR", dirs.pipCache],
+        ["UV_CACHE_DIR", dirs.uvCache],
+        ["PIPX_HOME", dirs.pipxHome],
+        ["PIPX_BIN_DIR", dirs.pipxBin],
+        ["POETRY_CACHE_DIR", dirs.poetryCache],
+        ["POETRY_CONFIG_DIR", dirs.poetryConfig],
+        ["POETRY_DATA_DIR", dirs.poetryData],
+        ["CONDA_PKGS_DIRS", dirs.condaPkgs],
+        ["GRADLE_USER_HOME", dirs.gradleHome],
+        ["COURSIER_CACHE", dirs.coursierCache],
+        ["VCPKG_DEFAULT_BINARY_CACHE", dirs.vcpkgCache],
+        ["TEMP", dirs.tempDir],
+        ["TMP", dirs.tempDir],
+        ["TMPDIR", dirs.tempDir],
+        ["XDG_CACHE_HOME", dirs.xdgCache]
+      ],
+      pathEntries: [
+        dirs.npmPrefix,
+        dirs.pnpmHome,
+        dirs.goBin,
+        path.win32.join(dirs.cargoHome, "bin"),
+        path.win32.join(dirs.dotnetHome, ".dotnet", "tools"),
+        path.win32.join(dirs.gemHome, "bin"),
+        dirs.pipxBin,
+        ...dirs.pythonScriptDirs
+      ]
+    }
+  }
+
+  private static readonly _preparedSandboxCacheDirs = new Map<string, string[]>()
+
+  private static prepareSandboxCacheDirs(cacheRoot: string, sharedCacheRoot = cacheRoot): string[] {
+    const dirs = LocalSandbox.getSandboxToolCacheDirs(cacheRoot, sharedCacheRoot)
+    const cacheKey = `${normalizeDirKey(cacheRoot)}|${normalizeDirKey(sharedCacheRoot)}`
+    const siteCustomizePath = path.win32.join(dirs.pythonSiteCustomize, "sitecustomize.py")
+    const cachedDirs = LocalSandbox._preparedSandboxCacheDirs.get(cacheKey)
+    if (cachedDirs && existsSync(siteCustomizePath)) {
+      return cachedDirs
+    }
+
+    const { pathEntries } = LocalSandbox.buildSandboxToolEnv(cacheRoot, sharedCacheRoot)
+    const allDirs = [
+      dirs.root,
+      dirs.sharedRoot,
+      dirs.npmCache,
+      dirs.npmPrefix,
+      dirs.yarnCache,
+      dirs.yarnGlobal,
+      dirs.pnpmHome,
+      dirs.pnpmStore,
+      dirs.corepackHome,
+      dirs.nodeGypCache,
+      dirs.playwrightBrowsers,
+      dirs.puppeteerCache,
+      dirs.cypressCache,
+      dirs.electronCache,
+      dirs.electronBuilderCache,
+      dirs.goPath,
+      dirs.goModCache,
+      dirs.goBin,
+      dirs.goBuildCache,
+      dirs.cargoHome,
+      dirs.rustupHome,
+      dirs.nugetPackages,
+      dirs.nugetHttpCache,
+      dirs.nugetScratch,
+      dirs.dotnetHome,
+      dirs.gemHome,
+      dirs.bundleHome,
+      dirs.pythonUserBase,
+      dirs.pythonSiteCustomize,
+      ...dirs.pythonScriptDirs,
+      dirs.pipCache,
+      dirs.uvCache,
+      dirs.pipxHome,
+      dirs.pipxBin,
+      dirs.poetryCache,
+      dirs.poetryConfig,
+      dirs.poetryData,
+      dirs.condaPkgs,
+      dirs.gradleHome,
+      dirs.mavenRepo,
+      dirs.sbtBase,
+      dirs.ivyHome,
+      dirs.coursierCache,
+      dirs.vcpkgCache,
+      dirs.tempDir,
+      dirs.xdgCache,
+      ...pathEntries
+    ]
+    const uniqueDirs = Array.from(new Set(allDirs.map((dir) => path.win32.normalize(dir))))
+    let prepared = true
+    for (const dir of uniqueDirs) {
+      try { mkdirSync(dir, { recursive: true }) } catch (err) {
+        prepared = false
+        console.warn(`[LocalSandbox] failed to prepare sandbox cache dir ${dir}: ${err}`)
+      }
+    }
+    try {
+      writeFileSync(
+        siteCustomizePath,
+        PYTHON_TEMP_ACL_SITE_CUSTOMIZE,
+        "utf8"
+      )
+    } catch (err) {
+      prepared = false
+      console.warn(`[LocalSandbox] failed to prepare Python sandbox sitecustomize: ${err}`)
+    }
+    if (prepared) {
+      LocalSandbox._preparedSandboxCacheDirs.set(cacheKey, uniqueDirs)
+    }
+    return uniqueDirs
+  }
+
+  private static buildWritableRootsOverride(roots: string[]): string | undefined {
+    if (roots.length === 0) return undefined
+    return `sandbox_workspace_write.writable_roots=[${roots.map(tomlBasicString).join(",")}]`
+  }
+
+  private static buildElevatedSandboxEnvPreamble(
+    shellBase: string,
+    cacheRoot: string,
+    sharedCacheRoot = cacheRoot
+  ): string {
     const profileRoot = LocalSandbox.getElevatedSandboxUserProfileRoot(true)
     const homeDrive = path.win32.parse(profileRoot).root.replace(/\\$/, "")
     const homePath = profileRoot.slice(homeDrive.length) || "\\"
     const localAppData = path.win32.join(profileRoot, "AppData", "Local")
     const roamingAppData = path.win32.join(profileRoot, "AppData", "Roaming")
-    // Use the host user's real TEMP for maven.repo.local — it is ACL-granted writable by
-    // the sandbox user (included in write_roots during elevated setup). The sandbox user's
-    // own profile TEMP (C:\Users\CodexSandboxOnline\...\Temp) is NOT granted write access
-    // by the ACL setup, so we must NOT redirect TEMP/TMP to it.
-    const mavenRepoLocal = path.win32.join(realTempDir, "m2-sandbox-repo")
-    // JVM user.home override: the sandbox redirects USERPROFILE, which causes JVM
-    // tools (Maven, Gradle, sbt, etc.) to look for configs under the sandbox user's
-    // empty home. Setting -Duser.home to the real user home lets all JVM tools find
-    // their default configs (~/.m2/settings.xml, ~/.gradle/, etc.) without us having
-    // to know the exact location of each config file.
+    const toolEnv = LocalSandbox.buildSandboxToolEnv(cacheRoot, sharedCacheRoot)
+    const toolDirs = LocalSandbox.getSandboxToolCacheDirs(cacheRoot, sharedCacheRoot)
+    const pathPrefix = Array.from(new Set(toolEnv.pathEntries)).join(";")
+    // Redirect standard Windows profile env vars to the sandbox user's persistent profile.
+    // The sandbox user (CodexSandboxOnline) has full control over its own profile, so all
+    // non-overridden tools can read/write their default cache locations under
+    // USERPROFILE/APPDATA/LOCALAPPDATA. Tool installs/caches that need to survive across
+    // elevated/unelevated commands are redirected to the app-owned persistent cache root,
+    // which is passed to Codex as a writable_root so setup grants the capability SID.
     const envOverrides: Array<[string, string]> = [
       ["USERPROFILE", profileRoot],
       ["HOME", profileRoot],
@@ -199,43 +484,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       ["LOCALAPPDATA", localAppData],
       ["USERNAME", WINDOWS_SANDBOX_ONLINE_USERNAME],
       ["LOGNAME", WINDOWS_SANDBOX_ONLINE_USERNAME],
-      // ── Tool cache/home redirects ──
-      // Sandbox user has no access to the host user's HOME directories.
-      // Redirect all tool caches to TEMP-based writable directories.
-      // Node.js
-      ["NPM_CONFIG_CACHE", path.win32.join(realTempDir, "sandbox-npm-cache")],
-      ["YARN_CACHE_FOLDER", path.win32.join(realTempDir, "sandbox-yarn-cache")],
-      ["PNPM_HOME", path.win32.join(realTempDir, "sandbox-pnpm-home")],
-      ["PNPM_STORE_DIR", path.win32.join(realTempDir, "sandbox-pnpm-store")],
-      // Go
-      ["GOPATH", path.win32.join(realTempDir, "sandbox-gopath")],
-      ["GOMODCACHE", path.win32.join(realTempDir, "sandbox-gopath", "pkg", "mod")],
-      ["GOBIN", path.win32.join(realTempDir, "sandbox-gopath", "bin")],
-      // Rust
-      ["CARGO_HOME", path.win32.join(realTempDir, "sandbox-cargo-home")],
-      ["RUSTUP_HOME", path.win32.join(realTempDir, "sandbox-rustup-home")],
-      // cargo uses libgit2→libcurl→SChannel for git dependencies; force system git (which
-      // we've already patched with GIT_CONFIG_COUNT to use OpenSSL) instead of libgit2.
-      ["CARGO_GIT_FETCH_WITH_CLI", "true"],
-      // curl from Git for Windows (mingw64/bin/curl.exe) is a multi-backend build; tell it
-      // to use the OpenSSL backend to avoid SChannel SEC_E_NO_CREDENTIALS errors.
-      ["CURL_SSL_BACKEND", "openssl"],
-      // .NET
-      ["NUGET_PACKAGES", path.win32.join(realTempDir, "sandbox-nuget-packages")],
-      // Ruby
-      ["GEM_HOME", path.win32.join(realTempDir, "sandbox-gem-home")],
-      ["BUNDLE_PATH", path.win32.join(realTempDir, "sandbox-gem-home")],
-      // Python — PYTHONUSERBASE redirects pip's --user install target (fallback when
-      // site-packages is not writable). Without this, pip writes to %APPDATA%\Python
-      // which the sandbox user cannot access.
-      ["PYTHONUSERBASE", path.win32.join(realTempDir, "sandbox-python-user")],
-      ["PIP_CACHE_DIR", path.win32.join(realTempDir, "sandbox-pip-cache")],
-      ["POETRY_CACHE_DIR", path.win32.join(realTempDir, "sandbox-poetry-cache")],
-      ["CONDA_PKGS_DIRS", path.win32.join(realTempDir, "sandbox-conda-pkgs")],
-      // Gradle (JVM but uses its own env var, not JAVA_TOOL_OPTIONS)
-      ["GRADLE_USER_HOME", path.win32.join(realTempDir, "sandbox-gradle-home")],
-      // C/C++
-      ["VCPKG_DEFAULT_BINARY_CACHE", path.win32.join(realTempDir, "sandbox-vcpkg-cache")]
+      ...toolEnv.env
     ]
 
     // Preserve host user's JAVA_HOME so the sandbox user can locate the JDK.
@@ -246,22 +495,20 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       envOverrides.push(["JAVA_HOME", hostJavaHome])
     }
 
-    // Two-layer JVM user.home strategy:
-    //   JAVA_TOOL_OPTIONS → user.home = TEMP-based writable dir (for app logs, caches, etc.)
-    //   MAVEN_OPTS        → user.home = real user home (for reading ~/.m2/settings.xml etc.)
-    // Maven reads MAVEN_OPTS which overrides JAVA_TOOL_OPTIONS, so Maven gets the real home
-    // for config reading. All other JVMs (Spring Boot, Nacos, etc.) get the writable TEMP dir
-    // so they can create log files without permission errors.
-    const javaHome = path.win32.join(realTempDir, "sandbox-java-home")
+    // Maven-specific JVM strategy:
+    //   JAVA_TOOL_OPTIONS → encoding only; do not set user.home globally.
+    //   MAVEN_OPTS        → maven.repo.local under the app-owned writable cache root.
+    // This avoids conflicting -Duser.home values while keeping Maven writes inside the
+    // same writable-root mechanism Codex grants for elevated workspace-write.
+    // Maven commands are routed to unelevated mode before this path, so the real user's
+    // ~/.m2/settings.xml remains available without exposing the host profile in elevated mode.
     // Force UTF-8 encoding for all JVM output to match our chcp 65001 / [Console]::OutputEncoding=UTF8 preamble.
     // Without this, Java defaults to system encoding (GBK on Chinese Windows) → garbled output in PowerShell.
     const javaUtf8Flags = "-Dfile.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8"
-    const javaToolFlags = `${javaUtf8Flags} -Dmaven.repo.local=${mavenRepoLocal} -Duser.home=${javaHome}`
-    const mavenFlags = `${javaUtf8Flags} -Dmaven.repo.local=${mavenRepoLocal} -Duser.home=${realUserHome}`
-    // sbt/ivy: redirect global base and ivy cache to TEMP so sbt doesn't write to ~/.sbt / ~/.ivy2
-    const sbtBase = path.win32.join(realTempDir, "sandbox-sbt")
-    const ivyHome = path.win32.join(realTempDir, "sandbox-ivy2")
-    const sbtFlags = `-Dsbt.global.base=${sbtBase} -Divy.home=${ivyHome}`
+    const javaToolFlags = javaUtf8Flags
+    const mavenFlags = `${javaUtf8Flags} -Dmaven.repo.local=${toolDirs.mavenRepo}`
+    // sbt/ivy: keep writable state out of the host user's real ~/.sbt / ~/.ivy2.
+    const sbtFlags = `-Dsbt.global.base=${toolDirs.sbtBase} -Divy.home=${toolDirs.ivyHome}`
 
     // Force git to use OpenSSL instead of SChannel. The sandbox user (CodexSandboxOnline)
     // doesn't have access to the Windows LSA for SChannel credential initialization.
@@ -272,19 +519,23 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       const base = envOverrides
         .map(([key, value]) => `set "${key}=${cmdSetLiteral(value)}"`)
         .join(" & ")
+      const pathPreamble = pathPrefix ? `set "PATH=${cmdSetLiteral(pathPrefix)};%PATH%"` : ""
+      const pythonPathPreamble = `set "PYTHONPATH=${cmdSetLiteral(toolDirs.pythonSiteCustomize)};%PYTHONPATH%"`
       const jvmOpts = `set "JAVA_TOOL_OPTIONS=%JAVA_TOOL_OPTIONS% ${cmdSetLiteral(javaToolFlags)}" & set "MAVEN_OPTS=%MAVEN_OPTS% ${cmdSetLiteral(mavenFlags)}" & set "SBT_OPTS=%SBT_OPTS% ${cmdSetLiteral(sbtFlags)}"`
-      return `${base} & ${jvmOpts} & ${gitSslCmd}`
+      return [base, pathPreamble, pythonPathPreamble, jvmOpts, gitSslCmd].filter(Boolean).join(" & ")
     }
 
     if (shellBase === "pwsh" || shellBase === "powershell") {
       const base = envOverrides
         .map(([key, value]) => `$env:${key}=${powershellSingleQuote(value)}`)
         .join("; ")
+      const pathPreamble = pathPrefix ? `$env:PATH=${powershellSingleQuote(pathPrefix)} + ';' + $env:PATH` : ""
+      const pythonPathPreamble = `$env:PYTHONPATH=${powershellSingleQuote(toolDirs.pythonSiteCustomize)} + $(if ($env:PYTHONPATH) { ';' + $env:PYTHONPATH } else { '' })`
       const javaToolFlagsEscaped = javaToolFlags.replace(/\\/g, "\\\\")
       const mavenFlagsEscaped = mavenFlags.replace(/\\/g, "\\\\")
       const sbtFlagsEscaped = sbtFlags.replace(/\\/g, "\\\\")
       const jvmOpts = `$env:JAVA_TOOL_OPTIONS="$($env:JAVA_TOOL_OPTIONS) ${javaToolFlagsEscaped}"; $env:MAVEN_OPTS="$($env:MAVEN_OPTS) ${mavenFlagsEscaped}"; $env:SBT_OPTS="$($env:SBT_OPTS) ${sbtFlagsEscaped}"`
-      return `${base}; ${jvmOpts}; ${gitSslPs}`
+      return [base, pathPreamble, pythonPathPreamble, jvmOpts, gitSslPs].filter(Boolean).join("; ")
     }
 
     return ""
@@ -293,79 +544,43 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
   /**
    * Build JVM + Python environment preamble for unelevated sandbox mode.
    * Unelevated mode runs as the same user but with a restricted token that only allows
-   * writing to the workspace dir and TEMP. ~/.m2/repository and site-packages are NOT
-   * writable, so we redirect maven.repo.local and pip target to TEMP-based directories.
-   * No user.home redirect needed — same user, can read ~/.m2/settings.xml etc.
+   * writing to the workspace dir and configured writable_roots. Tool caches/user installs
+   * are redirected to the same app-owned persistent cache root used by elevated mode.
+   * No user.home redirect needed — keep JVM home behavior aligned with Codex.
    */
-  private static buildUnelevatedEnvPreamble(shellBase: string, tempDir: string): string {
-    // ── Tool cache/home redirects ──
-    // WRITE_RESTRICTED token only allows writing to workspace + TEMP.
-    // HOME directories (~/.npm, ~/.cargo, ~/.gradle, etc.) have no Everyone ACE,
-    // so tool caches must be redirected to TEMP-based writable directories.
-    const toolCacheOverrides: Array<[string, string]> = [
-      // Node.js
-      ["NPM_CONFIG_CACHE", path.win32.join(tempDir, "sandbox-npm-cache")],
-      ["YARN_CACHE_FOLDER", path.win32.join(tempDir, "sandbox-yarn-cache")],
-      ["PNPM_HOME", path.win32.join(tempDir, "sandbox-pnpm-home")],
-      ["PNPM_STORE_DIR", path.win32.join(tempDir, "sandbox-pnpm-store")],
-      // Go
-      ["GOPATH", path.win32.join(tempDir, "sandbox-gopath")],
-      ["GOMODCACHE", path.win32.join(tempDir, "sandbox-gopath", "pkg", "mod")],
-      ["GOBIN", path.win32.join(tempDir, "sandbox-gopath", "bin")],
-      // Rust
-      ["CARGO_HOME", path.win32.join(tempDir, "sandbox-cargo-home")],
-      ["RUSTUP_HOME", path.win32.join(tempDir, "sandbox-rustup-home")],
-      // cargo uses libgit2→libcurl→SChannel for git dependencies; force system git (which
-      // we've already patched with GIT_CONFIG_COUNT to use OpenSSL) instead of libgit2.
-      ["CARGO_GIT_FETCH_WITH_CLI", "true"],
-      // curl from Git for Windows (mingw64/bin/curl.exe) is a multi-backend build; tell it
-      // to use the OpenSSL backend to avoid SChannel SEC_E_NO_CREDENTIALS errors.
-      ["CURL_SSL_BACKEND", "openssl"],
-      // .NET
-      ["NUGET_PACKAGES", path.win32.join(tempDir, "sandbox-nuget-packages")],
-      // Ruby
-      ["GEM_HOME", path.win32.join(tempDir, "sandbox-gem-home")],
-      ["BUNDLE_PATH", path.win32.join(tempDir, "sandbox-gem-home")],
-      // Python — PYTHONUSERBASE redirects pip's --user install target (fallback when
-      // site-packages is not writable). Without this, pip writes to %APPDATA%\Python
-      // which the restricted token cannot access.
-      ["PYTHONUSERBASE", path.win32.join(tempDir, "sandbox-python-user")],
-      ["PIP_CACHE_DIR", path.win32.join(tempDir, "sandbox-pip-cache")],
-      ["POETRY_CACHE_DIR", path.win32.join(tempDir, "sandbox-poetry-cache")],
-      ["CONDA_PKGS_DIRS", path.win32.join(tempDir, "sandbox-conda-pkgs")],
-      // Gradle
-      ["GRADLE_USER_HOME", path.win32.join(tempDir, "sandbox-gradle-home")],
-      // C/C++
-      ["VCPKG_DEFAULT_BINARY_CACHE", path.win32.join(tempDir, "sandbox-vcpkg-cache")]
-    ]
+  private static buildUnelevatedEnvPreamble(shellBase: string, cacheRoot: string, sharedCacheRoot = cacheRoot): string {
+    const toolEnv = LocalSandbox.buildSandboxToolEnv(cacheRoot, sharedCacheRoot)
+    const toolDirs = LocalSandbox.getSandboxToolCacheDirs(cacheRoot, sharedCacheRoot)
+    const pathPrefix = Array.from(new Set(toolEnv.pathEntries)).join(";")
 
     // ── JVM flags ──
-    const mavenRepoLocal = path.win32.join(tempDir, "m2-sandbox-repo")
-    const javaHome = path.win32.join(tempDir, "sandbox-java-home")
     const javaUtf8Flags = "-Dfile.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8"
-    const javaToolFlags = `${javaUtf8Flags} -Dmaven.repo.local=${mavenRepoLocal} -Duser.home=${javaHome}`
-    const mavenFlags = `${javaUtf8Flags} -Dmaven.repo.local=${mavenRepoLocal}`
+    const javaToolFlags = javaUtf8Flags
+    const mavenFlags = `${javaUtf8Flags} -Dmaven.repo.local=${toolDirs.mavenRepo}`
     // sbt/ivy
-    const sbtBase = path.win32.join(tempDir, "sandbox-sbt")
-    const ivyHome = path.win32.join(tempDir, "sandbox-ivy2")
-    const sbtFlags = `-Dsbt.global.base=${sbtBase} -Divy.home=${ivyHome}`
+    const sbtFlags = `-Dsbt.global.base=${toolDirs.sbtBase} -Divy.home=${toolDirs.ivyHome}`
 
     if (shellBase === "cmd") {
-      const toolCache = toolCacheOverrides
+      const toolCache = toolEnv.env
         .map(([key, value]) => `set "${key}=${cmdSetLiteral(value)}"`)
         .join(" & ")
+      const pathPreamble = pathPrefix ? `set "PATH=${cmdSetLiteral(pathPrefix)};%PATH%"` : ""
+      const pythonPathPreamble = `set "PYTHONPATH=${cmdSetLiteral(toolDirs.pythonSiteCustomize)};%PYTHONPATH%"`
       const jvmOpts = `set "JAVA_TOOL_OPTIONS=%JAVA_TOOL_OPTIONS% ${cmdSetLiteral(javaToolFlags)}" & set "MAVEN_OPTS=%MAVEN_OPTS% ${cmdSetLiteral(mavenFlags)}" & set "SBT_OPTS=%SBT_OPTS% ${cmdSetLiteral(sbtFlags)}"`
-      return `${toolCache} & ${jvmOpts}`
+      return [toolCache, pathPreamble, pythonPathPreamble, jvmOpts].filter(Boolean).join(" & ")
     }
 
     if (shellBase === "pwsh" || shellBase === "powershell") {
-      const toolCache = toolCacheOverrides
+      const toolCache = toolEnv.env
         .map(([key, value]) => `$env:${key}=${powershellSingleQuote(value)}`)
         .join("; ")
+      const pathPreamble = pathPrefix ? `$env:PATH=${powershellSingleQuote(pathPrefix)} + ';' + $env:PATH` : ""
+      const pythonPathPreamble = `$env:PYTHONPATH=${powershellSingleQuote(toolDirs.pythonSiteCustomize)} + $(if ($env:PYTHONPATH) { ';' + $env:PYTHONPATH } else { '' })`
       const javaToolFlagsEscaped = javaToolFlags.replace(/\\/g, "\\\\")
       const mavenFlagsEscaped = mavenFlags.replace(/\\/g, "\\\\")
       const sbtFlagsEscaped = sbtFlags.replace(/\\/g, "\\\\")
-      return `${toolCache}; $env:JAVA_TOOL_OPTIONS="$($env:JAVA_TOOL_OPTIONS) ${javaToolFlagsEscaped}"; $env:MAVEN_OPTS="$($env:MAVEN_OPTS) ${mavenFlagsEscaped}"; $env:SBT_OPTS="$($env:SBT_OPTS) ${sbtFlagsEscaped}"`
+      const jvmOpts = `$env:JAVA_TOOL_OPTIONS="$($env:JAVA_TOOL_OPTIONS) ${javaToolFlagsEscaped}"; $env:MAVEN_OPTS="$($env:MAVEN_OPTS) ${mavenFlagsEscaped}"; $env:SBT_OPTS="$($env:SBT_OPTS) ${sbtFlagsEscaped}"`
+      return [toolCache, pathPreamble, pythonPathPreamble, jvmOpts].filter(Boolean).join("; ")
     }
 
     return ""
@@ -444,16 +659,19 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     const cmd = command.trim().toLowerCase()
     return (
       // Python package managers
-      /\bpip\s+install\b/.test(cmd)
-      || /\bpip3\s+install\b/.test(cmd)
+      /\bpip(?:3(?:\.\d+)?)?(?:\.exe|\.cmd|\.bat)?\s+(install|download|wheel)\b/.test(cmd)
+      || /\b(?:python(?:3(?:\.\d+)?)?|py)(?:\.exe)?(?:\s+-\d+(?:\.\d+)?)?\s+-m\s+pip\s+(install|download|wheel)\b/.test(cmd)
+      || /\buv(?:\.exe|\.cmd|\.bat)?\s+(pip\s+(install|sync)|sync|add|remove|lock|run|tool\s+install)\b/.test(cmd)
+      || /\bpipx(?:\.exe|\.cmd|\.bat)?\s+(install|run|runpip|upgrade|upgrade-all)\b/.test(cmd)
       || /\bpoetry\s+(install|add|update)\b/.test(cmd)
-      || /\bconda\s+install\b/.test(cmd)
+      || /\bconda\s+(install|create|update)\b/.test(cmd)
       // Node.js
       || /\bnpm\s+install\b/.test(cmd)
       || /\bnpm\s+i\b/.test(cmd)
       || /\bnpm\s+ci\b/.test(cmd)
-      || /\byarn\s+(add|install)\b/.test(cmd)
-      || /\bpnpm\s+(add|install|i)\b/.test(cmd)
+      || /\bnpm\s+update\b/.test(cmd)
+      || /\byarn\s+(add|install|upgrade)\b/.test(cmd)
+      || /\bpnpm\s+(add|install|i|update)\b/.test(cmd)
       || /\bnpx\s/.test(cmd)
       // Rust
       || /\bcargo\s+(install|build|test|run|fetch)\b/.test(cmd)
@@ -461,6 +679,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       // Go — build/test/run auto-download modules when not cached
       || /\bgo\s+(build|test|run|get|install|mod\s+download)\b/.test(cmd)
       // JVM
+      || /\bmvnw?(?:\.cmd|\.bat)?\b/.test(cmd)
       || /\bgradle\b/.test(cmd)
       || /\bgradlew\b/.test(cmd)
       || /\bsbt\b/.test(cmd)
@@ -509,8 +728,8 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     this.codexExePath = options.codexExePath ?? "codex"
     const h = options.hooks
     this.getHooks = typeof h === "function" ? h : () => h ?? []
-    this._elevatedMavenTempDir = baseEnv.TEMP || baseEnv.TMP || tmpdir()
-    this._realUserHome = baseEnv.USERPROFILE || baseEnv.HOME || homedir()
+    this._sandboxCacheRoot = LocalSandbox.buildSandboxCacheRoot(baseEnv, this.workingDir)
+    this._sharedSandboxCacheRoot = LocalSandbox.buildSharedSandboxCacheRoot(baseEnv)
     this.abortSignal = options.abortSignal
 
     // Eagerly cache the elevation check during construction to avoid blocking
@@ -2084,6 +2303,14 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     }
 
     const isElevatedSandbox = effectiveMode === "elevated"
+    const sandboxCacheRoots = Array.from(new Set([
+      this._sandboxCacheRoot,
+      this._sharedSandboxCacheRoot
+    ].map((dir) => path.win32.normalize(dir))))
+    const sandboxCacheDirs = LocalSandbox.prepareSandboxCacheDirs(this._sandboxCacheRoot, this._sharedSandboxCacheRoot)
+    const sandboxCacheWritableRootsOverride = effectiveMode === "elevated" || effectiveMode === "unelevated"
+      ? LocalSandbox.buildWritableRootsOverride(sandboxCacheRoots)
+      : undefined
 
     // Elevated mode: proactively ensure the workspace has ACL setup before spawning codex.exe.
     // This prevents the command from silently blocking mid-execution when codex.exe returns
@@ -2098,11 +2325,12 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
           console.log(`[LocalSandbox] elevated: granting sandbox user ACL for new workspace (no UAC): ${this.workingDir}`)
           try {
             await LocalSandbox.grantElevatedWorkspaceAcl(this.workingDir)
+            await Promise.all(sandboxCacheRoots.map((dir) => LocalSandbox.grantElevatedWorkspaceAcl(dir)))
             markWorkspaceElevatedSetupDone(this.workingDir)
             console.log(`[LocalSandbox] elevated: ACL grant done for ${this.workingDir}`)
           } catch (err) {
             console.warn(`[LocalSandbox] elevated: icacls grant failed, falling back to full setup: ${err}`)
-            const setupResult = await runElevatedSetupForPaths([this.workingDir])
+            const setupResult = await runElevatedSetupForPaths([this.workingDir, ...sandboxCacheRoots])
             if (setupResult.success) {
               markWorkspaceElevatedSetupDone(this.workingDir)
             }
@@ -2110,7 +2338,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
         } else {
           // Initial setup not done — need full elevated setup (UAC required)
           console.log(`[LocalSandbox] elevated: initial setup required, running with UAC: ${this.workingDir}`)
-          const setupResult = await runElevatedSetupForPaths([this.workingDir])
+          const setupResult = await runElevatedSetupForPaths([this.workingDir, ...sandboxCacheRoots])
           if (setupResult.success) {
             markWorkspaceElevatedSetupDone(this.workingDir)
             console.log(`[LocalSandbox] elevated: initial setup done for ${this.workingDir}`)
@@ -2157,14 +2385,13 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
           ? 'set "HTTP_PROXY=" & set "HTTPS_PROXY=" & set "ALL_PROXY=" & set "GIT_HTTP_PROXY=" & set "GIT_HTTPS_PROXY=" & set "GIT_SSH_COMMAND=" & set "GIT_ALLOW_PROTOCOLS=" & set "PIP_NO_INDEX=" & set "NPM_CONFIG_OFFLINE=" & set "CARGO_NET_OFFLINE=" & set "SBX_NONET_ACTIVE=" & set "GIT_CONFIG_COUNT=1" & set "GIT_CONFIG_KEY_0=http.sslBackend" & set "GIT_CONFIG_VALUE_0=openssl"'
           : '$env:HTTP_PROXY=$null; $env:HTTPS_PROXY=$null; $env:ALL_PROXY=$null; $env:GIT_HTTP_PROXY=$null; $env:GIT_HTTPS_PROXY=$null; $env:GIT_SSH_COMMAND=$null; $env:GIT_ALLOW_PROTOCOLS=$null; $env:PIP_NO_INDEX=$null; $env:NPM_CONFIG_OFFLINE=$null; $env:CARGO_NET_OFFLINE=$null; $env:SBX_NONET_ACTIVE=$null; $env:GIT_CONFIG_COUNT=\'1\'; $env:GIT_CONFIG_KEY_0=\'http.sslBackend\'; $env:GIT_CONFIG_VALUE_0=\'openssl\'')
       : ""
-    // Unelevated sandbox: also set JVM env vars to redirect maven.repo.local to TEMP
-    // (restricted token cannot write to ~/.m2/repository)
+    // Unelevated sandbox: set shared tool env vars to the persistent writable cache root.
     const unelevatedJvmPreamble = !isElevatedSandbox && effectiveMode !== "none"
-      ? LocalSandbox.buildUnelevatedEnvPreamble(shellBase, this._elevatedMavenTempDir)
+      ? LocalSandbox.buildUnelevatedEnvPreamble(shellBase, this._sandboxCacheRoot, this._sharedSandboxCacheRoot)
       : ""
     const unelevatedPreamble = [clearProxyPreamble, unelevatedJvmPreamble].filter(Boolean).join(shellBase === "cmd" ? " & " : "; ")
     const sandboxUserEnvPreamble = isElevatedSandbox
-      ? LocalSandbox.buildElevatedSandboxEnvPreamble(shellBase, this._elevatedMavenTempDir, this._realUserHome)
+      ? LocalSandbox.buildElevatedSandboxEnvPreamble(shellBase, this._sandboxCacheRoot, this._sharedSandboxCacheRoot)
       : unelevatedPreamble
     const commandWithSandboxEnv = sandboxUserEnvPreamble
       ? shellBase === "cmd"
@@ -2185,6 +2412,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       sandboxArgs = [
         "-c", 'windows.sandbox="elevated"',
         "-c", "sandbox_workspace_write.network_access=true",
+        ...(sandboxCacheWritableRootsOverride ? ["-c", sandboxCacheWritableRootsOverride] : []),
         "sandbox", "windows",
         "--full-auto",
         "--",
@@ -2210,6 +2438,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       sandboxArgs = [
         "-c", 'windows.sandbox="unelevated"',
         "-c", "sandbox_workspace_write.network_access=true",
+        ...(sandboxCacheWritableRootsOverride ? ["-c", sandboxCacheWritableRootsOverride] : []),
         "sandbox", "windows",
         "--full-auto",
         "--",
@@ -2238,19 +2467,14 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
           aclDirs.push(tmpDir)
           LocalSandbox._permanentAclDirs.add(tmpKey)
         }
-        // Pre-create JVM sandbox subdirectories from the main process (full permissions)
-        // so the sandbox user can write Maven repos, Java logs, etc.
-        const sandboxSubDirs = [
-          path.join(tmpDir, "sandbox-java-home"),
-          path.join(tmpDir, "m2-sandbox-repo")
-        ]
-        for (const subDir of sandboxSubDirs) {
-          try { mkdirSync(subDir, { recursive: true }) } catch { /* may already exist */ }
-          const subKey = normalizeDirKey(subDir)
-          if (!LocalSandbox._permanentAclDirs.has(subKey)) {
-            aclDirs.push(subDir)
-            LocalSandbox._permanentAclDirs.add(subKey)
-          }
+      }
+      // Pre-create app-owned persistent cache subdirectories from the main process
+      // (full permissions) so package managers can write caches/user installs there.
+      for (const cacheDir of sandboxCacheDirs) {
+        const cacheKey = normalizeDirKey(cacheDir)
+        if (!LocalSandbox._permanentAclDirs.has(cacheKey)) {
+          aclDirs.push(cacheDir)
+          LocalSandbox._permanentAclDirs.add(cacheKey)
         }
       }
       const aclGrantStart = Date.now()
@@ -2465,7 +2689,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     if (isElevatedSandbox && result.exitCode !== 0 && result.output.includes("setup refresh failed") && attempt <= 1) {
       console.log(`[LocalSandbox] elevated: setup refresh failed for ${this.workingDir}, running elevated setup with UAC (attempt=${attempt})...`)
       // runElevatedSetupForPaths / markWorkspaceElevatedSetupDone already imported statically
-      const setupResult = await runElevatedSetupForPaths([this.workingDir])
+      const setupResult = await runElevatedSetupForPaths([this.workingDir, ...sandboxCacheRoots])
       if (setupResult.success) {
         markWorkspaceElevatedSetupDone(this.workingDir)
         // Retry the command once now that ACLs are in place (increment attempt to prevent further retries)

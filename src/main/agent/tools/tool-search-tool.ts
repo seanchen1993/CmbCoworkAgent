@@ -370,8 +370,7 @@ export function createInspectTool(service: McpCapabilityService, options: ToolSe
             tool_id: savedTool.toolId,
             source: "saved_tool",
             allow_callers: ["invoke_deferred_tool"],
-            schema: savedTool.inputSchema,
-            output_schema: savedTool.outputSchema
+            schema: savedTool.inputSchema
           }
         }
 

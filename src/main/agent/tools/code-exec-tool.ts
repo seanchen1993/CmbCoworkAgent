@@ -4,49 +4,151 @@ import { ChatOpenAI } from "@langchain/openai"
 import { tool } from "langchain"
 import { z } from "zod"
 import type { ApprovalDecision, ApprovalRequest } from "../../types"
+import { CODE_EXEC_DEFAULT_TIMEOUT_MS } from "../../code-exec/constants"
 import { CodeExecEngine } from "../../code-exec/engine"
 import { LocalProcessRunner } from "../../code-exec/runner"
 import {
-  buildSavedCodeExecResultExample,
   buildSavedCodeExecToolDraft,
   getSavedCodeExecToolForCode,
-  inferSavedCodeExecSchema,
-  parseCodeExecOutputValue,
   persistSavedCodeExecTool
 } from "../../code-exec/saved-tool-store"
 import type { CodeExecMcpCall, CodeExecResult, CodeExecToolInput } from "../../code-exec/types"
+import { sanitizeMcpExampleValue } from "../../mcp/tool-example-store"
 import { getCustomModelConfigs, type CustomModelConfig } from "../../storage"
 import type { ApprovalStore } from "../approval-store"
 import type { McpCapabilityService } from "../../mcp/capability-types"
 
-const DEFAULT_TIMEOUT_MS = 20_000
+const DEFAULT_TIMEOUT_MS = CODE_EXEC_DEFAULT_TIMEOUT_MS
 const SAVE_TOOL_REWRITE_FAILED_NOTE = "工具化改写失败，请点拒绝关闭。"
-const SAVED_TOOL_REWRITE_SYSTEM_PROMPT = `rewrite a param hard coding js function into a reusable function.
+const SAVED_TOOL_REWRITE_SYSTEM_PROMPT = `
+# ROLE
+You are an expert Node.js developer. Your task is to refactor specific JavaScript async function bodies into highly reusable, generalized function bodies.
 
-Return JSON only with this shape:
+# OBJECTIVE
+Rewrite the provided JavaScript async function body by aggressively extracting **hardcoded values and literals** (e.g., magic strings, specific IDs, hardcoded numbers) into a dynamic \`params\` object. You MUST guarantee **Functional Equivalence**: the rewritten code must produce the exact same return shapes and execution side effects as the original, given the original values as inputs.
+
+# RULES & CONSTRAINTS
+
+## 1. Parameter Extraction & Refactoring
+- Extract **hardcoded literals** (quantities, absolute file paths, specific repository names, etc.) into \`params.<key>\`.
+- Keep internal constants and obvious programmatic defaults inline.
+- **CRITICAL LOGIC SHIFT:** If extracting a limit/quantity, you MUST refactor static hardcoded access (e.g., \`arr[0]\`) into dynamic array methods (e.g., \`.map()\`, \`.slice()\`) to handle ANY parameter value.
+- **Decompose Composite Strings:** If a hardcoded string contains structural data (e.g., API queries like \`"repo:owner/name"\`, absolute URLs, or file paths), DO NOT extract the entire string as a single parameter. Break it down into atomic semantic parameters (e.g., \`params.owner\`, \`params.repo\`) and reconstruct the original string using template literals.
+- **Global Parameter Reuse:** Identify duplicate hardcoded values across multiple function calls. You MUST map identical semantic values to a single shared parameter in the \`params\` object, rather than creating redundant parameters (e.g., use \`params.owner\` consistently instead of creating \`params.owner1\` and \`params.owner2\`).
+
+## 2. Code Formatting Constraints
+- \`rewritten_code\` must contain **raw inner statements only**. DO NOT wrap it in function signatures, IIFEs, classes, or exports.
+- Include an explicit top-level \`return\` statement.
+- Use \`mcp.$call("tool_id", args)\` exactly as provided.
+
+## 3. Schema Generation
+- \`tool_name\`: snake_case, short, reusable, capability-oriented.
+- \`description\`: concise (do not mention code_exec, saved tools, JS, or wrappers).
+- \`input_schema\`:
+  - **DYNAMIC TYPING:** Accurately infer the \`"type"\` (\`"string"\`, \`"number"\`, or \`"boolean"\`) based on the original literal's data type.
+  - **REQUIRED & DEFAULTS:** ALL extracted \`params\` MUST be added to the \`required\` array. Their \`default\` values MUST be the exact original literal values from the provided code.
+
+# OUTPUT FORMAT
+Output STRICTLY a valid JSON object.
+
 {
-  "tool_name": "snake_case_capability_name",
-  "description": "One sentence describing what the function does and its main inputs.",
-  "rewritten_code": "JavaScript async function-body code that uses params for reusable caller inputs.",
+  "tool_name": "string",
+  "description": "string",
+  "rewritten_code": "string",
   "input_schema": {
     "type": "object",
-    "properties": {}
+    "properties": {
+      "param_name": {
+        "type": "string | number | boolean",
+        "description": "string",
+        "default": "any"
+      }
+    },
+    "required": ["array of strings"]
   }
 }
 
-Rules:
-- Do not output <think> blocks, markdown fences, or any text before or after the JSON object.
-- Preserve the original behavior as closely as possible using the provided original_code, mcp_calls, and final_output.
-- rewritten_code runs as the body of an async function with access to params, mcp, console, signal, setTimeout, and clearTimeout.
-- Every caller-supplied value that should vary between runs must be read from params inside rewritten_code.
-- Stable implementation defaults may remain inline if they are internal constants, protocol selectors, or obvious defaults.
-- Use mcp.$call("tool_id", args) for MCP calls.
-- input_schema must be a valid JSON-schema-like object with top-level type "object".
-- Every params.<key> used by rewritten_code must appear in input_schema.properties.
-- Keep tool_name short, capability-oriented, and reusable.
-- Keep description concise and optimized for search_tool discovery.
-- Do not mention code_exec, saved tools, JavaScript, wrappers, or promotion in tool_name or description.`
+# EXAMPLES
 
+** Input:\`original_code\`:**
+const result = await mcp.$call("mcp__github__search_pull_requests", {
+  query: "repo:vllm-project/vllm",
+  sort: "created",
+  order: "desc",
+  perPage: 2
+});
+
+if (!result.ok) {
+  throw new Error(result.error);
+}
+
+const prs = result.data.items;
+const prDetails = [];
+
+for (const pr of prs) {
+  const detailResult = await mcp.$call("mcp__github__pull_request_read", {
+    method: "get",
+    owner: "vllm-project",
+    repo: "vllm",
+    pullNumber: pr.number
+  });
+
+  prDetails.push(detailResult);
+}
+
+return {
+  prs: prs.map(pr => ({
+    title: pr.title,
+    state: pr.state,
+    user: pr.user?.login
+  })),
+  details: prDetails.map(d => d.data)
+};
+
+**Expected Output**:
+{
+  "tool_name": "query_github_repo_recent_details",
+  "description": "Searches for recent pull requests in a specified GitHub repository and fetches their details.",
+  "rewritten_code": "const query = \`repo:\${params.owner}/\${params.repo}\`;\\nconst result = await mcp.$call(\\"mcp__github__search_pull_requests\\", {\\n  query: query,\\n  sort: params.sort,\\n  order: params.order,\\n  perPage: params.perPage\\n});\\n\\nif (!result.ok) {\\n  throw new Error(result.error);\\n}\\n\\nconst prs = result.data.items;\\nconst prDetails = [];\\n\\nfor (const pr of prs) {\\n  const detailResult = await mcp.$call(\\"mcp__github__pull_request_read\\", {\\n    method: \\"get\\",\\n    owner: params.owner,\\n    repo: params.repo,\\n    pullNumber: pr.number\\n  });\\n  prDetails.push(detailResult);\\n}\\n\\nreturn {\\n  prs: prs.map(pr => ({\\n    title: pr.title,\\n    state: pr.state,\\n    user: pr.user?.login\\n  })),\\n  details: prDetails.map(d => d.data)\\n};",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "owner": {
+        "type": "string",
+        "description": "The owner of the GitHub repository.",
+        "default": "vllm-project"
+      },
+      "repo": {
+        "type": "string",
+        "description": "The name of the GitHub repository.",
+        "default": "vllm"
+      },
+      "sort": {
+        "type": "string",
+        "description": "The field to sort the pull requests by.",
+        "default": "created"
+      },
+      "order": {
+        "type": "string",
+        "description": "The order of the sorting (e.g., desc, asc).",
+        "default": "desc"
+      },
+      "perPage": {
+        "type": "number",
+        "description": "The number of pull requests to fetch per page.",
+        "default": 2
+      }
+    },
+    "required": [
+      "owner",
+      "repo",
+      "sort",
+      "order",
+      "perPage"
+    ]
+  }
+}
+`
 const codeExecSchema = z.object({
   code: z
     .string()
@@ -146,7 +248,9 @@ function maybePromoteCodeExecAsTool(
     return result.output
   }
 
-  if (context.yoloMode || !context.requestApproval) return result.output
+  // YOLO skips execution approvals, but successful one-off scripts can still ask whether
+  // they should be promoted into reusable tools.
+  if (!context.requestApproval) return result.output
 
   void (async () => {
     try {
@@ -171,25 +275,19 @@ function maybePromoteCodeExecAsTool(
 
       const rewrite = await generateSavedToolRewrite(context, {
         code: input.code,
-        mcpCalls: result.meta?.mcpCalls ?? [],
-        output: result.output
+        mcpCalls: result.meta?.mcpCalls ?? []
       })
 
       const dependencies = Array.from(new Set((result.meta?.mcpCalls ?? []).map((call) => call.toolId).filter(Boolean)))
-      const outputValue = parseCodeExecOutputValue(result.output)
-      const outputSchema = inferSavedCodeExecSchema(outputValue)
-      const resultExample = buildSavedCodeExecResultExample(outputValue)
       const metadataError = rewrite ? undefined : SAVE_TOOL_REWRITE_FAILED_NOTE
       const draft = rewrite
         ? buildSavedCodeExecToolDraft({
           toolName: rewrite.toolName,
           description: rewrite.description,
           inputSchema: rewrite.inputSchema,
-          outputSchema,
           code: rewrite.rewrittenCode,
           timeoutMs: DEFAULT_TIMEOUT_MS,
-          dependencies,
-          resultExample
+          dependencies
         })
         : null
 
@@ -228,11 +326,9 @@ function maybePromoteCodeExecAsTool(
           toolName,
           description,
           inputSchema: rewrite.inputSchema,
-          outputSchema,
           code: rewrite.rewrittenCode,
           timeoutMs: DEFAULT_TIMEOUT_MS,
-          dependencies,
-          resultExample
+          dependencies
         })
 
         persistSavedCodeExecTool({
@@ -373,12 +469,21 @@ function parseSavedToolRewrite(raw: string): SavedToolRewrite | null {
   return null
 }
 
+function buildExecutedMcpToolCallsPreview(mcpCalls: CodeExecMcpCall[]): Array<{
+  tool_id: string
+  args_preview: unknown
+}> {
+  return mcpCalls.map((call) => ({
+    tool_id: call.toolId,
+    args_preview: sanitizeMcpExampleValue(call.args)
+  }))
+}
+
 async function generateSavedToolRewrite(
   context: CodeExecToolContext,
   input: {
     code: string
     mcpCalls: CodeExecMcpCall[]
-    output: string
   }
 ): Promise<SavedToolRewrite | null> {
   const config = resolveSidecarModelConfig(context.modelId)
@@ -391,15 +496,14 @@ async function generateSavedToolRewrite(
     model: config.model,
     apiKey: config.apiKey,
     configuration: { baseURL: config.baseUrl },
-    maxTokens: 5120,
-    temperature: 0,
+    maxTokens: 16384,
+    temperature: 0.1,
     streaming: false
   })
 
   const userPrompt = JSON.stringify({
     original_code: input.code,
-    mcp_calls: input.mcpCalls,
-    final_output: input.output
+    mcp_call_input_param: buildExecutedMcpToolCallsPreview(input.mcpCalls)
   }, null, 2)
 
   try {
@@ -413,7 +517,7 @@ async function generateSavedToolRewrite(
     const raw = extractResponseText(response.content).trim()
     const rewrite = parseSavedToolRewrite(raw)
     if (!rewrite) {
-      console.warn("[code_exec] failed to parse saved-tool rewrite response:", raw.slice(0, 200))
+      console.warn("[code_exec] failed to parse saved-tool rewrite response:", raw.slice(0, 2000))
       return null
     }
     return rewrite

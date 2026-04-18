@@ -1,8 +1,9 @@
-import { useState, useRef, useCallback, useEffect, useMemo, memo } from "react"
+import { useState, useRef, useCallback, useEffect, useMemo, memo, lazy, Suspense } from "react"
 import {
   ListTodo,
   FolderTree,
   GitBranch,
+  Code2,
   ChevronRight,
   ChevronDown,
   CheckCircle2,
@@ -28,22 +29,31 @@ import {
   Maximize2,
   Minimize2,
   EyeOff,
-  Loader2
+  Loader2,
+  Copy,
+  Check
 } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { toast } from "sonner"
 import { useAppStore, selectSkillGenerationAgent, selectSkillRetryContext } from "@/lib/store"
 import { useShallow } from "zustand/react/shallow"
 import { useThreadState, useThreadStream } from "@/lib/thread-context"
 import { getFileType } from "@/lib/file-types"
 import { Badge } from "@/components/ui/badge"
 import { DiffDisplay } from "@/components/chat/ToolCallRenderer"
-import { FileViewer } from "@/components/tabs/FileViewer"
 import { onOpenResourcePreview } from "@/lib/resource-preview-events"
-import type { Todo, SkillMetadata, PluginMetadata } from "@/types"
+import type { Todo, SkillMetadata, PluginMetadata, LspConfig, LspStatus } from "@/types"
 import { SubagentCard } from "@/components/panels/SubagentPanel"
-import { GitPanelView } from "@/components/panels/GitPanelView"
+import { LspPanel } from "@/components/customize/LspPanel"
 
 type HookConfig = Awaited<ReturnType<typeof window.api.hooks.list>>[number]
+
+const FileViewer = lazy(() =>
+  import("@/components/tabs/FileViewer").then((m) => ({ default: m.FileViewer }))
+)
+const GitPanelView = lazy(() =>
+  import("@/components/panels/GitPanelView").then((m) => ({ default: m.GitPanelView }))
+)
 
 const HEADER_HEIGHT = 52 // px
 const HANDLE_HEIGHT = 6 // px
@@ -52,12 +62,13 @@ const MIN_CONTENT_HEIGHT = 60 // px
 const COLLAPSE_THRESHOLD = 55 // px - auto-collapse when below this
 const PREVIEW_MAX_HEIGHT = "100vh"
 
-type PanelHeights = { tasks: number; files: number; agents: number; skills: number; plugins: number; hooks: number }
+type PanelHeights = { tasks: number; files: number; agents: number; skills: number; plugins: number; hooks: number; lsp: number }
 
 interface SectionHeaderProps {
   title: string
   icon: React.ElementType
   badge?: number
+  detail?: React.ReactNode
   isOpen: boolean
   onToggle: () => void
 }
@@ -66,6 +77,7 @@ function SectionHeader({
   title,
   icon: Icon,
   badge,
+  detail,
   isOpen,
   onToggle
 }: SectionHeaderProps): React.JSX.Element {
@@ -83,6 +95,7 @@ function SectionHeader({
       />
       <Icon className="size-4.5 text-foreground/70" />
       <span className="flex-1 text-left text-[16px] font-semibold leading-none">{title}</span>
+      {detail && <div className="shrink-0">{detail}</div>}
       {badge !== undefined && badge > 0 && (
         <span className="text-xs text-muted-foreground tabular-nums">{badge}</span>
       )}
@@ -137,15 +150,22 @@ function ResizeHandle({ onDrag }: ResizeHandleProps): React.JSX.Element {
 interface RightPanelProps {
   moduleMode: "work" | "preview" | "git"
   onRequestPreviewMode?: () => void
-  onRequestGitMode?: () => void
   onRequestWorkMode?: () => void
   onPreviewFullscreenChange?: (isFullscreen: boolean) => void
+}
+
+function LazySectionFallback({ label }: { label: string }): React.JSX.Element {
+  return (
+    <div className="flex h-full min-h-0 items-center justify-center text-muted-foreground">
+      <Loader2 className="mr-2 size-4 animate-spin" />
+      <span className="text-sm">{label}</span>
+    </div>
+  )
 }
 
 export function RightPanel({
   moduleMode,
   onRequestPreviewMode,
-  onRequestGitMode,
   onRequestWorkMode,
   onPreviewFullscreenChange
 }: RightPanelProps): React.JSX.Element {
@@ -184,6 +204,9 @@ export function RightPanel({
   const [skillsOpen, setSkillsOpen] = useState(false)
   const [pluginsOpen, setPluginsOpen] = useState(false)
   const [hooksOpen, setHooksOpen] = useState(false)
+  const [lspOpen, setLspOpen] = useState(false)
+  const [lspConfig, setLspConfig] = useState<LspConfig | null>(null)
+  const [lspStatus, setLspStatus] = useState<LspStatus | null>(null)
   const [skills, setSkills] = useState<SkillMetadata[]>([])
   const [disabledSkills, setDisabledSkills] = useState<Set<string>>(new Set())
   const [plugins, setPlugins] = useState<PluginMetadata[]>([])
@@ -209,12 +232,65 @@ export function RightPanel({
     window.api.plugins.list().then(setPlugins).catch(console.error)
   }, [pluginVersion])
 
+  useEffect(() => {
+    let cancelled = false
+
+    const loadLspSummary = async (): Promise<void> => {
+      try {
+        const cfg = await window.api.lsp.getConfig()
+        if (cancelled) return
+        setLspConfig(cfg)
+
+        const workspacePath = threadState?.workspacePath ?? null
+        const currentStatus = await window.api.lsp.getStatus(workspacePath)
+        if (!cancelled) {
+          setLspStatus(currentStatus)
+        }
+      } catch (error) {
+        console.error("[RightPanel] Failed to load LSP summary:", error)
+      }
+    }
+
+    void loadLspSummary()
+    const unsubscribe = window.api.lsp.onChanged(() => { void loadLspSummary() })
+
+    return () => {
+      cancelled = true
+      unsubscribe()
+    }
+  }, [currentThreadId, threadState?.workspacePath])
+
   // Auto-open agents panel when skill generation starts
   useEffect(() => {
     if (skillGenerationAgent.phase === "generating") {
       setAgentsOpen(true)
     }
   }, [skillGenerationAgent.phase])
+
+  const lspHeaderStatus = useMemo(() => {
+    if (!lspConfig) return null
+
+    const statusText = !lspConfig.enabled
+      ? "已禁用"
+      : currentThreadId && !threadState?.workspacePath
+        ? "未关联工作目录"
+        : lspStatus?.statusText ?? "已停止"
+
+    const statusClass = cn(
+      "text-xs font-medium tabular-nums",
+      lspStatus?.lifecycle === "ready"
+        ? "text-green-500"
+        : lspStatus?.lifecycle === "degraded"
+          ? "text-amber-600 dark:text-amber-400"
+          : lspStatus?.lifecycle === "starting" || lspStatus?.lifecycle === "importing"
+            ? "text-sky-600 dark:text-sky-400"
+            : lspStatus?.lifecycle === "error"
+              ? "text-destructive"
+              : "text-muted-foreground"
+    )
+
+    return <span className={statusClass}>{statusText}</span>
+  }, [currentThreadId, lspConfig, lspStatus, threadState?.workspacePath])
 
   // Auto-clear only for "done" phase (3 s brief confirmation).
   // "error" is intentionally NOT auto-cleared — it stays visible so the user
@@ -320,6 +396,20 @@ export function RightPanel({
     const isLoading = streamData.isLoading
     prevStreamLoadingRef.current = isLoading
 
+    const applyPreviewUpdate = (switchToPreview: boolean): void => {
+      if (!latestResourceEvent) return
+      if (lastAppliedPreviewKeyRef.current === latestResourceEvent.key) return
+      lastAppliedPreviewKeyRef.current = latestResourceEvent.key
+      setPreviewPath(latestResourceEvent.path)
+      setPreviewDiff(latestResourceEvent.codeDiff ?? null)
+      setPreviewReloadToken((v) => v + 1)
+      // For diff events, keep current panel and avoid auto-switching to preview.
+      const isDiffPreview = Boolean(latestResourceEvent.codeDiff)
+      if (switchToPreview && !isDiffPreview) {
+        onRequestPreviewMode?.()
+      }
+    }
+
     // Render preview when this round finishes: true -> false
     if (!(wasLoading && !isLoading)) return
     if (
@@ -327,57 +417,15 @@ export function RightPanel({
       lastAutoSwitchedBatchKeyRef.current !== latestCompletedLlmBatch.batchKey
     ) {
       lastAutoSwitchedBatchKeyRef.current = latestCompletedLlmBatch.batchKey
-      const switchPanelByWorkspaceType = async (): Promise<void> => {
-        try {
-          if (!currentThreadId) return
-          const summary = await window.api.workspace.getGitPanelSummary(currentThreadId)
-          if (summary.isGitRepo ?? summary.isWorktree) {
-            onRequestGitMode?.()
-            return
-          }
-        } catch {
-          // ignore summary refresh errors
-        }
-        if (!latestResourceEvent) return
-        if (lastAppliedPreviewKeyRef.current === latestResourceEvent.key) return
-        lastAppliedPreviewKeyRef.current = latestResourceEvent.key
-        setPreviewPath(latestResourceEvent.path)
-        setPreviewDiff(latestResourceEvent.codeDiff ?? null)
-        setPreviewReloadToken((v) => v + 1)
-        onRequestPreviewMode?.()
-      }
-      void switchPanelByWorkspaceType()
+      // Never auto-open git panel. If user is already on git, only refresh preview data silently.
+      applyPreviewUpdate(moduleMode !== "git")
       return
     }
-    if (!latestResourceEvent) return
-    if (lastAppliedPreviewKeyRef.current === latestResourceEvent.key) return
 
-    // For git repos without edits (only file reads), don't auto-switch to preview mode
-    // Stay on git panel unless user manually switches
-    const handleResourceEventWithoutEdits = async (): Promise<void> => {
-      try {
-        if (!currentThreadId) return
-        const summary = await window.api.workspace.getGitPanelSummary(currentThreadId)
-        if (summary.isGitRepo ?? summary.isWorktree) {
-          // Git repo: don't auto-switch to preview mode, just update preview content silently
-          lastAppliedPreviewKeyRef.current = latestResourceEvent.key
-          setPreviewPath(latestResourceEvent.path)
-          setPreviewDiff(latestResourceEvent.codeDiff ?? null)
-          setPreviewReloadToken((v) => v + 1)
-          return
-        }
-      } catch {
-        // ignore summary refresh errors
-      }
-      // Non-git repo: switch to preview mode as before
-      lastAppliedPreviewKeyRef.current = latestResourceEvent.key
-      setPreviewPath(latestResourceEvent.path)
-      setPreviewDiff(latestResourceEvent.codeDiff ?? null)
-      setPreviewReloadToken((v) => v + 1)
-      onRequestPreviewMode?.()
-    }
-    void handleResourceEventWithoutEdits()
-  }, [streamData.isLoading, latestResourceEvent, latestCompletedLlmBatch, onRequestPreviewMode, onRequestGitMode, currentThreadId])
+    // For non-edit resource events, respect current panel choice:
+    // if user stays on git panel, don't switch away; otherwise keep preview behavior.
+    applyPreviewUpdate(moduleMode !== "git")
+  }, [streamData.isLoading, latestResourceEvent, latestCompletedLlmBatch, onRequestPreviewMode, moduleMode])
 
   useEffect(() => {
     if (!currentThreadId) return
@@ -398,25 +446,9 @@ export function RightPanel({
       if (data.threadId === currentThreadId && previewPath) {
         setPreviewReloadToken((v) => v + 1)
       }
-      if (data.threadId === currentThreadId) {
-        window.api.workspace.getGitPanelSummary(currentThreadId).then((summary) => {
-          if (summary.isGitRepo ?? summary.isWorktree) {
-            if (moduleMode !== "git") {
-              onRequestGitMode?.()
-            }
-            return
-          }
-          if (moduleMode !== "preview") {
-            onRequestPreviewMode?.()
-          }
-        }).catch(() => {
-          // ignore summary refresh errors
-        })
-      }
     })
     return cleanup
-  }, [currentThreadId, previewPath, moduleMode, onRequestGitMode, onRequestPreviewMode])
-
+  }, [currentThreadId, previewPath])
 
   useEffect(() => {
     const cleanup = onOpenResourcePreview(({ threadId, filePath }) => {
@@ -451,6 +483,7 @@ export function RightPanel({
   const [skillsHeight, setSkillsHeight] = useState<number | null>(null)
   const [pluginsHeight, setPluginsHeight] = useState<number | null>(null)
   const [hooksHeight, setHooksHeight] = useState<number | null>(null)
+  const [lspHeight, setLspHeight] = useState<number | null>(null)
 
   // Track drag start heights
   const dragStartHeights = useRef<{
@@ -460,6 +493,7 @@ export function RightPanel({
     skills: number
     plugins: number
     hooks: number
+    lsp: number
   } | null>(null)
 
   // Calculate available content height
@@ -468,10 +502,10 @@ export function RightPanel({
     if (!containerRef.current) return 0
     const totalHeight = containerRef.current.clientHeight
 
-    const openPanels = [tasksOpen, filesOpen, agentsOpen, skillsOpen, pluginsOpen, hooksOpen]
-    let used = HEADER_HEIGHT * 6
+    const openPanels = [tasksOpen, filesOpen, agentsOpen, skillsOpen, pluginsOpen, hooksOpen, lspOpen]
+    let used = HEADER_HEIGHT * 7
     // Fixed visual gaps between section blocks
-    used += SECTION_GAP * 5
+    used += SECTION_GAP * 6
 
     // Count handles between consecutive open panels
     let handles = 0
@@ -483,15 +517,15 @@ export function RightPanel({
     used += HANDLE_HEIGHT * handles
 
     return Math.max(0, totalHeight - used)
-  }, [moduleMode, tasksOpen, filesOpen, agentsOpen, skillsOpen, pluginsOpen, hooksOpen])
+  }, [moduleMode, tasksOpen, filesOpen, agentsOpen, skillsOpen, pluginsOpen, hooksOpen, lspOpen])
 
   // Get current heights for each panel's content area
   const getContentHeights = useCallback(() => {
     const available = getAvailableContentHeight()
-    const openCount = [tasksOpen, filesOpen, agentsOpen, skillsOpen, pluginsOpen, hooksOpen].filter(Boolean).length
+    const openCount = [tasksOpen, filesOpen, agentsOpen, skillsOpen, pluginsOpen, hooksOpen, lspOpen].filter(Boolean).length
 
     if (openCount === 0) {
-      return { tasks: 0, files: 0, agents: 0, skills: 0, plugins: 0, hooks: 0 }
+      return { tasks: 0, files: 0, agents: 0, skills: 0, plugins: 0, hooks: 0, lsp: 0 }
     }
 
     const defaultHeight = available / openCount
@@ -502,7 +536,8 @@ export function RightPanel({
       agents: agentsOpen ? (agentsHeight ?? defaultHeight) : 0,
       skills: skillsOpen ? (skillsHeight ?? defaultHeight) : 0,
       plugins: pluginsOpen ? (pluginsHeight ?? defaultHeight) : 0,
-      hooks: hooksOpen ? (hooksHeight ?? defaultHeight) : 0
+      hooks: hooksOpen ? (hooksHeight ?? defaultHeight) : 0,
+      lsp: lspOpen ? (lspHeight ?? defaultHeight) : 0
     }
   }, [
     getAvailableContentHeight,
@@ -512,12 +547,14 @@ export function RightPanel({
     skillsOpen,
     pluginsOpen,
     hooksOpen,
+    lspOpen,
     tasksHeight,
     filesHeight,
     agentsHeight,
     skillsHeight,
     pluginsHeight,
-    hooksHeight
+    hooksHeight,
+    lspHeight
   ])
 
   // Handle resize between tasks and the next open section
@@ -778,6 +815,58 @@ export function RightPanel({
     [getContentHeights, getAvailableContentHeight, tasksOpen, filesOpen, agentsOpen, skillsOpen]
   )
 
+  // Handle resize between hooks and lsp
+  const handleHooksResize = useCallback(
+    (totalDelta: number) => {
+      if (!dragStartHeights.current) {
+        const currentHeights = getContentHeights()
+        dragStartHeights.current = { ...currentHeights }
+      }
+
+      const start = dragStartHeights.current
+      const available = getAvailableContentHeight()
+      const usedByUpperPanels =
+        (tasksOpen ? start.tasks : 0) +
+        (filesOpen ? start.files : 0) +
+        (agentsOpen ? start.agents : 0) +
+        (skillsOpen ? start.skills : 0) +
+        (pluginsOpen ? start.plugins : 0)
+      const maxForHooksAndLsp = available - usedByUpperPanels
+
+      let newHooksHeight = start.hooks + totalDelta
+      let newLspHeight = start.lsp - totalDelta
+
+      if (newHooksHeight < MIN_CONTENT_HEIGHT) {
+        newHooksHeight = MIN_CONTENT_HEIGHT
+        newLspHeight = start.lsp + (start.hooks - MIN_CONTENT_HEIGHT)
+      }
+      if (newLspHeight < MIN_CONTENT_HEIGHT) {
+        newLspHeight = MIN_CONTENT_HEIGHT
+        newHooksHeight = start.hooks + (start.lsp - MIN_CONTENT_HEIGHT)
+      }
+
+      if (newHooksHeight + newLspHeight > maxForHooksAndLsp) {
+        const excess = newHooksHeight + newLspHeight - maxForHooksAndLsp
+        if (totalDelta > 0) {
+          newLspHeight = Math.max(MIN_CONTENT_HEIGHT, newLspHeight - excess)
+        } else {
+          newHooksHeight = Math.max(MIN_CONTENT_HEIGHT, newHooksHeight - excess)
+        }
+      }
+
+      setHooksHeight(newHooksHeight)
+      setLspHeight(newLspHeight)
+
+      if (newHooksHeight < COLLAPSE_THRESHOLD) {
+        setHooksOpen(false)
+      }
+      if (newLspHeight < COLLAPSE_THRESHOLD) {
+        setLspOpen(false)
+      }
+    },
+    [getContentHeights, getAvailableContentHeight, tasksOpen, filesOpen, agentsOpen, skillsOpen, pluginsOpen]
+  )
+
   // Reset drag start on mouse up
   useEffect(() => {
     const handleMouseUp = (): void => {
@@ -795,15 +884,16 @@ export function RightPanel({
     setSkillsHeight(null)
     setPluginsHeight(null)
     setHooksHeight(null)
-  }, [tasksOpen, filesOpen, agentsOpen, skillsOpen, pluginsOpen, hooksOpen])
+    setLspHeight(null)
+  }, [tasksOpen, filesOpen, agentsOpen, skillsOpen, pluginsOpen, hooksOpen, lspOpen])
 
   // Calculate heights in an effect (refs can't be accessed during render)
-  const [heights, setHeights] = useState<PanelHeights>({ tasks: 0, files: 0, agents: 0, skills: 0, plugins: 0, hooks: 0 })
+  const [heights, setHeights] = useState<PanelHeights>({ tasks: 0, files: 0, agents: 0, skills: 0, plugins: 0, hooks: 0, lsp: 0 })
   useEffect(() => {
     setHeights(getContentHeights())
   }, [getContentHeights])
 
-  const allPanelsClosed = moduleMode === "work" && !tasksOpen && !filesOpen && !agentsOpen && !skillsOpen && !pluginsOpen && !hooksOpen
+  const allPanelsClosed = moduleMode === "work" && !tasksOpen && !filesOpen && !agentsOpen && !skillsOpen && !pluginsOpen && !hooksOpen && !lspOpen
 
   return (
     <aside
@@ -861,21 +951,24 @@ export function RightPanel({
       {moduleMode === "git" && (
         <div className="flex h-full min-h-0 flex-col border border-border/75 rounded-2xl bg-white">
           <div className="bg-white p-2 h-full min-h-0">
-            <GitPanelView
-              threadId={currentThreadId ?? ""}
-              workspacePath={threadState?.workspacePath ?? null}
-              onOpenFileFolder={async (filePath) => {
-                try {
-                  const resolved = resolvePreviewPaths(filePath, threadState?.workspacePath ?? null)
-                  const platform = await window.electron.ipcRenderer.invoke("get-platform")
-                  const normalizedPath =
-                    platform === "win32" ? resolved.fullPath.replace(/\//g, "\\") : resolved.fullPath
-                  await window.electron.ipcRenderer.invoke("show-item-in-folder", normalizedPath)
-                } catch (error) {
-                  console.error("[GitPanel] Failed to show item in folder:", error)
-                }
-              }}
-            />
+            <Suspense fallback={<LazySectionFallback label="加载 Git 面板..." />}>
+              <GitPanelView
+                key={currentThreadId ?? "git-panel-empty-thread"}
+                threadId={currentThreadId ?? ""}
+                workspacePath={threadState?.workspacePath ?? null}
+                onOpenFileFolder={async (filePath) => {
+                  try {
+                    const resolved = resolvePreviewPaths(filePath, threadState?.workspacePath ?? null)
+                    const platform = await window.electron.ipcRenderer.invoke("get-platform")
+                    const normalizedPath =
+                      platform === "win32" ? resolved.fullPath.replace(/\//g, "\\") : resolved.fullPath
+                    await window.electron.ipcRenderer.invoke("show-item-in-folder", normalizedPath)
+                  } catch (error) {
+                    console.error("[GitPanel] Failed to show item in folder:", error)
+                  }
+                }}
+              />
+            </Suspense>
           </div>
         </div>
       )}
@@ -989,6 +1082,25 @@ export function RightPanel({
         {hooksOpen && (
           <div className="overflow-auto right-panel-scroll" style={{ height: heights.hooks }}>
             <HooksContent hooks={hooks} onChange={() => window.api.hooks.list().then(setHooks).catch(console.error)} />
+          </div>
+        )}
+      </div>
+
+      {/* Resize handle after HOOKS */}
+      {hooksOpen && lspOpen && <ResizeHandle onDrag={handleHooksResize} />}
+
+      {/* LSP */}
+      <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
+        <SectionHeader
+          title="LSP"
+          icon={Code2}
+          detail={lspHeaderStatus}
+          isOpen={lspOpen}
+          onToggle={() => setLspOpen((prev) => !prev)}
+        />
+        {lspOpen && (
+          <div className="overflow-auto right-panel-scroll" style={{ height: heights.lsp }}>
+            <LspPanel threadId={currentThreadId} embedded statusOnly />
           </div>
         )}
       </div>
@@ -1364,6 +1476,18 @@ function ResourcePreview({
 }): React.JSX.Element {
   const fileName = filePath.split(/[\\/]/).pop() || filePath
   const [isFullscreen, setIsFullscreen] = useState(false)
+  const [previewMode, setPreviewMode] = useState<"preview" | "source">("preview")
+  const [copySuccess, setCopySuccess] = useState(false)
+  const extension = getPathExtension(filePath).toLowerCase()
+  const supportsSourceView =
+    !codeDiff &&
+    (extension === "md" ||
+      extension === "markdown" ||
+      extension === "mdx" ||
+      extension === "html" ||
+      extension === "htm")
+  const previewFileType = useMemo(() => getFileType(fileName), [fileName])
+  const canCopyContent = !codeDiff && (previewFileType.type === "code" || previewFileType.type === "text")
 
   const resolved = useMemo(
     () => resolvePreviewPaths(filePath, workspacePath),
@@ -1390,6 +1514,32 @@ function ResourcePreview({
     onFullscreenChange?.(false)
     onHidePreview?.()
   }
+
+  const handleCopyFileContent = useCallback(async () => {
+    if (!canCopyContent) {
+      toast.error("当前文件类型不支持复制内容")
+      return
+    }
+
+    try {
+      const result = resolved.inWorkspace
+        ? await window.api.workspace.readFile(threadId, resolved.workspaceFilePath)
+        : await window.api.workspace.readExternalFile(resolved.fullPath)
+
+      if (!result.success || result.content === undefined) {
+        toast.error(result.error || "复制失败，请重试")
+        return
+      }
+
+      await navigator.clipboard.writeText(result.content)
+      setCopySuccess(true)
+      setTimeout(() => setCopySuccess(false), 2000)
+      toast.success("文件内容已复制")
+    } catch (error) {
+      console.error("[ResourcePreview] Failed to copy file content:", error)
+      toast.error("复制失败，请重试")
+    }
+  }, [canCopyContent, resolved, threadId])
 
   useEffect(() => {
     if (!isFullscreen) return
@@ -1423,6 +1573,45 @@ function ResourcePreview({
           </div>
         </div>
         <div className="flex items-center gap-1">
+          {supportsSourceView ? (
+            <div className="inline-flex items-center rounded-md border border-border bg-background text-[11px]">
+              <button
+                type="button"
+                onClick={() => setPreviewMode("preview")}
+                aria-pressed={previewMode === "preview"}
+                className={cn(
+                  "px-2 py-0.5 transition-colors",
+                  previewMode === "preview"
+                    ? "bg-background-interactive text-foreground"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                预览
+              </button>
+              <button
+                type="button"
+                onClick={() => setPreviewMode("source")}
+                aria-pressed={previewMode === "source"}
+                className={cn(
+                  "border-l border-border px-2 py-0.5 transition-colors",
+                  previewMode === "source"
+                    ? "bg-background-interactive text-foreground"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                源码
+              </button>
+            </div>
+          ) : null}
+          <button
+            onClick={handleCopyFileContent}
+            disabled={!canCopyContent}
+            className="inline-flex items-center justify-center rounded-md px-1.5 py-1 text-[11px] text-muted-foreground enabled:hover:text-foreground enabled:hover:bg-background-interactive transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            title={canCopyContent ? "复制文件内容" : "当前文件类型不支持复制"}
+            aria-label={canCopyContent ? "复制文件内容" : "当前文件类型不支持复制"}
+          >
+            {copySuccess ? <Check className="size-3.5 text-status-nominal" /> : <Copy className="size-3.5" />}
+          </button>
           <button
             onClick={onReload}
             className="inline-flex items-center justify-center rounded-md px-1.5 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
@@ -1466,13 +1655,16 @@ function ResourcePreview({
         )}
 
         {!codeDiff && (
-          <FileViewer
-            threadId={threadId}
-            filePath={resolved.inWorkspace ? resolved.workspaceFilePath : resolved.fullPath}
-            externalFullPath={resolved.inWorkspace ? undefined : resolved.fullPath}
-            htmlFillHeight={isFullscreen}
-            reloadToken={reloadToken}
-          />
+          <Suspense fallback={<LazySectionFallback label="加载文件预览..." />}>
+            <FileViewer
+              threadId={threadId}
+              filePath={resolved.inWorkspace ? resolved.workspaceFilePath : resolved.fullPath}
+              externalFullPath={resolved.inWorkspace ? undefined : resolved.fullPath}
+              htmlFillHeight
+              reloadToken={reloadToken}
+              previewMode={supportsSourceView ? previewMode : undefined}
+            />
+          </Suspense>
         )}
       </div>
     </div>

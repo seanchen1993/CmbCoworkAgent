@@ -21,7 +21,6 @@ import {
   Layers,
   Clock,
   Notebook,
-  Megaphone,
   Zap,
   Sparkles,
   Wrench,
@@ -40,8 +39,10 @@ import { ModelSwitcher } from "./ModelSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
 import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
+import { GitBranchSwitcher } from "./GitBranchSwitcher"
 import type { Message, SkillMetadata } from "@/types"
 import { MessageBubble } from "./MessageBubble"
+import { UpdateStatusCard } from "./UpdateStatusCard"
 import {
   SkillCreateConfirmDialog,
   type SkillConfirmRequest
@@ -67,6 +68,9 @@ interface StreamMessage {
 
 interface ChatContainerProps {
   threadId: string
+  showGitChangeNotice?: boolean
+  onOpenGitPanel?: () => void
+  onThreadGitStatusChange?: (threadId: string, isGit: boolean) => void
 }
 
 interface SkillIntentBannerRequest {
@@ -163,7 +167,12 @@ function RotatingHeadline() {
   )
 }
 
-export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Element {
+export function ChatContainer({
+  threadId,
+  showGitChangeNotice = false,
+  onOpenGitPanel,
+  onThreadGitStatusChange
+}: ChatContainerProps): React.JSX.Element {
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const isAtBottomRef = useRef(true)
@@ -205,11 +214,9 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
   const thinkingCycleRef = useRef(-1)
   const wasLoadingRef = useRef(false)
   const loadingMessageCountRef = useRef(0)
-  const [latestVersion, setLatestVersion] = useState("")
+  const [needUpdateVersion, setNeedUpdateVersion] = useState(false)
   const [modelContextLimit, setModelContextLimit] = useState<number | undefined>(undefined)
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false)
-
-  const [version, setVersion] = useState("")
 
   useEffect(() => {
     const { ipcRenderer } = window.electron
@@ -217,14 +224,15 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
     // 主动请求版本，不依赖推送时序
     ipcRenderer.invoke("get-version").then((ver: unknown) => {
       console.log("版本 (invoke)：", ver)
-      if (ver) setVersion(ver as string)
+      if (ver) {
+        localStorage.setItem("version", ver as string)
+        updateMMJUserInfo()
+      }
     }).catch((e: unknown) => console.warn("get-version failed:", e))
 
     // 保留推送监听作为备用
     const removeListener = ipcRenderer.on("version", (ver: unknown) => {
       console.log("版本 (push)：", ver)
-      setVersion(ver as string)
-
       localStorage.setItem("version", ver as string)
       updateMMJUserInfo()
     })
@@ -577,32 +585,45 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
     return () => { ignore = true }
   }, [currentModel])
 
-  const queryLatestVersion = useCallback(async () => {
+  const syncNeedUpdateVersion = useCallback(async () => {
     try {
-      const response = await fetch(
-        import.meta.env.VITE_API_BASE_URL + "/api/trajectories/cmbdevclaw/versions/list",
-        {
-          method: "GET",
-          headers: {
-            "Content-Type": "application/json"
-            // Remove placeholder auth token for now
-          }
-        }
-      )
-      const data = await response.json()
-      setLatestVersion(data?.current?.version)
-    } catch (e) {
-      console.log(e)
+      const status = await window.api.update.getStatus()
+      setNeedUpdateVersion(Boolean(status.update) && status.status !== "idle")
+    } catch (error) {
+      console.warn("[ChatContainer] Failed to sync update status:", error)
+      setNeedUpdateVersion(false)
     }
   }, [])
 
-  const needUpdateVersion = useMemo(() => {
-    return latestVersion !== version
-  }, [latestVersion, version])
+  useEffect(() => {
+    const updateApi = window.api.update
+    void syncNeedUpdateVersion()
+
+    const removeAvailable = updateApi.onAvailable(() => {
+      setNeedUpdateVersion(true)
+    })
+    const removeDownloaded = updateApi.onDownloaded(() => {
+      setNeedUpdateVersion(true)
+    })
+    const removeError = updateApi.onError(() => {
+      void syncNeedUpdateVersion()
+    })
+
+    return () => {
+      removeAvailable()
+      removeDownloaded()
+      removeError()
+    }
+  }, [syncNeedUpdateVersion])
+
+  useEffect(() => {
+    if (!updateDialogOpen) {
+      void syncNeedUpdateVersion()
+    }
+  }, [updateDialogOpen, syncNeedUpdateVersion])
 
   useEffect(() => {
     queryRemoteSkills()
-    queryLatestVersion()
     const fetchYoloMode = (): void => {
       window.api.sandbox
         .getYoloMode()
@@ -1543,6 +1564,39 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
     )
   }
 
+  const extractMessageText = useCallback((content: Message["content"]): string => {
+    if (typeof content === "string") return content
+    if (!Array.isArray(content)) return ""
+
+    return content
+      .map((block) => {
+        if (block.type === "text") return block.text ?? ""
+        if (typeof block.content === "string") return block.content
+        return ""
+      })
+      .filter(Boolean)
+      .join("\n")
+  }, [])
+
+  const handleEditUserMessage = useCallback(
+    (message: Message): void => {
+      const original = extractMessageText(message.content)
+      const withoutAttachmentPreview = original.replace(/^(?:📎[^\n]*\n)+(?:\n)?/u, "").trim()
+      const nextInput = withoutAttachmentPreview || original
+      setInput(nextInput)
+
+      requestAnimationFrame(() => {
+        const textarea = inputRef.current
+        if (!textarea) return
+        textarea.focus()
+        const cursor = nextInput.length
+        textarea.setSelectionRange(cursor, cursor)
+      })
+      toast.success("已填充到输入框，编辑后可重新发送")
+    },
+    [extractMessageText, setInput]
+  )
+
   return (
     <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
       {/* Skill creation confirmation dialog */}
@@ -1862,53 +1916,12 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
                           </div>
                         </button>
 
-                        {/*版本check*/}
-                        <button
+                        <UpdateStatusCard
+                          hasUpdate={needUpdateVersion}
                           onClick={() => {
                             setUpdateDialogOpen(true)
                           }}
-                          type="button"
-                          className={`group relative w-full rounded-xl ${
-                            needUpdateVersion
-                              ? 'border-red-400/60 bg-gradient-to-br from-red-50/90 to-red-100/70 hover:border-red-500 hover:from-red-100 hover:to-red-150/80 shadow-red-100/50'
-                              : 'group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors '
-                          } px-4 py-3.5 text-left transition-all duration-300 ease-out hover:shadow-lg hover:scale-[1.01] active:scale-[0.99] backdrop-blur-sm`}
-                        >
-                          <div className="flex items-center gap-3.5">
-                            <div
-                              className={`${
-                                needUpdateVersion
-                                  ? 'bg-red-100 text-red-600 border-red-200 group-hover:bg-red-200 group-hover:text-red-700 group-hover:shadow-red-200/50'
-                                  : 'rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors'
-                              } rounded-lg border p-1 transition-all duration-300 shadow-sm group-hover:shadow-md`}>
-                              <Megaphone size={14} className="drop-shadow-sm" />
-                            </div>
-                            <div className="flex-1 min-w-0">
-                              <div className={`text-sm font-semibold leading-5 ${
-                                needUpdateVersion ? 'text-red-700' : ''
-                              } transition-colors duration-200`}>
-                                {needUpdateVersion? '发现新版本！' : '版本列表'}
-                              </div>
-                            </div>
-                            {needUpdateVersion && (
-                              <div className="flex items-center gap-2">
-                                <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse shadow-sm"></div>
-                              </div>
-                            )}
-                          </div>
-
-                          {/* 悬浮时的渐变覆盖层 */}
-                          <div className={`absolute inset-0 rounded-xl opacity-0 group-hover:opacity-100 transition-opacity duration-300 pointer-events-none ${
-                            needUpdateVersion
-                              ? 'bg-gradient-to-br from-red-400/8 via-transparent to-red-500/6'
-                              : 'bg-gradient-to-br from-blue-400/8 via-transparent to-indigo-500/6'
-                          }`}></div>
-
-                          {/* 边框光效 */}
-                          <div className={`absolute inset-0 rounded-xl opacity-0 group-hover:opacity-30 transition-opacity duration-300 pointer-events-none border ${
-                            needUpdateVersion ? 'border-red-300' : 'border-blue-300'
-                          } blur-sm`}></div>
-                        </button>
+                        />
 
 
                       </div>
@@ -1939,6 +1952,12 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
             {displayMessages.map((message, index) => {
               const previousMessage = index > 0 ? displayMessages[index - 1] : null;
               const isLastMessage = index === displayMessages.length - 1;
+              const nextNonToolMessage =
+                displayMessages.slice(index + 1).find((m) => m.role !== "tool") ?? null;
+              const showAssistantMeta =
+                message.role !== "assistant" ||
+                !nextNonToolMessage ||
+                nextNonToolMessage.role !== "assistant";
 
               return (
                 <MessageBubble
@@ -1946,9 +1965,11 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
                   message={message}
                   previousMessage={previousMessage}
                   isStreaming={isLastMessage && isLoading}
+                  showAssistantMeta={showAssistantMeta}
                   toolResults={toolResults}
                   pendingApproval={pendingApproval}
                   onApprovalDecision={handleApprovalDecision}
+                  onEditUserMessage={handleEditUserMessage}
                   threadId={threadId}
                 />
               );
@@ -2132,7 +2153,7 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
                 </div>
               </>
             ) : (
-              <div className="rounded-md bg-muted/50 px-3 py-2 font-mono text-sm break-all overflow-hidden">
+              <pre className="rounded-md bg-muted/50 px-3 py-2 font-mono text-sm whitespace-pre-wrap break-words overflow-auto max-h-40">
                 {isFileApproval
                   ? `${operation === "write_file" ? "写入" : "编辑"}: ${String(approval.filePath || pendingApproval.tool_call?.args?.filePath || "unknown")}`
                   : approval.command
@@ -2140,7 +2161,7 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
                     : pendingApproval.tool_call?.args?.command
                       ? String(pendingApproval.tool_call.args.command)
                       : "unknown command"}
-              </div>
+              </pre>
             )}
             {Boolean(approval._retryReason) && (
               <div className="text-xs text-amber-600 dark:text-amber-400">
@@ -2235,13 +2256,29 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
       )}
       {/* Input */}
       <div className="p-4">
+        {showGitChangeNotice && (
+          <div className="max-w-3xl mx-auto mb-2 flex items-center justify-between gap-3 rounded-xl border border-status-warning/40 bg-status-warning/10 px-3 py-2">
+            <div className="min-w-0 flex items-center gap-2 text-[12px] text-foreground">
+              <AlertCircle className="size-3.5 shrink-0 text-status-warning" />
+              <span className="truncate">检测到文件变更，可打开 Git 面板查看。</span>
+            </div>
+            <button
+              type="button"
+              onClick={onOpenGitPanel}
+              disabled={!onOpenGitPanel}
+              className="shrink-0 rounded-md bg-status-warning px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-status-warning/90 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              打开
+            </button>
+          </div>
+        )}
         <form onSubmit={handleSubmit} className="max-w-3xl mx-auto">
           <div className="flex flex-col gap-2">
             <div className="flex items-end gap-2">
               <div
                 ref={dropZoneRef}
                 className={cn(
-                  "relative flex-1 min-w-0 flex flex-col rounded-xl border border-border shadow-sm transition-colors duration-300",
+                  "relative flex-1 min-w-0 flex flex-col rounded-3xl border border-border  transition-colors duration-300",
                   glowVisible ? "bg-white/80" : "bg-white",
                   dragOver && "border-primary"
                 )}
@@ -2304,68 +2341,75 @@ export function ChatContainer({ threadId }: ChatContainerProps): React.JSX.Eleme
                   disabled={isLoading}
                   className={cn(
                     "relative z-[1] w-full resize-none bg-transparent overflow-y-auto",
-                    "px-4 py-3 text-sm placeholder:text-muted-foreground",
+                    "p-4 text-sm placeholder:text-muted-foreground",
                     "focus:outline-none disabled:opacity-70",
                     attachments.length > 0 && "pt-1.5"
                   )}
-                  rows={1}
+                  rows={3}
                   style={{ minHeight: "44px", maxHeight: "200px" }}
                 />
                 {/* Bottom bar: + button left, send button right */}
-                <div className="flex items-center justify-between px-2 pb-2">
-                  <button
-                    type="button"
-                    disabled={isLoading || attachmentLoading || attachments.length >= MAX_ATTACHMENTS || totalAttachmentChars >= MAX_TOTAL_CHARS}
-                    onClick={handleAttachClick}
-                    title="添加文件 (txt, md, csv, docx, xlsx)"
-                    className="flex items-center justify-center size-7 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                  >
-                    <Plus className="size-4" />
-                  </button>
-                  {isLoading ? (
+                <div className="flex items-center justify-between px-3 pb-2">
+                  <div className="flex items-center gap-1">
                     <button
                       type="button"
-                      onClick={handleCancel}
-                      aria-label="停止生成"
-                      className="flex items-center justify-center size-7 rounded-md bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
+                      disabled={isLoading || attachmentLoading || attachments.length >= MAX_ATTACHMENTS || totalAttachmentChars >= MAX_TOTAL_CHARS}
+                      onClick={handleAttachClick}
+                      title="添加文件 (txt, md, csv, docx, xlsx)"
+                      className="flex items-center justify-center size-7 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                     >
-                      <Square className="size-3 fill-current" />
+                      <Plus className="size-4" />
                     </button>
-                  ) : (
-                    <button
-                      type="submit"
-                      disabled={!input.trim() && attachments.length === 0}
-                      className="flex items-center justify-center size-7 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                    >
-                      <Send className="size-3.5" />
-                    </button>
-                  )}
+                    <div className="w-px h-4 bg-border mx-1" />
+                    <ModelSwitcher threadId={threadId} />
+                    <div className="w-px h-4 bg-border mx-1" />
+                    <WorkspacePicker threadId={threadId} onGitStatusChange={onThreadGitStatusChange} />
+
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {isLoading ? (
+                      <button
+                        type="button"
+                        onClick={handleCancel}
+                        aria-label="停止生成"
+                        className="flex items-center justify-center size-7 rounded-md bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
+                      >
+                        <Square className="size-3 fill-current" />
+                      </button>
+                    ) : (
+                      <button
+                        type="submit"
+                        disabled={!input.trim() && attachments.length === 0}
+                        className="flex items-center justify-center size-7 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        <Send className="size-3.5" />
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <ModelSwitcher threadId={threadId} />
-                <div className="w-px h-4 bg-border" />
-                <WorkspacePicker threadId={threadId} />
-                {yoloMode && (
-                  <>
-                    <div className="w-px h-4 bg-border" />
-                    <button
-                      type="button"
-                      title="点击打开设置"
-                      onClick={() => setShowCustomizeView(true, "sandbox")}
-                      className="inline-flex items-center gap-1 text-[11px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 hover:bg-amber-500/25 transition-colors cursor-pointer"
-                    >
-                      <Zap className="size-3" />
-                      YOLO
-                    </button>
-                  </>
-                )}
-              </div>
-              {tokenUsage && (
-                <ContextUsageIndicator tokenUsage={tokenUsage} modelId={currentModel} contextLimit={modelContextLimit} />
-              )}
+            {/*chat container bottom panel — moved inside input box above */}
+            <div className={'flex items-center justify-between'}>
+             <div className={'flex items-center space-x-4'}>
+               {yoloMode && (
+                 <button
+                   type="button"
+                   title="点击打开设置"
+                   onClick={() => setShowCustomizeView(true, "sandbox")}
+                   className="inline-flex items-center gap-1 text-[11px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 hover:bg-amber-500/25 transition-colors cursor-pointer"
+                 >
+                   <Zap className="size-3" />
+                   YOLO
+                 </button>
+               )}
+               {tokenUsage && (
+                 <ContextUsageIndicator tokenUsage={tokenUsage} modelId={currentModel}
+                                        contextLimit={modelContextLimit} />
+               )}
+             </div>
+            {/*  GitBranch */}
+            {/*<GitBranchSwitcher workspacePath={workspacePath} />*/}
             </div>
           </div>
         </form>

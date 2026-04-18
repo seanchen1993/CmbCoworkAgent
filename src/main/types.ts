@@ -184,6 +184,8 @@ export interface GrepMatch {
 }
 
 // MCP Connector types
+export type McpConnectorKind = "remote" | "stdio"
+
 export interface McpConnectorAdvanced {
   headers?: Record<string, string>
   transport?: "sse" | "streamable-http"
@@ -197,7 +199,11 @@ export interface McpConnectorAdvanced {
 export interface McpConnectorConfig {
   id: string
   name: string
-  url: string
+  kind?: McpConnectorKind
+  url?: string
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
   enabled: boolean
   advanced?: McpConnectorAdvanced
   lazyLoad?: boolean  // true = lazy load tools, false/undefined = load all tools
@@ -207,7 +213,11 @@ export interface McpConnectorConfig {
 
 export interface McpConnectorUpsert {
   name: string
-  url: string
+  kind?: McpConnectorKind
+  url?: string
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
   enabled?: boolean
   advanced?: McpConnectorAdvanced
   lazyLoad?: boolean  // true = lazy load tools, false/undefined = load all tools
@@ -308,9 +318,125 @@ export interface PluginMetadata {
 export interface PluginMcpServerConfig {
   command?: string
   args?: string[]
+  env?: Record<string, string>
   url?: string
   transport?: "sse" | "streamable-http"
   headers?: Record<string, string>
+}
+
+// LSP types
+export const LSP_JAVA_RUNTIME_NAMES = ["JavaSE-1.8", "JavaSE-11", "JavaSE-17", "JavaSE-21"] as const
+export type LspJavaRuntimeName = typeof LSP_JAVA_RUNTIME_NAMES[number]
+export type LspJavaRuntimeSource = "configured" | "env" | "java_home" | "scan"
+export type LspServerState = "stopped" | "starting" | "running" | "error"
+export type LspLifecycleState = "stopped" | "starting" | "importing" | "ready" | "degraded" | "error"
+
+export interface LspJavaRuntime {
+  name: LspJavaRuntimeName
+  path: string
+  source: LspJavaRuntimeSource
+  version: string | null
+  valid: boolean
+  error?: string
+}
+
+export interface LspProjectRequirement {
+  javaVersion: string
+  runtimeName: LspJavaRuntimeName
+  source: "pom.xml" | "build.gradle" | "build.gradle.kts" | ".classpath"
+}
+
+export interface LspStatus {
+  projectRoot: string | null
+  state: LspServerState
+  lifecycle: LspLifecycleState
+  statusText: string
+  projectStatusText: string
+  progressMessage: string | null
+  vsixAvailable: boolean
+  vsixSource: "user" | null
+  vsixPath: string | null
+  serviceReady: boolean
+  serviceReadyTimedOut: boolean
+  projectReady: boolean
+  projectReadyTimedOut: boolean
+  projectStatus: string | null
+  projectRequirement: LspProjectRequirement | null
+  runtimes: LspJavaRuntime[]
+  selectedRuntime: LspJavaRuntime | null
+  manualJavaHomeStatus: {
+    path: string
+    version: string | null
+    valid: boolean
+    error?: string
+  } | null
+  missingRuntime: LspJavaRuntimeName | null
+  degradedReason: string | null
+  warningReason: string | null
+}
+
+export interface LspConfig {
+  enabled: boolean
+  maxHeapMb: number
+  lastError: string | null
+  manualJavaHome: string | null
+}
+
+export interface LspDiagnostic {
+  file: string
+  line: number
+  column: number
+  endLine?: number
+  endColumn?: number
+  severity: "error" | "warning" | "info" | "hint"
+  message: string
+  source?: string
+}
+
+export interface LspLocation {
+  file: string
+  line: number
+  column: number
+  endLine?: number
+  endColumn?: number
+}
+
+export interface LspHoverResult {
+  contents: string
+  range?: {
+    startLine: number
+    startColumn: number
+    endLine: number
+    endColumn: number
+  }
+}
+
+export interface LspSymbol {
+  name: string
+  kind: string
+  file?: string
+  line?: number
+  column?: number
+  containerName?: string
+}
+
+export interface LspCallHierarchyItem {
+  name: string
+  kind: string
+  detail?: string
+  file: string
+  range: { startLine: number; startColumn: number; endLine: number; endColumn: number }
+  selectionRange: { startLine: number; startColumn: number; endLine: number; endColumn: number }
+}
+
+export interface LspCallHierarchyIncomingCall {
+  from: LspCallHierarchyItem
+  fromRanges: Array<{ startLine: number; startColumn: number; endLine: number; endColumn: number }>
+}
+
+export interface LspCallHierarchyOutgoingCall {
+  to: LspCallHierarchyItem
+  fromRanges: Array<{ startLine: number; startColumn: number; endLine: number; endColumn: number }>
 }
 
 // ── Approval / Sandbox Policy Types ──
