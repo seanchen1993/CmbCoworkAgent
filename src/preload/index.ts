@@ -585,7 +585,7 @@ const api = {
       ipcRenderer.invoke("mcp:testConnection", params)
   },
   terminal: {
-    create: (opts: { workDir?: string; args?: string[]; cols?: number; rows?: number; claudeModelId?: string; syncSkills?: boolean; syncMemory?: boolean }): Promise<string> =>
+    create: (opts: { id?: string; workDir?: string; args?: string[]; cols?: number; rows?: number; claudeModelId?: string; syncSkills?: boolean; syncMemory?: boolean }): Promise<string> =>
       ipcRenderer.invoke("terminal:create", opts),
     write: (id: string, data: string): void =>
       ipcRenderer.send("terminal:write", { id, data }),
@@ -607,6 +607,12 @@ const api = {
       const channel = `terminal:exit:${id}`
       // code 为 null 时表示主进程因 host 通信故障/spawn 失败强制 tear-down，没有真实退出码
       const handler = (_: unknown, code: number | null): void => { callback(code) }
+      ipcRenderer.on(channel, handler)
+      return () => { ipcRenderer.removeListener(channel, handler) }
+    },
+    onClosed: (id: string, callback: (reason: "disposed" | "error") => void): (() => void) => {
+      const channel = `terminal:closed:${id}`
+      const handler = (_: unknown, reason: "disposed" | "error"): void => { callback(reason) }
       ipcRenderer.on(channel, handler)
       return () => { ipcRenderer.removeListener(channel, handler) }
     }

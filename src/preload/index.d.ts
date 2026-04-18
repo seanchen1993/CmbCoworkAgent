@@ -329,7 +329,7 @@ interface CustomAPI {
     onChanged: (callback: () => void) => () => void
   }
   terminal: {
-    create: (opts: { workDir?: string; args?: string[]; cols?: number; rows?: number; claudeModelId?: string; syncSkills?: boolean; syncMemory?: boolean }) => Promise<string>
+    create: (opts: { id?: string; workDir?: string; args?: string[]; cols?: number; rows?: number; claudeModelId?: string; syncSkills?: boolean; syncMemory?: boolean }) => Promise<string>
     write: (id: string, data: string) => void
     resize: (id: string, cols: number, rows: number) => void
     dispose: (id: string) => Promise<void>
@@ -337,6 +337,7 @@ interface CustomAPI {
     ack: (id: string, bytes: number) => void
     onData: (id: string, callback: (data: string, bytes: number) => void) => () => void
     onExit: (id: string, callback: (code: number | null) => void) => () => void
+    onClosed: (id: string, callback: (reason: "disposed" | "error") => void) => () => void
   }
   keepAwake: {
     get: () => Promise<boolean>

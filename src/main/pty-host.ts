@@ -17,19 +17,41 @@ import { spawn as ptySpawn, IPty } from "node-pty"
 import { platform, homedir } from "os"
 import { existsSync } from "fs"
 import { join, basename } from "path"
-import { execSync } from "child_process"
+import { execFile, ChildProcess } from "child_process"
+import {
+  PTY_CREATE_CANCELLED_MESSAGE,
+  PTY_CREATE_CANCELLED_TAG,
+  PTY_DISPOSE_TIMED_OUT_MESSAGE
+} from "./pty-protocol"
 
 const activePtys = new Map<string, IPty>()
+const cancelledCreates = new Set<string>()
+const creatingPtys = new Set<string>()
+const createControllers = new Map<string, AbortController>()
+const activeExecChildren = new Set<ChildProcess>()
+const disposeWatchdogs = new Map<string, NodeJS.Timeout>()
 
 // 流控：高低水位线，防止缓冲区溢出
 const HIGH_WATER_MARK = 5 * 1024 * 1024  // 5MB 暂停
 const LOW_WATER_MARK = 1 * 1024 * 1024   // 1MB 恢复
 const pendingBytes = new Map<string, number>()
 const paused = new Map<string, boolean>()
+// 与主进程的 PTY_DISPOSE_TIMEOUT_MS 保持一致，避免 host 侧更早把“关闭慢”误报成不可恢复失败。
+const DISPOSE_CONFIRM_TIMEOUT_MS = 15_000
 
 // checkNodeVersion 与 tryCandidate 共享的"版本不兼容"标识：
 // 用 sentinel 前缀而非 err.message.includes(...) 字符串匹配，避免改文案时漏改导致分类静默走错路径
 const NODE_INCOMPATIBLE_TAG = "[NODE_INCOMPATIBLE] "
+const NODE_TIMEOUT_TAG = "[NODE_TIMEOUT] "
+// Windows 下宁可慢一点也尽量找到可用 Node：
+// - 单次 node -v probe 固定 5s
+// - Node where/reg 查找固定 3s
+// - Git Bash 探测：where git 5s，注册表 3s
+// 不再用“主预算 + tail 宽限”提前放弃后置候选。
+const NODE_VERSION_PROBE_TIMEOUT_MS = 5_000
+const NODE_DISCOVERY_LOOKUP_TIMEOUT_MS = 3_000
+const GIT_SHELL_WHERE_TIMEOUT_MS = 5_000
+const GIT_SHELL_REG_TIMEOUT_MS = 3_000
 
 // 剥离 BOM 并 trim
 function stripBomTrim(s: string): string {
@@ -41,8 +63,119 @@ function expandEnvVars(s: string): string {
   return s.replace(/%([^%]+)%/g, (_, n) => process.env[n] ?? `%${n}%`)
 }
 
+// Windows-only helper for de-duplicating discovered node.exe paths.
+function canonicalizeWinPath(p: string): string {
+  return p.replace(/\//g, "\\").toLowerCase()
+}
+
+function getExecErrorInfo(err: unknown): {
+  code: string
+  exitCode: number | null
+  status: number | null
+  signal: string
+  killed: boolean
+  stdout: string
+  stderr: string
+  message: string
+} {
+  const code =
+    typeof err === "object" && err && "code" in err
+      ? String((err as { code?: unknown }).code ?? "")
+      : ""
+  const exitCode =
+    typeof err === "object" &&
+    err &&
+    "code" in err &&
+    typeof (err as { code?: unknown }).code === "number"
+      ? (err as { code: number }).code
+      : null
+  const status =
+    typeof err === "object" &&
+    err &&
+    "status" in err &&
+    typeof (err as { status?: unknown }).status === "number"
+      ? (err as { status: number }).status
+      : null
+  const signal =
+    typeof err === "object" && err && "signal" in err
+      ? String((err as { signal?: unknown }).signal ?? "")
+      : ""
+  const killed =
+    typeof err === "object" && err && "killed" in err
+      ? Boolean((err as { killed?: unknown }).killed)
+      : false
+  const stdout =
+    typeof err === "object" && err && "stdout" in err
+      ? String((err as { stdout?: unknown }).stdout ?? "")
+      : ""
+  const stderr =
+    typeof err === "object" && err && "stderr" in err
+      ? String((err as { stderr?: unknown }).stderr ?? "")
+      : ""
+  const message = err instanceof Error ? err.message : String(err)
+  return {
+    code,
+    exitCode,
+    status,
+    signal,
+    killed,
+    stdout,
+    stderr,
+    message
+  }
+}
+
+function isExecTimeout(err: unknown): boolean {
+  const { code, signal, killed } = getExecErrorInfo(err)
+  return code === "ETIMEDOUT" || (killed && signal === "SIGTERM")
+}
+
+function isExecAbort(err: unknown): boolean {
+  const { code } = getExecErrorInfo(err)
+  return code === "ABORT_ERR" || (err instanceof Error && err.name === "AbortError")
+}
+
+function isCreateCancelled(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err)
+  return msg.startsWith(PTY_CREATE_CANCELLED_TAG)
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new Error(`${PTY_CREATE_CANCELLED_TAG}${PTY_CREATE_CANCELLED_MESSAGE}`)
+}
+
+async function execFileTracked(
+  file: string,
+  args: readonly string[],
+  opts: {
+    encoding: "utf8"
+    windowsHide?: boolean
+    timeout?: number
+    signal?: AbortSignal
+  }
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = execFile(file, args, opts, (err, stdout, stderr) => {
+      activeExecChildren.delete(child)
+      if (err) {
+        if (typeof err === "object" && err) {
+          if (!("stdout" in err)) (err as { stdout?: unknown }).stdout = stdout
+          if (!("stderr" in err)) (err as { stderr?: unknown }).stderr = stderr
+        }
+        reject(err)
+        return
+      }
+      resolve({
+        stdout: String(stdout ?? ""),
+        stderr: String(stderr ?? "")
+      })
+    })
+    activeExecChildren.add(child)
+  })
+}
+
 let cachedShell: string | null = null
-function getShell(): string {
+async function getShell(signal?: AbortSignal): Promise<string> {
   if (cachedShell) return cachedShell
   if (platform() === "win32") {
     const triedPaths: string[] = []
@@ -58,6 +191,7 @@ function getShell(): string {
       join(homedir(), "AppData", "Local", "Programs", "Git", "bin", "bash.exe"),
     ]
     for (const p of candidates) {
+      throwIfAborted(signal)
       triedPaths.push(p)
       if (existsSync(p)) {
         cachedShell = p
@@ -68,10 +202,12 @@ function getShell(): string {
     // 2. where git 推导 bash 路径（git.exe 在 PATH 中的概率比 bash.exe 高）
     // 多个 git.exe 共存时（portable shim + 完整安装等），逐个尝试推导，直到找到带 bash.exe 的那个
     try {
-      const gitOut = execSync("where.exe git", {
+      throwIfAborted(signal)
+      const { stdout: gitOut } = await execFileTracked("where.exe", ["git"], {
         encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-        timeout: 3000
+        windowsHide: true,
+        timeout: GIT_SHELL_WHERE_TIMEOUT_MS,
+        signal
       })
       const gitExes = stripBomTrim(gitOut)
         .split(/\r?\n/)
@@ -88,8 +224,18 @@ function getShell(): string {
           return cachedShell
         }
       }
-    } catch {
-      triedPaths.push("where:failed")
+    } catch (err) {
+      if (isCreateCancelled(err)) throw err
+      if (isExecAbort(err)) throw new Error(`${PTY_CREATE_CANCELLED_TAG}${PTY_CREATE_CANCELLED_MESSAGE}`)
+      const { exitCode, status } = getExecErrorInfo(err)
+      if (isExecTimeout(err)) {
+        triedPaths.push("where:timeout")
+      } else if (exitCode === 1 || status === 1) {
+        // where.exe 未命中时在不同系统语言下会输出本地化文案，统一按 status=1 视为 not-found。
+        triedPaths.push("where:not-found")
+      } else {
+        triedPaths.push("where:failed")
+      }
     }
 
     // 3. 注册表兜底（覆盖任意安装路径，git 不在 PATH 时仍可定位）
@@ -99,10 +245,13 @@ function getShell(): string {
     ]
     for (const key of regKeys) {
       try {
-        const regOut = execSync(
-          `reg query "${key}" /v InstallPath`,
-          { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 2000 }
-        )
+        throwIfAborted(signal)
+        const { stdout: regOut } = await execFileTracked("reg", ["query", key, "/v", "InstallPath"], {
+          encoding: "utf8",
+          windowsHide: true,
+          timeout: GIT_SHELL_REG_TIMEOUT_MS,
+          signal
+        })
         // 兼容 REG_SZ 和 REG_EXPAND_SZ
         const match = /InstallPath\s+REG_(?:SZ|EXPAND_SZ)\s+(.+)/i.exec(regOut)
         if (match) {
@@ -115,7 +264,21 @@ function getShell(): string {
           }
           console.warn(`[PtyHost] Registry found Git at ${installDir} but bash.exe not found`)
         }
-      } catch { /* key not found */ }
+      } catch (err) {
+        if (isCreateCancelled(err)) throw err
+        if (isExecAbort(err)) throw new Error(`${PTY_CREATE_CANCELLED_TAG}${PTY_CREATE_CANCELLED_MESSAGE}`)
+        const { exitCode, status } = getExecErrorInfo(err)
+        if (isExecTimeout(err)) {
+          triedPaths.push(`reg:${key}:timeout`)
+          continue
+        }
+        if (exitCode === 1 || status === 1) {
+          // reg query 对"键/值不存在"也会使用本地化输出，统一按 status=1 视为未命中。
+          triedPaths.push(`reg:${key}:not-found`)
+          continue
+        }
+        triedPaths.push(`reg:${key}:failed`)
+      }
     }
     throw new Error(
       `Git Bash not found. Tried: ${triedPaths.join("; ")}. ` +
@@ -140,44 +303,69 @@ function getShell(): string {
 }
 
 let cachedNodeExe: string | null = null
-function findNodeExe(): string {
+async function findNodeExe(signal?: AbortSignal): Promise<string> {
   if (platform() !== "win32") throw new Error("findNodeExe is Windows-only")
   if (cachedNodeExe) return cachedNodeExe
-
   const triedPaths: string[] = []
+  const seenCandidatePaths = new Set<string>()
 
   // 1. 快速检查常见路径（便宜：只是 stat 调用）
-  const candidates = [
+  const candidates: string[] = []
+  // nvm-windows 的活跃版本 symlink 通常在 NVM_SYMLINK（默认 C:\Program Files\nodejs）。
+  // 这里仍然显式加入候选，后续会通过 seenCandidatePaths 做去重。
+  const nvmSymlink = process.env.NVM_SYMLINK
+  if (nvmSymlink) candidates.push(join(nvmSymlink, "node.exe"))
+  candidates.push(
+    join(homedir(), ".volta", "bin", "node.exe"),
+    join(homedir(), "scoop", "apps", "nodejs", "current", "node.exe"),
     join("C:\\", "Program Files", "nodejs", "node.exe"),
     join("C:\\", "Program Files (x86)", "nodejs", "node.exe"),
     join("D:\\", "Program Files", "nodejs", "node.exe"),
-    join("D:\\", "Program Files (x86)", "nodejs", "node.exe"),
-    join(homedir(), "scoop", "apps", "nodejs", "current", "node.exe"),
-    join(homedir(), ".volta", "bin", "node.exe"),
-  ]
-  // nvm-windows 的活跃版本 symlink 通常在 NVM_SYMLINK（默认 C:\Program Files\nodejs，已被上面覆盖）
-  const nvmSymlink = process.env.NVM_SYMLINK
-  if (nvmSymlink) candidates.push(join(nvmSymlink, "node.exe"))
+    join("D:\\", "Program Files (x86)", "nodejs", "node.exe")
+  )
 
   // 探测一个已存在的候选路径：校验通过则缓存返回 "ok"，否则返回失败原因。
   // 不在版本不兼容时立即抛出 —— 用户可能同时装了不兼容旧版和兼容新版，旧的不能否决整个搜索。
   // triedPaths 由外层统一记录，避免双 push 导致最终错误冗长。
   let incompatibleSeen: string | null = null
+  let timeoutSeen: string | null = null
   let execFailedSeen: string | null = null
-  type TryResult = "ok" | "incompatible" | "exec-failed"
-  const tryCandidate = (p: string, label: string): TryResult => {
+  let lookupFailedSeen: string | null = null
+  type TryResult = "ok" | "incompatible" | "timeout" | "exec-failed" | "duplicate"
+  const recordTimeout = (detail: string): void => {
+    if (!timeoutSeen) timeoutSeen = detail
+  }
+  const recordLookupFailure = (detail: string): void => {
+    if (!lookupFailedSeen) lookupFailedSeen = detail
+  }
+  const tryCandidate = async (p: string, label: string): Promise<TryResult> => {
+    const key = canonicalizeWinPath(p)
+    if (seenCandidatePaths.has(key)) {
+      return "duplicate"
+    }
+    seenCandidatePaths.add(key)
+
     try {
-      checkNodeVersion(p)
+      await checkNodeVersion(p, signal)
       cachedNodeExe = p
       return "ok"
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
+      if (msg.startsWith(PTY_CREATE_CANCELLED_TAG)) {
+        throw err
+      }
       if (msg.startsWith(NODE_INCOMPATIBLE_TAG)) {
         // 用户向错误展示时去掉内部 sentinel 前缀
         const cleanMsg = msg.slice(NODE_INCOMPATIBLE_TAG.length)
         if (!incompatibleSeen) incompatibleSeen = `${label} (${p}): ${cleanMsg}`
         console.warn(`[PtyHost] Skipping ${label} (${p}): incompatible Node.js version, continuing search`)
         return "incompatible"
+      }
+      if (msg.startsWith(NODE_TIMEOUT_TAG)) {
+        const cleanMsg = msg.slice(NODE_TIMEOUT_TAG.length)
+        recordTimeout(`${label} (${p}): ${cleanMsg}`)
+        console.warn(`[PtyHost] Skipping ${label} (${p}): Node.js probe timed out`)
+        return "timeout"
       }
       if (!execFailedSeen) execFailedSeen = `${label} (${p}): ${msg}`
       console.warn(`[PtyHost] Skipping ${label} (${p}): ${msg}`)
@@ -187,24 +375,35 @@ function findNodeExe(): string {
 
   // 单条 triedPaths 的状态后缀，避免外层为同一个候选 push 两次
   const trySuffix = (r: TryResult): string =>
-    r === "incompatible" ? ":incompatible" : r === "exec-failed" ? ":exec-failed" : ""
+    r === "incompatible"
+      ? ":incompatible"
+      : r === "timeout"
+        ? ":timeout"
+        : r === "exec-failed"
+          ? ":exec-failed"
+          : r === "duplicate"
+            ? ":skipped-duplicate"
+            : ""
 
   for (const p of candidates) {
+    throwIfAborted(signal)
     if (!existsSync(p)) {
       triedPaths.push(`${p}:not-exists`)
       continue
     }
-    const r = tryCandidate(p, "candidate")
+    const r = await tryCandidate(p, "candidate")
     if (r === "ok") return cachedNodeExe!
     triedPaths.push(`${p}${trySuffix(r)}`)
   }
 
   // 2. where.exe 查找（PATH 中，可能有多个 node.exe：nvm / Scoop / MSI 共存）
   try {
-    const out = execSync("where.exe node.exe", {
+    throwIfAborted(signal)
+    const { stdout: out } = await execFileTracked("where.exe", ["node.exe"], {
       encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 3000
+      windowsHide: true,
+      timeout: NODE_DISCOVERY_LOOKUP_TIMEOUT_MS,
+      signal
     })
     const lines = stripBomTrim(out).split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
     if (lines.length === 0) {
@@ -216,12 +415,24 @@ function findNodeExe(): string {
         continue
       }
       // label 不塞 path：tryCandidate 内部 warn 时已经会单独打 path，避免 "where:C:\...\node.exe (C:\...\node.exe)" 重复
-      const r = tryCandidate(line, "where")
+      const r = await tryCandidate(line, "where")
       if (r === "ok") return cachedNodeExe!
       triedPaths.push(`where:${line}${trySuffix(r)}`)
     }
-  } catch {
-    triedPaths.push("where:failed")
+  } catch (err) {
+    if (isCreateCancelled(err)) throw err
+    if (isExecAbort(err)) throw new Error(`${PTY_CREATE_CANCELLED_TAG}${PTY_CREATE_CANCELLED_MESSAGE}`)
+    const { exitCode, status, message } = getExecErrorInfo(err)
+    if (isExecTimeout(err)) {
+      recordTimeout(`where.exe node.exe: lookup timed out`)
+      triedPaths.push("where:timeout")
+    } else if (exitCode === 1 || status === 1) {
+      // where.exe 未命中 PATH 时在不同系统语言下会本地化，统一按 status=1 视为 not-found。
+      triedPaths.push("where:not-found")
+    } else {
+      recordLookupFailure(`where.exe node.exe: ${message}`)
+      triedPaths.push("where:exec-failed")
+    }
   }
 
   // 3. 注册表兜底（Node.js MSI 安装会写 HKLM/HKCU SOFTWARE\Node.js InstallPath）
@@ -232,10 +443,13 @@ function findNodeExe(): string {
   ]
   for (const key of regKeys) {
     try {
-      const regOut = execSync(
-        `reg query "${key}" /v InstallPath`,
-        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 2000 }
-      )
+      throwIfAborted(signal)
+      const { stdout: regOut } = await execFileTracked("reg", ["query", key, "/v", "InstallPath"], {
+        encoding: "utf8",
+        windowsHide: true,
+        timeout: NODE_DISCOVERY_LOOKUP_TIMEOUT_MS,
+        signal
+      })
       // 兼容 REG_SZ 和 REG_EXPAND_SZ
       const match = /InstallPath\s+REG_(?:SZ|EXPAND_SZ)\s+(.+)/i.exec(regOut)
       if (match) {
@@ -246,11 +460,27 @@ function findNodeExe(): string {
           triedPaths.push(`reg:${key}:${regNode}:not-exists`)
           continue
         }
-        const r = tryCandidate(regNode, `reg:${key}`)
+        const r = await tryCandidate(regNode, `reg:${key}`)
         if (r === "ok") return cachedNodeExe!
         triedPaths.push(`reg:${key}:${regNode}${trySuffix(r)}`)
       }
-    } catch { /* key not found */ }
+    } catch (err) {
+      if (isCreateCancelled(err)) throw err
+      if (isExecAbort(err)) throw new Error(`${PTY_CREATE_CANCELLED_TAG}${PTY_CREATE_CANCELLED_MESSAGE}`)
+      const { exitCode, status, message } = getExecErrorInfo(err)
+      if (isExecTimeout(err)) {
+        recordTimeout(`reg query ${key}: lookup timed out`)
+        triedPaths.push(`reg:${key}:timeout`)
+        continue
+      }
+      if (exitCode === 1 || status === 1) {
+        // reg query 对"键/值不存在"会返回 status=1，但输出文本会本地化，统一按未命中处理。
+        triedPaths.push(`reg:${key}:not-found`)
+        continue
+      }
+      recordLookupFailure(`reg query ${key}: ${message}`)
+      triedPaths.push(`reg:${key}:exec-failed`)
+    }
   }
 
   // 全部候选都失败：如果至少有一个候选是版本不兼容，优先报告"升级"，否则报告"找不到"
@@ -260,12 +490,28 @@ function findNodeExe(): string {
     : `${triedPaths.slice(0, 3).join("; ")}; ... (+${triedPaths.length - 3} more)`
   console.error(`[PtyHost] findNodeExe failed. All tried paths:\n${triedPaths.join("\n")}`)
 
-  if (incompatibleSeen && execFailedSeen) {
-    // 混合失败：有版本不兼容的，也有存在但无法执行的，两类排查方向都给出
+  const issueParts: string[] = []
+  if (incompatibleSeen) {
+    issueParts.push(`Incompatible versions: ${incompatibleSeen}.`)
+  }
+  if (timeoutSeen) {
+    issueParts.push(`Timed out during background probing: ${timeoutSeen}.`)
+  }
+  if (execFailedSeen) {
+    issueParts.push(`Failed to execute: ${execFailedSeen}.`)
+  }
+  if (lookupFailedSeen) {
+    issueParts.push(`PATH/registry lookups failed: ${lookupFailedSeen}.`)
+  }
+
+  if (issueParts.length > 1) {
+    const summaryLead =
+      incompatibleSeen || execFailedSeen
+        ? "Node.js found but not fully usable."
+        : "Node.js detection encountered multiple probe/lookup issues."
     throw new Error(
-      `Node.js found but not fully usable. Some versions are incompatible with Claude Code: ${incompatibleSeen}. ` +
-      `Some failed to execute: ${execFailedSeen}. Tried: ${triedSummary}. ` +
-      `Upgrade Node.js and check permissions: https://nodejs.org/`
+      `${summaryLead} ${issueParts.join(" ")} Tried: ${triedSummary}. ` +
+      `Upgrade Node.js and check endpoint protection/AppLocker rules: https://nodejs.org/`
     )
   }
   if (incompatibleSeen) {
@@ -275,12 +521,26 @@ function findNodeExe(): string {
       `Please upgrade: https://nodejs.org/`
     )
   }
+  if (timeoutSeen) {
+    throw new Error(
+      `Node.js detection timed out during background probing. ` +
+      `First issue: ${timeoutSeen}. ` +
+      `Tried: ${triedSummary}. ` +
+      `This usually means hidden child-process launches are being delayed or blocked on Windows.`
+    )
+  }
   if (execFailedSeen) {
     // node.exe 存在但无法执行（权限/AppLocker/架构不匹配/损坏），和"找不到"是完全不同的排查方向
     throw new Error(
       `Node.js found but could not be executed (permission/AppLocker/architecture/corruption). ` +
       `First issue: ${execFailedSeen}. Tried: ${triedSummary}. ` +
       `Check permissions or reinstall: https://nodejs.org/`
+    )
+  }
+  if (lookupFailedSeen) {
+    throw new Error(
+      `Node.js was not found in common locations, and PATH/registry lookups failed. ` +
+      `First issue: ${lookupFailedSeen}. Tried: ${triedSummary}.`
     )
   }
   throw new Error(
@@ -295,19 +555,31 @@ function findNodeExe(): string {
  * - 执行失败（stub/损坏/无权限/架构不匹配）：抛错（让 caller 跳到下一个候选）
  * - 校验通过：返回
  */
-function checkNodeVersion(nodePath: string): void {
+async function checkNodeVersion(nodePath: string, signal?: AbortSignal): Promise<void> {
   let ver: string
   try {
-    // stdio + windowsHide：避免 node.exe 启动时弹出 Windows DLL 错误对话框挂死，
-    // 也避免 stderr 警告污染父进程日志
-    ver = execSync(`"${nodePath}" -v`, {
+    // 直接 execFile 调 node.exe，避免 Windows 下经由 cmd.exe 额外引入超时/策略拦截。
+    // 保留 windowsHide：避免 node.exe 启动时弹出 DLL 错误对话框挂死。
+    throwIfAborted(signal)
+    const { stdout } = await execFileTracked(nodePath, ["-v"], {
       encoding: "utf8",
-      timeout: 3000,
-      stdio: ["ignore", "pipe", "ignore"],
-      windowsHide: true
-    }).trim()
+      timeout: NODE_VERSION_PROBE_TIMEOUT_MS,
+      windowsHide: true,
+      signal
+    })
+    ver = String(stdout).trim()
   } catch (err) {
-    throw new Error(`Could not execute Node.js at ${nodePath}: ${err instanceof Error ? err.message : String(err)}`)
+    if (isCreateCancelled(err)) throw err
+    if (isExecAbort(err)) throw new Error(`${PTY_CREATE_CANCELLED_TAG}${PTY_CREATE_CANCELLED_MESSAGE}`)
+    if (isExecTimeout(err)) {
+      throw new Error(
+        `${NODE_TIMEOUT_TAG}Timed out while executing Node.js at ${nodePath}. ` +
+          `The executable may still work in an interactive terminal, but launching it from a hidden child process was too slow or blocked.`
+      )
+    }
+    throw new Error(
+      `Could not execute Node.js at ${nodePath}: ${err instanceof Error ? err.message : String(err)}`
+    )
   }
   // 解析完整版本号 vMAJOR.MINOR.PATCH
   const verMatch = ver.match(/^v(\d+)\.(\d+)\.(\d+)/)
@@ -383,9 +655,56 @@ function send(msg: Record<string, unknown>): void {
   process.send?.(msg)
 }
 
-function handleCreate(msg: CreateMsg): void {
+function clearDisposeWatchdog(id: string): void {
+  const timer = disposeWatchdogs.get(id)
+  if (timer) {
+    clearTimeout(timer)
+    disposeWatchdogs.delete(id)
+  }
+}
+
+function scheduleDisposeWatchdog(id: string, error: string): void {
+  clearDisposeWatchdog(id)
+  const timer = setTimeout(() => {
+    const pty = activePtys.get(id)
+    if (pty) {
+      try { pty.kill() } catch { /* ignore */ }
+    }
+    // 这里不要在未等到真实 onExit 前就把 PTY 从 host 跟踪表里抹掉；
+    // 否则一旦 kill 本身失效/卡死，底层 shell/Claude 还活着时就会变成 disposeAll 也兜不到的孤儿进程。
+    // watchdog 的职责是尽快把“关闭卡住”上报给主进程，让 renderer 收口到失败态；
+    // host 侧状态继续保留，后续若 finally/onExit/diposeAll 到来仍能再尝试杀掉它。
+    clearDisposeWatchdog(id)
+    send({ type: "error", id, error })
+  }, DISPOSE_CONFIRM_TIMEOUT_MS)
+  timer.unref()
+  disposeWatchdogs.set(id, timer)
+}
+
+async function handleCreate(msg: CreateMsg): Promise<void> {
+  if (activePtys.has(msg.id) || creatingPtys.has(msg.id)) {
+    send({
+      type: "error",
+      id: msg.id,
+      error: `PTY ${msg.id} already exists or is being created`
+    })
+    return
+  }
+  creatingPtys.add(msg.id)
+  const controller = new AbortController()
+  createControllers.set(msg.id, controller)
   try {
-    const shell = getShell()
+    const throwIfCreateCancelled = (): void => {
+      if (cancelledCreates.has(msg.id)) {
+        cancelledCreates.delete(msg.id)
+        controller.abort()
+        throw new Error(`${PTY_CREATE_CANCELLED_TAG}${PTY_CREATE_CANCELLED_MESSAGE}`)
+      }
+    }
+
+    throwIfCreateCancelled()
+    const shell = await getShell(controller.signal)
+    throwIfCreateCancelled()
     const escapeArg = (arg: string): string => `'${arg.replace(/'/g, "'\\''")}'`
 
     const isJsFile = msg.claudePath.endsWith(".js")
@@ -404,7 +723,9 @@ function handleCreate(msg: CreateMsg): void {
         // Windows: 用 node.exe（CONSOLE 子系统）替代 electron.exe（GUI 子系统），
         // electron.exe 在 ConPTY 下 process.stdout.isTTY 为 undefined，Claude Code 会误入 --print 模式。
         // 通过环境变量传递路径，避免 MSYS2 命令行参数编码损坏中文路径。
-        env._CLAW_NODE = findNodeExe()
+        throwIfCreateCancelled()
+        env._CLAW_NODE = await findNodeExe(controller.signal)
+        throwIfCreateCancelled()
         env._CLAW_SCRIPT = msg.claudePath
         // 注意：msg.args 仍走命令行参数，当前只含 ASCII flag（--model 等），无中文风险
         claudeCmd = ['"$_CLAW_NODE"', '"$_CLAW_SCRIPT"', ...msg.args.map(escapeArg)].join(" ")
@@ -432,6 +753,8 @@ function handleCreate(msg: CreateMsg): void {
       ? claudeCmd + ` ; ${varsToUnset.map((v) => `unset ${escapeArg(v)}`).join("; ")}; exec ${escapeArg(shell)} -l`
       : claudeCmd + ` ; exec ${escapeArg(shell)} -l`
 
+    throwIfCreateCancelled()
+
     const pty = ptySpawn(shell, ["-c", shellCmd], {
       name: "xterm-256color",
       cols: msg.cols,
@@ -444,6 +767,32 @@ function handleCreate(msg: CreateMsg): void {
     pendingBytes.set(msg.id, 0)
     paused.set(msg.id, false)
 
+    pty.onExit(({ exitCode }) => {
+      clearDisposeWatchdog(msg.id)
+      send({ type: "exit", id: msg.id, exitCode })
+      activePtys.delete(msg.id)
+      cancelledCreates.delete(msg.id)
+      pendingBytes.delete(msg.id)
+      paused.delete(msg.id)
+    })
+
+    if (cancelledCreates.has(msg.id)) {
+      cancelledCreates.delete(msg.id)
+      try {
+        pty.kill()
+        scheduleDisposeWatchdog(msg.id, "PTY creation cancellation timed out")
+      } catch (err) {
+        console.warn(`[PtyHost] Failed to kill cancelled PTY ${msg.id}:`, err)
+        // 这条 PTY 还没挂 onData，继续留在 host 里只会变成黑洞；启动 watchdog 兜底清理，
+        // 并让主进程不要再无意义地等满 15s。
+        scheduleDisposeWatchdog(msg.id, "PTY creation cancellation failed")
+      }
+      // PTY 已经 spawn 出来后再收到取消时，不要立刻回 "PTY creation cancelled" 给主进程，
+      // 否则 main 会把这次 dispose 过早视为已完成。优先等真实 exit；若迟迟不来，由 watchdog
+      // 再回 error 收尾。
+      return
+    }
+
     pty.onData((data) => {
       const current = (pendingBytes.get(msg.id) || 0) + Buffer.byteLength(data)
       pendingBytes.set(msg.id, current)
@@ -454,16 +803,22 @@ function handleCreate(msg: CreateMsg): void {
       send({ type: "data", id: msg.id, data })
     })
 
-    pty.onExit(({ exitCode }) => {
-      send({ type: "exit", id: msg.id, exitCode })
-      activePtys.delete(msg.id)
-      pendingBytes.delete(msg.id)
-      paused.delete(msg.id)
-    })
-
     send({ type: "created", id: msg.id })
   } catch (err) {
-    send({ type: "error", id: msg.id, error: err instanceof Error ? err.message : String(err) })
+    const msgText = err instanceof Error ? err.message : String(err)
+    send({
+      type: "error",
+      id: msg.id,
+      error: msgText.startsWith(PTY_CREATE_CANCELLED_TAG)
+        ? msgText.slice(PTY_CREATE_CANCELLED_TAG.length)
+        : msgText
+    })
+  } finally {
+    createControllers.delete(msg.id)
+    if (!activePtys.has(msg.id)) {
+      cancelledCreates.delete(msg.id)
+    }
+    creatingPtys.delete(msg.id)
   }
 }
 
@@ -491,20 +846,62 @@ function handleAck(msg: AckMsg): void {
 }
 
 function handleDispose(msg: DisposeMsg): void {
-  const pty = activePtys.get(msg.id)
+  const hasActivePty = activePtys.has(msg.id)
+  const isCreating = creatingPtys.has(msg.id)
+
+  // 只有“创建中的同 id”才需要用 cancelledCreates 让 in-flight handleCreate 早退。
+  // 对已创建成功、仅等待 pty.kill()/onExit 收尾的旧 PTY，不要再打 cancelled 标记，
+  // 否则同 id 的后续 create 可能会被误判成“上一次创建取消”。
+  if (isCreating) {
+    cancelledCreates.add(msg.id)
+  } else {
+    cancelledCreates.delete(msg.id)
+  }
+  const controller = createControllers.get(msg.id)
+  if (controller) controller.abort()
+  if (!isCreating && !hasActivePty) {
+    createControllers.delete(msg.id)
+  }
+  const pty = hasActivePty ? activePtys.get(msg.id) : undefined
   if (pty) {
-    pty.kill()
-    activePtys.delete(msg.id)
+    try {
+      pty.kill()
+      scheduleDisposeWatchdog(msg.id, PTY_DISPOSE_TIMED_OUT_MESSAGE)
+      // 这里只代表“已向 PTY 发出 kill”，不代表它已经真正退出。
+      // 必须继续等真实的 onExit 来做最终收尾；否则 main / renderer 会把 Stop/Close
+      // 过早视为成功，而尾部 onData/onExit 仍可能迟到到达，造成生命周期判断提前。
+      // 因此这里不要提前删 activePtys/pendingBytes/paused，也不要立刻回 disposed。
+    } catch {
+      // kill 同步抛错时，不能把这条 PTY 从 host 状态里提前抹掉；
+      // 否则如果底层进程其实还活着，就会变成后续 disposeAll 也兜不到的孤儿进程。
+      // 挂一个 watchdog 兜底：若真实 onExit 一直不来，至少能清掉 host 侧状态并通知主进程收尾。
+      console.warn(`[PtyHost] Failed to kill PTY ${msg.id} during dispose; keeping host-side state for timeout/retry recovery`)
+      scheduleDisposeWatchdog(msg.id, PTY_DISPOSE_TIMED_OUT_MESSAGE)
+      return
+    }
+    return
   }
   pendingBytes.delete(msg.id)
   paused.delete(msg.id)
+  clearDisposeWatchdog(msg.id)
+  if (!isCreating) {
+    send({ type: "disposed", id: msg.id })
+  }
 }
 
 function handleDisposeAll(): void {
+  killAllExecChildren()
+  for (const timer of disposeWatchdogs.values()) {
+    clearTimeout(timer)
+  }
+  disposeWatchdogs.clear()
   for (const [, pty] of activePtys) {
-    pty.kill()
+    try { pty.kill() } catch { /* ignore */ }
   }
   activePtys.clear()
+  createControllers.clear()
+  cancelledCreates.clear()
+  creatingPtys.clear()
   pendingBytes.clear()
   paused.clear()
   // #2 fix: 清理完毕后自行退出，避免被强制 kill 导致孤儿进程
@@ -513,7 +910,7 @@ function handleDisposeAll(): void {
 
 process.on("message", (msg: HostMessage) => {
   switch (msg.type) {
-    case "create": handleCreate(msg); break
+    case "create": void handleCreate(msg); break
     case "write": handleWrite(msg); break
     case "resize": handleResize(msg); break
     case "ack": handleAck(msg); break
@@ -534,12 +931,23 @@ function killAllActivePtys(): void {
   }
 }
 
+function killAllExecChildren(): void {
+  for (const [, controller] of createControllers) {
+    controller.abort()
+  }
+  for (const child of activeExecChildren) {
+    try { child.kill() } catch { /* ignore */ }
+  }
+  activeExecChildren.clear()
+}
+
 // 全局异常捕获：通知父进程后主动退出，让父进程的 child.on("exit") 走 tearDownCurrentHost。
 // 不退出会让 host 卡在半死状态：handler 装着，但 PTY map 已经被异常路径污染。
 process.on("uncaughtException", (err) => {
   console.error("[PtyHost] Uncaught exception:", err)
   try { send({ type: "error", error: err.message }) } catch { /* IPC 已断 */ }
   killAllActivePtys()
+  killAllExecChildren()
   // 给 IPC 发送一个 microtask 的窗口再退出
   setImmediate(() => process.exit(1))
 })
@@ -549,6 +957,7 @@ process.on("unhandledRejection", (reason) => {
   console.error("[PtyHost] Unhandled rejection:", reason)
   try { send({ type: "error", error: msg }) } catch { /* IPC 已断 */ }
   killAllActivePtys()
+  killAllExecChildren()
   setImmediate(() => process.exit(1))
 })
 

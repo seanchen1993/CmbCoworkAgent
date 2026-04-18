@@ -1,0 +1,5 @@
+export const PTY_CREATE_CANCELLED_MESSAGE = "PTY creation cancelled"
+export const PTY_CREATE_CANCELLED_TAG = "[CREATE_CANCELLED] "
+export const PTY_CREATE_TIMED_OUT_MESSAGE = "PTY creation timed out"
+export const PTY_DISPOSE_TIMED_OUT_MESSAGE = "PTY dispose timed out"
+export const TERMINAL_ALREADY_ACTIVE_OR_SHUTTING_DOWN_SUBSTRING = "already active or still shutting down"

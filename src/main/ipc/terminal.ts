@@ -10,6 +10,12 @@ import path from "path"
 import { app } from "electron"
 import { getCustomModelConfigById, syncSkillsToClaudeDir } from "../storage"
 import { homedir } from "os"
+import {
+  PTY_CREATE_CANCELLED_MESSAGE,
+  PTY_CREATE_TIMED_OUT_MESSAGE,
+  PTY_DISPOSE_TIMED_OUT_MESSAGE,
+  TERMINAL_ALREADY_ACTIVE_OR_SHUTTING_DOWN_SUBSTRING
+} from "../pty-protocol"
 
 // TODO: 当 CmbCowork 记忆系统改为按项目隔离后，使用与 Claude Code 相同的算法按项目拼接路径：
 // 1. findCanonicalGitRoot(effectiveWorkDir) 获取 git 仓库根目录（worktree 解析到主仓库）
@@ -50,6 +56,10 @@ function buildClaudeEnv(modelId: string, syncMemory: boolean): Record<string, st
 let ptyHost: ChildProcess | null = null
 let idCounter = 0
 let isShuttingDown = false
+let ptyHostCreateTimeoutStreak = 0
+const PTY_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/
+const PTY_DISPOSE_TIMEOUT_MS = 15_000
+const PTY_EXIT_OWNERSHIP_RELEASE_GRACE_MS = 250
 
 // 每个 PTY 对应的 BrowserWindow，用于将数据转发到正确的渲染进程
 const ptyWindows = new Map<string, BrowserWindow>()
@@ -59,6 +69,116 @@ const windowCleanupRegistered = new WeakSet<BrowserWindow>()
 
 // P1 fix: 等待子进程确认创建成功/失败
 const pendingCreates = new Map<string, { resolve: () => void; reject: (err: Error) => void; timer: NodeJS.Timeout }>()
+const pendingDisposes = new Map<string, { resolve: () => void; reject: (err: Error) => void; timer: NodeJS.Timeout; promise: Promise<void> }>()
+const disposeInterruptedCreates = new Set<string>()
+const createTimeoutCleanupDisposes = new Set<string>()
+const disposingPtys = new Set<string>()
+const disposingPtyTimers = new Map<string, NodeJS.Timeout>()
+
+function markPtyDisposing(id: string): void {
+  disposingPtys.add(id)
+  const existing = disposingPtyTimers.get(id)
+  if (existing) clearTimeout(existing)
+  const timer = setTimeout(() => {
+    disposingPtys.delete(id)
+    disposingPtyTimers.delete(id)
+  }, 5_000)
+  timer.unref()
+  disposingPtyTimers.set(id, timer)
+}
+
+function clearPtyDisposing(id: string): void {
+  disposingPtys.delete(id)
+  const timer = disposingPtyTimers.get(id)
+  if (timer) {
+    clearTimeout(timer)
+    disposingPtyTimers.delete(id)
+  }
+}
+
+function releasePtyWindowOwnership(id: string, graceMs = 0): void {
+  if (graceMs <= 0) {
+    ptyWindows.delete(id)
+    return
+  }
+  const timer = setTimeout(() => {
+    ptyWindows.delete(id)
+  }, graceMs)
+  timer.unref()
+}
+
+function clearAllDisposingPtys(): void {
+  disposingPtys.clear()
+  for (const timer of disposingPtyTimers.values()) {
+    clearTimeout(timer)
+  }
+  disposingPtyTimers.clear()
+}
+
+function rejectPendingCreate(id: string, reason: string): void {
+  const pending = pendingCreates.get(id)
+  if (!pending) return
+  clearTimeout(pending.timer)
+  pendingCreates.delete(id)
+  pending.reject(new Error(reason))
+}
+
+function resolvePendingDispose(id: string): void {
+  const pending = pendingDisposes.get(id)
+  if (!pending) return
+  clearTimeout(pending.timer)
+  pendingDisposes.delete(id)
+  disposeInterruptedCreates.delete(id)
+  createTimeoutCleanupDisposes.delete(id)
+  pending.resolve()
+}
+
+function rejectPendingDispose(id: string, reason: string): void {
+  const pending = pendingDisposes.get(id)
+  if (!pending) return
+  clearTimeout(pending.timer)
+  pendingDisposes.delete(id)
+  disposeInterruptedCreates.delete(id)
+  createTimeoutCleanupDisposes.delete(id)
+  pending.reject(new Error(reason))
+}
+
+function requestPtyDispose(id: string): Promise<void> {
+  const existing = pendingDisposes.get(id)
+  if (existing) return existing.promise
+
+  markPtyDisposing(id)
+  if (pendingCreates.has(id)) {
+    disposeInterruptedCreates.add(id)
+  }
+  rejectPendingCreate(id, PTY_CREATE_CANCELLED_MESSAGE)
+
+  let resolveDispose!: () => void
+  let rejectDispose!: (err: Error) => void
+  const promise = new Promise<void>((resolve, reject) => {
+    resolveDispose = resolve
+    rejectDispose = reject
+  })
+  const timer = setTimeout(() => {
+    clearPtyDisposing(id)
+    const win = ptyWindows.get(id)
+    if (!win || win.isDestroyed()) {
+      ptyWindows.delete(id)
+    }
+    rejectPendingDispose(id, PTY_DISPOSE_TIMED_OUT_MESSAGE)
+  }, PTY_DISPOSE_TIMEOUT_MS).unref()
+  pendingDisposes.set(id, { resolve: resolveDispose, reject: rejectDispose, timer, promise })
+
+  if (!ptyHost || ptyHost.killed || !ptyHost.connected) {
+    clearPtyDisposing(id)
+    ptyWindows.delete(id)
+    resolvePendingDispose(id)
+    return promise
+  }
+
+  sendToHost({ type: "dispose", id })
+  return promise
+}
 
 function getClaudePath(): string {
   const isWin = process.platform === "win32"
@@ -125,6 +245,7 @@ function ensurePtyHost(): ChildProcess {
     env: { ...process.env }
   })
   ptyHost = child
+  ptyHostCreateTimeoutStreak = 0
 
   // 代际守卫：handlers 用闭包捕获 child，回调触发时检查 ptyHost 是否还是自己这代，
   // 否则跳过全局状态修改，避免 ready timeout kill 旧 host 后旧 exit 事件误清新 host 状态
@@ -163,6 +284,7 @@ function ensurePtyHost(): ChildProcess {
     // 卡在 ready 之前被 kill 掉的 stuck host，那样的 host 从未收到过 create 消息（create 在
     // await ready 之后才发），所以不可能产生 id 类回信。即便万一发生，按 id 单条操作也无副作用。
     if (msg.type === "created" && msg.id) {
+      if (isCurrent()) ptyHostCreateTimeoutStreak = 0
       const pending = pendingCreates.get(msg.id)
       if (pending) {
         clearTimeout(pending.timer)
@@ -174,8 +296,55 @@ function ensurePtyHost(): ChildProcess {
 
     if (msg.type === "error") {
       if (msg.id) {
+        const isCreateCancelled = msg.error === PTY_CREATE_CANCELLED_MESSAGE
+        const isDisposeTimeout = msg.error === PTY_DISPOSE_TIMED_OUT_MESSAGE
+        const isCreateCancellationWatchdogError =
+          msg.error === "PTY creation cancellation timed out" ||
+          msg.error === "PTY creation cancellation failed"
+        const hadPendingDispose = pendingDisposes.has(msg.id)
+        const hadPendingCreate = pendingCreates.has(msg.id)
+        const interruptedCreateByDispose = disposeInterruptedCreates.has(msg.id)
+        const cleanupAfterCreateTimeout = createTimeoutCleanupDisposes.has(msg.id)
+        const win = ptyWindows.get(msg.id)
+        clearPtyDisposing(msg.id)
+        if (hadPendingDispose) {
+          if ((interruptedCreateByDispose || cleanupAfterCreateTimeout) && isCreateCancellationWatchdogError) {
+            // “dispose 打断 create” 后，若 host 侧 watchdog 只是报告 kill 卡住/失败，
+            // 不能把这条 PTY 过早视为“已经关闭成功”。
+            // 这里统一按 dispose timeout 处理：保留 ownership，让 renderer/main 还能继续重试 stop/close。
+            rejectPendingDispose(msg.id, PTY_DISPOSE_TIMED_OUT_MESSAGE)
+          // dispose 打断 create 时，不管最终是“主动取消”还是“创建真实失败”，
+          // 对 dispose 调用方来说这条 PTY 都已经结束，不应再冒成“关闭失败”。
+          } else
+          if (isCreateCancelled || hadPendingCreate || interruptedCreateByDispose || cleanupAfterCreateTimeout) {
+            // create 超时后 renderer 会保留 termId 和监听，等待 main 异步补发 dispose 的最终收尾。
+            // 这里即使 hadPendingDispose=true，也需要给 renderer 一个 closed 终态，
+            // 否则会留下 running=false 但 termId 仍在、永远等不到 exit/closed 的会话。
+            if (win && !win.isDestroyed()) {
+              win.webContents.send(`terminal:closed:${msg.id}`, isCreateCancelled ? "disposed" : "error")
+            }
+            resolvePendingDispose(msg.id)
+            ptyWindows.delete(msg.id)
+          } else if (isDisposeTimeout) {
+            // host 侧 watchdog 与主进程 dispose timeout 统一走“超时但可恢复/可重试”的语义：
+            // 这里不要删 ownership，让 renderer 仍能走 timeout 恢复，并继续等待迟到的 exit/closed。
+            rejectPendingDispose(msg.id, PTY_DISPOSE_TIMED_OUT_MESSAGE)
+          } else {
+            rejectPendingDispose(msg.id, msg.error || "PTY dispose failed")
+            ptyWindows.delete(msg.id)
+          }
+        } else if (!hadPendingCreate && !isDisposeTimeout) {
+          if (win && !win.isDestroyed()) {
+            // dispose 已超时、renderer 可能已恢复旧绑定；此时迟到的 error 说明这条 PTY
+            // 最终还是失败结束了，但这不是“host 异常退出”，因此单独发 closed 事件，
+            // 避免 renderer 误渲染成 [终端主机异常退出]。
+            win.webContents.send(`terminal:closed:${msg.id}`, "error")
+            ptyWindows.delete(msg.id)
+          }
+        }
         const pending = pendingCreates.get(msg.id)
         if (pending) {
+          if (isCurrent()) ptyHostCreateTimeoutStreak = 0
           clearTimeout(pending.timer)
           pending.reject(new Error(msg.error || "PTY creation failed"))
           pendingCreates.delete(msg.id)
@@ -197,11 +366,52 @@ function ensurePtyHost(): ChildProcess {
     }
 
     if (msg.type === "exit" && msg.id) {
+      clearPtyDisposing(msg.id)
+      const interruptedCreateByDispose = disposeInterruptedCreates.has(msg.id)
+      const cleanupAfterCreateTimeout = createTimeoutCleanupDisposes.has(msg.id)
       const win = ptyWindows.get(msg.id)
       if (win && !win.isDestroyed()) {
-        win.webContents.send(`terminal:exit:${msg.id}`, msg.exitCode)
+        if (interruptedCreateByDispose || cleanupAfterCreateTimeout) {
+          // create 被主动取消 / create-timeout 后 cleanup dispose 导致的退出，
+          // 不应该被 renderer 误渲染成 [终端主机异常退出]。
+          win.webContents.send(`terminal:closed:${msg.id}`, "disposed")
+        } else {
+          win.webContents.send(`terminal:exit:${msg.id}`, msg.exitCode)
+        }
       }
-      ptyWindows.delete(msg.id)
+      resolvePendingDispose(msg.id)
+      disposeInterruptedCreates.delete(msg.id)
+      createTimeoutCleanupDisposes.delete(msg.id)
+      releasePtyWindowOwnership(
+        msg.id,
+        win && !win.isDestroyed() ? PTY_EXIT_OWNERSHIP_RELEASE_GRACE_MS : 0
+      )
+      return
+    }
+
+    if (msg.type === "disposed" && msg.id) {
+      const hadPendingDispose = pendingDisposes.has(msg.id)
+      const cleanupAfterCreateTimeout = createTimeoutCleanupDisposes.has(msg.id)
+      clearPtyDisposing(msg.id)
+      // dispose 已超时并由 renderer 恢复旧 PTY 绑定后，迟到的 disposed 只是过期回包，
+      // 但如果 ownership 仍在，说明 renderer 还把这条会话视为可用，需要显式发 exit
+      // 把它收尾，避免留下假在线会话。
+      if (hadPendingDispose) {
+        if (cleanupAfterCreateTimeout) {
+          const win = ptyWindows.get(msg.id)
+          if (win && !win.isDestroyed()) {
+            win.webContents.send(`terminal:closed:${msg.id}`, "disposed")
+          }
+        }
+        resolvePendingDispose(msg.id)
+        ptyWindows.delete(msg.id)
+      } else {
+        const win = ptyWindows.get(msg.id)
+        if (win && !win.isDestroyed()) {
+          win.webContents.send(`terminal:closed:${msg.id}`, "disposed")
+          ptyWindows.delete(msg.id)
+        }
+      }
       return
     }
   })
@@ -232,15 +442,24 @@ function ensurePtyHost(): ChildProcess {
     }
     // 4. 清空全局状态
     ptyHost = null
+    ptyHostCreateTimeoutStreak = 0
     if (ptyHostReadyTimer) { clearTimeout(ptyHostReadyTimer); ptyHostReadyTimer = null }
     ptyHostReadyPromise = null
     ptyWindows.clear()
+    clearAllDisposingPtys()
+    disposeInterruptedCreates.clear()
+    createTimeoutCleanupDisposes.clear()
     // 5. reject 所有等待中的 create 请求（含 shutdown 期间正在跑的 terminal:create）
     for (const [, pending] of pendingCreates) {
       clearTimeout(pending.timer)
       pending.reject(reason)
     }
     pendingCreates.clear()
+    for (const [, pending] of pendingDisposes) {
+      clearTimeout(pending.timer)
+      pending.reject(reason)
+    }
+    pendingDisposes.clear()
   }
 
   child.on("exit", (code) => {
@@ -325,9 +544,9 @@ function ensureWindowCleanup(win: BrowserWindow): void {
     // 遍历所有属于该窗口的 PTY，全部清理
     for (const [id, w] of ptyWindows) {
       if (w === win) {
-        // sendToHost 默认 throwOnError=false，host 不在/send 失败时只 warn 不抛，无需 try/catch
-        sendToHost({ type: "dispose", id })
-        ptyWindows.delete(id)
+        void requestPtyDispose(id).catch((err) => {
+          console.warn(`[Terminal] Window-close dispose failed for PTY ${id}:`, err)
+        })
       }
     }
   })
@@ -338,8 +557,29 @@ export function registerTerminalHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle(
     "terminal:create",
-    async (event, { workDir, args, cols: initCols, rows: initRows, claudeModelId, syncSkills = false, syncMemory = false }: { workDir?: string; args?: string[]; cols?: number; rows?: number; claudeModelId?: string; syncSkills?: boolean; syncMemory?: boolean }) => {
-      const id = `term-${++idCounter}`
+    async (
+      event,
+      {
+        id: requestedId,
+        workDir,
+        args,
+        cols: initCols,
+        rows: initRows,
+        claudeModelId,
+        syncSkills = false,
+        syncMemory = false
+      }: {
+        id?: string
+        workDir?: string
+        args?: string[]
+        cols?: number
+        rows?: number
+        claudeModelId?: string
+        syncSkills?: boolean
+        syncMemory?: boolean
+      }
+    ) => {
+      const id = requestedId || `term-${++idCounter}`
       const window = BrowserWindow.fromWebContents(event.sender)
       // ptyCreated 在 try/catch 两侧共享：createPromise resolve 后标记为 true。
       // catch 块用它判断 PTY 是否已在子进程里存在，若存在则无条件发 dispose，
@@ -349,6 +589,19 @@ export function registerTerminalHandlers(ipcMain: IpcMain): void {
         if (!window) throw new Error("No window found")
         if (!isAllowedSender(event.sender)) {
           throw new Error("Terminal creation not allowed from remote pages")
+        }
+        if (!PTY_ID_PATTERN.test(id)) {
+          throw new Error("Invalid PTY id")
+        }
+        if (ptyWindows.has(id) || pendingCreates.has(id) || disposingPtys.has(id) || pendingDisposes.has(id)) {
+          console.error("[Terminal] Duplicate/reused PTY id rejected", {
+            id,
+            hasWindow: ptyWindows.has(id),
+            pending: pendingCreates.has(id),
+            disposing: disposingPtys.has(id),
+            pendingDispose: pendingDisposes.has(id)
+          })
+          throw new Error(`Terminal ${id} is ${TERMINAL_ALREADY_ACTIVE_OR_SHUTTING_DOWN_SUBSTRING}`)
         }
 
         ptyWindows.set(id, window)
@@ -388,27 +641,24 @@ export function registerTerminalHandlers(ipcMain: IpcMain): void {
           }
           ensureStillAlive("after skill sync")
         }
-
         const finalArgs = args || []
 
         // P1 fix: 等待子进程确认创建成功
         const createPromise = new Promise<void>((resolve, reject) => {
-          // 超时 30 秒：覆盖 Windows 冷启动 fork pty-host + getShell/findNodeExe 全量查找的最坏情况
-          // （Linux/macOS 通常 < 1s）。30s 是体感与最坏路径的折中：足够覆盖杀软扫描，又不会让用户假死太久。
+          // 超时 90 秒：Windows 下 getShell + findNodeExe 现在会尽量完整探测候选，
+          // 再叠加 Claude Code/PTY 自身冷启动，30s 容易先把更细诊断掐掉。
+          // 90s 偏保守，但符合“宁可慢一点也尽量找到可用 Node”的产品目标。
           const timer = setTimeout(() => {
             if (pendingCreates.has(id)) {
               pendingCreates.delete(id)
-              reject(new Error("PTY creation timed out"))
-              // host 卡在 handleCreate 同步路径（execSync/ptySpawn 挂死）时，IPC 消息队列无法处理，
-              // dispose 消息石沉大海，且 connected 仍为 true，ensurePtyHost 会继续复用这个僵尸 host。
-              // 30s 已是极限，此时主动 kill：exit 事件会触发 tearDownCurrentHost 完整清理，
-              // 包括 reject 其余 pendingCreates（其他 PTY I/O 此时也已冻结，kill 是正确策略）。
-              if (ptyHost && !ptyHost.killed) {
-                console.warn("[Terminal] PTY creation timed out, killing stuck host")
-                try { ptyHost.kill() } catch { /* ignore */ }
-              }
+              ptyHostCreateTimeoutStreak += 1
+              reject(new Error(PTY_CREATE_TIMED_OUT_MESSAGE))
+              // handleCreate 已异步化：create 超时不代表整个 Pty Host 僵死，其他终端 I/O 可能仍然正常。
+              // 迟到的 create 会在 catch 路径补发 dispose，pty-host 内部也会把该 id 标记为 cancelled。
+              // 这里不要因为单个会话的连续超时就杀掉整台 host，否则会把其他正常运行的 PTY 一起打掉。
+              console.warn(`[Terminal] PTY creation timed out (streak=${ptyHostCreateTimeoutStreak})`)
             }
-          }, 30_000).unref()
+          }, 90_000).unref()
           pendingCreates.set(id, { resolve, reject, timer })
         })
 
@@ -443,16 +693,23 @@ export function registerTerminalHandlers(ipcMain: IpcMain): void {
           clearTimeout(pending.timer)
           pendingCreates.delete(id)
         }
-        // 清理 ptyWindows：只有 entry 仍属于本次 create 的 window 时才删除，避免误清他人条目
+        // 保留 ptyWindows ownership，直到后续 dispose/exit/closed 真正收尾；
+        // renderer 的 create-timeout 路径会刻意保留 termId 和消息监听，等待迟到的终态消息。
+        // 如果这里提前 delete，后续 exit/closed 无法再投递回 renderer，session 会卡在未知状态。
         const stillOwned = ptyWindows.get(id) === window
-        if (stillOwned) ptyWindows.delete(id)
         // 向子进程发 dispose：
         // - 正常失败路径（stillOwned=true）：PTY 可能未创建，dispose 是 no-op 也无害
         // - 窗口关闭竞态（stillOwned=false + ptyCreated=true）：closed 回调在 PTY 尚不存在时
         //   发的早期 dispose 是 no-op，现在 PTY 已确认在子进程里存在，必须补发一次防止孤儿
         if (stillOwned || ptyCreated) {
-          // sendToHost 默认 throwOnError=false，host 不在/send 失败时只 warn 不抛，无需 try/catch
-          sendToHost({ type: "dispose", id })
+          if (err instanceof Error && err.message === PTY_CREATE_TIMED_OUT_MESSAGE) {
+            createTimeoutCleanupDisposes.add(id)
+          }
+          void requestPtyDispose(id).catch((disposeErr) => {
+            console.warn(`[Terminal] Cleanup dispose failed for PTY ${id}:`, disposeErr)
+          })
+        } else {
+          createTimeoutCleanupDisposes.delete(id)
         }
         throw err
       }
@@ -494,8 +751,7 @@ export function registerTerminalHandlers(ipcMain: IpcMain): void {
   ipcMain.handle("terminal:dispose", async (event, id: string) => {
     const win = ptyWindows.get(id)
     if (!win || win.webContents.id !== event.sender.id) return
-    sendToHost({ type: "dispose", id })
-    ptyWindows.delete(id)
+    await requestPtyDispose(id)
     console.log(`[Terminal] Disposed PTY ${id}`)
   })
 }
