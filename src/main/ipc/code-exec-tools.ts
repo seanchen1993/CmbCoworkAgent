@@ -1,4 +1,5 @@
 import type { IpcMain } from "electron"
+import { CODE_EXEC_DEFAULT_TIMEOUT_MS } from "../code-exec/constants"
 import { analyzeCodeExecForSavedToolPromotion } from "../code-exec/saved-tool-promotion"
 import {
   computeSavedCodeExecToolHash,
@@ -21,7 +22,7 @@ import type { CodeExecResult } from "../code-exec/types"
 import { getGlobalMcpCapabilityService } from "../mcp/capability-service"
 import { getOpenworkDir, isCodeExecEnabled, setCodeExecEnabled } from "../storage"
 
-const DEFAULT_TIMEOUT_MS = 20_000
+const DEFAULT_TIMEOUT_MS = CODE_EXEC_DEFAULT_TIMEOUT_MS
 const TIMEOUT_MIN = 1_000
 const TIMEOUT_MAX = 120_000
 
@@ -191,8 +192,6 @@ export function registerCodeExecToolsHandlers(ipcMain: IpcMain): void {
       const codeChanged = payload.code !== current.code
 
       let inputSchema = current.inputSchema
-      let outputSchema = current.outputSchema
-      let resultExample = current.resultExample
       let dependencies = parseCodeExecDependencies(payload.code)
 
       if (codeChanged && typeof payload.previewOutput !== "string") {
@@ -202,14 +201,11 @@ export function registerCodeExecToolsHandlers(ipcMain: IpcMain): void {
       if (codeChanged && typeof payload.previewOutput === "string") {
         const promotion = analyzeCodeExecForSavedToolPromotion({
           code: payload.code,
-          params: payload.previewParams,
-          output: payload.previewOutput
+          params: payload.previewParams
         })
 
         if (promotion.status === "ready") {
           inputSchema = promotion.inputSchema
-          outputSchema = promotion.outputSchema
-          resultExample = promotion.resultExample
           dependencies = promotion.dependencies
         }
       }
@@ -224,8 +220,6 @@ export function registerCodeExecToolsHandlers(ipcMain: IpcMain): void {
         codeHash: computeSavedCodeExecToolHash(payload.code, timeoutMs),
         dependencies,
         inputSchema,
-        outputSchema,
-        resultExample,
         lastPreviewParams: payload.previewParams ?? current.lastPreviewParams
       })
 

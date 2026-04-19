@@ -192,6 +192,10 @@ function sanitizeValue(
   return String(value)
 }
 
+export function sanitizeMcpExampleValue(value: unknown): unknown {
+  return sanitizeValue(value, { depth: 0 })
+}
+
 function buildResultExample(result: McpInvocationResult): unknown {
   if (result.isError) {
     return {

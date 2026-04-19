@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, renameS
 import type { HookConfig, HookUpsert } from "./hooks/types"
 import { readdir, readFile, rm, mkdir, stat as fsStat } from "fs/promises"
 import { app } from "electron"
+import { resolveMcpConnectorKind } from "./mcp/connector-kind"
 import type { PluginMetadata, PluginMcpServerConfig } from "./types"
 import { copyDirRecursive } from "./utils/fs"
 const OPENWORK_DIR = join(homedir(), ".cmbcoworkagent")
@@ -914,6 +915,110 @@ export function getMcpConnectorsPath(): string {
   return MCP_CONNECTORS_FILE
 }
 
+function normalizeStringRecord(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
+  const result: Record<string, string> = {}
+  for (const [key, entryValue] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof entryValue === "string") {
+      result[key] = entryValue
+    }
+  }
+  return Object.keys(result).length > 0 ? result : undefined
+}
+
+function normalizeMcpConnector(
+  value: unknown
+): import("./types").McpConnectorConfig | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null
+
+  const entry = value as Record<string, unknown>
+  if (typeof entry.id !== "string" || typeof entry.name !== "string") {
+    return null
+  }
+
+  const hasUrl = typeof entry.url === "string" && entry.url.trim().length > 0
+  const hasCommand = typeof entry.command === "string" && entry.command.trim().length > 0
+  if (entry.kind !== "stdio" && entry.kind !== "remote" && !hasUrl && !hasCommand) {
+    return null
+  }
+  const kind = resolveMcpConnectorKind({
+    kind: entry.kind === "stdio" || entry.kind === "remote" ? entry.kind : undefined,
+    url: hasUrl ? String(entry.url) : undefined,
+    command: hasCommand ? String(entry.command) : undefined
+  })
+
+  const advanced =
+    entry.advanced && typeof entry.advanced === "object" && !Array.isArray(entry.advanced)
+      ? (() => {
+          const advancedEntry = entry.advanced as Record<string, unknown>
+          const reconnect =
+            advancedEntry.reconnect &&
+            typeof advancedEntry.reconnect === "object" &&
+            !Array.isArray(advancedEntry.reconnect)
+              ? {
+                  enabled:
+                    typeof (advancedEntry.reconnect as Record<string, unknown>).enabled === "boolean"
+                      ? ((advancedEntry.reconnect as Record<string, unknown>).enabled as boolean)
+                      : undefined,
+                  maxAttempts:
+                    typeof (advancedEntry.reconnect as Record<string, unknown>).maxAttempts === "number"
+                      ? ((advancedEntry.reconnect as Record<string, unknown>).maxAttempts as number)
+                      : undefined,
+                  delayMs:
+                    typeof (advancedEntry.reconnect as Record<string, unknown>).delayMs === "number"
+                      ? ((advancedEntry.reconnect as Record<string, unknown>).delayMs as number)
+                      : undefined
+                }
+              : undefined
+          const transport: import("./types").McpConnectorAdvanced["transport"] =
+            advancedEntry.transport === "sse" || advancedEntry.transport === "streamable-http"
+              ? advancedEntry.transport
+              : undefined
+
+          const normalizedAdvanced: import("./types").McpConnectorAdvanced = {
+            headers: normalizeStringRecord(advancedEntry.headers),
+            transport,
+            reconnect:
+              reconnect && Object.values(reconnect).some((field) => field !== undefined)
+                ? reconnect
+                : undefined
+          }
+          return normalizedAdvanced
+        })()
+      : undefined
+
+  const connector: import("./types").McpConnectorConfig = {
+    id: entry.id,
+    name: entry.name,
+    kind,
+    enabled: typeof entry.enabled === "boolean" ? entry.enabled : true,
+    lazyLoad: typeof entry.lazyLoad === "boolean" ? entry.lazyLoad : false,
+    createdAt: typeof entry.createdAt === "string" ? entry.createdAt : new Date().toISOString(),
+    updatedAt: typeof entry.updatedAt === "string" ? entry.updatedAt : new Date().toISOString()
+  }
+
+  if (kind === "remote" && hasUrl) {
+    connector.url = String(entry.url).trim()
+    if (advanced && Object.values(advanced).some((field) => field !== undefined)) {
+      connector.advanced = advanced
+    }
+  }
+
+  if (kind === "stdio" && hasCommand) {
+    connector.command = String(entry.command).trim()
+    connector.args =
+      Array.isArray(entry.args) && entry.args.every((arg): arg is string => typeof arg === "string")
+        ? entry.args
+        : []
+    const env = normalizeStringRecord(entry.env)
+    if (env) {
+      connector.env = env
+    }
+  }
+
+  return connector
+}
+
 export function getMcpConnectors(): import("./types").McpConnectorConfig[] {
   getOpenworkDir()
   if (!existsSync(MCP_CONNECTORS_FILE)) return []
@@ -921,14 +1026,9 @@ export function getMcpConnectors(): import("./types").McpConnectorConfig[] {
     const content = readFileSync(MCP_CONNECTORS_FILE, "utf-8")
     const parsed = JSON.parse(content) as unknown
     if (!Array.isArray(parsed)) return []
-    return parsed.filter(
-      (item): item is import("./types").McpConnectorConfig =>
-        item != null &&
-        typeof item === "object" &&
-        typeof (item as Record<string, unknown>).id === "string" &&
-        typeof (item as Record<string, unknown>).name === "string" &&
-        typeof (item as Record<string, unknown>).url === "string"
-    )
+    return parsed
+      .map((item) => normalizeMcpConnector(item))
+      .filter((item): item is import("./types").McpConnectorConfig => item !== null)
   } catch {
     return []
   }
@@ -946,15 +1046,23 @@ export function upsertMcpConnector(
   const now = new Date().toISOString()
   const id = config.id ?? uuid()
   const existing = items.find((i) => i.id === id)
+  const kind = resolveMcpConnectorKind(config)
   const next: import("./types").McpConnectorConfig = {
     id,
     name: config.name.trim(),
-    url: config.url.trim(),
+    kind,
     enabled: config.enabled ?? true,
-    advanced: config.advanced,
     lazyLoad: config.lazyLoad ?? false,
     createdAt: existing?.createdAt ?? now,
     updatedAt: now
+  }
+  if (kind === "remote") {
+    next.url = config.url?.trim()
+    next.advanced = config.advanced
+  } else {
+    next.command = config.command?.trim()
+    next.args = config.args ?? []
+    next.env = config.env
   }
   const index = items.findIndex((i) => i.id === id)
   if (index >= 0) {
@@ -1293,6 +1401,67 @@ export function saveHeartbeatContent(content: string): void {
   writeFileSync(HEARTBEAT_MD_FILE, content)
 }
 
+// ── LSP Config ──
+
+const LSP_CONFIG_FILE = join(OPENWORK_DIR, "lsp-config.json")
+const LSP_RUNTIME_NAMES = ["JavaSE-1.8", "JavaSE-11", "JavaSE-17", "JavaSE-21"] as const
+
+function defaultLspConfig(): import("./types").LspConfig {
+  return {
+    enabled: false,
+    maxHeapMb: 1024,
+    lastError: null,
+    manualJavaHome: null
+  }
+}
+
+export function getLspConfig(): import("./types").LspConfig {
+  getOpenworkDir()
+  if (!existsSync(LSP_CONFIG_FILE)) return defaultLspConfig()
+  try {
+    const content = readFileSync(LSP_CONFIG_FILE, "utf-8")
+    const parsed = JSON.parse(content) as Record<string, unknown>
+    const defaults = defaultLspConfig()
+    let manualJavaHome = typeof parsed.manualJavaHome === "string" && parsed.manualJavaHome.trim()
+      ? parsed.manualJavaHome.trim()
+      : defaults.manualJavaHome
+
+    // Backward compatibility: migrate the first legacy per-version path into the single manual override.
+    if (!manualJavaHome && parsed.javaRuntimePaths && typeof parsed.javaRuntimePaths === "object") {
+      for (const name of LSP_RUNTIME_NAMES) {
+        const value = (parsed.javaRuntimePaths as Record<string, unknown>)[name]
+        if (typeof value === "string" && value.trim()) {
+          manualJavaHome = value.trim()
+          break
+        }
+      }
+    }
+
+    return {
+      enabled: typeof parsed.enabled === "boolean" ? parsed.enabled : defaults.enabled,
+      maxHeapMb: typeof parsed.maxHeapMb === "number" ? parsed.maxHeapMb : defaults.maxHeapMb,
+      lastError: typeof parsed.lastError === "string" ? parsed.lastError : defaults.lastError,
+      manualJavaHome
+    }
+  } catch {
+    return defaultLspConfig()
+  }
+}
+
+export function saveLspConfig(updates: Partial<import("./types").LspConfig>): void {
+  getOpenworkDir()
+  const current = getLspConfig()
+  const merged = { ...current, ...updates }
+  writeFileSync(LSP_CONFIG_FILE, JSON.stringify(merged, null, 2))
+}
+
+export function resetLspConfig(): import("./types").LspConfig {
+  getOpenworkDir()
+  const defaults = defaultLspConfig()
+  writeFileSync(LSP_CONFIG_FILE, JSON.stringify(defaults, null, 2))
+  return defaults
+}
+
 // ── Plugins ──
 
 const PLUGINS_DIR = join(OPENWORK_DIR, "plugins")
@@ -1412,6 +1581,13 @@ export function parseMcpJsonFile(filePath: string): Record<string, PluginMcpServ
       if (typeof entry.command === "string") validated.command = entry.command
       if (Array.isArray(entry.args) && entry.args.every((a): a is string => typeof a === "string")) {
         validated.args = entry.args
+      }
+      if (entry.env && typeof entry.env === "object" && !Array.isArray(entry.env)) {
+        const env: Record<string, string> = {}
+        for (const [ek, ev] of Object.entries(entry.env as Record<string, unknown>)) {
+          if (typeof ev === "string") env[ek] = ev
+        }
+        if (Object.keys(env).length > 0) validated.env = env
       }
       if (typeof entry.url === "string") validated.url = entry.url
       if (entry.transport === "sse" || entry.transport === "streamable-http") {

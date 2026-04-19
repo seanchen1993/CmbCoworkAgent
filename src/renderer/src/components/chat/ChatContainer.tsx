@@ -2153,7 +2153,7 @@ export function ChatContainer({
                 </div>
               </>
             ) : (
-              <div className="rounded-md bg-muted/50 px-3 py-2 font-mono text-sm break-all overflow-hidden">
+              <pre className="rounded-md bg-muted/50 px-3 py-2 font-mono text-sm whitespace-pre-wrap break-words overflow-auto max-h-40">
                 {isFileApproval
                   ? `${operation === "write_file" ? "写入" : "编辑"}: ${String(approval.filePath || pendingApproval.tool_call?.args?.filePath || "unknown")}`
                   : approval.command
@@ -2161,7 +2161,7 @@ export function ChatContainer({
                     : pendingApproval.tool_call?.args?.command
                       ? String(pendingApproval.tool_call.args.command)
                       : "unknown command"}
-              </div>
+              </pre>
             )}
             {Boolean(approval._retryReason) && (
               <div className="text-xs text-amber-600 dark:text-amber-400">
@@ -2409,7 +2409,7 @@ export function ChatContainer({
                )}
              </div>
             {/*  GitBranch */}
-            <GitBranchSwitcher workspacePath={workspacePath} />
+            {/*<GitBranchSwitcher workspacePath={workspacePath} />*/}
             </div>
           </div>
         </form>

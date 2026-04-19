@@ -249,10 +249,33 @@ export const marketApi = {
 
     const blob = await response.blob()
     const contentDisposition = response.headers.get("Content-Disposition")
-    const defaultExt = type === "skill" ? "zip" : type === "plugin" ? "zip" : "json"
+    const defaultExt = type === "skill" || type === "plugin" ? "zip" : "json"
     const filename = contentDisposition?.match(/filename="([^"]+)"/)?.[1] || `${name}.${defaultExt}`
 
     return { blob, filename }
+  },
+
+  async downloadLspVsix(): Promise<DownloadResponse> {
+    try {
+      if (typeof window.api?.lsp?.downloadVsix === "function") {
+        const downloadResult = await window.api.lsp.downloadVsix()
+        return {
+          success: downloadResult.success,
+          error: downloadResult.error
+        }
+      }
+
+      return {
+        success: false,
+        error: "LSP VSIX download API is not available"
+      }
+    } catch (downloadError) {
+      console.error("Failed to download LSP VSIX:", downloadError)
+      return {
+        success: false,
+        error: downloadError instanceof Error ? downloadError.message : "Failed to download LSP VSIX"
+      }
+    }
   },
 
   async getSkills(): Promise<MarketApiResponse> {
@@ -496,9 +519,25 @@ export const marketApi = {
       try {
         const text = await blob.text()
         const mcpConfig = JSON.parse(text)
-        const config = mcpConfig?.mcpServers?.pubmed || {}
+        const serverEntries =
+          mcpConfig?.mcpServers && typeof mcpConfig.mcpServers === "object"
+            ? Object.entries(mcpConfig.mcpServers as Record<string, unknown>)
+            : []
+        const [serverName, serverConfig] =
+          serverEntries[0] ?? [null, mcpConfig && typeof mcpConfig === "object" ? mcpConfig : null]
 
-        if (!config.name || !config.url) {
+        if (!serverConfig || typeof serverConfig !== "object") {
+          return {
+            success: false,
+            error: "No valid MCP connectors found in configuration"
+          }
+        }
+
+        const config = serverConfig as Record<string, unknown>
+        const hasRemote = typeof config.url === "string" && config.url.trim().length > 0
+        const hasStdio = typeof config.command === "string" && config.command.trim().length > 0
+
+        if (!hasRemote && !hasStdio) {
           return {
             success: false,
             error: "No valid MCP connectors found in configuration"
@@ -507,15 +546,55 @@ export const marketApi = {
 
         // Create all connectors
         if (typeof window.api?.mcp?.create === "function") {
-          const targetConfig = {
-            name: config?.name || name || "",
-            url: config?.url,
-            enabled: false,
-            advanced: {
-              ...(config?.advanced || {}),
-              transport: config?.type || config?.advanced?.transport || ""
-            }
-          }
+          const advanced =
+            config.advanced && typeof config.advanced === "object" && !Array.isArray(config.advanced)
+              ? (config.advanced as Record<string, unknown>)
+              : {}
+          const resolvedTransport: "sse" | "streamable-http" | undefined =
+            config.type === "sse" || config.type === "streamable-http"
+              ? config.type
+              : config.transport === "sse" || config.transport === "streamable-http"
+                ? config.transport
+                : advanced.transport === "sse" || advanced.transport === "streamable-http"
+                  ? advanced.transport
+                  : undefined
+          const targetConfig = hasStdio
+            ? {
+                name:
+                  (typeof config.name === "string" && config.name) ||
+                  (typeof serverName === "string" && serverName) ||
+                  name ||
+                  "",
+                kind: "stdio" as const,
+                command: String(config.command),
+                args:
+                  Array.isArray(config.args) && config.args.every((arg): arg is string => typeof arg === "string")
+                    ? config.args
+                    : [],
+                env:
+                  config.env && typeof config.env === "object" && !Array.isArray(config.env)
+                    ? Object.fromEntries(
+                        Object.entries(config.env as Record<string, unknown>).filter(
+                          (entry): entry is [string, string] => typeof entry[1] === "string"
+                        )
+                      )
+                    : undefined,
+                enabled: false
+              }
+            : {
+                name:
+                  (typeof config.name === "string" && config.name) ||
+                  (typeof serverName === "string" && serverName) ||
+                  name ||
+                  "",
+                kind: "remote" as const,
+                url: String(config.url),
+                enabled: false,
+                advanced: {
+                  ...advanced,
+                  ...(resolvedTransport ? { transport: resolvedTransport } : {})
+                }
+              }
           await window.api.mcp.create(targetConfig)
           return {
             success: true

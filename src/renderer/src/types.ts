@@ -66,7 +66,16 @@ import type {
   PluginMetadata,
   PluginManifest,
   ChatXConfig,
-  ChatXRobotConfig
+  ChatXRobotConfig,
+  LspConfig,
+  LspDiagnostic,
+  LspLocation,
+  LspHoverResult,
+  LspSymbol,
+  LspCallHierarchyItem,
+  LspCallHierarchyIncomingCall,
+  LspCallHierarchyOutgoingCall,
+  LspStatus
 } from "../../main/types"
 import type {
   ManagedSavedCodeExecTool,
@@ -87,7 +96,16 @@ export type {
   PluginMetadata,
   PluginManifest,
   ChatXConfig,
-  ChatXRobotConfig
+  ChatXRobotConfig,
+  LspConfig,
+  LspDiagnostic,
+  LspLocation,
+  LspHoverResult,
+  LspSymbol,
+  LspCallHierarchyItem,
+  LspCallHierarchyIncomingCall,
+  LspCallHierarchyOutgoingCall,
+  LspStatus
 }
 
 export type {

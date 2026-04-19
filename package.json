@@ -1,6 +1,6 @@
 {
   "name": "cmbdevclaw",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "description": "CMBDevClaw description",
   "author": {
     "name": "CMBDevClaw",
@@ -163,6 +163,7 @@
     "sql.js": "^1.12.0",
     "tailwind-merge": "^2.6.0",
     "uuid": "^11.0.5",
+    "vscode-jsonrpc": "^8.2.1",
     "ws": "^8.19.0",
     "xlsx": "0.18.5",
     "zustand": "^5.0.3"

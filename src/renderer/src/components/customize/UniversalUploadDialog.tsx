@@ -12,6 +12,12 @@ import {
 } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 
+interface UserInfoLite {
+  sapId?: string
+  ystId?: string
+  userName?: string
+}
+
 interface UniversalUploadDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -48,8 +54,28 @@ export function UniversalUploadDialog({
   const [category, setCategory] = useState<"研发场景" | "通用场景">("研发场景")
   const [guidance, setGuidance] = useState("")
   const [chineseName, setChineseName] = useState("")
-  const [userId, setUserId] = useState("")
+  const [userId, setUserId] = useState<string | undefined>(undefined)
   const [nameFromFile, setNameFromFile] = useState(false)  // name 是否来自文件解析（锁定）
+
+  const buildUserIdFromUserInfo = (userInfo: UserInfoLite | null): string | undefined => {
+    if (!userInfo) return undefined
+    const rawId = (userInfo.ystId || userInfo.sapId || "").trim()
+    const rawName = (userInfo.userName || "").trim()
+    if (rawId && rawName) return `${rawId} / ${rawName}`
+    if (rawId) return rawId
+    if (rawName) return rawName
+    return undefined
+  }
+
+  const loadCurrentUserId = async () => {
+    try {
+      const userInfo = await window.api.models.getUserInfo()
+      setUserId(buildUserIdFromUserInfo(userInfo))
+    } catch (e) {
+      console.error("[UniversalUploadDialog] Failed to load user info:", e)
+      setUserId(undefined)
+    }
+  }
 
   // Initialize form with existing data for update mode
   React.useEffect(() => {
@@ -59,7 +85,6 @@ export function UniversalUploadDialog({
       setCategory(existingItem.category as "研发场景" | "通用场景" || "研发场景")
       setGuidance(existingItem.guidance || "")
       setChineseName(existingItem.chinese_name || "")
-      setUserId(existingItem.user_id || "")
       setNameFromFile(false)
     } else if (!isUpdate && open) {
       // Reset form for new upload
@@ -68,8 +93,10 @@ export function UniversalUploadDialog({
       setCategory("研发场景")
       setGuidance("")
       setChineseName("")
-      setUserId("")
       setNameFromFile(false)
+    }
+    if (open) {
+      void loadCurrentUserId()
     }
   }, [isUpdate, existingItem, open])
 
@@ -177,7 +204,16 @@ export function UniversalUploadDialog({
     setUploading(true)
 
     try {
-      const result = await onUpload(file, name.trim(), description.trim(), category, guidance, chineseName.trim() || undefined, userId.trim() || undefined)
+      const normalizedUserId = userId?.trim() || undefined
+      const result = await onUpload(
+        file,
+        name.trim(),
+        description.trim(),
+        category,
+        guidance,
+        chineseName.trim() || undefined,
+        normalizedUserId
+      )
 
       if (result.success) {
         onSuccess()
@@ -188,7 +224,7 @@ export function UniversalUploadDialog({
         setDescription("")
         setGuidance("")
         setChineseName("")
-        setUserId("")
+        setUserId(undefined)
       } else {
         setError(result.error || "Upload failed")
       }
@@ -381,20 +417,6 @@ export function UniversalUploadDialog({
               placeholder="输入中文名称（可选）"
               value={chineseName}
               onChange={(e) => setChineseName(e.target.value)}
-              disabled={uploading}
-            />
-          </div>
-
-          {/* User ID Input */}
-          <div className="space-y-2">
-            <label htmlFor="user-id" className="block text-sm font-medium">
-              用户ID
-            </label>
-            <Input
-              id="user-id"
-              placeholder="输入用户id"
-              value={userId}
-              onChange={(e) => setUserId(e.target.value)}
               disabled={uploading}
             />
           </div>

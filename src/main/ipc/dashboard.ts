@@ -6,8 +6,9 @@
  * these IPC handlers for security.
  */
 
-import { ipcMain } from "electron"
+import { ipcMain, dialog, BrowserWindow } from "electron"
 import { getUserInfo } from "../storage"
+import * as fs from "fs"
 
 // ─────────────────────────────────────────────────────────
 // ES Configuration (from .env)
@@ -93,6 +94,15 @@ interface TimeRange {
 
 type Granularity = "day" | "week" | "month" | "custom"
 
+const DISLIKE_TYPE_OPTIONS = [
+  { id: "slow", label: "太慢了" },
+  { id: "not_helpful", label: "内容不相关" },
+  { id: "inaccurate", label: "信息不准确" },
+  { id: "unclear", label: "表述不清楚" },
+  { id: "unsafe", label: "包含不安全内容" },
+  { id: "other", label: "其他原因" }
+] as const
+
 function getCalendarInterval(granularity: Granularity, from: string, to: string): string {
   if (granularity === "day") return "hour"
   if (granularity === "custom") {
@@ -124,6 +134,10 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
       avg_duration:       { avg: { field: "durationMs" } },
       total_input_tokens: { sum: { field: "totalInputTokens" } },
       total_output_tokens:{ sum: { field: "totalOutputTokens" } },
+      total_skills:       { cardinality: { field: "usedSkills" } },
+      total_tools:        { cardinality: { field: "toolNames" } },
+      total_skill_calls:  { value_count: { field: "usedSkills" } },
+      total_tool_calls:   { value_count: { field: "toolNames" } },
       by_skill: { terms: { field: "usedSkills",  size: 10 } },
       by_tool: {
         terms: {
@@ -143,6 +157,9 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
           ]
         }
       },
+      by_tool_all: {
+        terms: { field: "toolNames", size: 50 }
+      },
       trend: {
         date_histogram: { field: "startedAt", calendar_interval: interval, time_zone: "Asia/Shanghai" },
         aggs: {
@@ -154,7 +171,8 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
   return esQuery(getEsIndex("trace"), body)
 }
 
-async function fetchModelStats(range: TimeRange, _granularity: Granularity): Promise<unknown> {
+async function fetchModelStats(range: TimeRange, granularity: Granularity): Promise<unknown> {
+  void granularity
   const body = {
     size: 0,
     query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
@@ -177,7 +195,8 @@ async function fetchModelStats(range: TimeRange, _granularity: Granularity): Pro
   return esQuery(getEsIndex("trace"), body)
 }
 
-async function fetchUserStats(range: TimeRange, _granularity: Granularity): Promise<unknown> {
+async function fetchUserStats(range: TimeRange, granularity: Granularity): Promise<unknown> {
+  void granularity
   const body = {
     size: 0,
     query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
@@ -190,7 +209,10 @@ async function fetchUserStats(range: TimeRange, _granularity: Granularity): Prom
         }
       },
       by_org:     { terms: { field: "orgName",     size: 30 } },
-      by_version: { terms: { field: "appVersion",  size: 20 } }
+      by_version: {
+        terms: { field: "appVersion", size: 20 },
+        aggs: { unique_users: { cardinality: { field: "sapId" } } }
+      }
     }
   }
   return esQuery(getEsIndex("trace"), body)
@@ -219,6 +241,112 @@ async function fetchProductivity(range: TimeRange, granularity: Granularity): Pr
       total_commits: { value_count: { field: "eventId" } }
     }
   }
+  return esQuery(getEsIndex("event"), body)
+}
+
+async function fetchFeedback(range: TimeRange, granularity: Granularity): Promise<unknown> {
+  const interval = getCalendarInterval(granularity, range.from, range.to)
+  const dislikeTypeFilters = Object.fromEntries(
+    DISLIKE_TYPE_OPTIONS.map((item) => [
+      item.id,
+      {
+        bool: {
+          filter: [
+            { term: { eventName: "message.feedback.dislike.submit" } },
+            {
+              bool: {
+                should: [
+                  { term: { "properties.dislikeType": item.id } },
+                  { term: { "properties.feedbackId": item.id } }
+                ],
+                minimum_should_match: 1
+              }
+            }
+          ]
+        }
+      }
+    ])
+  )
+
+  const body = {
+    size: 0,
+    query: {
+      bool: {
+        filter: [
+          timeRangeFilter("eventTime", range),
+          {
+            terms: {
+              eventName: [
+                "message.feedback.like",
+                "message.feedback.dislike.submit"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    aggs: {
+      total_likes: {
+        filter: { term: { eventName: "message.feedback.like" } },
+        aggs: {
+          unique_users: { cardinality: { field: "sapId" } }
+        }
+      },
+      total_dislikes: {
+        filter: { term: { eventName: "message.feedback.dislike.submit" } },
+        aggs: {
+          unique_users: { cardinality: { field: "sapId" } }
+        }
+      },
+      dislike_by_type: {
+        filters: {
+          filters: dislikeTypeFilters
+        }
+      },
+      trend: {
+        date_histogram: {
+          field: "eventTime",
+          calendar_interval: interval,
+          time_zone: "Asia/Shanghai"
+        },
+        aggs: {
+          likes: {
+            filter: { term: { eventName: "message.feedback.like" } }
+          },
+          dislikes: {
+            filter: { term: { eventName: "message.feedback.dislike.submit" } }
+          }
+        }
+      },
+      recent_dislike_comments: {
+        filter: {
+          bool: {
+            filter: [
+              { term: { eventName: "message.feedback.dislike.submit" } },
+              { exists: { field: "properties.dislikeText" } }
+            ]
+          }
+        },
+        aggs: {
+          latest: {
+            top_hits: {
+              size: 20,
+              sort: [{ eventTime: { order: "desc" } }],
+              _source: {
+                includes: [
+                  "eventTime",
+                  "properties.dislikeType",
+                  "properties.dislikeTypeLabel",
+                  "properties.dislikeText"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
   return esQuery(getEsIndex("event"), body)
 }
 
@@ -273,6 +401,10 @@ function makeMockOverview(range: TimeRange): unknown {
       avg_duration: { value: 4320 },
       total_input_tokens: { value: 2_340_000 },
       total_output_tokens: { value: 890_000 },
+      total_skills: { value: 10 },
+      total_tools: { value: 27 },
+      total_skill_calls: { value: 1711 },
+      total_tool_calls: { value: 6538 },
       by_skill: {
         buckets: [
           { key: "代码审查",     doc_count: 312 },
@@ -299,6 +431,35 @@ function makeMockOverview(range: TimeRange): unknown {
           { key: "run_tests",          doc_count: 112 },
           { key: "search_code",        doc_count: 98  },
           { key: "notify",             doc_count: 76  }
+        ]
+      },
+      by_tool_all: {
+        buckets: [
+          { key: "read_file",          doc_count: 1823 },
+          { key: "write_file",         doc_count: 1245 },
+          { key: "execute",            doc_count: 987  },
+          { key: "grep",               doc_count: 876  },
+          { key: "glob",               doc_count: 654  },
+          { key: "git_workflow",       doc_count: 412  },
+          { key: "browser_playwright", doc_count: 356  },
+          { key: "manage_skill",       doc_count: 298  },
+          { key: "edit_file",          doc_count: 267  },
+          { key: "manage_scheduler",   doc_count: 241  },
+          { key: "web_search",         doc_count: 198  },
+          { key: "list_directory",     doc_count: 187  },
+          { key: "db_query",           doc_count: 163  },
+          { key: "task",               doc_count: 156  },
+          { key: "task_output",        doc_count: 148  },
+          { key: "create_pr",          doc_count: 134  },
+          { key: "search_tool",        doc_count: 128  },
+          { key: "run_tests",          doc_count: 112  },
+          { key: "search_code",        doc_count: 98   },
+          { key: "code_exec",          doc_count: 92   },
+          { key: "notify",             doc_count: 76   },
+          { key: "inspect_tool",       doc_count: 64   },
+          { key: "write_todos",        doc_count: 58   },
+          { key: "invoke_deferred_tool", doc_count: 45 },
+          { key: "save_code_exec_tool", doc_count: 32  }
         ]
       },
       trend: { buckets: trend }
@@ -379,11 +540,11 @@ function makeMockUserStats(range: TimeRange): unknown {
       },
       by_version: {
         buckets: [
-          { key: "1.3.0", doc_count: 512 },
-          { key: "1.2.5", doc_count: 298 },
-          { key: "1.2.0", doc_count: 187 },
-          { key: "1.1.x", doc_count: 143 },
-          { key: "1.0.x", doc_count: 107 }
+          { key: "1.3.0", doc_count: 512, unique_users: { value: 98 } },
+          { key: "1.2.5", doc_count: 298, unique_users: { value: 62 } },
+          { key: "1.2.0", doc_count: 187, unique_users: { value: 41 } },
+          { key: "1.1.x", doc_count: 143, unique_users: { value: 28 } },
+          { key: "1.0.x", doc_count: 107, unique_users: { value: 19 } }
         ]
       },
       user_trend: { buckets: trend }
@@ -420,6 +581,116 @@ function makeMockProductivity(range: TimeRange): unknown {
       total_files_changed:{ value: 892 },
       total_commits:      { value: 187 },
       active_users:       { value: 24 }
+    }
+  }
+}
+
+function makeMockFeedback(range: TimeRange, granularity: Granularity): unknown {
+  const interval = getCalendarInterval(granularity, range.from, range.to)
+  const from = new Date(range.from)
+  const to = new Date(range.to)
+
+  const buckets: Date[] = []
+  if (interval === "hour") {
+    const start = new Date(from)
+    start.setMinutes(0, 0, 0)
+    for (let t = new Date(start); t <= to; t = new Date(t.getTime() + 60 * 60 * 1000)) {
+      buckets.push(new Date(t))
+    }
+  } else if (interval === "day") {
+    const start = new Date(from)
+    start.setHours(0, 0, 0, 0)
+    for (let t = new Date(start); t <= to; t = new Date(t.getTime() + 24 * 60 * 60 * 1000)) {
+      buckets.push(new Date(t))
+    }
+  } else {
+    const start = new Date(from)
+    const day = start.getDay()
+    start.setDate(start.getDate() - (day === 0 ? 6 : day - 1))
+    start.setHours(0, 0, 0, 0)
+    for (let t = new Date(start); t <= to; t = new Date(t.getTime() + 7 * 24 * 60 * 60 * 1000)) {
+      buckets.push(new Date(t))
+    }
+  }
+
+  const trend = buckets.map((t) => {
+    const likes = Math.floor(5 + Math.random() * 20)
+    const dislikes = Math.floor(2 + Math.random() * 12)
+    return {
+      key_as_string: t.toISOString(),
+      key: t.getTime(),
+      doc_count: likes + dislikes,
+      likes: { doc_count: likes },
+      dislikes: { doc_count: dislikes }
+    }
+  })
+
+  const dislikeByType = {
+    slow: { doc_count: 58 },
+    not_helpful: { doc_count: 74 },
+    inaccurate: { doc_count: 39 },
+    unclear: { doc_count: 46 },
+    unsafe: { doc_count: 11 },
+    other: { doc_count: 27 }
+  }
+
+  const recentComments = [
+    {
+      eventTime: new Date(to.getTime() - 10 * 60 * 1000).toISOString(),
+      properties: {
+        dislikeType: "other",
+        dislikeTypeLabel: "其他原因",
+        dislikeText: "希望能支持更精细的输出格式控制。"
+      }
+    },
+    {
+      eventTime: new Date(to.getTime() - 25 * 60 * 1000).toISOString(),
+      properties: {
+        dislikeType: "inaccurate",
+        dislikeTypeLabel: "信息不准确",
+        dislikeText: "依赖版本建议和项目实际不一致。"
+      }
+    },
+    {
+      eventTime: new Date(to.getTime() - 40 * 60 * 1000).toISOString(),
+      properties: {
+        dislikeType: "slow",
+        dislikeTypeLabel: "太慢了",
+        dislikeText: "等待响应时间偏长，尤其在长上下文里。"
+      }
+    },
+    {
+      eventTime: new Date(to.getTime() - 55 * 60 * 1000).toISOString(),
+      properties: {
+        dislikeType: "unclear",
+        dislikeTypeLabel: "表述不清楚",
+        dislikeText: "可以多给一步一步的解释。"
+      }
+    }
+  ]
+
+  return {
+    aggregations: {
+      total_likes: {
+        doc_count: 386,
+        unique_users: { value: 132 }
+      },
+      total_dislikes: {
+        doc_count: 255,
+        unique_users: { value: 96 }
+      },
+      dislike_by_type: { buckets: dislikeByType },
+      trend: { buckets: trend },
+      recent_dislike_comments: {
+        doc_count: recentComments.length,
+        latest: {
+          hits: {
+            hits: recentComments.map((item) => ({
+              _source: item
+            }))
+          }
+        }
+      }
     }
   }
 }
@@ -486,6 +757,70 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data: await fetchProductivity(range, granularity) }
       } catch (e) {
         console.error("[Dashboard] productivity error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:feedback",
+    async (_, range: TimeRange, granularity: Granularity) => {
+      if (import.meta.env.DEV) return { success: true, data: makeMockFeedback(range, granularity) }
+      try {
+        return { success: true, data: await fetchFeedback(range, granularity) }
+      } catch (e) {
+        console.error("[Dashboard] feedback error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:exportExcel",
+    async (
+      _,
+      sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>
+    ) => {
+      try {
+        // Dynamic import xlsx to avoid bundling issues
+        const XLSX = await import("xlsx")
+
+        const wb = XLSX.utils.book_new()
+        for (const sheet of sheets) {
+          const wsData = [sheet.header, ...sheet.rows]
+          const ws = XLSX.utils.aoa_to_sheet(wsData)
+
+          // Auto-size columns based on content
+          const colWidths = sheet.header.map((h, i) => {
+            let maxLen = h.length
+            for (const row of sheet.rows) {
+              const cellLen = String(row[i] ?? "").length
+              if (cellLen > maxLen) maxLen = cellLen
+            }
+            return { wch: Math.min(maxLen + 4, 40) }
+          })
+          ws["!cols"] = colWidths
+
+          XLSX.utils.book_append_sheet(wb, ws, sheet.name.slice(0, 31))
+        }
+
+        const win = BrowserWindow.getFocusedWindow()
+        const result = await dialog.showSaveDialog(win ?? BrowserWindow.getAllWindows()[0], {
+          title: "导出运营面板数据",
+          defaultPath: `运营面板数据_${new Date().toISOString().slice(0, 10)}.xlsx`,
+          filters: [{ name: "Excel", extensions: ["xlsx"] }]
+        })
+
+        if (result.canceled || !result.filePath) {
+          return { success: false, canceled: true }
+        }
+
+        const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" })
+        fs.writeFileSync(result.filePath, buf)
+
+        return { success: true, filePath: result.filePath }
+      } catch (e) {
+        console.error("[Dashboard] exportExcel error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }

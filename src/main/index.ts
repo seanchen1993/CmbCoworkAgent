@@ -85,6 +85,8 @@ import { registerTerminalHandlers, disposeAllTerminals } from "./ipc/terminal"
 import { registerCodeExecToolsHandlers } from "./ipc/code-exec-tools"
 import { registerRoutingHandlers } from "./ipc/routing"
 import { registerDashboardHandlers } from "./ipc/dashboard"
+import { registerLspHandlers } from "./ipc/lsp"
+import { stopAllLsp } from "./lsp"
 import { setTraceReporter } from "./agent/trace/collector"
 import { CloudTraceReporter } from "./agent/trace/cloud-reporter"
 import { setEventReporter, HttpEventReporter } from "./services/event-reporter"
@@ -324,6 +326,7 @@ if (!gotTheLock) {
     registerRoutingHandlers(ipcMain)
     registerDashboardHandlers(ipcMain)
     registerUpdaterHandlers()
+    registerLspHandlers(ipcMain)
 
     // Track event handler for client-side telemetry
     ipcMain.handle("track-event", async (_event, payload: any) => {
@@ -460,7 +463,15 @@ if (!gotTheLock) {
     }
   })
 
-  app.on("will-quit", () => {
+  let quitting = false
+  app.on("will-quit", (e) => {
+    if (quitting) {
+      // Re-entry: user pressed Cmd+Q again while cleanup is running. Just block.
+      e.preventDefault()
+      return
+    }
+    quitting = true
+    e.preventDefault()
     applyKeepAwake(false)
     disposeAllTerminals()
     LocalSandbox.killAll()
@@ -468,7 +479,30 @@ if (!gotTheLock) {
     stopHeartbeat()
     stopChatX()
     stopUpdateChecker()
-    closeRuntime().catch((e) => console.warn("[Main] closeRuntime error:", e))
-    flush()
+
+    const cleanup = Promise.all([
+      stopAllLsp().catch((err) => console.warn("[Main] stopAllLsp error:", err)),
+      closeRuntime().catch((err) => console.warn("[Main] closeRuntime error:", err))
+    ])
+
+    // Single-fire exit guard so timeout + finally don't both call app.exit
+    let exited = false
+    const doExit = (): void => {
+      if (exited) return
+      exited = true
+      flush()
+      app.exit(0)
+    }
+
+    // Give async cleanup up to 10s, then force quit
+    const forceTimer = setTimeout(() => {
+      console.warn("[Main] Cleanup timeout, force quitting")
+      doExit()
+    }, 10_000)
+
+    cleanup.finally(() => {
+      clearTimeout(forceTimer)
+      doExit()
+    })
   })
 }

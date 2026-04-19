@@ -751,11 +751,26 @@ export function MarketPanel(): React.JSX.Element {
         }
 
         const config = mcpServerConfig as Record<string, unknown>
+        const isStdio = typeof config.command === "string" && config.command.trim().length > 0
         const url = typeof config.url === "string" ? config.url : ""
         setMcpDetailConnector({
           id: item.name,
           name: typeof config.name === "string" ? config.name : item.name,
-          url,
+          kind: isStdio ? "stdio" : "remote",
+          url: isStdio ? undefined : url,
+          command: isStdio ? config.command as string : undefined,
+          args:
+            isStdio && Array.isArray(config.args) && config.args.every((arg): arg is string => typeof arg === "string")
+              ? config.args
+              : undefined,
+          env:
+            isStdio && config.env && typeof config.env === "object" && !Array.isArray(config.env)
+              ? Object.fromEntries(
+                  Object.entries(config.env as Record<string, unknown>).filter(
+                    (entry): entry is [string, string] => typeof entry[1] === "string"
+                  )
+                )
+              : undefined,
           enabled: false,
           lazyLoad: false,
           createdAt: item.created_at,
