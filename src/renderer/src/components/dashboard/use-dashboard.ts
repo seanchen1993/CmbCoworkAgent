@@ -20,9 +20,14 @@ export interface OverviewData {
   avgDurationMs: number
   inputTokens: number
   outputTokens: number
+  totalSkills: number
+  totalTools: number
+  totalSkillCalls: number
+  totalToolCalls: number
   trend: Array<{ time: string; count: number; users: number }>
   bySkill: Array<{ skill: string; count: number }>
   byTool: Array<{ tool: string; count: number }>
+  byToolAll: Array<{ tool: string; count: number }>
 }
 
 export interface ModelStatsData {
@@ -208,6 +213,10 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
   const avgDurationMs = aggs.avg_duration?.value ?? 0
   const inputTokens = aggs.total_input_tokens?.value ?? 0
   const outputTokens = aggs.total_output_tokens?.value ?? 0
+  const totalSkills = aggs.total_skills?.value ?? 0
+  const totalTools = aggs.total_tools?.value ?? 0
+  const totalSkillCalls = aggs.total_skill_calls?.value ?? 0
+  const totalToolCalls = aggs.total_tool_calls?.value ?? 0
 
   const trend: OverviewData["trend"] = (aggs.trend?.buckets ?? []).map((b: any) => ({
     time: formatTrendTime(b.key_as_string ?? new Date(b.key).toISOString(), granularity),
@@ -225,7 +234,12 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
     count: b.doc_count
   }))
 
-  return { totalCalls, activeUsers, avgDurationMs, inputTokens, outputTokens, trend, bySkill, byTool }
+  const byToolAll: OverviewData["byToolAll"] = (aggs.by_tool_all?.buckets ?? []).map((b: any) => ({
+    tool: b.key || "unknown",
+    count: b.doc_count
+  }))
+
+  return { totalCalls, activeUsers, avgDurationMs, inputTokens, outputTokens, totalSkills, totalTools, totalSkillCalls, totalToolCalls, trend, bySkill, byTool, byToolAll }
 }
 
 function parseModelStats(raw: any): ModelStatsData {
@@ -268,7 +282,7 @@ function parseUserStats(raw: any): UserStatsData {
 
   const byVersion: UserStatsData["byVersion"] = (aggs.by_version?.buckets ?? []).map((b: any) => ({
     version: b.key || "未知",
-    count: b.doc_count
+    count: b.unique_users?.value ?? b.doc_count
   }))
 
   const userTrend: UserStatsData["userTrend"] = (aggs.user_trend?.buckets ?? []).map((b: any) => ({

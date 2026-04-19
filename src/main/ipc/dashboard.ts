@@ -6,8 +6,9 @@
  * these IPC handlers for security.
  */
 
-import { ipcMain } from "electron"
+import { ipcMain, dialog, BrowserWindow } from "electron"
 import { getUserInfo } from "../storage"
+import * as fs from "fs"
 
 // ─────────────────────────────────────────────────────────
 // ES Configuration (from .env)
@@ -133,6 +134,10 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
       avg_duration:       { avg: { field: "durationMs" } },
       total_input_tokens: { sum: { field: "totalInputTokens" } },
       total_output_tokens:{ sum: { field: "totalOutputTokens" } },
+      total_skills:       { cardinality: { field: "usedSkills" } },
+      total_tools:        { cardinality: { field: "toolNames" } },
+      total_skill_calls:  { value_count: { field: "usedSkills" } },
+      total_tool_calls:   { value_count: { field: "toolNames" } },
       by_skill: { terms: { field: "usedSkills",  size: 10 } },
       by_tool: {
         terms: {
@@ -151,6 +156,9 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
             "write_todos"
           ]
         }
+      },
+      by_tool_all: {
+        terms: { field: "toolNames", size: 50 }
       },
       trend: {
         date_histogram: { field: "startedAt", calendar_interval: interval, time_zone: "Asia/Shanghai" },
@@ -201,7 +209,10 @@ async function fetchUserStats(range: TimeRange, granularity: Granularity): Promi
         }
       },
       by_org:     { terms: { field: "orgName",     size: 30 } },
-      by_version: { terms: { field: "appVersion",  size: 20 } }
+      by_version: {
+        terms: { field: "appVersion", size: 20 },
+        aggs: { unique_users: { cardinality: { field: "sapId" } } }
+      }
     }
   }
   return esQuery(getEsIndex("trace"), body)
@@ -390,6 +401,10 @@ function makeMockOverview(range: TimeRange): unknown {
       avg_duration: { value: 4320 },
       total_input_tokens: { value: 2_340_000 },
       total_output_tokens: { value: 890_000 },
+      total_skills: { value: 10 },
+      total_tools: { value: 27 },
+      total_skill_calls: { value: 1711 },
+      total_tool_calls: { value: 6538 },
       by_skill: {
         buckets: [
           { key: "代码审查",     doc_count: 312 },
@@ -416,6 +431,35 @@ function makeMockOverview(range: TimeRange): unknown {
           { key: "run_tests",          doc_count: 112 },
           { key: "search_code",        doc_count: 98  },
           { key: "notify",             doc_count: 76  }
+        ]
+      },
+      by_tool_all: {
+        buckets: [
+          { key: "read_file",          doc_count: 1823 },
+          { key: "write_file",         doc_count: 1245 },
+          { key: "execute",            doc_count: 987  },
+          { key: "grep",               doc_count: 876  },
+          { key: "glob",               doc_count: 654  },
+          { key: "git_workflow",       doc_count: 412  },
+          { key: "browser_playwright", doc_count: 356  },
+          { key: "manage_skill",       doc_count: 298  },
+          { key: "edit_file",          doc_count: 267  },
+          { key: "manage_scheduler",   doc_count: 241  },
+          { key: "web_search",         doc_count: 198  },
+          { key: "list_directory",     doc_count: 187  },
+          { key: "db_query",           doc_count: 163  },
+          { key: "task",               doc_count: 156  },
+          { key: "task_output",        doc_count: 148  },
+          { key: "create_pr",          doc_count: 134  },
+          { key: "search_tool",        doc_count: 128  },
+          { key: "run_tests",          doc_count: 112  },
+          { key: "search_code",        doc_count: 98   },
+          { key: "code_exec",          doc_count: 92   },
+          { key: "notify",             doc_count: 76   },
+          { key: "inspect_tool",       doc_count: 64   },
+          { key: "write_todos",        doc_count: 58   },
+          { key: "invoke_deferred_tool", doc_count: 45 },
+          { key: "save_code_exec_tool", doc_count: 32  }
         ]
       },
       trend: { buckets: trend }
@@ -496,11 +540,11 @@ function makeMockUserStats(range: TimeRange): unknown {
       },
       by_version: {
         buckets: [
-          { key: "1.3.0", doc_count: 512 },
-          { key: "1.2.5", doc_count: 298 },
-          { key: "1.2.0", doc_count: 187 },
-          { key: "1.1.x", doc_count: 143 },
-          { key: "1.0.x", doc_count: 107 }
+          { key: "1.3.0", doc_count: 512, unique_users: { value: 98 } },
+          { key: "1.2.5", doc_count: 298, unique_users: { value: 62 } },
+          { key: "1.2.0", doc_count: 187, unique_users: { value: 41 } },
+          { key: "1.1.x", doc_count: 143, unique_users: { value: 28 } },
+          { key: "1.0.x", doc_count: 107, unique_users: { value: 19 } }
         ]
       },
       user_trend: { buckets: trend }
@@ -726,6 +770,57 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data: await fetchFeedback(range, granularity) }
       } catch (e) {
         console.error("[Dashboard] feedback error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:exportExcel",
+    async (
+      _,
+      sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>
+    ) => {
+      try {
+        // Dynamic import xlsx to avoid bundling issues
+        const XLSX = await import("xlsx")
+
+        const wb = XLSX.utils.book_new()
+        for (const sheet of sheets) {
+          const wsData = [sheet.header, ...sheet.rows]
+          const ws = XLSX.utils.aoa_to_sheet(wsData)
+
+          // Auto-size columns based on content
+          const colWidths = sheet.header.map((h, i) => {
+            let maxLen = h.length
+            for (const row of sheet.rows) {
+              const cellLen = String(row[i] ?? "").length
+              if (cellLen > maxLen) maxLen = cellLen
+            }
+            return { wch: Math.min(maxLen + 4, 40) }
+          })
+          ws["!cols"] = colWidths
+
+          XLSX.utils.book_append_sheet(wb, ws, sheet.name.slice(0, 31))
+        }
+
+        const win = BrowserWindow.getFocusedWindow()
+        const result = await dialog.showSaveDialog(win ?? BrowserWindow.getAllWindows()[0], {
+          title: "导出运营面板数据",
+          defaultPath: `运营面板数据_${new Date().toISOString().slice(0, 10)}.xlsx`,
+          filters: [{ name: "Excel", extensions: ["xlsx"] }]
+        })
+
+        if (result.canceled || !result.filePath) {
+          return { success: false, canceled: true }
+        }
+
+        const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" })
+        fs.writeFileSync(result.filePath, buf)
+
+        return { success: true, filePath: result.filePath }
+      } catch (e) {
+        console.error("[Dashboard] exportExcel error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }

@@ -1,3 +1,4 @@
+import { useState } from "react"
 import { Activity, Users, Clock, ArrowDownToLine, ArrowUpFromLine } from "lucide-react"
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend
@@ -44,6 +45,74 @@ function formatNumber(n: number): string {
   return String(Math.round(n))
 }
 
+function ToolTopPanel({ data }: { data: OverviewData }) {
+  const [showAll, setShowAll] = useState(false)
+  const toolList = showAll ? data.byToolAll : data.byTool
+
+  return (
+    <div className="rounded-xl border border-border bg-card p-4">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-3">
+          <h3 className="text-xs font-medium text-muted-foreground">
+            Tool 使用 Top {showAll ? toolList.length : 10}
+          </h3>
+          <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+            <span><span className="font-semibold text-foreground">{data.totalTools}</span> 种</span>
+            <span className="text-border">|</span>
+            <span>共 <span className="font-semibold text-foreground">{formatNumber(data.totalToolCalls)}</span> 次调用</span>
+          </div>
+        </div>
+        <div className="flex items-center rounded-md border border-border overflow-hidden">
+          <button
+            className={`px-2 py-0.5 text-[10px] font-medium transition-colors ${
+              !showAll
+                ? "bg-primary text-primary-foreground"
+                : "text-muted-foreground hover:bg-muted/50"
+            }`}
+            onClick={() => setShowAll(false)}
+          >
+            已过滤
+          </button>
+          <button
+            className={`px-2 py-0.5 text-[10px] font-medium transition-colors ${
+              showAll
+                ? "bg-primary text-primary-foreground"
+                : "text-muted-foreground hover:bg-muted/50"
+            }`}
+            onClick={() => setShowAll(true)}
+          >
+            全部
+          </button>
+        </div>
+      </div>
+      {toolList.length === 0 ? (
+        <div className="text-xs text-muted-foreground text-center py-4">暂无数据</div>
+      ) : (
+        <div className={`space-y-1.5 ${showAll ? "max-h-[320px] overflow-y-auto pr-1" : ""}`}>
+          {toolList.map((item, i) => {
+            const max = toolList[0].count
+            const pct = max > 0 ? (item.count / max) * 100 : 0
+            return (
+              <div key={item.tool} className="flex items-center gap-2">
+                <span className="w-5 text-[10px] text-muted-foreground text-right shrink-0">{i + 1}</span>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between mb-0.5">
+                    <span className="text-xs truncate text-foreground font-mono">{item.tool}</span>
+                    <span className="text-[11px] text-muted-foreground ml-2 shrink-0">{item.count}</span>
+                  </div>
+                  <div className="h-1 rounded-full bg-muted overflow-hidden">
+                    <div className="h-full rounded-full bg-violet-500" style={{ width: `${pct}%` }} />
+                  </div>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function OverviewPanel({
   data,
   loading
@@ -60,7 +129,7 @@ export function OverviewPanel({
 
   return (
     <div className="space-y-4">
-      {/* Stat cards */}
+      {/* Row 1: Core metrics */}
       <div className="grid grid-cols-5 gap-3">
         <StatCard
           icon={Activity}
@@ -94,11 +163,18 @@ export function OverviewPanel({
         />
       </div>
 
-      {/* Skill & Tool Top 10 */}
+      {/* Skill & Tool Top rankings */}
       <div className="grid grid-cols-2 gap-3">
         {/* Skill Top 10 */}
         <div className="rounded-xl border border-border bg-card p-4">
-          <h3 className="text-xs font-medium text-muted-foreground mb-3">Skill 使用 Top 10</h3>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-xs font-medium text-muted-foreground">Skill 使用 Top 10</h3>
+            <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+              <span><span className="font-semibold text-foreground">{data.totalSkills}</span> 种</span>
+              <span className="text-border">|</span>
+              <span>共 <span className="font-semibold text-foreground">{formatNumber(data.totalSkillCalls)}</span> 次调用</span>
+            </div>
+          </div>
           {data.bySkill.length === 0 ? (
             <div className="text-xs text-muted-foreground text-center py-4">暂无数据</div>
           ) : (
@@ -125,34 +201,8 @@ export function OverviewPanel({
           )}
         </div>
 
-        {/* Tool Top 10 */}
-        <div className="rounded-xl border border-border bg-card p-4">
-          <h3 className="text-xs font-medium text-muted-foreground mb-3">Tool 使用 Top 10</h3>
-          {data.byTool.length === 0 ? (
-            <div className="text-xs text-muted-foreground text-center py-4">暂无数据</div>
-          ) : (
-            <div className="space-y-1.5">
-              {data.byTool.map((item, i) => {
-                const max = data.byTool[0].count
-                const pct = max > 0 ? (item.count / max) * 100 : 0
-                return (
-                  <div key={item.tool} className="flex items-center gap-2">
-                    <span className="w-4 text-[10px] text-muted-foreground text-right">{i + 1}</span>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center justify-between mb-0.5">
-                        <span className="text-xs truncate text-foreground font-mono">{item.tool}</span>
-                        <span className="text-[11px] text-muted-foreground ml-2 shrink-0">{item.count}</span>
-                      </div>
-                      <div className="h-1 rounded-full bg-muted overflow-hidden">
-                        <div className="h-full rounded-full bg-violet-500" style={{ width: `${pct}%` }} />
-                      </div>
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          )}
-        </div>
+        {/* Tool Top */}
+        <ToolTopPanel data={data} />
       </div>
 
       {/* Trend chart */}
