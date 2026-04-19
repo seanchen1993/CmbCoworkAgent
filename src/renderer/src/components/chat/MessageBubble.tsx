@@ -325,7 +325,7 @@ export function MessageBubble({
       )}
       <div className="flex-1 min-w-0 space-y-2 overflow-hidden pl-7">
         {content && <div className="rounded-lg px-3 overflow-hidden">{content}</div>}
-        {content && showAssistantMeta && (
+        {content && showAssistantMeta && !isStreaming && (
           <div className="flex items-center gap-1 px-3 opacity-0 transition-opacity group-hover:opacity-100">
             {/*<span className="text-[11px] text-muted-foreground">{createdAtLabel}</span>*/}
             <button
