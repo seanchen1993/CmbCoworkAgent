@@ -35,6 +35,34 @@ interface GitPanelFileDiff {
   deletions: number
 }
 
+interface GitPanelMetaStatePayload {
+  success: boolean
+  isWorktree: boolean
+  isGitRepo?: boolean
+  taskId: string
+  changedFilesTotal?: number
+  hasPendingDiff: boolean
+  hasPushableCommit: boolean
+  pendingCommits?: Array<{ hash: string; message: string; date: string }>
+  trackedFiles?: string[]
+  worktreeBranch?: string | null
+  error?: string
+}
+
+interface GitPanelDiffStatePayload {
+  success: boolean
+  isWorktree: boolean
+  isGitRepo?: boolean
+  taskId: string
+  files: GitPanelFileDiff[]
+  changedFilesTotal?: number
+  omittedFileCount?: number
+  totals: { additions: number; deletions: number; fileCount: number }
+  hasPendingDiff: boolean
+  suggestedCommitMessage?: string
+  error?: string
+}
+
 interface ExecFileError extends Error {
   stderr?: string | Buffer
   stdout?: string | Buffer
@@ -1362,6 +1390,131 @@ async function getGitPanelSummaryQuick(worktreePath: string): Promise<{
   }
 }
 
+function createEmptyGitPanelMetaState(
+  taskId: string,
+  overrides: Partial<GitPanelMetaStatePayload> = {}
+): GitPanelMetaStatePayload {
+  return {
+    success: false,
+    isWorktree: false,
+    isGitRepo: false,
+    taskId,
+    changedFilesTotal: 0,
+    hasPendingDiff: false,
+    hasPushableCommit: false,
+    pendingCommits: [],
+    trackedFiles: [],
+    worktreeBranch: null,
+    ...overrides
+  }
+}
+
+function createEmptyGitPanelDiffState(
+  taskId: string,
+  overrides: Partial<GitPanelDiffStatePayload> = {}
+): GitPanelDiffStatePayload {
+  return {
+    success: false,
+    isWorktree: false,
+    isGitRepo: false,
+    taskId,
+    files: [],
+    changedFilesTotal: 0,
+    omittedFileCount: 0,
+    totals: { additions: 0, deletions: 0, fileCount: 0 },
+    hasPendingDiff: false,
+    suggestedCommitMessage: "",
+    ...overrides
+  }
+}
+
+async function buildGitPanelMetaState(
+  threadId: string,
+  context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>>
+): Promise<GitPanelMetaStatePayload> {
+  if (!context.workspacePath) {
+    return createEmptyGitPanelMetaState(threadId, { error: "未配置工作区" })
+  }
+
+  if (!context.isGitRepo) {
+    return createEmptyGitPanelMetaState(threadId, {
+      error: "当前任务未关联 Git 仓库，无法打开 Git Panel"
+    })
+  }
+
+  const workspacePath = context.workspacePath
+  const tracked = getTrackedLlmFiles(context.metadata)
+  const cacheKey = getCacheKeyForPath(workspacePath)
+  const summaryPromise = getCachedPromise(
+    summaryCache,
+    cacheKey,
+    GIT_CONTEXT_CACHE_TTL_MS,
+    () => getGitPanelSummaryQuick(workspacePath)
+  )
+  const branchPromise = context.worktreeBranch
+    ? Promise.resolve(context.worktreeBranch)
+    : getCurrentBranchCached(workspacePath, { silent: true })
+
+  const worktreeBranch = await branchPromise
+  const pushabilityPromise = worktreeBranch
+    ? getPushabilitySnapshot(workspacePath, worktreeBranch, context.worktreeBaseCommit, {
+      silent: true
+    })
+    : Promise.resolve({ hasPushableCommit: false, pendingCommits: [] })
+
+  const [summary, pushability] = await Promise.all([summaryPromise, pushabilityPromise])
+
+  return {
+    success: true,
+    isWorktree: context.isWorktree,
+    isGitRepo: true,
+    taskId: threadId,
+    changedFilesTotal: summary.changedFiles,
+    hasPendingDiff: summary.hasPendingDiff,
+    hasPushableCommit: pushability.hasPushableCommit,
+    pendingCommits: pushability.pendingCommits,
+    trackedFiles: tracked,
+    worktreeBranch
+  }
+}
+
+async function buildGitPanelDiffState(
+  threadId: string,
+  context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>>
+): Promise<GitPanelDiffStatePayload> {
+  if (!context.workspacePath) {
+    return createEmptyGitPanelDiffState(threadId, { error: "未配置工作区" })
+  }
+
+  if (!context.isGitRepo) {
+    return createEmptyGitPanelDiffState(threadId, {
+      error: "当前任务未关联 Git 仓库，无法打开 Git Panel"
+    })
+  }
+
+  const tracked = getTrackedLlmFiles(context.metadata)
+  const state = await buildGitPanelState(context.workspacePath, tracked, {
+    silent: true,
+    includeAllWhenNoTracked: true
+  })
+
+  return {
+    success: true,
+    isWorktree: context.isWorktree,
+    isGitRepo: true,
+    taskId: threadId,
+    files: state.files,
+    changedFilesTotal: state.changedFilesTotal,
+    omittedFileCount: state.omittedFileCount,
+    totals: state.totals,
+    hasPendingDiff: state.changedFiles.length > 0,
+    suggestedCommitMessage:
+      state.changedFiles.length > 0
+        ? `feat(task:${threadId.slice(0, 8)}): update ${state.changedFiles.length} llm-modified file(s)`
+        : ""
+  }
+}
+
 async function getGitRoot(folderPath: string): Promise<string | null> {
   const cacheKey = getCacheKeyForPath(folderPath)
   return getCachedPromise(gitRootCache, cacheKey, GIT_CONTEXT_CACHE_TTL_MS, async () => {
@@ -2087,85 +2240,69 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     }
   )
 
-  ipcMain.handle("workspace:getGitPanelState", async (_event, { threadId }: { threadId: string }) => {
+  ipcMain.handle("workspace:getGitPanelMeta", async (_event, { threadId }: { threadId: string }) => {
+    let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
     try {
-      const context = await resolveThreadWorkspaceContext(threadId)
-      if (!context.workspacePath) {
-        return {
-          success: false,
-          isWorktree: false,
-          isGitRepo: false,
-          taskId: threadId,
-          files: [],
-          changedFilesTotal: 0,
-          omittedFileCount: 0,
-          totals: { additions: 0, deletions: 0, fileCount: 0 },
-          hasPendingDiff: false,
-          hasPushableCommit: false,
-          error: "未配置工作区"
-        }
-      }
-      if (!context.isGitRepo) {
-        return {
-          success: false,
-          isWorktree: false,
-          isGitRepo: false,
-          taskId: threadId,
-          files: [],
-          changedFilesTotal: 0,
-          omittedFileCount: 0,
-          totals: { additions: 0, deletions: 0, fileCount: 0 },
-          hasPendingDiff: false,
-          hasPushableCommit: false,
-          error: "当前任务未关联 Git 仓库，无法打开 Git Panel"
-        }
-      }
-
-      const tracked = getTrackedLlmFiles(context.metadata)
-      const state = await buildGitPanelState(context.workspacePath, tracked, {
-        silent: true,
-        includeAllWhenNoTracked: true
+      context = await resolveThreadWorkspaceContext(threadId)
+      return await buildGitPanelMetaState(threadId, context)
+    } catch (e) {
+      return createEmptyGitPanelMetaState(threadId, {
+        isWorktree: Boolean(context?.isWorktree),
+        isGitRepo: Boolean(context?.isGitRepo),
+        error: e instanceof Error ? e.message : "加载 Git 仓库信息失败"
       })
-      const worktreeBranch =
-        context.worktreeBranch || await getCurrentBranchCached(context.workspacePath, { silent: true })
-      // 统一快照：一次计算同时得到“是否可推送 + 待推送提交列表”。
-      // 这样避免之前两套函数分别探测 upstream/range 带来的重复 Git 命令。
-      const pushability = worktreeBranch
-        ? await getPushabilitySnapshot(context.workspacePath, worktreeBranch, context.worktreeBaseCommit, {
-          silent: true
-        })
-        : { hasPushableCommit: false, pendingCommits: [] }
+    }
+  })
+
+  ipcMain.handle("workspace:getGitPanelDiffs", async (_event, { threadId }: { threadId: string }) => {
+    let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
+    try {
+      context = await resolveThreadWorkspaceContext(threadId)
+      return await buildGitPanelDiffState(threadId, context)
+    } catch (e) {
+      return createEmptyGitPanelDiffState(threadId, {
+        isWorktree: Boolean(context?.isWorktree),
+        isGitRepo: Boolean(context?.isGitRepo),
+        error: e instanceof Error ? e.message : "加载 Git 文件变更失败"
+      })
+    }
+  })
+
+  ipcMain.handle("workspace:getGitPanelState", async (_event, { threadId }: { threadId: string }) => {
+    let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
+    try {
+      context = await resolveThreadWorkspaceContext(threadId)
+      const [meta, diff] = await Promise.all([
+        buildGitPanelMetaState(threadId, context),
+        buildGitPanelDiffState(threadId, context)
+      ])
       return {
-        success: true,
-        isWorktree: context.isWorktree,
-        isGitRepo: true,
+        success: meta.success && diff.success,
+        isWorktree: meta.isWorktree || diff.isWorktree,
+        isGitRepo: meta.isGitRepo ?? diff.isGitRepo,
         taskId: threadId,
-        files: state.files,
-        changedFilesTotal: state.changedFilesTotal,
-        omittedFileCount: state.omittedFileCount,
-        totals: state.totals,
-        hasPendingDiff: state.changedFiles.length > 0,
-        hasPushableCommit: pushability.hasPushableCommit,
-        pendingCommits: pushability.pendingCommits,
-        trackedFiles: tracked,
-        worktreeBranch,
-        suggestedCommitMessage:
-          state.changedFiles.length > 0
-            ? `feat(task:${threadId.slice(0, 8)}): update ${state.changedFiles.length} llm-modified file(s)`
-            : ""
+        files: diff.files,
+        changedFilesTotal: diff.changedFilesTotal ?? meta.changedFilesTotal,
+        omittedFileCount: diff.omittedFileCount,
+        totals: diff.totals,
+        hasPendingDiff: diff.hasPendingDiff,
+        hasPushableCommit: meta.hasPushableCommit,
+        pendingCommits: meta.pendingCommits,
+        trackedFiles: meta.trackedFiles,
+        worktreeBranch: meta.worktreeBranch,
+        suggestedCommitMessage: diff.suggestedCommitMessage,
+        error: meta.error || diff.error
       }
     } catch (e) {
       return {
-        success: false,
-        isWorktree: false,
-        isGitRepo: false,
-        taskId: threadId,
-        files: [],
-        changedFilesTotal: 0,
-        omittedFileCount: 0,
-        totals: { additions: 0, deletions: 0, fileCount: 0 },
-        hasPendingDiff: false,
+        ...createEmptyGitPanelDiffState(threadId, {
+          isWorktree: Boolean(context?.isWorktree),
+          isGitRepo: Boolean(context?.isGitRepo)
+        }),
         hasPushableCommit: false,
+        pendingCommits: [],
+        trackedFiles: [],
+        worktreeBranch: context?.worktreeBranch ?? null,
         error: e instanceof Error ? e.message : "加载 Git Panel 失败"
       }
     }

@@ -423,6 +423,60 @@ const api = {
         error?: string
       }>
     },
+    getGitPanelMeta: (threadId: string): Promise<{
+      success: boolean
+      isWorktree: boolean
+      isGitRepo?: boolean
+      taskId: string
+      changedFilesTotal?: number
+      hasPendingDiff: boolean
+      hasPushableCommit: boolean
+      pendingCommits?: Array<{ hash: string; message: string; date: string }>
+      trackedFiles?: string[]
+      worktreeBranch?: string | null
+      error?: string
+    }> => {
+      return ipcRenderer.invoke("workspace:getGitPanelMeta", { threadId }) as Promise<{
+        success: boolean
+        isWorktree: boolean
+        isGitRepo?: boolean
+        taskId: string
+        changedFilesTotal?: number
+        hasPendingDiff: boolean
+        hasPushableCommit: boolean
+        pendingCommits?: Array<{ hash: string; message: string; date: string }>
+        trackedFiles?: string[]
+        worktreeBranch?: string | null
+        error?: string
+      }>
+    },
+    getGitPanelDiffs: (threadId: string): Promise<{
+      success: boolean
+      isWorktree: boolean
+      isGitRepo?: boolean
+      taskId: string
+      files: Array<{ path: string; diff: string; additions: number; deletions: number }>
+      changedFilesTotal?: number
+      omittedFileCount?: number
+      totals: { additions: number; deletions: number; fileCount: number }
+      hasPendingDiff: boolean
+      suggestedCommitMessage?: string
+      error?: string
+    }> => {
+      return ipcRenderer.invoke("workspace:getGitPanelDiffs", { threadId }) as Promise<{
+        success: boolean
+        isWorktree: boolean
+        isGitRepo?: boolean
+        taskId: string
+        files: Array<{ path: string; diff: string; additions: number; deletions: number }>
+        changedFilesTotal?: number
+        omittedFileCount?: number
+        totals: { additions: number; deletions: number; fileCount: number }
+        hasPendingDiff: boolean
+        suggestedCommitMessage?: string
+        error?: string
+      }>
+    },
     getGitPanelSummary: (threadId: string): Promise<{
       success: boolean
       isWorktree: boolean
