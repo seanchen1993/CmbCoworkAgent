@@ -569,13 +569,39 @@ export function GitPanelView({
             )}
             {diffState.files.length === 0 ? (
               <div className="rounded-xl border border-border/70 bg-muted/20 px-4 py-8">
-                <div className="mx-auto max-w-[340px] text-center">
+                <div className="mx-auto max-w-[420px]">
                   <div className="mx-auto mb-3 flex size-9 items-center justify-center rounded-full border border-emerald-500/30 bg-emerald-500/10">
                     <CheckCircle2 className="size-4.5 text-emerald-600 dark:text-emerald-400" />
                   </div>
-                  <div className="text-sm font-medium text-foreground">没有待审批改动</div>
-                  <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                    当前工作区已是最新状态。后续产生文件变更时，这里会自动显示最新 diff。
+                  <div className="text-center text-sm font-medium text-foreground">
+                    没有待审批改动
+                  </div>
+                  <p className="mt-1 text-center text-xs leading-5 text-muted-foreground">
+                    当前工作区与基线一致，暂时没有可展示的净变更。
+                  </p>
+                  <div className="mt-3 rounded-lg border border-border/70 bg-background/70 p-3">
+                    <div className="mb-2 inline-flex items-center rounded-full border border-border/70 bg-muted/60 px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+                      可能原因
+                    </div>
+                    <ul className="space-y-1.5 text-xs leading-5 text-muted-foreground">
+                      <li className="flex items-start gap-2">
+                        <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-muted-foreground/60" />
+                        文件被{" "}
+                        <code className="rounded bg-muted px-1 py-0.5 text-[11px]">.gitignore</code>{" "}
+                        忽略
+                      </li>
+                      <li className="flex items-start gap-2">
+                        <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-muted-foreground/60" />
+                        文件改动后又恢复为原内容，最终净变更为 0
+                      </li>
+                      <li className="flex items-start gap-2">
+                        <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-muted-foreground/60" />
+                        当前修改仅影响未纳入 Git 跟踪的内容
+                      </li>
+                    </ul>
+                  </div>
+                  <p className="mt-3 text-center text-[11px] leading-5 text-muted-foreground">
+                    后续出现可跟踪的净变更时，这里会自动显示最新 diff。
                   </p>
                 </div>
               </div>
