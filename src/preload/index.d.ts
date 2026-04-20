@@ -666,6 +666,7 @@ interface CustomAPI {
       untrusted: (workspacePath: string) => Promise<{ fileName: string; filePath: string; event: string; command: string }[]>
       trustAll: (workspacePath: string) => Promise<void>
       trustFile: (workspacePath: string, fileName: string, filePath: string) => Promise<void>
+      onChanged: (callback: (data: { threadId: string; workspacePath: string }) => void) => () => void
     }
   }
   codeExecTools: {

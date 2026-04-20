@@ -1371,7 +1371,16 @@ const api = {
       trustAll: (workspacePath: string): Promise<void> =>
         ipcRenderer.invoke("hooks:workspace:trustAll", workspacePath),
       trustFile: (workspacePath: string, fileName: string, filePath: string): Promise<void> =>
-        ipcRenderer.invoke("hooks:workspace:trustFile", { workspacePath, fileName, filePath })
+        ipcRenderer.invoke("hooks:workspace:trustFile", { workspacePath, fileName, filePath }),
+      onChanged: (callback: (data: { threadId: string; workspacePath: string }) => void): (() => void) => {
+        const handler = (_: unknown, data: { threadId: string; workspacePath: string }): void => {
+          callback(data)
+        }
+        ipcRenderer.on("hooks:workspace:changed", handler)
+        return () => {
+          ipcRenderer.removeListener("hooks:workspace:changed", handler)
+        }
+      }
     }
   },
   codeExecTools: {

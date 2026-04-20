@@ -48,6 +48,7 @@ import { LspPanel } from "@/components/customize/LspPanel"
 
 type HookConfig = Awaited<ReturnType<typeof window.api.hooks.list>>[number]
 type DisplayHook = HookConfig & { source: "global" | "workspace" }
+type UntrustedWorkspaceHook = Awaited<ReturnType<typeof window.api.hooks.workspace.untrusted>>[number]
 
 const FileViewer = lazy(() =>
   import("@/components/tabs/FileViewer").then((m) => ({ default: m.FileViewer }))
@@ -212,6 +213,7 @@ export function RightPanel({
   const [disabledSkills, setDisabledSkills] = useState<Set<string>>(new Set())
   const [plugins, setPlugins] = useState<PluginMetadata[]>([])
   const [hooks, setHooks] = useState<DisplayHook[]>([])
+  const [untrustedWorkspaceHooks, setUntrustedWorkspaceHooks] = useState<UntrustedWorkspaceHook[]>([])
 
   useEffect(() => {
     async function load(): Promise<void> {
@@ -314,14 +316,16 @@ export function RightPanel({
   const loadHooks = useCallback(async (): Promise<void> => {
     try {
       const workspacePath = threadState?.workspacePath ?? null
-      const [globalHooks, workspaceHooks] = await Promise.all([
+      const [globalHooks, workspaceHooks, untrustedHooks] = await Promise.all([
         window.api.hooks.list(),
-        workspacePath ? window.api.hooks.workspace.list(workspacePath) : Promise.resolve([])
+        workspacePath ? window.api.hooks.workspace.list(workspacePath) : Promise.resolve([]),
+        workspacePath ? window.api.hooks.workspace.untrusted(workspacePath) : Promise.resolve([])
       ])
       setHooks([
         ...globalHooks.map((hook): DisplayHook => ({ ...hook, source: "global" })),
         ...workspaceHooks.map((hook): DisplayHook => ({ ...hook, source: "workspace" }))
       ])
+      setUntrustedWorkspaceHooks(untrustedHooks)
     } catch (error) {
       console.error("[RightPanel] Failed to load hooks:", error)
     }
@@ -330,6 +334,16 @@ export function RightPanel({
   useEffect(() => {
     void loadHooks()
   }, [loadHooks])
+
+  useEffect(() => {
+    if (!currentThreadId) return
+    const cleanup = window.api.hooks.workspace.onChanged((data) => {
+      if (data.threadId === currentThreadId) {
+        void loadHooks()
+      }
+    })
+    return cleanup
+  }, [currentThreadId, loadHooks])
 
   const latestResourceEvent = useMemo(() => {
     const persisted = threadState?.messages ?? []
@@ -1090,13 +1104,18 @@ export function RightPanel({
         <SectionHeader
           title="钩子"
           icon={Webhook}
-          badge={hooks.filter((h) => h.enabled).length}
+          badge={hooks.filter((h) => h.enabled).length + untrustedWorkspaceHooks.length}
           isOpen={hooksOpen}
           onToggle={() => setHooksOpen((prev) => !prev)}
         />
         {hooksOpen && (
           <div className="overflow-auto right-panel-scroll" style={{ height: heights.hooks }}>
-            <HooksContent hooks={hooks} onChange={() => { void loadHooks() }} />
+            <HooksContent
+              hooks={hooks}
+              untrustedWorkspaceHooks={untrustedWorkspaceHooks}
+              workspacePath={threadState?.workspacePath ?? null}
+              onChange={() => { void loadHooks() }}
+            />
           </div>
         )}
       </div>
@@ -2353,8 +2372,18 @@ const TOOL_LABEL: Record<string, string> = {
   manage_skill:     "技能管理",
 }
 
-function HooksContent({ hooks, onChange }: { hooks: DisplayHook[]; onChange: () => void }): React.JSX.Element {
-  if (hooks.length === 0) {
+function HooksContent({
+  hooks,
+  untrustedWorkspaceHooks,
+  workspacePath,
+  onChange
+}: {
+  hooks: DisplayHook[]
+  untrustedWorkspaceHooks: UntrustedWorkspaceHook[]
+  workspacePath: string | null
+  onChange: () => void
+}): React.JSX.Element {
+  if (hooks.length === 0 && untrustedWorkspaceHooks.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center text-center text-sm text-muted-foreground py-8 px-4">
         <Webhook className="size-8 mb-2 opacity-50" />
@@ -2375,6 +2404,59 @@ function HooksContent({ hooks, onChange }: { hooks: DisplayHook[]; onChange: () 
       console.error("[HooksContent] Failed to toggle hook:", e)
     }
   }
+
+  const handleTrustFile = async (hook: UntrustedWorkspaceHook): Promise<void> => {
+    if (!workspacePath) return
+    try {
+      await window.api.hooks.workspace.trustFile(workspacePath, hook.fileName, hook.filePath)
+      toast.success(`已信任工作区 Hook：${hook.fileName}`)
+      onChange()
+    } catch (e) {
+      console.error("[HooksContent] Failed to trust workspace hook:", e)
+      toast.error("信任工作区 Hook 失败")
+    }
+  }
+
+  const handleTrustAll = async (): Promise<void> => {
+    if (!workspacePath) return
+    try {
+      await window.api.hooks.workspace.trustAll(workspacePath)
+      toast.success("已信任当前工作区的命令 Hook")
+      onChange()
+    } catch (e) {
+      console.error("[HooksContent] Failed to trust all workspace hooks:", e)
+      toast.error("信任工作区 Hook 失败")
+    }
+  }
+
+  const renderUntrustedHookCard = (hook: UntrustedWorkspaceHook): React.JSX.Element => (
+    <div
+      key={hook.filePath}
+      className="p-3 rounded-sm border border-amber-500/35 bg-amber-500/5"
+    >
+      <div className="flex items-center gap-2 text-sm">
+        <span className={cn("text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0", EVENT_BADGE_COLORS[hook.event] ?? "bg-muted text-muted-foreground")}>
+          {EVENT_LABEL[hook.event] ?? hook.event}
+        </span>
+        <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
+          工作区
+        </span>
+        <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-amber-500/15 text-amber-700 dark:text-amber-400">
+          待信任
+        </span>
+        <button
+          className="ml-auto inline-flex items-center gap-1 rounded-sm border border-amber-500/40 px-2 py-0.5 text-[11px] font-medium text-amber-700 hover:bg-amber-500/10 dark:text-amber-300"
+          onClick={() => { void handleTrustFile(hook) }}
+          title="信任后才会执行这个工作区命令 Hook"
+        >
+          <Check className="size-3" />
+          信任
+        </button>
+      </div>
+      <div className="mt-1.5 text-[11px] text-muted-foreground break-all">{hook.fileName}</div>
+      <p className="text-xs text-muted-foreground mt-1 break-all line-clamp-2 font-mono">{hook.command}</p>
+    </div>
+  )
 
   const renderHookCard = (hook: DisplayHook): React.JSX.Element => {
     const isPrompt = hook.type === "prompt"
@@ -2431,6 +2513,23 @@ function HooksContent({ hooks, onChange }: { hooks: DisplayHook[]; onChange: () 
 
   return (
     <div className="p-3 space-y-2">
+      {untrustedWorkspaceHooks.length > 0 && (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between px-1">
+            <span className="inline-flex items-center gap-1 text-[11px] text-amber-700 dark:text-amber-400 tracking-wider font-medium">
+              <AlertCircle className="size-3" />
+              待信任工作区 Hook
+            </span>
+            <button
+              className="text-[11px] text-amber-700 hover:underline dark:text-amber-400"
+              onClick={() => { void handleTrustAll() }}
+            >
+              全部信任
+            </button>
+          </div>
+          {untrustedWorkspaceHooks.map(renderUntrustedHookCard)}
+        </div>
+      )}
       {enabled.length > 0 && enabled.map(renderHookCard)}
       {disabled.length > 0 && (
         <div className="space-y-2 pt-1">
