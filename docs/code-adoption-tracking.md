@@ -76,7 +76,7 @@
 
 | 文件 | 职责 |
 | --- | --- |
-| `src/main/services/adoption-index.ts` | sql.js 索引：`gen_events` 表，字段含 `event_id / file_path / content_fingerprint / shard_file / shard_offset / line_hashes(BLOB) / created_at / measured`。索引在 `(file_path, measured, created_at DESC)` 与 `(created_at)`。采用与 `db/index.ts` 相同的 500ms debounced 落盘策略。 |
+| `src/main/services/adoption-index.ts` | sql.js 索引：`gen_events` 表，字段含 `event_id / file_path / content_fingerprint / shard_file / shard_offset / line_hashes(BLOB) / created_at / measured`。索引在 `(file_path, measured, created_at DESC)` 与 `(created_at)`。500ms debounced 落盘。提供 `deleteOlderThan` / `deleteMeasuredOlderThan` / `trimToRowCap` / `vacuumAdoptionIndex` 维护 API。 |
 | `src/main/services/adoption-tracker.ts` | 核心管道：语言识别、行哈希、diffRatio、JSONL 滚动、保留策略、L1/L2/L3 事件投递、后台 sweeper 生命周期。 |
 
 ### 4.2 修改文件
@@ -130,9 +130,12 @@ xml, yaml, yml
 | `L2_RETENTION_MS` | 7 day | 索引/shard 保留上限 |
 | `SWEEP_INTERVAL_MS` | 5 min | 后台扫描间隔（L2 端到端延迟最多 10 + 5 = 15 min，可接受） |
 | `SHARD_SIZE_LIMIT_BYTES` | 10 MB | 单 shard 封口阈值 |
-| `DISK_HARD_CAP_BYTES` | 100 MB | 磁盘总硬顶（超过则按 sealed shard 从最旧开始丢） |
+| `DISK_HARD_CAP_BYTES` | 100 MB | JSONL 磁盘总硬顶（超过则按 sealed shard 从最旧开始丢） |
 | `MAX_LINES_FOR_MEASURE` | 3000 | 超过跳过度量（生成侧 + 度量侧对称应用） |
 | 线程上下文 LRU | 32 | 每个进程同时追踪的 thread 上限 |
+| `INDEX_MEASURED_RETENTION_MS` | 1 day | 已度量行的保留窗口（比 7 天全量保留更激进） |
+| `INDEX_MAX_ROWS` | 5000 | sqlite 硬行数上限；超出时优先删最旧的已度量行 |
+| `INDEX_VACUUM_EVERY_N_SWEEPS` | 12 | 约 1 小时一次 VACUUM，回收 DELETE 后的空闲页 |
 
 ## 6. 上报事件契约
 
@@ -195,6 +198,11 @@ xml, yaml, yml
 - **并发安全**：
   - `appendChain`：所有 JSONL append 经 Promise chain 串行化，避免两个并发 `recordGen` 读取到相同的 `currentShardSize` 导致 sqlite 索引里的 `shard_offset` 别名重叠。
   - `inFlightMeasurements`：以 `gen_events.event_id` 为 key 的去重集合。`timer_10m` sweep 与 `git_commit` 可能在同一毫秒对同一 pending 行触发度量，若不去重，两个 microtask 都会通过 `measured=0` 判定并各自发出一条 `code_adopt`。
+- **sqlite 文件大小控制**（三层护栏）：
+  1. **已度量行激进清理**（`deleteMeasuredOlderThan`）：`measured=1` 的行对后续 pending 查询已无价值，保留期降至 1 天（远短于 JSONL 的 7 天）。
+  2. **硬行数上限**（`trimToRowCap`）：超过 `INDEX_MAX_ROWS = 5000` 时，优先删最旧的已度量行；仍不够才触碰未度量行（会丢一点 L2 数据，作为最后兜底）。
+  3. **周期 VACUUM**（`vacuumAdoptionIndex`）：sqlite DELETE 只释放页到 free list，不缩文件。每约 1 小时（12 次 sweep）做一次 VACUUM，物理回收空间。
+  - 稳态实测：重度使用场景下 sqlite 文件应稳定在 5 MB 以内；极端生成高峰由行数上限兜底到数十 MB 量级。
 
 ## 8. 验证
 

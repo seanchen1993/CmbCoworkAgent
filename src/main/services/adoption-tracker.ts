@@ -40,7 +40,10 @@ import {
   initializeAdoptionIndex,
   insertGenEvent,
   markMeasured,
-  deleteOlderThan
+  deleteOlderThan,
+  deleteMeasuredOlderThan,
+  trimToRowCap,
+  vacuumAdoptionIndex
 } from "./adoption-index"
 
 // ─────────────────────────────────────────────────────────
@@ -55,6 +58,11 @@ const SHARD_MAX_AGE_MS = 30 * 60 * 1000 // rotate every 30 min
 const DISK_HARD_CAP_BYTES = 100 * 1024 * 1024 // 100 MB
 const MAX_LINES_FOR_MEASURE = 3000 // skip giant files (applied symmetrically at gen + measure)
 const MAX_CONTEXT_ENTRIES = 32 // bound in-memory context size
+
+// sqlite index safeguards — keep the on-disk file bounded even under abuse
+const INDEX_MEASURED_RETENTION_MS = 24 * 60 * 60 * 1000 // already-measured rows: 1 day
+const INDEX_MAX_ROWS = 5000 // hard row cap (oldest measured dropped first)
+const INDEX_VACUUM_EVERY_N_SWEEPS = 12 // VACUUM cadence (12 × 5min = 1h)
 
 const CODE_EXTENSIONS = new Set<string>([
   // Frontend
@@ -173,6 +181,7 @@ interface JsonlGenEntry {
 
 let initialized = false
 let sweepTimer: NodeJS.Timeout | null = null
+let sweepCount = 0
 let currentShardPath: string | null = null
 let currentShardSize = 0
 let currentShardStartMs = 0
@@ -378,9 +387,24 @@ async function enforceRetention(): Promise<void> {
     }
   }
 
-  // Also clean old index rows
+  // ── Index-side retention guards ─────────────────────────
+  // 1. Drop any row older than the 7-day window (safety net; normally empty).
   try {
     deleteOlderThan(cutoff)
+  } catch {
+    // ignore
+  }
+  // 2. Drop measured rows more aggressively — once measured they have no
+  //    further use for pending lookups.
+  try {
+    deleteMeasuredOlderThan(Date.now() - INDEX_MEASURED_RETENTION_MS)
+  } catch {
+    // ignore
+  }
+  // 3. Belt-and-suspenders row cap — protects against a single-day generation
+  //    spree blowing up the sqlite file.
+  try {
+    trimToRowCap(INDEX_MAX_ROWS)
   } catch {
     // ignore
   }
@@ -746,6 +770,7 @@ export function measureForCommit(stagedAbsolutePaths: string[], commitSha?: stri
 
 async function sweep(): Promise<void> {
   if (!initialized) return
+  sweepCount++
   try {
     // 1. Measure pending items that are past the 10-minute due time.
     const dueAt = Date.now() - L2_MEASURE_DELAY_MS
@@ -757,10 +782,20 @@ async function sweep(): Promise<void> {
     // 2. Rotate current shard if size / age triggers.
     await maybeRotateShard()
 
-    // 3. Enforce retention.
+    // 3. Enforce retention (age + measured-age + row-cap all applied here).
     await enforceRetention()
 
-    // 4. Persist sqlite changes.
+    // 4. Reclaim sqlite free pages periodically. VACUUM is expensive-ish, so
+    //    we only run it every N sweeps (≈ hourly by default).
+    if (sweepCount % INDEX_VACUUM_EVERY_N_SWEEPS === 0) {
+      try {
+        vacuumAdoptionIndex()
+      } catch {
+        // ignore
+      }
+    }
+
+    // 5. Persist sqlite changes.
     flushAdoptionIndex()
   } catch (e) {
     console.warn("[AdoptionTracker] sweep failed:", e)

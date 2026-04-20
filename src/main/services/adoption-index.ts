@@ -243,3 +243,89 @@ export function deleteOlderThan(cutoff: number): number {
     return 0
   }
 }
+
+/**
+ * Remove already-measured rows older than `cutoff`. These rows have no further
+ * use (findPendingGenForFile / findPendingDueBefore both filter measured=0), so
+ * we can evict them far more aggressively than the full 7-day window.
+ */
+export function deleteMeasuredOlderThan(cutoff: number): void {
+  if (!db) return
+  try {
+    db.run(`DELETE FROM gen_events WHERE measured = 1 AND created_at < ?`, [cutoff])
+    scheduleSave()
+  } catch (e) {
+    console.warn("[AdoptionIndex] deleteMeasuredOlderThan failed:", e)
+  }
+}
+
+/**
+ * Count rows currently in the index. Used by the hard row-count cap.
+ */
+export function countRows(): number {
+  if (!db) return 0
+  const stmt = db.prepare(`SELECT COUNT(*) AS c FROM gen_events`)
+  try {
+    if (!stmt.step()) return 0
+    const row = stmt.getAsObject() as unknown as { c: number }
+    return row.c ?? 0
+  } finally {
+    stmt.free()
+  }
+}
+
+/**
+ * Belt-and-suspenders cap on total rows. If the table exceeds `maxRows`, drop
+ * the oldest *measured* rows first (they're expendable); only if still over
+ * cap do we touch unmeasured rows.
+ */
+export function trimToRowCap(maxRows: number): void {
+  if (!db) return
+  const current = countRows()
+  if (current <= maxRows) return
+  const over = current - maxRows
+  try {
+    // Phase 1: drop oldest measured rows first
+    db.run(
+      `DELETE FROM gen_events
+        WHERE event_id IN (
+          SELECT event_id FROM gen_events
+           WHERE measured = 1
+           ORDER BY created_at ASC
+           LIMIT ?
+        )`,
+      [over]
+    )
+    // Phase 2: if still over cap, drop oldest unmeasured rows (lose some L2 data)
+    const after = countRows()
+    if (after > maxRows) {
+      db.run(
+        `DELETE FROM gen_events
+          WHERE event_id IN (
+            SELECT event_id FROM gen_events
+             ORDER BY created_at ASC
+             LIMIT ?
+          )`,
+        [after - maxRows]
+      )
+    }
+    scheduleSave()
+  } catch (e) {
+    console.warn("[AdoptionIndex] trimToRowCap failed:", e)
+  }
+}
+
+/**
+ * Reclaim disk space previously freed by DELETE. sql.js / sqlite do not
+ * auto-shrink on DELETE — pages become "free" but the file size stays at
+ * peak. We VACUUM periodically (not every sweep) to amortise the cost.
+ */
+export function vacuumAdoptionIndex(): void {
+  if (!db) return
+  try {
+    db.run("VACUUM")
+    scheduleSave()
+  } catch (e) {
+    console.warn("[AdoptionIndex] VACUUM failed:", e)
+  }
+}
