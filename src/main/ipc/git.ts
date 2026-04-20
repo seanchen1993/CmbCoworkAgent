@@ -3,6 +3,7 @@ import { execSync } from "child_process"
 import { platform } from "os"
 import { readdirSync, rmSync } from "fs"
 import path from "path"
+import { measureForCommit } from "../services/adoption-tracker"
 
 interface GitStatus {
   hasChanges: boolean
@@ -20,6 +21,33 @@ interface ExecCommandError extends Error {
 
 function isPushCommand(command: string): boolean {
   return /^git(\s+-C\s+"[^"]*")?\s+push(\s|$)/.test(command.trim())
+}
+
+function isCommitCommand(command: string): boolean {
+  return /^git(\s+-C\s+"[^"]*")?\s+commit(\s|$)/.test(command.trim())
+}
+
+/**
+ * Side-effect hook invoked right before a `git commit` is executed.
+ * Measures staged code files against pending gen events (L3 adoption).
+ * Never throws — any error is swallowed so it cannot block the commit.
+ */
+function triggerAdoptionMeasurementForCommit(command: string): void {
+  try {
+    const workingDir = getCommandWorkingDir(command, getCurrentWorkingDirectory())
+    const stagedOutput = execSync("git diff --cached --name-only", {
+      encoding: "utf-8",
+      cwd: workingDir,
+      timeout: 5000,
+      shell: platform() === "win32" ? "cmd.exe" : "/bin/bash"
+    }).trim()
+    if (!stagedOutput) return
+    const relFiles = stagedOutput.split("\n").map((f) => f.trim()).filter(Boolean)
+    const absFiles = relFiles.map((f) => path.resolve(workingDir, f))
+    measureForCommit(absFiles)
+  } catch (e) {
+    console.warn("[Git] adoption pre-commit measurement skipped:", e)
+  }
 }
 
 function isPullLikeCommand(command: string): boolean {
@@ -557,6 +585,11 @@ export function registerGitHandlers(): void {
       const isAllowed = allowedCommands.some(pattern => pattern.test(command.trim()))
       if (!isAllowed) {
         throw new Error(`不允许执行的命令: ${command}`)
+      }
+
+      // Pre-commit: measure adoption for staged files (side-effect, never blocks).
+      if (isCommitCommand(command)) {
+        triggerAdoptionMeasurementForCommit(command)
       }
 
       const result = executeGitCommand(command)

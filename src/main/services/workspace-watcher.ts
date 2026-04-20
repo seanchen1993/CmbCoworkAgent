@@ -2,6 +2,7 @@ import * as fs from "fs"
 import * as path from "path"
 import { BrowserWindow } from "electron"
 import micromatch from "micromatch"
+import { notifyFileChange, notifyFileUnlink } from "./adoption-tracker"
 
 // Store active watchers by thread ID
 const activeWatchers = new Map<string, fs.FSWatcher>()
@@ -211,6 +212,20 @@ export function startWatching(threadId: string, workspacePath: string): void {
       }
 
       console.log(`[WorkspaceWatcher] ${eventType}: ${filename} in thread ${threadId}`)
+
+      // Adoption tracking hook (side-effect only, guarded)
+      if (relativePath) {
+        try {
+          const absPath = path.resolve(workspacePath, relativePath)
+          if (eventType === "rename" && !fs.existsSync(absPath)) {
+            notifyFileUnlink(absPath)
+          } else {
+            notifyFileChange(absPath)
+          }
+        } catch {
+          // never affect watcher behavior
+        }
+      }
 
       // Debounce to prevent rapid updates
       const existingTimer = debounceTimers.get(threadId)

@@ -44,6 +44,10 @@ import { getLocalIP } from "../../net-utils"
 import { getUserInfo } from "../../storage"
 import { listAllSkills } from "../../ipc/skills"
 import { nowIsoLocal } from "../../util/local-time"
+import {
+  setAdoptionContext,
+  clearAdoptionContext
+} from "../../services/adoption-tracker"
 
 // ─────────────────────────────────────────────────────────
 // Global reporter registry
@@ -144,6 +148,15 @@ export class TraceCollector {
         modelId: this.modelId
       }
     })
+    // Publish context to adoption tracker (side-effect only)
+    try {
+      setAdoptionContext(this.threadId, {
+        traceId: this.traceId,
+        modelId: this.modelId
+      })
+    } catch {
+      // never block trace setup
+    }
   }
 
   /** Update the modelId (can be resolved after construction). */
@@ -153,6 +166,11 @@ export class TraceCollector {
     if (root) {
       root.metadata = { ...(root.metadata ?? {}), modelId: id }
     }
+    try {
+      setAdoptionContext(this.threadId, { modelId: id })
+    } catch {
+      // ignore
+    }
   }
 
   /** Set the human-readable model name (e.g. "minmax") for display in trace UI. */
@@ -161,6 +179,11 @@ export class TraceCollector {
     const root = this.getNode(this.rootNodeId)
     if (root) {
       root.metadata = { ...(root.metadata ?? {}), modelName: name }
+    }
+    try {
+      setAdoptionContext(this.threadId, { modelName: name })
+    } catch {
+      // ignore
     }
   }
 
@@ -186,6 +209,14 @@ export class TraceCollector {
     const root = this.getNode(this.rootNodeId)
     if (root) {
       root.metadata = { ...(root.metadata ?? {}), usedSkills: [...skills] }
+    }
+    try {
+      setAdoptionContext(this.threadId, {
+        usedSkills: [...skills],
+        primarySkill: skills.length > 0 ? skills[0] : null
+      })
+    } catch {
+      // ignore
     }
   }
 
@@ -435,6 +466,14 @@ export class TraceCollector {
       .catch((e) => {
         console.warn("[Tracer] Reporter.report() threw:", e)
       })
+
+    // Clear adoption context — subsequent write_file calls on this thread
+    // will no longer carry this trace's attribution.
+    try {
+      clearAdoptionContext(this.threadId)
+    } catch {
+      // ignore
+    }
 
     return trace
   }

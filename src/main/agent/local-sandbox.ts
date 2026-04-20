@@ -42,6 +42,7 @@ import {
 import { homedir } from "node:os"
 import type { HookConfig } from "../hooks/types"
 import { runHooks } from "../hooks/runner"
+import { recordGen as recordAdoptionGen } from "../services/adoption-tracker"
 
 /**
  * Sensitive directories under user profile that sandbox tools should not access.
@@ -1356,6 +1357,20 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       toolResult: JSON.stringify(result),
       workspacePath: this.workingDir
     }).catch((e) => console.warn("[Hooks] PostToolUse write error:", e))
+    // Adoption tracking (side-effect only, never throws)
+    if (!result.error) {
+      try {
+        recordAdoptionGen({
+          threadId: this.runId,
+          tool: "write_file",
+          filePath,
+          generatedContent: content,
+          workspacePath: this.workingDir
+        })
+      } catch {
+        // tracker must not affect tool result
+      }
+    }
     return result
   }
 
@@ -1463,6 +1478,21 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
         toolResult: JSON.stringify(result),
         workspacePath: this.workingDir
       }).catch((e) => console.warn("[Hooks] PostToolUse edit error:", e))
+      // Adoption tracking (side-effect only, never throws).
+      // At this point withFileLock resolved successfully — the edit was applied.
+      try {
+        recordAdoptionGen({
+          threadId: this.runId,
+          tool: "edit_file",
+          filePath,
+          // For edits, only the newly inserted string is the "generated" content.
+          // This matches the design: edit_file baseline = new_string lines.
+          generatedContent: newString,
+          workspacePath: this.workingDir
+        })
+      } catch {
+        // tracker must not affect tool result
+      }
       return result
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
