@@ -1961,6 +1961,7 @@ export function ChatContainer({
 
               return (
                 <MessageBubble
+                  isLoading={isLoading}
                   key={message.id}
                   message={message}
                   previousMessage={previousMessage}
