@@ -49,7 +49,7 @@ import {
 
 const L2_MEASURE_DELAY_MS = 10 * 60 * 1000 // 10 minutes
 const L2_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
-const SWEEP_INTERVAL_MS = 60 * 1000 // heartbeat cadence
+const SWEEP_INTERVAL_MS = 5 * 60 * 1000 // heartbeat cadence — 5min; L2 延迟 10min 足够容忍
 const SHARD_SIZE_LIMIT_BYTES = 10 * 1024 * 1024 // 10 MB per shard
 const SHARD_MAX_AGE_MS = 30 * 60 * 1000 // rotate every 30 min
 const DISK_HARD_CAP_BYTES = 100 * 1024 * 1024 // 100 MB

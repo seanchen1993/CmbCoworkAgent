@@ -123,7 +123,7 @@ xml, yaml, yml
 | --- | --- | --- |
 | `L2_MEASURE_DELAY_MS` | 10 min | L2 延时 |
 | `L2_RETENTION_MS` | 7 day | 索引/shard 保留上限 |
-| `SWEEP_INTERVAL_MS` | 60 s | 后台扫描间隔 |
+| `SWEEP_INTERVAL_MS` | 5 min | 后台扫描间隔（L2 端到端延迟最多 10 + 5 = 15 min，可接受） |
 | `SHARD_SIZE_LIMIT_BYTES` | 10 MB | 单 shard 封口阈值 |
 | `DISK_HARD_CAP_BYTES` | 100 MB | 磁盘总硬顶（超过则按 sealed shard 从最旧开始丢） |
 | `MAX_LINES_FOR_MEASURE` | 3000 | 超过跳过度量（生成侧 + 度量侧对称应用） |
