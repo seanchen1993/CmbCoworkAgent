@@ -374,7 +374,7 @@ export function WorkspacePicker({ threadId, onGitStatusChange }: WorkspacePicker
                   {worktreeError && (
                     <div className="flex items-start gap-1.5 text-[11px] text-destructive">
                       <AlertCircle className="size-3 mt-0.5 shrink-0" />
-                      <span>{worktreeError}</span>
+                      <span className="min-w-0 break-all">{worktreeError}</span>
                     </div>
                   )}
                   <Button
