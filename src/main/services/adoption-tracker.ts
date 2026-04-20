@@ -60,7 +60,7 @@ const MAX_LINES_FOR_MEASURE = 3000 // skip giant files (applied symmetrically at
 const MAX_CONTEXT_ENTRIES = 32 // bound in-memory context size
 
 // sqlite index safeguards — keep the on-disk file bounded even under abuse
-const INDEX_MEASURED_RETENTION_MS = 24 * 60 * 60 * 1000 // already-measured rows: 1 day
+const INDEX_MEASURED_RETENTION_MS = 3 * 24 * 60 * 60 * 1000 // already-measured rows: 3 days
 const INDEX_MAX_ROWS = 5000 // hard row cap (oldest measured dropped first)
 const INDEX_VACUUM_EVERY_N_SWEEPS = 12 // VACUUM cadence (12 × 5min = 1h)
 
