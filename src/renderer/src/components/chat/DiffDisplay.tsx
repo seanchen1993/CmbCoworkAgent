@@ -193,11 +193,25 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue }: DiffDisplayProps)
             }
           },
           diffContainer: {
+            width: "100%",
+            minWidth: "100%",
+            maxWidth: "100%",
             maxHeight: fullscreen ? "100%" : "22rem",
             minHeight: fullscreen ? "100%" : "80px",
             overflow: "auto",
+            overflowX: "hidden",
             height: fullscreen ? "100%" : undefined,
-            borderRadius: "0"
+            borderRadius: "0",
+            pre: {
+              width: "100%",
+              whiteSpace: "pre-wrap",
+              overflowWrap: "anywhere",
+              wordBreak: "break-word"
+            }
+          },
+          content: {
+            width: "100%",
+            maxWidth: "100%"
           },
           line: {
             lineHeight: "1.65",
