@@ -14,7 +14,7 @@ import {
   Loader2
 } from "lucide-react"
 import { cn } from "@/lib/utils"
-import { DiffDisplay } from "@/components/chat/ToolCallRenderer"
+import { DiffDisplay } from "@/components/chat/DiffDisplay"
 import { Badge } from "@/components/ui/badge"
 import { toast } from "sonner"
 import { GitSubmitDialog } from "./GitSubmitDialog"
