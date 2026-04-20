@@ -2,7 +2,6 @@ import * as fs from "fs"
 import * as path from "path"
 import { BrowserWindow } from "electron"
 import micromatch from "micromatch"
-import { notifyFileChange, notifyFileUnlink } from "./adoption-tracker"
 
 // Store active watchers by thread ID
 const activeWatchers = new Map<string, fs.FSWatcher>()
@@ -153,7 +152,11 @@ function matchesGitignoreRule(relativePath: string, rule: GitignoreRule): boolea
 }
 
 // 按 Git 规则顺序求值：后匹配覆盖前匹配，支持 ! 反选
-function isIgnoredByGitignore(threadId: string, workspacePath: string, relativePath: string): boolean {
+function isIgnoredByGitignore(
+  threadId: string,
+  workspacePath: string,
+  relativePath: string
+): boolean {
   const rules = loadGitignoreRules(threadId, workspacePath)
   if (rules.length === 0) return false
 
@@ -189,7 +192,9 @@ export function startWatching(threadId: string, workspacePath: string): void {
     // Use recursive watching (supported on macOS and Windows)
     const watcher = fs.watch(workspacePath, { recursive: true }, (eventType, filename) => {
       const relativePath = filename
-        ? normalizeRelativePath(typeof filename === "string" ? filename : filename.toString("utf-8"))
+        ? normalizeRelativePath(
+            typeof filename === "string" ? filename : filename.toString("utf-8")
+          )
         : ""
 
       // Keep ignoring hidden paths, except .gitignore which should refresh Git Panel in real time.
@@ -212,20 +217,6 @@ export function startWatching(threadId: string, workspacePath: string): void {
       }
 
       console.log(`[WorkspaceWatcher] ${eventType}: ${filename} in thread ${threadId}`)
-
-      // Adoption tracking hook (side-effect only, guarded)
-      if (relativePath) {
-        try {
-          const absPath = path.resolve(workspacePath, relativePath)
-          if (eventType === "rename" && !fs.existsSync(absPath)) {
-            notifyFileUnlink(absPath)
-          } else {
-            notifyFileChange(absPath)
-          }
-        } catch {
-          // never affect watcher behavior
-        }
-      }
 
       // Debounce to prevent rapid updates
       const existingTimer = debounceTimers.get(threadId)

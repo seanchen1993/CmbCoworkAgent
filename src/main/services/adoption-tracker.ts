@@ -161,9 +161,10 @@ interface JsonlGenEntry {
   traceId?: string
   filePath: string
   lineCount: number
-  lineHashes: string // hex string of packed UInt32 hashes
   fingerprint: string
   createdAt: number
+  // NOTE: lineHashes deliberately NOT stored here — sqlite index owns the BLOB.
+  // Keeping JSONL lean (~200B/record) lets the 100MB cap hold far more history.
 }
 
 // ─────────────────────────────────────────────────────────
@@ -175,6 +176,20 @@ let sweepTimer: NodeJS.Timeout | null = null
 let currentShardPath: string | null = null
 let currentShardSize = 0
 let currentShardStartMs = 0
+
+/**
+ * Serialises JSONL appends so concurrent callers never race on `currentShardSize`.
+ * The chain always resolves (errors are swallowed) so one failure does not block
+ * subsequent writes.
+ */
+let appendChain: Promise<unknown> = Promise.resolve()
+
+/**
+ * In-flight measurement dedup. Keyed by the pending gen event_id so multiple
+ * triggers (e.g. git_commit + timer_10m racing) don't produce duplicate
+ * code_adopt events or duplicate readFile work.
+ */
+const inFlightMeasurements = new Set<string>()
 
 /** threadId → AdoptionContext. Evicted oldest-first at MAX_CONTEXT_ENTRIES. */
 const threadContexts = new Map<string, AdoptionContext>()
@@ -253,15 +268,6 @@ function unpackLineHashes(bytes: Uint8Array): Uint32Array {
   const copy = new Uint8Array(bytes.length)
   copy.set(bytes)
   return new Uint32Array(copy.buffer)
-}
-
-function hashesToHex(hashes: Uint32Array): string {
-  // 8 hex chars per u32, compact for JSONL
-  const parts: string[] = []
-  for (let i = 0; i < hashes.length; i++) {
-    parts.push(hashes[i].toString(16).padStart(8, "0"))
-  }
-  return parts.join("")
 }
 
 function contentFingerprint(content: string): string {
@@ -384,7 +390,16 @@ async function enforceRetention(): Promise<void> {
 // JSONL writer
 // ─────────────────────────────────────────────────────────
 
-async function appendJsonl(entry: unknown): Promise<{ shardFile: string; offset: number }> {
+function appendJsonl(entry: unknown): Promise<{ shardFile: string; offset: number }> {
+  // Serialise every append through appendChain so two concurrent callers cannot
+  // both read `currentShardSize` before either has bumped it — the offsets we
+  // hand back to the sqlite index would otherwise alias.
+  const task = appendChain.then(() => doAppendJsonl(entry))
+  appendChain = task.catch(() => undefined)
+  return task
+}
+
+async function doAppendJsonl(entry: unknown): Promise<{ shardFile: string; offset: number }> {
   const shardPath = getCurrentShardPath()
   if (currentShardPath !== shardPath) {
     currentShardPath = shardPath
@@ -475,7 +490,6 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       traceId: getContext(input.threadId).traceId,
       filePath: absPath,
       lineCount: hashes.length,
-      lineHashes: hashesToHex(hashes),
       fingerprint,
       createdAt
     }
@@ -568,16 +582,17 @@ function emitSkippedLargeAtGen(args: {
   })
 }
 
+type MeasureSource = "timer_10m" | "git_commit"
+
 /**
  * Measure a specific file against the most recent unmeasured gen event.
  * Produces a `code_adopt` event if a pending gen is found. Never throws.
  */
 function measureFile(
   filePath: string,
-  source: "timer_10m" | "watcher_change" | "watcher_unlink" | "git_commit" | "session_end",
+  source: MeasureSource,
   opts?: {
     currentContent?: string // callers may supply the already-read content
-    verdictOverride?: "deleted"
     commitSha?: string
   }
 ): void {
@@ -591,47 +606,50 @@ function measureFile(
 
 async function doMeasureFile(
   filePath: string,
-  source: "timer_10m" | "watcher_change" | "watcher_unlink" | "git_commit" | "session_end",
-  opts?: { currentContent?: string; verdictOverride?: "deleted"; commitSha?: string }
+  source: MeasureSource,
+  opts?: { currentContent?: string; commitSha?: string }
 ): Promise<void> {
+  let pendingId: string | null = null
   try {
     const absPath = resolvePath(filePath)
     const minCreated = Date.now() - L2_RETENTION_MS
     const pending = findPendingGenForFile(absPath, minCreated)
     if (!pending) return
 
+    // Dedup concurrent measurements for the same pending gen. Multiple triggers
+    // (e.g. git_commit arriving just before timer_10m sweep) would otherwise
+    // both pass the `measured=0` check before either calls markMeasured.
+    if (inFlightMeasurements.has(pending.event_id)) return
+    inFlightMeasurements.add(pending.event_id)
+    pendingId = pending.event_id
+
     // Compute diffRatio (0..100)
     let verdict: "measured" | "deleted" | "committed" | "skipped_large" = "measured"
     let diffRatio: number | null = null
 
-    if (opts?.verdictOverride === "deleted") {
-      verdict = "deleted"
-      diffRatio = 0
+    const storedHashes = pending.line_hashes ? unpackLineHashes(pending.line_hashes) : null
+    if (!storedHashes || storedHashes.length === 0) {
+      // No baseline — nothing to compare against
+      return
+    }
+    if (storedHashes.length > MAX_LINES_FOR_MEASURE) {
+      verdict = "skipped_large"
+      diffRatio = null
     } else {
-      const storedHashes = pending.line_hashes ? unpackLineHashes(pending.line_hashes) : null
-      if (!storedHashes || storedHashes.length === 0) {
-        // No baseline — nothing to compare against
-        return
+      let current = opts?.currentContent
+      if (current === undefined) {
+        try {
+          current = await readFile(absPath, "utf-8")
+        } catch {
+          // File unreadable (removed / renamed) — terminal verdict: deleted
+          verdict = "deleted"
+          diffRatio = 0
+        }
       }
-      if (storedHashes.length > MAX_LINES_FOR_MEASURE) {
-        verdict = "skipped_large"
-        diffRatio = null
-      } else {
-        let current = opts?.currentContent
-        if (current === undefined) {
-          try {
-            current = await readFile(absPath, "utf-8")
-          } catch {
-            // File unreadable — treat as deleted
-            verdict = "deleted"
-            diffRatio = 0
-          }
-        }
-        if (verdict === "measured" && current !== undefined) {
-          const currentHashes = computeLineHashes(current)
-          diffRatio = computeDiffRatio(storedHashes, currentHashes)
-          if (source === "git_commit") verdict = "committed"
-        }
+      if (verdict === "measured" && current !== undefined) {
+        const currentHashes = computeLineHashes(current)
+        diffRatio = computeDiffRatio(storedHashes, currentHashes)
+        if (source === "git_commit") verdict = "committed"
       }
     }
 
@@ -668,6 +686,8 @@ async function doMeasureFile(
     })
   } catch (e) {
     console.warn("[AdoptionTracker] doMeasureFile failed:", e)
+  } finally {
+    if (pendingId !== null) inFlightMeasurements.delete(pendingId)
   }
 }
 
@@ -699,23 +719,18 @@ function computeDiffRatio(baseline: Uint32Array, current: Uint32Array): number {
 // External notification entry points
 // ─────────────────────────────────────────────────────────
 
-/** Called by workspace-watcher on any content-changing event. */
-export function notifyFileChange(absPath: string): void {
-  if (!isCodeFile(absPath)) return
-  measureFile(absPath, "watcher_change")
-}
-
-/** Called by workspace-watcher on deletion. */
-export function notifyFileUnlink(absPath: string): void {
-  if (!isCodeFile(absPath)) return
-  measureFile(absPath, "watcher_unlink", { verdictOverride: "deleted" })
-}
-
 /**
  * Called by git IPC commit handler before the actual `git commit` is
  * executed. Best-effort measurement of each staged code file against its
  * most recent unmeasured gen event. Returns immediately; work happens in
  * background microtasks.
+ *
+ * NOTE: we deliberately do NOT hook workspace-watcher here. Every fs.watch
+ * event would otherwise hit sqlite, and measuring on an intermediate edit
+ * locks in a diffRatio before the 10-minute "settle" window elapses — which
+ * would silently corrupt L2 semantics. The 10-min timer + this commit hook
+ * already cover all measurable outcomes; deletions surface via readFile
+ * ENOENT inside doMeasureFile.
  */
 export function measureForCommit(stagedAbsolutePaths: string[], commitSha?: string): void {
   if (!initialized) return

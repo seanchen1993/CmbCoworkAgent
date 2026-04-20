@@ -15,10 +15,12 @@
 | **L3 `code_adopt` (committed)** | 提交前度量 | 用户在 Git 面板点击 commit 的瞬间，对 staged 文件再算一次 diffRatio |
 
 并支持以下附属 `verdict`：
-- **deleted**：文件已被删除（L2 到点时不存在，或 watcher 捕获 unlink）
+- **deleted**：L2 timer 到点 / commit 时尝试 `readFile` 抛 ENOENT 即判定为删除（无需单独的 watcher 通道）
 - **skipped_large**：非空行数超过阈值（**3000 行**）跳过度量；**生成侧与度量侧对称生效**
   - 生成侧（`recordGen`）：先用行数上界快速判定，超过则直接发 `code_gen` + `code_adopt(skipped_large, measureSource="gen_oversize")`，**跳过哈希 / JSONL / sqlite 入库**，避免 BLOB 膨胀
   - 度量侧（`measureFile`）：读到文件当时再按非空行数二次校验
+
+> **设计注记**：我们曾短暂接入 `workspace-watcher`，但每次 `fs.watch` 事件都会打 sqlite 查询（热路径放大），且在 10 分钟窗口内提前度量会污染 L2 语义（锁定一个用户还没改完的中间状态）。因此 **adoption-tracker 不再监听 watcher**，只依赖 `timer_10m` + `git_commit` + `gen_oversize` 三条触发源。
 
 > 判定阈值（"算不算采纳"）**放在云端**决定，客户端只上报原始 `diffRatio`（0–100 的浮点数，保留两位小数）。
 
@@ -44,14 +46,17 @@
 │  - 行数 > 3000 → 直接终结  │      │ ~/.cmbcoworkagent/          │
 │    (skipped_large, 不哈希) │      │   adoption/current.jsonl    │
 │  - 否则 fnv1a 行哈希快照   │      │   adoption/YYYYMMDD-xx.jsonl│
-│  - 写索引 + 发 L1 事件     │      │                             │
+│  - 写索引 + 发 L1 事件     │      │ (记录精简：不含 lineHashes) │
+│  - 所有 append 经 writeChain │      │                             │
+│    串行化                  │      │                             │
 └────────────┬──────────────┘      └─────────────────────────────┘
              │
              ▼
 ┌───────────────────────────┐      ┌─────────────────────────────┐
-│ adoption-index.sqlite     │◀────▶│ 后台 sweep (60s, .unref())  │
+│ adoption-index.sqlite     │◀────▶│ 后台 sweep (5min, .unref()) │
 │  gen_events (pending)     │      │  - 过期/超量清理             │
-└────────────┬──────────────┘      │  - L2 到点触发 measureFile   │
+│  (BLOB 存 lineHashes)     │      │  - L2 到点触发 measureFile   │
+└────────────┬──────────────┘      │  - inFlight Set 去重并发     │
              │                     └─────────────────────────────┘
              ▼
     ┌────────┴─────────┐
@@ -80,7 +85,7 @@
 | --- | --- |
 | `src/main/services/event-reporter.ts` | `EventCategory` 增加 `"code_adoption"` |
 | `src/main/agent/local-sandbox.ts` | `write()` / `edit()` 成功后调用 `recordAdoptionGen(...)`，只在无 `result.error` 的成功分支 |
-| `src/main/services/workspace-watcher.ts` | 每次 `fs.watch` 回调向 tracker 透传 `notifyFileChange` / `notifyFileUnlink`（用于 LRU 里的活跃度统计，不参与决策） |
+| `src/main/services/workspace-watcher.ts` | **不** 参与采纳率管道（前一次接入后被回退 —— 参见设计注记）。仅继续承担向 renderer 发 workspace:files-changed 的职责 |
 | `src/main/ipc/git.ts` | `execute-git-command` handler 中检测 `git commit` 命令，在执行前调用 `measureForCommit(absFiles)` 对 staged 文件再算一次 diffRatio |
 | `src/main/agent/trace/collector.ts` | 构造函数 / `setModelId` / `setModelName` / `setUsedSkills` / `finish` 均透传 tracker 上下文（traceId、modelId、modelName、usedSkills、primarySkill），`finish` 里 `clearAdoptionContext(threadId)` |
 | `src/main/index.ts` | 启动 `initializeAdoptionTracker()`，`will-quit` 调 `shutdownAdoptionTracker()` |
@@ -170,7 +175,7 @@ xml, yaml, yml
     "traceId": "...",
     "verdict": "measured | committed | deleted | skipped_large",
     "diffRatio": 87.35,            // 0..100 浮点，2 位小数；skipped_large/unmeasurable 时为 null
-    "measureSource": "timer_10m | watcher_change | watcher_unlink | git_commit | session_end | gen_oversize",
+    "measureSource": "timer_10m | git_commit | gen_oversize",
     "measureLatencyMs": 600123,
     "measuredAt": "2026-04-20T10:30:00.000Z",
     "commitSha": null              // L3 场景可携带
@@ -187,6 +192,9 @@ xml, yaml, yml
 - **关闭**：`shutdownAdoptionTracker()` 在 `will-quit` 阶段 flush 索引、停 sweeper；`setInterval().unref()` 保证不阻塞进程退出。
 - **异常**：tracker 内部每个入口都用 `try/catch`；任何异常只输出 `console.warn`，绝不向 Agent / UI 冒泡。
 - **幂等性**：L2 到点若该文件已有更新的生成事件，只度量"最近一次"的生成；已度量的记录会被标记 `measured=1` 并在保留期后清理。
+- **并发安全**：
+  - `appendChain`：所有 JSONL append 经 Promise chain 串行化，避免两个并发 `recordGen` 读取到相同的 `currentShardSize` 导致 sqlite 索引里的 `shard_offset` 别名重叠。
+  - `inFlightMeasurements`：以 `gen_events.event_id` 为 key 的去重集合。`timer_10m` sweep 与 `git_commit` 可能在同一毫秒对同一 pending 行触发度量，若不去重，两个 microtask 都会通过 `measured=0` 判定并各自发出一条 `code_adopt`。
 
 ## 8. 验证
 
