@@ -188,6 +188,14 @@ export interface AgentTrace {
   originOrgId?: string
   /** Organization / department name */
   orgName?: string
+  /** Organization path name from UserInfo */
+  pathName?: string
+  /** Organization path ID from UserInfo.originPathId */
+  pathId?: string
+  /** Parent organization levels derived from pathName */
+  upperOrgLv1?: string
+  upperOrgLv2?: string
+  upperOrgLv3?: string
   /** Ordered list of reasoning steps */
   steps: TraceStep[]
   /** Ordered model-call runs (request + response) */

@@ -688,7 +688,8 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     userStats: (
       range: { from: string; to: string },
-      granularity: "day" | "week" | "month" | "custom"
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | null }
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     productivity: (
       range: { from: string; to: string },

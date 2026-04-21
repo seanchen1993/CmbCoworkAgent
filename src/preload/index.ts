@@ -1396,9 +1396,10 @@ const api = {
       ipcRenderer.invoke("dashboard:modelStats", range, granularity),
     userStats: (
       range: { from: string; to: string },
-      granularity: "day" | "week" | "month" | "custom"
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:userStats", range, granularity),
+      ipcRenderer.invoke("dashboard:userStats", range, granularity, opts),
     productivity: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom"

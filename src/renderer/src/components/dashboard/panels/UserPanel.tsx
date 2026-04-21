@@ -1,6 +1,9 @@
+import type { ReactNode } from "react"
 import {
   PieChart, Pie, Cell, Tooltip, ResponsiveContainer
 } from "recharts"
+import { ChevronLeft } from "lucide-react"
+import { Button } from "@/components/ui/button"
 import type { UserStatsData } from "../use-dashboard"
 
 const COLORS = [
@@ -13,16 +16,28 @@ function PiePanel({
   title,
   data,
   dataKey,
-  nameKey
+  nameKey,
+  onSliceClick,
+  action,
+  helperText
 }: {
   title: string
   data: Record<string, unknown>[]
   dataKey: string
   nameKey: string
+  onSliceClick?: (entry: Record<string, unknown>) => void
+  action?: ReactNode
+  helperText?: string
 }) {
   return (
     <div className="rounded-xl border border-border bg-card p-4">
-      <h3 className="text-xs font-medium text-muted-foreground mb-3">{title}</h3>
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <div>
+          <h3 className="text-xs font-medium text-muted-foreground">{title}</h3>
+          {helperText ? <p className="mt-1 text-[11px] text-muted-foreground/80">{helperText}</p> : null}
+        </div>
+        {action}
+      </div>
       {data.length > 0 ? (
         <ResponsiveContainer width="100%" height={240}>
           <PieChart>
@@ -38,6 +53,8 @@ function PiePanel({
               }
               labelLine={false}
               fontSize={9}
+              onClick={onSliceClick ? (entry) => onSliceClick(entry as Record<string, unknown>) : undefined}
+              style={onSliceClick ? { cursor: "pointer" } : undefined}
             >
               {data.map((_, i) => (
                 <Cell key={i} fill={COLORS[i % COLORS.length]} />
@@ -64,15 +81,21 @@ function PiePanel({
 
 export function UserPanel({
   data,
-  loading
+  loading,
+  onDrillDownOrg,
+  onResetOrgDrilldown
 }: {
   data: UserStatsData | null
   loading: boolean
+  onDrillDownOrg: (orgLv1: string) => void
+  onResetOrgDrilldown: () => void
 }) {
   if (loading && !data) {
     return <div className="text-sm text-muted-foreground py-8 text-center">加载中...</div>
   }
   if (!data) return null
+
+  const isDrilledDown = data.selectedUpperOrgLv1 !== null
 
   return (
     <div className="grid grid-cols-3 gap-4">
@@ -119,6 +142,17 @@ export function UserPanel({
         data={data.byOrg as Record<string, unknown>[]}
         dataKey="count"
         nameKey="org"
+        helperText="点击可查看下级组织使用情况"
+        action={isDrilledDown ? (
+          <Button variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs" onClick={onResetOrgDrilldown}>
+            <ChevronLeft className="size-3.5" />
+            返回上级
+          </Button>
+        ) : undefined}
+        onSliceClick={!isDrilledDown ? (entry) => {
+          const key = typeof entry.key === "string" ? entry.key : ""
+          onDrillDownOrg(key)
+        } : undefined}
       />
 
       {/* Version distribution */}
