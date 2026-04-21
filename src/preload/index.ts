@@ -426,7 +426,6 @@ const api = {
       hasPendingDiff: boolean
       changedFiles: number
     }> => {
-      console.log("[workspace:getGitPanelSummary] invoke", { threadId })
       return ipcRenderer.invoke("workspace:getGitPanelSummary", { threadId }) as Promise<{
         success: boolean
         isWorktree: boolean
