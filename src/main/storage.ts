@@ -538,6 +538,8 @@ export interface UserInfoConfig {
   userName?: string
   originOrgId?: string
   orgName?: string
+  pathName?: string
+  originPathId?: string
   ystRefreshToken?: string
   ystIdToken?: string
   ystCode?: string
