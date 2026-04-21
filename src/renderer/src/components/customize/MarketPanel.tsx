@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import {
   Search,
   ShoppingBag,
@@ -56,6 +56,16 @@ function getSecondaryCategory(category?: string): string {
   if (parts.length === 0) return ""
   if (parts.length === 1) return parts[0]
   return parts.slice(1).join("/")
+}
+
+function getPrimaryCategory(category?: string): string {
+  if (!category) return ""
+  const parts = category
+    .split("/")
+    .map((part) => part.trim())
+    .filter(Boolean)
+  if (parts.length === 0) return ""
+  return parts[0]
 }
 
 interface UploadedItemRecord {
@@ -850,6 +860,33 @@ export function MarketPanel(): React.JSX.Element {
     return getSecondaryCategory(item.category) === categoryFilter
   })
 
+  const skillCategoryStats = useMemo(() => {
+    if (activeTab !== "skill") return []
+
+    const categoryCounter = new Map<string, { primary: string; count: number }>()
+    for (const item of skillsData) {
+      const categoryName = getSecondaryCategory(item.category) || "未分类"
+      const primaryName = getPrimaryCategory(item.category) || "未分类"
+      const existing = categoryCounter.get(categoryName)
+      if (!existing) {
+        categoryCounter.set(categoryName, { primary: primaryName, count: 1 })
+      } else {
+        existing.count += 1
+        // 若出现同名二级类归属多个一级类，保持稳定且可预期的排序键
+        if (primaryName.localeCompare(existing.primary, "zh-CN") < 0) {
+          existing.primary = primaryName
+        }
+      }
+    }
+
+    return Array.from(categoryCounter.entries())
+      .map(([name, value]) => ({ name, count: value.count, primary: value.primary }))
+      .sort((a, b) => {
+        if (a.primary !== b.primary) return a.primary.localeCompare(b.primary, "zh-CN")
+        return a.name.localeCompare(b.name, "zh-CN")
+      })
+  }, [activeTab, skillsData])
+
   const openItemDetail = async (item: MarketItem) => {
     setSelectedItemKey(getItemKey(item))
     setDetailMode("detail")
@@ -1242,18 +1279,6 @@ export function MarketPanel(): React.JSX.Element {
                 className="pl-9 h-9 text-sm bg-white border-[#e8e6dc] text-[#141413] placeholder:text-[#b0aea5] rounded-xl focus-visible:ring-[#3898ec] focus-visible:border-[#3898ec]"
               />
             </div>
-            {activeTab === "skill" && categoryFilter && (
-              <div className="flex items-center justify-between rounded-lg border border-[#f5d9c4] bg-[#fdf3e7] px-2.5 py-1.5 text-xs text-[#8b623d]">
-                <span>已按二级分类筛选：{categoryFilter}</span>
-                <button
-                  type="button"
-                  className="text-[#b85a3a] hover:text-[#9f472d] transition-colors"
-                  onClick={() => setCategoryFilter(null)}
-                >
-                  清除
-                </button>
-              </div>
-            )}
           </div>
         )}
       </div>
@@ -1470,21 +1495,104 @@ export function MarketPanel(): React.JSX.Element {
                       </p>
                     </div>
                   ) : (
-                    filteredData.map((item) => (
-                      <MarketItemCard
-                        key={item.id}
-                        item={item}
-                        onOpenDetail={openItemDetail}
-                        onDelete={handleDelete}
-                        onUpdate={handleUpdate}
-                        onDownload={handleDownload}
-                        onUpdateInstall={handleUpdateInstall}
-                        onUninstall={handleUninstall}
-                        isDownloading={downloadingItems.has(item.id || item.name)}
-                        isInstalled={item.installed}
-                        isUpdating={updatingItems.has(item.id || item.name)}
-                      />
-                    ))
+                    activeTab === "skill" ? (
+                      <div className="grid grid-cols-1 xl:grid-cols-[240px_minmax(0,1fr)] gap-4 items-start">
+                        <aside className="rounded-2xl border border-[#e8e6dc] bg-[#faf9f5] p-3 xl:sticky xl:top-4">
+                          <div className="flex items-center justify-between mb-2 px-1">
+                            <h3 className="text-xs font-medium text-[#5e5d59]">分类</h3>
+                            {categoryFilter && (
+                              <button
+                                type="button"
+                                onClick={() => setCategoryFilter(null)}
+                                className="text-xs text-[#b85a3a] hover:text-[#9f472d] transition-colors cursor-pointer"
+                              >
+                                清除
+                              </button>
+                            )}
+                          </div>
+                          <div className="space-y-1.5 max-h-[60vh] overflow-y-auto pr-1">
+                            {skillCategoryStats.length === 0 ? (
+                              <p className="text-xs text-[#87867f] px-2 py-1.5">暂无分类</p>
+                            ) : (
+                              skillCategoryStats.map((category) => {
+                                const isActive = categoryFilter === category.name
+                                return (
+                                  <button
+                                    key={category.name}
+                                    type="button"
+                                    onClick={() =>
+                                      setCategoryFilter((prev) =>
+                                        prev === category.name ? null : category.name
+                                      )
+                                    }
+                                    className={`w-full flex items-center justify-between rounded-xl px-2.5 py-2 text-left transition-colors cursor-pointer ${
+                                      isActive
+                                        ? "bg-[#fdf3e7] border border-[#f5d9c4] text-[#8b623d]"
+                                        : "border border-transparent text-[#5e5d59] hover:bg-[#f5f4ed]"
+                                    }`}
+                                  >
+                                    <span className="text-[13px] leading-tight pr-2 break-all">
+                                      {category.name}
+                                    </span>
+                                    <span
+                                      className={`text-[11px] px-2 py-0.5 rounded-full shrink-0 ${
+                                        isActive
+                                          ? "bg-[#f5d9c4] text-[#8b623d]"
+                                          : "bg-[#f0eee6] text-[#87867f]"
+                                      }`}
+                                    >
+                                      {category.count}
+                                    </span>
+                                  </button>
+                                )
+                              })
+                            )}
+                          </div>
+                        </aside>
+
+                        <div className="space-y-3 min-w-0">
+                          <div className="flex items-center justify-between text-xs text-[#87867f] px-1">
+                            <span>
+                              {categoryFilter ? `当前分类：${categoryFilter}` : "全部 Skills"}
+                            </span>
+                            <span>{filteredData.length} 个结果</span>
+                          </div>
+                          <div className="grid grid-cols-1 2xl:grid-cols-2 gap-3">
+                            {filteredData.map((item) => (
+                              <MarketItemCard
+                                key={getItemKey(item)}
+                                item={item}
+                                onOpenDetail={openItemDetail}
+                                onDelete={handleDelete}
+                                onUpdate={handleUpdate}
+                                onDownload={handleDownload}
+                                onUpdateInstall={handleUpdateInstall}
+                                onUninstall={handleUninstall}
+                                isDownloading={downloadingItems.has(item.id || item.name)}
+                                isInstalled={item.installed}
+                                isUpdating={updatingItems.has(item.id || item.name)}
+                              />
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      filteredData.map((item) => (
+                        <MarketItemCard
+                          key={getItemKey(item)}
+                          item={item}
+                          onOpenDetail={openItemDetail}
+                          onDelete={handleDelete}
+                          onUpdate={handleUpdate}
+                          onDownload={handleDownload}
+                          onUpdateInstall={handleUpdateInstall}
+                          onUninstall={handleUninstall}
+                          isDownloading={downloadingItems.has(item.id || item.name)}
+                          isInstalled={item.installed}
+                          isUpdating={updatingItems.has(item.id || item.name)}
+                        />
+                      ))
+                    )
                   )}
                 </div>
               </ScrollArea>
