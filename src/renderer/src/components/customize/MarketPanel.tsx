@@ -22,6 +22,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { useAppStore } from "@/lib/store"
 import {
   Dialog,
   DialogContent,
@@ -45,6 +46,17 @@ const USE_MARKET_MOCK_ON_ERROR =
   String(import.meta.env.VITE_MARKET_MOCK_ON_ERROR || "false")
     .trim()
     .toLowerCase() === "true"
+
+function getSecondaryCategory(category?: string): string {
+  if (!category) return ""
+  const parts = category
+    .split("/")
+    .map((part) => part.trim())
+    .filter(Boolean)
+  if (parts.length === 0) return ""
+  if (parts.length === 1) return parts[0]
+  return parts.slice(1).join("/")
+}
 
 interface UploadedItemRecord {
   name: string
@@ -327,8 +339,10 @@ function isAllowedDetailFile(type: MarketItemType, filename: string): boolean {
 }
 
 export function MarketPanel(): React.JSX.Element {
+  const { marketInitialSkillCategory, setMarketInitialSkillCategory } = useAppStore()
   const [activeTab, setActiveTab] = useState<MarketItemType>("skill")
   const [searchQuery, setSearchQuery] = useState("")
+  const [categoryFilter, setCategoryFilter] = useState<string | null>(null)
   const [skillsData, setSkillsData] = useState<MarketItem[]>([])
   const [mcpsData, setMcpsData] = useState<MarketItem[]>([])
   const [pluginsData, setPluginsData] = useState<MarketItem[]>([])
@@ -465,6 +479,16 @@ export function MarketPanel(): React.JSX.Element {
     loadInstalledMcps()
     loadInstalledPlugins()
   }, [])
+
+  useEffect(() => {
+    if (!marketInitialSkillCategory) return
+    setActiveTab("skill")
+    setDetailMode("list")
+    setSelectedItemKey(null)
+    setCategoryFilter(marketInitialSkillCategory)
+    setSearchQuery("")
+    setMarketInitialSkillCategory(null)
+  }, [marketInitialSkillCategory, setMarketInitialSkillCategory])
 
   // 同步已安装状态，不触发额外的 market 接口请求
   useEffect(() => {
@@ -693,6 +717,12 @@ export function MarketPanel(): React.JSX.Element {
     resetDetailState()
   }, [activeTab])
 
+  useEffect(() => {
+    if (activeTab !== "skill" && categoryFilter !== null) {
+      setCategoryFilter(null)
+    }
+  }, [activeTab, categoryFilter])
+
   const getCurrentData = () => {
     switch (activeTab) {
       case "skill":
@@ -809,11 +839,16 @@ export function MarketPanel(): React.JSX.Element {
     }
   }
 
-  const filteredData = currentData.filter(
-    (item) =>
-      item.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      item.description.toLowerCase().includes(searchQuery.toLowerCase())
-  )
+  const filteredData = currentData.filter((item) => {
+    const query = searchQuery.toLowerCase()
+    const matchesSearch =
+      item.name.toLowerCase().includes(query) ||
+      item.description.toLowerCase().includes(query)
+    if (!matchesSearch) return false
+
+    if (activeTab !== "skill" || !categoryFilter) return true
+    return getSecondaryCategory(item.category) === categoryFilter
+  })
 
   const openItemDetail = async (item: MarketItem) => {
     setSelectedItemKey(getItemKey(item))
@@ -1197,14 +1232,28 @@ export function MarketPanel(): React.JSX.Element {
           )}
         </div>
         {detailMode === "list" && (
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-[#87867f]" />
-            <Input
-              placeholder="搜索技能、连接器、插件…"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-9 h-9 text-sm bg-white border-[#e8e6dc] text-[#141413] placeholder:text-[#b0aea5] rounded-xl focus-visible:ring-[#3898ec] focus-visible:border-[#3898ec]"
-            />
+          <div className="space-y-2">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-[#87867f]" />
+              <Input
+                placeholder="搜索技能、连接器、插件…"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="pl-9 h-9 text-sm bg-white border-[#e8e6dc] text-[#141413] placeholder:text-[#b0aea5] rounded-xl focus-visible:ring-[#3898ec] focus-visible:border-[#3898ec]"
+              />
+            </div>
+            {activeTab === "skill" && categoryFilter && (
+              <div className="flex items-center justify-between rounded-lg border border-[#f5d9c4] bg-[#fdf3e7] px-2.5 py-1.5 text-xs text-[#8b623d]">
+                <span>已按二级分类筛选：{categoryFilter}</span>
+                <button
+                  type="button"
+                  className="text-[#b85a3a] hover:text-[#9f472d] transition-colors"
+                  onClick={() => setCategoryFilter(null)}
+                >
+                  清除
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>

@@ -31,6 +31,7 @@ import {
 } from "lucide-react"
 import type { FileAttachment } from "@/types"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useAppStore } from "@/lib/store"
 import { cn } from "@/lib/utils"
 import { useShallow } from "zustand/react/shallow"
@@ -43,6 +44,7 @@ import { GitBranchSwitcher } from "./GitBranchSwitcher"
 import type { Message, SkillMetadata } from "@/types"
 import { MessageBubble } from "./MessageBubble"
 import { UpdateStatusCard } from "./UpdateStatusCard"
+import { SkillsByCategorySection, type SkillsByCategoryItem } from "./SkillsByCategorySection"
 import {
   SkillCreateConfirmDialog,
   type SkillConfirmRequest
@@ -119,6 +121,7 @@ const THINKING_MESSAGES = [
 const SUPPORTED_EXTS = new Set([".txt", ".md", ".csv", ".docx", ".xlsx", ".xls"])
 const MAX_ATTACHMENTS = 3
 const MAX_TOTAL_CHARS = 24_000
+const GOOD_SKILLS_PREVIEW_LIMIT = 4
 const escXml = (s: string): string => s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
 
 const ROTATING_WORDS = [
@@ -179,7 +182,6 @@ export function ChatContainer({
   const isComposingRef = useRef(false)
   const [skills, setSkills] = useState<SkillMetadata[]>([])
   const [skillsLoading, setSkillsLoading] = useState(true)
-  const [showAllGeneralSkills, setShowAllGeneralSkills] = useState(false)
   const [showAllProgrammingSkills, setShowAllProgrammingSkills] = useState(false)
   const [showAllCustomSkills, setShowAllCustomSkills] = useState(false)
   const [thinkingMessageIndex, setThinkingMessageIndex] = useState(0)
@@ -272,11 +274,14 @@ export function ChatContainer({
     models,
     loadThreads,
     generateTitleForFirstMessage,
-    setShowCustomizeView
+    setShowCustomizeView,
+    setMarketInitialSkillCategory
   } = useAppStore()
 
-  const goodSkillsRef = useRef<MarketItem[]>([])
   const allSkillsRef = useRef<MarketItem[]>([])
+  const goodSkillsRef = useRef<MarketItem[]>([])
+  const [marketSkillsData, setMarketSkillsData] = useState<MarketItem[]>([])
+  const [marketSkillsLoading, setMarketSkillsLoading] = useState(true)
   const [goodSkillsData, setGoodSkillsData] = useState<MarketItem[]>([])
 
   // Define loadSkills function at component level so it can be accessed everywhere
@@ -301,11 +306,14 @@ export function ChatContainer({
   }, [])
 
   const queryRemoteSkills = useCallback(async () => {
+    setMarketSkillsLoading(true)
     try {
       const res = await marketApi.getSkills()
+      const allSkills = res?.data || []
       const goodSkills = res?.data?.filter((it) => it.featured === "精品")
       goodSkillsRef.current = goodSkills || []
-      allSkillsRef.current = res?.data || []
+      allSkillsRef.current = allSkills
+      setMarketSkillsData(allSkills)
       setGoodSkillsData(goodSkills || [])
 
       // 自动安装所有精品技能
@@ -316,10 +324,12 @@ export function ChatContainer({
       }
     } catch (error) {
       console.error("Failed to query remote skills:", error)
+    } finally {
+      setMarketSkillsLoading(false)
     }
   }, [loadSkills])
 
-  const getSkillShowLabel=(name)=>{
+  const getSkillShowLabel = (name: string): string => {
     const target = allSkillsRef.current?.find((it) => it.name === name || it.chinese_name === name)
     return target?.chinese_name || name || ""
   }
@@ -1486,37 +1496,65 @@ export function ChatContainer({
     }
   }, [skills, isProgrammingSkill, goodSkillsData])
 
-  // 精品技能：按 category 分组，匹配本地已安装的 SkillMetadata
-  const goodSkillsByCategory = useMemo(() => {
+  // 全部市场技能：按 一级/二级 category 分组，二级内“精品”优先
+  const skillsByCategory = useMemo(() => {
     const localSkillMap = new Map(
       skills.filter((s) => s.source === "user").map((s) => [s.name, s])
     )
     const groups = new Map<
       string,
-      Array<{ skill: SkillMetadata; label: string; marketItem: MarketItem }>
+      Map<string, SkillsByCategoryItem[]>
     >()
-    for (const item of goodSkillsData) {
+
+    const splitCategory = (category?: string): { primary: string; secondary: string } => {
+      if (!category) return { primary: "精品技能", secondary: "" }
+      const parts = category
+        .split("/")
+        .map((part) => part.trim())
+        .filter(Boolean)
+      if (parts.length === 0) return { primary: "精品技能", secondary: "" }
+      if (parts.length === 1) return { primary: parts[0], secondary: "" }
+      return { primary: parts[0], secondary: parts.slice(1).join("/") }
+    }
+
+    for (const item of marketSkillsData) {
       const localSkill = localSkillMap.get(item.name)
-      // if (!localSkill) continue
-      const category = item.category || "精品技能"
-      if (!groups.has(category)) groups.set(category, [])
-      groups.get(category)!.push({
-        skill: localSkill || {},
+      const { primary, secondary } = splitCategory(item.category)
+      if (!groups.has(primary)) groups.set(primary, new Map())
+      const secondaryGroups = groups.get(primary)!
+      if (!secondaryGroups.has(secondary)) secondaryGroups.set(secondary, [])
+      secondaryGroups.get(secondary)!.push({
+        skill: localSkill ?? {
+          name: item.name,
+          description: item.description || "",
+          path: item.filename || item.name,
+          source: "user"
+        },
         label: item.chinese_name || item.name,
         marketItem: item,
+        isFeatured: item.featured === "精品"
       })
     }
-    return groups
-  }, [goodSkillsData, skills])
 
-  const visibleGeneralSkillCards = useMemo(() => {
-    const source = showAllGeneralSkills ? generalSkills : generalSkills.slice(0, 8)
-    return source.map((skill) => ({
-      skill,
-      label: getSkillSummary(skill),
-      icon: getSkillIcon(skill),
-    }))
-  }, [showAllGeneralSkills, generalSkills, getSkillSummary, getSkillIcon])
+    groups.forEach((secondaryGroups) => {
+      secondaryGroups.forEach((items) => {
+        items.sort((a, b) => {
+          if (a.isFeatured !== b.isFeatured) return a.isFeatured ? -1 : 1
+          return a.label.localeCompare(b.label, "zh-CN")
+        })
+      })
+    })
+
+    return groups
+  }, [marketSkillsData, skills])
+
+  const handleOpenMarketBySecondaryCategory = useCallback(
+    (secondaryCategory: string): void => {
+      setMarketInitialSkillCategory(secondaryCategory)
+      setShowCustomizeView(true, "market")
+    },
+    [setMarketInitialSkillCategory, setShowCustomizeView]
+  )
 
   const programmingSkillCards = useMemo(() => {
     const source = showAllProgrammingSkills ? programmingSkills : programmingSkills.slice(0, 8)
@@ -1535,6 +1573,17 @@ export function ChatContainer({
       icon: getSkillIcon(skill),
     }))
   }, [showAllCustomSkills, customSkills, getSkillSummary, getSkillIcon])
+
+  const helpSceneSkillIds = useMemo(() => new Set(["scheduler-assistant", "skill-creator"]), [])
+  const helpSceneSkillCards = useMemo(() => {
+    return generalSkills
+      .filter((skill) => helpSceneSkillIds.has(getSkillId(skill)))
+      .map((skill) => ({
+        skill,
+        label: getSkillSummary(skill),
+        icon: getSkillIcon(skill)
+      }))
+  }, [generalSkills, helpSceneSkillIds, getSkillId, getSkillSummary, getSkillIcon])
 
   const handleUseSkillPrompt = useCallback(
     (skill: SkillMetadata, label?: string): void => {
@@ -1737,7 +1786,7 @@ export function ChatContainer({
         <div className="p-4">
           <div className="max-w-3xl mx-auto space-y-4">
             {displayMessages.length === 0 && !isLoading && (
-              <div className="pt-14 pb-8">
+              <div className="pt-6 pb-8">
                 <RotatingHeadline />
                 {skillsLoading ? (
                   <div className="text-sm text-muted-foreground text-center py-10">正在加载技能列表...</div>
@@ -1787,164 +1836,153 @@ export function ChatContainer({
                         )}
                       </div>
                     )}
-                    {visibleGeneralSkillCards.length > 0 && (
-                      <div className="space-y-2">
-                        <div className="text-xs text-muted-foreground font-medium tracking-wider">
-                          通用场景
-                        </div>
+                    <Tabs defaultValue="skills-by-category" className="space-y-3">
+                      <TabsList className="grid h-9 w-full grid-cols-3">
+                        <TabsTrigger value="skills-by-category" className="text-xs">
+                          场景技能
+                        </TabsTrigger>
+                        <TabsTrigger value="installed-skills" className="text-xs">
+                          我安装的技能
+                        </TabsTrigger>
+                        <TabsTrigger value="help" className="text-xs">
+                          帮助
+                        </TabsTrigger>
+                      </TabsList>
+
+                      <TabsContent value="skills-by-category" className="mt-0">
+                        {marketSkillsLoading ? (
+                          <div className="rounded-xl border border-border/60 bg-background/80 px-4 py-8">
+                            <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground">
+                              <Loader2 className="size-4 animate-spin" />
+                              <span>场景技能加载中...</span>
+                            </div>
+                          </div>
+                        ) : (
+                          <>
+                            {/* 市场技能：按 category 分组展示（每个二级最多显示 3 个） */}
+                            <SkillsByCategorySection
+                              skillsByCategory={skillsByCategory}
+                              previewLimit={GOOD_SKILLS_PREVIEW_LIMIT}
+                              onOpenMarketByCategory={handleOpenMarketBySecondaryCategory}
+                              onUseSkillPrompt={handleUseSkillPrompt}
+                              getSkillShowLabel={getSkillShowLabel}
+                            />
+                            {skillsByCategory.size === 0 && (
+                              <div className="rounded-xl border border-dashed border-border/70 bg-background/70 px-4 py-6 text-center text-sm text-muted-foreground">
+                                暂无场景技能
+                              </div>
+                            )}
+                          </>
+                        )}
+                      </TabsContent>
+
+                      <TabsContent value="installed-skills" className="mt-0 space-y-2">
                         <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                          {visibleGeneralSkillCards.map(({ skill, label, icon }) => (
+                          {customSkillCards?.length ? customSkillCards.map(({ skill, label }) => (
                             <button
                               key={label+skill.path}
                               type="button"
-                              onClick={() => handleUseSkillPrompt(skill)}
-                              className=" group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
+                              onClick={() => handleUseSkillPrompt(skill, label)}
+                              className="group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
                             >
                               <div className="flex items-center gap-3">
-                                <div
-                                  className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
-                                  {icon}
+                                <div className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
+                                  <Wrench className={"size-4"} />
                                 </div>
-                                <div className="text-xs text-foreground leading-5">{label}</div>
+                                <div className="text-xs text-foreground leading-5">{getSkillShowLabel(label)}</div>
                               </div>
                             </button>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                    {generalSkills.length > 8 && (
-                      <button
-                        type="button"
-                        onClick={() => setShowAllGeneralSkills((prev) => !prev)}
-                        className="mx-auto flex items-center gap-1 rounded-full border border-border/70 bg-background px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/30 transition-colors"
-                      >
-                        {showAllGeneralSkills ? (
-                          <>
-                            <ChevronUp className="size-3.5" />
-                            <span>收起</span>
-                          </>
-                        ) : (
-                          <>
-                            <ChevronDown className="size-3.5" />
-                            <span>展开更多（+{generalSkills.length - 8}）</span>
-                          </>
-                        )}
-                      </button>
-                    )}
-                    {/* 精品技能：按 category 分组展示 */}
-                    {goodSkillsByCategory.size > 0 &&
-                      Array.from(goodSkillsByCategory.entries()).map(([category, items]) => (
-                        <div key={category} className="space-y-2">
-                          <div className="text-xs text-muted-foreground font-medium tracking-wider flex items-center gap-1">
-                            <Zap className="size-3 text-amber-500" />
-                            <span>{category}</span>
-                          </div>
-                          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                            {items.map(({ skill, label }) => (
-                              <button
-                                key={label+skill.path}
-                                type="button"
-                                onClick={() => handleUseSkillPrompt(skill, label)}
-                                className="group w-full rounded-xl border border-amber-200/70 bg-amber-50/60 px-3 py-2 text-left hover:bg-amber-100/70 hover:border-amber-300 transition-colors"
-                              >
-                                <div className="flex items-center gap-3">
-                                  <div className="rounded-md border border-amber-200/80 p-1.5 text-amber-500 group-hover:text-amber-600 transition-colors">
-                                    <Zap className="size-4" />
-                                  </div>
-                                  <div className="text-xs text-foreground leading-5">{getSkillShowLabel(label)}</div>
+                          )) : (
+                            <button
+                              type="button"
+                              className="group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
+                            >
+                              <div className="flex items-center gap-3">
+                                <div className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
+                                  <CircleAlert className={"size-4"} />
                                 </div>
-                              </button>
-                            ))}
-                          </div>
+                                <div className="text-xs text-foreground leading-5">暂无</div>
+                              </div>
+                            </button>
+                          )}
                         </div>
-                      ))}
-                    <div className="space-y-2">
-                      <div className="text-xs text-muted-foreground font-medium tracking-wider">
-                        <span>我安装的技能</span>
-                        <span className={'ml-2'}>(  路径：自定义 / 应用市场 )</span>
-                      </div>
-                      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                        {customSkillCards?.length ? customSkillCards.map(({ skill, label }) => (
-                          <button
-                            key={label+skill.path}
-                            type="button"
-                            onClick={() => handleUseSkillPrompt(skill, label)}
-                            className="group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
-                          >
-                            <div className="flex items-center gap-3">
-                              <div className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
-                                <Wrench className={"size-4"} />
-                              </div>
-                              <div className="text-xs text-foreground leading-5">{getSkillShowLabel(label)}</div>
-                            </div>
-                          </button>
-                        )) : (
+                        {customSkills.length > 8 && (
                           <button
                             type="button"
-                            className="group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
+                            onClick={() => setShowAllCustomSkills((prev) => !prev)}
+                            className="mx-auto flex items-center gap-1 rounded-full border border-border/70 bg-background px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/30 transition-colors"
                           >
-                            <div className="flex items-center gap-3">
-                              <div className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
-                                <CircleAlert className={"size-4"} />
-                              </div>
-                              <div className="text-xs text-foreground leading-5">暂无</div>
-                            </div>
+                            {showAllCustomSkills ? (
+                              <>
+                                <ChevronUp className="size-3.5" />
+                                <span>收起</span>
+                              </>
+                            ) : (
+                              <>
+                                <ChevronDown className="size-3.5" />
+                                <span>展开更多（+{customSkills.length - 8}）</span>
+                              </>
+                            )}
                           </button>
                         )}
-                      </div>
-                    </div>
+                      </TabsContent>
 
-                    <div className="space-y-2">
-                      <div className="text-xs text-muted-foreground font-medium tracking-wider">
-                        帮助
-                      </div>
-                      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                        <button
-                          onClick={async () => {
-                            const instructionUrl = import.meta.env.VITE_INTRUCTION_URL;
-                            handleCopyToClipboard(instructionUrl);
-                          }}
-                          type="button"
-                          className="group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
-                        >
-                          <div className="flex items-center gap-3">
-                            <div
-                              className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
-                              <Notebook size={14} />
+                      <TabsContent value="help" className="mt-0 space-y-2">
+                        {helpSceneSkillCards.length > 0 && (
+                          <div className="space-y-2">
+                            <div className="text-xs text-muted-foreground font-medium tracking-wider">
+                              通用场景
                             </div>
-                            <div className="text-xs text-foreground leading-5">操作说明文档</div>
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                              {helpSceneSkillCards.map(({ skill, label, icon }) => (
+                                <button
+                                  key={label + skill.path}
+                                  type="button"
+                                  onClick={() => handleUseSkillPrompt(skill)}
+                                  className="group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
+                                >
+                                  <div className="flex items-center gap-3">
+                                    <div
+                                      className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
+                                      {icon}
+                                    </div>
+                                    <div className="text-xs text-foreground leading-5">{label}</div>
+                                  </div>
+                                </button>
+                              ))}
+                            </div>
                           </div>
-                        </button>
+                        )}
+                        <div className="text-xs text-muted-foreground font-medium tracking-wider">
+                          帮助
+                        </div>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                          <button
+                            onClick={async () => {
+                              const instructionUrl = import.meta.env.VITE_INTRUCTION_URL;
+                              handleCopyToClipboard(instructionUrl);
+                            }}
+                            type="button"
+                            className="group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
+                          >
+                            <div className="flex items-center gap-3">
+                              <div
+                                className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
+                                <Notebook size={14} />
+                              </div>
+                              <div className="text-xs text-foreground leading-5">操作说明文档</div>
+                            </div>
+                          </button>
 
-                        <UpdateStatusCard
-                          hasUpdate={needUpdateVersion}
-                          onClick={() => {
-                            setUpdateDialogOpen(true)
-                          }}
-                        />
-
-
-                      </div>
-                      {customSkills.length > 8 && (
-                        <button
-                          type="button"
-                          onClick={() => setShowAllCustomSkills((prev) => !prev)}
-                          className="mx-auto flex items-center gap-1 rounded-full border border-border/70 bg-background px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/30 transition-colors"
-                        >
-                          {showAllCustomSkills ? (
-                            <>
-                              <ChevronUp className="size-3.5" />
-                              <span>收起</span>
-                            </>
-                          ) : (
-                            <>
-                              <ChevronDown className="size-3.5" />
-                              <span>展开更多（+{customSkills.length - 8}）</span>
-                            </>
-                          )}
-                        </button>
-                      )}
-                    </div>
+                          <UpdateStatusCard
+                            hasUpdate={needUpdateVersion}
+                            onClick={() => {
+                              setUpdateDialogOpen(true)
+                            }}
+                          />
+                        </div>
+                      </TabsContent>
+                    </Tabs>
                   </div>
                 )}
               </div>

@@ -12,6 +12,17 @@ import {
 } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 
+const SCENE_CATEGORY_OPTIONS = [
+  "治理类场景/架构红线",
+  "治理类场景/应用安全",
+  "治理类场景/云应用架构转型治理",
+  "研发类场景/应用类研发",
+  "研发类场景/数据类型研发",
+  "通用场景"
+] as const
+
+const DEFAULT_SCENE_CATEGORY = SCENE_CATEGORY_OPTIONS[0]
+
 interface UserInfoLite {
   sapId?: string
   ystId?: string
@@ -51,7 +62,7 @@ export function UniversalUploadDialog({
   const [file, setFile] = useState<File | null>(null)
   const [name, setName] = useState("")
   const [description, setDescription] = useState("")
-  const [category, setCategory] = useState<"研发场景" | "通用场景">("研发场景")
+  const [category, setCategory] = useState<string>(DEFAULT_SCENE_CATEGORY)
   const [guidance, setGuidance] = useState("")
   const [chineseName, setChineseName] = useState("")
   const [userId, setUserId] = useState<string | undefined>(undefined)
@@ -82,7 +93,7 @@ export function UniversalUploadDialog({
     if (isUpdate && existingItem && open) {
       setName(existingItem.name || "")
       setDescription(existingItem.description || "")
-      setCategory(existingItem.category as "研发场景" | "通用场景" || "研发场景")
+      setCategory(existingItem.category || DEFAULT_SCENE_CATEGORY)
       setGuidance(existingItem.guidance || "")
       setChineseName(existingItem.chinese_name || "")
       setNameFromFile(false)
@@ -90,7 +101,7 @@ export function UniversalUploadDialog({
       // Reset form for new upload
       setName("")
       setDescription("")
-      setCategory("研发场景")
+      setCategory(DEFAULT_SCENE_CATEGORY)
       setGuidance("")
       setChineseName("")
       setNameFromFile(false)
@@ -445,12 +456,19 @@ export function UniversalUploadDialog({
             <select
               id="category"
               value={category}
-              onChange={(e) => setCategory(e.target.value as "研发场景" | "通用场景")}
+              onChange={(e) => setCategory(e.target.value)}
               disabled={uploading}
               className="w-full p-2 text-sm border rounded-md focus:ring-1 focus:ring-primary focus:outline-none disabled:opacity-50"
             >
-              <option value="研发场景">研发场景</option>
-              <option value="通用场景">通用场景</option>
+              {category &&
+                !SCENE_CATEGORY_OPTIONS.includes(
+                  category as (typeof SCENE_CATEGORY_OPTIONS)[number]
+                ) && <option value={category}>{category}</option>}
+              {SCENE_CATEGORY_OPTIONS.map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
             </select>
           </div>
 
