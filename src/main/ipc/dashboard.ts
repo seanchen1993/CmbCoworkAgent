@@ -94,6 +94,10 @@ interface TimeRange {
 
 type Granularity = "day" | "week" | "month" | "custom"
 
+interface UserStatsOptions {
+  upperOrgLv1?: string | null
+}
+
 const DISLIKE_TYPE_OPTIONS = [
   { id: "slow", label: "太慢了" },
   { id: "not_helpful", label: "内容不相关" },
@@ -195,8 +199,25 @@ async function fetchModelStats(range: TimeRange, granularity: Granularity): Prom
   return esQuery(getEsIndex("trace"), body)
 }
 
-async function fetchUserStats(range: TimeRange, granularity: Granularity): Promise<unknown> {
+function buildUpperOrgLv1Filter(upperOrgLv1: string): Record<string, unknown> {
+  if (upperOrgLv1 === "") {
+    return {
+      bool: {
+        should: [
+          { term: { upperOrgLv1: "" } },
+          { bool: { must_not: [{ exists: { field: "upperOrgLv1" } }] } }
+        ],
+        minimum_should_match: 1
+      }
+    }
+  }
+
+  return { term: { upperOrgLv1 } }
+}
+
+async function fetchUserStats(range: TimeRange, granularity: Granularity, opts?: UserStatsOptions): Promise<unknown> {
   void granularity
+  const selectedUpperOrgLv1 = opts?.upperOrgLv1 ?? null
   const body = {
     size: 0,
     query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
@@ -205,10 +226,20 @@ async function fetchUserStats(range: TimeRange, granularity: Granularity): Promi
         terms: { field: "sapId", size: 50 },
         aggs: {
           user_name: { terms: { field: "userName",  size: 1 } },
-          org_name:  { terms: { field: "orgName",   size: 1 } }
+          org_name:  { terms: { field: "orgName",   size: 1 } },
+          upper_org_lv1: { terms: { field: "upperOrgLv1", size: 1, missing: "" } }
         }
       },
-      by_org:     { terms: { field: "orgName",     size: 30 } },
+      by_org: selectedUpperOrgLv1 !== null
+        ? {
+            filter: buildUpperOrgLv1Filter(selectedUpperOrgLv1),
+            aggs: {
+              items: { terms: { field: "orgName", size: 30, missing: "" } }
+            }
+          }
+        : {
+            terms: { field: "upperOrgLv1", size: 30, missing: "" }
+          },
       by_version: {
         terms: { field: "appVersion", size: 20 },
         aggs: { unique_users: { cardinality: { field: "sapId" } } }
@@ -495,11 +526,12 @@ function makeMockModelStats(): unknown {
   }
 }
 
-function makeMockUserStats(range: TimeRange): unknown {
+function makeMockUserStats(range: TimeRange, opts?: UserStatsOptions): unknown {
   const from = new Date(range.from)
   const to = new Date(range.to)
   const diffMs = to.getTime() - from.getTime()
   const diffDays = diffMs / (1000 * 60 * 60 * 24)
+  const selectedUpperOrgLv1 = opts?.upperOrgLv1 ?? null
 
   const trendBuckets: Date[] = []
   if (diffDays <= 1) {
@@ -517,27 +549,52 @@ function makeMockUserStats(range: TimeRange): unknown {
     users: { value: Math.floor(3 + Math.random() * 15) }
   }))
 
+  const byOrgBuckets = selectedUpperOrgLv1 === null
+    ? [
+        { key: "零售金融", doc_count: 748 },
+        { key: "公司金融", doc_count: 245 },
+        { key: "风险管理", doc_count: 189 },
+        { key: "科技管理", doc_count: 65 }
+      ]
+    : selectedUpperOrgLv1 === "零售金融"
+      ? [
+          { key: "零售一部", doc_count: 430 },
+          { key: "零售二部", doc_count: 318 }
+        ]
+      : selectedUpperOrgLv1 === "公司金融"
+        ? [
+            { key: "企业金融部", doc_count: 245 }
+          ]
+        : selectedUpperOrgLv1 === "风险管理"
+          ? [
+              { key: "风险管理部", doc_count: 189 }
+            ]
+          : selectedUpperOrgLv1 === "科技管理"
+            ? [
+                { key: "科技部", doc_count: 65 }
+              ]
+            : []
+
   return {
     aggregations: {
       top_users: {
         buckets: [
-          { key: "10010001", doc_count: 142, user_name: { buckets: [{ key: "张三", doc_count: 142 }] }, org_name: { buckets: [{ key: "零售一部", doc_count: 142 }] }, success_count: { doc_count: 130 } },
-          { key: "10010002", doc_count: 118, user_name: { buckets: [{ key: "李四", doc_count: 118 }] }, org_name: { buckets: [{ key: "零售二部", doc_count: 118 }] }, success_count: { doc_count: 110 } },
-          { key: "10010003", doc_count: 97,  user_name: { buckets: [{ key: "王五", doc_count: 97  }] }, org_name: { buckets: [{ key: "企业金融部", doc_count: 97  }] }, success_count: { doc_count: 89  } },
-          { key: "10010004", doc_count: 85,  user_name: { buckets: [{ key: "赵六", doc_count: 85  }] }, org_name: { buckets: [{ key: "零售一部", doc_count: 85  }] }, success_count: { doc_count: 72  } },
-          { key: "10010005", doc_count: 73,  user_name: { buckets: [{ key: "钱七", doc_count: 73  }] }, org_name: { buckets: [{ key: "风险管理部", doc_count: 73  }] }, success_count: { doc_count: 68  } },
-          { key: "10010006", doc_count: 61,  user_name: { buckets: [{ key: "孙八", doc_count: 61  }] }, org_name: { buckets: [{ key: "科技部",    doc_count: 61  }] }, success_count: { doc_count: 55  } }
+          { key: "10010001", doc_count: 142, user_name: { buckets: [{ key: "张三", doc_count: 142 }] }, org_name: { buckets: [{ key: "零售一部", doc_count: 142 }] }, upper_org_lv1: { buckets: [{ key: "零售金融", doc_count: 142 }] }, success_count: { doc_count: 130 } },
+          { key: "10010002", doc_count: 118, user_name: { buckets: [{ key: "李四", doc_count: 118 }] }, org_name: { buckets: [{ key: "零售二部", doc_count: 118 }] }, upper_org_lv1: { buckets: [{ key: "零售金融", doc_count: 118 }] }, success_count: { doc_count: 110 } },
+          { key: "10010003", doc_count: 97,  user_name: { buckets: [{ key: "王五", doc_count: 97  }] }, org_name: { buckets: [{ key: "企业金融部", doc_count: 97  }] }, upper_org_lv1: { buckets: [{ key: "公司金融", doc_count: 97 }] }, success_count: { doc_count: 89  } },
+          { key: "10010004", doc_count: 85,  user_name: { buckets: [{ key: "赵六", doc_count: 85  }] }, org_name: { buckets: [{ key: "零售一部", doc_count: 85  }] }, upper_org_lv1: { buckets: [{ key: "零售金融", doc_count: 85 }] }, success_count: { doc_count: 72  } },
+          { key: "10010005", doc_count: 73,  user_name: { buckets: [{ key: "钱七", doc_count: 73  }] }, org_name: { buckets: [{ key: "风险管理部", doc_count: 73  }] }, upper_org_lv1: { buckets: [{ key: "风险管理", doc_count: 73 }] }, success_count: { doc_count: 68  } },
+          { key: "10010006", doc_count: 61,  user_name: { buckets: [{ key: "孙八", doc_count: 61  }] }, org_name: { buckets: [{ key: "科技部",    doc_count: 61  }] }, upper_org_lv1: { buckets: [{ key: "科技管理", doc_count: 61 }] }, success_count: { doc_count: 55  } }
         ]
       },
-      by_org: {
-        buckets: [
-          { key: "零售一部", doc_count: 430 },
-          { key: "零售二部", doc_count: 318 },
-          { key: "企业金融部", doc_count: 245 },
-          { key: "风险管理部", doc_count: 189 },
-          { key: "科技部", doc_count: 65 }
-        ]
-      },
+      by_org: selectedUpperOrgLv1 === null
+        ? {
+            buckets: byOrgBuckets
+          }
+        : {
+            doc_count: byOrgBuckets.reduce((sum, bucket) => sum + bucket.doc_count, 0),
+            items: { buckets: byOrgBuckets }
+          },
       by_version: {
         buckets: [
           { key: "1.3.0", doc_count: 512, unique_users: { value: 98 } },
@@ -738,10 +795,10 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   _ipcMain.handle(
     "dashboard:userStats",
-    async (_, range: TimeRange, granularity: Granularity) => {
-      if (import.meta.env.DEV) return { success: true, data: makeMockUserStats(range) }
+    async (_, range: TimeRange, granularity: Granularity, opts?: UserStatsOptions) => {
+      if (import.meta.env.DEV) return { success: true, data: makeMockUserStats(range, opts) }
       try {
-        return { success: true, data: await fetchUserStats(range, granularity) }
+        return { success: true, data: await fetchUserStats(range, granularity, opts) }
       } catch (e) {
         console.error("[Dashboard] userStats error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
