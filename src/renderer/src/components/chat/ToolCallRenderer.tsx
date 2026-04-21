@@ -31,6 +31,25 @@ import type { ToolCall, Todo } from "@/types"
 import ReactDiffViewer, { DiffMethod } from "react-diff-viewer-continued"
 import { ToolCallErrorBoundary, RenderProbe } from "./ToolCallErrorBoundary"
 
+// Module-level sentinel so identity is stable across renders. Returned by
+// `tryRender` when the formatter throws synchronously — callers fall back
+// to <RenderProbe> so the ErrorBoundary can catch the throw during its
+// own render phase.
+const THROWN: unique symbol = Symbol("tool-render-thrown")
+
+function tryRender(fn: () => React.ReactNode): React.ReactNode | typeof THROWN {
+  try {
+    return fn()
+  } catch (err) {
+    // The boundary will display the fallback via RenderProbe's second
+    // invocation and log details through componentDidCatch. Keep this at
+    // debug level so the same failure isn't triple-logged in the console
+    // (probe + boundary + React's own "above error occurred..." notice).
+    console.debug("[ToolCallRenderer] formatter threw during probe:", err)
+    return THROWN
+  }
+}
+
 interface ToolCallRendererProps {
   toolCall: ToolCall
   result?: string | unknown
@@ -299,7 +318,10 @@ function CommandDisplay({
 }): React.JSX.Element {
   return (
     <div className="text-xs space-y-2 w-full overflow-hidden">
-      <div className="font-mono bg-background rounded-sm p-2 flex items-center gap-2 min-w-0">
+      <div
+        className="font-mono bg-background rounded-sm p-2 flex items-center gap-2 min-w-0"
+        title={command || undefined}
+      >
         <span className="text-status-info shrink-0">$</span>
         <span className="truncate">{command}</span>
       </div>
@@ -706,6 +728,20 @@ export function ToolCallRenderer({
 
   const displayArg = getDisplayArg()
 
+  // Shared across execute's content/result formatters so we don't pay
+  // safeStringify's deep-JSON cost twice for the same non-string result
+  // (can matter for large stdout from git log / npm test / etc).
+  const executeOutput: string | undefined =
+    toolCall.name === "execute"
+      ? typeof result === "string"
+        ? result
+        : result === undefined
+          ? undefined
+          : result === null
+            ? ""
+            : safeStringify(result)
+      : undefined
+
   // Render formatted content based on tool type
   const renderFormattedContent = (): React.ReactNode => {
     if (!args) return null
@@ -729,8 +765,18 @@ export function ToolCallRenderer({
       }
 
       case "execute": {
-        const output = typeof result === "string" ? result : undefined
-        return <CommandDisplay command="" output={isExpanded ? output : undefined} />
+        const command =
+          typeof args.command === "string"
+            ? args.command
+            : args.command == null
+              ? ""
+              : safeStringify(args.command)
+        return (
+          <CommandDisplay
+            command={command}
+            output={isExpanded ? executeOutput : undefined}
+          />
+        )
       }
 
       default:
@@ -830,7 +876,9 @@ export function ToolCallRenderer({
       case "execute": {
         // When expanded, output is shown in CommandDisplay - just show status
         // When collapsed, show the output preview
-        const output = typeof result === "string" ? result : safeStringify(result)
+        // Uses the outer `executeOutput` so we only pay safeStringify once
+        // per render (see its declaration above).
+        const output = executeOutput ?? ""
 
         // Special handling for git diff commands
         // todo 暂时注释，看后续是否要放开
@@ -866,7 +914,7 @@ export function ToolCallRenderer({
         // Collapsed view - show output preview
         if (output.trim()) {
           return (
-            <pre className="space-y-2">
+            <div className="space-y-2">
               <div className="text-xs text-status-nominal flex items-center gap-1.5">
                 <CheckCircle2 className="size-3" />
                 <span>Command completed</span>
@@ -875,7 +923,7 @@ export function ToolCallRenderer({
                 {output.slice(0, 500)}
                 {output.length > 500 && "..."}
               </pre>
-            </pre>
+            </div>
           )
         }
         return (
@@ -988,44 +1036,41 @@ export function ToolCallRenderer({
             : typeof result === "object"
               ? `obj${Object.keys(result as object).length}`
               : "prim"
-  const resetKey = `${id}:${argsFingerprint}:${resultFingerprint}`
-  // Probe once to decide whether the summary container is worth rendering.
-  // If the render function throws here, treat that as "has content" — the
-  // inner boundary will catch the same throw and show a fallback, which is
-  // the signal we want the user to see. Nodes captured here are unused;
-  // RenderProbe below calls the render functions again in the boundary's
-  // render phase so boundary catches them. This means render functions run
-  // up to twice per render — they're pure formatters so that's acceptable.
-  let contentHasOutput: boolean
-  try {
-    contentHasOutput = renderFormattedContent() != null
-  } catch {
-    contentHasOutput = true
-  }
-  let resultHasOutput: boolean
-  try {
-    resultHasOutput = renderFormattedResult() != null
-  } catch {
-    resultHasOutput = true
-  }
+  // Include isExpanded because several formatters take different branches
+  // based on it (execute output, task details, etc). Without it a render
+  // error in one state would stick even after the user toggled to the
+  // other.
+  const resetKey = `${id}:${argsFingerprint}:${resultFingerprint}:${isExpanded ? 1 : 0}`
+  // Evaluate formatters once per parent render. Happy path: the resulting
+  // element is handed to both the "should we render the container?" check
+  // and the boundary (no double invocation on read_file / grep / diff).
+  // Throw path: fall back to <RenderProbe> so the formatter runs again
+  // during the boundary's render phase — that second call is the only way
+  // React's error boundary can catch the throw. Notes:
+  //   - happy path  = 1 invocation  (was 2 before this optimisation)
+  //   - throw path  = 2 invocations (unavoidable — boundary needs the
+  //                   throw to happen inside its subtree)
+  const contentNode = tryRender(renderFormattedContent)
+  const resultNode = tryRender(renderFormattedResult)
+  const contentHasOutput = contentNode === THROWN || contentNode != null
+  const resultHasOutput = resultNode === THROWN || resultNode != null
   const hasFormattedDisplay = contentHasOutput || resultHasOutput
-  // RenderProbe has a stable module-level identity, so wrapping the render
-  // callbacks in it does NOT remount on every parent render (unlike inline
-  // components defined inside this render body).
   const formattedContent = contentHasOutput ? (
-    <ToolCallErrorBoundary
-      toolName={toolCall.name}
-      resetKey={`c:${resetKey}`}
-    >
-      <RenderProbe render={renderFormattedContent} />
+    <ToolCallErrorBoundary toolName={toolCall.name} resetKey={`c:${resetKey}`}>
+      {contentNode === THROWN ? (
+        <RenderProbe render={renderFormattedContent} />
+      ) : (
+        contentNode
+      )}
     </ToolCallErrorBoundary>
   ) : null
   const formattedResult = resultHasOutput ? (
-    <ToolCallErrorBoundary
-      toolName={toolCall.name}
-      resetKey={`r:${resetKey}`}
-    >
-      <RenderProbe render={renderFormattedResult} />
+    <ToolCallErrorBoundary toolName={toolCall.name} resetKey={`r:${resetKey}`}>
+      {resultNode === THROWN ? (
+        <RenderProbe render={renderFormattedResult} />
+      ) : (
+        resultNode
+      )}
     </ToolCallErrorBoundary>
   ) : null
 
