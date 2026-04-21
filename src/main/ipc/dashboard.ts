@@ -9,6 +9,8 @@
 import { ipcMain, dialog, BrowserWindow } from "electron"
 import { getUserInfo } from "../storage"
 import * as fs from "fs"
+import { buildTraceTree } from "../agent/trace/tree-builder"
+import type { AgentTrace, TraceNode } from "../agent/trace/types"
 
 // ─────────────────────────────────────────────────────────
 // ES Configuration (from .env)
@@ -94,6 +96,57 @@ interface TimeRange {
 
 type Granularity = "day" | "week" | "month" | "custom"
 
+interface DashboardTraceDetail {
+  traceId: string
+  threadId: string
+  startedAt: string
+  endedAt?: string
+  durationMs: number
+  userMessage: string
+  modelId?: string
+  modelName?: string
+  outcome: string
+  totalToolCalls: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalTokens: number
+  usedSkills: string[]
+  nodes?: TraceNode[]
+  rawAvailable: boolean
+  rawError?: string
+}
+
+interface DashboardCommitDetail {
+  eventId: string
+  eventTime: string
+  userName: string
+  sapId?: string
+  ystId?: string
+  orgName?: string
+  userIp?: string
+  repoPath?: string
+  branch?: string
+  filesChanged: number
+  insertions: number
+  deletions: number
+  triggeredBy?: string
+  threadId?: string
+  usedSkills: string[]
+  skillCount: number
+}
+
+interface EsSearchHit {
+  _id?: string
+  _source?: Record<string, unknown>
+}
+
+interface EsSearchResponse {
+  hits?: {
+    total?: number | { value?: number }
+    hits?: EsSearchHit[]
+  }
+}
+
 const DISLIKE_TYPE_OPTIONS = [
   { id: "slow", label: "太慢了" },
   { id: "not_helpful", label: "内容不相关" },
@@ -117,6 +170,207 @@ function getCalendarInterval(granularity: Granularity, from: string, to: string)
 
 function timeRangeFilter(field: string, range: TimeRange): Record<string, unknown> {
   return { range: { [field]: { gte: range.from, lte: range.to } } }
+}
+
+function isDashboardAllowed(): boolean {
+  if (import.meta.env.DEV) return true
+  const userInfo = getUserInfo()
+  const ystId = userInfo?.ystId?.trim()
+  if (!ystId) return false
+  return ALLOWED_YST_IDS.has(ystId)
+}
+
+function clampLimit(limit: number | undefined, fallback: number, max: number): number {
+  if (!Number.isFinite(limit)) return fallback
+  return Math.max(1, Math.min(max, Math.floor(Number(limit))))
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {}
+  return value as Record<string, unknown>
+}
+
+function asString(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value : fallback
+}
+
+function asOptionalString(value: unknown): string | undefined {
+  const text = asString(value).trim()
+  return text ? text : undefined
+}
+
+function asNumber(value: unknown, fallback = 0): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return fallback
+}
+
+function asStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value.filter((item): item is string => typeof item === "string")
+}
+
+function summarizeTraceTokenUsage(modelCalls: AgentTrace["modelCalls"]): {
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalTokens: number
+} {
+  if (!Array.isArray(modelCalls) || modelCalls.length === 0) {
+    return { totalInputTokens: 0, totalOutputTokens: 0, totalTokens: 0 }
+  }
+  return modelCalls.reduce(
+    (acc, call) => {
+      const input = call?.tokenUsage?.inputTokens ?? 0
+      const output = call?.tokenUsage?.outputTokens ?? 0
+      const total = call?.tokenUsage?.totalTokens ?? input + output
+      acc.totalInputTokens += input
+      acc.totalOutputTokens += output
+      acc.totalTokens += total
+      return acc
+    },
+    { totalInputTokens: 0, totalOutputTokens: 0, totalTokens: 0 }
+  )
+}
+
+function parseRawTrace(raw: unknown): { trace?: AgentTrace; error?: string } {
+  if (raw === undefined || raw === null) return { error: "该 trace 缺少 _raw 字段" }
+  if (typeof raw === "string") {
+    try {
+      return { trace: JSON.parse(raw) as AgentTrace }
+    } catch (e) {
+      return { error: `解析 _raw 失败：${e instanceof Error ? e.message : String(e)}` }
+    }
+  }
+  if (typeof raw === "object" && !Array.isArray(raw)) return { trace: raw as AgentTrace }
+  return { error: "_raw 字段格式不受支持" }
+}
+
+function normalizeParsedTrace(trace: AgentTrace, source: Record<string, unknown>, hit: EsSearchHit): AgentTrace {
+  const candidate = trace as Partial<AgentTrace>
+  const startedAt = candidate.startedAt || asString(source.startedAt)
+  const endedAt = candidate.endedAt || asString(source.endedAt, startedAt)
+  const outcome = asString(candidate.outcome, asString(source.outcome, "unknown"))
+  const safeOutcome = (
+    outcome === "success" || outcome === "error" || outcome === "cancelled" || outcome === "unknown"
+      ? outcome
+      : "unknown"
+  ) as AgentTrace["outcome"]
+
+  return {
+    ...trace,
+    traceId: candidate.traceId || asString(source.traceId, hit._id ?? ""),
+    threadId: candidate.threadId || asString(source.threadId),
+    startedAt,
+    endedAt,
+    durationMs: asNumber(candidate.durationMs, asNumber(source.durationMs)),
+    userMessage: candidate.userMessage || asString(source.userMessage),
+    modelId: candidate.modelId || asString(source.modelId),
+    modelName: candidate.modelName || asOptionalString(source.modelName),
+    steps: Array.isArray(candidate.steps) ? candidate.steps : [],
+    modelCalls: Array.isArray(candidate.modelCalls) ? candidate.modelCalls : undefined,
+    nodes: Array.isArray(candidate.nodes) ? candidate.nodes : undefined,
+    totalToolCalls: asNumber(candidate.totalToolCalls, asNumber(source.totalToolCalls)),
+    outcome: safeOutcome,
+    usedSkills: Array.isArray(candidate.usedSkills) ? candidate.usedSkills : asStringArray(source.usedSkills)
+  }
+}
+
+function getTotalHits(raw: EsSearchResponse, fallback: number): number {
+  const total = raw.hits?.total
+  if (typeof total === "number") return total
+  if (total && typeof total === "object" && typeof total.value === "number") return total.value
+  return fallback
+}
+
+function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
+  const source = hit._source ?? {}
+  const parsed = parseRawTrace(source._raw)
+
+  if (parsed.trace) {
+    const trace = normalizeParsedTrace(parsed.trace, source, hit)
+    const usage = summarizeTraceTokenUsage(trace.modelCalls)
+    const fallbackInputTokens = asNumber(source.totalInputTokens)
+    const fallbackOutputTokens = asNumber(source.totalOutputTokens)
+    const fallbackTotalTokens = asNumber(source.totalTokens, fallbackInputTokens + fallbackOutputTokens)
+    const totalInputTokens = usage.totalInputTokens || fallbackInputTokens
+    const totalOutputTokens = usage.totalOutputTokens || fallbackOutputTokens
+    const totalTokens = usage.totalTokens || fallbackTotalTokens || totalInputTokens + totalOutputTokens
+    let nodes: TraceNode[] | undefined
+    let rawError: string | undefined
+    try {
+      nodes = buildTraceTree(trace)
+    } catch (e) {
+      rawError = `解析 trace 树失败：${e instanceof Error ? e.message : String(e)}`
+    }
+
+    return {
+      traceId: trace.traceId || asString(source.traceId, hit._id ?? ""),
+      threadId: trace.threadId || asString(source.threadId),
+      startedAt: trace.startedAt || asString(source.startedAt),
+      endedAt: trace.endedAt || asOptionalString(source.endedAt),
+      durationMs: asNumber(trace.durationMs, asNumber(source.durationMs)),
+      userMessage: trace.userMessage || asString(source.userMessage),
+      modelId: trace.modelId || asOptionalString(source.modelId),
+      modelName: trace.modelName || asOptionalString(source.modelName),
+      outcome: trace.outcome || asString(source.outcome, "unknown"),
+      totalToolCalls: asNumber(trace.totalToolCalls, asNumber(source.totalToolCalls)),
+      totalInputTokens,
+      totalOutputTokens,
+      totalTokens,
+      usedSkills: Array.isArray(trace.usedSkills) ? trace.usedSkills : asStringArray(source.usedSkills),
+      ...(nodes ? { nodes } : {}),
+      rawAvailable: !rawError,
+      ...(rawError ? { rawError } : {})
+    }
+  }
+
+  const fallbackInputTokens = asNumber(source.totalInputTokens)
+  const fallbackOutputTokens = asNumber(source.totalOutputTokens)
+  return {
+    traceId: asString(source.traceId, hit._id ?? ""),
+    threadId: asString(source.threadId),
+    startedAt: asString(source.startedAt),
+    endedAt: asOptionalString(source.endedAt),
+    durationMs: asNumber(source.durationMs),
+    userMessage: asString(source.userMessage),
+    modelId: asOptionalString(source.modelId),
+    modelName: asOptionalString(source.modelName),
+    outcome: asString(source.outcome, "unknown"),
+    totalToolCalls: asNumber(source.totalToolCalls),
+    totalInputTokens: fallbackInputTokens,
+    totalOutputTokens: fallbackOutputTokens,
+    totalTokens: asNumber(source.totalTokens, fallbackInputTokens + fallbackOutputTokens),
+    usedSkills: asStringArray(source.usedSkills),
+    rawAvailable: false,
+    rawError: parsed.error
+  }
+}
+
+function normalizeCommitDetail(hit: EsSearchHit): DashboardCommitDetail {
+  const source = hit._source ?? {}
+  const properties = asRecord(source.properties)
+  const usedSkills = asStringArray(properties.usedSkills)
+  return {
+    eventId: asString(source.eventId, hit._id ?? ""),
+    eventTime: asString(source.eventTime),
+    userName: asString(source.userName, "unknown"),
+    sapId: asOptionalString(source.sapId),
+    ystId: asOptionalString(source.ystId),
+    orgName: asOptionalString(source.orgName),
+    userIp: asOptionalString(source.userIp),
+    repoPath: asOptionalString(properties.repoPath),
+    branch: asOptionalString(properties.branch),
+    filesChanged: asNumber(properties.filesChanged),
+    insertions: asNumber(properties.insertions),
+    deletions: asNumber(properties.deletions),
+    triggeredBy: asOptionalString(properties.triggeredBy),
+    threadId: asOptionalString(properties.threadId),
+    usedSkills,
+    skillCount: asNumber(properties.skillCount, usedSkills.length)
+  }
 }
 
 // ─────────────────────────────────────────────────────────
@@ -348,6 +602,94 @@ async function fetchFeedback(range: TimeRange, granularity: Granularity): Promis
   }
 
   return esQuery(getEsIndex("event"), body)
+}
+
+async function fetchSkillRecentTraces(
+  skill: string,
+  range: TimeRange,
+  limit = 3
+): Promise<DashboardTraceDetail[]> {
+  const size = clampLimit(limit, 3, 10)
+  const body = {
+    size,
+    sort: [{ startedAt: { order: "desc" } }],
+    query: {
+      bool: {
+        filter: [
+          timeRangeFilter("startedAt", range),
+          { term: { usedSkills: skill } }
+        ]
+      }
+    },
+    _source: {
+      includes: [
+        "_raw",
+        "traceId",
+        "threadId",
+        "startedAt",
+        "endedAt",
+        "durationMs",
+        "userMessage",
+        "modelId",
+        "modelName",
+        "outcome",
+        "totalToolCalls",
+        "totalInputTokens",
+        "totalOutputTokens",
+        "totalTokens",
+        "usedSkills"
+      ]
+    }
+  }
+  const raw = await esQuery(getEsIndex("trace"), body) as EsSearchResponse
+  return (raw.hits?.hits ?? []).map(normalizeTraceDetail)
+}
+
+async function fetchCommitDetails(
+  range: TimeRange,
+  limit = 200
+): Promise<{ total: number; items: DashboardCommitDetail[] }> {
+  const size = clampLimit(limit, 200, 500)
+  const body = {
+    track_total_hits: true,
+    size,
+    sort: [{ eventTime: { order: "desc" } }],
+    query: {
+      bool: {
+        filter: [
+          timeRangeFilter("eventTime", range),
+          { term: { eventName: "git.commit.created" } }
+        ]
+      }
+    },
+    _source: {
+      includes: [
+        "eventId",
+        "eventTime",
+        "eventName",
+        "userName",
+        "userIp",
+        "sapId",
+        "ystId",
+        "orgName",
+        "properties.repoPath",
+        "properties.branch",
+        "properties.filesChanged",
+        "properties.insertions",
+        "properties.deletions",
+        "properties.triggeredBy",
+        "properties.threadId",
+        "properties.usedSkills",
+        "properties.skillCount"
+      ]
+    }
+  }
+  const raw = await esQuery(getEsIndex("event"), body) as EsSearchResponse
+  const hits = raw.hits?.hits ?? []
+  return {
+    total: getTotalHits(raw, hits.length),
+    items: hits.map(normalizeCommitDetail)
+  }
 }
 
 // ─────────────────────────────────────────────────────────
@@ -695,6 +1037,140 @@ function makeMockFeedback(range: TimeRange, granularity: Granularity): unknown {
   }
 }
 
+function makeMockAgentTrace(skill: string, range: TimeRange, index: number): AgentTrace {
+  const from = new Date(range.from)
+  const to = new Date(range.to)
+  const spanMs = Math.max(60_000, to.getTime() - from.getTime())
+  const offsetMs = Math.min(spanMs - 1, (index + 1) * 35 * 60 * 1000)
+  const startedAt = new Date(to.getTime() - offsetMs)
+  const endedAt = new Date(startedAt.getTime() + (index + 2) * 28_000)
+  const traceId = `mock-trace-${skill}-${index + 1}`.replace(/\s+/g, "-")
+
+  return {
+    traceId,
+    threadId: `mock-thread-${index + 1}`,
+    startedAt: startedAt.toISOString(),
+    endedAt: endedAt.toISOString(),
+    durationMs: endedAt.getTime() - startedAt.getTime(),
+    userMessage: `请使用 ${skill} 帮我分析这次变更，并给出可执行建议。`,
+    modelId: "custom:minmax2.7",
+    modelName: "MiniMax-M2.7",
+    userName: ["张三", "李四", "王五"][index] ?? "张三",
+    sapId: `1001000${index + 1}`,
+    ystId: `27435${index + 1}`,
+    orgName: ["科技部", "零售一部", "风险管理部"][index] ?? "科技部",
+    steps: [
+      {
+        index: 0,
+        startedAt: startedAt.toISOString(),
+        assistantText: `我会先定位和 ${skill} 相关的上下文，再整理问题和建议。`,
+        toolCalls: [
+          {
+            name: "read_file",
+            args: { path: "src/example.ts" },
+            result: "读取到 120 行内容",
+            durationMs: 420
+          }
+        ]
+      },
+      {
+        index: 1,
+        startedAt: new Date(startedAt.getTime() + 12_000).toISOString(),
+        assistantText: `已完成 ${skill} 分析，结论包含风险点、建议修改和验证方式。`,
+        toolCalls: [
+          {
+            name: "grep",
+            args: { pattern: "TODO", path: "src" },
+            result: "匹配 3 处",
+            durationMs: 310
+          }
+        ]
+      }
+    ],
+    modelCalls: [
+      {
+        messageId: `mock-message-${index + 1}`,
+        startedAt: startedAt.toISOString(),
+        inputMessages: [
+          { role: "user", content: `请使用 ${skill} 帮我分析这次变更，并给出可执行建议。` }
+        ],
+        outputMessage: {
+          role: "assistant",
+          content: `已完成 ${skill} 分析。`
+        },
+        toolCalls: [],
+        tokenUsage: {
+          inputTokens: 3200 + index * 500,
+          outputTokens: 900 + index * 160,
+          totalTokens: 4100 + index * 660
+        }
+      }
+    ],
+    totalToolCalls: 2,
+    outcome: index === 2 ? "error" : "success",
+    ...(index === 2 ? { errorMessage: "Mock trace 用于展示异常状态" } : {}),
+    appVersion: "0.3.6",
+    usedSkills: [skill],
+    metadata: {
+      workspacePath: "/Users/demo/projects/cmbCowork"
+    }
+  }
+}
+
+function makeMockSkillRecentTraces(skill: string, range: TimeRange, limit = 3): DashboardTraceDetail[] {
+  return Array.from({ length: clampLimit(limit, 3, 10) }, (_, index) => {
+    const trace = makeMockAgentTrace(skill, range, index)
+    const usage = summarizeTraceTokenUsage(trace.modelCalls)
+    return {
+      traceId: trace.traceId,
+      threadId: trace.threadId,
+      startedAt: trace.startedAt,
+      endedAt: trace.endedAt,
+      durationMs: trace.durationMs,
+      userMessage: trace.userMessage,
+      modelId: trace.modelId,
+      modelName: trace.modelName,
+      outcome: trace.outcome,
+      totalToolCalls: trace.totalToolCalls,
+      totalInputTokens: usage.totalInputTokens,
+      totalOutputTokens: usage.totalOutputTokens,
+      totalTokens: usage.totalTokens,
+      usedSkills: trace.usedSkills,
+      nodes: buildTraceTree(trace),
+      rawAvailable: true
+    }
+  })
+}
+
+function makeMockCommitDetails(range: TimeRange, limit = 200): { total: number; items: DashboardCommitDetail[] } {
+  const from = new Date(range.from)
+  const to = new Date(range.to)
+  const spanMs = Math.max(60_000, to.getTime() - from.getTime())
+  const count = Math.min(clampLimit(limit, 200, 500), 18)
+  const items = Array.from({ length: count }, (_, index): DashboardCommitDetail => {
+    const eventTime = new Date(to.getTime() - Math.min(spanMs - 1, index * 42 * 60 * 1000))
+    return {
+      eventId: `mock-commit-event-${index + 1}`,
+      eventTime: eventTime.toISOString(),
+      userName: ["张三", "李四", "王五", "赵六"][index % 4],
+      sapId: `100100${String(index + 1).padStart(2, "0")}`,
+      ystId: `2743${String(50 + index).padStart(2, "0")}`,
+      orgName: ["科技部", "零售一部", "风险管理部"][index % 3],
+      userIp: `10.0.0.${20 + index}`,
+      repoPath: `/Users/demo/projects/cmb-${index % 3}`,
+      branch: index % 2 === 0 ? "feature/smart-model-routing" : "fix/dashboard-detail",
+      filesChanged: 2 + (index % 6),
+      insertions: 18 + index * 7,
+      deletions: 4 + index * 3,
+      triggeredBy: index % 4 === 0 ? "auto-push" : "manual",
+      threadId: `mock-thread-${(index % 5) + 1}`,
+      usedSkills: index % 2 === 0 ? ["代码审查-v1.0.0"] : ["需求分析-v1.0.0", "接口设计-v1.0.0"],
+      skillCount: index % 2 === 0 ? 1 : 2
+    }
+  })
+  return { total: 240, items }
+}
+
 // ─────────────────────────────────────────────────────────
 // IPC Registration
 // ─────────────────────────────────────────────────────────
@@ -702,12 +1178,7 @@ function makeMockFeedback(range: TimeRange, granularity: Granularity): unknown {
 export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   // Check if current user is allowed to see the dashboard
   _ipcMain.handle("dashboard:isAllowed", async () => {
-    // In development mode, always allow access
-    if (import.meta.env.DEV) return true
-    const userInfo = getUserInfo()
-    const ystId = userInfo?.ystId?.trim()
-    if (!ystId) return false
-    return ALLOWED_YST_IDS.has(ystId)
+    return isDashboardAllowed()
   })
 
   _ipcMain.handle(
@@ -770,6 +1241,34 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data: await fetchFeedback(range, granularity) }
       } catch (e) {
         console.error("[Dashboard] feedback error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:skillRecentTraces",
+    async (_, skill: string, range: TimeRange, limit?: number) => {
+      if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
+      if (import.meta.env.DEV) return { success: true, data: makeMockSkillRecentTraces(skill, range, limit) }
+      try {
+        return { success: true, data: await fetchSkillRecentTraces(skill, range, limit) }
+      } catch (e) {
+        console.error("[Dashboard] skillRecentTraces error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:commitDetails",
+    async (_, range: TimeRange, limit?: number) => {
+      if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
+      if (import.meta.env.DEV) return { success: true, data: makeMockCommitDetails(range, limit) }
+      try {
+        return { success: true, data: await fetchCommitDetails(range, limit) }
+      } catch (e) {
+        console.error("[Dashboard] commitDetails error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }

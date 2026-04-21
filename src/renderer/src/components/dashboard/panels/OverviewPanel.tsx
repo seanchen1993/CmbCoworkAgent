@@ -115,10 +115,12 @@ function ToolTopPanel({ data }: { data: OverviewData }) {
 
 export function OverviewPanel({
   data,
-  loading
+  loading,
+  onSkillClick
 }: {
   data: OverviewData | null
   loading: boolean
+  onSkillClick?: (skill: string) => void
 }) {
   if (loading && !data) {
     return <div className="text-sm text-muted-foreground py-8 text-center">加载中...</div>
@@ -182,8 +184,8 @@ export function OverviewPanel({
               {data.bySkill.map((item, i) => {
                 const max = data.bySkill[0].count
                 const pct = max > 0 ? (item.count / max) * 100 : 0
-                return (
-                  <div key={item.skill} className="flex items-center gap-2">
+                const content = (
+                  <>
                     <span className="w-4 text-[10px] text-muted-foreground text-right">{i + 1}</span>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center justify-between mb-0.5">
@@ -194,6 +196,23 @@ export function OverviewPanel({
                         <div className="h-full rounded-full bg-blue-500" style={{ width: `${pct}%` }} />
                       </div>
                     </div>
+                  </>
+                )
+                if (onSkillClick) {
+                  return (
+                    <button
+                      key={item.skill}
+                      type="button"
+                      className="flex w-full items-center gap-2 rounded-md px-1 py-0.5 text-left transition-colors hover:bg-muted/40 focus:outline-none focus:ring-2 focus:ring-ring"
+                      onClick={() => onSkillClick(item.skill)}
+                    >
+                      {content}
+                    </button>
+                  )
+                }
+                return (
+                  <div key={item.skill} className="flex items-center gap-2">
+                    {content}
                   </div>
                 )
               })}
