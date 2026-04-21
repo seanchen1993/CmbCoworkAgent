@@ -12,9 +12,15 @@ import {
 import { ThreadSidebar } from "@/components/sidebar/ThreadSidebar"
 import { TabbedPanel } from "@/components/tabs"
 import { RightPanel } from "@/components/panels/RightPanel"
-import { KanbanView } from "@/components/kanban"
-import { ClaudeCodePanel } from "@/components/customize/ClaudeCodePanel"
-import { CustomizeView } from "@/components/customize/CustomizeView"
+const KanbanView = lazy(() =>
+  import("@/components/kanban").then((m) => ({ default: m.KanbanView }))
+)
+const ClaudeCodePanel = lazy(() =>
+  import("@/components/customize/ClaudeCodePanel").then((m) => ({ default: m.ClaudeCodePanel }))
+)
+const CustomizeView = lazy(() =>
+  import("@/components/customize/CustomizeView").then((m) => ({ default: m.CustomizeView }))
+)
 const DashboardView = lazy(() =>
   import("@/components/dashboard/DashboardView").then((m) => ({ default: m.DashboardView }))
 )
@@ -79,6 +85,9 @@ function App(): React.JSX.Element {
   const [isGitWorkspaceByThread, setIsGitWorkspaceByThread] = useState<Record<string, boolean>>({})
   const [zoomLevel, setZoomLevel] = useState(1)
   const [bus, setBus] = useState(true)
+  // Delay loading ClaudeCodePanel code until user opens it once.
+  // After first open, keep it mounted (hidden when inactive) to preserve sessions.
+  const [claudeCodeMounted, setClaudeCodeMounted] = useState(false)
   const panelToggleBaseClass =
     "group inline-flex h-7 items-center justify-center gap-1.5 rounded-md border border-transparent px-2 text-[11px] font-medium whitespace-nowrap transition-all duration-150 outline-none focus-visible:ring-1 focus-visible:ring-border focus-visible:ring-offset-0 active:scale-95"
   const moduleActiveClass = "text-status-warning bg-status-warning/15 border-status-warning/45 hover:bg-status-warning/20"
@@ -268,6 +277,12 @@ function App(): React.JSX.Element {
       handlePreviewCollapse()
     }
   }, [currentThreadId, mainView, handlePreviewCollapse])
+
+  useEffect(() => {
+    if (mainView === "claudecode") {
+      setClaudeCodeMounted(true)
+    }
+  }, [mainView])
 
   useEffect(() => {
     const cleanupFs = window.api.workspace.onFilesChanged((data) => {
@@ -521,7 +536,9 @@ function App(): React.JSX.Element {
         {mainView === "customize" ? (
           <div className="flex flex-1 overflow-hidden bg-grid-subtle">
             <main className="flex flex-1 flex-col min-w-0 overflow-hidden">
-              <CustomizeView />
+              <Suspense fallback={<div className="flex flex-1 items-center justify-center"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>}>
+                <CustomizeView />
+              </Suspense>
             </main>
           </div>
         ) : mainView !== "claudecode" && mainView !== "dashboard" ? (
@@ -538,7 +555,9 @@ function App(): React.JSX.Element {
 
             {mainView === "kanban" ? (
               <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
-                <KanbanView />
+                <Suspense fallback={<div className="flex flex-1 items-center justify-center"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>}>
+                  <KanbanView />
+                </Suspense>
               </main>
             ) : (
               <>
@@ -602,21 +621,25 @@ function App(): React.JSX.Element {
           </div>
         )}
 
-        {/* Claude Code 面板始终挂载在所有条件分支外，CSS 控制显隐，不受 customize/thread 切换影响 */}
-        <div className={mainView === "claudecode" ? "relative flex flex-1 overflow-hidden bg-grid-subtle" : "hidden"}>
-          {/* claudecode 模式下也显示侧边栏 */}
-          {mainView === "claudecode" && !sidebarCollapsed && (
-            <>
-              <div style={{ width: leftWidth }} className="shrink-0">
-                <ThreadSidebar />
-              </div>
-              <ResizeHandle onDrag={handleLeftResize} />
-            </>
-          )}
-          <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
-            <ClaudeCodePanel visible={mainView === "claudecode"} />
-          </main>
-        </div>
+        {/* Claude Code 面板：首次进入时再加载代码；之后保持挂载，切换视图时仅隐藏。 */}
+        {(claudeCodeMounted || mainView === "claudecode") && (
+          <div className={mainView === "claudecode" ? "relative flex flex-1 overflow-hidden bg-grid-subtle" : "hidden"}>
+            {/* claudecode 模式下也显示侧边栏 */}
+            {mainView === "claudecode" && !sidebarCollapsed && (
+              <>
+                <div style={{ width: leftWidth }} className="shrink-0">
+                  <ThreadSidebar />
+                </div>
+                <ResizeHandle onDrag={handleLeftResize} />
+              </>
+            )}
+            <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
+              <Suspense fallback={<div className="flex flex-1 items-center justify-center"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>}>
+                <ClaudeCodePanel visible={mainView === "claudecode"} />
+              </Suspense>
+            </main>
+          </div>
+        )}
       </div>
       <Toaster position="top-center" richColors duration={2200} />
     </ThreadProvider>
