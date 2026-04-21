@@ -428,6 +428,8 @@ export class TraceCollector {
       ystId: userInfo?.ystId,
       originOrgId: userInfo?.originOrgId,
       orgName: userInfo?.orgName,
+      pathName: userInfo?.pathName,
+      pathId: userInfo?.originPathId,
       upperOrgLv1: upperOrgLevels.upperOrgLv1,
       upperOrgLv2: upperOrgLevels.upperOrgLv2,
       upperOrgLv3: upperOrgLevels.upperOrgLv3,
