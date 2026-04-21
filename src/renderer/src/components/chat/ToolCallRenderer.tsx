@@ -29,6 +29,7 @@ import { cn } from "@/lib/utils"
 import { getToolLabel } from "@/lib/tool-labels"
 import type { ToolCall, Todo } from "@/types"
 import ReactDiffViewer, { DiffMethod } from "react-diff-viewer-continued"
+import { ToolCallErrorBoundary, RenderProbe } from "./ToolCallErrorBoundary"
 
 interface ToolCallRendererProps {
   toolCall: ToolCall
@@ -680,19 +681,27 @@ export function ToolCallRenderer({
     onApprovalDecision?.("reject")
   }
 
-  // Format the main argument for display
+  // Format the main argument for display. All reads go through `str()` so
+  // a malformed / non-string value from the model never reaches JSX or
+  // .slice() — either would blow up ToolCallRenderer before the inner
+  // ErrorBoundary can catch it.
+  const str = (v: unknown, truncate?: number): string | null => {
+    if (typeof v !== "string" || !v) return null
+    return truncate ? v.slice(0, truncate) : v
+  }
   const getDisplayArg = (): string | null => {
     if (!args) return null
-    if (args.path) return args.path as string
-    if (args.file_path) return args.file_path as string
-    if (args.command) return (args.command as string).slice(0, 50)
-    if (args.pattern) return args.pattern as string
-    if (args.query) return args.query as string
-    if (args.glob) return args.glob as string
-    if (args.branch) return args.branch as string
-    if (args.remoteUrl) return args.remoteUrl as string
-    if (args.commitMessage) return (args.commitMessage as string).slice(0, 50)
-    return null
+    return (
+      str(args.path)
+      ?? str(args.file_path)
+      ?? str(args.command, 50)
+      ?? str(args.pattern)
+      ?? str(args.query)
+      ?? str(args.glob)
+      ?? str(args.branch)
+      ?? str(args.remoteUrl)
+      ?? str(args.commitMessage, 50)
+    )
   }
 
   const displayArg = getDisplayArg()
@@ -947,9 +956,78 @@ export function ToolCallRenderer({
     }
   }
 
-  const formattedContent = renderFormattedContent()
-  const formattedResult = renderFormattedResult()
-  const hasFormattedDisplay = formattedContent || formattedResult
+  // `resetKey` is a fingerprint of tool-call progress. When it changes
+  // while the boundary is in an error state, the boundary clears its
+  // error state and re-renders the children — so a mid-stream render
+  // error recovers as soon as the data changes. (Note: once the error
+  // has been caught, the original subtree is already unmounted by React's
+  // error-boundary semantics — "soft reset" here means "no new boundary
+  // instance via parent-key change", not "subtree state preserved". For
+  // normal happy-path re-renders without errors no unmount happens at all.)
+  //
+  // Fingerprint granularity:
+  //   - string:  exact length (soft reset per chunk; no remount cost)
+  //   - array:   element count
+  //   - object:  top-level key count (explicit null branch because
+  //              `typeof null === "object"` in JS)
+  //   - other primitives: stable
+  // args is folded in too because some formatters (e.g. edit_file's diff
+  // summary) depend on args while result is still pending.
+  const id = toolCall.id ?? toolCall.name
+  const argsFingerprint =
+    args && typeof args === "object" ? `a${Object.keys(args).length}` : "a0"
+  const resultFingerprint =
+    result === undefined
+      ? "pending"
+      : typeof result === "string"
+        ? `s${result.length}`
+        : result === null
+          ? "null"
+          : Array.isArray(result)
+            ? `arr${result.length}`
+            : typeof result === "object"
+              ? `obj${Object.keys(result as object).length}`
+              : "prim"
+  const resetKey = `${id}:${argsFingerprint}:${resultFingerprint}`
+  // Probe once to decide whether the summary container is worth rendering.
+  // If the render function throws here, treat that as "has content" — the
+  // inner boundary will catch the same throw and show a fallback, which is
+  // the signal we want the user to see. Nodes captured here are unused;
+  // RenderProbe below calls the render functions again in the boundary's
+  // render phase so boundary catches them. This means render functions run
+  // up to twice per render — they're pure formatters so that's acceptable.
+  let contentHasOutput: boolean
+  try {
+    contentHasOutput = renderFormattedContent() != null
+  } catch {
+    contentHasOutput = true
+  }
+  let resultHasOutput: boolean
+  try {
+    resultHasOutput = renderFormattedResult() != null
+  } catch {
+    resultHasOutput = true
+  }
+  const hasFormattedDisplay = contentHasOutput || resultHasOutput
+  // RenderProbe has a stable module-level identity, so wrapping the render
+  // callbacks in it does NOT remount on every parent render (unlike inline
+  // components defined inside this render body).
+  const formattedContent = contentHasOutput ? (
+    <ToolCallErrorBoundary
+      toolName={toolCall.name}
+      resetKey={`c:${resetKey}`}
+    >
+      <RenderProbe render={renderFormattedContent} />
+    </ToolCallErrorBoundary>
+  ) : null
+  const formattedResult = resultHasOutput ? (
+    <ToolCallErrorBoundary
+      toolName={toolCall.name}
+      resetKey={`r:${resetKey}`}
+    >
+      <RenderProbe render={renderFormattedResult} />
+    </ToolCallErrorBoundary>
+  ) : null
 
   return (
     <div
