@@ -14,12 +14,22 @@ import type { HookConfig, HookEvent, HookOnBlockConfig, HookType, PromptHookFall
 const VALID_EVENTS = new Set<HookEvent>([
   "PreToolUse",
   "PostToolUse",
+  "PostToolUseFailure",
   "Stop",
+  "StopFailure",
   "Notification",
   "UserPromptSubmit",
   "SessionStart",
   "SessionEnd",
-  "SubagentStop"
+  "SubagentStart",
+  "SubagentStop",
+  "PreCompact",
+  "PostCompact",
+  "PermissionRequest",
+  "PermissionDenied",
+  "Setup",
+  "CwdChanged",
+  "FileChanged"
 ])
 const VALID_TYPES = new Set<HookType>(["command", "prompt"])
 const VALID_FALLBACKS = new Set<PromptHookFallback>(["allow", "block"])

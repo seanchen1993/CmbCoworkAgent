@@ -1,4 +1,22 @@
-export type HookEvent = "PreToolUse" | "PostToolUse" | "Stop" | "Notification" | "UserPromptSubmit" | "SessionStart" | "SessionEnd" | "SubagentStop"
+export type HookEvent =
+  | "PreToolUse"
+  | "PostToolUse"
+  | "PostToolUseFailure"
+  | "Stop"
+  | "StopFailure"
+  | "Notification"
+  | "UserPromptSubmit"
+  | "SessionStart"
+  | "SessionEnd"
+  | "SubagentStart"
+  | "SubagentStop"
+  | "PreCompact"
+  | "PostCompact"
+  | "PermissionRequest"
+  | "PermissionDenied"
+  | "Setup"
+  | "CwdChanged"
+  | "FileChanged"
 
 /** Hook handler type.
  *  - "command": execute a shell command (original behaviour, default)
