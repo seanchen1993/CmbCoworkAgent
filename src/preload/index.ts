@@ -1015,6 +1015,10 @@ const api = {
       >,
     setMode: (mode: "none" | "unelevated" | "readonly" | "elevated"): Promise<void> =>
       ipcRenderer.invoke("sandbox:setMode", mode) as Promise<void>,
+    getLinuxMode: (): Promise<"none" | "workspace-write" | "isolated"> =>
+      ipcRenderer.invoke("sandbox:getLinuxMode") as Promise<"none" | "workspace-write" | "isolated">,
+    setLinuxMode: (mode: "none" | "workspace-write" | "isolated"): Promise<void> =>
+      ipcRenderer.invoke("sandbox:setLinuxMode", mode) as Promise<void>,
     checkElevatedSetup: (): Promise<{ setupComplete: boolean }> =>
       ipcRenderer.invoke("sandbox:checkElevatedSetup") as Promise<{ setupComplete: boolean }>,
     runElevatedSetup: (workspacePaths?: string[]): Promise<{ success: boolean; error?: string }> =>

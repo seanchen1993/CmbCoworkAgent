@@ -148,6 +148,10 @@ export interface LocalSandboxOptions {
   windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated"
   /** Full path to codex.exe for Windows sandbox. Falls back to 'codex' on PATH if not provided. */
   codexExePath?: string
+  /** Linux sandbox mode: 'workspace-write' allows writes to workspace + dep caches only, 'isolated' disables network, 'none' runs directly (default: 'none') */
+  linuxSandbox?: "none" | "workspace-write" | "isolated"
+  /** Full path to codex-linux-sandbox binary. Falls back to 'codex-linux-sandbox' on PATH if not provided. */
+  codexLinuxSandboxPath?: string
   /** Hook configurations for PreToolUse/PostToolUse lifecycle events.
    *  Accepts a getter function so hooks are always read fresh from storage. */
   hooks?: HookConfig[] | (() => HookConfig[])
@@ -190,6 +194,8 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
   private readonly workingDir: string
   private readonly windowsSandbox: "none" | "unelevated" | "readonly" | "elevated"
   private readonly codexExePath: string
+  private readonly linuxSandbox: "none" | "workspace-write" | "isolated"
+  private readonly codexLinuxSandboxPath: string
   private readonly getHooks: () => HookConfig[]
   /** App-owned persistent cache root granted as a Codex writable root per workspace. */
   private readonly _sandboxCacheRoot: string
@@ -726,6 +732,8 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     this.workingDir = options.rootDir ?? process.cwd()
     this.windowsSandbox = options.windowsSandbox ?? "none"
     this.codexExePath = options.codexExePath ?? "codex"
+    this.linuxSandbox = options.linuxSandbox ?? "none"
+    this.codexLinuxSandboxPath = options.codexLinuxSandboxPath ?? "codex-linux-sandbox"
     const h = options.hooks
     this.getHooks = typeof h === "function" ? h : () => h ?? []
     this._sandboxCacheRoot = LocalSandbox.buildSandboxCacheRoot(baseEnv, this.workingDir)
@@ -2250,6 +2258,11 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       return this.executeInWindowsSandbox(command, 1, effectiveSandboxMode, effectiveTimeout, overrideAbortSignal)
     }
 
+    if (process.platform === "linux" && this.linuxSandbox !== "none") {
+      console.log(`[LocalSandbox] → executeInLinuxSandbox mode=${this.linuxSandbox}`)
+      return this.executeInLinuxSandbox(command, this.linuxSandbox, effectiveTimeout, overrideAbortSignal)
+    }
+
     const isWindows = process.platform === "win32"
     const shell = LocalSandbox.resolveShell()
     const shellBase = path.basename(shell).replace(/\.exe$/i, "")
@@ -2722,6 +2735,239 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       // to avoid redundant icacls spawns. Cleanup happens in revokeGrantedAclsForRun()
       // which is called when the agent run ends (decrements ref-count per run).
     }
+  }
+
+  /**
+   * Build a FileSystemSandboxPolicy JSON string for codex-linux-sandbox.
+   * workspace-write: global RO + workspace writable + dep caches writable + credentials blocked.
+   * isolated: same as workspace-write but with network disabled.
+   */
+  private buildLinuxFsPolicy(): string {
+    const home = process.env.HOME ?? "/root"
+    type FsEntry = { path: unknown; access: string }
+    const pathEntry = (p: string): unknown => ({ type: "path", path: p })
+    const specialEntry = (kind: string): unknown => ({ type: "special", value: { kind } })
+
+    const entries: FsEntry[] = [
+      // Global read-only root
+      { path: specialEntry("root"), access: "read" },
+      // Workspace writable
+      { path: pathEntry(this.workingDir), access: "write" },
+    ]
+
+    // Dep cache dirs: writable so builds can populate them
+    const depCaches = [
+      `${home}/.m2/repository`,
+      `${home}/.gradle/caches`,
+      `${home}/.gradle/wrapper`,
+      `${home}/.cache/pip`,
+      `${home}/.npm`,
+      `${home}/.cargo/registry`,
+      `${home}/.cargo/git`,
+    ]
+    for (const dir of depCaches) {
+      entries.push({ path: pathEntry(dir), access: "write" })
+    }
+
+    // Credential paths: explicitly blocked (none access)
+    const blocked = [
+      `${home}/.ssh`,
+      `${home}/.gnupg`,
+      `${home}/.aws`,
+      `${home}/.kube`,
+      `${home}/.docker`,
+      `${home}/.m2/settings.xml`,
+      `${home}/.gradle/gradle.properties`,
+      `${home}/.netrc`,
+      `${home}/.pypirc`,
+      `${home}/.npmrc`,
+    ]
+    for (const p of blocked) {
+      entries.push({ path: pathEntry(p), access: "none" })
+    }
+
+    return JSON.stringify({ kind: "restricted", entries })
+  }
+
+  /**
+   * Execute a command inside the codex-linux-sandbox (bubblewrap-based).
+   * workspace-write: writable workspace + dep caches, credentials blocked, network allowed.
+   * isolated: same FS policy but network disabled (Restricted).
+   */
+  private async executeInLinuxSandbox(
+    command: string,
+    mode: "workspace-write" | "isolated",
+    timeoutMs?: number,
+    overrideAbortSignal?: AbortSignal
+  ): Promise<ExecuteResponse> {
+    const execStartMs = Date.now()
+    const cmdTimeout = timeoutMs ?? this.timeout
+
+    const fsPolicy = this.buildLinuxFsPolicy()
+    const netPolicy = mode === "isolated" ? '"Restricted"' : '"Enabled"'
+
+    // Two-stage execution mirroring Codex's default bwrap mode:
+    // outer: bwrap sets up filesystem namespace (ro-bind / /, bind workspace, unshare-net...)
+    // inner: codex-linux-sandbox re-execs itself with --apply-seccomp-then-exec, which applies
+    //        seccomp syscall filters (block connect/socket/bind at kernel level) then execs the
+    //        real command. bwrap's --ro-bind / / makes the binary visible inside the sandbox.
+    const sandboxArgs = [
+      "--sandbox-policy-cwd", this.workingDir,
+      "--file-system-sandbox-policy", fsPolicy,
+      "--network-sandbox-policy", netPolicy,
+      "--",
+      this.codexLinuxSandboxPath, "--apply-seccomp-then-exec",
+      "--",
+      "/bin/sh", "-c", command,
+    ]
+
+    return new Promise<ExecuteResponse>((resolve) => {
+      const stdoutChunks: Buffer[] = []
+      const stderrChunks: Buffer[] = []
+      let totalBytes = 0
+      let resolved = false
+      let exited = false
+      let firstDataAt = 0
+
+      const effectiveAbortSignal = overrideAbortSignal ?? this.abortSignal
+
+      if (effectiveAbortSignal?.aborted) {
+        resolve({ output: "<execute_metadata>\nUser aborted the command, process has been killed\n</execute_metadata>\n\n<no output>", exitCode: 130, truncated: false })
+        return
+      }
+
+      console.log(`[LocalSandbox] linux-sandbox spawn: ${this.codexLinuxSandboxPath} mode=${mode}`)
+      console.log(`[LocalSandbox] cwd: ${this.workingDir}`)
+
+      const proc = spawn(this.codexLinuxSandboxPath, sandboxArgs, {
+        cwd: this.workingDir,
+        env: this.env,
+        stdio: ["ignore", "pipe", "pipe"]
+      })
+
+      console.log(`[LocalSandbox] linux-sandbox pid=${proc.pid} at +${Date.now() - execStartMs}ms`)
+      LocalSandbox.activeProcesses.add(proc)
+
+      let timedOut = false
+      let aborted = false
+      let drainTimerId: ReturnType<typeof setTimeout> | null = null
+
+      const killProc = (): void => {
+        void LocalSandbox.killTree(proc, () => exited)
+      }
+
+      const timeoutId = setTimeout(() => {
+        if (resolved || timedOut || aborted) return
+        console.log(`[LocalSandbox] linux-sandbox timeout: pid=${proc.pid}, killing after ${cmdTimeout}ms`)
+        timedOut = true
+        killProc()
+        drainTimerId = setTimeout(() => {
+          collectAndResolve(null, "SIGKILL")
+        }, LocalSandbox.IO_DRAIN_TIMEOUT_MS)
+      }, cmdTimeout)
+
+      const abortHandler = (): void => {
+        if (resolved || timedOut || aborted) return
+        console.log(`[LocalSandbox] linux-sandbox abort: pid=${proc.pid}`)
+        aborted = true
+        clearTimeout(timeoutId)
+        killProc()
+        drainTimerId = setTimeout(() => {
+          collectAndResolve(null, "SIGKILL")
+        }, LocalSandbox.IO_DRAIN_TIMEOUT_MS)
+      }
+      if (effectiveAbortSignal) {
+        effectiveAbortSignal.addEventListener("abort", abortHandler, { once: true })
+      }
+
+      proc.stdout?.on("data", (chunk: Buffer) => {
+        if (!firstDataAt) { firstDataAt = Date.now(); console.log(`[LocalSandbox] linux-sandbox first data at +${firstDataAt - execStartMs}ms`) }
+        if (totalBytes < this.maxOutputBytes) {
+          stdoutChunks.push(chunk)
+          totalBytes += chunk.length
+        }
+      })
+
+      proc.stderr?.on("data", (chunk: Buffer) => {
+        if (!firstDataAt) { firstDataAt = Date.now(); console.log(`[LocalSandbox] linux-sandbox first data at +${firstDataAt - execStartMs}ms`) }
+        if (totalBytes < this.maxOutputBytes) {
+          stderrChunks.push(chunk)
+          totalBytes += chunk.length
+        }
+      })
+
+      const collectAndResolve = (code: number | null, signal: string | null): void => {
+        if (resolved) return
+        try {
+          const elapsed = Date.now() - execStartMs
+          const reason = aborted ? "abort" : timedOut ? "timeout" : "normal"
+          console.log(`[LocalSandbox] linux-sandbox collectAndResolve: pid=${proc.pid}, reason=${reason}, code=${code}, signal=${signal}, elapsed=${elapsed}ms`)
+          resolved = true
+          exited = true
+          LocalSandbox.activeProcesses.delete(proc)
+          clearTimeout(timeoutId)
+          if (drainTimerId) clearTimeout(drainTimerId)
+          if (effectiveAbortSignal) effectiveAbortSignal.removeEventListener("abort", abortHandler)
+
+          const stdoutBuf = Buffer.concat(stdoutChunks)
+          const stderrBuf = Buffer.concat(stderrChunks)
+
+          let output = ""
+          if (stdoutBuf.length > 0) output += stdoutBuf.toString("utf8")
+          if (stderrBuf.length > 0) {
+            const errText = stderrBuf.toString("utf8")
+              .split("\n").filter((l) => l.length > 0)
+              .map((l) => `[stderr] ${l}`).join("\n")
+            if (errText) output += (output ? "\n" : "") + errText
+          }
+
+          let truncated = false
+          if (output.length > this.maxOutputBytes) {
+            output = output.slice(0, this.maxOutputBytes) + `\n\n... Output truncated at ${this.maxOutputBytes} bytes.`
+            truncated = true
+          }
+          if (!output.trim()) output = "<no output>"
+
+          if (aborted) {
+            resolve({ output: `<execute_metadata>\nUser aborted the command, process has been killed\n</execute_metadata>\n\n${output}`, exitCode: 130, truncated })
+          } else if (timedOut) {
+            resolve({ output: `<execute_metadata>\nexecute tool killed the running process and terminated command after exceeding timeout ${(cmdTimeout / 1000).toFixed(1)}s\n</execute_metadata>\n\n${output}`, exitCode: 124, truncated })
+          } else {
+            resolve({ output, exitCode: signal ? null : code, truncated })
+          }
+        } catch (err) {
+          console.error(`[LocalSandbox] linux-sandbox collectAndResolve error`, err)
+          resolved = true
+          LocalSandbox.activeProcesses.delete(proc)
+          clearTimeout(timeoutId)
+          if (drainTimerId) clearTimeout(drainTimerId)
+          if (effectiveAbortSignal) effectiveAbortSignal.removeEventListener("abort", abortHandler)
+          resolve({ output: `Error processing sandbox output: ${err instanceof Error ? err.message : String(err)}`, exitCode: code ?? 1, truncated: false })
+        }
+      }
+
+      proc.on("close", (code, signal) => {
+        console.log(`[LocalSandbox] linux-sandbox close pid=${proc.pid} code=${code} signal=${signal}`)
+        exited = true
+        collectAndResolve(code, signal as string | null)
+      })
+
+      proc.on("error", (err) => {
+        if (resolved) return
+        resolved = true
+        exited = true
+        LocalSandbox.activeProcesses.delete(proc)
+        clearTimeout(timeoutId)
+        if (drainTimerId) clearTimeout(drainTimerId)
+        if (effectiveAbortSignal) effectiveAbortSignal.removeEventListener("abort", abortHandler)
+        console.error("[LocalSandbox] linux-sandbox spawn error:", err)
+        resolve({
+          output: `错误：Linux 沙箱启动失败，命令未执行。\n原因：${(err as NodeJS.ErrnoException).message ?? String(err)}\n请检查 codex-linux-sandbox 是否存在并有执行权限，或在设置中关闭 Linux 沙箱。`,
+          exitCode: null,
+          truncated: false
+        })
+      })
+    })
   }
 
   private executeOnce(

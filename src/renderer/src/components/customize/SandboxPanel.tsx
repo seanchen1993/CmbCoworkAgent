@@ -3,8 +3,10 @@ import { Shield, ShieldOff, ShieldCheck, ShieldPlus, Zap, Info, Loader2 } from "
 import { cn } from "@/lib/utils"
 
 type SandboxMode = "none" | "unelevated" | "readonly" | "elevated"
+type LinuxSandboxMode = "none" | "workspace-write" | "isolated"
 
 const isWindows = navigator.userAgent.toLowerCase().includes("windows")
+const isLinux = !isWindows && navigator.userAgent.toLowerCase().includes("linux")
 
 interface ModeOption {
   value: SandboxMode
@@ -12,6 +14,36 @@ interface ModeOption {
   description: string
   icon: React.ReactNode
 }
+
+interface LinuxModeOption {
+  value: LinuxSandboxMode
+  label: string
+  description: string
+  icon: React.ReactNode
+}
+
+const LINUX_MODE_OPTIONS: LinuxModeOption[] = [
+  {
+    value: "isolated",
+    label: "强隔离沙箱（断网）",
+    description:
+      "工作目录可写、依赖缓存可写，凭证目录受保护，同时禁用网络访问。适合对安全性要求最高的场景。",
+    icon: <ShieldPlus className="size-4" />
+  },
+  {
+    value: "workspace-write",
+    label: "工作区沙箱",
+    description:
+      "工作目录可写、Maven/Gradle/npm/pip 等依赖缓存可写，SSH/AWS/Kube 等凭证目录受保护，网络访问不受限。",
+    icon: <Shield className="size-4" />
+  },
+  {
+    value: "none",
+    label: "关闭",
+    description: "不启用沙箱，命令直接在当前用户权限下执行。",
+    icon: <ShieldOff className="size-4" />
+  }
+]
 
 const MODE_OPTIONS: ModeOption[] = [
   {
@@ -47,10 +79,12 @@ type ElevatedSetupStatus = "idle" | "checking" | "running" | "done" | "error"
 
 export function SandboxPanel(): React.JSX.Element {
   const [mode, setMode] = useState<SandboxMode>("none")
+  const [linuxMode, setLinuxMode] = useState<LinuxSandboxMode>("none")
   const [yolo, setYolo] = useState(false)
   const [loading, setLoading] = useState(true)
   const [yoloPending, setYoloPending] = useState(false)
   const [modePending, setModePending] = useState(false)
+  const [linuxModePending, setLinuxModePending] = useState(false)
   const [elevatedSetupStatus, setElevatedSetupStatus] = useState<ElevatedSetupStatus>("idle")
   const [elevatedSetupError, setElevatedSetupError] = useState<string | null>(null)
   const mountedRef = useRef(true)
@@ -68,12 +102,14 @@ export function SandboxPanel(): React.JSX.Element {
 
   const loadSettings = useCallback(async () => {
     try {
-      const [currentMode, currentYolo] = await Promise.all([
+      const [currentMode, currentLinuxMode, currentYolo] = await Promise.all([
         window.api.sandbox.getMode(),
+        window.api.sandbox.getLinuxMode(),
         window.api.sandbox.getYoloMode()
       ])
       if (mountedRef.current) {
         setMode(currentMode)
+        setLinuxMode(currentLinuxMode)
         setYolo(currentYolo)
         setLoading(false)
       }
@@ -183,6 +219,22 @@ export function SandboxPanel(): React.JSX.Element {
     }
   }, [modePending, loadSettings])
 
+  const handleSelectLinuxMode = useCallback(
+    async (newMode: LinuxSandboxMode) => {
+      if (newMode === linuxMode || linuxModePending) return
+      setLinuxModePending(true)
+      try {
+        await window.api.sandbox.setLinuxMode(newMode)
+      } catch (e) {
+        console.error("[SandboxPanel] Failed to set linux mode:", e)
+        loadSettings()
+      } finally {
+        if (mountedRef.current) setLinuxModePending(false)
+      }
+    },
+    [linuxMode, linuxModePending, loadSettings]
+  )
+
   const handleToggleYolo = useCallback(async () => {
     if (yoloPending) return
     setYoloPending(true)
@@ -260,15 +312,15 @@ export function SandboxPanel(): React.JSX.Element {
           </button>
         </div>
 
-        {/* Windows 沙箱 */}
+        {/* 沙箱隔离 */}
         <div className="flex flex-col gap-4">
           <div className="flex items-center gap-2">
             <Shield className="size-5" />
-            <h2 className={cn("text-lg font-bold", !isWindows && "text-muted-foreground")}>
-              Windows 沙箱
+            <h2 className={cn("text-lg font-bold", !isWindows && !isLinux && "text-muted-foreground")}>
+              {isLinux ? "Linux 沙箱" : "Windows 沙箱"}
             </h2>
-            {!isWindows && (
-              <span className="text-xs text-muted-foreground">（仅 Windows 可用）</span>
+            {!isWindows && !isLinux && (
+              <span className="text-xs text-muted-foreground">（仅 Windows / Linux 可用）</span>
             )}
             {/* Developer backdoor — anchored to header so always visible */}
             {!unlocked && isWindows && (
@@ -327,7 +379,14 @@ export function SandboxPanel(): React.JSX.Element {
             )}
           </div>
 
-          {isWindows ? (
+          {isLinux ? (
+            <div className="flex items-start gap-2 rounded-md border border-blue-500/20 bg-blue-500/5 p-3 text-sm text-blue-600 dark:text-blue-400">
+              <Info className="size-4 mt-0.5 shrink-0" />
+              <p>
+                Linux 沙箱基于 bubblewrap（bwrap）实现，工作区沙箱模式限制写权限范围，强隔离模式同时断开网络访问。切换后将在下一次对话中生效。
+              </p>
+            </div>
+          ) : isWindows ? (
             <div className="flex flex-col gap-2">
               <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 p-3 text-sm text-amber-700 dark:text-amber-400">
                 <Info className="size-4 mt-0.5 shrink-0" />
@@ -348,12 +407,12 @@ export function SandboxPanel(): React.JSX.Element {
           ) : (
             <div className="flex items-start gap-2 rounded-md border border-muted bg-muted/30 p-3 text-sm text-muted-foreground">
               <Info className="size-4 mt-0.5 shrink-0" />
-              <p>Windows 沙箱仅在 Windows 平台上可用，当前平台不支持此功能。</p>
+              <p>沙箱仅在 Windows 和 Linux 平台上可用，当前平台不支持此功能。</p>
             </div>
           )}
 
-          <div className={cn("flex flex-col gap-3 max-w-lg", !isWindows && "opacity-40")}>
-            {MODE_OPTIONS.map((opt) => {
+          <div className={cn("flex flex-col gap-3 max-w-lg", !isWindows && !isLinux && "opacity-40")}>
+            {!isLinux && MODE_OPTIONS.map((opt) => {
               // Temporary policy:
               // Allow selecting "none" (关闭/不启用沙箱) without developer unlock.
               // Keep other restricted modes behind developer channel for now.
@@ -404,6 +463,39 @@ export function SandboxPanel(): React.JSX.Element {
               )
             })}
           </div>
+
+          {/* Linux sandbox mode options — only shown on Linux */}
+          {isLinux && (
+            <div className="flex flex-col gap-3 max-w-lg mt-2">
+              {LINUX_MODE_OPTIONS.map((opt) => (
+                <button
+                  key={opt.value}
+                  onClick={() => handleSelectLinuxMode(opt.value)}
+                  disabled={linuxModePending}
+                  className={cn(
+                    "flex items-start gap-3 rounded-lg border-2 p-4 text-left transition-colors w-full",
+                    linuxModePending && "opacity-60 cursor-not-allowed",
+                    linuxMode === opt.value
+                      ? "border-primary bg-primary/5"
+                      : "border-border hover:border-primary/40 hover:bg-muted/40"
+                  )}
+                >
+                  <div className={cn("mt-0.5 shrink-0", linuxMode === opt.value ? "text-primary" : "text-muted-foreground")}>
+                    {opt.icon}
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium">{opt.label}</span>
+                      {linuxMode === opt.value && (
+                        <span className="text-xs rounded-full bg-primary/10 text-primary px-2 py-0.5">当前</span>
+                      )}
+                    </div>
+                    <p className="text-xs text-muted-foreground leading-relaxed">{opt.description}</p>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
 
           {/* Elevated setup status */}
           {elevatedSetupStatus === "checking" && (

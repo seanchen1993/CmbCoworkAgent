@@ -6,6 +6,8 @@ import { join, resolve } from "path"
 import {
   getWindowsSandboxMode,
   setWindowsSandboxMode,
+  getLinuxSandboxMode,
+  setLinuxSandboxMode,
   getYoloMode,
   setYoloMode,
   getApprovalRules,
@@ -13,6 +15,7 @@ import {
   isSandboxNuxCompleted,
   setSandboxNuxCompleted
 } from "../storage"
+import type { LinuxSandboxMode } from "../storage"
 import { pendingApprovals } from "../agent/runtime"
 import type { ApprovalDecision } from "../types"
 
@@ -363,6 +366,21 @@ export function registerSandboxHandlers(ipcMain: IpcMain): void {
         throw new Error(`Invalid sandbox mode: ${mode}`)
       }
       setWindowsSandboxMode(mode)
+      notifyChanged()
+    }
+  )
+
+  ipcMain.handle("sandbox:getLinuxMode", async (): Promise<LinuxSandboxMode> => {
+    return getLinuxSandboxMode()
+  })
+
+  ipcMain.handle(
+    "sandbox:setLinuxMode",
+    async (_event, mode: LinuxSandboxMode): Promise<void> => {
+      if (!["none", "workspace-write", "isolated"].includes(mode)) {
+        throw new Error(`Invalid Linux sandbox mode: ${mode}`)
+      }
+      setLinuxSandboxMode(mode)
       notifyChanged()
     }
   )

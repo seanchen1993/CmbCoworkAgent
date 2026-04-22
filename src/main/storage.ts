@@ -1667,22 +1667,26 @@ const SANDBOX_SETTINGS_FILE = join(OPENWORK_DIR, "sandbox-settings.json")
 const SANDBOX_MODES = new Set<"none" | "unelevated" | "readonly" | "elevated">(["none", "unelevated", "readonly", "elevated"])
 type SandboxMode = "none" | "unelevated" | "readonly" | "elevated"
 
-function readSandboxSettings(): { mode: SandboxMode; yolo: boolean; nuxCompleted: boolean } {
-  if (!existsSync(SANDBOX_SETTINGS_FILE)) return { mode: "unelevated", yolo: false, nuxCompleted: false }
+export type LinuxSandboxMode = "none" | "workspace-write" | "isolated"
+const LINUX_SANDBOX_MODES = new Set<LinuxSandboxMode>(["none", "workspace-write", "isolated"])
+
+function readSandboxSettings(): { mode: SandboxMode; yolo: boolean; nuxCompleted: boolean; linuxMode: LinuxSandboxMode } {
+  if (!existsSync(SANDBOX_SETTINGS_FILE)) return { mode: "unelevated", yolo: false, nuxCompleted: false, linuxMode: "none" }
   try {
     const parsed = JSON.parse(readFileSync(SANDBOX_SETTINGS_FILE, "utf-8"))
     return {
       mode: SANDBOX_MODES.has(parsed.mode) ? parsed.mode : "unelevated",
       yolo: parsed.yolo === true,
-      nuxCompleted: parsed.nuxCompleted === true
+      nuxCompleted: parsed.nuxCompleted === true,
+      linuxMode: LINUX_SANDBOX_MODES.has(parsed.linuxMode) ? parsed.linuxMode : "none"
     }
   } catch (err) {
     console.warn("[Storage] Failed to load sandbox settings:", err)
-    return { mode: "unelevated", yolo: false, nuxCompleted: false }
+    return { mode: "unelevated", yolo: false, nuxCompleted: false, linuxMode: "none" }
   }
 }
 
-function updateSandboxSettings(patch: Partial<{ mode: SandboxMode; yolo: boolean; nuxCompleted: boolean }>): void {
+function updateSandboxSettings(patch: Partial<{ mode: SandboxMode; yolo: boolean; nuxCompleted: boolean; linuxMode: LinuxSandboxMode }>): void {
   getOpenworkDir()
   const current = readSandboxSettings()
   writeFileSync(SANDBOX_SETTINGS_FILE, JSON.stringify({ ...current, ...patch }, null, 2))
@@ -1690,6 +1694,14 @@ function updateSandboxSettings(patch: Partial<{ mode: SandboxMode; yolo: boolean
 
 export function getWindowsSandboxMode(): SandboxMode {
   return readSandboxSettings().mode
+}
+
+export function getLinuxSandboxMode(): LinuxSandboxMode {
+  return readSandboxSettings().linuxMode
+}
+
+export function setLinuxSandboxMode(mode: LinuxSandboxMode): void {
+  updateSandboxSettings({ linuxMode: mode })
 }
 
 export function setWindowsSandboxMode(mode: SandboxMode): void {

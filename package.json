@@ -48,6 +48,7 @@
     "dist:win": "npm run build && electron-builder --win",
     "dist:mac": "npm run build && electron-builder --mac",
     "dist:linux": "npm run build && electron-builder --linux --x64 --publish=never",
+    "compress:linux-sandbox": "node -e \"const {existsSync,createReadStream,createWriteStream}=require('fs');const{createGzip}=require('zlib');const{pipeline}=require('stream/promises');const bin='resources/bin/linux/codex-linux-sandbox';if(existsSync(bin)&&!existsSync(bin+'.gz')){pipeline(createReadStream(bin),createGzip(),createWriteStream(bin+'.gz')).then(()=>{console.log('compressed')})}\"",
     "server:cache": "node scripts/server-cache.js",
     "postinstall": "electron-rebuild -f -w node-pty",
     "env:filter:setup": "node scripts/setup-env-filter.mjs",

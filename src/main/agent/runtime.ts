@@ -46,7 +46,7 @@ import type * as _lcZodTypes from "@langchain/core/utils/types"
 
 import path from "path"
 import { join, resolve, delimiter } from "path"
-import { existsSync, createWriteStream, statSync, unlinkSync } from "fs"
+import { existsSync, createWriteStream, statSync, unlinkSync, chmodSync, mkdirSync } from "fs"
 import { createReadStream } from "fs"
 import { createGunzip } from "zlib"
 import { pipeline } from "stream/promises"
@@ -66,7 +66,7 @@ import { createPlaywrightTool } from "./tools/playwright-tool"
 import { createToolSearchTools } from "./tools/tool-search-tool"
 import { createCodeExecTool } from "./tools/code-exec-tool"
 import { listSavedCodeExecTools } from "../code-exec/saved-tool-store"
-import { getWindowsSandboxMode, getYoloMode, getEnabledHooks, isCodeExecEnabled, getLspConfig } from "../storage"
+import { getWindowsSandboxMode, getLinuxSandboxMode, getYoloMode, getEnabledHooks, isCodeExecEnabled, getLspConfig } from "../storage"
 import { ApprovalStore } from "./approval-store"
 import { ToolOrchestrator } from "./tool-orchestrator"
 import type { ApprovalRequest, ApprovalDecision } from "../types"
@@ -99,6 +99,28 @@ async function ensureCodexExe(exePath: string): Promise<void> {
     console.log("[Runtime] codex.exe extracted from .gz")
   } catch (e) {
     console.error("[Runtime] Failed to extract codex.exe:", e)
+  }
+}
+
+/**
+ * Decompress codex-linux-sandbox.gz → codex-linux-sandbox if needed, then chmod +x.
+ * gzPath: source .gz inside app resources (may be read-only after system install)
+ * binPath: destination for the extracted binary (must be in a user-writable dir,
+ *          e.g. app.getPath('userData'), since /opt/CMBDevClaw/resources/ is root-owned)
+ */
+async function ensureLinuxSandboxBin(gzPath: string, binPath: string): Promise<void> {
+  if (!existsSync(gzPath)) return
+  if (existsSync(binPath)) {
+    if (statSync(binPath).mtimeMs >= statSync(gzPath).mtimeMs) return
+    try { unlinkSync(binPath) } catch { /* ignore */ }
+  }
+  try {
+    mkdirSync(join(binPath, ".."), { recursive: true })
+    await pipeline(createReadStream(gzPath), createGunzip(), createWriteStream(binPath))
+    chmodSync(binPath, 0o755)
+    console.log("[Runtime] codex-linux-sandbox extracted from .gz")
+  } catch (e) {
+    console.error("[Runtime] Failed to extract codex-linux-sandbox:", e)
   }
 }
 
@@ -1074,6 +1096,17 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const windowsSandbox = process.platform === "win32" ? getWindowsSandboxMode() : "none"
   console.log(`[Runtime] codex.exe: ${codexExePath}, exists: ${codexExists}, sandboxMode: ${windowsSandbox}`)
 
+  // codex-linux-sandbox: gz lives in read-only resources; extract to user-writable userData.
+  // This mirrors the Windows codex.exe pattern but targets userData instead of resources/,
+  // because Linux system installs (/opt/CMBDevClaw/resources/) are root-owned and not writable
+  // by the running user, whereas %AppData%\Local\Programs\... on Windows is user-writable.
+  const codexLinuxSandboxGz = join(rgDir, "codex-linux-sandbox.gz")
+  const codexLinuxSandboxPath = join(app.getPath("userData"), "bin", "codex-linux-sandbox")
+  if (process.platform === "linux") await ensureLinuxSandboxBin(codexLinuxSandboxGz, codexLinuxSandboxPath)
+  const linuxSandboxExists = process.platform === "linux" && existsSync(codexLinuxSandboxPath)
+  const linuxSandbox = process.platform === "linux" ? getLinuxSandboxMode() : "none"
+  console.log(`[Runtime] codex-linux-sandbox: ${codexLinuxSandboxPath}, exists: ${linuxSandboxExists}, linuxSandboxMode: ${linuxSandbox}`)
+
   const enabledHooks = getEnabledHooks()
   console.log(`[Runtime] Loaded ${enabledHooks.length} enabled hooks`)
 
@@ -1084,6 +1117,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     maxOutputBytes,
     windowsSandbox,
     codexExePath: codexExists ? codexExePath : undefined,
+    linuxSandbox,
+    codexLinuxSandboxPath: linuxSandboxExists ? codexLinuxSandboxPath : undefined,
     // Pass a getter so hooks are always read fresh from storage at call time
     hooks: getEnabledHooks,
     abortSignal: options.abortSignal,

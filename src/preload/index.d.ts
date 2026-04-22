@@ -466,6 +466,8 @@ interface CustomAPI {
   sandbox: {
     getMode: () => Promise<"none" | "unelevated" | "readonly" | "elevated">
     setMode: (mode: "none" | "unelevated" | "readonly" | "elevated") => Promise<void>
+    getLinuxMode: () => Promise<"none" | "workspace-write" | "isolated">
+    setLinuxMode: (mode: "none" | "workspace-write" | "isolated") => Promise<void>
     checkElevatedSetup: () => Promise<{ setupComplete: boolean }>
     runElevatedSetup: (workspacePaths?: string[]) => Promise<{ success: boolean; error?: string }>
     getYoloMode: () => Promise<boolean>
