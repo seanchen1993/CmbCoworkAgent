@@ -16,6 +16,11 @@ import {
   getCommandHookToolInputSummary
 } from "./AddHookDialog"
 
+type PluginHookMetadata = Awaited<ReturnType<typeof window.api.plugins.listHooks>>[number]
+type GlobalDisplayHook = HookConfig & { source: "global" }
+type PluginDisplayHook = PluginHookMetadata & { source: "plugin" }
+type DisplayHook = GlobalDisplayHook | PluginDisplayHook
+
 const EVENT_BADGE: Record<
   HookEvent,
   { label: string; className: string; english: string; tip: string }
@@ -31,6 +36,12 @@ const EVENT_BADGE: Record<
     className: "bg-green-500/15 text-green-600 dark:text-green-400",
     english: "PostToolUse",
     tip: "工具执行后触发，输出追加到 Agent 上下文"
+  },
+  PostToolUseFailure: {
+    label: "调用失败",
+    className: "bg-red-500/15 text-red-600 dark:text-red-400",
+    english: "PostToolUseFailure",
+    tip: "工具执行失败后触发"
   },
   UserPromptSubmit: {
     label: "提交",
@@ -56,29 +67,85 @@ const EVENT_BADGE: Record<
     english: "Stop",
     tip: "Agent 完成任务停止时触发，可请求返工"
   },
+  StopFailure: {
+    label: "停止失败",
+    className: "bg-orange-500/15 text-orange-600 dark:text-orange-400",
+    english: "StopFailure",
+    tip: "Stop 钩子执行失败时触发"
+  },
   Notification: {
     label: "通知",
     className: "bg-purple-500/15 text-purple-600 dark:text-purple-400",
     english: "Notification",
     tip: "Agent 等待审批时触发，用于自定义提醒"
   },
+  SubagentStart: {
+    label: "子开始",
+    className: "bg-violet-500/15 text-violet-600 dark:text-violet-400",
+    english: "SubagentStart",
+    tip: "子 Agent 启动时触发"
+  },
   SubagentStop: {
     label: "子停止",
     className: "bg-indigo-500/15 text-indigo-600 dark:text-indigo-400",
     english: "SubagentStop",
     tip: "子 Agent 完成任务时触发"
+  },
+  PreCompact: {
+    label: "压缩前",
+    className: "bg-slate-500/15 text-slate-600 dark:text-slate-400",
+    english: "PreCompact",
+    tip: "上下文压缩前触发"
+  },
+  PostCompact: {
+    label: "压缩后",
+    className: "bg-slate-500/15 text-slate-600 dark:text-slate-400",
+    english: "PostCompact",
+    tip: "上下文压缩后触发"
+  },
+  PermissionRequest: {
+    label: "权限申请",
+    className: "bg-yellow-500/15 text-yellow-600 dark:text-yellow-400",
+    english: "PermissionRequest",
+    tip: "Agent 申请执行权限时触发"
+  },
+  PermissionDenied: {
+    label: "权限拒绝",
+    className: "bg-red-500/15 text-red-600 dark:text-red-400",
+    english: "PermissionDenied",
+    tip: "权限申请被拒绝时触发"
+  },
+  Setup: {
+    label: "初始化",
+    className: "bg-sky-500/15 text-sky-600 dark:text-sky-400",
+    english: "Setup",
+    tip: "Agent 运行时初始化阶段触发"
+  },
+  CwdChanged: {
+    label: "目录变更",
+    className: "bg-lime-500/15 text-lime-600 dark:text-lime-400",
+    english: "CwdChanged",
+    tip: "工作目录变更时触发"
+  },
+  FileChanged: {
+    label: "文件变更",
+    className: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400",
+    english: "FileChanged",
+    tip: "工作区文件变更时触发"
   }
 }
 
 /** Human-readable summary shown in the list item */
-function hookSummary(hook: HookConfig): string {
+function hookSummary(hook: DisplayHook): string {
   if (hook.type === "prompt") return hook.prompt ?? ""
   return hook.command ?? ""
 }
 
 export function HooksPanel(): React.JSX.Element {
-  const [hooks, setHooks] = useState<HookConfig[]>([])
-  const [selectedHook, setSelectedHook] = useState<HookConfig | null>(null)
+  const pluginVersion = useAppStore((s) => s.pluginVersion)
+  const bumpPluginVersion = useAppStore((s) => s.bumpPluginVersion)
+  const [hooks, setHooks] = useState<DisplayHook[]>([])
+  const [selectedHook, setSelectedHook] = useState<DisplayHook | null>(null)
   const [searchQuery, setSearchQuery] = useState("")
   const [debouncedQuery, setDebouncedQuery] = useState("")
   const [dialogOpen, setDialogOpen] = useState(false)
@@ -93,11 +160,41 @@ export function HooksPanel(): React.JSX.Element {
 
   const loadHooks = useCallback(async () => {
     try {
-      const list = await window.api.hooks.list()
+      const [globalHooks, plugins] = await Promise.all([
+        window.api.hooks.list(),
+        window.api.plugins.list()
+      ])
+      const pluginHookGroups = await Promise.all(
+        plugins
+          .filter((plugin) => (plugin.hookCount ?? 0) > 0)
+          .map(async (plugin) => {
+            try {
+              const detail = await window.api.plugins.getDetail(plugin.id)
+              return detail.hooks.map(
+                (hook): PluginDisplayHook => ({
+                  ...hook,
+                  source: "plugin"
+                })
+              )
+            } catch (error) {
+              console.error(`[HooksPanel] Failed to load hooks for plugin ${plugin.name}:`, error)
+              return []
+            }
+          })
+      )
+      const list: DisplayHook[] = [
+        ...globalHooks.map(
+          (hook): GlobalDisplayHook => ({
+            ...hook,
+            source: "global"
+          })
+        ),
+        ...pluginHookGroups.flat()
+      ]
       setHooks(list)
       setSelectedHook((prev) => {
         if (!prev) return null
-        return list.find((h) => h.id === prev.id) ?? null
+        return list.find((h) => h.id === prev.id && h.source === prev.source) ?? null
       })
     } catch (e) {
       console.error(e)
@@ -105,8 +202,8 @@ export function HooksPanel(): React.JSX.Element {
   }, [])
 
   useEffect(() => {
-    loadHooks()
-  }, [loadHooks])
+    void loadHooks()
+  }, [loadHooks, pluginVersion])
 
   const filteredHooks = useMemo(() => {
     const q = debouncedQuery.trim().toLowerCase()
@@ -117,16 +214,32 @@ export function HooksPanel(): React.JSX.Element {
         summary.includes(q) ||
         h.event.toLowerCase().includes(q) ||
         (h.matcher && h.matcher.toLowerCase().includes(q)) ||
+        (h.source === "plugin" && h.pluginName.toLowerCase().includes(q)) ||
+        (h.source === "plugin" ? "插件" : "全局").includes(q) ||
         (h.type === "prompt" ? "自然语言策略" : "命令").includes(q)
       )
     })
   }, [hooks, debouncedQuery])
 
-  const handleToggleEnabled = useCallback((id: string, enabled: boolean) => {
-    window.api.hooks.setEnabled(id, enabled).catch(console.error)
-    setHooks((prev) => prev.map((h) => (h.id === id ? { ...h, enabled } : h)))
-    setSelectedHook((prev) => (prev?.id === id ? { ...prev, enabled } : prev))
-  }, [])
+  const handleToggleEnabled = useCallback(
+    async (hook: DisplayHook, enabled: boolean) => {
+      try {
+        if (hook.source === "plugin") {
+          const result = await window.api.plugins.setHookEnabled(hook.pluginId, hook.id, enabled)
+          if (!result.success) {
+            throw new Error(result.error || "插件 Hook 切换失败")
+          }
+          bumpPluginVersion()
+        } else {
+          await window.api.hooks.setEnabled(hook.id, enabled)
+        }
+        await loadHooks()
+      } catch (error) {
+        console.error("[HooksPanel] Failed to toggle hook:", error)
+      }
+    },
+    [bumpPluginVersion, loadHooks]
+  )
 
   const handleDelete = useCallback(
     async (hook: HookConfig) => {
@@ -199,6 +312,7 @@ export function HooksPanel(): React.JSX.Element {
               filteredHooks.map((hook) => {
                 const badge = EVENT_BADGE[hook.event]
                 const isPrompt = hook.type === "prompt"
+                const isPluginHook = hook.source === "plugin"
                 const summary = hookSummary(hook)
                 return (
                   <button
@@ -235,6 +349,21 @@ export function HooksPanel(): React.JSX.Element {
                     )}
                     <span
                       className={cn(
+                        "text-[10px] font-medium px-1.5 py-0.5 rounded-full shrink-0",
+                        isPluginHook
+                          ? "bg-violet-500/15 text-violet-600 dark:text-violet-400"
+                          : "bg-sky-500/15 text-sky-600 dark:text-sky-400"
+                      )}
+                    >
+                      {isPluginHook ? "插件" : "全局"}
+                    </span>
+                    {isPluginHook && (
+                      <span className="text-[10px] text-muted-foreground shrink-0 truncate max-w-[88px]">
+                        {hook.pluginName}
+                      </span>
+                    )}
+                    <span
+                      className={cn(
                         "text-sm truncate flex-1",
                         isPrompt ? "italic" : "font-mono",
                         !hook.enabled && "text-muted-foreground"
@@ -242,9 +371,16 @@ export function HooksPanel(): React.JSX.Element {
                     >
                       {summary}
                     </span>
-                    {!hook.enabled && (
-                      <span className="text-[10px] text-muted-foreground shrink-0">已禁用</span>
-                    )}
+                    <div className="flex items-center gap-1 shrink-0">
+                      {isPluginHook && !hook.pluginEnabled && (
+                        <span className="text-[10px] text-amber-600 dark:text-amber-400">
+                          插件停用
+                        </span>
+                      )}
+                      {!hook.enabled && (
+                        <span className="text-[10px] text-muted-foreground">已禁用</span>
+                      )}
+                    </div>
                   </button>
                 )
               })
@@ -286,14 +422,15 @@ export function HooksPanel(): React.JSX.Element {
 /* ── Hook detail view ──────────────────────────────────────────────── */
 
 function HookDetail(props: {
-  hook: HookConfig
-  onToggleEnabled: (id: string, enabled: boolean) => void
+  hook: DisplayHook
+  onToggleEnabled: (hook: DisplayHook, enabled: boolean) => void
   onDelete: (hook: HookConfig) => void
   onEdit: (hook: HookConfig) => void
 }): React.JSX.Element {
   const { hook, onToggleEnabled, onDelete, onEdit } = props
   const badge = EVENT_BADGE[hook.event]
   const isPrompt = hook.type === "prompt"
+  const isPluginHook = hook.source === "plugin"
   const { models } = useAppStore()
   const modelName = hook.modelId
     ? (models.find((m) => m.id === hook.modelId)?.name ?? hook.modelId)
@@ -349,6 +486,16 @@ function HookDetail(props: {
             >
               {isPrompt ? "自然语言策略" : "Shell 命令"}
             </span>
+            <span
+              className={cn(
+                "text-[10px] font-medium px-1.5 py-0.5 rounded-full",
+                isPluginHook
+                  ? "bg-violet-500/15 text-violet-600 dark:text-violet-400"
+                  : "bg-sky-500/15 text-sky-600 dark:text-sky-400"
+              )}
+            >
+              {isPluginHook ? "插件 Hook" : "全局 Hook"}
+            </span>
             {hook.matcher &&
               (() => {
                 const preset = COMMON_TOOLS.find(
@@ -375,29 +522,33 @@ function HookDetail(props: {
           </div>
         </div>
         <div className="flex items-center gap-1 shrink-0">
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 w-7 p-0"
-            onClick={() => onEdit(hook)}
-            title="编辑"
-          >
-            <Pencil className="size-3.5" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 w-7 p-0 text-destructive hover:text-destructive"
-            onClick={() => onDelete(hook)}
-            title="删除"
-          >
-            <Trash2 className="size-3.5" />
-          </Button>
+          {!isPluginHook && (
+            <>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 w-7 p-0"
+                onClick={() => onEdit(hook)}
+                title="编辑"
+              >
+                <Pencil className="size-3.5" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 w-7 p-0 text-destructive hover:text-destructive"
+                onClick={() => onDelete(hook)}
+                title="删除"
+              >
+                <Trash2 className="size-3.5" />
+              </Button>
+            </>
+          )}
           <Button
             variant={hook.enabled ? "default" : "outline"}
             size="sm"
             className="h-7 text-xs ml-1"
-            onClick={() => onToggleEnabled(hook.id, !hook.enabled)}
+            onClick={() => onToggleEnabled(hook, !hook.enabled)}
           >
             {hook.enabled ? "已启用" : "已禁用"}
           </Button>
@@ -406,6 +557,21 @@ function HookDetail(props: {
 
       {/* Details */}
       <div className="space-y-4">
+        <DetailRow label="来源" value={isPluginHook ? "插件 Hook" : "全局 Hook"} />
+        {isPluginHook && (
+          <DetailRow
+            label="所属插件"
+            value={hook.pluginName}
+            subtext={hook.pluginEnabled ? "插件当前已启用" : "插件当前已禁用，此 Hook 不会执行"}
+          />
+        )}
+        {isPluginHook && <DetailRow label="配置文件" value={hook.hookPath} mono />}
+        {isPluginHook && (
+          <DetailRow
+            label="管理方式"
+            value="这里可以切换启停；如需修改脚本或策略内容，请到插件详情页或插件目录中调整。"
+          />
+        )}
         <DetailRow
           label="事件类型"
           value={`${badge.label}（${badge.english}）`}
@@ -658,7 +824,7 @@ function EmptyState(): React.JSX.Element {
       <h3 className="text-base font-bold mb-2">钩子</h3>
       <p className="text-sm text-muted-foreground max-w-md mb-6">
         钩子允许你在 Agent 生命周期的关键节点执行 Shell 命令，或通过自然语言描述让行内 LLM
-        实时判决工具调用是否合规。
+        实时判决工具调用是否合规。这里除了你手动创建的全局 Hook，也会统一显示由插件提供的 Hook。
       </p>
       <div className="text-left text-sm text-muted-foreground space-y-3 max-w-md">
         <div className="space-y-1">

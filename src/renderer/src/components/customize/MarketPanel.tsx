@@ -113,21 +113,20 @@ interface MarketItemCardProps {
 }
 
 function MarketItemCard({
-                          item,
-                          onOpenDetail,
-                          onDelete,
-                          onUpdate,
-                          onDownload,
-                          onUpdateInstall,
-                          onUninstall,
-                          isDownloading = false,
-                          isInstalled = false,
-                          isUpdating = false
-                        }: MarketItemCardProps) {
+  item,
+  onOpenDetail,
+  onDelete,
+  onUpdate,
+  onDownload,
+  onUpdateInstall,
+  onUninstall,
+  isDownloading = false,
+  isInstalled = false,
+  isUpdating = false
+}: MarketItemCardProps) {
   const handleInstallDownload = () => {
     onDownload(item, false)
   }
-
 
   const handleUpdateInstall = () => {
     onUpdateInstall(item)
@@ -310,7 +309,8 @@ type SkillPreviewKind = "text" | "html" | "image" | "pdf"
 interface PluginDetailData {
   skills: string[]
   mcpServers: string[]
-  hooks: number
+  hookCount: number
+  hooks: Array<Awaited<ReturnType<typeof window.api.plugins.listHooks>>[number]>
   manifest: PluginManifest | null
 }
 
@@ -570,7 +570,12 @@ export function MarketPanel(): React.JSX.Element {
       }
 
       // 下载并安装最新版本
-      const response = await marketApi.downloadItem(itemName, activeTab, false, item.featured === "精品")
+      const response = await marketApi.downloadItem(
+        itemName,
+        activeTab,
+        false,
+        item.featured === "精品"
+      )
 
       if (response.success) {
         console.log(`Successfully updated and installed ${item.name}`)
@@ -621,9 +626,9 @@ export function MarketPanel(): React.JSX.Element {
         const isInstalled =
           type === "skill"
             ? installedSkillsRef.current.includes(item.name) ||
-            installedSkillsRef.current.some(
-              (str) => item.name === str || item.filename?.includes(str)
-            )
+              installedSkillsRef.current.some(
+                (str) => item.name === str || item.filename?.includes(str)
+              )
             : type === "mcp"
               ? installedMcpsRef.current.includes(item.name)
               : installedPluginsRef.current.includes(item.name)
@@ -759,9 +764,11 @@ export function MarketPanel(): React.JSX.Element {
           name: typeof config.name === "string" ? config.name : item.name,
           kind: isStdio ? "stdio" : "remote",
           url: isStdio ? undefined : url,
-          command: isStdio ? config.command as string : undefined,
+          command: isStdio ? (config.command as string) : undefined,
           args:
-            isStdio && Array.isArray(config.args) && config.args.every((arg): arg is string => typeof arg === "string")
+            isStdio &&
+            Array.isArray(config.args) &&
+            config.args.every((arg): arg is string => typeof arg === "string")
               ? config.args
               : undefined,
           env:
@@ -795,7 +802,8 @@ export function MarketPanel(): React.JSX.Element {
         setPluginDetailData({
           skills: [],
           mcpServers: [],
-          hooks: 0,
+          hookCount: 0,
+          hooks: [],
           manifest: {
             name: item.name,
             version: item.version,
@@ -821,12 +829,12 @@ export function MarketPanel(): React.JSX.Element {
   const openItemDetail = async (item: MarketItem) => {
     setSelectedItemKey(getItemKey(item))
     setDetailMode("detail")
-    if (item.featured === '精品'){
+    if (item.featured === "精品") {
       if (activeTab === "skill") {
         setSkillDetailSkill({
           name: item.name,
-          description:  item.description,
-          path:  '',
+          description: item.description,
+          path: "",
           source: "user"
         })
         return
@@ -937,7 +945,12 @@ export function MarketPanel(): React.JSX.Element {
       }
 
       // Use current activeTab as the type and pass the downloadToLocal flag
-      const response = await marketApi.downloadItem(itemName, activeTab, downloadToLocal, item.featured === "精品")
+      const response = await marketApi.downloadItem(
+        itemName,
+        activeTab,
+        downloadToLocal,
+        item.featured === "精品"
+      )
       if (response.success) {
         console.log(`Downloaded ${item.name}`)
 
@@ -1419,9 +1432,7 @@ export function MarketPanel(): React.JSX.Element {
                       <div className="size-10 rounded-2xl bg-[#f5f4ed] border border-[#e8e6dc] flex items-center justify-center mb-3">
                         <ShoppingBag className="size-5 text-[#b0aea5]" />
                       </div>
-                      <p className="text-sm">
-                        {searchQuery ? "未找到匹配的项目" : "暂无可用项目"}
-                      </p>
+                      <p className="text-sm">{searchQuery ? "未找到匹配的项目" : "暂无可用项目"}</p>
                     </div>
                   ) : (
                     filteredData.map((item) => (
@@ -1554,13 +1565,13 @@ export function MarketPanel(): React.JSX.Element {
         existingItem={
           updateDialog.item
             ? {
-              name: updateDialog.item.name,
-              description: updateDialog.item.description,
-              category: updateDialog.item.category || "研发场景",
-              guidance: updateDialog.item.guidance,
-              chinese_name: updateDialog.item.chinese_name,
-              user_id: updateDialog.item.user_id
-            }
+                name: updateDialog.item.name,
+                description: updateDialog.item.description,
+                category: updateDialog.item.category || "研发场景",
+                guidance: updateDialog.item.guidance,
+                chinese_name: updateDialog.item.chinese_name,
+                user_id: updateDialog.item.user_id
+              }
             : undefined
         }
       />

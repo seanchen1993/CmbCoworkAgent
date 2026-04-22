@@ -28,10 +28,13 @@ import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
 import type { PluginMetadata, PluginManifest } from "@/types"
 
+type PluginHookMetadata = Awaited<ReturnType<typeof window.api.plugins.listHooks>>[number]
+
 interface PluginDetail {
   skills: string[]
   mcpServers: string[]
-  hooks: number
+  hookCount: number
+  hooks: PluginHookMetadata[]
   manifest: PluginManifest | null
 }
 
@@ -182,7 +185,8 @@ function UploadPluginDialog(props: {
         <DialogHeader>
           <DialogTitle>安装 Plugin</DialogTitle>
           <DialogDescription>
-            上传 .zip 文件或选择本地 Plugin 文件夹。Plugin 需包含 skills/ 目录或 .mcp.json 配置。
+            上传 .zip 文件或选择本地 Plugin 文件夹。Plugin 可包含 skills/、.mcp.json，或
+            hooks/hooks.json。
           </DialogDescription>
         </DialogHeader>
         <div
@@ -277,7 +281,7 @@ export function PluginsPanel(): React.JSX.Element {
               .getDetail(updated.id)
               .then(setDetail)
               .catch(() => {
-                setDetail({ skills: [], mcpServers: [], hooks: 0, manifest: null })
+                setDetail({ skills: [], mcpServers: [], hookCount: 0, hooks: [], manifest: null })
               })
           }
         }
@@ -296,7 +300,7 @@ export function PluginsPanel(): React.JSX.Element {
       const d = await window.api.plugins.getDetail(plugin.id)
       setDetail(d)
     } catch {
-      setDetail({ skills: [], mcpServers: [], hooks: 0, manifest: null })
+      setDetail({ skills: [], mcpServers: [], hookCount: 0, hooks: [], manifest: null })
     }
   }, [])
 
@@ -323,6 +327,23 @@ export function PluginsPanel(): React.JSX.Element {
       }
     },
     [selectedPlugin, refreshPlugins]
+  )
+
+  const handleToggleHookEnabled = useCallback(
+    async (plugin: PluginMetadata, hook: PluginHookMetadata) => {
+      try {
+        const result = await window.api.plugins.setHookEnabled(plugin.id, hook.id, !hook.enabled)
+        if (!result.success) {
+          setErrorMsg(result.error || "启用/禁用插件 Hook 失败")
+          return
+        }
+        bumpPluginVersion()
+        await loadDetail(plugin)
+      } catch (e) {
+        setErrorMsg(e instanceof Error ? e.message : "启用/禁用插件 Hook 失败")
+      }
+    },
+    [bumpPluginVersion, loadDetail]
   )
 
   const handleDeleteRequest = useCallback((plugin: PluginMetadata) => {
@@ -476,6 +497,12 @@ export function PluginsPanel(): React.JSX.Element {
                         {plugin.mcpServerCount} MCPs
                       </span>
                     )}
+                    {(plugin.hookCount ?? 0) > 0 && (
+                      <span className="text-[10px] text-muted-foreground flex items-center gap-1">
+                        <Webhook className="size-3" />
+                        {plugin.hookCount ?? 0} Hooks
+                      </span>
+                    )}
                   </div>
                 </button>
               ))
@@ -489,6 +516,7 @@ export function PluginsPanel(): React.JSX.Element {
         plugin={selectedPlugin}
         detail={detail}
         onToggleEnabled={handleToggleEnabled}
+        onToggleHookEnabled={handleToggleHookEnabled}
         onDelete={handleDeleteRequest}
       />
 
@@ -518,10 +546,18 @@ export function PluginDetailPanel(props: {
   plugin: PluginMetadata | null
   detail: PluginDetail | null
   onToggleEnabled: (plugin: PluginMetadata) => void
+  onToggleHookEnabled?: (plugin: PluginMetadata, hook: PluginHookMetadata) => void
   onDelete: (plugin: PluginMetadata) => void
   hideActions?: boolean
 }): React.JSX.Element {
-  const { plugin, detail, onToggleEnabled, onDelete, hideActions = false } = props
+  const {
+    plugin,
+    detail,
+    onToggleEnabled,
+    onToggleHookEnabled,
+    onDelete,
+    hideActions = false
+  } = props
 
   if (!plugin) {
     return (
@@ -533,8 +569,8 @@ export function PluginDetailPanel(props: {
             </div>
             <h3 className="text-lg font-semibold text-foreground/80">Plugins 插件</h3>
             <p className="text-sm text-muted-foreground leading-relaxed">
-              插件是打包好的功能扩展包，一个插件可以同时包含 Skills 技能和 MCP
-              服务器。相比单独添加技能或 MCP，插件提供了更便捷的「一键安装、整体管理」的体验。
+              插件是打包好的功能扩展包，一个插件可以同时包含 Skills、MCP 服务器和 Hooks。
+              相比单独添加技能或 MCP，插件提供了更便捷的「一键安装、整体管理」的体验。
             </p>
           </div>
 
@@ -545,9 +581,13 @@ export function PluginDetailPanel(props: {
                 一个插件可以包含以下组件的任意组合：
                 <span className="font-medium text-foreground/60">Skills</span>（位于{" "}
                 <span className="font-mono text-xs bg-muted px-1.5 py-0.5 rounded">skills/</span>{" "}
-                目录）和 <span className="font-medium text-foreground/60">MCP 服务器</span>（通过{" "}
+                目录）、<span className="font-medium text-foreground/60">MCP 服务器</span>（通过{" "}
                 <span className="font-mono text-xs bg-muted px-1.5 py-0.5 rounded">.mcp.json</span>{" "}
-                配置）。安装后，包含的技能和 MCP 会自动注册，可以在插件详情页查看具体内容。
+                配置），以及 <span className="font-medium text-foreground/60">Hooks</span>（默认读取{" "}
+                <span className="font-mono text-xs bg-muted px-1.5 py-0.5 rounded">
+                  hooks/hooks.json
+                </span>
+                ）。 安装后，包含的技能、MCP 和 Hooks 都可以在插件详情页查看和管理。
               </p>
             </div>
 
@@ -581,8 +621,8 @@ export function PluginDetailPanel(props: {
               <p className="text-[13px] text-muted-foreground leading-relaxed">
                 如果你只需要一个技能，直接在 Skills
                 页面上传即可。如果你只需要连接一个远程工具服务，在 MCPs
-                页面添加即可。但当你需要「一组关联的技能 + MCP
-                配置」打包分发时，插件是更好的选择——安装一次，全部就位。
+                页面添加即可。但当你需要「一组关联的技能 + MCP 配置 + Hook
+                规则」打包分发时，插件是更好的选择——安装一次，全部就位。
               </p>
             </div>
           </div>
@@ -597,7 +637,28 @@ export function PluginDetailPanel(props: {
       ? manifest.author
       : manifest.author.name || ""
     : plugin.author
-  const hookCount = detail?.hooks ?? plugin.hookCount ?? 0
+  const hookCount = detail?.hookCount ?? plugin.hookCount ?? detail?.hooks.length ?? 0
+  const canManageHooks = !hideActions && typeof onToggleHookEnabled === "function"
+  const eventLabel: Partial<Record<PluginHookMetadata["event"], string>> = {
+    PreToolUse: "调用前",
+    PostToolUse: "调用后",
+    PostToolUseFailure: "调用失败",
+    Stop: "停止",
+    StopFailure: "停止失败",
+    Notification: "通知",
+    UserPromptSubmit: "提交",
+    SessionStart: "会话始",
+    SessionEnd: "会话终",
+    SubagentStart: "子开始",
+    SubagentStop: "子停止",
+    PreCompact: "压缩前",
+    PostCompact: "压缩后",
+    PermissionRequest: "权限申请",
+    PermissionDenied: "权限拒绝",
+    Setup: "初始化",
+    CwdChanged: "目录变更",
+    FileChanged: "文件变更"
+  }
 
   return (
     <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
@@ -695,6 +756,79 @@ export function PluginDetailPanel(props: {
               </div>
             </div>
           </div>
+
+          {detail && detail.hooks.length > 0 && (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-sm font-medium">Hooks</h3>
+                <span className="text-[11px] text-muted-foreground">
+                  配置文件：{detail.hooks[0]?.hookPath ?? "hooks/hooks.json"}
+                </span>
+              </div>
+              {!plugin.enabled && (
+                <div className="rounded-md border border-amber-300/50 bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">
+                  插件当前已禁用，下面这些 Hook 不会参与执行；你仍然可以提前调整它们的启停状态。
+                </div>
+              )}
+              <div className="space-y-2">
+                {detail.hooks.map((hook) => {
+                  const isPrompt = hook.type === "prompt"
+                  const summary = isPrompt ? (hook.prompt ?? "") : (hook.command ?? "")
+                  return (
+                    <div
+                      key={hook.id}
+                      className={cn(
+                        "rounded-md border border-border/60 bg-muted/20 px-3 py-2 space-y-2",
+                        !hook.enabled && "opacity-60"
+                      )}
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-muted text-muted-foreground">
+                          {eventLabel[hook.event] ?? hook.event}
+                        </span>
+                        {isPrompt && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-violet-500/15 text-violet-600 dark:text-violet-400">
+                            策略
+                          </span>
+                        )}
+                        {hook.matcher && hook.matcher !== "*" && (
+                          <span className="text-[10px] text-muted-foreground shrink-0 font-mono">
+                            {hook.matcher}
+                          </span>
+                        )}
+                        {canManageHooks ? (
+                          <button
+                            className="ml-auto shrink-0"
+                            onClick={() => onToggleHookEnabled?.(plugin, hook)}
+                            title={hook.enabled ? "点击禁用" : "点击启用"}
+                          >
+                            <Power
+                              className={cn(
+                                "size-3.5",
+                                hook.enabled ? "text-status-nominal" : "text-muted-foreground"
+                              )}
+                            />
+                          </button>
+                        ) : (
+                          <span className="ml-auto text-[10px] text-muted-foreground">
+                            {hook.enabled ? "已启用" : "已禁用"}
+                          </span>
+                        )}
+                      </div>
+                      <p
+                        className={cn(
+                          "text-xs text-muted-foreground break-all",
+                          isPrompt ? "italic" : "font-mono"
+                        )}
+                      >
+                        {summary}
+                      </p>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
 
           {/* Skills list */}
           {detail && detail.skills.length > 0 && (

@@ -46,7 +46,12 @@ import { SubagentCard } from "@/components/panels/SubagentPanel"
 import { LspPanel } from "@/components/customize/LspPanel"
 
 type HookConfig = Awaited<ReturnType<typeof window.api.hooks.list>>[number]
-type DisplayHook = HookConfig & { source: "global" | "workspace" }
+type PluginHookMetadata = Awaited<ReturnType<typeof window.api.plugins.listHooks>>[number]
+type DisplayHook = HookConfig & {
+  source: "global" | "workspace" | "plugin"
+  pluginId?: string
+  pluginName?: string
+}
 
 const FileViewer = lazy(() =>
   import("@/components/tabs/FileViewer").then((m) => ({ default: m.FileViewer }))
@@ -62,7 +67,15 @@ const MIN_CONTENT_HEIGHT = 60 // px
 const COLLAPSE_THRESHOLD = 55 // px - auto-collapse when below this
 const PREVIEW_MAX_HEIGHT = "100vh"
 
-type PanelHeights = { tasks: number; files: number; agents: number; skills: number; plugins: number; hooks: number; lsp: number }
+type PanelHeights = {
+  tasks: number
+  files: number
+  agents: number
+  skills: number
+  plugins: number
+  hooks: number
+  lsp: number
+}
 
 interface SectionHeaderProps {
   title: string
@@ -169,15 +182,16 @@ export function RightPanel({
   onRequestWorkMode,
   onPreviewFullscreenChange
 }: RightPanelProps): React.JSX.Element {
-  const { currentThreadId, pluginVersion, skillGenerationByThread, setSkillGenerationPhase } = useAppStore(
-    useShallow((s) => ({
-      currentThreadId: s.currentThreadId,
-      pluginVersion: s.pluginVersion,
-      // Subscribe to the whole map so we re-render when any thread's card changes
-      skillGenerationByThread: s.skillGenerationByThread,
-      setSkillGenerationPhase: s.setSkillGenerationPhase
-    }))
-  )
+  const { currentThreadId, pluginVersion, skillGenerationByThread, setSkillGenerationPhase } =
+    useAppStore(
+      useShallow((s) => ({
+        currentThreadId: s.currentThreadId,
+        pluginVersion: s.pluginVersion,
+        // Subscribe to the whole map so we re-render when any thread's card changes
+        skillGenerationByThread: s.skillGenerationByThread,
+        setSkillGenerationPhase: s.setSkillGenerationPhase
+      }))
+    )
   // Derive the current thread's card state from the per-thread map
   const skillGenerationAgent = selectSkillGenerationAgent(
     { skillGenerationByThread } as Parameters<typeof selectSkillGenerationAgent>[0],
@@ -251,7 +265,9 @@ export function RightPanel({
     }
 
     void loadLspSummary()
-    const unsubscribe = window.api.lsp.onChanged(() => { void loadLspSummary() })
+    const unsubscribe = window.api.lsp.onChanged(() => {
+      void loadLspSummary()
+    })
 
     return () => {
       cancelled = true
@@ -273,7 +289,7 @@ export function RightPanel({
       ? "已禁用"
       : currentThreadId && !threadState?.workspacePath
         ? "未关联工作目录"
-        : lspStatus?.statusText ?? "已停止"
+        : (lspStatus?.statusText ?? "已停止")
 
     const statusClass = cn(
       "text-xs font-medium tabular-nums",
@@ -312,13 +328,22 @@ export function RightPanel({
   const loadHooks = useCallback(async (): Promise<void> => {
     try {
       const workspacePath = threadState?.workspacePath ?? null
-      const [globalHooks, workspaceHooks] = await Promise.all([
+      const [globalHooks, workspaceHooks, pluginHooks] = await Promise.all([
         window.api.hooks.list(),
-        workspacePath ? window.api.hooks.workspace.list(workspacePath) : Promise.resolve([])
+        workspacePath ? window.api.hooks.workspace.list(workspacePath) : Promise.resolve([]),
+        window.api.plugins.listHooks()
       ])
       setHooks([
         ...globalHooks.map((hook): DisplayHook => ({ ...hook, source: "global" })),
-        ...workspaceHooks.map((hook): DisplayHook => ({ ...hook, source: "workspace" }))
+        ...workspaceHooks.map((hook): DisplayHook => ({ ...hook, source: "workspace" })),
+        ...pluginHooks.map(
+          (hook: PluginHookMetadata): DisplayHook => ({
+            ...hook,
+            source: "plugin",
+            pluginId: hook.pluginId,
+            pluginName: hook.pluginName
+          })
+        )
       ])
     } catch (error) {
       console.error("[RightPanel] Failed to load hooks:", error)
@@ -327,7 +352,7 @@ export function RightPanel({
 
   useEffect(() => {
     void loadHooks()
-  }, [loadHooks])
+  }, [loadHooks, pluginVersion])
 
   useEffect(() => {
     if (!currentThreadId) return
@@ -341,7 +366,13 @@ export function RightPanel({
 
   const latestResourceEvent = useMemo(() => {
     const persisted = threadState?.messages ?? []
-    const streaming = (streamData.messages as Array<{ id?: string; tool_calls?: Array<{ id?: string; name: string; args?: Record<string, unknown> }> }> | undefined) ?? []
+    const streaming =
+      (streamData.messages as
+        | Array<{
+            id?: string
+            tool_calls?: Array<{ id?: string; name: string; args?: Record<string, unknown> }>
+          }>
+        | undefined) ?? []
     const all = [
       ...persisted.map((m) => ({ source: "persisted" as const, message: m })),
       ...streaming.map((m) => ({ source: "streaming" as const, message: m }))
@@ -378,7 +409,13 @@ export function RightPanel({
 
   const latestCompletedLlmBatch = useMemo(() => {
     const persisted = threadState?.messages ?? []
-    const streaming = (streamData.messages as Array<{ id?: string; tool_calls?: Array<{ id?: string; name: string; args?: Record<string, unknown> }> }> | undefined) ?? []
+    const streaming =
+      (streamData.messages as
+        | Array<{
+            id?: string
+            tool_calls?: Array<{ id?: string; name: string; args?: Record<string, unknown> }>
+          }>
+        | undefined) ?? []
     const all = [
       ...persisted.map((m) => ({ message: m })),
       ...streaming.map((m) => ({ message: m }))
@@ -445,7 +482,13 @@ export function RightPanel({
     // For non-edit resource events, respect current panel choice:
     // if user stays on git panel, don't switch away; otherwise keep preview behavior.
     applyPreviewUpdate(moduleMode !== "git")
-  }, [streamData.isLoading, latestResourceEvent, latestCompletedLlmBatch, onRequestPreviewMode, moduleMode])
+  }, [
+    streamData.isLoading,
+    latestResourceEvent,
+    latestCompletedLlmBatch,
+    onRequestPreviewMode,
+    moduleMode
+  ])
 
   useEffect(() => {
     if (!currentThreadId) return
@@ -486,12 +529,15 @@ export function RightPanel({
   }, [moduleMode, previewPath, onPreviewFullscreenChange])
 
   useEffect(() => {
-    if (!currentThreadId || !latestCompletedLlmBatch || latestCompletedLlmBatch.files.length === 0) return
+    if (!currentThreadId || !latestCompletedLlmBatch || latestCompletedLlmBatch.files.length === 0)
+      return
     if (lastRecordedBatchKeyRef.current === latestCompletedLlmBatch.batchKey) return
     lastRecordedBatchKeyRef.current = latestCompletedLlmBatch.batchKey
-    window.api.workspace.recordLlmModifiedFiles(currentThreadId, latestCompletedLlmBatch.files).catch((error) => {
-      console.error("[RightPanel] Failed to record LLM modified files:", error)
-    })
+    window.api.workspace
+      .recordLlmModifiedFiles(currentThreadId, latestCompletedLlmBatch.files)
+      .catch((error) => {
+        console.error("[RightPanel] Failed to record LLM modified files:", error)
+      })
   }, [currentThreadId, latestCompletedLlmBatch])
 
   // Store content heights in pixels (null = auto/equal distribution)
@@ -520,7 +566,15 @@ export function RightPanel({
     if (!containerRef.current) return 0
     const totalHeight = containerRef.current.clientHeight
 
-    const openPanels = [tasksOpen, filesOpen, agentsOpen, skillsOpen, pluginsOpen, hooksOpen, lspOpen]
+    const openPanels = [
+      tasksOpen,
+      filesOpen,
+      agentsOpen,
+      skillsOpen,
+      pluginsOpen,
+      hooksOpen,
+      lspOpen
+    ]
     let used = HEADER_HEIGHT * 7
     // Fixed visual gaps between section blocks
     used += SECTION_GAP * 6
@@ -540,7 +594,15 @@ export function RightPanel({
   // Get current heights for each panel's content area
   const getContentHeights = useCallback(() => {
     const available = getAvailableContentHeight()
-    const openCount = [tasksOpen, filesOpen, agentsOpen, skillsOpen, pluginsOpen, hooksOpen, lspOpen].filter(Boolean).length
+    const openCount = [
+      tasksOpen,
+      filesOpen,
+      agentsOpen,
+      skillsOpen,
+      pluginsOpen,
+      hooksOpen,
+      lspOpen
+    ].filter(Boolean).length
 
     if (openCount === 0) {
       return { tasks: 0, files: 0, agents: 0, skills: 0, plugins: 0, hooks: 0, lsp: 0 }
@@ -882,7 +944,15 @@ export function RightPanel({
         setLspOpen(false)
       }
     },
-    [getContentHeights, getAvailableContentHeight, tasksOpen, filesOpen, agentsOpen, skillsOpen, pluginsOpen]
+    [
+      getContentHeights,
+      getAvailableContentHeight,
+      tasksOpen,
+      filesOpen,
+      agentsOpen,
+      skillsOpen,
+      pluginsOpen
+    ]
   )
 
   // Reset drag start on mouse up
@@ -906,12 +976,28 @@ export function RightPanel({
   }, [tasksOpen, filesOpen, agentsOpen, skillsOpen, pluginsOpen, hooksOpen, lspOpen])
 
   // Calculate heights in an effect (refs can't be accessed during render)
-  const [heights, setHeights] = useState<PanelHeights>({ tasks: 0, files: 0, agents: 0, skills: 0, plugins: 0, hooks: 0, lsp: 0 })
+  const [heights, setHeights] = useState<PanelHeights>({
+    tasks: 0,
+    files: 0,
+    agents: 0,
+    skills: 0,
+    plugins: 0,
+    hooks: 0,
+    lsp: 0
+  })
   useEffect(() => {
     setHeights(getContentHeights())
   }, [getContentHeights])
 
-  const allPanelsClosed = moduleMode === "work" && !tasksOpen && !filesOpen && !agentsOpen && !skillsOpen && !pluginsOpen && !hooksOpen && !lspOpen
+  const allPanelsClosed =
+    moduleMode === "work" &&
+    !tasksOpen &&
+    !filesOpen &&
+    !agentsOpen &&
+    !skillsOpen &&
+    !pluginsOpen &&
+    !hooksOpen &&
+    !lspOpen
 
   return (
     <aside
@@ -923,10 +1009,7 @@ export function RightPanel({
     >
       {moduleMode === "preview" && (
         <div className="flex h-full min-h-0 flex-col border border-border/75 rounded-2xl bg-background">
-          <div
-            className="bg-background p-2 h-full min-h-0"
-            style={{ height: PREVIEW_MAX_HEIGHT }}
-          >
+          <div className="bg-background p-2 h-full min-h-0" style={{ height: PREVIEW_MAX_HEIGHT }}>
             {previewPath ? (
               <ResourcePreview
                 key={`${previewPath}:${previewReloadToken}`}
@@ -946,8 +1029,7 @@ export function RightPanel({
                   </div>
                   <div className="text-sm font-semibold text-foreground">暂无可预览文件</div>
                   <p className="mt-2 text-xs leading-5 text-muted-foreground">
-                    生成或编辑文件后会自动在这里展示预览。
-                    也可以在工具调用里点击预览图标快速打开。
+                    生成或编辑文件后会自动在这里展示预览。 也可以在工具调用里点击预览图标快速打开。
                   </p>
                   <div className="mt-4 flex items-center justify-center gap-2">
                     <button
@@ -975,10 +1057,15 @@ export function RightPanel({
                 workspacePath={threadState?.workspacePath ?? null}
                 onOpenFileFolder={async (filePath) => {
                   try {
-                    const resolved = resolvePreviewPaths(filePath, threadState?.workspacePath ?? null)
+                    const resolved = resolvePreviewPaths(
+                      filePath,
+                      threadState?.workspacePath ?? null
+                    )
                     const platform = await window.electron.ipcRenderer.invoke("get-platform")
                     const normalizedPath =
-                      platform === "win32" ? resolved.fullPath.replace(/\//g, "\\") : resolved.fullPath
+                      platform === "win32"
+                        ? resolved.fullPath.replace(/\//g, "\\")
+                        : resolved.fullPath
                     await window.electron.ipcRenderer.invoke("show-item-in-folder", normalizedPath)
                   } catch (error) {
                     console.error("[GitPanel] Failed to show item in folder:", error)
@@ -992,138 +1079,140 @@ export function RightPanel({
 
       {moduleMode === "work" && (
         <>
-      {/* TASKS */}
-      <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
-        <SectionHeader
-          title="任务"
-          icon={ListTodo}
-          badge={todos.length}
-          isOpen={tasksOpen}
-          onToggle={() => setTasksOpen((prev) => !prev)}
-        />
-        {tasksOpen && (
-          <div className="overflow-auto right-panel-scroll" style={{ height: heights.tasks }}>
-            <TasksContent />
-          </div>
-        )}
-      </div>
-
-      {/* Resize handle after TASKS */}
-      {tasksOpen && (filesOpen || agentsOpen) && <ResizeHandle onDrag={handleTasksResize} />}
-
-      {/* FILES */}
-      <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
-        <SectionHeader
-          title="文件"
-          icon={FolderTree}
-          badge={workspaceFiles.length}
-          isOpen={filesOpen}
-          onToggle={() => setFilesOpen((prev) => !prev)}
-        />
-        {filesOpen && (
-          <div className="overflow-auto right-panel-scroll" style={{ height: heights.files }}>
-            <FilesContent />
-          </div>
-        )}
-      </div>
-
-      {/* Resize handle after FILES */}
-      {filesOpen && agentsOpen && <ResizeHandle onDrag={handleFilesResize} />}
-
-      {/* AGENTS */}
-      <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
-        <SectionHeader
-          title="代理"
-          icon={GitBranch}
-          badge={subagents.length + (skillGenerationAgent.phase !== null ? 1 : 0)}
-          isOpen={agentsOpen}
-          onToggle={() => setAgentsOpen((prev) => !prev)}
-        />
-        {agentsOpen && (
-          <div className="overflow-auto right-panel-scroll" style={{ height: heights.agents }}>
-            <AgentsContent />
-          </div>
-        )}
-      </div>
-
-      {/* Resize handle after AGENTS */}
-      {agentsOpen && skillsOpen && <ResizeHandle onDrag={handleAgentsResize} />}
-
-      {/* SKILLS */}
-      <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
-        <SectionHeader
-          title="技能"
-          icon={Sparkles}
-          badge={skills.length}
-          isOpen={skillsOpen}
-          onToggle={() => setSkillsOpen((prev) => !prev)}
-        />
-        {skillsOpen && (
-          <div className="overflow-auto right-panel-scroll" style={{ height: heights.skills }}>
-            <SkillsContent skills={skills} disabledSkills={disabledSkills} />
-          </div>
-        )}
-      </div>
-
-      {/* Resize handle after SKILLS */}
-      {skillsOpen && pluginsOpen && <ResizeHandle onDrag={handleSkillsResize} />}
-
-      {/* PLUGINS */}
-      <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
-        <SectionHeader
-          title="插件"
-          icon={Puzzle}
-          badge={plugins.length}
-          isOpen={pluginsOpen}
-          onToggle={() => setPluginsOpen((prev) => !prev)}
-        />
-        {pluginsOpen && (
-          <div className="overflow-auto right-panel-scroll" style={{ height: heights.plugins }}>
-            <PluginsContent plugins={plugins} />
-          </div>
-        )}
-      </div>
-
-      {/* Resize handle after PLUGINS */}
-      {pluginsOpen && hooksOpen && <ResizeHandle onDrag={handlePluginsResize} />}
-
-      {/* HOOKS */}
-      <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
-        <SectionHeader
-          title="钩子"
-          icon={Webhook}
-          badge={hooks.filter((h) => h.enabled).length}
-          isOpen={hooksOpen}
-          onToggle={() => setHooksOpen((prev) => !prev)}
-        />
-        {hooksOpen && (
-          <div className="overflow-auto right-panel-scroll" style={{ height: heights.hooks }}>
-            <HooksContent
-              hooks={hooks}
-              onChange={() => { void loadHooks() }}
+          {/* TASKS */}
+          <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
+            <SectionHeader
+              title="任务"
+              icon={ListTodo}
+              badge={todos.length}
+              isOpen={tasksOpen}
+              onToggle={() => setTasksOpen((prev) => !prev)}
             />
+            {tasksOpen && (
+              <div className="overflow-auto right-panel-scroll" style={{ height: heights.tasks }}>
+                <TasksContent />
+              </div>
+            )}
           </div>
-        )}
-      </div>
 
-      {/* Resize handle after HOOKS */}
-      {hooksOpen && lspOpen && <ResizeHandle onDrag={handleHooksResize} />}
+          {/* Resize handle after TASKS */}
+          {tasksOpen && (filesOpen || agentsOpen) && <ResizeHandle onDrag={handleTasksResize} />}
 
-      {/* LSP */}
-      <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
-        <SectionHeader
-          title="LSP"
-          icon={Code2}
-          detail={lspHeaderStatus}
-          isOpen={lspOpen}
-          onToggle={() => setLspOpen((prev) => !prev)}
-        />
-        {lspOpen && (
-          <div className="overflow-auto right-panel-scroll" style={{ height: heights.lsp }}>
-            <LspPanel threadId={currentThreadId} embedded statusOnly />
+          {/* FILES */}
+          <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
+            <SectionHeader
+              title="文件"
+              icon={FolderTree}
+              badge={workspaceFiles.length}
+              isOpen={filesOpen}
+              onToggle={() => setFilesOpen((prev) => !prev)}
+            />
+            {filesOpen && (
+              <div className="overflow-auto right-panel-scroll" style={{ height: heights.files }}>
+                <FilesContent />
+              </div>
+            )}
           </div>
-        )}
-      </div>
+
+          {/* Resize handle after FILES */}
+          {filesOpen && agentsOpen && <ResizeHandle onDrag={handleFilesResize} />}
+
+          {/* AGENTS */}
+          <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
+            <SectionHeader
+              title="代理"
+              icon={GitBranch}
+              badge={subagents.length + (skillGenerationAgent.phase !== null ? 1 : 0)}
+              isOpen={agentsOpen}
+              onToggle={() => setAgentsOpen((prev) => !prev)}
+            />
+            {agentsOpen && (
+              <div className="overflow-auto right-panel-scroll" style={{ height: heights.agents }}>
+                <AgentsContent />
+              </div>
+            )}
+          </div>
+
+          {/* Resize handle after AGENTS */}
+          {agentsOpen && skillsOpen && <ResizeHandle onDrag={handleAgentsResize} />}
+
+          {/* SKILLS */}
+          <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
+            <SectionHeader
+              title="技能"
+              icon={Sparkles}
+              badge={skills.length}
+              isOpen={skillsOpen}
+              onToggle={() => setSkillsOpen((prev) => !prev)}
+            />
+            {skillsOpen && (
+              <div className="overflow-auto right-panel-scroll" style={{ height: heights.skills }}>
+                <SkillsContent skills={skills} disabledSkills={disabledSkills} />
+              </div>
+            )}
+          </div>
+
+          {/* Resize handle after SKILLS */}
+          {skillsOpen && pluginsOpen && <ResizeHandle onDrag={handleSkillsResize} />}
+
+          {/* PLUGINS */}
+          <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
+            <SectionHeader
+              title="插件"
+              icon={Puzzle}
+              badge={plugins.length}
+              isOpen={pluginsOpen}
+              onToggle={() => setPluginsOpen((prev) => !prev)}
+            />
+            {pluginsOpen && (
+              <div className="overflow-auto right-panel-scroll" style={{ height: heights.plugins }}>
+                <PluginsContent plugins={plugins} />
+              </div>
+            )}
+          </div>
+
+          {/* Resize handle after PLUGINS */}
+          {pluginsOpen && hooksOpen && <ResizeHandle onDrag={handlePluginsResize} />}
+
+          {/* HOOKS */}
+          <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
+            <SectionHeader
+              title="钩子"
+              icon={Webhook}
+              badge={hooks.filter((h) => h.enabled).length}
+              isOpen={hooksOpen}
+              onToggle={() => setHooksOpen((prev) => !prev)}
+            />
+            {hooksOpen && (
+              <div className="overflow-auto right-panel-scroll" style={{ height: heights.hooks }}>
+                <HooksContent
+                  hooks={hooks}
+                  onChange={() => {
+                    void loadHooks()
+                  }}
+                />
+              </div>
+            )}
+          </div>
+
+          {/* Resize handle after HOOKS */}
+          {hooksOpen && lspOpen && <ResizeHandle onDrag={handleHooksResize} />}
+
+          {/* LSP */}
+          <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
+            <SectionHeader
+              title="LSP"
+              icon={Code2}
+              detail={lspHeaderStatus}
+              isOpen={lspOpen}
+              onToggle={() => setLspOpen((prev) => !prev)}
+            />
+            {lspOpen && (
+              <div className="overflow-auto right-panel-scroll" style={{ height: heights.lsp }}>
+                <LspPanel threadId={currentThreadId} embedded statusOnly />
+              </div>
+            )}
+          </div>
         </>
       )}
     </aside>
@@ -1296,7 +1385,10 @@ function isResourcePreviewPath(filePath: string): boolean {
   return RESOURCE_PREVIEW_EXTENSIONS.has(ext)
 }
 
-function getToolCallFilePath(toolCall: { name: string; args?: Record<string, unknown> }): string | null {
+function getToolCallFilePath(toolCall: {
+  name: string
+  args?: Record<string, unknown>
+}): string | null {
   if (toolCall.name !== "write_file" && toolCall.name !== "edit_file") return null
   const raw = toolCall.args?.path ?? toolCall.args?.file_path
   if (typeof raw !== "string" || !raw.trim()) return null
@@ -1307,7 +1399,10 @@ function isAbsolutePath(filePath: string): boolean {
   return /^(?:[a-zA-Z]:[\\/]|\/)/.test(filePath)
 }
 
-function resolvePreviewPaths(filePath: string, workspacePath: string | null): {
+function resolvePreviewPaths(
+  filePath: string,
+  workspacePath: string | null
+): {
   fullPath: string
   workspaceFilePath: string
   inWorkspace: boolean
@@ -1318,9 +1413,7 @@ function resolvePreviewPaths(filePath: string, workspacePath: string | null): {
   }
 
   const ws = workspacePath.replace(/\\/g, "/").replace(/\/+$/, "")
-  const fullPath = isAbsolutePath(input)
-    ? input
-    : `${ws}/${input.replace(/^\/+/, "")}`
+  const fullPath = isAbsolutePath(input) ? input : `${ws}/${input.replace(/^\/+/, "")}`
 
   const inWorkspace = fullPath === ws || fullPath.startsWith(`${ws}/`)
   if (!inWorkspace) {
@@ -1371,8 +1464,7 @@ function buildPreviewEvent(
 
   const args = toolCall.args || {}
   const oldValue = ((args.old_string ?? args.old_str) as string | undefined) || ""
-  const newValue =
-    ((args.new_string ?? args.new_str ?? args.content) as string | undefined) || ""
+  const newValue = ((args.new_string ?? args.new_str ?? args.content) as string | undefined) || ""
 
   if (toolCall.name === "write_file") {
     return {
@@ -1419,7 +1511,9 @@ function FilesContent(): React.JSX.Element {
     }
     loadWorkspace()
 
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentThreadId])
 
@@ -1441,7 +1535,6 @@ function FilesContent(): React.JSX.Element {
     return cleanup
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentThreadId])
-
 
   return (
     <div className="flex flex-col h-full">
@@ -1627,7 +1720,11 @@ function ResourcePreview({
             title={canCopyContent ? "复制文件内容" : "当前文件类型不支持复制"}
             aria-label={canCopyContent ? "复制文件内容" : "当前文件类型不支持复制"}
           >
-            {copySuccess ? <Check className="size-3.5 text-status-nominal" /> : <Copy className="size-3.5" />}
+            {copySuccess ? (
+              <Check className="size-3.5 text-status-nominal" />
+            ) : (
+              <Copy className="size-3.5" />
+            )}
           </button>
           <button
             onClick={onReload}
@@ -1974,27 +2071,32 @@ function SkillGenerationCard({
 }): React.JSX.Element {
   const [expanded, setExpanded] = useState(false)
 
-  const statusBadge = phase === "generating"
-    ? { icon: Loader2, variant: "info" as const, label: "生成中", spin: true }
-    : phase === "done"
-      ? { icon: CheckCircle2, variant: "nominal" as const, label: "已完成", spin: false }
-      : { icon: AlertCircle, variant: "critical" as const, label: "执行失败", spin: false }
+  const statusBadge =
+    phase === "generating"
+      ? { icon: Loader2, variant: "info" as const, label: "生成中", spin: true }
+      : phase === "done"
+        ? { icon: CheckCircle2, variant: "nominal" as const, label: "已完成", spin: false }
+        : { icon: AlertCircle, variant: "critical" as const, label: "执行失败", spin: false }
 
   const StatusIcon = statusBadge.icon
 
   return (
-    <div className={cn(
-      "rounded-lg border bg-card text-card-foreground shadow-sm",
-      phase === "generating" && "border-status-info/50"
-    )}>
+    <div
+      className={cn(
+        "rounded-lg border bg-card text-card-foreground shadow-sm",
+        phase === "generating" && "border-status-info/50"
+      )}
+    >
       {/* Header */}
       <div className="p-3 pb-2">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 text-sm font-medium truncate">
-            <Sparkles className={cn(
-              "size-4 shrink-0",
-              phase === "generating" ? "text-status-info" : "text-muted-foreground"
-            )} />
+            <Sparkles
+              className={cn(
+                "size-4 shrink-0",
+                phase === "generating" ? "text-status-info" : "text-muted-foreground"
+              )}
+            />
             <span className="truncate">技能草稿生成</span>
           </div>
           <Badge variant={statusBadge.variant} className="shrink-0">
@@ -2045,10 +2147,11 @@ function SkillGenerationCard({
                   onClick={() => setExpanded((v) => !v)}
                 >
                   <span>查看生成内容</span>
-                  {expanded
-                    ? <ChevronDown className="size-3" />
-                    : <ChevronRight className="size-3" />
-                  }
+                  {expanded ? (
+                    <ChevronDown className="size-3" />
+                  ) : (
+                    <ChevronRight className="size-3" />
+                  )}
                 </button>
                 {expanded && (
                   <pre className="px-2 py-1.5 text-[10px] font-mono text-foreground/70 whitespace-pre-wrap break-all leading-relaxed max-h-40 overflow-y-auto border-t border-border">
@@ -2076,7 +2179,12 @@ function SkillGenerationCard({
 }
 
 function AgentsContent(): React.JSX.Element {
-  const { currentThreadId, skillGenerationByThread, skillRetryContextByThread, setSkillGenerationPhase } = useAppStore(
+  const {
+    currentThreadId,
+    skillGenerationByThread,
+    skillRetryContextByThread,
+    setSkillGenerationPhase
+  } = useAppStore(
     useShallow((s) => ({
       currentThreadId: s.currentThreadId,
       skillGenerationByThread: s.skillGenerationByThread,
@@ -2101,12 +2209,15 @@ function AgentsContent(): React.JSX.Element {
   const handleRetry = useCallback((): void => {
     if (!currentThreadId || !skillRetryContext || retryInFlightRef.current) return
     retryInFlightRef.current = true
-    void window.api.skillEvolution.retryGeneration(currentThreadId, skillRetryContext)
+    void window.api.skillEvolution
+      .retryGeneration(currentThreadId, skillRetryContext)
       .catch((err: unknown) => {
         console.error("[SkillGen] Retry IPC failed:", err)
         setSkillGenerationPhase("error", err instanceof Error ? err.message : "重试失败")
       })
-      .finally(() => { retryInFlightRef.current = false })
+      .finally(() => {
+        retryInFlightRef.current = false
+      })
   }, [currentThreadId, skillRetryContext, setSkillGenerationPhase])
 
   if (subagents.length === 0 && !hasSkillGen) {
@@ -2128,12 +2239,12 @@ function AgentsContent(): React.JSX.Element {
           streamedText={skillGenerationAgent.streamedText}
           errorText={skillGenerationAgent.errorText}
           onDismiss={
-            skillGenerationAgent.phase === "error"
-              ? () => setSkillGenerationPhase(null)
-              : undefined
+            skillGenerationAgent.phase === "error" ? () => setSkillGenerationPhase(null) : undefined
           }
           onRetry={
-            (skillGenerationAgent.phase === "error" || skillGenerationAgent.phase === "generating") && skillRetryContext
+            (skillGenerationAgent.phase === "error" ||
+              skillGenerationAgent.phase === "generating") &&
+            skillRetryContext
               ? handleRetry
               : undefined
           }
@@ -2189,16 +2300,22 @@ function SkillsContent({
     return (
       <div
         key={skill.name}
-        className={cn(
-          "p-3 rounded-sm border border-border",
-          disabled && "opacity-60"
-        )}
+        className={cn("p-3 rounded-sm border border-border", disabled && "opacity-60")}
       >
         <div className="flex items-center gap-2 text-sm font-medium">
-          <Sparkles className={cn("size-3.5 shrink-0", disabled ? "text-muted-foreground" : "text-amber-500")} />
-          <span className={cn("flex-1 truncate", disabled && "text-muted-foreground line-through")}>{skill.name}</span>
+          <Sparkles
+            className={cn(
+              "size-3.5 shrink-0",
+              disabled ? "text-muted-foreground" : "text-amber-500"
+            )}
+          />
+          <span className={cn("flex-1 truncate", disabled && "text-muted-foreground line-through")}>
+            {skill.name}
+          </span>
           {disabled && (
-            <Badge variant="outline" className="text-[10px] h-4 px-1.5 shrink-0">已禁用</Badge>
+            <Badge variant="outline" className="text-[10px] h-4 px-1.5 shrink-0">
+              已禁用
+            </Badge>
           )}
         </div>
         {skill.description && (
@@ -2258,15 +2375,24 @@ function PluginsContent({ plugins }: { plugins: PluginMetadata[] }): React.JSX.E
   const renderPluginCard = (plugin: PluginMetadata): React.JSX.Element => (
     <div
       key={plugin.id}
-      className={cn(
-        "p-3 rounded-sm border border-border",
-        !plugin.enabled && "opacity-60"
-      )}
+      className={cn("p-3 rounded-sm border border-border", !plugin.enabled && "opacity-60")}
     >
       <div className="flex items-center gap-2 text-sm font-medium">
-        <Puzzle className={cn("size-3.5 shrink-0", plugin.enabled ? "text-primary" : "text-muted-foreground")} />
-        <span className={cn("flex-1 truncate", !plugin.enabled && "text-muted-foreground")}>{plugin.name}</span>
-        <Power className={cn("size-3 shrink-0", plugin.enabled ? "text-status-nominal" : "text-muted-foreground")} />
+        <Puzzle
+          className={cn(
+            "size-3.5 shrink-0",
+            plugin.enabled ? "text-primary" : "text-muted-foreground"
+          )}
+        />
+        <span className={cn("flex-1 truncate", !plugin.enabled && "text-muted-foreground")}>
+          {plugin.name}
+        </span>
+        <Power
+          className={cn(
+            "size-3 shrink-0",
+            plugin.enabled ? "text-status-nominal" : "text-muted-foreground"
+          )}
+        />
       </div>
       {plugin.description && (
         <p className="text-xs text-muted-foreground mt-1 line-clamp-2">{plugin.description}</p>
@@ -2337,14 +2463,14 @@ const EVENT_LABEL: Record<string, string> = {
 }
 
 const TOOL_LABEL: Record<string, string> = {
-  execute:          "执行命令",
-  write_file:       "写入文件",
-  edit_file:        "编辑文件",
-  read_file:        "读取文件",
-  memory_search:    "搜索记忆",
-  memory_get:       "读取记忆",
+  execute: "执行命令",
+  write_file: "写入文件",
+  edit_file: "编辑文件",
+  read_file: "读取文件",
+  memory_search: "搜索记忆",
+  memory_get: "读取记忆",
   manage_scheduler: "调度任务",
-  manage_skill:     "技能管理",
+  manage_skill: "技能管理"
 }
 
 function HooksContent({
@@ -2359,7 +2485,7 @@ function HooksContent({
       <div className="flex flex-col items-center justify-center text-center text-sm text-muted-foreground py-8 px-4">
         <Webhook className="size-8 mb-2 opacity-50" />
         <span>暂无钩子</span>
-        <span className="text-xs mt-1">在自定义面板或工作区中添加钩子</span>
+        <span className="text-xs mt-1">在自定义面板、插件或工作区中添加钩子</span>
       </div>
     )
   }
@@ -2367,9 +2493,23 @@ function HooksContent({
   const enabled = hooks.filter((h) => h.enabled)
   const disabled = hooks.filter((h) => !h.enabled)
 
-  const handleToggle = async (hook: HookConfig): Promise<void> => {
+  const handleToggle = async (hook: DisplayHook): Promise<void> => {
     try {
-      await window.api.hooks.setEnabled(hook.id, !hook.enabled)
+      if (hook.source === "plugin") {
+        if (!hook.pluginId) {
+          throw new Error("缺少插件 ID")
+        }
+        const result = await window.api.plugins.setHookEnabled(
+          hook.pluginId,
+          hook.id,
+          !hook.enabled
+        )
+        if (!result.success) {
+          throw new Error(result.error || "插件 Hook 切换失败")
+        }
+      } else {
+        await window.api.hooks.setEnabled(hook.id, !hook.enabled)
+      }
       onChange()
     } catch (e) {
       console.error("[HooksContent] Failed to toggle hook:", e)
@@ -2380,54 +2520,80 @@ function HooksContent({
     const isPrompt = hook.type === "prompt"
     const isWorkspaceHook = hook.source === "workspace"
     const isGlobalHook = hook.source === "global"
+    const isPluginHook = hook.source === "plugin"
     const summary = isPrompt ? (hook.prompt ?? "") : (hook.command ?? "")
     return (
-    <div
-      key={hook.id}
-      className={cn("p-3 rounded-sm border border-border", !hook.enabled && "opacity-60")}
-    >
-      <div className="flex items-center gap-2 text-sm">
-        <span className={cn("text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0", EVENT_BADGE_COLORS[hook.event] ?? "bg-muted text-muted-foreground")}>
-          {EVENT_LABEL[hook.event] ?? hook.event}
-        </span>
-        {isGlobalHook && (
-          <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-sky-500/15 text-sky-600 dark:text-sky-400">
-            全局
-          </span>
-        )}
-        {isWorkspaceHook && (
-          <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
-            工作区
-          </span>
-        )}
-        {isPrompt && (
-          <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-violet-500/15 text-violet-600 dark:text-violet-400">
-            策略
-          </span>
-        )}
-        {hook.matcher && hook.matcher !== "*" && (
-          <span className="text-[10px] text-muted-foreground shrink-0 font-mono">
-            {TOOL_LABEL[hook.matcher] ?? hook.matcher}
-          </span>
-        )}
-        {isWorkspaceHook ? (
-          <span className="ml-auto text-[10px] text-muted-foreground shrink-0">只读</span>
-        ) : (
-          <button
-            className="ml-auto shrink-0"
-            onClick={() => handleToggle(hook)}
-            title={hook.enabled ? "点击禁用" : "点击启用"}
+      <div
+        key={hook.id}
+        className={cn("p-3 rounded-sm border border-border", !hook.enabled && "opacity-60")}
+      >
+        <div className="flex items-center gap-2 text-sm">
+          <span
+            className={cn(
+              "text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0",
+              EVENT_BADGE_COLORS[hook.event] ?? "bg-muted text-muted-foreground"
+            )}
           >
-            <Power className={cn("size-3", hook.enabled ? "text-status-nominal" : "text-muted-foreground")} />
-          </button>
-        )}
+            {EVENT_LABEL[hook.event] ?? hook.event}
+          </span>
+          {isGlobalHook && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-sky-500/15 text-sky-600 dark:text-sky-400">
+              全局
+            </span>
+          )}
+          {isWorkspaceHook && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
+              工作区
+            </span>
+          )}
+          {isPluginHook && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-violet-500/15 text-violet-600 dark:text-violet-400">
+              插件
+            </span>
+          )}
+          {isPrompt && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-violet-500/15 text-violet-600 dark:text-violet-400">
+              策略
+            </span>
+          )}
+          {isPluginHook && hook.pluginName && (
+            <span className="text-[10px] text-muted-foreground shrink-0 truncate max-w-[120px]">
+              {hook.pluginName}
+            </span>
+          )}
+          {hook.matcher && hook.matcher !== "*" && (
+            <span className="text-[10px] text-muted-foreground shrink-0 font-mono">
+              {TOOL_LABEL[hook.matcher] ?? hook.matcher}
+            </span>
+          )}
+          {isWorkspaceHook ? (
+            <span className="ml-auto text-[10px] text-muted-foreground shrink-0">只读</span>
+          ) : (
+            <button
+              className="ml-auto shrink-0"
+              onClick={() => handleToggle(hook)}
+              title={hook.enabled ? "点击禁用" : "点击启用"}
+            >
+              <Power
+                className={cn(
+                  "size-3",
+                  hook.enabled ? "text-status-nominal" : "text-muted-foreground"
+                )}
+              />
+            </button>
+          )}
+        </div>
+        <p
+          className={cn(
+            "text-xs text-muted-foreground mt-1.5 break-all line-clamp-2",
+            isPrompt ? "italic" : "font-mono"
+          )}
+        >
+          {summary}
+        </p>
       </div>
-      <p className={cn(
-        "text-xs text-muted-foreground mt-1.5 break-all line-clamp-2",
-        isPrompt ? "italic" : "font-mono"
-      )}>{summary}</p>
-    </div>
-  )}
+    )
+  }
 
   return (
     <div className="p-3 space-y-2">
@@ -2435,8 +2601,12 @@ function HooksContent({
       {disabled.length > 0 && (
         <div className="space-y-2 pt-1">
           <div className="flex items-center justify-between px-1">
-            <span className="text-[11px] text-muted-foreground tracking-wider font-medium">已禁用</span>
-            <Badge variant="outline" className="text-[10px] h-5">{disabled.length}</Badge>
+            <span className="text-[11px] text-muted-foreground tracking-wider font-medium">
+              已禁用
+            </span>
+            <Badge variant="outline" className="text-[10px] h-5">
+              {disabled.length}
+            </Badge>
           </div>
           {disabled.map(renderHookCard)}
         </div>
