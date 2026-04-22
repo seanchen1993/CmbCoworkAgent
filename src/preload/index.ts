@@ -1399,6 +1399,21 @@ const api = {
       granularity: "day" | "week" | "month" | "custom"
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:userStats", range, granularity),
+    skillUsageSummary: (
+      range: { from: string; to: string },
+      granularity: "day" | "week" | "month" | "custom"
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:skillUsageSummary", range, granularity),
+    skillUserStats: (
+      range: { from: string; to: string },
+      granularity: "day" | "week" | "month" | "custom",
+      skillName: string
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:skillUserStats", range, granularity, skillName),
+    userProfiles: (
+      sapIds: string[]
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:userProfiles", sapIds),
     productivity: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom"

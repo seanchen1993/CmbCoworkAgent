@@ -346,7 +346,8 @@ export const marketApi = {
   async downloadItem(
     name: string,
     type: MarketItemType,
-    downloadToLocal = false
+    downloadToLocal = false,
+    _isFeatured = false
   ): Promise<DownloadResponse> {
     console.log(`Downloading ${type} item: ${name}`)
     const { blob, filename } = await this.fetchInstallFile(name, type)

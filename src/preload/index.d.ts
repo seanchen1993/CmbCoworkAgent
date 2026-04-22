@@ -690,6 +690,18 @@ interface CustomAPI {
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom"
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    skillUsageSummary: (
+      range: { from: string; to: string },
+      granularity: "day" | "week" | "month" | "custom"
+    ) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    skillUserStats: (
+      range: { from: string; to: string },
+      granularity: "day" | "week" | "month" | "custom",
+      skillName: string
+    ) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    userProfiles: (
+      sapIds: string[]
+    ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     productivity: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom"

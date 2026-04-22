@@ -37,6 +37,14 @@ const ALLOWED_YST_IDS = new Set(
   ALLOWED_YST_IDS_RAW.split(",").map((s) => s.trim()).filter(Boolean)
 )
 
+function isDashboardAllowedForCurrentUser(): boolean {
+  if (import.meta.env.DEV) return true
+  const userInfo = getUserInfo()
+  const ystId = userInfo?.ystId?.trim()
+  if (!ystId) return false
+  return ALLOWED_YST_IDS.has(ystId)
+}
+
 // ─────────────────────────────────────────────────────────
 // ES HTTP helper
 // ─────────────────────────────────────────────────────────
@@ -212,6 +220,92 @@ async function fetchUserStats(range: TimeRange, granularity: Granularity): Promi
       by_version: {
         terms: { field: "appVersion", size: 20 },
         aggs: { unique_users: { cardinality: { field: "sapId" } } }
+      }
+    }
+  }
+  return esQuery(getEsIndex("trace"), body)
+}
+
+async function fetchSkillUsageSummary(range: TimeRange, granularity: Granularity): Promise<unknown> {
+  void granularity
+  const body = {
+    size: 0,
+    query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
+    aggs: {
+      by_skill: {
+        terms: { field: "usedSkills", size: 1000 },
+        aggs: {
+          unique_users: { cardinality: { field: "sapId" } }
+        }
+      }
+    }
+  }
+  return esQuery(getEsIndex("trace"), body)
+}
+
+async function fetchSkillUserStats(
+  range: TimeRange,
+  granularity: Granularity,
+  skillName: string
+): Promise<unknown> {
+  void granularity
+  const body = {
+    size: 0,
+    query: {
+      bool: {
+        filter: [
+          timeRangeFilter("startedAt", range),
+          { term: { usedSkills: skillName } }
+        ]
+      }
+    },
+    aggs: {
+      total_calls: { value_count: { field: "traceId" } },
+      top_users: {
+        terms: { field: "sapId", size: 100 },
+        aggs: {
+          user_name: { terms: { field: "userName", size: 1 } },
+          org_name: { terms: { field: "orgName", size: 1 } }
+        }
+      }
+    }
+  }
+  return esQuery(getEsIndex("trace"), body)
+}
+
+async function fetchUserProfilesBySapIds(sapIds: string[]): Promise<unknown> {
+  const sanitizedSapIds = Array.from(
+    new Set(
+      sapIds
+        .map((id) => id.trim())
+        .filter(Boolean)
+    )
+  ).slice(0, 500)
+
+  if (sanitizedSapIds.length === 0) {
+    return {
+      aggregations: {
+        by_sap: { buckets: [] }
+      }
+    }
+  }
+
+  const body = {
+    size: 0,
+    query: {
+      bool: {
+        filter: [
+          { terms: { sapId: sanitizedSapIds } }
+        ]
+      }
+    },
+    aggs: {
+      by_sap: {
+        terms: { field: "sapId", size: sanitizedSapIds.length, include: sanitizedSapIds },
+        aggs: {
+          user_name: { terms: { field: "userName", size: 1 } },
+          org_name: { terms: { field: "orgName", size: 1 } }
+        }
       }
     }
   }
@@ -552,6 +646,101 @@ function makeMockUserStats(range: TimeRange): unknown {
   }
 }
 
+function makeMockSkillUsageSummary(range: TimeRange): unknown {
+  const overview = makeMockOverview(range) as {
+    aggregations?: { by_skill?: { buckets?: Array<{ key: string; doc_count: number }> } }
+  }
+  return {
+    aggregations: {
+      by_skill: {
+        buckets: (overview.aggregations?.by_skill?.buckets ?? []).map((bucket) => ({
+          ...bucket,
+          unique_users: { value: Math.max(1, Math.floor(bucket.doc_count * 0.35)) }
+        }))
+      }
+    }
+  }
+}
+
+function makeMockSkillUserStats(range: TimeRange, skillName: string): unknown {
+  const userStats = makeMockUserStats(range) as {
+    aggregations?: {
+      top_users?: {
+        buckets?: Array<{
+          key: string
+          doc_count: number
+          user_name?: { buckets?: Array<{ key: string }> }
+          org_name?: { buckets?: Array<{ key: string }> }
+        }>
+      }
+    }
+  }
+  const topUsers = userStats.aggregations?.top_users?.buckets ?? []
+  const offset = Math.abs(
+    Array.from(skillName).reduce((acc, ch) => acc + ch.charCodeAt(0), 0)
+  ) % 7
+  const picked = topUsers.slice(0, Math.max(3, 6 - offset))
+  const totalCalls = picked.reduce((sum, item) => sum + item.doc_count, 0)
+
+  return {
+    aggregations: {
+      total_calls: { value: totalCalls },
+      total_users: { value: picked.length },
+      top_users: { buckets: picked }
+    }
+  }
+}
+
+function makeMockUserProfilesBySapIds(sapIds: string[]): unknown {
+  const userStats = makeMockUserStats({
+    from: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+    to: new Date().toISOString()
+  }) as {
+    aggregations?: {
+      top_users?: {
+        buckets?: Array<{
+          key: string
+          user_name?: { buckets?: Array<{ key: string }> }
+          org_name?: { buckets?: Array<{ key: string }> }
+        }>
+      }
+    }
+  }
+
+  const fallbackBuckets = userStats.aggregations?.top_users?.buckets ?? []
+  const fallbackMap = new Map(
+    fallbackBuckets.map((bucket) => [
+      bucket.key,
+      {
+        userName: bucket.user_name?.buckets?.[0]?.key ?? bucket.key,
+        orgName: bucket.org_name?.buckets?.[0]?.key ?? ""
+      }
+    ])
+  )
+
+  const buckets = Array.from(
+    new Set(
+      sapIds
+        .map((id) => id.trim())
+        .filter(Boolean)
+    )
+  ).map((sapId) => {
+    const fallback = fallbackMap.get(sapId)
+    return {
+      key: sapId,
+      doc_count: 1,
+      user_name: { buckets: [{ key: fallback?.userName ?? `用户${sapId.slice(-4)}` }] },
+      org_name: { buckets: [{ key: fallback?.orgName ?? "未知部门" }] }
+    }
+  })
+
+  return {
+    aggregations: {
+      by_sap: { buckets }
+    }
+  }
+}
+
 function makeMockProductivity(range: TimeRange): unknown {
   const from = new Date(range.from)
   const to = new Date(range.to)
@@ -702,12 +891,7 @@ function makeMockFeedback(range: TimeRange, granularity: Granularity): unknown {
 export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   // Check if current user is allowed to see the dashboard
   _ipcMain.handle("dashboard:isAllowed", async () => {
-    // In development mode, always allow access
-    if (import.meta.env.DEV) return true
-    const userInfo = getUserInfo()
-    const ystId = userInfo?.ystId?.trim()
-    if (!ystId) return false
-    return ALLOWED_YST_IDS.has(ystId)
+    return isDashboardAllowedForCurrentUser()
   })
 
   _ipcMain.handle(
@@ -744,6 +928,62 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data: await fetchUserStats(range, granularity) }
       } catch (e) {
         console.error("[Dashboard] userStats error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:skillUsageSummary",
+    async (_, range: TimeRange, granularity: Granularity) => {
+      if (import.meta.env.DEV) return { success: true, data: makeMockSkillUsageSummary(range) }
+      try {
+        return { success: true, data: await fetchSkillUsageSummary(range, granularity) }
+      } catch (e) {
+        console.error("[Dashboard] skillUsageSummary error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:skillUserStats",
+    async (_, range: TimeRange, granularity: Granularity, skillName: string) => {
+      const trimmedSkillName = skillName?.trim?.() ?? ""
+      if (!trimmedSkillName) {
+        return { success: false, error: "skillName is required" }
+      }
+      if (!isDashboardAllowedForCurrentUser()) {
+        return { success: false, error: "当前用户无权限查看 Skill 用户明细" }
+      }
+      if (import.meta.env.DEV) {
+        return { success: true, data: makeMockSkillUserStats(range, trimmedSkillName) }
+      }
+      try {
+        return {
+          success: true,
+          data: await fetchSkillUserStats(range, granularity, trimmedSkillName)
+        }
+      } catch (e) {
+        console.error("[Dashboard] skillUserStats error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:userProfiles",
+    async (_, sapIds: string[]) => {
+      const sanitizedSapIds = Array.isArray(sapIds)
+        ? sapIds.filter((id): id is string => typeof id === "string")
+        : []
+      if (import.meta.env.DEV) {
+        return { success: true, data: makeMockUserProfilesBySapIds(sanitizedSapIds) }
+      }
+      try {
+        return { success: true, data: await fetchUserProfilesBySapIds(sanitizedSapIds) }
+      } catch (e) {
+        console.error("[Dashboard] userProfiles error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }

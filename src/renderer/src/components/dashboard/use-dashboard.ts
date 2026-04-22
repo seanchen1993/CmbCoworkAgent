@@ -53,6 +53,8 @@ export interface UserStatsData {
   userTrend: Array<{ time: string; users: number }>
 }
 
+type ParsedTopUser = UserStatsData["topUsers"][number]
+
 export interface ProductivityData {
   commitTrend: Array<{ time: string; count: number }>
   totalInsertions: number
@@ -268,12 +270,7 @@ function parseModelStats(raw: any): ModelStatsData {
 function parseUserStats(raw: any): UserStatsData {
   const aggs = raw?.aggregations ?? {}
 
-  const topUsers: UserStatsData["topUsers"] = (aggs.top_users?.buckets ?? []).map((b: any) => ({
-    sapId: b.key,
-    userName: b.user_name?.buckets?.[0]?.key ?? b.key,
-    orgName: b.org_name?.buckets?.[0]?.key ?? "",
-    count: b.doc_count
-  }))
+  const topUsers = parseTopUsersFromAgg(raw)
 
   const byOrg: UserStatsData["byOrg"] = (aggs.by_org?.buckets ?? []).map((b: any) => ({
     org: b.key || "未知",
@@ -291,6 +288,16 @@ function parseUserStats(raw: any): UserStatsData {
   }))
 
   return { topUsers, byOrg, byVersion, userTrend }
+}
+
+export function parseTopUsersFromAgg(raw: any): ParsedTopUser[] {
+  const aggs = raw?.aggregations ?? {}
+  return (aggs.top_users?.buckets ?? []).map((b: any) => ({
+    sapId: b.key,
+    userName: b.user_name?.buckets?.[0]?.key ?? b.key,
+    orgName: b.org_name?.buckets?.[0]?.key ?? "",
+    count: b.doc_count
+  }))
 }
 
 function parseProductivity(raw: any, granularity: Granularity): ProductivityData {
