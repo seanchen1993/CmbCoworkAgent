@@ -70,7 +70,7 @@ export function UniversalUploadDialog({
 
   const buildUserIdFromUserInfo = (userInfo: UserInfoLite | null): string | undefined => {
     if (!userInfo) return undefined
-    const rawId = (userInfo.ystId || userInfo.sapId || "").trim()
+    const rawId = ( userInfo.sapId || userInfo.ystId || "").trim()
     const rawName = (userInfo.userName || "").trim()
     if (rawId && rawName) return `${rawId} / ${rawName}`
     if (rawId) return rawId

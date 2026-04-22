@@ -306,18 +306,37 @@ async function fetchUserProfilesBySapIds(sapIds: string[]): Promise<unknown> {
     }
   }
 
+  const includeShouldFilters = sanitizedSapIds.flatMap((id) => {
+    const escaped = escapeWildcard(id)
+    const wildcardPattern = `*${escaped}*`
+    return [
+      { term: { sapId: id } },
+      { term: { "sapId.keyword": id } },
+      { wildcard: { sapId: wildcardPattern } },
+      { wildcard: { "sapId.keyword": wildcardPattern } }
+    ]
+  })
+
   const body = {
     size: 0,
     query: {
       bool: {
         filter: [
-          { terms: { sapId: sanitizedSapIds } }
+          {
+            bool: {
+              should: includeShouldFilters,
+              minimum_should_match: 1
+            }
+          }
         ]
       }
     },
     aggs: {
       by_sap: {
-        terms: { field: "sapId", size: sanitizedSapIds.length, include: sanitizedSapIds },
+        terms: {
+          field: "sapId",
+          size: Math.min(Math.max(sanitizedSapIds.length * 5, 100), 2000)
+        },
         aggs: {
           user_name: { terms: { field: "userName", size: 1 } },
           org_name: { terms: { field: "orgName", size: 1 } }

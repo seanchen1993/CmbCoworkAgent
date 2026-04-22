@@ -119,27 +119,6 @@ function getSkillMetricByName(
   return summary[key] ?? null
 }
 
-function buildSapIdCandidates(rawId?: string): string[] {
-  const normalized = String(rawId || "").trim()
-  if (!normalized) return []
-
-  const candidates = new Set<string>([normalized])
-  const digitsOnly = /^\d+$/.test(normalized)
-  if (!digitsOnly) return Array.from(candidates)
-
-  // 兼容 marketplace 的简写 user_id（例：293078）与 ES sapId（例：80293078）
-  if (!normalized.startsWith("80") && normalized.length <= 6) {
-    candidates.add(`80${normalized.padStart(6, "0")}`)
-  }
-
-  // 反向兼容：若已是 8 位 80 前缀，也补一份去前缀简写便于兜底
-  if (normalized.startsWith("80") && normalized.length === 8) {
-    candidates.add(normalized.slice(2))
-  }
-
-  return Array.from(candidates)
-}
-
 const localStorageHelper = {
   // Get all items uploaded by current user
   getUploadedItems(): UploadedItemRecord[] {
@@ -293,12 +272,6 @@ function MarketItemCard({
       {/* Footer: metadata + actions */}
       <div className="flex items-center justify-between flex-wrap gap-2 pt-3 border-t border-[#f0eee6]">
         <div className="flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-[#87867f]">
-          {item.filename && (
-            <div className="flex items-center gap-1">
-              <FileText className="size-3 shrink-0" />
-              <span>{item.filename}</span>
-            </div>
-          )}
           <div className="flex items-center gap-1">
             <Calendar className="size-3 shrink-0" />
             <span>{new Date(item.created_at).toLocaleDateString("zh-CN")}</span>
@@ -643,15 +616,6 @@ export function MarketPanel(): React.JSX.Element {
       return
     }
 
-    const candidateIdsByRaw = Object.fromEntries(
-      normalizedIds.map((rawId) => [rawId, buildSapIdCandidates(rawId)])
-    ) as Record<string, string[]>
-    const lookupSapIds = Array.from(
-      new Set(
-        normalizedIds.flatMap((rawId) => candidateIdsByRaw[rawId] ?? [rawId])
-      )
-    )
-
     if (typeof window.api?.dashboard?.userProfiles !== "function") {
       const fallback = Object.fromEntries(
         normalizedIds.map((sapId) => [sapId, { sapId, userName: "", orgName: "" }])
@@ -661,7 +625,7 @@ export function MarketPanel(): React.JSX.Element {
     }
 
     try {
-      const response = await window.api.dashboard.userProfiles(lookupSapIds)
+      const response = await window.api.dashboard.userProfiles(normalizedIds)
       if (!response.success || !response.data) {
         throw new Error(response.error || "获取上传用户信息失败")
       }
@@ -679,23 +643,28 @@ export function MarketPanel(): React.JSX.Element {
         }
       ).aggregations?.by_sap?.buckets ?? []
 
-      const profileByCandidateId: Record<string, UploaderProfile> = {}
+      const profileBySapId: Record<string, UploaderProfile> = {}
       for (const bucket of buckets) {
         const sapId = bucket.key?.trim()
         if (!sapId) continue
-        profileByCandidateId[sapId] = {
+        profileBySapId[sapId] = {
           sapId,
           userName: bucket.user_name?.buckets?.[0]?.key ?? "",
           orgName: bucket.org_name?.buckets?.[0]?.key ?? ""
         }
       }
 
+      const profileEntries = Object.entries(profileBySapId)
       const nextMap: Record<string, UploaderProfile> = {}
       for (const rawId of normalizedIds) {
-        const candidates = candidateIdsByRaw[rawId] ?? [rawId]
-        const hit = candidates.find((candidate) => profileByCandidateId[candidate])
-        if (hit) {
-          nextMap[rawId] = profileByCandidateId[hit]
+        if (profileBySapId[rawId]) {
+          nextMap[rawId] = profileBySapId[rawId]
+          continue
+        }
+
+        const includeHit = profileEntries.find(([sapId]) => sapId.includes(rawId))?.[1]
+        if (includeHit) {
+          nextMap[rawId] = includeHit
         } else {
           nextMap[rawId] = { sapId: rawId, userName: "", orgName: "" }
         }
@@ -1616,11 +1585,13 @@ export function MarketPanel(): React.JSX.Element {
 
       {detailMode === "detail" && selectedItem ? (
         <ScrollArea className="flex-1">
-          <div className="p-5">
-            <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_300px] gap-5 items-start">
-              <div className="space-y-3 xl:order-1 order-2">{renderDetailFilePanel()}</div>
+          <div className="p-5 h-full">
+            <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_380px] gap-5 items-start xl:h-full">
+              <div className="space-y-3 xl:order-1 order-2">
+                {renderDetailFilePanel()}
+              </div>
 
-              <div className="xl:order-2 order-1 space-y-3 xl:sticky xl:top-4">
+              <div className="xl:order-2 order-1 space-y-3 xl:sticky xl:top-4 w-full h-full overflow-y-auto pr-1">
                 {/* Info card */}
                 <div className="rounded-2xl border border-[#e8e6dc] bg-[#faf9f5] p-4 space-y-3 shadow-[rgba(0,0,0,0.04)_0px_4px_16px]">
                   <div className="space-y-1.5">
@@ -1762,7 +1733,7 @@ export function MarketPanel(): React.JSX.Element {
                   </div>
                 </div>
 
-                {activeTab === "skill" && (
+                {activeTab === "skill" && canViewSkillUserDetail && (
                   <div className="rounded-2xl border border-[#e8e6dc] bg-[#faf9f5] p-4 space-y-3 shadow-[rgba(0,0,0,0.03)_0px_2px_10px]">
                     <div className="flex items-center justify-between">
                       <h4 className="text-[13px] font-medium text-[#141413]">使用用户明细</h4>
@@ -1770,11 +1741,7 @@ export function MarketPanel(): React.JSX.Element {
                         调用次数 {selectedSkillCallCount ?? 0} / 使用用户数 {selectedSkillUserCount ?? 0}
                       </span>
                     </div>
-                    {!canViewSkillUserDetail ? (
-                      <div className="text-xs text-[#87867f] py-3">
-                        当前用户无权限查看用户明细（仅允许 `VITE_DASHBOARD_ALLOWED_YST_IDS` 配置用户查看）。
-                      </div>
-                    ) : skillUsageLoading ? (
+                    {skillUsageLoading ? (
                       <div className="flex items-center justify-center py-5 text-xs text-[#87867f]">
                         <div className="size-4 border-2 border-[#c4956a] border-t-transparent rounded-full animate-spin mr-2" />
                         加载中…

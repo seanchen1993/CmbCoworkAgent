@@ -11,7 +11,7 @@ export const MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
       "featured": "精品",
       "version": "1.0.2",
       "user_id": "80***31",
-      "guidance": "入口1：帮我检测并修***区下相应项目问题",
+      "guidance": "入口1：帮我检测并修***区下相应项目问题帮我检测并修***区下相应项目问题帮我检测并修***区下相应项目问题帮我检测并修***区下相应项目问题帮我检测并修***区下相应项目问题帮我检测并修***区下相应项目问题",
       "ip": "99.***.***.118",
       "description": "数***",
       "filename": "jav***or.zip",
