@@ -1,12 +1,15 @@
 import { spawn } from "node:child_process"
 import { ChatOpenAI } from "@langchain/openai"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
+import * as chardet from "jschardet"
+import * as iconv from "iconv-lite"
 import type { HookConfig, HookEvent, HookResult } from "./types"
 import { joinHookText } from "./text"
 import { getCustomModelConfigs } from "../storage"
 
 const DEFAULT_TIMEOUT = 10_000
 const MAX_OUTPUT_BYTES = 1_000_000 // 1 MB per hook
+const CHARDET_CONFIDENCE_THRESHOLD = 0.8
 
 export interface HookContext {
   toolName?: string
@@ -114,6 +117,60 @@ function isBlockingResult(result: HookResult): boolean {
   return result.blocked || result.decision === "block" || result.continue === false
 }
 
+function isValidUtf8(buf: Buffer): boolean {
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(buf)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function detectHookOutputEncoding(buf: Buffer): string {
+  if (buf.length === 0) return "utf-8"
+  const detected = chardet.detect(buf)
+  if (!detected) return "utf-8"
+
+  const encoding = typeof detected === "string" ? detected : detected.encoding
+  const confidence = typeof detected === "object" ? detected.confidence : 1
+
+  if (!encoding || encoding.toLowerCase() === "ascii" || !iconv.encodingExists(encoding)) {
+    return "utf-8"
+  }
+
+  if (confidence >= CHARDET_CONFIDENCE_THRESHOLD) {
+    return encoding
+  }
+
+  // On Chinese Windows, short GBK/GB18030 output often comes back with low confidence
+  // even though the bytes are definitely not UTF-8. In that case, trust the detector.
+  if (!isValidUtf8(buf)) {
+    return encoding
+  }
+
+  return "utf-8"
+}
+
+function decodeHookOutput(
+  stdoutBuf: Buffer,
+  stderrBuf: Buffer
+): { stdout: string; stderr: string } {
+  const combined = Buffer.concat([stdoutBuf, stderrBuf])
+  const encoding = process.platform === "win32" ? detectHookOutputEncoding(combined) : "utf-8"
+
+  try {
+    return {
+      stdout: stdoutBuf.length > 0 ? iconv.decode(stdoutBuf, encoding) : "",
+      stderr: stderrBuf.length > 0 ? iconv.decode(stderrBuf, encoding) : ""
+    }
+  } catch {
+    return {
+      stdout: stdoutBuf.toString("utf-8"),
+      stderr: stderrBuf.toString("utf-8")
+    }
+  }
+}
+
 /**
  * Execute a single hook command and return its result.
  */
@@ -146,7 +203,9 @@ function executeCommandHook(
     // Wrapped in try/catch — child may already be dead if spawn failed.
     try {
       child.stdin?.end(stdinPayload)
-    } catch { /* ignore — error event will fire */ }
+    } catch {
+      /* ignore — error event will fire */
+    }
 
     const stdoutChunks: Buffer[] = []
     const stderrChunks: Buffer[] = []
@@ -167,7 +226,11 @@ function executeCommandHook(
       outputBytes += chunk.length
       if (outputBytes > MAX_OUTPUT_BYTES) {
         outputTruncated = true
-        try { child.kill("SIGKILL") } catch { /* ignore */ }
+        try {
+          child.kill("SIGKILL")
+        } catch {
+          /* ignore */
+        }
       } else {
         stdoutChunks.push(chunk)
       }
@@ -182,7 +245,11 @@ function executeCommandHook(
     })
 
     const timer = setTimeout(() => {
-      try { child.kill("SIGKILL") } catch { /* ignore */ }
+      try {
+        child.kill("SIGKILL")
+      } catch {
+        /* ignore */
+      }
       settle({
         exitCode: null,
         stdout: "",
@@ -192,11 +259,14 @@ function executeCommandHook(
     }, timeout + 500)
 
     child.on("close", (exitCode) => {
+      const stdoutBuf = Buffer.concat(stdoutChunks)
+      const stderrBuf = Buffer.concat(stderrChunks)
+      const decoded = decodeHookOutput(stdoutBuf, stderrBuf)
       const extraNote = outputTruncated ? `\n[output truncated at ${MAX_OUTPUT_BYTES} bytes]` : ""
       settle({
         exitCode,
-        stdout: Buffer.concat(stdoutChunks).toString("utf-8").trim(),
-        stderr: Buffer.concat(stderrChunks).toString("utf-8").trim() + extraNote,
+        stdout: decoded.stdout.trim(),
+        stderr: decoded.stderr.trim() + extraNote,
         blocked: exitCode === 2
       })
     })
@@ -295,7 +365,11 @@ function getPromptHookModel(modelId: string | undefined, timeout: number): ChatO
  * On timeout / model unavailable / parse failure → falls back to hook.fallback
  * ("allow" by default, configurable to "block" for strict environments).
  */
-async function executePromptHook(hook: HookConfig, context: HookContext, event: HookEvent): Promise<HookResult> {
+async function executePromptHook(
+  hook: HookConfig,
+  context: HookContext,
+  event: HookEvent
+): Promise<HookResult> {
   const fallback = hook.fallback ?? "allow"
   const fallbackResult = (reason: string): HookResult => ({
     exitCode: fallback === "block" ? 1 : 0,
@@ -317,16 +391,20 @@ async function executePromptHook(hook: HookConfig, context: HookContext, event: 
     return fallbackResult("[PromptHook] No model configured — cannot evaluate prompt hook")
   }
 
-  const userMsg = JSON.stringify({
-    hook_event_name: event,
-    policy,
-    ...(context.userPrompt ? { prompt: context.userPrompt } : {}),
-    tool_name: context.toolName ?? "(unknown)",
-    tool_args: context.toolArgs ?? {},
-    ...(context.toolResult !== undefined ? { tool_result: context.toolResult } : {}),
-    ...(context.stopContext ? { stop_context: context.stopContext } : {}),
-    workspace: context.workspacePath ?? ""
-  }, null, 2)
+  const userMsg = JSON.stringify(
+    {
+      hook_event_name: event,
+      policy,
+      ...(context.userPrompt ? { prompt: context.userPrompt } : {}),
+      tool_name: context.toolName ?? "(unknown)",
+      tool_args: context.toolArgs ?? {},
+      ...(context.toolResult !== undefined ? { tool_result: context.toolResult } : {}),
+      ...(context.stopContext ? { stop_context: context.stopContext } : {}),
+      workspace: context.workspacePath ?? ""
+    },
+    null,
+    2
+  )
 
   let timeoutId: ReturnType<typeof setTimeout> | undefined
   try {
@@ -338,10 +416,10 @@ async function executePromptHook(hook: HookConfig, context: HookContext, event: 
       }, timeout)
     })
 
-    const invokePromise = model.invoke([
-      new SystemMessage(PROMPT_HOOK_SYSTEM),
-      new HumanMessage(userMsg)
-    ], { signal: abortController.signal })
+    const invokePromise = model.invoke(
+      [new SystemMessage(PROMPT_HOOK_SYSTEM), new HumanMessage(userMsg)],
+      { signal: abortController.signal }
+    )
 
     const response = await Promise.race([invokePromise, timeoutPromise])
     if (timeoutId) {
@@ -349,16 +427,17 @@ async function executePromptHook(hook: HookConfig, context: HookContext, event: 
       timeoutId = undefined
     }
 
-    let raw = typeof response.content === "string"
-      ? response.content
-      : JSON.stringify(response.content)
+    let raw =
+      typeof response.content === "string" ? response.content : JSON.stringify(response.content)
 
     raw = stripThinkBlocks(raw)
 
     const jsonStr = extractFirstJson(raw)
     if (!jsonStr) {
       console.warn("[PromptHook] Could not extract JSON from model response:", raw.slice(0, 200))
-      return fallbackResult(`[PromptHook] Model returned non-JSON response — applying fallback (${fallback})`)
+      return fallbackResult(
+        `[PromptHook] Model returned non-JSON response — applying fallback (${fallback})`
+      )
     }
 
     const parsed = JSON.parse(jsonStr) as { decision: string; reason?: string }
@@ -367,7 +446,7 @@ async function executePromptHook(hook: HookConfig, context: HookContext, event: 
 
     console.log(
       `[PromptHook] policy="${policy.slice(0, 60)}…" tool=${context.toolName} → decision=${parsed.decision}` +
-      (parsed.reason ? ` reason="${parsed.reason}"` : "")
+        (parsed.reason ? ` reason="${parsed.reason}"` : "")
     )
 
     return {
@@ -409,35 +488,56 @@ function parseHookJsonOutput(result: HookResult): HookResult {
     const parsed = JSON.parse(raw) as Record<string, unknown>
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return result
 
-    const nested = (typeof parsed.hookSpecificOutput === "object" && parsed.hookSpecificOutput !== null && !Array.isArray(parsed.hookSpecificOutput))
-      ? parsed.hookSpecificOutput as Record<string, unknown>
-      : undefined
+    const nested =
+      typeof parsed.hookSpecificOutput === "object" &&
+      parsed.hookSpecificOutput !== null &&
+      !Array.isArray(parsed.hookSpecificOutput)
+        ? (parsed.hookSpecificOutput as Record<string, unknown>)
+        : undefined
 
     const additionalContext =
-      typeof parsed.additionalContext === "string" ? parsed.additionalContext :
-      (nested && typeof nested.additionalContext === "string" ? nested.additionalContext : undefined)
+      typeof parsed.additionalContext === "string"
+        ? parsed.additionalContext
+        : nested && typeof nested.additionalContext === "string"
+          ? nested.additionalContext
+          : undefined
 
     const requiredSkill =
-      typeof parsed.requiredSkill === "string" ? parsed.requiredSkill :
-      (nested && typeof nested.requiredSkill === "string" ? nested.requiredSkill : undefined)
+      typeof parsed.requiredSkill === "string"
+        ? parsed.requiredSkill
+        : nested && typeof nested.requiredSkill === "string"
+          ? nested.requiredSkill
+          : undefined
 
     const updatedInputSource = parsed.updatedInput ?? nested?.updatedInput
-    const updatedInput = (typeof updatedInputSource === "object" && updatedInputSource !== null && !Array.isArray(updatedInputSource))
-      ? updatedInputSource as Record<string, unknown>
-      : undefined
+    const updatedInput =
+      typeof updatedInputSource === "object" &&
+      updatedInputSource !== null &&
+      !Array.isArray(updatedInputSource)
+        ? (updatedInputSource as Record<string, unknown>)
+        : undefined
 
     const decisionValue = parsed.decision
     const decision: "block" | "approve" | undefined =
-      decisionValue === "block" ? "block" :
-      decisionValue === "approve" ? "approve" :
-      undefined
+      decisionValue === "block" ? "block" : decisionValue === "approve" ? "approve" : undefined
 
     // Nested permissionDecision=deny maps to block for backwards compat with our dispatcher
-    const permDecision = nested && typeof nested.permissionDecision === "string" ? nested.permissionDecision : undefined
-    const effectiveDecision = decision ?? (permDecision === "deny" || permDecision === "ask" ? "block" : permDecision === "allow" ? "approve" : undefined)
+    const permDecision =
+      nested && typeof nested.permissionDecision === "string"
+        ? nested.permissionDecision
+        : undefined
+    const effectiveDecision =
+      decision ??
+      (permDecision === "deny" || permDecision === "ask"
+        ? "block"
+        : permDecision === "allow"
+          ? "approve"
+          : undefined)
     const effectiveReason =
       (typeof parsed.reason === "string" ? parsed.reason : undefined) ??
-      (nested && typeof nested.permissionDecisionReason === "string" ? nested.permissionDecisionReason : undefined)
+      (nested && typeof nested.permissionDecisionReason === "string"
+        ? nested.permissionDecisionReason
+        : undefined)
 
     return {
       ...result,
@@ -445,7 +545,8 @@ function parseHookJsonOutput(result: HookResult): HookResult {
       systemMessage: typeof parsed.systemMessage === "string" ? parsed.systemMessage : undefined,
       requiredSkill,
       updatedInput,
-      suppressOutput: typeof parsed.suppressOutput === "boolean" ? parsed.suppressOutput : undefined,
+      suppressOutput:
+        typeof parsed.suppressOutput === "boolean" ? parsed.suppressOutput : undefined,
       continue: typeof parsed.continue === "boolean" ? parsed.continue : undefined,
       stopReason: typeof parsed.stopReason === "string" ? parsed.stopReason : undefined,
       decision: effectiveDecision,
@@ -534,14 +635,24 @@ export async function runHooks(
       onHookResult?.(event, hook, result)
       // continue=false halts the entire agent turn, overrides everything else
       if (result.continue === false) {
-        const reason = result.stopReason || result.reason || result.stderr || result.stdout || `${event} hook stopped the turn`
+        const reason =
+          result.stopReason ||
+          result.reason ||
+          result.stderr ||
+          result.stdout ||
+          `${event} hook stopped the turn`
         return { ...result, stdout: reason, blocked: true }
       }
       if (result.blocked) {
         return result
       }
       if (result.decision === "block") {
-        const reason = result.reason || result.stopReason || result.stderr || result.stdout || `${event} hook blocked`
+        const reason =
+          result.reason ||
+          result.stopReason ||
+          result.stderr ||
+          result.stdout ||
+          `${event} hook blocked`
         return {
           ...result,
           stdout: reason,
@@ -566,7 +677,10 @@ export async function runHooks(
       }
     }
     return {
-      exitCode: 0, stdout: "", stderr: "", blocked: false,
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+      blocked: false,
       updatedInput: mergedUpdatedInput,
       additionalContext: mergedAdditionalContext,
       systemMessage: mergedSystemMessage
@@ -625,7 +739,11 @@ export async function runHooks(
       onHookResult?.(event, hook, result)
       if (result.continue === false || result.blocked || result.decision === "block") {
         blockReasons.push(
-          result.reason || result.stopReason || result.stdout || result.stderr || "Stop hook requested revision"
+          result.reason ||
+            result.stopReason ||
+            result.stdout ||
+            result.stderr ||
+            "Stop hook requested revision"
         )
       }
       if (result.additionalContext) {
@@ -652,17 +770,17 @@ export async function runHooks(
 
   // SubagentStop / Notification / SessionStart / SessionEnd: fire-and-forget
   for (const hook of matched) {
-    executeHook(hook, env, context, event).then((result) => {
-      console.log(
-        `[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}`
-      )
-      onHookResult?.(event, hook, result)
-      if (result.stderr) {
-        console.warn(`[Hooks] ${event} hook stderr:`, result.stderr)
-      }
-    }).catch((err) => {
-      console.warn(`[Hooks] ${event} hook error:`, err)
-    })
+    executeHook(hook, env, context, event)
+      .then((result) => {
+        console.log(`[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}`)
+        onHookResult?.(event, hook, result)
+        if (result.stderr) {
+          console.warn(`[Hooks] ${event} hook stderr:`, result.stderr)
+        }
+      })
+      .catch((err) => {
+        console.warn(`[Hooks] ${event} hook error:`, err)
+      })
   }
 
   return null
