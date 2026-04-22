@@ -23,15 +23,15 @@ export function fireSessionStartOnce(threadId: string, workspacePath?: string, o
 }
 
 /** Fire SessionEnd for a thread if it previously fired SessionStart. No-op otherwise. */
-export function fireSessionEnd(threadId: string, workspacePath?: string): void {
+export async function fireSessionEnd(threadId: string, workspacePath?: string, onHookResult?: HookResultCallback): Promise<void> {
   if (!startedSessions.has(threadId)) return
   const startedWorkspacePath = startedSessions.get(threadId)
   startedSessions.delete(threadId)
   const effectiveWorkspacePath = workspacePath ?? startedWorkspacePath
-  runHooks(getEnabledHooks(effectiveWorkspacePath), "SessionEnd", {
+  await runHooks(getEnabledHooks(effectiveWorkspacePath), "SessionEnd", {
     workspacePath: effectiveWorkspacePath,
     sessionId: threadId
-  }).catch((e) => console.warn("[Hooks] SessionEnd hook error:", e))
+  }, onHookResult).catch((e) => console.warn("[Hooks] SessionEnd hook error:", e))
 }
 
 /**
@@ -40,13 +40,21 @@ export function fireSessionEnd(threadId: string, workspacePath?: string): void {
  *
  * `timeoutMs` caps total wait so a hung hook can't block app shutdown indefinitely.
  */
-export async function fireSessionEndAll(timeoutMs = 5000): Promise<void> {
+export async function fireSessionEndAll(
+  timeoutMs = 5000,
+  getOnHookResult?: (threadId: string) => HookResultCallback | undefined
+): Promise<void> {
   const entries = Array.from(startedSessions.entries())
   startedSessions.clear()
   if (entries.length === 0) return
   const all = Promise.allSettled(
     entries.map(([id, workspacePath]) =>
-      runHooks(getEnabledHooks(workspacePath), "SessionEnd", { sessionId: id, workspacePath })
+      runHooks(
+        getEnabledHooks(workspacePath),
+        "SessionEnd",
+        { sessionId: id, workspacePath },
+        getOnHookResult?.(id)
+      )
     )
   )
   const timeout = new Promise<void>((resolve) => setTimeout(resolve, timeoutMs))

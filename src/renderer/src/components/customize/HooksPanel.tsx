@@ -325,6 +325,25 @@ function HookDetail(props: {
           <DetailRow label="命令" value={hook.command ?? ""} mono />
         )}
 
+        {hook.onBlock && (
+          <>
+            <div className="pt-2 border-t border-border/50">
+              <h4 className="text-sm font-medium">阻断后补充配置</h4>
+            </div>
+            {hook.onBlock.reason && <DetailRow label="回退原因" value={hook.onBlock.reason} />}
+            {hook.onBlock.systemMessage && <DetailRow label="用户提示" value={hook.onBlock.systemMessage} />}
+            {hook.onBlock.requiredSkill && <DetailRow label="整改技能" value={hook.onBlock.requiredSkill} mono />}
+            {hook.onBlock.additionalContext && (
+              <div className="flex items-start gap-4">
+                <span className="text-sm text-muted-foreground w-20 shrink-0">额外上下文</span>
+                <div className="flex-1 max-h-64 overflow-auto rounded-md bg-muted/50 px-3 py-2 text-sm whitespace-pre-wrap break-all border border-border/50">
+                  {hook.onBlock.additionalContext}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+
         <DetailRow label="超时" value={`${hook.timeout ?? 10000}ms`} />
         <DetailRow label="创建时间" value={formatTime(hook.createdAt)} />
         <DetailRow label="更新时间" value={formatTime(hook.updatedAt)} />

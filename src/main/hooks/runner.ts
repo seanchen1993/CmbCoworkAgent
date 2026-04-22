@@ -2,6 +2,7 @@ import { spawn } from "node:child_process"
 import { ChatOpenAI } from "@langchain/openai"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
 import type { HookConfig, HookEvent, HookResult } from "./types"
+import { joinHookText } from "./text"
 import { getCustomModelConfigs } from "../storage"
 
 const DEFAULT_TIMEOUT = 10_000
@@ -109,9 +110,8 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext): string {
   return JSON.stringify(payload)
 }
 
-function joinHookText(existing: string | undefined, next: string | undefined): string | undefined {
-  if (!next) return existing
-  return existing ? `${existing}\n${next}` : next
+function isBlockingResult(result: HookResult): boolean {
+  return result.blocked || result.decision === "block" || result.continue === false
 }
 
 /**
@@ -394,8 +394,8 @@ const MAX_JSON_OUTPUT_CHARS = 10_000
  * Try to parse structured JSON fields from hook stdout (exit 0 only).
  *
  * Recognised top-level fields (Claude Code compatible):
- *   additionalContext, systemMessage, updatedInput, suppressOutput,
- *   continue, stopReason, decision, reason
+ *   additionalContext, systemMessage, requiredSkill, updatedInput,
+ *   suppressOutput, continue, stopReason, decision, reason
  *
  * Also reads nested `hookSpecificOutput.{additionalContext,updatedInput,permissionDecision}`
  * which Claude Code's newer protocol uses for PreToolUse/UserPromptSubmit.
@@ -416,6 +416,10 @@ function parseHookJsonOutput(result: HookResult): HookResult {
     const additionalContext =
       typeof parsed.additionalContext === "string" ? parsed.additionalContext :
       (nested && typeof nested.additionalContext === "string" ? nested.additionalContext : undefined)
+
+    const requiredSkill =
+      typeof parsed.requiredSkill === "string" ? parsed.requiredSkill :
+      (nested && typeof nested.requiredSkill === "string" ? nested.requiredSkill : undefined)
 
     const updatedInputSource = parsed.updatedInput ?? nested?.updatedInput
     const updatedInput = (typeof updatedInputSource === "object" && updatedInputSource !== null && !Array.isArray(updatedInputSource))
@@ -439,6 +443,7 @@ function parseHookJsonOutput(result: HookResult): HookResult {
       ...result,
       additionalContext,
       systemMessage: typeof parsed.systemMessage === "string" ? parsed.systemMessage : undefined,
+      requiredSkill,
       updatedInput,
       suppressOutput: typeof parsed.suppressOutput === "boolean" ? parsed.suppressOutput : undefined,
       continue: typeof parsed.continue === "boolean" ? parsed.continue : undefined,
@@ -449,6 +454,26 @@ function parseHookJsonOutput(result: HookResult): HookResult {
   } catch {
     // stdout is not JSON — treat as plain text (backwards compatible)
     return result
+  }
+}
+
+function applyConfiguredOnBlock(result: HookResult, hook: HookConfig): HookResult {
+  const onBlock = hook.onBlock
+  if (!onBlock || !isBlockingResult(result)) return result
+
+  const fallbackReason = onBlock.reason
+  const reason = result.reason ?? result.stopReason ?? fallbackReason
+  const stopReason = result.stopReason ?? result.reason ?? fallbackReason
+  const stdout = result.stdout || result.reason || result.stopReason || fallbackReason || ""
+
+  return {
+    ...result,
+    stdout,
+    reason,
+    stopReason,
+    systemMessage: joinHookText(result.systemMessage, onBlock.systemMessage),
+    additionalContext: joinHookText(result.additionalContext, onBlock.additionalContext),
+    requiredSkill: result.requiredSkill ?? onBlock.requiredSkill
   }
 }
 
@@ -471,7 +496,7 @@ async function executeHook(
     const stdinPayload = buildHookStdinPayload(event, context)
     result = await executeCommandHook(hook, env, stdinPayload)
   }
-  return parseHookJsonOutput(result)
+  return applyConfiguredOnBlock(parseHookJsonOutput(result), hook)
 }
 
 /**

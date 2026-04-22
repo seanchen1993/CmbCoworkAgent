@@ -41,7 +41,8 @@ import {
 } from "../ipc/sandbox"
 import { homedir } from "node:os"
 import type { HookConfig, HookResult } from "../hooks/types"
-import { runHooks, type HookResultCallback } from "../hooks/runner"
+import type { HookResultCallback } from "../hooks/runner"
+import { runHooksEnriched } from "../hooks/required-skill"
 
 /**
  * Sensitive directories under user profile that sandbox tools should not access.
@@ -1408,7 +1409,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       }
     }
     // PreToolUse hook
-    const preResult = await runHooks(this.getHooks(), "PreToolUse", {
+    const preResult = await runHooksEnriched(this.getHooks(), "PreToolUse", {
       toolName: "write_file",
       toolArgs: { filePath, content },
       workspacePath: this.workingDir,
@@ -1427,7 +1428,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     })
     // PostToolUse hook
     try {
-      const postResult = await runHooks(this.getHooks(), "PostToolUse", {
+      const postResult = await runHooksEnriched(this.getHooks(), "PostToolUse", {
         toolName: "write_file",
         toolArgs: { filePath, content },
         toolResult: JSON.stringify(result),
@@ -1503,7 +1504,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       }
     }
     // PreToolUse hook
-    const preResult = await runHooks(this.getHooks(), "PreToolUse", {
+    const preResult = await runHooksEnriched(this.getHooks(), "PreToolUse", {
       toolName: "edit_file",
       toolArgs: { filePath, oldString, newString, replaceAll },
       workspacePath: this.workingDir,
@@ -1541,7 +1542,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       })
       // PostToolUse hook
       try {
-        const postResult = await runHooks(this.getHooks(), "PostToolUse", {
+        const postResult = await runHooksEnriched(this.getHooks(), "PostToolUse", {
           toolName: "edit_file",
           toolArgs: { filePath, oldString, newString, replaceAll },
           toolResult: JSON.stringify(result),
@@ -2280,7 +2281,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     }
 
     // PreToolUse hook
-    const preResult = await runHooks(this.getHooks(), "PreToolUse", {
+    const preResult = await runHooksEnriched(this.getHooks(), "PreToolUse", {
       toolName: "execute",
       toolArgs: { command },
       workspacePath: this.workingDir,
@@ -2299,7 +2300,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     if (this.orchestrator) {
       const result = await this.orchestrator.execute(command, this.workingDir, this.windowsSandbox)
       // PostToolUse hook
-      const postResult = await runHooks(this.getHooks(), "PostToolUse", {
+      const postResult = await runHooksEnriched(this.getHooks(), "PostToolUse", {
         toolName: "execute",
         toolArgs: { command },
         toolResult: result.output,
@@ -2311,7 +2312,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
 
     const result = await this.executeRaw(command)
     // PostToolUse hook
-    const postResult = await runHooks(this.getHooks(), "PostToolUse", {
+    const postResult = await runHooksEnriched(this.getHooks(), "PostToolUse", {
       toolName: "execute",
       toolArgs: { command },
       toolResult: result.output,

@@ -9,7 +9,7 @@ import {
   trustWorkspaceHookFile
 } from "../storage"
 import type { UntrustedWorkspaceHook } from "../storage"
-import type { HookConfig, HookEvent, HookType, PromptHookFallback, HookUpsert } from "../hooks/types"
+import type { HookConfig, HookEvent, HookOnBlockConfig, HookType, PromptHookFallback, HookUpsert } from "../hooks/types"
 
 const VALID_EVENTS = new Set<HookEvent>([
   "PreToolUse",
@@ -25,6 +25,21 @@ const VALID_TYPES = new Set<HookType>(["command", "prompt"])
 const VALID_FALLBACKS = new Set<PromptHookFallback>(["allow", "block"])
 const TIMEOUT_MIN = 1_000
 const TIMEOUT_MAX = 60_000
+
+function validateOnBlockConfig(onBlock: HookOnBlockConfig | undefined): void {
+  if (onBlock === undefined) return
+  if (!onBlock || typeof onBlock !== "object" || Array.isArray(onBlock)) {
+    throw new Error("onBlock 必须为对象")
+  }
+
+  const fields: Array<keyof HookOnBlockConfig> = ["reason", "systemMessage", "additionalContext", "requiredSkill"]
+  for (const field of fields) {
+    const value = onBlock[field]
+    if (value !== undefined && typeof value !== "string") {
+      throw new Error(`onBlock.${field} 必须为字符串`)
+    }
+  }
+}
 
 function validateHookConfig(config: HookUpsert): void {
   if (!config.event || !VALID_EVENTS.has(config.event)) {
@@ -56,6 +71,8 @@ function validateHookConfig(config: HookUpsert): void {
       throw new Error(`超时时间必须在 ${TIMEOUT_MIN}ms 到 ${TIMEOUT_MAX}ms 之间`)
     }
   }
+
+  validateOnBlockConfig(config.onBlock)
 }
 
 export function registerHooksHandlers(ipcMain: IpcMain): void {

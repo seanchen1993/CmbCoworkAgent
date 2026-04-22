@@ -9,6 +9,17 @@ export type HookType = "command" | "prompt"
 /** What the LLM should do when a prompt-hook times out or returns invalid JSON */
 export type PromptHookFallback = "allow" | "block"
 
+export interface HookOnBlockConfig {
+  /** Fallback reason used when the hook blocks but does not provide one itself. */
+  reason?: string
+  /** Visible notice shown to the user when the hook blocks. */
+  systemMessage?: string
+  /** Additional hidden context appended for the agent after a block. */
+  additionalContext?: string
+  /** Optional remediation skill to load when the hook blocks. */
+  requiredSkill?: string
+}
+
 export interface HookConfig {
   id: string
   event: HookEvent
@@ -21,6 +32,7 @@ export interface HookConfig {
   modelId?: string          // Which configured model to use; omit = use default model
   fallback?: PromptHookFallback  // Behaviour on timeout / parse failure; default "allow"
   // ── shared ────────────────────────────────────────────────────────────────
+  onBlock?: HookOnBlockConfig // static block-time remediation metadata
   timeout?: number          // Timeout in ms, default 10000
   enabled: boolean
   createdAt: string
@@ -35,6 +47,8 @@ export interface HookResult {
   /** Structured fields parsed from JSON stdout (exit 0 only) */
   additionalContext?: string    // injected into agent context (invisible to user)
   systemMessage?: string        // visible warning to user
+  /** Optional skill to load as remediation guidance when the hook fires. */
+  requiredSkill?: string
   updatedInput?: Record<string, unknown>  // PreToolUse: modify tool args
   suppressOutput?: boolean      // suppress tool output from agent context
   /** If false, agent halts the entire turn (not just this tool). */
@@ -67,6 +81,7 @@ export interface HookUpsert {
   prompt?: string
   modelId?: string
   fallback?: PromptHookFallback
+  onBlock?: HookOnBlockConfig
   timeout?: number
   enabled?: boolean
 }

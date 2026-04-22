@@ -68,8 +68,10 @@ import {
   type FailoverAttempt
 } from "../agent/failover"
 import { runHooks, type HookContext, type HookResultCallback } from "../hooks/runner"
-import type { HookConfig, HookEvent, HookResult } from "../hooks/types"
+import type { HookResult } from "../hooks/types"
 import { fireSessionStartOnce } from "../hooks/session-lifecycle"
+import { runHooksEnriched } from "../hooks/required-skill"
+import { makeHookResultCallback } from "../hooks/result-callback"
 import type {
   AgentInvokeParams,
   AgentResumeParams,
@@ -129,32 +131,6 @@ function sendActiveHookNotice(window: BrowserWindow, channel: string, workspaceP
   const message = formatActiveHookNotice(getActiveHookSummary(workspacePath))
   if (!message) return
   sendHookNotice(window, channel, message)
-}
-
-function makeHookResultCallback(window: BrowserWindow, channel: string): HookResultCallback {
-  return (event: HookEvent, hook: HookConfig, result: HookResult): void => {
-    const hookType = hook.type ?? "command"
-    const label = hookType === "command"
-      ? (hook.command ?? "").slice(0, 60)
-      : (hook.prompt ?? "").slice(0, 60)
-    const toolSuffix = hook.matcher && hook.matcher !== "*" ? `/${hook.matcher}` : ""
-    window.webContents.send(channel, {
-      type: "custom",
-      data: {
-        type: "hook_executed",
-        event,
-        hookType,
-        label,
-        toolSuffix,
-        exitCode: result.exitCode,
-        blocked: result.blocked,
-        decision: result.decision,
-        stdout: result.stdout?.slice(0, 500) ?? "",
-        stderr: result.stderr?.slice(0, 200) ?? "",
-        systemMessage: result.systemMessage
-      }
-    })
-  }
 }
 
 interface SerializedHookMessage {
@@ -396,7 +372,7 @@ async function runStopHooksWithRevision({
 }): Promise<boolean> {
   let revisionCount = 0
   while (!abortSignal.aborted) {
-    const stopResult = await runHooks(getEnabledHooks(workspacePath), "Stop", {
+    const stopResult = await runHooksEnriched(getEnabledHooks(workspacePath), "Stop", {
       workspacePath,
       sessionId: threadId,
       stopContext: getStopContext()
@@ -1057,7 +1033,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
       // Fire UserPromptSubmit hook — may block the message, halt the turn, rewrite the prompt,
       // or inject additional context that the LLM should see alongside the user's message.
-      const promptSubmitResult = await runHooks(getEnabledHooks(workspacePath ?? undefined), "UserPromptSubmit", {
+      const promptSubmitResult = await runHooksEnriched(getEnabledHooks(workspacePath ?? undefined), "UserPromptSubmit", {
         toolArgs: { message },
         userPrompt: message,
         workspacePath: workspacePath ?? undefined,

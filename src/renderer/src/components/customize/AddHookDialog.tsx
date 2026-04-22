@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import {
@@ -12,7 +12,7 @@ import {
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
-import type { HookConfig, HookEvent, HookType, PromptHookFallback, HookUpsert } from "@/types"
+import type { HookConfig, HookEvent, HookType, PromptHookFallback, HookUpsert, SkillMetadata } from "@/types"
 
 // ── 常用工具选项 ──────────────────────────────────────────────────────────────
 export const COMMON_TOOLS: { value: string; label: string; description: string }[] = [
@@ -44,6 +44,7 @@ const FALLBACK_OPTIONS: { value: PromptHookFallback; label: string; description:
   { value: "allow", label: "宽松（默认放行）", description: "模型超时或返回异常时默认放行，适合非关键场景" },
   { value: "block", label: "严格（默认阻断）", description: "模型超时或返回异常时默认阻断，适合高安全要求场景" }
 ]
+const MANUAL_SKILL_VALUE = "__manual_skill__"
 
 export function AddHookDialog(props: {
   open: boolean
@@ -53,10 +54,34 @@ export function AddHookDialog(props: {
 }): React.JSX.Element {
   const { open, onOpenChange, onSuccess, editHook } = props
   const { models, loadModels } = useAppStore()
+  const [skills, setSkills] = useState<SkillMetadata[]>([])
+  const [disabledSkillNames, setDisabledSkillNames] = useState<Set<string>>(new Set())
 
   useEffect(() => {
     if (open && models.length === 0) loadModels()
   }, [open, models.length, loadModels])
+
+  useEffect(() => {
+    if (!open) return
+
+    let cancelled = false
+    void Promise.all([window.api.skills.list(), window.api.skills.getDisabled()])
+      .then(([availableSkills, disabled]) => {
+        if (cancelled) return
+        setSkills([...availableSkills].sort((a, b) => a.name.localeCompare(b.name, "zh-CN")))
+        setDisabledSkillNames(new Set(disabled.map((name) => name.trim().toLowerCase())))
+      })
+      .catch((error) => {
+        console.error("[AddHookDialog] Failed to load skills:", error)
+        if (cancelled) return
+        setSkills([])
+        setDisabledSkillNames(new Set())
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [open])
 
   const [hookType, setHookType] = useState<HookType>(editHook?.type ?? "command")
   const [event, setEvent] = useState<HookEvent>(editHook?.event ?? "PreToolUse")
@@ -74,10 +99,41 @@ export function AddHookDialog(props: {
   const [prompt, setPrompt] = useState(editHook?.prompt ?? "")
   const [modelId, setModelId] = useState(editHook?.modelId ?? "")
   const [fallback, setFallback] = useState<PromptHookFallback>(editHook?.fallback ?? "allow")
+  const [onBlockReason, setOnBlockReason] = useState(editHook?.onBlock?.reason ?? "")
+  const [onBlockSystemMessage, setOnBlockSystemMessage] = useState(editHook?.onBlock?.systemMessage ?? "")
+  const [onBlockRequiredSkill, setOnBlockRequiredSkill] = useState(editHook?.onBlock?.requiredSkill ?? "")
+  const [onBlockAdditionalContext, setOnBlockAdditionalContext] = useState(editHook?.onBlock?.additionalContext ?? "")
   // shared
   const [timeout, setTimeout_] = useState(String(editHook?.timeout ?? 10000))
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  const configuredSkills = useMemo(() => {
+    const enabled: SkillMetadata[] = []
+    const disabled: SkillMetadata[] = []
+
+    for (const skill of skills) {
+      if (disabledSkillNames.has(skill.name.trim().toLowerCase())) {
+        disabled.push(skill)
+      } else {
+        enabled.push(skill)
+      }
+    }
+
+    return [...enabled, ...disabled]
+  }, [skills, disabledSkillNames])
+  const matchedSkill = useMemo(() => {
+    const normalized = onBlockRequiredSkill.trim().toLowerCase()
+    if (!normalized) return null
+    return skills.find((skill) => skill.name.trim().toLowerCase() === normalized) ?? null
+  }, [skills, onBlockRequiredSkill])
+  const matchedSkillDisabled = matchedSkill
+    ? disabledSkillNames.has(matchedSkill.name.trim().toLowerCase())
+    : false
+  const requiredSkillPickerValue =
+    matchedSkill
+      ? matchedSkill.name
+      : MANUAL_SKILL_VALUE
 
   const populateFromHook = useCallback((h: HookConfig | null | undefined) => {
     if (h) {
@@ -90,6 +146,10 @@ export function AddHookDialog(props: {
       setPrompt(h.prompt ?? "")
       setModelId(h.modelId ?? "")
       setFallback(h.fallback ?? "allow")
+      setOnBlockReason(h.onBlock?.reason ?? "")
+      setOnBlockSystemMessage(h.onBlock?.systemMessage ?? "")
+      setOnBlockRequiredSkill(h.onBlock?.requiredSkill ?? "")
+      setOnBlockAdditionalContext(h.onBlock?.additionalContext ?? "")
       setTimeout_(String(h.timeout ?? 10000))
     } else {
       setHookType("command")
@@ -100,6 +160,10 @@ export function AddHookDialog(props: {
       setPrompt("")
       setModelId("")
       setFallback("allow")
+      setOnBlockReason("")
+      setOnBlockSystemMessage("")
+      setOnBlockRequiredSkill("")
+      setOnBlockAdditionalContext("")
       setTimeout_("10000")
     }
     setError(null)
@@ -149,6 +213,16 @@ export function AddHookDialog(props: {
         config.fallback = fallback
       }
 
+      const onBlock = {
+        reason: onBlockReason.trim(),
+        systemMessage: onBlockSystemMessage.trim(),
+        requiredSkill: onBlockRequiredSkill.trim(),
+        additionalContext: onBlockAdditionalContext.trim()
+      }
+      if (onBlock.reason || onBlock.systemMessage || onBlock.requiredSkill || onBlock.additionalContext) {
+        config.onBlock = onBlock
+      }
+
       if (editHook) {
         await window.api.hooks.update({ ...config, id: editHook.id })
       } else {
@@ -161,19 +235,20 @@ export function AddHookDialog(props: {
     } finally {
       setSubmitting(false)
     }
-  }, [hookType, event, matcherMode, matcher, command, prompt, modelId, fallback, timeout, editHook, onSuccess, handleOpenChange, showMatcher])
+  }, [hookType, event, matcherMode, matcher, command, prompt, modelId, fallback, timeout, onBlockReason, onBlockSystemMessage, onBlockRequiredSkill, onBlockAdditionalContext, editHook, onSuccess, handleOpenChange, showMatcher])
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="sm:max-w-lg">
-        <DialogHeader>
+      <DialogContent className="sm:max-w-lg max-h-[85vh] flex flex-col gap-0 p-0">
+        <DialogHeader className="shrink-0 px-6 pt-6 pb-4 border-b border-border/60">
           <DialogTitle>{editHook ? "编辑 Hook" : "添加 Hook"}</DialogTitle>
           <DialogDescription>
             配置在特定事件发生时自动执行的 Shell 命令，或用自然语言描述合规策略由模型判决。
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4">
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain px-6 py-4">
+          <div className="space-y-4 pr-1">
           {/* Hook type toggle */}
           <div className="space-y-2">
             <label className="text-sm font-medium">Hook 类型</label>
@@ -359,18 +434,130 @@ export function AddHookDialog(props: {
                 : "命令执行超时时间，范围 1000–60000ms，默认 10000ms"}
             </p>
           </div>
+
+          <div className="space-y-3 rounded-md border border-border/60 bg-muted/20 p-3">
+            <div className="space-y-1">
+              <label className="text-sm font-medium">阻断后补充配置（onBlock）</label>
+              <p className="text-xs text-muted-foreground">
+                当 Hook 发生阻断或停止时，静态补齐整改信息。不会覆盖 Hook 自己已经返回的 reason，只补充缺失字段并附加提示。
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <label htmlFor="hook-onblock-reason" className="text-sm font-medium">阻断原因回退（可选）</label>
+              <Input
+                id="hook-onblock-reason"
+                placeholder="例如：请先按整改技能处理后再重试"
+                value={onBlockReason}
+                onChange={(e) => setOnBlockReason(e.target.value)}
+                className="h-9"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label htmlFor="hook-onblock-system-message" className="text-sm font-medium">用户提示（可选）</label>
+              <Input
+                id="hook-onblock-system-message"
+                placeholder="例如：Hook 已阻断本次操作，并附带整改技能"
+                value={onBlockSystemMessage}
+                onChange={(e) => setOnBlockSystemMessage(e.target.value)}
+                className="h-9"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium">联动已配置技能（可选）</label>
+              <Select
+                value={requiredSkillPickerValue}
+                onValueChange={(value) => {
+                  if (value === MANUAL_SKILL_VALUE) return
+                  setOnBlockRequiredSkill(value)
+                }}
+              >
+                <SelectTrigger className="h-9">
+                  <SelectValue placeholder={configuredSkills.length > 0 ? "从当前已配置技能中选择" : "暂无已配置技能"} />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={MANUAL_SKILL_VALUE}>手动输入或保留当前值</SelectItem>
+                  {configuredSkills.map((skill) => {
+                    const skillDisabled = disabledSkillNames.has(skill.name.trim().toLowerCase())
+
+                    return (
+                      <SelectItem key={skill.path} value={skill.name} className="py-2">
+                        <div>
+                          <span className="text-sm">
+                            {skill.name}
+                            {skillDisabled ? "（已禁用）" : ""}
+                          </span>
+                          <p className="text-xs text-muted-foreground mt-0.5 line-clamp-2">
+                            {skill.description || (skillDisabled ? "该技能当前已禁用" : "无描述")}
+                          </p>
+                        </div>
+                      </SelectItem>
+                    )
+                  })}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                {configuredSkills.length > 0
+                  ? "这里联动的是当前已配置技能。选中后会自动写入下方 `requiredSkill` 字段；若技能已禁用，需要先启用后运行时才会注入整改指引。"
+                  : "当前还没有可联动的技能，仍可手动填写 `requiredSkill`。"}
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <label htmlFor="hook-onblock-required-skill" className="text-sm font-medium">整改技能（requiredSkill，可选）</label>
+              <Input
+                id="hook-onblock-required-skill"
+                placeholder="可手动输入，或从上方已配置技能列表带入"
+                value={onBlockRequiredSkill}
+                onChange={(e) => setOnBlockRequiredSkill(e.target.value)}
+                className="h-9 font-mono"
+              />
+              {onBlockRequiredSkill.trim() && matchedSkill && !matchedSkillDisabled && (
+                <p className="text-xs text-muted-foreground">
+                  已匹配技能：`{matchedSkill.name}` {matchedSkill.source === "user" ? "（自定义）" : "（内置）"}
+                </p>
+              )}
+              {onBlockRequiredSkill.trim() && matchedSkillDisabled && (
+                <p className="text-xs text-amber-600 dark:text-amber-400">
+                  当前填写的技能存在，但已被禁用。运行时只会对已启用技能注入整改指引。
+                </p>
+              )}
+              {onBlockRequiredSkill.trim() && !matchedSkill && (
+                <p className="text-xs text-muted-foreground">
+                  当前值未匹配到技能列表，将按原样保存。只有运行时能解析到已启用技能时才会生效。
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <label htmlFor="hook-onblock-context" className="text-sm font-medium">额外上下文（additionalContext，可选）</label>
+              <textarea
+                id="hook-onblock-context"
+                placeholder="补充给 Agent 的隐藏整改说明"
+                value={onBlockAdditionalContext}
+                onChange={(e) => setOnBlockAdditionalContext(e.target.value)}
+                rows={3}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-ring"
+              />
+            </div>
+          </div>
+          </div>
         </div>
 
-        {error && <p className="text-sm text-destructive">{error}</p>}
+        <div className="shrink-0 border-t border-border/60 px-6 py-4 bg-background">
+          {error && <p className="text-sm text-destructive mb-3">{error}</p>}
 
-        <DialogFooter>
-          <Button variant="outline" onClick={() => handleOpenChange(false)} disabled={submitting}>
-            取消
-          </Button>
-          <Button onClick={handleSubmit} disabled={submitting}>
-            {submitting ? "处理中…" : (editHook ? "保存" : "添加")}
-          </Button>
-        </DialogFooter>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => handleOpenChange(false)} disabled={submitting}>
+              取消
+            </Button>
+            <Button onClick={handleSubmit} disabled={submitting}>
+              {submitting ? "处理中…" : (editHook ? "保存" : "添加")}
+            </Button>
+          </DialogFooter>
+        </div>
       </DialogContent>
     </Dialog>
   )

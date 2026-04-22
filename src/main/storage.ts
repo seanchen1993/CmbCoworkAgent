@@ -3,7 +3,7 @@ import { join } from "path"
 import { createHash } from "crypto"
 import { v4 as uuid } from "uuid"
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, renameSync, readdirSync } from "fs"
-import type { HookConfig, HookUpsert } from "./hooks/types"
+import type { HookConfig, HookOnBlockConfig, HookUpsert } from "./hooks/types"
 import { readdir, readFile, rm, mkdir, stat as fsStat } from "fs/promises"
 import { app } from "electron"
 import { resolveMcpConnectorKind } from "./mcp/connector-kind"
@@ -1783,6 +1783,30 @@ export function removeApprovalRule(pattern: string): void {
 
 const HOOKS_FILE = join(OPENWORK_DIR, "hooks.json")
 
+function normalizeOptionalHookString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined
+  const trimmed = value.trim()
+  return trimmed ? trimmed : undefined
+}
+
+function parseHookOnBlock(raw: unknown): HookOnBlockConfig | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined
+
+  const onBlockRaw = raw as Record<string, unknown>
+  const onBlock: HookOnBlockConfig = {
+    reason: normalizeOptionalHookString(onBlockRaw.reason),
+    systemMessage: normalizeOptionalHookString(onBlockRaw.systemMessage),
+    additionalContext: normalizeOptionalHookString(onBlockRaw.additionalContext),
+    requiredSkill: normalizeOptionalHookString(onBlockRaw.requiredSkill)
+  }
+
+  if (!onBlock.reason && !onBlock.systemMessage && !onBlock.additionalContext && !onBlock.requiredSkill) {
+    return undefined
+  }
+
+  return onBlock
+}
+
 export function getHooks(): HookConfig[] {
   getOpenworkDir()
   if (!existsSync(HOOKS_FILE)) return []
@@ -1790,16 +1814,30 @@ export function getHooks(): HookConfig[] {
     const content = readFileSync(HOOKS_FILE, "utf-8")
     const parsed = JSON.parse(content) as unknown
     if (!Array.isArray(parsed)) return []
-    return parsed.filter(
-      (item): item is HookConfig => {
-        if (item == null || typeof item !== "object") return false
-        const h = item as Record<string, unknown>
-        if (typeof h.id !== "string" || typeof h.event !== "string") return false
-        const hookType = h.type ?? "command"
-        if (hookType === "prompt") return typeof h.prompt === "string"
-        return typeof h.command === "string"
-      }
-    )
+    return parsed.flatMap((item): HookConfig[] => {
+      if (item == null || typeof item !== "object") return []
+      const h = item as Record<string, unknown>
+      if (typeof h.id !== "string" || typeof h.event !== "string") return []
+      const hookType = h.type ?? "command"
+      if (hookType === "prompt" && typeof h.prompt !== "string") return []
+      if (hookType === "command" && typeof h.command !== "string") return []
+
+      return [{
+        id: h.id,
+        event: h.event as HookConfig["event"],
+        matcher: typeof h.matcher === "string" ? h.matcher : undefined,
+        type: (hookType === "prompt" ? "prompt" : "command") as HookConfig["type"],
+        command: typeof h.command === "string" ? h.command : undefined,
+        prompt: typeof h.prompt === "string" ? h.prompt : undefined,
+        modelId: typeof h.modelId === "string" ? h.modelId : undefined,
+        fallback: hookType === "prompt" ? (h.fallback === "block" ? "block" : "allow") : undefined,
+        onBlock: parseHookOnBlock(h.onBlock),
+        timeout: typeof h.timeout === "number" ? h.timeout : undefined,
+        enabled: h.enabled !== false,
+        createdAt: typeof h.createdAt === "string" ? h.createdAt : new Date().toISOString(),
+        updatedAt: typeof h.updatedAt === "string" ? h.updatedAt : new Date().toISOString()
+      }]
+    })
   } catch {
     return []
   }
@@ -1836,6 +1874,7 @@ export function getEnabledPluginHooks(): HookConfig[] {
           prompt: typeof h.prompt === "string" ? h.prompt : undefined,
           modelId: typeof h.modelId === "string" ? h.modelId : undefined,
           fallback: h.fallback === "block" ? "block" : "allow",
+          onBlock: parseHookOnBlock(h.onBlock),
           timeout: typeof h.timeout === "number" ? h.timeout : undefined,
           enabled: h.enabled !== false, // default enabled
           createdAt: plugin.createdAt,
@@ -1976,6 +2015,7 @@ export function getWorkspaceHooks(workspacePath: string): HookConfig[] {
           prompt: typeof raw.prompt === "string" ? raw.prompt : undefined,
           modelId: typeof raw.modelId === "string" ? raw.modelId : undefined,
           fallback: raw.fallback === "block" ? "block" : "allow",
+          onBlock: parseHookOnBlock(raw.onBlock),
           timeout: typeof raw.timeout === "number" ? raw.timeout : undefined,
           enabled: true,
           createdAt: new Date().toISOString(),
@@ -2020,6 +2060,7 @@ export function upsertHook(config: HookUpsert & { id?: string }): string {
     prompt: hookType === "prompt" ? config.prompt?.trim() : undefined,
     modelId: hookType === "prompt" ? config.modelId : undefined,
     fallback: hookType === "prompt" ? (config.fallback ?? "allow") : undefined,
+    onBlock: parseHookOnBlock(config.onBlock),
     timeout: config.timeout,
     enabled: config.enabled ?? true,
     createdAt: existing?.createdAt ?? now,

@@ -154,6 +154,7 @@ import { startHeartbeat, stopHeartbeat } from "./services/heartbeat"
 import { startChatX, stopChatX } from "./services/chatx"
 import { LocalSandbox } from "./agent/local-sandbox"
 import { closeRuntime } from "./agent/runtime"
+import { makeBroadcastHookResultCallback } from "./hooks/result-callback"
 import { fireSessionEndAll, hasActiveSessions } from "./hooks/session-lifecycle"
 import { registerUpdaterHandlers, startUpdateChecker, stopUpdateChecker } from "./updater"
 import { runStartupSelfCheck } from "./updater/rollback"
@@ -537,7 +538,7 @@ if (!gotTheLock) {
       return
     }
     event.preventDefault()
-    fireSessionEndAll()
+    fireSessionEndAll(5000, (threadId) => makeBroadcastHookResultCallback(`agent:stream:${threadId}`))
       .catch((e) => console.warn("[Main] SessionEnd hooks error:", e))
       .finally(() => {
         sessionEndDone = true
