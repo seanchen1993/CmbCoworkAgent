@@ -1605,14 +1605,19 @@ export function MarketPanel(): React.JSX.Element {
                         精品
                       </span>
                     )}
-                    {activeTab === "skill" && selectedItem.user_id && (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-[#f5f4ed] border border-[#e8e6dc] text-[#5e5d59] px-2.5 py-1">
+                    { selectedItem.user_id ? (selectedItem.user_id.split('/')?.length ===3 ? <span
+                      className="inline-flex items-center gap-1 rounded-full bg-[#f5f4ed] border border-[#e8e6dc] text-[#5e5d59] px-2.5 py-1">
+                        <User className="size-3" />
+                      {selectedItem.user_id}
+                      </span> : (
+                      <span
+                        className="inline-flex items-center gap-1 rounded-full bg-[#f5f4ed] border border-[#e8e6dc] text-[#5e5d59] px-2.5 py-1">
                         <User className="size-3" />
                         {(selectedUploaderProfile?.sapId || selectedItem.user_id)}/
                         {selectedUploaderProfile?.userName || "未知用户"}/
                         {selectedUploaderProfile?.orgName || "未知部门"}
                       </span>
-                    )}
+                    )) : null}
                     {activeTab === "skill" && selectedSkillCallCount !== null && (
                       <span className="inline-flex items-center gap-1 rounded-full bg-[#eef3fb] border border-[#d7e2f5] text-[#365d97] px-2.5 py-1">
                         <BarChart3 className="size-3" />
