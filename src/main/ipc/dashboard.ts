@@ -127,6 +127,10 @@ function timeRangeFilter(field: string, range: TimeRange): Record<string, unknow
   return { range: { [field]: { gte: range.from, lte: range.to } } }
 }
 
+function escapeWildcard(value: string): string {
+  return value.replace(/[\\*?]/g, "\\$&")
+}
+
 // ─────────────────────────────────────────────────────────
 // Dashboard data fetchers
 // ─────────────────────────────────────────────────────────
@@ -249,13 +253,25 @@ async function fetchSkillUserStats(
   skillName: string
 ): Promise<unknown> {
   void granularity
+  const escapedSkillName = escapeWildcard(skillName)
+  const versionWildcard = `${escapedSkillName}-*`
   const body = {
     size: 0,
     query: {
       bool: {
         filter: [
           timeRangeFilter("startedAt", range),
-          { term: { usedSkills: skillName } }
+          {
+            bool: {
+              should: [
+                { term: { usedSkills: skillName } },
+                { wildcard: { usedSkills: versionWildcard } },
+                { term: { "usedSkills.keyword": skillName } },
+                { wildcard: { "usedSkills.keyword": versionWildcard } }
+              ],
+              minimum_should_match: 1
+            }
+          }
         ]
       }
     },

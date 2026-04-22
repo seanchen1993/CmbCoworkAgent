@@ -103,6 +103,43 @@ function getSkillStatsRange(): { from: string; to: string } {
   return getDefaultRange("month")
 }
 
+function normalizeSkillMetricKey(rawName?: string): string {
+  const base = String(rawName || "").trim().replace(/^\$/, "")
+  if (!base) return ""
+  // Trace 中 usedSkills 可能是 `${name}-${version}`，这里统一还原成 skill name。
+  return base.replace(/-v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/i, "").trim().toLowerCase()
+}
+
+function getSkillMetricByName(
+  summary: Record<string, SkillUsageSummaryMetric>,
+  rawName?: string
+): SkillUsageSummaryMetric | null {
+  const key = normalizeSkillMetricKey(rawName)
+  if (!key) return null
+  return summary[key] ?? null
+}
+
+function buildSapIdCandidates(rawId?: string): string[] {
+  const normalized = String(rawId || "").trim()
+  if (!normalized) return []
+
+  const candidates = new Set<string>([normalized])
+  const digitsOnly = /^\d+$/.test(normalized)
+  if (!digitsOnly) return Array.from(candidates)
+
+  // 兼容 marketplace 的简写 user_id（例：293078）与 ES sapId（例：80293078）
+  if (!normalized.startsWith("80") && normalized.length <= 6) {
+    candidates.add(`80${normalized.padStart(6, "0")}`)
+  }
+
+  // 反向兼容：若已是 8 位 80 前缀，也补一份去前缀简写便于兜底
+  if (normalized.startsWith("80") && normalized.length === 8) {
+    candidates.add(normalized.slice(2))
+  }
+
+  return Array.from(candidates)
+}
+
 const localStorageHelper = {
   // Get all items uploaded by current user
   getUploadedItems(): UploadedItemRecord[] {
@@ -534,11 +571,14 @@ export function MarketPanel(): React.JSX.Element {
       const buckets = aggs?.by_skill?.buckets ?? []
       const nextMap: Record<string, SkillUsageSummaryMetric> = {}
       for (const bucket of buckets) {
-        const key = bucket.key?.trim()
+        const key = normalizeSkillMetricKey(bucket.key)
         if (!key) continue
+        const current = nextMap[key] ?? { calls: 0, users: 0 }
         nextMap[key] = {
-          calls: bucket.doc_count ?? 0,
-          users: bucket.unique_users?.value ?? 0
+          // 调用次数可直接累加不同版本的桶
+          calls: current.calls + (bucket.doc_count ?? 0),
+          // 用户数按最大值估算，避免不同版本桶简单相加导致明显放大
+          users: Math.max(current.users, bucket.unique_users?.value ?? 0)
         }
       }
       setSkillUsageSummary(nextMap)
@@ -602,6 +642,16 @@ export function MarketPanel(): React.JSX.Element {
       setUploaderProfiles({})
       return
     }
+
+    const candidateIdsByRaw = Object.fromEntries(
+      normalizedIds.map((rawId) => [rawId, buildSapIdCandidates(rawId)])
+    ) as Record<string, string[]>
+    const lookupSapIds = Array.from(
+      new Set(
+        normalizedIds.flatMap((rawId) => candidateIdsByRaw[rawId] ?? [rawId])
+      )
+    )
+
     if (typeof window.api?.dashboard?.userProfiles !== "function") {
       const fallback = Object.fromEntries(
         normalizedIds.map((sapId) => [sapId, { sapId, userName: "", orgName: "" }])
@@ -611,7 +661,7 @@ export function MarketPanel(): React.JSX.Element {
     }
 
     try {
-      const response = await window.api.dashboard.userProfiles(normalizedIds)
+      const response = await window.api.dashboard.userProfiles(lookupSapIds)
       if (!response.success || !response.data) {
         throw new Error(response.error || "获取上传用户信息失败")
       }
@@ -629,16 +679,25 @@ export function MarketPanel(): React.JSX.Element {
         }
       ).aggregations?.by_sap?.buckets ?? []
 
-      const nextMap: Record<string, UploaderProfile> = Object.fromEntries(
-        normalizedIds.map((sapId) => [sapId, { sapId, userName: "", orgName: "" }])
-      )
+      const profileByCandidateId: Record<string, UploaderProfile> = {}
       for (const bucket of buckets) {
         const sapId = bucket.key?.trim()
         if (!sapId) continue
-        nextMap[sapId] = {
+        profileByCandidateId[sapId] = {
           sapId,
           userName: bucket.user_name?.buckets?.[0]?.key ?? "",
           orgName: bucket.org_name?.buckets?.[0]?.key ?? ""
+        }
+      }
+
+      const nextMap: Record<string, UploaderProfile> = {}
+      for (const rawId of normalizedIds) {
+        const candidates = candidateIdsByRaw[rawId] ?? [rawId]
+        const hit = candidates.find((candidate) => profileByCandidateId[candidate])
+        if (hit) {
+          nextMap[rawId] = profileByCandidateId[hit]
+        } else {
+          nextMap[rawId] = { sapId: rawId, userName: "", orgName: "" }
         }
       }
       setUploaderProfiles(nextMap)
@@ -985,7 +1044,7 @@ export function MarketPanel(): React.JSX.Element {
       ? currentData.find((item) => getItemKey(item) === selectedItemKey) || null
       : null
   const selectedSkillMetrics =
-    activeTab === "skill" && selectedItem ? skillUsageSummary[selectedItem.name] : null
+    activeTab === "skill" && selectedItem ? getSkillMetricByName(skillUsageSummary, selectedItem.name) : null
   const selectedSkillCallCount =
     activeTab === "skill" ? selectedSkillMetrics?.calls ?? 0 : null
   const selectedSkillUserCount =
@@ -1161,12 +1220,6 @@ export function MarketPanel(): React.JSX.Element {
     }
 
     if (item.featured === "精品" && activeTab === "skill") {
-      setSkillDetailSkill({
-        name: item.name,
-        description: item.description,
-        path: "",
-        source: "user"
-      })
       await Promise.all(detailTasks)
       return
     }
@@ -1429,6 +1482,13 @@ export function MarketPanel(): React.JSX.Element {
     }
 
     if (activeTab === "skill") {
+      if (selectedItem.featured === "精品") {
+        return (
+          <div className="rounded-xl border border-[#f5d9c4] bg-[#fdf3e7] p-6 text-sm text-[#8b623d]">
+            精品技能暂不支持查看详情文件内容，请直接安装后使用。
+          </div>
+        )
+      }
       if (!skillDetailSkill) {
         return (
           <div className="text-sm text-muted-foreground py-6">
@@ -1913,8 +1973,8 @@ export function MarketPanel(): React.JSX.Element {
                                 isDownloading={downloadingItems.has(item.id || item.name)}
                                 isInstalled={item.installed}
                                 isUpdating={updatingItems.has(item.id || item.name)}
-                                skillCallCount={skillUsageSummary[item.name]?.calls ?? 0}
-                                skillUserCount={skillUsageSummary[item.name]?.users ?? 0}
+                                skillCallCount={getSkillMetricByName(skillUsageSummary, item.name)?.calls ?? 0}
+                                skillUserCount={getSkillMetricByName(skillUsageSummary, item.name)?.users ?? 0}
                                 uploaderProfile={item.user_id ? uploaderProfiles[item.user_id] ?? null : null}
                               />
                             ))}
