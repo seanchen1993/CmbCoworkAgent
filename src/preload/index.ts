@@ -394,6 +394,8 @@ const api = {
       isGitRepo?: boolean
       taskId: string
       files: Array<{ path: string; diff: string; additions: number; deletions: number }>
+      changedFilesTotal?: number
+      omittedFileCount?: number
       totals: { additions: number; deletions: number; fileCount: number }
       hasPendingDiff: boolean
       hasPushableCommit: boolean
@@ -409,12 +411,68 @@ const api = {
         isGitRepo?: boolean
         taskId: string
         files: Array<{ path: string; diff: string; additions: number; deletions: number }>
+        changedFilesTotal?: number
+        omittedFileCount?: number
         totals: { additions: number; deletions: number; fileCount: number }
         hasPendingDiff: boolean
         hasPushableCommit: boolean
         pendingCommits?: Array<{ hash: string; message: string; date: string }>
         trackedFiles?: string[]
         worktreeBranch?: string | null
+        suggestedCommitMessage?: string
+        error?: string
+      }>
+    },
+    getGitPanelMeta: (threadId: string): Promise<{
+      success: boolean
+      isWorktree: boolean
+      isGitRepo?: boolean
+      taskId: string
+      changedFilesTotal?: number
+      hasPendingDiff: boolean
+      hasPushableCommit: boolean
+      pendingCommits?: Array<{ hash: string; message: string; date: string }>
+      trackedFiles?: string[]
+      worktreeBranch?: string | null
+      error?: string
+    }> => {
+      return ipcRenderer.invoke("workspace:getGitPanelMeta", { threadId }) as Promise<{
+        success: boolean
+        isWorktree: boolean
+        isGitRepo?: boolean
+        taskId: string
+        changedFilesTotal?: number
+        hasPendingDiff: boolean
+        hasPushableCommit: boolean
+        pendingCommits?: Array<{ hash: string; message: string; date: string }>
+        trackedFiles?: string[]
+        worktreeBranch?: string | null
+        error?: string
+      }>
+    },
+    getGitPanelDiffs: (threadId: string): Promise<{
+      success: boolean
+      isWorktree: boolean
+      isGitRepo?: boolean
+      taskId: string
+      files: Array<{ path: string; diff: string; additions: number; deletions: number }>
+      changedFilesTotal?: number
+      omittedFileCount?: number
+      totals: { additions: number; deletions: number; fileCount: number }
+      hasPendingDiff: boolean
+      suggestedCommitMessage?: string
+      error?: string
+    }> => {
+      return ipcRenderer.invoke("workspace:getGitPanelDiffs", { threadId }) as Promise<{
+        success: boolean
+        isWorktree: boolean
+        isGitRepo?: boolean
+        taskId: string
+        files: Array<{ path: string; diff: string; additions: number; deletions: number }>
+        changedFilesTotal?: number
+        omittedFileCount?: number
+        totals: { additions: number; deletions: number; fileCount: number }
+        hasPendingDiff: boolean
         suggestedCommitMessage?: string
         error?: string
       }>
@@ -437,19 +495,23 @@ const api = {
     },
     isGit: (
       folderPath: string,
-      options?: { includeWorktrees?: boolean }
+      options?: { includeWorktrees?: boolean; threadId?: string }
     ): Promise<{
       isGit: boolean
       gitRoot: string | null
       worktrees: Array<{ path: string; branch: string; isMain: boolean; createdAt?: Date }>
       isWorktreePath: boolean
     }> => {
-      return ipcRenderer.invoke("workspace:isGit", { folderPath, includeWorktrees: options?.includeWorktrees }) as Promise<{
-        isGit: boolean
-        gitRoot: string | null
-        worktrees: Array<{ path: string; branch: string; isMain: boolean; createdAt?: Date }>
-        isWorktreePath: boolean
-      }>
+      return ipcRenderer.invoke("workspace:isGit", {
+        folderPath,
+        includeWorktrees: options?.includeWorktrees,
+        threadId: options?.threadId
+      }) as Promise<{
+          isGit: boolean
+          gitRoot: string | null
+          worktrees: Array<{ path: string; branch: string; isMain: boolean; createdAt?: Date }>
+          isWorktreePath: boolean
+        }>
     },
     listWorktrees: (
       gitRoot: string
