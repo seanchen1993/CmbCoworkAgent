@@ -2804,7 +2804,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     const cmdTimeout = timeoutMs ?? this.timeout
 
     const fsPolicy = this.buildLinuxFsPolicy()
-    const netPolicy = mode === "isolated" ? '"Restricted"' : '"Enabled"'
+    const netPolicy = mode === "isolated" ? '"restricted"' : '"enabled"'
 
     // Two-stage execution mirroring Codex's default bwrap mode:
     // outer: bwrap sets up filesystem namespace (ro-bind / /, bind workspace, unshare-net...)
