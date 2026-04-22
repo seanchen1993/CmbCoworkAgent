@@ -48,9 +48,10 @@ export interface UserStatsData {
     orgName: string
     count: number
   }>
-  byOrg: Array<{ org: string; count: number }>
+  byOrg: Array<{ key: string; org: string; count: number }>
   byVersion: Array<{ version: string; count: number }>
   userTrend: Array<{ time: string; users: number }>
+  selectedUpperOrgLv1: string | null
 }
 
 type ParsedTopUser = UserStatsData["topUsers"][number]
@@ -267,13 +268,33 @@ function parseModelStats(raw: any): ModelStatsData {
   return { byModel, byTier, byLayer }
 }
 
-function parseUserStats(raw: any): UserStatsData {
+function formatTopUserOrgName(orgName: string, upperOrgLv1: string): string {
+  const normalizedOrgName = orgName.trim()
+  const normalizedUpperOrgLv1 = upperOrgLv1.trim()
+  if (!normalizedUpperOrgLv1) return normalizedOrgName
+  if (!normalizedOrgName) return normalizedUpperOrgLv1
+  return `${normalizedUpperOrgLv1}/${normalizedOrgName}`
+}
+
+function parseUserStats(raw: any, selectedUpperOrgLv1: string | null): UserStatsData {
   const aggs = raw?.aggregations ?? {}
+  const byOrgBuckets = Array.isArray(aggs.by_org?.buckets)
+    ? aggs.by_org.buckets
+    : (aggs.by_org?.items?.buckets ?? [])
 
-  const topUsers = parseTopUsersFromAgg(raw)
+  const topUsers: UserStatsData["topUsers"] = (aggs.top_users?.buckets ?? []).map((b: any) => ({
+    sapId: b.key,
+    userName: b.user_name?.buckets?.[0]?.key ?? b.key,
+    orgName: formatTopUserOrgName(
+      String(b.org_name?.buckets?.[0]?.key ?? ""),
+      String(b.upper_org_lv1?.buckets?.[0]?.key ?? "")
+    ),
+    count: b.doc_count
+  }))
 
-  const byOrg: UserStatsData["byOrg"] = (aggs.by_org?.buckets ?? []).map((b: any) => ({
-    org: b.key || "未知",
+  const byOrg: UserStatsData["byOrg"] = byOrgBuckets.map((b: any) => ({
+    key: String(b.key ?? ""),
+    org: String(b.key ?? "") || "未知",
     count: b.doc_count
   }))
 
@@ -287,7 +308,7 @@ function parseUserStats(raw: any): UserStatsData {
     users: b.users?.value ?? 0
   }))
 
-  return { topUsers, byOrg, byVersion, userTrend }
+  return { topUsers, byOrg, byVersion, userTrend, selectedUpperOrgLv1 }
 }
 
 export function parseTopUsersFromAgg(raw: any): ParsedTopUser[] {
@@ -403,7 +424,9 @@ function parseFeedback(raw: any, granularity: Granularity): FeedbackData {
 export function useDashboard() {
   const [granularity, setGranularity] = useState<Granularity>("day")
   const [range, setRange] = useState<TimeRange>(() => getDefaultRange("day"))
+  const [selectedUpperOrgLv1, setSelectedUpperOrgLv1] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const [userStatsLoading, setUserStatsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const [overview, setOverview] = useState<OverviewData | null>(null)
@@ -413,9 +436,11 @@ export function useDashboard() {
   const [feedback, setFeedback] = useState<FeedbackData | null>(null)
 
   const fetchIdRef = useRef(0)
+  const userStatsFetchIdRef = useRef(0)
 
-  const fetchAll = useCallback(async (r: TimeRange, g: Granularity) => {
+  const fetchAll = useCallback(async (r: TimeRange, g: Granularity, orgLv1: string | null) => {
     const id = ++fetchIdRef.current
+    const userStatsId = ++userStatsFetchIdRef.current
     setLoading(true)
     setError(null)
 
@@ -423,7 +448,7 @@ export function useDashboard() {
       const [ovRes, msRes, usRes, prRes, fbRes] = await Promise.all([
         window.api.dashboard.overview(r, g),
         window.api.dashboard.modelStats(r, g),
-        window.api.dashboard.userStats(r, g),
+        window.api.dashboard.userStats(r, g, { upperOrgLv1: orgLv1 }),
         window.api.dashboard.productivity(r, g),
         window.api.dashboard.feedback(r, g)
       ])
@@ -439,7 +464,9 @@ export function useDashboard() {
 
       setOverview(parseOverview(ovRes.data, g))
       setModelStats(parseModelStats(msRes.data))
-      setUserStats(parseUserStats(usRes.data))
+      if (userStatsId === userStatsFetchIdRef.current) {
+        setUserStats(parseUserStats(usRes.data, orgLv1))
+      }
       setProductivity(parseProductivity(prRes.data, g))
       setFeedback(parseFeedback(fbRes.data, g))
     } catch (e) {
@@ -450,9 +477,27 @@ export function useDashboard() {
     }
   }, [])
 
+  const fetchUserStatsOnly = useCallback(async (r: TimeRange, g: Granularity, orgLv1: string | null) => {
+    const id = ++userStatsFetchIdRef.current
+    setUserStatsLoading(true)
+    setError(null)
+
+    try {
+      const result = await window.api.dashboard.userStats(r, g, { upperOrgLv1: orgLv1 })
+      if (id !== userStatsFetchIdRef.current) return
+      if (!result.success) throw new Error(result.error ?? "获取用户数据失败")
+      setUserStats(parseUserStats(result.data, orgLv1))
+    } catch (e) {
+      if (id !== userStatsFetchIdRef.current) return
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      if (id === userStatsFetchIdRef.current) setUserStatsLoading(false)
+    }
+  }, [])
+
   // Auto-fetch on range/granularity change
   useEffect(() => {
-    fetchAll(range, granularity)
+    fetchAll(range, granularity, selectedUpperOrgLv1)
   }, [range, granularity, fetchAll])
 
   const changeGranularity = useCallback((g: Granularity) => {
@@ -476,13 +521,25 @@ export function useDashboard() {
   }, [])
 
   const refresh = useCallback(() => {
-    fetchAll(range, granularity)
-  }, [fetchAll, range, granularity])
+    fetchAll(range, granularity, selectedUpperOrgLv1)
+  }, [fetchAll, range, granularity, selectedUpperOrgLv1])
+
+  const drillDownUserOrg = useCallback((orgLv1: string) => {
+    setSelectedUpperOrgLv1(orgLv1)
+    fetchUserStatsOnly(range, granularity, orgLv1)
+  }, [fetchUserStatsOnly, range, granularity])
+
+  const resetUserOrgDrilldown = useCallback(() => {
+    setSelectedUpperOrgLv1(null)
+    fetchUserStatsOnly(range, granularity, null)
+  }, [fetchUserStatsOnly, range, granularity])
 
   return {
     granularity,
     range,
+    selectedUpperOrgLv1,
     loading,
+    userStatsLoading,
     error,
     overview,
     modelStats,
@@ -493,6 +550,8 @@ export function useDashboard() {
     navigate,
     setCustomRange,
     setRange,
-    refresh
+    refresh,
+    drillDownUserOrg,
+    resetUserOrgDrilldown
   }
 }

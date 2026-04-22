@@ -208,12 +208,40 @@ interface CustomAPI {
       isGitRepo?: boolean
       taskId: string
       files: Array<{ path: string; diff: string; additions: number; deletions: number }>
+      changedFilesTotal?: number
+      omittedFileCount?: number
       totals: { additions: number; deletions: number; fileCount: number }
       hasPendingDiff: boolean
       hasPushableCommit: boolean
       pendingCommits?: Array<{ hash: string; message: string; date: string }>
       trackedFiles?: string[]
       worktreeBranch?: string | null
+      suggestedCommitMessage?: string
+      error?: string
+    }>
+    getGitPanelMeta: (threadId: string) => Promise<{
+      success: boolean
+      isWorktree: boolean
+      isGitRepo?: boolean
+      taskId: string
+      changedFilesTotal?: number
+      hasPendingDiff: boolean
+      hasPushableCommit: boolean
+      pendingCommits?: Array<{ hash: string; message: string; date: string }>
+      trackedFiles?: string[]
+      worktreeBranch?: string | null
+      error?: string
+    }>
+    getGitPanelDiffs: (threadId: string) => Promise<{
+      success: boolean
+      isWorktree: boolean
+      isGitRepo?: boolean
+      taskId: string
+      files: Array<{ path: string; diff: string; additions: number; deletions: number }>
+      changedFilesTotal?: number
+      omittedFileCount?: number
+      totals: { additions: number; deletions: number; fileCount: number }
+      hasPendingDiff: boolean
       suggestedCommitMessage?: string
       error?: string
     }>
@@ -224,7 +252,7 @@ interface CustomAPI {
       hasPendingDiff: boolean
       changedFiles: number
     }>
-    isGit: (folderPath: string, options?: { includeWorktrees?: boolean }) => Promise<{
+    isGit: (folderPath: string, options?: { includeWorktrees?: boolean; threadId?: string }) => Promise<{
       isGit: boolean
       gitRoot: string | null
       worktrees: Array<{ path: string; branch: string; isMain: boolean; createdAt?: Date }>
@@ -688,7 +716,8 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     userStats: (
       range: { from: string; to: string },
-      granularity: "day" | "week" | "month" | "custom"
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | null }
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     skillUsageSummary: (
       range: { from: string; to: string },
