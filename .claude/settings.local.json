@@ -13,7 +13,8 @@
       "Bash(git config:*)",
       "Bash(npx tsc:*)",
       "Bash(export PATH=\"/usr/local/bin:/opt/homebrew/bin:$HOME/.nvm/versions/node/*/bin:$PATH\")",
-      "Bash(export PATH=\"/opt/homebrew/bin:$PATH\")"
+      "Bash(export PATH=\"/opt/homebrew/bin:$PATH\")",
+      "Bash(node scripts/env-crypt.mjs decrypt-file .env)"
     ]
   }
 }
