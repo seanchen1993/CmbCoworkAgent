@@ -284,13 +284,13 @@ function MarketItemCard({
           {skillCallCount !== null && (
             <div className="flex items-center gap-1">
               <BarChart3 className="size-3 shrink-0" />
-              <span>调用 {skillCallCount}</span>
+              <span>调用次数 {skillCallCount}</span>
             </div>
           )}
           {skillUserCount !== null && (
             <div className="flex items-center gap-1">
               <User className="size-3 shrink-0" />
-              <span>用户 {skillUserCount}</span>
+              <span>使用人数 {skillUserCount}</span>
             </div>
           )}
         </div>
@@ -1719,9 +1719,9 @@ export function MarketPanel(): React.JSX.Element {
                         <table className="w-full text-[12px]">
                           <thead className="bg-[#f5f4ed]">
                             <tr className="text-[#87867f]">
-                              <th className="text-left py-2 px-2 font-medium">sapId</th>
-                              <th className="text-left py-2 px-2 font-medium">userName</th>
-                              <th className="text-left py-2 px-2 font-medium">orgName</th>
+                              <th className="text-left py-2 px-2 font-medium">Id</th>
+                              <th className="text-left py-2 px-2 font-medium">名称</th>
+                              <th className="text-left py-2 px-2 font-medium">机构</th>
                               <th className="text-right py-2 px-2 font-medium">调用</th>
                             </tr>
                           </thead>
