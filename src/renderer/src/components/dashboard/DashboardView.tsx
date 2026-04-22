@@ -216,7 +216,9 @@ export function DashboardView(): React.JSX.Element {
   const {
     granularity,
     range,
+    selectedUpperOrgLv1,
     loading,
+    userStatsLoading,
     error,
     overview,
     modelStats,
@@ -226,7 +228,9 @@ export function DashboardView(): React.JSX.Element {
     changeGranularity,
     navigate,
     setCustomRange,
-    refresh
+    refresh,
+    drillDownUserOrg,
+    resetUserOrgDrilldown
   } = useDashboard()
 
   const [exporting, setExporting] = useState(false)
@@ -265,7 +269,7 @@ export function DashboardView(): React.JSX.Element {
     setCommitDetailsError(null)
     setCommitDetailsLoading(true)
     try {
-      const result = await window.api.dashboard.commitDetails(targetRange, 200)
+      const result = await window.api.dashboard.commitDetails(targetRange, 50)
       if (!result.success) throw new Error(result.error ?? "获取 Commit 明细失败")
       setCommitDetails(result.data ?? { total: 0, items: [] })
     } catch (e) {
@@ -407,7 +411,7 @@ export function DashboardView(): React.JSX.Element {
         }
         if (userStats.byOrg.length > 0) {
           sheets.push({
-            name: "部门分布",
+            name: selectedUpperOrgLv1 === null ? "一级部门分布" : `${selectedUpperOrgLv1 || "未知"}下级部门分布`,
             header: ["部门", "调用次数"],
             rows: userStats.byOrg.map((o) => [o.org, o.count])
           })
@@ -500,7 +504,12 @@ export function DashboardView(): React.JSX.Element {
           {/* User Analysis */}
           <section>
             <h2 className="text-sm font-semibold text-foreground mb-3">用户分析</h2>
-            <UserPanel data={userStats} loading={loading} />
+            <UserPanel
+              data={userStats}
+              loading={loading || userStatsLoading}
+              onDrillDownOrg={drillDownUserOrg}
+              onResetOrgDrilldown={resetUserOrgDrilldown}
+            />
           </section>
 
           {/* Model Analysis */}

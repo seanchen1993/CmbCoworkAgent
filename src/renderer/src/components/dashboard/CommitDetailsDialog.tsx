@@ -1,5 +1,4 @@
 import { GitCommit, Loader2 } from "lucide-react"
-import { Badge } from "@/components/ui/badge"
 import {
   Dialog,
   DialogContent,
@@ -22,16 +21,7 @@ function repoName(repoPath?: string): string {
   return parts[parts.length - 1] || repoPath
 }
 
-function triggeredByLabel(value?: string): string {
-  if (value === "manual") return "手动"
-  if (value === "auto-push") return "自动推送"
-  return value || "-"
-}
-
 function CommitRow({ item }: { item: DashboardCommitDetail }): React.JSX.Element {
-  const visibleSkills = item.usedSkills.slice(0, 2)
-  const hiddenSkillCount = item.usedSkills.length - visibleSkills.length
-
   return (
     <tr className="border-b border-border/60 last:border-b-0 hover:bg-muted/20">
       <td className="whitespace-nowrap px-3 py-2 text-[11px] text-muted-foreground">
@@ -58,27 +48,6 @@ function CommitRow({ item }: { item: DashboardCommitDetail }): React.JSX.Element
         <span className="text-muted-foreground">{item.filesChanged} 文件</span>
         <span className="ml-2 text-emerald-600 dark:text-emerald-400">+{item.insertions}</span>
         <span className="ml-1 text-rose-600 dark:text-rose-400">-{item.deletions}</span>
-      </td>
-      <td className="whitespace-nowrap px-3 py-2 text-xs text-muted-foreground">
-        {triggeredByLabel(item.triggeredBy)}
-      </td>
-      <td className="max-w-[180px] px-3 py-2">
-        {item.usedSkills.length === 0 ? (
-          <span className="text-xs text-muted-foreground">-</span>
-        ) : (
-          <div className="flex flex-wrap gap-1">
-            {visibleSkills.map((skill) => (
-              <Badge key={skill} variant="outline" className="max-w-[120px] truncate px-1.5 py-0 text-[10px]" title={skill}>
-                {skill}
-              </Badge>
-            ))}
-            {hiddenSkillCount > 0 && (
-              <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
-                +{hiddenSkillCount}
-              </Badge>
-            )}
-          </div>
-        )}
       </td>
       <td className="max-w-[110px] px-3 py-2 text-[11px] font-mono text-muted-foreground">
         <span className="block truncate" title={item.threadId}>{item.threadId || "-"}</span>
@@ -136,7 +105,7 @@ export function CommitDetailsDialog({
             </div>
             <ScrollArea className="min-h-0 flex-1">
               <div className="overflow-x-auto">
-                <table className="min-w-[920px] w-full text-left">
+                <table className="min-w-[760px] w-full text-left">
                   <thead className="sticky top-0 z-10 bg-background">
                     <tr className="border-b border-border text-[11px] text-muted-foreground">
                       <th className="whitespace-nowrap px-3 py-2 font-medium">时间</th>
@@ -145,8 +114,6 @@ export function CommitDetailsDialog({
                       <th className="whitespace-nowrap px-3 py-2 font-medium">仓库</th>
                       <th className="whitespace-nowrap px-3 py-2 font-medium">分支</th>
                       <th className="whitespace-nowrap px-3 py-2 font-medium">变更</th>
-                      <th className="whitespace-nowrap px-3 py-2 font-medium">触发方式</th>
-                      <th className="whitespace-nowrap px-3 py-2 font-medium">关联 Skill</th>
                       <th className="whitespace-nowrap px-3 py-2 font-medium">Thread</th>
                     </tr>
                   </thead>

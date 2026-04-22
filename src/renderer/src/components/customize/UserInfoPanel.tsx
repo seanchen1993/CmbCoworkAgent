@@ -8,6 +8,8 @@ interface UserInfoConfig {
     userName: '',
     originOrgId: '',
     orgName: '',
+    pathName: '',
+    originPathId: '',
     ystRefreshToken: '',
     ystCode: '',
     ystAccessToken: '',
@@ -42,6 +44,8 @@ const UserInfoPanel: React.FC = () => {
                             userName: resBody.userName,
                             originOrgId: resBody.originOrgId,
                             orgName: resBody.orgName,
+                            pathName: resBody.pathName,
+                            originPathId: resBody.originPathId,
                             ystRefreshToken: result.ystrefreshtoken,
                             ystAccessToken: result.ystAccessToken
                         } as UserInfoConfig)
@@ -51,6 +55,8 @@ const UserInfoPanel: React.FC = () => {
                             userName: resBody.userName,
                             originOrgId: resBody.originOrgId,
                             orgName: resBody.orgName,
+                            pathName: resBody.pathName,
+                            originPathId: resBody.originPathId,
                             ystRefreshToken: resBody.ystRefreshToken,
                             ystCode: userInfo.ystCode,
                             ystIdToken:resBody.ystIdToken,
@@ -79,6 +85,8 @@ const UserInfoPanel: React.FC = () => {
             userName: '',
             originOrgId: '',
             orgName: '',
+            pathName: '',
+            originPathId: '',
             ystRefreshToken: '',
             ystCode: '',
             ystAccessToken: '',
@@ -143,4 +151,3 @@ const UserInfoPanel: React.FC = () => {
 };
 
 export { UserInfoPanel };
-

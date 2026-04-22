@@ -99,6 +99,18 @@ function normalizeTrace(parsed: AgentTrace): AgentTrace {
   }
 }
 
+function deriveUpperOrgLevels(pathName?: string): Pick<AgentTrace, "upperOrgLv1" | "upperOrgLv2" | "upperOrgLv3"> {
+  const parts = typeof pathName === "string"
+    ? pathName.split("/").map((part) => part.trim()).filter(Boolean)
+    : []
+
+  return {
+    upperOrgLv1: parts.length >= 2 ? parts[parts.length - 2] : "",
+    upperOrgLv2: parts.length >= 3 ? parts[parts.length - 3] : "",
+    upperOrgLv3: parts.length >= 4 ? parts[parts.length - 4] : ""
+  }
+}
+
 // ─────────────────────────────────────────────────────────
 // TraceCollector class
 // ─────────────────────────────────────────────────────────
@@ -430,6 +442,7 @@ export class TraceCollector {
     }
 
     const userInfo = getUserInfo()
+    const upperOrgLevels = deriveUpperOrgLevels(userInfo?.pathName)
     const trace: AgentTrace = {
       traceId: this.traceId,
       threadId: this.threadId,
@@ -445,6 +458,11 @@ export class TraceCollector {
       ystId: userInfo?.ystId,
       originOrgId: userInfo?.originOrgId,
       orgName: userInfo?.orgName,
+      pathName: userInfo?.pathName,
+      pathId: userInfo?.originPathId,
+      upperOrgLv1: upperOrgLevels.upperOrgLv1,
+      upperOrgLv2: upperOrgLevels.upperOrgLv2,
+      upperOrgLv3: upperOrgLevels.upperOrgLv3,
       appVersion: app.getVersion(),
       steps: this.steps,
       modelCalls: this.modelCalls,

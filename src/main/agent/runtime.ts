@@ -6,6 +6,7 @@ import {
   createSkillsMiddleware,
   createMemoryMiddleware,
   createSummarizationMiddleware,
+  GENERAL_PURPOSE_SUBAGENT,
   StateBackend
 } from "deepagents"
 import {
@@ -20,18 +21,23 @@ import {
 } from "../storage"
 
 import { ChatOpenAI } from "@langchain/openai"
-import { DynamicStructuredTool } from "@langchain/core/tools"
+import { DynamicStructuredTool, ToolInputParsingException } from "@langchain/core/tools"
 import { SqlJsSaver } from "../checkpointer/sqljs-saver"
 import { LocalSandbox } from "./local-sandbox"
 import {
   createAgent,
+  createMiddleware,
+  MiddlewareError,
   ReactAgent,
   SystemMessage,
+  ToolInvocationError,
   todoListMiddleware,
   anthropicPromptCachingMiddleware,
   humanInTheLoopMiddleware
 } from "langchain"
+import { ToolMessage } from "@langchain/core/messages"
 import { Runnable } from "@langchain/core/runnables"
+import { isGraphBubbleUp } from "@langchain/langgraph"
 
 import type * as _lcTypes from "langchain"
 import type * as _lcMessages from "@langchain/core/messages"
@@ -183,7 +189,8 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     summarizationTrigger,
     summarizationKeep,
     toolTokenLimitBeforeEvict,
-    trimTokensToSummarize
+    trimTokensToSummarize,
+    subagentExtraSystemPrompt
   } = params
 
   // --- systemPrompt handling (identical to original) ---
@@ -363,15 +370,140 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     return mw
   }
 
+  // Once any wrapToolCall middleware is attached, ToolNode's
+  // defaultHandleToolErrors stops catching tool-body throws. So this
+  // middleware must convert any recoverable tool error into a ToolMessage,
+  // otherwise runs that used to just show a failed tool crash outright.
+  //
+  // Re-throw (let the run stop) only for:
+  //   - GraphBubbleUp: HITL / subgraph control flow
+  //   - AbortError: user cancellation
+  //   - programmer errors (TypeError / ReferenceError): code bugs we
+  //     want surfaced instead of silently retrying
+  //   - MiddlewareError: a sibling wrapToolCall middleware threw — its
+  //     own bug, not a tool failure
+  //
+  // Note: `task` / `task_output` errors are treated as recoverable too.
+  // deepagents throws a plain Error when the model picks an unknown
+  // subagent_type, and we want the model to see that error and retry with
+  // a valid name. A real subagent crash will also be surfaced as a
+  // ToolMessage — the model can decide whether to retry or abandon.
+  const NON_RECOVERABLE_TOOL_NAMES = new Set<string>()
+
+  const isAbortError = (error: unknown): boolean => {
+    if (!(error instanceof Error)) return false
+    return error.name === "AbortError" || (error as { code?: unknown }).code === "ABORT_ERR"
+  }
+
+  const isProgrammerError = (error: unknown): boolean =>
+    error instanceof TypeError || error instanceof ReferenceError
+
+  const describeToolError = (error: unknown): string => {
+    if (error instanceof Error) return error.message || error.name || "Error"
+    if (typeof error === "string" && error) return error
+    try {
+      return JSON.stringify(error) ?? String(error)
+    } catch {
+      return String(error)
+    }
+  }
+
+  const unwrapToolFailure = (
+    error: unknown,
+    toolName: string | undefined
+  ): { kind: "schema" | "runtime"; message: string } | null => {
+    if (isGraphBubbleUp(error) || isAbortError(error)) return null
+    if (isProgrammerError(error)) return null
+    if (MiddlewareError.isInstance(error)) return null
+
+    // ToolNode wraps schema parsing failures in ToolInvocationError.
+    // Schema errors are always recoverable — even for task/task_output,
+    // since a bad-schema call never actually runs the subagent.
+    if (error instanceof ToolInvocationError) {
+      if (error.toolError instanceof ToolInputParsingException) {
+        return { kind: "schema", message: error.toolError.message }
+      }
+      return unwrapToolFailure(error.toolError, toolName)
+    }
+
+    // Reserved: tool names that should bypass runtime-error recovery even
+    // when NON_RECOVERABLE_TOOL_NAMES is non-empty. Currently no tool is
+    // listed — task/task_output recover too, matching Claude Code's
+    // behaviour of letting the model decide whether to retry after a
+    // subagent failure.
+    if (toolName && NON_RECOVERABLE_TOOL_NAMES.has(toolName)) return null
+
+    // Any other throw from the tool body is recoverable. Including non-
+    // standard throws (plain objects, numbers) — describeToolError will
+    // serialise them — because leaving any path un-caught means ToolNode
+    // bubbles the throw and kills the run.
+    return { kind: "runtime", message: describeToolError(error) }
+  }
+
+  const toolErrorMiddleware = createMiddleware({
+    name: "toolErrorCatch",
+    wrapToolCall: async (request, handler) => {
+      try {
+        return await handler(request)
+      } catch (error) {
+        const toolName = request.toolCall?.name
+        const toolCallId = request.toolCall?.id
+
+        if ((request.runtime as { signal?: AbortSignal } | undefined)?.signal?.aborted) {
+          throw error
+        }
+
+        const recovered = unwrapToolFailure(error, toolName)
+        if (!recovered) throw error
+
+        // Without a tool_call_id we can't emit a usable ToolMessage —
+        // deepagents' patch middleware treats any ToolMessage whose id
+        // doesn't match a corresponding AIMessage.tool_calls[].id as an
+        // orphan and drops it silently, so the model would never see the
+        // error. Surfacing the original throw is the lesser evil: it
+        // crashes visibly instead of swallowing the failure.
+        if (!toolCallId) throw error
+
+        console.warn(
+          `[Runtime] Recoverable ${recovered.kind} error from tool "${toolName}" handed back to model:`,
+          recovered.message
+        )
+        return new ToolMessage({
+          content:
+            recovered.kind === "schema"
+              ? `Invalid tool arguments: ${recovered.message}\nPlease fix the arguments and try again.`
+              : `Tool execution failed: ${recovered.message}\nPlease adjust your approach and try again if appropriate.`,
+          tool_call_id: toolCallId,
+          name: toolName,
+          status: "error"
+        })
+      }
+    }
+  })
+
   // Base middleware for custom subagents (no skills — custom subagents must define their own)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const subagentMiddleware: any[] = [
     todoListMiddleware(),
     createFsMiddleware(),
+    toolErrorMiddleware,
     createSummarizationMiddleware(summarizationOptions),
     anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
     createPatchToolCallsMiddleware()
   ]
+
+  // Manual general-purpose subagent so AGENTS.md can be injected into its
+  // systemPrompt. deepagents' built-in generalPurposeAgent path offers no
+  // hook for project instructions. Spread GENERAL_PURPOSE_SUBAGENT to inherit
+  // the canonical name/description/default prompt, so future upstream tweaks
+  // propagate automatically.
+  const generalPurposeSubagent = {
+    ...GENERAL_PURPOSE_SUBAGENT,
+    systemPrompt: subagentExtraSystemPrompt
+      ? `${GENERAL_PURPOSE_SUBAGENT.systemPrompt}\n\n## Project Instructions\n\n${subagentExtraSystemPrompt}`
+      : GENERAL_PURPOSE_SUBAGENT.systemPrompt,
+    middleware: skillsMiddlewareArray
+  }
 
   return createAgent({
     model,
@@ -380,14 +512,14 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     middleware: [
       todoListMiddleware(),
       createFsMiddleware(),
+      toolErrorMiddleware,
       createSubAgentMiddleware({
         defaultModel: model,
         defaultTools: tools,
         defaultMiddleware: subagentMiddleware,
-        generalPurposeMiddleware: [...subagentMiddleware, ...skillsMiddlewareArray],
         defaultInterruptOn: null,
-        subagents: processedSubagents,
-        generalPurposeAgent: true,
+        subagents: [generalPurposeSubagent, ...processedSubagents],
+        generalPurposeAgent: false,
         systemPrompt: SEQUENTIAL_TASK_PROMPT
       } as Parameters<typeof createSubAgentMiddleware>[0]),
       createSummarizationMiddleware(summarizationOptions),
@@ -1250,6 +1382,7 @@ The workspace root is: ${workspacePath}`
     backend,
     systemPrompt,
     filesystemSystemPrompt,
+    subagentExtraSystemPrompt: agentsPrompt.prompt ?? undefined,
     skills: allSkillsSources.length > 0 ? allSkillsSources : undefined,
     memory: memorySources?.length ? memorySources : undefined,
     // When the orchestrator is active (non-YOLO), it handles execute approval
