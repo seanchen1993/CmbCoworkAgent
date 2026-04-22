@@ -17,6 +17,7 @@ interface UserInfoLite {
   sapId?: string
   ystId?: string
   userName?: string
+  orgName?: string
 }
 
 interface UniversalUploadDialogProps {
@@ -60,12 +61,11 @@ export function UniversalUploadDialog({
 
   const buildUserIdFromUserInfo = (userInfo: UserInfoLite | null): string | undefined => {
     if (!userInfo) return undefined
-    const rawId = ( userInfo.sapId || userInfo.ystId || "").trim()
+    const rawId = (userInfo.sapId || userInfo.ystId || "").trim()
     const rawName = (userInfo.userName || "").trim()
-    if (rawId && rawName) return `${rawId} / ${rawName}`
-    if (rawId) return rawId
-    if (rawName) return rawName
-    return undefined
+    const rawOrgName = (userInfo.orgName || "").trim()
+    const segments = [rawId, rawName, rawOrgName].filter(Boolean)
+    return segments.length > 0 ? segments.join(" / ") : undefined
   }
 
   const loadCurrentUserId = async () => {

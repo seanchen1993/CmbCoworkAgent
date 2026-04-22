@@ -14,6 +14,113 @@ export const SCENE_CATEGORY_OPTIONS = [
 
 export const DEFAULT_SCENE_CATEGORY = SCENE_CATEGORY_OPTIONS[0]
 
+export interface UploaderProfileInfo {
+  sapId: string
+  userName: string
+  orgName: string
+}
+
+export interface ParsedUploaderIdentity extends UploaderProfileInfo {
+  raw: string
+  segments: string[]
+}
+
+export function normalizeUploaderProfileField(value?: string): string {
+  const normalized = String(value || "").trim()
+  if (!normalized) return ""
+  if (normalized === "未知用户" || normalized === "未知部门" || normalized.toLowerCase() === "unknown") {
+    return ""
+  }
+  return normalized
+}
+
+export function normalizeUploaderMapKey(rawUserId?: string): string {
+  return String(rawUserId || "").trim()
+}
+
+export function parseUploaderIdentity(rawUserId?: string): ParsedUploaderIdentity | null {
+  const raw = String(rawUserId || "").trim()
+  if (!raw) return null
+  const segments = raw
+    .replace(/／/g, "/")
+    .split("/")
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+  if (segments.length === 0) return null
+
+  return {
+    raw,
+    segments,
+    sapId: segments[0] || "",
+    userName: normalizeUploaderProfileField(segments[1]),
+    orgName: normalizeUploaderProfileField(segments.slice(2).join(" / "))
+  }
+}
+
+export function buildUploaderIdCandidates(rawUserIdOrSapId?: string): string[] {
+  const parsed = parseUploaderIdentity(rawUserIdOrSapId)
+  const baseId = normalizeUploaderMapKey(parsed?.sapId || rawUserIdOrSapId)
+  if (!baseId) return []
+
+  const candidates = new Set<string>([baseId])
+  if (/^\d{6}$/.test(baseId)) {
+    candidates.add(`80${baseId}`)
+  }
+  if (/^80\d{6}$/.test(baseId)) {
+    candidates.add(baseId.slice(2))
+  }
+  return Array.from(candidates)
+}
+
+export function isCompleteUploaderUserId(rawUserId?: string): boolean {
+  const parsed = parseUploaderIdentity(rawUserId)
+  if (!parsed) return false
+  return Boolean(
+    parsed.segments.length >= 3 &&
+    normalizeUploaderProfileField(parsed.sapId) &&
+    normalizeUploaderProfileField(parsed.userName) &&
+    normalizeUploaderProfileField(parsed.orgName)
+  )
+}
+
+export function getUploaderProfileCompleteness(profile: UploaderProfileInfo): number {
+  let score = 0
+  if (normalizeUploaderProfileField(profile.sapId)) score += 1
+  if (normalizeUploaderProfileField(profile.userName)) score += 2
+  if (normalizeUploaderProfileField(profile.orgName)) score += 2
+  return score
+}
+
+export function pickMoreCompleteUploaderProfile(
+  current: UploaderProfileInfo | undefined,
+  candidate: UploaderProfileInfo
+): UploaderProfileInfo {
+  if (!current) return candidate
+  const currentScore = getUploaderProfileCompleteness(current)
+  const candidateScore = getUploaderProfileCompleteness(candidate)
+  if (candidateScore > currentScore) return candidate
+  if (candidateScore < currentScore) return current
+  return current
+}
+
+export function formatUploaderDisplay(
+  rawUserId?: string,
+  uploaderProfile?: Partial<UploaderProfileInfo> | null
+): string {
+  const raw = String(rawUserId || "").trim()
+  if (!raw) return "— / 未知用户 / 未知部门"
+  if (isCompleteUploaderUserId(raw)) return raw
+
+  const parsed = parseUploaderIdentity(raw)
+  const sapId =
+    normalizeUploaderProfileField(uploaderProfile?.sapId) || parsed?.sapId || raw || "—"
+  const userName =
+    normalizeUploaderProfileField(uploaderProfile?.userName) || parsed?.userName || "未知用户"
+  const orgName =
+    normalizeUploaderProfileField(uploaderProfile?.orgName) || parsed?.orgName || "未知部门"
+  return `${sapId} / ${userName} / ${orgName}`
+}
+
 /**
  * 单个 Skill 的统计指标。
  * calls: 调用次数
