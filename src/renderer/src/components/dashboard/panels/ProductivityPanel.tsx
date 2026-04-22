@@ -9,15 +9,17 @@ function StatCard({
   icon: Icon,
   label,
   value,
-  color
+  color,
+  onClick
 }: {
   icon: React.ElementType
   label: string
   value: string
   color: string
+  onClick?: () => void
 }) {
-  return (
-    <div className="flex items-center gap-3 rounded-xl border border-border bg-card px-4 py-3">
+  const content = (
+    <>
       <div className={`flex size-8 items-center justify-center rounded-lg ${color}`}>
         <Icon className="size-3.5 text-white" />
       </div>
@@ -25,6 +27,24 @@ function StatCard({
         <div className="text-[11px] text-muted-foreground">{label}</div>
         <div className="text-base font-bold text-foreground leading-tight">{value}</div>
       </div>
+    </>
+  )
+
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        className="flex items-center gap-3 rounded-xl border border-border bg-card px-4 py-3 text-left transition-colors hover:bg-muted/30 focus:outline-none focus:ring-2 focus:ring-ring"
+        onClick={onClick}
+      >
+        {content}
+      </button>
+    )
+  }
+
+  return (
+    <div className="flex items-center gap-3 rounded-xl border border-border bg-card px-4 py-3">
+      {content}
     </div>
   )
 }
@@ -37,10 +57,14 @@ function formatNumber(n: number): string {
 
 export function ProductivityPanel({
   data,
-  loading
+  loading,
+  onCommitTotalClick,
+  onCommitBucketClick
 }: {
   data: ProductivityData | null
   loading: boolean
+  onCommitTotalClick?: () => void
+  onCommitBucketClick?: (bucket: { from: string; to: string; label: string }) => void
 }) {
   if (loading && !data) {
     return <div className="text-sm text-muted-foreground py-8 text-center">加载中...</div>
@@ -48,6 +72,16 @@ export function ProductivityPanel({
   if (!data) return null
 
   const trendData = data.commitTrend
+  const getCommitBucketPayload = (value: unknown): ProductivityData["commitTrend"][number] | null => {
+    if (!value || typeof value !== "object") return null
+    const payload = (value as { payload?: unknown }).payload
+    if (!payload || typeof payload !== "object") return null
+    const candidate = payload as Partial<ProductivityData["commitTrend"][number]>
+    if (typeof candidate.from !== "string" || typeof candidate.to !== "string" || typeof candidate.time !== "string") {
+      return null
+    }
+    return candidate as ProductivityData["commitTrend"][number]
+  }
 
   return (
     <div className="space-y-4">
@@ -58,6 +92,7 @@ export function ProductivityPanel({
           label="Commit 总数"
           value={formatNumber(data.totalCommits)}
           color="bg-blue-500"
+          onClick={onCommitTotalClick}
         />
         <StatCard
           icon={FilePlus}
@@ -116,7 +151,18 @@ export function ProductivityPanel({
                   fontSize: 12
                 }}
               />
-              <Bar dataKey="count" name="Commits" fill="#3b82f6" radius={[4, 4, 0, 0]} />
+              <Bar
+                dataKey="count"
+                name="Commits"
+                fill="#3b82f6"
+                radius={[4, 4, 0, 0]}
+                cursor={onCommitBucketClick ? "pointer" : undefined}
+                onClick={(entry: unknown) => {
+                  const bucket = getCommitBucketPayload(entry)
+                  if (!bucket) return
+                  onCommitBucketClick?.({ from: bucket.from, to: bucket.to, label: bucket.time })
+                }}
+              />
             </BarChart>
           </ResponsiveContainer>
         ) : (

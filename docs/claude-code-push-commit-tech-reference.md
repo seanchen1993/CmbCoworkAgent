@@ -1,7 +1,7 @@
 # CMBDevClaw Git 全链路技术参考（性能重点）
 
-更新时间：2026-04-17  
-适用版本：当前仓库 `src/main/ipc/git.ts` + `src/main/ipc/models.ts` + Git Panel 相关实现。  
+更新时间：2026-04-17
+适用版本：当前仓库 `src/main/ipc/git.ts` + `src/main/ipc/models.ts` + Git Panel 相关实现。
 文档目标：从“Git 全操作”而不是“仅 commit/push”视角，梳理本项目的技术架构与性能设计。
 
 ---
