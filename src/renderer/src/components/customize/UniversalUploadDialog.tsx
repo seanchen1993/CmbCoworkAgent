@@ -11,17 +11,7 @@ import {
   DialogFooter
 } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
-
-const SCENE_CATEGORY_OPTIONS = [
-  "治理类场景/架构红线",
-  "治理类场景/应用安全",
-  "治理类场景/云应用架构转型治理",
-  "研发类场景/应用类研发",
-  "研发类场景/数据类型研发",
-  "通用场景"
-] as const
-
-const DEFAULT_SCENE_CATEGORY = SCENE_CATEGORY_OPTIONS[0]
+import { DEFAULT_SCENE_CATEGORY, SCENE_CATEGORY_OPTIONS } from "@/lib/skill-data-service"
 
 interface UserInfoLite {
   sapId?: string

@@ -44,7 +44,7 @@ import { GitBranchSwitcher } from "./GitBranchSwitcher"
 import type { Message, SkillMetadata } from "@/types"
 import { MessageBubble } from "./MessageBubble"
 import { UpdateStatusCard } from "./UpdateStatusCard"
-import { SkillsByCategorySection, type SkillsByCategoryItem } from "./SkillsByCategorySection"
+import { SkillsByCategorySection } from "./SkillsByCategorySection"
 import {
   SkillCreateConfirmDialog,
   type SkillConfirmRequest
@@ -279,9 +279,6 @@ export function ChatContainer({
   } = useAppStore()
 
   const allSkillsRef = useRef<MarketItem[]>([])
-  const goodSkillsRef = useRef<MarketItem[]>([])
-  const [marketSkillsData, setMarketSkillsData] = useState<MarketItem[]>([])
-  const [marketSkillsLoading, setMarketSkillsLoading] = useState(true)
   const [goodSkillsData, setGoodSkillsData] = useState<MarketItem[]>([])
 
   // Define loadSkills function at component level so it can be accessed everywhere
@@ -306,14 +303,11 @@ export function ChatContainer({
   }, [])
 
   const queryRemoteSkills = useCallback(async () => {
-    setMarketSkillsLoading(true)
     try {
       const res = await marketApi.getSkills()
       const allSkills = res?.data || []
       const goodSkills = res?.data?.filter((it) => it.featured === "精品")
-      goodSkillsRef.current = goodSkills || []
       allSkillsRef.current = allSkills
-      setMarketSkillsData(allSkills)
       setGoodSkillsData(goodSkills || [])
 
       // 自动安装所有精品技能
@@ -324,8 +318,6 @@ export function ChatContainer({
       }
     } catch (error) {
       console.error("Failed to query remote skills:", error)
-    } finally {
-      setMarketSkillsLoading(false)
     }
   }, [loadSkills])
 
@@ -1496,58 +1488,6 @@ export function ChatContainer({
     }
   }, [skills, isProgrammingSkill, goodSkillsData])
 
-  // 全部市场技能：按 一级/二级 category 分组，二级内“精品”优先
-  const skillsByCategory = useMemo(() => {
-    const localSkillMap = new Map(
-      skills.filter((s) => s.source === "user").map((s) => [s.name, s])
-    )
-    const groups = new Map<
-      string,
-      Map<string, SkillsByCategoryItem[]>
-    >()
-
-    const splitCategory = (category?: string): { primary: string; secondary: string } => {
-      if (!category) return { primary: "精品技能", secondary: "" }
-      const parts = category
-        .split("/")
-        .map((part) => part.trim())
-        .filter(Boolean)
-      if (parts.length === 0) return { primary: "精品技能", secondary: "" }
-      if (parts.length === 1) return { primary: parts[0], secondary: "" }
-      return { primary: parts[0], secondary: parts.slice(1).join("/") }
-    }
-
-    for (const item of marketSkillsData) {
-      const localSkill = localSkillMap.get(item.name)
-      const { primary, secondary } = splitCategory(item.category)
-      if (!groups.has(primary)) groups.set(primary, new Map())
-      const secondaryGroups = groups.get(primary)!
-      if (!secondaryGroups.has(secondary)) secondaryGroups.set(secondary, [])
-      secondaryGroups.get(secondary)!.push({
-        skill: localSkill ?? {
-          name: item.name,
-          description: item.description || "",
-          path: item.filename || item.name,
-          source: "user"
-        },
-        label: item.chinese_name || item.name,
-        marketItem: item,
-        isFeatured: item.featured === "精品"
-      })
-    }
-
-    groups.forEach((secondaryGroups) => {
-      secondaryGroups.forEach((items) => {
-        items.sort((a, b) => {
-          if (a.isFeatured !== b.isFeatured) return a.isFeatured ? -1 : 1
-          return a.label.localeCompare(b.label, "zh-CN")
-        })
-      })
-    })
-
-    return groups
-  }, [marketSkillsData, skills])
-
   const handleOpenMarketBySecondaryCategory = useCallback(
     (secondaryCategory: string): void => {
       setMarketInitialSkillCategory(secondaryCategory)
@@ -1850,30 +1790,13 @@ export function ChatContainer({
                       </TabsList>
 
                       <TabsContent value="skills-by-category" className="mt-0">
-                        {marketSkillsLoading ? (
-                          <div className="rounded-xl border border-border/60 bg-background/80 px-4 py-8">
-                            <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground">
-                              <Loader2 className="size-4 animate-spin" />
-                              <span>场景技能加载中...</span>
-                            </div>
-                          </div>
-                        ) : (
-                          <>
-                            {/* 市场技能：按 category 分组展示（每个二级最多显示 3 个） */}
-                            <SkillsByCategorySection
-                              skillsByCategory={skillsByCategory}
-                              previewLimit={GOOD_SKILLS_PREVIEW_LIMIT}
-                              onOpenMarketByCategory={handleOpenMarketBySecondaryCategory}
-                              onUseSkillPrompt={handleUseSkillPrompt}
-                              getSkillShowLabel={getSkillShowLabel}
-                            />
-                            {skillsByCategory.size === 0 && (
-                              <div className="rounded-xl border border-dashed border-border/70 bg-background/70 px-4 py-6 text-center text-sm text-muted-foreground">
-                                暂无场景技能
-                              </div>
-                            )}
-                          </>
-                        )}
+                        {/* 市场技能：内部使用 getAllSkills 取数并按分类展示 */}
+                        <SkillsByCategorySection
+                          skills={skills}
+                          previewLimit={GOOD_SKILLS_PREVIEW_LIMIT}
+                          onOpenMarketByCategory={handleOpenMarketBySecondaryCategory}
+                          onUseSkillPrompt={handleUseSkillPrompt}
+                        />
                       </TabsContent>
 
                       <TabsContent value="installed-skills" className="mt-0 space-y-2">

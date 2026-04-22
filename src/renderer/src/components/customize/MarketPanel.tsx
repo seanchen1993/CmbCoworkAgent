@@ -42,6 +42,13 @@ import { PluginDetailPanel } from "./PluginsPanel"
 import { marketApi, MarketApiResponse, MarketItem, MarketItemType } from "../../api/market"
 import { getMarketMockResponse } from "./MarketMockData"
 import { getDefaultRange, parseTopUsersFromAgg } from "../dashboard/use-dashboard"
+import {
+  getAllSkills,
+  getSkillMetricByName,
+  sortSkillItemsByUsage,
+  type SkillSortMode,
+  type SkillUsageSummaryMetric
+} from "../../lib/skill-data-service"
 
 // Local storage helper functions for tracking user uploads
 const UPLOADED_ITEMS_KEY = "marketplace_uploaded_items"
@@ -88,11 +95,6 @@ interface SkillUsageDetail {
   users: SkillUserUsage[]
 }
 
-interface SkillUsageSummaryMetric {
-  calls: number
-  users: number
-}
-
 interface UploaderProfile {
   sapId: string
   userName: string
@@ -102,22 +104,6 @@ interface UploaderProfile {
 function getSkillStatsRange(): { from: string; to: string } {
   // 和 Dashboard 的默认月维度保持一致，避免前后口径不一致。
   return getDefaultRange("month")
-}
-
-function normalizeSkillMetricKey(rawName?: string): string {
-  const base = String(rawName || "").trim().replace(/^\$/, "")
-  if (!base) return ""
-  // Trace 中 usedSkills 可能是 `${name}-${version}`，这里统一还原成 skill name。
-  return base.replace(/-v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/i, "").trim().toLowerCase()
-}
-
-function getSkillMetricByName(
-  summary: Record<string, SkillUsageSummaryMetric>,
-  rawName?: string
-): SkillUsageSummaryMetric | null {
-  const key = normalizeSkillMetricKey(rawName)
-  if (!key) return null
-  return summary[key] ?? null
 }
 
 const localStorageHelper = {
@@ -396,7 +382,6 @@ function MarketItemCard({
 
 type DetailViewMode = "list" | "detail"
 type SkillPreviewKind = "text" | "html" | "image" | "pdf"
-type SkillSortMode = "default" | "calls_desc" | "calls_asc" | "users_desc" | "users_asc"
 
 interface PluginDetailData {
   skills: string[]
@@ -451,7 +436,7 @@ export function MarketPanel(): React.JSX.Element {
   })
   const [reloadToken, setReloadToken] = useState(0)
   const [detailMode, setDetailMode] = useState<DetailViewMode>("list")
-  const [skillSortMode, setSkillSortMode] = useState<SkillSortMode>("default")
+  const [skillSortMode, setSkillSortMode] = useState<SkillSortMode>("calls_desc")
   const [selectedItemKey, setSelectedItemKey] = useState<string | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [skillDetailSkill, setSkillDetailSkill] = useState<SkillMetadata | null>(null)
@@ -519,50 +504,6 @@ export function MarketPanel(): React.JSX.Element {
   const triggerReload = () => {
     setReloadToken((prev) => prev + 1)
   }
-
-  const loadSkillUsageSummary = useCallback(async () => {
-    if (typeof window.api?.dashboard?.skillUsageSummary !== "function") {
-      setSkillUsageSummary({})
-      return
-    }
-    try {
-      const range = getSkillStatsRange()
-      const response = await window.api.dashboard.skillUsageSummary(range, "month")
-      if (!response.success || !response.data) {
-        throw new Error(response.error || "获取 Skill 调用数据失败")
-      }
-      const aggs = (
-        response.data as {
-          aggregations?: {
-            by_skill?: {
-              buckets?: Array<{
-                key?: string
-                doc_count?: number
-                unique_users?: { value?: number }
-              }>
-            }
-          }
-        }
-      ).aggregations
-      const buckets = aggs?.by_skill?.buckets ?? []
-      const nextMap: Record<string, SkillUsageSummaryMetric> = {}
-      for (const bucket of buckets) {
-        const key = normalizeSkillMetricKey(bucket.key)
-        if (!key) continue
-        const current = nextMap[key] ?? { calls: 0, users: 0 }
-        nextMap[key] = {
-          // 调用次数可直接累加不同版本的桶
-          calls: current.calls + (bucket.doc_count ?? 0),
-          // 用户数按最大值估算，避免不同版本桶简单相加导致明显放大
-          users: Math.max(current.users, bucket.unique_users?.value ?? 0)
-        }
-      }
-      setSkillUsageSummary(nextMap)
-    } catch (err) {
-      console.warn("[MarketPanel] Failed to load skill usage summary:", err)
-      setSkillUsageSummary({})
-    }
-  }, [])
 
   const loadSkillUserStats = useCallback(async (skillName: string) => {
     if (!skillName?.trim()) {
@@ -894,8 +835,6 @@ export function MarketPanel(): React.JSX.Element {
   useEffect(() => {
     const getMarketDataByTab = async (tab: MarketItemType): Promise<MarketApiResponse> => {
       switch (tab) {
-        case "skill":
-          return marketApi.getSkills()
         case "mcp":
           return marketApi.getMcps()
         case "plugin":
@@ -943,6 +882,30 @@ export function MarketPanel(): React.JSX.Element {
       setLoading(true)
       setError(null)
       try {
+        if (activeTab === "skill") {
+          const skillRes = await getAllSkills()
+          if ((!skillRes.success || !skillRes.data) && USE_MARKET_MOCK_ON_ERROR) {
+            console.warn(
+              `[MarketPanel] getAllSkills failed, fallback to mock data. error=${skillRes.error}`
+            )
+            const mockResponse = getMarketMockResponse("skill")
+            setSkillUsageSummary({})
+            setTabData("skill", addItemFlags(mockResponse.data || [], "skill"))
+            setError(null)
+            return
+          }
+          if (!skillRes.success || !skillRes.data) {
+            setError(skillRes.error || "加载数据失败")
+            setSkillUsageSummary({})
+            setTabData("skill", [])
+            return
+          }
+
+          setSkillUsageSummary(skillRes.summary || {})
+          setTabData("skill", addItemFlags(skillRes.data || [], "skill"))
+          return
+        }
+
         let response = await getMarketDataByTab(activeTab)
 
         if ((!response.success || !response.data) && USE_MARKET_MOCK_ON_ERROR) {
@@ -982,14 +945,6 @@ export function MarketPanel(): React.JSX.Element {
     setSelectedItemKey(null)
     resetDetailState()
   }, [activeTab])
-
-  useEffect(() => {
-    if (activeTab !== "skill") {
-      setSkillUsageSummary({})
-      return
-    }
-    void loadSkillUsageSummary()
-  }, [activeTab, reloadToken, loadSkillUsageSummary])
 
   useEffect(() => {
     if (activeTab !== "skill" && categoryFilter !== null) {
@@ -1154,38 +1109,7 @@ export function MarketPanel(): React.JSX.Element {
 
   const sortedSkillData = useMemo(() => {
     if (activeTab !== "skill") return filteredData
-    if (skillSortMode === "default") return filteredData
-
-    const list = [...filteredData]
-    const compareByName = (a: MarketItem, b: MarketItem): number =>
-      a.name.localeCompare(b.name, "zh-CN")
-
-    const getCalls = (item: MarketItem): number =>
-      getSkillMetricByName(skillUsageSummary, item.name)?.calls ?? 0
-    const getUsers = (item: MarketItem): number =>
-      getSkillMetricByName(skillUsageSummary, item.name)?.users ?? 0
-
-    list.sort((a, b) => {
-      const callsA = getCalls(a)
-      const callsB = getCalls(b)
-      const usersA = getUsers(a)
-      const usersB = getUsers(b)
-
-      switch (skillSortMode) {
-        case "calls_desc":
-          return callsB - callsA || usersB - usersA || compareByName(a, b)
-        case "calls_asc":
-          return callsA - callsB || usersA - usersB || compareByName(a, b)
-        case "users_desc":
-          return usersB - usersA || callsB - callsA || compareByName(a, b)
-        case "users_asc":
-          return usersA - usersB || callsA - callsB || compareByName(a, b)
-        default:
-          return 0
-      }
-    })
-
-    return list
+    return sortSkillItemsByUsage(filteredData, skillUsageSummary, skillSortMode)
   }, [activeTab, filteredData, skillSortMode, skillUsageSummary])
 
   const skillCategoryStats = useMemo(() => {

@@ -1,7 +1,8 @@
-import React from "react"
-import { Zap, Wrench } from "lucide-react"
+import React, { useEffect, useMemo, useState } from "react"
+import { Loader2, Zap, Wrench } from "lucide-react"
 import type { SkillMetadata } from "@/types"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
+import { getAllSkills, SCENE_CATEGORY_OPTIONS, type SkillWithUsage } from "@/lib/skill-data-service"
 import type { MarketItem } from "../../api/market"
 
 export interface SkillsByCategoryItem {
@@ -9,26 +10,186 @@ export interface SkillsByCategoryItem {
   label: string
   marketItem: MarketItem
   isFeatured: boolean
+  calls: number
 }
 
 export type SkillsByCategoryMap = Map<string, Map<string, SkillsByCategoryItem[]>>
 
 interface SkillsByCategorySectionProps {
-  skillsByCategory: SkillsByCategoryMap
+  skills: SkillMetadata[]
   previewLimit: number
   onOpenMarketByCategory: (category: string) => void
   onUseSkillPrompt: (skill: SkillMetadata, label?: string) => void
-  getSkillShowLabel: (label: string) => string
+}
+
+function splitCategory(category?: string): { primary: string; secondary: string } {
+  if (!category) return { primary: "精品技能", secondary: "" }
+  const parts = category
+    .split("/")
+    .map((part) => part.trim())
+    .filter(Boolean)
+  if (parts.length === 0) return { primary: "精品技能", secondary: "" }
+  if (parts.length === 1) return { primary: parts[0], secondary: "" }
+  return { primary: parts[0], secondary: parts.slice(1).join("/") }
+}
+
+function getCategoryKey(primary: string, secondary: string): string {
+  return secondary ? `${primary}/${secondary}` : primary
+}
+
+const primaryCategoryOrder = new Map<string, number>()
+const secondaryCategoryOrder = new Map<string, number>()
+let cachedMarketSkillsData: SkillWithUsage[] | null = null
+let marketSkillsRequestPromise: Promise<SkillWithUsage[]> | null = null
+
+SCENE_CATEGORY_OPTIONS.forEach((category, index) => {
+  const { primary, secondary } = splitCategory(category)
+  if (!primaryCategoryOrder.has(primary)) {
+    primaryCategoryOrder.set(primary, index)
+  }
+  secondaryCategoryOrder.set(getCategoryKey(primary, secondary), index)
+})
+
+async function loadMarketSkillsOnce(): Promise<SkillWithUsage[]> {
+  if (cachedMarketSkillsData) return cachedMarketSkillsData
+  if (marketSkillsRequestPromise) return marketSkillsRequestPromise
+
+  marketSkillsRequestPromise = (async () => {
+    try {
+      const skillRes = await getAllSkills()
+      if (skillRes.success && skillRes.data) {
+        cachedMarketSkillsData = skillRes.data
+      } else {
+        console.warn(
+          `[SkillsByCategorySection] getAllSkills failed, use empty list. error=${skillRes.error || "unknown"}`
+        )
+        cachedMarketSkillsData = []
+      }
+      return cachedMarketSkillsData
+    } catch (error) {
+      console.error("[SkillsByCategorySection] Failed to load skills:", error)
+      cachedMarketSkillsData = []
+      return cachedMarketSkillsData
+    } finally {
+      marketSkillsRequestPromise = null
+    }
+  })()
+
+  return marketSkillsRequestPromise
 }
 
 export function SkillsByCategorySection({
-  skillsByCategory,
+  skills,
   previewLimit,
   onOpenMarketByCategory,
-  onUseSkillPrompt,
-  getSkillShowLabel
-}: SkillsByCategorySectionProps): React.JSX.Element | null {
-  if (skillsByCategory.size === 0) return null
+  onUseSkillPrompt
+}: SkillsByCategorySectionProps): React.JSX.Element {
+  const [marketSkillsLoading, setMarketSkillsLoading] = useState(true)
+  const [marketSkillsData, setMarketSkillsData] = useState<SkillWithUsage[]>([])
+
+  useEffect(() => {
+    let canceled = false
+
+    const loadMarketSkills = async (): Promise<void> => {
+      if (cachedMarketSkillsData) {
+        setMarketSkillsData(cachedMarketSkillsData)
+        setMarketSkillsLoading(false)
+        return
+      }
+      setMarketSkillsLoading(true)
+      const data = await loadMarketSkillsOnce()
+      if (canceled) return
+      setMarketSkillsData(data)
+      setMarketSkillsLoading(false)
+    }
+
+    void loadMarketSkills()
+    return () => {
+      canceled = true
+    }
+  }, [])
+
+  const skillsByCategory = useMemo(() => {
+    const localSkillMap = new Map(
+      skills.filter((skill) => skill.source === "user").map((skill) => [skill.name, skill])
+    )
+    const groups = new Map<string, Map<string, SkillsByCategoryItem[]>>()
+
+    for (const item of marketSkillsData) {
+      const localSkill = localSkillMap.get(item.name)
+      const { primary, secondary } = splitCategory(item.category)
+      if (!groups.has(primary)) groups.set(primary, new Map())
+      const secondaryGroups = groups.get(primary)!
+      if (!secondaryGroups.has(secondary)) secondaryGroups.set(secondary, [])
+      secondaryGroups.get(secondary)!.push({
+        skill: localSkill ?? {
+          name: item.name,
+          description: item.description || "",
+          path: item.filename || item.name,
+          source: "user"
+        },
+        label: item.chinese_name || item.name,
+        marketItem: item,
+        isFeatured: item.featured === "精品",
+        calls: item.calls ?? 0
+      })
+    }
+
+    groups.forEach((secondaryGroups) => {
+      secondaryGroups.forEach((items) => {
+        items.sort((a, b) => {
+          if (a.isFeatured !== b.isFeatured) return a.isFeatured ? -1 : 1
+          if (!a.isFeatured && !b.isFeatured) {
+            return b.calls - a.calls || a.label.localeCompare(b.label, "zh-CN")
+          }
+          return a.label.localeCompare(b.label, "zh-CN")
+        })
+      })
+    })
+    const orderedPrimaryEntries = Array.from(groups.entries()).sort(([primaryA], [primaryB]) => {
+      const orderA = primaryCategoryOrder.get(primaryA) ?? Number.MAX_SAFE_INTEGER
+      const orderB = primaryCategoryOrder.get(primaryB) ?? Number.MAX_SAFE_INTEGER
+      if (orderA !== orderB) return orderA - orderB
+      return primaryA.localeCompare(primaryB, "zh-CN")
+    })
+
+    return new Map(
+      orderedPrimaryEntries.map(([primary, secondaryGroups]) => {
+        const orderedSecondaryEntries = Array.from(secondaryGroups.entries()).sort(
+          ([secondaryA], [secondaryB]) => {
+            const orderA =
+              secondaryCategoryOrder.get(getCategoryKey(primary, secondaryA)) ??
+              Number.MAX_SAFE_INTEGER
+            const orderB =
+              secondaryCategoryOrder.get(getCategoryKey(primary, secondaryB)) ??
+              Number.MAX_SAFE_INTEGER
+            if (orderA !== orderB) return orderA - orderB
+            return secondaryA.localeCompare(secondaryB, "zh-CN")
+          }
+        )
+        return [primary, new Map(orderedSecondaryEntries)]
+      })
+    )
+  }, [marketSkillsData, skills])
+
+  if (marketSkillsLoading) {
+    return (
+      <div className="rounded-xl border border-border/60 bg-background/80 px-4 py-8">
+        <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground">
+          <Loader2 className="size-4 animate-spin" />
+          <span>场景技能加载中...</span>
+        </div>
+      </div>
+    )
+  }
+
+  if (skillsByCategory.size === 0) {
+    return (
+      <div className="rounded-xl border border-dashed border-border/70 bg-background/70 px-4 py-6 text-center text-sm text-muted-foreground">
+        暂无场景技能
+      </div>
+    )
+  }
 
   return (
     <TooltipProvider delayDuration={250}>
@@ -91,7 +252,7 @@ export function SkillsByCategorySection({
                   )}
                   <div className="grid grid-cols-4 gap-2">
                     {items.slice(0, previewLimit).map(({ skill, label, marketItem, isFeatured }) => {
-                      const displayLabel = getSkillShowLabel(label)
+                      const displayLabel = label
                       return (
                         <Tooltip key={marketItem.name}>
                           <TooltipTrigger asChild>
