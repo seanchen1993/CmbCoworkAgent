@@ -69,6 +69,12 @@ export interface GenIndexRow {
   line_hashes: Uint8Array | null
   created_at: number
   measured: number
+  /** JSON-encoded string[] of skill names active at gen time, or null. */
+  used_skills: string | null
+  thread_id: string | null
+  trace_id: string | null
+  model_id: string | null
+  model_name: string | null
 }
 
 // ─────────────────────────────────────────────────────────
@@ -100,9 +106,31 @@ export async function initializeAdoptionIndex(): Promise<void> {
         shard_offset INTEGER NOT NULL,
         line_hashes BLOB,
         created_at INTEGER NOT NULL,
-        measured INTEGER NOT NULL DEFAULT 0
+        measured INTEGER NOT NULL DEFAULT 0,
+        used_skills TEXT,
+        thread_id TEXT,
+        trace_id TEXT,
+        model_id TEXT,
+        model_name TEXT
       )
     `)
+
+    // Migrate older DBs that pre-date the attribution columns. sql.js does not
+    // support "ADD COLUMN IF NOT EXISTS", so we swallow the "duplicate column"
+    // error each ALTER may throw on an already-migrated DB.
+    for (const col of [
+      "used_skills TEXT",
+      "thread_id TEXT",
+      "trace_id TEXT",
+      "model_id TEXT",
+      "model_name TEXT"
+    ]) {
+      try {
+        db.run(`ALTER TABLE gen_events ADD COLUMN ${col}`)
+      } catch {
+        // column already exists — safe to ignore
+      }
+    }
 
     db.run(
       `CREATE INDEX IF NOT EXISTS idx_gen_file_pending
@@ -150,8 +178,9 @@ export function insertGenEvent(row: GenIndexRow): void {
   try {
     db.run(
       `INSERT OR REPLACE INTO gen_events
-       (event_id, file_path, content_fingerprint, shard_file, shard_offset, line_hashes, created_at, measured)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       (event_id, file_path, content_fingerprint, shard_file, shard_offset, line_hashes, created_at, measured,
+        used_skills, thread_id, trace_id, model_id, model_name)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         row.event_id,
         row.file_path,
@@ -160,7 +189,12 @@ export function insertGenEvent(row: GenIndexRow): void {
         row.shard_offset,
         row.line_hashes ?? null,
         row.created_at,
-        row.measured
+        row.measured,
+        row.used_skills,
+        row.thread_id,
+        row.trace_id,
+        row.model_id,
+        row.model_name
       ]
     )
     scheduleSave()
@@ -177,7 +211,8 @@ export function findPendingGenForFile(filePath: string, minCreatedAt: number): G
   if (!db) return null
   const stmt = db.prepare(
     `SELECT event_id, file_path, content_fingerprint, shard_file, shard_offset,
-            line_hashes, created_at, measured
+            line_hashes, created_at, measured,
+            used_skills, thread_id, trace_id, model_id, model_name
        FROM gen_events
       WHERE file_path = ? AND measured = 0 AND created_at >= ?
       ORDER BY created_at DESC
@@ -190,32 +225,6 @@ export function findPendingGenForFile(filePath: string, minCreatedAt: number): G
   } finally {
     stmt.free()
   }
-}
-
-/**
- * Return all pending gen events that are past their due-for-measurement time.
- * Used by the timer-based L2 sweep.
- */
-export function findPendingDueBefore(dueAt: number, limit: number): GenIndexRow[] {
-  if (!db) return []
-  const stmt = db.prepare(
-    `SELECT event_id, file_path, content_fingerprint, shard_file, shard_offset,
-            line_hashes, created_at, measured
-       FROM gen_events
-      WHERE measured = 0 AND created_at <= ?
-      ORDER BY created_at ASC
-      LIMIT ?`
-  )
-  stmt.bind([dueAt, limit])
-  const out: GenIndexRow[] = []
-  try {
-    while (stmt.step()) {
-      out.push(stmt.getAsObject() as unknown as GenIndexRow)
-    }
-  } finally {
-    stmt.free()
-  }
-  return out
 }
 
 export function markMeasured(eventId: string): void {
@@ -246,7 +255,7 @@ export function deleteOlderThan(cutoff: number): number {
 
 /**
  * Remove already-measured rows older than `cutoff`. These rows have no further
- * use (findPendingGenForFile / findPendingDueBefore both filter measured=0), so
+ * use (findPendingGenForFile filters measured=0), so
  * we can evict them far more aggressively than the full 7-day window.
  */
 export function deleteMeasuredOlderThan(cutoff: number): void {

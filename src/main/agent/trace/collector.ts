@@ -212,8 +212,7 @@ export class TraceCollector {
     }
     try {
       setAdoptionContext(this.threadId, {
-        usedSkills: [...skills],
-        primarySkill: skills.length > 0 ? skills[0] : null
+        usedSkills: [...skills]
       })
     } catch {
       // ignore

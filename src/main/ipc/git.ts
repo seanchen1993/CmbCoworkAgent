@@ -1,9 +1,13 @@
 import { ipcMain } from "electron"
-import { execSync } from "child_process"
+import { execSync, execFileSync } from "child_process"
 import { platform } from "os"
 import { readdirSync, rmSync } from "fs"
 import path from "path"
-import { measureForCommit } from "../services/adoption-tracker"
+import {
+  captureStagedSnapshotsForCommit as captureAdoptionStagedSnapshots,
+  measureForCommit,
+  type StagedSnapshot
+} from "../services/adoption-tracker"
 
 interface GitStatus {
   hasChanges: boolean
@@ -27,26 +31,40 @@ function isCommitCommand(command: string): boolean {
   return /^git(\s+-C\s+"[^"]*")?\s+commit(\s|$)/.test(command.trim())
 }
 
-/**
- * Side-effect hook invoked right before a `git commit` is executed.
- * Measures staged code files against pending gen events (L3 adoption).
- * Never throws — any error is swallowed so it cannot block the commit.
- */
-function triggerAdoptionMeasurementForCommit(command: string): void {
+interface StagedCapture {
+  workingDir: string
+  snapshots: StagedSnapshot[]
+}
+
+function captureStagedSnapshotsForCommand(command: string): StagedCapture | null {
   try {
     const workingDir = getCommandWorkingDir(command, getCurrentWorkingDirectory())
-    const stagedOutput = execSync("git diff --cached --name-only", {
+    return { workingDir, snapshots: captureAdoptionStagedSnapshots(workingDir) }
+  } catch (e) {
+    console.warn("[Git] adoption pre-commit capture skipped:", e)
+    return null
+  }
+}
+
+/**
+ * Extract a commit SHA from a successful `git commit` stdout. Best-effort:
+ * git prints e.g. "[main abc1234] subject" on success. Returns null when the
+ * pattern is absent so callers can still emit the adoption event with no SHA.
+ */
+function extractCommitSha(commitOutput: string, workingDir: string): string | null {
+  const match = commitOutput.match(/\[[^\s\]]+\s+([0-9a-f]{7,40})\]/i)
+  if (match) return match[1]
+  // Fallback: ask git for HEAD's SHA.
+  try {
+    const sha = execSync("git rev-parse HEAD", {
       encoding: "utf-8",
       cwd: workingDir,
       timeout: 5000,
       shell: platform() === "win32" ? "cmd.exe" : "/bin/bash"
     }).trim()
-    if (!stagedOutput) return
-    const relFiles = stagedOutput.split("\n").map((f) => f.trim()).filter(Boolean)
-    const absFiles = relFiles.map((f) => path.resolve(workingDir, f))
-    measureForCommit(absFiles)
-  } catch (e) {
-    console.warn("[Git] adoption pre-commit measurement skipped:", e)
+    return sha || null
+  } catch {
+    return null
   }
 }
 
@@ -94,10 +112,9 @@ function resolveGitDir(command: string, fallbackCwd: string): string | null {
   const workingDir = getCommandWorkingDir(command, fallbackCwd)
 
   try {
-    const gitDir = execSync(`git -C "${workingDir}" rev-parse --git-dir`, {
+    const gitDir = execFileSync("git", ["-C", workingDir, "rev-parse", "--git-dir"], {
       encoding: "utf-8",
       cwd: workingDir,
-      shell: platform() === "win32" ? "cmd.exe" : "/bin/bash"
     }).trim()
 
     return normalizeGitDirPath(gitDir, workingDir)
@@ -488,11 +505,10 @@ function listBranches(cwd?: string): string[] {
 function switchBranch(branch: string, cwd?: string): { success: boolean; error?: string } {
   const workingDir = cwd || getCurrentWorkingDirectory()
   try {
-    execSync(`git checkout "${branch.replace(/"/g, '\\"')}"`, {
+    execFileSync("git", ["checkout", branch], {
       encoding: "utf-8",
       cwd: workingDir,
       timeout: 30000,
-      shell: platform() === "win32" ? "cmd.exe" : "/bin/bash"
     })
     return { success: true }
   } catch (rawError: unknown) {
@@ -511,14 +527,12 @@ function createBranch(branch: string, cwd?: string): { success: boolean; error?:
     return { success: false, error: "分支名不能为空" }
   }
 
-  const escapedBranch = branchName.replace(/"/g, '\\"')
   try {
     // Validate branch name format before creating.
-    execSync(`git check-ref-format --branch "${escapedBranch}"`, {
+    execFileSync("git", ["check-ref-format", "--branch", branchName], {
       encoding: "utf-8",
       cwd: workingDir,
       timeout: 10000,
-      shell: platform() === "win32" ? "cmd.exe" : "/bin/bash"
     })
   } catch {
     return { success: false, error: "分支名不合法" }
@@ -526,11 +540,10 @@ function createBranch(branch: string, cwd?: string): { success: boolean; error?:
 
   try {
     // `checkout -b` works on older git versions.
-    execSync(`git checkout -b "${escapedBranch}"`, {
+    execFileSync("git", ["checkout", "-b", branchName], {
       encoding: "utf-8",
       cwd: workingDir,
       timeout: 30000,
-      shell: platform() === "win32" ? "cmd.exe" : "/bin/bash"
     })
     return { success: true }
   } catch (rawError: unknown) {
@@ -587,13 +600,26 @@ export function registerGitHandlers(): void {
         throw new Error(`不允许执行的命令: ${command}`)
       }
 
-      // Pre-commit: measure adoption for staged files (side-effect, never blocks).
+      // Capture staged blob snapshots BEFORE commit — the index is wiped once
+      // the commit runs. If the commit then fails, we simply discard the capture
+      // without emitting any adoption event.
+      let stagedCapture: StagedCapture | null = null
       if (isCommitCommand(command)) {
-        triggerAdoptionMeasurementForCommit(command)
+        stagedCapture = captureStagedSnapshotsForCommand(command)
       }
 
       const result = executeGitCommand(command)
       console.log("[IPC] Git命令执行成功:", command, "结果:", result)
+
+      // Only emit adoption measurement once the commit actually succeeded.
+      if (stagedCapture && stagedCapture.snapshots.length > 0) {
+        try {
+          const sha = extractCommitSha(result, stagedCapture.workingDir) ?? undefined
+          measureForCommit(stagedCapture.snapshots, sha)
+        } catch (e) {
+          console.warn("[Git] adoption post-commit measurement skipped:", e)
+        }
+      }
 
       return result
     } catch (error) {

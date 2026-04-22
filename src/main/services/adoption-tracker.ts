@@ -2,9 +2,10 @@
  * Adoption Tracker
  *
  * Captures "code generation" events from agent write/edit tools, measures
- * "adoption" outcomes from three sources (10-minute timer, workspace file
- * changes, git commits), and reports both as telemetry events via the
- * existing `event-reporter` pipeline.
+ * "adoption" outcomes at git commit time (plus a terminal `skipped_large`
+ * verdict for oversize baselines), and reports both as telemetry events via
+ * the existing `event-reporter` pipeline. A former 10-minute retention timer
+ * was removed — its I/O fanout outweighed its signal value.
  *
  * ── Design guarantees ────────────────────────────────────
  *   1. Side-effect only. Every public entry point is non-blocking and wraps
@@ -30,11 +31,13 @@ import { appendFile, readdir, readFile, stat, unlink, rename } from "fs/promises
 import { existsSync, mkdirSync } from "fs"
 import { extname, join, relative, resolve as resolvePath } from "path"
 import { randomUUID } from "crypto"
+import { execFileSync } from "child_process"
+import * as iconv from "iconv-lite"
+import * as chardet from "jschardet"
 import { getOpenworkDir } from "../storage"
 import { trackEvent } from "./event-reporter"
 import {
   closeAdoptionIndex,
-  findPendingDueBefore,
   findPendingGenForFile,
   flushAdoptionIndex,
   initializeAdoptionIndex,
@@ -50,14 +53,18 @@ import {
 // Constants
 // ─────────────────────────────────────────────────────────
 
-const L2_MEASURE_DELAY_MS = 10 * 60 * 1000 // 10 minutes
-const L2_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
-const SWEEP_INTERVAL_MS = 5 * 60 * 1000 // heartbeat cadence — 5min; L2 延迟 10min 足够容忍
+// Longest window during which a pending gen row is still eligible to be matched
+// against a future git commit. Older rows are dropped by retention. (Previously
+// also doubled as the L2 timer window — L2 has been removed, this is now purely
+// "how long do we keep a baseline around for commit-time attribution".)
+const GEN_ATTRIBUTION_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+const SWEEP_INTERVAL_MS = 5 * 60 * 1000 // shard rotation / retention / VACUUM cadence
 const SHARD_SIZE_LIMIT_BYTES = 10 * 1024 * 1024 // 10 MB per shard
 const SHARD_MAX_AGE_MS = 30 * 60 * 1000 // rotate every 30 min
 const DISK_HARD_CAP_BYTES = 100 * 1024 * 1024 // 100 MB
 const MAX_LINES_FOR_MEASURE = 3000 // skip giant files (applied symmetrically at gen + measure)
 const MAX_CONTEXT_ENTRIES = 32 // bound in-memory context size
+const STAGED_BLOB_MAX_BYTES = 8 * 1024 * 1024 // cap git show output per staged file
 
 // sqlite index safeguards — keep the on-disk file bounded even under abuse
 const INDEX_MEASURED_RETENTION_MS = 3 * 24 * 60 * 60 * 1000 // already-measured rows: 3 days
@@ -145,8 +152,12 @@ export interface AdoptionContext {
   traceId?: string
   modelId?: string
   modelName?: string
+  /**
+   * Full list of skills the turn used. Cloud-side attribution counts each
+   * entry — there is no "primary" skill concept on the client (the former
+   * `primarySkill` field has been removed because it was merely `usedSkills[0]`).
+   */
   usedSkills?: string[]
-  primarySkill?: string | null
 }
 
 export interface RecordGenInput {
@@ -154,12 +165,35 @@ export interface RecordGenInput {
   tool: "write_file" | "edit_file"
   /** Absolute or workspace-relative path (tracker resolves it). */
   filePath: string
-  /** The content that was written (write_file) or the new_string (edit_file). */
+  /**
+   * The content that was written (write_file) or one copy of the new_string
+   * (edit_file). For replaceAll edits, `occurrences` expands this baseline into
+   * a repeated line-hash multiset without materialising a repeated string.
+   */
   generatedContent: string
   /** Optional: when provided, stepIndex is included in the gen event. */
   stepIndex?: number
   /** Optional: workspace root — used to turn absolute path into relative. */
   workspacePath?: string
+  /**
+   * Optional: non-blank lines removed by this tool call. When provided, the
+   * tracker uses this directly. write_file passes 0 here (it can only create
+   * new files).
+   */
+  deletedLineCount?: number
+  /**
+   * Optional: the local `old_string` fragment being replaced by edit_file.
+   * Together with `newString` and `occurrences` the tracker derives a cheap
+   * net-deletion count in the microtask — no full-file scan, no references
+   * to editor buffers retained. Slight over/undercount at oldString boundary
+   * lines is accepted: deletedLineCount is an auxiliary metric; the primary
+   * adoption signal is `generatedContent` (= newString) retention.
+   */
+  oldString?: string
+  /** Optional: the local `new_string` fragment. See `oldString`. */
+  newString?: string
+  /** Optional: replacement count returned by the edit tool. Defaults to 1. */
+  occurrences?: number
 }
 
 interface JsonlGenEntry {
@@ -169,6 +203,7 @@ interface JsonlGenEntry {
   traceId?: string
   filePath: string
   lineCount: number
+  deletedLineCount: number
   fingerprint: string
   createdAt: number
   // NOTE: lineHashes deliberately NOT stored here — sqlite index owns the BLOB.
@@ -194,9 +229,9 @@ let currentShardStartMs = 0
 let appendChain: Promise<unknown> = Promise.resolve()
 
 /**
- * In-flight measurement dedup. Keyed by the pending gen event_id so multiple
- * triggers (e.g. git_commit + timer_10m racing) don't produce duplicate
- * code_adopt events or duplicate readFile work.
+ * In-flight measurement dedup. Keyed by the pending gen event_id. Prevents
+ * duplicate emission if the same commit batch happens to pass the same file
+ * through measureFile twice (e.g. rename + modify variants).
  */
 const inFlightMeasurements = new Set<string>()
 
@@ -232,8 +267,11 @@ export function isCodeFile(filePath: string): boolean {
   if (!CODE_EXTENSIONS.has(ext)) return false
 
   const normalized = filePath.replace(/\\/g, "/").toLowerCase()
+  // Segment-level match so root-relative paths like "node_modules/foo/x.ts" are
+  // also excluded (the earlier substring check only caught paths with a leading "/").
+  const segments = normalized.split("/").filter(Boolean)
   for (const seg of EXCLUDED_PATH_SEGMENTS) {
-    if (normalized.includes(`/${seg}/`) || normalized.endsWith(`/${seg}`)) return false
+    if (segments.includes(seg)) return false
   }
   for (const re of EXCLUDED_FILENAME_PATTERNS) {
     if (re.test(normalized)) return false
@@ -258,6 +296,24 @@ function normalizeLine(line: string): string {
   return line.trim().replace(/\s+/g, " ")
 }
 
+/**
+ * Count non-blank, whitespace-normalised lines in `content`. Mirrors the
+ * normalisation used by `computeLineHashes` so the count matches the number of
+ * hashes we would actually compare. Exported so write/edit tool call sites can
+ * compute `deletedLineCount` against the same definition the tracker uses for
+ * added lines.
+ */
+export function countNonBlankLines(content: string): number {
+  if (!content) return 0
+  const lines = content.split(/\r?\n/)
+  let count = 0
+  for (const raw of lines) {
+    if (normalizeLine(raw).length > 0) count++
+  }
+  return count
+}
+
+
 function computeLineHashes(content: string): Uint32Array {
   const lines = content.split(/\r?\n/)
   const hashes: number[] = []
@@ -267,6 +323,24 @@ function computeLineHashes(content: string): Uint32Array {
     hashes.push(fnv1a32(norm))
   }
   return new Uint32Array(hashes)
+}
+
+function getGenerationOccurrenceCount(input: RecordGenInput): number {
+  if (input.tool !== "edit_file") return 1
+  if (typeof input.occurrences !== "number" || !Number.isFinite(input.occurrences)) return 1
+  const occurrences = Math.floor(input.occurrences)
+  // edit_file reports 0 for the empty-file insertion special case; the new
+  // string still appears once in the generated baseline.
+  return occurrences > 0 ? occurrences : 1
+}
+
+function repeatLineHashes(hashes: Uint32Array, occurrences: number): Uint32Array {
+  if (occurrences <= 1) return hashes
+  const repeated = new Uint32Array(hashes.length * occurrences)
+  for (let i = 0; i < occurrences; i++) {
+    repeated.set(hashes, i * hashes.length)
+  }
+  return repeated
 }
 
 function packLineHashes(hashes: Uint32Array): Uint8Array {
@@ -282,6 +356,62 @@ function unpackLineHashes(bytes: Uint8Array): Uint32Array {
 function contentFingerprint(content: string): string {
   // Cheap whole-content 32-bit fingerprint (not cryptographic — just a quick diff hint).
   return fnv1a32(content).toString(16).padStart(8, "0")
+}
+
+function isValidUtf8(buffer: Buffer): boolean {
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(buffer)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function detectTextEncoding(buffer: Buffer): string {
+  if (buffer.length === 0) return "utf-8"
+  try {
+    const detected = chardet.detect(buffer)
+    const encoding = typeof detected === "string" ? detected : detected?.encoding
+    const confidence = typeof detected === "string" ? 1 : (detected?.confidence ?? 0)
+    if (!encoding || encoding.toLowerCase() === "ascii" || !iconv.encodingExists(encoding)) {
+      return "utf-8"
+    }
+    if (confidence >= 0.8) return encoding
+    return isValidUtf8(buffer) ? "utf-8" : encoding
+  } catch {
+    return "utf-8"
+  }
+}
+
+function decodeCodeBuffer(buffer: Buffer): string {
+  return iconv.decode(buffer, detectTextEncoding(buffer))
+}
+
+function generationFingerprint(content: string, occurrences: number): string {
+  if (occurrences <= 1) return contentFingerprint(content)
+  // Avoid materialising repeated content; include the repeat count so replaceAll
+  // baselines don't share a fingerprint with a single replacement.
+  return contentFingerprint(`${occurrences}\0${content}`)
+}
+
+function getDeletionOccurrenceCount(input: RecordGenInput): number {
+  if (typeof input.occurrences !== "number" || !Number.isFinite(input.occurrences)) return 1
+  return Math.max(0, Math.floor(input.occurrences))
+}
+
+function deriveDeletedLineCount(input: RecordGenInput): number {
+  if (typeof input.deletedLineCount === "number") {
+    return Math.max(0, input.deletedLineCount)
+  }
+  if (typeof input.oldString !== "string") return 0
+
+  const occurrences = getDeletionOccurrenceCount(input)
+  if (occurrences === 0) return 0
+
+  const oldNonBlank = countNonBlankLines(input.oldString)
+  const newNonBlank =
+    typeof input.newString === "string" ? countNonBlankLines(input.newString) : 0
+  return Math.max(0, oldNonBlank - newNonBlank) * occurrences
 }
 
 // ─────────────────────────────────────────────────────────
@@ -341,7 +471,7 @@ async function enforceRetention(): Promise<void> {
     return
   }
 
-  const cutoff = Date.now() - L2_RETENTION_MS
+  const cutoff = Date.now() - GEN_ATTRIBUTION_WINDOW_MS
   interface ShardStat {
     name: string
     mtimeMs: number
@@ -459,6 +589,13 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
   try {
     if (!isCodeFile(input.filePath)) return
 
+    // Snapshot attribution context *before* any await. Between the await on
+    // appendJsonl below and our subsequent use of ctx, TraceCollector.finish()
+    // can run and clearAdoptionContext(threadId) — which would zero out the
+    // skill/model/trace fields on both the cloud event and the sqlite row,
+    // and in turn strip skill attribution from the downstream code_adopt.
+    const ctx = getContext(input.threadId)
+
     const absPath = input.workspacePath
       ? resolvePath(input.workspacePath, input.filePath)
       : resolvePath(input.filePath)
@@ -471,7 +608,8 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     // Counts every physical line incl. blanks — non-blank count can only be ≤ this.
     // If this already exceeds the cap, we short-circuit: emit L1 + terminal
     // `skipped_large` adopt event and skip hashing / JSONL / sqlite entirely.
-    const rawLineCount = input.generatedContent.split(/\r?\n/).length
+    const generationOccurrences = getGenerationOccurrenceCount(input)
+    const rawLineCount = input.generatedContent.split(/\r?\n/).length * generationOccurrences
     const eventId = `g_${randomUUID()}`
     const createdAt = Date.now()
 
@@ -482,44 +620,63 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
         absPath,
         relPath,
         lineCount: rawLineCount,
-        createdAt
+        createdAt,
+        ctx
       })
       return
     }
 
-    const hashes = computeLineHashes(input.generatedContent)
-    if (hashes.length === 0) return // empty-after-normalization → nothing worth tracking
+    const singleHashes = computeLineHashes(input.generatedContent)
+    if (singleHashes.length === 0) return // empty-after-normalization → nothing worth tracking
+    const repeatedHashCount = singleHashes.length * generationOccurrences
 
     // Non-blank line count may still exceed threshold only when rawLineCount is
     // already close; stay symmetric with the measure-time check.
-    if (hashes.length > MAX_LINES_FOR_MEASURE) {
+    if (repeatedHashCount > MAX_LINES_FOR_MEASURE) {
       emitSkippedLargeAtGen({
         eventId,
         input,
         absPath,
         relPath,
-        lineCount: hashes.length,
-        createdAt
+        lineCount: repeatedHashCount,
+        createdAt,
+        ctx
       })
       return
     }
 
-    const fingerprint = contentFingerprint(input.generatedContent)
+    const hashes = repeatLineHashes(singleHashes, generationOccurrences)
+    const fingerprint = generationFingerprint(input.generatedContent, generationOccurrences)
 
     // ── JSONL record ────────────────────────────────────
+    // Derive net-deletion count here (in the microtask), NOT at the tool
+    // call site — this keeps edit_file's hot path free of any O(N) scan for
+    // files that are about to be filtered out anyway (non-code, oversize,
+    // empty-after-normalization — all handled above).
+    // Only the local `oldString` / `newString` fragments are scanned — no
+    // full-file reads — so the cost is proportional to the edit size, not
+    // the file size. Boundary-line merging (e.g. oldString ending mid-line)
+    // can introduce small +/- 1 errors; acceptable for an auxiliary metric.
+    const deletedLineCount = deriveDeletedLineCount(input)
     const jsonlEntry: JsonlGenEntry = {
       t: "gen",
       eventId,
       threadId: input.threadId,
-      traceId: getContext(input.threadId).traceId,
+      traceId: ctx.traceId,
       filePath: absPath,
       lineCount: hashes.length,
+      deletedLineCount,
       fingerprint,
       createdAt
     }
     const { shardFile, offset } = await appendJsonl(jsonlEntry)
 
     // ── Index row ───────────────────────────────────────
+    // Persist attribution columns so the commit-time `code_adopt` event can
+    // carry them too (ES can then slice adoption rates by skill / model / trace
+    // directly, without a two-step join against code_gen). Using the snapshot
+    // taken before the await — see the top of this function.
+    const usedSkills = Array.isArray(ctx.usedSkills) ? ctx.usedSkills : []
     insertGenEvent({
       event_id: eventId,
       file_path: absPath,
@@ -528,11 +685,15 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       shard_offset: offset,
       line_hashes: packLineHashes(hashes),
       created_at: createdAt,
-      measured: 0
+      measured: 0,
+      used_skills: usedSkills.length > 0 ? JSON.stringify(usedSkills) : null,
+      thread_id: input.threadId || null,
+      trace_id: ctx.traceId ?? null,
+      model_id: ctx.modelId ?? null,
+      model_name: ctx.modelName ?? null
     })
 
     // ── Cloud event (metadata only) ─────────────────────
-    const ctx = getContext(input.threadId)
     trackEvent("code_gen", "code_adoption", {
       schemaVersion: 1,
       eventId,
@@ -542,8 +703,8 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       tool: input.tool,
       language: extname(absPath).slice(1).toLowerCase() || null,
       lineCount: hashes.length,
+      deletedLineCount,
       usedSkills: ctx.usedSkills ?? [],
-      primarySkill: ctx.primarySkill ?? null,
       modelId: ctx.modelId ?? null,
       modelName: ctx.modelName ?? null,
       // note: filePath / content / fingerprint intentionally withheld
@@ -567,10 +728,12 @@ function emitSkippedLargeAtGen(args: {
   relPath: string
   lineCount: number
   createdAt: number
+  /** Attribution snapshot taken before any await — see doRecordGen. */
+  ctx: AdoptionContext
 }): void {
-  const { eventId, input, absPath, relPath, lineCount, createdAt } = args
-  const ctx = getContext(input.threadId)
+  const { eventId, input, absPath, relPath, lineCount, createdAt, ctx } = args
   const language = extname(absPath).slice(1).toLowerCase() || null
+  const deletedLineCount = deriveDeletedLineCount(input)
 
   // L1 — record that the agent generated code (metadata only, no path/content)
   trackEvent("code_gen", "code_adoption", {
@@ -582,8 +745,8 @@ function emitSkippedLargeAtGen(args: {
     tool: input.tool,
     language,
     lineCount,
+    deletedLineCount,
     usedSkills: ctx.usedSkills ?? [],
-    primarySkill: ctx.primarySkill ?? null,
     modelId: ctx.modelId ?? null,
     modelName: ctx.modelName ?? null,
     createdAt: new Date(createdAt).toISOString(),
@@ -598,82 +761,96 @@ function emitSkippedLargeAtGen(args: {
     threadId: input.threadId,
     traceId: ctx.traceId ?? null,
     verdict: "skipped_large",
-    diffRatio: null,
+    generatedLineCount: lineCount,
+    adoptedLineCount: null,
     measureSource: "gen_oversize",
     measureLatencyMs: 0,
     measuredAt: new Date(createdAt).toISOString(),
-    commitSha: null
+    commitSha: null,
+    // Mirror the attribution fields attached by the normal commit path, so
+    // ES can aggregate adoption rates (including the skipped_large bucket)
+    // uniformly — otherwise these rows look like they have no skill.
+    usedSkills: ctx.usedSkills ?? [],
+    modelId: ctx.modelId ?? null,
+    modelName: ctx.modelName ?? null
   })
 }
 
-type MeasureSource = "timer_10m" | "git_commit"
+interface MeasureOpts {
+  /** Callers may supply the already-read content to avoid a readFile round trip. */
+  currentContent?: string | Buffer
+  commitSha?: string
+  /**
+   * When true, short-circuit to `verdict: deleted` without reading the worktree
+   * or comparing hashes. Used by the commit path for files staged as deletions.
+   */
+  stagedDeleted?: boolean
+}
 
 /**
- * Measure a specific file against the most recent unmeasured gen event.
- * Produces a `code_adopt` event if a pending gen is found. Never throws.
+ * Resolve the pending gen row for a file (most recent unmeasured within the
+ * attribution window) and produce a `code_adopt` event against it. Never throws.
+ *
+ * Only commit-driven measurements remain — the 10-min timer was retired for
+ * being the dominant I/O spike source with marginal value over L1 + L3.
  */
-function measureFile(
-  filePath: string,
-  source: MeasureSource,
-  opts?: {
-    currentContent?: string // callers may supply the already-read content
-    commitSha?: string
-  }
-): void {
+function measureFile(filePath: string, opts?: MeasureOpts): void {
   if (!initialized) return
   queueMicrotask(() => {
-    doMeasureFile(filePath, source, opts).catch((e) => {
+    doMeasureFile(filePath, opts).catch((e) => {
       console.warn("[AdoptionTracker] measureFile unexpected error:", e)
     })
   })
 }
 
-async function doMeasureFile(
-  filePath: string,
-  source: MeasureSource,
-  opts?: { currentContent?: string; commitSha?: string }
-): Promise<void> {
+async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void> {
   let pendingId: string | null = null
   try {
     const absPath = resolvePath(filePath)
-    const minCreated = Date.now() - L2_RETENTION_MS
+    const minCreated = Date.now() - GEN_ATTRIBUTION_WINDOW_MS
     const pending = findPendingGenForFile(absPath, minCreated)
     if (!pending) return
 
-    // Dedup concurrent measurements for the same pending gen. Multiple triggers
-    // (e.g. git_commit arriving just before timer_10m sweep) would otherwise
-    // both pass the `measured=0` check before either calls markMeasured.
+    // Dedup concurrent measurements for the same pending gen. Even without the
+    // timer/commit race, a single commit batch can pass the same file twice
+    // (rare but cheap to guard against).
     if (inFlightMeasurements.has(pending.event_id)) return
     inFlightMeasurements.add(pending.event_id)
     pendingId = pending.event_id
 
-    // Compute diffRatio (0..100)
-    let verdict: "measured" | "deleted" | "committed" | "skipped_large" = "measured"
-    let diffRatio: number | null = null
+    let verdict: "deleted" | "committed" | "skipped_large" = "committed"
 
     const storedHashes = pending.line_hashes ? unpackLineHashes(pending.line_hashes) : null
     if (!storedHashes || storedHashes.length === 0) {
       // No baseline — nothing to compare against
       return
     }
-    if (storedHashes.length > MAX_LINES_FOR_MEASURE) {
+    const generatedLineCount = storedHashes.length
+    let adoptedLineCount: number | null = null
+
+    if (opts?.stagedDeleted) {
+      // Commit path explicitly told us this file is being removed. Skip readFile
+      // (the worktree may still have stale content) and emit the deletion verdict.
+      verdict = "deleted"
+      adoptedLineCount = 0
+    } else if (storedHashes.length > MAX_LINES_FOR_MEASURE) {
       verdict = "skipped_large"
-      diffRatio = null
+      adoptedLineCount = null
     } else {
       let current = opts?.currentContent
       if (current === undefined) {
         try {
-          current = await readFile(absPath, "utf-8")
+          current = await readFile(absPath)
         } catch {
           // File unreadable (removed / renamed) — terminal verdict: deleted
           verdict = "deleted"
-          diffRatio = 0
+          adoptedLineCount = 0
         }
       }
-      if (verdict === "measured" && current !== undefined) {
-        const currentHashes = computeLineHashes(current)
-        diffRatio = computeDiffRatio(storedHashes, currentHashes)
-        if (source === "git_commit") verdict = "committed"
+      if (verdict === "committed" && current !== undefined) {
+        const currentText = Buffer.isBuffer(current) ? decodeCodeBuffer(current) : current
+        const currentHashes = computeLineHashes(currentText)
+        adoptedLineCount = countAdoptedLines(storedHashes, currentHashes)
       }
     }
 
@@ -685,28 +862,46 @@ async function doMeasureFile(
       eventId: adoptEventId,
       genEventId: pending.event_id,
       verdict,
-      diffRatio,
-      measureSource: source,
+      generatedLineCount,
+      adoptedLineCount,
+      measureSource: "git_commit",
       measuredAt,
       commitSha: opts?.commitSha ?? null
     })
 
     markMeasured(pending.event_id)
 
-    // Cloud event
-    const threadCtx: AdoptionContext = {} // best-effort — context may already be cleared
+    // Pull attribution columns that were persisted at gen time, so cloud ES
+    // can aggregate adoption rates by skill / model without a two-step join
+    // against code_gen via genEventId.
+    let usedSkills: string[] = []
+    if (pending.used_skills) {
+      try {
+        const parsed = JSON.parse(pending.used_skills) as unknown
+        if (Array.isArray(parsed)) {
+          usedSkills = parsed.filter((s): s is string => typeof s === "string")
+        }
+      } catch {
+        // corrupt row — treat as no skill attribution
+      }
+    }
+
     trackEvent("code_adopt", "code_adoption", {
       schemaVersion: 1,
       eventId: adoptEventId,
       genEventId: pending.event_id,
-      threadId: null, // not carried on the index row
-      traceId: threadCtx.traceId ?? null,
+      threadId: pending.thread_id ?? null,
+      traceId: pending.trace_id ?? null,
       verdict,
-      diffRatio,
-      measureSource: source,
+      generatedLineCount,
+      adoptedLineCount,
+      measureSource: "git_commit",
       measureLatencyMs: measuredAt - pending.created_at,
       measuredAt: new Date(measuredAt).toISOString(),
-      commitSha: opts?.commitSha ?? null
+      commitSha: opts?.commitSha ?? null,
+      usedSkills,
+      modelId: pending.model_id ?? null,
+      modelName: pending.model_name ?? null
     })
   } catch (e) {
     console.warn("[AdoptionTracker] doMeasureFile failed:", e)
@@ -715,11 +910,8 @@ async function doMeasureFile(
   }
 }
 
-/**
- * Compute a percentage [0..100] of how many baseline lines still appear in
- * the current file (multiset intersection on FNV hashes).
- */
-function computeDiffRatio(baseline: Uint32Array, current: Uint32Array): number {
+/** Count how many generated baseline lines still appear in the committed file. */
+function countAdoptedLines(baseline: Uint32Array, current: Uint32Array): number {
   if (baseline.length === 0) return 0
   const counts = new Map<number, number>()
   for (let i = 0; i < current.length; i++) {
@@ -735,57 +927,129 @@ function computeDiffRatio(baseline: Uint32Array, current: Uint32Array): number {
       counts.set(h, c - 1)
     }
   }
-  const ratio = (kept / baseline.length) * 100
-  return Math.round(ratio * 100) / 100 // two decimals
+  return kept
 }
 
 // ─────────────────────────────────────────────────────────
 // External notification entry points
 // ─────────────────────────────────────────────────────────
 
+/** One staged file, captured against the index at pre-commit time. */
+export interface StagedSnapshot {
+  /** Absolute path to the file in the working tree. */
+  absPath: string
+  /**
+   * Staged blob content exactly as it will land in the commit. Kept as bytes
+   * so Windows projects using GBK/Shift_JIS/etc. are not forced through UTF-8.
+   * `null` signals the file was staged for deletion.
+   */
+  stagedContent: Buffer | null
+}
+
 /**
- * Called by git IPC commit handler before the actual `git commit` is
- * executed. Best-effort measurement of each staged code file against its
- * most recent unmeasured gen event. Returns immediately; work happens in
- * background microtasks.
+ * Capture staged snapshots right BEFORE `git commit` runs. The commit clears
+ * the index, so callers must invoke this after `git add` and before `git commit`.
  *
- * NOTE: we deliberately do NOT hook workspace-watcher here. Every fs.watch
- * event would otherwise hit sqlite, and measuring on an intermediate edit
- * locks in a diffRatio before the 10-minute "settle" window elapses — which
- * would silently corrupt L2 semantics. The 10-min timer + this commit hook
- * already cover all measurable outcomes; deletions surface via readFile
- * ENOENT inside doMeasureFile.
+ * Never throws; failures only skip adoption measurement for that commit.
  */
-export function measureForCommit(stagedAbsolutePaths: string[], commitSha?: string): void {
+export function captureStagedSnapshotsForCommit(workingDir: string): StagedSnapshot[] {
+  try {
+    const raw = execFileSync("git", ["diff", "--cached", "--name-status", "-z"], {
+      encoding: "utf-8",
+      cwd: workingDir,
+      timeout: 5000,
+      maxBuffer: 1024 * 1024
+    })
+    if (!raw) return []
+
+    const snapshots: StagedSnapshot[] = []
+    // Output format with -z:
+    //   Normal:      <STATUS>\0<path>\0
+    //   Rename/copy: <Rnnn|Cnnn>\0<old>\0<new>\0
+    const tokens = raw.split("\0").filter(Boolean)
+    for (let i = 0; i < tokens.length; ) {
+      const status = tokens[i]
+      if (!status || !/^[ACDMRTU]/.test(status)) {
+        i++
+        continue
+      }
+
+      const isRenameOrCopy = status.startsWith("R") || status.startsWith("C")
+      const pathsNeeded = isRenameOrCopy ? 2 : 1
+      if (i + pathsNeeded >= tokens.length) break
+      const relPath = isRenameOrCopy ? tokens[i + 2] : tokens[i + 1]
+      i += 1 + pathsNeeded
+      if (!relPath) continue
+
+      const absPath = resolvePath(workingDir, relPath)
+      if (status === "D") {
+        snapshots.push({ absPath, stagedContent: null })
+        continue
+      }
+      if (!isCodeFile(absPath)) continue
+
+      try {
+        const stagedContent = execFileSync("git", ["show", `:${relPath}`], {
+          cwd: workingDir,
+          timeout: 5000,
+          maxBuffer: STAGED_BLOB_MAX_BYTES
+        })
+        snapshots.push({ absPath, stagedContent })
+      } catch {
+        // Binary / too-large / other failure — skip silently.
+      }
+    }
+    return snapshots
+  } catch (e) {
+    console.warn("[AdoptionTracker] adoption pre-commit capture skipped:", e)
+    return []
+  }
+}
+
+/**
+ * Called by git IPC commit handler AFTER the actual `git commit` succeeds.
+ * The caller is responsible for capturing staged blob content *before* the
+ * commit runs (because `git commit` clears the index); we compare the hash
+ * of the staged blob — not whatever happens to be on disk — against the
+ * pending gen baseline. Returns immediately; work happens in background
+ * microtasks.
+ *
+ * NOTE: we deliberately do NOT hook workspace-watcher. Every fs.watch
+ * event would otherwise hit sqlite for every keystroke-level save; commit
+ * is the only signal we treat as adoption. Deletions surface via a null
+ * stagedContent (→ `verdict: deleted`).
+ */
+export function measureForCommit(snapshots: StagedSnapshot[], commitSha?: string): void {
   if (!initialized) return
-  for (const absPath of stagedAbsolutePaths) {
-    if (!isCodeFile(absPath)) continue
-    measureFile(absPath, "git_commit", { commitSha })
+  for (const snap of snapshots) {
+    if (!isCodeFile(snap.absPath)) continue
+    if (snap.stagedContent === null) {
+      measureFile(snap.absPath, { stagedDeleted: true, commitSha })
+      continue
+    }
+    measureFile(snap.absPath, {
+      currentContent: snap.stagedContent,
+      commitSha
+    })
   }
 }
 
 // ─────────────────────────────────────────────────────────
-// Sweep (heartbeat-like, but internal — not the user-facing heartbeat)
+// Sweep — housekeeping only (no measurement). Handles shard rotation,
+// retention enforcement, periodic sqlite VACUUM, and index flush.
 // ─────────────────────────────────────────────────────────
 
 async function sweep(): Promise<void> {
   if (!initialized) return
   sweepCount++
   try {
-    // 1. Measure pending items that are past the 10-minute due time.
-    const dueAt = Date.now() - L2_MEASURE_DELAY_MS
-    const dueItems = findPendingDueBefore(dueAt, 50)
-    for (const item of dueItems) {
-      measureFile(item.file_path, "timer_10m")
-    }
-
-    // 2. Rotate current shard if size / age triggers.
+    // 1. Rotate current shard if size / age triggers.
     await maybeRotateShard()
 
-    // 3. Enforce retention (age + measured-age + row-cap all applied here).
+    // 2. Enforce retention (age + measured-age + row-cap all applied here).
     await enforceRetention()
 
-    // 4. Reclaim sqlite free pages periodically. VACUUM is expensive-ish, so
+    // 3. Reclaim sqlite free pages periodically. VACUUM is expensive-ish, so
     //    we only run it every N sweeps (≈ hourly by default).
     if (sweepCount % INDEX_VACUUM_EVERY_N_SWEEPS === 0) {
       try {
@@ -795,7 +1059,7 @@ async function sweep(): Promise<void> {
       }
     }
 
-    // 5. Persist sqlite changes.
+    // 4. Persist sqlite changes.
     flushAdoptionIndex()
   } catch (e) {
     console.warn("[AdoptionTracker] sweep failed:", e)

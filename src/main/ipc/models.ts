@@ -14,6 +14,7 @@ import type {
 } from "../types"
 import { startWatching, stopWatching } from "../services/workspace-watcher"
 import { trackEvent } from "../services/event-reporter"
+import { captureStagedSnapshotsForCommit, measureForCommit } from "../services/adoption-tracker"
 import { getTracesDir } from "../agent/trace/collector"
 import type { AgentTrace } from "../agent/trace/types"
 
@@ -1817,8 +1818,18 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
         logGitStep(threadId, "commit", `add 文件数：${state.changedFiles.length}`)
         await runGit(worktreePath, ["add", "--", ...state.changedFiles])
+        const adoptionSnapshots = captureStagedSnapshotsForCommit(worktreePath)
         logGitStep(threadId, "commit", `commit message: ${message}`)
         await runGit(worktreePath, ["commit", "-m", message])
+        let commitSha: string | undefined
+        try {
+          commitSha = (await runGit(worktreePath, ["rev-parse", "HEAD"], { silent: true })).trim() || undefined
+        } catch {
+          // best-effort: adoption can still be measured without the SHA
+        }
+        if (adoptionSnapshots.length > 0) {
+          measureForCommit(adoptionSnapshots, commitSha)
+        }
         const { getThread, updateThread } = await import("../db")
         const thread = getThread(threadId)
         if (thread) {
@@ -1901,9 +1912,13 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           try {
             logGitStep(threadId, "push", `自动提交 message: ${commitMessage}`)
             await runGit(worktreePath, ["add", "--", ...pending.changedFiles])
+            const adoptionSnapshots = captureStagedSnapshotsForCommit(worktreePath)
             await runGit(worktreePath, ["commit", "-m", commitMessage])
             autoCommitted = true
             autoCommitHead = (await runGit(worktreePath, ["rev-parse", "HEAD"])).trim()
+            if (adoptionSnapshots.length > 0) {
+              measureForCommit(adoptionSnapshots, autoCommitHead || undefined)
+            }
             steps.push({ step: "commit", status: "ok", detail: `自动提交成功：${commitMessage}` })
 
             // Operational telemetry (fire-and-forget, never blocks push flow)

@@ -28,14 +28,23 @@ export class SkillUsageDetector {
     }
   }
 
-  onReadFilePath(rawPath: string): void {
+  /**
+   * Record a read_file path and check whether it matches any loaded skill.
+   * Returns `true` when at least one new skill name was added to the set
+   * (callers can use this to immediately refresh downstream state, e.g.
+   * tracer.setUsedSkills / adoption context, so that subsequent code_gen
+   * events in the same turn carry the skill attribution).
+   */
+  onReadFilePath(rawPath: string): boolean {
     const normalized = normalizePath(rawPath.trim())
-    if (!normalized) return
+    if (!normalized) return false
+
+    const priorSize = this.usedSkillNames.size
 
     const exactMatch = this.loadedSkillsByDocPath.get(normalized)
     if (exactMatch) {
       this.usedSkillNames.add(exactMatch)
-      return
+      return this.usedSkillNames.size > priorSize
     }
 
     for (const [rootDir, skillName] of this.loadedSkillsByRootDir.entries()) {
@@ -43,6 +52,7 @@ export class SkillUsageDetector {
         this.usedSkillNames.add(skillName)
       }
     }
+    return this.usedSkillNames.size > priorSize
   }
 
   getUsedSkillNames(): string[] {

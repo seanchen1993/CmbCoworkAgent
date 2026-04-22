@@ -982,7 +982,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 (typeof tc.args?.file_path === "string" && tc.args.file_path) ||
                 ""
               if (readPathRaw) {
-                skillUsageDetector.onReadFilePath(readPathRaw)
+                const hit = skillUsageDetector.onReadFilePath(readPathRaw)
+                // Sync tracer + adoption context immediately when the hit set
+                // grows. Without this, a write_file/edit_file that follows in
+                // the *same* values batch would snapshot an empty usedSkills
+                // and the resulting code_gen would be missing skill attribution.
+                if (hit) {
+                  tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+                }
               }
             }
 
@@ -1157,7 +1164,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   (typeof tc.args?.file_path === "string" && tc.args.file_path) ||
                   ""
                 if (readPathRaw) {
-                  skillUsageDetector.onReadFilePath(readPathRaw)
+                  const hit = skillUsageDetector.onReadFilePath(readPathRaw)
+                  // See the read_file branch in processMessagesSideEffects —
+                  // a following write/edit in this same messages loop would
+                  // otherwise see a stale usedSkills snapshot.
+                  if (hit) {
+                    tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+                  }
                 }
               }
             }

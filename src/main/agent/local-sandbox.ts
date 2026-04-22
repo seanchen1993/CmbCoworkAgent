@@ -1343,6 +1343,12 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       return { error: `[Hook blocked] ${preResult.stdout || "write_file was blocked by a hook"}` }
     }
     const resolvedPath = this._resolvePath(filePath)
+    // deepagents' FilesystemBackend.write() refuses to overwrite: if the
+    // target exists it returns an "already exists" error and does NOT touch
+    // the file. Therefore every successful super.write() is a brand-new
+    // file ⇒ prior content is empty and deletedLineCount = 0. We skip the
+    // old pre-read entirely (it was wasted I/O on success and would also
+    // bypass isCodeFile / size guards on failure).
     const result = await this.withFileLock(resolvedPath, async () => {
       const r = await super.write(filePath, content)
       if (!r.error) {
@@ -1365,7 +1371,10 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
           tool: "write_file",
           filePath,
           generatedContent: content,
-          workspacePath: this.workingDir
+          workspacePath: this.workingDir,
+          // write_file only succeeds when creating a new file (see above) —
+          // no prior lines could have been deleted.
+          deletedLineCount: 0
         })
       } catch {
         // tracker must not affect tool result
@@ -1485,10 +1494,17 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
           threadId: this.runId,
           tool: "edit_file",
           filePath,
-          // For edits, only the newly inserted string is the "generated" content.
-          // This matches the design: edit_file baseline = new_string lines.
+          // For edits, the local generated fragment is new_string; the tracker
+          // expands its line hashes by occurrences for replaceAll.
           generatedContent: newString,
-          workspacePath: this.workingDir
+          workspacePath: this.workingDir,
+          // Pass the edit fragments only — no full-file references. Tracker
+          // derives deletedLineCount in a microtask via
+          // max(0, countNonBlankLines(oldString) - countNonBlankLines(newString)) * occurrences,
+          // avoiding any full-file scan or retention of editor buffers.
+          oldString,
+          newString,
+          occurrences: result.occurrences
         })
       } catch {
         // tracker must not affect tool result
