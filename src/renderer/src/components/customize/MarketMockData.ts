@@ -291,12 +291,12 @@ export const MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
       "created_at": "2026-04-10T02:36:42.534058+00:00"
     },
     {
-      "name": "pla***li",
+      "name": "playwright-cli111",
       "chinese_name": "p***器",
       "category": "通用场景",
       "featured": "",
       "version": "1.0.6",
-      "user_id": "29***杨琪",
+      "user_id": "293088 / 张三 / 市场",
       "guidance": "你可以说：只能使用p***行今天的股票价格",
       "ip": "99.***.***.166",
       "description": "- playwrig***rror.com",
@@ -304,12 +304,12 @@ export const MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
       "created_at": "2026-03-26T08:04:51.036218+00:00"
     },
     {
-      "name": "pys***er",
+      "name": "pys***er111",
       "chinese_name": "p***级",
       "category": "研发场景",
       "featured": "",
       "version": "1.0.3",
-      "user_id": "80***89",
+      "user_id": "293088",
       "guidance": "可提供目录地址或者具***指定的某个版本。",
       "ip": "99.***.***.132",
       "description": "支持离线分析平台上部***依赖检查等功能。",
@@ -317,12 +317,12 @@ export const MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
       "created_at": "2026-04-15T12:13:56.637167+00:00"
     },
     {
-      "name": "ddl***or",
+      "name": "ddl***or111",
       "chinese_name": "D***成",
       "category": "研发场景",
       "featured": "",
       "version": "1.0.0",
-      "user_id": "31***陈杭",
+      "user_id": "293088 / 张三",
       "guidance": "输***",
       "ip": "99.***.***.230",
       "description": "根据表结构设计生成D***表空间/目录下。",

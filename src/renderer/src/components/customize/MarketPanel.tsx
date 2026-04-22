@@ -269,7 +269,7 @@ function MarketItemCard({
               <span>v{item.version}</span>
             </div>
           )}
-          {item.user_id && (
+          {item.user_id ? ( item.user_id.split('/')?.length ===3 ? <span> {item.user_id}</span> :
             <div className="flex items-center gap-1">
               <User className="size-3 shrink-0" />
               {isSkillCard ? (
@@ -280,7 +280,7 @@ function MarketItemCard({
                 <span>用户 {item.user_id}</span>
               )}
             </div>
-          )}
+          ) : null}
           {skillCallCount !== null && (
             <div className="flex items-center gap-1">
               <BarChart3 className="size-3 shrink-0" />
