@@ -42,6 +42,7 @@ import { ContextUsageIndicator } from "./ContextUsageIndicator"
 import { GitBranchSwitcher } from "./GitBranchSwitcher"
 import type { Message, SkillMetadata } from "@/types"
 import { MessageBubble } from "./MessageBubble"
+import { ChatScrollNavigator } from "./ChatScrollNavigator"
 import { UpdateStatusCard } from "./UpdateStatusCard"
 import {
   SkillCreateConfirmDialog,
@@ -222,6 +223,7 @@ export function ChatContainer({
 }: ChatContainerProps): React.JSX.Element {
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const userMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const isAtBottomRef = useRef(true)
   const isComposingRef = useRef(false)
   const [skills, setSkills] = useState<SkillMetadata[]>([])
@@ -924,6 +926,22 @@ export function ChatContainer({
     })
   }, [threadMessages, streamData.messages])
 
+  const userMessageIds = useMemo(
+    () => displayMessages.filter((message) => message.role === "user").map((message) => message.id),
+    [displayMessages]
+  )
+
+  const setUserMessageRef = useCallback(
+    (messageId: string) => (node: HTMLDivElement | null): void => {
+      if (node) {
+        userMessageRefs.current.set(messageId, node)
+        return
+      }
+      userMessageRefs.current.delete(messageId)
+    },
+    []
+  )
+
   // Build tool results map from tool messages
   const toolResults = useMemo(() => {
     const results = new Map<string, { content: string | unknown; is_error?: boolean }>()
@@ -944,6 +962,108 @@ export function ChatContainer({
       "[data-radix-scroll-area-viewport]"
     ) as HTMLDivElement | null
   }, [])
+
+  const getElementTopInViewport = useCallback((element: HTMLElement, viewport: HTMLElement): number => {
+    const elementRect = element.getBoundingClientRect()
+    const viewportRect = viewport.getBoundingClientRect()
+    return elementRect.top - viewportRect.top + viewport.scrollTop
+  }, [])
+
+  const scrollToTop = useCallback((): void => {
+    const viewport = getViewport()
+    if (!viewport) return
+    viewport.scrollTo({ top: 0, behavior: "smooth" })
+    isAtBottomRef.current = false
+  }, [getViewport])
+
+  const scrollToBottom = useCallback((): void => {
+    const viewport = getViewport()
+    if (!viewport) return
+    viewport.scrollTo({ top: viewport.scrollHeight, behavior: "smooth" })
+    isAtBottomRef.current = true
+  }, [getViewport])
+
+  const scrollToUserQuestionByIndex = useCallback(
+    (index: number): boolean => {
+      if (index < 0 || index >= userMessageIds.length) return false
+
+      const viewport = getViewport()
+      if (!viewport) return false
+
+      const messageId = userMessageIds[index]
+      const targetElement = userMessageRefs.current.get(messageId)
+      if (!targetElement) return false
+
+      const targetTop = Math.max(0, getElementTopInViewport(targetElement, viewport) - 8)
+      viewport.scrollTo({ top: targetTop, behavior: "smooth" })
+      isAtBottomRef.current = false
+      return true
+    },
+    [getElementTopInViewport, getViewport, userMessageIds]
+  )
+
+  const getCurrentUserQuestionIndex = useCallback((): number => {
+    const viewport = getViewport()
+    if (!viewport || userMessageIds.length === 0) return -1
+
+    const viewportAnchor = viewport.scrollTop + 24
+    let currentIndex = -1
+
+    for (let i = 0; i < userMessageIds.length; i += 1) {
+      const messageId = userMessageIds[i]
+      const targetElement = userMessageRefs.current.get(messageId)
+      if (!targetElement) continue
+
+      const top = getElementTopInViewport(targetElement, viewport)
+      if (top <= viewportAnchor) {
+        currentIndex = i
+      } else {
+        break
+      }
+    }
+
+    return currentIndex
+  }, [getElementTopInViewport, getViewport, userMessageIds])
+
+  const handleScrollToPrevUserQuestion = useCallback((): void => {
+    if (displayMessages.length === 0) return
+    if (userMessageIds.length === 0) {
+      scrollToTop()
+      return
+    }
+
+    const currentIndex = getCurrentUserQuestionIndex()
+    const targetIndex = currentIndex > 0 ? currentIndex - 1 : -1
+    if (targetIndex >= 0 && scrollToUserQuestionByIndex(targetIndex)) return
+
+    scrollToTop()
+  }, [
+    displayMessages.length,
+    getCurrentUserQuestionIndex,
+    scrollToTop,
+    scrollToUserQuestionByIndex,
+    userMessageIds.length
+  ])
+
+  const handleScrollToNextUserQuestion = useCallback((): void => {
+    if (displayMessages.length === 0) return
+    if (userMessageIds.length === 0) {
+      scrollToBottom()
+      return
+    }
+
+    const currentIndex = getCurrentUserQuestionIndex()
+    const targetIndex = currentIndex + 1
+    if (targetIndex >= 0 && targetIndex < userMessageIds.length && scrollToUserQuestionByIndex(targetIndex)) return
+
+    scrollToBottom()
+  }, [
+    displayMessages.length,
+    getCurrentUserQuestionIndex,
+    scrollToBottom,
+    scrollToUserQuestionByIndex,
+    userMessageIds.length
+  ])
 
   // Track scroll position to determine if user is at bottom
   const handleScroll = useCallback((): void => {
@@ -2016,18 +2136,24 @@ export function ChatContainer({
                 nextNonToolMessage.role !== "assistant";
 
               return (
-                <MessageBubble
+                <div
+                  isLoading={isLoading}
                   key={message.id}
-                  message={message}
-                  previousMessage={previousMessage}
-                  isStreaming={isLastMessage && isLoading}
-                  showAssistantMeta={showAssistantMeta}
-                  toolResults={toolResults}
-                  pendingApproval={pendingApproval}
-                  onApprovalDecision={handleApprovalDecision}
-                  onEditUserMessage={handleEditUserMessage}
-                  threadId={threadId}
-                />
+                  ref={message.role === "user" ? setUserMessageRef(message.id) : undefined}
+                  data-message-role={message.role}
+                >
+                  <MessageBubble
+                    message={message}
+                    previousMessage={previousMessage}
+                    isStreaming={isLastMessage && isLoading}
+                    showAssistantMeta={showAssistantMeta}
+                    toolResults={toolResults}
+                    pendingApproval={pendingApproval}
+                    onApprovalDecision={handleApprovalDecision}
+                    onEditUserMessage={handleEditUserMessage}
+                    threadId={threadId}
+                  />
+                </div>
               );
             })}
 
@@ -2091,6 +2217,14 @@ export function ChatContainer({
           </div>
         </div>
       </ScrollArea>
+      {displayMessages.length > 0 && (
+        <ChatScrollNavigator
+          onScrollToTop={scrollToTop}
+          onScrollToPrevUserQuestion={handleScrollToPrevUserQuestion}
+          onScrollToNextUserQuestion={handleScrollToNextUserQuestion}
+          onScrollToBottom={scrollToBottom}
+        />
+      )}
       {/* Orchestrator approval bar — placed outside ScrollArea so it's always visible */}
       {pendingApproval && Boolean((pendingApproval as unknown as Record<string, unknown>)._orchestratorRequestId) && (
         <div className="px-4 pb-2">

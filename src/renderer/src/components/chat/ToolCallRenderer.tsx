@@ -14,21 +14,33 @@ import {
   XCircle,
   File,
   Folder,
-  Maximize2,
-  Minimize2,
-  AlertCircle,
-  GitCommit,
-  Eye,
-  EyeOff,
-  Minus,
-  Plus
+  AlertCircle
 } from "lucide-react"
-import { memo, useState } from "react"
+import { useState } from "react"
 import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
 import { getToolLabel } from "@/lib/tool-labels"
 import type { ToolCall, Todo } from "@/types"
-import ReactDiffViewer, { DiffMethod } from "react-diff-viewer-continued"
+import { ToolCallErrorBoundary, RenderProbe } from "./ToolCallErrorBoundary"
+
+// Module-level sentinel so identity is stable across renders. Returned by
+// `tryRender` when the formatter throws synchronously — callers fall back
+// to <RenderProbe> so the ErrorBoundary can catch the throw during its
+// own render phase.
+const THROWN: unique symbol = Symbol("tool-render-thrown")
+
+function tryRender(fn: () => React.ReactNode): React.ReactNode | typeof THROWN {
+  try {
+    return fn()
+  } catch (err) {
+    // The boundary will display the fallback via RenderProbe's second
+    // invocation and log details through componentDidCatch. Keep this at
+    // debug level so the same failure isn't triple-logged in the console
+    // (probe + boundary + React's own "above error occurred..." notice).
+    console.debug("[ToolCallRenderer] formatter threw during probe:", err)
+    return THROWN
+  }
+}
 
 interface ToolCallRendererProps {
   toolCall: ToolCall
@@ -298,7 +310,10 @@ function CommandDisplay({
 }): React.JSX.Element {
   return (
     <div className="text-xs space-y-2 w-full overflow-hidden">
-      <div className="font-mono bg-background rounded-sm p-2 flex items-center gap-2 min-w-0">
+      <div
+        className="font-mono bg-background rounded-sm p-2 flex items-center gap-2 min-w-0"
+        title={command || undefined}
+      >
         <span className="text-status-info shrink-0">$</span>
         <span className="truncate">{command}</span>
       </div>
@@ -340,314 +355,6 @@ function TaskDisplay({
   )
 }
 
-// Render git diff nicely
-interface DiffDisplayProps {
-  diff?: string
-  oldValue?: string
-  newValue?: string
-}
-
-export const DiffDisplay = memo(({ diff, oldValue, newValue }: DiffDisplayProps) => {
-  const [isFullscreen, setIsFullscreen] = useState(false)
-  const [renderMode, setRenderMode] = useState<"preview" | "full">("preview")
-
-  const diffToUse = diff || ""
-
-  // Parse git diff to extract old and new content
-  const parseGitDiff = (diffText: string) => {
-    const lines = diffText.split("\n")
-    let oldContent = ""
-    let newContent = ""
-    let inHunk = false
-    let totalLines = 0
-    let addedLines = 0
-    let removedLines = 0
-
-    for (const line of lines) {
-      if (line.startsWith("@@")) {
-        inHunk = true
-        continue
-      }
-      if (inHunk) {
-        totalLines++
-        if (line.startsWith("-")) {
-          oldContent += line.substring(1) + "\n"
-          removedLines++
-        } else if (line.startsWith("+")) {
-          newContent += line.substring(1) + "\n"
-          addedLines++
-        } else if (line.startsWith(" ")) {
-          oldContent += line.substring(1) + "\n"
-          newContent += line.substring(1) + "\n"
-        }
-      }
-    }
-
-    return {
-      oldContent: oldContent.trim(),
-      newContent: newContent.trim(),
-      totalLines,
-      addedLines,
-      removedLines
-    }
-  }
-
-  const { oldContent, newContent, totalLines, addedLines, removedLines } = parseGitDiff(diffToUse)
-
-  const isLargeDiff = totalLines > 100
-  const maxPreviewLines = 20
-
-  const getPreviewContent = (content: string, maxLines: number) => {
-    const lines = content.split("\n")
-    if (lines.length <= maxLines) return content
-    return (
-      lines.slice(0, maxLines).join("\n") +
-      "\n...(显示前 " +
-      maxLines +
-      " 行，共 " +
-      lines.length +
-      " 行)"
-    )
-  }
-
-  const shouldUsePreview = isLargeDiff && renderMode === "preview"
-  const displayOldContent = shouldUsePreview
-    ? getPreviewContent(oldContent, maxPreviewLines)
-    : oldContent
-  const displayNewContent = shouldUsePreview
-    ? getPreviewContent(newContent, maxPreviewLines)
-    : newContent
-
-  const makeDiffViewer = (fullscreen: boolean) => (
-    <ReactDiffViewer
-      oldValue={oldValue || displayOldContent}
-      newValue={newValue || displayNewContent}
-      splitView={fullscreen}
-      hideLineNumbers={!fullscreen}
-      renderGutter={
-        !fullscreen
-          ? (data) => {
-              const { lineNumber, additionalLineNumber, type, styles } = data
-              const displayLineNumber = lineNumber ?? additionalLineNumber
-              const added = type === 1
-              const removed = type === 2
-              const changed = type === 3
-
-              return (
-                <td
-                  className={cn(
-                    styles.gutter,
-                    !displayLineNumber && styles.emptyGutter,
-                    added && styles.diffAdded,
-                    removed && styles.diffRemoved,
-                    changed && styles.diffChanged
-                  )}
-                >
-                  <pre className={styles.lineNumber}>{displayLineNumber ?? ""}</pre>
-                </td>
-              )
-            }
-          : undefined
-      }
-      useDarkTheme={false}
-      loadingElement={() => (
-        <div className="flex items-center justify-center gap-2 py-6 text-sm text-muted-foreground">
-          <div className="size-3 rounded-full bg-primary/40 animate-pulse" />
-          加载中…
-        </div>
-      )}
-      disableWordDiff={shouldUsePreview}
-      compareMethod={shouldUsePreview ? DiffMethod.LINES : DiffMethod.WORDS}
-      styles={{
-        variables: {
-          light: {
-            diffViewerBackground: "#ffffff",
-            diffViewerColor: "#292524",
-            addedBackground: "#dcfce7",
-            addedColor: "#166534",
-            removedBackground: "#fee2e2",
-            removedColor: "#991b1b",
-            wordAddedBackground: "#bbf7d0",
-            wordRemovedBackground: "#fecaca",
-            addedGutterBackground: "#bbf7d0",
-            removedGutterBackground: "#fecaca",
-            gutterBackground: "#FAF9F6",
-            gutterBackgroundDark: "#F0EEE9",
-            highlightBackground: "#fef9c3",
-            highlightGutterBackground: "#fef08a",
-            codeFoldGutterBackground: "#F5F3EF",
-            codeFoldBackground: "#F5F3EF",
-            emptyLineBackground: "#F5F3EF",
-            gutterColor: "#A8A29E",
-            addedGutterColor: "#16a34a",
-            removedGutterColor: "#dc2626",
-            codeFoldContentColor: "#A8A29E",
-            diffViewerTitleBackground: "#F0EEE9",
-            diffViewerTitleColor: "#44403C",
-            diffViewerTitleBorderColor: "#EEECE7"
-          }
-        },
-        diffContainer: {
-          maxHeight: fullscreen ? "100%" : "22rem",
-          minHeight: fullscreen ? "100%" : "80px",
-          overflow: "auto",
-          height: fullscreen ? "100%" : undefined,
-          borderRadius: "0"
-        },
-        line: {
-          lineHeight: "1.65",
-          fontSize: "0.75rem"
-        },
-        contentText: {
-          fontFamily: "'Consolas', 'JetBrains Mono', 'Fira Code', monospace"
-          // fontSize: "0.75rem",
-        },
-        gutter: {
-          minWidth: "2.5rem",
-          padding: "0 0.5rem"
-        }
-      }}
-    />
-  )
-
-  return (
-    <>
-      {/* Header toolbar */}
-      <div className="flex items-center justify-between gap-2 px-3 py-2 bg-muted/60 border-b border-border">
-        {/* Left: icon + title + stats */}
-        <div className="flex items-center gap-2 min-w-0">
-          <GitCommit className="size-3.5 text-muted-foreground shrink-0" />
-          <span className="text-[11px] font-semibold text-foreground tracking-wide truncate">
-            变更预览
-          </span>
-          {(addedLines > 0 || removedLines > 0) && (
-            <div className="flex items-center gap-1">
-              {addedLines > 0 && (
-                <span className="inline-flex items-center gap-0.5 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-400">
-                  <Plus className="size-2.5" />
-                  {addedLines}
-                </span>
-              )}
-              {removedLines > 0 && (
-                <span className="inline-flex items-center gap-0.5 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-400">
-                  <Minus className="size-2.5" />
-                  {removedLines}
-                </span>
-              )}
-              {isLargeDiff && (
-                <span className="text-[10px] text-muted-foreground">共 {totalLines} 行</span>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Right: controls */}
-        <div className="flex items-center gap-1 shrink-0">
-          <button
-            onClick={() => setIsFullscreen(true)}
-            className="inline-flex items-center justify-center text-[10px] font-medium cursor-pointer px-1.5 py-1 rounded bg-background hover:bg-accent/20 border border-border text-muted-foreground hover:text-foreground transition-colors"
-            title="全屏查看"
-            aria-label="全屏查看"
-          >
-            <Maximize2 className="size-2.5" />
-          </button>
-        </div>
-      </div>
-
-      {/* Large-file warning banner */}
-      {isLargeDiff && renderMode === "full" && (
-        <div className="flex items-center gap-2 px-3 py-1.5 bg-amber-50 dark:bg-amber-950/60 border-b border-amber-200 dark:border-amber-800">
-          <div className="size-1.5 rounded-full bg-amber-500 animate-pulse shrink-0" />
-          <span className="text-amber-700 dark:text-amber-300">
-            大文件渲染可能较慢，建议切换至全屏模式查看
-          </span>
-        </div>
-      )}
-
-      {/* Diff content */}
-      <div
-        className="relative font-mono bg-white overflow-auto w-full"
-        style={{ maxHeight: "22rem", minHeight: "5rem" }}
-      >
-        {makeDiffViewer(false)}
-      </div>
-
-      {/* Fullscreen modal */}
-      {isFullscreen && (
-        <div
-          className="fixed inset-0 z-50 flex flex-col bg-background/98 backdrop-blur-sm"
-          style={{ marginTop: "40px" }}
-        >
-          {/* Modal header */}
-          <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-muted/40 shrink-0">
-            <div className="flex items-center gap-3">
-              <div className="flex items-center gap-2">
-                <GitCommit className="size-4 text-primary" />
-                <span className="text-sm font-semibold">Git Diff — 全屏视图</span>
-              </div>
-              <div className="flex items-center gap-1.5">
-                {addedLines > 0 && (
-                  <span className="inline-flex items-center gap-0.5 text-[11px] font-medium px-2 py-0.5 rounded-full bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-400">
-                    <Plus className="size-3" />
-                    {addedLines} 行新增
-                  </span>
-                )}
-                {removedLines > 0 && (
-                  <span className="inline-flex items-center gap-0.5 text-[11px] font-medium px-2 py-0.5 rounded-full bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-400">
-                    <Minus className="size-3" />
-                    {removedLines} 行删除
-                  </span>
-                )}
-                <span className="text-xs text-muted-foreground">共 {totalLines} 行</span>
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              {isLargeDiff && (
-                <button
-                  onClick={() => setRenderMode(renderMode === "preview" ? "full" : "preview")}
-                  className="inline-flex items-center gap-1.5 cursor-pointer px-3 py-1.5 text-xs font-medium bg-background hover:bg-muted border border-border rounded transition-colors"
-                >
-                  {renderMode === "preview" ? (
-                    <>
-                      <Eye className="size-3" />
-                      展开全部代码
-                    </>
-                  ) : (
-                    <>
-                      <EyeOff className="size-3" />
-                      精简预览
-                    </>
-                  )}
-                </button>
-              )}
-              <button
-                onClick={() => {
-                  setIsFullscreen(false)
-                  setRenderMode("preview")
-                }}
-                className="inline-flex items-center gap-1.5 cursor-pointer px-3 py-1.5 text-xs font-medium hover:bg-muted border border-border rounded transition-colors"
-                title="退出全屏"
-              >
-                <Minimize2 className="size-3" />
-                退出全屏
-              </button>
-            </div>
-          </div>
-
-          {/* Modal content */}
-          <div className="flex-1 overflow-hidden p-4">
-            <div className="h-full rounded-md border border-border overflow-auto bg-white font-mono text-xs">
-              {makeDiffViewer(true)}
-            </div>
-          </div>
-        </div>
-      )}
-    </>
-  )
-})
-
-DiffDisplay.displayName = "DiffDisplay"
-
 export function ToolCallRenderer({
   toolCall,
   result,
@@ -680,22 +387,44 @@ export function ToolCallRenderer({
     onApprovalDecision?.("reject")
   }
 
-  // Format the main argument for display
+  // Format the main argument for display. All reads go through `str()` so
+  // a malformed / non-string value from the model never reaches JSX or
+  // .slice() — either would blow up ToolCallRenderer before the inner
+  // ErrorBoundary can catch it.
+  const str = (v: unknown, truncate?: number): string | null => {
+    if (typeof v !== "string" || !v) return null
+    return truncate ? v.slice(0, truncate) : v
+  }
   const getDisplayArg = (): string | null => {
     if (!args) return null
-    if (args.path) return args.path as string
-    if (args.file_path) return args.file_path as string
-    if (args.command) return (args.command as string).slice(0, 50)
-    if (args.pattern) return args.pattern as string
-    if (args.query) return args.query as string
-    if (args.glob) return args.glob as string
-    if (args.branch) return args.branch as string
-    if (args.remoteUrl) return args.remoteUrl as string
-    if (args.commitMessage) return (args.commitMessage as string).slice(0, 50)
-    return null
+    return (
+      str(args.path)
+      ?? str(args.file_path)
+      ?? str(args.command, 50)
+      ?? str(args.pattern)
+      ?? str(args.query)
+      ?? str(args.glob)
+      ?? str(args.branch)
+      ?? str(args.remoteUrl)
+      ?? str(args.commitMessage, 50)
+    )
   }
 
   const displayArg = getDisplayArg()
+
+  // Shared across execute's content/result formatters so we don't pay
+  // safeStringify's deep-JSON cost twice for the same non-string result
+  // (can matter for large stdout from git log / npm test / etc).
+  const executeOutput: string | undefined =
+    toolCall.name === "execute"
+      ? typeof result === "string"
+        ? result
+        : result === undefined
+          ? undefined
+          : result === null
+            ? ""
+            : safeStringify(result)
+      : undefined
 
   // Render formatted content based on tool type
   const renderFormattedContent = (): React.ReactNode => {
@@ -720,8 +449,18 @@ export function ToolCallRenderer({
       }
 
       case "execute": {
-        const output = typeof result === "string" ? result : undefined
-        return <CommandDisplay command="" output={isExpanded ? output : undefined} />
+        const command =
+          typeof args.command === "string"
+            ? args.command
+            : args.command == null
+              ? ""
+              : safeStringify(args.command)
+        return (
+          <CommandDisplay
+            command={command}
+            output={isExpanded ? executeOutput : undefined}
+          />
+        )
       }
 
       default:
@@ -821,7 +560,9 @@ export function ToolCallRenderer({
       case "execute": {
         // When expanded, output is shown in CommandDisplay - just show status
         // When collapsed, show the output preview
-        const output = typeof result === "string" ? result : safeStringify(result)
+        // Uses the outer `executeOutput` so we only pay safeStringify once
+        // per render (see its declaration above).
+        const output = executeOutput ?? ""
 
         // Special handling for git diff commands
         // todo 暂时注释，看后续是否要放开
@@ -857,7 +598,7 @@ export function ToolCallRenderer({
         // Collapsed view - show output preview
         if (output.trim()) {
           return (
-            <pre className="space-y-2">
+            <div className="space-y-2">
               <div className="text-xs text-status-nominal flex items-center gap-1.5">
                 <CheckCircle2 className="size-3" />
                 <span>Command completed</span>
@@ -866,7 +607,7 @@ export function ToolCallRenderer({
                 {output.slice(0, 500)}
                 {output.length > 500 && "..."}
               </pre>
-            </pre>
+            </div>
           )
         }
         return (
@@ -947,9 +688,75 @@ export function ToolCallRenderer({
     }
   }
 
-  const formattedContent = renderFormattedContent()
-  const formattedResult = renderFormattedResult()
-  const hasFormattedDisplay = formattedContent || formattedResult
+  // `resetKey` is a fingerprint of tool-call progress. When it changes
+  // while the boundary is in an error state, the boundary clears its
+  // error state and re-renders the children — so a mid-stream render
+  // error recovers as soon as the data changes. (Note: once the error
+  // has been caught, the original subtree is already unmounted by React's
+  // error-boundary semantics — "soft reset" here means "no new boundary
+  // instance via parent-key change", not "subtree state preserved". For
+  // normal happy-path re-renders without errors no unmount happens at all.)
+  //
+  // Fingerprint granularity:
+  //   - string:  exact length (soft reset per chunk; no remount cost)
+  //   - array:   element count
+  //   - object:  top-level key count (explicit null branch because
+  //              `typeof null === "object"` in JS)
+  //   - other primitives: stable
+  // args is folded in too because some formatters (e.g. edit_file's diff
+  // summary) depend on args while result is still pending.
+  const id = toolCall.id ?? toolCall.name
+  const argsFingerprint =
+    args && typeof args === "object" ? `a${Object.keys(args).length}` : "a0"
+  const resultFingerprint =
+    result === undefined
+      ? "pending"
+      : typeof result === "string"
+        ? `s${result.length}`
+        : result === null
+          ? "null"
+          : Array.isArray(result)
+            ? `arr${result.length}`
+            : typeof result === "object"
+              ? `obj${Object.keys(result as object).length}`
+              : "prim"
+  // Include isExpanded because several formatters take different branches
+  // based on it (execute output, task details, etc). Without it a render
+  // error in one state would stick even after the user toggled to the
+  // other.
+  const resetKey = `${id}:${argsFingerprint}:${resultFingerprint}:${isExpanded ? 1 : 0}`
+  // Evaluate formatters once per parent render. Happy path: the resulting
+  // element is handed to both the "should we render the container?" check
+  // and the boundary (no double invocation on read_file / grep / diff).
+  // Throw path: fall back to <RenderProbe> so the formatter runs again
+  // during the boundary's render phase — that second call is the only way
+  // React's error boundary can catch the throw. Notes:
+  //   - happy path  = 1 invocation  (was 2 before this optimisation)
+  //   - throw path  = 2 invocations (unavoidable — boundary needs the
+  //                   throw to happen inside its subtree)
+  const contentNode = tryRender(renderFormattedContent)
+  const resultNode = tryRender(renderFormattedResult)
+  const contentHasOutput = contentNode === THROWN || contentNode != null
+  const resultHasOutput = resultNode === THROWN || resultNode != null
+  const hasFormattedDisplay = contentHasOutput || resultHasOutput
+  const formattedContent = contentHasOutput ? (
+    <ToolCallErrorBoundary toolName={toolCall.name} resetKey={`c:${resetKey}`}>
+      {contentNode === THROWN ? (
+        <RenderProbe render={renderFormattedContent} />
+      ) : (
+        contentNode
+      )}
+    </ToolCallErrorBoundary>
+  ) : null
+  const formattedResult = resultHasOutput ? (
+    <ToolCallErrorBoundary toolName={toolCall.name} resetKey={`r:${resetKey}`}>
+      {resultNode === THROWN ? (
+        <RenderProbe render={renderFormattedResult} />
+      ) : (
+        resultNode
+      )}
+    </ToolCallErrorBoundary>
+  ) : null
 
   return (
     <div

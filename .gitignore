@@ -23,3 +23,7 @@ resources/lsp-vsix/*.vsix
 # Claude Code local session artifacts
 .cmbdevclaw/
 AGENTS.md
+claude-code-source-code-main
+
+
+claude-code-source-code-main/

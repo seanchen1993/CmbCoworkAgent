@@ -136,7 +136,7 @@ export function WorkspacePicker({ threadId, onGitStatusChange }: WorkspacePicker
         if (cancelled) return
         if (result.success && result.files) setWorkspaceFiles(result.files)
 
-        const gitInfo = await window.api.workspace.isGit(p, { includeWorktrees: false })
+        const gitInfo = await window.api.workspace.isGit(p, { includeWorktrees: false, threadId })
         if (cancelled) return
         setIsGit(gitInfo.isGit)
         setGitRoot(gitInfo.isGit ? gitInfo.gitRoot : null)
@@ -173,7 +173,7 @@ export function WorkspacePicker({ threadId, onGitStatusChange }: WorkspacePicker
     await selectWorkspaceFolder(threadId, setWorkspacePath, setWorkspaceFiles, setLoading, setOpen)
     const newPath = await window.api.workspace.get(threadId)
     if (newPath) {
-      const gitInfo = await window.api.workspace.isGit(newPath, { includeWorktrees: false })
+      const gitInfo = await window.api.workspace.isGit(newPath, { includeWorktrees: false, threadId })
       setIsGit(gitInfo.isGit)
       setGitRoot(gitInfo.isGit ? gitInfo.gitRoot : null)
       setIsWorktreePath(gitInfo.isWorktreePath)
@@ -374,7 +374,7 @@ export function WorkspacePicker({ threadId, onGitStatusChange }: WorkspacePicker
                   {worktreeError && (
                     <div className="flex items-start gap-1.5 text-[11px] text-destructive">
                       <AlertCircle className="size-3 mt-0.5 shrink-0" />
-                      <span>{worktreeError}</span>
+                      <span className="min-w-0 break-all">{worktreeError}</span>
                     </div>
                   )}
                   <Button
