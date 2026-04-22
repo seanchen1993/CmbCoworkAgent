@@ -7,17 +7,67 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
 import type { HookConfig, HookEvent } from "@/types"
-import { AddHookDialog, COMMON_TOOLS } from "./AddHookDialog"
+import {
+  AddHookDialog,
+  COMMAND_HOOK_EVENT_DOCS,
+  COMMON_TOOLS,
+  getCommandHookReadableContextDocs,
+  getCommandHookToolInputDocs,
+  getCommandHookToolInputSummary
+} from "./AddHookDialog"
 
-const EVENT_BADGE: Record<HookEvent, { label: string; className: string; english: string; tip: string }> = {
-  PreToolUse:   { label: "调用前", className: "bg-blue-500/15 text-blue-600 dark:text-blue-400",     english: "PreToolUse",        tip: "工具执行前触发，可拦截并阻止执行" },
-  PostToolUse:  { label: "调用后", className: "bg-green-500/15 text-green-600 dark:text-green-400",   english: "PostToolUse",       tip: "工具执行后触发，输出追加到 Agent 上下文" },
-  UserPromptSubmit: { label: "提交", className: "bg-cyan-500/15 text-cyan-600 dark:text-cyan-400",    english: "UserPromptSubmit",  tip: "用户消息进入模型前触发，可阻断或重写" },
-  SessionStart: { label: "会话始", className: "bg-teal-500/15 text-teal-600 dark:text-teal-400",      english: "SessionStart",      tip: "线程首次运行 Agent 时触发一次" },
-  SessionEnd:   { label: "会话终", className: "bg-rose-500/15 text-rose-600 dark:text-rose-400",      english: "SessionEnd",        tip: "线程删除或应用退出时触发" },
-  Stop:         { label: "停止",   className: "bg-amber-500/15 text-amber-600 dark:text-amber-400",   english: "Stop",              tip: "Agent 完成任务停止时触发，可请求返工" },
-  Notification: { label: "通知",   className: "bg-purple-500/15 text-purple-600 dark:text-purple-400", english: "Notification",      tip: "Agent 等待审批时触发，用于自定义提醒" },
-  SubagentStop: { label: "子停止", className: "bg-indigo-500/15 text-indigo-600 dark:text-indigo-400", english: "SubagentStop",      tip: "子 Agent 完成任务时触发" }
+const EVENT_BADGE: Record<
+  HookEvent,
+  { label: string; className: string; english: string; tip: string }
+> = {
+  PreToolUse: {
+    label: "调用前",
+    className: "bg-blue-500/15 text-blue-600 dark:text-blue-400",
+    english: "PreToolUse",
+    tip: "工具执行前触发，可拦截并阻止执行"
+  },
+  PostToolUse: {
+    label: "调用后",
+    className: "bg-green-500/15 text-green-600 dark:text-green-400",
+    english: "PostToolUse",
+    tip: "工具执行后触发，输出追加到 Agent 上下文"
+  },
+  UserPromptSubmit: {
+    label: "提交",
+    className: "bg-cyan-500/15 text-cyan-600 dark:text-cyan-400",
+    english: "UserPromptSubmit",
+    tip: "用户消息进入模型前触发，可阻断或重写"
+  },
+  SessionStart: {
+    label: "会话始",
+    className: "bg-teal-500/15 text-teal-600 dark:text-teal-400",
+    english: "SessionStart",
+    tip: "线程首次运行 Agent 时触发一次"
+  },
+  SessionEnd: {
+    label: "会话终",
+    className: "bg-rose-500/15 text-rose-600 dark:text-rose-400",
+    english: "SessionEnd",
+    tip: "线程删除或应用退出时触发"
+  },
+  Stop: {
+    label: "停止",
+    className: "bg-amber-500/15 text-amber-600 dark:text-amber-400",
+    english: "Stop",
+    tip: "Agent 完成任务停止时触发，可请求返工"
+  },
+  Notification: {
+    label: "通知",
+    className: "bg-purple-500/15 text-purple-600 dark:text-purple-400",
+    english: "Notification",
+    tip: "Agent 等待审批时触发，用于自定义提醒"
+  },
+  SubagentStop: {
+    label: "子停止",
+    className: "bg-indigo-500/15 text-indigo-600 dark:text-indigo-400",
+    english: "SubagentStop",
+    tip: "子 Agent 完成任务时触发"
+  }
 }
 
 /** Human-readable summary shown in the list item */
@@ -54,7 +104,9 @@ export function HooksPanel(): React.JSX.Element {
     }
   }, [])
 
-  useEffect(() => { loadHooks() }, [loadHooks])
+  useEffect(() => {
+    loadHooks()
+  }, [loadHooks])
 
   const filteredHooks = useMemo(() => {
     const q = debouncedQuery.trim().toLowerCase()
@@ -89,7 +141,9 @@ export function HooksPanel(): React.JSX.Element {
     [loadHooks]
   )
 
-  const handleAddSuccess = useCallback(() => { loadHooks() }, [loadHooks])
+  const handleAddSuccess = useCallback(() => {
+    loadHooks()
+  }, [loadHooks])
 
   return (
     <>
@@ -111,7 +165,10 @@ export function HooksPanel(): React.JSX.Element {
                   <button
                     type="button"
                     className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground p-0.5 rounded"
-                    onClick={() => { setSearchQuery(""); setDebouncedQuery("") }}
+                    onClick={() => {
+                      setSearchQuery("")
+                      setDebouncedQuery("")
+                    }}
                     aria-label="清除"
                   >
                     <X className="size-3" />
@@ -122,7 +179,10 @@ export function HooksPanel(): React.JSX.Element {
                 variant="ghost"
                 size="sm"
                 className="h-7 w-7 p-0 shrink-0"
-                onClick={() => { setEditHook(null); setDialogOpen(true) }}
+                onClick={() => {
+                  setEditHook(null)
+                  setDialogOpen(true)
+                }}
               >
                 <Plus className="size-4" />
               </Button>
@@ -152,7 +212,12 @@ export function HooksPanel(): React.JSX.Element {
                     <TooltipProvider delayDuration={200}>
                       <Tooltip>
                         <TooltipTrigger asChild>
-                          <span className={cn("text-[10px] font-medium px-1.5 py-0.5 rounded-full shrink-0 cursor-default", badge.className)}>
+                          <span
+                            className={cn(
+                              "text-[10px] font-medium px-1.5 py-0.5 rounded-full shrink-0 cursor-default",
+                              badge.className
+                            )}
+                          >
                             {badge.label}
                           </span>
                         </TooltipTrigger>
@@ -163,15 +228,18 @@ export function HooksPanel(): React.JSX.Element {
                       </Tooltip>
                     </TooltipProvider>
                     {/* type icon */}
-                    {isPrompt
-                      ? <BrainCircuit className="size-3 shrink-0 text-violet-500" />
-                      : <Terminal className="size-3 shrink-0 text-muted-foreground" />
-                    }
-                    <span className={cn(
-                      "text-sm truncate flex-1",
-                      isPrompt ? "italic" : "font-mono",
-                      !hook.enabled && "text-muted-foreground"
-                    )}>
+                    {isPrompt ? (
+                      <BrainCircuit className="size-3 shrink-0 text-violet-500" />
+                    ) : (
+                      <Terminal className="size-3 shrink-0 text-muted-foreground" />
+                    )}
+                    <span
+                      className={cn(
+                        "text-sm truncate flex-1",
+                        isPrompt ? "italic" : "font-mono",
+                        !hook.enabled && "text-muted-foreground"
+                      )}
+                    >
                       {summary}
                     </span>
                     {!hook.enabled && (
@@ -192,7 +260,10 @@ export function HooksPanel(): React.JSX.Element {
             hook={selectedHook}
             onToggleEnabled={handleToggleEnabled}
             onDelete={handleDelete}
-            onEdit={(h) => { setEditHook(h); setDialogOpen(true) }}
+            onEdit={(h) => {
+              setEditHook(h)
+              setDialogOpen(true)
+            }}
           />
         ) : (
           <EmptyState />
@@ -201,7 +272,10 @@ export function HooksPanel(): React.JSX.Element {
 
       <AddHookDialog
         open={dialogOpen}
-        onOpenChange={(open) => { setDialogOpen(open); if (!open) setEditHook(null) }}
+        onOpenChange={(open) => {
+          setDialogOpen(open)
+          if (!open) setEditHook(null)
+        }}
         onSuccess={handleAddSuccess}
         editHook={editHook}
       />
@@ -224,6 +298,10 @@ function HookDetail(props: {
   const modelName = hook.modelId
     ? (models.find((m) => m.id === hook.modelId)?.name ?? hook.modelId)
     : null
+  const commandHookDoc = COMMAND_HOOK_EVENT_DOCS[hook.event]
+  const readableContextDocs = getCommandHookReadableContextDocs(hook.event)
+  const toolInputDocs = getCommandHookToolInputDocs(hook.event, hook.matcher)
+  const toolInputSummary = getCommandHookToolInputSummary(hook.event, hook.matcher)
 
   return (
     <div className="p-6 space-y-6">
@@ -231,19 +309,27 @@ function HookDetail(props: {
       <div className="flex items-start justify-between gap-4">
         <div className="space-y-1 min-w-0">
           <div className="flex items-center gap-2">
-            {isPrompt
-              ? <BrainCircuit className="size-4 text-violet-500 shrink-0" />
-              : <Terminal className="size-4 text-muted-foreground shrink-0" />
-            }
+            {isPrompt ? (
+              <BrainCircuit className="size-4 text-violet-500 shrink-0" />
+            ) : (
+              <Terminal className="size-4 text-muted-foreground shrink-0" />
+            )}
             <h3 className={cn("text-base font-bold truncate", isPrompt ? "italic" : "font-mono")}>
-              {isPrompt ? (hook.prompt ?? "").slice(0, 60) + ((hook.prompt?.length ?? 0) > 60 ? "…" : "") : (hook.command ?? "")}
+              {isPrompt
+                ? (hook.prompt ?? "").slice(0, 60) + ((hook.prompt?.length ?? 0) > 60 ? "…" : "")
+                : (hook.command ?? "")}
             </h3>
           </div>
           <div className="flex items-center gap-2">
             <TooltipProvider delayDuration={200}>
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <span className={cn("text-[10px] font-medium px-1.5 py-0.5 rounded-full cursor-default", badge.className)}>
+                  <span
+                    className={cn(
+                      "text-[10px] font-medium px-1.5 py-0.5 rounded-full cursor-default",
+                      badge.className
+                    )}
+                  >
                     {badge.label}
                   </span>
                 </TooltipTrigger>
@@ -253,39 +339,58 @@ function HookDetail(props: {
                 </TooltipContent>
               </Tooltip>
             </TooltipProvider>
-            <span className={cn(
-              "text-[10px] font-medium px-1.5 py-0.5 rounded-full",
-              isPrompt
-                ? "bg-violet-500/15 text-violet-600 dark:text-violet-400"
-                : "bg-zinc-500/15 text-zinc-600 dark:text-zinc-400"
-            )}>
+            <span
+              className={cn(
+                "text-[10px] font-medium px-1.5 py-0.5 rounded-full",
+                isPrompt
+                  ? "bg-violet-500/15 text-violet-600 dark:text-violet-400"
+                  : "bg-zinc-500/15 text-zinc-600 dark:text-zinc-400"
+              )}
+            >
               {isPrompt ? "自然语言策略" : "Shell 命令"}
             </span>
-            {hook.matcher && (() => {
-              const preset = COMMON_TOOLS.find((t) => t.value !== "custom" && t.value === hook.matcher)
-              return (
-                <TooltipProvider delayDuration={200}>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span className="text-xs text-muted-foreground font-mono cursor-default">
-                        {preset ? preset.label : hook.matcher}
-                      </span>
-                    </TooltipTrigger>
-                    <TooltipContent side="bottom">
-                      <p className="font-mono text-xs font-semibold">{hook.matcher}</p>
-                      {preset && <p className="text-xs text-muted-foreground">{preset.description}</p>}
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
-              )
-            })()}
+            {hook.matcher &&
+              (() => {
+                const preset = COMMON_TOOLS.find(
+                  (t) => t.value !== "custom" && t.value === hook.matcher
+                )
+                return (
+                  <TooltipProvider delayDuration={200}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span className="text-xs text-muted-foreground font-mono cursor-default">
+                          {preset ? preset.label : hook.matcher}
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent side="bottom">
+                        <p className="font-mono text-xs font-semibold">{hook.matcher}</p>
+                        {preset && (
+                          <p className="text-xs text-muted-foreground">{preset.description}</p>
+                        )}
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                )
+              })()}
           </div>
         </div>
         <div className="flex items-center gap-1 shrink-0">
-          <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => onEdit(hook)} title="编辑">
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 w-7 p-0"
+            onClick={() => onEdit(hook)}
+            title="编辑"
+          >
             <Pencil className="size-3.5" />
           </Button>
-          <Button variant="ghost" size="sm" className="h-7 w-7 p-0 text-destructive hover:text-destructive" onClick={() => onDelete(hook)} title="删除">
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 w-7 p-0 text-destructive hover:text-destructive"
+            onClick={() => onDelete(hook)}
+            title="删除"
+          >
             <Trash2 className="size-3.5" />
           </Button>
           <Button
@@ -301,11 +406,24 @@ function HookDetail(props: {
 
       {/* Details */}
       <div className="space-y-4">
-        <DetailRow label="事件类型" value={`${badge.label}（${badge.english}）`} subtext={badge.tip} />
-        {hook.matcher && (() => {
-          const preset = COMMON_TOOLS.find((t) => t.value !== "custom" && t.value === hook.matcher)
-          return <DetailRow label="工具匹配" value={preset ? `${preset.label}（${hook.matcher}）` : hook.matcher} mono={!preset} />
-        })()}
+        <DetailRow
+          label="事件类型"
+          value={`${badge.label}（${badge.english}）`}
+          subtext={badge.tip}
+        />
+        {hook.matcher &&
+          (() => {
+            const preset = COMMON_TOOLS.find(
+              (t) => t.value !== "custom" && t.value === hook.matcher
+            )
+            return (
+              <DetailRow
+                label="工具匹配"
+                value={preset ? `${preset.label}（${hook.matcher}）` : hook.matcher}
+                mono={!preset}
+              />
+            )
+          })()}
 
         {isPrompt ? (
           <>
@@ -322,7 +440,157 @@ function HookDetail(props: {
             />
           </>
         ) : (
-          <DetailRow label="命令" value={hook.command ?? ""} mono />
+          <>
+            <DetailRow label="命令" value={hook.command ?? ""} mono />
+            <DetailRow
+              label="输入协议"
+              value="脚本通过 stdin JSON + 环境变量接收上下文；stdout 可返回纯文本或 JSON，stderr 用于调试日志。"
+            />
+            <div className="flex items-start gap-4">
+              <span className="text-sm text-muted-foreground w-20 shrink-0">脚本输入</span>
+              <div className="flex-1 space-y-2 rounded-md border border-border/50 bg-muted/30 px-3 py-2">
+                <p className="text-sm text-foreground/90">{commandHookDoc.inputDescription}</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {commandHookDoc.inputFields.map((field) => (
+                    <span
+                      key={field}
+                      className="rounded-full border border-border/50 bg-background px-2 py-0.5 font-mono text-[10px] text-foreground/80"
+                    >
+                      {field}
+                    </span>
+                  ))}
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {commandHookDoc.envFields.map((field) => (
+                    <span
+                      key={field}
+                      className="rounded-full border border-dashed border-border/50 bg-background px-2 py-0.5 font-mono text-[10px] text-muted-foreground"
+                    >
+                      {field}
+                    </span>
+                  ))}
+                </div>
+                <div className="rounded-md border border-border/40 bg-background/80 px-3 py-2 space-y-3">
+                  <div className="space-y-1">
+                    <p className="text-sm font-medium text-foreground">可读取信息总览</p>
+                    <p className="text-sm text-muted-foreground">
+                      当前事件下，脚本可直接从 stdin JSON、环境变量和事件专属对象里读取这些信息。
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <p className="text-xs font-medium text-foreground/90">stdin 顶层字段</p>
+                    <div className="space-y-2">
+                      {readableContextDocs.stdinFields.map((field) => (
+                        <div
+                          key={field.key}
+                          className="rounded-md border border-border/40 bg-muted/20 px-3 py-2 space-y-1"
+                        >
+                          <span className="inline-flex rounded-full border border-border/50 bg-background px-2 py-0.5 font-mono text-[10px] text-foreground/80">
+                            {field.key}
+                          </span>
+                          <p className="text-sm text-muted-foreground">{field.description}</p>
+                          {field.note && <p className="text-xs text-foreground/80">{field.note}</p>}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <p className="text-xs font-medium text-foreground/90">环境变量</p>
+                    <div className="space-y-2">
+                      {readableContextDocs.envFields.map((field) => (
+                        <div
+                          key={field.key}
+                          className="rounded-md border border-border/40 bg-muted/20 px-3 py-2 space-y-1"
+                        >
+                          <span className="inline-flex rounded-full border border-dashed border-border/50 bg-background px-2 py-0.5 font-mono text-[10px] text-muted-foreground">
+                            {field.key}
+                          </span>
+                          <p className="text-sm text-muted-foreground">{field.description}</p>
+                          {field.note && <p className="text-xs text-foreground/80">{field.note}</p>}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  {readableContextDocs.extraObjects.length > 0 && (
+                    <div className="space-y-2">
+                      <p className="text-xs font-medium text-foreground/90">事件专属对象</p>
+                      <div className="space-y-2">
+                        {readableContextDocs.extraObjects.map((doc) => (
+                          <div
+                            key={doc.key}
+                            className="rounded-md border border-border/40 bg-muted/20 px-3 py-2 space-y-1.5"
+                          >
+                            <span className="inline-flex rounded-full border border-border/50 bg-background px-2 py-0.5 font-mono text-[10px] text-foreground/80">
+                              {doc.key}
+                            </span>
+                            {doc.fields && doc.fields.length > 0 && (
+                              <div className="flex flex-wrap gap-1.5">
+                                {doc.fields.map((field) => (
+                                  <span
+                                    key={`${doc.key}-${field}`}
+                                    className="rounded-full border border-dashed border-border/50 bg-background px-2 py-0.5 font-mono text-[10px] text-muted-foreground"
+                                  >
+                                    {field}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                            <p className="text-sm text-muted-foreground">{doc.description}</p>
+                            {doc.note && <p className="text-xs text-foreground/80">{doc.note}</p>}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+            {toolInputDocs.length > 0 && (
+              <div className="flex items-start gap-4">
+                <span className="text-sm text-muted-foreground w-20 shrink-0">tool_input</span>
+                <div className="flex-1 space-y-2 rounded-md border border-border/50 bg-muted/30 px-3 py-2">
+                  <p className="text-sm text-foreground/90">{toolInputSummary}</p>
+                  {toolInputDocs.map((doc) => (
+                    <div
+                      key={doc.key}
+                      className="rounded-md border border-border/40 bg-background/80 px-3 py-2 space-y-1.5"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="rounded-full border border-border/50 bg-background px-2 py-0.5 font-mono text-[10px] text-foreground/80">
+                          {doc.label}
+                        </span>
+                        {doc.fileHint && (
+                          <span className="rounded-full border border-emerald-300/50 bg-emerald-50 px-2 py-0.5 text-[10px] text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300">
+                            可直接拿文件路径：`filePath`
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {doc.fields.map((field) => (
+                          <span
+                            key={field}
+                            className="rounded-full border border-dashed border-border/50 bg-background px-2 py-0.5 font-mono text-[10px] text-muted-foreground"
+                          >
+                            {field}
+                          </span>
+                        ))}
+                      </div>
+                      <p className="text-sm text-muted-foreground">{doc.description}</p>
+                      {doc.fileHint && (
+                        <p className="text-xs text-emerald-700 dark:text-emerald-300">
+                          {doc.fileHint}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            <DetailRow
+              label="日志查看"
+              value="运行后回到聊天区，展开“Hook 执行记录”；调试日志建议输出到 stderr，如果 stdout 输出 JSON，会被当成 Hook 返回值解析。想确认某个事件的原始 payload，也可以先把 payload 整体打印到 stderr。"
+            />
+          </>
         )}
 
         {hook.onBlock && (
@@ -331,8 +599,12 @@ function HookDetail(props: {
               <h4 className="text-sm font-medium">阻断后补充配置</h4>
             </div>
             {hook.onBlock.reason && <DetailRow label="回退原因" value={hook.onBlock.reason} />}
-            {hook.onBlock.systemMessage && <DetailRow label="用户提示" value={hook.onBlock.systemMessage} />}
-            {hook.onBlock.requiredSkill && <DetailRow label="整改技能" value={hook.onBlock.requiredSkill} mono />}
+            {hook.onBlock.systemMessage && (
+              <DetailRow label="用户提示" value={hook.onBlock.systemMessage} />
+            )}
+            {hook.onBlock.requiredSkill && (
+              <DetailRow label="整改技能" value={hook.onBlock.requiredSkill} mono />
+            )}
             {hook.onBlock.additionalContext && (
               <div className="flex items-start gap-4">
                 <span className="text-sm text-muted-foreground w-20 shrink-0">额外上下文</span>
@@ -352,7 +624,12 @@ function HookDetail(props: {
   )
 }
 
-function DetailRow(props: { label: string; value: string; mono?: boolean; subtext?: string }): React.JSX.Element {
+function DetailRow(props: {
+  label: string
+  value: string
+  mono?: boolean
+  subtext?: string
+}): React.JSX.Element {
   return (
     <div className="flex items-start gap-4">
       <span className="text-sm text-muted-foreground w-20 shrink-0">{props.label}</span>
@@ -365,7 +642,11 @@ function DetailRow(props: { label: string; value: string; mono?: boolean; subtex
 }
 
 function formatTime(iso: string): string {
-  try { return new Date(iso).toLocaleString() } catch { return iso }
+  try {
+    return new Date(iso).toLocaleString()
+  } catch {
+    return iso
+  }
 }
 
 /* ── Empty state ─────────────────────────────────────────────────── */
@@ -376,27 +657,67 @@ function EmptyState(): React.JSX.Element {
       <Webhook className="size-12 text-muted-foreground/40 mb-4" />
       <h3 className="text-base font-bold mb-2">钩子</h3>
       <p className="text-sm text-muted-foreground max-w-md mb-6">
-        钩子允许你在 Agent 生命周期的关键节点执行 Shell 命令，或通过自然语言描述让行内 LLM 实时判决工具调用是否合规。
+        钩子允许你在 Agent 生命周期的关键节点执行 Shell 命令，或通过自然语言描述让行内 LLM
+        实时判决工具调用是否合规。
       </p>
       <div className="text-left text-sm text-muted-foreground space-y-3 max-w-md">
         <div className="space-y-1">
           <p className="font-medium text-foreground flex items-center gap-1.5">
             <Terminal className="size-3.5" /> Shell 命令模式
           </p>
-          <p className="text-xs pl-5">执行脚本，exit!=0 可阻断工具调用，阻断原因直接反馈给 Agent</p>
+          <p className="text-xs pl-5">
+            脚本通过 stdin JSON 和环境变量接收上下文；stdout 可返回纯文本或 JSON，stderr
+            用于调试日志。
+          </p>
+          <p className="text-xs pl-5">
+            右侧详情会按事件列出 stdin 顶层字段、环境变量和事件专属对象；例如 `write_file` /
+            `edit_file` 时可从 `tool_input.filePath` 读取路径。
+          </p>
         </div>
         <div className="space-y-1">
           <p className="font-medium text-violet-600 dark:text-violet-400 flex items-center gap-1.5">
             <BrainCircuit className="size-3.5" /> 自然语言策略模式
           </p>
-          <p className="text-xs pl-5">用自然语言写合规规则，行内 LLM 逐次判决是否放行，无需编写脚本</p>
+          <p className="text-xs pl-5">
+            用自然语言写合规规则，行内 LLM 逐次判决是否放行，无需编写脚本
+          </p>
         </div>
         <div className="pt-1 border-t border-border/50 space-y-1.5">
-          <p><span className="font-medium text-blue-600 dark:text-blue-400">调用前</span> <span className="font-mono text-muted-foreground">PreToolUse</span>{" — 拦截并阻断，阻断原因反馈给 Agent 使其自适应调整"}</p>
-          <p><span className="font-medium text-green-600 dark:text-green-400">调用后</span> <span className="font-mono text-muted-foreground">PostToolUse</span>{" — 输出追加到 Agent 上下文，外部系统状态参与 AI 推理"}</p>
-          <p><span className="font-medium text-amber-600 dark:text-amber-400">停止</span> <span className="font-mono text-muted-foreground">Stop</span>{" — 任务完成后复查，可请求 Agent 返工"}</p>
-          <p><span className="font-medium text-cyan-600 dark:text-cyan-400">提交</span> <span className="font-mono text-muted-foreground">UserPromptSubmit</span>{" — 用户消息进入模型前，可阻断或重写"}</p>
-          <p><span className="font-medium text-purple-600 dark:text-purple-400">通知</span> <span className="font-mono text-muted-foreground">Notification</span>{" — 自定义提醒或消息推送"}</p>
+          <p>
+            <span className="font-medium text-blue-600 dark:text-blue-400">调用前</span>{" "}
+            <span className="font-mono text-muted-foreground">PreToolUse</span>
+            {" — 拦截并阻断，阻断原因反馈给 Agent 使其自适应调整"}
+          </p>
+          <p>
+            <span className="font-medium text-green-600 dark:text-green-400">调用后</span>{" "}
+            <span className="font-mono text-muted-foreground">PostToolUse</span>
+            {" — 输出追加到 Agent 上下文，外部系统状态参与 AI 推理"}
+          </p>
+          <p>
+            <span className="font-medium text-amber-600 dark:text-amber-400">停止</span>{" "}
+            <span className="font-mono text-muted-foreground">Stop</span>
+            {" — 任务完成后复查，可请求 Agent 返工"}
+          </p>
+          <p>
+            <span className="font-medium text-cyan-600 dark:text-cyan-400">提交</span>{" "}
+            <span className="font-mono text-muted-foreground">UserPromptSubmit</span>
+            {" — 用户消息进入模型前，可阻断或重写"}
+          </p>
+          <p>
+            <span className="font-medium text-purple-600 dark:text-purple-400">通知</span>{" "}
+            <span className="font-mono text-muted-foreground">Notification</span>
+            {" — 自定义提醒或消息推送"}
+          </p>
+        </div>
+        <div className="pt-1 border-t border-border/50 space-y-1">
+          <p className="text-xs">
+            右侧详情现在会同步展示当前事件的 stdin 顶层字段、环境变量，以及像
+            `tool_response`、`stop_context`、`subagent` 这类事件专属对象。
+          </p>
+          <p className="text-xs">
+            如果你想确认某次运行的原始输入，也可以临时把整份 `payload` 打到
+            `stderr`，然后去聊天区“Hook 执行记录”里看。
+          </p>
         </div>
       </div>
     </div>

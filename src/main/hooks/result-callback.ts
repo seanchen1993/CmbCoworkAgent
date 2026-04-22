@@ -2,6 +2,15 @@ import { BrowserWindow, type WebContents } from "electron"
 import type { HookResultCallback } from "./runner"
 import type { HookConfig, HookEvent, HookResult } from "./types"
 
+const MAX_STDOUT_PREVIEW_CHARS = 4_000
+const MAX_STDERR_PREVIEW_CHARS = 8_000
+
+function truncatePreview(text: string | undefined, maxChars: number): string {
+  if (!text) return ""
+  if (text.length <= maxChars) return text
+  return `${text.slice(0, maxChars)}\n...[truncated ${text.length - maxChars} chars]`
+}
+
 function sendHookResult(webContents: WebContents, channel: string, event: HookEvent, hook: HookConfig, result: HookResult): void {
   if (webContents.isDestroyed()) return
 
@@ -22,8 +31,8 @@ function sendHookResult(webContents: WebContents, channel: string, event: HookEv
       exitCode: result.exitCode,
       blocked: result.blocked,
       decision: result.decision,
-      stdout: result.stdout?.slice(0, 500) ?? "",
-      stderr: result.stderr?.slice(0, 200) ?? "",
+      stdout: truncatePreview(result.stdout, MAX_STDOUT_PREVIEW_CHARS),
+      stderr: truncatePreview(result.stderr, MAX_STDERR_PREVIEW_CHARS),
       systemMessage: result.systemMessage
     }
   })

@@ -71,6 +71,10 @@ function HookLogsPanel({ logs }: { logs: HookLogEntry[] }): React.JSX.Element {
       </button>
       {expanded && (
         <div className="border-t border-border/40 divide-y divide-border/30">
+          <div className="px-3 py-2 text-[11px] text-muted-foreground">
+            调试日志建议写到 <span className="font-mono text-foreground/80">stderr</span>。
+            如果 <span className="font-mono text-foreground/80">stdout</span> 输出的是 JSON，它会被当成 Hook 返回值解析。
+          </div>
           {logs.map((log) => {
             const ok = !log.blocked && log.exitCode === 0
             return (
@@ -82,12 +86,25 @@ function HookLogsPanel({ logs }: { logs: HookLogEntry[] }): React.JSX.Element {
                   <span className="text-foreground/80 font-semibold">[{log.event}{log.toolSuffix}]</span>
                   <span className="text-muted-foreground truncate">{log.hookType}: {log.label}</span>
                   {log.decision && <span className="text-xs text-amber-600 dark:text-amber-400">{log.decision}</span>}
+                  <span className="ml-auto text-[10px] text-muted-foreground/70">
+                    {log.timestamp.toLocaleTimeString()}
+                  </span>
                 </div>
                 {log.stdout && (
-                  <div className="text-muted-foreground whitespace-pre-wrap break-all pl-4">{log.stdout}</div>
+                  <div className="pl-4 space-y-1">
+                    <div className="text-[10px] uppercase tracking-wide text-muted-foreground/70">stdout</div>
+                    <div className="max-h-40 overflow-auto rounded-md border border-border/40 bg-background/70 px-2 py-1 text-muted-foreground whitespace-pre-wrap break-all">
+                      {log.stdout}
+                    </div>
+                  </div>
                 )}
                 {log.stderr && (
-                  <div className="text-red-500/80 whitespace-pre-wrap break-all pl-4">{log.stderr}</div>
+                  <div className="pl-4 space-y-1">
+                    <div className="text-[10px] uppercase tracking-wide text-red-500/70">stderr / 日志</div>
+                    <div className="max-h-48 overflow-auto rounded-md border border-red-300/40 bg-red-50/40 px-2 py-1 text-red-500/80 whitespace-pre-wrap break-all dark:border-red-500/30 dark:bg-red-500/10">
+                      {log.stderr}
+                    </div>
+                  </div>
                 )}
                 {log.systemMessage && (
                   <div className="text-blue-500/80 pl-4">{log.systemMessage}</div>
