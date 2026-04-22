@@ -260,7 +260,7 @@ export function TraceHistoryDialog({
       <DialogContent className="flex h-[80vh] max-w-[1080px] grid-rows-none flex-col gap-0 p-0">
         <DialogHeader className="border-b border-border px-5 py-4">
           <DialogTitle className="text-base">Skill 会话历史 · {skill ?? "-"}</DialogTitle>
-          <DialogDescription>当前时间范围最近 3 次</DialogDescription>
+          <DialogDescription>当前时间范围最近 10 次</DialogDescription>
         </DialogHeader>
 
         {loading ? (

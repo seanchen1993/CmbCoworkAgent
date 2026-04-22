@@ -232,7 +232,7 @@ export function DashboardView(): React.JSX.Element {
     setSkillTracesError(null)
     setSkillTracesLoading(true)
     try {
-      const result = await window.api.dashboard.skillRecentTraces(skill, range, 3)
+      const result = await window.api.dashboard.skillRecentTraces(skill, range, 10)
       if (!result.success) throw new Error(result.error ?? "获取 Skill 会话历史失败")
       setSkillTraces(result.data ?? [])
     } catch (e) {
@@ -249,7 +249,7 @@ export function DashboardView(): React.JSX.Element {
     setCommitDetailsError(null)
     setCommitDetailsLoading(true)
     try {
-      const result = await window.api.dashboard.commitDetails(targetRange, 200)
+      const result = await window.api.dashboard.commitDetails(targetRange, 50)
       if (!result.success) throw new Error(result.error ?? "获取 Commit 明细失败")
       setCommitDetails(result.data ?? { total: 0, items: [] })
     } catch (e) {

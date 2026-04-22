@@ -392,11 +392,11 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
       total_tools:        { cardinality: { field: "toolNames" } },
       total_skill_calls:  { value_count: { field: "usedSkills" } },
       total_tool_calls:   { value_count: { field: "toolNames" } },
-      by_skill: { terms: { field: "usedSkills",  size: 10 } },
+      by_skill: { terms: { field: "usedSkills",  size: 20 } },
       by_tool: {
         terms: {
           field: "toolNames",
-          size: 10,
+          size: 20,
           exclude: [
             // Claude Code 内置文件 / 系统工具
             "execute", "read_file", "write_file", "glob", "grep",
@@ -412,7 +412,7 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
         }
       },
       by_tool_all: {
-        terms: { field: "toolNames", size: 50 }
+        terms: { field: "toolNames", size: 20 }
       },
       trend: {
         date_histogram: { field: "startedAt", calendar_interval: interval, time_zone: "Asia/Shanghai" },
@@ -607,9 +607,9 @@ async function fetchFeedback(range: TimeRange, granularity: Granularity): Promis
 async function fetchSkillRecentTraces(
   skill: string,
   range: TimeRange,
-  limit = 3
+  limit = 10
 ): Promise<DashboardTraceDetail[]> {
-  const size = clampLimit(limit, 3, 10)
+  const size = clampLimit(limit, 10, 10)
   const body = {
     size,
     sort: [{ startedAt: { order: "desc" } }],
@@ -647,9 +647,9 @@ async function fetchSkillRecentTraces(
 
 async function fetchCommitDetails(
   range: TimeRange,
-  limit = 200
+  limit = 50
 ): Promise<{ total: number; items: DashboardCommitDetail[] }> {
-  const size = clampLimit(limit, 200, 500)
+  const size = clampLimit(limit, 50, 500)
   const body = {
     track_total_hits: true,
     size,
@@ -743,9 +743,9 @@ function makeMockOverview(range: TimeRange): unknown {
       avg_duration: { value: 4320 },
       total_input_tokens: { value: 2_340_000 },
       total_output_tokens: { value: 890_000 },
-      total_skills: { value: 10 },
+      total_skills: { value: 20 },
       total_tools: { value: 27 },
-      total_skill_calls: { value: 1711 },
+      total_skill_calls: { value: 2022 },
       total_tool_calls: { value: 6538 },
       by_skill: {
         buckets: [
@@ -758,7 +758,17 @@ function makeMockOverview(range: TimeRange): unknown {
           { key: "日志分析",     doc_count: 121 },
           { key: "数据清洗",     doc_count: 98  },
           { key: "性能诊断",     doc_count: 87  },
-          { key: "安全扫描",     doc_count: 62  }
+          { key: "安全扫描",     doc_count: 62  },
+          { key: "代码重构",     doc_count: 54  },
+          { key: "异常排查",     doc_count: 49  },
+          { key: "接口联调",     doc_count: 44  },
+          { key: "依赖升级",     doc_count: 38  },
+          { key: "配置检查",     doc_count: 33  },
+          { key: "发布诊断",     doc_count: 29  },
+          { key: "性能优化",     doc_count: 24  },
+          { key: "埋点分析",     doc_count: 18  },
+          { key: "前端走查",     doc_count: 13  },
+          { key: "脚本生成",     doc_count: 9   }
         ]
       },
       by_tool: {
@@ -772,7 +782,17 @@ function makeMockOverview(range: TimeRange): unknown {
           { key: "create_pr",          doc_count: 134 },
           { key: "run_tests",          doc_count: 112 },
           { key: "search_code",        doc_count: 98  },
-          { key: "notify",             doc_count: 76  }
+          { key: "notify",             doc_count: 76  },
+          { key: "query_logs",         doc_count: 68  },
+          { key: "schema_check",       doc_count: 59  },
+          { key: "open_preview",       doc_count: 53  },
+          { key: "analyze_diff",       doc_count: 47  },
+          { key: "format_code",        doc_count: 42  },
+          { key: "lint_fix",           doc_count: 36  },
+          { key: "dependency_audit",   doc_count: 31  },
+          { key: "deploy_check",       doc_count: 26  },
+          { key: "trace_lookup",       doc_count: 19  },
+          { key: "ticket_update",      doc_count: 12  }
         ]
       },
       by_tool_all: {
@@ -796,12 +816,7 @@ function makeMockOverview(range: TimeRange): unknown {
           { key: "search_tool",        doc_count: 128  },
           { key: "run_tests",          doc_count: 112  },
           { key: "search_code",        doc_count: 98   },
-          { key: "code_exec",          doc_count: 92   },
-          { key: "notify",             doc_count: 76   },
-          { key: "inspect_tool",       doc_count: 64   },
-          { key: "write_todos",        doc_count: 58   },
-          { key: "invoke_deferred_tool", doc_count: 45 },
-          { key: "save_code_exec_tool", doc_count: 32  }
+          { key: "code_exec",          doc_count: 92   }
         ]
       },
       trend: { buckets: trend }
@@ -1117,8 +1132,8 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
   }
 }
 
-function makeMockSkillRecentTraces(skill: string, range: TimeRange, limit = 3): DashboardTraceDetail[] {
-  return Array.from({ length: clampLimit(limit, 3, 10) }, (_, index) => {
+function makeMockSkillRecentTraces(skill: string, range: TimeRange, limit = 10): DashboardTraceDetail[] {
+  return Array.from({ length: clampLimit(limit, 10, 10) }, (_, index) => {
     const trace = makeMockAgentTrace(skill, range, index)
     const usage = summarizeTraceTokenUsage(trace.modelCalls)
     return {
