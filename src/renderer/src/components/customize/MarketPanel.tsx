@@ -23,6 +23,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useAppStore } from "@/lib/store"
 import {
   Dialog,
@@ -395,6 +396,7 @@ function MarketItemCard({
 
 type DetailViewMode = "list" | "detail"
 type SkillPreviewKind = "text" | "html" | "image" | "pdf"
+type SkillSortMode = "default" | "calls_desc" | "calls_asc" | "users_desc" | "users_asc"
 
 interface PluginDetailData {
   skills: string[]
@@ -449,6 +451,7 @@ export function MarketPanel(): React.JSX.Element {
   })
   const [reloadToken, setReloadToken] = useState(0)
   const [detailMode, setDetailMode] = useState<DetailViewMode>("list")
+  const [skillSortMode, setSkillSortMode] = useState<SkillSortMode>("default")
   const [selectedItemKey, setSelectedItemKey] = useState<string | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [skillDetailSkill, setSkillDetailSkill] = useState<SkillMetadata | null>(null)
@@ -1148,6 +1151,42 @@ export function MarketPanel(): React.JSX.Element {
     if (activeTab !== "skill" || !categoryFilter) return true
     return getSecondaryCategory(item.category) === categoryFilter
   })
+
+  const sortedSkillData = useMemo(() => {
+    if (activeTab !== "skill") return filteredData
+    if (skillSortMode === "default") return filteredData
+
+    const list = [...filteredData]
+    const compareByName = (a: MarketItem, b: MarketItem): number =>
+      a.name.localeCompare(b.name, "zh-CN")
+
+    const getCalls = (item: MarketItem): number =>
+      getSkillMetricByName(skillUsageSummary, item.name)?.calls ?? 0
+    const getUsers = (item: MarketItem): number =>
+      getSkillMetricByName(skillUsageSummary, item.name)?.users ?? 0
+
+    list.sort((a, b) => {
+      const callsA = getCalls(a)
+      const callsB = getCalls(b)
+      const usersA = getUsers(a)
+      const usersB = getUsers(b)
+
+      switch (skillSortMode) {
+        case "calls_desc":
+          return callsB - callsA || usersB - usersA || compareByName(a, b)
+        case "calls_asc":
+          return callsA - callsB || usersA - usersB || compareByName(a, b)
+        case "users_desc":
+          return usersB - usersA || callsB - callsA || compareByName(a, b)
+        case "users_asc":
+          return usersA - usersB || callsA - callsB || compareByName(a, b)
+        default:
+          return 0
+      }
+    })
+
+    return list
+  }, [activeTab, filteredData, skillSortMode, skillUsageSummary])
 
   const skillCategoryStats = useMemo(() => {
     if (activeTab !== "skill") return []
@@ -1924,10 +1963,28 @@ export function MarketPanel(): React.JSX.Element {
                             <span>
                               {categoryFilter ? `当前分类：${categoryFilter}` : "全部 Skills"}
                             </span>
-                            <span>{filteredData.length} 个结果</span>
+                            <div className="flex items-center gap-2">
+                              <div className={'inline-block w-10'}>排序</div>
+                              <Select
+                                value={skillSortMode}
+                                onValueChange={(value) => setSkillSortMode(value as SkillSortMode)}
+                              >
+                                <SelectTrigger className="h-7 min-w-[132px] rounded-lg border-[#e8e6dc] bg-white px-2 text-[11px] text-[#5e5d59]">
+                                  <SelectValue placeholder="默认" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="default">默认</SelectItem>
+                                  <SelectItem value="calls_desc">调用次数 ↓</SelectItem>
+                                  <SelectItem value="calls_asc">调用次数 ↑</SelectItem>
+                                  <SelectItem value="users_desc">用户数 ↓</SelectItem>
+                                  <SelectItem value="users_asc">用户数 ↑</SelectItem>
+                                </SelectContent>
+                              </Select>
+                              <div  className={'inline-block w-30'}>{filteredData.length} 个结果</div>
+                            </div>
                           </div>
                           <div className="grid grid-cols-1 2xl:grid-cols-2 gap-3">
-                            {filteredData.map((item) => (
+                            {sortedSkillData.map((item) => (
                               <MarketItemCard
                                 key={getItemKey(item)}
                                 item={item}
