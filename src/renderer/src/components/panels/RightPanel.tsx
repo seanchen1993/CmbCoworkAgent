@@ -40,7 +40,6 @@ import { useShallow } from "zustand/react/shallow"
 import { useThreadState, useThreadStream } from "@/lib/thread-context"
 import { getFileType } from "@/lib/file-types"
 import { Badge } from "@/components/ui/badge"
-import { DiffDisplay } from "@/components/chat/ToolCallRenderer"
 import { onOpenResourcePreview } from "@/lib/resource-preview-events"
 import type { Todo, SkillMetadata, PluginMetadata, LspConfig, LspStatus } from "@/types"
 import { SubagentCard } from "@/components/panels/SubagentPanel"
@@ -191,7 +190,6 @@ export function RightPanel({
   const containerRef = useRef<HTMLDivElement>(null)
 
   const [previewPath, setPreviewPath] = useState<string | null>(null)
-  const [previewDiff, setPreviewDiff] = useState<CodeDiffPayload | null>(null)
   const [previewReloadToken, setPreviewReloadToken] = useState(0)
   const lastAppliedPreviewKeyRef = useRef<string | null>(null)
   const lastRecordedBatchKeyRef = useRef<string | null>(null)
@@ -401,11 +399,8 @@ export function RightPanel({
       if (lastAppliedPreviewKeyRef.current === latestResourceEvent.key) return
       lastAppliedPreviewKeyRef.current = latestResourceEvent.key
       setPreviewPath(latestResourceEvent.path)
-      setPreviewDiff(latestResourceEvent.codeDiff ?? null)
       setPreviewReloadToken((v) => v + 1)
-      // For diff events, keep current panel and avoid auto-switching to preview.
-      const isDiffPreview = Boolean(latestResourceEvent.codeDiff)
-      if (switchToPreview && !isDiffPreview) {
+      if (switchToPreview) {
         onRequestPreviewMode?.()
       }
     }
@@ -432,7 +427,6 @@ export function RightPanel({
     if (lastThreadIdRef.current !== currentThreadId) {
       lastThreadIdRef.current = currentThreadId
       setPreviewPath(null)
-      setPreviewDiff(null)
       lastAppliedPreviewKeyRef.current = null
       lastRecordedBatchKeyRef.current = null
       lastAutoSwitchedBatchKeyRef.current = null
@@ -454,7 +448,6 @@ export function RightPanel({
     const cleanup = onOpenResourcePreview(({ threadId, filePath }) => {
       if (!currentThreadId || threadId !== currentThreadId) return
       setPreviewPath(filePath)
-      setPreviewDiff(null)
       setPreviewReloadToken((v) => v + 1)
       onRequestPreviewMode?.()
     })
@@ -913,7 +906,6 @@ export function RightPanel({
               <ResourcePreview
                 key={`${previewPath}:${previewReloadToken}`}
                 filePath={previewPath}
-                codeDiff={previewDiff}
                 workspacePath={threadState?.workspacePath ?? null}
                 threadId={currentThreadId ?? ""}
                 reloadToken={previewReloadToken}
@@ -1457,7 +1449,6 @@ function FilesContent(): React.JSX.Element {
 
 function ResourcePreview({
   filePath,
-  codeDiff,
   workspacePath,
   threadId,
   reloadToken,
@@ -1466,7 +1457,6 @@ function ResourcePreview({
   onHidePreview
 }: {
   filePath: string
-  codeDiff?: CodeDiffPayload | null
   workspacePath: string | null
   threadId: string
   reloadToken: number
@@ -1480,14 +1470,13 @@ function ResourcePreview({
   const [copySuccess, setCopySuccess] = useState(false)
   const extension = getPathExtension(filePath).toLowerCase()
   const supportsSourceView =
-    !codeDiff &&
-    (extension === "md" ||
-      extension === "markdown" ||
-      extension === "mdx" ||
-      extension === "html" ||
-      extension === "htm")
+    extension === "md" ||
+    extension === "markdown" ||
+    extension === "mdx" ||
+    extension === "html" ||
+    extension === "htm"
   const previewFileType = useMemo(() => getFileType(fileName), [fileName])
-  const canCopyContent = !codeDiff && (previewFileType.type === "code" || previewFileType.type === "text")
+  const canCopyContent = previewFileType.type === "code" || previewFileType.type === "text"
 
   const resolved = useMemo(
     () => resolvePreviewPaths(filePath, workspacePath),
@@ -1648,24 +1637,16 @@ function ResourcePreview({
       </div>
 
       <div className="overflow-y-auto overflow-x-hidden right-panel-scroll bg-background flex-1 min-h-0">
-        {codeDiff && (
-          <div className="p-2">
-            <DiffDisplay oldValue={codeDiff.oldValue} newValue={codeDiff.newValue} />
-          </div>
-        )}
-
-        {!codeDiff && (
-          <Suspense fallback={<LazySectionFallback label="加载文件预览..." />}>
-            <FileViewer
-              threadId={threadId}
-              filePath={resolved.inWorkspace ? resolved.workspaceFilePath : resolved.fullPath}
-              externalFullPath={resolved.inWorkspace ? undefined : resolved.fullPath}
-              htmlFillHeight
-              reloadToken={reloadToken}
-              previewMode={supportsSourceView ? previewMode : undefined}
-            />
-          </Suspense>
-        )}
+        <Suspense fallback={<LazySectionFallback label="加载文件预览..." />}>
+          <FileViewer
+            threadId={threadId}
+            filePath={resolved.inWorkspace ? resolved.workspaceFilePath : resolved.fullPath}
+            externalFullPath={resolved.inWorkspace ? undefined : resolved.fullPath}
+            htmlFillHeight
+            reloadToken={reloadToken}
+            previewMode={supportsSourceView ? previewMode : undefined}
+          />
+        </Suspense>
       </div>
     </div>
   )
