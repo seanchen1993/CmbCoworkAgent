@@ -56,8 +56,60 @@ export interface UserStatsData {
 
 type ParsedTopUser = UserStatsData["topUsers"][number]
 
+export interface DashboardTraceNode {
+  id: string
+  type: "trace" | "llm" | "tool" | "tool_result" | "message" | "error" | "cancel"
+  parentId: string | null
+  name?: string
+  status?: "running" | "success" | "error" | "cancelled" | "unknown"
+  startedAt: string
+  endedAt?: string
+  input?: unknown
+  output?: unknown
+  metadata?: Record<string, unknown>
+}
+
+export interface DashboardTraceDetail {
+  traceId: string
+  threadId: string
+  startedAt: string
+  endedAt?: string
+  durationMs: number
+  userMessage: string
+  modelId?: string
+  modelName?: string
+  outcome: string
+  totalToolCalls: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalTokens: number
+  usedSkills: string[]
+  nodes?: DashboardTraceNode[]
+  rawAvailable: boolean
+  rawError?: string
+}
+
+export interface DashboardCommitDetail {
+  eventId: string
+  eventTime: string
+  userName: string
+  sapId?: string
+  ystId?: string
+  orgName?: string
+  userIp?: string
+  repoPath?: string
+  branch?: string
+  filesChanged: number
+  insertions: number
+  deletions: number
+  triggeredBy?: string
+  threadId?: string
+  usedSkills: string[]
+  skillCount: number
+}
+
 export interface ProductivityData {
-  commitTrend: Array<{ time: string; count: number }>
+  commitTrend: Array<{ time: string; count: number; from: string; to: string }>
   totalInsertions: number
   totalDeletions: number
   totalFilesChanged: number
@@ -209,6 +261,36 @@ function formatTrendTime(isoStr: string, granularity: Granularity): string {
   return `${mm}-${dd} ${hh}:${min}`
 }
 
+function getTrendBucketInterval(granularity: Granularity, range: TimeRange): "hour" | "day" | "week" {
+  if (granularity === "day") return "hour"
+  if (granularity === "custom") {
+    const diffMs = new Date(range.to).getTime() - new Date(range.from).getTime()
+    const diffDays = diffMs / (1000 * 60 * 60 * 24)
+    if (diffDays <= 1) return "hour"
+    if (diffDays <= 14) return "day"
+    return "week"
+  }
+  return "day"
+}
+
+function getTrendBucketRange(bucketIso: string, granularity: Granularity, range: TimeRange): TimeRange {
+  const interval = getTrendBucketInterval(granularity, range)
+  const bucketStart = new Date(bucketIso).getTime()
+  const rangeFrom = new Date(range.from).getTime()
+  const rangeTo = new Date(range.to).getTime()
+  const durationMs = interval === "hour"
+    ? 60 * 60 * 1000
+    : interval === "day"
+      ? 24 * 60 * 60 * 1000
+      : 7 * 24 * 60 * 60 * 1000
+  const from = Math.max(bucketStart, rangeFrom)
+  const to = Math.min(bucketStart + durationMs - 1, rangeTo)
+  return {
+    from: new Date(from).toISOString(),
+    to: new Date(to).toISOString()
+  }
+}
+
 function parseOverview(raw: any, granularity: Granularity): OverviewData {
   const aggs = raw?.aggregations ?? {}
   const totalCalls = aggs.total_calls?.value ?? 0
@@ -321,16 +403,22 @@ export function parseTopUsersFromAgg(raw: any): ParsedTopUser[] {
   }))
 }
 
-function parseProductivity(raw: any, granularity: Granularity): ProductivityData {
+function parseProductivity(raw: any, granularity: Granularity, range: TimeRange): ProductivityData {
   const aggs = raw?.aggregations ?? {}
   const totalCommits = aggs.total_commits?.value ?? 0
   const activeUsers = aggs.active_users?.value ?? 0
 
   return {
-    commitTrend: (aggs.commit_trend?.buckets ?? []).map((b: any) => ({
-      time: formatTrendTime(b.key_as_string ?? new Date(b.key).toISOString(), granularity),
-      count: b.doc_count
-    })),
+    commitTrend: (aggs.commit_trend?.buckets ?? []).map((b: any) => {
+      const iso = b.key_as_string ?? new Date(b.key).toISOString()
+      const bucketRange = getTrendBucketRange(iso, granularity, range)
+      return {
+        time: formatTrendTime(iso, granularity),
+        count: b.doc_count,
+        from: bucketRange.from,
+        to: bucketRange.to
+      }
+    }),
     totalInsertions: aggs.total_insertions?.value ?? 0,
     totalDeletions: aggs.total_deletions?.value ?? 0,
     totalFilesChanged: aggs.total_files_changed?.value ?? 0,
@@ -464,10 +552,10 @@ export function useDashboard() {
 
       setOverview(parseOverview(ovRes.data, g))
       setModelStats(parseModelStats(msRes.data))
+      setProductivity(parseProductivity(prRes.data, g, r))
       if (userStatsId === userStatsFetchIdRef.current) {
         setUserStats(parseUserStats(usRes.data, orgLv1))
       }
-      setProductivity(parseProductivity(prRes.data, g))
       setFeedback(parseFeedback(fbRes.data, g))
     } catch (e) {
       if (id !== fetchIdRef.current) return

@@ -51,6 +51,58 @@ interface ElectronAPI {
   }
 }
 
+interface DashboardTraceNode {
+  id: string
+  type: "trace" | "llm" | "tool" | "tool_result" | "message" | "error" | "cancel"
+  parentId: string | null
+  name?: string
+  status?: "running" | "success" | "error" | "cancelled" | "unknown"
+  startedAt: string
+  endedAt?: string
+  input?: unknown
+  output?: unknown
+  metadata?: Record<string, unknown>
+}
+
+interface DashboardTraceDetail {
+  traceId: string
+  threadId: string
+  startedAt: string
+  endedAt?: string
+  durationMs: number
+  userMessage: string
+  modelId?: string
+  modelName?: string
+  outcome: string
+  totalToolCalls: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalTokens: number
+  usedSkills: string[]
+  nodes?: DashboardTraceNode[]
+  rawAvailable: boolean
+  rawError?: string
+}
+
+interface DashboardCommitDetail {
+  eventId: string
+  eventTime: string
+  userName: string
+  sapId?: string
+  ystId?: string
+  orgName?: string
+  userIp?: string
+  repoPath?: string
+  branch?: string
+  filesChanged: number
+  insertions: number
+  deletions: number
+  triggeredBy?: string
+  threadId?: string
+  usedSkills: string[]
+  skillCount: number
+}
+
 interface CustomAPI {
   agent: {
     invoke: (
@@ -739,6 +791,15 @@ interface CustomAPI {
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom"
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    skillRecentTraces: (
+      skill: string,
+      range: { from: string; to: string },
+      limit?: number
+    ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
+    commitDetails: (
+      range: { from: string; to: string },
+      limit?: number
+    ) => Promise<{ success: boolean; data?: { total: number; items: DashboardCommitDetail[] }; error?: string }>
     exportExcel: (
       sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>
     ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
