@@ -103,6 +103,19 @@ interface DashboardCommitDetail {
   skillCount: number
 }
 
+interface DashboardCodeStats {
+  generatedLines: number
+  deletedLines: number
+  measuredGeneratedLines: number
+  adoptedLines: number
+  adoptionRate: number | null
+}
+
+interface DashboardSkillDetail {
+  stats: DashboardCodeStats
+  traces: DashboardTraceDetail[]
+}
+
 interface CustomAPI {
   agent: {
     invoke: (
@@ -755,6 +768,11 @@ interface CustomAPI {
       range: { from: string; to: string },
       limit?: number
     ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
+    skillDetail: (
+      skill: string,
+      range: { from: string; to: string },
+      limit?: number
+    ) => Promise<{ success: boolean; data?: DashboardSkillDetail; error?: string }>
     commitDetails: (
       range: { from: string; to: string },
       limit?: number

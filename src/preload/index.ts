@@ -1415,6 +1415,12 @@ const api = {
       limit?: number
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:skillRecentTraces", skill, range, limit),
+    skillDetail: (
+      skill: string,
+      range: { from: string; to: string },
+      limit?: number
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:skillDetail", skill, range, limit),
     commitDetails: (
       range: { from: string; to: string },
       limit?: number

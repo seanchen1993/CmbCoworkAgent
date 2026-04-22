@@ -10,7 +10,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import {
   useDashboard,
   type DashboardCommitDetail,
-  type DashboardTraceDetail,
+  type DashboardSkillDetail,
   type Granularity,
   type TimeRange
 } from "./use-dashboard"
@@ -196,6 +196,22 @@ function formatDuration(ms: number): string {
   return `${Math.floor(s / 60)}m${Math.round(s % 60)}s`
 }
 
+function formatPercent(value: number | null): string {
+  if (value === null) return "—"
+  return `${(value * 100).toFixed(1)}%`
+}
+
+const EMPTY_SKILL_DETAIL: DashboardSkillDetail = {
+  stats: {
+    generatedLines: 0,
+    deletedLines: 0,
+    measuredGeneratedLines: 0,
+    adoptedLines: 0,
+    adoptionRate: null
+  },
+  traces: []
+}
+
 export function DashboardView(): React.JSX.Element {
   const {
     granularity,
@@ -216,7 +232,7 @@ export function DashboardView(): React.JSX.Element {
   const [exporting, setExporting] = useState(false)
   const [skillDialogOpen, setSkillDialogOpen] = useState(false)
   const [selectedSkill, setSelectedSkill] = useState<string | null>(null)
-  const [skillTraces, setSkillTraces] = useState<DashboardTraceDetail[]>([])
+  const [skillDetail, setSkillDetail] = useState<DashboardSkillDetail | null>(null)
   const [skillTracesLoading, setSkillTracesLoading] = useState(false)
   const [skillTracesError, setSkillTracesError] = useState<string | null>(null)
   const [commitDialogOpen, setCommitDialogOpen] = useState(false)
@@ -228,13 +244,13 @@ export function DashboardView(): React.JSX.Element {
   const handleSkillClick = useCallback(async (skill: string) => {
     setSelectedSkill(skill)
     setSkillDialogOpen(true)
-    setSkillTraces([])
+    setSkillDetail(null)
     setSkillTracesError(null)
     setSkillTracesLoading(true)
     try {
-      const result = await window.api.dashboard.skillRecentTraces(skill, range, 3)
-      if (!result.success) throw new Error(result.error ?? "获取 Skill 会话历史失败")
-      setSkillTraces(result.data ?? [])
+      const result = await window.api.dashboard.skillDetail(skill, range, 3)
+      if (!result.success) throw new Error(result.error ?? "获取 Skill 详情失败")
+      setSkillDetail(result.data ?? EMPTY_SKILL_DETAIL)
     } catch (e) {
       setSkillTracesError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -287,6 +303,11 @@ export function DashboardView(): React.JSX.Element {
             ["平均耗时", formatDuration(overview.avgDurationMs)],
             ["输入 Token", overview.inputTokens],
             ["输出 Token", overview.outputTokens],
+            ["代码生成行数", overview.codeGeneratedLines],
+            ["代码删除行数", overview.codeDeletedLines],
+            ["代码采纳行数", overview.codeAdoptedLines],
+            ["代码采纳率", formatPercent(overview.codeAdoptionRate)],
+            ["代码采纳率分母行数", overview.codeMeasuredGeneratedLines],
             ["Skill 种类数", overview.totalSkills],
             ["Skill 调用次数", overview.totalSkillCalls],
             ["Tool 种类数", overview.totalTools],
@@ -499,7 +520,8 @@ export function DashboardView(): React.JSX.Element {
         open={skillDialogOpen}
         onOpenChange={setSkillDialogOpen}
         skill={selectedSkill}
-        traces={skillTraces}
+        traces={skillDetail?.traces ?? []}
+        codeStats={skillDetail?.stats ?? null}
         loading={skillTracesLoading}
         error={skillTracesError}
       />

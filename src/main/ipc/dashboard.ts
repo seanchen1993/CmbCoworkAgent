@@ -135,6 +135,19 @@ interface DashboardCommitDetail {
   skillCount: number
 }
 
+interface DashboardCodeStats {
+  generatedLines: number
+  deletedLines: number
+  measuredGeneratedLines: number
+  adoptedLines: number
+  adoptionRate: number | null
+}
+
+interface DashboardSkillDetail {
+  stats: DashboardCodeStats
+  traces: DashboardTraceDetail[]
+}
+
 interface EsSearchHit {
   _id?: string
   _source?: Record<string, unknown>
@@ -211,6 +224,38 @@ function asNumber(value: unknown, fallback = 0): number {
 function asStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return []
   return value.filter((item): item is string => typeof item === "string")
+}
+
+function getAggNumber(raw: unknown, path: string[], fallback = 0): number {
+  let current: unknown = raw
+  for (const key of path) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) return fallback
+    current = (current as Record<string, unknown>)[key]
+  }
+  return asNumber(current, fallback)
+}
+
+function computeAdoptionRate(adoptedLines: number, measuredGeneratedLines: number): number | null {
+  return measuredGeneratedLines > 0 ? adoptedLines / measuredGeneratedLines : null
+}
+
+function normalizeCodeStatsFromAggs(raw: unknown): DashboardCodeStats {
+  const generatedLines = getAggNumber(raw, ["aggregations", "code_gen", "generated_lines", "value"])
+  const deletedLines = getAggNumber(raw, ["aggregations", "code_gen", "deleted_lines", "value"])
+  const measuredGeneratedLines = getAggNumber(raw, [
+    "aggregations",
+    "code_adopt_measured",
+    "measured_generated_lines",
+    "value"
+  ])
+  const adoptedLines = getAggNumber(raw, ["aggregations", "code_adopt_measured", "adopted_lines", "value"])
+  return {
+    generatedLines,
+    deletedLines,
+    measuredGeneratedLines,
+    adoptedLines,
+    adoptionRate: computeAdoptionRate(adoptedLines, measuredGeneratedLines)
+  }
 }
 
 function summarizeTraceTokenUsage(modelCalls: AgentTrace["modelCalls"]): {
@@ -379,7 +424,7 @@ function normalizeCommitDetail(hit: EsSearchHit): DashboardCommitDetail {
 
 async function fetchOverview(range: TimeRange, granularity: Granularity): Promise<unknown> {
   const interval = getCalendarInterval(granularity, range.from, range.to)
-  const body = {
+  const traceBody = {
     size: 0,
     query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
     aggs: {
@@ -422,7 +467,57 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
       }
     }
   }
-  return esQuery(getEsIndex("trace"), body)
+  const codeBody = {
+    size: 0,
+    query: {
+      bool: {
+        filter: [
+          timeRangeFilter("eventTime", range),
+          { terms: { eventName: ["code_gen", "code_adopt"] } }
+        ]
+      }
+    },
+    aggs: {
+      code_gen: {
+        filter: { term: { eventName: "code_gen" } },
+        aggs: {
+          generated_lines: { sum: { field: "properties.lineCount" } },
+          deleted_lines: { sum: { field: "properties.deletedLineCount" } }
+        }
+      },
+      code_adopt_measured: {
+        filter: {
+          bool: {
+            filter: [
+              { term: { eventName: "code_adopt" } },
+              { exists: { field: "properties.adoptedLineCount" } }
+            ]
+          }
+        },
+        aggs: {
+          measured_generated_lines: { sum: { field: "properties.generatedLineCount" } },
+          adopted_lines: { sum: { field: "properties.adoptedLineCount" } }
+        }
+      }
+    }
+  }
+
+  const [traceRaw, codeRaw] = await Promise.all([
+    esQuery(getEsIndex("trace"), traceBody),
+    esQuery(getEsIndex("event"), codeBody)
+  ])
+  const codeStats = normalizeCodeStatsFromAggs(codeRaw)
+  const traceRecord = asRecord(traceRaw)
+  return {
+    ...traceRecord,
+    aggregations: {
+      ...asRecord(traceRecord.aggregations),
+      code_generated_lines: { value: codeStats.generatedLines },
+      code_deleted_lines: { value: codeStats.deletedLines },
+      code_measured_generated_lines: { value: codeStats.measuredGeneratedLines },
+      code_adopted_lines: { value: codeStats.adoptedLines }
+    }
+  }
 }
 
 async function fetchModelStats(range: TimeRange, granularity: Granularity): Promise<unknown> {
@@ -645,6 +740,54 @@ async function fetchSkillRecentTraces(
   return (raw.hits?.hits ?? []).map(normalizeTraceDetail)
 }
 
+async function fetchSkillCodeStats(skill: string, range: TimeRange): Promise<DashboardCodeStats> {
+  const body = {
+    size: 0,
+    query: {
+      bool: {
+        filter: [
+          timeRangeFilter("eventTime", range),
+          { terms: { eventName: ["code_gen", "code_adopt"] } },
+          { term: { "properties.usedSkills": skill } }
+        ]
+      }
+    },
+    aggs: {
+      code_gen: {
+        filter: { term: { eventName: "code_gen" } },
+        aggs: {
+          generated_lines: { sum: { field: "properties.lineCount" } },
+          deleted_lines: { sum: { field: "properties.deletedLineCount" } }
+        }
+      },
+      code_adopt_measured: {
+        filter: {
+          bool: {
+            filter: [
+              { term: { eventName: "code_adopt" } },
+              { exists: { field: "properties.adoptedLineCount" } }
+            ]
+          }
+        },
+        aggs: {
+          measured_generated_lines: { sum: { field: "properties.generatedLineCount" } },
+          adopted_lines: { sum: { field: "properties.adoptedLineCount" } }
+        }
+      }
+    }
+  }
+  const raw = await esQuery(getEsIndex("event"), body)
+  return normalizeCodeStatsFromAggs(raw)
+}
+
+async function fetchSkillDetail(skill: string, range: TimeRange, limit = 3): Promise<DashboardSkillDetail> {
+  const [stats, traces] = await Promise.all([
+    fetchSkillCodeStats(skill, range),
+    fetchSkillRecentTraces(skill, range, limit)
+  ])
+  return { stats, traces }
+}
+
 async function fetchCommitDetails(
   range: TimeRange,
   limit = 200
@@ -747,6 +890,10 @@ function makeMockOverview(range: TimeRange): unknown {
       total_tools: { value: 27 },
       total_skill_calls: { value: 1711 },
       total_tool_calls: { value: 6538 },
+      code_generated_lines: { value: 4820 },
+      code_deleted_lines: { value: 930 },
+      code_measured_generated_lines: { value: 3900 },
+      code_adopted_lines: { value: 2860 },
       by_skill: {
         buckets: [
           { key: "代码审查",     doc_count: 312 },
@@ -1142,6 +1289,28 @@ function makeMockSkillRecentTraces(skill: string, range: TimeRange, limit = 3): 
   })
 }
 
+function makeMockSkillCodeStats(skill: string): DashboardCodeStats {
+  const seed = Array.from(skill).reduce((acc, char) => acc + char.charCodeAt(0), 0)
+  const generatedLines = 680 + (seed % 360)
+  const deletedLines = 80 + (seed % 90)
+  const measuredGeneratedLines = Math.max(0, generatedLines - 120)
+  const adoptedLines = Math.round(measuredGeneratedLines * (0.62 + (seed % 18) / 100))
+  return {
+    generatedLines,
+    deletedLines,
+    measuredGeneratedLines,
+    adoptedLines,
+    adoptionRate: computeAdoptionRate(adoptedLines, measuredGeneratedLines)
+  }
+}
+
+function makeMockSkillDetail(skill: string, range: TimeRange, limit = 3): DashboardSkillDetail {
+  return {
+    stats: makeMockSkillCodeStats(skill),
+    traces: makeMockSkillRecentTraces(skill, range, limit)
+  }
+}
+
 function makeMockCommitDetails(range: TimeRange, limit = 200): { total: number; items: DashboardCommitDetail[] } {
   const from = new Date(range.from)
   const to = new Date(range.to)
@@ -1255,6 +1424,20 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data: await fetchSkillRecentTraces(skill, range, limit) }
       } catch (e) {
         console.error("[Dashboard] skillRecentTraces error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:skillDetail",
+    async (_, skill: string, range: TimeRange, limit?: number) => {
+      if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
+      if (import.meta.env.DEV) return { success: true, data: makeMockSkillDetail(skill, range, limit) }
+      try {
+        return { success: true, data: await fetchSkillDetail(skill, range, limit) }
+      } catch (e) {
+        console.error("[Dashboard] skillDetail error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }

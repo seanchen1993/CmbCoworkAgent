@@ -4,10 +4,13 @@ import {
   AlertCircle,
   Ban,
   Bot,
+  CheckCircle2,
   ChevronDown,
   ChevronRight,
   Clock,
+  Code2,
   Coins,
+  Gauge,
   Hash,
   Loader2,
   MessageSquare,
@@ -19,13 +22,12 @@ import { Badge } from "@/components/ui/badge"
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogHeader,
   DialogTitle
 } from "@/components/ui/dialog"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
-import type { DashboardTraceDetail, DashboardTraceNode } from "./use-dashboard"
+import type { DashboardCodeStats, DashboardTraceDetail, DashboardTraceNode } from "./use-dashboard"
 
 const EMPTY_NODES: DashboardTraceNode[] = []
 
@@ -44,10 +46,94 @@ function fmtTokens(tokens: number): string {
   return String(tokens)
 }
 
+function fmtLines(lines: number): string {
+  if (lines >= 1_000_000) return `${(lines / 1_000_000).toFixed(1)}M`
+  if (lines >= 1_000) return `${(lines / 1_000).toFixed(1)}K`
+  return String(Math.round(lines))
+}
+
+function fmtPercent(value: number | null): string {
+  if (value === null) return "—"
+  return `${(value * 100).toFixed(1)}%`
+}
+
 function formatTime(iso: string): string {
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) return iso || "-"
   return date.toLocaleString()
+}
+
+function SkillCodeStat({
+  icon: Icon,
+  label,
+  value,
+  sub
+}: {
+  icon: React.ElementType
+  label: string
+  value: string
+  sub?: string
+}): React.JSX.Element {
+  return (
+    <div className="flex min-w-0 items-center gap-2 rounded-lg border border-border bg-card px-4 py-3">
+      <Icon className="size-3.5 shrink-0 text-muted-foreground" />
+      <div className="min-w-0">
+        <p className="text-[10px] text-muted-foreground">{label}</p>
+        <p className="truncate text-[12px] font-semibold">{value}</p>
+        {sub && <p className="truncate text-[10px] text-muted-foreground/70">{sub}</p>}
+      </div>
+    </div>
+  )
+}
+
+function SkillCodeStatsBar({ stats }: { stats: DashboardCodeStats | null }): React.JSX.Element {
+  if (!stats) {
+    return (
+      <section className="shrink-0 border-b border-border bg-background px-5 py-4">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <div>
+            <h3 className="text-xs font-semibold text-foreground">代码指标</h3>
+            <p className="text-[10px] text-muted-foreground">按当前 Skill 归因</p>
+          </div>
+        </div>
+        <div className="rounded-lg border border-dashed border-border px-4 py-3 text-xs text-muted-foreground">
+          暂无代码采纳数据
+        </div>
+      </section>
+    )
+  }
+  return (
+    <section className="shrink-0 border-b border-border bg-background px-5 py-4">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div>
+          <h3 className="text-xs font-semibold text-foreground">代码指标</h3>
+          <p className="text-[10px] text-muted-foreground">按当前 Skill 归因</p>
+        </div>
+      </div>
+      <div className="grid grid-cols-3 gap-3">
+        <SkillCodeStat
+          icon={Code2}
+          label="生成行数"
+          value={fmtLines(stats.generatedLines)}
+        />
+        <SkillCodeStat
+          icon={CheckCircle2}
+          label="采纳行数"
+          value={fmtLines(stats.adoptedLines)}
+        />
+        <SkillCodeStat
+          icon={Gauge}
+          label="采纳率"
+          value={fmtPercent(stats.adoptionRate)}
+          sub={
+            stats.adoptionRate === null
+              ? "暂无可度量提交"
+              : `${fmtLines(stats.adoptedLines)} / ${fmtLines(stats.measuredGeneratedLines)} 行`
+          }
+        />
+      </div>
+    </section>
+  )
 }
 
 function outcomeLabel(outcome: string): string {
@@ -229,6 +315,7 @@ export function TraceHistoryDialog({
   onOpenChange,
   skill,
   traces,
+  codeStats,
   loading,
   error
 }: {
@@ -236,6 +323,7 @@ export function TraceHistoryDialog({
   onOpenChange: (open: boolean) => void
   skill: string | null
   traces: DashboardTraceDetail[]
+  codeStats: DashboardCodeStats | null
   loading: boolean
   error: string | null
 }): React.JSX.Element {
@@ -260,7 +348,6 @@ export function TraceHistoryDialog({
       <DialogContent className="flex h-[80vh] max-w-[1080px] grid-rows-none flex-col gap-0 p-0">
         <DialogHeader className="border-b border-border px-5 py-4">
           <DialogTitle className="text-base">Skill 会话历史 · {skill ?? "-"}</DialogTitle>
-          <DialogDescription>当前时间范围最近 3 次</DialogDescription>
         </DialogHeader>
 
         {loading ? (
@@ -272,78 +359,96 @@ export function TraceHistoryDialog({
             {error}
           </div>
         ) : traces.length === 0 ? (
-          <div className="flex flex-1 items-center justify-center px-6 text-sm text-muted-foreground">
-            当前时间范围内没有该 Skill 的会话历史
+          <div className="flex min-h-0 flex-1 flex-col">
+            <SkillCodeStatsBar stats={codeStats} />
+            <section className="flex min-h-0 flex-1 flex-col bg-background">
+              <div className="shrink-0 border-b border-border px-5 py-3">
+                <h3 className="text-xs font-semibold text-foreground">最近 3 次 Trace 记录</h3>
+                <p className="text-[10px] text-muted-foreground">选择记录查看完整执行树</p>
+              </div>
+              <div className="flex flex-1 items-center justify-center px-6 text-sm text-muted-foreground">
+                当前时间范围内没有该 Skill 的会话历史
+              </div>
+            </section>
           </div>
         ) : (
-          <div className="grid min-h-0 flex-1 grid-cols-[320px_minmax(0,1fr)]">
-            <div className="min-h-0 border-r border-border">
-              <ScrollArea className="h-full">
-                <div className="space-y-2 p-3">
-                  {traces.map((trace) => (
-                    <TraceCard
-                      key={trace.traceId}
-                      trace={trace}
-                      selected={selectedTrace?.traceId === trace.traceId}
-                      onClick={() => setSelectedTraceId(trace.traceId)}
-                    />
-                  ))}
+          <div className="flex min-h-0 flex-1 flex-col">
+            <SkillCodeStatsBar stats={codeStats} />
+            <section className="flex min-h-0 flex-1 flex-col bg-background">
+              <div className="shrink-0 border-b border-border px-5 py-3">
+                <h3 className="text-xs font-semibold text-foreground">最近 3 次 Trace 记录</h3>
+                <p className="text-[10px] text-muted-foreground">选择记录查看完整执行树</p>
+              </div>
+              <div className="grid min-h-0 flex-1 grid-cols-[320px_minmax(0,1fr)]">
+                <div className="min-h-0 border-r border-border">
+                  <ScrollArea className="h-full">
+                    <div className="space-y-2 p-3">
+                      {traces.map((trace) => (
+                        <TraceCard
+                          key={trace.traceId}
+                          trace={trace}
+                          selected={selectedTrace?.traceId === trace.traceId}
+                          onClick={() => setSelectedTraceId(trace.traceId)}
+                        />
+                      ))}
+                    </div>
+                  </ScrollArea>
                 </div>
-              </ScrollArea>
-            </div>
 
-            <div className="flex min-h-0 min-w-0 flex-col">
-              {selectedTrace && (
-                <div className="grid shrink-0 grid-cols-4 border-b border-border">
-                  <div className="flex items-center gap-2 border-r border-border px-4 py-2.5">
-                    <Clock className="size-3.5 text-muted-foreground" />
-                    <div className="min-w-0">
-                      <p className="text-[10px] text-muted-foreground">时间</p>
-                      <p className="truncate text-[12px] font-semibold">{formatTime(selectedTrace.startedAt)}</p>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2 border-r border-border px-4 py-2.5">
-                    <Hash className="size-3.5 text-muted-foreground" />
-                    <div className="min-w-0">
-                      <p className="text-[10px] text-muted-foreground">工具调用</p>
-                      <p className="truncate text-[12px] font-semibold">{selectedTrace.totalToolCalls}</p>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2 border-r border-border px-4 py-2.5">
-                    <Timer className="size-3.5 text-muted-foreground" />
-                    <div className="min-w-0">
-                      <p className="text-[10px] text-muted-foreground">耗时</p>
-                      <p className="truncate text-[12px] font-semibold">{fmtDuration(selectedTrace.durationMs)}</p>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2 px-4 py-2.5">
-                    <Coins className="size-3.5 text-muted-foreground" />
-                    <div className="min-w-0">
-                      <p className="text-[10px] text-muted-foreground">Token</p>
-                      <p className="truncate text-[12px] font-semibold">{fmtTokens(selectedTrace.totalTokens)}</p>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              <ScrollArea className="min-h-0 flex-1">
-                <div className="p-4">
-                  {selectedTrace && !selectedTrace.rawAvailable && (
-                    <div className="mb-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
-                      {selectedTrace.rawError || "该 trace 缺少完整 raw 内容，无法展示完整执行树"}
+                <div className="flex min-h-0 min-w-0 flex-col">
+                  {selectedTrace && (
+                    <div className="grid shrink-0 grid-cols-4 border-b border-border">
+                      <div className="flex items-center gap-2 border-r border-border px-4 py-2.5">
+                        <Clock className="size-3.5 text-muted-foreground" />
+                        <div className="min-w-0">
+                          <p className="text-[10px] text-muted-foreground">时间</p>
+                          <p className="truncate text-[12px] font-semibold">{formatTime(selectedTrace.startedAt)}</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 border-r border-border px-4 py-2.5">
+                        <Hash className="size-3.5 text-muted-foreground" />
+                        <div className="min-w-0">
+                          <p className="text-[10px] text-muted-foreground">工具调用</p>
+                          <p className="truncate text-[12px] font-semibold">{selectedTrace.totalToolCalls}</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 border-r border-border px-4 py-2.5">
+                        <Timer className="size-3.5 text-muted-foreground" />
+                        <div className="min-w-0">
+                          <p className="text-[10px] text-muted-foreground">耗时</p>
+                          <p className="truncate text-[12px] font-semibold">{fmtDuration(selectedTrace.durationMs)}</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 px-4 py-2.5">
+                        <Coins className="size-3.5 text-muted-foreground" />
+                        <div className="min-w-0">
+                          <p className="text-[10px] text-muted-foreground">Token</p>
+                          <p className="truncate text-[12px] font-semibold">{fmtTokens(selectedTrace.totalTokens)}</p>
+                        </div>
+                      </div>
                     </div>
                   )}
-                  {root ? (
-                    <TraceTreeNode node={root} childrenByParent={childrenByParent} depth={0} />
-                  ) : selectedTrace ? (
-                    <div className="rounded-md border border-border bg-card p-4">
-                      <p className="mb-2 text-xs font-semibold text-muted-foreground">Trace Summary</p>
-                      <JsonBlock value={selectedTrace} />
+
+                  <ScrollArea className="min-h-0 flex-1">
+                    <div className="p-4">
+                      {selectedTrace && !selectedTrace.rawAvailable && (
+                        <div className="mb-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+                          {selectedTrace.rawError || "该 trace 缺少完整 raw 内容，无法展示完整执行树"}
+                        </div>
+                      )}
+                      {root ? (
+                        <TraceTreeNode node={root} childrenByParent={childrenByParent} depth={0} />
+                      ) : selectedTrace ? (
+                        <div className="rounded-md border border-border bg-card p-4">
+                          <p className="mb-2 text-xs font-semibold text-muted-foreground">Trace Summary</p>
+                          <JsonBlock value={selectedTrace} />
+                        </div>
+                      ) : null}
                     </div>
-                  ) : null}
+                  </ScrollArea>
                 </div>
-              </ScrollArea>
-            </div>
+              </div>
+            </section>
           </div>
         )}
       </DialogContent>

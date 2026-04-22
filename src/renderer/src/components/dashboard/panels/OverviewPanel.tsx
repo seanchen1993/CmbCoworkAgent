@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { Activity, Users, Clock, ArrowDownToLine, ArrowUpFromLine } from "lucide-react"
+import { Activity, Users, Clock, ArrowDownToLine, ArrowUpFromLine, Code2, Trash2, Gauge } from "lucide-react"
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend
 } from "recharts"
@@ -43,6 +43,11 @@ function formatNumber(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
   return String(Math.round(n))
+}
+
+function formatPercent(value: number | null): string {
+  if (value === null) return "—"
+  return `${(value * 100).toFixed(1)}%`
 }
 
 function ToolTopPanel({ data }: { data: OverviewData }) {
@@ -162,6 +167,33 @@ export function OverviewPanel({
           label="输出 Token"
           value={formatNumber(data.outputTokens)}
           color="bg-rose-500"
+        />
+      </div>
+
+      {/* Row 2: Code adoption metrics */}
+      <div className="grid grid-cols-5 gap-3">
+        <StatCard
+          icon={Code2}
+          label="代码生成行数"
+          value={formatNumber(data.codeGeneratedLines)}
+          color="bg-emerald-500"
+        />
+        <StatCard
+          icon={Trash2}
+          label="代码删除行数"
+          value={formatNumber(data.codeDeletedLines)}
+          color="bg-zinc-500"
+        />
+        <StatCard
+          icon={Gauge}
+          label="代码采纳率"
+          value={formatPercent(data.codeAdoptionRate)}
+          sub={
+            data.codeAdoptionRate === null
+              ? "暂无可度量提交"
+              : `${formatNumber(data.codeAdoptedLines)} / ${formatNumber(data.codeMeasuredGeneratedLines)} 行`
+          }
+          color="bg-cyan-500"
         />
       </div>
 

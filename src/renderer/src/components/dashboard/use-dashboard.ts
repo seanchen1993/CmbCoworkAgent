@@ -20,6 +20,11 @@ export interface OverviewData {
   avgDurationMs: number
   inputTokens: number
   outputTokens: number
+  codeGeneratedLines: number
+  codeDeletedLines: number
+  codeMeasuredGeneratedLines: number
+  codeAdoptedLines: number
+  codeAdoptionRate: number | null
   totalSkills: number
   totalTools: number
   totalSkillCalls: number
@@ -103,6 +108,19 @@ export interface DashboardCommitDetail {
   threadId?: string
   usedSkills: string[]
   skillCount: number
+}
+
+export interface DashboardCodeStats {
+  generatedLines: number
+  deletedLines: number
+  measuredGeneratedLines: number
+  adoptedLines: number
+  adoptionRate: number | null
+}
+
+export interface DashboardSkillDetail {
+  stats: DashboardCodeStats
+  traces: DashboardTraceDetail[]
 }
 
 export interface ProductivityData {
@@ -295,6 +313,12 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
   const avgDurationMs = aggs.avg_duration?.value ?? 0
   const inputTokens = aggs.total_input_tokens?.value ?? 0
   const outputTokens = aggs.total_output_tokens?.value ?? 0
+  const codeGeneratedLines = aggs.code_generated_lines?.value ?? 0
+  const codeDeletedLines = aggs.code_deleted_lines?.value ?? 0
+  const codeMeasuredGeneratedLines = aggs.code_measured_generated_lines?.value ?? 0
+  const codeAdoptedLines = aggs.code_adopted_lines?.value ?? 0
+  const codeAdoptionRate =
+    codeMeasuredGeneratedLines > 0 ? codeAdoptedLines / codeMeasuredGeneratedLines : null
   const totalSkills = aggs.total_skills?.value ?? 0
   const totalTools = aggs.total_tools?.value ?? 0
   const totalSkillCalls = aggs.total_skill_calls?.value ?? 0
@@ -321,7 +345,26 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
     count: b.doc_count
   }))
 
-  return { totalCalls, activeUsers, avgDurationMs, inputTokens, outputTokens, totalSkills, totalTools, totalSkillCalls, totalToolCalls, trend, bySkill, byTool, byToolAll }
+  return {
+    totalCalls,
+    activeUsers,
+    avgDurationMs,
+    inputTokens,
+    outputTokens,
+    codeGeneratedLines,
+    codeDeletedLines,
+    codeMeasuredGeneratedLines,
+    codeAdoptedLines,
+    codeAdoptionRate,
+    totalSkills,
+    totalTools,
+    totalSkillCalls,
+    totalToolCalls,
+    trend,
+    bySkill,
+    byTool,
+    byToolAll
+  }
 }
 
 function parseModelStats(raw: any): ModelStatsData {
