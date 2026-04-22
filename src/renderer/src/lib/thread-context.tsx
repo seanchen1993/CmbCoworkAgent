@@ -51,6 +51,21 @@ export interface ModelRetryState {
   startedAt: Date
 }
 
+export interface HookLogEntry {
+  id: string
+  event: string
+  hookType: string
+  label: string
+  toolSuffix: string
+  exitCode: number | null
+  blocked: boolean
+  decision?: string
+  stdout: string
+  stderr: string
+  systemMessage?: string
+  timestamp: Date
+}
+
 // Per-thread state (persisted/restored from checkpoints)
 export interface ThreadState {
   messages: Message[]
@@ -110,6 +125,9 @@ interface ThreadContextValue {
   // Stream subscription
   subscribeToStream: (threadId: string, callback: () => void) => () => void
   getStreamData: (threadId: string) => StreamData
+  // Hook log subscription (external store — no re-renders on ThreadProvider)
+  subscribeToHookLogs: (threadId: string, callback: () => void) => () => void
+  getHookLogs: (threadId: string) => HookLogEntry[]
   // Get all initialized thread states (for kanban view)
   getAllThreadStates: () => Record<string, ThreadState>
   // Get all stream loading states (for kanban view)
@@ -144,6 +162,7 @@ const defaultStreamData: StreamData = {
   isLoading: false,
   stream: null
 }
+const EMPTY_HOOK_LOGS: HookLogEntry[] = []
 
 const ThreadContext = createContext<ThreadContextValue | null>(null)
 
@@ -180,6 +199,17 @@ interface CustomEventData {
   reason?: string
   message?: string
   delayMs?: number
+  // hook_executed fields
+  event?: string
+  hookType?: string
+  label?: string
+  toolSuffix?: string
+  exitCode?: number | null
+  blocked?: boolean
+  decision?: string
+  stdout?: string
+  stderr?: string
+  systemMessage?: string
 }
 
 // Component that holds a stream and notifies subscribers
@@ -269,6 +299,26 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   // Stream data store (not React state - we use subscriptions)
   const streamDataRef = useRef<Record<string, StreamData>>({})
   const streamSubscribersRef = useRef<Record<string, Set<() => void>>>({})
+
+  // Hook logs store (not React state — avoids re-rendering chat on every hook fire)
+  const hookLogsRef = useRef<Record<string, HookLogEntry[]>>({})
+  const hookLogsSubscribersRef = useRef<Record<string, Set<() => void>>>({})
+
+  const notifyHookLogSubscribers = useCallback((threadId: string) => {
+    hookLogsSubscribersRef.current[threadId]?.forEach((cb) => cb())
+  }, [])
+
+  const subscribeToHookLogs = useCallback((threadId: string, callback: () => void) => {
+    if (!hookLogsSubscribersRef.current[threadId]) {
+      hookLogsSubscribersRef.current[threadId] = new Set()
+    }
+    hookLogsSubscribersRef.current[threadId].add(callback)
+    return () => { hookLogsSubscribersRef.current[threadId]?.delete(callback) }
+  }, [])
+
+  const getHookLogs = useCallback((threadId: string): HookLogEntry[] => {
+    return hookLogsRef.current[threadId] ?? EMPTY_HOOK_LOGS
+  }, [])
 
   // Notify subscribers for a thread
   const notifyStreamSubscribers = useCallback((threadId: string) => {
@@ -502,6 +552,25 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             toast.info(data.message)
           }
           break
+        case "hook_executed": {
+          const entry: HookLogEntry = {
+            id: `${Date.now()}-${Math.random()}`,
+            event: data.event ?? "",
+            hookType: data.hookType ?? "command",
+            label: data.label ?? "",
+            toolSuffix: data.toolSuffix ?? "",
+            exitCode: data.exitCode ?? null,
+            blocked: data.blocked ?? false,
+            decision: data.decision,
+            stdout: data.stdout ?? "",
+            stderr: data.stderr ?? "",
+            systemMessage: data.systemMessage,
+            timestamp: new Date()
+          }
+          hookLogsRef.current[threadId] = [...(hookLogsRef.current[threadId] ?? []), entry]
+          notifyHookLogSubscribers(threadId)
+          break
+        }
         case "token_usage":
           // Only update if we have meaningful token values (> 0)
           // This prevents resetting the usage when streaming ends
@@ -549,6 +618,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
       const actions: ThreadActions = {
         appendMessage: (message: Message) => {
+          // Clear hook logs (external store) at the start of each new user turn
+          if (message.role === "user") {
+            hookLogsRef.current[threadId] = []
+            notifyHookLogSubscribers(threadId)
+          }
           updateThreadState(threadId, (state) => {
             const exists = state.messages.some((m) => m.id === message.id)
             if (exists) {
@@ -857,6 +931,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
       // "started" fires before agent runtime creation — show loading immediately
       if (event.type === "started") {
+        hookLogsRef.current[threadId] = []
+        notifyHookLogSubscribers(threadId)
         updateThreadState(threadId, () => ({ scheduledTaskLoading: true }))
         return
       }
@@ -1069,6 +1145,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     delete actionsCache.current[threadId]
     delete streamDataRef.current[threadId]
     delete streamSubscribersRef.current[threadId]
+    delete hookLogsRef.current[threadId]
+    delete hookLogsSubscribersRef.current[threadId]
     setActiveThreadIds((prev) => {
       const next = new Set(prev)
       next.delete(threadId)
@@ -1089,6 +1167,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       cleanupThread,
       subscribeToStream,
       getStreamData,
+      subscribeToHookLogs,
+      getHookLogs,
       getAllThreadStates,
       getAllStreamLoadingStates,
       subscribeToAllStreams
@@ -1100,6 +1180,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       cleanupThread,
       subscribeToStream,
       getStreamData,
+      subscribeToHookLogs,
+      getHookLogs,
       getAllThreadStates,
       getAllStreamLoadingStates,
       subscribeToAllStreams

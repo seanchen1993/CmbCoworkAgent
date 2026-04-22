@@ -1964,11 +1964,6 @@ export function getWorkspaceHooks(workspacePath: string): HookConfig[] {
         if (hookType === "prompt" && typeof raw.prompt !== "string") continue
         if (hookType === "command" && typeof raw.command !== "string") continue
         if (raw.enabled === false) continue
-        // command hooks require trust confirmation
-        if (hookType === "command" && !isWorkspaceHookTrusted(workspacePath, file, filePath)) {
-          console.log(`[Hooks] Skipping untrusted workspace command hook: ${file}`)
-          continue
-        }
         const baseName = file.replace(/\.json$/, "")
         result.push({
           id: `ws:${baseName}`,

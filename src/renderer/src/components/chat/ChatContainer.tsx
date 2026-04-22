@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useMemo, useCallback, useState } from "react"
+import React, { useRef, useEffect, useMemo, useCallback, useState, useSyncExternalStore } from "react"
 import {
   Send,
   Square,
@@ -34,7 +34,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { useAppStore } from "@/lib/store"
 import { cn } from "@/lib/utils"
 import { useShallow } from "zustand/react/shallow"
-import { useCurrentThread, useThreadStream } from "@/lib/thread-context"
+import { useCurrentThread, useThreadStream, useThreadContext, type HookLogEntry } from "@/lib/thread-context"
 import { ModelSwitcher } from "./ModelSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
 import { ChatTodos } from "./ChatTodos"
@@ -52,6 +52,53 @@ import { marketApi, MarketItem } from "../../api/market"
 import { insertLog, updateMMJUserInfo } from "../../../js/mmjUtils"
 import { UpdateDialog } from "../update/UpdateDialog"
 import { toast } from "sonner"
+
+function HookLogsPanel({ logs }: { logs: HookLogEntry[] }): React.JSX.Element {
+  const [expanded, setExpanded] = React.useState(false)
+  const hasIssue = logs.some((l) => l.blocked || l.exitCode === null || (l.exitCode !== 0 && l.exitCode !== 2))
+  return (
+    <div className={`rounded-md border text-xs font-mono ${hasIssue ? "border-amber-400/60 bg-amber-50/40 dark:bg-amber-900/10" : "border-border/50 bg-muted/30"}`}>
+      <button
+        className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-muted/50 transition-colors"
+        onClick={() => setExpanded((v) => !v)}
+      >
+        <span className="shrink-0">⚙</span>
+        <span className="text-muted-foreground">
+          Hook 执行记录（{logs.length} 次）{hasIssue ? " ⚠" : ""}
+        </span>
+        <span className="ml-auto text-muted-foreground/60">{expanded ? "▲" : "▼"}</span>
+      </button>
+      {expanded && (
+        <div className="border-t border-border/40 divide-y divide-border/30">
+          {logs.map((log) => {
+            const ok = !log.blocked && log.exitCode === 0
+            return (
+              <div key={log.id} className="px-3 py-2 space-y-0.5">
+                <div className="flex items-center gap-2">
+                  <span className={ok ? "text-green-600 dark:text-green-400" : "text-red-500"}>
+                    {ok ? "✓" : log.blocked ? "✗ 拦截" : log.exitCode === null ? "✗ 超时" : `✗ exit=${log.exitCode}`}
+                  </span>
+                  <span className="text-foreground/80 font-semibold">[{log.event}{log.toolSuffix}]</span>
+                  <span className="text-muted-foreground truncate">{log.hookType}: {log.label}</span>
+                  {log.decision && <span className="text-xs text-amber-600 dark:text-amber-400">{log.decision}</span>}
+                </div>
+                {log.stdout && (
+                  <div className="text-muted-foreground whitespace-pre-wrap break-all pl-4">{log.stdout}</div>
+                )}
+                {log.stderr && (
+                  <div className="text-red-500/80 whitespace-pre-wrap break-all pl-4">{log.stderr}</div>
+                )}
+                {log.systemMessage && (
+                  <div className="text-blue-500/80 pl-4">{log.systemMessage}</div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
 
 interface AgentStreamValues {
   todos?: Array<{ id?: string; content?: string; status?: string }>
@@ -396,6 +443,13 @@ export function ChatContainer({
     clearError,
     setDraftInput: setInput
   } = useCurrentThread(threadId)
+
+  // Hook logs live in an external store so updates don't re-render the full provider tree
+  const threadContext = useThreadContext()
+  const hookLogs = useSyncExternalStore(
+    useCallback((cb) => threadContext.subscribeToHookLogs(threadId, cb), [threadContext, threadId]),
+    useCallback(() => threadContext.getHookLogs(threadId), [threadContext, threadId])
+  )
 
   // Get the stream data via subscription - reactive updates without re-rendering provider
   const streamData = useThreadStream(threadId)
@@ -1982,6 +2036,9 @@ export function ChatContainer({
             {/*<DisplayDiffTest/>*/}
 
 
+
+            {/* Hook execution logs — shown during/after a turn for debugging */}
+            {hookLogs.length > 0 && <HookLogsPanel logs={hookLogs} />}
 
             {/* Orchestrator standalone approval bar moved outside ScrollArea — see below */}
             {/* Model retry indicator — shown when the fetch layer is retrying a transient error */}

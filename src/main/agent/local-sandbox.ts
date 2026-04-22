@@ -41,7 +41,7 @@ import {
 } from "../ipc/sandbox"
 import { homedir } from "node:os"
 import type { HookConfig, HookResult } from "../hooks/types"
-import { runHooks } from "../hooks/runner"
+import { runHooks, type HookResultCallback } from "../hooks/runner"
 
 /**
  * Sensitive directories under user profile that sandbox tools should not access.
@@ -151,6 +151,8 @@ export interface LocalSandboxOptions {
   /** Hook configurations for PreToolUse/PostToolUse lifecycle events.
    *  Accepts a getter function so hooks are always read fresh from storage. */
   hooks?: HookConfig[] | (() => HookConfig[])
+  /** Optional callback invoked after each hook executes — used to emit results to the renderer. */
+  onHookResult?: HookResultCallback
   /** AbortSignal for cancelling running child processes when the user aborts.
    *  When signalled, any in-flight execute() will kill its child process immediately
    *  (SIGTERM → 200ms → SIGKILL), matching OpenCode/Codex abort behaviour. */
@@ -191,6 +193,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
   private readonly windowsSandbox: "none" | "unelevated" | "readonly" | "elevated"
   private readonly codexExePath: string
   private readonly getHooks: () => HookConfig[]
+  private readonly _onHookResult?: HookResultCallback
   /** App-owned persistent cache root granted as a Codex writable root per workspace. */
   private readonly _sandboxCacheRoot: string
   /** Shared download/artifact cache root reused across workspaces. */
@@ -799,6 +802,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     this.codexExePath = options.codexExePath ?? "codex"
     const h = options.hooks
     this.getHooks = typeof h === "function" ? h : () => h ?? []
+    this._onHookResult = options.onHookResult
     this._sandboxCacheRoot = LocalSandbox.buildSandboxCacheRoot(baseEnv, this.workingDir)
     this._sharedSandboxCacheRoot = LocalSandbox.buildSharedSandboxCacheRoot(baseEnv)
     this.abortSignal = options.abortSignal
@@ -1409,7 +1413,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       toolArgs: { filePath, content },
       workspacePath: this.workingDir,
       sessionId: this.runId
-    })
+    }, this._onHookResult)
     if (preResult?.blocked) {
       return { error: `[Hook blocked] ${preResult.stdout || "write_file was blocked by a hook"}` }
     }
@@ -1429,7 +1433,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
         toolResult: JSON.stringify(result),
         workspacePath: this.workingDir,
         sessionId: this.runId
-      })
+      }, this._onHookResult)
       return LocalSandbox.applyPostHookContext(result, postResult, "write_file")
     } catch (e) {
       console.warn("[Hooks] PostToolUse write error:", e)
@@ -1504,7 +1508,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       toolArgs: { filePath, oldString, newString, replaceAll },
       workspacePath: this.workingDir,
       sessionId: this.runId
-    })
+    }, this._onHookResult)
     if (preResult?.blocked) {
       return { error: `[Hook blocked] ${preResult.stdout || "edit_file was blocked by a hook"}` }
     }
@@ -1543,7 +1547,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
           toolResult: JSON.stringify(result),
           workspacePath: this.workingDir,
           sessionId: this.runId
-        })
+        }, this._onHookResult)
         return LocalSandbox.applyPostHookContext(result, postResult, "edit_file")
       } catch (e) {
         console.warn("[Hooks] PostToolUse edit error:", e)
@@ -2281,7 +2285,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       toolArgs: { command },
       workspacePath: this.workingDir,
       sessionId: this.runId
-    })
+    }, this._onHookResult)
     if (preResult?.blocked) {
       return {
         output: `[Hook blocked] ${preResult.stdout || "execute was blocked by a hook"}`,
@@ -2301,7 +2305,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
         toolResult: result.output,
         workspacePath: this.workingDir,
         sessionId: this.runId
-      })
+      }, this._onHookResult)
       return LocalSandbox.applyPostHookToExecResult(result, postResult)
     }
 
@@ -2313,7 +2317,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       toolResult: result.output,
       workspacePath: this.workingDir,
       sessionId: this.runId
-    })
+    }, this._onHookResult)
     return LocalSandbox.applyPostHookToExecResult(result, postResult)
   }
 

@@ -1,4 +1,4 @@
-import { runHooks } from "./runner"
+import { runHooks, type HookResultCallback } from "./runner"
 import { getEnabledHooks } from "../storage"
 
 // Map<threadId, workspacePath?>. Cleanup paths:
@@ -13,13 +13,13 @@ export function hasActiveSessions(): boolean {
 }
 
 /** Fire SessionStart exactly once per threadId lifetime (within the main-process run). */
-export function fireSessionStartOnce(threadId: string, workspacePath?: string): void {
+export function fireSessionStartOnce(threadId: string, workspacePath?: string, onHookResult?: HookResultCallback): void {
   if (startedSessions.has(threadId)) return
   startedSessions.set(threadId, workspacePath)
   runHooks(getEnabledHooks(workspacePath), "SessionStart", {
     workspacePath,
     sessionId: threadId
-  }).catch((e) => console.warn("[Hooks] SessionStart hook error:", e))
+  }, onHookResult).catch((e) => console.warn("[Hooks] SessionStart hook error:", e))
 }
 
 /** Fire SessionEnd for a thread if it previously fired SessionStart. No-op otherwise. */

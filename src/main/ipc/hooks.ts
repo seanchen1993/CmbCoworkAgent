@@ -5,7 +5,6 @@ import {
   deleteHook,
   setHookEnabled,
   getWorkspaceHooks,
-  getUntrustedWorkspaceCommandHooks,
   trustAllWorkspaceHooks,
   trustWorkspaceHookFile
 } from "../storage"
@@ -110,9 +109,9 @@ export function registerHooksHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle(
     "hooks:workspace:untrusted",
-    async (_event, workspacePath: string): Promise<UntrustedWorkspaceHook[]> => {
-      if (!workspacePath) return []
-      return getUntrustedWorkspaceCommandHooks(workspacePath)
+    async (): Promise<UntrustedWorkspaceHook[]> => {
+      // Workspace command hooks are now trusted by default — always return empty.
+      return []
     }
   )
 

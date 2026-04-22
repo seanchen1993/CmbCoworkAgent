@@ -23,6 +23,7 @@ import { ChatOpenAI } from "@langchain/openai"
 import { DynamicStructuredTool } from "@langchain/core/tools"
 import { SqlJsSaver } from "../checkpointer/sqljs-saver"
 import { LocalSandbox } from "./local-sandbox"
+import type { HookResultCallback } from "../hooks/runner"
 import {
   createAgent,
   ReactAgent,
@@ -859,6 +860,8 @@ export interface CreateAgentRuntimeOptions {
    *  on routing mode — pinned mode benefits from more retries since there is
    *  no failover fallback, while auto-routing can retry less and failover more. */
   maxRetryAttempts?: number
+  /** Callback invoked after each hook executes — used to emit results to the renderer. */
+  onHookResult?: HookResultCallback
 }
 
 // Create agent runtime with configured model and checkpointer
@@ -872,7 +875,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     extraSystemPrompt,
     retryHooks,
     maxRetryAttempts,
-    enableAgentsPrompt = true
+    enableAgentsPrompt = true,
+    onHookResult
   } = options
 
   if (!threadId) {
@@ -954,6 +958,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     windowsSandbox,
     codexExePath: codexExists ? codexExePath : undefined,
     hooks: () => getEnabledHooks(workspacePath),
+    onHookResult,
     abortSignal: options.abortSignal,
     runId: threadId
   })
@@ -995,7 +1000,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         toolArgs: { command: req.command, reason: req.reason, filePath: req.filePath },
         workspacePath,
         sessionId: threadId
-      }).catch((e) => console.warn("[Hooks] Notification hook error:", e))
+      }, onHookResult).catch((e) => console.warn("[Hooks] Notification hook error:", e))
       for (const win of BrowserWindow.getAllWindows()) {
         win.webContents.send(`approval:request:${threadId}`, req)
       }

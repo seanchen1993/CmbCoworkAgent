@@ -481,10 +481,13 @@ async function executeHook(
  * - PostToolUse: collects stdout from all hooks as extra context.
  * - Stop/SubagentStop/Notification/SessionStart/SessionEnd: fire-and-forget.
  */
+export type HookResultCallback = (event: HookEvent, hook: HookConfig, result: HookResult) => void
+
 export async function runHooks(
   hooks: HookConfig[],
   event: HookEvent,
-  context: HookContext
+  context: HookContext,
+  onHookResult?: HookResultCallback
 ): Promise<HookResult | null> {
   const matched = hooks.filter(
     (h) => h.enabled && h.event === event && matchesToolName(h.matcher, context.toolName)
@@ -503,6 +506,7 @@ export async function runHooks(
       console.log(
         `[Hooks] ${event} hook (${hook.type ?? "command"}) "${(hook.command ?? hook.prompt ?? "").slice(0, 60)}" → exit=${result.exitCode}, blocked=${result.blocked}`
       )
+      onHookResult?.(event, hook, result)
       // continue=false halts the entire agent turn, overrides everything else
       if (result.continue === false) {
         const reason = result.stopReason || result.reason || result.stderr || result.stdout || `${event} hook stopped the turn`
@@ -556,6 +560,7 @@ export async function runHooks(
       console.log(
         `[Hooks] PostToolUse hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}`
       )
+      onHookResult?.(event, hook, result)
       if (result.continue === false) {
         shouldHalt = true
         haltReason = result.stopReason ?? haltReason
@@ -592,6 +597,7 @@ export async function runHooks(
       console.log(
         `[Hooks] Stop hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}`
       )
+      onHookResult?.(event, hook, result)
       if (result.continue === false || result.blocked || result.decision === "block") {
         blockReasons.push(
           result.reason || result.stopReason || result.stdout || result.stderr || "Stop hook requested revision"
@@ -625,6 +631,7 @@ export async function runHooks(
       console.log(
         `[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}`
       )
+      onHookResult?.(event, hook, result)
       if (result.stderr) {
         console.warn(`[Hooks] ${event} hook stderr:`, result.stderr)
       }
