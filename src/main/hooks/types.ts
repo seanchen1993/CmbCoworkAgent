@@ -18,6 +18,26 @@ export type HookEvent =
   | "CwdChanged"
   | "FileChanged"
 
+// Events currently emitted by the runtime and safe to configure in files / IPC.
+export const SUPPORTED_HOOK_EVENTS = [
+  "PreToolUse",
+  "PostToolUse",
+  "Stop",
+  "Notification",
+  "UserPromptSubmit",
+  "SessionStart",
+  "SessionEnd",
+  "SubagentStop"
+] as const satisfies readonly HookEvent[]
+
+export type SupportedHookEvent = (typeof SUPPORTED_HOOK_EVENTS)[number]
+
+const SUPPORTED_HOOK_EVENT_SET = new Set<HookEvent>(SUPPORTED_HOOK_EVENTS)
+
+export function isSupportedHookEvent(value: unknown): value is SupportedHookEvent {
+  return typeof value === "string" && SUPPORTED_HOOK_EVENT_SET.has(value as HookEvent)
+}
+
 /** Hook handler type.
  *  - "command": execute a shell command (original behaviour, default)
  *  - "prompt":  send a single-turn LLM request; the model decides allow/block
@@ -41,17 +61,17 @@ export interface HookOnBlockConfig {
 export interface HookConfig {
   id: string
   event: HookEvent
-  matcher?: string          // Tool name match, e.g. "execute", "write_file", "*"
-  type?: HookType           // Default: "command"
+  matcher?: string // Tool name match, e.g. "execute", "write_file", "*"
+  type?: HookType // Default: "command"
   // ── command hook ──────────────────────────────────────────────────────────
-  command?: string          // Shell command to run (required when type=="command")
+  command?: string // Shell command to run (required when type=="command")
   // ── prompt hook ───────────────────────────────────────────────────────────
-  prompt?: string           // Natural-language policy (required when type=="prompt")
-  modelId?: string          // Which configured model to use; omit = use default model
-  fallback?: PromptHookFallback  // Behaviour on timeout / parse failure; default "allow"
+  prompt?: string // Natural-language policy (required when type=="prompt")
+  modelId?: string // Which configured model to use; omit = use default model
+  fallback?: PromptHookFallback // Behaviour on timeout / parse failure; default "allow"
   // ── shared ────────────────────────────────────────────────────────────────
   onBlock?: HookOnBlockConfig // static block-time remediation metadata
-  timeout?: number          // Timeout in ms, default 10000
+  timeout?: number // Timeout in ms, default 10000
   enabled: boolean
   createdAt: string
   updatedAt: string
@@ -61,14 +81,14 @@ export interface HookResult {
   exitCode: number | null
   stdout: string
   stderr: string
-  blocked: boolean          // exit code 2 = intentional block (PreToolUse / UserPromptSubmit)
+  blocked: boolean // exit code 2 = intentional block (PreToolUse / UserPromptSubmit)
   /** Structured fields parsed from JSON stdout (exit 0 only) */
-  additionalContext?: string    // injected into agent context (invisible to user)
-  systemMessage?: string        // visible warning to user
+  additionalContext?: string // injected into agent context (invisible to user)
+  systemMessage?: string // visible warning to user
   /** Optional skill to load as remediation guidance when the hook fires. */
   requiredSkill?: string
-  updatedInput?: Record<string, unknown>  // PreToolUse: modify tool args
-  suppressOutput?: boolean      // suppress tool output from agent context
+  updatedInput?: Record<string, unknown> // PreToolUse: modify tool args
+  suppressOutput?: boolean // suppress tool output from agent context
   /** If false, agent halts the entire turn (not just this tool). */
   continue?: boolean
   /** Reason message for halting; shown to user when continue=false. */
@@ -83,12 +103,12 @@ export interface HookResult {
 export interface HookEnv {
   HOOK_EVENT: HookEvent
   TOOL_NAME?: string
-  TOOL_ARGS?: string        // JSON
-  TOOL_RESULT?: string      // PostToolUse only
+  TOOL_ARGS?: string // JSON, best-effort only for compact payloads; stdin remains canonical
+  TOOL_RESULT?: string // PostToolUse only, best-effort only for compact payloads
   WORKSPACE_PATH?: string
-  CLAUDE_PROJECT_DIR?: string  // Claude Code compatibility: alias for WORKSPACE_PATH
-  USER_PROMPT?: string         // UserPromptSubmit event
-  SESSION_ID?: string          // threadId
+  CLAUDE_PROJECT_DIR?: string // Claude Code compatibility: alias for WORKSPACE_PATH
+  USER_PROMPT?: string // UserPromptSubmit event
+  SESSION_ID?: string // threadId
 }
 
 export interface HookUpsert {

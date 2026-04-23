@@ -143,7 +143,7 @@ export interface CommandHookReadableContextDoc {
   extraObjects: HookReadableObjectDoc[]
 }
 
-export const COMMAND_HOOK_EVENT_DOCS: Record<HookEvent, CommandHookEventDoc> = {
+export const COMMAND_HOOK_EVENT_DOCS: Partial<Record<HookEvent, CommandHookEventDoc>> = {
   PreToolUse: {
     inputDescription: "当前事件发生在工具真正执行前，最常见的输入是工具名和工具参数。",
     inputFields: ["hook_event_name", "session_id", "cwd", "tool_name", "tool_input"],
@@ -668,6 +668,10 @@ exit 0
   }
 }
 
+export function getCommandHookEventDoc(event: HookEvent): CommandHookEventDoc {
+  return COMMAND_HOOK_EVENT_DOCS[event] ?? COMMAND_HOOK_EVENT_DOCS.PreToolUse!
+}
+
 export const TOOL_INPUT_DOCS: Record<string, ToolInputDoc> = {
   execute: {
     key: "execute",
@@ -780,7 +784,7 @@ export function getCommandHookReadableContextDocs(event: HookEvent): CommandHook
       {
         key: "TOOL_ARGS",
         description:
-          "当前工具入参的 JSON 字符串版本；如果脚本更喜欢从环境变量读取，可以直接解析它。"
+          "当前工具入参的 JSON 字符串版本；为避免大 payload 撑爆子进程环境，这个字段只会在内容较小时附带，完整数据始终在 stdin。"
       }
     )
   }
@@ -792,7 +796,8 @@ export function getCommandHookReadableContextDocs(event: HookEvent): CommandHook
     })
     envFields.push({
       key: "TOOL_RESULT",
-      description: "工具返回结果的 JSON 字符串版本；适合不想从 stdin 解析完整 payload 的脚本。"
+      description:
+        "工具返回结果的 JSON 字符串版本；同样只会在内容较小时附带，完整返回始终以 stdin 里的 tool_response / tool_result 为准。"
     })
     extraObjects.push({
       key: "tool_response",
@@ -817,7 +822,8 @@ export function getCommandHookReadableContextDocs(event: HookEvent): CommandHook
       { key: "USER_PROMPT", description: "用户原始输入文本，对应 stdin 里的 prompt。" },
       {
         key: "TOOL_ARGS",
-        description: "用户消息对象的 JSON 字符串版本，当前通常就是 { message }。"
+        description:
+          "用户消息对象的 JSON 字符串版本，当前通常就是 { message }；若后续 payload 变大，也应优先以 stdin 为准。"
       }
     )
   }
@@ -949,7 +955,7 @@ export function AddHookDialog(props: {
     () => HOOK_EVENTS.find((item) => item.value === event) ?? HOOK_EVENTS[0],
     [event]
   )
-  const currentCommandHookDoc = useMemo(() => COMMAND_HOOK_EVENT_DOCS[event], [event])
+  const currentCommandHookDoc = useMemo(() => getCommandHookEventDoc(event), [event])
   const resolvedMatcherValue = useMemo(() => {
     if (event !== "PreToolUse" && event !== "PostToolUse") return ""
     return matcherMode === CUSTOM_SENTINEL ? matcher.trim() : matcherMode
@@ -1226,7 +1232,8 @@ export function AddHookDialog(props: {
                   className="h-9 font-mono"
                 />
                 <p className="text-xs text-muted-foreground">
-                  脚本会收到一份 stdin JSON 和若干环境变量。想返回结构化结果时，`stdout`
+                  脚本会收到一份 stdin JSON 和若干环境变量，其中 stdin 是完整权威输入； `TOOL_ARGS`
+                  / `TOOL_RESULT` 这类大字段只会在 payload 较小时附带。想返回结构化结果时， `stdout`
                   必须只输出最终文本或 JSON；调试日志请写到 `stderr`。
                 </p>
                 <details className="rounded-md border border-border/60 bg-muted/20 px-3 py-2">

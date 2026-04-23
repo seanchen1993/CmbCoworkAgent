@@ -11,7 +11,12 @@ import {
   renameSync,
   readdirSync
 } from "fs"
-import type { HookConfig, HookOnBlockConfig, HookUpsert } from "./hooks/types"
+import {
+  isSupportedHookEvent,
+  type HookConfig,
+  type HookOnBlockConfig,
+  type HookUpsert
+} from "./hooks/types"
 import { readdir, readFile, rm, mkdir, stat as fsStat } from "fs/promises"
 import { app } from "electron"
 import { resolveMcpConnectorKind } from "./mcp/connector-kind"
@@ -499,6 +504,7 @@ export function invalidateEnabledSkillsCache(): void {
   _pluginSkillsCache = null
   _pluginMcpCache = null
   _pluginHooksCache = null
+  _skillHooksCache = null
 }
 
 /**
@@ -1565,9 +1571,11 @@ export function resetLspConfig(): import("./types").LspConfig {
 const PLUGINS_DIR = join(OPENWORK_DIR, "plugins")
 const PLUGINS_FILE = join(OPENWORK_DIR, "plugins.json")
 const DEFAULT_PLUGIN_HOOKS_PATH = "hooks/hooks.json"
+const SKILL_HOOKS_FILE = "hooks.json"
 let _pluginSkillsCache: string[] | null = null
 let _pluginMcpCache: Record<string, PluginMcpServerConfig> | null = null
 let _pluginHooksCache: PluginHookMetadata[] | null = null
+let _skillHooksCache: HookConfig[] | null = null
 
 export function getPluginsDir(): string {
   if (!existsSync(PLUGINS_DIR)) {
@@ -1927,14 +1935,24 @@ function parseHookOnBlock(raw: unknown): HookOnBlockConfig | undefined {
 // CC timeout is in seconds; our HookConfig.timeout is in milliseconds.
 
 const CC_HOOK_EVENTS: ReadonlySet<string> = new Set([
-  "PreToolUse", "PostToolUse", "PostToolUseFailure",
-  "Stop", "StopFailure",
-  "Notification", "UserPromptSubmit",
-  "SessionStart", "SessionEnd",
-  "SubagentStart", "SubagentStop",
-  "PreCompact", "PostCompact",
-  "PermissionRequest", "PermissionDenied",
-  "Setup", "CwdChanged", "FileChanged"
+  "PreToolUse",
+  "PostToolUse",
+  "PostToolUseFailure",
+  "Stop",
+  "StopFailure",
+  "Notification",
+  "UserPromptSubmit",
+  "SessionStart",
+  "SessionEnd",
+  "SubagentStart",
+  "SubagentStop",
+  "PreCompact",
+  "PostCompact",
+  "PermissionRequest",
+  "PermissionDenied",
+  "Setup",
+  "CwdChanged",
+  "FileChanged"
 ])
 
 function isCcSettingsObj(obj: Record<string, unknown>): boolean {
@@ -1979,28 +1997,39 @@ function ccCommandToHookConfig(
   if (h.type === "command") {
     if (typeof h.command !== "string") return null
     return {
-      id, event, matcher,
+      id,
+      event,
+      matcher,
       type: "command",
       command: h.command,
       onBlock: parseHookOnBlock(h.onBlock),
-      timeout, enabled,
-      createdAt: meta.createdAt, updatedAt: meta.updatedAt
+      timeout,
+      enabled,
+      createdAt: meta.createdAt,
+      updatedAt: meta.updatedAt
     }
   }
   if (h.type === "prompt") {
     if (typeof h.prompt !== "string") return null
     return {
-      id, event, matcher,
+      id,
+      event,
+      matcher,
       type: "prompt",
       prompt: h.prompt,
       // CC uses `model`, we use `modelId`
       modelId:
-        typeof h.model === "string" ? h.model :
-        typeof h.modelId === "string" ? h.modelId : undefined,
+        typeof h.model === "string"
+          ? h.model
+          : typeof h.modelId === "string"
+            ? h.modelId
+            : undefined,
       fallback: h.fallback === "block" ? "block" : "allow",
       onBlock: parseHookOnBlock(h.onBlock),
-      timeout, enabled,
-      createdAt: meta.createdAt, updatedAt: meta.updatedAt
+      timeout,
+      enabled,
+      createdAt: meta.createdAt,
+      updatedAt: meta.updatedAt
     }
   }
   // agent / http: not supported in this runtime — skip silently
@@ -2018,8 +2047,13 @@ function expandCcHooksSettings(
 ): HookConfig[] {
   const result: HookConfig[] = []
   for (const [eventKey, matchersRaw] of Object.entries(obj)) {
-    if (!CC_HOOK_EVENTS.has(eventKey) || !Array.isArray(matchersRaw)) continue
-    const event = eventKey as HookConfig["event"]
+    if (
+      !CC_HOOK_EVENTS.has(eventKey) ||
+      !Array.isArray(matchersRaw) ||
+      !isSupportedHookEvent(eventKey)
+    )
+      continue
+    const event = eventKey
     matchersRaw.forEach((matcherEntry: unknown, mi: number) => {
       if (!matcherEntry || typeof matcherEntry !== "object" || Array.isArray(matcherEntry)) return
       const me = matcherEntry as Record<string, unknown>
@@ -2028,7 +2062,8 @@ function expandCcHooksSettings(
       hooksArr.forEach((rawHook: unknown, hi: number) => {
         if (!rawHook || typeof rawHook !== "object" || Array.isArray(rawHook)) return
         const cfg = ccCommandToHookConfig(
-          event, matcher,
+          event,
+          matcher,
           rawHook as Record<string, unknown>,
           `${idPrefix}/${event}:${mi}:${hi}`,
           meta
@@ -2052,11 +2087,11 @@ export function getHooks(): HookConfig[] {
     const fmt = detectHooksFileFormat(parsed)
 
     if (fmt === "cc_settings") {
-      return expandCcHooksSettings(
-        parsed as Record<string, unknown>,
-        "global",
-        { enabled: true, createdAt: now, updatedAt: now }
-      )
+      return expandCcHooksSettings(parsed as Record<string, unknown>, "global", {
+        enabled: true,
+        createdAt: now,
+        updatedAt: now
+      })
     }
 
     // flat (our native format) or unrecognized
@@ -2065,6 +2100,7 @@ export function getHooks(): HookConfig[] {
       if (item == null || typeof item !== "object") return []
       const h = item as Record<string, unknown>
       if (typeof h.id !== "string" || typeof h.event !== "string") return []
+      if (!isSupportedHookEvent(h.event)) return []
       const hookType = h.type ?? "command"
       if (hookType === "prompt" && typeof h.prompt !== "string") return []
       if (hookType === "command" && typeof h.command !== "string") return []
@@ -2143,6 +2179,7 @@ function parsePluginHooks(plugin: PluginMetadata): PluginHookMetadata[] {
         if (!raw || typeof raw !== "object") return []
         const h = raw as Record<string, unknown>
         if (typeof h.event !== "string") return []
+        if (!isSupportedHookEvent(h.event)) return []
 
         const hookType = h.type ?? "command"
         if (hookType === "prompt" && typeof h.prompt !== "string") return []
@@ -2196,6 +2233,99 @@ export function getPluginHooks(pluginId: string): PluginHookMetadata[] {
   return parsePluginHooks(plugin)
 }
 
+// ── Skill Hooks ───────────────────────────────────────────────────────────────
+
+function buildSkillHookId(skillName: string, rawId: unknown, index: number): string {
+  return `skill:${skillName}/${typeof rawId === "string" ? rawId : String(index)}`
+}
+
+function parseSkillHooks(skillDir: string, skillName: string): HookConfig[] {
+  const hooksFilePath = join(skillDir, SKILL_HOOKS_FILE)
+  if (!existsSync(hooksFilePath)) return []
+
+  try {
+    const parsed = JSON.parse(readFileSync(hooksFilePath, "utf-8"))
+    const now = new Date().toISOString()
+    const meta = { enabled: true, createdAt: now, updatedAt: now }
+    const idPrefix = `skill:${skillName}`
+    const fmt = detectHooksFileFormat(parsed)
+
+    if (fmt === "cc_plugin") {
+      const settingsObj = (parsed as Record<string, unknown>).hooks as Record<string, unknown>
+      return expandCcHooksSettings(settingsObj, idPrefix, meta)
+    }
+    if (fmt === "cc_settings") {
+      return expandCcHooksSettings(parsed as Record<string, unknown>, idPrefix, meta)
+    }
+    if (fmt !== "flat") return []
+
+    return (parsed as unknown[]).flatMap((raw, index): HookConfig[] => {
+      if (!raw || typeof raw !== "object") return []
+      const h = raw as Record<string, unknown>
+      if (typeof h.event !== "string") return []
+      if (!isSupportedHookEvent(h.event)) return []
+      const hookType = h.type ?? "command"
+      if (hookType === "prompt" && typeof h.prompt !== "string") return []
+      if (hookType === "command" && typeof h.command !== "string") return []
+      return [{
+        id: buildSkillHookId(skillName, h.id, index),
+        event: h.event as HookConfig["event"],
+        matcher: typeof h.matcher === "string" ? h.matcher : undefined,
+        type: (hookType === "prompt" ? "prompt" : "command") as HookConfig["type"],
+        command: typeof h.command === "string" ? h.command : undefined,
+        prompt: typeof h.prompt === "string" ? h.prompt : undefined,
+        modelId: typeof h.modelId === "string" ? h.modelId : undefined,
+        fallback: h.fallback === "block" ? "block" : "allow",
+        onBlock: parseHookOnBlock(h.onBlock),
+        timeout: typeof h.timeout === "number" ? h.timeout : undefined,
+        enabled: h.enabled !== false,
+        createdAt: now,
+        updatedAt: now
+      }]
+    })
+  } catch {
+    console.warn(`[Hooks] Failed to parse skill hooks for "${skillName}"`)
+    return []
+  }
+}
+
+export function getEnabledSkillHooks(): HookConfig[] {
+  if (_skillHooksCache) return _skillHooksCache
+  const hooks: HookConfig[] = []
+  for (const sourceDir of getSkillsSources()) {
+    if (!existsSync(sourceDir)) continue
+    try {
+      for (const entry of readdirSync(sourceDir, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue
+        const skillDir = join(sourceDir, entry.name)
+        // Resolve display name from SKILL.md frontmatter, fall back to directory name
+        let skillName = entry.name
+        const skillMdPath = join(skillDir, "SKILL.md")
+        if (existsSync(skillMdPath)) {
+          try {
+            const content = readFileSync(skillMdPath, "utf-8")
+            const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/)
+            if (match) {
+              for (const line of match[1].split("\n")) {
+                const colonIdx = line.indexOf(":")
+                if (colonIdx > 0 && line.slice(0, colonIdx).trim() === "name") {
+                  const name = line.slice(colonIdx + 1).trim()
+                  if (name) { skillName = name; break }
+                }
+              }
+            }
+          } catch { /* use entry.name */ }
+        }
+        hooks.push(...parseSkillHooks(skillDir, skillName))
+      }
+    } catch {
+      console.warn(`[Hooks] Failed to scan skill hooks in ${sourceDir}`)
+    }
+  }
+  _skillHooksCache = hooks
+  return _skillHooksCache
+}
+
 export function setPluginHookEnabled(pluginId: string, hookId: string, enabled: boolean): void {
   const plugin = getPlugins().find((item) => item.id === pluginId)
   if (!plugin) {
@@ -2241,9 +2371,7 @@ export function setPluginHookEnabled(pluginId: string, hookId: string, enabled: 
 
     const root = parsed as Record<string, unknown>
     const settingsObj: Record<string, unknown> =
-      fmt === "cc_plugin"
-        ? (root.hooks as Record<string, unknown>)
-        : root
+      fmt === "cc_plugin" ? (root.hooks as Record<string, unknown>) : root
 
     const matchers = settingsObj[eventName]
     if (!Array.isArray(matchers) || !matchers[matcherIdx]) throw new Error("插件 Hook 不存在")
@@ -2414,6 +2542,7 @@ export function getWorkspaceHooks(workspacePath: string): HookConfig[] {
         if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue
         const raw = parsed as Record<string, unknown>
         if (typeof raw.event !== "string") continue
+        if (!isSupportedHookEvent(raw.event)) continue
         const hookType = resolveWorkspaceHookType(raw)
         if (!hookType) continue
         if (hookType === "prompt" && typeof raw.prompt !== "string") continue
@@ -2447,8 +2576,9 @@ export function getWorkspaceHooks(workspacePath: string): HookConfig[] {
 export function getEnabledHooks(workspacePath?: string): HookConfig[] {
   const globalHooks = getHooks().filter((h) => h.enabled)
   const pluginHooks = getEnabledPluginHooks()
+  const skillHooks = getEnabledSkillHooks()
   const workspaceHooks = workspacePath ? getWorkspaceHooks(workspacePath) : []
-  return [...globalHooks, ...pluginHooks, ...workspaceHooks]
+  return [...globalHooks, ...pluginHooks, ...skillHooks, ...workspaceHooks]
 }
 
 function writeHooksAtomic(items: HookConfig[]): void {

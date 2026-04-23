@@ -10,6 +10,11 @@ import { getCustomModelConfigs } from "../storage"
 const DEFAULT_TIMEOUT = 10_000
 const MAX_OUTPUT_BYTES = 1_000_000 // 1 MB per hook
 const CHARDET_CONFIDENCE_THRESHOLD = 0.8
+const CHARDET_SAMPLE_BYTES = 8_192
+const MAX_HOOK_ENV_JSON_CHARS = 4_096
+
+// Compiled regex cache keyed by matcher string. null = invalid pattern (fallback to exact match).
+const _regexCache = new Map<string, RegExp | null>()
 
 export interface HookContext {
   toolName?: string
@@ -49,16 +54,24 @@ function isRegexPattern(matcher: string): boolean {
  * - if matcher contains regex metacharacters, treat as regex (case-insensitive)
  * - otherwise exact case-insensitive match
  */
+function getCachedRegex(matcher: string): RegExp | null {
+  if (_regexCache.has(matcher)) return _regexCache.get(matcher)!
+  try {
+    const re = new RegExp(matcher, "i")
+    _regexCache.set(matcher, re)
+    return re
+  } catch {
+    _regexCache.set(matcher, null)
+    return null
+  }
+}
+
 function matchesToolName(matcher: string | undefined, toolName: string | undefined): boolean {
   if (!matcher || matcher === "*") return true
   if (!toolName) return false
   if (isRegexPattern(matcher)) {
-    try {
-      return new RegExp(matcher, "i").test(toolName)
-    } catch {
-      // Invalid regex — fall back to exact match
-      return matcher.toLowerCase() === toolName.toLowerCase()
-    }
+    const re = getCachedRegex(matcher)
+    return re ? re.test(toolName) : matcher.toLowerCase() === toolName.toLowerCase()
   }
   return matcher.toLowerCase() === toolName.toLowerCase()
 }
@@ -66,15 +79,28 @@ function matchesToolName(matcher: string | undefined, toolName: string | undefin
 /**
  * Build environment variables for a hook command.
  */
+function setBestEffortJsonEnv(
+  env: Record<string, string>,
+  key: "TOOL_ARGS" | "TOOL_RESULT",
+  value: string | undefined
+): void {
+  if (!value || value.length > MAX_HOOK_ENV_JSON_CHARS) return
+  env[key] = value
+}
+
 function buildHookEnv(event: HookEvent, context: HookContext): Record<string, string> {
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
     HOOK_EVENT: event
   }
   if (context.toolName) env.TOOL_NAME = context.toolName
-  if (context.toolArgs) env.TOOL_ARGS = JSON.stringify(context.toolArgs)
+  // stdin JSON is the canonical payload. TOOL_ARGS / TOOL_RESULT are small-payload
+  // compatibility helpers only, so they don't blow up the child-process env block.
+  if (context.toolArgs) {
+    setBestEffortJsonEnv(env, "TOOL_ARGS", JSON.stringify(context.toolArgs))
+  }
   // toolResult is already a JSON string from upstream — passing as-is avoids double encoding.
-  if (context.toolResult) env.TOOL_RESULT = context.toolResult
+  setBestEffortJsonEnv(env, "TOOL_RESULT", context.toolResult)
   if (context.workspacePath) {
     env.WORKSPACE_PATH = context.workspacePath
     // Claude Code compatibility — the canonical env var hooks expect
@@ -155,9 +181,20 @@ function decodeHookOutput(
   stdoutBuf: Buffer,
   stderrBuf: Buffer
 ): { stdout: string; stderr: string } {
-  const combined = Buffer.concat([stdoutBuf, stderrBuf])
-  const encoding = process.platform === "win32" ? detectHookOutputEncoding(combined) : "utf-8"
-
+  if (process.platform !== "win32") {
+    return {
+      stdout: stdoutBuf.length > 0 ? stdoutBuf.toString("utf-8") : "",
+      stderr: stderrBuf.length > 0 ? stderrBuf.toString("utf-8") : ""
+    }
+  }
+  // Sample both streams in bounded chunks so stderr-only Chinese diagnostics still
+  // influence detection when stdout contains ASCII / JSON.
+  const perStreamSampleBytes = Math.floor(CHARDET_SAMPLE_BYTES / 2)
+  const sample = Buffer.concat([
+    stdoutBuf.subarray(0, perStreamSampleBytes),
+    stderrBuf.subarray(0, CHARDET_SAMPLE_BYTES - perStreamSampleBytes)
+  ])
+  const encoding = detectHookOutputEncoding(sample)
   try {
     return {
       stdout: stdoutBuf.length > 0 ? iconv.decode(stdoutBuf, encoding) : "",
@@ -737,7 +774,7 @@ export async function runHooks(
         `[Hooks] Stop hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}`
       )
       onHookResult?.(event, hook, result)
-      if (result.continue === false || result.blocked || result.decision === "block") {
+      if (isBlockingResult(result)) {
         blockReasons.push(
           result.reason ||
             result.stopReason ||

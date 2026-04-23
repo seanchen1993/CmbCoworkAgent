@@ -9,28 +9,18 @@ import {
   trustWorkspaceHookFile
 } from "../storage"
 import type { UntrustedWorkspaceHook } from "../storage"
-import type { HookConfig, HookEvent, HookOnBlockConfig, HookType, PromptHookFallback, HookUpsert } from "../hooks/types"
+import {
+  isSupportedHookEvent,
+  SUPPORTED_HOOK_EVENTS,
+  HookConfig,
+  HookEvent,
+  HookOnBlockConfig,
+  HookType,
+  PromptHookFallback,
+  HookUpsert
+} from "../hooks/types"
 
-const VALID_EVENTS = new Set<HookEvent>([
-  "PreToolUse",
-  "PostToolUse",
-  "PostToolUseFailure",
-  "Stop",
-  "StopFailure",
-  "Notification",
-  "UserPromptSubmit",
-  "SessionStart",
-  "SessionEnd",
-  "SubagentStart",
-  "SubagentStop",
-  "PreCompact",
-  "PostCompact",
-  "PermissionRequest",
-  "PermissionDenied",
-  "Setup",
-  "CwdChanged",
-  "FileChanged"
-])
+const VALID_EVENTS = new Set<HookEvent>(SUPPORTED_HOOK_EVENTS)
 const VALID_TYPES = new Set<HookType>(["command", "prompt"])
 const VALID_FALLBACKS = new Set<PromptHookFallback>(["allow", "block"])
 const TIMEOUT_MIN = 1_000
@@ -42,7 +32,12 @@ function validateOnBlockConfig(onBlock: HookOnBlockConfig | undefined): void {
     throw new Error("onBlock 必须为对象")
   }
 
-  const fields: Array<keyof HookOnBlockConfig> = ["reason", "systemMessage", "additionalContext", "requiredSkill"]
+  const fields: Array<keyof HookOnBlockConfig> = [
+    "reason",
+    "systemMessage",
+    "additionalContext",
+    "requiredSkill"
+  ]
   for (const field of fields) {
     const value = onBlock[field]
     if (value !== undefined && typeof value !== "string") {
@@ -52,7 +47,7 @@ function validateOnBlockConfig(onBlock: HookOnBlockConfig | undefined): void {
 }
 
 function validateHookConfig(config: HookUpsert): void {
-  if (!config.event || !VALID_EVENTS.has(config.event)) {
+  if (!config.event || !isSupportedHookEvent(config.event) || !VALID_EVENTS.has(config.event)) {
     throw new Error("无效的事件类型")
   }
 
@@ -92,14 +87,11 @@ export function registerHooksHandlers(ipcMain: IpcMain): void {
     return getHooks()
   })
 
-  ipcMain.handle(
-    "hooks:create",
-    async (_event, config: HookUpsert): Promise<{ id: string }> => {
-      validateHookConfig(config)
-      const id = upsertHook(config)
-      return { id }
-    }
-  )
+  ipcMain.handle("hooks:create", async (_event, config: HookUpsert): Promise<{ id: string }> => {
+    validateHookConfig(config)
+    const id = upsertHook(config)
+    return { id }
+  })
 
   ipcMain.handle(
     "hooks:update",
@@ -134,13 +126,10 @@ export function registerHooksHandlers(ipcMain: IpcMain): void {
     }
   )
 
-  ipcMain.handle(
-    "hooks:workspace:untrusted",
-    async (): Promise<UntrustedWorkspaceHook[]> => {
-      // Workspace command hooks are now trusted by default — always return empty.
-      return []
-    }
-  )
+  ipcMain.handle("hooks:workspace:untrusted", async (): Promise<UntrustedWorkspaceHook[]> => {
+    // Workspace command hooks are now trusted by default — always return empty.
+    return []
+  })
 
   ipcMain.handle(
     "hooks:workspace:trustAll",
@@ -152,7 +141,14 @@ export function registerHooksHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle(
     "hooks:workspace:trustFile",
-    async (_event, { workspacePath, fileName, filePath }: { workspacePath: string; fileName: string; filePath: string }): Promise<void> => {
+    async (
+      _event,
+      {
+        workspacePath,
+        fileName,
+        filePath
+      }: { workspacePath: string; fileName: string; filePath: string }
+    ): Promise<void> => {
       if (!workspacePath || !fileName || !filePath) return
       trustWorkspaceHookFile(workspacePath, fileName, filePath)
     }

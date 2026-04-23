@@ -381,8 +381,8 @@ async function runStopHooksWithRevision({
       return null
     })
 
-    if (stopResult?.systemMessage) sendNotice(stopResult.systemMessage)
     if (stopResult?.decision !== "block") return true
+    if (stopResult.systemMessage) sendNotice(stopResult.systemMessage)
 
     const reason = getStopHookBlockReason(stopResult)
     if (revisionCount >= MAX_STOP_HOOK_REVISIONS) {
@@ -965,6 +965,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       })
     }
 
+    const onHookResult = makeHookResultCallback(window, channel)
+
     const appendTurnToProposalWindow = (
       status: "success" | "error",
       errorMessage?: string
@@ -1028,7 +1030,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
       // Fire SessionStart once per thread lifetime (not per turn). SessionEnd fires when the
       // thread is deleted (threads:delete) or the app is quitting.
-      fireSessionStartOnce(threadId, sessionWorkspacePath, makeHookResultCallback(window, channel))
+      fireSessionStartOnce(threadId, sessionWorkspacePath, onHookResult)
       sendActiveHookNotice(window, channel, workspacePath)
 
       // Fire UserPromptSubmit hook — may block the message, halt the turn, rewrite the prompt,
@@ -1038,7 +1040,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         userPrompt: message,
         workspacePath: workspacePath ?? undefined,
         sessionId: threadId
-      }, makeHookResultCallback(window, channel))
+      }, onHookResult)
       if (promptSubmitResult?.blocked || promptSubmitResult?.continue === false) {
         const reason =
           promptSubmitResult.stopReason ||
@@ -1143,7 +1145,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             noSkillEvolutionTool: true,
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
-            onHookResult: makeHookResultCallback(window, channel)
+            onHookResult
           })
           // First attempt sends the message; subsequent attempts resume from checkpoint
           const input = isFirstAttempt ? { messages: [humanMessage] } : null
@@ -1360,7 +1362,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   id: toolCallId,
                   status: isErr ? "failed" : "completed"
                 }
-              }, makeHookResultCallback(window, channel)).catch((e) => console.warn("[Hooks] SubagentStop hook error:", e))
+              }, onHookResult).catch((e) => console.warn("[Hooks] SubagentStop hook error:", e))
             }
           }
 
@@ -1684,7 +1686,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             noSkillEvolutionTool: true,
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
-            onHookResult: makeHookResultCallback(window, channel)
+            onHookResult
           })
           activeStream = await agent.stream(null, streamConfig) // resume from checkpoint
           usedModelId = nextCandidate
@@ -1714,7 +1716,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           },
           sendNotice: sendHookNotice,
           sendError: sendStreamError,
-          onHookResult: makeHookResultCallback(window, channel)
+          onHookResult
         })
 
         if (!stopPassed) {
@@ -1922,6 +1924,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         error
       })
     }
+    const onHookResult = makeHookResultCallback(window, channel)
 
     const onWindowClosed = (): void => {
       console.log("[Agent] Window closed, aborting resume stream for thread:", threadId)
@@ -1979,7 +1982,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             noSkillEvolutionTool: true,
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
-            onHookResult: makeHookResultCallback(window, channel)
+            onHookResult
           })
           resumeStream = await resumeAgent.stream(new Command({ resume: resumeValue }), resumeStreamConfig)
           resumeAgentRuntime = resumeAgent
@@ -2074,7 +2077,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             abortSignal: abortController.signal, noSkillEvolutionTool: true,
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
-            onHookResult: makeHookResultCallback(window, channel)
+            onHookResult
           })
           activeResumeStream = await nextAgent.stream(new Command({ resume: resumeValue }), resumeStreamConfig)
           resumeAgentRuntime = nextAgent
@@ -2099,7 +2102,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           },
           sendNotice: sendHookNotice,
           sendError: sendStreamError,
-          onHookResult: makeHookResultCallback(window, channel)
+          onHookResult
         })
 
         if (!stopPassed) return
@@ -2174,6 +2177,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         error
       })
     }
+    const onHookResult = makeHookResultCallback(window, channel)
 
     const onWindowClosed = (): void => {
       console.log("[Agent] Window closed, aborting interrupt stream for thread:", threadId)
@@ -2224,7 +2228,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               noSkillEvolutionTool: true,
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
-              onHookResult: makeHookResultCallback(window, channel)
+              onHookResult
             })
             intStream = await intAgent.stream(null, interruptStreamConfig)
             intAgentRuntime = intAgent
@@ -2319,7 +2323,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               abortSignal: abortController.signal, noSkillEvolutionTool: true,
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
-              onHookResult: makeHookResultCallback(window, channel)
+              onHookResult
             })
             activeIntStream = await nextAgent.stream(null, interruptStreamConfig)
             intAgentRuntime = nextAgent
@@ -2344,7 +2348,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             },
             sendNotice: sendHookNotice,
             sendError: sendStreamError,
-            onHookResult: makeHookResultCallback(window, channel)
+            onHookResult
           })
 
           if (!stopPassed) return
