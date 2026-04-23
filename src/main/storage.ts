@@ -1669,27 +1669,54 @@ type SandboxMode = "none" | "unelevated" | "readonly" | "elevated"
 
 export type LinuxSandboxMode = "none" | "workspace-write" | "isolated"
 const LINUX_SANDBOX_MODES = new Set<LinuxSandboxMode>(["none", "workspace-write", "isolated"])
+const SANDBOX_SETTINGS_VERSION = 2
 
-function readSandboxSettings(): { mode: SandboxMode; yolo: boolean; nuxCompleted: boolean; linuxMode: LinuxSandboxMode } {
-  if (!existsSync(SANDBOX_SETTINGS_FILE)) return { mode: "unelevated", yolo: false, nuxCompleted: false, linuxMode: "none" }
+type SandboxSettings = {
+  mode: SandboxMode
+  yolo: boolean
+  nuxCompleted: boolean
+  linuxMode: LinuxSandboxMode
+  version: number
+}
+
+function defaultSandboxSettings(): SandboxSettings {
+  const defaultLinuxMode: LinuxSandboxMode = process.platform === "linux" ? "workspace-write" : "none"
+  return {
+    mode: "unelevated",
+    yolo: false,
+    nuxCompleted: false,
+    linuxMode: defaultLinuxMode,
+    version: SANDBOX_SETTINGS_VERSION
+  }
+}
+
+function readSandboxSettings(): SandboxSettings {
+  const defaults = defaultSandboxSettings()
+  if (!existsSync(SANDBOX_SETTINGS_FILE)) return defaults
   try {
     const parsed = JSON.parse(readFileSync(SANDBOX_SETTINGS_FILE, "utf-8"))
+    const parsedVersion = Number.isInteger(parsed.version) ? parsed.version : 0
+    let linuxMode: LinuxSandboxMode = LINUX_SANDBOX_MODES.has(parsed.linuxMode) ? parsed.linuxMode : defaults.linuxMode
+    if (process.platform === "linux" && parsedVersion < SANDBOX_SETTINGS_VERSION && linuxMode === "none") {
+      linuxMode = defaults.linuxMode
+    }
     return {
       mode: SANDBOX_MODES.has(parsed.mode) ? parsed.mode : "unelevated",
       yolo: parsed.yolo === true,
       nuxCompleted: parsed.nuxCompleted === true,
-      linuxMode: LINUX_SANDBOX_MODES.has(parsed.linuxMode) ? parsed.linuxMode : "none"
+      linuxMode,
+      version: SANDBOX_SETTINGS_VERSION
     }
   } catch (err) {
     console.warn("[Storage] Failed to load sandbox settings:", err)
-    return { mode: "unelevated", yolo: false, nuxCompleted: false, linuxMode: "none" }
+    return defaults
   }
 }
 
-function updateSandboxSettings(patch: Partial<{ mode: SandboxMode; yolo: boolean; nuxCompleted: boolean; linuxMode: LinuxSandboxMode }>): void {
+function updateSandboxSettings(patch: Partial<SandboxSettings>): void {
   getOpenworkDir()
   const current = readSandboxSettings()
-  writeFileSync(SANDBOX_SETTINGS_FILE, JSON.stringify({ ...current, ...patch }, null, 2))
+  writeFileSync(SANDBOX_SETTINGS_FILE, JSON.stringify({ ...current, ...patch, version: SANDBOX_SETTINGS_VERSION }, null, 2))
 }
 
 export function getWindowsSandboxMode(): SandboxMode {

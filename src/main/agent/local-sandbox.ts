@@ -22,6 +22,7 @@ import {
   type SandboxBackendProtocol,
   type GrepMatch,
   type FileInfo,
+  type FileData,
   type FileUploadResponse,
   type FileOperationError
 } from "deepagents"
@@ -49,7 +50,8 @@ import { runHooks } from "../hooks/runner"
  */
 const SENSITIVE_DIR_NAMES = new Set([
   ".ssh", ".gnupg", ".aws", ".azure", ".kube",
-  ".docker", ".config", ".npm", ".pki", ".terraform.d"
+  ".docker", ".config", ".npm", ".pki", ".terraform.d",
+  ".git-credentials", ".password-store",
 ])
 
 const WINDOWS_SANDBOX_OFFLINE_USERNAME = "CodexSandboxOffline"
@@ -111,6 +113,10 @@ function isSensitivePath(filePath: string): boolean {
 
 function powershellSingleQuote(value: string): string {
   return `'${value.replace(/'/g, "''")}'`
+}
+
+function shellSingleQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`
 }
 
 function cmdSetLiteral(value: string): string {
@@ -768,15 +774,37 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
 
   /**
    * Check if a path is blocked by sandbox policy.
-   * When sandbox is elevated, sensitive directories (e.g. .ssh, .aws) are blocked.
+   * Linux sandbox file tools are workspace-scoped; elevated Windows mode blocks sensitive dirs.
    */
   private isBlockedBySandbox(filePath: string): boolean {
-    if (this.windowsSandbox !== "elevated") return false
     try {
       const resolved = this._resolvePath(filePath)
-      return isSensitivePath(resolved)
+
+      if (process.platform === "linux" && this.linuxSandbox !== "none") {
+        return !this.isPathInsideWorkingDir(resolved) || isSensitivePath(resolved)
+      }
+
+      if (this.windowsSandbox === "elevated") {
+        return isSensitivePath(resolved)
+      }
+
+      return false
     } catch {
-      return isSensitivePath(filePath)
+      if (process.platform === "linux" && this.linuxSandbox !== "none") return true
+      return this.windowsSandbox === "elevated" && isSensitivePath(filePath)
+    }
+  }
+
+  private isPathInsideWorkingDir(resolvedPath: string): boolean {
+    const isInside = (root: string, target: string): boolean => {
+      const relative = path.relative(root, target)
+      return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))
+    }
+
+    try {
+      return isInside(realpathSync(this.workingDir), LocalSandbox.realpathThroughExistingAncestor(resolvedPath))
+    } catch {
+      return isInside(path.resolve(this.workingDir), path.resolve(resolvedPath))
     }
   }
 
@@ -807,10 +835,12 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     }
     const original = (this as any).resolvePath.bind(this)
     const workingDir = this.workingDir
+    const linuxSandboxActive = process.platform === "linux" && this.linuxSandbox !== "none"
     const redirects: Record<string, string> = {
       "/large_tool_results/": ".cmbdevclaw/large_tool_results"
     }
     ;(this as any).resolvePath = (key: string): string => {
+      if (linuxSandboxActive && key === "/") return workingDir
       for (const [prefix, localDir] of Object.entries(redirects)) {
         if (key.startsWith(prefix)) {
           const redirected = path.join(workingDir, localDir, key.slice(prefix.length))
@@ -934,16 +964,9 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
 
     if (results.length === 0) return results
 
-    // Filter out any results from sensitive directories
-    if (this.windowsSandbox === "elevated") {
-      results = results.filter(m => {
-        try {
-          const resolved = this._resolvePath(m.path)
-          return !isSensitivePath(resolved)
-        } catch {
-          return !isSensitivePath(m.path)
-        }
-      })
+    // Keep Node-side search results inside the same boundary enforced for file tools.
+    if ((process.platform === "linux" && this.linuxSandbox !== "none") || this.windowsSandbox === "elevated") {
+      results = results.filter(m => !this.isBlockedBySandbox(m.path))
       if (results.length === 0) return results
     }
 
@@ -989,14 +1012,13 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       return []
     }
     let infos = await super.globInfo(pattern, path)
-    // Filter out any results that fall within sensitive directories
-    if (this.windowsSandbox === "elevated") {
+    // Filter out any results that fall outside the active sandbox boundary.
+    if ((process.platform === "linux" && this.linuxSandbox !== "none") || this.windowsSandbox === "elevated") {
       infos = infos.filter(f => {
         try {
-          const resolved = this._resolvePath(f.path)
-          return !isSensitivePath(resolved)
+          return !this.isBlockedBySandbox(f.path)
         } catch {
-          return true
+          return false
         }
       })
     }
@@ -1024,14 +1046,13 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       return [{ path: "Error: Access denied — this directory is restricted by sandbox policy.", is_dir: false } as FileInfo]
     }
     let infos = await super.lsInfo(path)
-    // Filter out any results that fall within sensitive directories
-    if (this.windowsSandbox === "elevated") {
+    // Filter out any results that fall outside the active sandbox boundary.
+    if ((process.platform === "linux" && this.linuxSandbox !== "none") || this.windowsSandbox === "elevated") {
       infos = infos.filter(f => {
         try {
-          const resolved = this._resolvePath(f.path)
-          return !isSensitivePath(resolved)
+          return !this.isBlockedBySandbox(f.path)
         } catch {
-          return true
+          return false
         }
       })
     }
@@ -1178,6 +1199,19 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       const msg = e instanceof Error ? e.message : String(e)
       return `Error reading file '${filePath}': ${msg}`
     }
+  }
+
+  async readRaw(filePath: string): Promise<FileData> {
+    if (this.isBlockedBySandbox(filePath)) {
+      throw new Error(`Access denied — '${filePath}' is restricted by sandbox policy.`)
+    }
+    const data = await super.readRaw(filePath)
+    try {
+      await this.recordReadTime(this._resolvePath(filePath))
+    } catch {
+      // Best-effort only; readRaw callers should not fail after a successful read.
+    }
+    return data
   }
 
   /**
@@ -1792,6 +1826,38 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       }
     }
     return null
+  }
+
+  private static realpathThroughExistingAncestor(targetPath: string): string {
+    const absolute = path.resolve(targetPath)
+    const missingParts: string[] = []
+    let probe = absolute
+
+    while (!existsSync(probe)) {
+      const parent = path.dirname(probe)
+      if (parent === probe) break
+      missingParts.unshift(path.basename(probe))
+      probe = parent
+    }
+
+    const realAncestor = realpathSync(probe)
+    return missingParts.length > 0
+      ? path.join(realAncestor, ...missingParts)
+      : realAncestor
+  }
+
+  private static pathWithoutBwrapDirs(pathValue: string): string {
+    return pathValue
+      .split(":")
+      .filter((dir) => {
+        if (!dir) return false
+        try {
+          return !existsSync(path.join(dir, "bwrap"))
+        } catch {
+          return true
+        }
+      })
+      .join(":")
   }
 
   /** Track all active child processes for cleanup on app quit. */
@@ -2774,8 +2840,18 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       `${home}/.ssh`,
       `${home}/.gnupg`,
       `${home}/.aws`,
+      `${home}/.azure`,
       `${home}/.kube`,
       `${home}/.docker`,
+      `${home}/.pki`,
+      `${home}/.terraform.d`,
+      `${home}/.git-credentials`,
+      `${home}/.password-store`,
+      // Specific credential subdirs under .config
+      `${home}/.config/gcloud`,
+      `${home}/.config/gh`,
+      `${home}/.config/op`,          // 1Password CLI
+      `${home}/.config/keyring`,
       `${home}/.m2/settings.xml`,
       `${home}/.gradle/gradle.properties`,
       `${home}/.netrc`,
@@ -2805,6 +2881,11 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
 
     const fsPolicy = this.buildLinuxFsPolicy()
     const netPolicy = mode === "isolated" ? '"restricted"' : '"enabled"'
+    const originalPath = this.env["PATH"] ?? process.env.PATH ?? ""
+    const helperPath = LocalSandbox.pathWithoutBwrapDirs(originalPath)
+    const commandWithRestoredPath = helperPath !== originalPath && originalPath
+      ? `export PATH=${shellSingleQuote(originalPath)}; ${command}`
+      : command
 
     // Two-stage execution mirroring Codex's default bwrap mode:
     // outer: bwrap sets up filesystem namespace (ro-bind / /, bind workspace, unshare-net...)
@@ -2818,7 +2899,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       "--",
       this.codexLinuxSandboxPath, "--apply-seccomp-then-exec",
       "--",
-      "/bin/sh", "-c", command,
+      "/bin/sh", "-c", commandWithRestoredPath,
     ]
 
     return new Promise<ExecuteResponse>((resolve) => {
@@ -2839,10 +2920,19 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       console.log(`[LocalSandbox] linux-sandbox spawn: ${this.codexLinuxSandboxPath} mode=${mode}`)
       console.log(`[LocalSandbox] cwd: ${this.workingDir}`)
 
+      const sandboxEnv = { ...this.env }
+      // Force the helper to fall back to its built-in bubblewrap, then restore
+      // the user's PATH inside the command shell so git/node/python still work.
+      if (helperPath !== originalPath) {
+        sandboxEnv["PATH"] = helperPath
+        console.log("[LocalSandbox] linux-sandbox: hiding system bwrap from helper PATH")
+      }
+
       const proc = spawn(this.codexLinuxSandboxPath, sandboxArgs, {
         cwd: this.workingDir,
-        env: this.env,
-        stdio: ["ignore", "pipe", "pipe"]
+        env: sandboxEnv,
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: true,   // new process group so killTree(-pid) reaches all descendants
       })
 
       console.log(`[LocalSandbox] linux-sandbox pid=${proc.pid} at +${Date.now() - execStartMs}ms`)
