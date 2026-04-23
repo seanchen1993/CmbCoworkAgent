@@ -459,7 +459,8 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
   private static buildElevatedSandboxEnvPreamble(
     shellBase: string,
     cacheRoot: string,
-    sharedCacheRoot = cacheRoot
+    sharedCacheRoot = cacheRoot,
+    hostEnv?: Record<string, string>
   ): string {
     const profileRoot = LocalSandbox.getElevatedSandboxUserProfileRoot(true)
     const homeDrive = path.win32.parse(profileRoot).root.replace(/\\$/, "")
@@ -515,11 +516,26 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     const gitSslCmd = 'set "GIT_CONFIG_COUNT=1" & set "GIT_CONFIG_KEY_0=http.sslBackend" & set "GIT_CONFIG_VALUE_0=openssl"'
     const gitSslPs  = "$env:GIT_CONFIG_COUNT='1'; $env:GIT_CONFIG_KEY_0='http.sslBackend'; $env:GIT_CONFIG_VALUE_0='openssl'"
 
+    // The elevated sandbox runs as CodexSandboxOnline whose registry PATH only has System32.
+    // codex.exe's CreateProcessAsUser loads that minimal PATH — the main-process PATH (with
+    // Maven, Gradle, custom tools, etc.) is NOT inherited. Inject the host PATH here so the
+    // command shell sees the full toolchain.  Strip MSYS2 usr/bin paths first — those binaries
+    // crash under restricted tokens (DLL 0xC0000135).
+    const rawHostPath = (hostEnv?.PATH ?? hostEnv?.Path ?? process.env.PATH ?? "")
+    const filteredHostPath = rawHostPath
+      .split(";")
+      .filter(p => {
+        const lower = p.toLowerCase()
+        return !(lower.includes("\\usr\\bin") && lower.includes("git"))
+      })
+      .join(";")
+
     if (shellBase === "cmd") {
       const base = envOverrides
         .map(([key, value]) => `set "${key}=${cmdSetLiteral(value)}"`)
         .join(" & ")
-      const pathPreamble = pathPrefix ? `set "PATH=${cmdSetLiteral(pathPrefix)};%PATH%"` : ""
+      const fullPrefix = [pathPrefix, filteredHostPath].filter(Boolean).join(";")
+      const pathPreamble = fullPrefix ? `set "PATH=${cmdSetLiteral(fullPrefix)};%PATH%"` : ""
       const pythonPathPreamble = `set "PYTHONPATH=${cmdSetLiteral(toolDirs.pythonSiteCustomize)};%PYTHONPATH%"`
       const jvmOpts = `set "JAVA_TOOL_OPTIONS=%JAVA_TOOL_OPTIONS% ${cmdSetLiteral(javaToolFlags)}" & set "MAVEN_OPTS=%MAVEN_OPTS% ${cmdSetLiteral(mavenFlags)}" & set "SBT_OPTS=%SBT_OPTS% ${cmdSetLiteral(sbtFlags)}"`
       return [base, pathPreamble, pythonPathPreamble, jvmOpts, gitSslCmd].filter(Boolean).join(" & ")
@@ -529,7 +545,8 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       const base = envOverrides
         .map(([key, value]) => `$env:${key}=${powershellSingleQuote(value)}`)
         .join("; ")
-      const pathPreamble = pathPrefix ? `$env:PATH=${powershellSingleQuote(pathPrefix)} + ';' + $env:PATH` : ""
+      const fullPrefix = [pathPrefix, filteredHostPath].filter(Boolean).join(";")
+      const pathPreamble = fullPrefix ? `$env:PATH=${powershellSingleQuote(fullPrefix)} + ';' + $env:PATH` : ""
       const pythonPathPreamble = `$env:PYTHONPATH=${powershellSingleQuote(toolDirs.pythonSiteCustomize)} + $(if ($env:PYTHONPATH) { ';' + $env:PYTHONPATH } else { '' })`
       const javaToolFlagsEscaped = javaToolFlags.replace(/\\/g, "\\\\")
       const mavenFlagsEscaped = mavenFlags.replace(/\\/g, "\\\\")
@@ -2391,7 +2408,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       : ""
     const unelevatedPreamble = [clearProxyPreamble, unelevatedJvmPreamble].filter(Boolean).join(shellBase === "cmd" ? " & " : "; ")
     const sandboxUserEnvPreamble = isElevatedSandbox
-      ? LocalSandbox.buildElevatedSandboxEnvPreamble(shellBase, this._sandboxCacheRoot, this._sharedSandboxCacheRoot)
+      ? LocalSandbox.buildElevatedSandboxEnvPreamble(shellBase, this._sandboxCacheRoot, this._sharedSandboxCacheRoot, this.env)
       : unelevatedPreamble
     const commandWithSandboxEnv = sandboxUserEnvPreamble
       ? shellBase === "cmd"
