@@ -881,6 +881,20 @@ interface CustomAPI {
       granularity: "day" | "week" | "month" | "custom",
       opts?: { upperOrgLv1?: string | null }
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    skillUsageSummary: (
+      range: { from: string; to: string },
+      granularity: "day" | "week" | "month" | "custom",
+      // 可选：指定技能名后，后端按技能名聚合返回用户数。
+      skillNames?: string[]
+    ) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    skillUserStats: (
+      range: { from: string; to: string },
+      granularity: "day" | "week" | "month" | "custom",
+      skillName: string
+    ) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    userProfiles: (
+      sapIds: string[]
+    ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     productivity: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom"
