@@ -134,13 +134,20 @@ export interface SkillUsageSummaryMetric {
 interface SkillUsageBucket {
   key?: string
   doc_count?: number
-  unique_users?: { value?: number }
+  // 旧结构：unique_users.value
+  // 新结构（filters 子聚合）：unique_users.count.value
+  unique_users?: { value?: number; count?: { value?: number } }
+}
+
+interface SkillUsageFiltersBucket {
+  doc_count?: number
+  unique_users?: { value?: number; count?: { value?: number } }
 }
 
 interface SkillUsageDashboardData {
   aggregations?: {
     by_skill?: {
-      buckets?: SkillUsageBucket[]
+      buckets?: SkillUsageBucket[] | Record<string, SkillUsageFiltersBucket>
     }
   }
 }
@@ -214,14 +221,38 @@ export function buildSkillUsageSummaryFromBuckets(
     const key = normalizeSkillMetricKey(bucket.key)
     if (!key) continue
     const current = nextMap[key] ?? { calls: 0, users: 0 }
+    // 同时兼容两种返回结构：
+    // 1) terms 聚合: unique_users.value
+    // 2) filters 聚合: unique_users.count.value
+    const uniqueUsers = bucket.unique_users?.value ?? bucket.unique_users?.count?.value ?? 0
     nextMap[key] = {
       // 调用次数累加不同版本桶
       calls: current.calls + (bucket.doc_count ?? 0),
       // 用户数取最大值，避免不同版本桶相加放大
-      users: Math.max(current.users, bucket.unique_users?.value ?? 0)
+      users: Math.max(current.users, uniqueUsers)
     }
   }
   return nextMap
+}
+
+/**
+ * 兼容解析 `by_skill.buckets` 的两种结构：
+ * - 旧版 terms：数组 buckets
+ * - 新版 filters：对象 buckets（key 为 skillName）
+ */
+function extractSkillUsageBuckets(dashboardData: SkillUsageDashboardData | undefined): SkillUsageBucket[] {
+  const rawBuckets = dashboardData?.aggregations?.by_skill?.buckets
+  if (Array.isArray(rawBuckets)) return rawBuckets
+  if (!rawBuckets || typeof rawBuckets !== "object") return []
+
+  return Object.entries(rawBuckets).map(([key, bucket]) => ({
+    key,
+    doc_count: bucket.doc_count ?? 0,
+    unique_users: {
+      value: bucket.unique_users?.value,
+      count: bucket.unique_users?.count
+    }
+  }))
 }
 
 /**
@@ -291,7 +322,7 @@ export function buildSkillUsageData<T extends { name: string }>(
   summary: Record<string, SkillUsageSummaryMetric>
   sortedItems: T[]
 } {
-  const buckets = dashboardData?.aggregations?.by_skill?.buckets ?? []
+  const buckets = extractSkillUsageBuckets(dashboardData)
   const summary = buildSkillUsageSummaryFromBuckets(buckets)
   const sortedItems = sortSkillItemsByUsage(items, summary, sortMode)
   return { summary, sortedItems }
@@ -314,7 +345,9 @@ export async function getAllSkills(): Promise<GetAllSkillsResult> {
     let dashboardData: SkillUsageDashboardData | undefined
     if (typeof window.api?.dashboard?.skillUsageSummary === "function") {
       const range = getDefaultRange("month")
-      const usageRes = await window.api.dashboard.skillUsageSummary(range, "month")
+      // 把技能名传给后端，让后端按技能名 filters 聚合，减少版本桶合并误差。
+      const skillNames = skillsRes.data.map((item) => item.name).filter(Boolean)
+      const usageRes = await window.api.dashboard.skillUsageSummary(range, "month", skillNames)
       if (usageRes.success && usageRes.data) {
         dashboardData = usageRes.data as SkillUsageDashboardData
       }

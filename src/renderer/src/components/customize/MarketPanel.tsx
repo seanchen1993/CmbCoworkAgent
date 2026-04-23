@@ -93,6 +93,10 @@ interface SkillUserUsage {
 
 interface SkillUsageDetail {
   users: SkillUserUsage[]
+  // 去重用户数（仅统计非空 ystId 用户）
+  uniqueUsersCount?: number
+  // 空用户调用次数（ystId 为空或缺失）
+  emptyUserCalls?: number
 }
 
 interface UploaderProfile {
@@ -524,7 +528,15 @@ export function MarketPanel(): React.JSX.Element {
       }
 
       const topUsers = parseTopUsersFromAgg(response.data)
-      setSelectedSkillUsage({ users: topUsers })
+      // 与后端聚合字段 `unique_users_count` 对齐，作为详情头部“使用用户数”的优先来源。
+      const uniqueUsersCount = (
+        response.data as { aggregations?: { unique_users_count?: { value?: number } } }
+      ).aggregations?.unique_users_count?.value ?? topUsers.length
+      // 空用户调用次数来自 `empty_user_calls.filtered.doc_count`。
+      const emptyUserCalls = (
+        response.data as { aggregations?: { empty_user_calls?: { filtered?: { doc_count?: number } } } }
+      ).aggregations?.empty_user_calls?.filtered?.doc_count ?? 0
+      setSelectedSkillUsage({ users: topUsers, uniqueUsersCount, emptyUserCalls })
     } catch (err) {
       console.warn(`[MarketPanel] Failed to load skill user stats for ${skillName}:`, err)
       setSelectedSkillUsage({ users: [] })
@@ -975,11 +987,29 @@ export function MarketPanel(): React.JSX.Element {
   const selectedSkillCallCount =
     activeTab === "skill" ? selectedSkillMetrics?.calls ?? 0 : null
   const selectedSkillUserCount =
-    activeTab === "skill" ? selectedSkillMetrics?.users ?? 0 : null
+    activeTab === "skill"
+      // 详情视图优先用实时查询值；若未加载到则回退列表汇总值。
+      ? selectedSkillUsage?.uniqueUsersCount ?? selectedSkillMetrics?.users ?? 0
+      : null
   const selectedUploaderProfile =
     activeTab === "skill" && selectedItem?.user_id
       ? uploaderProfiles[selectedItem.user_id] ?? null
       : null
+  const selectedSkillUsageRows = useMemo(() => {
+    const users = selectedSkillUsage?.users ?? []
+    const emptyUserCalls = selectedSkillUsage?.emptyUserCalls ?? 0
+    if (emptyUserCalls <= 0) return users
+    // 在用户明细表追加“空用户”占位行，显式展示空用户调用次数。
+    return [
+      ...users,
+      {
+        sapId: "__empty_user__",
+        userName: "空用户（未记录）",
+        orgName: "",
+        count: emptyUserCalls
+      }
+    ]
+  }, [selectedSkillUsage])
 
   useEffect(() => {
     if (activeTab !== "skill") return
@@ -1726,15 +1756,21 @@ export function MarketPanel(): React.JSX.Element {
                             </tr>
                           </thead>
                           <tbody>
-                            {(selectedSkillUsage?.users ?? []).map((user) => (
+                            {selectedSkillUsageRows.map((user) => (
                               <tr key={user.sapId} className="border-t border-[#f0eee6] text-[#5e5d59]">
-                                <td className="py-1.5 px-2 font-mono">{user.sapId}</td>
-                                <td className="py-1.5 px-2">{user.userName || user.sapId}</td>
+                                <td className="py-1.5 px-2 font-mono">
+                                  {/* 空用户行没有真实 id，统一展示占位符 */}
+                                  {user.sapId === "__empty_user__" ? "—" : user.sapId}
+                                </td>
+                                <td className="py-1.5 px-2">
+                                  {/* 空用户行固定展示标签，普通行仍按姓名/ID 回退显示 */}
+                                  {user.sapId === "__empty_user__" ? user.userName : user.userName || user.sapId}
+                                </td>
                                 <td className="py-1.5 px-2">{user.orgName || "—"}</td>
                                 <td className="py-1.5 px-2 text-right">{user.count}</td>
                               </tr>
                             ))}
-                            {(selectedSkillUsage?.users?.length ?? 0) === 0 && (
+                            {selectedSkillUsageRows.length === 0 && (
                               <tr>
                                 <td colSpan={4} className="py-6 text-center text-[#87867f]">
                                   暂无调用用户数据

@@ -1463,9 +1463,11 @@ const api = {
       ipcRenderer.invoke("dashboard:userStats", range, granularity, opts),
     skillUsageSummary: (
       range: { from: string; to: string },
-      granularity: "day" | "week" | "month" | "custom"
+      granularity: "day" | "week" | "month" | "custom",
+      // 可选：传入技能名列表，后端将按技能名做 filters 聚合（更精确用户数）。
+      skillNames?: string[]
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:skillUsageSummary", range, granularity),
+      ipcRenderer.invoke("dashboard:skillUsageSummary", range, granularity, skillNames),
     skillUserStats: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",

@@ -773,7 +773,9 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     skillUsageSummary: (
       range: { from: string; to: string },
-      granularity: "day" | "week" | "month" | "custom"
+      granularity: "day" | "week" | "month" | "custom",
+      // 可选：指定技能名后，后端按技能名聚合返回用户数。
+      skillNames?: string[]
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     skillUserStats: (
       range: { from: string; to: string },

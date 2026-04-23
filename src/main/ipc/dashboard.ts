@@ -188,6 +188,69 @@ function escapeWildcard(value: string): string {
   return value.replace(/[\\*?]/g, "\\$&")
 }
 
+/**
+ * 过滤“有有效 ystId 的记录”：
+ * - 字段存在
+ * - 且不为空字符串
+ */
+function buildNonEmptyYstIdFilter(): Record<string, unknown> {
+  return {
+    bool: {
+      must: [{ exists: { field: "ystId" } }],
+      must_not: [{ term: { ystId: "" } }]
+    }
+  }
+}
+
+/**
+ * 过滤“空用户记录”：
+ * - ystId 为空字符串
+ * - 或 ystId 字段不存在
+ */
+function buildEmptyYstIdFilter(): Record<string, unknown> {
+  return {
+    bool: {
+      should: [{ term: { ystId: "" } }, { bool: { must_not: [{ exists: { field: "ystId" } }] } }],
+      minimum_should_match: 1
+    }
+  }
+}
+
+/**
+ * 统一构建技能命中条件：
+ * 使用 wildcard 兼容 `技能名-版本` 这一类上报格式。
+ */
+function buildSkillUsageWildcardFilter(skillName: string): Record<string, unknown> {
+  const escapedSkillName = escapeWildcard(skillName)
+  const wildcardPattern = `${escapedSkillName}**`
+  return {
+    bool: {
+      should: [
+        { wildcard: { usedSkills: wildcardPattern } },
+        { wildcard: { "usedSkills.keyword": wildcardPattern } }
+      ],
+      minimum_should_match: 1
+    }
+  }
+}
+
+/**
+ * 清洗技能名参数：
+ * - 去重
+ * - 去空值
+ * - 限制最大数量，避免 filters 聚合过大
+ */
+function normalizeSkillQueryNames(skillNames?: string[]): string[] {
+  if (!Array.isArray(skillNames)) return []
+  return Array.from(
+    new Set(
+      skillNames
+        .map((name) => String(name || "").trim())
+        .filter(Boolean)
+    )
+  ).slice(0, 1000)
+}
+
 function isDashboardAllowed(): boolean {
   if (import.meta.env.DEV) return true
   const userInfo = getUserInfo()
@@ -515,8 +578,40 @@ async function fetchUserStats(range: TimeRange, granularity: Granularity, opts?:
   return esQuery(getEsIndex("trace"), body)
 }
 
-async function fetchSkillUsageSummary(range: TimeRange, granularity: Granularity): Promise<unknown> {
+async function fetchSkillUsageSummary(
+  range: TimeRange,
+  granularity: Granularity,
+  skillNames?: string[]
+): Promise<unknown> {
   void granularity
+  // 模式 A：前端传入技能名列表，使用 filters 精确按“技能维度”统计。
+  // 这样可以直接得到每个技能的用户数，避免按版本桶二次合并带来的误差。
+  const normalizedSkillNames = normalizeSkillQueryNames(skillNames)
+  if (normalizedSkillNames.length > 0) {
+    const filters = Object.fromEntries(
+      normalizedSkillNames.map((skillName) => [skillName, buildSkillUsageWildcardFilter(skillName)])
+    )
+    const body = {
+      size: 0,
+      query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
+      aggs: {
+        by_skill: {
+          filters: { filters },
+          aggs: {
+            unique_users: {
+              filter: buildNonEmptyYstIdFilter(),
+              aggs: {
+                count: { cardinality: { field: "ystId" } }
+              }
+            }
+          }
+        }
+      }
+    }
+    return esQuery(getEsIndex("trace"), body)
+  }
+
+  // 模式 B：兼容旧调用方，保留 terms 聚合结构。
   const body = {
     size: 0,
     query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
@@ -524,7 +619,7 @@ async function fetchSkillUsageSummary(range: TimeRange, granularity: Granularity
       by_skill: {
         terms: { field: "usedSkills", size: 1000 },
         aggs: {
-          unique_users: { cardinality: { field: "sapId" } }
+          unique_users: { cardinality: { field: "ystId" } }
         }
       }
     }
@@ -539,31 +634,47 @@ async function fetchSkillUserStats(
 ): Promise<unknown> {
   void granularity
   const escapedSkillName = escapeWildcard(skillName)
-  const versionWildcard = `${escapedSkillName}-*`
+  const wildcardPattern = `${escapedSkillName}**`
+  const skillFilter = buildSkillUsageWildcardFilter(skillName)
   const body = {
     size: 0,
     query: {
       bool: {
-        filter: [
+        must: [
           timeRangeFilter("startedAt", range),
-          {
-            bool: {
-              should: [
-                { term: { usedSkills: skillName } },
-                { wildcard: { usedSkills: versionWildcard } },
-                { term: { "usedSkills.keyword": skillName } },
-                { wildcard: { "usedSkills.keyword": versionWildcard } }
-              ],
-              minimum_should_match: 1
-            }
-          }
-        ]
+          { exists: { field: "ystId" } },
+          { bool: { must_not: { term: { ystId: "" } } } }
+        ],
+        should: [
+          { wildcard: { usedSkills: wildcardPattern } },
+          { wildcard: { "usedSkills.keyword": wildcardPattern } }
+        ],
+        minimum_should_match: 1
       }
     },
     aggs: {
+      // 非空 ystId 的去重用户数（用于“使用用户数”展示）
+      unique_users_count: { cardinality: { field: "ystId" } },
+      // 非空 ystId 的调用总次数（主查询已经过滤了非空用户）
       total_calls: { value_count: { field: "traceId" } },
+      // 额外统计空用户调用次数：
+      // 通过 global 聚合跳出主查询（主查询已过滤非空用户），
+      // 然后重新套用 时间范围 + 技能命中 + 空用户 条件。
+      empty_user_calls: {
+        global: {},
+        aggs: {
+          filtered: {
+            filter: {
+              bool: {
+                must: [timeRangeFilter("startedAt", range), skillFilter, buildEmptyYstIdFilter()]
+              }
+            }
+          }
+        }
+      },
+      // 非空 ystId 的 Top 用户明细表
       top_users: {
-        terms: { field: "sapId", size: 100 },
+        terms: { field: "ystId", size: 100 },
         aggs: {
           user_name: { terms: { field: "userName", size: 1 } },
           org_name: { terms: { field: "orgName", size: 1 } }
@@ -1130,11 +1241,15 @@ function makeMockSkillUserStats(range: TimeRange, skillName: string): unknown {
   ) % 7
   const picked = topUsers.slice(0, Math.max(3, 6 - offset))
   const totalCalls = picked.reduce((sum, item) => sum + item.doc_count, 0)
+  // 模拟环境下给出一个小比例空用户调用，便于前端联调空用户行展示。
+  const emptyUserCalls = Math.floor(totalCalls * 0.08)
 
   return {
     aggregations: {
       total_calls: { value: totalCalls },
       total_users: { value: picked.length },
+      unique_users_count: { value: picked.length },
+      empty_user_calls: { filtered: { doc_count: emptyUserCalls } },
       top_users: { buckets: picked }
     }
   }
@@ -1518,10 +1633,11 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   _ipcMain.handle(
     "dashboard:skillUsageSummary",
-    async (_, range: TimeRange, granularity: Granularity) => {
+    async (_, range: TimeRange, granularity: Granularity, skillNames?: string[]) => {
+      // `skillNames` 为可选参数：传入后走更精确的 filters 聚合。
       if (import.meta.env.DEV) return { success: true, data: makeMockSkillUsageSummary(range) }
       try {
-        return { success: true, data: await fetchSkillUsageSummary(range, granularity) }
+        return { success: true, data: await fetchSkillUsageSummary(range, granularity, skillNames) }
       } catch (e) {
         console.error("[Dashboard] skillUsageSummary error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
