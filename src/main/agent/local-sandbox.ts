@@ -9,11 +9,12 @@
  * handled via HITL configuration.
  */
 
-import { spawn, execSync, type ChildProcess } from "node:child_process"
+import { spawn, execFile, execSync, type ChildProcess } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
 import { constants as fsConstants, existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs"
 import fs from "node:fs/promises"
 import path from "node:path"
+import { promisify } from "node:util"
 import {
   FilesystemBackend,
   type EditResult,
@@ -43,6 +44,8 @@ import { homedir } from "node:os"
 import type { HookConfig, HookResult } from "../hooks/types"
 import type { HookResultCallback } from "../hooks/runner"
 import { runHooksEnriched } from "../hooks/required-skill"
+
+const execFileP = promisify(execFile)
 
 /**
  * Sensitive directories under user profile that sandbox tools should not access.
@@ -442,6 +445,8 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
   }
 
   private static readonly _preparedSandboxCacheDirs = new Map<string, string[]>()
+  private static readonly _elevatedWorkspaceSetupPromises =
+    new Map<string, Promise<{ ready: boolean; error?: string }>>()
 
   private static prepareSandboxCacheDirs(cacheRoot: string, sharedCacheRoot = cacheRoot): string[] {
     const dirs = LocalSandbox.getSandboxToolCacheDirs(cacheRoot, sharedCacheRoot)
@@ -829,6 +834,29 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     // the event loop on the first file-write hot path (execSync("net session")).
     if (process.platform === "win32" && this.windowsSandbox === "readonly") {
       LocalSandbox.isElevated()
+    }
+    if (process.platform === "win32" && this.windowsSandbox !== "none") {
+      void LocalSandbox.resolvePythonDir().catch((err) => {
+        console.warn("[LocalSandbox] failed to prewarm Python dir:", err)
+      })
+    }
+    if (
+      process.platform === "win32"
+      && this.windowsSandbox === "elevated"
+      && isElevatedSetupComplete()
+      && !isWorkspaceElevatedSetupDone(this.workingDir)
+    ) {
+      const cacheRoots = Array.from(new Set([
+        this._sandboxCacheRoot,
+        this._sharedSandboxCacheRoot
+      ].map((dir) => path.win32.normalize(dir))))
+      void LocalSandbox.ensureElevatedWorkspaceSetup(this.workingDir, cacheRoots, false).then((result) => {
+        if (!result.ready && result.error) {
+          console.warn(`[LocalSandbox] elevated workspace prewarm skipped: ${result.error}`)
+        }
+      }).catch((err) => {
+        console.warn("[LocalSandbox] elevated workspace prewarm failed:", err)
+      })
     }
 
     // Redirect deepagents' virtual eviction paths (e.g. /large_tool_results/)
@@ -1757,36 +1785,56 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
    * the real Python path from the main process and inject it into the sandbox PATH.
    */
   private static _pythonDir: string | null | undefined = undefined // undefined = not yet checked
+  private static _pythonDirPromise: Promise<string | null> | null = null
 
-  private static resolvePythonDir(): string | null {
+  private static async resolvePythonDir(): Promise<string | null> {
     if (LocalSandbox._pythonDir !== undefined) return LocalSandbox._pythonDir
+    if (LocalSandbox._pythonDirPromise) return LocalSandbox._pythonDirPromise
+
+    const lookup = (async () => {
+      try {
+        // Try py launcher first (reads registry, works even when python not in PATH)
+        const { stdout } = await execFileP("py", ["-c", "import sys; print(sys.executable)"], {
+          timeout: 5000,
+          encoding: "utf-8",
+          windowsHide: true
+        })
+        const pyOutput = String(stdout).trim()
+        if (pyOutput && existsSync(pyOutput)) {
+          LocalSandbox._pythonDir = path.dirname(pyOutput)
+          console.log(`[LocalSandbox] resolved Python dir via py launcher: ${LocalSandbox._pythonDir}`)
+          return LocalSandbox._pythonDir
+        }
+      } catch { /* py launcher not available */ }
+      try {
+        // Fallback: where python
+        const { stdout } = await execFileP("where", ["python"], {
+          timeout: 5000,
+          encoding: "utf-8",
+          windowsHide: true
+        })
+        const whereOutput = String(stdout).trim().split(/\r?\n/)[0]
+        if (whereOutput && existsSync(whereOutput)) {
+          LocalSandbox._pythonDir = path.dirname(whereOutput)
+          console.log(`[LocalSandbox] resolved Python dir via where: ${LocalSandbox._pythonDir}`)
+          return LocalSandbox._pythonDir
+        }
+      } catch { /* python not found */ }
+      LocalSandbox._pythonDir = null
+      return null
+    })()
+
+    LocalSandbox._pythonDirPromise = lookup
     try {
-      // Try py launcher first (reads registry, works even when python not in PATH)
-      const pyOutput = execSync("py -c \"import sys; print(sys.executable)\"", {
-        timeout: 5000, stdio: ["ignore", "pipe", "ignore"], encoding: "utf-8"
-      }).trim()
-      if (pyOutput && existsSync(pyOutput)) {
-        LocalSandbox._pythonDir = path.dirname(pyOutput)
-        console.log(`[LocalSandbox] resolved Python dir via py launcher: ${LocalSandbox._pythonDir}`)
-        return LocalSandbox._pythonDir
+      return await lookup
+    } finally {
+      if (LocalSandbox._pythonDirPromise === lookup) {
+        LocalSandbox._pythonDirPromise = null
       }
-    } catch { /* py launcher not available */ }
-    try {
-      // Fallback: where python
-      const whereOutput = execSync("where python", {
-        timeout: 5000, stdio: ["ignore", "pipe", "ignore"], encoding: "utf-8"
-      }).trim().split(/\r?\n/)[0]
-      if (whereOutput && existsSync(whereOutput)) {
-        LocalSandbox._pythonDir = path.dirname(whereOutput)
-        console.log(`[LocalSandbox] resolved Python dir via where: ${LocalSandbox._pythonDir}`)
-        return LocalSandbox._pythonDir
-      }
-    } catch { /* python not found */ }
-    LocalSandbox._pythonDir = null
-    return null
+    }
   }
 
-  private static buildSandboxEnv(env: Record<string, string>): Record<string, string> {
+  private static async buildSandboxEnv(env: Record<string, string>): Promise<Record<string, string>> {
     const result = { ...env }
     const sep = path.delimiter
     const sys32 = (env.SystemRoot || env.windir || "C:\\Windows") + "\\System32"
@@ -1812,7 +1860,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     // Inject Python installation directory if not already in PATH.
     // The py launcher uses registry (inaccessible in sandbox), so we resolve
     // the real path from the main process and add it to the sandbox PATH.
-    const pythonDir = LocalSandbox.resolvePythonDir()
+    const pythonDir = await LocalSandbox.resolvePythonDir()
     if (pythonDir) {
       const pythonLower = pythonDir.toLowerCase()
       if (!system.some(s => s.toLowerCase() === pythonLower)
@@ -2105,6 +2153,52 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
         reject(err)
       })
     })
+  }
+
+  private static async ensureElevatedWorkspaceSetup(
+    workingDir: string,
+    cacheRoots: string[],
+    allowSetupPrompt: boolean
+  ): Promise<{ ready: boolean; error?: string }> {
+    if (isWorkspaceElevatedSetupDone(workingDir)) return { ready: true }
+
+    const workspaceKey = normalizeDirKey(workingDir)
+    const existing = LocalSandbox._elevatedWorkspaceSetupPromises.get(workspaceKey)
+    if (existing) return existing
+
+    const task = (async (): Promise<{ ready: boolean; error?: string }> => {
+      if (isWorkspaceElevatedSetupDone(workingDir)) return { ready: true }
+
+      if (isElevatedSetupComplete()) {
+        try {
+          await LocalSandbox.grantElevatedWorkspaceAcl(workingDir)
+          await Promise.all(cacheRoots.map((dir) => LocalSandbox.grantElevatedWorkspaceAcl(dir)))
+          markWorkspaceElevatedSetupDone(workingDir)
+          return { ready: true }
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          console.warn(`[LocalSandbox] elevated workspace ACL preflight failed for ${workingDir}: ${message}`)
+          if (!allowSetupPrompt) return { ready: false, error: message }
+        }
+      } else if (!allowSetupPrompt) {
+        return { ready: false, error: "initial elevated setup pending" }
+      }
+
+      const setupResult = await runElevatedSetupForPaths([workingDir, ...cacheRoots])
+      if (setupResult.success) {
+        markWorkspaceElevatedSetupDone(workingDir)
+        return { ready: true }
+      }
+      return { ready: false, error: setupResult.error || "未知错误" }
+    })()
+
+    LocalSandbox._elevatedWorkspaceSetupPromises.set(workspaceKey, task)
+    task.finally(() => {
+      if (LocalSandbox._elevatedWorkspaceSetupPromises.get(workspaceKey) === task) {
+        LocalSandbox._elevatedWorkspaceSetupPromises.delete(workspaceKey)
+      }
+    }).catch(() => { /* handled by caller */ })
+    return task
   }
 
   private static readonly SIGKILL_TIMEOUT_MS = 200
@@ -2411,7 +2505,6 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       this._sandboxCacheRoot,
       this._sharedSandboxCacheRoot
     ].map((dir) => path.win32.normalize(dir))))
-    const sandboxCacheDirs = LocalSandbox.prepareSandboxCacheDirs(this._sandboxCacheRoot, this._sharedSandboxCacheRoot)
     const sandboxCacheWritableRootsOverride = effectiveMode === "elevated" || effectiveMode === "unelevated"
       ? LocalSandbox.buildWritableRootsOverride(sandboxCacheRoots)
       : undefined
@@ -2423,36 +2516,18 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     if (isElevatedSandbox && attempt === 1) {
       console.log(`[LocalSandbox] elevated: checking workspace setup at +${Date.now() - methodStartMs}ms`)
       if (!isWorkspaceElevatedSetupDone(this.workingDir)) {
-        if (isElevatedSetupComplete()) {
-          // Initial setup already done (sandbox user exists). For new workspaces, just grant
-          // ACL access via icacls — no UAC needed since we own the directory.
-          console.log(`[LocalSandbox] elevated: granting sandbox user ACL for new workspace (no UAC): ${this.workingDir}`)
-          try {
-            await LocalSandbox.grantElevatedWorkspaceAcl(this.workingDir)
-            await Promise.all(sandboxCacheRoots.map((dir) => LocalSandbox.grantElevatedWorkspaceAcl(dir)))
-            markWorkspaceElevatedSetupDone(this.workingDir)
-            console.log(`[LocalSandbox] elevated: ACL grant done for ${this.workingDir}`)
-          } catch (err) {
-            console.warn(`[LocalSandbox] elevated: icacls grant failed, falling back to full setup: ${err}`)
-            const setupResult = await runElevatedSetupForPaths([this.workingDir, ...sandboxCacheRoots])
-            if (setupResult.success) {
-              markWorkspaceElevatedSetupDone(this.workingDir)
-            }
-          }
-        } else {
-          // Initial setup not done — need full elevated setup (UAC required)
-          console.log(`[LocalSandbox] elevated: initial setup required, running with UAC: ${this.workingDir}`)
-          const setupResult = await runElevatedSetupForPaths([this.workingDir, ...sandboxCacheRoots])
-          if (setupResult.success) {
-            markWorkspaceElevatedSetupDone(this.workingDir)
-            console.log(`[LocalSandbox] elevated: initial setup done for ${this.workingDir}`)
-          } else {
-            console.warn(`[LocalSandbox] elevated: initial setup failed: ${setupResult.error}`)
-            // Continue anyway — codex.exe will handle "setup refresh failed" reactively as fallback
+        const setupResult = await LocalSandbox.ensureElevatedWorkspaceSetup(this.workingDir, sandboxCacheRoots, true)
+        if (!setupResult.ready) {
+          return {
+            output: `沙箱工作目录配置失败: ${setupResult.error || "未知错误"}。\n请在设置中切换沙箱模式或以管理员身份运行应用。`,
+            exitCode: 1,
+            truncated: false
           }
         }
       }
     }
+
+    const sandboxCacheDirs = LocalSandbox.prepareSandboxCacheDirs(this._sandboxCacheRoot, this._sharedSandboxCacheRoot)
 
     // Git Bash (MSYS2) crashes under restricted tokens — always use PowerShell/cmd
     console.log(`[LocalSandbox] elevated: pre-setup done at +${Date.now() - methodStartMs}ms, resolving shell...`)
@@ -2587,8 +2662,16 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     }
 
     const execStartMs = Date.now()
+    // Effective abort signal: per-task override (for background tasks) or conversation-level signal.
+    const effectiveAbortSignal = overrideAbortSignal ?? this.abortSignal
     try {
-    const result = await new Promise<ExecuteResponse>((resolve) => {
+      // Early return if already aborted — avoid a potentially slow buildSandboxEnv (Python lookup)
+      // just to immediately discard the result.
+      if (effectiveAbortSignal?.aborted) {
+        return { output: "<execute_metadata>\nUser aborted the command, process has been killed\n</execute_metadata>\n\n<no output>", exitCode: 130, truncated: false }
+      }
+      const sandboxEnv = await LocalSandbox.buildSandboxEnv(this.env)
+      const result = await new Promise<ExecuteResponse>((resolve) => {
       const stdoutChunks: Buffer[] = []
       const stderrChunks: Buffer[] = []
       let totalBytes = 0
@@ -2596,10 +2679,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       let exited = false
       let firstDataAt = 0 // timestamp of first stdout/stderr data
 
-      // Effective abort signal: per-task override (for background tasks) or conversation-level signal.
-      const effectiveAbortSignal = overrideAbortSignal ?? this.abortSignal
-
-      // Early return if already aborted — avoid spawning a process just to kill it.
+      // Second check: abort may have fired during the buildSandboxEnv await above.
       if (effectiveAbortSignal?.aborted) {
         resolve({ output: "<execute_metadata>\nUser aborted the command, process has been killed\n</execute_metadata>\n\n<no output>", exitCode: 130, truncated: false })
         return
@@ -2607,12 +2687,6 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
 
       console.log(`[LocalSandbox] spawn: ${this.codexExePath} ${JSON.stringify(sandboxArgs)}`)
       console.log(`[LocalSandbox] cwd: ${this.workingDir}`)
-
-      // Build sandbox-safe env: ensure System32 is before Git usr/bin in PATH.
-      // MSYS2 binaries (from Git usr/bin) crash under restricted tokens due to
-      // DLL load failures (0xC0000135). Prioritizing System32 ensures native
-      // Windows executables (whoami, find, sort, etc.) are found first.
-      const sandboxEnv = LocalSandbox.buildSandboxEnv(this.env)
 
       // spawn() reports ENOENT asynchronously via the "error" event, not by throwing
       const proc = spawn(this.codexExePath, sandboxArgs, {
@@ -2786,7 +2860,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
           truncated: false
         })
       })
-    })
+      })
 
     // Elevated mode: if "setup refresh failed", run elevated setup for this workspace (one-time UAC) and retry.
     // Only retry once (attempt === 1) to prevent infinite recursion if setup succeeds but codex.exe keeps failing.
