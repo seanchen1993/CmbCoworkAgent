@@ -9,9 +9,9 @@
  * handled via HITL configuration.
  */
 
-import { spawn, execFile, execSync, type ChildProcess } from "node:child_process"
+import { spawn, execFile, type ChildProcess } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
-import { constants as fsConstants, existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs"
+import { constants as fsConstants, existsSync, realpathSync } from "node:fs"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { promisify } from "node:util"
@@ -34,8 +34,11 @@ import { replace } from "./replace"
 import type { ToolOrchestrator } from "./tool-orchestrator"
 import { assessCommandSafety } from "./exec-policy"
 import {
-  isWorkspaceElevatedSetupDone,
+  areElevatedRootsPrepared,
   isElevatedSetupComplete,
+  isElevatedRootPrepared,
+  markElevatedRootsPrepared,
+  isWorkspaceElevatedSetupDone,
   runElevatedSetupForPaths,
   markWorkspaceElevatedSetupDone,
   normalizeDirKey
@@ -445,18 +448,19 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
   }
 
   private static readonly _preparedSandboxCacheDirs = new Map<string, string[]>()
+  private static readonly _sandboxCachePreparePromises = new Map<string, Promise<string[]>>()
+  private static readonly _elevatedRootPreparePromises = new Map<string, Promise<boolean>>()
   private static readonly _elevatedWorkspaceSetupPromises =
     new Map<string, Promise<{ ready: boolean; error?: string }>>()
 
-  private static prepareSandboxCacheDirs(cacheRoot: string, sharedCacheRoot = cacheRoot): string[] {
+  private static describeSandboxCacheDirs(cacheRoot: string, sharedCacheRoot = cacheRoot): {
+    cacheKey: string
+    uniqueDirs: string[]
+    siteCustomizePath: string
+  } {
     const dirs = LocalSandbox.getSandboxToolCacheDirs(cacheRoot, sharedCacheRoot)
     const cacheKey = `${normalizeDirKey(cacheRoot)}|${normalizeDirKey(sharedCacheRoot)}`
     const siteCustomizePath = path.win32.join(dirs.pythonSiteCustomize, "sitecustomize.py")
-    const cachedDirs = LocalSandbox._preparedSandboxCacheDirs.get(cacheKey)
-    if (cachedDirs && existsSync(siteCustomizePath)) {
-      return cachedDirs
-    }
-
     const { pathEntries } = LocalSandbox.buildSandboxToolEnv(cacheRoot, sharedCacheRoot)
     const allDirs = [
       dirs.root,
@@ -508,27 +512,56 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       ...pathEntries
     ]
     const uniqueDirs = Array.from(new Set(allDirs.map((dir) => path.win32.normalize(dir))))
-    let prepared = true
-    for (const dir of uniqueDirs) {
-      try { mkdirSync(dir, { recursive: true }) } catch (err) {
-        prepared = false
-        console.warn(`[LocalSandbox] failed to prepare sandbox cache dir ${dir}: ${err}`)
+    return { cacheKey, uniqueDirs, siteCustomizePath }
+  }
+
+  private static getPreparedSandboxCacheDirs(cacheRoot: string, sharedCacheRoot = cacheRoot): string[] {
+    const { cacheKey, uniqueDirs, siteCustomizePath } = LocalSandbox.describeSandboxCacheDirs(cacheRoot, sharedCacheRoot)
+    const cachedDirs = LocalSandbox._preparedSandboxCacheDirs.get(cacheKey)
+    if (cachedDirs && existsSync(siteCustomizePath)) {
+      return cachedDirs
+    }
+    return uniqueDirs.filter((dir) => existsSync(dir))
+  }
+
+  private static async prepareSandboxCacheDirs(cacheRoot: string, sharedCacheRoot = cacheRoot): Promise<string[]> {
+    const { cacheKey, uniqueDirs, siteCustomizePath } = LocalSandbox.describeSandboxCacheDirs(cacheRoot, sharedCacheRoot)
+    const cachedDirs = LocalSandbox._preparedSandboxCacheDirs.get(cacheKey)
+    if (cachedDirs && existsSync(siteCustomizePath)) {
+      return cachedDirs
+    }
+    const existing = LocalSandbox._sandboxCachePreparePromises.get(cacheKey)
+    if (existing) return existing
+
+    const task = (async (): Promise<string[]> => {
+      let prepared = true
+      for (const dir of uniqueDirs) {
+        try {
+          await fs.mkdir(dir, { recursive: true })
+        } catch (err) {
+          prepared = false
+          console.warn(`[LocalSandbox] failed to prepare sandbox cache dir ${dir}: ${err}`)
+        }
       }
-    }
-    try {
-      writeFileSync(
-        siteCustomizePath,
-        PYTHON_TEMP_ACL_SITE_CUSTOMIZE,
-        "utf8"
-      )
-    } catch (err) {
-      prepared = false
-      console.warn(`[LocalSandbox] failed to prepare Python sandbox sitecustomize: ${err}`)
-    }
-    if (prepared) {
-      LocalSandbox._preparedSandboxCacheDirs.set(cacheKey, uniqueDirs)
-    }
-    return uniqueDirs
+      try {
+        await fs.writeFile(siteCustomizePath, PYTHON_TEMP_ACL_SITE_CUSTOMIZE, "utf8")
+      } catch (err) {
+        prepared = false
+        console.warn(`[LocalSandbox] failed to prepare Python sandbox sitecustomize: ${err}`)
+      }
+      if (prepared) {
+        LocalSandbox._preparedSandboxCacheDirs.set(cacheKey, uniqueDirs)
+      }
+      return uniqueDirs
+    })()
+
+    LocalSandbox._sandboxCachePreparePromises.set(cacheKey, task)
+    task.finally(() => {
+      if (LocalSandbox._sandboxCachePreparePromises.get(cacheKey) === task) {
+        LocalSandbox._sandboxCachePreparePromises.delete(cacheKey)
+      }
+    }).catch(() => { /* handled by caller */ })
+    return task
   }
 
   private static buildWritableRootsOverride(roots: string[]): string | undefined {
@@ -830,33 +863,30 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     this._sharedSandboxCacheRoot = LocalSandbox.buildSharedSandboxCacheRoot(baseEnv)
     this.abortSignal = options.abortSignal
 
-    // Eagerly cache the elevation check during construction to avoid blocking
-    // the event loop on the first file-write hot path (execSync("net session")).
+    // Prewarm sandbox state during construction so command execution avoids
+    // kicking off expensive setup work on the hot path.
     if (process.platform === "win32" && this.windowsSandbox === "readonly") {
-      LocalSandbox.isElevated()
+      void LocalSandbox.getElevationState().catch((err) => {
+        console.warn("[LocalSandbox] failed to prewarm elevation state:", err)
+      })
     }
     if (process.platform === "win32" && this.windowsSandbox !== "none") {
       void LocalSandbox.resolvePythonDir().catch((err) => {
         console.warn("[LocalSandbox] failed to prewarm Python dir:", err)
       })
+      void LocalSandbox.prepareSandboxCacheDirs(this._sandboxCacheRoot, this._sharedSandboxCacheRoot).catch((err) => {
+        console.warn("[LocalSandbox] failed to prewarm sandbox cache dirs:", err)
+      })
     }
     if (
       process.platform === "win32"
       && this.windowsSandbox === "elevated"
-      && isElevatedSetupComplete()
-      && !isWorkspaceElevatedSetupDone(this.workingDir)
     ) {
       const cacheRoots = Array.from(new Set([
         this._sandboxCacheRoot,
         this._sharedSandboxCacheRoot
       ].map((dir) => path.win32.normalize(dir))))
-      void LocalSandbox.ensureElevatedWorkspaceSetup(this.workingDir, cacheRoots, false).then((result) => {
-        if (!result.ready && result.error) {
-          console.warn(`[LocalSandbox] elevated workspace prewarm skipped: ${result.error}`)
-        }
-      }).catch((err) => {
-        console.warn("[LocalSandbox] elevated workspace prewarm failed:", err)
-      })
+      LocalSandbox.prewarmElevatedWorkspaceRoots(this.workingDir, cacheRoots)
     }
 
     // Redirect deepagents' virtual eviction paths (e.g. /large_tool_results/)
@@ -1957,6 +1987,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
 
   /** Cached result of admin elevation check. */
   private static _isElevated: boolean | null = null
+  private static _isElevatedPromise: Promise<boolean> | null = null
 
   /**
    * Check if the current process is running with administrator privileges (Windows only).
@@ -1977,20 +2008,40 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
    */
   static isElevated(): boolean {
     if (LocalSandbox._isElevated !== null) return LocalSandbox._isElevated
+    void LocalSandbox.getElevationState().catch(() => {
+      // Best-effort prewarm; readonly callers conservatively treat unknown as non-admin.
+    })
+    return false
+  }
+
+  private static async getElevationState(): Promise<boolean> {
+    if (LocalSandbox._isElevated !== null) return LocalSandbox._isElevated
+    if (LocalSandbox._isElevatedPromise) return LocalSandbox._isElevatedPromise
     if (process.platform !== "win32") {
       LocalSandbox._isElevated = false
       return false
     }
     const safeCwd = process.env.SYSTEMROOT || process.env.windir || "C:\\Windows"
-    try {
-      const output = execSync("whoami /groups", { encoding: "utf-8", windowsHide: true, cwd: safeCwd })
-      LocalSandbox._isElevated = output.includes("S-1-16-12288")
+    const lookup = execFileP("whoami", ["/groups"], {
+      encoding: "utf-8",
+      windowsHide: true,
+      cwd: safeCwd,
+      timeout: 5000
+    }).then(({ stdout }) => {
+      LocalSandbox._isElevated = String(stdout).includes("S-1-16-12288")
       console.log(`[LocalSandbox] isElevated=${LocalSandbox._isElevated} (whoami /groups)`)
-    } catch (e) {
+      return LocalSandbox._isElevated
+    }).catch((e) => {
       console.log("[LocalSandbox] whoami failed:", (e as Error).message?.slice(0, 120))
       LocalSandbox._isElevated = false
-    }
-    return LocalSandbox._isElevated
+      return false
+    }).finally(() => {
+      if (LocalSandbox._isElevatedPromise === lookup) {
+        LocalSandbox._isElevatedPromise = null
+      }
+    })
+    LocalSandbox._isElevatedPromise = lookup
+    return lookup
   }
 
   /** Directories that currently have the Everyone ACE granted, with reference count.
@@ -2153,6 +2204,41 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
         reject(err)
       })
     })
+  }
+
+  private static getElevatedPrepareRoots(workingDir: string, cacheRoots: string[]): string[] {
+    return Array.from(new Set([workingDir, ...cacheRoots].map((dir) => path.win32.normalize(dir))))
+  }
+
+  private static prepareElevatedRootInBackground(root: string): void {
+    const key = normalizeDirKey(root)
+    if (!isElevatedSetupComplete() || isElevatedRootPrepared(root)) return
+    const existing = LocalSandbox._elevatedRootPreparePromises.get(key)
+    if (existing) return
+
+    const task = LocalSandbox.grantElevatedWorkspaceAcl(root)
+      .then(() => {
+        markElevatedRootsPrepared([root])
+        return true
+      })
+      .catch((err) => {
+        console.warn(`[LocalSandbox] elevated root prewarm failed for ${root}: ${err instanceof Error ? err.message : String(err)}`)
+        return false
+      })
+
+    LocalSandbox._elevatedRootPreparePromises.set(key, task)
+    task.finally(() => {
+      if (LocalSandbox._elevatedRootPreparePromises.get(key) === task) {
+        LocalSandbox._elevatedRootPreparePromises.delete(key)
+      }
+    }).catch(() => { /* handled by caller */ })
+  }
+
+  private static prewarmElevatedWorkspaceRoots(workingDir: string, cacheRoots: string[]): void {
+    if (!isElevatedSetupComplete()) return
+    for (const root of LocalSandbox.getElevatedPrepareRoots(workingDir, cacheRoots)) {
+      LocalSandbox.prepareElevatedRootInBackground(root)
+    }
   }
 
   private static async ensureElevatedWorkspaceSetup(
@@ -2509,11 +2595,23 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       ? LocalSandbox.buildWritableRootsOverride(sandboxCacheRoots)
       : undefined
 
-    // Elevated mode: proactively ensure the workspace has ACL setup before spawning codex.exe.
-    // This prevents the command from silently blocking mid-execution when codex.exe returns
-    // "setup refresh failed" (which triggers a reactive UAC mid-command).
-    // Using persistent cache so workspaces only need setup once, across restarts.
-    if (isElevatedSandbox && attempt === 1) {
+    // Elevated mode: only check whether the prepared roots are ready.
+    // Missing roots are warmed in the background so the execute hot path never
+    // blocks on ACL setup.
+    if (isElevatedSandbox) {
+      const elevatedRoots = LocalSandbox.getElevatedPrepareRoots(this.workingDir, sandboxCacheRoots)
+      const rootsReady = areElevatedRootsPrepared(elevatedRoots)
+      if (!rootsReady) {
+        console.log(`[LocalSandbox] elevated: roots not ready at +${Date.now() - methodStartMs}ms, background prewarm scheduled`)
+        LocalSandbox.prewarmElevatedWorkspaceRoots(this.workingDir, sandboxCacheRoots)
+        return {
+          output: "Elevated sandbox workspace permissions are still preparing in the background. Please retry in a moment.",
+          exitCode: 1,
+          truncated: false
+        }
+      }
+    }
+    if (attempt < 0 && isElevatedSandbox && attempt === 1) {
       console.log(`[LocalSandbox] elevated: checking workspace setup at +${Date.now() - methodStartMs}ms`)
       if (!isWorkspaceElevatedSetupDone(this.workingDir)) {
         const setupResult = await LocalSandbox.ensureElevatedWorkspaceSetup(this.workingDir, sandboxCacheRoots, true)
@@ -2527,7 +2625,10 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       }
     }
 
-    const sandboxCacheDirs = LocalSandbox.prepareSandboxCacheDirs(this._sandboxCacheRoot, this._sharedSandboxCacheRoot)
+    void LocalSandbox.prepareSandboxCacheDirs(this._sandboxCacheRoot, this._sharedSandboxCacheRoot).catch((err) => {
+      console.warn("[LocalSandbox] sandbox cache dir prewarm failed during execute:", err)
+    })
+    const sandboxCacheDirs = LocalSandbox.getPreparedSandboxCacheDirs(this._sandboxCacheRoot, this._sharedSandboxCacheRoot)
 
     // Git Bash (MSYS2) crashes under restricted tokens — always use PowerShell/cmd
     console.log(`[LocalSandbox] elevated: pre-setup done at +${Date.now() - methodStartMs}ms, resolving shell...`)
@@ -2579,7 +2680,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       : effectiveCommand
 
     const isReadonly = effectiveMode === "readonly"
-    const elevated = isReadonly && LocalSandbox.isElevated()
+    const elevated = isReadonly ? await LocalSandbox.getElevationState() : false
 
     // elevated: dedicated sandbox user, codex.exe handles the isolation internally
     // readonly + admin: grant full read + cwd write so admin can work in workspace
@@ -2862,9 +2963,21 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       })
       })
 
+    // Elevated mode: if Codex reports stale setup, kick background prewarm for the next retry
+    // rather than blocking the current command on ACL refresh.
+    if (isElevatedSandbox && result.exitCode !== 0 && result.output.includes("setup refresh failed")) {
+      console.warn(`[LocalSandbox] elevated: setup refresh failed for ${this.workingDir}, scheduling background prewarm`)
+      LocalSandbox.prewarmElevatedWorkspaceRoots(this.workingDir, sandboxCacheRoots)
+      return {
+        output: `${result.output}\n\n[Sandbox] Elevated workspace permissions are still preparing in the background. Please retry in a moment.`,
+        exitCode: result.exitCode ?? 1,
+        truncated: result.truncated
+      }
+    }
+
     // Elevated mode: if "setup refresh failed", run elevated setup for this workspace (one-time UAC) and retry.
     // Only retry once (attempt === 1) to prevent infinite recursion if setup succeeds but codex.exe keeps failing.
-    if (isElevatedSandbox && result.exitCode !== 0 && result.output.includes("setup refresh failed") && attempt <= 1) {
+    if (attempt < 0 && isElevatedSandbox && result.exitCode !== 0 && result.output.includes("setup refresh failed") && attempt <= 1) {
       console.log(`[LocalSandbox] elevated: setup refresh failed for ${this.workingDir}, running elevated setup with UAC (attempt=${attempt})...`)
       // runElevatedSetupForPaths / markWorkspaceElevatedSetupDone already imported statically
       const setupResult = await runElevatedSetupForPaths([this.workingDir, ...sandboxCacheRoots])

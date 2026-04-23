@@ -1,8 +1,9 @@
 import { app, BrowserWindow, IpcMain } from "electron"
 import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, unlinkSync } from "fs"
-import { execFile, execSync } from "child_process"
+import { execFile } from "child_process"
 import { homedir, tmpdir } from "os"
 import { join, resolve } from "path"
+import { promisify } from "util"
 import {
   getWindowsSandboxMode,
   setWindowsSandboxMode,
@@ -21,9 +22,10 @@ const SETUP_MARKER_PATH = join(CODEX_HOME, ".sandbox", "setup_marker.json")
 const SANDBOX_USERS_PATH = join(CODEX_HOME, ".sandbox-secrets", "sandbox_users.json")
 const ELEVATED_WORKSPACES_PATH = join(CODEX_HOME, ".sandbox", "elevated_workspaces.json")
 const SETUP_VERSION = 5
+const execFileP = promisify(execFile)
 
-/** Persistent + session cache of workspace dirs that have had elevated ACL setup done. */
-const elevatedSetupDirs = new Set<string>()
+/** Persistent + session cache of elevated sandbox roots already prepared for ACL use. */
+const elevatedPreparedRoots = new Set<string>()
 
 /** Normalize a directory path for consistent cache lookups (lowercase, no trailing slash, backslashes). */
 export function normalizeDirKey(dir: string): string {
@@ -31,14 +33,19 @@ export function normalizeDirKey(dir: string): string {
 }
 
 /** Load previously configured workspace paths from disk into the in-memory set. */
-function loadElevatedWorkspaceDirs(): void {
+function loadElevatedPreparedRoots(): void {
   try {
     if (!existsSync(ELEVATED_WORKSPACES_PATH)) return
     const data = JSON.parse(readFileSync(ELEVATED_WORKSPACES_PATH, "utf-8"))
-    if (Array.isArray(data.paths)) {
-      for (const p of data.paths) {
-        if (typeof p === "string") elevatedSetupDirs.add(normalizeDirKey(p))
-      }
+    const version = typeof data.version === "number" ? data.version : SETUP_VERSION
+    if (version !== SETUP_VERSION) return
+    const rawRoots = Array.isArray(data.roots)
+      ? data.roots
+      : Array.isArray(data.paths)
+        ? data.paths
+        : []
+    for (const p of rawRoots) {
+      if (typeof p === "string") elevatedPreparedRoots.add(normalizeDirKey(p))
     }
   } catch {
     // Corrupt or missing file — start fresh, will be overwritten on next save
@@ -46,18 +53,21 @@ function loadElevatedWorkspaceDirs(): void {
 }
 
 /** Persist the current set of configured workspace paths to disk. */
-function saveElevatedWorkspaceDirs(): void {
+function saveElevatedPreparedRoots(): void {
   try {
     const sbxDir = join(CODEX_HOME, ".sandbox")
     mkdirSync(sbxDir, { recursive: true })
-    writeFileSync(ELEVATED_WORKSPACES_PATH, JSON.stringify({ paths: [...elevatedSetupDirs] }, null, 2))
+    writeFileSync(
+      ELEVATED_WORKSPACES_PATH,
+      JSON.stringify({ version: SETUP_VERSION, roots: [...elevatedPreparedRoots] }, null, 2)
+    )
   } catch (err) {
-    console.warn("[Sandbox] Failed to persist elevated workspace dirs:", err)
+    console.warn("[Sandbox] Failed to persist elevated prepared roots:", err)
   }
 }
 
-// Load persisted dirs immediately so they survive app restarts
-loadElevatedWorkspaceDirs()
+// Load persisted roots immediately so they survive app restarts
+loadElevatedPreparedRoots()
 
 /** Sensitive directories under user profile that should NOT be readable by the sandbox user. */
 const USERPROFILE_READ_ROOT_EXCLUSIONS = [
@@ -140,9 +150,11 @@ function psEscape(s: string): string {
 }
 
 let _cachedIsCurrentProcessElevated: boolean | null = null
+let _currentProcessElevationPromise: Promise<boolean> | null = null
 
-function isCurrentProcessElevated(): boolean {
+async function getCurrentProcessElevationState(): Promise<boolean> {
   if (_cachedIsCurrentProcessElevated !== null) return _cachedIsCurrentProcessElevated
+  if (_currentProcessElevationPromise) return _currentProcessElevationPromise
 
   if (process.platform !== "win32") {
     _cachedIsCurrentProcessElevated = false
@@ -155,13 +167,30 @@ function isCurrentProcessElevated(): boolean {
   // for non-admin users due to group policy, producing a false positive that
   // causes the UAC prompt to be skipped entirely.
   const safeCwd = process.env.SYSTEMROOT || process.env.windir || "C:\\Windows"
-  try {
-    const output = execSync("whoami /groups", { encoding: "utf-8", windowsHide: true, cwd: safeCwd })
-    _cachedIsCurrentProcessElevated = output.includes("S-1-16-12288")
-  } catch {
+  const lookup = execFileP("whoami", ["/groups"], {
+    encoding: "utf-8",
+    windowsHide: true,
+    cwd: safeCwd,
+    timeout: 5000
+  }).then(({ stdout }) => {
+    _cachedIsCurrentProcessElevated = String(stdout).includes("S-1-16-12288")
+    return _cachedIsCurrentProcessElevated
+  }).catch(() => {
     _cachedIsCurrentProcessElevated = false
-  }
-  return _cachedIsCurrentProcessElevated
+    return false
+  }).finally(() => {
+    if (_currentProcessElevationPromise === lookup) {
+      _currentProcessElevationPromise = null
+    }
+  })
+  _currentProcessElevationPromise = lookup
+  return lookup
+}
+
+function prewarmCurrentProcessElevation(): void {
+  void getCurrentProcessElevationState().catch((err) => {
+    console.warn("[Sandbox] Failed to prewarm process elevation state:", err)
+  })
 }
 
 /**
@@ -275,7 +304,7 @@ export async function runElevatedSetupForPaths(
   const b64 = Buffer.from(JSON.stringify(payload)).toString("base64")
 
   try {
-    if (isCurrentProcessElevated()) {
+    if (await getCurrentProcessElevationState()) {
       await new Promise<void>((resolve, reject) => {
         execFile(setupExe, [b64], {
           timeout: 120_000,
@@ -327,12 +356,7 @@ export async function runElevatedSetupForPaths(
     return { success: false, error: `沙箱配置失败: ${msg}` }
   }
 
-  // Mark these directories as set up for this session
-  if (workspacePaths) {
-    for (const p of workspacePaths) {
-      if (p) elevatedSetupDirs.add(normalizeDirKey(p))
-    }
-  }
+  markElevatedRootsPrepared(validatedWorkspacePaths)
 
   if (isElevatedSetupComplete()) {
     return { success: true }
@@ -340,17 +364,38 @@ export async function runElevatedSetupForPaths(
   return { success: false, error: "沙箱配置未完成，请重试" }
 }
 
-export function isWorkspaceElevatedSetupDone(dir: string): boolean {
-  return elevatedSetupDirs.has(normalizeDirKey(dir))
+export function isElevatedRootPrepared(dir: string): boolean {
+  return elevatedPreparedRoots.has(normalizeDirKey(dir))
 }
 
-/** Mark a workspace directory as having elevated ACL setup done, and persist to disk. */
+export function areElevatedRootsPrepared(dirs: string[]): boolean {
+  return dirs.every((dir) => isElevatedRootPrepared(dir))
+}
+
+/** Mark elevated roots as prepared, and persist to disk. */
+export function markElevatedRootsPrepared(dirs: string[]): void {
+  let changed = false
+  for (const dir of dirs) {
+    const key = normalizeDirKey(dir)
+    if (!elevatedPreparedRoots.has(key)) {
+      elevatedPreparedRoots.add(key)
+      changed = true
+    }
+  }
+  if (changed) saveElevatedPreparedRoots()
+}
+
+export function isWorkspaceElevatedSetupDone(dir: string): boolean {
+  return isElevatedRootPrepared(dir)
+}
+
+/** Backwards-compatible alias for workspace-only callers. */
 export function markWorkspaceElevatedSetupDone(dir: string): void {
-  elevatedSetupDirs.add(normalizeDirKey(dir))
-  saveElevatedWorkspaceDirs()
+  markElevatedRootsPrepared([dir])
 }
 
 export function registerSandboxHandlers(ipcMain: IpcMain): void {
+  prewarmCurrentProcessElevation()
 
   ipcMain.handle("sandbox:getMode", async (): Promise<"none" | "unelevated" | "readonly" | "elevated"> => {
     return getWindowsSandboxMode()
