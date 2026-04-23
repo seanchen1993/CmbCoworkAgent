@@ -10,15 +10,22 @@ import {
   MessageFeedbackDialog,
   type DislikeFeedbackPayload
 } from "./MessageFeedbackDialog"
+import { SkillChip } from "@/features/slash-commands/skill-chip"
+import { parseSkillMarker } from "@/features/slash-commands/skill-marker"
+
+function stripSkillRefPrefix(s: string): string {
+  // Strip the internal <skill-ref>NAME</skill-ref> prefix so copy/paste yields the user-visible text.
+  return s.replace(/^<skill-ref>[^<\n]+<\/skill-ref>\s*/, "")
+}
 
 function extractMessagePlainText(content: Message["content"]): string {
-  if (typeof content === "string") return content
+  if (typeof content === "string") return stripSkillRefPrefix(content)
   if (!Array.isArray(content)) return ""
 
   return content
     .map((block) => {
-      if (block.type === "text") return block.text ?? ""
-      if (typeof block.content === "string") return block.content
+      if (block.type === "text") return stripSkillRefPrefix(block.text ?? "")
+      if (typeof block.content === "string") return stripSkillRefPrefix(block.content)
       return ""
     })
     .filter(Boolean)
@@ -146,9 +153,13 @@ export function MessageBubble({
 
       // Use streaming markdown for assistant messages, plain text for user messages
       if (isUser) {
+        const skillParsed = parseSkillMarker(message.content)
         return (
           <div className="whitespace-pre-wrap text-[15px] leading-7 text-foreground/95">
-            {message.content}
+            {skillParsed && (
+              <SkillChip label={skillParsed.skillName} compact className="mr-2" />
+            )}
+            {skillParsed ? skillParsed.rest : message.content}
           </div>
         )
       }

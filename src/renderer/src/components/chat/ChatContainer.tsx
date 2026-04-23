@@ -51,6 +51,10 @@ import {
 import { uploadChatData, ChatReportPayload } from "@/api"
 import { marketApi, MarketItem } from "../../api/market"
 import { insertLog, updateMMJUserInfo } from "../../../js/mmjUtils"
+import { SlashCommandPopover } from "@/features/slash-commands/SlashCommandPopover"
+import { useSlashCommands } from "@/features/slash-commands/useSlashCommands"
+import { SkillChip } from "@/features/slash-commands/skill-chip"
+import { formatSkillRef, parseSkillMarker } from "@/features/slash-commands/skill-marker"
 import { UpdateDialog } from "../update/UpdateDialog"
 import { toast } from "sonner"
 
@@ -277,6 +281,14 @@ export function ChatContainer({
     setShowCustomizeView
   } = useAppStore()
 
+  const [selectedSkill, setSelectedSkill] = useState<SkillMetadata | null>(null)
+
+  // ChatContainer is shared across threads (no key={threadId} remount). Clear the local
+  // skill selection when switching threads so a chip picked in thread A doesn't leak into thread B.
+  useEffect(() => {
+    setSelectedSkill(null)
+  }, [threadId])
+
   const goodSkillsRef = useRef<MarketItem[]>([])
   const allSkillsRef = useRef<MarketItem[]>([])
   const [goodSkillsData, setGoodSkillsData] = useState<MarketItem[]>([])
@@ -290,10 +302,26 @@ export function ChatContainer({
       ])
       const disabledSet = new Set(disabledList)
       // Include both built-in (project) and custom (user) skills
-      const availableSkills = loadedSkills.filter(
-        (s) => (s.source === "project" || s.source === "user") && !disabledSet.has(s.name)
-      )
-      setSkills([...availableSkills].sort((a, b) => a.name.localeCompare(b.name, "zh-CN")))
+      const availableSkills = loadedSkills
+        .filter((s) => (s.source === "project" || s.source === "user") && !disabledSet.has(s.name))
+        .sort((a, b) => a.name.localeCompare(b.name, "zh-CN"))
+      // Skip setState when the resolved list is identical to avoid useMemo churn in the popover.
+      // Compare path + name + description so frontmatter edits to an existing SKILL.md file
+      // still propagate to the popover without requiring a full reload.
+      setSkills((prev) => {
+        if (
+          prev.length === availableSkills.length &&
+          prev.every(
+            (p, i) =>
+              p.path === availableSkills[i].path &&
+              p.name === availableSkills[i].name &&
+              p.description === availableSkills[i].description
+          )
+        ) {
+          return prev
+        }
+        return availableSkills
+      })
     } catch (error) {
       console.error("[ChatContainer] Failed to load skills:", error)
       setSkills([])
@@ -851,22 +879,59 @@ export function ChatContainer({
         }
       })
 
-    // Clean up attachment XML tags in user messages for display
+    // Clean up <attachment>/<skill> XML blocks in user messages for display.
+    // <skill-ref> stays in the content so MessageBubble can render the skill chip.
+    // Only match the *wrapper* blocks we emit in submitMessage, not arbitrary occurrences.
+    // - attachment: our wrapper is <attachment filename="…" …>…</attachment>
+    // - skill: our wrapper is a top-level <skill>\n<name>…</name>\n<path>…</path>… </skill>
+    //   (SKILL.md bodies containing `</skill>` are defused to `< /skill>` before send,
+    //    so requiring <name>/<path> right after <skill> lets us safely tell our wrapper
+    //    apart from a user casually typing "<skill>" in chat.)
+    const SKILL_WRAPPER_RE =
+      /\s*<skill>\s*<name>[\s\S]*?<\/name>\s*<path>[\s\S]*?<\/path>[\s\S]*?<\/skill>\s*/g
+    const SKILL_INSTRUCTION_RE =
+      /\s*<skill-invocation-instruction>[\s\S]*?<\/skill-invocation-instruction>\s*/g
+    const ATTACHMENT_WRAPPER_RE =
+      /<attachment\s+filename="([^"]*)"[^>]*>[\s\S]*?<\/attachment>/g
+    const SKILL_REF_PREFIX_RE = /^<skill-ref>[^<\n]+<\/skill-ref>\s*/
+
     const allMessages = [...threadMessages, ...streamingMsgs]
     return allMessages.map((msg) => {
-      if (msg.role !== "user" || typeof msg.content !== "string" || !msg.content.includes("<attachment ")) return msg
-      // Extract filenames and user text separately, then reorder: filenames first
+      if (msg.role !== "user" || typeof msg.content !== "string") return msg
+      const hasAttachment = ATTACHMENT_WRAPPER_RE.test(msg.content)
+      ATTACHMENT_WRAPPER_RE.lastIndex = 0
+      const hasSkillWrapper = SKILL_WRAPPER_RE.test(msg.content)
+      SKILL_WRAPPER_RE.lastIndex = 0
+      if (!hasAttachment && !hasSkillWrapper) return msg
+
+      let working = msg.content
+      // Strip the full SKILL.md body and its invocation-instruction banner;
+      // the leading <skill-ref> prefix is preserved.
+      if (hasSkillWrapper) {
+        working = working.replace(SKILL_INSTRUCTION_RE, "").replace(SKILL_WRAPPER_RE, "")
+      }
+
       const fileNames: string[] = []
-      const textOnly = msg.content
-        .replace(/<attachment\s+filename="([^"]*)"[^>]*>[\s\S]*?<\/attachment>/g, (_match, name) => {
-          const decoded = name.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"')
+      if (hasAttachment) {
+        working = working.replace(ATTACHMENT_WRAPPER_RE, (_match, name) => {
+          const decoded = name
+            .replace(/&amp;/g, "&")
+            .replace(/&lt;/g, "<")
+            .replace(/&gt;/g, ">")
+            .replace(/&quot;/g, '"')
           fileNames.push(`📎 ${decoded}`)
           return ""
         })
-        .trim()
-      const cleaned = fileNames.length > 0
-        ? `${fileNames.join("\n")}\n\n${textOnly}`.trim()
-        : textOnly
+      }
+
+      // Preserve a leading <skill-ref> so MessageBubble can still render the chip,
+      // then splice 📎 filenames before the user text body.
+      const refMatch = working.match(SKILL_REF_PREFIX_RE)
+      const leadingRef = refMatch ? refMatch[0].trim() : ""
+      const rest = (refMatch ? working.slice(refMatch[0].length) : working).trim()
+      const body = fileNames.length > 0 ? `${fileNames.join("\n")}\n\n${rest}`.trim() : rest
+      const cleaned = leadingRef ? `${leadingRef}\n${body}` : body
+
       return { ...msg, content: cleaned }
     })
   }, [threadMessages, streamData.messages])
@@ -1066,9 +1131,174 @@ export function ChatContainer({
     clearError()
   }
 
+  const submitMessage = useCallback(
+    async (
+      rawText: string,
+      opts?: {
+        attachments?: FileAttachment[]
+        skill?: SkillMetadata | null
+      }
+    ): Promise<void> => {
+      if (!stream) return
+
+      const providedAttachments = opts?.attachments
+      const currentAttachments =
+        providedAttachments && providedAttachments.length > 0 ? [...providedAttachments] : undefined
+
+      const skill = opts?.skill ?? null
+      const trimmedInput = rawText.trim()
+      const fallbackForAttachments = currentAttachments ? "请分析以下文件内容。" : ""
+      // skill-only with no user text: leave userText empty; the <skill> block itself is the instruction.
+      const userText = trimmedInput || fallbackForAttachments
+
+      // Read SKILL.md body upfront so we can abort before touching input/attachment state
+      // when the skill is unreachable — otherwise the user loses their draft with nothing sent.
+      let skillBlock = ""
+      if (skill) {
+        let skillContent: string | null = null
+        try {
+          const res = await window.api.skills.read(skill.path)
+          if (res.success && typeof res.content === "string") {
+            skillContent = res.content
+          } else {
+            console.warn("[submitMessage] failed to read skill:", skill.path, res.error)
+          }
+        } catch (err) {
+          console.warn("[submitMessage] skill read threw:", err)
+        }
+        if (skillContent === null) {
+          toast.error(`无法读取技能「${skill.name}」，请重试或更换技能`)
+          return
+        }
+        const instruction =
+          `<skill-invocation-instruction>\n` +
+          `用户通过斜杠命令显式指定使用下方 <skill> 块中的技能。\n` +
+          `本轮你必须严格遵循 <skill> 块中的说明执行，不要改写成泛化的回答，不要跳过步骤，也不要重复询问技能已经明确说明的内容。\n` +
+          `请始终使用中文回答。\n` +
+          `</skill-invocation-instruction>`
+        // Defuse any literal </skill> inside SKILL.md body to prevent premature closing of the wrapper.
+        const safeContent = skillContent.replace(/<\/skill>/gi, "< /skill>")
+        skillBlock =
+          `\n\n${instruction}\n\n<skill>\n<name>${escXml(skill.name)}</name>\n<path>${escXml(skill.path)}</path>\n${safeContent}\n</skill>`
+      }
+
+      setInput("")
+      setAttachments([])
+      if (skill) setSelectedSkill(null)
+      // skill-only sends produce empty userText; record the skill name for audit/debug.
+      const logText = userText || (skill ? `[skill-only: ${skill.name}]` : "")
+      insertLog("send: " + logText)
+
+      let attachmentsBlock = ""
+      if (currentAttachments && currentAttachments.length > 0) {
+        attachmentsBlock = currentAttachments
+          .map((att) => {
+            const truncAttr = att.truncated ? ' truncated="true"' : ""
+            const pathAttr = att.filePath ? ` path="${escXml(att.filePath)}"` : ""
+            const safeContent = att.content.replace(/<\/attachment>/gi, "< /attachment>")
+            return `\n\n<attachment filename="${escXml(att.filename)}"${pathAttr} type="${att.mimeType}" size="${att.size}"${truncAttr}>\n${safeContent}\n</attachment>`
+          })
+          .join("")
+      }
+
+      // Single user-message payload: <skill-ref> header + user text + attachments + <skill> body.
+      // Display layer strips <attachment>/<skill> blocks but keeps <skill-ref> for chip rendering.
+      const prefix = skill ? `${formatSkillRef(skill.name)}\n` : ""
+      const fullMessage = `${prefix}${userText}${attachmentsBlock}${skillBlock}`
+
+      // Display content mirrors the payload shape so replayed history renders consistently.
+      let displayContent = userText
+      if (currentAttachments && currentAttachments.length > 0) {
+        const fileNames = currentAttachments.map((a) => `📎 ${a.filename}`).join("\n")
+        displayContent = `${fileNames}\n\n${userText}`
+      }
+      if (skill) {
+        // Avoid a trailing blank line in skill-only bubbles (no text, no attachments).
+        displayContent = displayContent
+          ? `${formatSkillRef(skill.name)}\n${displayContent}`
+          : formatSkillRef(skill.name)
+      }
+
+      const userMessage: Message = {
+        id: crypto.randomUUID(),
+        role: "user",
+        content: displayContent,
+        created_at: new Date()
+      }
+      appendMessage(userMessage)
+
+      // Only seed title generation when the user actually typed something, and only
+      // for the very first couple of turns. Bounding by threadMessages.length <= 1
+      // (0 before first send; 1 when a prior skill-only send didn't name the thread yet)
+      // preserves the "delay naming to the first real typed turn" behavior without risking
+      // later turns overwriting a title the user might have manually reset to "Thread N".
+      if (trimmedInput && threadMessages.length <= 1) {
+        const currentThread = threads.find((t) => t.thread_id === threadId)
+        const hasDefaultTitle = currentThread?.title?.startsWith("Thread ")
+        if (hasDefaultTitle) {
+          generateTitleForFirstMessage(threadId, trimmedInput)
+        }
+      }
+
+      await stream.submit(
+        { messages: [{ type: "human", content: fullMessage }] },
+        {
+          config: {
+            configurable: { thread_id: threadId, model_id: currentModel }
+          }
+        }
+      )
+    },
+    [
+      stream,
+      threadMessages,
+      threads,
+      threadId,
+      currentModel,
+      appendMessage,
+      generateTitleForFirstMessage,
+      setInput,
+      setAttachments,
+      setSelectedSkill
+    ]
+  )
+
+  const slash = useSlashCommands({
+    input,
+    skills,
+    skillSelected: selectedSkill !== null
+  })
+
+  // Refresh the skills list each time the popover opens, so toggling enable/disable
+  // in the customize panel during this session is reflected without reloading.
+  const slashPopoverKind = slash.mode.kind
+  useEffect(() => {
+    if (slashPopoverKind === "skill") {
+      void loadSkills()
+    }
+  }, [slashPopoverKind, loadSkills])
+
+  // Depend on the stable resetSelection callback instead of the whole `slash` object —
+  // otherwise `slash`'s identity changes every render (the hook returns a fresh object literal),
+  // which would re-create this callback each keystroke and cascade into SlashCommandPopover re-renders.
+  const slashResetSelection = slash.resetSelection
+  const applySkillSelection = useCallback(
+    (s: SkillMetadata) => {
+      setSelectedSkill(s)
+      setInput("")
+      slashResetSelection()
+      requestAnimationFrame(() => {
+        inputRef.current?.focus()
+      })
+    },
+    [setInput, slashResetSelection]
+  )
+
   const handleSubmit = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault()
-    if ((!input.trim() && attachments.length === 0) || isLoading || !stream) return
+
+    if ((!input.trim() && attachments.length === 0 && !selectedSkill) || isLoading || !stream)
+      return
 
     if (!currentModel) {
       setError("请先在下方选择模型后再发送消息。")
@@ -1109,67 +1339,48 @@ export function ChatContainer({
       setPendingApproval(null)
     }
 
-    const rawMessage = input.trim()
-    const currentAttachments = attachments.length > 0 ? [...attachments] : undefined
-    // If user only uploaded files without text, add a default prompt
-    const userText = rawMessage || (currentAttachments ? "请分析以下文件内容。" : "")
-    setInput("")
-    setAttachments([])
-    insertLog('send: '+userText)
-
-    const isFirstMessage = threadMessages.length === 0
-
-    // Build the full message with attachments as XML tags (sent to model)
-    let fullMessage = userText
-    if (currentAttachments && currentAttachments.length > 0) {
-      const attachmentTexts = currentAttachments.map((att) => {
-        const truncAttr = att.truncated ? ' truncated="true"' : ""
-        const pathAttr = att.filePath ? ` path="${escXml(att.filePath)}"` : ""
-        const safeContent = att.content.replace(/<\/attachment>/gi, "< /attachment>")
-        return `\n\n<attachment filename="${escXml(att.filename)}"${pathAttr} type="${att.mimeType}" size="${att.size}"${truncAttr}>\n${safeContent}\n</attachment>`
-      })
-      fullMessage = userText + attachmentTexts.join("")
-    }
-
-    // Build display content: show attachment filenames in user bubble (not full content)
-    let displayContent: string = userText
-    if (currentAttachments && currentAttachments.length > 0) {
-      const fileNames = currentAttachments.map((a) => `📎 ${a.filename}`).join("\n")
-      displayContent = `${fileNames}\n\n${userText}`
-    }
-
-    const userMessage: Message = {
-      id: crypto.randomUUID(),
-      role: "user",
-      content: displayContent,
-      created_at: new Date()
-    }
-    appendMessage(userMessage)
-
-    if (isFirstMessage) {
-      const currentThread = threads.find((t) => t.thread_id === threadId)
-      const hasDefaultTitle = currentThread?.title?.startsWith("Thread ")
-      if (hasDefaultTitle) {
-        generateTitleForFirstMessage(threadId, userText)
-      }
-    }
-
-    await stream.submit(
-      {
-        messages: [{ type: "human", content: fullMessage }]
-      },
-      {
-        config: {
-          configurable: { thread_id: threadId, model_id: currentModel }
-        }
-      }
-    )
+    await submitMessage(input, { attachments, skill: selectedSkill })
   }
 
   const handleKeyDown = (e: React.KeyboardEvent): void => {
     // IME composing (Chinese/Japanese/Korean) should not trigger submit on Enter
     const isComposing = e.nativeEvent.isComposing || isComposingRef.current
     if (isComposing) return
+
+    // Skill popover keyboard navigation
+    if (slash.mode.kind === "skill") {
+      if (e.key === "ArrowDown") {
+        e.preventDefault()
+        slash.moveSelection(1)
+        return
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault()
+        slash.moveSelection(-1)
+        return
+      }
+      if (e.key === "Escape") {
+        e.preventDefault()
+        setInput("")
+        return
+      }
+      if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") {
+        const s = slash.mode.skills[slash.selectedIdx]
+        if (s) {
+          e.preventDefault()
+          applySkillSelection(s)
+          return
+        }
+        // Empty / no-match list: fall through so Enter still submits instead of doing nothing.
+      }
+    }
+
+    // Backspace at start of empty input removes the skill chip
+    if (e.key === "Backspace" && selectedSkill && input.length === 0) {
+      e.preventDefault()
+      setSelectedSkill(null)
+      return
+    }
 
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault()
@@ -1701,8 +1912,21 @@ export function ChatContainer({
   const handleEditUserMessage = useCallback(
     (message: Message): void => {
       const original = extractMessageText(message.content)
-      const withoutAttachmentPreview = original.replace(/^(?:📎[^\n]*\n)+(?:\n)?/u, "").trim()
-      const nextInput = withoutAttachmentPreview || original
+      // Restore skill selection from the original display content's <skill-ref> prefix;
+      // without this, the re-sent message would keep the chip visual via stripping but
+      // actually skip the real SKILL.md injection, creating a silent-failure chip.
+      const skillMatch = parseSkillMarker(original)
+      if (skillMatch) {
+        const skillFromList = skills.find((s) => s.name === skillMatch.skillName)
+        setSelectedSkill(skillFromList ?? null)
+      } else {
+        setSelectedSkill(null)
+      }
+      const bodyAfterSkillRef = skillMatch ? skillMatch.rest : original
+      const withoutAttachmentPreview = bodyAfterSkillRef
+        .replace(/^(?:📎[^\n]*\n)+(?:\n)?/u, "")
+        .trim()
+      const nextInput = withoutAttachmentPreview || bodyAfterSkillRef
       setInput(nextInput)
 
       requestAnimationFrame(() => {
@@ -1714,7 +1938,7 @@ export function ChatContainer({
       })
       toast.success("已填充到输入框，编辑后可重新发送")
     },
-    [extractMessageText, setInput]
+    [extractMessageText, setInput, skills]
   )
 
   return (
@@ -2406,7 +2630,13 @@ export function ChatContainer({
             </button>
           </div>
         )}
-        <form onSubmit={handleSubmit} className="max-w-3xl mx-auto">
+        <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">
+          <SlashCommandPopover
+            mode={slash.mode}
+            selectedIdx={slash.selectedIdx}
+            onHoverIdx={slash.setSelectedIdx}
+            onSelectSkill={applySkillSelection}
+          />
           <div className="flex flex-col gap-2">
             <div className="flex items-end gap-2">
               <div
@@ -2429,6 +2659,15 @@ export function ChatContainer({
                 {dragOver && (
                   <div className="absolute inset-0 z-10 flex items-center justify-center rounded-xl border-2 border-dashed border-primary bg-primary/5">
                     <span className="text-sm text-primary">拖放文件到这里</span>
+                  </div>
+                )}
+                {/* Selected skill chip */}
+                {selectedSkill && (
+                  <div className="flex items-center gap-1.5 px-3 pt-2.5">
+                    <SkillChip
+                      label={selectedSkill.name}
+                      onRemove={() => setSelectedSkill(null)}
+                    />
                   </div>
                 )}
                 {/* Attachment chips inside input box */}
@@ -2471,7 +2710,11 @@ export function ChatContainer({
                     isComposingRef.current = false
                   }}
                   onKeyDown={handleKeyDown}
-                  placeholder={attachments.length > 0 ? "输入消息或直接发送文件..." : "输入消息..."}
+                  placeholder={
+                    attachments.length > 0
+                      ? "输入消息或直接发送文件..."
+                      : "向 CMBDevClaw 提问，/ 输入命令"
+                  }
                   disabled={isLoading}
                   className={cn(
                     "relative z-[1] w-full resize-none bg-transparent overflow-y-auto",
@@ -2513,7 +2756,7 @@ export function ChatContainer({
                     ) : (
                       <button
                         type="submit"
-                        disabled={!input.trim() && attachments.length === 0}
+                        disabled={!input.trim() && attachments.length === 0 && !selectedSkill}
                         className="flex items-center justify-center size-7 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                       >
                         <Send className="size-3.5" />
