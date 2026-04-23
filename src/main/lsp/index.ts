@@ -140,6 +140,11 @@ export async function startLsp(projectRoot: string): Promise<void> {
 }
 
 async function doStartLsp(projectRoot: string): Promise<void> {
+  const config = getLspConfig()
+  if (!config.enabled) {
+    throw new Error("LSP 已禁用，请先在 LSP 配置中启用")
+  }
+
   const check = checkJdtlsAvailable()
   if (!check.available) {
     const errMsg = check.error ?? "JDTLS not available"
@@ -148,14 +153,24 @@ async function doStartLsp(projectRoot: string): Promise<void> {
     throw new Error(errMsg)
   }
 
-  const config = getLspConfig()
   const maxHeapMb = config.maxHeapMb || 1024
-  const runtimeContext = buildProjectRuntimeContext(projectRoot, config)
+  const runtimeContext = await buildProjectRuntimeContext(projectRoot, config)
   if (!runtimeContext.selectedRuntime) {
     const errMsg = "未探测到可用 JDK，请先在 LSP 配置中设置有效的 JDK Home"
     saveLspConfig({ lastError: errMsg })
     broadcastChanged()
     throw new Error(errMsg)
+  }
+
+  const latestConfig = getLspConfig()
+  if (!latestConfig.enabled) {
+    throw new Error("LSP 已禁用，请先在 LSP 配置中启用")
+  }
+  if (
+    latestConfig.manualJavaHome !== config.manualJavaHome
+    || latestConfig.maxHeapMb !== config.maxHeapMb
+  ) {
+    throw new Error("LSP 配置已变更，请重新启动")
   }
 
   // Track state as "starting"
@@ -255,12 +270,38 @@ export function getClient(projectRoot: string): LspClient | null {
   return entry?.state === "running" ? entry.client : null
 }
 
-export function getLspStatus(projectRoot: string | null): LspStatus {
+export async function getLspStatus(projectRoot: string | null): Promise<LspStatus> {
   const config = getLspConfig()
+  if (!config.enabled) {
+    return {
+      projectRoot,
+      state: "stopped",
+      lifecycle: "stopped",
+      statusText: "已禁用",
+      projectStatusText: "已禁用",
+      progressMessage: null,
+      vsixAvailable: false,
+      vsixSource: null,
+      vsixPath: null,
+      serviceReady: false,
+      serviceReadyTimedOut: false,
+      projectReady: false,
+      projectReadyTimedOut: false,
+      projectStatus: null,
+      projectRequirement: null,
+      runtimes: [],
+      selectedRuntime: null,
+      manualJavaHomeStatus: null,
+      missingRuntime: null,
+      degradedReason: null,
+      warningReason: null
+    }
+  }
+
   const vsixStatus = getVsixStatus()
   const runtimeContext = projectRoot
-    ? buildProjectRuntimeContext(projectRoot, config)
-    : buildGlobalRuntimeContext(config)
+    ? await buildProjectRuntimeContext(projectRoot, config)
+    : await buildGlobalRuntimeContext(config)
 
   const entry = projectRoot ? (servers.get(projectRoot) ?? null) : null
   const startupStatus: StartupStatusSnapshot = entry?.client.getStartupStatus() ?? {

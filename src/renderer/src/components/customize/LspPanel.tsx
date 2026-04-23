@@ -77,6 +77,13 @@ export function LspPanel({ threadId, embedded = false, statusOnly = false }: Lsp
       if (!mountedRef.current) return
       setConfig(cfg)
 
+      if (!cfg.enabled) {
+        setProjectRoot(null)
+        const currentStatus = await window.api.lsp.getStatus(null)
+        if (mountedRef.current) setStatus(currentStatus)
+        return
+      }
+
       if (!threadId) {
         setProjectRoot(null)
         const currentStatus = await window.api.lsp.getStatus(null)
@@ -421,7 +428,7 @@ export function LspPanel({ threadId, embedded = false, statusOnly = false }: Lsp
     : status?.selectedRuntime
       ? `${status.selectedRuntime.path}${runtimeSourceLabel ? ` (${runtimeSourceLabel})` : ""}`
       : "未探测到可用的本机 JDK"
-  const showVsixImportCard = status ? !status.vsixAvailable : false
+  const showVsixImportCard = config.enabled && status ? !status.vsixAvailable : false
   const vsixActionBusy = downloadingVsix || importingVsix
   const downloadDisplayTotalBytes = 130 * 1024 * 1024
   const downloadProgressWidth = downloadProgress

@@ -234,7 +234,7 @@ export function registerLspHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "lsp:getStatus",
     async (_event, projectRoot: string | null) => {
-      return getLspStatus(projectRoot)
+      return await getLspStatus(projectRoot)
     }
   )
 
