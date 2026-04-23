@@ -12,6 +12,7 @@ import type {
   WorkspaceLoadParams,
   WorkspaceFileParams
 } from "../types"
+import { LocalSandbox } from "../agent/local-sandbox"
 import { startWatching, stopWatching } from "../services/workspace-watcher"
 import { trackEvent } from "../services/event-reporter"
 import { getTracesDir } from "../agent/trace/collector"
@@ -1823,6 +1824,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       // Update file watcher
       if (newPath) {
         startWatching(threadId, newPath)
+        LocalSandbox.prewarmForWorkspace(newPath)
       } else {
         stopWatching(threadId)
       }
@@ -1856,6 +1858,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
         // Start watching the new workspace
         startWatching(threadId, selectedPath)
+        LocalSandbox.prewarmForWorkspace(selectedPath)
       }
     } else {
       // Fallback to global

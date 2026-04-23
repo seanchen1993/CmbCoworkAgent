@@ -148,7 +148,7 @@ import { stopAllLsp } from "./lsp"
 import { setTraceReporter } from "./agent/trace/collector"
 import { CloudTraceReporter } from "./agent/trace/cloud-reporter"
 import { setEventReporter, HttpEventReporter } from "./services/event-reporter"
-import { initializeDatabase, flush } from "./db"
+import { getAllThreads, initializeDatabase, flush } from "./db"
 import { startScheduler, stopScheduler } from "./services/scheduler"
 import { startHeartbeat, stopHeartbeat } from "./services/heartbeat"
 import { startChatX, stopChatX } from "./services/chatx"
@@ -164,6 +164,7 @@ import { trackEvent } from "./services/event-reporter"
 
 let mainWindow: BrowserWindow | null = null
 let loginWindow: BrowserWindow | null = null
+const STARTUP_SANDBOX_PREWARM_WORKSPACE_LIMIT = 5
 
 // ── Keep Awake ──
 let keepAwakeBlockerId: number | null = null
@@ -293,6 +294,36 @@ function createWindow(): void {
   })
 }
 
+function collectRecentWorkspacePathsForSandboxPrewarm(): string[] {
+  const workspaces: string[] = []
+  const seen = new Set<string>()
+
+  for (const thread of getAllThreads().slice(0, STARTUP_SANDBOX_PREWARM_WORKSPACE_LIMIT)) {
+    if (!thread.metadata) continue
+    try {
+      const metadata = JSON.parse(thread.metadata)
+      const workspacePath = typeof metadata.workspacePath === "string" ? metadata.workspacePath.trim() : ""
+      if (!workspacePath) continue
+      const key = workspacePath.toLowerCase()
+      if (seen.has(key)) continue
+      seen.add(key)
+      workspaces.push(workspacePath)
+    } catch {
+      // Ignore malformed metadata and keep scanning recent threads.
+    }
+  }
+
+  return workspaces
+}
+
+function prewarmRecentSandboxWorkspaces(): void {
+  if (process.platform !== "win32") return
+  const workspaces = collectRecentWorkspacePathsForSandboxPrewarm()
+  if (workspaces.length === 0) return
+  console.log(`[Main] Prewarming sandbox for ${workspaces.length} recent workspace(s)`)
+  LocalSandbox.prewarmForWorkspaces(workspaces)
+}
+
 // Ensure only a single instance is running (prevents duplicate schedulers on Windows)
 const gotTheLock = app.requestSingleInstanceLock()
 if (!gotTheLock) {
@@ -387,6 +418,7 @@ if (!gotTheLock) {
     registerDashboardHandlers(ipcMain)
     registerUpdaterHandlers()
     registerLspHandlers(ipcMain)
+    prewarmRecentSandboxWorkspaces()
 
     ipcMain.on(MAIN_LOG_TOGGLE_CHANNEL, (_event, enabled: unknown) => {
       mainLogForwardingEnabled = Boolean(enabled)
@@ -477,12 +509,7 @@ if (!gotTheLock) {
     })
 
     ipcMain.handle("open-login-page", async () => {
-      if(mainWindow && !mainWindow.isDestroyed() && !isDev) {
-        mainWindow.loadURL(`https://oa-auth.paas.${import.meta.env.VITE_LOGIN_PT}.com/auth/sso-login` +
-          "?client_id=5221ab160e0145d9b0736c2f8fb84229" +
-          "&redirect_uri=" + encodeURIComponent(`https://cmbdevclawweb.paas.${import.meta.env.VITE_LOGIN_PT}.cn/login.html`) +
-          "&response_type=code")
-      }
+      console.log("[Auth] open-login-page ignored in this build")
     })
 
     ipcMain.handle("close-login-page", async () => {

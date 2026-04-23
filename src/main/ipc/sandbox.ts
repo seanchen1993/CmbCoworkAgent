@@ -151,6 +151,7 @@ function psEscape(s: string): string {
 
 let _cachedIsCurrentProcessElevated: boolean | null = null
 let _currentProcessElevationPromise: Promise<boolean> | null = null
+const SANDBOX_PREWARM_WORKSPACE_LIMIT = 5
 
 async function getCurrentProcessElevationState(): Promise<boolean> {
   if (_cachedIsCurrentProcessElevated !== null) return _cachedIsCurrentProcessElevated
@@ -191,6 +192,37 @@ function prewarmCurrentProcessElevation(): void {
   void getCurrentProcessElevationState().catch((err) => {
     console.warn("[Sandbox] Failed to prewarm process elevation state:", err)
   })
+}
+
+async function scheduleKnownWorkspaceSandboxPrewarm(
+  mode: "none" | "unelevated" | "readonly" | "elevated"
+): Promise<void> {
+  if (process.platform !== "win32" || mode === "none") return
+
+  try {
+    const [{ getAllThreads }, { LocalSandbox }] = await Promise.all([
+      import("../db"),
+      import("../agent/local-sandbox")
+    ])
+    const workspaces = new Set<string>()
+
+    for (const thread of getAllThreads().slice(0, SANDBOX_PREWARM_WORKSPACE_LIMIT)) {
+      if (typeof thread.metadata !== "string" || !thread.metadata) continue
+      try {
+        const metadata = JSON.parse(thread.metadata) as { workspacePath?: unknown }
+        if (typeof metadata.workspacePath === "string" && metadata.workspacePath.trim()) {
+          workspaces.add(metadata.workspacePath)
+        }
+      } catch {
+        // Ignore malformed metadata and continue.
+      }
+    }
+
+    if (workspaces.size === 0) return
+    LocalSandbox.prewarmForWorkspaces([...workspaces], mode)
+  } catch (err) {
+    console.warn("[Sandbox] Failed to schedule known workspace prewarm:", err)
+  }
 }
 
 /**
@@ -409,6 +441,7 @@ export function registerSandboxHandlers(ipcMain: IpcMain): void {
       }
       setWindowsSandboxMode(mode)
       notifyChanged()
+      void scheduleKnownWorkspaceSandboxPrewarm(mode)
     }
   )
 
@@ -463,6 +496,7 @@ export function registerSandboxHandlers(ipcMain: IpcMain): void {
       }
       setSandboxNuxCompleted()
       notifyChanged()
+      void scheduleKnownWorkspaceSandboxPrewarm(getWindowsSandboxMode())
     }
   )
 
