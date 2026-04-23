@@ -1,7 +1,7 @@
 import { tool } from "langchain"
 import { z } from "zod"
 import { existsSync } from "fs"
-import { execFileSync } from "child_process"
+import { spawn } from "child_process"
 import {
   startLsp,
   isLspRunning,
@@ -51,18 +51,56 @@ interface LspToolContext {
   workspacePath: string
 }
 
-function filterGitIgnored(locations: LspLocation[], projectRoot: string): LspLocation[] {
+async function collectGitIgnoredPaths(paths: string[], projectRoot: string): Promise<Set<string>> {
+  return await new Promise((resolve) => {
+    const child = spawn("git", ["check-ignore", "--stdin"], {
+      cwd: projectRoot,
+      windowsHide: true,
+      stdio: ["pipe", "pipe", "ignore"]
+    })
+    let stdout = ""
+    let settled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+
+    const finish = (ignoredPaths: Set<string>): void => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      resolve(ignoredPaths)
+    }
+
+    timer = setTimeout(() => {
+      child.kill()
+      finish(new Set())
+    }, 5000)
+
+    child.stdout?.setEncoding("utf-8")
+    child.stdout?.on("data", (chunk: string) => {
+      stdout += chunk
+    })
+
+    child.on("error", () => {
+      finish(new Set())
+    })
+
+    child.on("close", (code) => {
+      if (code !== 0 && code !== 1) {
+        finish(new Set())
+        return
+      }
+      finish(new Set(stdout.trim().split(/\r?\n/).filter(Boolean)))
+    })
+
+    child.stdin?.end(`${paths.join("\n")}\n`)
+  })
+}
+
+async function filterGitIgnored(locations: LspLocation[], projectRoot: string): Promise<LspLocation[]> {
   if (locations.length === 0) return locations
   const uniquePaths = [...new Set(locations.map(l => l.file))]
 
   try {
-    const result = execFileSync("git", ["check-ignore", "--stdin"], {
-      cwd: projectRoot,
-      input: uniquePaths.join("\n"),
-      encoding: "utf-8",
-      timeout: 5000
-    })
-    const ignoredPaths = new Set(result.trim().split(/\r?\n/).filter(Boolean))
+    const ignoredPaths = await collectGitIgnoredPaths(uniquePaths, projectRoot)
     if (ignoredPaths.size === 0) return locations
     const filtered = locations.filter(l => !ignoredPaths.has(l.file))
     console.log(`[LSP] gitignore filtered: ${locations.length} → ${filtered.length} locations`)
@@ -154,7 +192,7 @@ export function createLspTool(context: LspToolContext) {
               return "Error: filePath, line, and column are required for definition"
             }
             const locations = await lspDefinition(workspacePath, input.filePath, input.line, input.column)
-            const filtered = filterGitIgnored(locations, workspacePath)
+            const filtered = await filterGitIgnored(locations, workspacePath)
             return formatLocations(filtered, "Definitions")
           }
 
@@ -163,7 +201,7 @@ export function createLspTool(context: LspToolContext) {
               return "Error: filePath, line, and column are required for references"
             }
             const locations = await lspReferences(workspacePath, input.filePath, input.line, input.column)
-            const filtered = filterGitIgnored(locations, workspacePath)
+            const filtered = await filterGitIgnored(locations, workspacePath)
             return formatLocations(filtered, "References")
           }
 
@@ -181,7 +219,7 @@ export function createLspTool(context: LspToolContext) {
               return "Error: filePath, line, and column are required for implementation"
             }
             const locations = await lspImplementation(workspacePath, input.filePath, input.line, input.column)
-            const filtered = filterGitIgnored(locations, workspacePath)
+            const filtered = await filterGitIgnored(locations, workspacePath)
             return formatLocations(filtered, "Implementations")
           }
 

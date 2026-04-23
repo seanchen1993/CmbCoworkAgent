@@ -239,7 +239,7 @@ export function RightPanel({
         if (cancelled) return
         setLspConfig(cfg)
 
-        const workspacePath = threadState?.workspacePath ?? null
+        const workspacePath = cfg.enabled ? (threadState?.workspacePath ?? null) : null
         const currentStatus = await window.api.lsp.getStatus(workspacePath)
         if (!cancelled) {
           setLspStatus(currentStatus)
@@ -256,7 +256,7 @@ export function RightPanel({
       cancelled = true
       unsubscribe()
     }
-  }, [currentThreadId, threadState?.workspacePath])
+  }, [threadState?.workspacePath])
 
   // Auto-open agents panel when skill generation starts
   useEffect(() => {
