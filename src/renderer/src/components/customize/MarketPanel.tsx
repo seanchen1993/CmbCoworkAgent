@@ -1129,6 +1129,7 @@ export function MarketPanel(): React.JSX.Element {
   const filteredData = currentData.filter((item) => {
     const query = searchQuery.toLowerCase()
     const matchesSearch =
+      item.chinese_name.toLowerCase().includes(query) ||
       item.name.toLowerCase().includes(query) ||
       item.description.toLowerCase().includes(query)
     if (!matchesSearch) return false
