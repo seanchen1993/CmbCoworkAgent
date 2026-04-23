@@ -1,6 +1,7 @@
 import { IpcMain } from "electron"
 import {
   getHooks,
+  getEnabledSkillHookMetadata,
   upsertHook,
   deleteHook,
   setHookEnabled,
@@ -9,6 +10,7 @@ import {
   trustWorkspaceHookFile
 } from "../storage"
 import type { UntrustedWorkspaceHook } from "../storage"
+import type { SkillHookMetadata } from "../types"
 import {
   isSupportedHookEvent,
   SUPPORTED_HOOK_EVENTS,
@@ -85,6 +87,10 @@ export function registerHooksHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle("hooks:list", async (): Promise<HookConfig[]> => {
     return getHooks()
+  })
+
+  ipcMain.handle("hooks:skills:list", async (): Promise<SkillHookMetadata[]> => {
+    return getEnabledSkillHookMetadata()
   })
 
   ipcMain.handle("hooks:create", async (_event, config: HookUpsert): Promise<{ id: string }> => {

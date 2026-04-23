@@ -23,6 +23,7 @@ import type {
   PluginHookMetadata,
   PluginMetadata,
   PluginManifest,
+  SkillHookMetadata,
   ChatXConfig
 } from "../main/types"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
@@ -1561,6 +1562,9 @@ const api = {
   },
   hooks: {
     list: (): Promise<HookConfig[]> => ipcRenderer.invoke("hooks:list"),
+    skills: {
+      list: (): Promise<SkillHookMetadata[]> => ipcRenderer.invoke("hooks:skills:list")
+    },
     create: (config: HookUpsert): Promise<{ id: string }> =>
       ipcRenderer.invoke("hooks:create", config),
     update: (config: HookUpsert & { id: string }): Promise<{ id: string }> =>

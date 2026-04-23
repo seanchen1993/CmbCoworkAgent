@@ -17,9 +17,11 @@ import {
 } from "./AddHookDialog"
 
 type PluginHookMetadata = Awaited<ReturnType<typeof window.api.plugins.listHooks>>[number]
+type SkillHookMetadata = Awaited<ReturnType<typeof window.api.hooks.skills.list>>[number]
 type GlobalDisplayHook = HookConfig & { source: "global" }
 type PluginDisplayHook = PluginHookMetadata & { source: "plugin" }
-type DisplayHook = GlobalDisplayHook | PluginDisplayHook
+type SkillDisplayHook = SkillHookMetadata & { source: "skill" }
+type DisplayHook = GlobalDisplayHook | PluginDisplayHook | SkillDisplayHook
 
 const EVENT_BADGE: Record<
   HookEvent,
@@ -267,6 +269,22 @@ function hookSummary(hook: DisplayHook): string {
   return hook.command ?? ""
 }
 
+const HOOK_SOURCE_BADGE_CLASS: Record<DisplayHook["source"], string> = {
+  global: "bg-sky-500/15 text-sky-600 dark:text-sky-400",
+  plugin: "bg-violet-500/15 text-violet-600 dark:text-violet-400",
+  skill: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+}
+
+function getHookSourceLabel(source: DisplayHook["source"]): string {
+  if (source === "plugin") return "插件"
+  if (source === "skill") return "技能"
+  return "全局"
+}
+
+function getHookSourceDetailLabel(source: DisplayHook["source"]): string {
+  return `${getHookSourceLabel(source)} Hook`
+}
+
 export function HooksPanel(): React.JSX.Element {
   const pluginVersion = useAppStore((s) => s.pluginVersion)
   const bumpPluginVersion = useAppStore((s) => s.bumpPluginVersion)
@@ -286,8 +304,9 @@ export function HooksPanel(): React.JSX.Element {
 
   const loadHooks = useCallback(async () => {
     try {
-      const [globalHooks, plugins] = await Promise.all([
+      const [globalHooks, skillHooks, plugins] = await Promise.all([
         window.api.hooks.list(),
+        window.api.hooks.skills.list(),
         window.api.plugins.list()
       ])
       const pluginHookGroups = await Promise.all(
@@ -313,6 +332,12 @@ export function HooksPanel(): React.JSX.Element {
           (hook): GlobalDisplayHook => ({
             ...hook,
             source: "global"
+          })
+        ),
+        ...skillHooks.map(
+          (hook): SkillDisplayHook => ({
+            ...hook,
+            source: "skill"
           })
         ),
         ...pluginHookGroups.flat()
@@ -341,7 +366,8 @@ export function HooksPanel(): React.JSX.Element {
         h.event.toLowerCase().includes(q) ||
         (h.matcher && h.matcher.toLowerCase().includes(q)) ||
         (h.source === "plugin" && h.pluginName.toLowerCase().includes(q)) ||
-        (h.source === "plugin" ? "插件" : "全局").includes(q) ||
+        (h.source === "skill" && h.skillName.toLowerCase().includes(q)) ||
+        getHookSourceLabel(h.source).includes(q) ||
         (h.type === "prompt" ? "自然语言策略" : "命令").includes(q)
       )
     })
@@ -356,8 +382,10 @@ export function HooksPanel(): React.JSX.Element {
             throw new Error(result.error || "插件 Hook 切换失败")
           }
           bumpPluginVersion()
-        } else {
+        } else if (hook.source === "global") {
           await window.api.hooks.setEnabled(hook.id, enabled)
+        } else {
+          return
         }
         await loadHooks()
       } catch (error) {
@@ -439,6 +467,7 @@ export function HooksPanel(): React.JSX.Element {
                 const badge = EVENT_BADGE[hook.event]
                 const isPrompt = hook.type === "prompt"
                 const isPluginHook = hook.source === "plugin"
+                const isSkillHook = hook.source === "skill"
                 const summary = hookSummary(hook)
                 return (
                   <button
@@ -476,16 +505,19 @@ export function HooksPanel(): React.JSX.Element {
                     <span
                       className={cn(
                         "text-[10px] font-medium px-1.5 py-0.5 rounded-full shrink-0",
-                        isPluginHook
-                          ? "bg-violet-500/15 text-violet-600 dark:text-violet-400"
-                          : "bg-sky-500/15 text-sky-600 dark:text-sky-400"
+                        HOOK_SOURCE_BADGE_CLASS[hook.source]
                       )}
                     >
-                      {isPluginHook ? "插件" : "全局"}
+                      {getHookSourceLabel(hook.source)}
                     </span>
                     {isPluginHook && (
                       <span className="text-[10px] text-muted-foreground shrink-0 truncate max-w-[88px]">
                         {hook.pluginName}
+                      </span>
+                    )}
+                    {isSkillHook && (
+                      <span className="text-[10px] text-muted-foreground shrink-0 truncate max-w-[88px]">
+                        {hook.skillName}
                       </span>
                     )}
                     <span
@@ -558,7 +590,9 @@ function HookDetail(props: {
   const { hook, onToggleEnabled, onDelete, onShowGuide, onEdit } = props
   const badge = EVENT_BADGE[hook.event]
   const isPrompt = hook.type === "prompt"
+  const isGlobalHook = hook.source === "global"
   const isPluginHook = hook.source === "plugin"
+  const isSkillHook = hook.source === "skill"
   const { models } = useAppStore()
   const modelName = hook.modelId
     ? (models.find((m) => m.id === hook.modelId)?.name ?? hook.modelId)
@@ -617,12 +651,10 @@ function HookDetail(props: {
             <span
               className={cn(
                 "text-[10px] font-medium px-1.5 py-0.5 rounded-full",
-                isPluginHook
-                  ? "bg-violet-500/15 text-violet-600 dark:text-violet-400"
-                  : "bg-sky-500/15 text-sky-600 dark:text-sky-400"
+                HOOK_SOURCE_BADGE_CLASS[hook.source]
               )}
             >
-              {isPluginHook ? "插件 Hook" : "全局 Hook"}
+              {getHookSourceDetailLabel(hook.source)}
             </span>
             {hook.matcher &&
               (() => {
@@ -653,7 +685,7 @@ function HookDetail(props: {
           <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={onShowGuide}>
             配置说明
           </Button>
-          {!isPluginHook && (
+          {isGlobalHook && (
             <>
               <Button
                 variant="ghost"
@@ -675,20 +707,23 @@ function HookDetail(props: {
               </Button>
             </>
           )}
-          <Button
-            variant={hook.enabled ? "default" : "outline"}
-            size="sm"
-            className="h-7 text-xs ml-1"
-            onClick={() => onToggleEnabled(hook, !hook.enabled)}
-          >
-            {hook.enabled ? "已启用" : "已禁用"}
-          </Button>
+          {!isSkillHook && (
+            <Button
+              variant={hook.enabled ? "default" : "outline"}
+              size="sm"
+              className="h-7 text-xs ml-1"
+              onClick={() => onToggleEnabled(hook, !hook.enabled)}
+            >
+              {hook.enabled ? "已启用" : "已禁用"}
+            </Button>
+          )}
         </div>
       </div>
 
       {/* Details */}
       <div className="space-y-4">
-        <DetailRow label="来源" value={isPluginHook ? "插件 Hook" : "全局 Hook"} />
+        <DetailRow label="来源" value={getHookSourceDetailLabel(hook.source)} />
+        {isGlobalHook && <DetailRow label="管理方式" value="这里可以直接启停、编辑和删除。" />}
         {isPluginHook && (
           <DetailRow
             label="所属插件"
@@ -703,6 +738,22 @@ function HookDetail(props: {
             value="这里可以切换启停；如需修改脚本或策略内容，请到插件详情页或插件目录中调整。"
           />
         )}
+        {isSkillHook && (
+          <DetailRow
+            label="所属技能"
+            value={hook.skillName}
+            subtext="该 Hook 跟随技能一起加载；停用技能后会一起移除。"
+          />
+        )}
+        {isSkillHook && <DetailRow label="配置文件" value={hook.hookPath} mono />}
+        {isSkillHook && <DetailRow label="技能目录" value={hook.skillPath} mono />}
+        {isSkillHook && (
+          <DetailRow
+            label="管理方式"
+            value="这里用于查看；如需停用，请到技能管理页停用技能；如需修改脚本或策略内容，请到技能目录中调整 hooks.json。"
+          />
+        )}
+        <DetailRow label="状态" value={hook.enabled ? "已启用" : "已禁用"} />
         <DetailRow
           label="事件类型"
           value={`${badge.label}（${badge.english}）`}
@@ -1011,7 +1062,9 @@ function HooksGuide(): React.JSX.Element {
         <div className="space-y-1">
           <h3 className="text-lg font-bold">Hook 配置说明</h3>
           <p className="text-sm text-muted-foreground">
-            Hook 在 Agent 执行的关键节点触发，可以拦截工具调用、校验输出、注入上下文，或推送通知。支持 Shell 脚本和自然语言策略两种形式，来源分为全局、插件、技能和工作区四类。
+            Hook 在 Agent
+            执行的关键节点触发，可以拦截工具调用、校验输出、注入上下文，或推送通知。支持 Shell
+            脚本和自然语言策略两种形式，来源分为全局、插件、技能和工作区四类。
           </p>
         </div>
       </div>
@@ -1055,9 +1108,13 @@ function HooksGuide(): React.JSX.Element {
           >
             <div className="space-y-2 text-sm text-muted-foreground">
               <p>全局 Hook 由你在当前应用里创建、编辑、删除。</p>
-              <p>插件 Hook 来自插件目录下的 hooks/hooks.json，随插件启停，这里可以统一控制，但不直接编辑脚本内容。</p>
               <p>
-                技能 Hook 来自技能目录下的 hooks.json，随技能一起加载，启停技能时同步生效。适合把某项技能的配套拦截或校验逻辑打包进技能本体一起分发。
+                插件 Hook 来自插件目录下的
+                hooks/hooks.json，随插件启停，这里可以统一控制，但不直接编辑脚本内容。
+              </p>
+              <p>
+                技能 Hook 来自技能目录下的
+                hooks.json，随技能一起加载，启停技能时同步生效。适合把某项技能的配套拦截或校验逻辑打包进技能本体一起分发。
               </p>
               <p>
                 工作区 Hook 适合跟项目一起分发；脚本或策略本体建议放在项目目录里跟代码一起维护。
@@ -1104,8 +1161,7 @@ function HooksGuide(): React.JSX.Element {
               </pre>
               <p>
                 脚本路径相对于技能目录本身，例如
-                <code className="mx-1 font-mono text-foreground/85">python hooks/check.py</code>
-                。
+                <code className="mx-1 font-mono text-foreground/85">python hooks/check.py</code>。
               </p>
               <p>
                 hooks.json 里写
@@ -1120,9 +1176,7 @@ function HooksGuide(): React.JSX.Element {
             summary="扁平数组（推荐）、Claude Code hooks settings 格式、带 hooks 包裹层三种都支持。"
           >
             <div className="space-y-2 text-sm text-muted-foreground">
-              <p>
-                推荐用扁平数组格式（顶层是数组），可以在一个文件里放多条规则，结构最直观。
-              </p>
+              <p>推荐用扁平数组格式（顶层是数组），可以在一个文件里放多条规则，结构最直观。</p>
               <p>
                 也支持 Claude Code 风格的
                 <code className="mx-1 font-mono text-foreground/85">{`{ EventName: [...] }`}</code>

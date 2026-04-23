@@ -22,7 +22,8 @@ import {
   getEnabledHooks,
   getHooks,
   getWorkspaceHooks,
-  getEnabledPluginHooks
+  getEnabledPluginHooks,
+  getEnabledSkillHooks
 } from "../storage"
 import { resolveModel, rememberRoutingDecision, rememberRoutingFeedback } from "../routing"
 import { notifyIfBackground, stripThink } from "../services/notify"
@@ -62,11 +63,7 @@ import {
   type SkillProposal,
   type WorthinessResult
 } from "../agent/skill-evolution/skill-proposal-logic"
-import {
-  isRetryableApiError,
-  buildOrderedChain,
-  type FailoverAttempt
-} from "../agent/failover"
+import { isRetryableApiError, buildOrderedChain, type FailoverAttempt } from "../agent/failover"
 import { runHooks, type HookContext, type HookResultCallback } from "../hooks/runner"
 import type { HookResult } from "../hooks/types"
 import { fireSessionStartOnce } from "../hooks/session-lifecycle"
@@ -92,6 +89,7 @@ type StopHookContext = NonNullable<HookContext["stopContext"]>
 interface ActiveHookSummary {
   global: number
   plugin: number
+  skill: number
   workspace: number
   total: number
 }
@@ -99,14 +97,16 @@ interface ActiveHookSummary {
 function getActiveHookSummary(workspacePath?: string): ActiveHookSummary {
   const global = getHooks().filter((hook) => hook.enabled).length
   const plugin = getEnabledPluginHooks().filter((hook) => hook.enabled).length
+  const skill = getEnabledSkillHooks().filter((hook) => hook.enabled).length
   const workspace = workspacePath
     ? getWorkspaceHooks(workspacePath).filter((hook) => hook.enabled).length
     : 0
   return {
     global,
     plugin,
+    skill,
     workspace,
-    total: global + plugin + workspace
+    total: global + plugin + skill + workspace
   }
 }
 
@@ -115,7 +115,8 @@ function formatActiveHookNotice(summary: ActiveHookSummary): string | null {
   const parts = [
     summary.global > 0 ? `全局 ${summary.global}` : "",
     summary.workspace > 0 ? `工作区 ${summary.workspace}` : "",
-    summary.plugin > 0 ? `插件 ${summary.plugin}` : ""
+    summary.plugin > 0 ? `插件 ${summary.plugin}` : "",
+    summary.skill > 0 ? `技能 ${summary.skill}` : ""
   ].filter(Boolean)
   return `本轮已启用 ${summary.total} 个钩子（${parts.join("，")}）`
 }
@@ -127,7 +128,11 @@ function sendHookNotice(window: BrowserWindow, channel: string, message: string)
   })
 }
 
-function sendActiveHookNotice(window: BrowserWindow, channel: string, workspacePath?: string): void {
+function sendActiveHookNotice(
+  window: BrowserWindow,
+  channel: string,
+  workspacePath?: string
+): void {
   const message = formatActiveHookNotice(getActiveHookSummary(workspacePath))
   if (!message) return
   sendHookNotice(window, channel, message)
@@ -331,7 +336,13 @@ class StopHookContextCollector {
 }
 
 function getStopHookBlockReason(result: HookResult): string {
-  return result.reason || result.stopReason || result.stdout || result.stderr || "Stop hook requested revision"
+  return (
+    result.reason ||
+    result.stopReason ||
+    result.stdout ||
+    result.stderr ||
+    "Stop hook requested revision"
+  )
 }
 
 function buildStopRevisionPrompt(result: HookResult, attempt: number): string {
@@ -372,11 +383,16 @@ async function runStopHooksWithRevision({
 }): Promise<boolean> {
   let revisionCount = 0
   while (!abortSignal.aborted) {
-    const stopResult = await runHooksEnriched(getEnabledHooks(workspacePath), "Stop", {
-      workspacePath,
-      sessionId: threadId,
-      stopContext: getStopContext()
-    }, onHookResult).catch((e) => {
+    const stopResult = await runHooksEnriched(
+      getEnabledHooks(workspacePath),
+      "Stop",
+      {
+        workspacePath,
+        sessionId: threadId,
+        stopContext: getStopContext()
+      },
+      onHookResult
+    ).catch((e) => {
       console.warn("[Hooks] Stop hook error:", e)
       return null
     })
@@ -386,12 +402,16 @@ async function runStopHooksWithRevision({
 
     const reason = getStopHookBlockReason(stopResult)
     if (revisionCount >= MAX_STOP_HOOK_REVISIONS) {
-      sendError(`Stop hook blocked completion after ${MAX_STOP_HOOK_REVISIONS} revision attempts: ${reason}`)
+      sendError(
+        `Stop hook blocked completion after ${MAX_STOP_HOOK_REVISIONS} revision attempts: ${reason}`
+      )
       return false
     }
 
     revisionCount += 1
-    sendNotice(`Stop hook requested revision (${revisionCount}/${MAX_STOP_HOOK_REVISIONS}): ${reason}`)
+    sendNotice(
+      `Stop hook requested revision (${revisionCount}/${MAX_STOP_HOOK_REVISIONS}): ${reason}`
+    )
     await runRevision(buildStopRevisionPrompt(stopResult, revisionCount))
   }
   return false
@@ -400,7 +420,6 @@ async function runStopHooksWithRevision({
 // ─────────────────────────────────────────────────────────
 // Auto skill proposal: generate a skill from conversation context
 // ─────────────────────────────────────────────────────────
-
 
 const SKILL_PROPOSAL_SYSTEM_PROMPT = `You are an expert at capturing reusable agent skills from conversation history.
 
@@ -534,7 +553,9 @@ async function judgeSkillWorthiness(
   const configs = getCustomModelConfigs()
   const config = configs[0]
   if (!config?.apiKey) {
-    console.log(`[SkillEvolution][${threadId}] Worthiness LLM skipped: missing model config or API key`)
+    console.log(
+      `[SkillEvolution][${threadId}] Worthiness LLM skipped: missing model config or API key`
+    )
     return null
   }
 
@@ -555,30 +576,39 @@ ${context.toolCallSummary}
 Is this conversation worth saving as a reusable skill?`
 
   try {
-    console.log(`[SkillEvolution][${threadId}] Worthiness LLM invoke start ${JSON.stringify({
-      toolCallCount: context.toolCallCount,
-      threshold: getSkillEvolutionThreshold(),
-      turnCount: context.turnCount,
-      errorCount: context.errorCount,
-      toolCallSummary: context.toolCallSummary
-    })}`)
+    console.log(
+      `[SkillEvolution][${threadId}] Worthiness LLM invoke start ${JSON.stringify({
+        toolCallCount: context.toolCallCount,
+        threshold: getSkillEvolutionThreshold(),
+        turnCount: context.turnCount,
+        errorCount: context.errorCount,
+        toolCallSummary: context.toolCallSummary
+      })}`
+    )
     const response = await model.invoke([
       new SystemMessage(buildWorthinessPrompt(context.toolCallCount, getSkillEvolutionThreshold())),
       new HumanMessage(userPrompt)
     ])
     const raw = typeof response.content === "string" ? response.content : ""
-    console.log(`[SkillEvolution][${threadId}] Worthiness LLM raw ${JSON.stringify({
-      preview: raw.slice(0, 400)
-    })}`)
+    console.log(
+      `[SkillEvolution][${threadId}] Worthiness LLM raw ${JSON.stringify({
+        preview: raw.slice(0, 400)
+      })}`
+    )
     const result = parseWorthinessResponse(raw)
     if (!result) {
-      console.warn(`[SkillEvolution][${threadId}] Failed to parse worthiness response:`, raw.slice(0, 200))
+      console.warn(
+        `[SkillEvolution][${threadId}] Failed to parse worthiness response:`,
+        raw.slice(0, 200)
+      )
       return null
     }
-    console.log(`[SkillEvolution][${threadId}] Worthiness LLM invoke done ${JSON.stringify({
-      worthy: result.worthy,
-      reason: result.reason
-    })}`)
+    console.log(
+      `[SkillEvolution][${threadId}] Worthiness LLM invoke done ${JSON.stringify({
+        worthy: result.worthy,
+        reason: result.reason
+      })}`
+    )
     return result
   } catch (e) {
     console.warn(`[SkillEvolution][${threadId}] Failed to judge worthiness:`, e)
@@ -663,7 +693,9 @@ Based on this conversation, generate a reusable skill. Output JSON only.`
     } catch (streamErr) {
       clearTimeout(idleTimer)
       if (timedOut) {
-        throw new Error(`技能草稿生成超时（${TOKEN_IDLE_TIMEOUT_MS / 1000}s 内无新内容），请点击重试`)
+        throw new Error(
+          `技能草稿生成超时（${TOKEN_IDLE_TIMEOUT_MS / 1000}s 内无新内容），请点击重试`
+        )
       }
       throw streamErr
     }
@@ -752,7 +784,8 @@ async function runSkillProposalFlow(
   intentMode: "mode_a_rule" | "mode_b_llm",
   recommendationReason?: string
 ): Promise<void> {
-  const latestUserMessage = context.turns[context.turns.length - 1]?.userMessage ?? context.transcript
+  const latestUserMessage =
+    context.turns[context.turns.length - 1]?.userMessage ?? context.transcript
 
   // Step 1 — Intent banner: ask user whether they want to save as a skill.
   // We include the proposal context so the renderer can cache it for manual retry.
@@ -811,13 +844,15 @@ async function autoProposeSKill(
   const autoProposeEnabled = isSkillAutoProposeEnabled()
   const mode = getSkillProposalMode(autoProposeEnabled)
 
-  console.log(`[SkillEvolution][${threadId}] Decision start ${JSON.stringify({
-    mode,
-    toolCallCount: context.toolCallCount,
-    turnCount: context.turnCount,
-    errorCount: context.errorCount,
-    toolCallSummary: context.toolCallSummary
-  })}`)
+  console.log(
+    `[SkillEvolution][${threadId}] Decision start ${JSON.stringify({
+      mode,
+      toolCallCount: context.toolCallCount,
+      turnCount: context.turnCount,
+      errorCount: context.errorCount,
+      toolCallSummary: context.toolCallSummary
+    })}`
+  )
 
   let llmWorthy = false
   let worthinessReason: string | undefined
@@ -842,20 +877,24 @@ async function autoProposeSKill(
   const shouldPropose = shouldProposeSkill(mode, llmWorthy)
 
   if (!shouldPropose) {
-    console.log(`[SkillEvolution][${threadId}] Decision skip ${JSON.stringify({
-      mode,
-      llmWorthy,
-      reason: "proposal_flow_not_triggered"
-    })}`)
+    console.log(
+      `[SkillEvolution][${threadId}] Decision skip ${JSON.stringify({
+        mode,
+        llmWorthy,
+        reason: "proposal_flow_not_triggered"
+      })}`
+    )
     return
   }
 
-  console.log(`[SkillEvolution][${threadId}] Decision enter proposal flow ${JSON.stringify({
-    mode,
-    llmWorthy,
-    toolCallCount: context.toolCallCount,
-    turnCount: context.turnCount
-  })}`)
+  console.log(
+    `[SkillEvolution][${threadId}] Decision enter proposal flow ${JSON.stringify({
+      mode,
+      llmWorthy,
+      toolCallCount: context.toolCallCount,
+      turnCount: context.turnCount
+    })}`
+  )
   try {
     trackEvent("skill.proposal.triggered", "skill", {
       threadId,
@@ -869,7 +908,6 @@ async function autoProposeSKill(
   }
   await runSkillProposalFlow(threadId, context, mode, worthinessReason)
 }
-
 
 export function registerAgentHandlers(ipcMain: IpcMain): void {
   console.log("[Agent] Registering agent handlers...")
@@ -892,11 +930,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         return
       }
 
-      console.log(`[SkillEvolution][${threadId}] Manual retry requested ${JSON.stringify({
-        intentMode,
-        toolCallCount: context.toolCallCount,
-        turnCount: context.turnCount
-      })}`)
+      console.log(
+        `[SkillEvolution][${threadId}] Manual retry requested ${JSON.stringify({
+          intentMode,
+          toolCallCount: context.toolCallCount,
+          turnCount: context.turnCount
+        })}`
+      )
 
       try {
         const proposal = await generateSkillProposal(threadId, context)
@@ -983,13 +1023,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       })
 
       const context = buildSkillProposalWindowContext(snapshotSkillProposalWindow(threadId))
-      console.log(`[SkillEvolution][${threadId}] Window append ${JSON.stringify({
-        status,
-        currentTurnToolCallCount: toolCallCounter.getCount(),
-        windowTurnCount: context.turnCount,
-        windowToolCallCount: context.toolCallCount,
-        usedSkills: context.usedSkills
-      })}`)
+      console.log(
+        `[SkillEvolution][${threadId}] Window append ${JSON.stringify({
+          status,
+          currentTurnToolCallCount: toolCallCounter.getCount(),
+          windowTurnCount: context.turnCount,
+          windowToolCallCount: context.toolCallCount,
+          usedSkills: context.usedSkills
+        })}`
+      )
       return context
     }
 
@@ -1035,12 +1077,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
       // Fire UserPromptSubmit hook — may block the message, halt the turn, rewrite the prompt,
       // or inject additional context that the LLM should see alongside the user's message.
-      const promptSubmitResult = await runHooksEnriched(getEnabledHooks(workspacePath ?? undefined), "UserPromptSubmit", {
-        toolArgs: { message },
-        userPrompt: message,
-        workspacePath: workspacePath ?? undefined,
-        sessionId: threadId
-      }, onHookResult)
+      const promptSubmitResult = await runHooksEnriched(
+        getEnabledHooks(workspacePath ?? undefined),
+        "UserPromptSubmit",
+        {
+          toolArgs: { message },
+          userPrompt: message,
+          workspacePath: workspacePath ?? undefined,
+          sessionId: threadId
+        },
+        onHookResult
+      )
       if (promptSubmitResult?.blocked || promptSubmitResult?.continue === false) {
         const reason =
           promptSubmitResult.stopReason ||
@@ -1078,7 +1125,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         try {
           const memoryStore = await getMemoryStore()
           memoryStore.syncMemoryFiles()
-        } catch { /* non-critical */ }
+        } catch {
+          /* non-critical */
+        }
       }
 
       const requestedModelId = modelId || (metadata.model as string | undefined)
@@ -1179,7 +1228,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       // Notify frontend if failover happened — update model display + context window
       const notifyFailover = (): void => {
         if (failoverAttempts.length > 0 && usedModelId !== effectiveModelId) {
-          const usedCfgId = usedModelId?.startsWith("custom:") ? usedModelId.slice("custom:".length) : usedModelId
+          const usedCfgId = usedModelId?.startsWith("custom:")
+            ? usedModelId.slice("custom:".length)
+            : usedModelId
           const usedCfg = getCustomModelConfigs().find((c) => c.id === usedCfgId)
           window.webContents.send(channel, {
             type: "custom",
@@ -1195,13 +1246,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             data: { type: "model_failover", attempts: failoverAttempts, activeModelId: usedModelId }
           })
           // P2: persist failover model + sticky in a single atomic write
-          rememberRoutingDecision(threadId, {
-            resolvedModelId: usedModelId!,
-            resolvedTier: usedCfg?.tier ?? "premium",
-            routeReason: `failover from ${failoverAttempts[0].modelId}`,
-            fallbackChain: [],
-            layer: "pinned"
-          }, usedModelId!)
+          rememberRoutingDecision(
+            threadId,
+            {
+              resolvedModelId: usedModelId!,
+              resolvedTier: usedCfg?.tier ?? "premium",
+              routeReason: `failover from ${failoverAttempts[0].modelId}`,
+              fallbackChain: [],
+              layer: "pinned"
+            },
+            usedModelId!
+          )
           // Update effectiveModelId for downstream trace/feedback
           effectiveModelId = usedModelId
         }
@@ -1246,15 +1301,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const trimContent = (s: string): string =>
         s.length > MAX_TRACE_CONTENT ? `${s.slice(0, MAX_TRACE_CONTENT)}\n…(truncated)` : s
 
-      const normalizeMessageText = (s: string): string =>
-        s.replace(/\r\n/g, "\n").trim()
+      const normalizeMessageText = (s: string): string => s.replace(/\r\n/g, "\n").trim()
 
       // Providers may surface usage as top-level `usage_metadata` or under
       // `response_metadata.token_usage` / `response_metadata.usage`.
       // Normalize all variants so trace capture and UI stay aligned.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const getUsageMetadata = (kwargs: any): unknown =>
-        kwargs?.usage_metadata ?? kwargs?.response_metadata?.token_usage ?? kwargs?.response_metadata?.usage
+        kwargs?.usage_metadata ??
+        kwargs?.response_metadata?.token_usage ??
+        kwargs?.response_metadata?.usage
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const extractText = (raw: any): string => {
@@ -1274,7 +1330,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const toRole = (className: string, kwargs: any): "system" | "user" | "assistant" | "tool" | "unknown" => {
+      const toRole = (
+        className: string,
+        kwargs: any
+      ): "system" | "user" | "assistant" | "tool" | "unknown" => {
         if (className.includes("Human")) return "user"
         if (className.includes("AI")) return "assistant"
         if (className.includes("System")) return "system"
@@ -1287,34 +1346,43 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const normalizeTokenUsage = (usage: any): {
-        inputTokens?: number
-        outputTokens?: number
-        totalTokens?: number
-        cacheReadTokens?: number
-        cacheCreationTokens?: number
-      } | undefined => {
+      const normalizeTokenUsage = (
+        usage: any
+      ):
+        | {
+            inputTokens?: number
+            outputTokens?: number
+            totalTokens?: number
+            cacheReadTokens?: number
+            cacheCreationTokens?: number
+          }
+        | undefined => {
         if (!usage || typeof usage !== "object") return undefined
         const toNum = (v: unknown): number | undefined =>
           typeof v === "number" && Number.isFinite(v) ? v : undefined
         const inputTokens = toNum(usage.input_tokens ?? usage.inputTokens)
         const outputTokens = toNum(usage.output_tokens ?? usage.outputTokens)
         const totalTokens = toNum(usage.total_tokens ?? usage.totalTokens)
-        const cacheReadTokens = toNum(usage.cache_read_input_tokens ?? usage.cacheReadInputTokens ?? usage.cacheReadTokens)
-        const cacheCreationTokens = toNum(usage.cache_creation_input_tokens ?? usage.cacheCreationInputTokens ?? usage.cacheCreationTokens)
+        const cacheReadTokens = toNum(
+          usage.cache_read_input_tokens ?? usage.cacheReadInputTokens ?? usage.cacheReadTokens
+        )
+        const cacheCreationTokens = toNum(
+          usage.cache_creation_input_tokens ??
+            usage.cacheCreationInputTokens ??
+            usage.cacheCreationTokens
+        )
         if (
           inputTokens === undefined &&
           outputTokens === undefined &&
           totalTokens === undefined &&
           cacheReadTokens === undefined &&
           cacheCreationTokens === undefined
-        ) return undefined
+        )
+          return undefined
         return { inputTokens, outputTokens, totalTokens, cacheReadTokens, cacheCreationTokens }
       }
 
-      const extractTextBlocks = (
-        raw: unknown
-      ): string => {
+      const extractTextBlocks = (raw: unknown): string => {
         if (typeof raw === "string") return raw
         if (Array.isArray(raw)) {
           return (raw as Array<{ type?: string; text?: string }>)
@@ -1350,19 +1418,26 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             const toolCallId = kwargs.tool_call_id as string
             if (!_subagentStopFired.has(toolCallId)) {
               _subagentStopFired.add(toolCallId)
-              const additionalKwargs = kwargs.additional_kwargs as Record<string, unknown> | undefined
+              const additionalKwargs = kwargs.additional_kwargs as
+                | Record<string, unknown>
+                | undefined
               const isErr =
                 kwargs.status === "error" ||
                 kwargs.is_error === true ||
                 additionalKwargs?.is_error === true
-              runHooks(getEnabledHooks(sessionWorkspacePath), "SubagentStop", {
-                workspacePath: sessionWorkspacePath,
-                sessionId: threadId,
-                subagent: {
-                  id: toolCallId,
-                  status: isErr ? "failed" : "completed"
-                }
-              }, onHookResult).catch((e) => console.warn("[Hooks] SubagentStop hook error:", e))
+              runHooks(
+                getEnabledHooks(sessionWorkspacePath),
+                "SubagentStop",
+                {
+                  workspacePath: sessionWorkspacePath,
+                  sessionId: threadId,
+                  subagent: {
+                    id: toolCallId,
+                    status: isErr ? "failed" : "completed"
+                  }
+                },
+                onHookResult
+              ).catch((e) => console.warn("[Hooks] SubagentStop hook error:", e))
             }
           }
 
@@ -1373,9 +1448,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           if (visibleText) assistantText += visibleText
 
           // Tool-call extraction — deduped by message ID.
-          const toolCalls = kwargs.tool_calls as Array<{
-            id?: string; name?: string; args?: Record<string, unknown>
-          }> | undefined
+          const toolCalls = kwargs.tool_calls as
+            | Array<{
+                id?: string
+                name?: string
+                args?: Record<string, unknown>
+              }>
+            | undefined
           const msgId = (kwargs.id as string) || ""
           if (!toolCalls || toolCalls.length === 0) return
           if (msgId && _countedAiMsgIds.has(msgId)) return
@@ -1422,7 +1501,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 name?: string
                 tool_call_id?: string
                 usage_metadata?: unknown
-                response_metadata?: { token_usage?: unknown; usage?: unknown; model_name?: string; model?: string }
+                response_metadata?: {
+                  token_usage?: unknown
+                  usage?: unknown
+                  model_name?: string
+                  model?: string
+                }
                 status?: string
                 is_error?: boolean
                 additional_kwargs?: Record<string, unknown>
@@ -1450,7 +1534,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             const className = classId[classId.length - 1] || ""
             const role = toRole(className, kwargs)
             if (role !== "user") continue
-            if (normalizeMessageText(extractText(kwargs.content)) === normalizeMessageText(message)) {
+            if (
+              normalizeMessageText(extractText(kwargs.content)) === normalizeMessageText(message)
+            ) {
               currentTurnStartIndex = i
               break
             }
@@ -1473,7 +1559,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
               // Extract the real model name from API response metadata (e.g. "MiniMax-M2.7")
               // This takes precedence over the user-configured model name (config.model)
-              const apiModelName = kwargs.response_metadata?.model_name ?? kwargs.response_metadata?.model
+              const apiModelName =
+                kwargs.response_metadata?.model_name ?? kwargs.response_metadata?.model
               if (typeof apiModelName === "string" && apiModelName) {
                 tracer.setModelName(apiModelName)
               }
@@ -1495,9 +1582,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
               const outputToolCalls = Array.isArray(tcs)
                 ? tcs.map((tc) => ({
-                  name: tc?.name ?? "unknown",
-                  args: tc?.args ?? {}
-                }))
+                    name: tc?.name ?? "unknown",
+                    args: tc?.args ?? {}
+                  }))
                 : []
 
               const llmNodeId = tracer.beginLlmNode({
@@ -1523,7 +1610,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 inputMessages: inputSlice,
                 outputMessage: {
                   role: "assistant",
-                  content: extractText(kwargs.content),
+                  content: extractText(kwargs.content)
                 },
                 toolCalls: outputToolCalls,
                 tokenUsage: usageForTrace
@@ -1543,7 +1630,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               for (let tcIndex = 0; tcIndex < tcs.length; tcIndex++) {
                 const tc = tcs[tcIndex]
                 const tcId = typeof tc?.id === "string" ? tc.id : ""
-                const toolRef = tcId || `${aiMsgId || "ai_unknown"}:${tcIndex}:${JSON.stringify(tc?.args ?? {})}`
+                const toolRef =
+                  tcId || `${aiMsgId || "ai_unknown"}:${tcIndex}:${JSON.stringify(tc?.args ?? {})}`
                 const counted = toolCallCounter.register(tc, aiMsgId, tcIndex)
                 if (!_toolNodeByRef.has(toolRef)) {
                   const parentId = aiMsgId ? _llmNodeByMessageId.get(aiMsgId) : undefined
@@ -1560,7 +1648,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
                 if (counted) {
                   const turnCount = toolCallCounter.getCount()
-                  console.log(`[Agent] Turn tool call #${turnCount} (${tc?.name ?? "unknown"}) in thread ${threadId} [values]`)
+                  console.log(
+                    `[Agent] Turn tool call #${turnCount} (${tc?.name ?? "unknown"}) in thread ${threadId} [values]`
+                  )
                 }
 
                 if (tc?.name !== "read_file") continue
@@ -1575,16 +1665,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             }
 
             if (isToolMessage) {
-              const toolMsgId = typeof kwargs.id === "string"
-                ? kwargs.id
-                : `${kwargs.tool_call_id ?? "tool"}:${i}:${extractText(kwargs.content)}`
+              const toolMsgId =
+                typeof kwargs.id === "string"
+                  ? kwargs.id
+                  : `${kwargs.tool_call_id ?? "tool"}:${i}:${extractText(kwargs.content)}`
               if (_countedToolResultMsgIds.has(toolMsgId)) continue
               const toolCallId = typeof kwargs.tool_call_id === "string" ? kwargs.tool_call_id : ""
               _countedToolResultMsgIds.add(toolMsgId)
               const parentId = toolCallId ? _toolNodeByRef.get(toolCallId) : undefined
               const toolOutput = extractText(kwargs.content)
               // Detect tool error: explicit status field, is_error flag, or error-prefix in output
-              const additionalKwargs = kwargs.additional_kwargs as Record<string, unknown> | undefined
+              const additionalKwargs = kwargs.additional_kwargs as
+                | Record<string, unknown>
+                | undefined
               const isToolError =
                 kwargs.status === "error" ||
                 kwargs.is_error === true ||
@@ -1606,7 +1699,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const finalMsgs = state.messages.filter((m) => {
             const cn = Array.isArray(m.id) ? m.id[m.id.length - 1] || "" : ""
             const kw = m.kwargs || {}
-            return cn.includes("AI") && (!kw.tool_calls || !Array.isArray(kw.tool_calls) || kw.tool_calls.length === 0)
+            return (
+              cn.includes("AI") &&
+              (!kw.tool_calls || !Array.isArray(kw.tool_calls) || kw.tool_calls.length === 0)
+            )
           })
           const last = finalMsgs[finalMsgs.length - 1]
           if (last) {
@@ -1629,7 +1725,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
       }
 
-      let lastFinalText = ""  // 最终回复（不含中间工具推理），用于 ChatX HTTP 回复
+      let lastFinalText = "" // 最终回复（不含中间工具推理），用于 ChatX HTTP 回复
 
       // P1: Mid-stream failover — if the stream fails with a retryable error,
       // try remaining models in the chain using resume semantics.
@@ -1638,7 +1734,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       )
       let activeStream: AsyncIterable<unknown> = stream
 
-      const consumeStreamWithSideEffects = async (source: AsyncIterable<unknown>): Promise<void> => {
+      const consumeStreamWithSideEffects = async (
+        source: AsyncIterable<unknown>
+      ): Promise<void> => {
         for await (const chunk of source) {
           if (abortController.signal.aborted) break
 
@@ -1669,8 +1767,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           if (abortController.signal.aborted) throw midStreamErr
 
           const failedModelId = usedModelId ?? "unknown"
-          failoverAttempts.push({ modelId: failedModelId, error: String(midStreamErr), timestamp: Date.now() })
-          console.warn(`[Agent][Failover] Mid-stream ${failedModelId} failed: ${midStreamErr}, trying next...`)
+          failoverAttempts.push({
+            modelId: failedModelId,
+            error: String(midStreamErr),
+            timestamp: Date.now()
+          })
+          console.warn(
+            `[Agent][Failover] Mid-stream ${failedModelId} failed: ${midStreamErr}, trying next...`
+          )
 
           if (!abortController.signal.aborted) {
             await new Promise((r) => setTimeout(r, 500))
@@ -1707,7 +1811,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               usedSkills: skillUsageDetector.getUsedSkillNames()
             }),
           runRevision: async (revisionPrompt) => {
-            if (!agent) throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
+            if (!agent)
+              throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
             const revisionStream = await agent.stream(
               { messages: [new HumanMessage(revisionPrompt)] },
               streamConfig
@@ -1751,23 +1856,27 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const threshold = getSkillEvolutionThreshold()
           if (shouldEvaluateSkillProposalWindow(sessionToolCallCount, threshold)) {
             const mode = getSkillProposalMode(isSkillAutoProposeEnabled())
-            console.log(`[SkillEvolution][${threadId}] Threshold reached ${JSON.stringify({
-              toolCallCount: sessionToolCallCount,
-              windowToolCallCount: proposalContext.toolCallCount,
-              threshold,
-              mode,
-              usedSkills: proposalContext.usedSkills,
-              turnCount: proposalContext.turnCount,
-              errorCount: proposalContext.errorCount,
-              toolCallSummary: proposalContext.toolCallSummary
-            })}`)
+            console.log(
+              `[SkillEvolution][${threadId}] Threshold reached ${JSON.stringify({
+                toolCallCount: sessionToolCallCount,
+                windowToolCallCount: proposalContext.toolCallCount,
+                threshold,
+                mode,
+                usedSkills: proposalContext.usedSkills,
+                turnCount: proposalContext.turnCount,
+                errorCount: proposalContext.errorCount,
+                toolCallSummary: proposalContext.toolCallSummary
+              })}`
+            )
             if (proposalContext.usedSkills.length > 0) {
               const names = ` [${proposalContext.usedSkills.join(", ")}]`
               console.log(
                 `[SkillEvolution][${threadId}] Threshold skip because used skills were detected${names}`
               )
             } else {
-              console.log(`[SkillEvolution][${threadId}] Threshold passed without used skills, evaluating proposal mode`)
+              console.log(
+                `[SkillEvolution][${threadId}] Threshold passed without used skills, evaluating proposal mode`
+              )
               await autoProposeSKill(threadId, proposalContext).catch((e) =>
                 console.warn("[Agent] autoProposeSKill failed:", e)
               )
@@ -1799,7 +1908,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             routingMode: getGlobalRoutingMode()
           }).catch(() => null)
           const memModelId = memRoutingResult?.resolvedModelId
-          const memCfgId = memModelId?.replace("custom:", "") ?? modelId?.replace("custom:", "") ?? ""
+          const memCfgId =
+            memModelId?.replace("custom:", "") ?? modelId?.replace("custom:", "") ?? ""
           const config = allConfigs.find((c) => c.id === memCfgId) || allConfigs[0]
 
           if (!config) {
@@ -1984,13 +2094,20 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
             onHookResult
           })
-          resumeStream = await resumeAgent.stream(new Command({ resume: resumeValue }), resumeStreamConfig)
+          resumeStream = await resumeAgent.stream(
+            new Command({ resume: resumeValue }),
+            resumeStreamConfig
+          )
           resumeAgentRuntime = resumeAgent
           resumeUsedModelId = candidateId
           break
         } catch (err) {
           if (!isRetryableApiError(err)) throw err
-          resumeFailoverAttempts.push({ modelId: candidateId, error: String(err), timestamp: Date.now() })
+          resumeFailoverAttempts.push({
+            modelId: candidateId,
+            error: String(err),
+            timestamp: Date.now()
+          })
           console.warn(`[Agent][Failover][Resume] ${candidateId} failed: ${err}, trying next...`)
           if (!abortController.signal.aborted) {
             await new Promise((r) => setTimeout(r, 500))
@@ -2011,7 +2128,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       // Notify frontend + persist routing state if failover happened
       const notifyResumeFailover = (): void => {
         if (resumeFailoverAttempts.length > 0 && resumeUsedModelId !== effectiveResumeModelId) {
-          const usedCfgId = resumeUsedModelId?.startsWith("custom:") ? resumeUsedModelId.slice("custom:".length) : resumeUsedModelId
+          const usedCfgId = resumeUsedModelId?.startsWith("custom:")
+            ? resumeUsedModelId.slice("custom:".length)
+            : resumeUsedModelId
           const usedCfg = getCustomModelConfigs().find((c) => c.id === usedCfgId)
           window.webContents.send(channel, {
             type: "custom",
@@ -2024,23 +2143,33 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           })
           window.webContents.send(channel, {
             type: "custom",
-            data: { type: "model_failover", attempts: resumeFailoverAttempts, activeModelId: resumeUsedModelId }
+            data: {
+              type: "model_failover",
+              attempts: resumeFailoverAttempts,
+              activeModelId: resumeUsedModelId
+            }
           })
           // P2: persist failover model + sticky in a single atomic write
-          rememberRoutingDecision(threadId, {
-            resolvedModelId: resumeUsedModelId!,
-            resolvedTier: usedCfg?.tier ?? "premium",
-            routeReason: `failover from ${resumeFailoverAttempts[0].modelId}`,
-            fallbackChain: [],
-            layer: "pinned"
-          }, resumeUsedModelId!)
+          rememberRoutingDecision(
+            threadId,
+            {
+              resolvedModelId: resumeUsedModelId!,
+              resolvedTier: usedCfg?.tier ?? "premium",
+              routeReason: `failover from ${resumeFailoverAttempts[0].modelId}`,
+              fallbackChain: [],
+              layer: "pinned"
+            },
+            resumeUsedModelId!
+          )
         }
       }
       notifyResumeFailover()
 
       // P1: Mid-stream failover for resume
       const resumeRemainingCandidates = resumeOrderedChain.slice(
-        resumeUsedModelId ? resumeOrderedChain.indexOf(resumeUsedModelId) + 1 : resumeOrderedChain.length
+        resumeUsedModelId
+          ? resumeOrderedChain.indexOf(resumeUsedModelId) + 1
+          : resumeOrderedChain.length
       )
       let activeResumeStream: AsyncIterable<unknown> = resumeStream
 
@@ -2067,19 +2196,31 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           if (!isRetryableApiError(midErr) || resumeRemainingCandidates.length === 0) throw midErr
           if (abortController.signal.aborted) throw midErr
 
-          resumeFailoverAttempts.push({ modelId: resumeUsedModelId ?? "unknown", error: String(midErr), timestamp: Date.now() })
-          console.warn(`[Agent][Failover][Resume] Mid-stream ${resumeUsedModelId} failed: ${midErr}, trying next...`)
+          resumeFailoverAttempts.push({
+            modelId: resumeUsedModelId ?? "unknown",
+            error: String(midErr),
+            timestamp: Date.now()
+          })
+          console.warn(
+            `[Agent][Failover][Resume] Mid-stream ${resumeUsedModelId} failed: ${midErr}, trying next...`
+          )
           if (!abortController.signal.aborted) await new Promise((r) => setTimeout(r, 500))
 
           const nextCandidate = resumeRemainingCandidates.shift()!
           const nextAgent = await createAgentRuntime({
-            threadId, workspacePath, modelId: nextCandidate,
-            abortSignal: abortController.signal, noSkillEvolutionTool: true,
+            threadId,
+            workspacePath,
+            modelId: nextCandidate,
+            abortSignal: abortController.signal,
+            noSkillEvolutionTool: true,
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
             onHookResult
           })
-          activeResumeStream = await nextAgent.stream(new Command({ resume: resumeValue }), resumeStreamConfig)
+          activeResumeStream = await nextAgent.stream(
+            new Command({ resume: resumeValue }),
+            resumeStreamConfig
+          )
           resumeAgentRuntime = nextAgent
           resumeUsedModelId = nextCandidate
           notifyResumeFailover()
@@ -2093,7 +2234,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           abortSignal: abortController.signal,
           getStopContext: () => stopContextCollector.snapshot(),
           runRevision: async (revisionPrompt) => {
-            if (!resumeAgentRuntime) throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
+            if (!resumeAgentRuntime)
+              throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
             const revisionStream = await resumeAgentRuntime.stream(
               { messages: [new HumanMessage(revisionPrompt)] },
               resumeStreamConfig
@@ -2194,7 +2336,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         requestedModelId: modelId ?? undefined,
         routingMode: getGlobalRoutingMode()
       }).catch(() => null)
-      const effectiveInterruptModelId = interruptRoutingResult?.resolvedModelId ?? modelId ?? undefined
+      const effectiveInterruptModelId =
+        interruptRoutingResult?.resolvedModelId ?? modelId ?? undefined
 
       const interruptStreamConfig = {
         configurable: { thread_id: threadId },
@@ -2236,8 +2379,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             break
           } catch (err) {
             if (!isRetryableApiError(err)) throw err
-            intFailoverAttempts.push({ modelId: candidateId, error: String(err), timestamp: Date.now() })
-            console.warn(`[Agent][Failover][Interrupt] ${candidateId} failed: ${err}, trying next...`)
+            intFailoverAttempts.push({
+              modelId: candidateId,
+              error: String(err),
+              timestamp: Date.now()
+            })
+            console.warn(
+              `[Agent][Failover][Interrupt] ${candidateId} failed: ${err}, trying next...`
+            )
             if (!abortController.signal.aborted) {
               await new Promise((r) => setTimeout(r, 500))
             }
@@ -2257,7 +2406,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         // Notify frontend + persist routing state if failover happened
         const notifyIntFailover = (): void => {
           if (intFailoverAttempts.length > 0 && intUsedModelId !== effectiveInterruptModelId) {
-            const usedCfgId = intUsedModelId?.startsWith("custom:") ? intUsedModelId.slice("custom:".length) : intUsedModelId
+            const usedCfgId = intUsedModelId?.startsWith("custom:")
+              ? intUsedModelId.slice("custom:".length)
+              : intUsedModelId
             const usedCfg = getCustomModelConfigs().find((c) => c.id === usedCfgId)
             window.webContents.send(channel, {
               type: "custom",
@@ -2270,16 +2421,24 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             })
             window.webContents.send(channel, {
               type: "custom",
-              data: { type: "model_failover", attempts: intFailoverAttempts, activeModelId: intUsedModelId }
+              data: {
+                type: "model_failover",
+                attempts: intFailoverAttempts,
+                activeModelId: intUsedModelId
+              }
             })
             // P2: persist failover model + sticky in a single atomic write
-            rememberRoutingDecision(threadId, {
-              resolvedModelId: intUsedModelId!,
-              resolvedTier: usedCfg?.tier ?? "premium",
-              routeReason: `failover from ${intFailoverAttempts[0].modelId}`,
-              fallbackChain: [],
-              layer: "pinned"
-            }, intUsedModelId!)
+            rememberRoutingDecision(
+              threadId,
+              {
+                resolvedModelId: intUsedModelId!,
+                resolvedTier: usedCfg?.tier ?? "premium",
+                routeReason: `failover from ${intFailoverAttempts[0].modelId}`,
+                fallbackChain: [],
+                layer: "pinned"
+              },
+              intUsedModelId!
+            )
           }
         }
         notifyIntFailover()
@@ -2313,14 +2472,23 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             if (!isRetryableApiError(midErr) || intRemainingCandidates.length === 0) throw midErr
             if (abortController.signal.aborted) throw midErr
 
-            intFailoverAttempts.push({ modelId: intUsedModelId ?? "unknown", error: String(midErr), timestamp: Date.now() })
-            console.warn(`[Agent][Failover][Interrupt] Mid-stream ${intUsedModelId} failed: ${midErr}, trying next...`)
+            intFailoverAttempts.push({
+              modelId: intUsedModelId ?? "unknown",
+              error: String(midErr),
+              timestamp: Date.now()
+            })
+            console.warn(
+              `[Agent][Failover][Interrupt] Mid-stream ${intUsedModelId} failed: ${midErr}, trying next...`
+            )
             if (!abortController.signal.aborted) await new Promise((r) => setTimeout(r, 500))
 
             const nextCandidate = intRemainingCandidates.shift()!
             const nextAgent = await createAgentRuntime({
-              threadId, workspacePath, modelId: nextCandidate,
-              abortSignal: abortController.signal, noSkillEvolutionTool: true,
+              threadId,
+              workspacePath,
+              modelId: nextCandidate,
+              abortSignal: abortController.signal,
+              noSkillEvolutionTool: true,
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult
@@ -2339,7 +2507,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             abortSignal: abortController.signal,
             getStopContext: () => stopContextCollector.snapshot(),
             runRevision: async (revisionPrompt) => {
-              if (!intAgentRuntime) throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
+              if (!intAgentRuntime)
+                throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
               const revisionStream = await intAgentRuntime.stream(
                 { messages: [new HumanMessage(revisionPrompt)] },
                 interruptStreamConfig
@@ -2383,7 +2552,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
   // Handle cancellation
   ipcMain.handle("agent:cancel", async (_event, { threadId }: AgentCancelParams) => {
     const controller = activeRuns.get(threadId)
-    console.log(`[Agent] cancel: threadId=${threadId}, hasController=${!!controller}, activeRuns=[${Array.from(activeRuns.keys()).join(", ")}]`)
+    console.log(
+      `[Agent] cancel: threadId=${threadId}, hasController=${!!controller}, activeRuns=[${Array.from(activeRuns.keys()).join(", ")}]`
+    )
     // Cancel any background tasks belonging to this thread (e.g. builds, tests)
     LocalSandbox.cancelBackgroundTasks(threadId)
     if (controller) {

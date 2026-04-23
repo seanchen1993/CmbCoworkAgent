@@ -1,5 +1,5 @@
 import { homedir } from "os"
-import { join } from "path"
+import { basename, join } from "path"
 import { createHash } from "crypto"
 import { v4 as uuid } from "uuid"
 import {
@@ -20,7 +20,12 @@ import {
 import { readdir, readFile, rm, mkdir, stat as fsStat } from "fs/promises"
 import { app } from "electron"
 import { resolveMcpConnectorKind } from "./mcp/connector-kind"
-import type { PluginHookMetadata, PluginMetadata, PluginMcpServerConfig } from "./types"
+import type {
+  PluginHookMetadata,
+  PluginMetadata,
+  PluginMcpServerConfig,
+  SkillHookMetadata
+} from "./types"
 import { copyDirRecursive } from "./utils/fs"
 const OPENWORK_DIR = join(homedir(), ".cmbcoworkagent")
 const ENV_FILE = join(OPENWORK_DIR, ".env")
@@ -505,6 +510,7 @@ export function invalidateEnabledSkillsCache(): void {
   _pluginMcpCache = null
   _pluginHooksCache = null
   _skillHooksCache = null
+  _skillHookMetadataCache = null
 }
 
 /**
@@ -1576,6 +1582,7 @@ let _pluginSkillsCache: string[] | null = null
 let _pluginMcpCache: Record<string, PluginMcpServerConfig> | null = null
 let _pluginHooksCache: PluginHookMetadata[] | null = null
 let _skillHooksCache: HookConfig[] | null = null
+let _skillHookMetadataCache: SkillHookMetadata[] | null = null
 
 export function getPluginsDir(): string {
   if (!existsSync(PLUGINS_DIR)) {
@@ -2239,6 +2246,76 @@ function buildSkillHookId(skillName: string, rawId: unknown, index: number): str
   return `skill:${skillName}/${typeof rawId === "string" ? rawId : String(index)}`
 }
 
+interface SkillHookSource {
+  skillDir: string
+  skillName: string
+}
+
+function readSkillDisplayName(skillDir: string, fallbackName: string): string | null {
+  const skillMdPath = join(skillDir, "SKILL.md")
+  if (!existsSync(skillMdPath)) return null
+  try {
+    const content = readFileSync(skillMdPath, "utf-8")
+    return parseSkillNameFromFrontmatter(content) || fallbackName
+  } catch {
+    return fallbackName
+  }
+}
+
+function collectSkillHookSourcesFromDir(
+  sourceDir: string,
+  disabledSkills: Set<string>,
+  respectDisabledList: boolean,
+  seenDirs: Set<string>
+): SkillHookSource[] {
+  const result: SkillHookSource[] = []
+  if (!existsSync(sourceDir)) return result
+
+  const pushSkill = (skillDir: string, skillName: string): void => {
+    const normalizedName = skillName.trim().toLowerCase()
+    if (respectDisabledList && disabledSkills.has(normalizedName)) return
+    if (seenDirs.has(skillDir)) return
+    seenDirs.add(skillDir)
+    result.push({ skillDir, skillName })
+  }
+
+  const rootSkillName = readSkillDisplayName(sourceDir, basename(sourceDir))
+  if (rootSkillName) {
+    pushSkill(sourceDir, rootSkillName)
+    return result
+  }
+
+  try {
+    for (const entry of readdirSync(sourceDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      const skillDir = join(sourceDir, entry.name)
+      const skillName = readSkillDisplayName(skillDir, entry.name)
+      if (!skillName) continue
+      pushSkill(skillDir, skillName)
+    }
+  } catch {
+    console.warn(`[Hooks] Failed to scan skill hooks in ${sourceDir}`)
+  }
+
+  return result
+}
+
+function getEnabledSkillHookSources(): SkillHookSource[] {
+  const disabledSkills = new Set(getDisabledSkills().map((name) => name.trim().toLowerCase()))
+  const seenDirs = new Set<string>()
+  const sources: SkillHookSource[] = []
+
+  for (const sourceDir of getSkillsSources()) {
+    sources.push(...collectSkillHookSourcesFromDir(sourceDir, disabledSkills, true, seenDirs))
+  }
+
+  for (const sourceDir of getEnabledPluginSkillsSources()) {
+    sources.push(...collectSkillHookSourcesFromDir(sourceDir, disabledSkills, false, seenDirs))
+  }
+
+  return sources
+}
+
 function parseSkillHooks(skillDir: string, skillName: string): HookConfig[] {
   const hooksFilePath = join(skillDir, SKILL_HOOKS_FILE)
   if (!existsSync(hooksFilePath)) return []
@@ -2267,21 +2344,23 @@ function parseSkillHooks(skillDir: string, skillName: string): HookConfig[] {
       const hookType = h.type ?? "command"
       if (hookType === "prompt" && typeof h.prompt !== "string") return []
       if (hookType === "command" && typeof h.command !== "string") return []
-      return [{
-        id: buildSkillHookId(skillName, h.id, index),
-        event: h.event as HookConfig["event"],
-        matcher: typeof h.matcher === "string" ? h.matcher : undefined,
-        type: (hookType === "prompt" ? "prompt" : "command") as HookConfig["type"],
-        command: typeof h.command === "string" ? h.command : undefined,
-        prompt: typeof h.prompt === "string" ? h.prompt : undefined,
-        modelId: typeof h.modelId === "string" ? h.modelId : undefined,
-        fallback: h.fallback === "block" ? "block" : "allow",
-        onBlock: parseHookOnBlock(h.onBlock),
-        timeout: typeof h.timeout === "number" ? h.timeout : undefined,
-        enabled: h.enabled !== false,
-        createdAt: now,
-        updatedAt: now
-      }]
+      return [
+        {
+          id: buildSkillHookId(skillName, h.id, index),
+          event: h.event as HookConfig["event"],
+          matcher: typeof h.matcher === "string" ? h.matcher : undefined,
+          type: (hookType === "prompt" ? "prompt" : "command") as HookConfig["type"],
+          command: typeof h.command === "string" ? h.command : undefined,
+          prompt: typeof h.prompt === "string" ? h.prompt : undefined,
+          modelId: typeof h.modelId === "string" ? h.modelId : undefined,
+          fallback: h.fallback === "block" ? "block" : "allow",
+          onBlock: parseHookOnBlock(h.onBlock),
+          timeout: typeof h.timeout === "number" ? h.timeout : undefined,
+          enabled: h.enabled !== false,
+          createdAt: now,
+          updatedAt: now
+        }
+      ]
     })
   } catch {
     console.warn(`[Hooks] Failed to parse skill hooks for "${skillName}"`)
@@ -2289,40 +2368,28 @@ function parseSkillHooks(skillDir: string, skillName: string): HookConfig[] {
   }
 }
 
+function buildEnabledSkillHookMetadata(): SkillHookMetadata[] {
+  return getEnabledSkillHookSources().flatMap(({ skillDir, skillName }): SkillHookMetadata[] => {
+    const hookPath = join(skillDir, SKILL_HOOKS_FILE)
+    return parseSkillHooks(skillDir, skillName).map((hook) => ({
+      ...hook,
+      skillName,
+      skillPath: skillDir,
+      hookPath
+    }))
+  })
+}
+
+export function getEnabledSkillHookMetadata(): SkillHookMetadata[] {
+  if (_skillHookMetadataCache) return _skillHookMetadataCache
+  _skillHookMetadataCache = buildEnabledSkillHookMetadata()
+  _skillHooksCache = _skillHookMetadataCache
+  return _skillHookMetadataCache
+}
+
 export function getEnabledSkillHooks(): HookConfig[] {
   if (_skillHooksCache) return _skillHooksCache
-  const hooks: HookConfig[] = []
-  for (const sourceDir of getSkillsSources()) {
-    if (!existsSync(sourceDir)) continue
-    try {
-      for (const entry of readdirSync(sourceDir, { withFileTypes: true })) {
-        if (!entry.isDirectory()) continue
-        const skillDir = join(sourceDir, entry.name)
-        // Resolve display name from SKILL.md frontmatter, fall back to directory name
-        let skillName = entry.name
-        const skillMdPath = join(skillDir, "SKILL.md")
-        if (existsSync(skillMdPath)) {
-          try {
-            const content = readFileSync(skillMdPath, "utf-8")
-            const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/)
-            if (match) {
-              for (const line of match[1].split("\n")) {
-                const colonIdx = line.indexOf(":")
-                if (colonIdx > 0 && line.slice(0, colonIdx).trim() === "name") {
-                  const name = line.slice(colonIdx + 1).trim()
-                  if (name) { skillName = name; break }
-                }
-              }
-            }
-          } catch { /* use entry.name */ }
-        }
-        hooks.push(...parseSkillHooks(skillDir, skillName))
-      }
-    } catch {
-      console.warn(`[Hooks] Failed to scan skill hooks in ${sourceDir}`)
-    }
-  }
-  _skillHooksCache = hooks
+  _skillHooksCache = getEnabledSkillHookMetadata()
   return _skillHooksCache
 }
 

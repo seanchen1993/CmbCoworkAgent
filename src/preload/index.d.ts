@@ -22,7 +22,8 @@ import type {
   ChatXConfig,
   PluginHookMetadata,
   PluginMetadata,
-  PluginManifest
+  PluginManifest,
+  SkillHookMetadata
 } from "../main/types"
 import { UserInfoConfig } from "../main/storage"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
@@ -829,6 +830,9 @@ interface CustomAPI {
   }
   hooks: {
     list: () => Promise<HookConfig[]>
+    skills: {
+      list: () => Promise<SkillHookMetadata[]>
+    }
     create: (config: HookUpsert) => Promise<{ id: string }>
     update: (config: HookUpsert & { id: string }) => Promise<{ id: string }>
     delete: (id: string) => Promise<void>
