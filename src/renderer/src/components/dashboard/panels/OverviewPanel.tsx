@@ -1,7 +1,7 @@
 import { useState } from "react"
 import { Activity, Users, Clock, ArrowDownToLine, ArrowUpFromLine, Code2, Trash2, Gauge, Search, X, Info } from "lucide-react"
 import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, Legend
+  ComposedChart, Line, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, Legend
 } from "recharts"
 import { Input } from "@/components/ui/input"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
@@ -495,18 +495,31 @@ export function OverviewPanel({
       <div className="rounded-xl border border-border bg-card p-4">
         <h3 className="text-xs font-medium text-muted-foreground mb-3">调用量趋势</h3>
         <ResponsiveContainer width="100%" height={220}>
-          <LineChart data={trendData}>
-            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
+          <ComposedChart data={trendData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" vertical={false} />
             <XAxis
               dataKey="time"
               tick={{ fontSize: 10, fill: "var(--color-muted-foreground)" }}
               axisLine={{ stroke: "var(--color-border)" }}
             />
             <YAxis
+              yAxisId="calls"
               tick={{ fontSize: 10, fill: "var(--color-muted-foreground)" }}
               axisLine={{ stroke: "var(--color-border)" }}
+              allowDecimals={false}
+            />
+            <YAxis
+              yAxisId="users"
+              orientation="right"
+              tick={{ fontSize: 10, fill: "var(--color-muted-foreground)" }}
+              axisLine={{ stroke: "var(--color-border)" }}
+              allowDecimals={false}
             />
             <RechartsTooltip
+              formatter={(value: number | string, name: string) => [
+                Number(value).toLocaleString("zh-CN"),
+                name
+              ]}
               contentStyle={{
                 backgroundColor: "var(--color-card)",
                 border: "1px solid var(--color-border)",
@@ -515,7 +528,17 @@ export function OverviewPanel({
               }}
             />
             <Legend wrapperStyle={{ fontSize: 11 }} />
+            <Bar
+              yAxisId="users"
+              dataKey="users"
+              name="活跃用户"
+              fill="#8b5cf6"
+              fillOpacity={0.75}
+              barSize={18}
+              radius={[4, 4, 0, 0]}
+            />
             <Line
+              yAxisId="calls"
               type="monotone"
               dataKey="count"
               name="调用次数"
@@ -523,15 +546,7 @@ export function OverviewPanel({
               strokeWidth={2}
               dot={{ r: 3 }}
             />
-            <Line
-              type="monotone"
-              dataKey="users"
-              name="活跃用户"
-              stroke="#8b5cf6"
-              strokeWidth={2}
-              dot={{ r: 3 }}
-            />
-          </LineChart>
+          </ComposedChart>
         </ResponsiveContainer>
       </div>
     </div>
