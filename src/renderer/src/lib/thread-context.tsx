@@ -13,7 +13,7 @@ import {
 /* eslint-disable react-refresh/only-export-components */
 import { useStream } from "@langchain/langgraph-sdk/react"
 import { ElectronIPCTransport } from "./electron-transport"
-import type { Message, Todo, FileInfo, Subagent, HITLRequest } from "@/types"
+import type { Message, Todo, FileInfo, Subagent, HITLRequest, ToolCallState } from "@/types"
 import { useAppStore } from "@/lib/store"
 import type { DeepAgent } from "../../../main/agent/types"
 import { toast } from "sonner"
@@ -73,6 +73,8 @@ export interface ThreadState {
   workspaceFiles: FileInfo[]
   workspacePath: string | null
   subagents: Subagent[]
+  toolCallStates: Record<string, ToolCallState>
+  pendingApprovals: HITLRequest[]
   pendingApproval: HITLRequest | null
   error: string | null
   currentModel: string
@@ -105,7 +107,10 @@ export interface ThreadActions {
   setWorkspaceFiles: (files: FileInfo[] | ((prev: FileInfo[]) => FileInfo[])) => void
   setWorkspacePath: (path: string | null) => void
   setSubagents: (subagents: Subagent[]) => void
+  setToolCallState: (toolCallId: string, updates: Partial<ToolCallState>) => void
   setPendingApproval: (request: HITLRequest | null) => void
+  enqueuePendingApproval: (request: HITLRequest) => void
+  removePendingApproval: (requestId?: string) => void
   setError: (error: string | null) => void
   clearError: () => void
   setCurrentModel: (modelId: string) => void
@@ -143,6 +148,8 @@ const createDefaultThreadState = (): ThreadState => ({
   workspaceFiles: [],
   workspacePath: null,
   subagents: [],
+  toolCallStates: {},
+  pendingApprovals: [],
   pendingApproval: null,
   error: null,
   currentModel: "",
@@ -163,6 +170,123 @@ const defaultStreamData: StreamData = {
   stream: null
 }
 const EMPTY_HOOK_LOGS: HookLogEntry[] = []
+
+function getPendingApprovalId(request: HITLRequest): string {
+  const approval = request as unknown as Record<string, unknown>
+  const orchestratorRequestId = approval._orchestratorRequestId
+  if (typeof orchestratorRequestId === "string" && orchestratorRequestId.trim()) {
+    return orchestratorRequestId
+  }
+  return request.id
+}
+
+function buildPendingApprovalState(queue: HITLRequest[]): Pick<ThreadState, "pendingApprovals" | "pendingApproval"> {
+  return {
+    pendingApprovals: queue,
+    pendingApproval: queue[0] ?? null
+  }
+}
+
+function enqueuePendingApproval(queue: HITLRequest[], request: HITLRequest): HITLRequest[] {
+  const requestId = getPendingApprovalId(request)
+  const nextQueue = queue.filter((item) => getPendingApprovalId(item) !== requestId)
+  nextQueue.push(request)
+  return nextQueue
+}
+
+function removePendingApproval(queue: HITLRequest[], requestId?: string): HITLRequest[] {
+  if (queue.length === 0) return queue
+  if (!requestId) return queue.slice(1)
+  return queue.filter((item) => getPendingApprovalId(item) !== requestId)
+}
+
+function normalizeThreadState(state: ThreadState): ThreadState {
+  const pendingQueue = Array.isArray(state.pendingApprovals)
+    ? state.pendingApprovals
+    : (state.pendingApproval ? [state.pendingApproval] : [])
+  return {
+    ...state,
+    toolCallStates: state.toolCallStates || {},
+    ...buildPendingApprovalState(pendingQueue)
+  }
+}
+
+function mergeToolCallArgs(
+  existingArgs?: Record<string, unknown>,
+  incomingArgs?: Record<string, unknown>
+): Record<string, unknown> | undefined {
+  if (!existingArgs && !incomingArgs) return undefined
+  return {
+    ...(existingArgs || {}),
+    ...(incomingArgs || {})
+  }
+}
+
+function upsertToolCallState(
+  states: Record<string, ToolCallState>,
+  toolCallId: string | undefined,
+  updates: Partial<ToolCallState>
+): Record<string, ToolCallState> {
+  if (!toolCallId?.trim()) return states
+  const existing = states[toolCallId]
+  return {
+    ...states,
+    [toolCallId]: {
+      id: toolCallId,
+      status: updates.status || existing?.status || "queued",
+      name: updates.name ?? existing?.name,
+      args: mergeToolCallArgs(existing?.args, updates.args),
+      command: updates.command ?? existing?.command,
+      filePath: updates.filePath ?? existing?.filePath,
+      reason: updates.reason ?? existing?.reason,
+      operation: updates.operation ?? existing?.operation,
+      code: updates.code ?? existing?.code,
+      timeoutMs: updates.timeoutMs ?? existing?.timeoutMs,
+      updatedAt: new Date()
+    }
+  }
+}
+
+function upsertToolCallStateFromRequest(
+  states: Record<string, ToolCallState>,
+  request: HITLRequest & Record<string, unknown>,
+  status: ToolCallState["status"] = "awaiting_approval"
+): Record<string, ToolCallState> {
+  const toolCall = request.tool_call
+  if (!toolCall?.id) return states
+
+  const mergedArgs: Record<string, unknown> = {
+    ...(toolCall.args || {})
+  }
+  if (typeof request.command === "string" && !mergedArgs.command) {
+    mergedArgs.command = request.command
+  }
+  if (typeof request.filePath === "string") {
+    if (!mergedArgs.path) mergedArgs.path = request.filePath
+    if (!mergedArgs.file_path) mergedArgs.file_path = request.filePath
+  }
+  if (typeof request.code === "string" && mergedArgs.code === undefined) {
+    mergedArgs.code = request.code
+  }
+  if (request.params !== undefined && mergedArgs.params === undefined) {
+    mergedArgs.params = request.params
+  }
+  if (typeof request.timeoutMs === "number" && mergedArgs.timeoutMs === undefined) {
+    mergedArgs.timeoutMs = request.timeoutMs
+  }
+
+  return upsertToolCallState(states, toolCall.id, {
+    status,
+    name: toolCall.name,
+    args: mergedArgs,
+    command: typeof request.command === "string" ? request.command : undefined,
+    filePath: typeof request.filePath === "string" ? request.filePath : undefined,
+    reason: typeof request.reason === "string" ? request.reason : undefined,
+    operation: typeof request.operation === "string" ? request.operation : undefined,
+    code: typeof request.code === "string" ? request.code : undefined,
+    timeoutMs: typeof request.timeoutMs === "number" ? request.timeoutMs : undefined
+  })
+}
 
 const ThreadContext = createContext<ThreadContextValue | null>(null)
 
@@ -372,12 +496,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
   const getThreadState = useCallback(
     (threadId: string): ThreadState => {
-      const state = threadStates[threadId] || createDefaultThreadState()
-      if (state.pendingApproval) {
+      const state = normalizeThreadState(threadStates[threadId] || createDefaultThreadState())
+      if (state.pendingApprovals.length > 0) {
         console.log(
-          "[ThreadContext] getThreadState returning pendingApproval for:",
+          "[ThreadContext] getThreadState returning pending approvals for:",
           threadId,
-          state.pendingApproval
+          state.pendingApprovals.length
         )
       }
       return state
@@ -400,7 +524,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const updateThreadState = useCallback(
     (threadId: string, updater: (prev: ThreadState) => Partial<ThreadState>) => {
       setThreadStates((prev) => {
-        const currentState = prev[threadId] || createDefaultThreadState()
+        const currentState = normalizeThreadState(prev[threadId] || createDefaultThreadState())
         const updates = updater(currentState)
         return {
           ...prev,
@@ -481,7 +605,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               threadId,
               data.request
             )
-            updateThreadState(threadId, () => ({ pendingApproval: data.request }))
+            updateThreadState(threadId, (state) => ({
+              ...buildPendingApprovalState(
+                enqueuePendingApproval(state.pendingApprovals, data.request!)
+              ),
+              toolCallStates: upsertToolCallStateFromRequest(
+                state.toolCallStates,
+                data.request as HITLRequest & Record<string, unknown>
+              )
+            }))
           }
           break
         case "workspace":
@@ -625,14 +757,54 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           }
           updateThreadState(threadId, (state) => {
             const exists = state.messages.some((m) => m.id === message.id)
-            if (exists) {
-              return { messages: state.messages.map((m) => (m.id === message.id ? message : m)) }
+            let nextToolCallStates = state.toolCallStates
+            if (Array.isArray(message.tool_calls)) {
+              for (const toolCall of message.tool_calls) {
+                nextToolCallStates = upsertToolCallState(nextToolCallStates, toolCall.id, {
+                  name: toolCall.name,
+                  args: toolCall.args,
+                  status: "queued"
+                })
+              }
             }
-            return { messages: [...state.messages, message] }
+            if (message.role === "tool" && message.tool_call_id) {
+              nextToolCallStates = upsertToolCallState(nextToolCallStates, message.tool_call_id, {
+                name: message.name,
+                status: message.is_error ? "failed" : "completed"
+              })
+            }
+            if (exists) {
+              return {
+                messages: state.messages.map((m) => (m.id === message.id ? message : m)),
+                toolCallStates: nextToolCallStates
+              }
+            }
+            return { messages: [...state.messages, message], toolCallStates: nextToolCallStates }
           })
         },
         setMessages: (messages: Message[]) => {
-          updateThreadState(threadId, () => ({ messages }))
+          updateThreadState(threadId, (state) => {
+            const nextToolCallStates = messages.reduce<Record<string, ToolCallState>>((acc, message) => {
+              if (Array.isArray(message.tool_calls)) {
+                for (const toolCall of message.tool_calls) {
+                  acc = upsertToolCallState(acc, toolCall.id, {
+                    name: toolCall.name,
+                    args: toolCall.args,
+                    status: "queued"
+                  })
+                }
+              }
+              if (message.role === "tool" && message.tool_call_id) {
+                acc = upsertToolCallState(acc, message.tool_call_id, {
+                  name: message.name,
+                  status: message.is_error ? "failed" : "completed"
+                })
+              }
+              return acc
+            }, state.toolCallStates)
+
+            return { messages, toolCallStates: nextToolCallStates }
+          })
         },
         setTodos: (todos: Todo[]) => {
           updateThreadState(threadId, () => ({ todos }))
@@ -648,8 +820,32 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         setSubagents: (subagents: Subagent[]) => {
           updateThreadState(threadId, () => ({ subagents }))
         },
+        setToolCallState: (toolCallId: string, updates: Partial<ToolCallState>) => {
+          updateThreadState(threadId, (state) => ({
+            toolCallStates: upsertToolCallState(state.toolCallStates, toolCallId, updates)
+          }))
+        },
         setPendingApproval: (request: HITLRequest | null) => {
-          updateThreadState(threadId, () => ({ pendingApproval: request }))
+          updateThreadState(threadId, (state) => ({
+            ...buildPendingApprovalState(request ? [request] : []),
+            ...(request
+              ? { toolCallStates: upsertToolCallStateFromRequest(state.toolCallStates, request as HITLRequest & Record<string, unknown>) }
+              : {})
+          }))
+        },
+        enqueuePendingApproval: (request: HITLRequest) => {
+          updateThreadState(threadId, (state) => ({
+            ...buildPendingApprovalState(enqueuePendingApproval(state.pendingApprovals, request)),
+            toolCallStates: upsertToolCallStateFromRequest(
+              state.toolCallStates,
+              request as HITLRequest & Record<string, unknown>
+            )
+          }))
+        },
+        removePendingApproval: (requestId?: string) => {
+          updateThreadState(threadId, (state) =>
+            buildPendingApprovalState(removePendingApproval(state.pendingApprovals, requestId))
+          )
         },
         setError: (error: string | null) => {
           updateThreadState(threadId, () => ({ error }))
@@ -959,9 +1155,34 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             tool_calls?: unknown[]
             tool_call_id?: string
             name?: string
+            is_error?: boolean
           }>
+          const nextToolCallStates = msgs.reduce<Record<string, ToolCallState>>((acc, msg) => {
+            if (Array.isArray(msg.tool_calls)) {
+              for (const toolCall of msg.tool_calls as Array<{
+                id?: string
+                name?: string
+                args?: Record<string, unknown>
+              }>) {
+                if (!toolCall.id) continue
+                acc = upsertToolCallState(acc, toolCall.id, {
+                  name: toolCall.name,
+                  args: toolCall.args,
+                  status: "queued"
+                })
+              }
+            }
+            if (msg.role === "tool" && msg.tool_call_id) {
+              acc = upsertToolCallState(acc, msg.tool_call_id, {
+                name: msg.name,
+                status: msg.is_error ? "failed" : "completed"
+              })
+            }
+            return acc
+          }, {})
           updateThreadState(threadId, () => ({
-            messages: msgs.map((m) => ({ ...m, created_at: new Date() }) as Message)
+            messages: msgs.map((m) => ({ ...m, created_at: new Date() }) as Message),
+            toolCallStates: nextToolCallStates
           }))
           break
         }
@@ -1004,6 +1225,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           }
           const finalContent = tracker.accumulatedContent
           updateThreadState(threadId, (prev) => {
+            const nextToolCallStates = (toolCalls || []).reduce<Record<string, ToolCallState>>(
+              (acc, toolCall) =>
+                upsertToolCallState(acc, toolCall.id, {
+                  name: toolCall.name,
+                  args: toolCall.args,
+                  status: "queued"
+                }),
+              prev.toolCallStates
+            )
             const idx = prev.messages.findIndex((m) => m.id === id)
             // Defensive clear: any real assistant token means data is flowing
             // again, so a stale retry indicator must disappear.
@@ -1015,10 +1245,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 content: finalContent,
                 ...(toolCalls?.length && { tool_calls: toolCalls })
               }
-              return { ...clearRetry, messages: updated }
+              return { ...clearRetry, messages: updated, toolCallStates: nextToolCallStates }
             }
             return {
               ...clearRetry,
+              toolCallStates: nextToolCallStates,
               messages: [
                 ...prev.messages,
                 {
@@ -1040,9 +1271,14 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           const content = event.content as string
           const toolCallId = event.toolCallId as string
           const name = event.name as string | undefined
+          const isError = event.isError as boolean | undefined
           updateThreadState(threadId, (prev) => {
             if (prev.messages.some((m) => m.id === id)) return {}
             return {
+              toolCallStates: upsertToolCallState(prev.toolCallStates, toolCallId, {
+                name,
+                status: isError ? "failed" : "completed"
+              }),
               messages: [
                 ...prev.messages,
                 {
@@ -1051,6 +1287,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   content,
                   tool_call_id: toolCallId,
                   name,
+                  is_error: isError,
                   created_at: new Date()
                 }
               ]
@@ -1095,10 +1332,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       const cleanupApproval = window.api.sandbox.onApprovalRequest(threadId, (request: unknown) => {
         console.log(`[ThreadProvider] Approval request for thread ${threadId}:`, request)
         const req = request as Record<string, unknown>
-        updateThreadState(threadId, () => ({
-          pendingApproval: {
+        updateThreadState(threadId, (state) => {
+          const approvalRequest = {
             id: (req.id as string) || "",
-            tool_call: (req.tool_call as { id: string; name: string; args: Record<string, unknown> }) || { id: "", name: "execute", args: {} },
+            tool_call:
+              (req.tool_call as { id: string; name: string; args: Record<string, unknown> }) || {
+                id: "",
+                name: "execute",
+                args: {}
+              },
             allowed_decisions: ["approve", "reject"],
             command: req.command,
             reason: req.reason,
@@ -1114,8 +1356,18 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             _orchestratorRequestId: req.id,
             _retryReason: req.retry_reason,
             _approvalTypes: req.allowed_approval_types
-          } as any
-        }))
+          } as HITLRequest & Record<string, unknown>
+
+          return {
+            ...buildPendingApprovalState(
+              enqueuePendingApproval(state.pendingApprovals, approvalRequest)
+            ),
+            toolCallStates: upsertToolCallStateFromRequest(
+              state.toolCallStates,
+              approvalRequest
+            )
+          }
+        })
         // Auto-switch to this thread so the approval UI is visible
         const currentId = useAppStore.getState().currentThreadId
         if (currentId !== threadId) {
@@ -1125,7 +1377,23 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       })
       const cleanupTimeout = window.api.sandbox.onApprovalTimeout(threadId, (data) => {
         console.warn(`[ThreadProvider] Approval timed out for thread ${threadId}: requestId=${data.requestId}`)
-        updateThreadState(threadId, () => ({ pendingApproval: null }))
+        updateThreadState(threadId, (state) => {
+          const timedOutApproval = state.pendingApprovals.find(
+            (approval) => getPendingApprovalId(approval) === data.requestId
+          )
+          return {
+            ...buildPendingApprovalState(removePendingApproval(state.pendingApprovals, data.requestId)),
+            ...(timedOutApproval?.tool_call?.id
+              ? {
+                  toolCallStates: upsertToolCallState(
+                    state.toolCallStates,
+                    timedOutApproval.tool_call.id,
+                    { status: "interrupted" }
+                  )
+                }
+              : {})
+          }
+        })
       })
       approvalListenerCleanups.current[threadId] = [cleanupApproval, cleanupTimeout]
     },
