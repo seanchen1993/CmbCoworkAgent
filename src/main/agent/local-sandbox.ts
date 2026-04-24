@@ -849,6 +849,26 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
   private static _pythonCliCache = new Map<string, boolean>()
 
   /**
+   * True when the resolved Python install lives under the real user's profile
+   * (e.g. per-user install at %LOCALAPPDATA%\Programs\Python\... or the MS Store
+   * alias under %LOCALAPPDATA%\Microsoft\WindowsApps). The elevated sandbox user
+   * (CodexSandboxOnline) cannot read the real user's profile, so PATH lookups for
+   * python/py resolve to unreadable paths and fail with CommandNotFoundException.
+   * Bare python/py invocations must route to unelevated mode to keep real-user identity.
+   */
+  private static isPythonUnderUserProfile(): boolean {
+    // Uses the prewarmed cache populated by resolvePythonDir() in the constructor.
+    // If the async lookup hasn't completed yet, return false (no routing) — elevated
+    // will attempt normally; worst case one failed attempt before cache fills.
+    const pyDir = LocalSandbox._pythonDir
+    const userProfile = process.env.USERPROFILE
+    if (!pyDir || !userProfile) return false
+    const normProfile = userProfile.toLowerCase().replace(/[\\/]+$/, "")
+    const normPy = pyDir.toLowerCase()
+    return normPy === normProfile || normPy.startsWith(normProfile + "\\") || normPy.startsWith(normProfile + "/")
+  }
+
+  /**
    * Returns true if the command's executable is located in a Python Scripts
    * directory on PATH. Detects any pip-installed CLI tool automatically without
    * requiring a hardcoded allowlist.
@@ -929,6 +949,11 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       || /\bgit\s+lfs\b/.test(cmd)
       // Any pip-installed CLI tool detected via PATH scan (auto, no hardcoded list needed)
       || LocalSandbox.isPythonCliTool(command)
+      // Per-user Python install: elevated sandbox user can't read the real user's profile,
+      // so bare `python` / `py` / `python3` fail with CommandNotFoundException even though
+      // the path is in PATH. Route to unelevated to keep real-user identity (and thus access).
+      || (LocalSandbox.isPythonUnderUserProfile()
+        && /^\s*(?:python(?:3(?:\.\d+)?)?|py)(?:\.exe)?(?:\s|$)/i.test(command))
     )
   }
 
@@ -2742,10 +2767,14 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     // Package install commands (pip, npm, cargo, etc.) often fail in elevated mode due to
     // permission issues with TEMP, site-packages, or certificate stores. Route them directly
     // to unelevated mode to avoid the wasted elevated attempt + fallback retry overhead.
-    if (effectiveMode === "elevated" && sandboxModeOverride !== "unelevated"
-      && LocalSandbox.shouldPreferUnelevated(command)) {
-      console.log("[LocalSandbox] package-install command detected; routing directly to unelevated")
-      return this.executeInWindowsSandbox(command, attempt, "unelevated", timeoutMs, overrideAbortSignal)
+    // Await the Python-dir prewarm so the per-user-install check in shouldPreferUnelevated
+    // has a populated cache even on the very first command.
+    if (effectiveMode === "elevated" && sandboxModeOverride !== "unelevated") {
+      await LocalSandbox.resolvePythonDir().catch(() => null)
+      if (LocalSandbox.shouldPreferUnelevated(command)) {
+        console.log("[LocalSandbox] package-install command detected; routing directly to unelevated")
+        return this.executeInWindowsSandbox(command, attempt, "unelevated", timeoutMs, overrideAbortSignal)
+      }
     }
 
     const isElevatedSandbox = effectiveMode === "elevated"
