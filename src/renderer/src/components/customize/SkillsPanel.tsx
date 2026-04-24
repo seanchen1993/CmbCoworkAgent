@@ -9,9 +9,9 @@ import {
   Folder,
   Plus,
   Power,
-  ShoppingBag,
   Search,
   Sparkles,
+  Store,
   Trash2,
   Upload,
   X
@@ -1356,48 +1356,61 @@ export function SkillsPanel(): React.JSX.Element {
     <div className="contents">
       <div className="w-[330px] shrink-0 border-r border-border flex flex-col">
         <div className="p-3 border-b border-border space-y-2">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-1">
-              <div className="relative flex-1 min-w-[120px] max-w-[160px]">
-                <Search className="absolute left-2 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground pointer-events-none" />
-                <Input
-                  placeholder="搜索"
-                  value={searchQuery}
-                  onChange={(e) => handleSearchChange(e.target.value)}
-                  className="h-7 pl-7 pr-6 text-xs"
-                />
-                {searchQuery && (
-                  <button
-                    type="button"
-                    className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground p-0.5 rounded"
-                    onClick={() => {
-                      setSearchQuery("")
-                      setDebouncedQuery("")
-                    }}
-                    aria-label="清���"
-                  >
-                    <X className="size-3" />
-                  </button>
-                )}
-              </div>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-7 w-7 p-0 shrink-0"
-                onClick={() => setUploadDialogOpen(true)}
+          <div className="relative">
+            <Search className="absolute left-2 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground pointer-events-none" />
+            <Input
+              placeholder="搜索"
+              value={searchQuery}
+              onChange={(e) => handleSearchChange(e.target.value)}
+              className="h-7 w-full pl-7 pr-6 text-xs"
+            />
+            {searchQuery && (
+              <button
+                type="button"
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground p-0.5 rounded"
+                onClick={() => {
+                  setSearchQuery("")
+                  setDebouncedQuery("")
+                }}
+                aria-label="清空"
               >
-                <Plus className="size-4" />
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-7 px-2 gap-1 text-xs shrink-0"
-                onClick={() => openMarketWithSkillSearch("")}
-              >
-                <ShoppingBag className="size-3.5" />
-                去应用市场
-              </Button>
-            </div>
+                <X className="size-3" />
+              </button>
+            )}
+          </div>
+          <div className="flex items-center gap-1.5">
+            <Button
+              variant="outline"
+              size="sm"
+              className="cursor-pointer group relative h-7 flex-1 overflow-hidden rounded-md border-emerald-300/55 bg-emerald-500/[0.08] px-2 text-xs font-medium text-emerald-700 shadow-sm transition-all duration-200 hover:-translate-y-px hover:border-emerald-400/70 hover:bg-emerald-500/[0.16] hover:shadow-md dark:text-emerald-300"
+              onClick={() => setUploadDialogOpen(true)}
+              aria-label="上传技能"
+            >
+              <span
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-0 bg-gradient-to-r from-transparent via-emerald-400/10 to-emerald-400/25 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
+              />
+              <span className="relative flex size-4 items-center justify-center rounded-full bg-emerald-500/15 ring-1 ring-emerald-500/25 transition-transform duration-200 group-hover:scale-105">
+                <Plus className="size-2.5" />
+              </span>
+              <span className="relative">上传技能</span>
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="cursor-pointer group relative h-7 flex-1 overflow-hidden rounded-md border-primary/40 bg-primary/[0.08] px-2.5 text-xs font-medium text-primary shadow-sm transition-all duration-200 hover:-translate-y-px hover:border-primary/60 hover:bg-primary/[0.18] hover:shadow-md"
+              onClick={() => openMarketWithSkillSearch("")}
+            >
+              <span
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-0 bg-gradient-to-r from-transparent via-primary/15 to-primary/30 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
+              />
+              <span className="relative flex size-4 items-center justify-center rounded-full bg-primary/15 ring-1 ring-primary/25 transition-transform duration-200 group-hover:scale-105">
+                <Store className="size-2.5" />
+              </span>
+              <span className="relative">去应用市场</span>
+              <ChevronRight className="relative size-3 text-primary/80 transition-transform duration-200 group-hover:translate-x-0.5" />
+            </Button>
           </div>
         </div>
         <ScrollArea className="flex-1">
@@ -1753,14 +1766,15 @@ function SkillItem(props: {
           </p>
         </div>
         <span>
-             {hasMarketEntry && (
-               <Badge
-                 variant="outline"
-                 className="h-4 px-1.5 text-[10px] border-emerald-200 text-emerald-700 bg-emerald-50"
-               >
-                 市场
-               </Badge>
-             )}
+          {hasMarketEntry && (
+            <Badge
+              variant="outline"
+              className="h-4 gap-1 px-1.5 text-[10px] border-emerald-200 text-emerald-700 bg-emerald-50"
+            >
+              <Store className="size-2.5 shrink-0" />
+              市场
+            </Badge>
+          )}
           {isEdited && (
             <Badge
               variant="outline"
@@ -1999,10 +2013,12 @@ export function SkillDetail(props: {
               <Button
                 variant="default"
                 size="sm"
-                className={cn(publishButtonClassName, "shrink-0")}
+                className={cn(publishButtonClassName, "group shrink-0")}
                 onClick={onPublish}
               >
-                <CloudUpload className="size-3" />
+                <span className="flex size-4 items-center justify-center rounded-full bg-white/20 ring-1 ring-white/30 transition-transform duration-200 group-hover:scale-105">
+                  <CloudUpload className="size-2.5" />
+                </span>
                 {publishLabel}
               </Button>
             )}
@@ -2012,9 +2028,10 @@ export function SkillDetail(props: {
             {hasMarketEntry && (
               <Badge
                 variant="outline"
-                className="h-5 px-2 text-[10px] border-emerald-200 text-emerald-700 bg-emerald-50"
+                className="h-5 gap-1 px-2 text-[10px] border-emerald-200 text-emerald-700 bg-emerald-50"
               >
-                市场技能
+                <Store className="size-3 shrink-0" />
+                市场
               </Badge>
             )}
             {isEdited && (
