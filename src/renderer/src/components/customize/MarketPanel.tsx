@@ -445,7 +445,12 @@ function isAllowedDetailFile(type: MarketItemType, filename: string): boolean {
 }
 
 export function MarketPanel(): React.JSX.Element {
-  const { marketInitialSkillCategory, setMarketInitialSkillCategory } = useAppStore()
+  const {
+    marketInitialSkillCategory,
+    setMarketInitialSkillCategory,
+    marketInitialSkillSearchQuery,
+    setMarketInitialSkillSearchQuery
+  } = useAppStore()
   const [activeTab, setActiveTab] = useState<MarketItemType>("skill")
   const [searchQuery, setSearchQuery] = useState("")
   const [uploadFilterMode, setUploadFilterMode] = useState<UploadFilterMode>("all")
@@ -754,14 +759,28 @@ export function MarketPanel(): React.JSX.Element {
   }, [canViewSkillUserDetail])
 
   useEffect(() => {
-    if (!marketInitialSkillCategory) return
+    const hasInitialCategory = !!marketInitialSkillCategory
+    const hasInitialSearch = !!marketInitialSkillSearchQuery?.trim()
+    if (!hasInitialCategory && !hasInitialSearch) return
+
     setActiveTab("skill")
     setDetailMode("list")
     setSelectedItemKey(null)
-    setCategoryFilter(marketInitialSkillCategory)
-    setSearchQuery("")
+    if (hasInitialCategory) {
+      setCategoryFilter(marketInitialSkillCategory)
+    } else {
+      // 按名称跳转搜索时，避免历史分类筛选把结果“过滤没了”。
+      setCategoryFilter(null)
+    }
+    setSearchQuery(marketInitialSkillSearchQuery?.trim() || "")
     setMarketInitialSkillCategory(null)
-  }, [marketInitialSkillCategory, setMarketInitialSkillCategory])
+    setMarketInitialSkillSearchQuery(null)
+  }, [
+    marketInitialSkillCategory,
+    marketInitialSkillSearchQuery,
+    setMarketInitialSkillCategory,
+    setMarketInitialSkillSearchQuery
+  ])
 
   // 同步已安装状态，不触发额外的 market 接口请求
   useEffect(() => {

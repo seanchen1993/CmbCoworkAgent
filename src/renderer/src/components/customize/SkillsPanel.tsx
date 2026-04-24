@@ -48,6 +48,7 @@ type FileTreeNode = {
 type SkillMarketInfo = Pick<MarketItem, "name" | "chinese_name" | "category" | "description">
 type SaveSkillFileResult = { success: boolean; error?: string }
 type PublishMode = "upload" | "update"
+type PublishSuccessPayload = { skillName: string; mode: PublishMode }
 type UploadedItemRecord = {
   name: string
   type: "skill" | "mcp" | "plugin"
@@ -428,7 +429,7 @@ function PublishSkillDialog(props: {
   mode: PublishMode
   marketInfo?: SkillMarketInfo
   onOpenChange: (open: boolean) => void
-  onSuccess: () => void
+  onSuccess: (payload: PublishSuccessPayload) => void
 }): React.JSX.Element {
   const { open, skill, mode, marketInfo, onOpenChange, onSuccess } = props
   const [uploading, setUploading] = useState(false)
@@ -504,7 +505,7 @@ function PublishSkillDialog(props: {
 
       markUploadedSkillInStorage(skill.name)
 
-      onSuccess()
+      onSuccess({ skillName: skill.name, mode })
       onOpenChange(false)
     } catch (e) {
       setError(e instanceof Error ? e.message : mode === "update" ? "更新失败" : "发布失败")
@@ -928,7 +929,11 @@ function SkillsGuide(): React.JSX.Element {
 }
 
 export function SkillsPanel(): React.JSX.Element {
-  const { setShowCustomizeView } = useAppStore()
+  const {
+    setShowCustomizeView,
+    setMarketInitialSkillCategory,
+    setMarketInitialSkillSearchQuery
+  } = useAppStore()
   const [skills, setSkills] = useState<SkillMetadata[]>([])
   const [expandedSkills, setExpandedSkills] = useState<Set<string>>(new Set())
   const [expandedDirNodes, setExpandedDirNodes] = useState<Set<string>>(new Set())
@@ -1195,9 +1200,9 @@ export function SkillsPanel(): React.JSX.Element {
     () => !!selectedSkill && editedSkillPaths.has(normalizeSkillPathKey(selectedSkill.path)),
     [editedSkillPaths, selectedSkill]
   )
-  const selectedSkillIsMarketInstalled = useMemo(
-    () => !!selectedSkillMarketInfo && !selectedSkillUploadedByMe,
-    [selectedSkillMarketInfo, selectedSkillUploadedByMe]
+  const selectedSkillHasMarketEntry = useMemo(
+    () => !!selectedSkillMarketInfo,
+    [selectedSkillMarketInfo]
   )
   const selectedSkillCanEdit = useMemo(
     () =>
@@ -1366,7 +1371,7 @@ export function SkillsPanel(): React.JSX.Element {
               title="内置技能"
               skills={filteredBuiltin}
               marketSkillMap={marketSkillMap}
-              uploadedSkillNames={uploadedSkillNames}
+              localUploadedSkillPaths={localUploadedSkillPaths}
               editedSkillPaths={editedSkillPaths}
               expandedSkills={expandedSkills}
               skillFilesMap={skillFilesMap}
@@ -1383,7 +1388,7 @@ export function SkillsPanel(): React.JSX.Element {
                 title="我安装的技能"
                 skills={filteredCustom}
                 marketSkillMap={marketSkillMap}
-                uploadedSkillNames={uploadedSkillNames}
+                localUploadedSkillPaths={localUploadedSkillPaths}
                 editedSkillPaths={editedSkillPaths}
                 expandedSkills={expandedSkills}
                 skillFilesMap={skillFilesMap}
@@ -1431,7 +1436,8 @@ export function SkillsPanel(): React.JSX.Element {
         canEdit={selectedSkillCanEdit}
         onSaveContent={saveSkillFileContent}
         isEdited={selectedSkillIsEdited}
-        isMarketInstalled={selectedSkillIsMarketInstalled}
+        isLocalUploaded={selectedSkillUploadedInPanel}
+        hasMarketEntry={selectedSkillHasMarketEntry}
       />
 
       <UploadSkillDialog
@@ -1471,10 +1477,20 @@ export function SkillsPanel(): React.JSX.Element {
           setPublishDialogOpen(open)
           if (!open) setPublishSkill(null)
         }}
-        onSuccess={() => {
+        onSuccess={({ skillName, mode }) => {
           reloadUploadedSkillNames()
           void loadMarketSkills()
           window.api.skills.list().then(setSkills).catch(console.error)
+
+          const keyword = skillName.trim()
+          toast.success(
+            mode === "update"
+              ? `技能「${skillName}」更新发布成功，已跳转到应用市场。`
+              : `技能「${skillName}」发布成功，已跳转到应用市场。`
+          )
+          setMarketInitialSkillCategory(null)
+          setMarketInitialSkillSearchQuery(keyword || null)
+          setShowCustomizeView(true, "market")
         }}
       />
     </div>
@@ -1485,7 +1501,7 @@ function SkillSection(props: {
   title: string
   skills: SkillMetadata[]
   marketSkillMap: Record<string, SkillMarketInfo>
-  uploadedSkillNames: Set<string>
+  localUploadedSkillPaths: Set<string>
   editedSkillPaths: Set<string>
   expandedSkills: Set<string>
   skillFilesMap: Record<string, string[]>
@@ -1501,7 +1517,7 @@ function SkillSection(props: {
     title,
     skills,
     marketSkillMap,
-    uploadedSkillNames,
+    localUploadedSkillPaths,
     editedSkillPaths,
     expandedSkills,
     skillFilesMap,
@@ -1547,8 +1563,10 @@ function SkillSection(props: {
               const disabled = disabledSkills.has(skill.name)
               const marketInfo =
                 skill.source === "user" ? marketSkillMap[normalizeSkillName(skill.name)] : undefined
-              const isUploadedByMe = uploadedSkillNames.has(normalizeSkillName(skill.name))
-              const isMarketInstalled = !!marketInfo && !isUploadedByMe
+              const hasMarketEntry = !!marketInfo
+              const isLocalUploaded =
+                localUploadedSkillPaths.has(normalizeSkillPathKey(skill.path)) ||
+                (skill.source === "user" && !marketInfo)
               const isEdited = editedSkillPaths.has(normalizeSkillPathKey(skill.path))
 
               return (
@@ -1556,7 +1574,8 @@ function SkillSection(props: {
                   key={skill.name}
                   skill={skill}
                   marketInfo={marketInfo}
-                  isMarketInstalled={isMarketInstalled}
+                  isLocalUploaded={isLocalUploaded}
+                  hasMarketEntry={hasMarketEntry}
                   isEdited={isEdited}
                   expanded={expanded}
                   selected={selected}
@@ -1580,7 +1599,8 @@ function SkillSection(props: {
 function SkillItem(props: {
   skill: SkillMetadata
   marketInfo?: SkillMarketInfo
-  isMarketInstalled: boolean
+  isLocalUploaded: boolean
+  hasMarketEntry: boolean
   isEdited: boolean
   expanded: boolean
   selected: boolean
@@ -1595,7 +1615,8 @@ function SkillItem(props: {
   const {
     skill,
     marketInfo,
-    isMarketInstalled,
+    isLocalUploaded,
+    hasMarketEntry,
     isEdited,
     expanded,
     selected,
@@ -1615,7 +1636,7 @@ function SkillItem(props: {
   const chineseName = getSkillChineseName(skill, marketInfo)
   const displayName = chineseName || skill.name
   const subtitleName = chineseName ? skill.name : null
-  const sourceLabel = isMarketInstalled ? "市场" : skill.source === "project" ? "内置" : "本地"
+  const showLocalTag = skill.source !== "project" && (isLocalUploaded || !hasMarketEntry)
 
   return (
     <div className="rounded-md border border-border/70 overflow-hidden">
@@ -1647,17 +1668,27 @@ function SkillItem(props: {
                 {subtitleName}
               </span>
             )}
-            <Badge
-              variant="outline"
-              className={cn(
-                "h-4 px-1.5 text-[10px]",
-                isMarketInstalled
-                  ? "border-emerald-200 text-emerald-700 bg-emerald-50"
-                  : "text-muted-foreground"
-              )}
-            >
-              {sourceLabel}
-            </Badge>
+            {skill.source === "project" ? (
+              <Badge variant="outline" className="h-4 px-1.5 text-[10px] text-muted-foreground">
+                内置
+              </Badge>
+            ) : (
+              <>
+                {showLocalTag && (
+                  <Badge variant="outline" className="h-4 px-1.5 text-[10px] text-muted-foreground">
+                    本地
+                  </Badge>
+                )}
+                {hasMarketEntry && (
+                  <Badge
+                    variant="outline"
+                    className="h-4 px-1.5 text-[10px] border-emerald-200 text-emerald-700 bg-emerald-50"
+                  >
+                    市场
+                  </Badge>
+                )}
+              </>
+            )}
             {isEdited && (
               <Badge
                 variant="outline"
@@ -1780,7 +1811,8 @@ export function SkillDetail(props: {
   canEdit?: boolean
   onSaveContent?: (filePath: string, content: string) => Promise<SaveSkillFileResult>
   isEdited?: boolean
-  isMarketInstalled?: boolean
+  isLocalUploaded?: boolean
+  hasMarketEntry?: boolean
   hideActions?: boolean
 }): React.JSX.Element {
   const {
@@ -1800,7 +1832,8 @@ export function SkillDetail(props: {
     canEdit = false,
     onSaveContent,
     isEdited = false,
-    isMarketInstalled = false,
+    isLocalUploaded = false,
+    hasMarketEntry = false,
     hideActions = false
   } = props
   const [isEditing, setIsEditing] = useState(false)
@@ -1859,7 +1892,7 @@ export function SkillDetail(props: {
 
   const chineseName = getSkillChineseName(skill, marketInfo)
   const category = getSkillCategory(skill, marketInfo)
-  const sourceLabel = isMarketInstalled ? "市场技能" : skill.source === "project" ? "内置技能" : "本地技能"
+  const showLocalTag = skill.source !== "project" && (isLocalUploaded || !hasMarketEntry)
   const description = marketInfo?.description || skill.description || "暂无描述"
   const isMarkdown = !!selectedFilePath && /\.md$/i.test(selectedFilePath)
   const hasFrontmatter = isMarkdown && !!content && content.startsWith("---")
@@ -1914,17 +1947,27 @@ export function SkillDetail(props: {
           </div>
           <div className="mt-1 flex items-center gap-1.5 flex-wrap">
             {chineseName && <p className="text-xs text-muted-foreground truncate">{skill.name}</p>}
-            <Badge
-              variant="outline"
-              className={cn(
-                "h-5 px-2 text-[10px]",
-                isMarketInstalled
-                  ? "border-emerald-200 text-emerald-700 bg-emerald-50"
-                  : "text-muted-foreground"
-              )}
-            >
-              {sourceLabel}
-            </Badge>
+            {skill.source === "project" ? (
+              <Badge variant="outline" className="h-5 px-2 text-[10px] text-muted-foreground">
+                内置技能
+              </Badge>
+            ) : (
+              <>
+                {showLocalTag && (
+                  <Badge variant="outline" className="h-5 px-2 text-[10px] text-muted-foreground">
+                    本地技能
+                  </Badge>
+                )}
+                {hasMarketEntry && (
+                  <Badge
+                    variant="outline"
+                    className="h-5 px-2 text-[10px] border-emerald-200 text-emerald-700 bg-emerald-50"
+                  >
+                    市场技能
+                  </Badge>
+                )}
+              </>
+            )}
             {isEdited && (
               <Badge
                 variant="outline"
