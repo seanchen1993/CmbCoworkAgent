@@ -65,6 +65,15 @@ function parseYamlFrontmatter(content: string): Record<string, string> {
   return result
 }
 
+function makeSafeZipFileName(rawName: string): string {
+  const sanitized = rawName
+    .replace(/[\\/:*?"<>|]/g, "-")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+  return `${sanitized || "skill"}.zip`
+}
+
 async function loadSkills(
   dirPath: string,
   source: "project" | "user" = "project"
@@ -94,6 +103,7 @@ async function loadSkills(
           version: frontmatter.version || "v1.0.0",
           license: frontmatter.license || null,
           compatibility: frontmatter.compatibility || null,
+          metadata: frontmatter,
           allowedTools: frontmatter["allowed-tools"]
             ? frontmatter["allowed-tools"].split(/\s+/)
             : undefined
@@ -385,6 +395,61 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
         return { success: false, error: "仅支持 .md 或 .zip 文件" }
       } catch (e) {
         return { success: false, error: e instanceof Error ? e.message : "Unknown error" }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    "skills:exportForMarket",
+    async (
+      _event,
+      skillPath: string
+    ): Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }> => {
+      if (!skillPath || typeof skillPath !== "string") {
+        return { success: false, error: "无效的技能路径" }
+      }
+
+      try {
+        const resolvedSkillPath = path.resolve(skillPath)
+        if (!isPathUnderAllowedDirs(resolvedSkillPath)) {
+          return { success: false, error: "Access denied: skill path outside skills directory" }
+        }
+
+        const skillDir = path.dirname(resolvedSkillPath)
+        if (!existsSync(skillDir)) {
+          return { success: false, error: "技能目录不存在" }
+        }
+
+        const files = await listSkillFiles(skillDir)
+        if (files.length === 0) {
+          return { success: false, error: "技能目录为空，无法导出" }
+        }
+
+        const zip = new AdmZip()
+        for (const filePath of files) {
+          const relativePath = path.relative(skillDir, filePath).replace(/\\/g, "/")
+          if (!relativePath || relativePath.startsWith("..")) {
+            continue
+          }
+          const fileBuffer = await fs.readFile(filePath)
+          zip.addFile(relativePath, fileBuffer)
+        }
+
+        const skillContent = await fs.readFile(resolvedSkillPath, "utf-8")
+        const frontmatter = parseYamlFrontmatter(skillContent)
+        const skillName = frontmatter.name?.trim() || path.basename(skillDir)
+        const zipBuffer = zip.toBuffer()
+
+        return {
+          success: true,
+          fileName: makeSafeZipFileName(skillName),
+          buffer: zipBuffer.buffer.slice(
+            zipBuffer.byteOffset,
+            zipBuffer.byteOffset + zipBuffer.byteLength
+          )
+        }
+      } catch (e) {
+        return { success: false, error: e instanceof Error ? e.message : "导出技能失败" }
       }
     }
   )

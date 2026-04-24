@@ -395,6 +395,9 @@ interface CustomAPI {
       buffer: ArrayBuffer,
       fileName?: string
     ) => Promise<{ success: boolean; filePath?: string; content?: string; error?: string }>
+    exportForMarket: (
+      skillPath: string
+    ) => Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }>
     delete: (skillPath: string) => Promise<{ success: boolean; error?: string }>
   }
   mcp: {

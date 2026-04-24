@@ -656,6 +656,11 @@ const api = {
     ): Promise<{ success: boolean; filePath?: string; content?: string; error?: string }> => {
       return ipcRenderer.invoke("skills:extractMarkdownFromZip", { buffer, fileName })
     },
+    exportForMarket: (
+      skillPath: string
+    ): Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }> => {
+      return ipcRenderer.invoke("skills:exportForMarket", skillPath)
+    },
     delete: (skillPath: string): Promise<{ success: boolean; error?: string }> => {
       return ipcRenderer.invoke("skills:delete", skillPath)
     }

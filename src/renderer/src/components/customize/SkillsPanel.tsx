@@ -4,10 +4,12 @@ import remarkGfm from "remark-gfm"
 import {
   ChevronDown,
   ChevronRight,
+  CloudUpload,
   FileText,
   Folder,
   Plus,
   Power,
+  ShoppingBag,
   Search,
   Sparkles,
   Trash2,
@@ -22,11 +24,15 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle
 } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import type { SkillMetadata } from "@/types"
+import { useAppStore } from "@/lib/store"
+import { marketApi, type MarketItem } from "../../api/market"
+import { DEFAULT_SCENE_CATEGORY, SCENE_CATEGORY_OPTIONS } from "../../lib/skill-data-service"
 
 type FilePreviewKind = "text" | "html" | "image" | "pdf"
 type FileTreeNode = {
@@ -35,6 +41,42 @@ type FileTreeNode = {
   path: string
   isDir: boolean
   children: FileTreeNode[]
+}
+
+type SkillMarketInfo = Pick<MarketItem, "name" | "chinese_name" | "category" | "description">
+
+interface UserInfoLite {
+  sapId?: string
+  ystId?: string
+  userName?: string
+  orgName?: string
+}
+
+function normalizeSkillName(value?: string): string {
+  return String(value || "").trim().toLowerCase()
+}
+
+function buildUserIdFromUserInfo(userInfo: UserInfoLite | null): string | undefined {
+  if (!userInfo) return undefined
+  const rawId = (userInfo.sapId || userInfo.ystId || "").trim()
+  const rawName = (userInfo.userName || "").trim()
+  const rawOrgName = (userInfo.orgName || "").trim()
+  const segments = [rawId, rawName, rawOrgName].filter(Boolean)
+  return segments.length > 0 ? segments.join(" / ") : undefined
+}
+
+function getSkillChineseName(skill: SkillMetadata, marketInfo: SkillMarketInfo | undefined): string {
+  const marketChinese = marketInfo?.chinese_name?.trim()
+  if (marketChinese) return marketChinese
+  const metadataChinese = skill.metadata?.chinese_name?.trim()
+  return metadataChinese || ""
+}
+
+function getSkillCategory(skill: SkillMetadata, marketInfo: SkillMarketInfo | undefined): string {
+  const marketCategory = marketInfo?.category?.trim()
+  if (marketCategory) return marketCategory
+  const metadataCategory = skill.metadata?.category?.trim()
+  return metadataCategory || ""
 }
 
 function UploadSkillDialog(props: {
@@ -149,6 +191,189 @@ function UploadSkillDialog(props: {
   )
 }
 
+function PublishSkillDialog(props: {
+  open: boolean
+  skill: SkillMetadata | null
+  marketInfo?: SkillMarketInfo
+  onOpenChange: (open: boolean) => void
+  onSuccess: () => void
+}): React.JSX.Element {
+  const { open, skill, marketInfo, onOpenChange, onSuccess } = props
+  const [uploading, setUploading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [description, setDescription] = useState("")
+  const [category, setCategory] = useState<string>(DEFAULT_SCENE_CATEGORY)
+  const [guidance, setGuidance] = useState("")
+  const [chineseName, setChineseName] = useState("")
+  const [userId, setUserId] = useState<string | undefined>(undefined)
+
+  const loadCurrentUserId = useCallback(async () => {
+    try {
+      const userInfo = await window.api.models.getUserInfo()
+      setUserId(buildUserIdFromUserInfo(userInfo as UserInfoLite | null))
+    } catch (e) {
+      console.error("[SkillsPanel] Failed to load user info:", e)
+      setUserId(undefined)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!open || !skill) return
+    setError(null)
+    setDescription(skill.description || marketInfo?.description || "")
+    setGuidance(skill.metadata?.guidance || "")
+    setChineseName(getSkillChineseName(skill, marketInfo))
+    const initialCategory = getSkillCategory(skill, marketInfo) || DEFAULT_SCENE_CATEGORY
+    setCategory(initialCategory)
+    void loadCurrentUserId()
+  }, [loadCurrentUserId, marketInfo, open, skill])
+
+  const handlePublish = useCallback(async () => {
+    if (!skill || uploading) return
+
+    setError(null)
+    setUploading(true)
+    try {
+      const exported = await window.api.skills.exportForMarket(skill.path)
+      if (!exported.success || !exported.buffer) {
+        setError(exported.error || "导出技能失败")
+        return
+      }
+
+      const fileName = exported.fileName || `${skill.name}.zip`
+      const file = new File([exported.buffer], fileName, { type: "application/zip" })
+      const result = await marketApi.uploadFile(
+        file,
+        "skill",
+        skill.name,
+        description.trim(),
+        category,
+        guidance.trim() || undefined,
+        chineseName.trim() || undefined,
+        userId?.trim() || undefined
+      )
+
+      if (!result.success) {
+        setError(result.error || "发布失败")
+        return
+      }
+
+      try {
+        const key = "marketplace_uploaded_items"
+        const raw = localStorage.getItem(key)
+        const parsed = raw ? JSON.parse(raw) : []
+        const next = (Array.isArray(parsed) ? parsed : []).filter(
+          (item) => !(item?.name === skill.name && item?.type === "skill")
+        )
+        next.push({ name: skill.name, type: "skill", uploadedAt: new Date().toISOString() })
+        localStorage.setItem(key, JSON.stringify(next))
+      } catch (storageError) {
+        console.warn("[SkillsPanel] Failed to mark uploaded skill in localStorage:", storageError)
+      }
+
+      onSuccess()
+      onOpenChange(false)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "发布失败")
+    } finally {
+      setUploading(false)
+    }
+  }, [category, chineseName, description, guidance, onOpenChange, onSuccess, skill, uploading, userId])
+
+  return (
+    <Dialog open={open} onOpenChange={(next) => !uploading && onOpenChange(next)}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>发布到公共市场</DialogTitle>
+          <DialogDescription>
+            会自动打包当前技能目录为 zip 并上传到 Market。名称将使用技能英文名且不可修改。
+          </DialogDescription>
+        </DialogHeader>
+
+        {!skill ? (
+          <p className="text-sm text-muted-foreground">未选择技能</p>
+        ) : (
+          <div className="space-y-3">
+            {marketInfo && (
+              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+                市场中已存在同名技能，继续发布可能会被后端拒绝，请按提示处理。
+              </p>
+            )}
+
+            <div className="space-y-1">
+              <p className="text-xs text-muted-foreground">英文名称</p>
+              <Input value={skill.name} disabled />
+            </div>
+
+            <div className="space-y-1">
+              <p className="text-xs text-muted-foreground">中文名称</p>
+              <Input
+                value={chineseName}
+                onChange={(e) => setChineseName(e.target.value)}
+                disabled={uploading}
+                placeholder="可选"
+              />
+            </div>
+
+            <div className="space-y-1">
+              <p className="text-xs text-muted-foreground">描述</p>
+              <textarea
+                className="w-full min-h-[82px] rounded-md border border-input bg-background px-3 py-2 text-sm"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                disabled={uploading}
+                placeholder="可选"
+              />
+            </div>
+
+            <div className="space-y-1">
+              <p className="text-xs text-muted-foreground">场景分类</p>
+              <select
+                value={category}
+                onChange={(e) => setCategory(e.target.value)}
+                disabled={uploading}
+                className="w-full h-9 rounded-md border border-input bg-background px-3 text-sm"
+              >
+                {category &&
+                  !SCENE_CATEGORY_OPTIONS.includes(
+                    category as (typeof SCENE_CATEGORY_OPTIONS)[number]
+                  ) && <option value={category}>{category}</option>}
+                {SCENE_CATEGORY_OPTIONS.map((option) => (
+                  <option key={option} value={option}>
+                    {option}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="space-y-1">
+              <p className="text-xs text-muted-foreground">使用指引</p>
+              <textarea
+                className="w-full min-h-[82px] rounded-md border border-input bg-background px-3 py-2 text-sm"
+                value={guidance}
+                onChange={(e) => setGuidance(e.target.value)}
+                disabled={uploading}
+                placeholder="可选"
+              />
+            </div>
+
+            {error && <p className="text-sm text-destructive">{error}</p>}
+          </div>
+        )}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={uploading}>
+            取消
+          </Button>
+          <Button onClick={handlePublish} disabled={!skill || uploading}>
+            {uploading ? "发布中..." : "一键发布"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 function getSkillDir(skillPath: string): string {
   const normalized = skillPath.replace(/\\/g, "/")
   const idx = normalized.lastIndexOf("/")
@@ -227,10 +452,12 @@ function defaultSkillFile(files: string[]): string | null {
 }
 
 export function SkillsPanel(): React.JSX.Element {
+  const { setShowCustomizeView } = useAppStore()
   const [skills, setSkills] = useState<SkillMetadata[]>([])
   const [expandedSkills, setExpandedSkills] = useState<Set<string>>(new Set())
   const [expandedDirNodes, setExpandedDirNodes] = useState<Set<string>>(new Set())
   const [skillFilesMap, setSkillFilesMap] = useState<Record<string, string[]>>({})
+  const [marketSkillMap, setMarketSkillMap] = useState<Record<string, SkillMarketInfo>>({})
   const [selectedSkill, setSelectedSkill] = useState<SkillMetadata | null>(null)
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null)
   const [selectedFileContent, setSelectedFileContent] = useState<string | null>(null)
@@ -238,6 +465,8 @@ export function SkillsPanel(): React.JSX.Element {
   const [selectedBinaryBase64, setSelectedBinaryBase64] = useState<string | null>(null)
   const [selectedBinaryMimeType, setSelectedBinaryMimeType] = useState<string | null>(null)
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false)
+  const [publishDialogOpen, setPublishDialogOpen] = useState(false)
+  const [publishSkill, setPublishSkill] = useState<SkillMetadata | null>(null)
   const [disabledSkills, setDisabledSkills] = useState<Set<string>>(new Set())
   const [searchQuery, setSearchQuery] = useState("")
   const [debouncedQuery, setDebouncedQuery] = useState("")
@@ -256,6 +485,31 @@ export function SkillsPanel(): React.JSX.Element {
   useEffect(() => {
     window.api.skills.list().then(setSkills).catch(console.error)
   }, [])
+
+  const loadMarketSkills = useCallback(async () => {
+    try {
+      const res = await marketApi.getSkills()
+      if (!res.success || !res.data) return
+      const next: Record<string, SkillMarketInfo> = {}
+      for (const item of res.data) {
+        const normalized = normalizeSkillName(item.name)
+        if (!normalized) continue
+        next[normalized] = {
+          name: item.name,
+          chinese_name: item.chinese_name,
+          category: item.category,
+          description: item.description
+        }
+      }
+      setMarketSkillMap(next)
+    } catch (e) {
+      console.warn("[SkillsPanel] Failed to load market skills:", e)
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadMarketSkills()
+  }, [loadMarketSkills])
 
   useEffect(() => {
     window.api.skills
@@ -438,17 +692,42 @@ export function SkillsPanel(): React.JSX.Element {
   const builtinSkills = useMemo(() => skills.filter((s) => s.source === "project"), [skills])
   const customSkills = useMemo(() => skills.filter((s) => s.source === "user"), [skills])
 
+  const resolveMarketInfo = useCallback(
+    (skill: SkillMetadata): SkillMarketInfo | undefined => {
+      if (skill.source !== "user") return undefined
+      return marketSkillMap[normalizeSkillName(skill.name)]
+    },
+    [marketSkillMap]
+  )
+
+  const selectedSkillMarketInfo = useMemo(
+    () => (selectedSkill ? resolveMarketInfo(selectedSkill) : undefined),
+    [resolveMarketInfo, selectedSkill]
+  )
+
   const filterSkillsBySearch = useCallback(
     (list: SkillMetadata[]) => {
       const q = debouncedQuery.trim().toLowerCase()
       if (!q) return list
-      return list.filter(
-        (s) =>
-          s.name.toLowerCase().includes(q) || (s.description?.toLowerCase().includes(q) ?? false)
-      )
+      return list.filter((skill) => {
+        const marketInfo = resolveMarketInfo(skill)
+        const chineseName = getSkillChineseName(skill, marketInfo)
+        const category = getSkillCategory(skill, marketInfo)
+        return (
+          skill.name.toLowerCase().includes(q) ||
+          (skill.description?.toLowerCase().includes(q) ?? false) ||
+          chineseName.toLowerCase().includes(q) ||
+          category.toLowerCase().includes(q)
+        )
+      })
     },
-    [debouncedQuery]
+    [debouncedQuery, resolveMarketInfo]
   )
+
+  const openPublishDialog = useCallback((skill: SkillMetadata) => {
+    setPublishSkill(skill)
+    setPublishDialogOpen(true)
+  }, [])
 
   const filteredBuiltin = useMemo(
     () => filterSkillsBySearch(builtinSkills),
@@ -464,7 +743,6 @@ export function SkillsPanel(): React.JSX.Element {
       <div className="w-[330px] shrink-0 border-r border-border flex flex-col">
         <div className="p-3 border-b border-border space-y-2">
           <div className="flex items-center justify-between gap-2">
-            <h2 className="text-base font-bold">Skills</h2>
             <div className="flex items-center gap-1">
               <div className="relative flex-1 min-w-[120px] max-w-[160px]">
                 <Search className="absolute left-2 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground pointer-events-none" />
@@ -496,6 +774,15 @@ export function SkillsPanel(): React.JSX.Element {
               >
                 <Plus className="size-4" />
               </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 px-2 gap-1 text-xs shrink-0"
+                onClick={() => setShowCustomizeView(true, "market")}
+              >
+                <ShoppingBag className="size-3.5" />
+                去应用市场
+              </Button>
             </div>
           </div>
         </div>
@@ -504,6 +791,7 @@ export function SkillsPanel(): React.JSX.Element {
             <SkillSection
               title="内置技能"
               skills={filteredBuiltin}
+              marketSkillMap={marketSkillMap}
               expandedSkills={expandedSkills}
               skillFilesMap={skillFilesMap}
               selectedSkill={selectedSkill}
@@ -518,6 +806,7 @@ export function SkillsPanel(): React.JSX.Element {
               <SkillSection
                 title="我安装的技能"
                 skills={filteredCustom}
+                marketSkillMap={marketSkillMap}
                 expandedSkills={expandedSkills}
                 skillFilesMap={skillFilesMap}
                 selectedSkill={selectedSkill}
@@ -535,6 +824,7 @@ export function SkillsPanel(): React.JSX.Element {
 
       <SkillDetail
         skill={selectedSkill}
+        marketInfo={selectedSkillMarketInfo}
         selectedFilePath={selectedFilePath}
         content={selectedFileContent}
         previewKind={selectedFilePreviewKind}
@@ -547,6 +837,11 @@ export function SkillsPanel(): React.JSX.Element {
         onDelete={
           selectedSkill?.source === "user" ? () => handleDeleteSkill(selectedSkill) : undefined
         }
+        onPublish={
+          selectedSkill?.source === "user" && !selectedSkillMarketInfo
+            ? () => openPublishDialog(selectedSkill)
+            : undefined
+        }
       />
 
       <UploadSkillDialog
@@ -557,6 +852,20 @@ export function SkillsPanel(): React.JSX.Element {
           window.api.skills.list().then(setSkills).catch(console.error)
         }}
       />
+
+      <PublishSkillDialog
+        open={publishDialogOpen}
+        skill={publishSkill}
+        marketInfo={publishSkill ? resolveMarketInfo(publishSkill) : undefined}
+        onOpenChange={(open) => {
+          setPublishDialogOpen(open)
+          if (!open) setPublishSkill(null)
+        }}
+        onSuccess={() => {
+          void loadMarketSkills()
+          window.api.skills.list().then(setSkills).catch(console.error)
+        }}
+      />
     </div>
   )
 }
@@ -564,6 +873,7 @@ export function SkillsPanel(): React.JSX.Element {
 function SkillSection(props: {
   title: string
   skills: SkillMetadata[]
+  marketSkillMap: Record<string, SkillMarketInfo>
   expandedSkills: Set<string>
   skillFilesMap: Record<string, string[]>
   selectedSkill: SkillMetadata | null
@@ -577,6 +887,7 @@ function SkillSection(props: {
   const {
     title,
     skills,
+    marketSkillMap,
     expandedSkills,
     skillFilesMap,
     selectedSkill,
@@ -619,11 +930,14 @@ function SkillSection(props: {
               const files = skillFilesMap[skill.name] || []
               const selected = selectedSkill?.name === skill.name
               const disabled = disabledSkills.has(skill.name)
+              const marketInfo =
+                skill.source === "user" ? marketSkillMap[normalizeSkillName(skill.name)] : undefined
 
               return (
                 <SkillItem
                   key={skill.name}
                   skill={skill}
+                  marketInfo={marketInfo}
                   expanded={expanded}
                   selected={selected}
                   disabled={disabled}
@@ -645,6 +959,7 @@ function SkillSection(props: {
 
 function SkillItem(props: {
   skill: SkillMetadata
+  marketInfo?: SkillMarketInfo
   expanded: boolean
   selected: boolean
   disabled: boolean
@@ -657,6 +972,7 @@ function SkillItem(props: {
 }): React.JSX.Element {
   const {
     skill,
+    marketInfo,
     expanded,
     selected,
     disabled,
@@ -672,12 +988,16 @@ function SkillItem(props: {
     () => (expanded && files.length > 0 ? buildFileTree(skill.path, files) : []),
     [expanded, files, skill.path]
   )
+  const chineseName = getSkillChineseName(skill, marketInfo)
+  const displayName = chineseName || skill.name
+  const subtitleName = chineseName ? skill.name : null
+  const sourceLabel = marketInfo ? "市场" : skill.source === "project" ? "内置" : "本地"
 
   return (
     <div className="rounded-md border border-border/70 overflow-hidden">
       <button
         className={cn(
-          "w-full flex items-center gap-2 px-2 py-1.5 text-left transition-colors",
+          "w-full flex items-center gap-2 px-2.5 py-2 text-left transition-colors",
           selected ? "bg-muted/70" : "hover:bg-muted/50"
         )}
         onClick={() => onToggleSkill(skill)}
@@ -688,14 +1008,34 @@ function SkillItem(props: {
           <ChevronRight className="size-3.5 text-muted-foreground shrink-0" />
         )}
         <Folder className="size-3.5 text-muted-foreground shrink-0" />
-        <span
-          className={cn(
-            "text-sm truncate flex-1",
-            disabled && "text-muted-foreground line-through"
-          )}
-        >
-          {skill.name}
-        </span>
+        <div className="min-w-0 flex-1 space-y-1">
+          <p
+            className={cn(
+              "text-sm truncate",
+              disabled && "text-muted-foreground line-through"
+            )}
+          >
+            {displayName}
+          </p>
+          <div className="flex flex-wrap items-center gap-1 min-w-0">
+            {subtitleName && (
+              <span className="text-[10px] text-muted-foreground truncate min-w-0 max-w-full">
+                {subtitleName}
+              </span>
+            )}
+            <Badge
+              variant="outline"
+              className={cn(
+                "h-4 px-1.5 text-[10px]",
+                marketInfo
+                  ? "border-emerald-200 text-emerald-700 bg-emerald-50"
+                  : "text-muted-foreground"
+              )}
+            >
+              {sourceLabel}
+            </Badge>
+          </div>
+        </div>
         <Sparkles
           className={cn(
             "size-3 shrink-0",
@@ -744,8 +1084,8 @@ function SkillFileTree(props: {
           return (
             <div key={node.id}>
               <button
-                className="w-full flex items-center gap-2 pr-2 py-1.5 text-left text-xs text-muted-foreground hover:bg-muted/40"
-                style={{ paddingLeft: `${28 + level * 16}px` }}
+                className="w-full min-h-8 flex items-center gap-2 pr-2 py-1.5 text-left text-xs text-muted-foreground hover:bg-muted/40"
+                style={{ paddingLeft: `${22 + level * 14}px` }}
                 onClick={() => onToggleDirNode(node.id)}
               >
                 {isExpanded ? (
@@ -754,7 +1094,7 @@ function SkillFileTree(props: {
                   <ChevronRight className="size-3 shrink-0" />
                 )}
                 <Folder className="size-3 shrink-0" />
-                <span className="truncate">{node.name}</span>
+                <span className="min-w-0 flex-1 truncate">{node.name}</span>
               </button>
               {isExpanded && (
                 <SkillFileTree
@@ -776,14 +1116,14 @@ function SkillFileTree(props: {
           <button
             key={node.id}
             className={cn(
-              "w-full flex items-center gap-2 pr-2 py-1.5 text-left text-xs transition-colors",
+              "w-full min-h-8 flex items-center gap-2 pr-2 py-1.5 text-left text-xs transition-colors",
               activeFile ? "bg-muted" : "hover:bg-muted/50"
             )}
-            style={{ paddingLeft: `${28 + level * 16}px` }}
+            style={{ paddingLeft: `${22 + level * 14}px` }}
             onClick={() => onSelectFile(skill, node.path)}
           >
             <FileText className="size-3 shrink-0 text-muted-foreground" />
-            <span className="truncate">{node.name}</span>
+            <span className="min-w-0 flex-1 truncate">{node.name}</span>
           </button>
         )
       })}
@@ -793,6 +1133,7 @@ function SkillFileTree(props: {
 
 export function SkillDetail(props: {
   skill: SkillMetadata | null
+  marketInfo?: SkillMarketInfo
   selectedFilePath: string | null
   content: string | null
   previewKind: FilePreviewKind
@@ -801,10 +1142,12 @@ export function SkillDetail(props: {
   isDisabled: boolean
   onToggleEnabled: () => void
   onDelete?: () => void
+  onPublish?: () => void
   hideActions?: boolean
 }): React.JSX.Element {
   const {
     skill,
+    marketInfo,
     selectedFilePath,
     content,
     previewKind,
@@ -813,6 +1156,7 @@ export function SkillDetail(props: {
     isDisabled,
     onToggleEnabled,
     onDelete,
+    onPublish,
     hideActions = false
   } = props
 
@@ -887,7 +1231,10 @@ export function SkillDetail(props: {
     )
   }
 
-  const description = skill.description || "暂无描述"
+  const chineseName = getSkillChineseName(skill, marketInfo)
+  const category = getSkillCategory(skill, marketInfo)
+  const sourceLabel = marketInfo ? "市场" : skill.source === "project" ? "内置技能" : "本地技能"
+  const description = marketInfo?.description || skill.description || "暂无描述"
   const isMarkdown = !!selectedFilePath && /\.md$/i.test(selectedFilePath)
   const hasFrontmatter = isMarkdown && !!content && content.startsWith("---")
   const frontmatterEnd = hasFrontmatter ? content.indexOf("---", 3) : -1
@@ -911,13 +1258,40 @@ export function SkillDetail(props: {
     >
       <div className="p-4 border-b border-border flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <h2 className="text-base font-semibold truncate">{skill.name}</h2>
-          {/*<p className="text-xs text-muted-foreground mt-0.5 truncate">*/}
-          {/*  {selectedFilePath ? selectedFilePath.replace(/\\/g, "/") : "未选择文件"}*/}
-          {/*</p>*/}
+          <h2 className="text-base font-semibold truncate">{chineseName || skill.name}</h2>
+          <div className="mt-1 flex items-center gap-1.5 flex-wrap">
+            {chineseName && <p className="text-xs text-muted-foreground truncate">{skill.name}</p>}
+            <Badge
+              variant="outline"
+              className={cn(
+                "h-5 px-2 text-[10px]",
+                marketInfo
+                  ? "border-emerald-200 text-emerald-700 bg-emerald-50"
+                  : "text-muted-foreground"
+              )}
+            >
+              {sourceLabel}
+            </Badge>
+            {category && (
+              <Badge variant="outline" className="h-5 px-2 text-[10px]">
+                {category}
+              </Badge>
+            )}
+          </div>
         </div>
         {!hideActions && (
           <div className="flex items-center gap-1.5 shrink-0">
+            {onPublish && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 gap-1.5 text-xs"
+                onClick={onPublish}
+              >
+                <CloudUpload className="size-3" />
+                发布到市场
+              </Button>
+            )}
             {onDelete && (
               <Button
                 variant="ghost"
