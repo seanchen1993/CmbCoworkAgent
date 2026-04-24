@@ -717,6 +717,216 @@ function defaultSkillFile(files: string[]): string | null {
   return skillMd ?? files[0]
 }
 
+const SKILL_HOOK_TREE_EXAMPLE = `~/.cmbcoworkagent/skills/<skill-name>/
+  SKILL.md
+  hooks.json
+  hooks/
+    pre-write-check.py`
+
+const SKILL_HOOK_JSON_EXAMPLE = `[
+  {
+    "event": "PreToolUse",
+    "matcher": "write_file|edit_file",
+    "type": "command",
+    "command": "python C:/absolute/path/to/pre_write_guard.py",
+    "timeout": 10000,
+    "onBlock": {
+      "systemMessage": "请先按技能要求整改，再重试",
+      "requiredSkill": "<skill-name>"
+    }
+  }
+]`
+
+function SkillGuideSection(props: {
+  title: string
+  summary: string
+  children: React.ReactNode
+}): React.JSX.Element {
+  const { title, summary, children } = props
+  return (
+    <details className="rounded-lg border border-border/60 bg-background">
+      <summary className="cursor-pointer list-none p-4 [&::-webkit-details-marker]:hidden">
+        <div className="flex items-start justify-between gap-3">
+          <div className="space-y-1">
+            <h4 className="text-sm font-semibold text-foreground">{title}</h4>
+            <p className="text-sm text-muted-foreground">{summary}</p>
+          </div>
+          <span className="shrink-0 rounded-full border border-border/50 bg-muted/30 px-2 py-0.5 text-[10px] text-muted-foreground">
+            点击展开
+          </span>
+        </div>
+      </summary>
+      <div className="border-t border-border/50 p-4">{children}</div>
+    </details>
+  )
+}
+
+function SkillGuideSubSection(props: {
+  title: string
+  summary: string
+  children: React.ReactNode
+}): React.JSX.Element {
+  const { title, summary, children } = props
+  return (
+    <details className="rounded-md border border-border/40 bg-muted/20">
+      <summary className="cursor-pointer list-none px-3 py-2.5 [&::-webkit-details-marker]:hidden">
+        <div className="space-y-1">
+          <p className="text-sm font-medium text-foreground">{title}</p>
+          <p className="text-sm text-muted-foreground">{summary}</p>
+        </div>
+      </summary>
+      <div className="border-t border-border/40 px-3 py-3">{children}</div>
+    </details>
+  )
+}
+
+function SkillsGuide(): React.JSX.Element {
+  return (
+    <div className="flex-1 overflow-y-auto p-8">
+      <div className="mx-auto max-w-3xl space-y-4">
+        <div className="flex items-center gap-3">
+          <div className="rounded-2xl bg-muted p-3">
+            <Sparkles className="size-6 text-muted-foreground" />
+          </div>
+          <div className="space-y-1">
+            <h3 className="text-lg font-bold">技能介绍</h3>
+            <p className="text-sm text-muted-foreground">
+              技能是可复用的 AI
+              提示词模板；如果某个技能需要配套拦截、校验或整改引导，也可以在技能目录里直接附带 Skill
+              Hook。
+            </p>
+          </div>
+        </div>
+
+        <SkillGuideSection
+          title="技能基础"
+          summary="技能目录结构、上传方式，以及启用 / 禁用的基本行为。"
+        >
+          <div className="space-y-3">
+            <SkillGuideSubSection
+              title="技能目录长什么样"
+              summary="每个技能本质上是一个目录，核心文件是 SKILL.md。"
+            >
+              <div className="space-y-2 text-sm text-muted-foreground">
+                <p>
+                  技能的核心是
+                  <code className="mx-1 font-mono text-foreground/85">SKILL.md</code>
+                  ，用来定义任务目标、执行步骤、输出要求等。
+                </p>
+                <p>
+                  应用里会区分内置技能和自定义技能；内置技能不可删除，自定义技能可以上传、禁用和删除。
+                </p>
+              </div>
+            </SkillGuideSubSection>
+
+            <SkillGuideSubSection
+              title="如何添加和使用"
+              summary="支持上传 .md 或 .zip，上传后可直接在右侧预览。"
+            >
+              <div className="space-y-2 text-sm text-muted-foreground">
+                <p>
+                  点击左上角
+                  <code className="mx-1 font-mono text-foreground/85">+</code>
+                  可上传技能。
+                </p>
+                <p>上传后可以在左侧展开目录、右侧预览文件内容，也可以随时切换技能启用状态。</p>
+                <p>禁用技能后，该技能本体和它附带的 Skill Hook 会一起失效。</p>
+              </div>
+            </SkillGuideSubSection>
+          </div>
+        </SkillGuideSection>
+
+        <SkillGuideSection
+          title="Skill Hook 配置说明"
+          summary="把 hooks.json 放进技能目录后，技能启用时会自动加载对应 Hook。"
+        >
+          <div className="space-y-3">
+            <SkillGuideSubSection
+              title="Skill Hook 是什么"
+              summary="适合把某个技能专属的拦截、校验和整改引导跟技能本体一起分发。"
+            >
+              <div className="space-y-2 text-sm text-muted-foreground">
+                <p>
+                  Skill Hook 会进入统一 Hook
+                  执行链，但它的来源绑定在技能上：启用技能时加载，停用技能时同步移除。
+                </p>
+                <p>
+                  常见用途包括写入前校验、完成前补充检查、阻断后自动附带
+                  <code className="mx-1 font-mono text-foreground/85">requiredSkill</code>
+                  整改指引。
+                </p>
+              </div>
+            </SkillGuideSubSection>
+
+            <SkillGuideSubSection
+              title="目录与加载规则"
+              summary="在技能目录下新建 hooks.json；脚本本体建议放到 hooks/ 子目录。"
+            >
+              <div className="space-y-2 text-sm text-muted-foreground">
+                <pre className="rounded-md border border-border/40 bg-background p-2 text-xs leading-5 text-foreground">
+                  {SKILL_HOOK_TREE_EXAMPLE}
+                </pre>
+                <p>
+                  只要目录里存在
+                  <code className="mx-1 font-mono text-foreground/85">hooks.json</code>
+                  ，启用技能时就会自动加载。
+                </p>
+                <p>
+                  当前 Hook 命令实际按工作区
+                  <code className="mx-1 font-mono text-foreground/85">cwd</code>
+                  执行；如果脚本放在技能目录里，推荐在
+                  <code className="mx-1 font-mono text-foreground/85">command</code>
+                  里写绝对路径，避免随工作区变化找不到脚本。
+                </p>
+              </div>
+            </SkillGuideSubSection>
+
+            <SkillGuideSubSection
+              title="最小配置示例"
+              summary="下面是一个最小的 skill-level PreToolUse command hook。"
+            >
+              <div className="space-y-2 text-sm text-muted-foreground">
+                <pre className="overflow-x-auto rounded-md border border-border/40 bg-background p-3 text-xs leading-5 text-foreground">
+                  <code>{SKILL_HOOK_JSON_EXAMPLE}</code>
+                </pre>
+                <p>
+                  如果要用自然语言策略 Hook，可以把
+                  <code className="mx-1 font-mono text-foreground/85">type</code>
+                  改成
+                  <code className="mx-1 font-mono text-foreground/85">prompt</code>
+                  ，再提供
+                  <code className="mx-1 font-mono text-foreground/85">prompt</code>
+                  字段。
+                </p>
+              </div>
+            </SkillGuideSubSection>
+
+            <SkillGuideSubSection
+              title="调试与验证"
+              summary="看 Hook 执行记录、stderr 日志，以及去哪看完整事件协议。"
+            >
+              <div className="space-y-2 text-sm text-muted-foreground">
+                <p>
+                  命令 Hook 的调试日志建议写到 stderr；如果 stdout 输出 JSON，会被当成 Hook
+                  返回值解析。
+                </p>
+                <p>
+                  技能 Hook 生效后，可以在聊天区的“Hook 执行记录”里看执行结果，也可以到“自定义 &gt;
+                  钩子”查看统一的来源和配置详情。
+                </p>
+                <p>
+                  完整的事件输入 / 输出协议、tool_input 字段和各类返回字段说明，请到“自定义 &gt;
+                  钩子”右侧查看。
+                </p>
+              </div>
+            </SkillGuideSubSection>
+          </div>
+        </SkillGuideSection>
+      </div>
+    </div>
+  )
+}
+
 export function SkillsPanel(): React.JSX.Element {
   const { setShowCustomizeView } = useAppStore()
   const [skills, setSkills] = useState<SkillMetadata[]>([])
@@ -1202,6 +1412,13 @@ export function SkillsPanel(): React.JSX.Element {
         onToggleEnabled={() => {
           if (selectedSkill) toggleSkillEnabled(selectedSkill.name)
         }}
+        onShowGuide={() => {
+          setSelectedSkill(null)
+          setSelectedFilePath(null)
+          setSelectedFileContent(null)
+          setSelectedBinaryBase64(null)
+          setSelectedBinaryMimeType(null)
+        }}
         onDelete={
           selectedSkill?.source === "user" ? () => handleDeleteSkill(selectedSkill) : undefined
         }
@@ -1556,6 +1773,7 @@ export function SkillDetail(props: {
   binaryMimeType: string | null
   isDisabled: boolean
   onToggleEnabled: () => void
+  onShowGuide?: () => void
   onDelete?: () => void
   onPublish?: () => void
   publishLabel?: string
@@ -1575,6 +1793,7 @@ export function SkillDetail(props: {
     binaryMimeType,
     isDisabled,
     onToggleEnabled,
+    onShowGuide,
     onDelete,
     onPublish,
     publishLabel = "发布到市场",
@@ -1635,74 +1854,7 @@ export function SkillDetail(props: {
   }, [canEditCurrentFile, draftContent, isSaving, onSaveContent, selectedFilePath])
 
   if (!skill) {
-    return (
-      <div
-        className="flex-1 flex items-center justify-center overflow-y-auto p-8 select-none"
-        onCopy={(e) => e.preventDefault()}
-        onKeyDown={(e) => {
-          if ((e.ctrlKey || e.metaKey) && e.key === "c") {
-            e.preventDefault()
-          }
-        }}
-      >
-        <div className="max-w-md space-y-6">
-          <div className="text-center space-y-3">
-            <div className="size-14 rounded-2xl bg-muted/60 flex items-center justify-center mx-auto">
-              <Sparkles className="size-7 text-muted-foreground/60" />
-            </div>
-            <h3 className="text-lg font-semibold text-foreground/80">Skills 技能</h3>
-            <p className="text-sm text-muted-foreground leading-relaxed">
-              技能是可复用的 AI 提示词模板，让 AI
-              按照预设的指令和步骤完成特定任务。应用内置了一些常用技能，你也可以上传自定义技能来扩展
-              AI 的工作流。
-            </p>
-          </div>
-
-          <div className="space-y-3">
-            <div className="rounded-xl border border-border/60 bg-muted/30 p-4 space-y-3">
-              <p className="text-sm font-medium text-foreground/70">技能的结构</p>
-              <p className="text-[13px] text-muted-foreground leading-relaxed">
-                每个技能是一个文件夹，核心是{" "}
-                <span className="font-mono text-xs bg-muted px-1.5 py-0.5 rounded">SKILL.md</span>{" "}
-                文件，用来定义 AI 的行为指令——任务目标、执行步骤、输出格式等。技能分为
-                <span className="font-medium text-foreground/60">内置技能</span>（随应用提供）和
-                <span className="font-medium text-foreground/60">自定义技能</span>
-                （用户上传），内置技能不可删除，自定义技能可随时管理。
-              </p>
-            </div>
-
-            <div className="rounded-xl border border-border/60 bg-muted/30 p-4 space-y-3">
-              <p className="text-sm font-medium text-foreground/70">如何添加和使用？</p>
-              <ul className="text-[13px] text-muted-foreground space-y-2 leading-relaxed">
-                <li className="flex gap-2">
-                  <span className="text-foreground/40 shrink-0">1.</span>
-                  <span>
-                    点击 <span className="font-medium text-foreground/60">+</span> 按钮，支持上传
-                    .md 或 .zip 格式的技能文件
-                  </span>
-                </li>
-                <li className="flex gap-2">
-                  <span className="text-foreground/40 shrink-0">2.</span>
-                  <span>上传后可在右侧预览文件内容，支持渲染和源码切换</span>
-                </li>
-                <li className="flex gap-2">
-                  <span className="text-foreground/40 shrink-0">3.</span>
-                  <span>通过开关可随时启用或禁用某个技能</span>
-                </li>
-              </ul>
-            </div>
-
-            <div className="rounded-xl border border-border/60 bg-muted/30 p-4 space-y-3">
-              <p className="text-sm font-medium text-foreground/70">适用场景</p>
-              <p className="text-[13px] text-muted-foreground leading-relaxed">
-                代码审查、文档生成、Bug 分析、数据处理、翻译润色……任何你需要 AI
-                反复执行的任务，都可以封装成技能来提升效率。你还可以从 Market 中下载大家分享的技能。
-              </p>
-            </div>
-          </div>
-        </div>
-      </div>
-    )
+    return <SkillsGuide />
   }
 
   const chineseName = getSkillChineseName(skill, marketInfo)

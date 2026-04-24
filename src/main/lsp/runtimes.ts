@@ -1,9 +1,12 @@
-import { spawnSync } from "child_process"
+import { execFile } from "child_process"
 import { existsSync, readdirSync, readFileSync } from "fs"
 import { homedir } from "os"
 import { join } from "path"
+import { promisify } from "util"
 import type { LspConfig, LspJavaRuntime, LspJavaRuntimeName, LspProjectRequirement } from "../types"
 import { LSP_JAVA_RUNTIME_NAMES } from "../types"
+
+const execFileP = promisify(execFile)
 
 const RUNTIME_NAME_BY_MAJOR: Record<number, LspJavaRuntimeName> = {
   8: "JavaSE-1.8",
@@ -19,7 +22,7 @@ const SOURCE_PRIORITY: Record<LspJavaRuntime["source"], number> = {
   scan: 3
 }
 
-const AUTO_RUNTIME_CACHE_TTL_MS = 30_000
+const AUTO_RUNTIME_CACHE_TTL_MS = 5 * 60_000
 
 type JavaHomeStatus = { path: string; version: string | null; valid: boolean; error?: string }
 type ResolvedJavaHome = { runtime: LspJavaRuntime | null; status: JavaHomeStatus }
@@ -28,8 +31,18 @@ type AutoRuntimeCache = {
   checkedAt: number
   runtimes: LspJavaRuntime[]
 }
+type RuntimeContext = {
+  projectRequirement: LspProjectRequirement | null
+  runtimes: LspJavaRuntime[]
+  selectedRuntime: LspJavaRuntime | null
+  manualJavaHomeStatus: { path: string; version: string | null; valid: boolean; error?: string } | null
+  missingRuntime: LspJavaRuntimeName | null
+  settingsRuntimes: Array<{ name: LspJavaRuntimeName; path: string; default?: boolean }>
+}
 
 let autoRuntimeCache: AutoRuntimeCache | null = null
+let autoRuntimeInflight: Promise<LspJavaRuntime[]> | null = null
+let autoRuntimeCacheVersion = 0
 
 function normalizeJavaHome(inputPath: string): string {
   const trimmed = inputPath.trim().replace(/[\\/]+$/, "")
@@ -119,12 +132,15 @@ function validateJavaHome(javaHome: string): { version: string | null; valid: bo
   return { version, valid: true }
 }
 
-function collectMacJavaHomes(): string[] {
+async function collectMacJavaHomes(): Promise<string[]> {
   if (process.platform !== "darwin") return []
   const homes = new Set<string>()
 
   try {
-    const result = spawnSync("/usr/libexec/java_home", ["-V"], { encoding: "utf-8" })
+    const result = await execFileP("/usr/libexec/java_home", ["-V"], {
+      encoding: "utf-8",
+      timeout: 1500
+    })
     const combined = `${result.stdout ?? ""}\n${result.stderr ?? ""}`
     for (const line of combined.split("\n")) {
       const pathMatch = line.match(/(\/.*)$/)
@@ -143,12 +159,16 @@ function collectMacJavaHomes(): string[] {
   return Array.from(homes)
 }
 
-function collectWindowsJavaHomes(): string[] {
+async function collectWindowsJavaHomes(): Promise<string[]> {
   if (process.platform !== "win32") return []
   const homes = new Set<string>()
 
   try {
-    const result = spawnSync("where", ["java"], { encoding: "utf-8" })
+    const result = await execFileP("where", ["java"], {
+      encoding: "utf-8",
+      timeout: 1500,
+      windowsHide: true
+    })
     const combined = `${result.stdout ?? ""}\n${result.stderr ?? ""}`
     for (const line of combined.split("\n")) {
       const candidate = line.trim()
@@ -338,18 +358,20 @@ export function inferProjectJavaRequirement(projectRoot: string): LspProjectRequ
   )
 }
 
-function collectAutoDetectedJavaHomes(): string[] {
+async function collectAutoDetectedJavaHomes(): Promise<string[]> {
   const homes = new Set<string>()
   const envHome = process.env.JAVA_HOME
   if (envHome) homes.add(normalizeJavaHome(envHome))
-  for (const home of collectMacJavaHomes()) homes.add(home)
-  for (const home of collectWindowsJavaHomes()) homes.add(home)
+  for (const home of await collectMacJavaHomes()) homes.add(home)
+  for (const home of await collectWindowsJavaHomes()) homes.add(home)
   for (const home of collectLinuxJavaHomes()) homes.add(home)
   return Array.from(homes)
 }
 
 export function invalidateJavaRuntimeCache(): void {
   autoRuntimeCache = null
+  autoRuntimeInflight = null
+  autoRuntimeCacheVersion += 1
 }
 
 function resolveManualJavaHome(manualJavaHome: string | null): {
@@ -363,7 +385,7 @@ function resolveManualJavaHome(manualJavaHome: string | null): {
   return resolveJavaHome(manualJavaHome, "configured")
 }
 
-function resolveAutoDetectedJavaRuntimes(): LspJavaRuntime[] {
+async function resolveAutoDetectedJavaRuntimes(): Promise<LspJavaRuntime[]> {
   const envJavaHome = process.env.JAVA_HOME ?? null
   const now = Date.now()
   if (
@@ -373,34 +395,63 @@ function resolveAutoDetectedJavaRuntimes(): LspJavaRuntime[] {
   ) {
     return autoRuntimeCache.runtimes
   }
+  if (autoRuntimeInflight) return autoRuntimeInflight
 
-  const runtimes = new Map<LspJavaRuntimeName, LspJavaRuntime>()
+  const cacheVersion = autoRuntimeCacheVersion
+  const task = (async (): Promise<LspJavaRuntime[]> => {
+    const runtimes = new Map<LspJavaRuntimeName, LspJavaRuntime>()
 
-  for (const home of collectAutoDetectedJavaHomes()) {
-    const source: LspJavaRuntime["source"] =
-      process.env.JAVA_HOME && isSameJavaHome(process.env.JAVA_HOME, home)
-        ? "env"
-        : process.platform === "darwin"
-          ? "java_home"
-          : "scan"
-    const runtime = inferRuntimeFromPath(home, source)
-    if (runtime) setRuntime(runtimes, runtime)
+    for (const home of await collectAutoDetectedJavaHomes()) {
+      const source: LspJavaRuntime["source"] =
+        process.env.JAVA_HOME && isSameJavaHome(process.env.JAVA_HOME, home)
+          ? "env"
+          : process.platform === "darwin"
+            ? "java_home"
+            : "scan"
+      const runtime = inferRuntimeFromPath(home, source)
+      if (runtime) setRuntime(runtimes, runtime)
+    }
+
+    const resolved = LSP_JAVA_RUNTIME_NAMES
+      .map((name) => runtimes.get(name))
+      .filter((runtime): runtime is LspJavaRuntime => Boolean(runtime))
+
+    if (cacheVersion === autoRuntimeCacheVersion) {
+      autoRuntimeCache = { envJavaHome, checkedAt: now, runtimes: resolved }
+    }
+    return resolved
+  })()
+
+  autoRuntimeInflight = task
+  try {
+    return await task
+  } finally {
+    if (autoRuntimeInflight === task) autoRuntimeInflight = null
   }
-
-  const resolved = LSP_JAVA_RUNTIME_NAMES
-    .map((name) => runtimes.get(name))
-    .filter((runtime): runtime is LspJavaRuntime => Boolean(runtime))
-
-  autoRuntimeCache = { envJavaHome, checkedAt: now, runtimes: resolved }
-  return resolved
 }
 
-function resolveJavaRuntimesWithManualResolution(manualResolution: ReturnType<typeof resolveManualJavaHome>): LspJavaRuntime[] {
+function manualRuntimeSatisfiesProject(
+  runtime: LspJavaRuntime,
+  projectRequirement: LspProjectRequirement | null
+): boolean {
+  return !projectRequirement || runtime.name === projectRequirement.runtimeName
+}
+
+async function resolveJavaRuntimesWithManualResolution(
+  manualResolution: ReturnType<typeof resolveManualJavaHome>,
+  projectRequirement: LspProjectRequirement | null
+): Promise<LspJavaRuntime[]> {
   const runtimes = new Map<LspJavaRuntimeName, LspJavaRuntime>()
+  const manualRuntime = manualResolution.runtime
 
-  if (manualResolution.runtime) setRuntime(runtimes, manualResolution.runtime)
+  if (manualRuntime) {
+    setRuntime(runtimes, manualRuntime)
+    if (manualRuntime.valid && manualRuntimeSatisfiesProject(manualRuntime, projectRequirement)) {
+      return [manualRuntime]
+    }
+  }
 
-  for (const runtime of resolveAutoDetectedJavaRuntimes()) {
+  for (const runtime of await resolveAutoDetectedJavaRuntimes()) {
     if (runtime) setRuntime(runtimes, runtime)
   }
 
@@ -409,20 +460,13 @@ function resolveJavaRuntimesWithManualResolution(manualResolution: ReturnType<ty
     .filter((runtime): runtime is LspJavaRuntime => Boolean(runtime))
 }
 
-export function resolveJavaRuntimes(config: LspConfig): LspJavaRuntime[] {
-  return resolveJavaRuntimesWithManualResolution(resolveManualJavaHome(config.manualJavaHome))
+export function resolveJavaRuntimes(config: LspConfig): Promise<LspJavaRuntime[]> {
+  return resolveJavaRuntimesWithManualResolution(resolveManualJavaHome(config.manualJavaHome), null)
 }
 
-function buildRuntimeContext(config: LspConfig, projectRequirement: LspProjectRequirement | null): {
-  projectRequirement: LspProjectRequirement | null
-  runtimes: LspJavaRuntime[]
-  selectedRuntime: LspJavaRuntime | null
-  manualJavaHomeStatus: { path: string; version: string | null; valid: boolean; error?: string } | null
-  missingRuntime: LspJavaRuntimeName | null
-  settingsRuntimes: Array<{ name: LspJavaRuntimeName; path: string; default?: boolean }>
-} {
+async function buildRuntimeContext(config: LspConfig, projectRequirement: LspProjectRequirement | null): Promise<RuntimeContext> {
   const manualResolution = resolveManualJavaHome(config.manualJavaHome)
-  const runtimes = resolveJavaRuntimesWithManualResolution(manualResolution)
+  const runtimes = await resolveJavaRuntimesWithManualResolution(manualResolution, projectRequirement)
   const manualJavaHomeStatus = manualResolution.status
   const validRuntimes = runtimes.filter((runtime) => runtime.valid)
 
@@ -457,10 +501,10 @@ function buildRuntimeContext(config: LspConfig, projectRequirement: LspProjectRe
   }
 }
 
-export function buildGlobalRuntimeContext(config: LspConfig): ReturnType<typeof buildRuntimeContext> {
+export function buildGlobalRuntimeContext(config: LspConfig): Promise<RuntimeContext> {
   return buildRuntimeContext(config, null)
 }
 
-export function buildProjectRuntimeContext(projectRoot: string, config: LspConfig): ReturnType<typeof buildRuntimeContext> {
+export function buildProjectRuntimeContext(projectRoot: string, config: LspConfig): Promise<RuntimeContext> {
   return buildRuntimeContext(config, inferProjectJavaRequirement(projectRoot))
 }

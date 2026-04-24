@@ -1,4 +1,4 @@
-import { IpcMain } from "electron"
+import { IpcMain, BrowserWindow } from "electron"
 import { v4 as uuid } from "uuid"
 import {
   getAllThreads,
@@ -10,6 +10,8 @@ import {
 import { getCheckpointer, closeCheckpointer } from "../agent/runtime"
 import { deleteThreadCheckpoint } from "../storage"
 import { generateTitle } from "../services/title-generator"
+import { fireSessionEnd } from "../hooks/session-lifecycle"
+import { makeHookResultCallback } from "../hooks/result-callback"
 import type { Thread, ThreadUpdateParams } from "../types"
 
 export function registerThreadHandlers(ipcMain: IpcMain): void {
@@ -85,8 +87,28 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
   })
 
   // Delete a thread
-  ipcMain.handle("threads:delete", async (_event, threadId: string) => {
+  ipcMain.handle("threads:delete", async (event, threadId: string) => {
     console.log("[Threads] Deleting thread:", threadId)
+
+    // Fire SessionEnd before teardown so hooks can observe a valid thread record.
+    // No-op if SessionStart never fired for this thread.
+    const existingThread = getThread(threadId)
+    let workspacePath: string | undefined
+    if (existingThread?.metadata) {
+      try {
+        const metadata = JSON.parse(existingThread.metadata) as Record<string, unknown>
+        workspacePath = typeof metadata.workspacePath === "string" ? metadata.workspacePath : undefined
+      } catch {
+        workspacePath = undefined
+      }
+    }
+    const window = BrowserWindow.fromWebContents(event.sender)
+    const hookChannel = `agent:stream:${threadId}`
+    await fireSessionEnd(
+      threadId,
+      workspacePath,
+      window ? makeHookResultCallback(window, hookChannel) : undefined
+    )
 
     // Delete from our metadata store
     dbDeleteThread(threadId)

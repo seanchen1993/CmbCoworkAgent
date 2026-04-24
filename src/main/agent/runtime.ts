@@ -24,6 +24,7 @@ import { ChatOpenAI } from "@langchain/openai"
 import { DynamicStructuredTool, ToolInputParsingException } from "@langchain/core/tools"
 import { SqlJsSaver } from "../checkpointer/sqljs-saver"
 import { LocalSandbox } from "./local-sandbox"
+import type { HookResultCallback } from "../hooks/runner"
 import {
   createAgent,
   createMiddleware,
@@ -67,6 +68,7 @@ import { createToolSearchTools } from "./tools/tool-search-tool"
 import { createCodeExecTool } from "./tools/code-exec-tool"
 import { listSavedCodeExecTools } from "../code-exec/saved-tool-store"
 import { getWindowsSandboxMode, getYoloMode, getEnabledHooks, isCodeExecEnabled, getLspConfig } from "../storage"
+import { runHooks } from "../hooks/runner"
 import { ApprovalStore } from "./approval-store"
 import { ToolOrchestrator } from "./tool-orchestrator"
 import type { ApprovalRequest, ApprovalDecision } from "../types"
@@ -990,6 +992,8 @@ export interface CreateAgentRuntimeOptions {
    *  on routing mode — pinned mode benefits from more retries since there is
    *  no failover fallback, while auto-routing can retry less and failover more. */
   maxRetryAttempts?: number
+  /** Callback invoked after each hook executes — used to emit results to the renderer. */
+  onHookResult?: HookResultCallback
 }
 
 // Create agent runtime with configured model and checkpointer
@@ -1003,7 +1007,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     extraSystemPrompt,
     retryHooks,
     maxRetryAttempts,
-    enableAgentsPrompt = true
+    enableAgentsPrompt = true,
+    onHookResult
   } = options
 
   if (!threadId) {
@@ -1074,7 +1079,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const windowsSandbox = process.platform === "win32" ? getWindowsSandboxMode() : "none"
   console.log(`[Runtime] codex.exe: ${codexExePath}, exists: ${codexExists}, sandboxMode: ${windowsSandbox}`)
 
-  const enabledHooks = getEnabledHooks()
+  const enabledHooks = getEnabledHooks(workspacePath)
   console.log(`[Runtime] Loaded ${enabledHooks.length} enabled hooks`)
 
   const backend = new LocalSandbox({
@@ -1084,8 +1089,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     maxOutputBytes,
     windowsSandbox,
     codexExePath: codexExists ? codexExePath : undefined,
-    // Pass a getter so hooks are always read fresh from storage at call time
-    hooks: getEnabledHooks,
+    hooks: () => getEnabledHooks(workspacePath),
+    onHookResult,
     abortSignal: options.abortSignal,
     runId: threadId
   })
@@ -1120,6 +1125,14 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         targetWebContentsIds: BrowserWindow.getAllWindows().map(w => w.webContents.id)
       })
       console.log(`[Orchestrator] sending approval request on channel: approval:request:${threadId}, reqId=${req.id}, command=${req.command}`)
+      // Fire Notification hook — agent is now waiting on user input.
+      // Fire-and-forget so it doesn't delay the UI prompt.
+      runHooks(getEnabledHooks(workspacePath), "Notification", {
+        toolName: req.tool_call?.name,
+        toolArgs: { command: req.command, reason: req.reason, filePath: req.filePath },
+        workspacePath,
+        sessionId: threadId
+      }, onHookResult).catch((e) => console.warn("[Hooks] Notification hook error:", e))
       for (const win of BrowserWindow.getAllWindows()) {
         win.webContents.send(`approval:request:${threadId}`, req)
       }

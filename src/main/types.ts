@@ -1,3 +1,5 @@
+import type { HookConfig } from "./hooks/types"
+
 // Thread types matching langgraph-api
 export type ThreadStatus = "idle" | "busy" | "interrupted" | "error"
 
@@ -206,7 +208,7 @@ export interface McpConnectorConfig {
   env?: Record<string, string>
   enabled: boolean
   advanced?: McpConnectorAdvanced
-  lazyLoad?: boolean  // true = lazy load tools, false/undefined = load all tools
+  lazyLoad?: boolean // true = lazy load tools, false/undefined = load all tools
   createdAt: string
   updatedAt: string
 }
@@ -220,11 +222,18 @@ export interface McpConnectorUpsert {
   env?: Record<string, string>
   enabled?: boolean
   advanced?: McpConnectorAdvanced
-  lazyLoad?: boolean  // true = lazy load tools, false/undefined = load all tools
+  lazyLoad?: boolean // true = lazy load tools, false/undefined = load all tools
 }
 
 // Scheduled Task types
-export type ScheduledTaskFrequency = "once" | "manual" | "hourly" | "daily" | "weekdays" | "weekly" | "interval"
+export type ScheduledTaskFrequency =
+  | "once"
+  | "manual"
+  | "hourly"
+  | "daily"
+  | "weekdays"
+  | "weekly"
+  | "interval"
 export type ScheduledTaskType = "action" | "reminder"
 
 export interface ScheduledTask {
@@ -232,15 +241,15 @@ export interface ScheduledTask {
   name: string
   description: string
   prompt: string
-  taskType: ScheduledTaskType       // "action" = agent 执行操作, "reminder" = 暖心提醒
+  taskType: ScheduledTaskType // "action" = agent 执行操作, "reminder" = 暖心提醒
   modelId: string | null
   workDir: string | null
   chatxRobotChatId: string | null // 关联的机器人会话ID，执行完后 HTTP 回复
   frequency: ScheduledTaskFrequency
-  intervalMinutes: number | null    // 仅 interval 类型使用，如 5 表示每5分钟
-  runAt: string | null            // ISO 时间戳，仅 once 类型使用
-  runAtTime: string | null       // "HH:mm" 格式，如 "09:00"
-  weekday: number | null          // 0=周日, 1=周一, ..., 6=周六 (仅 weekly 使用)
+  intervalMinutes: number | null // 仅 interval 类型使用，如 5 表示每5分钟
+  runAt: string | null // ISO 时间戳，仅 once 类型使用
+  runAtTime: string | null // "HH:mm" 格式，如 "09:00"
+  weekday: number | null // 0=周日, 1=周一, ..., 6=周六 (仅 weekly 使用)
   enabled: boolean
   createdAt: string
   updatedAt: string
@@ -299,6 +308,8 @@ export interface PluginManifest {
   keywords?: string[]
   skills?: string | string[]
   mcpServers?: string
+  /** Path to hooks config file relative to plugin root (default: "hooks/hooks.json") */
+  hooks?: string
 }
 
 export interface PluginMetadata {
@@ -311,8 +322,24 @@ export interface PluginMetadata {
   enabled: boolean
   skillCount: number
   mcpServerCount: number
+  hookCount?: number
+  /** Cached hooks config path relative to plugin root, read from manifest at install/inspect time. */
+  hookPath?: string
   createdAt: string
   updatedAt: string
+}
+
+export interface PluginHookMetadata extends HookConfig {
+  pluginId: string
+  pluginName: string
+  pluginEnabled: boolean
+  hookPath: string
+}
+
+export interface SkillHookMetadata extends HookConfig {
+  skillName: string
+  skillPath: string
+  hookPath: string
 }
 
 export interface PluginMcpServerConfig {
@@ -326,10 +353,16 @@ export interface PluginMcpServerConfig {
 
 // LSP types
 export const LSP_JAVA_RUNTIME_NAMES = ["JavaSE-1.8", "JavaSE-11", "JavaSE-17", "JavaSE-21"] as const
-export type LspJavaRuntimeName = typeof LSP_JAVA_RUNTIME_NAMES[number]
+export type LspJavaRuntimeName = (typeof LSP_JAVA_RUNTIME_NAMES)[number]
 export type LspJavaRuntimeSource = "configured" | "env" | "java_home" | "scan"
 export type LspServerState = "stopped" | "starting" | "running" | "error"
-export type LspLifecycleState = "stopped" | "starting" | "importing" | "ready" | "degraded" | "error"
+export type LspLifecycleState =
+  | "stopped"
+  | "starting"
+  | "importing"
+  | "ready"
+  | "degraded"
+  | "error"
 
 export interface LspJavaRuntime {
   name: LspJavaRuntimeName
@@ -443,11 +476,11 @@ export interface LspCallHierarchyOutgoingCall {
 
 /** Review decision for command approval */
 export type ReviewDecision =
-  | "approved"            // approve this invocation only
-  | "approved_session"    // approve for the remainder of this session (cached)
-  | "approved_permanent"  // always allow this command pattern (persisted)
-  | "denied"              // reject
-  | "abort"               // abort the entire run
+  | "approved" // approve this invocation only
+  | "approved_session" // approve for the remainder of this session (cached)
+  | "approved_permanent" // always allow this command pattern (persisted)
+  | "denied" // reject
+  | "abort" // abort the entire run
 
 /** Command safety classification */
 export type ExecSafetyLevel = "safe" | "needs_approval" | "forbidden"
@@ -456,19 +489,25 @@ export type ExecSafetyLevel = "safe" | "needs_approval" | "forbidden"
 export interface ApprovalRequest extends HITLRequest {
   safety_level: ExecSafetyLevel
   /** Operation type: "execute" for shell commands, "write_file"/"edit_file" for file operations */
-  operation?: "execute" | "write_file" | "edit_file" | "code_exec" | "prepare_save_code_exec_tool" | "save_code_exec_tool"
-  command?: string           // shell command (for execute operations)
-  filePath?: string          // target file path (for write_file/edit_file operations)
-  code?: string              // code_exec script preview
-  params?: unknown           // code_exec params preview
-  timeoutMs?: number         // code_exec timeout preview
-  savedToolName?: string     // proposed saved tool name before slug normalization
-  savedToolId?: string       // proposed saved tool ID
+  operation?:
+    | "execute"
+    | "write_file"
+    | "edit_file"
+    | "code_exec"
+    | "prepare_save_code_exec_tool"
+    | "save_code_exec_tool"
+  command?: string // shell command (for execute operations)
+  filePath?: string // target file path (for write_file/edit_file operations)
+  code?: string // code_exec script preview
+  params?: unknown // code_exec params preview
+  timeoutMs?: number // code_exec timeout preview
+  savedToolName?: string // proposed saved tool name before slug normalization
+  savedToolId?: string // proposed saved tool ID
   savedToolDescription?: string // proposed saved tool description
   savedToolMetadataError?: string // metadata generation failure message for manual fallback
   cwd: string
-  reason?: string           // why approval is needed
-  retry_reason?: string     // sandbox-failure retry context
+  reason?: string // why approval is needed
+  retry_reason?: string // sandbox-failure retry context
   allowed_approval_types: ApprovalDecisionType[]
 }
 
