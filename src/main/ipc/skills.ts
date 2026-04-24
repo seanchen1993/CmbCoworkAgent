@@ -8,6 +8,12 @@ import * as iconv from "iconv-lite"
 import { getCustomSkillsDir, getDisabledSkills, getSkillsDir, setDisabledSkills } from "../storage"
 import type { SkillMetadata } from "../types"
 
+interface ZipEntryLike {
+  entryName: string
+  rawEntryName?: Buffer
+  efs?: boolean
+}
+
 function sanitizeSkillName(name: string): string {
   return (
     name
@@ -133,6 +139,144 @@ function decodeSkillTextFile(content: Buffer, filePath: string): string {
   }
 
   return content.toString("utf-8")
+}
+
+function normalizeZipEntryName(name: string): string {
+  return String(name || "")
+    .replace(/\\/g, "/")
+    .replace(/\0/g, "")
+}
+
+function decodeZipEntryName(entry: ZipEntryLike): string {
+  const fallback = normalizeZipEntryName(entry.entryName)
+  const raw = Buffer.isBuffer(entry.rawEntryName) ? entry.rawEntryName : null
+  if (!raw || raw.length === 0) return fallback
+
+  try {
+    // UTF-8 标记 or UTF-8 字节有效：优先按 UTF-8。
+    if (entry.efs === true || isValidUtf8(raw)) {
+      const utf8Name = normalizeZipEntryName(raw.toString("utf-8"))
+      if (utf8Name) return utf8Name
+    }
+
+    // Windows 上传的 ZIP 常见 ANSI(GBK/GB18030) 文件名。
+    if (process.platform === "win32") {
+      const gbName = normalizeZipEntryName(iconv.decode(raw, "gb18030"))
+      if (gbName) return gbName
+    }
+
+    // 按 ZIP 规范的 CP437 做兜底。
+    if (iconv.encodingExists("cp437")) {
+      const cp437Name = normalizeZipEntryName(iconv.decode(raw, "cp437"))
+      if (cp437Name) return cp437Name
+    }
+  } catch {
+    // fall through
+  }
+
+  return fallback
+}
+
+function containsCjk(text: string): boolean {
+  return /[\u3400-\u9fff]/.test(text)
+}
+
+function isSafePathSegment(name: string): boolean {
+  if (!name || name === "." || name === "..") return false
+  if (/[\\/:*?"<>|]/.test(name)) return false
+  // Windows 文件名不允许以空格或点结尾
+  if (/[. ]$/.test(name)) return false
+  return true
+}
+
+function scoreDecodedName(name: string): number {
+  let score = 0
+  for (const ch of name) {
+    if (/[\u3400-\u9fff]/.test(ch)) score += 4
+    else if (/[A-Za-z0-9._\- ()[\]]/.test(ch)) score += 1
+    else if (/[\u2500-\u259f]/.test(ch))
+      // box drawing / block
+      score -= 3
+    else if (ch === "\uFFFD") score -= 4
+  }
+  return score
+}
+
+/**
+ * 修复历史上可能出现的“zip 文件名被 cp437 误解码”导致的乱码名。
+ * 只在“原名不含 CJK、候选名包含 CJK”时触发，尽量保守避免误改。
+ */
+function recoverMojibakePathSegment(name: string): string | null {
+  if (!name || containsCjk(name) || !iconv.encodingExists("cp437")) return null
+  try {
+    const cp437Bytes = iconv.encode(name, "cp437")
+    const candidates = [
+      normalizeZipEntryName(iconv.decode(cp437Bytes, "utf-8")),
+      normalizeZipEntryName(iconv.decode(cp437Bytes, "gb18030"))
+    ]
+    const valid = candidates.filter((candidate) => {
+      if (!candidate || candidate === name) return false
+      if (!containsCjk(candidate)) return false
+      return isSafePathSegment(candidate)
+    })
+    if (valid.length === 0) return null
+
+    let best = valid[0]
+    let bestScore = scoreDecodedName(best)
+    for (const candidate of valid.slice(1)) {
+      const score = scoreDecodedName(candidate)
+      if (score > bestScore) {
+        best = candidate
+        bestScore = score
+      }
+    }
+    return best
+  } catch {
+    return null
+  }
+}
+
+async function repairMojibakeNamesInSkillDir(skillDirPath: string): Promise<void> {
+  if (process.platform !== "win32" || !iconv.encodingExists("cp437")) return
+
+  const dirQueue: string[] = [skillDirPath]
+  for (let i = 0; i < dirQueue.length; i++) {
+    const currentDir = dirQueue[i]
+    let entries: Awaited<ReturnType<typeof fs.readdir>>
+    try {
+      entries = await fs.readdir(currentDir, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      dirQueue.push(path.join(currentDir, entry.name))
+    }
+  }
+
+  // 深层目录优先重命名，避免父目录先改名后子路径失效。
+  dirQueue.sort((a, b) => b.length - a.length)
+
+  for (const dirPath of dirQueue) {
+    let entries: Awaited<ReturnType<typeof fs.readdir>>
+    try {
+      entries = await fs.readdir(dirPath, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      const recovered = recoverMojibakePathSegment(entry.name)
+      if (!recovered || recovered === entry.name) continue
+      const fromPath = path.join(dirPath, entry.name)
+      const toPath = path.join(dirPath, recovered)
+      if (existsSync(toPath)) continue
+      try {
+        await fs.rename(fromPath, toPath)
+      } catch (renameError) {
+        console.warn(`[Skills] Failed to repair mojibake filename "${entry.name}":`, renameError)
+      }
+    }
+  }
 }
 
 function parseYamlFrontmatter(content: string): Record<string, string> {
@@ -358,6 +502,8 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
         return { success: false, error: "Access denied: skill path outside skills directory" }
       }
 
+      await repairMojibakeNamesInSkillDir(skillDirPath)
+
       let files = await listSkillFiles(skillDirPath)
       // Fallback: always expose the skill entry file if directory traversal returns empty.
       if (files.length === 0 && existsSync(resolvedSkillFilePath)) {
@@ -384,20 +530,24 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
         const zip = new AdmZip(Buffer.from(buffer))
         const entries = zip
           .getEntries()
-          .filter((entry) => !entry.isDirectory && /\.md$/i.test(entry.entryName))
-          .sort((a, b) => a.entryName.localeCompare(b.entryName))
+          .map((entry) => ({ entry, decodedName: decodeZipEntryName(entry) }))
+          .filter((item) => !item.entry.isDirectory && /\.md$/i.test(item.decodedName))
+          .sort((a, b) => a.decodedName.localeCompare(b.decodedName))
 
         if (entries.length === 0) {
           return { success: false, error: "Zip 中未找到 .md 文件" }
         }
 
         const preferred =
-          entries.find((entry) => /(^|\/)SKILL\.md$/i.test(entry.entryName)) || entries[0]
-        const content = preferred.getData().toString("utf-8")
+          entries.find((item) => /(^|\/)SKILL\.md$/i.test(item.decodedName)) || entries[0]
+        const content = decodeSkillTextFile(
+          preferred.entry.getData(),
+          preferred.decodedName || "SKILL.md"
+        )
 
         return {
           success: true,
-          filePath: preferred.entryName || fileName || "SKILL.md",
+          filePath: preferred.decodedName || fileName || "SKILL.md",
           content
         }
       } catch (e) {
@@ -466,23 +616,24 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
         if (ext === ".zip") {
           const zip = new AdmZip(Buffer.from(buffer))
           const entries = zip.getEntries()
+          const decodedEntries = entries.map((entry) => ({
+            entry,
+            decodedName: decodeZipEntryName(entry)
+          }))
 
-          let skillMdEntry = entries.find((e) => !e.isDirectory && e.entryName === "SKILL.md")
-          if (!skillMdEntry) {
-            const firstDir = entries.find((e) => e.isDirectory && !e.entryName.includes("/"))
-            if (firstDir) {
-              const prefix = firstDir.entryName
-              skillMdEntry = entries.find(
-                (e) => !e.isDirectory && e.entryName === `${prefix}SKILL.md`
-              )
-            }
-          }
+          const skillMdEntry =
+            decodedEntries.find(
+              (item) => !item.entry.isDirectory && /(^|\/)SKILL\.md$/i.test(item.decodedName)
+            ) || null
 
           if (!skillMdEntry) {
             return { success: false, error: "ZIP 文件必须包含 SKILL.md" }
           }
 
-          const content = skillMdEntry.getData().toString("utf-8")
+          const content = decodeSkillTextFile(
+            skillMdEntry.entry.getData(),
+            skillMdEntry.decodedName
+          )
           const frontmatter = parseYamlFrontmatter(content)
           const name = frontmatter.name?.trim()
           if (!name) {
@@ -498,18 +649,21 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
           const skillDir = path.join(customDir, skillName)
           mkdirSync(skillDir, { recursive: true })
 
-          const basePrefix = skillMdEntry.entryName.replace("SKILL.md", "")
-          for (const entry of entries) {
+          const basePrefix = skillMdEntry.decodedName.replace(/SKILL\.md$/i, "")
+          for (const item of decodedEntries) {
+            const entry = item.entry
             if (entry.isDirectory) continue
-            if (!entry.entryName.startsWith(basePrefix)) continue
-            const relativePath = entry.entryName.slice(basePrefix.length)
+            if (!item.decodedName.startsWith(basePrefix)) continue
+            const relativePath = item.decodedName.slice(basePrefix.length)
             if (!relativePath) continue
             const destPath = path.resolve(skillDir, relativePath)
             if (
               !destPath.startsWith(path.resolve(skillDir) + path.sep) &&
               destPath !== path.resolve(skillDir)
             ) {
-              console.warn(`[Skills] Skipping ZIP entry with path traversal: ${entry.entryName}`)
+              console.warn(
+                `[Skills] Skipping ZIP entry with path traversal: ${item.decodedName || entry.entryName}`
+              )
               continue
             }
             const destDir = path.dirname(destPath)
@@ -602,19 +756,27 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
 
         if (ext === ".zip") {
           const zip = new AdmZip(Buffer.from(buffer))
-          const entries = zip.getEntries()
-          let mdEntry = entries.find((e) => !e.isDirectory && e.entryName === "SKILL.md")
-          if (!mdEntry) {
-            mdEntry = entries.find((e) => !e.isDirectory && e.entryName.endsWith("/SKILL.md"))
-          }
+          const entries = zip
+            .getEntries()
+            .map((entry) => ({ entry, decodedName: decodeZipEntryName(entry) }))
+          let mdEntry =
+            entries.find(
+              (item) => !item.entry.isDirectory && /(^|\/)SKILL\.md$/i.test(item.decodedName)
+            ) || null
           if (!mdEntry) {
             // 取任意 .md 文件
-            mdEntry = entries.find(
-              (e) => !e.isDirectory && e.entryName.toLowerCase().endsWith(".md")
-            )
+            mdEntry =
+              entries.find(
+                (item) => !item.entry.isDirectory && item.decodedName.toLowerCase().endsWith(".md")
+              ) || null
           }
-          if (!mdEntry) return { success: false, error: "ZIP 中未找到 MD 文件" }
-          const content = mdEntry.getData().toString("utf-8")
+          if (!mdEntry) {
+            return { success: false, error: "ZIP 中未找到 MD 文件" }
+          }
+          const content = decodeSkillTextFile(
+            mdEntry.entry.getData(),
+            mdEntry.decodedName || "SKILL.md"
+          )
           const frontmatter = parseYamlFrontmatter(content)
           const name = frontmatter.name?.trim()
           if (!name) return { success: false, error: "MD 文件 frontmatter 中未找到 name 字段" }
