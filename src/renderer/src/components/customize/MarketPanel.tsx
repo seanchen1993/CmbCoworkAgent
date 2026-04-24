@@ -2111,7 +2111,7 @@ export function MarketPanel(): React.JSX.Element {
                         />
                       ))
                     )
-                  )}
+                  }
                 </div>
               </ScrollArea>
             </TabsContent>
