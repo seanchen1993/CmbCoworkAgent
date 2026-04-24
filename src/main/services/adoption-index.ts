@@ -3,7 +3,7 @@
  *
  * SQLite-backed index for CodeGen events produced by the adoption tracker.
  * The index is the authoritative lookup structure when we need to find
- * "the most recent unmeasured generation for this file" at commit time.
+ * pending unmeasured generations for a file at commit time.
  *
  * Design notes:
  *   - Uses sql.js (same as db/index.ts) to stay consistent with the rest of
@@ -204,24 +204,26 @@ export function insertGenEvent(row: GenIndexRow): void {
 }
 
 /**
- * Find the most recent unmeasured gen event for a file within the retention
- * window. Returns null when none exists.
+ * Find all unmeasured gen events for a file within the retention window,
+ * newest first. Returns an empty array when none exists.
  */
-export function findPendingGenForFile(filePath: string, minCreatedAt: number): GenIndexRow | null {
-  if (!db) return null
+export function findPendingGensForFile(filePath: string, minCreatedAt: number): GenIndexRow[] {
+  if (!db) return []
   const stmt = db.prepare(
     `SELECT event_id, file_path, content_fingerprint, shard_file, shard_offset,
             line_hashes, created_at, measured,
             used_skills, thread_id, trace_id, model_id, model_name
        FROM gen_events
       WHERE file_path = ? AND measured = 0 AND created_at >= ?
-      ORDER BY created_at DESC
-      LIMIT 1`
+      ORDER BY created_at DESC`
   )
   stmt.bind([filePath, minCreatedAt])
   try {
-    if (!stmt.step()) return null
-    return stmt.getAsObject() as unknown as GenIndexRow
+    const rows: GenIndexRow[] = []
+    while (stmt.step()) {
+      rows.push(stmt.getAsObject() as unknown as GenIndexRow)
+    }
+    return rows
   } finally {
     stmt.free()
   }
@@ -255,7 +257,7 @@ export function deleteOlderThan(cutoff: number): number {
 
 /**
  * Remove already-measured rows older than `cutoff`. These rows have no further
- * use (findPendingGenForFile filters measured=0), so
+ * use (findPendingGensForFile filters measured=0), so
  * we can evict them far more aggressively than the full 7-day window.
  */
 export function deleteMeasuredOlderThan(cutoff: number): void {

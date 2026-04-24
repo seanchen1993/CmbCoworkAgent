@@ -39,7 +39,7 @@ import { ensureVersionedSkillIdentifier } from "../utils/skill-identifiers"
 import { trackEvent } from "./event-reporter"
 import {
   closeAdoptionIndex,
-  findPendingGenForFile,
+  findPendingGensForFile,
   flushAdoptionIndex,
   initializeAdoptionIndex,
   insertGenEvent,
@@ -229,12 +229,8 @@ let currentShardStartMs = 0
  */
 let appendChain: Promise<unknown> = Promise.resolve()
 
-/**
- * In-flight measurement dedup. Keyed by the pending gen event_id. Prevents
- * duplicate emission if the same commit batch happens to pass the same file
- * through measureFile twice (e.g. rename + modify variants).
- */
-const inFlightMeasurements = new Set<string>()
+/** In-flight measurement dedup keyed by absolute file path. */
+const inFlightFileMeasurements = new Set<string>()
 
 /** threadId → AdoptionContext. Evicted oldest-first at MAX_CONTEXT_ENTRIES. */
 const threadContexts = new Map<string, AdoptionContext>()
@@ -802,8 +798,8 @@ interface MeasureOpts {
 }
 
 /**
- * Resolve the pending gen row for a file (most recent unmeasured within the
- * attribution window) and produce a `code_adopt` event against it. Never throws.
+ * Resolve all pending gen rows for a file (newest first within the attribution
+ * window) and produce `code_adopt` events against them. Never throws.
  *
  * Only commit-driven measurements remain — the 10-min timer was retired for
  * being the dominant I/O spike source with marginal value over L1 + L3.
@@ -818,125 +814,139 @@ function measureFile(filePath: string, opts?: MeasureOpts): void {
 }
 
 async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void> {
-  let pendingId: string | null = null
+  let absPath = ""
   try {
-    const absPath = resolvePath(filePath)
+    absPath = resolvePath(filePath)
     const minCreated = Date.now() - GEN_ATTRIBUTION_WINDOW_MS
-    const pending = findPendingGenForFile(absPath, minCreated)
-    if (!pending) return
+    const pendingRows = findPendingGensForFile(absPath, minCreated)
+    if (pendingRows.length === 0) return
 
-    // Dedup concurrent measurements for the same pending gen. Even without the
+    // Dedup concurrent measurements for the same file. Even without the
     // timer/commit race, a single commit batch can pass the same file twice
     // (rare but cheap to guard against).
-    if (inFlightMeasurements.has(pending.event_id)) return
-    inFlightMeasurements.add(pending.event_id)
-    pendingId = pending.event_id
+    if (inFlightFileMeasurements.has(absPath)) return
+    inFlightFileMeasurements.add(absPath)
 
-    let verdict: "deleted" | "committed" | "skipped_large" = "committed"
+    let currentHashCounts: Map<number, number> | null = null
+    let missingCurrentContent = false
 
-    const storedHashes = pending.line_hashes ? unpackLineHashes(pending.line_hashes) : null
-    if (!storedHashes || storedHashes.length === 0) {
-      // No baseline — nothing to compare against
-      return
-    }
-    const generatedLineCount = storedHashes.length
-    let adoptedLineCount: number | null = null
-
-    if (opts?.stagedDeleted) {
-      // Commit path explicitly told us this file is being removed. Skip readFile
-      // (the worktree may still have stale content) and emit the deletion verdict.
-      verdict = "deleted"
-      adoptedLineCount = 0
-    } else if (storedHashes.length > MAX_LINES_FOR_MEASURE) {
-      verdict = "skipped_large"
-      adoptedLineCount = null
-    } else {
+    if (!opts?.stagedDeleted) {
       let current = opts?.currentContent
       if (current === undefined) {
         try {
           current = await readFile(absPath)
         } catch {
-          // File unreadable (removed / renamed) — terminal verdict: deleted
-          verdict = "deleted"
-          adoptedLineCount = 0
+          missingCurrentContent = true
         }
       }
-      if (verdict === "committed" && current !== undefined) {
+
+      if (!missingCurrentContent && current !== undefined) {
         const currentText = Buffer.isBuffer(current) ? decodeCodeBuffer(current) : current
-        const currentHashes = computeLineHashes(currentText)
-        adoptedLineCount = countAdoptedLines(storedHashes, currentHashes)
+        currentHashCounts = buildLineHashCounts(computeLineHashes(currentText))
       }
     }
 
-    // Write adoption record to JSONL
-    const adoptEventId = `a_${randomUUID()}`
-    const measuredAt = Date.now()
-    await appendJsonl({
-      t: "adopt",
-      eventId: adoptEventId,
-      genEventId: pending.event_id,
-      verdict,
-      generatedLineCount,
-      adoptedLineCount,
-      measureSource: "git_commit",
-      measuredAt,
-      commitSha: opts?.commitSha ?? null
-    })
+    for (const pending of pendingRows) {
+      let verdict: "deleted" | "committed" | "skipped_large" = "committed"
 
-    markMeasured(pending.event_id)
-
-    // Pull attribution columns that were persisted at gen time, so cloud ES
-    // can aggregate adoption rates by skill / model without a two-step join
-    // against code_gen via genEventId.
-    let usedSkills: string[] = []
-    if (pending.used_skills) {
-      try {
-        const parsed = JSON.parse(pending.used_skills) as unknown
-        usedSkills = normalizeUsedSkills(parsed)
-      } catch {
-        // corrupt row — treat as no skill attribution
+      const storedHashes = pending.line_hashes ? unpackLineHashes(pending.line_hashes) : null
+      if (!storedHashes || storedHashes.length === 0) {
+        // No baseline — clear the dangling row so future commits don't keep
+        // rediscovering the same corrupt / empty pending record.
+        markMeasured(pending.event_id)
+        continue
       }
-    }
+      const generatedLineCount = storedHashes.length
+      let adoptedLineCount: number | null = null
 
-    trackEvent("code_adopt", "code_adoption", {
-      schemaVersion: 1,
-      eventId: adoptEventId,
-      genEventId: pending.event_id,
-      threadId: pending.thread_id ?? null,
-      traceId: pending.trace_id ?? null,
-      verdict,
-      generatedLineCount,
-      adoptedLineCount,
-      measureSource: "git_commit",
-      measureLatencyMs: measuredAt - pending.created_at,
-      measuredAt: new Date(measuredAt).toISOString(),
-      commitSha: opts?.commitSha ?? null,
-      usedSkills,
-      modelId: pending.model_id ?? null,
-      modelName: pending.model_name ?? null
-    })
+      if (opts?.stagedDeleted || missingCurrentContent) {
+        // Commit path explicitly told us this file is being removed, or the
+        // file is unreadable after commit. Both are terminal deletion verdicts.
+        verdict = "deleted"
+        adoptedLineCount = 0
+      } else if (storedHashes.length > MAX_LINES_FOR_MEASURE) {
+        verdict = "skipped_large"
+        adoptedLineCount = null
+      } else {
+        adoptedLineCount = consumeAdoptedLines(storedHashes, currentHashCounts)
+      }
+
+      const adoptEventId = `a_${randomUUID()}`
+      const measuredAt = Date.now()
+      await appendJsonl({
+        t: "adopt",
+        eventId: adoptEventId,
+        genEventId: pending.event_id,
+        verdict,
+        generatedLineCount,
+        adoptedLineCount,
+        measureSource: "git_commit",
+        measuredAt,
+        commitSha: opts?.commitSha ?? null
+      })
+
+      markMeasured(pending.event_id)
+
+      // Pull attribution columns that were persisted at gen time, so cloud ES
+      // can aggregate adoption rates by skill / model without a two-step join
+      // against code_gen via genEventId.
+      let usedSkills: string[] = []
+      if (pending.used_skills) {
+        try {
+          const parsed = JSON.parse(pending.used_skills) as unknown
+          usedSkills = normalizeUsedSkills(parsed)
+        } catch {
+          // corrupt row — treat as no skill attribution
+        }
+      }
+
+      trackEvent("code_adopt", "code_adoption", {
+        schemaVersion: 1,
+        eventId: adoptEventId,
+        genEventId: pending.event_id,
+        threadId: pending.thread_id ?? null,
+        traceId: pending.trace_id ?? null,
+        verdict,
+        generatedLineCount,
+        adoptedLineCount,
+        measureSource: "git_commit",
+        measureLatencyMs: measuredAt - pending.created_at,
+        measuredAt: new Date(measuredAt).toISOString(),
+        commitSha: opts?.commitSha ?? null,
+        usedSkills,
+        modelId: pending.model_id ?? null,
+        modelName: pending.model_name ?? null
+      })
+    }
   } catch (e) {
     console.warn("[AdoptionTracker] doMeasureFile failed:", e)
   } finally {
-    if (pendingId !== null) inFlightMeasurements.delete(pendingId)
+    if (absPath) inFlightFileMeasurements.delete(absPath)
   }
 }
 
-/** Count how many generated baseline lines still appear in the committed file. */
-function countAdoptedLines(baseline: Uint32Array, current: Uint32Array): number {
-  if (baseline.length === 0) return 0
+function buildLineHashCounts(lines: Uint32Array): Map<number, number> {
   const counts = new Map<number, number>()
-  for (let i = 0; i < current.length; i++) {
-    const h = current[i]
+  for (let i = 0; i < lines.length; i++) {
+    const h = lines[i]
     counts.set(h, (counts.get(h) ?? 0) + 1)
   }
+  return counts
+}
+
+/** Count and consume how many generated baseline lines still appear in the committed file. */
+function consumeAdoptedLines(
+  baseline: Uint32Array,
+  availableCounts: Map<number, number> | null
+): number {
+  if (baseline.length === 0 || !availableCounts) return 0
   let kept = 0
   for (let i = 0; i < baseline.length; i++) {
     const h = baseline[i]
-    const c = counts.get(h)
+    const c = availableCounts.get(h)
     if (c && c > 0) {
       kept++
-      counts.set(h, c - 1)
+      availableCounts.set(h, c - 1)
     }
   }
   return kept

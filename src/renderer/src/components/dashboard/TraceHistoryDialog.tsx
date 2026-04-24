@@ -12,6 +12,7 @@ import {
   Coins,
   Gauge,
   Hash,
+  Info,
   Loader2,
   MessageSquare,
   Terminal,
@@ -69,6 +70,36 @@ function GeneratedLinesTooltip(): React.JSX.Element {
       <div className="text-muted-foreground">当前按非空行统计。</div>
       <div className="text-muted-foreground">空行和仅包含空白字符的行不会计入。</div>
     </div>
+  )
+}
+
+function SkillAttributionTooltip(): React.JSX.Element {
+  return (
+    <div className="space-y-1 text-[11px]">
+      <div className="font-medium text-foreground">Skill 归因说明</div>
+      <div className="text-muted-foreground">代码生成优先归因到当前 run 实际命中的 Skill。</div>
+      <div className="text-muted-foreground">若当前 run 尚未命中 Skill，会回看最近 2 轮会话中的 Skill 共同归因。</div>
+      <div className="text-muted-foreground">若当前 run 已命中 Skill，还会补入上一轮会话中的 Skill 一并归因。</div>
+    </div>
+  )
+}
+
+function InfoHint({ content }: { content: React.ReactNode }): React.JSX.Element {
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            className="inline-flex size-4 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground"
+            aria-label="查看说明"
+          >
+            <Info className="size-3.5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent className="max-w-72">{content}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   )
 }
 
@@ -146,7 +177,10 @@ function SkillCodeStatsBar({ stats }: { stats: DashboardCodeStats | null }): Rea
         <div className="mb-3 flex items-center justify-between gap-3">
           <div>
             <h3 className="text-xs font-semibold text-foreground">代码指标</h3>
-            <p className="text-[10px] text-muted-foreground">按当前 Skill 归因</p>
+            <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+              <span>按当前 Skill 归因</span>
+              <InfoHint content={<SkillAttributionTooltip />} />
+            </div>
           </div>
         </div>
         <div className="rounded-lg border border-dashed border-border px-4 py-3 text-xs text-muted-foreground">
@@ -160,7 +194,10 @@ function SkillCodeStatsBar({ stats }: { stats: DashboardCodeStats | null }): Rea
       <div className="mb-3 flex items-center justify-between gap-3">
         <div>
           <h3 className="text-xs font-semibold text-foreground">代码指标</h3>
-          <p className="text-[10px] text-muted-foreground">按当前 Skill 归因</p>
+          <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+            <span>按当前 Skill 归因</span>
+            <InfoHint content={<SkillAttributionTooltip />} />
+          </div>
         </div>
       </div>
       <div className="grid grid-cols-3 gap-3">

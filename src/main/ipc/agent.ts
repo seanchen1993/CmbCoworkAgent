@@ -24,6 +24,7 @@ import { resolveModel, rememberRoutingDecision, rememberRoutingFeedback } from "
 import { notifyIfBackground, stripThink } from "../services/notify"
 import { trackEvent } from "../services/event-reporter"
 import { trySendChatXReply } from "../services/chatx"
+import { setAdoptionContext } from "../services/adoption-tracker"
 import { TraceCollector } from "../agent/trace/collector"
 import {
   requestSkillIntent,
@@ -627,6 +628,29 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     const skillUsageDetector = new SkillUsageDetector()
     const toolCallCounter = new ToolCallCounter()
     let assistantText = ""
+    const recentCompletedTurns = snapshotSkillProposalWindow(threadId).slice(-2)
+
+    const computeCodeGenAttributionSkills = (currentRunSkills: string[]): string[] => {
+      const inheritedTurns =
+        currentRunSkills.length > 0 ? recentCompletedTurns.slice(-1) : recentCompletedTurns
+
+      return Array.from(
+        new Set([
+          ...currentRunSkills,
+          ...inheritedTurns.flatMap((turn) => turn.usedSkills)
+        ])
+      )
+    }
+
+    const syncUsedSkillsContext = (): void => {
+      const currentRunSkills = skillUsageDetector.getUsedSkillNames()
+      tracer.setUsedSkills(currentRunSkills)
+      setAdoptionContext(threadId, {
+        usedSkills: computeCodeGenAttributionSkills(currentRunSkills)
+      })
+    }
+
+    syncUsedSkillsContext()
 
     const appendTurnToProposalWindow = (
       status: "success" | "error",
@@ -988,7 +1012,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 // the *same* values batch would snapshot an empty usedSkills
                 // and the resulting code_gen would be missing skill attribution.
                 if (hit) {
-                  tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+                  syncUsedSkillsContext()
                 }
               }
             }
@@ -1032,7 +1056,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const skillsMetadata = Array.isArray(state.skillsMetadata) ? state.skillsMetadata : []
           if (skillsMetadata.length > 0) {
             skillUsageDetector.onSkillsMetadata(skillsMetadata)
-            tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+            syncUsedSkillsContext()
           }
 
           if (!Array.isArray(state.messages)) return
@@ -1169,7 +1193,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   // a following write/edit in this same messages loop would
                   // otherwise see a stale usedSkills snapshot.
                   if (hit) {
-                    tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+                    syncUsedSkillsContext()
                   }
                 }
               }
