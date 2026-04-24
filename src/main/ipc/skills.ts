@@ -11,7 +11,9 @@ import type { SkillMetadata } from "../types"
 interface ZipEntryLike {
   entryName: string
   rawEntryName?: Buffer
-  efs?: boolean
+  header?: {
+    flags_efs?: boolean
+  }
 }
 
 function sanitizeSkillName(name: string): string {
@@ -153,11 +155,13 @@ function decodeZipEntryName(entry: ZipEntryLike): string {
   if (!raw || raw.length === 0) return fallback
 
   try {
-    // UTF-8 标记 or UTF-8 字节有效：优先按 UTF-8。
-    if (entry.efs === true || isValidUtf8(raw)) {
-      const utf8Name = normalizeZipEntryName(raw.toString("utf-8"))
-      if (utf8Name) return utf8Name
-    }
+    const utf8Valid = isValidUtf8(raw)
+    const hasUtf8Flag = entry.header?.flags_efs === true
+    const utf8Name = utf8Valid ? normalizeZipEntryName(raw.toString("utf-8")) : ""
+
+    // 只有在字节本身是有效 UTF-8 时才按 UTF-8 使用，避免把 GBK 字节误解成 "����"。
+    if (hasUtf8Flag && utf8Name) return utf8Name
+    if (utf8Name) return utf8Name
 
     // Windows 上传的 ZIP 常见 ANSI(GBK/GB18030) 文件名。
     if (process.platform === "win32") {
