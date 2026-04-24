@@ -63,7 +63,6 @@ type WorkingDirectoryCacheEntry = {
   expiresAt: number
 }
 
-<<<<<<< HEAD
 function isCommitCommand(command: string): boolean {
   return /^git(\s+-C\s+"[^"]*")?\s+commit(\s|$)/.test(command.trim())
 }
