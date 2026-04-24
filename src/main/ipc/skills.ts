@@ -18,15 +18,26 @@ function sanitizeSkillName(name: string): string {
   )
 }
 
+/**
+ * 为路径比较做统一归一化：
+ * 1) 先 resolve + normalize，消除 `.` / `..` 与分隔符差异；
+ * 2) Windows 文件系统通常大小写不敏感，比较前统一转小写，避免仅大小写差异导致误判。
+ */
+function normalizePathForComparison(inputPath: string): string {
+  const normalized = path.normalize(path.resolve(inputPath))
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized
+}
+
+function isPathUnderDir(targetPath: string, dirPath: string): boolean {
+  const resolvedTarget = normalizePathForComparison(targetPath)
+  const resolvedDir = normalizePathForComparison(dirPath)
+  const rel = path.relative(resolvedDir, resolvedTarget)
+  // `rel === ""` 代表 target 与 dir 完全相同，也视为在目录内。
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))
+}
+
 function isPathUnderAllowedDirs(filePath: string): boolean {
-  const resolved = path.resolve(filePath)
-  const builtin = path.resolve(getSkillsDir())
-  const custom = path.resolve(getCustomSkillsDir())
-  for (const dir of [builtin, custom]) {
-    const rel = path.relative(dir, resolved)
-    if (!rel.startsWith("..") && !path.isAbsolute(rel)) return true
-  }
-  return false
+  return isPathUnderDir(filePath, getSkillsDir()) || isPathUnderDir(filePath, getCustomSkillsDir())
 }
 
 function getMimeTypeByPath(filePath: string): string {
@@ -222,6 +233,45 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
       return { success: false, error: e instanceof Error ? e.message : "Unknown error" }
     }
   })
+
+  ipcMain.handle(
+    "skills:write",
+    async (
+      _event,
+      payload: { skillPath: string; content: string }
+    ): Promise<{ success: boolean; error?: string }> => {
+      const { skillPath, content } = payload || {}
+      if (!skillPath || typeof skillPath !== "string") {
+        return { success: false, error: "无效的技能路径" }
+      }
+      if (typeof content !== "string") {
+        return { success: false, error: "无效的文件内容" }
+      }
+
+      try {
+        const resolvedPath = path.resolve(skillPath)
+        const customDir = getCustomSkillsDir()
+        // 使用 realpath 防止“自定义目录内软链接指向目录外”的绕过场景。
+        const [realFilePath, realCustomDir] = await Promise.all([
+          fs.realpath(resolvedPath),
+          fs.realpath(customDir).catch(() => path.resolve(customDir))
+        ])
+        // 仅允许写入用户自定义技能目录，防止误改内置技能或越权写任意路径。
+        if (!isPathUnderDir(realFilePath, realCustomDir)) {
+          return { success: false, error: "只能编辑自定义技能文件" }
+        }
+        const stat = await fs.stat(realFilePath)
+        // 明确拒绝目录等非文件对象，避免错误覆盖。
+        if (!stat.isFile()) {
+          return { success: false, error: "目标不是文件" }
+        }
+        await fs.writeFile(realFilePath, content, "utf-8")
+        return { success: true }
+      } catch (e) {
+        return { success: false, error: e instanceof Error ? e.message : "保存失败" }
+      }
+    }
+  )
 
   ipcMain.handle("skills:listFiles", async (_event, skillPath: string) => {
     try {

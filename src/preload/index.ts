@@ -628,6 +628,12 @@ const api = {
     read: (skillPath: string): Promise<{ success: boolean; content?: string; error?: string }> => {
       return ipcRenderer.invoke("skills:read", skillPath)
     },
+    write: (
+      skillPath: string,
+      content: string
+    ): Promise<{ success: boolean; error?: string }> => {
+      return ipcRenderer.invoke("skills:write", { skillPath, content })
+    },
     readBinary: (
       skillPath: string
     ): Promise<{ success: boolean; content?: string; mimeType?: string; error?: string }> => {
