@@ -62,6 +62,16 @@ function fmtExactLines(lines: number): string {
   return Math.round(lines).toLocaleString("zh-CN")
 }
 
+function GeneratedLinesTooltip(): React.JSX.Element {
+  return (
+    <div className="space-y-1 text-[11px]">
+      <div className="font-medium text-foreground">代码生成行数说明</div>
+      <div className="text-muted-foreground">当前按非空行统计。</div>
+      <div className="text-muted-foreground">空行和仅包含空白字符的行不会计入。</div>
+    </div>
+  )
+}
+
 function formatTime(iso: string): string {
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) return iso || "-"
@@ -158,6 +168,7 @@ function SkillCodeStatsBar({ stats }: { stats: DashboardCodeStats | null }): Rea
           icon={Code2}
           label="生成行数"
           value={fmtLines(stats.generatedLines)}
+          tooltipContent={<GeneratedLinesTooltip />}
         />
         <SkillCodeStat
           icon={CheckCircle2}

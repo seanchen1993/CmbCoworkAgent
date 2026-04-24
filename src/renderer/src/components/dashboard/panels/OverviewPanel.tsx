@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { Activity, Users, Clock, ArrowDownToLine, ArrowUpFromLine, Code2, Trash2, Gauge, Search, X } from "lucide-react"
+import { Activity, Users, Clock, ArrowDownToLine, ArrowUpFromLine, Code2, Trash2, Gauge, Search, X, Info } from "lucide-react"
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, Legend
 } from "recharts"
@@ -94,6 +94,46 @@ function AdoptionDetailTooltip({ data }: { data: OverviewData }) {
   )
 }
 
+function GeneratedLinesTooltip(): React.JSX.Element {
+  return (
+    <div className="space-y-1 text-[11px]">
+      <div className="font-medium text-foreground">代码生成行数说明</div>
+      <div className="text-muted-foreground">当前按非空行统计。</div>
+      <div className="text-muted-foreground">空行和仅包含空白字符的行不会计入。</div>
+    </div>
+  )
+}
+
+function SkillUsageTooltip(): React.JSX.Element {
+  return (
+    <div className="space-y-1 text-[11px]">
+      <div className="font-medium text-foreground">Skill 使用统计说明</div>
+      <div className="text-muted-foreground">当一次运行中读取到某个 Skill 的文件或目录时，会记为使用了该 Skill。</div>
+      <div className="text-muted-foreground">若一条 trace 使用多个 Skill，会分别计入各自次数。</div>
+      <div className="text-muted-foreground">展示名称会带 Skill 版本；若版本解析失败，默认显示为 v1.0.0。</div>
+    </div>
+  )
+}
+
+function InfoHint({ content }: { content: React.ReactNode }): React.JSX.Element {
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            className="inline-flex size-4 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground"
+            aria-label="查看说明"
+          >
+            <Info className="size-3.5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent className="max-w-72">{content}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
+
 type RankingItem = {
   name: string
   count: number
@@ -150,7 +190,8 @@ function SearchableRankingPanel({
   barColorClassName,
   labelClassName,
   onItemClick,
-  headerActions
+  headerActions,
+  titleTooltipContent
 }: {
   title: string
   totalKinds: number
@@ -164,6 +205,7 @@ function SearchableRankingPanel({
   labelClassName?: string
   onItemClick?: (name: string) => void
   headerActions?: React.ReactNode
+  titleTooltipContent?: React.ReactNode
 }) {
   const [query, setQuery] = useState("")
   const trimmedQuery = query.trim()
@@ -183,6 +225,7 @@ function SearchableRankingPanel({
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <h3 className="text-xs font-medium text-muted-foreground">{title}</h3>
+            {titleTooltipContent ? <InfoHint content={titleTooltipContent} /> : null}
             <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
               {statusLabel}
             </span>
@@ -301,6 +344,7 @@ function SkillRankingPanel({
       emptySearchLabel="未找到匹配的 Skill"
       barColorClassName="bg-blue-500"
       onItemClick={onSkillClick}
+      titleTooltipContent={<SkillUsageTooltip />}
     />
   )
 }
@@ -419,6 +463,7 @@ export function OverviewPanel({
           label="代码生成行数"
           value={formatNumber(data.codeGeneratedLines)}
           color="bg-emerald-500"
+          tooltipContent={<GeneratedLinesTooltip />}
         />
         <StatCard
           icon={Trash2}
