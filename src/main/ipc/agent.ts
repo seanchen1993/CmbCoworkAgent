@@ -220,8 +220,8 @@ async function judgeSkillWorthiness(
     model: config.model,
     apiKey: config.apiKey,
     configuration: { baseURL: config.baseUrl },
-    maxTokens: 1024,
-    temperature: 0
+    maxTokens: config.maxOutputTokens,
+    temperature: config.temperature
   })
 
   const userPrompt = `## Conversation window since last skill-evolution reset (${context.turnCount} turns)
@@ -300,8 +300,8 @@ Based on this conversation, generate a reusable skill. Output JSON only.`
       model: config.model,
       apiKey: config.apiKey,
       configuration: { baseURL: config.baseUrl },
-      maxTokens: 2048,
-      temperature: 0.3,
+      maxTokens: config.maxOutputTokens,
+      temperature: config.temperature,
       streaming: true
     })
 
@@ -1375,7 +1375,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               model: new ChatOpenAI({
                 model: config.model,
                 apiKey: config.apiKey,
-                configuration: { baseURL: config.baseUrl }
+                configuration: { baseURL: config.baseUrl },
+                maxTokens: config.maxOutputTokens,
+                temperature: config.temperature
               }),
               conversation,
               memoryDir: memoryStore.getMemoryDir()

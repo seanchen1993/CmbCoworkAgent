@@ -190,6 +190,8 @@ function getPromptHookModel(modelId: string | undefined): ChatOpenAI | null {
     apiKey: config.apiKey,
     maxRetries: 0,
     timeout: 30_000,
+    maxTokens: config.maxOutputTokens,
+    temperature: config.temperature,
     configuration: { baseURL: config.baseUrl }
   })
 }

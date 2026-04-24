@@ -203,11 +203,21 @@ const api = {
       defaultMaxTokens: number
       minMaxTokens: number
       maxMaxTokens: number
+      defaultMaxOutputTokens: number
+      minMaxOutputTokens: number
+      maxMaxOutputTokens: number
+      defaultTemperature: number
+      maxTemperature: number
     }> => {
       return ipcRenderer.invoke("models:getTokenLimits") as Promise<{
         defaultMaxTokens: number
         minMaxTokens: number
         maxMaxTokens: number
+        defaultMaxOutputTokens: number
+        minMaxOutputTokens: number
+        maxMaxOutputTokens: number
+        defaultTemperature: number
+        maxTemperature: number
       }>
     },
     getCustomConfigs: (): Promise<
@@ -218,6 +228,8 @@ const api = {
         model: string
         hasApiKey: boolean
         maxTokens: number
+        maxOutputTokens: number
+        temperature: number
         interleavedThinking?: boolean
         tier?: "premium" | "economy"
       }>
@@ -230,6 +242,8 @@ const api = {
           model: string
           hasApiKey: boolean
           maxTokens: number
+          maxOutputTokens: number
+          temperature: number
           interleavedThinking?: boolean
           tier?: "premium" | "economy"
         }>
@@ -244,6 +258,8 @@ const api = {
       model: string
       hasApiKey: boolean
       maxTokens: number
+      maxOutputTokens: number
+      temperature: number
       interleavedThinking?: boolean
       tier?: "premium" | "economy"
     } | null> => {
@@ -254,6 +270,8 @@ const api = {
         model: string
         hasApiKey: boolean
         maxTokens: number
+        maxOutputTokens: number
+        temperature: number
         interleavedThinking?: boolean
         tier?: "premium" | "economy"
       } | null>
@@ -265,6 +283,8 @@ const api = {
       model: string
       apiKey?: string
       maxTokens?: number
+      maxOutputTokens?: number
+      temperature?: number
       interleavedThinking?: boolean
       tier?: "premium" | "economy"
     }): Promise<void> => {
@@ -277,6 +297,8 @@ const api = {
       model: string
       apiKey?: string
       maxTokens?: number
+      maxOutputTokens?: number
+      temperature?: number
       interleavedThinking?: boolean
       tier?: "premium" | "economy"
     }): Promise<{ id: string }> => {
@@ -296,6 +318,8 @@ const api = {
       baseUrl?: string
       model?: string
       apiKey?: string
+      maxOutputTokens?: number
+      temperature?: number
     }): Promise<{ success: boolean; error?: string; latencyMs?: number }> => {
       return ipcRenderer.invoke("models:testConnection", params) as Promise<{
         success: boolean

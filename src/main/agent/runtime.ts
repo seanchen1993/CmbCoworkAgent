@@ -17,6 +17,8 @@ import {
   isMemoryEnabled,
   getSkillEvolutionThreshold as getStoredSkillEvolutionThreshold,
   DEFAULT_MAX_TOKENS,
+  DEFAULT_MAX_OUTPUT_TOKENS,
+  DEFAULT_TEMPERATURE,
   getEnabledPluginSkillsSources
 } from "../storage"
 
@@ -924,6 +926,8 @@ function getModelInstance(
     model: string
     baseUrl: string
     apiKey?: string
+    maxOutputTokens?: number
+    temperature?: number
     interleavedThinking?: boolean
   },
   retryHooks?: ModelRetryHooks,
@@ -939,10 +943,14 @@ function getModelInstance(
     throw new Error("Custom model name is empty. Please configure a valid model name in Settings.")
   }
   console.log("[Runtime] Custom model:", resolvedModel, "baseUrl:", customConfig.baseUrl)
+  const maxOutputTokens = customConfig.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
+  const temperature = customConfig.temperature ?? DEFAULT_TEMPERATURE
 
   const baseFields = {
     model: resolvedModel,
     apiKey,
+    maxTokens: maxOutputTokens,
+    temperature,
     // SDK-level retry AND timeout disabled — unified retry + per-attempt
     // timeout live in retryingFetch below. Setting SDK timeout here would
     // create a shared AbortSignal that, once fired, permanently blocks all

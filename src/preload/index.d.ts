@@ -157,19 +157,24 @@ interface CustomAPI {
       defaultMaxTokens: number
       minMaxTokens: number
       maxMaxTokens: number
+      defaultMaxOutputTokens: number
+      minMaxOutputTokens: number
+      maxMaxOutputTokens: number
+      defaultTemperature: number
+      maxTemperature: number
     }>
-    getCustomConfigs: () => Promise<
-      Array<{
-        id: string
-        name: string
-        baseUrl: string
-        model: string
-        hasApiKey: boolean
-        maxTokens: number
-        interleavedThinking?: boolean
-        tier?: "premium" | "economy"
-      }>
-    >
+    getCustomConfigs: () => Promise<Array<{
+      id: string
+      name: string
+      baseUrl: string
+      model: string
+      hasApiKey: boolean
+      maxTokens: number
+      maxOutputTokens: number
+      temperature: number
+      interleavedThinking?: boolean
+      tier?: "premium" | "economy"
+    }>>
     getCustomConfig: (id?: string) => Promise<{
       id: string
       name: string
@@ -177,6 +182,8 @@ interface CustomAPI {
       model: string
       hasApiKey: boolean
       maxTokens: number
+      maxOutputTokens: number
+      temperature: number
       interleavedThinking?: boolean
       tier?: "premium" | "economy"
     } | null>
@@ -187,6 +194,8 @@ interface CustomAPI {
       model: string
       apiKey?: string
       maxTokens?: number
+      maxOutputTokens?: number
+      temperature?: number
       interleavedThinking?: boolean
       tier?: "premium" | "economy"
     }) => Promise<void>
@@ -198,6 +207,8 @@ interface CustomAPI {
       model: string
       apiKey?: string
       maxTokens?: number
+      maxOutputTokens?: number
+      temperature?: number
       interleavedThinking?: boolean
       tier?: "premium" | "economy"
     }) => Promise<{ id: string }>
@@ -209,6 +220,8 @@ interface CustomAPI {
       baseUrl?: string
       model?: string
       apiKey?: string
+      maxOutputTokens?: number
+      temperature?: number
     }) => Promise<{ success: boolean; error?: string; latencyMs?: number }>
   }
   workspace: {

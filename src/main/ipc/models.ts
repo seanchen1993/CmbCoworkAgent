@@ -1572,7 +1572,12 @@ import {
   getUserInfo,
   DEFAULT_MAX_TOKENS,
   MIN_MAX_TOKENS,
-  MAX_MAX_TOKENS
+  MAX_MAX_TOKENS,
+  DEFAULT_MAX_OUTPUT_TOKENS,
+  MIN_MAX_OUTPUT_TOKENS,
+  MAX_MAX_OUTPUT_TOKENS,
+  DEFAULT_TEMPERATURE,
+  MAX_TEMPERATURE
 } from "../storage"
 import type { CustomModelConfig } from "../storage"
 
@@ -1677,7 +1682,12 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     return {
       defaultMaxTokens: DEFAULT_MAX_TOKENS,
       minMaxTokens: MIN_MAX_TOKENS,
-      maxMaxTokens: MAX_MAX_TOKENS
+      maxMaxTokens: MAX_MAX_TOKENS,
+      defaultMaxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
+      minMaxOutputTokens: MIN_MAX_OUTPUT_TOKENS,
+      maxMaxOutputTokens: MAX_MAX_OUTPUT_TOKENS,
+      defaultTemperature: DEFAULT_TEMPERATURE,
+      maxTemperature: MAX_TEMPERATURE
     }
   })
 
@@ -1686,11 +1696,20 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     "models:testConnection",
     async (
       _event,
-      params: { id?: string; baseUrl?: string; model?: string; apiKey?: string }
+      params: {
+        id?: string
+        baseUrl?: string
+        model?: string
+        apiKey?: string
+        maxOutputTokens?: number
+        temperature?: number
+      }
     ): Promise<{ success: boolean; error?: string; latencyMs?: number }> => {
       let baseUrl: string
       let model: string
       let apiKey: string
+      let maxOutputTokens: number
+      let temperature: number
 
       if (params.id) {
         // Test an existing saved config — read API key from storage
@@ -1699,10 +1718,14 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         baseUrl = params.baseUrl || saved.baseUrl
         model = params.model || saved.model
         apiKey = params.apiKey || saved.apiKey || ""
+        maxOutputTokens = params.maxOutputTokens ?? saved.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
+        temperature = params.temperature ?? saved.temperature ?? DEFAULT_TEMPERATURE
       } else {
         baseUrl = params.baseUrl || ""
         model = params.model || ""
         apiKey = params.apiKey || ""
+        maxOutputTokens = params.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
+        temperature = params.temperature ?? DEFAULT_TEMPERATURE
       }
 
       if (!baseUrl) return { success: false, error: "接口地址不能为空" }
@@ -1737,7 +1760,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           body: JSON.stringify({
             model,
             messages: [{ role: "user", content: "Hi" }],
-            max_tokens: 1,
+            max_tokens: maxOutputTokens,
+            temperature,
             stream: false
           }),
           signal: controller.signal
