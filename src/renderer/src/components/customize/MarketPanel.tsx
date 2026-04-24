@@ -1674,7 +1674,7 @@ export function MarketPanel(): React.JSX.Element {
           <div className="space-y-2">
             <div className="flex items-center gap-2">
               <div className="relative flex-1">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-[#87867f]" />
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-[#87867f] pointer-events-none" />
                 <Input
                   placeholder="搜索技能、连接器、插件…"
                   value={searchQuery}

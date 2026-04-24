@@ -1392,7 +1392,7 @@ export function SkillsPanel(): React.JSX.Element {
                 variant="outline"
                 size="sm"
                 className="h-7 px-2 gap-1 text-xs shrink-0"
-                onClick={() => setShowCustomizeView(true, "market")}
+                onClick={() => openMarketWithSkillSearch("")}
               >
                 <ShoppingBag className="size-3.5" />
                 去应用市场
@@ -1742,7 +1742,6 @@ function SkillItem(props: {
         ) : (
           <ChevronRight className="size-3.5 text-muted-foreground shrink-0" />
         )}
-        <Folder className="size-3.5 text-muted-foreground shrink-0" />
         <div className="min-w-0 flex-1 space-y-1">
           <p
             className={cn(
@@ -1752,36 +1751,25 @@ function SkillItem(props: {
           >
             {displayName}
           </p>
-          <div className="flex flex-wrap items-center gap-1 min-w-0">
-            {subtitleName && (
-              <span className="text-[10px] text-muted-foreground truncate min-w-0 max-w-full">
-                {subtitleName}
-              </span>
-            )}
-            {hasMarketEntry && (
-              <Badge
-                variant="outline"
-                className="h-4 px-1.5 text-[10px] border-emerald-200 text-emerald-700 bg-emerald-50"
-              >
-                市场
-              </Badge>
-            )}
-            {isEdited && (
-              <Badge
-                variant="outline"
-                className="h-4 px-1.5 text-[10px] border-amber-200 text-amber-800 bg-amber-50"
-              >
-                已编辑
-              </Badge>
-            )}
-          </div>
         </div>
-        <Sparkles
-          className={cn(
-            "size-3 shrink-0",
-            disabled ? "text-muted-foreground/40" : "text-amber-500"
+        <span>
+             {hasMarketEntry && (
+               <Badge
+                 variant="outline"
+                 className="h-4 px-1.5 text-[10px] border-emerald-200 text-emerald-700 bg-emerald-50"
+               >
+                 市场
+               </Badge>
+             )}
+          {isEdited && (
+            <Badge
+              variant="outline"
+              className="h-4 px-1.5 text-[10px] border-amber-200 text-amber-800 bg-amber-50"
+            >
+              已编辑
+            </Badge>
           )}
-        />
+        </span>
       </button>
       {expanded && (
         <div
