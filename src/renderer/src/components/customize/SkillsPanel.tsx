@@ -1177,6 +1177,18 @@ export function SkillsPanel(): React.JSX.Element {
     [marketSkillMap]
   )
 
+  const isSkillUploadedInPanel = useCallback(
+    (skill: SkillMetadata | null | undefined): boolean => {
+      if (!skill || skill.source !== "user") return false
+      const localMarked = localUploadedSkillPaths.has(normalizeSkillPathKey(skill.path))
+      if (localMarked) return true
+      if (uploadedSkillNames.has(normalizeSkillName(skill.name))) return true
+      // 历史兜底：无市场同名记录时，仍按“本地上传”处理。
+      return !resolveMarketInfo(skill)
+    },
+    [localUploadedSkillPaths, resolveMarketInfo, uploadedSkillNames]
+  )
+
   const selectedSkillMarketInfo = useMemo(
     () => (selectedSkill ? resolveMarketInfo(selectedSkill) : undefined),
     [resolveMarketInfo, selectedSkill]
@@ -1186,11 +1198,8 @@ export function SkillsPanel(): React.JSX.Element {
    * 优先依赖本地路径标记；其次兜底为“用户技能且市场中无同名项”（历史数据兼容）。
    */
   const selectedSkillUploadedInPanel = useMemo(
-    () =>
-      !!selectedSkill &&
-      (localUploadedSkillPaths.has(normalizeSkillPathKey(selectedSkill.path)) ||
-        (selectedSkill.source === "user" && !selectedSkillMarketInfo)),
-    [localUploadedSkillPaths, selectedSkill, selectedSkillMarketInfo]
+    () => isSkillUploadedInPanel(selectedSkill),
+    [isSkillUploadedInPanel, selectedSkill]
   )
   const selectedSkillUploadedByMe = useMemo(
     () => !!selectedSkill && uploadedSkillNames.has(normalizeSkillName(selectedSkill.name)),
@@ -1201,8 +1210,8 @@ export function SkillsPanel(): React.JSX.Element {
     [editedSkillPaths, selectedSkill]
   )
   const selectedSkillHasMarketEntry = useMemo(
-    () => !!selectedSkillMarketInfo,
-    [selectedSkillMarketInfo]
+    () => !!selectedSkillMarketInfo || selectedSkillUploadedByMe,
+    [selectedSkillMarketInfo, selectedSkillUploadedByMe]
   )
   const selectedSkillCanEdit = useMemo(
     () =>
@@ -1308,13 +1317,26 @@ export function SkillsPanel(): React.JSX.Element {
     [uploadedSkillNames]
   )
 
+  const uploadedCustomSkills = useMemo(
+    () => customSkills.filter((skill) => isSkillUploadedInPanel(skill)),
+    [customSkills, isSkillUploadedInPanel]
+  )
+  const marketInstalledCustomSkills = useMemo(
+    () => customSkills.filter((skill) => !isSkillUploadedInPanel(skill)),
+    [customSkills, isSkillUploadedInPanel]
+  )
+
   const filteredBuiltin = useMemo(
     () => filterSkillsBySearch(builtinSkills),
     [builtinSkills, filterSkillsBySearch]
   )
-  const filteredCustom = useMemo(
-    () => filterSkillsBySearch(customSkills),
-    [customSkills, filterSkillsBySearch]
+  const filteredUploadedCustom = useMemo(
+    () => filterSkillsBySearch(uploadedCustomSkills),
+    [filterSkillsBySearch, uploadedCustomSkills]
+  )
+  const filteredMarketInstalledCustom = useMemo(
+    () => filterSkillsBySearch(marketInstalledCustomSkills),
+    [filterSkillsBySearch, marketInstalledCustomSkills]
   )
 
   return (
@@ -1371,6 +1393,7 @@ export function SkillsPanel(): React.JSX.Element {
               title="内置技能"
               skills={filteredBuiltin}
               marketSkillMap={marketSkillMap}
+              uploadedSkillNames={uploadedSkillNames}
               localUploadedSkillPaths={localUploadedSkillPaths}
               editedSkillPaths={editedSkillPaths}
               expandedSkills={expandedSkills}
@@ -1383,11 +1406,31 @@ export function SkillsPanel(): React.JSX.Element {
               onToggleDirNode={toggleDirNode}
               onSelectFile={onSelectFile}
             />
-            {customSkills.length > 0 && (
+            {uploadedCustomSkills.length > 0 && (
               <SkillSection
-                title="我安装的技能"
-                skills={filteredCustom}
+                title="我上传的技能"
+                skills={filteredUploadedCustom}
                 marketSkillMap={marketSkillMap}
+                uploadedSkillNames={uploadedSkillNames}
+                localUploadedSkillPaths={localUploadedSkillPaths}
+                editedSkillPaths={editedSkillPaths}
+                expandedSkills={expandedSkills}
+                skillFilesMap={skillFilesMap}
+                selectedSkill={selectedSkill}
+                selectedFilePath={selectedFilePath}
+                expandedDirNodes={expandedDirNodes}
+                disabledSkills={disabledSkills}
+                onToggleSkill={onToggleSkill}
+                onToggleDirNode={toggleDirNode}
+                onSelectFile={onSelectFile}
+              />
+            )}
+            {marketInstalledCustomSkills.length > 0 && (
+              <SkillSection
+                title="我从应用市场安装的技能"
+                skills={filteredMarketInstalledCustom}
+                marketSkillMap={marketSkillMap}
+                uploadedSkillNames={uploadedSkillNames}
                 localUploadedSkillPaths={localUploadedSkillPaths}
                 editedSkillPaths={editedSkillPaths}
                 expandedSkills={expandedSkills}
@@ -1501,6 +1544,7 @@ function SkillSection(props: {
   title: string
   skills: SkillMetadata[]
   marketSkillMap: Record<string, SkillMarketInfo>
+  uploadedSkillNames: Set<string>
   localUploadedSkillPaths: Set<string>
   editedSkillPaths: Set<string>
   expandedSkills: Set<string>
@@ -1517,6 +1561,7 @@ function SkillSection(props: {
     title,
     skills,
     marketSkillMap,
+    uploadedSkillNames,
     localUploadedSkillPaths,
     editedSkillPaths,
     expandedSkills,
@@ -1530,31 +1575,79 @@ function SkillSection(props: {
     onSelectFile
   } = props
   const [collapsed, setCollapsed] = useState(false)
+  const sectionStyle = useMemo(() => {
+    if (title.includes("内置")) {
+      return {
+        header:
+          "border-sky-200/70 bg-sky-50/80 text-sky-900 hover:bg-sky-50 dark:border-sky-900/50 dark:bg-sky-950/30 dark:text-sky-100",
+        dot: "bg-sky-500",
+        count:
+          "border-sky-200/80 bg-white/85 text-sky-700 dark:border-sky-800 dark:bg-sky-950/50 dark:text-sky-200"
+      }
+    }
+    if (title.includes("我上传")) {
+      return {
+        header:
+          "border-amber-200/70 bg-amber-50/80 text-amber-900 hover:bg-amber-50 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-100",
+        dot: "bg-amber-500",
+        count:
+          "border-amber-200/80 bg-white/85 text-amber-700 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-200"
+      }
+    }
+    if (title.includes("应用市场")) {
+      return {
+        header:
+          "border-emerald-200/70 bg-emerald-50/80 text-emerald-900 hover:bg-emerald-50 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-100",
+        dot: "bg-emerald-500",
+        count:
+          "border-emerald-200/80 bg-white/85 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-200"
+      }
+    }
+    return {
+      header:
+        "border-border/70 bg-muted/50 text-foreground hover:bg-muted dark:border-border/60 dark:bg-muted/30 dark:text-foreground",
+      dot: "bg-muted-foreground",
+      count:
+        "border-border/70 bg-background text-muted-foreground dark:border-border/60 dark:bg-background/70"
+    }
+  }, [title])
 
   return (
-    <div>
+    <div className="rounded-xl border border-border/60 bg-background/40 p-1.5">
       <button
-        className="flex items-center justify-between w-full px-1 mb-1 group cursor-pointer"
+        className={cn(
+          "flex items-center justify-between w-full rounded-md border px-2.5 py-1.5 group cursor-pointer transition-colors",
+          sectionStyle.header
+        )}
         onClick={() => setCollapsed((v) => !v)}
       >
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-2 min-w-0">
           {collapsed ? (
             <ChevronRight className="size-3 text-muted-foreground" />
           ) : (
             <ChevronDown className="size-3 text-muted-foreground" />
           )}
-          <span className="text-[11px] text-muted-foreground tracking-wider font-medium">
+          <span className={cn("size-1.5 rounded-full shrink-0", sectionStyle.dot)} />
+          <span className="text-xs font-semibold tracking-wide truncate">
             {title}
           </span>
         </div>
-        <Badge variant="outline" className="text-[10px] h-4 px-1.5">
+        <Badge
+          variant="outline"
+          className={cn(
+            "h-5 min-w-6 justify-center px-1.5 text-[10px] font-semibold tabular-nums",
+            sectionStyle.count
+          )}
+        >
           {skills.length}
         </Badge>
       </button>
       {!collapsed && (
-        <div className="space-y-2">
+        <div className="space-y-2 pt-2 px-0.5 pb-0.5">
           {skills.length === 0 ? (
-            <p className="text-xs text-muted-foreground px-1 py-2">没有匹配的技能</p>
+            <p className="text-xs text-muted-foreground rounded-md border border-dashed border-border/60 px-2 py-2">
+              没有匹配的技能
+            </p>
           ) : (
             skills.map((skill) => {
               const expanded = expandedSkills.has(skill.name)
@@ -1563,7 +1656,8 @@ function SkillSection(props: {
               const disabled = disabledSkills.has(skill.name)
               const marketInfo =
                 skill.source === "user" ? marketSkillMap[normalizeSkillName(skill.name)] : undefined
-              const hasMarketEntry = !!marketInfo
+              const hasMarketEntry =
+                !!marketInfo || uploadedSkillNames.has(normalizeSkillName(skill.name))
               const isLocalUploaded =
                 localUploadedSkillPaths.has(normalizeSkillPathKey(skill.path)) ||
                 (skill.source === "user" && !marketInfo)
