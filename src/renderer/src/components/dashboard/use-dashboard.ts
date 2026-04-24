@@ -31,8 +31,11 @@ export interface OverviewData {
   totalToolCalls: number
   trend: Array<{ time: string; count: number; users: number }>
   bySkill: Array<{ skill: string; count: number }>
+  bySkillAll: Array<{ skill: string; count: number }>
   byTool: Array<{ tool: string; count: number }>
   byToolAll: Array<{ tool: string; count: number }>
+  byToolFilteredAll: Array<{ tool: string; count: number }>
+  byToolAllFull: Array<{ tool: string; count: number }>
 }
 
 export interface ModelStatsData {
@@ -319,7 +322,7 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
   const codeMeasuredGeneratedLines = aggs.code_measured_generated_lines?.value ?? 0
   const codeAdoptedLines = aggs.code_adopted_lines?.value ?? 0
   const codeAdoptionRate =
-    codeMeasuredGeneratedLines > 0 ? codeAdoptedLines / codeMeasuredGeneratedLines : null
+    codeGeneratedLines > 0 ? codeAdoptedLines / codeGeneratedLines : null
   const totalSkills = aggs.total_skills?.value ?? 0
   const totalTools = aggs.total_tools?.value ?? 0
   const totalSkillCalls = aggs.total_skill_calls?.value ?? 0
@@ -336,12 +339,31 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
     count: b.doc_count
   }))
 
+  const bySkillAll: OverviewData["bySkillAll"] = (aggs.by_skill_all?.buckets ?? aggs.by_skill?.buckets ?? []).map((b: any) => ({
+    skill: b.key || "unknown",
+    count: b.doc_count
+  }))
+
   const byTool: OverviewData["byTool"] = (aggs.by_tool?.buckets ?? []).map((b: any) => ({
     tool: b.key || "unknown",
     count: b.doc_count
   }))
 
   const byToolAll: OverviewData["byToolAll"] = (aggs.by_tool_all?.buckets ?? []).map((b: any) => ({
+    tool: b.key || "unknown",
+    count: b.doc_count
+  }))
+
+  const byToolFilteredAll: OverviewData["byToolFilteredAll"] = (
+    aggs.by_tool_filtered_all?.buckets ?? aggs.by_tool?.buckets ?? []
+  ).map((b: any) => ({
+    tool: b.key || "unknown",
+    count: b.doc_count
+  }))
+
+  const byToolAllFull: OverviewData["byToolAllFull"] = (
+    aggs.by_tool_all_full?.buckets ?? aggs.by_tool_all?.buckets ?? []
+  ).map((b: any) => ({
     tool: b.key || "unknown",
     count: b.doc_count
   }))
@@ -363,8 +385,11 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
     totalToolCalls,
     trend,
     bySkill,
+    bySkillAll,
     byTool,
-    byToolAll
+    byToolAll,
+    byToolFilteredAll,
+    byToolAllFull
   }
 }
 

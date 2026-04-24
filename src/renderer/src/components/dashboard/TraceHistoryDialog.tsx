@@ -26,6 +26,7 @@ import {
   DialogTitle
 } from "@/components/ui/dialog"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import type { DashboardCodeStats, DashboardTraceDetail, DashboardTraceNode } from "./use-dashboard"
 
@@ -54,7 +55,11 @@ function fmtLines(lines: number): string {
 
 function fmtPercent(value: number | null): string {
   if (value === null) return "—"
-  return `${(value * 100).toFixed(1)}%`
+  return `${(value * 100).toFixed(2)}%`
+}
+
+function fmtExactLines(lines: number): string {
+  return Math.round(lines).toLocaleString("zh-CN")
 }
 
 function formatTime(iso: string): string {
@@ -67,21 +72,59 @@ function SkillCodeStat({
   icon: Icon,
   label,
   value,
-  sub
+  sub,
+  tooltipContent
 }: {
   icon: React.ElementType
   label: string
   value: string
   sub?: string
+  tooltipContent?: React.ReactNode
 }): React.JSX.Element {
-  return (
-    <div className="flex min-w-0 items-center gap-2 rounded-lg border border-border bg-card px-4 py-3">
+  const card = (
+    <div
+      className={`flex min-w-0 items-center gap-2 rounded-lg border border-border bg-card px-4 py-3 ${tooltipContent ? "cursor-help" : ""}`}
+    >
       <Icon className="size-3.5 shrink-0 text-muted-foreground" />
       <div className="min-w-0">
         <p className="text-[10px] text-muted-foreground">{label}</p>
         <p className="truncate text-[12px] font-semibold">{value}</p>
         {sub && <p className="truncate text-[10px] text-muted-foreground/70">{sub}</p>}
       </div>
+    </div>
+  )
+
+  if (!tooltipContent) return card
+
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>{card}</TooltipTrigger>
+        <TooltipContent className="max-w-64">{tooltipContent}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
+
+function AdoptionDetailTooltip({ stats }: { stats: DashboardCodeStats }): React.JSX.Element {
+  return (
+    <div className="space-y-1.5">
+      <div className="text-[11px] font-medium text-foreground">代码行数明细</div>
+      <div className="space-y-1 text-[11px]">
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">采纳行数</span>
+          <span className="font-medium text-foreground">{fmtExactLines(stats.adoptedLines)} 行</span>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">生成行数</span>
+          <span className="font-medium text-foreground">{fmtExactLines(stats.generatedLines)} 行</span>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">删除行数</span>
+          <span className="font-medium text-foreground">{fmtExactLines(stats.deletedLines)} 行</span>
+        </div>
+      </div>
+      <div className="text-[10px] text-muted-foreground">采纳率按 采纳行数 / 生成行数 计算</div>
     </div>
   )
 }
@@ -127,9 +170,10 @@ function SkillCodeStatsBar({ stats }: { stats: DashboardCodeStats | null }): Rea
           value={fmtPercent(stats.adoptionRate)}
           sub={
             stats.adoptionRate === null
-              ? "暂无可度量提交"
-              : `${fmtLines(stats.adoptedLines)} / ${fmtLines(stats.measuredGeneratedLines)} 行`
+              ? "暂无代码生成数据"
+              : `${fmtLines(stats.adoptedLines)} / ${fmtLines(stats.generatedLines)} 行`
           }
+          tooltipContent={<AdoptionDetailTooltip stats={stats} />}
         />
       </div>
     </section>

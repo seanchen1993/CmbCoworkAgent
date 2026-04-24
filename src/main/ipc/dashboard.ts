@@ -239,8 +239,8 @@ function getAggNumber(raw: unknown, path: string[], fallback = 0): number {
   return asNumber(current, fallback)
 }
 
-function computeAdoptionRate(adoptedLines: number, measuredGeneratedLines: number): number | null {
-  return measuredGeneratedLines > 0 ? adoptedLines / measuredGeneratedLines : null
+function computeAdoptionRate(adoptedLines: number, generatedLines: number): number | null {
+  return generatedLines > 0 ? adoptedLines / generatedLines : null
 }
 
 function normalizeCodeStatsFromAggs(raw: unknown): DashboardCodeStats {
@@ -258,7 +258,7 @@ function normalizeCodeStatsFromAggs(raw: unknown): DashboardCodeStats {
     deletedLines,
     measuredGeneratedLines,
     adoptedLines,
-    adoptionRate: computeAdoptionRate(adoptedLines, measuredGeneratedLines)
+    adoptionRate: computeAdoptionRate(adoptedLines, generatedLines)
   }
 }
 
@@ -428,6 +428,20 @@ function normalizeCommitDetail(hit: EsSearchHit): DashboardCommitDetail {
 
 async function fetchOverview(range: TimeRange, granularity: Granularity): Promise<unknown> {
   const interval = getCalendarInterval(granularity, range.from, range.to)
+  const rankingTopSize = 20
+  const rankingSearchSize = 1000
+  const filteredToolExcludes = [
+    // Claude Code 内置文件 / 系统工具
+    "execute", "read_file", "write_file", "glob", "grep",
+    "list_directory", "task", "task_output",
+    "ls", "edit_file",
+    // 工具搜索 / 元工具
+    "search_tool", "inspect_tool", "invoke_deferred_tool",
+    // 内置代码执行辅助
+    "code_exec", "prepare_save_code_exec_tool", "save_code_exec_tool",
+    // 内置任务管理
+    "write_todos"
+  ]
   const traceBody = {
     size: 0,
     query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
@@ -441,27 +455,27 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
       total_tools:        { cardinality: { field: "toolNames" } },
       total_skill_calls:  { value_count: { field: "usedSkills" } },
       total_tool_calls:   { value_count: { field: "toolNames" } },
-      by_skill: { terms: { field: "usedSkills",  size: 20 } },
+      by_skill: { terms: { field: "usedSkills", size: rankingTopSize } },
+      by_skill_all: { terms: { field: "usedSkills", size: rankingSearchSize } },
       by_tool: {
         terms: {
           field: "toolNames",
-          size: 20,
-          exclude: [
-            // Claude Code 内置文件 / 系统工具
-            "execute", "read_file", "write_file", "glob", "grep",
-            "list_directory", "task", "task_output",
-            "ls", "edit_file",
-            // 工具搜索 / 元工具
-            "search_tool", "inspect_tool", "invoke_deferred_tool",
-            // 内置代码执行辅助
-            "code_exec", "prepare_save_code_exec_tool", "save_code_exec_tool",
-            // 内置任务管理
-            "write_todos"
-          ]
+          size: rankingTopSize,
+          exclude: filteredToolExcludes
+        }
+      },
+      by_tool_filtered_all: {
+        terms: {
+          field: "toolNames",
+          size: rankingSearchSize,
+          exclude: filteredToolExcludes
         }
       },
       by_tool_all: {
-        terms: { field: "toolNames", size: 20 }
+        terms: { field: "toolNames", size: rankingTopSize }
+      },
+      by_tool_all_full: {
+        terms: { field: "toolNames", size: rankingSearchSize }
       },
       trend: {
         date_histogram: { field: "startedAt", calendar_interval: interval, time_zone: "Asia/Shanghai" },
@@ -949,6 +963,35 @@ function makeMockOverview(range: TimeRange): unknown {
           { key: "脚本生成",     doc_count: 9   }
         ]
       },
+      by_skill_all: {
+        buckets: [
+          { key: "代码审查",     doc_count: 312 },
+          { key: "需求分析",     doc_count: 278 },
+          { key: "文档生成",     doc_count: 245 },
+          { key: "单元测试",     doc_count: 198 },
+          { key: "SQL优化",      doc_count: 167 },
+          { key: "接口设计",     doc_count: 143 },
+          { key: "日志分析",     doc_count: 121 },
+          { key: "数据清洗",     doc_count: 98  },
+          { key: "性能诊断",     doc_count: 87  },
+          { key: "安全扫描",     doc_count: 62  },
+          { key: "代码重构",     doc_count: 54  },
+          { key: "异常排查",     doc_count: 49  },
+          { key: "接口联调",     doc_count: 44  },
+          { key: "依赖升级",     doc_count: 38  },
+          { key: "配置检查",     doc_count: 33  },
+          { key: "发布诊断",     doc_count: 29  },
+          { key: "性能优化",     doc_count: 24  },
+          { key: "埋点分析",     doc_count: 18  },
+          { key: "前端走查",     doc_count: 13  },
+          { key: "脚本生成",     doc_count: 9   },
+          { key: "冒烟测试",     doc_count: 8   },
+          { key: "链路排查",     doc_count: 7   },
+          { key: "Schema 校验",  doc_count: 6   },
+          { key: "接口 Mock",    doc_count: 5   },
+          { key: "灰度检查",     doc_count: 4   }
+        ]
+      },
       by_tool: {
         buckets: [
           { key: "git_workflow",       doc_count: 412 },
@@ -973,6 +1016,33 @@ function makeMockOverview(range: TimeRange): unknown {
           { key: "ticket_update",      doc_count: 12  }
         ]
       },
+      by_tool_filtered_all: {
+        buckets: [
+          { key: "git_workflow",       doc_count: 412 },
+          { key: "browser_playwright", doc_count: 356 },
+          { key: "manage_skill",       doc_count: 298 },
+          { key: "manage_scheduler",   doc_count: 241 },
+          { key: "web_search",         doc_count: 198 },
+          { key: "db_query",           doc_count: 163 },
+          { key: "create_pr",          doc_count: 134 },
+          { key: "run_tests",          doc_count: 112 },
+          { key: "search_code",        doc_count: 98  },
+          { key: "notify",             doc_count: 76  },
+          { key: "query_logs",         doc_count: 68  },
+          { key: "schema_check",       doc_count: 59  },
+          { key: "open_preview",       doc_count: 53  },
+          { key: "analyze_diff",       doc_count: 47  },
+          { key: "format_code",        doc_count: 42  },
+          { key: "lint_fix",           doc_count: 36  },
+          { key: "dependency_audit",   doc_count: 31  },
+          { key: "deploy_check",       doc_count: 26  },
+          { key: "trace_lookup",       doc_count: 19  },
+          { key: "ticket_update",      doc_count: 12  },
+          { key: "mcp_sqlQuery",       doc_count: 11  },
+          { key: "browser_visualDiff", doc_count: 9   },
+          { key: "workflow_template",  doc_count: 7   }
+        ]
+      },
       by_tool_all: {
         buckets: [
           { key: "read_file",          doc_count: 1823 },
@@ -995,6 +1065,35 @@ function makeMockOverview(range: TimeRange): unknown {
           { key: "run_tests",          doc_count: 112  },
           { key: "search_code",        doc_count: 98   },
           { key: "code_exec",          doc_count: 92   }
+        ]
+      },
+      by_tool_all_full: {
+        buckets: [
+          { key: "read_file",                  doc_count: 1823 },
+          { key: "write_file",                 doc_count: 1245 },
+          { key: "execute",                    doc_count: 987  },
+          { key: "grep",                       doc_count: 876  },
+          { key: "glob",                       doc_count: 654  },
+          { key: "git_workflow",               doc_count: 412  },
+          { key: "browser_playwright",         doc_count: 356  },
+          { key: "manage_skill",               doc_count: 298  },
+          { key: "edit_file",                  doc_count: 267  },
+          { key: "manage_scheduler",           doc_count: 241  },
+          { key: "web_search",                 doc_count: 198  },
+          { key: "list_directory",             doc_count: 187  },
+          { key: "db_query",                   doc_count: 163  },
+          { key: "task",                       doc_count: 156  },
+          { key: "task_output",                doc_count: 148  },
+          { key: "create_pr",                  doc_count: 134  },
+          { key: "search_tool",                doc_count: 128  },
+          { key: "run_tests",                  doc_count: 112  },
+          { key: "search_code",                doc_count: 98   },
+          { key: "code_exec",                  doc_count: 92   },
+          { key: "prepare_save_code_exec_tool",doc_count: 81   },
+          { key: "notify",                     doc_count: 76   },
+          { key: "query_logs",                 doc_count: 68   },
+          { key: "schema_check",               doc_count: 59   },
+          { key: "open_preview",               doc_count: 53   }
         ]
       },
       trend: { buckets: trend }
@@ -1372,7 +1471,7 @@ function makeMockSkillCodeStats(skill: string): DashboardCodeStats {
     deletedLines,
     measuredGeneratedLines,
     adoptedLines,
-    adoptionRate: computeAdoptionRate(adoptedLines, measuredGeneratedLines)
+    adoptionRate: computeAdoptionRate(adoptedLines, generatedLines)
   }
 }
 

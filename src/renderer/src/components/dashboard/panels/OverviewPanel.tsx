@@ -1,8 +1,10 @@
 import { useState } from "react"
-import { Activity, Users, Clock, ArrowDownToLine, ArrowUpFromLine, Code2, Trash2, Gauge } from "lucide-react"
+import { Activity, Users, Clock, ArrowDownToLine, ArrowUpFromLine, Code2, Trash2, Gauge, Search, X } from "lucide-react"
 import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, Legend
 } from "recharts"
+import { Input } from "@/components/ui/input"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import type { OverviewData } from "../use-dashboard"
 
 function StatCard({
@@ -10,16 +12,20 @@ function StatCard({
   label,
   value,
   sub,
-  color
+  color,
+  tooltipContent
 }: {
   icon: React.ElementType
   label: string
   value: string
   sub?: string
   color: string
+  tooltipContent?: React.ReactNode
 }) {
-  return (
-    <div className="flex items-center gap-3 rounded-xl border border-border bg-card px-4 py-3">
+  const card = (
+    <div
+      className={`flex items-center gap-3 rounded-xl border border-border bg-card px-4 py-3 ${tooltipContent ? "cursor-help" : ""}`}
+    >
       <div className={`flex size-9 items-center justify-center rounded-lg ${color}`}>
         <Icon className="size-4 text-white" />
       </div>
@@ -29,6 +35,17 @@ function StatCard({
         {sub && <div className="text-[10px] text-muted-foreground">{sub}</div>}
       </div>
     </div>
+  )
+
+  if (!tooltipContent) return card
+
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>{card}</TooltipTrigger>
+        <TooltipContent className="max-w-64">{tooltipContent}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   )
 }
 
@@ -47,28 +64,276 @@ function formatNumber(n: number): string {
 
 function formatPercent(value: number | null): string {
   if (value === null) return "—"
-  return `${(value * 100).toFixed(1)}%`
+  return `${(value * 100).toFixed(2)}%`
 }
 
-function ToolTopPanel({ data }: { data: OverviewData }) {
-  const [showAll, setShowAll] = useState(false)
-  const toolList = showAll ? data.byToolAll : data.byTool
+function formatExactNumber(n: number): string {
+  return Math.round(n).toLocaleString("zh-CN")
+}
+
+function AdoptionDetailTooltip({ data }: { data: OverviewData }) {
+  return (
+    <div className="space-y-1.5">
+      <div className="text-[11px] font-medium text-foreground">代码行数明细</div>
+      <div className="space-y-1 text-[11px]">
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">采纳行数</span>
+          <span className="font-medium text-foreground">{formatExactNumber(data.codeAdoptedLines)} 行</span>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">生成行数</span>
+          <span className="font-medium text-foreground">{formatExactNumber(data.codeGeneratedLines)} 行</span>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">删除行数</span>
+          <span className="font-medium text-foreground">{formatExactNumber(data.codeDeletedLines)} 行</span>
+        </div>
+      </div>
+      <div className="text-[10px] text-muted-foreground">采纳率按 采纳行数 / 生成行数 计算</div>
+    </div>
+  )
+}
+
+type RankingItem = {
+  name: string
+  count: number
+}
+
+function normalizeRankingLookup(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
+function matchesRankingQuery(name: string, query: string): boolean {
+  const trimmed = query.trim()
+  if (!trimmed) return true
+
+  const rawQuery = trimmed.toLowerCase()
+  const normalizedQuery = normalizeRankingLookup(trimmed)
+  return name.toLowerCase().includes(rawQuery) || normalizeRankingLookup(name).includes(normalizedQuery)
+}
+
+function highlightRankingName(name: string, query: string): React.ReactNode {
+  const trimmed = query.trim()
+  if (!trimmed) return name
+
+  const rawName = name.toLowerCase()
+  const rawQuery = trimmed.toLowerCase()
+  const matchIndex = rawName.indexOf(rawQuery)
+  if (matchIndex === -1) return name
+
+  return (
+    <>
+      {name.slice(0, matchIndex)}
+      <mark className="rounded bg-primary/15 px-0.5 text-foreground">{name.slice(matchIndex, matchIndex + trimmed.length)}</mark>
+      {name.slice(matchIndex + trimmed.length)}
+    </>
+  )
+}
+
+function sumRankingCounts(items: RankingItem[]): number {
+  return items.reduce((total, item) => total + item.count, 0)
+}
+
+function SearchableRankingPanel({
+  title,
+  totalKinds,
+  totalCalls,
+  defaultItems,
+  searchItems,
+  searchPlaceholder,
+  emptyLabel,
+  emptySearchLabel,
+  barColorClassName,
+  labelClassName,
+  onItemClick,
+  headerActions
+}: {
+  title: string
+  totalKinds: number
+  totalCalls: number
+  defaultItems: RankingItem[]
+  searchItems: RankingItem[]
+  searchPlaceholder: string
+  emptyLabel: string
+  emptySearchLabel: string
+  barColorClassName: string
+  labelClassName?: string
+  onItemClick?: (name: string) => void
+  headerActions?: React.ReactNode
+}) {
+  const [query, setQuery] = useState("")
+  const trimmedQuery = query.trim()
+  const visibleItems = trimmedQuery
+    ? searchItems.filter((item) => matchesRankingQuery(item.name, trimmedQuery))
+    : defaultItems
+  const maxCount = searchItems[0]?.count ?? defaultItems[0]?.count ?? 0
+  const statusLabel = trimmedQuery
+    ? `匹配 ${visibleItems.length} 项`
+    : defaultItems.length > 0
+      ? `Top ${defaultItems.length}`
+      : "暂无排行"
 
   return (
     <div className="flex h-[340px] flex-col rounded-xl border border-border bg-card p-4">
-      <div className="mb-3 flex shrink-0 items-center justify-between">
-        <div className="flex items-center gap-3">
-          <h3 className="text-xs font-medium text-muted-foreground">
-            Tool 使用 Top 20
-          </h3>
+      <div className="mb-3 flex shrink-0 items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <h3 className="text-xs font-medium text-muted-foreground">{title}</h3>
+            <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+              {statusLabel}
+            </span>
+          </div>
           <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-            <span><span className="font-semibold text-foreground">{data.totalTools}</span> 种</span>
+            <span><span className="font-semibold text-foreground">{totalKinds}</span> 种</span>
             <span className="text-border">|</span>
-            <span>共 <span className="font-semibold text-foreground">{formatNumber(data.totalToolCalls)}</span> 次调用</span>
+            <span>共 <span className="font-semibold text-foreground">{formatNumber(totalCalls)}</span> 次调用</span>
           </div>
         </div>
+        {headerActions}
+      </div>
+
+      <div className="mb-3 flex shrink-0 items-center gap-2">
+        <div className="relative flex-1">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder={searchPlaceholder}
+            className="h-8 rounded-md border-border bg-background pl-8 pr-8 text-xs"
+          />
+          {trimmedQuery ? (
+            <button
+              type="button"
+              className="absolute right-1.5 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              onClick={() => setQuery("")}
+              aria-label="清空搜索"
+            >
+              <X className="size-3.5" />
+            </button>
+          ) : null}
+        </div>
+      </div>
+
+      {searchItems.length === 0 ? (
+        <div className="flex flex-1 items-center justify-center py-4 text-center text-xs text-muted-foreground">{emptyLabel}</div>
+      ) : visibleItems.length === 0 ? (
+        <div className="flex flex-1 items-center justify-center py-4 text-center text-xs text-muted-foreground">{emptySearchLabel}</div>
+      ) : (
+        <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+          <div className="space-y-1.5">
+            {visibleItems.map((item, i) => {
+              const pct = maxCount > 0 ? (item.count / maxCount) * 100 : 0
+              const rank = trimmedQuery ? searchItems.findIndex((candidate) => candidate.name === item.name) + 1 : i + 1
+              const content = (
+                <>
+                  <span className="w-7 shrink-0 text-right text-[10px] text-muted-foreground">{rank}</span>
+                  <div className="min-w-0 flex-1">
+                    <div className="mb-0.5 flex items-center justify-between gap-2">
+                      <span
+                        title={item.name}
+                        className={`min-w-0 truncate text-xs text-foreground ${labelClassName ?? ""}`}
+                      >
+                        {highlightRankingName(item.name, trimmedQuery)}
+                      </span>
+                      <span className="shrink-0 text-[11px] text-muted-foreground">{item.count}</span>
+                    </div>
+                    <div className="h-1 overflow-hidden rounded-full bg-muted">
+                      <div className={`h-full rounded-full ${barColorClassName}`} style={{ width: `${pct}%` }} />
+                    </div>
+                  </div>
+                </>
+              )
+
+              if (onItemClick) {
+                return (
+                  <button
+                    key={item.name}
+                    type="button"
+                    className="flex w-full cursor-pointer items-center gap-2 rounded-md px-1 py-0.5 text-left transition-colors hover:bg-muted/50 hover:text-primary focus:outline-none focus:ring-2 focus:ring-ring"
+                    onClick={() => onItemClick(item.name)}
+                  >
+                    {content}
+                  </button>
+                )
+              }
+
+              return (
+                <div key={item.name} className="flex items-center gap-2">
+                  {content}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SkillRankingPanel({
+  data,
+  onSkillClick
+}: {
+  data: OverviewData
+  onSkillClick?: (skill: string) => void
+}) {
+  const defaultItems: RankingItem[] = data.bySkill.map((item) => ({ name: item.skill, count: item.count }))
+  const searchItems: RankingItem[] = (data.bySkillAll.length > 0 ? data.bySkillAll : data.bySkill).map((item) => ({
+    name: item.skill,
+    count: item.count
+  }))
+  const totalKinds = searchItems.length > 0 ? searchItems.length : data.totalSkills
+  const totalCalls = searchItems.length > 0 ? sumRankingCounts(searchItems) : data.totalSkillCalls
+
+  return (
+    <SearchableRankingPanel
+      title="Skill 使用"
+      totalKinds={totalKinds}
+      totalCalls={totalCalls}
+      defaultItems={defaultItems}
+      searchItems={searchItems}
+      searchPlaceholder="搜索 Skill 名称，不限 Top 20"
+      emptyLabel="暂无 Skill 数据"
+      emptySearchLabel="未找到匹配的 Skill"
+      barColorClassName="bg-blue-500"
+      onItemClick={onSkillClick}
+    />
+  )
+}
+
+function ToolRankingPanel({ data }: { data: OverviewData }) {
+  const [showAll, setShowAll] = useState(false)
+  const defaultItems: RankingItem[] = (
+    showAll ? data.byToolAll : data.byTool
+  ).map((item) => ({ name: item.tool, count: item.count }))
+  const searchItems: RankingItem[] = (
+    showAll
+      ? (data.byToolAllFull.length > 0 ? data.byToolAllFull : data.byToolAll)
+      : (data.byToolFilteredAll.length > 0 ? data.byToolFilteredAll : data.byTool)
+  ).map((item) => ({ name: item.tool, count: item.count }))
+  const totalKinds = searchItems.length > 0 ? searchItems.length : data.totalTools
+  const totalCalls = searchItems.length > 0 ? sumRankingCounts(searchItems) : data.totalToolCalls
+
+  return (
+    <SearchableRankingPanel
+      title="Tool 使用"
+      totalKinds={totalKinds}
+      totalCalls={totalCalls}
+      defaultItems={defaultItems}
+      searchItems={searchItems}
+      searchPlaceholder={showAll ? "搜索 Tool 名称（全部）" : "搜索 Tool 名称（已过滤）"}
+      emptyLabel="暂无 Tool 数据"
+      emptySearchLabel="未找到匹配的 Tool"
+      barColorClassName="bg-violet-500"
+      labelClassName="font-mono"
+      headerActions={
         <div className="flex items-center rounded-md border border-border overflow-hidden">
           <button
+            type="button"
             className={`px-2 py-0.5 text-[10px] font-medium transition-colors ${
               !showAll
                 ? "bg-primary text-primary-foreground"
@@ -79,6 +344,7 @@ function ToolTopPanel({ data }: { data: OverviewData }) {
             已过滤
           </button>
           <button
+            type="button"
             className={`px-2 py-0.5 text-[10px] font-medium transition-colors ${
               showAll
                 ? "bg-primary text-primary-foreground"
@@ -89,34 +355,8 @@ function ToolTopPanel({ data }: { data: OverviewData }) {
             全部
           </button>
         </div>
-      </div>
-      {toolList.length === 0 ? (
-        <div className="flex flex-1 items-center justify-center py-4 text-center text-xs text-muted-foreground">暂无数据</div>
-      ) : (
-        <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-          <div className="space-y-1.5">
-            {toolList.map((item, i) => {
-              const max = toolList[0].count
-              const pct = max > 0 ? (item.count / max) * 100 : 0
-              return (
-                <div key={item.tool} className="flex items-center gap-2">
-                  <span className="w-5 shrink-0 text-right text-[10px] text-muted-foreground">{i + 1}</span>
-                  <div className="min-w-0 flex-1">
-                    <div className="mb-0.5 flex items-center justify-between">
-                      <span className="truncate font-mono text-xs text-foreground">{item.tool}</span>
-                      <span className="ml-2 shrink-0 text-[11px] text-muted-foreground">{item.count}</span>
-                    </div>
-                    <div className="h-1 overflow-hidden rounded-full bg-muted">
-                      <div className="h-full rounded-full bg-violet-500" style={{ width: `${pct}%` }} />
-                    </div>
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        </div>
-      )}
-    </div>
+      }
+    />
   )
 }
 
@@ -192,72 +432,18 @@ export function OverviewPanel({
           value={formatPercent(data.codeAdoptionRate)}
           sub={
             data.codeAdoptionRate === null
-              ? "暂无可度量提交"
-              : `${formatNumber(data.codeAdoptedLines)} / ${formatNumber(data.codeMeasuredGeneratedLines)} 行`
+              ? "暂无代码生成数据"
+              : `${formatNumber(data.codeAdoptedLines)} / ${formatNumber(data.codeGeneratedLines)} 行`
           }
           color="bg-cyan-500"
+          tooltipContent={<AdoptionDetailTooltip data={data} />}
         />
       </div>
 
       {/* Skill & Tool Top rankings */}
       <div className="grid grid-cols-2 gap-3">
-        {/* Skill Top 20 */}
-        <div className="flex h-[340px] flex-col rounded-xl border border-border bg-card p-4">
-          <div className="mb-3 flex shrink-0 items-center justify-between">
-            <h3 className="text-xs font-medium text-muted-foreground">Skill 使用 Top 20</h3>
-            <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-              <span><span className="font-semibold text-foreground">{data.totalSkills}</span> 种</span>
-              <span className="text-border">|</span>
-              <span>共 <span className="font-semibold text-foreground">{formatNumber(data.totalSkillCalls)}</span> 次调用</span>
-            </div>
-          </div>
-          {data.bySkill.length === 0 ? (
-            <div className="flex flex-1 items-center justify-center py-4 text-center text-xs text-muted-foreground">暂无数据</div>
-          ) : (
-            <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-              <div className="space-y-1.5">
-                {data.bySkill.map((item, i) => {
-                  const max = data.bySkill[0].count
-                  const pct = max > 0 ? (item.count / max) * 100 : 0
-                  const content = (
-                    <>
-                      <span className="w-4 text-right text-[10px] text-muted-foreground">{i + 1}</span>
-                      <div className="min-w-0 flex-1">
-                        <div className="mb-0.5 flex items-center justify-between">
-                          <span className="truncate text-xs text-foreground">{item.skill}</span>
-                          <span className="ml-2 shrink-0 text-[11px] text-muted-foreground">{item.count}</span>
-                        </div>
-                        <div className="h-1 overflow-hidden rounded-full bg-muted">
-                          <div className="h-full rounded-full bg-blue-500" style={{ width: `${pct}%` }} />
-                        </div>
-                      </div>
-                    </>
-                  )
-                  if (onSkillClick) {
-                    return (
-                      <button
-                        key={item.skill}
-                        type="button"
-                        className="flex w-full items-center gap-2 rounded-md px-1 py-0.5 text-left transition-colors hover:bg-muted/40 focus:outline-none focus:ring-2 focus:ring-ring"
-                        onClick={() => onSkillClick(item.skill)}
-                      >
-                        {content}
-                      </button>
-                    )
-                  }
-                  return (
-                    <div key={item.skill} className="flex items-center gap-2">
-                      {content}
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Tool Top */}
-        <ToolTopPanel data={data} />
+        <SkillRankingPanel data={data} onSkillClick={onSkillClick} />
+        <ToolRankingPanel data={data} />
       </div>
 
       {/* Trend chart */}
@@ -275,7 +461,7 @@ export function OverviewPanel({
               tick={{ fontSize: 10, fill: "var(--color-muted-foreground)" }}
               axisLine={{ stroke: "var(--color-border)" }}
             />
-            <Tooltip
+            <RechartsTooltip
               contentStyle={{
                 backgroundColor: "var(--color-card)",
                 border: "1px solid var(--color-border)",

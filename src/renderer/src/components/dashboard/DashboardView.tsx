@@ -198,7 +198,7 @@ function formatDuration(ms: number): string {
 
 function formatPercent(value: number | null): string {
   if (value === null) return "—"
-  return `${(value * 100).toFixed(1)}%`
+  return `${(value * 100).toFixed(2)}%`
 }
 
 const EMPTY_SKILL_DETAIL: DashboardSkillDetail = {
@@ -311,7 +311,6 @@ export function DashboardView(): React.JSX.Element {
             ["代码删除行数", overview.codeDeletedLines],
             ["代码采纳行数", overview.codeAdoptedLines],
             ["代码采纳率", formatPercent(overview.codeAdoptionRate)],
-            ["代码采纳率分母行数", overview.codeMeasuredGeneratedLines],
             ["Skill 种类数", overview.totalSkills],
             ["Skill 调用次数", overview.totalSkillCalls],
             ["Tool 种类数", overview.totalTools],
@@ -328,8 +327,9 @@ export function DashboardView(): React.JSX.Element {
           })
         }
 
-        // Skill Top
-        if (overview.bySkill.length > 0) {
+        // Skill ranking
+        const exportSkills = overview.bySkillAll.length > 0 ? overview.bySkillAll : overview.bySkill
+        if (exportSkills.length > 0) {
           sheets.push({
             name: "Skill使用排行",
             header: ["排名", "Skill", "调用次数"],
@@ -337,13 +337,14 @@ export function DashboardView(): React.JSX.Element {
               ["Skill 种类数", overview.totalSkills, ""],
               ["Skill 调用次数", overview.totalSkillCalls, ""],
               ["", "", ""],
-              ...overview.bySkill.map((s, i) => [i + 1, s.skill, s.count])
+              ...exportSkills.map((s, i) => [i + 1, s.skill, s.count])
             ]
           })
         }
 
-        // Tool Top (filtered)
-        if (overview.byTool.length > 0) {
+        // Tool ranking (filtered)
+        const exportFilteredTools = overview.byToolFilteredAll.length > 0 ? overview.byToolFilteredAll : overview.byTool
+        if (exportFilteredTools.length > 0) {
           sheets.push({
             name: "Tool使用排行(已过滤)",
             header: ["排名", "Tool", "调用次数"],
@@ -351,13 +352,14 @@ export function DashboardView(): React.JSX.Element {
               ["Tool 种类数", overview.totalTools, ""],
               ["Tool 调用次数", overview.totalToolCalls, ""],
               ["", "", ""],
-              ...overview.byTool.map((t, i) => [i + 1, t.tool, t.count])
+              ...exportFilteredTools.map((t, i) => [i + 1, t.tool, t.count])
             ]
           })
         }
 
-        // Tool Top (all)
-        if (overview.byToolAll.length > 0) {
+        // Tool ranking (all)
+        const exportAllTools = overview.byToolAllFull.length > 0 ? overview.byToolAllFull : overview.byToolAll
+        if (exportAllTools.length > 0) {
           sheets.push({
             name: "Tool使用排行(全部)",
             header: ["排名", "Tool", "调用次数"],
@@ -365,7 +367,7 @@ export function DashboardView(): React.JSX.Element {
               ["Tool 种类数", overview.totalTools, ""],
               ["Tool 调用次数", overview.totalToolCalls, ""],
               ["", "", ""],
-              ...overview.byToolAll.map((t, i) => [i + 1, t.tool, t.count])
+              ...exportAllTools.map((t, i) => [i + 1, t.tool, t.count])
             ]
           })
         }
