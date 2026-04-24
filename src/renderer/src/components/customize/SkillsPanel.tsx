@@ -1407,12 +1407,10 @@ export function SkillsPanel(): React.JSX.Element {
               skills={filteredBuiltin}
               marketSkillMap={marketSkillMap}
               uploadedSkillNames={uploadedSkillNames}
-              localUploadedSkillPaths={localUploadedSkillPaths}
               editedSkillPaths={editedSkillPaths}
               expandedSkills={expandedSkills}
               skillFilesMap={skillFilesMap}
               selectedSkill={selectedSkill}
-              selectedFilePath={selectedFilePath}
               expandedDirNodes={expandedDirNodes}
               disabledSkills={disabledSkills}
               onToggleSkill={onToggleSkill}
@@ -1425,12 +1423,10 @@ export function SkillsPanel(): React.JSX.Element {
                 skills={filteredUploadedCustom}
                 marketSkillMap={marketSkillMap}
                 uploadedSkillNames={uploadedSkillNames}
-                localUploadedSkillPaths={localUploadedSkillPaths}
                 editedSkillPaths={editedSkillPaths}
                 expandedSkills={expandedSkills}
                 skillFilesMap={skillFilesMap}
                 selectedSkill={selectedSkill}
-                selectedFilePath={selectedFilePath}
                 expandedDirNodes={expandedDirNodes}
                 disabledSkills={disabledSkills}
                 onToggleSkill={onToggleSkill}
@@ -1444,12 +1440,10 @@ export function SkillsPanel(): React.JSX.Element {
                 skills={filteredMarketInstalledCustom}
                 marketSkillMap={marketSkillMap}
                 uploadedSkillNames={uploadedSkillNames}
-                localUploadedSkillPaths={localUploadedSkillPaths}
                 editedSkillPaths={editedSkillPaths}
                 expandedSkills={expandedSkills}
                 skillFilesMap={skillFilesMap}
                 selectedSkill={selectedSkill}
-                selectedFilePath={selectedFilePath}
                 expandedDirNodes={expandedDirNodes}
                 disabledSkills={disabledSkills}
                 onToggleSkill={onToggleSkill}
@@ -1492,7 +1486,6 @@ export function SkillsPanel(): React.JSX.Element {
         canEdit={selectedSkillCanEdit}
         onSaveContent={saveSkillFileContent}
         isEdited={selectedSkillIsEdited}
-        isLocalUploaded={selectedSkillUploadedInPanel}
         hasMarketEntry={selectedSkillHasMarketEntry}
       />
 
@@ -1555,12 +1548,10 @@ function SkillSection(props: {
   skills: SkillMetadata[]
   marketSkillMap: Record<string, SkillMarketInfo>
   uploadedSkillNames: Set<string>
-  localUploadedSkillPaths: Set<string>
   editedSkillPaths: Set<string>
   expandedSkills: Set<string>
   skillFilesMap: Record<string, string[]>
   selectedSkill: SkillMetadata | null
-  selectedFilePath: string | null
   expandedDirNodes: Set<string>
   disabledSkills: Set<string>
   onToggleSkill: (skill: SkillMetadata) => void
@@ -1572,12 +1563,10 @@ function SkillSection(props: {
     skills,
     marketSkillMap,
     uploadedSkillNames,
-    localUploadedSkillPaths,
     editedSkillPaths,
     expandedSkills,
     skillFilesMap,
     selectedSkill,
-    selectedFilePath,
     expandedDirNodes,
     disabledSkills,
     onToggleSkill,
@@ -1668,9 +1657,6 @@ function SkillSection(props: {
                 skill.source === "user" ? marketSkillMap[normalizeSkillName(skill.name)] : undefined
               const hasMarketEntry =
                 !!marketInfo || uploadedSkillNames.has(normalizeSkillName(skill.name))
-              const isLocalUploaded =
-                localUploadedSkillPaths.has(normalizeSkillPathKey(skill.path)) ||
-                (skill.source === "user" && !marketInfo)
               const isEdited = editedSkillPaths.has(normalizeSkillPathKey(skill.path))
 
               return (
@@ -1678,14 +1664,12 @@ function SkillSection(props: {
                   key={skill.name}
                   skill={skill}
                   marketInfo={marketInfo}
-                  isLocalUploaded={isLocalUploaded}
                   hasMarketEntry={hasMarketEntry}
                   isEdited={isEdited}
                   expanded={expanded}
                   selected={selected}
                   disabled={disabled}
                   files={files}
-                  selectedFilePath={selectedFilePath}
                   expandedDirNodes={expandedDirNodes}
                   onToggleSkill={onToggleSkill}
                   onToggleDirNode={onToggleDirNode}
@@ -1703,14 +1687,12 @@ function SkillSection(props: {
 function SkillItem(props: {
   skill: SkillMetadata
   marketInfo?: SkillMarketInfo
-  isLocalUploaded: boolean
   hasMarketEntry: boolean
   isEdited: boolean
   expanded: boolean
   selected: boolean
   disabled: boolean
   files: string[]
-  selectedFilePath: string | null
   expandedDirNodes: Set<string>
   onToggleSkill: (skill: SkillMetadata) => void
   onToggleDirNode: (nodeId: string) => void
@@ -1719,14 +1701,12 @@ function SkillItem(props: {
   const {
     skill,
     marketInfo,
-    isLocalUploaded,
     hasMarketEntry,
     isEdited,
     expanded,
     selected,
     disabled,
     files,
-    selectedFilePath,
     expandedDirNodes,
     onToggleSkill,
     onToggleDirNode,
@@ -1740,14 +1720,20 @@ function SkillItem(props: {
   const chineseName = getSkillChineseName(skill, marketInfo)
   const displayName = chineseName || skill.name
   const subtitleName = chineseName ? skill.name : null
-  const showLocalTag = skill.source !== "project" && (isLocalUploaded || !hasMarketEntry)
 
   return (
-    <div className="rounded-md border border-border/70 overflow-hidden">
+    <div
+      className={cn(
+        "rounded-md border overflow-hidden transition-colors",
+        selected
+          ? "border-primary/60 bg-primary/[0.04] ring-1 ring-primary/20"
+          : "border-border/70 bg-transparent"
+      )}
+    >
       <button
         className={cn(
           "w-full flex items-center gap-2 px-2.5 py-2 text-left transition-colors",
-          selected ? "bg-muted/70" : "hover:bg-muted/50"
+          selected ? "bg-primary/10" : "hover:bg-muted/50"
         )}
         onClick={() => onToggleSkill(skill)}
       >
@@ -1772,26 +1758,13 @@ function SkillItem(props: {
                 {subtitleName}
               </span>
             )}
-            {skill.source === "project" ? (
-              <Badge variant="outline" className="h-4 px-1.5 text-[10px] text-muted-foreground">
-                内置
+            {hasMarketEntry && (
+              <Badge
+                variant="outline"
+                className="h-4 px-1.5 text-[10px] border-emerald-200 text-emerald-700 bg-emerald-50"
+              >
+                市场
               </Badge>
-            ) : (
-              <>
-                {showLocalTag && (
-                  <Badge variant="outline" className="h-4 px-1.5 text-[10px] text-muted-foreground">
-                    本地
-                  </Badge>
-                )}
-                {hasMarketEntry && (
-                  <Badge
-                    variant="outline"
-                    className="h-4 px-1.5 text-[10px] border-emerald-200 text-emerald-700 bg-emerald-50"
-                  >
-                    市场
-                  </Badge>
-                )}
-              </>
             )}
             {isEdited && (
               <Badge
@@ -1811,13 +1784,17 @@ function SkillItem(props: {
         />
       </button>
       {expanded && (
-        <div className="border-t border-border/60 bg-muted/20">
+        <div
+          className={cn(
+            "border-t",
+            selected ? "border-primary/30 bg-primary/[0.03]" : "border-border/60 bg-muted/20"
+          )}
+        >
           {treeNodes.length > 0 ? (
             <SkillFileTree
               nodes={treeNodes}
               level={0}
               skill={skill}
-              selectedFilePath={selectedFilePath}
               expandedDirNodes={expandedDirNodes}
               onToggleDirNode={onToggleDirNode}
               onSelectFile={onSelectFile}
@@ -1835,23 +1812,25 @@ function SkillFileTree(props: {
   nodes: FileTreeNode[]
   level: number
   skill: SkillMetadata
-  selectedFilePath: string | null
   expandedDirNodes: Set<string>
   onToggleDirNode: (nodeId: string) => void
   onSelectFile: (skill: SkillMetadata, filePath: string) => void
 }): React.JSX.Element {
-  const { nodes, level, skill, selectedFilePath, expandedDirNodes, onToggleDirNode, onSelectFile } =
-    props
+  const { nodes, level, skill, expandedDirNodes, onToggleDirNode, onSelectFile } = props
 
   return (
-    <div>
+    <div className="py-1">
       {nodes.map((node) => {
         if (node.isDir) {
           const isExpanded = expandedDirNodes.has(node.id)
           return (
             <div key={node.id}>
               <button
-                className="w-full min-h-8 flex items-center gap-2 pr-2 py-1.5 text-left text-xs text-muted-foreground hover:bg-muted/40"
+                className={cn(
+                  "w-full min-h-8 flex items-center gap-2 rounded-sm pr-2 py-1.5 text-left text-[11px] transition-colors",
+                  isExpanded ? "text-foreground bg-background/60" : "text-muted-foreground",
+                  "hover:bg-background/80"
+                )}
                 style={{ paddingLeft: `${22 + level * 14}px` }}
                 onClick={() => onToggleDirNode(node.id)}
               >
@@ -1868,7 +1847,6 @@ function SkillFileTree(props: {
                   nodes={node.children}
                   level={level + 1}
                   skill={skill}
-                  selectedFilePath={selectedFilePath}
                   expandedDirNodes={expandedDirNodes}
                   onToggleDirNode={onToggleDirNode}
                   onSelectFile={onSelectFile}
@@ -1878,18 +1856,14 @@ function SkillFileTree(props: {
           )
         }
 
-        const activeFile = selectedFilePath === node.path
         return (
           <button
             key={node.id}
-            className={cn(
-              "w-full min-h-8 flex items-center gap-2 pr-2 py-1.5 text-left text-xs transition-colors",
-              activeFile ? "bg-muted" : "hover:bg-muted/50"
-            )}
+            className="group w-full min-h-8 flex items-center gap-2 rounded-sm border-l-2 border-l-transparent pr-2 py-1.5 text-left text-[11px] text-foreground/80 transition-colors hover:bg-background/80 hover:text-foreground"
             style={{ paddingLeft: `${22 + level * 14}px` }}
             onClick={() => onSelectFile(skill, node.path)}
           >
-            <FileText className="size-3 shrink-0 text-muted-foreground" />
+            <FileText className="size-3 shrink-0 text-muted-foreground transition-colors group-hover:text-foreground" />
             <span className="min-w-0 flex-1 truncate">{node.name}</span>
           </button>
         )
@@ -1915,7 +1889,6 @@ export function SkillDetail(props: {
   canEdit?: boolean
   onSaveContent?: (filePath: string, content: string) => Promise<SaveSkillFileResult>
   isEdited?: boolean
-  isLocalUploaded?: boolean
   hasMarketEntry?: boolean
   hideActions?: boolean
 }): React.JSX.Element {
@@ -1935,7 +1908,6 @@ export function SkillDetail(props: {
     canEdit = false,
     onSaveContent,
     isEdited = false,
-    isLocalUploaded = false,
     hasMarketEntry = false,
     hideActions = false
   } = props
@@ -1995,7 +1967,6 @@ export function SkillDetail(props: {
 
   const chineseName = getSkillChineseName(skill, marketInfo)
   const category = getSkillCategory(skill, marketInfo)
-  const showLocalTag = skill.source !== "project" && (isLocalUploaded || !hasMarketEntry)
   const description = marketInfo?.description || skill.description || "暂无描述"
   const isMarkdown = !!selectedFilePath && /\.md$/i.test(selectedFilePath)
   const hasFrontmatter = isMarkdown && !!content && content.startsWith("---")
@@ -2050,26 +2021,13 @@ export function SkillDetail(props: {
           </div>
           <div className="mt-1 flex items-center gap-1.5 flex-wrap">
             {chineseName && <p className="text-xs text-muted-foreground truncate">{skill.name}</p>}
-            {skill.source === "project" ? (
-              <Badge variant="outline" className="h-5 px-2 text-[10px] text-muted-foreground">
-                内置技能
+            {hasMarketEntry && (
+              <Badge
+                variant="outline"
+                className="h-5 px-2 text-[10px] border-emerald-200 text-emerald-700 bg-emerald-50"
+              >
+                市场技能
               </Badge>
-            ) : (
-              <>
-                {showLocalTag && (
-                  <Badge variant="outline" className="h-5 px-2 text-[10px] text-muted-foreground">
-                    本地技能
-                  </Badge>
-                )}
-                {hasMarketEntry && (
-                  <Badge
-                    variant="outline"
-                    className="h-5 px-2 text-[10px] border-emerald-200 text-emerald-700 bg-emerald-50"
-                  >
-                    市场技能
-                  </Badge>
-                )}
-              </>
             )}
             {isEdited && (
               <Badge
@@ -2145,9 +2103,9 @@ export function SkillDetail(props: {
       </div>
 
       {isEditing && canEditCurrentFile ? (
-        <div className="flex-1 min-h-0 p-4">
+        <div className="flex-1 min-h-0 p-4 flex flex-col gap-2">
           <SkillFileEditor
-            className="h-full"
+            className="flex-1 min-h-0"
             value={draftContent}
             onChange={setDraftContent}
             onSave={() => void handleSaveEdit()}
@@ -2157,43 +2115,45 @@ export function SkillDetail(props: {
         </div>
       ) : (
         <ScrollArea className="flex-1">
-          <div className="p-4">
-            {isLoading ? (
-              <p className="text-sm text-muted-foreground">加载中...</p>
-            ) : previewKind === "image" && binaryDataUrl ? (
-              <div className="h-full w-full flex items-start justify-center">
-                <img
-                  src={binaryDataUrl}
-                  alt={selectedFilePath ?? "image preview"}
-                  className="max-w-full h-auto rounded-md border border-border"
-                />
-              </div>
-            ) : previewKind === "pdf" && binaryDataUrl ? (
-              <div className="h-[80vh] min-h-[500px]">
-                <iframe
-                  title={selectedFilePath ?? "pdf preview"}
-                  src={binaryDataUrl}
-                  className="h-full w-full rounded-md border border-border bg-white"
-                />
-              </div>
-            ) : previewKind === "html" ? (
-              <div className="h-[80vh] min-h-[500px] rounded-md border border-border overflow-hidden bg-white">
-                <iframe
-                  title={selectedFilePath ?? "html preview"}
-                  srcDoc={content ?? ""}
-                  className="h-full w-full"
-                  sandbox=""
-                />
-              </div>
-            ) : !isMarkdown ? (
-              <pre className="text-xs font-mono whitespace-pre-wrap break-words leading-relaxed text-muted-foreground bg-muted/30 rounded-md p-3">
-                {content}
-              </pre>
-            ) : (
-              <div className="streaming-markdown text-sm leading-relaxed">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{previewContent ?? ""}</ReactMarkdown>
-              </div>
-            )}
+          <div className="p-4 space-y-3">
+            <div className="rounded-lg border border-border/70 bg-background/70 p-3">
+              {isLoading ? (
+                <p className="text-sm text-muted-foreground">加载中...</p>
+              ) : previewKind === "image" && binaryDataUrl ? (
+                <div className="h-full w-full flex items-start justify-center">
+                  <img
+                    src={binaryDataUrl}
+                    alt={selectedFilePath ?? "image preview"}
+                    className="max-w-full h-auto rounded-md border border-border"
+                  />
+                </div>
+              ) : previewKind === "pdf" && binaryDataUrl ? (
+                <div className="h-[80vh] min-h-[500px]">
+                  <iframe
+                    title={selectedFilePath ?? "pdf preview"}
+                    src={binaryDataUrl}
+                    className="h-full w-full rounded-md border border-border bg-white"
+                  />
+                </div>
+              ) : previewKind === "html" ? (
+                <div className="h-[80vh] min-h-[500px] rounded-md border border-border overflow-hidden bg-white">
+                  <iframe
+                    title={selectedFilePath ?? "html preview"}
+                    srcDoc={content ?? ""}
+                    className="h-full w-full"
+                    sandbox=""
+                  />
+                </div>
+              ) : !isMarkdown ? (
+                <pre className="text-xs font-mono whitespace-pre-wrap break-words leading-relaxed text-foreground/85">
+                  {content}
+                </pre>
+              ) : (
+                <div className="streaming-markdown text-sm leading-relaxed">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{previewContent ?? ""}</ReactMarkdown>
+                </div>
+              )}
+            </div>
           </div>
         </ScrollArea>
       )}
