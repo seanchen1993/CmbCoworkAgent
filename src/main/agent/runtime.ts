@@ -126,27 +126,42 @@ export const pendingApprovals = new Map<string, {
 
 type ToolConcurrencyTier = "exclusive" | "shared" | "bypass"
 
-/** Tools that mutate state (files, processes, schedulers). Take write lock. */
+/**
+ * Tools that mutate cross-tool shared state (tool registry, scheduler, skill
+ * files, subagent slots). These must run one-at-a-time across the entire
+ * thread — write lock.
+ *
+ * Note: shell / file I/O tools are intentionally NOT here. They are approval-
+ * required but each operates on independent resources, so they go into SHARED
+ * so their approval events can fire concurrently. Actual per-resource
+ * serialization happens at a lower layer (LocalSandbox.runSerializedExecution
+ * for shell; filesystem is concurrency-safe per distinct path).
+ */
 const EXCLUSIVE_TOOL_NAMES = new Set([
-  "execute",
-  "write_file",
-  "edit_file",
   "code_exec",
   "prepare_save_code_exec_tool",
   "save_code_exec_tool",
   "browser_playwright",
   "manage_scheduler",
   "manage_skill",
-  "task"
+  "task",
+  "invoke_deferred_tool"
 ])
 
 /**
- * Pure read-only tools that can run concurrently with each other but must wait
- * for any in-flight write. This is the low-risk subset — only tools that are
- * clearly non-mutating. Shell commands are intentionally NOT here (shell ends
- * up in EXCLUSIVE via `execute`).
+ * Tools that hold the read lock. This includes:
+ *   - True read-only tools (read_file, grep, glob, …)
+ *   - Approval-required tools whose actual execution is coordinated at a lower
+ *     layer (execute / write_file / edit_file). They go here so that batched
+ *     approvals fire CONCURRENTLY — holding them under write lock would
+ *     serialize the approval events, defeating the Codex-style "approve the
+ *     whole batch up front, execute after each approval" UX.
+ *
+ * Aligns with Codex: shell / local_shell / exec_command / shell_command are
+ * marked `supports_parallel_tool_calls: true` there for the same reason.
  */
-const SHARED_READ_ONLY_TOOL_NAMES = new Set([
+const SHARED_TOOL_NAMES = new Set([
+  // True read-only
   "read_file",
   "ls",
   "glob",
@@ -155,7 +170,10 @@ const SHARED_READ_ONLY_TOOL_NAMES = new Set([
   "inspect_tool",
   "task_output",
   "view_image",
-  "invoke_deferred_tool"
+  // Approval-required, per-resource-independent
+  "execute",
+  "write_file",
+  "edit_file"
 ])
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -166,16 +184,15 @@ function classifyToolConcurrency(
   toolCall: { name?: string; args?: unknown } | undefined
 ): ToolConcurrencyTier {
   const toolName = toolCall?.name
-  if (!toolName) return "bypass"
-
-  if (toolName === "execute") {
-    const args = isRecord(toolCall?.args) ? toolCall.args : null
-    return args?.run_in_background === true ? "bypass" : "exclusive"
-  }
+  if (!toolName) return "exclusive" // safety default: unknown → write lock
 
   if (EXCLUSIVE_TOOL_NAMES.has(toolName)) return "exclusive"
-  if (SHARED_READ_ONLY_TOOL_NAMES.has(toolName)) return "shared"
-  return "bypass"
+  if (SHARED_TOOL_NAMES.has(toolName)) return "shared"
+  // Unknown tools (eager MCP tools registered with runtime toolId names,
+  // dynamic plugin tools, custom extras) default to EXCLUSIVE. This matches
+  // Codex's `configured_tool_supports_parallel` default (false). Opting in
+  // to `shared` requires explicit whitelisting — unknown = unsafe.
+  return "exclusive"
 }
 
 /**
