@@ -24,7 +24,11 @@ interface UsageMetadata {
 
 function getUsageMetadata(kwargs?: SerializedMessageChunk["kwargs"]): UsageMetadata | undefined {
   if (!kwargs) return undefined
-  return kwargs.usage_metadata || kwargs.response_metadata?.token_usage || kwargs.response_metadata?.usage
+  return (
+    kwargs.usage_metadata ||
+    kwargs.response_metadata?.token_usage ||
+    kwargs.response_metadata?.usage
+  )
 }
 
 function createTokenUsageEvent(usageMetadata: UsageMetadata): StreamEvent | null {
@@ -132,6 +136,24 @@ export class ElectronIPCTransport implements UseStreamTransport {
     this.completedToolCallsByName.clear()
     const threadId = payload.config?.configurable?.thread_id
     const modelId = payload.config?.configurable?.model_id as string | undefined
+    // Slash-command UI sets this on the configurable so the main process can safely
+    // separate the hidden <skill> payload from the user's visible prompt before
+    // running UserPromptSubmit hooks. A user typing `<skill-ref>...<skill>...</skill>`
+    // by hand will never have this field, so hand-written fakes fall through to the
+    // no-slash branch and the full message is shown to hooks.
+    //
+    // Runtime-validate the shape: crossing the renderer ↔ preload ↔ main boundary means
+    // a future caller could pass anything here. Reject silently (treat as absent) rather
+    // than bubbling a TypeError out of splitSlashCommandPayload on a malformed object.
+    const rawSlashSkill = payload.config?.configurable?.slash_skill
+    const slashSkill: { name: string; path: string } | undefined =
+      rawSlashSkill &&
+      typeof rawSlashSkill === "object" &&
+      !Array.isArray(rawSlashSkill) &&
+      typeof (rawSlashSkill as { name?: unknown }).name === "string" &&
+      typeof (rawSlashSkill as { path?: unknown }).path === "string"
+        ? (rawSlashSkill as { name: string; path: string })
+        : undefined
     if (!threadId) {
       return this.createErrorGenerator("MISSING_THREAD_ID", "Thread ID is required")
     }
@@ -159,7 +181,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
       messageContent,
       payload.command,
       payload.signal,
-      modelId
+      modelId,
+      slashSkill
     )
   }
 
@@ -175,7 +198,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
     message: string,
     command: unknown,
     signal: AbortSignal,
-    modelId?: string
+    modelId?: string,
+    slashSkill?: { name: string; path: string }
   ): AsyncGenerator<StreamEvent> {
     // Create a queue to buffer events from IPC
     const eventQueue: StreamEvent[] = []
@@ -220,7 +244,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
           }
         }
       },
-      modelId
+      modelId,
+      slashSkill
     )
 
     // Handle abort signal
@@ -449,8 +474,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
       const className = classId[classId.length - 1] || ""
 
       // Detect if this message comes from a subagent via checkpoint namespace
-      const checkpointNs =
-        metadata?.langgraph_checkpoint_ns || metadata?.checkpoint_ns
+      const checkpointNs = metadata?.langgraph_checkpoint_ns || metadata?.checkpoint_ns
       const isFromSubagent = this.isSubagentNamespace(checkpointNs)
 
       // Check if this is a ToolMessage (class name contains 'ToolMessage')
@@ -720,7 +744,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
         if (actionRequests.length) {
           const firstAction = actionRequests[0]
-          const reviewConfig = reviewConfigs?.find((rc: { actionName: string }) => rc.actionName === firstAction.name)
+          const reviewConfig = reviewConfigs?.find(
+            (rc: { actionName: string }) => rc.actionName === firstAction.name
+          )
 
           // Collect pending tool call IDs
           const nameCount = new Map<string, number>()

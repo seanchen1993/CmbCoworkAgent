@@ -35,8 +35,10 @@ function unescapeXml(s: string): string {
  * Character class notes:
  *   - Rejects `<` so a real closing `</skill-ref>` is never accidentally matched as name
  *   - Rejects `\n` to keep the marker a single-line tag (renderer and main agree)
- *   - NOTE: the backend variant in ipc/agent.ts uses no trailing `\s*` (it only tests,
- *     never slices), so it re-declares this locally. Keep the char class identical there.
+ *   - NOTE: the backend re-declares an equivalent regex locally in `ipc/agent.ts`
+ *     (same character class, also trailing `\s*`, used to slice the prefix off).
+ *     Main process can't import renderer code, so the two copies must be kept in
+ *     sync by hand. If you tweak one, grep `<skill-ref>` across the repo.
  */
 export const SKILL_REF_PATTERN = /^<skill-ref>([^<\n]+)<\/skill-ref>\s*/
 
@@ -69,9 +71,7 @@ export function formatSkillRef(skillName: string): string {
  * path (onExplicitInvocation in ipc/agent.ts) cross-checks against the hidden <skill>
  * wrapper so spoofed markers don't pollute usage stats or trigger skill evolution.
  */
-export function parseSkillMarker(
-  content: string
-): { skillName: string; rest: string } | null {
+export function parseSkillMarker(content: string): { skillName: string; rest: string } | null {
   // Character class / anchor rules live in SKILL_REF_PATTERN.
   const marker = content.match(SKILL_REF_PATTERN)
   if (!marker) return null

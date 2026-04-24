@@ -84,7 +84,8 @@ const api = {
       threadId: string,
       message: string,
       onEvent: (event: StreamEvent) => void,
-      modelId?: string
+      modelId?: string,
+      slashSkill?: { name: string; path: string }
     ): (() => void) => {
       const channel = `agent:stream:${threadId}`
 
@@ -96,7 +97,7 @@ const api = {
       }
 
       ipcRenderer.on(channel, handler)
-      ipcRenderer.send("agent:invoke", { threadId, message, modelId })
+      ipcRenderer.send("agent:invoke", { threadId, message, modelId, slashSkill })
 
       return () => {
         ipcRenderer.removeListener(channel, handler)
@@ -107,7 +108,8 @@ const api = {
       message: string,
       command: unknown,
       onEvent: (event: StreamEvent) => void,
-      modelId?: string
+      modelId?: string,
+      slashSkill?: { name: string; path: string }
     ): (() => void) => {
       const channel = `agent:stream:${threadId}`
 
@@ -121,9 +123,13 @@ const api = {
       ipcRenderer.on(channel, handler)
 
       if (command) {
+        // agent:resume continues an existing graph run from checkpoint — no new user
+        // message, no UserPromptSubmit hook, no fresh skill injection. slashSkill
+        // belongs to the submit that originated this run and is preserved in the
+        // checkpoint's message history, so we intentionally don't forward it here.
         ipcRenderer.send("agent:resume", { threadId, command, modelId })
       } else {
-        ipcRenderer.send("agent:invoke", { threadId, message, modelId })
+        ipcRenderer.send("agent:invoke", { threadId, message, modelId, slashSkill })
       }
 
       return () => {

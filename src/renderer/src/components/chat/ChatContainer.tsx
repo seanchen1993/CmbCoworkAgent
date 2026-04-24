@@ -1114,8 +1114,7 @@ export function ChatContainer({
     const SKILL_WRAPPER_PROBE =
       /<skill>\s*<name>[\s\S]*?<\/name>\s*<path>[\s\S]*?<\/path>[\s\S]*?<\/skill>/
     const ATTACHMENT_PROBE = /<attachment\s+filename="[^"]*"[^>]*>[\s\S]*?<\/attachment>/
-    const ATTACHMENT_STRIP =
-      /<attachment\s+filename="([^"]*)"[^>]*>[\s\S]*?<\/attachment>/g
+    const ATTACHMENT_STRIP = /<attachment\s+filename="([^"]*)"[^>]*>[\s\S]*?<\/attachment>/g
     const SKILL_REF_PREFIX_RE = SKILL_REF_PATTERN
 
     const allMessages = [...threadMessages, ...streamingMsgs]
@@ -1127,6 +1126,16 @@ export function ChatContainer({
       // user who merely pastes a <skill><name><path>...</skill> example in a discussion
       // will have no leading <skill-ref>, and we'd otherwise silently strip their quote
       // out of the bubble / copy / edit-resend flows.
+      //
+      // Trust model note: unlike main-process hook/router/usage gating (which requires
+      // the renderer's slashSkill authenticity metadata), this display-side strip is
+      // shape-based — it has to be, since checkpointer-replayed messages are raw strings
+      // with no metadata attached. If a user hand-types a fake
+      // `<skill-ref>...<skill>...</skill>` payload, the main process correctly treats the
+      // whole thing as user input for hooks/model/routing, but the bubble/copy/edit UI
+      // here will still hide the tail. This is a self-inflicted cosmetic mismatch for the
+      // forger (they see less than the model does); no third-party user is harmed, so we
+      // accept it rather than adding a signed-metadata channel through checkpoint storage.
       const hasSkillRefPrefix = SKILL_REF_PREFIX_RE.test(msg.content)
       const hasSkillWrapper = hasSkillRefPrefix && SKILL_WRAPPER_PROBE.test(msg.content)
       if (!hasAttachment && !hasSkillWrapper) return msg
@@ -1147,8 +1156,10 @@ export function ChatContainer({
             const instructionOpen = working.lastIndexOf("<skill-invocation-instruction>", skillOpen)
             if (instructionOpen >= 0) {
               const removeEnd = skillCloseEnd + "</skill>".length
-              working = (working.slice(0, instructionOpen) + working.slice(removeEnd))
-                .replace(/[\s]+$/, "")
+              working = (working.slice(0, instructionOpen) + working.slice(removeEnd)).replace(
+                /[\s]+$/,
+                ""
+              )
             }
           }
         }
@@ -1410,191 +1421,199 @@ export function ChatContainer({
         return next
       })
       try {
-      const providedAttachments = opts?.attachments
-      const currentAttachments =
-        providedAttachments && providedAttachments.length > 0 ? [...providedAttachments] : undefined
+        const providedAttachments = opts?.attachments
+        const currentAttachments =
+          providedAttachments && providedAttachments.length > 0
+            ? [...providedAttachments]
+            : undefined
 
-      const skill = opts?.skill ?? null
-      const trimmedInput = rawText.trim()
-      const fallbackForAttachments = currentAttachments ? "请分析以下文件内容。" : ""
-      // skill-only with no user text: leave userText empty; the <skill> block itself is the instruction.
-      const userText = trimmedInput || fallbackForAttachments
+        const skill = opts?.skill ?? null
+        const trimmedInput = rawText.trim()
+        const fallbackForAttachments = currentAttachments ? "请分析以下文件内容。" : ""
+        // skill-only with no user text: leave userText empty; the <skill> block itself is the instruction.
+        const userText = trimmedInput || fallbackForAttachments
 
-      // Read SKILL.md body upfront so we can abort before touching input/attachment state
-      // when the skill is unreachable — otherwise the user loses their draft with nothing sent.
-      let skillBlock = ""
-      if (skill) {
-        // Only hit skills.getDisabled (cheap: a stored array) to catch the "user disabled
-        // then immediately sent" race. skills.list is heavier (frontmatter parsing) and
-        // the popover already refreshes it on open; skills.read itself surfaces "file
-        // missing" via its own error path, so we don't need a separate existence probe.
-        try {
-          const disabledList = await window.api.skills.getDisabled()
-          // Must check cancel BEFORE acting on the result — a cancelled-then-superseded
-          // invocation that sees skill as disabled must not wipe the new invocation's chip.
-          if (cancelledInvocationsRef.current.has(invocationToken)) return
-          if (disabledList.includes(skill.name)) {
-            threadCtx.getThreadActions(submitThreadId).setDraftSkill(null)
-            toast.error(`技能「${skill.name}」已不可用`, {
-              description: "可能已被禁用或删除，请重新选择"
-            })
+        // Read SKILL.md body upfront so we can abort before touching input/attachment state
+        // when the skill is unreachable — otherwise the user loses their draft with nothing sent.
+        let skillBlock = ""
+        if (skill) {
+          // Only hit skills.getDisabled (cheap: a stored array) to catch the "user disabled
+          // then immediately sent" race. skills.list is heavier (frontmatter parsing) and
+          // the popover already refreshes it on open; skills.read itself surfaces "file
+          // missing" via its own error path, so we don't need a separate existence probe.
+          try {
+            const disabledList = await window.api.skills.getDisabled()
+            // Must check cancel BEFORE acting on the result — a cancelled-then-superseded
+            // invocation that sees skill as disabled must not wipe the new invocation's chip.
+            if (cancelledInvocationsRef.current.has(invocationToken)) return
+            if (disabledList.includes(skill.name)) {
+              threadCtx.getThreadActions(submitThreadId).setDraftSkill(null)
+              toast.error(`技能「${skill.name}」已不可用`, {
+                description: "可能已被禁用或删除，请重新选择"
+              })
+              return
+            }
+          } catch (err) {
+            // Non-fatal: skip the disable check on IPC outage rather than blocking the send.
+            console.warn("[submitMessage] getDisabled probe failed", err)
+            if (cancelledInvocationsRef.current.has(invocationToken)) return
+          }
+          let skillContent: string | null = null
+          let readErrorReason: string | null = null
+          try {
+            const res = await window.api.skills.read(skill.path)
+            if (res.success && typeof res.content === "string") {
+              skillContent = res.content
+            } else {
+              readErrorReason = res.error ?? "读取失败"
+              console.warn("[submitMessage] failed to read skill:", skill.path, res.error)
+            }
+          } catch (err) {
+            readErrorReason = err instanceof Error ? err.message : String(err)
+            console.warn("[submitMessage] skill read threw:", err)
+          }
+          if (skillContent === null) {
+            // Check cancel before acting on the error: if this invocation was cancelled and
+            // a newer one (possibly with a different skill) has taken over, we must not
+            // wipe the newer chip or pop a toast meant for the aborted invocation.
+            if (cancelledInvocationsRef.current.has(invocationToken)) return
+            // Distinguish "file really gone" (ENOENT / not found) from transient IO errors
+            // so we don't trap the user in a "press send → toast → press send" loop after
+            // the SKILL.md has been physically deleted. The list-based pre-check was removed
+            // to save an IPC per send, so this is the one place that catches deletion.
+            const msg = readErrorReason ?? ""
+            const isPermanentMissing = /ENOENT|no such file|not found|文件不存在/i.test(msg)
+            if (isPermanentMissing) {
+              threadCtx.getThreadActions(submitThreadId).setDraftSkill(null)
+              toast.error(`技能「${skill.name}」已不存在`, {
+                description: "SKILL.md 文件可能已被删除，请重新选择"
+              })
+            } else {
+              // Transient (busy disk, momentary permission flap) — keep the chip so the user
+              // can retry the same skill with one click rather than re-selecting.
+              toast.error(`无法读取技能「${skill.name}」`, {
+                description: readErrorReason ?? "请重试或更换技能"
+              })
+            }
             return
           }
-        } catch (err) {
-          // Non-fatal: skip the disable check on IPC outage rather than blocking the send.
-          console.warn("[submitMessage] getDisabled probe failed", err)
+          // User pressed stop during the skill-read IPC wait. Discard the submit entirely
+          // without writing to composer state.
           if (cancelledInvocationsRef.current.has(invocationToken)) return
+          const instruction =
+            `<skill-invocation-instruction>\n` +
+            `用户通过斜杠命令显式指定使用下方 <skill> 块中的技能。\n` +
+            `本轮你必须严格遵循 <skill> 块中的说明执行，不要改写成泛化的回答，不要跳过步骤，也不要重复询问技能已经明确说明的内容。\n` +
+            `请始终使用中文回答。\n` +
+            `</skill-invocation-instruction>`
+          // Defuse any literal <skill> / </skill> inside SKILL.md body. Both tags must be defused:
+          //   - </skill> would prematurely close the wrapper (model / backend would misparse).
+          //   - <skill> would be picked up by displayMessages' tail-first lastIndexOf("<skill>") walk
+          //     and by the main-process anti-spoof scan, both of which assume the wrapper's opening
+          //     tag is unique. A SKILL.md that documents the protocol (e.g. skill-creator) trivially
+          //     contains <skill> in prose — without this defuse, the user's own message bubble gets
+          //     truncated and usage stats silently drop.
+          const safeContent = skillContent
+            .replace(/<skill>/gi, "< skill>")
+            .replace(/<\/skill>/gi, "< /skill>")
+          // NOTE: the wrapper shape below (<skill><name/><path/>body</skill>) MUST stay in sync
+          // with SKILL_WRAPPER_PROBE and the anchor-based strip (indexOf("<skill-invocation-instruction>")
+          // and the following <skill>…</skill>) in displayMessages. If you change the wrapper
+          // (e.g. insert <version/> between <name/> and <path/>), update both.
+          // Use escapeXmlAttr (the same helper formatSkillRef uses) instead of the local
+          // escXml from this file — escXml doesn't encode ' so names like O'Reilly would
+          // appear as &apos; inside <skill-ref> but as a literal "'" here, and the backend
+          // anti-spoof regex, which cross-matches the two forms, would silently miss. Same
+          // pairing for sanitizeSkillName: both tags must apply it so names with CR/LF match.
+          skillBlock = `\n\n${instruction}\n\n<skill>\n<name>${escapeXmlAttr(sanitizeSkillName(skill.name))}</name>\n<path>${escapeXmlAttr(skill.path)}</path>\n${safeContent}\n</skill>`
         }
-        let skillContent: string | null = null
-        let readErrorReason: string | null = null
-        try {
-          const res = await window.api.skills.read(skill.path)
-          if (res.success && typeof res.content === "string") {
-            skillContent = res.content
-          } else {
-            readErrorReason = res.error ?? "读取失败"
-            console.warn("[submitMessage] failed to read skill:", skill.path, res.error)
-          }
-        } catch (err) {
-          readErrorReason = err instanceof Error ? err.message : String(err)
-          console.warn("[submitMessage] skill read threw:", err)
+
+        setInput("") // draftInput is thread-scoped (tied to submitThreadId via closure), safe.
+        // draftSkill is also thread-scoped, but the wrapper from useCurrentThread captures
+        // the current render's threadId — go through getThreadActions so we always clear
+        // the originating thread's chip even if the user has switched away.
+        if (skill) {
+          threadCtx.getThreadActions(submitThreadId).setDraftSkill(null)
         }
-        if (skillContent === null) {
-          // Check cancel before acting on the error: if this invocation was cancelled and
-          // a newer one (possibly with a different skill) has taken over, we must not
-          // wipe the newer chip or pop a toast meant for the aborted invocation.
-          if (cancelledInvocationsRef.current.has(invocationToken)) return
-          // Distinguish "file really gone" (ENOENT / not found) from transient IO errors
-          // so we don't trap the user in a "press send → toast → press send" loop after
-          // the SKILL.md has been physically deleted. The list-based pre-check was removed
-          // to save an IPC per send, so this is the one place that catches deletion.
-          const msg = readErrorReason ?? ""
-          const isPermanentMissing =
-            /ENOENT|no such file|not found|文件不存在/i.test(msg)
-          if (isPermanentMissing) {
-            threadCtx.getThreadActions(submitThreadId).setDraftSkill(null)
-            toast.error(`技能「${skill.name}」已不存在`, {
-              description: "SKILL.md 文件可能已被删除，请重新选择"
+        // attachments is still ComponentContainer-level shared state. If the user has switched
+        // away from submitThreadId during the async skill.read window, clearing here would
+        // wipe whatever the user just added on the NEW thread (pending attachment upload).
+        const stillOnOriginThread = submitThreadId === currentThreadIdRef.current
+        if (stillOnOriginThread) {
+          setAttachments([])
+        }
+        // skill-only sends produce empty userText; record the skill name for audit/debug.
+        const logText = userText || (skill ? `[skill-only: ${skill.name}]` : "")
+        insertLog("send: " + logText)
+
+        let attachmentsBlock = ""
+        if (currentAttachments && currentAttachments.length > 0) {
+          attachmentsBlock = currentAttachments
+            .map((att) => {
+              const truncAttr = att.truncated ? ' truncated="true"' : ""
+              const pathAttr = att.filePath ? ` path="${escXml(att.filePath)}"` : ""
+              const safeContent = att.content.replace(/<\/attachment>/gi, "< /attachment>")
+              return `\n\n<attachment filename="${escXml(att.filename)}"${pathAttr} type="${att.mimeType}" size="${att.size}"${truncAttr}>\n${safeContent}\n</attachment>`
             })
-          } else {
-            // Transient (busy disk, momentary permission flap) — keep the chip so the user
-            // can retry the same skill with one click rather than re-selecting.
-            toast.error(`无法读取技能「${skill.name}」`, {
-              description: readErrorReason ?? "请重试或更换技能"
-            })
-          }
-          return
+            .join("")
         }
-        // User pressed stop during the skill-read IPC wait. Discard the submit entirely
-        // without writing to composer state.
-        if (cancelledInvocationsRef.current.has(invocationToken)) return
-        const instruction =
-          `<skill-invocation-instruction>\n` +
-          `用户通过斜杠命令显式指定使用下方 <skill> 块中的技能。\n` +
-          `本轮你必须严格遵循 <skill> 块中的说明执行，不要改写成泛化的回答，不要跳过步骤，也不要重复询问技能已经明确说明的内容。\n` +
-          `请始终使用中文回答。\n` +
-          `</skill-invocation-instruction>`
-        // Defuse any literal <skill> / </skill> inside SKILL.md body. Both tags must be defused:
-        //   - </skill> would prematurely close the wrapper (model / backend would misparse).
-        //   - <skill> would be picked up by displayMessages' tail-first lastIndexOf("<skill>") walk
-        //     and by the main-process anti-spoof scan, both of which assume the wrapper's opening
-        //     tag is unique. A SKILL.md that documents the protocol (e.g. skill-creator) trivially
-        //     contains <skill> in prose — without this defuse, the user's own message bubble gets
-        //     truncated and usage stats silently drop.
-        const safeContent = skillContent
-          .replace(/<skill>/gi, "< skill>")
-          .replace(/<\/skill>/gi, "< /skill>")
-        // NOTE: the wrapper shape below (<skill><name/><path/>body</skill>) MUST stay in sync
-        // with SKILL_WRAPPER_PROBE and the anchor-based strip (indexOf("<skill-invocation-instruction>")
-        // and the following <skill>…</skill>) in displayMessages. If you change the wrapper
-        // (e.g. insert <version/> between <name/> and <path/>), update both.
-        // Use escapeXmlAttr (the same helper formatSkillRef uses) instead of the local
-        // escXml from this file — escXml doesn't encode ' so names like O'Reilly would
-        // appear as &apos; inside <skill-ref> but as a literal "'" here, and the backend
-        // anti-spoof regex, which cross-matches the two forms, would silently miss. Same
-        // pairing for sanitizeSkillName: both tags must apply it so names with CR/LF match.
-        skillBlock =
-          `\n\n${instruction}\n\n<skill>\n<name>${escapeXmlAttr(sanitizeSkillName(skill.name))}</name>\n<path>${escapeXmlAttr(skill.path)}</path>\n${safeContent}\n</skill>`
-      }
 
-      setInput("") // draftInput is thread-scoped (tied to submitThreadId via closure), safe.
-      // draftSkill is also thread-scoped, but the wrapper from useCurrentThread captures
-      // the current render's threadId — go through getThreadActions so we always clear
-      // the originating thread's chip even if the user has switched away.
-      if (skill) {
-        threadCtx.getThreadActions(submitThreadId).setDraftSkill(null)
-      }
-      // attachments is still ComponentContainer-level shared state. If the user has switched
-      // away from submitThreadId during the async skill.read window, clearing here would
-      // wipe whatever the user just added on the NEW thread (pending attachment upload).
-      const stillOnOriginThread = submitThreadId === currentThreadIdRef.current
-      if (stillOnOriginThread) {
-        setAttachments([])
-      }
-      // skill-only sends produce empty userText; record the skill name for audit/debug.
-      const logText = userText || (skill ? `[skill-only: ${skill.name}]` : "")
-      insertLog("send: " + logText)
+        // Single user-message payload: <skill-ref> header + user text + attachments + <skill> body.
+        // Display layer strips <attachment>/<skill> blocks but keeps <skill-ref> for chip rendering.
+        const prefix = skill ? `${formatSkillRef(skill.name)}\n` : ""
+        const fullMessage = `${prefix}${userText}${attachmentsBlock}${skillBlock}`
 
-      let attachmentsBlock = ""
-      if (currentAttachments && currentAttachments.length > 0) {
-        attachmentsBlock = currentAttachments
-          .map((att) => {
-            const truncAttr = att.truncated ? ' truncated="true"' : ""
-            const pathAttr = att.filePath ? ` path="${escXml(att.filePath)}"` : ""
-            const safeContent = att.content.replace(/<\/attachment>/gi, "< /attachment>")
-            return `\n\n<attachment filename="${escXml(att.filename)}"${pathAttr} type="${att.mimeType}" size="${att.size}"${truncAttr}>\n${safeContent}\n</attachment>`
-          })
-          .join("")
-      }
-
-      // Single user-message payload: <skill-ref> header + user text + attachments + <skill> body.
-      // Display layer strips <attachment>/<skill> blocks but keeps <skill-ref> for chip rendering.
-      const prefix = skill ? `${formatSkillRef(skill.name)}\n` : ""
-      const fullMessage = `${prefix}${userText}${attachmentsBlock}${skillBlock}`
-
-      // Display content mirrors the payload shape so replayed history renders consistently.
-      let displayContent = userText
-      if (currentAttachments && currentAttachments.length > 0) {
-        const fileNames = currentAttachments.map((a) => `📎 ${a.filename}`).join("\n")
-        displayContent = `${fileNames}\n\n${userText}`
-      }
-      if (skill) {
-        // Avoid a trailing blank line in skill-only bubbles (no text, no attachments).
-        displayContent = displayContent
-          ? `${formatSkillRef(skill.name)}\n${displayContent}`
-          : formatSkillRef(skill.name)
-      }
-
-      const userMessage: Message = {
-        id: crypto.randomUUID(),
-        role: "user",
-        content: displayContent,
-        created_at: new Date()
-      }
-      appendMessage(userMessage)
-
-      // Only seed title generation when the user actually typed something, and only while
-      // this is still one of the first couple of user turns. Counting user messages (not
-      // total messages) preserves delayed naming after a skill-only first turn — by the
-      // time the user types a real follow-up, an assistant reply + tool messages already
-      // live in threadMessages, so a length-based bound would lock out the naming window.
-      const priorUserMessages = threadMessages.filter((m) => m.role === "user").length
-      if (trimmedInput && priorUserMessages <= 1) {
-        const currentThread = threads.find((t) => t.thread_id === submitThreadId)
-        const hasDefaultTitle = currentThread?.title?.startsWith("Thread ")
-        if (hasDefaultTitle) {
-          generateTitleForFirstMessage(submitThreadId, trimmedInput)
+        // Display content mirrors the payload shape so replayed history renders consistently.
+        let displayContent = userText
+        if (currentAttachments && currentAttachments.length > 0) {
+          const fileNames = currentAttachments.map((a) => `📎 ${a.filename}`).join("\n")
+          displayContent = `${fileNames}\n\n${userText}`
         }
-      }
+        if (skill) {
+          // Avoid a trailing blank line in skill-only bubbles (no text, no attachments).
+          displayContent = displayContent
+            ? `${formatSkillRef(skill.name)}\n${displayContent}`
+            : formatSkillRef(skill.name)
+        }
 
-      await stream.submit(
-        { messages: [{ type: "human", content: fullMessage }] },
-        {
-          config: {
-            configurable: { thread_id: submitThreadId, model_id: currentModel }
+        const userMessage: Message = {
+          id: crypto.randomUUID(),
+          role: "user",
+          content: displayContent,
+          created_at: new Date()
+        }
+        appendMessage(userMessage)
+
+        // Only seed title generation when the user actually typed something, and only while
+        // this is still one of the first couple of user turns. Counting user messages (not
+        // total messages) preserves delayed naming after a skill-only first turn — by the
+        // time the user types a real follow-up, an assistant reply + tool messages already
+        // live in threadMessages, so a length-based bound would lock out the naming window.
+        const priorUserMessages = threadMessages.filter((m) => m.role === "user").length
+        if (trimmedInput && priorUserMessages <= 1) {
+          const currentThread = threads.find((t) => t.thread_id === submitThreadId)
+          const hasDefaultTitle = currentThread?.title?.startsWith("Thread ")
+          if (hasDefaultTitle) {
+            generateTitleForFirstMessage(submitThreadId, trimmedInput)
           }
         }
-      )
+
+        await stream.submit(
+          { messages: [{ type: "human", content: fullMessage }] },
+          {
+            config: {
+              configurable: {
+                thread_id: submitThreadId,
+                model_id: currentModel,
+                // Signal to the main process that the hidden <skill> payload at the end
+                // of fullMessage was produced by this trusted UI code path. Without this,
+                // main-side hook machinery treats the whole message as raw user input
+                // (so a user pasting a fake <skill> block cannot bypass hook review).
+                ...(skill ? { slash_skill: { name: skill.name, path: skill.path } } : {})
+              }
+            }
+          }
+        )
       } finally {
         // All three cleanups must be gated by token identity. If the user cancelled this
         // invocation and started a newer one before we reached finally, the slot is now
@@ -1604,8 +1623,7 @@ export function ChatContainer({
         //   2. flip submittingThreads state to empty, making the UI show "send" while B
         //      is actually in flight (pre-isLoading window)
         // So only clean up if we're still the active invocation for this thread.
-        const stillOurs =
-          activeInvocationsRef.current.get(submitThreadId) === invocationToken
+        const stillOurs = activeInvocationsRef.current.get(submitThreadId) === invocationToken
         if (stillOurs) {
           submittingThreadsRef.current.delete(submitThreadId)
           activeInvocationsRef.current.delete(submitThreadId)
@@ -2371,11 +2389,7 @@ export function ChatContainer({
       } else if (skillState === "loading") {
         toast.info(`技能列表加载中，若需复用「${skillMatch?.skillName}」请稍后重新选择`)
       } else if (hadActiveDraft) {
-        toast.warning(
-          hadAttachmentPreview
-            ? "已覆盖当前草稿，附件请重新添加"
-            : "已覆盖当前草稿"
-        )
+        toast.warning(hadAttachmentPreview ? "已覆盖当前草稿，附件请重新添加" : "已覆盖当前草稿")
       } else {
         toast.success(
           hadAttachmentPreview
@@ -2384,14 +2398,7 @@ export function ChatContainer({
         )
       }
     },
-    [
-      extractMessageText,
-      setInput,
-      skills,
-      skillsLoading,
-      setSelectedSkill,
-      setAttachments
-    ]
+    [extractMessageText, setInput, skills, skillsLoading, setSelectedSkill, setAttachments]
   )
   // Inlined as JSX (not components) to avoid React remounting on every parent render —
   // declaring a component inside the parent creates a new function reference each render,

@@ -18,7 +18,15 @@ function sanitizeSkillName(name: string): string {
   )
 }
 
-function isPathUnderAllowedDirs(filePath: string): boolean {
+/**
+ * Single source of truth for "is this absolute path allowed to be treated as a skill file?"
+ *
+ * Callers today: skill I/O handlers in this module (read/delete/list existing checks)
+ * and the slash-command authenticity gate in ipc/agent.ts. Keep one implementation so a
+ * future "add plugin skill dir / workspace skills" change lands in exactly one place.
+ */
+export function isPathUnderAllowedSkillDirs(filePath: string): boolean {
+  if (!filePath) return false
   const resolved = path.resolve(filePath)
   const builtin = path.resolve(getSkillsDir())
   const custom = path.resolve(getCustomSkillsDir())
@@ -27,6 +35,11 @@ function isPathUnderAllowedDirs(filePath: string): boolean {
     if (!rel.startsWith("..") && !path.isAbsolute(rel)) return true
   }
   return false
+}
+
+// Kept for backward compat inside this file; prefer the exported name above.
+function isPathUnderAllowedDirs(filePath: string): boolean {
+  return isPathUnderAllowedSkillDirs(filePath)
 }
 
 function getMimeTypeByPath(filePath: string): string {

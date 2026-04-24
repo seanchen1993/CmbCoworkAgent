@@ -25,6 +25,7 @@ import {
   getEnabledPluginHooks,
   getEnabledSkillHooks
 } from "../storage"
+import { isPathUnderAllowedSkillDirs } from "./skills"
 import { resolveModel, rememberRoutingDecision, rememberRoutingFeedback } from "../routing"
 import { notifyIfBackground, stripThink } from "../services/notify"
 import { trackEvent } from "../services/event-reporter"
@@ -92,6 +93,200 @@ interface ActiveHookSummary {
   skill: number
   workspace: number
   total: number
+}
+
+interface SlashCommandPayloadParts {
+  prefix: string
+  visibleMessage: string
+  separatorBeforeHiddenTail: string
+  hiddenTail: string
+  skillName: string
+  skillPath: string
+}
+
+const SKILL_REF_PREFIX_RE = /^<skill-ref>([^<\n]+)<\/skill-ref>\s*/
+
+function decodeXmlEntities(s: string): string {
+  return s
+    .replace(/&apos;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&gt;/g, ">")
+    .replace(/&lt;/g, "<")
+    .replace(/&amp;/g, "&")
+}
+
+/**
+ * Must mirror the renderer's sanitizeSkillName in features/slash-commands/skill-marker.
+ * The renderer applies this to both the <skill-ref> prefix and the wrapper's <name>
+ * (collapsing CR/LF to a single space, then trim). To compare decoded payload fields
+ * against the raw metadata the renderer sends, we need the same transform on our side.
+ */
+function sanitizeSkillName(name: string): string {
+  return name.replace(/[\r\n]+/g, " ").trim()
+}
+
+// Path allowlist for slashSkill.path lives in ipc/skills.ts as isPathUnderAllowedSkillDirs —
+// shared with the read/list/delete handlers there so any future addition (plugin skills,
+// workspace-scoped skills) lands in exactly one place. See the import at the top.
+
+/**
+ * Split a slash-command message into its prefix / visible-user-text / hidden-skill-tail
+ * parts so hooks can see only the user's prompt, not the inlined SKILL.md body.
+ *
+ * Authenticity gate — we do NOT infer slash-command-ness from message shape alone. A
+ * user who hand-types `<skill-ref>...<skill>...</skill>` in the composer would match
+ * the shape but must not be trusted to hide content from hooks. The renderer therefore
+ * attaches a `slashSkill` metadata object to the stream's configurable ONLY on the
+ * trusted slash UI path; without it, this function returns null and hooks see the
+ * message verbatim.
+ *
+ * Tail-first anchoring — mirrors displayMessages' strip algorithm (ChatContainer).
+ * Start from the LAST `</skill>`, walk back to the last `<skill>`, then the last
+ * `<skill-invocation-instruction>` before that `<skill>`. A forward lastIndexOf for
+ * the instruction tag alone would mis-anchor when the SKILL.md body itself mentions
+ * the literal `<skill-invocation-instruction>` string (easy for docs-style skills).
+ *
+ * Cross-check — we additionally verify that `<name>` and `<path>` inside the matched
+ * `<skill>` block decode to the renderer-declared metadata. Any mismatch (renderer
+ * bug, middleware rewriting, attacker managing to inject metadata) returns null.
+ */
+function splitSlashCommandPayload(
+  message: string,
+  slashSkill: unknown
+): SlashCommandPayloadParts | null {
+  // Runtime-validate the metadata. It crosses renderer → preload → IPC, so a caller
+  // passing `{}`, `true`, `{ name: null }`, etc. should be rejected cleanly instead of
+  // throwing out of sanitizeSkillName further down. Absent / malformed → treat
+  // as "no trusted metadata" and leave the message intact for hooks to see.
+  if (
+    !slashSkill ||
+    typeof slashSkill !== "object" ||
+    Array.isArray(slashSkill) ||
+    typeof (slashSkill as { name?: unknown }).name !== "string" ||
+    typeof (slashSkill as { path?: unknown }).path !== "string"
+  ) {
+    return null
+  }
+  const trustedSkill = slashSkill as { name: string; path: string }
+  // Reject empty name / path — renderer bug or edge case shouldn't be able to match
+  // an empty `<name></name>` / `<path></path>` in the wrapper (our [^<]* is 0-length
+  // permissive) and then seed skillUsageDetector.onExplicitInvocation("") downstream.
+  if (!trustedSkill.name.trim() || !trustedSkill.path.trim()) return null
+  // Path must resolve inside an allowed skill root. Without this check, a crafted IPC
+  // (DevTools, compromised renderer, rogue plugin) could attach any path here and have
+  // it forwarded to audit/allowlist hooks as `toolArgs.skillPath`, bypassing whatever
+  // prefix check the hook author wrote. Fall through to the no-slash branch (null)
+  // rather than throwing — the message still gets handled, hooks just see it raw.
+  if (!isPathUnderAllowedSkillDirs(trustedSkill.path)) return null
+
+  const prefixMatch = message.match(SKILL_REF_PREFIX_RE)
+  if (!prefixMatch) return null
+  // Compare using the same sanitization the renderer applies when writing the payload
+  // so that skill names with CR/LF (rare but possible) still round-trip cleanly.
+  const expectedName = sanitizeSkillName(trustedSkill.name)
+  const prefixName = decodeXmlEntities(prefixMatch[1]).trim()
+  if (prefixName !== expectedName) return null
+
+  const afterPrefixIndex = prefixMatch[0].length
+
+  // Tail-first: find wrapper anchors from end-of-message, matching displayMessages.
+  const skillCloseEnd = message.lastIndexOf("</skill>")
+  if (skillCloseEnd < afterPrefixIndex) return null
+  const skillOpen = message.lastIndexOf("<skill>", skillCloseEnd)
+  if (skillOpen < afterPrefixIndex) return null
+  const instructionOpen = message.lastIndexOf("<skill-invocation-instruction>", skillOpen)
+  if (instructionOpen < afterPrefixIndex) return null
+
+  // Validate the wrapper's <name>/<path> match the trusted metadata. This catches
+  // both unexpected payload shapes and any attempt by a middle layer to swap skills.
+  const block = message.slice(skillOpen, skillCloseEnd + "</skill>".length)
+  const nameMatch = block.match(/<name>\s*([^<]*)\s*<\/name>/)
+  const pathMatch = block.match(/<path>\s*([^<]*)\s*<\/path>/)
+  if (!nameMatch || !pathMatch) return null
+  if (decodeXmlEntities(nameMatch[1]).trim() !== expectedName) return null
+  if (decodeXmlEntities(pathMatch[1]).trim() !== trustedSkill.path.trim()) return null
+
+  const hiddenTail = message.slice(instructionOpen)
+  const visibleWithSeparator = message.slice(afterPrefixIndex, instructionOpen)
+  const visibleMessage = visibleWithSeparator.replace(/\s+$/, "")
+  const separatorBeforeHiddenTail = visibleWithSeparator.slice(visibleMessage.length) || "\n\n"
+
+  return {
+    prefix: prefixMatch[0],
+    visibleMessage,
+    separatorBeforeHiddenTail,
+    hiddenTail,
+    // Intentionally return the raw (pre-sanitize) trustedSkill.name here. The wire
+    // form embedded in prefix/wrapper goes through sanitizeSkillName (CR/LF → space),
+    // but downstream consumers — skillUsageDetector, dashboard stats, hook toolArgs —
+    // key on the untouched `skill.name` from the skills list. Normalizing here would
+    // desync us from knownSkillNames in the evolution detector.
+    skillName: trustedSkill.name,
+    skillPath: trustedSkill.path
+  }
+}
+
+function rebuildSlashCommandPayload(
+  parts: SlashCommandPayloadParts,
+  visibleMessage: string
+): string {
+  return `${parts.prefix}${visibleMessage.replace(/\s+$/, "")}${parts.separatorBeforeHiddenTail}${parts.hiddenTail}`
+}
+
+/**
+ * Insert a space after `<` in `<skill-invocation-instruction>` tokens so they no longer
+ * match displayMessages' tail-first strip anchor. Same convention the renderer uses for
+ * `<skill>` in SKILL.md body. Apply this ONLY to text coming from hooks (rewrite or
+ * additionalContext) — not to the user's own visible message. If the user is genuinely
+ * discussing this XML tag in their prompt, the literal must reach the model intact; the
+ * model only ever sees one authoritative wrapper so a stray copy in user text doesn't
+ * confuse it. History-replay's renderer-side strip is what we're protecting here, and
+ * it's fine for a user who types protocol docs to see their own bubble get clipped.
+ */
+function defuseInstructionTag(text: string): string {
+  return text
+    .replace(/<skill-invocation-instruction>/g, "< skill-invocation-instruction>")
+    .replace(/<\/skill-invocation-instruction>/g, "< /skill-invocation-instruction>")
+}
+
+/**
+ * Produce the message string we feed to the router — never the raw wrapper-laden payload.
+ *
+ * Routing scores by length / code fences / path-like tokens, so an inlined SKILL.md
+ * (several KB, full of ``` fences and example paths) systematically pushes every
+ * slash-command send into the premium tier regardless of the user's actual intent.
+ *
+ * Two important contracts:
+ * 1. Only strip the <skill> wrapper when splitSlashCommandPayload already returned a
+ *    trusted `parts` object. Inferring slash-payload-ness from message shape alone
+ *    (old code did this via `/^<skill-ref>/` + lastIndexOf) silently cut spoofed
+ *    payloads too, and mis-anchored when SKILL.md bodies contained literal
+ *    `<skill-invocation-instruction>` strings.
+ * 2. Accept the caller's `message` as-is — this is the post-hook `effectiveMessage`
+ *    so that hook rewrites / additionalContext influence routing complexity.
+ */
+function stripMessageForRouting(message: string, parts: SlashCommandPayloadParts | null): string {
+  let stripped = message
+  if (parts) {
+    // rebuildSlashCommandPayload always produces `${prefix}${visible}${sep}${hiddenTail}`,
+    // so both prefix.startsWith and the hiddenTail lastIndexOf are guaranteed to hit on
+    // effectiveMessage. If the tail lookup misses, the invariant is broken and a future
+    // refactor silently stripped only the prefix — leak the skill body into routing
+    // scoring rather than hide the break. Log loudly and fall back to passing the full
+    // stripped form through; at least routing sees something, and the warn makes the
+    // regression discoverable.
+    stripped = stripped.slice(parts.prefix.length)
+    const tailIndex = stripped.lastIndexOf(parts.hiddenTail)
+    if (tailIndex >= 0) {
+      stripped = stripped.slice(0, tailIndex).replace(/\s+$/, "")
+    } else {
+      console.warn(
+        "[Agent] stripMessageForRouting: hiddenTail not found in effectiveMessage — " +
+          "routing invariant broken, check rebuildSlashCommandPayload output shape"
+      )
+    }
+  }
+  return stripped.replace(/<attachment\s+filename="[^"]*"[^>]*>[\s\S]*?<\/attachment>/g, "").trim()
 }
 
 function getActiveHookSummary(workspacePath?: string): ActiveHookSummary {
@@ -950,811 +1145,676 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
   )
 
   // Handle agent invocation with streaming
-  ipcMain.on("agent:invoke", async (event, { threadId, message, modelId }: AgentInvokeParams) => {
-    const channel = `agent:stream:${threadId}`
-    const window = BrowserWindow.fromWebContents(event.sender)
+  ipcMain.on(
+    "agent:invoke",
+    async (event, { threadId, message, modelId, slashSkill }: AgentInvokeParams) => {
+      const channel = `agent:stream:${threadId}`
+      const window = BrowserWindow.fromWebContents(event.sender)
 
-    console.log("[Agent] Received invoke request:", {
-      threadId,
-      message: message.substring(0, 50),
-      modelId
-    })
-
-    if (!window) {
-      console.error("[Agent] No window found")
-      return
-    }
-
-    // Abort any existing stream for this thread before starting a new one
-    // This prevents concurrent streams which can cause checkpoint corruption
-    const existingController = activeRuns.get(threadId)
-    if (existingController) {
-      console.log("[Agent] Aborting existing stream for thread:", threadId)
-      existingController.abort()
-      activeRuns.delete(threadId)
-    }
-
-    const abortController = new AbortController()
-    activeRuns.set(threadId, abortController)
-
-    // Abort the stream if the window is closed/destroyed
-    const onWindowClosed = (): void => {
-      console.log("[Agent] Window closed, aborting stream for thread:", threadId)
-      abortController.abort()
-    }
-    window.once("closed", onWindowClosed)
-
-    // Start trace collection for this invocation (modelId resolved later)
-    const tracer = new TraceCollector(threadId, message, modelId ?? "unknown")
-    const skillUsageDetector = new SkillUsageDetector()
-    const toolCallCounter = new ToolCallCounter()
-    let assistantText = ""
-    const stopContextCollector = new StopHookContextCollector(message)
-
-    const sendHookNotice = (notice: string): void => {
-      window.webContents.send(channel, {
-        type: "custom",
-        data: { type: "hook_notice", message: notice }
-      })
-    }
-
-    const sendStreamError = (error: string): void => {
-      window.webContents.send(channel, {
-        type: "error",
-        error
-      })
-    }
-
-    const onHookResult = makeHookResultCallback(window, channel)
-
-    const appendTurnToProposalWindow = (
-      status: "success" | "error",
-      errorMessage?: string
-    ): SkillProposalWindowContext => {
-      appendSkillProposalWindowTurn(threadId, {
-        userMessage: message,
-        assistantText,
-        toolCallNames: toolCallCounter.getNames(),
-        toolCallCount: toolCallCounter.getCount(),
-        status,
-        errorMessage,
-        usedSkills: skillUsageDetector.getUsedSkillNames(),
-        finishedAt: nowIsoLocal()
-      })
-
-      const context = buildSkillProposalWindowContext(snapshotSkillProposalWindow(threadId))
-      console.log(
-        `[SkillEvolution][${threadId}] Window append ${JSON.stringify({
-          status,
-          currentTurnToolCallCount: toolCallCounter.getCount(),
-          windowTurnCount: context.turnCount,
-          windowToolCallCount: context.toolCallCount,
-          usedSkills: context.usedSkills
-        })}`
-      )
-      return context
-    }
-
-    // Hoisted so catch/finally block can access them
-    let sessionWorkspacePath: string | undefined
-    let invokeRoutingResult: Awaited<ReturnType<typeof resolveModel>> | null = null
-    let toolErrorCount = 0
-    // High-water mark of input tokens — hoisted for catch/finally access
-    let highWaterInputTokens = 0
-    // Actual model used after failover — hoisted for catch/finally routing feedback
-    let usedModelId: string | undefined
-
-    try {
-      // Get workspace path from thread metadata - REQUIRED
-      const thread = getThread(threadId)
-      let metadata: Record<string, unknown> = {}
-      if (thread?.metadata) {
-        try {
-          metadata = JSON.parse(thread.metadata)
-        } catch {
-          console.warn("[Agent] Failed to parse thread metadata, using empty object")
-        }
-      }
-      console.log("[Agent] Thread metadata:", metadata)
-
-      const workspacePath = metadata.workspacePath as string | undefined
-      sessionWorkspacePath = workspacePath ?? undefined
-
-      if (!workspacePath) {
-        window.webContents.send(channel, {
-          type: "error",
-          error: "WORKSPACE_REQUIRED",
-          message: "Please select a workspace folder before sending messages."
-        })
-        await tracer.finish("error", "WORKSPACE_REQUIRED")
-        return
-      }
-
-      // Fire SessionStart once per thread lifetime (not per turn). SessionEnd fires when the
-      // thread is deleted (threads:delete) or the app is quitting.
-      fireSessionStartOnce(threadId, sessionWorkspacePath, onHookResult)
-      sendActiveHookNotice(window, channel, workspacePath)
-
-      // Fire UserPromptSubmit hook — may block the message, halt the turn, rewrite the prompt,
-      // or inject additional context that the LLM should see alongside the user's message.
-      const promptSubmitResult = await runHooksEnriched(
-        getEnabledHooks(workspacePath ?? undefined),
-        "UserPromptSubmit",
-        {
-          toolArgs: { message },
-          userPrompt: message,
-          workspacePath: workspacePath ?? undefined,
-          sessionId: threadId
-        },
-        onHookResult
-      )
-      if (promptSubmitResult?.blocked || promptSubmitResult?.continue === false) {
-        const reason =
-          promptSubmitResult.stopReason ||
-          promptSubmitResult.stderr ||
-          promptSubmitResult.stdout ||
-          "消息被 Hook 策略拦截"
-        window.webContents.send(channel, {
-          type: "error",
-          error: reason
+      // Runtime-validate IPC shape before touching string methods. The
+      // AgentInvokeParams type is a compile-time promise; a malformed renderer
+      // (wrong field type, forgot to stringify) would otherwise crash the handler
+      // before we even reach the try/catch wrapping the main flow.
+      if (typeof threadId !== "string" || typeof message !== "string") {
+        console.error("[Agent] Invalid invoke payload shape, ignoring", {
+          threadId: typeof threadId,
+          message: typeof message
         })
         return
       }
-      // Apply hook-supplied prompt rewrite / context injection. `message` remains the raw
-      // user input for tracing and proposal capture; `effectiveMessage` is what the LLM sees.
-      let effectiveMessage = message
-      const updatedMessage =
-        promptSubmitResult?.updatedInput?.message ??
-        promptSubmitResult?.updatedInput?.prompt ??
-        promptSubmitResult?.updatedInput?.userPrompt
-      if (typeof updatedMessage === "string" && updatedMessage.length > 0) {
-        effectiveMessage = updatedMessage
-      }
-      if (promptSubmitResult?.additionalContext) {
-        effectiveMessage = `${promptSubmitResult.additionalContext}\n\n${effectiveMessage}`
-      }
-      if (promptSubmitResult?.systemMessage) {
-        window.webContents.send(channel, {
-          type: "custom",
-          data: { type: "hook_notice", message: promptSubmitResult.systemMessage }
-        })
-      }
 
-      // Sync FTS index with any memory files changed since last invocation
-      if (isMemoryEnabled()) {
-        try {
-          const memoryStore = await getMemoryStore()
-          memoryStore.syncMemoryFiles()
-        } catch {
-          /* non-critical */
-        }
-      }
-
-      const requestedModelId = modelId || (metadata.model as string | undefined)
-      // Strip slash-command wrappers before feeding the message to the router. Routing
-      // scores based on length / code-block count / path-like tokens — an inlined SKILL.md
-      // (several KB, usually contains ``` fences and example paths) would systematically
-      // push every slash-command send toward premium tier regardless of the user's actual
-      // intent. See ChatContainer.submitMessage for the symmetric wrapper construction.
-      let routingMessage = message
-      if (typeof message === "string") {
-        // Only strip the slash-command wrapper if the message actually starts with
-        // <skill-ref> — without this guard, a user who pastes `<skill>…</skill>` text
-        // verbatim (e.g. discussing the protocol or asking the model to analyse XML)
-        // would have their own words silently cut before scoring.
-        // submitMessage always emits the wrapper at the tail (instruction + skill, both
-        // anchored to end-of-payload), so we strip from the LAST
-        // `<skill-invocation-instruction>` onward rather than using /g across the whole
-        // message. That keeps any <skill>…</skill> or <skill-invocation-instruction>
-        // fragments the user typed into userText intact.
-        const hasSlashPrefix = /^<skill-ref>[^<\n]+<\/skill-ref>/.test(message)
-        let stripped = message
-        if (hasSlashPrefix) {
-          stripped = stripped.replace(/^<skill-ref>[^<\n]+<\/skill-ref>\s*/, "")
-          // Assumes the wrapper (<skill-invocation-instruction>…</skill>) is the FINAL
-          // segment of the payload — submitMessage constructs it that way today. If we
-          // ever append anything after the wrapper (e.g. a trace id or metadata block),
-          // this slice will silently drop it; update to "slice from instruction-anchor
-          // through the last </skill>" instead.
-          const tailAnchor = stripped.lastIndexOf("<skill-invocation-instruction>")
-          if (tailAnchor >= 0) {
-            stripped = stripped.slice(0, tailAnchor).replace(/\s+$/, "")
-          }
-        }
-        routingMessage = stripped
-          .replace(/<attachment\s+filename="[^"]*"[^>]*>[\s\S]*?<\/attachment>/g, "")
-          .trim()
-      }
-      invokeRoutingResult = await resolveModel({
-        taskSource: "chat",
-        message: routingMessage,
+      // For slash-command sends the first ~50 chars are just the `<skill-ref>` prefix,
+      // which is useless for debugging. Log the declared skill name instead and skip
+      // ahead into the prompt body if we can cheaply locate it. Guard indexOf -> -1
+      // with a non-negative clamp so a (defensive) missing close tag doesn't produce
+      // an off-by-11 offset and a misaligned preview.
+      const skillRefCloseIdx = slashSkill ? message.indexOf("</skill-ref>") : -1
+      const messagePreview =
+        slashSkill && skillRefCloseIdx >= 0
+          ? message
+              .slice(skillRefCloseIdx + "</skill-ref>".length)
+              .trim()
+              .slice(0, 50)
+          : message.substring(0, 50)
+      console.log("[Agent] Received invoke request:", {
         threadId,
-        requestedModelId,
-        routingMode: getGlobalRoutingMode()
-      }).catch(() => null)
-      let effectiveModelId = invokeRoutingResult?.resolvedModelId ?? requestedModelId
+        message: messagePreview,
+        modelId,
+        ...(slashSkill ? { skill: slashSkill.name } : {})
+      })
 
-      // Persist routing decision for thread continuity (sticky/force logic next turn)
-      if (invokeRoutingResult) rememberRoutingDecision(threadId, invokeRoutingResult)
-
-      // Attach routing funnel record to trace (setRoutingTrace is internally safe, never throws)
-      if (invokeRoutingResult?.routingTrace) {
-        tracer.setRoutingTrace(invokeRoutingResult.routingTrace)
+      if (!window) {
+        console.error("[Agent] No window found")
+        return
       }
 
-      // Emit routing result so the frontend can display which model was selected
-      if (invokeRoutingResult) {
+      // Abort any existing stream for this thread before starting a new one
+      // This prevents concurrent streams which can cause checkpoint corruption
+      const existingController = activeRuns.get(threadId)
+      if (existingController) {
+        console.log("[Agent] Aborting existing stream for thread:", threadId)
+        existingController.abort()
+        activeRuns.delete(threadId)
+      }
+
+      const abortController = new AbortController()
+      activeRuns.set(threadId, abortController)
+
+      // Abort the stream if the window is closed/destroyed.
+      // This listener is registered OUTSIDE the try/finally below — the few lines
+      // between here and the try (constructors for TraceCollector, SkillUsageDetector,
+      // etc.) are pure field initialization that can't throw. If you add anything
+      // fallible between here and the try block, move the try up to include this
+      // registration so the finally's removeListener still runs on failure.
+      const onWindowClosed = (): void => {
+        console.log("[Agent] Window closed, aborting stream for thread:", threadId)
+        abortController.abort()
+      }
+      window.once("closed", onWindowClosed)
+
+      // Compute slash payload parts up front — TraceCollector, StopHookContextCollector,
+      // the proposal window closure, and the UserPromptSubmit branch all need to agree
+      // on "what the user really said" vs "inlined SKILL.md body." Any consumer that sees
+      // the raw `message` instead of visibleUserMessage risks leaking multi-KB skill
+      // documentation into dashboards, memory, or hook context.
+      //
+      // Trust model: splitSlashCommandPayload enforces structural checks (shape +
+      // renderer-attached metadata + path under a skills root). We intentionally do NOT
+      // cross-check against listAllSkills() or re-read SKILL.md from disk here — those
+      // layers only harden against an attacker who can already inject arbitrary IPC from
+      // renderer context, but such an attacker can just as easily call stream.submit with
+      // a raw prompt that bypasses slash handling entirely. The marginal protection
+      // isn't worth two extra disk reads per turn plus the maintenance coupling.
+      const slashPayloadParts =
+        typeof message === "string" ? splitSlashCommandPayload(message, slashSkill ?? null) : null
+      const visibleUserMessage = slashPayloadParts?.visibleMessage ?? message
+
+      // Start trace collection for this invocation (modelId resolved later).
+      // Use visibleUserMessage so dashboard/optimizer views show the user's actual prompt
+      // rather than the full slash payload; the real prompt the model saw is still
+      // captured by the per-model-call trace nodes added as the run progresses.
+      const tracer = new TraceCollector(threadId, visibleUserMessage, modelId ?? "unknown")
+      const skillUsageDetector = new SkillUsageDetector()
+      // Record explicit slash invocation as soon as we've authenticated the payload —
+      // do NOT wait until after UserPromptSubmit hooks run. If a hook throws and the
+      // outer catch path fires `appendTurnToProposalWindow("error")`, the proposal
+      // window should still reflect "user tried to invoke skill X" rather than a
+      // silent `usedSkills: []`. Recording is idempotent (detector uses a Set).
+      //
+      // Seed the detector with the authenticated skill metadata FIRST. Otherwise the
+      // subsequent onExplicitInvocation would land in `pendingExplicitNames` (since
+      // knownSkillNames is still empty before the first `values` event flows in from
+      // the graph tick), and any error path that reads getUsedSkillNames() before
+      // onSkillsMetadata arrives would silently see `[]`.
+      if (slashPayloadParts) {
+        skillUsageDetector.onSkillsMetadata([
+          { name: slashPayloadParts.skillName, path: slashPayloadParts.skillPath }
+        ])
+        skillUsageDetector.onExplicitInvocation(slashPayloadParts.skillName)
+      }
+      const toolCallCounter = new ToolCallCounter()
+      let assistantText = ""
+      const stopContextCollector = new StopHookContextCollector(visibleUserMessage)
+
+      const sendHookNotice = (notice: string): void => {
         window.webContents.send(channel, {
           type: "custom",
-          data: {
-            type: "routing_result",
-            resolvedModelId: invokeRoutingResult.resolvedModelId,
-            resolvedTier: invokeRoutingResult.resolvedTier,
-            routeReason: invokeRoutingResult.routeReason
-          }
+          data: { type: "hook_notice", message: notice }
         })
       }
 
-      // Slash-command skill invocations inline the SKILL.md body into the user message
-      // instead of going through the read_file tool, so they never trigger the
-      // onReadFilePath path. Parse the leading <skill-ref>NAME</skill-ref> tag here so
-      // usage stats (dashboard, trace, skill evolution window) still record the skill.
-      // The renderer XML-escapes the skill name (see formatSkillRef); reverse that here
-      // so names with special characters (&, ", ', <) match the real skill metadata.
-      //
-      // Use the raw `message` (not `effectiveMessage`): hooks can rewrite/prepend context,
-      // which may drop the leading <skill-ref> tag, but we want usage stats keyed to what
-      // the user actually invoked.
-      if (typeof message === "string") {
-        // Anchor to the start of the message to mirror the renderer's formatSkillRef usage
-        // (which always writes <skill-ref> as the leading prefix). Otherwise users quoting
-        // the tag in regular chat would poison usage stats.
-        // Local copy of SKILL_REF_PATTERN (from renderer features/slash-commands/skill-marker).
-        // Main process can't import renderer code, so the character class here MUST stay in
-        // sync with that constant — if you change one, change the other.
-        const slashSkillMatch = message.match(/^<skill-ref>([^<\n]+)<\/skill-ref>/)
-        if (slashSkillMatch) {
-          // Keep the XML-escaped form for regex matching against the wrapper's <name>
-          // (both are produced by escXml/escapeXml on the renderer side — matching them in
-          // escaped form is the only way skill names containing '&', '<', '>', '"' will hit).
-          // Only decode when recording into the detector, whose keys are the real names.
-          const rawName = slashSkillMatch[1].trim()
-          // SKILL_REF_PATTERN allows a name made entirely of whitespace ([^<\n]+ matches
-          // spaces). Skip the wrapper lookup if the trimmed name is empty so we don't walk
-          // the message body just to hand the detector an empty key.
-          if (rawName) {
-            const decoded = rawName
-              .replace(/&apos;/g, "'")
-              .replace(/&quot;/g, '"')
-              .replace(/&gt;/g, ">")
-              .replace(/&lt;/g, "<")
-              .replace(/&amp;/g, "&")
-            // Anti-spoof: only record usage when the real <skill> payload wrapper (which only
-            // submitMessage emits) is also present, and its <name> matches. A user who merely
-            // types <skill-ref>foo</skill-ref> at the start of a chat message would otherwise
-            // pollute usage stats without actually invoking any skill.
-            //
-            // Walk every <skill>...</skill> block in the message instead of just the first.
-            // The renderer always appends our real wrapper at the *end* (after attachments,
-            // after instruction), but a user message body or attachment text might happen to
-            // contain a literal "<skill>" earlier — picking only the first occurrence would
-            // miss our real wrapper and silently drop the usage stat.
-            // We only require <name> to match <skill-ref>'s rawName. Path correlation
-            // sounds tempting for spoof prevention, but when the user has disabled any skill,
-            // the runtime loads from a copied enabled-skills-* dir so the loaded path differs
-            // from the renderer's sent path — a strict path check would silently drop every
-            // legitimate invocation. See usage-detector.ts comment for the full trade-off.
-            let cursor = 0
-            while (cursor < message.length) {
-              const skillOpen = message.indexOf("<skill>", cursor)
-              if (skillOpen < 0) break
-              const skillClose = message.indexOf("</skill>", skillOpen)
-              if (skillClose < 0) break
-              const block = message.slice(skillOpen, skillClose)
-              const nameMatch = block.match(/<name>\s*([^<]*)\s*<\/name>/)
-              if (nameMatch && nameMatch[1].trim() === rawName) {
-                skillUsageDetector.onExplicitInvocation(decoded)
-                break
-              }
-              cursor = skillClose + "</skill>".length
-            }
+      const sendStreamError = (error: string): void => {
+        window.webContents.send(channel, {
+          type: "error",
+          error
+        })
+      }
+
+      const onHookResult = makeHookResultCallback(window, channel)
+
+      const appendTurnToProposalWindow = (
+        status: "success" | "error",
+        errorMessage?: string
+      ): SkillProposalWindowContext => {
+        appendSkillProposalWindowTurn(threadId, {
+          // Store visible user text only. The hidden <skill> wrapper is implementation
+          // detail; storing it would pollute proposal-debug views and blow up log size
+          // when a user repeatedly invokes a big skill. Skill identity is captured via
+          // the separate usedSkills field.
+          userMessage: visibleUserMessage,
+          assistantText,
+          toolCallNames: toolCallCounter.getNames(),
+          toolCallCount: toolCallCounter.getCount(),
+          status,
+          errorMessage,
+          usedSkills: skillUsageDetector.getUsedSkillNames(),
+          finishedAt: nowIsoLocal()
+        })
+
+        const context = buildSkillProposalWindowContext(snapshotSkillProposalWindow(threadId))
+        console.log(
+          `[SkillEvolution][${threadId}] Window append ${JSON.stringify({
+            status,
+            currentTurnToolCallCount: toolCallCounter.getCount(),
+            windowTurnCount: context.turnCount,
+            windowToolCallCount: context.toolCallCount,
+            usedSkills: context.usedSkills
+          })}`
+        )
+        return context
+      }
+
+      // Hoisted so catch/finally block can access them
+      let sessionWorkspacePath: string | undefined
+      let invokeRoutingResult: Awaited<ReturnType<typeof resolveModel>> | null = null
+      let toolErrorCount = 0
+      // High-water mark of input tokens — hoisted for catch/finally access
+      let highWaterInputTokens = 0
+      // Actual model used after failover — hoisted for catch/finally routing feedback
+      let usedModelId: string | undefined
+
+      try {
+        // Get workspace path from thread metadata - REQUIRED
+        const thread = getThread(threadId)
+        let metadata: Record<string, unknown> = {}
+        if (thread?.metadata) {
+          try {
+            metadata = JSON.parse(thread.metadata)
+          } catch {
+            console.warn("[Agent] Failed to parse thread metadata, using empty object")
           }
         }
-      }
+        console.log("[Agent] Thread metadata:", metadata)
 
-      const humanMessage = new HumanMessage(effectiveMessage)
-      const streamConfig = {
-        configurable: { thread_id: threadId },
-        signal: abortController.signal,
-        streamMode: ["messages", "values"] as ("messages" | "values")[],
-        recursionLimit: 1000
-      }
+        const workspacePath = metadata.workspacePath as string | undefined
+        sessionWorkspacePath = workspacePath ?? undefined
 
-      // ── Failover loop: try models in order, resume from checkpoint on retryable errors ──
-      const primaryTier = invokeRoutingResult?.resolvedTier ?? "premium"
-      const orderedChain = buildOrderedChain(
-        effectiveModelId,
-        invokeRoutingResult?.fallbackChain,
-        primaryTier,
-        invokeRoutingResult?.layer !== "pinned"
-      )
-      const failoverAttempts: FailoverAttempt[] = []
-      usedModelId = effectiveModelId
-      let isFirstAttempt = true
-      let agent: Awaited<ReturnType<typeof createAgentRuntime>> | null = null
-      let stream: AsyncIterable<unknown> | null = null
-
-      for (const candidateId of orderedChain) {
-        if (abortController.signal.aborted) break
-        try {
-          agent = await createAgentRuntime({
-            threadId,
-            workspacePath,
-            modelId: candidateId,
-            abortSignal: abortController.signal,
-            noSkillEvolutionTool: true,
-            retryHooks: buildModelRetryHooks(window, channel),
-            maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
-            onHookResult
+        if (!workspacePath) {
+          window.webContents.send(channel, {
+            type: "error",
+            error: "WORKSPACE_REQUIRED",
+            message: "Please select a workspace folder before sending messages."
           })
-          // First attempt sends the message; subsequent attempts resume from checkpoint
-          const input = isFirstAttempt ? { messages: [humanMessage] } : null
-          stream = await agent.stream(input, streamConfig)
-          usedModelId = candidateId
-          break
-        } catch (err) {
-          if (!isRetryableApiError(err)) throw err
-          failoverAttempts.push({ modelId: candidateId, error: String(err), timestamp: Date.now() })
-          console.warn(`[Agent][Failover] ${candidateId} failed: ${err}, trying next...`)
-          // Keep isFirstAttempt=true: init-time errors (createAgentRuntime / agent.stream)
-          // happen before any graph tick, so HumanMessage is NOT yet checkpointed.
-          // Next candidate must still send { messages: [humanMessage] }.
-          if (!abortController.signal.aborted) {
-            await new Promise((r) => setTimeout(r, 500))
+          await tracer.finish("error", "WORKSPACE_REQUIRED")
+          return
+        }
+
+        // Fire SessionStart once per thread lifetime (not per turn). SessionEnd fires when the
+        // thread is deleted (threads:delete) or the app is quitting.
+        fireSessionStartOnce(threadId, sessionWorkspacePath, onHookResult)
+        sendActiveHookNotice(window, channel, workspacePath)
+
+        // slashPayloadParts / visibleUserMessage are computed earlier (up by the
+        // onHookResult block) so Stop hooks, proposal window, and UserPromptSubmit all
+        // share one source of truth on what the user really said vs the hidden skill
+        // wrapper. See the comment there for the trust model.
+        const promptForHook = visibleUserMessage
+
+        // Fire UserPromptSubmit hook — may block the message, halt the turn, rewrite the prompt,
+        // or inject additional context that the LLM should see alongside the user's message.
+        // Expose skillName/skillPath for audit/allowlist hooks so they can act on the invoked
+        // skill identity without needing to parse it out of the raw message string.
+        const promptSubmitResult = await runHooksEnriched(
+          getEnabledHooks(workspacePath ?? undefined),
+          "UserPromptSubmit",
+          {
+            toolArgs: slashPayloadParts
+              ? {
+                  message: promptForHook,
+                  slashCommand: true,
+                  skillName: slashPayloadParts.skillName,
+                  skillPath: slashPayloadParts.skillPath
+                }
+              : { message },
+            userPrompt: promptForHook,
+            workspacePath: workspacePath ?? undefined,
+            sessionId: threadId
+          },
+          onHookResult
+        )
+        if (promptSubmitResult?.blocked || promptSubmitResult?.continue === false) {
+          const reason =
+            promptSubmitResult.stopReason ||
+            promptSubmitResult.stderr ||
+            promptSubmitResult.stdout ||
+            "消息被 Hook 策略拦截"
+          window.webContents.send(channel, {
+            type: "error",
+            error: reason
+          })
+          return
+        }
+        // Apply hook-supplied prompt rewrite / context injection. `message` remains the raw
+        // user input for tracing and proposal capture; `effectiveMessage` is what the LLM sees.
+        //
+        // For slash-command messages, both rewrite and additionalContext must land INSIDE the
+        // visible segment (between <skill-ref> prefix and the hidden <skill> wrapper tail),
+        // never in front of the prefix — otherwise displayMessages' `^<skill-ref>` anchor
+        // breaks on history replay and the chip silently disappears.
+        //
+        // Caveat for hook authors: `visibleMessage` contains the user's text AND any
+        // `<attachment ...>...</attachment>` blocks the renderer inlined before the slash
+        // wrapper. A hook that returns `updatedInput.message` REPLACES this entire visible
+        // segment, so attachments get dropped unless the hook re-emits them. This mirrors the
+        // behavior for non-slash messages (where message == visible). Hooks that only want to
+        // tweak user text should prefer `additionalContext` instead.
+        //
+        // Design decision (not a bug): attachments are intentionally part of the visible
+        // segment rather than the hidden tail, because DLP/audit hooks legitimately need to
+        // inspect attachment contents. Moving attachments into the hidden tail would protect
+        // them from rewrite but blind hooks to file contents — the wrong trade for the
+        // primary "enforce policy on what we send to the model" use case.
+        let visibleMessage = slashPayloadParts?.visibleMessage ?? message
+        const updatedMessage =
+          promptSubmitResult?.updatedInput?.message ??
+          promptSubmitResult?.updatedInput?.prompt ??
+          promptSubmitResult?.updatedInput?.userPrompt
+        // Treat empty string the same as an absent field — in JSON-from-shell hooks
+        // it's almost always "caller forgot to set this" rather than "intentionally
+        // clear the prompt." Hooks that truly need to blank the message can return
+        // a single space or rely on `continue: false` to halt the turn entirely.
+        //
+        // For slash payloads, defuse any `<skill-invocation-instruction>` tokens the hook
+        // emitted before they land in visibleMessage. We DON'T defuse the user's own
+        // visibleMessage — a user legitimately discussing this protocol tag should have
+        // their literal reach the model intact. Only hook output is treated as potentially
+        // interfering with our history-replay strip anchors.
+        if (typeof updatedMessage === "string" && updatedMessage.length > 0) {
+          visibleMessage = slashPayloadParts ? defuseInstructionTag(updatedMessage) : updatedMessage
+        }
+        if (promptSubmitResult?.additionalContext) {
+          const ctx = slashPayloadParts
+            ? defuseInstructionTag(promptSubmitResult.additionalContext)
+            : promptSubmitResult.additionalContext
+          visibleMessage = `${ctx}\n\n${visibleMessage}`
+        }
+        const effectiveMessage = slashPayloadParts
+          ? rebuildSlashCommandPayload(slashPayloadParts, visibleMessage)
+          : visibleMessage
+        if (promptSubmitResult?.systemMessage) {
+          window.webContents.send(channel, {
+            type: "custom",
+            data: { type: "hook_notice", message: promptSubmitResult.systemMessage }
+          })
+        }
+
+        // Sync FTS index with any memory files changed since last invocation
+        if (isMemoryEnabled()) {
+          try {
+            const memoryStore = await getMemoryStore()
+            memoryStore.syncMemoryFiles()
+          } catch {
+            /* non-critical */
           }
         }
-      }
 
-      // P3: user cancellation during failover should not be reported as hard error
-      if (abortController.signal.aborted) {
-        // Fall through to outer abort handling
-        throw Object.assign(new Error("aborted"), { name: "AbortError" })
-      }
+        const requestedModelId = modelId || (metadata.model as string | undefined)
+        // Use `effectiveMessage` (post-hook) so hook rewrites and additionalContext
+        // actually influence routing complexity scoring — a hook that expands a short
+        // prompt into a long task should let routing see the expanded form. We strip
+        // the slash-command wrapper only when splitSlashCommandPayload produced a
+        // trusted parts object; spoofed payloads (no slashSkill metadata) are routed
+        // on the full text so attackers can't hide tokens from routing either.
+        const routingMessage =
+          typeof effectiveMessage === "string"
+            ? stripMessageForRouting(effectiveMessage, slashPayloadParts)
+            : effectiveMessage
+        invokeRoutingResult = await resolveModel({
+          taskSource: "chat",
+          message: routingMessage,
+          threadId,
+          requestedModelId,
+          routingMode: getGlobalRoutingMode()
+        }).catch(() => null)
+        let effectiveModelId = invokeRoutingResult?.resolvedModelId ?? requestedModelId
 
-      if (!stream || !agent) {
-        const allErrors = failoverAttempts.map((a) => `${a.modelId}: ${a.error}`).join("; ")
-        throw new Error(`All models failed: ${allErrors}`)
-      }
+        // Persist routing decision for thread continuity (sticky/force logic next turn)
+        if (invokeRoutingResult) rememberRoutingDecision(threadId, invokeRoutingResult)
 
-      // Notify frontend if failover happened — update model display + context window
-      const notifyFailover = (): void => {
-        if (failoverAttempts.length > 0 && usedModelId !== effectiveModelId) {
-          const usedCfgId = usedModelId?.startsWith("custom:")
-            ? usedModelId.slice("custom:".length)
-            : usedModelId
-          const usedCfg = getCustomModelConfigs().find((c) => c.id === usedCfgId)
+        // Attach routing funnel record to trace (setRoutingTrace is internally safe, never throws)
+        if (invokeRoutingResult?.routingTrace) {
+          tracer.setRoutingTrace(invokeRoutingResult.routingTrace)
+        }
+
+        // Emit routing result so the frontend can display which model was selected
+        if (invokeRoutingResult) {
           window.webContents.send(channel, {
             type: "custom",
             data: {
               type: "routing_result",
-              resolvedModelId: usedModelId,
-              resolvedTier: usedCfg?.tier ?? "premium",
-              routeReason: `failover from ${failoverAttempts[0].modelId}`
+              resolvedModelId: invokeRoutingResult.resolvedModelId,
+              resolvedTier: invokeRoutingResult.resolvedTier,
+              routeReason: invokeRoutingResult.routeReason
             }
           })
-          window.webContents.send(channel, {
-            type: "custom",
-            data: { type: "model_failover", attempts: failoverAttempts, activeModelId: usedModelId }
-          })
-          // P2: persist failover model + sticky in a single atomic write
-          rememberRoutingDecision(
-            threadId,
-            {
-              resolvedModelId: usedModelId!,
-              resolvedTier: usedCfg?.tier ?? "premium",
-              routeReason: `failover from ${failoverAttempts[0].modelId}`,
-              fallbackChain: [],
-              layer: "pinned"
-            },
-            usedModelId!
+        }
+
+        // Explicit slash-command usage was already recorded right after splitSlashCommandPayload
+        // returned — see the comment near the tracer/stopContextCollector init. Recording
+        // there rather than here means hook failures don't wipe the "user invoked skill X"
+        // signal from the error-path proposal window.
+
+        const humanMessage = new HumanMessage(effectiveMessage)
+        const streamConfig = {
+          configurable: { thread_id: threadId },
+          signal: abortController.signal,
+          streamMode: ["messages", "values"] as ("messages" | "values")[],
+          recursionLimit: 1000
+        }
+
+        // ── Failover loop: try models in order, resume from checkpoint on retryable errors ──
+        const primaryTier = invokeRoutingResult?.resolvedTier ?? "premium"
+        const orderedChain = buildOrderedChain(
+          effectiveModelId,
+          invokeRoutingResult?.fallbackChain,
+          primaryTier,
+          invokeRoutingResult?.layer !== "pinned"
+        )
+        const failoverAttempts: FailoverAttempt[] = []
+        usedModelId = effectiveModelId
+        // Intentionally const — this failover loop only retries INIT-time errors
+        // (createAgentRuntime / agent.stream throw synchronously before any graph
+        // tick runs), so HumanMessage is never checkpointed on retryable failure
+        // paths. Every candidate must re-send { messages: [humanMessage] }, never
+        // resume from a nonexistent checkpoint. Don't flip this to `let` without
+        // also changing when we checkpoint the human input.
+        const isFirstAttempt = true
+        let agent: Awaited<ReturnType<typeof createAgentRuntime>> | null = null
+        let stream: AsyncIterable<unknown> | null = null
+
+        for (const candidateId of orderedChain) {
+          if (abortController.signal.aborted) break
+          try {
+            agent = await createAgentRuntime({
+              threadId,
+              workspacePath,
+              modelId: candidateId,
+              abortSignal: abortController.signal,
+              noSkillEvolutionTool: true,
+              retryHooks: buildModelRetryHooks(window, channel),
+              maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
+              onHookResult
+            })
+            // First attempt sends the message; subsequent attempts resume from checkpoint
+            const input = isFirstAttempt ? { messages: [humanMessage] } : null
+            stream = await agent.stream(input, streamConfig)
+            usedModelId = candidateId
+            break
+          } catch (err) {
+            if (!isRetryableApiError(err)) throw err
+            failoverAttempts.push({
+              modelId: candidateId,
+              error: String(err),
+              timestamp: Date.now()
+            })
+            console.warn(`[Agent][Failover] ${candidateId} failed: ${err}, trying next...`)
+            // Keep isFirstAttempt=true: init-time errors (createAgentRuntime / agent.stream)
+            // happen before any graph tick, so HumanMessage is NOT yet checkpointed.
+            // Next candidate must still send { messages: [humanMessage] }.
+            if (!abortController.signal.aborted) {
+              await new Promise((r) => setTimeout(r, 500))
+            }
+          }
+        }
+
+        // P3: user cancellation during failover should not be reported as hard error
+        if (abortController.signal.aborted) {
+          // Fall through to outer abort handling
+          throw Object.assign(new Error("aborted"), { name: "AbortError" })
+        }
+
+        if (!stream || !agent) {
+          const allErrors = failoverAttempts.map((a) => `${a.modelId}: ${a.error}`).join("; ")
+          throw new Error(`All models failed: ${allErrors}`)
+        }
+
+        // Notify frontend if failover happened — update model display + context window
+        const notifyFailover = (): void => {
+          if (failoverAttempts.length > 0 && usedModelId !== effectiveModelId) {
+            const usedCfgId = usedModelId?.startsWith("custom:")
+              ? usedModelId.slice("custom:".length)
+              : usedModelId
+            const usedCfg = getCustomModelConfigs().find((c) => c.id === usedCfgId)
+            window.webContents.send(channel, {
+              type: "custom",
+              data: {
+                type: "routing_result",
+                resolvedModelId: usedModelId,
+                resolvedTier: usedCfg?.tier ?? "premium",
+                routeReason: `failover from ${failoverAttempts[0].modelId}`
+              }
+            })
+            window.webContents.send(channel, {
+              type: "custom",
+              data: {
+                type: "model_failover",
+                attempts: failoverAttempts,
+                activeModelId: usedModelId
+              }
+            })
+            // P2: persist failover model + sticky in a single atomic write
+            rememberRoutingDecision(
+              threadId,
+              {
+                resolvedModelId: usedModelId!,
+                resolvedTier: usedCfg?.tier ?? "premium",
+                routeReason: `failover from ${failoverAttempts[0].modelId}`,
+                fallbackChain: [],
+                layer: "pinned"
+              },
+              usedModelId!
+            )
+            // Update effectiveModelId for downstream trace/feedback
+            effectiveModelId = usedModelId
+          }
+        }
+        notifyFailover()
+
+        // Update tracer with resolved modelId.
+        // Set modelName from config.model (the real API model name, e.g. "MiniMax-M2.7") as an
+        // initial fallback — it will be overwritten later by the actual model name from the API
+        // response metadata once the first AI message arrives (see response_metadata.model_name below).
+        if (effectiveModelId) {
+          tracer.setModelId(effectiveModelId)
+          const cfgIdForName = effectiveModelId.startsWith("custom:")
+            ? effectiveModelId.slice("custom:".length)
+            : effectiveModelId
+          const cfgForName = getCustomModelConfigs().find((c) => c.id === cfgIdForName)
+          // Use config.model (the actual API model name) as fallback, not config.name (display label)
+          if (cfgForName?.model) tracer.setModelName(cfgForName.model)
+        }
+
+        // ── Tool-call extraction (tested in __tests__/tool-call-extraction.test.ts)
+        //
+        // "messages" mode delivers one [msgChunk, metadata?] tuple per LangGraph message.
+        // AI messages carry a complete tool_calls array even in streaming mode —
+        // confirmed by stream-converter.ts and unit tests.
+        //
+        // Deduplication: same AI message ID can appear in multiple chunks
+        // (e.g. once as AIMessageChunk, once as AIMessage in a values snapshot).
+        // We track seen IDs to count each unique tool invocation exactly once.
+        // ─────────────────────────────────────────────────────────────────────────
+
+        const _countedAiMsgIds = new Set<string>()
+        const _countedModelMsgIds = new Set<string>()
+        const _countedToolResultMsgIds = new Set<string>()
+        // Track which subagent tool-call IDs we've already emitted SubagentStop for (dedupe)
+        const _subagentStopFired = new Set<string>()
+        const _llmNodeByMessageId = new Map<string, string>()
+        const _toolNodeByRef = new Map<string, string>()
+        const MODEL_INPUT_WINDOW = 12
+        const MAX_TRACE_CONTENT = 2000
+
+        const trimContent = (s: string): string =>
+          s.length > MAX_TRACE_CONTENT ? `${s.slice(0, MAX_TRACE_CONTENT)}\n…(truncated)` : s
+
+        const normalizeMessageText = (s: string): string => s.replace(/\r\n/g, "\n").trim()
+
+        // Providers may surface usage as top-level `usage_metadata` or under
+        // `response_metadata.token_usage` / `response_metadata.usage`.
+        // Normalize all variants so trace capture and UI stay aligned.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const getUsageMetadata = (kwargs: any): unknown =>
+          kwargs?.usage_metadata ??
+          kwargs?.response_metadata?.token_usage ??
+          kwargs?.response_metadata?.usage
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const extractText = (raw: any): string => {
+          if (typeof raw === "string") return trimContent(raw)
+          if (!Array.isArray(raw)) return ""
+          const text = raw
+            .map((b) => {
+              if (typeof b === "string") return b
+              if (!b || typeof b !== "object") return ""
+              if (typeof b.text === "string") return b.text
+              if (typeof b.content === "string") return b.content
+              return ""
+            })
+            .filter(Boolean)
+            .join("\n")
+          return trimContent(text)
+        }
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const toRole = (
+          className: string,
+          kwargs: any
+        ): "system" | "user" | "assistant" | "tool" | "unknown" => {
+          if (className.includes("Human")) return "user"
+          if (className.includes("AI")) return "assistant"
+          if (className.includes("System")) return "system"
+          if (className.includes("Tool")) return "tool"
+          if (kwargs?.type === "human") return "user"
+          if (kwargs?.type === "ai") return "assistant"
+          if (kwargs?.type === "system") return "system"
+          if (kwargs?.type === "tool") return "tool"
+          return "unknown"
+        }
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const normalizeTokenUsage = (
+          usage: any
+        ):
+          | {
+              inputTokens?: number
+              outputTokens?: number
+              totalTokens?: number
+              cacheReadTokens?: number
+              cacheCreationTokens?: number
+            }
+          | undefined => {
+          if (!usage || typeof usage !== "object") return undefined
+          const toNum = (v: unknown): number | undefined =>
+            typeof v === "number" && Number.isFinite(v) ? v : undefined
+          const inputTokens = toNum(usage.input_tokens ?? usage.inputTokens)
+          const outputTokens = toNum(usage.output_tokens ?? usage.outputTokens)
+          const totalTokens = toNum(usage.total_tokens ?? usage.totalTokens)
+          const cacheReadTokens = toNum(
+            usage.cache_read_input_tokens ?? usage.cacheReadInputTokens ?? usage.cacheReadTokens
           )
-          // Update effectiveModelId for downstream trace/feedback
-          effectiveModelId = usedModelId
+          const cacheCreationTokens = toNum(
+            usage.cache_creation_input_tokens ??
+              usage.cacheCreationInputTokens ??
+              usage.cacheCreationTokens
+          )
+          if (
+            inputTokens === undefined &&
+            outputTokens === undefined &&
+            totalTokens === undefined &&
+            cacheReadTokens === undefined &&
+            cacheCreationTokens === undefined
+          )
+            return undefined
+          return { inputTokens, outputTokens, totalTokens, cacheReadTokens, cacheCreationTokens }
         }
-      }
-      notifyFailover()
 
-      // Update tracer with resolved modelId.
-      // Set modelName from config.model (the real API model name, e.g. "MiniMax-M2.7") as an
-      // initial fallback — it will be overwritten later by the actual model name from the API
-      // response metadata once the first AI message arrives (see response_metadata.model_name below).
-      if (effectiveModelId) {
-        tracer.setModelId(effectiveModelId)
-        const cfgIdForName = effectiveModelId.startsWith("custom:")
-          ? effectiveModelId.slice("custom:".length)
-          : effectiveModelId
-        const cfgForName = getCustomModelConfigs().find((c) => c.id === cfgIdForName)
-        // Use config.model (the actual API model name) as fallback, not config.name (display label)
-        if (cfgForName?.model) tracer.setModelName(cfgForName.model)
-      }
+        const extractTextBlocks = (raw: unknown): string => {
+          if (typeof raw === "string") return raw
+          if (Array.isArray(raw)) {
+            return (raw as Array<{ type?: string; text?: string }>)
+              .filter((b) => b?.type === "text")
+              .map((b) => b.text ?? "")
+              .join("")
+          }
+          return ""
+        }
 
-      // ── Tool-call extraction (tested in __tests__/tool-call-extraction.test.ts)
-      //
-      // "messages" mode delivers one [msgChunk, metadata?] tuple per LangGraph message.
-      // AI messages carry a complete tool_calls array even in streaming mode —
-      // confirmed by stream-converter.ts and unit tests.
-      //
-      // Deduplication: same AI message ID can appear in multiple chunks
-      // (e.g. once as AIMessageChunk, once as AIMessage in a values snapshot).
-      // We track seen IDs to count each unique tool invocation exactly once.
-      // ─────────────────────────────────────────────────────────────────────────
-
-      const _countedAiMsgIds = new Set<string>()
-      const _countedModelMsgIds = new Set<string>()
-      const _countedToolResultMsgIds = new Set<string>()
-      // Track which subagent tool-call IDs we've already emitted SubagentStop for (dedupe)
-      const _subagentStopFired = new Set<string>()
-      const _llmNodeByMessageId = new Map<string, string>()
-      const _toolNodeByRef = new Map<string, string>()
-      const MODEL_INPUT_WINDOW = 12
-      const MAX_TRACE_CONTENT = 2000
-
-      const trimContent = (s: string): string =>
-        s.length > MAX_TRACE_CONTENT ? `${s.slice(0, MAX_TRACE_CONTENT)}\n…(truncated)` : s
-
-      const normalizeMessageText = (s: string): string => s.replace(/\r\n/g, "\n").trim()
-
-      // Providers may surface usage as top-level `usage_metadata` or under
-      // `response_metadata.token_usage` / `response_metadata.usage`.
-      // Normalize all variants so trace capture and UI stay aligned.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const getUsageMetadata = (kwargs: any): unknown =>
-        kwargs?.usage_metadata ??
-        kwargs?.response_metadata?.token_usage ??
-        kwargs?.response_metadata?.usage
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const extractText = (raw: any): string => {
-        if (typeof raw === "string") return trimContent(raw)
-        if (!Array.isArray(raw)) return ""
-        const text = raw
-          .map((b) => {
-            if (typeof b === "string") return b
-            if (!b || typeof b !== "object") return ""
-            if (typeof b.text === "string") return b.text
-            if (typeof b.content === "string") return b.content
-            return ""
+        const forwardStreamChunk = (mode: string, payload: unknown): void => {
+          window.webContents.send(channel, {
+            type: "stream",
+            mode,
+            data: payload
           })
-          .filter(Boolean)
-          .join("\n")
-        return trimContent(text)
-      }
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const toRole = (
-        className: string,
-        kwargs: any
-      ): "system" | "user" | "assistant" | "tool" | "unknown" => {
-        if (className.includes("Human")) return "user"
-        if (className.includes("AI")) return "assistant"
-        if (className.includes("System")) return "system"
-        if (className.includes("Tool")) return "tool"
-        if (kwargs?.type === "human") return "user"
-        if (kwargs?.type === "ai") return "assistant"
-        if (kwargs?.type === "system") return "system"
-        if (kwargs?.type === "tool") return "tool"
-        return "unknown"
-      }
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const normalizeTokenUsage = (
-        usage: any
-      ):
-        | {
-            inputTokens?: number
-            outputTokens?: number
-            totalTokens?: number
-            cacheReadTokens?: number
-            cacheCreationTokens?: number
-          }
-        | undefined => {
-        if (!usage || typeof usage !== "object") return undefined
-        const toNum = (v: unknown): number | undefined =>
-          typeof v === "number" && Number.isFinite(v) ? v : undefined
-        const inputTokens = toNum(usage.input_tokens ?? usage.inputTokens)
-        const outputTokens = toNum(usage.output_tokens ?? usage.outputTokens)
-        const totalTokens = toNum(usage.total_tokens ?? usage.totalTokens)
-        const cacheReadTokens = toNum(
-          usage.cache_read_input_tokens ?? usage.cacheReadInputTokens ?? usage.cacheReadTokens
-        )
-        const cacheCreationTokens = toNum(
-          usage.cache_creation_input_tokens ??
-            usage.cacheCreationInputTokens ??
-            usage.cacheCreationTokens
-        )
-        if (
-          inputTokens === undefined &&
-          outputTokens === undefined &&
-          totalTokens === undefined &&
-          cacheReadTokens === undefined &&
-          cacheCreationTokens === undefined
-        )
-          return undefined
-        return { inputTokens, outputTokens, totalTokens, cacheReadTokens, cacheCreationTokens }
-      }
-
-      const extractTextBlocks = (raw: unknown): string => {
-        if (typeof raw === "string") return raw
-        if (Array.isArray(raw)) {
-          return (raw as Array<{ type?: string; text?: string }>)
-            .filter((b) => b?.type === "text")
-            .map((b) => b.text ?? "")
-            .join("")
         }
-        return ""
-      }
 
-      const forwardStreamChunk = (mode: string, payload: unknown): void => {
-        window.webContents.send(channel, {
-          type: "stream",
-          mode,
-          data: payload
-        })
-      }
+        const processMessagesSideEffects = (payload: unknown): void => {
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const [msgChunk] = payload as [any]
+            if (!msgChunk) return
 
-      const processMessagesSideEffects = (payload: unknown): void => {
-        try {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const [msgChunk] = payload as [any]
-          if (!msgChunk) return
+            const kwargs = (msgChunk.kwargs || {}) as Record<string, unknown>
+            const classId: string[] = Array.isArray(msgChunk.id) ? msgChunk.id : []
+            const className = classId[classId.length - 1] || ""
+            const isAI = className.includes("AI")
+            const isTool = className.includes("Tool")
 
-          const kwargs = (msgChunk.kwargs || {}) as Record<string, unknown>
-          const classId: string[] = Array.isArray(msgChunk.id) ? msgChunk.id : []
-          const className = classId[classId.length - 1] || ""
-          const isAI = className.includes("AI")
-          const isTool = className.includes("Tool")
-
-          // SubagentStop — a "task" tool message signals subagent completion
-          if (isTool && kwargs.name === "task" && kwargs.tool_call_id) {
-            const toolCallId = kwargs.tool_call_id as string
-            if (!_subagentStopFired.has(toolCallId)) {
-              _subagentStopFired.add(toolCallId)
-              const additionalKwargs = kwargs.additional_kwargs as
-                | Record<string, unknown>
-                | undefined
-              const isErr =
-                kwargs.status === "error" ||
-                kwargs.is_error === true ||
-                additionalKwargs?.is_error === true
-              runHooks(
-                getEnabledHooks(sessionWorkspacePath),
-                "SubagentStop",
-                {
-                  workspacePath: sessionWorkspacePath,
-                  sessionId: threadId,
-                  subagent: {
-                    id: toolCallId,
-                    status: isErr ? "failed" : "completed"
-                  }
-                },
-                onHookResult
-              ).catch((e) => console.warn("[Hooks] SubagentStop hook error:", e))
-            }
-          }
-
-          if (!isAI) return
-
-          const rawContent = kwargs.content ?? msgChunk.content
-          const visibleText = extractTextBlocks(rawContent)
-          if (visibleText) assistantText += visibleText
-
-          // Tool-call extraction — deduped by message ID.
-          const toolCalls = kwargs.tool_calls as
-            | Array<{
-                id?: string
-                name?: string
-                args?: Record<string, unknown>
-              }>
-            | undefined
-          const msgId = (kwargs.id as string) || ""
-          if (!toolCalls || toolCalls.length === 0) return
-          if (msgId && _countedAiMsgIds.has(msgId)) return
-          if (msgId) _countedAiMsgIds.add(msgId)
-
-          tracer.beginStep()
-          for (let tcIndex = 0; tcIndex < toolCalls.length; tcIndex++) {
-            const tc = toolCalls[tcIndex]
-            const tcName = tc.name ?? "unknown"
-            tracer.recordToolCall({ name: tcName, args: tc.args ?? {} })
-            const counted = toolCallCounter.register(tc, msgId, tcIndex)
-
-            if (tcName === "read_file") {
-              const readPathRaw =
-                (typeof tc.args?.path === "string" && tc.args.path) ||
-                (typeof tc.args?.file_path === "string" && tc.args.file_path) ||
-                ""
-              if (readPathRaw) {
-                skillUsageDetector.onReadFilePath(readPathRaw)
+            // SubagentStop — a "task" tool message signals subagent completion
+            if (isTool && kwargs.name === "task" && kwargs.tool_call_id) {
+              const toolCallId = kwargs.tool_call_id as string
+              if (!_subagentStopFired.has(toolCallId)) {
+                _subagentStopFired.add(toolCallId)
+                const additionalKwargs = kwargs.additional_kwargs as
+                  | Record<string, unknown>
+                  | undefined
+                const isErr =
+                  kwargs.status === "error" ||
+                  kwargs.is_error === true ||
+                  additionalKwargs?.is_error === true
+                runHooks(
+                  getEnabledHooks(sessionWorkspacePath),
+                  "SubagentStop",
+                  {
+                    workspacePath: sessionWorkspacePath,
+                    sessionId: threadId,
+                    subagent: {
+                      id: toolCallId,
+                      status: isErr ? "failed" : "completed"
+                    }
+                  },
+                  onHookResult
+                ).catch((e) => console.warn("[Hooks] SubagentStop hook error:", e))
               }
             }
 
-            if (counted) {
-              const turnCount = toolCallCounter.getCount()
-              console.log(`[Agent] Turn tool call #${turnCount} (${tcName}) in thread ${threadId}`)
-            }
-          }
-          tracer.endStep(visibleText)
-        } catch (e) {
-          console.error("[Agent] Tool-call extraction error:", e)
-        }
-      }
+            if (!isAI) return
 
-      const processValuesSideEffects = (payload: unknown): void => {
-        try {
-          const state = payload as {
-            skillsMetadata?: Array<{ name?: string; path?: string }>
-            messages?: Array<{
-              id?: string[]
-              kwargs?: {
-                id?: string
-                type?: string
-                content?: unknown
-                name?: string
-                tool_call_id?: string
-                usage_metadata?: unknown
-                response_metadata?: {
-                  token_usage?: unknown
-                  usage?: unknown
-                  model_name?: string
-                  model?: string
-                }
-                status?: string
-                is_error?: boolean
-                additional_kwargs?: Record<string, unknown>
-                tool_calls?: Array<{
+            const rawContent = kwargs.content ?? msgChunk.content
+            const visibleText = extractTextBlocks(rawContent)
+            if (visibleText) assistantText += visibleText
+
+            // Tool-call extraction — deduped by message ID.
+            const toolCalls = kwargs.tool_calls as
+              | Array<{
                   id?: string
                   name?: string
                   args?: Record<string, unknown>
                 }>
-              }
-            }>
-          }
-          const skillsMetadata = Array.isArray(state.skillsMetadata) ? state.skillsMetadata : []
-          if (skillsMetadata.length > 0) {
-            skillUsageDetector.onSkillsMetadata(skillsMetadata)
-            tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
-          }
+              | undefined
+            const msgId = (kwargs.id as string) || ""
+            if (!toolCalls || toolCalls.length === 0) return
+            if (msgId && _countedAiMsgIds.has(msgId)) return
+            if (msgId) _countedAiMsgIds.add(msgId)
 
-          if (!Array.isArray(state.messages)) return
+            tracer.beginStep()
+            for (let tcIndex = 0; tcIndex < toolCalls.length; tcIndex++) {
+              const tc = toolCalls[tcIndex]
+              const tcName = tc.name ?? "unknown"
+              tracer.recordToolCall({ name: tcName, args: tc.args ?? {} })
+              const counted = toolCallCounter.register(tc, msgId, tcIndex)
 
-          let currentTurnStartIndex = -1
-          for (let i = state.messages.length - 1; i >= 0; i--) {
-            const msg = state.messages[i]
-            const kwargs = msg?.kwargs || {}
-            const classId = Array.isArray(msg?.id) ? msg.id : []
-            const className = classId[classId.length - 1] || ""
-            const role = toRole(className, kwargs)
-            if (role !== "user") continue
-            if (
-              normalizeMessageText(extractText(kwargs.content)) === normalizeMessageText(message)
-            ) {
-              currentTurnStartIndex = i
-              break
-            }
-          }
-
-          const valuesStartIndex = currentTurnStartIndex >= 0 ? currentTurnStartIndex + 1 : 0
-
-          for (let i = valuesStartIndex; i < state.messages.length; i++) {
-            const msg = state.messages[i]
-            const tcs = msg?.kwargs?.tool_calls
-
-            const kwargs = msg?.kwargs || {}
-            const classId = Array.isArray(msg?.id) ? msg.id : []
-            const className = classId[classId.length - 1] || ""
-            const isAI = className.includes("AI") || kwargs.type === "ai"
-            const isToolMessage = className.includes("Tool") || kwargs.type === "tool"
-            const aiMsgId = typeof kwargs.id === "string" ? kwargs.id : ""
-            if (isAI && aiMsgId && !_countedModelMsgIds.has(aiMsgId)) {
-              _countedModelMsgIds.add(aiMsgId)
-
-              // Extract the real model name from API response metadata (e.g. "MiniMax-M2.7")
-              // This takes precedence over the user-configured model name (config.model)
-              const apiModelName =
-                kwargs.response_metadata?.model_name ?? kwargs.response_metadata?.model
-              if (typeof apiModelName === "string" && apiModelName) {
-                tracer.setModelName(apiModelName)
-              }
-
-              const inputSlice = state.messages
-                .slice(Math.max(0, i - MODEL_INPUT_WINDOW), i)
-                .map((m) => {
-                  const k = m?.kwargs || {}
-                  const cid = Array.isArray(m?.id) ? m.id : []
-                  const cname = cid[cid.length - 1] || ""
-                  return {
-                    role: toRole(cname, k),
-                    content: extractText(k.content),
-                    ...(typeof k.name === "string" ? { name: k.name } : {}),
-                    ...(typeof k.tool_call_id === "string" ? { toolCallId: k.tool_call_id } : {})
-                  }
-                })
-                .filter((m) => m.content || m.role === "tool")
-
-              const outputToolCalls = Array.isArray(tcs)
-                ? tcs.map((tc) => ({
-                    name: tc?.name ?? "unknown",
-                    args: tc?.args ?? {}
-                  }))
-                : []
-
-              const llmNodeId = tracer.beginLlmNode({
-                messageId: aiMsgId,
-                startedAt: nowIsoLocal(),
-                input: inputSlice,
-                metadata: {
-                  toolCallCount: outputToolCalls.length
-                }
-              })
-              _llmNodeByMessageId.set(aiMsgId, llmNodeId)
-
-              const usageForTrace = normalizeTokenUsage(getUsageMetadata(kwargs))
-
-              // Track high-water mark of input tokens for context window capacity guard
-              if (usageForTrace?.inputTokens && usageForTrace.inputTokens > highWaterInputTokens) {
-                highWaterInputTokens = usageForTrace.inputTokens
-              }
-
-              tracer.recordModelCall({
-                messageId: aiMsgId,
-                startedAt: nowIsoLocal(),
-                inputMessages: inputSlice,
-                outputMessage: {
-                  role: "assistant",
-                  content: extractText(kwargs.content)
-                },
-                toolCalls: outputToolCalls,
-                tokenUsage: usageForTrace
-              })
-
-              tracer.endLlmNode({
-                nodeId: llmNodeId,
-                output: extractText(kwargs.content),
-                status: "success",
-                metadata: {
-                  tokenUsage: usageForTrace
-                }
-              })
-            }
-
-            if (Array.isArray(tcs)) {
-              for (let tcIndex = 0; tcIndex < tcs.length; tcIndex++) {
-                const tc = tcs[tcIndex]
-                const tcId = typeof tc?.id === "string" ? tc.id : ""
-                const toolRef =
-                  tcId || `${aiMsgId || "ai_unknown"}:${tcIndex}:${JSON.stringify(tc?.args ?? {})}`
-                const counted = toolCallCounter.register(tc, aiMsgId, tcIndex)
-                if (!_toolNodeByRef.has(toolRef)) {
-                  const parentId = aiMsgId ? _llmNodeByMessageId.get(aiMsgId) : undefined
-                  const toolNodeId = tracer.addToolNode({
-                    name: tc?.name ?? "unknown",
-                    input: tc?.args ?? {},
-                    parentId,
-                    llmMessageId: aiMsgId || undefined,
-                    toolCallId: tcId || undefined,
-                    metadata: { index: tcIndex }
-                  })
-                  _toolNodeByRef.set(toolRef, toolNodeId)
-                }
-
-                if (counted) {
-                  const turnCount = toolCallCounter.getCount()
-                  console.log(
-                    `[Agent] Turn tool call #${turnCount} (${tc?.name ?? "unknown"}) in thread ${threadId} [values]`
-                  )
-                }
-
-                if (tc?.name !== "read_file") continue
+              if (tcName === "read_file") {
                 const readPathRaw =
                   (typeof tc.args?.path === "string" && tc.args.path) ||
                   (typeof tc.args?.file_path === "string" && tc.args.file_path) ||
@@ -1763,330 +1823,552 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   skillUsageDetector.onReadFilePath(readPathRaw)
                 }
               }
-            }
 
-            if (isToolMessage) {
-              const toolMsgId =
-                typeof kwargs.id === "string"
-                  ? kwargs.id
-                  : `${kwargs.tool_call_id ?? "tool"}:${i}:${extractText(kwargs.content)}`
-              if (_countedToolResultMsgIds.has(toolMsgId)) continue
-              const toolCallId = typeof kwargs.tool_call_id === "string" ? kwargs.tool_call_id : ""
-              _countedToolResultMsgIds.add(toolMsgId)
-              const parentId = toolCallId ? _toolNodeByRef.get(toolCallId) : undefined
-              const toolOutput = extractText(kwargs.content)
-              // Detect tool error: explicit status field, is_error flag, or error-prefix in output
-              const additionalKwargs = kwargs.additional_kwargs as
-                | Record<string, unknown>
-                | undefined
-              const isToolError =
-                kwargs.status === "error" ||
-                kwargs.is_error === true ||
-                additionalKwargs?.is_error === true ||
-                /^(error:|mcp tool error:|tool error:|failed:)/i.test(toolOutput.trim())
-              if (isToolError) toolErrorCount += 1
-              tracer.addToolResultNode({
-                parentId,
-                toolCallId: toolCallId || undefined,
-                output: toolOutput,
-                status: isToolError ? "error" : "success",
-                metadata: {
-                  messageId: toolMsgId
+              if (counted) {
+                const turnCount = toolCallCounter.getCount()
+                console.log(
+                  `[Agent] Turn tool call #${turnCount} (${tcName}) in thread ${threadId}`
+                )
+              }
+            }
+            tracer.endStep(visibleText)
+          } catch (e) {
+            console.error("[Agent] Tool-call extraction error:", e)
+          }
+        }
+
+        const processValuesSideEffects = (payload: unknown): void => {
+          try {
+            const state = payload as {
+              skillsMetadata?: Array<{ name?: string; path?: string }>
+              messages?: Array<{
+                id?: string[]
+                kwargs?: {
+                  id?: string
+                  type?: string
+                  content?: unknown
+                  name?: string
+                  tool_call_id?: string
+                  usage_metadata?: unknown
+                  response_metadata?: {
+                    token_usage?: unknown
+                    usage?: unknown
+                    model_name?: string
+                    model?: string
+                  }
+                  status?: string
+                  is_error?: boolean
+                  additional_kwargs?: Record<string, unknown>
+                  tool_calls?: Array<{
+                    id?: string
+                    name?: string
+                    args?: Record<string, unknown>
+                  }>
                 }
-              })
+              }>
             }
-          }
+            const skillsMetadata = Array.isArray(state.skillsMetadata) ? state.skillsMetadata : []
+            if (skillsMetadata.length > 0) {
+              skillUsageDetector.onSkillsMetadata(skillsMetadata)
+              tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+            }
 
-          const finalMsgs = state.messages.filter((m) => {
-            const cn = Array.isArray(m.id) ? m.id[m.id.length - 1] || "" : ""
-            const kw = m.kwargs || {}
-            return (
-              cn.includes("AI") &&
-              (!kw.tool_calls || !Array.isArray(kw.tool_calls) || kw.tool_calls.length === 0)
+            if (!Array.isArray(state.messages)) return
+
+            // Locate "where this turn's Human message starts" in the reducer history so
+            // we only account for tool calls/AI messages emitted this turn. We compare
+            // against `effectiveMessage` (post-hook, post-slash-rebuild) because that's
+            // what actually lands in the checkpoint — matching against raw `message`
+            // would miss every turn where a hook added additionalContext or rewrote the
+            // prompt, silently falling back to O(N) full-history scan (correctness is
+            // still guaranteed by the per-id dedup Set, but perf degrades).
+            let currentTurnStartIndex = -1
+            for (let i = state.messages.length - 1; i >= 0; i--) {
+              const msg = state.messages[i]
+              const kwargs = msg?.kwargs || {}
+              const classId = Array.isArray(msg?.id) ? msg.id : []
+              const className = classId[classId.length - 1] || ""
+              const role = toRole(className, kwargs)
+              if (role !== "user") continue
+              if (
+                normalizeMessageText(extractText(kwargs.content)) ===
+                normalizeMessageText(effectiveMessage)
+              ) {
+                currentTurnStartIndex = i
+                break
+              }
+            }
+
+            const valuesStartIndex = currentTurnStartIndex >= 0 ? currentTurnStartIndex + 1 : 0
+
+            for (let i = valuesStartIndex; i < state.messages.length; i++) {
+              const msg = state.messages[i]
+              const tcs = msg?.kwargs?.tool_calls
+
+              const kwargs = msg?.kwargs || {}
+              const classId = Array.isArray(msg?.id) ? msg.id : []
+              const className = classId[classId.length - 1] || ""
+              const isAI = className.includes("AI") || kwargs.type === "ai"
+              const isToolMessage = className.includes("Tool") || kwargs.type === "tool"
+              const aiMsgId = typeof kwargs.id === "string" ? kwargs.id : ""
+              if (isAI && aiMsgId && !_countedModelMsgIds.has(aiMsgId)) {
+                _countedModelMsgIds.add(aiMsgId)
+
+                // Extract the real model name from API response metadata (e.g. "MiniMax-M2.7")
+                // This takes precedence over the user-configured model name (config.model)
+                const apiModelName =
+                  kwargs.response_metadata?.model_name ?? kwargs.response_metadata?.model
+                if (typeof apiModelName === "string" && apiModelName) {
+                  tracer.setModelName(apiModelName)
+                }
+
+                const inputSlice = state.messages
+                  .slice(Math.max(0, i - MODEL_INPUT_WINDOW), i)
+                  .map((m) => {
+                    const k = m?.kwargs || {}
+                    const cid = Array.isArray(m?.id) ? m.id : []
+                    const cname = cid[cid.length - 1] || ""
+                    return {
+                      role: toRole(cname, k),
+                      content: extractText(k.content),
+                      ...(typeof k.name === "string" ? { name: k.name } : {}),
+                      ...(typeof k.tool_call_id === "string" ? { toolCallId: k.tool_call_id } : {})
+                    }
+                  })
+                  .filter((m) => m.content || m.role === "tool")
+
+                const outputToolCalls = Array.isArray(tcs)
+                  ? tcs.map((tc) => ({
+                      name: tc?.name ?? "unknown",
+                      args: tc?.args ?? {}
+                    }))
+                  : []
+
+                const llmNodeId = tracer.beginLlmNode({
+                  messageId: aiMsgId,
+                  startedAt: nowIsoLocal(),
+                  input: inputSlice,
+                  metadata: {
+                    toolCallCount: outputToolCalls.length
+                  }
+                })
+                _llmNodeByMessageId.set(aiMsgId, llmNodeId)
+
+                const usageForTrace = normalizeTokenUsage(getUsageMetadata(kwargs))
+
+                // Track high-water mark of input tokens for context window capacity guard
+                if (
+                  usageForTrace?.inputTokens &&
+                  usageForTrace.inputTokens > highWaterInputTokens
+                ) {
+                  highWaterInputTokens = usageForTrace.inputTokens
+                }
+
+                tracer.recordModelCall({
+                  messageId: aiMsgId,
+                  startedAt: nowIsoLocal(),
+                  inputMessages: inputSlice,
+                  outputMessage: {
+                    role: "assistant",
+                    content: extractText(kwargs.content)
+                  },
+                  toolCalls: outputToolCalls,
+                  tokenUsage: usageForTrace
+                })
+
+                tracer.endLlmNode({
+                  nodeId: llmNodeId,
+                  output: extractText(kwargs.content),
+                  status: "success",
+                  metadata: {
+                    tokenUsage: usageForTrace
+                  }
+                })
+              }
+
+              if (Array.isArray(tcs)) {
+                for (let tcIndex = 0; tcIndex < tcs.length; tcIndex++) {
+                  const tc = tcs[tcIndex]
+                  const tcId = typeof tc?.id === "string" ? tc.id : ""
+                  const toolRef =
+                    tcId ||
+                    `${aiMsgId || "ai_unknown"}:${tcIndex}:${JSON.stringify(tc?.args ?? {})}`
+                  const counted = toolCallCounter.register(tc, aiMsgId, tcIndex)
+                  if (!_toolNodeByRef.has(toolRef)) {
+                    const parentId = aiMsgId ? _llmNodeByMessageId.get(aiMsgId) : undefined
+                    const toolNodeId = tracer.addToolNode({
+                      name: tc?.name ?? "unknown",
+                      input: tc?.args ?? {},
+                      parentId,
+                      llmMessageId: aiMsgId || undefined,
+                      toolCallId: tcId || undefined,
+                      metadata: { index: tcIndex }
+                    })
+                    _toolNodeByRef.set(toolRef, toolNodeId)
+                  }
+
+                  if (counted) {
+                    const turnCount = toolCallCounter.getCount()
+                    console.log(
+                      `[Agent] Turn tool call #${turnCount} (${tc?.name ?? "unknown"}) in thread ${threadId} [values]`
+                    )
+                  }
+
+                  if (tc?.name !== "read_file") continue
+                  const readPathRaw =
+                    (typeof tc.args?.path === "string" && tc.args.path) ||
+                    (typeof tc.args?.file_path === "string" && tc.args.file_path) ||
+                    ""
+                  if (readPathRaw) {
+                    skillUsageDetector.onReadFilePath(readPathRaw)
+                  }
+                }
+              }
+
+              if (isToolMessage) {
+                const toolMsgId =
+                  typeof kwargs.id === "string"
+                    ? kwargs.id
+                    : `${kwargs.tool_call_id ?? "tool"}:${i}:${extractText(kwargs.content)}`
+                if (_countedToolResultMsgIds.has(toolMsgId)) continue
+                const toolCallId =
+                  typeof kwargs.tool_call_id === "string" ? kwargs.tool_call_id : ""
+                _countedToolResultMsgIds.add(toolMsgId)
+                const parentId = toolCallId ? _toolNodeByRef.get(toolCallId) : undefined
+                const toolOutput = extractText(kwargs.content)
+                // Detect tool error: explicit status field, is_error flag, or error-prefix in output
+                const additionalKwargs = kwargs.additional_kwargs as
+                  | Record<string, unknown>
+                  | undefined
+                const isToolError =
+                  kwargs.status === "error" ||
+                  kwargs.is_error === true ||
+                  additionalKwargs?.is_error === true ||
+                  /^(error:|mcp tool error:|tool error:|failed:)/i.test(toolOutput.trim())
+                if (isToolError) toolErrorCount += 1
+                tracer.addToolResultNode({
+                  parentId,
+                  toolCallId: toolCallId || undefined,
+                  output: toolOutput,
+                  status: isToolError ? "error" : "success",
+                  metadata: {
+                    messageId: toolMsgId
+                  }
+                })
+              }
+            }
+
+            const finalMsgs = state.messages.filter((m) => {
+              const cn = Array.isArray(m.id) ? m.id[m.id.length - 1] || "" : ""
+              const kw = m.kwargs || {}
+              return (
+                cn.includes("AI") &&
+                (!kw.tool_calls || !Array.isArray(kw.tool_calls) || kw.tool_calls.length === 0)
+              )
+            })
+            const last = finalMsgs[finalMsgs.length - 1]
+            if (last) {
+              const kw = last.kwargs || {}
+              const text = extractTextBlocks(kw.content).trim()
+              if (text) lastFinalText = text
+            }
+          } catch (e) {
+            console.error("[Agent] Values side-effect processing error:", e)
+          }
+        }
+
+        const processChunkSideEffects = (mode: string, payload: unknown): void => {
+          if (mode === "messages") {
+            processMessagesSideEffects(payload)
+            return
+          }
+          if (mode === "values") {
+            processValuesSideEffects(payload)
+          }
+        }
+
+        let lastFinalText = "" // 最终回复（不含中间工具推理），用于 ChatX HTTP 回复
+
+        // P1: Mid-stream failover — if the stream fails with a retryable error,
+        // try remaining models in the chain using resume semantics.
+        const remainingCandidates = orderedChain.slice(
+          usedModelId ? orderedChain.indexOf(usedModelId) + 1 : orderedChain.length
+        )
+        let activeStream: AsyncIterable<unknown> = stream
+
+        const consumeStreamWithSideEffects = async (
+          source: AsyncIterable<unknown>
+        ): Promise<void> => {
+          for await (const chunk of source) {
+            if (abortController.signal.aborted) break
+
+            const [mode, data] = chunk as unknown as [string, unknown]
+
+            // Serialize first — live BaseMessage objects must be serialized before
+            // we can inspect the LangChain class path (msgChunk.id becomes the
+            // class array ["langchain_core","messages","AIMessageChunk"] only after
+            // toJSON() / JSON.stringify; on the live object, .id is the msg-id string).
+            const serialized = serializeStreamData(data)
+            // UI forwarding is the primary path. Trace / metrics / skill-evolution
+            // processing below are side effects and must never block streaming.
+            forwardStreamChunk(mode, serialized)
+            processChunkSideEffects(mode, serialized)
+            stopContextCollector.processStreamChunk(mode, serialized)
+          }
+        }
+
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          try {
+            await consumeStreamWithSideEffects(activeStream)
+            break // Stream completed successfully
+          } catch (midStreamErr) {
+            if (!isRetryableApiError(midStreamErr) || remainingCandidates.length === 0) {
+              throw midStreamErr
+            }
+            if (abortController.signal.aborted) throw midStreamErr
+
+            const failedModelId = usedModelId ?? "unknown"
+            failoverAttempts.push({
+              modelId: failedModelId,
+              error: String(midStreamErr),
+              timestamp: Date.now()
+            })
+            console.warn(
+              `[Agent][Failover] Mid-stream ${failedModelId} failed: ${midStreamErr}, trying next...`
             )
-          })
-          const last = finalMsgs[finalMsgs.length - 1]
-          if (last) {
-            const kw = last.kwargs || {}
-            const text = extractTextBlocks(kw.content).trim()
-            if (text) lastFinalText = text
+
+            if (!abortController.signal.aborted) {
+              await new Promise((r) => setTimeout(r, 500))
+            }
+
+            // Try next candidate with resume semantics
+            const nextCandidate = remainingCandidates.shift()!
+            agent = await createAgentRuntime({
+              threadId,
+              workspacePath,
+              modelId: nextCandidate,
+              abortSignal: abortController.signal,
+              noSkillEvolutionTool: true,
+              retryHooks: buildModelRetryHooks(window, channel),
+              maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
+              onHookResult
+            })
+            activeStream = await agent.stream(null, streamConfig) // resume from checkpoint
+            usedModelId = nextCandidate
+            notifyFailover()
           }
-        } catch (e) {
-          console.error("[Agent] Values side-effect processing error:", e)
         }
-      }
 
-      const processChunkSideEffects = (mode: string, payload: unknown): void => {
-        if (mode === "messages") {
-          processMessagesSideEffects(payload)
-          return
-        }
-        if (mode === "values") {
-          processValuesSideEffects(payload)
-        }
-      }
-
-      let lastFinalText = "" // 最终回复（不含中间工具推理），用于 ChatX HTTP 回复
-
-      // P1: Mid-stream failover — if the stream fails with a retryable error,
-      // try remaining models in the chain using resume semantics.
-      const remainingCandidates = orderedChain.slice(
-        usedModelId ? orderedChain.indexOf(usedModelId) + 1 : orderedChain.length
-      )
-      let activeStream: AsyncIterable<unknown> = stream
-
-      const consumeStreamWithSideEffects = async (
-        source: AsyncIterable<unknown>
-      ): Promise<void> => {
-        for await (const chunk of source) {
-          if (abortController.signal.aborted) break
-
-          const [mode, data] = chunk as unknown as [string, unknown]
-
-          // Serialize first — live BaseMessage objects must be serialized before
-          // we can inspect the LangChain class path (msgChunk.id becomes the
-          // class array ["langchain_core","messages","AIMessageChunk"] only after
-          // toJSON() / JSON.stringify; on the live object, .id is the msg-id string).
-          const serialized = serializeStreamData(data)
-          // UI forwarding is the primary path. Trace / metrics / skill-evolution
-          // processing below are side effects and must never block streaming.
-          forwardStreamChunk(mode, serialized)
-          processChunkSideEffects(mode, serialized)
-          stopContextCollector.processStreamChunk(mode, serialized)
-        }
-      }
-
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        try {
-          await consumeStreamWithSideEffects(activeStream)
-          break // Stream completed successfully
-        } catch (midStreamErr) {
-          if (!isRetryableApiError(midStreamErr) || remainingCandidates.length === 0) {
-            throw midStreamErr
-          }
-          if (abortController.signal.aborted) throw midStreamErr
-
-          const failedModelId = usedModelId ?? "unknown"
-          failoverAttempts.push({
-            modelId: failedModelId,
-            error: String(midStreamErr),
-            timestamp: Date.now()
-          })
-          console.warn(
-            `[Agent][Failover] Mid-stream ${failedModelId} failed: ${midStreamErr}, trying next...`
-          )
-
-          if (!abortController.signal.aborted) {
-            await new Promise((r) => setTimeout(r, 500))
-          }
-
-          // Try next candidate with resume semantics
-          const nextCandidate = remainingCandidates.shift()!
-          agent = await createAgentRuntime({
+        if (!abortController.signal.aborted) {
+          // Feed Stop hooks the same visible text UserPromptSubmit saw, not the raw
+          // slash payload with SKILL.md inlined. A Stop policy that scans for user
+          // intent shouldn't be tripped by skill-documentation boilerplate, and the
+          // several-KB SKILL.md body has no business entering Stop hook context.
+          const stopPassed = await runStopHooksWithRevision({
             threadId,
-            workspacePath,
-            modelId: nextCandidate,
+            workspacePath: workspacePath ?? undefined,
             abortSignal: abortController.signal,
-            noSkillEvolutionTool: true,
-            retryHooks: buildModelRetryHooks(window, channel),
-            maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
+            getStopContext: () =>
+              stopContextCollector.snapshot({
+                userMessage: visibleUserMessage,
+                assistantResponse: lastFinalText || assistantText.trim(),
+                toolCalls: toolCallCounter.getNames(),
+                usedSkills: skillUsageDetector.getUsedSkillNames()
+              }),
+            runRevision: async (revisionPrompt) => {
+              if (!agent)
+                throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
+              const revisionStream = await agent.stream(
+                { messages: [new HumanMessage(revisionPrompt)] },
+                streamConfig
+              )
+              await consumeStreamWithSideEffects(revisionStream)
+            },
+            sendNotice: sendHookNotice,
+            sendError: sendStreamError,
             onHookResult
           })
-          activeStream = await agent.stream(null, streamConfig) // resume from checkpoint
-          usedModelId = nextCandidate
-          notifyFailover()
-        }
-      }
 
-      if (!abortController.signal.aborted) {
-        const stopPassed = await runStopHooksWithRevision({
-          threadId,
-          workspacePath: workspacePath ?? undefined,
-          abortSignal: abortController.signal,
-          getStopContext: () =>
-            stopContextCollector.snapshot({
-              userMessage: message,
-              assistantResponse: lastFinalText || assistantText.trim(),
-              toolCalls: toolCallCounter.getNames(),
-              usedSkills: skillUsageDetector.getUsedSkillNames()
-            }),
-          runRevision: async (revisionPrompt) => {
-            if (!agent)
-              throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
-            const revisionStream = await agent.stream(
-              { messages: [new HumanMessage(revisionPrompt)] },
-              streamConfig
-            )
-            await consumeStreamWithSideEffects(revisionStream)
-          },
-          sendNotice: sendHookNotice,
-          sendError: sendStreamError,
-          onHookResult
-        })
+          if (!stopPassed) {
+            await tracer.finish("error", "Stop hook blocked completion")
+            return
+          }
 
-        if (!stopPassed) {
-          await tracer.finish("error", "Stop hook blocked completion")
-          return
-        }
+          window.webContents.send(channel, { type: "done" })
+          notifyIfBackground("✅ 任务完成", lastFinalText || assistantText.trim() || "对话已完成")
 
-        window.webContents.send(channel, { type: "done" })
-        notifyIfBackground("✅ 任务完成", lastFinalText || assistantText.trim() || "对话已完成")
+          // Finish trace
+          tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+          await tracer.finish("success")
 
-        // Finish trace
-        tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
-        await tracer.finish("success")
+          // Write routing feedback so next turn can use sticky/force logic
+          if (invokeRoutingResult) {
+            rememberRoutingFeedback(threadId, {
+              resolvedTier: invokeRoutingResult.resolvedTier,
+              resolvedModelId: usedModelId ?? invokeRoutingResult.resolvedModelId,
+              outcome: "success",
+              toolCallCount: toolCallCounter.getCount(),
+              toolErrorCount,
+              lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
+            })
+          }
 
-        // Write routing feedback so next turn can use sticky/force logic
-        if (invokeRoutingResult) {
-          rememberRoutingFeedback(threadId, {
-            resolvedTier: invokeRoutingResult.resolvedTier,
-            resolvedModelId: usedModelId ?? invokeRoutingResult.resolvedModelId,
-            outcome: "success",
-            toolCallCount: toolCallCounter.getCount(),
-            toolErrorCount,
-            lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
-          })
-        }
+          if (isOnlineSkillEvolutionEnabled()) {
+            const proposalContext = appendTurnToProposalWindow("success")
 
-        if (isOnlineSkillEvolutionEnabled()) {
-          const proposalContext = appendTurnToProposalWindow("success")
-
-          // Check if this turn crossed the skill-evolution threshold.
-          const sessionToolCallCount = proposalContext.toolCallCount
-          const threshold = getSkillEvolutionThreshold()
-          if (shouldEvaluateSkillProposalWindow(sessionToolCallCount, threshold)) {
-            const mode = getSkillProposalMode(isSkillAutoProposeEnabled())
-            console.log(
-              `[SkillEvolution][${threadId}] Threshold reached ${JSON.stringify({
-                toolCallCount: sessionToolCallCount,
-                windowToolCallCount: proposalContext.toolCallCount,
-                threshold,
-                mode,
-                usedSkills: proposalContext.usedSkills,
-                turnCount: proposalContext.turnCount,
-                errorCount: proposalContext.errorCount,
-                toolCallSummary: proposalContext.toolCallSummary
-              })}`
-            )
-            if (proposalContext.usedSkills.length > 0) {
-              const names = ` [${proposalContext.usedSkills.join(", ")}]`
+            // Check if this turn crossed the skill-evolution threshold.
+            const sessionToolCallCount = proposalContext.toolCallCount
+            const threshold = getSkillEvolutionThreshold()
+            if (shouldEvaluateSkillProposalWindow(sessionToolCallCount, threshold)) {
+              const mode = getSkillProposalMode(isSkillAutoProposeEnabled())
               console.log(
-                `[SkillEvolution][${threadId}] Threshold skip because used skills were detected${names}`
+                `[SkillEvolution][${threadId}] Threshold reached ${JSON.stringify({
+                  toolCallCount: sessionToolCallCount,
+                  windowToolCallCount: proposalContext.toolCallCount,
+                  threshold,
+                  mode,
+                  usedSkills: proposalContext.usedSkills,
+                  turnCount: proposalContext.turnCount,
+                  errorCount: proposalContext.errorCount,
+                  toolCallSummary: proposalContext.toolCallSummary
+                })}`
               )
-            } else {
-              console.log(
-                `[SkillEvolution][${threadId}] Threshold passed without used skills, evaluating proposal mode`
-              )
-              await autoProposeSKill(threadId, proposalContext).catch((e) =>
-                console.warn("[Agent] autoProposeSKill failed:", e)
-              )
+              if (proposalContext.usedSkills.length > 0) {
+                const names = ` [${proposalContext.usedSkills.join(", ")}]`
+                console.log(
+                  `[SkillEvolution][${threadId}] Threshold skip because used skills were detected${names}`
+                )
+              } else {
+                console.log(
+                  `[SkillEvolution][${threadId}] Threshold passed without used skills, evaluating proposal mode`
+                )
+                await autoProposeSKill(threadId, proposalContext).catch((e) =>
+                  console.warn("[Agent] autoProposeSKill failed:", e)
+                )
+              }
+            }
+          } else {
+            resetSkillEvolutionSession(threadId)
+          }
+
+          // If this is a ChatX-linked thread, also send reply via HTTP (only final answer, no tool reasoning)
+          const chatxReply = lastFinalText || stripThink(assistantText).trim()
+          if (metadata.chatxRobotChatId && chatxReply) {
+            trySendChatXReply(metadata.chatxRobotChatId as string, chatxReply)
+          }
+
+          // Feed long-term memory summarization the visible user prompt, not the raw
+          // slash payload with inlined SKILL.md. Pulling multi-KB skill documentation
+          // into memory wastes tokens on every summarization call AND pollutes future
+          // retrievals (memory search would match against skill boilerplate instead of
+          // the user's actual request). Attach the skill identity separately so memory
+          // retains the fact that a skill was used without storing its body.
+          const memoryUserMessage = slashPayloadParts
+            ? `${visibleUserMessage}\n\n[Skill used: ${slashPayloadParts.skillName}]`
+            : message
+          const conversation = assistantText.trim()
+            ? `User: ${memoryUserMessage}\n\nAssistant: ${assistantText}`
+            : ""
+
+          if (isMemoryEnabled() && conversation.length >= MIN_CHARS_FOR_MEMORY) {
+            const memoryStore = await getMemoryStore()
+            const allConfigs = getCustomModelConfigs()
+
+            // Use routing to pick memory summarization model (economy in auto mode)
+            const memRoutingResult = await resolveModel({
+              taskSource: "memory_summarize",
+              threadId,
+              requestedModelId: modelId ?? undefined,
+              routingMode: getGlobalRoutingMode()
+            }).catch(() => null)
+            const memModelId = memRoutingResult?.resolvedModelId
+            const memCfgId =
+              memModelId?.replace("custom:", "") ?? modelId?.replace("custom:", "") ?? ""
+            const config = allConfigs.find((c) => c.id === memCfgId) || allConfigs[0]
+
+            if (!config) {
+              console.warn("[Agent] No model config available — skipping memory summarization")
+            } else if (config?.apiKey) {
+              summarizeAndSave({
+                model: new ChatOpenAI({
+                  model: config.model,
+                  apiKey: config.apiKey,
+                  configuration: { baseURL: config.baseUrl }
+                }),
+                conversation,
+                memoryDir: memoryStore.getMemoryDir()
+              }).catch((e) => console.warn("[Agent] Memory summarize failed:", e))
             }
           }
+        }
+      } catch (error) {
+        // Ignore abort-related errors (expected when stream is cancelled)
+        const isAbortError =
+          error instanceof Error &&
+          (error.name === "AbortError" ||
+            error.message.includes("aborted") ||
+            error.message.includes("Controller is already closed"))
+
+        if (!isAbortError) {
+          const errMsg = error instanceof Error ? error.message : "Unknown error"
+          console.error("[Agent] Error:", error)
+          window.webContents.send(channel, {
+            type: "error",
+            error: errMsg
+          })
+          notifyIfBackground("❌ 任务失败", errMsg)
+          if (isOnlineSkillEvolutionEnabled()) {
+            appendTurnToProposalWindow("error", errMsg)
+          } else {
+            resetSkillEvolutionSession(threadId)
+          }
+          tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+          tracer.finish("error", errMsg).catch(() => {})
+          if (invokeRoutingResult) {
+            rememberRoutingFeedback(threadId, {
+              resolvedTier: invokeRoutingResult.resolvedTier,
+              resolvedModelId: usedModelId ?? invokeRoutingResult.resolvedModelId,
+              outcome: "error",
+              toolCallCount: toolCallCounter.getCount(),
+              toolErrorCount,
+              lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
+            })
+          }
         } else {
-          resetSkillEvolutionSession(threadId)
-        }
-
-        // If this is a ChatX-linked thread, also send reply via HTTP (only final answer, no tool reasoning)
-        const chatxReply = lastFinalText || stripThink(assistantText).trim()
-        if (metadata.chatxRobotChatId && chatxReply) {
-          trySendChatXReply(metadata.chatxRobotChatId as string, chatxReply)
-        }
-
-        const conversation = assistantText.trim()
-          ? `User: ${message}\n\nAssistant: ${assistantText}`
-          : ""
-
-        if (isMemoryEnabled() && conversation.length >= MIN_CHARS_FOR_MEMORY) {
-          const memoryStore = await getMemoryStore()
-          const allConfigs = getCustomModelConfigs()
-
-          // Use routing to pick memory summarization model (economy in auto mode)
-          const memRoutingResult = await resolveModel({
-            taskSource: "memory_summarize",
-            threadId,
-            requestedModelId: modelId ?? undefined,
-            routingMode: getGlobalRoutingMode()
-          }).catch(() => null)
-          const memModelId = memRoutingResult?.resolvedModelId
-          const memCfgId =
-            memModelId?.replace("custom:", "") ?? modelId?.replace("custom:", "") ?? ""
-          const config = allConfigs.find((c) => c.id === memCfgId) || allConfigs[0]
-
-          if (!config) {
-            console.warn("[Agent] No model config available — skipping memory summarization")
-          } else if (config?.apiKey) {
-            summarizeAndSave({
-              model: new ChatOpenAI({
-                model: config.model,
-                apiKey: config.apiKey,
-                configuration: { baseURL: config.baseUrl }
-              }),
-              conversation,
-              memoryDir: memoryStore.getMemoryDir()
-            }).catch((e) => console.warn("[Agent] Memory summarize failed:", e))
+          tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+          tracer.finish("cancelled").catch(() => {})
+          if (invokeRoutingResult) {
+            rememberRoutingFeedback(threadId, {
+              resolvedTier: invokeRoutingResult.resolvedTier,
+              resolvedModelId: usedModelId ?? invokeRoutingResult.resolvedModelId,
+              outcome: "cancelled",
+              toolCallCount: toolCallCounter.getCount(),
+              toolErrorCount,
+              lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
+            })
           }
         }
-      }
-    } catch (error) {
-      // Ignore abort-related errors (expected when stream is cancelled)
-      const isAbortError =
-        error instanceof Error &&
-        (error.name === "AbortError" ||
-          error.message.includes("aborted") ||
-          error.message.includes("Controller is already closed"))
-
-      if (!isAbortError) {
-        const errMsg = error instanceof Error ? error.message : "Unknown error"
-        console.error("[Agent] Error:", error)
-        window.webContents.send(channel, {
-          type: "error",
-          error: errMsg
+      } finally {
+        activeRuns.delete(threadId)
+        // Drop the "closed" listener — once() only auto-clears on actual fire, so a long
+        // run where the window never closes would otherwise accumulate one closure per
+        // invoke (each holds threadId + abortController). `isDestroyed()` guards against
+        // the rare race where the window died between abort and this cleanup.
+        if (!window.isDestroyed()) {
+          window.removeListener("closed", onWindowClosed)
+        }
+        // Clean up sandbox ACLs granted during this run (unelevated mode keeps them
+        // across commands for performance, so we revoke them when the run ends).
+        // Uses threadId to only release this run's ref-counts, not other concurrent runs'.
+        LocalSandbox.revokeGrantedAclsForRun(threadId).catch((err) => {
+          console.warn("[Agent] ACL cleanup error:", err)
         })
-        notifyIfBackground("❌ 任务失败", errMsg)
-        if (isOnlineSkillEvolutionEnabled()) {
-          appendTurnToProposalWindow("error", errMsg)
-        } else {
-          resetSkillEvolutionSession(threadId)
-        }
-        tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
-        tracer.finish("error", errMsg).catch(() => {})
-        if (invokeRoutingResult) {
-          rememberRoutingFeedback(threadId, {
-            resolvedTier: invokeRoutingResult.resolvedTier,
-            resolvedModelId: usedModelId ?? invokeRoutingResult.resolvedModelId,
-            outcome: "error",
-            toolCallCount: toolCallCounter.getCount(),
-            toolErrorCount,
-            lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
-          })
-        }
-      } else {
-        tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
-        tracer.finish("cancelled").catch(() => {})
-        if (invokeRoutingResult) {
-          rememberRoutingFeedback(threadId, {
-            resolvedTier: invokeRoutingResult.resolvedTier,
-            resolvedModelId: usedModelId ?? invokeRoutingResult.resolvedModelId,
-            outcome: "cancelled",
-            toolCallCount: toolCallCounter.getCount(),
-            toolErrorCount,
-            lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
-          })
-        }
+        // SessionEnd is NOT fired here — it belongs to thread lifecycle (delete / app quit),
+        // not turn completion. See fireSessionEnd call in threads:delete handler.
       }
-    } finally {
-      activeRuns.delete(threadId)
-      // Clean up sandbox ACLs granted during this run (unelevated mode keeps them
-      // across commands for performance, so we revoke them when the run ends).
-      // Uses threadId to only release this run's ref-counts, not other concurrent runs'.
-      LocalSandbox.revokeGrantedAclsForRun(threadId).catch((err) => {
-        console.warn("[Agent] ACL cleanup error:", err)
-      })
-      // SessionEnd is NOT fired here — it belongs to thread lifecycle (delete / app quit),
-      // not turn completion. See fireSessionEnd call in threads:delete handler.
     }
-  })
+  )
 
   // Handle agent resume (after interrupt approval/rejection via useStream)
   ipcMain.on("agent:resume", async (event, { threadId, command, modelId }: AgentResumeParams) => {
@@ -2368,6 +2650,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
     } finally {
       activeRuns.delete(threadId)
+      // See agent:invoke finally — once() doesn't auto-clear when the window stays up.
+      if (!window.isDestroyed()) {
+        window.removeListener("closed", onWindowClosed)
+      }
     }
   })
 
@@ -2647,6 +2933,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
     } finally {
       activeRuns.delete(threadId)
+      // See agent:invoke finally — once() doesn't auto-clear when the window stays up.
+      if (!window.isDestroyed()) {
+        window.removeListener("closed", onWindowClosed)
+      }
     }
   })
 

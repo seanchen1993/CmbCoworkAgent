@@ -8,10 +8,21 @@ export type ThreadStatus = "idle" | "busy" | "interrupted" | "error"
 // =============================================================================
 
 // Agent IPC
+export interface SlashSkillInvocation {
+  name: string
+  path: string
+}
+
 export interface AgentInvokeParams {
   threadId: string
   message: string
   modelId?: string
+  // Set by the renderer ONLY when the message was built via the slash-command UI.
+  // Main-process hook machinery uses this to authorize unwrapping the hidden
+  // <skill> payload before showing the message to UserPromptSubmit hooks; if the
+  // user merely typed a fake <skill-ref>...<skill>...</skill> by hand, the
+  // renderer won't set this field, and hooks will see the raw message intact.
+  slashSkill?: SlashSkillInvocation
 }
 
 export interface AgentResumeParams {
