@@ -696,9 +696,43 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
 
       const requestedModelId = modelId || (metadata.model as string | undefined)
+      // Strip slash-command wrappers before feeding the message to the router. Routing
+      // scores based on length / code-block count / path-like tokens — an inlined SKILL.md
+      // (several KB, usually contains ``` fences and example paths) would systematically
+      // push every slash-command send toward premium tier regardless of the user's actual
+      // intent. See ChatContainer.submitMessage for the symmetric wrapper construction.
+      let routingMessage = message
+      if (typeof message === "string") {
+        // Only strip the slash-command wrapper if the message actually starts with
+        // <skill-ref> — without this guard, a user who pastes `<skill>…</skill>` text
+        // verbatim (e.g. discussing the protocol or asking the model to analyse XML)
+        // would have their own words silently cut before scoring.
+        // submitMessage always emits the wrapper at the tail (instruction + skill, both
+        // anchored to end-of-payload), so we strip from the LAST
+        // `<skill-invocation-instruction>` onward rather than using /g across the whole
+        // message. That keeps any <skill>…</skill> or <skill-invocation-instruction>
+        // fragments the user typed into userText intact.
+        const hasSlashPrefix = /^<skill-ref>[^<\n]+<\/skill-ref>/.test(message)
+        let stripped = message
+        if (hasSlashPrefix) {
+          stripped = stripped.replace(/^<skill-ref>[^<\n]+<\/skill-ref>\s*/, "")
+          // Assumes the wrapper (<skill-invocation-instruction>…</skill>) is the FINAL
+          // segment of the payload — submitMessage constructs it that way today. If we
+          // ever append anything after the wrapper (e.g. a trace id or metadata block),
+          // this slice will silently drop it; update to "slice from instruction-anchor
+          // through the last </skill>" instead.
+          const tailAnchor = stripped.lastIndexOf("<skill-invocation-instruction>")
+          if (tailAnchor >= 0) {
+            stripped = stripped.slice(0, tailAnchor).replace(/\s+$/, "")
+          }
+        }
+        routingMessage = stripped
+          .replace(/<attachment\s+filename="[^"]*"[^>]*>[\s\S]*?<\/attachment>/g, "")
+          .trim()
+      }
       invokeRoutingResult = await resolveModel({
         taskSource: "chat",
-        message,
+        message: routingMessage,
         threadId,
         requestedModelId,
         routingMode: getGlobalRoutingMode()
@@ -724,6 +758,69 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             routeReason: invokeRoutingResult.routeReason
           }
         })
+      }
+
+      // Slash-command skill invocations inline the SKILL.md body into the user message
+      // instead of going through the read_file tool, so they never trigger the
+      // onReadFilePath path. Parse the leading <skill-ref>NAME</skill-ref> tag here so
+      // usage stats (dashboard, trace, skill evolution window) still record the skill.
+      // The renderer XML-escapes the skill name (see formatSkillRef); reverse that here
+      // so names with special characters (&, ", ', <) match the real skill metadata.
+      if (typeof message === "string") {
+        // Anchor to the start of the message to mirror the renderer's formatSkillRef usage
+        // (which always writes <skill-ref> as the leading prefix). Otherwise users quoting
+        // the tag in regular chat would poison usage stats.
+        // Local copy of SKILL_REF_PATTERN (from renderer features/slash-commands/skill-marker).
+        // Main process can't import renderer code, so the character class here MUST stay in
+        // sync with that constant — if you change one, change the other.
+        const slashSkillMatch = message.match(/^<skill-ref>([^<\n]+)<\/skill-ref>/)
+        if (slashSkillMatch) {
+          // Keep the XML-escaped form for regex matching against the wrapper's <name>
+          // (both are produced by escXml/escapeXml on the renderer side — matching them in
+          // escaped form is the only way skill names containing '&', '<', '>', '"' will hit).
+          // Only decode when recording into the detector, whose keys are the real names.
+          const rawName = slashSkillMatch[1].trim()
+          // SKILL_REF_PATTERN allows a name made entirely of whitespace ([^<\n]+ matches
+          // spaces). Skip the wrapper lookup if the trimmed name is empty so we don't walk
+          // the message body just to hand the detector an empty key.
+          if (rawName) {
+            const decoded = rawName
+              .replace(/&apos;/g, "'")
+              .replace(/&quot;/g, '"')
+              .replace(/&gt;/g, ">")
+              .replace(/&lt;/g, "<")
+              .replace(/&amp;/g, "&")
+            // Anti-spoof: only record usage when the real <skill> payload wrapper (which only
+            // submitMessage emits) is also present, and its <name> matches. A user who merely
+            // types <skill-ref>foo</skill-ref> at the start of a chat message would otherwise
+            // pollute usage stats without actually invoking any skill.
+            //
+            // Walk every <skill>...</skill> block in the message instead of just the first.
+            // The renderer always appends our real wrapper at the *end* (after attachments,
+            // after instruction), but a user message body or attachment text might happen to
+            // contain a literal "<skill>" earlier — picking only the first occurrence would
+            // miss our real wrapper and silently drop the usage stat.
+            // We only require <name> to match <skill-ref>'s rawName. Path correlation
+            // sounds tempting for spoof prevention, but when the user has disabled any skill,
+            // the runtime loads from a copied enabled-skills-* dir so the loaded path differs
+            // from the renderer's sent path — a strict path check would silently drop every
+            // legitimate invocation. See usage-detector.ts comment for the full trade-off.
+            let cursor = 0
+            while (cursor < message.length) {
+              const skillOpen = message.indexOf("<skill>", cursor)
+              if (skillOpen < 0) break
+              const skillClose = message.indexOf("</skill>", skillOpen)
+              if (skillClose < 0) break
+              const block = message.slice(skillOpen, skillClose)
+              const nameMatch = block.match(/<name>\s*([^<]*)\s*<\/name>/)
+              if (nameMatch && nameMatch[1].trim() === rawName) {
+                skillUsageDetector.onExplicitInvocation(decoded)
+                break
+              }
+              cursor = skillClose + "</skill>".length
+            }
+          }
+        }
       }
 
       const humanMessage = new HumanMessage(message)

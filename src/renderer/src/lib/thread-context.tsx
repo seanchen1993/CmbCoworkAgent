@@ -13,7 +13,7 @@ import {
 /* eslint-disable react-refresh/only-export-components */
 import { useStream } from "@langchain/langgraph-sdk/react"
 import { ElectronIPCTransport } from "./electron-transport"
-import type { Message, Todo, FileInfo, Subagent, HITLRequest } from "@/types"
+import type { Message, Todo, FileInfo, Subagent, HITLRequest, SkillMetadata } from "@/types"
 import { useAppStore } from "@/lib/store"
 import type { DeepAgent } from "../../../main/agent/types"
 
@@ -65,6 +65,13 @@ export interface ThreadState {
   fileContents: Record<string, string>
   tokenUsage: TokenUsage | null
   draftInput: string
+  /**
+   * Skill chip the user has selected for the next send. Persisted alongside draftInput
+   * so chip and draft survive view switches (chat → customize → back) consistently —
+   * ChatContainer is unmounted across non-thread views, so a component-local ref would
+   * silently drop the chip while keeping the text, changing the send semantics.
+   */
+  draftSkill: SkillMetadata | null
   scheduledTaskLoading: boolean
   scheduledTaskId: string | null
   routingResult: RoutingResultState | null
@@ -98,6 +105,7 @@ export interface ThreadActions {
   setActiveTab: (tab: "agent" | string) => void
   setFileContents: (path: string, content: string) => void
   setDraftInput: (input: string) => void
+  setDraftSkill: (skill: SkillMetadata | null) => void
 }
 
 // Context value
@@ -132,6 +140,7 @@ const createDefaultThreadState = (): ThreadState => ({
   fileContents: {},
   tokenUsage: null,
   draftInput: "",
+  draftSkill: null,
   scheduledTaskLoading: false,
   scheduledTaskId: null,
   routingResult: null,
@@ -625,6 +634,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         },
         setDraftInput: (input: string) => {
           updateThreadState(threadId, () => ({ draftInput: input }))
+        },
+        setDraftSkill: (skill: SkillMetadata | null) => {
+          updateThreadState(threadId, () => ({ draftSkill: skill }))
         }
       }
 

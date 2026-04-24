@@ -11,21 +11,28 @@ import {
   type DislikeFeedbackPayload
 } from "./MessageFeedbackDialog"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
-import { parseSkillMarker } from "@/features/slash-commands/skill-marker"
+import { SKILL_REF_PATTERN, parseSkillMarker } from "@/features/slash-commands/skill-marker"
 
 function stripSkillRefPrefix(s: string): string {
   // Strip the internal <skill-ref>NAME</skill-ref> prefix so copy/paste yields the user-visible text.
-  return s.replace(/^<skill-ref>[^<\n]+<\/skill-ref>\s*/, "")
+  return s.replace(SKILL_REF_PATTERN, "")
 }
 
-function extractMessagePlainText(content: Message["content"]): string {
-  if (typeof content === "string") return stripSkillRefPrefix(content)
+function extractMessagePlainText(
+  content: Message["content"],
+  options: { stripSkillRef?: boolean } = {}
+): string {
+  // Only strip the <skill-ref> prefix for our own user messages — assistant replies that
+  // happen to quote `<skill-ref>...</skill-ref>` (e.g. discussing the protocol) should
+  // copy verbatim instead of silently losing characters.
+  const maybeStrip = options.stripSkillRef ? stripSkillRefPrefix : (s: string): string => s
+  if (typeof content === "string") return maybeStrip(content)
   if (!Array.isArray(content)) return ""
 
   return content
     .map((block) => {
-      if (block.type === "text") return stripSkillRefPrefix(block.text ?? "")
-      if (typeof block.content === "string") return stripSkillRefPrefix(block.content)
+      if (block.type === "text") return maybeStrip(block.text ?? "")
+      if (typeof block.content === "string") return maybeStrip(block.content)
       return ""
     })
     .filter(Boolean)
@@ -86,6 +93,8 @@ interface MessageBubbleProps {
   onEditUserMessage?: (message: Message) => void
   threadId: string
   isLoading: boolean
+  /** Optional: disable the "edit & resend" button while the current thread has a send in flight. */
+  editDisabled?: boolean
 }
 
 export function MessageBubble({
@@ -98,7 +107,8 @@ export function MessageBubble({
   onApprovalDecision,
   onEditUserMessage,
   threadId,
-  isLoading
+  isLoading,
+  editDisabled = false
 }: MessageBubbleProps): React.JSX.Element | null {
   const [collapsedTools, setCollapsedTools] = useState<Set<string>>(new Set())
   const [collapsedHtmlTools, setCollapsedHtmlTools] = useState<Set<string>>(new Set())
@@ -196,7 +206,7 @@ export function MessageBubble({
 
   const content = renderContent()
   const hasToolCalls = message.tool_calls && message.tool_calls.length > 0
-  const plainTextForCopy = extractMessagePlainText(message.content)
+  const plainTextForCopy = extractMessagePlainText(message.content, { stripSkillRef: isUser })
 
   const handleCopyMessage = async (): Promise<void> => {
     if (!plainTextForCopy.trim()) {
@@ -290,9 +300,10 @@ export function MessageBubble({
             </button>
             <button
               type="button"
+              disabled={editDisabled}
               onClick={() => onEditUserMessage?.(message)}
-              className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
-              title="编辑后重新发送"
+              className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors disabled:cursor-not-allowed disabled:opacity-40"
+              title={editDisabled ? "发送中，请稍候" : "编辑后重新发送"}
               aria-label="编辑后重新发送"
             >
               <PencilLine className="size-3" />

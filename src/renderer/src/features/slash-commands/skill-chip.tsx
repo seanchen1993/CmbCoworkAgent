@@ -5,6 +5,13 @@ import { Package2, X } from "lucide-react"
 interface Props {
   label: string
   onRemove?: () => void
+  /**
+   * When true, the × button is shown but disabled (greyed out + tooltip explaining why).
+   * Use this instead of omitting onRemove during transient states (e.g. a send is in flight)
+   * so the control doesn't vanish from the user's eye and come back a moment later.
+   */
+  removeDisabled?: boolean
+  removeDisabledTitle?: string
   className?: string
   compact?: boolean
 }
@@ -12,6 +19,8 @@ interface Props {
 export function SkillChip({
   label,
   onRemove,
+  removeDisabled,
+  removeDisabledTitle,
   className,
   compact
 }: Props): React.ReactElement {
@@ -32,7 +41,9 @@ export function SkillChip({
         <button
           type="button"
           onClick={onRemove}
-          className="ml-0.5 opacity-60 hover:opacity-100"
+          disabled={removeDisabled}
+          title={removeDisabled ? removeDisabledTitle : undefined}
+          className="ml-0.5 opacity-60 hover:opacity-100 disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:opacity-30"
           aria-label="移除技能"
         >
           <X className="size-3" />

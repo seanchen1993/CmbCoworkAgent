@@ -9,6 +9,9 @@ interface Props {
   selectedIdx: number
   onHoverIdx: (idx: number) => void
   onSelectSkill: (s: SkillMetadata) => void
+  // True only during the first load after app start — lets us distinguish
+  // "skills still loading" from "genuinely no matches" in the empty state.
+  skillsLoading?: boolean
 }
 
 function SourceBadge({ source }: { source: SkillMetadata["source"] }): React.ReactElement {
@@ -20,14 +23,19 @@ export function SlashCommandPopover({
   mode,
   selectedIdx,
   onHoverIdx,
-  onSelectSkill
+  onSelectSkill,
+  skillsLoading = false
 }: Props): React.ReactElement | null {
   const selectedRef = useRef<HTMLButtonElement | null>(null)
+  // Only depend on the discriminator + selectedIdx — depending on the whole `mode`
+  // would re-scroll on every filter keystroke, potentially yanking the view while the
+  // user is mouse-hovering deeper in the list.
+  const modeKind = mode.kind
 
   useEffect(() => {
     // Keep the highlighted row in view when navigating with keyboard through long lists.
     selectedRef.current?.scrollIntoView({ block: "nearest" })
-  }, [selectedIdx, mode])
+  }, [selectedIdx, modeKind])
 
   if (mode.kind === "closed") return null
 
@@ -42,7 +50,9 @@ export function SlashCommandPopover({
     >
       <div className="px-4 pt-3 pb-1 text-xs text-muted-foreground/70">技能</div>
       {mode.skills.length === 0 ? (
-        <div className="px-4 py-4 text-sm text-muted-foreground">没有匹配的技能</div>
+        <div className="px-4 py-4 text-sm text-muted-foreground">
+          {skillsLoading ? "加载中…" : "没有匹配的技能"}
+        </div>
       ) : (
         <div className="py-1">
           {mode.skills.map((s, idx) => {

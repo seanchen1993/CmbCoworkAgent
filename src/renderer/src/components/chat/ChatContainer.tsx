@@ -34,7 +34,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { useAppStore } from "@/lib/store"
 import { cn } from "@/lib/utils"
 import { useShallow } from "zustand/react/shallow"
-import { useCurrentThread, useThreadStream } from "@/lib/thread-context"
+import { useCurrentThread, useThreadContext, useThreadStream } from "@/lib/thread-context"
 import { ModelSwitcher } from "./ModelSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
 import { ChatTodos } from "./ChatTodos"
@@ -54,7 +54,13 @@ import { insertLog, updateMMJUserInfo } from "../../../js/mmjUtils"
 import { SlashCommandPopover } from "@/features/slash-commands/SlashCommandPopover"
 import { useSlashCommands } from "@/features/slash-commands/useSlashCommands"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
-import { formatSkillRef, parseSkillMarker } from "@/features/slash-commands/skill-marker"
+import {
+  SKILL_REF_PATTERN,
+  escapeXmlAttr,
+  formatSkillRef,
+  parseSkillMarker,
+  sanitizeSkillName
+} from "@/features/slash-commands/skill-marker"
 import { UpdateDialog } from "../update/UpdateDialog"
 import { toast } from "sonner"
 
@@ -281,13 +287,56 @@ export function ChatContainer({
     setShowCustomizeView
   } = useAppStore()
 
-  const [selectedSkill, setSelectedSkill] = useState<SkillMetadata | null>(null)
+  // Live-tracked current thread id. Sync during render, NOT inside a useEffect, because
+  // an effect only runs after commit — between a thread switch render and that effect,
+  // an already-queued microtask (e.g. the resumption of a skills.read IPC) could resume
+  // with stale ref value. Render-phase assignment to a ref is explicitly allowed by React.
+  const currentThreadIdRef = useRef(threadId)
+  currentThreadIdRef.current = threadId
 
-  // ChatContainer is shared across threads (no key={threadId} remount). Clear the local
-  // skill selection when switching threads so a chip picked in thread A doesn't leak into thread B.
-  useEffect(() => {
-    setSelectedSkill(null)
-  }, [threadId])
+  // Mirror input / attachments for rare callbacks that only need to "peek" at their
+  // current value (e.g. handleEditUserMessage's hadActiveDraft probe). Reading via a
+  // ref avoids pulling these frequently-changing values into the callback's deps array,
+  // which would rebuild the callback on every keystroke and re-render every MessageBubble
+  // the edit handler is passed to.
+
+  // Guard against double-submit during the async skill-read window. The skill path awaits
+  // window.api.skills.read(...) before isLoading flips to true and the input is cleared,
+  // so without this lock a quick double-Enter / double-click would queue a second send.
+  // Keyed by threadId so a long-running submit in thread A doesn't block a send in thread B.
+  // Declared here (before handleDrop/etc) so other callbacks can consult it to refuse
+  // composer side-effects while a send is in flight.
+  const submittingThreadsRef = useRef<Set<string>>(new Set())
+  const [submittingThreads, setSubmittingThreads] = useState<Set<string>>(new Set())
+  const isSubmittingThisThread = submittingThreads.has(threadId)
+  // Per-invocation cancel tokens keyed by the submitMessage call's own identity (a fresh
+  // object each call), not by threadId. A threadId-based cancel breaks under:
+  //   submit A → cancel → submit B (during A's IPC wait) → B clears "threadId cancel flag"
+  //   → A's continuation misses the cancel → both A and B reach stream.submit.
+  // Each invocation carries its own token, so cancelling A never affects B.
+  const activeInvocationsRef = useRef<Map<string, object>>(new Map())
+  const cancelledInvocationsRef = useRef<WeakSet<object>>(new WeakSet())
+
+  const handleCancelPreSubmit = useCallback((targetThreadId: string) => {
+    const activeToken = activeInvocationsRef.current.get(targetThreadId)
+    if (activeToken) {
+      cancelledInvocationsRef.current.add(activeToken)
+    }
+    // Unlock the thread for a new submit immediately — the old invocation will notice its
+    // token is marked cancelled at its next checkpoint and bail without touching state.
+    submittingThreadsRef.current.delete(targetThreadId)
+    setSubmittingThreads((prev) => {
+      if (!prev.has(targetThreadId)) return prev
+      const next = new Set(prev)
+      next.delete(targetThreadId)
+      return next
+    })
+  }, [])
+
+  // Used to write to the originating thread's draftSkill from a submit continuation
+  // even after the user has switched threads. The closure-captured setSelectedSkill from
+  // useCurrentThread is bound to the current render's threadId; this lets us bypass that.
+  const threadCtx = useThreadContext()
 
   const goodSkillsRef = useRef<MarketItem[]>([])
   const allSkillsRef = useRef<MarketItem[]>([])
@@ -415,6 +464,7 @@ export function ChatContainer({
     tokenUsage,
     currentModel,
     draftInput: input,
+    draftSkill: selectedSkill,
     scheduledTaskLoading,
     scheduledTaskId,
     modelRetry,
@@ -423,7 +473,8 @@ export function ChatContainer({
     appendMessage,
     setError,
     clearError,
-    setDraftInput: setInput
+    setDraftInput: setInput,
+    setDraftSkill: setSelectedSkill
   } = useCurrentThread(threadId)
 
   // Get the stream data via subscription - reactive updates without re-rendering provider
@@ -456,6 +507,10 @@ export function ChatContainer({
   const [attachmentLoading, setAttachmentLoading] = useState(false)
   const [dragOver, setDragOver] = useState(false)
   const attachmentsRef = useRef<FileAttachment[]>([])
+  // See currentThreadIdRef comment: lets callbacks peek at the draft text without having
+  // to depend on it. `inputRef` is already taken by the textarea DOM ref.
+  const draftInputValueRef = useRef(input)
+  draftInputValueRef.current = input
 
   // Keep ref in sync with state
   useEffect(() => { attachmentsRef.current = attachments }, [attachments])
@@ -547,6 +602,10 @@ export function ChatContainer({
     e.stopPropagation()
     setDragOver(false)
     if (attachmentLoading) return
+    // Don't accept drops while a send is in-flight — submitMessage already snapshotted
+    // the attachment list, so anything added here would race with the pending
+    // setAttachments([]) and either vanish or stick around without having been sent.
+    if (submittingThreadsRef.current.has(currentThreadIdRef.current)) return
     const files = e.dataTransfer.files
     if (files.length > 0) {
       const paths = Array.from(files)
@@ -887,33 +946,57 @@ export function ChatContainer({
     //   (SKILL.md bodies containing `</skill>` are defused to `< /skill>` before send,
     //    so requiring <name>/<path> right after <skill> lets us safely tell our wrapper
     //    apart from a user casually typing "<skill>" in chat.)
-    const SKILL_WRAPPER_RE =
-      /\s*<skill>\s*<name>[\s\S]*?<\/name>\s*<path>[\s\S]*?<\/path>[\s\S]*?<\/skill>\s*/g
-    const SKILL_INSTRUCTION_RE =
-      /\s*<skill-invocation-instruction>[\s\S]*?<\/skill-invocation-instruction>\s*/g
-    const ATTACHMENT_WRAPPER_RE =
+    // Keep .test() regexes non-global and .replace() regexes global. Mixing /g with both
+    // .test() and .replace() on the same module-level regex leaks lastIndex state between
+    // messages — a classic JS footgun. Splitting them avoids the manual lastIndex resets.
+    // NOTE: the wrapper shape below MUST stay in sync with the payload built in submitMessage
+    // (leading `<skill>\n<name>…</name>\n<path>…</path>\n` then SKILL.md body then `</skill>`).
+    const SKILL_WRAPPER_PROBE =
+      /<skill>\s*<name>[\s\S]*?<\/name>\s*<path>[\s\S]*?<\/path>[\s\S]*?<\/skill>/
+    const ATTACHMENT_PROBE = /<attachment\s+filename="[^"]*"[^>]*>[\s\S]*?<\/attachment>/
+    const ATTACHMENT_STRIP =
       /<attachment\s+filename="([^"]*)"[^>]*>[\s\S]*?<\/attachment>/g
-    const SKILL_REF_PREFIX_RE = /^<skill-ref>[^<\n]+<\/skill-ref>\s*/
+    const SKILL_REF_PREFIX_RE = SKILL_REF_PATTERN
 
     const allMessages = [...threadMessages, ...streamingMsgs]
     return allMessages.map((msg) => {
       if (msg.role !== "user" || typeof msg.content !== "string") return msg
-      const hasAttachment = ATTACHMENT_WRAPPER_RE.test(msg.content)
-      ATTACHMENT_WRAPPER_RE.lastIndex = 0
-      const hasSkillWrapper = SKILL_WRAPPER_RE.test(msg.content)
-      SKILL_WRAPPER_RE.lastIndex = 0
+      const hasAttachment = ATTACHMENT_PROBE.test(msg.content)
+      // Only treat a message as having our hidden skill wrapper when the leading
+      // <skill-ref> prefix is also present. submitMessage always emits both together; a
+      // user who merely pastes a <skill><name><path>...</skill> example in a discussion
+      // will have no leading <skill-ref>, and we'd otherwise silently strip their quote
+      // out of the bubble / copy / edit-resend flows.
+      const hasSkillRefPrefix = SKILL_REF_PREFIX_RE.test(msg.content)
+      const hasSkillWrapper = hasSkillRefPrefix && SKILL_WRAPPER_PROBE.test(msg.content)
       if (!hasAttachment && !hasSkillWrapper) return msg
 
       let working = msg.content
-      // Strip the full SKILL.md body and its invocation-instruction banner;
-      // the leading <skill-ref> prefix is preserved.
+      // Strip only the hidden wrapper submitMessage appends at the tail, not arbitrary
+      // <skill>…</skill> fragments the user may have pasted earlier in the body. We start
+      // from the END: submitMessage emits "</skill>" as the final closing tag of the
+      // payload, so locate that first, then walk backwards to <skill>, then to the
+      // <skill-invocation-instruction> that always precedes it. If a user pasted either
+      // anchor verbatim in their message body, this tail-first scan still aligns on the
+      // one we actually emitted (which is always last).
       if (hasSkillWrapper) {
-        working = working.replace(SKILL_INSTRUCTION_RE, "").replace(SKILL_WRAPPER_RE, "")
+        const skillCloseEnd = working.lastIndexOf("</skill>")
+        if (skillCloseEnd >= 0) {
+          const skillOpen = working.lastIndexOf("<skill>", skillCloseEnd)
+          if (skillOpen >= 0) {
+            const instructionOpen = working.lastIndexOf("<skill-invocation-instruction>", skillOpen)
+            if (instructionOpen >= 0) {
+              const removeEnd = skillCloseEnd + "</skill>".length
+              working = (working.slice(0, instructionOpen) + working.slice(removeEnd))
+                .replace(/[\s]+$/, "")
+            }
+          }
+        }
       }
 
       const fileNames: string[] = []
       if (hasAttachment) {
-        working = working.replace(ATTACHMENT_WRAPPER_RE, (_match, name) => {
+        working = working.replace(ATTACHMENT_STRIP, (_match, name) => {
           const decoded = name
             .replace(/&amp;/g, "&")
             .replace(/&lt;/g, "<")
@@ -1140,7 +1223,24 @@ export function ChatContainer({
       }
     ): Promise<void> => {
       if (!stream) return
-
+      // Capture the threadId at submit time. If the user switches threads while the
+      // skill-read is in flight, we must still operate on the ORIGINAL thread for state
+      // clears; otherwise setSelectedSkill(null) below would clobber the new thread's
+      // pending chip via the fresh render closure.
+      const submitThreadId = threadId
+      if (submittingThreadsRef.current.has(submitThreadId)) return
+      submittingThreadsRef.current.add(submitThreadId)
+      // Per-call identity for cancel checks — see activeInvocationsRef/cancelledInvocationsRef
+      // comments above. Every subsequent checkpoint consults this one token, so a cancel
+      // for invocation A can never be cleared by a later invocation B.
+      const invocationToken: object = {}
+      activeInvocationsRef.current.set(submitThreadId, invocationToken)
+      setSubmittingThreads((prev) => {
+        const next = new Set(prev)
+        next.add(submitThreadId)
+        return next
+      })
+      try {
       const providedAttachments = opts?.attachments
       const currentAttachments =
         providedAttachments && providedAttachments.length > 0 ? [...providedAttachments] : undefined
@@ -1155,36 +1255,113 @@ export function ChatContainer({
       // when the skill is unreachable — otherwise the user loses their draft with nothing sent.
       let skillBlock = ""
       if (skill) {
+        // Only hit skills.getDisabled (cheap: a stored array) to catch the "user disabled
+        // then immediately sent" race. skills.list is heavier (frontmatter parsing) and
+        // the popover already refreshes it on open; skills.read itself surfaces "file
+        // missing" via its own error path, so we don't need a separate existence probe.
+        try {
+          const disabledList = await window.api.skills.getDisabled()
+          // Must check cancel BEFORE acting on the result — a cancelled-then-superseded
+          // invocation that sees skill as disabled must not wipe the new invocation's chip.
+          if (cancelledInvocationsRef.current.has(invocationToken)) return
+          if (disabledList.includes(skill.name)) {
+            threadCtx.getThreadActions(submitThreadId).setDraftSkill(null)
+            toast.error(`技能「${skill.name}」已不可用`, {
+              description: "可能已被禁用或删除，请重新选择"
+            })
+            return
+          }
+        } catch (err) {
+          // Non-fatal: skip the disable check on IPC outage rather than blocking the send.
+          console.warn("[submitMessage] getDisabled probe failed", err)
+          if (cancelledInvocationsRef.current.has(invocationToken)) return
+        }
         let skillContent: string | null = null
+        let readErrorReason: string | null = null
         try {
           const res = await window.api.skills.read(skill.path)
           if (res.success && typeof res.content === "string") {
             skillContent = res.content
           } else {
+            readErrorReason = res.error ?? "读取失败"
             console.warn("[submitMessage] failed to read skill:", skill.path, res.error)
           }
         } catch (err) {
+          readErrorReason = err instanceof Error ? err.message : String(err)
           console.warn("[submitMessage] skill read threw:", err)
         }
         if (skillContent === null) {
-          toast.error(`无法读取技能「${skill.name}」，请重试或更换技能`)
+          // Check cancel before acting on the error: if this invocation was cancelled and
+          // a newer one (possibly with a different skill) has taken over, we must not
+          // wipe the newer chip or pop a toast meant for the aborted invocation.
+          if (cancelledInvocationsRef.current.has(invocationToken)) return
+          // Distinguish "file really gone" (ENOENT / not found) from transient IO errors
+          // so we don't trap the user in a "press send → toast → press send" loop after
+          // the SKILL.md has been physically deleted. The list-based pre-check was removed
+          // to save an IPC per send, so this is the one place that catches deletion.
+          const msg = readErrorReason ?? ""
+          const isPermanentMissing =
+            /ENOENT|no such file|not found|文件不存在/i.test(msg)
+          if (isPermanentMissing) {
+            threadCtx.getThreadActions(submitThreadId).setDraftSkill(null)
+            toast.error(`技能「${skill.name}」已不存在`, {
+              description: "SKILL.md 文件可能已被删除，请重新选择"
+            })
+          } else {
+            // Transient (busy disk, momentary permission flap) — keep the chip so the user
+            // can retry the same skill with one click rather than re-selecting.
+            toast.error(`无法读取技能「${skill.name}」`, {
+              description: readErrorReason ?? "请重试或更换技能"
+            })
+          }
           return
         }
+        // User pressed stop during the skill-read IPC wait. Discard the submit entirely
+        // without writing to composer state.
+        if (cancelledInvocationsRef.current.has(invocationToken)) return
         const instruction =
           `<skill-invocation-instruction>\n` +
           `用户通过斜杠命令显式指定使用下方 <skill> 块中的技能。\n` +
           `本轮你必须严格遵循 <skill> 块中的说明执行，不要改写成泛化的回答，不要跳过步骤，也不要重复询问技能已经明确说明的内容。\n` +
           `请始终使用中文回答。\n` +
           `</skill-invocation-instruction>`
-        // Defuse any literal </skill> inside SKILL.md body to prevent premature closing of the wrapper.
-        const safeContent = skillContent.replace(/<\/skill>/gi, "< /skill>")
+        // Defuse any literal <skill> / </skill> inside SKILL.md body. Both tags must be defused:
+        //   - </skill> would prematurely close the wrapper (model / backend would misparse).
+        //   - <skill> would be picked up by displayMessages' tail-first lastIndexOf("<skill>") walk
+        //     and by the main-process anti-spoof scan, both of which assume the wrapper's opening
+        //     tag is unique. A SKILL.md that documents the protocol (e.g. skill-creator) trivially
+        //     contains <skill> in prose — without this defuse, the user's own message bubble gets
+        //     truncated and usage stats silently drop.
+        const safeContent = skillContent
+          .replace(/<skill>/gi, "< skill>")
+          .replace(/<\/skill>/gi, "< /skill>")
+        // NOTE: the wrapper shape below (<skill><name/><path/>body</skill>) MUST stay in sync
+        // with SKILL_WRAPPER_PROBE and the anchor-based strip (indexOf("<skill-invocation-instruction>")
+        // and the following <skill>…</skill>) in displayMessages. If you change the wrapper
+        // (e.g. insert <version/> between <name/> and <path/>), update both.
+        // Use escapeXmlAttr (the same helper formatSkillRef uses) instead of the local
+        // escXml from this file — escXml doesn't encode ' so names like O'Reilly would
+        // appear as &apos; inside <skill-ref> but as a literal "'" here, and the backend
+        // anti-spoof regex, which cross-matches the two forms, would silently miss. Same
+        // pairing for sanitizeSkillName: both tags must apply it so names with CR/LF match.
         skillBlock =
-          `\n\n${instruction}\n\n<skill>\n<name>${escXml(skill.name)}</name>\n<path>${escXml(skill.path)}</path>\n${safeContent}\n</skill>`
+          `\n\n${instruction}\n\n<skill>\n<name>${escapeXmlAttr(sanitizeSkillName(skill.name))}</name>\n<path>${escapeXmlAttr(skill.path)}</path>\n${safeContent}\n</skill>`
       }
 
-      setInput("")
-      setAttachments([])
-      if (skill) setSelectedSkill(null)
+      setInput("") // draftInput is thread-scoped (tied to submitThreadId via closure), safe.
+      // draftSkill is also thread-scoped, but the wrapper from useCurrentThread captures
+      // the current render's threadId — go through getThreadActions so we always clear
+      // the originating thread's chip even if the user has switched away.
+      if (skill) {
+        threadCtx.getThreadActions(submitThreadId).setDraftSkill(null)
+      }
+      // attachments is still ComponentContainer-level shared state. If the user has switched
+      // away from submitThreadId during the async skill.read window, clearing here would
+      // wipe whatever the user just added on the NEW thread (pending attachment upload).
+      const stillOnOriginThread = submitThreadId === currentThreadIdRef.current
+      if (stillOnOriginThread) {
+        setAttachments([])
+      }
       // skill-only sends produce empty userText; record the skill name for audit/debug.
       const logText = userText || (skill ? `[skill-only: ${skill.name}]` : "")
       insertLog("send: " + logText)
@@ -1227,16 +1404,17 @@ export function ChatContainer({
       }
       appendMessage(userMessage)
 
-      // Only seed title generation when the user actually typed something, and only
-      // for the very first couple of turns. Bounding by threadMessages.length <= 1
-      // (0 before first send; 1 when a prior skill-only send didn't name the thread yet)
-      // preserves the "delay naming to the first real typed turn" behavior without risking
-      // later turns overwriting a title the user might have manually reset to "Thread N".
-      if (trimmedInput && threadMessages.length <= 1) {
-        const currentThread = threads.find((t) => t.thread_id === threadId)
+      // Only seed title generation when the user actually typed something, and only while
+      // this is still one of the first couple of user turns. Counting user messages (not
+      // total messages) preserves delayed naming after a skill-only first turn — by the
+      // time the user types a real follow-up, an assistant reply + tool messages already
+      // live in threadMessages, so a length-based bound would lock out the naming window.
+      const priorUserMessages = threadMessages.filter((m) => m.role === "user").length
+      if (trimmedInput && priorUserMessages <= 1) {
+        const currentThread = threads.find((t) => t.thread_id === submitThreadId)
         const hasDefaultTitle = currentThread?.title?.startsWith("Thread ")
         if (hasDefaultTitle) {
-          generateTitleForFirstMessage(threadId, trimmedInput)
+          generateTitleForFirstMessage(submitThreadId, trimmedInput)
         }
       }
 
@@ -1244,10 +1422,32 @@ export function ChatContainer({
         { messages: [{ type: "human", content: fullMessage }] },
         {
           config: {
-            configurable: { thread_id: threadId, model_id: currentModel }
+            configurable: { thread_id: submitThreadId, model_id: currentModel }
           }
         }
       )
+      } finally {
+        // All three cleanups must be gated by token identity. If the user cancelled this
+        // invocation and started a newer one before we reached finally, the slot is now
+        // owned by that newer token — blindly deleting here would:
+        //   1. strip submittingThreadsRef, reopening the dup-submit guard and letting the
+        //      user's next click race against the still-flying stream.submit from B
+        //   2. flip submittingThreads state to empty, making the UI show "send" while B
+        //      is actually in flight (pre-isLoading window)
+        // So only clean up if we're still the active invocation for this thread.
+        const stillOurs =
+          activeInvocationsRef.current.get(submitThreadId) === invocationToken
+        if (stillOurs) {
+          submittingThreadsRef.current.delete(submitThreadId)
+          activeInvocationsRef.current.delete(submitThreadId)
+          setSubmittingThreads((prev) => {
+            if (!prev.has(submitThreadId)) return prev
+            const next = new Set(prev)
+            next.delete(submitThreadId)
+            return next
+          })
+        }
+      }
     },
     [
       stream,
@@ -1291,11 +1491,23 @@ export function ChatContainer({
         inputRef.current?.focus()
       })
     },
-    [setInput, slashResetSelection]
+    // setSelectedSkill comes from useCurrentThread(threadId) and therefore carries the
+    // current thread's identity. Listing it in deps also implicitly tracks threadId, since
+    // getThreadActions caches actions per threadId — when threadId changes, we get a new
+    // setSelectedSkill and rebuild this callback. If getThreadActions's identity semantics
+    // ever change, consider adding threadId explicitly here.
+    [setInput, slashResetSelection, setSelectedSkill]
   )
 
   const handleSubmit = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault()
+
+    // If the slash popover is currently open (user typed /xxx and is mid-selection),
+    // any submit attempt — Enter, Tab, or clicking the send button — should not be
+    // treated as a real send. Otherwise the send button would happily ship the literal
+    // "/xxx" text to the model, which is never what the user meant when the popover
+    // showed up. The keydown handler swallows Enter/Tab itself; this catches the click.
+    if (slash.mode.kind === "skill") return
 
     if ((!input.trim() && attachments.length === 0 && !selectedSkill) || isLoading || !stream)
       return
@@ -1371,7 +1583,11 @@ export function ChatContainer({
           applySkillSelection(s)
           return
         }
-        // Empty / no-match list: fall through so Enter still submits instead of doing nothing.
+        // No match: swallow the key. Letting it fall through would submit the raw `/xxx`
+        // as literal text, which is almost never what the user meant when they opened
+        // the skill popover — better to do nothing and let them edit the filter.
+        e.preventDefault()
+        return
       }
     }
 
@@ -1428,6 +1644,23 @@ export function ChatContainer({
         stream?.stop(),
         window.api.agent.cancel(threadId)
       ])
+      // Belt-and-suspenders: proactively release the submit lock for this thread. The
+      // submitMessage finally block should already fire when stream.submit rejects on
+      // abort, but if the SDK ever swallows that rejection the lock would stay held and
+      // leave the thread frozen in "submitting" state — unrecoverable without a restart.
+      submittingThreadsRef.current.delete(threadId)
+      // Also mark any in-flight invocation for this thread as cancelled so its remaining
+      // checkpoints (or its finally) bail out without touching composer state.
+      const activeToken = activeInvocationsRef.current.get(threadId)
+      if (activeToken) {
+        cancelledInvocationsRef.current.add(activeToken)
+      }
+      setSubmittingThreads((prev) => {
+        if (!prev.has(threadId)) return prev
+        const next = new Set(prev)
+        next.delete(threadId)
+        return next
+      })
     }
   }
 
@@ -1869,6 +2102,10 @@ export function ChatContainer({
 
   const handleUseSkillPrompt = useCallback(
     (skill: SkillMetadata, label?: string): void => {
+      // Refuse to reshape the composer while a send is in-flight. submitMessage already
+      // snapshotted the draft/attachments, so anything we write here would race with the
+      // pending setInput("") and either vanish or linger after the outgoing message.
+      if (submittingThreadsRef.current.has(currentThreadIdRef.current)) return
       const custPrompt = label ? getTargetRemoteSkill(label) : ""
       const prompt = buildSkillPrompt(skill)
       setInput(custPrompt || prompt)
@@ -1911,23 +2148,60 @@ export function ChatContainer({
 
   const handleEditUserMessage = useCallback(
     (message: Message): void => {
+      // Defensive guard — the edit button in MessageBubble is already disabled via
+      // editDisabled when a send is in-flight, but this belt-and-suspenders check makes
+      // sure a programmatic or keyboard-triggered call can't race the submit either.
+      if (submittingThreadsRef.current.has(currentThreadIdRef.current)) {
+        console.warn("[handleEditUserMessage] ignored: a send is currently in flight")
+        return
+      }
+      // Detect whether edit-resend is about to clobber an in-progress draft so we can
+      // tell the user explicitly. Without this the draft vanishes with only a generic
+      // success toast, which looks like the edit action "worked" but actually ate work.
+      // Read via refs, not deps, so every keystroke doesn't rebuild this callback (which
+      // is passed to every MessageBubble as a prop and would otherwise re-render them all).
+      const hadActiveDraft =
+        draftInputValueRef.current.trim().length > 0 || attachmentsRef.current.length > 0
       const original = extractMessageText(message.content)
       // Restore skill selection from the original display content's <skill-ref> prefix;
       // without this, the re-sent message would keep the chip visual via stripping but
       // actually skip the real SKILL.md injection, creating a silent-failure chip.
       const skillMatch = parseSkillMarker(original)
+      // Distinguish the skills list still loading from the skill being actually missing.
+      // If we declare "missing" while the list is only half-loaded, a perfectly valid skill
+      // gets dropped and the user sees a false warning. Asking the user to retry in a
+      // moment is safer than tearing down the chip prematurely.
+      let skillState: "ok" | "missing" | "loading" = "ok"
       if (skillMatch) {
         const skillFromList = skills.find((s) => s.name === skillMatch.skillName)
-        setSelectedSkill(skillFromList ?? null)
+        if (skillFromList) {
+          setSelectedSkill(skillFromList)
+        } else if (skillsLoading) {
+          setSelectedSkill(null)
+          skillState = "loading"
+        } else {
+          setSelectedSkill(null)
+          skillState = "missing"
+        }
       } else {
         setSelectedSkill(null)
       }
       const bodyAfterSkillRef = skillMatch ? skillMatch.rest : original
-      const withoutAttachmentPreview = bodyAfterSkillRef
-        .replace(/^(?:📎[^\n]*\n)+(?:\n)?/u, "")
-        .trim()
-      const nextInput = withoutAttachmentPreview || bodyAfterSkillRef
+      // Strip the display-only 📎 filename preview. When only 📎 lines are present
+      // (skill + attachments, no typed text), the result is intentionally empty so the
+      // user starts from a clean input — re-introducing the 📎 text would leak it into
+      // the next outgoing message as literal content.
+      // The 📎 preview lines may not end with a newline when the message has attachments
+      // but no text body — e.g. `📎 a.txt\n📎 b.txt`. The previous regex required \n after
+      // every 📎 line and would leave the final 📎 row in the input, then send it as text.
+      const ATTACHMENT_PREVIEW_RE = /^(?:📎[^\n]*(?:\n|$))+\n?/u
+      const hadAttachmentPreview = ATTACHMENT_PREVIEW_RE.test(bodyAfterSkillRef)
+      const nextInput = bodyAfterSkillRef.replace(ATTACHMENT_PREVIEW_RE, "").trim()
       setInput(nextInput)
+      // Clear any attachments the user had queued before hitting "edit". Edit re-send is
+      // scoped to recovering the prior message's text/skill, not to piggy-back on whatever
+      // files happen to be pending. The toast below tells the user to re-add attachments.
+      setAttachments([])
 
       requestAnimationFrame(() => {
         const textarea = inputRef.current
@@ -1936,9 +2210,32 @@ export function ChatContainer({
         const cursor = nextInput.length
         textarea.setSelectionRange(cursor, cursor)
       })
-      toast.success("已填充到输入框，编辑后可重新发送")
+      if (skillState === "missing") {
+        toast.warning(`原消息使用的技能「${skillMatch?.skillName}」当前不可用，已从草稿中移除`)
+      } else if (skillState === "loading") {
+        toast.info(`技能列表加载中，若需复用「${skillMatch?.skillName}」请稍后重新选择`)
+      } else if (hadActiveDraft) {
+        toast.warning(
+          hadAttachmentPreview
+            ? "已覆盖当前草稿，附件请重新添加"
+            : "已覆盖当前草稿"
+        )
+      } else {
+        toast.success(
+          hadAttachmentPreview
+            ? "已填充文字和技能，附件请重新添加"
+            : "已填充到输入框，编辑后可重新发送"
+        )
+      }
     },
-    [extractMessageText, setInput, skills]
+    [
+      extractMessageText,
+      setInput,
+      skills,
+      skillsLoading,
+      setSelectedSkill,
+      setAttachments
+    ]
   )
 
   return (
@@ -2305,7 +2602,6 @@ export function ChatContainer({
 
               return (
                 <div
-                  isLoading={isLoading}
                   key={message.id}
                   ref={message.role === "user" ? setUserMessageRef(message.id) : undefined}
                   data-message-role={message.role}
@@ -2314,6 +2610,12 @@ export function ChatContainer({
                     message={message}
                     previousMessage={previousMessage}
                     isStreaming={isLastMessage && isLoading}
+                    isLoading={isLoading}
+                    // Lock the edit-resend button while the current thread has a send
+                    // in flight — otherwise handleEditUserMessage would rewrite
+                    // input/attachments/skill that submitMessage has already snapshotted,
+                    // producing "eye shows X, model received Y" drift.
+                    editDisabled={isSubmittingThisThread}
                     showAssistantMeta={showAssistantMeta}
                     toolResults={toolResults}
                     pendingApproval={pendingApproval}
@@ -2636,6 +2938,7 @@ export function ChatContainer({
             selectedIdx={slash.selectedIdx}
             onHoverIdx={slash.setSelectedIdx}
             onSelectSkill={applySkillSelection}
+            skillsLoading={skillsLoading}
           />
           <div className="flex flex-col gap-2">
             <div className="flex items-end gap-2">
@@ -2667,6 +2970,12 @@ export function ChatContainer({
                     <SkillChip
                       label={selectedSkill.name}
                       onRemove={() => setSelectedSkill(null)}
+                      // Keep the × visible but disabled during a send — submitMessage has
+                      // already snapshotted the skill, so removing it now would mislead.
+                      // Visible-disabled is less jarring than having the button pop away
+                      // and return moments later.
+                      removeDisabled={isSubmittingThisThread}
+                      removeDisabledTitle="发送中，无法移除技能"
                     />
                   </div>
                 )}
@@ -2684,8 +2993,11 @@ export function ChatContainer({
                           {att.truncated && <span className="text-amber-500" title="内容已截取">⚠</span>}
                           <button
                             type="button"
+                            // Same reason as the skill chip: a submit in flight has already
+                            // captured the attachment list — removing now would mislead.
+                            disabled={isSubmittingThisThread}
                             onClick={() => removeAttachment(idx)}
-                            className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-foreground"
+                            className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-foreground disabled:cursor-not-allowed"
                           >
                             <X className="size-3" />
                           </button>
@@ -2715,7 +3027,7 @@ export function ChatContainer({
                       ? "输入消息或直接发送文件..."
                       : "向 CMBDevClaw 提问，/ 输入命令"
                   }
-                  disabled={isLoading}
+                  disabled={isLoading || isSubmittingThisThread}
                   className={cn(
                     "relative z-[1] w-full resize-none bg-transparent overflow-y-auto",
                     "p-4 text-sm placeholder:text-muted-foreground",
@@ -2730,7 +3042,13 @@ export function ChatContainer({
                   <div className="flex items-center gap-1">
                     <button
                       type="button"
-                      disabled={isLoading || attachmentLoading || attachments.length >= MAX_ATTACHMENTS || totalAttachmentChars >= MAX_TOTAL_CHARS}
+                      disabled={
+                        isLoading ||
+                        isSubmittingThisThread ||
+                        attachmentLoading ||
+                        attachments.length >= MAX_ATTACHMENTS ||
+                        totalAttachmentChars >= MAX_TOTAL_CHARS
+                      }
                       onClick={handleAttachClick}
                       title="添加文件 (txt, md, csv, docx, xlsx)"
                       className="flex items-center justify-center size-7 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
@@ -2749,6 +3067,16 @@ export function ChatContainer({
                         type="button"
                         onClick={handleCancel}
                         aria-label="停止生成"
+                        className="flex items-center justify-center size-7 rounded-md bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
+                      >
+                        <Square className="size-3 fill-current" />
+                      </button>
+                    ) : isSubmittingThisThread ? (
+                      <button
+                        type="button"
+                        onClick={() => handleCancelPreSubmit(threadId)}
+                        aria-label="取消发送"
+                        title="取消发送"
                         className="flex items-center justify-center size-7 rounded-md bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
                       >
                         <Square className="size-3 fill-current" />

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useMemo, useState } from "react"
 import type { SkillMetadata } from "@/types"
 
 export type PopoverMode =
@@ -36,14 +36,16 @@ export function useSlashCommands(params: {
 
   // Reset highlight to the top whenever the popover (re-)opens or the filter term changes,
   // so pressing Enter right after typing never selects a stale carry-over item.
-  const prevKeyRef = useRef<string>("")
+  // Store the previous key in state (per React docs: "storing information from previous
+  // renders"). Using useState rather than a ref here is safer under StrictMode's double
+  // invocation — setState triggers a second render that self-corrects, whereas a ref
+  // mutated during the first render would stick and then mismatch on the re-run.
   const currentKey = mode.kind === "skill" ? `skill:${mode.filter}` : "closed"
-  useEffect(() => {
-    if (currentKey !== prevKeyRef.current) {
-      prevKeyRef.current = currentKey
-      setSelectedIdx(0)
-    }
-  }, [currentKey])
+  const [prevKey, setPrevKey] = useState(currentKey)
+  if (currentKey !== prevKey) {
+    setPrevKey(currentKey)
+    if (selectedIdx !== 0) setSelectedIdx(0)
+  }
 
   const totalItems = mode.kind === "skill" ? mode.skills.length : 0
   const clampedIdx = totalItems === 0 ? 0 : Math.min(selectedIdx, totalItems - 1)
