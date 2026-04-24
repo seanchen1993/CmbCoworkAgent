@@ -113,6 +113,121 @@ export const pendingApprovals = new Map<string, {
   targetWebContentsIds: number[]
 }>()
 
+const approvalRequestQueues = new Map<string, Promise<void>>()
+const foregroundToolExecutionQueues = new Map<string, Promise<void>>()
+
+type ToolConcurrencyTier = "parallel" | "serialized_foreground"
+
+const SERIALIZED_FOREGROUND_TOOL_NAMES = new Set([
+  "execute",
+  "write_file",
+  "edit_file",
+  "code_exec",
+  "prepare_save_code_exec_tool",
+  "save_code_exec_tool",
+  "browser_playwright",
+  "manage_scheduler",
+  "manage_skill",
+  "task"
+])
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+}
+
+function classifyToolConcurrency(
+  toolCall: { name?: string; args?: unknown } | undefined
+): ToolConcurrencyTier {
+  const toolName = toolCall?.name
+  if (!toolName) return "parallel"
+
+  if (toolName === "execute") {
+    const args = isRecord(toolCall?.args) ? toolCall.args : null
+    return args?.run_in_background === true ? "parallel" : "serialized_foreground"
+  }
+
+  return SERIALIZED_FOREGROUND_TOOL_NAMES.has(toolName) ? "serialized_foreground" : "parallel"
+}
+
+async function runSerializedForegroundToolExecution<T>(
+  queueId: string,
+  label: string,
+  task: () => Promise<T>
+): Promise<T> {
+  const previous = foregroundToolExecutionQueues.get(queueId)
+  let releaseCurrent!: () => void
+  const current = new Promise<void>((resolve) => {
+    releaseCurrent = resolve
+  })
+  const tail = (previous ?? Promise.resolve()).catch(() => undefined).then(() => current)
+  foregroundToolExecutionQueues.set(queueId, tail)
+
+  const waitStart = Date.now()
+  if (previous) {
+    console.log(`[Runtime] foreground tool queue waiting for ${queueId}: ${label}`)
+    await previous.catch(() => undefined)
+    console.log(
+      `[Runtime] foreground tool queue acquired for ${queueId}: ${label} after ${Date.now() - waitStart}ms`
+    )
+  }
+
+  try {
+    return await task()
+  } finally {
+    releaseCurrent()
+    void tail.finally(() => {
+      if (foregroundToolExecutionQueues.get(queueId) === tail) {
+        foregroundToolExecutionQueues.delete(queueId)
+      }
+    })
+  }
+}
+
+function createGradedToolConcurrencyMiddleware(queueId: string) {
+  return createMiddleware({
+    name: "gradedToolConcurrency",
+    wrapToolCall: async (request, handler) => {
+      const toolCall = request.toolCall as { id?: string; name?: string; args?: unknown } | undefined
+      if (classifyToolConcurrency(toolCall) === "parallel") {
+        return handler(request)
+      }
+
+      const label = `${toolCall?.name ?? "unknown"}:${toolCall?.id ?? "no-id"}`
+      return runSerializedForegroundToolExecution(queueId, label, () => handler(request))
+    }
+  })
+}
+
+async function runSerializedApprovalRequest<T>(threadId: string, task: () => Promise<T>): Promise<T> {
+  const previous = approvalRequestQueues.get(threadId)
+  let releaseCurrent!: () => void
+  const current = new Promise<void>((resolve) => {
+    releaseCurrent = resolve
+  })
+  const tail = (previous ?? Promise.resolve()).catch(() => undefined).then(() => current)
+  approvalRequestQueues.set(threadId, tail)
+
+  const waitStart = Date.now()
+  if (previous) {
+    console.log(`[Runtime] approval queue waiting for thread ${threadId}`)
+    await previous.catch(() => undefined)
+    console.log(
+      `[Runtime] approval queue acquired for thread ${threadId} after ${Date.now() - waitStart}ms`
+    )
+  }
+
+  try {
+    return await task()
+  } finally {
+    releaseCurrent()
+    void tail.finally(() => {
+      if (approvalRequestQueues.get(threadId) === tail) {
+        approvalRequestQueues.delete(threadId)
+      }
+    })
+  }
+}
+
 /** Per-thread approval store cache. */
 const approvalStores = new Map<string, ApprovalStore>()
 
@@ -128,6 +243,16 @@ export function getOrCreateApprovalStore(threadId: string): ApprovalStore {
 
 const BASE_PROMPT =
   "In order to complete the objective that the user asks of you, you have access to a number of standard tools."
+
+const GRADED_TOOL_CALL_PROMPT = `
+## Tool Call Concurrency
+
+- Independent read-only tools may be called in parallel when that clearly saves time.
+- Read-only tools include filesystem reads (ls, read_file, glob, grep), search_tool, inspect_tool, task_output, memory reads, and other non-mutating lookups.
+- Foreground state-changing or approval-requiring tools must stay serialized. This includes execute (unless run_in_background=true), write_file, edit_file, code_exec, browser_playwright, manage_scheduler, manage_skill, and similar mutating tools.
+- Never batch multiple foreground serialized tools in a single response. Wait for the result of the current foreground tool before issuing the next one.
+- When in doubt, prefer serialized foreground execution over batching side-effecting tools.
+`
 
 function createEagerMcpTools(
   capabilityService: McpCapabilityService,
@@ -192,7 +317,8 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     summarizationKeep,
     toolTokenLimitBeforeEvict,
     trimTokensToSummarize,
-    subagentExtraSystemPrompt
+    subagentExtraSystemPrompt,
+    toolConcurrencyQueueId = "default"
   } = params
 
   // --- systemPrompt handling (identical to original) ---
@@ -485,9 +611,12 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
 
   // Base middleware for custom subagents (no skills — custom subagents must define their own)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const gradedToolConcurrencyMiddleware = createGradedToolConcurrencyMiddleware(toolConcurrencyQueueId)
+
   const subagentMiddleware: any[] = [
     todoListMiddleware(),
     createFsMiddleware(),
+    gradedToolConcurrencyMiddleware,
     toolErrorMiddleware,
     createSummarizationMiddleware(summarizationOptions),
     anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
@@ -514,6 +643,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     middleware: [
       todoListMiddleware(),
       createFsMiddleware(),
+      gradedToolConcurrencyMiddleware,
       toolErrorMiddleware,
       createSubAgentMiddleware({
         defaultModel: model,
@@ -950,6 +1080,9 @@ function getModelInstance(
     // create a shared AbortSignal that, once fired, permanently blocks all
     // subsequent retry attempts at the fetch layer.
     maxRetries: 0,
+    modelKwargs: {
+      parallel_tool_calls: true
+    },
     configuration: {
       baseURL: customConfig.baseUrl,
       fetch:
@@ -1104,7 +1237,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // whether the orchestrator is mounted below.
   const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000
   requestApproval = (req: ApprovalRequest): Promise<ApprovalDecision> => {
-    return new Promise<ApprovalDecision>((resolve) => {
+    return runSerializedApprovalRequest(threadId, () => new Promise<ApprovalDecision>((resolve) => {
       const timeoutId = setTimeout(() => {
         if (pendingApprovals.has(req.id)) {
           pendingApprovals.delete(req.id)
@@ -1136,7 +1269,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       for (const win of BrowserWindow.getAllWindows()) {
         win.webContents.send(`approval:request:${threadId}`, req)
       }
-    })
+    }))
   }
 
   if (!yoloMode) {
@@ -1146,7 +1279,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       return backend.executeRaw(command, sandboxMode)
     }
 
-    const orchestrator = new ToolOrchestrator(approvalStore, rawExecute, requestApproval, false)
+    const orchestrator = new ToolOrchestrator(approvalStore, rawExecute, requestApproval, false, threadId)
     backend.setOrchestrator(orchestrator)
   }
 
@@ -1371,6 +1504,7 @@ The workspace root is: ${workspacePath}`
     hasInvokeDeferredTool,
     hasCodeExecTool
   })
+  systemPrompt += GRADED_TOOL_CALL_PROMPT
   systemPrompt += renderAvailableDeferredToolsPrompt(deferredToolIds)
   console.log("[Runtime] System prompt summary:", {
     chars: systemPrompt.length,
@@ -1405,7 +1539,8 @@ The workspace root is: ${workspacePath}`
     summarizationTrigger: { type: "tokens", value: triggerTokens },
     summarizationKeep: { type: "tokens", value: keepTokens },
     toolTokenLimitBeforeEvict: toolEvictLimit,
-    trimTokensToSummarize: trimForSummary
+    trimTokensToSummarize: trimForSummary,
+    toolConcurrencyQueueId: options.threadId ?? workspacePath
   })
 
   console.log("[Runtime] Agent created with skills parameter:", allSkillsSources.length > 0 ? allSkillsSources : undefined)

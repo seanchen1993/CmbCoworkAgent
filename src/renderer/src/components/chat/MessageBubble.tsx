@@ -1,4 +1,4 @@
-import type { Message, HITLRequest } from "@/types"
+import type { Message, HITLRequest, ToolCallState, ToolCallStatus } from "@/types"
 import { ToolCallRenderer } from "./ToolCallRenderer";
 import { StreamingMarkdown } from "./StreamingMarkdown"
 import { getToolLabel } from "@/lib/tool-labels"
@@ -63,6 +63,40 @@ function getToolPreviewPath(toolCall: { name: string; args?: Record<string, unkn
   return path
 }
 
+function hydrateToolCall(
+  toolCall: { id: string; name: string; args?: Record<string, unknown> },
+  toolState?: ToolCallState
+): { id: string; name: string; args: Record<string, unknown> } {
+  return {
+    ...toolCall,
+    name: toolCall.name || toolState?.name || "execute",
+    args: {
+      ...(toolState?.args || {}),
+      ...(toolCall.args || {})
+    }
+  }
+}
+
+function getToolStatusMeta(status: ToolCallStatus): { label: string; className: string } {
+  switch (status) {
+    case "completed":
+      return { label: "OK", className: "bg-green-100 text-green-700 border border-green-200" }
+    case "failed":
+      return { label: "ERROR", className: "bg-red-100 text-red-700 border border-red-200" }
+    case "awaiting_approval":
+      return { label: "APPROVAL", className: "bg-amber-100 text-amber-700 border border-amber-200" }
+    case "queued":
+      return { label: "QUEUED", className: "bg-slate-100 text-slate-600 border border-slate-200" }
+    case "running":
+      return { label: "RUNNING", className: "bg-gray-100 text-gray-600 border border-gray-200 animate-pulse" }
+    case "rejected":
+      return { label: "REJECTED", className: "bg-orange-100 text-orange-700 border border-orange-200" }
+    case "interrupted":
+    default:
+      return { label: "INTERRUPTED", className: "bg-amber-100 text-amber-700 border border-amber-200" }
+  }
+}
+
 interface ToolResultInfo {
   content: string | unknown
   is_error?: boolean
@@ -74,6 +108,7 @@ interface MessageBubbleProps {
   isStreaming?: boolean
   showAssistantMeta?: boolean
   toolResults?: Map<string, ToolResultInfo>
+  toolCallStates?: Map<string, ToolCallState>
   pendingApproval?: HITLRequest | null
   onApprovalDecision?: (decision: "approve" | "approve_session" | "approve_permanent" | "reject" | "edit") => void
   onEditUserMessage?: (message: Message) => void
@@ -87,6 +122,7 @@ export function MessageBubble({
   isStreaming = true,
   showAssistantMeta = true,
   toolResults,
+  toolCallStates,
   pendingApproval,
   onApprovalDecision,
   onEditUserMessage,
@@ -387,6 +423,8 @@ export function MessageBubble({
           <div className="space-y-2 overflow-hidden">
             {message.tool_calls!.map((toolCall, index) => {
               const toolId = toolCall.id || `${message.id}-${index}`;
+              const toolState = toolCallStates?.get(toolCall.id)
+              const resolvedToolCall = hydrateToolCall(toolCall, toolState)
               const result = toolResults?.get(toolCall.id);
               const pendingIds = pendingApproval?.pendingToolCallIds;
               const needsApproval = Boolean(
@@ -394,10 +432,20 @@ export function MessageBubble({
                   ? pendingIds.includes(toolCall.id)
                   : pendingApproval?.tool_call?.id && pendingApproval.tool_call.id === toolCall.id
               );
-              const isHtmlTool = isHtmlRenderToolCall(toolCall);
+              const inferredStatus: ToolCallStatus =
+                toolState?.status ||
+                (needsApproval
+                  ? "awaiting_approval"
+                  : result !== undefined
+                    ? (result.is_error ? "failed" : "completed")
+                    : isStreaming
+                      ? "running"
+                      : "interrupted")
+              const statusMeta = getToolStatusMeta(inferredStatus)
+              const isHtmlTool = isHtmlRenderToolCall(resolvedToolCall);
               const isExpanded = isHtmlTool ? collapsedHtmlTools.has(toolId) : collapsedTools.has(toolId);
-              const summary = getToolCallSummary(toolCall);
-              const previewPath = getToolPreviewPath(toolCall);
+              const summary = getToolCallSummary(resolvedToolCall);
+              const previewPath = getToolPreviewPath(resolvedToolCall);
               const isOk = result !== undefined && !result.is_error
 
               // 如果工具需要审批，使用原来的ToolCallRenderer（批量时隐藏按钮）
@@ -406,9 +454,10 @@ export function MessageBubble({
                 return (
                   <ToolCallRenderer
                     key={`${toolCall.id || `tc-${index}`}-${needsApproval ? "pending" : "done"}`}
-                    toolCall={toolCall}
+                    toolCall={resolvedToolCall}
                     result={result?.content}
                     isError={result?.is_error}
+                    status={inferredStatus}
                     needsApproval={needsApproval}
                     showApprovalButtons={!isBatch}
                     onApprovalDecision={onApprovalDecision}
@@ -459,27 +508,9 @@ export function MessageBubble({
                       )}
 
                       {/* 状态指示器 */}
-                      {result !== undefined && (
-                        <div className={`shrink-0 px-2 py-0.5 text-[10px] font-medium rounded ${
-                          result.is_error
-                            ? 'bg-red-100 text-red-700 border border-red-200'
-                            : 'bg-green-100 text-green-700 border border-green-200'
-                        }`}>
-                          {result.is_error ? "ERROR" : "OK"}
-                        </div>
-                      )}
-
-                      {result === undefined && isStreaming && (
-                        <div className="shrink-0 px-2 py-0.5 text-[10px] font-medium rounded bg-gray-100 text-gray-600 border border-gray-200 animate-pulse">
-                          RUNNING
-                        </div>
-                      )}
-
-                      {result === undefined && !isStreaming && (
-                        <div className="shrink-0 px-2 py-0.5 text-[10px] font-medium rounded bg-amber-100 text-amber-700 border border-amber-200">
-                          INTERRUPTED
-                        </div>
-                      )}
+                      <div className={`shrink-0 px-2 py-0.5 text-[10px] font-medium rounded ${statusMeta.className}`}>
+                        {statusMeta.label}
+                      </div>
                     </div>
                   </button>
 
@@ -487,9 +518,10 @@ export function MessageBubble({
                   {(isExpanded  ) && (
                     <div className="border-t border-border">
                       <ToolCallRenderer
-                        toolCall={toolCall}
+                        toolCall={resolvedToolCall}
                         result={result?.content}
                         isError={result?.is_error}
+                        status={inferredStatus}
                         needsApproval={false}
                         onApprovalDecision={undefined}
                         isStreaming={isStreaming}

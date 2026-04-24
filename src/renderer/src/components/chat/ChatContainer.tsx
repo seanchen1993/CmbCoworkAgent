@@ -53,7 +53,7 @@ import { WorkspacePicker } from "./WorkspacePicker"
 import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
 import { GitBranchSwitcher } from "./GitBranchSwitcher"
-import type { Message, SkillMetadata } from "@/types"
+import type { Message, SkillMetadata, ToolCallState, ToolCallStatus } from "@/types"
 import { MessageBubble } from "./MessageBubble"
 import { ChatScrollNavigator } from "./ChatScrollNavigator"
 import { UpdateStatusCard } from "./UpdateStatusCard"
@@ -164,6 +164,7 @@ interface StreamMessage {
   tool_calls?: Message["tool_calls"]
   tool_call_id?: string
   name?: string
+  is_error?: boolean
 }
 
 interface ChatContainerProps {
@@ -181,6 +182,42 @@ interface SkillIntentBannerRequest {
   recommendationReason?: string
   /** Opaque context — cached so the retry button can replay generation without a new threshold. */
   context: unknown
+}
+
+function mergeToolCallArgs(
+  baseArgs?: Record<string, unknown>,
+  liveArgs?: Record<string, unknown>
+): Record<string, unknown> {
+  return {
+    ...(baseArgs || {}),
+    ...(liveArgs || {})
+  }
+}
+
+function getToolCallFilePath(args?: Record<string, unknown>): string | undefined {
+  const path = args?.path ?? args?.file_path
+  return typeof path === "string" && path.trim() ? path : undefined
+}
+
+function getToolCallCommand(args?: Record<string, unknown>): string | undefined {
+  return typeof args?.command === "string" && args.command.trim() ? args.command : undefined
+}
+
+function getToolCallCode(args?: Record<string, unknown>): string | undefined {
+  return typeof args?.code === "string" && args.code.trim() ? args.code : undefined
+}
+
+function getToolCallTimeout(args?: Record<string, unknown>): number | undefined {
+  return typeof args?.timeoutMs === "number" ? args.timeoutMs : undefined
+}
+
+function isTerminalToolCallStatus(status?: ToolCallStatus): boolean {
+  return (
+    status === "completed" ||
+    status === "failed" ||
+    status === "interrupted" ||
+    status === "rejected"
+  )
 }
 
 const THINKING_MESSAGES = [
@@ -500,6 +537,8 @@ export function ChatContainer({
   // Get persisted thread state and actions from context
   const {
     messages: threadMessages,
+    toolCallStates,
+    pendingApprovals,
     pendingApproval,
     todos,
     error: threadError,
@@ -510,8 +549,9 @@ export function ChatContainer({
     scheduledTaskLoading,
     scheduledTaskId,
     modelRetry,
+    setToolCallState,
     setTodos,
-    setPendingApproval,
+    removePendingApproval,
     appendMessage,
     setError,
     clearError,
@@ -531,6 +571,7 @@ export function ChatContainer({
   const [savedToolNameInput, setSavedToolNameInput] = useState("")
   const [savedToolDescriptionInput, setSavedToolDescriptionInput] = useState("")
   const [saveToolMetadataLoading, setSaveToolMetadataLoading] = useState(false)
+  const queuedApprovalCount = Math.max(0, pendingApprovals.length - 1)
 
   useEffect(() => {
     const approval = pendingApproval as unknown as Record<string, unknown> | null
@@ -890,19 +931,34 @@ export function ChatContainer({
             ? { savedToolDescription: savedToolDescriptionInput }
             : {})
         })
-
-        if (!(operation === "prepare_save_code_exec_tool" && decision === "approve")) {
-          setPendingApproval(null)
-        }
+        setSaveToolMetadataLoading(false)
+        setToolCallState(pendingApproval.tool_call?.id || "", {
+          status:
+            decision === "approve" ||
+            decision === "approve_session" ||
+            decision === "approve_permanent"
+              ? "running"
+              : "rejected"
+        })
+        removePendingApproval(pendingApproval.id)
         return
       }
 
       // Legacy HITL approval path (non-execute tools)
       if (!stream) {
-        setPendingApproval(null)
+        setToolCallState(pendingApproval.tool_call?.id || "", { status: "rejected" })
+        removePendingApproval(pendingApproval.id)
         return
       }
-      setPendingApproval(null)
+      setToolCallState(pendingApproval.tool_call?.id || "", {
+        status:
+          decision === "approve" ||
+          decision === "approve_session" ||
+          decision === "approve_permanent"
+            ? "running"
+            : "rejected"
+      })
+      removePendingApproval(pendingApproval.id)
 
       try {
         const legacyDecision =
@@ -920,9 +976,10 @@ export function ChatContainer({
     [
       currentModel,
       pendingApproval,
+      setToolCallState,
+      removePendingApproval,
       savedToolDescriptionInput,
       savedToolNameInput,
-      setPendingApproval,
       stream,
       threadId
     ]
@@ -979,6 +1036,7 @@ export function ChatContainer({
             ...(role === "tool" &&
               streamMsg.tool_call_id && { tool_call_id: streamMsg.tool_call_id }),
             ...(role === "tool" && streamMsg.name && { name: streamMsg.name }),
+            ...(role === "tool" && streamMsg.is_error !== undefined && { is_error: streamMsg.is_error }),
             created_at: new Date()
           }
           appendMessage(storeMsg)
@@ -1007,6 +1065,7 @@ export function ChatContainer({
           ...(role === "tool" &&
             streamMsg.tool_call_id && { tool_call_id: streamMsg.tool_call_id }),
           ...(role === "tool" && streamMsg.name && { name: streamMsg.name }),
+          ...(role === "tool" && streamMsg.is_error !== undefined && { is_error: streamMsg.is_error }),
           created_at: new Date()
         }
       })
@@ -1066,12 +1125,77 @@ export function ChatContainer({
       if (msg.role === "tool" && msg.tool_call_id) {
         results.set(msg.tool_call_id, {
           content: msg.content,
-          is_error: false // Could be enhanced to track errors
+          is_error: msg.is_error
         })
       }
     }
     return results
   }, [displayMessages])
+
+  const toolCallDisplayStates = useMemo(() => {
+    const orderedToolCalls: Array<{ id: string; name: string; args: Record<string, unknown> }> = []
+    const seenToolCallIds = new Set<string>()
+
+    for (const message of displayMessages) {
+      if (!Array.isArray(message.tool_calls)) continue
+      for (const toolCall of message.tool_calls) {
+        if (!toolCall?.id || seenToolCallIds.has(toolCall.id)) continue
+        seenToolCallIds.add(toolCall.id)
+        orderedToolCalls.push(toolCall)
+      }
+    }
+
+    const currentApprovalIds = new Set<string>()
+    if (pendingApproval?.pendingToolCallIds?.length) {
+      for (const id of pendingApproval.pendingToolCallIds) {
+        if (id) currentApprovalIds.add(id)
+      }
+    } else if (pendingApproval?.tool_call?.id) {
+      currentApprovalIds.add(pendingApproval.tool_call.id)
+    }
+
+    let activeAssigned = false
+    const nextStates = new Map<string, ToolCallState>()
+
+    for (const toolCall of orderedToolCalls) {
+      const baseState = toolCallStates[toolCall.id]
+      const mergedArgs = mergeToolCallArgs(baseState?.args, toolCall.args)
+      const result = toolResults.get(toolCall.id)
+      let status: ToolCallStatus
+
+      if (result !== undefined) {
+        status = result.is_error ? "failed" : "completed"
+      } else if (baseState?.status === "rejected") {
+        status = "rejected"
+      } else if (currentApprovalIds.has(toolCall.id)) {
+        status = "awaiting_approval"
+        activeAssigned = true
+      } else if (!isLoading) {
+        status = isTerminalToolCallStatus(baseState?.status) ? baseState!.status : "interrupted"
+      } else if (!activeAssigned) {
+        status = "running"
+        activeAssigned = true
+      } else {
+        status = "queued"
+      }
+
+      nextStates.set(toolCall.id, {
+        id: toolCall.id,
+        status,
+        name: toolCall.name || baseState?.name,
+        args: mergedArgs,
+        command: getToolCallCommand(mergedArgs) || baseState?.command,
+        filePath: getToolCallFilePath(mergedArgs) || baseState?.filePath,
+        reason: baseState?.reason,
+        operation: baseState?.operation,
+        code: getToolCallCode(mergedArgs) || baseState?.code,
+        timeoutMs: getToolCallTimeout(mergedArgs) ?? baseState?.timeoutMs,
+        updatedAt: baseState?.updatedAt ?? new Date()
+      })
+    }
+
+    return nextStates
+  }, [displayMessages, isLoading, pendingApproval, toolCallStates, toolResults])
 
   // Get the actual scrollable viewport element from Radix ScrollArea
   const getViewport = useCallback((): HTMLDivElement | null => {
@@ -1286,7 +1410,8 @@ export function ChatContainer({
           tool_call_id: pendingApproval.tool_call?.id || ""
         })
       }
-      setPendingApproval(null)
+      setToolCallState(pendingApproval.tool_call?.id || "", { status: "rejected" })
+      removePendingApproval(pendingApproval.id)
     }
 
     const rawMessage = input.trim()
@@ -2238,6 +2363,7 @@ export function ChatContainer({
                     isStreaming={isLastMessage && isLoading}
                     showAssistantMeta={showAssistantMeta}
                     toolResults={toolResults}
+                    toolCallStates={toolCallDisplayStates}
                     pendingApproval={pendingApproval}
                     onApprovalDecision={handleApprovalDecision}
                     onEditUserMessage={handleEditUserMessage}
@@ -2385,6 +2511,11 @@ export function ChatContainer({
                                 ? "保存脚本工具需要确认"
                                 : "命令需要审批"}
                     </span>
+                    {queuedApprovalCount > 0 && (
+                      <span className="text-xs text-muted-foreground">
+                        还有 {queuedApprovalCount} 条待审批
+                      </span>
+                    )}
                   </div>
                   {isCodeExecApproval ||
                   isPrepareSaveCodeExecToolApproval ||

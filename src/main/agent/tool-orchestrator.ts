@@ -28,12 +28,45 @@ export type RawExecuteFn = (command: string, sandboxMode?: string) => Promise<Ex
 export type RequestApprovalFn = (req: ApprovalRequest) => Promise<ApprovalDecision>
 
 export class ToolOrchestrator {
+  private static readonly interactiveQueues = new Map<string, Promise<void>>()
+
   constructor(
     private approvalStore: ApprovalStore,
     private rawExecute: RawExecuteFn,
     private requestApproval: RequestApprovalFn,
-    private yoloMode: boolean = false
+    private yoloMode: boolean = false,
+    private queueId: string = randomUUID()
   ) {}
+
+  private async runSerializedInteractive<T>(label: string, task: () => Promise<T>): Promise<T> {
+    const previous = ToolOrchestrator.interactiveQueues.get(this.queueId)
+    let releaseCurrent!: () => void
+    const current = new Promise<void>((resolve) => {
+      releaseCurrent = resolve
+    })
+    const tail = (previous ?? Promise.resolve()).catch(() => undefined).then(() => current)
+    ToolOrchestrator.interactiveQueues.set(this.queueId, tail)
+
+    const waitStart = Date.now()
+    if (previous) {
+      console.log(`[Orchestrator] queue(${this.queueId}) waiting for ${label}`)
+      await previous.catch(() => undefined)
+      console.log(
+        `[Orchestrator] queue(${this.queueId}) acquired ${label} after ${Date.now() - waitStart}ms`
+      )
+    }
+
+    try {
+      return await task()
+    } finally {
+      releaseCurrent()
+      void tail.finally(() => {
+        if (ToolOrchestrator.interactiveQueues.get(this.queueId) === tail) {
+          ToolOrchestrator.interactiveQueues.delete(this.queueId)
+        }
+      })
+    }
+  }
 
   /**
    * Execute a command through the full approval + sandbox pipeline.
@@ -43,95 +76,97 @@ export class ToolOrchestrator {
    * @param sandboxMode  Current sandbox mode (none/unelevated/elevated/readonly)
    */
   async execute(command: string, cwd: string, sandboxMode: string): Promise<ExecuteResponse> {
-    console.log(`[Orchestrator] execute: "${command}" cwd=${cwd} sandbox=${sandboxMode} yolo=${this.yoloMode}`)
+    return this.runSerializedInteractive(`execute:${command.slice(0, 80)}`, async () => {
+      console.log(`[Orchestrator] execute: "${command}" cwd=${cwd} sandbox=${sandboxMode} yolo=${this.yoloMode}`)
 
-    // 1. Assess command safety — always check, even in YOLO mode
-    const safety = assessCommandSafety(command, cwd, {
-      windowsShell: process.platform === "win32" && sandboxMode !== "none" ? "powershell" : "unknown"
+      // 1. Assess command safety — always check, even in YOLO mode
+      const safety = assessCommandSafety(command, cwd, {
+        windowsShell: process.platform === "win32" && sandboxMode !== "none" ? "powershell" : "unknown"
+      })
+      console.log(`[Orchestrator] safety: ${safety.level}${safety.reason ? ` (${safety.reason})` : ""}`)
+
+      // 2. Forbidden commands → reject immediately, regardless of YOLO mode
+      if (safety.level === "forbidden") {
+        return {
+          output: `Command forbidden: ${safety.reason}`,
+          exitCode: 1,
+          truncated: false
+        }
+      }
+
+      // 3. YOLO mode: skip approval for safe + needs_approval commands
+      if (this.yoloMode) {
+        return this.rawExecute(command, sandboxMode)
+      }
+
+      // 4. Safe commands → execute directly
+      if (safety.level === "safe") {
+        console.log("[Orchestrator] safe → rawExecute")
+        return this.rawExecute(command, sandboxMode)
+      }
+
+      // 5. Needs approval → check cache, then ask user
+      const key = this.approvalStore.makeKey(command, cwd, sandboxMode)
+      // derivePermanentApprovalPattern returns a prefix-based pattern for known safe executables,
+      // or null for unknown executables. For unknown executables, fall back to exact-match pattern
+      // (the raw command text) — this still allows "always allow" but requires exact same command.
+      const prefixPattern = derivePermanentApprovalPattern(command)
+      const patternKey = prefixPattern ?? this.approvalStore.makePatternKey(command)
+
+      console.log("[Orchestrator] needs_approval → requesting user approval...")
+
+      const decision = await this.approvalStore.withCachedApproval(
+        key,
+        patternKey,
+        async (): Promise<ReviewDecision> => {
+          const approval = await this.requestApproval({
+            id: randomUUID(),
+            tool_call: { id: randomUUID(), name: "execute", args: { command } },
+            safety_level: "needs_approval",
+            command,
+            cwd,
+            reason: safety.reason,
+            allowed_decisions: ["approve", "reject"],
+            // Always offer permanent approval — for known executables it uses prefix match,
+            // for unknown executables it uses exact match (still useful for repeated commands).
+            allowed_approval_types: ["approve", "approve_session", "approve_permanent", "reject"]
+          })
+          return this.mapDecisionToReview(approval.type)
+        },
+        {
+          allowPermanentMatch: true,
+          allowPermanentStore: true,
+          commandForPatternMatch: command
+        }
+      )
+
+      if (decision === "denied" || decision === "abort") {
+        return {
+          output: "Command rejected by user.",
+          exitCode: 1,
+          truncated: false
+        }
+      }
+
+      // 6. Execute (with sandbox)
+      try {
+        const result = await this.rawExecute(command, sandboxMode)
+        if (sandboxMode !== "none" && this.isSandboxDeniedResponse(result)) {
+          return this.handleSandboxRetry(command, cwd, result.output)
+        }
+        return result
+      } catch (err) {
+        // 7. Sandbox denial → block and inform user
+        if (sandboxMode !== "none" && this.isSandboxDenialError(err)) {
+          return this.handleSandboxRetry(
+            command,
+            cwd,
+            `沙箱阻止了此操作: ${err instanceof Error ? err.message : String(err)}`
+          )
+        }
+        throw err
+      }
     })
-    console.log(`[Orchestrator] safety: ${safety.level}${safety.reason ? ` (${safety.reason})` : ""}`)
-
-    // 2. Forbidden commands → reject immediately, regardless of YOLO mode
-    if (safety.level === "forbidden") {
-      return {
-        output: `Command forbidden: ${safety.reason}`,
-        exitCode: 1,
-        truncated: false
-      }
-    }
-
-    // 3. YOLO mode: skip approval for safe + needs_approval commands
-    if (this.yoloMode) {
-      return this.rawExecute(command, sandboxMode)
-    }
-
-    // 4. Safe commands → execute directly
-    if (safety.level === "safe") {
-      console.log("[Orchestrator] safe → rawExecute")
-      return this.rawExecute(command, sandboxMode)
-    }
-
-    // 5. Needs approval → check cache, then ask user
-    const key = this.approvalStore.makeKey(command, cwd, sandboxMode)
-    // derivePermanentApprovalPattern returns a prefix-based pattern for known safe executables,
-    // or null for unknown executables. For unknown executables, fall back to exact-match pattern
-    // (the raw command text) — this still allows "always allow" but requires exact same command.
-    const prefixPattern = derivePermanentApprovalPattern(command)
-    const patternKey = prefixPattern ?? this.approvalStore.makePatternKey(command)
-
-    console.log("[Orchestrator] needs_approval → requesting user approval...")
-
-    const decision = await this.approvalStore.withCachedApproval(
-      key,
-      patternKey,
-      async (): Promise<ReviewDecision> => {
-        const approval = await this.requestApproval({
-          id: randomUUID(),
-          tool_call: { id: randomUUID(), name: "execute", args: { command } },
-          safety_level: "needs_approval",
-          command,
-          cwd,
-          reason: safety.reason,
-          allowed_decisions: ["approve", "reject"],
-          // Always offer permanent approval — for known executables it uses prefix match,
-          // for unknown executables it uses exact match (still useful for repeated commands).
-          allowed_approval_types: ["approve", "approve_session", "approve_permanent", "reject"]
-        })
-        return this.mapDecisionToReview(approval.type)
-      },
-      {
-        allowPermanentMatch: true,
-        allowPermanentStore: true,
-        commandForPatternMatch: command
-      }
-    )
-
-    if (decision === "denied" || decision === "abort") {
-      return {
-        output: "Command rejected by user.",
-        exitCode: 1,
-        truncated: false
-      }
-    }
-
-    // 5. Execute (with sandbox)
-    try {
-      const result = await this.rawExecute(command, sandboxMode)
-      if (sandboxMode !== "none" && this.isSandboxDeniedResponse(result)) {
-        return this.handleSandboxRetry(command, cwd, result.output)
-      }
-      return result
-    } catch (err) {
-      // 6. Sandbox denial → block and inform user
-      if (sandboxMode !== "none" && this.isSandboxDenialError(err)) {
-        return this.handleSandboxRetry(
-          command,
-          cwd,
-          `沙箱阻止了此操作: ${err instanceof Error ? err.message : String(err)}`
-        )
-      }
-      throw err
-    }
   }
 
   /**
@@ -144,42 +179,44 @@ export class ToolOrchestrator {
     filePath: string,
     cwd: string
   ): Promise<boolean> {
-    if (this.yoloMode) return true
+    return this.runSerializedInteractive(`file:${operation}:${filePath}`, async () => {
+      if (this.yoloMode) return true
 
-    const key = this.approvalStore.makeKey(`${operation}:${filePath}`, cwd, "file")
-    // Directory-based pattern for permanent approval: file:write:/dir/* or file:edit:/dir/*
-    const dir = path.dirname(filePath).replace(/\\/g, "/")
-    const patternKey = `file:${operation}:${dir}/*`
+      const key = this.approvalStore.makeKey(`${operation}:${filePath}`, cwd, "file")
+      // Directory-based pattern for permanent approval: file:write:/dir/* or file:edit:/dir/*
+      const dir = path.dirname(filePath).replace(/\\/g, "/")
+      const patternKey = `file:${operation}:${dir}/*`
 
-    console.log(`[Orchestrator] approveFileOp: ${operation} "${filePath}" cwd=${cwd}`)
+      console.log(`[Orchestrator] approveFileOp: ${operation} "${filePath}" cwd=${cwd}`)
 
-    const decision = await this.approvalStore.withCachedApproval(
-      key,
-      patternKey,
-      async (): Promise<ReviewDecision> => {
-        const approval = await this.requestApproval({
-          id: randomUUID(),
-          tool_call: { id: randomUUID(), name: operation, args: { filePath } },
-          safety_level: "needs_approval",
-          operation,
-          filePath,
-          cwd,
-          reason: operation === "write_file" ? "文件写入操作需要审批" : "文件编辑操作需要审批",
-          allowed_decisions: ["approve", "reject"],
-          allowed_approval_types: ["approve", "approve_session", "approve_permanent", "reject"]
-        })
-        return this.mapDecisionToReview(approval.type)
-      },
-      {
-        allowPermanentMatch: true,
-        allowPermanentStore: true,
-        commandForPatternMatch: `file:${operation}:${filePath.replace(/\\/g, "/")}`
-      }
-    )
+      const decision = await this.approvalStore.withCachedApproval(
+        key,
+        patternKey,
+        async (): Promise<ReviewDecision> => {
+          const approval = await this.requestApproval({
+            id: randomUUID(),
+            tool_call: { id: randomUUID(), name: operation, args: { filePath } },
+            safety_level: "needs_approval",
+            operation,
+            filePath,
+            cwd,
+            reason: operation === "write_file" ? "文件写入操作需要审批" : "文件编辑操作需要审批",
+            allowed_decisions: ["approve", "reject"],
+            allowed_approval_types: ["approve", "approve_session", "approve_permanent", "reject"]
+          })
+          return this.mapDecisionToReview(approval.type)
+        },
+        {
+          allowPermanentMatch: true,
+          allowPermanentStore: true,
+          commandForPatternMatch: `file:${operation}:${filePath.replace(/\\/g, "/")}`
+        }
+      )
 
-    const approved = decision !== "denied" && decision !== "abort"
-    console.log(`[Orchestrator] approveFileOp: ${operation} "${filePath}" → ${approved ? "approved" : "rejected"}`)
-    return approved
+      const approved = decision !== "denied" && decision !== "abort"
+      console.log(`[Orchestrator] approveFileOp: ${operation} "${filePath}" → ${approved ? "approved" : "rejected"}`)
+      return approved
+    })
   }
 
   /** Map renderer decision type to ReviewDecision. */
