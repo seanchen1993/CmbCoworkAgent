@@ -54,6 +54,8 @@ export interface UserStatsData {
   selectedUpperOrgLv1: string | null
 }
 
+type ParsedTopUser = UserStatsData["topUsers"][number]
+
 export interface DashboardTraceNode {
   id: string
   type: "trace" | "llm" | "tool" | "tool_result" | "message" | "error" | "cancel"
@@ -389,6 +391,16 @@ function parseUserStats(raw: any, selectedUpperOrgLv1: string | null): UserStats
   }))
 
   return { topUsers, byOrg, byVersion, userTrend, selectedUpperOrgLv1 }
+}
+
+export function parseTopUsersFromAgg(raw: any): ParsedTopUser[] {
+  const aggs = raw?.aggregations ?? {}
+  return (aggs.top_users?.buckets ?? []).map((b: any) => ({
+    sapId: b.key,
+    userName: b.user_name?.buckets?.[0]?.key ?? b.key,
+    orgName: b.org_name?.buckets?.[0]?.key ?? "",
+    count: b.doc_count
+  }))
 }
 
 function parseProductivity(raw: any, granularity: Granularity, range: TimeRange): ProductivityData {

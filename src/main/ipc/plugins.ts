@@ -7,29 +7,43 @@ import { v4 as uuid } from "uuid"
 import {
   getPluginsDir,
   getPlugins,
+  getPluginHooks,
+  getEnabledPluginHookMetadata,
   upsertPlugin,
   deletePlugin as deletePluginStorage,
   setPluginEnabled,
+  setPluginHookEnabled,
   invalidateEnabledSkillsCache,
   parseMcpJsonFile
 } from "../storage"
 import { copyDirRecursive, createAsyncMutex } from "../utils/fs"
-import type { PluginManifest, PluginMetadata, PluginMcpServerConfig } from "../types"
+import type {
+  PluginHookMetadata,
+  PluginManifest,
+  PluginMetadata,
+  PluginMcpServerConfig
+} from "../types"
 import { invalidateGlobalMcpCapabilityService } from "../mcp/capability-service"
+
+const DEFAULT_PLUGIN_HOOKS_PATH = "hooks/hooks.json"
 
 interface ParsedPlugin {
   manifest: PluginManifest | null
   skillDirs: string[]
   mcpConfigs: Record<string, PluginMcpServerConfig>
+  hookCount: number
+  hookPath: string
   name: string
 }
 
 function sanitizePluginName(name: string): string {
-  return name
-    .replace(/[^a-zA-Z0-9-_.\u4e00-\u9fff]/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "")
-    .slice(0, 64) || "plugin"
+  return (
+    name
+      .replace(/[^a-zA-Z0-9-_.\u4e00-\u9fff]/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 64) || "plugin"
+  )
 }
 
 /** Validate and parse a raw JSON object as PluginManifest. Returns null if invalid. */
@@ -48,9 +62,17 @@ function validatePluginManifest(raw: unknown): PluginManifest | null {
           ? (obj.author as PluginManifest["author"])
           : undefined,
     license: typeof obj.license === "string" ? obj.license : undefined,
-    keywords: Array.isArray(obj.keywords) ? obj.keywords.filter((k): k is string => typeof k === "string") : undefined,
-    skills: typeof obj.skills === "string" ? obj.skills : Array.isArray(obj.skills) ? obj.skills.filter((s): s is string => typeof s === "string") : undefined,
-    mcpServers: typeof obj.mcpServers === "string" ? obj.mcpServers : undefined
+    keywords: Array.isArray(obj.keywords)
+      ? obj.keywords.filter((k): k is string => typeof k === "string")
+      : undefined,
+    skills:
+      typeof obj.skills === "string"
+        ? obj.skills
+        : Array.isArray(obj.skills)
+          ? obj.skills.filter((s): s is string => typeof s === "string")
+          : undefined,
+    mcpServers: typeof obj.mcpServers === "string" ? obj.mcpServers : undefined,
+    hooks: typeof obj.hooks === "string" ? obj.hooks : undefined
   }
 }
 
@@ -115,7 +137,37 @@ async function parsePluginDir(dirPath: string): Promise<ParsedPlugin> {
   const mcpJsonPath = path.join(dirPath, ".mcp.json")
   mcpConfigs = parseMcpJsonFile(mcpJsonPath) ?? {}
 
-  return { manifest, skillDirs, mcpConfigs, name }
+  // Count hooks — supports our flat array and CC formats
+  let hookCount = 0
+  const hookPath = manifest?.hooks ?? DEFAULT_PLUGIN_HOOKS_PATH
+  const hooksFilePath = path.join(dirPath, hookPath)
+  if (existsSync(hooksFilePath)) {
+    try {
+      const raw = JSON.parse(await fs.readFile(hooksFilePath, "utf-8"))
+      if (Array.isArray(raw)) {
+        hookCount = raw.length
+      } else if (raw && typeof raw === "object") {
+        // CC plugin wrapper { description?, hooks: {...} } or CC settings { EventName: [...] }
+        const settingsObj =
+          typeof (raw as Record<string, unknown>).hooks === "object" &&
+          !Array.isArray((raw as Record<string, unknown>).hooks)
+            ? ((raw as Record<string, unknown>).hooks as Record<string, unknown>)
+            : (raw as Record<string, unknown>)
+        for (const matchers of Object.values(settingsObj)) {
+          if (!Array.isArray(matchers)) continue
+          for (const matcher of matchers) {
+            if (matcher && typeof matcher === "object" && Array.isArray((matcher as Record<string, unknown>).hooks)) {
+              hookCount += ((matcher as Record<string, unknown>).hooks as unknown[]).length
+            }
+          }
+        }
+      }
+    } catch {
+      /* ignore invalid hooks file */
+    }
+  }
+
+  return { manifest, skillDirs, mcpConfigs, hookCount, hookPath, name }
 }
 
 function formatAuthor(author: PluginManifest["author"]): string {
@@ -129,17 +181,19 @@ async function installPluginFromDir(
 ): Promise<{ success: boolean; pluginName?: string; error?: string }> {
   try {
     const parsed = await parsePluginDir(dirPath)
-    if (parsed.skillDirs.length === 0 && Object.keys(parsed.mcpConfigs).length === 0) {
-      return { success: false, error: "未检测到有效的 skills 或 MCP 配置" }
+    if (
+      parsed.skillDirs.length === 0 &&
+      Object.keys(parsed.mcpConfigs).length === 0 &&
+      parsed.hookCount === 0
+    ) {
+      return { success: false, error: "未检测到有效的 skills、MCP 配置或 hooks" }
     }
 
     const pluginsDir = getPluginsDir()
 
     // Check for existing plugin with same name AND author (update scenario)
     const newAuthor = formatAuthor(parsed.manifest?.author)
-    const existing = getPlugins().find(
-      (p) => p.name === parsed.name && p.author === newAuthor
-    )
+    const existing = getPlugins().find((p) => p.name === parsed.name && p.author === newAuthor)
 
     // Determine unique directory name — avoid collision with other plugins' directories
     let pluginDirName = sanitizePluginName(parsed.name)
@@ -149,7 +203,10 @@ async function installPluginFromDir(
       while (existsSync(path.join(pluginsDir, pluginDirName))) {
         suffix++
         if (suffix > maxRetries) {
-          return { success: false, error: `无法为插件 "${parsed.name}" 创建唯一目录名，目录 "${pluginDirName}" 已被占用` }
+          return {
+            success: false,
+            error: `无法为插件 "${parsed.name}" 创建唯一目录名，目录 "${pluginDirName}" 已被占用`
+          }
         }
         pluginDirName = `${sanitizePluginName(parsed.name)}-${suffix}`
       }
@@ -197,6 +254,8 @@ async function installPluginFromDir(
       enabled: true,
       skillCount: parsed.skillDirs.length,
       mcpServerCount: Object.keys(parsed.mcpConfigs).length,
+      hookCount: parsed.hookCount,
+      hookPath: parsed.hookPath,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now
     }
@@ -232,7 +291,10 @@ async function installPluginFromZip(
         }
         totalSize += entry.header.size
         if (totalSize > MAX_EXTRACTED_SIZE) {
-          return { success: false, error: `ZIP 解压后大小超过 ${MAX_EXTRACTED_SIZE / 1024 / 1024}MB 限制` }
+          return {
+            success: false,
+            error: `ZIP 解压后大小超过 ${MAX_EXTRACTED_SIZE / 1024 / 1024}MB 限制`
+          }
         }
       }
     }
@@ -245,7 +307,10 @@ async function installPluginFromZip(
       const availableBytes = fsInfo.bavail * fsInfo.bsize
       // Require at least 2x the total uncompressed size (temp + final copy)
       if (availableBytes < totalSize * 2) {
-        return { success: false, error: `磁盘可用空间不足，需要至少 ${Math.ceil(totalSize * 2 / 1024 / 1024)}MB` }
+        return {
+          success: false,
+          error: `磁盘可用空间不足，需要至少 ${Math.ceil((totalSize * 2) / 1024 / 1024)}MB`
+        }
       }
     } catch {
       // statfs may not be available on all platforms — continue without check
@@ -334,7 +399,7 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
       }
       await pluginMutex.acquire()
       try {
-      return await installPluginFromZip(buffer)
+        return await installPluginFromZip(buffer)
       } finally {
         pluginMutex.release()
       }
@@ -392,7 +457,10 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle(
     "plugins:setEnabled",
-    async (_event, payload: { id: string; enabled: boolean }): Promise<{ success: boolean; error?: string }> => {
+    async (
+      _event,
+      payload: { id: string; enabled: boolean }
+    ): Promise<{ success: boolean; error?: string }> => {
       await pluginMutex.acquire()
       try {
         const { id, enabled } = payload
@@ -416,18 +484,44 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
     ): Promise<{
       skills: string[]
       mcpServers: string[]
+      hookCount: number
+      hooks: PluginHookMetadata[]
       manifest: PluginManifest | null
     }> => {
       const plugins = getPlugins()
       const plugin = plugins.find((p) => p.id === id)
       if (!plugin || !existsSync(plugin.path)) {
-        return { skills: [], mcpServers: [], manifest: null }
+        return { skills: [], mcpServers: [], hookCount: 0, hooks: [], manifest: null }
       }
       const parsed = await parsePluginDir(plugin.path)
       return {
         skills: parsed.skillDirs,
         mcpServers: Object.keys(parsed.mcpConfigs),
+        hookCount: parsed.hookCount,
+        hooks: getPluginHooks(plugin.id),
         manifest: parsed.manifest
+      }
+    }
+  )
+
+  ipcMain.handle("plugins:listHooks", async (): Promise<PluginHookMetadata[]> => {
+    return getEnabledPluginHookMetadata()
+  })
+
+  ipcMain.handle(
+    "plugins:setHookEnabled",
+    async (
+      _event,
+      payload: { pluginId: string; hookId: string; enabled: boolean }
+    ): Promise<{ success: boolean; error?: string }> => {
+      await pluginMutex.acquire()
+      try {
+        setPluginHookEnabled(payload.pluginId, payload.hookId, payload.enabled)
+        return { success: true }
+      } catch (e) {
+        return { success: false, error: e instanceof Error ? e.message : "设置失败" }
+      } finally {
+        pluginMutex.release()
       }
     }
   )
