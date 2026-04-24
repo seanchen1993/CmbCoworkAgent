@@ -23,6 +23,13 @@ export type SchedulerEvent =
         tool_calls?: unknown[]
         tool_call_id?: string
         name?: string
+        /**
+         * Passthrough of BaseMessage.additional_kwargs. Consumers rely on this
+         * for slash-command chip rendering (cmb_skill_ref) and for hiding the
+         * transient skill-context bubble (cmb_meta === "transient_skill_context").
+         * Without this field the renderer would lose the chip on history reload.
+         */
+        additional_kwargs?: Record<string, unknown>
       }>
     }
   | { type: "todos"; todos: Array<{ id?: string; content?: string; status?: string }> }
@@ -260,13 +267,19 @@ export class StreamConverter {
         else if (cn.includes("Tool")) role = "tool"
         else if (cn.includes("System")) role = "system"
 
+        const additionalKwargs = kw.additional_kwargs as
+          | Record<string, unknown>
+          | undefined
         return {
           id: (kw.id as string) || `msg-${index}`,
           role,
           content: extractContent(kw.content ?? msg.content),
           tool_calls: kw.tool_calls as unknown[] | undefined,
           ...(role === "tool" && kw.tool_call_id ? { tool_call_id: kw.tool_call_id as string } : {}),
-          ...(role === "tool" && kw.name ? { name: kw.name as string } : {})
+          ...(role === "tool" && kw.name ? { name: kw.name as string } : {}),
+          // Carry additional_kwargs all the way to the renderer. The UI filter
+          // (skill chip render, transient-context bubble hide) lives there.
+          ...(additionalKwargs ? { additional_kwargs: additionalKwargs } : {})
         }
       })
 

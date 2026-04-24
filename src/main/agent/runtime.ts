@@ -71,6 +71,8 @@ import { getWindowsSandboxMode, getYoloMode, getEnabledHooks, isCodeExecEnabled,
 import { runHooks } from "../hooks/runner"
 import { ApprovalStore } from "./approval-store"
 import { ToolOrchestrator } from "./tool-orchestrator"
+import { createTransientSlashContextMiddleware } from "../slash-commands/transient-middleware"
+import type { TransientSlashModelContext } from "../slash-commands/types"
 import type { ApprovalRequest, ApprovalDecision } from "../types"
 import type { McpCapabilityService, McpCapabilityTool } from "../mcp/capability-types"
 import {
@@ -994,6 +996,14 @@ export interface CreateAgentRuntimeOptions {
   maxRetryAttempts?: number
   /** Callback invoked after each hook executes — used to emit results to the renderer. */
   onHookResult?: HookResultCallback
+  /**
+   * Per-invocation slash-skill context. When set, the transient middleware
+   * injects the rendered SKILL.md into every `wrapModelCall` request without
+   * touching state.messages (so checkpointer and summarization never see it).
+   * Fresh invocations resolve this from `slashInvocation`; resumes read it
+   * from the active-context store (or rehydrate from checkpoint as a fallback).
+   */
+  transientSlashContext?: TransientSlashModelContext | null
 }
 
 // Create agent runtime with configured model and checkpointer
@@ -1388,6 +1398,18 @@ The workspace root is: ${workspacePath}`
   backend.setGitWorkflowCommitOnly(false)
   console.log("[Runtime] Final tool list:", finalTools.map((t) => (t as { name?: string }).name ?? "(unnamed)"))
 
+  // Slash-command transient middleware: injects SKILL.md into each model call
+  // without persisting it. Placed ahead of summarization by createDeepAgent's
+  // fixed ordering rule — see the `middleware:` array in createDeepAgent below,
+  // where `...customMiddleware` is appended AFTER summarization. That position
+  // is actually what we want: we wrap the already-summarized message list so
+  // the model sees summarized-history → injected-skill → current-turn, and
+  // summarization never touches our transient injection (we only mutate
+  // `request.messages`, never `state.messages`).
+  const transientSlashMiddleware = createTransientSlashContextMiddleware(
+    options.transientSlashContext ?? null
+  )
+
   const agent = createDeepAgent({
     model,
     tools: finalTools,
@@ -1405,7 +1427,8 @@ The workspace root is: ${workspacePath}`
     summarizationTrigger: { type: "tokens", value: triggerTokens },
     summarizationKeep: { type: "tokens", value: keepTokens },
     toolTokenLimitBeforeEvict: toolEvictLimit,
-    trimTokensToSummarize: trimForSummary
+    trimTokensToSummarize: trimForSummary,
+    middleware: [transientSlashMiddleware]
   })
 
   console.log("[Runtime] Agent created with skills parameter:", allSkillsSources.length > 0 ? allSkillsSources : undefined)

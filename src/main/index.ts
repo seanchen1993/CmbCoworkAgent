@@ -129,6 +129,7 @@ import { registerAgentHandlers } from "./ipc/agent"
 import { registerThreadHandlers } from "./ipc/threads"
 import { registerModelHandlers } from "./ipc/models"
 import { registerSkillsHandlers } from "./ipc/skills"
+import { registerSlashCommandsHandlers } from "./ipc/slash-commands"
 import { registerMcpHandlers } from "./ipc/mcp"
 import { registerScheduledTaskHandlers } from "./ipc/scheduled-tasks"
 import { registerHeartbeatHandlers } from "./ipc/heartbeat"
@@ -371,6 +372,7 @@ if (!gotTheLock) {
     registerThreadHandlers(ipcMain)
     registerModelHandlers(ipcMain)
     registerSkillsHandlers(ipcMain)
+    registerSlashCommandsHandlers(ipcMain)
     registerMcpHandlers(ipcMain)
     registerScheduledTaskHandlers(ipcMain)
     registerHeartbeatHandlers(ipcMain)

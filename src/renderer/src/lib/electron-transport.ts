@@ -2,6 +2,27 @@ import type { UseStreamTransport } from "@langchain/langgraph-sdk/react"
 import type { ToolCall, ToolCallChunk } from "@langchain/core/messages"
 import type { StreamPayload, StreamEvent, IPCEvent, IPCStreamEvent } from "../../../types"
 import type { Subagent } from "../types"
+import type { SlashInvocation } from "@/features/slash-commands/types"
+
+/**
+ * Runtime shape guard for a slash_invocation config object.
+ * The renderer tsconfig can't share the main-process type ergonomically (see
+ * tsconfig.web.json), so we duplicate the shape check at the IPC boundary.
+ * Any malformed value is discarded silently — we don't fail the send, just
+ * skip the slash wiring so the message still reaches the model as free text.
+ */
+function toSlashInvocation(raw: unknown): SlashInvocation | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined
+  const r = raw as { kind?: unknown; id?: unknown; args?: unknown }
+  if (r.kind !== "skill" || typeof r.id !== "string" || !r.id.startsWith("skill:")) {
+    return undefined
+  }
+  return {
+    kind: "skill",
+    id: r.id,
+    ...(typeof r.args === "string" ? { args: r.args } : {})
+  }
+}
 
 /**
  * Usage metadata from LangChain model responses.
@@ -132,6 +153,13 @@ export class ElectronIPCTransport implements UseStreamTransport {
     this.completedToolCallsByName.clear()
     const threadId = payload.config?.configurable?.thread_id
     const modelId = payload.config?.configurable?.model_id as string | undefined
+    // Pick up slash invocation from the configurable bag. ChatContainer puts
+    // { slash_invocation: { kind: "skill", id } } there when the user picked a
+    // command via the popover; we validate shape before trusting it.
+    const slashInvocation = toSlashInvocation(
+      (payload.config?.configurable as { slash_invocation?: unknown } | undefined)
+        ?.slash_invocation
+    )
     if (!threadId) {
       return this.createErrorGenerator("MISSING_THREAD_ID", "Thread ID is required")
     }
@@ -159,7 +187,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
       messageContent,
       payload.command,
       payload.signal,
-      modelId
+      modelId,
+      slashInvocation
     )
   }
 
@@ -175,7 +204,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
     message: string,
     command: unknown,
     signal: AbortSignal,
-    modelId?: string
+    modelId?: string,
+    slashInvocation?: SlashInvocation
   ): AsyncGenerator<StreamEvent> {
     // Create a queue to buffer events from IPC
     const eventQueue: StreamEvent[] = []
@@ -220,7 +250,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
           }
         }
       },
-      modelId
+      modelId,
+      slashInvocation
     )
 
     // Handle abort signal

@@ -26,6 +26,7 @@ import type {
   SkillHookMetadata,
   ChatXConfig
 } from "../main/types"
+import type { SlashCommandListItem, SlashInvocation } from "../main/slash-commands/types"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
 import { UserInfoConfig } from "../main/storage"
 import type {
@@ -84,7 +85,8 @@ const api = {
       threadId: string,
       message: string,
       onEvent: (event: StreamEvent) => void,
-      modelId?: string
+      modelId?: string,
+      slashInvocation?: SlashInvocation
     ): (() => void) => {
       const channel = `agent:stream:${threadId}`
 
@@ -96,7 +98,7 @@ const api = {
       }
 
       ipcRenderer.on(channel, handler)
-      ipcRenderer.send("agent:invoke", { threadId, message, modelId })
+      ipcRenderer.send("agent:invoke", { threadId, message, modelId, slashInvocation })
 
       return () => {
         ipcRenderer.removeListener(channel, handler)
@@ -107,7 +109,8 @@ const api = {
       message: string,
       command: unknown,
       onEvent: (event: StreamEvent) => void,
-      modelId?: string
+      modelId?: string,
+      slashInvocation?: SlashInvocation
     ): (() => void) => {
       const channel = `agent:stream:${threadId}`
 
@@ -121,9 +124,13 @@ const api = {
       ipcRenderer.on(channel, handler)
 
       if (command) {
-        ipcRenderer.send("agent:resume", { threadId, command, modelId })
+        // Resume carries slashInvocation too so the middleware can be rewired
+        // on the resumed runtime. Main also keeps an in-memory active context
+        // per thread as the primary source; this is the belt-and-braces copy
+        // for process-restart-between-invoke-and-resume scenarios.
+        ipcRenderer.send("agent:resume", { threadId, command, modelId, slashInvocation })
       } else {
-        ipcRenderer.send("agent:invoke", { threadId, message, modelId })
+        ipcRenderer.send("agent:invoke", { threadId, message, modelId, slashInvocation })
       }
 
       return () => {
@@ -713,6 +720,9 @@ const api = {
     delete: (skillPath: string): Promise<{ success: boolean; error?: string }> => {
       return ipcRenderer.invoke("skills:delete", skillPath)
     }
+  },
+  slashCommands: {
+    list: (): Promise<SlashCommandListItem[]> => ipcRenderer.invoke("slashCommands:list")
   },
   mcp: {
     list: (): Promise<McpConnectorConfig[]> => ipcRenderer.invoke("mcp:list"),

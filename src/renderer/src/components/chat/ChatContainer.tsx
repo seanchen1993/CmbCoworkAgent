@@ -64,6 +64,9 @@ import { marketApi, MarketItem } from "../../api/market"
 import { insertLog, updateMMJUserInfo } from "../../../js/mmjUtils"
 import { UpdateDialog } from "../update/UpdateDialog"
 import { toast } from "sonner"
+import { useSlashCommands } from "@/features/slash-commands/useSlashCommands"
+import { SlashCommandPopover } from "@/features/slash-commands/SlashCommandPopover"
+import { SlashCommandChip } from "@/features/slash-commands/SlashCommandChip"
 
 function HookLogsPanel({ logs }: { logs: HookLogEntry[] }): React.JSX.Element {
   const [expanded, setExpanded] = React.useState(false)
@@ -531,6 +534,12 @@ export function ChatContainer({
   const [savedToolNameInput, setSavedToolNameInput] = useState("")
   const [savedToolDescriptionInput, setSavedToolDescriptionInput] = useState("")
   const [saveToolMetadataLoading, setSaveToolMetadataLoading] = useState(false)
+
+  // Slash-command composer state. Lives alongside the textarea so /name opens
+  // the picker, selecting a command pins a chip, and submitMessage reads
+  // `slashSelected` to put the typed invocation on the wire.
+  const slash = useSlashCommands(input)
+  const slashSelected = slash.selected
 
   useEffect(() => {
     const approval = pendingApproval as unknown as Record<string, unknown> | null
@@ -1318,11 +1327,29 @@ export function ChatContainer({
       displayContent = `${fileNames}\n\n${userText}`
     }
 
+    // Snapshot the selected slash command BEFORE we clear it below — we still
+    // need to render the chip on the optimistic user bubble and put the typed
+    // invocation on the wire.
+    const activeSlash = slashSelected
     const userMessage: Message = {
       id: crypto.randomUUID(),
       role: "user",
       content: displayContent,
-      created_at: new Date()
+      created_at: new Date(),
+      // Optimistic chip on the freshly-sent bubble. Main will overwrite this
+      // slot with the authenticated ref after the checkpoint round-trips.
+      ...(activeSlash
+        ? {
+            additional_kwargs: {
+              cmb_skill_ref: {
+                kind: "skill" as const,
+                id: activeSlash.id,
+                name: activeSlash.name,
+                source: activeSlash.source
+              }
+            }
+          }
+        : {})
     }
     appendMessage(userMessage)
 
@@ -1334,13 +1361,32 @@ export function ChatContainer({
       }
     }
 
+    // Drop the selection on the floor — one slash invocation per turn. User
+    // can pick the same skill again for the next message if they want.
+    if (activeSlash) slash.clearSelection()
+
     await stream.submit(
       {
         messages: [{ type: "human", content: fullMessage }]
       },
       {
         config: {
-          configurable: { thread_id: threadId, model_id: currentModel }
+          configurable: {
+            thread_id: threadId,
+            model_id: currentModel,
+            // Typed slash invocation passed through useStream's config → our
+            // electron-transport picks it up, shape-validates, and forwards
+            // to main over `agent:invoke`. Main resolves the id via the
+            // registry; renderer never sends a path.
+            ...(activeSlash
+              ? {
+                  slash_invocation: {
+                    kind: "skill" as const,
+                    id: activeSlash.id
+                  }
+                }
+              : {})
+          }
         }
       }
     )
@@ -1351,9 +1397,47 @@ export function ChatContainer({
     const isComposing = e.nativeEvent.isComposing || isComposingRef.current
     if (isComposing) return
 
+    // Slash popover keyboard nav takes priority over send/newline.
+    if (slash.popover.kind === "open" && slash.filtered.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault()
+        slash.setSelectedIdx(Math.min(slash.selectedIdx + 1, slash.filtered.length - 1))
+        return
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault()
+        slash.setSelectedIdx(Math.max(slash.selectedIdx - 1, 0))
+        return
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault()
+        const picked = slash.pick()
+        if (picked) {
+          // Consume the "/filter" text — chip replaces it, composer resets for
+          // free-form args.
+          setInput("")
+        }
+        return
+      }
+      if (e.key === "Escape") {
+        e.preventDefault()
+        // Dismissing the popover without a pick means the user typed "/" by
+        // accident; clear the composer so they don't get a stale filter state.
+        setInput("")
+        return
+      }
+    }
+
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault()
       handleSubmit(e)
+    }
+
+    // Backspace at empty composer removes an active skill selection — mirrors
+    // how pill-style "tag" inputs across the app already behave.
+    if (e.key === "Backspace" && input === "" && slashSelected) {
+      e.preventDefault()
+      slash.clearSelection()
     }
   }
 
@@ -2610,6 +2694,30 @@ export function ChatContainer({
                         setGlowVisible(false)
                     }}
                   />
+                )}
+                {/* Slash command picker floats above the composer when active. */}
+                <SlashCommandPopover
+                  mode={slash.popover}
+                  items={slash.filtered}
+                  loading={slash.loading}
+                  selectedIdx={slash.selectedIdx}
+                  onHoverIdx={slash.setSelectedIdx}
+                  onPick={(item) => {
+                    slash.pick(item)
+                    setInput("")
+                    inputRef.current?.focus()
+                  }}
+                />
+                {/* Active skill chip pinned at the top of the composer. */}
+                {slashSelected && (
+                  <div className="flex flex-wrap gap-1.5 px-3 pt-2.5">
+                    <SlashCommandChip
+                      name={slashSelected.name}
+                      source={slashSelected.source}
+                      onRemove={() => slash.clearSelection()}
+                      compact
+                    />
+                  </div>
                 )}
                 {dragOver && (
                   <div className="absolute inset-0 z-10 flex items-center justify-center rounded-xl border-2 border-dashed border-primary bg-primary/5">

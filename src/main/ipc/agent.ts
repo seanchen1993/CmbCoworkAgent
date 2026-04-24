@@ -69,6 +69,15 @@ import type { HookResult } from "../hooks/types"
 import { fireSessionStartOnce } from "../hooks/session-lifecycle"
 import { runHooksEnriched } from "../hooks/required-skill"
 import { makeHookResultCallback } from "../hooks/result-callback"
+import { buildTransientSlashContext } from "../slash-commands/dispatch"
+import {
+  clearActiveSlashContext,
+  getActiveSlashContext,
+  rehydrateActiveSlashContextFromCheckpoint,
+  setActiveSlashContext
+} from "../slash-commands/active-context"
+import type { TransientSlashModelContext } from "../slash-commands/types"
+import { getCheckpointer } from "../agent/runtime"
 import type {
   AgentInvokeParams,
   AgentResumeParams,
@@ -950,14 +959,31 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
   )
 
   // Handle agent invocation with streaming
-  ipcMain.on("agent:invoke", async (event, { threadId, message, modelId }: AgentInvokeParams) => {
+  ipcMain.on(
+    "agent:invoke",
+    async (
+      event,
+      { threadId, message, modelId, slashInvocation }: AgentInvokeParams
+    ) => {
     const channel = `agent:stream:${threadId}`
     const window = BrowserWindow.fromWebContents(event.sender)
+
+    // Runtime shape-check: IPC crosses a trust boundary, and AgentInvokeParams
+    // is a compile-time promise. A malformed renderer (wrong type, forgot to
+    // stringify) would otherwise explode below on .substring / string ops.
+    if (typeof threadId !== "string" || typeof message !== "string") {
+      console.error("[Agent] Invalid invoke payload shape, ignoring", {
+        threadId: typeof threadId,
+        message: typeof message
+      })
+      return
+    }
 
     console.log("[Agent] Received invoke request:", {
       threadId,
       message: message.substring(0, 50),
-      modelId
+      modelId,
+      ...(slashInvocation ? { slash: slashInvocation.kind + ":" + slashInvocation.id } : {})
     })
 
     if (!window) {
@@ -990,6 +1016,35 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     const toolCallCounter = new ToolCallCounter()
     let assistantText = ""
     const stopContextCollector = new StopHookContextCollector(message)
+
+    // Resolve slash invocation up-front so hooks/routing/trace/usage-detector
+    // can all see the skill name without needing to parse message content.
+    // Intentionally resolved BEFORE UserPromptSubmit hooks so a hook that
+    // throws or cancels the turn still leaves proposal/trace aware of the
+    // intended skill — no "the user tried to use skill X but we have no
+    // record" silent data loss.
+    let transientSlashContext: TransientSlashModelContext | null = null
+    if (slashInvocation) {
+      transientSlashContext = await buildTransientSlashContext(slashInvocation)
+      if (!transientSlashContext) {
+        // Renderer said "user invoked skill X" but registry/dispatch couldn't
+        // resolve it (disabled mid-session, deleted, read error). Fail loud:
+        // we don't want to silently send a bare message when the user clearly
+        // asked for skill augmentation.
+        window.webContents.send(channel, {
+          type: "error",
+          error: "技能已不可用或已被禁用，请重新选择"
+        })
+        activeRuns.delete(threadId)
+        return
+      }
+      setActiveSlashContext(threadId, transientSlashContext)
+      // Seed skill-usage detector with the explicit invocation so proposal /
+      // trace / evolution code see this turn used skill X even if an early
+      // error path fires before any model `read_file` on SKILL.md.
+      skillUsageDetector.seedKnownSkill(transientSlashContext.skill.ref.name)
+      skillUsageDetector.onExplicitInvocation(transientSlashContext.skill.ref.name)
+    }
 
     const sendHookNotice = (notice: string): void => {
       window.webContents.send(channel, {
@@ -1136,7 +1191,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         message,
         threadId,
         requestedModelId,
-        routingMode: getGlobalRoutingMode()
+        routingMode: getGlobalRoutingMode(),
+        // Account for the slash-command SKILL.md body that routing's classifier
+        // never sees: transient middleware injects it at model-call time, so
+        // routing classification stays based on the user's actual prompt. The
+        // context-capacity guard still needs the bytes reserved.
+        extraInputTokens: transientSlashContext?.skill.estimatedTokens
       }).catch(() => null)
       let effectiveModelId = invokeRoutingResult?.resolvedModelId ?? requestedModelId
 
@@ -1161,7 +1221,20 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         })
       }
 
-      const humanMessage = new HumanMessage(effectiveMessage)
+      // The user's message is stored in the checkpoint as-is (no XML wrapper,
+      // no inlined SKILL.md). If this turn invoked a slash skill, the skill
+      // ref rides along in `additional_kwargs` so renderer chips can be
+      // rehydrated on thread reload without the renderer ever seeing the body.
+      const humanMessage = new HumanMessage({
+        content: effectiveMessage,
+        ...(transientSlashContext
+          ? {
+              additional_kwargs: {
+                cmb_skill_ref: transientSlashContext.skill.ref
+              }
+            }
+          : {})
+      })
       const streamConfig = {
         configurable: { thread_id: threadId },
         signal: abortController.signal,
@@ -1194,7 +1267,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             noSkillEvolutionTool: true,
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
-            onHookResult
+            onHookResult,
+            transientSlashContext
           })
           // First attempt sends the message; subsequent attempts resume from checkpoint
           const input = isFirstAttempt ? { messages: [humanMessage] } : null
@@ -1790,7 +1864,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             noSkillEvolutionTool: true,
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
-            onHookResult
+            onHookResult,
+            // Mid-stream failover still needs the skill injected on the new
+            // runtime. Same `transientSlashContext` reused — it's immutable
+            // for the duration of one turn.
+            transientSlashContext
           })
           activeStream = await agent.stream(null, streamConfig) // resume from checkpoint
           usedModelId = nextCandidate
@@ -1985,10 +2063,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       // SessionEnd is NOT fired here — it belongs to thread lifecycle (delete / app quit),
       // not turn completion. See fireSessionEnd call in threads:delete handler.
     }
-  })
+  }
+  )
 
   // Handle agent resume (after interrupt approval/rejection via useStream)
-  ipcMain.on("agent:resume", async (event, { threadId, command, modelId }: AgentResumeParams) => {
+  ipcMain.on(
+    "agent:resume",
+    async (
+      event,
+      { threadId, command, modelId, slashInvocation }: AgentResumeParams
+    ) => {
     const channel = `agent:stream:${threadId}`
     const window = BrowserWindow.fromWebContents(event.sender)
 
@@ -2043,6 +2127,58 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     window.once("closed", onWindowClosed)
     sendActiveHookNotice(window, channel, workspacePath)
 
+    // Recover the slash context for this resume:
+    //   1. If the renderer sent one with the resume payload, resolve it fresh
+    //      — this is the cheap path and usually wins.
+    //   2. Otherwise fall back to the per-thread in-memory cache populated by
+    //      the original invoke.
+    //   3. If neither is available (process restart between invoke and resume),
+    //      scan the checkpoint for the last cmb_skill_ref and rehydrate.
+    //
+    // Rehydrate failures are non-fatal: resume continues without the skill and
+    // a hook_notice lets the user know the context was lost.
+    let resumeSlashContext: TransientSlashModelContext | null = null
+    if (slashInvocation) {
+      resumeSlashContext = await buildTransientSlashContext(slashInvocation)
+    }
+    if (!resumeSlashContext) {
+      resumeSlashContext = getActiveSlashContext(threadId) ?? null
+    }
+    if (!resumeSlashContext) {
+      try {
+        const checkpointer = await getCheckpointer(threadId)
+        const tuple = await checkpointer.getTuple({
+          configurable: { thread_id: threadId }
+        })
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const checkpointMessages = (tuple?.checkpoint as any)?.values?.messages ?? []
+        resumeSlashContext = await rehydrateActiveSlashContextFromCheckpoint(
+          threadId,
+          checkpointMessages
+        )
+        if (resumeSlashContext) {
+          console.log(
+            `[Agent][Resume] Rehydrated slash skill "${resumeSlashContext.skill.ref.name}" from checkpoint`
+          )
+        }
+      } catch (err) {
+        console.warn("[Agent][Resume] Checkpoint rehydrate failed:", err)
+      }
+    }
+    if (resumeSlashContext) {
+      setActiveSlashContext(threadId, resumeSlashContext)
+    } else if (slashInvocation) {
+      // Renderer asked for a skill but we couldn't resolve it — tell the user
+      // so they aren't confused by the model losing its skill instructions.
+      window.webContents.send(channel, {
+        type: "custom",
+        data: {
+          type: "hook_notice",
+          message: "本次继续执行未能恢复技能上下文，模型将按无技能状态继续。"
+        }
+      })
+    }
+
     try {
       const requestedModelIdResume = modelId || (metadata.model as string | undefined)
       const resumeRoutingResult = await resolveModel({
@@ -2092,7 +2228,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             noSkillEvolutionTool: true,
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
-            onHookResult
+            onHookResult,
+            transientSlashContext: resumeSlashContext
           })
           resumeStream = await resumeAgent.stream(
             new Command({ resume: resumeValue }),
@@ -2215,7 +2352,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             noSkillEvolutionTool: true,
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
-            onHookResult
+            onHookResult,
+            transientSlashContext: resumeSlashContext
           })
           activeResumeStream = await nextAgent.stream(
             new Command({ resume: resumeValue }),
@@ -2267,8 +2405,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
     } finally {
       activeRuns.delete(threadId)
+      // Resume is the end of the turn it was resuming from (either success or
+      // abort/error). Clear the per-thread slash context so the next fresh
+      // invoke starts clean — otherwise a stale context would survive until
+      // overwritten by the next invoke's setActiveSlashContext.
+      clearActiveSlashContext(threadId)
     }
-  })
+  }
+  )
 
   // Handle HITL interrupt response
   // NOTE: With the orchestrator-based approval system, execute commands are no
@@ -2328,6 +2472,29 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     window.once("closed", onWindowClosed)
     sendActiveHookNotice(window, channel, workspacePath)
 
+    // interrupt handler is mid-turn — we need the same skill context the
+    // original invoke set up. Same recover chain as resume: memory → rehydrate.
+    // (The interrupt IPC doesn't carry slashInvocation; the renderer's HITL
+    // decision is only about approve/reject/edit, not skill selection.)
+    let interruptSlashContext: TransientSlashModelContext | null =
+      getActiveSlashContext(threadId) ?? null
+    if (!interruptSlashContext) {
+      try {
+        const checkpointer = await getCheckpointer(threadId)
+        const tuple = await checkpointer.getTuple({
+          configurable: { thread_id: threadId }
+        })
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const checkpointMessages = (tuple?.checkpoint as any)?.values?.messages ?? []
+        interruptSlashContext = await rehydrateActiveSlashContextFromCheckpoint(
+          threadId,
+          checkpointMessages
+        )
+      } catch (err) {
+        console.warn("[Agent][Interrupt] Checkpoint rehydrate failed:", err)
+      }
+    }
+
     try {
       const interruptRoutingResult = await resolveModel({
         taskSource: "chat",
@@ -2371,7 +2538,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               noSkillEvolutionTool: true,
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
-              onHookResult
+              onHookResult,
+              transientSlashContext: interruptSlashContext
             })
             intStream = await intAgent.stream(null, interruptStreamConfig)
             intAgentRuntime = intAgent
@@ -2491,7 +2659,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               noSkillEvolutionTool: true,
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
-              onHookResult
+              onHookResult,
+              transientSlashContext: interruptSlashContext
             })
             activeIntStream = await nextAgent.stream(null, interruptStreamConfig)
             intAgentRuntime = nextAgent

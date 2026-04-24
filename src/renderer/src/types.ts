@@ -136,6 +136,12 @@ export interface Message {
   // For tool messages - the name of the tool
   name?: string
   created_at: Date
+  /**
+   * LangChain BaseMessage.additional_kwargs pass-through. Currently used by
+   * the slash-command system to attach `cmb_skill_ref` (render the chip) and
+   * `cmb_meta: "transient_skill_context"` (hide the injected SKILL.md bubble).
+   */
+  additional_kwargs?: Record<string, unknown>
 }
 
 export interface ContentBlock {

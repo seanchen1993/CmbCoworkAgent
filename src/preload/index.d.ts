@@ -25,6 +25,7 @@ import type {
   PluginManifest,
   SkillHookMetadata
 } from "../main/types"
+import type { SlashCommandListItem, SlashInvocation } from "../main/slash-commands/types"
 import { UserInfoConfig } from "../main/storage"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
 import type {
@@ -111,14 +112,16 @@ interface CustomAPI {
       threadId: string,
       message: string,
       onEvent: (event: StreamEvent) => void,
-      modelId?: string
+      modelId?: string,
+      slashInvocation?: SlashInvocation
     ) => () => void
     streamAgent: (
       threadId: string,
       message: string,
       command: unknown,
       onEvent: (event: StreamEvent) => void,
-      modelId?: string
+      modelId?: string,
+      slashInvocation?: SlashInvocation
     ) => () => void
     interrupt: (
       threadId: string,
@@ -126,6 +129,9 @@ interface CustomAPI {
       onEvent?: (event: StreamEvent) => void
     ) => () => void
     cancel: (threadId: string) => Promise<void>
+  }
+  slashCommands: {
+    list: () => Promise<SlashCommandListItem[]>
   }
   threads: {
     list: () => Promise<Thread[]>

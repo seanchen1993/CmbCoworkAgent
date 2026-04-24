@@ -19,6 +19,14 @@ export interface RoutingContext {
   routingMode: "auto" | "pinned"
   /** Set for resume/interrupt continuations so routing reuses the previous model */
   continuation?: "resume" | "interrupt"
+  /**
+   * Extra input tokens that main will inject into the model request on top of
+   * the message. Used for slash-command SKILL.md bodies that are invisible to
+   * the router's classification step but still occupy context window space.
+   * The context-capacity guard adds these to lastInputTokens before deciding
+   * whether to switch to a larger-context economy model.
+   */
+  extraInputTokens?: number
 }
 
 export interface RoutingResult {
@@ -698,12 +706,17 @@ const CONTEXT_CAPACITY_RATIO = 0.75
 function guardContextCapacity(
   result: RoutingResult,
   threadId: string | undefined,
-  layerRecords: RoutingLayerRecord[]
+  layerRecords: RoutingLayerRecord[],
+  extraInputTokens: number = 0
 ): RoutingResult {
   if (result.resolvedTier !== "economy") return result
 
   const state = readThreadRoutingState(threadId)
-  const lastInputTokens = state?.lastInputTokens
+  // Include extra injected tokens (e.g. slash-skill SKILL.md body) in the
+  // capacity estimate. These tokens reach the model via the transient
+  // middleware without ever being classified by routing, but they still
+  // occupy context window space.
+  const lastInputTokens = (state?.lastInputTokens ?? 0) + Math.max(0, extraInputTokens)
   if (!lastInputTokens || lastInputTokens <= 0) return result
 
   const configs = getCustomModelConfigs()
@@ -1114,7 +1127,7 @@ export async function resolveModel(ctx: RoutingContext): Promise<RoutingResult> 
       })
       let r = resolveFromTier(l2Detail.result, `layer2:rules→${l2Detail.result}`, "layer2")
       // Context window capacity guard — ensure economy model can handle current context
-      r = guardContextCapacity(r, ctx.threadId, layerRecords)
+      r = guardContextCapacity(r, ctx.threadId, layerRecords, ctx.extraInputTokens)
       console.log(`[ROUTING] ${JSON.stringify({ ...logCtx, layer: r.layer, resolvedTier: r.resolvedTier, routeReason: r.routeReason })}`)
       return withTrace(r)
     }
@@ -1154,7 +1167,7 @@ export async function resolveModel(ctx: RoutingContext): Promise<RoutingResult> 
     })
     let r = resolveFromTier(l3.tier, `layer3:llm→${l3.tier}`, "layer3")
     // Context window capacity guard — ensure economy model can handle current context
-    r = guardContextCapacity(r, ctx.threadId, layerRecords)
+    r = guardContextCapacity(r, ctx.threadId, layerRecords, ctx.extraInputTokens)
     console.log(`[ROUTING] ${JSON.stringify({ ...logCtx, layer: r.layer, resolvedTier: r.resolvedTier, routeReason: r.routeReason })}`)
     return withTrace(r)
   }

@@ -10,6 +10,16 @@ import {
   MessageFeedbackDialog,
   type DislikeFeedbackPayload
 } from "./MessageFeedbackDialog"
+import { SlashCommandChip } from "@/features/slash-commands/SlashCommandChip"
+import type { SlashSkillRef } from "@/features/slash-commands/types"
+
+/** Extract the slash-skill ref stashed by the slash-command system (or null). */
+function readSkillRef(message: Message): SlashSkillRef | null {
+  const ref = message.additional_kwargs?.cmb_skill_ref as SlashSkillRef | undefined
+  if (!ref || typeof ref !== "object") return null
+  if (ref.kind !== "skill" || typeof ref.name !== "string") return null
+  return ref
+}
 
 function extractMessagePlainText(content: Message["content"]): string {
   if (typeof content === "string") return content
@@ -137,10 +147,24 @@ export function MessageBubble({
     return null
   }
 
+  // Hide the transient skill-context message. Main injects it via wrapModelCall
+  // purely for the model's eyes; it rides the stream as a HumanMessage but
+  // should never be rendered as a user bubble. The same `cmb_meta` check
+  // protects proposal/memory consumers upstream.
+  if (message.additional_kwargs?.cmb_meta === "transient_skill_context") {
+    return null
+  }
+
+  const skillRef = isUser ? readSkillRef(message) : null
+
   const renderContent = (): React.ReactNode => {
     if (typeof message.content === "string") {
       // Empty content
       if (!message.content.trim()) {
+        // Still render a bubble if there's a skill chip to show — users who
+        // only send a skill with no text still want feedback that their
+        // invocation went through.
+        if (skillRef) return <div />
         return null
       }
 
@@ -148,6 +172,14 @@ export function MessageBubble({
       if (isUser) {
         return (
           <div className="whitespace-pre-wrap text-[15px] leading-7 text-foreground/95">
+            {skillRef && (
+              <SlashCommandChip
+                name={skillRef.name}
+                source={skillRef.source}
+                compact
+                className="mr-2 align-middle"
+              />
+            )}
             {message.content}
           </div>
         )

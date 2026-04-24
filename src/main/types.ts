@@ -1,4 +1,5 @@
 import type { HookConfig } from "./hooks/types"
+import type { SlashInvocation } from "./slash-commands/types"
 
 // Thread types matching langgraph-api
 export type ThreadStatus = "idle" | "busy" | "interrupted" | "error"
@@ -12,12 +13,27 @@ export interface AgentInvokeParams {
   threadId: string
   message: string
   modelId?: string
+  /**
+   * Typed slash-command invocation produced by the renderer popover.
+   * Absent for free-text sends. When present, main resolves the id against the
+   * slash-command registry and injects SKILL.md into the model call via the
+   * transient middleware — the body never lands in state.messages or on disk.
+   */
+  slashInvocation?: SlashInvocation
 }
 
 export interface AgentResumeParams {
   threadId: string
   command: { resume?: { decision?: string; pendingCount?: number } }
   modelId?: string
+  /**
+   * Resume carries the invocation too so the transient middleware can be wired
+   * back up on the resumed runtime. The active-context memory store usually
+   * still has it, but the process could have restarted between original invoke
+   * and resume — passing it through again gives us a cheap source of truth
+   * without needing to rehydrate from the checkpoint on every resume.
+   */
+  slashInvocation?: SlashInvocation
 }
 
 export interface AgentInterruptParams {
@@ -125,6 +141,12 @@ export interface Message {
   content: string | ContentBlock[]
   tool_calls?: ToolCall[]
   created_at: Date
+  /**
+   * Pass-through of BaseMessage.additional_kwargs. The slash-command system
+   * writes `cmb_skill_ref` / `cmb_meta` here; UI reads it to render the skill
+   * chip and to hide transient context bubbles.
+   */
+  additional_kwargs?: Record<string, unknown>
 }
 
 export interface ContentBlock {
