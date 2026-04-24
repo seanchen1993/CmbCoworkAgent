@@ -28,55 +28,26 @@ export type RawExecuteFn = (command: string, sandboxMode?: string) => Promise<Ex
 export type RequestApprovalFn = (req: ApprovalRequest) => Promise<ApprovalDecision>
 
 export class ToolOrchestrator {
-  private static readonly interactiveQueues = new Map<string, Promise<void>>()
-
   constructor(
     private approvalStore: ApprovalStore,
     private rawExecute: RawExecuteFn,
     private requestApproval: RequestApprovalFn,
-    private yoloMode: boolean = false,
-    private queueId: string = randomUUID()
+    private yoloMode: boolean = false
   ) {}
-
-  private async runSerializedInteractive<T>(label: string, task: () => Promise<T>): Promise<T> {
-    const previous = ToolOrchestrator.interactiveQueues.get(this.queueId)
-    let releaseCurrent!: () => void
-    const current = new Promise<void>((resolve) => {
-      releaseCurrent = resolve
-    })
-    const tail = (previous ?? Promise.resolve()).catch(() => undefined).then(() => current)
-    ToolOrchestrator.interactiveQueues.set(this.queueId, tail)
-
-    const waitStart = Date.now()
-    if (previous) {
-      console.log(`[Orchestrator] queue(${this.queueId}) waiting for ${label}`)
-      await previous.catch(() => undefined)
-      console.log(
-        `[Orchestrator] queue(${this.queueId}) acquired ${label} after ${Date.now() - waitStart}ms`
-      )
-    }
-
-    try {
-      return await task()
-    } finally {
-      releaseCurrent()
-      void tail.finally(() => {
-        if (ToolOrchestrator.interactiveQueues.get(this.queueId) === tail) {
-          ToolOrchestrator.interactiveQueues.delete(this.queueId)
-        }
-      })
-    }
-  }
 
   /**
    * Execute a command through the full approval + sandbox pipeline.
+   *
+   * Concurrency is now managed by the middleware-level RWLock in runtime.ts —
+   * this method no longer serializes internally. Multiple calls may enter
+   * approval concurrently so the renderer receives all requests immediately.
    *
    * @param command      Shell command string
    * @param cwd          Working directory
    * @param sandboxMode  Current sandbox mode (none/unelevated/elevated/readonly)
    */
   async execute(command: string, cwd: string, sandboxMode: string): Promise<ExecuteResponse> {
-    return this.runSerializedInteractive(`execute:${command.slice(0, 80)}`, async () => {
+    {
       console.log(`[Orchestrator] execute: "${command}" cwd=${cwd} sandbox=${sandboxMode} yolo=${this.yoloMode}`)
 
       // 1. Assess command safety — always check, even in YOLO mode
@@ -166,20 +137,22 @@ export class ToolOrchestrator {
         }
         throw err
       }
-    })
+    }
   }
 
   /**
    * Approve a file write or edit operation.
    * Returns true if approved, false if rejected.
    * Skipped in YOLO mode (no orchestrator set on LocalSandbox).
+   *
+   * Concurrency handled by middleware-level RWLock — no internal serialization.
    */
   async approveFileOp(
     operation: "write_file" | "edit_file",
     filePath: string,
     cwd: string
   ): Promise<boolean> {
-    return this.runSerializedInteractive(`file:${operation}:${filePath}`, async () => {
+    {
       if (this.yoloMode) return true
 
       const key = this.approvalStore.makeKey(`${operation}:${filePath}`, cwd, "file")
@@ -216,7 +189,7 @@ export class ToolOrchestrator {
       const approved = decision !== "denied" && decision !== "abort"
       console.log(`[Orchestrator] approveFileOp: ${operation} "${filePath}" → ${approved ? "approved" : "rejected"}`)
       return approved
-    })
+    }
   }
 
   /** Map renderer decision type to ReviewDecision. */

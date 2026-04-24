@@ -113,12 +113,21 @@ export const pendingApprovals = new Map<string, {
   targetWebContentsIds: number[]
 }>()
 
-const approvalRequestQueues = new Map<string, Promise<void>>()
-const foregroundToolExecutionQueues = new Map<string, Promise<void>>()
+// ─── Tool concurrency: AsyncRWLock (writer-preferring) ──────────────────────
+//
+// Mirrors Codex's `ToolCallRuntime` model (codex-rs/core/src/tools/parallel.rs):
+//   - shared (read lock): tools that are safe to run concurrently (reads)
+//   - exclusive (write lock): side-effecting tools that must run alone
+//   - bypass: tools we have no classification for — pass through without locking
+//
+// Approval events are NOT serialized by this lock — they fire immediately from
+// each tool task. The renderer's pendingApprovals[] queue owns UI ordering.
+// Execution is what this lock gates.
 
-type ToolConcurrencyTier = "parallel" | "serialized_foreground"
+type ToolConcurrencyTier = "exclusive" | "shared" | "bypass"
 
-const SERIALIZED_FOREGROUND_TOOL_NAMES = new Set([
+/** Tools that mutate state (files, processes, schedulers). Take write lock. */
+const EXCLUSIVE_TOOL_NAMES = new Set([
   "execute",
   "write_file",
   "edit_file",
@@ -131,6 +140,24 @@ const SERIALIZED_FOREGROUND_TOOL_NAMES = new Set([
   "task"
 ])
 
+/**
+ * Pure read-only tools that can run concurrently with each other but must wait
+ * for any in-flight write. This is the low-risk subset — only tools that are
+ * clearly non-mutating. Shell commands are intentionally NOT here (shell ends
+ * up in EXCLUSIVE via `execute`).
+ */
+const SHARED_READ_ONLY_TOOL_NAMES = new Set([
+  "read_file",
+  "ls",
+  "glob",
+  "grep",
+  "search_tool",
+  "inspect_tool",
+  "task_output",
+  "view_image",
+  "invoke_deferred_tool"
+])
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
 }
@@ -139,93 +166,133 @@ function classifyToolConcurrency(
   toolCall: { name?: string; args?: unknown } | undefined
 ): ToolConcurrencyTier {
   const toolName = toolCall?.name
-  if (!toolName) return "parallel"
+  if (!toolName) return "bypass"
 
   if (toolName === "execute") {
     const args = isRecord(toolCall?.args) ? toolCall.args : null
-    return args?.run_in_background === true ? "parallel" : "serialized_foreground"
+    return args?.run_in_background === true ? "bypass" : "exclusive"
   }
 
-  return SERIALIZED_FOREGROUND_TOOL_NAMES.has(toolName) ? "serialized_foreground" : "parallel"
+  if (EXCLUSIVE_TOOL_NAMES.has(toolName)) return "exclusive"
+  if (SHARED_READ_ONLY_TOOL_NAMES.has(toolName)) return "shared"
+  return "bypass"
 }
 
-async function runSerializedForegroundToolExecution<T>(
-  queueId: string,
-  label: string,
-  task: () => Promise<T>
-): Promise<T> {
-  const previous = foregroundToolExecutionQueues.get(queueId)
-  let releaseCurrent!: () => void
-  const current = new Promise<void>((resolve) => {
-    releaseCurrent = resolve
-  })
-  const tail = (previous ?? Promise.resolve()).catch(() => undefined).then(() => current)
-  foregroundToolExecutionQueues.set(queueId, tail)
+/**
+ * Writer-preferring async read-write lock.
+ *
+ * - `read()`: multiple holders allowed. Blocks if a writer is active or waiting.
+ * - `write()`: exclusive. Blocks until all readers drain and no other writer held.
+ *
+ * Writer preference prevents writer starvation when reads are frequent.
+ */
+class AsyncRWLock {
+  private readers = 0
+  private writerHeld = false
+  private writerQueue: Array<() => void> = []
+  private readerQueue: Array<() => void> = []
 
-  const waitStart = Date.now()
-  if (previous) {
-    console.log(`[Runtime] foreground tool queue waiting for ${queueId}: ${label}`)
-    await previous.catch(() => undefined)
-    console.log(
-      `[Runtime] foreground tool queue acquired for ${queueId}: ${label} after ${Date.now() - waitStart}ms`
-    )
+  async read<T>(task: () => Promise<T>): Promise<T> {
+    await this.acquireRead()
+    try {
+      return await task()
+    } finally {
+      this.releaseRead()
+    }
   }
 
-  try {
-    return await task()
-  } finally {
-    releaseCurrent()
-    void tail.finally(() => {
-      if (foregroundToolExecutionQueues.get(queueId) === tail) {
-        foregroundToolExecutionQueues.delete(queueId)
-      }
+  async write<T>(task: () => Promise<T>): Promise<T> {
+    await this.acquireWrite()
+    try {
+      return await task()
+    } finally {
+      this.releaseWrite()
+    }
+  }
+
+  private acquireRead(): Promise<void> {
+    if (!this.writerHeld && this.writerQueue.length === 0) {
+      this.readers++
+      return Promise.resolve()
+    }
+    return new Promise<void>((resolve) => {
+      this.readerQueue.push(() => {
+        this.readers++
+        resolve()
+      })
     })
   }
+
+  private acquireWrite(): Promise<void> {
+    if (!this.writerHeld && this.readers === 0) {
+      this.writerHeld = true
+      return Promise.resolve()
+    }
+    return new Promise<void>((resolve) => {
+      this.writerQueue.push(() => {
+        this.writerHeld = true
+        resolve()
+      })
+    })
+  }
+
+  private releaseRead(): void {
+    this.readers--
+    if (this.readers === 0 && this.writerQueue.length > 0) {
+      const next = this.writerQueue.shift()!
+      next()
+    }
+  }
+
+  private releaseWrite(): void {
+    this.writerHeld = false
+    if (this.writerQueue.length > 0) {
+      const next = this.writerQueue.shift()!
+      next()
+    } else if (this.readerQueue.length > 0) {
+      const pending = this.readerQueue.splice(0)
+      for (const wake of pending) wake()
+    }
+  }
+}
+
+const toolConcurrencyLocks = new Map<string, AsyncRWLock>()
+
+function getToolConcurrencyLock(queueId: string): AsyncRWLock {
+  let lock = toolConcurrencyLocks.get(queueId)
+  if (!lock) {
+    lock = new AsyncRWLock()
+    toolConcurrencyLocks.set(queueId, lock)
+  }
+  return lock
 }
 
 function createGradedToolConcurrencyMiddleware(queueId: string) {
+  const lock = getToolConcurrencyLock(queueId)
   return createMiddleware({
     name: "gradedToolConcurrency",
     wrapToolCall: async (request, handler) => {
       const toolCall = request.toolCall as { id?: string; name?: string; args?: unknown } | undefined
-      if (classifyToolConcurrency(toolCall) === "parallel") {
+      const tier = classifyToolConcurrency(toolCall)
+      if (tier === "bypass") {
         return handler(request)
       }
-
       const label = `${toolCall?.name ?? "unknown"}:${toolCall?.id ?? "no-id"}`
-      return runSerializedForegroundToolExecution(queueId, label, () => handler(request))
+      const waitStart = Date.now()
+      if (tier === "shared") {
+        return lock.read(async () => {
+          const waited = Date.now() - waitStart
+          if (waited > 50) console.log(`[Runtime] shared-lock acquired ${label} after ${waited}ms`)
+          return handler(request)
+        })
+      }
+      return lock.write(async () => {
+        const waited = Date.now() - waitStart
+        if (waited > 50) console.log(`[Runtime] exclusive-lock acquired ${label} after ${waited}ms`)
+        return handler(request)
+      })
     }
   })
-}
-
-async function runSerializedApprovalRequest<T>(threadId: string, task: () => Promise<T>): Promise<T> {
-  const previous = approvalRequestQueues.get(threadId)
-  let releaseCurrent!: () => void
-  const current = new Promise<void>((resolve) => {
-    releaseCurrent = resolve
-  })
-  const tail = (previous ?? Promise.resolve()).catch(() => undefined).then(() => current)
-  approvalRequestQueues.set(threadId, tail)
-
-  const waitStart = Date.now()
-  if (previous) {
-    console.log(`[Runtime] approval queue waiting for thread ${threadId}`)
-    await previous.catch(() => undefined)
-    console.log(
-      `[Runtime] approval queue acquired for thread ${threadId} after ${Date.now() - waitStart}ms`
-    )
-  }
-
-  try {
-    return await task()
-  } finally {
-    releaseCurrent()
-    void tail.finally(() => {
-      if (approvalRequestQueues.get(threadId) === tail) {
-        approvalRequestQueues.delete(threadId)
-      }
-    })
-  }
 }
 
 /** Per-thread approval store cache. */
@@ -243,16 +310,6 @@ export function getOrCreateApprovalStore(threadId: string): ApprovalStore {
 
 const BASE_PROMPT =
   "In order to complete the objective that the user asks of you, you have access to a number of standard tools."
-
-const GRADED_TOOL_CALL_PROMPT = `
-## Tool Call Concurrency
-
-- Independent read-only tools may be called in parallel when that clearly saves time.
-- Read-only tools include filesystem reads (ls, read_file, glob, grep), search_tool, inspect_tool, task_output, memory reads, and other non-mutating lookups.
-- Foreground state-changing or approval-requiring tools must stay serialized. This includes execute (unless run_in_background=true), write_file, edit_file, code_exec, browser_playwright, manage_scheduler, manage_skill, and similar mutating tools.
-- Never batch multiple foreground serialized tools in a single response. Wait for the result of the current foreground tool before issuing the next one.
-- When in doubt, prefer serialized foreground execution over batching side-effecting tools.
-`
 
 function createEagerMcpTools(
   capabilityService: McpCapabilityService,
@@ -1237,7 +1294,11 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // whether the orchestrator is mounted below.
   const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000
   requestApproval = (req: ApprovalRequest): Promise<ApprovalDecision> => {
-    return runSerializedApprovalRequest(threadId, () => new Promise<ApprovalDecision>((resolve) => {
+    // IPC fires immediately; the renderer owns the queue (pendingApprovals[]).
+    // Multiple concurrent tool calls each register their own resolver here —
+    // the renderer shows them one at a time, but the events are not serialized
+    // back-end side. This matches how Codex surfaces ExecApprovalRequest events.
+    return new Promise<ApprovalDecision>((resolve) => {
       const timeoutId = setTimeout(() => {
         if (pendingApprovals.has(req.id)) {
           pendingApprovals.delete(req.id)
@@ -1258,8 +1319,6 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         targetWebContentsIds: BrowserWindow.getAllWindows().map(w => w.webContents.id)
       })
       console.log(`[Orchestrator] sending approval request on channel: approval:request:${threadId}, reqId=${req.id}, command=${req.command}`)
-      // Fire Notification hook — agent is now waiting on user input.
-      // Fire-and-forget so it doesn't delay the UI prompt.
       runHooks(getEnabledHooks(workspacePath), "Notification", {
         toolName: req.tool_call?.name,
         toolArgs: { command: req.command, reason: req.reason, filePath: req.filePath },
@@ -1269,7 +1328,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       for (const win of BrowserWindow.getAllWindows()) {
         win.webContents.send(`approval:request:${threadId}`, req)
       }
-    }))
+    })
   }
 
   if (!yoloMode) {
@@ -1279,7 +1338,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       return backend.executeRaw(command, sandboxMode)
     }
 
-    const orchestrator = new ToolOrchestrator(approvalStore, rawExecute, requestApproval, false, threadId)
+    const orchestrator = new ToolOrchestrator(approvalStore, rawExecute, requestApproval, false)
     backend.setOrchestrator(orchestrator)
   }
 
@@ -1504,7 +1563,6 @@ The workspace root is: ${workspacePath}`
     hasInvokeDeferredTool,
     hasCodeExecTool
   })
-  systemPrompt += GRADED_TOOL_CALL_PROMPT
   systemPrompt += renderAvailableDeferredToolsPrompt(deferredToolIds)
   console.log("[Runtime] System prompt summary:", {
     chars: systemPrompt.length,
