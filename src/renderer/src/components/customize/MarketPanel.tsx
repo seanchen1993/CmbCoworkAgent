@@ -48,6 +48,7 @@ import { PluginDetailPanel } from "./PluginsPanel"
 import { marketApi, MarketApiResponse, MarketItem, MarketItemType } from "../../api/market"
 import { getMarketMockResponse } from "./MarketMockData"
 import { getDefaultRange, parseTopUsersFromAgg } from "../dashboard/use-dashboard"
+import { toast } from "sonner"
 import {
   buildUploaderIdCandidates,
   getAllSkills,
@@ -469,18 +470,10 @@ export function MarketPanel(): React.JSX.Element {
     open: false,
     item: null
   })
-  const [downloadSuccess, setDownloadSuccess] = useState<{ open: boolean; itemName: string }>({
-    open: false,
-    itemName: ""
-  })
   const [uploadDialog, setUploadDialog] = useState(false)
   const [updateDialog, setUpdateDialog] = useState<{ open: boolean; item: MarketItem | null }>({
     open: false,
     item: null
-  })
-  const [uploadSuccess, setUploadSuccess] = useState<{ open: boolean; type: MarketItemType }>({
-    open: false,
-    type: "skill"
   })
   const [reloadToken, setReloadToken] = useState(0)
   const [detailMode, setDetailMode] = useState<DetailViewMode>("list")
@@ -513,6 +506,8 @@ export function MarketPanel(): React.JSX.Element {
   )
 
   const getItemKey = (item: MarketItem) => item.id || item.name
+  const getMarketTypeLabel = (type: MarketItemType) =>
+    type === "skill" ? "技能" : type === "mcp" ? "MCP连接器" : "插件"
 
   const resetDetailState = () => {
     setSkillDetailSkill(null)
@@ -903,7 +898,9 @@ export function MarketPanel(): React.JSX.Element {
 
       if (response.success) {
         console.log(`Successfully updated and installed ${item.name}`)
-        setDownloadSuccess({ open: true, itemName: `${item.name} (已更新安装)` })
+        toast.success(
+          `已为您更新并安装「${item.name}」到${getMarketTypeLabel(activeTab)}，请新开一个会话试试效果。`
+        )
 
         // 重新加载对应类型的已安装列表
         if (activeTab === "skill") {
@@ -1407,11 +1404,11 @@ export function MarketPanel(): React.JSX.Element {
 
         // Show different success messages based on download type
         if (downloadToLocal) {
-          // For local downloads, show a different message
-          setDownloadSuccess({ open: true, itemName: `${item.name} (已保存到本地)` })
+          toast.success(`「${item.name}」已保存到本地。`)
         } else {
-          // For application installs, show the original message
-          setDownloadSuccess({ open: true, itemName: item.name })
+          toast.success(
+            `「${item.name}」已安装到${getMarketTypeLabel(activeTab)}，请新开一个会话试试效果。`
+          )
 
           // 重新加载对应类型的已安装列表 (only for app installs, not local downloads)
           if (activeTab === "skill") {
@@ -1440,7 +1437,9 @@ export function MarketPanel(): React.JSX.Element {
   }
 
   const handleUploadSuccess = () => {
-    setUploadSuccess({ open: true, type: activeTab })
+    toast.success(
+      `${getMarketTypeLabel(activeTab)}已上传到 Market，请新开一个会话试试效果。`
+    )
     // Reload the current tab data
     triggerReload()
   }
@@ -1540,7 +1539,9 @@ export function MarketPanel(): React.JSX.Element {
   }
 
   const handleUpdateSuccess = () => {
-    setUploadSuccess({ open: true, type: activeTab })
+    toast.success(
+      `${getMarketTypeLabel(activeTab)}已更新到 Market，请新开一个会话试试效果。`
+    )
     setUpdateDialog({ open: false, item: null })
     // Reload the current tab data
     triggerReload()
@@ -2167,33 +2168,6 @@ export function MarketPanel(): React.JSX.Element {
         </DialogContent>
       </Dialog>
 
-      <Dialog
-        open={downloadSuccess.open}
-        onOpenChange={(open) => setDownloadSuccess({ open, itemName: "" })}
-      >
-        <DialogContent className="bg-[#faf9f5] border-[#e8e6dc]">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 text-[#141413]">
-              <CheckCircle className="size-5 text-[#2e7d4f]" />
-              安装成功
-            </DialogTitle>
-            <DialogDescription className="text-[#5e5d59]">
-              &quot;{downloadSuccess.itemName}&quot; 已成功添加到您的
-              {activeTab === "skill" ? "技能" : activeTab === "mcp" ? "MCP连接器" : "插件"}中。
-              {activeTab === "skill" && " 您可以在技能面板中找到它。"}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              className="bg-[#c4956a] hover:bg-[#b85a3a] text-[#faf9f5] border-0 rounded-lg"
-              onClick={() => setDownloadSuccess({ open: false, itemName: "" })}
-            >
-              确定
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
       {/* Use UniversalUploadDialog for all types */}
       <UniversalUploadDialog
         open={uploadDialog}
@@ -2202,37 +2176,6 @@ export function MarketPanel(): React.JSX.Element {
         resourceType={activeTab}
         onUpload={handleUniversalUpload}
       />
-
-      <Dialog
-        open={uploadSuccess.open}
-        onOpenChange={(open) => setUploadSuccess({ open, type: "skill" })}
-      >
-        <DialogContent className="bg-[#faf9f5] border-[#e8e6dc]">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 text-[#141413]">
-              <CheckCircle className="size-5 text-[#2e7d4f]" />
-              上传成功
-            </DialogTitle>
-            <DialogDescription className="text-[#5e5d59]">
-              您的
-              {uploadSuccess.type === "skill"
-                ? "技能"
-                : uploadSuccess.type === "mcp"
-                  ? "MCP连接器"
-                  : "插件"}
-              已成功上传到Market！
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              className="bg-[#c4956a] hover:bg-[#b85a3a] text-[#faf9f5] border-0 rounded-lg"
-              onClick={() => setUploadSuccess({ open: false, type: "skill" })}
-            >
-              确认
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
       {/* Update dialog using UniversalUploadDialog component */}
       <UniversalUploadDialog
