@@ -1339,6 +1339,19 @@ export function SkillsPanel(): React.JSX.Element {
     [filterSkillsBySearch, marketInstalledCustomSkills]
   )
 
+  const openMarketWithSkillSearch = useCallback(
+    (skillName: string) => {
+      const keyword = skillName.trim()
+      setMarketInitialSkillCategory(null)
+      setMarketInitialSkillSearchQuery(keyword || null)
+      // 兜底：当 customizeInitialTab 已经是 market 时，先切到 skills 再切回 market，
+      // 保证“更新到市场/发布到市场”后一定触发市场页切换并应用搜索词。
+      setShowCustomizeView(true, "skills")
+      setTimeout(() => setShowCustomizeView(true, "market"), 0)
+    },
+    [setMarketInitialSkillCategory, setMarketInitialSkillSearchQuery, setShowCustomizeView]
+  )
+
   return (
     <div className="contents">
       <div className="w-[330px] shrink-0 border-r border-border flex flex-col">
@@ -1525,15 +1538,12 @@ export function SkillsPanel(): React.JSX.Element {
           void loadMarketSkills()
           window.api.skills.list().then(setSkills).catch(console.error)
 
-          const keyword = skillName.trim()
           toast.success(
             mode === "update"
               ? `技能「${skillName}」更新发布成功，已跳转到应用市场。`
               : `技能「${skillName}」发布成功，已跳转到应用市场。`
           )
-          setMarketInitialSkillCategory(null)
-          setMarketInitialSkillSearchQuery(keyword || null)
-          setShowCustomizeView(true, "market")
+          openMarketWithSkillSearch(skillName)
         }}
       />
     </div>
@@ -1919,7 +1929,6 @@ export function SkillDetail(props: {
     binaryMimeType,
     isDisabled,
     onToggleEnabled,
-    onShowGuide,
     onDelete,
     onPublish,
     publishLabel = "发布到市场",
@@ -2135,54 +2144,59 @@ export function SkillDetail(props: {
         </p>
       </div>
 
-      <ScrollArea className="flex-1">
-        <div className="p-4">
-          {isLoading ? (
-            <p className="text-sm text-muted-foreground">加载中...</p>
-          ) : isEditing && canEditCurrentFile ? (
-            <SkillFileEditor
-              value={draftContent}
-              onChange={setDraftContent}
-              onSave={() => void handleSaveEdit()}
-              error={saveError}
-              disabled={isSaving}
-            />
-          ) : previewKind === "image" && binaryDataUrl ? (
-            <div className="h-full w-full flex items-start justify-center">
-              <img
-                src={binaryDataUrl}
-                alt={selectedFilePath ?? "image preview"}
-                className="max-w-full h-auto rounded-md border border-border"
-              />
-            </div>
-          ) : previewKind === "pdf" && binaryDataUrl ? (
-            <div className="h-[80vh] min-h-[500px]">
-              <iframe
-                title={selectedFilePath ?? "pdf preview"}
-                src={binaryDataUrl}
-                className="h-full w-full rounded-md border border-border bg-white"
-              />
-            </div>
-          ) : previewKind === "html" ? (
-            <div className="h-[80vh] min-h-[500px] rounded-md border border-border overflow-hidden bg-white">
-              <iframe
-                title={selectedFilePath ?? "html preview"}
-                srcDoc={content ?? ""}
-                className="h-full w-full"
-                sandbox=""
-              />
-            </div>
-          ) : !isMarkdown ? (
-            <pre className="text-xs font-mono whitespace-pre-wrap break-words leading-relaxed text-muted-foreground bg-muted/30 rounded-md p-3">
-              {content}
-            </pre>
-          ) : (
-            <div className="streaming-markdown text-sm leading-relaxed">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{previewContent ?? ""}</ReactMarkdown>
-            </div>
-          )}
+      {isEditing && canEditCurrentFile ? (
+        <div className="flex-1 min-h-0 p-4">
+          <SkillFileEditor
+            className="h-full"
+            value={draftContent}
+            onChange={setDraftContent}
+            onSave={() => void handleSaveEdit()}
+            error={saveError}
+            disabled={isSaving}
+          />
         </div>
-      </ScrollArea>
+      ) : (
+        <ScrollArea className="flex-1">
+          <div className="p-4">
+            {isLoading ? (
+              <p className="text-sm text-muted-foreground">加载中...</p>
+            ) : previewKind === "image" && binaryDataUrl ? (
+              <div className="h-full w-full flex items-start justify-center">
+                <img
+                  src={binaryDataUrl}
+                  alt={selectedFilePath ?? "image preview"}
+                  className="max-w-full h-auto rounded-md border border-border"
+                />
+              </div>
+            ) : previewKind === "pdf" && binaryDataUrl ? (
+              <div className="h-[80vh] min-h-[500px]">
+                <iframe
+                  title={selectedFilePath ?? "pdf preview"}
+                  src={binaryDataUrl}
+                  className="h-full w-full rounded-md border border-border bg-white"
+                />
+              </div>
+            ) : previewKind === "html" ? (
+              <div className="h-[80vh] min-h-[500px] rounded-md border border-border overflow-hidden bg-white">
+                <iframe
+                  title={selectedFilePath ?? "html preview"}
+                  srcDoc={content ?? ""}
+                  className="h-full w-full"
+                  sandbox=""
+                />
+              </div>
+            ) : !isMarkdown ? (
+              <pre className="text-xs font-mono whitespace-pre-wrap break-words leading-relaxed text-muted-foreground bg-muted/30 rounded-md p-3">
+                {content}
+              </pre>
+            ) : (
+              <div className="streaming-markdown text-sm leading-relaxed">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{previewContent ?? ""}</ReactMarkdown>
+              </div>
+            )}
+          </div>
+        </ScrollArea>
+      )}
     </div>
   )
 }
