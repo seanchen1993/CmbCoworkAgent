@@ -45,6 +45,10 @@ import { getUserInfo } from "../../storage"
 import { listAllSkills } from "../../ipc/skills"
 import { nowIsoLocal } from "../../util/local-time"
 import {
+  ensureVersionedSkillIdentifier,
+  parseSkillIdentifier
+} from "../../utils/skill-identifiers"
+import {
   setAdoptionContext,
   clearAdoptionContext
 } from "../../services/adoption-tracker"
@@ -432,12 +436,28 @@ export class TraceCollector {
       try {
         const allSkills = await listAllSkills()
         const skillVersionMap = new Map(allSkills.map((s) => [s.name, s.version]))
-        usedSkillsWithVersions = this.usedSkills.map((name) => {
-          const version = skillVersionMap.get(name) ?? "v1.0.0"
-          return `${name}-${version}`
-        })
+        usedSkillsWithVersions = Array.from(
+          new Set(
+            this.usedSkills
+              .map((skill) => {
+                const parsed = parseSkillIdentifier(skill)
+                return ensureVersionedSkillIdentifier(
+                  parsed.name,
+                  parsed.version ?? skillVersionMap.get(parsed.name)
+                )
+              })
+              .filter(Boolean)
+          )
+        )
       } catch (e) {
         console.warn("[Tracer] Failed to resolve skill versions:", e)
+        usedSkillsWithVersions = Array.from(
+          new Set(
+            this.usedSkills
+              .map((skill) => ensureVersionedSkillIdentifier(skill))
+              .filter(Boolean)
+          )
+        )
       }
     }
 

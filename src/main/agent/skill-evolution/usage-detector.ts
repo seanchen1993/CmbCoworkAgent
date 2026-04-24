@@ -1,8 +1,10 @@
 import { posix as pathPosix } from "path"
+import { ensureVersionedSkillIdentifier } from "../../utils/skill-identifiers"
 
 export interface SkillMetadataLite {
   name?: string
   path?: string
+  version?: string
 }
 
 function normalizePath(path: string): string {
@@ -18,12 +20,13 @@ export class SkillUsageDetector {
     for (const skill of skills) {
       const skillName = typeof skill.name === "string" ? skill.name.trim() : ""
       const skillPath = typeof skill.path === "string" ? normalizePath(skill.path.trim()) : ""
-      if (!skillName || !skillPath) continue
+      const skillIdentifier = ensureVersionedSkillIdentifier(skillName, skill.version)
+      if (!skillName || !skillPath || !skillIdentifier) continue
 
-      this.loadedSkillsByDocPath.set(skillPath, skillName)
+      this.loadedSkillsByDocPath.set(skillPath, skillIdentifier)
       const rootDir = normalizePath(pathPosix.dirname(skillPath))
       if (rootDir && rootDir !== ".") {
-        this.loadedSkillsByRootDir.set(rootDir, skillName)
+        this.loadedSkillsByRootDir.set(rootDir, skillIdentifier)
       }
     }
   }

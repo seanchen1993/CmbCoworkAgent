@@ -35,6 +35,7 @@ import { execFileSync } from "child_process"
 import * as iconv from "iconv-lite"
 import * as chardet from "jschardet"
 import { getOpenworkDir } from "../storage"
+import { ensureVersionedSkillIdentifier } from "../utils/skill-identifiers"
 import { trackEvent } from "./event-reporter"
 import {
   closeAdoptionIndex,
@@ -414,6 +415,18 @@ function deriveDeletedLineCount(input: RecordGenInput): number {
   return Math.max(0, oldNonBlank - newNonBlank) * occurrences
 }
 
+function normalizeUsedSkills(skills: unknown): string[] {
+  if (!Array.isArray(skills)) return []
+
+  const normalized = new Set<string>()
+  for (const skill of skills) {
+    if (typeof skill !== "string") continue
+    const identifier = ensureVersionedSkillIdentifier(skill)
+    if (identifier) normalized.add(identifier)
+  }
+  return Array.from(normalized)
+}
+
 // ─────────────────────────────────────────────────────────
 // Context (set by TraceCollector during agent lifecycle)
 // ─────────────────────────────────────────────────────────
@@ -676,7 +689,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     // carry them too (ES can then slice adoption rates by skill / model / trace
     // directly, without a two-step join against code_gen). Using the snapshot
     // taken before the await — see the top of this function.
-    const usedSkills = Array.isArray(ctx.usedSkills) ? ctx.usedSkills : []
+    const usedSkills = normalizeUsedSkills(ctx.usedSkills)
     insertGenEvent({
       event_id: eventId,
       file_path: absPath,
@@ -704,7 +717,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       language: extname(absPath).slice(1).toLowerCase() || null,
       lineCount: hashes.length,
       deletedLineCount,
-      usedSkills: ctx.usedSkills ?? [],
+      usedSkills,
       modelId: ctx.modelId ?? null,
       modelName: ctx.modelName ?? null,
       // note: filePath / content / fingerprint intentionally withheld
@@ -734,6 +747,7 @@ function emitSkippedLargeAtGen(args: {
   const { eventId, input, absPath, relPath, lineCount, createdAt, ctx } = args
   const language = extname(absPath).slice(1).toLowerCase() || null
   const deletedLineCount = deriveDeletedLineCount(input)
+  const usedSkills = normalizeUsedSkills(ctx.usedSkills)
 
   // L1 — record that the agent generated code (metadata only, no path/content)
   trackEvent("code_gen", "code_adoption", {
@@ -746,7 +760,7 @@ function emitSkippedLargeAtGen(args: {
     language,
     lineCount,
     deletedLineCount,
-    usedSkills: ctx.usedSkills ?? [],
+    usedSkills,
     modelId: ctx.modelId ?? null,
     modelName: ctx.modelName ?? null,
     createdAt: new Date(createdAt).toISOString(),
@@ -770,7 +784,7 @@ function emitSkippedLargeAtGen(args: {
     // Mirror the attribution fields attached by the normal commit path, so
     // ES can aggregate adoption rates (including the skipped_large bucket)
     // uniformly — otherwise these rows look like they have no skill.
-    usedSkills: ctx.usedSkills ?? [],
+    usedSkills,
     modelId: ctx.modelId ?? null,
     modelName: ctx.modelName ?? null
   })
@@ -878,9 +892,7 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
     if (pending.used_skills) {
       try {
         const parsed = JSON.parse(pending.used_skills) as unknown
-        if (Array.isArray(parsed)) {
-          usedSkills = parsed.filter((s): s is string => typeof s === "string")
-        }
+        usedSkills = normalizeUsedSkills(parsed)
       } catch {
         // corrupt row — treat as no skill attribution
       }

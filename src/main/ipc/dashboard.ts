@@ -11,6 +11,7 @@ import { getUserInfo } from "../storage"
 import * as fs from "fs"
 import { buildTraceTree } from "../agent/trace/tree-builder"
 import type { AgentTrace, TraceNode } from "../agent/trace/types"
+import { getSkillIdentifierLookupTerms } from "../utils/skill-identifiers"
 
 // ─────────────────────────────────────────────────────────
 // ES Configuration (from .env)
@@ -750,6 +751,7 @@ async function fetchSkillRecentTraces(
   limit = 10
 ): Promise<DashboardTraceDetail[]> {
   const size = clampLimit(limit, 10, 10)
+  const skillTerms = getSkillIdentifierLookupTerms(skill)
   const body = {
     size,
     sort: [{ startedAt: { order: "desc" } }],
@@ -757,7 +759,7 @@ async function fetchSkillRecentTraces(
       bool: {
         filter: [
           timeRangeFilter("startedAt", range),
-          { term: { usedSkills: skill } }
+          { terms: { usedSkills: skillTerms } }
         ]
       }
     },
@@ -786,6 +788,7 @@ async function fetchSkillRecentTraces(
 }
 
 async function fetchSkillCodeStats(skill: string, range: TimeRange): Promise<DashboardCodeStats> {
+  const skillTerms = getSkillIdentifierLookupTerms(skill)
   const body = {
     size: 0,
     query: {
@@ -793,7 +796,7 @@ async function fetchSkillCodeStats(skill: string, range: TimeRange): Promise<Das
         filter: [
           timeRangeFilter("eventTime", range),
           { terms: { eventName: ["code_gen", "code_adopt"] } },
-          { term: { "properties.usedSkills": skill } }
+          { terms: { "properties.usedSkills": skillTerms } }
         ]
       }
     },

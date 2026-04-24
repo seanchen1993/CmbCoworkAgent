@@ -1007,7 +1007,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const processValuesSideEffects = (payload: unknown): void => {
         try {
           const state = payload as {
-            skillsMetadata?: Array<{ name?: string; path?: string }>
+            skillsMetadata?: Array<{ name?: string; path?: string; version?: string }>
             messages?: Array<{
               id?: string[]
               kwargs?: {
