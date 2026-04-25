@@ -408,6 +408,13 @@ export function ChatContainer({
   // Define loadSkills function at component level so it can be accessed everywhere
   const loadSkills = useCallback(async (): Promise<void> => {
     try {
+      const pluginSkillsPromise =
+        typeof window.api.skills.listPlugins === "function"
+          ? window.api.skills.listPlugins().catch((error) => {
+              console.warn("[ChatContainer] Failed to load plugin skills:", error)
+              return []
+            })
+          : Promise.resolve([])
       // Pull plugin skills alongside built-in/custom so the slash popover and
       // welcome-screen skill cards can surface them. Plugin-shipped skills go
       // through their own enable/disable lifecycle (plugin-level, not the
@@ -415,7 +422,7 @@ export function ChatContainer({
       // plugin.enabled, so we don't apply disabledSet to them here.
       const [loadedSkills, pluginSkills, disabledList] = await Promise.all([
         window.api.skills.list(),
-        window.api.skills.listPlugins(),
+        pluginSkillsPromise,
         window.api.skills.getDisabled()
       ])
       const disabledSet = new Set(disabledList)
@@ -2387,7 +2394,6 @@ export function ChatContainer({
 
               return (
                 <div
-                  isLoading={isLoading}
                   key={message.id}
                   ref={message.role === "user" ? setUserMessageRef(message.id) : undefined}
                   data-message-role={message.role}
@@ -2402,6 +2408,7 @@ export function ChatContainer({
                     onApprovalDecision={handleApprovalDecision}
                     onEditUserMessage={handleEditUserMessage}
                     threadId={threadId}
+                    isLoading={isLoading}
                   />
                 </div>
               )
