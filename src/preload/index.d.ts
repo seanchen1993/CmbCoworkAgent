@@ -407,6 +407,7 @@ interface CustomAPI {
   }
   skills: {
     list: () => Promise<SkillMetadata[]>
+    listPlugins: () => Promise<SkillMetadata[]>
     read: (skillPath: string) => Promise<{ success: boolean; content?: string; error?: string }>
     readBinary: (
       skillPath: string

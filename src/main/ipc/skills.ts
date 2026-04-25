@@ -3,7 +3,13 @@ import { IpcMain } from "electron"
 import * as fs from "fs/promises"
 import * as path from "path"
 import { existsSync, mkdirSync, rmSync } from "fs"
-import { getCustomSkillsDir, getDisabledSkills, getSkillsDir, setDisabledSkills } from "../storage"
+import {
+  getCustomSkillsDir,
+  getDisabledSkills,
+  getEnabledPluginSkillsSources,
+  getSkillsDir,
+  setDisabledSkills
+} from "../storage"
 import type { SkillMetadata } from "../types"
 
 function sanitizeSkillName(name: string): string {
@@ -142,11 +148,81 @@ export async function listAllSkills(): Promise<SkillMetadata[]> {
   return Array.from(byName.values())
 }
 
+/**
+ * List skills shipped by enabled plugins.
+ *
+ * Kept separate from listAllSkills() on purpose: plugin skills follow a
+ * different lifecycle (managed by plugin enable/disable, not the disabled-
+ * skills list), and the existing skills-management UIs (SkillsPanel,
+ * MarketPanel, EvolutionPanel) intentionally show only built-in/user skills
+ * to avoid letting users delete/disable plugin-owned files. This endpoint is
+ * for callers that want a complete picture (e.g. the slash-command popover).
+ *
+ * Marked with `source: "user"` because SkillMetadata's source is a closed
+ * enum {project, user} — pragmatically the closest fit, since plugin skills
+ * are user-installed rather than project-bundled.
+ */
+export async function listPluginSkills(): Promise<SkillMetadata[]> {
+  const sources = getEnabledPluginSkillsSources()
+  // Dedupe by skill name across plugins. When two enabled plugins ship a skill
+  // with the same name, a later one wins — there's no principled way to pick,
+  // and exposing duplicates would let the slash popover show two entries that
+  // recover to different paths after edit-resend.
+  const byName = new Map<string, SkillMetadata>()
+  for (const dir of sources) {
+    try {
+      // Two valid plugin shapes per getEnabledPluginSkillsSources():
+      //   1. plugin/skills/  — directory of sub-folders, each with a SKILL.md
+      //   2. plugin/         — the plugin root itself contains a single SKILL.md
+      // loadSkills() only walks shape 1; shape 2 needs a direct read.
+      // The two shapes are mutually exclusive at the source-list level:
+      // getEnabledPluginSkillsSources() picks `plugin/skills/` if it exists,
+      // otherwise `plugin/`. So we never see both for the same plugin here.
+      // If that storage strategy ever changes (mixed-shape plugins), revisit
+      // the if/else below — it would silently take only the root SKILL.md.
+      const rootSkillMd = path.join(dir, "SKILL.md")
+      if (existsSync(rootSkillMd)) {
+        const content = await fs.readFile(rootSkillMd, "utf-8")
+        const frontmatter = parseYamlFrontmatter(content)
+        // Fallback to the plugin directory's basename when frontmatter.name is
+        // missing — mirrors loadSkills() behaviour above. Without this, a
+        // plugin shipping a root SKILL.md without `name:` would silently
+        // disappear from the popover while still being loaded by hook system.
+        const name = frontmatter.name?.trim() || path.basename(dir)
+        byName.set(name, {
+          name,
+          description: frontmatter.description || "",
+          path: rootSkillMd,
+          source: "user",
+          version: frontmatter.version || "v1.0.0",
+          license: frontmatter.license || null,
+          compatibility: frontmatter.compatibility || null,
+          allowedTools: frontmatter["allowed-tools"]
+            ? frontmatter["allowed-tools"].split(/\s+/)
+            : undefined
+        })
+      } else {
+        const skills = await loadSkills(dir, "user")
+        for (const s of skills) byName.set(s.name, s)
+      }
+    } catch (e) {
+      // Per-plugin failures are non-fatal: keep going so a single bad plugin
+      // doesn't blank out every other one.
+      console.warn(`[Skills] Failed to load plugin skills from ${dir}:`, e)
+    }
+  }
+  return Array.from(byName.values())
+}
+
 export function registerSkillsHandlers(ipcMain: IpcMain): void {
   console.log("[Skills] Registering skills handlers...")
 
   ipcMain.handle("skills:list", async (): Promise<SkillMetadata[]> => {
     return listAllSkills()
+  })
+
+  ipcMain.handle("skills:listPlugins", async (): Promise<SkillMetadata[]> => {
+    return listPluginSkills()
   })
 
   ipcMain.handle("skills:getDisabled", async (): Promise<string[]> => {
