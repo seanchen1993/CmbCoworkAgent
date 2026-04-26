@@ -1614,6 +1614,11 @@ export function getPlugins(): PluginMetadata[] {
 function writePlugins(items: PluginMetadata[]): void {
   getOpenworkDir()
   writeFileSync(PLUGINS_FILE, JSON.stringify(items, null, 2))
+  // Plugin enable/disable changes the set of skills that listPluginSkills()
+  // and the hook system surface. Invalidate the cache here so the next read
+  // rebuilds — otherwise users see stale plugin entries in the slash popover
+  // immediately after toggling a plugin in MarketPanel.
+  invalidateEnabledSkillsCache()
 }
 
 export function upsertPlugin(meta: PluginMetadata): void {
