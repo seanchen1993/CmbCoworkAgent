@@ -614,7 +614,7 @@ export interface UserInfoConfig {
 
 export const DEFAULT_MAX_TOKENS = 128_000
 export const MIN_MAX_TOKENS = 32_000
-export const MAX_MAX_TOKENS = 128_000
+export const MAX_MAX_TOKENS = 1_000_000
 
 export interface CustomModelPublicConfig {
   id: string
