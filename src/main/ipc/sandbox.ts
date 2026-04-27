@@ -65,6 +65,30 @@ export function normalizeDirKey(dir: string): string {
   return resolve(dir).replace(/\/+/g, "\\").replace(/\\+$/, "").toLowerCase()
 }
 
+const ELEVATED_SYSTEM_SENSITIVE_ROOTS = [
+  "c:\\windows",
+  "c:\\program files",
+  "c:\\program files (x86)",
+  "c:\\programdata",
+  "c:\\users\\all users",
+  "c:\\users\\default",
+  "c:\\users\\public"
+]
+
+export function getElevatedSystemSensitivePathError(dir: string): string | null {
+  if (!dir || typeof dir !== "string") return null
+  let key: string
+  try {
+    key = normalizeDirKey(dir)
+  } catch {
+    return null
+  }
+
+  const blockedRoot = ELEVATED_SYSTEM_SENSITIVE_ROOTS.find((root) => key === root || key.startsWith(`${root}\\`))
+  if (!blockedRoot) return null
+  return `Elevated 模式可以读取系统目录，也可能执行不涉及写入的命令；但当前模式需要为工作区准备写入权限，不支持将系统敏感目录作为工作区：${dir}。请选择普通项目目录作为工作区；如只需读取或执行非写入命令，请切换到 readonly/unelevated/none 后重试。`
+}
+
 function isSafeElevatedPreparedRoot(dir: string): boolean {
   if (!dir || typeof dir !== "string") return false
   if (/^[\\/]{2}/.test(dir)) return false
@@ -77,19 +101,7 @@ function isSafeElevatedPreparedRoot(dir: string): boolean {
   }
 
   if (/^[a-z]:$/i.test(key)) return false
-
-  const blockedRoots = [
-    "c:\\windows",
-    "c:\\program files",
-    "c:\\program files (x86)",
-    "c:\\programdata",
-    "c:\\users\\all users",
-    "c:\\users\\default",
-    "c:\\users\\public"
-  ]
-  if (blockedRoots.some((root) => key === root || key.startsWith(`${root}\\`))) {
-    return false
-  }
+  if (getElevatedSystemSensitivePathError(dir)) return false
 
   try {
     return statSync(resolve(dir)).isDirectory()
@@ -334,6 +346,7 @@ export async function runElevatedSetupForPaths(
   // write_roots: TEMP + workspace paths (validated)
   const writeRoots = [tmpDir]
   const validatedWorkspacePaths: string[] = []
+  const rejectedWorkspaceErrors: string[] = []
   if (workspacePaths) {
     for (const p of workspacePaths) {
       if (!p || typeof p !== "string") continue
@@ -352,14 +365,10 @@ export async function runElevatedSetupForPaths(
         console.warn(`[Sandbox] Rejected write_root: drive root "${p}"`)
         continue
       }
-      // Block system directories
-      const blockedPrefixes = [
-        "c:/windows", "c:/program files", "c:/program files (x86)",
-        "c:/programdata", "c:/users/all users", "c:/users/default",
-        "c:/users/public"
-      ]
-      if (blockedPrefixes.some(bp => normalized === bp || normalized.startsWith(bp + "/"))) {
-        console.warn(`[Sandbox] Rejected write_root: system directory "${p}"`)
+      const sensitivePathError = getElevatedSystemSensitivePathError(resolved)
+      if (sensitivePathError) {
+        console.warn(`[Sandbox] Rejected write_root: ${sensitivePathError}`)
+        rejectedWorkspaceErrors.push(sensitivePathError)
         continue
       }
       // Block sensitive user directories
@@ -385,6 +394,9 @@ export async function runElevatedSetupForPaths(
       if (!writeRoots.includes(resolved)) writeRoots.push(resolved)
       validatedWorkspacePaths.push(resolved)
     }
+  }
+  if (workspacePaths?.length && validatedWorkspacePaths.length === 0 && rejectedWorkspaceErrors.length > 0) {
+    return { success: false, error: rejectedWorkspaceErrors[0] }
   }
 
   // read_roots: user profile subdirs (excluding sensitive dirs) + standard Windows dirs

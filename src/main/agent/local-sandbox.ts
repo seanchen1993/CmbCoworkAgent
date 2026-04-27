@@ -38,7 +38,8 @@ import {
   isElevatedSetupComplete,
   markElevatedRootsPrepared,
   runElevatedSetupForPaths,
-  normalizeDirKey
+  normalizeDirKey,
+  getElevatedSystemSensitivePathError
 } from "../ipc/sandbox"
 import { getWindowsSandboxMode } from "../storage"
 import { homedir } from "node:os"
@@ -173,6 +174,7 @@ interface ExecuteRawOptions {
 interface WorkspaceSwitchPreparationResult {
   ready: boolean
   prompted: boolean
+  reason?: "system-sensitive-path"
   error?: string
 }
 
@@ -655,6 +657,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     })
 
     if (windowsSandbox === "elevated") {
+      if (getElevatedSystemSensitivePathError(resolvedWorkspace)) return
       const cacheRoots = Array.from(new Set([
         cacheRoot,
         sharedCacheRoot
@@ -705,6 +708,10 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     }
 
     const { resolvedWorkspace, cacheRoots } = LocalSandbox.buildElevatedWorkspaceCacheRoots(workspacePath, env)
+    const sensitivePathError = getElevatedSystemSensitivePathError(resolvedWorkspace)
+    if (sensitivePathError) {
+      return { ready: false, prompted: false, reason: "system-sensitive-path", error: sensitivePathError }
+    }
     if (LocalSandbox.areElevatedWorkspaceRootsPrepared(resolvedWorkspace, cacheRoots)) {
       return { ready: true, prompted: false }
     }
@@ -2940,6 +2947,14 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
 
     if (isElevatedSandbox) {
       try {
+        const sensitivePathError = getElevatedSystemSensitivePathError(this.workingDir)
+        if (sensitivePathError) {
+          return {
+            output: sensitivePathError,
+            exitCode: 1,
+            truncated: false
+          }
+        }
         if (!isElevatedSetupComplete()) {
           return {
             output: "Elevated 沙箱尚未完成初始化。请在设置中手动完成 elevated 配置，或切换到 unelevated/none 后重试。",

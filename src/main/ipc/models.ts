@@ -90,20 +90,24 @@ function prepareWorkspaceSelectionSandbox(
       if (getWindowsSandboxMode() !== "elevated") return
       if (shouldStillNotify && !(await shouldStillNotify())) return
 
-      console.warn(`[Workspace] elevated sandbox setup for ${workspacePath} did not complete: ${result.error}`)
-      const messageBoxOptions: MessageBoxOptions = {
-        type: "warning",
-        title: "Elevated 沙箱配置未完成",
-        message: "已切换工作区，但 Elevated 沙箱配置未完成。",
-        detail: `${result.error}\n\n请在设置中手动完成 Elevated 配置，或切换到 unelevated / none 后重试。`,
-        buttons: ["知道了"],
-        defaultId: 0
+      if (result.reason === "system-sensitive-path") {
+        const messageBoxOptions: MessageBoxOptions = {
+          type: "warning",
+          title: "Elevated 工作区受限",
+          message: "Elevated 模式可以读取系统目录，也可能执行不涉及写入的命令；但当前模式需要为工作区准备写入权限，不支持将系统敏感目录作为工作区。",
+          detail: result.error,
+          buttons: ["知道了"],
+          defaultId: 0
+        }
+        if (parentWindow && !parentWindow.isDestroyed()) {
+          await dialog.showMessageBox(parentWindow, messageBoxOptions)
+        } else {
+          await dialog.showMessageBox(messageBoxOptions)
+        }
+        return
       }
-      if (parentWindow && !parentWindow.isDestroyed()) {
-        await dialog.showMessageBox(parentWindow, messageBoxOptions)
-      } else {
-        await dialog.showMessageBox(messageBoxOptions)
-      }
+
+      console.warn(`[Workspace] elevated sandbox background preparation for ${workspacePath} did not complete: ${result.error}`)
     })
     .catch((err) => {
       console.warn("[Workspace] elevated sandbox background preparation failed:", err)
