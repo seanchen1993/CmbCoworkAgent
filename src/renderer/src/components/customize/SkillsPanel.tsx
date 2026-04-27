@@ -1537,6 +1537,7 @@ export function SkillsPanel(): React.JSX.Element {
                 onToggleDirNode={toggleDirNode}
                 onSelectFile={onSelectFile}
                 hideFeaturedMarketFiles
+                hideMarketTag
               />
             )}
           </div>
@@ -1644,6 +1645,7 @@ function SkillSection(props: {
   expandedDirNodes: Set<string>
   disabledSkills: Set<string>
   hideFeaturedMarketFiles?: boolean
+  hideMarketTag?: boolean
   onToggleSkill: (skill: SkillMetadata) => void
   onToggleDirNode: (nodeId: string) => void
   onSelectFile: (skill: SkillMetadata, filePath: string) => void
@@ -1660,6 +1662,7 @@ function SkillSection(props: {
     expandedDirNodes,
     disabledSkills,
     hideFeaturedMarketFiles = false,
+    hideMarketTag = false,
     onToggleSkill,
     onToggleDirNode,
     onSelectFile
@@ -1757,6 +1760,7 @@ function SkillSection(props: {
                   skill={skill}
                   marketInfo={marketInfo}
                   hasMarketEntry={hasMarketEntry}
+                  hideMarketTag={hideMarketTag}
                   isEdited={isEdited}
                   expanded={expanded}
                   selected={selected}
@@ -1781,6 +1785,7 @@ function SkillItem(props: {
   skill: SkillMetadata
   marketInfo?: SkillMarketInfo
   hasMarketEntry: boolean
+  hideMarketTag?: boolean
   isEdited: boolean
   expanded: boolean
   selected: boolean
@@ -1796,6 +1801,7 @@ function SkillItem(props: {
     skill,
     marketInfo,
     hasMarketEntry,
+    hideMarketTag = false,
     isEdited,
     expanded,
     selected,
@@ -1857,7 +1863,7 @@ function SkillItem(props: {
               精品
             </Badge>
           )}
-          {hasMarketEntry && (
+          {hasMarketEntry && !hideMarketTag && (
             <Badge
               variant="outline"
               className="h-4 gap-1 px-1.5 text-[10px] border-emerald-200 text-emerald-700 bg-emerald-50"
