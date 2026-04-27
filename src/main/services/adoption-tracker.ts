@@ -655,6 +655,10 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     }
 
     const hashes = repeatLineHashes(singleHashes, generationOccurrences)
+    const oldLineHashes =
+      input.tool === "edit_file" && typeof input.oldString === "string"
+        ? repeatLineHashes(computeLineHashes(input.oldString), getDeletionOccurrenceCount(input))
+        : new Uint32Array(0)
     const fingerprint = generationFingerprint(input.generatedContent, generationOccurrences)
 
     // ── JSONL record ────────────────────────────────────
@@ -693,6 +697,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       shard_file: shardFile,
       shard_offset: offset,
       line_hashes: packLineHashes(hashes),
+      old_line_hashes: oldLineHashes.length > 0 ? packLineHashes(oldLineHashes) : null,
       created_at: createdAt,
       measured: 0,
       used_skills: usedSkills.length > 0 ? JSON.stringify(usedSkills) : null,
@@ -772,6 +777,7 @@ function emitSkippedLargeAtGen(args: {
     traceId: ctx.traceId ?? null,
     verdict: "skipped_large",
     generatedLineCount: lineCount,
+    effectiveGeneratedLineCount: lineCount,
     adoptedLineCount: null,
     measureSource: "gen_oversize",
     measureLatencyMs: 0,
@@ -829,6 +835,7 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
 
     let currentHashCounts: Map<number, number> | null = null
     let missingCurrentContent = false
+    const supersededHashCounts = new Map<number, number>()
 
     if (!opts?.stagedDeleted) {
       let current = opts?.currentContent
@@ -857,6 +864,12 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
         continue
       }
       const generatedLineCount = storedHashes.length
+      const oversizedBaseline = storedHashes.length > MAX_LINES_FOR_MEASURE
+      const { effectiveLineCount, adoptedFromEffective } = consumeEffectiveAdoptionLines(
+        storedHashes,
+        supersededHashCounts,
+        oversizedBaseline ? null : currentHashCounts
+      )
       let adoptedLineCount: number | null = null
 
       if (opts?.stagedDeleted || missingCurrentContent) {
@@ -864,11 +877,11 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
         // file is unreadable after commit. Both are terminal deletion verdicts.
         verdict = "deleted"
         adoptedLineCount = 0
-      } else if (storedHashes.length > MAX_LINES_FOR_MEASURE) {
+      } else if (oversizedBaseline) {
         verdict = "skipped_large"
         adoptedLineCount = null
       } else {
-        adoptedLineCount = consumeAdoptedLines(storedHashes, currentHashCounts)
+        adoptedLineCount = adoptedFromEffective
       }
 
       const adoptEventId = `a_${randomUUID()}`
@@ -879,6 +892,7 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
         genEventId: pending.event_id,
         verdict,
         generatedLineCount,
+        effectiveGeneratedLineCount: effectiveLineCount,
         adoptedLineCount,
         measureSource: "git_commit",
         measuredAt,
@@ -908,6 +922,7 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
         traceId: pending.trace_id ?? null,
         verdict,
         generatedLineCount,
+        effectiveGeneratedLineCount: effectiveLineCount,
         adoptedLineCount,
         measureSource: "git_commit",
         measureLatencyMs: measuredAt - pending.created_at,
@@ -917,6 +932,14 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
         modelId: pending.model_id ?? null,
         modelName: pending.model_name ?? null
       })
+
+      if (pending.old_line_hashes) {
+        try {
+          addLineHashesToCounts(supersededHashCounts, unpackLineHashes(pending.old_line_hashes))
+        } catch {
+          // corrupt row — keep measuring older rows without supersession hints
+        }
+      }
     }
   } catch (e) {
     console.warn("[AdoptionTracker] doMeasureFile failed:", e)
@@ -927,29 +950,50 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
 
 function buildLineHashCounts(lines: Uint32Array): Map<number, number> {
   const counts = new Map<number, number>()
+  addLineHashesToCounts(counts, lines)
+  return counts
+}
+
+function addLineHashesToCounts(counts: Map<number, number>, lines: Uint32Array): void {
   for (let i = 0; i < lines.length; i++) {
     const h = lines[i]
     counts.set(h, (counts.get(h) ?? 0) + 1)
   }
-  return counts
 }
 
-/** Count and consume how many generated baseline lines still appear in the committed file. */
-function consumeAdoptedLines(
+/**
+ * Count effective generated lines after excluding older baseline lines that a
+ * later agent edit explicitly replaced, then consume the subset still present
+ * in the committed file.
+ */
+function consumeEffectiveAdoptionLines(
   baseline: Uint32Array,
+  supersededCounts: Map<number, number>,
   availableCounts: Map<number, number> | null
-): number {
-  if (baseline.length === 0 || !availableCounts) return 0
-  let kept = 0
+): { effectiveLineCount: number; adoptedFromEffective: number } {
+  if (baseline.length === 0) {
+    return { effectiveLineCount: 0, adoptedFromEffective: 0 }
+  }
+
+  let effectiveLineCount = 0
+  let adoptedFromEffective = 0
   for (let i = 0; i < baseline.length; i++) {
     const h = baseline[i]
+    const superseded = supersededCounts.get(h)
+    if (superseded && superseded > 0) {
+      supersededCounts.set(h, superseded - 1)
+      continue
+    }
+
+    effectiveLineCount++
+    if (!availableCounts) continue
     const c = availableCounts.get(h)
     if (c && c > 0) {
-      kept++
+      adoptedFromEffective++
       availableCounts.set(h, c - 1)
     }
   }
-  return kept
+  return { effectiveLineCount, adoptedFromEffective }
 }
 
 // ─────────────────────────────────────────────────────────

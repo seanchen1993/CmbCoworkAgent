@@ -67,6 +67,7 @@ export interface GenIndexRow {
   shard_file: string
   shard_offset: number
   line_hashes: Uint8Array | null
+  old_line_hashes: Uint8Array | null
   created_at: number
   measured: number
   /** JSON-encoded string[] of skill names active at gen time, or null. */
@@ -105,6 +106,7 @@ export async function initializeAdoptionIndex(): Promise<void> {
         shard_file TEXT NOT NULL,
         shard_offset INTEGER NOT NULL,
         line_hashes BLOB,
+        old_line_hashes BLOB,
         created_at INTEGER NOT NULL,
         measured INTEGER NOT NULL DEFAULT 0,
         used_skills TEXT,
@@ -123,7 +125,8 @@ export async function initializeAdoptionIndex(): Promise<void> {
       "thread_id TEXT",
       "trace_id TEXT",
       "model_id TEXT",
-      "model_name TEXT"
+      "model_name TEXT",
+      "old_line_hashes BLOB"
     ]) {
       try {
         db.run(`ALTER TABLE gen_events ADD COLUMN ${col}`)
@@ -178,9 +181,9 @@ export function insertGenEvent(row: GenIndexRow): void {
   try {
     db.run(
       `INSERT OR REPLACE INTO gen_events
-       (event_id, file_path, content_fingerprint, shard_file, shard_offset, line_hashes, created_at, measured,
+       (event_id, file_path, content_fingerprint, shard_file, shard_offset, line_hashes, old_line_hashes, created_at, measured,
         used_skills, thread_id, trace_id, model_id, model_name)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         row.event_id,
         row.file_path,
@@ -188,6 +191,7 @@ export function insertGenEvent(row: GenIndexRow): void {
         row.shard_file,
         row.shard_offset,
         row.line_hashes ?? null,
+        row.old_line_hashes ?? null,
         row.created_at,
         row.measured,
         row.used_skills,
@@ -211,7 +215,7 @@ export function findPendingGensForFile(filePath: string, minCreatedAt: number): 
   if (!db) return []
   const stmt = db.prepare(
     `SELECT event_id, file_path, content_fingerprint, shard_file, shard_offset,
-            line_hashes, created_at, measured,
+            line_hashes, old_line_hashes, created_at, measured,
             used_skills, thread_id, trace_id, model_id, model_name
        FROM gen_events
       WHERE file_path = ? AND measured = 0 AND created_at >= ?

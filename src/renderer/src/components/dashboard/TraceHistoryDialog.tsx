@@ -67,8 +67,9 @@ function GeneratedLinesTooltip(): React.JSX.Element {
   return (
     <div className="space-y-1 text-[11px]">
       <div className="font-medium text-foreground">代码生成行数说明</div>
-      <div className="text-muted-foreground">当前按非空行统计。</div>
+      <div className="text-muted-foreground">当前按 agent 写入或编辑的非空行统计。</div>
       <div className="text-muted-foreground">空行和仅包含空白字符的行不会计入。</div>
+      <div className="text-muted-foreground">该指标表示原始生成量，包含后续被 agent 自己改写的中间稿。</div>
     </div>
   )
 }
@@ -157,7 +158,11 @@ function AdoptionDetailTooltip({ stats }: { stats: DashboardCodeStats }): React.
           <span className="font-medium text-foreground">{fmtExactLines(stats.adoptedLines)} 行</span>
         </div>
         <div className="flex items-center justify-between gap-4">
-          <span className="text-muted-foreground">生成行数</span>
+          <span className="text-muted-foreground">有效生成行数</span>
+          <span className="font-medium text-foreground">{fmtExactLines(stats.effectiveGeneratedLines)} 行</span>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">原始生成行数</span>
           <span className="font-medium text-foreground">{fmtExactLines(stats.generatedLines)} 行</span>
         </div>
         <div className="flex items-center justify-between gap-4">
@@ -165,7 +170,9 @@ function AdoptionDetailTooltip({ stats }: { stats: DashboardCodeStats }): React.
           <span className="font-medium text-foreground">{fmtExactLines(stats.deletedLines)} 行</span>
         </div>
       </div>
-      <div className="text-[10px] text-muted-foreground">采纳率按 采纳行数 / 生成行数 计算</div>
+      <div className="text-[10px] text-muted-foreground">
+        采纳率按 采纳行数 / 有效生成行数 计算，已扣除被后续 agent 编辑覆盖的中间稿。
+      </div>
     </div>
   )
 }
@@ -219,7 +226,7 @@ function SkillCodeStatsBar({ stats }: { stats: DashboardCodeStats | null }): Rea
           sub={
             stats.adoptionRate === null
               ? "暂无代码生成数据"
-              : `${fmtLines(stats.adoptedLines)} / ${fmtLines(stats.generatedLines)} 行`
+              : `${fmtLines(stats.adoptedLines)} / ${fmtLines(stats.effectiveGeneratedLines)} 行`
           }
           tooltipContent={<AdoptionDetailTooltip stats={stats} />}
         />

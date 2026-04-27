@@ -147,6 +147,7 @@ interface DashboardCommitDetail {
 interface DashboardCodeStats {
   generatedLines: number
   deletedLines: number
+  effectiveGeneratedLines: number
   measuredGeneratedLines: number
   adoptedLines: number
   adoptionRate: number | null
@@ -319,6 +320,25 @@ function computeAdoptionRate(adoptedLines: number, generatedLines: number): numb
   return generatedLines > 0 ? adoptedLines / generatedLines : null
 }
 
+function effectiveGeneratedLinesSumAgg(): Record<string, unknown> {
+  return {
+    sum: {
+      script: {
+        lang: "painless",
+        source: `
+          if (doc.containsKey('properties.effectiveGeneratedLineCount') && doc['properties.effectiveGeneratedLineCount'].size() != 0) {
+            return doc['properties.effectiveGeneratedLineCount'].value;
+          }
+          if (doc.containsKey('properties.generatedLineCount') && doc['properties.generatedLineCount'].size() != 0) {
+            return doc['properties.generatedLineCount'].value;
+          }
+          return 0;
+        `
+      }
+    }
+  }
+}
+
 function normalizeCodeStatsFromAggs(raw: unknown): DashboardCodeStats {
   const generatedLines = getAggNumber(raw, ["aggregations", "code_gen", "generated_lines", "value"])
   const deletedLines = getAggNumber(raw, ["aggregations", "code_gen", "deleted_lines", "value"])
@@ -328,13 +348,19 @@ function normalizeCodeStatsFromAggs(raw: unknown): DashboardCodeStats {
     "measured_generated_lines",
     "value"
   ])
+  const effectiveGeneratedLines = getAggNumber(
+    raw,
+    ["aggregations", "code_adopt_measured", "effective_generated_lines", "value"],
+    measuredGeneratedLines
+  )
   const adoptedLines = getAggNumber(raw, ["aggregations", "code_adopt_measured", "adopted_lines", "value"])
   return {
     generatedLines,
     deletedLines,
+    effectiveGeneratedLines,
     measuredGeneratedLines,
     adoptedLines,
-    adoptionRate: computeAdoptionRate(adoptedLines, generatedLines)
+    adoptionRate: computeAdoptionRate(adoptedLines, effectiveGeneratedLines)
   }
 }
 
@@ -590,6 +616,7 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
         },
         aggs: {
           measured_generated_lines: { sum: { field: "properties.generatedLineCount" } },
+          effective_generated_lines: effectiveGeneratedLinesSumAgg(),
           adopted_lines: { sum: { field: "properties.adoptedLineCount" } }
         }
       }
@@ -608,6 +635,7 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
       ...asRecord(traceRecord.aggregations),
       code_generated_lines: { value: codeStats.generatedLines },
       code_deleted_lines: { value: codeStats.deletedLines },
+      code_effective_generated_lines: { value: codeStats.effectiveGeneratedLines },
       code_measured_generated_lines: { value: codeStats.measuredGeneratedLines },
       code_adopted_lines: { value: codeStats.adoptedLines }
     }
@@ -1059,6 +1087,7 @@ async function fetchSkillCodeStats(skill: string, range: TimeRange): Promise<Das
         },
         aggs: {
           measured_generated_lines: { sum: { field: "properties.generatedLineCount" } },
+          effective_generated_lines: effectiveGeneratedLinesSumAgg(),
           adopted_lines: { sum: { field: "properties.adoptedLineCount" } }
         }
       }
@@ -1807,13 +1836,15 @@ function makeMockSkillCodeStats(skill: string): DashboardCodeStats {
   const generatedLines = 680 + (seed % 360)
   const deletedLines = 80 + (seed % 90)
   const measuredGeneratedLines = Math.max(0, generatedLines - 120)
-  const adoptedLines = Math.round(measuredGeneratedLines * (0.62 + (seed % 18) / 100))
+  const effectiveGeneratedLines = Math.max(0, measuredGeneratedLines - 30)
+  const adoptedLines = Math.round(effectiveGeneratedLines * (0.62 + (seed % 18) / 100))
   return {
     generatedLines,
     deletedLines,
+    effectiveGeneratedLines,
     measuredGeneratedLines,
     adoptedLines,
-    adoptionRate: computeAdoptionRate(adoptedLines, generatedLines)
+    adoptionRate: computeAdoptionRate(adoptedLines, effectiveGeneratedLines)
   }
 }
 

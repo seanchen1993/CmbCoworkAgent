@@ -108,6 +108,7 @@ interface DashboardCommitDetail {
 interface DashboardCodeStats {
   generatedLines: number
   deletedLines: number
+  effectiveGeneratedLines: number
   measuredGeneratedLines: number
   adoptedLines: number
   adoptionRate: number | null

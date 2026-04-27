@@ -81,7 +81,11 @@ function AdoptionDetailTooltip({ data }: { data: OverviewData }) {
           <span className="font-medium text-foreground">{formatExactNumber(data.codeAdoptedLines)} 行</span>
         </div>
         <div className="flex items-center justify-between gap-4">
-          <span className="text-muted-foreground">生成行数</span>
+          <span className="text-muted-foreground">有效生成行数</span>
+          <span className="font-medium text-foreground">{formatExactNumber(data.codeEffectiveGeneratedLines)} 行</span>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">原始生成行数</span>
           <span className="font-medium text-foreground">{formatExactNumber(data.codeGeneratedLines)} 行</span>
         </div>
         <div className="flex items-center justify-between gap-4">
@@ -89,7 +93,9 @@ function AdoptionDetailTooltip({ data }: { data: OverviewData }) {
           <span className="font-medium text-foreground">{formatExactNumber(data.codeDeletedLines)} 行</span>
         </div>
       </div>
-      <div className="text-[10px] text-muted-foreground">采纳率按 采纳行数 / 生成行数 计算</div>
+      <div className="text-[10px] text-muted-foreground">
+        采纳率按 采纳行数 / 有效生成行数 计算，已扣除被后续 agent 编辑覆盖的中间稿。
+      </div>
     </div>
   )
 }
@@ -98,8 +104,9 @@ function GeneratedLinesTooltip(): React.JSX.Element {
   return (
     <div className="space-y-1 text-[11px]">
       <div className="font-medium text-foreground">代码生成行数说明</div>
-      <div className="text-muted-foreground">当前按非空行统计。</div>
+      <div className="text-muted-foreground">当前按 agent 写入或编辑的非空行统计。</div>
       <div className="text-muted-foreground">空行和仅包含空白字符的行不会计入。</div>
+      <div className="text-muted-foreground">该指标表示原始生成量，包含后续被 agent 自己改写的中间稿。</div>
     </div>
   )
 }
@@ -478,7 +485,7 @@ export function OverviewPanel({
           sub={
             data.codeAdoptionRate === null
               ? "暂无代码生成数据"
-              : `${formatNumber(data.codeAdoptedLines)} / ${formatNumber(data.codeGeneratedLines)} 行`
+              : `${formatNumber(data.codeAdoptedLines)} / ${formatNumber(data.codeEffectiveGeneratedLines)} 行`
           }
           color="bg-cyan-500"
           tooltipContent={<AdoptionDetailTooltip data={data} />}

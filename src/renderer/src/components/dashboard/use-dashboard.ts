@@ -22,6 +22,7 @@ export interface OverviewData {
   outputTokens: number
   codeGeneratedLines: number
   codeDeletedLines: number
+  codeEffectiveGeneratedLines: number
   codeMeasuredGeneratedLines: number
   codeAdoptedLines: number
   codeAdoptionRate: number | null
@@ -119,6 +120,7 @@ export interface DashboardCommitDetail {
 export interface DashboardCodeStats {
   generatedLines: number
   deletedLines: number
+  effectiveGeneratedLines: number
   measuredGeneratedLines: number
   adoptedLines: number
   adoptionRate: number | null
@@ -321,10 +323,12 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
   const outputTokens = aggs.total_output_tokens?.value ?? 0
   const codeGeneratedLines = aggs.code_generated_lines?.value ?? 0
   const codeDeletedLines = aggs.code_deleted_lines?.value ?? 0
+  const codeEffectiveGeneratedLines =
+    aggs.code_effective_generated_lines?.value ?? aggs.code_measured_generated_lines?.value ?? codeGeneratedLines
   const codeMeasuredGeneratedLines = aggs.code_measured_generated_lines?.value ?? 0
   const codeAdoptedLines = aggs.code_adopted_lines?.value ?? 0
   const codeAdoptionRate =
-    codeGeneratedLines > 0 ? codeAdoptedLines / codeGeneratedLines : null
+    codeEffectiveGeneratedLines > 0 ? codeAdoptedLines / codeEffectiveGeneratedLines : null
   const totalSkills = aggs.total_skills?.value ?? 0
   const totalTools = aggs.total_tools?.value ?? 0
   const totalSkillCalls = aggs.total_skill_calls?.value ?? 0
@@ -378,6 +382,7 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
     outputTokens,
     codeGeneratedLines,
     codeDeletedLines,
+    codeEffectiveGeneratedLines,
     codeMeasuredGeneratedLines,
     codeAdoptedLines,
     codeAdoptionRate,

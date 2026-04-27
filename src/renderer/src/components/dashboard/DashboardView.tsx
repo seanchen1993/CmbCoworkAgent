@@ -205,6 +205,7 @@ const EMPTY_SKILL_DETAIL: DashboardSkillDetail = {
   stats: {
     generatedLines: 0,
     deletedLines: 0,
+    effectiveGeneratedLines: 0,
     measuredGeneratedLines: 0,
     adoptedLines: 0,
     adoptionRate: null
@@ -308,6 +309,7 @@ export function DashboardView(): React.JSX.Element {
             ["输入 Token", overview.inputTokens],
             ["输出 Token", overview.outputTokens],
             ["代码生成行数", overview.codeGeneratedLines],
+            ["代码有效生成行数", overview.codeEffectiveGeneratedLines],
             ["代码删除行数", overview.codeDeletedLines],
             ["代码采纳行数", overview.codeAdoptedLines],
             ["代码采纳率", formatPercent(overview.codeAdoptionRate)],
