@@ -86,6 +86,8 @@ class Settings(BaseModel):
     markdown_react_max_files: int = 4
     markdown_react_max_token_budget: int = 12_000
     error_analyst_react_max_reads: int = 3
+    error_analyst_max_markdown_reads: int = 2
+    error_analyst_max_artifact_reads: int = 1
     family_similarity_threshold: float = 0.35
     episode_gap_minutes: int = 30
     enable_episode_route_classifier: bool = True

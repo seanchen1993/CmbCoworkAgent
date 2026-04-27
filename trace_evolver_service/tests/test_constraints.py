@@ -84,7 +84,7 @@ def test_llm_edit_builder_only_allows_visible_existing_markdown(tmp_path: Path) 
     _build_bundle(tmp_path)
     bundle = scan_skill_roots([str(tmp_path)])[0]
 
-    ops = _build_ops_from_llm_edits(
+    ops, rejected = _build_ops_from_llm_edits(
         [
             {
                 "file": "references/troubleshooting.md",
@@ -183,6 +183,36 @@ def test_bounded_markdown_react_respects_dynamic_budget(tmp_path: Path) -> None:
     assert any("soft budget" in note for note in notes)
 
 
+def _make_fake_chat_model(responses):
+    """Create a fake ChatOpenAI that returns pre-built AIMessages.
+
+    ``responses`` is a list of lists-of-tool-call-dicts.  Each outer entry is
+    one ``invoke()`` call; each inner dict has ``name``, ``args``, ``id``.
+    Supports ``bind_tools`` / ``bind`` via a simple passthrough.
+    """
+    from langchain_core.messages import AIMessage
+
+    class _FakeModel:
+        def __init__(self, resps):
+            self._resps = list(resps)
+            self._idx = 0
+
+        def bind_tools(self, *a, **kw):  # noqa: ANN002,ANN003
+            return self  # passthrough
+
+        def bind(self, **kw):  # noqa: ANN003
+            return self
+
+        def invoke(self, messages, **kw):  # noqa: ANN001,ANN003
+            if self._idx >= len(self._resps):
+                return AIMessage(content="(exhausted)", tool_calls=[])
+            tool_calls = self._resps[self._idx]
+            self._idx += 1
+            return AIMessage(content="", tool_calls=tool_calls)
+
+    return _FakeModel(responses)
+
+
 def test_error_analyst_can_request_full_read_before_writing_patch(tmp_path: Path, monkeypatch) -> None:
     _build_bundle(tmp_path)
     bundle = scan_skill_roots([str(tmp_path)])[0]
@@ -211,34 +241,19 @@ def test_error_analyst_can_request_full_read_before_writing_patch(tmp_path: Path
         confidence=0.8,
     )
 
-    class FakeLLM:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def chat_json(self, messages, temperature=None, max_tokens=None):  # noqa: ANN001
-            self.calls += 1
-            if self.calls == 1:
-                return {
-                    "action": "read_file",
-                    "file": "references/troubleshooting.md",
-                    "reason": "Need the troubleshooting guidance before patching it.",
-                }
-            return {
-                "action": "write_patch",
-                "edits": [
-                    {
-                        "file": "references/troubleshooting.md",
-                        "op": "append_file_end",
+    fake_model = _make_fake_chat_model([
+        # Turn 1: read_file
+        [{"name": "ReadFileParams", "args": {"file": "references/troubleshooting.md", "reason": "Need it before patching."}, "id": "call_1"}],
+        # Turn 2: write_patch
+        [{"name": "WritePatchParams", "args": {
+            "edits": [{"file": "references/troubleshooting.md", "op": "append_file_end",
                         "content": "## Resolver-first check\n\n- Verify resolver behavior before concluding the UI fix is enough.\n",
-                        "intent": "reference",
-                    }
-                ],
-                "confidence": 0.77,
-                "rationale": "Adds the missing resolver-specific reminder where the troubleshooting note already lives.",
-            }
-
-    fake_llm = FakeLLM()
-    monkeypatch.setattr("trace_evolver.analysis._get_llm", lambda settings: fake_llm)
+                        "intent": "reference"}],
+            "confidence": 0.77,
+            "rationale": "Adds the missing resolver-specific reminder.",
+        }, "id": "call_2"}],
+    ])
+    monkeypatch.setattr("trace_evolver.react_agent.create_chat_model", lambda settings: fake_model)
 
     patch, notes = analyst._react_patch_loop(  # noqa: SLF001
         episode,
@@ -635,25 +650,17 @@ def test_error_analyst_llm_can_emit_exact_text_edit(tmp_path: Path, monkeypatch)
         confidence=0.8,
     )
 
-    class FakeLLM:
-        def chat_json(self, messages, temperature=None, max_tokens=None):  # noqa: ANN001
-            return {
-                "action": "write_patch",
-                "edits": [
-                    {
-                        "file": "SKILL.md",
-                        "op": "edit",
+    fake_model = _make_fake_chat_model([
+        [{"name": "WritePatchParams", "args": {
+            "edits": [{"file": "SKILL.md", "op": "edit",
                         "old_string": "- Start from the failing path.",
                         "new_string": "- Start from the failing path.\n- Compare UI validation, resolver, and submit path before patching.",
-                        "intent": "workflow",
-                    }
-                ],
-                "confidence": 0.81,
-                "rationale": "Tightens the workflow with the missing resolver check.",
-            }
-
-    fake_llm = FakeLLM()
-    monkeypatch.setattr("trace_evolver.analysis._get_llm", lambda settings: fake_llm)
+                        "intent": "workflow"}],
+            "confidence": 0.81,
+            "rationale": "Tightens the workflow with the missing resolver check.",
+        }, "id": "call_1"}],
+    ])
+    monkeypatch.setattr("trace_evolver.react_agent.create_chat_model", lambda settings: fake_model)
 
     patch, notes = analyst._react_patch_loop(  # noqa: SLF001
         episode,
@@ -872,26 +879,38 @@ def test_error_analyst_react_loop_respects_max_reads(tmp_path: Path, monkeypatch
         confidence=0.7,
     )
 
-    class FakeLLM:
-        """Always asks to read a file, never writes."""
-        def __init__(self) -> None:
-            self.calls = 0
+    # After the first read succeeds and exhausts max_reads=1, the loop will
+    # switch to model_write_only which forces WritePatchParams.  But our fake
+    # model just keeps returning read_file tool calls. Since it returns no tool
+    # calls after exhaustion (or write_patch isn't produced), we end up with no
+    # patch.  Simulate: first call reads successfully, then forced-write model
+    # returns empty (no tool_calls) so the loop terminates.
+    from langchain_core.messages import AIMessage
 
-        def chat_json(self, messages, temperature=None, max_tokens=None):  # noqa: ANN001
-            self.calls += 1
-            return {
-                "action": "read_file",
-                "file": "references/troubleshooting.md",
-                "reason": "need it",
-            }
+    class _AlwaysReadModel:
+        """Always tries to read a file, ignores tool_choice forcing."""
+        def __init__(self):
+            self._calls = 0
 
-    fake_llm = FakeLLM()
-    monkeypatch.setattr("trace_evolver.analysis._get_llm", lambda settings: fake_llm)
+        def bind_tools(self, *a, **kw):
+            return self
+
+        def invoke(self, messages, **kw):
+            self._calls += 1
+            # After reads exhausted, the loop uses model_write_only.
+            # Return no tool_calls so loop terminates.
+            if self._calls > 2:
+                return AIMessage(content="I cannot proceed.", tool_calls=[])
+            return AIMessage(content="", tool_calls=[
+                {"name": "ReadFileParams", "args": {"file": "references/troubleshooting.md", "reason": "need it"}, "id": f"call_{self._calls}"},
+            ])
+
+    monkeypatch.setattr("trace_evolver.react_agent.create_chat_model", lambda settings: _AlwaysReadModel())
 
     patch, notes = analyst._react_patch_loop(episode, bundle, hypothesis)  # noqa: SLF001
     # Should terminate without a patch after exhausting reads
     assert patch is None
-    assert any("max reads" in n or "ended without" in n for n in notes)
+    assert any("ended without" in n or "no tool_calls" in n for n in notes)
 
 
 def test_error_analyst_diagnosis_confidence_passthrough(tmp_path: Path, monkeypatch) -> None:
@@ -926,37 +945,30 @@ def test_error_analyst_diagnosis_confidence_passthrough(tmp_path: Path, monkeypa
         user_messages=["Fix the bug"],
     )
 
-    class FakeLLM:
-        def __init__(self) -> None:
-            self.calls = 0
-
+    # FakeLLM for diagnosis (still uses chat_json via _get_llm)
+    class FakeDiagnosisLLM:
         def chat_json(self, messages, temperature=None, max_tokens=None):  # noqa: ANN001
-            self.calls += 1
-            if self.calls == 1:  # diagnosis
-                return {
-                    "failure_surface": "Assertion error in test suite.",
-                    "root_cause": "Missing boundary check in the validation skill.",
-                    "causal_chain": "agent skipped check → error",
-                    "confidence_note": "clear causal chain",
-                    "diagnosis_confidence": 0.82,
-                }
-            # react loop: immediate write_patch
             return {
-                "action": "write_patch",
-                "edits": [
-                    {
-                        "file": "SKILL.md",
-                        "op": "append_file_end",
-                        "content": "## Boundary check\n\n- Always verify boundaries.\n",
-                        "intent": "guardrail",
-                    }
-                ],
-                "confidence": 0.75,
-                "rationale": "Adds missing boundary check guidance.",
+                "failure_surface": "Assertion error in test suite.",
+                "root_cause": "Missing boundary check in the validation skill.",
+                "causal_chain": "agent skipped check → error",
+                "confidence_note": "clear causal chain",
+                "diagnosis_confidence": 0.82,
             }
 
-    fake_llm = FakeLLM()
-    monkeypatch.setattr("trace_evolver.analysis._get_llm", lambda settings: fake_llm)
+    monkeypatch.setattr("trace_evolver.analysis._get_llm", lambda settings: FakeDiagnosisLLM())
+
+    # Fake LangChain model for the react patch loop
+    fake_model = _make_fake_chat_model([
+        [{"name": "WritePatchParams", "args": {
+            "edits": [{"file": "SKILL.md", "op": "append_file_end",
+                        "content": "## Boundary check\n\n- Always verify boundaries.\n",
+                        "intent": "guardrail"}],
+            "confidence": 0.75,
+            "rationale": "Adds missing boundary check guidance.",
+        }, "id": "call_1"}],
+    ])
+    monkeypatch.setattr("trace_evolver.react_agent.create_chat_model", lambda settings: fake_model)
 
     hypotheses, patches, notes = analyst.analyze(episode, traces, bundle)
     assert len(hypotheses) == 1

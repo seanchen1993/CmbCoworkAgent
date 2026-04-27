@@ -33,14 +33,14 @@ class LLMClient:
             base_url=llm_settings.base_url,
         )
 
-    def chat(
+    def _call(
         self,
         messages: list[dict[str, str]],
         *,
         temperature: float | None = None,
         max_tokens: int | None = None,
-    ) -> str:
-        """Send a chat completion request and return the assistant message content.
+    ) -> Any:
+        """Send a chat completion request and return the raw message object.
 
         Retries once on transient errors before raising.
         """
@@ -58,16 +58,27 @@ class LLMClient:
                 resp = self._client.chat.completions.create(
                     **request_kwargs,
                 )
-                content = resp.choices[0].message.content or ""
-                content = _strip_think_tags(content)
-                logger.debug("LLM response length: %d chars", len(content))
-                return content
+                return resp.choices[0].message
             except Exception as exc:
                 last_exc = exc
                 if attempt < _MAX_RETRIES:
                     logger.warning("LLM call failed (attempt %d), retrying in %.1fs: %s", attempt + 1, _RETRY_BACKOFF_S, exc)
                     time.sleep(_RETRY_BACKOFF_S)
         raise last_exc  # type: ignore[misc]
+
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> str:
+        """Send a chat completion request and return the assistant message content."""
+        msg = self._call(messages, temperature=temperature, max_tokens=max_tokens)
+        content = msg.content or ""
+        content = _strip_think_tags(content)
+        logger.debug("LLM response length: %d chars", len(content))
+        return content
 
     def chat_json(
         self,
@@ -78,20 +89,52 @@ class LLMClient:
     ) -> dict[str, Any]:
         """Send a chat completion and parse the response as JSON.
 
-        The prompt must instruct the model to return valid JSON.
-        Falls back to extracting the first JSON object if the response
-        contains markdown fences or surrounding text.
+        Checks both message.content and message.tool_calls, since some models
+        (e.g. MiniMax) may route JSON actions through the tool_calls field
+        instead of content.
         """
-        raw = self.chat(messages, temperature=temperature, max_tokens=max_tokens)
-        return _extract_json(raw)
+        msg = self._call(messages, temperature=temperature, max_tokens=max_tokens)
+        content = _strip_think_tags(msg.content or "")
+
+        # 1) Try to extract JSON from content first
+        if content.strip():
+            try:
+                return _extract_json(content)
+            except ValueError:
+                logger.debug("Could not extract JSON from content, checking tool_calls")
+
+        # 2) Fall back to tool_calls if the model used structured tool calling
+        tool_calls = getattr(msg, "tool_calls", None)
+        if tool_calls:
+            for tc in tool_calls:
+                fn = getattr(tc, "function", None)
+                if fn and fn.arguments:
+                    try:
+                        return json.loads(fn.arguments)
+                    except json.JSONDecodeError:
+                        try:
+                            return _extract_json(fn.arguments)
+                        except ValueError:
+                            continue
+            logger.warning("Found tool_calls but could not parse arguments as JSON")
+
+        # 3) If content had text but we skipped it above, raise with context
+        if content.strip():
+            raise ValueError(f"Could not parse JSON from LLM response: {content[:200]}")
+        raise ValueError("LLM returned empty content and no parseable tool_calls")
 
 
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+_MINIMAX_TOOL_CALL_RE = re.compile(r"<minimax:tool_call>\s*", re.DOTALL)
+_MINIMAX_TOOL_CALL_END_RE = re.compile(r"\s*</minimax:tool_call>", re.DOTALL)
 
 
 def _strip_think_tags(text: str) -> str:
-    """Remove <think>...</think> blocks from reasoning-model output."""
-    return _THINK_RE.sub("", text).strip()
+    """Remove <think>...</think> and <minimax:tool_call> wrapper tags from model output."""
+    text = _THINK_RE.sub("", text)
+    text = _MINIMAX_TOOL_CALL_RE.sub("", text)
+    text = _MINIMAX_TOOL_CALL_END_RE.sub("", text)
+    return text.strip()
 
 
 def _extract_json(text: str) -> dict[str, Any]:
@@ -116,5 +159,20 @@ def _extract_json(text: str) -> dict[str, Any]:
             return json.loads(text[start : end + 1])
         except json.JSONDecodeError:
             pass
+    # Last resort: try to find a valid JSON object by scanning from each '{'
+    if start != -1:
+        for i in range(start, len(text)):
+            if text[i] == "{":
+                depth = 0
+                for j in range(i, len(text)):
+                    if text[j] == "{":
+                        depth += 1
+                    elif text[j] == "}":
+                        depth -= 1
+                        if depth == 0:
+                            try:
+                                return json.loads(text[i : j + 1])
+                            except json.JSONDecodeError:
+                                break
     logger.error("Failed to parse JSON from LLM response: %s", text[:500])
     raise ValueError(f"Could not parse JSON from LLM response: {text[:200]}")

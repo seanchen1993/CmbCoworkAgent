@@ -26,6 +26,11 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from trace_evolver.artifacts import (
+    format_artifact_catalog,
+    format_artifact_summary_line,
+    get_artifact_content,
+)
 from trace_evolver.config import Settings
 from trace_evolver.llm import LLMClient
 from trace_evolver.schemas import (
@@ -33,6 +38,7 @@ from trace_evolver.schemas import (
     Episode,
     EvidenceSpan,
     FailureHypothesis,
+    FeedbackDigest,
     HypothesisPatch,
     ImportedTrace,
     MarkdownFileMeta,
@@ -55,7 +61,38 @@ _ERROR_KEYWORDS = frozenset({
 
 _VALID_INTENTS = frozenset({"trigger", "workflow", "guardrail", "example", "reference", "metadata"})
 
+import re as _re
+
+# Detect clearly truncated / incomplete content — NOT legitimate uses of
+# "...", "TODO", etc. in documentation or code examples.
+# Matches only: a line that is *nothing but* dots/ellipsis, or explicit
+# truncation markers like "…(truncated)", "<!-- placeholder -->".
+_TRUNCATION_RE = _re.compile(
+    r"^\s*\.{3,}\s*$"                  # line consisting only of "..."
+    r"|^\s*…\s*$"                      # line consisting only of "…"
+    r"|\.\.\.\s*\(truncated\)"         # ...(truncated)
+    r"|…\s*\(truncated\)"             # …(truncated)
+    r"|<!--\s*placeholder\s*-->"       # <!-- placeholder -->
+    r"|<\s*placeholder\s*/?\s*>",      # <placeholder/> or <placeholder>
+    _re.IGNORECASE | _re.MULTILINE,
+)
+
+
+def _has_placeholder(text: str) -> str | None:
+    """Return a reason string if text contains truncation/placeholder markers, else None.
+
+    Only flags clearly incomplete content (bare ellipsis lines, explicit truncation
+    markers).  Legitimate uses of '...' in code examples, TODO in task descriptions,
+    or FIXME in comments are intentionally NOT matched.
+    """
+    m = _TRUNCATION_RE.search(text)
+    if m:
+        return f"truncation marker detected: {m.group()!r}"
+    return None
+
+
 _ACTION_READ = "read_file"
+_ACTION_READ_ARTIFACT = "read_artifact"
 _ACTION_WRITE = "write_patch"
 
 _PATCH_PLACEMENT_RULES = (
@@ -93,6 +130,161 @@ _EDIT_JSON_SCHEMA = (
     "    }\n"
     "  ],\n"
 )
+
+
+# ---------------------------------------------------------------------------
+# Feedback extraction (pure Python, no LLM)
+# ---------------------------------------------------------------------------
+
+# Correction signal words — user is pointing out a mistake or giving a requirement
+_CORRECTION_SIGNALS_ZH = frozenset({
+    "不", "没有", "没", "不要", "冲突", "同步", "覆写", "覆盖",
+    "不对", "错", "问题", "重叠", "缺少", "漏", "忘",
+})
+_CORRECTION_SIGNALS_EN = frozenset({
+    "not", "don't", "didn't", "doesn't", "wrong", "shouldn't", "never",
+    "missing", "forgot", "conflict", "override", "sync", "mismatch",
+    "broken", "fail", "overlap",
+})
+
+# Requirement signal words — user is stating what should happen
+_REQUIREMENT_SIGNALS_ZH = frozenset({
+    "要", "必须", "应该", "需要", "先", "之前", "同时", "按照", "遵循",
+})
+_REQUIREMENT_SIGNALS_EN = frozenset({
+    "must", "should", "always", "before", "first", "together", "follow",
+    "ensure", "require", "simultaneously",
+})
+
+# Technical detail signals — likely needs artifact inspection to understand
+_ARTIFACT_QUESTION_SIGNALS = frozenset({
+    "重叠", "overlap", "截断", "truncat", "乱码", "garble",
+    "报错", "stack", "traceback", "截图", "screenshot",
+})
+
+
+def _extract_feedback_digest(
+    episode: Episode,
+    traces: list[ImportedTrace] | None = None,
+) -> FeedbackDigest:
+    """Extract structured feedback from episode user messages.
+
+    Skips the first message (initial task request) and treats subsequent
+    messages as corrections/feedback.  Pure heuristic — no LLM call.
+    """
+    complaints: list[str] = []
+    requirements: list[str] = []
+    artifact_questions: list[str] = []
+
+    # Subsequent messages (after the first) are typically corrections
+    correction_messages = episode.user_messages[1:] if len(episode.user_messages) > 1 else []
+
+    for msg in correction_messages:
+        msg_lower = msg.lower()
+        msg_tokens = set(msg_lower.split())
+
+        is_complaint = bool(
+            msg_tokens & _CORRECTION_SIGNALS_EN
+            or any(sig in msg for sig in _CORRECTION_SIGNALS_ZH)
+        )
+        is_requirement = bool(
+            msg_tokens & _REQUIREMENT_SIGNALS_EN
+            or any(sig in msg for sig in _REQUIREMENT_SIGNALS_ZH)
+        )
+        needs_artifact = bool(
+            msg_tokens & _ARTIFACT_QUESTION_SIGNALS
+            or any(sig in msg_lower for sig in _ARTIFACT_QUESTION_SIGNALS)
+        )
+
+        if is_complaint:
+            complaints.append(msg)
+        if is_requirement:
+            requirements.append(msg)
+        if needs_artifact and not is_complaint:
+            artifact_questions.append(msg)
+
+    # Find repeated themes across traces (keywords that appear in 2+ trace userMessages)
+    repeated_themes: list[str] = []
+    if len(correction_messages) >= 2:
+        from collections import Counter
+        # Extract meaningful correction keywords from each message
+        all_keywords: list[str] = []
+        for msg in correction_messages:
+            msg_lower = msg.lower()
+            for sig in _CORRECTION_SIGNALS_ZH | _REQUIREMENT_SIGNALS_ZH:
+                if sig in msg:
+                    all_keywords.append(sig)
+            for sig in _CORRECTION_SIGNALS_EN | _REQUIREMENT_SIGNALS_EN:
+                if sig in msg_lower.split():
+                    all_keywords.append(sig)
+        counts = Counter(all_keywords)
+        repeated_themes = [kw for kw, count in counts.most_common() if count >= 2]
+
+    # Infer likely skill gaps from complaints — domain-agnostic patterns only.
+    # We detect *structural* gap types (missed pre-read, sync violation, override
+    # violation) without assuming which files, frameworks, or languages are involved.
+    skill_gaps: list[str] = []
+    all_complaints_text = " ".join(complaints).lower()
+
+    # Gap: agent skipped reading a mandatory reference file
+    if any(x in all_complaints_text for x in [
+        "没有读", "没读", "没看", "didn't read", "没有看", "not read",
+        "you didn't", "你都没有", "没有按照", "没按照",
+    ]):
+        skill_gaps.append("agent skipped a mandatory pre-read step mentioned by the user")
+
+    # Gap: agent failed to keep related outputs in sync
+    if any(x in all_complaints_text for x in [
+        "同步", "sync", "不同步", "没有完全同步", "not in sync", "out of sync",
+        "inconsistent", "不一致",
+    ]):
+        skill_gaps.append("related outputs were not kept in sync after changes")
+
+    # Gap: agent violated an explicit constraint / overrode protected defaults
+    if any(x in all_complaints_text for x in [
+        "覆写", "override", "覆盖", "overwrite", "冲突", "conflict",
+        "硬规则", "hard rule", "违反", "violat",
+    ]):
+        skill_gaps.append("agent violated an explicit constraint or overrode protected defaults")
+
+    return FeedbackDigest(
+        user_complaints=complaints,
+        explicit_requirements=requirements,
+        repeated_themes=repeated_themes,
+        likely_skill_gaps=skill_gaps,
+        artifact_questions=artifact_questions,
+    )
+
+
+def _format_feedback_for_prompt(digest: FeedbackDigest) -> str:
+    """Render a FeedbackDigest into a prompt section."""
+    if not any([digest.user_complaints, digest.explicit_requirements, digest.repeated_themes, digest.likely_skill_gaps]):
+        return ""
+    parts: list[str] = ["## Highest Priority: User Feedback\n"]
+    if digest.user_complaints:
+        parts.append("**User complaints (verbatim):**")
+        for c in digest.user_complaints:
+            parts.append(f"- \"{c}\"")
+        parts.append("")
+    if digest.explicit_requirements:
+        parts.append("**Explicit requirements:**")
+        for r in digest.explicit_requirements:
+            parts.append(f"- \"{r}\"")
+        parts.append("")
+    if digest.likely_skill_gaps:
+        parts.append("**Likely skill gaps (inferred):**")
+        for g in digest.likely_skill_gaps:
+            parts.append(f"- {g}")
+        parts.append("")
+    if digest.repeated_themes:
+        parts.append(f"**Repeated themes across traces:** {', '.join(digest.repeated_themes)}")
+        parts.append("")
+    parts.append(
+        "You MUST address every user complaint above. "
+        "If a complaint already identifies a missing workflow rule, write a concrete, "
+        "executable skill-level guardrail — not an abstract checklist.\n"
+    )
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +370,10 @@ def _format_traces_for_prompt(traces: list[ImportedTrace], *, max_chars: int = 8
                 result_hint = trim_snippet(tool.result or "", 100) if tool.result else ""
                 line += f"\n    tool({tool.name}): {result_hint}"
             block += line + "\n"
+        # Append artifact summary if available
+        art_line = format_artifact_summary_line(trace.artifact_index)
+        if art_line:
+            block += f"  artifacts: {art_line}\n"
         if len(block) > budget:
             block = block[:budget]
         parts.append(block)
@@ -463,7 +659,7 @@ class SuccessAnalyst:
             return patterns, []
 
         # Build EditOps from LLM response
-        ops = _build_ops_from_llm_edits(result.get("edits", []), bundle, ["SKILL.md"])
+        ops, _rej = _build_ops_from_llm_edits(result.get("edits", []), bundle, ["SKILL.md"])
         if not ops:
             return patterns, []
 
@@ -572,9 +768,12 @@ class ErrorAnalyst:
         if not _has_llm(self.settings):
             return [], [], ["LLM unavailable; ErrorAnalyst requires LLM"]
 
+        # Pre-LLM: extract structured user feedback
+        feedback = _extract_feedback_digest(episode, traces)
+
         notes: list[str] = []
         try:
-            failure_surface, root_cause, diag_confidence = self._diagnose(traces, bundle)
+            failure_surface, root_cause, diag_confidence = self._diagnose(traces, bundle, feedback)
         except Exception:
             logger.warning("ErrorAnalyst diagnosis failed", exc_info=True)
             return [], [], ["diagnosis LLM call failed"]
@@ -590,19 +789,28 @@ class ErrorAnalyst:
         if not bundle:
             return [hypothesis], [], notes + ["no bundle; skipping patch"]
 
-        patch, react_notes = self._react_patch_loop(episode, bundle, hypothesis)
+        patch, react_notes = self._react_patch_loop(episode, bundle, hypothesis, traces, feedback)
         notes.extend(react_notes)
         return [hypothesis], [patch] if patch else [], notes
 
     # -- Phase A: diagnosis -------------------------------------------------
 
-    def _diagnose(self, traces: list[ImportedTrace], bundle: SkillBundleMeta | None = None) -> tuple[str, str, float]:
+    def _diagnose(
+        self,
+        traces: list[ImportedTrace],
+        bundle: SkillBundleMeta | None = None,
+        feedback: FeedbackDigest | None = None,
+    ) -> tuple[str, str, float]:
         llm = _get_llm(self.settings)
         traces_text = _format_traces_for_prompt(traces, prefer_errors=True)
 
         skill_context = ""
         if bundle:
             skill_context = _read_relative_file_safe(bundle, "SKILL.md")
+
+        feedback_section = ""
+        if feedback:
+            feedback_section = _format_feedback_for_prompt(feedback)
 
         messages = [
             {
@@ -612,8 +820,13 @@ class ErrorAnalyst:
                     "IMPORTANT CONSTRAINT: You are working in a trace-only scenario. You CANNOT replay the agent, "
                     "CANNOT re-run any tools, and CANNOT validate fixes in a real environment. "
                     "All your analysis must be grounded solely in the trace evidence provided.\n\n"
+                    "**Evidence priority:**\n"
+                    "1. USER FEEDBACK (highest) — user corrections and complaints directly identify what went wrong.\n"
+                    "2. AGENT BEHAVIOR — what the agent did (or failed to do) in the trace steps.\n"
+                    "3. TRACE DETAILS — specific step content, tool results, error messages.\n\n"
                     "Follow the trace-only diagnostic workflow:\n"
-                    "1. **Understand failure surface** — identify what went wrong (the observable symptom from traces)\n"
+                    "1. **Start from user feedback** — if user complaints exist, they ARE the failure surface. "
+                    "Do not re-derive what the user already told you.\n"
                     "2. **Trace to agent behavior** — locate the specific decision or action step in the traces "
                     "that caused or contributed to the failure\n"
                     "3. **Cross-check against SKILL.md** — compare the agent's behavior with the current skill document. "
@@ -633,7 +846,8 @@ class ErrorAnalyst:
             {
                 "role": "user",
                 "content": (
-                    f"## Agent Traces\n{traces_text}\n\n"
+                    (f"{feedback_section}\n" if feedback_section else "")
+                    + f"## Agent Traces\n{traces_text}\n\n"
                     f"## Current SKILL.md\n{skill_context}\n\n"
                     "Follow the trace-only diagnostic workflow and return the JSON."
                 ),
@@ -655,18 +869,21 @@ class ErrorAnalyst:
         episode: Episode,
         bundle: SkillBundleMeta,
         hypothesis: FailureHypothesis,
+        traces: list[ImportedTrace] | None = None,
+        feedback: FeedbackDigest | None = None,
     ) -> tuple[HypothesisPatch | None, list[str]]:
-        """Unified ReAct loop: the LLM reads files and writes patches in one loop.
+        """Bounded ReAct loop using LangChain structured tool calling.
 
-        Each turn the LLM returns one JSON action:
-        - {"action": "read_file", "file": "path", "reason": "..."} — request a markdown file
-        - {"action": "write_patch", "edits": [...], "confidence": float, "rationale": "..."} — terminal
-
-        The loop enforces max reads and hard token budget.
+        Delegates the LLM interaction to :mod:`react_agent` which uses
+        ``ChatOpenAI.bind_tools()`` for robust tool-call parsing, while
+        constraint enforcement (read budget, token budget, path whitelist)
+        is handled via callbacks defined here.
         """
-        llm = _get_llm(self.settings)
+        from trace_evolver.react_agent import create_chat_model, run_react_loop
+
         notes: list[str] = []
-        max_reads = self.settings.error_analyst_react_max_reads
+        max_markdown_reads = self.settings.error_analyst_max_markdown_reads
+        max_artifact_reads = self.settings.error_analyst_max_artifact_reads
         hard_budget = self.settings.llm.markdown_hard_budget_tokens
 
         # file_contents dict tracks visible files; insertion-ordered (Python 3.7+)
@@ -679,153 +896,156 @@ class ErrorAnalyst:
             return None, notes
 
         used_tokens = _estimate_token_count(skill_content)
-        reads_done = 0
         known_paths = {m.file_path for m in bundle.markdown_files}
 
         heading_tree = _build_heading_tree_text(bundle)
         existing_refs = [m.file_path for m in bundle.markdown_files if m.file_path.startswith("references/")]
         refs_context = ", ".join(existing_refs) if existing_refs else "(none)"
 
+        # Build artifact catalog from traces
+        artifact_catalog = format_artifact_catalog(traces or [])
+        has_artifacts = artifact_catalog != "(none)"
+
+        # System prompt — evidence-priority-aware
         system_prompt = (
             "You are a skill-evolution patch writer (Error Analyst 𝒜⁻) operating in a ReAct loop.\n\n"
-            "Each turn you MUST return exactly one JSON action:\n\n"
-            "**Option A — read a file before patching:**\n"
-            '{"action": "read_file", "file": "bundle-relative path", "reason": "why you need it"}\n\n'
-            "**Option B — write the patch (terminal action):**\n"
-            "{\n"
-            '  "action": "write_patch",\n'
-            f"{_EDIT_JSON_SCHEMA}"
-            '  "confidence": "float 0.4-0.9",\n'
-            '  "rationale": "why these changes prevent the failure"\n'
-            "}\n\n"
-            "**Rules:**\n"
-            f"- You may read at most {max_reads} additional files.\n"
-            "- SKILL.md is always visible; do not request it.\n"
-            "- Only request files that appear in the markdown catalog.\n"
-            "- When you have enough context, choose write_patch.\n\n"
+            "You have access to tools:\n"
+            "- **ReadFileParams** — read a markdown file from the skill bundle.\n"
+            + ("- **ReadArtifactParams** — read a file artifact written by the agent during the trace.\n" if has_artifacts else "")
+            + "- **WritePatchParams** — submit the final patch (terminal action, ends the loop).\n\n"
+            "**Evidence priority (CRITICAL — this determines patch quality):**\n"
+            "1. **USER FEEDBACK (highest)** — user corrections, complaints, and explicit requirements. "
+            "If feedback already identifies a missing workflow rule, write a concrete, executable "
+            "skill-level guardrail directly. Do not dilute into abstract checklists.\n"
+            "2. **AGENT BEHAVIOR** — what the agent did wrong (skipped steps, wrong order, missing verification). "
+            "Prefer concrete workflow steps with specific commands over abstract checklists.\n"
+            "3. **ARTIFACT CONTENT (lowest)** — only read artifacts when the patch depends on concrete "
+            "generated content details. Do not spend read budget on artifacts unless necessary.\n\n"
+            "**Read budget:**\n"
+            f"- Markdown files: up to {max_markdown_reads} reads\n"
+            + (f"- Artifacts: up to {max_artifact_reads} reads (use only when needed for technical specifics)\n" if has_artifacts else "")
+            + "- SKILL.md is already visible — do not request it.\n"
+            "- Only request files from the markdown catalog or artifact catalog.\n"
+            "- When you have enough context, call WritePatchParams.\n\n"
             f"{_PATCH_PLACEMENT_RULES}\n"
             f"{_MARKDOWN_FORMAT_RULES}\n"
             "**Content rules**:\n"
             "- Be concise and actionable — every sentence should change agent behavior.\n"
-            "- Use conditional language: 'When X happens, do Y before Z'.\n"
-            "- Include verification steps: 'After doing X, verify Y by checking Z'.\n"
+            "- Write concrete workflow steps with specific actions, not abstract checklists.\n"
+            "- Use imperative language: 'Read design-ref.md FIRST', 'Generate BOTH files in the same pass'.\n"
+            "- Include verification steps with specific commands when possible.\n"
             "- Ground in the specific failure: reference what went wrong and how to prevent it.\n"
+            "- NEVER use placeholder text like '...', 'TODO', or 'results must be empty'.\n"
         )
 
-        # The loop has two phases:
-        # 1. Read phase: up to max_reads successful reads (invalid reads don't count)
-        #    Protected by a generous turn cap to prevent infinite invalid-read loops.
-        # 2. Write phase: always guaranteed one final write turn after reads are done.
-        max_turns = max_reads * 3 + 1  # generous cap for invalid reads
-        force_write = False
-        rejected_reads: list[str] = []
+        # User content — feedback first, then diagnosis, then context
+        feedback_section = ""
+        if feedback:
+            feedback_section = _format_feedback_for_prompt(feedback)
 
-        for turn in range(max_turns):
-            reads_remaining = max_reads - reads_done
-            files_context = "\n\n".join(
-                f"### {path}\n```markdown\n{content}\n```"
-                for path, content in file_contents.items()
-            )
-            catalog_text = _build_markdown_catalog_text(bundle, list(file_contents))
+        catalog_text = _build_markdown_catalog_text(bundle, list(file_contents))
+        files_context = "\n\n".join(
+            f"### {path}\n```markdown\n{content}\n```"
+            for path, content in file_contents.items()
+        )
+        artifact_section = ""
+        if has_artifacts:
+            artifact_section = f"## Trace Artifacts (files written by agent)\n{artifact_catalog}\n\n"
 
-            user_content = (
-                f"## Failure Diagnosis\n"
-                f"Failure surface: {hypothesis.failure_surface}\n"
-                f"Root cause: {hypothesis.suspected_root_cause}\n\n"
-                f"## Episode Context\n"
-                f"User messages: {'; '.join(episode.user_messages[:3])}\n"
-                f"Skills used: {', '.join(episode.used_skills)}\n\n"
-                f"## SKILL.md heading structure\n{heading_tree}\n\n"
-                f"## Existing references/ files\n{refs_context}\n\n"
-                f"## Markdown Catalog (not-yet-visible files)\n{catalog_text}\n\n"
-                f"## Visible Files (full content)\n{files_context}\n\n"
-                f"Reads remaining: {0 if force_write else reads_remaining}\n"
-                + (f"Previously rejected reads (do not re-request): {', '.join(rejected_reads)}\n" if rejected_reads else "")
-                + f"{'You MUST choose write_patch now.' if force_write else 'Choose your action.'}"
-            )
+        # Build episode context with corrections marked
+        if len(episode.user_messages) > 1:
+            ep_context_lines = [f"- Initial request: \"{episode.user_messages[0]}\""]
+            for msg in episode.user_messages[1:]:
+                ep_context_lines.append(f"- **Correction/feedback**: \"{msg}\"")
+            ep_context = "\n".join(ep_context_lines)
+        else:
+            ep_context = f"User message: {episode.user_messages[0] if episode.user_messages else '(none)'}"
 
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
-            ]
+        user_content = (
+            (f"{feedback_section}\n" if feedback_section else "")
+            + f"## Failure Diagnosis\n"
+            f"Failure surface: {hypothesis.failure_surface}\n"
+            f"Root cause: {hypothesis.suspected_root_cause}\n\n"
+            f"## Episode Context\n"
+            f"{ep_context}\n"
+            f"Skills used: {', '.join(episode.used_skills)}\n\n"
+            f"## SKILL.md heading structure\n{heading_tree}\n\n"
+            f"## Existing references/ files\n{refs_context}\n\n"
+            f"## Markdown Catalog (not-yet-visible files)\n{catalog_text}\n\n"
+            + artifact_section
+            + f"## Visible Files (full content)\n{files_context}\n\n"
+            "Address every user complaint above. Write concrete workflow rules, not abstract checklists."
+        )
 
-            try:
-                result = llm.chat_json(messages, temperature=0.2)
-            except Exception:
-                logger.warning("ReAct loop LLM call failed on turn %d", turn, exc_info=True)
-                notes.append(f"LLM call failed on turn {turn}")
-                break
+        # Callbacks for react_agent tool implementations
+        def read_file_cb(path: str) -> tuple[str | None, int]:
+            if not is_allowed_markdown_relative_path(path):
+                return None, 0
+            content = _read_relative_file_safe(bundle, path)
+            if not content:
+                return None, 0
+            return content, _estimate_token_count(content)
 
-            action = str(result.get("action", _ACTION_WRITE)).strip().lower()
+        def read_artifact_cb(art_id: str, offset: int, limit: int) -> tuple[str | None, int]:
+            for trace in (traces or []):
+                for art in trace.artifact_index:
+                    if art.art_id == art_id:
+                        content = get_artifact_content(trace, art, offset=offset, limit=limit)
+                        if content:
+                            return content, _estimate_token_count(content)
+                        return None, 0
+            return None, 0
 
-            # Handle read_file action (only during read phase)
-            if action == _ACTION_READ and not force_write and reads_done < max_reads:
-                file_path = str(result.get("file", ""))
-                reason = str(result.get("reason", ""))
+        # Run the LangChain bounded ReAct loop
+        model = create_chat_model(self.settings.llm)
+        result, react_notes = run_react_loop(
+            model,
+            system_prompt,
+            user_content,
+            max_markdown_reads=max_markdown_reads,
+            max_artifact_reads=max_artifact_reads,
+            hard_budget_tokens=hard_budget,
+            file_contents=file_contents,
+            used_tokens=used_tokens,
+            known_paths=known_paths,
+            read_file_cb=read_file_cb,
+            read_artifact_cb=read_artifact_cb if has_artifacts else None,
+            has_artifacts=has_artifacts,
+        )
+        notes.extend(react_notes)
 
-                if file_path not in known_paths or file_path in file_contents:
-                    notes.append(f"invalid/duplicate read request: {file_path}")
-                    rejected_reads.append(file_path)
-                    continue  # doesn't consume a read — retry
-                if not is_allowed_markdown_relative_path(file_path):
-                    notes.append(f"disallowed path: {file_path}")
-                    rejected_reads.append(file_path)
-                    continue
+        if result is None:
+            return None, notes
 
-                content = _read_relative_file_safe(bundle, file_path)
-                if not content:
-                    notes.append(f"could not read {file_path}")
-                    rejected_reads.append(file_path)
-                    continue
+        # Process write_patch result into HypothesisPatch
+        raw_edits = result.get("edits", [])
+        if not raw_edits:
+            notes.append("write_patch returned no edits")
+            return None, notes
 
-                token_count = _estimate_token_count(content)
-                if used_tokens + token_count > hard_budget:
-                    notes.append(f"skipped {file_path}: would exceed hard budget ({used_tokens}+{token_count}>{hard_budget})")
-                    rejected_reads.append(file_path)
-                    continue
+        ops, op_rejected = _build_ops_from_llm_edits(raw_edits, bundle, list(file_contents))
+        if op_rejected:
+            notes.extend(f"rejected edit: {r}" for r in op_rejected)
+        if not ops:
+            notes.append("no valid ops after validation")
+            return None, notes
 
-                file_contents[file_path] = content
-                used_tokens += token_count
-                reads_done += 1
-                notes.append(f"opened {file_path} (reason: {reason}, tokens~{token_count})")
-                continue
-
-            # If LLM returned read_file but reads are exhausted, force a write turn
-            if action == _ACTION_READ:
-                notes.append("max reads exhausted; forcing write_patch turn")
-                force_write = True
-                continue
-
-            # Process write_patch action
-            raw_edits = result.get("edits", [])
-            if not raw_edits:
-                notes.append("LLM returned write_patch with no edits")
-                return None, notes
-
-            ops = _build_ops_from_llm_edits(raw_edits, bundle, list(file_contents))
-            if not ops:
-                notes.append("no valid ops after validation")
-                return None, notes
-
-            patch = HypothesisPatch(
-                patch_id=f"patch-{sha256_text(episode.episode_id + hypothesis.failure_surface)[:12]}",
-                source_kind="error",
-                target_skill_id=bundle.skill_id,
-                family_id="",
-                source_trace_ids=episode.trace_ids,
-                source_thread_ids=[episode.thread_id],
-                base_bundle_hash=bundle.bundle_hash,
-                visible_files=list(file_contents),
-                ops=ops,
-                confidence=float(result.get("confidence", 0.6)),
-                rationale=result.get("rationale", "LLM-generated patch via ReAct loop."),
-                risk_flags=["budget-limited"] if any("budget" in n for n in notes) else [],
-                evidence_spans=hypothesis.evidence_spans,
-            )
-            return patch, notes
-
-        notes.append("ReAct loop ended without producing a patch")
-        return None, notes
+        patch = HypothesisPatch(
+            patch_id=f"patch-{sha256_text(episode.episode_id + hypothesis.failure_surface)[:12]}",
+            source_kind="error",
+            target_skill_id=bundle.skill_id,
+            family_id="",
+            source_trace_ids=episode.trace_ids,
+            source_thread_ids=[episode.thread_id],
+            base_bundle_hash=bundle.bundle_hash,
+            visible_files=list(file_contents),
+            ops=ops,
+            confidence=float(result.get("confidence", 0.6)),
+            rationale=result.get("rationale", "LLM-generated patch via ReAct loop."),
+            risk_flags=["budget-limited"] if any("budget" in n for n in notes) else [],
+            evidence_spans=hypothesis.evidence_spans,
+        )
+        return patch, notes
 
 
 # ---------------------------------------------------------------------------
@@ -836,8 +1056,11 @@ def _build_ops_from_llm_edits(
     raw_edits: list[dict],
     bundle: SkillBundleMeta,
     visible_files: list[str],
-) -> list[EditOp]:
+) -> tuple[list[EditOp], list[str]]:
     """Convert LLM-generated edit dicts into validated EditOp objects.
+
+    Returns ``(ops, rejected_reasons)`` — rejected_reasons lists human-readable
+    strings explaining why individual edits were dropped (useful for diagnostics).
 
     The write protocol is intentionally small:
     - edit(old_string/new_string) for existing markdown text
@@ -845,6 +1068,7 @@ def _build_ops_from_llm_edits(
     - create for new markdown files
     """
     ops: list[EditOp] = []
+    rejected_reasons: list[str] = []
     created_refs: set[str] = set()
     visible_file_set = set(visible_files)
 
@@ -867,6 +1091,14 @@ def _build_ops_from_llm_edits(
         intent = raw.get("intent", "guardrail")
         if intent not in _VALID_INTENTS:
             intent = "guardrail"
+
+        # Reject truncated / incomplete content
+        _check_text = new_string if op_type == "edit" else content
+        if _check_text:
+            _placeholder_reason = _has_placeholder(_check_text)
+            if _placeholder_reason:
+                rejected_reasons.append(f"op on {file_path}: {_placeholder_reason}")
+                continue
 
         # Determine if this is a file creation or an edit.
         # Existing files are only writable when they were fully visible in the prompt.
@@ -931,7 +1163,7 @@ def _build_ops_from_llm_edits(
                 source_visibility="full",
             ))
 
-    return ops
+    return ops, rejected_reasons
 
 
 # ---------------------------------------------------------------------------

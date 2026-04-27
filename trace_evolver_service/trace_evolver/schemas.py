@@ -42,10 +42,26 @@ class AgentTrace(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
+class TraceArtifact(BaseModel):
+    """Metadata for a file artifact produced by an agent tool call."""
+    art_id: str = ""
+    file_path: str
+    file_name: str
+    artifact_type: Literal["write", "edit"]
+    model_call_index: int
+    tool_call_index: int
+    content_chars: int
+    total_lines: int = 0
+    seq: int = 0
+    latest: bool = False
+    latest_snapshot: bool = False
+
+
 class ImportedTrace(AgentTrace):
     source_path: str
     local_path: str
     ingested_at: str
+    artifact_index: list[TraceArtifact] = Field(default_factory=list)
 
 
 class EvidenceSpan(BaseModel):
@@ -66,6 +82,15 @@ class Episode(BaseModel):
     tool_signature: list[str]
     outcomes: list[str]
     user_messages: list[str]
+
+
+class FeedbackDigest(BaseModel):
+    """Structured extraction of user feedback from episode messages."""
+    user_complaints: list[str] = Field(default_factory=list)
+    explicit_requirements: list[str] = Field(default_factory=list)
+    repeated_themes: list[str] = Field(default_factory=list)
+    likely_skill_gaps: list[str] = Field(default_factory=list)
+    artifact_questions: list[str] = Field(default_factory=list)
 
 
 class TaskFamily(BaseModel):

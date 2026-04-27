@@ -18,6 +18,7 @@ import logging
 import shutil
 from pathlib import Path
 
+from trace_evolver.artifacts import build_artifact_index
 from trace_evolver.schemas import AgentTrace, ImportedTrace
 from trace_evolver.utils import ensure_absolute, utc_now
 
@@ -87,14 +88,14 @@ def load_imported_traces(jsonl_files: list[Path]) -> list[ImportedTrace]:
                     duplicate_count += 1
                     continue
                 seen_trace_ids.add(trace.traceId)
-                imported.append(
-                    ImportedTrace(
-                        **trace.model_dump(),
-                        source_path=str(local_file),
-                        local_path=str(local_file),
-                        ingested_at=ingested_at,
-                    )
+                it = ImportedTrace(
+                    **trace.model_dump(),
+                    source_path=str(local_file),
+                    local_path=str(local_file),
+                    ingested_at=ingested_at,
                 )
+                it.artifact_index = build_artifact_index(it)
+                imported.append(it)
 
     logger.info(
         "Trace ingestion: %d lines read, %d traces imported, %d skipped (bad format), %d duplicates",
