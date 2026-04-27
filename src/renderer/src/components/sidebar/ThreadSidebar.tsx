@@ -400,7 +400,7 @@ export function ThreadSidebar(): React.JSX.Element {
           <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
             <Terminal className="size-3" />
           </div>
-          <span className="text-muted-foreground">Claude Code</span>
+          <span className="text-muted-foreground">Code</span>
         </Button>
         {dashboardAllowed && (
           <Button

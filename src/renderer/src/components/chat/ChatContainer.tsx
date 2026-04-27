@@ -64,6 +64,10 @@ import { marketApi, MarketItem } from "../../api/market"
 import { insertLog, updateMMJUserInfo } from "../../../js/mmjUtils"
 import { UpdateDialog } from "../update/UpdateDialog"
 import { toast } from "sonner"
+import { SlashCommandPopover } from "@/features/slash-commands/SlashCommandPopover"
+import { useSlashCommands } from "@/features/slash-commands/useSlashCommands"
+import { SkillChip } from "@/features/slash-commands/skill-chip"
+import { formatSkillUseBlock, parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
 
 function HookLogsPanel({ logs }: { logs: HookLogEntry[] }): React.JSX.Element {
   const [expanded, setExpanded] = React.useState(false)
@@ -441,16 +445,32 @@ export function ChatContainer({
   // Define loadSkills function at component level so it can be accessed everywhere
   const loadSkills = useCallback(async (): Promise<void> => {
     try {
-      const [loadedSkills, disabledList] = await Promise.all([
+      const pluginSkillsPromise =
+        typeof window.api.skills.listPlugins === "function"
+          ? window.api.skills.listPlugins().catch((error) => {
+              console.warn("[ChatContainer] Failed to load plugin skills:", error)
+              return []
+            })
+          : Promise.resolve([])
+      // Pull plugin skills alongside built-in/custom so the slash popover and
+      // welcome-screen skill cards can surface them. Plugin-shipped skills go
+      // through their own enable/disable lifecycle (plugin-level, not the
+      // disabled-skills list), and listPlugins() already filters by
+      // plugin.enabled, so we don't apply disabledSet to them here.
+      const [loadedSkills, pluginSkills, disabledList] = await Promise.all([
         window.api.skills.list(),
+        pluginSkillsPromise,
         window.api.skills.getDisabled()
       ])
       const disabledSet = new Set(disabledList)
-      // Include both built-in (project) and custom (user) skills
       const availableSkills = loadedSkills.filter(
         (s) => (s.source === "project" || s.source === "user") && !disabledSet.has(s.name)
       )
-      setSkills([...availableSkills].sort((a, b) => a.name.localeCompare(b.name, "zh-CN")))
+      // Built-in/custom names win over plugin names: plugins are third-party
+      // and shouldn't shadow first-party skills the user expects to see.
+      const seen = new Set(availableSkills.map((s) => s.name))
+      const merged = [...availableSkills, ...pluginSkills.filter((p) => !seen.has(p.name))]
+      setSkills([...merged].sort((a, b) => a.name.localeCompare(b.name, "zh-CN")))
     } catch (error) {
       console.error("[ChatContainer] Failed to load skills:", error)
       setSkills([])
@@ -546,6 +566,7 @@ export function ChatContainer({
     tokenUsage,
     currentModel,
     draftInput: input,
+    draftSkill: selectedSkill,
     scheduledTaskLoading,
     scheduledTaskId,
     modelRetry,
@@ -555,7 +576,8 @@ export function ChatContainer({
     appendMessage,
     setError,
     clearError,
-    setDraftInput: setInput
+    setDraftInput: setInput,
+    setDraftSkill: setSelectedSkill
   } = useCurrentThread(threadId)
 
   // Hook logs live in an external store so updates don't re-render the full provider tree
@@ -1370,9 +1392,45 @@ export function ChatContainer({
     clearError()
   }
 
+  const slash = useSlashCommands({
+    input,
+    skills,
+    skillSelected: selectedSkill !== null
+  })
+
+  // Refresh skill list whenever the popover opens so customize-panel
+  // enable/disable changes reflect without an app restart.
+  const slashPopoverKind = slash.mode.kind
+  useEffect(() => {
+    if (slashPopoverKind === "skill") {
+      void loadSkills()
+    }
+  }, [slashPopoverKind, loadSkills])
+
+  // Depend on the stable callback refs, not the whole `slash` object —
+  // the hook returns a fresh literal every render, which would re-create
+  // applySkillSelection each keystroke and cascade into popover rerenders.
+  const slashResetSelection = slash.resetSelection
+  const applySkillSelection = useCallback(
+    (s: SkillMetadata) => {
+      setSelectedSkill(s)
+      setInput("")
+      slashResetSelection()
+      requestAnimationFrame(() => inputRef.current?.focus())
+    },
+    [setInput, slashResetSelection, setSelectedSkill]
+  )
+
   const handleSubmit = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault()
-    if ((!input.trim() && attachments.length === 0) || isLoading || !stream) return
+    // Defense-in-depth: every current trigger already short-circuits while the
+    // popover is open — the send button is disabled, and handleKeyDown's
+    // popover branch returns before reaching handleSubmit. Kept here so any
+    // future invoker (hotkey, programmatic call) can't accidentally ship the
+    // literal "/xxx" text as a message.
+    if (slash.mode.kind === "skill") return
+    if ((!input.trim() && attachments.length === 0 && !selectedSkill) || isLoading || !stream)
+      return
 
     if (!currentModel) {
       setError("请先在下方选择模型后再发送消息。")
@@ -1414,13 +1472,23 @@ export function ChatContainer({
       removePendingApproval(pendingApproval.id)
     }
 
+    // Snapshot the skill selection before we clear it — synchronous path, no
+    // async gap, so no token/stillOurs needed.
+    const skill = selectedSkill
     const rawMessage = input.trim()
     const currentAttachments = attachments.length > 0 ? [...attachments] : undefined
-    // If user only uploaded files without text, add a default prompt
-    const userText = rawMessage || (currentAttachments ? "请分析以下文件内容。" : "")
+    // If user only uploaded files without text, add a default prompt.
+    // skill-only sends (text empty, no attachments) still fall into this branch
+    // because the default prompt requires attachments — for skill-only we let
+    // userText stay empty and rely on the trailing skill-use block as the signal.
+    // When a skill is active we also skip the default prompt: the skill's own
+    // instruction will tell the model what to do with the attachment, and a
+    // generic "请分析以下文件内容" would compete with it.
+    const userText = rawMessage || (currentAttachments && !skill ? "请分析以下文件内容。" : "")
     setInput("")
     setAttachments([])
-    insertLog("send: " + userText)
+    if (skill) setSelectedSkill(null)
+    insertLog("send: " + (userText || (skill ? `[skill-only: ${skill.name}]` : "")))
 
     const isFirstMessage = threadMessages.length === 0
 
@@ -1436,12 +1504,30 @@ export function ChatContainer({
       fullMessage = userText + attachmentTexts.join("")
     }
 
-    // Build display content: show attachment filenames in user bubble (not full content)
+    // Append the skill-use block at the very end. The model is told to `read`
+    // the SKILL.md on its own — we don't inline the body. Hooks/routing/memory
+    // see this block verbatim; they don't need to know it's a slash command.
+    // join(\n\n) on filtered parts avoids leading blank lines when the user
+    // sends a skill with no text or attachments (skill-only invocation).
+    const skillBlock = skill ? formatSkillUseBlock({ name: skill.name, path: skill.path }) : ""
+    fullMessage = [fullMessage, skillBlock].filter(Boolean).join("\n\n")
+
+    // displayContent is what the user sees in their bubble while this run is
+    // in-memory. It carries the trailing skill block so MessageBubble's
+    // tail-anchored parser can render the chip and strip it back out.
+    //
+    // Note: the *checkpointed* version of this message is `fullMessage` (the
+    // full payload sent to the model, including <attachment>…</attachment>
+    // bodies), not displayContent. After a thread reload, MessageBubble
+    // therefore renders chip + raw attachment XML instead of chip + 📎 names.
+    // That replay-vs-live divergence is a pre-existing limitation of the
+    // attachment pipeline and is not introduced by the slash-command code.
     let displayContent: string = userText
     if (currentAttachments && currentAttachments.length > 0) {
       const fileNames = currentAttachments.map((a) => `📎 ${a.filename}`).join("\n")
       displayContent = `${fileNames}\n\n${userText}`
     }
+    displayContent = [displayContent, skillBlock].filter(Boolean).join("\n\n")
 
     const userMessage: Message = {
       id: crypto.randomUUID(),
@@ -1455,7 +1541,12 @@ export function ChatContainer({
       const currentThread = threads.find((t) => t.thread_id === threadId)
       const hasDefaultTitle = currentThread?.title?.startsWith("Thread ")
       if (hasDefaultTitle) {
-        generateTitleForFirstMessage(threadId, userText)
+        // skill-only sends have empty userText. Fall back to the skill name so
+        // the sidebar shows something meaningful instead of the raw thread id.
+        const titleSource = userText || (skill ? `使用 ${skill.name}` : "")
+        if (titleSource) {
+          generateTitleForFirstMessage(threadId, titleSource)
+        }
       }
     }
 
@@ -1475,6 +1566,46 @@ export function ChatContainer({
     // IME composing (Chinese/Japanese/Korean) should not trigger submit on Enter
     const isComposing = e.nativeEvent.isComposing || isComposingRef.current
     if (isComposing) return
+
+    // Skill popover nav takes over keys while open.
+    if (slash.mode.kind === "skill") {
+      if (e.key === "ArrowDown") {
+        e.preventDefault()
+        slash.moveSelection(1)
+        return
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault()
+        slash.moveSelection(-1)
+        return
+      }
+      if (e.key === "Escape") {
+        e.preventDefault()
+        setInput("")
+        return
+      }
+      if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") {
+        const s = slash.mode.skills[slash.selectedIdx]
+        if (s) {
+          e.preventDefault()
+          applySkillSelection(s)
+          return
+        }
+        // No match: swallow. Letting "/xxx" submit as literal text is almost
+        // never what the user meant when they opened the picker.
+        e.preventDefault()
+        return
+      }
+    }
+
+    // Backspace at start of empty input removes the skill chip.
+    // Skip while IME is composing — there Backspace edits the pinyin buffer,
+    // not the textarea, and the user doesn't intend to drop the chip.
+    if (e.key === "Backspace" && !isComposing && selectedSkill && input.length === 0) {
+      e.preventDefault()
+      setSelectedSkill(null)
+      return
+    }
 
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault()
@@ -1993,8 +2124,40 @@ export function ChatContainer({
   const handleEditUserMessage = useCallback(
     (message: Message): void => {
       const original = extractMessageText(message.content)
-      const withoutAttachmentPreview = original.replace(/^(?:📎[^\n]*\n)+(?:\n)?/u, "").trim()
-      const nextInput = withoutAttachmentPreview || original
+      // Strip the trailing <CMBDEVCLAW-SKILL-USE-V1> block first so the raw tag
+      // doesn't leak into the composer. Restore the chip by looking the skill
+      // up in the current skills list — if the skill was removed since that
+      // message was sent, drop the chip and surface a notice; sending the raw
+      // name as text is never useful.
+      const skillParsed = parseSkillUseBlock(original)
+      const bodyAfterSkill = skillParsed ? skillParsed.rest : original
+      let missingSkillName: string | null = null
+      // Only touch selectedSkill when the edited message itself carried a skill
+      // ref. Editing an unrelated old message must NOT silently wipe whatever
+      // skill the user has currently picked in the composer — that's user
+      // intent for the next send, unrelated to the message being edited.
+      if (skillParsed) {
+        // Match by path first, fall back to name. Path is the more stable
+        // identifier when a plugin and a custom skill happen to share a name —
+        // without it we'd silently restore the chip to "the wrong foo".
+        const hit =
+          skills.find((s) => s.path === skillParsed.skillPath) ??
+          skills.find((s) => s.name === skillParsed.skillName)
+        if (hit) {
+          setSelectedSkill(hit)
+        } else {
+          setSelectedSkill(null)
+          missingSkillName = skillParsed.skillName
+        }
+      }
+      const withoutAttachmentPreview = bodyAfterSkill
+        .replace(/^(?:📎[^\n]*\n)+(?:\n)?/u, "")
+        .trim()
+      // For attachment-only messages (no real text), `withoutAttachmentPreview`
+      // is empty. Fallback to "" rather than `bodyAfterSkill` — refilling the
+      // 📎 line previews into the composer would have them re-sent as literal
+      // text on the next submit (the user is expected to re-add attachments).
+      const nextInput = withoutAttachmentPreview
       setInput(nextInput)
 
       requestAnimationFrame(() => {
@@ -2004,9 +2167,13 @@ export function ChatContainer({
         const cursor = nextInput.length
         textarea.setSelectionRange(cursor, cursor)
       })
-      toast.success("已填充到输入框，编辑后可重新发送")
+      if (missingSkillName) {
+        toast.warning(`原消息使用的技能「${missingSkillName}」当前不可用，已从草稿中移除`)
+      } else {
+        toast.success("已填充到输入框，编辑后可重新发送")
+      }
     },
-    [extractMessageText, setInput]
+    [extractMessageText, setInput, skills, setSelectedSkill]
   )
   // Inlined as JSX (not components) to avoid React remounting on every parent render —
   // declaring a component inside the parent creates a new function reference each render,
@@ -2352,7 +2519,6 @@ export function ChatContainer({
 
               return (
                 <div
-                  isLoading={isLoading}
                   key={message.id}
                   ref={message.role === "user" ? setUserMessageRef(message.id) : undefined}
                   data-message-role={message.role}
@@ -2368,6 +2534,7 @@ export function ChatContainer({
                     onApprovalDecision={handleApprovalDecision}
                     onEditUserMessage={handleEditUserMessage}
                     threadId={threadId}
+                    isLoading={isLoading}
                   />
                 </div>
               )
@@ -2715,7 +2882,14 @@ export function ChatContainer({
             </button>
           </div>
         )}
-        <form onSubmit={handleSubmit} className="max-w-3xl mx-auto">
+        <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">
+          <SlashCommandPopover
+            mode={slash.mode}
+            selectedIdx={slash.selectedIdx}
+            onHoverIdx={slash.setSelectedIdx}
+            onSelectSkill={applySkillSelection}
+            skillsLoading={skillsLoading}
+          />
           <div className="flex flex-col gap-2">
             <div className="flex items-end gap-2">
               <div
@@ -2729,6 +2903,15 @@ export function ChatContainer({
                 onDragOver={handleDragOver}
                 onDragLeave={handleDragLeave}
               >
+                {/* Selected-skill chip sits above attachments and the textarea */}
+                {selectedSkill && (
+                  <div className="flex items-center gap-1.5 px-3 pt-2.5">
+                    <SkillChip
+                      label={selectedSkill.name}
+                      onRemove={() => setSelectedSkill(null)}
+                    />
+                  </div>
+                )}
                 {glowVisible && (
                   <div
                     className={cn("siri-bg-glow rounded-xl", !isLoading && "siri-bg-glow-out")}
@@ -2797,7 +2980,11 @@ export function ChatContainer({
                     isComposingRef.current = false
                   }}
                   onKeyDown={handleKeyDown}
-                  placeholder={attachments.length > 0 ? "输入消息或直接发送文件..." : "输入消息..."}
+                  placeholder={
+                    attachments.length > 0
+                      ? "输入消息或直接发送文件..."
+                      : "向 CMBDevClaw 提问，/ 输入命令"
+                  }
                   disabled={isLoading}
                   className={cn(
                     "relative z-[1] w-full resize-none bg-transparent overflow-y-auto",
@@ -2846,7 +3033,10 @@ export function ChatContainer({
                     ) : (
                       <button
                         type="submit"
-                        disabled={!input.trim() && attachments.length === 0}
+                        disabled={
+                          (!input.trim() && attachments.length === 0 && !selectedSkill) ||
+                          slash.mode.kind === "skill"
+                        }
                         className="flex items-center justify-center size-7 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                       >
                         <Send className="size-3.5" />

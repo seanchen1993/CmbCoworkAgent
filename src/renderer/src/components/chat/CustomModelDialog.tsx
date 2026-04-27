@@ -49,7 +49,7 @@ interface CustomModelItem {
 const FALLBACK_LIMITS: TokenLimits = {
   defaultMaxTokens: 128_000,
   minMaxTokens: 32_000,
-  maxMaxTokens: 128_000
+  maxMaxTokens: 1_000_000
 }
 
 function defaultInterleavedThinkingForModel(model: string): boolean {

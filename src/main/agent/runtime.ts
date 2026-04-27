@@ -83,6 +83,7 @@ import { createLspTool } from "./tools/lsp-tool"
 import { detectJavaProject } from "../lsp"
 import {
   DEFAULT_AGENTS_MAX_BYTES,
+  DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
   loadAgentsPromptForWorkspace
 } from "./agents-md"
 
@@ -328,6 +329,51 @@ export function getOrCreateApprovalStore(threadId: string): ApprovalStore {
 const BASE_PROMPT =
   "In order to complete the objective that the user asks of you, you have access to a number of standard tools."
 
+const SUMMARY_KEEP_RATIO = 0.1
+const SUMMARY_INPUT_RATIO = 0.65
+const SUMMARY_INPUT_TOKEN_CAP = 700_000
+
+const CMB_COWORK_SUMMARY_PROMPT = `Your task is to create a detailed continuation summary for an ongoing CmbCowork coding-agent conversation.
+
+The next model call will use your summary to continue the work. Write a dense, practical engineering handoff that preserves details that would be hard or costly to recover. Do not include private reasoning or analysis scratchpad.
+
+Cover these sections:
+
+1. Primary Request and Intent
+   - Capture the user's explicit requests, corrections, decisions, and current expectations.
+   - Preserve exact dates, branch names, commit hashes, model names, file paths, config values, and quoted user wording when they matter.
+
+2. Current Work State
+   - Describe what was being worked on immediately before compaction.
+   - Separate completed work, in-progress work, and remaining work.
+   - Include whether changes are committed, pushed, only in the worktree, or not yet made.
+
+3. Files and Code Sections
+   - List files inspected, modified, or created.
+   - For each important file, include the relevant symbols, constants, functions, or code paths and why they matter.
+   - Include short code snippets only when exact behavior would otherwise be ambiguous.
+
+4. Commands, Tests, and Outputs
+   - Record meaningful commands run and their results.
+   - Include test/typecheck failures, known unrelated failures, and any verification already completed.
+
+5. Technical Decisions and Constraints
+   - Capture assumptions, tradeoffs, rejected approaches, provider/model limitations, routing/summary/token-budget reasoning, and compatibility constraints.
+
+6. Errors, Fixes, and Warnings
+   - Record bugs encountered, root causes, fixes or mitigations, and anything the next model should avoid repeating.
+
+7. Pending Next Step
+   - List concrete next actions only if they directly follow from the latest user request.
+   - If the latest user request was already completed, say so and do not invent unrelated next steps.
+
+Prefer concise bullet points with high information density. Be thorough about technical state, but avoid generic narrative. If the user used Chinese, preserve Chinese wording for user-facing details and reply-context details.
+
+Conversation to summarize:
+{conversation}
+
+Summary:`
+
 function createEagerMcpTools(
   capabilityService: McpCapabilityService,
   tools: McpCapabilityTool[]
@@ -368,6 +414,9 @@ When NOT to use the task tool:
  * Aligned with official 1.8.1 except:
  *   - Accepts `summarizationTrigger` / `summarizationKeep` for explicit overrides
  *     (useful for custom models without a profile).
+ *   - Accepts a custom summarization prompt tuned for coding-agent handoffs.
+ *   - Accepts custom argument-truncation thresholds so large-context models
+ *     don't trim old edit/write tool args after a fixed 20 messages.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
@@ -391,6 +440,8 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     summarizationKeep,
     toolTokenLimitBeforeEvict,
     trimTokensToSummarize,
+    summarizationSummaryPrompt,
+    summarizationTruncateArgsSettings,
     subagentExtraSystemPrompt,
     toolConcurrencyQueueId = "default"
   } = params
@@ -443,14 +494,13 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     model,
     backend: filesystemBackend,
     historyPathPrefix: ".cmbdevclaw/conversation_history",
+    ...(summarizationSummaryPrompt && { summaryPrompt: summarizationSummaryPrompt }),
     ...(trimTokensToSummarize != null && { trimTokensToSummarize }),
     ...(summarizationTrigger != null && { trigger: summarizationTrigger }),
     ...(summarizationKeep != null && { keep: summarizationKeep }),
-    truncateArgsSettings: {
-      trigger: { type: "messages" as const, value: 20 },
-      keep: { type: "messages" as const, value: 20 },
-      maxLength: 1000
-    }
+    ...(summarizationTruncateArgsSettings && {
+      truncateArgsSettings: summarizationTruncateArgsSettings
+    })
   }
 
   // Create filesystem middleware and fix grep tool's misleading "Regex pattern" param description
@@ -1367,15 +1417,18 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     truncated: false
   }
   if (enableAgentsPrompt) {
-    agentsPrompt = await loadAgentsPromptForWorkspace(workspacePath, DEFAULT_AGENTS_MAX_BYTES)
+    agentsPrompt = await loadAgentsPromptForWorkspace(workspacePath, {
+      globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
+      projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
+    })
     if (agentsPrompt.prompt) {
       systemPrompt += "\n\n" + agentsPrompt.prompt
       console.log("[Runtime] Loaded AGENTS.md files:", agentsPrompt.loadedPaths)
       if (agentsPrompt.truncated) {
-        console.warn(
-          "[Runtime] AGENTS.md content exceeded prompt budget and was truncated:",
-          DEFAULT_AGENTS_MAX_BYTES
-        )
+        console.warn("[Runtime] AGENTS.md content exceeded prompt budget and was truncated:", {
+          globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
+          projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
+        })
       }
     } else {
       console.log("[Runtime] No AGENTS.md files discovered for workspace:", workspacePath)
@@ -1589,9 +1642,9 @@ The workspace root is: ${workspacePath}`
     deferredToolIds: deferredToolIds.length
   })
   const triggerTokens = Math.floor(maxTokens * 0.75)
-  const keepTokens = Math.max(Math.floor(maxTokens * 0.08), 4_000)
-  const toolEvictLimit = Math.min(6_000, Math.max(Math.floor(maxTokens * 0.05), 3_000))
-  const trimForSummary = Math.min(12_000, Math.floor(maxTokens * 0.25))
+  const keepTokens = Math.max(Math.floor(maxTokens * SUMMARY_KEEP_RATIO), 4_000)
+  const toolEvictLimit = Math.min(20_000, Math.max(Math.floor(maxTokens * 0.08), 6_000))
+  const trimForSummary = Math.min(SUMMARY_INPUT_TOKEN_CAP, Math.floor(maxTokens * SUMMARY_INPUT_RATIO))
   console.log("[Runtime] Context window:", maxTokens, "→ summarization trigger:", triggerTokens, "→ keep:", keepTokens, "→ tool evict limit:", toolEvictLimit, "→ trim for summary:", trimForSummary, "→ max output bytes:", maxOutputBytes)
 
   backend.setGitWorkflowCommitOnly(false)
@@ -1615,6 +1668,12 @@ The workspace root is: ${workspacePath}`
     summarizationKeep: { type: "tokens", value: keepTokens },
     toolTokenLimitBeforeEvict: toolEvictLimit,
     trimTokensToSummarize: trimForSummary,
+    summarizationSummaryPrompt: CMB_COWORK_SUMMARY_PROMPT,
+    summarizationTruncateArgsSettings: {
+      trigger: { type: "tokens", value: triggerTokens },
+      keep: { type: "tokens", value: keepTokens },
+      maxLength: 2000
+    },
     toolConcurrencyQueueId: options.threadId ?? workspacePath
   })
 

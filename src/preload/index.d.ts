@@ -407,7 +407,9 @@ interface CustomAPI {
   }
   skills: {
     list: () => Promise<SkillMetadata[]>
+    listPlugins: () => Promise<SkillMetadata[]>
     read: (skillPath: string) => Promise<{ success: boolean; content?: string; error?: string }>
+    write: (skillPath: string, content: string) => Promise<{ success: boolean; error?: string }>
     readBinary: (
       skillPath: string
     ) => Promise<{ success: boolean; content?: string; mimeType?: string; error?: string }>
@@ -424,6 +426,9 @@ interface CustomAPI {
       buffer: ArrayBuffer,
       fileName?: string
     ) => Promise<{ success: boolean; filePath?: string; content?: string; error?: string }>
+    exportForMarket: (
+      skillPath: string
+    ) => Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }>
     delete: (skillPath: string) => Promise<{ success: boolean; error?: string }>
   }
   mcp: {

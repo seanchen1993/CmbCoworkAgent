@@ -5,10 +5,10 @@ const MOCK_CREATED_AT = "2026-01-01T00:00:00.000Z"
 export const MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
   skill: [
     {
-      "name": "jav***or",
+      "name": "pinchtab",
       "chinese_name": "数***复",
       "category": "治理类场景/云应用架构转型治理",
-      "featured": "精品",
+      "featured": "",
       "version": "1.0.2",
       "user_id": "80***31",
       "guidance": "入口1：帮我检测并修***区下相应项目问题帮我检测并修***区下相应项目问题帮我检测并修***区下相应项目问题帮我检测并修***区下相应项目问题帮我检测并修***区下相应项目问题帮我检测并修***区下相应项目问题",
@@ -117,7 +117,7 @@ export const MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
       "user_id": "80***78",
       "guidance": "你可以说：只能使用a***的股票价格发给我",
       "ip": "99.***.***.166",
-      "description": "- agent-br***rror.com",
+      "description": "- agent-br***rror.comagent-br***rror.comagent-br***rror.comagent-br***rror.comagent-br***rror.comagent-br***rror.comagent-br***rror.comagent-br***rror.comagent-br***rror.comagent-br***rror.comagent-br***rror.com",
       "filename": "age***.0.zip",
       "created_at": "2026-03-26T07:53:53.354489+00:00"
     },

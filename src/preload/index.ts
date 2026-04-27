@@ -679,8 +679,17 @@ const api = {
     list: (): Promise<SkillMetadata[]> => {
       return ipcRenderer.invoke("skills:list")
     },
+    listPlugins: (): Promise<SkillMetadata[]> => {
+      return ipcRenderer.invoke("skills:listPlugins")
+    },
     read: (skillPath: string): Promise<{ success: boolean; content?: string; error?: string }> => {
       return ipcRenderer.invoke("skills:read", skillPath)
+    },
+    write: (
+      skillPath: string,
+      content: string
+    ): Promise<{ success: boolean; error?: string }> => {
+      return ipcRenderer.invoke("skills:write", { skillPath, content })
     },
     readBinary: (
       skillPath: string
@@ -709,6 +718,11 @@ const api = {
       fileName?: string
     ): Promise<{ success: boolean; filePath?: string; content?: string; error?: string }> => {
       return ipcRenderer.invoke("skills:extractMarkdownFromZip", { buffer, fileName })
+    },
+    exportForMarket: (
+      skillPath: string
+    ): Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }> => {
+      return ipcRenderer.invoke("skills:exportForMarket", skillPath)
     },
     delete: (skillPath: string): Promise<{ success: boolean; error?: string }> => {
       return ipcRenderer.invoke("skills:delete", skillPath)
