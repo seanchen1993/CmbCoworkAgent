@@ -1812,6 +1812,7 @@ function SkillItem(props: {
     () => (expanded && !hideFileTree && files.length > 0 ? buildFileTree(skill.path, files) : []),
     [expanded, files, hideFileTree, skill.path]
   )
+  const isFeatured = isFeaturedSkill(marketInfo)
   const chineseName = getSkillChineseName(skill, marketInfo)
   const displayName = chineseName || skill.name
 
@@ -1847,6 +1848,15 @@ function SkillItem(props: {
           </p>
         </div>
         <span>
+          {isFeatured && (
+            <Badge
+              variant="outline"
+              className="h-4 gap-1 px-1.5 text-[10px] border-amber-200 text-amber-800 bg-amber-50"
+            >
+              <Sparkles className="size-2.5 shrink-0" />
+              精品
+            </Badge>
+          )}
           {hasMarketEntry && (
             <Badge
               variant="outline"
@@ -2073,6 +2083,7 @@ export function SkillDetail(props: {
   const chineseName = getSkillChineseName(skill, marketInfo)
   const category = getSkillCategory(skill, marketInfo)
   const description = marketInfo?.description || skill.description || "暂无描述"
+  const isFeatured = isFeaturedSkill(marketInfo)
   const isMarkdown = !!selectedFilePath && /\.md$/i.test(selectedFilePath)
   const previewContent =
     isMarkdown && markdownFrontmatter.hasFrontmatter
@@ -2126,6 +2137,15 @@ export function SkillDetail(props: {
           </div>
           <div className="mt-1 flex items-center gap-1.5 flex-wrap">
             {chineseName && <p className="text-xs text-muted-foreground truncate">{skill.name}</p>}
+            {isFeatured && (
+              <Badge
+                variant="outline"
+                className="h-5 gap-1 px-2 text-[10px] border-amber-200 text-amber-800 bg-amber-50"
+              >
+                <Sparkles className="size-3 shrink-0" />
+                精品
+              </Badge>
+            )}
             {hasMarketEntry && (
               <Badge
                 variant="outline"
