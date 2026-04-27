@@ -8,6 +8,7 @@ import {
   getDisabledSkills,
   getEnabledPluginSkillsSources,
   getSkillsDir,
+  getWorkspaceSkillsDir,
   setDisabledSkills
 } from "../storage"
 import type { SkillMetadata } from "../types"
@@ -137,14 +138,18 @@ async function listSkillFiles(skillDirPath: string): Promise<string[]> {
 }
 
 /** List all skills (built-in + custom), de-duplicated by name (custom wins). */
-export async function listAllSkills(): Promise<SkillMetadata[]> {
-  const [builtin, custom] = await Promise.all([
+export async function listAllSkills(workspacePath?: string): Promise<SkillMetadata[]> {
+  const workspace = workspacePath ? getWorkspaceSkillsDir(workspacePath) : null
+  const [builtin, custom, workspaceSkills] = await Promise.all([
     loadSkills(getSkillsDir(), "project"),
-    loadSkills(getCustomSkillsDir(), "user")
+    loadSkills(getCustomSkillsDir(), "user"),
+    workspace ? loadSkills(workspace, "user") : Promise.resolve([])
   ])
+  // Workspace skills have highest priority (override builtin and custom)
   const byName = new Map<string, SkillMetadata>()
   for (const s of builtin) byName.set(s.name, s)
   for (const s of custom) byName.set(s.name, s)
+  for (const s of workspaceSkills) byName.set(s.name, s)
   return Array.from(byName.values())
 }
 
@@ -217,8 +222,8 @@ export async function listPluginSkills(): Promise<SkillMetadata[]> {
 export function registerSkillsHandlers(ipcMain: IpcMain): void {
   console.log("[Skills] Registering skills handlers...")
 
-  ipcMain.handle("skills:list", async (): Promise<SkillMetadata[]> => {
-    return listAllSkills()
+  ipcMain.handle("skills:list", async (_event, workspacePath?: string): Promise<SkillMetadata[]> => {
+    return listAllSkills(workspacePath)
   })
 
   ipcMain.handle("skills:listPlugins", async (): Promise<SkillMetadata[]> => {

@@ -2,7 +2,7 @@ import { createHash } from "crypto"
 import { join } from "path"
 import { MultiServerMCPClient } from "@langchain/mcp-adapters"
 import { buildMcpServerConfig } from "../ipc/mcp"
-import { getEnabledMcpConnectors, getPlugins, getUserInfo, parseMcpJsonFile } from "../storage"
+import { getEnabledMcpConnectors, getPlugins, getProjectMcpConnectors, getUserInfo, parseMcpJsonFile } from "../storage"
 import type { PluginMcpServerConfig } from "../types"
 import { buildAliasMaps, buildCapabilityAliases, type McpCapabilitySeed } from "./aliasing"
 import { resolveMcpConnectorKind } from "./connector-kind"
@@ -52,6 +52,43 @@ function toPluginSources(): CapabilitySource[] {
   }
 
   return sources
+}
+
+function toProjectSources(workspacePath: string): CapabilitySource[] {
+  const userInfo = getUserInfo()
+  const projectConnectors = getProjectMcpConnectors(workspacePath)
+  if (projectConnectors.length === 0) return []
+
+  return projectConnectors.map((connector) => {
+    const isStdio = resolveMcpConnectorKind(connector) === "stdio"
+
+    return {
+      kind: "connector" as const,
+      providerKey: connector.id,
+      providerDisplayName: connector.name || connector.id,
+      visibility: connector.lazyLoad ? "lazy" : "eager",
+      serverConfig: isStdio
+        ? buildMcpServerConfig({
+            kind: "stdio",
+            command: connector.command,
+            args: connector.args,
+            env: connector.env
+          })
+        : buildMcpServerConfig({
+            kind: "remote",
+            url: connector.url,
+            advanced: {
+              ...connector.advanced,
+              headers: {
+                ...connector.advanced?.headers,
+                yst_id_token: userInfo?.ystIdToken || "",
+                sap_id: userInfo?.sapId || "",
+                name: encodeURIComponent(userInfo?.userName || "")
+              }
+            }
+          })
+    }
+  })
 }
 
 function buildPluginServerConfig(config: PluginMcpServerConfig): Record<string, unknown> {
@@ -155,6 +192,19 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
   private cache: CapabilityCache | null = null
   private initPromise: Promise<void> | null = null
   private readonly schemaCache = new SchemaCache()
+  private currentWorkspacePath: string | null = null
+
+  /**
+   * Set the current workspace path for project-level MCP loading.
+   * When workspace changes, call this and then invalidateGlobalMcpCapabilityService().
+   */
+  setWorkspace(workspacePath: string | null): void {
+    this.currentWorkspacePath = workspacePath
+  }
+
+  getWorkspace(): string | null {
+    return this.currentWorkspacePath
+  }
 
   async listTools(): Promise<McpCapabilityTool[]> {
     await this.ensureInitialized()
@@ -250,7 +300,12 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
   }
 
   private readSources(): CapabilitySource[] {
-    return [...toConnectorSources(), ...toPluginSources()]
+    const sources = [...toConnectorSources(), ...toPluginSources()]
+    // Include project-level MCP when workspace is set
+    if (this.currentWorkspacePath) {
+      sources.push(...toProjectSources(this.currentWorkspacePath))
+    }
+    return sources
   }
 
   private resolveTool(idOrAlias: string): McpCapabilityTool | null {
@@ -372,4 +427,14 @@ export async function closeGlobalMcpCapabilityService(): Promise<void> {
   if (!globalCapabilityService) return
   await globalCapabilityService.close()
   globalCapabilityService = null
+}
+
+/**
+ * Set the workspace for project-level MCP loading.
+ * When workspace changes, call this and then invalidateGlobalMcpCapabilityService().
+ */
+export function setWorkspaceMcpService(workspacePath: string | null): void {
+  if (globalCapabilityService) {
+    globalCapabilityService.setWorkspace(workspacePath)
+  }
 }

@@ -1263,7 +1263,7 @@ ${subagentShellGuidance}
 - browser_playwright: built-in browser automation and page interaction tool powered by project-local Playwright (fallback when no matching browser skill exists).
 The workspace root is: ${workspacePath}`
 
-  const skillsSources = await getEnabledSkillsSources()
+  const skillsSources = await getEnabledSkillsSources(workspacePath)
   console.log("[Runtime] Raw skills sources from getEnabledSkillsSources():", skillsSources)
   console.log("[Runtime] Raw skills sources count:", skillsSources.length)
   console.log("[Runtime] Raw skills sources content:", JSON.stringify(skillsSources, null, 2))

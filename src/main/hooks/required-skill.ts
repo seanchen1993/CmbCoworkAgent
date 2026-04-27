@@ -35,11 +35,11 @@ function trimSkillContent(content: string): string {
   return `${content.slice(0, MAX_REQUIRED_SKILL_CHARS)}\n\n[skill content truncated at ${MAX_REQUIRED_SKILL_CHARS} chars]`
 }
 
-async function resolveSkillGuidance(requiredSkill: string): Promise<ResolvedSkillGuidance | null> {
+async function resolveSkillGuidance(requiredSkill: string, workspacePath?: string): Promise<ResolvedSkillGuidance | null> {
   const normalized = requiredSkill.trim().toLowerCase()
   if (!normalized) return null
 
-  const sourceDirs = await getEnabledSkillsSources()
+  const sourceDirs = await getEnabledSkillsSources(workspacePath)
   for (const sourceDir of sourceDirs) {
     if (!existsSync(sourceDir)) continue
 
@@ -97,11 +97,12 @@ function formatMissingSkillGuidance(requiredSkill: string): string {
 }
 
 export async function enrichHookResultWithRequiredSkill(
-  result: HookResult | null
+  result: HookResult | null,
+  workspacePath?: string
 ): Promise<HookResult | null> {
   if (!result?.requiredSkill?.trim()) return result
 
-  const resolved = await resolveSkillGuidance(result.requiredSkill)
+  const resolved = await resolveSkillGuidance(result.requiredSkill, workspacePath)
   const guidance = resolved
     ? formatResolvedSkillGuidance(resolved)
     : formatMissingSkillGuidance(result.requiredSkill)
@@ -140,5 +141,7 @@ export async function enrichHookResultWithRequiredSkill(
 export async function runHooksEnriched(
   ...args: Parameters<typeof runHooks>
 ): Promise<HookResult | null> {
-  return enrichHookResultWithRequiredSkill(await runHooks(...args))
+  const result = await runHooks(...args)
+  const context = args[2]
+  return enrichHookResultWithRequiredSkill(result, context?.workspacePath)
 }

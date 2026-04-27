@@ -37,6 +37,36 @@ export interface HookContext {
 }
 
 /**
+ * Extract a file path from tool arguments for FILE_PATH environment variable.
+ */
+function extractFilePath(toolName: string | undefined, toolArgs: Record<string, unknown>): string | undefined {
+  if (!toolName || !toolArgs) return undefined
+
+  // Tools that have a dedicated file_path field
+  const filePathFields: Record<string, string> = {
+    write_file: "file_path",
+    edit_file: "file_path",
+    read_file: "file_path",
+    create_file: "file_path",
+    move_file: "destination_path",
+    copy_file: "destination_path",
+    delete_file: "file_path",
+    Bash: "command", // may contain file paths
+    execute: "command",
+  }
+
+  const field = filePathFields[toolName]
+  if (!field) return undefined
+
+  const value = toolArgs[field]
+  if (typeof value === "string" && value.trim()) {
+    return value.trim()
+  }
+
+  return undefined
+}
+
+/**
  * Detect whether a matcher string looks like a regex pattern.
  *
  * `.` is deliberately excluded — tool names commonly contain dots (e.g. `mcp.server_name`),
@@ -68,7 +98,9 @@ function getCachedRegex(matcher: string): RegExp | null {
 
 function matchesToolName(matcher: string | undefined, toolName: string | undefined): boolean {
   if (!matcher || matcher === "*") return true
-  if (!toolName) return false
+  // For non-tool events (SessionStart, SessionEnd, Notification, etc.) where toolName is
+  // undefined, allow hooks through — the matcher is only meaningful for tool-based events.
+  if (!toolName) return true
   if (isRegexPattern(matcher)) {
     const re = getCachedRegex(matcher)
     return re ? re.test(toolName) : matcher.toLowerCase() === toolName.toLowerCase()
@@ -97,7 +129,13 @@ function buildHookEnv(event: HookEvent, context: HookContext): Record<string, st
   // stdin JSON is the canonical payload. TOOL_ARGS / TOOL_RESULT are small-payload
   // compatibility helpers only, so they don't blow up the child-process env block.
   if (context.toolArgs) {
-    setBestEffortJsonEnv(env, "TOOL_ARGS", JSON.stringify(context.toolArgs))
+    const toolArgsJson = JSON.stringify(context.toolArgs)
+    setBestEffortJsonEnv(env, "TOOL_ARGS", toolArgsJson)
+    // Claude Code compatibility aliases
+    env.TOOL_INPUT = toolArgsJson
+    // FILE_PATH: extract from toolArgs when possible
+    const filePath = extractFilePath(context.toolName, context.toolArgs)
+    if (filePath) env.FILE_PATH = filePath
   }
   // toolResult is already a JSON string from upstream — passing as-is avoids double encoding.
   setBestEffortJsonEnv(env, "TOOL_RESULT", context.toolResult)
@@ -105,6 +143,8 @@ function buildHookEnv(event: HookEvent, context: HookContext): Record<string, st
     env.WORKSPACE_PATH = context.workspacePath
     // Claude Code compatibility — the canonical env var hooks expect
     env.CLAUDE_PROJECT_DIR = context.workspacePath
+    // Additional alias without CLAUDE prefix
+    env.PROJECT_ROOT = context.workspacePath
   }
   if (context.sessionId) env.SESSION_ID = context.sessionId
   if (context.userPrompt) env.USER_PROMPT = context.userPrompt
@@ -123,6 +163,11 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext): string {
   }
   if (context.toolName) payload.tool_name = context.toolName
   if (context.toolArgs) payload.tool_input = context.toolArgs
+  // FILE_PATH: extracted file path for file operations
+  if (context.toolName && context.toolArgs) {
+    const filePath = extractFilePath(context.toolName, context.toolArgs)
+    if (filePath) payload.file_path = filePath
+  }
   if (context.toolResult !== undefined) {
     // Upstream passes JSON.stringify(result); parse it back so hooks see a real object
     // (matches Claude Code spec where tool_response is the structured response).
@@ -805,20 +850,34 @@ export async function runHooks(
     return null
   }
 
-  // SubagentStop / Notification / SessionStart / SessionEnd: fire-and-forget
+  // SubagentStop / Notification / SessionStart / SessionEnd: await results for additionalContext/systemMessage
+  const additionalContexts: string[] = []
+  const systemMessages: string[] = []
   for (const hook of matched) {
-    executeHook(hook, env, context, event)
-      .then((result) => {
-        console.log(`[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}`)
-        onHookResult?.(event, hook, result)
-        if (result.stderr) {
-          console.warn(`[Hooks] ${event} hook stderr:`, result.stderr)
-        }
-      })
-      .catch((err) => {
-        console.warn(`[Hooks] ${event} hook error:`, err)
-      })
+    const result = await executeHook(hook, env, context, event)
+    console.log(`[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}`)
+    onHookResult?.(event, hook, result)
+    if (result.stderr) {
+      console.warn(`[Hooks] ${event} hook stderr:`, result.stderr)
+    }
+    if (result.additionalContext) {
+      additionalContexts.push(result.additionalContext)
+    }
+    if (result.systemMessage) {
+      systemMessages.push(result.systemMessage)
+    }
   }
-
+  const mergedAdditionalContext = additionalContexts.length > 0 ? additionalContexts.join("\n") : undefined
+  const mergedSystemMessage = systemMessages.length > 0 ? systemMessages.join("\n") : undefined
+  if (mergedAdditionalContext || mergedSystemMessage) {
+    return {
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+      blocked: false,
+      additionalContext: mergedAdditionalContext,
+      systemMessage: mergedSystemMessage
+    }
+  }
   return null
 }

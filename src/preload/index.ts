@@ -676,8 +676,8 @@ const api = {
     }
   },
   skills: {
-    list: (): Promise<SkillMetadata[]> => {
-      return ipcRenderer.invoke("skills:list")
+    list: (workspacePath?: string): Promise<SkillMetadata[]> => {
+      return ipcRenderer.invoke("skills:list", workspacePath)
     },
     listPlugins: (): Promise<SkillMetadata[]> => {
       return ipcRenderer.invoke("skills:listPlugins")

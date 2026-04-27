@@ -163,6 +163,12 @@ export function getCustomSkillsDir(): string {
   return CUSTOM_SKILLS_DIR
 }
 
+const WORKSPACE_SKILLS_DIR = ".cmbdevclaw/skills"
+
+export function getWorkspaceSkillsDir(workspacePath: string): string {
+  return join(workspacePath, WORKSPACE_SKILLS_DIR)
+}
+
 export function getSkillsSources(): string[] {
   const builtin = getSkillsDir()
   const custom = getCustomSkillsDir()
@@ -516,14 +522,27 @@ export function invalidateEnabledSkillsCache(): void {
 /**
  * Returns skills sources for the agent: either the filtered enabled-skills dirs
  * or the full skills dirs if no skills are disabled.
+ * Includes workspace skills directory when workspacePath is provided.
  */
-export async function getEnabledSkillsSources(): Promise<string[]> {
+export async function getEnabledSkillsSources(workspacePath?: string): Promise<string[]> {
   const disabled = getDisabledSkills()
-  if (disabled.length === 0) return getSkillsSources()
+  const workspace = workspacePath ? getWorkspaceSkillsDir(workspacePath) : null
+
+  if (disabled.length === 0) {
+    const sources = getSkillsSources()
+    if (workspace && existsSync(workspace)) {
+      sources.push(workspace)
+    }
+    return sources
+  }
 
   // When skills are disabled, create separate filtered directories for builtin and custom skills
   const enabledDirs = await ensureEnabledSkillsDirsAsync()
-  return enabledDirs.filter((dir) => existsSync(dir))
+  const filteredDirs = enabledDirs.filter((dir) => existsSync(dir))
+  if (workspace && existsSync(workspace)) {
+    filteredDirs.push(workspace)
+  }
+  return filteredDirs
 }
 
 const CMB_SKILL_PREFIX = "_cmb_"
@@ -558,7 +577,7 @@ export async function syncSkillsToClaudeDir(workDir: string): Promise<void> {
   await cleanCmbSkillsFromClaudeDir(workDir)
 
   // Copy enabled skills
-  const sourceDirs = await getEnabledSkillsSources()
+  const sourceDirs = await getEnabledSkillsSources(workDir)
   let count = 0
   for (const sourceDir of sourceDirs) {
     if (!existsSync(sourceDir)) continue
@@ -1732,6 +1751,33 @@ export function parseMcpJsonFile(filePath: string): Record<string, PluginMcpServ
   }
 }
 
+// Project-level MCP configuration — .mcp.json in workspace root
+export function getProjectMcpConnectors(workspacePath: string): import("./types").McpConnectorConfig[] {
+  const mcpPath = join(workspacePath, ".mcp.json")
+  if (!existsSync(mcpPath)) return []
+  try {
+    const servers = parseMcpJsonFile(mcpPath)
+    if (!servers) return []
+    const now = new Date().toISOString()
+    return Object.entries(servers).map(([name, cfg]) => ({
+      id: `project:${name}`,
+      name,
+      kind: cfg.url ? "remote" : "stdio",
+      url: cfg.url,
+      command: cfg.command,
+      args: cfg.args,
+      env: cfg.env,
+      enabled: true,
+      lazyLoad: false,
+      createdAt: now,
+      updatedAt: now
+    }))
+  } catch {
+    console.warn(`[Storage] Failed to load project MCP config from ${mcpPath}`)
+    return []
+  }
+}
+
 // ── ChatX ──────────────────────────────────────────────────────────────────────
 
 const CHATX_CONFIG_FILE = join(OPENWORK_DIR, "chatx-config.json")
@@ -2645,12 +2691,58 @@ export function getWorkspaceHooks(workspacePath: string): HookConfig[] {
   return result
 }
 
+// ── Project-level settings.local.json hooks (Claude Code compatible) ────────────
+
+const SETTINGS_LOCAL_FILE = "settings.local.json"
+const CMBSETTINGS_DIR = ".cmbdevclaw"
+
+/**
+ * Load hooks from Claude Code project-level settings.local.json files.
+ * Checks both workspace root /settings.local.json and .cmbdevclaw/settings.local.json.
+ * Uses the CC HooksSettings format { hooks: { EventName: [...] } }.
+ */
+export function getProjectSettingsLocalHooks(workspacePath: string): HookConfig[] {
+  const candidates = [
+    join(workspacePath, SETTINGS_LOCAL_FILE),
+    join(workspacePath, CMBSETTINGS_DIR, SETTINGS_LOCAL_FILE)
+  ]
+
+  let allHooks: HookConfig[] = []
+  const now = new Date().toISOString()
+  const meta = { enabled: true, createdAt: now, updatedAt: now }
+
+  for (let i = 0; i < candidates.length; i++) {
+    const settingsPath = candidates[i]
+    if (!existsSync(settingsPath)) continue
+    try {
+      const content = readFileSync(settingsPath, "utf-8")
+      const parsed = JSON.parse(content) as unknown
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue
+
+      const obj = parsed as Record<string, unknown>
+      const hooksObjRaw = obj.hooks
+      if (!hooksObjRaw || typeof hooksObjRaw !== "object" || Array.isArray(hooksObjRaw)) continue
+
+      // The settings.local.json structure is { hooks: { EventName: [...] } } (CC plugin wrapper format).
+      const hooksObj = hooksObjRaw as Record<string, unknown>
+      // i=0 → workspace root /settings.local.json, i=1 → .cmbdevclaw/settings.local.json
+      const prefix = i === 1 ? "cmbsettings.local" : "settings.local"
+      allHooks = allHooks.concat(expandCcHooksSettings(hooksObj, prefix, meta))
+    } catch {
+      /* skip invalid files */
+    }
+  }
+
+  return allHooks
+}
+
 export function getEnabledHooks(workspacePath?: string): HookConfig[] {
   const globalHooks = getHooks().filter((h) => h.enabled)
   const pluginHooks = getEnabledPluginHooks()
   const skillHooks = getEnabledSkillHooks()
   const workspaceHooks = workspacePath ? getWorkspaceHooks(workspacePath) : []
-  return [...globalHooks, ...pluginHooks, ...skillHooks, ...workspaceHooks]
+  const settingsLocalHooks = workspacePath ? getProjectSettingsLocalHooks(workspacePath) : []
+  return [...globalHooks, ...pluginHooks, ...skillHooks, ...workspaceHooks, ...settingsLocalHooks]
 }
 
 function writeHooksAtomic(items: HookConfig[]): void {

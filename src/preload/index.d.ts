@@ -406,7 +406,7 @@ interface CustomAPI {
     supportedExtensions: () => Promise<string[]>
   }
   skills: {
-    list: () => Promise<SkillMetadata[]>
+    list: (workspacePath?: string) => Promise<SkillMetadata[]>
     listPlugins: () => Promise<SkillMetadata[]>
     read: (skillPath: string) => Promise<{ success: boolean; content?: string; error?: string }>
     readBinary: (

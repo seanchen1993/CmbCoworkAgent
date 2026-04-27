@@ -226,10 +226,10 @@ export function RightPanel({
   const [hooks, setHooks] = useState<DisplayHook[]>([])
 
   useEffect(() => {
-    async function load(): Promise<void> {
+    async function load(workspacePath: string | null | undefined): Promise<void> {
       try {
         const [loaded, disabled] = await Promise.all([
-          window.api.skills.list(),
+          window.api.skills.list(workspacePath ?? undefined),
           window.api.skills.getDisabled()
         ])
         setSkills(loaded)
@@ -238,8 +238,8 @@ export function RightPanel({
         console.error("[RightPanel] Failed to load skills:", e)
       }
     }
-    load()
-  }, [])
+    load(threadState?.workspacePath)
+  }, [threadState?.workspacePath])
 
   useEffect(() => {
     window.api.plugins.list().then(setPlugins).catch(console.error)

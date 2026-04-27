@@ -406,8 +406,11 @@ export function ChatContainer({
   const [goodSkillsData, setGoodSkillsData] = useState<MarketItem[]>([])
 
   // Define loadSkills function at component level so it can be accessed everywhere
-  const loadSkills = useCallback(async (): Promise<void> => {
+  // Note: workspacePath is obtained from threadContext inside the function
+  const loadSkills = useCallback(async (workspacePath?: string): Promise<void> => {
     try {
+      // Use provided workspacePath, or derive from threadContext if not provided
+      const effectiveWorkspacePath = workspacePath ?? threadContext.getThreadState(threadId)?.workspacePath ?? undefined
       const pluginSkillsPromise =
         typeof window.api.skills.listPlugins === "function"
           ? window.api.skills.listPlugins().catch((error) => {
@@ -421,7 +424,7 @@ export function ChatContainer({
       // disabled-skills list), and listPlugins() already filters by
       // plugin.enabled, so we don't apply disabledSet to them here.
       const [loadedSkills, pluginSkills, disabledList] = await Promise.all([
-        window.api.skills.list(),
+        window.api.skills.list(effectiveWorkspacePath),
         pluginSkillsPromise,
         window.api.skills.getDisabled()
       ])
@@ -440,7 +443,7 @@ export function ChatContainer({
     } finally {
       setSkillsLoading(false)
     }
-  }, [])
+  }, [threadId])
 
   const queryRemoteSkills = useCallback(async () => {
     try {

@@ -66,7 +66,7 @@ import {
 import { isRetryableApiError, buildOrderedChain, type FailoverAttempt } from "../agent/failover"
 import { runHooks, type HookContext, type HookResultCallback } from "../hooks/runner"
 import type { HookResult } from "../hooks/types"
-import { fireSessionStartOnce } from "../hooks/session-lifecycle"
+import { fireSessionStartOnce, consumeSessionStartContext } from "../hooks/session-lifecycle"
 import { runHooksEnriched } from "../hooks/required-skill"
 import { makeHookResultCallback } from "../hooks/result-callback"
 import type {
@@ -1072,7 +1072,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
       // Fire SessionStart once per thread lifetime (not per turn). SessionEnd fires when the
       // thread is deleted (threads:delete) or the app is quitting.
-      fireSessionStartOnce(threadId, sessionWorkspacePath, onHookResult)
+      await fireSessionStartOnce(threadId, sessionWorkspacePath, onHookResult)
       sendActiveHookNotice(window, channel, workspacePath)
 
       // Fire UserPromptSubmit hook — may block the message, halt the turn, rewrite the prompt,
@@ -1109,6 +1109,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         promptSubmitResult?.updatedInput?.userPrompt
       if (typeof updatedMessage === "string" && updatedMessage.length > 0) {
         effectiveMessage = updatedMessage
+      }
+      // Prepend SessionStart additionalContext first (session-level init context)
+      const sessionStartCtx = consumeSessionStartContext(threadId)
+      if (sessionStartCtx) {
+        effectiveMessage = `${sessionStartCtx}\n\n${effectiveMessage}`
       }
       if (promptSubmitResult?.additionalContext) {
         effectiveMessage = `${promptSubmitResult.additionalContext}\n\n${effectiveMessage}`
