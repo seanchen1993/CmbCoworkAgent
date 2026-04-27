@@ -40,6 +40,14 @@ const ALLOWED_YST_IDS = new Set(
   ALLOWED_YST_IDS_RAW.split(",").map((s) => s.trim()).filter(Boolean)
 )
 
+function isDashboardAllowedForCurrentUser(): boolean {
+  if (import.meta.env.DEV) return true
+  const userInfo = getUserInfo()
+  const ystId = userInfo?.ystId?.trim()
+  if (!ystId) return false
+  return ALLOWED_YST_IDS.has(ystId)
+}
+
 // ─────────────────────────────────────────────────────────
 // ES HTTP helper
 // ─────────────────────────────────────────────────────────
@@ -188,6 +196,73 @@ function getCalendarInterval(granularity: Granularity, from: string, to: string)
 
 function timeRangeFilter(field: string, range: TimeRange): Record<string, unknown> {
   return { range: { [field]: { gte: range.from, lte: range.to } } }
+}
+
+function escapeWildcard(value: string): string {
+  return value.replace(/[\\*?]/g, "\\$&")
+}
+
+/**
+ * 过滤“有有效 ystId 的记录”：
+ * - 字段存在
+ * - 且不为空字符串
+ */
+function buildNonEmptyYstIdFilter(): Record<string, unknown> {
+  return {
+    bool: {
+      must: [{ exists: { field: "ystId" } }],
+      must_not: [{ term: { ystId: "" } }]
+    }
+  }
+}
+
+/**
+ * 过滤“空用户记录”：
+ * - ystId 为空字符串
+ * - 或 ystId 字段不存在
+ */
+function buildEmptyYstIdFilter(): Record<string, unknown> {
+  return {
+    bool: {
+      should: [{ term: { ystId: "" } }, { bool: { must_not: [{ exists: { field: "ystId" } }] } }],
+      minimum_should_match: 1
+    }
+  }
+}
+
+/**
+ * 统一构建技能命中条件：
+ * 使用 wildcard 兼容 `技能名-版本` 这一类上报格式。
+ */
+function buildSkillUsageWildcardFilter(skillName: string): Record<string, unknown> {
+  const escapedSkillName = escapeWildcard(skillName)
+  const wildcardPattern = `${escapedSkillName}**`
+  return {
+    bool: {
+      should: [
+        { wildcard: { usedSkills: wildcardPattern } },
+        { wildcard: { "usedSkills.keyword": wildcardPattern } }
+      ],
+      minimum_should_match: 1
+    }
+  }
+}
+
+/**
+ * 清洗技能名参数：
+ * - 去重
+ * - 去空值
+ * - 限制最大数量，避免 filters 聚合过大
+ */
+function normalizeSkillQueryNames(skillNames?: string[]): string[] {
+  if (!Array.isArray(skillNames)) return []
+  return Array.from(
+    new Set(
+      skillNames
+        .map((name) => String(name || "").trim())
+        .filter(Boolean)
+    )
+  ).slice(0, 1000)
 }
 
 function isDashboardAllowed(): boolean {
@@ -607,6 +682,171 @@ async function fetchUserStats(range: TimeRange, granularity: Granularity, opts?:
       by_version: {
         terms: { field: "appVersion", size: 20 },
         aggs: { unique_users: { cardinality: { field: "sapId" } } }
+      }
+    }
+  }
+  return esQuery(getEsIndex("trace"), body)
+}
+
+async function fetchSkillUsageSummary(
+  range: TimeRange,
+  granularity: Granularity,
+  skillNames?: string[]
+): Promise<unknown> {
+  void granularity
+  // 模式 A：前端传入技能名列表，使用 filters 精确按“技能维度”统计。
+  // 这样可以直接得到每个技能的用户数，避免按版本桶二次合并带来的误差。
+  const normalizedSkillNames = normalizeSkillQueryNames(skillNames)
+  if (normalizedSkillNames.length > 0) {
+    const filters = Object.fromEntries(
+      normalizedSkillNames.map((skillName) => [skillName, buildSkillUsageWildcardFilter(skillName)])
+    )
+    const body = {
+      size: 0,
+      query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
+      aggs: {
+        by_skill: {
+          filters: { filters },
+          aggs: {
+            unique_users: {
+              filter: buildNonEmptyYstIdFilter(),
+              aggs: {
+                count: { cardinality: { field: "ystId" } }
+              }
+            }
+          }
+        }
+      }
+    }
+    return esQuery(getEsIndex("trace"), body)
+  }
+
+  // 模式 B：兼容旧调用方，保留 terms 聚合结构。
+  const body = {
+    size: 0,
+    query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
+    aggs: {
+      by_skill: {
+        terms: { field: "usedSkills", size: 1000 },
+        aggs: {
+          unique_users: { cardinality: { field: "ystId" } }
+        }
+      }
+    }
+  }
+  return esQuery(getEsIndex("trace"), body)
+}
+
+async function fetchSkillUserStats(
+  range: TimeRange,
+  granularity: Granularity,
+  skillName: string
+): Promise<unknown> {
+  void granularity
+  const escapedSkillName = escapeWildcard(skillName)
+  const wildcardPattern = `${escapedSkillName}**`
+  const skillFilter = buildSkillUsageWildcardFilter(skillName)
+  const body = {
+    size: 0,
+    query: {
+      bool: {
+        must: [
+          timeRangeFilter("startedAt", range),
+          { exists: { field: "ystId" } },
+          { bool: { must_not: { term: { ystId: "" } } } }
+        ],
+        should: [
+          { wildcard: { usedSkills: wildcardPattern } },
+          { wildcard: { "usedSkills.keyword": wildcardPattern } }
+        ],
+        minimum_should_match: 1
+      }
+    },
+    aggs: {
+      // 非空 ystId 的去重用户数（用于“使用用户数”展示）
+      unique_users_count: { cardinality: { field: "ystId" } },
+      // 非空 ystId 的调用总次数（主查询已经过滤了非空用户）
+      total_calls: { value_count: { field: "traceId" } },
+      // 额外统计空用户调用次数：
+      // 通过 global 聚合跳出主查询（主查询已过滤非空用户），
+      // 然后重新套用 时间范围 + 技能命中 + 空用户 条件。
+      empty_user_calls: {
+        global: {},
+        aggs: {
+          filtered: {
+            filter: {
+              bool: {
+                must: [timeRangeFilter("startedAt", range), skillFilter, buildEmptyYstIdFilter()]
+              }
+            }
+          }
+        }
+      },
+      // 非空 ystId 的 Top 用户明细表
+      top_users: {
+        terms: { field: "ystId", size: 100 },
+        aggs: {
+          user_name: { terms: { field: "userName", size: 1 } },
+          org_name: { terms: { field: "orgName", size: 1 } }
+        }
+      }
+    }
+  }
+  return esQuery(getEsIndex("trace"), body)
+}
+
+async function fetchUserProfilesBySapIds(sapIds: string[]): Promise<unknown> {
+  const sanitizedSapIds = Array.from(
+    new Set(
+      sapIds
+        .map((id) => id.trim())
+        .filter(Boolean)
+    )
+  ).slice(0, 500)
+
+  if (sanitizedSapIds.length === 0) {
+    return {
+      aggregations: {
+        by_sap: { buckets: [] }
+      }
+    }
+  }
+
+  const includeShouldFilters = sanitizedSapIds.flatMap((id) => {
+    const escaped = escapeWildcard(id)
+    const wildcardPattern = `*${escaped}*`
+    return [
+      { term: { sapId: id } },
+      { term: { "sapId.keyword": id } },
+      { wildcard: { sapId: wildcardPattern } },
+      { wildcard: { "sapId.keyword": wildcardPattern } }
+    ]
+  })
+
+  const body = {
+    size: 0,
+    query: {
+      bool: {
+        filter: [
+          {
+            bool: {
+              should: includeShouldFilters,
+              minimum_should_match: 1
+            }
+          }
+        ]
+      }
+    },
+    aggs: {
+      by_sap: {
+        terms: {
+          field: "sapId",
+          size: Math.min(Math.max(sanitizedSapIds.length * 5, 100), 2000)
+        },
+        aggs: {
+          user_name: { terms: { field: "userName", size: 1 } },
+          org_name: { terms: { field: "orgName", size: 1 } }
+        }
       }
     }
   }
@@ -1215,6 +1455,105 @@ function makeMockUserStats(range: TimeRange, opts?: UserStatsOptions): unknown {
   }
 }
 
+function makeMockSkillUsageSummary(range: TimeRange): unknown {
+  const overview = makeMockOverview(range) as {
+    aggregations?: { by_skill?: { buckets?: Array<{ key: string; doc_count: number }> } }
+  }
+  return {
+    aggregations: {
+      by_skill: {
+        buckets: (overview.aggregations?.by_skill?.buckets ?? []).map((bucket) => ({
+          ...bucket,
+          unique_users: { value: Math.max(1, Math.floor(bucket.doc_count * 0.35)) }
+        }))
+      }
+    }
+  }
+}
+
+function makeMockSkillUserStats(range: TimeRange, skillName: string): unknown {
+  const userStats = makeMockUserStats(range) as {
+    aggregations?: {
+      top_users?: {
+        buckets?: Array<{
+          key: string
+          doc_count: number
+          user_name?: { buckets?: Array<{ key: string }> }
+          org_name?: { buckets?: Array<{ key: string }> }
+        }>
+      }
+    }
+  }
+  const topUsers = userStats.aggregations?.top_users?.buckets ?? []
+  const offset = Math.abs(
+    Array.from(skillName).reduce((acc, ch) => acc + ch.charCodeAt(0), 0)
+  ) % 7
+  const picked = topUsers.slice(0, Math.max(3, 6 - offset))
+  const totalCalls = picked.reduce((sum, item) => sum + item.doc_count, 0)
+  // 模拟环境下给出一个小比例空用户调用，便于前端联调空用户行展示。
+  const emptyUserCalls = Math.floor(totalCalls * 0.08)
+
+  return {
+    aggregations: {
+      total_calls: { value: totalCalls },
+      total_users: { value: picked.length },
+      unique_users_count: { value: picked.length },
+      empty_user_calls: { filtered: { doc_count: emptyUserCalls } },
+      top_users: { buckets: picked }
+    }
+  }
+}
+
+function makeMockUserProfilesBySapIds(sapIds: string[]): unknown {
+  const userStats = makeMockUserStats({
+    from: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+    to: new Date().toISOString()
+  }) as {
+    aggregations?: {
+      top_users?: {
+        buckets?: Array<{
+          key: string
+          user_name?: { buckets?: Array<{ key: string }> }
+          org_name?: { buckets?: Array<{ key: string }> }
+        }>
+      }
+    }
+  }
+
+  const fallbackBuckets = userStats.aggregations?.top_users?.buckets ?? []
+  const fallbackMap = new Map(
+    fallbackBuckets.map((bucket) => [
+      bucket.key,
+      {
+        userName: bucket.user_name?.buckets?.[0]?.key ?? bucket.key,
+        orgName: bucket.org_name?.buckets?.[0]?.key ?? ""
+      }
+    ])
+  )
+
+  const buckets = Array.from(
+    new Set(
+      sapIds
+        .map((id) => id.trim())
+        .filter(Boolean)
+    )
+  ).map((sapId) => {
+    const fallback = fallbackMap.get(sapId)
+    return {
+      key: sapId,
+      doc_count: 1,
+      user_name: { buckets: [{ key: fallback?.userName ?? `用户${sapId.slice(-4)}` }] },
+      org_name: { buckets: [{ key: fallback?.orgName ?? "未知部门" }] }
+    }
+  })
+
+  return {
+    aggregations: {
+      by_sap: { buckets }
+    }
+  }
+}
+
 function makeMockProductivity(range: TimeRange): unknown {
   const from = new Date(range.from)
   const to = new Date(range.to)
@@ -1558,6 +1897,63 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data: await fetchUserStats(range, granularity, opts) }
       } catch (e) {
         console.error("[Dashboard] userStats error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:skillUsageSummary",
+    async (_, range: TimeRange, granularity: Granularity, skillNames?: string[]) => {
+      // `skillNames` 为可选参数：传入后走更精确的 filters 聚合。
+      if (import.meta.env.DEV) return { success: true, data: makeMockSkillUsageSummary(range) }
+      try {
+        return { success: true, data: await fetchSkillUsageSummary(range, granularity, skillNames) }
+      } catch (e) {
+        console.error("[Dashboard] skillUsageSummary error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:skillUserStats",
+    async (_, range: TimeRange, granularity: Granularity, skillName: string) => {
+      const trimmedSkillName = skillName?.trim?.() ?? ""
+      if (!trimmedSkillName) {
+        return { success: false, error: "skillName is required" }
+      }
+      if (!isDashboardAllowedForCurrentUser()) {
+        return { success: false, error: "当前用户无权限查看 Skill 用户明细" }
+      }
+      if (import.meta.env.DEV) {
+        return { success: true, data: makeMockSkillUserStats(range, trimmedSkillName) }
+      }
+      try {
+        return {
+          success: true,
+          data: await fetchSkillUserStats(range, granularity, trimmedSkillName)
+        }
+      } catch (e) {
+        console.error("[Dashboard] skillUserStats error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:userProfiles",
+    async (_, sapIds: string[]) => {
+      const sanitizedSapIds = Array.isArray(sapIds)
+        ? sapIds.filter((id): id is string => typeof id === "string")
+        : []
+      if (import.meta.env.DEV) {
+        return { success: true, data: makeMockUserProfilesBySapIds(sanitizedSapIds) }
+      }
+      try {
+        return { success: true, data: await fetchUserProfilesBySapIds(sanitizedSapIds) }
+      } catch (e) {
+        console.error("[Dashboard] userProfiles error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }

@@ -8,6 +8,7 @@ const activeWatchers = new Map<string, fs.FSWatcher>()
 
 // Debounce timers to prevent rapid-fire updates
 const debounceTimers = new Map<string, NodeJS.Timeout>()
+const hookDebounceTimers = new Map<string, NodeJS.Timeout>()
 
 interface GitignoreRule {
   // 规则原始 pattern（已做路径标准化）
@@ -42,6 +43,11 @@ function normalizeRelativePath(input: string): string {
     .replace(/^\/+/, "")
     .replace(/\/+/g, "/")
     .replace(/\/$/, "")
+}
+
+function isWorkspaceHookPath(relativePath: string): boolean {
+  const normalized = normalizeRelativePath(relativePath).toLowerCase()
+  return normalized === ".cmbdevclaw/hooks" || normalized.startsWith(".cmbdevclaw/hooks/")
 }
 
 // 解析 .gitignore 文本，转换为可直接匹配的规则结构
@@ -197,6 +203,23 @@ export function startWatching(threadId: string, workspacePath: string): void {
           )
         : ""
 
+      if (relativePath && isWorkspaceHookPath(relativePath)) {
+        console.log(`[WorkspaceWatcher] workspace hook ${eventType}: ${filename} in thread ${threadId}`)
+
+        const existingTimer = hookDebounceTimers.get(threadId)
+        if (existingTimer) {
+          clearTimeout(existingTimer)
+        }
+
+        const timer = setTimeout(() => {
+          hookDebounceTimers.delete(threadId)
+          notifyWorkspaceHooksChanged(threadId, workspacePath)
+        }, DEBOUNCE_DELAY)
+
+        hookDebounceTimers.set(threadId, timer)
+        return
+      }
+
       // Keep ignoring hidden paths, except .gitignore which should refresh Git Panel in real time.
       if (relativePath) {
         const parts = relativePath.split("/").filter(Boolean)
@@ -261,6 +284,12 @@ export function stopWatching(threadId: string): void {
     debounceTimers.delete(threadId)
   }
 
+  const hookTimer = hookDebounceTimers.get(threadId)
+  if (hookTimer) {
+    clearTimeout(hookTimer)
+    hookDebounceTimers.delete(threadId)
+  }
+
   invalidateGitignoreRules(threadId)
 }
 
@@ -281,6 +310,17 @@ function notifyRenderer(threadId: string, workspacePath: string): void {
 
   for (const win of windows) {
     win.webContents.send("workspace:files-changed", {
+      threadId,
+      workspacePath
+    })
+  }
+}
+
+function notifyWorkspaceHooksChanged(threadId: string, workspacePath: string): void {
+  const windows = BrowserWindow.getAllWindows()
+
+  for (const win of windows) {
+    win.webContents.send("hooks:workspace:changed", {
       threadId,
       workspacePath
     })

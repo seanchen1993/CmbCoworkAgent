@@ -1,20 +1,55 @@
 import { IpcMain } from "electron"
 import {
   getHooks,
+  getEnabledSkillHookMetadata,
   upsertHook,
   deleteHook,
-  setHookEnabled
+  setHookEnabled,
+  getWorkspaceHooks,
+  trustAllWorkspaceHooks,
+  trustWorkspaceHookFile
 } from "../storage"
-import type { HookConfig, HookEvent, HookType, PromptHookFallback, HookUpsert } from "../hooks/types"
+import type { UntrustedWorkspaceHook } from "../storage"
+import type { SkillHookMetadata } from "../types"
+import {
+  isSupportedHookEvent,
+  SUPPORTED_HOOK_EVENTS,
+  HookConfig,
+  HookEvent,
+  HookOnBlockConfig,
+  HookType,
+  PromptHookFallback,
+  HookUpsert
+} from "../hooks/types"
 
-const VALID_EVENTS = new Set<HookEvent>(["PreToolUse", "PostToolUse", "Stop", "Notification"])
+const VALID_EVENTS = new Set<HookEvent>(SUPPORTED_HOOK_EVENTS)
 const VALID_TYPES = new Set<HookType>(["command", "prompt"])
 const VALID_FALLBACKS = new Set<PromptHookFallback>(["allow", "block"])
 const TIMEOUT_MIN = 1_000
 const TIMEOUT_MAX = 60_000
 
+function validateOnBlockConfig(onBlock: HookOnBlockConfig | undefined): void {
+  if (onBlock === undefined) return
+  if (!onBlock || typeof onBlock !== "object" || Array.isArray(onBlock)) {
+    throw new Error("onBlock 必须为对象")
+  }
+
+  const fields: Array<keyof HookOnBlockConfig> = [
+    "reason",
+    "systemMessage",
+    "additionalContext",
+    "requiredSkill"
+  ]
+  for (const field of fields) {
+    const value = onBlock[field]
+    if (value !== undefined && typeof value !== "string") {
+      throw new Error(`onBlock.${field} 必须为字符串`)
+    }
+  }
+}
+
 function validateHookConfig(config: HookUpsert): void {
-  if (!config.event || !VALID_EVENTS.has(config.event)) {
+  if (!config.event || !isSupportedHookEvent(config.event) || !VALID_EVENTS.has(config.event)) {
     throw new Error("无效的事件类型")
   }
 
@@ -43,6 +78,8 @@ function validateHookConfig(config: HookUpsert): void {
       throw new Error(`超时时间必须在 ${TIMEOUT_MIN}ms 到 ${TIMEOUT_MAX}ms 之间`)
     }
   }
+
+  validateOnBlockConfig(config.onBlock)
 }
 
 export function registerHooksHandlers(ipcMain: IpcMain): void {
@@ -52,14 +89,15 @@ export function registerHooksHandlers(ipcMain: IpcMain): void {
     return getHooks()
   })
 
-  ipcMain.handle(
-    "hooks:create",
-    async (_event, config: HookUpsert): Promise<{ id: string }> => {
-      validateHookConfig(config)
-      const id = upsertHook(config)
-      return { id }
-    }
-  )
+  ipcMain.handle("hooks:skills:list", async (): Promise<SkillHookMetadata[]> => {
+    return getEnabledSkillHookMetadata()
+  })
+
+  ipcMain.handle("hooks:create", async (_event, config: HookUpsert): Promise<{ id: string }> => {
+    validateHookConfig(config)
+    const id = upsertHook(config)
+    return { id }
+  })
 
   ipcMain.handle(
     "hooks:update",
@@ -81,6 +119,44 @@ export function registerHooksHandlers(ipcMain: IpcMain): void {
     "hooks:setEnabled",
     async (_event, { id, enabled }: { id: string; enabled: boolean }): Promise<void> => {
       setHookEnabled(id, enabled)
+    }
+  )
+
+  // ── Workspace Hooks ──
+
+  ipcMain.handle(
+    "hooks:workspace:list",
+    async (_event, workspacePath: string): Promise<HookConfig[]> => {
+      if (!workspacePath) return []
+      return getWorkspaceHooks(workspacePath)
+    }
+  )
+
+  ipcMain.handle("hooks:workspace:untrusted", async (): Promise<UntrustedWorkspaceHook[]> => {
+    // Workspace command hooks are now trusted by default — always return empty.
+    return []
+  })
+
+  ipcMain.handle(
+    "hooks:workspace:trustAll",
+    async (_event, workspacePath: string): Promise<void> => {
+      if (!workspacePath) return
+      trustAllWorkspaceHooks(workspacePath)
+    }
+  )
+
+  ipcMain.handle(
+    "hooks:workspace:trustFile",
+    async (
+      _event,
+      {
+        workspacePath,
+        fileName,
+        filePath
+      }: { workspacePath: string; fileName: string; filePath: string }
+    ): Promise<void> => {
+      if (!workspacePath || !fileName || !filePath) return
+      trustWorkspaceHookFile(workspacePath, fileName, filePath)
     }
   )
 }
