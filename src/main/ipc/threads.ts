@@ -1,4 +1,6 @@
 import { IpcMain, BrowserWindow } from "electron"
+import { existsSync } from "fs"
+import Store from "electron-store"
 import { v4 as uuid } from "uuid"
 import {
   getAllThreads,
@@ -8,11 +10,18 @@ import {
   deleteThread as dbDeleteThread
 } from "../db"
 import { getCheckpointer, closeCheckpointer } from "../agent/runtime"
-import { deleteThreadCheckpoint } from "../storage"
+import { deleteThreadCheckpoint, getOpenworkDir } from "../storage"
 import { generateTitle } from "../services/title-generator"
 import { fireSessionEnd } from "../hooks/session-lifecycle"
 import { makeHookResultCallback } from "../hooks/result-callback"
 import type { Thread, ThreadUpdateParams } from "../types"
+
+// 复用主进程 settings 存储，用于读取“最近一次选择的工作区”。
+// 这里不存敏感信息，只读写路径类配置。
+const settingsStore = new Store({
+  name: "settings",
+  cwd: getOpenworkDir()
+})
 
 export function registerThreadHandlers(ipcMain: IpcMain): void {
   // List all threads
@@ -47,9 +56,31 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
   // Create a new thread
   ipcMain.handle("threads:create", async (_event, metadata?: Record<string, unknown>) => {
     const threadId = uuid()
-    const title = (metadata?.title as string) || `Thread ${new Date().toLocaleDateString()}`
+    // 先拷贝一份，避免直接修改调用方传入的 metadata 对象。
+    const nextMetadata: Record<string, unknown> = { ...(metadata ?? {}) }
 
-    const thread = dbCreateThread(threadId, { ...metadata, title })
+    // 仅当调用方没有显式传 workspacePath 时，才自动继承最近工作区。
+    // 这样可以兼容两种场景：
+    // 1) 用户手动点“新任务” -> 自动带上最近目录；
+    // 2) 业务方显式指定 workspacePath -> 保持调用方优先。
+    const hasWorkspacePath = Object.prototype.hasOwnProperty.call(nextMetadata, "workspacePath")
+    if (!hasWorkspacePath) {
+      const lastWorkspacePath = settingsStore.get("workspacePath", null)
+      // 仅在路径存在时回填，避免写入无效目录导致后续报错。
+      if (
+        typeof lastWorkspacePath === "string" &&
+        lastWorkspacePath &&
+        existsSync(lastWorkspacePath)
+      ) {
+        nextMetadata.workspacePath = lastWorkspacePath
+      }
+    }
+
+    // title 仍保持原有规则：优先使用调用方传入，否则使用日期默认值。
+    const title = (nextMetadata.title as string) || `Thread ${new Date().toLocaleDateString()}`
+    nextMetadata.title = title
+
+    const thread = dbCreateThread(threadId, nextMetadata)
 
     return {
       thread_id: thread.thread_id,

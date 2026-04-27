@@ -276,10 +276,10 @@ function App(): React.JSX.Element {
     : false
 
   useEffect(() => {
-    if (!currentThreadId || mainView !== "thread") {
-      setRightModule("work")
-      handlePreviewCollapse()
-    }
+    // Keep right panel behavior predictable: when switching thread or entering thread view,
+    // always fall back to workspace mode.
+    setRightModule("work")
+    handlePreviewCollapse()
   }, [currentThreadId, mainView, handlePreviewCollapse])
 
   useEffect(() => {

@@ -1823,6 +1823,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       // Update file watcher
       if (newPath) {
         startWatching(threadId, newPath)
+        // 同步刷新“最近工作区”，供新建线程默认复用。
+        store.set("workspacePath", newPath)
       } else {
         stopWatching(threadId)
       }
@@ -1833,10 +1835,40 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
   // Select workspace folder via dialog (for a specific thread)
   ipcMain.handle("workspace:select", async (_event, threadId?: string) => {
+    // 选择器默认路径优先级：
+    // 1) 当前线程已绑定的 workspacePath
+    // 2) 全局记录的最近 workspacePath
+    // 3) 让系统对话框自行决定默认目录
+    let preferredPath: string | null = null
+
+    if (threadId) {
+      const { getThread } = await import("../db")
+      const thread = getThread(threadId)
+      if (thread?.metadata) {
+        try {
+          const metadata = JSON.parse(thread.metadata) as Record<string, unknown>
+          preferredPath =
+            typeof metadata.workspacePath === "string" ? metadata.workspacePath : null
+        } catch {
+          preferredPath = null
+        }
+      }
+    }
+
+    if (!preferredPath) {
+      const storedPath = store.get("workspacePath", null)
+      preferredPath = typeof storedPath === "string" ? storedPath : null
+    }
+
+    // 仅当目录真实存在时才作为 defaultPath，避免对话框落到不存在路径。
+    const defaultPath =
+      preferredPath && existsSync(preferredPath) ? preferredPath : undefined
+
     const result = await dialog.showOpenDialog({
       properties: ["openDirectory", "createDirectory"],
       title: "Select Workspace Folder",
-      message: "Choose a folder for the agent to work in"
+      message: "Choose a folder for the agent to work in",
+      defaultPath
     })
 
     if (result.canceled || result.filePaths.length === 0) {
@@ -1857,10 +1889,11 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         // Start watching the new workspace
         startWatching(threadId, selectedPath)
       }
-    } else {
-      // Fallback to global
-      store.set("workspacePath", selectedPath)
     }
+
+    // 无论是线程模式还是全局模式，都更新“最近工作区”。
+    // 这样新建会话与下次打开选择框都能默认到这个目录。
+    store.set("workspacePath", selectedPath)
 
     return selectedPath
   })
