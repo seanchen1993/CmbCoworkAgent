@@ -138,6 +138,18 @@ export interface Message {
   created_at: Date
 }
 
+export interface QueuedMessage {
+  id: string
+  text: string
+  attachmentModelBlocks?: string
+  attachmentDisplayPrefix?: string
+  skillBlock?: string
+  modelId?: string
+  handoffRequestedAt?: Date
+  created_at: Date
+  updated_at: Date
+}
+
 export interface ContentBlock {
   type: "text" | "image" | "tool_use" | "tool_result"
   text?: string

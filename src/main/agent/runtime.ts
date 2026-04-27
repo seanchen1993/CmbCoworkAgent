@@ -36,7 +36,7 @@ import {
   anthropicPromptCachingMiddleware,
   humanInTheLoopMiddleware
 } from "langchain"
-import { ToolMessage } from "@langchain/core/messages"
+import { AIMessage, HumanMessage, ToolMessage } from "@langchain/core/messages"
 import { Runnable } from "@langchain/core/runnables"
 import { isGraphBubbleUp } from "@langchain/langgraph"
 
@@ -124,6 +124,82 @@ export function getOrCreateApprovalStore(threadId: string): ApprovalStore {
     approvalStores.set(threadId, store)
   }
   return store
+}
+
+export interface CurrentRunQueuedMessage {
+  id: string
+  content: string
+  displayContent?: string
+}
+
+const currentRunMessageQueues = new Map<string, CurrentRunQueuedMessage[]>()
+
+export function queueCurrentRunMessage(threadId: string, message: CurrentRunQueuedMessage): void {
+  if (!threadId || !message.id || !message.content.trim()) return
+  const existing = currentRunMessageQueues.get(threadId) ?? []
+  const existingIndex = existing.findIndex((item) => item.id === message.id)
+  const next =
+    existingIndex >= 0
+      ? existing.map((item, index) => (index === existingIndex ? message : item))
+      : [...existing, message]
+  currentRunMessageQueues.set(threadId, next)
+}
+
+export function deleteCurrentRunQueuedMessage(threadId: string, messageId: string): void {
+  const existing = currentRunMessageQueues.get(threadId)
+  if (!existing) return
+  const next = existing.filter((message) => message.id !== messageId)
+  if (next.length > 0) currentRunMessageQueues.set(threadId, next)
+  else currentRunMessageQueues.delete(threadId)
+}
+
+export function clearCurrentRunMessageQueue(threadId: string): void {
+  currentRunMessageQueues.delete(threadId)
+}
+
+function drainCurrentRunMessageQueue(threadId: string): CurrentRunQueuedMessage[] {
+  const queued = currentRunMessageQueues.get(threadId) ?? []
+  currentRunMessageQueues.delete(threadId)
+  return queued
+}
+
+function notifyCurrentRunMessagesInjected(
+  threadId: string,
+  messages: CurrentRunQueuedMessage[]
+): void {
+  const payload = {
+    messageIds: messages.map((message) => message.id),
+    messages: messages.map((message) => ({
+      id: message.id,
+      content: message.displayContent || message.content
+    }))
+  }
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send(`agent:queueInjected:${threadId}`, payload)
+  }
+}
+
+function drainCurrentRunMessagesForInjection(
+  threadId: string,
+  phase: "beforeModel" | "afterModel"
+): { messages: HumanMessage[] } | undefined {
+  const queued = drainCurrentRunMessageQueue(threadId).filter((message) => message.content.trim())
+  if (queued.length === 0) return undefined
+
+  notifyCurrentRunMessagesInjected(threadId, queued)
+  console.log(
+    `[Runtime] Injected ${queued.length} queued current-run message(s) in ${phase} for thread ${threadId}`
+  )
+
+  return {
+    messages: queued.map(
+      (message) =>
+        new HumanMessage({
+          id: message.id,
+          content: message.content
+        })
+    )
+  }
 }
 
 const BASE_PROMPT =
@@ -532,12 +608,45 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     }
   })
 
+  const currentRunMessageQueueMiddleware = createMiddleware({
+    name: "currentRunMessageQueue",
+    beforeModel: (_state, runtime) => {
+      const threadId =
+        typeof runtime.configurable?.thread_id === "string"
+          ? runtime.configurable.thread_id
+          : undefined
+      if (!threadId) return undefined
+
+      const injection = drainCurrentRunMessagesForInjection(threadId, "beforeModel")
+      return injection ? { messages: injection.messages } : undefined
+    },
+    afterModel: {
+      canJumpTo: ["model"],
+      hook: (state, runtime) => {
+        const threadId =
+          typeof runtime.configurable?.thread_id === "string"
+            ? runtime.configurable.thread_id
+            : undefined
+        if (!threadId) return undefined
+
+        const messages = Array.isArray(state.messages) ? state.messages : []
+        const lastMessage = messages.at(-1)
+        if (!AIMessage.isInstance(lastMessage)) return undefined
+        if (lastMessage.tool_calls && lastMessage.tool_calls.length > 0) return undefined
+
+        const injection = drainCurrentRunMessagesForInjection(threadId, "afterModel")
+        return injection ? { messages: injection.messages, jumpTo: "model" } : undefined
+      }
+    }
+  })
+
   // Base middleware for custom subagents (no skills — custom subagents must define their own)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const subagentMiddleware: any[] = [
     todoListMiddleware(),
     createFsMiddleware(),
     toolErrorMiddleware,
+    currentRunMessageQueueMiddleware,
     createSummarizationMiddleware(summarizationOptions),
     anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
     createPatchToolCallsMiddleware()
@@ -573,6 +682,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
         generalPurposeAgent: false,
         systemPrompt: SEQUENTIAL_TASK_PROMPT
       } as Parameters<typeof createSubAgentMiddleware>[0]),
+      currentRunMessageQueueMiddleware,
       createSummarizationMiddleware(summarizationOptions),
       anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
       createPatchToolCallsMiddleware(),

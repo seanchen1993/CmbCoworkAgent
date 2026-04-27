@@ -13,7 +13,7 @@ import {
 /* eslint-disable react-refresh/only-export-components */
 import { useStream } from "@langchain/langgraph-sdk/react"
 import { ElectronIPCTransport } from "./electron-transport"
-import type { Message, Todo, FileInfo, Subagent, HITLRequest, SkillMetadata } from "@/types"
+import type { Message, Todo, FileInfo, Subagent, HITLRequest, SkillMetadata, QueuedMessage } from "@/types"
 import { useAppStore } from "@/lib/store"
 import type { DeepAgent } from "../../../main/agent/types"
 import { toast } from "sonner"
@@ -69,6 +69,7 @@ export interface HookLogEntry {
 // Per-thread state (persisted/restored from checkpoints)
 export interface ThreadState {
   messages: Message[]
+  queuedMessages: QueuedMessage[]
   todos: Todo[]
   workspaceFiles: FileInfo[]
   workspacePath: string | null
@@ -107,6 +108,12 @@ interface StreamData {
 export interface ThreadActions {
   appendMessage: (message: Message) => void
   setMessages: (messages: Message[]) => void
+  addQueuedMessage: (message: QueuedMessage) => void
+  updateQueuedMessage: (messageId: string, updates: Partial<QueuedMessage>) => void
+  deleteQueuedMessage: (messageId: string) => void
+  reorderQueuedMessages: (orderedIds: string[]) => void
+  promoteQueuedMessage: (messageId: string) => void
+  clearQueuedMessages: () => void
   setTodos: (todos: Todo[]) => void
   setWorkspaceFiles: (files: FileInfo[] | ((prev: FileInfo[]) => FileInfo[])) => void
   setWorkspacePath: (path: string | null) => void
@@ -146,6 +153,7 @@ interface ThreadContextValue {
 // Default thread state
 const createDefaultThreadState = (): ThreadState => ({
   messages: [],
+  queuedMessages: [],
   todos: [],
   workspaceFiles: [],
   workspacePath: null,
@@ -171,6 +179,61 @@ const defaultStreamData: StreamData = {
   stream: null
 }
 const EMPTY_HOOK_LOGS: HookLogEntry[] = []
+const QUEUE_STORAGE_PREFIX = "cmbcowork:message-queue:"
+
+function queueStorageKey(threadId: string): string {
+  return `${QUEUE_STORAGE_PREFIX}${threadId}`
+}
+
+function normalizeQueuedMessage(raw: unknown): QueuedMessage | null {
+  if (!raw || typeof raw !== "object") return null
+  const item = raw as Partial<QueuedMessage>
+  if (typeof item.id !== "string" || !item.id) return null
+  if (typeof item.text !== "string") return null
+  const createdAt = item.created_at ? new Date(item.created_at) : new Date()
+  const updatedAt = item.updated_at ? new Date(item.updated_at) : createdAt
+  const handoffRequestedAt = item.handoffRequestedAt ? new Date(item.handoffRequestedAt) : null
+  return {
+    id: item.id,
+    text: item.text,
+    attachmentModelBlocks:
+      typeof item.attachmentModelBlocks === "string" ? item.attachmentModelBlocks : undefined,
+    attachmentDisplayPrefix:
+      typeof item.attachmentDisplayPrefix === "string" ? item.attachmentDisplayPrefix : undefined,
+    skillBlock: typeof item.skillBlock === "string" ? item.skillBlock : undefined,
+    modelId: typeof item.modelId === "string" ? item.modelId : undefined,
+    handoffRequestedAt:
+      handoffRequestedAt && !Number.isNaN(handoffRequestedAt.getTime())
+        ? handoffRequestedAt
+        : undefined,
+    created_at: Number.isNaN(createdAt.getTime()) ? new Date() : createdAt,
+    updated_at: Number.isNaN(updatedAt.getTime()) ? new Date() : updatedAt
+  }
+}
+
+function loadQueuedMessages(threadId: string): QueuedMessage[] {
+  try {
+    const raw = window.localStorage.getItem(queueStorageKey(threadId))
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.map(normalizeQueuedMessage).filter((item): item is QueuedMessage => Boolean(item))
+  } catch {
+    return []
+  }
+}
+
+function persistQueuedMessages(threadId: string, messages: QueuedMessage[]): void {
+  try {
+    if (messages.length === 0) {
+      window.localStorage.removeItem(queueStorageKey(threadId))
+      return
+    }
+    window.localStorage.setItem(queueStorageKey(threadId), JSON.stringify(messages))
+  } catch {
+    // Queue persistence is best-effort; the in-memory queue remains authoritative.
+  }
+}
 
 const ThreadContext = createContext<ThreadContextValue | null>(null)
 
@@ -642,6 +705,56 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         setMessages: (messages: Message[]) => {
           updateThreadState(threadId, () => ({ messages }))
         },
+        addQueuedMessage: (message: QueuedMessage) => {
+          updateThreadState(threadId, (state) => {
+            const next = [...state.queuedMessages, message]
+            persistQueuedMessages(threadId, next)
+            return { queuedMessages: next }
+          })
+        },
+        updateQueuedMessage: (messageId: string, updates: Partial<QueuedMessage>) => {
+          updateThreadState(threadId, (state) => {
+            const next = state.queuedMessages.map((message) =>
+              message.id === messageId
+                ? { ...message, ...updates, id: message.id, updated_at: new Date() }
+                : message
+            )
+            persistQueuedMessages(threadId, next)
+            return { queuedMessages: next }
+          })
+        },
+        deleteQueuedMessage: (messageId: string) => {
+          updateThreadState(threadId, (state) => {
+            const next = state.queuedMessages.filter((message) => message.id !== messageId)
+            persistQueuedMessages(threadId, next)
+            return { queuedMessages: next }
+          })
+        },
+        reorderQueuedMessages: (orderedIds: string[]) => {
+          updateThreadState(threadId, (state) => {
+            const byId = new Map(state.queuedMessages.map((message) => [message.id, message]))
+            const ordered = orderedIds
+              .map((id) => byId.get(id))
+              .filter((message): message is QueuedMessage => Boolean(message))
+            const missing = state.queuedMessages.filter((message) => !orderedIds.includes(message.id))
+            const next = [...ordered, ...missing]
+            persistQueuedMessages(threadId, next)
+            return { queuedMessages: next }
+          })
+        },
+        promoteQueuedMessage: (messageId: string) => {
+          updateThreadState(threadId, (state) => {
+            const target = state.queuedMessages.find((message) => message.id === messageId)
+            if (!target) return {}
+            const next = [target, ...state.queuedMessages.filter((message) => message.id !== messageId)]
+            persistQueuedMessages(threadId, next)
+            return { queuedMessages: next }
+          })
+        },
+        clearQueuedMessages: () => {
+          persistQueuedMessages(threadId, [])
+          updateThreadState(threadId, () => ({ queuedMessages: [] }))
+        },
         setTodos: (todos: Todo[]) => {
           updateThreadState(threadId, () => ({ todos }))
         },
@@ -915,6 +1028,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const heartbeatListenerCleanups = useRef<Record<string, () => void>>({})
   // Track approval listeners per thread (registered globally, not per-component)
   const approvalListenerCleanups = useRef<Record<string, Array<() => void>>>({})
+  const queueListenerCleanups = useRef<Record<string, () => void>>({})
 
   // Track streaming AI message state per thread (for token-by-token accumulation)
   const schedulerStreamingRef = useRef<
@@ -1084,7 +1198,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
       setThreadStates((prev) => {
         if (prev[threadId]) return prev
-        return { ...prev, [threadId]: createDefaultThreadState() }
+        return {
+          ...prev,
+          [threadId]: {
+            ...createDefaultThreadState(),
+            queuedMessages: loadQueuedMessages(threadId)
+          }
+        }
       })
 
       loadThreadHistory(threadId)
@@ -1106,26 +1226,31 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       const cleanupApproval = window.api.sandbox.onApprovalRequest(threadId, (request: unknown) => {
         console.log(`[ThreadProvider] Approval request for thread ${threadId}:`, request)
         const req = request as Record<string, unknown>
+        const pendingApproval = {
+          id: (req.id as string) || "",
+          tool_call: (req.tool_call as { id: string; name: string; args: Record<string, unknown> }) || {
+            id: "",
+            name: "execute",
+            args: {}
+          },
+          allowed_decisions: ["approve", "reject"],
+          command: req.command,
+          reason: req.reason,
+          operation: req.operation,
+          filePath: req.filePath,
+          code: req.code,
+          params: req.params,
+          timeoutMs: req.timeoutMs,
+          savedToolName: req.savedToolName,
+          savedToolId: req.savedToolId,
+          savedToolDescription: req.savedToolDescription,
+          savedToolMetadataError: req.savedToolMetadataError,
+          _orchestratorRequestId: req.id,
+          _retryReason: req.retry_reason,
+          _approvalTypes: req.allowed_approval_types
+        } as HITLRequest & Record<string, unknown>
         updateThreadState(threadId, () => ({
-          pendingApproval: {
-            id: (req.id as string) || "",
-            tool_call: (req.tool_call as { id: string; name: string; args: Record<string, unknown> }) || { id: "", name: "execute", args: {} },
-            allowed_decisions: ["approve", "reject"],
-            command: req.command,
-            reason: req.reason,
-            operation: req.operation,
-            filePath: req.filePath,
-            code: req.code,
-            params: req.params,
-            timeoutMs: req.timeoutMs,
-            savedToolName: req.savedToolName,
-            savedToolId: req.savedToolId,
-            savedToolDescription: req.savedToolDescription,
-            savedToolMetadataError: req.savedToolMetadataError,
-            _orchestratorRequestId: req.id,
-            _retryReason: req.retry_reason,
-            _approvalTypes: req.allowed_approval_types
-          } as any
+          pendingApproval
         }))
         // Auto-switch to this thread so the approval UI is visible
         const currentId = useAppStore.getState().currentThreadId
@@ -1139,6 +1264,38 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         updateThreadState(threadId, () => ({ pendingApproval: null }))
       })
       approvalListenerCleanups.current[threadId] = [cleanupApproval, cleanupTimeout]
+
+      queueListenerCleanups.current[threadId] = window.api.agent.onQueuedMessagesInjected(
+        threadId,
+        ({ messageIds, messages }) => {
+          if (!Array.isArray(messageIds) || messageIds.length === 0) return
+          const injectedIds = new Set(messageIds)
+          updateThreadState(threadId, (state) => {
+            const next = state.queuedMessages.filter((message) => !injectedIds.has(message.id))
+            const eventMessages = Array.isArray(messages) ? messages : []
+            const eventMessageIds = new Set(eventMessages.map((message) => message.id))
+            const fallbackMessages = state.queuedMessages
+              .filter((message) => injectedIds.has(message.id) && !eventMessageIds.has(message.id))
+              .map((message) => ({ id: message.id, content: message.text }))
+            const existingMessageIds = new Set(state.messages.map((message) => message.id))
+            const injectedUserMessages: Message[] = [...eventMessages, ...fallbackMessages]
+              .filter((message) => message.id && !existingMessageIds.has(message.id))
+              .map((message) => ({
+                id: message.id,
+                role: "user",
+                content: message.content,
+                created_at: new Date()
+              }))
+            persistQueuedMessages(threadId, next)
+            return {
+              queuedMessages: next,
+              ...(injectedUserMessages.length > 0
+                ? { messages: [...state.messages, ...injectedUserMessages] }
+                : {})
+            }
+          })
+        }
+      )
     },
     [loadThreadHistory, processSchedulerEvent, updateThreadState]
   )
@@ -1150,6 +1307,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     delete heartbeatListenerCleanups.current[threadId]
     approvalListenerCleanups.current[threadId]?.forEach((c) => c())
     delete approvalListenerCleanups.current[threadId]
+    queueListenerCleanups.current[threadId]?.()
+    delete queueListenerCleanups.current[threadId]
     delete schedulerStreamingRef.current[threadId]
 
     initializedThreadsRef.current.delete(threadId)

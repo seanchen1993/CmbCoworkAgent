@@ -126,6 +126,18 @@ interface CustomAPI {
       onEvent?: (event: StreamEvent) => void
     ) => () => void
     cancel: (threadId: string) => Promise<void>
+    queueCurrentRunMessage: (
+      threadId: string,
+      message: { id: string; content: string; displayContent?: string }
+    ) => Promise<{ queued: boolean; reason?: string }>
+    deleteCurrentRunQueuedMessage: (threadId: string, messageId: string) => Promise<void>
+    onQueuedMessagesInjected: (
+      threadId: string,
+      callback: (payload: {
+        messageIds: string[]
+        messages?: Array<{ id: string; content: string }>
+      }) => void
+    ) => () => void
   }
   threads: {
     list: () => Promise<Thread[]>

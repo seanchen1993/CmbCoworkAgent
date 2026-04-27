@@ -3,8 +3,11 @@ import { nowIsoLocal } from "../util/local-time"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
 import { Command } from "@langchain/langgraph"
 import {
+  clearCurrentRunMessageQueue,
   createAgentRuntime,
+  deleteCurrentRunQueuedMessage,
   getSkillEvolutionThreshold,
+  queueCurrentRunMessage,
   type ModelRetryHooks
 } from "../agent/runtime"
 import { getThread } from "../db"
@@ -911,6 +914,47 @@ async function autoProposeSKill(
 
 export function registerAgentHandlers(ipcMain: IpcMain): void {
   console.log("[Agent] Registering agent handlers...")
+
+  ipcMain.handle(
+    "agent:queueCurrentRunMessage",
+    async (
+      _event,
+      payload: {
+        threadId?: string
+        message?: { id?: string; content?: string; displayContent?: string }
+      }
+    ): Promise<{ queued: boolean; reason?: string }> => {
+      const threadId = payload?.threadId
+      const message = payload?.message
+      if (!threadId || !message?.id || !message.content?.trim()) {
+        console.warn("[Agent][Queue] rejected invalid queue payload", { threadId })
+        return { queued: false, reason: "invalid_payload" }
+      }
+      if (!activeRuns.has(threadId)) {
+        console.log(
+          `[Agent][Queue] no active run for thread ${threadId}; activeRuns=[${Array.from(activeRuns.keys()).join(", ")}]`
+        )
+        return { queued: false, reason: "no_active_run" }
+      }
+      queueCurrentRunMessage(threadId, {
+        id: message.id,
+        content: message.content,
+        displayContent: message.displayContent
+      })
+      console.log(
+        `[Agent][Queue] queued current-run message ${message.id} for thread ${threadId}`
+      )
+      return { queued: true }
+    }
+  )
+
+  ipcMain.handle(
+    "agent:deleteCurrentRunQueuedMessage",
+    async (_event, payload: { threadId?: string; messageId?: string }): Promise<void> => {
+      if (!payload?.threadId || !payload.messageId) return
+      deleteCurrentRunQueuedMessage(payload.threadId, payload.messageId)
+    }
+  )
 
   // Manual retry for skill generation — triggered when the user clicks the retry button
   // in the right panel after a generation failure.  Skips the intent banner (user already
@@ -1976,6 +2020,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
     } finally {
       activeRuns.delete(threadId)
+      clearCurrentRunMessageQueue(threadId)
       // Clean up sandbox ACLs granted during this run (unelevated mode keeps them
       // across commands for performance, so we revoke them when the run ends).
       // Uses threadId to only release this run's ref-counts, not other concurrent runs'.
@@ -2267,6 +2312,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
     } finally {
       activeRuns.delete(threadId)
+      clearCurrentRunMessageQueue(threadId)
     }
   })
 
@@ -2546,6 +2592,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
     } finally {
       activeRuns.delete(threadId)
+      clearCurrentRunMessageQueue(threadId)
     }
   })
 
@@ -2560,6 +2607,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     if (controller) {
       controller.abort()
       activeRuns.delete(threadId)
+      clearCurrentRunMessageQueue(threadId)
       console.log(`[Agent] cancel: aborted controller for thread ${threadId}`)
     } else {
       console.warn(`[Agent] cancel: no active run found for thread ${threadId}`)

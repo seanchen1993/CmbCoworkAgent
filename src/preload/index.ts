@@ -154,6 +154,34 @@ const api = {
     },
     cancel: (threadId: string): Promise<void> => {
       return ipcRenderer.invoke("agent:cancel", { threadId })
+    },
+    queueCurrentRunMessage: (
+      threadId: string,
+      message: { id: string; content: string; displayContent?: string }
+    ): Promise<{ queued: boolean; reason?: string }> => {
+      return ipcRenderer.invoke("agent:queueCurrentRunMessage", { threadId, message }) as Promise<{
+        queued: boolean
+        reason?: string
+      }>
+    },
+    deleteCurrentRunQueuedMessage: (threadId: string, messageId: string): Promise<void> => {
+      return ipcRenderer.invoke("agent:deleteCurrentRunQueuedMessage", { threadId, messageId })
+    },
+    onQueuedMessagesInjected: (
+      threadId: string,
+      callback: (payload: { messageIds: string[]; messages?: Array<{ id: string; content: string }> }) => void
+    ): (() => void) => {
+      const channel = `agent:queueInjected:${threadId}`
+      const handler = (
+        _event: unknown,
+        payload: { messageIds: string[]; messages?: Array<{ id: string; content: string }> }
+      ) => {
+        callback(payload)
+      }
+      ipcRenderer.on(channel, handler)
+      return () => {
+        ipcRenderer.removeListener(channel, handler)
+      }
     }
   },
   threads: {

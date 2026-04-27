@@ -34,11 +34,19 @@ import {
   CircleAlert,
   FilePenLine,
   Plus,
-  Loader2
+  Loader2,
+  CornerDownRight,
+  Trash2,
+  MoreHorizontal,
+  GripVertical,
+  Pencil,
+  ListEnd,
+  Check
 } from "lucide-react"
 import type { FileAttachment } from "@/types"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { useAppStore } from "@/lib/store"
 import { cn } from "@/lib/utils"
 import { useShallow } from "zustand/react/shallow"
@@ -52,8 +60,7 @@ import { ModelSwitcher } from "./ModelSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
 import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
-import { GitBranchSwitcher } from "./GitBranchSwitcher"
-import type { Message, SkillMetadata } from "@/types"
+import type { Message, SkillMetadata, QueuedMessage } from "@/types"
 import { MessageBubble } from "./MessageBubble"
 import { ChatScrollNavigator } from "./ChatScrollNavigator"
 import { UpdateStatusCard } from "./UpdateStatusCard"
@@ -227,6 +234,24 @@ const GOOD_SKILLS_PREVIEW_LIMIT = 4
 const escXml = (s: string): string =>
   s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
 
+function getQueuedModelContent(message: QueuedMessage): string {
+  const primary = `${message.text}${message.attachmentModelBlocks ?? ""}`.trim()
+  return [primary, message.skillBlock].filter((part) => part && part.trim()).join("\n\n")
+}
+
+function getQueuedDisplayContent(message: QueuedMessage): string {
+  const primary = message.attachmentDisplayPrefix
+    ? [message.attachmentDisplayPrefix, message.text.trim()].filter(Boolean).join("\n\n")
+    : message.text.trim()
+  return [primary, message.skillBlock].filter((part) => part && part.trim()).join("\n\n")
+}
+
+function getQueuedPreview(message: QueuedMessage): string {
+  const content = getQueuedDisplayContent(message)
+  const display = (parseSkillUseBlock(content)?.rest ?? content).replace(/\s+/g, " ").trim()
+  return display || "待执行消息"
+}
+
 const ROTATING_WORDS = [
   "编写代码",
   "调试问题",
@@ -255,7 +280,7 @@ function RotatingHeadline() {
       if (displayed.length < word.length) {
         timer = setTimeout(() => setDisplayed(word.slice(0, displayed.length + 1)), 150)
       } else {
-        setPhase("showing")
+        timer = setTimeout(() => setPhase("showing"), 0)
       }
     } else if (phase === "showing") {
       timer = setTimeout(() => setPhase("erasing"), 2000)
@@ -263,8 +288,10 @@ function RotatingHeadline() {
       if (displayed.length > 0) {
         timer = setTimeout(() => setDisplayed(displayed.slice(0, -1)), 80)
       } else {
-        setWordIndex((i) => (i + 1) % ROTATING_WORDS.length)
-        setPhase("typing")
+        timer = setTimeout(() => {
+          setWordIndex((i) => (i + 1) % ROTATING_WORDS.length)
+          setPhase("typing")
+        }, 0)
       }
     }
 
@@ -322,6 +349,11 @@ export function ChatContainer({
   const [nuxLoading, setNuxLoading] = useState(false)
   const [nuxError, setNuxError] = useState<string | null>(null)
   const [nuxLoadingStep, setNuxLoadingStep] = useState(0)
+  const [editingQueueId, setEditingQueueId] = useState<string | null>(null)
+  const [editingQueueText, setEditingQueueText] = useState("")
+  const [draggingQueueId, setDraggingQueueId] = useState<string | null>(null)
+  const [queuePumpTick, setQueuePumpTick] = useState(0)
+  const queueSubmittingRef = useRef(false)
 
   const NUX_LOADING_STEPS: string[] = [
     "正在准备沙箱环境...",
@@ -520,6 +552,7 @@ export function ChatContainer({
   // Get persisted thread state and actions from context
   const {
     messages: threadMessages,
+    queuedMessages,
     pendingApproval,
     todos,
     error: threadError,
@@ -534,6 +567,11 @@ export function ChatContainer({
     setTodos,
     setPendingApproval,
     appendMessage,
+    addQueuedMessage,
+    updateQueuedMessage,
+    deleteQueuedMessage,
+    reorderQueuedMessages,
+    promoteQueuedMessage,
     setError,
     clearError,
     setDraftInput: setInput,
@@ -1305,8 +1343,7 @@ export function ChatContainer({
     // future invoker (hotkey, programmatic call) can't accidentally ship the
     // literal "/xxx" text as a message.
     if (slash.mode.kind === "skill") return
-    if ((!input.trim() && attachments.length === 0 && !selectedSkill) || isLoading || !stream)
-      return
+    if ((!input.trim() && attachments.length === 0 && !selectedSkill) || !stream) return
 
     if (!currentModel) {
       setError("请先在下方选择模型后再发送消息。")
@@ -1333,20 +1370,6 @@ export function ChatContainer({
       clearError()
     }
 
-    if (pendingApproval) {
-      // P0 fix: notify main process to reject the pending approval instead of silently dropping it.
-      // Otherwise the orchestrator's Promise hangs until the 5-minute timeout.
-      const approvalAny = pendingApproval as unknown as Record<string, unknown>
-      if (approvalAny._orchestratorRequestId) {
-        window.api.sandbox.sendApprovalDecision({
-          requestId: approvalAny._orchestratorRequestId as string,
-          type: "reject",
-          tool_call_id: pendingApproval.tool_call?.id || ""
-        })
-      }
-      setPendingApproval(null)
-    }
-
     // Snapshot the skill selection before we clear it — synchronous path, no
     // async gap, so no token/stillOurs needed.
     const skill = selectedSkill
@@ -1363,12 +1386,9 @@ export function ChatContainer({
     setInput("")
     setAttachments([])
     if (skill) setSelectedSkill(null)
-    insertLog("send: " + (userText || (skill ? `[skill-only: ${skill.name}]` : "")))
 
-    const isFirstMessage = threadMessages.length === 0
-
-    // Build the full message with attachments as XML tags (sent to model)
-    let fullMessage = userText
+    let attachmentModelBlocks = ""
+    let attachmentDisplayPrefix = ""
     if (currentAttachments && currentAttachments.length > 0) {
       const attachmentTexts = currentAttachments.map((att) => {
         const truncAttr = att.truncated ? ' truncated="true"' : ""
@@ -1376,7 +1396,8 @@ export function ChatContainer({
         const safeContent = att.content.replace(/<\/attachment>/gi, "< /attachment>")
         return `\n\n<attachment filename="${escXml(att.filename)}"${pathAttr} type="${att.mimeType}" size="${att.size}"${truncAttr}>\n${safeContent}\n</attachment>`
       })
-      fullMessage = userText + attachmentTexts.join("")
+      attachmentModelBlocks = attachmentTexts.join("")
+      attachmentDisplayPrefix = currentAttachments.map((a) => `📎 ${a.filename}`).join("\n")
     }
 
     // Append the skill-use block at the very end. The model is told to `read`
@@ -1385,27 +1406,32 @@ export function ChatContainer({
     // join(\n\n) on filtered parts avoids leading blank lines when the user
     // sends a skill with no text or attachments (skill-only invocation).
     const skillBlock = skill ? formatSkillUseBlock({ name: skill.name, path: skill.path }) : ""
-    fullMessage = [fullMessage, skillBlock].filter(Boolean).join("\n\n")
-
-    // displayContent is what the user sees in their bubble while this run is
-    // in-memory. It carries the trailing skill block so MessageBubble's
-    // tail-anchored parser can render the chip and strip it back out.
-    //
-    // Note: the *checkpointed* version of this message is `fullMessage` (the
-    // full payload sent to the model, including <attachment>…</attachment>
-    // bodies), not displayContent. After a thread reload, MessageBubble
-    // therefore renders chip + raw attachment XML instead of chip + 📎 names.
-    // That replay-vs-live divergence is a pre-existing limitation of the
-    // attachment pipeline and is not introduced by the slash-command code.
-    let displayContent: string = userText
-    if (currentAttachments && currentAttachments.length > 0) {
-      const fileNames = currentAttachments.map((a) => `📎 ${a.filename}`).join("\n")
-      displayContent = `${fileNames}\n\n${userText}`
+    const queuedDraft: QueuedMessage = {
+      id: crypto.randomUUID(),
+      text: userText,
+      attachmentModelBlocks,
+      attachmentDisplayPrefix,
+      skillBlock,
+      modelId: currentModel,
+      created_at: new Date(),
+      updated_at: new Date()
     }
-    displayContent = [displayContent, skillBlock].filter(Boolean).join("\n\n")
+    const fullMessage = getQueuedModelContent(queuedDraft)
+    const displayContent = getQueuedDisplayContent(queuedDraft)
+
+    if (isLoading || pendingApproval) {
+      addQueuedMessage(queuedDraft)
+      insertLog("queue: " + (userText || (skill ? `[skill-only: ${skill.name}]` : "")))
+      requestAnimationFrame(() => inputRef.current?.focus())
+      return
+    }
+
+    insertLog("send: " + (userText || (skill ? `[skill-only: ${skill.name}]` : "")))
+
+    const isFirstMessage = threadMessages.length === 0
 
     const userMessage: Message = {
-      id: crypto.randomUUID(),
+      id: queuedDraft.id,
       role: "user",
       content: displayContent,
       created_at: new Date()
@@ -1436,6 +1462,156 @@ export function ChatContainer({
       }
     )
   }
+
+  const startEditingQueuedMessage = useCallback((message: QueuedMessage): void => {
+    setEditingQueueId(message.id)
+    setEditingQueueText(message.text)
+  }, [])
+
+  const saveEditingQueuedMessage = useCallback((): void => {
+    if (!editingQueueId) return
+    const message = queuedMessages.find((item) => item.id === editingQueueId)
+    if (!message) {
+      setEditingQueueId(null)
+      setEditingQueueText("")
+      return
+    }
+    const nextText = editingQueueText.trim()
+    const hasNonTextPayload =
+      Boolean(message.attachmentModelBlocks?.trim()) || Boolean(message.skillBlock?.trim())
+    if (!nextText && !hasNonTextPayload) return
+    const updatedMessage = { ...message, text: nextText }
+    updateQueuedMessage(editingQueueId, { text: nextText })
+    if (message.handoffRequestedAt) {
+      void window.api.agent.queueCurrentRunMessage(threadId, {
+        id: message.id,
+        content: getQueuedModelContent(updatedMessage),
+        displayContent: getQueuedDisplayContent(updatedMessage)
+      })
+    }
+    setEditingQueueId(null)
+    setEditingQueueText("")
+  }, [editingQueueId, editingQueueText, queuedMessages, threadId, updateQueuedMessage])
+
+  const cancelEditingQueuedMessage = useCallback((): void => {
+    setEditingQueueId(null)
+    setEditingQueueText("")
+  }, [])
+
+  const moveQueuedMessage = useCallback(
+    (sourceId: string, targetId: string, placement: "before" | "after"): void => {
+      if (sourceId === targetId) return
+      const ids = queuedMessages.map((message) => message.id)
+      const sourceIndex = ids.indexOf(sourceId)
+      const targetIndex = ids.indexOf(targetId)
+      if (sourceIndex < 0 || targetIndex < 0) return
+      ids.splice(sourceIndex, 1)
+      const adjustedTargetIndex = sourceIndex < targetIndex ? targetIndex - 1 : targetIndex
+      ids.splice(placement === "after" ? adjustedTargetIndex + 1 : adjustedTargetIndex, 0, sourceId)
+      reorderQueuedMessages(ids)
+    },
+    [queuedMessages, reorderQueuedMessages]
+  )
+
+  const handleDeleteQueuedMessage = useCallback(
+    (message: QueuedMessage): void => {
+      if (message.handoffRequestedAt) {
+        void window.api.agent.deleteCurrentRunQueuedMessage(threadId, message.id)
+      }
+      deleteQueuedMessage(message.id)
+    },
+    [deleteQueuedMessage, threadId]
+  )
+
+  const handleGuideQueuedMessage = useCallback(
+    async (message: QueuedMessage): Promise<void> => {
+      if (message.handoffRequestedAt) return
+      try {
+        const result = await window.api.agent.queueCurrentRunMessage(threadId, {
+          id: message.id,
+          content: getQueuedModelContent(message),
+          displayContent: getQueuedDisplayContent(message)
+        })
+        if (result.queued) {
+          updateQueuedMessage(message.id, { handoffRequestedAt: new Date() })
+          toast.success("已提交给当前运行，会在下一次模型调用前接收")
+          return
+        }
+        promoteQueuedMessage(message.id)
+        toast.message("当前没有可插队的运行，已提到队首")
+      } catch (err) {
+        console.error("[ChatContainer] Failed to guide queued message:", err)
+        promoteQueuedMessage(message.id)
+        toast.error("插队失败，已提到队首")
+      }
+    },
+    [promoteQueuedMessage, threadId, updateQueuedMessage]
+  )
+
+  const submitQueuedMessage = useCallback(
+    async (queued: QueuedMessage): Promise<void> => {
+      if (!stream) return
+      const fullMessage = getQueuedModelContent(queued)
+      if (!fullMessage.trim()) return
+      const displayContent = getQueuedDisplayContent(queued)
+      deleteQueuedMessage(queued.id)
+      appendMessage({
+        id: queued.id,
+        role: "user",
+        content: displayContent,
+        created_at: new Date()
+      })
+      await stream.submit(
+        {
+          messages: [{ type: "human", content: fullMessage }]
+        },
+        {
+          config: {
+            configurable: { thread_id: threadId, model_id: queued.modelId || currentModel }
+          }
+        }
+      )
+    },
+    [appendMessage, currentModel, deleteQueuedMessage, stream, threadId]
+  )
+
+  useEffect(() => {
+    if (isLoading || pendingApproval) return
+    for (const queued of queuedMessages) {
+      if (queued.handoffRequestedAt) {
+        updateQueuedMessage(queued.id, { handoffRequestedAt: undefined })
+      }
+    }
+  }, [isLoading, pendingApproval, queuedMessages, updateQueuedMessage])
+
+  useEffect(() => {
+    if (queueSubmittingRef.current) return
+    if (isLoading || pendingApproval || threadError || !stream) return
+    const next = queuedMessages[0]
+    if (!next) return
+
+    queueSubmittingRef.current = true
+    submitQueuedMessage(next)
+      .catch((err) => {
+        const message = err instanceof Error ? err.message : String(err)
+        setError(message)
+        addQueuedMessage({ ...next, updated_at: new Date() })
+      })
+      .finally(() => {
+        queueSubmittingRef.current = false
+        setQueuePumpTick((tick) => tick + 1)
+      })
+  }, [
+    addQueuedMessage,
+    isLoading,
+    pendingApproval,
+    queuePumpTick,
+    queuedMessages,
+    setError,
+    stream,
+    submitQueuedMessage,
+    threadError
+  ])
 
   const handleKeyDown = (e: React.KeyboardEvent): void => {
     // IME composing (Chinese/Japanese/Korean) should not trigger submit on Enter
@@ -2799,6 +2975,141 @@ export function ChatContainer({
                     <span className="text-sm text-primary">拖放文件到这里</span>
                   </div>
                 )}
+                {queuedMessages.length > 0 && (
+                  <div className="relative z-[1] border-b border-border/60 px-3 py-2">
+                    <div className="flex items-center gap-2 pb-1 text-[11px] text-muted-foreground">
+                      <ListEnd className="size-3.5" />
+                      <span>排队中 {queuedMessages.length} 条</span>
+                    </div>
+                    <div className="space-y-1">
+                      {queuedMessages.map((queued) => {
+                        const isEditing = editingQueueId === queued.id
+                        const isGuided = Boolean(queued.handoffRequestedAt)
+                        return (
+                          <div
+                            key={queued.id}
+                            draggable={!isEditing}
+                            onDragStart={() => setDraggingQueueId(queued.id)}
+                            onDragOver={(e) => e.preventDefault()}
+                            onDrop={(e) => {
+                              e.preventDefault()
+                              if (draggingQueueId) {
+                                const rect = e.currentTarget.getBoundingClientRect()
+                                const placement = e.clientY > rect.top + rect.height / 2 ? "after" : "before"
+                                moveQueuedMessage(draggingQueueId, queued.id, placement)
+                              }
+                              setDraggingQueueId(null)
+                            }}
+                            onDragEnd={() => setDraggingQueueId(null)}
+                            className={cn(
+                              "rounded-md border border-transparent px-1.5 py-1 transition-colors",
+                              draggingQueueId === queued.id && "opacity-50",
+                              !isEditing && "hover:border-border/70 hover:bg-muted/30"
+                            )}
+                          >
+                            {isEditing ? (
+                              <div className="space-y-2">
+                                <textarea
+                                  value={editingQueueText}
+                                  onChange={(e) => setEditingQueueText(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                                      e.preventDefault()
+                                      saveEditingQueuedMessage()
+                                    }
+                                    if (e.key === "Escape") {
+                                      e.preventDefault()
+                                      cancelEditingQueuedMessage()
+                                    }
+                                  }}
+                                  className="min-h-20 w-full resize-none rounded-md border border-border bg-background px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                                  autoFocus
+                                />
+                                <div className="flex justify-end gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={cancelEditingQueuedMessage}
+                                    className="flex h-7 items-center gap-1 rounded-md px-2 text-xs text-muted-foreground hover:bg-muted"
+                                  >
+                                    <X className="size-3.5" />
+                                    取消
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={saveEditingQueuedMessage}
+                                    className="flex h-7 items-center gap-1 rounded-md bg-primary px-2 text-xs text-primary-foreground hover:bg-primary/90"
+                                  >
+                                    <Check className="size-3.5" />
+                                    保存
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="flex min-w-0 items-center gap-1.5">
+                                <GripVertical className="size-4 shrink-0 cursor-grab text-muted-foreground/50" />
+                                <CornerDownRight className="size-4 shrink-0 text-muted-foreground/70" />
+                                <div className="min-w-0 flex-1 truncate text-sm text-foreground/80">
+                                  {getQueuedPreview(queued)}
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => void handleGuideQueuedMessage(queued)}
+                                  disabled={isGuided}
+                                  title={
+                                    isGuided
+                                      ? "已提交给当前运行"
+                                      : "提交给当前运行，下次模型调用前接收"
+                                  }
+                                  className="flex h-7 shrink-0 items-center gap-1 rounded-md px-2 text-xs text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-default disabled:opacity-60"
+                                >
+                                  <CornerDownRight className="size-3.5" />
+                                  {isGuided ? "已引导" : "引导"}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteQueuedMessage(queued)}
+                                  title="删除"
+                                  className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+                                >
+                                  <Trash2 className="size-3.5" />
+                                </button>
+                                <Popover>
+                                  <PopoverTrigger asChild>
+                                    <button
+                                      type="button"
+                                      title="更多"
+                                      className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+                                    >
+                                      <MoreHorizontal className="size-4" />
+                                    </button>
+                                  </PopoverTrigger>
+                                  <PopoverContent align="end" className="w-40 p-1">
+                                    <button
+                                      type="button"
+                                      onClick={() => startEditingQueuedMessage(queued)}
+                                      className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-muted"
+                                    >
+                                      <Pencil className="size-4" />
+                                      编辑消息
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleDeleteQueuedMessage(queued)}
+                                      className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm text-muted-foreground hover:bg-muted hover:text-foreground"
+                                    >
+                                      <ListEnd className="size-4" />
+                                      关闭排队
+                                    </button>
+                                  </PopoverContent>
+                                </Popover>
+                              </div>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
                 {/* Attachment chips inside input box */}
                 {attachments.length > 0 && (
                   <div className="flex flex-col gap-1 px-3 pt-2.5">
@@ -2854,11 +3165,10 @@ export function ChatContainer({
                       ? "输入消息或直接发送文件..."
                       : "向 CMBDevClaw 提问，/ 输入命令"
                   }
-                  disabled={isLoading}
                   className={cn(
                     "relative z-[1] w-full resize-none bg-transparent overflow-y-auto",
                     "p-4 text-sm placeholder:text-muted-foreground",
-                    "focus:outline-none disabled:opacity-70",
+                    "focus:outline-none",
                     attachments.length > 0 && "pt-1.5"
                   )}
                   rows={3}
@@ -2870,7 +3180,6 @@ export function ChatContainer({
                     <button
                       type="button"
                       disabled={
-                        isLoading ||
                         attachmentLoading ||
                         attachments.length >= MAX_ATTACHMENTS ||
                         totalAttachmentChars >= MAX_TOTAL_CHARS
@@ -2891,14 +3200,27 @@ export function ChatContainer({
                   </div>
                   <div className="flex items-center gap-2">
                     {isLoading ? (
-                      <button
-                        type="button"
-                        onClick={handleCancel}
-                        aria-label="停止生成"
-                        className="flex items-center justify-center size-7 rounded-md bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
-                      >
-                        <Square className="size-3 fill-current" />
-                      </button>
+                      <>
+                        <button
+                          type="submit"
+                          disabled={
+                            (!input.trim() && attachments.length === 0 && !selectedSkill) ||
+                            slash.mode.kind === "skill"
+                          }
+                          title="加入队列"
+                          className="flex items-center justify-center size-7 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          <Send className="size-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleCancel}
+                          aria-label="停止生成"
+                          className="flex items-center justify-center size-7 rounded-md bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
+                        >
+                          <Square className="size-3 fill-current" />
+                        </button>
+                      </>
                     ) : (
                       <button
                         type="submit"
