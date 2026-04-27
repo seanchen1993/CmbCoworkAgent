@@ -1,10 +1,11 @@
-import { IpcMain, dialog, app, BrowserWindow } from "electron"
+import { IpcMain, dialog, app, BrowserWindow, type MessageBoxOptions } from "electron"
 import Store from "electron-store"
 import * as fs from "fs/promises"
 import { existsSync } from "fs"
 import * as path from "path"
 import { execFile } from "child_process"
 import { promisify } from "util"
+import { getWindowsSandboxMode } from "../storage"
 import type {
   ModelConfig,
   Provider,
@@ -73,6 +74,40 @@ interface FileHistorySnapshot {
   exists: boolean
   content: string | null
   ts: string
+}
+
+function prepareWorkspaceSelectionSandbox(
+  workspacePath: string,
+  parentWindow?: BrowserWindow | null,
+  shouldStillNotify?: () => boolean | Promise<boolean>
+): void {
+  if (!workspacePath || process.platform !== "win32") return
+
+  LocalSandbox.prewarmForWorkspace(workspacePath)
+  void LocalSandbox.prepareWorkspaceForSelection(workspacePath)
+    .then(async (result) => {
+      if (result.ready || !result.error) return
+      if (getWindowsSandboxMode() !== "elevated") return
+      if (shouldStillNotify && !(await shouldStillNotify())) return
+
+      console.warn(`[Workspace] elevated sandbox setup for ${workspacePath} did not complete: ${result.error}`)
+      const messageBoxOptions: MessageBoxOptions = {
+        type: "warning",
+        title: "Elevated 沙箱配置未完成",
+        message: "已切换工作区，但 Elevated 沙箱配置未完成。",
+        detail: `${result.error}\n\n请在设置中手动完成 Elevated 配置，或切换到 unelevated / none 后重试。`,
+        buttons: ["知道了"],
+        defaultId: 0
+      }
+      if (parentWindow && !parentWindow.isDestroyed()) {
+        await dialog.showMessageBox(parentWindow, messageBoxOptions)
+      } else {
+        await dialog.showMessageBox(messageBoxOptions)
+      }
+    })
+    .catch((err) => {
+      console.warn("[Workspace] elevated sandbox background preparation failed:", err)
+    })
 }
 
 type PushStepStatus = "ok" | "failed" | "skipped"
@@ -1801,11 +1836,13 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   // Set workspace path for a thread (stores in thread metadata)
   ipcMain.handle(
     "workspace:set",
-    async (_event, { threadId, path: newPath }: WorkspaceSetParams) => {
+    async (event, { threadId, path: newPath }: WorkspaceSetParams) => {
+      const parentWindow = BrowserWindow.fromWebContents(event.sender)
       if (!threadId) {
         // Fallback to global setting
         if (newPath) {
           store.set("workspacePath", newPath)
+          prepareWorkspaceSelectionSandbox(newPath, parentWindow, () => store.get("workspacePath") === newPath)
         } else {
           store.delete("workspacePath")
         }
@@ -1824,7 +1861,16 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       // Update file watcher
       if (newPath) {
         startWatching(threadId, newPath)
-        LocalSandbox.prewarmForWorkspace(newPath)
+        prepareWorkspaceSelectionSandbox(newPath, parentWindow, () => {
+          const current = getThread(threadId)
+          if (!current?.metadata) return false
+          try {
+            const currentMetadata = JSON.parse(current.metadata) as { workspacePath?: unknown }
+            return currentMetadata.workspacePath === newPath
+          } catch {
+            return false
+          }
+        })
       } else {
         stopWatching(threadId)
       }
@@ -1834,7 +1880,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   )
 
   // Select workspace folder via dialog (for a specific thread)
-  ipcMain.handle("workspace:select", async (_event, threadId?: string) => {
+  ipcMain.handle("workspace:select", async (event, threadId?: string) => {
+    const parentWindow = BrowserWindow.fromWebContents(event.sender)
     const result = await dialog.showOpenDialog({
       properties: ["openDirectory", "createDirectory"],
       title: "Select Workspace Folder",
@@ -1858,11 +1905,21 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
         // Start watching the new workspace
         startWatching(threadId, selectedPath)
-        LocalSandbox.prewarmForWorkspace(selectedPath)
+        prepareWorkspaceSelectionSandbox(selectedPath, parentWindow, () => {
+          const current = getThread(threadId)
+          if (!current?.metadata) return false
+          try {
+            const currentMetadata = JSON.parse(current.metadata) as { workspacePath?: unknown }
+            return currentMetadata.workspacePath === selectedPath
+          } catch {
+            return false
+          }
+        })
       }
     } else {
       // Fallback to global
       store.set("workspacePath", selectedPath)
+      prepareWorkspaceSelectionSandbox(selectedPath, parentWindow, () => store.get("workspacePath") === selectedPath)
     }
 
     return selectedPath

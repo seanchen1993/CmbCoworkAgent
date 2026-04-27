@@ -24,12 +24,78 @@ const ELEVATED_WORKSPACES_PATH = join(CODEX_HOME, ".sandbox", "elevated_workspac
 const SETUP_VERSION = 5
 const execFileP = promisify(execFile)
 
+function createAbortError(): Error {
+  const error = new Error("Operation aborted")
+  error.name = "AbortError"
+  return error
+}
+
+function execFileWithAbort(
+  file: string,
+  args: string[],
+  options: Parameters<typeof execFile>[2] & { timeout?: number; windowsHide?: boolean },
+  abortSignal?: AbortSignal
+): Promise<void> {
+  if (abortSignal?.aborted) {
+    return Promise.reject(createAbortError())
+  }
+
+  return new Promise<void>((resolve, reject) => {
+    const child = execFile(file, args, options, (err) => {
+      abortSignal?.removeEventListener("abort", onAbort)
+      if (err) reject(err)
+      else resolve()
+    })
+
+    const onAbort = () => {
+      abortSignal?.removeEventListener("abort", onAbort)
+      try { child.kill() } catch { /* already exited */ }
+      reject(createAbortError())
+    }
+
+    abortSignal?.addEventListener("abort", onAbort, { once: true })
+  })
+}
+
 /** Persistent + session cache of elevated sandbox roots already prepared for ACL use. */
 const elevatedPreparedRoots = new Set<string>()
 
 /** Normalize a directory path for consistent cache lookups (lowercase, no trailing slash, backslashes). */
 export function normalizeDirKey(dir: string): string {
   return resolve(dir).replace(/\/+/g, "\\").replace(/\\+$/, "").toLowerCase()
+}
+
+function isSafeElevatedPreparedRoot(dir: string): boolean {
+  if (!dir || typeof dir !== "string") return false
+  if (/^[\\/]{2}/.test(dir)) return false
+
+  let key: string
+  try {
+    key = normalizeDirKey(dir)
+  } catch {
+    return false
+  }
+
+  if (/^[a-z]:$/i.test(key)) return false
+
+  const blockedRoots = [
+    "c:\\windows",
+    "c:\\program files",
+    "c:\\program files (x86)",
+    "c:\\programdata",
+    "c:\\users\\all users",
+    "c:\\users\\default",
+    "c:\\users\\public"
+  ]
+  if (blockedRoots.some((root) => key === root || key.startsWith(`${root}\\`))) {
+    return false
+  }
+
+  try {
+    return statSync(resolve(dir)).isDirectory()
+  } catch {
+    return false
+  }
 }
 
 /** Load previously configured workspace paths from disk into the in-memory set. */
@@ -44,9 +110,16 @@ function loadElevatedPreparedRoots(): void {
       : Array.isArray(data.paths)
         ? data.paths
         : []
+    let changed = false
     for (const p of rawRoots) {
-      if (typeof p === "string") elevatedPreparedRoots.add(normalizeDirKey(p))
+      if (typeof p !== "string") continue
+      if (!isSafeElevatedPreparedRoot(p)) {
+        changed = true
+        continue
+      }
+      elevatedPreparedRoots.add(normalizeDirKey(p))
     }
+    if (changed) saveElevatedPreparedRoots()
   } catch {
     // Corrupt or missing file — start fresh, will be overwritten on next save
   }
@@ -144,11 +217,6 @@ export function isElevatedSetupComplete(): boolean {
   }
 }
 
-/** Escape single quotes for PowerShell single-quoted strings. */
-function psEscape(s: string): string {
-  return s.replace(/'/g, "''")
-}
-
 let _cachedIsCurrentProcessElevated: boolean | null = null
 let _currentProcessElevationPromise: Promise<boolean> | null = null
 const SANDBOX_PREWARM_WORKSPACE_LIMIT = 5
@@ -176,8 +244,11 @@ async function getCurrentProcessElevationState(): Promise<boolean> {
   }).then(({ stdout }) => {
     _cachedIsCurrentProcessElevated = String(stdout).includes("S-1-16-12288")
     return _cachedIsCurrentProcessElevated
-  }).catch(() => {
-    _cachedIsCurrentProcessElevated = false
+  }).catch((e) => {
+    // Transient probe failures must not pin the cache to false — leave it null
+    // so the next caller (e.g. NUX setup, runElevatedSetupForPaths) retries the
+    // whoami check. Returning false this time is just a safe-by-default fallback.
+    console.warn("[Sandbox] whoami probe failed (cache untouched, will retry):", (e as Error)?.message?.slice(0, 120))
     return false
   }).finally(() => {
     if (_currentProcessElevationPromise === lookup) {
@@ -198,6 +269,10 @@ async function scheduleKnownWorkspaceSandboxPrewarm(
   mode: "none" | "unelevated" | "readonly" | "elevated"
 ): Promise<void> {
   if (process.platform !== "win32" || mode === "none") return
+  // Keep elevated mode close to Codex upstream: prepare only the active cwd
+  // opportunistically, not a historical list of workspaces that can include
+  // stale or protected paths.
+  if (mode === "elevated") return
 
   try {
     const [{ getAllThreads }, { LocalSandbox }] = await Promise.all([
@@ -227,12 +302,17 @@ async function scheduleKnownWorkspaceSandboxPrewarm(
 
 /**
  * Run elevated sandbox setup with UAC for the given workspace paths.
- * This is called both from the NUX dialog and from local-sandbox when
- * a new workspace directory needs ACL setup in elevated mode.
+ * This is intended for explicit setup entry points such as first-run NUX
+ * and the sandbox settings panel.
  */
 export async function runElevatedSetupForPaths(
-  workspacePaths?: string[]
+  workspacePaths?: string[],
+  abortSignal?: AbortSignal
 ): Promise<{ success: boolean; error?: string }> {
+  if (abortSignal?.aborted) {
+    throw createAbortError()
+  }
+
   if (process.platform !== "win32") {
     return { success: false, error: "Elevated sandbox is only available on Windows" }
   }
@@ -337,15 +417,10 @@ export async function runElevatedSetupForPaths(
 
   try {
     if (await getCurrentProcessElevationState()) {
-      await new Promise<void>((resolve, reject) => {
-        execFile(setupExe, [b64], {
-          timeout: 120_000,
-          windowsHide: true
-        }, (err) => {
-          if (err) reject(err)
-          else resolve()
-        })
-      })
+      await execFileWithAbort(setupExe, [b64], {
+        timeout: 120_000,
+        windowsHide: true
+      }, abortSignal)
     } else {
       // Write PS script to a temp file to avoid command-line length limits and encoding
       // corruption that occur when passing long base64 payloads via -Command inline.
@@ -363,24 +438,22 @@ export async function runElevatedSetupForPaths(
       writeFileSync(tmpScript, psScript, "utf-8")
 
       try {
-        await new Promise<void>((resolve, reject) => {
-          execFile("powershell", [
-            "-NoProfile", "-NonInteractive",
-            "-ExecutionPolicy", "Bypass",
-            "-File", tmpScript
-          ], {
-            timeout: 120_000,
-            windowsHide: false
-          }, (err) => {
-            if (err) reject(err)
-            else resolve()
-          })
-        })
+        await execFileWithAbort("powershell", [
+          "-NoProfile", "-NonInteractive",
+          "-ExecutionPolicy", "Bypass",
+          "-File", tmpScript
+        ], {
+          timeout: 120_000,
+          windowsHide: false
+        }, abortSignal)
       } finally {
         try { unlinkSync(tmpScript) } catch {}
       }
     }
   } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw err
+    }
     const msg = err instanceof Error ? err.message : String(err)
     if (msg.includes("1223") || msg.includes("canceled") || msg.includes("cancelled")) {
       return { success: false, error: "用户取消了管理员授权" }
@@ -408,6 +481,7 @@ export function areElevatedRootsPrepared(dirs: string[]): boolean {
 export function markElevatedRootsPrepared(dirs: string[]): void {
   let changed = false
   for (const dir of dirs) {
+    if (!isSafeElevatedPreparedRoot(dir)) continue
     const key = normalizeDirKey(dir)
     if (!elevatedPreparedRoots.has(key)) {
       elevatedPreparedRoots.add(key)
