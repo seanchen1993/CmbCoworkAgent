@@ -45,7 +45,10 @@ type FileTreeNode = {
   children: FileTreeNode[]
 }
 
-type SkillMarketInfo = Pick<MarketItem, "name" | "chinese_name" | "category" | "description">
+type SkillMarketInfo = Pick<
+  MarketItem,
+  "name" | "chinese_name" | "category" | "description" | "featured"
+>
 type SaveSkillFileResult = { success: boolean; error?: string }
 type PublishMode = "upload" | "update"
 type PublishSuccessPayload = { skillName: string; mode: PublishMode }
@@ -309,6 +312,10 @@ function getSkillCategory(skill: SkillMetadata, marketInfo: SkillMarketInfo | un
   if (marketCategory) return marketCategory
   const metadataCategory = skill.metadata?.category?.trim()
   return metadataCategory || ""
+}
+
+function isFeaturedSkill(marketInfo: SkillMarketInfo | undefined): boolean {
+  return marketInfo?.featured === "精品"
 }
 
 function UploadSkillDialog(props: {
@@ -1001,7 +1008,8 @@ export function SkillsPanel(): React.JSX.Element {
           name: item.name,
           chinese_name: item.chinese_name,
           category: item.category,
-          description: item.description
+          description: item.description,
+          featured: item.featured
         }
       }
       setMarketSkillMap(next)
@@ -1089,6 +1097,17 @@ export function SkillsPanel(): React.JSX.Element {
     return files
   }, [])
 
+  const shouldHideMarketInstalledFeaturedFiles = useCallback(
+    (skill: SkillMetadata): boolean => {
+      if (skill.source !== "user") return false
+      const localMarked = localUploadedSkillPaths.has(normalizeSkillPathKey(skill.path))
+      const uploadedByMe = uploadedSkillNames.has(normalizeSkillName(skill.name))
+      if (localMarked || uploadedByMe) return false
+      return isFeaturedSkill(marketSkillMap[normalizeSkillName(skill.name)])
+    },
+    [localUploadedSkillPaths, marketSkillMap, uploadedSkillNames]
+  )
+
   const onToggleSkill = useCallback(
     async (skill: SkillMetadata) => {
       const wasExpanded = expandedSkillsRef.current.has(skill.name)
@@ -1097,6 +1116,14 @@ export function SkillsPanel(): React.JSX.Element {
       setExpandedSkills(next)
 
       if (!wasExpanded) {
+        if (shouldHideMarketInstalledFeaturedFiles(skill)) {
+          setSelectedSkill(skill)
+          setSelectedFilePath(null)
+          setSelectedFileContent(null)
+          setSelectedBinaryBase64(null)
+          setSelectedBinaryMimeType(null)
+          return
+        }
         const files = await ensureSkillFiles(skill)
         const firstFile = defaultSkillFile(files)
         if (firstFile) {
@@ -1108,14 +1135,22 @@ export function SkillsPanel(): React.JSX.Element {
         }
       }
     },
-    [ensureSkillFiles, loadFileContent]
+    [ensureSkillFiles, loadFileContent, shouldHideMarketInstalledFeaturedFiles]
   )
 
   const onSelectFile = useCallback(
     async (skill: SkillMetadata, filePath: string) => {
+      if (shouldHideMarketInstalledFeaturedFiles(skill)) {
+        setSelectedSkill(skill)
+        setSelectedFilePath(null)
+        setSelectedFileContent(null)
+        setSelectedBinaryBase64(null)
+        setSelectedBinaryMimeType(null)
+        return
+      }
       await loadFileContent(skill, filePath)
     },
-    [loadFileContent]
+    [loadFileContent, shouldHideMarketInstalledFeaturedFiles]
   )
 
   const toggleDirNode = useCallback((nodeId: string) => {
@@ -1213,12 +1248,21 @@ export function SkillsPanel(): React.JSX.Element {
     () => !!selectedSkillMarketInfo || selectedSkillUploadedByMe,
     [selectedSkillMarketInfo, selectedSkillUploadedByMe]
   )
+  const isMarketInstalledFeaturedSkill = useCallback(
+    (skill: SkillMetadata | null | undefined): boolean => {
+      if (!skill || skill.source !== "user") return false
+      if (isSkillUploadedInPanel(skill)) return false
+      return isFeaturedSkill(resolveMarketInfo(skill))
+    },
+    [isSkillUploadedInPanel, resolveMarketInfo]
+  )
+  const selectedSkillHideContent = useMemo(
+    () => isMarketInstalledFeaturedSkill(selectedSkill),
+    [isMarketInstalledFeaturedSkill, selectedSkill]
+  )
   const selectedSkillCanEdit = useMemo(
-    () =>
-      !!selectedSkill &&
-      // 规则 1：除内置技能外，其他技能都可编辑（含市场安装技能）。
-      selectedSkill.source !== "project",
-    [selectedSkill]
+    () => !!selectedSkill && selectedSkillUploadedInPanel,
+    [selectedSkill, selectedSkillUploadedInPanel]
   )
   const selectedSkillCanPublish = useMemo(
     () =>
@@ -1245,6 +1289,9 @@ export function SkillsPanel(): React.JSX.Element {
     async (filePath: string, nextContent: string): Promise<SaveSkillFileResult> => {
       if (!selectedSkill) return { success: false, error: "未选择技能" }
       if (selectedSkill.source === "project") return { success: false, error: "内置技能不支持编辑" }
+      if (!isSkillUploadedInPanel(selectedSkill)) {
+        return { success: false, error: "只有我上传的技能支持编辑" }
+      }
       if (!selectedFilePath || selectedFilePath !== filePath) {
         return { success: false, error: "当前文件已切换，请重试" }
       }
@@ -1282,7 +1329,7 @@ export function SkillsPanel(): React.JSX.Element {
 
       return { success: true }
     },
-    [selectedFilePath, selectedSkill]
+    [isSkillUploadedInPanel, selectedFilePath, selectedSkill]
   )
 
   const filterSkillsBySearch = useCallback(
@@ -1462,6 +1509,7 @@ export function SkillsPanel(): React.JSX.Element {
                 onToggleSkill={onToggleSkill}
                 onToggleDirNode={toggleDirNode}
                 onSelectFile={onSelectFile}
+                hideFeaturedMarketFiles
               />
             )}
           </div>
@@ -1497,6 +1545,7 @@ export function SkillsPanel(): React.JSX.Element {
         }
         publishLabel={selectedSkillPublishLabel}
         canEdit={selectedSkillCanEdit}
+        hideContentPreview={selectedSkillHideContent}
         onSaveContent={saveSkillFileContent}
         isEdited={selectedSkillIsEdited}
         hasMarketEntry={selectedSkillHasMarketEntry}
@@ -1567,6 +1616,7 @@ function SkillSection(props: {
   selectedSkill: SkillMetadata | null
   expandedDirNodes: Set<string>
   disabledSkills: Set<string>
+  hideFeaturedMarketFiles?: boolean
   onToggleSkill: (skill: SkillMetadata) => void
   onToggleDirNode: (nodeId: string) => void
   onSelectFile: (skill: SkillMetadata, filePath: string) => void
@@ -1582,6 +1632,7 @@ function SkillSection(props: {
     selectedSkill,
     expandedDirNodes,
     disabledSkills,
+    hideFeaturedMarketFiles = false,
     onToggleSkill,
     onToggleDirNode,
     onSelectFile
@@ -1671,6 +1722,7 @@ function SkillSection(props: {
               const hasMarketEntry =
                 !!marketInfo || uploadedSkillNames.has(normalizeSkillName(skill.name))
               const isEdited = editedSkillPaths.has(normalizeSkillPathKey(skill.path))
+              const hideFileTree = hideFeaturedMarketFiles && isFeaturedSkill(marketInfo)
 
               return (
                 <SkillItem
@@ -1682,6 +1734,7 @@ function SkillSection(props: {
                   expanded={expanded}
                   selected={selected}
                   disabled={disabled}
+                  hideFileTree={hideFileTree}
                   files={files}
                   expandedDirNodes={expandedDirNodes}
                   onToggleSkill={onToggleSkill}
@@ -1705,6 +1758,7 @@ function SkillItem(props: {
   expanded: boolean
   selected: boolean
   disabled: boolean
+  hideFileTree?: boolean
   files: string[]
   expandedDirNodes: Set<string>
   onToggleSkill: (skill: SkillMetadata) => void
@@ -1719,6 +1773,7 @@ function SkillItem(props: {
     expanded,
     selected,
     disabled,
+    hideFileTree = false,
     files,
     expandedDirNodes,
     onToggleSkill,
@@ -1727,12 +1782,11 @@ function SkillItem(props: {
   } = props
 
   const treeNodes = useMemo(
-    () => (expanded && files.length > 0 ? buildFileTree(skill.path, files) : []),
-    [expanded, files, skill.path]
+    () => (expanded && !hideFileTree && files.length > 0 ? buildFileTree(skill.path, files) : []),
+    [expanded, files, hideFileTree, skill.path]
   )
   const chineseName = getSkillChineseName(skill, marketInfo)
   const displayName = chineseName || skill.name
-  const subtitleName = chineseName ? skill.name : null
 
   return (
     <div
@@ -1792,7 +1846,11 @@ function SkillItem(props: {
             selected ? "border-primary/30 bg-primary/[0.03]" : "border-border/60 bg-muted/20"
           )}
         >
-          {treeNodes.length > 0 ? (
+          {hideFileTree ? (
+            <div className="pl-7 pr-2 py-2 text-xs text-muted-foreground">
+              精品技能不支持查看，可以直接使用。
+            </div>
+          ) : treeNodes.length > 0 ? (
             <SkillFileTree
               nodes={treeNodes}
               level={0}
@@ -1892,6 +1950,7 @@ export function SkillDetail(props: {
   onSaveContent?: (filePath: string, content: string) => Promise<SaveSkillFileResult>
   isEdited?: boolean
   hasMarketEntry?: boolean
+  hideContentPreview?: boolean
   hideActions?: boolean
 }): React.JSX.Element {
   const {
@@ -1911,6 +1970,7 @@ export function SkillDetail(props: {
     onSaveContent,
     isEdited = false,
     hasMarketEntry = false,
+    hideContentPreview = false,
     hideActions = false
   } = props
   const [isEditing, setIsEditing] = useState(false)
@@ -1921,6 +1981,7 @@ export function SkillDetail(props: {
   const isEditableTextFile = !!selectedFilePath && KNOWN_TEXT_EXTS.has(selectedFileExt)
   const canEditCurrentFile =
     canEdit &&
+    !hideContentPreview &&
     isEditableTextFile &&
     typeof content === "string" &&
     (previewKind === "text" || previewKind === "html")
@@ -2107,7 +2168,13 @@ export function SkillDetail(props: {
         </p>
       </div>
 
-      {isEditing && canEditCurrentFile ? (
+      {hideContentPreview ? (
+        <div className="flex-1 min-h-0 p-4">
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+            精品技能不支持查看，可以直接使用。
+          </div>
+        </div>
+      ) : isEditing && canEditCurrentFile ? (
         <div className="flex-1 min-h-0 p-4 flex flex-col gap-2">
           <SkillFileEditor
             className="flex-1 min-h-0"
