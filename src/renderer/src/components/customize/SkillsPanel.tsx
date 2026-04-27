@@ -318,6 +318,33 @@ function isFeaturedSkill(marketInfo: SkillMarketInfo | undefined): boolean {
   return marketInfo?.featured === "精品"
 }
 
+function splitMarkdownFrontmatter(
+  filePath: string | null,
+  content: string | null
+): { protectedPrefix: string; editableContent: string; hasFrontmatter: boolean } {
+  const isMarkdown = !!filePath && /\.md$/i.test(filePath)
+  if (!isMarkdown || typeof content !== "string") {
+    return { protectedPrefix: "", editableContent: content ?? "", hasFrontmatter: false }
+  }
+
+  const match = content.match(/^---\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/)
+  if (!match) return { protectedPrefix: "", editableContent: content, hasFrontmatter: false }
+
+  return {
+    protectedPrefix: match[0],
+    editableContent: content.slice(match[0].length),
+    hasFrontmatter: true
+  }
+}
+
+function mergeMarkdownFrontmatter(protectedPrefix: string, editableContent: string): string {
+  if (!protectedPrefix) return editableContent
+  if (!editableContent || protectedPrefix.endsWith("\n") || protectedPrefix.endsWith("\r\n")) {
+    return `${protectedPrefix}${editableContent}`
+  }
+  return `${protectedPrefix}\n${editableContent}`
+}
+
 function UploadSkillDialog(props: {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -1979,6 +2006,10 @@ export function SkillDetail(props: {
   const [saveError, setSaveError] = useState<string | null>(null)
   const selectedFileExt = selectedFilePath?.split(".").pop()?.toLowerCase() ?? ""
   const isEditableTextFile = !!selectedFilePath && KNOWN_TEXT_EXTS.has(selectedFileExt)
+  const markdownFrontmatter = useMemo(
+    () => splitMarkdownFrontmatter(selectedFilePath, content),
+    [content, selectedFilePath]
+  )
   const canEditCurrentFile =
     canEdit &&
     !hideContentPreview &&
@@ -1988,30 +2019,34 @@ export function SkillDetail(props: {
 
   useEffect(() => {
     setIsEditing(false)
-    setDraftContent(content ?? "")
+    setDraftContent(markdownFrontmatter.editableContent)
     setIsSaving(false)
     setSaveError(null)
-  }, [selectedFilePath, content, canEditCurrentFile])
+  }, [selectedFilePath, content, canEditCurrentFile, markdownFrontmatter.editableContent])
 
   const handleStartEdit = useCallback(() => {
     if (!canEditCurrentFile) return
-    setDraftContent(content ?? "")
+    setDraftContent(markdownFrontmatter.editableContent)
     setSaveError(null)
     setIsEditing(true)
-  }, [canEditCurrentFile, content])
+  }, [canEditCurrentFile, markdownFrontmatter.editableContent])
 
   const handleCancelEdit = useCallback(() => {
-    setDraftContent(content ?? "")
+    setDraftContent(markdownFrontmatter.editableContent)
     setSaveError(null)
     setIsEditing(false)
-  }, [content])
+  }, [markdownFrontmatter.editableContent])
 
   const handleSaveEdit = useCallback(async () => {
     if (!canEditCurrentFile || !selectedFilePath || !onSaveContent || isSaving) return
     setSaveError(null)
     setIsSaving(true)
     try {
-      const result = await onSaveContent(selectedFilePath, draftContent)
+      const nextContent = mergeMarkdownFrontmatter(
+        markdownFrontmatter.protectedPrefix,
+        draftContent
+      )
+      const result = await onSaveContent(selectedFilePath, nextContent)
       if (result.success) {
         setIsEditing(false)
       } else {
@@ -2022,7 +2057,14 @@ export function SkillDetail(props: {
     } finally {
       setIsSaving(false)
     }
-  }, [canEditCurrentFile, draftContent, isSaving, onSaveContent, selectedFilePath])
+  }, [
+    canEditCurrentFile,
+    draftContent,
+    isSaving,
+    markdownFrontmatter.protectedPrefix,
+    onSaveContent,
+    selectedFilePath
+  ])
 
   if (!skill) {
     return <SkillsGuide />
@@ -2032,16 +2074,14 @@ export function SkillDetail(props: {
   const category = getSkillCategory(skill, marketInfo)
   const description = marketInfo?.description || skill.description || "暂无描述"
   const isMarkdown = !!selectedFilePath && /\.md$/i.test(selectedFilePath)
-  const hasFrontmatter = isMarkdown && !!content && content.startsWith("---")
-  const frontmatterEnd = hasFrontmatter ? content.indexOf("---", 3) : -1
   const previewContent =
-    hasFrontmatter && frontmatterEnd > 0
-      ? content.slice(content.indexOf("\n", frontmatterEnd) + 1).trim()
+    isMarkdown && markdownFrontmatter.hasFrontmatter
+      ? markdownFrontmatter.editableContent.trim()
       : content
   const binaryDataUrl =
     binaryBase64 && binaryMimeType ? `data:${binaryMimeType};base64,${binaryBase64}` : null
   const isLoading = !!selectedFilePath && content === null && binaryBase64 === null
-  const isDirty = isEditing && draftContent !== (content ?? "")
+  const isDirty = isEditing && draftContent !== markdownFrontmatter.editableContent
   /**
    * 让“发布/更新到市场”按钮更亮眼：
    * - 发布：橙金渐变；
@@ -2182,6 +2222,11 @@ export function SkillDetail(props: {
             onChange={setDraftContent}
             onSave={() => void handleSaveEdit()}
             error={saveError}
+            note={
+              markdownFrontmatter.hasFrontmatter
+                ? "Markdown 顶部元信息受保护，此处只编辑正文内容。"
+                : null
+            }
             disabled={isSaving}
           />
         </div>
