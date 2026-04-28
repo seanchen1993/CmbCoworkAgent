@@ -12,6 +12,12 @@ import * as fs from "fs"
 import { buildTraceTree } from "../agent/trace/tree-builder"
 import type { AgentTrace, TraceNode } from "../agent/trace/types"
 import { getSkillIdentifierLookupTerms } from "../utils/skill-identifiers"
+import {
+  effectiveGeneratedLinesSumAgg,
+  makeDashboardCodeStats,
+  normalizeCodeStatsFromAggs,
+  type DashboardCodeStats
+} from "./dashboard-code-stats"
 
 // ─────────────────────────────────────────────────────────
 // ES Configuration (from .env)
@@ -142,19 +148,6 @@ interface DashboardCommitDetail {
   threadId?: string
   usedSkills: string[]
   skillCount: number
-}
-
-interface DashboardCodeStats {
-  generatedLines: number
-  deletedLines: number
-  effectiveGeneratedLines: number
-  measuredGeneratedLines: number
-  unmeasuredGeneratedLines: number
-  inclusiveEffectiveGeneratedLines: number
-  adoptedLines: number
-  measuredAdoptionRate: number | null
-  inclusiveAdoptionRate: number | null
-  adoptionRate: number | null
 }
 
 interface DashboardSkillDetail {
@@ -309,79 +302,6 @@ function asNumber(value: unknown, fallback = 0): number {
 function asStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return []
   return value.filter((item): item is string => typeof item === "string")
-}
-
-function getAggNumber(raw: unknown, path: string[], fallback = 0): number {
-  let current: unknown = raw
-  for (const key of path) {
-    if (!current || typeof current !== "object" || Array.isArray(current)) return fallback
-    current = (current as Record<string, unknown>)[key]
-  }
-  return asNumber(current, fallback)
-}
-
-function computeAdoptionRate(adoptedLines: number, generatedLines: number): number | null {
-  return generatedLines > 0 ? adoptedLines / generatedLines : null
-}
-
-function makeDashboardCodeStats(args: {
-  generatedLines: number
-  deletedLines: number
-  measuredGeneratedLines: number
-  effectiveGeneratedLines: number
-  adoptedLines: number
-}): DashboardCodeStats {
-  const generatedLines = Math.max(0, args.generatedLines)
-  const deletedLines = Math.max(0, args.deletedLines)
-  const measuredGeneratedLines = Math.max(0, args.measuredGeneratedLines)
-  const effectiveGeneratedLines = Math.max(0, args.effectiveGeneratedLines)
-  const adoptedLines = Math.max(0, args.adoptedLines)
-  const unmeasuredGeneratedLines = Math.max(0, generatedLines - measuredGeneratedLines)
-  const inclusiveEffectiveGeneratedLines = effectiveGeneratedLines + unmeasuredGeneratedLines
-  const measuredAdoptionRate = computeAdoptionRate(adoptedLines, effectiveGeneratedLines)
-  const inclusiveAdoptionRate = computeAdoptionRate(adoptedLines, inclusiveEffectiveGeneratedLines)
-  return {
-    generatedLines,
-    deletedLines,
-    effectiveGeneratedLines,
-    measuredGeneratedLines,
-    unmeasuredGeneratedLines,
-    inclusiveEffectiveGeneratedLines,
-    adoptedLines,
-    measuredAdoptionRate,
-    inclusiveAdoptionRate,
-    // Backward-compatible alias for older renderer code paths.
-    adoptionRate: measuredAdoptionRate
-  }
-}
-
-function effectiveGeneratedLinesSumAgg(): Record<string, unknown> {
-  return {
-    sum: { field: "properties.effectiveGeneratedLineCount" }
-  }
-}
-
-function normalizeCodeStatsFromAggs(raw: unknown): DashboardCodeStats {
-  const generatedLines = getAggNumber(raw, ["aggregations", "code_gen", "generated_lines", "value"])
-  const deletedLines = getAggNumber(raw, ["aggregations", "code_gen", "deleted_lines", "value"])
-  const measuredGeneratedLines = getAggNumber(raw, [
-    "aggregations",
-    "code_adopt_measured",
-    "measured_generated_lines",
-    "value"
-  ])
-  const effectiveGeneratedLines = getAggNumber(
-    raw,
-    ["aggregations", "code_adopt_measured", "effective_generated_lines", "value"]
-  )
-  const adoptedLines = getAggNumber(raw, ["aggregations", "code_adopt_measured", "adopted_lines", "value"])
-  return makeDashboardCodeStats({
-    generatedLines,
-    deletedLines,
-    effectiveGeneratedLines,
-    measuredGeneratedLines,
-    adoptedLines
-  })
 }
 
 function summarizeTraceTokenUsage(modelCalls: AgentTrace["modelCalls"]): {

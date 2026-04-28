@@ -115,6 +115,14 @@ function deriveUpperOrgLevels(pathName?: string): Pick<AgentTrace, "upperOrgLv1"
   }
 }
 
+function getAppVersionForTrace(): string {
+  try {
+    return typeof app?.getVersion === "function" ? app.getVersion() : "unknown"
+  } catch {
+    return "unknown"
+  }
+}
+
 // ─────────────────────────────────────────────────────────
 // TraceCollector class
 // ─────────────────────────────────────────────────────────
@@ -483,7 +491,7 @@ export class TraceCollector {
       upperOrgLv1: upperOrgLevels.upperOrgLv1,
       upperOrgLv2: upperOrgLevels.upperOrgLv2,
       upperOrgLv3: upperOrgLevels.upperOrgLv3,
-      appVersion: app.getVersion(),
+      appVersion: getAppVersionForTrace(),
       steps: this.steps,
       modelCalls: this.modelCalls,
       nodes: this.finalizeNodes(outcome, endedAt, errorMessage),
