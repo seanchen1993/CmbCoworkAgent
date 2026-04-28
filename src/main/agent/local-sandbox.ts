@@ -43,8 +43,7 @@ import { homedir } from "node:os"
 import type { HookConfig, HookResult } from "../hooks/types"
 import type { HookResultCallback } from "../hooks/runner"
 import { runHooksEnriched } from "../hooks/required-skill"
-import { joinHookText } from "../hooks/text"
-import type { SkillLifecycleRegistry } from "./skill-lifecycle/registry"
+import type { SkillLifecycleMatch, SkillLifecycleRegistry } from "./skill-lifecycle/registry"
 import type { AgentFileMutationKind } from "../services/agent-auto-commit"
 
 /**
@@ -58,6 +57,15 @@ const SENSITIVE_DIR_NAMES = new Set([
 
 const WINDOWS_SANDBOX_OFFLINE_USERNAME = "CodexSandboxOffline"
 const WINDOWS_SANDBOX_ONLINE_USERNAME = "CodexSandboxOnline"
+
+interface PendingSkillHookContext {
+  skill: SkillLifecycleMatch
+  notes: string[]
+}
+
+export interface SkillHookContextProvider {
+  drainSkillHookContexts(): string[]
+}
 
 // Python's tempfile uses private 0o700 directories on Windows. Under Codex's
 // WRITE_RESTRICTED token those DACLs omit the capability SID, so pip cannot
@@ -188,7 +196,7 @@ export interface LocalSandboxOptions {
  * console.log('Exit code:', result.exitCode);
  * ```
  */
-export class LocalSandbox extends FilesystemBackend implements SandboxBackendProtocol {
+export class LocalSandbox extends FilesystemBackend implements SandboxBackendProtocol, SkillHookContextProvider {
   /** Unique identifier for this sandbox instance */
   readonly id: string
   /** Run/thread identifier for ACL ref-counting (falls back to this.id). */
@@ -226,6 +234,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
   private readonly _onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
   private _skillLifecycleRegistry?: SkillLifecycleRegistry
   private readonly _skillHooksFired = new Set<string>()
+  private readonly _pendingSkillHookContexts: PendingSkillHookContext[] = []
 
   /**
    * Apply PostToolUse hook feedback to a file-operation result (write/edit).
@@ -891,6 +900,23 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     this._skillLifecycleRegistry = registry
   }
 
+  private enqueueSkillHookContext(skill: SkillLifecycleMatch, notes: string[]): void {
+    const cleanNotes = notes
+      .map((note) => note.trim())
+      .filter(Boolean)
+    if (cleanNotes.length === 0) return
+    this._pendingSkillHookContexts.push({ skill, notes: cleanNotes })
+  }
+
+  drainSkillHookContexts(): string[] {
+    const items = this._pendingSkillHookContexts.splice(0)
+    return items.map(({ skill, notes }) => [
+      `Skill: ${skill.name}`,
+      `Skill path: ${skill.path}`,
+      ...notes
+    ].join("\n"))
+  }
+
   /** Expose the sandbox mode for the orchestrator. */
   getSandboxMode(): "none" | "unelevated" | "readonly" | "elevated" {
     return this.windowsSandbox
@@ -1252,10 +1278,10 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     if (this.isBlockedBySandbox(filePath)) {
       return `Error: Access denied — '${filePath}' is restricted by sandbox policy.`
     }
-    let skillMatch: ReturnType<SkillLifecycleRegistry["resolveRead"]> | null = null
+    let skillMatch: SkillLifecycleMatch | null = null
     let fireSkillHooks = false
     let resolvedForSkill: string | undefined
-    let preSkillHookNotes: string[] = []
+    const skillHookNotes: string[] = []
     try {
       try {
         resolvedForSkill = this._resolvePath(filePath)
@@ -1281,11 +1307,13 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
               `Skill ${skillMatch.name} was blocked by a hook`
             return `Error reading skill '${skillMatch.name}': [Hook blocked] ${reason}`
           }
-          preSkillHookNotes = [
-            preResult?.stdout,
-            preResult?.additionalContext,
-            preResult?.systemMessage
-          ].filter((item): item is string => Boolean(item))
+          skillHookNotes.push(
+            ...[
+              preResult?.stdout,
+              preResult?.additionalContext,
+              preResult?.systemMessage
+            ].filter((item): item is string => Boolean(item))
+          )
           this._skillHooksFired.add(skillMatch.name)
         }
       } catch (hookError) {
@@ -1336,19 +1364,18 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
             skillRoot: skillMatch.rootDir,
             skillTriggerToolName: "read_file"
           }, this._onHookResult)
-          const notes = [
-            ...preSkillHookNotes,
-            postResult?.stdout,
-            postResult?.additionalContext,
-            postResult?.systemMessage,
-            postResult?.decision === "block" ? postResult.reason : undefined
-          ].filter((item): item is string => Boolean(item))
-          if (notes.length > 0) {
-            return joinHookText(result, notes.join("\n"), "\n\n") ?? result
-          }
+          skillHookNotes.push(
+            ...[
+              postResult?.stdout,
+              postResult?.additionalContext,
+              postResult?.systemMessage,
+              postResult?.decision === "block" ? postResult.reason : undefined
+            ].filter((item): item is string => Boolean(item))
+          )
         } catch (hookError) {
           console.warn("[Hooks] PostSkillUse error:", hookError)
         }
+        this.enqueueSkillHookContext(skillMatch, skillHookNotes)
       }
 
       return result
