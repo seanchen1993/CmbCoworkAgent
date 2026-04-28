@@ -18,7 +18,8 @@ import {
   FileText,
   Lightbulb,
   ArrowLeft,
-  BarChart3
+  BarChart3,
+  X
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -118,7 +119,7 @@ interface UserInfoLite {
   ystId?: string
 }
 
-type UploadFilterMode = "all" | "mine"
+type UploadFilterMode = "all" | "mine" | "installed" | "featured"
 
 function getSkillStatsRange(): { from: string; to: string } {
   // 和 Dashboard 的默认月维度保持一致，避免前后口径不一致。
@@ -1235,6 +1236,8 @@ export function MarketPanel(): React.JSX.Element {
           item.description.toLowerCase().includes(query)
         if (!matchesSearch) return false
         if (uploadFilterMode === "mine" && !isMineUploadedItem(item)) return false
+        if (uploadFilterMode === "installed" && !item.installed) return false
+        if (uploadFilterMode === "featured" && item.featured !== "精品") return false
 
         if (activeTab !== "skill" || !categoryFilter) return true
         return getSecondaryCategory(item.category) === categoryFilter
@@ -1248,6 +1251,15 @@ export function MarketPanel(): React.JSX.Element {
     return sortSkillItemsByUsage(filteredData, skillUsageSummary, skillSortMode)
   }, [activeTab, filteredData, skillSortMode, skillUsageSummary])
   const visibleSkillData = activeTab === "skill" && filteredData.length > 0 ? sortedSkillData : []
+  const emptyResultMessage = searchQuery
+    ? "未找到匹配的项目"
+    : uploadFilterMode === "mine"
+      ? "未找到你上传的项目"
+      : uploadFilterMode === "installed"
+        ? "未找到你安装的项目"
+        : uploadFilterMode === "featured"
+          ? "未找到精品项目"
+          : "暂无可用项目"
 
   const skillCategoryStats = useMemo(() => {
     if (activeTab !== "skill") return []
@@ -1686,19 +1698,31 @@ export function MarketPanel(): React.JSX.Element {
                   placeholder="搜索技能、连接器、插件…"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  className="pl-9 h-9 text-sm bg-white border-[#e8e6dc] text-[#141413] placeholder:text-[#b0aea5] rounded-xl focus-visible:ring-[#3898ec] focus-visible:border-[#3898ec]"
+                  className="pl-9 pr-9 h-9 text-sm bg-white border-[#e8e6dc] text-[#141413] placeholder:text-[#b0aea5] rounded-xl focus-visible:ring-[#3898ec] focus-visible:border-[#3898ec]"
                 />
+                {searchQuery && (
+                  <button
+                    type="button"
+                    aria-label="清空搜索"
+                    onClick={() => setSearchQuery("")}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 size-5 inline-flex items-center justify-center rounded-md text-[#87867f] hover:text-[#5e5d59] hover:bg-[#f5f4ed] transition-colors cursor-pointer"
+                  >
+                    <X className="size-3.5" />
+                  </button>
+                )}
               </div>
               <Select
                 value={uploadFilterMode}
                 onValueChange={(value) => setUploadFilterMode(value as UploadFilterMode)}
               >
-                <SelectTrigger className="h-9 w-[124px] rounded-xl border-[#e8e6dc] bg-white text-xs text-[#5e5d59]">
+                <SelectTrigger className="h-9 w-[132px] rounded-xl border-[#e8e6dc] bg-white text-xs text-[#5e5d59]">
                   <SelectValue placeholder="上传筛选" />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">全部项目</SelectItem>
                   <SelectItem value="mine">我上传的</SelectItem>
+                  <SelectItem value="installed">我安装的</SelectItem>
+                  <SelectItem value="featured">精品</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -2007,13 +2031,7 @@ export function MarketPanel(): React.JSX.Element {
                       <div className="size-10 rounded-2xl bg-[#f5f4ed] border border-[#e8e6dc] flex items-center justify-center mb-3">
                         <ShoppingBag className="size-5 text-[#b0aea5]" />
                       </div>
-                      <p className="text-sm">
-                        {uploadFilterMode === "mine"
-                          ? "未找到你上传的项目"
-                          : searchQuery
-                            ? "未找到匹配的项目"
-                            : "暂无可用项目"}
-                      </p>
+                      <p className="text-sm">{emptyResultMessage}</p>
                     </div>
                   ) : activeTab === "skill" ? (
                     <div className="grid grid-cols-1 xl:grid-cols-[240px_minmax(0,1fr)] gap-4 items-start">
@@ -2106,13 +2124,7 @@ export function MarketPanel(): React.JSX.Element {
                               <div className="size-10 rounded-2xl bg-[#f5f4ed] border border-[#e8e6dc] flex items-center justify-center mb-3">
                                 <ShoppingBag className="size-5 text-[#b0aea5]" />
                               </div>
-                              <p className="text-sm">
-                                {uploadFilterMode === "mine"
-                                  ? "未找到你上传的项目"
-                                  : searchQuery
-                                    ? "未找到匹配的项目"
-                                    : "暂无可用项目"}
-                              </p>
+                              <p className="text-sm">{emptyResultMessage}</p>
                             </div>
                           ) : (
                             <div
