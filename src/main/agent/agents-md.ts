@@ -1,10 +1,15 @@
+import { constants as fsConstants, type Stats } from "fs"
 import { lstat, open, realpath, stat } from "fs/promises"
+import { homedir } from "os"
 import { dirname, isAbsolute, join, relative, resolve } from "path"
 
 export const DEFAULT_AGENTS_FILENAME = "AGENTS.md"
 export const LOCAL_AGENTS_OVERRIDE_FILENAME = "AGENTS.override.md"
 export const DEFAULT_AGENTS_MAX_BYTES = 32 * 1024
-const AGENTS_READ_PADDING_BYTES = 4
+export const DEFAULT_GLOBAL_AGENTS_MAX_BYTES = DEFAULT_AGENTS_MAX_BYTES
+const AGENTS_PROJECT_SEPARATOR = "\n\n--- project-doc ---\n\n"
+const UTF8_READ_PADDING_BYTES = 4
+const GLOBAL_AGENTS_SECTION_TITLE = "# Global AGENTS.md instructions"
 
 export interface AgentsPromptEntry {
   path: string
@@ -15,11 +20,15 @@ export interface AgentsPromptEntry {
 interface AgentsFileReference {
   path: string
   readPath: string
+  rootPath: string | null
+  rejectHardLinks: boolean
+  fallbackFiles?: AgentsFileReference[]
 }
 
 interface ReadAgentsFileResult {
   content: string
   truncated: boolean
+  bytesRead: number
 }
 
 export interface AgentsPromptResult {
@@ -27,6 +36,25 @@ export interface AgentsPromptResult {
   projectRoot: string
   loadedPaths: string[]
   truncated: boolean
+}
+
+export interface AgentsPromptBudgetOptions {
+  globalMaxBytes?: number
+  projectMaxBytes?: number
+  totalMaxBytes?: number
+}
+
+type AgentsPromptBudget = number | AgentsPromptBudgetOptions
+
+interface NormalizedAgentsPromptBudget {
+  globalMaxBytes: number
+  projectMaxBytes: number
+  totalMaxBytes?: number
+}
+
+interface ResolveAgentsFileOptions {
+  rejectHardLinks?: boolean
+  rejectSymlinks?: boolean
 }
 
 function isWithinRoot(rootDir: string, targetDir: string): boolean {
@@ -90,8 +118,9 @@ async function hasPath(filePath: string): Promise<boolean> {
 }
 
 async function resolveSafeAgentsFile(
-  projectRoot: string,
-  candidatePath: string
+  projectRoot: string | null,
+  candidatePath: string,
+  options: ResolveAgentsFileOptions = {}
 ): Promise<AgentsFileReference | null> {
   let stats: Awaited<ReturnType<typeof lstat>>
   try {
@@ -100,14 +129,17 @@ async function resolveSafeAgentsFile(
     return null
   }
 
-  if (!stats.isFile() && !stats.isSymbolicLink()) {
+  if (stats.isSymbolicLink()) {
+    if (options.rejectSymlinks) {
+      console.warn("[AGENTS] Skipping AGENTS symlink:", candidatePath)
+      return null
+    }
+  } else if (!stats.isFile()) {
     return null
   }
 
-  let resolvedProjectRoot: string
   let resolvedCandidatePath: string
   try {
-    resolvedProjectRoot = await realpath(projectRoot)
     resolvedCandidatePath = await realpath(candidatePath)
   } catch (error) {
     console.warn("[AGENTS] Failed to resolve AGENTS file path:", candidatePath, error)
@@ -119,46 +151,196 @@ async function resolveSafeAgentsFile(
     if (!resolvedStats.isFile()) {
       return null
     }
+    if (options.rejectHardLinks && resolvedStats.nlink > 1) {
+      console.warn(
+        "[AGENTS] Skipping AGENTS file with multiple hard links:",
+        candidatePath,
+        "links:",
+        resolvedStats.nlink
+      )
+      return null
+    }
   } catch (error) {
     console.warn("[AGENTS] Failed to stat resolved AGENTS file:", resolvedCandidatePath, error)
     return null
   }
 
-  if (!isWithinRoot(resolvedProjectRoot, resolvedCandidatePath)) {
-    console.warn(
-      "[AGENTS] Skipping AGENTS file outside project root:",
-      candidatePath,
-      "->",
-      resolvedCandidatePath
-    )
-    return null
+  let resolvedProjectRoot: string | null = null
+  if (projectRoot) {
+    try {
+      resolvedProjectRoot = await realpath(projectRoot)
+    } catch (error) {
+      console.warn("[AGENTS] Failed to resolve project root:", projectRoot, error)
+      return null
+    }
+
+    if (!isWithinRoot(resolvedProjectRoot, resolvedCandidatePath)) {
+      console.warn(
+        "[AGENTS] Skipping AGENTS file outside project root:",
+        candidatePath,
+        "->",
+        resolvedCandidatePath
+      )
+      return null
+    }
   }
 
   return {
     path: candidatePath,
-    readPath: resolvedCandidatePath
+    readPath: resolvedCandidatePath,
+    rootPath: resolvedProjectRoot,
+    rejectHardLinks: options.rejectHardLinks === true
   }
 }
 
+function areSameFile(left: Stats, right: Stats): boolean {
+  return left.dev === right.dev && left.ino === right.ino
+}
+
+function findUtf8SafePrefixLength(buffer: Buffer, maxBytes: number): number {
+  const end = Math.min(buffer.length, Math.max(0, maxBytes))
+  if (end === 0 || end === buffer.length) {
+    return end
+  }
+
+  let sequenceStart = end - 1
+  while (sequenceStart >= 0 && (buffer[sequenceStart] & 0xc0) === 0x80) {
+    sequenceStart -= 1
+  }
+
+  if (sequenceStart < 0) {
+    return 0
+  }
+
+  const firstByte = buffer[sequenceStart]
+  let expectedLength = 1
+  if ((firstByte & 0x80) === 0) {
+    expectedLength = 1
+  } else if ((firstByte & 0xe0) === 0xc0) {
+    expectedLength = 2
+  } else if ((firstByte & 0xf0) === 0xe0) {
+    expectedLength = 3
+  } else if ((firstByte & 0xf8) === 0xf0) {
+    expectedLength = 4
+  } else {
+    return sequenceStart
+  }
+
+  return end - sequenceStart >= expectedLength ? end : sequenceStart
+}
+
 async function readAgentsFilePrefix(
-  filePath: string,
+  file: AgentsFileReference,
   maxBytes: number
 ): Promise<ReadAgentsFileResult> {
-  const readLimit = Math.max(1, maxBytes + AGENTS_READ_PADDING_BYTES)
-  const handle = await open(filePath, "r")
+  const contentLimit = Math.max(1, maxBytes)
+  const readLimit = contentLimit + UTF8_READ_PADDING_BYTES
+  const forbidSymlink = file.rejectHardLinks && file.path === file.readPath
+  const flags = forbidSymlink ? fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW : fsConstants.O_RDONLY
+  const handle = await open(forbidSymlink ? file.path : file.readPath, flags)
 
   try {
     const fileStats = await handle.stat()
+    if (!fileStats.isFile()) {
+      throw new Error(`AGENTS path is not a regular file: ${file.path}`)
+    }
+    if (file.rejectHardLinks && fileStats.nlink > 1) {
+      throw new Error(`AGENTS path has multiple hard links: ${file.path}`)
+    }
+
+    if (file.rootPath) {
+      const resolvedPath = await realpath(file.path)
+      if (!isWithinRoot(file.rootPath, resolvedPath)) {
+        throw new Error(`AGENTS path escaped root while opening: ${file.path}`)
+      }
+      const currentStats = await stat(resolvedPath)
+      if (!areSameFile(fileStats, currentStats)) {
+        throw new Error(`AGENTS path changed while opening: ${file.path}`)
+      }
+    }
+
     const bytesToRead = Math.min(fileStats.size, readLimit)
     const buffer = Buffer.alloc(bytesToRead)
     const { bytesRead } = await handle.read(buffer, 0, bytesToRead, 0)
+    const contentBytes = findUtf8SafePrefixLength(buffer.subarray(0, bytesRead), contentLimit)
     return {
-      content: buffer.toString("utf8", 0, bytesRead),
-      truncated: fileStats.size > bytesToRead
+      content: buffer.toString("utf8", 0, contentBytes),
+      truncated: fileStats.size > contentBytes,
+      bytesRead: contentBytes
     }
   } finally {
     await handle.close()
   }
+}
+
+async function readFirstAvailableAgentsFile(
+  file: AgentsFileReference,
+  maxBytes: number
+): Promise<{ file: AgentsFileReference; content: ReadAgentsFileResult } | null> {
+  const candidates = [file, ...(file.fallbackFiles ?? [])]
+
+  for (const candidate of candidates) {
+    try {
+      return {
+        file: candidate,
+        content: await readAgentsFilePrefix(candidate, maxBytes)
+      }
+    } catch (error) {
+      console.warn("[AGENTS] Failed to read AGENTS file:", candidate.path, error)
+    }
+  }
+
+  return null
+}
+
+function normalizeAgentsPromptBudget(budget: AgentsPromptBudget): NormalizedAgentsPromptBudget {
+  if (typeof budget === "number") {
+    return {
+      globalMaxBytes: budget,
+      projectMaxBytes: budget,
+      totalMaxBytes: budget
+    }
+  }
+
+  return {
+    globalMaxBytes: budget.globalMaxBytes ?? DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
+    projectMaxBytes: budget.projectMaxBytes ?? DEFAULT_AGENTS_MAX_BYTES,
+    totalMaxBytes: budget.totalMaxBytes
+  }
+}
+
+export function getCmbCoworkAgentsHome(): string {
+  const configuredHome = process.env.CMB_COWORK_AGENT_HOME?.trim()
+  if (configuredHome) {
+    return resolve(configuredHome)
+  }
+  return join(homedir(), ".cmbcoworkagent")
+}
+
+export async function discoverGlobalAgentsFiles(
+  agentsHome = getCmbCoworkAgentsHome()
+): Promise<AgentsFileReference[]> {
+  const globalFileOptions: ResolveAgentsFileOptions = {
+    rejectHardLinks: true,
+    rejectSymlinks: true
+  }
+  const overridePath = join(agentsHome, LOCAL_AGENTS_OVERRIDE_FILENAME)
+  const agentsPath = join(agentsHome, DEFAULT_AGENTS_FILENAME)
+  const [overrideFile, agentsFile] = await Promise.all([
+    resolveSafeAgentsFile(agentsHome, overridePath, globalFileOptions),
+    resolveSafeAgentsFile(agentsHome, agentsPath, globalFileOptions)
+  ])
+
+  if (overrideFile) {
+    return [
+      {
+        ...overrideFile,
+        fallbackFiles: agentsFile ? [agentsFile] : undefined
+      }
+    ]
+  }
+
+  return agentsFile ? [agentsFile] : []
 }
 
 export async function discoverAgentsFiles(
@@ -170,14 +352,20 @@ export async function discoverAgentsFiles(
 
   for (const dir of dirs) {
     const overridePath = join(dir, LOCAL_AGENTS_OVERRIDE_FILENAME)
-    const overrideFile = await resolveSafeAgentsFile(projectRoot, overridePath)
+    const overrideFile = await resolveSafeAgentsFile(projectRoot, overridePath, {
+      rejectHardLinks: true,
+      rejectSymlinks: true
+    })
     if (overrideFile) {
       discovered.push(overrideFile)
       continue
     }
 
     const agentsPath = join(dir, DEFAULT_AGENTS_FILENAME)
-    const agentsFile = await resolveSafeAgentsFile(projectRoot, agentsPath)
+    const agentsFile = await resolveSafeAgentsFile(projectRoot, agentsPath, {
+      rejectHardLinks: true,
+      rejectSymlinks: true
+    })
     if (agentsFile) {
       discovered.push(agentsFile)
     }
@@ -186,21 +374,55 @@ export async function discoverAgentsFiles(
   return discovered
 }
 
-export async function readAgentsFiles(
+export function readAgentsFiles(
   cwd: string,
   files: AgentsFileReference[],
-  maxBytes = DEFAULT_AGENTS_MAX_BYTES
+  maxBytes?: number
+): Promise<{ entries: AgentsPromptEntry[]; truncated: boolean }>
+export function readAgentsFiles(
+  files: AgentsFileReference[],
+  maxBytes?: number,
+  sectionTitle?: string
+): Promise<{ entries: AgentsPromptEntry[]; truncated: boolean }>
+export async function readAgentsFiles(
+  firstArg: string | AgentsFileReference[],
+  secondArg?: AgentsFileReference[] | number,
+  thirdArg?: number | string
 ): Promise<{ entries: AgentsPromptEntry[]; truncated: boolean }> {
+  const files = typeof firstArg === "string" ? (secondArg as AgentsFileReference[]) : firstArg
+  const maxBytes =
+    typeof firstArg === "string"
+      ? typeof thirdArg === "number"
+        ? thirdArg
+        : DEFAULT_AGENTS_MAX_BYTES
+      : typeof secondArg === "number"
+        ? secondArg
+        : DEFAULT_AGENTS_MAX_BYTES
+  const sectionTitle =
+    typeof firstArg === "string"
+      ? getProjectAgentsSectionTitle(firstArg)
+      : typeof thirdArg === "string"
+        ? thirdArg
+        : undefined
   const entries: AgentsPromptEntry[] = []
   let truncated = false
+  let remainingBytes = maxBytes
 
   for (const file of files) {
-    let rawContent: ReadAgentsFileResult
-    try {
-      rawContent = await readAgentsFilePrefix(file.readPath, maxBytes)
-    } catch (error) {
-      console.warn("[AGENTS] Failed to read AGENTS file:", file.path, error)
+    if (remainingBytes <= 0) {
+      truncated = true
+      break
+    }
+
+    const readResult = await readFirstAvailableAgentsFile(file, remainingBytes)
+    if (!readResult) {
       continue
+    }
+    const loadedFile = readResult.file
+    const rawContent = readResult.content
+
+    if (rawContent.truncated) {
+      truncated = true
     }
 
     const content = rawContent.content.trim()
@@ -212,18 +434,21 @@ export async function readAgentsFiles(
     let entryTruncated = rawContent.truncated
 
     if (
-      !doesRenderedPromptFit(
-        cwd,
-        [...entries, { path: file.path, content, truncated: rawContent.truncated }],
+      sectionTitle &&
+      !doesRenderedSectionFit(
+        sectionTitle,
+        [...entries, { path: loadedFile.path, content, truncated: rawContent.truncated }],
         maxBytes
       )
     ) {
-      finalContent = fitRenderedContentToBudget(cwd, entries, file.path, content, maxBytes)
+      finalContent = fitRenderedContentToSectionBudget(
+        sectionTitle,
+        entries,
+        loadedFile.path,
+        content,
+        maxBytes
+      )
       entryTruncated = true
-      truncated = true
-    }
-
-    if (rawContent.truncated) {
       truncated = true
     }
 
@@ -232,8 +457,10 @@ export async function readAgentsFiles(
       break
     }
 
+    remainingBytes = Math.max(0, remainingBytes - Buffer.byteLength(finalContent, "utf8"))
+
     entries.push({
-      path: file.path,
+      path: loadedFile.path,
       content: finalContent,
       truncated: entryTruncated
     })
@@ -246,12 +473,16 @@ export async function readAgentsFiles(
   return { entries, truncated }
 }
 
-export function renderAgentsPrompt(cwd: string, entries: AgentsPromptEntry[]): string | null {
+function getProjectAgentsSectionTitle(cwd: string): string {
+  return `# AGENTS.md instructions for ${cwd}`
+}
+
+function renderAgentsPromptSection(title: string, entries: AgentsPromptEntry[]): string | null {
   if (entries.length === 0) {
     return null
   }
 
-  const lines: string[] = [`# AGENTS.md instructions for ${cwd}`, "", "<INSTRUCTIONS>"]
+  const lines: string[] = [title, "", "<INSTRUCTIONS>"]
   for (const entry of entries) {
     lines.push(`[${entry.path}]`)
     lines.push(entry.content)
@@ -266,20 +497,20 @@ export function renderAgentsPrompt(cwd: string, entries: AgentsPromptEntry[]): s
   return lines.join("\n")
 }
 
-function doesRenderedPromptFit(
-  cwd: string,
+function doesRenderedSectionFit(
+  title: string,
   entries: AgentsPromptEntry[],
   maxBytes: number
 ): boolean {
-  const prompt = renderAgentsPrompt(cwd, entries)
+  const prompt = renderAgentsPromptSection(title, entries)
   if (!prompt) {
     return true
   }
   return Buffer.byteLength(prompt, "utf8") <= maxBytes
 }
 
-function fitRenderedContentToBudget(
-  cwd: string,
+function fitRenderedContentToSectionBudget(
+  title: string,
   existingEntries: AgentsPromptEntry[],
   filePath: string,
   content: string,
@@ -287,18 +518,19 @@ function fitRenderedContentToBudget(
 ): string {
   let best = ""
   let low = 1
-  let high = content.length
+  const codePoints = Array.from(content)
+  let high = codePoints.length
 
   while (low <= high) {
     const mid = Math.floor((low + high) / 2)
-    const candidate = content.slice(0, mid).trimEnd()
+    const candidate = codePoints.slice(0, mid).join("").trimEnd()
     if (!candidate) {
       low = mid + 1
       continue
     }
 
-    const fits = doesRenderedPromptFit(
-      cwd,
+    const fits = doesRenderedSectionFit(
+      title,
       [...existingEntries, { path: filePath, content: candidate, truncated: true }],
       maxBytes
     )
@@ -313,19 +545,164 @@ function fitRenderedContentToBudget(
   return best
 }
 
+function fitEntriesToSectionBudget(
+  title: string,
+  entries: AgentsPromptEntry[],
+  maxBytes: number
+): { entries: AgentsPromptEntry[]; truncated: boolean } {
+  const fittedEntries: AgentsPromptEntry[] = []
+
+  if (maxBytes <= 0) {
+    return { entries: fittedEntries, truncated: entries.length > 0 }
+  }
+
+  for (const entry of entries) {
+    if (doesRenderedSectionFit(title, [...fittedEntries, entry], maxBytes)) {
+      fittedEntries.push(entry)
+      continue
+    }
+
+    const fittedContent = fitRenderedContentToSectionBudget(
+      title,
+      fittedEntries,
+      entry.path,
+      entry.content,
+      maxBytes
+    )
+
+    if (fittedContent.trim()) {
+      fittedEntries.push({
+        ...entry,
+        content: fittedContent,
+        truncated: true
+      })
+    }
+
+    return { entries: fittedEntries, truncated: true }
+  }
+
+  return { entries: fittedEntries, truncated: false }
+}
+
+function fitEntriesToTotalBudget(
+  cwd: string,
+  projectEntries: AgentsPromptEntry[],
+  globalEntries: AgentsPromptEntry[],
+  maxBytes: number
+): {
+  projectEntries: AgentsPromptEntry[]
+  globalEntries: AgentsPromptEntry[]
+  truncated: boolean
+} {
+  if (maxBytes <= 0) {
+    return {
+      projectEntries: [],
+      globalEntries: [],
+      truncated: projectEntries.length > 0 || globalEntries.length > 0
+    }
+  }
+
+  const currentPrompt = renderAgentsPrompt(cwd, projectEntries, globalEntries)
+  if (!currentPrompt || Buffer.byteLength(currentPrompt, "utf8") <= maxBytes) {
+    return { projectEntries, globalEntries, truncated: false }
+  }
+
+  const projectTitle = getProjectAgentsSectionTitle(cwd)
+  const projectPrompt = renderAgentsPromptSection(projectTitle, projectEntries)
+
+  if (!projectPrompt) {
+    const fittedGlobal = fitEntriesToSectionBudget(
+      GLOBAL_AGENTS_SECTION_TITLE,
+      globalEntries,
+      maxBytes
+    )
+    return {
+      projectEntries: [],
+      globalEntries: fittedGlobal.entries,
+      truncated: fittedGlobal.truncated
+    }
+  }
+
+  const projectBytes = Buffer.byteLength(projectPrompt, "utf8")
+  if (projectBytes >= maxBytes) {
+    const fittedProject = fitEntriesToSectionBudget(projectTitle, projectEntries, maxBytes)
+    return {
+      projectEntries: fittedProject.entries,
+      globalEntries: [],
+      truncated: true
+    }
+  }
+
+  const separatorBytes = Buffer.byteLength(AGENTS_PROJECT_SEPARATOR, "utf8")
+  const globalMaxBytes = maxBytes - projectBytes - separatorBytes
+  const fittedGlobal = fitEntriesToSectionBudget(
+    GLOBAL_AGENTS_SECTION_TITLE,
+    globalEntries,
+    globalMaxBytes
+  )
+
+  return {
+    projectEntries,
+    globalEntries: fittedGlobal.entries,
+    truncated: fittedGlobal.truncated || fittedGlobal.entries.length < globalEntries.length
+  }
+}
+
+export function renderAgentsPrompt(
+  cwd: string,
+  projectEntries: AgentsPromptEntry[],
+  globalEntries: AgentsPromptEntry[] = []
+): string | null {
+  const globalPrompt = renderAgentsPromptSection(GLOBAL_AGENTS_SECTION_TITLE, globalEntries)
+  const projectPrompt = renderAgentsPromptSection(getProjectAgentsSectionTitle(cwd), projectEntries)
+
+  if (globalPrompt && projectPrompt) {
+    return `${globalPrompt}${AGENTS_PROJECT_SEPARATOR}${projectPrompt}`
+  }
+  return globalPrompt ?? projectPrompt
+}
+
 export async function loadAgentsPromptForWorkspace(
   workspacePath: string,
-  maxBytes = DEFAULT_AGENTS_MAX_BYTES
+  budget: AgentsPromptBudget = {
+    globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
+    projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
+  }
 ): Promise<AgentsPromptResult> {
   const cwd = await normalizeWorkspacePath(workspacePath)
   const projectRoot = await findProjectRootByGitMarker(cwd)
-  const discoveredPaths = await discoverAgentsFiles(projectRoot, cwd)
-  const { entries, truncated } = await readAgentsFiles(cwd, discoveredPaths, maxBytes)
+  const globalPaths = await discoverGlobalAgentsFiles()
+  const projectPaths = await discoverAgentsFiles(projectRoot, cwd)
+  const { globalMaxBytes, projectMaxBytes, totalMaxBytes } = normalizeAgentsPromptBudget(budget)
+  const globalResult = await readAgentsFiles(
+    globalPaths,
+    globalMaxBytes,
+    GLOBAL_AGENTS_SECTION_TITLE
+  )
+  const projectResult = await readAgentsFiles(
+    projectPaths,
+    projectMaxBytes,
+    getProjectAgentsSectionTitle(cwd)
+  )
+  const totalBudgetResult =
+    totalMaxBytes == null
+      ? {
+          globalEntries: globalResult.entries,
+          projectEntries: projectResult.entries,
+          truncated: false
+        }
+      : fitEntriesToTotalBudget(cwd, projectResult.entries, globalResult.entries, totalMaxBytes)
 
   return {
-    prompt: renderAgentsPrompt(cwd, entries),
+    prompt: renderAgentsPrompt(
+      cwd,
+      totalBudgetResult.projectEntries,
+      totalBudgetResult.globalEntries
+    ),
     projectRoot,
-    loadedPaths: entries.map((entry) => entry.path),
-    truncated
+    loadedPaths: [...totalBudgetResult.globalEntries, ...totalBudgetResult.projectEntries].map(
+      (entry) => entry.path
+    ),
+    truncated: globalResult.truncated || projectResult.truncated || totalBudgetResult.truncated
   }
 }

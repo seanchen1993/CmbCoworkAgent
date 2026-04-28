@@ -7,6 +7,7 @@ export interface SkillFileEditorProps {
   disabled?: boolean
   error?: string | null
   className?: string
+  note?: string | null
   onChange: (value: string) => void
   onSave: () => void
 }
@@ -14,7 +15,7 @@ export interface SkillFileEditorProps {
 export const SkillFileEditor = memo(function SkillFileEditor(
   props: SkillFileEditorProps
 ): React.JSX.Element {
-  const { value, disabled = false, error = null, className, onChange, onSave } = props
+  const { value, disabled = false, error = null, className, note = null, onChange, onSave } = props
 
   return (
     <div
@@ -31,6 +32,7 @@ export const SkillFileEditor = memo(function SkillFileEditor(
       <p className="text-xs text-muted-foreground">
         当前为编辑态，和预览态样式已区分。可使用 Ctrl/Cmd + S 快速保存。
       </p>
+      {note && <p className="text-xs text-amber-900">{note}</p>}
       <textarea
         className="w-full flex-1 min-h-0 resize-none rounded-md border border-amber-300/70 bg-white px-3 py-2 text-xs font-mono leading-relaxed shadow-sm"
         value={value}
