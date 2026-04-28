@@ -1,6 +1,8 @@
 export type HookEvent =
   | "PreToolUse"
   | "PostToolUse"
+  | "PreSkillUse"
+  | "PostSkillUse"
   | "PostToolUseFailure"
   | "Stop"
   | "StopFailure"
@@ -22,6 +24,8 @@ export type HookEvent =
 export const SUPPORTED_HOOK_EVENTS = [
   "PreToolUse",
   "PostToolUse",
+  "PreSkillUse",
+  "PostSkillUse",
   "Stop",
   "Notification",
   "UserPromptSubmit",
@@ -61,7 +65,7 @@ export interface HookOnBlockConfig {
 export interface HookConfig {
   id: string
   event: HookEvent
-  matcher?: string // Tool name match, e.g. "execute", "write_file", "*"
+  matcher?: string // Tool name or skill name match, e.g. "execute", "imagegen", "*"
   type?: HookType // Default: "command"
   // ── command hook ──────────────────────────────────────────────────────────
   command?: string // Shell command to run (required when type=="command")
@@ -105,6 +109,9 @@ export interface HookEnv {
   TOOL_NAME?: string
   TOOL_ARGS?: string // JSON, best-effort only for compact payloads; stdin remains canonical
   TOOL_RESULT?: string // PostToolUse only, best-effort only for compact payloads
+  SKILL_NAME?: string
+  SKILL_PATH?: string
+  SKILL_ROOT?: string
   WORKSPACE_PATH?: string
   CLAUDE_PROJECT_DIR?: string // Claude Code compatibility: alias for WORKSPACE_PATH
   USER_PROMPT?: string // UserPromptSubmit event

@@ -24,7 +24,8 @@ import type {
   PluginMetadata,
   PluginManifest,
   SkillHookMetadata,
-  ChatXConfig
+  ChatXConfig,
+  AgentAutoCommitSettings
 } from "../main/types"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
 import { UserInfoConfig } from "../main/storage"
@@ -969,6 +970,14 @@ const api = {
         ipcRenderer.removeListener("memory:changed", handler)
       }
     }
+  },
+  autoCommit: {
+    getSettings: (): Promise<AgentAutoCommitSettings> =>
+      ipcRenderer.invoke("autoCommit:getSettings") as Promise<AgentAutoCommitSettings>,
+    saveSettings: (
+      updates: Partial<AgentAutoCommitSettings>
+    ): Promise<AgentAutoCommitSettings> =>
+      ipcRenderer.invoke("autoCommit:saveSettings", updates) as Promise<AgentAutoCommitSettings>
   },
   heartbeat: {
     getConfig: (): Promise<HeartbeatConfig> =>

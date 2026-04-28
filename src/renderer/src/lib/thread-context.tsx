@@ -13,10 +13,19 @@ import {
 /* eslint-disable react-refresh/only-export-components */
 import { useStream } from "@langchain/langgraph-sdk/react"
 import { ElectronIPCTransport } from "./electron-transport"
-import type { Message, Todo, FileInfo, Subagent, HITLRequest, SkillMetadata } from "@/types"
+import type {
+  Message,
+  Todo,
+  FileInfo,
+  Subagent,
+  HITLRequest,
+  SkillMetadata,
+  AgentAutoCommitResult
+} from "@/types"
 import { useAppStore } from "@/lib/store"
 import type { DeepAgent } from "../../../main/agent/types"
 import { toast } from "sonner"
+import { formatAutoCommitText } from "../../../auto-commit-format"
 
 // Open file tab type
 export interface OpenFile {
@@ -218,6 +227,7 @@ interface CustomEventData {
   stdout?: string
   stderr?: string
   systemMessage?: string
+  result?: AgentAutoCommitResult
 }
 
 // Component that holds a stream and notifies subscribers
@@ -558,6 +568,18 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         case "hook_notice":
           if (typeof data.message === "string" && data.message.trim()) {
             toast.info(data.message)
+          }
+          break
+        case "auto_commit_result":
+          if (data.result) {
+            const message = formatAutoCommitText(data.result)
+            if (data.result.status === "committed") {
+              toast.success(message || "自动提交成功")
+            } else if (data.result.status === "failed") {
+              toast.error(message || "自动提交失败")
+            } else if (data.result.status === "skipped") {
+              toast.info(message || "自动提交已跳过")
+            }
           }
           break
         case "hook_executed": {

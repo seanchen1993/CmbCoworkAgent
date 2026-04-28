@@ -58,6 +58,16 @@ const HOOK_EVENTS: { value: HookEvent; label: string; description: string }[] = 
     description: "在工具执行后触发，stdout 会追加到 Agent 下一轮上下文，外部系统状态可参与 AI 推理"
   },
   {
+    value: "PreSkillUse",
+    label: "技能使用前（PreSkillUse）",
+    description: "在 Agent 首次读取某个 Skill 前触发，可按技能名拦截或注入上下文"
+  },
+  {
+    value: "PostSkillUse",
+    label: "技能使用后（PostSkillUse）",
+    description: "在 Agent 首次读取某个 Skill 后触发，可记录使用情况或补充技能约束"
+  },
+  {
     value: "UserPromptSubmit",
     label: "用户提交提示（UserPromptSubmit）",
     description: "用户消息进入模型前触发，可阻断、重写提示或注入 additionalContext"
@@ -315,6 +325,144 @@ if ($toolName -eq "write_file" -and -not $success) {
 }
 
 Write-Output "已完成写后校验：$filePath 写入成功"
+exit 0
+`
+  },
+  PreSkillUse: {
+    inputDescription: "当前事件发生在 Agent 首次读取某个 Skill 前，重点字段是技能名、技能路径和触发读取的工具。",
+    inputFields: [
+      "hook_event_name",
+      "session_id",
+      "cwd",
+      "skill_name",
+      "skill_path",
+      "skill_root",
+      "tool_name",
+      "tool_input"
+    ],
+    envFields: [
+      "HOOK_EVENT",
+      "SESSION_ID",
+      "WORKSPACE_PATH",
+      "SKILL_NAME",
+      "SKILL_PATH",
+      "SKILL_ROOT",
+      "TOOL_NAME",
+      "TOOL_ARGS"
+    ],
+    stdinExample: `{
+  "hook_event_name": "PreSkillUse",
+  "session_id": "thread-123",
+  "cwd": "C:\\\\ai\\\\demo",
+  "skill_name": "code-review",
+  "skill_path": "C:\\\\Users\\\\me\\\\.codex\\\\skills\\\\code-review\\\\SKILL.md",
+  "skill_root": "C:\\\\Users\\\\me\\\\.codex\\\\skills\\\\code-review",
+  "tool_name": "read_file",
+  "tool_input": {
+    "filePath": "C:\\\\Users\\\\me\\\\.codex\\\\skills\\\\code-review\\\\SKILL.md"
+  }
+}`,
+    outputDescription: "当前事件适合做技能准入、审计登记，或给 Agent 注入使用该技能前必须遵守的约束。",
+    outputNotes: [
+      "`exit = 2` 或 `decision=block` 可阻止本次技能读取。",
+      "`additionalContext` / 普通 stdout 会追加到 Agent 上下文。"
+    ],
+    outputExample: `{
+  "additionalContext": "使用 code-review 技能时，请优先列出高风险问题并附文件行号。"
+}`,
+    pythonExample: `import json
+import sys
+
+payload = json.load(sys.stdin)
+skill_name = str(payload.get("skill_name", ""))
+
+print(f"[hook] pre skill={skill_name}", file=sys.stderr)
+
+if skill_name == "dangerous-skill":
+    json.dump(
+        {"decision": "block", "reason": "该技能当前不允许在此工作区使用"},
+        sys.stdout,
+        ensure_ascii=False,
+    )
+    sys.exit(0)
+
+print(f"即将使用技能：{skill_name}", end="")
+sys.exit(0)
+`,
+    shellExample: `$raw = [Console]::In.ReadToEnd()
+$payload = $raw | ConvertFrom-Json -Depth 20
+$skillName = [string]$payload.skill_name
+
+[Console]::Error.WriteLine("[hook] pre skill=$skillName")
+
+if ($skillName -eq "dangerous-skill") {
+    [pscustomobject]@{
+        decision = "block"
+        reason = "该技能当前不允许在此工作区使用"
+    } | ConvertTo-Json -Compress -Depth 5
+    exit 0
+}
+
+Write-Output "即将使用技能：$skillName"
+exit 0
+`
+  },
+  PostSkillUse: {
+    inputDescription: "当前事件发生在 Agent 首次读取某个 Skill 后，可读取技能信息、触发工具和读取结果摘要。",
+    inputFields: [
+      "hook_event_name",
+      "session_id",
+      "cwd",
+      "skill_name",
+      "skill_path",
+      "skill_root",
+      "tool_name",
+      "tool_input",
+      "tool_response"
+    ],
+    envFields: [
+      "HOOK_EVENT",
+      "SESSION_ID",
+      "WORKSPACE_PATH",
+      "SKILL_NAME",
+      "SKILL_PATH",
+      "SKILL_ROOT",
+      "TOOL_NAME",
+      "TOOL_ARGS",
+      "TOOL_RESULT"
+    ],
+    stdinExample: `{
+  "hook_event_name": "PostSkillUse",
+  "session_id": "thread-123",
+  "cwd": "C:\\\\ai\\\\demo",
+  "skill_name": "code-review",
+  "tool_name": "read_file",
+  "tool_response": {
+    "path": "C:\\\\Users\\\\me\\\\.codex\\\\skills\\\\code-review\\\\SKILL.md"
+  }
+}`,
+    outputDescription: "当前事件适合做使用记录、指标上报，或把技能后的补充检查要求回灌给 Agent。",
+    outputNotes: [
+      "普通 stdout 会追加到 Agent 下一轮上下文。",
+      "如需让 Agent 重新审视技能使用结果，可返回 `decision=block` 与 `reason`。"
+    ],
+    outputExample: `已记录技能使用：code-review`,
+    pythonExample: `import json
+import sys
+
+payload = json.load(sys.stdin)
+skill_name = str(payload.get("skill_name", ""))
+
+print(f"[hook] post skill={skill_name}", file=sys.stderr)
+print(f"已记录技能使用：{skill_name}", end="")
+sys.exit(0)
+`,
+    shellExample: `$raw = [Console]::In.ReadToEnd()
+$payload = $raw | ConvertFrom-Json -Depth 20
+$skillName = [string]$payload.skill_name
+
+[Console]::Error.WriteLine("[hook] post skill=$skillName")
+Write-Output "已记录技能使用：$skillName"
 exit 0
 `
   },
@@ -710,9 +858,18 @@ export const NOTIFICATION_TOOL_INPUT_DOC: ToolInputDoc = {
   fileHint: "如果这是文件相关审批，tool_input.filePath 可以直接拿到对应路径。"
 }
 
+export const SKILL_USE_TOOL_INPUT_DOC: ToolInputDoc = {
+  key: "skill-use",
+  label: "SkillUse",
+  fields: ["filePath", "offset", "limit"],
+  description: "触发技能加载的工具入参通常来自 read_file；技能名和路径在顶层 skill_name / skill_path 字段。",
+  fileHint: "skill_path 指向被读取的 SKILL.md，skill_root 指向技能目录。"
+}
+
 export function getCommandHookToolInputDocs(event: HookEvent, matcher?: string): ToolInputDoc[] {
   if (event === "UserPromptSubmit") return [USER_PROMPT_TOOL_INPUT_DOC]
   if (event === "Notification") return [NOTIFICATION_TOOL_INPUT_DOC]
+  if (event === "PreSkillUse" || event === "PostSkillUse") return [SKILL_USE_TOOL_INPUT_DOC]
   if (event === "PreToolUse" || event === "PostToolUse") {
     const commonDocs = [
       TOOL_INPUT_DOCS.execute,
@@ -732,6 +889,9 @@ export function getCommandHookToolInputSummary(event: HookEvent, matcher?: strin
   }
   if (event === "Notification") {
     return "当前事件的 tool_input 来自审批请求，常见字段是 command、reason、filePath。"
+  }
+  if (event === "PreSkillUse" || event === "PostSkillUse") {
+    return "当前 matcher 命中技能名；技能信息在 skill_name、skill_path、skill_root，触发读取参数在 tool_input。"
   }
   if (event === "PreToolUse" || event === "PostToolUse") {
     if (!matcher || matcher === "*") {
@@ -767,7 +927,13 @@ export function getCommandHookReadableContextDocs(event: HookEvent): CommandHook
 
   const extraObjects: HookReadableObjectDoc[] = []
 
-  if (event === "PreToolUse" || event === "PostToolUse" || event === "Notification") {
+  if (
+    event === "PreToolUse" ||
+    event === "PostToolUse" ||
+    event === "PreSkillUse" ||
+    event === "PostSkillUse" ||
+    event === "Notification"
+  ) {
     stdinFields.push(
       {
         key: "tool_name",
@@ -789,7 +955,38 @@ export function getCommandHookReadableContextDocs(event: HookEvent): CommandHook
     )
   }
 
-  if (event === "PostToolUse") {
+  if (event === "PreSkillUse" || event === "PostSkillUse") {
+    stdinFields.push(
+      {
+        key: "skill_name",
+        description: "当前被读取的技能名；matcher 对这个字段生效。"
+      },
+      {
+        key: "skill_path",
+        description: "当前技能的 SKILL.md 路径。"
+      },
+      {
+        key: "skill_root",
+        description: "当前技能目录。"
+      },
+      {
+        key: "skill_trigger_tool_name",
+        description: "触发技能读取的工具名，当前通常是 read_file。"
+      }
+    )
+    envFields.push(
+      { key: "SKILL_NAME", description: "当前技能名，对应 stdin 里的 skill_name。" },
+      { key: "SKILL_PATH", description: "当前 SKILL.md 路径，对应 stdin 里的 skill_path。" },
+      { key: "SKILL_ROOT", description: "当前技能目录，对应 stdin 里的 skill_root。" }
+    )
+    extraObjects.push({
+      key: "skill",
+      fields: ["skill_name", "skill_path", "skill_root", "skill_trigger_tool_name"],
+      description: "描述当前首次读取的技能，以及触发读取的工具。"
+    })
+  }
+
+  if (event === "PostToolUse" || event === "PostSkillUse") {
     stdinFields.push({
       key: "tool_response",
       description: "工具执行后的结构化返回；stdin 里会尽量还原成对象，便于脚本直接读取。"
@@ -955,11 +1152,29 @@ export function AddHookDialog(props: {
     () => HOOK_EVENTS.find((item) => item.value === event) ?? HOOK_EVENTS[0],
     [event]
   )
+  const isSkillMatcherEvent = event === "PreSkillUse" || event === "PostSkillUse"
+  const showMatcher =
+    event === "PreToolUse" || event === "PostToolUse" || isSkillMatcherEvent
+  const skillMatcherOptions = useMemo(
+    () => [
+      { value: "*", label: "所有技能（*）", description: "匹配任意技能读取" },
+      ...configuredSkills.map((skill) => ({
+        value: skill.name,
+        label: skill.name,
+        description: disabledSkillNames.has(skill.name.trim().toLowerCase())
+          ? "当前技能未启用"
+          : "按技能名精确匹配"
+      })),
+      { value: CUSTOM_SENTINEL, label: "自定义…", description: "手动输入技能名称或正则表达式" }
+    ],
+    [configuredSkills, disabledSkillNames]
+  )
+  const matcherOptions = isSkillMatcherEvent ? skillMatcherOptions : COMMON_TOOLS
   const currentCommandHookDoc = useMemo(() => getCommandHookEventDoc(event), [event])
   const resolvedMatcherValue = useMemo(() => {
-    if (event !== "PreToolUse" && event !== "PostToolUse") return ""
+    if (!showMatcher) return ""
     return matcherMode === CUSTOM_SENTINEL ? matcher.trim() : matcherMode
-  }, [event, matcherMode, matcher])
+  }, [showMatcher, matcherMode, matcher])
   const currentToolInputDocs = useMemo<ToolInputDoc[]>(
     () => getCommandHookToolInputDocs(event, resolvedMatcherValue),
     [event, resolvedMatcherValue]
@@ -1015,8 +1230,6 @@ export function AddHookDialog(props: {
     },
     [onOpenChange, editHook, populateFromHook]
   )
-
-  const showMatcher = event === "PreToolUse" || event === "PostToolUse"
 
   const handleSubmit = useCallback(async () => {
     setError(null)
@@ -1152,7 +1365,14 @@ export function AddHookDialog(props: {
             {/* Event */}
             <div className="space-y-2">
               <label className="text-sm font-medium">事件类型</label>
-              <Select value={event} onValueChange={(v) => setEvent(v as HookEvent)}>
+              <Select
+                value={event}
+                onValueChange={(v) => {
+                  setEvent(v as HookEvent)
+                  setMatcherMode("*")
+                  setMatcher("")
+                }}
+              >
                 <SelectTrigger className="h-9">
                   <SelectValue />
                 </SelectTrigger>
@@ -1172,7 +1392,9 @@ export function AddHookDialog(props: {
             {/* Matcher */}
             {showMatcher && (
               <div className="space-y-2">
-                <label className="text-sm font-medium">工具匹配</label>
+                <label className="text-sm font-medium">
+                  {isSkillMatcherEvent ? "技能匹配" : "工具匹配"}
+                </label>
                 <Select
                   value={matcherMode}
                   onValueChange={(v) => {
@@ -1184,7 +1406,7 @@ export function AddHookDialog(props: {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {COMMON_TOOLS.map((t) => (
+                    {matcherOptions.map((t) => (
                       <SelectItem key={t.value} value={t.value} className="py-2">
                         <div>
                           <span className="text-sm">{t.label}</span>
@@ -1197,21 +1419,34 @@ export function AddHookDialog(props: {
                 {matcherMode === CUSTOM_SENTINEL && (
                   <>
                     <Input
-                      placeholder="输入工具名称，如 execute 或 write_file|edit_file"
+                      placeholder={
+                        isSkillMatcherEvent
+                          ? "输入技能名称，如 code-review 或 imagegen|openai-docs"
+                          : "输入工具名称，如 execute 或 write_file|edit_file"
+                      }
                       value={matcher}
                       onChange={(e) => setMatcher(e.target.value)}
                       className="h-9 font-mono"
                       autoFocus
                     />
                     <p className="text-xs text-muted-foreground">
-                      精确匹配工具名（不区分大小写）。包含{" "}
+                      精确匹配{isSkillMatcherEvent ? "技能名" : "工具名"}（不区分大小写）。包含{" "}
                       <code className="font-mono">
                         | * + ? ^ $ ( ) [ ] {"{"} {"}"} \
                       </code>{" "}
                       时按
                       <strong>正则表达式</strong>解析（不是 glob）。例如{" "}
-                      <code className="font-mono">write_file|edit_file</code> 命中两个工具，
-                      <code className="font-mono">mcp__.*</code> 命中所有 mcp 工具。
+                      {isSkillMatcherEvent ? (
+                        <>
+                          <code className="font-mono">imagegen|openai-docs</code> 命中两个技能，
+                          <code className="font-mono">.*docs</code> 命中匹配的技能。
+                        </>
+                      ) : (
+                        <>
+                          <code className="font-mono">write_file|edit_file</code> 命中两个工具，
+                          <code className="font-mono">mcp__.*</code> 命中所有 mcp 工具。
+                        </>
+                      )}
                     </p>
                   </>
                 )}

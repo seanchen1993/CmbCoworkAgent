@@ -23,7 +23,8 @@ import type {
   PluginHookMetadata,
   PluginMetadata,
   PluginManifest,
-  SkillHookMetadata
+  SkillHookMetadata,
+  AgentAutoCommitSettings
 } from "../main/types"
 import { UserInfoConfig } from "../main/storage"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
@@ -457,6 +458,12 @@ interface CustomAPI {
       enabled: boolean
     }>
     onChanged: (callback: () => void) => () => void
+  }
+  autoCommit: {
+    getSettings: () => Promise<AgentAutoCommitSettings>
+    saveSettings: (
+      updates: Partial<AgentAutoCommitSettings>
+    ) => Promise<AgentAutoCommitSettings>
   }
   lsp: {
     getConfig: () => Promise<LspConfig>

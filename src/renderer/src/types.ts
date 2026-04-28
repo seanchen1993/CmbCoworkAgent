@@ -75,7 +75,11 @@ import type {
   LspCallHierarchyItem,
   LspCallHierarchyIncomingCall,
   LspCallHierarchyOutgoingCall,
-  LspStatus
+  LspStatus,
+  AgentAutoCommitMode,
+  AgentAutoCommitMessageStrategy,
+  AgentAutoCommitSettings,
+  AgentAutoCommitResult
 } from "../../main/types"
 import type {
   ManagedSavedCodeExecTool,
@@ -105,7 +109,11 @@ export type {
   LspCallHierarchyItem,
   LspCallHierarchyIncomingCall,
   LspCallHierarchyOutgoingCall,
-  LspStatus
+  LspStatus,
+  AgentAutoCommitMode,
+  AgentAutoCommitMessageStrategy,
+  AgentAutoCommitSettings,
+  AgentAutoCommitResult
 }
 
 export type {

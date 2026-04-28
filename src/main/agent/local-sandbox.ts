@@ -43,6 +43,9 @@ import { homedir } from "node:os"
 import type { HookConfig, HookResult } from "../hooks/types"
 import type { HookResultCallback } from "../hooks/runner"
 import { runHooksEnriched } from "../hooks/required-skill"
+import { joinHookText } from "../hooks/text"
+import type { SkillLifecycleRegistry } from "./skill-lifecycle/registry"
+import type { AgentFileMutationKind } from "../services/agent-auto-commit"
 
 /**
  * Sensitive directories under user profile that sandbox tools should not access.
@@ -160,6 +163,10 @@ export interface LocalSandboxOptions {
   abortSignal?: AbortSignal
   /** Unique run/thread identifier used for ACL ref-counting across concurrent runs. */
   runId?: string
+  /** Records successful agent-owned file mutations for post-run automation. */
+  onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
+  /** Detects reads of skill files so skill lifecycle hooks can wrap the load. */
+  skillLifecycleRegistry?: SkillLifecycleRegistry
 }
 
 /**
@@ -216,6 +223,9 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
   private readonly _fileLocks = new Map<string, Promise<void>>()
   /** mtime recorded after each successful read/write, for external-modification detection */
   private readonly _fileReadTimes = new Map<string, number>()
+  private readonly _onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
+  private _skillLifecycleRegistry?: SkillLifecycleRegistry
+  private readonly _skillHooksFired = new Set<string>()
 
   /**
    * Apply PostToolUse hook feedback to a file-operation result (write/edit).
@@ -821,6 +831,8 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     const h = options.hooks
     this.getHooks = typeof h === "function" ? h : () => h ?? []
     this._onHookResult = options.onHookResult
+    this._onFileMutation = options.onFileMutation
+    this._skillLifecycleRegistry = options.skillLifecycleRegistry
     this._sandboxCacheRoot = LocalSandbox.buildSandboxCacheRoot(baseEnv, this.workingDir)
     this._sharedSandboxCacheRoot = LocalSandbox.buildSharedSandboxCacheRoot(baseEnv)
     this.abortSignal = options.abortSignal
@@ -873,6 +885,10 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
   /** Toggle direct git submit command blocking when git_workflow is available. */
   setGitWorkflowCommitOnly(enabled: boolean): void {
     this.enforceGitWorkflowCommitOnly = enabled
+  }
+
+  setSkillLifecycleRegistry(registry: SkillLifecycleRegistry | undefined): void {
+    this._skillLifecycleRegistry = registry
   }
 
   /** Expose the sandbox mode for the orchestrator. */
@@ -1236,7 +1252,46 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     if (this.isBlockedBySandbox(filePath)) {
       return `Error: Access denied — '${filePath}' is restricted by sandbox policy.`
     }
+    let skillMatch: ReturnType<SkillLifecycleRegistry["resolveRead"]> | null = null
+    let fireSkillHooks = false
+    let resolvedForSkill: string | undefined
+    let preSkillHookNotes: string[] = []
     try {
+      try {
+        resolvedForSkill = this._resolvePath(filePath)
+        skillMatch = this._skillLifecycleRegistry?.resolveRead(filePath, resolvedForSkill) ?? null
+        if (skillMatch && !this._skillHooksFired.has(skillMatch.name)) {
+          fireSkillHooks = true
+          const preResult = await runHooksEnriched(this.getHooks(), "PreSkillUse", {
+            toolName: "read_file",
+            toolArgs: { filePath, offset, limit },
+            workspacePath: this.workingDir,
+            sessionId: this.runId,
+            skillName: skillMatch.name,
+            skillPath: skillMatch.path,
+            skillRoot: skillMatch.rootDir,
+            skillTriggerToolName: "read_file"
+          }, this._onHookResult)
+          if (preResult?.blocked || preResult?.continue === false || preResult?.decision === "block") {
+            const reason =
+              preResult.reason ||
+              preResult.stopReason ||
+              preResult.stdout ||
+              preResult.stderr ||
+              `Skill ${skillMatch.name} was blocked by a hook`
+            return `Error reading skill '${skillMatch.name}': [Hook blocked] ${reason}`
+          }
+          preSkillHookNotes = [
+            preResult?.stdout,
+            preResult?.additionalContext,
+            preResult?.systemMessage
+          ].filter((item): item is string => Boolean(item))
+          this._skillHooksFired.add(skillMatch.name)
+        }
+      } catch (hookError) {
+        console.warn("[Hooks] PreSkillUse error:", hookError)
+      }
+
       const { buffer, resolvedPath } = await this.readFileBuffer(filePath)
 
       const ext = path.extname(resolvedPath).toLowerCase()
@@ -1255,10 +1310,48 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       const hasMore = offset + limit < total
       const end = Math.min(offset + (hasMore ? limit - 1 : limit), total)
       const formatted = this.formatLines(lines.slice(offset, end), offset + 1)
-      if (hasMore) {
-        return `[Lines ${offset + 1}-${end} of ${total}. Use offset=${end} to read more.]\n` + formatted
+      const result = hasMore
+        ? `[Lines ${offset + 1}-${end} of ${total}. Use offset=${end} to read more.]\n` + formatted
+        : formatted
+
+      if (fireSkillHooks && skillMatch) {
+        try {
+          const resultPreview =
+            result.length > 20_000
+              ? `${result.slice(0, 20_000)}\n...[truncated ${result.length - 20_000} chars]`
+              : result
+          const postResult = await runHooksEnriched(this.getHooks(), "PostSkillUse", {
+            toolName: "read_file",
+            toolArgs: { filePath, offset, limit },
+            toolResult: JSON.stringify({
+              path: filePath,
+              resolvedPath: resolvedForSkill ?? resolvedPath,
+              content: resultPreview,
+              truncated: resultPreview.length !== result.length
+            }),
+            workspacePath: this.workingDir,
+            sessionId: this.runId,
+            skillName: skillMatch.name,
+            skillPath: skillMatch.path,
+            skillRoot: skillMatch.rootDir,
+            skillTriggerToolName: "read_file"
+          }, this._onHookResult)
+          const notes = [
+            ...preSkillHookNotes,
+            postResult?.stdout,
+            postResult?.additionalContext,
+            postResult?.systemMessage,
+            postResult?.decision === "block" ? postResult.reason : undefined
+          ].filter((item): item is string => Boolean(item))
+          if (notes.length > 0) {
+            return joinHookText(result, notes.join("\n"), "\n\n") ?? result
+          }
+        } catch (hookError) {
+          console.warn("[Hooks] PostSkillUse error:", hookError)
+        }
       }
-      return formatted
+
+      return result
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
       return `Error reading file '${filePath}': ${msg}`
@@ -1443,6 +1536,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       }
       return r
     })
+    if (!result.error) this._onFileMutation?.(filePath, "write")
     // PostToolUse hook
     try {
       const postResult = await runHooksEnriched(this.getHooks(), "PostToolUse", {
@@ -1471,7 +1565,13 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     }))
     const allowed = indexed.filter((e) => !e.sandboxBlocked && !e.writeBlocked)
 
-    if (allowed.length === files.length) return super.uploadFiles(files)
+    if (allowed.length === files.length) {
+      const results = await super.uploadFiles(files)
+      results.forEach((result, index) => {
+        if (!result.error) this._onFileMutation?.(files[index][0], "upload")
+      })
+      return results
+    }
 
     // Batch-delegate all allowed files in one call
     const allowedResults = allowed.length > 0
@@ -1486,7 +1586,9 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       if (entry.sandboxBlocked || entry.writeBlocked) {
         results[entry.i] = { path: entry.filePath, error: denied }
       } else {
-        results[entry.i] = allowedResults[ai++]
+        const result = allowedResults[ai++]
+        results[entry.i] = result
+        if (!result.error) this._onFileMutation?.(entry.filePath, "upload")
       }
     }
     return results
@@ -1557,6 +1659,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
         await this.recordReadTime(resolvedPath)
         return { path: filePath, filesUpdate: null, occurrences }
       })
+      this._onFileMutation?.(filePath, "edit")
       // PostToolUse hook
       try {
         const postResult = await runHooksEnriched(this.getHooks(), "PostToolUse", {

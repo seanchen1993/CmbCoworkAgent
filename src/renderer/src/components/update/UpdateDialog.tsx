@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react"
+import { useState, useEffect, useCallback, useRef, type ReactElement } from "react"
 import { toast } from "sonner"
 import {
   Dialog,
@@ -56,7 +56,7 @@ export function UpdateDialog({
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
-}): JSX.Element {
+}): ReactElement {
   const [stage, setStage] = useState<UpdateStage>("idle")
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null)
   const [progress, setProgress] = useState<DownloadProgress | null>(null)

@@ -17,6 +17,7 @@ import {
   type HookOnBlockConfig,
   type HookUpsert
 } from "./hooks/types"
+import type { AgentAutoCommitSettings } from "./types"
 import { readdir, readFile, rm, mkdir, stat as fsStat } from "fs/promises"
 import { app } from "electron"
 import { resolveMcpConnectorKind } from "./mcp/connector-kind"
@@ -279,6 +280,82 @@ export function isMemoryEnabled(): boolean {
 export function setMemoryEnabled(enabled: boolean): void {
   getOpenworkDir()
   writeFileSync(MEMORY_SETTINGS_FILE, JSON.stringify({ enabled }, null, 2))
+}
+
+// ── Agent auto-commit settings ───────────────────────────────────────────────
+
+const AGENT_AUTO_COMMIT_SETTINGS_FILE = join(OPENWORK_DIR, "agent-auto-commit-settings.json")
+
+const DEFAULT_AGENT_AUTO_COMMIT_SETTINGS: AgentAutoCommitSettings = {
+  mode: "off",
+  push: false,
+  messageStrategy: "business"
+}
+
+function normalizeAgentAutoCommitSettings(input: unknown): AgentAutoCommitSettings {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return { ...DEFAULT_AGENT_AUTO_COMMIT_SETTINGS }
+  }
+  const raw = input as Record<string, unknown>
+  const mode =
+    raw.mode === "ask" || raw.mode === "always" || raw.mode === "off" ? raw.mode : "off"
+  const messageStrategy =
+    raw.messageStrategy === "template" ||
+    raw.messageStrategy === "business" ||
+    raw.messageStrategy === "prompt" ||
+    raw.messageStrategy === "diff"
+      ? raw.messageStrategy
+      : "business"
+  const cardNumber =
+    typeof raw.cardNumber === "string" && raw.cardNumber.trim()
+      ? raw.cardNumber.trim()
+      : undefined
+  const template =
+    typeof raw.template === "string" && raw.template.trim()
+      ? raw.template.trim()
+      : undefined
+
+  return {
+    mode,
+    push: false,
+    messageStrategy,
+    ...(cardNumber ? { cardNumber } : {}),
+    ...(template ? { template } : {})
+  }
+}
+
+export function getAgentAutoCommitSettings(): AgentAutoCommitSettings {
+  getOpenworkDir()
+  if (!existsSync(AGENT_AUTO_COMMIT_SETTINGS_FILE)) {
+    return { ...DEFAULT_AGENT_AUTO_COMMIT_SETTINGS }
+  }
+  try {
+    return normalizeAgentAutoCommitSettings(
+      JSON.parse(readFileSync(AGENT_AUTO_COMMIT_SETTINGS_FILE, "utf-8"))
+    )
+  } catch {
+    return { ...DEFAULT_AGENT_AUTO_COMMIT_SETTINGS }
+  }
+}
+
+export function saveAgentAutoCommitSettings(
+  updates: Partial<AgentAutoCommitSettings>
+): AgentAutoCommitSettings {
+  getOpenworkDir()
+  const next = normalizeAgentAutoCommitSettings({
+    ...getAgentAutoCommitSettings(),
+    ...updates,
+    push: false
+  })
+  if (
+    next.mode !== "off" &&
+    next.messageStrategy === "business" &&
+    !next.cardNumber?.trim()
+  ) {
+    throw new Error("开启自动提交前需要填写卡号")
+  }
+  writeFileSync(AGENT_AUTO_COMMIT_SETTINGS_FILE, JSON.stringify(next, null, 2))
+  return next
 }
 
 // ── Code exec settings ──
@@ -1949,6 +2026,8 @@ function parseHookOnBlock(raw: unknown): HookOnBlockConfig | undefined {
 const CC_HOOK_EVENTS: ReadonlySet<string> = new Set([
   "PreToolUse",
   "PostToolUse",
+  "PreSkillUse",
+  "PostSkillUse",
   "PostToolUseFailure",
   "Stop",
   "StopFailure",
@@ -2055,7 +2134,8 @@ function ccCommandToHookConfig(
 function expandCcHooksSettings(
   obj: Record<string, unknown>,
   idPrefix: string,
-  meta: { enabled: boolean; createdAt: string; updatedAt: string }
+  meta: { enabled: boolean; createdAt: string; updatedAt: string },
+  defaultSkillMatcher?: string
 ): HookConfig[] {
   const result: HookConfig[] = []
   for (const [eventKey, matchersRaw] of Object.entries(obj)) {
@@ -2069,7 +2149,12 @@ function expandCcHooksSettings(
     matchersRaw.forEach((matcherEntry: unknown, mi: number) => {
       if (!matcherEntry || typeof matcherEntry !== "object" || Array.isArray(matcherEntry)) return
       const me = matcherEntry as Record<string, unknown>
-      const matcher = typeof me.matcher === "string" ? me.matcher : undefined
+      const matcher =
+        typeof me.matcher === "string"
+          ? me.matcher
+          : (event === "PreSkillUse" || event === "PostSkillUse")
+            ? defaultSkillMatcher
+            : undefined
       const hooksArr = Array.isArray(me.hooks) ? me.hooks : []
       hooksArr.forEach((rawHook: unknown, hi: number) => {
         if (!rawHook || typeof rawHook !== "object" || Array.isArray(rawHook)) return
@@ -2334,10 +2419,10 @@ function parseSkillHooks(skillDir: string, skillName: string): HookConfig[] {
 
     if (fmt === "cc_plugin") {
       const settingsObj = (parsed as Record<string, unknown>).hooks as Record<string, unknown>
-      return expandCcHooksSettings(settingsObj, idPrefix, meta)
+      return expandCcHooksSettings(settingsObj, idPrefix, meta, skillName)
     }
     if (fmt === "cc_settings") {
-      return expandCcHooksSettings(parsed as Record<string, unknown>, idPrefix, meta)
+      return expandCcHooksSettings(parsed as Record<string, unknown>, idPrefix, meta, skillName)
     }
     if (fmt !== "flat") return []
 
@@ -2353,7 +2438,12 @@ function parseSkillHooks(skillDir: string, skillName: string): HookConfig[] {
         {
           id: buildSkillHookId(skillName, h.id, index),
           event: h.event as HookConfig["event"],
-          matcher: typeof h.matcher === "string" ? h.matcher : undefined,
+          matcher:
+            typeof h.matcher === "string"
+              ? h.matcher
+              : (h.event === "PreSkillUse" || h.event === "PostSkillUse")
+                ? skillName
+                : undefined,
           type: (hookType === "prompt" ? "prompt" : "command") as HookConfig["type"],
           command: typeof h.command === "string" ? h.command : undefined,
           prompt: typeof h.prompt === "string" ? h.prompt : undefined,

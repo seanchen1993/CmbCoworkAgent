@@ -24,6 +24,8 @@ import { ChatOpenAI } from "@langchain/openai"
 import { DynamicStructuredTool, ToolInputParsingException } from "@langchain/core/tools"
 import { SqlJsSaver } from "../checkpointer/sqljs-saver"
 import { LocalSandbox } from "./local-sandbox"
+import { SkillLifecycleRegistry } from "./skill-lifecycle/registry"
+import type { AgentFileMutationKind } from "../services/agent-auto-commit"
 import type { HookResultCallback } from "../hooks/runner"
 import {
   createAgent,
@@ -1044,6 +1046,8 @@ export interface CreateAgentRuntimeOptions {
   maxRetryAttempts?: number
   /** Callback invoked after each hook executes — used to emit results to the renderer. */
   onHookResult?: HookResultCallback
+  /** Callback invoked after successful write/edit/upload filesystem operations. */
+  onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
 }
 
 // Create agent runtime with configured model and checkpointer
@@ -1058,7 +1062,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     retryHooks,
     maxRetryAttempts,
     enableAgentsPrompt = true,
-    onHookResult
+    onHookResult,
+    onFileMutation
   } = options
 
   if (!threadId) {
@@ -1141,6 +1146,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     codexExePath: codexExists ? codexExePath : undefined,
     hooks: () => getEnabledHooks(workspacePath),
     onHookResult,
+    onFileMutation,
     abortSignal: options.abortSignal,
     runId: threadId
   })
@@ -1278,6 +1284,9 @@ The workspace root is: ${workspacePath}`
   console.log("[Runtime] Plugin skills sources count:", pluginSkillsSources.length)
 
   const allSkillsSources = [...skillsSources, ...pluginSkillsSources]
+  backend.setSkillLifecycleRegistry(
+    allSkillsSources.length > 0 ? new SkillLifecycleRegistry(allSkillsSources) : undefined
+  )
   console.log("[Runtime] All skills sources combined:", allSkillsSources)
   console.log("[Runtime] All skills sources count:", allSkillsSources.length)
   console.log("[Runtime] Skills sources:", skillsSources, "Plugin skills:", pluginSkillsSources)

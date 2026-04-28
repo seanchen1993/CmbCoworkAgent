@@ -1,4 +1,4 @@
-import { IpcMain, BrowserWindow } from "electron"
+import { IpcMain, BrowserWindow, dialog } from "electron"
 import { nowIsoLocal } from "../util/local-time"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
 import { Command } from "@langchain/langgraph"
@@ -68,6 +68,15 @@ import { runHooks, type HookContext, type HookResultCallback } from "../hooks/ru
 import type { HookResult } from "../hooks/types"
 import { fireSessionStartOnce } from "../hooks/session-lifecycle"
 import { runHooksEnriched } from "../hooks/required-skill"
+import {
+  discardAgentAutoCommitTracking,
+  maybeAutoCommitAfterAgentRun,
+  recordAgentTouchedFile,
+  startAgentGitSnapshot,
+  type AgentGitSnapshot
+} from "../services/agent-auto-commit"
+import type { AgentAutoCommitResult } from "../types"
+import { formatAutoCommitLines } from "../../auto-commit-format"
 import { makeHookResultCallback } from "../hooks/result-callback"
 import type {
   AgentInvokeParams,
@@ -136,6 +145,81 @@ function sendActiveHookNotice(
   const message = formatActiveHookNotice(getActiveHookSummary(workspacePath))
   if (!message) return
   sendHookNotice(window, channel, message)
+}
+
+function sendAutoCommitResult(
+  window: BrowserWindow,
+  channel: string,
+  result: AgentAutoCommitResult
+): void {
+  if (result.status === "disabled") return
+  window.webContents.send(channel, {
+    type: "custom",
+    data: { type: "auto_commit_result", result }
+  })
+}
+
+async function confirmAutoCommit(
+  window: BrowserWindow,
+  result: AgentAutoCommitResult
+): Promise<boolean> {
+  const lines = formatAutoCommitLines(result)
+  const response = await dialog.showMessageBox(window, {
+    type: "question",
+    buttons: ["提交", "取消"],
+    defaultId: 0,
+    cancelId: 1,
+    title: "确认自动提交",
+    message: result.message || "是否提交本轮 Agent 改动？",
+    detail: lines.join("\n")
+  })
+  return response.response === 0
+}
+
+async function finalizeAutoCommit({
+  threadId,
+  workspacePath,
+  userPrompt,
+  snapshot,
+  window,
+  channel
+}: {
+  threadId: string
+  workspacePath: string | undefined
+  userPrompt?: string
+  snapshot: AgentGitSnapshot | null
+  window: BrowserWindow
+  channel: string
+}): Promise<void> {
+  const result = await maybeAutoCommitAfterAgentRun({
+    threadId,
+    workspacePath,
+    userPrompt,
+    snapshot,
+    confirm: (preview) => confirmAutoCommit(window, preview)
+  })
+  sendAutoCommitResult(window, channel, result)
+}
+
+async function beginAutoCommitTracking(
+  threadId: string,
+  workspacePath: string | undefined
+): Promise<{
+  snapshot: AgentGitSnapshot | null
+  onFileMutation?: (filePath: string) => void
+}> {
+  let snapshot: AgentGitSnapshot | null = null
+  try {
+    snapshot = await startAgentGitSnapshot(threadId, workspacePath)
+  } catch (error) {
+    console.warn("[AutoCommit] failed to capture start snapshot:", error)
+  }
+  return {
+    snapshot,
+    onFileMutation: workspacePath
+      ? (filePath: string) => recordAgentTouchedFile(threadId, workspacePath, filePath)
+      : undefined
+  }
 }
 
 interface SerializedHookMessage {
@@ -1130,6 +1214,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
       }
 
+      const autoCommit = await beginAutoCommitTracking(threadId, workspacePath)
+
       const requestedModelId = modelId || (metadata.model as string | undefined)
       invokeRoutingResult = await resolveModel({
         taskSource: "chat",
@@ -1194,7 +1280,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             noSkillEvolutionTool: true,
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
-            onHookResult
+            onHookResult,
+            onFileMutation: autoCommit.onFileMutation
           })
           // First attempt sends the message; subsequent attempts resume from checkpoint
           const input = isFirstAttempt ? { messages: [humanMessage] } : null
@@ -1790,7 +1877,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             noSkillEvolutionTool: true,
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
-            onHookResult
+            onHookResult,
+            onFileMutation: autoCommit.onFileMutation
           })
           activeStream = await agent.stream(null, streamConfig) // resume from checkpoint
           usedModelId = nextCandidate
@@ -1829,6 +1917,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           return
         }
 
+        await finalizeAutoCommit({
+          threadId,
+          workspacePath,
+          userPrompt: message,
+          snapshot: autoCommit.snapshot,
+          window,
+          channel
+        })
         window.webContents.send(channel, { type: "done" })
         notifyIfBackground("✅ 任务完成", lastFinalText || assistantText.trim() || "对话已完成")
 
@@ -1976,6 +2072,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
     } finally {
       activeRuns.delete(threadId)
+      discardAgentAutoCommitTracking(threadId)
       // Clean up sandbox ACLs granted during this run (unelevated mode keeps them
       // across commands for performance, so we revoke them when the run ends).
       // Uses threadId to only release this run's ref-counts, not other concurrent runs'.
@@ -2042,6 +2139,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     }
     window.once("closed", onWindowClosed)
     sendActiveHookNotice(window, channel, workspacePath)
+    const autoCommit = await beginAutoCommitTracking(threadId, workspacePath)
 
     try {
       const requestedModelIdResume = modelId || (metadata.model as string | undefined)
@@ -2092,7 +2190,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             noSkillEvolutionTool: true,
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
-            onHookResult
+            onHookResult,
+            onFileMutation: autoCommit.onFileMutation
           })
           resumeStream = await resumeAgent.stream(
             new Command({ resume: resumeValue }),
@@ -2215,7 +2314,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             noSkillEvolutionTool: true,
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
-            onHookResult
+            onHookResult,
+            onFileMutation: autoCommit.onFileMutation
           })
           activeResumeStream = await nextAgent.stream(
             new Command({ resume: resumeValue }),
@@ -2249,6 +2349,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
         if (!stopPassed) return
 
+        await finalizeAutoCommit({
+          threadId,
+          workspacePath,
+          userPrompt: stopContextCollector.snapshot().userMessage ?? "continue agent task",
+          snapshot: autoCommit.snapshot,
+          window,
+          channel
+        })
         window.webContents.send(channel, { type: "done" })
       }
     } catch (error) {
@@ -2267,6 +2375,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
     } finally {
       activeRuns.delete(threadId)
+      discardAgentAutoCommitTracking(threadId)
     }
   })
 
@@ -2327,6 +2436,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     }
     window.once("closed", onWindowClosed)
     sendActiveHookNotice(window, channel, workspacePath)
+    const autoCommit = await beginAutoCommitTracking(threadId, workspacePath)
 
     try {
       const interruptRoutingResult = await resolveModel({
@@ -2371,7 +2481,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               noSkillEvolutionTool: true,
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
-              onHookResult
+              onHookResult,
+              onFileMutation: autoCommit.onFileMutation
             })
             intStream = await intAgent.stream(null, interruptStreamConfig)
             intAgentRuntime = intAgent
@@ -2491,7 +2602,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               noSkillEvolutionTool: true,
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
-              onHookResult
+              onHookResult,
+              onFileMutation: autoCommit.onFileMutation
             })
             activeIntStream = await nextAgent.stream(null, interruptStreamConfig)
             intAgentRuntime = nextAgent
@@ -2522,6 +2634,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           if (!stopPassed) return
 
+          await finalizeAutoCommit({
+            threadId,
+            workspacePath,
+            userPrompt: stopContextCollector.snapshot().userMessage ?? "continue agent task",
+            snapshot: autoCommit.snapshot,
+            window,
+            channel
+          })
           window.webContents.send(channel, { type: "done" })
         }
       } else if (decision.type === "reject") {
@@ -2546,6 +2666,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
     } finally {
       activeRuns.delete(threadId)
+      discardAgentAutoCommitTracking(threadId)
     }
   })
 

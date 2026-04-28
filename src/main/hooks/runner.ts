@@ -25,6 +25,11 @@ export interface HookContext {
   sessionId?: string
   /** User prompt text for UserPromptSubmit — exposed as USER_PROMPT env and prompt in stdin JSON */
   userPrompt?: string
+  /** Skill lifecycle context for PreSkillUse/PostSkillUse. */
+  skillName?: string
+  skillPath?: string
+  skillRoot?: string
+  skillTriggerToolName?: string
   /** Subagent descriptor for SubagentStop — exposed in stdin JSON */
   subagent?: { id?: string; name?: string; status?: string }
   /** Stop event context — gives hooks visibility into what the agent did this turn */
@@ -66,14 +71,20 @@ function getCachedRegex(matcher: string): RegExp | null {
   }
 }
 
-function matchesToolName(matcher: string | undefined, toolName: string | undefined): boolean {
+function matchesName(matcher: string | undefined, name: string | undefined): boolean {
   if (!matcher || matcher === "*") return true
-  if (!toolName) return false
+  if (!name) return false
   if (isRegexPattern(matcher)) {
     const re = getCachedRegex(matcher)
-    return re ? re.test(toolName) : matcher.toLowerCase() === toolName.toLowerCase()
+    return re ? re.test(name) : matcher.toLowerCase() === name.toLowerCase()
   }
-  return matcher.toLowerCase() === toolName.toLowerCase()
+  return matcher.toLowerCase() === name.toLowerCase()
+}
+
+function getMatcherTarget(event: HookEvent, context: HookContext): string | undefined {
+  return event === "PreSkillUse" || event === "PostSkillUse"
+    ? context.skillName
+    : context.toolName
 }
 
 /**
@@ -94,6 +105,9 @@ function buildHookEnv(event: HookEvent, context: HookContext): Record<string, st
     HOOK_EVENT: event
   }
   if (context.toolName) env.TOOL_NAME = context.toolName
+  if (context.skillName) env.SKILL_NAME = context.skillName
+  if (context.skillPath) env.SKILL_PATH = context.skillPath
+  if (context.skillRoot) env.SKILL_ROOT = context.skillRoot
   // stdin JSON is the canonical payload. TOOL_ARGS / TOOL_RESULT are small-payload
   // compatibility helpers only, so they don't blow up the child-process env block.
   if (context.toolArgs) {
@@ -134,6 +148,10 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext): string {
     }
   }
   if (context.userPrompt) payload.prompt = context.userPrompt
+  if (context.skillName) payload.skill_name = context.skillName
+  if (context.skillPath) payload.skill_path = context.skillPath
+  if (context.skillRoot) payload.skill_root = context.skillRoot
+  if (context.skillTriggerToolName) payload.skill_trigger_tool_name = context.skillTriggerToolName
   if (context.subagent) payload.subagent = context.subagent
   if (context.stopContext) payload.stop_context = context.stopContext
   return JSON.stringify(payload)
@@ -436,6 +454,9 @@ async function executePromptHook(
       tool_name: context.toolName ?? "(unknown)",
       tool_args: context.toolArgs ?? {},
       ...(context.toolResult !== undefined ? { tool_result: context.toolResult } : {}),
+      ...(context.skillName ? { skill_name: context.skillName } : {}),
+      ...(context.skillPath ? { skill_path: context.skillPath } : {}),
+      ...(context.skillRoot ? { skill_root: context.skillRoot } : {}),
       ...(context.stopContext ? { stop_context: context.stopContext } : {}),
       workspace: context.workspacePath ?? ""
     },
@@ -640,8 +661,8 @@ async function executeHook(
 /**
  * Run all matching hooks for a given event.
  *
- * - PreToolUse/UserPromptSubmit: exit code 2 or decision=block stops the turn.
- * - PostToolUse: collects stdout from all hooks as extra context.
+ * - PreToolUse/PreSkillUse/UserPromptSubmit: exit code 2 or decision=block stops the turn.
+ * - PostToolUse/PostSkillUse: collects stdout from all hooks as extra context.
  * - Stop/SubagentStop/Notification/SessionStart/SessionEnd: fire-and-forget.
  */
 export type HookResultCallback = (event: HookEvent, hook: HookConfig, result: HookResult) => void
@@ -653,14 +674,14 @@ export async function runHooks(
   onHookResult?: HookResultCallback
 ): Promise<HookResult | null> {
   const matched = hooks.filter(
-    (h) => h.enabled && h.event === event && matchesToolName(h.matcher, context.toolName)
+    (h) => h.enabled && h.event === event && matchesName(h.matcher, getMatcherTarget(event, context))
   )
 
   if (matched.length === 0) return null
 
   const env = buildHookEnv(event, context)
 
-  if (event === "PreToolUse" || event === "UserPromptSubmit") {
+  if (event === "PreToolUse" || event === "PreSkillUse" || event === "UserPromptSubmit") {
     let mergedUpdatedInput: Record<string, unknown> | undefined
     let mergedAdditionalContext: string | undefined
     let mergedSystemMessage: string | undefined
@@ -724,7 +745,7 @@ export async function runHooks(
     }
   }
 
-  if (event === "PostToolUse") {
+  if (event === "PostToolUse" || event === "PostSkillUse") {
     const outputs: string[] = []
     const contexts: string[] = []
     const messages: string[] = []
@@ -734,14 +755,14 @@ export async function runHooks(
     for (const hook of matched) {
       const result = await executeHook(hook, env, context, event)
       console.log(
-        `[Hooks] PostToolUse hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}`
+        `[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}`
       )
       onHookResult?.(event, hook, result)
       if (result.continue === false) {
         shouldHalt = true
         haltReason = result.stopReason ?? haltReason
       }
-      // PostToolUse decision=block: feed reason back to agent for reconsideration
+      // Post* decision=block: feed reason back to agent for reconsideration
       if (result.decision === "block" && result.reason) {
         blockReasons.push(result.reason)
       }

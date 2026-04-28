@@ -252,15 +252,14 @@ async function repairMojibakeNamesInSkillDir(skillDirPath: string): Promise<void
   const dirQueue: string[] = [skillDirPath]
   for (let i = 0; i < dirQueue.length; i++) {
     const currentDir = dirQueue[i]
-    let entries: Awaited<ReturnType<typeof fs.readdir>>
     try {
-      entries = await fs.readdir(currentDir, { withFileTypes: true })
+      const entries = await fs.readdir(currentDir, { withFileTypes: true })
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue
+        dirQueue.push(path.join(currentDir, entry.name))
+      }
     } catch {
       continue
-    }
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue
-      dirQueue.push(path.join(currentDir, entry.name))
     }
   }
 
@@ -268,23 +267,22 @@ async function repairMojibakeNamesInSkillDir(skillDirPath: string): Promise<void
   dirQueue.sort((a, b) => b.length - a.length)
 
   for (const dirPath of dirQueue) {
-    let entries: Awaited<ReturnType<typeof fs.readdir>>
     try {
-      entries = await fs.readdir(dirPath, { withFileTypes: true })
+      const entries = await fs.readdir(dirPath, { withFileTypes: true })
+      for (const entry of entries) {
+        const recovered = recoverMojibakePathSegment(entry.name)
+        if (!recovered || recovered === entry.name) continue
+        const fromPath = path.join(dirPath, entry.name)
+        const toPath = path.join(dirPath, recovered)
+        if (existsSync(toPath)) continue
+        try {
+          await fs.rename(fromPath, toPath)
+        } catch (renameError) {
+          console.warn(`[Skills] Failed to repair mojibake filename "${entry.name}":`, renameError)
+        }
+      }
     } catch {
       continue
-    }
-    for (const entry of entries) {
-      const recovered = recoverMojibakePathSegment(entry.name)
-      if (!recovered || recovered === entry.name) continue
-      const fromPath = path.join(dirPath, entry.name)
-      const toPath = path.join(dirPath, recovered)
-      if (existsSync(toPath)) continue
-      try {
-        await fs.rename(fromPath, toPath)
-      } catch (renameError) {
-        console.warn(`[Skills] Failed to repair mojibake filename "${entry.name}":`, renameError)
-      }
     }
   }
 }

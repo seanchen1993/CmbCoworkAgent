@@ -1732,7 +1732,6 @@ function SkillItem(props: {
   )
   const chineseName = getSkillChineseName(skill, marketInfo)
   const displayName = chineseName || skill.name
-  const subtitleName = chineseName ? skill.name : null
 
   return (
     <div

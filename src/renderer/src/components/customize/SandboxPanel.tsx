@@ -1,6 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { Shield, ShieldOff, ShieldCheck, ShieldPlus, Zap, Info, Loader2 } from "lucide-react"
+import {
+  Shield,
+  ShieldOff,
+  ShieldCheck,
+  ShieldPlus,
+  Zap,
+  Info,
+  Loader2,
+  GitCommit,
+  Save,
+  AlertTriangle
+} from "lucide-react"
 import { cn } from "@/lib/utils"
+import type {
+  AgentAutoCommitMessageStrategy,
+  AgentAutoCommitMode,
+  AgentAutoCommitSettings
+} from "@/types"
 
 type SandboxMode = "none" | "unelevated" | "readonly" | "elevated"
 
@@ -45,12 +61,44 @@ const MODE_OPTIONS: ModeOption[] = [
 
 type ElevatedSetupStatus = "idle" | "checking" | "running" | "done" | "error"
 
+const DEFAULT_AUTO_COMMIT_SETTINGS: AgentAutoCommitSettings = {
+  mode: "off",
+  push: false,
+  messageStrategy: "business"
+}
+
+const AUTO_COMMIT_MODES: Array<{
+  value: AgentAutoCommitMode
+  label: string
+  description: string
+}> = [
+  { value: "off", label: "关闭", description: "默认，不自动提交" },
+  { value: "ask", label: "询问", description: "提交前弹窗确认" },
+  { value: "always", label: "自动", description: "结束后直接提交" }
+]
+
+const AUTO_COMMIT_STRATEGIES: Array<{
+  value: AgentAutoCommitMessageStrategy
+  label: string
+}> = [
+  { value: "business", label: "业务格式" },
+  { value: "prompt", label: "用户 Prompt" },
+  { value: "diff", label: "Diff 摘要" },
+  { value: "template", label: "固定模板" }
+]
+
 export function SandboxPanel(): React.JSX.Element {
   const [mode, setMode] = useState<SandboxMode>("none")
   const [yolo, setYolo] = useState(false)
+  const [autoCommitDraft, setAutoCommitDraft] = useState<AgentAutoCommitSettings>(
+    DEFAULT_AUTO_COMMIT_SETTINGS
+  )
   const [loading, setLoading] = useState(true)
   const [yoloPending, setYoloPending] = useState(false)
   const [modePending, setModePending] = useState(false)
+  const [autoCommitPending, setAutoCommitPending] = useState(false)
+  const [autoCommitError, setAutoCommitError] = useState<string | null>(null)
+  const [autoCommitSaved, setAutoCommitSaved] = useState(false)
   const [elevatedSetupStatus, setElevatedSetupStatus] = useState<ElevatedSetupStatus>("idle")
   const [elevatedSetupError, setElevatedSetupError] = useState<string | null>(null)
   const mountedRef = useRef(true)
@@ -68,13 +116,15 @@ export function SandboxPanel(): React.JSX.Element {
 
   const loadSettings = useCallback(async () => {
     try {
-      const [currentMode, currentYolo] = await Promise.all([
+      const [currentMode, currentYolo, currentAutoCommit] = await Promise.all([
         window.api.sandbox.getMode(),
-        window.api.sandbox.getYoloMode()
+        window.api.sandbox.getYoloMode(),
+        window.api.autoCommit.getSettings()
       ])
       if (mountedRef.current) {
         setMode(currentMode)
         setYolo(currentYolo)
+        setAutoCommitDraft(currentAutoCommit)
         setLoading(false)
       }
     } catch (e) {
@@ -196,6 +246,56 @@ export function SandboxPanel(): React.JSX.Element {
     }
   }, [yolo, yoloPending, loadSettings])
 
+  const updateAutoCommitDraft = useCallback(
+    (updates: Partial<AgentAutoCommitSettings>) => {
+      setAutoCommitSaved(false)
+      setAutoCommitError(null)
+      setAutoCommitDraft((current) => ({ ...current, ...updates, push: false }))
+    },
+    []
+  )
+
+  const handleSaveAutoCommit = useCallback(async () => {
+    if (autoCommitPending) return
+    const cardNumber = autoCommitDraft.cardNumber?.trim()
+    if (
+      autoCommitDraft.mode !== "off" &&
+      autoCommitDraft.messageStrategy === "business" &&
+      !cardNumber
+    ) {
+      setAutoCommitError("开启业务格式自动提交前需要填写 cardNumber")
+      return
+    }
+    setAutoCommitPending(true)
+    setAutoCommitError(null)
+    try {
+      const saved = await window.api.autoCommit.saveSettings({
+        ...autoCommitDraft,
+        cardNumber,
+        template: autoCommitDraft.template?.trim() || undefined,
+        push: false
+      })
+      if (mountedRef.current) {
+        setAutoCommitDraft(saved)
+        setAutoCommitSaved(true)
+        setTimeout(() => {
+          if (mountedRef.current) setAutoCommitSaved(false)
+        }, 2500)
+      }
+    } catch (e) {
+      if (mountedRef.current) {
+        setAutoCommitError(e instanceof Error ? e.message : String(e))
+      }
+    } finally {
+      if (mountedRef.current) setAutoCommitPending(false)
+    }
+  }, [autoCommitDraft, autoCommitPending])
+
+  const autoCommitNeedsCard =
+    autoCommitDraft.mode !== "off" &&
+    autoCommitDraft.messageStrategy === "business" &&
+    !autoCommitDraft.cardNumber?.trim()
+
   if (loading) {
     return (
       <div className="flex flex-1 items-center justify-center text-muted-foreground text-sm p-8">
@@ -258,6 +358,124 @@ export function SandboxPanel(): React.JSX.Element {
               />
             </div>
           </button>
+        </div>
+
+        {/* Agent 自动提交 */}
+        <div className="flex flex-col gap-4">
+          <div className="flex items-center gap-2">
+            <GitCommit className="size-5" />
+            <h2 className="text-lg font-bold">Agent 自动提交</h2>
+          </div>
+
+          <div className="flex items-start gap-2 rounded-md border border-blue-500/20 bg-blue-500/5 p-3 text-sm text-blue-600 dark:text-blue-400">
+            <Info className="size-4 mt-0.5 shrink-0" />
+            <p>
+              只在 Agent 结束后执行 git commit，不会自动 push。提交范围仅包含本轮记录到的
+              write/edit/upload 或 Git Panel 跟踪文件；执行前已脏且本轮再次触达的文件会纳入，并在提交结果里提示。
+            </p>
+          </div>
+
+          <div className="flex max-w-lg flex-col gap-3 rounded-lg border border-border p-4">
+            <div className="grid grid-cols-3 gap-2">
+              {AUTO_COMMIT_MODES.map((opt) => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => updateAutoCommitDraft({ mode: opt.value })}
+                  className={cn(
+                    "rounded-md border px-3 py-2 text-left transition-colors",
+                    autoCommitDraft.mode === opt.value
+                      ? "border-primary bg-primary/5 text-primary"
+                      : "border-border hover:bg-muted/40"
+                  )}
+                >
+                  <span className="block text-sm font-medium">{opt.label}</span>
+                  <span className="block text-xs text-muted-foreground">{opt.description}</span>
+                </button>
+              ))}
+            </div>
+
+            <label className="flex flex-col gap-1 text-sm">
+              <span className="font-medium">commit message 策略</span>
+              <select
+                value={autoCommitDraft.messageStrategy}
+                onChange={(e) =>
+                  updateAutoCommitDraft({
+                    messageStrategy: e.target.value as AgentAutoCommitMessageStrategy
+                  })
+                }
+                className="h-9 rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
+              >
+                {AUTO_COMMIT_STRATEGIES.map((strategy) => (
+                  <option key={strategy.value} value={strategy.value}>
+                    {strategy.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            {autoCommitDraft.messageStrategy === "template" && (
+              <label className="flex flex-col gap-1 text-sm">
+                <span className="font-medium">固定模板</span>
+                <input
+                  value={autoCommitDraft.template ?? ""}
+                  onChange={(e) => updateAutoCommitDraft({ template: e.target.value })}
+                  placeholder="fix: {summary}"
+                  className="h-9 rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
+                />
+                <span className="text-xs text-muted-foreground">
+                  支持 {"{summary}"}、{"{diffSummary}"}、{"{fileCount}"}、{"{files}"}、{"{threadShort}"}
+                </span>
+              </label>
+            )}
+
+            <label className="flex flex-col gap-1 text-sm">
+              <span className="font-medium">cardNumber</span>
+              <input
+                value={autoCommitDraft.cardNumber ?? ""}
+                onChange={(e) => updateAutoCommitDraft({ cardNumber: e.target.value })}
+                placeholder="例如 CMB-12345"
+                className={cn(
+                  "h-9 rounded-md border bg-background px-3 text-sm outline-none focus:border-primary",
+                  autoCommitNeedsCard ? "border-amber-500/70" : "border-border"
+                )}
+              />
+            </label>
+
+            {autoCommitNeedsCard && (
+              <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 p-3 text-sm text-amber-700 dark:text-amber-400">
+                <AlertTriangle className="size-4 mt-0.5 shrink-0" />
+                <p>业务格式需要 cardNumber；缺少时会跳过自动提交，不会编造卡号。</p>
+              </div>
+            )}
+
+            {autoCommitError && (
+              <div className="flex items-start gap-2 rounded-md border border-red-500/20 bg-red-500/5 p-3 text-sm text-red-600 dark:text-red-400">
+                <Info className="size-4 mt-0.5 shrink-0" />
+                <p>{autoCommitError}</p>
+              </div>
+            )}
+
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={handleSaveAutoCommit}
+                disabled={autoCommitPending}
+                className={cn(
+                  "inline-flex h-9 items-center gap-2 rounded-md border border-border px-3 text-sm font-medium transition-colors hover:bg-muted/50",
+                  autoCommitPending && "cursor-not-allowed opacity-60"
+                )}
+              >
+                {autoCommitPending ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <Save className="size-4" />
+                )}
+                保存
+              </button>
+              {autoCommitSaved && <span className="text-xs text-green-600">已保存</span>}
+            </div>
+          </div>
         </div>
 
         {/* Windows 沙箱 */}

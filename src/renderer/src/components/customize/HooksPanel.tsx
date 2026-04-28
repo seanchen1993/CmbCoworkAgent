@@ -39,6 +39,18 @@ const EVENT_BADGE: Record<
     english: "PostToolUse",
     tip: "工具执行后触发，输出追加到 Agent 上下文"
   },
+  PreSkillUse: {
+    label: "技能前",
+    className: "bg-blue-500/15 text-blue-600 dark:text-blue-400",
+    english: "PreSkillUse",
+    tip: "Agent 首次读取某个技能前触发，可按技能名拦截"
+  },
+  PostSkillUse: {
+    label: "技能后",
+    className: "bg-green-500/15 text-green-600 dark:text-green-400",
+    english: "PostSkillUse",
+    tip: "Agent 首次读取某个技能后触发，可记录或注入补充上下文"
+  },
   PostToolUseFailure: {
     label: "调用失败",
     className: "bg-red-500/15 text-red-600 dark:text-red-400",
@@ -140,6 +152,8 @@ const EVENT_BADGE: Record<
 const GUIDE_EVENT_ORDER: HookEvent[] = [
   "PreToolUse",
   "PostToolUse",
+  "PreSkillUse",
+  "PostSkillUse",
   "UserPromptSubmit",
   "SessionStart",
   "SessionEnd",
