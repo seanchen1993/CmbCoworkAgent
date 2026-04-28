@@ -424,7 +424,9 @@ async function getHeadCommitStats(
 }
 
 function notifyWorkspaceFilesChanged(threadId: string, workspacePath: string): void {
-  for (const win of BrowserWindow.getAllWindows()) {
+  const getAllWindows = BrowserWindow?.getAllWindows
+  if (typeof getAllWindows !== "function") return
+  for (const win of getAllWindows.call(BrowserWindow)) {
     if (!win.isDestroyed()) {
       win.webContents.send("workspace:files-changed", { threadId, workspacePath })
     }
@@ -432,19 +434,24 @@ function notifyWorkspaceFilesChanged(threadId: string, workspacePath: string): v
 }
 
 async function clearLlmModifiedMetadata(threadId: string): Promise<void> {
-  const { getThread, updateThread } = await import("../db")
-  const thread = getThread(threadId)
-  if (!thread) return
-  let metadata: Record<string, unknown> = {}
   try {
-    metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
-  } catch {
-    metadata = {}
+    const { getThread, updateThread } = await import("../db")
+    const thread = getThread(threadId)
+    if (!thread) return
+    let metadata: Record<string, unknown> = {}
+    try {
+      metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
+    } catch {
+      metadata = {}
+    }
+    metadata.llmModifiedFiles = []
+    metadata.llmFileHistory = {}
+    metadata.llmRecentlyRevertedFiles = []
+    updateThread(threadId, { metadata: JSON.stringify(metadata) })
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("Database not initialized")) return
+    console.warn("[AutoCommit] Failed to clear LLM modified metadata:", error)
   }
-  metadata.llmModifiedFiles = []
-  metadata.llmFileHistory = {}
-  metadata.llmRecentlyRevertedFiles = []
-  updateThread(threadId, { metadata: JSON.stringify(metadata) })
 }
 
 async function getThreadLlmModifiedFiles(
@@ -593,12 +600,10 @@ export async function maybeAutoCommitAfterAgentRun({
     )
 
     const newDirtyFiles = Array.from(endDirty).filter((file) => !startDirty.has(file))
+    const agentNewDirtyFiles = newDirtyFiles.filter((file) => agentOwned.has(file))
     const candidate = new Set<string>()
-    for (const file of newDirtyFiles) {
+    for (const file of agentNewDirtyFiles) {
       candidate.add(file)
-    }
-    for (const file of agentOwned) {
-      if (endDirty.has(file)) candidate.add(file)
     }
     for (const file of changedStartDirty) {
       candidate.add(file)
@@ -615,8 +620,8 @@ export async function maybeAutoCommitAfterAgentRun({
         `本次自动提交包含 ${preexistingIncluded.length} 个 Agent 开始前已有未提交改动、且本轮又被修改或触达的文件`
       )
     }
-    if (newDirtyFiles.length > 0) {
-      warnings.push(`本次自动提交包含 ${newDirtyFiles.length} 个执行期间新增的脏文件`)
+    if (agentNewDirtyFiles.length > 0) {
+      warnings.push(`本次自动提交包含 ${agentNewDirtyFiles.length} 个执行期间新增的 Agent 文件`)
     }
     if (skippedFiles.length > 0) {
       warnings.push(`还有 ${skippedFiles.length} 个未记录为本轮 Agent 改动的脏文件，未纳入自动提交`)

@@ -211,6 +211,41 @@ When NOT to use the task tool:
 - Remember to use the \`task\` tool to silo independent tasks within a multi-part objective.
 - You should use the \`task\` tool whenever you have a complex task that will take multiple steps, and is independent from other tasks that the agent needs to complete. These agents are highly competent and efficient.`
 
+// Skill lifecycle hooks can return guidance for the model, but that guidance
+// must not be appended to the SKILL.md file content returned by read_file.
+// Drain it into an independent system-message section on the next model call.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function createSkillHookContextMiddleware(
+  filesystemBackend: Partial<SkillHookContextProvider>
+): any {
+  return createMiddleware({
+    name: "skillHookContext",
+    wrapModelCall: (request, handler) => {
+      if (typeof filesystemBackend.drainSkillHookContexts !== "function") return handler(request)
+
+      let contexts: string[] = []
+      try {
+        contexts = filesystemBackend.drainSkillHookContexts()
+      } catch (error) {
+        console.warn("[Runtime] Failed to drain skill hook context:", error)
+      }
+      if (contexts.length === 0) return handler(request)
+
+      const injectedContext = [
+        "",
+        "## Skill Hook Context",
+        "The following guidance was produced by skill lifecycle hooks. It is not part of any SKILL.md file content.",
+        ...contexts
+      ].join("\n\n")
+
+      return handler({
+        ...request,
+        systemMessage: request.systemMessage.concat(injectedContext)
+      })
+    }
+  })
+}
+
 /**
  * Custom version of deepagents' createDeepAgent.
  *
@@ -424,38 +459,6 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     return mw
   }
 
-  // Skill lifecycle hooks can return guidance for the model, but that guidance
-  // must not be appended to the SKILL.md file content returned by read_file.
-  // Drain it into an independent system-message section on the next model call.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const createSkillHookContextMiddleware = (): any => createMiddleware({
-    name: "skillHookContext",
-    wrapModelCall: (request, handler) => {
-      const provider = filesystemBackend as Partial<SkillHookContextProvider>
-      if (typeof provider.drainSkillHookContexts !== "function") return handler(request)
-
-      let contexts: string[] = []
-      try {
-        contexts = provider.drainSkillHookContexts()
-      } catch (error) {
-        console.warn("[Runtime] Failed to drain skill hook context:", error)
-      }
-      if (contexts.length === 0) return handler(request)
-
-      const injectedContext = [
-        "",
-        "## Skill Hook Context",
-        "The following guidance was produced by skill lifecycle hooks. It is not part of any SKILL.md file content.",
-        ...contexts
-      ].join("\n\n")
-
-      return handler({
-        ...request,
-        systemMessage: request.systemMessage.concat(injectedContext)
-      })
-    }
-  })
-
   // Once any wrapToolCall middleware is attached, ToolNode's
   // defaultHandleToolErrors stops catching tool-body throws. So this
   // middleware must convert any recoverable tool error into a ToolMessage,
@@ -572,7 +575,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
   const subagentMiddleware: any[] = [
     todoListMiddleware(),
     createFsMiddleware(),
-    createSkillHookContextMiddleware(),
+    createSkillHookContextMiddleware(filesystemBackend),
     toolErrorMiddleware,
     createSummarizationMiddleware(summarizationOptions),
     anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
@@ -599,7 +602,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     middleware: [
       todoListMiddleware(),
       createFsMiddleware(),
-      createSkillHookContextMiddleware(),
+      createSkillHookContextMiddleware(filesystemBackend),
       toolErrorMiddleware,
       createSubAgentMiddleware({
         defaultModel: model,
