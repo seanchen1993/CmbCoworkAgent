@@ -149,7 +149,11 @@ interface DashboardCodeStats {
   deletedLines: number
   effectiveGeneratedLines: number
   measuredGeneratedLines: number
+  unmeasuredGeneratedLines: number
+  inclusiveEffectiveGeneratedLines: number
   adoptedLines: number
+  measuredAdoptionRate: number | null
+  inclusiveAdoptionRate: number | null
   adoptionRate: number | null
 }
 
@@ -320,22 +324,40 @@ function computeAdoptionRate(adoptedLines: number, generatedLines: number): numb
   return generatedLines > 0 ? adoptedLines / generatedLines : null
 }
 
+function makeDashboardCodeStats(args: {
+  generatedLines: number
+  deletedLines: number
+  measuredGeneratedLines: number
+  effectiveGeneratedLines: number
+  adoptedLines: number
+}): DashboardCodeStats {
+  const generatedLines = Math.max(0, args.generatedLines)
+  const deletedLines = Math.max(0, args.deletedLines)
+  const measuredGeneratedLines = Math.max(0, args.measuredGeneratedLines)
+  const effectiveGeneratedLines = Math.max(0, args.effectiveGeneratedLines)
+  const adoptedLines = Math.max(0, args.adoptedLines)
+  const unmeasuredGeneratedLines = Math.max(0, generatedLines - measuredGeneratedLines)
+  const inclusiveEffectiveGeneratedLines = effectiveGeneratedLines + unmeasuredGeneratedLines
+  const measuredAdoptionRate = computeAdoptionRate(adoptedLines, effectiveGeneratedLines)
+  const inclusiveAdoptionRate = computeAdoptionRate(adoptedLines, inclusiveEffectiveGeneratedLines)
+  return {
+    generatedLines,
+    deletedLines,
+    effectiveGeneratedLines,
+    measuredGeneratedLines,
+    unmeasuredGeneratedLines,
+    inclusiveEffectiveGeneratedLines,
+    adoptedLines,
+    measuredAdoptionRate,
+    inclusiveAdoptionRate,
+    // Backward-compatible alias for older renderer code paths.
+    adoptionRate: measuredAdoptionRate
+  }
+}
+
 function effectiveGeneratedLinesSumAgg(): Record<string, unknown> {
   return {
-    sum: {
-      script: {
-        lang: "painless",
-        source: `
-          if (doc.containsKey('properties.effectiveGeneratedLineCount') && doc['properties.effectiveGeneratedLineCount'].size() != 0) {
-            return doc['properties.effectiveGeneratedLineCount'].value;
-          }
-          if (doc.containsKey('properties.generatedLineCount') && doc['properties.generatedLineCount'].size() != 0) {
-            return doc['properties.generatedLineCount'].value;
-          }
-          return 0;
-        `
-      }
-    }
+    sum: { field: "properties.effectiveGeneratedLineCount" }
   }
 }
 
@@ -350,18 +372,16 @@ function normalizeCodeStatsFromAggs(raw: unknown): DashboardCodeStats {
   ])
   const effectiveGeneratedLines = getAggNumber(
     raw,
-    ["aggregations", "code_adopt_measured", "effective_generated_lines", "value"],
-    measuredGeneratedLines
+    ["aggregations", "code_adopt_measured", "effective_generated_lines", "value"]
   )
   const adoptedLines = getAggNumber(raw, ["aggregations", "code_adopt_measured", "adopted_lines", "value"])
-  return {
+  return makeDashboardCodeStats({
     generatedLines,
     deletedLines,
     effectiveGeneratedLines,
     measuredGeneratedLines,
-    adoptedLines,
-    adoptionRate: computeAdoptionRate(adoptedLines, effectiveGeneratedLines)
-  }
+    adoptedLines
+  })
 }
 
 function summarizeTraceTokenUsage(modelCalls: AgentTrace["modelCalls"]): {
@@ -587,33 +607,38 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
       }
     }
   }
+  const codeGenFilters: Record<string, unknown>[] = [
+    { term: { eventName: "code_gen" } },
+    timeRangeFilter("eventTime", range)
+  ]
+  const codeAdoptFilters: Record<string, unknown>[] = [
+    { term: { eventName: "code_adopt" } },
+    { exists: { field: "properties.adoptedLineCount" } },
+    { exists: { field: "properties.generatedLineCount" } },
+    { exists: { field: "properties.effectiveGeneratedLineCount" } },
+    timeRangeFilter("properties.generatedAt", range)
+  ]
   const codeBody = {
     size: 0,
     query: {
       bool: {
-        filter: [
-          timeRangeFilter("eventTime", range),
-          { terms: { eventName: ["code_gen", "code_adopt"] } }
-        ]
+        should: [
+          { bool: { filter: codeGenFilters } },
+          { bool: { filter: codeAdoptFilters } }
+        ],
+        minimum_should_match: 1
       }
     },
     aggs: {
       code_gen: {
-        filter: { term: { eventName: "code_gen" } },
+        filter: { bool: { filter: codeGenFilters } },
         aggs: {
           generated_lines: { sum: { field: "properties.lineCount" } },
           deleted_lines: { sum: { field: "properties.deletedLineCount" } }
         }
       },
       code_adopt_measured: {
-        filter: {
-          bool: {
-            filter: [
-              { term: { eventName: "code_adopt" } },
-              { exists: { field: "properties.adoptedLineCount" } }
-            ]
-          }
-        },
+        filter: { bool: { filter: codeAdoptFilters } },
         aggs: {
           measured_generated_lines: { sum: { field: "properties.generatedLineCount" } },
           effective_generated_lines: effectiveGeneratedLinesSumAgg(),
@@ -637,6 +662,8 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
       code_deleted_lines: { value: codeStats.deletedLines },
       code_effective_generated_lines: { value: codeStats.effectiveGeneratedLines },
       code_measured_generated_lines: { value: codeStats.measuredGeneratedLines },
+      code_unmeasured_generated_lines: { value: codeStats.unmeasuredGeneratedLines },
+      code_inclusive_effective_generated_lines: { value: codeStats.inclusiveEffectiveGeneratedLines },
       code_adopted_lines: { value: codeStats.adoptedLines }
     }
   }
@@ -1057,34 +1084,40 @@ async function fetchSkillRecentTraces(
 
 async function fetchSkillCodeStats(skill: string, range: TimeRange): Promise<DashboardCodeStats> {
   const skillTerms = getSkillIdentifierLookupTerms(skill)
+  const codeGenFilters: Record<string, unknown>[] = [
+    { term: { eventName: "code_gen" } },
+    timeRangeFilter("eventTime", range),
+    { terms: { "properties.usedSkills": skillTerms } }
+  ]
+  const codeAdoptFilters: Record<string, unknown>[] = [
+    { term: { eventName: "code_adopt" } },
+    { exists: { field: "properties.adoptedLineCount" } },
+    { exists: { field: "properties.generatedLineCount" } },
+    { exists: { field: "properties.effectiveGeneratedLineCount" } },
+    timeRangeFilter("properties.generatedAt", range),
+    { terms: { "properties.usedSkills": skillTerms } }
+  ]
   const body = {
     size: 0,
     query: {
       bool: {
-        filter: [
-          timeRangeFilter("eventTime", range),
-          { terms: { eventName: ["code_gen", "code_adopt"] } },
-          { terms: { "properties.usedSkills": skillTerms } }
-        ]
+        should: [
+          { bool: { filter: codeGenFilters } },
+          { bool: { filter: codeAdoptFilters } }
+        ],
+        minimum_should_match: 1
       }
     },
     aggs: {
       code_gen: {
-        filter: { term: { eventName: "code_gen" } },
+        filter: { bool: { filter: codeGenFilters } },
         aggs: {
           generated_lines: { sum: { field: "properties.lineCount" } },
           deleted_lines: { sum: { field: "properties.deletedLineCount" } }
         }
       },
       code_adopt_measured: {
-        filter: {
-          bool: {
-            filter: [
-              { term: { eventName: "code_adopt" } },
-              { exists: { field: "properties.adoptedLineCount" } }
-            ]
-          }
-        },
+        filter: { bool: { filter: codeAdoptFilters } },
         aggs: {
           measured_generated_lines: { sum: { field: "properties.generatedLineCount" } },
           effective_generated_lines: effectiveGeneratedLinesSumAgg(),
@@ -1210,6 +1243,9 @@ function makeMockOverview(range: TimeRange): unknown {
       code_generated_lines: { value: 4820 },
       code_deleted_lines: { value: 930 },
       code_measured_generated_lines: { value: 3900 },
+      code_effective_generated_lines: { value: 3720 },
+      code_unmeasured_generated_lines: { value: 920 },
+      code_inclusive_effective_generated_lines: { value: 4640 },
       code_adopted_lines: { value: 2860 },
       by_skill: {
         buckets: [
@@ -1838,14 +1874,13 @@ function makeMockSkillCodeStats(skill: string): DashboardCodeStats {
   const measuredGeneratedLines = Math.max(0, generatedLines - 120)
   const effectiveGeneratedLines = Math.max(0, measuredGeneratedLines - 30)
   const adoptedLines = Math.round(effectiveGeneratedLines * (0.62 + (seed % 18) / 100))
-  return {
+  return makeDashboardCodeStats({
     generatedLines,
     deletedLines,
     effectiveGeneratedLines,
     measuredGeneratedLines,
-    adoptedLines,
-    adoptionRate: computeAdoptionRate(adoptedLines, effectiveGeneratedLines)
-  }
+    adoptedLines
+  })
 }
 
 function makeMockSkillDetail(skill: string, range: TimeRange, limit = 3): DashboardSkillDetail {

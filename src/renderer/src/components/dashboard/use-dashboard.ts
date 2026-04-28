@@ -24,7 +24,11 @@ export interface OverviewData {
   codeDeletedLines: number
   codeEffectiveGeneratedLines: number
   codeMeasuredGeneratedLines: number
+  codeUnmeasuredGeneratedLines: number
+  codeInclusiveEffectiveGeneratedLines: number
   codeAdoptedLines: number
+  codeMeasuredAdoptionRate: number | null
+  codeInclusiveAdoptionRate: number | null
   codeAdoptionRate: number | null
   totalSkills: number
   totalTools: number
@@ -122,7 +126,11 @@ export interface DashboardCodeStats {
   deletedLines: number
   effectiveGeneratedLines: number
   measuredGeneratedLines: number
+  unmeasuredGeneratedLines: number
+  inclusiveEffectiveGeneratedLines: number
   adoptedLines: number
+  measuredAdoptionRate: number | null
+  inclusiveAdoptionRate: number | null
   adoptionRate: number | null
 }
 
@@ -323,12 +331,19 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
   const outputTokens = aggs.total_output_tokens?.value ?? 0
   const codeGeneratedLines = aggs.code_generated_lines?.value ?? 0
   const codeDeletedLines = aggs.code_deleted_lines?.value ?? 0
-  const codeEffectiveGeneratedLines =
-    aggs.code_effective_generated_lines?.value ?? aggs.code_measured_generated_lines?.value ?? codeGeneratedLines
   const codeMeasuredGeneratedLines = aggs.code_measured_generated_lines?.value ?? 0
+  const codeEffectiveGeneratedLines = aggs.code_effective_generated_lines?.value ?? 0
+  const codeUnmeasuredGeneratedLines =
+    aggs.code_unmeasured_generated_lines?.value ?? Math.max(0, codeGeneratedLines - codeMeasuredGeneratedLines)
+  const codeInclusiveEffectiveGeneratedLines =
+    aggs.code_inclusive_effective_generated_lines?.value ??
+    codeEffectiveGeneratedLines + codeUnmeasuredGeneratedLines
   const codeAdoptedLines = aggs.code_adopted_lines?.value ?? 0
-  const codeAdoptionRate =
+  const codeMeasuredAdoptionRate =
     codeEffectiveGeneratedLines > 0 ? codeAdoptedLines / codeEffectiveGeneratedLines : null
+  const codeInclusiveAdoptionRate =
+    codeInclusiveEffectiveGeneratedLines > 0 ? codeAdoptedLines / codeInclusiveEffectiveGeneratedLines : null
+  const codeAdoptionRate = codeMeasuredAdoptionRate
   const totalSkills = aggs.total_skills?.value ?? 0
   const totalTools = aggs.total_tools?.value ?? 0
   const totalSkillCalls = aggs.total_skill_calls?.value ?? 0
@@ -384,7 +399,11 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
     codeDeletedLines,
     codeEffectiveGeneratedLines,
     codeMeasuredGeneratedLines,
+    codeUnmeasuredGeneratedLines,
+    codeInclusiveEffectiveGeneratedLines,
     codeAdoptedLines,
+    codeMeasuredAdoptionRate,
+    codeInclusiveAdoptionRate,
     codeAdoptionRate,
     totalSkills,
     totalTools,

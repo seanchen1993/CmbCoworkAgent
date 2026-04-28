@@ -781,6 +781,7 @@ function emitSkippedLargeAtGen(args: {
     adoptedLineCount: null,
     measureSource: "gen_oversize",
     measureLatencyMs: 0,
+    generatedAt: new Date(createdAt).toISOString(),
     measuredAt: new Date(createdAt).toISOString(),
     commitSha: null,
     // Mirror the attribution fields attached by the normal commit path, so
@@ -926,6 +927,7 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
         adoptedLineCount,
         measureSource: "git_commit",
         measureLatencyMs: measuredAt - pending.created_at,
+        generatedAt: new Date(pending.created_at).toISOString(),
         measuredAt: new Date(measuredAt).toISOString(),
         commitSha: opts?.commitSha ?? null,
         usedSkills,

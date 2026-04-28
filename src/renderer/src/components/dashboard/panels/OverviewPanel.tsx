@@ -71,30 +71,59 @@ function formatExactNumber(n: number): string {
   return Math.round(n).toLocaleString("zh-CN")
 }
 
-function AdoptionDetailTooltip({ data }: { data: OverviewData }) {
+function InclusiveAdoptionTooltip({ data }: { data: OverviewData }) {
   return (
     <div className="space-y-1.5">
-      <div className="text-[11px] font-medium text-foreground">代码行数明细</div>
+      <div className="text-[11px] font-medium text-foreground">含未提交采纳率</div>
       <div className="space-y-1 text-[11px]">
         <div className="flex items-center justify-between gap-4">
           <span className="text-muted-foreground">采纳行数</span>
           <span className="font-medium text-foreground">{formatExactNumber(data.codeAdoptedLines)} 行</span>
         </div>
         <div className="flex items-center justify-between gap-4">
-          <span className="text-muted-foreground">有效生成行数</span>
+          <span className="text-muted-foreground">已测量有效生成行数</span>
           <span className="font-medium text-foreground">{formatExactNumber(data.codeEffectiveGeneratedLines)} 行</span>
         </div>
         <div className="flex items-center justify-between gap-4">
-          <span className="text-muted-foreground">原始生成行数</span>
-          <span className="font-medium text-foreground">{formatExactNumber(data.codeGeneratedLines)} 行</span>
+          <span className="text-muted-foreground">未提交生成行数</span>
+          <span className="font-medium text-foreground">{formatExactNumber(data.codeUnmeasuredGeneratedLines)} 行</span>
         </div>
         <div className="flex items-center justify-between gap-4">
-          <span className="text-muted-foreground">删除行数</span>
-          <span className="font-medium text-foreground">{formatExactNumber(data.codeDeletedLines)} 行</span>
+          <span className="text-muted-foreground">含未提交分母</span>
+          <span className="font-medium text-foreground">
+            {formatExactNumber(data.codeInclusiveEffectiveGeneratedLines)} 行
+          </span>
         </div>
       </div>
-      <div className="text-[10px] text-muted-foreground">
-        采纳率按 采纳行数 / 有效生成行数 计算，已扣除被后续 agent 编辑覆盖的中间稿。
+      <div className="space-y-0.5 text-[10px] text-muted-foreground">
+        <div>采纳率 = 采纳行数 / (已测量有效生成行数 + 未提交生成行数)。</div>
+        <div>已测量有效生成行数已剔除被 agent 自己改写的中间稿部分。</div>
+      </div>
+    </div>
+  )
+}
+
+function MeasuredAdoptionTooltip({ data }: { data: OverviewData }) {
+  return (
+    <div className="space-y-1.5">
+      <div className="text-[11px] font-medium text-foreground">已测量采纳率</div>
+      <div className="space-y-1 text-[11px]">
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">采纳行数</span>
+          <span className="font-medium text-foreground">{formatExactNumber(data.codeAdoptedLines)} 行</span>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">已测量有效生成行数</span>
+          <span className="font-medium text-foreground">{formatExactNumber(data.codeEffectiveGeneratedLines)} 行</span>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">已测量原始生成行数</span>
+          <span className="font-medium text-foreground">{formatExactNumber(data.codeMeasuredGeneratedLines)} 行</span>
+        </div>
+      </div>
+      <div className="space-y-0.5 text-[10px] text-muted-foreground">
+        <div>采纳率 = 采纳行数 / 已测量有效生成行数。</div>
+        <div>已测量有效生成行数已剔除被 agent 自己改写的中间稿部分。</div>
       </div>
     </div>
   )
@@ -480,15 +509,27 @@ export function OverviewPanel({
         />
         <StatCard
           icon={Gauge}
-          label="代码采纳率"
-          value={formatPercent(data.codeAdoptionRate)}
+          label="含未提交采纳率"
+          value={formatPercent(data.codeInclusiveAdoptionRate)}
           sub={
-            data.codeAdoptionRate === null
+            data.codeInclusiveAdoptionRate === null
               ? "暂无代码生成数据"
-              : `${formatNumber(data.codeAdoptedLines)} / ${formatNumber(data.codeEffectiveGeneratedLines)} 行`
+              : `${formatNumber(data.codeAdoptedLines)} / ${formatNumber(data.codeInclusiveEffectiveGeneratedLines)} 行`
           }
           color="bg-cyan-500"
-          tooltipContent={<AdoptionDetailTooltip data={data} />}
+          tooltipContent={<InclusiveAdoptionTooltip data={data} />}
+        />
+        <StatCard
+          icon={Gauge}
+          label="已测量采纳率"
+          value={formatPercent(data.codeMeasuredAdoptionRate)}
+          sub={
+            data.codeMeasuredAdoptionRate === null
+              ? "暂无测量数据"
+              : `${formatNumber(data.codeAdoptedLines)} / ${formatNumber(data.codeEffectiveGeneratedLines)} 行`
+          }
+          color="bg-blue-500"
+          tooltipContent={<MeasuredAdoptionTooltip data={data} />}
         />
       </div>
 
@@ -523,9 +564,9 @@ export function OverviewPanel({
               allowDecimals={false}
             />
             <RechartsTooltip
-              formatter={(value: number | string, name: string) => [
-                Number(value).toLocaleString("zh-CN"),
-                name
+              formatter={(value, name) => [
+                Number(value ?? 0).toLocaleString("zh-CN"),
+                String(name)
               ]}
               contentStyle={{
                 backgroundColor: "var(--color-card)",

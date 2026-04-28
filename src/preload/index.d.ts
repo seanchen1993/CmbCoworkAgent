@@ -110,7 +110,11 @@ interface DashboardCodeStats {
   deletedLines: number
   effectiveGeneratedLines: number
   measuredGeneratedLines: number
+  unmeasuredGeneratedLines: number
+  inclusiveEffectiveGeneratedLines: number
   adoptedLines: number
+  measuredAdoptionRate: number | null
+  inclusiveAdoptionRate: number | null
   adoptionRate: number | null
 }
 

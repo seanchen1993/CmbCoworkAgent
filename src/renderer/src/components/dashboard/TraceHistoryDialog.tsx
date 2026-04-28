@@ -148,30 +148,57 @@ function SkillCodeStat({
   )
 }
 
-function AdoptionDetailTooltip({ stats }: { stats: DashboardCodeStats }): React.JSX.Element {
+function InclusiveAdoptionTooltip({ stats }: { stats: DashboardCodeStats }): React.JSX.Element {
   return (
     <div className="space-y-1.5">
-      <div className="text-[11px] font-medium text-foreground">代码行数明细</div>
+      <div className="text-[11px] font-medium text-foreground">含未提交采纳率</div>
       <div className="space-y-1 text-[11px]">
         <div className="flex items-center justify-between gap-4">
           <span className="text-muted-foreground">采纳行数</span>
           <span className="font-medium text-foreground">{fmtExactLines(stats.adoptedLines)} 行</span>
         </div>
         <div className="flex items-center justify-between gap-4">
-          <span className="text-muted-foreground">有效生成行数</span>
+          <span className="text-muted-foreground">已测量有效生成行数</span>
           <span className="font-medium text-foreground">{fmtExactLines(stats.effectiveGeneratedLines)} 行</span>
         </div>
         <div className="flex items-center justify-between gap-4">
-          <span className="text-muted-foreground">原始生成行数</span>
-          <span className="font-medium text-foreground">{fmtExactLines(stats.generatedLines)} 行</span>
+          <span className="text-muted-foreground">未提交生成行数</span>
+          <span className="font-medium text-foreground">{fmtExactLines(stats.unmeasuredGeneratedLines)} 行</span>
         </div>
         <div className="flex items-center justify-between gap-4">
-          <span className="text-muted-foreground">删除行数</span>
-          <span className="font-medium text-foreground">{fmtExactLines(stats.deletedLines)} 行</span>
+          <span className="text-muted-foreground">含未提交分母</span>
+          <span className="font-medium text-foreground">{fmtExactLines(stats.inclusiveEffectiveGeneratedLines)} 行</span>
         </div>
       </div>
-      <div className="text-[10px] text-muted-foreground">
-        采纳率按 采纳行数 / 有效生成行数 计算，已扣除被后续 agent 编辑覆盖的中间稿。
+      <div className="space-y-0.5 text-[10px] text-muted-foreground">
+        <div>采纳率 = 采纳行数 / (已测量有效生成行数 + 未提交生成行数)。</div>
+        <div>已测量有效生成行数已剔除被 agent 自己改写的中间稿部分。</div>
+      </div>
+    </div>
+  )
+}
+
+function MeasuredAdoptionTooltip({ stats }: { stats: DashboardCodeStats }): React.JSX.Element {
+  return (
+    <div className="space-y-1.5">
+      <div className="text-[11px] font-medium text-foreground">已测量采纳率</div>
+      <div className="space-y-1 text-[11px]">
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">采纳行数</span>
+          <span className="font-medium text-foreground">{fmtExactLines(stats.adoptedLines)} 行</span>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">已测量有效生成行数</span>
+          <span className="font-medium text-foreground">{fmtExactLines(stats.effectiveGeneratedLines)} 行</span>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">已测量原始生成行数</span>
+          <span className="font-medium text-foreground">{fmtExactLines(stats.measuredGeneratedLines)} 行</span>
+        </div>
+      </div>
+      <div className="space-y-0.5 text-[10px] text-muted-foreground">
+        <div>采纳率 = 采纳行数 / 已测量有效生成行数。</div>
+        <div>已测量有效生成行数已剔除被 agent 自己改写的中间稿部分。</div>
       </div>
     </div>
   )
@@ -207,7 +234,7 @@ function SkillCodeStatsBar({ stats }: { stats: DashboardCodeStats | null }): Rea
           </div>
         </div>
       </div>
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-4 gap-3">
         <SkillCodeStat
           icon={Code2}
           label="生成行数"
@@ -221,14 +248,25 @@ function SkillCodeStatsBar({ stats }: { stats: DashboardCodeStats | null }): Rea
         />
         <SkillCodeStat
           icon={Gauge}
-          label="采纳率"
-          value={fmtPercent(stats.adoptionRate)}
+          label="含未提交采纳率"
+          value={fmtPercent(stats.inclusiveAdoptionRate)}
           sub={
-            stats.adoptionRate === null
+            stats.inclusiveAdoptionRate === null
               ? "暂无代码生成数据"
+              : `${fmtLines(stats.adoptedLines)} / ${fmtLines(stats.inclusiveEffectiveGeneratedLines)} 行`
+          }
+          tooltipContent={<InclusiveAdoptionTooltip stats={stats} />}
+        />
+        <SkillCodeStat
+          icon={Gauge}
+          label="已测量采纳率"
+          value={fmtPercent(stats.measuredAdoptionRate)}
+          sub={
+            stats.measuredAdoptionRate === null
+              ? "暂无测量数据"
               : `${fmtLines(stats.adoptedLines)} / ${fmtLines(stats.effectiveGeneratedLines)} 行`
           }
-          tooltipContent={<AdoptionDetailTooltip stats={stats} />}
+          tooltipContent={<MeasuredAdoptionTooltip stats={stats} />}
         />
       </div>
     </section>
