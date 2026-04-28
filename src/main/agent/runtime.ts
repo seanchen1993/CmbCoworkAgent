@@ -83,6 +83,7 @@ import { createLspTool } from "./tools/lsp-tool"
 import { detectJavaProject } from "../lsp"
 import {
   DEFAULT_AGENTS_MAX_BYTES,
+  DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
   loadAgentsPromptForWorkspace
 } from "./agents-md"
 
@@ -1207,15 +1208,18 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     truncated: false
   }
   if (enableAgentsPrompt) {
-    agentsPrompt = await loadAgentsPromptForWorkspace(workspacePath, DEFAULT_AGENTS_MAX_BYTES)
+    agentsPrompt = await loadAgentsPromptForWorkspace(workspacePath, {
+      globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
+      projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
+    })
     if (agentsPrompt.prompt) {
       systemPrompt += "\n\n" + agentsPrompt.prompt
       console.log("[Runtime] Loaded AGENTS.md files:", agentsPrompt.loadedPaths)
       if (agentsPrompt.truncated) {
-        console.warn(
-          "[Runtime] AGENTS.md content exceeded prompt budget and was truncated:",
-          DEFAULT_AGENTS_MAX_BYTES
-        )
+        console.warn("[Runtime] AGENTS.md content exceeded prompt budget and was truncated:", {
+          globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
+          projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
+        })
       }
     } else {
       console.log("[Runtime] No AGENTS.md files discovered for workspace:", workspacePath)
