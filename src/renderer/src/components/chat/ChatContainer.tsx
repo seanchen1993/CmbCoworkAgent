@@ -50,6 +50,7 @@ import {
 } from "@/lib/thread-context"
 import { ModelSwitcher } from "./ModelSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
+import { AutoCommitControl } from "./AutoCommitControl"
 import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
 import type { Message, SkillMetadata } from "@/types"
@@ -2887,6 +2888,8 @@ export function ChatContainer({
                       threadId={threadId}
                       onGitStatusChange={onThreadGitStatusChange}
                     />
+                    <div className="w-px h-4 bg-border mx-1" />
+                    <AutoCommitControl />
                   </div>
                   <div className="flex items-center gap-2">
                     {isLoading ? (

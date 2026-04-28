@@ -363,37 +363,31 @@ function buildCommitMessage(
   userPrompt: string | undefined,
   candidateFiles: string[]
 ): { message?: string; reason?: string } {
+  const cardNumber = settings.cardNumber?.trim()
+  if (!cardNumber) {
+    return { reason: "自动提交缺少卡片编号，请先在设置中填写卡片编号" }
+  }
+
   const summary = cleanSummary(userPrompt)
   const diffSummary = buildDiffSummary(candidateFiles)
+  let messageSummary = summary
   if (settings.messageStrategy === "template") {
     const template = settings.template?.trim()
     if (!template) {
       return { reason: "自动提交模板为空，已跳过提交" }
     }
-    return {
-      message: template
-        .replaceAll("{threadId}", threadId)
-        .replaceAll("{threadShort}", threadId.slice(0, 8))
-        .replaceAll("{summary}", summary)
-        .replaceAll("{diffSummary}", diffSummary)
-        .replaceAll("{fileCount}", String(candidateFiles.length))
-        .replaceAll("{files}", candidateFiles.join(", "))
-    }
+    messageSummary = template
+      .replaceAll("{threadId}", threadId)
+      .replaceAll("{threadShort}", threadId.slice(0, 8))
+      .replaceAll("{summary}", summary)
+      .replaceAll("{diffSummary}", diffSummary)
+      .replaceAll("{fileCount}", String(candidateFiles.length))
+      .replaceAll("{files}", candidateFiles.join(", "))
+  } else if (settings.messageStrategy === "diff") {
+    messageSummary = diffSummary
   }
 
-  if (settings.messageStrategy === "prompt") {
-    return { message: `fix: ${summary}` }
-  }
-
-  if (settings.messageStrategy === "diff") {
-    return { message: `fix: ${diffSummary}` }
-  }
-
-  const cardNumber = settings.cardNumber?.trim()
-  if (!cardNumber) {
-    return { reason: "自动提交缺少卡号，请先在设置中填写 cardNumber" }
-  }
-  return { message: `${cardNumber} #comment fix:${summary} #CMBDevClaw` }
+  return { message: `${cardNumber} #comment fix:${messageSummary} #CMBDevClaw` }
 }
 
 async function getUnmergedFiles(worktreePath: string): Promise<string[]> {

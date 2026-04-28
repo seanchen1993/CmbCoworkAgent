@@ -1,7 +1,7 @@
 import type { HookConfig } from "./hooks/types"
 
 export type AgentAutoCommitMode = "off" | "ask" | "always"
-export type AgentAutoCommitMessageStrategy = "business" | "template" | "prompt" | "diff"
+export type AgentAutoCommitMessageStrategy = "template" | "prompt" | "diff"
 
 export interface AgentAutoCommitSettings {
   mode: AgentAutoCommitMode

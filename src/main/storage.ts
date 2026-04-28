@@ -289,7 +289,7 @@ const AGENT_AUTO_COMMIT_SETTINGS_FILE = join(OPENWORK_DIR, "agent-auto-commit-se
 const DEFAULT_AGENT_AUTO_COMMIT_SETTINGS: AgentAutoCommitSettings = {
   mode: "off",
   push: false,
-  messageStrategy: "business"
+  messageStrategy: "prompt"
 }
 
 function normalizeAgentAutoCommitSettings(input: unknown): AgentAutoCommitSettings {
@@ -301,11 +301,12 @@ function normalizeAgentAutoCommitSettings(input: unknown): AgentAutoCommitSettin
     raw.mode === "ask" || raw.mode === "always" || raw.mode === "off" ? raw.mode : "off"
   const messageStrategy =
     raw.messageStrategy === "template" ||
-    raw.messageStrategy === "business" ||
     raw.messageStrategy === "prompt" ||
     raw.messageStrategy === "diff"
       ? raw.messageStrategy
-      : "business"
+      : raw.messageStrategy === "business"
+        ? "prompt"
+        : "prompt"
   const cardNumber =
     typeof raw.cardNumber === "string" && raw.cardNumber.trim()
       ? raw.cardNumber.trim()
@@ -347,12 +348,8 @@ export function saveAgentAutoCommitSettings(
     ...updates,
     push: false
   })
-  if (
-    next.mode !== "off" &&
-    next.messageStrategy === "business" &&
-    !next.cardNumber?.trim()
-  ) {
-    throw new Error("开启自动提交前需要填写卡号")
+  if (next.mode !== "off" && !next.cardNumber?.trim()) {
+    throw new Error("开启自动提交前需要填写卡片编号")
   }
   writeFileSync(AGENT_AUTO_COMMIT_SETTINGS_FILE, JSON.stringify(next, null, 2))
   return next
