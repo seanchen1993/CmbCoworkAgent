@@ -14,12 +14,13 @@ import {
   ChevronRight,
   FolderOpen,
   Maximize2,
-  Minimize2
+  Minimize2, FolderPlus
 } from "lucide-react"
 import type { ChatXRobotConfig } from "@/types"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { UpdateActionButton } from "@/components/update/UpdateActionButton"
 import { useAppStore } from "@/lib/store"
 import {
   useAllStreamLoadingStates,
@@ -87,7 +88,7 @@ function ThreadStatusIcon({
   isLoading: boolean
   pendingApproval: boolean
   scheduledTaskLoading: boolean
-}): React.JSX.Element {
+}): React.JSX.Element | null {
   if (isLoading || scheduledTaskLoading) {
     return <Loader2 className="size-4 shrink-0 text-status-info animate-spin" />
   }
@@ -317,6 +318,7 @@ export function ThreadSidebar(): React.JSX.Element {
     }
   })
   const [hoveredProjectKey, setHoveredProjectKey] = useState<string | null>(null)
+  const [selectingProjectFolder, setSelectingProjectFolder] = useState(false)
 
   const persistUnread = useCallback((ids: Set<string>) => {
     localStorage.setItem("threads:unreadIds", JSON.stringify([...ids]))
@@ -476,6 +478,21 @@ export function ThreadSidebar(): React.JSX.Element {
 
   const [creatingRobot, setCreatingRobot] = useState(false)
 
+  const handleAddProject = async (): Promise<void> => {
+    if (selectingProjectFolder) return
+    setSelectingProjectFolder(true)
+    try {
+      const workspacePath = await window.api.workspace.select()
+      if (!workspacePath) return
+      await createThread({
+        title: `Thread ${new Date().toLocaleDateString()}`,
+        workspacePath
+      })
+    } finally {
+      setSelectingProjectFolder(false)
+    }
+  }
+
   const handleNewRobotThread = async (robot: ChatXRobotConfig): Promise<void> => {
     if (creatingRobot) return
     setCreatingRobot(true)
@@ -622,26 +639,41 @@ export function ThreadSidebar(): React.JSX.Element {
         )}
       </div>
 
+      <div className="flex items-center gap-2 px-4 py-1.5 text-xs font-medium text-muted-foreground">
+        <span className="min-w-0 flex-1 truncate">项目 {threadProjects.length}</span>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          className="size-6 shrink-0"
+          title={allProjectsCollapsed ? "全部展开项目" : "全部收起项目"}
+          onClick={toggleAllProjects}
+          disabled={threadProjects.length === 0}
+        >
+          {allProjectsCollapsed ? (
+            <Maximize2 className="size-3.5" />
+          ) : (
+            <Minimize2 className="size-3.5" />
+          )}
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          className="size-6 shrink-0"
+          title="新增项目"
+          onClick={handleAddProject}
+          disabled={selectingProjectFolder}
+        >
+          {selectingProjectFolder ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : (
+            <FolderPlus className="size-3.5" />
+          )}
+        </Button>
+      </div>
+
       {/* Thread List */}
       <ScrollArea className="flex-1 min-h-0">
-        <div className="p-2 space-y-1 overflow-hidden">
-          <div className="flex items-center gap-2 px-2 py-1.5 text-xs font-medium text-muted-foreground">
-            <span className="min-w-0 flex-1 truncate">项目 {threadProjects.length}</span>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              className="size-6 shrink-0"
-              title={allProjectsCollapsed ? "全部展开项目" : "全部收起项目"}
-              onClick={toggleAllProjects}
-              disabled={threadProjects.length === 0}
-            >
-              {allProjectsCollapsed ? (
-                <Maximize2 className="size-3.5" />
-              ) : (
-                <Minimize2 className="size-3.5" />
-              )}
-            </Button>
-          </div>
+        <div className="px-2 pb-2 space-y-1 overflow-hidden">
           {threadProjects.map((project) => {
             const isCollapsed = collapsedProjectKeys.has(project.key)
             const hasSelectedThread = project.threads.some(
@@ -807,6 +839,7 @@ export function ThreadSidebar(): React.JSX.Element {
           <span className="text-[9px] text-black ml-1 tabular-nums">
             {version || __APP_VERSION__}
           </span>
+          <UpdateActionButton variant="tag" hideWhenCurrent className="ml-1" />
         </div>
       </div>
     </aside>
