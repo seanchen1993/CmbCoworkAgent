@@ -20,8 +20,10 @@ import type {
   LspCallHierarchyOutgoingCall,
   LspStatus,
   ChatXConfig,
+  PluginHookMetadata,
   PluginMetadata,
-  PluginManifest
+  PluginManifest,
+  SkillHookMetadata
 } from "../main/types"
 import { UserInfoConfig } from "../main/storage"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
@@ -49,6 +51,58 @@ interface ElectronAPI {
     platform: NodeJS.Platform
     versions: NodeJS.ProcessVersions
   }
+}
+
+interface DashboardTraceNode {
+  id: string
+  type: "trace" | "llm" | "tool" | "tool_result" | "message" | "error" | "cancel"
+  parentId: string | null
+  name?: string
+  status?: "running" | "success" | "error" | "cancelled" | "unknown"
+  startedAt: string
+  endedAt?: string
+  input?: unknown
+  output?: unknown
+  metadata?: Record<string, unknown>
+}
+
+interface DashboardTraceDetail {
+  traceId: string
+  threadId: string
+  startedAt: string
+  endedAt?: string
+  durationMs: number
+  userMessage: string
+  modelId?: string
+  modelName?: string
+  outcome: string
+  totalToolCalls: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalTokens: number
+  usedSkills: string[]
+  nodes?: DashboardTraceNode[]
+  rawAvailable: boolean
+  rawError?: string
+}
+
+interface DashboardCommitDetail {
+  eventId: string
+  eventTime: string
+  userName: string
+  sapId?: string
+  ystId?: string
+  orgName?: string
+  userIp?: string
+  repoPath?: string
+  branch?: string
+  filesChanged: number
+  insertions: number
+  deletions: number
+  triggeredBy?: string
+  threadId?: string
+  usedSkills: string[]
+  skillCount: number
 }
 
 interface CustomAPI {
@@ -196,8 +250,17 @@ interface CustomAPI {
       error?: string
     }>
     clearWorktreeContext: (threadId: string) => Promise<void>
-    saveWorktreeContext: (threadId: string, gitRoot: string, branch: string, baseBranch?: string, baseCommit?: string) => Promise<void>
-    recordLlmModifiedFiles: (threadId: string, files: string[]) => Promise<{
+    saveWorktreeContext: (
+      threadId: string,
+      gitRoot: string,
+      branch: string,
+      baseBranch?: string,
+      baseCommit?: string
+    ) => Promise<void>
+    recordLlmModifiedFiles: (
+      threadId: string,
+      files: string[]
+    ) => Promise<{
       success: boolean
       files?: string[]
       error?: string
@@ -208,12 +271,40 @@ interface CustomAPI {
       isGitRepo?: boolean
       taskId: string
       files: Array<{ path: string; diff: string; additions: number; deletions: number }>
+      changedFilesTotal?: number
+      omittedFileCount?: number
       totals: { additions: number; deletions: number; fileCount: number }
       hasPendingDiff: boolean
       hasPushableCommit: boolean
       pendingCommits?: Array<{ hash: string; message: string; date: string }>
       trackedFiles?: string[]
       worktreeBranch?: string | null
+      suggestedCommitMessage?: string
+      error?: string
+    }>
+    getGitPanelMeta: (threadId: string) => Promise<{
+      success: boolean
+      isWorktree: boolean
+      isGitRepo?: boolean
+      taskId: string
+      changedFilesTotal?: number
+      hasPendingDiff: boolean
+      hasPushableCommit: boolean
+      pendingCommits?: Array<{ hash: string; message: string; date: string }>
+      trackedFiles?: string[]
+      worktreeBranch?: string | null
+      error?: string
+    }>
+    getGitPanelDiffs: (threadId: string) => Promise<{
+      success: boolean
+      isWorktree: boolean
+      isGitRepo?: boolean
+      taskId: string
+      files: Array<{ path: string; diff: string; additions: number; deletions: number }>
+      changedFilesTotal?: number
+      omittedFileCount?: number
+      totals: { additions: number; deletions: number; fileCount: number }
+      hasPendingDiff: boolean
       suggestedCommitMessage?: string
       error?: string
     }>
@@ -224,20 +315,29 @@ interface CustomAPI {
       hasPendingDiff: boolean
       changedFiles: number
     }>
-    isGit: (folderPath: string, options?: { includeWorktrees?: boolean }) => Promise<{
+    isGit: (
+      folderPath: string,
+      options?: { includeWorktrees?: boolean; threadId?: string }
+    ) => Promise<{
       isGit: boolean
       gitRoot: string | null
       worktrees: Array<{ path: string; branch: string; isMain: boolean; createdAt?: Date }>
       isWorktreePath: boolean
     }>
-    listWorktrees: (gitRoot: string) => Promise<
-      Array<{ path: string; branch: string; isMain: boolean; createdAt?: Date }>
-    >
-    removeWorktree: (gitRoot: string, worktreePath: string) => Promise<{
+    listWorktrees: (
+      gitRoot: string
+    ) => Promise<Array<{ path: string; branch: string; isMain: boolean; createdAt?: Date }>>
+    removeWorktree: (
+      gitRoot: string,
+      worktreePath: string
+    ) => Promise<{
       success: boolean
       error?: string
     }>
-    createWorktree: (gitRoot: string, branch: string) => Promise<{
+    createWorktree: (
+      gitRoot: string,
+      branch: string
+    ) => Promise<{
       success: boolean
       path?: string
       branch?: string
@@ -245,11 +345,17 @@ interface CustomAPI {
       baseCommit?: string
       error?: string
     }>
-    commitWorktree: (threadId: string, message: string) => Promise<{
+    commitWorktree: (
+      threadId: string,
+      message: string
+    ) => Promise<{
       success: boolean
       error?: string
     }>
-    pushWorktree: (threadId: string, message?: string) => Promise<{
+    pushWorktree: (
+      threadId: string,
+      message?: string
+    ) => Promise<{
       success: boolean
       autoCommitted?: boolean
       error?: string
@@ -268,7 +374,10 @@ interface CustomAPI {
       success: boolean
       error?: string
     }>
-    rejectWorktreeFile: (threadId: string, filePath: string) => Promise<{
+    rejectWorktreeFile: (
+      threadId: string,
+      filePath: string
+    ) => Promise<{
       success: boolean
       error?: string
     }>
@@ -298,7 +407,9 @@ interface CustomAPI {
   }
   skills: {
     list: () => Promise<SkillMetadata[]>
+    listPlugins: () => Promise<SkillMetadata[]>
     read: (skillPath: string) => Promise<{ success: boolean; content?: string; error?: string }>
+    write: (skillPath: string, content: string) => Promise<{ success: boolean; error?: string }>
     readBinary: (
       skillPath: string
     ) => Promise<{ success: boolean; content?: string; mimeType?: string; error?: string }>
@@ -315,6 +426,9 @@ interface CustomAPI {
       buffer: ArrayBuffer,
       fileName?: string
     ) => Promise<{ success: boolean; filePath?: string; content?: string; error?: string }>
+    exportForMarket: (
+      skillPath: string
+    ) => Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }>
     delete: (skillPath: string) => Promise<{ success: boolean; error?: string }>
   }
   mcp: {
@@ -353,27 +467,81 @@ interface CustomAPI {
     isRunning: (projectRoot: string) => Promise<boolean>
     getStatus: (projectRoot: string | null) => Promise<LspStatus>
     getDownloadTarget: () => Promise<{ name: string; filenames: string[] }>
-    getDownloadState: () => Promise<{ isDownloading: boolean; progress: { percent: number; transferred: number; total: number } | null }>
+    getDownloadState: () => Promise<{
+      isDownloading: boolean
+      progress: { percent: number; transferred: number; total: number } | null
+    }>
     downloadVsix: () => Promise<{ success: boolean; path?: string; error?: string }>
     importVsix: () => Promise<{ success: boolean; path?: string; error?: string }>
-    saveDownloadedVsix: (buffer: ArrayBuffer, fileName?: string) => Promise<{ success: boolean; path?: string; error?: string }>
-    onDownloadState: (callback: (state: { isDownloading: boolean; progress: { percent: number; transferred: number; total: number } | null }) => void) => () => void
-    definition: (params: { projectRoot: string; filePath: string; line: number; column: number }) => Promise<LspLocation[]>
-    references: (params: { projectRoot: string; filePath: string; line: number; column: number }) => Promise<LspLocation[]>
-    hover: (params: { projectRoot: string; filePath: string; line: number; column: number }) => Promise<LspHoverResult | null>
-    implementation: (params: { projectRoot: string; filePath: string; line: number; column: number }) => Promise<LspLocation[]>
+    saveDownloadedVsix: (
+      buffer: ArrayBuffer,
+      fileName?: string
+    ) => Promise<{ success: boolean; path?: string; error?: string }>
+    onDownloadState: (
+      callback: (state: {
+        isDownloading: boolean
+        progress: { percent: number; transferred: number; total: number } | null
+      }) => void
+    ) => () => void
+    definition: (params: {
+      projectRoot: string
+      filePath: string
+      line: number
+      column: number
+    }) => Promise<LspLocation[]>
+    references: (params: {
+      projectRoot: string
+      filePath: string
+      line: number
+      column: number
+    }) => Promise<LspLocation[]>
+    hover: (params: {
+      projectRoot: string
+      filePath: string
+      line: number
+      column: number
+    }) => Promise<LspHoverResult | null>
+    implementation: (params: {
+      projectRoot: string
+      filePath: string
+      line: number
+      column: number
+    }) => Promise<LspLocation[]>
     documentSymbols: (params: { projectRoot: string; filePath: string }) => Promise<LspSymbol[]>
     workspaceSymbol: (params: { projectRoot: string; query: string }) => Promise<LspSymbol[]>
     diagnostics: (params: { projectRoot: string; filePath?: string }) => Promise<LspDiagnostic[]>
-    prepareCallHierarchy: (params: { projectRoot: string; filePath: string; line: number; column: number }) => Promise<LspCallHierarchyItem[]>
-    incomingCalls: (params: { projectRoot: string; filePath: string; line: number; column: number }) => Promise<LspCallHierarchyIncomingCall[]>
-    outgoingCalls: (params: { projectRoot: string; filePath: string; line: number; column: number }) => Promise<LspCallHierarchyOutgoingCall[]>
+    prepareCallHierarchy: (params: {
+      projectRoot: string
+      filePath: string
+      line: number
+      column: number
+    }) => Promise<LspCallHierarchyItem[]>
+    incomingCalls: (params: {
+      projectRoot: string
+      filePath: string
+      line: number
+      column: number
+    }) => Promise<LspCallHierarchyIncomingCall[]>
+    outgoingCalls: (params: {
+      projectRoot: string
+      filePath: string
+      line: number
+      column: number
+    }) => Promise<LspCallHierarchyOutgoingCall[]>
     detectJavaProject: (dirPath: string) => Promise<boolean>
     onDiagnostics: (callback: (diagnostics: LspDiagnostic[]) => void) => () => void
     onChanged: (callback: () => void) => () => void
   }
   terminal: {
-    create: (opts: { workDir?: string; args?: string[]; cols?: number; rows?: number; claudeModelId?: string; syncSkills?: boolean; syncMemory?: boolean }) => Promise<string>
+    create: (opts: {
+      workDir?: string
+      args?: string[]
+      cols?: number
+      rows?: number
+      claudeModelId?: string
+      syncSkills?: boolean
+      syncMemory?: boolean
+    }) => Promise<string>
     write: (id: string, data: string) => void
     resize: (id: string, cols: number, rows: number) => void
     dispose: (id: string) => Promise<void>
@@ -425,9 +593,19 @@ interface CustomAPI {
     installFromDir: () => Promise<{ success: boolean; pluginName?: string; error?: string }>
     delete: (id: string) => Promise<{ success: boolean; error?: string }>
     setEnabled: (id: string, enabled: boolean) => Promise<void>
-    getDetail: (
-      id: string
-    ) => Promise<{ skills: string[]; mcpServers: string[]; manifest: PluginManifest | null }>
+    getDetail: (id: string) => Promise<{
+      skills: string[]
+      mcpServers: string[]
+      hookCount: number
+      hooks: PluginHookMetadata[]
+      manifest: PluginManifest | null
+    }>
+    listHooks: () => Promise<PluginHookMetadata[]>
+    setHookEnabled: (
+      pluginId: string,
+      hookId: string,
+      enabled: boolean
+    ) => Promise<{ success: boolean; error?: string }>
   }
   chatx: {
     getConfig: () => Promise<ChatXConfig>
@@ -657,17 +835,34 @@ interface CustomAPI {
   }
   hooks: {
     list: () => Promise<HookConfig[]>
+    skills: {
+      list: () => Promise<SkillHookMetadata[]>
+    }
     create: (config: HookUpsert) => Promise<{ id: string }>
     update: (config: HookUpsert & { id: string }) => Promise<{ id: string }>
     delete: (id: string) => Promise<void>
     setEnabled: (id: string, enabled: boolean) => Promise<void>
+    workspace: {
+      list: (workspacePath: string) => Promise<HookConfig[]>
+      untrusted: (
+        workspacePath: string
+      ) => Promise<{ fileName: string; filePath: string; event: string; command: string }[]>
+      trustAll: (workspacePath: string) => Promise<void>
+      trustFile: (workspacePath: string, fileName: string, filePath: string) => Promise<void>
+      onChanged: (
+        callback: (data: { threadId: string; workspacePath: string }) => void
+      ) => () => void
+    }
   }
   codeExecTools: {
     list: () => Promise<ManagedSavedCodeExecTool[]>
     getSettings: () => Promise<{ codeExecEnabled: boolean }>
     setCodeExecEnabled: (enabled: boolean) => Promise<void>
     setEnabled: (id: string, enabled: boolean) => Promise<ManagedSavedCodeExecTool>
-    setLastPreviewParams: (id: string, params: Record<string, unknown>) => Promise<ManagedSavedCodeExecTool>
+    setLastPreviewParams: (
+      id: string,
+      params: Record<string, unknown>
+    ) => Promise<ManagedSavedCodeExecTool>
     update: (payload: SavedCodeExecToolUpdatePayload) => Promise<ManagedSavedCodeExecTool>
     delete: (id: string) => Promise<void>
     runPreview: (payload: SavedCodeExecPreviewPayload) => Promise<SavedCodeExecPreviewResult>
@@ -688,7 +883,22 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     userStats: (
       range: { from: string; to: string },
-      granularity: "day" | "week" | "month" | "custom"
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | null }
+    ) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    skillUsageSummary: (
+      range: { from: string; to: string },
+      granularity: "day" | "week" | "month" | "custom",
+      // 可选：指定技能名后，后端按技能名聚合返回用户数。
+      skillNames?: string[]
+    ) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    skillUserStats: (
+      range: { from: string; to: string },
+      granularity: "day" | "week" | "month" | "custom",
+      skillName: string
+    ) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    userProfiles: (
+      sapIds: string[]
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     productivity: (
       range: { from: string; to: string },
@@ -698,6 +908,19 @@ interface CustomAPI {
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom"
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    skillRecentTraces: (
+      skill: string,
+      range: { from: string; to: string },
+      limit?: number
+    ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
+    commitDetails: (
+      range: { from: string; to: string },
+      limit?: number
+    ) => Promise<{
+      success: boolean
+      data?: { total: number; items: DashboardCommitDetail[] }
+      error?: string
+    }>
     exportExcel: (
       sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>
     ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
@@ -706,23 +929,23 @@ interface CustomAPI {
     check: () => Promise<
       | { hasUpdate: false }
       | {
-        hasUpdate: true
-        version: string
-        updateType: string
-        releaseNotes: string
-        size: number
-        mandatory: boolean
-        currentStatus?: string
-        currentProgress?: {
-          percent: number
-          transferred: number
-          total: number
-          speed: string
-          phase: "downloading" | "verifying" | "extracting"
-          message: string
-        } | null
-        currentError?: string | null
-      }
+          hasUpdate: true
+          version: string
+          updateType: string
+          releaseNotes: string
+          size: number
+          mandatory: boolean
+          currentStatus?: string
+          currentProgress?: {
+            percent: number
+            transferred: number
+            total: number
+            speed: string
+            phase: "downloading" | "verifying" | "extracting"
+            message: string
+          } | null
+          currentError?: string | null
+        }
     >
     download: () => Promise<{ success: boolean }>
     install: () => Promise<void>
@@ -730,7 +953,13 @@ interface CustomAPI {
     rollback: () => Promise<void>
     getStatus: () => Promise<{
       status: string
-      update: { version: string; updateType: string; releaseNotes: string; size: number; mandatory: boolean } | null
+      update: {
+        version: string
+        updateType: string
+        releaseNotes: string
+        size: number
+        mandatory: boolean
+      } | null
       progress: {
         percent: number
         transferred: number
@@ -743,21 +972,44 @@ interface CustomAPI {
       canRollback: boolean
     }>
     getStartupResult: () => Promise<{ updatedFrom?: string; updatedTo?: string }>
-    onAvailable: (callback: (info: { version: string; updateType: string; releaseNotes: string; size: number; mandatory: boolean; autoDownloading?: boolean }) => void) => () => void
-    onProgress: (callback: (progress: {
-      percent: number
-      transferred: number
-      total: number
-      speed: string
-      phase: "downloading" | "verifying" | "extracting"
-      message: string
-    }) => void) => () => void
-    onDownloaded: (callback: (info: { version: string; updateType: string; releaseNotes?: string; size?: number; mandatory?: boolean }) => void) => () => void
+    onAvailable: (
+      callback: (info: {
+        version: string
+        updateType: string
+        releaseNotes: string
+        size: number
+        mandatory: boolean
+        autoDownloading?: boolean
+      }) => void
+    ) => () => void
+    onProgress: (
+      callback: (progress: {
+        percent: number
+        transferred: number
+        total: number
+        speed: string
+        phase: "downloading" | "verifying" | "extracting"
+        message: string
+      }) => void
+    ) => () => void
+    onDownloaded: (
+      callback: (info: {
+        version: string
+        updateType: string
+        releaseNotes?: string
+        size?: number
+        mandatory?: boolean
+      }) => void
+    ) => () => void
     onError: (callback: (err: { message: string; silent?: boolean }) => void) => () => void
   }
   git: {
-    currentBranch: (cwd?: string) => Promise<{ isGitRepo: boolean; branch: string | null; isWorktree: boolean }>
-    listBranches: (cwd?: string) => Promise<{ success: boolean; branches: string[]; error?: string }>
+    currentBranch: (
+      cwd?: string
+    ) => Promise<{ isGitRepo: boolean; branch: string | null; isWorktree: boolean }>
+    listBranches: (
+      cwd?: string
+    ) => Promise<{ success: boolean; branches: string[]; error?: string }>
     switchBranch: (branch: string, cwd?: string) => Promise<{ success: boolean; error?: string }>
     createBranch: (branch: string, cwd?: string) => Promise<{ success: boolean; error?: string }>
   }

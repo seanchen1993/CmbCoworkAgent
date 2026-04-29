@@ -6,6 +6,7 @@ import {
   createSkillsMiddleware,
   createMemoryMiddleware,
   createSummarizationMiddleware,
+  GENERAL_PURPOSE_SUBAGENT,
   StateBackend
 } from "deepagents"
 import {
@@ -20,18 +21,24 @@ import {
 } from "../storage"
 
 import { ChatOpenAI } from "@langchain/openai"
-import { DynamicStructuredTool } from "@langchain/core/tools"
+import { DynamicStructuredTool, ToolInputParsingException } from "@langchain/core/tools"
 import { SqlJsSaver } from "../checkpointer/sqljs-saver"
 import { LocalSandbox } from "./local-sandbox"
+import type { HookResultCallback } from "../hooks/runner"
 import {
   createAgent,
+  createMiddleware,
+  MiddlewareError,
   ReactAgent,
   SystemMessage,
+  ToolInvocationError,
   todoListMiddleware,
   anthropicPromptCachingMiddleware,
   humanInTheLoopMiddleware
 } from "langchain"
+import { ToolMessage } from "@langchain/core/messages"
 import { Runnable } from "@langchain/core/runnables"
+import { isGraphBubbleUp } from "@langchain/langgraph"
 
 import type * as _lcTypes from "langchain"
 import type * as _lcMessages from "@langchain/core/messages"
@@ -61,6 +68,7 @@ import { createToolSearchTools } from "./tools/tool-search-tool"
 import { createCodeExecTool } from "./tools/code-exec-tool"
 import { listSavedCodeExecTools } from "../code-exec/saved-tool-store"
 import { getWindowsSandboxMode, getYoloMode, getEnabledHooks, isCodeExecEnabled, getLspConfig } from "../storage"
+import { runHooks } from "../hooks/runner"
 import { ApprovalStore } from "./approval-store"
 import { ToolOrchestrator } from "./tool-orchestrator"
 import type { ApprovalRequest, ApprovalDecision } from "../types"
@@ -75,6 +83,7 @@ import { createLspTool } from "./tools/lsp-tool"
 import { detectJavaProject } from "../lsp"
 import {
   DEFAULT_AGENTS_MAX_BYTES,
+  DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
   loadAgentsPromptForWorkspace
 } from "./agents-md"
 
@@ -121,6 +130,51 @@ export function getOrCreateApprovalStore(threadId: string): ApprovalStore {
 const BASE_PROMPT =
   "In order to complete the objective that the user asks of you, you have access to a number of standard tools."
 
+const SUMMARY_KEEP_RATIO = 0.1
+const SUMMARY_INPUT_RATIO = 0.65
+const SUMMARY_INPUT_TOKEN_CAP = 700_000
+
+const CMB_COWORK_SUMMARY_PROMPT = `Your task is to create a detailed continuation summary for an ongoing CmbCowork coding-agent conversation.
+
+The next model call will use your summary to continue the work. Write a dense, practical engineering handoff that preserves details that would be hard or costly to recover. Do not include private reasoning or analysis scratchpad.
+
+Cover these sections:
+
+1. Primary Request and Intent
+   - Capture the user's explicit requests, corrections, decisions, and current expectations.
+   - Preserve exact dates, branch names, commit hashes, model names, file paths, config values, and quoted user wording when they matter.
+
+2. Current Work State
+   - Describe what was being worked on immediately before compaction.
+   - Separate completed work, in-progress work, and remaining work.
+   - Include whether changes are committed, pushed, only in the worktree, or not yet made.
+
+3. Files and Code Sections
+   - List files inspected, modified, or created.
+   - For each important file, include the relevant symbols, constants, functions, or code paths and why they matter.
+   - Include short code snippets only when exact behavior would otherwise be ambiguous.
+
+4. Commands, Tests, and Outputs
+   - Record meaningful commands run and their results.
+   - Include test/typecheck failures, known unrelated failures, and any verification already completed.
+
+5. Technical Decisions and Constraints
+   - Capture assumptions, tradeoffs, rejected approaches, provider/model limitations, routing/summary/token-budget reasoning, and compatibility constraints.
+
+6. Errors, Fixes, and Warnings
+   - Record bugs encountered, root causes, fixes or mitigations, and anything the next model should avoid repeating.
+
+7. Pending Next Step
+   - List concrete next actions only if they directly follow from the latest user request.
+   - If the latest user request was already completed, say so and do not invent unrelated next steps.
+
+Prefer concise bullet points with high information density. Be thorough about technical state, but avoid generic narrative. If the user used Chinese, preserve Chinese wording for user-facing details and reply-context details.
+
+Conversation to summarize:
+{conversation}
+
+Summary:`
+
 function createEagerMcpTools(
   capabilityService: McpCapabilityService,
   tools: McpCapabilityTool[]
@@ -161,6 +215,9 @@ When NOT to use the task tool:
  * Aligned with official 1.8.1 except:
  *   - Accepts `summarizationTrigger` / `summarizationKeep` for explicit overrides
  *     (useful for custom models without a profile).
+ *   - Accepts a custom summarization prompt tuned for coding-agent handoffs.
+ *   - Accepts custom argument-truncation thresholds so large-context models
+ *     don't trim old edit/write tool args after a fixed 20 messages.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
@@ -183,7 +240,10 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     summarizationTrigger,
     summarizationKeep,
     toolTokenLimitBeforeEvict,
-    trimTokensToSummarize
+    trimTokensToSummarize,
+    summarizationSummaryPrompt,
+    summarizationTruncateArgsSettings,
+    subagentExtraSystemPrompt
   } = params
 
   // --- systemPrompt handling (identical to original) ---
@@ -234,14 +294,13 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     model,
     backend: filesystemBackend,
     historyPathPrefix: ".cmbdevclaw/conversation_history",
+    ...(summarizationSummaryPrompt && { summaryPrompt: summarizationSummaryPrompt }),
     ...(trimTokensToSummarize != null && { trimTokensToSummarize }),
     ...(summarizationTrigger != null && { trigger: summarizationTrigger }),
     ...(summarizationKeep != null && { keep: summarizationKeep }),
-    truncateArgsSettings: {
-      trigger: { type: "messages" as const, value: 20 },
-      keep: { type: "messages" as const, value: 20 },
-      maxLength: 1000
-    }
+    ...(summarizationTruncateArgsSettings && {
+      truncateArgsSettings: summarizationTruncateArgsSettings
+    })
   }
 
   // Create filesystem middleware and fix grep tool's misleading "Regex pattern" param description
@@ -363,15 +422,140 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     return mw
   }
 
+  // Once any wrapToolCall middleware is attached, ToolNode's
+  // defaultHandleToolErrors stops catching tool-body throws. So this
+  // middleware must convert any recoverable tool error into a ToolMessage,
+  // otherwise runs that used to just show a failed tool crash outright.
+  //
+  // Re-throw (let the run stop) only for:
+  //   - GraphBubbleUp: HITL / subgraph control flow
+  //   - AbortError: user cancellation
+  //   - programmer errors (TypeError / ReferenceError): code bugs we
+  //     want surfaced instead of silently retrying
+  //   - MiddlewareError: a sibling wrapToolCall middleware threw — its
+  //     own bug, not a tool failure
+  //
+  // Note: `task` / `task_output` errors are treated as recoverable too.
+  // deepagents throws a plain Error when the model picks an unknown
+  // subagent_type, and we want the model to see that error and retry with
+  // a valid name. A real subagent crash will also be surfaced as a
+  // ToolMessage — the model can decide whether to retry or abandon.
+  const NON_RECOVERABLE_TOOL_NAMES = new Set<string>()
+
+  const isAbortError = (error: unknown): boolean => {
+    if (!(error instanceof Error)) return false
+    return error.name === "AbortError" || (error as { code?: unknown }).code === "ABORT_ERR"
+  }
+
+  const isProgrammerError = (error: unknown): boolean =>
+    error instanceof TypeError || error instanceof ReferenceError
+
+  const describeToolError = (error: unknown): string => {
+    if (error instanceof Error) return error.message || error.name || "Error"
+    if (typeof error === "string" && error) return error
+    try {
+      return JSON.stringify(error) ?? String(error)
+    } catch {
+      return String(error)
+    }
+  }
+
+  const unwrapToolFailure = (
+    error: unknown,
+    toolName: string | undefined
+  ): { kind: "schema" | "runtime"; message: string } | null => {
+    if (isGraphBubbleUp(error) || isAbortError(error)) return null
+    if (isProgrammerError(error)) return null
+    if (MiddlewareError.isInstance(error)) return null
+
+    // ToolNode wraps schema parsing failures in ToolInvocationError.
+    // Schema errors are always recoverable — even for task/task_output,
+    // since a bad-schema call never actually runs the subagent.
+    if (error instanceof ToolInvocationError) {
+      if (error.toolError instanceof ToolInputParsingException) {
+        return { kind: "schema", message: error.toolError.message }
+      }
+      return unwrapToolFailure(error.toolError, toolName)
+    }
+
+    // Reserved: tool names that should bypass runtime-error recovery even
+    // when NON_RECOVERABLE_TOOL_NAMES is non-empty. Currently no tool is
+    // listed — task/task_output recover too, matching Claude Code's
+    // behaviour of letting the model decide whether to retry after a
+    // subagent failure.
+    if (toolName && NON_RECOVERABLE_TOOL_NAMES.has(toolName)) return null
+
+    // Any other throw from the tool body is recoverable. Including non-
+    // standard throws (plain objects, numbers) — describeToolError will
+    // serialise them — because leaving any path un-caught means ToolNode
+    // bubbles the throw and kills the run.
+    return { kind: "runtime", message: describeToolError(error) }
+  }
+
+  const toolErrorMiddleware = createMiddleware({
+    name: "toolErrorCatch",
+    wrapToolCall: async (request, handler) => {
+      try {
+        return await handler(request)
+      } catch (error) {
+        const toolName = request.toolCall?.name
+        const toolCallId = request.toolCall?.id
+
+        if ((request.runtime as { signal?: AbortSignal } | undefined)?.signal?.aborted) {
+          throw error
+        }
+
+        const recovered = unwrapToolFailure(error, toolName)
+        if (!recovered) throw error
+
+        // Without a tool_call_id we can't emit a usable ToolMessage —
+        // deepagents' patch middleware treats any ToolMessage whose id
+        // doesn't match a corresponding AIMessage.tool_calls[].id as an
+        // orphan and drops it silently, so the model would never see the
+        // error. Surfacing the original throw is the lesser evil: it
+        // crashes visibly instead of swallowing the failure.
+        if (!toolCallId) throw error
+
+        console.warn(
+          `[Runtime] Recoverable ${recovered.kind} error from tool "${toolName}" handed back to model:`,
+          recovered.message
+        )
+        return new ToolMessage({
+          content:
+            recovered.kind === "schema"
+              ? `Invalid tool arguments: ${recovered.message}\nPlease fix the arguments and try again.`
+              : `Tool execution failed: ${recovered.message}\nPlease adjust your approach and try again if appropriate.`,
+          tool_call_id: toolCallId,
+          name: toolName,
+          status: "error"
+        })
+      }
+    }
+  })
+
   // Base middleware for custom subagents (no skills — custom subagents must define their own)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const subagentMiddleware: any[] = [
     todoListMiddleware(),
     createFsMiddleware(),
+    toolErrorMiddleware,
     createSummarizationMiddleware(summarizationOptions),
     anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
     createPatchToolCallsMiddleware()
   ]
+
+  // Manual general-purpose subagent so AGENTS.md can be injected into its
+  // systemPrompt. deepagents' built-in generalPurposeAgent path offers no
+  // hook for project instructions. Spread GENERAL_PURPOSE_SUBAGENT to inherit
+  // the canonical name/description/default prompt, so future upstream tweaks
+  // propagate automatically.
+  const generalPurposeSubagent = {
+    ...GENERAL_PURPOSE_SUBAGENT,
+    systemPrompt: subagentExtraSystemPrompt
+      ? `${GENERAL_PURPOSE_SUBAGENT.systemPrompt}\n\n## Project Instructions\n\n${subagentExtraSystemPrompt}`
+      : GENERAL_PURPOSE_SUBAGENT.systemPrompt,
+    middleware: skillsMiddlewareArray
+  }
 
   return createAgent({
     model,
@@ -380,14 +564,14 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     middleware: [
       todoListMiddleware(),
       createFsMiddleware(),
+      toolErrorMiddleware,
       createSubAgentMiddleware({
         defaultModel: model,
         defaultTools: tools,
         defaultMiddleware: subagentMiddleware,
-        generalPurposeMiddleware: [...subagentMiddleware, ...skillsMiddlewareArray],
         defaultInterruptOn: null,
-        subagents: processedSubagents,
-        generalPurposeAgent: true,
+        subagents: [generalPurposeSubagent, ...processedSubagents],
+        generalPurposeAgent: false,
         systemPrompt: SEQUENTIAL_TASK_PROMPT
       } as Parameters<typeof createSubAgentMiddleware>[0]),
       createSummarizationMiddleware(summarizationOptions),
@@ -858,6 +1042,8 @@ export interface CreateAgentRuntimeOptions {
    *  on routing mode — pinned mode benefits from more retries since there is
    *  no failover fallback, while auto-routing can retry less and failover more. */
   maxRetryAttempts?: number
+  /** Callback invoked after each hook executes — used to emit results to the renderer. */
+  onHookResult?: HookResultCallback
 }
 
 // Create agent runtime with configured model and checkpointer
@@ -871,7 +1057,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     extraSystemPrompt,
     retryHooks,
     maxRetryAttempts,
-    enableAgentsPrompt = true
+    enableAgentsPrompt = true,
+    onHookResult
   } = options
 
   if (!threadId) {
@@ -942,7 +1129,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const windowsSandbox = process.platform === "win32" ? getWindowsSandboxMode() : "none"
   console.log(`[Runtime] codex.exe: ${codexExePath}, exists: ${codexExists}, sandboxMode: ${windowsSandbox}`)
 
-  const enabledHooks = getEnabledHooks()
+  const enabledHooks = getEnabledHooks(workspacePath)
   console.log(`[Runtime] Loaded ${enabledHooks.length} enabled hooks`)
 
   const backend = new LocalSandbox({
@@ -952,8 +1139,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     maxOutputBytes,
     windowsSandbox,
     codexExePath: codexExists ? codexExePath : undefined,
-    // Pass a getter so hooks are always read fresh from storage at call time
-    hooks: getEnabledHooks,
+    hooks: () => getEnabledHooks(workspacePath),
+    onHookResult,
     abortSignal: options.abortSignal,
     runId: threadId
   })
@@ -988,6 +1175,14 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         targetWebContentsIds: BrowserWindow.getAllWindows().map(w => w.webContents.id)
       })
       console.log(`[Orchestrator] sending approval request on channel: approval:request:${threadId}, reqId=${req.id}, command=${req.command}`)
+      // Fire Notification hook — agent is now waiting on user input.
+      // Fire-and-forget so it doesn't delay the UI prompt.
+      runHooks(getEnabledHooks(workspacePath), "Notification", {
+        toolName: req.tool_call?.name,
+        toolArgs: { command: req.command, reason: req.reason, filePath: req.filePath },
+        workspacePath,
+        sessionId: threadId
+      }, onHookResult).catch((e) => console.warn("[Hooks] Notification hook error:", e))
       for (const win of BrowserWindow.getAllWindows()) {
         win.webContents.send(`approval:request:${threadId}`, req)
       }
@@ -1013,15 +1208,18 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     truncated: false
   }
   if (enableAgentsPrompt) {
-    agentsPrompt = await loadAgentsPromptForWorkspace(workspacePath, DEFAULT_AGENTS_MAX_BYTES)
+    agentsPrompt = await loadAgentsPromptForWorkspace(workspacePath, {
+      globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
+      projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
+    })
     if (agentsPrompt.prompt) {
       systemPrompt += "\n\n" + agentsPrompt.prompt
       console.log("[Runtime] Loaded AGENTS.md files:", agentsPrompt.loadedPaths)
       if (agentsPrompt.truncated) {
-        console.warn(
-          "[Runtime] AGENTS.md content exceeded prompt budget and was truncated:",
-          DEFAULT_AGENTS_MAX_BYTES
-        )
+        console.warn("[Runtime] AGENTS.md content exceeded prompt budget and was truncated:", {
+          globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
+          projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
+        })
       }
     } else {
       console.log("[Runtime] No AGENTS.md files discovered for workspace:", workspacePath)
@@ -1235,9 +1433,9 @@ The workspace root is: ${workspacePath}`
     deferredToolIds: deferredToolIds.length
   })
   const triggerTokens = Math.floor(maxTokens * 0.75)
-  const keepTokens = Math.max(Math.floor(maxTokens * 0.08), 4_000)
-  const toolEvictLimit = Math.min(6_000, Math.max(Math.floor(maxTokens * 0.05), 3_000))
-  const trimForSummary = Math.min(12_000, Math.floor(maxTokens * 0.25))
+  const keepTokens = Math.max(Math.floor(maxTokens * SUMMARY_KEEP_RATIO), 4_000)
+  const toolEvictLimit = Math.min(20_000, Math.max(Math.floor(maxTokens * 0.08), 6_000))
+  const trimForSummary = Math.min(SUMMARY_INPUT_TOKEN_CAP, Math.floor(maxTokens * SUMMARY_INPUT_RATIO))
   console.log("[Runtime] Context window:", maxTokens, "→ summarization trigger:", triggerTokens, "→ keep:", keepTokens, "→ tool evict limit:", toolEvictLimit, "→ trim for summary:", trimForSummary, "→ max output bytes:", maxOutputBytes)
 
   backend.setGitWorkflowCommitOnly(false)
@@ -1250,6 +1448,7 @@ The workspace root is: ${workspacePath}`
     backend,
     systemPrompt,
     filesystemSystemPrompt,
+    subagentExtraSystemPrompt: agentsPrompt.prompt ?? undefined,
     skills: allSkillsSources.length > 0 ? allSkillsSources : undefined,
     memory: memorySources?.length ? memorySources : undefined,
     // When the orchestrator is active (non-YOLO), it handles execute approval
@@ -1259,7 +1458,13 @@ The workspace root is: ${workspacePath}`
     summarizationTrigger: { type: "tokens", value: triggerTokens },
     summarizationKeep: { type: "tokens", value: keepTokens },
     toolTokenLimitBeforeEvict: toolEvictLimit,
-    trimTokensToSummarize: trimForSummary
+    trimTokensToSummarize: trimForSummary,
+    summarizationSummaryPrompt: CMB_COWORK_SUMMARY_PROMPT,
+    summarizationTruncateArgsSettings: {
+      trigger: { type: "tokens", value: triggerTokens },
+      keep: { type: "tokens", value: keepTokens },
+      maxLength: 2000
+    }
   })
 
   console.log("[Runtime] Agent created with skills parameter:", allSkillsSources.length > 0 ? allSkillsSources : undefined)

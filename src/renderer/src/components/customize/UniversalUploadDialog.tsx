@@ -11,11 +11,13 @@ import {
   DialogFooter
 } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
+import { DEFAULT_SCENE_CATEGORY, SCENE_CATEGORY_OPTIONS } from "@/lib/skill-data-service"
 
 interface UserInfoLite {
   sapId?: string
   ystId?: string
   userName?: string
+  orgName?: string
 }
 
 interface UniversalUploadDialogProps {
@@ -51,7 +53,7 @@ export function UniversalUploadDialog({
   const [file, setFile] = useState<File | null>(null)
   const [name, setName] = useState("")
   const [description, setDescription] = useState("")
-  const [category, setCategory] = useState<"研发场景" | "通用场景">("研发场景")
+  const [category, setCategory] = useState<string>(DEFAULT_SCENE_CATEGORY)
   const [guidance, setGuidance] = useState("")
   const [chineseName, setChineseName] = useState("")
   const [userId, setUserId] = useState<string | undefined>(undefined)
@@ -59,12 +61,11 @@ export function UniversalUploadDialog({
 
   const buildUserIdFromUserInfo = (userInfo: UserInfoLite | null): string | undefined => {
     if (!userInfo) return undefined
-    const rawId = (userInfo.ystId || userInfo.sapId || "").trim()
+    const rawId = (userInfo.sapId || userInfo.ystId || "").trim()
     const rawName = (userInfo.userName || "").trim()
-    if (rawId && rawName) return `${rawId} / ${rawName}`
-    if (rawId) return rawId
-    if (rawName) return rawName
-    return undefined
+    const rawOrgName = (userInfo.orgName || "").trim()
+    const segments = [rawId, rawName, rawOrgName].filter(Boolean)
+    return segments.length > 0 ? segments.join(" / ") : undefined
   }
 
   const loadCurrentUserId = async () => {
@@ -82,7 +83,7 @@ export function UniversalUploadDialog({
     if (isUpdate && existingItem && open) {
       setName(existingItem.name || "")
       setDescription(existingItem.description || "")
-      setCategory(existingItem.category as "研发场景" | "通用场景" || "研发场景")
+      setCategory(existingItem.category || DEFAULT_SCENE_CATEGORY)
       setGuidance(existingItem.guidance || "")
       setChineseName(existingItem.chinese_name || "")
       setNameFromFile(false)
@@ -90,7 +91,7 @@ export function UniversalUploadDialog({
       // Reset form for new upload
       setName("")
       setDescription("")
-      setCategory("研发场景")
+      setCategory(DEFAULT_SCENE_CATEGORY)
       setGuidance("")
       setChineseName("")
       setNameFromFile(false)
@@ -445,12 +446,19 @@ export function UniversalUploadDialog({
             <select
               id="category"
               value={category}
-              onChange={(e) => setCategory(e.target.value as "研发场景" | "通用场景")}
+              onChange={(e) => setCategory(e.target.value)}
               disabled={uploading}
               className="w-full p-2 text-sm border rounded-md focus:ring-1 focus:ring-primary focus:outline-none disabled:opacity-50"
             >
-              <option value="研发场景">研发场景</option>
-              <option value="通用场景">通用场景</option>
+              {category &&
+                !SCENE_CATEGORY_OPTIONS.includes(
+                  category as (typeof SCENE_CATEGORY_OPTIONS)[number]
+                ) && <option value={category}>{category}</option>}
+              {SCENE_CATEGORY_OPTIONS.map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
             </select>
           </div>
 

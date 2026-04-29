@@ -48,13 +48,68 @@ export interface UserStatsData {
     orgName: string
     count: number
   }>
-  byOrg: Array<{ org: string; count: number }>
+  byOrg: Array<{ key: string; org: string; count: number }>
   byVersion: Array<{ version: string; count: number }>
   userTrend: Array<{ time: string; users: number }>
+  selectedUpperOrgLv1: string | null
+}
+
+type ParsedTopUser = UserStatsData["topUsers"][number]
+
+export interface DashboardTraceNode {
+  id: string
+  type: "trace" | "llm" | "tool" | "tool_result" | "message" | "error" | "cancel"
+  parentId: string | null
+  name?: string
+  status?: "running" | "success" | "error" | "cancelled" | "unknown"
+  startedAt: string
+  endedAt?: string
+  input?: unknown
+  output?: unknown
+  metadata?: Record<string, unknown>
+}
+
+export interface DashboardTraceDetail {
+  traceId: string
+  threadId: string
+  startedAt: string
+  endedAt?: string
+  durationMs: number
+  userMessage: string
+  modelId?: string
+  modelName?: string
+  outcome: string
+  totalToolCalls: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalTokens: number
+  usedSkills: string[]
+  nodes?: DashboardTraceNode[]
+  rawAvailable: boolean
+  rawError?: string
+}
+
+export interface DashboardCommitDetail {
+  eventId: string
+  eventTime: string
+  userName: string
+  sapId?: string
+  ystId?: string
+  orgName?: string
+  userIp?: string
+  repoPath?: string
+  branch?: string
+  filesChanged: number
+  insertions: number
+  deletions: number
+  triggeredBy?: string
+  threadId?: string
+  usedSkills: string[]
+  skillCount: number
 }
 
 export interface ProductivityData {
-  commitTrend: Array<{ time: string; count: number }>
+  commitTrend: Array<{ time: string; count: number; from: string; to: string }>
   totalInsertions: number
   totalDeletions: number
   totalFilesChanged: number
@@ -206,6 +261,36 @@ function formatTrendTime(isoStr: string, granularity: Granularity): string {
   return `${mm}-${dd} ${hh}:${min}`
 }
 
+function getTrendBucketInterval(granularity: Granularity, range: TimeRange): "hour" | "day" | "week" {
+  if (granularity === "day") return "hour"
+  if (granularity === "custom") {
+    const diffMs = new Date(range.to).getTime() - new Date(range.from).getTime()
+    const diffDays = diffMs / (1000 * 60 * 60 * 24)
+    if (diffDays <= 1) return "hour"
+    if (diffDays <= 14) return "day"
+    return "week"
+  }
+  return "day"
+}
+
+function getTrendBucketRange(bucketIso: string, granularity: Granularity, range: TimeRange): TimeRange {
+  const interval = getTrendBucketInterval(granularity, range)
+  const bucketStart = new Date(bucketIso).getTime()
+  const rangeFrom = new Date(range.from).getTime()
+  const rangeTo = new Date(range.to).getTime()
+  const durationMs = interval === "hour"
+    ? 60 * 60 * 1000
+    : interval === "day"
+      ? 24 * 60 * 60 * 1000
+      : 7 * 24 * 60 * 60 * 1000
+  const from = Math.max(bucketStart, rangeFrom)
+  const to = Math.min(bucketStart + durationMs - 1, rangeTo)
+  return {
+    from: new Date(from).toISOString(),
+    to: new Date(to).toISOString()
+  }
+}
+
 function parseOverview(raw: any, granularity: Granularity): OverviewData {
   const aggs = raw?.aggregations ?? {}
   const totalCalls = aggs.total_calls?.value ?? 0
@@ -265,18 +350,33 @@ function parseModelStats(raw: any): ModelStatsData {
   return { byModel, byTier, byLayer }
 }
 
-function parseUserStats(raw: any): UserStatsData {
+function formatTopUserOrgName(orgName: string, upperOrgLv1: string): string {
+  const normalizedOrgName = orgName.trim()
+  const normalizedUpperOrgLv1 = upperOrgLv1.trim()
+  if (!normalizedUpperOrgLv1) return normalizedOrgName
+  if (!normalizedOrgName) return normalizedUpperOrgLv1
+  return `${normalizedUpperOrgLv1}/${normalizedOrgName}`
+}
+
+function parseUserStats(raw: any, selectedUpperOrgLv1: string | null): UserStatsData {
   const aggs = raw?.aggregations ?? {}
+  const byOrgBuckets = Array.isArray(aggs.by_org?.buckets)
+    ? aggs.by_org.buckets
+    : (aggs.by_org?.items?.buckets ?? [])
 
   const topUsers: UserStatsData["topUsers"] = (aggs.top_users?.buckets ?? []).map((b: any) => ({
     sapId: b.key,
     userName: b.user_name?.buckets?.[0]?.key ?? b.key,
-    orgName: b.org_name?.buckets?.[0]?.key ?? "",
+    orgName: formatTopUserOrgName(
+      String(b.org_name?.buckets?.[0]?.key ?? ""),
+      String(b.upper_org_lv1?.buckets?.[0]?.key ?? "")
+    ),
     count: b.doc_count
   }))
 
-  const byOrg: UserStatsData["byOrg"] = (aggs.by_org?.buckets ?? []).map((b: any) => ({
-    org: b.key || "未知",
+  const byOrg: UserStatsData["byOrg"] = byOrgBuckets.map((b: any) => ({
+    key: String(b.key ?? ""),
+    org: String(b.key ?? "") || "未知",
     count: b.doc_count
   }))
 
@@ -290,19 +390,35 @@ function parseUserStats(raw: any): UserStatsData {
     users: b.users?.value ?? 0
   }))
 
-  return { topUsers, byOrg, byVersion, userTrend }
+  return { topUsers, byOrg, byVersion, userTrend, selectedUpperOrgLv1 }
 }
 
-function parseProductivity(raw: any, granularity: Granularity): ProductivityData {
+export function parseTopUsersFromAgg(raw: any): ParsedTopUser[] {
+  const aggs = raw?.aggregations ?? {}
+  return (aggs.top_users?.buckets ?? []).map((b: any) => ({
+    sapId: b.key,
+    userName: b.user_name?.buckets?.[0]?.key ?? b.key,
+    orgName: b.org_name?.buckets?.[0]?.key ?? "",
+    count: b.doc_count
+  }))
+}
+
+function parseProductivity(raw: any, granularity: Granularity, range: TimeRange): ProductivityData {
   const aggs = raw?.aggregations ?? {}
   const totalCommits = aggs.total_commits?.value ?? 0
   const activeUsers = aggs.active_users?.value ?? 0
 
   return {
-    commitTrend: (aggs.commit_trend?.buckets ?? []).map((b: any) => ({
-      time: formatTrendTime(b.key_as_string ?? new Date(b.key).toISOString(), granularity),
-      count: b.doc_count
-    })),
+    commitTrend: (aggs.commit_trend?.buckets ?? []).map((b: any) => {
+      const iso = b.key_as_string ?? new Date(b.key).toISOString()
+      const bucketRange = getTrendBucketRange(iso, granularity, range)
+      return {
+        time: formatTrendTime(iso, granularity),
+        count: b.doc_count,
+        from: bucketRange.from,
+        to: bucketRange.to
+      }
+    }),
     totalInsertions: aggs.total_insertions?.value ?? 0,
     totalDeletions: aggs.total_deletions?.value ?? 0,
     totalFilesChanged: aggs.total_files_changed?.value ?? 0,
@@ -396,7 +512,9 @@ function parseFeedback(raw: any, granularity: Granularity): FeedbackData {
 export function useDashboard() {
   const [granularity, setGranularity] = useState<Granularity>("day")
   const [range, setRange] = useState<TimeRange>(() => getDefaultRange("day"))
+  const [selectedUpperOrgLv1, setSelectedUpperOrgLv1] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const [userStatsLoading, setUserStatsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const [overview, setOverview] = useState<OverviewData | null>(null)
@@ -406,9 +524,11 @@ export function useDashboard() {
   const [feedback, setFeedback] = useState<FeedbackData | null>(null)
 
   const fetchIdRef = useRef(0)
+  const userStatsFetchIdRef = useRef(0)
 
-  const fetchAll = useCallback(async (r: TimeRange, g: Granularity) => {
+  const fetchAll = useCallback(async (r: TimeRange, g: Granularity, orgLv1: string | null) => {
     const id = ++fetchIdRef.current
+    const userStatsId = ++userStatsFetchIdRef.current
     setLoading(true)
     setError(null)
 
@@ -416,7 +536,7 @@ export function useDashboard() {
       const [ovRes, msRes, usRes, prRes, fbRes] = await Promise.all([
         window.api.dashboard.overview(r, g),
         window.api.dashboard.modelStats(r, g),
-        window.api.dashboard.userStats(r, g),
+        window.api.dashboard.userStats(r, g, { upperOrgLv1: orgLv1 }),
         window.api.dashboard.productivity(r, g),
         window.api.dashboard.feedback(r, g)
       ])
@@ -432,8 +552,10 @@ export function useDashboard() {
 
       setOverview(parseOverview(ovRes.data, g))
       setModelStats(parseModelStats(msRes.data))
-      setUserStats(parseUserStats(usRes.data))
-      setProductivity(parseProductivity(prRes.data, g))
+      setProductivity(parseProductivity(prRes.data, g, r))
+      if (userStatsId === userStatsFetchIdRef.current) {
+        setUserStats(parseUserStats(usRes.data, orgLv1))
+      }
       setFeedback(parseFeedback(fbRes.data, g))
     } catch (e) {
       if (id !== fetchIdRef.current) return
@@ -443,9 +565,27 @@ export function useDashboard() {
     }
   }, [])
 
+  const fetchUserStatsOnly = useCallback(async (r: TimeRange, g: Granularity, orgLv1: string | null) => {
+    const id = ++userStatsFetchIdRef.current
+    setUserStatsLoading(true)
+    setError(null)
+
+    try {
+      const result = await window.api.dashboard.userStats(r, g, { upperOrgLv1: orgLv1 })
+      if (id !== userStatsFetchIdRef.current) return
+      if (!result.success) throw new Error(result.error ?? "获取用户数据失败")
+      setUserStats(parseUserStats(result.data, orgLv1))
+    } catch (e) {
+      if (id !== userStatsFetchIdRef.current) return
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      if (id === userStatsFetchIdRef.current) setUserStatsLoading(false)
+    }
+  }, [])
+
   // Auto-fetch on range/granularity change
   useEffect(() => {
-    fetchAll(range, granularity)
+    fetchAll(range, granularity, selectedUpperOrgLv1)
   }, [range, granularity, fetchAll])
 
   const changeGranularity = useCallback((g: Granularity) => {
@@ -469,13 +609,25 @@ export function useDashboard() {
   }, [])
 
   const refresh = useCallback(() => {
-    fetchAll(range, granularity)
-  }, [fetchAll, range, granularity])
+    fetchAll(range, granularity, selectedUpperOrgLv1)
+  }, [fetchAll, range, granularity, selectedUpperOrgLv1])
+
+  const drillDownUserOrg = useCallback((orgLv1: string) => {
+    setSelectedUpperOrgLv1(orgLv1)
+    fetchUserStatsOnly(range, granularity, orgLv1)
+  }, [fetchUserStatsOnly, range, granularity])
+
+  const resetUserOrgDrilldown = useCallback(() => {
+    setSelectedUpperOrgLv1(null)
+    fetchUserStatsOnly(range, granularity, null)
+  }, [fetchUserStatsOnly, range, granularity])
 
   return {
     granularity,
     range,
+    selectedUpperOrgLv1,
     loading,
+    userStatsLoading,
     error,
     overview,
     modelStats,
@@ -486,6 +638,8 @@ export function useDashboard() {
     navigate,
     setCustomRange,
     setRange,
-    refresh
+    refresh,
+    drillDownUserOrg,
+    resetUserOrgDrilldown
   }
 }

@@ -20,8 +20,10 @@ import type {
   LspCallHierarchyIncomingCall,
   LspCallHierarchyOutgoingCall,
   LspStatus,
+  PluginHookMetadata,
   PluginMetadata,
   PluginManifest,
+  SkillHookMetadata,
   ChatXConfig
 } from "../main/types"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
@@ -378,22 +380,44 @@ const api = {
     clearWorktreeContext: (threadId: string): Promise<void> => {
       return ipcRenderer.invoke("workspace:clearWorktreeContext", threadId) as Promise<void>
     },
-    saveWorktreeContext: (threadId: string, gitRoot: string, branch: string, baseBranch?: string, baseCommit?: string): Promise<void> => {
-      return ipcRenderer.invoke("workspace:saveWorktreeContext", { threadId, gitRoot, branch, baseBranch, baseCommit }) as Promise<void>
+    saveWorktreeContext: (
+      threadId: string,
+      gitRoot: string,
+      branch: string,
+      baseBranch?: string,
+      baseCommit?: string
+    ): Promise<void> => {
+      return ipcRenderer.invoke("workspace:saveWorktreeContext", {
+        threadId,
+        gitRoot,
+        branch,
+        baseBranch,
+        baseCommit
+      }) as Promise<void>
     },
-    recordLlmModifiedFiles: (threadId: string, files: string[]): Promise<{ success: boolean; files?: string[]; error?: string }> => {
-      return ipcRenderer.invoke("workspace:recordLlmModifiedFiles", { threadId, files }) as Promise<{
+    recordLlmModifiedFiles: (
+      threadId: string,
+      files: string[]
+    ): Promise<{ success: boolean; files?: string[]; error?: string }> => {
+      return ipcRenderer.invoke("workspace:recordLlmModifiedFiles", {
+        threadId,
+        files
+      }) as Promise<{
         success: boolean
         files?: string[]
         error?: string
       }>
     },
-    getGitPanelState: (threadId: string): Promise<{
+    getGitPanelState: (
+      threadId: string
+    ): Promise<{
       success: boolean
       isWorktree: boolean
       isGitRepo?: boolean
       taskId: string
       files: Array<{ path: string; diff: string; additions: number; deletions: number }>
+      changedFilesTotal?: number
+      omittedFileCount?: number
       totals: { additions: number; deletions: number; fileCount: number }
       hasPendingDiff: boolean
       hasPushableCommit: boolean
@@ -409,6 +433,8 @@ const api = {
         isGitRepo?: boolean
         taskId: string
         files: Array<{ path: string; diff: string; additions: number; deletions: number }>
+        changedFilesTotal?: number
+        omittedFileCount?: number
         totals: { additions: number; deletions: number; fileCount: number }
         hasPendingDiff: boolean
         hasPushableCommit: boolean
@@ -419,14 +445,73 @@ const api = {
         error?: string
       }>
     },
-    getGitPanelSummary: (threadId: string): Promise<{
+    getGitPanelMeta: (
+      threadId: string
+    ): Promise<{
+      success: boolean
+      isWorktree: boolean
+      isGitRepo?: boolean
+      taskId: string
+      changedFilesTotal?: number
+      hasPendingDiff: boolean
+      hasPushableCommit: boolean
+      pendingCommits?: Array<{ hash: string; message: string; date: string }>
+      trackedFiles?: string[]
+      worktreeBranch?: string | null
+      error?: string
+    }> => {
+      return ipcRenderer.invoke("workspace:getGitPanelMeta", { threadId }) as Promise<{
+        success: boolean
+        isWorktree: boolean
+        isGitRepo?: boolean
+        taskId: string
+        changedFilesTotal?: number
+        hasPendingDiff: boolean
+        hasPushableCommit: boolean
+        pendingCommits?: Array<{ hash: string; message: string; date: string }>
+        trackedFiles?: string[]
+        worktreeBranch?: string | null
+        error?: string
+      }>
+    },
+    getGitPanelDiffs: (
+      threadId: string
+    ): Promise<{
+      success: boolean
+      isWorktree: boolean
+      isGitRepo?: boolean
+      taskId: string
+      files: Array<{ path: string; diff: string; additions: number; deletions: number }>
+      changedFilesTotal?: number
+      omittedFileCount?: number
+      totals: { additions: number; deletions: number; fileCount: number }
+      hasPendingDiff: boolean
+      suggestedCommitMessage?: string
+      error?: string
+    }> => {
+      return ipcRenderer.invoke("workspace:getGitPanelDiffs", { threadId }) as Promise<{
+        success: boolean
+        isWorktree: boolean
+        isGitRepo?: boolean
+        taskId: string
+        files: Array<{ path: string; diff: string; additions: number; deletions: number }>
+        changedFilesTotal?: number
+        omittedFileCount?: number
+        totals: { additions: number; deletions: number; fileCount: number }
+        hasPendingDiff: boolean
+        suggestedCommitMessage?: string
+        error?: string
+      }>
+    },
+    getGitPanelSummary: (
+      threadId: string
+    ): Promise<{
       success: boolean
       isWorktree: boolean
       isGitRepo?: boolean
       hasPendingDiff: boolean
       changedFiles: number
     }> => {
-      console.log("[workspace:getGitPanelSummary] invoke", { threadId })
       return ipcRenderer.invoke("workspace:getGitPanelSummary", { threadId }) as Promise<{
         success: boolean
         isWorktree: boolean
@@ -437,14 +522,18 @@ const api = {
     },
     isGit: (
       folderPath: string,
-      options?: { includeWorktrees?: boolean }
+      options?: { includeWorktrees?: boolean; threadId?: string }
     ): Promise<{
       isGit: boolean
       gitRoot: string | null
       worktrees: Array<{ path: string; branch: string; isMain: boolean; createdAt?: Date }>
       isWorktreePath: boolean
     }> => {
-      return ipcRenderer.invoke("workspace:isGit", { folderPath, includeWorktrees: options?.includeWorktrees }) as Promise<{
+      return ipcRenderer.invoke("workspace:isGit", {
+        folderPath,
+        includeWorktrees: options?.includeWorktrees,
+        threadId: options?.threadId
+      }) as Promise<{
         isGit: boolean
         gitRoot: string | null
         worktrees: Array<{ path: string; branch: string; isMain: boolean; createdAt?: Date }>
@@ -470,7 +559,14 @@ const api = {
     createWorktree: (
       gitRoot: string,
       branch: string
-    ): Promise<{ success: boolean; path?: string; branch?: string; baseBranch?: string; baseCommit?: string; error?: string }> => {
+    ): Promise<{
+      success: boolean
+      path?: string
+      branch?: string
+      baseBranch?: string
+      baseCommit?: string
+      error?: string
+    }> => {
       return ipcRenderer.invoke("workspace:createWorktree", { gitRoot, branch }) as Promise<{
         success: boolean
         path?: string
@@ -480,26 +576,42 @@ const api = {
         error?: string
       }>
     },
-    commitWorktree: (threadId: string, message: string): Promise<{ success: boolean; error?: string }> => {
+    commitWorktree: (
+      threadId: string,
+      message: string
+    ): Promise<{ success: boolean; error?: string }> => {
       return ipcRenderer.invoke("workspace:commitWorktree", { threadId, message }) as Promise<{
         success: boolean
         error?: string
       }>
     },
-    pushWorktree: (threadId: string, message?: string): Promise<{
+    pushWorktree: (
+      threadId: string,
+      message?: string
+    ): Promise<{
       success: boolean
       autoCommitted?: boolean
       error?: string
-      steps?: Array<{ step: "pull" | "commit" | "push" | "verify" | "final"; status: "ok" | "failed" | "skipped"; detail: string }>
+      steps?: Array<{
+        step: "pull" | "commit" | "push" | "verify" | "final"
+        status: "ok" | "failed" | "skipped"
+        detail: string
+      }>
     }> => {
       return ipcRenderer.invoke("workspace:pushWorktree", { threadId, message }) as Promise<{
         success: boolean
         autoCommitted?: boolean
         error?: string
-        steps?: Array<{ step: "pull" | "commit" | "push" | "verify" | "final"; status: "ok" | "failed" | "skipped"; detail: string }>
+        steps?: Array<{
+          step: "pull" | "commit" | "push" | "verify" | "final"
+          status: "ok" | "failed" | "skipped"
+          detail: string
+        }>
       }>
     },
-    pullWorktree: (threadId: string): Promise<{ success: boolean; detail?: string; error?: string }> => {
+    pullWorktree: (
+      threadId: string
+    ): Promise<{ success: boolean; detail?: string; error?: string }> => {
       return ipcRenderer.invoke("workspace:pullWorktree", { threadId }) as Promise<{
         success: boolean
         detail?: string
@@ -512,7 +624,10 @@ const api = {
         error?: string
       }>
     },
-    rejectWorktreeFile: (threadId: string, filePath: string): Promise<{ success: boolean; error?: string }> => {
+    rejectWorktreeFile: (
+      threadId: string,
+      filePath: string
+    ): Promise<{ success: boolean; error?: string }> => {
       return ipcRenderer.invoke("workspace:rejectWorktreeFile", { threadId, filePath }) as Promise<{
         success: boolean
         error?: string
@@ -564,8 +679,17 @@ const api = {
     list: (): Promise<SkillMetadata[]> => {
       return ipcRenderer.invoke("skills:list")
     },
+    listPlugins: (): Promise<SkillMetadata[]> => {
+      return ipcRenderer.invoke("skills:listPlugins")
+    },
     read: (skillPath: string): Promise<{ success: boolean; content?: string; error?: string }> => {
       return ipcRenderer.invoke("skills:read", skillPath)
+    },
+    write: (
+      skillPath: string,
+      content: string
+    ): Promise<{ success: boolean; error?: string }> => {
+      return ipcRenderer.invoke("skills:write", { skillPath, content })
     },
     readBinary: (
       skillPath: string
@@ -595,6 +719,11 @@ const api = {
     ): Promise<{ success: boolean; filePath?: string; content?: string; error?: string }> => {
       return ipcRenderer.invoke("skills:extractMarkdownFromZip", { buffer, fileName })
     },
+    exportForMarket: (
+      skillPath: string
+    ): Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }> => {
+      return ipcRenderer.invoke("skills:exportForMarket", skillPath)
+    },
     delete: (skillPath: string): Promise<{ success: boolean; error?: string }> => {
       return ipcRenderer.invoke("skills:delete", skillPath)
     }
@@ -617,8 +746,7 @@ const api = {
       ipcRenderer.invoke("mcp:testConnection", params)
   },
   lsp: {
-    getConfig: (): Promise<LspConfig> =>
-      ipcRenderer.invoke("lsp:getConfig") as Promise<LspConfig>,
+    getConfig: (): Promise<LspConfig> => ipcRenderer.invoke("lsp:getConfig") as Promise<LspConfig>,
     saveConfig: (updates: Partial<LspConfig>): Promise<void> =>
       ipcRenderer.invoke("lsp:saveConfig", updates) as Promise<void>,
     resetConfig: (): Promise<LspConfig> =>
@@ -636,18 +764,53 @@ const api = {
     getDownloadState: (): Promise<LspDownloadState> =>
       ipcRenderer.invoke("lsp:getDownloadState") as Promise<LspDownloadState>,
     downloadVsix: (): Promise<{ success: boolean; path?: string; error?: string }> =>
-      ipcRenderer.invoke("lsp:downloadVsix") as Promise<{ success: boolean; path?: string; error?: string }>,
+      ipcRenderer.invoke("lsp:downloadVsix") as Promise<{
+        success: boolean
+        path?: string
+        error?: string
+      }>,
     importVsix: (): Promise<{ success: boolean; path?: string; error?: string }> =>
-      ipcRenderer.invoke("lsp:importVsix") as Promise<{ success: boolean; path?: string; error?: string }>,
-    saveDownloadedVsix: (buffer: ArrayBuffer, fileName?: string): Promise<{ success: boolean; path?: string; error?: string }> =>
-      ipcRenderer.invoke("lsp:saveDownloadedVsix", { buffer, fileName }) as Promise<{ success: boolean; path?: string; error?: string }>,
-    definition: (params: { projectRoot: string; filePath: string; line: number; column: number }): Promise<LspLocation[]> =>
+      ipcRenderer.invoke("lsp:importVsix") as Promise<{
+        success: boolean
+        path?: string
+        error?: string
+      }>,
+    saveDownloadedVsix: (
+      buffer: ArrayBuffer,
+      fileName?: string
+    ): Promise<{ success: boolean; path?: string; error?: string }> =>
+      ipcRenderer.invoke("lsp:saveDownloadedVsix", { buffer, fileName }) as Promise<{
+        success: boolean
+        path?: string
+        error?: string
+      }>,
+    definition: (params: {
+      projectRoot: string
+      filePath: string
+      line: number
+      column: number
+    }): Promise<LspLocation[]> =>
       ipcRenderer.invoke("lsp:definition", params) as Promise<LspLocation[]>,
-    references: (params: { projectRoot: string; filePath: string; line: number; column: number }): Promise<LspLocation[]> =>
+    references: (params: {
+      projectRoot: string
+      filePath: string
+      line: number
+      column: number
+    }): Promise<LspLocation[]> =>
       ipcRenderer.invoke("lsp:references", params) as Promise<LspLocation[]>,
-    hover: (params: { projectRoot: string; filePath: string; line: number; column: number }): Promise<LspHoverResult | null> =>
+    hover: (params: {
+      projectRoot: string
+      filePath: string
+      line: number
+      column: number
+    }): Promise<LspHoverResult | null> =>
       ipcRenderer.invoke("lsp:hover", params) as Promise<LspHoverResult | null>,
-    implementation: (params: { projectRoot: string; filePath: string; line: number; column: number }): Promise<LspLocation[]> =>
+    implementation: (params: {
+      projectRoot: string
+      filePath: string
+      line: number
+      column: number
+    }): Promise<LspLocation[]> =>
       ipcRenderer.invoke("lsp:implementation", params) as Promise<LspLocation[]>,
     documentSymbols: (params: { projectRoot: string; filePath: string }): Promise<LspSymbol[]> =>
       ipcRenderer.invoke("lsp:documentSymbols", params) as Promise<LspSymbol[]>,
@@ -655,55 +818,93 @@ const api = {
       ipcRenderer.invoke("lsp:workspaceSymbol", params) as Promise<LspSymbol[]>,
     diagnostics: (params: { projectRoot: string; filePath?: string }): Promise<LspDiagnostic[]> =>
       ipcRenderer.invoke("lsp:diagnostics", params) as Promise<LspDiagnostic[]>,
-    prepareCallHierarchy: (params: { projectRoot: string; filePath: string; line: number; column: number }): Promise<LspCallHierarchyItem[]> =>
+    prepareCallHierarchy: (params: {
+      projectRoot: string
+      filePath: string
+      line: number
+      column: number
+    }): Promise<LspCallHierarchyItem[]> =>
       ipcRenderer.invoke("lsp:prepareCallHierarchy", params) as Promise<LspCallHierarchyItem[]>,
-    incomingCalls: (params: { projectRoot: string; filePath: string; line: number; column: number }): Promise<LspCallHierarchyIncomingCall[]> =>
+    incomingCalls: (params: {
+      projectRoot: string
+      filePath: string
+      line: number
+      column: number
+    }): Promise<LspCallHierarchyIncomingCall[]> =>
       ipcRenderer.invoke("lsp:incomingCalls", params) as Promise<LspCallHierarchyIncomingCall[]>,
-    outgoingCalls: (params: { projectRoot: string; filePath: string; line: number; column: number }): Promise<LspCallHierarchyOutgoingCall[]> =>
+    outgoingCalls: (params: {
+      projectRoot: string
+      filePath: string
+      line: number
+      column: number
+    }): Promise<LspCallHierarchyOutgoingCall[]> =>
       ipcRenderer.invoke("lsp:outgoingCalls", params) as Promise<LspCallHierarchyOutgoingCall[]>,
     detectJavaProject: (dirPath: string): Promise<boolean> =>
       ipcRenderer.invoke("lsp:detectJavaProject", dirPath) as Promise<boolean>,
     onDiagnostics: (callback: (diagnostics: LspDiagnostic[]) => void): (() => void) => {
-      const handler = (_: unknown, diagnostics: LspDiagnostic[]): void => { callback(diagnostics) }
+      const handler = (_: unknown, diagnostics: LspDiagnostic[]): void => {
+        callback(diagnostics)
+      }
       ipcRenderer.on("lsp:diagnostics", handler)
-      return () => { ipcRenderer.removeListener("lsp:diagnostics", handler) }
+      return () => {
+        ipcRenderer.removeListener("lsp:diagnostics", handler)
+      }
     },
     onChanged: (callback: () => void): (() => void) => {
-      const handler = (): void => { callback() }
+      const handler = (): void => {
+        callback()
+      }
       ipcRenderer.on("lsp:changed", handler)
-      return () => { ipcRenderer.removeListener("lsp:changed", handler) }
+      return () => {
+        ipcRenderer.removeListener("lsp:changed", handler)
+      }
     },
     onDownloadState: (callback: (state: LspDownloadState) => void): (() => void) => {
-      const handler = (_: unknown, state: LspDownloadState): void => { callback(state) }
+      const handler = (_: unknown, state: LspDownloadState): void => {
+        callback(state)
+      }
       ipcRenderer.on("lsp:download-state", handler)
-      return () => { ipcRenderer.removeListener("lsp:download-state", handler) }
+      return () => {
+        ipcRenderer.removeListener("lsp:download-state", handler)
+      }
     }
   },
   terminal: {
-    create: (opts: { workDir?: string; args?: string[]; cols?: number; rows?: number; claudeModelId?: string; syncSkills?: boolean; syncMemory?: boolean }): Promise<string> =>
-      ipcRenderer.invoke("terminal:create", opts),
-    write: (id: string, data: string): void =>
-      ipcRenderer.send("terminal:write", { id, data }),
+    create: (opts: {
+      workDir?: string
+      args?: string[]
+      cols?: number
+      rows?: number
+      claudeModelId?: string
+      syncSkills?: boolean
+      syncMemory?: boolean
+    }): Promise<string> => ipcRenderer.invoke("terminal:create", opts),
+    write: (id: string, data: string): void => ipcRenderer.send("terminal:write", { id, data }),
     resize: (id: string, cols: number, rows: number): void =>
       ipcRenderer.send("terminal:resize", { id, cols, rows }),
-    dispose: (id: string): Promise<void> =>
-      ipcRenderer.invoke("terminal:dispose", id),
-    selectDir: (): Promise<string | null> =>
-      ipcRenderer.invoke("terminal:selectDir"),
-    ack: (id: string, bytes: number): void =>
-      ipcRenderer.send("terminal:ack", { id, bytes }),
+    dispose: (id: string): Promise<void> => ipcRenderer.invoke("terminal:dispose", id),
+    selectDir: (): Promise<string | null> => ipcRenderer.invoke("terminal:selectDir"),
+    ack: (id: string, bytes: number): void => ipcRenderer.send("terminal:ack", { id, bytes }),
     onData: (id: string, callback: (data: string, bytes: number) => void): (() => void) => {
       const channel = `terminal:data:${id}`
-      const handler = (_: unknown, data: string, bytes: number): void => { callback(data, bytes) }
+      const handler = (_: unknown, data: string, bytes: number): void => {
+        callback(data, bytes)
+      }
       ipcRenderer.on(channel, handler)
-      return () => { ipcRenderer.removeListener(channel, handler) }
+      return () => {
+        ipcRenderer.removeListener(channel, handler)
+      }
     },
     onExit: (id: string, callback: (code: number | null) => void): (() => void) => {
       const channel = `terminal:exit:${id}`
       // code 为 null 时表示主进程因 host 通信故障/spawn 失败强制 tear-down，没有真实退出码
-      const handler = (_: unknown, code: number | null): void => { callback(code) }
+      const handler = (_: unknown, code: number | null): void => {
+        callback(code)
+      }
       ipcRenderer.on(channel, handler)
-      return () => { ipcRenderer.removeListener(channel, handler) }
+      return () => {
+        ipcRenderer.removeListener(channel, handler)
+      }
     }
   },
   keepAwake: {
@@ -931,12 +1132,32 @@ const api = {
       ipcRenderer.invoke("plugins:setEnabled", { id, enabled }) as Promise<void>,
     getDetail: (
       id: string
-    ): Promise<{ skills: string[]; mcpServers: string[]; manifest: PluginManifest | null }> =>
+    ): Promise<{
+      skills: string[]
+      mcpServers: string[]
+      hookCount: number
+      hooks: PluginHookMetadata[]
+      manifest: PluginManifest | null
+    }> =>
       ipcRenderer.invoke("plugins:getDetail", id) as Promise<{
         skills: string[]
         mcpServers: string[]
+        hookCount: number
+        hooks: PluginHookMetadata[]
         manifest: PluginManifest | null
-      }>
+      }>,
+    listHooks: (): Promise<PluginHookMetadata[]> =>
+      ipcRenderer.invoke("plugins:listHooks") as Promise<PluginHookMetadata[]>,
+    setHookEnabled: (
+      pluginId: string,
+      hookId: string,
+      enabled: boolean
+    ): Promise<{ success: boolean; error?: string }> =>
+      ipcRenderer.invoke("plugins:setHookEnabled", {
+        pluginId,
+        hookId,
+        enabled
+      }) as Promise<{ success: boolean; error?: string }>
   },
   chatx: {
     getConfig: (): Promise<ChatXConfig> =>
@@ -981,7 +1202,7 @@ const api = {
     sendApprovalDecision: (decision: {
       requestId: string
       type: string
-      tool_call_id: string,
+      tool_call_id: string
       savedToolName?: string
       savedToolDescription?: string
     }): void => {
@@ -1355,22 +1576,52 @@ const api = {
   },
   hooks: {
     list: (): Promise<HookConfig[]> => ipcRenderer.invoke("hooks:list"),
+    skills: {
+      list: (): Promise<SkillHookMetadata[]> => ipcRenderer.invoke("hooks:skills:list")
+    },
     create: (config: HookUpsert): Promise<{ id: string }> =>
       ipcRenderer.invoke("hooks:create", config),
     update: (config: HookUpsert & { id: string }): Promise<{ id: string }> =>
       ipcRenderer.invoke("hooks:update", config),
     delete: (id: string): Promise<void> => ipcRenderer.invoke("hooks:delete", id),
     setEnabled: (id: string, enabled: boolean): Promise<void> =>
-      ipcRenderer.invoke("hooks:setEnabled", { id, enabled })
+      ipcRenderer.invoke("hooks:setEnabled", { id, enabled }),
+    workspace: {
+      list: (workspacePath: string): Promise<HookConfig[]> =>
+        ipcRenderer.invoke("hooks:workspace:list", workspacePath),
+      untrusted: (
+        workspacePath: string
+      ): Promise<{ fileName: string; filePath: string; event: string; command: string }[]> =>
+        ipcRenderer.invoke("hooks:workspace:untrusted", workspacePath),
+      trustAll: (workspacePath: string): Promise<void> =>
+        ipcRenderer.invoke("hooks:workspace:trustAll", workspacePath),
+      trustFile: (workspacePath: string, fileName: string, filePath: string): Promise<void> =>
+        ipcRenderer.invoke("hooks:workspace:trustFile", { workspacePath, fileName, filePath }),
+      onChanged: (
+        callback: (data: { threadId: string; workspacePath: string }) => void
+      ): (() => void) => {
+        const handler = (_: unknown, data: { threadId: string; workspacePath: string }): void => {
+          callback(data)
+        }
+        ipcRenderer.on("hooks:workspace:changed", handler)
+        return () => {
+          ipcRenderer.removeListener("hooks:workspace:changed", handler)
+        }
+      }
+    }
   },
   codeExecTools: {
     list: (): Promise<ManagedSavedCodeExecTool[]> => ipcRenderer.invoke("codeExecTools:list"),
-    getSettings: (): Promise<{ codeExecEnabled: boolean }> => ipcRenderer.invoke("codeExecTools:getSettings"),
+    getSettings: (): Promise<{ codeExecEnabled: boolean }> =>
+      ipcRenderer.invoke("codeExecTools:getSettings"),
     setCodeExecEnabled: (enabled: boolean): Promise<void> =>
       ipcRenderer.invoke("codeExecTools:setCodeExecEnabled", enabled),
     setEnabled: (id: string, enabled: boolean): Promise<ManagedSavedCodeExecTool> =>
       ipcRenderer.invoke("codeExecTools:setEnabled", { id, enabled }),
-    setLastPreviewParams: (id: string, params: Record<string, unknown>): Promise<ManagedSavedCodeExecTool> =>
+    setLastPreviewParams: (
+      id: string,
+      params: Record<string, unknown>
+    ): Promise<ManagedSavedCodeExecTool> =>
       ipcRenderer.invoke("codeExecTools:setLastPreviewParams", { id, params }),
     update: (payload: SavedCodeExecToolUpdatePayload): Promise<ManagedSavedCodeExecTool> =>
       ipcRenderer.invoke("codeExecTools:update", payload),
@@ -1396,9 +1647,27 @@ const api = {
       ipcRenderer.invoke("dashboard:modelStats", range, granularity),
     userStats: (
       range: { from: string; to: string },
-      granularity: "day" | "week" | "month" | "custom"
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:userStats", range, granularity),
+      ipcRenderer.invoke("dashboard:userStats", range, granularity, opts),
+    skillUsageSummary: (
+      range: { from: string; to: string },
+      granularity: "day" | "week" | "month" | "custom",
+      // 可选：传入技能名列表，后端将按技能名做 filters 聚合（更精确用户数）。
+      skillNames?: string[]
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:skillUsageSummary", range, granularity, skillNames),
+    skillUserStats: (
+      range: { from: string; to: string },
+      granularity: "day" | "week" | "month" | "custom",
+      skillName: string
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:skillUserStats", range, granularity, skillName),
+    userProfiles: (
+      sapIds: string[]
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:userProfiles", sapIds),
     productivity: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom"
@@ -1409,6 +1678,17 @@ const api = {
       granularity: "day" | "week" | "month" | "custom"
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:feedback", range, granularity),
+    skillRecentTraces: (
+      skill: string,
+      range: { from: string; to: string },
+      limit?: number
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:skillRecentTraces", skill, range, limit),
+    commitDetails: (
+      range: { from: string; to: string },
+      limit?: number
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:commitDetails", range, limit),
     exportExcel: (
       sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>
     ): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> =>
@@ -1497,7 +1777,13 @@ const api = {
     rollback: (): Promise<void> => ipcRenderer.invoke("update:rollback"),
     getStatus: (): Promise<{
       status: string
-      update: { version: string; updateType: string; releaseNotes: string; size: number; mandatory: boolean } | null
+      update: {
+        version: string
+        updateType: string
+        releaseNotes: string
+        size: number
+        mandatory: boolean
+      } | null
       progress: {
         percent: number
         transferred: number
@@ -1541,7 +1827,15 @@ const api = {
       ipcRenderer.on("update:progress", wrapper)
       return () => ipcRenderer.removeListener("update:progress", wrapper)
     },
-    onDownloaded: (callback: (info: { version: string; updateType: string; releaseNotes?: string; size?: number; mandatory?: boolean }) => void) => {
+    onDownloaded: (
+      callback: (info: {
+        version: string
+        updateType: string
+        releaseNotes?: string
+        size?: number
+        mandatory?: boolean
+      }) => void
+    ) => {
       const wrapper = (_event: unknown, info: Parameters<typeof callback>[0]): void =>
         callback(info)
       ipcRenderer.on("update:downloaded", wrapper)
@@ -1554,30 +1848,28 @@ const api = {
     }
   },
   git: {
-    currentBranch: (cwd?: string): Promise<{ isGitRepo: boolean; branch: string | null; isWorktree: boolean }> =>
+    currentBranch: (
+      cwd?: string
+    ): Promise<{ isGitRepo: boolean; branch: string | null; isWorktree: boolean }> =>
       ipcRenderer.invoke("git:currentBranch", cwd) as Promise<{
         isGitRepo: boolean
         branch: string | null
         isWorktree: boolean
       }>,
-    listBranches: (cwd?: string): Promise<{ success: boolean; branches: string[]; error?: string }> =>
+    listBranches: (
+      cwd?: string
+    ): Promise<{ success: boolean; branches: string[]; error?: string }> =>
       ipcRenderer.invoke("git:listBranches", cwd) as Promise<{
         success: boolean
         branches: string[]
         error?: string
       }>,
-    switchBranch: (
-      branch: string,
-      cwd?: string
-    ): Promise<{ success: boolean; error?: string }> =>
+    switchBranch: (branch: string, cwd?: string): Promise<{ success: boolean; error?: string }> =>
       ipcRenderer.invoke("git:switchBranch", { branch, cwd }) as Promise<{
         success: boolean
         error?: string
       }>,
-    createBranch: (
-      branch: string,
-      cwd?: string
-    ): Promise<{ success: boolean; error?: string }> =>
+    createBranch: (branch: string, cwd?: string): Promise<{ success: boolean; error?: string }> =>
       ipcRenderer.invoke("git:createBranch", { branch, cwd }) as Promise<{
         success: boolean
         error?: string

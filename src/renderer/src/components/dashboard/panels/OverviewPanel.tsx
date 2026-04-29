@@ -50,11 +50,11 @@ function ToolTopPanel({ data }: { data: OverviewData }) {
   const toolList = showAll ? data.byToolAll : data.byTool
 
   return (
-    <div className="rounded-xl border border-border bg-card p-4">
-      <div className="flex items-center justify-between mb-3">
+    <div className="flex h-[340px] flex-col rounded-xl border border-border bg-card p-4">
+      <div className="mb-3 flex shrink-0 items-center justify-between">
         <div className="flex items-center gap-3">
           <h3 className="text-xs font-medium text-muted-foreground">
-            Tool 使用 Top {showAll ? toolList.length : 10}
+            Tool 使用 Top 20
           </h3>
           <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
             <span><span className="font-semibold text-foreground">{data.totalTools}</span> 种</span>
@@ -86,27 +86,29 @@ function ToolTopPanel({ data }: { data: OverviewData }) {
         </div>
       </div>
       {toolList.length === 0 ? (
-        <div className="text-xs text-muted-foreground text-center py-4">暂无数据</div>
+        <div className="flex flex-1 items-center justify-center py-4 text-center text-xs text-muted-foreground">暂无数据</div>
       ) : (
-        <div className={`space-y-1.5 ${showAll ? "max-h-[320px] overflow-y-auto pr-1" : ""}`}>
-          {toolList.map((item, i) => {
-            const max = toolList[0].count
-            const pct = max > 0 ? (item.count / max) * 100 : 0
-            return (
-              <div key={item.tool} className="flex items-center gap-2">
-                <span className="w-5 text-[10px] text-muted-foreground text-right shrink-0">{i + 1}</span>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between mb-0.5">
-                    <span className="text-xs truncate text-foreground font-mono">{item.tool}</span>
-                    <span className="text-[11px] text-muted-foreground ml-2 shrink-0">{item.count}</span>
-                  </div>
-                  <div className="h-1 rounded-full bg-muted overflow-hidden">
-                    <div className="h-full rounded-full bg-violet-500" style={{ width: `${pct}%` }} />
+        <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+          <div className="space-y-1.5">
+            {toolList.map((item, i) => {
+              const max = toolList[0].count
+              const pct = max > 0 ? (item.count / max) * 100 : 0
+              return (
+                <div key={item.tool} className="flex items-center gap-2">
+                  <span className="w-5 shrink-0 text-right text-[10px] text-muted-foreground">{i + 1}</span>
+                  <div className="min-w-0 flex-1">
+                    <div className="mb-0.5 flex items-center justify-between">
+                      <span className="truncate font-mono text-xs text-foreground">{item.tool}</span>
+                      <span className="ml-2 shrink-0 text-[11px] text-muted-foreground">{item.count}</span>
+                    </div>
+                    <div className="h-1 overflow-hidden rounded-full bg-muted">
+                      <div className="h-full rounded-full bg-violet-500" style={{ width: `${pct}%` }} />
+                    </div>
                   </div>
                 </div>
-              </div>
-            )
-          })}
+              )
+            })}
+          </div>
         </div>
       )}
     </div>
@@ -115,10 +117,12 @@ function ToolTopPanel({ data }: { data: OverviewData }) {
 
 export function OverviewPanel({
   data,
-  loading
+  loading,
+  onSkillClick
 }: {
   data: OverviewData | null
   loading: boolean
+  onSkillClick?: (skill: string) => void
 }) {
   if (loading && !data) {
     return <div className="text-sm text-muted-foreground py-8 text-center">加载中...</div>
@@ -165,10 +169,10 @@ export function OverviewPanel({
 
       {/* Skill & Tool Top rankings */}
       <div className="grid grid-cols-2 gap-3">
-        {/* Skill Top 10 */}
-        <div className="rounded-xl border border-border bg-card p-4">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-xs font-medium text-muted-foreground">Skill 使用 Top 10</h3>
+        {/* Skill Top 20 */}
+        <div className="flex h-[340px] flex-col rounded-xl border border-border bg-card p-4">
+          <div className="mb-3 flex shrink-0 items-center justify-between">
+            <h3 className="text-xs font-medium text-muted-foreground">Skill 使用 Top 20</h3>
             <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
               <span><span className="font-semibold text-foreground">{data.totalSkills}</span> 种</span>
               <span className="text-border">|</span>
@@ -176,27 +180,46 @@ export function OverviewPanel({
             </div>
           </div>
           {data.bySkill.length === 0 ? (
-            <div className="text-xs text-muted-foreground text-center py-4">暂无数据</div>
+            <div className="flex flex-1 items-center justify-center py-4 text-center text-xs text-muted-foreground">暂无数据</div>
           ) : (
-            <div className="space-y-1.5">
-              {data.bySkill.map((item, i) => {
-                const max = data.bySkill[0].count
-                const pct = max > 0 ? (item.count / max) * 100 : 0
-                return (
-                  <div key={item.skill} className="flex items-center gap-2">
-                    <span className="w-4 text-[10px] text-muted-foreground text-right">{i + 1}</span>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center justify-between mb-0.5">
-                        <span className="text-xs truncate text-foreground">{item.skill}</span>
-                        <span className="text-[11px] text-muted-foreground ml-2 shrink-0">{item.count}</span>
+            <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+              <div className="space-y-1.5">
+                {data.bySkill.map((item, i) => {
+                  const max = data.bySkill[0].count
+                  const pct = max > 0 ? (item.count / max) * 100 : 0
+                  const content = (
+                    <>
+                      <span className="w-4 text-right text-[10px] text-muted-foreground">{i + 1}</span>
+                      <div className="min-w-0 flex-1">
+                        <div className="mb-0.5 flex items-center justify-between">
+                          <span className="truncate text-xs text-foreground">{item.skill}</span>
+                          <span className="ml-2 shrink-0 text-[11px] text-muted-foreground">{item.count}</span>
+                        </div>
+                        <div className="h-1 overflow-hidden rounded-full bg-muted">
+                          <div className="h-full rounded-full bg-blue-500" style={{ width: `${pct}%` }} />
+                        </div>
                       </div>
-                      <div className="h-1 rounded-full bg-muted overflow-hidden">
-                        <div className="h-full rounded-full bg-blue-500" style={{ width: `${pct}%` }} />
-                      </div>
+                    </>
+                  )
+                  if (onSkillClick) {
+                    return (
+                      <button
+                        key={item.skill}
+                        type="button"
+                        className="flex w-full items-center gap-2 rounded-md px-1 py-0.5 text-left transition-colors hover:bg-muted/40 focus:outline-none focus:ring-2 focus:ring-ring"
+                        onClick={() => onSkillClick(item.skill)}
+                      >
+                        {content}
+                      </button>
+                    )
+                  }
+                  return (
+                    <div key={item.skill} className="flex items-center gap-2">
+                      {content}
                     </div>
-                  </div>
-                )
-              })}
+                  )
+                })}
+              </div>
             </div>
           )}
         </div>

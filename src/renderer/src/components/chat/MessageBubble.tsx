@@ -10,15 +10,32 @@ import {
   MessageFeedbackDialog,
   type DislikeFeedbackPayload
 } from "./MessageFeedbackDialog"
+import { SkillChip } from "@/features/slash-commands/skill-chip"
+import { parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
 
-function extractMessagePlainText(content: Message["content"]): string {
-  if (typeof content === "string") return content
+/**
+ * Strip the trailing `<CMBDEVCLAW-SKILL-USE-V1>…</…>` block when present.
+ * Only applied to user-authored content — assistant replies that happen to
+ * quote the tag (e.g. discussing the protocol) should copy verbatim instead
+ * of silently losing characters.
+ */
+function stripSkillUseBlock(s: string): string {
+  const parsed = parseSkillUseBlock(s)
+  return parsed ? parsed.rest : s
+}
+
+function extractMessagePlainText(
+  content: Message["content"],
+  options: { stripSkillUse?: boolean } = {}
+): string {
+  const maybeStrip = options.stripSkillUse ? stripSkillUseBlock : (s: string): string => s
+  if (typeof content === "string") return maybeStrip(content)
   if (!Array.isArray(content)) return ""
 
   return content
     .map((block) => {
-      if (block.type === "text") return block.text ?? ""
-      if (typeof block.content === "string") return block.content
+      if (block.type === "text") return maybeStrip(block.text ?? "")
+      if (typeof block.content === "string") return maybeStrip(block.content)
       return ""
     })
     .filter(Boolean)
@@ -78,6 +95,7 @@ interface MessageBubbleProps {
   onApprovalDecision?: (decision: "approve" | "approve_session" | "approve_permanent" | "reject" | "edit") => void
   onEditUserMessage?: (message: Message) => void
   threadId: string
+  isLoading: boolean
 }
 
 export function MessageBubble({
@@ -89,7 +107,8 @@ export function MessageBubble({
   pendingApproval,
   onApprovalDecision,
   onEditUserMessage,
-  threadId
+  threadId,
+  isLoading
 }: MessageBubbleProps): React.JSX.Element | null {
   const [collapsedTools, setCollapsedTools] = useState<Set<string>>(new Set())
   const [collapsedHtmlTools, setCollapsedHtmlTools] = useState<Set<string>>(new Set())
@@ -137,16 +156,24 @@ export function MessageBubble({
 
   const renderContent = (): React.ReactNode => {
     if (typeof message.content === "string") {
-      // Empty content
+      // Empty content (after potentially stripping the trailing skill-use block below)
       if (!message.content.trim()) {
         return null
       }
 
       // Use streaming markdown for assistant messages, plain text for user messages
       if (isUser) {
+        // Parse the trailing `<CMBDEVCLAW-SKILL-USE-V1>` block: chip at the top,
+        // rest of the message as plain text. Handles skill-only sends (no text)
+        // by still rendering the chip with an empty tail.
+        const skillParsed = parseSkillUseBlock(message.content)
+        const visibleText = skillParsed ? skillParsed.rest : message.content
         return (
           <div className="whitespace-pre-wrap text-[15px] leading-7 text-foreground/95">
-            {message.content}
+            {skillParsed && (
+              <SkillChip label={skillParsed.skillName} compact className="mr-2" />
+            )}
+            {visibleText}
           </div>
         )
       }
@@ -159,12 +186,17 @@ export function MessageBubble({
         if (block.type === "text" && block.text) {
           // Use streaming markdown for assistant text blocks
           if (isUser) {
+            const skillParsed = parseSkillUseBlock(block.text)
+            const visibleText = skillParsed ? skillParsed.rest : block.text
             return (
               <div
                 key={index}
                 className="whitespace-pre-wrap text-[15px] leading-7 text-foreground/95"
               >
-                {block.text}
+                {skillParsed && (
+                  <SkillChip label={skillParsed.skillName} compact className="mr-2" />
+                )}
+                {visibleText}
               </div>
             )
           }
@@ -183,7 +215,9 @@ export function MessageBubble({
 
   const content = renderContent()
   const hasToolCalls = message.tool_calls && message.tool_calls.length > 0
-  const plainTextForCopy = extractMessagePlainText(message.content)
+  // Only strip the skill-use tail from OUR user messages; assistant text that
+  // happens to quote the tag (e.g. while discussing the protocol) copies verbatim.
+  const plainTextForCopy = extractMessagePlainText(message.content, { stripSkillUse: isUser })
 
   const handleCopyMessage = async (): Promise<void> => {
     if (!plainTextForCopy.trim()) {
@@ -325,7 +359,7 @@ export function MessageBubble({
       )}
       <div className="flex-1 min-w-0 space-y-2 overflow-hidden pl-7">
         {content && <div className="rounded-lg px-3 overflow-hidden">{content}</div>}
-        {content && showAssistantMeta && (
+        {content && showAssistantMeta && !isLoading && (
           <div className="flex items-center gap-1 px-3 opacity-0 transition-opacity group-hover:opacity-100">
             {/*<span className="text-[11px] text-muted-foreground">{createdAtLabel}</span>*/}
             <button

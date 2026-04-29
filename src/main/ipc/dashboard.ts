@@ -9,6 +9,8 @@
 import { ipcMain, dialog, BrowserWindow } from "electron"
 import { getUserInfo } from "../storage"
 import * as fs from "fs"
+import { buildTraceTree } from "../agent/trace/tree-builder"
+import type { AgentTrace, TraceNode } from "../agent/trace/types"
 
 // ─────────────────────────────────────────────────────────
 // ES Configuration (from .env)
@@ -36,6 +38,14 @@ const ALLOWED_YST_IDS_RAW = (import.meta.env.VITE_DASHBOARD_ALLOWED_YST_IDS as s
 const ALLOWED_YST_IDS = new Set(
   ALLOWED_YST_IDS_RAW.split(",").map((s) => s.trim()).filter(Boolean)
 )
+
+function isDashboardAllowedForCurrentUser(): boolean {
+  if (import.meta.env.DEV) return true
+  const userInfo = getUserInfo()
+  const ystId = userInfo?.ystId?.trim()
+  if (!ystId) return false
+  return ALLOWED_YST_IDS.has(ystId)
+}
 
 // ─────────────────────────────────────────────────────────
 // ES HTTP helper
@@ -94,6 +104,61 @@ interface TimeRange {
 
 type Granularity = "day" | "week" | "month" | "custom"
 
+interface DashboardTraceDetail {
+  traceId: string
+  threadId: string
+  startedAt: string
+  endedAt?: string
+  durationMs: number
+  userMessage: string
+  modelId?: string
+  modelName?: string
+  outcome: string
+  totalToolCalls: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalTokens: number
+  usedSkills: string[]
+  nodes?: TraceNode[]
+  rawAvailable: boolean
+  rawError?: string
+}
+
+interface DashboardCommitDetail {
+  eventId: string
+  eventTime: string
+  userName: string
+  sapId?: string
+  ystId?: string
+  orgName?: string
+  userIp?: string
+  repoPath?: string
+  branch?: string
+  filesChanged: number
+  insertions: number
+  deletions: number
+  triggeredBy?: string
+  threadId?: string
+  usedSkills: string[]
+  skillCount: number
+}
+
+interface EsSearchHit {
+  _id?: string
+  _source?: Record<string, unknown>
+}
+
+interface EsSearchResponse {
+  hits?: {
+    total?: number | { value?: number }
+    hits?: EsSearchHit[]
+  }
+}
+
+interface UserStatsOptions {
+  upperOrgLv1?: string | null
+}
+
 const DISLIKE_TYPE_OPTIONS = [
   { id: "slow", label: "太慢了" },
   { id: "not_helpful", label: "内容不相关" },
@@ -119,6 +184,274 @@ function timeRangeFilter(field: string, range: TimeRange): Record<string, unknow
   return { range: { [field]: { gte: range.from, lte: range.to } } }
 }
 
+function escapeWildcard(value: string): string {
+  return value.replace(/[\\*?]/g, "\\$&")
+}
+
+/**
+ * 过滤“有有效 ystId 的记录”：
+ * - 字段存在
+ * - 且不为空字符串
+ */
+function buildNonEmptyYstIdFilter(): Record<string, unknown> {
+  return {
+    bool: {
+      must: [{ exists: { field: "ystId" } }],
+      must_not: [{ term: { ystId: "" } }]
+    }
+  }
+}
+
+/**
+ * 过滤“空用户记录”：
+ * - ystId 为空字符串
+ * - 或 ystId 字段不存在
+ */
+function buildEmptyYstIdFilter(): Record<string, unknown> {
+  return {
+    bool: {
+      should: [{ term: { ystId: "" } }, { bool: { must_not: [{ exists: { field: "ystId" } }] } }],
+      minimum_should_match: 1
+    }
+  }
+}
+
+/**
+ * 统一构建技能命中条件：
+ * 使用 wildcard 兼容 `技能名-版本` 这一类上报格式。
+ */
+function buildSkillUsageWildcardFilter(skillName: string): Record<string, unknown> {
+  const escapedSkillName = escapeWildcard(skillName)
+  const wildcardPattern = `${escapedSkillName}**`
+  return {
+    bool: {
+      should: [
+        { wildcard: { usedSkills: wildcardPattern } },
+        { wildcard: { "usedSkills.keyword": wildcardPattern } }
+      ],
+      minimum_should_match: 1
+    }
+  }
+}
+
+/**
+ * 清洗技能名参数：
+ * - 去重
+ * - 去空值
+ * - 限制最大数量，避免 filters 聚合过大
+ */
+function normalizeSkillQueryNames(skillNames?: string[]): string[] {
+  if (!Array.isArray(skillNames)) return []
+  return Array.from(
+    new Set(
+      skillNames
+        .map((name) => String(name || "").trim())
+        .filter(Boolean)
+    )
+  ).slice(0, 1000)
+}
+
+function isDashboardAllowed(): boolean {
+  if (import.meta.env.DEV) return true
+  const userInfo = getUserInfo()
+  const ystId = userInfo?.ystId?.trim()
+  if (!ystId) return false
+  return ALLOWED_YST_IDS.has(ystId)
+}
+
+function clampLimit(limit: number | undefined, fallback: number, max: number): number {
+  if (!Number.isFinite(limit)) return fallback
+  return Math.max(1, Math.min(max, Math.floor(Number(limit))))
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {}
+  return value as Record<string, unknown>
+}
+
+function asString(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value : fallback
+}
+
+function asOptionalString(value: unknown): string | undefined {
+  const text = asString(value).trim()
+  return text ? text : undefined
+}
+
+function asNumber(value: unknown, fallback = 0): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return fallback
+}
+
+function asStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value.filter((item): item is string => typeof item === "string")
+}
+
+function summarizeTraceTokenUsage(modelCalls: AgentTrace["modelCalls"]): {
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalTokens: number
+} {
+  if (!Array.isArray(modelCalls) || modelCalls.length === 0) {
+    return { totalInputTokens: 0, totalOutputTokens: 0, totalTokens: 0 }
+  }
+  return modelCalls.reduce(
+    (acc, call) => {
+      const input = call?.tokenUsage?.inputTokens ?? 0
+      const output = call?.tokenUsage?.outputTokens ?? 0
+      const total = call?.tokenUsage?.totalTokens ?? input + output
+      acc.totalInputTokens += input
+      acc.totalOutputTokens += output
+      acc.totalTokens += total
+      return acc
+    },
+    { totalInputTokens: 0, totalOutputTokens: 0, totalTokens: 0 }
+  )
+}
+
+function parseRawTrace(raw: unknown): { trace?: AgentTrace; error?: string } {
+  if (raw === undefined || raw === null) return { error: "该 trace 缺少 _raw 字段" }
+  if (typeof raw === "string") {
+    try {
+      return { trace: JSON.parse(raw) as AgentTrace }
+    } catch (e) {
+      return { error: `解析 _raw 失败：${e instanceof Error ? e.message : String(e)}` }
+    }
+  }
+  if (typeof raw === "object" && !Array.isArray(raw)) return { trace: raw as AgentTrace }
+  return { error: "_raw 字段格式不受支持" }
+}
+
+function normalizeParsedTrace(trace: AgentTrace, source: Record<string, unknown>, hit: EsSearchHit): AgentTrace {
+  const candidate = trace as Partial<AgentTrace>
+  const startedAt = candidate.startedAt || asString(source.startedAt)
+  const endedAt = candidate.endedAt || asString(source.endedAt, startedAt)
+  const outcome = asString(candidate.outcome, asString(source.outcome, "unknown"))
+  const safeOutcome = (
+    outcome === "success" || outcome === "error" || outcome === "cancelled" || outcome === "unknown"
+      ? outcome
+      : "unknown"
+  ) as AgentTrace["outcome"]
+
+  return {
+    ...trace,
+    traceId: candidate.traceId || asString(source.traceId, hit._id ?? ""),
+    threadId: candidate.threadId || asString(source.threadId),
+    startedAt,
+    endedAt,
+    durationMs: asNumber(candidate.durationMs, asNumber(source.durationMs)),
+    userMessage: candidate.userMessage || asString(source.userMessage),
+    modelId: candidate.modelId || asString(source.modelId),
+    modelName: candidate.modelName || asOptionalString(source.modelName),
+    steps: Array.isArray(candidate.steps) ? candidate.steps : [],
+    modelCalls: Array.isArray(candidate.modelCalls) ? candidate.modelCalls : undefined,
+    nodes: Array.isArray(candidate.nodes) ? candidate.nodes : undefined,
+    totalToolCalls: asNumber(candidate.totalToolCalls, asNumber(source.totalToolCalls)),
+    outcome: safeOutcome,
+    usedSkills: Array.isArray(candidate.usedSkills) ? candidate.usedSkills : asStringArray(source.usedSkills)
+  }
+}
+
+function getTotalHits(raw: EsSearchResponse, fallback: number): number {
+  const total = raw.hits?.total
+  if (typeof total === "number") return total
+  if (total && typeof total === "object" && typeof total.value === "number") return total.value
+  return fallback
+}
+
+function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
+  const source = hit._source ?? {}
+  const parsed = parseRawTrace(source._raw)
+
+  if (parsed.trace) {
+    const trace = normalizeParsedTrace(parsed.trace, source, hit)
+    const usage = summarizeTraceTokenUsage(trace.modelCalls)
+    const fallbackInputTokens = asNumber(source.totalInputTokens)
+    const fallbackOutputTokens = asNumber(source.totalOutputTokens)
+    const fallbackTotalTokens = asNumber(source.totalTokens, fallbackInputTokens + fallbackOutputTokens)
+    const totalInputTokens = usage.totalInputTokens || fallbackInputTokens
+    const totalOutputTokens = usage.totalOutputTokens || fallbackOutputTokens
+    const totalTokens = usage.totalTokens || fallbackTotalTokens || totalInputTokens + totalOutputTokens
+    let nodes: TraceNode[] | undefined
+    let rawError: string | undefined
+    try {
+      nodes = buildTraceTree(trace)
+    } catch (e) {
+      rawError = `解析 trace 树失败：${e instanceof Error ? e.message : String(e)}`
+    }
+
+    return {
+      traceId: trace.traceId || asString(source.traceId, hit._id ?? ""),
+      threadId: trace.threadId || asString(source.threadId),
+      startedAt: trace.startedAt || asString(source.startedAt),
+      endedAt: trace.endedAt || asOptionalString(source.endedAt),
+      durationMs: asNumber(trace.durationMs, asNumber(source.durationMs)),
+      userMessage: trace.userMessage || asString(source.userMessage),
+      modelId: trace.modelId || asOptionalString(source.modelId),
+      modelName: trace.modelName || asOptionalString(source.modelName),
+      outcome: trace.outcome || asString(source.outcome, "unknown"),
+      totalToolCalls: asNumber(trace.totalToolCalls, asNumber(source.totalToolCalls)),
+      totalInputTokens,
+      totalOutputTokens,
+      totalTokens,
+      usedSkills: Array.isArray(trace.usedSkills) ? trace.usedSkills : asStringArray(source.usedSkills),
+      ...(nodes ? { nodes } : {}),
+      rawAvailable: !rawError,
+      ...(rawError ? { rawError } : {})
+    }
+  }
+
+  const fallbackInputTokens = asNumber(source.totalInputTokens)
+  const fallbackOutputTokens = asNumber(source.totalOutputTokens)
+  return {
+    traceId: asString(source.traceId, hit._id ?? ""),
+    threadId: asString(source.threadId),
+    startedAt: asString(source.startedAt),
+    endedAt: asOptionalString(source.endedAt),
+    durationMs: asNumber(source.durationMs),
+    userMessage: asString(source.userMessage),
+    modelId: asOptionalString(source.modelId),
+    modelName: asOptionalString(source.modelName),
+    outcome: asString(source.outcome, "unknown"),
+    totalToolCalls: asNumber(source.totalToolCalls),
+    totalInputTokens: fallbackInputTokens,
+    totalOutputTokens: fallbackOutputTokens,
+    totalTokens: asNumber(source.totalTokens, fallbackInputTokens + fallbackOutputTokens),
+    usedSkills: asStringArray(source.usedSkills),
+    rawAvailable: false,
+    rawError: parsed.error
+  }
+}
+
+function normalizeCommitDetail(hit: EsSearchHit): DashboardCommitDetail {
+  const source = hit._source ?? {}
+  const properties = asRecord(source.properties)
+  const usedSkills = asStringArray(properties.usedSkills)
+  return {
+    eventId: asString(source.eventId, hit._id ?? ""),
+    eventTime: asString(source.eventTime),
+    userName: asString(source.userName, "unknown"),
+    sapId: asOptionalString(source.sapId),
+    ystId: asOptionalString(source.ystId),
+    orgName: asOptionalString(source.orgName),
+    userIp: asOptionalString(source.userIp),
+    repoPath: asOptionalString(properties.repoPath),
+    branch: asOptionalString(properties.branch),
+    filesChanged: asNumber(properties.filesChanged),
+    insertions: asNumber(properties.insertions),
+    deletions: asNumber(properties.deletions),
+    triggeredBy: asOptionalString(properties.triggeredBy),
+    threadId: asOptionalString(properties.threadId),
+    usedSkills,
+    skillCount: asNumber(properties.skillCount, usedSkills.length)
+  }
+}
+
 // ─────────────────────────────────────────────────────────
 // Dashboard data fetchers
 // ─────────────────────────────────────────────────────────
@@ -138,11 +471,11 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
       total_tools:        { cardinality: { field: "toolNames" } },
       total_skill_calls:  { value_count: { field: "usedSkills" } },
       total_tool_calls:   { value_count: { field: "toolNames" } },
-      by_skill: { terms: { field: "usedSkills",  size: 10 } },
+      by_skill: { terms: { field: "usedSkills",  size: 20 } },
       by_tool: {
         terms: {
           field: "toolNames",
-          size: 10,
+          size: 20,
           exclude: [
             // Claude Code 内置文件 / 系统工具
             "execute", "read_file", "write_file", "glob", "grep",
@@ -158,7 +491,7 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
         }
       },
       by_tool_all: {
-        terms: { field: "toolNames", size: 50 }
+        terms: { field: "toolNames", size: 20 }
       },
       trend: {
         date_histogram: { field: "startedAt", calendar_interval: interval, time_zone: "Asia/Shanghai" },
@@ -195,8 +528,25 @@ async function fetchModelStats(range: TimeRange, granularity: Granularity): Prom
   return esQuery(getEsIndex("trace"), body)
 }
 
-async function fetchUserStats(range: TimeRange, granularity: Granularity): Promise<unknown> {
+function buildUpperOrgLv1Filter(upperOrgLv1: string): Record<string, unknown> {
+  if (upperOrgLv1 === "") {
+    return {
+      bool: {
+        should: [
+          { term: { upperOrgLv1: "" } },
+          { bool: { must_not: [{ exists: { field: "upperOrgLv1" } }] } }
+        ],
+        minimum_should_match: 1
+      }
+    }
+  }
+
+  return { term: { upperOrgLv1 } }
+}
+
+async function fetchUserStats(range: TimeRange, granularity: Granularity, opts?: UserStatsOptions): Promise<unknown> {
   void granularity
+  const selectedUpperOrgLv1 = opts?.upperOrgLv1 ?? null
   const body = {
     size: 0,
     query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
@@ -205,13 +555,188 @@ async function fetchUserStats(range: TimeRange, granularity: Granularity): Promi
         terms: { field: "sapId", size: 50 },
         aggs: {
           user_name: { terms: { field: "userName",  size: 1 } },
-          org_name:  { terms: { field: "orgName",   size: 1 } }
+          org_name:  { terms: { field: "orgName",   size: 1 } },
+          upper_org_lv1: { terms: { field: "upperOrgLv1", size: 1, missing: "" } }
         }
       },
-      by_org:     { terms: { field: "orgName",     size: 30 } },
+      by_org: selectedUpperOrgLv1 !== null
+        ? {
+            filter: buildUpperOrgLv1Filter(selectedUpperOrgLv1),
+            aggs: {
+              items: { terms: { field: "orgName", size: 30, missing: "" } }
+            }
+          }
+        : {
+            terms: { field: "upperOrgLv1", size: 30, missing: "" }
+          },
       by_version: {
         terms: { field: "appVersion", size: 20 },
         aggs: { unique_users: { cardinality: { field: "sapId" } } }
+      }
+    }
+  }
+  return esQuery(getEsIndex("trace"), body)
+}
+
+async function fetchSkillUsageSummary(
+  range: TimeRange,
+  granularity: Granularity,
+  skillNames?: string[]
+): Promise<unknown> {
+  void granularity
+  // 模式 A：前端传入技能名列表，使用 filters 精确按“技能维度”统计。
+  // 这样可以直接得到每个技能的用户数，避免按版本桶二次合并带来的误差。
+  const normalizedSkillNames = normalizeSkillQueryNames(skillNames)
+  if (normalizedSkillNames.length > 0) {
+    const filters = Object.fromEntries(
+      normalizedSkillNames.map((skillName) => [skillName, buildSkillUsageWildcardFilter(skillName)])
+    )
+    const body = {
+      size: 0,
+      query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
+      aggs: {
+        by_skill: {
+          filters: { filters },
+          aggs: {
+            unique_users: {
+              filter: buildNonEmptyYstIdFilter(),
+              aggs: {
+                count: { cardinality: { field: "ystId" } }
+              }
+            }
+          }
+        }
+      }
+    }
+    return esQuery(getEsIndex("trace"), body)
+  }
+
+  // 模式 B：兼容旧调用方，保留 terms 聚合结构。
+  const body = {
+    size: 0,
+    query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
+    aggs: {
+      by_skill: {
+        terms: { field: "usedSkills", size: 1000 },
+        aggs: {
+          unique_users: { cardinality: { field: "ystId" } }
+        }
+      }
+    }
+  }
+  return esQuery(getEsIndex("trace"), body)
+}
+
+async function fetchSkillUserStats(
+  range: TimeRange,
+  granularity: Granularity,
+  skillName: string
+): Promise<unknown> {
+  void granularity
+  const escapedSkillName = escapeWildcard(skillName)
+  const wildcardPattern = `${escapedSkillName}**`
+  const skillFilter = buildSkillUsageWildcardFilter(skillName)
+  const body = {
+    size: 0,
+    query: {
+      bool: {
+        must: [
+          timeRangeFilter("startedAt", range),
+          { exists: { field: "ystId" } },
+          { bool: { must_not: { term: { ystId: "" } } } }
+        ],
+        should: [
+          { wildcard: { usedSkills: wildcardPattern } },
+          { wildcard: { "usedSkills.keyword": wildcardPattern } }
+        ],
+        minimum_should_match: 1
+      }
+    },
+    aggs: {
+      // 非空 ystId 的去重用户数（用于“使用用户数”展示）
+      unique_users_count: { cardinality: { field: "ystId" } },
+      // 非空 ystId 的调用总次数（主查询已经过滤了非空用户）
+      total_calls: { value_count: { field: "traceId" } },
+      // 额外统计空用户调用次数：
+      // 通过 global 聚合跳出主查询（主查询已过滤非空用户），
+      // 然后重新套用 时间范围 + 技能命中 + 空用户 条件。
+      empty_user_calls: {
+        global: {},
+        aggs: {
+          filtered: {
+            filter: {
+              bool: {
+                must: [timeRangeFilter("startedAt", range), skillFilter, buildEmptyYstIdFilter()]
+              }
+            }
+          }
+        }
+      },
+      // 非空 ystId 的 Top 用户明细表
+      top_users: {
+        terms: { field: "ystId", size: 100 },
+        aggs: {
+          user_name: { terms: { field: "userName", size: 1 } },
+          org_name: { terms: { field: "orgName", size: 1 } }
+        }
+      }
+    }
+  }
+  return esQuery(getEsIndex("trace"), body)
+}
+
+async function fetchUserProfilesBySapIds(sapIds: string[]): Promise<unknown> {
+  const sanitizedSapIds = Array.from(
+    new Set(
+      sapIds
+        .map((id) => id.trim())
+        .filter(Boolean)
+    )
+  ).slice(0, 500)
+
+  if (sanitizedSapIds.length === 0) {
+    return {
+      aggregations: {
+        by_sap: { buckets: [] }
+      }
+    }
+  }
+
+  const includeShouldFilters = sanitizedSapIds.flatMap((id) => {
+    const escaped = escapeWildcard(id)
+    const wildcardPattern = `*${escaped}*`
+    return [
+      { term: { sapId: id } },
+      { term: { "sapId.keyword": id } },
+      { wildcard: { sapId: wildcardPattern } },
+      { wildcard: { "sapId.keyword": wildcardPattern } }
+    ]
+  })
+
+  const body = {
+    size: 0,
+    query: {
+      bool: {
+        filter: [
+          {
+            bool: {
+              should: includeShouldFilters,
+              minimum_should_match: 1
+            }
+          }
+        ]
+      }
+    },
+    aggs: {
+      by_sap: {
+        terms: {
+          field: "sapId",
+          size: Math.min(Math.max(sanitizedSapIds.length * 5, 100), 2000)
+        },
+        aggs: {
+          user_name: { terms: { field: "userName", size: 1 } },
+          org_name: { terms: { field: "orgName", size: 1 } }
+        }
       }
     }
   }
@@ -350,6 +875,94 @@ async function fetchFeedback(range: TimeRange, granularity: Granularity): Promis
   return esQuery(getEsIndex("event"), body)
 }
 
+async function fetchSkillRecentTraces(
+  skill: string,
+  range: TimeRange,
+  limit = 10
+): Promise<DashboardTraceDetail[]> {
+  const size = clampLimit(limit, 10, 10)
+  const body = {
+    size,
+    sort: [{ startedAt: { order: "desc" } }],
+    query: {
+      bool: {
+        filter: [
+          timeRangeFilter("startedAt", range),
+          { term: { usedSkills: skill } }
+        ]
+      }
+    },
+    _source: {
+      includes: [
+        "_raw",
+        "traceId",
+        "threadId",
+        "startedAt",
+        "endedAt",
+        "durationMs",
+        "userMessage",
+        "modelId",
+        "modelName",
+        "outcome",
+        "totalToolCalls",
+        "totalInputTokens",
+        "totalOutputTokens",
+        "totalTokens",
+        "usedSkills"
+      ]
+    }
+  }
+  const raw = await esQuery(getEsIndex("trace"), body) as EsSearchResponse
+  return (raw.hits?.hits ?? []).map(normalizeTraceDetail)
+}
+
+async function fetchCommitDetails(
+  range: TimeRange,
+  limit = 50
+): Promise<{ total: number; items: DashboardCommitDetail[] }> {
+  const size = clampLimit(limit, 50, 500)
+  const body = {
+    track_total_hits: true,
+    size,
+    sort: [{ eventTime: { order: "desc" } }],
+    query: {
+      bool: {
+        filter: [
+          timeRangeFilter("eventTime", range),
+          { term: { eventName: "git.commit.created" } }
+        ]
+      }
+    },
+    _source: {
+      includes: [
+        "eventId",
+        "eventTime",
+        "eventName",
+        "userName",
+        "userIp",
+        "sapId",
+        "ystId",
+        "orgName",
+        "properties.repoPath",
+        "properties.branch",
+        "properties.filesChanged",
+        "properties.insertions",
+        "properties.deletions",
+        "properties.triggeredBy",
+        "properties.threadId",
+        "properties.usedSkills",
+        "properties.skillCount"
+      ]
+    }
+  }
+  const raw = await esQuery(getEsIndex("event"), body) as EsSearchResponse
+  const hits = raw.hits?.hits ?? []
+  return {
+    total: getTotalHits(raw, hits.length),
+    items: hits.map(normalizeCommitDetail)
+  }
+}
+
 // ─────────────────────────────────────────────────────────
 // Dev mock data
 // ─────────────────────────────────────────────────────────
@@ -401,9 +1014,9 @@ function makeMockOverview(range: TimeRange): unknown {
       avg_duration: { value: 4320 },
       total_input_tokens: { value: 2_340_000 },
       total_output_tokens: { value: 890_000 },
-      total_skills: { value: 10 },
+      total_skills: { value: 20 },
       total_tools: { value: 27 },
-      total_skill_calls: { value: 1711 },
+      total_skill_calls: { value: 2022 },
       total_tool_calls: { value: 6538 },
       by_skill: {
         buckets: [
@@ -416,7 +1029,17 @@ function makeMockOverview(range: TimeRange): unknown {
           { key: "日志分析",     doc_count: 121 },
           { key: "数据清洗",     doc_count: 98  },
           { key: "性能诊断",     doc_count: 87  },
-          { key: "安全扫描",     doc_count: 62  }
+          { key: "安全扫描",     doc_count: 62  },
+          { key: "代码重构",     doc_count: 54  },
+          { key: "异常排查",     doc_count: 49  },
+          { key: "接口联调",     doc_count: 44  },
+          { key: "依赖升级",     doc_count: 38  },
+          { key: "配置检查",     doc_count: 33  },
+          { key: "发布诊断",     doc_count: 29  },
+          { key: "性能优化",     doc_count: 24  },
+          { key: "埋点分析",     doc_count: 18  },
+          { key: "前端走查",     doc_count: 13  },
+          { key: "脚本生成",     doc_count: 9   }
         ]
       },
       by_tool: {
@@ -430,7 +1053,17 @@ function makeMockOverview(range: TimeRange): unknown {
           { key: "create_pr",          doc_count: 134 },
           { key: "run_tests",          doc_count: 112 },
           { key: "search_code",        doc_count: 98  },
-          { key: "notify",             doc_count: 76  }
+          { key: "notify",             doc_count: 76  },
+          { key: "query_logs",         doc_count: 68  },
+          { key: "schema_check",       doc_count: 59  },
+          { key: "open_preview",       doc_count: 53  },
+          { key: "analyze_diff",       doc_count: 47  },
+          { key: "format_code",        doc_count: 42  },
+          { key: "lint_fix",           doc_count: 36  },
+          { key: "dependency_audit",   doc_count: 31  },
+          { key: "deploy_check",       doc_count: 26  },
+          { key: "trace_lookup",       doc_count: 19  },
+          { key: "ticket_update",      doc_count: 12  }
         ]
       },
       by_tool_all: {
@@ -454,12 +1087,7 @@ function makeMockOverview(range: TimeRange): unknown {
           { key: "search_tool",        doc_count: 128  },
           { key: "run_tests",          doc_count: 112  },
           { key: "search_code",        doc_count: 98   },
-          { key: "code_exec",          doc_count: 92   },
-          { key: "notify",             doc_count: 76   },
-          { key: "inspect_tool",       doc_count: 64   },
-          { key: "write_todos",        doc_count: 58   },
-          { key: "invoke_deferred_tool", doc_count: 45 },
-          { key: "save_code_exec_tool", doc_count: 32  }
+          { key: "code_exec",          doc_count: 92   }
         ]
       },
       trend: { buckets: trend }
@@ -495,11 +1123,12 @@ function makeMockModelStats(): unknown {
   }
 }
 
-function makeMockUserStats(range: TimeRange): unknown {
+function makeMockUserStats(range: TimeRange, opts?: UserStatsOptions): unknown {
   const from = new Date(range.from)
   const to = new Date(range.to)
   const diffMs = to.getTime() - from.getTime()
   const diffDays = diffMs / (1000 * 60 * 60 * 24)
+  const selectedUpperOrgLv1 = opts?.upperOrgLv1 ?? null
 
   const trendBuckets: Date[] = []
   if (diffDays <= 1) {
@@ -517,27 +1146,52 @@ function makeMockUserStats(range: TimeRange): unknown {
     users: { value: Math.floor(3 + Math.random() * 15) }
   }))
 
+  const byOrgBuckets = selectedUpperOrgLv1 === null
+    ? [
+        { key: "零售金融", doc_count: 748 },
+        { key: "公司金融", doc_count: 245 },
+        { key: "风险管理", doc_count: 189 },
+        { key: "科技管理", doc_count: 65 }
+      ]
+    : selectedUpperOrgLv1 === "零售金融"
+      ? [
+          { key: "零售一部", doc_count: 430 },
+          { key: "零售二部", doc_count: 318 }
+        ]
+      : selectedUpperOrgLv1 === "公司金融"
+        ? [
+            { key: "企业金融部", doc_count: 245 }
+          ]
+        : selectedUpperOrgLv1 === "风险管理"
+          ? [
+              { key: "风险管理部", doc_count: 189 }
+            ]
+          : selectedUpperOrgLv1 === "科技管理"
+            ? [
+                { key: "科技部", doc_count: 65 }
+              ]
+            : []
+
   return {
     aggregations: {
       top_users: {
         buckets: [
-          { key: "10010001", doc_count: 142, user_name: { buckets: [{ key: "张三", doc_count: 142 }] }, org_name: { buckets: [{ key: "零售一部", doc_count: 142 }] }, success_count: { doc_count: 130 } },
-          { key: "10010002", doc_count: 118, user_name: { buckets: [{ key: "李四", doc_count: 118 }] }, org_name: { buckets: [{ key: "零售二部", doc_count: 118 }] }, success_count: { doc_count: 110 } },
-          { key: "10010003", doc_count: 97,  user_name: { buckets: [{ key: "王五", doc_count: 97  }] }, org_name: { buckets: [{ key: "企业金融部", doc_count: 97  }] }, success_count: { doc_count: 89  } },
-          { key: "10010004", doc_count: 85,  user_name: { buckets: [{ key: "赵六", doc_count: 85  }] }, org_name: { buckets: [{ key: "零售一部", doc_count: 85  }] }, success_count: { doc_count: 72  } },
-          { key: "10010005", doc_count: 73,  user_name: { buckets: [{ key: "钱七", doc_count: 73  }] }, org_name: { buckets: [{ key: "风险管理部", doc_count: 73  }] }, success_count: { doc_count: 68  } },
-          { key: "10010006", doc_count: 61,  user_name: { buckets: [{ key: "孙八", doc_count: 61  }] }, org_name: { buckets: [{ key: "科技部",    doc_count: 61  }] }, success_count: { doc_count: 55  } }
+          { key: "10010001", doc_count: 142, user_name: { buckets: [{ key: "张三", doc_count: 142 }] }, org_name: { buckets: [{ key: "零售一部", doc_count: 142 }] }, upper_org_lv1: { buckets: [{ key: "零售金融", doc_count: 142 }] }, success_count: { doc_count: 130 } },
+          { key: "10010002", doc_count: 118, user_name: { buckets: [{ key: "李四", doc_count: 118 }] }, org_name: { buckets: [{ key: "零售二部", doc_count: 118 }] }, upper_org_lv1: { buckets: [{ key: "零售金融", doc_count: 118 }] }, success_count: { doc_count: 110 } },
+          { key: "10010003", doc_count: 97,  user_name: { buckets: [{ key: "王五", doc_count: 97  }] }, org_name: { buckets: [{ key: "企业金融部", doc_count: 97  }] }, upper_org_lv1: { buckets: [{ key: "公司金融", doc_count: 97 }] }, success_count: { doc_count: 89  } },
+          { key: "10010004", doc_count: 85,  user_name: { buckets: [{ key: "赵六", doc_count: 85  }] }, org_name: { buckets: [{ key: "零售一部", doc_count: 85  }] }, upper_org_lv1: { buckets: [{ key: "零售金融", doc_count: 85 }] }, success_count: { doc_count: 72  } },
+          { key: "10010005", doc_count: 73,  user_name: { buckets: [{ key: "钱七", doc_count: 73  }] }, org_name: { buckets: [{ key: "风险管理部", doc_count: 73  }] }, upper_org_lv1: { buckets: [{ key: "风险管理", doc_count: 73 }] }, success_count: { doc_count: 68  } },
+          { key: "10010006", doc_count: 61,  user_name: { buckets: [{ key: "孙八", doc_count: 61  }] }, org_name: { buckets: [{ key: "科技部",    doc_count: 61  }] }, upper_org_lv1: { buckets: [{ key: "科技管理", doc_count: 61 }] }, success_count: { doc_count: 55  } }
         ]
       },
-      by_org: {
-        buckets: [
-          { key: "零售一部", doc_count: 430 },
-          { key: "零售二部", doc_count: 318 },
-          { key: "企业金融部", doc_count: 245 },
-          { key: "风险管理部", doc_count: 189 },
-          { key: "科技部", doc_count: 65 }
-        ]
-      },
+      by_org: selectedUpperOrgLv1 === null
+        ? {
+            buckets: byOrgBuckets
+          }
+        : {
+            doc_count: byOrgBuckets.reduce((sum, bucket) => sum + bucket.doc_count, 0),
+            items: { buckets: byOrgBuckets }
+          },
       by_version: {
         buckets: [
           { key: "1.3.0", doc_count: 512, unique_users: { value: 98 } },
@@ -548,6 +1202,105 @@ function makeMockUserStats(range: TimeRange): unknown {
         ]
       },
       user_trend: { buckets: trend }
+    }
+  }
+}
+
+function makeMockSkillUsageSummary(range: TimeRange): unknown {
+  const overview = makeMockOverview(range) as {
+    aggregations?: { by_skill?: { buckets?: Array<{ key: string; doc_count: number }> } }
+  }
+  return {
+    aggregations: {
+      by_skill: {
+        buckets: (overview.aggregations?.by_skill?.buckets ?? []).map((bucket) => ({
+          ...bucket,
+          unique_users: { value: Math.max(1, Math.floor(bucket.doc_count * 0.35)) }
+        }))
+      }
+    }
+  }
+}
+
+function makeMockSkillUserStats(range: TimeRange, skillName: string): unknown {
+  const userStats = makeMockUserStats(range) as {
+    aggregations?: {
+      top_users?: {
+        buckets?: Array<{
+          key: string
+          doc_count: number
+          user_name?: { buckets?: Array<{ key: string }> }
+          org_name?: { buckets?: Array<{ key: string }> }
+        }>
+      }
+    }
+  }
+  const topUsers = userStats.aggregations?.top_users?.buckets ?? []
+  const offset = Math.abs(
+    Array.from(skillName).reduce((acc, ch) => acc + ch.charCodeAt(0), 0)
+  ) % 7
+  const picked = topUsers.slice(0, Math.max(3, 6 - offset))
+  const totalCalls = picked.reduce((sum, item) => sum + item.doc_count, 0)
+  // 模拟环境下给出一个小比例空用户调用，便于前端联调空用户行展示。
+  const emptyUserCalls = Math.floor(totalCalls * 0.08)
+
+  return {
+    aggregations: {
+      total_calls: { value: totalCalls },
+      total_users: { value: picked.length },
+      unique_users_count: { value: picked.length },
+      empty_user_calls: { filtered: { doc_count: emptyUserCalls } },
+      top_users: { buckets: picked }
+    }
+  }
+}
+
+function makeMockUserProfilesBySapIds(sapIds: string[]): unknown {
+  const userStats = makeMockUserStats({
+    from: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+    to: new Date().toISOString()
+  }) as {
+    aggregations?: {
+      top_users?: {
+        buckets?: Array<{
+          key: string
+          user_name?: { buckets?: Array<{ key: string }> }
+          org_name?: { buckets?: Array<{ key: string }> }
+        }>
+      }
+    }
+  }
+
+  const fallbackBuckets = userStats.aggregations?.top_users?.buckets ?? []
+  const fallbackMap = new Map(
+    fallbackBuckets.map((bucket) => [
+      bucket.key,
+      {
+        userName: bucket.user_name?.buckets?.[0]?.key ?? bucket.key,
+        orgName: bucket.org_name?.buckets?.[0]?.key ?? ""
+      }
+    ])
+  )
+
+  const buckets = Array.from(
+    new Set(
+      sapIds
+        .map((id) => id.trim())
+        .filter(Boolean)
+    )
+  ).map((sapId) => {
+    const fallback = fallbackMap.get(sapId)
+    return {
+      key: sapId,
+      doc_count: 1,
+      user_name: { buckets: [{ key: fallback?.userName ?? `用户${sapId.slice(-4)}` }] },
+      org_name: { buckets: [{ key: fallback?.orgName ?? "未知部门" }] }
+    }
+  })
+
+  return {
+    aggregations: {
+      by_sap: { buckets }
     }
   }
 }
@@ -695,6 +1448,140 @@ function makeMockFeedback(range: TimeRange, granularity: Granularity): unknown {
   }
 }
 
+function makeMockAgentTrace(skill: string, range: TimeRange, index: number): AgentTrace {
+  const from = new Date(range.from)
+  const to = new Date(range.to)
+  const spanMs = Math.max(60_000, to.getTime() - from.getTime())
+  const offsetMs = Math.min(spanMs - 1, (index + 1) * 35 * 60 * 1000)
+  const startedAt = new Date(to.getTime() - offsetMs)
+  const endedAt = new Date(startedAt.getTime() + (index + 2) * 28_000)
+  const traceId = `mock-trace-${skill}-${index + 1}`.replace(/\s+/g, "-")
+
+  return {
+    traceId,
+    threadId: `mock-thread-${index + 1}`,
+    startedAt: startedAt.toISOString(),
+    endedAt: endedAt.toISOString(),
+    durationMs: endedAt.getTime() - startedAt.getTime(),
+    userMessage: `请使用 ${skill} 帮我分析这次变更，并给出可执行建议。`,
+    modelId: "custom:minmax2.7",
+    modelName: "MiniMax-M2.7",
+    userName: ["张三", "李四", "王五"][index] ?? "张三",
+    sapId: `1001000${index + 1}`,
+    ystId: `27435${index + 1}`,
+    orgName: ["科技部", "零售一部", "风险管理部"][index] ?? "科技部",
+    steps: [
+      {
+        index: 0,
+        startedAt: startedAt.toISOString(),
+        assistantText: `我会先定位和 ${skill} 相关的上下文，再整理问题和建议。`,
+        toolCalls: [
+          {
+            name: "read_file",
+            args: { path: "src/example.ts" },
+            result: "读取到 120 行内容",
+            durationMs: 420
+          }
+        ]
+      },
+      {
+        index: 1,
+        startedAt: new Date(startedAt.getTime() + 12_000).toISOString(),
+        assistantText: `已完成 ${skill} 分析，结论包含风险点、建议修改和验证方式。`,
+        toolCalls: [
+          {
+            name: "grep",
+            args: { pattern: "TODO", path: "src" },
+            result: "匹配 3 处",
+            durationMs: 310
+          }
+        ]
+      }
+    ],
+    modelCalls: [
+      {
+        messageId: `mock-message-${index + 1}`,
+        startedAt: startedAt.toISOString(),
+        inputMessages: [
+          { role: "user", content: `请使用 ${skill} 帮我分析这次变更，并给出可执行建议。` }
+        ],
+        outputMessage: {
+          role: "assistant",
+          content: `已完成 ${skill} 分析。`
+        },
+        toolCalls: [],
+        tokenUsage: {
+          inputTokens: 3200 + index * 500,
+          outputTokens: 900 + index * 160,
+          totalTokens: 4100 + index * 660
+        }
+      }
+    ],
+    totalToolCalls: 2,
+    outcome: index === 2 ? "error" : "success",
+    ...(index === 2 ? { errorMessage: "Mock trace 用于展示异常状态" } : {}),
+    appVersion: "0.3.6",
+    usedSkills: [skill],
+    metadata: {
+      workspacePath: "/Users/demo/projects/cmbCowork"
+    }
+  }
+}
+
+function makeMockSkillRecentTraces(skill: string, range: TimeRange, limit = 10): DashboardTraceDetail[] {
+  return Array.from({ length: clampLimit(limit, 10, 10) }, (_, index) => {
+    const trace = makeMockAgentTrace(skill, range, index)
+    const usage = summarizeTraceTokenUsage(trace.modelCalls)
+    return {
+      traceId: trace.traceId,
+      threadId: trace.threadId,
+      startedAt: trace.startedAt,
+      endedAt: trace.endedAt,
+      durationMs: trace.durationMs,
+      userMessage: trace.userMessage,
+      modelId: trace.modelId,
+      modelName: trace.modelName,
+      outcome: trace.outcome,
+      totalToolCalls: trace.totalToolCalls,
+      totalInputTokens: usage.totalInputTokens,
+      totalOutputTokens: usage.totalOutputTokens,
+      totalTokens: usage.totalTokens,
+      usedSkills: trace.usedSkills,
+      nodes: buildTraceTree(trace),
+      rawAvailable: true
+    }
+  })
+}
+
+function makeMockCommitDetails(range: TimeRange, limit = 200): { total: number; items: DashboardCommitDetail[] } {
+  const from = new Date(range.from)
+  const to = new Date(range.to)
+  const spanMs = Math.max(60_000, to.getTime() - from.getTime())
+  const count = Math.min(clampLimit(limit, 200, 500), 18)
+  const items = Array.from({ length: count }, (_, index): DashboardCommitDetail => {
+    const eventTime = new Date(to.getTime() - Math.min(spanMs - 1, index * 42 * 60 * 1000))
+    return {
+      eventId: `mock-commit-event-${index + 1}`,
+      eventTime: eventTime.toISOString(),
+      userName: ["张三", "李四", "王五", "赵六"][index % 4],
+      sapId: `100100${String(index + 1).padStart(2, "0")}`,
+      ystId: `2743${String(50 + index).padStart(2, "0")}`,
+      orgName: ["科技部", "零售一部", "风险管理部"][index % 3],
+      userIp: `10.0.0.${20 + index}`,
+      repoPath: `/Users/demo/projects/cmb-${index % 3}`,
+      branch: index % 2 === 0 ? "feature/smart-model-routing" : "fix/dashboard-detail",
+      filesChanged: 2 + (index % 6),
+      insertions: 18 + index * 7,
+      deletions: 4 + index * 3,
+      triggeredBy: index % 4 === 0 ? "auto-push" : "manual",
+      threadId: `mock-thread-${(index % 5) + 1}`,
+      usedSkills: index % 2 === 0 ? ["代码审查-v1.0.0"] : ["需求分析-v1.0.0", "接口设计-v1.0.0"],
+      skillCount: index % 2 === 0 ? 1 : 2
+    }
+  })
+  return { total: 240, items }
+}
+
 // ─────────────────────────────────────────────────────────
 // IPC Registration
 // ─────────────────────────────────────────────────────────
@@ -702,12 +1589,7 @@ function makeMockFeedback(range: TimeRange, granularity: Granularity): unknown {
 export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   // Check if current user is allowed to see the dashboard
   _ipcMain.handle("dashboard:isAllowed", async () => {
-    // In development mode, always allow access
-    if (import.meta.env.DEV) return true
-    const userInfo = getUserInfo()
-    const ystId = userInfo?.ystId?.trim()
-    if (!ystId) return false
-    return ALLOWED_YST_IDS.has(ystId)
+    return isDashboardAllowed()
   })
 
   _ipcMain.handle(
@@ -738,12 +1620,69 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   _ipcMain.handle(
     "dashboard:userStats",
-    async (_, range: TimeRange, granularity: Granularity) => {
-      if (import.meta.env.DEV) return { success: true, data: makeMockUserStats(range) }
+    async (_, range: TimeRange, granularity: Granularity, opts?: UserStatsOptions) => {
+      if (import.meta.env.DEV) return { success: true, data: makeMockUserStats(range, opts) }
       try {
-        return { success: true, data: await fetchUserStats(range, granularity) }
+        return { success: true, data: await fetchUserStats(range, granularity, opts) }
       } catch (e) {
         console.error("[Dashboard] userStats error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:skillUsageSummary",
+    async (_, range: TimeRange, granularity: Granularity, skillNames?: string[]) => {
+      // `skillNames` 为可选参数：传入后走更精确的 filters 聚合。
+      if (import.meta.env.DEV) return { success: true, data: makeMockSkillUsageSummary(range) }
+      try {
+        return { success: true, data: await fetchSkillUsageSummary(range, granularity, skillNames) }
+      } catch (e) {
+        console.error("[Dashboard] skillUsageSummary error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:skillUserStats",
+    async (_, range: TimeRange, granularity: Granularity, skillName: string) => {
+      const trimmedSkillName = skillName?.trim?.() ?? ""
+      if (!trimmedSkillName) {
+        return { success: false, error: "skillName is required" }
+      }
+      if (!isDashboardAllowedForCurrentUser()) {
+        return { success: false, error: "当前用户无权限查看 Skill 用户明细" }
+      }
+      if (import.meta.env.DEV) {
+        return { success: true, data: makeMockSkillUserStats(range, trimmedSkillName) }
+      }
+      try {
+        return {
+          success: true,
+          data: await fetchSkillUserStats(range, granularity, trimmedSkillName)
+        }
+      } catch (e) {
+        console.error("[Dashboard] skillUserStats error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:userProfiles",
+    async (_, sapIds: string[]) => {
+      const sanitizedSapIds = Array.isArray(sapIds)
+        ? sapIds.filter((id): id is string => typeof id === "string")
+        : []
+      if (import.meta.env.DEV) {
+        return { success: true, data: makeMockUserProfilesBySapIds(sanitizedSapIds) }
+      }
+      try {
+        return { success: true, data: await fetchUserProfilesBySapIds(sanitizedSapIds) }
+      } catch (e) {
+        console.error("[Dashboard] userProfiles error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }
@@ -770,6 +1709,34 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data: await fetchFeedback(range, granularity) }
       } catch (e) {
         console.error("[Dashboard] feedback error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:skillRecentTraces",
+    async (_, skill: string, range: TimeRange, limit?: number) => {
+      if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
+      if (import.meta.env.DEV) return { success: true, data: makeMockSkillRecentTraces(skill, range, limit) }
+      try {
+        return { success: true, data: await fetchSkillRecentTraces(skill, range, limit) }
+      } catch (e) {
+        console.error("[Dashboard] skillRecentTraces error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:commitDetails",
+    async (_, range: TimeRange, limit?: number) => {
+      if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
+      if (import.meta.env.DEV) return { success: true, data: makeMockCommitDetails(range, limit) }
+      try {
+        return { success: true, data: await fetchCommitDetails(range, limit) }
+      } catch (e) {
+        console.error("[Dashboard] commitDetails error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }

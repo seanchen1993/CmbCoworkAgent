@@ -10,6 +10,10 @@ import { existsSync } from "fs"
 import { join } from "path"
 import { writeMainLog, writeRendererLog } from "./logging"
 
+const MAIN_LOG_EVENT_CHANNEL = "debug:main-console-log"
+const MAIN_LOG_TOGGLE_CHANNEL = "debug:set-main-console-forwarding"
+let mainLogForwardingEnabled = false
+
 function getConsoleLevelName(level: number): string {
   switch (level) {
     case 0:
@@ -22,6 +26,59 @@ function getConsoleLevelName(level: number): string {
       return "DEBUG"
     default:
       return "LOG"
+  }
+}
+
+function safeFormatLogValue(value: unknown, seen = new WeakSet<object>()): string {
+  if (value instanceof Error) return value.stack || `${value.name}: ${value.message}`
+  if (typeof value === "string") return value
+  if (typeof value === "bigint") return `${value.toString()}n`
+  if (
+    value === null ||
+    value === undefined ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  ) {
+    return String(value)
+  }
+  if (typeof value === "symbol") return value.toString()
+  if (typeof value === "function") return `[Function ${value.name || "anonymous"}]`
+  if (typeof value !== "object") return String(value)
+
+  try {
+    return JSON.stringify(
+      value,
+      (_key, nestedValue) => {
+        if (typeof nestedValue === "bigint") return `${nestedValue.toString()}n`
+        if (nestedValue instanceof Error) {
+          return {
+            name: nestedValue.name,
+            message: nestedValue.message,
+            stack: nestedValue.stack
+          }
+        }
+        if (typeof nestedValue === "symbol") return nestedValue.toString()
+        if (typeof nestedValue === "function") return `[Function ${nestedValue.name || "anonymous"}]`
+        if (nestedValue && typeof nestedValue === "object") {
+          if (seen.has(nestedValue)) return "[Circular]"
+          seen.add(nestedValue)
+        }
+        return nestedValue
+      },
+      2
+    )
+  } catch {
+    return Object.prototype.toString.call(value)
+  }
+}
+
+function forwardMainLogToRenderer(level: string, args: unknown[]): void {
+  if (!mainLogForwardingEnabled) return
+  const message = args.map((arg) => safeFormatLogValue(arg)).join(" ")
+  const windows = BrowserWindow.getAllWindows()
+  for (const window of windows) {
+    if (window.isDestroyed() || window.webContents.isDestroyed()) continue
+    window.webContents.send(MAIN_LOG_EVENT_CHANNEL, { level, message })
   }
 }
 
@@ -39,6 +96,7 @@ function withEpipeGuard<T extends (...args: unknown[]) => void>(fn: T): T {
 function withMainFileLogging<T extends (...args: unknown[]) => void>(level: string, fn: T): T {
   return ((...args: Parameters<T>) => {
     writeMainLog(level, args)
+    forwardMainLogToRenderer(level, args)
     fn(...args)
   }) as T
 }
@@ -97,6 +155,8 @@ import { startHeartbeat, stopHeartbeat } from "./services/heartbeat"
 import { startChatX, stopChatX } from "./services/chatx"
 import { LocalSandbox } from "./agent/local-sandbox"
 import { closeRuntime } from "./agent/runtime"
+import { makeBroadcastHookResultCallback } from "./hooks/result-callback"
+import { fireSessionEndAll, hasActiveSessions } from "./hooks/session-lifecycle"
 import { registerUpdaterHandlers, startUpdateChecker, stopUpdateChecker } from "./updater"
 import { runStartupSelfCheck } from "./updater/rollback"
 import { isKeepAwakeEnabled, setKeepAwakeEnabled } from "./storage"
@@ -330,6 +390,10 @@ if (!gotTheLock) {
     registerUpdaterHandlers()
     registerLspHandlers(ipcMain)
 
+    ipcMain.on(MAIN_LOG_TOGGLE_CHANNEL, (_event, enabled: unknown) => {
+      mainLogForwardingEnabled = Boolean(enabled)
+    })
+
     // Track event handler for client-side telemetry
     ipcMain.handle("track-event", async (_event, payload: any) => {
       try {
@@ -463,6 +527,25 @@ if (!gotTheLock) {
     if (process.platform !== "darwin") {
       app.quit()
     }
+  })
+
+  // Use before-quit (not will-quit) so we can preventDefault, await SessionEnd hooks,
+  // then re-issue app.quit(). will-quit fires during teardown — async hook spawns
+  // queued there have no guarantee of completing before the process exits.
+  let sessionEndDone = false
+  app.on("before-quit", (event) => {
+    if (sessionEndDone) return
+    if (!hasActiveSessions()) {
+      sessionEndDone = true
+      return
+    }
+    event.preventDefault()
+    fireSessionEndAll(5000, (threadId) => makeBroadcastHookResultCallback(`agent:stream:${threadId}`))
+      .catch((e) => console.warn("[Main] SessionEnd hooks error:", e))
+      .finally(() => {
+        sessionEndDone = true
+        app.quit()
+      })
   })
 
   let quitting = false

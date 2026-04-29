@@ -7,12 +7,20 @@ import { useState, useCallback } from "react"
 import { RefreshCw, Loader2, AlertCircle, ChevronLeft, ChevronRight, Download } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { useDashboard, type Granularity } from "./use-dashboard"
+import {
+  useDashboard,
+  type DashboardCommitDetail,
+  type DashboardTraceDetail,
+  type Granularity,
+  type TimeRange
+} from "./use-dashboard"
 import { OverviewPanel } from "./panels/OverviewPanel"
 import { ModelPanel } from "./panels/ModelPanel"
 import { UserPanel } from "./panels/UserPanel"
 import { ProductivityPanel } from "./panels/ProductivityPanel"
 import { FeedbackPanel } from "./panels/FeedbackPanel"
+import { TraceHistoryDialog } from "./TraceHistoryDialog"
+import { CommitDetailsDialog } from "./CommitDetailsDialog"
 
 // ─────────────────────────────────────────────────────────
 // Time control bar
@@ -192,7 +200,9 @@ export function DashboardView(): React.JSX.Element {
   const {
     granularity,
     range,
+    selectedUpperOrgLv1,
     loading,
+    userStatsLoading,
     error,
     overview,
     modelStats,
@@ -202,10 +212,67 @@ export function DashboardView(): React.JSX.Element {
     changeGranularity,
     navigate,
     setCustomRange,
-    refresh
+    refresh,
+    drillDownUserOrg,
+    resetUserOrgDrilldown
   } = useDashboard()
 
   const [exporting, setExporting] = useState(false)
+  const [skillDialogOpen, setSkillDialogOpen] = useState(false)
+  const [selectedSkill, setSelectedSkill] = useState<string | null>(null)
+  const [skillTraces, setSkillTraces] = useState<DashboardTraceDetail[]>([])
+  const [skillTracesLoading, setSkillTracesLoading] = useState(false)
+  const [skillTracesError, setSkillTracesError] = useState<string | null>(null)
+  const [commitDialogOpen, setCommitDialogOpen] = useState(false)
+  const [commitScopeLabel, setCommitScopeLabel] = useState("当前范围")
+  const [commitDetails, setCommitDetails] = useState<{ total: number; items: DashboardCommitDetail[] } | null>(null)
+  const [commitDetailsLoading, setCommitDetailsLoading] = useState(false)
+  const [commitDetailsError, setCommitDetailsError] = useState<string | null>(null)
+
+  const handleSkillClick = useCallback(async (skill: string) => {
+    setSelectedSkill(skill)
+    setSkillDialogOpen(true)
+    setSkillTraces([])
+    setSkillTracesError(null)
+    setSkillTracesLoading(true)
+    try {
+      const result = await window.api.dashboard.skillRecentTraces(skill, range, 10)
+      if (!result.success) throw new Error(result.error ?? "获取 Skill 会话历史失败")
+      setSkillTraces(result.data ?? [])
+    } catch (e) {
+      setSkillTracesError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSkillTracesLoading(false)
+    }
+  }, [range])
+
+  const loadCommitDetails = useCallback(async (targetRange: TimeRange, scopeLabel: string) => {
+    setCommitScopeLabel(scopeLabel)
+    setCommitDialogOpen(true)
+    setCommitDetails(null)
+    setCommitDetailsError(null)
+    setCommitDetailsLoading(true)
+    try {
+      const result = await window.api.dashboard.commitDetails(targetRange, 50)
+      if (!result.success) throw new Error(result.error ?? "获取 Commit 明细失败")
+      setCommitDetails(result.data ?? { total: 0, items: [] })
+    } catch (e) {
+      setCommitDetailsError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setCommitDetailsLoading(false)
+    }
+  }, [])
+
+  const handleCommitTotalClick = useCallback(() => {
+    void loadCommitDetails(range, `当前范围 · ${formatRangeLabel(range.from, range.to, granularity)}`)
+  }, [loadCommitDetails, range, granularity])
+
+  const handleCommitBucketClick = useCallback((bucket: { from: string; to: string; label: string }) => {
+    void loadCommitDetails(
+      { from: bucket.from, to: bucket.to },
+      `时间桶 · ${bucket.label}`
+    )
+  }, [loadCommitDetails])
 
   const handleExport = useCallback(async () => {
     if (!overview && !modelStats && !userStats && !productivity) return
@@ -323,7 +390,7 @@ export function DashboardView(): React.JSX.Element {
         }
         if (userStats.byOrg.length > 0) {
           sheets.push({
-            name: "部门分布",
+            name: selectedUpperOrgLv1 === null ? "一级部门分布" : `${selectedUpperOrgLv1 || "未知"}下级部门分布`,
             header: ["部门", "调用次数"],
             rows: userStats.byOrg.map((o) => [o.org, o.count])
           })
@@ -399,19 +466,29 @@ export function DashboardView(): React.JSX.Element {
           {/* Overview */}
           <section>
             <h2 className="text-sm font-semibold text-foreground mb-3">使用概览</h2>
-            <OverviewPanel data={overview} loading={loading} />
+            <OverviewPanel data={overview} loading={loading} onSkillClick={handleSkillClick} />
           </section>
 
           {/* Productivity */}
           <section>
             <h2 className="text-sm font-semibold text-foreground mb-3">生产力指标</h2>
-            <ProductivityPanel data={productivity} loading={loading} />
+            <ProductivityPanel
+              data={productivity}
+              loading={loading}
+              onCommitTotalClick={handleCommitTotalClick}
+              onCommitBucketClick={handleCommitBucketClick}
+            />
           </section>
 
           {/* User Analysis */}
           <section>
             <h2 className="text-sm font-semibold text-foreground mb-3">用户分析</h2>
-            <UserPanel data={userStats} loading={loading} />
+            <UserPanel
+              data={userStats}
+              loading={loading || userStatsLoading}
+              onDrillDownOrg={drillDownUserOrg}
+              onResetOrgDrilldown={resetUserOrgDrilldown}
+            />
           </section>
 
           {/* Model Analysis */}
@@ -427,6 +504,22 @@ export function DashboardView(): React.JSX.Element {
           </section>
         </div>
       </ScrollArea>
+      <TraceHistoryDialog
+        open={skillDialogOpen}
+        onOpenChange={setSkillDialogOpen}
+        skill={selectedSkill}
+        traces={skillTraces}
+        loading={skillTracesLoading}
+        error={skillTracesError}
+      />
+      <CommitDetailsDialog
+        open={commitDialogOpen}
+        onOpenChange={setCommitDialogOpen}
+        scopeLabel={commitScopeLabel}
+        data={commitDetails}
+        loading={commitDetailsLoading}
+        error={commitDetailsError}
+      />
     </div>
   )
 }
