@@ -8,7 +8,7 @@ export const MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
       "name": "pinchtab",
       "chinese_name": "数***复",
       "category": "治理类场景/云应用架构转型治理",
-      "featured": "",
+      "featured": "精品",
       "version": "1.0.2",
       "user_id": "80***31",
       "guidance": "入口1：帮我检测并修***区下相应项目问题帮我检测并修***区下相应项目问题帮我检测并修***区下相应项目问题帮我检测并修***区下相应项目问题帮我检测并修***区下相应项目问题帮我检测并修***区下相应项目问题",
