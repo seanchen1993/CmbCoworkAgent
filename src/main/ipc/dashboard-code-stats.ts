@@ -11,6 +11,11 @@ export interface DashboardCodeStats {
   adoptionRate: number | null
 }
 
+export interface DashboardSkillCodeAdoptionStats extends DashboardCodeStats {
+  skill: string
+  commitCount: number
+}
+
 function asNumber(value: unknown, fallback = 0): number {
   if (typeof value === "number" && Number.isFinite(value)) return value
   if (typeof value === "string" && value.trim()) {
@@ -27,6 +32,15 @@ function getAggNumber(raw: unknown, path: string[], fallback = 0): number {
     current = (current as Record<string, unknown>)[key]
   }
   return asNumber(current, fallback)
+}
+
+function getAggArray(raw: unknown, path: string[]): unknown[] {
+  let current: unknown = raw
+  for (const key of path) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) return []
+    current = (current as Record<string, unknown>)[key]
+  }
+  return Array.isArray(current) ? current : []
 }
 
 export function computeAdoptionRate(adoptedLines: number, generatedLines: number): number | null {
@@ -70,20 +84,20 @@ export function effectiveGeneratedLinesSumAgg(): Record<string, unknown> {
   }
 }
 
-export function normalizeCodeStatsFromAggs(raw: unknown): DashboardCodeStats {
-  const generatedLines = getAggNumber(raw, ["aggregations", "code_gen", "generated_lines", "value"])
-  const deletedLines = getAggNumber(raw, ["aggregations", "code_gen", "deleted_lines", "value"])
+function normalizeCodeStatsFromContainer(raw: unknown, prefix: string[] = []): DashboardCodeStats {
+  const generatedLines = getAggNumber(raw, [...prefix, "code_gen", "generated_lines", "value"])
+  const deletedLines = getAggNumber(raw, [...prefix, "code_gen", "deleted_lines", "value"])
   const measuredGeneratedLines = getAggNumber(raw, [
-    "aggregations",
+    ...prefix,
     "code_adopt_measured",
     "measured_generated_lines",
     "value"
   ])
   const effectiveGeneratedLines = getAggNumber(
     raw,
-    ["aggregations", "code_adopt_measured", "effective_generated_lines", "value"]
+    [...prefix, "code_adopt_measured", "effective_generated_lines", "value"]
   )
-  const adoptedLines = getAggNumber(raw, ["aggregations", "code_adopt_measured", "adopted_lines", "value"])
+  const adoptedLines = getAggNumber(raw, [...prefix, "code_adopt_measured", "adopted_lines", "value"])
   return makeDashboardCodeStats({
     generatedLines,
     deletedLines,
@@ -91,4 +105,25 @@ export function normalizeCodeStatsFromAggs(raw: unknown): DashboardCodeStats {
     measuredGeneratedLines,
     adoptedLines
   })
+}
+
+export function normalizeCodeStatsFromAggs(raw: unknown): DashboardCodeStats {
+  return normalizeCodeStatsFromContainer(raw, ["aggregations"])
+}
+
+export function normalizeSkillCodeAdoptionBuckets(raw: unknown): DashboardSkillCodeAdoptionStats[] {
+  return getAggArray(raw, ["aggregations", "by_skill_adoption", "buckets"])
+    .map((bucket): DashboardSkillCodeAdoptionStats | null => {
+      if (!bucket || typeof bucket !== "object" || Array.isArray(bucket)) return null
+      const record = bucket as Record<string, unknown>
+      const skill = typeof record.key === "string" ? record.key : ""
+      if (!skill) return null
+      const stats = normalizeCodeStatsFromContainer(record)
+      return {
+        ...stats,
+        skill,
+        commitCount: Math.max(0, getAggNumber(record, ["code_adopt_measured", "commit_count", "value"]))
+      }
+    })
+    .filter((item): item is DashboardSkillCodeAdoptionStats => item !== null)
 }

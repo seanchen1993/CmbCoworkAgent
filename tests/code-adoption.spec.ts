@@ -8,7 +8,8 @@
 import {
   effectiveGeneratedLinesSumAgg,
   makeDashboardCodeStats,
-  normalizeCodeStatsFromAggs
+  normalizeCodeStatsFromAggs,
+  normalizeSkillCodeAdoptionBuckets
 } from "../src/main/ipc/dashboard-code-stats.ts"
 
 function assert(condition: unknown, message: string): void {
@@ -98,6 +99,59 @@ function testEffectiveGeneratedLinesAggregationField(): void {
   )
 }
 
+function testNormalizeSkillCodeAdoptionBuckets(): void {
+  const items = normalizeSkillCodeAdoptionBuckets({
+    aggregations: {
+      by_skill_adoption: {
+        buckets: [
+          {
+            key: "代码审查-v1.0.0",
+            code_gen: {
+              generated_lines: { value: 120 },
+              deleted_lines: { value: 3 }
+            },
+            code_adopt_measured: {
+              measured_generated_lines: { value: 80 },
+              effective_generated_lines: { value: 60 },
+              adopted_lines: { value: 30 },
+              commit_count: { value: 2 }
+            }
+          },
+          {
+            key: "接口设计-v1.0.0",
+            code_gen: {
+              generated_lines: { value: 50 },
+              deleted_lines: { value: 0 }
+            },
+            code_adopt_measured: {
+              measured_generated_lines: { value: 0 },
+              effective_generated_lines: { value: 0 },
+              adopted_lines: { value: 0 },
+              // ES cardinality does not count missing/null commitSha values.
+              commit_count: { value: 0 }
+            }
+          }
+        ]
+      }
+    }
+  })
+
+  assert(items.length === 2, "expected two Skill code adoption buckets")
+  assert(items[0].skill === "代码审查-v1.0.0", "Skill bucket key should be preserved")
+  assert(items[0].generatedLines === 120, "Skill generated lines should be parsed from code_gen")
+  assert(items[0].measuredGeneratedLines === 80, "Skill measured raw lines should be parsed from code_adopt")
+  assert(items[0].effectiveGeneratedLines === 60, "Skill effective generated lines should be parsed")
+  assert(items[0].unmeasuredGeneratedLines === 40, "Skill unmeasured lines should be generated - measured")
+  assert(items[0].inclusiveEffectiveGeneratedLines === 100, "Skill inclusive denominator should include unmeasured lines")
+  assert(items[0].adoptedLines === 30, "Skill adopted lines should be parsed")
+  assert(items[0].commitCount === 2, "Skill commit count should use commitSha cardinality")
+  assertClose(items[0].measuredAdoptionRate, 30 / 60, "Skill measured adoption rate should be calculated")
+  assertClose(items[0].inclusiveAdoptionRate, 30 / 100, "Skill inclusive adoption rate should be calculated")
+  assert(items[1].measuredAdoptionRate === null, "Skill measured rate should be null when no measured denominator")
+  assertClose(items[1].inclusiveAdoptionRate, 0, "Skill inclusive rate should be zero when generated but not adopted")
+  assert(items[1].commitCount === 0, "null/missing commitSha values should not contribute to commit count")
+}
+
 function run(): void {
   testInclusiveAndMeasuredRates()
   console.log("PASS inclusive/measured adoption rates")
@@ -107,6 +161,8 @@ function run(): void {
   console.log("PASS code stats aggregation normalization")
   testEffectiveGeneratedLinesAggregationField()
   console.log("PASS effective generated lines aggregation field")
+  testNormalizeSkillCodeAdoptionBuckets()
+  console.log("PASS Skill code adoption bucket normalization")
 }
 
 run()

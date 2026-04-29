@@ -2,6 +2,7 @@
  * Dashboard data fetching hook
  */
 import { useState, useEffect, useCallback, useRef } from "react"
+import type { SkillAdoptionRankingItem } from "./skill-adoption-ranking"
 
 // ─────────────────────────────────────────────────────────
 // Types
@@ -37,6 +38,7 @@ export interface OverviewData {
   trend: Array<{ time: string; count: number; users: number }>
   bySkill: Array<{ skill: string; count: number }>
   bySkillAll: Array<{ skill: string; count: number }>
+  bySkillAdoption: SkillAdoptionRankingItem[]
   byTool: Array<{ tool: string; count: number }>
   byToolAll: Array<{ tool: string; count: number }>
   byToolFilteredAll: Array<{ tool: string; count: number }>
@@ -220,6 +222,32 @@ export function getDefaultRange(granularity: Granularity): TimeRange {
   return { from: from.toISOString(), to: now.toISOString() }
 }
 
+function getCurrentPeriodStart(granularity: Granularity, now = new Date()): Date | null {
+  switch (granularity) {
+    case "day":
+      return startOfDay(now)
+    case "week":
+      return startOfWeek(now)
+    case "month":
+      return startOfMonth(now)
+    default:
+      return null
+  }
+}
+
+export function getRefreshRange(range: TimeRange, granularity: Granularity): TimeRange {
+  const currentPeriodStart = getCurrentPeriodStart(granularity)
+  if (!currentPeriodStart) return range
+
+  const currentFrom = currentPeriodStart.toISOString()
+  if (range.from !== currentFrom) return range
+
+  return {
+    from: range.from,
+    to: new Date().toISOString()
+  }
+}
+
 /** Navigate day/week/month forward or backward. Returns new range. */
 export function navigateRange(
   granularity: Granularity,
@@ -365,6 +393,23 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
     count: b.doc_count
   }))
 
+  const bySkillAdoption: OverviewData["bySkillAdoption"] = (aggs.code_by_skill_adoption?.buckets ?? []).map((b: any) => {
+    const measuredAdoptionRate = b.measured_adoption_rate?.value
+    const inclusiveAdoptionRate = b.inclusive_adoption_rate?.value
+    return {
+      skill: b.key || "unknown",
+      generatedLines: b.generated_lines?.value ?? 0,
+      measuredGeneratedLines: b.measured_generated_lines?.value ?? 0,
+      effectiveGeneratedLines: b.effective_generated_lines?.value ?? 0,
+      unmeasuredGeneratedLines: b.unmeasured_generated_lines?.value ?? 0,
+      inclusiveEffectiveGeneratedLines: b.inclusive_effective_generated_lines?.value ?? 0,
+      adoptedLines: b.adopted_lines?.value ?? 0,
+      measuredAdoptionRate: typeof measuredAdoptionRate === "number" ? measuredAdoptionRate : null,
+      inclusiveAdoptionRate: typeof inclusiveAdoptionRate === "number" ? inclusiveAdoptionRate : null,
+      commitCount: b.commit_count?.value ?? 0
+    }
+  })
+
   const byTool: OverviewData["byTool"] = (aggs.by_tool?.buckets ?? []).map((b: any) => ({
     tool: b.key || "unknown",
     count: b.doc_count
@@ -412,6 +457,7 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
     trend,
     bySkill,
     bySkillAll,
+    bySkillAdoption,
     byTool,
     byToolAll,
     byToolFilteredAll,
@@ -701,6 +747,11 @@ export function useDashboard() {
   }, [])
 
   const refresh = useCallback(() => {
+    const nextRange = getRefreshRange(range, granularity)
+    if (nextRange.from !== range.from || nextRange.to !== range.to) {
+      setRange(nextRange)
+      return
+    }
     fetchAll(range, granularity, selectedUpperOrgLv1)
   }, [fetchAll, range, granularity, selectedUpperOrgLv1])
 

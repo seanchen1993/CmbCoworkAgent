@@ -16,6 +16,7 @@ import {
   effectiveGeneratedLinesSumAgg,
   makeDashboardCodeStats,
   normalizeCodeStatsFromAggs,
+  normalizeSkillCodeAdoptionBuckets,
   type DashboardCodeStats
 } from "./dashboard-code-stats"
 
@@ -564,6 +565,27 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
           effective_generated_lines: effectiveGeneratedLinesSumAgg(),
           adopted_lines: { sum: { field: "properties.adoptedLineCount" } }
         }
+      },
+      by_skill_adoption: {
+        terms: { field: "properties.usedSkills", size: rankingSearchSize },
+        aggs: {
+          code_gen: {
+            filter: { bool: { filter: codeGenFilters } },
+            aggs: {
+              generated_lines: { sum: { field: "properties.lineCount" } },
+              deleted_lines: { sum: { field: "properties.deletedLineCount" } }
+            }
+          },
+          code_adopt_measured: {
+            filter: { bool: { filter: codeAdoptFilters } },
+            aggs: {
+              measured_generated_lines: { sum: { field: "properties.generatedLineCount" } },
+              effective_generated_lines: effectiveGeneratedLinesSumAgg(),
+              adopted_lines: { sum: { field: "properties.adoptedLineCount" } },
+              commit_count: { cardinality: { field: "properties.commitSha" } }
+            }
+          }
+        }
       }
     }
   }
@@ -573,6 +595,7 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
     esQuery(getEsIndex("event"), codeBody)
   ])
   const codeStats = normalizeCodeStatsFromAggs(codeRaw)
+  const skillCodeAdoption = normalizeSkillCodeAdoptionBuckets(codeRaw)
   const traceRecord = asRecord(traceRaw)
   return {
     ...traceRecord,
@@ -584,7 +607,21 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
       code_measured_generated_lines: { value: codeStats.measuredGeneratedLines },
       code_unmeasured_generated_lines: { value: codeStats.unmeasuredGeneratedLines },
       code_inclusive_effective_generated_lines: { value: codeStats.inclusiveEffectiveGeneratedLines },
-      code_adopted_lines: { value: codeStats.adoptedLines }
+      code_adopted_lines: { value: codeStats.adoptedLines },
+      code_by_skill_adoption: {
+        buckets: skillCodeAdoption.map((item) => ({
+          key: item.skill,
+          generated_lines: { value: item.generatedLines },
+          measured_generated_lines: { value: item.measuredGeneratedLines },
+          effective_generated_lines: { value: item.effectiveGeneratedLines },
+          unmeasured_generated_lines: { value: item.unmeasuredGeneratedLines },
+          inclusive_effective_generated_lines: { value: item.inclusiveEffectiveGeneratedLines },
+          adopted_lines: { value: item.adoptedLines },
+          measured_adoption_rate: { value: item.measuredAdoptionRate },
+          inclusive_adoption_rate: { value: item.inclusiveAdoptionRate },
+          commit_count: { value: item.commitCount }
+        }))
+      }
     }
   }
 }
@@ -1218,6 +1255,58 @@ function makeMockOverview(range: TimeRange): unknown {
           { key: "Schema 校验",  doc_count: 6   },
           { key: "接口 Mock",    doc_count: 5   },
           { key: "灰度检查",     doc_count: 4   }
+        ]
+      },
+      code_by_skill_adoption: {
+        buckets: [
+          {
+            key: "代码审查",
+            generated_lines: { value: 850 },
+            measured_generated_lines: { value: 760 },
+            effective_generated_lines: { value: 700 },
+            unmeasured_generated_lines: { value: 90 },
+            inclusive_effective_generated_lines: { value: 790 },
+            adopted_lines: { value: 511 },
+            measured_adoption_rate: { value: 511 / 700 },
+            inclusive_adoption_rate: { value: 511 / 790 },
+            commit_count: { value: 18 }
+          },
+          {
+            key: "单元测试",
+            generated_lines: { value: 620 },
+            measured_generated_lines: { value: 620 },
+            effective_generated_lines: { value: 560 },
+            unmeasured_generated_lines: { value: 0 },
+            inclusive_effective_generated_lines: { value: 560 },
+            adopted_lines: { value: 470 },
+            measured_adoption_rate: { value: 470 / 560 },
+            inclusive_adoption_rate: { value: 470 / 560 },
+            commit_count: { value: 12 }
+          },
+          {
+            key: "SQL优化",
+            generated_lines: { value: 460 },
+            measured_generated_lines: { value: 360 },
+            effective_generated_lines: { value: 330 },
+            unmeasured_generated_lines: { value: 100 },
+            inclusive_effective_generated_lines: { value: 430 },
+            adopted_lines: { value: 260 },
+            measured_adoption_rate: { value: 260 / 330 },
+            inclusive_adoption_rate: { value: 260 / 430 },
+            commit_count: { value: 7 }
+          },
+          {
+            key: "接口设计",
+            generated_lines: { value: 380 },
+            measured_generated_lines: { value: 0 },
+            effective_generated_lines: { value: 0 },
+            unmeasured_generated_lines: { value: 380 },
+            inclusive_effective_generated_lines: { value: 380 },
+            adopted_lines: { value: 0 },
+            measured_adoption_rate: { value: null },
+            inclusive_adoption_rate: { value: 0 },
+            commit_count: { value: 0 }
+          }
         ]
       },
       by_tool: {
