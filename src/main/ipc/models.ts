@@ -76,22 +76,20 @@ interface FileHistorySnapshot {
   ts: string
 }
 
-function prepareWorkspaceSelectionSandbox(
+async function prepareWorkspaceSelectionSandbox(
   workspacePath: string,
-  parentWindow?: BrowserWindow | null,
-  shouldStillNotify?: () => boolean | Promise<boolean>
-): void {
-  if (!workspacePath || process.platform !== "win32") return
+  parentWindow?: BrowserWindow | null
+): Promise<boolean> {
+  if (!workspacePath || process.platform !== "win32") return true
 
   LocalSandbox.prewarmForWorkspace(workspacePath)
-  void LocalSandbox.prepareWorkspaceForSelection(workspacePath)
-    .then(async (result) => {
-      if (result.ready || !result.error) return
-      if (getWindowsSandboxMode() !== "elevated") return
-      if (shouldStillNotify && !(await shouldStillNotify())) return
+  try {
+    const result = await LocalSandbox.prepareWorkspaceForSelection(workspacePath)
+    if (result.ready || !result.error) return true
+    if (getWindowsSandboxMode() !== "elevated") return true
 
-      if (result.reason === "system-sensitive-path") {
-        const messageBoxOptions: MessageBoxOptions = {
+    const messageBoxOptions: MessageBoxOptions = result.reason === "system-sensitive-path"
+      ? {
           type: "warning",
           title: "Elevated 工作区受限",
           message: "Elevated 模式可以读取系统目录，也可能执行不涉及写入的命令；但当前模式需要为工作区准备写入权限，不支持将系统敏感目录作为工作区。",
@@ -99,19 +97,38 @@ function prepareWorkspaceSelectionSandbox(
           buttons: ["知道了"],
           defaultId: 0
         }
-        if (parentWindow && !parentWindow.isDestroyed()) {
-          await dialog.showMessageBox(parentWindow, messageBoxOptions)
-        } else {
-          await dialog.showMessageBox(messageBoxOptions)
+      : {
+          type: "warning",
+          title: "Elevated 沙箱配置未完成",
+          message: "工作区尚未切换，因为 Elevated 沙箱配置未完成。",
+          detail: `${result.error}\n\n请在设置中手动完成 Elevated 配置，或切换到 unelevated / none 后重试。`,
+          buttons: ["知道了"],
+          defaultId: 0
         }
-        return
-      }
 
-      console.warn(`[Workspace] elevated sandbox background preparation for ${workspacePath} did not complete: ${result.error}`)
-    })
-    .catch((err) => {
-      console.warn("[Workspace] elevated sandbox background preparation failed:", err)
-    })
+    if (parentWindow && !parentWindow.isDestroyed()) {
+      await dialog.showMessageBox(parentWindow, messageBoxOptions)
+    } else {
+      await dialog.showMessageBox(messageBoxOptions)
+    }
+    return false
+  } catch (err) {
+    console.warn("[Workspace] elevated sandbox workspace preparation failed:", err)
+    const messageBoxOptions: MessageBoxOptions = {
+      type: "warning",
+      title: "Elevated 沙箱配置未完成",
+      message: "工作区尚未切换，因为 Elevated 沙箱准备失败。",
+      detail: `${err instanceof Error ? err.message : String(err)}\n\n请在设置中手动完成 Elevated 配置，或切换到 unelevated / none 后重试。`,
+      buttons: ["知道了"],
+      defaultId: 0
+    }
+    if (parentWindow && !parentWindow.isDestroyed()) {
+      await dialog.showMessageBox(parentWindow, messageBoxOptions)
+    } else {
+      await dialog.showMessageBox(messageBoxOptions)
+    }
+    return false
+  }
 }
 
 type PushStepStatus = "ok" | "failed" | "skipped"
@@ -1845,8 +1862,9 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       if (!threadId) {
         // Fallback to global setting
         if (newPath) {
+          const ready = await prepareWorkspaceSelectionSandbox(newPath, parentWindow)
+          if (!ready) return null
           store.set("workspacePath", newPath)
-          prepareWorkspaceSelectionSandbox(newPath, parentWindow, () => store.get("workspacePath") === newPath)
         } else {
           store.delete("workspacePath")
         }
@@ -1857,27 +1875,23 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       const thread = getThread(threadId)
       if (!thread) return null
 
-      const metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
-      metadata.workspacePath = newPath
-      clearThreadGitContextCache(metadata)
-      updateThread(threadId, { metadata: JSON.stringify(metadata) })
-
-      // Update file watcher
       if (newPath) {
+        const ready = await prepareWorkspaceSelectionSandbox(newPath, parentWindow)
+        if (!ready) return null
+
+        const metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
+        metadata.workspacePath = newPath
+        clearThreadGitContextCache(metadata)
+        updateThread(threadId, { metadata: JSON.stringify(metadata) })
+
         startWatching(threadId, newPath)
         // 同步刷新“最近工作区”，供新建线程默认复用。
         store.set("workspacePath", newPath)
-        prepareWorkspaceSelectionSandbox(newPath, parentWindow, () => {
-          const current = getThread(threadId)
-          if (!current?.metadata) return false
-          try {
-            const currentMetadata = JSON.parse(current.metadata) as { workspacePath?: unknown }
-            return currentMetadata.workspacePath === newPath
-          } catch {
-            return false
-          }
-        })
       } else {
+        const metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
+        metadata.workspacePath = newPath
+        clearThreadGitContextCache(metadata)
+        updateThread(threadId, { metadata: JSON.stringify(metadata) })
         stopWatching(threadId)
       }
 
@@ -1929,6 +1943,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     }
 
     const selectedPath = result.filePaths[0]
+    const ready = await prepareWorkspaceSelectionSandbox(selectedPath, parentWindow)
+    if (!ready) return null
 
     if (threadId) {
       const { getThread, updateThread } = await import("../db")
@@ -1941,25 +1957,12 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
         // Start watching the new workspace
         startWatching(threadId, selectedPath)
-        prepareWorkspaceSelectionSandbox(selectedPath, parentWindow, () => {
-          const current = getThread(threadId)
-          if (!current?.metadata) return false
-          try {
-            const currentMetadata = JSON.parse(current.metadata) as { workspacePath?: unknown }
-            return currentMetadata.workspacePath === selectedPath
-          } catch {
-            return false
-          }
-        })
       }
     }
 
     // 无论是线程模式还是全局模式，都更新“最近工作区”。
     // 这样新建会话与下次打开选择框都能默认到这个目录。
     store.set("workspacePath", selectedPath)
-    if (!threadId) {
-      prepareWorkspaceSelectionSandbox(selectedPath, parentWindow, () => store.get("workspacePath") === selectedPath)
-    }
 
     return selectedPath
   })

@@ -698,6 +698,17 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     return areElevatedRootsPrepared(LocalSandbox.getElevatedPrepareRoots(workingDir, cacheRoots))
   }
 
+  private static shouldPromptForWorkspaceSwitchSetup(error?: string): boolean {
+    if (!error) return false
+    if (error === "initial elevated setup pending") return true
+    const lower = error.toLowerCase()
+    return lower.includes("icacls exited 5")
+      || lower.includes("access is denied")
+      || lower.includes("access denied")
+      || lower.includes("permission denied")
+      || error.includes("拒绝访问")
+  }
+
   static async prepareWorkspaceForSelection(
     workspacePath: string,
     windowsSandbox: "none" | "unelevated" | "readonly" | "elevated" = getWindowsSandboxMode(),
@@ -724,7 +735,26 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     if (preflight.ready) {
       return { ready: true, prompted: false }
     }
-    return { ready: false, prompted: false, error: preflight.error || "未知错误" }
+
+    const preflightError = preflight.error || "未知错误"
+    if (!LocalSandbox.shouldPromptForWorkspaceSwitchSetup(preflightError)) {
+      return { ready: false, prompted: false, error: preflightError }
+    }
+
+    const promptedSetup = await LocalSandbox.ensureElevatedWorkspaceSetup(
+      resolvedWorkspace,
+      cacheRoots,
+      true
+    )
+    if (!promptedSetup.ready) {
+      return {
+        ready: false,
+        prompted: true,
+        error: promptedSetup.error || preflightError
+      }
+    }
+
+    return { ready: true, prompted: true }
   }
 
   private static buildElevatedSandboxEnvPreamble(
