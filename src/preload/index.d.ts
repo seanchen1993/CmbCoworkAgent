@@ -111,14 +111,16 @@ interface CustomAPI {
       threadId: string,
       message: string,
       onEvent: (event: StreamEvent) => void,
-      modelId?: string
+      modelId?: string,
+      agentMode?: "normal" | "coordinator"
     ) => () => void
     streamAgent: (
       threadId: string,
       message: string,
       command: unknown,
       onEvent: (event: StreamEvent) => void,
-      modelId?: string
+      modelId?: string,
+      agentMode?: "normal" | "coordinator"
     ) => () => void
     interrupt: (
       threadId: string,

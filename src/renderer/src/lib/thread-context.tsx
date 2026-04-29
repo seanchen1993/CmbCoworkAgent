@@ -73,6 +73,8 @@ export interface ThreadState {
   workspaceFiles: FileInfo[]
   workspacePath: string | null
   subagents: Subagent[]
+  subagentToolCallCount: number
+  subagentInternalLogs: SubagentInternalLogEntry[]
   pendingApproval: HITLRequest | null
   error: string | null
   currentModel: string
@@ -91,6 +93,19 @@ export interface ThreadState {
   scheduledTaskId: string | null
   routingResult: RoutingResultState | null
   modelRetry: ModelRetryState | null
+}
+
+export interface SubagentInternalLogEntry {
+  id: string
+  kind: "tool_call" | "tool_result"
+  title: string
+  content: string
+  result?: string
+  status?: "waiting" | "completed"
+  createdAt: string
+  checkpointNs?: string
+  toolCallId?: string
+  toolName?: string
 }
 
 // Stream instance type
@@ -150,6 +165,8 @@ const createDefaultThreadState = (): ThreadState => ({
   workspaceFiles: [],
   workspacePath: null,
   subagents: [],
+  subagentToolCallCount: 0,
+  subagentInternalLogs: [],
   pendingApproval: null,
   error: null,
   currentModel: "",
@@ -172,6 +189,29 @@ const defaultStreamData: StreamData = {
 }
 const EMPTY_HOOK_LOGS: HookLogEntry[] = []
 
+function upsertSubagentLogEntry(
+  logs: SubagentInternalLogEntry[],
+  entry: SubagentInternalLogEntry
+): SubagentInternalLogEntry[] {
+  const existingIndex = logs.findIndex((log) => log.id === entry.id)
+  if (existingIndex === -1) {
+    return [...logs, entry].slice(-20)
+  }
+
+  const nextLogs = [...logs]
+  const existing = nextLogs[existingIndex]
+  nextLogs[existingIndex] = {
+    ...existing,
+    ...entry,
+    content: entry.content || existing.content,
+    result: entry.result ?? existing.result,
+    status: entry.status ?? existing.status,
+    toolName: entry.toolName || existing.toolName,
+    title: entry.title || existing.title
+  }
+  return nextLogs.slice(-20)
+}
+
 const ThreadContext = createContext<ThreadContextValue | null>(null)
 
 // Custom event types from the stream
@@ -190,6 +230,8 @@ interface CustomEventData {
     completedAt?: Date
     subagentType?: string
   }>
+  count?: number
+  entry?: SubagentInternalLogEntry
   usage?: {
     inputTokens?: number
     outputTokens?: number
@@ -519,6 +561,23 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 completedAt: s.completedAt,
                 subagentType: s.subagentType
               }))
+            }))
+          }
+          break
+        case "subagent_tool_count":
+          if (typeof data.count === "number" && Number.isFinite(data.count)) {
+            updateThreadState(threadId, () => ({
+              subagentToolCallCount: Math.max(0, Math.floor(data.count!))
+            }))
+          }
+          break
+        case "subagent_log_reset":
+          updateThreadState(threadId, () => ({ subagentInternalLogs: [] }))
+          break
+        case "subagent_log_entry":
+          if (data.entry?.id) {
+            updateThreadState(threadId, (prev) => ({
+              subagentInternalLogs: upsertSubagentLogEntry(prev.subagentInternalLogs, data.entry!)
             }))
           }
           break

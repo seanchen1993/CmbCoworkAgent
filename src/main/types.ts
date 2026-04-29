@@ -12,12 +12,14 @@ export interface AgentInvokeParams {
   threadId: string
   message: string
   modelId?: string
+  agentMode?: "normal" | "coordinator"
 }
 
 export interface AgentResumeParams {
   threadId: string
   command: { resume?: { decision?: string; pendingCount?: number } }
   modelId?: string
+  agentMode?: "normal" | "coordinator"
 }
 
 export interface AgentInterruptParams {

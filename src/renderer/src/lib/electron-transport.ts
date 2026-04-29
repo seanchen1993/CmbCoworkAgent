@@ -118,6 +118,15 @@ export class ElectronIPCTransport implements UseStreamTransport {
   // Track active subagents by their tool_call_id
   private activeSubagents: Map<string, Subagent> = new Map()
 
+  // Track subagent-internal tool calls as a single aggregate activity count.
+  private subagentToolCallIds: Set<string> = new Set()
+
+  private subagentToolLogEntryIds: Map<string, string> = new Map()
+
+  private subagentToolCallCount = 0
+
+  private subagentLogSequence = 0
+
   // Track accumulated tool call chunks (for streaming tool calls)
   private accumulatedToolCalls: Map<string, AccumulatedToolCall> = new Map()
 
@@ -128,10 +137,18 @@ export class ElectronIPCTransport implements UseStreamTransport {
     // Reset state for new stream
     this.currentMessageId = null
     this.activeSubagents.clear()
+    this.subagentToolCallIds.clear()
+    this.subagentToolLogEntryIds.clear()
+    this.subagentToolCallCount = 0
+    this.subagentLogSequence = 0
     this.accumulatedToolCalls.clear()
     this.completedToolCallsByName.clear()
     const threadId = payload.config?.configurable?.thread_id
     const modelId = payload.config?.configurable?.model_id as string | undefined
+    const agentMode = payload.config?.configurable?.agent_mode as
+      | "normal"
+      | "coordinator"
+      | undefined
     if (!threadId) {
       return this.createErrorGenerator("MISSING_THREAD_ID", "Thread ID is required")
     }
@@ -159,7 +176,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
       messageContent,
       payload.command,
       payload.signal,
-      modelId
+      modelId,
+      agentMode
     )
   }
 
@@ -175,7 +193,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
     message: string,
     command: unknown,
     signal: AbortSignal,
-    modelId?: string
+    modelId?: string,
+    agentMode?: "normal" | "coordinator"
   ): AsyncGenerator<StreamEvent> {
     // Create a queue to buffer events from IPC
     const eventQueue: StreamEvent[] = []
@@ -194,6 +213,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
         thread_id: threadId
       }
     }
+    yield this.createSubagentLogResetEvent()
+    yield this.createSubagentToolCountEvent()
 
     const cleanup = window.api.agent.streamAgent(
       threadId,
@@ -220,7 +241,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
           }
         }
       },
-      modelId
+      modelId,
+      agentMode
     )
 
     // Handle abort signal
@@ -451,17 +473,37 @@ export class ElectronIPCTransport implements UseStreamTransport {
       // Detect if this message comes from a subagent via checkpoint namespace
       const checkpointNs =
         metadata?.langgraph_checkpoint_ns || metadata?.checkpoint_ns
-      const isFromSubagent = this.isSubagentNamespace(checkpointNs)
-
       // Check if this is a ToolMessage (class name contains 'ToolMessage')
       const isToolMessage = className.includes("ToolMessage") && !!kwargs.tool_call_id
 
       // Check if this is an AI message (class name contains 'AI')
       const isAIMessage = className.includes("AI") || className.includes("AIMessageChunk")
 
+      const isTaskResultMessage =
+        isToolMessage &&
+        kwargs.name === "task" &&
+        !!kwargs.tool_call_id &&
+        this.activeSubagents.has(kwargs.tool_call_id)
+      const isKnownSubagentToolCall =
+        isToolMessage &&
+        !!kwargs.tool_call_id &&
+        this.subagentToolLogEntryIds.has(kwargs.tool_call_id)
+      const isFromSubagent =
+        !isTaskResultMessage &&
+        this.isSubagentNamespace(checkpointNs) &&
+        (this.hasRunningSubagent() || isKnownSubagentToolCall)
+
       if (isAIMessage) {
         if (isFromSubagent) {
-          // Silently drop subagent messages — we only show status from task tool calls
+          // Keep subagent internals hidden, but expose aggregate tool activity.
+          events.push(...this.processSubagentToolCalls(kwargs.tool_calls, kwargs.tool_call_chunks))
+          events.push(
+            ...this.createSubagentAssistantLogEvents(
+              checkpointNs,
+              kwargs.tool_calls,
+              kwargs.tool_call_chunks
+            )
+          )
         } else {
           // Main agent message
           const content = this.extractContent(kwargs.content)
@@ -537,7 +579,19 @@ export class ElectronIPCTransport implements UseStreamTransport {
       // Handle ToolMessage
       if (isToolMessage && kwargs.tool_call_id) {
         if (isFromSubagent) {
-          // Silently drop subagent tool messages
+          const resultContent = this.truncateSubagentLogContent(this.extractContent(kwargs.content))
+          events.push(
+            this.createSubagentLogEntryEvent({
+              kind: "tool_result",
+              title: `工具返回：${kwargs.name || kwargs.tool_call_id}`,
+              content: "",
+              result: resultContent,
+              status: "completed",
+              checkpointNs,
+              toolCallId: kwargs.tool_call_id,
+              toolName: kwargs.name
+            })
+          )
         } else {
           // Main agent tool message
           const content = this.extractContent(kwargs.content)
@@ -765,11 +819,92 @@ export class ElectronIPCTransport implements UseStreamTransport {
   }
 
   /**
-   * Check if a checkpoint namespace indicates a subagent message.
-   * Subagent namespaces contain "tools:" segments.
+   * Check if a checkpoint namespace indicates a nested subagent message.
+   * Main-agent tool nodes can also contain "tools:", so callers must also
+   * require an active task subagent before treating the event as internal.
    */
   private isSubagentNamespace(ns?: string): boolean {
     return !!ns && ns.includes("tools:")
+  }
+
+  private hasRunningSubagent(): boolean {
+    return Array.from(this.activeSubagents.values()).some(
+      (subagent) => subagent.status === "running"
+    )
+  }
+
+  private processSubagentToolCalls(
+    ...toolCallGroups: Array<Array<{ id?: string; name?: string }> | undefined>
+  ): StreamEvent[] {
+    let changed = false
+
+    for (const toolCalls of toolCallGroups) {
+      if (!toolCalls?.length) continue
+
+      for (const toolCall of toolCalls) {
+        if (!toolCall.id) continue
+        if (this.subagentToolCallIds.has(toolCall.id)) continue
+
+        this.subagentToolCallIds.add(toolCall.id)
+        changed = true
+      }
+    }
+
+    if (!changed) return []
+
+    this.subagentToolCallCount = this.subagentToolCallIds.size
+    return [this.createSubagentToolCountEvent()]
+  }
+
+  private createSubagentAssistantLogEvents(
+    checkpointNs?: string,
+    ...toolCallGroups: Array<Array<{ id?: string; name?: string; args?: unknown }> | undefined>
+  ): StreamEvent[] {
+    const events: StreamEvent[] = []
+
+    for (const toolCalls of toolCallGroups) {
+      if (!toolCalls?.length) continue
+
+      for (const toolCall of toolCalls) {
+        if (!toolCall.id) continue
+
+        events.push(
+          this.createSubagentLogEntryEvent({
+            kind: "tool_call",
+            title: `调用工具：${toolCall.name || "未知工具"}`,
+            content: this.formatSubagentToolArgs(toolCall.args),
+            status: "waiting",
+            checkpointNs,
+            toolCallId: toolCall.id,
+            toolName: toolCall.name
+          })
+        )
+      }
+    }
+
+    return events
+  }
+
+  private formatSubagentToolArgs(args: unknown): string {
+    if (args === undefined || args === null || args === "") return ""
+    if (typeof args === "string") {
+      return this.truncateSubagentLogContent(args)
+    }
+
+    try {
+      return this.truncateSubagentLogContent(JSON.stringify(args, null, 2))
+    } catch {
+      return this.truncateSubagentLogContent(String(args))
+    }
+  }
+
+  private truncateSubagentLogContent(content: string): string {
+    const trimmed = content.trim()
+    if (!trimmed) return ""
+
+    const maxChars = 1200
+    if (trimmed.length <= maxChars) return trimmed
+    return `${trimmed.slice(0, maxChars)}\n...`
   }
 
   /**
@@ -941,6 +1076,65 @@ export class ElectronIPCTransport implements UseStreamTransport {
       data: {
         type: "subagents",
         subagents: Array.from(this.activeSubagents.values())
+      }
+    }
+  }
+
+  private createSubagentToolCountEvent(): StreamEvent {
+    return {
+      event: "custom",
+      data: {
+        type: "subagent_tool_count",
+        count: this.subagentToolCallCount
+      }
+    }
+  }
+
+  private createSubagentLogResetEvent(): StreamEvent {
+    return {
+      event: "custom",
+      data: {
+        type: "subagent_log_reset"
+      }
+    }
+  }
+
+  private createSubagentLogEntryEvent(input: {
+    kind: "tool_call" | "tool_result"
+    title: string
+    content?: string
+    result?: string
+    status?: "waiting" | "completed"
+    checkpointNs?: string
+    toolCallId?: string
+    toolName?: string
+  }): StreamEvent {
+    this.subagentLogSequence += 1
+    const entryId =
+      input.toolCallId && this.subagentToolLogEntryIds.has(input.toolCallId)
+        ? this.subagentToolLogEntryIds.get(input.toolCallId)!
+        : `subagent-log-${Date.now()}-${this.subagentLogSequence}`
+
+    if (input.toolCallId) {
+      this.subagentToolLogEntryIds.set(input.toolCallId, entryId)
+    }
+
+    return {
+      event: "custom",
+      data: {
+        type: "subagent_log_entry",
+        entry: {
+          id: entryId,
+          kind: input.kind,
+          title: input.title,
+          content: input.content ?? "",
+          result: input.result,
+          status: input.status,
+          checkpointNs: input.checkpointNs,
+          toolCallId: input.toolCallId,
+          toolName: input.toolName,
+          createdAt: new Date().toISOString()
+        }
       }
     }
   }

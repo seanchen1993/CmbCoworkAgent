@@ -7,7 +7,7 @@ import {
   getSkillEvolutionThreshold,
   type ModelRetryHooks
 } from "../agent/runtime"
-import { getThread } from "../db"
+import { getThread, updateThread } from "../db"
 import { summarizeAndSave } from "../memory/summarizer"
 import { getMemoryStore } from "../memory/store"
 import { ChatOpenAI } from "@langchain/openai"
@@ -63,6 +63,11 @@ import {
   type SkillProposal,
   type WorthinessResult
 } from "../agent/skill-evolution/skill-proposal-logic"
+import {
+  getAgentModeFromMetadata,
+  resolveCoordinatorHarnessRequest,
+  type AgentMode
+} from "../agent/coordinator-harness"
 import { isRetryableApiError, buildOrderedChain, type FailoverAttempt } from "../agent/failover"
 import { runHooks, type HookContext, type HookResultCallback } from "../hooks/runner"
 import type { HookResult } from "../hooks/types"
@@ -950,7 +955,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
   )
 
   // Handle agent invocation with streaming
-  ipcMain.on("agent:invoke", async (event, { threadId, message, modelId }: AgentInvokeParams) => {
+  ipcMain.on("agent:invoke", async (
+    event,
+    { threadId, message, modelId, agentMode: requestedAgentMode }: AgentInvokeParams
+  ) => {
     const channel = `agent:stream:${threadId}`
     const window = BrowserWindow.fromWebContents(event.sender)
 
@@ -1120,6 +1128,46 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         })
       }
 
+      const metadataAgentMode = getAgentModeFromMetadata(metadata)
+      const requestedMode =
+        requestedAgentMode === "coordinator" || requestedAgentMode === "normal"
+          ? requestedAgentMode
+          : undefined
+      const harnessRequest = resolveCoordinatorHarnessRequest(effectiveMessage, metadata)
+      effectiveMessage = harnessRequest.message
+
+      const effectiveAgentMode: AgentMode =
+        requestedMode ?? (harnessRequest.enabled ? "coordinator" : metadataAgentMode)
+      const shouldPersistAgentMode =
+        requestedMode !== undefined ||
+        (harnessRequest.shouldPersist && effectiveAgentMode === "coordinator")
+
+      if (shouldPersistAgentMode) {
+        metadata.agentMode = effectiveAgentMode
+        updateThread(threadId, { metadata: JSON.stringify(metadata) })
+      }
+
+      console.log("[CoordinatorHarness] mode resolved", {
+        threadId,
+        requestedAgentMode: requestedMode ?? null,
+        metadataAgentMode,
+        harnessSource: harnessRequest.source ?? null,
+        harnessRequestEnabled: harnessRequest.enabled,
+        persisted: shouldPersistAgentMode,
+        effectiveAgentMode
+      })
+
+      if (effectiveAgentMode === "coordinator") {
+        window.webContents.send(channel, {
+          type: "custom",
+          data: {
+            type: "agent_mode",
+            mode: "coordinator",
+            source: requestedMode ? "ui" : harnessRequest.source ?? "metadata"
+          }
+        })
+      }
+
       // Sync FTS index with any memory files changed since last invocation
       if (isMemoryEnabled()) {
         try {
@@ -1192,6 +1240,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             modelId: candidateId,
             abortSignal: abortController.signal,
             noSkillEvolutionTool: true,
+            agentMode: effectiveAgentMode,
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
             onHookResult
@@ -1788,6 +1837,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             modelId: nextCandidate,
             abortSignal: abortController.signal,
             noSkillEvolutionTool: true,
+            agentMode: effectiveAgentMode,
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
             onHookResult
@@ -1988,7 +2038,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
   })
 
   // Handle agent resume (after interrupt approval/rejection via useStream)
-  ipcMain.on("agent:resume", async (event, { threadId, command, modelId }: AgentResumeParams) => {
+  ipcMain.on("agent:resume", async (
+    event,
+    { threadId, command, modelId, agentMode: requestedAgentMode }: AgentResumeParams
+  ) => {
     const channel = `agent:stream:${threadId}`
     const window = BrowserWindow.fromWebContents(event.sender)
 
@@ -2003,6 +2056,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     const thread = getThread(threadId)
     const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
     const workspacePath = metadata.workspacePath as string | undefined
+    const resumeAgentMode: AgentMode =
+      requestedAgentMode === "coordinator" || requestedAgentMode === "normal"
+        ? requestedAgentMode
+        : getAgentModeFromMetadata(metadata)
+
+    if (requestedAgentMode === "coordinator" || requestedAgentMode === "normal") {
+      updateThread(threadId, {
+        metadata: JSON.stringify({ ...metadata, agentMode: requestedAgentMode })
+      })
+    }
 
     if (!workspacePath) {
       window.webContents.send(channel, {
@@ -2090,6 +2153,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             modelId: candidateId,
             abortSignal: abortController.signal,
             noSkillEvolutionTool: true,
+            agentMode: resumeAgentMode,
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
             onHookResult
@@ -2213,6 +2277,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             modelId: nextCandidate,
             abortSignal: abortController.signal,
             noSkillEvolutionTool: true,
+            agentMode: resumeAgentMode,
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
             onHookResult
@@ -2288,6 +2353,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
     const workspacePath = metadata.workspacePath as string | undefined
     const modelId = metadata.model as string | undefined
+    const interruptAgentMode = getAgentModeFromMetadata(metadata)
 
     if (!workspacePath) {
       window.webContents.send(channel, {
@@ -2369,6 +2435,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               modelId: candidateId,
               abortSignal: abortController.signal,
               noSkillEvolutionTool: true,
+              agentMode: interruptAgentMode,
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult
@@ -2489,6 +2556,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               modelId: nextCandidate,
               abortSignal: abortController.signal,
               noSkillEvolutionTool: true,
+              agentMode: interruptAgentMode,
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult

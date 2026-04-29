@@ -49,6 +49,7 @@ import {
   type HookLogEntry
 } from "@/lib/thread-context"
 import { ModelSwitcher } from "./ModelSwitcher"
+import { AgentModeSwitcher, type ChatAgentMode } from "./AgentModeSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
 import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
@@ -366,6 +367,7 @@ export function ChatContainer({
   const [needUpdateVersion, setNeedUpdateVersion] = useState(false)
   const [modelContextLimit, setModelContextLimit] = useState<number | undefined>(undefined)
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false)
+  const [agentMode, setAgentMode] = useState<ChatAgentMode>("normal")
 
   useEffect(() => {
     const { ipcRenderer } = window.electron
@@ -426,10 +428,54 @@ export function ChatContainer({
     threads,
     models,
     loadThreads,
+    updateThread,
     generateTitleForFirstMessage,
     setShowCustomizeView,
     setMarketInitialSkillCategory
   } = useAppStore()
+
+  useEffect(() => {
+    const currentThread = threads.find((thread) => thread.thread_id === threadId)
+    if (currentThread) {
+      const metadata = currentThread.metadata ?? {}
+      setAgentMode(metadata.agentMode === "coordinator" ? "coordinator" : "normal")
+      return
+    }
+
+    let cancelled = false
+    void window.api.threads
+      .get(threadId)
+      .then((thread) => {
+        if (cancelled) return
+        const metadata = thread?.metadata ?? {}
+        setAgentMode(metadata.agentMode === "coordinator" ? "coordinator" : "normal")
+      })
+      .catch((error) => {
+        console.warn("[ChatContainer] Failed to load agent mode:", error)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [threadId, threads])
+
+  const handleAgentModeChange = useCallback(
+    (nextMode: ChatAgentMode): void => {
+      const previousMode = agentMode
+      setAgentMode(nextMode)
+      void (async () => {
+        const thread = await window.api.threads.get(threadId)
+        const metadata = thread?.metadata ?? {}
+        await updateThread(threadId, {
+          metadata: { ...metadata, agentMode: nextMode }
+        })
+      })().catch((error) => {
+        console.error("[ChatContainer] Failed to update agent mode:", error)
+        setAgentMode(previousMode)
+        toast.error("Agent 模式保存失败，请重试")
+      })
+    },
+    [agentMode, threadId, updateThread]
+  )
 
   const allSkillsRef = useRef<MarketItem[]>([])
   const [goodSkillsData, setGoodSkillsData] = useState<MarketItem[]>([])
@@ -962,7 +1008,9 @@ export function ChatContainer({
           command: {
             resume: { decision: legacyDecision, pendingCount: pendingApproval.pendingCount }
           },
-          config: { configurable: { thread_id: threadId, model_id: currentModel } }
+          config: {
+            configurable: { thread_id: threadId, model_id: currentModel, agent_mode: agentMode }
+          }
         })
       } catch (err) {
         console.error("[ChatContainer] Resume command failed:", err)
@@ -970,6 +1018,7 @@ export function ChatContainer({
     },
     [
       currentModel,
+      agentMode,
       pendingApproval,
       savedToolDescriptionInput,
       savedToolNameInput,
@@ -1453,7 +1502,7 @@ export function ChatContainer({
       },
       {
         config: {
-          configurable: { thread_id: threadId, model_id: currentModel }
+          configurable: { thread_id: threadId, model_id: currentModel, agent_mode: agentMode }
         }
       }
     )
@@ -2889,6 +2938,12 @@ export function ChatContainer({
                     </button>
                     <div className="w-px h-4 bg-border mx-1" />
                     <ModelSwitcher threadId={threadId} />
+                    <div className="w-px h-4 bg-border mx-1" />
+                    <AgentModeSwitcher
+                      mode={agentMode}
+                      disabled={isLoading}
+                      onChange={handleAgentModeChange}
+                    />
                     <div className="w-px h-4 bg-border mx-1" />
                     <WorkspacePicker
                       threadId={threadId}

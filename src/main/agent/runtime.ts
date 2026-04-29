@@ -86,6 +86,13 @@ import {
   DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
   loadAgentsPromptForWorkspace
 } from "./agents-md"
+import {
+  buildCoordinatorSystemPrompt,
+  buildCoordinatorTaskPrompt,
+  buildHarnessSubagents,
+  createCoordinatorHarnessTools,
+  type AgentMode
+} from "./coordinator-harness"
 
 /** Decompress codex.exe.gz → codex.exe if needed (re-extract if .gz is newer than .exe). */
 async function ensureCodexExe(exePath: string): Promise<void> {
@@ -243,7 +250,12 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     trimTokensToSummarize,
     summarizationSummaryPrompt,
     summarizationTruncateArgsSettings,
-    subagentExtraSystemPrompt
+    subagentExtraSystemPrompt,
+    mainFilesystemEnabled = true,
+    mainTodosEnabled = true,
+    subagentDefaultTools,
+    taskSystemPrompt = SEQUENTIAL_TASK_PROMPT,
+    includeGeneralPurposeSubagent = true
   } = params
 
   // --- systemPrompt handling (identical to original) ---
@@ -556,23 +568,26 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
       : GENERAL_PURPOSE_SUBAGENT.systemPrompt,
     middleware: skillsMiddlewareArray
   }
+  const availableSubagents = includeGeneralPurposeSubagent
+    ? [generalPurposeSubagent, ...processedSubagents]
+    : processedSubagents
 
   return createAgent({
     model,
     systemPrompt: finalSystemPrompt,
     tools,
     middleware: [
-      todoListMiddleware(),
-      createFsMiddleware(),
+      ...(mainTodosEnabled ? [todoListMiddleware()] : []),
+      ...(mainFilesystemEnabled ? [createFsMiddleware()] : []),
       toolErrorMiddleware,
       createSubAgentMiddleware({
         defaultModel: model,
-        defaultTools: tools,
+        defaultTools: subagentDefaultTools ?? tools,
         defaultMiddleware: subagentMiddleware,
         defaultInterruptOn: null,
-        subagents: [generalPurposeSubagent, ...processedSubagents],
+        subagents: availableSubagents,
         generalPurposeAgent: false,
-        systemPrompt: SEQUENTIAL_TASK_PROMPT
+        systemPrompt: taskSystemPrompt
       } as Parameters<typeof createSubAgentMiddleware>[0]),
       createSummarizationMiddleware(summarizationOptions),
       anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
@@ -631,6 +646,18 @@ function formatLocalISO(date: Date, timeZone: string): string {
   return `${local}${sign}${oh}:${om}`
 }
 
+function getRuntimeTimeContext(date: Date = new Date()): {
+  timezone: string
+  currentTime: string
+} {
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
+  const currentTime = formatLocalISO(date, timezone)
+  return {
+    timezone,
+    currentTime
+  }
+}
+
 function getSystemPrompt(workspacePath: string, windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated"): string {
   const isWindows = process.platform === "win32"
   const platform = isWindows ? "Windows" : process.platform === "darwin" ? "macOS" : "Linux"
@@ -654,13 +681,13 @@ function getSystemPrompt(workspacePath: string, windowsSandbox?: "none" | "unele
   - NEVER use bash-specific syntax: $(), \${}, <<<, <(), 2>&1 |, [[ ]], etc.`
       : "- Use cmd.exe syntax for shell commands (e.g., dir instead of ls, type instead of cat)\n- Use && to chain commands, use ^ for line continuation, use %VAR% for environment variables"
 
-  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
+  const timeContext = getRuntimeTimeContext()
   const workingDirSection = `
 ### System Environment
 - Operating system: ${platform} (${process.arch})
 - Default shell: ${shell}
-- Timezone: ${timezone}
-- Current time: ${formatLocalISO(new Date(), timezone)}
+- Timezone: ${timeContext.timezone}
+- Current time: ${timeContext.currentTime}
 ${shellGuidance}
 
 ### File System and Paths
@@ -1034,6 +1061,8 @@ export interface CreateAgentRuntimeOptions {
   noSkillEvolutionTool?: boolean
   /** Load workspace AGENTS.md hierarchy into the main system prompt. */
   enableAgentsPrompt?: boolean
+  /** Runtime mode. "normal" preserves the existing agent; "coordinator" enables harness orchestration. */
+  agentMode?: AgentMode
   /** AbortSignal — when signalled, any running child process is killed immediately. */
   abortSignal?: AbortSignal
   /** Optional hooks invoked when the model fetch layer retries / resolves. */
@@ -1058,8 +1087,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     retryHooks,
     maxRetryAttempts,
     enableAgentsPrompt = true,
+    agentMode = "normal",
     onHookResult
   } = options
+  const isCoordinatorMode = agentMode === "coordinator"
 
   if (!threadId) {
     throw new Error("Thread ID is required for checkpointing.")
@@ -1074,6 +1105,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   console.log("[Runtime] Creating agent runtime...")
   console.log("[Runtime] Thread ID:", threadId)
   console.log("[Runtime] Workspace path:", workspacePath)
+  console.log("[Runtime] Agent mode:", agentMode)
 
   const selectedModelId = modelId?.startsWith("custom:") ? modelId.slice("custom:".length) : undefined
 
@@ -1234,6 +1266,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const isWindows = process.platform === "win32"
   const platform = isWindows ? "Windows" : process.platform === "darwin" ? "macOS" : "Linux"
   const { name: shell, isBashLike, isPowerShell } = getShellInfo(windowsSandbox)
+  const timeContext = getRuntimeTimeContext()
   const userInfo = getUserInfo()
   const subagentShellGuidance = isBashLike
     ? "- Use Unix/bash commands for shell operations (ls, cat, grep, etc.)"
@@ -1254,6 +1287,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
 ### System Environment
 - Operating system: ${platform} (${process.arch})
 - Default shell: ${shell}
+- Timezone: ${timeContext.timezone}
+- Current time: ${timeContext.currentTime}
+- Timestamp rule: Do not invent dates or timestamps. If a timestamp is useful, use the current time above; otherwise omit it.
 ${subagentShellGuidance}
 
 ### Available Tools
@@ -1418,18 +1454,44 @@ The workspace root is: ${workspacePath}`
     console.log("[Runtime] Added code_exec prompt")
   }
 
-  systemPrompt += renderInjectedToolUsagePrompt({
-    hasSearchTool,
-    hasInspectTool,
-    hasInvokeDeferredTool,
-    hasCodeExecTool
-  })
-  systemPrompt += renderAvailableDeferredToolsPrompt(deferredToolIds)
+  const coordinatorHarnessTools = isCoordinatorMode
+    ? createCoordinatorHarnessTools({ workspacePath, threadId })
+    : []
+  if (coordinatorHarnessTools.length > 0) {
+    wrapToolErrors(coordinatorHarnessTools as any[])
+  }
+
+  const harnessProjectInstructions = [agentsPrompt.prompt, extraSystemPrompt]
+    .filter(Boolean)
+    .join("\n\n")
+  if (isCoordinatorMode) {
+    systemPrompt = buildCoordinatorSystemPrompt({
+      threadId,
+      workspacePath,
+      platform,
+      shell,
+      timezone: timeContext.timezone,
+      currentTime: timeContext.currentTime,
+      projectInstructions: harnessProjectInstructions,
+      hasBrowserTool: hasNamedTool("browser_playwright"),
+      hasCodeExecTool,
+      deferredToolIds
+    })
+  } else {
+    systemPrompt += renderInjectedToolUsagePrompt({
+      hasSearchTool,
+      hasInspectTool,
+      hasInvokeDeferredTool,
+      hasCodeExecTool
+    })
+    systemPrompt += renderAvailableDeferredToolsPrompt(deferredToolIds)
+  }
   console.log("[Runtime] System prompt summary:", {
     chars: systemPrompt.length,
     hasAgentsPrompt: Boolean(agentsPrompt.prompt),
     agentsFilesLoaded: agentsPrompt.loadedPaths.length,
     hasExtraSystemPrompt: Boolean(extraSystemPrompt),
+    agentMode,
     deferredToolIds: deferredToolIds.length
   })
   const triggerTokens = Math.floor(maxTokens * 0.75)
@@ -1439,18 +1501,57 @@ The workspace root is: ${workspacePath}`
   console.log("[Runtime] Context window:", maxTokens, "→ summarization trigger:", triggerTokens, "→ keep:", keepTokens, "→ tool evict limit:", toolEvictLimit, "→ trim for summary:", trimForSummary, "→ max output bytes:", maxOutputBytes)
 
   backend.setGitWorkflowCommitOnly(false)
-  console.log("[Runtime] Final tool list:", finalTools.map((t) => (t as { name?: string }).name ?? "(unnamed)"))
+  const mainTools = isCoordinatorMode ? coordinatorHarnessTools : finalTools
+  const workerTools = finalTools
+  const harnessSubagents = isCoordinatorMode
+    ? buildHarnessSubagents(
+        harnessProjectInstructions || undefined,
+        allSkillsSources.length > 0 ? allSkillsSources : undefined,
+        threadId,
+        timeContext
+      )
+    : []
+
+  console.log(
+    "[Runtime] Final tool list:",
+    mainTools.map((t) => (t as { name?: string }).name ?? "(unnamed)")
+  )
+  if (isCoordinatorMode) {
+    console.log(
+      "[Runtime] Coordinator worker tool list:",
+      workerTools.map((t) => (t as { name?: string }).name ?? "(unnamed)")
+    )
+    console.log("[CoordinatorHarness] runtime configured", {
+      threadId,
+      mainTools: mainTools.map((t) => (t as { name?: string }).name ?? "(unnamed)"),
+      workerToolCount: workerTools.length,
+      subagents: harnessSubagents.map((agent) => agent.name),
+      mainTodosEnabled: false,
+      mainFilesystemEnabled: false,
+      mainSkillsEnabled: false,
+      mainMemoryEnabled: false
+    })
+  }
+  const mainSkillSources =
+    !isCoordinatorMode && allSkillsSources.length > 0 ? allSkillsSources : undefined
+  const mainMemorySources = !isCoordinatorMode && memorySources?.length ? memorySources : undefined
 
   const agent = createDeepAgent({
     model,
-    tools: finalTools,
+    tools: mainTools,
+    subagentDefaultTools: workerTools,
+    subagents: harnessSubagents,
     checkpointer,
     backend,
     systemPrompt,
     filesystemSystemPrompt,
     subagentExtraSystemPrompt: agentsPrompt.prompt ?? undefined,
-    skills: allSkillsSources.length > 0 ? allSkillsSources : undefined,
-    memory: memorySources?.length ? memorySources : undefined,
+    mainTodosEnabled: !isCoordinatorMode,
+    mainFilesystemEnabled: !isCoordinatorMode,
+    taskSystemPrompt: isCoordinatorMode ? buildCoordinatorTaskPrompt(threadId) : SEQUENTIAL_TASK_PROMPT,
+    includeGeneralPurposeSubagent: !isCoordinatorMode,
+    skills: mainSkillSources,
+    memory: mainMemorySources,
     // When the orchestrator is active (non-YOLO), it handles execute approval
     // internally via IPC — no need for the HITL middleware to intercept execute.
     // HITL middleware is still used in YOLO=false mode for non-execute tools if needed.
@@ -1467,8 +1568,8 @@ The workspace root is: ${workspacePath}`
     }
   })
 
-  console.log("[Runtime] Agent created with skills parameter:", allSkillsSources.length > 0 ? allSkillsSources : undefined)
-  console.log("[Runtime] Final skills passed to createDeepAgent:", JSON.stringify(allSkillsSources.length > 0 ? allSkillsSources : undefined, null, 2))
+  console.log("[Runtime] Agent created with skills parameter:", mainSkillSources)
+  console.log("[Runtime] Final skills passed to createDeepAgent:", JSON.stringify(mainSkillSources, null, 2))
   console.log("[Runtime] Agent created with LocalSandbox at:", workspacePath)
   return agent
 }

@@ -84,7 +84,8 @@ const api = {
       threadId: string,
       message: string,
       onEvent: (event: StreamEvent) => void,
-      modelId?: string
+      modelId?: string,
+      agentMode?: "normal" | "coordinator"
     ): (() => void) => {
       const channel = `agent:stream:${threadId}`
 
@@ -96,7 +97,7 @@ const api = {
       }
 
       ipcRenderer.on(channel, handler)
-      ipcRenderer.send("agent:invoke", { threadId, message, modelId })
+      ipcRenderer.send("agent:invoke", { threadId, message, modelId, agentMode })
 
       return () => {
         ipcRenderer.removeListener(channel, handler)
@@ -107,7 +108,8 @@ const api = {
       message: string,
       command: unknown,
       onEvent: (event: StreamEvent) => void,
-      modelId?: string
+      modelId?: string,
+      agentMode?: "normal" | "coordinator"
     ): (() => void) => {
       const channel = `agent:stream:${threadId}`
 
@@ -121,9 +123,9 @@ const api = {
       ipcRenderer.on(channel, handler)
 
       if (command) {
-        ipcRenderer.send("agent:resume", { threadId, command, modelId })
+        ipcRenderer.send("agent:resume", { threadId, command, modelId, agentMode })
       } else {
-        ipcRenderer.send("agent:invoke", { threadId, message, modelId })
+        ipcRenderer.send("agent:invoke", { threadId, message, modelId, agentMode })
       }
 
       return () => {
