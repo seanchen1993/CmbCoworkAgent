@@ -71,6 +71,7 @@ import { getWindowsSandboxMode, getYoloMode, getEnabledHooks, isCodeExecEnabled,
 import { runHooks } from "../hooks/runner"
 import { ApprovalStore } from "./approval-store"
 import { ToolOrchestrator } from "./tool-orchestrator"
+import { classifyCommandConcurrency } from "./exec-policy"
 import type { ApprovalRequest, ApprovalDecision } from "../types"
 import type { McpCapabilityService, McpCapabilityTool } from "../mcp/capability-types"
 import {
@@ -132,11 +133,8 @@ type ToolConcurrencyTier = "exclusive" | "shared" | "bypass"
  * files, subagent slots). These must run one-at-a-time across the entire
  * thread — write lock.
  *
- * Note: shell / file I/O tools are intentionally NOT here. They are approval-
- * required but each operates on independent resources, so they go into SHARED
- * so their approval events can fire concurrently. Actual per-resource
- * serialization happens at a lower layer (LocalSandbox.runSerializedExecution
- * for shell; filesystem is concurrency-safe per distinct path).
+ * Note: mutating shell / file I/O tools are also exclusive. Only commands that
+ * are provably read-only are allowed to overlap with other read-only work.
  */
 const EXCLUSIVE_TOOL_NAMES = new Set([
   "code_exec",
@@ -146,20 +144,16 @@ const EXCLUSIVE_TOOL_NAMES = new Set([
   "manage_scheduler",
   "manage_skill",
   "task",
-  "invoke_deferred_tool"
+  "invoke_deferred_tool",
+  "write_file",
+  "edit_file"
 ])
 
 /**
  * Tools that hold the read lock. This includes:
  *   - True read-only tools (read_file, grep, glob, …)
- *   - Approval-required tools whose actual execution is coordinated at a lower
- *     layer (execute / write_file / edit_file). They go here so that batched
- *     approvals fire CONCURRENTLY — holding them under write lock would
- *     serialize the approval events, defeating the Codex-style "approve the
- *     whole batch up front, execute after each approval" UX.
- *
- * Aligns with Codex: shell / local_shell / exec_command / shell_command are
- * marked `supports_parallel_tool_calls: true` there for the same reason.
+ *   - `execute` only when its command is classified as read-only. Other
+ *     commands are exclusive so writes/builds/package managers do not overlap.
  */
 const SHARED_TOOL_NAMES = new Set([
   // True read-only
@@ -170,15 +164,28 @@ const SHARED_TOOL_NAMES = new Set([
   "search_tool",
   "inspect_tool",
   "task_output",
-  "view_image",
-  // Approval-required, per-resource-independent
-  "execute",
-  "write_file",
-  "edit_file"
+  "view_image"
 ])
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
+}
+
+function executeCommandFromToolArgs(args: unknown): string | null {
+  if (isRecord(args) && typeof args.command === "string") {
+    return args.command
+  }
+  if (typeof args === "string") {
+    try {
+      const parsed = JSON.parse(args) as unknown
+      if (isRecord(parsed) && typeof parsed.command === "string") {
+        return parsed.command
+      }
+    } catch {
+      return null
+    }
+  }
+  return null
 }
 
 function classifyToolConcurrency(
@@ -188,6 +195,12 @@ function classifyToolConcurrency(
   if (!toolName) return "exclusive" // safety default: unknown → write lock
 
   if (EXCLUSIVE_TOOL_NAMES.has(toolName)) return "exclusive"
+  if (toolName === "execute") {
+    const command = executeCommandFromToolArgs(toolCall?.args)
+    return command && classifyCommandConcurrency(command) === "parallel_safe"
+      ? "shared"
+      : "exclusive"
+  }
   if (SHARED_TOOL_NAMES.has(toolName)) return "shared"
   // Unknown tools (eager MCP tools registered with runtime toolId names,
   // dynamic plugin tools, custom extras) default to EXCLUSIVE. This matches
@@ -736,11 +749,12 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
   // Base middleware for custom subagents (no skills — custom subagents must define their own)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const gradedToolConcurrencyMiddleware = createGradedToolConcurrencyMiddleware(toolConcurrencyQueueId)
+  const subagentToolConcurrencyMiddleware = createGradedToolConcurrencyMiddleware(`${toolConcurrencyQueueId}:subagent`)
 
   const subagentMiddleware: any[] = [
     todoListMiddleware(),
     createFsMiddleware(),
-    gradedToolConcurrencyMiddleware,
+    subagentToolConcurrencyMiddleware,
     toolErrorMiddleware,
     createSummarizationMiddleware(summarizationOptions),
     anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),

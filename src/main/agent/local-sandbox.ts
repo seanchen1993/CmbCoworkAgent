@@ -32,7 +32,7 @@ import * as chardet from "jschardet"
 import micromatch from "micromatch"
 import { replace } from "./replace"
 import type { ToolOrchestrator } from "./tool-orchestrator"
-import { assessCommandSafety } from "./exec-policy"
+import { assessCommandSafety, classifyCommandConcurrency } from "./exec-policy"
 import {
   areElevatedRootsPrepared,
   isElevatedSetupComplete,
@@ -169,6 +169,15 @@ export interface LocalSandboxOptions {
 
 interface ExecuteRawOptions {
   background?: boolean
+}
+
+type ExecutionConcurrencyMode = "shared" | "exclusive"
+
+interface ExecutionGate {
+  activeShared: number
+  exclusiveHeld: boolean
+  sharedQueue: Array<() => void>
+  exclusiveQueue: Array<() => void>
 }
 
 interface WorkspaceSwitchPreparationResult {
@@ -463,7 +472,8 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
   private static readonly _elevatedWorkspacePreparePromises = new Map<string, Promise<boolean>>()
   private static readonly _elevatedWorkspaceSetupPromises =
     new Map<string, Promise<{ ready: boolean; error?: string }>>()
-  private static readonly _serializedExecutionQueues = new Map<string, Promise<void>>()
+  private static readonly _executionGates = new Map<string, ExecutionGate>()
+  private static readonly PARALLEL_SAFE_EXECUTION_LIMIT = 2
   // Keep command-time prewarm opportunistic. The Codex sandbox backend still
   // performs its own refresh; this tiny grace only lets an already-fast ACL
   // prewarm finish without making shell execution wait on setup work.
@@ -596,32 +606,112 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     return `${runId}|${normalizeDirKey(workingDir)}|${sandboxMode}`
   }
 
-  private static async runSerializedExecution<T>(key: string, task: () => Promise<T>): Promise<T> {
-    const previous = LocalSandbox._serializedExecutionQueues.get(key)
-    let releaseCurrent!: () => void
-    const current = new Promise<void>((resolve) => {
-      releaseCurrent = resolve
-    })
-    const tail = (previous ?? Promise.resolve()).catch(() => undefined).then(() => current)
-    LocalSandbox._serializedExecutionQueues.set(key, tail)
+  private static getExecutionGate(key: string): ExecutionGate {
+    let gate = LocalSandbox._executionGates.get(key)
+    if (!gate) {
+      gate = {
+        activeShared: 0,
+        exclusiveHeld: false,
+        sharedQueue: [],
+        exclusiveQueue: []
+      }
+      LocalSandbox._executionGates.set(key, gate)
+    }
+    return gate
+  }
 
-    const waitStart = Date.now()
-    if (previous) {
-      console.log(`[LocalSandbox] queue: waiting for previous command on ${key}`)
-      await previous.catch(() => undefined)
-      console.log(`[LocalSandbox] queue: acquired ${key} after ${Date.now() - waitStart}ms`)
+  private static drainExecutionGate(gate: ExecutionGate, sharedLimit: number): void {
+    if (gate.exclusiveHeld) return
+
+    if (gate.activeShared === 0 && gate.exclusiveQueue.length > 0) {
+      const nextExclusive = gate.exclusiveQueue.shift()
+      if (nextExclusive) {
+        gate.exclusiveHeld = true
+        nextExclusive()
+      }
+      return
     }
 
+    if (gate.exclusiveQueue.length > 0) return
+
+    while (gate.activeShared < sharedLimit && gate.sharedQueue.length > 0) {
+      const nextShared = gate.sharedQueue.shift()
+      if (!nextShared) break
+      gate.activeShared += 1
+      nextShared()
+    }
+  }
+
+  private static releaseExecutionGate(
+    key: string,
+    gate: ExecutionGate,
+    mode: ExecutionConcurrencyMode,
+    sharedLimit: number
+  ): void {
+    if (mode === "exclusive") {
+      gate.exclusiveHeld = false
+    } else {
+      gate.activeShared = Math.max(0, gate.activeShared - 1)
+    }
+
+    LocalSandbox.drainExecutionGate(gate, sharedLimit)
+    if (
+      !gate.exclusiveHeld &&
+      gate.activeShared === 0 &&
+      gate.exclusiveQueue.length === 0 &&
+      gate.sharedQueue.length === 0
+    ) {
+      LocalSandbox._executionGates.delete(key)
+    }
+  }
+
+  private static async acquireExecutionGate(
+    key: string,
+    mode: ExecutionConcurrencyMode,
+    sharedLimit: number
+  ): Promise<() => void> {
+    const gate = LocalSandbox.getExecutionGate(key)
+    return new Promise<() => void>((resolve) => {
+      const grant = () => {
+        resolve(() => LocalSandbox.releaseExecutionGate(key, gate, mode, sharedLimit))
+      }
+      if (mode === "exclusive") {
+        gate.exclusiveQueue.push(grant)
+      } else {
+        gate.sharedQueue.push(grant)
+      }
+      LocalSandbox.drainExecutionGate(gate, sharedLimit)
+    })
+  }
+
+  private static async runExecutionWithConcurrency<T>(
+    key: string,
+    mode: ExecutionConcurrencyMode,
+    task: () => Promise<T>
+  ): Promise<T> {
+    const waitStart = Date.now()
+    const release = await LocalSandbox.acquireExecutionGate(
+      key,
+      mode,
+      LocalSandbox.PARALLEL_SAFE_EXECUTION_LIMIT
+    )
+    const waited = Date.now() - waitStart
+    if (waited > 50) {
+      console.log(`[LocalSandbox] ${mode} command gate acquired ${key} after ${waited}ms`)
+    }
     try {
       return await task()
     } finally {
-      releaseCurrent()
-      void tail.finally(() => {
-        if (LocalSandbox._serializedExecutionQueues.get(key) === tail) {
-          LocalSandbox._serializedExecutionQueues.delete(key)
-        }
-      })
+      release()
     }
+  }
+
+  private static async runSerializedExecution<T>(key: string, task: () => Promise<T>): Promise<T> {
+    return LocalSandbox.runExecutionWithConcurrency(key, "exclusive", task)
+  }
+
+  private static async runParallelSafeExecution<T>(key: string, task: () => Promise<T>): Promise<T> {
+    return LocalSandbox.runExecutionWithConcurrency(key, "shared", task)
   }
 
   static prewarmForWorkspace(
@@ -2937,6 +3027,13 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     }
 
     const queueKey = LocalSandbox.buildSerializedExecutionKey(this.runId, this.workingDir, effectiveSandboxMode)
+    const commandConcurrency = classifyCommandConcurrency(command)
+    if (commandConcurrency === "parallel_safe") {
+      return LocalSandbox.runParallelSafeExecution(queueKey, () =>
+        this.executeRawUnserialized(command, sandboxModeOverride, timeoutMs, overrideAbortSignal)
+      )
+    }
+
     return LocalSandbox.runSerializedExecution(queueKey, () =>
       this.executeRawUnserialized(command, sandboxModeOverride, timeoutMs, overrideAbortSignal)
     )
