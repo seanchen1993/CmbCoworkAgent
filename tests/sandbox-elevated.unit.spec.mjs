@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs"
 
 const modelsSource = readFileSync(new URL("../src/main/ipc/models.ts", import.meta.url), "utf8")
 const localSandboxSource = readFileSync(new URL("../src/main/agent/local-sandbox.ts", import.meta.url), "utf8")
+const sandboxSource = readFileSync(new URL("../src/main/ipc/sandbox.ts", import.meta.url), "utf8")
 
 function sectionBetween(source, startMarker, endMarker) {
   const start = source.indexOf(startMarker)
@@ -61,5 +62,64 @@ test("workspace switch preparation still supports explicit setup/UAC for hard fa
     localSandboxSource,
     /private static shouldPromptForWorkspaceSwitchSetup\(error\?: string\): boolean/,
     "hard-failure prompting policy should stay explicit and reviewable"
+  )
+})
+
+test("elevated workspace root validation is shared before ACL/setup work", () => {
+  const prewarmSection = sectionBetween(
+    localSandboxSource,
+    "static prewarmForWorkspace(",
+    "static prewarmForWorkspaces("
+  )
+  const selectionSection = sectionBetween(
+    localSandboxSource,
+    "static async prepareWorkspaceForSelection(",
+    "private static buildElevatedSandboxEnvPreamble("
+  )
+  const setupSection = sectionBetween(
+    sandboxSource,
+    "export async function runElevatedSetupForPaths(",
+    "export function isElevatedRootPrepared("
+  )
+  const ensureSection = sectionBetween(
+    localSandboxSource,
+    "private static async ensureElevatedWorkspaceSetup(",
+    "private static createAbortError()"
+  )
+
+  assert.match(
+    sandboxSource,
+    /export function validateElevatedWorkspaceRoot\(workspacePath: string\)/,
+    "sandbox IPC should expose one shared elevated workspace validator"
+  )
+  assert.match(
+    prewarmSection,
+    /validateElevatedWorkspaceRoot\(workspacePath\)/,
+    "elevated prewarm should skip invalid workspace roots before ACL work"
+  )
+  assert.ok(
+    prewarmSection.indexOf("LocalSandbox.resolveWindowsSandboxShell()") <
+      prewarmSection.indexOf("validateElevatedWorkspaceRoot(workspacePath)"),
+    "workspace-independent shell prewarm should still run before elevated workspace validation can return"
+  )
+  assert.ok(
+    prewarmSection.indexOf("LocalSandbox.resolvePythonDir()") <
+      prewarmSection.indexOf("validateElevatedWorkspaceRoot(workspacePath)"),
+    "workspace-independent Python prewarm should still run before elevated workspace validation can return"
+  )
+  assert.match(
+    selectionSection,
+    /const workspaceValidation = validateElevatedWorkspaceRoot\(workspacePath\)/,
+    "workspace selection should validate before preflight ACL work"
+  )
+  assert.match(
+    setupSection,
+    /const validation = validateElevatedWorkspaceRoot\(p\)/,
+    "elevated setup should use the same workspace validation path"
+  )
+  assert.match(
+    ensureSection,
+    /setupResult\.success[\s\S]*areElevatedWorkspaceRootsPrepared\(workingDir, cacheRoots\)/,
+    "workspace setup success should be rechecked against the requested workspace root"
   )
 })

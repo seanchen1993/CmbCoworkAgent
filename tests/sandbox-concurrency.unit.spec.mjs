@@ -79,6 +79,11 @@ test("subagents use their own concurrency gate to avoid parent task deadlock", (
 
 test("local sandbox keeps risky commands exclusive while limiting read-only command parallelism", () => {
   const executeRawSection = sectionBetween(localSandboxSource, "async executeRaw(", "/**\n   * Execute a command inside")
+  const executeInSandboxSection = sectionBetween(
+    localSandboxSource,
+    "private async executeInWindowsSandbox(",
+    "private executeOnce("
+  )
 
   assert.match(
     localSandboxSource,
@@ -109,5 +114,15 @@ test("local sandbox keeps risky commands exclusive while limiting read-only comm
     executeRawSection,
     /commandConcurrency === "parallel_safe"[\s\S]*runParallelSafeExecution[\s\S]*runSerializedExecution/,
     "executeRaw should route only parallel-safe commands around the exclusive queue"
+  )
+  assert.match(
+    executeInSandboxSection,
+    /sandboxCacheDirs = await LocalSandbox\.raceWithAbort\([\s\S]*LocalSandbox\.prepareSandboxCacheDirs/,
+    "sandbox execution should wait for cache dirs before building ACL and writable roots"
+  )
+  assert.doesNotMatch(
+    executeInSandboxSection,
+    /void LocalSandbox\.prepareSandboxCacheDirs[\s\S]*getPreparedSandboxCacheDirs/,
+    "sandbox execution must not fire-and-forget cache dir prep then immediately read partial results"
   )
 })

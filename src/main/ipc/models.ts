@@ -88,7 +88,9 @@ async function prepareWorkspaceSelectionSandbox(
     if (result.ready || !result.error) return true
     if (getWindowsSandboxMode() !== "elevated") return true
 
-    const messageBoxOptions: MessageBoxOptions = result.reason === "system-sensitive-path"
+    const isWorkspacePathRestricted =
+      result.reason === "system-sensitive-path" || result.reason === "invalid-workspace-path"
+    const messageBoxOptions: MessageBoxOptions = isWorkspacePathRestricted
       ? {
           type: "warning",
           title: "Elevated 工作区受限",

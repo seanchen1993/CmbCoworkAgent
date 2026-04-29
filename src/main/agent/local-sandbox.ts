@@ -39,7 +39,8 @@ import {
   markElevatedRootsPrepared,
   runElevatedSetupForPaths,
   normalizeDirKey,
-  getElevatedSystemSensitivePathError
+  getElevatedSystemSensitivePathError,
+  validateElevatedWorkspaceRoot
 } from "../ipc/sandbox"
 import { getWindowsSandboxMode } from "../storage"
 import { homedir } from "node:os"
@@ -183,7 +184,7 @@ interface ExecutionGate {
 interface WorkspaceSwitchPreparationResult {
   ready: boolean
   prompted: boolean
-  reason?: "system-sensitive-path"
+  reason?: "system-sensitive-path" | "invalid-workspace-path"
   error?: string
 }
 
@@ -544,15 +545,6 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     return { cacheKey, uniqueDirs, siteCustomizePath }
   }
 
-  private static getPreparedSandboxCacheDirs(cacheRoot: string, sharedCacheRoot = cacheRoot): string[] {
-    const { cacheKey, uniqueDirs, siteCustomizePath } = LocalSandbox.describeSandboxCacheDirs(cacheRoot, sharedCacheRoot)
-    const cachedDirs = LocalSandbox._preparedSandboxCacheDirs.get(cacheKey)
-    if (cachedDirs && existsSync(siteCustomizePath)) {
-      return cachedDirs
-    }
-    return uniqueDirs.filter((dir) => existsSync(dir))
-  }
-
   private static async prepareSandboxCacheDirs(cacheRoot: string, sharedCacheRoot = cacheRoot): Promise<string[]> {
     const { cacheKey, uniqueDirs, siteCustomizePath } = LocalSandbox.describeSandboxCacheDirs(cacheRoot, sharedCacheRoot)
     const cachedDirs = LocalSandbox._preparedSandboxCacheDirs.get(cacheKey)
@@ -719,12 +711,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     windowsSandbox: "none" | "unelevated" | "readonly" | "elevated" = getWindowsSandboxMode(),
     env?: Record<string, string>
   ): void {
-    if (process.platform !== "win32" || !workspacePath || windowsSandbox === "none") return
-
-    const resolvedWorkspace = path.resolve(workspacePath)
-    const baseEnv = env ?? ({ ...process.env } as Record<string, string>)
-    const cacheRoot = LocalSandbox.buildSandboxCacheRoot(baseEnv, resolvedWorkspace)
-    const sharedCacheRoot = LocalSandbox.buildSharedSandboxCacheRoot(baseEnv)
+    if (process.platform !== "win32" || windowsSandbox === "none") return
 
     if (windowsSandbox === "readonly") {
       void LocalSandbox.getElevationState().catch((err) => {
@@ -742,12 +729,23 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       console.warn("[LocalSandbox] failed to prewarm Python dir:", err)
     })
 
+    if (!workspacePath) return
+
+    const workspaceValidation = windowsSandbox === "elevated"
+      ? validateElevatedWorkspaceRoot(workspacePath)
+      : null
+    if (workspaceValidation && (!workspaceValidation.ok || !workspaceValidation.resolved)) return
+
+    const resolvedWorkspace = workspaceValidation?.resolved ?? path.resolve(workspacePath)
+    const baseEnv = env ?? ({ ...process.env } as Record<string, string>)
+    const cacheRoot = LocalSandbox.buildSandboxCacheRoot(baseEnv, resolvedWorkspace)
+    const sharedCacheRoot = LocalSandbox.buildSharedSandboxCacheRoot(baseEnv)
+
     void LocalSandbox.prepareSandboxCacheDirs(cacheRoot, sharedCacheRoot).catch((err) => {
       console.warn("[LocalSandbox] failed to prewarm sandbox cache dirs:", err)
     })
 
     if (windowsSandbox === "elevated") {
-      if (getElevatedSystemSensitivePathError(resolvedWorkspace)) return
       const cacheRoots = Array.from(new Set([
         cacheRoot,
         sharedCacheRoot
@@ -808,11 +806,19 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       return { ready: true, prompted: false }
     }
 
-    const { resolvedWorkspace, cacheRoots } = LocalSandbox.buildElevatedWorkspaceCacheRoots(workspacePath, env)
-    const sensitivePathError = getElevatedSystemSensitivePathError(resolvedWorkspace)
-    if (sensitivePathError) {
-      return { ready: false, prompted: false, reason: "system-sensitive-path", error: sensitivePathError }
+    const workspaceValidation = validateElevatedWorkspaceRoot(workspacePath)
+    if (!workspaceValidation.ok || !workspaceValidation.resolved) {
+      return {
+        ready: false,
+        prompted: false,
+        reason: workspaceValidation.reason === "system-sensitive-path"
+          ? "system-sensitive-path"
+          : "invalid-workspace-path",
+        error: workspaceValidation.error || "Elevated 工作区路径无效。"
+      }
     }
+
+    const { resolvedWorkspace, cacheRoots } = LocalSandbox.buildElevatedWorkspaceCacheRoots(workspaceValidation.resolved, env)
     if (LocalSandbox.areElevatedWorkspaceRootsPrepared(resolvedWorkspace, cacheRoots)) {
       return { ready: true, prompted: false }
     }
@@ -2640,7 +2646,10 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
           await LocalSandbox.delayWithAbort(LocalSandbox.ELEVATED_EXPLICIT_SETUP_SETTLE_MS, abortSignal)
         }
         markElevatedRootsPrepared([workingDir, ...cacheRoots])
-        return { ready: true }
+        if (LocalSandbox.areElevatedWorkspaceRootsPrepared(workingDir, cacheRoots)) {
+          return { ready: true }
+        }
+        return { ready: false, error: "Elevated 工作区权限没有完全准备好，请重试。" }
       }
       return { ready: false, error: setupResult.error || "未知错误" }
     })()
@@ -3106,10 +3115,18 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       }
     }
 
-    void LocalSandbox.prepareSandboxCacheDirs(this._sandboxCacheRoot, this._sharedSandboxCacheRoot).catch((err) => {
-      console.warn("[LocalSandbox] sandbox cache dir prewarm failed during execute:", err)
-    })
-    const sandboxCacheDirs = LocalSandbox.getPreparedSandboxCacheDirs(this._sandboxCacheRoot, this._sharedSandboxCacheRoot)
+    let sandboxCacheDirs: string[] = []
+    try {
+      sandboxCacheDirs = await LocalSandbox.raceWithAbort(
+        LocalSandbox.prepareSandboxCacheDirs(this._sandboxCacheRoot, this._sharedSandboxCacheRoot),
+        effectiveAbortSignal
+      )
+    } catch (err) {
+      if (LocalSandbox.isAbortError(err) || effectiveAbortSignal?.aborted) {
+        return LocalSandbox.createAbortedExecuteResponse()
+      }
+      console.warn("[LocalSandbox] sandbox cache dir prepare failed during execute:", err)
+    }
 
     // Git Bash (MSYS2) crashes under restricted tokens — always use PowerShell/cmd
     console.log(`[LocalSandbox] elevated: pre-setup done at +${Date.now() - methodStartMs}ms, resolving shell...`)

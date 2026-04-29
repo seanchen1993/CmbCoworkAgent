@@ -75,6 +75,36 @@ const ELEVATED_SYSTEM_SENSITIVE_ROOTS = [
   "c:\\users\\public"
 ]
 
+/** Sensitive directories under user profile that should NOT be readable by the sandbox user. */
+const USERPROFILE_READ_ROOT_EXCLUSIONS = [
+  ".ssh",
+  ".gnupg",
+  ".aws",
+  ".azure",
+  ".kube",
+  ".docker",
+  ".config",
+  ".npm",
+  ".pki",
+  ".terraform.d"
+]
+
+export type ElevatedWorkspaceRootValidationReason =
+  | "empty-path"
+  | "unc-path"
+  | "drive-root"
+  | "system-sensitive-path"
+  | "user-sensitive-path"
+  | "not-directory"
+  | "not-found"
+
+export interface ElevatedWorkspaceRootValidation {
+  ok: boolean
+  resolved?: string
+  reason?: ElevatedWorkspaceRootValidationReason
+  error?: string
+}
+
 export function getElevatedSystemSensitivePathError(dir: string): string | null {
   if (!dir || typeof dir !== "string") return null
   let key: string
@@ -87,6 +117,82 @@ export function getElevatedSystemSensitivePathError(dir: string): string | null 
   const blockedRoot = ELEVATED_SYSTEM_SENSITIVE_ROOTS.find((root) => key === root || key.startsWith(`${root}\\`))
   if (!blockedRoot) return null
   return `Elevated 模式可以读取系统目录，也可能执行不涉及写入的命令；但当前模式需要为工作区准备写入权限，不支持将系统敏感目录作为工作区：${dir}。请选择普通项目目录作为工作区；如只需读取或执行非写入命令，请切换到 readonly/unelevated/none 后重试。`
+}
+
+export function validateElevatedWorkspaceRoot(workspacePath: string): ElevatedWorkspaceRootValidation {
+  if (!workspacePath || typeof workspacePath !== "string" || !workspacePath.trim()) {
+    return { ok: false, reason: "empty-path", error: "Elevated 工作区路径不能为空。" }
+  }
+
+  let resolved: string
+  try {
+    resolved = resolve(workspacePath)
+  } catch (err) {
+    return {
+      ok: false,
+      reason: "not-found",
+      error: `Elevated 工作区路径无效：${err instanceof Error ? err.message : String(err)}`
+    }
+  }
+
+  const normalized = resolved.replace(/\\/g, "/").toLowerCase()
+  if (/^[\\/]{2}/.test(workspacePath) || /^[\\/]{2}/.test(resolved)) {
+    return {
+      ok: false,
+      resolved,
+      reason: "unc-path",
+      error: `Elevated 模式不支持将 UNC 网络路径作为工作区：${workspacePath}。请选择本地普通项目目录。`
+    }
+  }
+
+  if (/^[a-z]:\/?\s*$/.test(normalized)) {
+    return {
+      ok: false,
+      resolved,
+      reason: "drive-root",
+      error: `Elevated 模式不支持将盘符根目录作为工作区：${workspacePath}。请选择普通项目目录。`
+    }
+  }
+
+  const sensitivePathError = getElevatedSystemSensitivePathError(resolved)
+  if (sensitivePathError) {
+    return { ok: false, resolved, reason: "system-sensitive-path", error: sensitivePathError }
+  }
+
+  const userProfile = process.env.USERPROFILE || homedir()
+  const homeNorm = userProfile.replace(/\\/g, "/").toLowerCase()
+  if (normalized.startsWith(homeNorm + "/")) {
+    const relative = normalized.slice(homeNorm.length + 1).split("/")[0]
+    if (USERPROFILE_READ_ROOT_EXCLUSIONS.some((entry) => entry.toLowerCase() === relative)) {
+      return {
+        ok: false,
+        resolved,
+        reason: "user-sensitive-path",
+        error: `Elevated 模式不支持将用户敏感目录作为工作区：${workspacePath}。请选择普通项目目录。`
+      }
+    }
+  }
+
+  try {
+    const stat = statSync(resolved)
+    if (!stat.isDirectory()) {
+      return {
+        ok: false,
+        resolved,
+        reason: "not-directory",
+        error: `Elevated 工作区路径不是目录：${workspacePath}`
+      }
+    }
+  } catch {
+    return {
+      ok: false,
+      resolved,
+      reason: "not-found",
+      error: `Elevated 工作区路径不存在：${workspacePath}`
+    }
+  }
+
+  return { ok: true, resolved }
 }
 
 function isSafeElevatedPreparedRoot(dir: string): boolean {
@@ -153,20 +259,6 @@ function saveElevatedPreparedRoots(): void {
 
 // Load persisted roots immediately so they survive app restarts
 loadElevatedPreparedRoots()
-
-/** Sensitive directories under user profile that should NOT be readable by the sandbox user. */
-const USERPROFILE_READ_ROOT_EXCLUSIONS = [
-  ".ssh",
-  ".gnupg",
-  ".aws",
-  ".azure",
-  ".kube",
-  ".docker",
-  ".config",
-  ".npm",
-  ".pki",
-  ".terraform.d"
-]
 
 /**
  * Enumerate user profile subdirectories, excluding sensitive ones.
@@ -349,48 +441,14 @@ export async function runElevatedSetupForPaths(
   const rejectedWorkspaceErrors: string[] = []
   if (workspacePaths) {
     for (const p of workspacePaths) {
-      if (!p || typeof p !== "string") continue
-      // Resolve to absolute path (handles relative paths like ../../)
-      const resolved = resolve(p)
-      const normalized = resolved.replace(/\\/g, "/").toLowerCase()
-
-      // Block UNC paths (\\server\share or //server/share)
-      if (/^[\\/]{2}/.test(p) || /^[\\/]{2}/.test(resolved)) {
-        console.warn(`[Sandbox] Rejected write_root: UNC path "${p}"`)
+      const validation = validateElevatedWorkspaceRoot(p)
+      if (!validation.ok || !validation.resolved) {
+        const error = validation.error || `Elevated 工作区路径无效：${p}`
+        console.warn(`[Sandbox] Rejected write_root: ${error}`)
+        rejectedWorkspaceErrors.push(error)
         continue
       }
-
-      // Block drive roots (e.g. "C:\", "D:\")
-      if (/^[a-z]:\/?\s*$/.test(normalized)) {
-        console.warn(`[Sandbox] Rejected write_root: drive root "${p}"`)
-        continue
-      }
-      const sensitivePathError = getElevatedSystemSensitivePathError(resolved)
-      if (sensitivePathError) {
-        console.warn(`[Sandbox] Rejected write_root: ${sensitivePathError}`)
-        rejectedWorkspaceErrors.push(sensitivePathError)
-        continue
-      }
-      // Block sensitive user directories
-      const homeNorm = home.replace(/\\/g, "/").toLowerCase()
-      if (normalized.startsWith(homeNorm + "/")) {
-        const relative = normalized.slice(homeNorm.length + 1).split("/")[0]
-        if (USERPROFILE_READ_ROOT_EXCLUSIONS.some(e => e.toLowerCase() === relative)) {
-          console.warn(`[Sandbox] Rejected write_root: sensitive directory "${p}"`)
-          continue
-        }
-      }
-      // Verify path exists and is a directory
-      try {
-        const st = statSync(resolved)
-        if (!st.isDirectory()) {
-          console.warn(`[Sandbox] Rejected write_root: not a directory "${p}"`)
-          continue
-        }
-      } catch {
-        console.warn(`[Sandbox] Rejected write_root: path does not exist "${p}"`)
-        continue
-      }
+      const resolved = validation.resolved
       if (!writeRoots.includes(resolved)) writeRoots.push(resolved)
       validatedWorkspacePaths.push(resolved)
     }
