@@ -4,12 +4,14 @@ import remarkGfm from "remark-gfm"
 import {
   ChevronDown,
   ChevronRight,
+  CloudUpload,
   FileText,
   Folder,
   Plus,
   Power,
   Search,
   Sparkles,
+  Store,
   Trash2,
   Upload,
   X
@@ -22,11 +24,17 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle
 } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import type { SkillMetadata } from "@/types"
+import { useAppStore } from "@/lib/store"
+import { marketApi, type MarketItem } from "../../api/market"
+import { DEFAULT_SCENE_CATEGORY, SCENE_CATEGORY_OPTIONS } from "../../lib/skill-data-service"
+import { SkillFileEditor } from "./SkillFileEditor"
+import { toast } from "sonner"
 
 type FilePreviewKind = "text" | "html" | "image" | "pdf"
 type FileTreeNode = {
@@ -37,10 +45,310 @@ type FileTreeNode = {
   children: FileTreeNode[]
 }
 
+type SkillMarketInfo = Pick<
+  MarketItem,
+  "name" | "chinese_name" | "category" | "description" | "featured"
+>
+type SaveSkillFileResult = { success: boolean; error?: string }
+type PublishMode = "upload" | "update"
+type PublishSuccessPayload = { skillName: string; mode: PublishMode }
+type UploadedItemRecord = {
+  name: string
+  type: "skill" | "mcp" | "plugin"
+  uploadedAt?: string
+}
+type LocalUploadedSkillPathRecord = {
+  path: string
+  uploadedAt?: string
+}
+type EditedSkillPathRecord = {
+  path: string
+  editedAt?: string
+}
+
+interface UserInfoLite {
+  sapId?: string
+  ystId?: string
+  userName?: string
+  orgName?: string
+}
+
+const KNOWN_TEXT_EXTS = new Set([
+  "md",
+  "txt",
+  "html",
+  "htm",
+  "css",
+  "scss",
+  "less",
+  "js",
+  "ts",
+  "jsx",
+  "tsx",
+  "json",
+  "yaml",
+  "yml",
+  "xml",
+  "csv",
+  "svg",
+  "sh",
+  "bash",
+  "py",
+  "rb",
+  "go",
+  "rs",
+  "java",
+  "kt",
+  "c",
+  "h",
+  "cpp",
+  "hpp",
+  "sql",
+  "graphql",
+  "toml",
+  "ini",
+  "env",
+  "log"
+])
+const UPLOADED_ITEMS_KEY = "marketplace_uploaded_items"
+const LOCAL_UPLOADED_SKILL_PATHS_KEY = "skills_panel_uploaded_skill_paths"
+const EDITED_SKILL_PATHS_KEY = "skills_panel_edited_skill_paths"
+
+/**
+ * 统一路径 Key，保证在 Windows/Linux 下本地标记可稳定命中：
+ * - 分隔符统一为 `/`
+ * - 比较统一转小写（Windows 大小写不敏感场景更稳妥）
+ */
+function normalizeSkillPathKey(skillPath: string): string {
+  return String(skillPath || "").replace(/\\/g, "/").trim().toLowerCase()
+}
+
+/**
+ * 统一目录名 Key，用于把 upload 返回的目录名与 skills.list() 结果做匹配。
+ */
+function normalizeDirNameKey(dirName: string): string {
+  return String(dirName || "")
+    .replace(/\\/g, "/")
+    .split("/")
+    .filter(Boolean)
+    .pop()
+    ?.trim()
+    .toLowerCase() || ""
+}
+
+/**
+ * 从本地缓存读取“我发布过的 skill 名称集合”。
+ * 这里不依赖服务端字段，沿用 Market 面板的本地标记逻辑，避免破坏现有数据口径。
+ */
+function readUploadedSkillNamesFromStorage(): Set<string> {
+  try {
+    const raw = localStorage.getItem(UPLOADED_ITEMS_KEY)
+    const parsed: UploadedItemRecord[] = raw ? JSON.parse(raw) : []
+    if (!Array.isArray(parsed)) return new Set()
+
+    const names = new Set<string>()
+    for (const item of parsed) {
+      if (!item || item.type !== "skill") continue
+      const normalized = normalizeSkillName(item.name)
+      if (normalized) names.add(normalized)
+    }
+    return names
+  } catch (storageError) {
+    console.warn("[SkillsPanel] Failed to read uploaded items from localStorage:", storageError)
+    return new Set()
+  }
+}
+
+/**
+ * 统一写入“我发布过”的本地标记：
+ * - 同名记录先去重再写入，避免历史重复项导致判断抖动；
+ * - 时间戳保留，后续可用于按最近发布排序等扩展。
+ */
+function markUploadedSkillInStorage(skillName: string): void {
+  try {
+    const raw = localStorage.getItem(UPLOADED_ITEMS_KEY)
+    const parsed: UploadedItemRecord[] = raw ? JSON.parse(raw) : []
+    const records = Array.isArray(parsed) ? parsed : []
+    const next = records.filter((item) => !(item?.name === skillName && item?.type === "skill"))
+    next.push({ name: skillName, type: "skill", uploadedAt: new Date().toISOString() })
+    localStorage.setItem(UPLOADED_ITEMS_KEY, JSON.stringify(next))
+  } catch (storageError) {
+    console.warn("[SkillsPanel] Failed to mark uploaded skill in localStorage:", storageError)
+  }
+}
+
+/**
+ * 读取“通过 SkillsPanel 上传过”的技能路径集合。
+ * 该集合用于判定：这是“我自己上传”的技能，而不是从市场安装来的技能。
+ */
+function readLocalUploadedSkillPathSetFromStorage(): Set<string> {
+  try {
+    const raw = localStorage.getItem(LOCAL_UPLOADED_SKILL_PATHS_KEY)
+    const parsed: LocalUploadedSkillPathRecord[] = raw ? JSON.parse(raw) : []
+    if (!Array.isArray(parsed)) return new Set()
+
+    const paths = new Set<string>()
+    for (const item of parsed) {
+      if (!item?.path) continue
+      paths.add(normalizeSkillPathKey(item.path))
+    }
+    return paths
+  } catch (storageError) {
+    console.warn("[SkillsPanel] Failed to read local uploaded skill paths:", storageError)
+    return new Set()
+  }
+}
+
+/**
+ * 记录“该技能是从 SkillsPanel 上传”的来源标记。
+ */
+function markLocalUploadedSkillPathInStorage(skillPath: string): void {
+  try {
+    const keyPath = normalizeSkillPathKey(skillPath)
+    if (!keyPath) return
+    const raw = localStorage.getItem(LOCAL_UPLOADED_SKILL_PATHS_KEY)
+    const parsed: LocalUploadedSkillPathRecord[] = raw ? JSON.parse(raw) : []
+    const records = Array.isArray(parsed) ? parsed : []
+    const next = records.filter((item) => normalizeSkillPathKey(item?.path || "") !== keyPath)
+    next.push({ path: skillPath, uploadedAt: new Date().toISOString() })
+    localStorage.setItem(LOCAL_UPLOADED_SKILL_PATHS_KEY, JSON.stringify(next))
+  } catch (storageError) {
+    console.warn("[SkillsPanel] Failed to mark local uploaded skill path:", storageError)
+  }
+}
+
+/**
+ * 删除技能时同步移除本地上传来源标记，防止脏数据累积。
+ */
+function removeLocalUploadedSkillPathFromStorage(skillPath: string): void {
+  try {
+    const keyPath = normalizeSkillPathKey(skillPath)
+    const raw = localStorage.getItem(LOCAL_UPLOADED_SKILL_PATHS_KEY)
+    const parsed: LocalUploadedSkillPathRecord[] = raw ? JSON.parse(raw) : []
+    const records = Array.isArray(parsed) ? parsed : []
+    const next = records.filter((item) => normalizeSkillPathKey(item?.path || "") !== keyPath)
+    localStorage.setItem(LOCAL_UPLOADED_SKILL_PATHS_KEY, JSON.stringify(next))
+  } catch (storageError) {
+    console.warn("[SkillsPanel] Failed to remove local uploaded skill path:", storageError)
+  }
+}
+
+/**
+ * 读取“已编辑技能”的路径集合，用于在 UI 中展示“已编辑”标识。
+ */
+function readEditedSkillPathSetFromStorage(): Set<string> {
+  try {
+    const raw = localStorage.getItem(EDITED_SKILL_PATHS_KEY)
+    const parsed: EditedSkillPathRecord[] = raw ? JSON.parse(raw) : []
+    if (!Array.isArray(parsed)) return new Set()
+    const paths = new Set<string>()
+    for (const item of parsed) {
+      if (!item?.path) continue
+      paths.add(normalizeSkillPathKey(item.path))
+    }
+    return paths
+  } catch (storageError) {
+    console.warn("[SkillsPanel] Failed to read edited skill paths:", storageError)
+    return new Set()
+  }
+}
+
+/**
+ * 保存“已编辑技能”标记。
+ */
+function markEditedSkillPathInStorage(skillPath: string): void {
+  try {
+    const keyPath = normalizeSkillPathKey(skillPath)
+    if (!keyPath) return
+    const raw = localStorage.getItem(EDITED_SKILL_PATHS_KEY)
+    const parsed: EditedSkillPathRecord[] = raw ? JSON.parse(raw) : []
+    const records = Array.isArray(parsed) ? parsed : []
+    const next = records.filter((item) => normalizeSkillPathKey(item?.path || "") !== keyPath)
+    next.push({ path: skillPath, editedAt: new Date().toISOString() })
+    localStorage.setItem(EDITED_SKILL_PATHS_KEY, JSON.stringify(next))
+  } catch (storageError) {
+    console.warn("[SkillsPanel] Failed to mark edited skill path:", storageError)
+  }
+}
+
+/**
+ * 删除技能时清理“已编辑技能”标记。
+ */
+function removeEditedSkillPathFromStorage(skillPath: string): void {
+  try {
+    const keyPath = normalizeSkillPathKey(skillPath)
+    const raw = localStorage.getItem(EDITED_SKILL_PATHS_KEY)
+    const parsed: EditedSkillPathRecord[] = raw ? JSON.parse(raw) : []
+    const records = Array.isArray(parsed) ? parsed : []
+    const next = records.filter((item) => normalizeSkillPathKey(item?.path || "") !== keyPath)
+    localStorage.setItem(EDITED_SKILL_PATHS_KEY, JSON.stringify(next))
+  } catch (storageError) {
+    console.warn("[SkillsPanel] Failed to remove edited skill path:", storageError)
+  }
+}
+
+function normalizeSkillName(value?: string): string {
+  return String(value || "").trim().toLowerCase()
+}
+
+function buildUserIdFromUserInfo(userInfo: UserInfoLite | null): string | undefined {
+  if (!userInfo) return undefined
+  const rawId = (userInfo.sapId || userInfo.ystId || "").trim()
+  const rawName = (userInfo.userName || "").trim()
+  const rawOrgName = (userInfo.orgName || "").trim()
+  const segments = [rawId, rawName, rawOrgName].filter(Boolean)
+  return segments.length > 0 ? segments.join(" / ") : undefined
+}
+
+function getSkillChineseName(skill: SkillMetadata, marketInfo: SkillMarketInfo | undefined): string {
+  const marketChinese = marketInfo?.chinese_name?.trim()
+  if (marketChinese) return marketChinese
+  const metadataChinese = skill.metadata?.chinese_name?.trim()
+  return metadataChinese || ""
+}
+
+function getSkillCategory(skill: SkillMetadata, marketInfo: SkillMarketInfo | undefined): string {
+  const marketCategory = marketInfo?.category?.trim()
+  if (marketCategory) return marketCategory
+  const metadataCategory = skill.metadata?.category?.trim()
+  return metadataCategory || ""
+}
+
+function isFeaturedSkill(marketInfo: SkillMarketInfo | undefined): boolean {
+  return marketInfo?.featured === "精品"
+}
+
+function splitMarkdownFrontmatter(
+  filePath: string | null,
+  content: string | null
+): { protectedPrefix: string; editableContent: string; hasFrontmatter: boolean } {
+  const isMarkdown = !!filePath && /\.md$/i.test(filePath)
+  if (!isMarkdown || typeof content !== "string") {
+    return { protectedPrefix: "", editableContent: content ?? "", hasFrontmatter: false }
+  }
+
+  const match = content.match(/^---\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/)
+  if (!match) return { protectedPrefix: "", editableContent: content, hasFrontmatter: false }
+
+  return {
+    protectedPrefix: match[0],
+    editableContent: content.slice(match[0].length),
+    hasFrontmatter: true
+  }
+}
+
+function mergeMarkdownFrontmatter(protectedPrefix: string, editableContent: string): string {
+  if (!protectedPrefix) return editableContent
+  if (!editableContent || protectedPrefix.endsWith("\n") || protectedPrefix.endsWith("\r\n")) {
+    return `${protectedPrefix}${editableContent}`
+  }
+  return `${protectedPrefix}\n${editableContent}`
+}
+
 function UploadSkillDialog(props: {
   open: boolean
   onOpenChange: (open: boolean) => void
-  onSuccess: () => void
+  onSuccess: (uploadedSkillDirName?: string) => void
 }): React.JSX.Element {
   const { open, onOpenChange, onSuccess } = props
   const [dragOver, setDragOver] = useState(false)
@@ -64,7 +372,7 @@ function UploadSkillDialog(props: {
         const buffer = await file.arrayBuffer()
         const res = await window.api.skills.upload(buffer, file.name)
         if (res.success) {
-          onSuccess()
+          onSuccess(res.skillName)
           onOpenChange(false)
         } else {
           setError(res.error || "上传失败")
@@ -149,6 +457,207 @@ function UploadSkillDialog(props: {
   )
 }
 
+function PublishSkillDialog(props: {
+  open: boolean
+  skill: SkillMetadata | null
+  mode: PublishMode
+  marketInfo?: SkillMarketInfo
+  onOpenChange: (open: boolean) => void
+  onSuccess: (payload: PublishSuccessPayload) => void
+}): React.JSX.Element {
+  const { open, skill, mode, marketInfo, onOpenChange, onSuccess } = props
+  const [uploading, setUploading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [description, setDescription] = useState("")
+  const [category, setCategory] = useState<string>(DEFAULT_SCENE_CATEGORY)
+  const [guidance, setGuidance] = useState("")
+  const [chineseName, setChineseName] = useState("")
+  const [userId, setUserId] = useState<string | undefined>(undefined)
+
+  const loadCurrentUserId = useCallback(async () => {
+    try {
+      const userInfo = await window.api.models.getUserInfo()
+      setUserId(buildUserIdFromUserInfo(userInfo as UserInfoLite | null))
+    } catch (e) {
+      console.error("[SkillsPanel] Failed to load user info:", e)
+      setUserId(undefined)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!open || !skill) return
+    setError(null)
+    setDescription(skill.description || marketInfo?.description || "")
+    setGuidance(skill.metadata?.guidance || "")
+    setChineseName(getSkillChineseName(skill, marketInfo))
+    const initialCategory = getSkillCategory(skill, marketInfo) || DEFAULT_SCENE_CATEGORY
+    setCategory(initialCategory)
+    void loadCurrentUserId()
+  }, [loadCurrentUserId, marketInfo, open, skill])
+
+  const handlePublish = useCallback(async () => {
+    if (!skill || uploading) return
+
+    setError(null)
+    setUploading(true)
+    try {
+      const exported = await window.api.skills.exportForMarket(skill.path)
+      if (!exported.success || !exported.buffer) {
+        setError(exported.error || "导出技能失败")
+        return
+      }
+
+      const fileName = exported.fileName || `${skill.name}.zip`
+      const file = new File([exported.buffer], fileName, { type: "application/zip" })
+      const result =
+        mode === "update"
+          ? await marketApi.updateItem(
+              file,
+              "skill",
+              skill.name,
+              description.trim(),
+              category,
+              guidance.trim() || undefined,
+              chineseName.trim() || undefined,
+              userId?.trim() || undefined
+            )
+          : await marketApi.uploadFile(
+              file,
+              "skill",
+              skill.name,
+              description.trim(),
+              category,
+              guidance.trim() || undefined,
+              chineseName.trim() || undefined,
+              userId?.trim() || undefined
+            )
+
+      if (!result.success) {
+        setError(result.error || (mode === "update" ? "更新失败" : "发布失败"))
+        return
+      }
+
+      markUploadedSkillInStorage(skill.name)
+
+      onSuccess({ skillName: skill.name, mode })
+      onOpenChange(false)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : mode === "update" ? "更新失败" : "发布失败")
+    } finally {
+      setUploading(false)
+    }
+  }, [
+    category,
+    chineseName,
+    description,
+    guidance,
+    mode,
+    onOpenChange,
+    onSuccess,
+    skill,
+    uploading,
+    userId
+  ])
+
+  return (
+    <Dialog open={open} onOpenChange={(next) => !uploading && onOpenChange(next)}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>{mode === "update" ? "更新市场技能" : "发布到公共市场"}</DialogTitle>
+          <DialogDescription>
+            会自动打包当前技能目录为 zip 并提交到 Market。名称将使用技能英文名且不可修改。
+          </DialogDescription>
+        </DialogHeader>
+
+        {!skill ? (
+          <p className="text-sm text-muted-foreground">未选择技能</p>
+        ) : (
+          <div className="space-y-3">
+            {mode === "upload" && marketInfo && (
+              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+                市场中已存在同名技能，继续发布可能会被后端拒绝，请按提示处理。
+              </p>
+            )}
+            {mode === "update" && (
+              <p className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-md px-3 py-2">
+                将覆盖更新你已发布到市场的同名技能，并自动递增版本号。
+              </p>
+            )}
+
+            <div className="space-y-1">
+              <p className="text-xs text-muted-foreground">英文名称</p>
+              <Input value={skill.name} disabled />
+            </div>
+
+            <div className="space-y-1">
+              <p className="text-xs text-muted-foreground">中文名称</p>
+              <Input
+                value={chineseName}
+                onChange={(e) => setChineseName(e.target.value)}
+                disabled={uploading}
+                placeholder="可选"
+              />
+            </div>
+
+            <div className="space-y-1">
+              <p className="text-xs text-muted-foreground">描述</p>
+              <textarea
+                className="w-full min-h-[82px] rounded-md border border-input bg-background px-3 py-2 text-sm"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                disabled={uploading}
+                placeholder="可选"
+              />
+            </div>
+
+            <div className="space-y-1">
+              <p className="text-xs text-muted-foreground">场景分类</p>
+              <select
+                value={category}
+                onChange={(e) => setCategory(e.target.value)}
+                disabled={uploading}
+                className="w-full h-9 rounded-md border border-input bg-background px-3 text-sm"
+              >
+                {category &&
+                  !SCENE_CATEGORY_OPTIONS.includes(
+                    category as (typeof SCENE_CATEGORY_OPTIONS)[number]
+                  ) && <option value={category}>{category}</option>}
+                {SCENE_CATEGORY_OPTIONS.map((option) => (
+                  <option key={option} value={option}>
+                    {option}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="space-y-1">
+              <p className="text-xs text-muted-foreground">使用指引</p>
+              <textarea
+                className="w-full min-h-[82px] rounded-md border border-input bg-background px-3 py-2 text-sm"
+                value={guidance}
+                onChange={(e) => setGuidance(e.target.value)}
+                disabled={uploading}
+                placeholder="可选"
+              />
+            </div>
+
+            {error && <p className="text-sm text-destructive">{error}</p>}
+          </div>
+        )}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={uploading}>
+            取消
+          </Button>
+          <Button onClick={handlePublish} disabled={!skill || uploading}>
+            {uploading ? (mode === "update" ? "更新中..." : "发布中...") : mode === "update" ? "更新发布" : "一键发布"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 function getSkillDir(skillPath: string): string {
   const normalized = skillPath.replace(/\\/g, "/")
   const idx = normalized.lastIndexOf("/")
@@ -194,6 +703,21 @@ function sortTreeNodes(nodes: FileTreeNode[], isRoot: boolean): FileTreeNode[] {
 
 function buildFileTree(skillPath: string, files: string[]): FileTreeNode[] {
   const root: FileTreeNode = createDirNode("root", "root", "")
+  /**
+   * 性能优化：
+   * 旧实现每层目录都用 `children.find` 线性查找，文件较多时会退化到 O(n^2)。
+   * 这里用 WeakMap 缓存“目录节点 -> 子节点索引”，将查找降为近似 O(1)。
+   */
+  const childIndexCache = new WeakMap<FileTreeNode, Map<string, FileTreeNode>>()
+
+  const getChildIndex = (node: FileTreeNode): Map<string, FileTreeNode> => {
+    let index = childIndexCache.get(node)
+    if (!index) {
+      index = new Map(node.children.map((child) => [child.name, child]))
+      childIndexCache.set(node, index)
+    }
+    return index
+  }
 
   for (const filePath of files) {
     const relative = getRelativeFileName(skillPath, filePath)
@@ -205,13 +729,15 @@ function buildFileTree(skillPath: string, files: string[]): FileTreeNode[] {
       const segment = segments[i]
       const isLast = i === segments.length - 1
       const nodeId = `${current.id}/${segment}`
-      let child = current.children.find((c) => c.name === segment)
+      const childIndex = getChildIndex(current)
+      let child = childIndex.get(segment)
 
       if (!child) {
         child = isLast
           ? createFileNode(nodeId, segment, filePath)
           : createDirNode(nodeId, segment, `${current.path}/${segment}`.replace(/^\/+/, "/"))
         current.children.push(child)
+        childIndex.set(segment, child)
       }
       current = child
     }
@@ -226,11 +752,227 @@ function defaultSkillFile(files: string[]): string | null {
   return skillMd ?? files[0]
 }
 
+const SKILL_HOOK_TREE_EXAMPLE = `~/.cmbcoworkagent/skills/<skill-name>/
+  SKILL.md
+  hooks.json
+  hooks/
+    pre-write-check.py`
+
+const SKILL_HOOK_JSON_EXAMPLE = `[
+  {
+    "event": "PreToolUse",
+    "matcher": "write_file|edit_file",
+    "type": "command",
+    "command": "python C:/absolute/path/to/pre_write_guard.py",
+    "timeout": 10000,
+    "onBlock": {
+      "systemMessage": "请先按技能要求整改，再重试",
+      "requiredSkill": "<skill-name>"
+    }
+  }
+]`
+
+function SkillGuideSection(props: {
+  title: string
+  summary: string
+  children: React.ReactNode
+}): React.JSX.Element {
+  const { title, summary, children } = props
+  return (
+    <details className="rounded-lg border border-border/60 bg-background">
+      <summary className="cursor-pointer list-none p-4 [&::-webkit-details-marker]:hidden">
+        <div className="flex items-start justify-between gap-3">
+          <div className="space-y-1">
+            <h4 className="text-sm font-semibold text-foreground">{title}</h4>
+            <p className="text-sm text-muted-foreground">{summary}</p>
+          </div>
+          <span className="shrink-0 rounded-full border border-border/50 bg-muted/30 px-2 py-0.5 text-[10px] text-muted-foreground">
+            点击展开
+          </span>
+        </div>
+      </summary>
+      <div className="border-t border-border/50 p-4">{children}</div>
+    </details>
+  )
+}
+
+function SkillGuideSubSection(props: {
+  title: string
+  summary: string
+  children: React.ReactNode
+}): React.JSX.Element {
+  const { title, summary, children } = props
+  return (
+    <details className="rounded-md border border-border/40 bg-muted/20">
+      <summary className="cursor-pointer list-none px-3 py-2.5 [&::-webkit-details-marker]:hidden">
+        <div className="space-y-1">
+          <p className="text-sm font-medium text-foreground">{title}</p>
+          <p className="text-sm text-muted-foreground">{summary}</p>
+        </div>
+      </summary>
+      <div className="border-t border-border/40 px-3 py-3">{children}</div>
+    </details>
+  )
+}
+
+function SkillsGuide(): React.JSX.Element {
+  return (
+    <div className="flex-1 overflow-y-auto p-8">
+      <div className="mx-auto max-w-3xl space-y-4">
+        <div className="flex items-center gap-3">
+          <div className="rounded-2xl bg-muted p-3">
+            <Sparkles className="size-6 text-muted-foreground" />
+          </div>
+          <div className="space-y-1">
+            <h3 className="text-lg font-bold">技能介绍</h3>
+            <p className="text-sm text-muted-foreground">
+              技能是可复用的 AI
+              提示词模板；如果某个技能需要配套拦截、校验或整改引导，也可以在技能目录里直接附带 Skill
+              Hook。
+            </p>
+          </div>
+        </div>
+
+        <SkillGuideSection
+          title="技能基础"
+          summary="技能目录结构、上传方式，以及启用 / 禁用的基本行为。"
+        >
+          <div className="space-y-3">
+            <SkillGuideSubSection
+              title="技能目录长什么样"
+              summary="每个技能本质上是一个目录，核心文件是 SKILL.md。"
+            >
+              <div className="space-y-2 text-sm text-muted-foreground">
+                <p>
+                  技能的核心是
+                  <code className="mx-1 font-mono text-foreground/85">SKILL.md</code>
+                  ，用来定义任务目标、执行步骤、输出要求等。
+                </p>
+                <p>
+                  应用里会区分内置技能和自定义技能；内置技能不可删除，自定义技能可以上传、禁用和删除。
+                </p>
+              </div>
+            </SkillGuideSubSection>
+
+            <SkillGuideSubSection
+              title="如何添加和使用"
+              summary="支持上传 .md 或 .zip，上传后可直接在右侧预览。"
+            >
+              <div className="space-y-2 text-sm text-muted-foreground">
+                <p>
+                  点击左上角
+                  <code className="mx-1 font-mono text-foreground/85">+</code>
+                  可上传技能。
+                </p>
+                <p>上传后可以在左侧展开目录、右侧预览文件内容，也可以随时切换技能启用状态。</p>
+                <p>禁用技能后，该技能本体和它附带的 Skill Hook 会一起失效。</p>
+              </div>
+            </SkillGuideSubSection>
+          </div>
+        </SkillGuideSection>
+
+        <SkillGuideSection
+          title="Skill Hook 配置说明"
+          summary="把 hooks.json 放进技能目录后，技能启用时会自动加载对应 Hook。"
+        >
+          <div className="space-y-3">
+            <SkillGuideSubSection
+              title="Skill Hook 是什么"
+              summary="适合把某个技能专属的拦截、校验和整改引导跟技能本体一起分发。"
+            >
+              <div className="space-y-2 text-sm text-muted-foreground">
+                <p>
+                  Skill Hook 会进入统一 Hook
+                  执行链，但它的来源绑定在技能上：启用技能时加载，停用技能时同步移除。
+                </p>
+                <p>
+                  常见用途包括写入前校验、完成前补充检查、阻断后自动附带
+                  <code className="mx-1 font-mono text-foreground/85">requiredSkill</code>
+                  整改指引。
+                </p>
+              </div>
+            </SkillGuideSubSection>
+
+            <SkillGuideSubSection
+              title="目录与加载规则"
+              summary="在技能目录下新建 hooks.json；脚本本体建议放到 hooks/ 子目录。"
+            >
+              <div className="space-y-2 text-sm text-muted-foreground">
+                <pre className="rounded-md border border-border/40 bg-background p-2 text-xs leading-5 text-foreground">
+                  {SKILL_HOOK_TREE_EXAMPLE}
+                </pre>
+                <p>
+                  只要目录里存在
+                  <code className="mx-1 font-mono text-foreground/85">hooks.json</code>
+                  ，启用技能时就会自动加载。
+                </p>
+                <p>
+                  当前 Hook 命令实际按工作区
+                  <code className="mx-1 font-mono text-foreground/85">cwd</code>
+                  执行；如果脚本放在技能目录里，推荐在
+                  <code className="mx-1 font-mono text-foreground/85">command</code>
+                  里写绝对路径，避免随工作区变化找不到脚本。
+                </p>
+              </div>
+            </SkillGuideSubSection>
+
+            <SkillGuideSubSection
+              title="最小配置示例"
+              summary="下面是一个最小的 skill-level PreToolUse command hook。"
+            >
+              <div className="space-y-2 text-sm text-muted-foreground">
+                <pre className="overflow-x-auto rounded-md border border-border/40 bg-background p-3 text-xs leading-5 text-foreground">
+                  <code>{SKILL_HOOK_JSON_EXAMPLE}</code>
+                </pre>
+                <p>
+                  如果要用自然语言策略 Hook，可以把
+                  <code className="mx-1 font-mono text-foreground/85">type</code>
+                  改成
+                  <code className="mx-1 font-mono text-foreground/85">prompt</code>
+                  ，再提供
+                  <code className="mx-1 font-mono text-foreground/85">prompt</code>
+                  字段。
+                </p>
+              </div>
+            </SkillGuideSubSection>
+
+            <SkillGuideSubSection
+              title="调试与验证"
+              summary="看 Hook 执行记录、stderr 日志，以及去哪看完整事件协议。"
+            >
+              <div className="space-y-2 text-sm text-muted-foreground">
+                <p>
+                  命令 Hook 的调试日志建议写到 stderr；如果 stdout 输出 JSON，会被当成 Hook
+                  返回值解析。
+                </p>
+                <p>
+                  技能 Hook 生效后，可以在聊天区的“Hook 执行记录”里看执行结果，也可以到“自定义 &gt;
+                  钩子”查看统一的来源和配置详情。
+                </p>
+                <p>
+                  完整的事件输入 / 输出协议、tool_input 字段和各类返回字段说明，请到“自定义 &gt;
+                  钩子”右侧查看。
+                </p>
+              </div>
+            </SkillGuideSubSection>
+          </div>
+        </SkillGuideSection>
+      </div>
+    </div>
+  )
+}
+
 export function SkillsPanel(): React.JSX.Element {
+  const {
+    setShowCustomizeView,
+    setMarketInitialSkillCategory,
+    setMarketInitialSkillSearchQuery
+  } = useAppStore()
   const [skills, setSkills] = useState<SkillMetadata[]>([])
   const [expandedSkills, setExpandedSkills] = useState<Set<string>>(new Set())
   const [expandedDirNodes, setExpandedDirNodes] = useState<Set<string>>(new Set())
   const [skillFilesMap, setSkillFilesMap] = useState<Record<string, string[]>>({})
+  const [marketSkillMap, setMarketSkillMap] = useState<Record<string, SkillMarketInfo>>({})
   const [selectedSkill, setSelectedSkill] = useState<SkillMetadata | null>(null)
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null)
   const [selectedFileContent, setSelectedFileContent] = useState<string | null>(null)
@@ -238,7 +980,19 @@ export function SkillsPanel(): React.JSX.Element {
   const [selectedBinaryBase64, setSelectedBinaryBase64] = useState<string | null>(null)
   const [selectedBinaryMimeType, setSelectedBinaryMimeType] = useState<string | null>(null)
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false)
+  const [publishDialogOpen, setPublishDialogOpen] = useState(false)
+  const [publishSkill, setPublishSkill] = useState<SkillMetadata | null>(null)
+  const [publishMode, setPublishMode] = useState<PublishMode>("upload")
   const [disabledSkills, setDisabledSkills] = useState<Set<string>>(new Set())
+  const [uploadedSkillNames, setUploadedSkillNames] = useState<Set<string>>(() =>
+    readUploadedSkillNamesFromStorage()
+  )
+  const [localUploadedSkillPaths, setLocalUploadedSkillPaths] = useState<Set<string>>(() =>
+    readLocalUploadedSkillPathSetFromStorage()
+  )
+  const [editedSkillPaths, setEditedSkillPaths] = useState<Set<string>>(() =>
+    readEditedSkillPathSetFromStorage()
+  )
   const [searchQuery, setSearchQuery] = useState("")
   const [debouncedQuery, setDebouncedQuery] = useState("")
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
@@ -257,6 +1011,47 @@ export function SkillsPanel(): React.JSX.Element {
     window.api.skills.list().then(setSkills).catch(console.error)
   }, [])
 
+  const reloadUploadedSkillNames = useCallback(() => {
+    setUploadedSkillNames(readUploadedSkillNamesFromStorage())
+  }, [])
+
+  const reloadLocalUploadedSkillPaths = useCallback(() => {
+    setLocalUploadedSkillPaths(readLocalUploadedSkillPathSetFromStorage())
+  }, [])
+
+  const reloadEditedSkillPaths = useCallback(() => {
+    setEditedSkillPaths(readEditedSkillPathSetFromStorage())
+  }, [])
+
+  const loadMarketSkills = useCallback(async () => {
+    try {
+      const res = await marketApi.getSkills()
+      if (!res.success || !res.data) return
+      const next: Record<string, SkillMarketInfo> = {}
+      for (const item of res.data) {
+        const normalized = normalizeSkillName(item.name)
+        if (!normalized) continue
+        next[normalized] = {
+          name: item.name,
+          chinese_name: item.chinese_name,
+          category: item.category,
+          description: item.description,
+          featured: item.featured
+        }
+      }
+      setMarketSkillMap(next)
+    } catch (e) {
+      console.warn("[SkillsPanel] Failed to load market skills:", e)
+    }
+  }, [])
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      void loadMarketSkills()
+    }, 0)
+    return () => clearTimeout(timer)
+  }, [loadMarketSkills])
+
   useEffect(() => {
     window.api.skills
       .getDisabled()
@@ -265,10 +1060,14 @@ export function SkillsPanel(): React.JSX.Element {
   }, [])
 
   const skillFilesMapRef = useRef(skillFilesMap)
-  skillFilesMapRef.current = skillFilesMap
+  useEffect(() => {
+    skillFilesMapRef.current = skillFilesMap
+  }, [skillFilesMap])
 
   const expandedSkillsRef = useRef(expandedSkills)
-  expandedSkillsRef.current = expandedSkills
+  useEffect(() => {
+    expandedSkillsRef.current = expandedSkills
+  }, [expandedSkills])
 
   const loadFileContent = useCallback(async (skill: SkillMetadata, filePath: string) => {
     setSelectedSkill(skill)
@@ -281,44 +1080,7 @@ export function SkillsPanel(): React.JSX.Element {
     const isImage = ["png", "jpg", "jpeg", "gif", "webp"].includes(ext)
     const isPdf = ext === "pdf"
     const isHtml = ext === "html" || ext === "htm"
-    const knownTextExts = new Set([
-      "md",
-      "txt",
-      "html",
-      "htm",
-      "css",
-      "scss",
-      "less",
-      "js",
-      "ts",
-      "jsx",
-      "tsx",
-      "json",
-      "yaml",
-      "yml",
-      "xml",
-      "csv",
-      "svg",
-      "sh",
-      "bash",
-      "py",
-      "rb",
-      "go",
-      "rs",
-      "java",
-      "kt",
-      "c",
-      "h",
-      "cpp",
-      "hpp",
-      "sql",
-      "graphql",
-      "toml",
-      "ini",
-      "env",
-      "log"
-    ])
-    const isKnownText = knownTextExts.has(ext)
+    const isKnownText = KNOWN_TEXT_EXTS.has(ext)
 
     if (isImage || isPdf) {
       setSelectedFilePreviewKind(isImage ? "image" : "pdf")
@@ -362,6 +1124,17 @@ export function SkillsPanel(): React.JSX.Element {
     return files
   }, [])
 
+  const shouldHideMarketInstalledFeaturedFiles = useCallback(
+    (skill: SkillMetadata): boolean => {
+      if (skill.source !== "user") return false
+      const localMarked = localUploadedSkillPaths.has(normalizeSkillPathKey(skill.path))
+      const uploadedByMe = uploadedSkillNames.has(normalizeSkillName(skill.name))
+      if (localMarked || uploadedByMe) return false
+      return isFeaturedSkill(marketSkillMap[normalizeSkillName(skill.name)])
+    },
+    [localUploadedSkillPaths, marketSkillMap, uploadedSkillNames]
+  )
+
   const onToggleSkill = useCallback(
     async (skill: SkillMetadata) => {
       const wasExpanded = expandedSkillsRef.current.has(skill.name)
@@ -370,6 +1143,14 @@ export function SkillsPanel(): React.JSX.Element {
       setExpandedSkills(next)
 
       if (!wasExpanded) {
+        if (shouldHideMarketInstalledFeaturedFiles(skill)) {
+          setSelectedSkill(skill)
+          setSelectedFilePath(null)
+          setSelectedFileContent(null)
+          setSelectedBinaryBase64(null)
+          setSelectedBinaryMimeType(null)
+          return
+        }
         const files = await ensureSkillFiles(skill)
         const firstFile = defaultSkillFile(files)
         if (firstFile) {
@@ -381,14 +1162,22 @@ export function SkillsPanel(): React.JSX.Element {
         }
       }
     },
-    [ensureSkillFiles, loadFileContent]
+    [ensureSkillFiles, loadFileContent, shouldHideMarketInstalledFeaturedFiles]
   )
 
   const onSelectFile = useCallback(
     async (skill: SkillMetadata, filePath: string) => {
+      if (shouldHideMarketInstalledFeaturedFiles(skill)) {
+        setSelectedSkill(skill)
+        setSelectedFilePath(null)
+        setSelectedFileContent(null)
+        setSelectedBinaryBase64(null)
+        setSelectedBinaryMimeType(null)
+        return
+      }
       await loadFileContent(skill, filePath)
     },
-    [loadFileContent]
+    [loadFileContent, shouldHideMarketInstalledFeaturedFiles]
   )
 
   const toggleDirNode = useCallback((nodeId: string) => {
@@ -415,6 +1204,10 @@ export function SkillsPanel(): React.JSX.Element {
     if (!confirm(`确定要删除技能「${skill.name}」吗？`)) return
     const res = await window.api.skills.delete(skill.path)
     if (res.success) {
+      removeLocalUploadedSkillPathFromStorage(skill.path)
+      removeEditedSkillPathFromStorage(skill.path)
+      reloadLocalUploadedSkillPaths()
+      reloadEditedSkillPaths()
       setSelectedSkill(null)
       setSelectedFilePath(null)
       setSelectedFileContent(null)
@@ -433,70 +1226,265 @@ export function SkillsPanel(): React.JSX.Element {
     } else {
       alert(res.error || "删除失败")
     }
-  }, [])
+  }, [reloadEditedSkillPaths, reloadLocalUploadedSkillPaths])
 
   const builtinSkills = useMemo(() => skills.filter((s) => s.source === "project"), [skills])
   const customSkills = useMemo(() => skills.filter((s) => s.source === "user"), [skills])
+
+  const resolveMarketInfo = useCallback(
+    (skill: SkillMetadata): SkillMarketInfo | undefined => {
+      if (skill.source !== "user") return undefined
+      return marketSkillMap[normalizeSkillName(skill.name)]
+    },
+    [marketSkillMap]
+  )
+
+  const isSkillUploadedInPanel = useCallback(
+    (skill: SkillMetadata | null | undefined): boolean => {
+      if (!skill || skill.source !== "user") return false
+      const localMarked = localUploadedSkillPaths.has(normalizeSkillPathKey(skill.path))
+      if (localMarked) return true
+      if (uploadedSkillNames.has(normalizeSkillName(skill.name))) return true
+      // 历史兜底：无市场同名记录时，仍按“本地上传”处理。
+      return !resolveMarketInfo(skill)
+    },
+    [localUploadedSkillPaths, resolveMarketInfo, uploadedSkillNames]
+  )
+
+  const selectedSkillMarketInfo = useMemo(
+    () => (selectedSkill ? resolveMarketInfo(selectedSkill) : undefined),
+    [resolveMarketInfo, selectedSkill]
+  )
+  /**
+   * “我自己在 SkillsPanel 上传”的判定：
+   * 优先依赖本地路径标记；其次兜底为“用户技能且市场中无同名项”（历史数据兼容）。
+   */
+  const selectedSkillUploadedInPanel = useMemo(
+    () => isSkillUploadedInPanel(selectedSkill),
+    [isSkillUploadedInPanel, selectedSkill]
+  )
+  const selectedSkillUploadedByMe = useMemo(
+    () => !!selectedSkill && uploadedSkillNames.has(normalizeSkillName(selectedSkill.name)),
+    [selectedSkill, uploadedSkillNames]
+  )
+  const selectedSkillIsEdited = useMemo(
+    () => !!selectedSkill && editedSkillPaths.has(normalizeSkillPathKey(selectedSkill.path)),
+    [editedSkillPaths, selectedSkill]
+  )
+  const selectedSkillHasMarketEntry = useMemo(
+    () => !!selectedSkillMarketInfo || selectedSkillUploadedByMe,
+    [selectedSkillMarketInfo, selectedSkillUploadedByMe]
+  )
+  const isMarketInstalledFeaturedSkill = useCallback(
+    (skill: SkillMetadata | null | undefined): boolean => {
+      if (!skill || skill.source !== "user") return false
+      if (isSkillUploadedInPanel(skill)) return false
+      return isFeaturedSkill(resolveMarketInfo(skill))
+    },
+    [isSkillUploadedInPanel, resolveMarketInfo]
+  )
+  const selectedSkillHideContent = useMemo(
+    () => isMarketInstalledFeaturedSkill(selectedSkill),
+    [isMarketInstalledFeaturedSkill, selectedSkill]
+  )
+  const selectedSkillCanEdit = useMemo(
+    () => !!selectedSkill && selectedSkillUploadedInPanel,
+    [selectedSkill, selectedSkillUploadedInPanel]
+  )
+  const selectedSkillCanPublish = useMemo(
+    () =>
+      !!selectedSkill &&
+      selectedSkill.source !== "project" &&
+      // 规则 2：我上传但尚未“我发布过”时，提供“一键发布”。
+      selectedSkillUploadedInPanel &&
+      !selectedSkillUploadedByMe,
+    [selectedSkill, selectedSkillUploadedByMe, selectedSkillUploadedInPanel]
+  )
+  const selectedSkillCanUpdate = useMemo(
+    () =>
+      !!selectedSkill &&
+      selectedSkill.source !== "project" &&
+      // 规则 4：我上传且已经发布到市场，并且发生过编辑时，支持“更新发布”。
+      selectedSkillUploadedInPanel &&
+      selectedSkillUploadedByMe &&
+      selectedSkillIsEdited,
+    [selectedSkill, selectedSkillIsEdited, selectedSkillUploadedByMe, selectedSkillUploadedInPanel]
+  )
+  const selectedSkillPublishLabel = selectedSkillCanUpdate ? "更新到市场" : "发布到市场"
+
+  const saveSkillFileContent = useCallback(
+    async (filePath: string, nextContent: string): Promise<SaveSkillFileResult> => {
+      if (!selectedSkill) return { success: false, error: "未选择技能" }
+      if (selectedSkill.source === "project") return { success: false, error: "内置技能不支持编辑" }
+      if (!isSkillUploadedInPanel(selectedSkill)) {
+        return { success: false, error: "只有我上传的技能支持编辑" }
+      }
+      if (!selectedFilePath || selectedFilePath !== filePath) {
+        return { success: false, error: "当前文件已切换，请重试" }
+      }
+
+      const res = await window.api.skills.write(filePath, nextContent)
+      if (!res.success) return { success: false, error: res.error || "保存失败" }
+
+      setSelectedFileContent(nextContent)
+      markEditedSkillPathInStorage(selectedSkill.path)
+      setEditedSkillPaths((prev) => {
+        const next = new Set(prev)
+        next.add(normalizeSkillPathKey(selectedSkill.path))
+        return next
+      })
+      toast.success("保存成功，可新开会话试一试效果。")
+
+      if (/(^|\/)SKILL\.md$/i.test(filePath)) {
+        /**
+         * SKILL.md 里可能修改了 frontmatter（名称/描述等）。
+         * 保存后主动刷新技能列表，保证左侧列表与右侧详情展示的元信息立即一致。
+         */
+        setSkillFilesMap({})
+        window.api.skills
+          .list()
+          .then((nextSkills) => {
+            setSkills(nextSkills)
+            const nextSelected = nextSkills.find((item) => item.path === filePath) || null
+            setSelectedSkill(nextSelected)
+            if (nextSelected) {
+              setExpandedSkills(new Set([nextSelected.name]))
+            }
+          })
+          .catch(console.error)
+      }
+
+      return { success: true }
+    },
+    [isSkillUploadedInPanel, selectedFilePath, selectedSkill]
+  )
 
   const filterSkillsBySearch = useCallback(
     (list: SkillMetadata[]) => {
       const q = debouncedQuery.trim().toLowerCase()
       if (!q) return list
-      return list.filter(
-        (s) =>
-          s.name.toLowerCase().includes(q) || (s.description?.toLowerCase().includes(q) ?? false)
-      )
+      return list.filter((skill) => {
+        const marketInfo = resolveMarketInfo(skill)
+        const chineseName = getSkillChineseName(skill, marketInfo)
+        const category = getSkillCategory(skill, marketInfo)
+        return (
+          skill.name.toLowerCase().includes(q) ||
+          (skill.description?.toLowerCase().includes(q) ?? false) ||
+          chineseName.toLowerCase().includes(q) ||
+          category.toLowerCase().includes(q)
+        )
+      })
     },
-    [debouncedQuery]
+    [debouncedQuery, resolveMarketInfo]
+  )
+
+  const openPublishDialog = useCallback(
+    (skill: SkillMetadata) => {
+      // 已发布过则“更新发布”，否则“一键发布”。
+      const mode: PublishMode = uploadedSkillNames.has(normalizeSkillName(skill.name))
+        ? "update"
+        : "upload"
+      setPublishMode(mode)
+      setPublishSkill(skill)
+      setPublishDialogOpen(true)
+    },
+    [uploadedSkillNames]
+  )
+
+  const uploadedCustomSkills = useMemo(
+    () => customSkills.filter((skill) => isSkillUploadedInPanel(skill)),
+    [customSkills, isSkillUploadedInPanel]
+  )
+  const marketInstalledCustomSkills = useMemo(
+    () => customSkills.filter((skill) => !isSkillUploadedInPanel(skill)),
+    [customSkills, isSkillUploadedInPanel]
   )
 
   const filteredBuiltin = useMemo(
     () => filterSkillsBySearch(builtinSkills),
     [builtinSkills, filterSkillsBySearch]
   )
-  const filteredCustom = useMemo(
-    () => filterSkillsBySearch(customSkills),
-    [customSkills, filterSkillsBySearch]
+  const filteredUploadedCustom = useMemo(
+    () => filterSkillsBySearch(uploadedCustomSkills),
+    [filterSkillsBySearch, uploadedCustomSkills]
+  )
+  const filteredMarketInstalledCustom = useMemo(
+    () => filterSkillsBySearch(marketInstalledCustomSkills),
+    [filterSkillsBySearch, marketInstalledCustomSkills]
+  )
+
+  const openMarketWithSkillSearch = useCallback(
+    (skillName: string) => {
+      const keyword = skillName.trim()
+      setMarketInitialSkillCategory(null)
+      setMarketInitialSkillSearchQuery(keyword || null)
+      // 兜底：当 customizeInitialTab 已经是 market 时，先切到 skills 再切回 market，
+      // 保证“更新到市场/发布到市场”后一定触发市场页切换并应用搜索词。
+      setShowCustomizeView(true, "skills")
+      setTimeout(() => setShowCustomizeView(true, "market"), 0)
+    },
+    [setMarketInitialSkillCategory, setMarketInitialSkillSearchQuery, setShowCustomizeView]
   )
 
   return (
     <div className="contents">
       <div className="w-[330px] shrink-0 border-r border-border flex flex-col">
         <div className="p-3 border-b border-border space-y-2">
-          <div className="flex items-center justify-between gap-2">
-            <h2 className="text-base font-bold">Skills</h2>
-            <div className="flex items-center gap-1">
-              <div className="relative flex-1 min-w-[120px] max-w-[160px]">
-                <Search className="absolute left-2 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground pointer-events-none" />
-                <Input
-                  placeholder="搜索"
-                  value={searchQuery}
-                  onChange={(e) => handleSearchChange(e.target.value)}
-                  className="h-7 pl-7 pr-6 text-xs"
-                />
-                {searchQuery && (
-                  <button
-                    type="button"
-                    className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground p-0.5 rounded"
-                    onClick={() => {
-                      setSearchQuery("")
-                      setDebouncedQuery("")
-                    }}
-                    aria-label="清���"
-                  >
-                    <X className="size-3" />
-                  </button>
-                )}
-              </div>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-7 w-7 p-0 shrink-0"
-                onClick={() => setUploadDialogOpen(true)}
+          <div className="relative">
+            <Search className="absolute left-2 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground pointer-events-none" />
+            <Input
+              placeholder="搜索"
+              value={searchQuery}
+              onChange={(e) => handleSearchChange(e.target.value)}
+              className="h-7 w-full pl-7 pr-6 text-xs"
+            />
+            {searchQuery && (
+              <button
+                type="button"
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground p-0.5 rounded"
+                onClick={() => {
+                  setSearchQuery("")
+                  setDebouncedQuery("")
+                }}
+                aria-label="清空"
               >
-                <Plus className="size-4" />
-              </Button>
-            </div>
+                <X className="size-3" />
+              </button>
+            )}
+          </div>
+          <div className="flex items-center gap-1.5">
+            <Button
+              variant="outline"
+              size="sm"
+              className="cursor-pointer group relative h-7 flex-1 overflow-hidden rounded-md border-emerald-300/55 bg-emerald-500/[0.08] px-2 text-xs font-medium text-emerald-700 shadow-sm transition-all duration-200 hover:-translate-y-px hover:border-emerald-400/70 hover:bg-emerald-500/[0.16] hover:shadow-md dark:text-emerald-300"
+              onClick={() => setUploadDialogOpen(true)}
+              aria-label="上传技能"
+            >
+              <span
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-0 bg-gradient-to-r from-transparent via-emerald-400/10 to-emerald-400/25 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
+              />
+              <span className="relative flex size-4 items-center justify-center rounded-full bg-emerald-500/15 ring-1 ring-emerald-500/25 transition-transform duration-200 group-hover:scale-105">
+                <Plus className="size-2.5" />
+              </span>
+              <span className="relative">上传技能</span>
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="cursor-pointer group relative h-7 flex-1 overflow-hidden rounded-md border-primary/40 bg-primary/[0.08] px-2.5 text-xs font-medium text-primary shadow-sm transition-all duration-200 hover:-translate-y-px hover:border-primary/60 hover:bg-primary/[0.18] hover:shadow-md"
+              onClick={() => openMarketWithSkillSearch("")}
+            >
+              <span
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-0 bg-gradient-to-r from-transparent via-primary/15 to-primary/30 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
+              />
+              <span className="relative flex size-4 items-center justify-center rounded-full bg-primary/15 ring-1 ring-primary/25 transition-transform duration-200 group-hover:scale-105">
+                <Store className="size-2.5" />
+              </span>
+              <span className="relative">去应用市场</span>
+              <ChevronRight className="relative size-3 text-primary/80 transition-transform duration-200 group-hover:translate-x-0.5" />
+            </Button>
           </div>
         </div>
         <ScrollArea className="flex-1">
@@ -504,29 +1492,52 @@ export function SkillsPanel(): React.JSX.Element {
             <SkillSection
               title="内置技能"
               skills={filteredBuiltin}
+              marketSkillMap={marketSkillMap}
+              uploadedSkillNames={uploadedSkillNames}
+              editedSkillPaths={editedSkillPaths}
               expandedSkills={expandedSkills}
               skillFilesMap={skillFilesMap}
               selectedSkill={selectedSkill}
-              selectedFilePath={selectedFilePath}
               expandedDirNodes={expandedDirNodes}
               disabledSkills={disabledSkills}
               onToggleSkill={onToggleSkill}
               onToggleDirNode={toggleDirNode}
               onSelectFile={onSelectFile}
             />
-            {customSkills.length > 0 && (
+            {uploadedCustomSkills.length > 0 && (
               <SkillSection
-                title="我安装的技能"
-                skills={filteredCustom}
+                title="我上传的技能"
+                skills={filteredUploadedCustom}
+                marketSkillMap={marketSkillMap}
+                uploadedSkillNames={uploadedSkillNames}
+                editedSkillPaths={editedSkillPaths}
                 expandedSkills={expandedSkills}
                 skillFilesMap={skillFilesMap}
                 selectedSkill={selectedSkill}
-                selectedFilePath={selectedFilePath}
                 expandedDirNodes={expandedDirNodes}
                 disabledSkills={disabledSkills}
                 onToggleSkill={onToggleSkill}
                 onToggleDirNode={toggleDirNode}
                 onSelectFile={onSelectFile}
+              />
+            )}
+            {marketInstalledCustomSkills.length > 0 && (
+              <SkillSection
+                title="我从应用市场安装的技能"
+                skills={filteredMarketInstalledCustom}
+                marketSkillMap={marketSkillMap}
+                uploadedSkillNames={uploadedSkillNames}
+                editedSkillPaths={editedSkillPaths}
+                expandedSkills={expandedSkills}
+                skillFilesMap={skillFilesMap}
+                selectedSkill={selectedSkill}
+                expandedDirNodes={expandedDirNodes}
+                disabledSkills={disabledSkills}
+                onToggleSkill={onToggleSkill}
+                onToggleDirNode={toggleDirNode}
+                onSelectFile={onSelectFile}
+                hideFeaturedMarketFiles
+                hideMarketTag
               />
             )}
           </div>
@@ -535,6 +1546,7 @@ export function SkillsPanel(): React.JSX.Element {
 
       <SkillDetail
         skill={selectedSkill}
+        marketInfo={selectedSkillMarketInfo}
         selectedFilePath={selectedFilePath}
         content={selectedFileContent}
         previewKind={selectedFilePreviewKind}
@@ -544,17 +1556,77 @@ export function SkillsPanel(): React.JSX.Element {
         onToggleEnabled={() => {
           if (selectedSkill) toggleSkillEnabled(selectedSkill.name)
         }}
+        onShowGuide={() => {
+          setSelectedSkill(null)
+          setSelectedFilePath(null)
+          setSelectedFileContent(null)
+          setSelectedBinaryBase64(null)
+          setSelectedBinaryMimeType(null)
+        }}
         onDelete={
           selectedSkill?.source === "user" ? () => handleDeleteSkill(selectedSkill) : undefined
         }
+        onPublish={
+          selectedSkill && (selectedSkillCanPublish || selectedSkillCanUpdate)
+            ? () => openPublishDialog(selectedSkill)
+            : undefined
+        }
+        publishLabel={selectedSkillPublishLabel}
+        canEdit={selectedSkillCanEdit}
+        hideContentPreview={selectedSkillHideContent}
+        onSaveContent={saveSkillFileContent}
+        isEdited={selectedSkillIsEdited}
+        hasMarketEntry={selectedSkillHasMarketEntry}
       />
 
       <UploadSkillDialog
         open={uploadDialogOpen}
         onOpenChange={setUploadDialogOpen}
-        onSuccess={() => {
+        onSuccess={(uploadedSkillDirName) => {
           setSkillFilesMap({})
+          window.api.skills
+            .list()
+            .then((nextSkills) => {
+              setSkills(nextSkills)
+              if (!uploadedSkillDirName) return
+              /**
+               * 上传成功后把“目录名（upload 返回）”映射回技能 path，并写入“本面板上传”的来源标记。
+               * 这里用目录名匹配，兼容 frontmatter name 与目录名不完全一致的场景。
+               */
+              const dirNameKey = normalizeDirNameKey(uploadedSkillDirName)
+              const matched = nextSkills.find((item) => {
+                const normalizedDir = getSkillDir(item.path).replace(/\\/g, "/")
+                const dirName = normalizedDir.split("/").filter(Boolean).pop() || ""
+                return normalizeDirNameKey(dirName) === dirNameKey
+              })
+              if (!matched) return
+              markLocalUploadedSkillPathInStorage(matched.path)
+              reloadLocalUploadedSkillPaths()
+            })
+            .catch(console.error)
+        }}
+      />
+
+      <PublishSkillDialog
+        open={publishDialogOpen}
+        skill={publishSkill}
+        mode={publishMode}
+        marketInfo={publishSkill ? resolveMarketInfo(publishSkill) : undefined}
+        onOpenChange={(open) => {
+          setPublishDialogOpen(open)
+          if (!open) setPublishSkill(null)
+        }}
+        onSuccess={({ skillName, mode }) => {
+          reloadUploadedSkillNames()
+          void loadMarketSkills()
           window.api.skills.list().then(setSkills).catch(console.error)
+
+          toast.success(
+            mode === "update"
+              ? `技能「${skillName}」更新发布成功，已跳转到应用市场。`
+              : `技能「${skillName}」发布成功，已跳转到应用市场。`
+          )
+          openMarketWithSkillSearch(skillName)
         }}
       />
     </div>
@@ -564,12 +1636,16 @@ export function SkillsPanel(): React.JSX.Element {
 function SkillSection(props: {
   title: string
   skills: SkillMetadata[]
+  marketSkillMap: Record<string, SkillMarketInfo>
+  uploadedSkillNames: Set<string>
+  editedSkillPaths: Set<string>
   expandedSkills: Set<string>
   skillFilesMap: Record<string, string[]>
   selectedSkill: SkillMetadata | null
-  selectedFilePath: string | null
   expandedDirNodes: Set<string>
   disabledSkills: Set<string>
+  hideFeaturedMarketFiles?: boolean
+  hideMarketTag?: boolean
   onToggleSkill: (skill: SkillMetadata) => void
   onToggleDirNode: (nodeId: string) => void
   onSelectFile: (skill: SkillMetadata, filePath: string) => void
@@ -577,58 +1653,120 @@ function SkillSection(props: {
   const {
     title,
     skills,
+    marketSkillMap,
+    uploadedSkillNames,
+    editedSkillPaths,
     expandedSkills,
     skillFilesMap,
     selectedSkill,
-    selectedFilePath,
     expandedDirNodes,
     disabledSkills,
+    hideFeaturedMarketFiles = false,
+    hideMarketTag = false,
     onToggleSkill,
     onToggleDirNode,
     onSelectFile
   } = props
   const [collapsed, setCollapsed] = useState(false)
+  const sectionStyle = useMemo(() => {
+    if (title.includes("内置")) {
+      return {
+        header:
+          "border-sky-200/70 bg-sky-50/80 text-sky-900 hover:bg-sky-50 dark:border-sky-900/50 dark:bg-sky-950/30 dark:text-sky-100",
+        dot: "bg-sky-500",
+        count:
+          "border-sky-200/80 bg-white/85 text-sky-700 dark:border-sky-800 dark:bg-sky-950/50 dark:text-sky-200"
+      }
+    }
+    if (title.includes("我上传")) {
+      return {
+        header:
+          "border-amber-200/70 bg-amber-50/80 text-amber-900 hover:bg-amber-50 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-100",
+        dot: "bg-amber-500",
+        count:
+          "border-amber-200/80 bg-white/85 text-amber-700 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-200"
+      }
+    }
+    if (title.includes("应用市场")) {
+      return {
+        header:
+          "border-emerald-200/70 bg-emerald-50/80 text-emerald-900 hover:bg-emerald-50 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-100",
+        dot: "bg-emerald-500",
+        count:
+          "border-emerald-200/80 bg-white/85 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-200"
+      }
+    }
+    return {
+      header:
+        "border-border/70 bg-muted/50 text-foreground hover:bg-muted dark:border-border/60 dark:bg-muted/30 dark:text-foreground",
+      dot: "bg-muted-foreground",
+      count:
+        "border-border/70 bg-background text-muted-foreground dark:border-border/60 dark:bg-background/70"
+    }
+  }, [title])
 
   return (
-    <div>
+    <div className="rounded-xl border border-border/60 bg-background/40 p-1.5">
       <button
-        className="flex items-center justify-between w-full px-1 mb-1 group cursor-pointer"
+        className={cn(
+          "flex items-center justify-between w-full rounded-md border px-2.5 py-1.5 group cursor-pointer transition-colors",
+          sectionStyle.header
+        )}
         onClick={() => setCollapsed((v) => !v)}
       >
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-2 min-w-0">
           {collapsed ? (
             <ChevronRight className="size-3 text-muted-foreground" />
           ) : (
             <ChevronDown className="size-3 text-muted-foreground" />
           )}
-          <span className="text-[11px] text-muted-foreground tracking-wider font-medium">
+          <span className={cn("size-1.5 rounded-full shrink-0", sectionStyle.dot)} />
+          <span className="text-xs font-semibold tracking-wide truncate">
             {title}
           </span>
         </div>
-        <Badge variant="outline" className="text-[10px] h-4 px-1.5">
+        <Badge
+          variant="outline"
+          className={cn(
+            "h-5 min-w-6 justify-center px-1.5 text-[10px] font-semibold tabular-nums",
+            sectionStyle.count
+          )}
+        >
           {skills.length}
         </Badge>
       </button>
       {!collapsed && (
-        <div className="space-y-2">
+        <div className="space-y-2 pt-2 px-0.5 pb-0.5">
           {skills.length === 0 ? (
-            <p className="text-xs text-muted-foreground px-1 py-2">没有匹配的技能</p>
+            <p className="text-xs text-muted-foreground rounded-md border border-dashed border-border/60 px-2 py-2">
+              没有匹配的技能
+            </p>
           ) : (
             skills.map((skill) => {
               const expanded = expandedSkills.has(skill.name)
               const files = skillFilesMap[skill.name] || []
               const selected = selectedSkill?.name === skill.name
               const disabled = disabledSkills.has(skill.name)
+              const marketInfo =
+                skill.source === "user" ? marketSkillMap[normalizeSkillName(skill.name)] : undefined
+              const hasMarketEntry =
+                !!marketInfo || uploadedSkillNames.has(normalizeSkillName(skill.name))
+              const isEdited = editedSkillPaths.has(normalizeSkillPathKey(skill.path))
+              const hideFileTree = hideFeaturedMarketFiles && isFeaturedSkill(marketInfo)
 
               return (
                 <SkillItem
                   key={skill.name}
                   skill={skill}
+                  marketInfo={marketInfo}
+                  hasMarketEntry={hasMarketEntry}
+                  hideMarketTag={hideMarketTag}
+                  isEdited={isEdited}
                   expanded={expanded}
                   selected={selected}
                   disabled={disabled}
+                  hideFileTree={hideFileTree}
                   files={files}
-                  selectedFilePath={selectedFilePath}
                   expandedDirNodes={expandedDirNodes}
                   onToggleSkill={onToggleSkill}
                   onToggleDirNode={onToggleDirNode}
@@ -645,11 +1783,15 @@ function SkillSection(props: {
 
 function SkillItem(props: {
   skill: SkillMetadata
+  marketInfo?: SkillMarketInfo
+  hasMarketEntry: boolean
+  hideMarketTag?: boolean
+  isEdited: boolean
   expanded: boolean
   selected: boolean
   disabled: boolean
+  hideFileTree?: boolean
   files: string[]
-  selectedFilePath: string | null
   expandedDirNodes: Set<string>
   onToggleSkill: (skill: SkillMetadata) => void
   onToggleDirNode: (nodeId: string) => void
@@ -657,11 +1799,15 @@ function SkillItem(props: {
 }): React.JSX.Element {
   const {
     skill,
+    marketInfo,
+    hasMarketEntry,
+    hideMarketTag = false,
+    isEdited,
     expanded,
     selected,
     disabled,
+    hideFileTree = false,
     files,
-    selectedFilePath,
     expandedDirNodes,
     onToggleSkill,
     onToggleDirNode,
@@ -669,16 +1815,26 @@ function SkillItem(props: {
   } = props
 
   const treeNodes = useMemo(
-    () => (expanded && files.length > 0 ? buildFileTree(skill.path, files) : []),
-    [expanded, files, skill.path]
+    () => (expanded && !hideFileTree && files.length > 0 ? buildFileTree(skill.path, files) : []),
+    [expanded, files, hideFileTree, skill.path]
   )
+  const isFeatured = isFeaturedSkill(marketInfo)
+  const chineseName = getSkillChineseName(skill, marketInfo)
+  const displayName = chineseName || skill.name
 
   return (
-    <div className="rounded-md border border-border/70 overflow-hidden">
+    <div
+      className={cn(
+        "rounded-md border overflow-hidden transition-colors",
+        selected
+          ? "border-primary/60 bg-primary/[0.04] ring-1 ring-primary/20"
+          : "border-border/70 bg-transparent"
+      )}
+    >
       <button
         className={cn(
-          "w-full flex items-center gap-2 px-2 py-1.5 text-left transition-colors",
-          selected ? "bg-muted/70" : "hover:bg-muted/50"
+          "w-full flex items-center gap-2 px-2.5 py-2 text-left transition-colors",
+          selected ? "bg-primary/10" : "hover:bg-muted/50"
         )}
         onClick={() => onToggleSkill(skill)}
       >
@@ -687,30 +1843,61 @@ function SkillItem(props: {
         ) : (
           <ChevronRight className="size-3.5 text-muted-foreground shrink-0" />
         )}
-        <Folder className="size-3.5 text-muted-foreground shrink-0" />
-        <span
-          className={cn(
-            "text-sm truncate flex-1",
-            disabled && "text-muted-foreground line-through"
+        <div className="min-w-0 flex-1 space-y-1">
+          <p
+            className={cn(
+              "text-sm truncate",
+              disabled && "text-muted-foreground line-through"
+            )}
+          >
+            {displayName}
+          </p>
+        </div>
+        <span>
+          {isFeatured && (
+            <Badge
+              variant="outline"
+              className="h-4 gap-1 px-1.5 text-[10px] border-amber-200 text-amber-800 bg-amber-50"
+            >
+              <Sparkles className="size-2.5 shrink-0" />
+              精品
+            </Badge>
           )}
-        >
-          {skill.name}
+          {hasMarketEntry && !hideMarketTag && (
+            <Badge
+              variant="outline"
+              className="h-4 gap-1 px-1.5 text-[10px] border-emerald-200 text-emerald-700 bg-emerald-50"
+            >
+              <Store className="size-2.5 shrink-0" />
+              市场
+            </Badge>
+          )}
+          {isEdited && (
+            <Badge
+              variant="outline"
+              className="h-4 px-1.5 text-[10px] border-amber-200 text-amber-800 bg-amber-50"
+            >
+              已编辑
+            </Badge>
+          )}
         </span>
-        <Sparkles
-          className={cn(
-            "size-3 shrink-0",
-            disabled ? "text-muted-foreground/40" : "text-amber-500"
-          )}
-        />
       </button>
       {expanded && (
-        <div className="border-t border-border/60 bg-muted/20">
-          {treeNodes.length > 0 ? (
+        <div
+          className={cn(
+            "border-t",
+            selected ? "border-primary/30 bg-primary/[0.03]" : "border-border/60 bg-muted/20"
+          )}
+        >
+          {hideFileTree ? (
+            <div className="pl-7 pr-2 py-2 text-xs text-muted-foreground">
+              精品技能不支持查看，可以直接使用。
+            </div>
+          ) : treeNodes.length > 0 ? (
             <SkillFileTree
               nodes={treeNodes}
               level={0}
               skill={skill}
-              selectedFilePath={selectedFilePath}
               expandedDirNodes={expandedDirNodes}
               onToggleDirNode={onToggleDirNode}
               onSelectFile={onSelectFile}
@@ -728,24 +1915,26 @@ function SkillFileTree(props: {
   nodes: FileTreeNode[]
   level: number
   skill: SkillMetadata
-  selectedFilePath: string | null
   expandedDirNodes: Set<string>
   onToggleDirNode: (nodeId: string) => void
   onSelectFile: (skill: SkillMetadata, filePath: string) => void
 }): React.JSX.Element {
-  const { nodes, level, skill, selectedFilePath, expandedDirNodes, onToggleDirNode, onSelectFile } =
-    props
+  const { nodes, level, skill, expandedDirNodes, onToggleDirNode, onSelectFile } = props
 
   return (
-    <div>
+    <div className="py-1">
       {nodes.map((node) => {
         if (node.isDir) {
           const isExpanded = expandedDirNodes.has(node.id)
           return (
             <div key={node.id}>
               <button
-                className="w-full flex items-center gap-2 pr-2 py-1.5 text-left text-xs text-muted-foreground hover:bg-muted/40"
-                style={{ paddingLeft: `${28 + level * 16}px` }}
+                className={cn(
+                  "w-full min-h-8 flex items-center gap-2 rounded-sm pr-2 py-1.5 text-left text-[11px] transition-colors",
+                  isExpanded ? "text-foreground bg-background/60" : "text-muted-foreground",
+                  "hover:bg-background/80"
+                )}
+                style={{ paddingLeft: `${22 + level * 14}px` }}
                 onClick={() => onToggleDirNode(node.id)}
               >
                 {isExpanded ? (
@@ -754,14 +1943,13 @@ function SkillFileTree(props: {
                   <ChevronRight className="size-3 shrink-0" />
                 )}
                 <Folder className="size-3 shrink-0" />
-                <span className="truncate">{node.name}</span>
+                <span className="min-w-0 flex-1 truncate">{node.name}</span>
               </button>
               {isExpanded && (
                 <SkillFileTree
                   nodes={node.children}
                   level={level + 1}
                   skill={skill}
-                  selectedFilePath={selectedFilePath}
                   expandedDirNodes={expandedDirNodes}
                   onToggleDirNode={onToggleDirNode}
                   onSelectFile={onSelectFile}
@@ -771,19 +1959,15 @@ function SkillFileTree(props: {
           )
         }
 
-        const activeFile = selectedFilePath === node.path
         return (
           <button
             key={node.id}
-            className={cn(
-              "w-full flex items-center gap-2 pr-2 py-1.5 text-left text-xs transition-colors",
-              activeFile ? "bg-muted" : "hover:bg-muted/50"
-            )}
-            style={{ paddingLeft: `${28 + level * 16}px` }}
+            className="group w-full min-h-8 flex items-center gap-2 rounded-sm border-l-2 border-l-transparent pr-2 py-1.5 text-left text-[11px] text-foreground/80 transition-colors hover:bg-background/80 hover:text-foreground"
+            style={{ paddingLeft: `${22 + level * 14}px` }}
             onClick={() => onSelectFile(skill, node.path)}
           >
-            <FileText className="size-3 shrink-0 text-muted-foreground" />
-            <span className="truncate">{node.name}</span>
+            <FileText className="size-3 shrink-0 text-muted-foreground transition-colors group-hover:text-foreground" />
+            <span className="min-w-0 flex-1 truncate">{node.name}</span>
           </button>
         )
       })}
@@ -793,6 +1977,7 @@ function SkillFileTree(props: {
 
 export function SkillDetail(props: {
   skill: SkillMetadata | null
+  marketInfo?: SkillMarketInfo
   selectedFilePath: string | null
   content: string | null
   previewKind: FilePreviewKind
@@ -800,11 +1985,20 @@ export function SkillDetail(props: {
   binaryMimeType: string | null
   isDisabled: boolean
   onToggleEnabled: () => void
+  onShowGuide?: () => void
   onDelete?: () => void
+  onPublish?: () => void
+  publishLabel?: string
+  canEdit?: boolean
+  onSaveContent?: (filePath: string, content: string) => Promise<SaveSkillFileResult>
+  isEdited?: boolean
+  hasMarketEntry?: boolean
+  hideContentPreview?: boolean
   hideActions?: boolean
 }): React.JSX.Element {
   const {
     skill,
+    marketInfo,
     selectedFilePath,
     content,
     previewKind,
@@ -813,111 +2007,203 @@ export function SkillDetail(props: {
     isDisabled,
     onToggleEnabled,
     onDelete,
+    onPublish,
+    publishLabel = "发布到市场",
+    canEdit = false,
+    onSaveContent,
+    isEdited = false,
+    hasMarketEntry = false,
+    hideContentPreview = false,
     hideActions = false
   } = props
+  const [isEditing, setIsEditing] = useState(false)
+  const [draftContent, setDraftContent] = useState("")
+  const [isSaving, setIsSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const selectedFileExt = selectedFilePath?.split(".").pop()?.toLowerCase() ?? ""
+  const isEditableTextFile = !!selectedFilePath && KNOWN_TEXT_EXTS.has(selectedFileExt)
+  const markdownFrontmatter = useMemo(
+    () => splitMarkdownFrontmatter(selectedFilePath, content),
+    [content, selectedFilePath]
+  )
+  const canEditCurrentFile =
+    canEdit &&
+    !hideContentPreview &&
+    isEditableTextFile &&
+    typeof content === "string" &&
+    (previewKind === "text" || previewKind === "html")
+
+  useEffect(() => {
+    setIsEditing(false)
+    setDraftContent(markdownFrontmatter.editableContent)
+    setIsSaving(false)
+    setSaveError(null)
+  }, [selectedFilePath, content, canEditCurrentFile, markdownFrontmatter.editableContent])
+
+  const handleStartEdit = useCallback(() => {
+    if (!canEditCurrentFile) return
+    setDraftContent(markdownFrontmatter.editableContent)
+    setSaveError(null)
+    setIsEditing(true)
+  }, [canEditCurrentFile, markdownFrontmatter.editableContent])
+
+  const handleCancelEdit = useCallback(() => {
+    setDraftContent(markdownFrontmatter.editableContent)
+    setSaveError(null)
+    setIsEditing(false)
+  }, [markdownFrontmatter.editableContent])
+
+  const handleSaveEdit = useCallback(async () => {
+    if (!canEditCurrentFile || !selectedFilePath || !onSaveContent || isSaving) return
+    setSaveError(null)
+    setIsSaving(true)
+    try {
+      const nextContent = mergeMarkdownFrontmatter(
+        markdownFrontmatter.protectedPrefix,
+        draftContent
+      )
+      const result = await onSaveContent(selectedFilePath, nextContent)
+      if (result.success) {
+        setIsEditing(false)
+      } else {
+        setSaveError(result.error || "保存失败")
+      }
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : "保存失败")
+    } finally {
+      setIsSaving(false)
+    }
+  }, [
+    canEditCurrentFile,
+    draftContent,
+    isSaving,
+    markdownFrontmatter.protectedPrefix,
+    onSaveContent,
+    selectedFilePath
+  ])
 
   if (!skill) {
-    return (
-      <div
-        className="flex-1 flex items-center justify-center overflow-y-auto p-8 select-none"
-        onCopy={(e) => e.preventDefault()}
-        onKeyDown={(e) => {
-          if ((e.ctrlKey || e.metaKey) && e.key === "c") {
-            e.preventDefault()
-          }
-        }}
-      >
-        <div className="max-w-md space-y-6">
-          <div className="text-center space-y-3">
-            <div className="size-14 rounded-2xl bg-muted/60 flex items-center justify-center mx-auto">
-              <Sparkles className="size-7 text-muted-foreground/60" />
-            </div>
-            <h3 className="text-lg font-semibold text-foreground/80">Skills 技能</h3>
-            <p className="text-sm text-muted-foreground leading-relaxed">
-              技能是可复用的 AI 提示词模板，让 AI
-              按照预设的指令和步骤完成特定任务。应用内置了一些常用技能，你也可以上传自定义技能来扩展
-              AI 的工作流。
-            </p>
-          </div>
-
-          <div className="space-y-3">
-            <div className="rounded-xl border border-border/60 bg-muted/30 p-4 space-y-3">
-              <p className="text-sm font-medium text-foreground/70">技能的结构</p>
-              <p className="text-[13px] text-muted-foreground leading-relaxed">
-                每个技能是一个文件夹，核心是{" "}
-                <span className="font-mono text-xs bg-muted px-1.5 py-0.5 rounded">SKILL.md</span>{" "}
-                文件，用来定义 AI 的行为指令——任务目标、执行步骤、输出格式等。技能分为
-                <span className="font-medium text-foreground/60">内置技能</span>（随应用提供）和
-                <span className="font-medium text-foreground/60">自定义技能</span>
-                （用户上传），内置技能不可删除，自定义技能可随时管理。
-              </p>
-            </div>
-
-            <div className="rounded-xl border border-border/60 bg-muted/30 p-4 space-y-3">
-              <p className="text-sm font-medium text-foreground/70">如何添加和使用？</p>
-              <ul className="text-[13px] text-muted-foreground space-y-2 leading-relaxed">
-                <li className="flex gap-2">
-                  <span className="text-foreground/40 shrink-0">1.</span>
-                  <span>
-                    点击 <span className="font-medium text-foreground/60">+</span> 按钮，支持上传
-                    .md 或 .zip 格式的技能文件
-                  </span>
-                </li>
-                <li className="flex gap-2">
-                  <span className="text-foreground/40 shrink-0">2.</span>
-                  <span>上传后可在右侧预览文件内容，支持渲染和源码切换</span>
-                </li>
-                <li className="flex gap-2">
-                  <span className="text-foreground/40 shrink-0">3.</span>
-                  <span>通过开关可随时启用或禁用某个技能</span>
-                </li>
-              </ul>
-            </div>
-
-            <div className="rounded-xl border border-border/60 bg-muted/30 p-4 space-y-3">
-              <p className="text-sm font-medium text-foreground/70">适用场景</p>
-              <p className="text-[13px] text-muted-foreground leading-relaxed">
-                代码审查、文档生成、Bug 分析、数据处理、翻译润色……任何你需要 AI
-                反复执行的任务，都可以封装成技能来提升效率。你还可以从 Market 中下载大家分享的技能。
-              </p>
-            </div>
-          </div>
-        </div>
-      </div>
-    )
+    return <SkillsGuide />
   }
 
-  const description = skill.description || "暂无描述"
+  const chineseName = getSkillChineseName(skill, marketInfo)
+  const category = getSkillCategory(skill, marketInfo)
+  const description = marketInfo?.description || skill.description || "暂无描述"
+  const isFeatured = isFeaturedSkill(marketInfo)
   const isMarkdown = !!selectedFilePath && /\.md$/i.test(selectedFilePath)
-  const hasFrontmatter = isMarkdown && !!content && content.startsWith("---")
-  const frontmatterEnd = hasFrontmatter ? content.indexOf("---", 3) : -1
   const previewContent =
-    hasFrontmatter && frontmatterEnd > 0
-      ? content.slice(content.indexOf("\n", frontmatterEnd) + 1).trim()
+    isMarkdown && markdownFrontmatter.hasFrontmatter
+      ? markdownFrontmatter.editableContent.trim()
       : content
   const binaryDataUrl =
     binaryBase64 && binaryMimeType ? `data:${binaryMimeType};base64,${binaryBase64}` : null
   const isLoading = !!selectedFilePath && content === null && binaryBase64 === null
+  const isDirty = isEditing && draftContent !== markdownFrontmatter.editableContent
+  /**
+   * 让“发布/更新到市场”按钮更亮眼：
+   * - 发布：橙金渐变；
+   * - 更新：青绿渐变；
+   * 同时加阴影与悬停态，增强可点击感。
+   */
+  const publishButtonClassName = publishLabel.includes("更新")
+    ? "cursor-pointer h-7 gap-1.5 text-xs border-0 text-white hover:text-white bg-gradient-to-r from-emerald-500 to-teal-500 shadow-[0_6px_16px_rgba(16,185,129,0.35)] hover:from-emerald-400 hover:to-teal-400 hover:shadow-[0_8px_20px_rgba(16,185,129,0.45)]"
+    : "cursor-pointer h-7 gap-1.5 text-xs border-0 text-white hover:text-white bg-gradient-to-r from-amber-500 to-orange-500 shadow-[0_6px_16px_rgba(245,158,11,0.35)] hover:from-amber-400 hover:to-orange-400 hover:shadow-[0_8px_20px_rgba(245,158,11,0.45)]"
 
   return (
     <div
-      className="flex-1 flex flex-col min-w-0 overflow-hidden select-none"
-      onCopy={(e) => e.preventDefault()}
+      className={cn("flex-1 flex flex-col min-w-0 overflow-hidden", !isEditing && "select-none")}
+      onCopy={(e) => {
+        if (!isEditing) e.preventDefault()
+      }}
       onKeyDown={(e) => {
-        if ((e.ctrlKey || e.metaKey) && e.key === "c") {
+        if (!isEditing && (e.ctrlKey || e.metaKey) && e.key === "c") {
           e.preventDefault()
         }
       }}
     >
       <div className="p-4 border-b border-border flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <h2 className="text-base font-semibold truncate">{skill.name}</h2>
-          {/*<p className="text-xs text-muted-foreground mt-0.5 truncate">*/}
-          {/*  {selectedFilePath ? selectedFilePath.replace(/\\/g, "/") : "未选择文件"}*/}
-          {/*</p>*/}
+          <div className="flex items-center gap-2 min-w-0">
+            <h2 className="text-base font-semibold truncate min-w-0 flex-1">
+              {chineseName || skill.name}
+            </h2>
+            {!hideActions && onPublish && (
+              <Button
+                variant="default"
+                size="sm"
+                className={cn(publishButtonClassName, "group shrink-0")}
+                onClick={onPublish}
+              >
+                <span className="flex size-4 items-center justify-center rounded-full bg-white/20 ring-1 ring-white/30 transition-transform duration-200 group-hover:scale-105">
+                  <CloudUpload className="size-2.5" />
+                </span>
+                {publishLabel}
+              </Button>
+            )}
+          </div>
+          <div className="mt-1 flex items-center gap-1.5 flex-wrap">
+            {chineseName && <p className="text-xs text-muted-foreground truncate">{skill.name}</p>}
+            {isFeatured && (
+              <Badge
+                variant="outline"
+                className="h-5 gap-1 px-2 text-[10px] border-amber-200 text-amber-800 bg-amber-50"
+              >
+                <Sparkles className="size-3 shrink-0" />
+                精品
+              </Badge>
+            )}
+            {hasMarketEntry && (
+              <Badge
+                variant="outline"
+                className="h-5 gap-1 px-2 text-[10px] border-emerald-200 text-emerald-700 bg-emerald-50"
+              >
+                <Store className="size-3 shrink-0" />
+                市场
+              </Badge>
+            )}
+            {isEdited && (
+              <Badge
+                variant="outline"
+                className="h-5 px-2 text-[10px] border-amber-200 text-amber-800 bg-amber-50"
+              >
+                已编辑
+              </Badge>
+            )}
+            {category && (
+              <Badge variant="outline" className="h-5 px-2 text-[10px]">
+                {category}
+              </Badge>
+            )}
+          </div>
         </div>
         {!hideActions && (
           <div className="flex items-center gap-1.5 shrink-0">
+            {canEditCurrentFile && !isEditing && (
+              <Button variant="outline" size="sm" className="h-7 text-xs" onClick={handleStartEdit}>
+                编辑
+              </Button>
+            )}
+            {canEditCurrentFile && isEditing && (
+              <>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs"
+                  onClick={handleCancelEdit}
+                  disabled={isSaving}
+                >
+                  取消
+                </Button>
+                <Button
+                  size="sm"
+                  className="h-7 text-xs"
+                  onClick={() => void handleSaveEdit()}
+                  disabled={!isDirty || isSaving}
+                >
+                  {isSaving ? "保存中..." : "保存"}
+                </Button>
+              </>
+            )}
             {onDelete && (
               <Button
                 variant="ghost"
@@ -948,46 +2234,72 @@ export function SkillDetail(props: {
         </p>
       </div>
 
-      <ScrollArea className="flex-1">
-        <div className="p-4">
-          {isLoading ? (
-            <p className="text-sm text-muted-foreground">加载中...</p>
-          ) : previewKind === "image" && binaryDataUrl ? (
-            <div className="h-full w-full flex items-start justify-center">
-              <img
-                src={binaryDataUrl}
-                alt={selectedFilePath ?? "image preview"}
-                className="max-w-full h-auto rounded-md border border-border"
-              />
-            </div>
-          ) : previewKind === "pdf" && binaryDataUrl ? (
-            <div className="h-[80vh] min-h-[500px]">
-              <iframe
-                title={selectedFilePath ?? "pdf preview"}
-                src={binaryDataUrl}
-                className="h-full w-full rounded-md border border-border bg-white"
-              />
-            </div>
-          ) : previewKind === "html" ? (
-            <div className="h-[80vh] min-h-[500px] rounded-md border border-border overflow-hidden bg-white">
-              <iframe
-                title={selectedFilePath ?? "html preview"}
-                srcDoc={content ?? ""}
-                className="h-full w-full"
-                sandbox=""
-              />
-            </div>
-          ) : !isMarkdown ? (
-            <pre className="text-xs font-mono whitespace-pre-wrap break-words leading-relaxed text-muted-foreground bg-muted/30 rounded-md p-3">
-              {content}
-            </pre>
-          ) : (
-            <div className="streaming-markdown text-sm leading-relaxed">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{previewContent ?? ""}</ReactMarkdown>
-            </div>
-          )}
+      {hideContentPreview ? (
+        <div className="flex-1 min-h-0 p-4">
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+            精品技能不支持查看，可以直接使用。
+          </div>
         </div>
-      </ScrollArea>
+      ) : isEditing && canEditCurrentFile ? (
+        <div className="flex-1 min-h-0 p-4 flex flex-col gap-2">
+          <SkillFileEditor
+            className="flex-1 min-h-0"
+            value={draftContent}
+            onChange={setDraftContent}
+            onSave={() => void handleSaveEdit()}
+            error={saveError}
+            note={
+              markdownFrontmatter.hasFrontmatter
+                ? "Markdown 顶部元信息受保护，此处只编辑正文内容。"
+                : null
+            }
+            disabled={isSaving}
+          />
+        </div>
+      ) : (
+        <ScrollArea className="flex-1">
+          <div className="p-4 space-y-3">
+            <div className="rounded-lg border border-border/70 bg-background/70 p-3">
+              {isLoading ? (
+                <p className="text-sm text-muted-foreground">加载中...</p>
+              ) : previewKind === "image" && binaryDataUrl ? (
+                <div className="h-full w-full flex items-start justify-center">
+                  <img
+                    src={binaryDataUrl}
+                    alt={selectedFilePath ?? "image preview"}
+                    className="max-w-full h-auto rounded-md border border-border"
+                  />
+                </div>
+              ) : previewKind === "pdf" && binaryDataUrl ? (
+                <div className="h-[80vh] min-h-[500px]">
+                  <iframe
+                    title={selectedFilePath ?? "pdf preview"}
+                    src={binaryDataUrl}
+                    className="h-full w-full rounded-md border border-border bg-white"
+                  />
+                </div>
+              ) : previewKind === "html" ? (
+                <div className="h-[80vh] min-h-[500px] rounded-md border border-border overflow-hidden bg-white">
+                  <iframe
+                    title={selectedFilePath ?? "html preview"}
+                    srcDoc={content ?? ""}
+                    className="h-full w-full"
+                    sandbox=""
+                  />
+                </div>
+              ) : !isMarkdown ? (
+                <pre className="text-xs font-mono whitespace-pre-wrap break-words leading-relaxed text-foreground/85">
+                  {content}
+                </pre>
+              ) : (
+                <div className="streaming-markdown text-sm leading-relaxed">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{previewContent ?? ""}</ReactMarkdown>
+                </div>
+              )}
+            </div>
+          </div>
+        </ScrollArea>
+      )}
     </div>
   )
 }

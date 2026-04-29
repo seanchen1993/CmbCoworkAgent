@@ -45,7 +45,10 @@ export async function runStartupSelfCheck(): Promise<StartupCheckResult> {
 
   let marker: UpdateMarker
   try {
-    marker = JSON.parse(readFileSync(markerPath, "utf-8"))
+    // Strip UTF-8 BOM — PowerShell 5.1's Set-Content -Encoding UTF8 writes BOM
+    // and JSON.parse rejects it.
+    const raw = readFileSync(markerPath, "utf-8").replace(/^\uFEFF/, "")
+    marker = JSON.parse(raw)
   } catch {
     console.warn("[Updater] Failed to parse update-marker.json, removing it")
     unlinkSync(markerPath)

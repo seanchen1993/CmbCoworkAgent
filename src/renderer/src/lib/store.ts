@@ -53,6 +53,8 @@ interface AppState {
   // Customize view state
   showCustomizeView: boolean
   customizeInitialTab: string | null
+  marketInitialSkillCategory: string | null
+  marketInitialSkillSearchQuery: string | null
 
   // Thread actions
   loadThreads: () => Promise<void>
@@ -84,6 +86,8 @@ interface AppState {
 
   // Customize actions
   setShowCustomizeView: (show: boolean, tab?: string) => void
+  setMarketInitialSkillCategory: (category: string | null) => void
+  setMarketInitialSkillSearchQuery: (query: string | null) => void
   setMainView: (view: "thread" | "customize" | "evolution" | "kanban" | "claudecode" | "dashboard") => void
 
   // Plugin state sync — increment to trigger RightPanel refresh
@@ -153,6 +157,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   previousThreadId: null,
   showCustomizeView: false,
   customizeInitialTab: null,
+  marketInitialSkillCategory: null,
+  marketInitialSkillSearchQuery: null,
   pluginVersion: 0,
   evolutionTab: "candidates",
   evolutionRunning: false,
@@ -381,6 +387,14 @@ export const useAppStore = create<AppState>((set, get) => ({
         ...(restored ? { currentThreadId: restored, previousThreadId: null } : {})
       })
     }
+  },
+
+  setMarketInitialSkillCategory: (category) => {
+    set({ marketInitialSkillCategory: category })
+  },
+
+  setMarketInitialSkillSearchQuery: (query) => {
+    set({ marketInitialSkillSearchQuery: query })
   },
 
   setMainView: (view) => {

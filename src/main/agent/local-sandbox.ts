@@ -40,8 +40,9 @@ import {
   normalizeDirKey
 } from "../ipc/sandbox"
 import { homedir } from "node:os"
-import type { HookConfig } from "../hooks/types"
-import { runHooks } from "../hooks/runner"
+import type { HookConfig, HookResult } from "../hooks/types"
+import type { HookResultCallback } from "../hooks/runner"
+import { runHooksEnriched } from "../hooks/required-skill"
 
 /**
  * Sensitive directories under user profile that sandbox tools should not access.
@@ -151,6 +152,8 @@ export interface LocalSandboxOptions {
   /** Hook configurations for PreToolUse/PostToolUse lifecycle events.
    *  Accepts a getter function so hooks are always read fresh from storage. */
   hooks?: HookConfig[] | (() => HookConfig[])
+  /** Optional callback invoked after each hook executes — used to emit results to the renderer. */
+  onHookResult?: HookResultCallback
   /** AbortSignal for cancelling running child processes when the user aborts.
    *  When signalled, any in-flight execute() will kill its child process immediately
    *  (SIGTERM → 200ms → SIGKILL), matching OpenCode/Codex abort behaviour. */
@@ -191,6 +194,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
   private readonly windowsSandbox: "none" | "unelevated" | "readonly" | "elevated"
   private readonly codexExePath: string
   private readonly getHooks: () => HookConfig[]
+  private readonly _onHookResult?: HookResultCallback
   /** App-owned persistent cache root granted as a Codex writable root per workspace. */
   private readonly _sandboxCacheRoot: string
   /** Shared download/artifact cache root reused across workspaces. */
@@ -212,6 +216,77 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
   private readonly _fileLocks = new Map<string, Promise<void>>()
   /** mtime recorded after each successful read/write, for external-modification detection */
   private readonly _fileReadTimes = new Map<string, number>()
+
+  /**
+   * Apply PostToolUse hook feedback to a file-operation result (write/edit).
+   *
+   * ⚠️ UPSTREAM CONTRACT — depends on deepagents library internals:
+   *   1. write_file / edit_file tool wrappers treat `result.error` as a failed
+   *      file operation. Only use that channel for real file failures or explicit
+   *      PostToolUse decision=block feedback.
+   *   2. FilesystemBackend sets filesUpdate=null on writes (external storage), so
+   *      overriding `error` on a successful write does NOT lose any LangGraph state.
+   *
+   * Non-blocking hook notes are preserved in metadata so they do not turn a
+   * successful edit/write into a failed tool call.
+   */
+  private static applyPostHookContext<T extends { error?: string; path?: string; metadata?: Record<string, unknown> }>(
+    result: T,
+    postResult: HookResult | null,
+    fileOpLabel: string
+  ): T {
+    if (!postResult) return result
+    const notes: string[] = []
+    if (postResult.stdout) notes.push(`[Hook output]\n${postResult.stdout}`)
+    if (postResult.additionalContext) notes.push(`[Hook context] ${postResult.additionalContext}`)
+    if (postResult.systemMessage) notes.push(`[Hook notice] ${postResult.systemMessage}`)
+    if (postResult.decision === "block" && postResult.reason) {
+      notes.push(`[Hook requested review] ${postResult.reason}`)
+    }
+    if (postResult.continue === false) {
+      const reason = postResult.stopReason || postResult.reason || "PostToolUse hook stopped the turn"
+      notes.push(`[Hook stopped turn] ${reason}`)
+    }
+    if (notes.length === 0) return result
+
+    const originallyFailed = !!result.error
+    const shouldSurfaceAsError = originallyFailed || postResult.decision === "block" || postResult.continue === false
+    if (!shouldSurfaceAsError) {
+      return {
+        ...result,
+        metadata: {
+          ...(result.metadata ?? {}),
+          hookFeedback: notes.join("\n")
+        }
+      }
+    }
+
+    const statusLine = originallyFailed
+      ? result.error
+      : `${fileOpLabel} '${result.path ?? ""}' succeeded. File is persisted on disk — do not retry; address the hook feedback below in your next turn.`
+    return { ...result, error: `${statusLine}\n${notes.join("\n")}` }
+  }
+
+  /**
+   * Apply PostToolUse hook feedback to an ExecuteResponse.
+   * additionalContext / decision=block reason are appended to `output` so the
+   * LLM sees them alongside the command's actual output.
+   */
+  private static applyPostHookToExecResult(
+    result: ExecuteResponse,
+    postResult: HookResult | null
+  ): ExecuteResponse {
+    if (!postResult) return result
+    const parts: string[] = []
+    if (postResult.stdout) parts.push(`[Hook output]\n${postResult.stdout}`)
+    if (postResult.additionalContext) parts.push(`[Hook context]\n${postResult.additionalContext}`)
+    if (postResult.systemMessage) parts.push(`[Hook notice]\n${postResult.systemMessage}`)
+    if (postResult.decision === "block" && postResult.reason) {
+      parts.push(`[Hook requested review] ${postResult.reason}`)
+    }
+    if (parts.length === 0) return result
+    return { ...result, output: result.output + "\n\n" + parts.join("\n\n") }
+  }
 
   private static getElevatedSandboxUserProfileRoot(networkEnabled: boolean): string {
     const username = networkEnabled ? WINDOWS_SANDBOX_ONLINE_USERNAME : WINDOWS_SANDBOX_OFFLINE_USERNAME
@@ -459,7 +534,8 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
   private static buildElevatedSandboxEnvPreamble(
     shellBase: string,
     cacheRoot: string,
-    sharedCacheRoot = cacheRoot
+    sharedCacheRoot = cacheRoot,
+    hostEnv?: Record<string, string>
   ): string {
     const profileRoot = LocalSandbox.getElevatedSandboxUserProfileRoot(true)
     const homeDrive = path.win32.parse(profileRoot).root.replace(/\\$/, "")
@@ -515,11 +591,26 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     const gitSslCmd = 'set "GIT_CONFIG_COUNT=1" & set "GIT_CONFIG_KEY_0=http.sslBackend" & set "GIT_CONFIG_VALUE_0=openssl"'
     const gitSslPs  = "$env:GIT_CONFIG_COUNT='1'; $env:GIT_CONFIG_KEY_0='http.sslBackend'; $env:GIT_CONFIG_VALUE_0='openssl'"
 
+    // The elevated sandbox runs as CodexSandboxOnline whose registry PATH only has System32.
+    // codex.exe's CreateProcessAsUser loads that minimal PATH — the main-process PATH (with
+    // Maven, Gradle, custom tools, etc.) is NOT inherited. Inject the host PATH here so the
+    // command shell sees the full toolchain.  Strip MSYS2 usr/bin paths first — those binaries
+    // crash under restricted tokens (DLL 0xC0000135).
+    const rawHostPath = (hostEnv?.PATH ?? hostEnv?.Path ?? process.env.PATH ?? "")
+    const filteredHostPath = rawHostPath
+      .split(";")
+      .filter(p => {
+        const lower = p.toLowerCase()
+        return !(lower.includes("\\usr\\bin") && lower.includes("git"))
+      })
+      .join(";")
+
     if (shellBase === "cmd") {
       const base = envOverrides
         .map(([key, value]) => `set "${key}=${cmdSetLiteral(value)}"`)
         .join(" & ")
-      const pathPreamble = pathPrefix ? `set "PATH=${cmdSetLiteral(pathPrefix)};%PATH%"` : ""
+      const fullPrefix = [pathPrefix, filteredHostPath].filter(Boolean).join(";")
+      const pathPreamble = fullPrefix ? `set "PATH=${cmdSetLiteral(fullPrefix)};%PATH%"` : ""
       const pythonPathPreamble = `set "PYTHONPATH=${cmdSetLiteral(toolDirs.pythonSiteCustomize)};%PYTHONPATH%"`
       const jvmOpts = `set "JAVA_TOOL_OPTIONS=%JAVA_TOOL_OPTIONS% ${cmdSetLiteral(javaToolFlags)}" & set "MAVEN_OPTS=%MAVEN_OPTS% ${cmdSetLiteral(mavenFlags)}" & set "SBT_OPTS=%SBT_OPTS% ${cmdSetLiteral(sbtFlags)}"`
       return [base, pathPreamble, pythonPathPreamble, jvmOpts, gitSslCmd].filter(Boolean).join(" & ")
@@ -529,7 +620,8 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       const base = envOverrides
         .map(([key, value]) => `$env:${key}=${powershellSingleQuote(value)}`)
         .join("; ")
-      const pathPreamble = pathPrefix ? `$env:PATH=${powershellSingleQuote(pathPrefix)} + ';' + $env:PATH` : ""
+      const fullPrefix = [pathPrefix, filteredHostPath].filter(Boolean).join(";")
+      const pathPreamble = fullPrefix ? `$env:PATH=${powershellSingleQuote(fullPrefix)} + ';' + $env:PATH` : ""
       const pythonPathPreamble = `$env:PYTHONPATH=${powershellSingleQuote(toolDirs.pythonSiteCustomize)} + $(if ($env:PYTHONPATH) { ';' + $env:PYTHONPATH } else { '' })`
       const javaToolFlagsEscaped = javaToolFlags.replace(/\\/g, "\\\\")
       const mavenFlagsEscaped = mavenFlags.replace(/\\/g, "\\\\")
@@ -728,6 +820,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     this.codexExePath = options.codexExePath ?? "codex"
     const h = options.hooks
     this.getHooks = typeof h === "function" ? h : () => h ?? []
+    this._onHookResult = options.onHookResult
     this._sandboxCacheRoot = LocalSandbox.buildSandboxCacheRoot(baseEnv, this.workingDir)
     this._sharedSandboxCacheRoot = LocalSandbox.buildSharedSandboxCacheRoot(baseEnv)
     this.abortSignal = options.abortSignal
@@ -1333,11 +1426,12 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       }
     }
     // PreToolUse hook
-    const preResult = await runHooks(this.getHooks(), "PreToolUse", {
+    const preResult = await runHooksEnriched(this.getHooks(), "PreToolUse", {
       toolName: "write_file",
       toolArgs: { filePath, content },
-      workspacePath: this.workingDir
-    })
+      workspacePath: this.workingDir,
+      sessionId: this.runId
+    }, this._onHookResult)
     if (preResult?.blocked) {
       return { error: `[Hook blocked] ${preResult.stdout || "write_file was blocked by a hook"}` }
     }
@@ -1349,14 +1443,20 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       }
       return r
     })
-    // PostToolUse hook (fire-and-forget)
-    runHooks(this.getHooks(), "PostToolUse", {
-      toolName: "write_file",
-      toolArgs: { filePath, content },
-      toolResult: JSON.stringify(result),
-      workspacePath: this.workingDir
-    }).catch((e) => console.warn("[Hooks] PostToolUse write error:", e))
-    return result
+    // PostToolUse hook
+    try {
+      const postResult = await runHooksEnriched(this.getHooks(), "PostToolUse", {
+        toolName: "write_file",
+        toolArgs: { filePath, content },
+        toolResult: JSON.stringify(result),
+        workspacePath: this.workingDir,
+        sessionId: this.runId
+      }, this._onHookResult)
+      return LocalSandbox.applyPostHookContext(result, postResult, "write_file")
+    } catch (e) {
+      console.warn("[Hooks] PostToolUse write error:", e)
+      return result
+    }
   }
 
   /**
@@ -1421,11 +1521,12 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       }
     }
     // PreToolUse hook
-    const preResult = await runHooks(this.getHooks(), "PreToolUse", {
+    const preResult = await runHooksEnriched(this.getHooks(), "PreToolUse", {
       toolName: "edit_file",
       toolArgs: { filePath, oldString, newString, replaceAll },
-      workspacePath: this.workingDir
-    })
+      workspacePath: this.workingDir,
+      sessionId: this.runId
+    }, this._onHookResult)
     if (preResult?.blocked) {
       return { error: `[Hook blocked] ${preResult.stdout || "edit_file was blocked by a hook"}` }
     }
@@ -1456,14 +1557,20 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
         await this.recordReadTime(resolvedPath)
         return { path: filePath, filesUpdate: null, occurrences }
       })
-      // PostToolUse hook (fire-and-forget)
-      runHooks(this.getHooks(), "PostToolUse", {
-        toolName: "edit_file",
-        toolArgs: { filePath, oldString, newString, replaceAll },
-        toolResult: JSON.stringify(result),
-        workspacePath: this.workingDir
-      }).catch((e) => console.warn("[Hooks] PostToolUse edit error:", e))
-      return result
+      // PostToolUse hook
+      try {
+        const postResult = await runHooksEnriched(this.getHooks(), "PostToolUse", {
+          toolName: "edit_file",
+          toolArgs: { filePath, oldString, newString, replaceAll },
+          toolResult: JSON.stringify(result),
+          workspacePath: this.workingDir,
+          sessionId: this.runId
+        }, this._onHookResult)
+        return LocalSandbox.applyPostHookContext(result, postResult, "edit_file")
+      } catch (e) {
+        console.warn("[Hooks] PostToolUse edit error:", e)
+        return result
+      }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
       return { error: `Error editing file '${filePath}': ${msg}` }
@@ -2191,11 +2298,12 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     }
 
     // PreToolUse hook
-    const preResult = await runHooks(this.getHooks(), "PreToolUse", {
+    const preResult = await runHooksEnriched(this.getHooks(), "PreToolUse", {
       toolName: "execute",
       toolArgs: { command },
-      workspacePath: this.workingDir
-    })
+      workspacePath: this.workingDir,
+      sessionId: this.runId
+    }, this._onHookResult)
     if (preResult?.blocked) {
       return {
         output: `[Hook blocked] ${preResult.stdout || "execute was blocked by a hook"}`,
@@ -2209,30 +2317,26 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     if (this.orchestrator) {
       const result = await this.orchestrator.execute(command, this.workingDir, this.windowsSandbox)
       // PostToolUse hook
-      const postResult = await runHooks(this.getHooks(), "PostToolUse", {
+      const postResult = await runHooksEnriched(this.getHooks(), "PostToolUse", {
         toolName: "execute",
         toolArgs: { command },
         toolResult: result.output,
-        workspacePath: this.workingDir
-      })
-      if (postResult?.stdout) {
-        return { ...result, output: result.output + "\n\n[Hook output]\n" + postResult.stdout }
-      }
-      return result
+        workspacePath: this.workingDir,
+        sessionId: this.runId
+      }, this._onHookResult)
+      return LocalSandbox.applyPostHookToExecResult(result, postResult)
     }
 
     const result = await this.executeRaw(command)
     // PostToolUse hook
-    const postResult = await runHooks(this.getHooks(), "PostToolUse", {
+    const postResult = await runHooksEnriched(this.getHooks(), "PostToolUse", {
       toolName: "execute",
       toolArgs: { command },
       toolResult: result.output,
-      workspacePath: this.workingDir
-    })
-    if (postResult?.stdout) {
-      return { ...result, output: result.output + "\n\n[Hook output]\n" + postResult.stdout }
-    }
-    return result
+      workspacePath: this.workingDir,
+      sessionId: this.runId
+    }, this._onHookResult)
+    return LocalSandbox.applyPostHookToExecResult(result, postResult)
   }
 
   /**
@@ -2391,7 +2495,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       : ""
     const unelevatedPreamble = [clearProxyPreamble, unelevatedJvmPreamble].filter(Boolean).join(shellBase === "cmd" ? " & " : "; ")
     const sandboxUserEnvPreamble = isElevatedSandbox
-      ? LocalSandbox.buildElevatedSandboxEnvPreamble(shellBase, this._sandboxCacheRoot, this._sharedSandboxCacheRoot)
+      ? LocalSandbox.buildElevatedSandboxEnvPreamble(shellBase, this._sandboxCacheRoot, this._sharedSandboxCacheRoot, this.env)
       : unelevatedPreamble
     const commandWithSandboxEnv = sandboxUserEnvPreamble
       ? shellBase === "cmd"
