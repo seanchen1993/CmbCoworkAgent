@@ -436,12 +436,14 @@ async function computeEnabledSkillsFingerprint(
       for (const e of entries) {
         if (!e.isDirectory()) continue
         dirNames.push(e.name)
-        const skillMdPath = join(dir, e.name, "SKILL.md")
-        try {
-          const st = await fsStat(skillMdPath)
-          dirNames.push(String(st.mtimeMs))
-        } catch {
-          /* no SKILL.md or unreadable */
+        for (const fileName of ["SKILL.md", "hooks.json"]) {
+          const filePath = join(dir, e.name, fileName)
+          try {
+            const st = await fsStat(filePath)
+            dirNames.push(`${fileName}:${st.mtimeMs}`)
+          } catch {
+            /* missing or unreadable */
+          }
         }
       }
       parts.push(dirNames.sort().join(","))
@@ -2358,6 +2360,8 @@ function buildSkillHookId(skillName: string, rawId: unknown, index: number): str
 interface SkillHookSource {
   skillDir: string
   skillName: string
+  pluginId?: string
+  pluginName?: string
 }
 
 function readSkillDisplayName(skillDir: string, fallbackName: string): string | null {
@@ -2375,7 +2379,8 @@ function collectSkillHookSourcesFromDir(
   sourceDir: string,
   disabledSkills: Set<string>,
   respectDisabledList: boolean,
-  seenDirs: Set<string>
+  seenDirs: Set<string>,
+  pluginMeta?: { pluginId: string; pluginName: string }
 ): SkillHookSource[] {
   const result: SkillHookSource[] = []
   if (!existsSync(sourceDir)) return result
@@ -2385,7 +2390,7 @@ function collectSkillHookSourcesFromDir(
     if (respectDisabledList && disabledSkills.has(normalizedName)) return
     if (seenDirs.has(skillDir)) return
     seenDirs.add(skillDir)
-    result.push({ skillDir, skillName })
+    result.push({ skillDir, skillName, ...pluginMeta })
   }
 
   const rootSkillName = readSkillDisplayName(sourceDir, basename(sourceDir))
@@ -2418,8 +2423,16 @@ function getEnabledSkillHookSources(): SkillHookSource[] {
     sources.push(...collectSkillHookSourcesFromDir(sourceDir, disabledSkills, true, seenDirs))
   }
 
-  for (const sourceDir of getEnabledPluginSkillsSources()) {
-    sources.push(...collectSkillHookSourcesFromDir(sourceDir, disabledSkills, false, seenDirs))
+  for (const source of getEnabledPluginSkillSourceMetadata()) {
+    sources.push(
+      ...collectSkillHookSourcesFromDir(
+        source.sourceDir,
+        disabledSkills,
+        false,
+        seenDirs,
+        { pluginId: source.pluginId, pluginName: source.pluginName }
+      )
+    )
   }
 
   return sources
@@ -2483,13 +2496,15 @@ function parseSkillHooks(skillDir: string, skillName: string): HookConfig[] {
 }
 
 function buildEnabledSkillHookMetadata(): SkillHookMetadata[] {
-  return getEnabledSkillHookSources().flatMap(({ skillDir, skillName }): SkillHookMetadata[] => {
+  return getEnabledSkillHookSources().flatMap(({ skillDir, skillName, pluginId, pluginName }): SkillHookMetadata[] => {
     const hookPath = join(skillDir, SKILL_HOOKS_FILE)
     return parseSkillHooks(skillDir, skillName).map((hook) => ({
       ...hook,
       skillName,
       skillPath: skillDir,
-      hookPath
+      hookPath,
+      pluginId,
+      pluginName
     }))
   })
 }

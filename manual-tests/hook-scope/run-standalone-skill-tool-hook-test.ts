@@ -99,7 +99,14 @@ async function main(): Promise<void> {
   const content = await sandbox.read(skillPath, 0, 80)
   assert(content.includes("scope-plain-skill"), "expected skill content")
   printEvents("read SKILL.md to activate skill", beforeReadSkill)
-  assert(readHookEvents().length === beforeReadSkill, "PreToolUse/PostToolUse hooks should not fire while only reading SKILL.md")
+  const skillUseEvents = readHookEvents().slice(beforeReadSkill)
+  const skillUseLabels = skillUseEvents.map((event) => String(event.label || ""))
+  assert(skillUseLabels.includes("plain-skill-pre"), "plain-skill-pre did not fire while reading SKILL.md")
+  assert(skillUseLabels.includes("plain-skill-post"), "plain-skill-post did not fire while reading SKILL.md")
+  assert(
+    skillUseEvents.every((event) => event.hook_event_name === "PreSkillUse" || event.hook_event_name === "PostSkillUse"),
+    "expected only PreSkillUse/PostSkillUse events while reading SKILL.md",
+  )
 
   const beforeAfterSkill = readHookEvents().length
   await sandbox.execute("cmd /c echo after-skill")

@@ -369,6 +369,8 @@ export interface SkillHookMetadata extends HookConfig {
   skillName: string
   skillPath: string
   hookPath: string
+  pluginId?: string
+  pluginName?: string
 }
 
 export interface PluginMcpServerConfig {

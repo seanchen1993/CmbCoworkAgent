@@ -347,6 +347,41 @@ fs.writeFileSync(p, String(n + 1))
   })
 }
 
+async function testSameNameDifferentSkillsFireSeparately(): Promise<void> {
+  await withTempDir("skill-read-same-name", async (base) => {
+    const sourceA = join(base, "skills-a")
+    const sourceB = join(base, "skills-b")
+    const skillPathA = await writeSkillDoc(sourceA, "SKILL.md", {
+      raw: "---\nname: shared-name\n---\nA\n"
+    })
+    const skillPathB = await writeSkillDoc(sourceB, "SKILL.md", {
+      raw: "---\nname: shared-name\n---\nB\n"
+    })
+    const hitsPath = join(base, "hits.txt")
+    const sandbox = new LocalSandbox({
+      rootDir: base,
+      skillLifecycleRegistry: new SkillLifecycleRegistry([sourceA, sourceB]),
+      hooks: [
+        makeHook({
+          event: "PreSkillUse",
+          matcher: "shared-name",
+          command: nodeCommand(`
+const fs = require('fs')
+fs.appendFileSync(${JSON.stringify(hitsPath)}, (process.env.SKILL_ROOT || '') + '\\n')
+`)
+        })
+      ]
+    })
+
+    await sandbox.read(skillPathA)
+    await sandbox.read(skillPathB)
+    const hits = existsSync(hitsPath)
+      ? (await readFile(hitsPath, "utf8")).split(/\r?\n/).filter(Boolean)
+      : []
+    assert(hits.length === 2, `expected both same-name skills to fire hooks, got ${hits.length}`)
+  })
+}
+
 async function testPostSkillContextQueueAndDrain(): Promise<void> {
   await withTempDir("skill-drain", async (base) => {
     const source = join(base, "skills")
@@ -438,6 +473,8 @@ async function run(): Promise<void> {
   console.log("PASS D2 PreSkillUse block stops skill read")
   await testSameSkillReadFiresOnce()
   console.log("PASS D3 same skill read fires hooks once")
+  await testSameNameDifferentSkillsFireSeparately()
+  console.log("PASS D3b same-name skills fire separately")
   await testPostSkillContextQueueAndDrain()
   console.log("PASS D4/D5 post context queue drains cleanly")
   await testNonSkillReadDoesNotFireHooks()

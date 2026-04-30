@@ -1,7 +1,10 @@
 import {
   getEnabledPluginHookMetadata,
   getEnabledSkillHookMetadata,
-  getEnabledHooks
+  getEnabledHooks,
+  getCustomSkillsDir,
+  getOpenworkDir,
+  getSkillsDir
 } from "../storage"
 import type { HookContext } from "./runner"
 import type { HookConfig, HookEvent } from "./types"
@@ -9,13 +12,15 @@ import type { HookConfig, HookEvent } from "./types"
 export interface HookScopeSnapshot {
   activePluginIds: string[]
   activeSkillNames: string[]
+  activeSkillPaths: string[]
 }
 
 export interface HookScopeController {
   readonly activePluginIds: ReadonlySet<string>
   readonly activeSkillNames: ReadonlySet<string>
+  readonly activeSkillPaths: ReadonlySet<string>
   activatePlugin(pluginId?: string | null): void
-  activateSkill(skillName?: string | null, pluginId?: string | null): void
+  activateSkill(skillName?: string | null, pluginId?: string | null, skillPath?: string | null): void
   snapshot(): HookScopeSnapshot
 }
 
@@ -29,6 +34,33 @@ function normalizePluginId(pluginId: string | undefined | null): string {
   return pluginId?.trim().toLowerCase() ?? ""
 }
 
+function normalizePathKey(path: string | undefined | null): string {
+  return path?.trim().replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase() ?? ""
+}
+
+function addPathAliases(target: Set<string>, path: string | undefined | null): void {
+  const normalized = normalizePathKey(path)
+  if (!normalized) return
+  target.add(normalized)
+
+  const openworkDir = normalizePathKey(getOpenworkDir())
+  const customSkillsDir = normalizePathKey(getCustomSkillsDir())
+  const builtinSkillsDir = normalizePathKey(getSkillsDir())
+  const enabledCustomPrefix = `${openworkDir}/enabled-skills-custom/`
+  const enabledBuiltinPrefix = `${openworkDir}/enabled-skills-builtin/`
+  const enabledLegacyPrefix = `${openworkDir}/enabled-skills/`
+
+  if (normalized.startsWith(enabledCustomPrefix)) {
+    target.add(`${customSkillsDir}/${normalized.slice(enabledCustomPrefix.length)}`)
+  } else if (normalized.startsWith(enabledBuiltinPrefix)) {
+    target.add(`${builtinSkillsDir}/${normalized.slice(enabledBuiltinPrefix.length)}`)
+  } else if (normalized.startsWith(enabledLegacyPrefix)) {
+    const relativePath = normalized.slice(enabledLegacyPrefix.length)
+    target.add(`${customSkillsDir}/${relativePath}`)
+    target.add(`${builtinSkillsDir}/${relativePath}`)
+  }
+}
+
 export function extractPluginIdFromProviderKey(providerKey?: string): string | undefined {
   if (!providerKey?.startsWith("plugin:")) return undefined
   const rest = providerKey.slice("plugin:".length)
@@ -40,25 +72,47 @@ export function extractPluginIdFromProviderKey(providerKey?: string): string | u
 export function createHookScope(): HookScopeController {
   const activePluginIds = new Set<string>()
   const activeSkillNames = new Set<string>()
+  const activeSkillPaths = new Set<string>()
 
   return {
     activePluginIds,
     activeSkillNames,
+    activeSkillPaths,
     activatePlugin(pluginId) {
       const normalized = normalizePluginId(pluginId)
       if (normalized) activePluginIds.add(normalized)
     },
-    activateSkill(skillName, pluginId) {
+    activateSkill(skillName, pluginId, skillPath) {
       const normalized = normalizeSkillName(skillName)
       if (normalized) activeSkillNames.add(normalized)
       const normalizedPluginId = normalizePluginId(pluginId)
       if (normalizedPluginId) activePluginIds.add(normalizedPluginId)
+      const normalizedPath = normalizePathKey(skillPath)
+      if (normalizedPath) activeSkillPaths.add(normalizedPath)
     },
     snapshot() {
       return {
         activePluginIds: [...activePluginIds],
-        activeSkillNames: [...activeSkillNames]
+        activeSkillNames: [...activeSkillNames],
+        activeSkillPaths: [...activeSkillPaths]
       }
+    }
+  }
+}
+
+export function mergeHookScopeSnapshot(
+  target: HookScopeController,
+  snapshot: HookScopeSnapshot
+): void {
+  for (const pluginId of snapshot.activePluginIds) {
+    target.activatePlugin(pluginId)
+  }
+  for (const skillPath of snapshot.activeSkillPaths) {
+    target.activateSkill(undefined, undefined, skillPath)
+  }
+  if (snapshot.activeSkillPaths.length === 0) {
+    for (const skillName of snapshot.activeSkillNames) {
+      target.activateSkill(skillName)
     }
   }
 }
@@ -67,10 +121,14 @@ export function resolveEnabledHooksForRun(
   workspacePath: string | undefined,
   _event: HookEvent,
   context: HookContext,
-  scope?: HookScopeController
+  scope?: HookScopeController,
+  options: { includeAllScoped?: boolean } = {}
 ): HookConfig[] {
   const baseHooks = getEnabledHooks(workspacePath)
   if (!scope) return baseHooks
+  if (options.includeAllScoped) {
+    return [...baseHooks, ...getEnabledPluginHookMetadata(), ...getEnabledSkillHookMetadata()]
+  }
 
   const allowedPluginIds = new Set(scope.activePluginIds)
   const currentPluginId = normalizePluginId(context.pluginId)
@@ -79,6 +137,12 @@ export function resolveEnabledHooksForRun(
   const allowedSkillNames = new Set(scope.activeSkillNames)
   const currentSkillName = normalizeSkillName(context.skillName)
   if (currentSkillName) allowedSkillNames.add(currentSkillName)
+  const allowedSkillPaths = new Set<string>()
+  for (const skillPath of scope.activeSkillPaths) {
+    addPathAliases(allowedSkillPaths, skillPath)
+  }
+  addPathAliases(allowedSkillPaths, context.skillPath)
+  addPathAliases(allowedSkillPaths, context.skillRoot)
 
   // runHooks() filters by hook.enabled before dispatch, so we don't repeat that
   // here — keeping this resolver focused on scope/membership.
@@ -90,11 +154,14 @@ export function resolveEnabledHooksForRun(
         )
 
   const skillHooks =
-    allowedSkillNames.size === 0
+    allowedSkillNames.size === 0 && allowedSkillPaths.size === 0
       ? []
-      : getEnabledSkillHookMetadata().filter((hook) =>
-          allowedSkillNames.has(normalizeSkillName(hook.skillName))
-        )
+      : getEnabledSkillHookMetadata().filter((hook) => {
+          const hookSkillPath = normalizePathKey(hook.skillPath)
+          if (hookSkillPath && allowedSkillPaths.has(hookSkillPath)) return true
+          if (allowedSkillPaths.size > 0) return false
+          return allowedSkillNames.has(normalizeSkillName(hook.skillName))
+        })
 
   return [...baseHooks, ...pluginHooks, ...skillHooks]
 }

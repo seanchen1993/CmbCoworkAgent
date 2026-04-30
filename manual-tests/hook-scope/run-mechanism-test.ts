@@ -227,7 +227,14 @@ async function testStandaloneSkillHooks(): Promise<void> {
   const skillPath = "C:\\Users\\87624\\.cmbcoworkagent\\skills\\scope-plain-skill\\SKILL.md"
   const content = await sandbox.read(skillPath, 0, 80)
   assert(content.includes("scope-plain-skill"), "expected to read scope-plain-skill content")
-  assert(readHookEvents().length === afterNoUse, "PreToolUse/PostToolUse skill hooks should not fire while only reading SKILL.md")
+  const skillUseEvents = readHookEvents().slice(afterNoUse)
+  const skillUseLabels = skillUseEvents.map((event) => String(event.label || ""))
+  assert(skillUseLabels.includes("plain-skill-pre"), "expected plain-skill-pre to fire while reading SKILL.md")
+  assert(skillUseLabels.includes("plain-skill-post"), "expected plain-skill-post to fire while reading SKILL.md")
+  assert(
+    skillUseEvents.every((event) => event.hook_event_name === "PreSkillUse" || event.hook_event_name === "PostSkillUse"),
+    "expected only PreSkillUse/PostSkillUse events while reading SKILL.md"
+  )
 
   const beforeExecute = readHookEvents().length
   await sandbox.execute("cmd /c echo after-plain-skill")

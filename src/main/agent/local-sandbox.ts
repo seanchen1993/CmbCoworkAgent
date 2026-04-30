@@ -915,6 +915,10 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     return runHooksEnriched(this.resolveHooks(event, context), event, context, this._onHookResult)
   }
 
+  private getSkillHookKey(skill: SkillLifecycleMatch): string {
+    return path.resolve(skill.rootDir || path.dirname(skill.path) || skill.name).toLowerCase()
+  }
+
   private enqueueSkillHookContext(skill: SkillLifecycleMatch, notes: string[]): void {
     const cleanNotes = notes
       .map((note) => note.trim())
@@ -1301,7 +1305,8 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       try {
         resolvedForSkill = this._resolvePath(filePath)
         skillMatch = this._skillLifecycleRegistry?.resolveRead(filePath, resolvedForSkill) ?? null
-        if (skillMatch && !this._skillHooksFired.has(skillMatch.name)) {
+        const skillHookKey = skillMatch ? this.getSkillHookKey(skillMatch) : ""
+        if (skillMatch && !this._skillHooksFired.has(skillHookKey)) {
           fireSkillHooks = true
           const preContext: HookContext = {
             toolName: "read_file",
@@ -1332,7 +1337,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
               preResult?.systemMessage
             ].filter((item): item is string => Boolean(item))
           )
-          this._skillHooksFired.add(skillMatch.name)
+          this._skillHooksFired.add(skillHookKey)
         }
       } catch (hookError) {
         console.warn("[Hooks] PreSkillUse error:", hookError)
@@ -1361,7 +1366,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
         : formatted
 
       if (fireSkillHooks && skillMatch) {
-        this._hookScope?.activateSkill(skillMatch.name, skillMatch.pluginId)
+        this._hookScope?.activateSkill(skillMatch.name, skillMatch.pluginId, skillMatch.rootDir)
         try {
           const resultPreview =
             result.length > 20_000

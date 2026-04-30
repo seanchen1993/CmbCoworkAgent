@@ -1177,7 +1177,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
       // Fire SessionStart once per thread lifetime (not per turn). SessionEnd fires when the
       // thread is deleted (threads:delete) or the app is quitting.
-      fireSessionStartOnce(threadId, sessionWorkspacePath, onHookResult)
+      fireSessionStartOnce(threadId, sessionWorkspacePath, onHookResult, hookScope)
       sendActiveHookNotice(window, channel, workspacePath)
 
       // Fire UserPromptSubmit hook — may block the message, halt the turn, rewrite the prompt,
