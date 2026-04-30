@@ -12,12 +12,14 @@ import {
 import {
   getThreadCheckpointPath,
   getEnabledSkillsSources,
+  getEnabledSkillMiddlewareSources,
   getCustomModelConfigs,
   getUserInfo,
   isMemoryEnabled,
   getSkillEvolutionThreshold as getStoredSkillEvolutionThreshold,
   DEFAULT_MAX_TOKENS,
   getEnabledPluginSkillSourceMetadata,
+  getEnabledPluginSkillMiddlewareSources,
   getPlugins
 } from "../storage"
 
@@ -1429,19 +1431,21 @@ ${subagentShellGuidance}
 - browser_playwright: built-in browser automation and page interaction tool powered by project-local Playwright (fallback when no matching browser skill exists).
 The workspace root is: ${workspacePath}`
 
-  const skillsSources = await getEnabledSkillsSources()
-  console.log("[Runtime] Raw skills sources from getEnabledSkillsSources():", skillsSources)
-  console.log("[Runtime] Raw skills sources count:", skillsSources.length)
-  console.log("[Runtime] Raw skills sources content:", JSON.stringify(skillsSources, null, 2))
+  const skillLifecycleRootSources = await getEnabledSkillsSources()
+  const skillsSources = await getEnabledSkillMiddlewareSources()
+  console.log("[Runtime] Raw skills sources from getEnabledSkillsSources():", skillLifecycleRootSources)
+  console.log("[Runtime] Raw skills sources count:", skillLifecycleRootSources.length)
+  console.log("[Runtime] Raw skills sources content:", JSON.stringify(skillLifecycleRootSources, null, 2))
+  console.log("[Runtime] Skill middleware sources:", skillsSources)
 
   // Merge plugin skills sources
   const pluginSkillSourceMetadata = getEnabledPluginSkillSourceMetadata()
-  const pluginSkillsSources = pluginSkillSourceMetadata.map((source) => source.sourceDir)
+  const pluginSkillsSources = await getEnabledPluginSkillMiddlewareSources()
   console.log("[Runtime] Plugin skills sources:", pluginSkillsSources)
   console.log("[Runtime] Plugin skills sources count:", pluginSkillsSources.length)
 
   const allSkillsSources = [...skillsSources, ...pluginSkillsSources]
-  const skillLifecycleSources = [...skillsSources, ...pluginSkillSourceMetadata]
+  const skillLifecycleSources = [...skillLifecycleRootSources, ...pluginSkillSourceMetadata]
   backend.setSkillLifecycleRegistry(
     skillLifecycleSources.length > 0 ? new SkillLifecycleRegistry(skillLifecycleSources) : undefined
   )

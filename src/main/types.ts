@@ -574,10 +574,14 @@ export interface ChatXConfig {
 
 // Skills types
 export interface SkillMetadata {
+  id?: string
   name: string
   description: string
   path: string
   source: "user" | "project"
+  relativePath?: string
+  pluginId?: string
+  pluginName?: string
   /** Skill version from SKILL.md frontmatter, defaults to "v1.0.0" */
   version: string
   license?: string | null

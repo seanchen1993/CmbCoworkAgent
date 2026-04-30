@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/select"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
+import { isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
 import type {
   HookConfig,
   HookEvent,
@@ -1063,7 +1064,7 @@ export function AddHookDialog(props: {
   const { open, onOpenChange, onSuccess, editHook } = props
   const { models, loadModels } = useAppStore()
   const [skills, setSkills] = useState<SkillMetadata[]>([])
-  const [disabledSkillNames, setDisabledSkillNames] = useState<Set<string>>(new Set())
+  const [disabledSkillIds, setDisabledSkillIds] = useState<Set<string>>(new Set())
 
   useEffect(() => {
     if (open && models.length === 0) loadModels()
@@ -1077,13 +1078,13 @@ export function AddHookDialog(props: {
       .then(([availableSkills, disabled]) => {
         if (cancelled) return
         setSkills([...availableSkills].sort((a, b) => a.name.localeCompare(b.name, "zh-CN")))
-        setDisabledSkillNames(new Set(disabled.map((name) => name.trim().toLowerCase())))
+        setDisabledSkillIds(new Set(disabled.map(normalizeSkillId)))
       })
       .catch((error) => {
         console.error("[AddHookDialog] Failed to load skills:", error)
         if (cancelled) return
         setSkills([])
-        setDisabledSkillNames(new Set())
+        setDisabledSkillIds(new Set())
       })
 
     return () => {
@@ -1130,7 +1131,7 @@ export function AddHookDialog(props: {
     const disabled: SkillMetadata[] = []
 
     for (const skill of skills) {
-      if (disabledSkillNames.has(skill.name.trim().toLowerCase())) {
+      if (isSkillDisabled(skill, disabledSkillIds)) {
         disabled.push(skill)
       } else {
         enabled.push(skill)
@@ -1138,14 +1139,14 @@ export function AddHookDialog(props: {
     }
 
     return [...enabled, ...disabled]
-  }, [skills, disabledSkillNames])
+  }, [skills, disabledSkillIds])
   const matchedSkill = useMemo(() => {
     const normalized = onBlockRequiredSkill.trim().toLowerCase()
     if (!normalized) return null
     return skills.find((skill) => skill.name.trim().toLowerCase() === normalized) ?? null
   }, [skills, onBlockRequiredSkill])
   const matchedSkillDisabled = matchedSkill
-    ? disabledSkillNames.has(matchedSkill.name.trim().toLowerCase())
+    ? isSkillDisabled(matchedSkill, disabledSkillIds)
     : false
   const requiredSkillPickerValue = matchedSkill ? matchedSkill.name : MANUAL_SKILL_VALUE
   const currentEventMeta = useMemo(
@@ -1161,13 +1162,13 @@ export function AddHookDialog(props: {
       ...configuredSkills.map((skill) => ({
         value: skill.name,
         label: skill.name,
-        description: disabledSkillNames.has(skill.name.trim().toLowerCase())
+        description: isSkillDisabled(skill, disabledSkillIds)
           ? "当前技能未启用"
           : "按技能名精确匹配"
       })),
       { value: CUSTOM_SENTINEL, label: "自定义…", description: "手动输入技能名称或正则表达式" }
     ],
-    [configuredSkills, disabledSkillNames]
+    [configuredSkills, disabledSkillIds]
   )
   const matcherOptions = isSkillMatcherEvent ? skillMatcherOptions : COMMON_TOOLS
   const currentCommandHookDoc = useMemo(() => getCommandHookEventDoc(event), [event])
@@ -1865,7 +1866,7 @@ export function AddHookDialog(props: {
                   <SelectContent>
                     <SelectItem value={MANUAL_SKILL_VALUE}>手动输入或保留当前值</SelectItem>
                     {configuredSkills.map((skill) => {
-                      const skillDisabled = disabledSkillNames.has(skill.name.trim().toLowerCase())
+                      const skillDisabled = isSkillDisabled(skill, disabledSkillIds)
 
                       return (
                         <SelectItem key={skill.path} value={skill.name} className="py-2">

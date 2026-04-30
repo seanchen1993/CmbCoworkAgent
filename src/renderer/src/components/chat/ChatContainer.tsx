@@ -68,6 +68,7 @@ import { SlashCommandPopover } from "@/features/slash-commands/SlashCommandPopov
 import { useSlashCommands } from "@/features/slash-commands/useSlashCommands"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
 import { formatSkillUseBlock, parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
+import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
 
 function HookLogsPanel({ logs }: { logs: HookLogEntry[] }): React.JSX.Element {
   const [expanded, setExpanded] = React.useState(false)
@@ -425,9 +426,9 @@ export function ChatContainer({
         pluginSkillsPromise,
         window.api.skills.getDisabled()
       ])
-      const disabledSet = new Set(disabledList)
+      const disabledSet = new Set(disabledList.map(normalizeSkillId))
       const availableSkills = loadedSkills.filter(
-        (s) => (s.source === "project" || s.source === "user") && !disabledSet.has(s.name)
+        (s) => (s.source === "project" || s.source === "user") && !isSkillDisabled(s, disabledSet)
       )
       // Built-in/custom names win over plugin names: plugins are third-party
       // and shouldn't shadow first-party skills the user expects to see.
@@ -1615,8 +1616,10 @@ export function ChatContainer({
   // ────────────────────────────────────────────────────────
 
   const getSkillId = useCallback((skill: SkillMetadata): string => {
-    const fromPath = skill?.path?.split("/").slice(-2, -1)[0]
-    return (fromPath || skill.name || "").toLowerCase()
+    const idSegments = getSkillMetadataId(skill).split("/").filter(Boolean)
+    const fromId = idSegments.length > 0 ? idSegments[idSegments.length - 1] : undefined
+    const fromPath = skill?.path?.replace(/\\/g, "/").split("/").slice(-2, -1)[0]
+    return (fromId || fromPath || skill.name || "").toLowerCase()
   }, [])
 
   const buildSkillPrompt = useCallback(

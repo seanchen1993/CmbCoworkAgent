@@ -31,6 +31,7 @@ import {
 import { cn } from "@/lib/utils"
 import type { SkillMetadata } from "@/types"
 import { useAppStore } from "@/lib/store"
+import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
 import { marketApi, type MarketItem } from "../../api/market"
 import { DEFAULT_SCENE_CATEGORY, SCENE_CATEGORY_OPTIONS } from "../../lib/skill-data-service"
 import { SkillFileEditor } from "./SkillFileEditor"
@@ -1020,7 +1021,7 @@ export function SkillsPanel(): React.JSX.Element {
   useEffect(() => {
     window.api.skills
       .getDisabled()
-      .then((list) => setDisabledSkills(new Set(list)))
+      .then((list) => setDisabledSkills(new Set(list.map(normalizeSkillId))))
       .catch(console.error)
   }, [])
 
@@ -1076,24 +1077,26 @@ export function SkillsPanel(): React.JSX.Element {
   }, [])
 
   const ensureSkillFiles = useCallback(async (skill: SkillMetadata): Promise<string[]> => {
-    const cachedFiles = skillFilesMapRef.current[skill.name]
+    const skillId = getSkillMetadataId(skill)
+    const cachedFiles = skillFilesMapRef.current[skillId]
     if (cachedFiles && cachedFiles.length > 0) return cachedFiles
     const res = await window.api.skills.listFiles(skill.path)
     const fallbackFiles = [skill.path]
     if (!res.success || !res.files || res.files.length === 0) {
-      setSkillFilesMap((prev) => ({ ...prev, [skill.name]: fallbackFiles }))
+      setSkillFilesMap((prev) => ({ ...prev, [skillId]: fallbackFiles }))
       return fallbackFiles
     }
     const files = res.files
-    setSkillFilesMap((prev) => ({ ...prev, [skill.name]: files }))
+    setSkillFilesMap((prev) => ({ ...prev, [skillId]: files }))
     return files
   }, [])
 
   const onToggleSkill = useCallback(
     async (skill: SkillMetadata) => {
-      const wasExpanded = expandedSkillsRef.current.has(skill.name)
+      const skillId = getSkillMetadataId(skill)
+      const wasExpanded = expandedSkillsRef.current.has(skillId)
       const next = new Set<string>()
-      if (!wasExpanded) next.add(skill.name)
+      if (!wasExpanded) next.add(skillId)
       setExpandedSkills(next)
 
       if (!wasExpanded) {
@@ -1127,11 +1130,17 @@ export function SkillsPanel(): React.JSX.Element {
     })
   }, [])
 
-  const toggleSkillEnabled = useCallback((skillName: string) => {
+  const toggleSkillEnabled = useCallback((skill: SkillMetadata) => {
     setDisabledSkills((prev) => {
       const next = new Set(prev)
-      if (next.has(skillName)) next.delete(skillName)
-      else next.add(skillName)
+      const skillId = getSkillMetadataId(skill)
+      const legacyName = normalizeSkillId(skill.name)
+      if (isSkillDisabled(skill, next)) {
+        next.delete(skillId)
+        next.delete(legacyName)
+      } else {
+        next.add(skillId)
+      }
       window.api.skills.setDisabled([...next]).catch(console.error)
       return next
     })
@@ -1151,12 +1160,13 @@ export function SkillsPanel(): React.JSX.Element {
       setSelectedFileContent(null)
       setSkillFilesMap((prev) => {
         const next = { ...prev }
-        delete next[skill.name]
+        delete next[getSkillMetadataId(skill)]
         return next
       })
       setDisabledSkills((prev) => {
         const next = new Set(prev)
-        next.delete(skill.name)
+        next.delete(getSkillMetadataId(skill))
+        next.delete(normalizeSkillId(skill.name))
         window.api.skills.setDisabled([...next]).catch(console.error)
         return next
       })
@@ -1274,7 +1284,7 @@ export function SkillsPanel(): React.JSX.Element {
             const nextSelected = nextSkills.find((item) => item.path === filePath) || null
             setSelectedSkill(nextSelected)
             if (nextSelected) {
-              setExpandedSkills(new Set([nextSelected.name]))
+              setExpandedSkills(new Set([getSkillMetadataId(nextSelected)]))
             }
           })
           .catch(console.error)
@@ -1476,9 +1486,9 @@ export function SkillsPanel(): React.JSX.Element {
         previewKind={selectedFilePreviewKind}
         binaryBase64={selectedBinaryBase64}
         binaryMimeType={selectedBinaryMimeType}
-        isDisabled={selectedSkill ? disabledSkills.has(selectedSkill.name) : false}
+        isDisabled={selectedSkill ? isSkillDisabled(selectedSkill, disabledSkills) : false}
         onToggleEnabled={() => {
-          if (selectedSkill) toggleSkillEnabled(selectedSkill.name)
+          if (selectedSkill) toggleSkillEnabled(selectedSkill)
         }}
         onShowGuide={() => {
           setSelectedSkill(null)
@@ -1662,10 +1672,11 @@ function SkillSection(props: {
             </p>
           ) : (
             skills.map((skill) => {
-              const expanded = expandedSkills.has(skill.name)
-              const files = skillFilesMap[skill.name] || []
-              const selected = selectedSkill?.name === skill.name
-              const disabled = disabledSkills.has(skill.name)
+              const skillId = getSkillMetadataId(skill)
+              const expanded = expandedSkills.has(skillId)
+              const files = skillFilesMap[skillId] || []
+              const selected = selectedSkill ? getSkillMetadataId(selectedSkill) === skillId : false
+              const disabled = isSkillDisabled(skill, disabledSkills)
               const marketInfo =
                 skill.source === "user" ? marketSkillMap[normalizeSkillName(skill.name)] : undefined
               const hasMarketEntry =
@@ -1674,7 +1685,7 @@ function SkillSection(props: {
 
               return (
                 <SkillItem
-                  key={skill.name}
+                  key={skillId || skill.path}
                   skill={skill}
                   marketInfo={marketInfo}
                   hasMarketEntry={hasMarketEntry}

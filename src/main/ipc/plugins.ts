@@ -25,6 +25,8 @@ import type {
 } from "../types"
 import { invalidateGlobalMcpCapabilityService } from "../mcp/capability-service"
 import { notifyHooksChanged } from "../hooks/notifications"
+import { discoverSkills } from "../skills/discovery"
+import { decodeArchiveEntryName } from "../skills/archive"
 
 const DEFAULT_PLUGIN_HOOKS_PATH = "hooks/hooks.json"
 
@@ -113,14 +115,7 @@ async function parsePluginDir(dirPath: string): Promise<ParsedPlugin> {
   const skillsDir = path.join(dirPath, "skills")
   if (existsSync(skillsDir)) {
     try {
-      const entries = await fs.readdir(skillsDir, { withFileTypes: true })
-      for (const entry of entries) {
-        if (!entry.isDirectory()) continue
-        const skillMdPath = path.join(skillsDir, entry.name, "SKILL.md")
-        if (existsSync(skillMdPath)) {
-          skillDirs.push(entry.name)
-        }
-      }
+      skillDirs.push(...(await discoverSkills(skillsDir)).map((skill) => skill.relativePath || "."))
     } catch {
       console.warn("[Plugins] Failed to scan skills/ in", dirPath)
     }
@@ -281,6 +276,10 @@ async function installPluginFromZip(
   try {
     const zip = new AdmZip(Buffer.from(buffer))
     const entries = zip.getEntries()
+    const decodedEntries = entries.map((entry) => ({
+      entry,
+      decodedName: decodeArchiveEntryName(entry)
+    }))
 
     // Check total uncompressed size and entry count before extracting
     let totalSize = 0
@@ -320,14 +319,16 @@ async function installPluginFromZip(
 
     // Determine root prefix — the zip may have a single root directory
     let rootPrefix = ""
-    const firstEntry = entries.find((e) => !e.isDirectory)
+    const firstEntry = decodedEntries.find((item) => !item.entry.isDirectory)
     if (firstEntry) {
-      const parts = firstEntry.entryName.split("/")
+      const parts = firstEntry.decodedName.split("/")
       if (parts.length > 1) {
         // Check if all entries share the same root directory
         const candidate = parts[0] + "/"
-        const allMatch = entries.every(
-          (e) => e.entryName.startsWith(candidate) || e.entryName === candidate.slice(0, -1)
+        const allMatch = decodedEntries.every(
+          (item) =>
+            item.decodedName.startsWith(candidate) ||
+            item.decodedName === candidate.slice(0, -1)
         )
         if (allMatch) rootPrefix = candidate
       }
@@ -340,9 +341,9 @@ async function installPluginFromZip(
     mkdirSync(tempDir, { recursive: true })
 
     try {
-      for (const entry of entries) {
+      for (const { entry, decodedName } of decodedEntries) {
         if (entry.isDirectory) continue
-        let relativePath = entry.entryName
+        let relativePath = decodedName
         if (rootPrefix && relativePath.startsWith(rootPrefix)) {
           relativePath = relativePath.slice(rootPrefix.length)
         }
@@ -353,7 +354,7 @@ async function installPluginFromZip(
         const normalDest = path.normalize(destPath)
         const normalBase = path.normalize(path.resolve(tempDir))
         if (!normalDest.startsWith(normalBase + path.sep) && normalDest !== normalBase) {
-          throw new Error(`ZIP 包含路径穿越条目: ${entry.entryName}`)
+          throw new Error(`ZIP 包含路径穿越条目: ${decodedName || entry.entryName}`)
         }
         const destDirPath = path.dirname(destPath)
         mkdirSync(destDirPath, { recursive: true })

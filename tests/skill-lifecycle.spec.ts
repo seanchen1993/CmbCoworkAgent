@@ -9,9 +9,19 @@ import { existsSync } from "fs"
 import { mkdtemp, mkdir, rm, writeFile, readFile } from "fs/promises"
 import { tmpdir } from "os"
 import { join, sep } from "path"
+import * as iconv from "iconv-lite"
 import { LocalSandbox } from "../src/main/agent/local-sandbox.ts"
 import { SkillLifecycleRegistry } from "../src/main/agent/skill-lifecycle/registry.ts"
 import { createHookScope } from "../src/main/hooks/scope.ts"
+import { discoverSkillsSync, expandSkillMiddlewareSourceDirs } from "../src/main/skills/discovery.ts"
+import {
+  removeDisabledSkillEntriesForSkills,
+  resolveDisabledSkillIds
+} from "../src/main/skills/ids.ts"
+import {
+  decodeArchiveEntryName,
+  selectRootSkillMarkdownEntry
+} from "../src/main/skills/archive.ts"
 import type { HookConfig } from "../src/main/hooks/types.ts"
 
 function assert(cond: unknown, msg: string): void {
@@ -95,6 +105,120 @@ async function testNestedLayout(): Promise<void> {
     assert(b?.name === "beta", `expected beta got ${b?.name}`)
     assert(c === null, "no-SKILL.md dirs should not match")
   })
+}
+
+async function testDeepNestedLayout(): Promise<void> {
+  await withTempDir("skill-deep-nested", async (base) => {
+    const source = join(base, "skills")
+    await writeSkillDoc(source, "office/SKILL.md", { name: "office" })
+    await writeSkillDoc(source, "office/pdf/SKILL.md", { name: "pdf" })
+    await writeSkillDoc(source, "office/pdf/extract/SKILL.md", { name: "pdf-extract" })
+    await writeSkillDoc(source, "office/pdf/extract/deeper/SKILL.md", { name: "too-deep" })
+    await writeFile(join(source, "office", "pdf", "extract", "helper.txt"), "helper", "utf8")
+
+    const reg = new SkillLifecycleRegistry([source])
+    const parent = reg.resolveRead(join(source, "office", "SKILL.md"))
+    const child = reg.resolveRead(join(source, "office", "pdf", "SKILL.md"))
+    const grandchild = reg.resolveRead(join(source, "office", "pdf", "extract", "helper.txt"))
+    const tooDeep = reg.resolveRead(join(source, "office", "pdf", "extract", "deeper", "SKILL.md"))
+
+    assert(parent?.name === "office", `expected office got ${parent?.name}`)
+    assert(child?.name === "pdf", `expected pdf got ${child?.name}`)
+    assert(grandchild?.name === "pdf-extract", `expected pdf-extract got ${grandchild?.name}`)
+    assert(tooDeep?.name === "pdf-extract", `too-deep skill should not be discovered, got ${tooDeep?.name}`)
+  })
+}
+
+async function testSkillMiddlewareSourceExpansion(): Promise<void> {
+  await withTempDir("skill-source-expansion", async (base) => {
+    const source = join(base, "skills")
+    await writeSkillDoc(source, "office/SKILL.md", { name: "office" })
+    await writeSkillDoc(source, "office/pdf/SKILL.md", { name: "pdf" })
+    await writeSkillDoc(source, "office/pdf/extract/SKILL.md", { name: "pdf-extract" })
+
+    const expanded = await expandSkillMiddlewareSourceDirs([source])
+    assert(expanded.includes(source), "expanded sources should include root skills dir")
+    assert(
+      expanded.includes(join(source, "office")),
+      "expanded sources should include parent dir for second-level skills"
+    )
+    assert(
+      expanded.includes(join(source, "office", "pdf")),
+      "expanded sources should include parent dir for third-level skills"
+    )
+  })
+}
+
+async function testDisabledSkillIdsResolveByPathAndLegacyName(): Promise<void> {
+  await withTempDir("skill-disabled-ids", async (base) => {
+    const source = join(base, "skills")
+    await writeSkillDoc(source, "office/pdf/SKILL.md", { name: "shared-pdf" })
+    await writeSkillDoc(source, "reports/pdf/SKILL.md", { name: "shared-pdf" })
+
+    const skills = discoverSkillsSync(source)
+    const disabledByPath = resolveDisabledSkillIds(["office/pdf"], skills)
+    assert(disabledByPath.includes("office/pdf"), "path id should disable the targeted nested skill")
+    assert(
+      !disabledByPath.includes("reports/pdf"),
+      "path id should not disable a same-name nested sibling"
+    )
+
+    const disabledByLegacyName = resolveDisabledSkillIds(["shared-pdf"], skills)
+    assert(
+      disabledByLegacyName.includes("office/pdf") &&
+        disabledByLegacyName.includes("reports/pdf"),
+      `legacy name should expand to all matching skill ids, got ${disabledByLegacyName.join(",")}`
+    )
+  })
+}
+
+async function testDeletedSkillDisabledEntriesArePruned(): Promise<void> {
+  await withTempDir("skill-disabled-prune", async (base) => {
+    const source = join(base, "skills")
+    await writeSkillDoc(source, "alpha/SKILL.md", { name: "shared-name" })
+    await writeSkillDoc(source, "alpha/child/SKILL.md", { name: "alpha-child" })
+    await writeSkillDoc(source, "beta/SKILL.md", { name: "shared-name" })
+
+    const skills = discoverSkillsSync(source)
+    const removing = skills.filter((skill) => skill.relativePath.startsWith("alpha"))
+    const remaining = skills.filter((skill) => !skill.relativePath.startsWith("alpha"))
+    const next = removeDisabledSkillEntriesForSkills(
+      ["alpha", "alpha/child", "shared-name", "beta"],
+      removing,
+      remaining
+    )
+
+    assert(!next.includes("alpha"), "deleted root skill id should be removed")
+    assert(!next.includes("alpha/child"), "deleted nested skill id should be removed")
+    assert(next.includes("shared-name"), "legacy alias still used by remaining skill should stay")
+    assert(next.includes("beta"), "unrelated disabled skill should stay")
+  })
+}
+
+async function testZipRootSkillSelectionPrefersShallowSkillMd(): Promise<void> {
+  const entries = [
+    { entry: { isDirectory: false }, decodedName: "skill/imagegen/scope-plain-skill/SKILL.md" },
+    { entry: { isDirectory: false }, decodedName: "skill/imagegen/SKILL.md" },
+    { entry: { isDirectory: false }, decodedName: "../SKILL.md" },
+    { entry: { isDirectory: false }, decodedName: "skill/SKILL.md" }
+  ]
+  const selected = selectRootSkillMarkdownEntry(entries, (item) => item.entry.isDirectory)
+  assert(
+    selected?.decodedName === "skill/SKILL.md",
+    `expected root skill/SKILL.md got ${selected?.decodedName}`
+  )
+}
+
+async function testZipEntryNameDecodesGbkPluginSkillPath(): Promise<void> {
+  const rawName = "Code-Review-Helper - 副本/skills/架构红线高整改等级问题智能检测与修复/imagegen/SKILL.md"
+  const decoded = decodeArchiveEntryName({
+    entryName:
+      "Code-Review-Helper - ����/skills/�ܹ����߸����ĵȼ��������ܼ�����޸�/imagegen/SKILL.md",
+    rawEntryName: iconv.encode(rawName, "gb18030"),
+    header: { flags_efs: false }
+  })
+
+  assert(decoded === rawName, `expected GBK zip path to decode, got ${decoded}`)
 }
 
 async function testFallbackName(): Promise<void> {
@@ -258,6 +382,51 @@ async function testPluginSkillActivatesScopedHooks(): Promise<void> {
     await sandbox.write(join(base, "written.txt"), "ok")
     const marker = existsSync(outputPath) ? (await readFile(outputPath, "utf8")).trim() : ""
     assert(marker === "plugin active", `expected scoped hook marker, got ${marker}`)
+  })
+}
+
+async function testNestedSkillActivatesOnlyMatchedScopedHooks(): Promise<void> {
+  await withTempDir("skill-nested-scope", async (base) => {
+    const source = join(base, "skills")
+    await writeSkillDoc(source, "office/SKILL.md", {
+      raw: "---\nname: office\n---\nparent\n"
+    })
+    const childSkillPath = await writeSkillDoc(source, "office/pdf/SKILL.md", {
+      raw: "---\nname: pdf\n---\nchild\n"
+    })
+    const parentRoot = join(source, "office")
+    const childRoot = join(source, "office", "pdf")
+    const pathKey = (value: string): string => value.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase()
+    const parentMarker = join(base, "parent-hit.txt")
+    const childMarker = join(base, "child-hit.txt")
+    const hookScope = createHookScope()
+    const parentHook = makeHook({
+      event: "PreToolUse",
+      matcher: "write_file",
+      command: nodeCommand(`require('fs').writeFileSync(${JSON.stringify(parentMarker)}, 'parent')`)
+    })
+    const childHook = makeHook({
+      event: "PreToolUse",
+      matcher: "write_file",
+      command: nodeCommand(`require('fs').writeFileSync(${JSON.stringify(childMarker)}, 'child')`)
+    })
+    const sandbox = new LocalSandbox({
+      rootDir: base,
+      skillLifecycleRegistry: new SkillLifecycleRegistry([source]),
+      hookScope,
+      hookResolver: () => {
+        const hooks: HookConfig[] = []
+        if (hookScope.activeSkillPaths.has(pathKey(parentRoot))) hooks.push(parentHook)
+        if (hookScope.activeSkillPaths.has(pathKey(childRoot))) hooks.push(childHook)
+        return hooks
+      }
+    })
+
+    await sandbox.read(childSkillPath)
+    await sandbox.write(join(base, "written.txt"), "ok")
+
+    assert(!existsSync(parentMarker), "reading child skill should not activate parent scoped hook")
+    assert(existsSync(childMarker), "reading child skill should activate child scoped hook")
   })
 }
 
@@ -443,6 +612,18 @@ async function run(): Promise<void> {
   console.log("PASS A1 single SKILL.md at source root")
   await testNestedLayout()
   console.log("PASS A2 nested skill subdirectories")
+  await testDeepNestedLayout()
+  console.log("PASS A2b deep nested skill subdirectories use longest path")
+  await testSkillMiddlewareSourceExpansion()
+  console.log("PASS A2c nested skill middleware source expansion")
+  await testDisabledSkillIdsResolveByPathAndLegacyName()
+  console.log("PASS A2d disabled skill ids are path-aware with legacy-name fallback")
+  await testDeletedSkillDisabledEntriesArePruned()
+  console.log("PASS A2e deleted skill disabled entries are pruned")
+  await testZipRootSkillSelectionPrefersShallowSkillMd()
+  console.log("PASS A2f zip upload selects the rootmost SKILL.md")
+  await testZipEntryNameDecodesGbkPluginSkillPath()
+  console.log("PASS A2g GBK plugin zip skill paths decode correctly")
   await testFallbackName()
   console.log("PASS A3 fallback name when no frontmatter")
   await testFrontmatterCRLF()
@@ -467,6 +648,8 @@ async function run(): Promise<void> {
   console.log("PASS A12 plugin skill metadata carried through registry")
   await testPluginSkillActivatesScopedHooks()
   console.log("PASS A13 plugin skill activates scoped hooks")
+  await testNestedSkillActivatesOnlyMatchedScopedHooks()
+  console.log("PASS A14 nested skill activates only the matched scoped hook")
   await testSkillReadContentIsNotPolluted()
   console.log("PASS D1 SKILL.md content not polluted")
   await testPreSkillBlockStopsRead()

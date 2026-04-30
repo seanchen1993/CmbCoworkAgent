@@ -42,6 +42,7 @@ import { getFileType } from "@/lib/file-types"
 import { Badge } from "@/components/ui/badge"
 import { onOpenResourcePreview } from "@/lib/resource-preview-events"
 import type { Todo, SkillMetadata, PluginMetadata, LspConfig, LspStatus } from "@/types"
+import { isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
 import { SubagentCard } from "@/components/panels/SubagentPanel"
 import { LspPanel } from "@/components/customize/LspPanel"
 
@@ -237,7 +238,7 @@ export function RightPanel({
           window.api.skills.getDisabled()
         ])
         setSkills(loaded)
-        setDisabledSkills(new Set(disabled))
+        setDisabledSkills(new Set(disabled.map(normalizeSkillId)))
       } catch (e) {
         console.error("[RightPanel] Failed to load skills:", e)
       }
@@ -2317,10 +2318,10 @@ function SkillsContent({
   const generalSkills = skills.filter((skill) => !isProgrammingSkill(skill))
 
   const renderSkillCard = (skill: SkillMetadata): React.JSX.Element => {
-    const disabled = disabledSkills.has(skill.name)
+    const disabled = isSkillDisabled(skill, disabledSkills)
     return (
       <div
-        key={skill.name}
+        key={skill.id || skill.path}
         className={cn("p-3 rounded-sm border border-border", disabled && "opacity-60")}
       >
         <div className="flex items-center gap-2 text-sm font-medium">

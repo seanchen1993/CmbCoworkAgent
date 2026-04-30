@@ -202,10 +202,14 @@ export interface GrepMatch {
 }
 
 export interface SkillMetadata {
+  id?: string
   name: string
   description: string
   path: string
   source: "user" | "project"
+  relativePath?: string
+  pluginId?: string
+  pluginName?: string
   license?: string | null
   compatibility?: string | null
   metadata?: Record<string, string>

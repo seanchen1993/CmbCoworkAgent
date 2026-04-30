@@ -1,5 +1,5 @@
 import { homedir } from "os"
-import { basename, join } from "path"
+import { basename, isAbsolute, join, relative, resolve } from "path"
 import { createHash } from "crypto"
 import { v4 as uuid } from "uuid"
 import {
@@ -18,7 +18,7 @@ import {
   type HookUpsert
 } from "./hooks/types"
 import type { AgentAutoCommitSettings } from "./types"
-import { readdir, readFile, rm, mkdir, stat as fsStat } from "fs/promises"
+import { readdir, rm, mkdir, stat as fsStat } from "fs/promises"
 import { app } from "electron"
 import { resolveMcpConnectorKind } from "./mcp/connector-kind"
 import type {
@@ -28,6 +28,19 @@ import type {
   SkillHookMetadata
 } from "./types"
 import { copyDirRecursive } from "./utils/fs"
+import {
+  discoverSkills,
+  discoverSkillsSync,
+  expandSkillMiddlewareSourceDirs,
+  makeFlattenedSkillDirName,
+  normalizeSkillRelativePath,
+  type DiscoveredSkill
+} from "./skills/discovery"
+import {
+  isDiscoveredSkillDisabled,
+  removeDisabledSkillEntriesForSkills,
+  resolveDisabledSkillIds
+} from "./skills/ids"
 const OPENWORK_DIR = join(homedir(), ".cmbcoworkagent")
 const ENV_FILE = join(OPENWORK_DIR, ".env")
 
@@ -385,7 +398,7 @@ export function setCodeExecEnabled(enabled: boolean): void {
 
 const DISABLED_SKILLS_FILE = join(OPENWORK_DIR, "disabled-skills.json")
 
-export function getDisabledSkills(): string[] {
+function readDisabledSkillEntries(): string[] {
   getOpenworkDir()
   if (!existsSync(DISABLED_SKILLS_FILE)) return []
   try {
@@ -397,22 +410,82 @@ export function getDisabledSkills(): string[] {
   }
 }
 
-export function setDisabledSkills(skillNames: string[]): void {
+function writeDisabledSkillEntries(disabledEntries: string[]): void {
   getOpenworkDir()
-  writeFileSync(DISABLED_SKILLS_FILE, JSON.stringify(skillNames, null, 2))
+  writeFileSync(DISABLED_SKILLS_FILE, JSON.stringify(disabledEntries, null, 2))
   invalidateEnabledSkillsCache()
 }
 
-function parseSkillNameFromFrontmatter(content: string): string | null {
-  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/)
-  if (!match) return null
-  for (const line of match[1].split("\n")) {
-    const colonIdx = line.indexOf(":")
-    if (colonIdx > 0 && line.slice(0, colonIdx).trim().toLowerCase() === "name") {
-      return line.slice(colonIdx + 1).trim()
+function resolveDisabledSkillEntries(disabledEntries: string[], sourceDirs = getSkillsSources()): string[] {
+  const skills = sourceDirs.flatMap((sourceDir) => {
+    try {
+      return discoverSkillsSync(sourceDir)
+    } catch {
+      return []
     }
+  })
+  return resolveDisabledSkillIds(disabledEntries, skills)
+}
+
+export function getDisabledSkills(): string[] {
+  return resolveDisabledSkillEntries(readDisabledSkillEntries())
+}
+
+export function setDisabledSkills(skillIds: string[]): void {
+  writeDisabledSkillEntries(resolveDisabledSkillEntries(skillIds))
+}
+
+function normalizeSkillDirPath(input: string): string {
+  const normalized = resolve(input)
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized
+}
+
+function isSameOrChildPath(targetPath: string, parentPath: string): boolean {
+  const relPath = relative(
+    normalizeSkillDirPath(parentPath),
+    normalizeSkillDirPath(targetPath)
+  )
+  return relPath === "" || (!relPath.startsWith("..") && !isAbsolute(relPath))
+}
+
+function discoverSkillsFromSourcesSync(sourceDirs = getSkillsSources()): DiscoveredSkill[] {
+  return sourceDirs.flatMap((sourceDir) => {
+    try {
+      return discoverSkillsSync(sourceDir)
+    } catch {
+      return []
+    }
+  })
+}
+
+function computeDisabledSkillEntriesWithoutSkillDir(skillDir: string): string[] | null {
+  const allSkills = discoverSkillsFromSourcesSync()
+  const skillsToRemove = allSkills.filter((skill) => isSameOrChildPath(skill.rootDir, skillDir))
+  if (skillsToRemove.length === 0) return null
+
+  const remainingSkills = allSkills.filter((skill) => !isSameOrChildPath(skill.rootDir, skillDir))
+  const currentEntries = readDisabledSkillEntries()
+  const nextEntries = removeDisabledSkillEntriesForSkills(
+    currentEntries,
+    skillsToRemove,
+    remainingSkills
+  )
+  const unchanged =
+    currentEntries.length === nextEntries.length &&
+    currentEntries.every((entry, index) => entry === nextEntries[index])
+  return unchanged ? null : nextEntries
+}
+
+export function clearDisabledSkillsForSkillDir(skillDir: string): void {
+  const nextEntries = computeDisabledSkillEntriesWithoutSkillDir(skillDir)
+  if (nextEntries) writeDisabledSkillEntries(nextEntries)
+}
+
+export function prepareDisabledSkillsCleanupForSkillDir(skillDir: string): () => void {
+  const nextEntries = computeDisabledSkillEntriesWithoutSkillDir(skillDir)
+  return () => {
+    if (nextEntries) writeDisabledSkillEntries(nextEntries)
   }
-  return null
 }
 
 const ENABLED_SKILLS_DIR = join(OPENWORK_DIR, "enabled-skills")
@@ -427,17 +500,16 @@ async function computeEnabledSkillsFingerprint(
   disabledList: string[],
   sourceDirs: string[]
 ): Promise<string> {
-  const parts = [disabledList.sort().join(","), sourceDirs.join("|")]
+  const parts = [[...disabledList].sort().join(","), sourceDirs.join("|")]
   for (const dir of sourceDirs) {
     if (!existsSync(dir)) continue
     try {
-      const entries = await readdir(dir, { withFileTypes: true })
       const dirNames: string[] = []
-      for (const e of entries) {
-        if (!e.isDirectory()) continue
-        dirNames.push(e.name)
+      const skills = await discoverSkills(dir)
+      for (const skill of skills) {
+        dirNames.push(skill.relativePath || ".")
         for (const fileName of ["SKILL.md", "hooks.json"]) {
-          const filePath = join(dir, e.name, fileName)
+          const filePath = join(skill.rootDir, fileName)
           try {
             const st = await fsStat(filePath)
             dirNames.push(`${fileName}:${st.mtimeMs}`)
@@ -459,38 +531,58 @@ async function copyEnabledSkillsFromSourceAsync(
   disabled: Set<string>,
   destDir?: string
 ): Promise<number> {
-  let count = 0
-  const entries = await readdir(sourceDir, { withFileTypes: true })
+  const skills = await discoverSkills(sourceDir)
+  const enabledSkills = skills.filter((skill) => !isDiscoveredSkillDisabled(skill, disabled))
+  const topLevelDirs = new Map<string, { src: string; dest: string }>()
+  const targetRoot = destDir ?? ENABLED_SKILLS_DIR
 
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue
-    const skillMdPath = join(sourceDir, entry.name, "SKILL.md")
-    if (!existsSync(skillMdPath)) continue
+  const topLevelFor = (relativePath: string): string => {
+    const normalized = normalizeSkillRelativePath(relativePath)
+    if (!normalized) return basename(sourceDir)
+    return normalized.split("/")[0] || basename(sourceDir)
+  }
 
+  for (const skill of enabledSkills) {
+    const topLevel = topLevelFor(skill.relativePath)
+    if (topLevelDirs.has(topLevel)) continue
+    topLevelDirs.set(topLevel, {
+      src: skill.relativePath ? join(sourceDir, topLevel) : sourceDir,
+      dest: join(targetRoot, topLevel)
+    })
+  }
+
+  const copiedTopLevels = new Set<string>()
+  for (const [topLevel, paths] of topLevelDirs) {
     try {
-      const content = await readFile(skillMdPath, "utf-8")
-      const name = parseSkillNameFromFrontmatter(content) || entry.name
-      if (disabled.has(name.trim().toLowerCase())) continue
-    } catch {
-      continue
-    }
-
-    const srcSkillDir = join(sourceDir, entry.name)
-    const destPath = destDir ? join(destDir, entry.name) : join(ENABLED_SKILLS_DIR, entry.name)
-    try {
-      await copyDirRecursive(srcSkillDir, destPath)
-      count++
+      await copyDirRecursive(paths.src, paths.dest)
+      copiedTopLevels.add(topLevel)
     } catch (e) {
-      console.warn(`[Storage] Failed to copy skill ${entry.name}:`, e)
-      // Clean up partial directory so it doesn't look like a valid skill
+      console.warn(`[Storage] Failed to copy skill tree ${topLevel}:`, e)
       try {
-        await rm(destPath, { recursive: true, force: true })
+        await rm(paths.dest, { recursive: true, force: true })
       } catch {
         /* ignore */
       }
     }
   }
-  return count
+
+  for (const skill of skills) {
+    if (!isDiscoveredSkillDisabled(skill, disabled)) continue
+    const topLevel = topLevelFor(skill.relativePath)
+    if (!copiedTopLevels.has(topLevel)) continue
+    const normalizedRel = normalizeSkillRelativePath(skill.relativePath)
+    const destSkillDir = normalizedRel
+      ? join(targetRoot, normalizedRel)
+      : join(targetRoot, basename(sourceDir))
+    try {
+      await rm(join(destSkillDir, "SKILL.md"), { force: true })
+      await rm(join(destSkillDir, "hooks.json"), { force: true })
+    } catch (e) {
+      console.warn(`[Storage] Failed to prune disabled skill ${skill.name}:`, e)
+    }
+  }
+
+  return enabledSkills.filter((skill) => copiedTopLevels.has(topLevelFor(skill.relativePath))).length
 }
 
 let _enabledSkillsBuildLock: Promise<string[]> | null = null
@@ -603,6 +695,14 @@ export async function getEnabledSkillsSources(): Promise<string[]> {
   return enabledDirs.filter((dir) => existsSync(dir))
 }
 
+/**
+ * Sources passed to deepagents SkillsMiddleware. The middleware discovers only
+ * one directory level, so include parent directories for nested skills too.
+ */
+export async function getEnabledSkillMiddlewareSources(): Promise<string[]> {
+  return expandSkillMiddlewareSourceDirs(await getEnabledSkillsSources())
+}
+
 const CMB_SKILL_PREFIX = "_cmb_"
 
 /**
@@ -637,21 +737,27 @@ export async function syncSkillsToClaudeDir(workDir: string): Promise<void> {
   // Copy enabled skills
   const sourceDirs = await getEnabledSkillsSources()
   let count = 0
+  const usedDestNames = new Map<string, string>()
   for (const sourceDir of sourceDirs) {
     if (!existsSync(sourceDir)) continue
-    const entries = await readdir(sourceDir, { withFileTypes: true })
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue
-      const skillMdPath = join(sourceDir, entry.name, "SKILL.md")
-      if (!existsSync(skillMdPath)) continue
-      const dest = join(claudeSkillsDir, CMB_SKILL_PREFIX + entry.name)
+    const skills = await discoverSkills(sourceDir)
+    for (const skill of skills) {
+      const relativeName = skill.relativePath || basename(skill.rootDir)
+      let destName = CMB_SKILL_PREFIX + makeFlattenedSkillDirName(relativeName)
+      const existingRelativeName = usedDestNames.get(destName)
+      if (existingRelativeName && existingRelativeName !== relativeName) {
+        const hash = createHash("sha256").update(relativeName).digest("hex").slice(0, 8)
+        destName = `${destName}-${hash}`
+      }
+      usedDestNames.set(destName, relativeName)
+      const dest = join(claudeSkillsDir, destName)
       try {
         // Remove existing dest to avoid merge with prior copy (e.g. builtin vs custom same name)
         if (existsSync(dest)) await rm(dest, { recursive: true, force: true })
-        await copyDirRecursive(join(sourceDir, entry.name), dest)
+        await copyDirRecursive(skill.rootDir, dest)
         count++
       } catch (e) {
-        console.warn(`[Storage] Failed to sync skill ${entry.name} to Claude dir:`, e)
+        console.warn(`[Storage] Failed to sync skill ${skill.name} to Claude dir:`, e)
         try {
           await rm(dest, { recursive: true, force: true })
         } catch {
@@ -1730,10 +1836,21 @@ export function getEnabledPluginSkillsSources(): string[] {
   return _pluginSkillsCache
 }
 
+export async function getEnabledPluginSkillMiddlewareSources(): Promise<string[]> {
+  const rootOnlySources: string[] = []
+  const nestedSources: string[] = []
+  for (const source of getEnabledPluginSkillSourceMetadata()) {
+    if (source.maxDepth === 0) rootOnlySources.push(source.sourceDir)
+    else nestedSources.push(source.sourceDir)
+  }
+  return [...rootOnlySources, ...(await expandSkillMiddlewareSourceDirs(nestedSources))]
+}
+
 export interface PluginSkillSourceMetadata {
   sourceDir: string
   pluginId: string
   pluginName: string
+  maxDepth?: number
 }
 
 export function getEnabledPluginSkillSourceMetadata(): PluginSkillSourceMetadata[] {
@@ -1754,7 +1871,8 @@ export function getEnabledPluginSkillSourceMetadata(): PluginSkillSourceMetadata
         sources.push({
           sourceDir: plugin.path,
           pluginId: plugin.id,
-          pluginName: plugin.name
+          pluginName: plugin.name,
+          maxDepth: 0
         })
       }
     }
@@ -2364,48 +2482,28 @@ interface SkillHookSource {
   pluginName?: string
 }
 
-function readSkillDisplayName(skillDir: string, fallbackName: string): string | null {
-  const skillMdPath = join(skillDir, "SKILL.md")
-  if (!existsSync(skillMdPath)) return null
-  try {
-    const content = readFileSync(skillMdPath, "utf-8")
-    return parseSkillNameFromFrontmatter(content) || fallbackName
-  } catch {
-    return fallbackName
-  }
-}
-
 function collectSkillHookSourcesFromDir(
   sourceDir: string,
   disabledSkills: Set<string>,
   respectDisabledList: boolean,
   seenDirs: Set<string>,
-  pluginMeta?: { pluginId: string; pluginName: string }
+  pluginMeta?: { pluginId: string; pluginName: string },
+  maxDepth?: number
 ): SkillHookSource[] {
   const result: SkillHookSource[] = []
   if (!existsSync(sourceDir)) return result
 
-  const pushSkill = (skillDir: string, skillName: string): void => {
-    const normalizedName = skillName.trim().toLowerCase()
-    if (respectDisabledList && disabledSkills.has(normalizedName)) return
+  const pushSkill = (skill: ReturnType<typeof discoverSkillsSync>[number]): void => {
+    if (respectDisabledList && isDiscoveredSkillDisabled(skill, disabledSkills)) return
+    const skillDir = skill.rootDir
     if (seenDirs.has(skillDir)) return
     seenDirs.add(skillDir)
-    result.push({ skillDir, skillName, ...pluginMeta })
-  }
-
-  const rootSkillName = readSkillDisplayName(sourceDir, basename(sourceDir))
-  if (rootSkillName) {
-    pushSkill(sourceDir, rootSkillName)
-    return result
+    result.push({ skillDir, skillName: skill.name, ...pluginMeta })
   }
 
   try {
-    for (const entry of readdirSync(sourceDir, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue
-      const skillDir = join(sourceDir, entry.name)
-      const skillName = readSkillDisplayName(skillDir, entry.name)
-      if (!skillName) continue
-      pushSkill(skillDir, skillName)
+    for (const skill of discoverSkillsSync(sourceDir, maxDepth)) {
+      pushSkill(skill)
     }
   } catch {
     console.warn(`[Hooks] Failed to scan skill hooks in ${sourceDir}`)
@@ -2430,7 +2528,8 @@ function getEnabledSkillHookSources(): SkillHookSource[] {
         disabledSkills,
         false,
         seenDirs,
-        { pluginId: source.pluginId, pluginName: source.pluginName }
+        { pluginId: source.pluginId, pluginName: source.pluginName },
+        source.maxDepth
       )
     )
   }
