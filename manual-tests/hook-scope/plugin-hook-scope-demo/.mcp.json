@@ -1,0 +1,12 @@
+{
+  "scope-demo-mcp": {
+    "command": "node",
+    "args": [
+      "C:\\ai\\CmbCoworkAgent\\manual-tests\\hook-scope\\plugin-hook-scope-demo\\mcp-server.cjs"
+    ],
+    "env": {
+      "WORKSPACE_PATH": "C:\\ai\\CmbCoworkAgent",
+      "CLAUDE_PROJECT_DIR": "C:\\ai\\CmbCoworkAgent"
+    }
+  }
+}

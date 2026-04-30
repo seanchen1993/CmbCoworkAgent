@@ -11,6 +11,7 @@ import { tmpdir } from "os"
 import { join, sep } from "path"
 import { LocalSandbox } from "../src/main/agent/local-sandbox.ts"
 import { SkillLifecycleRegistry } from "../src/main/agent/skill-lifecycle/registry.ts"
+import { createHookScope } from "../src/main/hooks/scope.ts"
 import type { HookConfig } from "../src/main/hooks/types.ts"
 
 function assert(cond: unknown, msg: string): void {
@@ -216,6 +217,50 @@ async function testCaseInsensitiveOnPaths(): Promise<void> {
   })
 }
 
+async function testPluginSkillMetadata(): Promise<void> {
+  await withTempDir("skill-plugin-meta", async (base) => {
+    const source = join(base, "plugin", "skills")
+    const skillPath = await writeSkillDoc(source, "plugged/SKILL.md", { name: "plugged" })
+    const reg = new SkillLifecycleRegistry([
+      { sourceDir: source, pluginId: "plugin-a", pluginName: "Plugin A" }
+    ])
+    const match = reg.resolveRead(skillPath)
+    assert(match?.name === "plugged", `expected plugged got ${match?.name}`)
+    assert(match?.pluginId === "plugin-a", `expected plugin-a got ${match?.pluginId}`)
+    assert(match?.pluginName === "Plugin A", `expected Plugin A got ${match?.pluginName}`)
+  })
+}
+
+async function testPluginSkillActivatesScopedHooks(): Promise<void> {
+  await withTempDir("skill-plugin-scope", async (base) => {
+    const source = join(base, "plugin", "skills")
+    const skillPath = await writeSkillDoc(source, "plugged/SKILL.md", {
+      raw: "---\nname: plugged\n---\nbody\n"
+    })
+    const outputPath = join(base, "scope-hit.txt")
+    const hookScope = createHookScope()
+    const scopedHook = makeHook({
+      event: "PreToolUse",
+      matcher: "write_file",
+      command: nodeCommand(`require('fs').writeFileSync(${JSON.stringify(outputPath)}, 'plugin active')`)
+    })
+    const sandbox = new LocalSandbox({
+      rootDir: base,
+      skillLifecycleRegistry: new SkillLifecycleRegistry([
+        { sourceDir: source, pluginId: "plugin-a", pluginName: "Plugin A" }
+      ]),
+      hookScope,
+      hookResolver: () => (hookScope.activePluginIds.has("plugin-a") ? [scopedHook] : [])
+    })
+
+    await sandbox.read(skillPath)
+    assert(!existsSync(outputPath), "plugin scoped hook should not fire during skill read")
+    await sandbox.write(join(base, "written.txt"), "ok")
+    const marker = existsSync(outputPath) ? (await readFile(outputPath, "utf8")).trim() : ""
+    assert(marker === "plugin active", `expected scoped hook marker, got ${marker}`)
+  })
+}
+
 async function testSkillReadContentIsNotPolluted(): Promise<void> {
   await withTempDir("skill-read-clean", async (base) => {
     const source = join(base, "skills")
@@ -383,6 +428,10 @@ async function run(): Promise<void> {
   console.log("PASS A11 missing source ignored")
   await testCaseInsensitiveOnPaths()
   console.log("PASS A11b case-insensitive matching")
+  await testPluginSkillMetadata()
+  console.log("PASS A12 plugin skill metadata carried through registry")
+  await testPluginSkillActivatesScopedHooks()
+  console.log("PASS A13 plugin skill activates scoped hooks")
   await testSkillReadContentIsNotPolluted()
   console.log("PASS D1 SKILL.md content not polluted")
   await testPreSkillBlockStopsRead()

@@ -19,7 +19,6 @@ import {
   isOnlineSkillEvolutionEnabled,
   isSkillAutoProposeEnabled,
   getGlobalRoutingMode,
-  getEnabledHooks,
   getHooks,
   getWorkspaceHooks,
   getEnabledPluginHooks,
@@ -65,6 +64,7 @@ import {
 } from "../agent/skill-evolution/skill-proposal-logic"
 import { isRetryableApiError, buildOrderedChain, type FailoverAttempt } from "../agent/failover"
 import { runHooks, type HookContext, type HookResultCallback } from "../hooks/runner"
+import { createHookScope, resolveEnabledHooksForRun, type HookScopeController } from "../hooks/scope"
 import type { HookResult } from "../hooks/types"
 import { fireSessionStartOnce } from "../hooks/session-lifecycle"
 import { runHooksEnriched } from "../hooks/required-skill"
@@ -78,6 +78,7 @@ import {
 import type { AgentAutoCommitResult } from "../types"
 import { formatAutoCommitLines } from "../../auto-commit-format"
 import { makeHookResultCallback } from "../hooks/result-callback"
+import { notifyHooksChanged } from "../hooks/notifications"
 import type {
   AgentInvokeParams,
   AgentResumeParams,
@@ -120,14 +121,29 @@ function getActiveHookSummary(workspacePath?: string): ActiveHookSummary {
 }
 
 function formatActiveHookNotice(summary: ActiveHookSummary): string | null {
-  if (summary.total === 0) return null
-  const parts = [
-    summary.global > 0 ? `全局 ${summary.global}` : "",
-    summary.workspace > 0 ? `工作区 ${summary.workspace}` : "",
-    summary.plugin > 0 ? `插件 ${summary.plugin}` : "",
-    summary.skill > 0 ? `技能 ${summary.skill}` : ""
-  ].filter(Boolean)
-  return `本轮已启用 ${summary.total} 个钩子（${parts.join("，")}）`
+  // 全局 / 工作区 hook 进入本轮即生效；插件 / 技能 hook 走作用域化激活
+  // （只有当其所属插件/技能本轮被使用时才会触发），不能与前两类合并展示，
+  // 否则用户会以为所有 plugin/skill hook 都会跑。
+  const baseTotal = summary.global + summary.workspace
+  const scopedTotal = summary.plugin + summary.skill
+  if (baseTotal === 0 && scopedTotal === 0) return null
+
+  const segments: string[] = []
+  if (baseTotal > 0) {
+    const baseParts = [
+      summary.global > 0 ? `全局 ${summary.global}` : "",
+      summary.workspace > 0 ? `工作区 ${summary.workspace}` : ""
+    ].filter(Boolean)
+    segments.push(`本轮已启用 ${baseTotal} 个钩子（${baseParts.join("，")}）`)
+  }
+  if (scopedTotal > 0) {
+    const scopedParts = [
+      summary.plugin > 0 ? `插件 ${summary.plugin}` : "",
+      summary.skill > 0 ? `技能 ${summary.skill}` : ""
+    ].filter(Boolean)
+    segments.push(`按需触发：${scopedParts.join("，")}（仅在对应插件/技能本轮被使用时生效）`)
+  }
+  return segments.join("；")
 }
 
 function sendHookNotice(window: BrowserWindow, channel: string, message: string): void {
@@ -451,6 +467,7 @@ async function runStopHooksWithRevision({
   workspacePath,
   abortSignal,
   getStopContext,
+  hookScope,
   runRevision,
   sendNotice,
   sendError,
@@ -460,6 +477,7 @@ async function runStopHooksWithRevision({
   workspacePath?: string
   abortSignal: AbortSignal
   getStopContext: () => StopHookContext
+  hookScope: HookScopeController
   runRevision: (prompt: string) => Promise<void>
   sendNotice: (message: string) => void
   sendError: (message: string) => void
@@ -467,14 +485,15 @@ async function runStopHooksWithRevision({
 }): Promise<boolean> {
   let revisionCount = 0
   while (!abortSignal.aborted) {
+    const context: HookContext = {
+      workspacePath,
+      sessionId: threadId,
+      stopContext: getStopContext()
+    }
     const stopResult = await runHooksEnriched(
-      getEnabledHooks(workspacePath),
+      resolveEnabledHooksForRun(workspacePath, "Stop", context, hookScope),
       "Stop",
-      {
-        workspacePath,
-        sessionId: threadId,
-        stopContext: getStopContext()
-      },
+      context,
       onHookResult
     ).catch((e) => {
       console.warn("[Hooks] Stop hook error:", e)
@@ -814,6 +833,7 @@ async function writeSkillToDisk(skillId: string, content: string, name: string):
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send("skills:changed")
   }
+  notifyHooksChanged("skill-written")
   console.log(`[Agent] Wrote skill "${name}" to ${skillDir}`)
 }
 
@@ -1060,6 +1080,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
     const abortController = new AbortController()
     activeRuns.set(threadId, abortController)
+    const hookScope = createHookScope()
 
     // Abort the stream if the window is closed/destroyed
     const onWindowClosed = (): void => {
@@ -1161,15 +1182,21 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
       // Fire UserPromptSubmit hook — may block the message, halt the turn, rewrite the prompt,
       // or inject additional context that the LLM should see alongside the user's message.
+      const promptSubmitContext: HookContext = {
+        toolArgs: { message },
+        userPrompt: message,
+        workspacePath: workspacePath ?? undefined,
+        sessionId: threadId
+      }
       const promptSubmitResult = await runHooksEnriched(
-        getEnabledHooks(workspacePath ?? undefined),
+        resolveEnabledHooksForRun(
+          workspacePath ?? undefined,
+          "UserPromptSubmit",
+          promptSubmitContext,
+          hookScope
+        ),
         "UserPromptSubmit",
-        {
-          toolArgs: { message },
-          userPrompt: message,
-          workspacePath: workspacePath ?? undefined,
-          sessionId: threadId
-        },
+        promptSubmitContext,
         onHookResult
       )
       if (promptSubmitResult?.blocked || promptSubmitResult?.continue === false) {
@@ -1281,6 +1308,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
             onHookResult,
+            hookScope,
             onFileMutation: autoCommit.onFileMutation
           })
           // First attempt sends the message; subsequent attempts resume from checkpoint
@@ -1512,17 +1540,23 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 kwargs.status === "error" ||
                 kwargs.is_error === true ||
                 additionalKwargs?.is_error === true
+              const subagentStopContext: HookContext = {
+                workspacePath: sessionWorkspacePath,
+                sessionId: threadId,
+                subagent: {
+                  id: toolCallId,
+                  status: isErr ? "failed" : "completed"
+                }
+              }
               runHooks(
-                getEnabledHooks(sessionWorkspacePath),
+                resolveEnabledHooksForRun(
+                  sessionWorkspacePath,
+                  "SubagentStop",
+                  subagentStopContext,
+                  hookScope
+                ),
                 "SubagentStop",
-                {
-                  workspacePath: sessionWorkspacePath,
-                  sessionId: threadId,
-                  subagent: {
-                    id: toolCallId,
-                    status: isErr ? "failed" : "completed"
-                  }
-                },
+                subagentStopContext,
                 onHookResult
               ).catch((e) => console.warn("[Hooks] SubagentStop hook error:", e))
             }
@@ -1878,6 +1912,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
             onHookResult,
+            hookScope,
             onFileMutation: autoCommit.onFileMutation
           })
           activeStream = await agent.stream(null, streamConfig) // resume from checkpoint
@@ -1909,6 +1944,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           },
           sendNotice: sendHookNotice,
           sendError: sendStreamError,
+          hookScope,
           onHookResult
         })
 
@@ -2118,6 +2154,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
     const abortController = new AbortController()
     activeRuns.set(threadId, abortController)
+    const hookScope = createHookScope()
     const stopContextCollector = new StopHookContextCollector()
     const sendHookNotice = (notice: string): void => {
       window.webContents.send(channel, {
@@ -2191,6 +2228,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
             onHookResult,
+            hookScope,
             onFileMutation: autoCommit.onFileMutation
           })
           resumeStream = await resumeAgent.stream(
@@ -2315,6 +2353,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
             onHookResult,
+            hookScope,
             onFileMutation: autoCommit.onFileMutation
           })
           activeResumeStream = await nextAgent.stream(
@@ -2344,6 +2383,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           },
           sendNotice: sendHookNotice,
           sendError: sendStreamError,
+          hookScope,
           onHookResult
         })
 
@@ -2415,6 +2455,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
     const abortController = new AbortController()
     activeRuns.set(threadId, abortController)
+    const hookScope = createHookScope()
     const stopContextCollector = new StopHookContextCollector()
     const sendHookNotice = (notice: string): void => {
       window.webContents.send(channel, {
@@ -2482,6 +2523,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
+              hookScope,
               onFileMutation: autoCommit.onFileMutation
             })
             intStream = await intAgent.stream(null, interruptStreamConfig)
@@ -2603,6 +2645,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
+              hookScope,
               onFileMutation: autoCommit.onFileMutation
             })
             activeIntStream = await nextAgent.stream(null, interruptStreamConfig)
@@ -2629,6 +2672,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             },
             sendNotice: sendHookNotice,
             sendError: sendStreamError,
+            hookScope,
             onHookResult
           })
 

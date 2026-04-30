@@ -581,6 +581,7 @@ export function invalidateEnabledSkillsCache(): void {
   _enabledSkillsBuiltinFingerprint = null
   _enabledSkillsCustomFingerprint = null
   _pluginSkillsCache = null
+  _pluginSkillSourcesCache = null
   _pluginMcpCache = null
   _pluginHooksCache = null
   _skillHooksCache = null
@@ -1653,6 +1654,7 @@ const PLUGINS_FILE = join(OPENWORK_DIR, "plugins.json")
 const DEFAULT_PLUGIN_HOOKS_PATH = "hooks/hooks.json"
 const SKILL_HOOKS_FILE = "hooks.json"
 let _pluginSkillsCache: string[] | null = null
+let _pluginSkillSourcesCache: PluginSkillSourceMetadata[] | null = null
 let _pluginMcpCache: Record<string, PluginMcpServerConfig> | null = null
 let _pluginHooksCache: PluginHookMetadata[] | null = null
 let _skillHooksCache: HookConfig[] | null = null
@@ -1722,20 +1724,40 @@ export function setPluginEnabled(id: string, enabled: boolean): void {
 
 export function getEnabledPluginSkillsSources(): string[] {
   if (_pluginSkillsCache) return _pluginSkillsCache
+  _pluginSkillsCache = getEnabledPluginSkillSourceMetadata().map((source) => source.sourceDir)
+  return _pluginSkillsCache
+}
+
+export interface PluginSkillSourceMetadata {
+  sourceDir: string
+  pluginId: string
+  pluginName: string
+}
+
+export function getEnabledPluginSkillSourceMetadata(): PluginSkillSourceMetadata[] {
+  if (_pluginSkillSourcesCache) return _pluginSkillSourcesCache
   const plugins = getPlugins().filter((p) => p.enabled && p.skillCount > 0)
-  const sources: string[] = []
+  const sources: PluginSkillSourceMetadata[] = []
   for (const plugin of plugins) {
     const skillsDir = join(plugin.path, "skills")
     if (existsSync(skillsDir)) {
-      sources.push(skillsDir)
+      sources.push({
+        sourceDir: skillsDir,
+        pluginId: plugin.id,
+        pluginName: plugin.name
+      })
     } else {
       const rootSkillMd = join(plugin.path, "SKILL.md")
       if (existsSync(rootSkillMd)) {
-        sources.push(plugin.path)
+        sources.push({
+          sourceDir: plugin.path,
+          pluginId: plugin.id,
+          pluginName: plugin.name
+        })
       }
     }
   }
-  _pluginSkillsCache = sources
+  _pluginSkillSourcesCache = sources
   return sources
 }
 
@@ -2733,11 +2755,11 @@ export function getWorkspaceHooks(workspacePath: string): HookConfig[] {
 }
 
 export function getEnabledHooks(workspacePath?: string): HookConfig[] {
+  // Runtime base hooks only. Plugin/skill hooks are added by the run-scoped
+  // resolver after the corresponding plugin or skill is actually used.
   const globalHooks = getHooks().filter((h) => h.enabled)
-  const pluginHooks = getEnabledPluginHooks()
-  const skillHooks = getEnabledSkillHooks()
   const workspaceHooks = workspacePath ? getWorkspaceHooks(workspacePath) : []
-  return [...globalHooks, ...pluginHooks, ...skillHooks, ...workspaceHooks]
+  return [...globalHooks, ...workspaceHooks]
 }
 
 function writeHooksAtomic(items: HookConfig[]): void {

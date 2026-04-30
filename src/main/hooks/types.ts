@@ -109,6 +109,8 @@ export interface HookEnv {
   TOOL_NAME?: string
   TOOL_ARGS?: string // JSON, best-effort only for compact payloads; stdin remains canonical
   TOOL_RESULT?: string // PostToolUse only, best-effort only for compact payloads
+  PLUGIN_ID?: string
+  PLUGIN_NAME?: string
   SKILL_NAME?: string
   SKILL_PATH?: string
   SKILL_ROOT?: string

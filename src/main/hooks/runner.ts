@@ -4,6 +4,7 @@ import { HumanMessage, SystemMessage } from "@langchain/core/messages"
 import * as chardet from "jschardet"
 import * as iconv from "iconv-lite"
 import type { HookConfig, HookEvent, HookResult } from "./types"
+import type { PluginHookMetadata, SkillHookMetadata } from "../types"
 import { joinHookText } from "./text"
 import { getCustomModelConfigs } from "../storage"
 
@@ -23,6 +24,9 @@ export interface HookContext {
   workspacePath?: string
   /** Session / thread identifier — exposed to hooks as SESSION_ID and session_id in stdin JSON */
   sessionId?: string
+  /** Plugin that owns the capability currently being used, when known. */
+  pluginId?: string
+  pluginName?: string
   /** User prompt text for UserPromptSubmit — exposed as USER_PROMPT env and prompt in stdin JSON */
   userPrompt?: string
   /** Skill lifecycle context for PreSkillUse/PostSkillUse. */
@@ -105,6 +109,8 @@ function buildHookEnv(event: HookEvent, context: HookContext): Record<string, st
     HOOK_EVENT: event
   }
   if (context.toolName) env.TOOL_NAME = context.toolName
+  if (context.pluginId) env.PLUGIN_ID = context.pluginId
+  if (context.pluginName) env.PLUGIN_NAME = context.pluginName
   if (context.skillName) env.SKILL_NAME = context.skillName
   if (context.skillPath) env.SKILL_PATH = context.skillPath
   if (context.skillRoot) env.SKILL_ROOT = context.skillRoot
@@ -137,6 +143,8 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext): string {
   }
   if (context.toolName) payload.tool_name = context.toolName
   if (context.toolArgs) payload.tool_input = context.toolArgs
+  if (context.pluginId) payload.plugin_id = context.pluginId
+  if (context.pluginName) payload.plugin_name = context.pluginName
   if (context.toolResult !== undefined) {
     // Upstream passes JSON.stringify(result); parse it back so hooks see a real object
     // (matches Claude Code spec where tool_response is the structured response).
@@ -667,6 +675,26 @@ async function executeHook(
  */
 export type HookResultCallback = (event: HookEvent, hook: HookConfig, result: HookResult) => void
 
+/**
+ * Hook entries reaching this runner may carry plugin or skill ownership metadata
+ * from {@link PluginHookMetadata} or {@link SkillHookMetadata}. Use a partial union
+ * to recover those fields without forcing every caller to know which kind it is.
+ */
+type ScopedHook = HookConfig &
+  Partial<Pick<PluginHookMetadata, "pluginId" | "pluginName">> &
+  Partial<Pick<SkillHookMetadata, "skillName" | "skillPath">>
+
+function enrichContextFromHook(hook: HookConfig, context: HookContext): HookContext {
+  const scopedHook = hook as ScopedHook
+  return {
+    ...context,
+    pluginId: context.pluginId ?? scopedHook.pluginId,
+    pluginName: context.pluginName ?? scopedHook.pluginName,
+    skillName: context.skillName ?? scopedHook.skillName,
+    skillPath: context.skillPath ?? scopedHook.skillPath
+  }
+}
+
 export async function runHooks(
   hooks: HookConfig[],
   event: HookEvent,
@@ -679,14 +707,13 @@ export async function runHooks(
 
   if (matched.length === 0) return null
 
-  const env = buildHookEnv(event, context)
-
   if (event === "PreToolUse" || event === "PreSkillUse" || event === "UserPromptSubmit") {
     let mergedUpdatedInput: Record<string, unknown> | undefined
     let mergedAdditionalContext: string | undefined
     let mergedSystemMessage: string | undefined
     for (const hook of matched) {
-      const result = await executeHook(hook, env, context, event)
+      const hookContext = enrichContextFromHook(hook, context)
+      const result = await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event)
       console.log(
         `[Hooks] ${event} hook (${hook.type ?? "command"}) "${(hook.command ?? hook.prompt ?? "").slice(0, 60)}" → exit=${result.exitCode}, blocked=${result.blocked}`
       )
@@ -753,7 +780,8 @@ export async function runHooks(
     let shouldHalt = false
     let haltReason: string | undefined
     for (const hook of matched) {
-      const result = await executeHook(hook, env, context, event)
+      const hookContext = enrichContextFromHook(hook, context)
+      const result = await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event)
       console.log(
         `[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}`
       )
@@ -790,7 +818,8 @@ export async function runHooks(
     let additionalContext: string | undefined
     let systemMessage: string | undefined
     for (const hook of matched) {
-      const result = await executeHook(hook, env, context, event)
+      const hookContext = enrichContextFromHook(hook, context)
+      const result = await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event)
       console.log(
         `[Hooks] Stop hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}`
       )
@@ -828,7 +857,8 @@ export async function runHooks(
 
   // SubagentStop / Notification / SessionStart / SessionEnd: fire-and-forget
   for (const hook of matched) {
-    executeHook(hook, env, context, event)
+    const hookContext = enrichContextFromHook(hook, context)
+    executeHook(hook, buildHookEnv(event, hookContext), hookContext, event)
       .then((result) => {
         console.log(`[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}`)
         onHookResult?.(event, hook, result)

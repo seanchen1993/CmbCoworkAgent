@@ -47,10 +47,14 @@ import { LspPanel } from "@/components/customize/LspPanel"
 
 type HookConfig = Awaited<ReturnType<typeof window.api.hooks.list>>[number]
 type PluginHookMetadata = Awaited<ReturnType<typeof window.api.plugins.listHooks>>[number]
+type SkillHookMetadata = Awaited<ReturnType<typeof window.api.hooks.skills.list>>[number]
 type DisplayHook = HookConfig & {
-  source: "global" | "workspace" | "plugin"
+  source: "global" | "workspace" | "plugin" | "skill"
   pluginId?: string
   pluginName?: string
+  skillName?: string
+  skillPath?: string
+  hookPath?: string
 }
 
 const FileViewer = lazy(() =>
@@ -328,20 +332,31 @@ export function RightPanel({
   const loadHooks = useCallback(async (): Promise<void> => {
     try {
       const workspacePath = threadState?.workspacePath ?? null
-      const [globalHooks, workspaceHooks, pluginHooks] = await Promise.all([
+      const [globalHooks, workspaceHooks, pluginHooks, skillHooks] = await Promise.all([
         window.api.hooks.list(),
         workspacePath ? window.api.hooks.workspace.list(workspacePath) : Promise.resolve([]),
-        window.api.plugins.listHooks()
+        window.api.plugins.listHooks(),
+        window.api.hooks.skills.list()
       ])
       setHooks([
         ...globalHooks.map((hook): DisplayHook => ({ ...hook, source: "global" })),
         ...workspaceHooks.map((hook): DisplayHook => ({ ...hook, source: "workspace" })),
+        ...skillHooks.map(
+          (hook: SkillHookMetadata): DisplayHook => ({
+            ...hook,
+            source: "skill",
+            skillName: hook.skillName,
+            skillPath: hook.skillPath,
+            hookPath: hook.hookPath
+          })
+        ),
         ...pluginHooks.map(
           (hook: PluginHookMetadata): DisplayHook => ({
             ...hook,
             source: "plugin",
             pluginId: hook.pluginId,
-            pluginName: hook.pluginName
+            pluginName: hook.pluginName,
+            hookPath: hook.hookPath
           })
         )
       ])
@@ -353,6 +368,12 @@ export function RightPanel({
   useEffect(() => {
     void loadHooks()
   }, [loadHooks, pluginVersion])
+
+  useEffect(() => {
+    return window.api.hooks.onChanged(() => {
+      void loadHooks()
+    })
+  }, [loadHooks])
 
   useEffect(() => {
     if (!currentThreadId) return
@@ -2440,9 +2461,13 @@ function PluginsContent({ plugins }: { plugins: PluginMetadata[] }): React.JSX.E
   )
 }
 
+// Only the events the runtime actually emits (SUPPORTED_HOOK_EVENTS in src/main/hooks/types.ts).
+// Adding rows here for unsupported events is dead UI and misleads readers.
 const EVENT_BADGE_COLORS: Record<string, string> = {
   PreToolUse: "bg-blue-500/15 text-blue-600 dark:text-blue-400",
   PostToolUse: "bg-green-500/15 text-green-600 dark:text-green-400",
+  PreSkillUse: "bg-blue-500/15 text-blue-600 dark:text-blue-400",
+  PostSkillUse: "bg-green-500/15 text-green-600 dark:text-green-400",
   UserPromptSubmit: "bg-cyan-500/15 text-cyan-600 dark:text-cyan-400",
   SessionStart: "bg-teal-500/15 text-teal-600 dark:text-teal-400",
   SessionEnd: "bg-rose-500/15 text-rose-600 dark:text-rose-400",
@@ -2454,10 +2479,12 @@ const EVENT_BADGE_COLORS: Record<string, string> = {
 const EVENT_LABEL: Record<string, string> = {
   PreToolUse: "调用前",
   PostToolUse: "调用后",
+  PreSkillUse: "技能前",
+  PostSkillUse: "技能后",
   UserPromptSubmit: "提交",
   SessionStart: "会话始",
   SessionEnd: "会话终",
-  Stop: "停止时",
+  Stop: "停止",
   Notification: "通知",
   SubagentStop: "子停止"
 }
@@ -2485,7 +2512,7 @@ function HooksContent({
       <div className="flex flex-col items-center justify-center text-center text-sm text-muted-foreground py-8 px-4">
         <Webhook className="size-8 mb-2 opacity-50" />
         <span>暂无钩子</span>
-        <span className="text-xs mt-1">在自定义面板、插件或工作区中添加钩子</span>
+        <span className="text-xs mt-1">在自定义面板、插件、技能或工作区中添加钩子</span>
       </div>
     )
   }
@@ -2495,21 +2522,8 @@ function HooksContent({
 
   const handleToggle = async (hook: DisplayHook): Promise<void> => {
     try {
-      if (hook.source === "plugin") {
-        if (!hook.pluginId) {
-          throw new Error("缺少插件 ID")
-        }
-        const result = await window.api.plugins.setHookEnabled(
-          hook.pluginId,
-          hook.id,
-          !hook.enabled
-        )
-        if (!result.success) {
-          throw new Error(result.error || "插件 Hook 切换失败")
-        }
-      } else {
-        await window.api.hooks.setEnabled(hook.id, !hook.enabled)
-      }
+      if (hook.source !== "global") return
+      await window.api.hooks.setEnabled(hook.id, !hook.enabled)
       onChange()
     } catch (e) {
       console.error("[HooksContent] Failed to toggle hook:", e)
@@ -2521,56 +2535,87 @@ function HooksContent({
     const isWorkspaceHook = hook.source === "workspace"
     const isGlobalHook = hook.source === "global"
     const isPluginHook = hook.source === "plugin"
+    const isSkillHook = hook.source === "skill"
     const summary = isPrompt ? (hook.prompt ?? "") : (hook.command ?? "")
+    const ownerLabel = isPluginHook ? hook.pluginName : isSkillHook ? hook.skillName : undefined
+    const readonlyTitle = isWorkspaceHook
+      ? "工作区 Hook 由工作区配置管理"
+      : isPluginHook
+        ? "插件 Hook 请在插件详情页管理"
+        : isSkillHook
+          ? "技能 Hook 请在技能目录或技能管理页管理"
+          : ""
     return (
       <div
         key={hook.id}
-        className={cn("p-3 rounded-sm border border-border", !hook.enabled && "opacity-60")}
+        className={cn(
+          "min-w-0 overflow-hidden p-3 rounded-sm border border-border",
+          !hook.enabled && "opacity-60"
+        )}
       >
-        <div className="flex items-center gap-2 text-sm">
-          <span
-            className={cn(
-              "text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0",
-              EVENT_BADGE_COLORS[hook.event] ?? "bg-muted text-muted-foreground"
+        <div className="flex min-w-0 items-start gap-2 text-sm">
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+            <span
+              className={cn(
+                "max-w-full truncate text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0",
+                EVENT_BADGE_COLORS[hook.event] ?? "bg-muted text-muted-foreground"
+              )}
+              title={hook.event}
+            >
+              {EVENT_LABEL[hook.event] ?? hook.event}
+            </span>
+            {isGlobalHook && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-sky-500/15 text-sky-600 dark:text-sky-400">
+                全局
+              </span>
             )}
-          >
-            {EVENT_LABEL[hook.event] ?? hook.event}
-          </span>
-          {isGlobalHook && (
-            <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-sky-500/15 text-sky-600 dark:text-sky-400">
-              全局
+            {isWorkspaceHook && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
+                工作区
+              </span>
+            )}
+            {isPluginHook && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-violet-500/15 text-violet-600 dark:text-violet-400">
+                插件
+              </span>
+            )}
+            {isSkillHook && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
+                技能
+              </span>
+            )}
+            {isPrompt && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-violet-500/15 text-violet-600 dark:text-violet-400">
+                策略
+              </span>
+            )}
+            {ownerLabel && (
+              <span
+                className="min-w-0 max-w-[120px] truncate text-[10px] text-muted-foreground"
+                title={ownerLabel}
+              >
+                {ownerLabel}
+              </span>
+            )}
+            {hook.matcher && hook.matcher !== "*" && (
+              <span
+                className="min-w-0 max-w-[140px] truncate text-[10px] text-muted-foreground font-mono"
+                title={hook.matcher}
+              >
+                {TOOL_LABEL[hook.matcher] ?? hook.matcher}
+              </span>
+            )}
+          </div>
+          {!isGlobalHook ? (
+            <span
+              className="text-[10px] text-muted-foreground shrink-0 leading-5"
+              title={readonlyTitle}
+            >
+              只读
             </span>
-          )}
-          {isWorkspaceHook && (
-            <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
-              工作区
-            </span>
-          )}
-          {isPluginHook && (
-            <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-violet-500/15 text-violet-600 dark:text-violet-400">
-              插件
-            </span>
-          )}
-          {isPrompt && (
-            <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-violet-500/15 text-violet-600 dark:text-violet-400">
-              策略
-            </span>
-          )}
-          {isPluginHook && hook.pluginName && (
-            <span className="text-[10px] text-muted-foreground shrink-0 truncate max-w-[120px]">
-              {hook.pluginName}
-            </span>
-          )}
-          {hook.matcher && hook.matcher !== "*" && (
-            <span className="text-[10px] text-muted-foreground shrink-0 font-mono">
-              {TOOL_LABEL[hook.matcher] ?? hook.matcher}
-            </span>
-          )}
-          {isWorkspaceHook ? (
-            <span className="ml-auto text-[10px] text-muted-foreground shrink-0">只读</span>
           ) : (
             <button
-              className="ml-auto shrink-0"
+              className="shrink-0 leading-5"
               onClick={() => handleToggle(hook)}
               title={hook.enabled ? "点击禁用" : "点击启用"}
             >
@@ -2585,9 +2630,10 @@ function HooksContent({
         </div>
         <p
           className={cn(
-            "text-xs text-muted-foreground mt-1.5 break-all line-clamp-2",
+            "min-w-0 overflow-hidden text-xs text-muted-foreground mt-1.5 break-words line-clamp-2",
             isPrompt ? "italic" : "font-mono"
           )}
+          title={summary}
         >
           {summary}
         </p>

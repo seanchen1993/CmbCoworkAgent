@@ -845,6 +845,7 @@ interface CustomAPI {
     skills: {
       list: () => Promise<SkillHookMetadata[]>
     }
+    onChanged: (callback: (data: { reason?: string; at: string }) => void) => () => void
     create: (config: HookUpsert) => Promise<{ id: string }>
     update: (config: HookUpsert & { id: string }) => Promise<{ id: string }>
     delete: (id: string) => Promise<void>

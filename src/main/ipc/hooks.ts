@@ -11,6 +11,7 @@ import {
 } from "../storage"
 import type { UntrustedWorkspaceHook } from "../storage"
 import type { SkillHookMetadata } from "../types"
+import { notifyHooksChanged } from "../hooks/notifications"
 import {
   isSupportedHookEvent,
   SUPPORTED_HOOK_EVENTS,
@@ -96,6 +97,7 @@ export function registerHooksHandlers(ipcMain: IpcMain): void {
   ipcMain.handle("hooks:create", async (_event, config: HookUpsert): Promise<{ id: string }> => {
     validateHookConfig(config)
     const id = upsertHook(config)
+    notifyHooksChanged("global-hook-created")
     return { id }
   })
 
@@ -107,18 +109,21 @@ export function registerHooksHandlers(ipcMain: IpcMain): void {
       }
       validateHookConfig(config)
       const id = upsertHook(config)
+      notifyHooksChanged("global-hook-updated")
       return { id }
     }
   )
 
   ipcMain.handle("hooks:delete", async (_event, id: string): Promise<void> => {
     deleteHook(id)
+    notifyHooksChanged("global-hook-deleted")
   })
 
   ipcMain.handle(
     "hooks:setEnabled",
     async (_event, { id, enabled }: { id: string; enabled: boolean }): Promise<void> => {
       setHookEnabled(id, enabled)
+      notifyHooksChanged("global-hook-enabled-changed")
     }
   )
 

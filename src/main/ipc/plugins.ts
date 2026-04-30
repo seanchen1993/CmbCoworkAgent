@@ -24,6 +24,7 @@ import type {
   PluginMcpServerConfig
 } from "../types"
 import { invalidateGlobalMcpCapabilityService } from "../mcp/capability-service"
+import { notifyHooksChanged } from "../hooks/notifications"
 
 const DEFAULT_PLUGIN_HOOKS_PATH = "hooks/hooks.json"
 
@@ -263,6 +264,7 @@ async function installPluginFromDir(
     upsertPlugin(meta)
     invalidateEnabledSkillsCache()
     await invalidateGlobalMcpCapabilityService("plugin:update")
+    notifyHooksChanged("plugin-installed")
 
     return { success: true, pluginName: parsed.name }
   } catch (e) {
@@ -445,6 +447,7 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
           deletePluginStorage(id)
           invalidateEnabledSkillsCache()
           await invalidateGlobalMcpCapabilityService("plugin:delete")
+          notifyHooksChanged("plugin-deleted")
           return { success: true }
         } catch (e) {
           return { success: false, error: e instanceof Error ? e.message : "删除失败" }
@@ -467,6 +470,7 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
         setPluginEnabled(id, enabled)
         invalidateEnabledSkillsCache()
         await invalidateGlobalMcpCapabilityService("plugin:setEnabled")
+        notifyHooksChanged("plugin-enabled-changed")
         return { success: true }
       } catch (e) {
         return { success: false, error: e instanceof Error ? e.message : "设置失败" }
@@ -517,6 +521,7 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
       await pluginMutex.acquire()
       try {
         setPluginHookEnabled(payload.pluginId, payload.hookId, payload.enabled)
+        notifyHooksChanged("plugin-hook-enabled-changed")
         return { success: true }
       } catch (e) {
         return { success: false, error: e instanceof Error ? e.message : "设置失败" }

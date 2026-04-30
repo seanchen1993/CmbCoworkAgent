@@ -153,6 +153,7 @@ import { initializeDatabase, flush } from "./db"
 import { startScheduler, stopScheduler } from "./services/scheduler"
 import { startHeartbeat, stopHeartbeat } from "./services/heartbeat"
 import { startChatX, stopChatX } from "./services/chatx"
+import { startHookConfigWatcher, stopHookConfigWatcher } from "./services/hook-config-watcher"
 import { LocalSandbox } from "./agent/local-sandbox"
 import { closeRuntime } from "./agent/runtime"
 import { makeBroadcastHookResultCallback } from "./hooks/result-callback"
@@ -505,6 +506,7 @@ if (!gotTheLock) {
     startScheduler()
     startHeartbeat()
     startChatX()
+    startHookConfigWatcher()
     startUpdateChecker()
 
     // ── Keep Awake ──
@@ -563,6 +565,7 @@ if (!gotTheLock) {
     stopScheduler()
     stopHeartbeat()
     stopChatX()
+    stopHookConfigWatcher()
     stopUpdateChecker()
 
     const cleanup = Promise.all([

@@ -1,0 +1,38 @@
+[
+  {
+    "id": "plugin-pre-any-tool",
+    "event": "PreToolUse",
+    "matcher": "*",
+    "type": "command",
+    "command": "node manual-tests/hook-scope/hook-recorder.cjs plugin-pre-any-tool",
+    "timeout": 8000,
+    "enabled": true
+  },
+  {
+    "id": "plugin-post-any-tool",
+    "event": "PostToolUse",
+    "matcher": "*",
+    "type": "command",
+    "command": "node manual-tests/hook-scope/hook-recorder.cjs plugin-post-any-tool",
+    "timeout": 8000,
+    "enabled": true
+  },
+  {
+    "id": "plugin-pre-skill",
+    "event": "PreSkillUse",
+    "matcher": "scope-plugin-skill",
+    "type": "command",
+    "command": "node manual-tests/hook-scope/hook-recorder.cjs plugin-pre-skill",
+    "timeout": 8000,
+    "enabled": true
+  },
+  {
+    "id": "plugin-post-skill",
+    "event": "PostSkillUse",
+    "matcher": "scope-plugin-skill",
+    "type": "command",
+    "command": "node manual-tests/hook-scope/hook-recorder.cjs plugin-post-skill",
+    "timeout": 8000,
+    "enabled": true
+  }
+]

@@ -1588,6 +1588,17 @@ const api = {
     skills: {
       list: (): Promise<SkillHookMetadata[]> => ipcRenderer.invoke("hooks:skills:list")
     },
+    onChanged: (
+      callback: (data: { reason?: string; at: string }) => void
+    ): (() => void) => {
+      const handler = (_: unknown, data: { reason?: string; at: string }): void => {
+        callback(data)
+      }
+      ipcRenderer.on("hooks:changed", handler)
+      return () => {
+        ipcRenderer.removeListener("hooks:changed", handler)
+      }
+    },
     create: (config: HookUpsert): Promise<{ id: string }> =>
       ipcRenderer.invoke("hooks:create", config),
     update: (config: HookUpsert & { id: string }): Promise<{ id: string }> =>

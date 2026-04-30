@@ -10,9 +10,11 @@ import {
   getDisabledSkills,
   getEnabledPluginSkillsSources,
   getSkillsDir,
+  invalidateEnabledSkillsCache,
   setDisabledSkills
 } from "../storage"
 import type { SkillMetadata } from "../types"
+import { notifyHooksChanged } from "../hooks/notifications"
 
 interface ZipEntryLike {
   entryName: string
@@ -475,6 +477,7 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
   ipcMain.handle("skills:setDisabled", async (_event, skillNames: string[]) => {
     if (!Array.isArray(skillNames)) return
     setDisabledSkills(skillNames.filter((s): s is string => typeof s === "string"))
+    notifyHooksChanged("skills-disabled-changed")
   })
 
   ipcMain.handle(
@@ -495,6 +498,8 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
       }
       try {
         rmSync(skillDir, { recursive: true })
+        invalidateEnabledSkillsCache()
+        notifyHooksChanged("skill-deleted")
         return { success: true }
       } catch (e) {
         return { success: false, error: e instanceof Error ? e.message : "删除失败" }
@@ -565,6 +570,11 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
           return { success: false, error: "目标不是文件" }
         }
         await fs.writeFile(realFilePath, content, "utf-8")
+        const fileName = path.basename(realFilePath)
+        if (fileName === "hooks.json" || fileName === "SKILL.md") {
+          invalidateEnabledSkillsCache()
+          notifyHooksChanged("skill-file-written")
+        }
         return { success: true }
       } catch (e) {
         return { success: false, error: e instanceof Error ? e.message : "保存失败" }
@@ -688,6 +698,8 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
           const skillDir = path.join(customDir, skillName)
           mkdirSync(skillDir, { recursive: true })
           await fs.writeFile(path.join(skillDir, "SKILL.md"), content, "utf-8")
+          invalidateEnabledSkillsCache()
+          notifyHooksChanged("skill-uploaded")
           return { success: true, skillName }
         }
 
@@ -748,6 +760,8 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
             mkdirSync(destDir, { recursive: true })
             await fs.writeFile(destPath, entry.getData())
           }
+          invalidateEnabledSkillsCache()
+          notifyHooksChanged("skill-uploaded")
           return { success: true, skillName }
         }
 

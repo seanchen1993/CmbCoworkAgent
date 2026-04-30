@@ -1,0 +1,20 @@
+[
+  {
+    "id": "plugin-skill-pre",
+    "event": "PreSkillUse",
+    "matcher": "scope-plugin-skill",
+    "type": "command",
+    "command": "node manual-tests/hook-scope/hook-recorder.cjs plugin-skill-pre",
+    "timeout": 8000,
+    "enabled": true
+  },
+  {
+    "id": "plugin-skill-post",
+    "event": "PostSkillUse",
+    "matcher": "scope-plugin-skill",
+    "type": "command",
+    "command": "node manual-tests/hook-scope/hook-recorder.cjs plugin-skill-post",
+    "timeout": 8000,
+    "enabled": true
+  }
+]

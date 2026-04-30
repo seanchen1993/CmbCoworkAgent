@@ -5,11 +5,19 @@ export interface SkillLifecycleMatch {
   name: string
   path: string
   rootDir: string
+  pluginId?: string
+  pluginName?: string
 }
 
 interface SkillLifecycleEntry extends SkillLifecycleMatch {
   normalizedDocPath: string
   normalizedRootDir: string
+}
+
+export interface SkillLifecycleSource {
+  sourceDir: string
+  pluginId?: string
+  pluginName?: string
 }
 
 function normalizePath(input: string): string {
@@ -36,8 +44,13 @@ function readSkillName(skillDoc: string, fallbackName: string): string {
   }
 }
 
-function collectSkillEntriesFromSource(source: string): SkillLifecycleEntry[] {
-  const sourcePath = resolve(source)
+function normalizeSource(source: string | SkillLifecycleSource): SkillLifecycleSource {
+  return typeof source === "string" ? { sourceDir: source } : source
+}
+
+function collectSkillEntriesFromSource(rawSource: string | SkillLifecycleSource): SkillLifecycleEntry[] {
+  const source = normalizeSource(rawSource)
+  const sourcePath = resolve(source.sourceDir)
   const rootSkill = join(sourcePath, "SKILL.md")
   if (existsSync(rootSkill)) {
     return [
@@ -45,6 +58,8 @@ function collectSkillEntriesFromSource(source: string): SkillLifecycleEntry[] {
         name: readSkillName(rootSkill, basename(sourcePath)),
         path: rootSkill,
         rootDir: sourcePath,
+        pluginId: source.pluginId,
+        pluginName: source.pluginName,
         normalizedDocPath: normalizePath(rootSkill),
         normalizedRootDir: normalizePath(sourcePath)
       }
@@ -62,6 +77,8 @@ function collectSkillEntriesFromSource(source: string): SkillLifecycleEntry[] {
       name: readSkillName(skillDoc, entry.name),
       path: skillDoc,
       rootDir: skillRoot,
+      pluginId: source.pluginId,
+      pluginName: source.pluginName,
       normalizedDocPath: normalizePath(skillDoc),
       normalizedRootDir: normalizePath(skillRoot)
     })
@@ -72,7 +89,7 @@ function collectSkillEntriesFromSource(source: string): SkillLifecycleEntry[] {
 export class SkillLifecycleRegistry {
   private readonly entries: SkillLifecycleEntry[]
 
-  constructor(sources: string[]) {
+  constructor(sources: Array<string | SkillLifecycleSource>) {
     const seen = new Set<string>()
     const entries: SkillLifecycleEntry[] = []
     for (const source of sources) {
@@ -103,7 +120,9 @@ export class SkillLifecycleRegistry {
           return {
             name: entry.name,
             path: entry.path,
-            rootDir: entry.rootDir
+            rootDir: entry.rootDir,
+            pluginId: entry.pluginId,
+            pluginName: entry.pluginName
           }
         }
       }

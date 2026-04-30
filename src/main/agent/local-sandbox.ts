@@ -40,9 +40,10 @@ import {
   normalizeDirKey
 } from "../ipc/sandbox"
 import { homedir } from "node:os"
-import type { HookConfig, HookResult } from "../hooks/types"
-import type { HookResultCallback } from "../hooks/runner"
+import type { HookConfig, HookEvent, HookResult } from "../hooks/types"
+import type { HookContext, HookResultCallback } from "../hooks/runner"
 import { runHooksEnriched } from "../hooks/required-skill"
+import type { HookScopeController } from "../hooks/scope"
 import type { SkillLifecycleMatch, SkillLifecycleRegistry } from "./skill-lifecycle/registry"
 import type { AgentFileMutationKind } from "../services/agent-auto-commit"
 
@@ -66,6 +67,8 @@ interface PendingSkillHookContext {
 export interface SkillHookContextProvider {
   drainSkillHookContexts(): string[]
 }
+
+export type LocalSandboxHookResolver = (event: HookEvent, context: HookContext) => HookConfig[]
 
 // Python's tempfile uses private 0o700 directories on Windows. Under Codex's
 // WRITE_RESTRICTED token those DACLs omit the capability SID, so pip cannot
@@ -163,6 +166,10 @@ export interface LocalSandboxOptions {
   /** Hook configurations for PreToolUse/PostToolUse lifecycle events.
    *  Accepts a getter function so hooks are always read fresh from storage. */
   hooks?: HookConfig[] | (() => HookConfig[])
+  /** Run-scoped hook resolver; when omitted, `hooks` is used as a static/global list. */
+  hookResolver?: LocalSandboxHookResolver
+  /** Run-scoped skill/plugin activation state. */
+  hookScope?: HookScopeController
   /** Optional callback invoked after each hook executes — used to emit results to the renderer. */
   onHookResult?: HookResultCallback
   /** AbortSignal for cancelling running child processes when the user aborts.
@@ -209,6 +216,8 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
   private readonly windowsSandbox: "none" | "unelevated" | "readonly" | "elevated"
   private readonly codexExePath: string
   private readonly getHooks: () => HookConfig[]
+  private readonly resolveHooks: LocalSandboxHookResolver
+  private readonly _hookScope?: HookScopeController
   private readonly _onHookResult?: HookResultCallback
   /** App-owned persistent cache root granted as a Codex writable root per workspace. */
   private readonly _sandboxCacheRoot: string
@@ -839,6 +848,8 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     this.codexExePath = options.codexExePath ?? "codex"
     const h = options.hooks
     this.getHooks = typeof h === "function" ? h : () => h ?? []
+    this.resolveHooks = options.hookResolver ?? (() => this.getHooks())
+    this._hookScope = options.hookScope
     this._onHookResult = options.onHookResult
     this._onFileMutation = options.onFileMutation
     this._skillLifecycleRegistry = options.skillLifecycleRegistry
@@ -898,6 +909,10 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
 
   setSkillLifecycleRegistry(registry: SkillLifecycleRegistry | undefined): void {
     this._skillLifecycleRegistry = registry
+  }
+
+  private runHooks(event: HookEvent, context: HookContext): Promise<HookResult | null> {
+    return runHooksEnriched(this.resolveHooks(event, context), event, context, this._onHookResult)
   }
 
   private enqueueSkillHookContext(skill: SkillLifecycleMatch, notes: string[]): void {
@@ -1288,7 +1303,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
         skillMatch = this._skillLifecycleRegistry?.resolveRead(filePath, resolvedForSkill) ?? null
         if (skillMatch && !this._skillHooksFired.has(skillMatch.name)) {
           fireSkillHooks = true
-          const preResult = await runHooksEnriched(this.getHooks(), "PreSkillUse", {
+          const preContext: HookContext = {
             toolName: "read_file",
             toolArgs: { filePath, offset, limit },
             workspacePath: this.workingDir,
@@ -1296,8 +1311,11 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
             skillName: skillMatch.name,
             skillPath: skillMatch.path,
             skillRoot: skillMatch.rootDir,
+            pluginId: skillMatch.pluginId,
+            pluginName: skillMatch.pluginName,
             skillTriggerToolName: "read_file"
-          }, this._onHookResult)
+          }
+          const preResult = await this.runHooks("PreSkillUse", preContext)
           if (preResult?.blocked || preResult?.continue === false || preResult?.decision === "block") {
             const reason =
               preResult.reason ||
@@ -1343,12 +1361,13 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
         : formatted
 
       if (fireSkillHooks && skillMatch) {
+        this._hookScope?.activateSkill(skillMatch.name, skillMatch.pluginId)
         try {
           const resultPreview =
             result.length > 20_000
               ? `${result.slice(0, 20_000)}\n...[truncated ${result.length - 20_000} chars]`
               : result
-          const postResult = await runHooksEnriched(this.getHooks(), "PostSkillUse", {
+          const postContext: HookContext = {
             toolName: "read_file",
             toolArgs: { filePath, offset, limit },
             toolResult: JSON.stringify({
@@ -1362,8 +1381,11 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
             skillName: skillMatch.name,
             skillPath: skillMatch.path,
             skillRoot: skillMatch.rootDir,
+            pluginId: skillMatch.pluginId,
+            pluginName: skillMatch.pluginName,
             skillTriggerToolName: "read_file"
-          }, this._onHookResult)
+          }
+          const postResult = await this.runHooks("PostSkillUse", postContext)
           skillHookNotes.push(
             ...[
               postResult?.stdout,
@@ -1546,12 +1568,12 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       }
     }
     // PreToolUse hook
-    const preResult = await runHooksEnriched(this.getHooks(), "PreToolUse", {
+    const preResult = await this.runHooks("PreToolUse", {
       toolName: "write_file",
       toolArgs: { filePath, content },
       workspacePath: this.workingDir,
       sessionId: this.runId
-    }, this._onHookResult)
+    })
     if (preResult?.blocked) {
       return { error: `[Hook blocked] ${preResult.stdout || "write_file was blocked by a hook"}` }
     }
@@ -1566,13 +1588,13 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     if (!result.error) this._onFileMutation?.(filePath, "write")
     // PostToolUse hook
     try {
-      const postResult = await runHooksEnriched(this.getHooks(), "PostToolUse", {
+      const postResult = await this.runHooks("PostToolUse", {
         toolName: "write_file",
         toolArgs: { filePath, content },
         toolResult: JSON.stringify(result),
         workspacePath: this.workingDir,
         sessionId: this.runId
-      }, this._onHookResult)
+      })
       return LocalSandbox.applyPostHookContext(result, postResult, "write_file")
     } catch (e) {
       console.warn("[Hooks] PostToolUse write error:", e)
@@ -1650,12 +1672,12 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       }
     }
     // PreToolUse hook
-    const preResult = await runHooksEnriched(this.getHooks(), "PreToolUse", {
+    const preResult = await this.runHooks("PreToolUse", {
       toolName: "edit_file",
       toolArgs: { filePath, oldString, newString, replaceAll },
       workspacePath: this.workingDir,
       sessionId: this.runId
-    }, this._onHookResult)
+    })
     if (preResult?.blocked) {
       return { error: `[Hook blocked] ${preResult.stdout || "edit_file was blocked by a hook"}` }
     }
@@ -1689,13 +1711,13 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       this._onFileMutation?.(filePath, "edit")
       // PostToolUse hook
       try {
-        const postResult = await runHooksEnriched(this.getHooks(), "PostToolUse", {
+        const postResult = await this.runHooks("PostToolUse", {
           toolName: "edit_file",
           toolArgs: { filePath, oldString, newString, replaceAll },
           toolResult: JSON.stringify(result),
           workspacePath: this.workingDir,
           sessionId: this.runId
-        }, this._onHookResult)
+        })
         return LocalSandbox.applyPostHookContext(result, postResult, "edit_file")
       } catch (e) {
         console.warn("[Hooks] PostToolUse edit error:", e)
@@ -2428,12 +2450,12 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     }
 
     // PreToolUse hook
-    const preResult = await runHooksEnriched(this.getHooks(), "PreToolUse", {
+    const preResult = await this.runHooks("PreToolUse", {
       toolName: "execute",
       toolArgs: { command },
       workspacePath: this.workingDir,
       sessionId: this.runId
-    }, this._onHookResult)
+    })
     if (preResult?.blocked) {
       return {
         output: `[Hook blocked] ${preResult.stdout || "execute was blocked by a hook"}`,
@@ -2447,25 +2469,25 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     if (this.orchestrator) {
       const result = await this.orchestrator.execute(command, this.workingDir, this.windowsSandbox)
       // PostToolUse hook
-      const postResult = await runHooksEnriched(this.getHooks(), "PostToolUse", {
+      const postResult = await this.runHooks("PostToolUse", {
         toolName: "execute",
         toolArgs: { command },
         toolResult: result.output,
         workspacePath: this.workingDir,
         sessionId: this.runId
-      }, this._onHookResult)
+      })
       return LocalSandbox.applyPostHookToExecResult(result, postResult)
     }
 
     const result = await this.executeRaw(command)
     // PostToolUse hook
-    const postResult = await runHooksEnriched(this.getHooks(), "PostToolUse", {
+    const postResult = await this.runHooks("PostToolUse", {
       toolName: "execute",
       toolArgs: { command },
       toolResult: result.output,
       workspacePath: this.workingDir,
       sessionId: this.runId
-    }, this._onHookResult)
+    })
     return LocalSandbox.applyPostHookToExecResult(result, postResult)
   }
 

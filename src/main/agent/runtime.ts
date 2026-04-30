@@ -17,7 +17,8 @@ import {
   isMemoryEnabled,
   getSkillEvolutionThreshold as getStoredSkillEvolutionThreshold,
   DEFAULT_MAX_TOKENS,
-  getEnabledPluginSkillsSources
+  getEnabledPluginSkillSourceMetadata,
+  getPlugins
 } from "../storage"
 
 import { ChatOpenAI } from "@langchain/openai"
@@ -71,6 +72,15 @@ import { createCodeExecTool } from "./tools/code-exec-tool"
 import { listSavedCodeExecTools } from "../code-exec/saved-tool-store"
 import { getWindowsSandboxMode, getYoloMode, getEnabledHooks, isCodeExecEnabled, getLspConfig } from "../storage"
 import { runHooks } from "../hooks/runner"
+import type { HookContext } from "../hooks/runner"
+import type { HookEvent, HookResult } from "../hooks/types"
+import { runHooksEnriched } from "../hooks/required-skill"
+import {
+  createHookScope,
+  extractPluginIdFromProviderKey,
+  resolveEnabledHooksForRun,
+  type HookScopeController
+} from "../hooks/scope"
 import { ApprovalStore } from "./approval-store"
 import { ToolOrchestrator } from "./tool-orchestrator"
 import type { ApprovalRequest, ApprovalDecision } from "../types"
@@ -182,6 +192,102 @@ function createEagerMcpTools(
   tools: McpCapabilityTool[]
 ): DynamicStructuredTool[] {
   return tools.map((tool) => createEagerMcpTool(capabilityService, tool))
+}
+
+function createScopedMcpCapabilityService(
+  service: McpCapabilityService,
+  hookScope: HookScopeController,
+  resolveHooksForContext: (
+    event: HookEvent,
+    context: HookContext
+  ) => ReturnType<typeof resolveEnabledHooksForRun>,
+  onHookResult: HookResultCallback | undefined,
+  baseContext: { workspacePath: string; threadId: string }
+): McpCapabilityService {
+  const getPluginName = (pluginId: string): string | undefined => {
+    try {
+      return getPlugins().find((plugin) => plugin.id === pluginId)?.name
+    } catch {
+      return undefined
+    }
+  }
+
+  const formatPostHookFeedback = (postResult: HookResult | null): string | null => {
+    if (!postResult) return null
+    const parts = [
+      postResult.stdout ? `[Hook output]\n${postResult.stdout}` : undefined,
+      postResult.additionalContext ? `[Hook context]\n${postResult.additionalContext}` : undefined,
+      postResult.systemMessage ? `[Hook notice]\n${postResult.systemMessage}` : undefined,
+      postResult.decision === "block" && postResult.reason
+        ? `[Hook requested review] ${postResult.reason}`
+        : undefined,
+      postResult.continue === false
+        ? `[Hook stopped turn] ${postResult.stopReason || postResult.reason || "PostToolUse hook stopped the turn"}`
+        : undefined
+    ].filter((item): item is string => Boolean(item))
+    return parts.length > 0 ? parts.join("\n\n") : null
+  }
+
+  return {
+    listTools: () => service.listTools(),
+    getTool: (idOrAlias) => service.getTool(idOrAlias),
+    invoke: async (idOrAlias, args) => {
+      const tool = await service.getTool(idOrAlias)
+      const pluginId = extractPluginIdFromProviderKey(tool?.providerKey)
+      if (!pluginId || !tool) return service.invoke(idOrAlias, args)
+
+      const hookContext: HookContext = {
+        toolName: tool.toolId,
+        toolArgs: args,
+        workspacePath: baseContext.workspacePath,
+        sessionId: baseContext.threadId,
+        pluginId,
+        pluginName: getPluginName(pluginId)
+      }
+      const preResult = await runHooksEnriched(
+        resolveHooksForContext("PreToolUse", hookContext),
+        "PreToolUse",
+        hookContext,
+        onHookResult
+      )
+      if (preResult?.blocked || preResult?.continue === false || preResult?.decision === "block") {
+        throw new Error(
+          preResult.reason
+            || preResult.stopReason
+            || preResult.stdout
+            || preResult.stderr
+            || `MCP tool ${tool.toolId} was blocked by a hook`
+        )
+      }
+
+      hookScope.activatePlugin(pluginId)
+      const result = await service.invoke(idOrAlias, args)
+      const postContext: HookContext = {
+        ...hookContext,
+        toolResult: result.text
+      }
+      const postResult = await runHooksEnriched(
+        resolveHooksForContext("PostToolUse", postContext),
+        "PostToolUse",
+        postContext,
+        onHookResult
+      )
+      const hookFeedback = formatPostHookFeedback(postResult)
+      const isError =
+        result.isError || postResult?.decision === "block" || postResult?.continue === false
+      return {
+        ...result,
+        isError,
+        text: hookFeedback ? `${result.text}\n\n${hookFeedback}` : result.text,
+        contentBlocks:
+          hookFeedback && result.contentBlocks
+            ? [...result.contentBlocks, { type: "text", text: hookFeedback }]
+            : result.contentBlocks
+      }
+    },
+    invalidate: (reason) => service.invalidate(reason),
+    close: () => service.close()
+  }
 }
 
 const SEQUENTIAL_TASK_PROMPT = `## \`task\` (subagent spawner)
@@ -1083,6 +1189,8 @@ export interface CreateAgentRuntimeOptions {
   maxRetryAttempts?: number
   /** Callback invoked after each hook executes — used to emit results to the renderer. */
   onHookResult?: HookResultCallback
+  /** Run-scoped plugin/skill activation state for hook resolution. */
+  hookScope?: HookScopeController
   /** Callback invoked after successful write/edit/upload filesystem operations. */
   onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
 }
@@ -1100,6 +1208,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     maxRetryAttempts,
     enableAgentsPrompt = true,
     onHookResult,
+    hookScope: providedHookScope,
     onFileMutation
   } = options
 
@@ -1116,6 +1225,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   console.log("[Runtime] Creating agent runtime...")
   console.log("[Runtime] Thread ID:", threadId)
   console.log("[Runtime] Workspace path:", workspacePath)
+  const hookScope = providedHookScope ?? createHookScope()
+  const resolveHooksForContext = (event: HookEvent, context: HookContext) =>
+    resolveEnabledHooksForRun(workspacePath, event, context, hookScope)
 
   const selectedModelId = modelId?.startsWith("custom:") ? modelId.slice("custom:".length) : undefined
 
@@ -1171,8 +1283,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const windowsSandbox = process.platform === "win32" ? getWindowsSandboxMode() : "none"
   console.log(`[Runtime] codex.exe: ${codexExePath}, exists: ${codexExists}, sandboxMode: ${windowsSandbox}`)
 
-  const enabledHooks = getEnabledHooks(workspacePath)
-  console.log(`[Runtime] Loaded ${enabledHooks.length} enabled hooks`)
+  const baseHooks = getEnabledHooks(workspacePath)
+  console.log(`[Runtime] Loaded ${baseHooks.length} base enabled hooks`)
 
   const backend = new LocalSandbox({
     rootDir: workspacePath,
@@ -1181,7 +1293,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     maxOutputBytes,
     windowsSandbox,
     codexExePath: codexExists ? codexExePath : undefined,
-    hooks: () => getEnabledHooks(workspacePath),
+    hookResolver: resolveHooksForContext,
+    hookScope,
     onHookResult,
     onFileMutation,
     abortSignal: options.abortSignal,
@@ -1220,12 +1333,18 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       console.log(`[Orchestrator] sending approval request on channel: approval:request:${threadId}, reqId=${req.id}, command=${req.command}`)
       // Fire Notification hook — agent is now waiting on user input.
       // Fire-and-forget so it doesn't delay the UI prompt.
-      runHooks(getEnabledHooks(workspacePath), "Notification", {
+      const notificationContext: HookContext = {
         toolName: req.tool_call?.name,
         toolArgs: { command: req.command, reason: req.reason, filePath: req.filePath },
         workspacePath,
         sessionId: threadId
-      }, onHookResult).catch((e) => console.warn("[Hooks] Notification hook error:", e))
+      }
+      runHooks(
+        resolveHooksForContext("Notification", notificationContext),
+        "Notification",
+        notificationContext,
+        onHookResult
+      ).catch((e) => console.warn("[Hooks] Notification hook error:", e))
       for (const win of BrowserWindow.getAllWindows()) {
         win.webContents.send(`approval:request:${threadId}`, req)
       }
@@ -1316,13 +1435,15 @@ The workspace root is: ${workspacePath}`
   console.log("[Runtime] Raw skills sources content:", JSON.stringify(skillsSources, null, 2))
 
   // Merge plugin skills sources
-  const pluginSkillsSources = getEnabledPluginSkillsSources()
+  const pluginSkillSourceMetadata = getEnabledPluginSkillSourceMetadata()
+  const pluginSkillsSources = pluginSkillSourceMetadata.map((source) => source.sourceDir)
   console.log("[Runtime] Plugin skills sources:", pluginSkillsSources)
   console.log("[Runtime] Plugin skills sources count:", pluginSkillsSources.length)
 
   const allSkillsSources = [...skillsSources, ...pluginSkillsSources]
+  const skillLifecycleSources = [...skillsSources, ...pluginSkillSourceMetadata]
   backend.setSkillLifecycleRegistry(
-    allSkillsSources.length > 0 ? new SkillLifecycleRegistry(allSkillsSources) : undefined
+    skillLifecycleSources.length > 0 ? new SkillLifecycleRegistry(skillLifecycleSources) : undefined
   )
   console.log("[Runtime] All skills sources combined:", allSkillsSources)
   console.log("[Runtime] All skills sources count:", allSkillsSources.length)
@@ -1344,7 +1465,13 @@ The workspace root is: ${workspacePath}`
     console.log("[Runtime] Memory disabled by user setting")
   }
 
-  const capabilityService = getGlobalMcpCapabilityService()
+  const capabilityService = createScopedMcpCapabilityService(
+    getGlobalMcpCapabilityService(),
+    hookScope,
+    resolveHooksForContext,
+    onHookResult,
+    { workspacePath, threadId }
+  )
   const codeExecEnabled = isCodeExecEnabled()
   const allMcpTools = await capabilityService.listTools()
   const codeExecRouteEnabled = codeExecEnabled && allMcpTools.length > 0

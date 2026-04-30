@@ -370,6 +370,12 @@ export function HooksPanel(): React.JSX.Element {
     void loadHooks()
   }, [loadHooks, pluginVersion])
 
+  useEffect(() => {
+    return window.api.hooks.onChanged(() => {
+      void loadHooks()
+    })
+  }, [loadHooks])
+
   const filteredHooks = useMemo(() => {
     const q = debouncedQuery.trim().toLowerCase()
     if (!q) return hooks
