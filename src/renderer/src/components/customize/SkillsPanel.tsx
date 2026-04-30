@@ -46,7 +46,10 @@ type FileTreeNode = {
   children: FileTreeNode[]
 }
 
-type SkillMarketInfo = Pick<MarketItem, "name" | "chinese_name" | "category" | "description">
+type SkillMarketInfo = Pick<
+  MarketItem,
+  "name" | "chinese_name" | "category" | "description" | "featured"
+>
 type SaveSkillFileResult = { success: boolean; error?: string }
 type PublishMode = "upload" | "update"
 type PublishSuccessPayload = { skillName: string; mode: PublishMode }
@@ -310,6 +313,37 @@ function getSkillCategory(skill: SkillMetadata, marketInfo: SkillMarketInfo | un
   if (marketCategory) return marketCategory
   const metadataCategory = skill.metadata?.category?.trim()
   return metadataCategory || ""
+}
+
+function isFeaturedSkill(marketInfo: SkillMarketInfo | undefined): boolean {
+  return marketInfo?.featured === "精品"
+}
+
+function splitMarkdownFrontmatter(
+  filePath: string | null,
+  content: string | null
+): { protectedPrefix: string; editableContent: string; hasFrontmatter: boolean } {
+  const isMarkdown = !!filePath && /\.md$/i.test(filePath)
+  if (!isMarkdown || typeof content !== "string") {
+    return { protectedPrefix: "", editableContent: content ?? "", hasFrontmatter: false }
+  }
+
+  const match = content.match(/^---\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/)
+  if (!match) return { protectedPrefix: "", editableContent: content, hasFrontmatter: false }
+
+  return {
+    protectedPrefix: match[0],
+    editableContent: content.slice(match[0].length),
+    hasFrontmatter: true
+  }
+}
+
+function mergeMarkdownFrontmatter(protectedPrefix: string, editableContent: string): string {
+  if (!protectedPrefix) return editableContent
+  if (!editableContent || protectedPrefix.endsWith("\n") || protectedPrefix.endsWith("\r\n")) {
+    return `${protectedPrefix}${editableContent}`
+  }
+  return `${protectedPrefix}\n${editableContent}`
 }
 
 function buildNestedNameConflictConfirmMessage(
@@ -1115,7 +1149,8 @@ export function SkillsPanel(): React.JSX.Element {
           name: item.name,
           chinese_name: item.chinese_name,
           category: item.category,
-          description: item.description
+          description: item.description,
+          featured: item.featured
         }
       }
       setMarketSkillMap(next)
@@ -1204,6 +1239,17 @@ export function SkillsPanel(): React.JSX.Element {
     return files
   }, [])
 
+  const shouldHideMarketInstalledFeaturedFiles = useCallback(
+    (skill: SkillMetadata): boolean => {
+      if (skill.source !== "user") return false
+      const localMarked = localUploadedSkillPaths.has(normalizeSkillPathKey(skill.path))
+      const uploadedByMe = uploadedSkillNames.has(normalizeSkillName(skill.name))
+      if (localMarked || uploadedByMe) return false
+      return isFeaturedSkill(marketSkillMap[normalizeSkillName(skill.name)])
+    },
+    [localUploadedSkillPaths, marketSkillMap, uploadedSkillNames]
+  )
+
   const onToggleSkill = useCallback(
     async (skill: SkillMetadata) => {
       const skillId = getSkillMetadataId(skill)
@@ -1213,6 +1259,14 @@ export function SkillsPanel(): React.JSX.Element {
       setExpandedSkills(next)
 
       if (!wasExpanded) {
+        if (shouldHideMarketInstalledFeaturedFiles(skill)) {
+          setSelectedSkill(skill)
+          setSelectedFilePath(null)
+          setSelectedFileContent(null)
+          setSelectedBinaryBase64(null)
+          setSelectedBinaryMimeType(null)
+          return
+        }
         const files = await ensureSkillFiles(skill)
         const firstFile = defaultSkillFile(files)
         if (firstFile) {
@@ -1224,14 +1278,22 @@ export function SkillsPanel(): React.JSX.Element {
         }
       }
     },
-    [ensureSkillFiles, loadFileContent]
+    [ensureSkillFiles, loadFileContent, shouldHideMarketInstalledFeaturedFiles]
   )
 
   const onSelectFile = useCallback(
     async (skill: SkillMetadata, filePath: string) => {
+      if (shouldHideMarketInstalledFeaturedFiles(skill)) {
+        setSelectedSkill(skill)
+        setSelectedFilePath(null)
+        setSelectedFileContent(null)
+        setSelectedBinaryBase64(null)
+        setSelectedBinaryMimeType(null)
+        return
+      }
       await loadFileContent(skill, filePath)
     },
-    [loadFileContent]
+    [loadFileContent, shouldHideMarketInstalledFeaturedFiles]
   )
 
   const toggleDirNode = useCallback((nodeId: string) => {
@@ -1331,12 +1393,21 @@ export function SkillsPanel(): React.JSX.Element {
     () => !!selectedSkillMarketInfo || selectedSkillUploadedByMe,
     [selectedSkillMarketInfo, selectedSkillUploadedByMe]
   )
+  const isMarketInstalledFeaturedSkill = useCallback(
+    (skill: SkillMetadata | null | undefined): boolean => {
+      if (!skill || skill.source !== "user") return false
+      if (isSkillUploadedInPanel(skill)) return false
+      return isFeaturedSkill(resolveMarketInfo(skill))
+    },
+    [isSkillUploadedInPanel, resolveMarketInfo]
+  )
+  const selectedSkillHideContent = useMemo(
+    () => isMarketInstalledFeaturedSkill(selectedSkill),
+    [isMarketInstalledFeaturedSkill, selectedSkill]
+  )
   const selectedSkillCanEdit = useMemo(
-    () =>
-      !!selectedSkill &&
-      // 规则 1：除内置技能外，其他技能都可编辑（含市场安装技能）。
-      selectedSkill.source !== "project",
-    [selectedSkill]
+    () => !!selectedSkill && selectedSkillUploadedInPanel,
+    [selectedSkill, selectedSkillUploadedInPanel]
   )
   const selectedSkillCanPublish = useMemo(
     () =>
@@ -1363,6 +1434,9 @@ export function SkillsPanel(): React.JSX.Element {
     async (filePath: string, nextContent: string): Promise<SaveSkillFileResult> => {
       if (!selectedSkill) return { success: false, error: "未选择技能" }
       if (selectedSkill.source === "project") return { success: false, error: "内置技能不支持编辑" }
+      if (!isSkillUploadedInPanel(selectedSkill)) {
+        return { success: false, error: "只有我上传的技能支持编辑" }
+      }
       if (!selectedFilePath || selectedFilePath !== filePath) {
         return { success: false, error: "当前文件已切换，请重试" }
       }
@@ -1400,7 +1474,7 @@ export function SkillsPanel(): React.JSX.Element {
 
       return { success: true }
     },
-    [selectedFilePath, selectedSkill]
+    [isSkillUploadedInPanel, selectedFilePath, selectedSkill]
   )
 
   const filterSkillsBySearch = useCallback(
@@ -1580,6 +1654,8 @@ export function SkillsPanel(): React.JSX.Element {
                 onToggleSkill={onToggleSkill}
                 onToggleDirNode={toggleDirNode}
                 onSelectFile={onSelectFile}
+                hideFeaturedMarketFiles
+                hideMarketTag
               />
             )}
           </div>
@@ -1615,6 +1691,7 @@ export function SkillsPanel(): React.JSX.Element {
         }
         publishLabel={selectedSkillPublishLabel}
         canEdit={selectedSkillCanEdit}
+        hideContentPreview={selectedSkillHideContent}
         onSaveContent={saveSkillFileContent}
         isEdited={selectedSkillIsEdited}
         hasMarketEntry={selectedSkillHasMarketEntry}
@@ -1685,6 +1762,8 @@ function SkillSection(props: {
   selectedSkill: SkillMetadata | null
   expandedDirNodes: Set<string>
   disabledSkills: Set<string>
+  hideFeaturedMarketFiles?: boolean
+  hideMarketTag?: boolean
   onToggleSkill: (skill: SkillMetadata) => void
   onToggleDirNode: (nodeId: string) => void
   onSelectFile: (skill: SkillMetadata, filePath: string) => void
@@ -1700,6 +1779,8 @@ function SkillSection(props: {
     selectedSkill,
     expandedDirNodes,
     disabledSkills,
+    hideFeaturedMarketFiles = false,
+    hideMarketTag = false,
     onToggleSkill,
     onToggleDirNode,
     onSelectFile
@@ -1790,6 +1871,7 @@ function SkillSection(props: {
               const hasMarketEntry =
                 !!marketInfo || uploadedSkillNames.has(normalizeSkillName(skill.name))
               const isEdited = editedSkillPaths.has(normalizeSkillPathKey(skill.path))
+              const hideFileTree = hideFeaturedMarketFiles && isFeaturedSkill(marketInfo)
 
               return (
                 <SkillItem
@@ -1797,10 +1879,12 @@ function SkillSection(props: {
                   skill={skill}
                   marketInfo={marketInfo}
                   hasMarketEntry={hasMarketEntry}
+                  hideMarketTag={hideMarketTag}
                   isEdited={isEdited}
                   expanded={expanded}
                   selected={selected}
                   disabled={disabled}
+                  hideFileTree={hideFileTree}
                   files={files}
                   expandedDirNodes={expandedDirNodes}
                   onToggleSkill={onToggleSkill}
@@ -1820,10 +1904,12 @@ function SkillItem(props: {
   skill: SkillMetadata
   marketInfo?: SkillMarketInfo
   hasMarketEntry: boolean
+  hideMarketTag?: boolean
   isEdited: boolean
   expanded: boolean
   selected: boolean
   disabled: boolean
+  hideFileTree?: boolean
   files: string[]
   expandedDirNodes: Set<string>
   onToggleSkill: (skill: SkillMetadata) => void
@@ -1834,10 +1920,12 @@ function SkillItem(props: {
     skill,
     marketInfo,
     hasMarketEntry,
+    hideMarketTag = false,
     isEdited,
     expanded,
     selected,
     disabled,
+    hideFileTree = false,
     files,
     expandedDirNodes,
     onToggleSkill,
@@ -1846,9 +1934,10 @@ function SkillItem(props: {
   } = props
 
   const treeNodes = useMemo(
-    () => (expanded && files.length > 0 ? buildFileTree(skill.path, files) : []),
-    [expanded, files, skill.path]
+    () => (expanded && !hideFileTree && files.length > 0 ? buildFileTree(skill.path, files) : []),
+    [expanded, files, hideFileTree, skill.path]
   )
+  const isFeatured = isFeaturedSkill(marketInfo)
   const chineseName = getSkillChineseName(skill, marketInfo)
   const displayName = chineseName || skill.name
 
@@ -1884,7 +1973,16 @@ function SkillItem(props: {
           </p>
         </div>
         <span>
-          {hasMarketEntry && (
+          {isFeatured && (
+            <Badge
+              variant="outline"
+              className="h-4 gap-1 px-1.5 text-[10px] border-amber-200 text-amber-800 bg-amber-50"
+            >
+              <Sparkles className="size-2.5 shrink-0" />
+              精品
+            </Badge>
+          )}
+          {hasMarketEntry && !hideMarketTag && (
             <Badge
               variant="outline"
               className="h-4 gap-1 px-1.5 text-[10px] border-emerald-200 text-emerald-700 bg-emerald-50"
@@ -1910,7 +2008,11 @@ function SkillItem(props: {
             selected ? "border-primary/30 bg-primary/[0.03]" : "border-border/60 bg-muted/20"
           )}
         >
-          {treeNodes.length > 0 ? (
+          {hideFileTree ? (
+            <div className="pl-7 pr-2 py-2 text-xs text-muted-foreground">
+              精品技能不支持查看，可以直接使用。
+            </div>
+          ) : treeNodes.length > 0 ? (
             <SkillFileTree
               nodes={treeNodes}
               level={0}
@@ -2010,6 +2112,7 @@ export function SkillDetail(props: {
   onSaveContent?: (filePath: string, content: string) => Promise<SaveSkillFileResult>
   isEdited?: boolean
   hasMarketEntry?: boolean
+  hideContentPreview?: boolean
   hideActions?: boolean
 }): React.JSX.Element {
   const {
@@ -2029,6 +2132,7 @@ export function SkillDetail(props: {
     onSaveContent,
     isEdited = false,
     hasMarketEntry = false,
+    hideContentPreview = false,
     hideActions = false
   } = props
   const [isEditing, setIsEditing] = useState(false)
@@ -2037,38 +2141,47 @@ export function SkillDetail(props: {
   const [saveError, setSaveError] = useState<string | null>(null)
   const selectedFileExt = selectedFilePath?.split(".").pop()?.toLowerCase() ?? ""
   const isEditableTextFile = !!selectedFilePath && KNOWN_TEXT_EXTS.has(selectedFileExt)
+  const markdownFrontmatter = useMemo(
+    () => splitMarkdownFrontmatter(selectedFilePath, content),
+    [content, selectedFilePath]
+  )
   const canEditCurrentFile =
     canEdit &&
+    !hideContentPreview &&
     isEditableTextFile &&
     typeof content === "string" &&
     (previewKind === "text" || previewKind === "html")
 
   useEffect(() => {
     setIsEditing(false)
-    setDraftContent(content ?? "")
+    setDraftContent(markdownFrontmatter.editableContent)
     setIsSaving(false)
     setSaveError(null)
-  }, [selectedFilePath, content, canEditCurrentFile])
+  }, [selectedFilePath, content, canEditCurrentFile, markdownFrontmatter.editableContent])
 
   const handleStartEdit = useCallback(() => {
     if (!canEditCurrentFile) return
-    setDraftContent(content ?? "")
+    setDraftContent(markdownFrontmatter.editableContent)
     setSaveError(null)
     setIsEditing(true)
-  }, [canEditCurrentFile, content])
+  }, [canEditCurrentFile, markdownFrontmatter.editableContent])
 
   const handleCancelEdit = useCallback(() => {
-    setDraftContent(content ?? "")
+    setDraftContent(markdownFrontmatter.editableContent)
     setSaveError(null)
     setIsEditing(false)
-  }, [content])
+  }, [markdownFrontmatter.editableContent])
 
   const handleSaveEdit = useCallback(async () => {
     if (!canEditCurrentFile || !selectedFilePath || !onSaveContent || isSaving) return
     setSaveError(null)
     setIsSaving(true)
     try {
-      const result = await onSaveContent(selectedFilePath, draftContent)
+      const nextContent = mergeMarkdownFrontmatter(
+        markdownFrontmatter.protectedPrefix,
+        draftContent
+      )
+      const result = await onSaveContent(selectedFilePath, nextContent)
       if (result.success) {
         setIsEditing(false)
       } else {
@@ -2079,7 +2192,14 @@ export function SkillDetail(props: {
     } finally {
       setIsSaving(false)
     }
-  }, [canEditCurrentFile, draftContent, isSaving, onSaveContent, selectedFilePath])
+  }, [
+    canEditCurrentFile,
+    draftContent,
+    isSaving,
+    markdownFrontmatter.protectedPrefix,
+    onSaveContent,
+    selectedFilePath
+  ])
 
   if (!skill) {
     return <SkillsGuide />
@@ -2088,17 +2208,16 @@ export function SkillDetail(props: {
   const chineseName = getSkillChineseName(skill, marketInfo)
   const category = getSkillCategory(skill, marketInfo)
   const description = marketInfo?.description || skill.description || "暂无描述"
+  const isFeatured = isFeaturedSkill(marketInfo)
   const isMarkdown = !!selectedFilePath && /\.md$/i.test(selectedFilePath)
-  const hasFrontmatter = isMarkdown && !!content && content.startsWith("---")
-  const frontmatterEnd = hasFrontmatter ? content.indexOf("---", 3) : -1
   const previewContent =
-    hasFrontmatter && frontmatterEnd > 0
-      ? content.slice(content.indexOf("\n", frontmatterEnd) + 1).trim()
+    isMarkdown && markdownFrontmatter.hasFrontmatter
+      ? markdownFrontmatter.editableContent.trim()
       : content
   const binaryDataUrl =
     binaryBase64 && binaryMimeType ? `data:${binaryMimeType};base64,${binaryBase64}` : null
   const isLoading = !!selectedFilePath && content === null && binaryBase64 === null
-  const isDirty = isEditing && draftContent !== (content ?? "")
+  const isDirty = isEditing && draftContent !== markdownFrontmatter.editableContent
   /**
    * 让“发布/更新到市场”按钮更亮眼：
    * - 发布：橙金渐变；
@@ -2143,6 +2262,15 @@ export function SkillDetail(props: {
           </div>
           <div className="mt-1 flex items-center gap-1.5 flex-wrap">
             {chineseName && <p className="text-xs text-muted-foreground truncate">{skill.name}</p>}
+            {isFeatured && (
+              <Badge
+                variant="outline"
+                className="h-5 gap-1 px-2 text-[10px] border-amber-200 text-amber-800 bg-amber-50"
+              >
+                <Sparkles className="size-3 shrink-0" />
+                精品
+              </Badge>
+            )}
             {hasMarketEntry && (
               <Badge
                 variant="outline"
@@ -2225,7 +2353,13 @@ export function SkillDetail(props: {
         </p>
       </div>
 
-      {isEditing && canEditCurrentFile ? (
+      {hideContentPreview ? (
+        <div className="flex-1 min-h-0 p-4">
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+            精品技能不支持查看，可以直接使用。
+          </div>
+        </div>
+      ) : isEditing && canEditCurrentFile ? (
         <div className="flex-1 min-h-0 p-4 flex flex-col gap-2">
           <SkillFileEditor
             className="flex-1 min-h-0"
@@ -2233,6 +2367,11 @@ export function SkillDetail(props: {
             onChange={setDraftContent}
             onSave={() => void handleSaveEdit()}
             error={saveError}
+            note={
+              markdownFrontmatter.hasFrontmatter
+                ? "Markdown 顶部元信息受保护，此处只编辑正文内容。"
+                : null
+            }
             disabled={isSaving}
           />
         </div>

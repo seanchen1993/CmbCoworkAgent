@@ -55,7 +55,7 @@ import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
 import type { Message, SkillMetadata } from "@/types"
 import { MessageBubble } from "./MessageBubble"
-import { ChatScrollNavigator } from "./ChatScrollNavigator"
+import { ChatScrollNavigator, type ChatScrollQuestion } from "./ChatScrollNavigator"
 import { UpdateStatusCard } from "./UpdateStatusCard"
 import { SkillsByCategorySection } from "./SkillsByCategorySection"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
@@ -243,6 +243,31 @@ const ROTATING_WORDS = [
   "部署上线"
 ]
 
+const getMessageText = (content: Message["content"]): string => {
+  if (typeof content === "string") return content
+  if (!Array.isArray(content)) return ""
+
+  return content
+    .map((block) => {
+      if (block.type === "text") return block.text ?? ""
+      if (typeof block.content === "string") return block.content
+      return ""
+    })
+    .filter(Boolean)
+    .join("\n")
+}
+
+const getQuestionPreview = (content: Message["content"]): string => {
+  const text = getMessageText(content)
+    .replace(/<attachment\s+filename="([^"]*)"[^>]*>[\s\S]*?<\/attachment>/g, "📎 $1")
+    .replace(/<CMBDEVCLAW-SKILL-USE-V1>[\s\S]*?<\/CMBDEVCLAW-SKILL-USE-V1>/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+
+  if (!text) return "（空提问）"
+  return text.length > 120 ? `${text.slice(0, 120)}...` : text
+}
+
 function RotatingHeadline() {
   const [wordIndex, setWordIndex] = useState(0)
   const [displayed, setDisplayed] = useState("")
@@ -256,7 +281,7 @@ function RotatingHeadline() {
       if (displayed.length < word.length) {
         timer = setTimeout(() => setDisplayed(word.slice(0, displayed.length + 1)), 150)
       } else {
-        setPhase("showing")
+        timer = setTimeout(() => setPhase("showing"), 0)
       }
     } else if (phase === "showing") {
       timer = setTimeout(() => setPhase("erasing"), 2000)
@@ -264,8 +289,10 @@ function RotatingHeadline() {
       if (displayed.length > 0) {
         timer = setTimeout(() => setDisplayed(displayed.slice(0, -1)), 80)
       } else {
-        setWordIndex((i) => (i + 1) % ROTATING_WORDS.length)
-        setPhase("typing")
+        timer = setTimeout(() => {
+          setWordIndex((i) => (i + 1) % ROTATING_WORDS.length)
+          setPhase("typing")
+        }, 0)
       }
     }
 
@@ -295,12 +322,15 @@ export function ChatContainer({
   const scrollRef = useRef<HTMLDivElement>(null)
   const userMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const isAtBottomRef = useRef(true)
+  const requestedUserQuestionIndexRef = useRef<number | null>(null)
+  const requestedUserQuestionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const isComposingRef = useRef(false)
   const [skills, setSkills] = useState<SkillMetadata[]>([])
   const [skillsLoading, setSkillsLoading] = useState(true)
   const [showAllProgrammingSkills, setShowAllProgrammingSkills] = useState(false)
   const [showAllCustomSkills, setShowAllCustomSkills] = useState(false)
   const [thinkingMessageIndex, setThinkingMessageIndex] = useState(0)
+  const [activeUserQuestionIndex, setActiveUserQuestionIndex] = useState(-1)
   // Skill creation human-confirmation state
   const [skillConfirmRequest, setSkillConfirmRequest] = useState<SkillConfirmRequest | null>(null)
   // Skill intent banner state ("Want to save as a skill?")
@@ -1070,6 +1100,17 @@ export function ChatContainer({
     [displayMessages]
   )
 
+  const userQuestions = useMemo<ChatScrollQuestion[]>(
+    () =>
+      displayMessages
+        .filter((message) => message.role === "user")
+        .map((message) => ({
+          id: message.id,
+          preview: getQuestionPreview(message.content)
+        })),
+    [displayMessages]
+  )
+
   const setUserMessageRef = useCallback(
     (messageId: string) =>
       (node: HTMLDivElement | null): void => {
@@ -1112,35 +1153,28 @@ export function ChatContainer({
     []
   )
 
-  const scrollToTop = useCallback((): void => {
-    const viewport = getViewport()
-    if (!viewport) return
-    viewport.scrollTo({ top: 0, behavior: "smooth" })
-    isAtBottomRef.current = false
-  }, [getViewport])
-
-  const scrollToBottom = useCallback((): void => {
-    const viewport = getViewport()
-    if (!viewport) return
-    viewport.scrollTo({ top: viewport.scrollHeight, behavior: "smooth" })
-    isAtBottomRef.current = true
-  }, [getViewport])
-
   const scrollToUserQuestionByIndex = useCallback(
-    (index: number): boolean => {
-      if (index < 0 || index >= userMessageIds.length) return false
+    (index: number): void => {
+      if (index < 0 || index >= userMessageIds.length) return
 
       const viewport = getViewport()
-      if (!viewport) return false
+      if (!viewport) return
 
       const messageId = userMessageIds[index]
       const targetElement = userMessageRefs.current.get(messageId)
-      if (!targetElement) return false
+      if (!targetElement) return
 
       const targetTop = Math.max(0, getElementTopInViewport(targetElement, viewport) - 8)
+      requestedUserQuestionIndexRef.current = index
+      if (requestedUserQuestionTimerRef.current) {
+        clearTimeout(requestedUserQuestionTimerRef.current)
+      }
+      requestedUserQuestionTimerRef.current = setTimeout(() => {
+        requestedUserQuestionIndexRef.current = null
+      }, 700)
       viewport.scrollTo({ top: targetTop, behavior: "smooth" })
       isAtBottomRef.current = false
-      return true
+      setActiveUserQuestionIndex(index)
     },
     [getElementTopInViewport, getViewport, userMessageIds]
   )
@@ -1149,7 +1183,10 @@ export function ChatContainer({
     const viewport = getViewport()
     if (!viewport || userMessageIds.length === 0) return -1
 
-    const viewportAnchor = viewport.scrollTop + 24
+    const { scrollTop, scrollHeight, clientHeight } = viewport
+    const nearBottom = scrollHeight - scrollTop - clientHeight < 80
+    const viewportAnchor = scrollTop + 24
+    const viewportBottomAnchor = scrollTop + clientHeight - 80
     let currentIndex = -1
 
     for (let i = 0; i < userMessageIds.length; i += 1) {
@@ -1165,53 +1202,19 @@ export function ChatContainer({
       }
     }
 
+    if (nearBottom) {
+      for (let i = userMessageIds.length - 1; i >= 0; i -= 1) {
+        const messageId = userMessageIds[i]
+        const targetElement = userMessageRefs.current.get(messageId)
+        if (!targetElement) continue
+
+        const top = getElementTopInViewport(targetElement, viewport)
+        if (top <= viewportBottomAnchor) return i
+      }
+    }
+
     return currentIndex
   }, [getElementTopInViewport, getViewport, userMessageIds])
-
-  const handleScrollToPrevUserQuestion = useCallback((): void => {
-    if (displayMessages.length === 0) return
-    if (userMessageIds.length === 0) {
-      scrollToTop()
-      return
-    }
-
-    const currentIndex = getCurrentUserQuestionIndex()
-    const targetIndex = currentIndex > 0 ? currentIndex - 1 : -1
-    if (targetIndex >= 0 && scrollToUserQuestionByIndex(targetIndex)) return
-
-    scrollToTop()
-  }, [
-    displayMessages.length,
-    getCurrentUserQuestionIndex,
-    scrollToTop,
-    scrollToUserQuestionByIndex,
-    userMessageIds.length
-  ])
-
-  const handleScrollToNextUserQuestion = useCallback((): void => {
-    if (displayMessages.length === 0) return
-    if (userMessageIds.length === 0) {
-      scrollToBottom()
-      return
-    }
-
-    const currentIndex = getCurrentUserQuestionIndex()
-    const targetIndex = currentIndex + 1
-    if (
-      targetIndex >= 0 &&
-      targetIndex < userMessageIds.length &&
-      scrollToUserQuestionByIndex(targetIndex)
-    )
-      return
-
-    scrollToBottom()
-  }, [
-    displayMessages.length,
-    getCurrentUserQuestionIndex,
-    scrollToBottom,
-    scrollToUserQuestionByIndex,
-    userMessageIds.length
-  ])
 
   // Track scroll position to determine if user is at bottom
   const handleScroll = useCallback((): void => {
@@ -1222,7 +1225,12 @@ export function ChatContainer({
     // Consider "at bottom" if within 50px of the bottom
     const threshold = 50
     isAtBottomRef.current = scrollHeight - scrollTop - clientHeight < threshold
-  }, [getViewport])
+    if (requestedUserQuestionIndexRef.current !== null) {
+      setActiveUserQuestionIndex(requestedUserQuestionIndexRef.current)
+      return
+    }
+    setActiveUserQuestionIndex(getCurrentUserQuestionIndex())
+  }, [getCurrentUserQuestionIndex, getViewport])
 
   // Attach scroll listener to viewport
   useEffect(() => {
@@ -1232,6 +1240,21 @@ export function ChatContainer({
     viewport.addEventListener("scroll", handleScroll)
     return () => viewport.removeEventListener("scroll", handleScroll)
   }, [getViewport, handleScroll])
+
+  useEffect(() => {
+    return () => {
+      if (requestedUserQuestionTimerRef.current) {
+        clearTimeout(requestedUserQuestionTimerRef.current)
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      setActiveUserQuestionIndex(getCurrentUserQuestionIndex())
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [getCurrentUserQuestionIndex, userMessageIds.length])
 
   // Auto-scroll on new messages only if already at bottom
   useEffect(() => {
@@ -1986,17 +2009,7 @@ export function ChatContainer({
   }
 
   const extractMessageText = useCallback((content: Message["content"]): string => {
-    if (typeof content === "string") return content
-    if (!Array.isArray(content)) return ""
-
-    return content
-      .map((block) => {
-        if (block.type === "text") return block.text ?? ""
-        if (typeof block.content === "string") return block.content
-        return ""
-      })
-      .filter(Boolean)
-      .join("\n")
+    return getMessageText(content)
   }, [])
 
   const handleEditUserMessage = useCallback(
@@ -2028,9 +2041,7 @@ export function ChatContainer({
           missingSkillName = skillParsed.skillName
         }
       }
-      const withoutAttachmentPreview = bodyAfterSkill
-        .replace(/^(?:📎[^\n]*\n)+(?:\n)?/u, "")
-        .trim()
+      const withoutAttachmentPreview = bodyAfterSkill.replace(/^(?:📎[^\n]*\n)+(?:\n)?/u, "").trim()
       // For attachment-only messages (no real text), `withoutAttachmentPreview`
       // is empty. Fallback to "" rather than `bodyAfterSkill` — refilling the
       // 📎 line previews into the composer would have them re-sent as literal
@@ -2177,7 +2188,7 @@ export function ChatContainer({
   )
 
   return (
-    <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
+    <div className="relative flex flex-1 flex-col min-h-0 overflow-hidden">
       {/* Skill creation confirmation dialog */}
       <SkillCreateConfirmDialog
         request={skillConfirmRequest}
@@ -2480,12 +2491,11 @@ export function ChatContainer({
           </div>
         </div>
       </ScrollArea>
-      {displayMessages.length > 0 && (
+      {userQuestions.length > 0 && (
         <ChatScrollNavigator
-          onScrollToTop={scrollToTop}
-          onScrollToPrevUserQuestion={handleScrollToPrevUserQuestion}
-          onScrollToNextUserQuestion={handleScrollToNextUserQuestion}
-          onScrollToBottom={scrollToBottom}
+          questions={userQuestions}
+          activeQuestionIndex={activeUserQuestionIndex}
+          onScrollToQuestion={scrollToUserQuestionByIndex}
         />
       )}
       {/* Orchestrator approval bar — placed outside ScrollArea so it's always visible */}
@@ -2778,10 +2788,7 @@ export function ChatContainer({
                 {/* Selected-skill chip sits above attachments and the textarea */}
                 {selectedSkill && (
                   <div className="flex items-center gap-1.5 px-3 pt-2.5">
-                    <SkillChip
-                      label={selectedSkill.name}
-                      onRemove={() => setSelectedSkill(null)}
-                    />
+                    <SkillChip label={selectedSkill.name} onRemove={() => setSelectedSkill(null)} />
                   </div>
                 )}
                 {glowVisible && (
