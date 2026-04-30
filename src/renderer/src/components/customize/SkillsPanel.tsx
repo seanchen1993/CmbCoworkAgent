@@ -312,6 +312,19 @@ function getSkillCategory(skill: SkillMetadata, marketInfo: SkillMarketInfo | un
   return metadataCategory || ""
 }
 
+function buildNestedNameConflictConfirmMessage(
+  conflicts: Array<{ name: string; relativePath: string }>
+): string {
+  const preview =
+    conflicts.length <= 5
+      ? conflicts.map((item) => `${item.name}（${item.relativePath}）`).join("、")
+      : `${conflicts
+          .slice(0, 5)
+          .map((item) => `${item.name}（${item.relativePath}）`)
+          .join("、")} 等`
+  return `导入会引入 ${conflicts.length} 个与现有 skill 同名的子技能：${preview}，是否继续？\n\n继续后面板中可能出现同名技能，可通过目录层级区分。`
+}
+
 function UploadSkillDialog(props: {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -337,7 +350,19 @@ function UploadSkillDialog(props: {
       setUploading(true)
       try {
         const buffer = await file.arrayBuffer()
-        const res = await window.api.skills.upload(buffer, file.name)
+        let res = await window.api.skills.upload(buffer, file.name)
+        if (!res.success && res.nestedNameConflicts?.length) {
+          const shouldContinue = window.confirm(
+            buildNestedNameConflictConfirmMessage(res.nestedNameConflicts)
+          )
+          if (!shouldContinue) {
+            setError("已取消导入")
+            return
+          }
+          res = await window.api.skills.upload(buffer, file.name, {
+            allowNestedNameDuplicates: true
+          })
+        }
         if (res.success) {
           onSuccess(res.skillName)
           onOpenChange(false)
@@ -385,7 +410,7 @@ function UploadSkillDialog(props: {
         <DialogHeader>
           <DialogTitle>上传技能</DialogTitle>
           <DialogDescription>
-            .md 文件需包含 YAML frontmatter 中的 name 字段；.zip 文件需包含 SKILL.md
+            .md 文件需包含 YAML frontmatter 中的 name 字段；.zip 文件需包含 SKILL.md，可包含嵌套子技能
           </DialogDescription>
         </DialogHeader>
         <div
@@ -468,7 +493,8 @@ function PublishSkillDialog(props: {
     setError(null)
     setUploading(true)
     try {
-      const exported = await window.api.skills.exportForMarket(skill.path)
+      const includeNestedSkills = await resolveNestedSkillExportChoice(skill)
+      const exported = await window.api.skills.exportForMarket(skill.path, { includeNestedSkills })
       if (!exported.success || !exported.buffer) {
         setError(exported.error || "导出技能失败")
         return
@@ -532,7 +558,7 @@ function PublishSkillDialog(props: {
         <DialogHeader>
           <DialogTitle>{mode === "update" ? "更新市场技能" : "发布到公共市场"}</DialogTitle>
           <DialogDescription>
-            会自动打包当前技能目录为 zip 并提交到 Market。名称将使用技能英文名且不可修改。
+            会自动打包当前技能目录为 zip 并提交到 Market。若包含嵌套子技能，发布前会询问是否一并上传。
           </DialogDescription>
         </DialogHeader>
 
@@ -640,6 +666,35 @@ function getRelativeFileName(skillPath: string, filePath: string): string {
   return normalizedFile
 }
 
+function getNestedChildSkillRoots(skillPath: string, files: string[]): string[] {
+  const roots = new Set<string>()
+  for (const filePath of files) {
+    const relative = getRelativeFileName(skillPath, filePath).replace(/\\/g, "/")
+    if (!/(^|\/)SKILL\.md$/i.test(relative)) continue
+    if (relative.toUpperCase() === "SKILL.MD") continue
+    const root = relative.replace(/\/SKILL\.md$/i, "")
+    if (root) roots.add(root)
+  }
+  return [...roots].sort((a, b) => a.localeCompare(b))
+}
+
+async function resolveNestedSkillExportChoice(skill: SkillMetadata): Promise<boolean> {
+  const res = await window.api.skills.listFiles(skill.path)
+  if (!res.success) {
+    throw new Error(res.error || "检测子技能失败")
+  }
+  const nestedSkillRoots = getNestedChildSkillRoots(skill.path, res.files || [])
+  if (nestedSkillRoots.length === 0) return true
+
+  const preview =
+    nestedSkillRoots.length <= 5
+      ? nestedSkillRoots.join("、")
+      : `${nestedSkillRoots.slice(0, 5).join("、")} 等`
+  return window.confirm(
+    `这个 skill 下包含 ${nestedSkillRoots.length} 个子技能（${preview}），是否一并上传？\n\n点击“确定”一并上传，点击“取消”仅上传当前 skill。`
+  )
+}
+
 function createDirNode(id: string, name: string, path: string): FileTreeNode {
   return { id, name, path, isDir: true, children: [] }
 }
@@ -725,6 +780,15 @@ const SKILL_HOOK_TREE_EXAMPLE = `~/.cmbcoworkagent/skills/<skill-name>/
   hooks/
     pre-write-check.py`
 
+const SKILL_NESTED_TREE_EXAMPLE = `~/.cmbcoworkagent/skills/office/
+  SKILL.md
+  hooks.json
+  pdf/
+    SKILL.md
+    hooks.json
+  sheets/
+    SKILL.md`
+
 const SKILL_HOOK_JSON_EXAMPLE = `[
   {
     "event": "PreToolUse",
@@ -802,12 +866,12 @@ function SkillsGuide(): React.JSX.Element {
 
         <SkillGuideSection
           title="技能基础"
-          summary="技能目录结构、上传方式，以及启用 / 禁用的基本行为。"
+          summary="技能目录结构、嵌套子技能、上传方式，以及启用 / 禁用的基本行为。"
         >
           <div className="space-y-3">
             <SkillGuideSubSection
               title="技能目录长什么样"
-              summary="每个技能本质上是一个目录，核心文件是 SKILL.md。"
+              summary="每个技能本质上是一个目录，核心文件是 SKILL.md；目录下也可以继续放子技能。"
             >
               <div className="space-y-2 text-sm text-muted-foreground">
                 <p>
@@ -816,14 +880,44 @@ function SkillsGuide(): React.JSX.Element {
                   ，用来定义任务目标、执行步骤、输出要求等。
                 </p>
                 <p>
-                  应用里会区分内置技能和自定义技能；内置技能不可删除，自定义技能可以上传、禁用和删除。
+                  一个技能目录下如果还有子目录包含
+                  <code className="mx-1 font-mono text-foreground/85">SKILL.md</code>
+                  ，会被识别为独立的子技能；系统按目录路径区分父子技能和同名技能。
+                </p>
+                <p>
+                  应用里会区分内置技能和自定义技能；内置技能不可删除，自定义技能可以上传、禁用、编辑和删除。
+                </p>
+              </div>
+            </SkillGuideSubSection>
+
+            <SkillGuideSubSection
+              title="嵌套子技能"
+              summary="适合把一个主题下的多个细分能力打包在同一个父目录里。"
+            >
+              <div className="space-y-2 text-sm text-muted-foreground">
+                <pre className="rounded-md border border-border/40 bg-background p-2 text-xs leading-5 text-foreground">
+                  {SKILL_NESTED_TREE_EXAMPLE}
+                </pre>
+                <p>
+                  例如
+                  <code className="mx-1 font-mono text-foreground/85">office</code>
+                  可以作为父技能，下面的
+                  <code className="mx-1 font-mono text-foreground/85">office/pdf</code>
+                  和
+                  <code className="mx-1 font-mono text-foreground/85">office/sheets</code>
+                  会作为独立子技能展示和匹配。
+                </p>
+                <p>
+                  子技能可以拥有自己的
+                  <code className="mx-1 font-mono text-foreground/85">hooks.json</code>
+                  ；触发子技能时只激活它自己目录下的 Skill Hook，不会串到同名的其他技能。
                 </p>
               </div>
             </SkillGuideSubSection>
 
             <SkillGuideSubSection
               title="如何添加和使用"
-              summary="支持上传 .md 或 .zip，上传后可直接在右侧预览。"
+              summary="支持上传 .md 或 .zip；zip 可以带父目录和嵌套子技能。"
             >
               <div className="space-y-2 text-sm text-muted-foreground">
                 <p>
@@ -831,8 +925,27 @@ function SkillsGuide(): React.JSX.Element {
                   <code className="mx-1 font-mono text-foreground/85">+</code>
                   可上传技能。
                 </p>
+                <p>
+                  导入 zip 时会选择最外层的
+                  <code className="mx-1 font-mono text-foreground/85">SKILL.md</code>
+                  作为主技能；如果包含子技能且子技能名称与已有技能重复，会先提示确认。
+                </p>
                 <p>上传后可以在左侧展开目录、右侧预览文件内容，也可以随时切换技能启用状态。</p>
                 <p>禁用技能后，该技能本体和它附带的 Skill Hook 会一起失效。</p>
+              </div>
+            </SkillGuideSubSection>
+
+            <SkillGuideSubSection
+              title="发布到市场"
+              summary="发布时会保留技能原始相对路径信息，并处理嵌套子技能。"
+            >
+              <div className="space-y-2 text-sm text-muted-foreground">
+                <p>
+                  发布前如果检测到子技能，会询问是否一起上传；选择只上传当前技能时，子技能目录不会进入导出包。
+                </p>
+                <p>
+                  导出包会附带市场元数据，记录当前技能和子技能的相对路径；重新导入时这些元数据只用于识别，不会写入用户技能目录。
+                </p>
               </div>
             </SkillGuideSubSection>
           </div>
@@ -862,7 +975,7 @@ function SkillsGuide(): React.JSX.Element {
 
             <SkillGuideSubSection
               title="目录与加载规则"
-              summary="在技能目录下新建 hooks.json；脚本本体建议放到 hooks/ 子目录。"
+              summary="在技能目录下新建 hooks.json；父技能和子技能都可以有自己的 Hook。"
             >
               <div className="space-y-2 text-sm text-muted-foreground">
                 <pre className="rounded-md border border-border/40 bg-background p-2 text-xs leading-5 text-foreground">
@@ -871,7 +984,7 @@ function SkillsGuide(): React.JSX.Element {
                 <p>
                   只要目录里存在
                   <code className="mx-1 font-mono text-foreground/85">hooks.json</code>
-                  ，启用技能时就会自动加载。
+                  ，启用对应技能时就会自动加载；嵌套子技能的 Hook 放在子技能自己的目录下。
                 </p>
                 <p>
                   当前 Hook 命令实际按工作区
@@ -1134,10 +1247,8 @@ export function SkillsPanel(): React.JSX.Element {
     setDisabledSkills((prev) => {
       const next = new Set(prev)
       const skillId = getSkillMetadataId(skill)
-      const legacyName = normalizeSkillId(skill.name)
       if (isSkillDisabled(skill, next)) {
         next.delete(skillId)
-        next.delete(legacyName)
       } else {
         next.add(skillId)
       }
@@ -1163,14 +1274,11 @@ export function SkillsPanel(): React.JSX.Element {
         delete next[getSkillMetadataId(skill)]
         return next
       })
-      setDisabledSkills((prev) => {
-        const next = new Set(prev)
-        next.delete(getSkillMetadataId(skill))
-        next.delete(normalizeSkillId(skill.name))
-        window.api.skills.setDisabled([...next]).catch(console.error)
-        return next
-      })
       window.api.skills.list().then(setSkills).catch(console.error)
+      window.api.skills
+        .getDisabled()
+        .then((list) => setDisabledSkills(new Set(list.map(normalizeSkillId))))
+        .catch(console.error)
     } else {
       alert(res.error || "删除失败")
     }

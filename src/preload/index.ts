@@ -710,9 +710,15 @@ const api = {
     },
     upload: (
       buffer: ArrayBuffer,
-      fileName: string
-    ): Promise<{ success: boolean; skillName?: string; error?: string }> => {
-      return ipcRenderer.invoke("skills:upload", { buffer, fileName })
+      fileName: string,
+      options?: { allowNestedNameDuplicates?: boolean }
+    ): Promise<{
+      success: boolean
+      skillName?: string
+      error?: string
+      nestedNameConflicts?: Array<{ name: string; relativePath: string }>
+    }> => {
+      return ipcRenderer.invoke("skills:upload", { buffer, fileName, options })
     },
     extractMarkdownFromZip: (
       buffer: ArrayBuffer,
@@ -721,9 +727,10 @@ const api = {
       return ipcRenderer.invoke("skills:extractMarkdownFromZip", { buffer, fileName })
     },
     exportForMarket: (
-      skillPath: string
+      skillPath: string,
+      options?: { includeNestedSkills?: boolean }
     ): Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }> => {
-      return ipcRenderer.invoke("skills:exportForMarket", skillPath)
+      return ipcRenderer.invoke("skills:exportForMarket", skillPath, options)
     },
     delete: (skillPath: string): Promise<{ success: boolean; error?: string }> => {
       return ipcRenderer.invoke("skills:delete", skillPath)

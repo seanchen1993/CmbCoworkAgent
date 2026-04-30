@@ -916,7 +916,8 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
   }
 
   private getSkillHookKey(skill: SkillLifecycleMatch): string {
-    return path.resolve(skill.rootDir || path.dirname(skill.path) || skill.name).toLowerCase()
+    const key = path.resolve(skill.rootDir)
+    return process.platform === "win32" ? key.toLowerCase() : key
   }
 
   private enqueueSkillHookContext(skill: SkillLifecycleMatch, notes: string[]): void {

@@ -35,13 +35,21 @@ function normalizePluginId(pluginId: string | undefined | null): string {
 }
 
 function normalizePathKey(path: string | undefined | null): string {
-  return path?.trim().replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase() ?? ""
+  const normalized = path?.trim().replace(/\\/g, "/").replace(/\/+$/, "") ?? ""
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized
+}
+
+function addNormalizedPathAlias(target: Set<string>, normalizedPath: string): void {
+  if (!normalizedPath) return
+  target.add(normalizedPath)
+  const skillDocDir = normalizedPath.replace(/\/skill\.md$/i, "")
+  if (skillDocDir !== normalizedPath) target.add(skillDocDir)
 }
 
 function addPathAliases(target: Set<string>, path: string | undefined | null): void {
   const normalized = normalizePathKey(path)
   if (!normalized) return
-  target.add(normalized)
+  addNormalizedPathAlias(target, normalized)
 
   const openworkDir = normalizePathKey(getOpenworkDir())
   const customSkillsDir = normalizePathKey(getCustomSkillsDir())
@@ -51,14 +59,21 @@ function addPathAliases(target: Set<string>, path: string | undefined | null): v
   const enabledLegacyPrefix = `${openworkDir}/enabled-skills/`
 
   if (normalized.startsWith(enabledCustomPrefix)) {
-    target.add(`${customSkillsDir}/${normalized.slice(enabledCustomPrefix.length)}`)
+    addNormalizedPathAlias(target, `${customSkillsDir}/${normalized.slice(enabledCustomPrefix.length)}`)
   } else if (normalized.startsWith(enabledBuiltinPrefix)) {
-    target.add(`${builtinSkillsDir}/${normalized.slice(enabledBuiltinPrefix.length)}`)
+    addNormalizedPathAlias(target, `${builtinSkillsDir}/${normalized.slice(enabledBuiltinPrefix.length)}`)
   } else if (normalized.startsWith(enabledLegacyPrefix)) {
     const relativePath = normalized.slice(enabledLegacyPrefix.length)
-    target.add(`${customSkillsDir}/${relativePath}`)
-    target.add(`${builtinSkillsDir}/${relativePath}`)
+    addNormalizedPathAlias(target, `${customSkillsDir}/${relativePath}`)
+    addNormalizedPathAlias(target, `${builtinSkillsDir}/${relativePath}`)
   }
+}
+
+function pathSetIntersects(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  for (const item of a) {
+    if (b.has(item)) return true
+  }
+  return false
 }
 
 export function extractPluginIdFromProviderKey(providerKey?: string): string | undefined {
@@ -110,10 +125,8 @@ export function mergeHookScopeSnapshot(
   for (const skillPath of snapshot.activeSkillPaths) {
     target.activateSkill(undefined, undefined, skillPath)
   }
-  if (snapshot.activeSkillPaths.length === 0) {
-    for (const skillName of snapshot.activeSkillNames) {
-      target.activateSkill(skillName)
-    }
+  for (const skillName of snapshot.activeSkillNames) {
+    target.activateSkill(skillName)
   }
 }
 
@@ -157,9 +170,9 @@ export function resolveEnabledHooksForRun(
     allowedSkillNames.size === 0 && allowedSkillPaths.size === 0
       ? []
       : getEnabledSkillHookMetadata().filter((hook) => {
-          const hookSkillPath = normalizePathKey(hook.skillPath)
-          if (hookSkillPath && allowedSkillPaths.has(hookSkillPath)) return true
-          if (allowedSkillPaths.size > 0) return false
+          const hookSkillPaths = new Set<string>()
+          addPathAliases(hookSkillPaths, hook.skillPath)
+          if (pathSetIntersects(hookSkillPaths, allowedSkillPaths)) return true
           return allowedSkillNames.has(normalizeSkillName(hook.skillName))
         })
 

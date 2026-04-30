@@ -12,9 +12,10 @@ import { join, sep } from "path"
 import * as iconv from "iconv-lite"
 import { LocalSandbox } from "../src/main/agent/local-sandbox.ts"
 import { SkillLifecycleRegistry } from "../src/main/agent/skill-lifecycle/registry.ts"
-import { createHookScope } from "../src/main/hooks/scope.ts"
+import { createHookScope, mergeHookScopeSnapshot } from "../src/main/hooks/scope.ts"
 import { discoverSkillsSync, expandSkillMiddlewareSourceDirs } from "../src/main/skills/discovery.ts"
 import {
+  isDiscoveredSkillDisabled,
   removeDisabledSkillEntriesForSkills,
   resolveDisabledSkillIds
 } from "../src/main/skills/ids.ts"
@@ -195,6 +196,24 @@ async function testDeletedSkillDisabledEntriesArePruned(): Promise<void> {
   })
 }
 
+async function testAncestorDisabledSkillDisablesNestedSkills(): Promise<void> {
+  await withTempDir("skill-disabled-ancestor", async (base) => {
+    const source = join(base, "skills")
+    await writeSkillDoc(source, "office/SKILL.md", { name: "office" })
+    await writeSkillDoc(source, "office/pdf/SKILL.md", { name: "pdf" })
+
+    const skills = discoverSkillsSync(source)
+    const disabled = new Set(resolveDisabledSkillIds(["office"], skills))
+    const child = skills.find((skill) => skill.relativePath === "office/pdf")
+
+    assert(child, "child skill should be discovered")
+    assert(
+      isDiscoveredSkillDisabled(child!, disabled),
+      "disabled parent skill id should disable nested child skills"
+    )
+  })
+}
+
 async function testZipRootSkillSelectionPrefersShallowSkillMd(): Promise<void> {
   const entries = [
     { entry: { isDirectory: false }, decodedName: "skill/imagegen/scope-plain-skill/SKILL.md" },
@@ -334,11 +353,32 @@ async function testCaseInsensitiveOnPaths(): Promise<void> {
     const source = join(base, "Skills")
     await writeSkillDoc(source, "Cap/SKILL.md", { name: "cap" })
     const reg = new SkillLifecycleRegistry([source])
-    // Use lower-case path; normalizePath in registry lowercases for comparison
+    // Use lower-case path; Windows paths are case-insensitive, POSIX paths are not.
     const lower = join(base, "skills", "cap", "SKILL.md").split(sep).join(sep)
     const match = reg.resolveRead(lower)
-    assert(match?.name === "cap", "case-insensitive normalization should match")
+    if (process.platform === "win32") {
+      assert(match?.name === "cap", "Windows path normalization should match case-insensitively")
+    } else {
+      assert(match === null, "POSIX path normalization should keep case-sensitive paths distinct")
+    }
   })
+}
+
+async function testHookScopeSnapshotMergesNamesAndPathsIndependently(): Promise<void> {
+  const target = createHookScope()
+  mergeHookScopeSnapshot(target, {
+    activePluginIds: [],
+    activeSkillNames: ["Name Only Skill"],
+    activeSkillPaths: ["C:/tmp/PathSkill"]
+  })
+
+  assert(target.activeSkillNames.has("name only skill"), "snapshot merge should preserve skill names")
+  const expectedPath =
+    process.platform === "win32" ? "c:/tmp/pathskill" : "C:/tmp/PathSkill"
+  assert(
+    target.activeSkillPaths.has(expectedPath),
+    "snapshot merge should preserve skill paths"
+  )
 }
 
 async function testPluginSkillMetadata(): Promise<void> {
@@ -620,10 +660,12 @@ async function run(): Promise<void> {
   console.log("PASS A2d disabled skill ids are path-aware with legacy-name fallback")
   await testDeletedSkillDisabledEntriesArePruned()
   console.log("PASS A2e deleted skill disabled entries are pruned")
+  await testAncestorDisabledSkillDisablesNestedSkills()
+  console.log("PASS A2f disabled parent skill id disables nested skills")
   await testZipRootSkillSelectionPrefersShallowSkillMd()
-  console.log("PASS A2f zip upload selects the rootmost SKILL.md")
+  console.log("PASS A2g zip upload selects the rootmost SKILL.md")
   await testZipEntryNameDecodesGbkPluginSkillPath()
-  console.log("PASS A2g GBK plugin zip skill paths decode correctly")
+  console.log("PASS A2h GBK plugin zip skill paths decode correctly")
   await testFallbackName()
   console.log("PASS A3 fallback name when no frontmatter")
   await testFrontmatterCRLF()
@@ -644,6 +686,8 @@ async function run(): Promise<void> {
   console.log("PASS A11 missing source ignored")
   await testCaseInsensitiveOnPaths()
   console.log("PASS A11b case-insensitive matching")
+  await testHookScopeSnapshotMergesNamesAndPathsIndependently()
+  console.log("PASS A11c hook scope snapshot keeps name and path activations")
   await testPluginSkillMetadata()
   console.log("PASS A12 plugin skill metadata carried through registry")
   await testPluginSkillActivatesScopedHooks()

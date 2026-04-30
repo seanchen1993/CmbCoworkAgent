@@ -22,7 +22,8 @@ export interface SkillLifecycleSource {
 }
 
 function normalizePath(input: string): string {
-  return normalize(input).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase()
+  const normalized = normalize(input).replace(/\\/g, "/").replace(/\/+$/, "")
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized
 }
 
 function normalizeSource(source: string | SkillLifecycleSource): SkillLifecycleSource {

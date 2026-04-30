@@ -207,7 +207,7 @@ const SKILL_HOOK_FLAT_EXAMPLE = `[
     "event": "PreToolUse",
     "matcher": "write_file|edit_file",
     "type": "command",
-    "command": "python hooks/pre-write-check.py",
+    "command": "python C:/absolute/path/to/skill/hooks/pre-write-check.py",
     "timeout": 10000,
     "onBlock": {
       "reason": "高风险写入，请先按整改流程处理",
@@ -217,7 +217,7 @@ const SKILL_HOOK_FLAT_EXAMPLE = `[
   {
     "event": "Stop",
     "type": "command",
-    "command": "python hooks/post-check.py"
+    "command": "python C:/absolute/path/to/skill/hooks/post-check.py"
   }
 ]`
 
@@ -228,7 +228,7 @@ const SKILL_HOOK_CC_EXAMPLE = `{
       "hooks": [
         {
           "type": "command",
-          "command": "python hooks/pre-write-check.py",
+          "command": "python C:/absolute/path/to/skill/hooks/pre-write-check.py",
           "timeout": 10
         }
       ]
@@ -1134,7 +1134,8 @@ function HooksGuide(): React.JSX.Element {
               </p>
               <p>
                 技能 Hook 来自技能目录下的
-                hooks.json，随技能一起加载，启停技能时同步生效。适合把某项技能的配套拦截或校验逻辑打包进技能本体一起分发。
+                hooks.json，随技能一起加载，启停技能时同步生效；嵌套子技能可以拥有自己的 hooks.json。
+                适合把某项技能的配套拦截或校验逻辑打包进技能本体一起分发。
               </p>
               <p>
                 工作区 Hook 适合跟项目一起分发；脚本或策略本体建议放在项目目录里跟代码一起维护。
@@ -1163,25 +1164,30 @@ function HooksGuide(): React.JSX.Element {
 
       <GuideSection
         title="技能 Hook 怎么配"
-        summary="把 hooks.json 放到技能目录里，随技能一起加载，适合把拦截逻辑打包进技能本体分发。"
+        summary="把 hooks.json 放到技能目录里，父技能和嵌套子技能都可以拥有自己的 Hook。"
       >
         <div className="space-y-3">
           <GuideSubSection
             title="加载规则"
-            summary="技能目录下放 hooks.json，启用技能时自动加载，停用时同步移除。"
+            summary="技能目录下放 hooks.json，启用该技能时自动加载，停用时同步移除。"
           >
             <div className="space-y-2 text-sm text-muted-foreground">
               <p>
                 在技能目录里新建
                 <code className="mx-1 font-mono text-foreground/85">hooks.json</code>
-                即可，无需其他配置。
+                即可，无需其他配置；如果是嵌套子技能，就放在子技能自己的目录里。
               </p>
               <pre className="rounded-md border border-border/40 bg-background p-2 text-xs leading-5">
-                {`~/.cmbcoworkagent/skills/<skill-name>/\n  SKILL.md\n  hooks.json          ← 新增此文件\n  hooks/              ← 脚本本体建议放这里\n    pre-write-check.py`}
+                {`~/.cmbcoworkagent/skills/office/\n  SKILL.md\n  hooks.json\n  pdf/\n    SKILL.md\n    hooks.json        ← 子技能自己的 Hook\n    hooks/\n      pre-write-check.py`}
               </pre>
               <p>
-                脚本路径相对于技能目录本身，例如
-                <code className="mx-1 font-mono text-foreground/85">python hooks/check.py</code>。
+                Hook 命令实际在当前工作区
+                <code className="mx-1 font-mono text-foreground/85">cwd</code>
+                下执行；脚本放在技能目录时，推荐在
+                <code className="mx-1 font-mono text-foreground/85">command</code>
+                里使用绝对路径，或通过
+                <code className="mx-1 font-mono text-foreground/85">SKILL_ROOT</code>
+                环境变量定位。
               </p>
               <p>
                 hooks.json 里写
@@ -1211,7 +1217,7 @@ function HooksGuide(): React.JSX.Element {
 
           <GuideSubSection
             title="最小示例：扁平数组（推荐）"
-            summary="一个文件放多条规则；command 里用相对路径调脚本。"
+            summary="一个文件放多条规则；command 里建议使用绝对路径或 SKILL_ROOT 定位脚本。"
           >
             <pre className="overflow-x-auto rounded-md border border-border/40 bg-background p-3 text-xs leading-5 text-foreground">
               <code>{SKILL_HOOK_FLAT_EXAMPLE}</code>

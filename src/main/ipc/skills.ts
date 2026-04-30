@@ -17,7 +17,11 @@ import {
 } from "../storage"
 import type { SkillMetadata } from "../types"
 import { notifyHooksChanged } from "../hooks/notifications"
-import { discoverSkills } from "../skills/discovery"
+import {
+  discoverSkills,
+  makeFlattenedSkillDirName,
+  normalizeSkillRelativePath
+} from "../skills/discovery"
 import { getDiscoveredSkillId, normalizeSkillId } from "../skills/ids"
 import {
   decodeArchiveEntryName,
@@ -31,6 +35,16 @@ interface ZipEntryLike {
   header?: {
     flags_efs?: boolean
   }
+}
+
+interface ZipEntryDataLike extends ZipEntryLike {
+  isDirectory: boolean
+  getData(): Buffer
+}
+
+interface DecodedZipEntry {
+  entry: ZipEntryDataLike
+  decodedName: string
 }
 
 function sanitizeSkillName(name: string): string {
@@ -285,13 +299,181 @@ function parseYamlFrontmatter(content: string): Record<string, string> {
   return result
 }
 
-function makeSafeZipFileName(rawName: string): string {
+const MARKETPLACE_SKILL_METADATA_PATH = ".cmbcoworkagent/marketplace-skill.json"
+
+interface MarketplaceSkillMetadata {
+  nestedSkills?: Array<{ relativePath?: string; name?: string }>
+}
+
+interface SkillUploadOptions {
+  allowNestedNameDuplicates?: boolean
+}
+
+interface SkillUploadNameConflict {
+  name: string
+  relativePath: string
+}
+
+interface SkillUploadResult {
+  success: boolean
+  skillName?: string
+  error?: string
+  nestedNameConflicts?: SkillUploadNameConflict[]
+}
+
+interface ExportForMarketOptions {
+  includeNestedSkills?: boolean
+}
+
+function makeSafeZipFileName(rawName: string, relativePath?: string): string {
   const sanitized = rawName
     .replace(/[\\/:*?"<>|]/g, "-")
     .replace(/\s+/g, "-")
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "")
-  return `${sanitized || "skill"}.zip`
+  const normalizedRelativePath = normalizeSkillRelativePath(relativePath ?? "")
+  const disambiguator = normalizedRelativePath.includes("/")
+    ? makeFlattenedSkillDirName(normalizedRelativePath)
+    : ""
+  return `${sanitized || "skill"}${disambiguator ? `--${disambiguator}` : ""}.zip`
+}
+
+function normalizeSkillNameForComparison(name: string): string {
+  return name.trim().toLowerCase()
+}
+
+function isMarketplaceSkillMetadataPath(relativePath: string): boolean {
+  const normalized = normalizeSkillRelativePath(relativePath).toLowerCase()
+  const metadataPath = MARKETPLACE_SKILL_METADATA_PATH.toLowerCase()
+  return normalized === metadataPath || normalized.endsWith(`/${metadataPath}`)
+}
+
+function readMarketplaceSkillMetadataFromZip(
+  decodedEntries: DecodedZipEntry[],
+  basePrefix: string
+): MarketplaceSkillMetadata | null {
+  const metadataEntry = decodedEntries.find((item) => {
+    if (item.entry.isDirectory || !item.decodedName.startsWith(basePrefix)) return false
+    const relativePath = item.decodedName.slice(basePrefix.length)
+    return (
+      normalizeSkillRelativePath(relativePath).toLowerCase() ===
+      MARKETPLACE_SKILL_METADATA_PATH.toLowerCase()
+    )
+  })
+  if (!metadataEntry) return null
+
+  try {
+    const parsed = JSON.parse(metadataEntry.entry.getData().toString("utf-8"))
+    if (!parsed || typeof parsed !== "object") return null
+    return parsed as MarketplaceSkillMetadata
+  } catch {
+    return null
+  }
+}
+
+function getNestedSkillNameCandidates(
+  decodedEntries: DecodedZipEntry[],
+  basePrefix: string,
+  metadata: MarketplaceSkillMetadata | null
+): Array<{ name: string; relativePath: string }> {
+  const metadataNames = new Map<string, string>()
+  for (const item of metadata?.nestedSkills || []) {
+    const relativePath = normalizeSkillRelativePath(String(item?.relativePath || ""))
+    const name = typeof item?.name === "string" ? item.name.trim() : ""
+    if (relativePath && name) {
+      metadataNames.set(relativePath, name)
+    }
+  }
+
+  const candidates: Array<{ name: string; relativePath: string }> = []
+  const seenRoots = new Set<string>()
+  for (const item of decodedEntries) {
+    if (item.entry.isDirectory || !item.decodedName.startsWith(basePrefix)) continue
+    const relativePath = normalizeSkillRelativePath(item.decodedName.slice(basePrefix.length))
+    if (!/(^|\/)SKILL\.md$/i.test(relativePath)) continue
+    if (relativePath.toUpperCase() === "SKILL.MD") continue
+
+    const root = normalizeSkillRelativePath(relativePath.replace(/\/SKILL\.md$/i, ""))
+    if (!root || seenRoots.has(root)) continue
+    seenRoots.add(root)
+
+    let name = metadataNames.get(root) || ""
+    if (!name) {
+      try {
+        const content = decodeSkillTextFile(item.entry.getData(), item.decodedName)
+        name = parseYamlFrontmatter(content).name?.trim() || ""
+      } catch {
+        name = ""
+      }
+    }
+    if (!name) {
+      name = root.split("/").filter(Boolean).pop() || root
+    }
+    candidates.push({ name, relativePath: root })
+  }
+
+  return candidates
+}
+
+function findNestedSkillNameConflicts(
+  nestedSkills: Array<{ name: string; relativePath: string }>,
+  existingNames: Set<string>
+): SkillUploadNameConflict[] {
+  const conflicts: SkillUploadNameConflict[] = []
+  const seen = new Set<string>()
+  for (const skill of nestedSkills) {
+    const normalizedName = normalizeSkillNameForComparison(skill.name)
+    if (!normalizedName || !existingNames.has(normalizedName) || seen.has(normalizedName)) continue
+    seen.add(normalizedName)
+    conflicts.push({ name: skill.name, relativePath: skill.relativePath })
+  }
+  return conflicts
+}
+
+function getExportSkillRelativePath(skillDir: string): string {
+  const resolvedSkillDir = path.resolve(skillDir)
+  for (const sourceDir of [getCustomSkillsDir(), getSkillsDir()]) {
+    const resolvedSource = path.resolve(sourceDir)
+    if (!isPathUnderDir(resolvedSkillDir, resolvedSource)) continue
+    const relativePath = normalizeSkillRelativePath(path.relative(resolvedSource, resolvedSkillDir))
+    if (relativePath) return relativePath
+  }
+  return path.basename(skillDir)
+}
+
+function getNestedSkillRoots(relativeFilePaths: string[]): string[] {
+  const roots = new Set<string>()
+  for (const relativePath of relativeFilePaths) {
+    const normalized = normalizeSkillRelativePath(relativePath)
+    if (!/(^|\/)SKILL\.md$/i.test(normalized)) continue
+    if (normalized.toUpperCase() === "SKILL.MD") continue
+    const root = normalizeSkillRelativePath(normalized.replace(/\/SKILL\.md$/i, ""))
+    if (root) roots.add(root)
+  }
+  return [...roots].sort((a, b) => a.localeCompare(b))
+}
+
+function isUnderAnyRelativeDir(relativePath: string, roots: string[]): boolean {
+  const normalized = normalizeSkillRelativePath(relativePath)
+  return roots.some((root) => normalized === root || normalized.startsWith(`${root}/`))
+}
+
+async function buildNestedSkillMetadata(
+  skillDir: string,
+  nestedRoots: string[]
+): Promise<Array<{ relativePath: string; name?: string }>> {
+  const nested: Array<{ relativePath: string; name?: string }> = []
+  for (const relativePath of nestedRoots) {
+    const skillMdPath = path.join(skillDir, relativePath, "SKILL.md")
+    try {
+      const content = await fs.readFile(skillMdPath, "utf-8")
+      const frontmatter = parseYamlFrontmatter(content)
+      nested.push({ relativePath, name: frontmatter.name?.trim() || undefined })
+    } catch {
+      nested.push({ relativePath })
+    }
+  }
+  return nested
 }
 
 async function loadSkills(
@@ -606,9 +788,9 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
     "skills:upload",
     async (
       _event,
-      payload: { buffer: ArrayBuffer; fileName: string }
-    ): Promise<{ success: boolean; skillName?: string; error?: string }> => {
-      const { buffer, fileName } = payload
+      payload: { buffer: ArrayBuffer; fileName: string; options?: SkillUploadOptions }
+    ): Promise<SkillUploadResult> => {
+      const { buffer, fileName, options = {} } = payload
       if (!buffer || !fileName || typeof fileName !== "string") {
         return { success: false, error: "Invalid buffer or fileName" }
       }
@@ -617,15 +799,21 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
       const customDir = getCustomSkillsDir()
       mkdirSync(customDir, { recursive: true })
 
-      const checkNameDuplicate = async (nameToCheck: string): Promise<boolean> => {
+      let existingSkillNamesCache: Set<string> | null = null
+      const getExistingSkillNames = async (): Promise<Set<string>> => {
+        if (existingSkillNamesCache) return existingSkillNamesCache
         const [builtin, custom] = await Promise.all([
           loadSkills(getSkillsDir(), "project"),
           loadSkills(getCustomSkillsDir(), "user")
         ])
-        const existingNames = new Set(
-          [...builtin, ...custom].map((s) => s.name.trim().toLowerCase())
+        existingSkillNamesCache = new Set(
+          [...builtin, ...custom].map((s) => normalizeSkillNameForComparison(s.name))
         )
-        return existingNames.has(nameToCheck.trim().toLowerCase())
+        return existingSkillNamesCache
+      }
+
+      const checkNameDuplicate = async (nameToCheck: string): Promise<boolean> => {
+        return (await getExistingSkillNames()).has(normalizeSkillNameForComparison(nameToCheck))
       }
 
       const checkDirCollision = (sanitizedName: string): boolean => {
@@ -662,7 +850,7 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
         if (ext === ".zip") {
           const zip = new AdmZip(Buffer.from(buffer))
           const entries = zip.getEntries()
-          const decodedEntries = entries.map((entry) => ({
+          const decodedEntries: DecodedZipEntry[] = entries.map((entry) => ({
             entry,
             decodedName: decodeZipEntryName(entry)
           }))
@@ -692,16 +880,36 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
           if (checkDirCollision(skillName)) {
             return { success: false, error: `技能目录「${skillName}」已存在，请换一个名称` }
           }
+
+          const basePrefix = skillMdEntry.decodedName.replace(/SKILL\.md$/i, "")
+          const metadata = readMarketplaceSkillMetadataFromZip(decodedEntries, basePrefix)
+          const nestedNameConflicts = findNestedSkillNameConflicts(
+            getNestedSkillNameCandidates(decodedEntries, basePrefix, metadata),
+            await getExistingSkillNames()
+          )
+          if (nestedNameConflicts.length > 0 && !options.allowNestedNameDuplicates) {
+            const preview = nestedNameConflicts
+              .slice(0, 5)
+              .map((item) => `${item.name}（${item.relativePath}）`)
+              .join("、")
+            const suffix = nestedNameConflicts.length > 5 ? "等" : ""
+            return {
+              success: false,
+              error: `导入会引入 ${nestedNameConflicts.length} 个与现有 skill 同名的子技能：${preview}${suffix}`,
+              nestedNameConflicts
+            }
+          }
+
           const skillDir = path.join(customDir, skillName)
           mkdirSync(skillDir, { recursive: true })
 
-          const basePrefix = skillMdEntry.decodedName.replace(/SKILL\.md$/i, "")
           for (const item of decodedEntries) {
             const entry = item.entry
             if (entry.isDirectory) continue
             if (!item.decodedName.startsWith(basePrefix)) continue
             const relativePath = item.decodedName.slice(basePrefix.length)
             if (!relativePath) continue
+            if (isMarketplaceSkillMetadataPath(relativePath)) continue
             const destPath = path.resolve(skillDir, relativePath)
             if (
               !destPath.startsWith(path.resolve(skillDir) + path.sep) &&
@@ -733,7 +941,8 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
     "skills:exportForMarket",
     async (
       _event,
-      skillPath: string
+      skillPath: string,
+      options: ExportForMarketOptions = {}
     ): Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }> => {
       if (!skillPath || typeof skillPath !== "string") {
         return { success: false, error: "无效的技能路径" }
@@ -755,10 +964,22 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
           return { success: false, error: "技能目录为空，无法导出" }
         }
 
+        const relativeFilePaths = files
+          .map((filePath) => path.relative(skillDir, filePath).replace(/\\/g, "/"))
+          .filter((relativePath) => relativePath && !relativePath.startsWith(".."))
+        const nestedSkillRoots = getNestedSkillRoots(relativeFilePaths)
+        const includeNestedSkills = options.includeNestedSkills !== false
+
         const zip = new AdmZip()
         for (const filePath of files) {
           const relativePath = path.relative(skillDir, filePath).replace(/\\/g, "/")
           if (!relativePath || relativePath.startsWith("..")) {
+            continue
+          }
+          if (isMarketplaceSkillMetadataPath(relativePath)) {
+            continue
+          }
+          if (!includeNestedSkills && isUnderAnyRelativeDir(relativePath, nestedSkillRoots)) {
             continue
           }
           const fileBuffer = await fs.readFile(filePath)
@@ -768,11 +989,27 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
         const skillContent = await fs.readFile(resolvedSkillPath, "utf-8")
         const frontmatter = parseYamlFrontmatter(skillContent)
         const skillName = frontmatter.name?.trim() || path.basename(skillDir)
+        const skillRelativePath = getExportSkillRelativePath(skillDir)
+        const includedNestedRoots = includeNestedSkills ? nestedSkillRoots : []
+        const metadata = {
+          schemaVersion: 1,
+          type: "cmb.skill.marketplace",
+          name: skillName,
+          relativePath: skillRelativePath,
+          rootDirName: path.basename(skillDir),
+          includeNestedSkills,
+          nestedSkills: await buildNestedSkillMetadata(skillDir, includedNestedRoots),
+          exportedAt: new Date().toISOString()
+        }
+        zip.addFile(
+          MARKETPLACE_SKILL_METADATA_PATH,
+          Buffer.from(JSON.stringify(metadata, null, 2), "utf-8")
+        )
         const zipBuffer = zip.toBuffer()
 
         return {
           success: true,
-          fileName: makeSafeZipFileName(skillName),
+          fileName: makeSafeZipFileName(skillName, skillRelativePath),
           buffer: zipBuffer.buffer.slice(
             zipBuffer.byteOffset,
             zipBuffer.byteOffset + zipBuffer.byteLength

@@ -421,14 +421,21 @@ interface CustomAPI {
     setDisabled: (skillNames: string[]) => Promise<void>
     upload: (
       buffer: ArrayBuffer,
-      fileName: string
-    ) => Promise<{ success: boolean; skillName?: string; error?: string }>
+      fileName: string,
+      options?: { allowNestedNameDuplicates?: boolean }
+    ) => Promise<{
+      success: boolean
+      skillName?: string
+      error?: string
+      nestedNameConflicts?: Array<{ name: string; relativePath: string }>
+    }>
     extractMarkdownFromZip: (
       buffer: ArrayBuffer,
       fileName?: string
     ) => Promise<{ success: boolean; filePath?: string; content?: string; error?: string }>
     exportForMarket: (
-      skillPath: string
+      skillPath: string,
+      options?: { includeNestedSkills?: boolean }
     ) => Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }>
     delete: (skillPath: string) => Promise<{ success: boolean; error?: string }>
   }

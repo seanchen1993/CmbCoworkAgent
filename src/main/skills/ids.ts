@@ -128,5 +128,12 @@ export function isDiscoveredSkillDisabled(
   skill: SkillIdentityLike,
   disabledSkillIds: ReadonlySet<string>
 ): boolean {
-  return disabledSkillIds.has(getDiscoveredSkillId(skill))
+  const skillId = getDiscoveredSkillId(skill)
+  if (!skillId) return false
+  for (const disabledId of disabledSkillIds) {
+    if (matchesSkillIdOrDescendant(skillId, normalizeSkillId(disabledId))) {
+      return true
+    }
+  }
+  return false
 }
