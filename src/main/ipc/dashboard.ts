@@ -696,6 +696,27 @@ function buildUpperOrgLv1Filter(upperOrgLv1: string): Record<string, unknown> {
   return { term: { upperOrgLv1 } }
 }
 
+function buildOrgDistributionAgg(
+  selectedUpperOrgLv1: string | null,
+  metric: "pv" | "uv"
+): Record<string, unknown> {
+  const field = selectedUpperOrgLv1 !== null ? "orgName" : "upperOrgLv1"
+  const terms: Record<string, unknown> = { field, size: 30, missing: "" }
+  const aggs = metric === "uv" ? { unique_users: { cardinality: { field: "sapId" } } } : undefined
+
+  if (metric === "uv") {
+    terms.order = { unique_users: "desc" }
+  }
+
+  const items = aggs ? { terms, aggs } : { terms }
+  if (selectedUpperOrgLv1 === null) return items
+
+  return {
+    filter: buildUpperOrgLv1Filter(selectedUpperOrgLv1),
+    aggs: { items }
+  }
+}
+
 async function fetchUserStats(range: TimeRange, granularity: Granularity, opts?: UserStatsOptions): Promise<unknown> {
   void granularity
   const selectedUpperOrgLv1 = opts?.upperOrgLv1 ?? null
@@ -711,16 +732,9 @@ async function fetchUserStats(range: TimeRange, granularity: Granularity, opts?:
           upper_org_lv1: { terms: { field: "upperOrgLv1", size: 1, missing: "" } }
         }
       },
-      by_org: selectedUpperOrgLv1 !== null
-        ? {
-            filter: buildUpperOrgLv1Filter(selectedUpperOrgLv1),
-            aggs: {
-              items: { terms: { field: "orgName", size: 30, missing: "" } }
-            }
-          }
-        : {
-            terms: { field: "upperOrgLv1", size: 30, missing: "" }
-          },
+      by_org: buildOrgDistributionAgg(selectedUpperOrgLv1, "pv"),
+      by_org_pv: buildOrgDistributionAgg(selectedUpperOrgLv1, "pv"),
+      by_org_uv: buildOrgDistributionAgg(selectedUpperOrgLv1, "uv"),
       by_version: {
         terms: { field: "appVersion", size: 20 },
         aggs: { unique_users: { cardinality: { field: "sapId" } } }
@@ -1533,29 +1547,41 @@ function makeMockUserStats(range: TimeRange, opts?: UserStatsOptions): unknown {
 
   const byOrgBuckets = selectedUpperOrgLv1 === null
     ? [
-        { key: "零售金融", doc_count: 748 },
-        { key: "公司金融", doc_count: 245 },
-        { key: "风险管理", doc_count: 189 },
-        { key: "科技管理", doc_count: 65 }
+        { key: "零售金融", doc_count: 748, unique_users: { value: 60 } },
+        { key: "公司金融", doc_count: 245, unique_users: { value: 20 } },
+        { key: "风险管理", doc_count: 189, unique_users: { value: 15 } },
+        { key: "科技管理", doc_count: 65, unique_users: { value: 5 } }
       ]
     : selectedUpperOrgLv1 === "零售金融"
       ? [
-          { key: "零售一部", doc_count: 430 },
-          { key: "零售二部", doc_count: 318 }
+          { key: "零售一部", doc_count: 430, unique_users: { value: 36 } },
+          { key: "零售二部", doc_count: 318, unique_users: { value: 24 } }
         ]
       : selectedUpperOrgLv1 === "公司金融"
         ? [
-            { key: "企业金融部", doc_count: 245 }
+            { key: "企业金融部", doc_count: 245, unique_users: { value: 20 } }
           ]
         : selectedUpperOrgLv1 === "风险管理"
           ? [
-              { key: "风险管理部", doc_count: 189 }
+              { key: "风险管理部", doc_count: 189, unique_users: { value: 15 } }
             ]
           : selectedUpperOrgLv1 === "科技管理"
             ? [
-                { key: "科技部", doc_count: 65 }
+                { key: "科技部", doc_count: 65, unique_users: { value: 5 } }
               ]
             : []
+  const byOrgPv = selectedUpperOrgLv1 === null
+    ? { buckets: byOrgBuckets }
+    : {
+        doc_count: byOrgBuckets.reduce((sum, bucket) => sum + bucket.doc_count, 0),
+        items: { buckets: byOrgBuckets }
+      }
+  const byOrgUv = selectedUpperOrgLv1 === null
+    ? { buckets: byOrgBuckets }
+    : {
+        doc_count: byOrgBuckets.reduce((sum, bucket) => sum + bucket.doc_count, 0),
+        items: { buckets: byOrgBuckets }
+      }
 
   return {
     aggregations: {
@@ -1569,14 +1595,9 @@ function makeMockUserStats(range: TimeRange, opts?: UserStatsOptions): unknown {
           { key: "10010006", doc_count: 61,  user_name: { buckets: [{ key: "孙八", doc_count: 61  }] }, org_name: { buckets: [{ key: "科技部",    doc_count: 61  }] }, upper_org_lv1: { buckets: [{ key: "科技管理", doc_count: 61 }] }, success_count: { doc_count: 55  } }
         ]
       },
-      by_org: selectedUpperOrgLv1 === null
-        ? {
-            buckets: byOrgBuckets
-          }
-        : {
-            doc_count: byOrgBuckets.reduce((sum, bucket) => sum + bucket.doc_count, 0),
-            items: { buckets: byOrgBuckets }
-          },
+      by_org: byOrgPv,
+      by_org_pv: byOrgPv,
+      by_org_uv: byOrgUv,
       by_version: {
         buckets: [
           { key: "1.3.0", doc_count: 512, unique_users: { value: 98 } },

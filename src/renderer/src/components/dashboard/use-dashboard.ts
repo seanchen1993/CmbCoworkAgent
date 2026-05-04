@@ -69,6 +69,8 @@ export interface UserStatsData {
     count: number
   }>
   byOrg: Array<{ key: string; org: string; count: number }>
+  byOrgPv: Array<{ key: string; org: string; count: number }>
+  byOrgUv: Array<{ key: string; org: string; count: number }>
   byVersion: Array<{ version: string; count: number }>
   userTrend: Array<{ time: string; users: number }>
   selectedUpperOrgLv1: string | null
@@ -525,9 +527,16 @@ function formatTopUserOrgName(orgName: string, upperOrgLv1: string): string {
 
 function parseUserStats(raw: any, selectedUpperOrgLv1: string | null): UserStatsData {
   const aggs = raw?.aggregations ?? {}
-  const byOrgBuckets = Array.isArray(aggs.by_org?.buckets)
-    ? aggs.by_org.buckets
-    : (aggs.by_org?.items?.buckets ?? [])
+  const getOrgBuckets = (agg: any): any[] => Array.isArray(agg?.buckets)
+    ? agg.buckets
+    : (agg?.items?.buckets ?? [])
+  const mapOrgBuckets = (buckets: any[], metric: "pv" | "uv"): UserStatsData["byOrg"] => buckets.map((b: any) => ({
+    key: String(b.key ?? ""),
+    org: String(b.key ?? "") || "未知",
+    count: metric === "uv" ? (b.unique_users?.value ?? b.doc_count ?? 0) : (b.doc_count ?? 0)
+  }))
+  const byOrgPvBuckets = getOrgBuckets(aggs.by_org_pv ?? aggs.by_org)
+  const byOrgUvBuckets = getOrgBuckets(aggs.by_org_uv ?? aggs.by_org)
 
   const topUsers: UserStatsData["topUsers"] = (aggs.top_users?.buckets ?? []).map((b: any) => ({
     sapId: b.key,
@@ -539,11 +548,9 @@ function parseUserStats(raw: any, selectedUpperOrgLv1: string | null): UserStats
     count: b.doc_count
   }))
 
-  const byOrg: UserStatsData["byOrg"] = byOrgBuckets.map((b: any) => ({
-    key: String(b.key ?? ""),
-    org: String(b.key ?? "") || "未知",
-    count: b.doc_count
-  }))
+  const byOrgPv = mapOrgBuckets(byOrgPvBuckets, "pv")
+  const byOrgUv = mapOrgBuckets(byOrgUvBuckets, "uv")
+  const byOrg = byOrgPv
 
   const byVersion: UserStatsData["byVersion"] = (aggs.by_version?.buckets ?? []).map((b: any) => ({
     version: b.key || "未知",
@@ -555,7 +562,7 @@ function parseUserStats(raw: any, selectedUpperOrgLv1: string | null): UserStats
     users: b.users?.value ?? 0
   }))
 
-  return { topUsers, byOrg, byVersion, userTrend, selectedUpperOrgLv1 }
+  return { topUsers, byOrg, byOrgPv, byOrgUv, byVersion, userTrend, selectedUpperOrgLv1 }
 }
 
 export function parseTopUsersFromAgg(raw: any): ParsedTopUser[] {
