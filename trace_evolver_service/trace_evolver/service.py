@@ -58,7 +58,15 @@ from trace_evolver.schemas import (
     RunResponse,
 )
 from trace_evolver.source import LocalTraceSource, load_imported_traces
-from trace_evolver.utils import is_allowed_markdown_relative_path, json_dumps, sha256_text, slugify, trim_snippet, utc_now
+from trace_evolver.utils import (
+    compress_text_for_llm,
+    is_allowed_markdown_relative_path,
+    json_dumps,
+    sha256_text,
+    slugify,
+    trim_snippet,
+    utc_now,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -495,7 +503,11 @@ class TraceEvolutionService:
                 f"Ops:\n{ops_text}"
             )
 
-        patches_text = "\n\n".join(patches_description)
+        patches_text = compress_text_for_llm(
+            "\n\n".join(patches_description),
+            self.settings.llm_max_merge_prompt_chars,
+            label="merge patches",
+        )
 
         prevalence_hint = ""
         if len(batch) >= 6:

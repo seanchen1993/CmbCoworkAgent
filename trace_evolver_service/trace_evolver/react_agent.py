@@ -23,6 +23,7 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
 from trace_evolver.config import LLMSettings
+from trace_evolver.utils import compress_text_for_llm
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,9 @@ def run_react_loop(
     read_file_cb: Callable[[str], tuple[str | None, int]],
     read_artifact_cb: Callable[[str, int, int], tuple[str | None, int]] | None = None,
     has_artifacts: bool = False,
+    max_artifact_lines: int = 200,
+    max_tool_message_chars: int = 30_000,
+    max_message_chars: int = 60_000,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     """Run a bounded ReAct loop with structured tool calling.
 
@@ -124,6 +128,9 @@ def run_react_loop(
     that artifact reads cannot starve skill/reference reading.
     """
     notes: list[str] = []
+    max_artifact_lines = max(1, max_artifact_lines)
+    max_tool_message_chars = max(1, max_tool_message_chars)
+    max_message_chars = max(1, max_message_chars)
     markdown_reads_done = 0
     artifact_reads_done = 0
     rejected_reads: set[str] = set()
@@ -163,7 +170,7 @@ def run_react_loop(
         active_model, force_write = _build_active_model()
 
         try:
-            response = active_model.invoke(messages)
+            response = active_model.invoke(_compress_message_history(messages, max_message_chars))
         except Exception:
             logger.warning("ReAct LLM call failed on turn %d", turn, exc_info=True)
             notes.append(f"LLM call failed on turn {turn}")
@@ -258,7 +265,7 @@ def run_react_loop(
                         )
                         notes.append(f"opened {file_path} (reason: {reason}, tokens~{token_count})")
 
-                messages.append(ToolMessage(content=msg, tool_call_id=tc_id))
+                messages.append(ToolMessage(content=_cap_tool_message(msg, max_tool_message_chars), tool_call_id=tc_id))
 
             # ---- read_artifact ---------------------------------------------
             elif name == _NAME_READ_ARTIFACT and read_artifact_cb is not None:
@@ -269,9 +276,9 @@ def run_react_loop(
                 except (TypeError, ValueError):
                     offset = 0
                 try:
-                    limit = max(1, int(args.get("limit", 80)))
+                    limit = min(max_artifact_lines, max(1, int(args.get("limit", 80))))
                 except (TypeError, ValueError):
-                    limit = 80
+                    limit = min(max_artifact_lines, 80)
                 reason = str(args.get("reason", ""))
                 art_key = f"{art_id}:{offset}-{offset + limit}"
 
@@ -304,7 +311,7 @@ def run_react_loop(
                             f"loaded artifact {art_key} (reason: {reason}, tokens~{token_count})"
                         )
 
-                messages.append(ToolMessage(content=msg, tool_call_id=tc_id))
+                messages.append(ToolMessage(content=_cap_tool_message(msg, max_tool_message_chars), tool_call_id=tc_id))
 
             # ---- unknown tool ----------------------------------------------
             else:
@@ -318,3 +325,29 @@ def run_react_loop(
 
     notes.append("ReAct loop ended without producing a patch")
     return None, notes
+
+
+def _cap_tool_message(text: str, max_chars: int) -> str:
+    return compress_text_for_llm(text, max_chars, label="tool message")
+
+
+def _compress_message_history(messages: list[BaseMessage], max_chars: int) -> list[BaseMessage]:
+    """Apply a final per-message cap before LangChain sends a request."""
+    bounded: list[BaseMessage] = []
+    for message in messages:
+        content = message.content
+        if isinstance(content, str):
+            bounded.append(
+                message.model_copy(
+                    update={
+                        "content": compress_text_for_llm(
+                            content,
+                            max_chars,
+                            label=message.type,
+                        )
+                    }
+                )
+            )
+        else:
+            bounded.append(message)
+    return bounded

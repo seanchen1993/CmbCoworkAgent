@@ -46,7 +46,7 @@ from trace_evolver.schemas import (
     SkillBundleMeta,
     SuccessPattern,
 )
-from trace_evolver.utils import is_allowed_markdown_relative_path, sha256_text, tokenize, trim_snippet
+from trace_evolver.utils import compress_text_for_llm, is_allowed_markdown_relative_path, sha256_text, tokenize, trim_snippet
 
 logger = logging.getLogger(__name__)
 
@@ -303,12 +303,20 @@ def _read_relative_file(bundle: SkillBundleMeta, relative_path: str) -> str:
     return (Path(bundle.root_path) / relative_path).read_text(encoding="utf-8")
 
 
-def _read_relative_file_safe(bundle: SkillBundleMeta, relative_path: str) -> str:
+def _read_relative_file_safe(
+    bundle: SkillBundleMeta,
+    relative_path: str,
+    *,
+    max_chars: int | None = None,
+) -> str:
     """Read file, return empty string on failure."""
     try:
-        return _read_relative_file(bundle, relative_path)
+        content = _read_relative_file(bundle, relative_path)
     except (FileNotFoundError, OSError):
         return ""
+    if max_chars is not None:
+        return compress_text_for_llm(content, max_chars, label=relative_path)
+    return content
 
 
 def _markdown_search_score(query_tokens: set[str], meta: MarkdownFileMeta) -> float:
@@ -375,12 +383,12 @@ def _format_traces_for_prompt(traces: list[ImportedTrace], *, max_chars: int = 8
         if art_line:
             block += f"  artifacts: {art_line}\n"
         if len(block) > budget:
-            block = block[:budget]
+            block = compress_text_for_llm(block, budget, label=f"trace:{trace.traceId}")
         parts.append(block)
         budget -= len(block)
         if budget <= 0:
             break
-    return "\n".join(parts)
+    return compress_text_for_llm("\n".join(parts), max_chars, label="trace prompt")
 
 
 def _select_error_relevant_steps(trace: ImportedTrace, max_steps: int = 8) -> list:
@@ -580,12 +588,20 @@ class SuccessAnalyst:
         bundle: SkillBundleMeta | None,
     ) -> tuple[list[SuccessPattern], list[HypothesisPatch]]:
         llm = _get_llm(self.settings)
-        traces_text = _format_traces_for_prompt(traces, prefer_errors=False)
+        traces_text = _format_traces_for_prompt(
+            traces,
+            max_chars=self.settings.llm_max_trace_chars,
+            prefer_errors=False,
+        )
 
         skill_context = ""
         heading_tree = ""
         if bundle:
-            skill_context = _read_relative_file_safe(bundle, "SKILL.md")
+            skill_context = _read_relative_file_safe(
+                bundle,
+                "SKILL.md",
+                max_chars=self.settings.llm_max_skill_file_chars,
+            )
             heading_tree = _build_heading_tree_text(bundle)
 
         messages = [
@@ -802,11 +818,19 @@ class ErrorAnalyst:
         feedback: FeedbackDigest | None = None,
     ) -> tuple[str, str, float]:
         llm = _get_llm(self.settings)
-        traces_text = _format_traces_for_prompt(traces, prefer_errors=True)
+        traces_text = _format_traces_for_prompt(
+            traces,
+            max_chars=self.settings.llm_max_trace_chars,
+            prefer_errors=True,
+        )
 
         skill_context = ""
         if bundle:
-            skill_context = _read_relative_file_safe(bundle, "SKILL.md")
+            skill_context = _read_relative_file_safe(
+                bundle,
+                "SKILL.md",
+                max_chars=self.settings.llm_max_skill_file_chars,
+            )
 
         feedback_section = ""
         if feedback:
@@ -888,7 +912,11 @@ class ErrorAnalyst:
 
         # file_contents dict tracks visible files; insertion-ordered (Python 3.7+)
         file_contents: dict[str, str] = {}
-        skill_content = _read_relative_file_safe(bundle, "SKILL.md")
+        skill_content = _read_relative_file_safe(
+            bundle,
+            "SKILL.md",
+            max_chars=self.settings.llm_max_skill_file_chars,
+        )
         if skill_content:
             file_contents["SKILL.md"] = skill_content
         else:
@@ -932,7 +960,8 @@ class ErrorAnalyst:
             "**Content rules**:\n"
             "- Be concise and actionable — every sentence should change agent behavior.\n"
             "- Write concrete workflow steps with specific actions, not abstract checklists.\n"
-            "- Use imperative language: 'Read design-ref.md FIRST', 'Generate BOTH files in the same pass'.\n"
+            "- Use imperative language: 'Read required reference files first', "
+            "'Keep related outputs consistent in the same workflow'.\n"
             "- Include verification steps with specific commands when possible.\n"
             "- Ground in the specific failure: reference what went wrong and how to prevent it.\n"
             "- NEVER use placeholder text like '...', 'TODO', or 'results must be empty'.\n"
@@ -947,6 +976,11 @@ class ErrorAnalyst:
         files_context = "\n\n".join(
             f"### {path}\n```markdown\n{content}\n```"
             for path, content in file_contents.items()
+        )
+        files_context = compress_text_for_llm(
+            files_context,
+            self.settings.llm_max_visible_file_chars,
+            label="visible markdown files",
         )
         artifact_section = ""
         if has_artifacts:
@@ -981,7 +1015,11 @@ class ErrorAnalyst:
         def read_file_cb(path: str) -> tuple[str | None, int]:
             if not is_allowed_markdown_relative_path(path):
                 return None, 0
-            content = _read_relative_file_safe(bundle, path)
+            content = _read_relative_file_safe(
+                bundle,
+                path,
+                max_chars=self.settings.llm_max_visible_file_chars,
+            )
             if not content:
                 return None, 0
             return content, _estimate_token_count(content)
@@ -990,7 +1028,14 @@ class ErrorAnalyst:
             for trace in (traces or []):
                 for art in trace.artifact_index:
                     if art.art_id == art_id:
-                        content = get_artifact_content(trace, art, offset=offset, limit=limit)
+                        safe_limit = max(1, min(limit, self.settings.llm_max_artifact_lines))
+                        content = get_artifact_content(
+                            trace,
+                            art,
+                            offset=offset,
+                            limit=safe_limit,
+                            max_chars=self.settings.llm_max_artifact_chars,
+                        )
                         if content:
                             return content, _estimate_token_count(content)
                         return None, 0
@@ -1011,6 +1056,9 @@ class ErrorAnalyst:
             read_file_cb=read_file_cb,
             read_artifact_cb=read_artifact_cb if has_artifacts else None,
             has_artifacts=has_artifacts,
+            max_artifact_lines=self.settings.llm_max_artifact_lines,
+            max_tool_message_chars=self.settings.llm_max_tool_message_chars,
+            max_message_chars=self.settings.llm.max_message_chars,
         )
         notes.extend(react_notes)
 

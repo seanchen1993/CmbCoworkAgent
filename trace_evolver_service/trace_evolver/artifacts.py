@@ -13,6 +13,7 @@ import logging
 from pathlib import PurePosixPath
 
 from trace_evolver.schemas import ImportedTrace, TraceArtifact
+from trace_evolver.utils import compress_text_for_llm
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +145,7 @@ def get_artifact_content(
     *,
     offset: int = 0,
     limit: int = 0,
+    max_chars: int | None = None,
 ) -> str | None:
     """Retrieve artifact content with line-range pagination.
 
@@ -155,15 +157,18 @@ def get_artifact_content(
     ``_DEFAULT_WRITE_LIMIT`` for ``write`` artifacts to prevent
     accidentally dumping an entire large file into the prompt.
 
-    For ``edit`` artifacts the full diff is always returned (they're small).
-    The caller (ReAct loop) is responsible for enforcing token budgets.
+    For ``edit`` artifacts the diff is returned, still capped by ``max_chars``
+    when provided. The caller (ReAct loop) also enforces token budgets.
     """
     raw = _raw_artifact_content(trace, artifact)
     if raw is None:
         return None
 
-    # edit diffs are typically small — always return in full
+    # Edit diffs are usually small, but production traces can still contain
+    # large replacements. Apply the same hard character cap before prompt use.
     if artifact.artifact_type == "edit":
+        if max_chars is not None:
+            return compress_text_for_llm(raw, max_chars, label=f"artifact:{artifact.art_id}")
         return raw
 
     lines = raw.split("\n")
@@ -180,7 +185,10 @@ def get_artifact_content(
     header = f"[Lines {start + 1}-{end} of {total}]"
     if end < total:
         header += f" Use offset={end} to read more."
-    return header + "\n" + "\n".join(selected)
+    result = header + "\n" + "\n".join(selected)
+    if max_chars is not None:
+        result = compress_text_for_llm(result, max_chars, label=f"artifact:{artifact.art_id}")
+    return result
 
 
 def _short_path(file_path: str, max_parts: int = 3) -> str:
@@ -202,7 +210,7 @@ def format_artifact_catalog(traces: list[ImportedTrace]) -> str:
         for art in trace.artifact_index:
             tags: list[str] = []
             if art.latest_snapshot:
-                tags.append("[latest-snapshot]")
+                tags.append("[latest-snapshot-not-final-if-followed-by-edit]")
             elif art.latest:
                 tags.append("[latest-event]")
             tag_str = " " + " ".join(tags) if tags else ""

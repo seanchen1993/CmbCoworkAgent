@@ -107,3 +107,28 @@ def trim_snippet(text: str, limit: int = 200) -> str:
     if len(collapsed) <= limit:
         return collapsed
     return collapsed[: limit - 3] + "..."
+
+
+def compress_text_for_llm(text: str, limit: int, *, label: str = "content") -> str:
+    """Preserve line breaks while enforcing a hard character cap for LLM input."""
+    if limit <= 0:
+        return ""
+    if len(text) <= limit:
+        return text
+
+    estimate_marker = f"\n[LLM input truncated from {label}]\n"
+    if len(estimate_marker) >= limit:
+        return estimate_marker[:limit]
+
+    keep = limit - len(estimate_marker)
+    estimated_head = max(0, int(keep * 0.7))
+    estimated_tail = max(0, keep - estimated_head)
+    omitted = max(0, len(text) - estimated_head - estimated_tail)
+    marker = f"\n[LLM input truncated: {omitted} chars omitted from {label}]\n"
+    if len(marker) >= limit:
+        return marker[:limit]
+    keep = limit - len(marker)
+    head = max(0, int(keep * 0.7))
+    tail = max(0, keep - head)
+    suffix = text[-tail:].lstrip() if tail > 0 else ""
+    return text[:head].rstrip() + marker + suffix

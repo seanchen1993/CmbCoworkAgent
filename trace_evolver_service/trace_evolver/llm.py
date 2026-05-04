@@ -16,6 +16,7 @@ from typing import Any
 from openai import OpenAI
 
 from trace_evolver.config import LLMSettings
+from trace_evolver.utils import compress_text_for_llm
 
 logger = logging.getLogger(__name__)
 
@@ -44,12 +45,13 @@ class LLMClient:
 
         Retries once on transient errors before raising.
         """
+        bounded_messages = _compress_messages(messages, self._settings.max_message_chars)
         last_exc: Exception | None = None
         for attempt in range(_MAX_RETRIES + 1):
             try:
                 request_kwargs: dict[str, Any] = {
                     "model": self._settings.model,
-                    "messages": messages,
+                    "messages": bounded_messages,
                     "temperature": temperature if temperature is not None else self._settings.temperature,
                 }
                 resolved_max_tokens = max_tokens if max_tokens is not None else self._settings.max_tokens
@@ -127,6 +129,19 @@ class LLMClient:
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 _MINIMAX_TOOL_CALL_RE = re.compile(r"<minimax:tool_call>\s*", re.DOTALL)
 _MINIMAX_TOOL_CALL_END_RE = re.compile(r"\s*</minimax:tool_call>", re.DOTALL)
+
+
+def _compress_messages(messages: list[dict[str, str]], max_chars: int) -> list[dict[str, str]]:
+    """Apply a final per-message hard cap before sending content to the LLM."""
+    bounded: list[dict[str, str]] = []
+    for message in messages:
+        next_message = dict(message)
+        content = next_message.get("content")
+        if isinstance(content, str):
+            role = str(next_message.get("role", "message"))
+            next_message["content"] = compress_text_for_llm(content, max_chars, label=f"{role} message")
+        bounded.append(next_message)
+    return bounded
 
 
 def _strip_think_tags(text: str) -> str:

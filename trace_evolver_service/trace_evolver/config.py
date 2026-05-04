@@ -28,6 +28,16 @@ def _load_dotenv() -> None:
 _load_dotenv()
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 class LLMSettings(BaseModel):
     base_url: str = Field(
         default_factory=lambda: os.environ.get(
@@ -53,6 +63,9 @@ class LLMSettings(BaseModel):
     output_reserve_tokens: int = 12_000
     markdown_soft_cap_tokens: int = 60_000
     markdown_hard_cap_tokens: int = 80_000
+    max_message_chars: int = Field(
+        default_factory=lambda: _env_int("TRACE_EVOLVER_LLM_MAX_MESSAGE_CHARS", 60_000)
+    )
 
     @property
     def markdown_soft_budget_tokens(self) -> int:
@@ -88,6 +101,27 @@ class Settings(BaseModel):
     error_analyst_react_max_reads: int = 3
     error_analyst_max_markdown_reads: int = 2
     error_analyst_max_artifact_reads: int = 1
+    llm_max_trace_chars: int = Field(
+        default_factory=lambda: _env_int("TRACE_EVOLVER_LLM_MAX_TRACE_CHARS", 24_000)
+    )
+    llm_max_skill_file_chars: int = Field(
+        default_factory=lambda: _env_int("TRACE_EVOLVER_LLM_MAX_SKILL_FILE_CHARS", 50_000)
+    )
+    llm_max_visible_file_chars: int = Field(
+        default_factory=lambda: _env_int("TRACE_EVOLVER_LLM_MAX_VISIBLE_FILE_CHARS", 50_000)
+    )
+    llm_max_artifact_lines: int = Field(
+        default_factory=lambda: _env_int("TRACE_EVOLVER_LLM_MAX_ARTIFACT_LINES", 200)
+    )
+    llm_max_artifact_chars: int = Field(
+        default_factory=lambda: _env_int("TRACE_EVOLVER_LLM_MAX_ARTIFACT_CHARS", 20_000)
+    )
+    llm_max_tool_message_chars: int = Field(
+        default_factory=lambda: _env_int("TRACE_EVOLVER_LLM_MAX_TOOL_MESSAGE_CHARS", 30_000)
+    )
+    llm_max_merge_prompt_chars: int = Field(
+        default_factory=lambda: _env_int("TRACE_EVOLVER_LLM_MAX_MERGE_PROMPT_CHARS", 50_000)
+    )
     family_similarity_threshold: float = 0.35
     episode_gap_minutes: int = 30
     enable_episode_route_classifier: bool = True
