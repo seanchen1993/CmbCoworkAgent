@@ -1,8 +1,9 @@
-import { useEffect, useState, useCallback, useRef, useLayoutEffect } from "react"
+import { useEffect, useState, useCallback, useRef, useLayoutEffect, lazy, Suspense } from "react"
 import {
   Briefcase,
   Eye,
   GitBranch,
+  Loader2,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
@@ -11,14 +12,35 @@ import {
 import { ThreadSidebar } from "@/components/sidebar/ThreadSidebar"
 import { TabbedPanel } from "@/components/tabs"
 import { RightPanel } from "@/components/panels/RightPanel"
-import { KanbanView } from "@/components/kanban"
-import { ClaudeCodePanel } from "@/components/customize/ClaudeCodePanel"
-import { CustomizeView } from "@/components/customize/CustomizeView"
+const KanbanView = lazy(() =>
+  import("@/components/kanban").then((m) => ({ default: m.KanbanView }))
+)
+const ClaudeCodePanel = lazy(() =>
+  import("@/components/customize/ClaudeCodePanel").then((m) => ({ default: m.ClaudeCodePanel }))
+)
+const CustomizeView = lazy(() =>
+  import("@/components/customize/CustomizeView").then((m) => ({ default: m.CustomizeView }))
+)
+const DashboardView = lazy(() =>
+  import("@/components/dashboard/DashboardView").then((m) => ({ default: m.DashboardView }))
+)
 import { ResizeHandle } from "@/components/ui/resizable"
 import { useAppStore } from "@/lib/store"
 import { ThreadProvider } from "@/lib/thread-context"
 import { initMMJ } from "../js/mmjUtils"
 import { Toaster } from "sonner"
+interface UserInfoConfig {
+  sapId: '',//8
+  ystId: '',//6
+  userName: '',
+  originOrgId: '',
+  orgName: '',
+  pathName: '',
+  originPathId: '',
+  ystRefreshToken: '',
+  ystCode: '',
+  ystAccessToken: '',
+}
 
 async function migrateDisabledSkillsFromLocalStorage(): Promise<void> {
   try {
@@ -47,6 +69,7 @@ function App(): React.JSX.Element {
   const {
     currentThreadId,
     loadThreads,
+    loadDashboardAllowed,
     createThread,
     mainView,
     sidebarCollapsed,
@@ -60,15 +83,59 @@ function App(): React.JSX.Element {
   const [rightWidth, setRightWidth] = useState(RIGHT_DEFAULT)
   const [rightModule, setRightModule] = useState<"work" | "preview" | "git">("work")
   const [previewFullscreen, setPreviewFullscreen] = useState(false)
-  const [hasPendingGitDiff, setHasPendingGitDiff] = useState(false)
+  const [pendingGitDiffByThread, setPendingGitDiffByThread] = useState<Record<string, boolean>>({})
+  const [isGitWorkspaceByThread, setIsGitWorkspaceByThread] = useState<Record<string, boolean>>({})
   const [zoomLevel, setZoomLevel] = useState(1)
-  const autoOpenedGitForThreadRef = useRef<string | null>(null)
+  const [bus, setBus] = useState(true)
+  // Delay loading ClaudeCodePanel code until user opens it once.
+  // After first open, keep it mounted (hidden when inactive) to preserve sessions.
+  const [claudeCodeMounted, setClaudeCodeMounted] = useState(false)
   const panelToggleBaseClass =
     "group inline-flex h-7 items-center justify-center gap-1.5 rounded-md border border-transparent px-2 text-[11px] font-medium whitespace-nowrap transition-all duration-150 outline-none focus-visible:ring-1 focus-visible:ring-border focus-visible:ring-offset-0 active:scale-95"
   const moduleActiveClass = "text-status-warning bg-status-warning/15 border-status-warning/45 hover:bg-status-warning/20"
   const moduleInactiveClass = "text-foreground hover:bg-muted/45"
   const sidebarToggleText = sidebarCollapsed ? "显示侧边栏" : "隐藏侧边栏"
   const rightPanelToggleText = rightPanelCollapsed ? "显示右侧面板" : "隐藏右侧面板"
+
+  const initUser = () => {
+    window.api.models.getUserInfo().then(user => {
+        const userInfo = user || {} as UserInfoConfig
+        if (userInfo.sapId) {
+          fetch(`https://archguardservice.paas.${import.meta.env.VITE_LOGIN_PT}.cn/cowork/login-info`, {
+              method: 'GET',
+              headers: {
+                  ystCode: userInfo.ystCode,
+                  ystRefreshToken: userInfo.ystRefreshToken || '',
+              }
+          }).then(async res => {
+              const result = await res.json()
+              if (result.returnCode === 'SUC0000') {
+                const resBody = result.body
+                setBus(true)
+                window.api.models.upsertUserInfo({
+                    sapId: resBody.sapId,//8
+                    ystId: resBody.ystId,//6
+                    userName: resBody.userName,
+                    originOrgId: resBody.originOrgId,
+                    orgName: resBody.orgName,
+                    pathName: resBody.pathName,
+                    originPathId: resBody.originPathId,
+                    ystRefreshToken: resBody.ystRefreshToken,
+                    ystCode: userInfo.ystCode,
+                    ystIdToken:resBody.ystIdToken,
+                    ystAccessToken: resBody.ystAccessToken
+                })
+              } else if (result.returnCode === 'BIZ9000'){
+                setBus(false)
+              } else{
+                window.electron.openLoginPage()
+              }
+          })
+        } else {
+          window.electron.openLoginPage()
+        }
+    });
+  };
 
   useEffect(() => {
     document.addEventListener('click', (e) => {
@@ -80,6 +147,7 @@ function App(): React.JSX.Element {
       }
     });
     initMMJ()
+    initUser()
   }, []);
 
   // Track drag start widths
@@ -180,87 +248,57 @@ function App(): React.JSX.Element {
     handlePreviewCollapse()
   }, [handlePreviewCollapse])
 
+  const setThreadPendingGitDiff = useCallback((threadId: string, pending: boolean) => {
+    setPendingGitDiffByThread((prev) => {
+      if (prev[threadId] === pending) return prev
+      return { ...prev, [threadId]: pending }
+    })
+  }, [])
+
+  const handleThreadGitStatusChange = useCallback((threadId: string, isGit: boolean) => {
+    setIsGitWorkspaceByThread((prev) => {
+      if (prev[threadId] === isGit) return prev
+      return { ...prev, [threadId]: isGit }
+    })
+  }, [])
+
   const selectGitModule = useCallback(() => {
+    if (currentThreadId) {
+      setThreadPendingGitDiff(currentThreadId, false)
+    }
     setRightModule("git")
     handlePreviewExpand()
-  }, [handlePreviewExpand])
+  }, [currentThreadId, handlePreviewExpand, setThreadPendingGitDiff])
+
+  const isCurrentThreadGit = currentThreadId ? Boolean(isGitWorkspaceByThread[currentThreadId]) : false
+  const hasPendingGitDiff = currentThreadId
+    ? Boolean(pendingGitDiffByThread[currentThreadId] && isCurrentThreadGit)
+    : false
 
   useEffect(() => {
-    let cancelled = false
-
-    const syncRightModuleByWorkspace = async (): Promise<void> => {
-      if (!currentThreadId || mainView !== "thread") {
-        setRightModule("work")
-        handlePreviewCollapse()
-        return
-      }
-
-      try {
-        const summary = await window.api.workspace.getGitPanelSummary(currentThreadId)
-        if (cancelled) return
-
-        const isGitWorkspace = Boolean(summary.isGitRepo ?? summary.isWorktree)
-        if (isGitWorkspace) {
-          autoOpenedGitForThreadRef.current = currentThreadId
-          setRightModule("git")
-          handlePreviewExpand()
-          return
-        }
-
-        setRightModule("work")
-        handlePreviewCollapse()
-      } catch {
-        if (cancelled) return
-        setRightModule("work")
-        handlePreviewCollapse()
-      }
-    }
-
-    void syncRightModuleByWorkspace()
-
-    return () => {
-      cancelled = true
-    }
-  }, [currentThreadId, mainView, handlePreviewCollapse, handlePreviewExpand])
+    // Keep right panel behavior predictable: when switching thread or entering thread view,
+    // always fall back to workspace mode.
+    setRightModule("work")
+    handlePreviewCollapse()
+  }, [currentThreadId, mainView, handlePreviewCollapse])
 
   useEffect(() => {
-    if (!currentThreadId || mainView !== "thread") {
-      setHasPendingGitDiff(false)
-      return
+    if (mainView === "claudecode") {
+      setClaudeCodeMounted(true)
     }
-    let cancelled = false
+  }, [mainView])
 
-    const refreshSummary = async (): Promise<void> => {
-      try {
-        const summary = await window.api.workspace.getGitPanelSummary(currentThreadId)
-        if (!cancelled) {
-          const isGitWorkspace = Boolean(summary.isGitRepo ?? summary.isWorktree)
-          setHasPendingGitDiff(Boolean(isGitWorkspace && summary.hasPendingDiff))
-          if (isGitWorkspace && autoOpenedGitForThreadRef.current !== currentThreadId) {
-            autoOpenedGitForThreadRef.current = currentThreadId
-            setRightModule("git")
-            handlePreviewExpand()
-          }
-        }
-      } catch {
-        if (!cancelled) setHasPendingGitDiff(false)
-      }
-    }
-
-    refreshSummary()
-    const timer = window.setInterval(refreshSummary, 3000)
+  useEffect(() => {
     const cleanupFs = window.api.workspace.onFilesChanged((data) => {
-      if (data.threadId === currentThreadId) {
-        refreshSummary()
-      }
+      const changedThreadId = data.threadId
+      if (!changedThreadId) return
+      // Keep current behavior: when user is already in current thread's Git panel, don't raise notice.
+      if (rightModule === "git" && changedThreadId === currentThreadId) return
+      setThreadPendingGitDiff(changedThreadId, true)
     })
 
-    return () => {
-      cancelled = true
-      window.clearInterval(timer)
-      cleanupFs()
-    }
-  }, [currentThreadId, mainView, handlePreviewExpand])
+    return cleanupFs
+  }, [currentThreadId, rightModule, setThreadPendingGitDiff])
 
   // Reset drag start on mouse up
   useEffect(() => {
@@ -275,7 +313,7 @@ function App(): React.JSX.Element {
     async function init(): Promise<void> {
       try {
         await migrateDisabledSkillsFromLocalStorage()
-        await loadThreads()
+        await Promise.all([loadThreads(), loadDashboardAllowed()])
         const threads = useAppStore.getState().threads
         if (threads.length === 0) {
           await createThread()
@@ -328,6 +366,14 @@ function App(): React.JSX.Element {
     return (
       <div className="flex h-screen items-center justify-center bg-background">
         <div className="text-muted-foreground">Initializing...</div>
+      </div>
+    )
+  }
+
+  if(!bus){
+    return (
+      <div className="flex h-screen items-center justify-center bg-background">
+        <div className="text-muted-foreground">目前仅供零售客户经营开发团队使用，暂不对外提供服务...,有任何疑问请联系 范雄</div>
       </div>
     )
   }
@@ -435,12 +481,12 @@ function App(): React.JSX.Element {
                         : moduleInactiveClass
                   }`}
                   onClick={selectGitModule}
-                  title="Git 操作"
-                  aria-label="Git 操作"
+                  title="Git 面板"
+                  aria-label="Git 面板"
                   aria-pressed={rightModule === "git"}
                 >
                   <GitBranch size={16} className="shrink-0" strokeWidth={1.8} />
-                  <span>Git 操作</span>
+                  <span>Git 面板</span>
                 </button>
                 <button
                   type="button"
@@ -494,10 +540,12 @@ function App(): React.JSX.Element {
         {mainView === "customize" ? (
           <div className="flex flex-1 overflow-hidden bg-grid-subtle">
             <main className="flex flex-1 flex-col min-w-0 overflow-hidden">
-              <CustomizeView />
+              <Suspense fallback={<div className="flex flex-1 items-center justify-center"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>}>
+                <CustomizeView />
+              </Suspense>
             </main>
           </div>
-        ) : mainView !== "claudecode" ? (
+        ) : mainView !== "claudecode" && mainView !== "dashboard" ? (
           <div className="relative flex flex-1 overflow-hidden bg-grid-subtle">
             {/* Left Sidebar */}
             {!sidebarCollapsed && (
@@ -511,7 +559,9 @@ function App(): React.JSX.Element {
 
             {mainView === "kanban" ? (
               <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
-                <KanbanView />
+                <Suspense fallback={<div className="flex flex-1 items-center justify-center"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>}>
+                  <KanbanView />
+                </Suspense>
               </main>
             ) : (
               <>
@@ -519,7 +569,13 @@ function App(): React.JSX.Element {
                 {!previewFullscreen && (
                   <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
                     {currentThreadId ? (
-                      <TabbedPanel threadId={currentThreadId} showTabBar={false} />
+                      <TabbedPanel
+                        threadId={currentThreadId}
+                        showTabBar={false}
+                        hasPendingGitDiffNotice={hasPendingGitDiff && rightModule !== "git"}
+                        onRequestOpenGitPanel={selectGitModule}
+                        onThreadGitStatusChange={handleThreadGitStatusChange}
+                      />
                     ) : (
                       <div className="flex flex-1 items-center justify-center text-muted-foreground">
                         选择或创建一个任务开始
@@ -541,7 +597,6 @@ function App(): React.JSX.Element {
                   <RightPanel
                     moduleMode={rightModule}
                     onRequestPreviewMode={selectPreviewModule}
-                    onRequestGitMode={selectGitModule}
                     onRequestWorkMode={selectWorkModule}
                     onPreviewFullscreenChange={setPreviewFullscreen}
                   />
@@ -551,21 +606,44 @@ function App(): React.JSX.Element {
           </div>
         ) : null}
 
-        {/* Claude Code 面板始终挂载在所有条件分支外，CSS 控制显隐，不受 customize/thread 切换影响 */}
-        <div className={mainView === "claudecode" ? "relative flex flex-1 overflow-hidden bg-grid-subtle" : "hidden"}>
-          {/* claudecode 模式下也显示侧边栏 */}
-          {mainView === "claudecode" && !sidebarCollapsed && (
-            <>
-              <div style={{ width: leftWidth }} className="shrink-0">
-                <ThreadSidebar />
-              </div>
-              <ResizeHandle onDrag={handleLeftResize} />
-            </>
-          )}
-          <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
-            <ClaudeCodePanel visible={mainView === "claudecode"} />
-          </main>
-        </div>
+        {/* Dashboard 面板 */}
+        {mainView === "dashboard" && (
+          <div className="relative flex flex-1 overflow-hidden bg-grid-subtle">
+            {!sidebarCollapsed && (
+              <>
+                <div style={{ width: leftWidth }} className="shrink-0">
+                  <ThreadSidebar />
+                </div>
+                <ResizeHandle onDrag={handleLeftResize} />
+              </>
+            )}
+            <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
+              <Suspense fallback={<div className="flex flex-1 items-center justify-center"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>}>
+                <DashboardView />
+              </Suspense>
+            </main>
+          </div>
+        )}
+
+        {/* Claude Code 面板：首次进入时再加载代码；之后保持挂载，切换视图时仅隐藏。 */}
+        {(claudeCodeMounted || mainView === "claudecode") && (
+          <div className={mainView === "claudecode" ? "relative flex flex-1 overflow-hidden bg-grid-subtle" : "hidden"}>
+            {/* claudecode 模式下也显示侧边栏 */}
+            {mainView === "claudecode" && !sidebarCollapsed && (
+              <>
+                <div style={{ width: leftWidth }} className="shrink-0">
+                  <ThreadSidebar />
+                </div>
+                <ResizeHandle onDrag={handleLeftResize} />
+              </>
+            )}
+            <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
+              <Suspense fallback={<div className="flex flex-1 items-center justify-center"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>}>
+                <ClaudeCodePanel visible={mainView === "claudecode"} />
+              </Suspense>
+            </main>
+          </div>
+        )}
       </div>
       <Toaster position="top-center" richColors duration={2200} />
     </ThreadProvider>

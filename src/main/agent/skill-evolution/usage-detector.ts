@@ -1,8 +1,10 @@
 import { posix as pathPosix } from "path"
+import { ensureVersionedSkillIdentifier } from "../../utils/skill-identifiers"
 
 export interface SkillMetadataLite {
   name?: string
   path?: string
+  version?: string
 }
 
 function normalizePath(path: string): string {
@@ -18,24 +20,34 @@ export class SkillUsageDetector {
     for (const skill of skills) {
       const skillName = typeof skill.name === "string" ? skill.name.trim() : ""
       const skillPath = typeof skill.path === "string" ? normalizePath(skill.path.trim()) : ""
-      if (!skillName || !skillPath) continue
+      const skillIdentifier = ensureVersionedSkillIdentifier(skillName, skill.version)
+      if (!skillName || !skillPath || !skillIdentifier) continue
 
-      this.loadedSkillsByDocPath.set(skillPath, skillName)
+      this.loadedSkillsByDocPath.set(skillPath, skillIdentifier)
       const rootDir = normalizePath(pathPosix.dirname(skillPath))
       if (rootDir && rootDir !== ".") {
-        this.loadedSkillsByRootDir.set(rootDir, skillName)
+        this.loadedSkillsByRootDir.set(rootDir, skillIdentifier)
       }
     }
   }
 
-  onReadFilePath(rawPath: string): void {
+  /**
+   * Record a read_file path and check whether it matches any loaded skill.
+   * Returns `true` when at least one new skill name was added to the set
+   * (callers can use this to immediately refresh downstream state, e.g.
+   * tracer.setUsedSkills / adoption context, so that subsequent code_gen
+   * events in the same turn carry the skill attribution).
+   */
+  onReadFilePath(rawPath: string): boolean {
     const normalized = normalizePath(rawPath.trim())
-    if (!normalized) return
+    if (!normalized) return false
+
+    const priorSize = this.usedSkillNames.size
 
     const exactMatch = this.loadedSkillsByDocPath.get(normalized)
     if (exactMatch) {
       this.usedSkillNames.add(exactMatch)
-      return
+      return this.usedSkillNames.size > priorSize
     }
 
     for (const [rootDir, skillName] of this.loadedSkillsByRootDir.entries()) {
@@ -43,6 +55,7 @@ export class SkillUsageDetector {
         this.usedSkillNames.add(skillName)
       }
     }
+    return this.usedSkillNames.size > priorSize
   }
 
   getUsedSkillNames(): string[] {

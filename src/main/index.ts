@@ -1,7 +1,18 @@
 import { app, shell, BrowserWindow, ipcMain, nativeImage, powerSaveBlocker } from "electron"
+
+// Fix Linux sandbox error: "The setuid sandbox is not running as root"
+// On Linux the chrome-sandbox binary often lacks setuid permissions in packaged apps.
+if (process.platform === "linux") {
+  app.commandLine.appendSwitch("no-sandbox")
+}
+
 import { existsSync } from "fs"
 import { join } from "path"
 import { writeMainLog, writeRendererLog } from "./logging"
+
+const MAIN_LOG_EVENT_CHANNEL = "debug:main-console-log"
+const MAIN_LOG_TOGGLE_CHANNEL = "debug:set-main-console-forwarding"
+let mainLogForwardingEnabled = false
 
 function getConsoleLevelName(level: number): string {
   switch (level) {
@@ -15,6 +26,59 @@ function getConsoleLevelName(level: number): string {
       return "DEBUG"
     default:
       return "LOG"
+  }
+}
+
+function safeFormatLogValue(value: unknown, seen = new WeakSet<object>()): string {
+  if (value instanceof Error) return value.stack || `${value.name}: ${value.message}`
+  if (typeof value === "string") return value
+  if (typeof value === "bigint") return `${value.toString()}n`
+  if (
+    value === null ||
+    value === undefined ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  ) {
+    return String(value)
+  }
+  if (typeof value === "symbol") return value.toString()
+  if (typeof value === "function") return `[Function ${value.name || "anonymous"}]`
+  if (typeof value !== "object") return String(value)
+
+  try {
+    return JSON.stringify(
+      value,
+      (_key, nestedValue) => {
+        if (typeof nestedValue === "bigint") return `${nestedValue.toString()}n`
+        if (nestedValue instanceof Error) {
+          return {
+            name: nestedValue.name,
+            message: nestedValue.message,
+            stack: nestedValue.stack
+          }
+        }
+        if (typeof nestedValue === "symbol") return nestedValue.toString()
+        if (typeof nestedValue === "function") return `[Function ${nestedValue.name || "anonymous"}]`
+        if (nestedValue && typeof nestedValue === "object") {
+          if (seen.has(nestedValue)) return "[Circular]"
+          seen.add(nestedValue)
+        }
+        return nestedValue
+      },
+      2
+    )
+  } catch {
+    return Object.prototype.toString.call(value)
+  }
+}
+
+function forwardMainLogToRenderer(level: string, args: unknown[]): void {
+  if (!mainLogForwardingEnabled) return
+  const message = args.map((arg) => safeFormatLogValue(arg)).join(" ")
+  const windows = BrowserWindow.getAllWindows()
+  for (const window of windows) {
+    if (window.isDestroyed() || window.webContents.isDestroyed()) continue
+    window.webContents.send(MAIN_LOG_EVENT_CHANNEL, { level, message })
   }
 }
 
@@ -32,6 +96,7 @@ function withEpipeGuard<T extends (...args: unknown[]) => void>(fn: T): T {
 function withMainFileLogging<T extends (...args: unknown[]) => void>(level: string, fn: T): T {
   return ((...args: Parameters<T>) => {
     writeMainLog(level, args)
+    forwardMainLogToRenderer(level, args)
     fn(...args)
   }) as T
 }
@@ -75,20 +140,28 @@ import { registerOptimizerHandlers } from "./ipc/optimizer"
 import { registerChatXHandlers } from "./ipc/chatx"
 import { registerHooksHandlers } from "./ipc/hooks"
 import { registerTerminalHandlers, disposeAllTerminals } from "./ipc/terminal"
+import { registerCodeExecToolsHandlers } from "./ipc/code-exec-tools"
 import { registerRoutingHandlers } from "./ipc/routing"
+import { registerDashboardHandlers } from "./ipc/dashboard"
+import { registerLspHandlers } from "./ipc/lsp"
+import { stopAllLsp } from "./lsp"
 import { setTraceReporter } from "./agent/trace/collector"
 import { CloudTraceReporter } from "./agent/trace/cloud-reporter"
+import { setEventReporter, HttpEventReporter } from "./services/event-reporter"
+import { initializeAdoptionTracker, shutdownAdoptionTracker } from "./services/adoption-tracker"
 import { initializeDatabase, flush } from "./db"
 import { startScheduler, stopScheduler } from "./services/scheduler"
 import { startHeartbeat, stopHeartbeat } from "./services/heartbeat"
 import { startChatX, stopChatX } from "./services/chatx"
 import { LocalSandbox } from "./agent/local-sandbox"
 import { closeRuntime } from "./agent/runtime"
+import { makeBroadcastHookResultCallback } from "./hooks/result-callback"
+import { fireSessionEndAll, hasActiveSessions } from "./hooks/session-lifecycle"
 import { registerUpdaterHandlers, startUpdateChecker, stopUpdateChecker } from "./updater"
 import { runStartupSelfCheck } from "./updater/rollback"
 import { isKeepAwakeEnabled, setKeepAwakeEnabled } from "./storage"
-import  os from "os";
 import { getLocalIP } from "./net-utils"
+import { trackEvent } from "./services/event-reporter"
 
 let mainWindow: BrowserWindow | null = null
 let loginWindow: BrowserWindow | null = null
@@ -155,7 +228,7 @@ function createWindow(): void {
       sandbox: false
     },
     ...(devWindowIcon ? { icon: devWindowIcon } : {}),
-    autoHideMenuBar: !['.166','.147','.216','.215','.225'].some(ip => getLocalIP().includes(ip)) // 自动隐藏菜单栏
+    autoHideMenuBar: !['.166','.147','.216','.215','.225', '201.99'].some(ip => getLocalIP().includes(ip)) // 自动隐藏菜单栏
   })
 
   mainWindow.on("ready-to-show", () => {
@@ -285,10 +358,21 @@ if (!gotTheLock) {
     if (traceBaseUrl) {
       setTraceReporter(new CloudTraceReporter(traceBaseUrl))
       console.log("[Main] CloudTraceReporter registered, uploading traces to:", traceBaseUrl)
+
+      // Operational telemetry events (skill / git) share the same base URL.
+      setEventReporter(new HttpEventReporter(traceBaseUrl))
+      console.log("[Main] HttpEventReporter registered, sending events to:", traceBaseUrl)
     }
 
     // Initialize database
     await initializeDatabase()
+
+    // Initialize adoption tracker (side-effect only; never blocks startup)
+    try {
+      await initializeAdoptionTracker()
+    } catch (err) {
+      console.warn("[Main] AdoptionTracker init failed (disabled):", err)
+    }
 
     // Register IPC handlers
     registerAgentHandlers(ipcMain)
@@ -306,8 +390,27 @@ if (!gotTheLock) {
     registerChatXHandlers(ipcMain)
     registerHooksHandlers(ipcMain)
     registerTerminalHandlers(ipcMain)
+    registerCodeExecToolsHandlers(ipcMain)
     registerRoutingHandlers(ipcMain)
+    registerDashboardHandlers(ipcMain)
     registerUpdaterHandlers()
+    registerLspHandlers(ipcMain)
+
+    ipcMain.on(MAIN_LOG_TOGGLE_CHANNEL, (_event, enabled: unknown) => {
+      mainLogForwardingEnabled = Boolean(enabled)
+    })
+
+    // Track event handler for client-side telemetry
+    ipcMain.handle("track-event", async (_event, payload: any) => {
+      try {
+        const { eventName, eventCategory, properties } = payload
+        trackEvent(eventName, eventCategory, properties)
+        return { success: true }
+      } catch (error) {
+        console.error("[IPC] Failed to track event:", error)
+        return { success: false }
+      }
+    })
 
     // Register file system handlers
     ipcMain.handle("get-platform", async () => {
@@ -381,6 +484,21 @@ if (!gotTheLock) {
       }
     })
 
+    ipcMain.handle("open-login-page", async () => {
+      if(mainWindow && !mainWindow.isDestroyed() && !isDev) {
+        mainWindow.loadURL(`https://oa-auth.paas.${import.meta.env.VITE_LOGIN_PT}.com/auth/sso-login` +
+          "?client_id=5221ab160e0145d9b0736c2f8fb84229" +
+          "&redirect_uri=" + encodeURIComponent(`https://cmbdevclawweb.paas.${import.meta.env.VITE_LOGIN_PT}.cn/login.html`) +
+          "&response_type=code")
+      }
+    })
+
+    ipcMain.handle("close-login-page", async () => {
+      if(mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.loadFile(join(__dirname, "../renderer/index.html"))
+      }
+    })
+
     createWindow()
 
     // Run post-update self-check before anything else
@@ -417,7 +535,34 @@ if (!gotTheLock) {
     }
   })
 
-  app.on("will-quit", () => {
+  // Use before-quit (not will-quit) so we can preventDefault, await SessionEnd hooks,
+  // then re-issue app.quit(). will-quit fires during teardown — async hook spawns
+  // queued there have no guarantee of completing before the process exits.
+  let sessionEndDone = false
+  app.on("before-quit", (event) => {
+    if (sessionEndDone) return
+    if (!hasActiveSessions()) {
+      sessionEndDone = true
+      return
+    }
+    event.preventDefault()
+    fireSessionEndAll(5000, (threadId) => makeBroadcastHookResultCallback(`agent:stream:${threadId}`))
+      .catch((e) => console.warn("[Main] SessionEnd hooks error:", e))
+      .finally(() => {
+        sessionEndDone = true
+        app.quit()
+      })
+  })
+
+  let quitting = false
+  app.on("will-quit", (e) => {
+    if (quitting) {
+      // Re-entry: user pressed Cmd+Q again while cleanup is running. Just block.
+      e.preventDefault()
+      return
+    }
+    quitting = true
+    e.preventDefault()
     applyKeepAwake(false)
     disposeAllTerminals()
     LocalSandbox.killAll()
@@ -425,7 +570,35 @@ if (!gotTheLock) {
     stopHeartbeat()
     stopChatX()
     stopUpdateChecker()
-    closeRuntime().catch((e) => console.warn("[Main] closeRuntime error:", e))
-    flush()
+    try {
+      shutdownAdoptionTracker()
+    } catch (err) {
+      console.warn("[Main] shutdownAdoptionTracker error:", err)
+    }
+
+    const cleanup = Promise.all([
+      stopAllLsp().catch((err) => console.warn("[Main] stopAllLsp error:", err)),
+      closeRuntime().catch((err) => console.warn("[Main] closeRuntime error:", err))
+    ])
+
+    // Single-fire exit guard so timeout + finally don't both call app.exit
+    let exited = false
+    const doExit = (): void => {
+      if (exited) return
+      exited = true
+      flush()
+      app.exit(0)
+    }
+
+    // Give async cleanup up to 10s, then force quit
+    const forceTimer = setTimeout(() => {
+      console.warn("[Main] Cleanup timeout, force quitting")
+      doExit()
+    }, 10_000)
+
+    cleanup.finally(() => {
+      clearTimeout(forceTimer)
+      doExit()
+    })
   })
 }

@@ -80,7 +80,8 @@ export default defineConfig({
       lib: {
         entry: {
           index: "src/main/index.ts",
-          "pty-host": "src/main/pty-host.ts"
+          "pty-host": "src/main/pty-host.ts",
+          "code-exec-helper": "src/main/code-exec/helper-entry.ts"
         },
         formats: ["cjs"]
       },

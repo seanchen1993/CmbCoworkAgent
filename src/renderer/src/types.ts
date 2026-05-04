@@ -66,8 +66,22 @@ import type {
   PluginMetadata,
   PluginManifest,
   ChatXConfig,
-  ChatXRobotConfig
+  ChatXRobotConfig,
+  LspConfig,
+  LspDiagnostic,
+  LspLocation,
+  LspHoverResult,
+  LspSymbol,
+  LspCallHierarchyItem,
+  LspCallHierarchyIncomingCall,
+  LspCallHierarchyOutgoingCall,
+  LspStatus
 } from "../../main/types"
+import type {
+  ManagedSavedCodeExecTool,
+  SavedCodeExecPreviewResult,
+  SavedCodeExecToolUpdatePayload
+} from "../../main/ipc/code-exec-tools"
 
 export type {
   McpConnectorAdvanced,
@@ -82,7 +96,22 @@ export type {
   PluginMetadata,
   PluginManifest,
   ChatXConfig,
-  ChatXRobotConfig
+  ChatXRobotConfig,
+  LspConfig,
+  LspDiagnostic,
+  LspLocation,
+  LspHoverResult,
+  LspSymbol,
+  LspCallHierarchyItem,
+  LspCallHierarchyIncomingCall,
+  LspCallHierarchyOutgoingCall,
+  LspStatus
+}
+
+export type {
+  ManagedSavedCodeExecTool,
+  SavedCodeExecPreviewResult,
+  SavedCodeExecToolUpdatePayload
 }
 
 export type StreamEvent =
@@ -176,4 +205,4 @@ export interface SkillMetadata {
 }
 
 
-export type { HookConfig, HookEvent, HookUpsert } from "../../main/hooks/types"
+export type { HookConfig, HookEvent, HookType, PromptHookFallback, HookUpsert } from "../../main/hooks/types"

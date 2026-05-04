@@ -79,6 +79,7 @@ flowchart LR
 | `src/main/db/index.ts` | sql.js 线程元数据存储 |
 | `src/renderer/src/App.tsx` | 顶层布局（Thread / Kanban / Customize） |
 | `src/renderer/src/components/customize/*` | 自定义中心各能力面板 |
+| `docs/claude-code-push-commit-tech-reference.md` | Claude Code `commit/push` 技术方案分析与本项目落地参考 |
 
 ## 数据存储
 
@@ -141,6 +142,21 @@ npm run dist
 | `npm run typecheck` | TS 类型检查（node + web） |
 | `npm run format` | Prettier 格式化 |
 
+## 开发者工具日志开关（F12）
+
+渲染进程日志在 DevTools Console 中默认关闭，不会持续打印。需要排查问题时，可在 F12 Console 手动执行：
+
+| 命令 | 作用 |
+| --- | --- |
+| `window.logOn()` | 开启日志打印 |
+| `window.logOff()` | 关闭日志打印 |
+| `window.logState()` | 查看当前是否开启（`true/false`） |
+
+也可以通过 `.env` 控制启动时默认状态：
+
+- `VITE_CONSOLE_LOG_DEFAULT_ON=true`：默认开启日志打印
+- 不配置或设为 `false`：默认关闭日志打印
+
 ## 环境变量
 
 `.env` 示例（按需配置）：
@@ -157,6 +173,7 @@ npm run dist
 | `VITE_INTRUCTION_URL` | 使用说明地址（前端展示） |
 | `VITE_APP_DOWNLOAD_URL` | 应用下载地址（前端展示） |
 | `VITE_MARKET_MOCK_ON_ERROR` | 市场请求失败时是否启用 mock 回退 |
+| `VITE_CONSOLE_LOG_DEFAULT_ON` | DevTools Console 日志默认开关（`true/1/on/yes` 为开启） |
 
 ## 安全建议
 

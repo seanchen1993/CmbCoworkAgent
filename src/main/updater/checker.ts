@@ -14,14 +14,22 @@ export interface RollbackInfo {
   sha256: string
 }
 
+export interface PlatformInfo {
+  full?: AsarInfo
+  rollback?: RollbackInfo
+}
+
 export interface LatestJson {
   version: string
   minVersion: string
   releaseNotes: string
   mandatory: boolean
   asar: AsarInfo
+  /** Top-level full — backward compatible, used when platforms is absent */
   full?: AsarInfo
   rollback?: RollbackInfo
+  /** Per-platform overrides (win32 / linux). Takes priority over top-level full. */
+  platforms?: Record<string, PlatformInfo>
 }
 
 export type UpdateType = "asar" | "full"
@@ -129,6 +137,10 @@ export async function checkForUpdate(baseUrl: string): Promise<UpdateCheckResult
 
   const updateType = determineUpdateType(currentVersion, latest.version, latest.minVersion)
 
+  // Resolve platform-specific overrides: platforms[platform] > top-level
+  const platform = process.platform // "win32" | "linux" | "darwin"
+  const platformInfo = latest.platforms?.[platform]
+
   let downloadFile: string
   let downloadSha256: string
   let downloadSize: number
@@ -138,17 +150,21 @@ export async function checkForUpdate(baseUrl: string): Promise<UpdateCheckResult
     downloadSha256 = latest.asar.sha256
     downloadSize = latest.asar.size
   } else {
-    if (!latest.full) {
-      // Fallback to asar if full is not provided
+    // Priority: platforms[platform].full → top-level full → fallback to asar
+    const fullInfo = platformInfo?.full ?? latest.full
+    if (!fullInfo) {
       downloadFile = latest.asar.file
       downloadSha256 = latest.asar.sha256
       downloadSize = latest.asar.size
     } else {
-      downloadFile = latest.full.file
-      downloadSha256 = latest.full.sha256
-      downloadSize = latest.full.size
+      downloadFile = fullInfo.file
+      downloadSha256 = fullInfo.sha256
+      downloadSize = fullInfo.size
     }
   }
+
+  // Rollback: platforms[platform].rollback → top-level rollback
+  const rollback = platformInfo?.rollback ?? latest.rollback
 
   return {
     version: latest.version,
@@ -158,6 +174,6 @@ export async function checkForUpdate(baseUrl: string): Promise<UpdateCheckResult
     downloadFile,
     downloadSha256,
     downloadSize,
-    rollback: latest.rollback
+    rollback
   }
 }

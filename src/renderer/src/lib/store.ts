@@ -15,7 +15,7 @@ interface EvolutionRunProgress {
 
 interface AppState {
   // Main content view routing
-  mainView: "thread" | "customize" | "evolution" | "kanban" | "claudecode"
+  mainView: "thread" | "customize" | "evolution" | "kanban" | "claudecode" | "dashboard"
 
   // Threads
   threads: Thread[]
@@ -44,9 +44,17 @@ interface AppState {
   previousThreadId: string | null  // 切换到 Claude Code 前保存的线程 ID
   setShowClaudeCodeView: (show: boolean) => void
 
+  // Dashboard view state
+  showDashboardView: boolean
+  setShowDashboardView: (show: boolean) => void
+  dashboardAllowed: boolean | null  // null = loading
+  loadDashboardAllowed: () => Promise<void>
+
   // Customize view state
   showCustomizeView: boolean
   customizeInitialTab: string | null
+  marketInitialSkillCategory: string | null
+  marketInitialSkillSearchQuery: string | null
 
   // Thread actions
   loadThreads: () => Promise<void>
@@ -78,7 +86,9 @@ interface AppState {
 
   // Customize actions
   setShowCustomizeView: (show: boolean, tab?: string) => void
-  setMainView: (view: "thread" | "customize" | "evolution" | "kanban" | "claudecode") => void
+  setMarketInitialSkillCategory: (category: string | null) => void
+  setMarketInitialSkillSearchQuery: (query: string | null) => void
+  setMainView: (view: "thread" | "customize" | "evolution" | "kanban" | "claudecode" | "dashboard") => void
 
   // Plugin state sync — increment to trigger RightPanel refresh
   pluginVersion: number
@@ -142,9 +152,13 @@ export const useAppStore = create<AppState>((set, get) => ({
   showKanbanView: false,
   showSubagentsInKanban: true,
   showClaudeCodeView: false,
+  showDashboardView: false,
+  dashboardAllowed: null,
   previousThreadId: null,
   showCustomizeView: false,
   customizeInitialTab: null,
+  marketInitialSkillCategory: null,
+  marketInitialSkillSearchQuery: null,
   pluginVersion: 0,
   evolutionTab: "candidates",
   evolutionRunning: false,
@@ -175,6 +189,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       showKanbanView: false,
       showCustomizeView: false,
       showClaudeCodeView: false,
+      showDashboardView: false,
       previousThreadId: null,
       mainView: "thread"
       // skillGenerationByThread is NOT reset here: new threads start with no entry
@@ -189,6 +204,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       showKanbanView: false,
       showCustomizeView: false,
       showClaudeCodeView: false,
+      showDashboardView: false,
       previousThreadId: null,
       mainView: "thread"
       // skillGenerationByThread is NOT cleared here: each thread retains its own card
@@ -284,6 +300,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         showClaudeCodeView: true,
         showKanbanView: false,
         showCustomizeView: false,
+        showDashboardView: false,
         mainView: "claudecode",
         previousThreadId: prev,
         currentThreadId: null
@@ -299,6 +316,34 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
+  // Dashboard actions
+  loadDashboardAllowed: async () => {
+    const allowed = await window.api.dashboard.isAllowed().catch(() => false)
+    set({ dashboardAllowed: allowed })
+  },
+
+  setShowDashboardView: (show: boolean) => {
+    if (show) {
+      const prev = get().previousThreadId || get().currentThreadId
+      set({
+        showDashboardView: true,
+        showClaudeCodeView: false,
+        showKanbanView: false,
+        showCustomizeView: false,
+        mainView: "dashboard",
+        previousThreadId: prev,
+        currentThreadId: null
+      })
+    } else {
+      const restored = get().previousThreadId
+      set({
+        showDashboardView: false,
+        mainView: "thread",
+        ...(restored ? { currentThreadId: restored, previousThreadId: null } : {})
+      })
+    }
+  },
+
   // Kanban actions
   setShowKanbanView: (show: boolean) => {
     if (show) {
@@ -308,6 +353,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         showKanbanView: true,
         showCustomizeView: false,
         showClaudeCodeView: false,
+        showDashboardView: false,
         mainView: "kanban",
         currentThreadId: null,
         previousThreadId: prev
@@ -328,6 +374,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         showCustomizeView: true,
         showKanbanView: false,
         showClaudeCodeView: false,
+        showDashboardView: false,
         customizeInitialTab: tab ?? null,
         mainView: "customize"
       })
@@ -340,6 +387,14 @@ export const useAppStore = create<AppState>((set, get) => ({
         ...(restored ? { currentThreadId: restored, previousThreadId: null } : {})
       })
     }
+  },
+
+  setMarketInitialSkillCategory: (category) => {
+    set({ marketInitialSkillCategory: category })
+  },
+
+  setMarketInitialSkillSearchQuery: (query) => {
+    set({ marketInitialSkillSearchQuery: query })
   },
 
   setMainView: (view) => {
@@ -371,6 +426,20 @@ export const useAppStore = create<AppState>((set, get) => ({
         showKanbanView: false,
         showClaudeCodeView: false,
         customizeInitialTab: "evolution"
+      })
+      return
+    }
+
+    if (view === "dashboard") {
+      const prev = get().previousThreadId || get().currentThreadId
+      set({
+        mainView: "dashboard",
+        showDashboardView: true,
+        showCustomizeView: false,
+        showKanbanView: false,
+        showClaudeCodeView: false,
+        previousThreadId: prev,
+        currentThreadId: null
       })
       return
     }

@@ -43,6 +43,7 @@ import {
   getSkillEvolutionThreshold,
   setSkillEvolutionThreshold
 } from "../storage"
+import { trackEvent } from "../services/event-reporter"
 
 function notifyRenderer(channel: string, payload?: unknown): void {
   for (const win of BrowserWindow.getAllWindows()) {
@@ -85,8 +86,8 @@ function getDefaultModel(): ChatOpenAI | null {
     model: config.model,
     apiKey: config.apiKey,
     configuration: { baseURL: config.baseUrl },
-    maxTokens: 4096,
-    temperature: 0.3,
+    maxTokens: config.maxOutputTokens,
+    temperature: config.temperature,
     streaming: true
   })
 }
@@ -199,11 +200,23 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
         }
 
         notifyRenderer("optimizer:streamEnd", { success: true })
+        const selectedMerged = mergePendingCandidates(runResult.candidates)
+        if (runResult.candidates.length > 0) {
+          try {
+            trackEvent("skill.evolution.created", "skill", {
+              candidatesCount: runResult.candidates.length,
+              tracesAnalyzed: runResult.tracesAnalyzed,
+              mode: runMode
+            })
+          } catch (e) {
+            console.warn("[event] failed to emit skill.evolution.created:", e)
+          }
+        }
         return {
           startedAt: runResult.startedAt,
           endedAt: runResult.endedAt,
           tracesAnalyzed: runResult.tracesAnalyzed,
-          candidates: mergePendingCandidates(runResult.candidates),
+          candidates: selectedMerged,
           summary: runResult.summary
         }
       }
@@ -231,6 +244,17 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
 
       notifyRenderer("optimizer:streamEnd", { success: true })
       result.candidates = mergePendingCandidates(result.candidates)
+      if (result.candidates.length > 0) {
+        try {
+          trackEvent("skill.evolution.created", "skill", {
+            candidatesCount: result.candidates.length,
+            tracesAnalyzed: result.tracesAnalyzed,
+            mode: runMode
+          })
+        } catch (e) {
+          console.warn("[event] failed to emit skill.evolution.created:", e)
+        }
+      }
       console.log(`[Optimizer] Run complete: ${result.summary}`)
       return result
     }
@@ -257,6 +281,16 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
         return { success: false, skillId: candidate.skillId, error: result.error }
       }
 
+      try {
+        trackEvent("skill.evolution.accepted", "skill", {
+          candidateId,
+          skillId: candidate.skillId,
+          skillName: candidate.name,
+          action: candidate.action
+        })
+      } catch (e) {
+        console.warn("[event] failed to emit skill.evolution.accepted:", e)
+      }
       console.log(`[Optimizer] Approved and applied skill: ${candidate.skillId}`)
       return { success: true, skillId: candidate.skillId }
     }

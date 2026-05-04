@@ -9,6 +9,7 @@ import {
 } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { cn } from "@/lib/utils"
 
 interface CustomModelDialogProps {
   open: boolean
@@ -24,6 +25,9 @@ interface CustomConfig {
   model: string
   apiKey: string
   maxTokensInput: string
+  maxOutputTokensInput: string
+  temperatureInput: string
+  interleavedThinking: boolean
   tier: "premium" | "economy"
 }
 
@@ -31,6 +35,11 @@ interface TokenLimits {
   defaultMaxTokens: number
   minMaxTokens: number
   maxMaxTokens: number
+  defaultMaxOutputTokens: number
+  minMaxOutputTokens: number
+  maxMaxOutputTokens: number
+  defaultTemperature: number
+  maxTemperature: number
 }
 
 interface CustomModelItem {
@@ -40,13 +49,25 @@ interface CustomModelItem {
   model: string
   hasApiKey: boolean
   maxTokens: number
+  maxOutputTokens: number
+  temperature: number
+  interleavedThinking?: boolean
   tier?: "premium" | "economy"
 }
 
 const FALLBACK_LIMITS: TokenLimits = {
   defaultMaxTokens: 128_000,
   minMaxTokens: 32_000,
-  maxMaxTokens: 128_000
+  maxMaxTokens: 1_000_000,
+  defaultMaxOutputTokens: 8_192,
+  minMaxOutputTokens: 1,
+  maxMaxOutputTokens: 100_000,
+  defaultTemperature: 0.1,
+  maxTemperature: 2
+}
+
+function defaultInterleavedThinkingForModel(model: string): boolean {
+  return /minimax/i.test(model)
 }
 
 function parseMaxTokens(value: string): number | null {
@@ -68,6 +89,36 @@ function getMaxTokensError(value: string, limits: TokenLimits): string | null {
   return null
 }
 
+function parseMaxOutputTokens(value: string): number | null {
+  return parseMaxTokens(value)
+}
+
+function getMaxOutputTokensError(value: string, limits: TokenLimits): string | null {
+  const parsed = parseMaxOutputTokens(value)
+  if (parsed === null) return "请输入最大 Tokens"
+  if (parsed < limits.minMaxOutputTokens || parsed > limits.maxMaxOutputTokens) {
+    return `最大 Tokens 必须在 ${limits.minMaxOutputTokens.toLocaleString()} 到 ${limits.maxMaxOutputTokens.toLocaleString()} 之间`
+  }
+  return null
+}
+
+function parseTemperature(value: string): number | null {
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  const parsed = Number(trimmed)
+  if (!Number.isFinite(parsed)) return null
+  return parsed
+}
+
+function getTemperatureError(value: string, limits: TokenLimits): string | null {
+  const parsed = parseTemperature(value)
+  if (parsed === null) return "请输入 Temperature"
+  if (parsed <= 0 || parsed > limits.maxTemperature) {
+    return `Temperature 必须在 (0, ${limits.maxTemperature}] 之间`
+  }
+  return null
+}
+
 export function CustomModelDialog({
   open,
   selectedModelId,
@@ -81,6 +132,9 @@ export function CustomModelDialog({
     model: "",
     apiKey: "",
     maxTokensInput: String(FALLBACK_LIMITS.defaultMaxTokens),
+    maxOutputTokensInput: String(FALLBACK_LIMITS.defaultMaxOutputTokens),
+    temperatureInput: String(FALLBACK_LIMITS.defaultTemperature),
+    interleavedThinking: false,
     tier: "premium"
   })
   const [showKey, setShowKey] = useState(false)
@@ -135,6 +189,11 @@ export function CustomModelDialog({
               model: resolvedExisting.model,
               apiKey: "",
               maxTokensInput: String(resolvedExisting.maxTokens ?? limits.defaultMaxTokens),
+              maxOutputTokensInput: String(resolvedExisting.maxOutputTokens ?? limits.defaultMaxOutputTokens),
+              temperatureInput: String(resolvedExisting.temperature ?? limits.defaultTemperature),
+              interleavedThinking:
+                resolvedExisting.interleavedThinking ??
+                defaultInterleavedThinkingForModel(resolvedExisting.model),
               tier: resolvedExisting.tier ?? "premium"
             })
             setHasExisting(true)
@@ -147,6 +206,9 @@ export function CustomModelDialog({
               model: "",
               apiKey: "",
               maxTokensInput: String(limits.defaultMaxTokens),
+              maxOutputTokensInput: String(limits.defaultMaxOutputTokens),
+              temperatureInput: String(limits.defaultTemperature),
+              interleavedThinking: false,
               tier: "premium"
             })
             setHasExisting(false)
@@ -177,6 +239,10 @@ export function CustomModelDialog({
       model: picked.model,
       apiKey: "",
       maxTokensInput: String(picked.maxTokens ?? tokenLimits.defaultMaxTokens),
+      maxOutputTokensInput: String(picked.maxOutputTokens ?? tokenLimits.defaultMaxOutputTokens),
+      temperatureInput: String(picked.temperature ?? tokenLimits.defaultTemperature),
+      interleavedThinking:
+        picked.interleavedThinking ?? defaultInterleavedThinkingForModel(picked.model),
       tier: picked.tier ?? "premium"
     })
     setHasExisting(true)
@@ -185,6 +251,8 @@ export function CustomModelDialog({
   }
 
   const maxTokensError = getMaxTokensError(config.maxTokensInput, tokenLimits)
+  const maxOutputTokensError = getMaxOutputTokensError(config.maxOutputTokensInput, tokenLimits)
+  const temperatureError = getTemperatureError(config.temperatureInput, tokenLimits)
   const canToggleKeyVisibility = config.apiKey.trim().length > 0
   const duplicateNameError =
     config.name.trim() &&
@@ -198,10 +266,16 @@ export function CustomModelDialog({
     config.model.trim() &&
     (hasExistingKey || config.apiKey.trim()) &&
     !maxTokensError &&
+    !maxOutputTokensError &&
+    !temperatureError &&
     !duplicateNameError
 
   const canTest =
-    config.baseUrl.trim() && config.model.trim() && (hasExistingKey || config.apiKey.trim())
+    config.baseUrl.trim() &&
+    config.model.trim() &&
+    (hasExistingKey || config.apiKey.trim()) &&
+    !maxOutputTokensError &&
+    !temperatureError
 
   async function handleTest(): Promise<void> {
     if (!canTest || testing || saving || deleting) return
@@ -209,11 +283,23 @@ export function CustomModelDialog({
     setTestResult(null)
     setFormError(null)
     try {
+      const parsedMaxOutputTokens = parseMaxOutputTokens(config.maxOutputTokensInput)
+      if (parsedMaxOutputTokens === null) {
+        setFormError("请输入有效的最大 Tokens")
+        return
+      }
+      const parsedTemperature = parseTemperature(config.temperatureInput)
+      if (parsedTemperature === null) {
+        setFormError("请输入有效的 Temperature")
+        return
+      }
       const result = await window.api.models.testConnection({
         id: config.id,
         baseUrl: config.baseUrl.trim(),
         model: config.model.trim(),
-        apiKey: config.apiKey.trim() || undefined
+        apiKey: config.apiKey.trim() || undefined,
+        maxOutputTokens: parsedMaxOutputTokens,
+        temperature: parsedTemperature
       })
       setTestResult(result)
     } catch (e) {
@@ -229,6 +315,8 @@ export function CustomModelDialog({
   async function handleSave(): Promise<void> {
     if (!canSave) {
       if (maxTokensError) setFormError(maxTokensError)
+      else if (maxOutputTokensError) setFormError(maxOutputTokensError)
+      else if (temperatureError) setFormError(temperatureError)
       else if (duplicateNameError) setFormError(duplicateNameError)
       return
     }
@@ -240,6 +328,16 @@ export function CustomModelDialog({
         setFormError("请输入有效的上下文窗口大小")
         return
       }
+      const parsedMaxOutputTokens = parseMaxOutputTokens(config.maxOutputTokensInput)
+      if (parsedMaxOutputTokens === null) {
+        setFormError("请输入有效的最大 Tokens")
+        return
+      }
+      const parsedTemperature = parseTemperature(config.temperatureInput)
+      if (parsedTemperature === null) {
+        setFormError("请输入有效的 Temperature")
+        return
+      }
 
       const result = await window.api.models.upsertCustomConfig({
         id: config.id,
@@ -248,6 +346,9 @@ export function CustomModelDialog({
         model: config.model.trim(),
         apiKey: config.apiKey.trim() || undefined,
         maxTokens: parsedMaxTokens,
+        maxOutputTokens: parsedMaxOutputTokens,
+        temperature: parsedTemperature,
+        interleavedThinking: config.interleavedThinking,
         tier: config.tier
       })
       const refreshed = await window.api.models.getCustomConfigs()
@@ -258,7 +359,12 @@ export function CustomModelDialog({
           ...prev,
           id: updated.id,
           name: updated.name,
-          apiKey: ""
+          baseUrl: updated.baseUrl,
+          model: updated.model,
+          apiKey: "",
+          maxTokensInput: String(updated.maxTokens ?? tokenLimits.defaultMaxTokens),
+          maxOutputTokensInput: String(updated.maxOutputTokens ?? tokenLimits.defaultMaxOutputTokens),
+          temperatureInput: String(updated.temperature ?? tokenLimits.defaultTemperature)
         }))
         setHasExisting(true)
         setHasExistingKey(updated.hasApiKey)
@@ -299,6 +405,10 @@ export function CustomModelDialog({
           model: fallback.model,
           apiKey: "",
           maxTokensInput: String(fallback.maxTokens ?? tokenLimits.defaultMaxTokens),
+          maxOutputTokensInput: String(fallback.maxOutputTokens ?? tokenLimits.defaultMaxOutputTokens),
+          temperatureInput: String(fallback.temperature ?? tokenLimits.defaultTemperature),
+          interleavedThinking:
+            fallback.interleavedThinking ?? defaultInterleavedThinkingForModel(fallback.model),
           tier: fallback.tier ?? "premium"
         })
         setHasExisting(true)
@@ -312,6 +422,9 @@ export function CustomModelDialog({
           model: "",
           apiKey: "",
           maxTokensInput: String(tokenLimits.defaultMaxTokens),
+          maxOutputTokensInput: String(tokenLimits.defaultMaxOutputTokens),
+          temperatureInput: String(tokenLimits.defaultTemperature),
+          interleavedThinking: false,
           tier: "premium"
         })
         setHasExisting(false)
@@ -349,6 +462,9 @@ export function CustomModelDialog({
                     model: "",
                     apiKey: "",
                     maxTokensInput: String(tokenLimits.defaultMaxTokens),
+                    maxOutputTokensInput: String(tokenLimits.defaultMaxOutputTokens),
+                    temperatureInput: String(tokenLimits.defaultTemperature),
+                    interleavedThinking: false,
                     tier: "premium"
                   })
                   setHasExisting(false)
@@ -410,7 +526,20 @@ export function CustomModelDialog({
               <label className="text-xs font-medium text-muted-foreground">模型名称（Model）</label>
               <Input
                 value={config.model}
-                onChange={(e) => { setConfig((c) => ({ ...c, model: e.target.value })); setTestResult(null) }}
+                onChange={(e) => {
+                  const nextModel = e.target.value
+                  setConfig((c) => {
+                    const currentDefault = defaultInterleavedThinkingForModel(c.model)
+                    const nextDefault = defaultInterleavedThinkingForModel(nextModel)
+                    return {
+                      ...c,
+                      model: nextModel,
+                      interleavedThinking:
+                        c.interleavedThinking === currentDefault ? nextDefault : c.interleavedThinking
+                    }
+                  })
+                  setTestResult(null)
+                }}
                 placeholder="gpt-4o, deepseek-chat, ..."
               />
             </div>
@@ -422,17 +551,93 @@ export function CustomModelDialog({
               <Input
                 type="number"
                 value={config.maxTokensInput}
-                onChange={(e) =>
+                onChange={(e) => {
                   setConfig((c) => ({
                     ...c,
                     maxTokensInput: e.target.value
                   }))
-                }
+                  setTestResult(null)
+                }}
                 placeholder={String(tokenLimits.defaultMaxTokens)}
                 min={tokenLimits.minMaxTokens}
                 max={tokenLimits.maxMaxTokens}
               />
               {maxTokensError && <p className="text-xs text-destructive">{maxTokensError}</p>}
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-muted-foreground">
+                  max_tokens（最大 Tokens）
+                </label>
+                <Input
+                  type="number"
+                  value={config.maxOutputTokensInput}
+                  onChange={(e) => {
+                    setConfig((c) => ({
+                      ...c,
+                      maxOutputTokensInput: e.target.value
+                    }))
+                    setTestResult(null)
+                  }}
+                  placeholder={String(tokenLimits.defaultMaxOutputTokens)}
+                  min={tokenLimits.minMaxOutputTokens}
+                  max={tokenLimits.maxMaxOutputTokens}
+                />
+                {maxOutputTokensError && <p className="text-xs text-destructive">{maxOutputTokensError}</p>}
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-muted-foreground">
+                  Temperature
+                </label>
+                <Input
+                  type="number"
+                  value={config.temperatureInput}
+                  onChange={(e) => {
+                    setConfig((c) => ({
+                      ...c,
+                      temperatureInput: e.target.value
+                    }))
+                    setTestResult(null)
+                  }}
+                  placeholder={String(tokenLimits.defaultTemperature)}
+                  min={0}
+                  max={tokenLimits.maxTemperature}
+                  step="any"
+                />
+                {temperatureError && <p className="text-xs text-destructive">{temperatureError}</p>}
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-muted-foreground">交错思考</label>
+              <div className="flex items-center justify-between rounded-md border border-border px-3 py-2">
+                <div className="space-y-1">
+                  <div className="text-sm text-foreground">
+                    {config.interleavedThinking ? "已开启" : "已关闭"}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={config.interleavedThinking}
+                  onClick={() =>
+                    setConfig((c) => ({ ...c, interleavedThinking: !c.interleavedThinking }))
+                  }
+                  className={cn(
+                    "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors",
+                    config.interleavedThinking ? "bg-primary" : "bg-muted-foreground/30"
+                  )}
+                >
+                  <span
+                    className={cn(
+                      "pointer-events-none inline-block size-4 rounded-full bg-white shadow-sm transition-transform",
+                      config.interleavedThinking ? "translate-x-4" : "translate-x-0"
+                    )}
+                  />
+                </button>
+              </div>
             </div>
 
             <div className="space-y-1.5">

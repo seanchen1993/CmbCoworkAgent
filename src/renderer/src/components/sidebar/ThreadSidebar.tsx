@@ -1,10 +1,10 @@
 import { useState, useCallback, useEffect, useRef } from "react"
-import { Plus, MessageSquare, Trash2, Pencil, Loader2, AlertCircle, Briefcase, HeartPulse, LayoutDashboard, Cpu, Radio, Terminal } from "lucide-react"
+import { Plus, MessageSquare, Trash2, Pencil, Loader2, AlertCircle, Briefcase, HeartPulse, LayoutDashboard, Cpu, Radio, Terminal, BarChart3 } from "lucide-react"
 import type { ChatXRobotConfig } from "@/types"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { useAppStore } from "@/lib/store"
-import { useThreadStream, useCurrentThread, useThreadContext } from "@/lib/thread-context"
+import { useAllStreamLoadingStates, useAllThreadStates, useThreadContext } from "@/lib/thread-context"
 import { cn, formatRelativeTime, truncate } from "@/lib/utils"
 import {
   ContextMenu,
@@ -16,10 +16,15 @@ import {
 import type { Thread } from "@/types"
 
 // Thread status indicator that shows loading, interrupted, or default state
-function ThreadStatusIcon({ threadId }: { threadId: string }): React.JSX.Element {
-  const { isLoading } = useThreadStream(threadId)
-  const { pendingApproval, scheduledTaskLoading } = useCurrentThread(threadId)
-
+function ThreadStatusIcon({
+  isLoading,
+  pendingApproval,
+  scheduledTaskLoading
+}: {
+  isLoading: boolean
+  pendingApproval: boolean
+  scheduledTaskLoading: boolean
+}): React.JSX.Element {
   if (isLoading || scheduledTaskLoading) {
     return <Loader2 className="size-4 shrink-0 text-status-info animate-spin" />
   }
@@ -31,15 +36,11 @@ function ThreadStatusIcon({ threadId }: { threadId: string }): React.JSX.Element
   return <MessageSquare className="size-4 shrink-0 text-muted-foreground" />
 }
 
-// Individual thread list item component
-function useIsThreadRunning(threadId: string): boolean {
-  const { isLoading } = useThreadStream(threadId)
-  const { scheduledTaskLoading } = useCurrentThread(threadId)
-  return isLoading || scheduledTaskLoading
-}
-
 function ThreadListItem({
   thread,
+  isLoading,
+  hasPendingApproval,
+  scheduledTaskLoading,
   isSelected,
   isEditing,
   isUnread,
@@ -53,6 +54,9 @@ function ThreadListItem({
   onEditingTitleChange
 }: {
   thread: Thread
+  isLoading: boolean
+  hasPendingApproval: boolean
+  scheduledTaskLoading: boolean
   isSelected: boolean
   isEditing: boolean
   isUnread: boolean
@@ -65,7 +69,7 @@ function ThreadListItem({
   onCancelEditing: () => void
   onEditingTitleChange: (value: string) => void
 }): React.JSX.Element {
-  const isRunning = useIsThreadRunning(thread.thread_id)
+  const isRunning = isLoading || scheduledTaskLoading
   const wasRunningRef = useRef(false)
   const onRunFinishedRef = useRef(onRunFinished)
   onRunFinishedRef.current = onRunFinished
@@ -92,7 +96,11 @@ function ThreadListItem({
             }
           }}
         >
-          <ThreadStatusIcon threadId={thread.thread_id} />
+          <ThreadStatusIcon
+            isLoading={isLoading}
+            pendingApproval={hasPendingApproval}
+            scheduledTaskLoading={scheduledTaskLoading}
+          />
           <div className="flex-1 min-w-0 overflow-hidden">
             {isEditing ? (
               <input
@@ -193,10 +201,15 @@ export function ThreadSidebar(): React.JSX.Element {
     showKanbanView,
     setShowKanbanView,
     showClaudeCodeView,
-    setShowClaudeCodeView
+    setShowClaudeCodeView,
+    showDashboardView,
+    setShowDashboardView,
+    dashboardAllowed
   } = useAppStore()
 
   const { cleanupThread } = useThreadContext()
+  const allThreadStates = useAllThreadStates()
+  const allStreamLoadingStates = useAllStreamLoadingStates()
 
   const [robots, setRobots] = useState<ChatXRobotConfig[]>([])
   const [showRobotPicker, setShowRobotPicker] = useState(false)
@@ -387,8 +400,24 @@ export function ThreadSidebar(): React.JSX.Element {
           <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
             <Terminal className="size-3" />
           </div>
-          <span className="text-muted-foreground">Claude Code</span>
+          <span className="text-muted-foreground">Code</span>
         </Button>
+        {dashboardAllowed && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className={cn(
+              "w-full justify-start gap-2 text-sm font-semibold",
+              showDashboardView && "bg-muted"
+            )}
+            onClick={() => setShowDashboardView(!showDashboardView)}
+          >
+            <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
+              <BarChart3 className="size-3" />
+            </div>
+            <span className="text-muted-foreground">运营面板</span>
+          </Button>
+        )}
         {robots.length > 0 && (
           <div className="relative" ref={robotPickerRef}>
             <Button
@@ -423,30 +452,40 @@ export function ThreadSidebar(): React.JSX.Element {
       {/* Thread List */}
       <ScrollArea className="flex-1 min-h-0">
         <div className="p-2 space-y-1 overflow-hidden">
-          {threads.map((thread) => (
-            <ThreadListItem
-              key={thread.thread_id}
-              thread={thread}
-              isSelected={currentThreadId === thread.thread_id}
-              isEditing={editingThreadId === thread.thread_id}
-              isUnread={unreadIds.has(thread.thread_id)}
-              editingTitle={editingTitle}
-              onSelect={() => {
-                selectThread(thread.thread_id)
-                markRead(thread.thread_id)
-              }}
-              onRunFinished={() => handleRunFinished(thread.thread_id)}
-              onDelete={() => {
-                cleanupThread(thread.thread_id)
-                deleteThread(thread.thread_id)
-                markRead(thread.thread_id)
-              }}
-              onStartEditing={() => startEditing(thread.thread_id, thread.title || "")}
-              onSaveTitle={saveTitle}
-              onCancelEditing={cancelEditing}
-              onEditingTitleChange={setEditingTitle}
-            />
-          ))}
+          {threads.map((thread) => {
+            const threadState = allThreadStates[thread.thread_id]
+            const isLoading = allStreamLoadingStates[thread.thread_id] ?? false
+            const scheduledTaskLoading = Boolean(threadState?.scheduledTaskLoading)
+            const hasPendingApproval = Boolean(threadState?.pendingApproval)
+
+            return (
+              <ThreadListItem
+                key={thread.thread_id}
+                thread={thread}
+                isLoading={isLoading}
+                hasPendingApproval={hasPendingApproval}
+                scheduledTaskLoading={scheduledTaskLoading}
+                isSelected={currentThreadId === thread.thread_id}
+                isEditing={editingThreadId === thread.thread_id}
+                isUnread={unreadIds.has(thread.thread_id)}
+                editingTitle={editingTitle}
+                onSelect={() => {
+                  selectThread(thread.thread_id)
+                  markRead(thread.thread_id)
+                }}
+                onRunFinished={() => handleRunFinished(thread.thread_id)}
+                onDelete={() => {
+                  cleanupThread(thread.thread_id)
+                  deleteThread(thread.thread_id)
+                  markRead(thread.thread_id)
+                }}
+                onStartEditing={() => startEditing(thread.thread_id, thread.title || "")}
+                onSaveTitle={saveTitle}
+                onCancelEditing={cancelEditing}
+                onEditingTitleChange={setEditingTitle}
+              />
+            )
+          })}
 
           {threads.length === 0 && (
             <div className="px-3 py-8 text-center text-sm text-muted-foreground">

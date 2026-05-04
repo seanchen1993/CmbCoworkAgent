@@ -6,42 +6,47 @@ import {
   createSkillsMiddleware,
   createMemoryMiddleware,
   createSummarizationMiddleware,
+  GENERAL_PURPOSE_SUBAGENT,
   StateBackend
 } from "deepagents"
 import {
   getThreadCheckpointPath,
   getEnabledSkillsSources,
-  getEnabledMcpConnectors,
   getCustomModelConfigs,
   getUserInfo,
   isMemoryEnabled,
   getSkillEvolutionThreshold as getStoredSkillEvolutionThreshold,
   DEFAULT_MAX_TOKENS,
-  getEnabledPluginSkillsSources,
-  getEnabledPluginMcpConfigs
+  DEFAULT_MAX_OUTPUT_TOKENS,
+  DEFAULT_TEMPERATURE,
+  getEnabledPluginSkillsSources
 } from "../storage"
-import { MultiServerMCPClient } from "@langchain/mcp-adapters"
-import { buildMcpServerConfig } from "../ipc/mcp"
 
 import { ChatOpenAI } from "@langchain/openai"
+import { DynamicStructuredTool, ToolInputParsingException } from "@langchain/core/tools"
 import { SqlJsSaver } from "../checkpointer/sqljs-saver"
 import { LocalSandbox } from "./local-sandbox"
+import type { HookResultCallback } from "../hooks/runner"
 import {
   createAgent,
+  createMiddleware,
+  MiddlewareError,
   ReactAgent,
   SystemMessage,
+  ToolInvocationError,
   todoListMiddleware,
   anthropicPromptCachingMiddleware,
   humanInTheLoopMiddleware
 } from "langchain"
+import { ToolMessage } from "@langchain/core/messages"
 import { Runnable } from "@langchain/core/runnables"
+import { isGraphBubbleUp } from "@langchain/langgraph"
 
 import type * as _lcTypes from "langchain"
 import type * as _lcMessages from "@langchain/core/messages"
 import type * as _lcLanggraph from "@langchain/langgraph"
 import type * as _lcZodTypes from "@langchain/core/utils/types"
 
-import { createHash } from "crypto"
 import path from "path"
 import { join, resolve, delimiter } from "path"
 import { existsSync, createWriteStream, statSync, unlinkSync } from "fs"
@@ -49,22 +54,40 @@ import { createReadStream } from "fs"
 import { createGunzip } from "zlib"
 import { pipeline } from "stream/promises"
 import { app, BrowserWindow } from "electron"
-import { BASE_SYSTEM_PROMPT, MEMORY_SYSTEM_PROMPT, LAZY_MCP_SYSTEM_PROMPT } from "./system-prompt"
+import {
+  BASE_SYSTEM_PROMPT,
+  MEMORY_SYSTEM_PROMPT,
+  renderInjectedToolUsagePrompt,
+  renderAvailableDeferredToolsPrompt
+} from "./system-prompt"
 import { getMemoryStore, closeMemoryStore } from "../memory/store"
 import { createMemorySearchTool, createMemoryGetTool } from "../memory/tools"
 import { createSchedulerTool } from "./tools/scheduler-tool"
 import { createSkillEvolutionTool } from "./tools/skill-evolution-tool"
 import { getThread } from "../db/index"
 import { createPlaywrightTool } from "./tools/playwright-tool"
-import {
-  McpToolRegistry,
-  createToolSearchTools,
-  fixMcpToolSchema
-} from "./tools/tool-search-tool"
-import { getWindowsSandboxMode, getYoloMode, getEnabledHooks } from "../storage"
+import { createToolSearchTools } from "./tools/tool-search-tool"
+import { createCodeExecTool } from "./tools/code-exec-tool"
+import { listSavedCodeExecTools } from "../code-exec/saved-tool-store"
+import { getWindowsSandboxMode, getYoloMode, getEnabledHooks, isCodeExecEnabled, getLspConfig } from "../storage"
+import { runHooks } from "../hooks/runner"
 import { ApprovalStore } from "./approval-store"
 import { ToolOrchestrator } from "./tool-orchestrator"
 import type { ApprovalRequest, ApprovalDecision } from "../types"
+import type { McpCapabilityService, McpCapabilityTool } from "../mcp/capability-types"
+import {
+  closeGlobalMcpCapabilityService,
+  getGlobalMcpCapabilityService
+} from "../mcp/capability-service"
+import { createEagerMcpTool } from "../mcp/langchain-tool"
+import { InterleavedThinkingChatOpenAICompletions } from "./interleaved-thinking-completions"
+import { createLspTool } from "./tools/lsp-tool"
+import { detectJavaProject } from "../lsp"
+import {
+  DEFAULT_AGENTS_MAX_BYTES,
+  DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
+  loadAgentsPromptForWorkspace
+} from "./agents-md"
 
 /** Decompress codex.exe.gz → codex.exe if needed (re-extract if .gz is newer than .exe). */
 async function ensureCodexExe(exePath: string): Promise<void> {
@@ -109,6 +132,58 @@ export function getOrCreateApprovalStore(threadId: string): ApprovalStore {
 const BASE_PROMPT =
   "In order to complete the objective that the user asks of you, you have access to a number of standard tools."
 
+const SUMMARY_KEEP_RATIO = 0.1
+const SUMMARY_INPUT_RATIO = 0.65
+const SUMMARY_INPUT_TOKEN_CAP = 700_000
+
+const CMB_COWORK_SUMMARY_PROMPT = `Your task is to create a detailed continuation summary for an ongoing CmbCowork coding-agent conversation.
+
+The next model call will use your summary to continue the work. Write a dense, practical engineering handoff that preserves details that would be hard or costly to recover. Do not include private reasoning or analysis scratchpad.
+
+Cover these sections:
+
+1. Primary Request and Intent
+   - Capture the user's explicit requests, corrections, decisions, and current expectations.
+   - Preserve exact dates, branch names, commit hashes, model names, file paths, config values, and quoted user wording when they matter.
+
+2. Current Work State
+   - Describe what was being worked on immediately before compaction.
+   - Separate completed work, in-progress work, and remaining work.
+   - Include whether changes are committed, pushed, only in the worktree, or not yet made.
+
+3. Files and Code Sections
+   - List files inspected, modified, or created.
+   - For each important file, include the relevant symbols, constants, functions, or code paths and why they matter.
+   - Include short code snippets only when exact behavior would otherwise be ambiguous.
+
+4. Commands, Tests, and Outputs
+   - Record meaningful commands run and their results.
+   - Include test/typecheck failures, known unrelated failures, and any verification already completed.
+
+5. Technical Decisions and Constraints
+   - Capture assumptions, tradeoffs, rejected approaches, provider/model limitations, routing/summary/token-budget reasoning, and compatibility constraints.
+
+6. Errors, Fixes, and Warnings
+   - Record bugs encountered, root causes, fixes or mitigations, and anything the next model should avoid repeating.
+
+7. Pending Next Step
+   - List concrete next actions only if they directly follow from the latest user request.
+   - If the latest user request was already completed, say so and do not invent unrelated next steps.
+
+Prefer concise bullet points with high information density. Be thorough about technical state, but avoid generic narrative. If the user used Chinese, preserve Chinese wording for user-facing details and reply-context details.
+
+Conversation to summarize:
+{conversation}
+
+Summary:`
+
+function createEagerMcpTools(
+  capabilityService: McpCapabilityService,
+  tools: McpCapabilityTool[]
+): DynamicStructuredTool[] {
+  return tools.map((tool) => createEagerMcpTool(capabilityService, tool))
+}
+
 const SEQUENTIAL_TASK_PROMPT = `## \`task\` (subagent spawner)
 
 You have access to a \`task\` tool to launch short-lived subagents that handle isolated tasks. These agents are ephemeral — they live only for the duration of the task and return a single result.
@@ -142,6 +217,9 @@ When NOT to use the task tool:
  * Aligned with official 1.8.1 except:
  *   - Accepts `summarizationTrigger` / `summarizationKeep` for explicit overrides
  *     (useful for custom models without a profile).
+ *   - Accepts a custom summarization prompt tuned for coding-agent handoffs.
+ *   - Accepts custom argument-truncation thresholds so large-context models
+ *     don't trim old edit/write tool args after a fixed 20 messages.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
@@ -164,7 +242,10 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     summarizationTrigger,
     summarizationKeep,
     toolTokenLimitBeforeEvict,
-    trimTokensToSummarize
+    trimTokensToSummarize,
+    summarizationSummaryPrompt,
+    summarizationTruncateArgsSettings,
+    subagentExtraSystemPrompt
   } = params
 
   // --- systemPrompt handling (identical to original) ---
@@ -215,14 +296,13 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     model,
     backend: filesystemBackend,
     historyPathPrefix: ".cmbdevclaw/conversation_history",
+    ...(summarizationSummaryPrompt && { summaryPrompt: summarizationSummaryPrompt }),
     ...(trimTokensToSummarize != null && { trimTokensToSummarize }),
     ...(summarizationTrigger != null && { trigger: summarizationTrigger }),
     ...(summarizationKeep != null && { keep: summarizationKeep }),
-    truncateArgsSettings: {
-      trigger: { type: "messages" as const, value: 20 },
-      keep: { type: "messages" as const, value: 20 },
-      maxLength: 1000
-    }
+    ...(summarizationTruncateArgsSettings && {
+      truncateArgsSettings: summarizationTruncateArgsSettings
+    })
   }
 
   // Create filesystem middleware and fix grep tool's misleading "Regex pattern" param description
@@ -344,15 +424,140 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     return mw
   }
 
+  // Once any wrapToolCall middleware is attached, ToolNode's
+  // defaultHandleToolErrors stops catching tool-body throws. So this
+  // middleware must convert any recoverable tool error into a ToolMessage,
+  // otherwise runs that used to just show a failed tool crash outright.
+  //
+  // Re-throw (let the run stop) only for:
+  //   - GraphBubbleUp: HITL / subgraph control flow
+  //   - AbortError: user cancellation
+  //   - programmer errors (TypeError / ReferenceError): code bugs we
+  //     want surfaced instead of silently retrying
+  //   - MiddlewareError: a sibling wrapToolCall middleware threw — its
+  //     own bug, not a tool failure
+  //
+  // Note: `task` / `task_output` errors are treated as recoverable too.
+  // deepagents throws a plain Error when the model picks an unknown
+  // subagent_type, and we want the model to see that error and retry with
+  // a valid name. A real subagent crash will also be surfaced as a
+  // ToolMessage — the model can decide whether to retry or abandon.
+  const NON_RECOVERABLE_TOOL_NAMES = new Set<string>()
+
+  const isAbortError = (error: unknown): boolean => {
+    if (!(error instanceof Error)) return false
+    return error.name === "AbortError" || (error as { code?: unknown }).code === "ABORT_ERR"
+  }
+
+  const isProgrammerError = (error: unknown): boolean =>
+    error instanceof TypeError || error instanceof ReferenceError
+
+  const describeToolError = (error: unknown): string => {
+    if (error instanceof Error) return error.message || error.name || "Error"
+    if (typeof error === "string" && error) return error
+    try {
+      return JSON.stringify(error) ?? String(error)
+    } catch {
+      return String(error)
+    }
+  }
+
+  const unwrapToolFailure = (
+    error: unknown,
+    toolName: string | undefined
+  ): { kind: "schema" | "runtime"; message: string } | null => {
+    if (isGraphBubbleUp(error) || isAbortError(error)) return null
+    if (isProgrammerError(error)) return null
+    if (MiddlewareError.isInstance(error)) return null
+
+    // ToolNode wraps schema parsing failures in ToolInvocationError.
+    // Schema errors are always recoverable — even for task/task_output,
+    // since a bad-schema call never actually runs the subagent.
+    if (error instanceof ToolInvocationError) {
+      if (error.toolError instanceof ToolInputParsingException) {
+        return { kind: "schema", message: error.toolError.message }
+      }
+      return unwrapToolFailure(error.toolError, toolName)
+    }
+
+    // Reserved: tool names that should bypass runtime-error recovery even
+    // when NON_RECOVERABLE_TOOL_NAMES is non-empty. Currently no tool is
+    // listed — task/task_output recover too, matching Claude Code's
+    // behaviour of letting the model decide whether to retry after a
+    // subagent failure.
+    if (toolName && NON_RECOVERABLE_TOOL_NAMES.has(toolName)) return null
+
+    // Any other throw from the tool body is recoverable. Including non-
+    // standard throws (plain objects, numbers) — describeToolError will
+    // serialise them — because leaving any path un-caught means ToolNode
+    // bubbles the throw and kills the run.
+    return { kind: "runtime", message: describeToolError(error) }
+  }
+
+  const toolErrorMiddleware = createMiddleware({
+    name: "toolErrorCatch",
+    wrapToolCall: async (request, handler) => {
+      try {
+        return await handler(request)
+      } catch (error) {
+        const toolName = request.toolCall?.name
+        const toolCallId = request.toolCall?.id
+
+        if ((request.runtime as { signal?: AbortSignal } | undefined)?.signal?.aborted) {
+          throw error
+        }
+
+        const recovered = unwrapToolFailure(error, toolName)
+        if (!recovered) throw error
+
+        // Without a tool_call_id we can't emit a usable ToolMessage —
+        // deepagents' patch middleware treats any ToolMessage whose id
+        // doesn't match a corresponding AIMessage.tool_calls[].id as an
+        // orphan and drops it silently, so the model would never see the
+        // error. Surfacing the original throw is the lesser evil: it
+        // crashes visibly instead of swallowing the failure.
+        if (!toolCallId) throw error
+
+        console.warn(
+          `[Runtime] Recoverable ${recovered.kind} error from tool "${toolName}" handed back to model:`,
+          recovered.message
+        )
+        return new ToolMessage({
+          content:
+            recovered.kind === "schema"
+              ? `Invalid tool arguments: ${recovered.message}\nPlease fix the arguments and try again.`
+              : `Tool execution failed: ${recovered.message}\nPlease adjust your approach and try again if appropriate.`,
+          tool_call_id: toolCallId,
+          name: toolName,
+          status: "error"
+        })
+      }
+    }
+  })
+
   // Base middleware for custom subagents (no skills — custom subagents must define their own)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const subagentMiddleware: any[] = [
     todoListMiddleware(),
     createFsMiddleware(),
+    toolErrorMiddleware,
     createSummarizationMiddleware(summarizationOptions),
     anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
     createPatchToolCallsMiddleware()
   ]
+
+  // Manual general-purpose subagent so AGENTS.md can be injected into its
+  // systemPrompt. deepagents' built-in generalPurposeAgent path offers no
+  // hook for project instructions. Spread GENERAL_PURPOSE_SUBAGENT to inherit
+  // the canonical name/description/default prompt, so future upstream tweaks
+  // propagate automatically.
+  const generalPurposeSubagent = {
+    ...GENERAL_PURPOSE_SUBAGENT,
+    systemPrompt: subagentExtraSystemPrompt
+      ? `${GENERAL_PURPOSE_SUBAGENT.systemPrompt}\n\n## Project Instructions\n\n${subagentExtraSystemPrompt}`
+      : GENERAL_PURPOSE_SUBAGENT.systemPrompt,
+    middleware: skillsMiddlewareArray
+  }
 
   return createAgent({
     model,
@@ -361,14 +566,14 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     middleware: [
       todoListMiddleware(),
       createFsMiddleware(),
+      toolErrorMiddleware,
       createSubAgentMiddleware({
         defaultModel: model,
         defaultTools: tools,
         defaultMiddleware: subagentMiddleware,
-        generalPurposeMiddleware: [...subagentMiddleware, ...skillsMiddlewareArray],
         defaultInterruptOn: null,
-        subagents: processedSubagents,
-        generalPurposeAgent: true,
+        subagents: [generalPurposeSubagent, ...processedSubagents],
+        generalPurposeAgent: false,
         systemPrompt: SEQUENTIAL_TASK_PROMPT
       } as Parameters<typeof createSubAgentMiddleware>[0]),
       createSummarizationMiddleware(summarizationOptions),
@@ -564,74 +769,6 @@ export function consumeSkillNudge(threadId: string): boolean {
   return had
 }
 
-// Global MCP tools cache: single shared client for both eager and lazy tools
-// Lifecycle managed here (not per-thread), reused across all sessions
-// Note: toolsByServer is cached, but eager/lazy distribution is decided at runtime
-// based on current config (lazyLoad may change without rebuilding client)
-const MCP_TOOLS_CACHE_TTL_MS = 5 * 60 * 1000
-let _mcpToolsCache: {
-  fingerprint: string
-  toolsByServer: Record<string, Awaited<ReturnType<MultiServerMCPClient["getTools"]>>>
-  client: MultiServerMCPClient
-  createdAt: number
-} | null = null
-
-// Pending promise to prevent concurrent MCP client initialization
-let _mcpInitPromise: Promise<void> | null = null
-
-// Retired MCP clients: kept alive for agents still referencing their tools.
-// Closed on app exit via closeRuntime().
-const _retiredMcpClients = new Set<MultiServerMCPClient>()
-
-function computeMcpConfigFingerprint(connectors: { id: string; url: string; advanced?: unknown }[]): string {
-  const payload = connectors.map((c) => `${c.id}:${c.url}:${JSON.stringify(c.advanced ?? {})}`).join("|")
-  return createHash("sha256").update(payload).digest("hex").slice(0, 16)
-}
-
-/**
- * Distribute MCP tools between eager tools and lazy registry based on lazyLoad config.
- * - Plugin servers: always eager
- * - User connectors: check lazyLoad setting
- */
-function distributeMcpTools(
-  toolsByServer: Record<string, Awaited<ReturnType<MultiServerMCPClient["getTools"]>>>,
-  mcpConnectors: { id: string; name?: string; lazyLoad?: boolean }[],
-  registry: McpToolRegistry,
-  logLazyTools = false
-): Awaited<ReturnType<MultiServerMCPClient["getTools"]>> {
-  const eagerTools: Awaited<ReturnType<MultiServerMCPClient["getTools"]>> = []
-
-  for (const [serverId, tools] of Object.entries(toolsByServer)) {
-    // Plugin servers: always eager (plugins don't support lazyLoad)
-    if (serverId.startsWith("plugin:")) {
-      eagerTools.push(...tools)
-      continue
-    }
-
-    // User-configured connectors: check lazyLoad setting
-    const connector = mcpConnectors.find(c => c.id === serverId)
-    if (!connector) {
-      // Connector was deleted or not found, skip its tools
-      continue
-    }
-
-    const isLazy = connector.lazyLoad ?? false
-    if (isLazy) {
-      const serverName = connector.name || serverId
-      if (tools.length > 0) {
-        registry.register(serverName, tools)
-        if (logLazyTools) {
-          console.log("[Runtime] Lazy MCP tools from:", serverName, "count:", tools.length)
-        }
-      }
-    } else {
-      eagerTools.push(...tools)
-    }
-  }
-
-  return eagerTools
-}
-
 export async function getCheckpointer(threadId: string): Promise<SqlJsSaver> {
   let checkpointer = checkpointers.get(threadId)
   if (!checkpointer) {
@@ -652,13 +789,201 @@ export async function closeCheckpointer(threadId: string): Promise<void> {
 }
 
 // Get the model instance from custom model configuration
+// ─── Custom fetch with unified retry ────────────────────────────────────────
+// Single source of truth for same-model retry logic. SDK-level retry is
+// disabled (maxRetries: 0) so this is the only layer that retries.
+
+/** Specific non-5xx status codes that should trigger a retry on the SAME model/endpoint.
+ *  All 5xx are also retryable (handled by isRetryableStatus below). */
+const RETRYABLE_NON_5XX_STATUS = new Set([408, 409, 429, 432, 433])
+
+function isRetryableStatus(status: number): boolean {
+  return status >= 500 || RETRYABLE_NON_5XX_STATUS.has(status)
+}
+
+const DEFAULT_RETRY_MAX_ATTEMPTS = 6 // 1 initial + 5 retries (used when caller does not specify)
+const RETRY_BASE_DELAY_MS = 1000 // exponential: 1s, 2s, 4s, 8s
+/** Per-attempt timeout — guards against half-open / stalled connections
+ *  (cases where TCP stays up but no bytes flow). Each attempt gets its own
+ *  AbortController so a timeout on attempt N doesn't poison attempt N+1. */
+const PER_ATTEMPT_TIMEOUT_MS = 60_000
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new DOMException("Aborted", "AbortError"))
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort)
+      resolve()
+    }, ms)
+    const onAbort = (): void => {
+      clearTimeout(timer)
+      reject(new DOMException("Aborted", "AbortError"))
+    }
+    signal?.addEventListener("abort", onAbort, { once: true })
+  })
+}
+
+function computeBackoffDelay(attempt: number): number {
+  // attempt is 1-based (1 = before first retry). 1s,2s,4s,8s with jitter 1x-2x.
+  const base = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1)
+  return Math.round(base * (1 + Math.random()))
+}
+
+/** Info emitted to the UI before each retry wait. */
+export interface ModelRetryInfo {
+  /** 1-based attempt counter about to be retried (1 = first retry). */
+  attempt: number
+  /** Maximum number of retries that can occur. */
+  maxRetries: number
+  /** Human-readable reason (HTTP status or network error message). */
+  reason: string
+  /** Wait duration before the next attempt, in ms. */
+  delayMs: number
+}
+
+/** Hooks invoked by the retrying fetch wrapper so the UI can display/clear status. */
+export interface ModelRetryHooks {
+  onRetry?: (info: ModelRetryInfo) => void
+  /** Called when a retry attempt succeeds (fetch returns a non-retryable response).
+   *  The UI should clear the retry indicator immediately on this callback. */
+  onRetrySuccess?: () => void
+}
+
+/**
+ * Build a retrying fetch wrapper. Retries on:
+ *   - Network errors thrown by fetch
+ *   - HTTP status in RETRYABLE_NON_5XX_STATUS (or >= 500)
+ *   - Per-attempt timeout (half-open / stalled connection guard)
+ * Does NOT retry on:
+ *   - Parent signal abort (user cancelled) — propagated immediately
+ *   - 2xx (including streaming 200 — returned immediately)
+ *   - Non-retryable 4xx (400/401/403/404/...) — bubbled up to failover layer
+ *
+ * Each attempt creates its own AbortController so a timeout on one attempt
+ * does not poison the next one (avoids the "stuck signal" pitfall that
+ * happens when SDK-level timeout aborts the shared signal).
+ */
+function createRetryingFetch(
+  hooks?: ModelRetryHooks,
+  maxAttempts: number = DEFAULT_RETRY_MAX_ATTEMPTS
+): typeof fetch {
+  const totalAttempts = Math.max(1, maxAttempts)
+  const maxRetries = totalAttempts - 1
+  return async (input, init) => {
+    const parentSignal = (init?.signal ?? undefined) as AbortSignal | undefined
+    let lastError: unknown = undefined
+
+    for (let attempt = 1; attempt <= totalAttempts; attempt++) {
+      if (parentSignal?.aborted) throw new DOMException("Aborted", "AbortError")
+
+      // Per-attempt controller: fresh each iteration so a timeout on attempt N
+      // does not leak into attempt N+1. Parent (user cancel) is forwarded in
+      // one direction only: parent -> attempt. Attempt abort never touches parent.
+      const attemptCtrl = new AbortController()
+      const onParentAbort = (): void => {
+        attemptCtrl.abort(parentSignal?.reason ?? new DOMException("Aborted", "AbortError"))
+      }
+      parentSignal?.addEventListener("abort", onParentAbort, { once: true })
+
+      const timeoutHandle = setTimeout(() => {
+        attemptCtrl.abort(new DOMException("Per-attempt timeout", "TimeoutError"))
+      }, PER_ATTEMPT_TIMEOUT_MS)
+
+      const cleanup = (): void => {
+        clearTimeout(timeoutHandle)
+        parentSignal?.removeEventListener("abort", onParentAbort)
+      }
+
+      try {
+        const res = await fetch(input, { ...init, signal: attemptCtrl.signal })
+
+        // IMPORTANT: do not cancel the per-attempt timeout yet for streaming
+        // responses — we want the timeout to cover only the time up to the
+        // first byte. Once the response headers are in, we cancel the timer
+        // because downstream (SDK / LangChain) owns the stream lifetime from
+        // here and should not be interrupted mid-stream by our timer.
+        cleanup()
+
+        // Success or non-retryable error — return as-is.
+        if (!isRetryableStatus(res.status)) {
+          // If this is a successful retry (not the first attempt), notify the UI
+          // so the retry indicator can be cleared immediately.
+          if (attempt > 1) hooks?.onRetrySuccess?.()
+          return res
+        }
+
+        // Retryable HTTP status.
+        if (attempt >= totalAttempts) return res // exhausted — return so caller sees the real status
+
+        // Drain body to free the connection before retrying.
+        try {
+          await res.arrayBuffer()
+        } catch {
+          /* ignore */
+        }
+
+        const delay = computeBackoffDelay(attempt)
+        console.warn(
+          `[Runtime] fetch HTTP ${res.status}, retry ${attempt}/${maxRetries} after ${delay}ms`
+        )
+        hooks?.onRetry?.({
+          attempt,
+          maxRetries,
+          reason: `HTTP ${res.status}`,
+          delayMs: delay
+        })
+        await sleep(delay, parentSignal)
+        continue
+      } catch (err) {
+        cleanup()
+
+        // Parent signal aborted (user cancel) — propagate immediately, no retry.
+        if (parentSignal?.aborted) throw err
+
+        // Distinguish per-attempt timeout from generic network errors for logging;
+        // both are retryable.
+        const isTimeout = err instanceof Error && err.name === "TimeoutError"
+        const rawMsg = err instanceof Error ? err.message : String(err)
+        const reason = isTimeout ? `timeout after ${PER_ATTEMPT_TIMEOUT_MS}ms` : rawMsg
+
+        lastError = err
+        if (attempt >= totalAttempts) throw err
+
+        const delay = computeBackoffDelay(attempt)
+        console.warn(
+          `[Runtime] fetch ${isTimeout ? "timeout" : "network error"} "${reason}", retry ${attempt}/${maxRetries} after ${delay}ms`
+        )
+        hooks?.onRetry?.({
+          attempt,
+          maxRetries,
+          reason: reason || "network error",
+          delayMs: delay
+        })
+        await sleep(delay, parentSignal)
+        continue
+      }
+    }
+
+    // Unreachable — loop always returns or throws.
+    throw lastError ?? new Error("retryingFetch: unexpected loop exit")
+  }
+}
+
+/** Default fetch (no UI hooks) for model instances without a UI context (e.g. skill generation). */
+const defaultRetryingFetch = createRetryingFetch()
+
 function getModelInstance(
   customConfig: {
     id: string
     model: string
     baseUrl: string
     apiKey?: string
-  }
+    maxOutputTokens?: number
+    temperature?: number
+    interleavedThinking?: boolean
+  },
+  retryHooks?: ModelRetryHooks,
+  maxRetryAttempts?: number
 ): ChatOpenAI {
   const apiKey = customConfig.apiKey
   if (!apiKey) {
@@ -670,16 +995,36 @@ function getModelInstance(
     throw new Error("Custom model name is empty. Please configure a valid model name in Settings.")
   }
   console.log("[Runtime] Custom model:", resolvedModel, "baseUrl:", customConfig.baseUrl)
+  const maxOutputTokens = customConfig.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
+  const temperature = customConfig.temperature ?? DEFAULT_TEMPERATURE
 
-  return new ChatOpenAI({
+  const baseFields = {
     model: resolvedModel,
     apiKey,
-    maxRetries: 1,
-    timeout: 60_000,
+    maxTokens: maxOutputTokens,
+    temperature,
+    // SDK-level retry AND timeout disabled — unified retry + per-attempt
+    // timeout live in retryingFetch below. Setting SDK timeout here would
+    // create a shared AbortSignal that, once fired, permanently blocks all
+    // subsequent retry attempts at the fetch layer.
+    maxRetries: 0,
     configuration: {
-      baseURL: customConfig.baseUrl
+      baseURL: customConfig.baseUrl,
+      fetch:
+        retryHooks || maxRetryAttempts !== undefined
+          ? createRetryingFetch(retryHooks, maxRetryAttempts)
+          : defaultRetryingFetch
     }
-  })
+  }
+
+  if (!customConfig.interleavedThinking) {
+    return new ChatOpenAI(baseFields)
+  }
+
+  return new ChatOpenAI({
+    ...baseFields,
+    completions: new InterleavedThinkingChatOpenAICompletions(baseFields)
+  } as never)
 }
 
 export interface CreateAgentRuntimeOptions {
@@ -695,15 +1040,34 @@ export interface CreateAgentRuntimeOptions {
   noSchedulerTool?: boolean
   /** Skip the manage_skill tool (disable skill evolution for scheduled/heartbeat agents) */
   noSkillEvolutionTool?: boolean
+  /** Load workspace AGENTS.md hierarchy into the main system prompt. */
+  enableAgentsPrompt?: boolean
   /** AbortSignal — when signalled, any running child process is killed immediately. */
   abortSignal?: AbortSignal
+  /** Optional hooks invoked when the model fetch layer retries / resolves. */
+  retryHooks?: ModelRetryHooks
+  /** Max fetch attempts (1 initial + N-1 retries). Caller may vary this based
+   *  on routing mode — pinned mode benefits from more retries since there is
+   *  no failover fallback, while auto-routing can retry less and failover more. */
+  maxRetryAttempts?: number
+  /** Callback invoked after each hook executes — used to emit results to the renderer. */
+  onHookResult?: HookResultCallback
 }
 
 // Create agent runtime with configured model and checkpointer
 export type AgentRuntime = ReturnType<typeof createAgent>
 
 export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Promise<DeepAgent> {
-  const { threadId, workspacePath, modelId, extraSystemPrompt } = options
+  const {
+    threadId,
+    workspacePath,
+    modelId,
+    extraSystemPrompt,
+    retryHooks,
+    maxRetryAttempts,
+    enableAgentsPrompt = true,
+    onHookResult
+  } = options
 
   if (!threadId) {
     throw new Error("Thread ID is required for checkpointing.")
@@ -731,7 +1095,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     throw new Error("Custom model not configured. Please configure a model in Settings.")
   }
 
-  const model = getModelInstance(customConfig)
+  const model = getModelInstance(customConfig, retryHooks, maxRetryAttempts)
   console.log("[Runtime] Model instance created")
 
   const checkpointer = await getCheckpointer(threadId)
@@ -773,7 +1137,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const windowsSandbox = process.platform === "win32" ? getWindowsSandboxMode() : "none"
   console.log(`[Runtime] codex.exe: ${codexExePath}, exists: ${codexExists}, sandboxMode: ${windowsSandbox}`)
 
-  const enabledHooks = getEnabledHooks()
+  const enabledHooks = getEnabledHooks(workspacePath)
   console.log(`[Runtime] Loaded ${enabledHooks.length} enabled hooks`)
 
   const backend = new LocalSandbox({
@@ -783,51 +1147,58 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     maxOutputBytes,
     windowsSandbox,
     codexExePath: codexExists ? codexExePath : undefined,
-    // Pass a getter so hooks are always read fresh from storage at call time
-    hooks: getEnabledHooks,
+    hooks: () => getEnabledHooks(workspacePath),
+    onHookResult,
     abortSignal: options.abortSignal,
     runId: threadId
   })
 
   // ── Wire up the approval orchestrator ──
   const yoloMode = getYoloMode()
-  if (!yoloMode) {
-    const approvalStore = getOrCreateApprovalStore(threadId)
-
-    // The approval requester sends requests to the renderer via BrowserWindow IPC.
-    // It returns a Promise that is resolved when the renderer sends back a decision.
-    // P3 fix: auto-reject after 5 minutes to prevent indefinite hangs.
-    const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000
-
-    const requestApproval = (req: ApprovalRequest): Promise<ApprovalDecision> => {
-      return new Promise<ApprovalDecision>((resolve) => {
-        const timeoutId = setTimeout(() => {
-          if (pendingApprovals.has(req.id)) {
-            pendingApprovals.delete(req.id)
-            console.warn(`[Orchestrator] approval request timed out after ${APPROVAL_TIMEOUT_MS / 1000}s: reqId=${req.id}`)
-            // P2 fix: notify renderer that approval timed out so it can clear the UI
-            for (const win of BrowserWindow.getAllWindows()) {
-              win.webContents.send(`approval:timeout:${threadId}`, { requestId: req.id })
-            }
-            resolve({ type: "reject", tool_call_id: req.tool_call?.id ?? req.id })
+  let approvalStore: ApprovalStore | undefined
+  let requestApproval: ((req: ApprovalRequest) => Promise<ApprovalDecision>) | undefined
+  // Keep the generic approval IPC available even in YOLO mode so code_exec can still
+  // ask for post-run tool promotion confirmation. Shell/file approvals remain gated by
+  // whether the orchestrator is mounted below.
+  const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000
+  requestApproval = (req: ApprovalRequest): Promise<ApprovalDecision> => {
+    return new Promise<ApprovalDecision>((resolve) => {
+      const timeoutId = setTimeout(() => {
+        if (pendingApprovals.has(req.id)) {
+          pendingApprovals.delete(req.id)
+          console.warn(`[Orchestrator] approval request timed out after ${APPROVAL_TIMEOUT_MS / 1000}s: reqId=${req.id}`)
+          for (const win of BrowserWindow.getAllWindows()) {
+            win.webContents.send(`approval:timeout:${threadId}`, { requestId: req.id })
           }
-        }, APPROVAL_TIMEOUT_MS)
-
-        pendingApprovals.set(req.id, {
-          resolve: (decision: ApprovalDecision) => {
-            clearTimeout(timeoutId)
-            resolve(decision)
-          },
-          request: req,
-          targetWebContentsIds: BrowserWindow.getAllWindows().map(w => w.webContents.id)
-        })
-        console.log(`[Orchestrator] sending approval request on channel: approval:request:${threadId}, reqId=${req.id}, command=${req.command}`)
-        // Broadcast to all windows — the active one will display the approval UI
-        for (const win of BrowserWindow.getAllWindows()) {
-          win.webContents.send(`approval:request:${threadId}`, req)
+          resolve({ type: "reject", tool_call_id: req.tool_call?.id ?? req.id })
         }
+      }, APPROVAL_TIMEOUT_MS)
+
+      pendingApprovals.set(req.id, {
+        resolve: (decision: ApprovalDecision) => {
+          clearTimeout(timeoutId)
+          resolve(decision)
+        },
+        request: req,
+        targetWebContentsIds: BrowserWindow.getAllWindows().map(w => w.webContents.id)
       })
-    }
+      console.log(`[Orchestrator] sending approval request on channel: approval:request:${threadId}, reqId=${req.id}, command=${req.command}`)
+      // Fire Notification hook — agent is now waiting on user input.
+      // Fire-and-forget so it doesn't delay the UI prompt.
+      runHooks(getEnabledHooks(workspacePath), "Notification", {
+        toolName: req.tool_call?.name,
+        toolArgs: { command: req.command, reason: req.reason, filePath: req.filePath },
+        workspacePath,
+        sessionId: threadId
+      }, onHookResult).catch((e) => console.warn("[Hooks] Notification hook error:", e))
+      for (const win of BrowserWindow.getAllWindows()) {
+        win.webContents.send(`approval:request:${threadId}`, req)
+      }
+    })
+  }
+
+  if (!yoloMode) {
+    approvalStore = getOrCreateApprovalStore(threadId)
 
     const rawExecute = (command: string, sandboxMode?: string): Promise<import("deepagents").ExecuteResponse> => {
       return backend.executeRaw(command, sandboxMode)
@@ -838,6 +1209,32 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   }
 
   let systemPrompt = getSystemPrompt(workspacePath, windowsSandbox)
+  let agentsPrompt: Awaited<ReturnType<typeof loadAgentsPromptForWorkspace>> = {
+    prompt: null,
+    projectRoot: workspacePath,
+    loadedPaths: [],
+    truncated: false
+  }
+  if (enableAgentsPrompt) {
+    agentsPrompt = await loadAgentsPromptForWorkspace(workspacePath, {
+      globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
+      projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
+    })
+    if (agentsPrompt.prompt) {
+      systemPrompt += "\n\n" + agentsPrompt.prompt
+      console.log("[Runtime] Loaded AGENTS.md files:", agentsPrompt.loadedPaths)
+      if (agentsPrompt.truncated) {
+        console.warn("[Runtime] AGENTS.md content exceeded prompt budget and was truncated:", {
+          globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
+          projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
+        })
+      }
+    } else {
+      console.log("[Runtime] No AGENTS.md files discovered for workspace:", workspacePath)
+    }
+  } else {
+    console.log("[Runtime] AGENTS.md prompt injection disabled for this runtime")
+  }
   if (extraSystemPrompt) {
     systemPrompt += "\n\n" + extraSystemPrompt
   }
@@ -876,7 +1273,6 @@ ${subagentShellGuidance}
 - grep: search for literal text within files (NOT regex). Do NOT use "|", ".*" or other regex syntax — call grep once per term instead.
 - Browser strategy: for browser tasks, first follow any matching enabled skill; only if no relevant skill is available, use browser_playwright.
 - browser_playwright: built-in browser automation and page interaction tool powered by project-local Playwright (fallback when no matching browser skill exists).
-
 The workspace root is: ${workspacePath}`
 
   const skillsSources = await getEnabledSkillsSources()
@@ -910,138 +1306,26 @@ The workspace root is: ${workspacePath}`
     console.log("[Runtime] Memory disabled by user setting")
   }
 
-  const mcpConnectors = getEnabledMcpConnectors()
-  const pluginMcpConfigs = getEnabledPluginMcpConfigs()
+  const capabilityService = getGlobalMcpCapabilityService()
+  const codeExecEnabled = isCodeExecEnabled()
+  const allMcpTools = await capabilityService.listTools()
+  const codeExecRouteEnabled = codeExecEnabled && allMcpTools.length > 0
+  const eagerMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "eager")
+  const lazyMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "lazy")
+  const deferredSavedTools = codeExecEnabled ? listSavedCodeExecTools() : []
+  const mcpTools = createEagerMcpTools(capabilityService, eagerMcpMetadata)
+  const toolSearchTools = await createToolSearchTools(capabilityService,
+    {workspacePath,
+    threadId: options.threadId},
+    {
+      codeExecRouteEnabled,
+      savedToolsEnabled: codeExecEnabled
+    })
 
-  // Create instance-level registry for lazy tools (avoid global state)
-  const registry = new McpToolRegistry()
-  let mcpTools: Awaited<ReturnType<MultiServerMCPClient["getTools"]>> = []
-
-  // Unified MCP client for both eager and lazy tools
-  if (mcpConnectors.length > 0 || Object.keys(pluginMcpConfigs).length > 0) {
-    // Build fingerprint including all connectors (both eager and lazy)
-    const fingerprint = computeMcpConfigFingerprint([
-      ...mcpConnectors,
-      ...Object.entries(pluginMcpConfigs).map(([k, v]) => ({ id: k, url: v.url ?? v.command ?? "", advanced: v }))
-    ])
-
-    // Wait for any pending initialization to complete (prevents concurrent init)
-    if (_mcpInitPromise) {
-      await _mcpInitPromise
-    }
-
-    // Re-check cache validity after waiting for pending init
-    const cached = _mcpToolsCache
-    const cacheValid = cached
-      && cached.fingerprint === fingerprint
-      && (Date.now() - cached.createdAt) < MCP_TOOLS_CACHE_TTL_MS
-
-    if (cacheValid) {
-      // Reuse cached client - redistribute tools based on CURRENT lazyLoad config
-      // (lazyLoad may have changed since cache was created)
-      mcpTools = distributeMcpTools(cached.toolsByServer, mcpConnectors, registry, false)
-      console.log("[Runtime] MCP tools from cache, eager:", mcpTools.length, "lazy:", registry.getToolCount())
-    } else {
-      // Create new client with all connectors
-      // Use a shared promise to prevent concurrent initialization
-      _mcpInitPromise = (async () => {
-        let mcpClient: MultiServerMCPClient | null = null
-        try {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const mcpServers: Record<string, any> = {}
-
-          // Add user-configured MCP connectors
-          for (const c of mcpConnectors) {
-            mcpServers[c.id] = buildMcpServerConfig({ url: c.url, advanced: {
-              ...c.advanced,
-              headers:{
-                ...c.advanced?.headers
-              }
-            } })
-          }
-          // Add plugin MCP servers
-          for (const [name, cfg] of Object.entries(pluginMcpConfigs)) {
-            if (cfg.command) {
-              mcpServers[name] = {
-                command: cfg.command,
-                args: cfg.args ?? []
-              }
-            } else if (cfg.url) {
-              mcpServers[name] = buildMcpServerConfig({
-                url: cfg.url,
-                advanced: { headers: cfg.headers, transport: cfg.transport }
-              })
-            }
-          }
-          mcpClient = new MultiServerMCPClient({
-            throwOnLoadError: false,
-            onConnectionError: "ignore",
-            useStandardContentBlocks: true,
-            mcpServers
-          })
-
-          // Get tools grouped by server
-          const toolsByServer = await mcpClient.initializeConnections()
-
-          // Distribute tools based on lazyLoad setting
-          mcpTools = distributeMcpTools(toolsByServer, mcpConnectors, registry, true)
-
-          // Update cache - store toolsByServer for redistribution on cache hit
-          const oldClient = _mcpToolsCache?.client
-          _mcpToolsCache = {
-            fingerprint,
-            toolsByServer,
-            client: mcpClient,
-            createdAt: Date.now()
-          }
-          if (oldClient && oldClient !== mcpClient) {
-            _retiredMcpClients.add(oldClient)
-          }
-          console.log("[Runtime] MCP tools loaded, eager:", mcpTools.length, "lazy:", registry.getToolCount())
-        } catch (e) {
-          if (mcpClient) {
-            mcpClient.close().catch(() => {})
-          }
-          console.warn("[Runtime] MCP client init failed:", e)
-        } finally {
-          _mcpInitPromise = null
-        }
-      })()
-      await _mcpInitPromise
-    }
-  } else if (_mcpToolsCache) {
-    // No connectors enabled, retire the cached client
-    _retiredMcpClients.add(_mcpToolsCache.client)
-    _mcpToolsCache = null
-    console.log("[Runtime] MCP connectors disabled, retired cached client")
-  }
-
-  // Fix MCP tool schemas: some MCP servers return `required: null` instead of `required: []`
-  // which causes API errors. Normalize null/undefined to empty array.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  for (const t of mcpTools as any[]) {
-    fixMcpToolSchema(t)
-  }
-
-  // Wrap MCP tools so that any ToolException/McpError is caught and returned
-  // as a normal error string instead of throwing. This keeps the agent loop
-  // running (same pattern as read_file returning "Error: ..." on failure).
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  for (const t of mcpTools as any[]) {
-    if (typeof t.func === "function") {
-      const originalFunc = t.func
-      t.func = async (...args: unknown[]) => {
-        try {
-          return await originalFunc.apply(t, args)
-        } catch (e: unknown) {
-          const msg = e instanceof Error ? e.message : String(e)
-          const level = e instanceof TypeError || e instanceof ReferenceError ? "error" : "warn"
-          console[level](`[Runtime] MCP tool "${t.name}" error (non-fatal):`, msg)
-          // MCP tools use responseFormat: "content_and_artifact", must return [content, artifact]
-          return [`MCP tool error: ${msg}`, []]
-        }
-      }
-    }
+  if (allMcpTools.length > 0) {
+    console.log("[Runtime] MCP tools loaded, eager:", eagerMcpMetadata.length, "lazy:", lazyMcpMetadata.length)
+  } else {
+    console.log("[Runtime] No MCP tools available in capability service")
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1070,6 +1354,17 @@ The workspace root is: ${workspacePath}`
 
   extraTools.push(createPlaywrightTool(workspacePath))
 
+  // Conditionally inject Java LSP tool
+  try {
+    const lspConfig = getLspConfig()
+    if (lspConfig.enabled && detectJavaProject(workspacePath)) {
+      extraTools.push(createLspTool({ workspacePath }))
+      console.log("[Runtime] Java LSP tool injected for:", workspacePath)
+    }
+  } catch (e) {
+    console.warn("[Runtime] Failed to check LSP config:", e)
+  }
+
   // Wrap extra tools so that errors are returned as strings instead of throwing
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function wrapToolErrors(tools: any[]): void {
@@ -1092,22 +1387,65 @@ The workspace root is: ${workspacePath}`
   wrapToolErrors(extraTools)
   wrapToolErrors(memoryTools as any[])
 
-  // Add tool search tools if there are lazy-loaded MCP tools
-  const toolSearchTools = registry.getToolCount() > 0 ? createToolSearchTools(registry) : []
   if (toolSearchTools.length > 0) {
-    console.log("[Runtime] Added tool search tools for lazy MCP tools:", registry.getToolCount())
-    // Add lazy MCP system prompt so LLM knows how to use search_tool
-    systemPrompt += LAZY_MCP_SYSTEM_PROMPT
     wrapToolErrors(toolSearchTools as any[])
   }
 
-  const triggerTokens = Math.floor(maxTokens * 0.75)
-  const keepTokens = Math.max(Math.floor(maxTokens * 0.08), 4_000)
-  const toolEvictLimit = Math.min(6_000, Math.max(Math.floor(maxTokens * 0.05), 3_000))
-  const trimForSummary = Math.min(12_000, Math.floor(maxTokens * 0.25))
-  console.log("[Runtime] Context window:", maxTokens, "→ summarization trigger:", triggerTokens, "→ keep:", keepTokens, "→ tool evict limit:", toolEvictLimit, "→ trim for summary:", trimForSummary, "→ max output bytes:", maxOutputBytes)
+  if (codeExecRouteEnabled) {
+    extraTools.push(createCodeExecTool({
+      workspacePath,
+      threadId: options.threadId,
+      modelId: options.modelId,
+      yoloMode,
+      capabilityService,
+      approvalStore,
+      requestApproval
+    }))
+  }
+
+  const deferredToolIds = [
+    ...lazyMcpMetadata.map((tool) => tool.toolId),
+    ...deferredSavedTools.map((tool) => tool.toolId)
+  ]
 
   const finalTools = [...mcpTools, ...memoryTools, ...extraTools, ...toolSearchTools]
+  const hasNamedTool = (name: string): boolean => {
+    return finalTools.some((tool) => (tool as { name?: string }).name === name)
+  }
+  const hasSearchTool = hasNamedTool("search_tool")
+  const hasInspectTool = hasNamedTool("inspect_tool")
+  const hasInvokeDeferredTool = hasNamedTool("invoke_deferred_tool")
+  const hasCodeExecTool = hasNamedTool("code_exec")
+
+  if (hasSearchTool && hasInspectTool && hasInvokeDeferredTool) {
+    console.log("[Runtime] Added deferred tool workflow prompt")
+  } else if (hasInspectTool) {
+    console.log("[Runtime] Added inspect_tool prompt")
+  }
+  if (hasCodeExecTool) {
+    console.log("[Runtime] Added code_exec prompt")
+  }
+
+  systemPrompt += renderInjectedToolUsagePrompt({
+    hasSearchTool,
+    hasInspectTool,
+    hasInvokeDeferredTool,
+    hasCodeExecTool
+  })
+  systemPrompt += renderAvailableDeferredToolsPrompt(deferredToolIds)
+  console.log("[Runtime] System prompt summary:", {
+    chars: systemPrompt.length,
+    hasAgentsPrompt: Boolean(agentsPrompt.prompt),
+    agentsFilesLoaded: agentsPrompt.loadedPaths.length,
+    hasExtraSystemPrompt: Boolean(extraSystemPrompt),
+    deferredToolIds: deferredToolIds.length
+  })
+  const triggerTokens = Math.floor(maxTokens * 0.75)
+  const keepTokens = Math.max(Math.floor(maxTokens * SUMMARY_KEEP_RATIO), 4_000)
+  const toolEvictLimit = Math.min(20_000, Math.max(Math.floor(maxTokens * 0.08), 6_000))
+  const trimForSummary = Math.min(SUMMARY_INPUT_TOKEN_CAP, Math.floor(maxTokens * SUMMARY_INPUT_RATIO))
+  console.log("[Runtime] Context window:", maxTokens, "→ summarization trigger:", triggerTokens, "→ keep:", keepTokens, "→ tool evict limit:", toolEvictLimit, "→ trim for summary:", trimForSummary, "→ max output bytes:", maxOutputBytes)
+
   backend.setGitWorkflowCommitOnly(false)
   console.log("[Runtime] Final tool list:", finalTools.map((t) => (t as { name?: string }).name ?? "(unnamed)"))
 
@@ -1118,6 +1456,7 @@ The workspace root is: ${workspacePath}`
     backend,
     systemPrompt,
     filesystemSystemPrompt,
+    subagentExtraSystemPrompt: agentsPrompt.prompt ?? undefined,
     skills: allSkillsSources.length > 0 ? allSkillsSources : undefined,
     memory: memorySources?.length ? memorySources : undefined,
     // When the orchestrator is active (non-YOLO), it handles execute approval
@@ -1127,7 +1466,13 @@ The workspace root is: ${workspacePath}`
     summarizationTrigger: { type: "tokens", value: triggerTokens },
     summarizationKeep: { type: "tokens", value: keepTokens },
     toolTokenLimitBeforeEvict: toolEvictLimit,
-    trimTokensToSummarize: trimForSummary
+    trimTokensToSummarize: trimForSummary,
+    summarizationSummaryPrompt: CMB_COWORK_SUMMARY_PROMPT,
+    summarizationTruncateArgsSettings: {
+      trigger: { type: "tokens", value: triggerTokens },
+      keep: { type: "tokens", value: keepTokens },
+      maxLength: 2000
+    }
   })
 
   console.log("[Runtime] Agent created with skills parameter:", allSkillsSources.length > 0 ? allSkillsSources : undefined)
@@ -1139,14 +1484,7 @@ The workspace root is: ${workspacePath}`
 // Clean up all checkpointer, MCP client, and memory store resources
 export async function closeRuntime(): Promise<void> {
   const closePromises: Promise<void>[] = Array.from(checkpointers.values()).map((cp) => cp.close())
-  if (_mcpToolsCache?.client) {
-    closePromises.push(_mcpToolsCache.client.close().catch(() => {}))
-    _mcpToolsCache = null
-  }
-  for (const client of _retiredMcpClients) {
-    closePromises.push(client.close().catch(() => {}))
-  }
-  _retiredMcpClients.clear()
+  closePromises.push(closeGlobalMcpCapabilityService())
   closePromises.push(closeMemoryStore())
   await Promise.all(closePromises)
   checkpointers.clear()

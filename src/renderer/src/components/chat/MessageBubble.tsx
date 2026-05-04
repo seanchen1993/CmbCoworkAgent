@@ -4,7 +4,43 @@ import { StreamingMarkdown } from "./StreamingMarkdown"
 import { getToolLabel } from "@/lib/tool-labels"
 import { emitOpenResourcePreview } from "@/lib/resource-preview-events"
 import { useState } from "react"
-import { ChevronDown, ChevronRight, Eye, Wrench } from "lucide-react"
+import { ChevronDown, ChevronRight, Eye, Wrench, Copy, Check, PencilLine, ThumbsUp, ThumbsDown, Smile, Frown } from "lucide-react"
+import { toast } from "sonner"
+import {
+  MessageFeedbackDialog,
+  type DislikeFeedbackPayload
+} from "./MessageFeedbackDialog"
+import { SkillChip } from "@/features/slash-commands/skill-chip"
+import { parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
+
+/**
+ * Strip the trailing `<CMBDEVCLAW-SKILL-USE-V1>…</…>` block when present.
+ * Only applied to user-authored content — assistant replies that happen to
+ * quote the tag (e.g. discussing the protocol) should copy verbatim instead
+ * of silently losing characters.
+ */
+function stripSkillUseBlock(s: string): string {
+  const parsed = parseSkillUseBlock(s)
+  return parsed ? parsed.rest : s
+}
+
+function extractMessagePlainText(
+  content: Message["content"],
+  options: { stripSkillUse?: boolean } = {}
+): string {
+  const maybeStrip = options.stripSkillUse ? stripSkillUseBlock : (s: string): string => s
+  if (typeof content === "string") return maybeStrip(content)
+  if (!Array.isArray(content)) return ""
+
+  return content
+    .map((block) => {
+      if (block.type === "text") return maybeStrip(block.text ?? "")
+      if (typeof block.content === "string") return maybeStrip(block.content)
+      return ""
+    })
+    .filter(Boolean)
+    .join("\n")
+}
 
 // 获取工具调用的简要描述
 function getToolCallSummary(toolCall: { name: string; args?: Record<string, unknown> }): string {
@@ -53,23 +89,34 @@ interface MessageBubbleProps {
   message: Message
   previousMessage?: Message | null
   isStreaming?: boolean
+  showAssistantMeta?: boolean
   toolResults?: Map<string, ToolResultInfo>
   pendingApproval?: HITLRequest | null
   onApprovalDecision?: (decision: "approve" | "approve_session" | "approve_permanent" | "reject" | "edit") => void
+  onEditUserMessage?: (message: Message) => void
   threadId: string
+  isLoading: boolean
 }
 
 export function MessageBubble({
   message,
   previousMessage,
   isStreaming = true,
+  showAssistantMeta = true,
   toolResults,
   pendingApproval,
   onApprovalDecision,
-  threadId
+  onEditUserMessage,
+  threadId,
+  isLoading
 }: MessageBubbleProps): React.JSX.Element | null {
   const [collapsedTools, setCollapsedTools] = useState<Set<string>>(new Set())
   const [collapsedHtmlTools, setCollapsedHtmlTools] = useState<Set<string>>(new Set())
+  const [copySuccess, setCopySuccess] = useState(false)
+  const [feedbackDialogOpen, setFeedbackDialogOpen] = useState(false)
+  const [likedMessageId, setLikedMessageId] = useState<string | null>(null)
+  const [dislikedMessageId, setDislikedMessageId] = useState<string | null>(null)
+  const [feedbackSubmitting, setFeedbackSubmitting] = useState(false)
   const isUser = message.role === "user"
   const isTool = message.role === "tool"
 
@@ -109,16 +156,24 @@ export function MessageBubble({
 
   const renderContent = (): React.ReactNode => {
     if (typeof message.content === "string") {
-      // Empty content
+      // Empty content (after potentially stripping the trailing skill-use block below)
       if (!message.content.trim()) {
         return null
       }
 
       // Use streaming markdown for assistant messages, plain text for user messages
       if (isUser) {
+        // Parse the trailing `<CMBDEVCLAW-SKILL-USE-V1>` block: chip at the top,
+        // rest of the message as plain text. Handles skill-only sends (no text)
+        // by still rendering the chip with an empty tail.
+        const skillParsed = parseSkillUseBlock(message.content)
+        const visibleText = skillParsed ? skillParsed.rest : message.content
         return (
           <div className="whitespace-pre-wrap text-[15px] leading-7 text-foreground/95">
-            {message.content}
+            {skillParsed && (
+              <SkillChip label={skillParsed.skillName} compact className="mr-2" />
+            )}
+            {visibleText}
           </div>
         )
       }
@@ -131,12 +186,17 @@ export function MessageBubble({
         if (block.type === "text" && block.text) {
           // Use streaming markdown for assistant text blocks
           if (isUser) {
+            const skillParsed = parseSkillUseBlock(block.text)
+            const visibleText = skillParsed ? skillParsed.rest : block.text
             return (
               <div
                 key={index}
                 className="whitespace-pre-wrap text-[15px] leading-7 text-foreground/95"
               >
-                {block.text}
+                {skillParsed && (
+                  <SkillChip label={skillParsed.skillName} compact className="mr-2" />
+                )}
+                {visibleText}
               </div>
             )
           }
@@ -155,6 +215,76 @@ export function MessageBubble({
 
   const content = renderContent()
   const hasToolCalls = message.tool_calls && message.tool_calls.length > 0
+  // Only strip the skill-use tail from OUR user messages; assistant text that
+  // happens to quote the tag (e.g. while discussing the protocol) copies verbatim.
+  const plainTextForCopy = extractMessagePlainText(message.content, { stripSkillUse: isUser })
+
+  const handleCopyMessage = async (): Promise<void> => {
+    if (!plainTextForCopy.trim()) {
+      toast.error("该消息暂无可复制内容")
+      return
+    }
+
+    try {
+      await navigator.clipboard.writeText(plainTextForCopy)
+      setCopySuccess(true)
+      setTimeout(() => setCopySuccess(false), 1800)
+    } catch (error) {
+      console.error("[MessageBubble] Failed to copy message:", error)
+      toast.error("复制失败，请重试")
+    }
+  }
+
+  const handleOpenFeedbackDialog = (type: "like" | "dislike") => {
+    setFeedbackDialogOpen(true)
+    if (type === "like") {
+      setLikedMessageId(message.id)
+      setDislikedMessageId(null)
+    } else {
+      setLikedMessageId(null)
+      setDislikedMessageId(message.id)
+    }
+  }
+
+  const handleFeedbackSubmit = async (
+    type: "like" | "dislike",
+    payload?: DislikeFeedbackPayload
+  ) => {
+    setFeedbackSubmitting(true)
+    try {
+      // Track feedback event
+      if (type === "like") {
+        window.electron?.ipcRenderer?.invoke("track-event", {
+          eventName: "message.feedback.like",
+          eventCategory: "chat",
+          properties: {
+            messageId: message.id,
+            threadId: threadId
+          }
+        }).catch((err) => console.error("Failed to track like event:", err))
+      } else {
+        window.electron?.ipcRenderer?.invoke("track-event", {
+          eventName: "message.feedback.dislike.submit",
+          eventCategory: "chat",
+          properties: {
+            feedbackId: payload?.feedbackId ?? "",
+            dislikeType: payload?.feedbackType ?? payload?.feedbackId ?? "",
+            dislikeTypeLabel: payload?.feedbackTypeLabel ?? "",
+            dislikeText: payload?.feedbackText ?? "",
+            feedbackText: payload?.feedbackText ?? "",
+            messageId: message.id,
+            threadId: threadId
+          }
+        }).catch((err) => console.error("Failed to track dislike feedback:", err))
+      }
+    } catch (error) {
+      console.error("反馈提交失败", error)
+      toast.error("反馈提交失败，请重试")
+    } finally {
+      setFeedbackSubmitting(false)
+      setFeedbackDialogOpen(false)
+    }
+  }
 
   // Don't render if there's no content and no tool calls
   if (!content && !hasToolCalls) {
@@ -163,16 +293,39 @@ export function MessageBubble({
 
   if (isUser) {
     return (
-      <div className="flex justify-end overflow-hidden py-4">
-        <div className="rounded-lg p-3 overflow-hidden bg-primary/10 max-w-[80%]">
-          {content}
+      <div className="group flex justify-end overflow-hidden py-4">
+        <div className="flex max-w-[80%] flex-col items-end gap-1">
+          <div className="rounded-lg p-3 overflow-hidden bg-primary/10">
+            {content}
+          </div>
+          <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+            {/*<span className="text-[11px] text-muted-foreground">{createdAtLabel}</span>*/}
+            <button
+              type="button"
+              onClick={handleCopyMessage}
+              className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
+              title="复制消息"
+              aria-label="复制消息"
+            >
+              {copySuccess ? <Check className="size-3 text-status-nominal" /> : <Copy className="size-3" />}
+            </button>
+            <button
+              type="button"
+              onClick={() => onEditUserMessage?.(message)}
+              className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
+              title="编辑后重新发送"
+              aria-label="编辑后重新发送"
+            >
+              <PencilLine className="size-3" />
+            </button>
+          </div>
         </div>
       </div>
     )
   }
 
   return (
-    <div className="overflow-hidden space-y-1.5">
+    <div className="group overflow-hidden space-y-1.5">
       {shouldShowMessageHead && (
         <div className="flex items-center gap-2 mb-4">
           <svg className="size-5 shrink-0" viewBox="0 0 120 120" fill="none">
@@ -206,6 +359,62 @@ export function MessageBubble({
       )}
       <div className="flex-1 min-w-0 space-y-2 overflow-hidden pl-7">
         {content && <div className="rounded-lg px-3 overflow-hidden">{content}</div>}
+        {content && showAssistantMeta && !isLoading && (
+          <div className="flex items-center gap-1 px-3 opacity-0 transition-opacity group-hover:opacity-100">
+            {/*<span className="text-[11px] text-muted-foreground">{createdAtLabel}</span>*/}
+            <button
+              type="button"
+              onClick={handleCopyMessage}
+              className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
+              title="复制消息"
+              aria-label="复制消息"
+            >
+              {copySuccess ? <Check className="size-3 text-status-nominal" /> : <Copy className="size-3" />}
+            </button>
+            {/* 点赞按钮 */}
+            <button
+              type="button"
+              onClick={() => {
+                setLikedMessageId(message.id)
+                setDislikedMessageId(null)
+                handleFeedbackSubmit("like")
+              }}
+              className={`inline-flex items-center justify-center rounded p-1 transition-all transform hover:scale-110 active:scale-95 ${
+                likedMessageId === message.id
+                  ? "text-green-500"
+                  : "text-muted-foreground hover:text-foreground hover:bg-background-interactive"
+              }`}
+              title="点赞"
+              aria-label="点赞"
+            >
+              {likedMessageId === message.id ? (
+                <Smile className="size-3" />
+              ) : (
+                <ThumbsUp className="size-3" />
+              )}
+            </button>
+            {/* 点踩按钮 */}
+            <button
+              type="button"
+              onClick={() => {
+                handleOpenFeedbackDialog("dislike")
+              }}
+              className={`inline-flex items-center justify-center rounded p-1 transition-all transform hover:scale-110 active:scale-95 ${
+                dislikedMessageId === message.id
+                  ? "text-red-500"
+                  : "text-muted-foreground hover:text-foreground hover:bg-background-interactive"
+              }`}
+              title="点踩"
+              aria-label="点踩"
+            >
+              {dislikedMessageId === message.id ? (
+                <Frown className="size-3" />
+              ) : (
+                <ThumbsDown className="size-3" />
+              )}
+            </button>
+          </div>
+        )}
         {hasToolCalls && (
           <div className="space-y-2 overflow-hidden">
             {message.tool_calls!.map((toolCall, index) => {
@@ -277,7 +486,7 @@ export function MessageBubble({
                           title="在右侧资源预览中打开"
                           aria-label="在右侧资源预览中打开"
                         >
-                          <Eye className="size-3.5" />
+                          <Eye className="size-3" />
                         </button>
                       )}
 
@@ -353,6 +562,13 @@ export function MessageBubble({
           </div>
         )}
       </div>
+      {/* 点赞点踩反馈对话框 */}
+      <MessageFeedbackDialog
+        open={feedbackDialogOpen}
+        onClose={() => setFeedbackDialogOpen(false)}
+        onSubmit={handleFeedbackSubmit}
+        submitting={feedbackSubmitting}
+      />
     </div>
   )
 }

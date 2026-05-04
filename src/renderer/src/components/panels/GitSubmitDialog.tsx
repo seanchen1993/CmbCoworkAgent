@@ -1,8 +1,27 @@
-import { CheckCircle2, Loader2, Upload } from "lucide-react"
+import { CheckCircle2, GitCommit, Loader2, Upload } from "lucide-react"
 import { Dialog, DialogContent } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue
+} from "@/components/ui/select"
 import { cn } from "@/lib/utils"
+
+const COMMIT_TYPES = [
+  { value: "fix", label: "fix" },
+  { value: "feat", label: "feat" },
+  { value: "refactor", label: "refactor" },
+  { value: "docs", label: "docs" },
+  { value: "style", label: "style" },
+  { value: "test", label: "test" },
+  { value: "chore", label: "chore" }
+] as const
+
+type CommitType = (typeof COMMIT_TYPES)[number]["value"]
 
 type GitSubmitAction = "commit" | "push"
 
@@ -16,9 +35,12 @@ interface GitSubmitDialogProps {
   deletions: number
   requiresCommitMetadata: boolean
   cardNumber: string
+  commitType: CommitType
   commitMessage: string
+  pendingCommits?: Array<{ hash: string; message: string; date: string }>
   onOpenChange: (open: boolean) => void
   onCardNumberChange: (value: string) => void
+  onCommitTypeChange: (value: CommitType) => void
   onCommitMessageChange: (value: string) => void
   onSubmit: (action: GitSubmitAction) => void
 }
@@ -33,9 +55,12 @@ export function GitSubmitDialog({
   deletions,
   requiresCommitMetadata,
   cardNumber,
+  commitType,
   commitMessage,
+  pendingCommits,
   onOpenChange,
   onCardNumberChange,
+  onCommitTypeChange,
   onCommitMessageChange,
   onSubmit
 }: GitSubmitDialogProps): React.JSX.Element {
@@ -43,7 +68,7 @@ export function GitSubmitDialog({
   const cardValue = cardNumber.trim()
   const messageValue = commitMessage.trim()
   const finalMessagePreview = cardValue
-    ? `${cardValue} #comment fix:${messageValue || "<message>"} #CMBDevClaw`
+    ? `${cardValue} #comment ${commitType}:${messageValue || "<message>"} #CMBDevClaw`
     : ""
   const cardMissing = requiresCommitMetadata && !cardValue
   const messageMissing = requiresCommitMetadata && !messageValue
@@ -116,6 +141,26 @@ export function GitSubmitDialog({
 
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between text-xs">
+                  <label htmlFor="git-commit-type" className="font-medium text-foreground">
+                    提交类型
+                  </label>
+                </div>
+                <Select value={commitType} onValueChange={onCommitTypeChange}>
+                  <SelectTrigger id="git-commit-type" className="w-full">
+                    <SelectValue placeholder="选择提交类型" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {COMMIT_TYPES.map((type) => (
+                      <SelectItem key={type.value} value={type.value}>
+                        {type.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-xs">
                   <label htmlFor="git-message" className="font-medium text-foreground">
                     提交消息
                   </label>
@@ -153,8 +198,30 @@ export function GitSubmitDialog({
               )}
             </>
           ) : (
-            <div className="rounded-lg border border-border/70 bg-muted/20 p-2.5 text-sm text-muted-foreground">
-              当前没有文件改动，将直接推送已有提交。
+            <div className="space-y-3">
+              <div className="rounded-lg border border-border/70 bg-muted/20 p-2.5 text-sm text-muted-foreground">
+                当前没有文件改动，将直接推送已有提交。
+              </div>
+              {pendingCommits && pendingCommits.length > 0 && (
+                <div className="space-y-1.5">
+                  <div className="flex items-center gap-1.5 text-xs font-medium text-foreground">
+                    <GitCommit className="size-3.5" />
+                    待推送的 {pendingCommits.length} 个提交
+                  </div>
+                  <div className="rounded-lg border border-border/70 bg-muted/10 divide-y divide-border/50 max-h-[180px] overflow-y-auto">
+                    {pendingCommits.map((commit) => (
+                      <div key={commit.hash} className="px-2.5 py-2 flex items-start gap-2">
+                        <code className="shrink-0 text-[10px] font-mono text-muted-foreground mt-0.5">
+                          {commit.hash.slice(0, 7)}
+                        </code>
+                        <span className="text-xs text-foreground break-all leading-5">
+                          {commit.message}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </form>
@@ -163,6 +230,7 @@ export function GitSubmitDialog({
           {requiresCommitMetadata ? (
             <>
               <Button
+                id={"git-commit-button"}
                 type="button"
                 className="w-full h-9"
                 variant={action === "push" ? "outline" : "default"}
@@ -183,6 +251,7 @@ export function GitSubmitDialog({
               </Button>
 
               <Button
+                id={"git-commit-push-button"}
                 type="button"
                 className="w-full h-9"
                 variant={action === "push" ? "default" : "outline"}
@@ -192,7 +261,7 @@ export function GitSubmitDialog({
                 {pushRunning ? (
                   <>
                     <Loader2 className="size-4 animate-spin" />
-                    推送中...
+                    推送中，可能稍慢，请耐心等待...
                   </>
                 ) : (
                   <>
@@ -204,6 +273,7 @@ export function GitSubmitDialog({
             </>
           ) : (
             <Button
+              id={"git-push-button"}
               type="button"
               className="w-full h-9"
               disabled={anyRunning}
@@ -212,7 +282,7 @@ export function GitSubmitDialog({
               {pushRunning ? (
                 <>
                   <Loader2 className="size-4 animate-spin" />
-                  推送中...
+                  推送中，可能稍慢，请耐心等待...
                 </>
               ) : (
                 <>
@@ -224,6 +294,7 @@ export function GitSubmitDialog({
           )}
 
           <Button
+            id={"git-cancel-button"}
             type="button"
             variant="ghost"
             className="w-full h-9"

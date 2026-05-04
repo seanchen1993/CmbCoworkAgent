@@ -1,3 +1,5 @@
+import type { HookConfig } from "./hooks/types"
+
 // Thread types matching langgraph-api
 export type ThreadStatus = "idle" | "busy" | "interrupted" | "error"
 
@@ -184,6 +186,8 @@ export interface GrepMatch {
 }
 
 // MCP Connector types
+export type McpConnectorKind = "remote" | "stdio"
+
 export interface McpConnectorAdvanced {
   headers?: Record<string, string>
   transport?: "sse" | "streamable-http"
@@ -197,24 +201,39 @@ export interface McpConnectorAdvanced {
 export interface McpConnectorConfig {
   id: string
   name: string
-  url: string
+  kind?: McpConnectorKind
+  url?: string
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
   enabled: boolean
   advanced?: McpConnectorAdvanced
-  lazyLoad?: boolean  // true = lazy load tools, false/undefined = load all tools
+  lazyLoad?: boolean // true = lazy load tools, false/undefined = load all tools
   createdAt: string
   updatedAt: string
 }
 
 export interface McpConnectorUpsert {
   name: string
-  url: string
+  kind?: McpConnectorKind
+  url?: string
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
   enabled?: boolean
   advanced?: McpConnectorAdvanced
-  lazyLoad?: boolean  // true = lazy load tools, false/undefined = load all tools
+  lazyLoad?: boolean // true = lazy load tools, false/undefined = load all tools
 }
 
 // Scheduled Task types
-export type ScheduledTaskFrequency = "once" | "manual" | "hourly" | "daily" | "weekdays" | "weekly" | "interval"
+export type ScheduledTaskFrequency =
+  | "once"
+  | "manual"
+  | "hourly"
+  | "daily"
+  | "weekdays"
+  | "weekly"
+  | "interval"
 export type ScheduledTaskType = "action" | "reminder"
 
 export interface ScheduledTask {
@@ -222,15 +241,15 @@ export interface ScheduledTask {
   name: string
   description: string
   prompt: string
-  taskType: ScheduledTaskType       // "action" = agent 执行操作, "reminder" = 暖心提醒
+  taskType: ScheduledTaskType // "action" = agent 执行操作, "reminder" = 暖心提醒
   modelId: string | null
   workDir: string | null
   chatxRobotChatId: string | null // 关联的机器人会话ID，执行完后 HTTP 回复
   frequency: ScheduledTaskFrequency
-  intervalMinutes: number | null    // 仅 interval 类型使用，如 5 表示每5分钟
-  runAt: string | null            // ISO 时间戳，仅 once 类型使用
-  runAtTime: string | null       // "HH:mm" 格式，如 "09:00"
-  weekday: number | null          // 0=周日, 1=周一, ..., 6=周六 (仅 weekly 使用)
+  intervalMinutes: number | null // 仅 interval 类型使用，如 5 表示每5分钟
+  runAt: string | null // ISO 时间戳，仅 once 类型使用
+  runAtTime: string | null // "HH:mm" 格式，如 "09:00"
+  weekday: number | null // 0=周日, 1=周一, ..., 6=周六 (仅 weekly 使用)
   enabled: boolean
   createdAt: string
   updatedAt: string
@@ -289,6 +308,8 @@ export interface PluginManifest {
   keywords?: string[]
   skills?: string | string[]
   mcpServers?: string
+  /** Path to hooks config file relative to plugin root (default: "hooks/hooks.json") */
+  hooks?: string
 }
 
 export interface PluginMetadata {
@@ -301,27 +322,165 @@ export interface PluginMetadata {
   enabled: boolean
   skillCount: number
   mcpServerCount: number
+  hookCount?: number
+  /** Cached hooks config path relative to plugin root, read from manifest at install/inspect time. */
+  hookPath?: string
   createdAt: string
   updatedAt: string
+}
+
+export interface PluginHookMetadata extends HookConfig {
+  pluginId: string
+  pluginName: string
+  pluginEnabled: boolean
+  hookPath: string
+}
+
+export interface SkillHookMetadata extends HookConfig {
+  skillName: string
+  skillPath: string
+  hookPath: string
 }
 
 export interface PluginMcpServerConfig {
   command?: string
   args?: string[]
+  env?: Record<string, string>
   url?: string
   transport?: "sse" | "streamable-http"
   headers?: Record<string, string>
+}
+
+// LSP types
+export const LSP_JAVA_RUNTIME_NAMES = ["JavaSE-1.8", "JavaSE-11", "JavaSE-17", "JavaSE-21"] as const
+export type LspJavaRuntimeName = (typeof LSP_JAVA_RUNTIME_NAMES)[number]
+export type LspJavaRuntimeSource = "configured" | "env" | "java_home" | "scan"
+export type LspServerState = "stopped" | "starting" | "running" | "error"
+export type LspLifecycleState =
+  | "stopped"
+  | "starting"
+  | "importing"
+  | "ready"
+  | "degraded"
+  | "error"
+
+export interface LspJavaRuntime {
+  name: LspJavaRuntimeName
+  path: string
+  source: LspJavaRuntimeSource
+  version: string | null
+  valid: boolean
+  error?: string
+}
+
+export interface LspProjectRequirement {
+  javaVersion: string
+  runtimeName: LspJavaRuntimeName
+  source: "pom.xml" | "build.gradle" | "build.gradle.kts" | ".classpath"
+}
+
+export interface LspStatus {
+  projectRoot: string | null
+  state: LspServerState
+  lifecycle: LspLifecycleState
+  statusText: string
+  projectStatusText: string
+  progressMessage: string | null
+  vsixAvailable: boolean
+  vsixSource: "user" | null
+  vsixPath: string | null
+  serviceReady: boolean
+  serviceReadyTimedOut: boolean
+  projectReady: boolean
+  projectReadyTimedOut: boolean
+  projectStatus: string | null
+  projectRequirement: LspProjectRequirement | null
+  runtimes: LspJavaRuntime[]
+  selectedRuntime: LspJavaRuntime | null
+  manualJavaHomeStatus: {
+    path: string
+    version: string | null
+    valid: boolean
+    error?: string
+  } | null
+  missingRuntime: LspJavaRuntimeName | null
+  degradedReason: string | null
+  warningReason: string | null
+}
+
+export interface LspConfig {
+  enabled: boolean
+  maxHeapMb: number
+  lastError: string | null
+  manualJavaHome: string | null
+}
+
+export interface LspDiagnostic {
+  file: string
+  line: number
+  column: number
+  endLine?: number
+  endColumn?: number
+  severity: "error" | "warning" | "info" | "hint"
+  message: string
+  source?: string
+}
+
+export interface LspLocation {
+  file: string
+  line: number
+  column: number
+  endLine?: number
+  endColumn?: number
+}
+
+export interface LspHoverResult {
+  contents: string
+  range?: {
+    startLine: number
+    startColumn: number
+    endLine: number
+    endColumn: number
+  }
+}
+
+export interface LspSymbol {
+  name: string
+  kind: string
+  file?: string
+  line?: number
+  column?: number
+  containerName?: string
+}
+
+export interface LspCallHierarchyItem {
+  name: string
+  kind: string
+  detail?: string
+  file: string
+  range: { startLine: number; startColumn: number; endLine: number; endColumn: number }
+  selectionRange: { startLine: number; startColumn: number; endLine: number; endColumn: number }
+}
+
+export interface LspCallHierarchyIncomingCall {
+  from: LspCallHierarchyItem
+  fromRanges: Array<{ startLine: number; startColumn: number; endLine: number; endColumn: number }>
+}
+
+export interface LspCallHierarchyOutgoingCall {
+  to: LspCallHierarchyItem
+  fromRanges: Array<{ startLine: number; startColumn: number; endLine: number; endColumn: number }>
 }
 
 // ── Approval / Sandbox Policy Types ──
 
 /** Review decision for command approval */
 export type ReviewDecision =
-  | "approved"            // approve this invocation only
-  | "approved_session"    // approve for the remainder of this session (cached)
-  | "approved_permanent"  // always allow this command pattern (persisted)
-  | "denied"              // reject
-  | "abort"               // abort the entire run
+  | "approved" // approve this invocation only
+  | "approved_session" // approve for the remainder of this session (cached)
+  | "approved_permanent" // always allow this command pattern (persisted)
+  | "denied" // reject
+  | "abort" // abort the entire run
 
 /** Command safety classification */
 export type ExecSafetyLevel = "safe" | "needs_approval" | "forbidden"
@@ -330,12 +489,25 @@ export type ExecSafetyLevel = "safe" | "needs_approval" | "forbidden"
 export interface ApprovalRequest extends HITLRequest {
   safety_level: ExecSafetyLevel
   /** Operation type: "execute" for shell commands, "write_file"/"edit_file" for file operations */
-  operation?: "execute" | "write_file" | "edit_file"
-  command?: string           // shell command (for execute operations)
-  filePath?: string          // target file path (for write_file/edit_file operations)
+  operation?:
+    | "execute"
+    | "write_file"
+    | "edit_file"
+    | "code_exec"
+    | "prepare_save_code_exec_tool"
+    | "save_code_exec_tool"
+  command?: string // shell command (for execute operations)
+  filePath?: string // target file path (for write_file/edit_file operations)
+  code?: string // code_exec script preview
+  params?: unknown // code_exec params preview
+  timeoutMs?: number // code_exec timeout preview
+  savedToolName?: string // proposed saved tool name before slug normalization
+  savedToolId?: string // proposed saved tool ID
+  savedToolDescription?: string // proposed saved tool description
+  savedToolMetadataError?: string // metadata generation failure message for manual fallback
   cwd: string
-  reason?: string           // why approval is needed
-  retry_reason?: string     // sandbox-failure retry context
+  reason?: string // why approval is needed
+  retry_reason?: string // sandbox-failure retry context
   allowed_approval_types: ApprovalDecisionType[]
 }
 
@@ -345,6 +517,8 @@ export type ApprovalDecisionType = "approve" | "approve_session" | "approve_perm
 export interface ApprovalDecision {
   type: ApprovalDecisionType
   tool_call_id: string
+  savedToolName?: string
+  savedToolDescription?: string
 }
 
 // ChatX types
@@ -380,4 +554,3 @@ export interface SkillMetadata {
   metadata?: Record<string, string>
   allowedTools?: string[]
 }
-

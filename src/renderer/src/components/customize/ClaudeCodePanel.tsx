@@ -16,9 +16,12 @@ interface Session {
   running: boolean
   workDir: string
   claudeModelId?: string
+  syncSkills: boolean
+  syncMemory: boolean
   hasContent: boolean
   ownsCreatingState: boolean // 只有 createSessionWithDir 创建的才为 true，表示该 session 持有 creating 锁
   restarting: boolean
+  slowStarting: boolean // terminal.create() 超过 8s 尚未返回，在 overlay 显示"首次启动较慢"提示
   // #1 fix: 分离 DOM 级别的 cleanup 和 PTY/IPC 级别的 cleanup
   domCleanups: Array<() => void>
   ptyCleanups: Array<() => void>
@@ -47,12 +50,33 @@ function createXterm(): { xterm: Terminal; fitAddon: FitAddon } {
       blue: "#1565c0",
       magenta: "#7b1fa2",
       cyan: "#00838f",
-      white: "#b8b4ac"
+      white: "#b8b4ac",
+      brightBlack: "#545454",
+      brightRed: "#e05a50",
+      brightGreen: "#4caf50",
+      brightYellow: "#ff9800",
+      brightBlue: "#42a5f5",
+      brightMagenta: "#ab47bc",
+      brightCyan: "#26c6da",
+      brightWhite: "#8a8780"
     },
     cursorBlink: true,
     scrollback: 5000,
-    allowProposedApi: true
+    allowProposedApi: true,
+    minimumContrastRatio: 4.5
     // #17: scrollbar: { width: 14 } 不是 xterm.js 有效选项，已移除
+  })
+  // Windows 兼容：Ctrl+V 粘贴、Ctrl+C 选中时复制
+  xterm.attachCustomKeyEventHandler((e) => {
+    if (e.type !== "keydown" || !(e.metaKey || e.ctrlKey)) return true
+    // Ctrl+V / Cmd+V → 交给浏览器原生粘贴
+    if (e.key === "v") return false
+    // Ctrl+C / Cmd+C → 有选中文本时复制，否则正常发送中断信号
+    if (e.key === "c" && xterm.hasSelection()) {
+      navigator.clipboard.writeText(xterm.getSelection()).catch(() => {})
+      return false
+    }
+    return true
   })
   const fitAddon = new FitAddon()
   xterm.loadAddon(fitAddon)
@@ -69,6 +93,12 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
   const [selectedModelId, setSelectedModelId] = useState<string>("")
   const [creating, setCreating] = useState(false)
   const [mountError, setMountError] = useState<string | null>(null)
+  const [syncSkills, setSyncSkills] = useState(false)
+  const [syncMemory, setSyncMemory] = useState(false)
+  const syncSkillsRef = useRef(syncSkills)
+  const syncMemoryRef = useRef(syncMemory)
+  syncSkillsRef.current = syncSkills
+  syncMemoryRef.current = syncMemory
 
   // 加载模型列表（仅打包环境）
   const refreshModels = useCallback((resetSelection = false) => {
@@ -268,12 +298,29 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
       session.xterm.clear()
     }
 
-    const termId = await window.api.terminal.create({
-      workDir: session.workDir || undefined,
-      cols: session.xterm.cols,
-      rows: session.xterm.rows,
-      claudeModelId: session.claudeModelId
-    })
+    // 慢启动提示：主进程 terminal.create 在最坏情况下最长等 ~50s（20s host ready + 30s PTY create），
+    // 8s 后还没返回，把 slowStarting 标记置 true，overlay 会切换到"首次启动较慢"文案。
+    // 成功后清掉标记，不污染 xterm buffer（写 buffer 会在 overlay 撤销后变成脏历史）。
+    const slowStartTimer = setTimeout(() => {
+      if (!sessionsRef.current.has(session.id)) return
+      session.slowStarting = true
+      setSessionIds((prev) => [...prev]) // 触发重渲让 overlay 更新文案
+    }, 8_000)
+    let termId: string
+    try {
+      termId = await window.api.terminal.create({
+        workDir: session.workDir || undefined,
+        args: ["--allow-dangerously-skip-permissions"],
+        cols: session.xterm.cols,
+        rows: session.xterm.rows,
+        claudeModelId: session.claudeModelId,
+        syncSkills: session.syncSkills,
+        syncMemory: session.syncMemory
+      })
+    } finally {
+      clearTimeout(slowStartTimer)
+      session.slowStarting = false
+    }
 
     // #2 fix: 如果 await 期间 session 被关闭，dispose 新创建的 PTY
     if (!sessionsRef.current.has(session.id)) {
@@ -303,7 +350,11 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
 
     const removeExit = window.api.terminal.onExit(termId, (code) => {
       if (!sessionsRef.current.has(session.id)) return
-      session.xterm.write(`\r\n\x1b[90m[进程已退出，代码: ${code}]\x1b[0m\r\n`)
+      // code 为 null 表示主进程 host 通信故障/spawn 失败强制 tear-down，没有真实退出码
+      const exitMsg = code === null
+        ? "[终端主机异常退出]"
+        : `[进程已退出，代码: ${code}]`
+      session.xterm.write(`\r\n\x1b[90m${exitMsg}\x1b[0m\r\n`)
       session.running = false
       session.restarting = false
       session.termId = null // 进程已退出，清零防止重启时多余 dispose
@@ -416,7 +467,7 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
 
       session = {
         id, termId: null, xterm, fitAddon, container,
-        running: false, workDir: dir, claudeModelId: resolvedModelId || undefined, hasContent: false, ownsCreatingState: true, restarting: false, domCleanups: [], ptyCleanups: []
+        running: false, workDir: dir, claudeModelId: resolvedModelId || undefined, syncSkills: syncSkillsRef.current, syncMemory: syncMemoryRef.current, hasContent: false, ownsCreatingState: true, restarting: false, slowStarting: false, domCleanups: [], ptyCleanups: []
       }
     } catch (err) {
       console.error("[ClaudeCode] Failed to create session:", err)
@@ -655,32 +706,65 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
                   <span>Windows 用户必须安装 Git Bash 和 Node.js (≥ 18)</span>
                 </div>
               )}
-            </div>
-          </div>
-          {isPackaged && models.length > 0 && (
-            <div className="flex items-center gap-2.5">
-              <span className="text-sm text-muted-foreground/70">模型配置</span>
-              <div className="relative inline-flex items-center">
-                <select
-                  value={selectedModelId}
-                  onChange={(e) => setSelectedModelId(e.target.value)}
-                  className="appearance-none h-10 pl-4 pr-9 rounded-xl border border-border/40 bg-muted/30 text-sm text-foreground/80 shadow-[0_1px_3px_rgba(0,0,0,0.04)] backdrop-blur-sm hover:bg-muted/50 hover:border-border/60 hover:shadow-[0_2px_8px_rgba(0,0,0,0.06)] active:scale-[0.97] focus:outline-none focus:ring-2 focus:ring-ring/20 focus:border-border/60 transition-all duration-200 ease-out cursor-pointer"
-                >
-                  {models.map((m) => (
-                    <option key={m.id} value={m.id}>{m.name}{m.model !== m.name ? `  ·  ${m.model}` : ""}</option>
-                  ))}
-                </select>
-                <ChevronDown className="pointer-events-none absolute right-3 size-3.5 text-muted-foreground/50" />
+              <div className="flex items-center gap-2 px-4 py-2">
+                <TriangleAlert className="size-3.5 shrink-0 text-amber-400" />
+                <span>按 {window.electron.process.platform === "win32" ? "Alt+M" : "Shift+Tab"} 切换到 bypass permissions 模式可跳过确认弹窗</span>
               </div>
             </div>
-          )}
-          <Button onClick={() => { setMountError(null); createSessionWithDir() }} className="gap-2" disabled={creating}>
-            {creating ? <Loader2 className="size-4 animate-spin" /> : <FolderOpen className="size-4" />}
-            {creating ? "正在启动..." : "选择工作目录并启动"}
-          </Button>
-          {mountError && (
-            <p className="text-xs text-destructive">{mountError}</p>
-          )}
+          </div>
+          <div className="flex flex-col items-center gap-3 w-full max-w-md">
+            {/* 液态玻璃配置面板 */}
+            <div className="w-full rounded-2xl border border-[rgba(0,0,0,0.06)] bg-[rgba(255,255,255,0.5)] backdrop-blur-xl shadow-[0_2px_12px_rgba(0,0,0,0.04),inset_0_1px_0_rgba(255,255,255,0.8)] overflow-hidden">
+              {/* 模型选择行 */}
+              {isPackaged && models.length > 0 && (
+                <div className="flex items-center justify-between px-4 py-2.5 border-b border-[rgba(0,0,0,0.04)]">
+                  <span className="text-xs text-muted-foreground/60">模型</span>
+                  <div className="relative inline-flex items-center">
+                    <select
+                      value={selectedModelId}
+                      onChange={(e) => setSelectedModelId(e.target.value)}
+                      className="appearance-none h-7 pl-3 pr-7 rounded-lg border-none bg-transparent text-xs text-foreground/70 focus:outline-none cursor-pointer hover:text-foreground/90 transition-colors"
+                    >
+                      {models.map((m) => (
+                        <option key={m.id} value={m.id}>{m.name}{m.model !== m.name ? ` · ${m.model}` : ""}</option>
+                      ))}
+                    </select>
+                    <ChevronDown className="pointer-events-none absolute right-1.5 size-3 text-muted-foreground/40" />
+                  </div>
+                </div>
+              )}
+              {/* 开关行 */}
+              {[
+                { label: "注入 CMBDevClaw 技能", checked: syncSkills, onChange: setSyncSkills },
+                { label: "注入 CMBDevClaw 记忆", checked: syncMemory, onChange: setSyncMemory }
+              ].map(({ label, checked, onChange }, i, arr) => (
+                <div key={label} className={cn("flex items-center justify-between px-4 py-2.5", i < arr.length - 1 && "border-b border-[rgba(0,0,0,0.04)]")}>
+                  <span className="text-xs text-muted-foreground/60">{label}</span>
+                  <button
+                    type="button"
+                    onClick={() => onChange(!checked)}
+                    className={cn(
+                      "relative w-[38px] h-[22px] rounded-full transition-all duration-300 ease-out cursor-pointer",
+                      checked ? "bg-[#34C759]" : "bg-[#e9e9ea]"
+                    )}
+                  >
+                    <span className={cn(
+                      "absolute top-[2px] size-[18px] rounded-full bg-white shadow-[0_2px_4px_rgba(0,0,0,0.15),0_1px_1px_rgba(0,0,0,0.06)] transition-all duration-300 ease-out",
+                      checked ? "left-[18px]" : "left-[2px]"
+                    )} />
+                  </button>
+                </div>
+              ))}
+            </div>
+            {/* 启动按钮 */}
+            <Button onClick={() => { setMountError(null); createSessionWithDir() }} className="gap-2 w-full max-w-xs" disabled={creating}>
+              {creating ? <Loader2 className="size-4 animate-spin" /> : <FolderOpen className="size-4" />}
+              {creating ? "正在启动..." : "选择工作目录并启动"}
+            </Button>
+            {mountError && (
+              <p className="text-xs text-destructive">{mountError}</p>
+            )}
+          </div>
         </div>
       )}
       {/* 顶部工具栏 */}
@@ -789,7 +873,7 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
                 <rect x="10" y="4" width="1" height="1" fill="#888"/>
               </svg>
             </div>
-            <span className="text-xs text-muted-foreground/50">{activeSession?.restarting ? "正在重启 Claude Code..." : "正在启动 Claude Code..."}</span>
+            <span className="text-xs text-muted-foreground/50">{activeSession?.slowStarting ? "首次启动可能较慢，请稍候..." : activeSession?.restarting ? "正在重启 Claude Code..." : "正在启动 Claude Code..."}</span>
             <style>{`
               .claude-mascot-container {
                 animation: mascot-hop 0.5s ease-in-out infinite;

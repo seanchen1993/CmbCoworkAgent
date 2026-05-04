@@ -11,6 +11,14 @@ import {
   DialogFooter
 } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
+import { DEFAULT_SCENE_CATEGORY, SCENE_CATEGORY_OPTIONS } from "@/lib/skill-data-service"
+
+interface UserInfoLite {
+  sapId?: string
+  ystId?: string
+  userName?: string
+  orgName?: string
+}
 
 interface UniversalUploadDialogProps {
   open: boolean
@@ -45,31 +53,51 @@ export function UniversalUploadDialog({
   const [file, setFile] = useState<File | null>(null)
   const [name, setName] = useState("")
   const [description, setDescription] = useState("")
-  const [category, setCategory] = useState<"研发场景" | "通用场景">("研发场景")
+  const [category, setCategory] = useState<string>(DEFAULT_SCENE_CATEGORY)
   const [guidance, setGuidance] = useState("")
   const [chineseName, setChineseName] = useState("")
-  const [userId, setUserId] = useState("")
+  const [userId, setUserId] = useState<string | undefined>(undefined)
   const [nameFromFile, setNameFromFile] = useState(false)  // name 是否来自文件解析（锁定）
+
+  const buildUserIdFromUserInfo = (userInfo: UserInfoLite | null): string | undefined => {
+    if (!userInfo) return undefined
+    const rawId = (userInfo.sapId || userInfo.ystId || "").trim()
+    const rawName = (userInfo.userName || "").trim()
+    const rawOrgName = (userInfo.orgName || "").trim()
+    const segments = [rawId, rawName, rawOrgName].filter(Boolean)
+    return segments.length > 0 ? segments.join(" / ") : undefined
+  }
+
+  const loadCurrentUserId = async () => {
+    try {
+      const userInfo = await window.api.models.getUserInfo()
+      setUserId(buildUserIdFromUserInfo(userInfo))
+    } catch (e) {
+      console.error("[UniversalUploadDialog] Failed to load user info:", e)
+      setUserId(undefined)
+    }
+  }
 
   // Initialize form with existing data for update mode
   React.useEffect(() => {
     if (isUpdate && existingItem && open) {
       setName(existingItem.name || "")
       setDescription(existingItem.description || "")
-      setCategory(existingItem.category as "研发场景" | "通用场景" || "研发场景")
+      setCategory(existingItem.category || DEFAULT_SCENE_CATEGORY)
       setGuidance(existingItem.guidance || "")
       setChineseName(existingItem.chinese_name || "")
-      setUserId(existingItem.user_id || "")
       setNameFromFile(false)
     } else if (!isUpdate && open) {
       // Reset form for new upload
       setName("")
       setDescription("")
-      setCategory("研发场景")
+      setCategory(DEFAULT_SCENE_CATEGORY)
       setGuidance("")
       setChineseName("")
-      setUserId("")
       setNameFromFile(false)
+    }
+    if (open) {
+      void loadCurrentUserId()
     }
   }, [isUpdate, existingItem, open])
 
@@ -177,7 +205,16 @@ export function UniversalUploadDialog({
     setUploading(true)
 
     try {
-      const result = await onUpload(file, name.trim(), description.trim(), category, guidance, chineseName.trim() || undefined, userId.trim() || undefined)
+      const normalizedUserId = userId?.trim() || undefined
+      const result = await onUpload(
+        file,
+        name.trim(),
+        description.trim(),
+        category,
+        guidance,
+        chineseName.trim() || undefined,
+        normalizedUserId
+      )
 
       if (result.success) {
         onSuccess()
@@ -188,7 +225,7 @@ export function UniversalUploadDialog({
         setDescription("")
         setGuidance("")
         setChineseName("")
-        setUserId("")
+        setUserId(undefined)
       } else {
         setError(result.error || "Upload failed")
       }
@@ -385,20 +422,6 @@ export function UniversalUploadDialog({
             />
           </div>
 
-          {/* User ID Input */}
-          <div className="space-y-2">
-            <label htmlFor="user-id" className="block text-sm font-medium">
-              用户ID
-            </label>
-            <Input
-              id="user-id"
-              placeholder="输入用户id"
-              value={userId}
-              onChange={(e) => setUserId(e.target.value)}
-              disabled={uploading}
-            />
-          </div>
-
           {/* Description Input */}
           <div className="space-y-2">
             <label htmlFor="description" className="block text-sm font-medium">
@@ -423,12 +446,19 @@ export function UniversalUploadDialog({
             <select
               id="category"
               value={category}
-              onChange={(e) => setCategory(e.target.value as "研发场景" | "通用场景")}
+              onChange={(e) => setCategory(e.target.value)}
               disabled={uploading}
               className="w-full p-2 text-sm border rounded-md focus:ring-1 focus:ring-primary focus:outline-none disabled:opacity-50"
             >
-              <option value="研发场景">研发场景</option>
-              <option value="通用场景">通用场景</option>
+              {category &&
+                !SCENE_CATEGORY_OPTIONS.includes(
+                  category as (typeof SCENE_CATEGORY_OPTIONS)[number]
+                ) && <option value={category}>{category}</option>}
+              {SCENE_CATEGORY_OPTIONS.map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
             </select>
           </div>
 

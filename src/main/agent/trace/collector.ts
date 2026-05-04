@@ -43,6 +43,15 @@ import { app } from "electron"
 import { getLocalIP } from "../../net-utils"
 import { getUserInfo } from "../../storage"
 import { listAllSkills } from "../../ipc/skills"
+import { nowIsoLocal } from "../../util/local-time"
+import {
+  ensureVersionedSkillIdentifier,
+  parseSkillIdentifier
+} from "../../utils/skill-identifiers"
+import {
+  setAdoptionContext,
+  clearAdoptionContext
+} from "../../services/adoption-tracker"
 
 // ─────────────────────────────────────────────────────────
 // Global reporter registry
@@ -94,6 +103,26 @@ function normalizeTrace(parsed: AgentTrace): AgentTrace {
   }
 }
 
+function deriveUpperOrgLevels(pathName?: string): Pick<AgentTrace, "upperOrgLv1" | "upperOrgLv2" | "upperOrgLv3"> {
+  const parts = typeof pathName === "string"
+    ? pathName.split("/").map((part) => part.trim()).filter(Boolean)
+    : []
+
+  return {
+    upperOrgLv1: parts.length >= 2 ? parts[parts.length - 2] : "",
+    upperOrgLv2: parts.length >= 3 ? parts[parts.length - 3] : "",
+    upperOrgLv3: parts.length >= 4 ? parts[parts.length - 4] : ""
+  }
+}
+
+function getAppVersionForTrace(): string {
+  try {
+    return typeof app?.getVersion === "function" ? app.getVersion() : "unknown"
+  } catch {
+    return "unknown"
+  }
+}
+
 // ─────────────────────────────────────────────────────────
 // TraceCollector class
 // ─────────────────────────────────────────────────────────
@@ -119,7 +148,7 @@ export class TraceCollector {
 
   /** The step currently being built (between beginStep / endStep). */
   private currentStepIndex = 0
-  private currentStepStartedAt: string = new Date().toISOString()
+  private currentStepStartedAt: string = nowIsoLocal()
   private currentToolCalls: TraceToolCall[] = []
 
   constructor(threadId: string, userMessage: string, modelId: string) {
@@ -127,7 +156,7 @@ export class TraceCollector {
     this.threadId = threadId
     this.userMessage = userMessage
     this.modelId = modelId
-    this.startedAt = new Date().toISOString()
+    this.startedAt = nowIsoLocal()
     this.rootNodeId = `trace:${this.traceId}`
     this.pushNode({
       id: this.rootNodeId,
@@ -143,6 +172,15 @@ export class TraceCollector {
         modelId: this.modelId
       }
     })
+    // Publish context to adoption tracker (side-effect only)
+    try {
+      setAdoptionContext(this.threadId, {
+        traceId: this.traceId,
+        modelId: this.modelId
+      })
+    } catch {
+      // never block trace setup
+    }
   }
 
   /** Update the modelId (can be resolved after construction). */
@@ -152,6 +190,11 @@ export class TraceCollector {
     if (root) {
       root.metadata = { ...(root.metadata ?? {}), modelId: id }
     }
+    try {
+      setAdoptionContext(this.threadId, { modelId: id })
+    } catch {
+      // ignore
+    }
   }
 
   /** Set the human-readable model name (e.g. "minmax") for display in trace UI. */
@@ -160,6 +203,11 @@ export class TraceCollector {
     const root = this.getNode(this.rootNodeId)
     if (root) {
       root.metadata = { ...(root.metadata ?? {}), modelName: name }
+    }
+    try {
+      setAdoptionContext(this.threadId, { modelName: name })
+    } catch {
+      // ignore
     }
   }
 
@@ -186,6 +234,13 @@ export class TraceCollector {
     if (root) {
       root.metadata = { ...(root.metadata ?? {}), usedSkills: [...skills] }
     }
+    try {
+      setAdoptionContext(this.threadId, {
+        usedSkills: [...skills]
+      })
+    } catch {
+      // ignore
+    }
   }
 
   /** Return the root trace node id. */
@@ -198,7 +253,7 @@ export class TraceCollector {
    * (i.e. before tool calls for that step are known).
    */
   beginStep(): void {
-    this.currentStepStartedAt = new Date().toISOString()
+    this.currentStepStartedAt = nowIsoLocal()
     this.currentToolCalls = []
   }
 
@@ -232,7 +287,7 @@ export class TraceCollector {
       parentId: this.rootNodeId,
       name: params?.name ?? "LLM Call",
       status: "running",
-      startedAt: params?.startedAt ?? new Date().toISOString(),
+      startedAt: params?.startedAt ?? nowIsoLocal(),
       input: params?.input,
       metadata: {
         ...(params?.metadata ?? {}),
@@ -269,7 +324,7 @@ export class TraceCollector {
       parentId,
       name: params.name,
       status: "running",
-      startedAt: params.startedAt ?? new Date().toISOString(),
+      startedAt: params.startedAt ?? nowIsoLocal(),
       input: params.input,
       metadata: {
         ...(params.metadata ?? {}),
@@ -293,7 +348,7 @@ export class TraceCollector {
       ?? (params.toolCallId ? this.toolNodeByCallId.get(params.toolCallId) : undefined)
       ?? this.rootNodeId
     const id = `tool_result:${uuid()}`
-    const now = params.startedAt ?? new Date().toISOString()
+    const now = params.startedAt ?? nowIsoLocal()
 
     this.pushNode({
       id,
@@ -328,7 +383,7 @@ export class TraceCollector {
     if (!node) return
 
     node.status = params.status ?? "success"
-    node.endedAt = params.endedAt ?? new Date().toISOString()
+    node.endedAt = params.endedAt ?? nowIsoLocal()
     if (params.output !== undefined) node.output = params.output
     if (params.metadata) node.metadata = { ...(node.metadata ?? {}), ...params.metadata }
   }
@@ -351,8 +406,8 @@ export class TraceCollector {
       name: params.name
         ?? (params.type === "error" ? "Run Error" : params.type === "cancel" ? "Run Cancelled" : "Run Completed"),
       status: params.status ?? (params.type === "error" ? "error" : params.type === "cancel" ? "cancelled" : "success"),
-      startedAt: params.startedAt ?? new Date().toISOString(),
-      endedAt: params.endedAt ?? new Date().toISOString(),
+      startedAt: params.startedAt ?? nowIsoLocal(),
+      endedAt: params.endedAt ?? nowIsoLocal(),
       output: params.output,
       metadata: params.metadata
     })
@@ -379,7 +434,7 @@ export class TraceCollector {
    * Safe to call multiple times — only the first call takes effect.
    */
   async finish(outcome: TraceOutcome, errorMessage?: string): Promise<AgentTrace> {
-    const endedAt = new Date().toISOString()
+    const endedAt = nowIsoLocal()
     const durationMs = Date.now() - new Date(this.startedAt).getTime()
     const totalToolCalls = this.steps.reduce((sum, s) => sum + s.toolCalls.length, 0)
 
@@ -389,15 +444,33 @@ export class TraceCollector {
       try {
         const allSkills = await listAllSkills()
         const skillVersionMap = new Map(allSkills.map((s) => [s.name, s.version]))
-        usedSkillsWithVersions = this.usedSkills.map((name) => {
-          const version = skillVersionMap.get(name) ?? "v1.0.0"
-          return `${name}-${version}`
-        })
+        usedSkillsWithVersions = Array.from(
+          new Set(
+            this.usedSkills
+              .map((skill) => {
+                const parsed = parseSkillIdentifier(skill)
+                return ensureVersionedSkillIdentifier(
+                  parsed.name,
+                  parsed.version ?? skillVersionMap.get(parsed.name)
+                )
+              })
+              .filter(Boolean)
+          )
+        )
       } catch (e) {
         console.warn("[Tracer] Failed to resolve skill versions:", e)
+        usedSkillsWithVersions = Array.from(
+          new Set(
+            this.usedSkills
+              .map((skill) => ensureVersionedSkillIdentifier(skill))
+              .filter(Boolean)
+          )
+        )
       }
     }
 
+    const userInfo = getUserInfo()
+    const upperOrgLevels = deriveUpperOrgLevels(userInfo?.pathName)
     const trace: AgentTrace = {
       traceId: this.traceId,
       threadId: this.threadId,
@@ -408,8 +481,17 @@ export class TraceCollector {
       modelId: this.modelId,
       ...(this.modelName ? { modelName: this.modelName } : {}),
       userIp: getLocalIP(),
-      userName: getUserInfo()?.userName,
-      appVersion: app.getVersion(),
+      userName: userInfo?.userName,
+      sapId: userInfo?.sapId,
+      ystId: userInfo?.ystId,
+      originOrgId: userInfo?.originOrgId,
+      orgName: userInfo?.orgName,
+      pathName: userInfo?.pathName,
+      pathId: userInfo?.originPathId,
+      upperOrgLv1: upperOrgLevels.upperOrgLv1,
+      upperOrgLv2: upperOrgLevels.upperOrgLv2,
+      upperOrgLv3: upperOrgLevels.upperOrgLv3,
+      appVersion: getAppVersionForTrace(),
       steps: this.steps,
       modelCalls: this.modelCalls,
       nodes: this.finalizeNodes(outcome, endedAt, errorMessage),
@@ -422,10 +504,20 @@ export class TraceCollector {
 
     writeTraceFile(trace)
 
+    // Fire-and-forget: trace upload is a side-channel operation and must
+    // never block the main agent flow. Errors are logged and swallowed.
+    void Promise.resolve()
+      .then(() => _reporter.report(trace))
+      .catch((e) => {
+        console.warn("[Tracer] Reporter.report() threw:", e)
+      })
+
+    // Clear adoption context — subsequent write_file calls on this thread
+    // will no longer carry this trace's attribution.
     try {
-      await _reporter.report(trace)
-    } catch (e) {
-      console.warn("[Tracer] Reporter.report() threw:", e)
+      clearAdoptionContext(this.threadId)
+    } catch {
+      // ignore
     }
 
     return trace
@@ -502,7 +594,7 @@ export class TraceCollector {
     const node = this.getNode(id)
     if (!node) return
     node.status = status
-    node.endedAt = new Date().toISOString()
+    node.endedAt = nowIsoLocal()
   }
 }
 
