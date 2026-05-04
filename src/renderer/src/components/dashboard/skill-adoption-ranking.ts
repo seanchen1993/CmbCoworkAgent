@@ -1,8 +1,10 @@
 export type SkillAdoptionSortKey =
   | "measuredAdoptionRate"
   | "inclusiveAdoptionRate"
+  | "pushedAdoptionRate"
   | "adoptedLines"
   | "commitCount"
+  | "pushedCommitCount"
 
 export interface SkillAdoptionRankingItem {
   skill: string
@@ -12,8 +14,13 @@ export interface SkillAdoptionRankingItem {
   unmeasuredGeneratedLines: number
   inclusiveEffectiveGeneratedLines: number
   adoptedLines: number
+  pushedMeasuredGeneratedLines: number
+  pushedEffectiveGeneratedLines: number
+  pushedAdoptedLines: number
+  pushedCommitCount: number
   measuredAdoptionRate: number | null
   inclusiveAdoptionRate: number | null
+  pushedAdoptionRate: number | null
   commitCount: number
 }
 
@@ -22,8 +29,10 @@ export const DEFAULT_SKILL_ADOPTION_SORT: SkillAdoptionSortKey = "measuredAdopti
 export const SKILL_ADOPTION_SORT_LABELS: Record<SkillAdoptionSortKey, string> = {
   measuredAdoptionRate: "已测量采纳率",
   inclusiveAdoptionRate: "含未提交采纳率",
+  pushedAdoptionRate: "已 Push 采纳率",
   adoptedLines: "采纳代码行数",
-  commitCount: "提交次数"
+  commitCount: "提交次数",
+  pushedCommitCount: "Push 次数"
 }
 
 export function getSkillAdoptionSortValue(

@@ -113,8 +113,13 @@ interface DashboardCodeStats {
   unmeasuredGeneratedLines: number
   inclusiveEffectiveGeneratedLines: number
   adoptedLines: number
+  pushedMeasuredGeneratedLines: number
+  pushedEffectiveGeneratedLines: number
+  pushedAdoptedLines: number
+  pushedCommitCount: number
   measuredAdoptionRate: number | null
   inclusiveAdoptionRate: number | null
+  pushedAdoptionRate: number | null
   adoptionRate: number | null
 }
 

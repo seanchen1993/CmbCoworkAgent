@@ -204,6 +204,36 @@ function MeasuredAdoptionTooltip({ stats }: { stats: DashboardCodeStats }): Reac
   )
 }
 
+function PushedAdoptionTooltip({ stats }: { stats: DashboardCodeStats }): React.JSX.Element {
+  return (
+    <div className="space-y-1.5">
+      <div className="text-[11px] font-medium text-foreground">已 Push 采纳率</div>
+      <div className="space-y-1 text-[11px]">
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">已 Push 采纳行数</span>
+          <span className="font-medium text-foreground">{fmtExactLines(stats.pushedAdoptedLines)} 行</span>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">已 Push 有效生成行数</span>
+          <span className="font-medium text-foreground">{fmtExactLines(stats.pushedEffectiveGeneratedLines)} 行</span>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">已 Push 原始生成行数</span>
+          <span className="font-medium text-foreground">{fmtExactLines(stats.pushedMeasuredGeneratedLines)} 行</span>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">已 Push Commit 数</span>
+          <span className="font-medium text-foreground">{fmtExactLines(stats.pushedCommitCount)} 次</span>
+        </div>
+      </div>
+      <div className="space-y-0.5 text-[10px] text-muted-foreground">
+        <div>采纳率 = 已 Push 采纳行数 / 已 Push 有效生成行数。</div>
+        <div>仅统计通过应用成功 Push 后的 commit。</div>
+      </div>
+    </div>
+  )
+}
+
 function SkillCodeStatsBar({ stats }: { stats: DashboardCodeStats | null }): React.JSX.Element {
   if (!stats) {
     return (
@@ -234,7 +264,7 @@ function SkillCodeStatsBar({ stats }: { stats: DashboardCodeStats | null }): Rea
           </div>
         </div>
       </div>
-      <div className="grid grid-cols-4 gap-3">
+      <div className="grid grid-cols-5 gap-3">
         <SkillCodeStat
           icon={Code2}
           label="生成行数"
@@ -267,6 +297,17 @@ function SkillCodeStatsBar({ stats }: { stats: DashboardCodeStats | null }): Rea
               : `${fmtLines(stats.adoptedLines)} / ${fmtLines(stats.effectiveGeneratedLines)} 行`
           }
           tooltipContent={<MeasuredAdoptionTooltip stats={stats} />}
+        />
+        <SkillCodeStat
+          icon={Gauge}
+          label="已 Push 采纳率"
+          value={fmtPercent(stats.pushedAdoptionRate)}
+          sub={
+            stats.pushedAdoptionRate === null
+              ? "暂无已 Push 数据"
+              : `${fmtLines(stats.pushedAdoptedLines)} / ${fmtLines(stats.pushedEffectiveGeneratedLines)} 行`
+          }
+          tooltipContent={<PushedAdoptionTooltip stats={stats} />}
         />
       </div>
     </section>

@@ -47,6 +47,11 @@ function testInclusiveAndMeasuredRates(): void {
     2860 / 4640,
     "inclusive adoption rate should include unmeasured generated lines"
   )
+  assert(stats.pushedMeasuredGeneratedLines === 0, "pushed measured raw lines should default to zero")
+  assert(stats.pushedEffectiveGeneratedLines === 0, "pushed effective lines should default to zero")
+  assert(stats.pushedAdoptedLines === 0, "pushed adopted lines should default to zero")
+  assert(stats.pushedCommitCount === 0, "pushed commit count should default to zero")
+  assert(stats.pushedAdoptionRate === null, "pushed adoption rate should be null without pushed denominator")
   assert(stats.adoptionRate === stats.measuredAdoptionRate, "legacy adoptionRate should alias measured rate")
 }
 
@@ -77,6 +82,12 @@ function testNormalizeCodeStatsFromAggs(): void {
         measured_generated_lines: { value: 80 },
         effective_generated_lines: { value: 60 },
         adopted_lines: { value: 30 }
+      },
+      code_adopt_pushed: {
+        pushed_measured_generated_lines: { value: 50 },
+        pushed_effective_generated_lines: { value: 40 },
+        pushed_adopted_lines: { value: 20 },
+        pushed_commit_count: { value: 2 }
       }
     }
   })
@@ -87,8 +98,13 @@ function testNormalizeCodeStatsFromAggs(): void {
   assert(stats.effectiveGeneratedLines === 60, "effectiveGeneratedLineCount should feed measured denominator")
   assert(stats.unmeasuredGeneratedLines === 20, "unmeasured lines should be generated - measured")
   assert(stats.inclusiveEffectiveGeneratedLines === 80, "inclusive denominator should add unmeasured lines")
+  assert(stats.pushedMeasuredGeneratedLines === 50, "pushed raw generated lines should be parsed")
+  assert(stats.pushedEffectiveGeneratedLines === 40, "pushed effective generated lines should be parsed")
+  assert(stats.pushedAdoptedLines === 20, "pushed adopted lines should be parsed")
+  assert(stats.pushedCommitCount === 2, "pushed commit count should be parsed")
   assertClose(stats.measuredAdoptionRate, 30 / 60, "measured rate should use effective denominator")
   assertClose(stats.inclusiveAdoptionRate, 30 / 80, "inclusive rate should use inclusive denominator")
+  assertClose(stats.pushedAdoptionRate, 20 / 40, "pushed rate should use pushed effective denominator")
 }
 
 function testEffectiveGeneratedLinesAggregationField(): void {
@@ -115,6 +131,12 @@ function testNormalizeSkillCodeAdoptionBuckets(): void {
               effective_generated_lines: { value: 60 },
               adopted_lines: { value: 30 },
               commit_count: { value: 2 }
+            },
+            code_adopt_pushed: {
+              pushed_measured_generated_lines: { value: 70 },
+              pushed_effective_generated_lines: { value: 50 },
+              pushed_adopted_lines: { value: 25 },
+              pushed_commit_count: { value: 1 }
             }
           },
           {
@@ -145,10 +167,16 @@ function testNormalizeSkillCodeAdoptionBuckets(): void {
   assert(items[0].inclusiveEffectiveGeneratedLines === 100, "Skill inclusive denominator should include unmeasured lines")
   assert(items[0].adoptedLines === 30, "Skill adopted lines should be parsed")
   assert(items[0].commitCount === 2, "Skill commit count should use commitSha cardinality")
+  assert(items[0].pushedMeasuredGeneratedLines === 70, "Skill pushed raw lines should be parsed")
+  assert(items[0].pushedEffectiveGeneratedLines === 50, "Skill pushed effective lines should be parsed")
+  assert(items[0].pushedAdoptedLines === 25, "Skill pushed adopted lines should be parsed")
+  assert(items[0].pushedCommitCount === 1, "Skill pushed commit count should be parsed")
   assertClose(items[0].measuredAdoptionRate, 30 / 60, "Skill measured adoption rate should be calculated")
   assertClose(items[0].inclusiveAdoptionRate, 30 / 100, "Skill inclusive adoption rate should be calculated")
+  assertClose(items[0].pushedAdoptionRate, 25 / 50, "Skill pushed adoption rate should be calculated")
   assert(items[1].measuredAdoptionRate === null, "Skill measured rate should be null when no measured denominator")
   assertClose(items[1].inclusiveAdoptionRate, 0, "Skill inclusive rate should be zero when generated but not adopted")
+  assert(items[1].pushedAdoptionRate === null, "Skill pushed rate should be null when no pushed denominator")
   assert(items[1].commitCount === 0, "null/missing commitSha values should not contribute to commit count")
 }
 

@@ -1,5 +1,6 @@
 import { IpcMain, dialog, app, BrowserWindow } from "electron"
 import Store from "electron-store"
+import { randomUUID } from "crypto"
 import * as fs from "fs/promises"
 import { existsSync } from "fs"
 import * as path from "path"
@@ -15,8 +16,11 @@ import type {
 import { startWatching, stopWatching } from "../services/workspace-watcher"
 import { trackEvent } from "../services/event-reporter"
 import { captureStagedSnapshotsForCommit, measureForCommit } from "../services/adoption-tracker"
+import { scheduleMarkCodeAdoptionCommitsPushed } from "../services/code-adoption-push-updater"
 import { getTracesDir } from "../agent/trace/collector"
 import type { AgentTrace } from "../agent/trace/types"
+import { nowIsoLocal } from "../util/local-time"
+import { buildGitCommitUrl, parseGitRemoteInfo } from "../utils/git-remote"
 
 const execFileAsync = promisify(execFile)
 
@@ -2484,6 +2488,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       logGitStep(threadId, "push", "开始推送流程")
       let autoCommitted = false
       let autoCommitHead: string | null = null
+      let pushedCommits: Array<{ hash: string; message: string; date: string }> = []
       const steps: PushStepResult[] = []
       try {
         const context = await resolveThreadWorkspaceContext(threadId)
@@ -2597,6 +2602,14 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           }
         }
 
+        const pushabilityBeforePush = await getPushabilitySnapshot(
+          worktreePath,
+          branch,
+          context.worktreeBaseCommit,
+          { silent: true }
+        )
+        pushedCommits = pushabilityBeforePush.pendingCommits
+
         // Step 2: Push
         try {
           logGitStep(threadId, "push", `执行 push origin ${branch}`)
@@ -2638,14 +2651,44 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
         // Operational telemetry (fire-and-forget, never blocks return)
         {
+          const pushOperationId = randomUUID()
+          const pushedAt = nowIsoLocal()
           let remoteUrl = ""
           try {
             remoteUrl = (await runGit(worktreePath, ["remote", "get-url", "origin"], { silent: true })).trim()
           } catch { /* best-effort */ }
+          const remoteInfo = parseGitRemoteInfo(remoteUrl)
+          const pushedCommitShas = pushedCommits.map((commit) => commit.hash)
+          const pushedCommitUrls = pushedCommitShas
+            .map((sha) => buildGitCommitUrl(remoteInfo, sha))
+            .filter(Boolean)
+          scheduleMarkCodeAdoptionCommitsPushed({
+            commitShas: pushedCommitShas,
+            repoPath: worktreePath,
+            branch,
+            remoteUrl,
+            repositoryName: remoteInfo?.repositoryName ?? "",
+            repositoryFullName: remoteInfo?.repositoryFullName ?? "",
+            repositoryHost: remoteInfo?.repositoryHost ?? "",
+            repositoryWebUrl: remoteInfo?.repositoryWebUrl ?? "",
+            commitUrlTemplate: remoteInfo?.commitUrlTemplate ?? "",
+            pushedAt,
+            pushOperationId
+          })
           trackGitEventWithSkills("git.push.executed", threadId, {
             repoPath: worktreePath,
             branch,
-            remoteUrl
+            remoteUrl,
+            repositoryName: remoteInfo?.repositoryName ?? "",
+            repositoryFullName: remoteInfo?.repositoryFullName ?? "",
+            repositoryHost: remoteInfo?.repositoryHost ?? "",
+            repositoryWebUrl: remoteInfo?.repositoryWebUrl ?? "",
+            commitUrlTemplate: remoteInfo?.commitUrlTemplate ?? "",
+            pushedCommitShas,
+            pushedCommitUrls,
+            pushedCommitCount: pushedCommitShas.length,
+            pushedAt,
+            pushOperationId
           })
         }
 

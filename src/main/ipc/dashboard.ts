@@ -305,6 +305,15 @@ function asStringArray(value: unknown): string[] {
   return value.filter((item): item is string => typeof item === "string")
 }
 
+function codeAdoptPushedAggs(): Record<string, unknown> {
+  return {
+    pushed_measured_generated_lines: { sum: { field: "properties.generatedLineCount" } },
+    pushed_effective_generated_lines: effectiveGeneratedLinesSumAgg(),
+    pushed_adopted_lines: { sum: { field: "properties.adoptedLineCount" } },
+    pushed_commit_count: { cardinality: { field: "properties.commitSha" } }
+  }
+}
+
 function summarizeTraceTokenUsage(modelCalls: AgentTrace["modelCalls"]): {
   totalInputTokens: number
   totalOutputTokens: number
@@ -539,6 +548,10 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
     { exists: { field: "properties.effectiveGeneratedLineCount" } },
     timeRangeFilter("properties.generatedAt", range)
   ]
+  const codeAdoptPushedFilters: Record<string, unknown>[] = [
+    ...codeAdoptFilters,
+    { term: { "properties.pushed": true } }
+  ]
   const codeBody = {
     size: 0,
     query: {
@@ -566,6 +579,10 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
           adopted_lines: { sum: { field: "properties.adoptedLineCount" } }
         }
       },
+      code_adopt_pushed: {
+        filter: { bool: { filter: codeAdoptPushedFilters } },
+        aggs: codeAdoptPushedAggs()
+      },
       by_skill_adoption: {
         terms: { field: "properties.usedSkills", size: rankingSearchSize },
         aggs: {
@@ -584,6 +601,10 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
               adopted_lines: { sum: { field: "properties.adoptedLineCount" } },
               commit_count: { cardinality: { field: "properties.commitSha" } }
             }
+          },
+          code_adopt_pushed: {
+            filter: { bool: { filter: codeAdoptPushedFilters } },
+            aggs: codeAdoptPushedAggs()
           }
         }
       }
@@ -608,6 +629,10 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
       code_unmeasured_generated_lines: { value: codeStats.unmeasuredGeneratedLines },
       code_inclusive_effective_generated_lines: { value: codeStats.inclusiveEffectiveGeneratedLines },
       code_adopted_lines: { value: codeStats.adoptedLines },
+      code_pushed_measured_generated_lines: { value: codeStats.pushedMeasuredGeneratedLines },
+      code_pushed_effective_generated_lines: { value: codeStats.pushedEffectiveGeneratedLines },
+      code_pushed_adopted_lines: { value: codeStats.pushedAdoptedLines },
+      code_pushed_commit_count: { value: codeStats.pushedCommitCount },
       code_by_skill_adoption: {
         buckets: skillCodeAdoption.map((item) => ({
           key: item.skill,
@@ -619,7 +644,12 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
           adopted_lines: { value: item.adoptedLines },
           measured_adoption_rate: { value: item.measuredAdoptionRate },
           inclusive_adoption_rate: { value: item.inclusiveAdoptionRate },
-          commit_count: { value: item.commitCount }
+          commit_count: { value: item.commitCount },
+          pushed_measured_generated_lines: { value: item.pushedMeasuredGeneratedLines },
+          pushed_effective_generated_lines: { value: item.pushedEffectiveGeneratedLines },
+          pushed_adopted_lines: { value: item.pushedAdoptedLines },
+          pushed_adoption_rate: { value: item.pushedAdoptionRate },
+          pushed_commit_count: { value: item.pushedCommitCount }
         }))
       }
     }
@@ -1054,6 +1084,10 @@ async function fetchSkillCodeStats(skill: string, range: TimeRange): Promise<Das
     timeRangeFilter("properties.generatedAt", range),
     { terms: { "properties.usedSkills": skillTerms } }
   ]
+  const codeAdoptPushedFilters: Record<string, unknown>[] = [
+    ...codeAdoptFilters,
+    { term: { "properties.pushed": true } }
+  ]
   const body = {
     size: 0,
     query: {
@@ -1080,6 +1114,10 @@ async function fetchSkillCodeStats(skill: string, range: TimeRange): Promise<Das
           effective_generated_lines: effectiveGeneratedLinesSumAgg(),
           adopted_lines: { sum: { field: "properties.adoptedLineCount" } }
         }
+      },
+      code_adopt_pushed: {
+        filter: { bool: { filter: codeAdoptPushedFilters } },
+        aggs: codeAdoptPushedAggs()
       }
     }
   }
@@ -1204,6 +1242,10 @@ function makeMockOverview(range: TimeRange): unknown {
       code_unmeasured_generated_lines: { value: 920 },
       code_inclusive_effective_generated_lines: { value: 4640 },
       code_adopted_lines: { value: 2860 },
+      code_pushed_measured_generated_lines: { value: 2500 },
+      code_pushed_effective_generated_lines: { value: 2360 },
+      code_pushed_adopted_lines: { value: 1880 },
+      code_pushed_commit_count: { value: 21 },
       by_skill: {
         buckets: [
           { key: "代码审查",     doc_count: 312 },
@@ -1269,6 +1311,11 @@ function makeMockOverview(range: TimeRange): unknown {
             adopted_lines: { value: 511 },
             measured_adoption_rate: { value: 511 / 700 },
             inclusive_adoption_rate: { value: 511 / 790 },
+            pushed_measured_generated_lines: { value: 520 },
+            pushed_effective_generated_lines: { value: 490 },
+            pushed_adopted_lines: { value: 380 },
+            pushed_adoption_rate: { value: 380 / 490 },
+            pushed_commit_count: { value: 8 },
             commit_count: { value: 18 }
           },
           {
@@ -1281,6 +1328,11 @@ function makeMockOverview(range: TimeRange): unknown {
             adopted_lines: { value: 470 },
             measured_adoption_rate: { value: 470 / 560 },
             inclusive_adoption_rate: { value: 470 / 560 },
+            pushed_measured_generated_lines: { value: 420 },
+            pushed_effective_generated_lines: { value: 380 },
+            pushed_adopted_lines: { value: 340 },
+            pushed_adoption_rate: { value: 340 / 380 },
+            pushed_commit_count: { value: 6 },
             commit_count: { value: 12 }
           },
           {
@@ -1293,6 +1345,11 @@ function makeMockOverview(range: TimeRange): unknown {
             adopted_lines: { value: 260 },
             measured_adoption_rate: { value: 260 / 330 },
             inclusive_adoption_rate: { value: 260 / 430 },
+            pushed_measured_generated_lines: { value: 200 },
+            pushed_effective_generated_lines: { value: 180 },
+            pushed_adopted_lines: { value: 140 },
+            pushed_adoption_rate: { value: 140 / 180 },
+            pushed_commit_count: { value: 3 },
             commit_count: { value: 7 }
           },
           {
@@ -1305,6 +1362,11 @@ function makeMockOverview(range: TimeRange): unknown {
             adopted_lines: { value: 0 },
             measured_adoption_rate: { value: null },
             inclusive_adoption_rate: { value: 0 },
+            pushed_measured_generated_lines: { value: 0 },
+            pushed_effective_generated_lines: { value: 0 },
+            pushed_adopted_lines: { value: 0 },
+            pushed_adoption_rate: { value: null },
+            pushed_commit_count: { value: 0 },
             commit_count: { value: 0 }
           }
         ]

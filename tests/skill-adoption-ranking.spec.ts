@@ -30,8 +30,13 @@ function makeItem(
     unmeasuredGeneratedLines: 0,
     inclusiveEffectiveGeneratedLines: 0,
     adoptedLines: 0,
+    pushedMeasuredGeneratedLines: 0,
+    pushedEffectiveGeneratedLines: 0,
+    pushedAdoptedLines: 0,
+    pushedCommitCount: 0,
     measuredAdoptionRate: null,
     inclusiveAdoptionRate: null,
+    pushedAdoptionRate: null,
     commitCount: 0,
     ...overrides
   }
@@ -62,13 +67,16 @@ function testTieBreaksByAdoptedLinesThenName(): void {
 
 function testAlternateSortKeys(): void {
   const items = [
-    makeItem("lines", { adoptedLines: 300, commitCount: 1, inclusiveAdoptionRate: 0.1 }),
-    makeItem("commits", { adoptedLines: 50, commitCount: 8, inclusiveAdoptionRate: 0.2 }),
-    makeItem("inclusive", { adoptedLines: 10, commitCount: 2, inclusiveAdoptionRate: 0.9 })
+    makeItem("lines", { adoptedLines: 300, commitCount: 1, pushedCommitCount: 1, inclusiveAdoptionRate: 0.1 }),
+    makeItem("commits", { adoptedLines: 50, commitCount: 8, pushedCommitCount: 2, inclusiveAdoptionRate: 0.2 }),
+    makeItem("inclusive", { adoptedLines: 10, commitCount: 2, pushedCommitCount: 3, inclusiveAdoptionRate: 0.9 }),
+    makeItem("pushed", { adoptedLines: 20, commitCount: 1, pushedCommitCount: 9, pushedAdoptionRate: 0.95 })
   ]
 
   assert(sortSkillAdoptionItems(items, "adoptedLines")[0].skill === "lines", "adopted lines sort should use adoptedLines")
   assert(sortSkillAdoptionItems(items, "commitCount")[0].skill === "commits", "commit sort should use commitCount")
+  assert(sortSkillAdoptionItems(items, "pushedCommitCount")[0].skill === "pushed", "push count sort should use pushedCommitCount")
+  assert(sortSkillAdoptionItems(items, "pushedAdoptionRate")[0].skill === "pushed", "pushed rate sort should use pushedAdoptionRate")
   assert(
     sortSkillAdoptionItems(items, "inclusiveAdoptionRate")[0].skill === "inclusive",
     "inclusive rate sort should use inclusiveAdoptionRate"

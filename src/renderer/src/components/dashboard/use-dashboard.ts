@@ -28,8 +28,13 @@ export interface OverviewData {
   codeUnmeasuredGeneratedLines: number
   codeInclusiveEffectiveGeneratedLines: number
   codeAdoptedLines: number
+  codePushedMeasuredGeneratedLines: number
+  codePushedEffectiveGeneratedLines: number
+  codePushedAdoptedLines: number
+  codePushedCommitCount: number
   codeMeasuredAdoptionRate: number | null
   codeInclusiveAdoptionRate: number | null
+  codePushedAdoptionRate: number | null
   codeAdoptionRate: number | null
   totalSkills: number
   totalTools: number
@@ -131,8 +136,13 @@ export interface DashboardCodeStats {
   unmeasuredGeneratedLines: number
   inclusiveEffectiveGeneratedLines: number
   adoptedLines: number
+  pushedMeasuredGeneratedLines: number
+  pushedEffectiveGeneratedLines: number
+  pushedAdoptedLines: number
+  pushedCommitCount: number
   measuredAdoptionRate: number | null
   inclusiveAdoptionRate: number | null
+  pushedAdoptionRate: number | null
   adoptionRate: number | null
 }
 
@@ -367,10 +377,16 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
     aggs.code_inclusive_effective_generated_lines?.value ??
     codeEffectiveGeneratedLines + codeUnmeasuredGeneratedLines
   const codeAdoptedLines = aggs.code_adopted_lines?.value ?? 0
+  const codePushedMeasuredGeneratedLines = aggs.code_pushed_measured_generated_lines?.value ?? 0
+  const codePushedEffectiveGeneratedLines = aggs.code_pushed_effective_generated_lines?.value ?? 0
+  const codePushedAdoptedLines = aggs.code_pushed_adopted_lines?.value ?? 0
+  const codePushedCommitCount = aggs.code_pushed_commit_count?.value ?? 0
   const codeMeasuredAdoptionRate =
     codeEffectiveGeneratedLines > 0 ? codeAdoptedLines / codeEffectiveGeneratedLines : null
   const codeInclusiveAdoptionRate =
     codeInclusiveEffectiveGeneratedLines > 0 ? codeAdoptedLines / codeInclusiveEffectiveGeneratedLines : null
+  const codePushedAdoptionRate =
+    codePushedEffectiveGeneratedLines > 0 ? codePushedAdoptedLines / codePushedEffectiveGeneratedLines : null
   const codeAdoptionRate = codeMeasuredAdoptionRate
   const totalSkills = aggs.total_skills?.value ?? 0
   const totalTools = aggs.total_tools?.value ?? 0
@@ -396,6 +412,7 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
   const bySkillAdoption: OverviewData["bySkillAdoption"] = (aggs.code_by_skill_adoption?.buckets ?? []).map((b: any) => {
     const measuredAdoptionRate = b.measured_adoption_rate?.value
     const inclusiveAdoptionRate = b.inclusive_adoption_rate?.value
+    const pushedAdoptionRate = b.pushed_adoption_rate?.value
     return {
       skill: b.key || "unknown",
       generatedLines: b.generated_lines?.value ?? 0,
@@ -404,8 +421,13 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
       unmeasuredGeneratedLines: b.unmeasured_generated_lines?.value ?? 0,
       inclusiveEffectiveGeneratedLines: b.inclusive_effective_generated_lines?.value ?? 0,
       adoptedLines: b.adopted_lines?.value ?? 0,
+      pushedMeasuredGeneratedLines: b.pushed_measured_generated_lines?.value ?? 0,
+      pushedEffectiveGeneratedLines: b.pushed_effective_generated_lines?.value ?? 0,
+      pushedAdoptedLines: b.pushed_adopted_lines?.value ?? 0,
+      pushedCommitCount: b.pushed_commit_count?.value ?? 0,
       measuredAdoptionRate: typeof measuredAdoptionRate === "number" ? measuredAdoptionRate : null,
       inclusiveAdoptionRate: typeof inclusiveAdoptionRate === "number" ? inclusiveAdoptionRate : null,
+      pushedAdoptionRate: typeof pushedAdoptionRate === "number" ? pushedAdoptionRate : null,
       commitCount: b.commit_count?.value ?? 0
     }
   })
@@ -447,8 +469,13 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
     codeUnmeasuredGeneratedLines,
     codeInclusiveEffectiveGeneratedLines,
     codeAdoptedLines,
+    codePushedMeasuredGeneratedLines,
+    codePushedEffectiveGeneratedLines,
+    codePushedAdoptedLines,
+    codePushedCommitCount,
     codeMeasuredAdoptionRate,
     codeInclusiveAdoptionRate,
+    codePushedAdoptionRate,
     codeAdoptionRate,
     totalSkills,
     totalTools,

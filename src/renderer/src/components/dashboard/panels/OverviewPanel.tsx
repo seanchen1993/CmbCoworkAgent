@@ -138,6 +138,36 @@ function MeasuredAdoptionTooltip({ data }: { data: OverviewData }) {
   )
 }
 
+function PushedAdoptionTooltip({ data }: { data: OverviewData }) {
+  return (
+    <div className="space-y-1.5">
+      <div className="text-[11px] font-medium text-foreground">已 Push 采纳率</div>
+      <div className="space-y-1 text-[11px]">
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">已 Push 采纳行数</span>
+          <span className="font-medium text-foreground">{formatExactNumber(data.codePushedAdoptedLines)} 行</span>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">已 Push 有效生成行数</span>
+          <span className="font-medium text-foreground">{formatExactNumber(data.codePushedEffectiveGeneratedLines)} 行</span>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">已 Push 原始生成行数</span>
+          <span className="font-medium text-foreground">{formatExactNumber(data.codePushedMeasuredGeneratedLines)} 行</span>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">已 Push Commit 数</span>
+          <span className="font-medium text-foreground">{formatExactNumber(data.codePushedCommitCount)} 次</span>
+        </div>
+      </div>
+      <div className="space-y-0.5 text-[10px] text-muted-foreground">
+        <div>采纳率 = 已 Push 采纳行数 / 已 Push 有效生成行数。</div>
+        <div>仅统计通过应用成功 Push 后的 commit。</div>
+      </div>
+    </div>
+  )
+}
+
 function GeneratedLinesTooltip(): React.JSX.Element {
   return (
     <div className="space-y-1 text-[11px]">
@@ -406,8 +436,12 @@ function formatNullablePercent(value: number | null): string {
 function formatSkillAdoptionSortValue(item: SkillAdoptionRankingItem, sortKey: SkillAdoptionSortKey): string {
   const value = getSkillAdoptionSortValue(item, sortKey)
   if (value === null) return "—"
-  if (sortKey === "measuredAdoptionRate" || sortKey === "inclusiveAdoptionRate") return formatPercent(value)
-  if (sortKey === "commitCount") return `${formatNumber(value)} 次`
+  if (
+    sortKey === "measuredAdoptionRate" ||
+    sortKey === "inclusiveAdoptionRate" ||
+    sortKey === "pushedAdoptionRate"
+  ) return formatPercent(value)
+  if (sortKey === "commitCount" || sortKey === "pushedCommitCount") return `${formatNumber(value)} 次`
   return `${formatNumber(value)} 行`
 }
 
@@ -514,9 +548,13 @@ function SkillAdoptionRankingPanel({
                       <span className="mx-1 text-border">|</span>
                       含未提交 {formatNullablePercent(item.inclusiveAdoptionRate)}
                       <span className="mx-1 text-border">|</span>
+                      已 Push {formatNullablePercent(item.pushedAdoptionRate)}
+                      <span className="mx-1 text-border">|</span>
                       采纳 {formatNumber(item.adoptedLines)} 行
                       <span className="mx-1 text-border">|</span>
                       提交 {formatNumber(item.commitCount)} 次
+                      <span className="mx-1 text-border">|</span>
+                      Push {formatNumber(item.pushedCommitCount)} 次
                     </div>
                     <div className="h-1 overflow-hidden rounded-full bg-muted">
                       <div className="h-full rounded-full bg-cyan-500" style={{ width: `${pct}%` }} />
@@ -741,6 +779,18 @@ export function OverviewPanel({
           }
           color="bg-blue-500"
           tooltipContent={<MeasuredAdoptionTooltip data={data} />}
+        />
+        <StatCard
+          icon={Gauge}
+          label="已 Push 采纳率"
+          value={formatPercent(data.codePushedAdoptionRate)}
+          sub={
+            data.codePushedAdoptionRate === null
+              ? "暂无已 Push 数据"
+              : `${formatNumber(data.codePushedAdoptedLines)} / ${formatNumber(data.codePushedEffectiveGeneratedLines)} 行`
+          }
+          color="bg-indigo-500"
+          tooltipContent={<PushedAdoptionTooltip data={data} />}
         />
       </div>
 

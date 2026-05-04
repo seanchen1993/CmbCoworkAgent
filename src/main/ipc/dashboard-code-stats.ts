@@ -6,8 +6,13 @@ export interface DashboardCodeStats {
   unmeasuredGeneratedLines: number
   inclusiveEffectiveGeneratedLines: number
   adoptedLines: number
+  pushedMeasuredGeneratedLines: number
+  pushedEffectiveGeneratedLines: number
+  pushedAdoptedLines: number
+  pushedCommitCount: number
   measuredAdoptionRate: number | null
   inclusiveAdoptionRate: number | null
+  pushedAdoptionRate: number | null
   adoptionRate: number | null
 }
 
@@ -53,16 +58,25 @@ export function makeDashboardCodeStats(args: {
   measuredGeneratedLines: number
   effectiveGeneratedLines: number
   adoptedLines: number
+  pushedMeasuredGeneratedLines?: number
+  pushedEffectiveGeneratedLines?: number
+  pushedAdoptedLines?: number
+  pushedCommitCount?: number
 }): DashboardCodeStats {
   const generatedLines = Math.max(0, args.generatedLines)
   const deletedLines = Math.max(0, args.deletedLines)
   const measuredGeneratedLines = Math.max(0, args.measuredGeneratedLines)
   const effectiveGeneratedLines = Math.max(0, args.effectiveGeneratedLines)
   const adoptedLines = Math.max(0, args.adoptedLines)
+  const pushedMeasuredGeneratedLines = Math.max(0, args.pushedMeasuredGeneratedLines ?? 0)
+  const pushedEffectiveGeneratedLines = Math.max(0, args.pushedEffectiveGeneratedLines ?? 0)
+  const pushedAdoptedLines = Math.max(0, args.pushedAdoptedLines ?? 0)
+  const pushedCommitCount = Math.max(0, args.pushedCommitCount ?? 0)
   const unmeasuredGeneratedLines = Math.max(0, generatedLines - measuredGeneratedLines)
   const inclusiveEffectiveGeneratedLines = effectiveGeneratedLines + unmeasuredGeneratedLines
   const measuredAdoptionRate = computeAdoptionRate(adoptedLines, effectiveGeneratedLines)
   const inclusiveAdoptionRate = computeAdoptionRate(adoptedLines, inclusiveEffectiveGeneratedLines)
+  const pushedAdoptionRate = computeAdoptionRate(pushedAdoptedLines, pushedEffectiveGeneratedLines)
   return {
     generatedLines,
     deletedLines,
@@ -71,8 +85,13 @@ export function makeDashboardCodeStats(args: {
     unmeasuredGeneratedLines,
     inclusiveEffectiveGeneratedLines,
     adoptedLines,
+    pushedMeasuredGeneratedLines,
+    pushedEffectiveGeneratedLines,
+    pushedAdoptedLines,
+    pushedCommitCount,
     measuredAdoptionRate,
     inclusiveAdoptionRate,
+    pushedAdoptionRate,
     // Backward-compatible alias for older renderer code paths.
     adoptionRate: measuredAdoptionRate
   }
@@ -98,12 +117,30 @@ function normalizeCodeStatsFromContainer(raw: unknown, prefix: string[] = []): D
     [...prefix, "code_adopt_measured", "effective_generated_lines", "value"]
   )
   const adoptedLines = getAggNumber(raw, [...prefix, "code_adopt_measured", "adopted_lines", "value"])
+  const pushedMeasuredGeneratedLines = getAggNumber(raw, [
+    ...prefix,
+    "code_adopt_pushed",
+    "pushed_measured_generated_lines",
+    "value"
+  ])
+  const pushedEffectiveGeneratedLines = getAggNumber(raw, [
+    ...prefix,
+    "code_adopt_pushed",
+    "pushed_effective_generated_lines",
+    "value"
+  ])
+  const pushedAdoptedLines = getAggNumber(raw, [...prefix, "code_adopt_pushed", "pushed_adopted_lines", "value"])
+  const pushedCommitCount = getAggNumber(raw, [...prefix, "code_adopt_pushed", "pushed_commit_count", "value"])
   return makeDashboardCodeStats({
     generatedLines,
     deletedLines,
     effectiveGeneratedLines,
     measuredGeneratedLines,
-    adoptedLines
+    adoptedLines,
+    pushedMeasuredGeneratedLines,
+    pushedEffectiveGeneratedLines,
+    pushedAdoptedLines,
+    pushedCommitCount
   })
 }
 
