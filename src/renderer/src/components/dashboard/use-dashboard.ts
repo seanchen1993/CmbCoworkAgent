@@ -350,12 +350,22 @@ function parseModelStats(raw: any): ModelStatsData {
   return { byModel, byTier, byLayer }
 }
 
-function formatTopUserOrgName(orgName: string, upperOrgLv1: string): string {
+function normalizeMetricValue(value: unknown): string {
+  if (Array.isArray(value)) return value.length > 0 ? String(value[0] ?? "") : ""
+  return value == null ? "" : String(value)
+}
+
+function getLatestUserMetric(bucket: any, field: string): string {
+  return normalizeMetricValue(bucket.latest_user_info?.top?.[0]?.metrics?.[field])
+}
+
+function formatTopUserOrgName(orgName: string, upperOrgLv1: string, upperOrgLv0: string): string {
   const normalizedOrgName = orgName.trim()
   const normalizedUpperOrgLv1 = upperOrgLv1.trim()
-  if (!normalizedUpperOrgLv1) return normalizedOrgName
-  if (!normalizedOrgName) return normalizedUpperOrgLv1
-  return `${normalizedUpperOrgLv1}/${normalizedOrgName}`
+  const normalizedUpperOrgLv0 = upperOrgLv0.trim()
+  if (normalizedUpperOrgLv1 && normalizedUpperOrgLv0) return `${normalizedUpperOrgLv1}/${normalizedUpperOrgLv0}`
+  if (normalizedUpperOrgLv1) return normalizedUpperOrgLv1
+  return normalizedOrgName
 }
 
 function parseUserStats(raw: any, selectedUpperOrgLv1: string | null): UserStatsData {
@@ -364,15 +374,18 @@ function parseUserStats(raw: any, selectedUpperOrgLv1: string | null): UserStats
     ? aggs.by_org.buckets
     : (aggs.by_org?.items?.buckets ?? [])
 
-  const topUsers: UserStatsData["topUsers"] = (aggs.top_users?.buckets ?? []).map((b: any) => ({
-    sapId: b.key,
-    userName: b.user_name?.buckets?.[0]?.key ?? b.key,
-    orgName: formatTopUserOrgName(
-      String(b.org_name?.buckets?.[0]?.key ?? ""),
-      String(b.upper_org_lv1?.buckets?.[0]?.key ?? "")
-    ),
-    count: b.doc_count
-  }))
+  const topUsers: UserStatsData["topUsers"] = (aggs.top_users?.buckets ?? []).map((b: any) => {
+    const userName = getLatestUserMetric(b, "userName") || b.key
+    const orgName = getLatestUserMetric(b, "orgName")
+    const upperOrgLv1 = getLatestUserMetric(b, "upperOrgLv1")
+    const upperOrgLv0 = getLatestUserMetric(b, "upperOrgLv0")
+    return {
+      sapId: b.key,
+      userName,
+      orgName: formatTopUserOrgName(orgName, upperOrgLv1, upperOrgLv0),
+      count: b.doc_count
+    }
+  })
 
   const byOrg: UserStatsData["byOrg"] = byOrgBuckets
     .filter((b: any) => String(b.key ?? "").trim() !== "")
