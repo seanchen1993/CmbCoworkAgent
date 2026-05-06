@@ -59,7 +59,15 @@ function normalizeSettings(settings: AgentAutoCommitSettings | null): AgentAutoC
   }
 }
 
-export function AutoCommitControl(): React.JSX.Element {
+type AutoCommitControlVariant = "compact" | "panel"
+
+interface AutoCommitControlProps {
+  variant?: AutoCommitControlVariant
+}
+
+export function AutoCommitControl({
+  variant = "compact"
+}: AutoCommitControlProps): React.JSX.Element {
   const [settings, setSettings] = useState<AgentAutoCommitSettings>(DEFAULT_AUTO_COMMIT_SETTINGS)
   const [draft, setDraft] = useState<AgentAutoCommitSettings>(DEFAULT_AUTO_COMMIT_SETTINGS)
   const [dialogOpen, setDialogOpen] = useState(false)
@@ -156,6 +164,124 @@ export function AutoCommitControl(): React.JSX.Element {
 
   const needsCard = draft.mode !== "off" && !draft.cardNumber?.trim()
 
+  const settingsForm = (
+    <div className="space-y-4">
+      <label className="flex flex-col gap-1.5 text-sm">
+        <span className="font-medium">提交方式</span>
+        <Select
+          value={draft.mode}
+          onValueChange={(value) => updateDraft({ mode: value as AgentAutoCommitMode })}
+          disabled={loading || pending}
+        >
+          <SelectTrigger>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="off">不自动提交</SelectItem>
+            <SelectItem value="ask">询问提交：弹窗确认后再提交</SelectItem>
+            <SelectItem value="always">自动提交：任务结束后直接提交</SelectItem>
+          </SelectContent>
+        </Select>
+      </label>
+
+      <label className="flex flex-col gap-1.5 text-sm">
+        <span className="font-medium">卡片编号</span>
+        <input
+          value={draft.cardNumber ?? ""}
+          onChange={(e) => updateDraft({ cardNumber: e.target.value })}
+          placeholder="例如 Z990880"
+          disabled={draft.mode === "off" || loading || pending}
+          className={cn(
+            "h-9 rounded-md border bg-background px-3 text-sm outline-none transition-colors focus:border-primary disabled:cursor-not-allowed disabled:opacity-60",
+            needsCard ? "border-amber-500/70" : "border-border"
+          )}
+        />
+      </label>
+
+      <div className="space-y-2">
+        <span className="text-sm font-medium">摘要来源</span>
+        <div className="grid gap-2 sm:grid-cols-2">
+          {STRATEGIES.map((strategy) => (
+            <button
+              key={strategy.value}
+              type="button"
+              onClick={() => updateDraft({ messageStrategy: strategy.value })}
+              disabled={draft.mode === "off" || loading || pending}
+              className={cn(
+                "min-h-[92px] rounded-md border p-3 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-60",
+                draft.messageStrategy === strategy.value
+                  ? "border-primary bg-primary/5 text-primary"
+                  : "border-border hover:bg-muted/40"
+              )}
+            >
+              <span className="block text-sm font-medium">{strategy.label}</span>
+              <span className="mt-1 block text-xs leading-5 text-muted-foreground">
+                {strategy.description}
+              </span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {draft.messageStrategy === "template" && (
+        <label className="flex flex-col gap-1.5 text-sm">
+          <span className="font-medium">摘要模板</span>
+          <input
+            value={draft.template ?? ""}
+            onChange={(e) => updateDraft({ template: e.target.value })}
+            placeholder="{summary}"
+            disabled={draft.mode === "off" || loading || pending}
+            className="h-9 rounded-md border border-border bg-background px-3 text-sm outline-none transition-colors focus:border-primary disabled:cursor-not-allowed disabled:opacity-60"
+          />
+          <span className="text-xs text-muted-foreground">
+            可用变量：{"{summary}"}、{"{diffSummary}"}、{"{fileCount}"}、{"{files}"}、
+            {"{threadShort}"}。这里只填写 fix: 后面的摘要。
+          </span>
+        </label>
+      )}
+
+      {needsCard && (
+        <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 p-3 text-sm text-amber-700 dark:text-amber-400">
+          <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+          <p>自动提交必须填写卡片编号；缺少时会跳过提交，不会编造编号。</p>
+        </div>
+      )}
+
+      {error && (
+        <div className="flex items-start gap-2 rounded-md border border-red-500/20 bg-red-500/5 p-3 text-sm text-red-600 dark:text-red-400">
+          <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+          <p>{error}</p>
+        </div>
+      )}
+    </div>
+  )
+
+  if (variant === "panel") {
+    return (
+      <div className="rounded-md border border-border bg-card p-5 shadow-sm">
+        <div className="mb-4 flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-base font-semibold">自动提交</h3>
+            <p className="mt-1 text-sm leading-6 text-muted-foreground">
+              提交信息固定为：卡片编号 #comment fix:摘要 #CMBDevClaw。这里只会执行 git
+              commit，不会自动 push。
+            </p>
+          </div>
+          <GitCommit className="mt-1 size-5 shrink-0 text-muted-foreground" />
+        </div>
+
+        {settingsForm}
+
+        <div className="mt-5 flex justify-end">
+          <Button onClick={handleSaveDraft} disabled={pending || loading}>
+            {pending ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
+            保存
+          </Button>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <>
       <div className="flex items-center gap-1">
@@ -203,90 +329,7 @@ export function AutoCommitControl(): React.JSX.Element {
             </DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-4">
-            <label className="flex flex-col gap-1.5 text-sm">
-              <span className="font-medium">提交方式</span>
-              <Select
-                value={draft.mode}
-                onValueChange={(value) => updateDraft({ mode: value as AgentAutoCommitMode })}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="ask">提交前确认：弹窗确认后再提交</SelectItem>
-                  <SelectItem value="always">自动提交：任务结束后直接提交</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
-
-            <label className="flex flex-col gap-1.5 text-sm">
-              <span className="font-medium">卡片编号</span>
-              <input
-                value={draft.cardNumber ?? ""}
-                onChange={(e) => updateDraft({ cardNumber: e.target.value })}
-                placeholder="例如 Z990880"
-                className={cn(
-                  "h-9 rounded-md border bg-background px-3 text-sm outline-none focus:border-primary",
-                  needsCard ? "border-amber-500/70" : "border-border"
-                )}
-              />
-            </label>
-
-            <div className="space-y-2">
-              <span className="text-sm font-medium">摘要来源</span>
-              <div className="grid gap-2 sm:grid-cols-2">
-                {STRATEGIES.map((strategy) => (
-                  <button
-                    key={strategy.value}
-                    type="button"
-                    onClick={() => updateDraft({ messageStrategy: strategy.value })}
-                    className={cn(
-                      "min-h-[92px] rounded-md border p-3 text-left transition-colors",
-                      draft.messageStrategy === strategy.value
-                        ? "border-primary bg-primary/5 text-primary"
-                        : "border-border hover:bg-muted/40"
-                    )}
-                  >
-                    <span className="block text-sm font-medium">{strategy.label}</span>
-                    <span className="mt-1 block text-xs leading-5 text-muted-foreground">
-                      {strategy.description}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {draft.messageStrategy === "template" && (
-              <label className="flex flex-col gap-1.5 text-sm">
-                <span className="font-medium">摘要模板</span>
-                <input
-                  value={draft.template ?? ""}
-                  onChange={(e) => updateDraft({ template: e.target.value })}
-                  placeholder="{summary}"
-                  className="h-9 rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
-                />
-                <span className="text-xs text-muted-foreground">
-                  可用变量：{"{summary}"}、{"{diffSummary}"}、{"{fileCount}"}、{"{files}"}、
-                  {"{threadShort}"}。这里只填写 fix: 后面的摘要。
-                </span>
-              </label>
-            )}
-
-            {needsCard && (
-              <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 p-3 text-sm text-amber-700 dark:text-amber-400">
-                <AlertTriangle className="mt-0.5 size-4 shrink-0" />
-                <p>自动提交必须填写卡片编号；缺少时会跳过提交，不会编造编号。</p>
-              </div>
-            )}
-
-            {error && (
-              <div className="flex items-start gap-2 rounded-md border border-red-500/20 bg-red-500/5 p-3 text-sm text-red-600 dark:text-red-400">
-                <AlertTriangle className="mt-0.5 size-4 shrink-0" />
-                <p>{error}</p>
-              </div>
-            )}
-          </div>
+          {settingsForm}
 
           <DialogFooter>
             <Button variant="outline" onClick={() => setDialogOpen(false)} disabled={pending}>
