@@ -207,7 +207,7 @@ const SKILL_HOOK_FLAT_EXAMPLE = `[
     "event": "PreToolUse",
     "matcher": "write_file|edit_file",
     "type": "command",
-    "command": "python C:/absolute/path/to/skill/hooks/pre-write-check.py",
+    "command": "python hooks/pre-write-check.py",
     "timeout": 10000,
     "onBlock": {
       "reason": "高风险写入，请先按整改流程处理",
@@ -217,7 +217,7 @@ const SKILL_HOOK_FLAT_EXAMPLE = `[
   {
     "event": "Stop",
     "type": "command",
-    "command": "python C:/absolute/path/to/skill/hooks/post-check.py"
+    "command": "python hooks/post-check.py"
   }
 ]`
 
@@ -228,7 +228,7 @@ const SKILL_HOOK_CC_EXAMPLE = `{
       "hooks": [
         {
           "type": "command",
-          "command": "python C:/absolute/path/to/skill/hooks/pre-write-check.py",
+          "command": "python hooks/pre-write-check.py",
           "timeout": 10
         }
       ]
@@ -770,7 +770,7 @@ function HookDetail(props: {
         {isSkillHook && (
           <DetailRow
             label="管理方式"
-            value="这里用于查看；如需停用，请到技能管理页停用技能；如需修改脚本或策略内容，请到技能目录中调整 hooks.json。"
+            value="这里用于查看；如需停用，请到技能管理页停用技能；如需修改脚本或策略内容，请到技能目录中调整 hooks/hooks.json（或旧版 hooks.json）。"
           />
         )}
         <DetailRow label="状态" value={hook.enabled ? "已启用" : "已禁用"} />
@@ -1134,7 +1134,8 @@ function HooksGuide(): React.JSX.Element {
               </p>
               <p>
                 技能 Hook 来自技能目录下的
-                hooks.json，随技能一起加载，启停技能时同步生效；嵌套子技能可以拥有自己的 hooks.json。
+                hooks/hooks.json，随技能一起加载，启停技能时同步生效；根目录 hooks.json
+                仍兼容旧包，嵌套子技能可以拥有自己的 hooks/hooks.json。
                 适合把某项技能的配套拦截或校验逻辑打包进技能本体一起分发。
               </p>
               <p>
@@ -1164,33 +1165,35 @@ function HooksGuide(): React.JSX.Element {
 
       <GuideSection
         title="技能 Hook 怎么配"
-        summary="把 hooks.json 放到技能目录里，父技能和嵌套子技能都可以拥有自己的 Hook。"
+        summary="把 hooks/hooks.json 放到技能目录里，父技能和嵌套子技能都可以拥有自己的 Hook。"
       >
         <div className="space-y-3">
           <GuideSubSection
             title="加载规则"
-            summary="技能目录下放 hooks.json，启用该技能时自动加载，停用时同步移除。"
+            summary="技能目录下放 hooks/hooks.json，启用该技能时自动加载，停用时同步移除。"
           >
             <div className="space-y-2 text-sm text-muted-foreground">
               <p>
                 在技能目录里新建
+                <code className="mx-1 font-mono text-foreground/85">hooks/hooks.json</code>
+                即可；根目录
                 <code className="mx-1 font-mono text-foreground/85">hooks.json</code>
-                即可，无需其他配置；如果是嵌套子技能，就放在子技能自己的目录里。
+                仍兼容旧包。如果是嵌套子技能，就放在子技能自己的目录里。
               </p>
               <pre className="rounded-md border border-border/40 bg-background p-2 text-xs leading-5">
-                {`~/.cmbcoworkagent/skills/office/\n  SKILL.md\n  hooks.json\n  pdf/\n    SKILL.md\n    hooks.json        ← 子技能自己的 Hook\n    hooks/\n      pre-write-check.py`}
+                {`~/.cmbcoworkagent/skills/office/\n  SKILL.md\n  hooks/\n    hooks.json\n    pre-write-check.py\n  pdf/\n    SKILL.md\n    hooks/\n      hooks.json      ← 子技能自己的 Hook\n      pre-write-check.py`}
               </pre>
               <p>
-                Hook 命令实际在当前工作区
+                Skill Hook 命令默认在技能所在目录作为
                 <code className="mx-1 font-mono text-foreground/85">cwd</code>
-                下执行；脚本放在技能目录时，推荐在
+                执行；脚本放在技能目录时，可以在
                 <code className="mx-1 font-mono text-foreground/85">command</code>
-                里使用绝对路径，或通过
+                里直接写相对路径，也可以通过
                 <code className="mx-1 font-mono text-foreground/85">SKILL_ROOT</code>
                 环境变量定位。
               </p>
               <p>
-                hooks.json 里写
+                hooks/hooks.json 里写
                 <code className="mx-1 font-mono text-foreground/85">{`"enabled": false`}</code>
                 可关闭单条规则；在应用里停用技能则整批移除。
               </p>
@@ -1217,7 +1220,7 @@ function HooksGuide(): React.JSX.Element {
 
           <GuideSubSection
             title="最小示例：扁平数组（推荐）"
-            summary="一个文件放多条规则；command 里建议使用绝对路径或 SKILL_ROOT 定位脚本。"
+            summary="一个文件放多条规则；command 可直接使用相对于技能目录的路径。"
           >
             <pre className="overflow-x-auto rounded-md border border-border/40 bg-background p-3 text-xs leading-5 text-foreground">
               <code>{SKILL_HOOK_FLAT_EXAMPLE}</code>
@@ -1255,7 +1258,10 @@ function HooksGuide(): React.JSX.Element {
               <pre className="rounded-md border border-border/40 bg-background p-2 text-xs leading-5">
                 {`~/.cmbcoworkagent/plugins/<plugin-name>/\n  manifest.json\n  hooks/\n    hooks.json      ← 默认路径\n    check.py`}
               </pre>
-              <p>在"插件"页面启用或停用插件，对应的 Hook 随之生效或移除。</p>
+              <p>
+                在<code className="mx-1 font-mono text-foreground/85">插件</code>
+                页面启用或停用插件，对应的 Hook 随之生效或移除。
+              </p>
             </div>
           </GuideSubSection>
 

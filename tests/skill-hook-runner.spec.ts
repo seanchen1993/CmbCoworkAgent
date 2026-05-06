@@ -12,7 +12,7 @@
  *   npx tsx tests/skill-hook-runner.spec.ts
  */
 
-import { mkdtemp, rm, writeFile, readFile } from "fs/promises"
+import { mkdir, mkdtemp, rm, writeFile, readFile } from "fs/promises"
 import { existsSync } from "fs"
 import { tmpdir } from "os"
 import { join } from "path"
@@ -183,6 +183,8 @@ async function testPostSkillAdditionalContextFlows(): Promise<void> {
 
 async function testEnvVarsAreInjected(): Promise<void> {
   await withTempDir("hook-env", async (dir) => {
+    const skillRoot = join(dir, "skills", "test-skill")
+    await mkdir(skillRoot, { recursive: true })
     const out = join(dir, "env.txt")
     const command = nodeCommand(`
 const fs = require('fs')
@@ -199,8 +201,8 @@ fs.writeFileSync(${JSON.stringify(out)}, [
     })
     await runHooks([hook], "PreSkillUse", {
       skillName: "test-skill",
-      skillPath: "/abs/skills/test-skill/SKILL.md",
-      skillRoot: "/abs/skills/test-skill"
+      skillPath: join(skillRoot, "SKILL.md"),
+      skillRoot
     })
     assert(existsSync(out), "hook should have written output file")
     const content = (await readFile(out, "utf8")).trim()
@@ -209,11 +211,15 @@ fs.writeFileSync(${JSON.stringify(out)}, [
       content.includes("test-skill/SKILL.md") || content.includes("test-skill\\SKILL.md"),
       `SKILL_PATH should appear in output, got "${content}"`
     )
+    assert(content.includes(skillRoot), `SKILL_ROOT should appear in output, got "${content}"`)
   })
 }
 
 async function testStdinPayloadIncludesSkillFields(): Promise<void> {
   await withTempDir("hook-stdin", async (dir) => {
+    const skillRoot = join(dir, "skills", "stdin-skill")
+    const skillPath = join(skillRoot, "SKILL.md")
+    await mkdir(skillRoot, { recursive: true })
     const out = join(dir, "stdin.json")
     const command = nodeCommand(`
 let d = ''
@@ -227,8 +233,8 @@ process.stdin.on('end', () => require('fs').writeFileSync(${JSON.stringify(out)}
     })
     await runHooks([hook], "PreSkillUse", {
       skillName: "test-skill",
-      skillPath: "/abs/path/SKILL.md",
-      skillRoot: "/abs/path",
+      skillPath,
+      skillRoot,
       skillTriggerToolName: "read_file"
     })
     assert(existsSync(out), "hook should have written stdin payload")
@@ -239,12 +245,39 @@ process.stdin.on('end', () => require('fs').writeFileSync(${JSON.stringify(out)}
       parsed.skill_name === "test-skill",
       `skill_name should be test-skill, got ${parsed.skill_name}`
     )
-    assert(parsed.skill_path === "/abs/path/SKILL.md", `skill_path mismatch: ${parsed.skill_path}`)
-    assert(parsed.skill_root === "/abs/path", `skill_root mismatch: ${parsed.skill_root}`)
+    assert(parsed.skill_path === skillPath, `skill_path mismatch: ${parsed.skill_path}`)
+    assert(parsed.skill_root === skillRoot, `skill_root mismatch: ${parsed.skill_root}`)
     assert(
       parsed.skill_trigger_tool_name === "read_file",
       `skill_trigger_tool_name mismatch: ${parsed.skill_trigger_tool_name}`
     )
+  })
+}
+
+async function testSkillRootIsDefaultCommandCwd(): Promise<void> {
+  await withTempDir("hook-cwd", async (dir) => {
+    const skillRoot = join(dir, "skills", "cwd-skill")
+    await writeFile(join(dir, "workspace-marker.txt"), "workspace", "utf8")
+    await mkdir(skillRoot, { recursive: true })
+    const out = join(dir, "cwd.txt")
+    const command = nodeCommand(`
+const fs = require('fs')
+fs.writeFileSync(${JSON.stringify(out)}, process.cwd())
+`)
+    const hook = makeHook({
+      event: "PreToolUse",
+      matcher: "*",
+      command
+    })
+    await runHooks([hook], "PreToolUse", {
+      toolName: "execute",
+      workspacePath: dir,
+      skillRoot
+    })
+    assert(existsSync(out), "hook should have written cwd output")
+    const cwd = (await readFile(out, "utf8")).trim().replace(/\\/g, "/").toLowerCase()
+    const expected = skillRoot.replace(/\\/g, "/").toLowerCase()
+    assert(cwd === expected, `hook command cwd should default to skillRoot, got ${cwd}`)
   })
 }
 
@@ -353,6 +386,8 @@ async function run(): Promise<void> {
   console.log("PASS B8 SKILL_NAME/SKILL_PATH/SKILL_ROOT env vars injected")
   await testStdinPayloadIncludesSkillFields()
   console.log("PASS B9 stdin payload includes skill_* fields")
+  await testSkillRootIsDefaultCommandCwd()
+  console.log("PASS B11 skill hook command cwd defaults to SKILL_ROOT")
   await testSkillEventDoesNotMatchToolEvent()
   console.log("PASS event isolation: PreSkillUse hooks don't fire on PreToolUse")
   await testToolEventDoesNotMatchSkillEvent()

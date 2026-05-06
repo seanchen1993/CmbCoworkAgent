@@ -45,6 +45,12 @@ type FileTreeNode = {
   isDir: boolean
   children: FileTreeNode[]
 }
+type SkillTreeNode = {
+  key: string
+  label: string
+  skill?: SkillMetadata
+  children: SkillTreeNode[]
+}
 
 type SkillMarketInfo = Pick<
   MarketItem,
@@ -121,20 +127,25 @@ const EDITED_SKILL_PATHS_KEY = "skills_panel_edited_skill_paths"
  * - 比较统一转小写（Windows 大小写不敏感场景更稳妥）
  */
 function normalizeSkillPathKey(skillPath: string): string {
-  return String(skillPath || "").replace(/\\/g, "/").trim().toLowerCase()
+  return String(skillPath || "")
+    .replace(/\\/g, "/")
+    .trim()
+    .toLowerCase()
 }
 
 /**
  * 统一目录名 Key，用于把 upload 返回的目录名与 skills.list() 结果做匹配。
  */
 function normalizeDirNameKey(dirName: string): string {
-  return String(dirName || "")
-    .replace(/\\/g, "/")
-    .split("/")
-    .filter(Boolean)
-    .pop()
-    ?.trim()
-    .toLowerCase() || ""
+  return (
+    String(dirName || "")
+      .replace(/\\/g, "/")
+      .split("/")
+      .filter(Boolean)
+      .pop()
+      ?.trim()
+      .toLowerCase() || ""
+  )
 }
 
 /**
@@ -289,7 +300,9 @@ function removeEditedSkillPathFromStorage(skillPath: string): void {
 }
 
 function normalizeSkillName(value?: string): string {
-  return String(value || "").trim().toLowerCase()
+  return String(value || "")
+    .trim()
+    .toLowerCase()
 }
 
 function buildUserIdFromUserInfo(userInfo: UserInfoLite | null): string | undefined {
@@ -301,7 +314,10 @@ function buildUserIdFromUserInfo(userInfo: UserInfoLite | null): string | undefi
   return segments.length > 0 ? segments.join(" / ") : undefined
 }
 
-function getSkillChineseName(skill: SkillMetadata, marketInfo: SkillMarketInfo | undefined): string {
+function getSkillChineseName(
+  skill: SkillMetadata,
+  marketInfo: SkillMarketInfo | undefined
+): string {
   const marketChinese = marketInfo?.chinese_name?.trim()
   if (marketChinese) return marketChinese
   const metadataChinese = skill.metadata?.chinese_name?.trim()
@@ -444,7 +460,8 @@ function UploadSkillDialog(props: {
         <DialogHeader>
           <DialogTitle>上传技能</DialogTitle>
           <DialogDescription>
-            .md 文件需包含 YAML frontmatter 中的 name 字段；.zip 文件需包含 SKILL.md，可包含嵌套子技能
+            .md 文件需包含 YAML frontmatter 中的 name 字段；.zip 文件需包含
+            SKILL.md，可包含嵌套子技能
           </DialogDescription>
         </DialogHeader>
         <div
@@ -592,7 +609,8 @@ function PublishSkillDialog(props: {
         <DialogHeader>
           <DialogTitle>{mode === "update" ? "更新市场技能" : "发布到公共市场"}</DialogTitle>
           <DialogDescription>
-            会自动打包当前技能目录为 zip 并提交到 Market。若包含嵌套子技能，发布前会询问是否一并上传。
+            会自动打包当前技能目录为 zip 并提交到
+            Market。若包含嵌套子技能，发布前会询问是否一并上传。
           </DialogDescription>
         </DialogHeader>
 
@@ -677,7 +695,13 @@ function PublishSkillDialog(props: {
             取消
           </Button>
           <Button onClick={handlePublish} disabled={!skill || uploading}>
-            {uploading ? (mode === "update" ? "更新中..." : "发布中...") : mode === "update" ? "更新发布" : "一键发布"}
+            {uploading
+              ? mode === "update"
+                ? "更新中..."
+                : "发布中..."
+              : mode === "update"
+                ? "更新发布"
+                : "一键发布"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -802,6 +826,61 @@ function buildFileTree(skillPath: string, files: string[]): FileTreeNode[] {
   return sortTreeNodes(root.children, true)
 }
 
+function getSkillTreePath(skill: SkillMetadata): string {
+  const id = skill.id?.startsWith("plugin:") ? skill.id.split("/").slice(1).join("/") : skill.id
+  return String(skill.relativePath || id || skill.name || "")
+    .replace(/\\/g, "/")
+    .replace(/^\/+|\/+$/g, "")
+}
+
+function buildSkillTree(skills: SkillMetadata[]): SkillTreeNode[] {
+  const root: SkillTreeNode = { key: "root", label: "root", children: [] }
+  const indexByNode = new WeakMap<SkillTreeNode, Map<string, SkillTreeNode>>()
+
+  const getIndex = (node: SkillTreeNode): Map<string, SkillTreeNode> => {
+    let index = indexByNode.get(node)
+    if (!index) {
+      index = new Map(node.children.map((child) => [normalizeSkillId(child.label), child]))
+      indexByNode.set(node, index)
+    }
+    return index
+  }
+
+  for (const skill of skills) {
+    const segments = getSkillTreePath(skill).split("/").filter(Boolean)
+    const fallbackSegments = segments.length > 0 ? segments : [skill.name]
+    let current = root
+
+    for (const segment of fallbackSegments) {
+      const key = `${current.key}/${normalizeSkillId(segment)}`
+      const childIndex = getIndex(current)
+      let child = childIndex.get(normalizeSkillId(segment))
+      if (!child) {
+        child = { key, label: segment, children: [] }
+        current.children.push(child)
+        childIndex.set(normalizeSkillId(segment), child)
+      }
+      current = child
+    }
+
+    current.skill = skill
+  }
+
+  const sortNodes = (nodes: SkillTreeNode[]): SkillTreeNode[] =>
+    [...nodes]
+      .sort((a, b) => a.label.localeCompare(b.label, "zh-CN"))
+      .map((node) => ({ ...node, children: sortNodes(node.children) }))
+
+  return sortNodes(root.children)
+}
+
+function countSkillTreeSkills(node: SkillTreeNode): number {
+  return (
+    (node.skill ? 1 : 0) +
+    node.children.reduce((sum, child) => sum + countSkillTreeSkills(child), 0)
+  )
+}
+
 function defaultSkillFile(files: string[]): string | null {
   if (files.length === 0) return null
   const skillMd = files.find((f) => /(^|\/)SKILL\.md$/i.test(f))
@@ -810,16 +889,18 @@ function defaultSkillFile(files: string[]): string | null {
 
 const SKILL_HOOK_TREE_EXAMPLE = `~/.cmbcoworkagent/skills/<skill-name>/
   SKILL.md
-  hooks.json
   hooks/
+    hooks.json
     pre-write-check.py`
 
 const SKILL_NESTED_TREE_EXAMPLE = `~/.cmbcoworkagent/skills/office/
   SKILL.md
-  hooks.json
+  hooks/
+    hooks.json
   pdf/
     SKILL.md
-    hooks.json
+    hooks/
+      hooks.json
   sheets/
     SKILL.md`
 
@@ -828,7 +909,7 @@ const SKILL_HOOK_JSON_EXAMPLE = `[
     "event": "PreToolUse",
     "matcher": "write_file|edit_file",
     "type": "command",
-    "command": "python C:/absolute/path/to/pre_write_guard.py",
+    "command": "python hooks/pre_write_guard.py",
     "timeout": 10000,
     "onBlock": {
       "systemMessage": "请先按技能要求整改，再重试",
@@ -936,14 +1017,13 @@ function SkillsGuide(): React.JSX.Element {
                   例如
                   <code className="mx-1 font-mono text-foreground/85">office</code>
                   可以作为父技能，下面的
-                  <code className="mx-1 font-mono text-foreground/85">office/pdf</code>
-                  和
+                  <code className="mx-1 font-mono text-foreground/85">office/pdf</code>和
                   <code className="mx-1 font-mono text-foreground/85">office/sheets</code>
                   会作为独立子技能展示和匹配。
                 </p>
                 <p>
                   子技能可以拥有自己的
-                  <code className="mx-1 font-mono text-foreground/85">hooks.json</code>
+                  <code className="mx-1 font-mono text-foreground/85">hooks/hooks.json</code>
                   ；触发子技能时只激活它自己目录下的 Skill Hook，不会串到同名的其他技能。
                 </p>
               </div>
@@ -987,7 +1067,7 @@ function SkillsGuide(): React.JSX.Element {
 
         <SkillGuideSection
           title="Skill Hook 配置说明"
-          summary="把 hooks.json 放进技能目录后，技能启用时会自动加载对应 Hook。"
+          summary="把 hooks/hooks.json 放进技能目录后，技能启用时会自动加载对应 Hook。"
         >
           <div className="space-y-3">
             <SkillGuideSubSection
@@ -1009,7 +1089,7 @@ function SkillsGuide(): React.JSX.Element {
 
             <SkillGuideSubSection
               title="目录与加载规则"
-              summary="在技能目录下新建 hooks.json；父技能和子技能都可以有自己的 Hook。"
+              summary="推荐在技能目录下新建 hooks/hooks.json；父技能和子技能都可以有自己的 Hook。"
             >
               <div className="space-y-2 text-sm text-muted-foreground">
                 <pre className="rounded-md border border-border/40 bg-background p-2 text-xs leading-5 text-foreground">
@@ -1017,15 +1097,19 @@ function SkillsGuide(): React.JSX.Element {
                 </pre>
                 <p>
                   只要目录里存在
+                  <code className="mx-1 font-mono text-foreground/85">hooks/hooks.json</code>
+                  ，启用对应技能时就会自动加载；根目录
                   <code className="mx-1 font-mono text-foreground/85">hooks.json</code>
-                  ，启用对应技能时就会自动加载；嵌套子技能的 Hook 放在子技能自己的目录下。
+                  仍兼容旧包，嵌套子技能的 Hook 放在子技能自己的目录下。
                 </p>
                 <p>
-                  当前 Hook 命令实际按工作区
+                  Skill Hook 命令默认按技能所在目录作为
                   <code className="mx-1 font-mono text-foreground/85">cwd</code>
-                  执行；如果脚本放在技能目录里，推荐在
+                  执行；脚本放在技能目录时，可以在
                   <code className="mx-1 font-mono text-foreground/85">command</code>
-                  里写绝对路径，避免随工作区变化找不到脚本。
+                  里直接写相对路径，也可以继续用
+                  <code className="mx-1 font-mono text-foreground/85">SKILL_ROOT</code>
+                  环境变量定位。
                 </p>
               </div>
             </SkillGuideSubSection>
@@ -1077,11 +1161,8 @@ function SkillsGuide(): React.JSX.Element {
 }
 
 export function SkillsPanel(): React.JSX.Element {
-  const {
-    setShowCustomizeView,
-    setMarketInitialSkillCategory,
-    setMarketInitialSkillSearchQuery
-  } = useAppStore()
+  const { setShowCustomizeView, setMarketInitialSkillCategory, setMarketInitialSkillSearchQuery } =
+    useAppStore()
   const [skills, setSkills] = useState<SkillMetadata[]>([])
   const [expandedSkills, setExpandedSkills] = useState<Set<string>>(new Set())
   const [expandedDirNodes, setExpandedDirNodes] = useState<Set<string>>(new Set())
@@ -1319,32 +1400,35 @@ export function SkillsPanel(): React.JSX.Element {
     })
   }, [])
 
-  const handleDeleteSkill = useCallback(async (skill: SkillMetadata) => {
-    if (!window.api?.skills?.delete) return
-    if (!confirm(`确定要删除技能「${skill.name}」吗？`)) return
-    const res = await window.api.skills.delete(skill.path)
-    if (res.success) {
-      removeLocalUploadedSkillPathFromStorage(skill.path)
-      removeEditedSkillPathFromStorage(skill.path)
-      reloadLocalUploadedSkillPaths()
-      reloadEditedSkillPaths()
-      setSelectedSkill(null)
-      setSelectedFilePath(null)
-      setSelectedFileContent(null)
-      setSkillFilesMap((prev) => {
-        const next = { ...prev }
-        delete next[getSkillMetadataId(skill)]
-        return next
-      })
-      window.api.skills.list().then(setSkills).catch(console.error)
-      window.api.skills
-        .getDisabled()
-        .then((list) => setDisabledSkills(new Set(list.map(normalizeSkillId))))
-        .catch(console.error)
-    } else {
-      alert(res.error || "删除失败")
-    }
-  }, [reloadEditedSkillPaths, reloadLocalUploadedSkillPaths])
+  const handleDeleteSkill = useCallback(
+    async (skill: SkillMetadata) => {
+      if (!window.api?.skills?.delete) return
+      if (!confirm(`确定要删除技能「${skill.name}」吗？`)) return
+      const res = await window.api.skills.delete(skill.path)
+      if (res.success) {
+        removeLocalUploadedSkillPathFromStorage(skill.path)
+        removeEditedSkillPathFromStorage(skill.path)
+        reloadLocalUploadedSkillPaths()
+        reloadEditedSkillPaths()
+        setSelectedSkill(null)
+        setSelectedFilePath(null)
+        setSelectedFileContent(null)
+        setSkillFilesMap((prev) => {
+          const next = { ...prev }
+          delete next[getSkillMetadataId(skill)]
+          return next
+        })
+        window.api.skills.list().then(setSkills).catch(console.error)
+        window.api.skills
+          .getDisabled()
+          .then((list) => setDisabledSkills(new Set(list.map(normalizeSkillId))))
+          .catch(console.error)
+      } else {
+        alert(res.error || "删除失败")
+      }
+    },
+    [reloadEditedSkillPaths, reloadLocalUploadedSkillPaths]
+  )
 
   const builtinSkills = useMemo(() => skills.filter((s) => s.source === "project"), [skills])
   const customSkills = useMemo(() => skills.filter((s) => s.source === "user"), [skills])
@@ -1786,6 +1870,7 @@ function SkillSection(props: {
     onSelectFile
   } = props
   const [collapsed, setCollapsed] = useState(false)
+  const skillTree = useMemo(() => buildSkillTree(skills), [skills])
   const sectionStyle = useMemo(() => {
     if (title.includes("内置")) {
       return {
@@ -1839,9 +1924,7 @@ function SkillSection(props: {
             <ChevronDown className="size-3 text-muted-foreground" />
           )}
           <span className={cn("size-1.5 rounded-full shrink-0", sectionStyle.dot)} />
-          <span className="text-xs font-semibold tracking-wide truncate">
-            {title}
-          </span>
+          <span className="text-xs font-semibold tracking-wide truncate">{title}</span>
         </div>
         <Badge
           variant="outline"
@@ -1860,42 +1943,151 @@ function SkillSection(props: {
               没有匹配的技能
             </p>
           ) : (
-            skills.map((skill) => {
-              const skillId = getSkillMetadataId(skill)
-              const expanded = expandedSkills.has(skillId)
-              const files = skillFilesMap[skillId] || []
-              const selected = selectedSkill ? getSkillMetadataId(selectedSkill) === skillId : false
-              const disabled = isSkillDisabled(skill, disabledSkills)
-              const marketInfo =
-                skill.source === "user" ? marketSkillMap[normalizeSkillName(skill.name)] : undefined
-              const hasMarketEntry =
-                !!marketInfo || uploadedSkillNames.has(normalizeSkillName(skill.name))
-              const isEdited = editedSkillPaths.has(normalizeSkillPathKey(skill.path))
-              const hideFileTree = hideFeaturedMarketFiles && isFeaturedSkill(marketInfo)
-
-              return (
-                <SkillItem
-                  key={skillId || skill.path}
-                  skill={skill}
-                  marketInfo={marketInfo}
-                  hasMarketEntry={hasMarketEntry}
-                  hideMarketTag={hideMarketTag}
-                  isEdited={isEdited}
-                  expanded={expanded}
-                  selected={selected}
-                  disabled={disabled}
-                  hideFileTree={hideFileTree}
-                  files={files}
-                  expandedDirNodes={expandedDirNodes}
-                  onToggleSkill={onToggleSkill}
-                  onToggleDirNode={onToggleDirNode}
-                  onSelectFile={onSelectFile}
-                />
-              )
-            })
+            <SkillTreeList
+              nodes={skillTree}
+              level={0}
+              marketSkillMap={marketSkillMap}
+              uploadedSkillNames={uploadedSkillNames}
+              editedSkillPaths={editedSkillPaths}
+              expandedSkills={expandedSkills}
+              skillFilesMap={skillFilesMap}
+              selectedSkill={selectedSkill}
+              expandedDirNodes={expandedDirNodes}
+              disabledSkills={disabledSkills}
+              hideFeaturedMarketFiles={hideFeaturedMarketFiles}
+              hideMarketTag={hideMarketTag}
+              onToggleSkill={onToggleSkill}
+              onToggleDirNode={onToggleDirNode}
+              onSelectFile={onSelectFile}
+            />
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+function SkillTreeList(props: {
+  nodes: SkillTreeNode[]
+  level: number
+  marketSkillMap: Record<string, SkillMarketInfo>
+  uploadedSkillNames: Set<string>
+  editedSkillPaths: Set<string>
+  expandedSkills: Set<string>
+  skillFilesMap: Record<string, string[]>
+  selectedSkill: SkillMetadata | null
+  expandedDirNodes: Set<string>
+  disabledSkills: Set<string>
+  hideFeaturedMarketFiles: boolean
+  hideMarketTag: boolean
+  onToggleSkill: (skill: SkillMetadata) => void
+  onToggleDirNode: (nodeId: string) => void
+  onSelectFile: (skill: SkillMetadata, filePath: string) => void
+}): React.JSX.Element {
+  const {
+    nodes,
+    level,
+    marketSkillMap,
+    uploadedSkillNames,
+    editedSkillPaths,
+    expandedSkills,
+    skillFilesMap,
+    selectedSkill,
+    expandedDirNodes,
+    disabledSkills,
+    hideFeaturedMarketFiles,
+    hideMarketTag,
+    onToggleSkill,
+    onToggleDirNode,
+    onSelectFile
+  } = props
+
+  return (
+    <div className={level === 0 ? "space-y-2" : "space-y-2"}>
+      {nodes.map((node) => {
+        const childCount = node.children.reduce(
+          (sum, child) => sum + countSkillTreeSkills(child),
+          0
+        )
+
+        return (
+          <div key={node.key} className="space-y-1.5">
+            {node.skill ? (
+              (() => {
+                const skill = node.skill
+                const skillId = getSkillMetadataId(skill)
+                const expanded = expandedSkills.has(skillId)
+                const files = skillFilesMap[skillId] || []
+                const selected = selectedSkill
+                  ? getSkillMetadataId(selectedSkill) === skillId
+                  : false
+                const disabled = isSkillDisabled(skill, disabledSkills)
+                const marketInfo =
+                  skill.source === "user"
+                    ? marketSkillMap[normalizeSkillName(skill.name)]
+                    : undefined
+                const hasMarketEntry =
+                  !!marketInfo || uploadedSkillNames.has(normalizeSkillName(skill.name))
+                const isEdited = editedSkillPaths.has(normalizeSkillPathKey(skill.path))
+                const hideFileTree = hideFeaturedMarketFiles && isFeaturedSkill(marketInfo)
+
+                return (
+                  <SkillItem
+                    key={skillId || skill.path}
+                    skill={skill}
+                    marketInfo={marketInfo}
+                    hasMarketEntry={hasMarketEntry}
+                    hideMarketTag={hideMarketTag}
+                    isEdited={isEdited}
+                    expanded={expanded}
+                    selected={selected}
+                    disabled={disabled}
+                    hideFileTree={hideFileTree}
+                    files={files}
+                    expandedDirNodes={expandedDirNodes}
+                    nestingLevel={level}
+                    childCount={childCount}
+                    onToggleSkill={onToggleSkill}
+                    onToggleDirNode={onToggleDirNode}
+                    onSelectFile={onSelectFile}
+                  />
+                )
+              })()
+            ) : (
+              <div
+                className="flex min-h-8 items-center gap-2 rounded-md border border-dashed border-border/60 bg-muted/20 px-2 py-1.5 text-xs text-muted-foreground"
+                style={{ marginLeft: `${level * 14}px` }}
+              >
+                <Folder className="size-3.5 shrink-0" />
+                <span className="min-w-0 flex-1 truncate">{node.label}</span>
+                <Badge variant="outline" className="h-4 px-1.5 text-[10px]">
+                  {childCount}
+                </Badge>
+              </div>
+            )}
+
+            {node.children.length > 0 && (
+              <SkillTreeList
+                nodes={node.children}
+                level={level + 1}
+                marketSkillMap={marketSkillMap}
+                uploadedSkillNames={uploadedSkillNames}
+                editedSkillPaths={editedSkillPaths}
+                expandedSkills={expandedSkills}
+                skillFilesMap={skillFilesMap}
+                selectedSkill={selectedSkill}
+                expandedDirNodes={expandedDirNodes}
+                disabledSkills={disabledSkills}
+                hideFeaturedMarketFiles={hideFeaturedMarketFiles}
+                hideMarketTag={hideMarketTag}
+                onToggleSkill={onToggleSkill}
+                onToggleDirNode={onToggleDirNode}
+                onSelectFile={onSelectFile}
+              />
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -1912,6 +2104,8 @@ function SkillItem(props: {
   hideFileTree?: boolean
   files: string[]
   expandedDirNodes: Set<string>
+  nestingLevel?: number
+  childCount?: number
   onToggleSkill: (skill: SkillMetadata) => void
   onToggleDirNode: (nodeId: string) => void
   onSelectFile: (skill: SkillMetadata, filePath: string) => void
@@ -1928,6 +2122,8 @@ function SkillItem(props: {
     hideFileTree = false,
     files,
     expandedDirNodes,
+    nestingLevel = 0,
+    childCount = 0,
     onToggleSkill,
     onToggleDirNode,
     onSelectFile
@@ -1955,6 +2151,7 @@ function SkillItem(props: {
           "w-full flex items-center gap-2 px-2.5 py-2 text-left transition-colors",
           selected ? "bg-primary/10" : "hover:bg-muted/50"
         )}
+        style={{ paddingLeft: `${10 + nestingLevel * 14}px` }}
         onClick={() => onToggleSkill(skill)}
       >
         {expanded ? (
@@ -1963,16 +2160,20 @@ function SkillItem(props: {
           <ChevronRight className="size-3.5 text-muted-foreground shrink-0" />
         )}
         <div className="min-w-0 flex-1 space-y-1">
-          <p
-            className={cn(
-              "text-sm truncate",
-              disabled && "text-muted-foreground line-through"
-            )}
-          >
+          <p className={cn("text-sm truncate", disabled && "text-muted-foreground line-through")}>
             {displayName}
           </p>
         </div>
-        <span>
+        <span className="flex shrink-0 items-center gap-1">
+          {childCount > 0 && (
+            <Badge
+              variant="outline"
+              className="h-4 gap-1 px-1.5 text-[10px] border-slate-200 text-slate-600 bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:bg-slate-900/40"
+            >
+              <Folder className="size-2.5 shrink-0" />
+              {childCount}
+            </Badge>
+          )}
           {isFeatured && (
             <Badge
               variant="outline"

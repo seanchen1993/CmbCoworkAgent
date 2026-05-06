@@ -39,6 +39,7 @@ import {
 import type { FileAttachment } from "@/types"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Badge } from "@/components/ui/badge"
 import { useAppStore } from "@/lib/store"
 import { cn } from "@/lib/utils"
 import { useShallow } from "zustand/react/shallow"
@@ -69,6 +70,18 @@ import { useSlashCommands } from "@/features/slash-commands/useSlashCommands"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
 import { formatSkillUseBlock, parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
 import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
+import { DEFAULT_SCENE_CATEGORY, SCENE_CATEGORY_OPTIONS } from "@/lib/skill-data-service"
+
+type WelcomeSkillCard = {
+  skill: SkillMetadata
+  label: string
+  icon: React.JSX.Element
+}
+
+type WelcomeSkillSceneGroup = {
+  category: string
+  cards: WelcomeSkillCard[]
+}
 
 function HookLogsPanel({ logs }: { logs: HookLogEntry[] }): React.JSX.Element {
   const [expanded, setExpanded] = React.useState(false)
@@ -326,6 +339,7 @@ export function ChatContainer({
   const requestedUserQuestionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const isComposingRef = useRef(false)
   const [skills, setSkills] = useState<SkillMetadata[]>([])
+  const [disabledSkillIds, setDisabledSkillIds] = useState<Set<string>>(new Set())
   const [skillsLoading, setSkillsLoading] = useState(true)
   const [showAllProgrammingSkills, setShowAllProgrammingSkills] = useState(false)
   const [showAllCustomSkills, setShowAllCustomSkills] = useState(false)
@@ -434,6 +448,7 @@ export function ChatContainer({
   } = useAppStore()
 
   const allSkillsRef = useRef<MarketItem[]>([])
+  const [marketSkillsData, setMarketSkillsData] = useState<MarketItem[]>([])
   const [goodSkillsData, setGoodSkillsData] = useState<MarketItem[]>([])
 
   // Define loadSkills function at component level so it can be accessed everywhere
@@ -457,8 +472,9 @@ export function ChatContainer({
         window.api.skills.getDisabled()
       ])
       const disabledSet = new Set(disabledList.map(normalizeSkillId))
+      setDisabledSkillIds(disabledSet)
       const availableSkills = loadedSkills.filter(
-        (s) => (s.source === "project" || s.source === "user") && !isSkillDisabled(s, disabledSet)
+        (s) => s.source === "project" || s.source === "user"
       )
       // Built-in/custom names win over plugin names: plugins are third-party
       // and shouldn't shadow first-party skills the user expects to see.
@@ -479,6 +495,7 @@ export function ChatContainer({
       const allSkills = res?.data || []
       const goodSkills = res?.data?.filter((it) => it.featured === "精品")
       allSkillsRef.current = allSkills
+      setMarketSkillsData(allSkills)
       setGoodSkillsData(goodSkills || [])
 
       // 自动安装所有精品技能
@@ -1292,9 +1309,19 @@ export function ChatContainer({
     clearError()
   }
 
+  const isLocalSkillDisabled = useCallback(
+    (skill: SkillMetadata): boolean => !skill.pluginId && isSkillDisabled(skill, disabledSkillIds),
+    [disabledSkillIds]
+  )
+
+  const enabledSkillsForSlash = useMemo(
+    () => skills.filter((skill) => !isLocalSkillDisabled(skill)),
+    [skills, isLocalSkillDisabled]
+  )
+
   const slash = useSlashCommands({
     input,
-    skills,
+    skills: enabledSkillsForSlash,
     skillSelected: selectedSkill !== null
   })
 
@@ -1922,26 +1949,29 @@ export function ChatContainer({
     [getSkillId, programmingSkillIds]
   )
 
-  const { generalSkills, programmingSkills, customSkills } = useMemo(() => {
-    const builtInSkills = skills.filter((skill) => skill.source === "project")
-    const userSkills = skills.filter((skill) => skill.source === "user")
+  const { generalSkills, programmingSkills, enabledCustomSkills, disabledLocalSkills } =
+    useMemo(() => {
+      const builtInSkills = skills.filter((skill) => skill.source === "project")
+      const userSkills = skills.filter((skill) => skill.source === "user")
+      const enabledBuiltInSkills = builtInSkills.filter((skill) => !isLocalSkillDisabled(skill))
 
-    const general = builtInSkills.filter((skill) => !isProgrammingSkill(skill))
-    const programming = builtInSkills.filter(isProgrammingSkill)
+      const general = enabledBuiltInSkills.filter((skill) => !isProgrammingSkill(skill))
+      const programming = enabledBuiltInSkills.filter(isProgrammingSkill)
 
-    // 精品技能名称集合，从「我安装的技能」中剔除
-    const goodSkillNames = new Set(goodSkillsData.map((g) => g.name))
-    const pureCustomSkills = userSkills.filter(
-      (s) => !goodSkillNames.has(s.name) && s.name !== "encrypt-password"
-    )
-    // todo  s.name !== 'encrypt-password' 这个逻辑在代码暂时写死，后面排查
+      // 精品技能名称集合，从「我安装的技能」中剔除
+      const goodSkillNames = new Set(goodSkillsData.map((g) => g.name))
+      const pureCustomSkills = userSkills.filter(
+        (s) => !goodSkillNames.has(s.name) && s.name !== "encrypt-password"
+      )
+      // todo  s.name !== 'encrypt-password' 这个逻辑在代码暂时写死，后面排查
 
-    return {
-      generalSkills: general,
-      programmingSkills: programming,
-      customSkills: pureCustomSkills
-    }
-  }, [skills, isProgrammingSkill, goodSkillsData])
+      return {
+        generalSkills: general,
+        programmingSkills: programming,
+        enabledCustomSkills: pureCustomSkills.filter((skill) => !isLocalSkillDisabled(skill)),
+        disabledLocalSkills: [...builtInSkills, ...userSkills].filter(isLocalSkillDisabled)
+      }
+    }, [skills, isLocalSkillDisabled, isProgrammingSkill, goodSkillsData])
 
   const handleOpenMarketBySecondaryCategory = useCallback(
     (secondaryCategory: string): void => {
@@ -1960,14 +1990,64 @@ export function ChatContainer({
     }))
   }, [showAllProgrammingSkills, programmingSkills, getSkillSummary, getSkillIcon])
 
-  const customSkillCards = useMemo(() => {
-    const source = showAllCustomSkills ? customSkills : customSkills.slice(0, 8)
-    return source.map((skill) => ({
-      skill,
-      label: getSkillSummary(skill),
-      icon: getSkillIcon(skill)
-    }))
-  }, [showAllCustomSkills, customSkills, getSkillSummary, getSkillIcon])
+  const marketSkillCategoryByName = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const item of marketSkillsData) {
+      if (!item.category) continue
+      map.set(item.name, item.category)
+      if (item.chinese_name) map.set(item.chinese_name, item.category)
+    }
+    return map
+  }, [marketSkillsData])
+
+  const getSkillSceneCategory = useCallback(
+    (skill: SkillMetadata): string => {
+      const category =
+        skill.metadata?.category ||
+        marketSkillCategoryByName.get(skill.name) ||
+        DEFAULT_SCENE_CATEGORY
+      return category.trim() || DEFAULT_SCENE_CATEGORY
+    },
+    [marketSkillCategoryByName]
+  )
+
+  const buildWelcomeSkillGroups = useCallback(
+    (sourceSkills: SkillMetadata[]): WelcomeSkillSceneGroup[] => {
+      const groups = new Map<string, WelcomeSkillCard[]>()
+      for (const skill of sourceSkills) {
+        const category = getSkillSceneCategory(skill)
+        const cards = groups.get(category) ?? []
+        cards.push({
+          skill,
+          label: getSkillSummary(skill),
+          icon: getSkillIcon(skill)
+        })
+        groups.set(category, cards)
+      }
+
+      const categoryOrder = new Map<string, number>(
+        SCENE_CATEGORY_OPTIONS.map((category, index) => [category, index])
+      )
+      return [...groups.entries()]
+        .sort(([a], [b]) => {
+          const rankA = categoryOrder.get(a) ?? Number.MAX_SAFE_INTEGER
+          const rankB = categoryOrder.get(b) ?? Number.MAX_SAFE_INTEGER
+          return rankA === rankB ? a.localeCompare(b, "zh-CN") : rankA - rankB
+        })
+        .map(([category, cards]) => ({ category, cards }))
+    },
+    [getSkillIcon, getSkillSceneCategory, getSkillSummary]
+  )
+
+  const enabledCustomSkillGroups = useMemo(() => {
+    const source = showAllCustomSkills ? enabledCustomSkills : enabledCustomSkills.slice(0, 8)
+    return buildWelcomeSkillGroups(source)
+  }, [buildWelcomeSkillGroups, enabledCustomSkills, showAllCustomSkills])
+
+  const disabledCustomSkillGroups = useMemo(
+    () => buildWelcomeSkillGroups(disabledLocalSkills),
+    [buildWelcomeSkillGroups, disabledLocalSkills]
+  )
 
   const helpSceneSkillIds = useMemo(() => new Set(["scheduler-assistant", "skill-creator"]), [])
   const helpSceneSkillCards = useMemo(() => {
@@ -2270,54 +2350,62 @@ export function ChatContainer({
                       <TabsContent value="skills-by-category" className="mt-0">
                         {/* 市场技能：内部使用 getAllSkills 取数并按分类展示 */}
                         <SkillsByCategorySection
-                          skills={skills}
+                          skills={enabledSkillsForSlash}
                           previewLimit={GOOD_SKILLS_PREVIEW_LIMIT}
                           onOpenMarketByCategory={handleOpenMarketBySecondaryCategory}
                           onUseSkillPrompt={handleUseSkillPrompt}
                         />
                       </TabsContent>
 
-                      <TabsContent value="installed-skills" className="mt-0 space-y-2">
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                          {customSkillCards?.length ? (
-                            customSkillCards.map(({ skill, label }) => (
-                              <button
-                                key={label + skill.path}
-                                type="button"
-                                onClick={() => handleUseSkillPrompt(skill, label)}
-                                className="group w-full rounded-xl border border-slate-300/90 dark:border-slate-600/85 bg-slate-50/70 dark:bg-slate-900/35 px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:bg-slate-100/95 dark:hover:bg-slate-800/55 hover:border-slate-400/95 dark:hover:border-slate-500/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
-                              >
-                                <div className="flex items-center gap-2 min-w-0">
-                                  <div className="rounded-md border border-slate-300/90 dark:border-slate-600/80 bg-white/80 dark:bg-slate-900/45 p-1.5 text-slate-500 dark:text-slate-300 group-hover:text-slate-700 dark:group-hover:text-slate-100 transition-colors">
-                                    <Wrench className={"size-4"} />
-                                  </div>
-                                  <div className="min-w-0 flex-1">
-                                    <div className="text-xs text-foreground leading-5 truncate whitespace-nowrap">
-                                      {getSkillShowLabel(label)}
+                      <TabsContent value="installed-skills" className="mt-0 space-y-3">
+                        {enabledCustomSkillGroups.length > 0 ? (
+                          enabledCustomSkillGroups.map((group) => (
+                            <div key={group.category} className="space-y-2">
+                              <div className="text-xs text-muted-foreground font-medium tracking-wider">
+                                {group.category}
+                              </div>
+                              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                                {group.cards.map(({ skill, label, icon }) => (
+                                  <button
+                                    key={label + skill.path}
+                                    type="button"
+                                    onClick={() => handleUseSkillPrompt(skill, label)}
+                                    className="group w-full rounded-xl border border-slate-300/90 dark:border-slate-600/85 bg-slate-50/70 dark:bg-slate-900/35 px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:bg-slate-100/95 dark:hover:bg-slate-800/55 hover:border-slate-400/95 dark:hover:border-slate-500/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
+                                  >
+                                    <div className="flex items-center gap-2 min-w-0">
+                                      <div className="rounded-md border border-slate-300/90 dark:border-slate-600/80 bg-white/80 dark:bg-slate-900/45 p-1.5 text-slate-500 dark:text-slate-300 group-hover:text-slate-700 dark:group-hover:text-slate-100 transition-colors">
+                                        {icon}
+                                      </div>
+                                      <div className="min-w-0 flex-1">
+                                        <div className="text-xs text-foreground leading-5 truncate whitespace-nowrap">
+                                          {getSkillShowLabel(label)}
+                                        </div>
+                                      </div>
                                     </div>
-                                  </div>
-                                </div>
-                              </button>
-                            ))
-                          ) : (
-                            <button
-                              type="button"
-                              className="group w-full rounded-xl border border-slate-300/90 dark:border-slate-600/85 bg-slate-50/70 dark:bg-slate-900/35 px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:bg-slate-100/95 dark:hover:bg-slate-800/55 hover:border-slate-400/95 dark:hover:border-slate-500/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
-                            >
-                              <div className="flex items-center gap-2 min-w-0">
-                                <div className="rounded-md border border-slate-300/90 dark:border-slate-600/80 bg-white/80 dark:bg-slate-900/45 p-1.5 text-slate-500 dark:text-slate-300 group-hover:text-slate-700 dark:group-hover:text-slate-100 transition-colors">
-                                  <CircleAlert className={"size-4"} />
-                                </div>
-                                <div className="min-w-0 flex-1">
-                                  <div className="text-xs text-foreground leading-5 truncate whitespace-nowrap">
-                                    暂无
-                                  </div>
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          ))
+                        ) : (
+                          <button
+                            type="button"
+                            className="group w-full rounded-xl border border-slate-300/90 dark:border-slate-600/85 bg-slate-50/70 dark:bg-slate-900/35 px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:bg-slate-100/95 dark:hover:bg-slate-800/55 hover:border-slate-400/95 dark:hover:border-slate-500/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
+                          >
+                            <div className="flex items-center gap-2 min-w-0">
+                              <div className="rounded-md border border-slate-300/90 dark:border-slate-600/80 bg-white/80 dark:bg-slate-900/45 p-1.5 text-slate-500 dark:text-slate-300 group-hover:text-slate-700 dark:group-hover:text-slate-100 transition-colors">
+                                <CircleAlert className={"size-4"} />
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <div className="text-xs text-foreground leading-5 truncate whitespace-nowrap">
+                                  暂无
                                 </div>
                               </div>
-                            </button>
-                          )}
-                        </div>
-                        {customSkills.length > 8 && (
+                            </div>
+                          </button>
+                        )}
+
+                        {enabledCustomSkills.length > 8 && (
                           <button
                             type="button"
                             onClick={() => setShowAllCustomSkills((prev) => !prev)}
@@ -2331,10 +2419,54 @@ export function ChatContainer({
                             ) : (
                               <>
                                 <ChevronDown className="size-3.5" />
-                                <span>展开更多（+{customSkills.length - 8}）</span>
+                                <span>展开更多（+{enabledCustomSkills.length - 8}）</span>
                               </>
                             )}
                           </button>
+                        )}
+
+                        {disabledLocalSkills.length > 0 && (
+                          <details className="rounded-lg border border-border/70 bg-muted/20 px-2 py-2">
+                            <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-xs font-medium text-muted-foreground">
+                              <span>已禁用技能</span>
+                              <Badge
+                                variant="outline"
+                                className="h-5 min-w-6 justify-center px-1.5 text-[10px]"
+                              >
+                                {disabledLocalSkills.length}
+                              </Badge>
+                            </summary>
+                            <div className="mt-2 space-y-2">
+                              {disabledCustomSkillGroups.map((group) => (
+                                <div key={group.category} className="space-y-2">
+                                  <div className="text-xs text-muted-foreground/80 font-medium tracking-wider">
+                                    {group.category}
+                                  </div>
+                                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                                    {group.cards.map(({ skill, label, icon }) => (
+                                      <button
+                                        key={label + skill.path}
+                                        type="button"
+                                        disabled
+                                        className="group w-full cursor-not-allowed rounded-xl border border-border/70 bg-background/60 px-3 py-2 text-left opacity-65 transition-colors"
+                                      >
+                                        <div className="flex items-center gap-2 min-w-0">
+                                          <div className="rounded-md border border-border/70 bg-background/70 p-1.5 text-muted-foreground">
+                                            {icon}
+                                          </div>
+                                          <div className="min-w-0 flex-1">
+                                            <div className="text-xs text-muted-foreground leading-5 truncate whitespace-nowrap line-through">
+                                              {getSkillShowLabel(label)}
+                                            </div>
+                                          </div>
+                                        </div>
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </details>
                         )}
                       </TabsContent>
 

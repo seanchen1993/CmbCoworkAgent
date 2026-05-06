@@ -368,6 +368,7 @@ export interface PluginHookMetadata extends HookConfig {
 export interface SkillHookMetadata extends HookConfig {
   skillName: string
   skillPath: string
+  skillRoot: string
   hookPath: string
   pluginId?: string
   pluginName?: string

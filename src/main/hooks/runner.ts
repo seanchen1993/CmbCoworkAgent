@@ -86,9 +86,7 @@ function matchesName(matcher: string | undefined, name: string | undefined): boo
 }
 
 function getMatcherTarget(event: HookEvent, context: HookContext): string | undefined {
-  return event === "PreSkillUse" || event === "PostSkillUse"
-    ? context.skillName
-    : context.toolName
+  return event === "PreSkillUse" || event === "PostSkillUse" ? context.skillName : context.toolName
 }
 
 /**
@@ -139,7 +137,7 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext): string {
   const payload: Record<string, unknown> = {
     hook_event_name: event,
     session_id: context.sessionId ?? "",
-    cwd: context.workspacePath ?? process.cwd()
+    cwd: context.skillRoot ?? context.workspacePath ?? process.cwd()
   }
   if (context.toolName) payload.tool_name = context.toolName
   if (context.toolArgs) payload.tool_input = context.toolArgs
@@ -259,7 +257,7 @@ function executeCommandHook(
       shell: isWindows ? true : false,
       stdio: ["pipe", "pipe", "pipe"],
       timeout,
-      cwd: env.WORKSPACE_PATH || process.cwd()
+      cwd: env.SKILL_ROOT || env.WORKSPACE_PATH || process.cwd()
     })
 
     // Write the Claude Code JSON payload to stdin so hooks can parse structured input.
@@ -682,7 +680,7 @@ export type HookResultCallback = (event: HookEvent, hook: HookConfig, result: Ho
  */
 type ScopedHook = HookConfig &
   Partial<Pick<PluginHookMetadata, "pluginId" | "pluginName">> &
-  Partial<Pick<SkillHookMetadata, "skillName" | "skillPath">>
+  Partial<Pick<SkillHookMetadata, "skillName" | "skillPath" | "skillRoot">>
 
 function enrichContextFromHook(hook: HookConfig, context: HookContext): HookContext {
   const scopedHook = hook as ScopedHook
@@ -691,7 +689,8 @@ function enrichContextFromHook(hook: HookConfig, context: HookContext): HookCont
     pluginId: context.pluginId ?? scopedHook.pluginId,
     pluginName: context.pluginName ?? scopedHook.pluginName,
     skillName: context.skillName ?? scopedHook.skillName,
-    skillPath: context.skillPath ?? scopedHook.skillPath
+    skillPath: context.skillPath ?? scopedHook.skillPath,
+    skillRoot: context.skillRoot ?? scopedHook.skillRoot
   }
 }
 
@@ -702,7 +701,8 @@ export async function runHooks(
   onHookResult?: HookResultCallback
 ): Promise<HookResult | null> {
   const matched = hooks.filter(
-    (h) => h.enabled && h.event === event && matchesName(h.matcher, getMatcherTarget(event, context))
+    (h) =>
+      h.enabled && h.event === event && matchesName(h.matcher, getMatcherTarget(event, context))
   )
 
   if (matched.length === 0) return null
