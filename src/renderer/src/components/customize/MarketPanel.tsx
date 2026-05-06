@@ -481,6 +481,7 @@ export function MarketPanel(): React.JSX.Element {
   const [skillSortMode, setSkillSortMode] = useState<SkillSortMode>("calls_desc")
   const [selectedItemKey, setSelectedItemKey] = useState<string | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
+  const [detailError, setDetailError] = useState<string | null>(null)
   const [skillDetailSkill, setSkillDetailSkill] = useState<SkillMetadata | null>(null)
   const [skillDetailSelectedFile, setSkillDetailSelectedFile] = useState<string | null>(null)
   const [skillDetailContent, setSkillDetailContent] = useState<string | null>(null)
@@ -511,6 +512,7 @@ export function MarketPanel(): React.JSX.Element {
     type === "skill" ? "技能" : type === "mcp" ? "MCP连接器" : "插件"
 
   const resetDetailState = () => {
+    setDetailError(null)
     setSkillDetailSkill(null)
     setSkillDetailSelectedFile(null)
     setSkillDetailContent(null)
@@ -1211,7 +1213,7 @@ export function MarketPanel(): React.JSX.Element {
       }
     } catch (detailError) {
       console.error("Failed to load detail data:", detailError)
-      setError(detailError instanceof Error ? detailError.message : "加载详情失败")
+      setDetailError(detailError instanceof Error ? detailError.message : "加载详情失败")
     } finally {
       setDetailLoading(false)
     }
@@ -1569,6 +1571,14 @@ export function MarketPanel(): React.JSX.Element {
     if (!selectedItem) return null
     if (detailLoading) {
       return <div className="text-sm text-muted-foreground py-6">文件详情加载中...</div>
+    }
+
+    if (detailError) {
+      return (
+        <div className="rounded-lg border border-[#fad4d4] bg-[#fdf2f2] px-4 py-3 text-sm text-[#b53333]">
+          {detailError}
+        </div>
+      )
     }
 
     if (activeTab === "skill") {
