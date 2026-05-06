@@ -881,6 +881,24 @@ function countSkillTreeSkills(node: SkillTreeNode): number {
   )
 }
 
+function splitSkillsByEnabled(
+  skills: SkillMetadata[],
+  disabledSkillIds: ReadonlySet<string>
+): { enabled: SkillMetadata[]; disabled: SkillMetadata[] } {
+  const enabled: SkillMetadata[] = []
+  const disabled: SkillMetadata[] = []
+
+  for (const skill of skills) {
+    if (isSkillDisabled(skill, disabledSkillIds)) {
+      disabled.push(skill)
+    } else {
+      enabled.push(skill)
+    }
+  }
+
+  return { enabled, disabled }
+}
+
 function defaultSkillFile(files: string[]): string | null {
   if (files.length === 0) return null
   const skillMd = files.find((f) => /(^|\/)SKILL\.md$/i.test(f))
@@ -1870,7 +1888,12 @@ function SkillSection(props: {
     onSelectFile
   } = props
   const [collapsed, setCollapsed] = useState(false)
-  const skillTree = useMemo(() => buildSkillTree(skills), [skills])
+  const [disabledCollapsed, setDisabledCollapsed] = useState(true)
+  const [expandedSkillTreeNodes, setExpandedSkillTreeNodes] = useState<Set<string>>(new Set())
+  const { enabled: enabledSkills, disabled: disabledSectionSkills } = useMemo(
+    () => splitSkillsByEnabled(skills, disabledSkills),
+    [disabledSkills, skills]
+  )
   const sectionStyle = useMemo(() => {
     if (title.includes("内置")) {
       return {
@@ -1907,6 +1930,14 @@ function SkillSection(props: {
         "border-border/70 bg-background text-muted-foreground dark:border-border/60 dark:bg-background/70"
     }
   }, [title])
+  const toggleSkillTreeNode = useCallback((nodeKey: string) => {
+    setExpandedSkillTreeNodes((prev) => {
+      const next = new Set(prev)
+      if (next.has(nodeKey)) next.delete(nodeKey)
+      else next.add(nodeKey)
+      return next
+    })
+  }, [])
 
   return (
     <div className="rounded-xl border border-border/60 bg-background/40 p-1.5">
@@ -1943,24 +1974,168 @@ function SkillSection(props: {
               没有匹配的技能
             </p>
           ) : (
-            <SkillTreeList
-              nodes={skillTree}
-              level={0}
-              marketSkillMap={marketSkillMap}
-              uploadedSkillNames={uploadedSkillNames}
-              editedSkillPaths={editedSkillPaths}
-              expandedSkills={expandedSkills}
-              skillFilesMap={skillFilesMap}
-              selectedSkill={selectedSkill}
-              expandedDirNodes={expandedDirNodes}
-              disabledSkills={disabledSkills}
-              hideFeaturedMarketFiles={hideFeaturedMarketFiles}
-              hideMarketTag={hideMarketTag}
-              onToggleSkill={onToggleSkill}
-              onToggleDirNode={onToggleDirNode}
-              onSelectFile={onSelectFile}
-            />
+            <>
+              <SkillStatusGroup
+                title="已启用"
+                skills={enabledSkills}
+                initiallyCollapsed={false}
+                disabledSkills={disabledSkills}
+                marketSkillMap={marketSkillMap}
+                uploadedSkillNames={uploadedSkillNames}
+                editedSkillPaths={editedSkillPaths}
+                expandedSkills={expandedSkills}
+                skillFilesMap={skillFilesMap}
+                selectedSkill={selectedSkill}
+                expandedDirNodes={expandedDirNodes}
+                expandedSkillTreeNodes={expandedSkillTreeNodes}
+                hideFeaturedMarketFiles={hideFeaturedMarketFiles}
+                hideMarketTag={hideMarketTag}
+                onToggleSkill={onToggleSkill}
+                onToggleSkillTreeNode={toggleSkillTreeNode}
+                onToggleDirNode={onToggleDirNode}
+                onSelectFile={onSelectFile}
+              />
+              <SkillStatusGroup
+                title="已禁用"
+                skills={disabledSectionSkills}
+                collapsed={disabledCollapsed}
+                onCollapsedChange={setDisabledCollapsed}
+                initiallyCollapsed
+                disabledSkills={disabledSkills}
+                marketSkillMap={marketSkillMap}
+                uploadedSkillNames={uploadedSkillNames}
+                editedSkillPaths={editedSkillPaths}
+                expandedSkills={expandedSkills}
+                skillFilesMap={skillFilesMap}
+                selectedSkill={selectedSkill}
+                expandedDirNodes={expandedDirNodes}
+                expandedSkillTreeNodes={expandedSkillTreeNodes}
+                hideFeaturedMarketFiles={hideFeaturedMarketFiles}
+                hideMarketTag={hideMarketTag}
+                onToggleSkill={onToggleSkill}
+                onToggleSkillTreeNode={toggleSkillTreeNode}
+                onToggleDirNode={onToggleDirNode}
+                onSelectFile={onSelectFile}
+              />
+            </>
           )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SkillStatusGroup(props: {
+  title: string
+  skills: SkillMetadata[]
+  initiallyCollapsed?: boolean
+  collapsed?: boolean
+  onCollapsedChange?: (collapsed: boolean) => void
+  marketSkillMap: Record<string, SkillMarketInfo>
+  uploadedSkillNames: Set<string>
+  editedSkillPaths: Set<string>
+  expandedSkills: Set<string>
+  skillFilesMap: Record<string, string[]>
+  selectedSkill: SkillMetadata | null
+  expandedDirNodes: Set<string>
+  expandedSkillTreeNodes: Set<string>
+  disabledSkills: Set<string>
+  hideFeaturedMarketFiles: boolean
+  hideMarketTag: boolean
+  onToggleSkill: (skill: SkillMetadata) => void
+  onToggleSkillTreeNode: (nodeKey: string) => void
+  onToggleDirNode: (nodeId: string) => void
+  onSelectFile: (skill: SkillMetadata, filePath: string) => void
+}): React.JSX.Element {
+  const {
+    title,
+    skills,
+    initiallyCollapsed = false,
+    collapsed,
+    onCollapsedChange,
+    marketSkillMap,
+    uploadedSkillNames,
+    editedSkillPaths,
+    expandedSkills,
+    skillFilesMap,
+    selectedSkill,
+    expandedDirNodes,
+    expandedSkillTreeNodes,
+    disabledSkills,
+    hideFeaturedMarketFiles,
+    hideMarketTag,
+    onToggleSkill,
+    onToggleSkillTreeNode,
+    onToggleDirNode,
+    onSelectFile
+  } = props
+  const [localCollapsed, setLocalCollapsed] = useState(initiallyCollapsed)
+  const isCollapsed = collapsed ?? localCollapsed
+  const skillTree = useMemo(() => buildSkillTree(skills), [skills])
+  const isDisabledGroup = title.includes("禁用")
+
+  const setCollapsed = useCallback(
+    (next: boolean) => {
+      if (onCollapsedChange) onCollapsedChange(next)
+      else setLocalCollapsed(next)
+    },
+    [onCollapsedChange]
+  )
+
+  if (skills.length === 0) return <></>
+
+  return (
+    <div
+      className={cn(
+        "rounded-lg border p-1",
+        isDisabledGroup
+          ? "border-border/60 bg-muted/20"
+          : "border-emerald-200/60 bg-emerald-50/30 dark:border-emerald-900/40 dark:bg-emerald-950/10"
+      )}
+    >
+      <button
+        className="flex min-h-7 w-full items-center justify-between gap-2 rounded-md px-2 py-1 text-left text-xs transition-colors hover:bg-background/70"
+        onClick={() => setCollapsed(!isCollapsed)}
+      >
+        <span className="flex min-w-0 items-center gap-1.5">
+          {isCollapsed ? (
+            <ChevronRight className="size-3 text-muted-foreground" />
+          ) : (
+            <ChevronDown className="size-3 text-muted-foreground" />
+          )}
+          <span
+            className={cn(
+              "size-1.5 rounded-full",
+              isDisabledGroup ? "bg-muted-foreground" : "bg-emerald-500"
+            )}
+          />
+          <span className="font-medium truncate">{title}</span>
+        </span>
+        <Badge variant="outline" className="h-4 min-w-5 justify-center px-1 text-[10px]">
+          {skills.length}
+        </Badge>
+      </button>
+      {!isCollapsed && (
+        <div className="space-y-2 pt-1.5">
+          <SkillTreeList
+            nodes={skillTree}
+            level={0}
+            marketSkillMap={marketSkillMap}
+            uploadedSkillNames={uploadedSkillNames}
+            editedSkillPaths={editedSkillPaths}
+            expandedSkills={expandedSkills}
+            skillFilesMap={skillFilesMap}
+            selectedSkill={selectedSkill}
+            expandedDirNodes={expandedDirNodes}
+            expandedSkillTreeNodes={expandedSkillTreeNodes}
+            disabledSkills={disabledSkills}
+            hideFeaturedMarketFiles={hideFeaturedMarketFiles}
+            hideMarketTag={hideMarketTag}
+            onToggleSkill={onToggleSkill}
+            onToggleSkillTreeNode={onToggleSkillTreeNode}
+            onToggleDirNode={onToggleDirNode}
+            onSelectFile={onSelectFile}
+          />
         </div>
       )}
     </div>
@@ -1977,10 +2152,12 @@ function SkillTreeList(props: {
   skillFilesMap: Record<string, string[]>
   selectedSkill: SkillMetadata | null
   expandedDirNodes: Set<string>
+  expandedSkillTreeNodes: Set<string>
   disabledSkills: Set<string>
   hideFeaturedMarketFiles: boolean
   hideMarketTag: boolean
   onToggleSkill: (skill: SkillMetadata) => void
+  onToggleSkillTreeNode: (nodeKey: string) => void
   onToggleDirNode: (nodeId: string) => void
   onSelectFile: (skill: SkillMetadata, filePath: string) => void
 }): React.JSX.Element {
@@ -1994,24 +2171,27 @@ function SkillTreeList(props: {
     skillFilesMap,
     selectedSkill,
     expandedDirNodes,
+    expandedSkillTreeNodes,
     disabledSkills,
     hideFeaturedMarketFiles,
     hideMarketTag,
     onToggleSkill,
+    onToggleSkillTreeNode,
     onToggleDirNode,
     onSelectFile
   } = props
 
   return (
-    <div className={level === 0 ? "space-y-2" : "space-y-2"}>
+    <div className="space-y-2">
       {nodes.map((node) => {
-        const childCount = node.children.reduce(
-          (sum, child) => sum + countSkillTreeSkills(child),
-          0
-        )
+          const childCount = node.children.reduce(
+            (sum, child) => sum + countSkillTreeSkills(child),
+            0
+          )
+          const childrenExpanded = expandedSkillTreeNodes.has(node.key)
 
-        return (
-          <div key={node.key} className="space-y-1.5">
+          return (
+            <div key={node.key} className="space-y-1.5">
             {node.skill ? (
               (() => {
                 const skill = node.skill
@@ -2054,36 +2234,64 @@ function SkillTreeList(props: {
                 )
               })()
             ) : (
-              <div
-                className="flex min-h-8 items-center gap-2 rounded-md border border-dashed border-border/60 bg-muted/20 px-2 py-1.5 text-xs text-muted-foreground"
+              <button
+                className="flex min-h-8 w-full items-center gap-2 rounded-md border border-dashed border-border/60 bg-muted/20 px-2 py-1.5 text-left text-xs text-muted-foreground hover:bg-muted/35"
                 style={{ marginLeft: `${level * 14}px` }}
+                onClick={() => onToggleSkillTreeNode(node.key)}
               >
+                {childrenExpanded ? (
+                  <ChevronDown className="size-3 shrink-0" />
+                ) : (
+                  <ChevronRight className="size-3 shrink-0" />
+                )}
                 <Folder className="size-3.5 shrink-0" />
                 <span className="min-w-0 flex-1 truncate">{node.label}</span>
                 <Badge variant="outline" className="h-4 px-1.5 text-[10px]">
                   {childCount}
                 </Badge>
-              </div>
+              </button>
             )}
 
-            {node.children.length > 0 && (
-              <SkillTreeList
-                nodes={node.children}
-                level={level + 1}
-                marketSkillMap={marketSkillMap}
-                uploadedSkillNames={uploadedSkillNames}
-                editedSkillPaths={editedSkillPaths}
-                expandedSkills={expandedSkills}
-                skillFilesMap={skillFilesMap}
-                selectedSkill={selectedSkill}
-                expandedDirNodes={expandedDirNodes}
-                disabledSkills={disabledSkills}
-                hideFeaturedMarketFiles={hideFeaturedMarketFiles}
-                hideMarketTag={hideMarketTag}
-                onToggleSkill={onToggleSkill}
-                onToggleDirNode={onToggleDirNode}
-                onSelectFile={onSelectFile}
-              />
+            {node.skill && node.children.length > 0 && (
+              <button
+                className="ml-3 flex min-h-7 w-[calc(100%-0.75rem)] items-center gap-2 rounded-md border border-dashed border-border/60 bg-muted/15 px-2 py-1 text-left text-[11px] text-muted-foreground hover:bg-muted/30"
+                onClick={() => onToggleSkillTreeNode(node.key)}
+              >
+                {childrenExpanded ? (
+                  <ChevronDown className="size-3 shrink-0" />
+                ) : (
+                  <ChevronRight className="size-3 shrink-0" />
+                )}
+                <Folder className="size-3 shrink-0" />
+                <span className="min-w-0 flex-1 truncate">子技能</span>
+                <Badge variant="outline" className="h-4 px-1.5 text-[10px]">
+                  {childCount}
+                </Badge>
+              </button>
+            )}
+
+            {node.children.length > 0 && childrenExpanded && (
+              <div className="ml-3 border-l border-border/60 pl-2">
+                <SkillTreeList
+                  nodes={node.children}
+                  level={level + 1}
+                  marketSkillMap={marketSkillMap}
+                  uploadedSkillNames={uploadedSkillNames}
+                  editedSkillPaths={editedSkillPaths}
+                  expandedSkills={expandedSkills}
+                  skillFilesMap={skillFilesMap}
+                  selectedSkill={selectedSkill}
+                  expandedDirNodes={expandedDirNodes}
+                  expandedSkillTreeNodes={expandedSkillTreeNodes}
+                  disabledSkills={disabledSkills}
+                  hideFeaturedMarketFiles={hideFeaturedMarketFiles}
+                  hideMarketTag={hideMarketTag}
+                  onToggleSkill={onToggleSkill}
+                  onToggleSkillTreeNode={onToggleSkillTreeNode}
+                  onToggleDirNode={onToggleDirNode}
+                  onSelectFile={onSelectFile}
+                />
+              </div>
             )}
           </div>
         )

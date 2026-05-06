@@ -2279,6 +2279,87 @@ function AgentsContent(): React.JSX.Element {
   )
 }
 
+type RightPanelSkillTreeNode = {
+  key: string
+  label: string
+  skill?: SkillMetadata
+  children: RightPanelSkillTreeNode[]
+}
+
+function getRightPanelSkillPath(skill: SkillMetadata): string {
+  const id = skill.id?.startsWith("plugin:") ? skill.id.split("/").slice(1).join("/") : skill.id
+  return String(skill.relativePath || id || skill.name || "")
+    .replace(/\\/g, "/")
+    .replace(/^\/+|\/+$/g, "")
+}
+
+function buildRightPanelSkillTree(skills: SkillMetadata[]): RightPanelSkillTreeNode[] {
+  const root: RightPanelSkillTreeNode = { key: "root", label: "root", children: [] }
+  const indexByNode = new WeakMap<RightPanelSkillTreeNode, Map<string, RightPanelSkillTreeNode>>()
+
+  const getIndex = (node: RightPanelSkillTreeNode): Map<string, RightPanelSkillTreeNode> => {
+    let index = indexByNode.get(node)
+    if (!index) {
+      index = new Map(node.children.map((child) => [normalizeSkillId(child.label), child]))
+      indexByNode.set(node, index)
+    }
+    return index
+  }
+
+  for (const skill of skills) {
+    const segments = getRightPanelSkillPath(skill).split("/").filter(Boolean)
+    const fallbackSegments = segments.length > 0 ? segments : [skill.name]
+    let current = root
+
+    for (const segment of fallbackSegments) {
+      const normalized = normalizeSkillId(segment)
+      const childIndex = getIndex(current)
+      let child = childIndex.get(normalized)
+      if (!child) {
+        child = { key: `${current.key}/${normalized}`, label: segment, children: [] }
+        current.children.push(child)
+        childIndex.set(normalized, child)
+      }
+      current = child
+    }
+
+    current.skill = skill
+  }
+
+  const sortNodes = (nodes: RightPanelSkillTreeNode[]): RightPanelSkillTreeNode[] =>
+    [...nodes]
+      .sort((a, b) => {
+        const labelA = a.skill?.name || a.label
+        const labelB = b.skill?.name || b.label
+        return labelA.localeCompare(labelB, "zh-CN")
+      })
+      .map((node) => ({ ...node, children: sortNodes(node.children) }))
+
+  return sortNodes(root.children)
+}
+
+function countRightPanelTreeSkills(node: RightPanelSkillTreeNode): number {
+  return (
+    (node.skill ? 1 : 0) +
+    node.children.reduce((sum, child) => sum + countRightPanelTreeSkills(child), 0)
+  )
+}
+
+function splitRightPanelSkillsByEnabled(
+  skills: SkillMetadata[],
+  disabledSkills: ReadonlySet<string>
+): { enabled: SkillMetadata[]; disabled: SkillMetadata[] } {
+  const enabled: SkillMetadata[] = []
+  const disabled: SkillMetadata[] = []
+
+  for (const skill of skills) {
+    if (isSkillDisabled(skill, disabledSkills)) disabled.push(skill)
+    else enabled.push(skill)
+  }
+
+  return { enabled, disabled }
+}
+
 function SkillsContent({
   skills,
   disabledSkills
@@ -2286,6 +2367,16 @@ function SkillsContent({
   skills: SkillMetadata[]
   disabledSkills: Set<string>
 }): React.JSX.Element {
+  const [expandedTreeNodes, setExpandedTreeNodes] = useState<Set<string>>(new Set())
+  const toggleTreeNode = useCallback((nodeKey: string) => {
+    setExpandedTreeNodes((prev) => {
+      const next = new Set(prev)
+      if (next.has(nodeKey)) next.delete(nodeKey)
+      else next.add(nodeKey)
+      return next
+    })
+  }, [])
+
   if (skills.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center text-center text-sm text-muted-foreground py-8 px-4">
@@ -2314,68 +2405,191 @@ function SkillsContent({
     return programmingSkillIds.has(skill.name.trim().toLowerCase())
   }
 
-  const programmingSkills = skills.filter(isProgrammingSkill)
-  const generalSkills = skills.filter((skill) => !isProgrammingSkill(skill))
+  const { enabled, disabled } = splitRightPanelSkillsByEnabled(skills, disabledSkills)
+  const enabledProgrammingSkills = enabled.filter(isProgrammingSkill)
+  const enabledGeneralSkills = enabled.filter((skill) => !isProgrammingSkill(skill))
+  const disabledProgrammingSkills = disabled.filter(isProgrammingSkill)
+  const disabledGeneralSkills = disabled.filter((skill) => !isProgrammingSkill(skill))
 
-  const renderSkillCard = (skill: SkillMetadata): React.JSX.Element => {
-    const disabled = isSkillDisabled(skill, disabledSkills)
+  const renderSkillTree = (
+    treeSkills: SkillMetadata[],
+    disabled: boolean
+  ): React.JSX.Element | null => {
+    if (treeSkills.length === 0) return null
+    const tree = buildRightPanelSkillTree(treeSkills)
+
+    const renderNodes = (nodes: RightPanelSkillTreeNode[]): React.JSX.Element => (
+      <div className="space-y-2">
+        {nodes.map((node) => {
+          const childCount = node.children.reduce(
+            (sum, child) => sum + countRightPanelTreeSkills(child),
+            0
+          )
+          const childrenExpanded = expandedTreeNodes.has(node.key)
+          return (
+            <div key={node.key} className="space-y-2">
+              {node.skill ? (
+                <div className={cn("p-3 rounded-sm border border-border", disabled && "opacity-60")}>
+                  <div className="flex items-center gap-2 text-sm font-medium">
+                    <Sparkles
+                      className={cn(
+                        "size-3.5 shrink-0",
+                        disabled ? "text-muted-foreground" : "text-amber-500"
+                      )}
+                    />
+                    <span
+                      className={cn(
+                        "flex-1 truncate",
+                        disabled && "text-muted-foreground line-through"
+                      )}
+                    >
+                      {node.skill.name}
+                    </span>
+                    {childCount > 0 && (
+                      <Badge variant="outline" className="text-[10px] h-4 px-1.5 shrink-0 gap-1">
+                        <Folder className="mr-1 size-2.5" />
+                        {childCount}
+                      </Badge>
+                    )}
+                    {disabled && (
+                      <Badge variant="outline" className="text-[10px] h-4 px-1.5 shrink-0">
+                        已禁用
+                      </Badge>
+                    )}
+                  </div>
+                  {node.skill.description && (
+                    <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
+                      {node.skill.description}
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <button
+                  className="flex min-h-9 w-full items-center gap-2 rounded-sm border border-dashed border-border/70 bg-muted/20 px-3 py-2 text-left text-xs text-muted-foreground hover:bg-muted/35"
+                  onClick={() => toggleTreeNode(node.key)}
+                >
+                  {childrenExpanded ? (
+                    <ChevronDown className="size-3 shrink-0" />
+                  ) : (
+                    <ChevronRight className="size-3 shrink-0" />
+                  )}
+                  <Folder className="size-3.5 shrink-0" />
+                  <span className="min-w-0 flex-1 truncate">{node.label}</span>
+                  <Badge variant="outline" className="text-[10px] h-4 px-1.5 shrink-0">
+                    {countRightPanelTreeSkills(node)}
+                  </Badge>
+                </button>
+              )}
+
+              {node.skill && node.children.length > 0 && (
+                <button
+                  className="ml-3 flex min-h-7 w-[calc(100%-0.75rem)] items-center gap-2 rounded-sm border border-dashed border-border/60 bg-muted/15 px-2 py-1 text-left text-[11px] text-muted-foreground hover:bg-muted/30"
+                  onClick={() => toggleTreeNode(node.key)}
+                >
+                  {childrenExpanded ? (
+                    <ChevronDown className="size-3 shrink-0" />
+                  ) : (
+                    <ChevronRight className="size-3 shrink-0" />
+                  )}
+                  <Folder className="size-3 shrink-0" />
+                  <span className="min-w-0 flex-1 truncate">子技能</span>
+                  <Badge variant="outline" className="text-[10px] h-4 px-1.5 shrink-0">
+                    {childCount}
+                  </Badge>
+                </button>
+              )}
+
+              {node.children.length > 0 && childrenExpanded && (
+                <div className="ml-3 border-l border-border/60 pl-2">
+                  {renderNodes(node.children)}
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    )
+
+    return renderNodes(tree)
+  }
+
+  const renderSceneGroup = (
+    title: string,
+    groupSkills: SkillMetadata[],
+    isDisabledGroup: boolean
+  ): React.JSX.Element | null => {
+    if (groupSkills.length === 0) return null
     return (
-      <div
-        key={skill.id || skill.path}
-        className={cn("p-3 rounded-sm border border-border", disabled && "opacity-60")}
-      >
-        <div className="flex items-center gap-2 text-sm font-medium">
-          <Sparkles
-            className={cn(
-              "size-3.5 shrink-0",
-              disabled ? "text-muted-foreground" : "text-amber-500"
-            )}
-          />
-          <span className={cn("flex-1 truncate", disabled && "text-muted-foreground line-through")}>
-            {skill.name}
+      <div className="space-y-2">
+        <div className="flex items-center justify-between px-1">
+          <span className="text-[11px] text-muted-foreground tracking-wider font-medium">
+            {title}
           </span>
-          {disabled && (
-            <Badge variant="outline" className="text-[10px] h-4 px-1.5 shrink-0">
-              已禁用
-            </Badge>
-          )}
+          <Badge variant="outline" className="text-[10px] h-5">
+            {groupSkills.length}
+          </Badge>
         </div>
-        {skill.description && (
-          <p className="text-xs text-muted-foreground mt-1 line-clamp-2">{skill.description}</p>
+        {renderSkillTree(groupSkills, isDisabledGroup)}
+      </div>
+    )
+  }
+
+  const renderStatusSection = (
+    title: string,
+    sectionSkills: SkillMetadata[],
+    isDisabledGroup: boolean,
+    defaultOpen: boolean
+  ): React.JSX.Element | null => {
+    if (sectionSkills.length === 0) return null
+    const content = (
+      <div className="space-y-3 pt-2">
+        {renderSceneGroup(
+          "通用场景",
+          isDisabledGroup ? disabledGeneralSkills : enabledGeneralSkills,
+          isDisabledGroup
         )}
+        {renderSceneGroup(
+          "编程场景",
+          isDisabledGroup ? disabledProgrammingSkills : enabledProgrammingSkills,
+          isDisabledGroup
+        )}
+      </div>
+    )
+
+    if (isDisabledGroup) {
+      return (
+        <details
+          className="rounded-sm border border-border/70 bg-muted/20 px-2 py-2"
+          open={defaultOpen}
+        >
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-[11px] font-medium text-muted-foreground">
+            <span>{title}</span>
+            <Badge variant="outline" className="text-[10px] h-5">
+              {sectionSkills.length}
+            </Badge>
+          </summary>
+          {content}
+        </details>
+      )
+    }
+
+    return (
+      <div className="rounded-sm border border-emerald-200/70 bg-emerald-50/35 px-2 py-2 dark:border-emerald-900/40 dark:bg-emerald-950/10">
+        <div className="flex items-center justify-between gap-2 text-[11px] font-medium text-emerald-800 dark:text-emerald-200">
+          <span>{title}</span>
+          <Badge variant="outline" className="text-[10px] h-5">
+            {sectionSkills.length}
+          </Badge>
+        </div>
+        {content}
       </div>
     )
   }
 
   return (
     <div className="p-3 space-y-2">
-      {generalSkills.length > 0 && (
-        <div className="space-y-2">
-          <div className="flex items-center justify-between px-1">
-            <span className="text-[11px] text-muted-foreground tracking-wider font-medium">
-              通用场景
-            </span>
-            <Badge variant="outline" className="text-[10px] h-5">
-              {generalSkills.length}
-            </Badge>
-          </div>
-          {generalSkills.map(renderSkillCard)}
-        </div>
-      )}
-
-      {programmingSkills.length > 0 && (
-        <div className="space-y-2 pt-1">
-          <div className="flex items-center justify-between px-1">
-            <span className="text-[11px] text-muted-foreground tracking-wider font-medium">
-              编程场景
-            </span>
-            <Badge variant="outline" className="text-[10px] h-5">
-              {programmingSkills.length}
-            </Badge>
-          </div>
-          {programmingSkills.map(renderSkillCard)}
-        </div>
-      )}
+      {renderStatusSection("已启用技能", enabled, false, true)}
+      {renderStatusSection("已禁用技能", disabled, true, false)}
     </div>
   )
 }

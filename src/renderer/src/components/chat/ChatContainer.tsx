@@ -21,6 +21,7 @@ import {
   LayoutTemplate,
   Settings2,
   ChevronDown,
+  ChevronRight,
   ChevronUp,
   ShieldCheck,
   Info,
@@ -71,6 +72,7 @@ import { SkillChip } from "@/features/slash-commands/skill-chip"
 import { formatSkillUseBlock, parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
 import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
 import { DEFAULT_SCENE_CATEGORY, SCENE_CATEGORY_OPTIONS } from "@/lib/skill-data-service"
+import { groupWelcomeSkills } from "./skill-grouping"
 
 type WelcomeSkillCard = {
   skill: SkillMetadata
@@ -81,6 +83,258 @@ type WelcomeSkillCard = {
 type WelcomeSkillSceneGroup = {
   category: string
   cards: WelcomeSkillCard[]
+}
+
+type WelcomeSkillTreeNode = {
+  key: string
+  label: string
+  card?: WelcomeSkillCard
+  children: WelcomeSkillTreeNode[]
+}
+
+function getWelcomeSkillTreePath(skill: SkillMetadata): string {
+  const id = skill.id?.startsWith("plugin:") ? skill.id.split("/").slice(1).join("/") : skill.id
+  return String(skill.relativePath || id || skill.name || "")
+    .replace(/\\/g, "/")
+    .replace(/^\/+|\/+$/g, "")
+}
+
+function buildWelcomeSkillTree(cards: WelcomeSkillCard[]): WelcomeSkillTreeNode[] {
+  const root: WelcomeSkillTreeNode = { key: "root", label: "root", children: [] }
+  const indexByNode = new WeakMap<WelcomeSkillTreeNode, Map<string, WelcomeSkillTreeNode>>()
+
+  const getIndex = (node: WelcomeSkillTreeNode): Map<string, WelcomeSkillTreeNode> => {
+    let index = indexByNode.get(node)
+    if (!index) {
+      index = new Map(node.children.map((child) => [normalizeSkillId(child.label), child]))
+      indexByNode.set(node, index)
+    }
+    return index
+  }
+
+  for (const card of cards) {
+    const segments = getWelcomeSkillTreePath(card.skill).split("/").filter(Boolean)
+    const fallbackSegments = segments.length > 0 ? segments : [card.skill.name]
+    let current = root
+
+    for (const segment of fallbackSegments) {
+      const normalized = normalizeSkillId(segment)
+      const childIndex = getIndex(current)
+      let child = childIndex.get(normalized)
+      if (!child) {
+        child = { key: `${current.key}/${normalized}`, label: segment, children: [] }
+        current.children.push(child)
+        childIndex.set(normalized, child)
+      }
+      current = child
+    }
+
+    current.card = card
+  }
+
+  const sortNodes = (nodes: WelcomeSkillTreeNode[]): WelcomeSkillTreeNode[] =>
+    [...nodes]
+      .sort((a, b) => {
+        const labelA = a.card?.label || a.label
+        const labelB = b.card?.label || b.label
+        return labelA.localeCompare(labelB, "zh-CN")
+      })
+      .map((node) => ({ ...node, children: sortNodes(node.children) }))
+
+  return sortNodes(root.children)
+}
+
+function countWelcomeSkillTreeCards(node: WelcomeSkillTreeNode): number {
+  return (
+    (node.card ? 1 : 0) +
+    node.children.reduce((sum, child) => sum + countWelcomeSkillTreeCards(child), 0)
+  )
+}
+
+function getWelcomeSkillTopLevelKey(skill: SkillMetadata): string {
+  return normalizeSkillId(getWelcomeSkillTreePath(skill).split("/").filter(Boolean)[0] || skill.name)
+}
+
+function limitWelcomeSkillsByTopLevel(skills: SkillMetadata[], previewLimit: number): SkillMetadata[] {
+  if (previewLimit <= 0) return []
+  const selectedRoots = new Set<string>()
+
+  for (const skill of skills) {
+    selectedRoots.add(getWelcomeSkillTopLevelKey(skill))
+    if (selectedRoots.size >= previewLimit) break
+  }
+
+  return skills.filter((skill) => selectedRoots.has(getWelcomeSkillTopLevelKey(skill)))
+}
+
+function WelcomeSkillButton(props: {
+  card: WelcomeSkillCard
+  disabled?: boolean
+  onUseSkill: (skill: SkillMetadata, label?: string) => void
+  getSkillShowLabel: (name: string) => string
+}): React.JSX.Element {
+  const { card, disabled = false, onUseSkill, getSkillShowLabel } = props
+  const label = getSkillShowLabel(card.label)
+
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={() => {
+        if (!disabled) onUseSkill(card.skill, card.label)
+      }}
+      className={cn(
+        "group w-full rounded-xl border px-3 py-2 text-left transition-all",
+        disabled
+          ? "cursor-not-allowed border-border/70 bg-background/60 opacity-65"
+          : "border-slate-300/90 bg-slate-50/70 shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:border-slate-400/95 hover:bg-slate-100/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] dark:border-slate-600/85 dark:bg-slate-900/35 dark:hover:border-slate-500/95 dark:hover:bg-slate-800/55"
+      )}
+    >
+      <div className="flex items-center gap-2 min-w-0">
+        <div
+          className={cn(
+            "rounded-md border p-1.5 transition-colors",
+            disabled
+              ? "border-border/70 bg-background/70 text-muted-foreground"
+              : "border-slate-300/90 bg-white/80 text-slate-500 group-hover:text-slate-700 dark:border-slate-600/80 dark:bg-slate-900/45 dark:text-slate-300 dark:group-hover:text-slate-100"
+          )}
+        >
+          {card.icon}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div
+            className={cn(
+              "text-xs leading-5 truncate whitespace-nowrap",
+              disabled ? "text-muted-foreground line-through" : "text-foreground"
+            )}
+          >
+            {label}
+          </div>
+        </div>
+      </div>
+    </button>
+  )
+}
+
+function WelcomeSkillTree(props: {
+  cards: WelcomeSkillCard[]
+  disabled?: boolean
+  onUseSkill: (skill: SkillMetadata, label?: string) => void
+  getSkillShowLabel: (name: string) => string
+}): React.JSX.Element {
+  const { cards, disabled = false, onUseSkill, getSkillShowLabel } = props
+  const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
+  const tree = useMemo(() => buildWelcomeSkillTree(cards), [cards])
+  const toggleNode = useCallback((nodeKey: string) => {
+    setExpandedNodes((prev) => {
+      const next = new Set(prev)
+      if (next.has(nodeKey)) next.delete(nodeKey)
+      else next.add(nodeKey)
+      return next
+    })
+  }, [])
+
+  return (
+    <WelcomeSkillTreeList
+      nodes={tree}
+      disabled={disabled}
+      nested={false}
+      expandedNodes={expandedNodes}
+      onToggleNode={toggleNode}
+      onUseSkill={onUseSkill}
+      getSkillShowLabel={getSkillShowLabel}
+    />
+  )
+}
+
+function WelcomeSkillTreeList(props: {
+  nodes: WelcomeSkillTreeNode[]
+  disabled: boolean
+  nested: boolean
+  expandedNodes: Set<string>
+  onToggleNode: (nodeKey: string) => void
+  onUseSkill: (skill: SkillMetadata, label?: string) => void
+  getSkillShowLabel: (name: string) => string
+}): React.JSX.Element {
+  const { nodes, disabled, nested, expandedNodes, onToggleNode, onUseSkill, getSkillShowLabel } =
+    props
+
+  return (
+    <div className={nested ? "grid grid-cols-1 gap-1.5" : "grid grid-cols-2 md:grid-cols-4 gap-2"}>
+      {nodes.map((node) => {
+        const childrenExpanded = expandedNodes.has(node.key)
+        const childCount = node.children.reduce(
+          (sum, child) => sum + countWelcomeSkillTreeCards(child),
+          0
+        )
+
+        return (
+          <div key={node.key} className="min-w-0 space-y-1.5">
+            {node.card ? (
+              <WelcomeSkillButton
+                card={node.card}
+                disabled={disabled}
+                onUseSkill={onUseSkill}
+                getSkillShowLabel={getSkillShowLabel}
+              />
+            ) : (
+              <button
+                type="button"
+                onClick={() => onToggleNode(node.key)}
+                className="w-full rounded-xl border border-dashed border-border/70 bg-muted/20 px-3 py-2 text-left hover:bg-muted/35"
+              >
+                <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    {childrenExpanded ? (
+                      <ChevronDown className="size-3 shrink-0" />
+                    ) : (
+                      <ChevronRight className="size-3 shrink-0" />
+                    )}
+                    <span className="truncate">{node.label}</span>
+                  </span>
+                  <Badge variant="outline" className="h-4 px-1.5 text-[10px]">
+                    {childCount}
+                  </Badge>
+                </div>
+              </button>
+            )}
+
+            {node.children.length > 0 && (
+              <button
+                type="button"
+                onClick={() => onToggleNode(node.key)}
+                className="flex min-h-7 w-full items-center gap-2 rounded-lg border border-dashed border-border/60 bg-muted/15 px-2 py-1 text-left text-[11px] text-muted-foreground hover:bg-muted/30"
+              >
+                {expandedNodes.has(node.key) ? (
+                  <ChevronDown className="size-3 shrink-0" />
+                ) : (
+                  <ChevronRight className="size-3 shrink-0" />
+                )}
+                <span className="min-w-0 flex-1 truncate">子技能</span>
+                <Badge variant="outline" className="h-4 px-1.5 text-[10px]">
+                  {childCount}
+                </Badge>
+              </button>
+            )}
+
+            {expandedNodes.has(node.key) && (
+              <div className="border-l border-border/60 pl-2">
+                <WelcomeSkillTreeList
+                  nodes={node.children}
+                  disabled={disabled}
+                  nested
+                  expandedNodes={expandedNodes}
+                  onToggleNode={onToggleNode}
+                  onUseSkill={onUseSkill}
+                  getSkillShowLabel={getSkillShowLabel}
+                />
+              </div>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
 }
 
 function HookLogsPanel({ logs }: { logs: HookLogEntry[] }): React.JSX.Element {
@@ -1951,26 +2205,7 @@ export function ChatContainer({
 
   const { generalSkills, programmingSkills, enabledCustomSkills, disabledLocalSkills } =
     useMemo(() => {
-      const builtInSkills = skills.filter((skill) => skill.source === "project")
-      const userSkills = skills.filter((skill) => skill.source === "user")
-      const enabledBuiltInSkills = builtInSkills.filter((skill) => !isLocalSkillDisabled(skill))
-
-      const general = enabledBuiltInSkills.filter((skill) => !isProgrammingSkill(skill))
-      const programming = enabledBuiltInSkills.filter(isProgrammingSkill)
-
-      // 精品技能名称集合，从「我安装的技能」中剔除
-      const goodSkillNames = new Set(goodSkillsData.map((g) => g.name))
-      const pureCustomSkills = userSkills.filter(
-        (s) => !goodSkillNames.has(s.name) && s.name !== "encrypt-password"
-      )
-      // todo  s.name !== 'encrypt-password' 这个逻辑在代码暂时写死，后面排查
-
-      return {
-        generalSkills: general,
-        programmingSkills: programming,
-        enabledCustomSkills: pureCustomSkills.filter((skill) => !isLocalSkillDisabled(skill)),
-        disabledLocalSkills: [...builtInSkills, ...userSkills].filter(isLocalSkillDisabled)
-      }
+      return groupWelcomeSkills(skills, goodSkillsData, isLocalSkillDisabled, isProgrammingSkill)
     }, [skills, isLocalSkillDisabled, isProgrammingSkill, goodSkillsData])
 
   const handleOpenMarketBySecondaryCategory = useCallback(
@@ -2040,7 +2275,9 @@ export function ChatContainer({
   )
 
   const enabledCustomSkillGroups = useMemo(() => {
-    const source = showAllCustomSkills ? enabledCustomSkills : enabledCustomSkills.slice(0, 8)
+    const source = showAllCustomSkills
+      ? enabledCustomSkills
+      : limitWelcomeSkillsByTopLevel(enabledCustomSkills, 8)
     return buildWelcomeSkillGroups(source)
   }, [buildWelcomeSkillGroups, enabledCustomSkills, showAllCustomSkills])
 
@@ -2359,34 +2596,31 @@ export function ChatContainer({
 
                       <TabsContent value="installed-skills" className="mt-0 space-y-3">
                         {enabledCustomSkillGroups.length > 0 ? (
-                          enabledCustomSkillGroups.map((group) => (
-                            <div key={group.category} className="space-y-2">
-                              <div className="text-xs text-muted-foreground font-medium tracking-wider">
-                                {group.category}
-                              </div>
-                              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                                {group.cards.map(({ skill, label, icon }) => (
-                                  <button
-                                    key={label + skill.path}
-                                    type="button"
-                                    onClick={() => handleUseSkillPrompt(skill, label)}
-                                    className="group w-full rounded-xl border border-slate-300/90 dark:border-slate-600/85 bg-slate-50/70 dark:bg-slate-900/35 px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:bg-slate-100/95 dark:hover:bg-slate-800/55 hover:border-slate-400/95 dark:hover:border-slate-500/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
-                                  >
-                                    <div className="flex items-center gap-2 min-w-0">
-                                      <div className="rounded-md border border-slate-300/90 dark:border-slate-600/80 bg-white/80 dark:bg-slate-900/45 p-1.5 text-slate-500 dark:text-slate-300 group-hover:text-slate-700 dark:group-hover:text-slate-100 transition-colors">
-                                        {icon}
-                                      </div>
-                                      <div className="min-w-0 flex-1">
-                                        <div className="text-xs text-foreground leading-5 truncate whitespace-nowrap">
-                                          {getSkillShowLabel(label)}
-                                        </div>
-                                      </div>
-                                    </div>
-                                  </button>
-                                ))}
-                              </div>
+                          <div className="rounded-lg border border-emerald-200/70 bg-emerald-50/35 px-2 py-2 dark:border-emerald-900/40 dark:bg-emerald-950/10">
+                            <div className="mb-2 flex items-center justify-between gap-2 text-xs font-medium text-emerald-800 dark:text-emerald-200">
+                              <span>已启用技能</span>
+                              <Badge
+                                variant="outline"
+                                className="h-5 min-w-6 justify-center px-1.5 text-[10px]"
+                              >
+                                {enabledCustomSkills.length}
+                              </Badge>
                             </div>
-                          ))
+                            <div className="space-y-3">
+                              {enabledCustomSkillGroups.map((group) => (
+                                <div key={group.category} className="space-y-2">
+                                  <div className="text-xs text-muted-foreground font-medium tracking-wider">
+                                    {group.category}
+                                  </div>
+                                  <WelcomeSkillTree
+                                    cards={group.cards}
+                                    onUseSkill={handleUseSkillPrompt}
+                                    getSkillShowLabel={getSkillShowLabel}
+                                  />
+                                </div>
+                              ))}
+                            </div>
+                          </div>
                         ) : (
                           <button
                             type="button"
@@ -2442,27 +2676,12 @@ export function ChatContainer({
                                   <div className="text-xs text-muted-foreground/80 font-medium tracking-wider">
                                     {group.category}
                                   </div>
-                                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                                    {group.cards.map(({ skill, label, icon }) => (
-                                      <button
-                                        key={label + skill.path}
-                                        type="button"
-                                        disabled
-                                        className="group w-full cursor-not-allowed rounded-xl border border-border/70 bg-background/60 px-3 py-2 text-left opacity-65 transition-colors"
-                                      >
-                                        <div className="flex items-center gap-2 min-w-0">
-                                          <div className="rounded-md border border-border/70 bg-background/70 p-1.5 text-muted-foreground">
-                                            {icon}
-                                          </div>
-                                          <div className="min-w-0 flex-1">
-                                            <div className="text-xs text-muted-foreground leading-5 truncate whitespace-nowrap line-through">
-                                              {getSkillShowLabel(label)}
-                                            </div>
-                                          </div>
-                                        </div>
-                                      </button>
-                                    ))}
-                                  </div>
+                                  <WelcomeSkillTree
+                                    cards={group.cards}
+                                    disabled
+                                    onUseSkill={handleUseSkillPrompt}
+                                    getSkillShowLabel={getSkillShowLabel}
+                                  />
                                 </div>
                               ))}
                             </div>
