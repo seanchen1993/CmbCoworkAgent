@@ -441,13 +441,23 @@ test("Windows sandbox execution plan prepares native helper access without host 
   )
   assert.match(
     localSandboxSource,
+    /SandboxNativeHelpers[\s\S]*nativeTools: path\.win32\.join\(root, "native-tools"\)/,
+    "native helper layout should live outside sandbox writable cache roots"
+  )
+  assert.doesNotMatch(
+    localSandboxSource,
     /nativeTools: path\.win32\.join\(cacheRoot, "native-tools"\)/,
-    "sandbox cache layout should include an app-owned native helper area"
+    "native helper assets must not be nested under the sandbox writable cache root"
   )
   assert.match(
     plannerSection,
-    /materializeNativeHelper[\s\S]*fs\.copyFile\(sourcePath, tempPath\)[\s\S]*fs\.rename\(tempPath, destinationPath\)/,
-    "native helpers should be copied via a temp file inside the sandbox cache before rename"
+    /materializeNativeHelper[\s\S]*fs\.copyFile\(sourcePath, tempPath\)[\s\S]*destinationIsFresh\(sourceInfo, tempPath\)[\s\S]*fs\.rename\(tempPath, destinationPath\)/,
+    "native helpers should be copied via a temp file and content-verified before rename"
+  )
+  assert.match(
+    plannerSection,
+    /destinationIsFresh\([\s\S]*fileContentHash\(destinationPath\) === sourceInfo\.hash/,
+    "native helper freshness should validate content hash instead of trusting size/mtime"
   )
   assert.match(
     plannerSection,
@@ -461,13 +471,13 @@ test("Windows sandbox execution plan prepares native helper access without host 
   )
   assert.match(
     executeWindowsSection,
-    /prepareNativeHelpersForPlan\(executionPlan, command, this\.workingDir, sandboxCacheRoot\)[\s\S]*prepareNativeHelperSpawnHook/,
+    /prepareNativeHelpersForPlan\(executionPlan, command, this\.workingDir\)[\s\S]*prepareNativeHelperSpawnHook\(executionPlan\)[\s\S]*prepareNativeHelperReadAccess\(executionPlan/,
     "Windows sandbox execution should prepare native helpers before spawning codex.exe"
   )
-  assert.match(
-    executeWindowsSection,
-    /buildWritableRootsOverride\(executionPlan\.writableRoots\)/,
-    "materialized helper paths should feed the same writable-root mechanism as other sandbox caches"
+  assert.doesNotMatch(
+    plannerSection,
+    /plan\.writableRoots\.push\([^)]*materialized\.destinationPath|plan\.writableRoots\.push\(hookDir\)|plan\.writableRoots\.push\(hookPath\)/,
+    "materialized helpers and preload hooks must not be granted through writable roots"
   )
   assert.doesNotMatch(
     executeRawSection,
@@ -476,10 +486,15 @@ test("Windows sandbox execution plan prepares native helper access without host 
   )
 })
 
-test("native helper ACL grants distinguish executable files from writable directories", () => {
+test("native helper ACL grants only read/execute access outside writable directories", () => {
   const unelevatedAclSection = sectionBetween(
     localSandboxSource,
     "private static async grantSandboxWriteAcl(",
+    "  private static async grantSandboxReadExecuteAcl("
+  )
+  const readExecuteAclSection = sectionBetween(
+    localSandboxSource,
+    "private static async grantSandboxReadExecuteAcl(",
     "  /** Remove the Everyone ACE"
   )
   const elevatedAclSection = sectionBetween(
@@ -497,6 +512,11 @@ test("native helper ACL grants distinguish executable files from writable direct
     "      // Pre-create app-owned persistent cache subdirectories from the main process",
     "      const aclGrantStart = Date.now()"
   )
+  const nativeHelperReadAccessSection = sectionBetween(
+    localSandboxSource,
+    "private static getNativeHelperReadAccessPaths(",
+    "  private static buildSerializedExecutionKey("
+  )
 
   assert.match(
     unelevatedAclSection,
@@ -504,14 +524,24 @@ test("native helper ACL grants distinguish executable files from writable direct
     "unelevated ACL grants should use inherited modify for directories and RX for helper files"
   )
   assert.match(
+    readExecuteAclSection,
+    /grantSuffix = isDirectory \? "\(OI\)\(CI\)\(RX\)" : "RX"/,
+    "native helper ACL grants should provide read/execute only, even for helper directories"
+  )
+  assert.match(
     elevatedAclSection,
     /fs\.stat\(dir\)[\s\S]*isDirectory\(\)[\s\S]*grantSuffix = isDirectory \? "\(OI\)\(CI\)\(M\)" : "RX"/,
     "elevated ACL grants should not apply directory inheritance flags to helper files"
   )
-  assert.match(
+  assert.doesNotMatch(
     executeWindowsAclSection,
-    /permanentAcl = \(await fs\.stat\(cachePath\)\)\.isDirectory\(\)/,
-    "file-level native helper ACL grants should not be marked permanent like cache directories"
+    /nativeHelperAccess/,
+    "native helper directories must not be mixed into writable cache ACL preparation"
+  )
+  assert.match(
+    nativeHelperReadAccessSection,
+    /getNativeHelperReadAccessPaths[\s\S]*prepareNativeHelperReadAccess[\s\S]*grantSandboxReadExecuteAcl/,
+    "native helper access should be prepared through the read/execute ACL path"
   )
   assert.match(
     elevatedPrepareSection,

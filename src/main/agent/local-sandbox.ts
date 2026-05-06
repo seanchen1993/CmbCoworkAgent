@@ -11,7 +11,7 @@
 
 import { spawn, execFile, type ChildProcess } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
-import { constants as fsConstants } from "node:fs"
+import { constants as fsConstants, createReadStream } from "node:fs"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { promisify } from "node:util"
@@ -443,6 +443,20 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     return LocalSandbox.buildSandboxCacheRootFromCanonical(env, canonicalWorkingDir)
   }
 
+  private static buildNativeHelperCacheBase(): string {
+    const localAppData = process.env.LOCALAPPDATA
+      || path.win32.join(homedir(), "AppData", "Local")
+    return path.win32.join(localAppData, "CmbCoworkAgent", "SandboxNativeHelpers")
+  }
+
+  private static getNativeHelperCacheDirs() {
+    const root = LocalSandbox.buildNativeHelperCacheBase()
+    return {
+      root,
+      nativeTools: path.win32.join(root, "native-tools")
+    }
+  }
+
   private static getSandboxToolCacheDirs(cacheRoot: string, sharedCacheRoot = cacheRoot) {
     const pythonUserBase = path.win32.join(cacheRoot, "python-userbase")
     const pythonSiteCustomize = path.win32.join(cacheRoot, "python-sitecustomize")
@@ -469,7 +483,6 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       cypressCache: path.win32.join(sharedCacheRoot, "cypress-cache"),
       electronCache: path.win32.join(sharedCacheRoot, "electron-cache"),
       electronBuilderCache: path.win32.join(sharedCacheRoot, "electron-builder-cache"),
-      nativeTools: path.win32.join(cacheRoot, "native-tools"),
       goPath: path.win32.join(cacheRoot, "go"),
       goModCache: path.win32.join(sharedCacheRoot, "go-mod-cache"),
       goBin: path.win32.join(cacheRoot, "go", "bin"),
@@ -610,7 +623,6 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       dirs.cypressCache,
       dirs.electronCache,
       dirs.electronBuilderCache,
-      dirs.nativeTools,
       dirs.goPath,
       dirs.goModCache,
       dirs.goBin,
@@ -728,15 +740,42 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     return /\.exe$/i.test(filePath)
   }
 
-  private static async fileSignature(filePath: string): Promise<string> {
+  private static async fileContentHash(filePath: string): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+      const hash = createHash("sha256")
+      const stream = createReadStream(filePath)
+      stream.on("data", (chunk) => {
+        hash.update(chunk)
+      })
+      stream.on("error", reject)
+      stream.on("end", () => {
+        resolve(hash.digest("hex"))
+      })
+    })
+  }
+
+  private static async fileContentSignature(filePath: string): Promise<{
+    size: number
+    hash: string
+    atime: Date
+    mtime: Date
+  }> {
     const stats = await fs.stat(filePath)
-    const modifiedMs = Math.max(0, Math.trunc(stats.mtimeMs))
-    return `${stats.size}-${modifiedMs.toString(16)}`
+    const hash = await LocalSandbox.fileContentHash(filePath)
+    return {
+      size: stats.size,
+      hash,
+      atime: stats.atime,
+      mtime: stats.mtime
+    }
+  }
+
+  private static nativeHelperSignature(sourceInfo: { size: number; hash: string }): string {
+    return `${sourceInfo.size}-${sourceInfo.hash.slice(0, 16)}`
   }
 
   private static materializedHelperDestination(
     sourcePath: string,
-    cacheRoot: string,
     label: string,
     signature: string
   ): string {
@@ -747,14 +786,16 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     const extension = parsed.ext || ".exe"
     const fileName = `${parsed.name}-${sourceHash}-${safeSignature}${extension}`
     return path.win32.join(
-      LocalSandbox.getSandboxToolCacheDirs(cacheRoot).nativeTools,
+      LocalSandbox.getNativeHelperCacheDirs().nativeTools,
       safeLabel,
       fileName
     )
   }
 
-  private static async destinationIsFresh(sourcePath: string, destinationPath: string): Promise<boolean> {
-    const sourceStats = await fs.stat(sourcePath)
+  private static async destinationIsFresh(
+    sourceInfo: { size: number; hash: string },
+    destinationPath: string
+  ): Promise<boolean> {
     let destinationStats
     try {
       destinationStats = await fs.stat(destinationPath)
@@ -762,34 +803,36 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return false
       throw err
     }
-    return destinationStats.size === sourceStats.size
-      && destinationStats.mtimeMs >= sourceStats.mtimeMs
+    if (destinationStats.size !== sourceInfo.size) return false
+    return await LocalSandbox.fileContentHash(destinationPath) === sourceInfo.hash
   }
 
   private static async materializeNativeHelper(
     sourcePath: string,
-    cacheRoot: string,
     label: string
   ): Promise<WindowsSandboxMaterializedHelper | null> {
     if (!LocalSandbox.isWindowsNativeExecutablePath(sourcePath)) return null
-    const signature = await LocalSandbox.fileSignature(sourcePath)
-    const destinationPath = LocalSandbox.materializedHelperDestination(sourcePath, cacheRoot, label, signature)
-    if (!(await LocalSandbox.destinationIsFresh(sourcePath, destinationPath))) {
+    const sourceInfo = await LocalSandbox.fileContentSignature(sourcePath)
+    const signature = LocalSandbox.nativeHelperSignature(sourceInfo)
+    const destinationPath = LocalSandbox.materializedHelperDestination(sourcePath, label, signature)
+    if (!(await LocalSandbox.destinationIsFresh(sourceInfo, destinationPath))) {
       const destinationDir = path.win32.dirname(destinationPath)
       await fs.mkdir(destinationDir, { recursive: true })
       const tempPath = path.win32.join(destinationDir, `.tmp-${process.pid}-${Date.now()}-${randomUUID()}${path.win32.extname(destinationPath)}`)
       try {
         await fs.copyFile(sourcePath, tempPath)
+        if (!(await LocalSandbox.destinationIsFresh(sourceInfo, tempPath))) {
+          throw new Error(`Native helper copy verification failed for ${sourcePath}`)
+        }
         await fs.rm(destinationPath, { force: true })
         try {
           await fs.rename(tempPath, destinationPath)
         } catch (err) {
-          if (!(await LocalSandbox.destinationIsFresh(sourcePath, destinationPath))) {
+          if (!(await LocalSandbox.destinationIsFresh(sourceInfo, destinationPath))) {
             throw err
           }
         }
-        const sourceStats = await fs.stat(sourcePath)
-        await fs.utimes(destinationPath, sourceStats.atime, sourceStats.mtime).catch(() => undefined)
+        await fs.utimes(destinationPath, sourceInfo.atime, sourceInfo.mtime).catch(() => undefined)
       } finally {
         await fs.rm(tempPath, { force: true }).catch(() => undefined)
       }
@@ -879,19 +922,16 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
   private static async prepareNativeHelpersForPlan(
     plan: WindowsSandboxExecutionPlan,
     command: string,
-    workingDir: string,
-    cacheRoot: string
+    workingDir: string
   ): Promise<void> {
     if (plan.mode === "none" || plan.mode === "readonly") return
     if (!LocalSandbox.shouldPrepareJavaScriptNativeHelpers(command)) return
 
     const esbuildHelpers = await LocalSandbox.findWorkspaceEsbuildBinaryRoots(workingDir)
     for (const helperPath of esbuildHelpers) {
-      const materialized = await LocalSandbox.materializeNativeHelper(helperPath, cacheRoot, "esbuild")
+      const materialized = await LocalSandbox.materializeNativeHelper(helperPath, "esbuild")
       if (materialized) {
         plan.materializedHelpers.push(materialized)
-        plan.writableRoots.push(path.win32.dirname(materialized.destinationPath))
-        plan.writableRoots.push(materialized.destinationPath)
         plan.nativeHelperAccess.push({
           path: materialized.destinationPath,
           reason: "esbuild spawns a native Windows helper that can fail under a WRITE_RESTRICTED token"
@@ -901,17 +941,14 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
   }
 
   private static async prepareNativeHelperSpawnHook(
-    plan: WindowsSandboxExecutionPlan,
-    cacheRoot: string
+    plan: WindowsSandboxExecutionPlan
   ): Promise<void> {
     if (plan.materializedHelpers.length === 0) return
-    const nativeToolsDir = LocalSandbox.getSandboxToolCacheDirs(cacheRoot).nativeTools
+    const nativeToolsDir = LocalSandbox.getNativeHelperCacheDirs().nativeTools
     const hookDir = path.win32.join(nativeToolsDir, "node-hook")
     const hookPath = path.win32.join(hookDir, "native-helper-spawn-hook.cjs")
     await fs.mkdir(hookDir, { recursive: true })
     await fs.writeFile(hookPath, NATIVE_HELPER_SPAWN_HOOK, "utf8")
-    plan.writableRoots.push(hookDir)
-    plan.writableRoots.push(hookPath)
     plan.nativeHelperAccess.push({
       path: hookPath,
       reason: "Node preload hook redirects known native helper spawns to sandbox-owned copies"
@@ -935,6 +972,32 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     plan.env.push(
       ["CMB_SANDBOX_NATIVE_HELPER_MAP", JSON.stringify(helperMap)],
       ["NODE_OPTIONS", `--require=${nodeOptionsQuote(hookPath)}`]
+    )
+  }
+
+  private static getNativeHelperReadAccessPaths(plan: WindowsSandboxExecutionPlan): string[] {
+    if (plan.nativeHelperAccess.length === 0) return []
+    const helperDirs = LocalSandbox.getNativeHelperCacheDirs()
+    return Array.from(new Set([
+      helperDirs.root,
+      helperDirs.nativeTools,
+      ...plan.nativeHelperAccess.flatMap((helper) => [
+        path.win32.dirname(helper.path),
+        helper.path
+      ])
+    ].map((entry) => path.win32.normalize(entry))))
+  }
+
+  private static async prepareNativeHelperReadAccess(
+    plan: WindowsSandboxExecutionPlan,
+    abortSignal?: AbortSignal
+  ): Promise<void> {
+    const accessPaths = LocalSandbox.getNativeHelperReadAccessPaths(plan)
+    if (accessPaths.length === 0) return
+    await mapLimit(
+      accessPaths,
+      LocalSandbox.ACL_OPERATION_CONCURRENCY,
+      (target) => LocalSandbox.grantSandboxReadExecuteAcl(target, abortSignal)
     )
   }
 
@@ -3013,6 +3076,54 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     })
   }
 
+  private static async grantSandboxReadExecuteAcl(target: string, abortSignal?: AbortSignal): Promise<void> {
+    LocalSandbox.throwIfAborted(abortSignal)
+    let isDirectory = true
+    try {
+      isDirectory = (await fs.stat(target)).isDirectory()
+    } catch {
+      isDirectory = true
+    }
+    return new Promise<void>((resolve, reject) => {
+      const grantSuffix = isDirectory ? "(OI)(CI)(RX)" : "RX"
+      const args = [
+        target,
+        "/grant",
+        `${LocalSandbox.EVERYONE_SID}:${grantSuffix}`,
+        "/Q"
+      ]
+      const proc = spawn("icacls", args, {
+        stdio: "ignore",
+        windowsHide: true
+      })
+      const onAbort = () => {
+        clearTimeout(timeoutId)
+        try { proc.kill() } catch { /* already exited */ }
+        reject(LocalSandbox.createAbortError())
+      }
+      const timeoutId = setTimeout(() => {
+        console.warn(`[LocalSandbox] icacls RX grant timed out after ${LocalSandbox.ICACLS_TIMEOUT_MS}ms on ${target}, killing`)
+        try { proc.kill() } catch { /* already exited */ }
+        resolve()
+      }, LocalSandbox.ICACLS_TIMEOUT_MS)
+      abortSignal?.addEventListener("abort", onAbort, { once: true })
+      proc.on("exit", (code) => {
+        clearTimeout(timeoutId)
+        abortSignal?.removeEventListener("abort", onAbort)
+        if (code !== 0) {
+          console.warn(`[LocalSandbox] icacls RX grant exited ${code} on ${target}`)
+        }
+        resolve()
+      })
+      proc.on("error", (err) => {
+        clearTimeout(timeoutId)
+        abortSignal?.removeEventListener("abort", onAbort)
+        console.warn(`[LocalSandbox] icacls RX grant error on ${target}:`, err.message)
+        resolve()
+      })
+    })
+  }
+
   /** Remove the Everyone ACE added by grantSandboxWriteAcl. Only actually calls
    *  icacls when the ref count drops to 0 (no other runs using this dir). */
   private static revokeSandboxWriteAcl(dir: string): Promise<void> {
@@ -3783,8 +3894,9 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     const executionPlan = LocalSandbox.buildWindowsSandboxExecutionPlan(command, effectiveMode, sandboxCacheRoots)
     try {
       await LocalSandbox.raceWithAbort(
-        LocalSandbox.prepareNativeHelpersForPlan(executionPlan, command, this.workingDir, sandboxCacheRoot)
-          .then(() => LocalSandbox.prepareNativeHelperSpawnHook(executionPlan, sandboxCacheRoot)),
+        LocalSandbox.prepareNativeHelpersForPlan(executionPlan, command, this.workingDir)
+          .then(() => LocalSandbox.prepareNativeHelperSpawnHook(executionPlan))
+          .then(() => LocalSandbox.prepareNativeHelperReadAccess(executionPlan, effectiveAbortSignal)),
         effectiveAbortSignal
       )
     } catch (err) {
@@ -3965,7 +4077,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       }
       // Pre-create app-owned persistent cache subdirectories from the main process
       // (full permissions) so package managers can write caches/user installs there.
-      for (const cachePath of Array.from(new Set([...sandboxCacheDirs, ...executionPlan.writableRoots, ...executionPlan.nativeHelperAccess.map((helper) => path.win32.dirname(helper.path))]))) {
+      for (const cachePath of Array.from(new Set([...sandboxCacheDirs, ...executionPlan.writableRoots]))) {
         const cacheKey = normalizeDirKey(cachePath)
         let permanentAcl = true
         try {
