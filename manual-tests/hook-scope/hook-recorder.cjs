@@ -31,11 +31,13 @@ function sanitizeName(value) {
 }
 
 function pickWorkspace(input) {
+  const fixtureWorkspace = "C:/ai/CmbCoworkAgent"
   return (
     input.workspace_path ||
-    input.cwd ||
     process.env.WORKSPACE_PATH ||
     process.env.CLAUDE_PROJECT_DIR ||
+    (fs.existsSync(fixtureWorkspace) ? fixtureWorkspace : "") ||
+    input.cwd ||
     process.cwd()
   )
 }

@@ -172,7 +172,12 @@ export function resolveEnabledHooksForRun(
       : getEnabledSkillHookMetadata().filter((hook) => {
           const hookSkillPaths = new Set<string>()
           addPathAliases(hookSkillPaths, hook.skillPath)
-          if (pathSetIntersects(hookSkillPaths, allowedSkillPaths)) return true
+          const pathMatches = pathSetIntersects(hookSkillPaths, allowedSkillPaths)
+          const hookPluginId = normalizePluginId(hook.pluginId)
+          if (hookPluginId) {
+            return allowedPluginIds.has(hookPluginId) && pathMatches
+          }
+          if (pathMatches) return true
           return allowedSkillNames.has(normalizeSkillName(hook.skillName))
         })
 

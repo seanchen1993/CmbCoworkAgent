@@ -267,8 +267,12 @@ async function main(): Promise<void> {
   await closeGlobalMcpCapabilityService()
 }
 
-main().catch(async (error) => {
-  await closeGlobalMcpCapabilityService().catch(() => undefined)
-  console.error(error)
-  process.exit(1)
-})
+main()
+  .then(() => {
+    process.exit(0)
+  })
+  .catch(async (error) => {
+    await closeGlobalMcpCapabilityService().catch(() => undefined)
+    console.error(error)
+    process.exit(1)
+  })

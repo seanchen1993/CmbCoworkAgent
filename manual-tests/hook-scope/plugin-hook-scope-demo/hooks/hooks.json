@@ -4,7 +4,7 @@
     "event": "PreToolUse",
     "matcher": "*",
     "type": "command",
-    "command": "node manual-tests/hook-scope/hook-recorder.cjs plugin-pre-any-tool",
+    "command": "node C:/Users/87624/.cmbcoworkagent/plugins/Hook-Scope-Demo/hook-recorder.cjs plugin-pre-any-tool",
     "timeout": 8000,
     "enabled": true
   },
@@ -13,7 +13,7 @@
     "event": "PostToolUse",
     "matcher": "*",
     "type": "command",
-    "command": "node manual-tests/hook-scope/hook-recorder.cjs plugin-post-any-tool",
+    "command": "node C:/Users/87624/.cmbcoworkagent/plugins/Hook-Scope-Demo/hook-recorder.cjs plugin-post-any-tool",
     "timeout": 8000,
     "enabled": true
   },
@@ -22,7 +22,7 @@
     "event": "PreSkillUse",
     "matcher": "scope-plugin-skill",
     "type": "command",
-    "command": "node manual-tests/hook-scope/hook-recorder.cjs plugin-pre-skill",
+    "command": "node C:/Users/87624/.cmbcoworkagent/plugins/Hook-Scope-Demo/hook-recorder.cjs plugin-pre-skill",
     "timeout": 8000,
     "enabled": true
   },
@@ -31,7 +31,7 @@
     "event": "PostSkillUse",
     "matcher": "scope-plugin-skill",
     "type": "command",
-    "command": "node manual-tests/hook-scope/hook-recorder.cjs plugin-post-skill",
+    "command": "node C:/Users/87624/.cmbcoworkagent/plugins/Hook-Scope-Demo/hook-recorder.cjs plugin-post-skill",
     "timeout": 8000,
     "enabled": true
   }

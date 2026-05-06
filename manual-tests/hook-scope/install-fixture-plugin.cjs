@@ -30,6 +30,7 @@ function formatAuthor(author) {
 fs.mkdirSync(pluginsDir, { recursive: true })
 fs.rmSync(destDir, { recursive: true, force: true })
 fs.cpSync(sourceDir, destDir, { recursive: true })
+fs.copyFileSync(path.join(__dirname, "hook-recorder.cjs"), path.join(destDir, "hook-recorder.cjs"))
 
 const plugins = readPlugins()
 const author = formatAuthor(manifest.author)

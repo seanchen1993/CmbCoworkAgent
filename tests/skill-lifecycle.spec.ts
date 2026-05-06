@@ -470,6 +470,66 @@ async function testNestedSkillActivatesOnlyMatchedScopedHooks(): Promise<void> {
   })
 }
 
+async function testPluginSkillHookDoesNotMatchStandaloneSkillByName(): Promise<void> {
+  await withTempDir("skill-plugin-name-collision", async (base) => {
+    const localSource = join(base, "skills")
+    const pluginSource = join(base, "plugin", "skills")
+    const localSkillPath = await writeSkillDoc(localSource, "shared/SKILL.md", {
+      raw: "---\nname: shared-name\n---\nlocal\n"
+    })
+    const pluginSkillRoot = join(pluginSource, "shared")
+    await writeSkillDoc(pluginSource, "shared/SKILL.md", {
+      raw: "---\nname: shared-name\n---\nplugin\n"
+    })
+
+    const localMarker = join(base, "local-hit.txt")
+    const pluginMarker = join(base, "plugin-hit.txt")
+    const hookScope = createHookScope()
+    const localHook = makeHook({
+      event: "PreToolUse",
+      matcher: "write_file",
+      command: nodeCommand(`require('fs').writeFileSync(${JSON.stringify(localMarker)}, 'local')`)
+    })
+    const pluginHook: HookConfig = {
+      ...makeHook({
+        event: "PreToolUse",
+        matcher: "write_file",
+        command: nodeCommand(`require('fs').writeFileSync(${JSON.stringify(pluginMarker)}, 'plugin')`)
+      }),
+      skillName: "shared-name",
+      skillPath: pluginSkillRoot,
+      skillRoot: pluginSkillRoot,
+      hookPath: join(pluginSkillRoot, "hooks.json"),
+      pluginId: "plugin-a",
+      pluginName: "Plugin A"
+    } as HookConfig
+    const sandbox = new LocalSandbox({
+      rootDir: base,
+      skillLifecycleRegistry: new SkillLifecycleRegistry([localSource]),
+      hookScope,
+      hookResolver: () => {
+        const hooks: HookConfig[] = []
+        if (hookScope.activeSkillNames.has("shared-name")) hooks.push(localHook)
+        const pluginPathKey =
+          process.platform === "win32"
+            ? pluginSkillRoot.replace(/\\/g, "/").toLowerCase()
+            : pluginSkillRoot.replace(/\\/g, "/")
+        if (hookScope.activeSkillPaths.has(pluginPathKey)) hooks.push(pluginHook)
+        return hooks
+      }
+    })
+
+    await sandbox.read(localSkillPath)
+    await sandbox.write(join(base, "written.txt"), "ok")
+
+    assert(existsSync(localMarker), "standalone same-name skill should activate local hook")
+    assert(
+      !existsSync(pluginMarker),
+      "plugin-owned same-name skill hook should not activate from standalone skill name"
+    )
+  })
+}
+
 async function testSkillReadContentIsNotPolluted(): Promise<void> {
   await withTempDir("skill-read-clean", async (base) => {
     const source = join(base, "skills")
@@ -694,6 +754,8 @@ async function run(): Promise<void> {
   console.log("PASS A13 plugin skill activates scoped hooks")
   await testNestedSkillActivatesOnlyMatchedScopedHooks()
   console.log("PASS A14 nested skill activates only the matched scoped hook")
+  await testPluginSkillHookDoesNotMatchStandaloneSkillByName()
+  console.log("PASS A15 plugin skill hook does not match standalone skill by name")
   await testSkillReadContentIsNotPolluted()
   console.log("PASS D1 SKILL.md content not polluted")
   await testPreSkillBlockStopsRead()
