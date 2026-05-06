@@ -322,7 +322,7 @@ test("elevated command routing avoids unconditional Python lookup waits", () => 
   const executeWindowsSection = sectionBetween(
     localSandboxSource,
     "private async executeInWindowsSandbox(",
-    "    const isElevatedSandbox = effectiveMode === \"elevated\""
+    "    const isReadonly = effectiveMode === \"readonly\""
   )
   const sandboxEnvSection = sectionBetween(
     localSandboxSource,
@@ -397,12 +397,12 @@ test("git metadata updates run with host token instead of Windows sandbox", () =
   )
   assert.match(
     rawExecutionSection,
-    /shouldRunGitMetadataOutsideWindowsSandbox\(command\)[\s\S]*executeRawUnserialized\(command, "none"/,
-    "git metadata commands should run with the host token before entering Codex Windows sandbox"
+    /buildWindowsSandboxExecutionPlan\(command, effectiveSandboxMode, \[\]\)[\s\S]*hostBroker\?\.kind === "git-metadata"[\s\S]*executeRawUnserialized\(command, "none"/,
+    "git metadata commands should run through the Windows execution plan before using the host token"
   )
   assert.match(
     rawExecutionSection,
-    /Codex workspace-write policies intentionally protect \.git/,
+    /isolated in the Windows execution plan until a git_workflow broker exists/,
     "the bypass should document the Codex .git protection policy it works around"
   )
   assert.match(
@@ -414,6 +414,119 @@ test("git metadata updates run with host token instead of Windows sandbox", () =
     sandboxResultSection,
     /shouldFallbackToUnelevatedForNetworkAuth/,
     "the existing elevated-to-unelevated fallback should remain available for non-git network auth failures"
+  )
+})
+
+test("Windows sandbox execution plan prepares native helper access without host bypassing npm scripts", () => {
+  const plannerSection = sectionBetween(
+    localSandboxSource,
+    "private static buildWindowsSandboxExecutionPlan(",
+    "  private static buildSerializedExecutionKey("
+  )
+  const executeRawSection = sectionBetween(
+    localSandboxSource,
+    "private async executeRawUnserialized(",
+    "    const isWindows = process.platform === \"win32\""
+  )
+  const executeWindowsSection = sectionBetween(
+    localSandboxSource,
+    "private async executeInWindowsSandbox(",
+    "    const isReadonly = effectiveMode === \"readonly\""
+  )
+
+  assert.match(
+    plannerSection,
+    /createBaseWindowsSandboxExecutionPlan[\s\S]*hostBroker[\s\S]*git-metadata/,
+    "git host-broker decisions should live in the Windows sandbox execution planner"
+  )
+  assert.match(
+    localSandboxSource,
+    /nativeTools: path\.win32\.join\(cacheRoot, "native-tools"\)/,
+    "sandbox cache layout should include an app-owned native helper area"
+  )
+  assert.match(
+    plannerSection,
+    /materializeNativeHelper[\s\S]*fs\.copyFile\(sourcePath, tempPath\)[\s\S]*fs\.rename\(tempPath, destinationPath\)/,
+    "native helpers should be copied via a temp file inside the sandbox cache before rename"
+  )
+  assert.match(
+    plannerSection,
+    /CMB_SANDBOX_NATIVE_HELPER_MAP[\s\S]*"NODE_OPTIONS", `--require=\$\{nodeOptionsQuote\(hookPath\)\}`/,
+    "Node commands should preload the native-helper redirect hook only when helpers were materialized"
+  )
+  assert.match(
+    plannerSection,
+    /basenameCounts[\s\S]*basenameCounts\.get\(basename\.toLowerCase\(\)\) === 1/,
+    "basename helper redirects should only be used when no duplicate native-helper basename exists"
+  )
+  assert.match(
+    executeWindowsSection,
+    /prepareNativeHelpersForPlan\(executionPlan, command, this\.workingDir, sandboxCacheRoot\)[\s\S]*prepareNativeHelperSpawnHook/,
+    "Windows sandbox execution should prepare native helpers before spawning codex.exe"
+  )
+  assert.match(
+    executeWindowsSection,
+    /buildWritableRootsOverride\(executionPlan\.writableRoots\)/,
+    "materialized helper paths should feed the same writable-root mechanism as other sandbox caches"
+  )
+  assert.doesNotMatch(
+    executeRawSection,
+    /npm[\s\S]*executeRawUnserialized\(command, "none"/,
+    "npm/build scripts must not be routed outside the sandbox just because they may spawn native helpers"
+  )
+})
+
+test("native helper ACL grants distinguish executable files from writable directories", () => {
+  const unelevatedAclSection = sectionBetween(
+    localSandboxSource,
+    "private static async grantSandboxWriteAcl(",
+    "  /** Remove the Everyone ACE"
+  )
+  const elevatedAclSection = sectionBetween(
+    localSandboxSource,
+    "private static async grantElevatedWorkspaceAcl(",
+    "  private static getElevatedPrepareRoots("
+  )
+  const elevatedPrepareSection = sectionBetween(
+    localSandboxSource,
+    "  private static getElevatedPrepareRoots(",
+    "  private static async ensureElevatedWorkspaceSetup("
+  )
+  const executeWindowsAclSection = sectionBetween(
+    localSandboxSource,
+    "      // Pre-create app-owned persistent cache subdirectories from the main process",
+    "      const aclGrantStart = Date.now()"
+  )
+
+  assert.match(
+    unelevatedAclSection,
+    /fs\.stat\(dir\)[\s\S]*isDirectory\(\)[\s\S]*EVERYONE_SID\}:\(OI\)\(CI\)\(M\)[\s\S]*EVERYONE_SID\}:RX/,
+    "unelevated ACL grants should use inherited modify for directories and RX for helper files"
+  )
+  assert.match(
+    elevatedAclSection,
+    /fs\.stat\(dir\)[\s\S]*isDirectory\(\)[\s\S]*grantSuffix = isDirectory \? "\(OI\)\(CI\)\(M\)" : "RX"/,
+    "elevated ACL grants should not apply directory inheritance flags to helper files"
+  )
+  assert.match(
+    executeWindowsAclSection,
+    /permanentAcl = \(await fs\.stat\(cachePath\)\)\.isDirectory\(\)/,
+    "file-level native helper ACL grants should not be marked permanent like cache directories"
+  )
+  assert.match(
+    elevatedPrepareSection,
+    /isCacheableElevatedPreparedRoot[\s\S]*fs\.stat\(root\)[\s\S]*isDirectory\(\)/,
+    "only directory roots should be eligible for persisted elevated prepared-root state"
+  )
+  assert.match(
+    elevatedPrepareSection,
+    /if \(cachePreparedRoot\) \{[\s\S]*markElevatedRootsPrepared\(\[root\]\)/,
+    "file-level elevated helper grants should not be marked as permanently prepared"
+  )
+  assert.match(
+    elevatedPrepareSection,
+    /areCacheableElevatedRootsPrepared/,
+    "elevated prewarm should verify persisted state only for cacheable directory roots"
   )
 })
 
@@ -430,7 +543,7 @@ test("sandbox execute helpers do not create visible console windows", () => {
   )
   const aclSection = sectionBetween(
     localSandboxSource,
-    "private static grantSandboxWriteAcl(",
+    "private static async grantSandboxWriteAcl(",
     "  /** Sandbox user names used by elevated mode. */"
   )
   const killTreeSection = sectionBetween(
