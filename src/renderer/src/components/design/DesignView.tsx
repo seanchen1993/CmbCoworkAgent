@@ -1,5 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect } from "react"
 import { v4 as uuid } from "uuid"
+import type { FileAttachment } from "@/types"
 
 // ─────────────────────────────────────────────────────────
 // Types
@@ -126,6 +127,8 @@ interface TabState {
   codeContext: Array<{ filename: string; content: string }> | null
   // Design reference link attached by user
   designLink: string | null
+  // Generic file attachments — reuses ChatContainer's FileAttachment via window.api.file
+  attachedFiles: FileAttachment[] | null
 }
 
 function makeTabState(): TabState {
@@ -156,6 +159,7 @@ function makeTabState(): TabState {
     selectedSkill: null,
     codeContext: null,
     designLink: null,
+    attachedFiles: null,
   }
 }
 
@@ -209,6 +213,9 @@ ${stubs}
 }
 
 let tabCounter = 1
+
+// File attachment limits — mirrors ChatContainer
+const DESIGN_MAX_ATTACHMENTS_DISPLAY = 3
 
 const VARIATION_COLORS: Record<string, string> = {
   a: "#3b82f6",
@@ -583,6 +590,13 @@ export function DesignView(): React.JSX.Element {
   const [codeModalOpen, setCodeModalOpen] = useState(false)
   const [linkModalOpen, setLinkModalOpen] = useState(false)
   const [linkModalText, setLinkModalText] = useState("")
+  // Toast notifications
+  const [toast, setToast] = useState<{ msg: string; id: number } | null>(null)
+  const showToast = useCallback((msg: string) => {
+    const id = Date.now()
+    setToast({ msg, id })
+    setTimeout(() => setToast((t) => t?.id === id ? null : t), 3000)
+  }, [])
 
   // Per-tab session tracking: tabId → { cleanup, sessionId }
   // Stored in a ref so it never triggers re-renders and isn't stale across tabs
@@ -593,7 +607,6 @@ export function DesignView(): React.JSX.Element {
   const canvasContainerRef = useRef<HTMLDivElement>(null)
   const activeTabIdRef    = useRef(activeTabId)
   const fileInputRef      = useRef<HTMLInputElement>(null)   // images only (screenshot)
-  const attachFileInputRef = useRef<HTMLInputElement>(null)  // any file (toolbar 📎)
 
   const ts = tabStates[activeTabId] ?? makeTabState()
 
@@ -991,56 +1004,64 @@ export function DesignView(): React.JSX.Element {
     e.target.value = ""
   }, [activeTabId, updateTs])
 
-  // ── Handle any-file attachment from toolbar 📎 ───────────
-  // Images → screenshot flow; everything else → codeContext
-  const handleAttachFile = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files
-    if (!files || files.length === 0) return
-    e.target.value = ""
+  // ── File attachment constants (same as ChatContainer) ─────
+  const DESIGN_MAX_ATTACHMENTS = 3
+  const DESIGN_MAX_TOTAL_CHARS = 24_000
 
-    const imageFiles: File[] = []
-    const codeFiles: File[]  = []
-    Array.from(files).forEach((f) => {
-      if (f.type.startsWith("image/")) imageFiles.push(f)
-      else codeFiles.push(f)
-    })
+  // ── Open OS file dialog via Electron IPC (same flow as ChatContainer) ──
+  const [attachmentLoading, setAttachmentLoading] = useState(false)
 
-    // Handle image → screenshot preview (use first image only)
-    if (imageFiles.length > 0) {
-      const img = imageFiles[0]
-      const reader = new FileReader()
-      reader.onload = (ev) => {
-        const dataUrl = ev.target?.result as string
-        const comma   = dataUrl.indexOf(",")
-        const base64  = dataUrl.slice(comma + 1)
-        const mimeType = dataUrl.slice(0, comma).match(/data:([^;]+)/)?.[1] ?? "image/png"
-        updateTs(activeTabId, { attachedImage: { base64, mimeType, previewUrl: dataUrl } })
+  const handleAttachClick = useCallback(async () => {
+    const ts = tabStates[activeTabId]
+    const current = ts?.attachedFiles ?? []
+    if (current.length >= DESIGN_MAX_ATTACHMENTS) {
+      showToast(`最多只能添加 ${DESIGN_MAX_ATTACHMENTS} 个附件`)
+      return
+    }
+    const result = await window.api.file.select()
+    if (result.canceled || result.filePaths.length === 0) return
+
+    setAttachmentLoading(true)
+    try {
+      const snapshot = tabStates[activeTabId]?.attachedFiles ?? []
+      let currentChars = snapshot.reduce((s, a) => s + a.content.length, 0)
+      const existingPaths = new Set(snapshot.map((a) => a.filePath))
+
+      for (const filePath of result.filePaths) {
+        if (existingPaths.has(filePath)) {
+          showToast(`"${filePath.replace(/^.*[/\\]/, "")}" 已添加`)
+          continue
+        }
+        const snap2 = tabStates[activeTabId]?.attachedFiles ?? []
+        if (snap2.length >= DESIGN_MAX_ATTACHMENTS) {
+          showToast(`最多只能添加 ${DESIGN_MAX_ATTACHMENTS} 个附件`)
+          break
+        }
+        const remaining = DESIGN_MAX_TOTAL_CHARS - currentChars
+        if (remaining <= 0) {
+          showToast(`附件总内容已达上限（${DESIGN_MAX_TOTAL_CHARS.toLocaleString()} 字符）`)
+          break
+        }
+        const res = await window.api.file.parse(filePath, remaining)
+        if (res.success && res.attachment) {
+          if (!res.attachment.content.trim()) {
+            showToast(`"${res.attachment.filename}" 内容为空`)
+            continue
+          }
+          updateTs(activeTabId, (prev) => ({
+            attachedFiles: [...(prev.attachedFiles ?? []), res.attachment!],
+          }))
+          existingPaths.add(res.attachment.filePath)
+          currentChars += res.attachment.content.length
+          showToast(`已添加：${res.attachment.filename}`)
+        } else {
+          showToast(res.error ?? "文件解析失败")
+        }
       }
-      reader.readAsDataURL(img)
+    } finally {
+      setAttachmentLoading(false)
     }
-
-    // Handle code / text files → merge into codeContext
-    if (codeFiles.length > 0) {
-      Promise.all(
-        codeFiles.map((f) => new Promise<{ filename: string; content: string }>((res) => {
-          const r = new FileReader()
-          r.onload = (ev) => res({ filename: f.name, content: ev.target?.result as string ?? "" })
-          r.readAsText(f)
-        }))
-      ).then((newFiles) => {
-        updateTs(activeTabId, (prev) => {
-          const existing = prev.codeContext ?? []
-          const merged   = [...existing]
-          newFiles.forEach((nf) => {
-            const idx = merged.findIndex((x) => x.filename === nf.filename)
-            if (idx >= 0) merged[idx] = nf
-            else merged.push(nf)
-          })
-          return { codeContext: merged }
-        })
-      })
-    }
-  }, [activeTabId, updateTs])
+  }, [activeTabId, tabStates, updateTs, showToast])
 
   // ── Build comment prompt helper ───────────────────────────
   const buildCommentPrompt = useCallback((
@@ -1205,8 +1226,9 @@ ${htmlSnippet}`
     const attachedImage = tabStates[activeTabId]?.attachedImage ?? null
     const selectedModelId = tabStates[activeTabId]?.selectedModelId ?? undefined
     const selectedSkill = tabStates[activeTabId]?.selectedSkill ?? null
-    const codeContext   = tabStates[activeTabId]?.codeContext ?? null
-    const designLink    = tabStates[activeTabId]?.designLink ?? null
+    const codeContext    = tabStates[activeTabId]?.codeContext ?? null
+    const designLink     = tabStates[activeTabId]?.designLink ?? null
+    const attachedFiles  = tabStates[activeTabId]?.attachedFiles ?? null
     if (!prompt && !attachedImage) return
     const state = tabStates[activeTabId]?.generationState ?? "idle"
     if (state === "asking" || state === "generating") return
@@ -1235,7 +1257,13 @@ ${htmlSnippet}`
     const linkSuffix = designLink
       ? `\n\n---\n[Design reference URL: ${designLink}]\nPlease use this as a visual/layout reference for the design.`
       : ""
-    const contextSuffix = skillSuffix + codeSuffix + linkSuffix
+    const filesSuffix = attachedFiles && attachedFiles.length > 0
+      ? "\n\n---\n[Attached files — " + attachedFiles.length + " file(s)]\n" +
+        attachedFiles.map((f) =>
+          `### ${f.filename}${f.truncated ? " (truncated)" : ""}\n${f.content}`
+        ).join("\n\n")
+      : ""
+    const contextSuffix = skillSuffix + codeSuffix + linkSuffix + filesSuffix
 
     // If a screenshot is attached — skip questions, go straight to image-based generation
     if (attachedImage) {
@@ -1416,6 +1444,20 @@ ${htmlContext}`
         onClose={() => setLinkModalOpen(false)}
       />
 
+      {/* Toast notification */}
+      {toast && (
+        <div style={{
+          position: "fixed", bottom: 120, left: "50%", transform: "translateX(-50%)",
+          background: "rgba(30,30,30,0.92)", color: "#fff", fontSize: 13, fontWeight: 500,
+          padding: "9px 18px", borderRadius: 20, zIndex: 99999,
+          pointerEvents: "none", whiteSpace: "nowrap",
+          boxShadow: "0 4px 20px rgba(0,0,0,0.3)",
+          border: "1px solid rgba(255,255,255,0.08)",
+        }}>
+          {toast.msg}
+        </div>
+      )}
+
       {/* Title Bar */}
       <div style={S.titleBar}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -1475,14 +1517,7 @@ ${htmlContext}`
             onChange={handleFileSelect}
             style={{ display: "none" }}
           />
-          {/* Hidden file input — any file (triggered from toolbar 📎) */}
-          <input
-            ref={attachFileInputRef}
-            type="file"
-            multiple
-            onChange={handleAttachFile}
-            style={{ display: "none" }}
-          />
+          {/* Note: generic file attachments now use window.api.file.select() (same as ChatContainer) */}
 
           {/* Bottom Input */}
           <div style={{ ...S.inputArea, position: "relative" }}>
@@ -1556,8 +1591,8 @@ ${htmlContext}`
                   <span style={{ fontSize: 12, color: "#8a8a8a" }}>截图已附加</span>
                 </div>
               )}
-              {/* Context pills row — skill / code / design-link */}
-              {(ts.selectedSkill || ts.codeContext || ts.designLink) && (
+              {/* Context pills row — skill / code / design-link / attached files */}
+              {(ts.selectedSkill || ts.codeContext || ts.designLink || (ts.attachedFiles && ts.attachedFiles.length > 0)) && (
                 <div style={{ padding: "8px 12px 0", display: "flex", flexWrap: "wrap", gap: 6 }}>
                   {ts.selectedSkill && (
                     <ContextPill
@@ -1585,6 +1620,24 @@ ${htmlContext}`
                       onClick={() => { setLinkModalText(ts.designLink!); setLinkModalOpen(true) }}
                     />
                   )}
+                  {ts.attachedFiles && ts.attachedFiles.map((f, idx) => (
+                    <ContextPill
+                      key={f.filePath}
+                      icon="📄"
+                      label={(f.filename.length > 28 ? f.filename.slice(0, 25) + "…" + f.filename.slice(f.filename.lastIndexOf(".")) : f.filename) + (f.truncated ? " ⚠️" : "")}
+                      badge={`${f.content.length.toLocaleString()} 字符`}
+                      color={{ bg: "#f5f5ff", border: "#d0d0ef", text: "#3a3a6a", dot: "#9090c0" }}
+                      onRemove={() => updateTs(activeTabId, (prev) => {
+                        const remaining = (prev.attachedFiles ?? []).filter((_, i) => i !== idx)
+                        return { attachedFiles: remaining.length > 0 ? remaining : null }
+                      })}
+                    />
+                  ))}
+                  {ts.attachedFiles && ts.attachedFiles.length > 0 && (
+                    <span style={{ fontSize: 11, color: "#aaa", alignSelf: "center" }}>
+                      {ts.attachedFiles.length}/{DESIGN_MAX_ATTACHMENTS_DISPLAY} 个文件
+                    </span>
+                  )}
                 </div>
               )}
               <textarea
@@ -1598,7 +1651,10 @@ ${htmlContext}`
               />
               <div style={S.inputToolbar}>
                 <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-                  <ToolbarIcon title="上传文件（图片→截图，代码文件→关联代码）" onClick={() => attachFileInputRef.current?.click()}>📎</ToolbarIcon>
+                  <ToolbarIcon
+                    title="添加文件 (txt, md, csv, docx, xlsx)"
+                    onClick={handleAttachClick}
+                  >{attachmentLoading ? "⏳" : "📎"}</ToolbarIcon>
                   {/* Model selector */}
                   {availableModels.length > 0 && (
                     <ModelSelector
