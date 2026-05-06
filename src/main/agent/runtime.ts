@@ -1263,8 +1263,7 @@ ${subagentShellGuidance}
 - edit_file: edit a file in the filesystem
 - glob: find files matching a pattern (e.g., "**/*.py")
 - grep: search for literal text within files (NOT regex). Do NOT use "|", ".*" or other regex syntax — call grep once per term instead.
-- Browser strategy: for browser tasks, first follow any matching enabled skill; only if no relevant skill is available, use browser_playwright.
-- browser_playwright: built-in browser automation and page interaction tool powered by project-local Playwright (fallback when no matching browser skill exists).
+- Browser strategy: for browser tasks, first follow any matching enabled skill; only if no relevant skill is available, looking for MCP-compatible browser automation solutions..
 The workspace root is: ${workspacePath}`
 
   const skillsSources = await getEnabledSkillsSources()
@@ -1344,7 +1343,7 @@ The workspace root is: ${workspacePath}`
     extraTools.push(createSkillEvolutionTool({ threadId: options.threadId }))
   }
 
-  extraTools.push(createPlaywrightTool(workspacePath))
+  // extraTools.push(createPlaywrightTool(workspacePath))
 
   // Conditionally inject Java LSP tool
   try {
