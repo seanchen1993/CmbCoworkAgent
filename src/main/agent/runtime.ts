@@ -47,8 +47,8 @@ import type * as _lcZodTypes from "@langchain/core/utils/types"
 
 import path from "path"
 import { join, resolve, delimiter } from "path"
-import { existsSync, createWriteStream, statSync, unlinkSync } from "fs"
-import { createReadStream } from "fs"
+import { createWriteStream, createReadStream } from "fs"
+import fs from "fs/promises"
 import { createGunzip } from "zlib"
 import { pipeline } from "stream/promises"
 import { app, BrowserWindow } from "electron"
@@ -91,18 +91,29 @@ import {
 /** Decompress codex.exe.gz → codex.exe if needed (re-extract if .gz is newer than .exe). */
 async function ensureCodexExe(exePath: string): Promise<void> {
   const gzPath = exePath + ".gz"
-  if (!existsSync(gzPath)) return
-  if (existsSync(exePath)) {
+  const gzStat = await fs.stat(gzPath).catch(() => null)
+  if (!gzStat) return
+  const exeStat = await fs.stat(exePath).catch(() => null)
+  if (exeStat) {
     // Skip if exe is up-to-date (gz not newer)
-    if (statSync(exePath).mtimeMs >= statSync(gzPath).mtimeMs) return
+    if (exeStat.mtimeMs >= gzStat.mtimeMs) return
     // gz is newer — remove stale exe before re-extracting
-    try { unlinkSync(exePath) } catch { /* ignore */ }
+    await fs.unlink(exePath).catch(() => {})
   }
   try {
     await pipeline(createReadStream(gzPath), createGunzip(), createWriteStream(exePath))
     console.log("[Runtime] codex.exe extracted from .gz")
   } catch (e) {
     console.error("[Runtime] Failed to extract codex.exe:", e)
+  }
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath)
+    return true
+  } catch {
+    return false
   }
 }
 
@@ -1330,11 +1341,14 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       join(app.getAppPath(), "resources"),
       join(app.getAppPath(), "..", "resources"),
     ]
-    resourceBase = candidates.find(c => existsSync(join(c, "bin"))) ?? resolve(__dirname, "../../resources")
+    const matches = await Promise.all(candidates.map(async (candidate) => (
+      await pathExists(join(candidate, "bin")) ? candidate : null
+    )))
+    resourceBase = matches.find((candidate): candidate is string => Boolean(candidate)) ?? resolve(__dirname, "../../resources")
   }
   const rgDir = join(resourceBase, "bin", process.platform)
   const rgBin = join(rgDir, process.platform === "win32" ? "rg.exe" : "rg")
-  const rgExists = existsSync(rgBin)
+  const rgExists = await pathExists(rgBin)
   // Mutate process.env.PATH so deepagents' internal ripgrepSearch
   // (spawns "rg" without custom env, inherits process.env) can find it.
   const paths = (process.env.PATH ?? "").split(delimiter)
@@ -1346,7 +1360,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // Codex Windows sandbox (unelevated): reuse rgDir which already points to resources/bin/win32
   const codexExePath = join(rgDir, "codex.exe")
   if (process.platform === "win32") await ensureCodexExe(codexExePath)
-  const codexExists = process.platform === "win32" && existsSync(codexExePath)
+  const codexExists = process.platform === "win32" && await pathExists(codexExePath)
   const windowsSandbox = process.platform === "win32" ? getWindowsSandboxMode() : "none"
   console.log(`[Runtime] codex.exe: ${codexExePath}, exists: ${codexExists}, sandboxMode: ${windowsSandbox}`)
 

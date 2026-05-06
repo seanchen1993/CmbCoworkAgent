@@ -11,7 +11,7 @@
 
 import { spawn, execFile, type ChildProcess } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
-import { constants as fsConstants, existsSync, realpathSync } from "node:fs"
+import { constants as fsConstants } from "node:fs"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { promisify } from "node:util"
@@ -34,7 +34,7 @@ import { replace } from "./replace"
 import type { ToolOrchestrator } from "./tool-orchestrator"
 import { assessCommandSafety, classifyCommandConcurrency } from "./exec-policy"
 import {
-  areElevatedRootsPrepared,
+  areElevatedRootsPreparedAsync,
   isElevatedSetupComplete,
   markElevatedRootsPrepared,
   runElevatedSetupForPaths,
@@ -49,6 +49,32 @@ import type { HookResultCallback } from "../hooks/runner"
 import { runHooksEnriched } from "../hooks/required-skill"
 
 const execFileP = promisify(execFile)
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function mapLimit<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length)
+  let nextIndex = 0
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex++
+      results[index] = await fn(items[index])
+    }
+  })
+  await Promise.all(workers)
+  return results
+}
 
 /**
  * Sensitive directories under user profile that sandbox tools should not access.
@@ -223,6 +249,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
   private readonly _onHookResult?: HookResultCallback
   /** App-owned persistent cache root granted as a Codex writable root per workspace. */
   private readonly _sandboxCacheRoot: string
+  private readonly _sandboxCacheRootPromise: Promise<string>
   /** Shared download/artifact cache root reused across workspaces. */
   private readonly _sharedSandboxCacheRoot: string
   /** Optional orchestrator for fine-grained approval + sandbox retry */
@@ -331,17 +358,21 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     return path.win32.join(LocalSandbox.buildSandboxCacheBase(env), "shared")
   }
 
-  private static buildSandboxCacheRoot(env: Record<string, string>, workingDir: string): string {
-    let canonicalWorkingDir = workingDir
-    try {
-      canonicalWorkingDir = realpathSync(workingDir)
-    } catch {
-      canonicalWorkingDir = path.resolve(workingDir)
-    }
+  private static buildSandboxCacheRootFromCanonical(env: Record<string, string>, canonicalWorkingDir: string): string {
     const key = canonicalWorkingDir.replace(/\//g, "\\").toLowerCase()
     const hash = createHash("sha256").update(key).digest("hex").slice(0, 16)
     const name = path.win32.basename(canonicalWorkingDir).replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").slice(0, 40) || "workspace"
     return path.win32.join(LocalSandbox.buildSandboxCacheBase(env), `${name}-${hash}`)
+  }
+
+  private static async buildSandboxCacheRoot(env: Record<string, string>, workingDir: string): Promise<string> {
+    let canonicalWorkingDir = path.resolve(workingDir)
+    try {
+      canonicalWorkingDir = await fs.realpath(workingDir)
+    } catch {
+      // Missing or inaccessible workspaces still need a stable fallback cache key.
+    }
+    return LocalSandbox.buildSandboxCacheRootFromCanonical(env, canonicalWorkingDir)
   }
 
   private static getSandboxToolCacheDirs(cacheRoot: string, sharedCacheRoot = cacheRoot) {
@@ -482,6 +513,8 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
   // After an explicit UAC-approved setup completes, codex.exe can briefly
   // observe stale sandbox state across session switches.
   private static readonly ELEVATED_EXPLICIT_SETUP_SETTLE_MS = 1_500
+  private static readonly SANDBOX_CACHE_PREPARE_CONCURRENCY = 8
+  private static readonly ACL_OPERATION_CONCURRENCY = 2
 
   private static describeSandboxCacheDirs(cacheRoot: string, sharedCacheRoot = cacheRoot): {
     cacheKey: string
@@ -548,22 +581,25 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
   private static async prepareSandboxCacheDirs(cacheRoot: string, sharedCacheRoot = cacheRoot): Promise<string[]> {
     const { cacheKey, uniqueDirs, siteCustomizePath } = LocalSandbox.describeSandboxCacheDirs(cacheRoot, sharedCacheRoot)
     const cachedDirs = LocalSandbox._preparedSandboxCacheDirs.get(cacheKey)
-    if (cachedDirs && existsSync(siteCustomizePath)) {
-      return cachedDirs
+    if (cachedDirs) {
+      if (await pathExists(siteCustomizePath)) {
+        return cachedDirs
+      }
+      LocalSandbox._preparedSandboxCacheDirs.delete(cacheKey)
     }
     const existing = LocalSandbox._sandboxCachePreparePromises.get(cacheKey)
     if (existing) return existing
 
     const task = (async (): Promise<string[]> => {
       let prepared = true
-      for (const dir of uniqueDirs) {
+      await mapLimit(uniqueDirs, LocalSandbox.SANDBOX_CACHE_PREPARE_CONCURRENCY, async (dir) => {
         try {
           await fs.mkdir(dir, { recursive: true })
         } catch (err) {
           prepared = false
           console.warn(`[LocalSandbox] failed to prepare sandbox cache dir ${dir}: ${err}`)
         }
-      }
+      })
       try {
         await fs.writeFile(siteCustomizePath, PYTHON_TEMP_ACL_SITE_CUSTOMIZE, "utf8")
       } catch (err) {
@@ -719,11 +755,9 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       })
     }
 
-    try {
-      LocalSandbox.resolveWindowsSandboxShell()
-    } catch (err) {
+    void LocalSandbox.resolveWindowsSandboxShell().catch((err) => {
       console.warn("[LocalSandbox] failed to prewarm sandbox shell:", err)
-    }
+    })
 
     void LocalSandbox.resolvePythonDir().catch((err) => {
       console.warn("[LocalSandbox] failed to prewarm Python dir:", err)
@@ -731,29 +765,33 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
 
     if (!workspacePath) return
 
-    const workspaceValidation = windowsSandbox === "elevated"
-      ? validateElevatedWorkspaceRoot(workspacePath)
-      : null
-    if (workspaceValidation && (!workspaceValidation.ok || !workspaceValidation.resolved)) return
+    void (async () => {
+      const workspaceValidation = windowsSandbox === "elevated"
+        ? await validateElevatedWorkspaceRoot(workspacePath)
+        : null
+      if (workspaceValidation && (!workspaceValidation.ok || !workspaceValidation.resolved)) return
 
-    const resolvedWorkspace = workspaceValidation?.resolved ?? path.resolve(workspacePath)
-    const baseEnv = env ?? ({ ...process.env } as Record<string, string>)
-    const cacheRoot = LocalSandbox.buildSandboxCacheRoot(baseEnv, resolvedWorkspace)
-    const sharedCacheRoot = LocalSandbox.buildSharedSandboxCacheRoot(baseEnv)
+      const resolvedWorkspace = workspaceValidation?.resolved ?? path.resolve(workspacePath)
+      const baseEnv = env ?? ({ ...process.env } as Record<string, string>)
+      const cacheRoot = await LocalSandbox.buildSandboxCacheRoot(baseEnv, resolvedWorkspace)
+      const sharedCacheRoot = LocalSandbox.buildSharedSandboxCacheRoot(baseEnv)
 
-    void LocalSandbox.prepareSandboxCacheDirs(cacheRoot, sharedCacheRoot).catch((err) => {
-      console.warn("[LocalSandbox] failed to prewarm sandbox cache dirs:", err)
-    })
-
-    if (windowsSandbox === "elevated") {
-      const cacheRoots = Array.from(new Set([
-        cacheRoot,
-        sharedCacheRoot
-      ].map((dir) => path.win32.normalize(dir))))
-      void LocalSandbox.prewarmElevatedWorkspaceRoots(resolvedWorkspace, cacheRoots).catch((err) => {
-        console.warn("[LocalSandbox] failed to prewarm elevated workspace roots:", err)
+      void LocalSandbox.prepareSandboxCacheDirs(cacheRoot, sharedCacheRoot).catch((err) => {
+        console.warn("[LocalSandbox] failed to prewarm sandbox cache dirs:", err)
       })
-    }
+
+      if (windowsSandbox === "elevated") {
+        const cacheRoots = Array.from(new Set([
+          cacheRoot,
+          sharedCacheRoot
+        ].map((dir) => path.win32.normalize(dir))))
+        void LocalSandbox.prewarmElevatedWorkspaceRoots(resolvedWorkspace, cacheRoots).catch((err) => {
+          console.warn("[LocalSandbox] failed to prewarm elevated workspace roots:", err)
+        })
+      }
+    })().catch((err) => {
+      console.warn("[LocalSandbox] failed to schedule sandbox prewarm:", err)
+    })
   }
 
   static prewarmForWorkspaces(
@@ -767,13 +805,13 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     }
   }
 
-  private static buildElevatedWorkspaceCacheRoots(
+  private static async buildElevatedWorkspaceCacheRoots(
     workspacePath: string,
     env?: Record<string, string>
-  ): { resolvedWorkspace: string; cacheRoots: string[] } {
+  ): Promise<{ resolvedWorkspace: string; cacheRoots: string[] }> {
     const resolvedWorkspace = path.resolve(workspacePath)
     const baseEnv = env ?? ({ ...process.env } as Record<string, string>)
-    const cacheRoot = LocalSandbox.buildSandboxCacheRoot(baseEnv, resolvedWorkspace)
+    const cacheRoot = await LocalSandbox.buildSandboxCacheRoot(baseEnv, resolvedWorkspace)
     const sharedCacheRoot = LocalSandbox.buildSharedSandboxCacheRoot(baseEnv)
     const cacheRoots = Array.from(new Set([
       cacheRoot,
@@ -782,8 +820,8 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     return { resolvedWorkspace, cacheRoots }
   }
 
-  private static areElevatedWorkspaceRootsPrepared(workingDir: string, cacheRoots: string[]): boolean {
-    return areElevatedRootsPrepared(LocalSandbox.getElevatedPrepareRoots(workingDir, cacheRoots))
+  private static async areElevatedWorkspaceRootsPrepared(workingDir: string, cacheRoots: string[]): Promise<boolean> {
+    return areElevatedRootsPreparedAsync(LocalSandbox.getElevatedPrepareRoots(workingDir, cacheRoots))
   }
 
   private static shouldPromptForWorkspaceSwitchSetup(error?: string): boolean {
@@ -806,7 +844,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       return { ready: true, prompted: false }
     }
 
-    const workspaceValidation = validateElevatedWorkspaceRoot(workspacePath)
+    const workspaceValidation = await validateElevatedWorkspaceRoot(workspacePath)
     if (!workspaceValidation.ok || !workspaceValidation.resolved) {
       return {
         ready: false,
@@ -818,8 +856,8 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       }
     }
 
-    const { resolvedWorkspace, cacheRoots } = LocalSandbox.buildElevatedWorkspaceCacheRoots(workspaceValidation.resolved, env)
-    if (LocalSandbox.areElevatedWorkspaceRootsPrepared(resolvedWorkspace, cacheRoots)) {
+    const { resolvedWorkspace, cacheRoots } = await LocalSandbox.buildElevatedWorkspaceCacheRoots(workspaceValidation.resolved, env)
+    if (await LocalSandbox.areElevatedWorkspaceRootsPrepared(resolvedWorkspace, cacheRoots)) {
       return { ready: true, prompted: false }
     }
 
@@ -1064,7 +1102,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
    * may not exist), causing empty-string path resolution → EPERM lstat ''.
    * Running them in unelevated mode keeps the real user identity, fixing the issue.
    */
-  private static isPythonCliTool(command: string): boolean {
+  private static async isPythonCliTool(command: string): Promise<boolean> {
     if (process.platform !== "win32") return false
     // Extract just the executable token (skip shell built-ins or paths with separators)
     const firstToken = command.trim().split(/\s+/)[0]
@@ -1080,7 +1118,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       const ldir = dir.toLowerCase()
       // Python Scripts dirs always contain both "python" and "script" in the path
       if (!ldir.includes("python") || !ldir.includes("script")) continue
-      if (existsSync(path.join(dir, exeName + ".exe")) || existsSync(path.join(dir, exeName))) {
+      if (await pathExists(path.join(dir, exeName + ".exe")) || await pathExists(path.join(dir, exeName))) {
         LocalSandbox._pythonCliCache.set(exeName, true)
         return true
       }
@@ -1089,9 +1127,9 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     return false
   }
 
-  private static shouldPreferUnelevated(command: string): boolean {
+  private static async shouldPreferUnelevated(command: string): Promise<boolean> {
     const cmd = command.trim().toLowerCase()
-    return (
+    if (
       // Python package managers
       /\bpip(?:3(?:\.\d+)?)?(?:\.exe|\.cmd|\.bat)?\s+(install|download|wheel)\b/.test(cmd)
       || /\b(?:python(?:3(?:\.\d+)?)?|py)(?:\.exe)?(?:\s+-\d+(?:\.\d+)?)?\s+-m\s+pip\s+(install|download|wheel)\b/.test(cmd)
@@ -1133,14 +1171,20 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       || /\bgit\s+(pull|fetch|push)\b/.test(cmd)
       || /\bgit\s+submodule\b/.test(cmd)
       || /\bgit\s+lfs\b/.test(cmd)
-      // Any pip-installed CLI tool detected via PATH scan (auto, no hardcoded list needed)
-      || LocalSandbox.isPythonCliTool(command)
-      // Per-user Python install: elevated sandbox user can't read the real user's profile,
-      // so bare `python` / `py` / `python3` fail with CommandNotFoundException even though
-      // the path is in PATH. Route to unelevated to keep real-user identity (and thus access).
-      || (LocalSandbox.isPythonUnderUserProfile()
-        && /^\s*(?:python(?:3(?:\.\d+)?)?|py)(?:\.exe)?(?:\s|$)/i.test(command))
-    )
+    ) {
+      return true
+    }
+
+    const isBarePythonCommand = /^\s*(?:python(?:3(?:\.\d+)?)?|py)(?:\.exe)?(?:\s|$)/i.test(command)
+    if (isBarePythonCommand) {
+      await LocalSandbox.resolvePythonDir().catch(() => null)
+      if (LocalSandbox.isPythonUnderUserProfile()) {
+        return true
+      }
+    }
+
+    // Any pip-installed CLI tool detected via PATH scan (auto, no hardcoded list needed).
+    return LocalSandbox.isPythonCliTool(command)
   }
 
   constructor(options: LocalSandboxOptions = {}) {
@@ -1168,7 +1212,11 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     const h = options.hooks
     this.getHooks = typeof h === "function" ? h : () => h ?? []
     this._onHookResult = options.onHookResult
-    this._sandboxCacheRoot = LocalSandbox.buildSandboxCacheRoot(baseEnv, this.workingDir)
+    this._sandboxCacheRoot = LocalSandbox.buildSandboxCacheRootFromCanonical(baseEnv, path.resolve(this.workingDir))
+    this._sandboxCacheRootPromise = LocalSandbox.buildSandboxCacheRoot(baseEnv, this.workingDir).catch((err) => {
+      console.warn("[LocalSandbox] failed to canonicalize sandbox cache root:", err)
+      return this._sandboxCacheRoot
+    })
     this._sharedSandboxCacheRoot = LocalSandbox.buildSharedSandboxCacheRoot(baseEnv)
     this.abortSignal = options.abortSignal
 
@@ -1716,7 +1764,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
    * - readonly + admin: only allow writes within the working directory
    * - unelevated / none: allow all writes (shell sandbox handles restriction)
    *
-   * Uses realpathSync to resolve symlinks and toLowerCase for Windows
+   * Uses realpath to resolve symlinks and toLowerCase for Windows
    * case-insensitive path comparison.
    */
   private async isWriteBlocked(filePath: string): Promise<boolean> {
@@ -1729,13 +1777,13 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       // If the file doesn't exist yet, resolve its parent directory instead.
       let realTarget: string
       try {
-        realTarget = realpathSync(resolved)
+        realTarget = await fs.realpath(resolved)
       } catch {
         // File doesn't exist yet — resolve parent dir + basename
-        const parentReal = realpathSync(path.dirname(resolved))
+        const parentReal = await fs.realpath(path.dirname(resolved))
         realTarget = path.join(parentReal, path.basename(resolved))
       }
-      const realCwd = realpathSync(this.workingDir)
+      const realCwd = await fs.realpath(this.workingDir)
       // Windows paths are case-insensitive
       const normalizedTarget = realTarget.toLowerCase()
       const normalizedCwd = realCwd.toLowerCase()
@@ -2060,9 +2108,27 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
    * macOS fallback: /bin/zsh
    * Linux fallback: /bin/sh
    */
+  private static _cachedResolvedShell: string | null = null
+  private static _resolvedShellPromise: Promise<string> | null = null
+
   /** Public accessor for the resolved shell path (used by system prompt). */
   static resolvedShell(): string {
-    return LocalSandbox.resolveShell()
+    if (LocalSandbox._cachedResolvedShell) return LocalSandbox._cachedResolvedShell
+    void LocalSandbox.resolveShell().catch((err) => {
+      console.warn("[LocalSandbox] failed to resolve shell:", err)
+    })
+
+    const isWindows = process.platform === "win32"
+    const userShell = process.env.SHELL
+    if (userShell) {
+      const basename = isWindows
+        ? path.win32.basename(userShell)
+        : path.basename(userShell)
+      if (!LocalSandbox.SHELL_BLACKLIST.has(basename)) return userShell
+    }
+    if (isWindows) return process.env.GIT_BASH_PATH || process.env.COMSPEC || "cmd.exe"
+    if (process.platform === "darwin") return "/bin/zsh"
+    return "/bin/sh"
   }
 
   /**
@@ -2071,23 +2137,40 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
    * so we must skip it and use PowerShell or cmd.exe instead.
    */
   private static _cachedSandboxShell: { shell: string; flags: string[] } | null = null
+  private static _sandboxShellPromise: Promise<{ shell: string; flags: string[] }> | null = null
 
-  private static resolveWindowsSandboxShell(): { shell: string; flags: string[] } {
+  private static async resolveWindowsSandboxShell(): Promise<{ shell: string; flags: string[] }> {
     if (LocalSandbox._cachedSandboxShell) return LocalSandbox._cachedSandboxShell
-    for (const ps of ["pwsh", "powershell"]) {
-      const fullPath = LocalSandbox.whichSync(ps)
-      if (fullPath) {
-        LocalSandbox._cachedSandboxShell = { shell: fullPath, flags: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"] }
-        return LocalSandbox._cachedSandboxShell
+    if (LocalSandbox._sandboxShellPromise) return LocalSandbox._sandboxShellPromise
+
+    const lookup = (async () => {
+      for (const ps of ["pwsh", "powershell"]) {
+        const fullPath = await LocalSandbox.which(ps)
+        if (fullPath) {
+          LocalSandbox._cachedSandboxShell = { shell: fullPath, flags: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"] }
+          return LocalSandbox._cachedSandboxShell
+        }
+      }
+      LocalSandbox._cachedSandboxShell = { shell: process.env.COMSPEC || "cmd.exe", flags: ["/c"] }
+      return LocalSandbox._cachedSandboxShell
+    })()
+
+    LocalSandbox._sandboxShellPromise = lookup
+    try {
+      return await lookup
+    } finally {
+      if (LocalSandbox._sandboxShellPromise === lookup) {
+        LocalSandbox._sandboxShellPromise = null
       }
     }
-    LocalSandbox._cachedSandboxShell = { shell: process.env.COMSPEC || "cmd.exe", flags: ["/c"] }
-    return LocalSandbox._cachedSandboxShell
   }
 
   /** Public accessor for the Windows sandbox shell (PowerShell or cmd.exe). */
   static resolvedWindowsSandboxShell(): string {
-    return LocalSandbox.resolveWindowsSandboxShell().shell
+    void LocalSandbox.resolveWindowsSandboxShell().catch((err) => {
+      console.warn("[LocalSandbox] failed to resolve Windows sandbox shell:", err)
+    })
+    return LocalSandbox._cachedSandboxShell?.shell ?? process.env.COMSPEC ?? "cmd.exe"
   }
 
   /**
@@ -2117,7 +2200,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
           windowsHide: true
         })
         const pyOutput = String(stdout).trim()
-        if (pyOutput && existsSync(pyOutput)) {
+        if (pyOutput && await pathExists(pyOutput)) {
           LocalSandbox._pythonDir = path.dirname(pyOutput)
           console.log(`[LocalSandbox] resolved Python dir via py launcher: ${LocalSandbox._pythonDir}`)
           return LocalSandbox._pythonDir
@@ -2131,7 +2214,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
           windowsHide: true
         })
         const whereOutput = String(stdout).trim().split(/\r?\n/)[0]
-        if (whereOutput && existsSync(whereOutput)) {
+        if (whereOutput && await pathExists(whereOutput)) {
           LocalSandbox._pythonDir = path.dirname(whereOutput)
           console.log(`[LocalSandbox] resolved Python dir via where: ${LocalSandbox._pythonDir}`)
           return LocalSandbox._pythonDir
@@ -2174,10 +2257,10 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     if (!system.some(s => s.toLowerCase() === sys32Lower)) {
       system.unshift(sys32)
     }
-    // Inject Python installation directory if not already in PATH.
-    // The py launcher uses registry (inaccessible in sandbox), so we resolve
-    // the real path from the main process and add it to the sandbox PATH.
-    const pythonDir = await LocalSandbox.resolvePythonDir()
+    // Inject Python only when the background prewarm has already resolved it.
+    // Direct python/py commands wait in shouldPreferUnelevated; ordinary commands
+    // should not be delayed by py/where python probes while building the sandbox env.
+    const pythonDir = LocalSandbox._pythonDir ?? null
     if (pythonDir) {
       const pythonLower = pythonDir.toLowerCase()
       if (!system.some(s => s.toLowerCase() === pythonLower)
@@ -2185,7 +2268,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
         rest.push(pythonDir)
         // Also add Scripts subdir (where pip.exe lives)
         const scriptsDir = path.join(pythonDir, "Scripts")
-        if (existsSync(scriptsDir)) {
+        if (await pathExists(scriptsDir)) {
           rest.push(scriptsDir)
         }
       }
@@ -2195,53 +2278,80 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     return result
   }
 
-  private static resolveShell(): string {
-    const isWindows = process.platform === "win32"
-    const userShell = process.env.SHELL
-    if (userShell) {
-      const basename = isWindows
-        ? path.win32.basename(userShell)
-        : path.basename(userShell)
-      if (!LocalSandbox.SHELL_BLACKLIST.has(basename)) return userShell
-    }
+  private static async resolveShell(): Promise<string> {
+    if (LocalSandbox._cachedResolvedShell) return LocalSandbox._cachedResolvedShell
+    if (LocalSandbox._resolvedShellPromise) return LocalSandbox._resolvedShellPromise
 
-    if (isWindows) {
-      const envBash = process.env.GIT_BASH_PATH
-      if (envBash) return envBash
-
-      // Derive bash.exe from git.exe install location:
-      // git.exe is typically at C:\Program Files\Git\cmd\git.exe
-      // bash.exe is at C:\Program Files\Git\bin\bash.exe
-      const gitExe = LocalSandbox.whichSync("git")
-      if (gitExe) {
-        const bash = path.join(gitExe, "..", "..", "bin", "bash.exe")
-        try {
-          if (existsSync(bash)) return bash
-        } catch { /* ignore */ }
+    const lookup = (async () => {
+      const isWindows = process.platform === "win32"
+      const userShell = process.env.SHELL
+      if (userShell) {
+        const basename = isWindows
+          ? path.win32.basename(userShell)
+          : path.basename(userShell)
+        if (!LocalSandbox.SHELL_BLACKLIST.has(basename)) {
+          LocalSandbox._cachedResolvedShell = userShell
+          return userShell
+        }
       }
 
-      // Fallback: check common install paths
-      for (const base of [
-        process.env["ProgramFiles"],
-        process.env["ProgramFiles(x86)"],
-        "C:\\Program Files"
-      ]) {
-        if (!base) continue
-        const bash = path.join(base, "Git", "bin", "bash.exe")
-        try {
-          if (existsSync(bash)) return bash
-        } catch { /* ignore */ }
+      if (isWindows) {
+        const envBash = process.env.GIT_BASH_PATH
+        if (envBash) {
+          LocalSandbox._cachedResolvedShell = envBash
+          return envBash
+        }
+
+        // Derive bash.exe from git.exe install location:
+        // git.exe is typically at C:\Program Files\Git\cmd\git.exe
+        // bash.exe is at C:\Program Files\Git\bin\bash.exe
+        const gitExe = await LocalSandbox.which("git")
+        if (gitExe) {
+          const bash = path.join(gitExe, "..", "..", "bin", "bash.exe")
+          try {
+            if (await pathExists(bash)) {
+              LocalSandbox._cachedResolvedShell = bash
+              return bash
+            }
+          } catch { /* ignore */ }
+        }
+
+        // Fallback: check common install paths
+        for (const base of [
+          process.env["ProgramFiles"],
+          process.env["ProgramFiles(x86)"],
+          "C:\\Program Files"
+        ]) {
+          if (!base) continue
+          const bash = path.join(base, "Git", "bin", "bash.exe")
+          try {
+            if (await pathExists(bash)) {
+              LocalSandbox._cachedResolvedShell = bash
+              return bash
+            }
+          } catch { /* ignore */ }
+        }
+
+        LocalSandbox._cachedResolvedShell = process.env.COMSPEC || "cmd.exe"
+        return LocalSandbox._cachedResolvedShell
       }
 
-      return process.env.COMSPEC || "cmd.exe"
-    }
+      LocalSandbox._cachedResolvedShell = process.platform === "darwin" ? "/bin/zsh" : "/bin/sh"
+      return LocalSandbox._cachedResolvedShell
+    })()
 
-    if (process.platform === "darwin") return "/bin/zsh"
-    return "/bin/sh"
+    LocalSandbox._resolvedShellPromise = lookup
+    try {
+      return await lookup
+    } finally {
+      if (LocalSandbox._resolvedShellPromise === lookup) {
+        LocalSandbox._resolvedShellPromise = null
+      }
+    }
   }
 
-  /** Synchronous `which` — locate an executable on PATH. */
-  private static whichSync(name: string): string | null {
+  /** Asynchronous `which` — locate an executable on PATH without blocking the main process. */
+  private static async which(name: string): Promise<string | null> {
     const isWindows = process.platform === "win32"
     const pathEnv = process.env.PATH || ""
     const sep = isWindows ? ";" : ":"
@@ -2251,7 +2361,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       for (const ext of extensions) {
         const full = path.join(dir, name + ext)
         try {
-          if (existsSync(full)) return full
+          if (await pathExists(full)) return full
         } catch { /* ignore */ }
       }
     }
@@ -2364,7 +2474,10 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     // the event loop on large repos (NTFS propagates inherited ACEs to
     // all existing descendants, which can take tens of seconds).
     return new Promise<void>((resolve) => {
-      const proc = spawn("icacls", [dir, "/grant", `${LocalSandbox.EVERYONE_SID}:(OI)(CI)(M)`], { stdio: "ignore" })
+      const proc = spawn("icacls", [dir, "/grant", `${LocalSandbox.EVERYONE_SID}:(OI)(CI)(M)`], {
+        stdio: "ignore",
+        windowsHide: true
+      })
       const timeoutId = setTimeout(() => {
         console.warn(`[LocalSandbox] icacls grant timed out after ${LocalSandbox.ICACLS_TIMEOUT_MS}ms on ${dir}, killing`)
         try { proc.kill() } catch { /* already exited */ }
@@ -2403,7 +2516,10 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     // count === 1 → last user, actually revoke
     LocalSandbox._grantedAclRefCount.delete(key)
     return new Promise<void>((resolve) => {
-      const proc = spawn("icacls", [dir, "/remove:g", LocalSandbox.EVERYONE_SID], { stdio: "ignore" })
+      const proc = spawn("icacls", [dir, "/remove:g", LocalSandbox.EVERYONE_SID], {
+        stdio: "ignore",
+        windowsHide: true
+      })
       const timeoutId = setTimeout(() => {
         console.warn(`[LocalSandbox] icacls revoke timed out after ${LocalSandbox.ICACLS_TIMEOUT_MS}ms on ${dir}, killing`)
         try { proc.kill() } catch { /* already exited */ }
@@ -2439,7 +2555,11 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     LocalSandbox._runAclDirs.delete(runId)
     if (dirsToRevoke.length === 0) return
     console.log(`[LocalSandbox] revokeGrantedAclsForRun(${runId}): releasing ${dirsToRevoke.length} dirs`)
-    await Promise.all(dirsToRevoke.map((dir) => LocalSandbox.revokeSandboxWriteAcl(dir)))
+    await mapLimit(
+      dirsToRevoke,
+      LocalSandbox.ACL_OPERATION_CONCURRENCY,
+      (dir) => LocalSandbox.revokeSandboxWriteAcl(dir)
+    )
   }
 
   /** Sandbox user names used by elevated mode. */
@@ -2466,7 +2586,10 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
         args.push("/grant", `${user}:(OI)(CI)(M)`)
       }
       args.push("/Q")
-      const proc = spawn("icacls", args, { stdio: "pipe" })
+      const proc = spawn("icacls", args, {
+        stdio: "pipe",
+        windowsHide: true
+      })
       let stderr = ""
       const onAbort = () => {
         clearTimeout(timeoutId)
@@ -2501,10 +2624,10 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     return Array.from(new Set([workingDir, ...cacheRoots].map((dir) => path.win32.normalize(dir))))
   }
 
-  private static prepareElevatedRoot(root: string): Promise<boolean> {
+  private static async prepareElevatedRoot(root: string): Promise<boolean> {
     const key = normalizeDirKey(root)
-    if (!isElevatedSetupComplete()) return Promise.resolve(false)
-    if (areElevatedRootsPrepared([root])) return Promise.resolve(true)
+    if (!(await isElevatedSetupComplete())) return Promise.resolve(false)
+    if (await areElevatedRootsPreparedAsync([root])) return Promise.resolve(true)
     const existing = LocalSandbox._elevatedRootPreparePromises.get(key)
     if (existing) return existing
 
@@ -2531,11 +2654,11 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     return roots.map((dir) => normalizeDirKey(dir)).join("|")
   }
 
-  private static prewarmElevatedWorkspaceRoots(workingDir: string, cacheRoots: string[]): Promise<boolean> {
-    if (!isElevatedSetupComplete()) return Promise.resolve(false)
+  private static async prewarmElevatedWorkspaceRoots(workingDir: string, cacheRoots: string[]): Promise<boolean> {
+    if (!(await isElevatedSetupComplete())) return Promise.resolve(false)
 
     const roots = LocalSandbox.getElevatedPrepareRoots(workingDir, cacheRoots)
-    if (areElevatedRootsPrepared(roots)) return Promise.resolve(true)
+    if (await areElevatedRootsPreparedAsync(roots)) return Promise.resolve(true)
 
     const key = LocalSandbox.buildElevatedWorkspacePrepareKey(roots)
     const existing = LocalSandbox._elevatedWorkspacePreparePromises.get(key)
@@ -2551,8 +2674,12 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
         )
         return [] as string[]
       })
-      .then(() => Promise.all(roots.map((root) => LocalSandbox.prepareElevatedRoot(root))))
-      .then((results) => results.every(Boolean) && areElevatedRootsPrepared(roots))
+      .then(() => mapLimit(
+        roots,
+        LocalSandbox.ACL_OPERATION_CONCURRENCY,
+        (root) => LocalSandbox.prepareElevatedRoot(root)
+      ))
+      .then(async (results) => results.every(Boolean) && await areElevatedRootsPreparedAsync(roots))
       .catch((err) => {
         console.warn(
           `[LocalSandbox] elevated workspace prewarm failed for ${workingDir}: ${err instanceof Error ? err.message : String(err)}`
@@ -2576,7 +2703,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     abortSignal?: AbortSignal
   ): Promise<boolean> {
     const roots = LocalSandbox.getElevatedPrepareRoots(workingDir, cacheRoots)
-    if (areElevatedRootsPrepared(roots)) return true
+    if (await areElevatedRootsPreparedAsync(roots)) return true
 
     const preparePromise = LocalSandbox.prewarmElevatedWorkspaceRoots(workingDir, cacheRoots)
     if (waitMs <= 0) return false
@@ -2592,7 +2719,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       return false
     })
 
-    return timedResult && areElevatedRootsPrepared(roots)
+    return timedResult && await areElevatedRootsPreparedAsync(roots)
   }
 
   private static async ensureElevatedWorkspaceSetup(
@@ -2602,7 +2729,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     abortSignal?: AbortSignal
   ): Promise<{ ready: boolean; error?: string }> {
     LocalSandbox.throwIfAborted(abortSignal)
-    if (LocalSandbox.areElevatedWorkspaceRootsPrepared(workingDir, cacheRoots)) return { ready: true }
+    if (await LocalSandbox.areElevatedWorkspaceRootsPrepared(workingDir, cacheRoots)) return { ready: true }
 
     const workspaceKey = normalizeDirKey(workingDir)
     const existing = LocalSandbox._elevatedWorkspaceSetupPromises.get(workspaceKey)
@@ -2610,10 +2737,10 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
 
     const task = (async (): Promise<{ ready: boolean; error?: string }> => {
       LocalSandbox.throwIfAborted(abortSignal)
-      if (LocalSandbox.areElevatedWorkspaceRootsPrepared(workingDir, cacheRoots)) return { ready: true }
+      if (await LocalSandbox.areElevatedWorkspaceRootsPrepared(workingDir, cacheRoots)) return { ready: true }
 
       // Cache roots have to exist physically before either icacls (preflight) or
-      // runElevatedSetupForPaths (which filters non-existent paths via statSync).
+      // runElevatedSetupForPaths (which filters non-existent paths during validation).
       // Skip this if it fails — we still try the ACL path below in case the dir
       // already exists from a prior run.
       await LocalSandbox.prepareSandboxCacheDirs(cacheRoots[0], cacheRoots[1]).catch((err) => {
@@ -2624,10 +2751,14 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       })
       LocalSandbox.throwIfAborted(abortSignal)
 
-      if (isElevatedSetupComplete()) {
+      if (await isElevatedSetupComplete()) {
         try {
           await LocalSandbox.grantElevatedWorkspaceAcl(workingDir, abortSignal)
-          await Promise.all(cacheRoots.map((dir) => LocalSandbox.grantElevatedWorkspaceAcl(dir, abortSignal)))
+          await mapLimit(
+            cacheRoots,
+            LocalSandbox.ACL_OPERATION_CONCURRENCY,
+            (dir) => LocalSandbox.grantElevatedWorkspaceAcl(dir, abortSignal)
+          )
           markElevatedRootsPrepared([workingDir, ...cacheRoots])
           return { ready: true }
         } catch (err) {
@@ -2646,7 +2777,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
           await LocalSandbox.delayWithAbort(LocalSandbox.ELEVATED_EXPLICIT_SETUP_SETTLE_MS, abortSignal)
         }
         markElevatedRootsPrepared([workingDir, ...cacheRoots])
-        if (LocalSandbox.areElevatedWorkspaceRootsPrepared(workingDir, cacheRoots)) {
+        if (await LocalSandbox.areElevatedWorkspaceRootsPrepared(workingDir, cacheRoots)) {
           return { ready: true }
         }
         return { ready: false, error: "Elevated 工作区权限没有完全准备好，请重试。" }
@@ -2741,7 +2872,10 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
 
     if (process.platform === "win32") {
       await new Promise<void>((res) => {
-        const killer = spawn("taskkill", ["/T", "/F", "/PID", String(pid)], { stdio: "ignore" })
+        const killer = spawn("taskkill", ["/T", "/F", "/PID", String(pid)], {
+          stdio: "ignore",
+          windowsHide: true
+        })
         killer.once("exit", () => res())
         killer.once("error", () => res())
       })
@@ -2990,7 +3124,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     }
 
     const isWindows = process.platform === "win32"
-    const shell = LocalSandbox.resolveShell()
+    const shell = await LocalSandbox.resolveShell()
     const shellBase = path.basename(shell).replace(/\.exe$/i, "")
     const isBashLikeShell = ["bash", "sh", "zsh"].includes(shellBase)
 
@@ -3062,19 +3196,24 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     // Package install commands (pip, npm, cargo, etc.) often fail in elevated mode due to
     // permission issues with TEMP, site-packages, or certificate stores. Route them directly
     // to unelevated mode to avoid the wasted elevated attempt + fallback retry overhead.
-    // Await the Python-dir prewarm so the per-user-install check in shouldPreferUnelevated
-    // has a populated cache even on the very first command.
+    // Keep Python-dir probing in the background for ordinary commands. shouldPreferUnelevated
+    // waits for it only when the command is a direct python/py invocation.
     if (effectiveMode === "elevated" && sandboxModeOverride !== "unelevated") {
-      await LocalSandbox.resolvePythonDir().catch(() => null)
-      if (LocalSandbox.shouldPreferUnelevated(command)) {
+      if (await LocalSandbox.shouldPreferUnelevated(command)) {
         console.log("[LocalSandbox] package-install command detected; routing directly to unelevated")
         return this.executeInWindowsSandbox(command, attempt, "unelevated", timeoutMs, overrideAbortSignal)
       }
     }
 
     const isElevatedSandbox = effectiveMode === "elevated"
+    const sandboxCacheRoot = await LocalSandbox.raceWithAbort(this._sandboxCacheRootPromise, effectiveAbortSignal)
+      .catch((err) => {
+        if (LocalSandbox.isAbortError(err)) throw err
+        console.warn("[LocalSandbox] failed to resolve canonical sandbox cache root during execute:", err)
+        return this._sandboxCacheRoot
+      })
     const sandboxCacheRoots = Array.from(new Set([
-      this._sandboxCacheRoot,
+      sandboxCacheRoot,
       this._sharedSandboxCacheRoot
     ].map((dir) => path.win32.normalize(dir))))
     const sandboxCacheWritableRootsOverride = effectiveMode === "elevated" || effectiveMode === "unelevated"
@@ -3091,7 +3230,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
             truncated: false
           }
         }
-        if (!isElevatedSetupComplete()) {
+        if (!(await isElevatedSetupComplete())) {
           return {
             output: "Elevated 沙箱尚未完成初始化。请在设置中手动完成 elevated 配置，或切换到 unelevated/none 后重试。",
             exitCode: 1,
@@ -3118,7 +3257,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     let sandboxCacheDirs: string[] = []
     try {
       sandboxCacheDirs = await LocalSandbox.raceWithAbort(
-        LocalSandbox.prepareSandboxCacheDirs(this._sandboxCacheRoot, this._sharedSandboxCacheRoot),
+        LocalSandbox.prepareSandboxCacheDirs(sandboxCacheRoot, this._sharedSandboxCacheRoot),
         effectiveAbortSignal
       )
     } catch (err) {
@@ -3130,7 +3269,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
 
     // Git Bash (MSYS2) crashes under restricted tokens — always use PowerShell/cmd
     console.log(`[LocalSandbox] elevated: pre-setup done at +${Date.now() - methodStartMs}ms, resolving shell...`)
-    const { shell, flags: shellFlags } = LocalSandbox.resolveWindowsSandboxShell()
+    const { shell, flags: shellFlags } = await LocalSandbox.resolveWindowsSandboxShell()
 
     // Force UTF-8 for all output streams (stdout + stderr).
     const shellBase = path.basename(shell).replace(/\.exe$/i, "").toLowerCase()
@@ -3165,11 +3304,11 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       : ""
     // Unelevated sandbox: set shared tool env vars to the persistent writable cache root.
     const unelevatedJvmPreamble = !isElevatedSandbox && effectiveMode !== "none"
-      ? LocalSandbox.buildUnelevatedEnvPreamble(shellBase, this._sandboxCacheRoot, this._sharedSandboxCacheRoot)
+      ? LocalSandbox.buildUnelevatedEnvPreamble(shellBase, sandboxCacheRoot, this._sharedSandboxCacheRoot)
       : ""
     const unelevatedPreamble = [clearProxyPreamble, unelevatedJvmPreamble].filter(Boolean).join(shellBase === "cmd" ? " & " : "; ")
     const sandboxUserEnvPreamble = isElevatedSandbox
-      ? LocalSandbox.buildElevatedSandboxEnvPreamble(shellBase, this._sandboxCacheRoot, this._sharedSandboxCacheRoot, this.env)
+      ? LocalSandbox.buildElevatedSandboxEnvPreamble(shellBase, sandboxCacheRoot, this._sharedSandboxCacheRoot, this.env)
       : unelevatedPreamble
     const commandWithSandboxEnv = sandboxUserEnvPreamble
       ? shellBase === "cmd"
@@ -3256,7 +3395,11 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
         }
       }
       const aclGrantStart = Date.now()
-      await Promise.all(aclDirs.map((dir) => LocalSandbox.grantSandboxWriteAcl(dir, this.runId)))
+      await mapLimit(
+        aclDirs,
+        LocalSandbox.ACL_OPERATION_CONCURRENCY,
+        (dir) => LocalSandbox.grantSandboxWriteAcl(dir, this.runId)
+      )
       console.log(`[LocalSandbox] ACL grant took ${Date.now() - aclGrantStart}ms for ${aclDirs.length} dirs`)
     }
 
@@ -3289,7 +3432,8 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       const proc = spawn(this.codexExePath, sandboxArgs, {
         cwd: this.workingDir,
         env: sandboxEnv,
-        stdio: ["ignore", "pipe", "pipe"]
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true
       })
 
       console.log(`[LocalSandbox] spawned pid=${proc.pid} at +${Date.now() - execStartMs}ms`)
@@ -3540,14 +3684,16 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
             cwd: this.workingDir,
             env: this.env,
             stdio: ["pipe", "pipe", "pipe"],
-            detached: false
+            detached: false,
+            windowsHide: true
           })
         : spawn(command, {
             shell,
             cwd: this.workingDir,
             env: this.env,
             stdio: ["ignore", "pipe", "pipe"],
-            detached: !isWindows
+            detached: !isWindows,
+            windowsHide: true
           })
 
       if (isBashOnWin && proc.stdin) {

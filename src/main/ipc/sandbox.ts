@@ -1,5 +1,5 @@
 import { app, BrowserWindow, IpcMain } from "electron"
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, unlinkSync } from "fs"
+import fs from "fs/promises"
 import { execFile } from "child_process"
 import { homedir, tmpdir } from "os"
 import { join, resolve } from "path"
@@ -23,6 +23,32 @@ const SANDBOX_USERS_PATH = join(CODEX_HOME, ".sandbox-secrets", "sandbox_users.j
 const ELEVATED_WORKSPACES_PATH = join(CODEX_HOME, ".sandbox", "elevated_workspaces.json")
 const SETUP_VERSION = 5
 const execFileP = promisify(execFile)
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function mapLimit<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length)
+  let nextIndex = 0
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex++
+      results[index] = await fn(items[index])
+    }
+  })
+  await Promise.all(workers)
+  return results
+}
 
 function createAbortError(): Error {
   const error = new Error("Operation aborted")
@@ -119,7 +145,7 @@ export function getElevatedSystemSensitivePathError(dir: string): string | null 
   return `Elevated 模式可以读取系统目录，也可能执行不涉及写入的命令；但当前模式需要为工作区准备写入权限，不支持将系统敏感目录作为工作区：${dir}。请选择普通项目目录作为工作区；如只需读取或执行非写入命令，请切换到 readonly/unelevated/none 后重试。`
 }
 
-export function validateElevatedWorkspaceRoot(workspacePath: string): ElevatedWorkspaceRootValidation {
+export async function validateElevatedWorkspaceRoot(workspacePath: string): Promise<ElevatedWorkspaceRootValidation> {
   if (!workspacePath || typeof workspacePath !== "string" || !workspacePath.trim()) {
     return { ok: false, reason: "empty-path", error: "Elevated 工作区路径不能为空。" }
   }
@@ -174,7 +200,7 @@ export function validateElevatedWorkspaceRoot(workspacePath: string): ElevatedWo
   }
 
   try {
-    const stat = statSync(resolved)
+    const stat = await fs.stat(resolved)
     if (!stat.isDirectory()) {
       return {
         ok: false,
@@ -195,7 +221,7 @@ export function validateElevatedWorkspaceRoot(workspacePath: string): ElevatedWo
   return { ok: true, resolved }
 }
 
-function isSafeElevatedPreparedRoot(dir: string): boolean {
+function isPotentiallySafeElevatedPreparedRoot(dir: string): boolean {
   if (!dir || typeof dir !== "string") return false
   if (/^[\\/]{2}/.test(dir)) return false
 
@@ -208,65 +234,78 @@ function isSafeElevatedPreparedRoot(dir: string): boolean {
 
   if (/^[a-z]:$/i.test(key)) return false
   if (getElevatedSystemSensitivePathError(dir)) return false
+  return true
+}
 
+async function isSafeElevatedPreparedRoot(dir: string): Promise<boolean> {
+  if (!isPotentiallySafeElevatedPreparedRoot(dir)) return false
   try {
-    return statSync(resolve(dir)).isDirectory()
+    return (await fs.stat(resolve(dir))).isDirectory()
   } catch {
     return false
   }
 }
 
 /** Load previously configured workspace paths from disk into the in-memory set. */
-function loadElevatedPreparedRoots(): void {
+async function loadElevatedPreparedRoots(): Promise<void> {
   try {
-    if (!existsSync(ELEVATED_WORKSPACES_PATH)) return
-    const data = JSON.parse(readFileSync(ELEVATED_WORKSPACES_PATH, "utf-8"))
+    const data = JSON.parse(await fs.readFile(ELEVATED_WORKSPACES_PATH, "utf-8"))
     const version = typeof data.version === "number" ? data.version : SETUP_VERSION
     if (version !== SETUP_VERSION) return
-    const rawRoots = Array.isArray(data.roots)
+    const rawRoots: unknown[] = Array.isArray(data.roots)
       ? data.roots
       : Array.isArray(data.paths)
         ? data.paths
         : []
     let changed = false
-    for (const p of rawRoots) {
-      if (typeof p !== "string") continue
-      if (!isSafeElevatedPreparedRoot(p)) {
+    const roots = rawRoots.filter((p): p is string => typeof p === "string")
+    const validatedRoots = await mapLimit(roots, 8, async (root) => ({
+      root,
+      safe: await isSafeElevatedPreparedRoot(root)
+    }))
+    for (const { root, safe } of validatedRoots) {
+      if (!safe) {
         changed = true
         continue
       }
-      elevatedPreparedRoots.add(normalizeDirKey(p))
+      elevatedPreparedRoots.add(normalizeDirKey(root))
     }
     if (changed) saveElevatedPreparedRoots()
-  } catch {
-    // Corrupt or missing file — start fresh, will be overwritten on next save
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+      console.warn("[Sandbox] Failed to load elevated prepared roots:", err)
+    }
   }
 }
+
+let elevatedPreparedRootsSavePromise = Promise.resolve()
 
 /** Persist the current set of configured workspace paths to disk. */
 function saveElevatedPreparedRoots(): void {
-  try {
-    const sbxDir = join(CODEX_HOME, ".sandbox")
-    mkdirSync(sbxDir, { recursive: true })
-    writeFileSync(
-      ELEVATED_WORKSPACES_PATH,
-      JSON.stringify({ version: SETUP_VERSION, roots: [...elevatedPreparedRoots] }, null, 2)
-    )
-  } catch (err) {
+  elevatedPreparedRootsSavePromise = elevatedPreparedRootsSavePromise
+    .catch(() => { /* previous failure already logged */ })
+    .then(async () => {
+      await elevatedPreparedRootsLoadPromise
+      const snapshot = JSON.stringify({ version: SETUP_VERSION, roots: [...elevatedPreparedRoots] }, null, 2)
+      const sbxDir = join(CODEX_HOME, ".sandbox")
+      await fs.mkdir(sbxDir, { recursive: true })
+      await fs.writeFile(ELEVATED_WORKSPACES_PATH, snapshot)
+    })
+  void elevatedPreparedRootsSavePromise.catch((err) => {
     console.warn("[Sandbox] Failed to persist elevated prepared roots:", err)
-  }
+  })
 }
 
 // Load persisted roots immediately so they survive app restarts
-loadElevatedPreparedRoots()
+const elevatedPreparedRootsLoadPromise = loadElevatedPreparedRoots()
 
 /**
  * Enumerate user profile subdirectories, excluding sensitive ones.
  * Matches codex's profile_read_roots() behavior.
  */
-function profileReadRoots(userProfile: string): string[] {
+async function profileReadRoots(userProfile: string): Promise<string[]> {
   try {
-    const entries = readdirSync(userProfile, { withFileTypes: true })
+    const entries = await fs.readdir(userProfile, { withFileTypes: true })
     return entries
       .filter((entry) => {
         const name = entry.name.toLowerCase()
@@ -286,7 +325,7 @@ function notifyChanged(): void {
 }
 
 /** Resolve the directory containing codex.exe and the sandbox helper binaries. */
-function resolveCodexBinDir(): string {
+async function resolveCodexBinDir(): Promise<string> {
   if (app.isPackaged) {
     return join(process.resourcesPath, "bin", "win32")
   }
@@ -298,18 +337,21 @@ function resolveCodexBinDir(): string {
     join(app.getAppPath(), "..", "resources"),    // fallback
   ]
   for (const c of candidates) {
-    if (existsSync(join(c, "bin", "win32"))) return join(c, "bin", "win32")
+    if (await pathExists(join(c, "bin", "win32"))) return join(c, "bin", "win32")
   }
   // Last resort: use __dirname-based path even if it doesn't exist
   return join(resolve(__dirname, "../../resources"), "bin", "win32")
 }
 
 /** Check whether the elevated sandbox setup has been completed (marker exists with correct version). */
-export function isElevatedSetupComplete(): boolean {
-  if (!existsSync(SETUP_MARKER_PATH) || !existsSync(SANDBOX_USERS_PATH)) return false
+export async function isElevatedSetupComplete(): Promise<boolean> {
   try {
-    const marker = JSON.parse(readFileSync(SETUP_MARKER_PATH, "utf-8"))
-    const users = JSON.parse(readFileSync(SANDBOX_USERS_PATH, "utf-8"))
+    const [markerRaw, usersRaw] = await Promise.all([
+      fs.readFile(SETUP_MARKER_PATH, "utf-8"),
+      fs.readFile(SANDBOX_USERS_PATH, "utf-8")
+    ])
+    const marker = JSON.parse(markerRaw)
+    const users = JSON.parse(usersRaw)
     return marker.version === SETUP_VERSION
       && users.version === SETUP_VERSION
       && typeof marker.offline_username === "string"
@@ -421,15 +463,15 @@ export async function runElevatedSetupForPaths(
     return { success: false, error: "Elevated sandbox is only available on Windows" }
   }
 
-  const binDir = resolveCodexBinDir()
+  const binDir = await resolveCodexBinDir()
   const setupExe = join(binDir, "codex-windows-sandbox-setup.exe")
-  if (!existsSync(setupExe)) {
+  if (!(await pathExists(setupExe))) {
     return { success: false, error: `找不到沙箱配置程序: ${setupExe}` }
   }
 
   // Ensure .sandbox directory exists
   const sbxDir = join(CODEX_HOME, ".sandbox")
-  mkdirSync(sbxDir, { recursive: true })
+  await fs.mkdir(sbxDir, { recursive: true })
 
   const home = homedir()
   const tmpDir = process.env.TEMP || process.env.TMP || join(home, "AppData", "Local", "Temp")
@@ -440,8 +482,10 @@ export async function runElevatedSetupForPaths(
   const validatedWorkspacePaths: string[] = []
   const rejectedWorkspaceErrors: string[] = []
   if (workspacePaths) {
-    for (const p of workspacePaths) {
-      const validation = validateElevatedWorkspaceRoot(p)
+    const validations = await Promise.all(
+      workspacePaths.map(async (p) => ({ path: p, validation: await validateElevatedWorkspaceRoot(p) }))
+    )
+    for (const { path: p, validation } of validations) {
       if (!validation.ok || !validation.resolved) {
         const error = validation.error || `Elevated 工作区路径无效：${p}`
         console.warn(`[Sandbox] Rejected write_root: ${error}`)
@@ -458,19 +502,22 @@ export async function runElevatedSetupForPaths(
   }
 
   // read_roots: user profile subdirs (excluding sensitive dirs) + standard Windows dirs
-  const readRoots = profileReadRoots(userProfile)
+  const readRoots = await profileReadRoots(userProfile)
   const standardReadDirs = [
     "C:\\Windows",
     "C:\\Program Files",
     "C:\\Program Files (x86)",
     "C:\\ProgramData"
   ]
-  for (const d of standardReadDirs) {
-    if (existsSync(d) && !readRoots.includes(d)) readRoots.push(d)
+  const existingStandardReadDirs = await Promise.all(
+    standardReadDirs.map(async (dir) => (await pathExists(dir) ? dir : null))
+  )
+  for (const d of existingStandardReadDirs) {
+    if (d && !readRoots.includes(d)) readRoots.push(d)
   }
 
   // Determine if this is initial setup or refresh (workspace ACL update)
-  const isRefresh = isElevatedSetupComplete()
+  const isRefresh = await isElevatedSetupComplete()
 
   const payload = {
     version: SETUP_VERSION,
@@ -505,7 +552,7 @@ export async function runElevatedSetupForPaths(
         `if ($null -eq $p) { exit 1 }`,
         `exit $p.ExitCode`,
       ].join("\r\n")
-      writeFileSync(tmpScript, psScript, "utf-8")
+      await fs.writeFile(tmpScript, psScript, "utf-8")
 
       try {
         await execFileWithAbort("powershell", [
@@ -514,10 +561,10 @@ export async function runElevatedSetupForPaths(
           "-File", tmpScript
         ], {
           timeout: 120_000,
-          windowsHide: false
+          windowsHide: true
         }, abortSignal)
       } finally {
-        try { unlinkSync(tmpScript) } catch {}
+        await fs.unlink(tmpScript).catch(() => {})
       }
     }
   } catch (err) {
@@ -533,7 +580,7 @@ export async function runElevatedSetupForPaths(
 
   markElevatedRootsPrepared(validatedWorkspacePaths)
 
-  if (isElevatedSetupComplete()) {
+  if (await isElevatedSetupComplete()) {
     return { success: true }
   }
   return { success: false, error: "沙箱配置未完成，请重试" }
@@ -547,11 +594,16 @@ export function areElevatedRootsPrepared(dirs: string[]): boolean {
   return dirs.every((dir) => isElevatedRootPrepared(dir))
 }
 
+export async function areElevatedRootsPreparedAsync(dirs: string[]): Promise<boolean> {
+  await elevatedPreparedRootsLoadPromise
+  return areElevatedRootsPrepared(dirs)
+}
+
 /** Mark elevated roots as prepared, and persist to disk. */
 export function markElevatedRootsPrepared(dirs: string[]): void {
   let changed = false
   for (const dir of dirs) {
-    if (!isSafeElevatedPreparedRoot(dir)) continue
+    if (!isPotentiallySafeElevatedPreparedRoot(dir)) continue
     const key = normalizeDirKey(dir)
     if (!elevatedPreparedRoots.has(key)) {
       elevatedPreparedRoots.add(key)
@@ -600,7 +652,7 @@ export function registerSandboxHandlers(ipcMain: IpcMain): void {
   })
 
   ipcMain.handle("sandbox:checkElevatedSetup", async (): Promise<{ setupComplete: boolean }> => {
-    return { setupComplete: isElevatedSetupComplete() }
+    return { setupComplete: await isElevatedSetupComplete() }
   })
 
   ipcMain.handle(
@@ -621,7 +673,7 @@ export function registerSandboxHandlers(ipcMain: IpcMain): void {
     "sandbox:completeNux",
     async (_event, mode: "elevated" | "unelevated" | "none"): Promise<void> => {
       if (mode === "elevated") {
-        if (!isElevatedSetupComplete()) {
+        if (!(await isElevatedSetupComplete())) {
           const result = await runElevatedSetupForPaths()
           if (!result.success) {
             // Elevated setup failed — fall back to unelevated mode instead of blocking the app
