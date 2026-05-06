@@ -1062,6 +1062,195 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       || (lower.includes("accessdeniedexception") || lower.includes("access is denied"))
   }
 
+  private static readonly GIT_NETWORK_SUBCOMMANDS = new Set([
+    "clone",
+    "fetch",
+    "pull"
+  ])
+
+  private static readonly GIT_SUBMODULE_METADATA_SUBCOMMANDS = new Set([
+    "init",
+    "sync",
+    "update"
+  ])
+
+  private static readonly GIT_LFS_METADATA_SUBCOMMANDS = new Set([
+    "fetch",
+    "pull"
+  ])
+
+  private static readonly GIT_GLOBAL_OPTIONS_WITH_VALUE = new Set([
+    "-c",
+    "--config-env",
+    "--exec-path",
+    "--git-dir",
+    "--namespace",
+    "--super-prefix",
+    "--work-tree"
+  ])
+
+  private static tokenizeRoutingCommand(command: string): string[] | null {
+    const tokens: string[] = []
+    let current = ""
+    let quote: "'" | "\"" | null = null
+    let escaped = false
+
+    const pushCurrent = () => {
+      if (current.length > 0) {
+        tokens.push(current)
+        current = ""
+      }
+    }
+
+    for (const ch of command.trim()) {
+      if (escaped) {
+        current += ch
+        escaped = false
+        continue
+      }
+      if (quote) {
+        if (ch === quote) {
+          quote = null
+          continue
+        }
+        if (quote === "\"" && ch === "\\") {
+          escaped = true
+          continue
+        }
+        current += ch
+        continue
+      }
+      if (ch === "'" || ch === "\"") {
+        quote = ch
+        continue
+      }
+      if (/\s/.test(ch)) {
+        pushCurrent()
+        continue
+      }
+      if ("|&;<>`".includes(ch)) {
+        return null
+      }
+      current += ch
+    }
+
+    if (quote || escaped) return null
+    pushCurrent()
+    return tokens
+  }
+
+  private static executableBaseName(token: string): string {
+    return path.win32.basename(token).replace(/\.(?:exe|cmd|bat)$/i, "").toLowerCase()
+  }
+
+  private static gitRoutingTokens(command: string): string[] | null {
+    const tokens = LocalSandbox.tokenizeRoutingCommand(command)
+    if (!tokens || tokens.length === 0) return null
+
+    const executable = LocalSandbox.executableBaseName(tokens[0])
+    if (executable === "cmd") {
+      const commandSwitchIndex = tokens.findIndex((token, index) => (
+        index > 0 && ["/c", "-c"].includes(token.toLowerCase())
+      ))
+      if (commandSwitchIndex !== -1 && commandSwitchIndex + 1 < tokens.length) {
+        return LocalSandbox.tokenizeRoutingCommand(tokens.slice(commandSwitchIndex + 1).join(" "))
+      }
+    }
+
+    if (executable === "powershell" || executable === "pwsh") {
+      const commandSwitchIndex = tokens.findIndex((token, index) => (
+        index > 0 && ["-command", "-c"].includes(token.toLowerCase())
+      ))
+      if (commandSwitchIndex !== -1 && commandSwitchIndex + 1 < tokens.length) {
+        return LocalSandbox.tokenizeRoutingCommand(tokens.slice(commandSwitchIndex + 1).join(" "))
+      }
+    }
+
+    return tokens
+  }
+
+  private static isGitExecutableToken(token: string): boolean {
+    return LocalSandbox.executableBaseName(token) === "git"
+  }
+
+  private static findGitMetadataSubcommand(tokens: string[]): string | null {
+    if (!LocalSandbox.isGitExecutableToken(tokens[0])) return null
+
+    let skipNext = false
+    for (let i = 1; i < tokens.length; i++) {
+      if (skipNext) {
+        skipNext = false
+        continue
+      }
+
+      const lower = tokens[i].toLowerCase()
+      if (LocalSandbox.GIT_GLOBAL_OPTIONS_WITH_VALUE.has(lower)) {
+        skipNext = true
+        continue
+      }
+      if (
+        lower.startsWith("--config-env=")
+        || lower.startsWith("--exec-path=")
+        || lower.startsWith("--git-dir=")
+        || lower.startsWith("--namespace=")
+        || lower.startsWith("--super-prefix=")
+        || lower.startsWith("--work-tree=")
+        || (lower.startsWith("-c") && lower.length > 2)
+      ) {
+        continue
+      }
+      if (lower === "--" || lower.startsWith("-")) {
+        continue
+      }
+
+      if (LocalSandbox.GIT_NETWORK_SUBCOMMANDS.has(lower)) {
+        return lower
+      }
+      if (lower === "submodule" || lower === "lfs") {
+        const nestedSubcommand = LocalSandbox.findNestedGitSubcommand(tokens.slice(i + 1))
+        const allowedNestedSubcommands = lower === "submodule"
+          ? LocalSandbox.GIT_SUBMODULE_METADATA_SUBCOMMANDS
+          : LocalSandbox.GIT_LFS_METADATA_SUBCOMMANDS
+        return nestedSubcommand && allowedNestedSubcommands.has(nestedSubcommand)
+          ? `${lower} ${nestedSubcommand}`
+          : null
+      }
+
+      return null
+    }
+
+    return null
+  }
+
+  private static findNestedGitSubcommand(tokens: string[]): string | null {
+    for (const token of tokens) {
+      const lower = token.toLowerCase()
+      if (lower === "--" || lower.startsWith("-")) {
+        continue
+      }
+      return lower
+    }
+    return null
+  }
+
+  private static shouldRunGitMetadataOutsideWindowsSandbox(command: string): boolean {
+    const tokens = LocalSandbox.gitRoutingTokens(command)
+    return !!tokens && LocalSandbox.findGitMetadataSubcommand(tokens) !== null
+  }
+
+  private static isGitMetadataPermissionFailure(output: string): boolean {
+    const lower = output.toLowerCase()
+    const denied = lower.includes("permission denied")
+      || lower.includes("access is denied")
+      || output.includes("拒绝访问")
+    const gitMetadata = lower.includes(".git/")
+      || lower.includes(".git\\")
+      || lower.includes("fetch_head")
+      || lower.includes("index.lock")
+      || lower.includes("packed-refs")
+    return denied && gitMetadata
+  }
+
   /**
    * Detect commands that are known to fail in elevated mode due to permission/cert issues.
    * These are routed directly to unelevated mode to avoid wasted elevated attempt.
@@ -1162,15 +1351,6 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       || /\bbundle\s+(install|update|add)\b/.test(cmd)
       // C/C++
       || /\bvcpkg\s+install\b/.test(cmd)
-      // Git network operations: elevated sandbox user lacks Windows Credential Store access
-      // (SEC_E_NO_CREDENTIALS for HTTPS) and has empty ~/.ssh (SSH key auth fails with
-      // "Permission denied (publickey)"). Proactive unelevated routing avoids the wasted
-      // elevated attempt and the directory-pollution problem git clone/submodule have
-      // (partial .git/ left behind makes the unelevated retry fail).
-      || /\bgit\s+clone\b/.test(cmd)
-      || /\bgit\s+(pull|fetch|push)\b/.test(cmd)
-      || /\bgit\s+submodule\b/.test(cmd)
-      || /\bgit\s+lfs\b/.test(cmd)
     ) {
       return true
     }
@@ -3119,6 +3299,21 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     console.log(`[LocalSandbox] executeRaw: command="${command}" effectiveMode=${effectiveSandboxMode} override=${sandboxModeOverride} timeout=${effectiveTimeout}ms overrideAbort=${!!overrideAbortSignal}`)
 
     if (process.platform === "win32" && effectiveSandboxMode !== "none") {
+      if (LocalSandbox.shouldRunGitMetadataOutsideWindowsSandbox(command)) {
+        if (effectiveSandboxMode !== "elevated" && effectiveSandboxMode !== "unelevated") {
+          console.warn("[LocalSandbox] git metadata command is blocked by readonly Windows sandbox")
+          return {
+            output: "Git metadata commands such as pull/fetch/clone cannot run in readonly Windows sandbox mode because they modify .git. Switch to elevated/unelevated/none and retry.",
+            exitCode: 1,
+            truncated: false
+          }
+        }
+        // Codex workspace-write policies intentionally protect .git inside writable
+        // roots. Git network commands mutate refs/FETCH_HEAD/index metadata, so they
+        // need the host token that already owns the repository and credentials.
+        console.warn("[LocalSandbox] git metadata command detected; running outside Windows sandbox")
+        return this.executeRawUnserialized(command, "none", timeoutMs, overrideAbortSignal)
+      }
       console.log("[LocalSandbox] -> executeInWindowsSandbox")
       return this.executeInWindowsSandbox(command, 1, effectiveSandboxMode, effectiveTimeout, overrideAbortSignal)
     }
@@ -3613,6 +3808,16 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
         exitCode: result.exitCode ?? 1,
         truncated: result.truncated
       }
+    }
+
+    if (
+      (effectiveMode === "elevated" || effectiveMode === "unelevated")
+      && result.exitCode !== 0
+      && LocalSandbox.shouldRunGitMetadataOutsideWindowsSandbox(command)
+      && LocalSandbox.isGitMetadataPermissionFailure(result.output)
+    ) {
+      console.warn("[LocalSandbox] Windows sandbox could not write git metadata; retrying outside sandbox")
+      return this.executeRaw(command, "none", timeoutMs, overrideAbortSignal)
     }
 
     if (

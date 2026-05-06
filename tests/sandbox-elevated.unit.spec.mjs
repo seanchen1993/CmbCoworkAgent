@@ -363,6 +363,60 @@ test("elevated command routing avoids unconditional Python lookup waits", () => 
   )
 })
 
+test("git metadata updates run with host token instead of Windows sandbox", () => {
+  const routingHelpersSection = sectionBetween(
+    localSandboxSource,
+    "private static readonly GIT_NETWORK_SUBCOMMANDS",
+    "  /**\r\n   * Detect commands that are known to fail in elevated mode"
+  )
+  const rawExecutionSection = sectionBetween(
+    localSandboxSource,
+    "private async executeRawUnserialized(",
+    "    const isWindows = process.platform === \"win32\""
+  )
+  const sandboxResultSection = sectionBetween(
+    localSandboxSource,
+    "    if (isElevatedSandbox && result.exitCode !== 0 && result.output.includes(\"setup refresh failed\"))",
+    "    console.log(`[LocalSandbox] executeInWindowsSandbox total:"
+  )
+
+  assert.match(
+    routingHelpersSection,
+    /GIT_NETWORK_SUBCOMMANDS[\s\S]*"clone"[\s\S]*"fetch"[\s\S]*"pull"/,
+    "git clone/fetch/pull should be treated as local .git metadata updates"
+  )
+  assert.doesNotMatch(
+    routingHelpersSection,
+    /GIT_NETWORK_SUBCOMMANDS[\s\S]*"push"/,
+    "git push should not be folded into the metadata-write sandbox bypass"
+  )
+  assert.match(
+    routingHelpersSection,
+    /executableBaseName\(tokens\[0\]\)[\s\S]*cmd[\s\S]*powershell[\s\S]*pwsh/,
+    "routing should understand common Windows shell wrappers instead of relying on a bare regex"
+  )
+  assert.match(
+    rawExecutionSection,
+    /shouldRunGitMetadataOutsideWindowsSandbox\(command\)[\s\S]*executeRawUnserialized\(command, "none"/,
+    "git metadata commands should run with the host token before entering Codex Windows sandbox"
+  )
+  assert.match(
+    rawExecutionSection,
+    /Codex workspace-write policies intentionally protect \.git/,
+    "the bypass should document the Codex .git protection policy it works around"
+  )
+  assert.match(
+    sandboxResultSection,
+    /isGitMetadataPermissionFailure\(result\.output\)[\s\S]*executeRaw\(command, "none"/,
+    "missed git metadata permission failures should retry once outside the Windows sandbox"
+  )
+  assert.match(
+    sandboxResultSection,
+    /shouldFallbackToUnelevatedForNetworkAuth/,
+    "the existing elevated-to-unelevated fallback should remain available for non-git network auth failures"
+  )
+})
+
 test("sandbox execute helpers do not create visible console windows", () => {
   const windowsSandboxSpawnSection = sectionBetween(
     localSandboxSource,
