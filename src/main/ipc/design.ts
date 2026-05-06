@@ -88,10 +88,9 @@ Before writing a single line of HTML, decide what format best serves the content
 
 1. **Always output a complete HTML file** — start with \`<!DOCTYPE html>\`, end with \`</html>\`. No fragments, no partial snippets.
 2. **Self-contained** — inline all CSS in \`<style>\` and all JS in \`<script>\`. CDN links for fonts or libraries are fine.
-3. **Three variations** — unless told otherwise, always produce exactly **3 distinct variations** within a single HTML file:
+3. **Two variations** — unless told otherwise, always produce exactly **2 distinct variations** within a single HTML file:
    - **Variation A** — conventional, safe, closest to established patterns
-   - **Variation B** — balanced, refines the concept with one interesting choice
-   - **Variation C** — bold, novel, pushes the aesthetic or interaction in a surprising direction
+   - **Variation B** — bold, novel, pushes the aesthetic or interaction in a surprising direction
 
    **CRITICAL — wrapping structure:**
    Each variation MUST be a direct child of \`<body>\`, carry the EXACT \`id\` attribute shown, AND a \`data-label\` attribute with a short, descriptive Chinese name (2–5 characters) that captures the visual personality of that variation — NOT generic labels like "方案A" or "变体一".
@@ -106,8 +105,7 @@ Before writing a single line of HTML, decide what format best serves the content
    Structure:
    <body>
      <div id="variation-a" data-label="极简留白"> ALL of Variation A content here </div>
-     <div id="variation-b" data-label="暖色渐变"> ALL of Variation B content here </div>
-     <div id="variation-c" data-label="暗夜沉浸"> ALL of Variation C content here </div>
+     <div id="variation-b" data-label="暗夜沉浸"> ALL of Variation B content here </div>
    </body>
    - Do NOT nest variations inside any other wrapper element.
    - Each variation div must be fully self-contained (complete UI, no shared DOM between variations).
@@ -203,7 +201,7 @@ If the user's prompt contains "CURRENT DESIGN HTML (iterate on this", you are in
 - Apply the user's follow-up instruction precisely. Change only what is asked; preserve everything else (colors, fonts, spacing, overall structure, content).
 - **Do NOT regenerate from scratch.** The existing design is the baseline — iterate on it.
 - If the instruction is a targeted tweak (e.g. "change button color", "add a footer"), output **one refined version** — no A/B/C labels needed.
-- If the instruction is broad or exploratory (e.g. "make it bolder", "try a dark theme"), output **3 variations** as usual, each iterating from the existing base in a different direction.
+- If the instruction is broad or exploratory (e.g. "make it bolder", "try a dark theme"), output **2 variations** as usual, each iterating from the existing base in a different direction.
 - Either way, output a complete, self-contained HTML file.
 
 ## Output format
@@ -217,60 +215,72 @@ Your response must end with: </html>
 // System Prompt — Screenshot / Image reference generation
 // ─────────────────────────────────────────────────────────
 
-const IMAGE_DESIGN_SYSTEM_PROMPT = `You are an expert designer. The user has provided a screenshot or image as a design reference. Analyze the image carefully and create an improved or reimagined version as a complete, self-contained HTML page.
+const IMAGE_DESIGN_SYSTEM_PROMPT = `You are an expert frontend engineer specializing in UI cloning. The user has uploaded a screenshot of a UI. Your ONLY job is to reproduce that UI as a pixel-accurate, self-contained HTML page.
+
+## PRIME DIRECTIVE — CLONE, do NOT redesign
+
+Study every pixel of the screenshot and reconstruct what you see:
+
+- **Layout structure**: Identify the exact column layout, fixed sidebars, sticky headers, panel widths. Match them precisely using CSS Grid or Flexbox.
+- **Colors**: Copy the exact colors from the screenshot — background colors, text colors, border colors, button colors, highlight/accent colors. Do NOT substitute with oklch() or "nicer" alternatives.
+- **Typography**: Match font sizes, font weights, letter-spacing, and text alignment visible in the screenshot. Reproduce all visible text content character-for-character.
+- **Spacing**: Match padding, gaps, and margins as closely as possible.
+- **Components**: Reproduce every UI component you see — navigation tabs, breadcrumbs, form inputs, dropdowns, cards, tables, buttons, badges, tags, icons, avatars, tooltips, accordions, modals.
+- **State**: Reproduce the visual state shown (e.g. which tab is active, which row is selected, what text is in inputs).
+- **Icons**: Use Unicode symbols, emoji, or inline SVG to approximate icons. Do NOT skip icons visible in the UI.
+- **Chinese text**: Copy all Chinese text exactly as shown. Do not translate or paraphrase.
+
+You are NOT improving the design. You are NOT simplifying it. You are NOT adding your own style. You are CLONING it.
+
+## Implementation strategy
+
+1. Start by identifying the top-level layout (e.g. fixed sidebar + main content, or header + two-column body)
+2. Sample the exact color values from the screenshot for backgrounds, borders, and text
+3. Reproduce the header / navigation first, then work left-to-right, top-to-bottom through each panel
+4. Use CSS classes that mirror the component semantics (e.g. .tab-bar, .sidebar, .card, .form-row)
+5. Inline all CSS — no external stylesheets except Google Fonts if a specific font is visible
+6. The final output must fill a standard browser viewport (min-height: 100vh) without scrolling if the screenshot shows a full-page layout
 
 ## Output rules
 
-1. **Always output a complete HTML file** — start with \`<!DOCTYPE html>\`, end with \`</html>\`. No fragments, no partial snippets.
-2. **Self-contained** — inline all CSS in \`<style>\` and all JS in \`<script>\`. CDN links for fonts or libraries are fine.
-3. **Single design** — output ONE polished design (no A/B/C variation wrappers). The entire UI goes directly in \`<body>\`.
-4. **No filler content** — every element must earn its place. Never pad with placeholder stats, dummy icons, or lorem ipsum.
+1. **Complete HTML file** — start with \`<!DOCTYPE html>\`, end with \`</html>\`
+2. **Self-contained** — all CSS in \`<style>\`, all JS in \`<script>\`. Google Fonts CDN is allowed.
+3. **No A/B/C variations** — one single page, exactly as shown in the screenshot
+4. **Real content** — every label, value, and placeholder text must match the screenshot. No lorem ipsum.
 
-## Design quality bar
+## Tweaks (Edit mode) — REQUIRED
 
-**Colors**: Use \`oklch()\` to define harmonious palettes. Match the brand/style visible in the reference image.
-**Typography**: Commit to a clear type scale. Avoid Inter, Roboto, Arial — pick something with character (DM Sans, Geist, Epilogue, Sora). Load from Google Fonts.
-**Spacing**: Generous. Cards: 24px+. Use CSS grid.
-**Details**: \`text-wrap: pretty\`, subtle box-shadows, smooth transitions (150–200ms ease), focus rings, hover states.
-
-## Tweaks (Edit mode) — REQUIRED in every output
-
-Every HTML file you produce **must** include a self-contained Tweaks system. Follow this protocol exactly.
-
-### 1 — Define tweakable defaults with EDITMODE markers
+Include the Tweaks protocol so the host app can enable live editing. Extract real values from the screenshot:
 
 \`\`\`js
-const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{"primaryColor":"#D97757","headingSize":48,"bodySize":16,"dark":false,"ctaText":"Get Started","radius":12}/*EDITMODE-END*/;
-\`\`\`
+// Example — replace with actual values sampled from the screenshot:
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{"primaryColor":"#4F6EF7","bodyBg":"#F5F7FA","fontSize":14,"radius":6,"sidebarWidth":240}/*EDITMODE-END*/;
 
-There must be **exactly one** such block, inside an inline \`<script>\` tag.
+function applyTweaks(edits) {
+  var t = Object.assign({}, TWEAK_DEFAULTS, edits);
+  var r = document.documentElement;
+  r.style.setProperty('--primary', t.primaryColor);
+  r.style.setProperty('--body-bg', t.bodyBg);
+  r.style.setProperty('--font-size', t.fontSize + 'px');
+  r.style.setProperty('--radius', t.radius + 'px');
+  r.style.setProperty('--sidebar-width', t.sidebarWidth + 'px');
+}
 
-### 2 — Register the postMessage listener BEFORE announcing availability
-
-\`\`\`js
+// IMPORTANT: register handler FIRST, then announce readiness
 window.addEventListener('message', function(e) {
-  if (e.data && e.data.type === '__activate_edit_mode')   showTweaksPanel();
-  if (e.data && e.data.type === '__deactivate_edit_mode') hideTweaksPanel();
   if (e.data && e.data.type === '__set_tweak_keys') applyTweaks(e.data.edits);
+  if (e.data && e.data.type === '__activate_edit_mode')   { /* optional: show panel */ }
+  if (e.data && e.data.type === '__deactivate_edit_mode') { /* optional: hide panel */ }
 });
 window.parent.postMessage({ type: '__edit_mode_available' }, '*');
-\`\`\`
-
-### 3 — Apply defaults via CSS variables
-
-\`\`\`js
-function applyTweaks(edits) {
-  const t = Object.assign({}, TWEAK_DEFAULTS, edits);
-  const r = document.documentElement;
-  r.style.setProperty('--primary', t.primaryColor);
-  // ... etc
-}
 applyTweaks({});
 \`\`\`
 
 ## Output format
 
-Respond with ONLY the raw HTML. No explanation, no markdown fences, no preamble.
+Respond with ONLY the raw HTML. Zero explanation, zero markdown fences, zero preamble.
+First character of your response: <
+Last character of your response: >
 Your response must start with: <!DOCTYPE html>
 Your response must end with: </html>
 `
@@ -279,9 +289,11 @@ Your response must end with: </html>
 // Model factory (same pattern as optimizer.ts)
 // ─────────────────────────────────────────────────────────
 
-function getModel(): ChatOpenAI | null {
+function getModel(modelId?: string): ChatOpenAI | null {
   const configs = getCustomModelConfigs()
-  const config = configs[0]
+  const config = modelId
+    ? (configs.find((c) => c.id === modelId) ?? configs[0])
+    : configs[0]
   if (!config || !config.apiKey) return null
   return new ChatOpenAI({
     model: config.model,
@@ -307,7 +319,7 @@ export function registerDesignHandlers(): void {
   // design:ask-questions — stream questions JSON from model
   ipcMain.on(
     "design:ask-questions",
-    async (event, { sessionId, prompt }: { sessionId: string; prompt: string }) => {
+    async (event, { sessionId, prompt, modelId }: { sessionId: string; prompt: string; modelId?: string }) => {
       const channel = `design:questions:${sessionId}`
       const window = BrowserWindow.fromWebContents(event.sender)
 
@@ -323,7 +335,7 @@ export function registerDesignHandlers(): void {
       const controller = new AbortController()
       activeSessions.set(sessionId, controller)
 
-      const model = getModel()
+      const model = getModel(modelId)
       if (!model) {
         send({ type: "error", error: "No model configured. Please set up a model in Settings." })
         return
@@ -365,7 +377,7 @@ export function registerDesignHandlers(): void {
   // design:generate — streaming, same pattern as agent:invoke
   ipcMain.on(
     "design:generate",
-    async (event, { sessionId, prompt }: { sessionId: string; prompt: string }) => {
+    async (event, { sessionId, prompt, modelId }: { sessionId: string; prompt: string; modelId?: string }) => {
       const channel = `design:stream:${sessionId}`
       const window = BrowserWindow.fromWebContents(event.sender)
 
@@ -382,7 +394,7 @@ export function registerDesignHandlers(): void {
       const controller = new AbortController()
       activeSessions.set(sessionId, controller)
 
-      const model = getModel()
+      const model = getModel(modelId)
       if (!model) {
         send({ type: "error", error: "No model configured. Please set up a model in Settings." })
         return
@@ -428,11 +440,12 @@ export function registerDesignHandlers(): void {
     "design:generate-from-image",
     async (
       event,
-      { sessionId, prompt, imageData, mimeType }: {
+      { sessionId, prompt, imageData, mimeType, modelId }: {
         sessionId: string
         prompt: string
         imageData: string
         mimeType: string
+        modelId?: string
       }
     ) => {
       const channel = `design:image-stream:${sessionId}`
@@ -452,12 +465,16 @@ export function registerDesignHandlers(): void {
 
       console.log(`[Design:Image] Handler fired — sessionId=${sessionId} mimeType=${mimeType} imageDataLen=${imageData?.length ?? 0} prompt="${prompt?.slice(0, 80)}"`)
 
-      const model = getModel()
+      const model = getModel(modelId)
       if (!model) {
         console.error("[Design:Image] No model configured")
         send({ type: "error", error: "No model configured. Please set up a model in Settings." })
         return
       }
+      // Log which model is being used
+      const configs = getCustomModelConfigs()
+      const usedConfig = modelId ? configs.find((c) => c.id === modelId) : configs[0]
+      console.log(`[Design:Image] Using model="${usedConfig?.model}" baseURL="${usedConfig?.baseUrl}" — NOTE: model must support vision/multimodal input`)
       console.log("[Design:Image] Model obtained, preparing to stream…")
 
       let fullText = ""
@@ -466,7 +483,7 @@ export function registerDesignHandlers(): void {
       try {
         send({ type: "start" })
 
-        const userPrompt = prompt?.trim() || "请参考这张截图，生成一个改进版的设计页面。"
+        const userPrompt = prompt?.trim() || "请完整还原截图中的页面，包括布局、配色、所有文字内容和组件。"
         console.log(`[Design:Image] Sending to model — prompt="${userPrompt.slice(0, 80)}"`)
 
         const stream = await model.stream(
@@ -476,7 +493,8 @@ export function registerDesignHandlers(): void {
               content: [
                 {
                   type: "image_url",
-                  image_url: { url: `data:${mimeType};base64,${imageData}` },
+                  // detail:"high" asks the model to use the full image resolution for analysis
+                  image_url: { url: `data:${mimeType};base64,${imageData}`, detail: "high" },
                 },
                 { type: "text", text: userPrompt },
               ],
@@ -493,14 +511,43 @@ export function registerDesignHandlers(): void {
             fullText += token
             tokenCount++
             if (tokenCount === 1) console.log("[Design:Image] First token received ✓")
-            if (tokenCount % 100 === 0) console.log(`[Design:Image] ${tokenCount} tokens so far (${fullText.length} chars)`)
+            if (tokenCount % 1000 === 0) console.log(`[Design:Image] ${tokenCount} tokens so far (${fullText.length} chars)`)
             send({ type: "token", token })
           }
         }
 
         console.log(`[Design:Image] Stream complete — ${tokenCount} tokens, ${fullText.length} chars total`)
+        // Print full raw output so we can diagnose whether the image was seen
+        console.log(`[Design:Image] ===== RAW MODEL OUTPUT START =====`)
+        console.log(fullText.slice(0, 800))
+        console.log(`[Design:Image] ===== RAW MODEL OUTPUT END =====`)
+
         const html = extractHtml(fullText)
-        console.log(`[Design:Image] HTML extracted — ${html.length} chars, sending done`)
+
+        // Detect if the model responded with text instead of HTML.
+        // Two failure modes:
+        //   1. Not HTML at all — model said "I can't see the image" etc.
+        //   2. HTML too short (< 2000 chars) — model generated a stub, not a real clone
+        const looksLikeHtml = html.trimStart().startsWith("<!DOCTYPE") || html.trimStart().startsWith("<html")
+        if (!looksLikeHtml) {
+          console.error("[Design:Image] ❌ Model did not produce HTML — vision likely unsupported")
+          send({
+            type: "error",
+            error: `当前模型（${configs[0]?.model}）不支持图片输入。\n\n请切换到支持 Vision 的模型，如：\n• gpt-4o\n• claude-3-5-sonnet-20241022\n• gemini-1.5-pro\n\n模型实际回复：\n${fullText.slice(0, 200)}`,
+          })
+          return
+        }
+
+        if (html.length < 2000) {
+          console.warn(`[Design:Image] ⚠️ HTML too short (${html.length} chars) — model likely did not process the image`)
+          send({
+            type: "error",
+            error: `模型（${configs[0]?.model}）可能无法处理图片，生成的页面过于简单（${html.length} 字符）。\n\n请确认该模型支持 Vision 多模态输入，或切换到 gpt-4o / claude-3-5-sonnet 等模型。\n\n模型实际回复：\n${fullText.slice(0, 200)}`,
+          })
+          return
+        }
+
+        console.log(`[Design:Image] HTML extracted — ${html.length} chars, sending done ✓`)
         send({ type: "done", html })
       } catch (err) {
         if (controller.signal.aborted) {

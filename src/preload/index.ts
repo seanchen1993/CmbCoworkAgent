@@ -1698,7 +1698,8 @@ const api = {
     generate: (
       sessionId: string,
       prompt: string,
-      onEvent: (event: { type: string; token?: string; html?: string; error?: string }) => void
+      onEvent: (event: { type: string; token?: string; html?: string; error?: string }) => void,
+      modelId?: string
     ): (() => void) => {
       const channel = `design:stream:${sessionId}`
       const handler = (_: unknown, data: { type: string; token?: string; html?: string; error?: string }): void => {
@@ -1708,13 +1709,14 @@ const api = {
         }
       }
       ipcRenderer.on(channel, handler)
-      ipcRenderer.send("design:generate", { sessionId, prompt })
+      ipcRenderer.send("design:generate", { sessionId, prompt, modelId })
       return () => ipcRenderer.removeListener(channel, handler)
     },
     askQuestions: (
       sessionId: string,
       prompt: string,
-      onEvent: (event: { type: string; questions?: unknown[]; error?: string }) => void
+      onEvent: (event: { type: string; questions?: unknown[]; error?: string }) => void,
+      modelId?: string
     ): (() => void) => {
       const channel = `design:questions:${sessionId}`
       const handler = (_: unknown, data: { type: string; questions?: unknown[]; error?: string }): void => {
@@ -1724,7 +1726,7 @@ const api = {
         }
       }
       ipcRenderer.on(channel, handler)
-      ipcRenderer.send("design:ask-questions", { sessionId, prompt })
+      ipcRenderer.send("design:ask-questions", { sessionId, prompt, modelId })
       return () => ipcRenderer.removeListener(channel, handler)
     },
     generateFromImage: (
@@ -1732,7 +1734,8 @@ const api = {
       prompt: string,
       imageData: string,
       mimeType: string,
-      onEvent: (event: { type: string; token?: string; html?: string; error?: string }) => void
+      onEvent: (event: { type: string; token?: string; html?: string; error?: string }) => void,
+      modelId?: string
     ): (() => void) => {
       const channel = `design:image-stream:${sessionId}`
       const handler = (_: unknown, data: { type: string; token?: string; html?: string; error?: string }): void => {
@@ -1742,7 +1745,7 @@ const api = {
         }
       }
       ipcRenderer.on(channel, handler)
-      ipcRenderer.send("design:generate-from-image", { sessionId, prompt, imageData, mimeType })
+      ipcRenderer.send("design:generate-from-image", { sessionId, prompt, imageData, mimeType, modelId })
       return () => ipcRenderer.removeListener(channel, handler)
     },
     cancel: (sessionId: string): Promise<void> => ipcRenderer.invoke("design:cancel", sessionId),

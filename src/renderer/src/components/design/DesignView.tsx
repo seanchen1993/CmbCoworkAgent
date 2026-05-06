@@ -74,6 +74,19 @@ interface ElementStyles {
   borderRadius: number
 }
 
+interface ModelOption {
+  id: string
+  name: string
+  model: string
+}
+
+interface SkillInfo {
+  name: string
+  description: string
+  path: string
+  content?: string   // SKILL.md content, loaded on selection
+}
+
 interface TabState {
   messages: Message[]
   html: string
@@ -84,6 +97,7 @@ interface TabState {
   rightTab: RightPanelTab
   variations: VariationItem[]
   activeVariationId: string | null  // null = show full html; 'a'|'b'|'c' = show that variant
+  selectedModelId: string | null
   // Per-tab canvas controls
   tweaksOn: boolean
   activeMode: "comment" | "edit" | "draw" | null
@@ -104,6 +118,14 @@ interface TabState {
   selectedElement: { edId: string; tagName: string; styles: ElementStyles } | null
   // Screenshot attachment — image awaiting send
   attachedImage: { base64: string; mimeType: string; previewUrl: string } | null
+  // Incrementing counter — changing it forces the iframe to remount (reload)
+  reloadKey: number
+  // Currently applied skill (via "/" slash command)
+  selectedSkill: SkillInfo | null
+  // Code context attached by user
+  codeContext: Array<{ filename: string; content: string }> | null
+  // Design reference link attached by user
+  designLink: string | null
 }
 
 function makeTabState(): TabState {
@@ -129,6 +151,11 @@ function makeTabState(): TabState {
     editModeAvailable: false,
     selectedElement: null,
     attachedImage: null,
+    selectedModelId: null,
+    reloadKey: 0,
+    selectedSkill: null,
+    codeContext: null,
+    designLink: null,
   }
 }
 
@@ -142,7 +169,7 @@ function parseVariations(fullHtml: string): VariationItem[] {
     const doc = parser.parseFromString(fullHtml, "text/html")
     const headHtml = doc.head.innerHTML
 
-    return (["a", "b", "c"] as const).reduce<VariationItem[]>((acc, id) => {
+    return (["a", "b"] as const).reduce<VariationItem[]>((acc, id) => {
       const el = doc.getElementById(`variation-${id}`)
       if (!el) return acc
 
@@ -155,7 +182,7 @@ function parseVariations(fullHtml: string): VariationItem[] {
       // In a standalone file only variation-A is in the body, so those getElementById calls return
       // null → TypeError → the entire JS init crashes → blank page.
       // Fix: include hidden stub divs for the OTHER variations so JS references don't throw.
-      const otherIds = (["a", "b", "c"] as const).filter((v) => v !== id)
+      const otherIds = (["a", "b"] as const).filter((v) => v !== id)
       const stubs = otherIds.map((v) => `<div id="variation-${v}" style="display:none!important;visibility:hidden!important;position:absolute!important;pointer-events:none!important"></div>`).join("\n")
 
       const rawHtml = `<!DOCTYPE html>
@@ -195,6 +222,31 @@ const VARIATION_COLORS: Record<string, string> = {
 // This is separate from comment mode so pins stay aligned even if
 // the user scrolls before/after entering comment mode.
 // ─────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────
+// Navigation blocker — always injected on iframe load.
+// Prevents any link click or form submission from navigating
+// the iframe away from the design preview.
+// ─────────────────────────────────────────────────────────
+
+const NAV_BLOCK_INJECT = `(function(){
+  if(window.__nb_active)return;
+  window.__nb_active=true;
+  // Block <a href> navigation
+  document.addEventListener('click',function(e){
+    var el=e.target;
+    while(el&&el!==document){
+      if(el.tagName==='A'&&el.getAttribute('href')&&el.getAttribute('href')!=='#'){
+        e.preventDefault();e.stopPropagation();return;
+      }
+      el=el.parentElement;
+    }
+  },true);
+  // Block form submissions
+  document.addEventListener('submit',function(e){
+    e.preventDefault();e.stopPropagation();
+  },true);
+})();`
 
 const SCROLL_INJECT = `(function(){
   if(window.__st_active)return;
@@ -525,6 +577,12 @@ export function DesignView(): React.JSX.Element {
   const [chatTabs, setChatTabs]       = useState<ChatTab[]>([{ id: "chat-1", label: "Chat" }])
   const [activeTabId, setActiveTabId] = useState("chat-1")
   const [tabStates, setTabStates]     = useState<Record<string, TabState>>({ "chat-1": makeTabState() })
+  const [availableModels, setAvailableModels] = useState<ModelOption[]>([])
+  const [allSkills, setAllSkills] = useState<SkillInfo[]>([])
+  // Code & link modal state
+  const [codeModalOpen, setCodeModalOpen] = useState(false)
+  const [linkModalOpen, setLinkModalOpen] = useState(false)
+  const [linkModalText, setLinkModalText] = useState("")
 
   // Per-tab session tracking: tabId → { cleanup, sessionId }
   // Stored in a ref so it never triggers re-renders and isn't stale across tabs
@@ -534,7 +592,8 @@ export function DesignView(): React.JSX.Element {
   const iframeRef         = useRef<HTMLIFrameElement>(null)
   const canvasContainerRef = useRef<HTMLDivElement>(null)
   const activeTabIdRef    = useRef(activeTabId)
-  const fileInputRef      = useRef<HTMLInputElement>(null)
+  const fileInputRef      = useRef<HTMLInputElement>(null)   // images only (screenshot)
+  const attachFileInputRef = useRef<HTMLInputElement>(null)  // any file (toolbar 📎)
 
   const ts = tabStates[activeTabId] ?? makeTabState()
 
@@ -560,6 +619,20 @@ export function DesignView(): React.JSX.Element {
       const updates = typeof patch === "function" ? patch(current) : patch
       return { ...prev, [tabId]: { ...current, ...updates } }
     })
+  }, [])
+
+  // ── Fetch available model configs on mount ────────────────
+  useEffect(() => {
+    window.api.models.getCustomConfigs().then((configs) => {
+      setAvailableModels(configs.map((c) => ({ id: c.id, name: c.name, model: c.model })))
+    }).catch(() => {})
+  }, [])
+
+  // ── Fetch available skills on mount ───────────────────────
+  useEffect(() => {
+    window.api.skills.list().then((skills) => {
+      setAllSkills(skills.map((s) => ({ name: s.name, description: s.description, path: s.path })))
+    }).catch(() => {})
   }, [])
 
   // ── Keep activeTabIdRef in sync ───────────────────────────
@@ -723,7 +796,7 @@ export function DesignView(): React.JSX.Element {
 
   // ── Ask Questions ─────────────────────────────────────────
 
-  const startAskQuestions = useCallback((prompt: string, tabId: string) => {
+  const startAskQuestions = useCallback((prompt: string, tabId: string, modelId?: string) => {
     const sessionId = uuid()
     updateTs(tabId, { generationState: "asking", originalPrompt: prompt, rightTab: "questions", questions: [] })
 
@@ -740,7 +813,7 @@ export function DesignView(): React.JSX.Element {
           rightTab: "questions",   // re-assert — guards against any interleaved update
           messages: [
             ...prev.messages,
-            { role: "questions-prompt" as const, content: "we has some questions →" },
+            { role: "questions-prompt" as const, content: "请补充相关问题 →" },
           ],
         }))
         tabSessionsRef.current.delete(tabId)
@@ -754,13 +827,13 @@ export function DesignView(): React.JSX.Element {
         }))
         tabSessionsRef.current.delete(tabId)
       }
-    })
+    }, modelId)
     tabSessionsRef.current.set(tabId, { cleanup, sessionId })
   }, [updateTs])
 
   // ── Generate Design ───────────────────────────────────────
 
-  const startGeneration = useCallback((prompt: string, tabId: string, isIteration = false) => {
+  const startGeneration = useCallback((prompt: string, tabId: string, isIteration = false, modelId?: string) => {
     const sessionId = uuid()
     updateTs(tabId, (prev) => ({
       generationState: "generating",
@@ -827,14 +900,14 @@ export function DesignView(): React.JSX.Element {
         })
         tabSessionsRef.current.delete(tabId)
       }
-    })
+    }, modelId)
     tabSessionsRef.current.set(tabId, { cleanup, sessionId })
   }, [updateTs])
 
   // ── Generate Design from Screenshot ──────────────────────
 
   const startGenerationFromImage = useCallback((
-    prompt: string, imageBase64: string, mimeType: string, tabId: string
+    prompt: string, imageBase64: string, mimeType: string, tabId: string, modelId?: string
   ) => {
     const sessionId = uuid()
     console.log(`[Design:Image] startGenerationFromImage — sessionId=${sessionId} mimeType=${mimeType} base64Len=${imageBase64.length} prompt="${prompt.slice(0, 80)}"`)
@@ -891,7 +964,7 @@ export function DesignView(): React.JSX.Element {
         })
         tabSessionsRef.current.delete(tabId)
       }
-    })
+    }, modelId)
     tabSessionsRef.current.set(tabId, { cleanup, sessionId })
   }, [updateTs])
 
@@ -916,6 +989,57 @@ export function DesignView(): React.JSX.Element {
     reader.readAsDataURL(file)
     // Reset so the same file can be re-selected
     e.target.value = ""
+  }, [activeTabId, updateTs])
+
+  // ── Handle any-file attachment from toolbar 📎 ───────────
+  // Images → screenshot flow; everything else → codeContext
+  const handleAttachFile = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files
+    if (!files || files.length === 0) return
+    e.target.value = ""
+
+    const imageFiles: File[] = []
+    const codeFiles: File[]  = []
+    Array.from(files).forEach((f) => {
+      if (f.type.startsWith("image/")) imageFiles.push(f)
+      else codeFiles.push(f)
+    })
+
+    // Handle image → screenshot preview (use first image only)
+    if (imageFiles.length > 0) {
+      const img = imageFiles[0]
+      const reader = new FileReader()
+      reader.onload = (ev) => {
+        const dataUrl = ev.target?.result as string
+        const comma   = dataUrl.indexOf(",")
+        const base64  = dataUrl.slice(comma + 1)
+        const mimeType = dataUrl.slice(0, comma).match(/data:([^;]+)/)?.[1] ?? "image/png"
+        updateTs(activeTabId, { attachedImage: { base64, mimeType, previewUrl: dataUrl } })
+      }
+      reader.readAsDataURL(img)
+    }
+
+    // Handle code / text files → merge into codeContext
+    if (codeFiles.length > 0) {
+      Promise.all(
+        codeFiles.map((f) => new Promise<{ filename: string; content: string }>((res) => {
+          const r = new FileReader()
+          r.onload = (ev) => res({ filename: f.name, content: ev.target?.result as string ?? "" })
+          r.readAsText(f)
+        }))
+      ).then((newFiles) => {
+        updateTs(activeTabId, (prev) => {
+          const existing = prev.codeContext ?? []
+          const merged   = [...existing]
+          newFiles.forEach((nf) => {
+            const idx = merged.findIndex((x) => x.filename === nf.filename)
+            if (idx >= 0) merged[idx] = nf
+            else merged.push(nf)
+          })
+          return { codeContext: merged }
+        })
+      })
+    }
   }, [activeTabId, updateTs])
 
   // ── Build comment prompt helper ───────────────────────────
@@ -965,7 +1089,7 @@ ${htmlSnippet}`
         { role: "user" as const, content: `📝 ${text.trim().slice(0, 50)}${text.length > 50 ? "…" : ""}` },
       ],
     }))
-    startGeneration(prompt, tabId, true)
+    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined)
   }, [activeTabId, tabStates, updateTs, startGeneration, buildCommentPrompt])
 
   // ── Send a saved comment pin → model ─────────────────────
@@ -989,7 +1113,7 @@ ${htmlSnippet}`
         { role: "user" as const, content: `📝 ${text.trim().slice(0, 50)}${text.length > 50 ? "…" : ""}` },
       ],
     }))
-    startGeneration(prompt, tabId, true)
+    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined)
   }, [activeTabId, tabStates, updateTs, startGeneration, buildCommentPrompt])
 
   // ── Edit a saved comment's text ───────────────────────────
@@ -1071,7 +1195,7 @@ ${htmlSnippet}`
       ],
     }))
 
-    startGeneration(prompt, tabId, true)
+    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined)
   }, [activeTabId, tabStates, updateTs, startGeneration, buildCommentPrompt])
 
   // ── Send message ──────────────────────────────────────────
@@ -1079,13 +1203,39 @@ ${htmlSnippet}`
   const handleSend = useCallback(() => {
     const prompt = (tabStates[activeTabId]?.inputValue ?? "").trim()
     const attachedImage = tabStates[activeTabId]?.attachedImage ?? null
+    const selectedModelId = tabStates[activeTabId]?.selectedModelId ?? undefined
+    const selectedSkill = tabStates[activeTabId]?.selectedSkill ?? null
+    const codeContext   = tabStates[activeTabId]?.codeContext ?? null
+    const designLink    = tabStates[activeTabId]?.designLink ?? null
     if (!prompt && !attachedImage) return
     const state = tabStates[activeTabId]?.generationState ?? "idle"
     if (state === "asking" || state === "generating") return
-    updateTs(activeTabId, { inputValue: "" })
+    // Clear transient context after send (code/link are kept for follow-ups; skill clears per-send)
+    updateTs(activeTabId, { inputValue: "", selectedSkill: null })
 
     const tabId = activeTabId
     const existing = tabStates[tabId]?.messages ?? []
+
+    // Build context suffixes — included in generation prompt but not displayed in chat
+    const skillSuffix = selectedSkill
+      ? `\n\n---\n[Design skill applied: ${selectedSkill.name}]\n${selectedSkill.content?.slice(0, 4000) ?? selectedSkill.description}\n\n` +
+        `IMPORTANT: Regardless of what the skill says about output format, you MUST output a complete standalone ` +
+        `<!DOCTYPE html> … </html> file (not a component file, not a code snippet). ` +
+        `The file must include the EDITMODE Tweaks system as required by the system prompt ` +
+        `(TWEAK_DEFAULTS with /*EDITMODE-BEGIN*/…/*EDITMODE-END*/ markers, postMessage listener, applyTweaks with CSS variables). ` +
+        `Apply the skill's design tokens and patterns inside that HTML file.`
+      : ""
+    const codeSuffix = codeContext && codeContext.length > 0
+      ? "\n\n---\n[Code context — " + codeContext.length + " file(s)]\n" +
+        codeContext.map((f) => {
+          const ext = f.filename.split(".").pop() ?? ""
+          return "```" + ext + "\n// " + f.filename + "\n" + f.content.slice(0, 2000) + "\n```"
+        }).join("\n\n")
+      : ""
+    const linkSuffix = designLink
+      ? `\n\n---\n[Design reference URL: ${designLink}]\nPlease use this as a visual/layout reference for the design.`
+      : ""
+    const contextSuffix = skillSuffix + codeSuffix + linkSuffix
 
     // If a screenshot is attached — skip questions, go straight to image-based generation
     if (attachedImage) {
@@ -1093,24 +1243,23 @@ ${htmlSnippet}`
       updateTs(tabId, (prev) => ({
         messages: [
           ...prev.messages,
-          { role: "user" as const, content: userContent, imageUrl: attachedImage.previewUrl },
+          { role: "user" as const, content: userContent + (selectedSkill ? ` ⚡${selectedSkill.name}` : ""), imageUrl: attachedImage.previewUrl },
         ],
       }))
-      startGenerationFromImage(prompt, attachedImage.base64, attachedImage.mimeType, tabId)
+      startGenerationFromImage(prompt + contextSuffix, attachedImage.base64, attachedImage.mimeType, tabId, selectedModelId)
       return
     }
 
-    // Always add user message first
+    // Always add user message first (show skill tag in chat bubble)
     updateTs(tabId, (prev) => ({
-      messages: [...prev.messages, { role: "user" as const, content: prompt }],
+      messages: [...prev.messages, { role: "user" as const, content: prompt + (selectedSkill ? ` ⚡${selectedSkill.name}` : "") }],
     }))
 
     // First message → ask questions
     if (existing.length === 0) {
-      startAskQuestions(prompt, tabId)
+      startAskQuestions(prompt + contextSuffix, tabId, selectedModelId)
     } else {
       // Subsequent messages → iterate on existing design
-      // If a specific variation is active, iterate on that; otherwise use the full HTML
       const currentState = tabStates[tabId]
       const activeVarId  = currentState?.activeVariationId ?? null
       const contextHtml  = activeVarId
@@ -1137,7 +1286,7 @@ CURRENT DESIGN HTML (iterate on this — do NOT ignore it):
 ${htmlContext}`
       }
 
-      startGeneration(iterationPrompt, tabId, /* isIteration */ !!contextHtml)
+      startGeneration(iterationPrompt + contextSuffix, tabId, /* isIteration */ !!contextHtml, selectedModelId)
     }
   }, [activeTabId, tabStates, updateTs, startAskQuestions, startGeneration, startGenerationFromImage])
 
@@ -1161,7 +1310,7 @@ ${htmlContext}`
       .filter(Boolean)
       .join("\n")
 
-    const enrichedPrompt = `${originalPrompt}\n\n---\nUser's answers to clarifying questions:\n${answerLines}\n\nRemember: Generate exactly 3 variations (A / B / C) within one HTML file.`
+    const enrichedPrompt = `${originalPrompt}\n\n---\nUser's answers to clarifying questions:\n${answerLines}\n\nRemember: Generate exactly 2 variations (A / B) within one HTML file.`
 
     // Build pill tags for the user message update
     const tags = questions
@@ -1181,7 +1330,7 @@ ${htmlContext}`
       answers,
     }))
 
-    startGeneration(enrichedPrompt, tabId)
+    startGeneration(enrichedPrompt, tabId, false, state.selectedModelId ?? undefined)
   }, [activeTabId, tabStates, updateTs, startGeneration])
 
   const handleCancel = useCallback(() => {
@@ -1194,7 +1343,43 @@ ${htmlContext}`
     updateTs(activeTabId, { generationState: "idle" })
   }, [activeTabId, updateTs])
 
+  // ── Slash-command skill picker ────────────────────────────
+  // Triggered when the input value is just "/" optionally followed by a filter word
+  const slashMatch     = inputValue.match(/^\/(\S*)$/)
+  const isSlashMode    = !!slashMatch
+  const slashQuery     = (slashMatch?.[1] ?? "").toLowerCase()
+  const filteredSkills = isSlashMode
+    ? allSkills.filter((s) => !slashQuery || s.name.toLowerCase().includes(slashQuery))
+    : []
+
+  const handleSkillSelect = useCallback(async (skill: SkillInfo) => {
+    setInputValue("")  // clear "/" from input
+    // Optimistically set skill without content first
+    updateTs(activeTabId, (prev) => ({ ...prev, selectedSkill: { ...skill } }))
+    // Try to load the SKILL.md content
+    try {
+      const result = await window.api.skills.read(skill.path + "/SKILL.md")
+      if (result.success && result.content) {
+        updateTs(activeTabId, (prev) => ({
+          ...prev,
+          selectedSkill: prev.selectedSkill?.name === skill.name
+            ? { ...prev.selectedSkill, content: result.content }
+            : prev.selectedSkill,
+        }))
+      }
+    } catch { /* skill content optional */ }
+  }, [activeTabId, updateTs, setInputValue])
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (isSlashMode) {
+      if (e.key === "Escape") { e.preventDefault(); setInputValue(""); return }
+      if (e.key === "Enter" && filteredSkills.length > 0) {
+        e.preventDefault()
+        handleSkillSelect(filteredSkills[0])
+        return
+      }
+      return  // let other keys type the filter query
+    }
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend() }
   }
 
@@ -1210,6 +1395,27 @@ ${htmlContext}`
 
   return (
     <div style={S.root}>
+      {/* Code & Link modals — rendered at root so they overlay everything */}
+      <CodeModal
+        open={codeModalOpen}
+        initialFiles={ts.codeContext ?? []}
+        onConfirm={(files) => {
+          updateTs(activeTabId, { codeContext: files.length > 0 ? files : null })
+          setCodeModalOpen(false)
+        }}
+        onClose={() => setCodeModalOpen(false)}
+      />
+      <LinkModal
+        open={linkModalOpen}
+        url={linkModalText}
+        onUrlChange={setLinkModalText}
+        onConfirm={() => {
+          updateTs(activeTabId, { designLink: linkModalText.trim() })
+          setLinkModalOpen(false)
+        }}
+        onClose={() => setLinkModalOpen(false)}
+      />
+
       {/* Title Bar */}
       <div style={S.titleBar}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -1243,6 +1449,8 @@ ${htmlContext}`
               <EmptyState
                 onSuggestion={(s) => setInputValue(s)}
                 onUploadScreenshot={() => fileInputRef.current?.click()}
+                onAttachCode={() => setCodeModalOpen(true)}
+                onAttachLink={() => { setLinkModalText(""); setLinkModalOpen(true) }}
               />
             ) : (
               <div style={S.messageList}>
@@ -1259,7 +1467,7 @@ ${htmlContext}`
             )}
           </div>
 
-          {/* Hidden file input for screenshot upload */}
+          {/* Hidden file input — images only (screenshot, triggered from EmptyState) */}
           <input
             ref={fileInputRef}
             type="file"
@@ -1267,9 +1475,62 @@ ${htmlContext}`
             onChange={handleFileSelect}
             style={{ display: "none" }}
           />
+          {/* Hidden file input — any file (triggered from toolbar 📎) */}
+          <input
+            ref={attachFileInputRef}
+            type="file"
+            multiple
+            onChange={handleAttachFile}
+            style={{ display: "none" }}
+          />
 
           {/* Bottom Input */}
-          <div style={S.inputArea}>
+          <div style={{ ...S.inputArea, position: "relative" }}>
+            {/* Skill picker popup — shown when input is "/" + optional filter text */}
+            {isSlashMode && filteredSkills.length > 0 && (
+              <div style={{
+                position: "absolute", bottom: "calc(100% + 4px)", left: 12, right: 12,
+                background: "#ffffff", border: "1px solid #e0ded8", borderRadius: 10,
+                boxShadow: "0 4px 16px rgba(0,0,0,0.10)",
+                maxHeight: 220, overflowY: "auto", zIndex: 200,
+              }}>
+                <div style={{ padding: "6px 8px 4px", fontSize: 11, color: "#a0a0a0", fontWeight: 500, borderBottom: "1px solid #f0eee8" }}>
+                  ⚡ 技能 — 按 ↵ 选第一个，Esc 取消
+                </div>
+                {filteredSkills.map((skill, i) => (
+                  <div
+                    key={skill.name}
+                    onClick={() => handleSkillSelect(skill)}
+                    style={{
+                      padding: "8px 12px", cursor: "pointer",
+                      background: i === 0 ? "#f8f7f4" : "transparent",
+                      borderBottom: i < filteredSkills.length - 1 ? "1px solid #f4f3f0" : "none",
+                      transition: "background 0.1s",
+                    }}
+                    onMouseEnter={(e) => (e.currentTarget.style.background = "#f3f2ee")}
+                    onMouseLeave={(e) => (e.currentTarget.style.background = i === 0 ? "#f8f7f4" : "transparent")}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <span style={{ fontSize: 14 }}>⚡</span>
+                      <span style={{ fontSize: 13, fontWeight: 600, color: "#1a1a1a" }}>{skill.name}</span>
+                    </div>
+                    <div style={{ fontSize: 11, color: "#8a8a8a", marginTop: 2, marginLeft: 20, lineHeight: 1.4 }}>
+                      {skill.description.slice(0, 80)}{skill.description.length > 80 ? "…" : ""}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {isSlashMode && filteredSkills.length === 0 && slashQuery && (
+              <div style={{
+                position: "absolute", bottom: "calc(100% + 4px)", left: 12, right: 12,
+                background: "#ffffff", border: "1px solid #e0ded8", borderRadius: 10,
+                boxShadow: "0 4px 16px rgba(0,0,0,0.10)", padding: "10px 14px",
+                fontSize: 12, color: "#a0a0a0", zIndex: 200,
+              }}>
+                无匹配技能 — 输入 / 不加文字可查看全部
+              </div>
+            )}
             <div style={S.inputBox}>
               {/* Screenshot preview strip */}
               {ts.attachedImage && (
@@ -1295,20 +1556,57 @@ ${htmlContext}`
                   <span style={{ fontSize: 12, color: "#8a8a8a" }}>截图已附加</span>
                 </div>
               )}
+              {/* Context pills row — skill / code / design-link */}
+              {(ts.selectedSkill || ts.codeContext || ts.designLink) && (
+                <div style={{ padding: "8px 12px 0", display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {ts.selectedSkill && (
+                    <ContextPill
+                      icon="⚡" label={ts.selectedSkill.name}
+                      badge={ts.selectedSkill.content ? "已加载" : undefined}
+                      color={{ bg: "#eff0fb", border: "#c7c9ef", text: "#3a3a8a", dot: "#9090c0" }}
+                      onRemove={() => updateTs(activeTabId, { selectedSkill: null })}
+                    />
+                  )}
+                  {ts.codeContext && ts.codeContext.length > 0 && (
+                    <ContextPill
+                      icon="🗂️"
+                      label={ts.codeContext.length === 1 ? (ts.codeContext[0].filename || "代码") : `${ts.codeContext.length} 个文件`}
+                      badge={ts.codeContext.length === 1 ? `${ts.codeContext[0].content.split("\n").length} 行` : undefined}
+                      color={{ bg: "#f0f8f0", border: "#b8d8b8", text: "#2a5a2a", dot: "#5a9a5a" }}
+                      onRemove={() => updateTs(activeTabId, { codeContext: null })}
+                      onClick={() => setCodeModalOpen(true)}
+                    />
+                  )}
+                  {ts.designLink && (
+                    <ContextPill
+                      icon="🔗" label={(() => { try { return new URL(ts.designLink).hostname } catch { return ts.designLink.slice(0, 30) } })()}
+                      color={{ bg: "#fff8f0", border: "#e8d0b0", text: "#5a3a00", dot: "#c07820" }}
+                      onRemove={() => updateTs(activeTabId, { designLink: null })}
+                      onClick={() => { setLinkModalText(ts.designLink!); setLinkModalOpen(true) }}
+                    />
+                  )}
+                </div>
+              )}
               <textarea
                 value={inputValue}
                 onChange={(e) => setInputValue(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder={ts.attachedImage ? "描述你希望如何改进这个设计…（可选）" : "描述你想创建的设计…"}
+                placeholder={ts.attachedImage ? "补充说明，如「还原这个页面」或「修改颜色为蓝色」…（可选）" : "描述你想创建的设计… (输入 / 选择技能)"}
                 rows={2}
                 style={S.textarea}
                 disabled={isBlocked}
               />
               <div style={S.inputToolbar}>
-                <div style={{ display: "flex", gap: 4 }}>
-                  <ToolbarIcon title="Settings">⚙️</ToolbarIcon>
-                  <ToolbarIcon title="上传截图" onClick={() => fileInputRef.current?.click()}>📎</ToolbarIcon>
-                  <button style={S.importBtn}>Import</button>
+                <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                  <ToolbarIcon title="上传文件（图片→截图，代码文件→关联代码）" onClick={() => attachFileInputRef.current?.click()}>📎</ToolbarIcon>
+                  {/* Model selector */}
+                  {availableModels.length > 0 && (
+                    <ModelSelector
+                      models={availableModels}
+                      selectedId={ts.selectedModelId}
+                      onChange={(id) => updateTs(activeTabId, { selectedModelId: id })}
+                    />
+                  )}
                 </div>
                 {isGenerating ? (
                   <button onClick={handleCancel} style={S.cancelBtn}>■ Stop</button>
@@ -1334,36 +1632,45 @@ ${htmlContext}`
         <div style={S.rightPanel}>
           {/* Canvas Tab Bar */}
           <div style={S.canvasBar}>
-            <button style={S.navBtn} title="Refresh">↻</button>
+            <button
+              style={S.navBtn}
+              title="重新加载预览"
+              onClick={() => {
+                // Force the iframe back to the design HTML even if it navigated away.
+                // Strategy: directly set srcdoc on the DOM element, then bump reloadKey
+                // so React also remounts it cleanly on next render.
+                const iframe = iframeRef.current
+                const state = tabStates[activeTabId]
+                if (iframe && state) {
+                  const displayHtml = state.activeVariationId
+                    ? (state.variations.find((v) => v.id === state.activeVariationId)?.html ?? state.html)
+                    : state.html
+                  if (displayHtml) {
+                    iframe.srcdoc = displayHtml
+                  }
+                }
+                updateTs(activeTabId, (prev) => ({ reloadKey: prev.reloadKey + 1 }))
+              }}
+            >↻</button>
 
             {/* Right panel tabs */}
             <div style={{ display: "flex", gap: 0, marginLeft: 8 }}>
               <RightTabBtn
-                label="Design"
+                label={
+                  ts.activeVariationId && ts.variations.length > 0
+                    ? (ts.variations.find((v) => v.id === ts.activeVariationId)?.label ?? "设计")
+                    : "设计"
+                }
                 active={ts.rightTab === "design"}
                 onClick={() => updateTs(activeTabId, { rightTab: "design" })}
               />
               {(ts.generationState === "asking" || ts.generationState === "questions_ready") && (
                 <RightTabBtn
-                  label="Questions"
+                  label="问题"
                   active={ts.rightTab === "questions"}
                   onClick={() => updateTs(activeTabId, { rightTab: "questions" })}
                   closable
                 />
-              )}
-              {/* Active variation indicator in top bar */}
-              {ts.variations.length > 0 && ts.activeVariationId && ts.rightTab === "design" && (
-                <div style={{
-                  display: "flex", alignItems: "center", gap: 6,
-                  padding: "0 12px", height: 44, fontSize: 12, fontWeight: 600,
-                  color: VARIATION_COLORS[ts.activeVariationId] ?? "#888",
-                }}>
-                  <span style={{
-                    width: 6, height: 6, borderRadius: "50%",
-                    background: VARIATION_COLORS[ts.activeVariationId] ?? "#888",
-                  }} />
-                  {ts.variations.find(v => v.id === ts.activeVariationId)?.label}
-                </div>
               )}
             </div>
 
@@ -1387,8 +1694,8 @@ ${htmlContext}`
                 {tweaksOn && (
                   <>
                     <div style={S.tweaksDivider} />
-                    <TweaksBtn label="Comment" icon={<CommentIcon active={activeMode === "comment"} />} active={activeMode === "comment"} onClick={() => setActiveMode(activeMode === "comment" ? null : "comment")} />
-                    <TweaksBtn label="Edit"    icon={<EditIcon    active={activeMode === "edit"}    />} active={activeMode === "edit"}    onClick={() => setActiveMode(activeMode === "edit"    ? null : "edit")}    />
+                    <TweaksBtn label="注释" icon={<CommentIcon active={activeMode === "comment"} />} active={activeMode === "comment"} onClick={() => setActiveMode(activeMode === "comment" ? null : "comment")} />
+                    <TweaksBtn label="编辑" icon={<EditIcon    active={activeMode === "edit"}    />} active={activeMode === "edit"}    onClick={() => setActiveMode(activeMode === "edit"    ? null : "edit")}    />
                   </>
                 )}
 
@@ -1400,7 +1707,7 @@ ${htmlContext}`
                   <button onClick={() => setZoom((z) => Math.min(200, z + 25))} style={S.zoomBtn}>+</button>
                 </div>
                 <div style={S.tweaksDivider} />
-                <button style={S.canvasActionBtn} onClick={() => downloadHtml(ts.html)}>⬇ Export</button>
+                <button style={S.canvasActionBtn} onClick={() => downloadHtml(ts.html)}>⬇ 导出</button>
               </div>
             )}
           </div>
@@ -1486,7 +1793,7 @@ ${htmlContext}`
                     <div style={{ position: "absolute", inset: 0, overflow: "auto" }}>
                       <iframe
                         ref={iframeRef}
-                        key={ts.activeVariationId ?? "all"}
+                        key={`${ts.activeVariationId ?? "all"}-${ts.reloadKey}`}
                         srcDoc={displayHtml}
                         style={{
                           display: "block",
@@ -1501,6 +1808,9 @@ ${htmlContext}`
                         sandbox="allow-scripts allow-same-origin"
                         title="Design Preview"
                         onLoad={() => {
+                          // Block link/form navigation so clicks inside the preview
+                          // never navigate the iframe away from the design
+                          injectIntoIframe(iframeRef.current, NAV_BLOCK_INJECT)
                           // Always inject scroll tracker so pins stay anchored to content
                           injectIntoIframe(iframeRef.current, SCROLL_INJECT)
                           // Reset scroll state — new iframe always starts at (0, 0)
@@ -1643,8 +1953,7 @@ ${htmlContext}`
                   })()
                 ) : (
                   <div style={S.canvasEmpty}>
-                    <p style={S.canvasEmptyText}>Creations will appear here</p>
-                    <button style={S.startSketchBtn}>✏️ Start with a sketch</button>
+                    <p style={S.canvasEmptyText}>生成的设计将在此展示</p>
                   </div>
                 )}
               </>
@@ -2473,9 +2782,11 @@ function QuestionsPanel({
 // Sub-components
 // ─────────────────────────────────────────────────────────
 
-function EmptyState({ onSuggestion, onUploadScreenshot }: {
+function EmptyState({ onSuggestion, onUploadScreenshot, onAttachCode, onAttachLink }: {
   onSuggestion: (s: string) => void
   onUploadScreenshot: () => void
+  onAttachCode: () => void
+  onAttachLink: () => void
 }) {
   return (
     <div style={S.emptyState}>
@@ -2483,8 +2794,8 @@ function EmptyState({ onSuggestion, onUploadScreenshot }: {
       <p style={S.emptySubtitle}>提供的背景越充分，设计结果越精准。</p>
       <div style={S.contextCards}>
         <ContextCard icon="🖼️" label="上传截图"         onClick={onUploadScreenshot} />
-        <ContextCard icon="🗂️" label="关联代码"         onClick={() => {}} />
-        <ContextCard icon="🔗" label="通过链接关联设计图" onClick={() => {}} />
+        <ContextCard icon="🗂️" label="关联代码"         onClick={onAttachCode} />
+        <ContextCard icon="🔗" label="通过链接关联设计图" onClick={onAttachLink} />
       </div>
     </div>
   )
@@ -2584,6 +2895,313 @@ function ContextCard({ icon, label, hint, onClick }: { icon: string; label: stri
   )
 }
 
+// ─────────────────────────────────────────────────────────
+// ContextPill — small dismissible tag shown above textarea
+// ─────────────────────────────────────────────────────────
+function ContextPill({ icon, label, badge, color, onRemove, onClick }: {
+  icon: string; label: string; badge?: string
+  color: { bg: string; border: string; text: string; dot: string }
+  onRemove: () => void
+  onClick?: () => void
+}) {
+  return (
+    <div
+      style={{
+        display: "inline-flex", alignItems: "center", gap: 5,
+        background: color.bg, border: `1px solid ${color.border}`,
+        borderRadius: 6, padding: "3px 6px 3px 8px",
+        cursor: onClick ? "pointer" : "default",
+      }}
+      onClick={onClick}
+    >
+      <span style={{ fontSize: 12 }}>{icon}</span>
+      <span style={{ fontSize: 12, fontWeight: 600, color: color.text }}>{label}</span>
+      {badge && <span style={{ fontSize: 10, color: color.text, opacity: 0.6 }}>{badge}</span>}
+      <button
+        onClick={(e) => { e.stopPropagation(); onRemove() }}
+        style={{
+          width: 14, height: 14, borderRadius: "50%",
+          background: color.dot, border: "none",
+          color: "#fff", fontSize: 9, cursor: "pointer",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          lineHeight: 1, fontFamily: "inherit", padding: 0, marginLeft: 2,
+        }}
+      >×</button>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────
+// CodeModal — multi-file code context: upload files / paste code
+// ─────────────────────────────────────────────────────────
+type CodeFile = { filename: string; content: string }
+
+function CodeModal({ open, initialFiles, onConfirm, onClose }: {
+  open: boolean
+  initialFiles: CodeFile[]
+  onConfirm: (files: CodeFile[]) => void
+  onClose: () => void
+}) {
+  const [files, setFiles]           = React.useState<CodeFile[]>(initialFiles)
+  const [selectedIdx, setSelectedIdx] = React.useState(0)
+  const [dragging, setDragging]     = React.useState(false)
+  const [editingName, setEditingName] = React.useState(false)
+  const fileInputRef = React.useRef<HTMLInputElement>(null)
+
+  // Sync when modal re-opens with new initialFiles
+  React.useEffect(() => {
+    if (open) { setFiles(initialFiles); setSelectedIdx(0); setEditingName(false) }
+  }, [open])  // eslint-disable-line react-hooks/exhaustive-deps
+
+  const selected = files[selectedIdx]
+
+  const readFileAsText = (file: File): Promise<CodeFile> =>
+    new Promise((res) => {
+      const reader = new FileReader()
+      reader.onload = (e) => res({ filename: file.name, content: e.target?.result as string ?? "" })
+      reader.readAsText(file)
+    })
+
+  const addFiles = async (fileList: FileList) => {
+    const newFiles = await Promise.all(Array.from(fileList).map(readFileAsText))
+    setFiles((prev) => {
+      const merged = [...prev]
+      newFiles.forEach((nf) => {
+        const existing = merged.findIndex((f) => f.filename === nf.filename)
+        if (existing >= 0) merged[existing] = nf
+        else merged.push(nf)
+      })
+      return merged
+    })
+    setSelectedIdx((prev) => prev)
+  }
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault(); setDragging(false)
+    if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files)
+  }
+
+  const addBlankFile = () => {
+    const name = `untitled-${files.length + 1}.ts`
+    setFiles((prev) => [...prev, { filename: name, content: "" }])
+    setSelectedIdx(files.length)
+    setEditingName(true)
+  }
+
+  const removeFile = (idx: number) => {
+    setFiles((prev) => prev.filter((_, i) => i !== idx))
+    setSelectedIdx((prev) => Math.max(0, prev >= idx ? prev - 1 : prev))
+  }
+
+  const updateContent = (content: string) => {
+    setFiles((prev) => prev.map((f, i) => i === selectedIdx ? { ...f, content } : f))
+  }
+
+  const updateFilename = (filename: string) => {
+    setFiles((prev) => prev.map((f, i) => i === selectedIdx ? { ...f, filename } : f))
+  }
+
+  const totalLines = files.reduce((acc, f) => acc + f.content.split("\n").length, 0)
+
+  if (!open) return null
+
+  const extColor: Record<string, string> = {
+    tsx: "#3178c6", ts: "#3178c6", jsx: "#f7a41d", js: "#f7a41d",
+    css: "#264de4", scss: "#c6538c", py: "#3572a5", vue: "#41b883",
+    html: "#e34c26", json: "#a0522d", md: "#555",
+  }
+  const getColor = (name: string) => extColor[name.split(".").pop() ?? ""] ?? "#888"
+
+  return (
+    <div
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}
+      onClick={onClose}
+      onDragOver={(e) => { e.preventDefault(); setDragging(true) }}
+      onDragLeave={() => setDragging(false)}
+      onDrop={handleDrop}
+    >
+      {/* Hidden file input */}
+      <input ref={fileInputRef} type="file" multiple accept=".ts,.tsx,.js,.jsx,.css,.scss,.py,.vue,.html,.json,.md,.txt" style={{ display: "none" }} onChange={(e) => { if (e.target.files) addFiles(e.target.files); e.target.value = "" }} />
+
+      <div
+        style={{ background: "#f8f7f4", borderRadius: 16, width: 820, height: 580, display: "flex", flexDirection: "column", boxShadow: "0 12px 48px rgba(0,0,0,0.22)", border: dragging ? "2px dashed #cc785c" : "2px solid transparent", overflow: "hidden" }}
+        onClick={(e) => e.stopPropagation()}
+        onDragOver={(e) => { e.preventDefault(); setDragging(true) }}
+        onDragLeave={(e) => { e.stopPropagation(); setDragging(false) }}
+        onDrop={(e) => { e.stopPropagation(); e.preventDefault(); setDragging(false); if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files) }}
+      >
+        {/* Header */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 20px", borderBottom: "1px solid #e8e6e0", background: "#fff" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <span style={{ fontSize: 18 }}>🗂️</span>
+            <span style={{ fontSize: 15, fontWeight: 600, color: "#1a1a1a" }}>关联代码</span>
+            {files.length > 0 && <span style={{ fontSize: 12, color: "#8a8a8a", background: "#f0eee8", borderRadius: 4, padding: "2px 7px" }}>{files.length} 个文件 · {totalLines} 行</span>}
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 14px", borderRadius: 8, border: "1px solid #e0ded8", background: "#fff", fontSize: 13, cursor: "pointer", fontFamily: "inherit", fontWeight: 500, color: "#1a1a1a" }}
+            >⬆ 上传文件</button>
+            <button
+              onClick={addBlankFile}
+              style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 14px", borderRadius: 8, border: "none", background: "#1a1a1a", fontSize: 13, cursor: "pointer", fontFamily: "inherit", fontWeight: 500, color: "#fff" }}
+            >＋ 粘贴代码</button>
+            <button onClick={onClose} style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "#8a8a8a", lineHeight: 1, padding: "0 4px" }}>×</button>
+          </div>
+        </div>
+
+        {/* Body */}
+        <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
+          {/* Left: file list */}
+          <div style={{ width: 200, borderRight: "1px solid #e8e6e0", background: "#fff", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+            <div style={{ flex: 1, overflowY: "auto", padding: "8px 0" }}>
+              {files.length === 0 ? (
+                <div style={{ padding: "24px 16px", textAlign: "center", color: "#aaa", fontSize: 12, lineHeight: 1.6 }}>
+                  上传文件或<br />点击「粘贴代码」
+                </div>
+              ) : files.map((f, i) => (
+                <div
+                  key={i}
+                  onClick={() => { setSelectedIdx(i); setEditingName(false) }}
+                  style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", cursor: "pointer", background: i === selectedIdx ? "#f4f3ef" : "transparent", borderLeft: i === selectedIdx ? "3px solid #1a1a1a" : "3px solid transparent" }}
+                >
+                  <span style={{ fontSize: 10, fontWeight: 700, color: getColor(f.filename), background: getColor(f.filename) + "18", borderRadius: 3, padding: "1px 4px", flexShrink: 0, textTransform: "uppercase" }}>
+                    {f.filename.split(".").pop()?.slice(0, 4) ?? "txt"}
+                  </span>
+                  <span style={{ fontSize: 12, color: "#1a1a1a", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={f.filename}>{f.filename}</span>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); removeFile(i) }}
+                    style={{ background: "none", border: "none", cursor: "pointer", color: "#bbb", fontSize: 14, lineHeight: 1, padding: 0, flexShrink: 0, opacity: 0, transition: "opacity 0.1s" }}
+                    onMouseEnter={(e) => (e.currentTarget.style.opacity = "1")}
+                    onMouseLeave={(e) => (e.currentTarget.style.opacity = "0")}
+                  >×</button>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Right: code editor */}
+          {selected ? (
+            <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+              {/* File name bar */}
+              <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 14px", borderBottom: "1px solid #e8e6e0", background: "#faf9f6" }}>
+                {editingName ? (
+                  <input
+                    autoFocus
+                    value={selected.filename}
+                    onChange={(e) => updateFilename(e.target.value)}
+                    onBlur={() => setEditingName(false)}
+                    onKeyDown={(e) => { if (e.key === "Enter") setEditingName(false) }}
+                    style={{ flex: 1, border: "1px solid #cc785c", borderRadius: 6, padding: "4px 8px", fontSize: 13, fontFamily: "monospace", outline: "none", background: "#fff" }}
+                  />
+                ) : (
+                  <span
+                    onClick={() => setEditingName(true)}
+                    title="点击重命名"
+                    style={{ fontSize: 13, fontFamily: "monospace", color: "#1a1a1a", cursor: "text", padding: "4px 0", borderBottom: "1px dashed #ccc" }}
+                  >{selected.filename}</span>
+                )}
+                <span style={{ fontSize: 11, color: "#aaa", marginLeft: "auto" }}>{selected.content.split("\n").length} 行</span>
+              </div>
+              {/* Code area with line numbers */}
+              <div style={{ flex: 1, display: "flex", overflow: "hidden", fontFamily: "monospace", fontSize: 12 }}>
+                {/* Line numbers */}
+                <div style={{ padding: "12px 8px 12px 12px", background: "#f4f3ef", color: "#bbb", textAlign: "right", userSelect: "none", lineHeight: "20px", overflowY: "hidden", minWidth: 40, fontSize: 11 }}
+                  aria-hidden>
+                  {selected.content.split("\n").map((_, i) => (
+                    <div key={i}>{i + 1}</div>
+                  ))}
+                </div>
+                {/* Editable textarea */}
+                <textarea
+                  value={selected.content}
+                  onChange={(e) => updateContent(e.target.value)}
+                  placeholder="在这里粘贴或编辑代码…"
+                  spellCheck={false}
+                  style={{ flex: 1, padding: "12px", border: "none", outline: "none", resize: "none", fontFamily: "monospace", fontSize: 12, lineHeight: "20px", background: "#fff", color: "#1a1a1a", overflowY: "auto" }}
+                />
+              </div>
+            </div>
+          ) : (
+            /* Empty drop zone */
+            <div
+              style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12, color: "#aaa" }}
+              onDragOver={(e) => { e.preventDefault(); setDragging(true) }}
+              onDrop={(e) => { e.preventDefault(); setDragging(false); if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files) }}
+            >
+              <span style={{ fontSize: 40 }}>⬆</span>
+              <p style={{ margin: 0, fontSize: 14, color: "#888", textAlign: "center", lineHeight: 1.6 }}>将代码文件拖拽到此处<br /><span style={{ fontSize: 12 }}>或点击右上角「上传文件」</span></p>
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 20px", borderTop: "1px solid #e8e6e0", background: "#fff" }}>
+          <span style={{ fontSize: 12, color: "#aaa" }}>支持 .ts .tsx .js .jsx .css .py .vue .html 等</span>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={onClose} style={{ padding: "8px 18px", borderRadius: 8, border: "1px solid #e0ded8", background: "#fff", fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>取消</button>
+            <button
+              onClick={() => onConfirm(files.filter((f) => f.content.trim()))}
+              disabled={files.filter((f) => f.content.trim()).length === 0}
+              style={{ padding: "8px 20px", borderRadius: 8, border: "none", background: files.some((f) => f.content.trim()) ? "#1a1a1a" : "#ccc", color: "#fff", fontSize: 13, cursor: files.some((f) => f.content.trim()) ? "pointer" : "default", fontFamily: "inherit", fontWeight: 500 }}
+            >确认关联 {files.filter((f) => f.content.trim()).length > 0 ? `(${files.filter((f) => f.content.trim()).length} 个文件)` : ""}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────
+// LinkModal — enter a design reference URL
+// ─────────────────────────────────────────────────────────
+function LinkModal({ open, url, onUrlChange, onConfirm, onClose }: {
+  open: boolean; url: string
+  onUrlChange: (v: string) => void
+  onConfirm: () => void; onClose: () => void
+}) {
+  if (!open) return null
+  const isValid = (() => { try { return !!new URL(url) } catch { return false } })()
+  return (
+    <div style={{
+      position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)",
+      display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000,
+    }} onClick={onClose}>
+      <div style={{
+        background: "#fff", borderRadius: 14, padding: 24, width: 480,
+        display: "flex", flexDirection: "column", gap: 14,
+        boxShadow: "0 8px 40px rgba(0,0,0,0.18)",
+      }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <h3 style={{ margin: 0, fontSize: 16, fontWeight: 600, color: "#1a1a1a" }}>🔗 通过链接关联设计图</h3>
+          <button onClick={onClose} style={{ background: "none", border: "none", fontSize: 18, cursor: "pointer", color: "#8a8a8a", lineHeight: 1 }}>×</button>
+        </div>
+        <p style={{ margin: 0, fontSize: 13, color: "#6a6a6a" }}>输入 Figma、Sketch、设计图或参考页面的链接，模型将把它作为视觉参考。</p>
+        <input
+          value={url}
+          onChange={(e) => onUrlChange(e.target.value)}
+          placeholder="https://www.figma.com/…  或其他参考链接"
+          autoFocus
+          onKeyDown={(e) => { if (e.key === "Enter" && isValid) onConfirm() }}
+          style={{
+            border: `1px solid ${isValid || !url ? "#e0ded8" : "#e8a0a0"}`, borderRadius: 8,
+            padding: "10px 12px", fontSize: 13, fontFamily: "inherit", outline: "none",
+          }}
+        />
+        {url && !isValid && <p style={{ margin: 0, fontSize: 12, color: "#c04040" }}>请输入有效的 URL（以 http:// 或 https:// 开头）</p>}
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          <button onClick={onClose} style={{ padding: "8px 18px", borderRadius: 8, border: "1px solid #e0ded8", background: "#fff", fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>取消</button>
+          <button
+            onClick={onConfirm}
+            disabled={!isValid}
+            style={{ padding: "8px 18px", borderRadius: 8, border: "none", background: isValid ? "#1a1a1a" : "#ccc", color: "#fff", fontSize: 13, cursor: isValid ? "pointer" : "default", fontFamily: "inherit", fontWeight: 500 }}
+          >确认关联</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function MessageBubble({ message }: { message: Message }) {
   const isUser = message.role === "user"
   const isQPrompt = message.role === "questions-prompt"
@@ -2628,6 +3246,49 @@ function MessageBubble({ message }: { message: Message }) {
           ))}
         </div>
       )}
+    </div>
+  )
+}
+
+function ModelSelector({ models, selectedId, onChange }: {
+  models: ModelOption[]
+  selectedId: string | null
+  onChange: (id: string) => void
+}) {
+  const selected = selectedId ? models.find((m) => m.id === selectedId) : models[0]
+  return (
+    <div style={{ position: "relative", display: "inline-block" }}>
+      <select
+        value={selectedId ?? models[0]?.id ?? ""}
+        onChange={(e) => onChange(e.target.value)}
+        style={{
+          appearance: "none",
+          WebkitAppearance: "none",
+          background: "#f4f3ef",
+          border: "1px solid #e0ded8",
+          borderRadius: 8,
+          padding: "4px 24px 4px 8px",
+          fontSize: 12,
+          fontWeight: 500,
+          color: "#4a4a4a",
+          cursor: "pointer",
+          fontFamily: "inherit",
+          outline: "none",
+          maxWidth: 130,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {models.map((m) => (
+          <option key={m.id} value={m.id}>{m.name || m.model}</option>
+        ))}
+      </select>
+      {/* chevron icon */}
+      <span style={{
+        position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)",
+        pointerEvents: "none", fontSize: 9, color: "#8a8a8a",
+      }}>▾</span>
     </div>
   )
 }
