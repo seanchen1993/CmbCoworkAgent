@@ -1,4 +1,5 @@
 import { MOCK_MARKET_DATA } from "../components/customize/MarketMockData"
+import { toast } from "sonner"
 
 export type MarketItemType = "skill" | "mcp" | "plugin"
 
@@ -66,7 +67,6 @@ const USE_MARKET_MOCK_ON_ERROR =
     .trim()
     .toLowerCase() === "true"
 
-
 function getMockMarketResponse(type: MarketItemType, error?: unknown): MarketApiResponse {
   const reason = error instanceof Error ? error.message : String(error ?? "unknown error")
   console.warn(`[marketApi] ${type} request failed, fallback to mock data. reason=${reason}`)
@@ -85,6 +85,53 @@ const ENDPOINTS = {
   download: (resourceType: string, name: string) =>
     `${API_BASE_URL}/download/${resourceType}/${name}`,
   delete: (resourceType: string, name: string) => `${API_BASE_URL}/${resourceType}/${name}`
+}
+
+function getErrorMessageFromBody(body: unknown): string | null {
+  if (!body || typeof body !== "object") return null
+
+  const payload = body as Record<string, unknown>
+  const candidates = [payload.detail, payload.message, payload.error]
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.trim()
+    }
+  }
+
+  return null
+}
+
+async function readMarketErrorMessage(response: Response): Promise<string> {
+  const fallback = `HTTP error! status: ${response.status}`
+
+  try {
+    const contentType = response.headers.get("content-type") || ""
+    if (contentType.includes("application/json")) {
+      const data = await response.json()
+      return getErrorMessageFromBody(data) || fallback
+    }
+
+    const text = await response.text()
+    if (!text.trim()) return fallback
+
+    try {
+      const data = JSON.parse(text)
+      return getErrorMessageFromBody(data) || text
+    } catch {
+      return text
+    }
+  } catch (error) {
+    console.warn("[marketApi] Failed to parse error response:", error)
+    return fallback
+  }
+}
+
+async function throwMarketError(response: Response): Promise<never> {
+  console.error(`API request failed: ${response.status} ${response.statusText}`)
+  const message = await readMarketErrorMessage(response)
+  console.error("Response error:", message)
+  toast.error(message)
+  throw new Error(message)
 }
 
 // Utility function to download blob as file
@@ -127,7 +174,7 @@ export const marketApi = {
     })
 
     if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`)
+      await throwMarketError(response)
     }
 
     const blob = await response.blob()
@@ -156,7 +203,8 @@ export const marketApi = {
       console.error("Failed to download LSP VSIX:", downloadError)
       return {
         success: false,
-        error: downloadError instanceof Error ? downloadError.message : "Failed to download LSP VSIX"
+        error:
+          downloadError instanceof Error ? downloadError.message : "Failed to download LSP VSIX"
       }
     }
   },
@@ -181,10 +229,7 @@ export const marketApi = {
       })
 
       if (!response.ok) {
-        console.error(`API request failed: ${response.status} ${response.statusText}`)
-        const errorText = await response.text()
-        console.error("Response body:", errorText)
-        throw new Error(`HTTP error! status: ${response.status}`)
+        await throwMarketError(response)
       }
 
       const contentType = response.headers.get("content-type")
@@ -236,10 +281,7 @@ export const marketApi = {
       })
 
       if (!response.ok) {
-        console.error(`API request failed: ${response.status} ${response.statusText}`)
-        const errorText = await response.text()
-        console.error("Response body:", errorText)
-        throw new Error(`HTTP error! status: ${response.status}`)
+        await throwMarketError(response)
       }
 
       const contentType = response.headers.get("content-type")
@@ -291,10 +333,7 @@ export const marketApi = {
       })
 
       if (!response.ok) {
-        console.error(`API request failed: ${response.status} ${response.statusText}`)
-        const errorText = await response.text()
-        console.error("Response body:", errorText)
-        throw new Error(`HTTP error! status: ${response.status}`)
+        await throwMarketError(response)
       }
 
       const contentType = response.headers.get("content-type")
@@ -337,7 +376,7 @@ export const marketApi = {
     })
 
     if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`)
+      await throwMarketError(response)
     }
 
     return await response.json()
@@ -349,6 +388,7 @@ export const marketApi = {
     downloadToLocal = false,
     _isFeatured = false
   ): Promise<DownloadResponse> {
+    void _isFeatured
     console.log(`Downloading ${type} item: ${name}`)
     const { blob, filename } = await this.fetchInstallFile(name, type)
 
@@ -407,8 +447,10 @@ export const marketApi = {
           mcpConfig?.mcpServers && typeof mcpConfig.mcpServers === "object"
             ? Object.entries(mcpConfig.mcpServers as Record<string, unknown>)
             : []
-        const [serverName, serverConfig] =
-          serverEntries[0] ?? [null, mcpConfig && typeof mcpConfig === "object" ? mcpConfig : null]
+        const [serverName, serverConfig] = serverEntries[0] ?? [
+          null,
+          mcpConfig && typeof mcpConfig === "object" ? mcpConfig : null
+        ]
 
         if (!serverConfig || typeof serverConfig !== "object") {
           return {
@@ -431,7 +473,9 @@ export const marketApi = {
         // Create all connectors
         if (typeof window.api?.mcp?.create === "function") {
           const advanced =
-            config.advanced && typeof config.advanced === "object" && !Array.isArray(config.advanced)
+            config.advanced &&
+            typeof config.advanced === "object" &&
+            !Array.isArray(config.advanced)
               ? (config.advanced as Record<string, unknown>)
               : {}
           const resolvedTransport: "sse" | "streamable-http" | undefined =
@@ -452,7 +496,8 @@ export const marketApi = {
                 kind: "stdio" as const,
                 command: String(config.command),
                 args:
-                  Array.isArray(config.args) && config.args.every((arg): arg is string => typeof arg === "string")
+                  Array.isArray(config.args) &&
+                  config.args.every((arg): arg is string => typeof arg === "string")
                     ? config.args
                     : [],
                 env:
@@ -536,7 +581,7 @@ export const marketApi = {
     })
 
     if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`)
+      await throwMarketError(response)
     }
 
     const data: MarketUploadResponse = await response.json()
@@ -602,7 +647,7 @@ export const marketApi = {
     })
 
     if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`)
+      await throwMarketError(response)
     }
 
     const data: MarketUpdateResponse = await response.json()
