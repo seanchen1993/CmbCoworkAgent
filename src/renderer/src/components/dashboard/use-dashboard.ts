@@ -374,11 +374,13 @@ function parseUserStats(raw: any, selectedUpperOrgLv1: string | null): UserStats
     count: b.doc_count
   }))
 
-  const byOrg: UserStatsData["byOrg"] = byOrgBuckets.map((b: any) => ({
-    key: String(b.key ?? ""),
-    org: String(b.key ?? "") || "未知",
-    count: b.doc_count
-  }))
+  const byOrg: UserStatsData["byOrg"] = byOrgBuckets
+    .filter((b: any) => String(b.key ?? "").trim() !== "")
+    .map((b: any) => ({
+      key: String(b.key ?? ""),
+      org: String(b.key ?? ""),
+      count: b.doc_count
+    }))
 
   const byVersion: UserStatsData["byVersion"] = (aggs.by_version?.buckets ?? []).map((b: any) => ({
     version: b.key || "未知",
@@ -613,8 +615,10 @@ export function useDashboard() {
   }, [fetchAll, range, granularity, selectedUpperOrgLv1])
 
   const drillDownUserOrg = useCallback((orgLv1: string) => {
-    setSelectedUpperOrgLv1(orgLv1)
-    fetchUserStatsOnly(range, granularity, orgLv1)
+    const normalizedOrgLv1 = orgLv1.trim()
+    if (!normalizedOrgLv1) return
+    setSelectedUpperOrgLv1(normalizedOrgLv1)
+    fetchUserStatsOnly(range, granularity, normalizedOrgLv1)
   }, [fetchUserStatsOnly, range, granularity])
 
   const resetUserOrgDrilldown = useCallback(() => {
