@@ -35,7 +35,23 @@ interface UniversalUploadDialogProps {
     userId?: string
   ) => Promise<{ success: boolean; error?: string }>
   isUpdate?: boolean
-  existingItem?: { name: string; description: string; category: string; guidance?: string; chinese_name?: string; user_id?: string }
+  existingItem?: {
+    name: string
+    description: string
+    category: string
+    guidance?: string
+    chinese_name?: string
+    user_id?: string
+  }
+}
+
+const buildUserIdFromUserInfo = (userInfo: UserInfoLite | null): string | undefined => {
+  if (!userInfo) return undefined
+  const rawId = (userInfo.sapId || userInfo.ystId || "").trim()
+  const rawName = (userInfo.userName || "").trim()
+  const rawOrgName = (userInfo.orgName || "").trim()
+  const segments = [rawId, rawName, rawOrgName].filter(Boolean)
+  return segments.length > 0 ? segments.join(" / ") : undefined
 }
 
 export function UniversalUploadDialog({
@@ -57,18 +73,9 @@ export function UniversalUploadDialog({
   const [guidance, setGuidance] = useState("")
   const [chineseName, setChineseName] = useState("")
   const [userId, setUserId] = useState<string | undefined>(undefined)
-  const [nameFromFile, setNameFromFile] = useState(false)  // name 是否来自文件解析（锁定）
+  const [nameFromFile, setNameFromFile] = useState(false) // name 是否来自文件解析（锁定）
 
-  const buildUserIdFromUserInfo = (userInfo: UserInfoLite | null): string | undefined => {
-    if (!userInfo) return undefined
-    const rawId = (userInfo.sapId || userInfo.ystId || "").trim()
-    const rawName = (userInfo.userName || "").trim()
-    const rawOrgName = (userInfo.orgName || "").trim()
-    const segments = [rawId, rawName, rawOrgName].filter(Boolean)
-    return segments.length > 0 ? segments.join(" / ") : undefined
-  }
-
-  const loadCurrentUserId = async () => {
+  const loadCurrentUserId = React.useCallback(async () => {
     try {
       const userInfo = await window.api.models.getUserInfo()
       setUserId(buildUserIdFromUserInfo(userInfo))
@@ -76,7 +83,7 @@ export function UniversalUploadDialog({
       console.error("[UniversalUploadDialog] Failed to load user info:", e)
       setUserId(undefined)
     }
-  }
+  }, [])
 
   // Initialize form with existing data for update mode
   React.useEffect(() => {
@@ -99,7 +106,7 @@ export function UniversalUploadDialog({
     if (open) {
       void loadCurrentUserId()
     }
-  }, [isUpdate, existingItem, open])
+  }, [isUpdate, existingItem, open, loadCurrentUserId])
 
   const getAcceptedTypes = () => {
     switch (resourceType) {
@@ -169,10 +176,10 @@ export function UniversalUploadDialog({
       if (ext === ".md" || ext === ".zip") {
         try {
           const buffer = await selectedFile.arrayBuffer()
-          const result = await window.electron.ipcRenderer.invoke("skills:parseNameFromFile", {
+          const result = (await window.electron.ipcRenderer.invoke("skills:parseNameFromFile", {
             buffer,
             fileName: selectedFile.name
-          }) as { success: boolean; name?: string; error?: string }
+          })) as { success: boolean; name?: string; error?: string }
 
           if (result.success && result.name) {
             setName(result.name)
@@ -195,9 +202,33 @@ export function UniversalUploadDialog({
   }
 
   const handleUpload = async () => {
-    // For updates, file is optional; for new uploads, file is required
-    if ((!isUpdate && !file) || !name.trim()) {
-      setError(isUpdate ? "请填写名称" : "请选择文件并填写名称")
+    if (!file) {
+      setError("请选择文件")
+      return
+    }
+
+    if (!name.trim()) {
+      setError("请填写英文名称")
+      return
+    }
+
+    if (!chineseName.trim()) {
+      setError("请填写中文名称")
+      return
+    }
+
+    if (!description.trim()) {
+      setError("请填写描述")
+      return
+    }
+
+    if (!category.trim()) {
+      setError("请选择场景")
+      return
+    }
+
+    if (!guidance.trim()) {
+      setError("请填写使用指引")
       return
     }
 
@@ -211,8 +242,8 @@ export function UniversalUploadDialog({
         name.trim(),
         description.trim(),
         category,
-        guidance,
-        chineseName.trim() || undefined,
+        guidance.trim(),
+        chineseName.trim(),
         normalizedUserId
       )
 
@@ -223,6 +254,7 @@ export function UniversalUploadDialog({
         setFile(null)
         setName("")
         setDescription("")
+        setCategory(DEFAULT_SCENE_CATEGORY)
         setGuidance("")
         setChineseName("")
         setUserId(undefined)
@@ -264,6 +296,9 @@ export function UniversalUploadDialog({
         setFile(null)
         setName("")
         setDescription("")
+        setCategory(DEFAULT_SCENE_CATEGORY)
+        setGuidance("")
+        setChineseName("")
         setError(null)
         setShowJsonTemplate(false)
         setNameFromFile(false)
@@ -299,6 +334,13 @@ export function UniversalUploadDialog({
 
   const [jsonTemplateCopied, setJsonTemplateCopied] = useState(false)
   const [showJsonTemplate, setShowJsonTemplate] = useState(false)
+  const canSubmit =
+    !!file &&
+    !!name.trim() &&
+    !!chineseName.trim() &&
+    !!description.trim() &&
+    !!category.trim() &&
+    !!guidance.trim()
 
   const handleCopyJsonTemplate = () => {
     const template = `{
@@ -338,9 +380,7 @@ export function UniversalUploadDialog({
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>{getTitle()}</DialogTitle>
-          <DialogDescription>
-            {getFileTypeDescription()}
-          </DialogDescription>
+          <DialogDescription>{getFileTypeDescription()}</DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4 max-h-[50vh] overflow-auto">
@@ -348,7 +388,9 @@ export function UniversalUploadDialog({
           <div
             className={cn(
               "border-2 border-dashed rounded-lg p-6 text-center transition-colors cursor-pointer",
-              dragOver ? "border-primary bg-primary/5" : "border-muted-foreground/30 hover:border-muted-foreground/50",
+              dragOver
+                ? "border-primary bg-primary/5"
+                : "border-muted-foreground/30 hover:border-muted-foreground/50",
               uploading && "pointer-events-none opacity-60"
             )}
             onDrop={onDrop}
@@ -363,6 +405,7 @@ export function UniversalUploadDialog({
               className="hidden"
               onChange={onInputChange}
               disabled={uploading}
+              required
             />
             {file ? (
               <div>
@@ -374,10 +417,7 @@ export function UniversalUploadDialog({
               <>
                 <Upload className="size-10 mx-auto text-muted-foreground mb-2" />
                 <p className="text-sm text-muted-foreground">拖拽文件到此处，或点击选择</p>
-                <p className="text-xs text-muted-foreground mt-1">
-                  支持: {getAcceptedTypes()}
-                  {isUpdate && <span className="block mt-1">更新时文件为可选项</span>}
-                </p>
+                <p className="text-xs text-muted-foreground mt-1">支持: {getAcceptedTypes()}</p>
               </>
             )}
           </div>
@@ -385,8 +425,7 @@ export function UniversalUploadDialog({
           {/* Name Input */}
           <div className="space-y-2">
             <label htmlFor="name" className="block text-sm font-medium">
-              英文名称 *
-              <span>（英文名称 = zip文件名 = md里的name）</span>
+              英文名称 *<span>（英文名称 = zip文件名 = md里的name）</span>
             </label>
             <Input
               id="name"
@@ -394,7 +433,8 @@ export function UniversalUploadDialog({
               value={name}
               onChange={(e) => setName(e.target.value)}
               disabled={uploading || isUpdate || nameFromFile}
-              className={(isUpdate || nameFromFile) ? "bg-muted" : ""}
+              className={isUpdate || nameFromFile ? "bg-muted" : ""}
+              required
             />
             {isUpdate ? (
               <p className="text-xs text-muted-foreground">更新时名称不可修改</p>
@@ -402,37 +442,39 @@ export function UniversalUploadDialog({
               <p className="text-xs text-muted-foreground">名称已从文件中自动提取，不可修改</p>
             ) : resourceType === "skill" ? (
               <p className="text-xs text-muted-foreground">
-                名称需与 .zip 文件名或 .md 文件中 frontmatter 的 <code className="bg-muted px-1 rounded">name</code> 字段保持一致
+                名称需与 .zip 文件名或 .md 文件中 frontmatter 的{" "}
+                <code className="bg-muted px-1 rounded">name</code> 字段保持一致
               </p>
             ) : null}
           </div>
 
-
           {/* Chinese Name Input */}
           <div className="space-y-2">
             <label htmlFor="chinese-name" className="block text-sm font-medium">
-              中文名称
+              中文名称 *
             </label>
             <Input
               id="chinese-name"
-              placeholder="输入中文名称（可选）"
+              placeholder="输入中文名称"
               value={chineseName}
               onChange={(e) => setChineseName(e.target.value)}
               disabled={uploading}
+              required
             />
           </div>
 
           {/* Description Input */}
           <div className="space-y-2">
             <label htmlFor="description" className="block text-sm font-medium">
-              描述
+              描述 *
             </label>
             <textarea
               id="description"
-              placeholder="输入资源描述（可选）"
+              placeholder="输入资源描述"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               disabled={uploading}
+              required
               rows={3}
               className="w-full p-2 text-sm border rounded-md focus:ring-1 focus:ring-primary focus:outline-none disabled:opacity-50"
             />
@@ -448,6 +490,7 @@ export function UniversalUploadDialog({
               value={category}
               onChange={(e) => setCategory(e.target.value)}
               disabled={uploading}
+              required
               className="w-full p-2 text-sm border rounded-md focus:ring-1 focus:ring-primary focus:outline-none disabled:opacity-50"
             >
               {category &&
@@ -465,7 +508,7 @@ export function UniversalUploadDialog({
           {/* Guidance Input - Available for all modes */}
           <div className="space-y-2">
             <label htmlFor="guidance" className="block text-sm font-medium">
-              使用指引（建议填写！）
+              使用指引 *
             </label>
             <textarea
               id="guidance"
@@ -473,11 +516,11 @@ export function UniversalUploadDialog({
               value={guidance}
               onChange={(e) => setGuidance(e.target.value)}
               disabled={uploading}
+              required
               rows={3}
               className="w-full p-2 text-sm border rounded-md focus:ring-1 focus:ring-primary focus:outline-none disabled:opacity-50"
             />
           </div>
-
 
           {/* JSON Template for MCP */}
           {resourceType === "mcp" && (
@@ -492,7 +535,11 @@ export function UniversalUploadDialog({
                   onClick={handleCopyJsonTemplate}
                   disabled={uploading}
                 >
-                  {jsonTemplateCopied ? <Check className="mr-2 h-4 w-4" /> : <Copy className="mr-2 h-4 w-4" />}
+                  {jsonTemplateCopied ? (
+                    <Check className="mr-2 h-4 w-4" />
+                  ) : (
+                    <Copy className="mr-2 h-4 w-4" />
+                  )}
                   {jsonTemplateCopied ? "模板已复制" : "复制 JSON 模板"}
                 </Button>
                 <Button
@@ -501,7 +548,11 @@ export function UniversalUploadDialog({
                   onClick={() => setShowJsonTemplate(!showJsonTemplate)}
                   disabled={uploading}
                 >
-                  {showJsonTemplate ? <ChevronDown className="mr-2 h-4 w-4" /> : <ChevronRight className="mr-2 h-4 w-4" />}
+                  {showJsonTemplate ? (
+                    <ChevronDown className="mr-2 h-4 w-4" />
+                  ) : (
+                    <ChevronRight className="mr-2 h-4 w-4" />
+                  )}
                   {showJsonTemplate ? "隐藏模板" : "查看模板"}
                 </Button>
               </div>
@@ -539,18 +590,11 @@ export function UniversalUploadDialog({
         </div>
 
         <DialogFooter>
-          <Button
-            variant="outline"
-            onClick={() => handleDialogClose(false)}
-            disabled={uploading}
-          >
+          <Button variant="outline" onClick={() => handleDialogClose(false)} disabled={uploading}>
             取消
           </Button>
-          <Button
-            onClick={handleUpload}
-            disabled={uploading || (!isUpdate && !file) || !name.trim()}
-          >
-            {uploading ? (isUpdate ? "更新中..." : "上传中...") : (isUpdate ? "更新" : "上传")}
+          <Button onClick={handleUpload} disabled={uploading || !canSubmit}>
+            {uploading ? (isUpdate ? "更新中..." : "上传中...") : isUpdate ? "更新" : "上传"}
           </Button>
         </DialogFooter>
       </DialogContent>
