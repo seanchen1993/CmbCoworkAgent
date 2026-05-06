@@ -305,7 +305,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: windows-2022
+          - os: windows-latest
             platform: win
             script: dist:win
           - os: ubuntu-latest
@@ -323,13 +323,12 @@ jobs:
         with:
           node-version: "22"
           cache: "npm"
-     
+
       - name: Decrypt .env for build
         run: node scripts/env-crypt.mjs decrypt-file .env
         env:
           ENV_ENCRYPTION_KEY: ${{ secrets.ENV_ENCRYPTION_KEY }}
-      - name: Configure node-gyp for Windows
-        run: npm config set msvs_version 2022
+
       # 用 npm ci 严格按 lockfile 装。
       # 历史:曾经有 "缺 @rollup/rollup-win32-x64-msvc 就删 node_modules 重装" 的 fallback,
       # 那是早期改用 npm install(增量路径有 optional deps 缺失 bug)时加的应急方案。
