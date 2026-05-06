@@ -356,7 +356,7 @@ function normalizeMetricValue(value: unknown): string {
 }
 
 function getLatestUserMetric(bucket: any, field: string): string {
-  return normalizeMetricValue(bucket.latest_user_info?.top?.[0]?.metrics?.[field])
+  return normalizeMetricValue(bucket.latest_user_info?.hits?.hits?.[0]?._source?.[field])
 }
 
 function formatTopUserOrgName(orgName: string, upperOrgLv1: string, upperOrgLv0: string): string {
