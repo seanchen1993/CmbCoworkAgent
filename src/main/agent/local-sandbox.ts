@@ -1425,6 +1425,9 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
         return { error: "文件写入被用户拒绝。" }
       }
     }
+    if (this.isAborted) {
+      return { error: "文件写入已取消。" }
+    }
     // PreToolUse hook
     const preResult = await runHooksEnriched(this.getHooks(), "PreToolUse", {
       toolName: "write_file",
@@ -1435,8 +1438,14 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     if (preResult?.blocked) {
       return { error: `[Hook blocked] ${preResult.stdout || "write_file was blocked by a hook"}` }
     }
+    if (this.isAborted) {
+      return { error: "文件写入已取消。" }
+    }
     const resolvedPath = this._resolvePath(filePath)
     const result = await this.withFileLock(resolvedPath, async () => {
+      if (this.isAborted) {
+        return { error: "文件写入已取消。" }
+      }
       const r = await super.write(filePath, content)
       if (!r.error) {
         await this.recordReadTime(resolvedPath)
@@ -1520,6 +1529,9 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
         return { error: "文件编辑被用户拒绝。" }
       }
     }
+    if (this.isAborted) {
+      return { error: "文件编辑已取消。" }
+    }
     // PreToolUse hook
     const preResult = await runHooksEnriched(this.getHooks(), "PreToolUse", {
       toolName: "edit_file",
@@ -1530,9 +1542,15 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     if (preResult?.blocked) {
       return { error: `[Hook blocked] ${preResult.stdout || "edit_file was blocked by a hook"}` }
     }
+    if (this.isAborted) {
+      return { error: "文件编辑已取消。" }
+    }
     try {
       const resolvedPath = this._resolvePath(filePath)
       const result = await this.withFileLock(resolvedPath, async () => {
+        if (this.isAborted) {
+          return { error: "文件编辑已取消。" }
+        }
         const { buffer } = await this.readFileBuffer(filePath)
         const ext = path.extname(resolvedPath).toLowerCase()
         const encoding = this.detectEncoding(buffer, ext)
@@ -1553,6 +1571,9 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
           occurrences = r.occurrences
         }
 
+        if (this.isAborted) {
+          return { error: "文件编辑已取消。" }
+        }
         await this.writeFileEncoded(resolvedPath, expectedContent, encoding)
         await this.recordReadTime(resolvedPath)
         return { path: filePath, filesUpdate: null, occurrences }

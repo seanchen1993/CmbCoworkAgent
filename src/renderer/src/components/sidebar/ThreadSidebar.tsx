@@ -454,7 +454,11 @@ export function ThreadSidebar(): React.JSX.Element {
         <div className="p-2 space-y-1 overflow-hidden">
           {threads.map((thread) => {
             const threadState = allThreadStates[thread.thread_id]
-            const isLoading = allStreamLoadingStates[thread.thread_id] ?? false
+            const hasRunningCoordinatorWorker = Boolean(
+              threadState?.coordinatorWorkers.some((worker) => worker.status === "running")
+            )
+            const isLoading =
+              (allStreamLoadingStates[thread.thread_id] ?? false) || hasRunningCoordinatorWorker
             const scheduledTaskLoading = Boolean(threadState?.scheduledTaskLoading)
             const hasPendingApproval = Boolean(threadState?.pendingApproval)
 
@@ -475,9 +479,15 @@ export function ThreadSidebar(): React.JSX.Element {
                 }}
                 onRunFinished={() => handleRunFinished(thread.thread_id)}
                 onDelete={() => {
-                  cleanupThread(thread.thread_id)
-                  deleteThread(thread.thread_id)
-                  markRead(thread.thread_id)
+                  void (async () => {
+                    try {
+                      await deleteThread(thread.thread_id)
+                      cleanupThread(thread.thread_id)
+                      markRead(thread.thread_id)
+                    } catch (error) {
+                      console.error("[ThreadSidebar] Failed to delete thread:", error)
+                    }
+                  })()
                 }}
                 onStartEditing={() => startEditing(thread.thread_id, thread.title || "")}
                 onSaveTitle={saveTitle}

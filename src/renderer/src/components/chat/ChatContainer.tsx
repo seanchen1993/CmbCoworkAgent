@@ -48,6 +48,11 @@ import {
   useThreadContext,
   type HookLogEntry
 } from "@/lib/thread-context"
+import {
+  filterCoordinatorNoiseMessages,
+  isCoordinatorNotificationPrompt
+} from "@/lib/message-display-helpers"
+import { isCoordinatorModeMetadata } from "@/lib/coordinator-mode-helpers"
 import { ModelSwitcher } from "./ModelSwitcher"
 import { AgentModeSwitcher, type ChatAgentMode } from "./AgentModeSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
@@ -367,7 +372,13 @@ export function ChatContainer({
   const [needUpdateVersion, setNeedUpdateVersion] = useState(false)
   const [modelContextLimit, setModelContextLimit] = useState<number | undefined>(undefined)
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false)
-  const [agentMode, setAgentMode] = useState<ChatAgentMode>("normal")
+  const initialAgentMode = isCoordinatorModeMetadata(
+    useAppStore.getState().threads.find((thread) => thread.thread_id === threadId)?.metadata
+  )
+    ? "coordinator"
+    : "normal"
+  const [agentMode, setAgentMode] = useState<ChatAgentMode>(initialAgentMode)
+  const agentModeHydratedRef = useRef(initialAgentMode === "coordinator")
 
   useEffect(() => {
     const { ipcRenderer } = window.electron
@@ -434,21 +445,45 @@ export function ChatContainer({
     setMarketInitialSkillCategory
   } = useAppStore()
 
-  useEffect(() => {
-    const currentThread = threads.find((thread) => thread.thread_id === threadId)
-    if (currentThread) {
-      const metadata = currentThread.metadata ?? {}
-      setAgentMode(metadata.agentMode === "coordinator" ? "coordinator" : "normal")
-      return
-    }
+  const resolveAgentMode = useCallback(
+    async (metadata: Record<string, unknown>): Promise<ChatAgentMode> => {
+      if (isCoordinatorModeMetadata(metadata)) {
+        return "coordinator"
+      }
+      const environmentForcedCoordinator = await window.api.agent
+        .isCoordinatorModeForced()
+        .catch((error) => {
+          console.warn("[ChatContainer] Failed to load environment coordinator mode:", error)
+          return false
+        })
+      return environmentForcedCoordinator ? "coordinator" : "normal"
+    },
+    []
+  )
 
+  const loadResolvedAgentMode = useCallback(async (): Promise<ChatAgentMode> => {
+    const currentThread = useAppStore.getState().threads.find((thread) => thread.thread_id === threadId)
+    if (currentThread) {
+      return resolveAgentMode(currentThread.metadata ?? {})
+    }
+    const thread = await window.api.threads.get(threadId)
+    return resolveAgentMode(thread?.metadata ?? {})
+  }, [resolveAgentMode, threadId])
+
+  useEffect(() => {
     let cancelled = false
-    void window.api.threads
-      .get(threadId)
-      .then((thread) => {
+    const currentThread = threads.find((thread) => thread.thread_id === threadId)
+    const metadataDerivedMode: ChatAgentMode = isCoordinatorModeMetadata(currentThread?.metadata)
+      ? "coordinator"
+      : "normal"
+    setAgentMode(metadataDerivedMode)
+    agentModeHydratedRef.current = metadataDerivedMode === "coordinator"
+
+    void loadResolvedAgentMode()
+      .then((nextMode) => {
         if (cancelled) return
-        const metadata = thread?.metadata ?? {}
-        setAgentMode(metadata.agentMode === "coordinator" ? "coordinator" : "normal")
+        agentModeHydratedRef.current = true
+        setAgentMode(nextMode)
       })
       .catch((error) => {
         console.warn("[ChatContainer] Failed to load agent mode:", error)
@@ -456,26 +491,7 @@ export function ChatContainer({
     return () => {
       cancelled = true
     }
-  }, [threadId, threads])
-
-  const handleAgentModeChange = useCallback(
-    (nextMode: ChatAgentMode): void => {
-      const previousMode = agentMode
-      setAgentMode(nextMode)
-      void (async () => {
-        const thread = await window.api.threads.get(threadId)
-        const metadata = thread?.metadata ?? {}
-        await updateThread(threadId, {
-          metadata: { ...metadata, agentMode: nextMode }
-        })
-      })().catch((error) => {
-        console.error("[ChatContainer] Failed to update agent mode:", error)
-        setAgentMode(previousMode)
-        toast.error("Agent 模式保存失败，请重试")
-      })
-    },
-    [agentMode, threadId, updateThread]
-  )
+  }, [threadId, threads, loadResolvedAgentMode])
 
   const allSkillsRef = useRef<MarketItem[]>([])
   const [goodSkillsData, setGoodSkillsData] = useState<MarketItem[]>([])
@@ -596,6 +612,7 @@ export function ChatContainer({
   const {
     messages: threadMessages,
     pendingApproval,
+    approvalQueue,
     todos,
     error: threadError,
     workspacePath,
@@ -603,11 +620,13 @@ export function ChatContainer({
     currentModel,
     draftInput: input,
     draftSkill: selectedSkill,
+    coordinatorWorkers,
     scheduledTaskLoading,
     scheduledTaskId,
     modelRetry,
     setTodos,
     setPendingApproval,
+    clearPendingApprovals,
     appendMessage,
     setError,
     clearError,
@@ -625,6 +644,7 @@ export function ChatContainer({
   // Get the stream data via subscription - reactive updates without re-rendering provider
   const streamData = useThreadStream(threadId)
   const stream = streamData.stream
+  const canChangeAgentMode = threadMessages.length === 0
   const [savedToolNameInput, setSavedToolNameInput] = useState("")
   const [savedToolDescriptionInput, setSavedToolDescriptionInput] = useState("")
   const [saveToolMetadataLoading, setSaveToolMetadataLoading] = useState(false)
@@ -645,7 +665,63 @@ export function ChatContainer({
     setSavedToolNameInput("")
     setSavedToolDescriptionInput("")
   }, [pendingApproval])
+  const hasRunningCoordinatorWorker = coordinatorWorkers.some((worker) => worker.status === "running")
   const isLoading = streamData.isLoading || scheduledTaskLoading
+  const agentModeSwitchDisabledReason = !canChangeAgentMode
+    ? "当前线程已有消息，不能再切换执行模式。请新开线程选择其他模式。"
+    : isLoading
+      ? "当前请求执行中，暂时不能切换执行模式。"
+      : undefined
+
+  const handleAgentModeChange = useCallback(
+    (nextMode: ChatAgentMode): void => {
+      const previousMode = agentMode
+      void (async () => {
+        if (threadMessages.length > 0) {
+          toast.error("当前线程已有消息，不能再切换执行模式。请新开线程选择其他模式。")
+          return
+        }
+        if (nextMode === "normal") {
+          const isEnvironmentForcedCoordinator = await window.api.agent
+            .isCoordinatorModeForced()
+            .catch(() => false)
+          if (isEnvironmentForcedCoordinator) {
+            toast.error("当前环境变量强制开启协同模式，不能切回普通模式")
+            return
+          }
+          const [workers, hasPendingNotifications] = await Promise.all([
+            window.api.agent.getCoordinatorWorkers(threadId).catch(() => []),
+            window.api.agent.hasCoordinatorWorkerNotifications(threadId).catch(() => false)
+          ])
+          const hasRemoteUnresolvedWorkers = workers.some(
+            (worker) => worker.status === "running" || worker.notification_acknowledged === false
+          )
+          if (hasRemoteUnresolvedWorkers || hasPendingNotifications) {
+            toast.error("仍有协同 worker 在运行或结果待处理，请先在协同模式处理完成后再切回普通模式")
+            return
+          }
+        }
+
+        agentModeHydratedRef.current = true
+        setAgentMode(nextMode)
+        const thread = await window.api.threads.get(threadId)
+        const metadata = thread?.metadata ?? {}
+        const nextMetadata: Record<string, unknown> = { ...metadata, agentMode: nextMode }
+        if (nextMode === "normal") {
+          delete nextMetadata.coordinatorMode
+        }
+        await updateThread(threadId, {
+          metadata: nextMetadata
+        })
+      })().catch((error) => {
+        console.error("[ChatContainer] Failed to update agent mode:", error)
+        agentModeHydratedRef.current = true
+        setAgentMode(previousMode)
+        toast.error("Agent 模式保存失败，请重试")
+      })
+    },
+    [agentMode, threadId, threadMessages, updateThread]
+  )
 
   // ── File attachments state ──
   const [attachments, setAttachments] = useState<FileAttachment[]>([])
@@ -969,7 +1045,9 @@ export function ChatContainer({
       const approvalAny = pendingApproval as unknown as Record<string, unknown>
       if (approvalAny._orchestratorRequestId) {
         const operation = approvalAny.operation as string | undefined
-        if (operation === "prepare_save_code_exec_tool" && decision === "approve") {
+        const keepPrepareApprovalForSaveMetadata =
+          operation === "prepare_save_code_exec_tool" && decision === "approve"
+        if (keepPrepareApprovalForSaveMetadata) {
           setSaveToolMetadataLoading(true)
         } else {
           setSaveToolMetadataLoading(false)
@@ -988,7 +1066,7 @@ export function ChatContainer({
             : {})
         })
 
-        if (!(operation === "prepare_save_code_exec_tool" && decision === "approve")) {
+        if (!keepPrepareApprovalForSaveMetadata) {
           setPendingApproval(null)
         }
         return
@@ -1059,10 +1137,11 @@ export function ChatContainer({
 
   const prevLoadingRef = useRef(false)
   useEffect(() => {
-    if (prevLoadingRef.current && !isLoading) {
-      for (const rawMsg of streamData.messages) {
-        const msg = rawMsg as StreamMessage
-        if (msg.id) {
+	    if (prevLoadingRef.current && !isLoading) {
+	      for (const rawMsg of streamData.messages) {
+	        const msg = rawMsg as StreamMessage
+	        if (msg.type === "human" && isCoordinatorNotificationPrompt(msg.content)) continue
+	        if (msg.id) {
           const streamMsg = msg as StreamMessage & { id: string }
 
           let role: Message["role"] = "assistant"
@@ -1091,9 +1170,10 @@ export function ChatContainer({
   const displayMessages = useMemo(() => {
     const threadMessageIds = new Set(threadMessages.map((m) => m.id))
 
-    const streamingMsgs: Message[] = ((streamData.messages || []) as StreamMessage[])
-      .filter((m): m is StreamMessage & { id: string } => !!m.id && !threadMessageIds.has(m.id))
-      .map((streamMsg) => {
+	  const streamingMsgs: Message[] = ((streamData.messages || []) as StreamMessage[])
+	      .filter((m): m is StreamMessage & { id: string } => !!m.id && !threadMessageIds.has(m.id))
+	      .filter((m) => !(m.type === "human" && isCoordinatorNotificationPrompt(m.content)))
+	      .map((streamMsg) => {
         let role: Message["role"] = "assistant"
         if (streamMsg.type === "human") role = "user"
         else if (streamMsg.type === "tool") role = "tool"
@@ -1113,7 +1193,7 @@ export function ChatContainer({
 
     // Clean up attachment XML tags in user messages for display
     const allMessages = [...threadMessages, ...streamingMsgs]
-    return allMessages.map((msg) => {
+    const cleanedMessages = allMessages.map((msg) => {
       if (
         msg.role !== "user" ||
         typeof msg.content !== "string" ||
@@ -1140,6 +1220,7 @@ export function ChatContainer({
         fileNames.length > 0 ? `${fileNames.join("\n")}\n\n${textOnly}`.trim() : textOnly
       return { ...msg, content: cleaned }
     })
+    return filterCoordinatorNoiseMessages(cleanedMessages)
   }, [threadMessages, streamData.messages])
 
   const userMessageIds = useMemo(
@@ -1404,18 +1485,20 @@ export function ChatContainer({
       clearError()
     }
 
-    if (pendingApproval) {
+    if (pendingApproval || approvalQueue.length > 0) {
       // P0 fix: notify main process to reject the pending approval instead of silently dropping it.
       // Otherwise the orchestrator's Promise hangs until the 5-minute timeout.
-      const approvalAny = pendingApproval as unknown as Record<string, unknown>
-      if (approvalAny._orchestratorRequestId) {
-        window.api.sandbox.sendApprovalDecision({
-          requestId: approvalAny._orchestratorRequestId as string,
-          type: "reject",
-          tool_call_id: pendingApproval.tool_call?.id || ""
-        })
+      for (const approval of [pendingApproval, ...approvalQueue].filter(Boolean)) {
+        const approvalAny = approval as unknown as Record<string, unknown>
+        if (approvalAny._orchestratorRequestId) {
+          window.api.sandbox.sendApprovalDecision({
+            requestId: approvalAny._orchestratorRequestId as string,
+            type: "reject",
+            tool_call_id: approval?.tool_call?.id || ""
+          })
+        }
       }
-      setPendingApproval(null)
+      clearPendingApprovals()
     }
 
     // Snapshot the skill selection before we clear it — synchronous path, no
@@ -1455,7 +1538,15 @@ export function ChatContainer({
     // see this block verbatim; they don't need to know it's a slash command.
     // join(\n\n) on filtered parts avoids leading blank lines when the user
     // sends a skill with no text or attachments (skill-only invocation).
-    const skillBlock = skill ? formatSkillUseBlock({ name: skill.name, path: skill.path }) : ""
+    const skillBlock = skill
+      ? formatSkillUseBlock({
+          name: skill.name,
+          path: skill.path,
+          description: skill.description,
+          metadata: skill.metadata,
+          allowedTools: skill.allowedTools
+        })
+      : ""
     fullMessage = [fullMessage, skillBlock].filter(Boolean).join("\n\n")
 
     // displayContent is what the user sees in their bubble while this run is
@@ -1474,6 +1565,29 @@ export function ChatContainer({
       displayContent = `${fileNames}\n\n${userText}`
     }
     displayContent = [displayContent, skillBlock].filter(Boolean).join("\n\n")
+    if (
+      /\[\[CMB_COORDINATOR_(?:WORKER_NOTIFICATION|INTERNAL_(?:CONTEXT|NOTIFICATION)_(?:START|END))\]\]/.test(
+        displayContent
+      )
+    ) {
+      displayContent = `用户输入的普通文本：\n\n${displayContent}`
+    }
+    const coordinatorPrefixed = /^\s*(?:\[coordinator\]|#coordinator)\s*[:-]?/i.test(fullMessage)
+    let submitAgentMode: ChatAgentMode = coordinatorPrefixed ? "coordinator" : agentMode
+    if (!coordinatorPrefixed && !agentModeHydratedRef.current) {
+      submitAgentMode = await loadResolvedAgentMode().catch((error) => {
+        console.warn("[ChatContainer] Failed to resolve submit agent mode:", error)
+        return agentMode
+      })
+      agentModeHydratedRef.current = true
+      if (submitAgentMode !== agentMode) {
+        setAgentMode(submitAgentMode)
+      }
+    }
+    if (submitAgentMode === "coordinator" && agentMode !== "coordinator") {
+      agentModeHydratedRef.current = true
+      setAgentMode("coordinator")
+    }
 
     const userMessage: Message = {
       id: crypto.randomUUID(),
@@ -1502,7 +1616,7 @@ export function ChatContainer({
       },
       {
         config: {
-          configurable: { thread_id: threadId, model_id: currentModel, agent_mode: agentMode }
+          configurable: { thread_id: threadId, model_id: currentModel, agent_mode: submitAgentMode }
         }
       }
     )
@@ -1594,8 +1708,17 @@ export function ChatContainer({
         console.error("[ChatContainer] Failed to cancel ChatX thread:", err)
       }
     } else {
-      // Stop frontend stream and kill backend child processes in parallel
+      // Stop the foreground answer only. Async coordinator workers are durable
+      // and should keep running unless the user explicitly stops them.
       await Promise.all([stream?.stop(), window.api.agent.cancel(threadId)])
+    }
+  }
+
+  const handleCancelBackgroundWorkers = async (): Promise<void> => {
+    try {
+      await window.api.agent.cancel(threadId, { cancelWorkers: true })
+    } catch (err) {
+      console.error("[ChatContainer] Failed to cancel coordinator workers:", err)
     }
   }
 
@@ -2941,7 +3064,8 @@ export function ChatContainer({
                     <div className="w-px h-4 bg-border mx-1" />
                     <AgentModeSwitcher
                       mode={agentMode}
-                      disabled={isLoading}
+                      disabled={isLoading || !canChangeAgentMode}
+                      disabledReason={agentModeSwitchDisabledReason}
                       onChange={handleAgentModeChange}
                     />
                     <div className="w-px h-4 bg-border mx-1" />
@@ -2961,16 +3085,29 @@ export function ChatContainer({
                         <Square className="size-3 fill-current" />
                       </button>
                     ) : (
-                      <button
-                        type="submit"
-                        disabled={
-                          (!input.trim() && attachments.length === 0 && !selectedSkill) ||
-                          slash.mode.kind === "skill"
-                        }
-                        className="flex items-center justify-center size-7 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                      >
-                        <Send className="size-3.5" />
-                      </button>
+                      <>
+                        {hasRunningCoordinatorWorker && (
+                          <button
+                            type="button"
+                            onClick={handleCancelBackgroundWorkers}
+                            aria-label="停止后台子代理"
+                            title="停止后台子代理"
+                            className="flex items-center justify-center size-7 rounded-md bg-destructive/10 text-destructive hover:bg-destructive hover:text-destructive-foreground transition-colors"
+                          >
+                            <Square className="size-3 fill-current" />
+                          </button>
+                        )}
+                        <button
+                          type="submit"
+                          disabled={
+                            (!input.trim() && attachments.length === 0 && !selectedSkill) ||
+                            slash.mode.kind === "skill"
+                          }
+                          className="flex items-center justify-center size-7 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          <Send className="size-3.5" />
+                        </button>
+                      </>
                     )}
                   </div>
                 </div>

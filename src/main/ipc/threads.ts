@@ -9,8 +9,21 @@ import {
   updateThread as dbUpdateThread,
   deleteThread as dbDeleteThread
 } from "../db"
-import { getCheckpointer, closeCheckpointer } from "../agent/runtime"
-import { deleteThreadCheckpoint, getOpenworkDir } from "../storage"
+import {
+  getCheckpointer,
+  closeCheckpointer,
+  closeWorkerCheckpointersForThread
+} from "../agent/runtime"
+import { forgetCoordinatorThreadState } from "./agent"
+import {
+  deleteThreadCheckpoint,
+  deleteThreadWorkerCheckpoints,
+  getOpenworkDir
+} from "../storage"
+import {
+  coordinatorWorkerManager,
+  deleteCoordinatorWorkerArtifacts
+} from "../agent/coordinator-worker-manager"
 import { generateTitle } from "../services/title-generator"
 import { fireSessionEnd } from "../hooks/session-lifecycle"
 import { makeHookResultCallback } from "../hooks/result-callback"
@@ -22,6 +35,56 @@ const settingsStore = new Store({
   name: "settings",
   cwd: getOpenworkDir()
 })
+
+async function assertCanPersistExplicitNormalMode(
+  threadId: string,
+  currentMetadata: Record<string, unknown>,
+  nextMetadata: Record<string, unknown>
+): Promise<void> {
+  if (nextMetadata.agentMode !== "normal" || currentMetadata.agentMode === "normal") {
+    return
+  }
+
+  const workspacePath =
+    typeof nextMetadata.workspacePath === "string"
+      ? nextMetadata.workspacePath
+      : typeof currentMetadata.workspacePath === "string"
+        ? currentMetadata.workspacePath
+        : undefined
+
+  if (!workspacePath) {
+    const workers = coordinatorWorkerManager.readWorkers(threadId)
+    const hasPendingNotifications = coordinatorWorkerManager.hasNotifications(threadId)
+    const unresolvedWorkers = workers.filter(
+      (worker) => worker.status === "running" || worker.notification_acknowledged === false
+    )
+    if (unresolvedWorkers.length === 0 && !hasPendingNotifications) {
+      return
+    }
+    throw new Error("该线程缺少工作区路径，无法安全切回普通模式。请先重新选择工作区后再切换。")
+  }
+
+  await coordinatorWorkerManager.restoreWorkersForThread({
+    parentThreadId: threadId,
+    workspacePath,
+    mode: "active"
+  })
+
+  const workers = coordinatorWorkerManager.readWorkers(threadId)
+  const hasPendingNotifications = coordinatorWorkerManager.hasNotifications(threadId)
+  const unresolvedWorkers = workers.filter(
+    (worker) => worker.status === "running" || worker.notification_acknowledged === false
+  )
+  if (unresolvedWorkers.length === 0 && !hasPendingNotifications) return
+
+  const workerList = unresolvedWorkers
+    .map((worker) => `${worker.worker_id}: ${worker.description}`)
+    .join("; ")
+  throw new Error(
+    "仍有协同 worker 在运行或结果待处理，请先在协同模式处理完成后再切回普通模式。"
+      + (workerList ? `相关 worker：${workerList}` : "请先切回协同模式处理这些结果。")
+  )
+}
 
 export function registerThreadHandlers(ipcMain: IpcMain): void {
   // List all threads
@@ -97,6 +160,17 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
   ipcMain.handle("threads:update", async (_event, { threadId, updates }: ThreadUpdateParams) => {
     const updateData: Parameters<typeof dbUpdateThread>[1] = {}
 
+    if (updates.metadata !== undefined) {
+      const currentThread = getThread(threadId)
+      const currentMetadata =
+        currentThread?.metadata ? (JSON.parse(currentThread.metadata) as Record<string, unknown>) : {}
+      await assertCanPersistExplicitNormalMode(
+        threadId,
+        currentMetadata,
+        updates.metadata as Record<string, unknown>
+      )
+    }
+
     if (updates.title !== undefined) updateData.title = updates.title
     if (updates.status !== undefined) updateData.status = updates.status
     if (updates.metadata !== undefined) updateData.metadata = JSON.stringify(updates.metadata)
@@ -141,6 +215,22 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       window ? makeHookResultCallback(window, hookChannel) : undefined
     )
 
+    const cancelledWorkers = coordinatorWorkerManager.cancelWorkersForThread(
+      threadId,
+      "Thread was deleted."
+    )
+    const waitForCleanupBestEffort = async (workerIds?: string[]) => {
+      try {
+        await coordinatorWorkerManager.waitForWorkerCleanup(threadId, workerIds)
+      } catch (error) {
+        console.warn("[Threads] Timed out waiting for coordinator worker cleanup:", error)
+      }
+    }
+    if (cancelledWorkers.length > 0) {
+      await waitForCleanupBestEffort(cancelledWorkers.map((worker) => worker.worker_id))
+    }
+    await waitForCleanupBestEffort()
+
     // Delete from our metadata store
     dbDeleteThread(threadId)
     console.log("[Threads] Deleted from metadata store")
@@ -148,15 +238,28 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     // Close any open checkpointer for this thread
     try {
       await closeCheckpointer(threadId)
+      await closeWorkerCheckpointersForThread(threadId)
       console.log("[Threads] Closed checkpointer")
     } catch (e) {
       console.warn("[Threads] Failed to close checkpointer:", e)
     }
 
+    coordinatorWorkerManager.forgetThread(threadId)
+    forgetCoordinatorThreadState(threadId)
+    if (workspacePath) {
+      try {
+        await deleteCoordinatorWorkerArtifacts(threadId, workspacePath)
+        console.log("[Threads] Deleted coordinator worker artifacts")
+      } catch (e) {
+        console.warn("[Threads] Failed to delete coordinator worker artifacts:", e)
+      }
+    }
+
     // Delete the thread's checkpoint file
     try {
       deleteThreadCheckpoint(threadId)
-      console.log("[Threads] Deleted checkpoint file")
+      const deletedWorkerCheckpoints = deleteThreadWorkerCheckpoints(threadId)
+      console.log("[Threads] Deleted checkpoint file", { deletedWorkerCheckpoints })
     } catch (e) {
       console.warn("[Threads] Failed to delete checkpoint file:", e)
     }

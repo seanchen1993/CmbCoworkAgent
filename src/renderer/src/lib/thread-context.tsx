@@ -13,10 +13,20 @@ import {
 /* eslint-disable react-refresh/only-export-components */
 import { useStream } from "@langchain/langgraph-sdk/react"
 import { ElectronIPCTransport } from "./electron-transport"
+import { isCoordinatorModeMetadata, isExplicitNormalModeMetadata } from "./coordinator-mode-helpers"
 import type { Message, Todo, FileInfo, Subagent, HITLRequest, SkillMetadata } from "@/types"
 import { useAppStore } from "@/lib/store"
 import type { DeepAgent } from "../../../main/agent/types"
 import { toast } from "sonner"
+import {
+  coordinatorWorkersEqual,
+  mergeCoordinatorWorkers,
+  upsertSubagentLogEntry,
+  type CoordinatorWorkerView,
+  type SubagentInternalLogEntry
+} from "./thread-state-helpers"
+
+export type { CoordinatorWorkerView, SubagentInternalLogEntry } from "./thread-state-helpers"
 
 // Open file tab type
 export interface OpenFile {
@@ -73,9 +83,11 @@ export interface ThreadState {
   workspaceFiles: FileInfo[]
   workspacePath: string | null
   subagents: Subagent[]
+  coordinatorWorkers: CoordinatorWorkerView[]
   subagentToolCallCount: number
   subagentInternalLogs: SubagentInternalLogEntry[]
   pendingApproval: HITLRequest | null
+  approvalQueue: HITLRequest[]
   error: string | null
   currentModel: string
   openFiles: OpenFile[]
@@ -95,18 +107,6 @@ export interface ThreadState {
   modelRetry: ModelRetryState | null
 }
 
-export interface SubagentInternalLogEntry {
-  id: string
-  kind: "tool_call" | "tool_result"
-  title: string
-  content: string
-  result?: string
-  status?: "waiting" | "completed"
-  createdAt: string
-  checkpointNs?: string
-  toolCallId?: string
-  toolName?: string
-}
 
 // Stream instance type
 type StreamInstance = ReturnType<typeof useStream<DeepAgent>>
@@ -127,6 +127,7 @@ export interface ThreadActions {
   setWorkspacePath: (path: string | null) => void
   setSubagents: (subagents: Subagent[]) => void
   setPendingApproval: (request: HITLRequest | null) => void
+  clearPendingApprovals: () => void
   setError: (error: string | null) => void
   clearError: () => void
   setCurrentModel: (modelId: string) => void
@@ -165,9 +166,11 @@ const createDefaultThreadState = (): ThreadState => ({
   workspaceFiles: [],
   workspacePath: null,
   subagents: [],
+  coordinatorWorkers: [],
   subagentToolCallCount: 0,
   subagentInternalLogs: [],
   pendingApproval: null,
+  approvalQueue: [],
   error: null,
   currentModel: "",
   openFiles: [],
@@ -182,34 +185,93 @@ const createDefaultThreadState = (): ThreadState => ({
   modelRetry: null
 })
 
+function isThreadMetadataInCoordinatorMode(threadId: string): boolean {
+  const thread = useAppStore.getState().threads.find((item) => item.thread_id === threadId)
+  return isCoordinatorModeMetadata(thread?.metadata)
+}
+
+function isThreadMetadataExplicitNormalMode(threadId: string): boolean {
+  const thread = useAppStore.getState().threads.find((item) => item.thread_id === threadId)
+  return isExplicitNormalModeMetadata(thread?.metadata)
+}
+
 const defaultStreamData: StreamData = {
   messages: [],
   isLoading: false,
   stream: null
 }
 const EMPTY_HOOK_LOGS: HookLogEntry[] = []
+const COORDINATOR_NOTIFICATION_RETRY_MS = 1_000
+const COORDINATOR_NOTIFICATION_MAX_RETRIES = 30
 
-function upsertSubagentLogEntry(
-  logs: SubagentInternalLogEntry[],
-  entry: SubagentInternalLogEntry
-): SubagentInternalLogEntry[] {
-  const existingIndex = logs.findIndex((log) => log.id === entry.id)
-  if (existingIndex === -1) {
-    return [...logs, entry].slice(-20)
-  }
+function isTerminalCoordinatorWorker(worker: CoordinatorWorkerView): boolean {
+  return (
+    worker.status === "completed" ||
+    worker.status === "failed" ||
+    worker.status === "cancelled"
+  )
+}
 
-  const nextLogs = [...logs]
-  const existing = nextLogs[existingIndex]
-  nextLogs[existingIndex] = {
-    ...existing,
-    ...entry,
-    content: entry.content || existing.content,
-    result: entry.result ?? existing.result,
-    status: entry.status ?? existing.status,
-    toolName: entry.toolName || existing.toolName,
-    title: entry.title || existing.title
+function approvalRequestId(request: HITLRequest | null | undefined): string | null {
+  if (!request) return null
+  const raw = request as unknown as Record<string, unknown>
+  const orchestratorId = raw._orchestratorRequestId
+  if (typeof orchestratorId === "string" && orchestratorId) return orchestratorId
+  return request.id || null
+}
+
+function approvalOperation(request: HITLRequest | null | undefined): string | null {
+  if (!request) return null
+  const raw = request as unknown as Record<string, unknown>
+  const operation = raw.operation
+  return typeof operation === "string" ? operation : null
+}
+
+function enqueuePendingApproval(
+  state: ThreadState,
+  request: HITLRequest
+): Partial<ThreadState> {
+  const requestId = approvalRequestId(request)
+  const currentId = approvalRequestId(state.pendingApproval)
+  const approvalQueue = state.approvalQueue ?? []
+  if (requestId && requestId === currentId) return {}
+  if (requestId && approvalQueue.some((queued) => approvalRequestId(queued) === requestId)) {
+    return {}
   }
-  return nextLogs.slice(-20)
+  if (!state.pendingApproval) {
+    return { pendingApproval: request }
+  }
+  if (
+    approvalOperation(state.pendingApproval) === "prepare_save_code_exec_tool" &&
+    approvalOperation(request) === "save_code_exec_tool"
+  ) {
+    return { pendingApproval: request }
+  }
+  return { approvalQueue: [...approvalQueue, request] }
+}
+
+function advancePendingApproval(state: ThreadState): Partial<ThreadState> {
+  const [nextApproval, ...remainingApprovals] = state.approvalQueue ?? []
+  return {
+    pendingApproval: nextApproval ?? null,
+    approvalQueue: remainingApprovals
+  }
+}
+
+function removePendingApprovalByRequestId(
+  state: ThreadState,
+  requestId: string
+): Partial<ThreadState> {
+  const currentId = approvalRequestId(state.pendingApproval)
+  if (currentId === requestId) {
+    return advancePendingApproval(state)
+  }
+  const approvalQueue = state.approvalQueue ?? []
+  const filteredQueue = approvalQueue.filter(
+    (approval) => approvalRequestId(approval) !== requestId
+  )
+  if (filteredQueue.length === approvalQueue.length) return {}
+  return { approvalQueue: filteredQueue }
 }
 
 const ThreadContext = createContext<ThreadContextValue | null>(null)
@@ -230,6 +292,13 @@ interface CustomEventData {
     completedAt?: Date
     subagentType?: string
   }>
+  workers?: CoordinatorWorkerView[]
+  worker?: CoordinatorWorkerView
+  notification?: string
+  suppressNotificationAutoRun?: boolean
+  mode?: "normal" | "coordinator"
+  source?: string
+  persisted?: boolean
   count?: number
   entry?: SubagentInternalLogEntry
   usage?: {
@@ -349,10 +418,20 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   // Stream data store (not React state - we use subscriptions)
   const streamDataRef = useRef<Record<string, StreamData>>({})
   const streamSubscribersRef = useRef<Record<string, Set<() => void>>>({})
+  const threadStatesRef = useRef<Record<string, ThreadState>>({})
+  const previousLoadingStatesRef = useRef<Record<string, boolean>>({})
+  const coordinatorNotificationTimersRef = useRef<Record<string, number>>({})
+  const coordinatorNotificationAttemptsRef = useRef<Record<string, number>>({})
+  const coordinatorNotificationRetryOnIdleRef = useRef<Record<string, boolean>>({})
+  const environmentCoordinatorThreadIdsRef = useRef<Set<string>>(new Set())
 
   // Hook logs store (not React state — avoids re-rendering chat on every hook fire)
   const hookLogsRef = useRef<Record<string, HookLogEntry[]>>({})
   const hookLogsSubscribersRef = useRef<Record<string, Set<() => void>>>({})
+
+  useEffect(() => {
+    threadStatesRef.current = threadStates
+  }, [threadStates])
 
   const notifyHookLogSubscribers = useCallback((threadId: string) => {
     hookLogsSubscribersRef.current[threadId]?.forEach((cb) => cb())
@@ -447,11 +526,44 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     return () => {}
   }, [])
 
+  const unresolvedCoordinatorThreadIdsKey = useMemo(() => {
+    return Object.entries(threadStates)
+      .filter(([threadId, state]) => {
+        const hasRunningWorker = state.coordinatorWorkers.some((worker) => worker.status === "running")
+        if (hasRunningWorker) return true
+
+        const hasPendingTerminalNotification = state.coordinatorWorkers.some(
+          (worker) =>
+            worker.status !== "running"
+            && worker.notification_acknowledged === false
+            && worker.suppress_notification_auto_run !== true
+        )
+        if (!hasPendingTerminalNotification) return false
+
+        if (!initializedThreadsRef.current.has(threadId)) return false
+
+        const isEnvironmentCoordinatorMode =
+          environmentCoordinatorThreadIdsRef.current.has(threadId)
+        if (isThreadMetadataExplicitNormalMode(threadId) && !isEnvironmentCoordinatorMode) {
+          return false
+        }
+
+        return true
+      })
+      .map(([threadId]) => threadId)
+      .sort()
+      .join("\n")
+  }, [threadStates])
+
   const updateThreadState = useCallback(
     (threadId: string, updater: (prev: ThreadState) => Partial<ThreadState>) => {
       setThreadStates((prev) => {
         const currentState = prev[threadId] || createDefaultThreadState()
         const updates = updater(currentState)
+        const updateKeys = Object.keys(updates) as Array<keyof ThreadState>
+        if (updateKeys.length === 0) return prev
+        const hasChanged = updateKeys.some((key) => !Object.is(currentState[key], updates[key]))
+        if (!hasChanged) return prev
         return {
           ...prev,
           [threadId]: { ...currentState, ...updates }
@@ -460,6 +572,172 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     },
     []
   )
+
+  const scheduleCoordinatorNotificationTurn = useCallback((threadId: string) => {
+    if (coordinatorNotificationTimersRef.current[threadId] !== undefined) return
+
+    coordinatorNotificationTimersRef.current[threadId] = window.setTimeout(async () => {
+      delete coordinatorNotificationTimersRef.current[threadId]
+
+      try {
+        const hasPendingNotification =
+          await window.api.agent.hasCoordinatorWorkerNotifications(threadId)
+        if (!hasPendingNotification) {
+          delete coordinatorNotificationAttemptsRef.current[threadId]
+          delete coordinatorNotificationRetryOnIdleRef.current[threadId]
+          return
+        }
+
+        let isEnvironmentCoordinatorMode =
+          environmentCoordinatorThreadIdsRef.current.has(threadId)
+        if (!isThreadMetadataInCoordinatorMode(threadId) && !isEnvironmentCoordinatorMode) {
+          try {
+            isEnvironmentCoordinatorMode = await window.api.agent.isCoordinatorModeForced()
+            if (isEnvironmentCoordinatorMode) {
+              environmentCoordinatorThreadIdsRef.current.add(threadId)
+            }
+          } catch (error) {
+            console.warn("[ThreadContext] Failed to check coordinator mode override:", error)
+          }
+        }
+
+        if (isThreadMetadataExplicitNormalMode(threadId) && !isEnvironmentCoordinatorMode) {
+          delete coordinatorNotificationAttemptsRef.current[threadId]
+          delete coordinatorNotificationRetryOnIdleRef.current[threadId]
+          return
+        }
+
+        const streamData = streamDataRef.current[threadId]
+        if (!streamData?.stream) {
+          coordinatorNotificationRetryOnIdleRef.current[threadId] = true
+          const attempts = (coordinatorNotificationAttemptsRef.current[threadId] ?? 0) + 1
+          coordinatorNotificationAttemptsRef.current[threadId] = attempts
+          if (attempts <= COORDINATOR_NOTIFICATION_MAX_RETRIES) {
+            scheduleCoordinatorNotificationTurn(threadId)
+          } else {
+            delete coordinatorNotificationAttemptsRef.current[threadId]
+          }
+          return
+        }
+
+        if (streamData.isLoading) {
+          coordinatorNotificationRetryOnIdleRef.current[threadId] = true
+          const attempts = (coordinatorNotificationAttemptsRef.current[threadId] ?? 0) + 1
+          coordinatorNotificationAttemptsRef.current[threadId] = attempts
+          if (attempts <= COORDINATOR_NOTIFICATION_MAX_RETRIES) {
+            scheduleCoordinatorNotificationTurn(threadId)
+          } else {
+            delete coordinatorNotificationAttemptsRef.current[threadId]
+          }
+          return
+        }
+
+        const threadState = threadStatesRef.current[threadId] ?? createDefaultThreadState()
+        await streamData.stream.submit(
+          null,
+          {
+            config: {
+              configurable: {
+                thread_id: threadId,
+                model_id: threadState.currentModel || undefined,
+                agent_mode: "coordinator",
+                coordinator_internal_notification: true
+              }
+            }
+          }
+        )
+        delete coordinatorNotificationAttemptsRef.current[threadId]
+        delete coordinatorNotificationRetryOnIdleRef.current[threadId]
+      } catch (error) {
+        console.warn("[ThreadContext] Failed to auto-run coordinator notification turn:", error)
+        const attempts = (coordinatorNotificationAttemptsRef.current[threadId] ?? 0) + 1
+        coordinatorNotificationAttemptsRef.current[threadId] = attempts
+        if (attempts <= COORDINATOR_NOTIFICATION_MAX_RETRIES) {
+          scheduleCoordinatorNotificationTurn(threadId)
+        } else {
+          delete coordinatorNotificationAttemptsRef.current[threadId]
+        }
+      }
+    }, COORDINATOR_NOTIFICATION_RETRY_MS)
+  }, [])
+
+  useEffect(() => {
+    const previous = previousLoadingStatesRef.current
+    for (const [threadId, wasLoading] of Object.entries(previous)) {
+      if (wasLoading && loadingStates[threadId] === false) {
+        const workers = threadStatesRef.current[threadId]?.coordinatorWorkers ?? []
+        if (workers.length === 0) continue
+        if (
+          (coordinatorNotificationAttemptsRef.current[threadId] ?? 0) <= 0 &&
+          !coordinatorNotificationRetryOnIdleRef.current[threadId]
+        ) {
+          continue
+        }
+        scheduleCoordinatorNotificationTurn(threadId)
+      }
+    }
+    previousLoadingStatesRef.current = loadingStates
+  }, [loadingStates, scheduleCoordinatorNotificationTurn])
+
+  useEffect(() => {
+    const unresolvedThreadIds = unresolvedCoordinatorThreadIdsKey
+      ? unresolvedCoordinatorThreadIdsKey.split("\n")
+      : []
+    if (unresolvedThreadIds.length === 0) return
+
+    let cancelled = false
+
+    const refreshCoordinatorWorkers = async (): Promise<void> => {
+      await Promise.all(
+        unresolvedThreadIds.map(async (threadId) => {
+          try {
+            const workers = await window.api.agent.getCoordinatorWorkers(threadId)
+            if (cancelled) return
+            const previousWorkers = threadStatesRef.current[threadId]?.coordinatorWorkers ?? []
+            const previousById = new Map(
+              previousWorkers.map((worker) => [worker.worker_id, worker])
+            )
+            const hasNewTerminalWorker = workers.some((worker) => {
+              const previous = previousById.get(worker.worker_id)
+              return (
+                previous?.status === "running"
+                && isTerminalCoordinatorWorker(worker)
+                && worker.suppress_notification_auto_run !== true
+              )
+            })
+            const hasPendingTerminalNotification = workers.some(
+              (worker) =>
+                isTerminalCoordinatorWorker(worker)
+                && worker.notification_acknowledged === false
+                && worker.suppress_notification_auto_run !== true
+            )
+            updateThreadState(threadId, (prev) => {
+              const merged = mergeCoordinatorWorkers(prev.coordinatorWorkers, workers, {
+                authoritative: true
+              })
+              if (coordinatorWorkersEqual(prev.coordinatorWorkers, merged)) return {}
+              return { coordinatorWorkers: merged }
+            })
+            if (hasNewTerminalWorker || hasPendingTerminalNotification) {
+              scheduleCoordinatorNotificationTurn(threadId)
+            }
+          } catch (error) {
+            console.warn("[ThreadContext] Failed to refresh coordinator workers:", error)
+          }
+        })
+      )
+    }
+
+    void refreshCoordinatorWorkers()
+    const timer = window.setInterval(() => {
+      void refreshCoordinatorWorkers()
+    }, 2_000)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [unresolvedCoordinatorThreadIdsKey, scheduleCoordinatorNotificationTurn, updateThreadState])
 
   // Parse error messages into user-friendly format
   const parseErrorMessage = useCallback((error: Error | string): string => {
@@ -522,7 +800,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   // Handle custom events from ThreadStreamHolder (interrupts, workspace updates, etc.)
   const handleCustomEvent = useCallback(
     (threadId: string, data: CustomEventData) => {
-      console.log("[ThreadContext] Custom event received:", { threadId, type: data.type, data })
+      console.log("[ThreadContext] Custom event received:", {
+        threadId,
+        type: data.type,
+        fileCount: Array.isArray(data.files) ? data.files.length : undefined,
+        workerCount: Array.isArray(data.workers) ? data.workers.length : undefined,
+        subagentCount: Array.isArray(data.subagents) ? data.subagents.length : undefined
+      })
       switch (data.type) {
         case "interrupt":
           if (data.request) {
@@ -531,7 +815,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               threadId,
               data.request
             )
-            updateThreadState(threadId, () => ({ pendingApproval: data.request }))
+            updateThreadState(threadId, (state) => enqueuePendingApproval(state, data.request!))
           }
           break
         case "workspace":
@@ -545,7 +829,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             })
           }
           if (data.path) {
-            updateThreadState(threadId, () => ({ workspacePath: data.path }))
+            updateThreadState(threadId, (state) =>
+              state.workspacePath === data.path
+                ? { workspacePath: data.path }
+                : { workspacePath: data.path, coordinatorWorkers: [] }
+            )
           }
           break
         case "subagents":
@@ -563,6 +851,29 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               }))
             }))
           }
+          break
+        case "coordinator_workers":
+          if (Array.isArray(data.workers)) {
+            updateThreadState(threadId, (prev) => {
+              const merged = mergeCoordinatorWorkers(prev.coordinatorWorkers, data.workers!, {
+                authoritative: true
+              })
+              if (coordinatorWorkersEqual(prev.coordinatorWorkers, merged)) return {}
+              return { coordinatorWorkers: merged }
+            })
+          } else if (data.worker) {
+            updateThreadState(threadId, (prev) => {
+              const merged = mergeCoordinatorWorkers(prev.coordinatorWorkers, [data.worker!])
+              if (coordinatorWorkersEqual(prev.coordinatorWorkers, merged)) return {}
+              return { coordinatorWorkers: merged }
+            })
+          }
+          if (data.notification && !data.suppressNotificationAutoRun) {
+            scheduleCoordinatorNotificationTurn(threadId)
+          }
+          break
+        case "coordinator_notification_deferred":
+          scheduleCoordinatorNotificationTurn(threadId)
           break
         case "subagent_tool_count":
           if (typeof data.count === "number" && Number.isFinite(data.count)) {
@@ -595,6 +906,34 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               // metadata — that stays as the user's manual selection for
               // pinned mode fallback.
               currentModel: data.resolvedModelId!
+            }))
+          }
+          break
+        case "agent_mode":
+          if (data.mode === "normal" || data.mode === "coordinator") {
+            if (
+              data.mode === "coordinator" &&
+              data.persisted === false &&
+              data.source === "environment"
+            ) {
+              environmentCoordinatorThreadIdsRef.current.add(threadId)
+            } else if (data.mode === "normal") {
+              environmentCoordinatorThreadIdsRef.current.delete(threadId)
+            }
+            if (data.persisted === false) {
+              break
+            }
+            // The main process already persisted this mode. Keep the UI in sync
+            // without writing stale renderer metadata back over newer main updates.
+            useAppStore.setState((state) => ({
+              threads: state.threads.map((thread) =>
+                thread.thread_id === threadId
+                  ? {
+                      ...thread,
+                      metadata: { ...(thread.metadata ?? {}), agentMode: data.mode }
+                    }
+                  : thread
+              )
             }))
           }
           break
@@ -674,7 +1013,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           break
       }
     },
-    [updateThreadState]
+    [notifyHookLogSubscribers, scheduleCoordinatorNotificationTurn, updateThreadState]
   )
 
   const getThreadActions = useCallback(
@@ -710,13 +1049,22 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           }))
         },
         setWorkspacePath: (path: string | null) => {
-          updateThreadState(threadId, () => ({ workspacePath: path }))
+          updateThreadState(threadId, (state) =>
+            state.workspacePath === path
+              ? { workspacePath: path }
+              : { workspacePath: path, coordinatorWorkers: [] }
+          )
         },
         setSubagents: (subagents: Subagent[]) => {
           updateThreadState(threadId, () => ({ subagents }))
         },
         setPendingApproval: (request: HITLRequest | null) => {
-          updateThreadState(threadId, () => ({ pendingApproval: request }))
+          updateThreadState(threadId, (state) =>
+            request ? enqueuePendingApproval(state, request) : advancePendingApproval(state)
+          )
+        },
+        clearPendingApprovals: () => {
+          updateThreadState(threadId, () => ({ pendingApproval: null, approvalQueue: [] }))
         },
         setError: (error: string | null) => {
           updateThreadState(threadId, () => ({ error }))
@@ -782,7 +1130,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       actionsCache.current[threadId] = actions
       return actions
     },
-    [updateThreadState]
+    [notifyHookLogSubscribers, updateThreadState]
   )
 
   const loadThreadHistory = useCallback(
@@ -843,6 +1191,27 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               })
               .catch(() => {})
           }
+
+          window.api.agent
+            .getCoordinatorWorkers(threadId)
+            .then((workers) => {
+              updateThreadState(threadId, (prev) => ({
+                coordinatorWorkers: mergeCoordinatorWorkers(prev.coordinatorWorkers, workers, {
+                  authoritative: true
+                })
+              }))
+            })
+            .catch((error) => {
+              console.warn("[ThreadContext] Failed to load coordinator workers:", error)
+            })
+          window.api.agent
+            .hasCoordinatorWorkerNotifications(threadId)
+            .then((hasPending) => {
+              if (hasPending) scheduleCoordinatorNotificationTurn(threadId)
+            })
+            .catch((error) => {
+              console.warn("[ThreadContext] Failed to check coordinator notifications:", error)
+            })
         }
       } catch (error) {
         console.error("[ThreadContext] Failed to load thread details:", error)
@@ -863,6 +1232,16 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   tool_calls?: unknown[]
                   tool_call_id?: string
                   name?: string
+                  additional_kwargs?: Record<string, unknown>
+                  kwargs?: {
+                    id?: string
+                    type?: string
+                    content?: string | unknown[]
+                    tool_calls?: unknown[]
+                    tool_call_id?: string
+                    name?: string
+                    additional_kwargs?: Record<string, unknown>
+                  }
                 }>
                 todos?: Array<{ id?: string; content?: string; status?: string }>
                 __interrupt__?: Array<{
@@ -885,7 +1264,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           const channelValues = latestCheckpoint.checkpoint?.channel_values
 
           if (channelValues?.messages && Array.isArray(channelValues.messages)) {
-            const messages: Message[] = channelValues.messages.map((msg, index) => {
+            const messages: Message[] = channelValues.messages.flatMap((msg, index) => {
+              const additionalKwargs = msg.additional_kwargs ?? msg.kwargs?.additional_kwargs
+              if (additionalKwargs?.cmb_internal_coordinator_notification === true) {
+                return []
+              }
+
               let role: "user" | "assistant" | "system" | "tool" = "assistant"
               if (typeof msg._getType === "function") {
                 const type = msg._getType()
@@ -893,24 +1277,35 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 else if (type === "ai") role = "assistant"
                 else if (type === "system") role = "system"
                 else if (type === "tool") role = "tool"
-              } else if (msg.type) {
-                if (msg.type === "human") role = "user"
-                else if (msg.type === "ai") role = "assistant"
-                else if (msg.type === "system") role = "system"
-                else if (msg.type === "tool") role = "tool"
+              } else {
+                const type = msg.type ?? msg.kwargs?.type
+                if (type === "human") role = "user"
+                else if (type === "ai") role = "assistant"
+                else if (type === "system") role = "system"
+                else if (type === "tool") role = "tool"
               }
 
               let content: Message["content"] = ""
-              if (typeof msg.content === "string") content = msg.content
-              else if (Array.isArray(msg.content)) content = msg.content as Message["content"]
+              const visibleUserMessage = additionalKwargs?.cmb_visible_user_message
+              const rawContent = msg.content ?? msg.kwargs?.content
+              if (role === "user" && typeof visibleUserMessage === "string") {
+                content = visibleUserMessage
+              } else if (typeof rawContent === "string") content = rawContent
+              else if (Array.isArray(rawContent)) content = rawContent as Message["content"]
+
+              const toolCalls = msg.tool_calls ?? msg.kwargs?.tool_calls
+              const toolCallId = msg.tool_call_id ?? msg.kwargs?.tool_call_id
+              const toolName = msg.name ?? msg.kwargs?.name
+              const messageId =
+                msg.kwargs?.id ?? (typeof msg.id === "string" ? msg.id : `msg-${index}`)
 
               return {
-                id: msg.id || `msg-${index}`,
+                id: messageId,
                 role,
                 content,
-                tool_calls: msg.tool_calls as Message["tool_calls"],
-                ...(role === "tool" && msg.tool_call_id && { tool_call_id: msg.tool_call_id }),
-                ...(role === "tool" && msg.name && { name: msg.name }),
+                tool_calls: toolCalls as Message["tool_calls"],
+                ...(role === "tool" && toolCallId && { tool_call_id: toolCallId }),
+                ...(role === "tool" && toolName && { name: toolName }),
                 created_at: new Date()
               }
             })
@@ -1130,7 +1525,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         }
       }
     },
-    [updateThreadState, loadThreadHistory, handleCustomEvent]
+    [
+      updateThreadState,
+      loadThreadHistory,
+      handleCustomEvent,
+      notifyHookLogSubscribers,
+      scheduleCoordinatorNotificationTurn
+    ]
   )
 
   const initializeThread = useCallback(
@@ -1165,27 +1566,30 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       const cleanupApproval = window.api.sandbox.onApprovalRequest(threadId, (request: unknown) => {
         console.log(`[ThreadProvider] Approval request for thread ${threadId}:`, request)
         const req = request as Record<string, unknown>
-        updateThreadState(threadId, () => ({
-          pendingApproval: {
-            id: (req.id as string) || "",
-            tool_call: (req.tool_call as { id: string; name: string; args: Record<string, unknown> }) || { id: "", name: "execute", args: {} },
-            allowed_decisions: ["approve", "reject"],
-            command: req.command,
-            reason: req.reason,
-            operation: req.operation,
-            filePath: req.filePath,
-            code: req.code,
-            params: req.params,
-            timeoutMs: req.timeoutMs,
-            savedToolName: req.savedToolName,
-            savedToolId: req.savedToolId,
-            savedToolDescription: req.savedToolDescription,
-            savedToolMetadataError: req.savedToolMetadataError,
-            _orchestratorRequestId: req.id,
-            _retryReason: req.retry_reason,
-            _approvalTypes: req.allowed_approval_types
-          } as any
-        }))
+        const pendingApproval: HITLRequest & Record<string, unknown> = {
+          id: (req.id as string) || "",
+          tool_call: (req.tool_call as { id: string; name: string; args: Record<string, unknown> }) || {
+            id: "",
+            name: "execute",
+            args: {}
+          },
+          allowed_decisions: ["approve", "reject"],
+          command: req.command,
+          reason: req.reason,
+          operation: req.operation,
+          filePath: req.filePath,
+          code: req.code,
+          params: req.params,
+          timeoutMs: req.timeoutMs,
+          savedToolName: req.savedToolName,
+          savedToolId: req.savedToolId,
+          savedToolDescription: req.savedToolDescription,
+          savedToolMetadataError: req.savedToolMetadataError,
+          _orchestratorRequestId: req.id,
+          _retryReason: req.retry_reason,
+          _approvalTypes: req.allowed_approval_types
+        }
+        updateThreadState(threadId, (state) => enqueuePendingApproval(state, pendingApproval))
         // Auto-switch to this thread so the approval UI is visible
         const currentId = useAppStore.getState().currentThreadId
         if (currentId !== threadId) {
@@ -1195,7 +1599,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       })
       const cleanupTimeout = window.api.sandbox.onApprovalTimeout(threadId, (data) => {
         console.warn(`[ThreadProvider] Approval timed out for thread ${threadId}: requestId=${data.requestId}`)
-        updateThreadState(threadId, () => ({ pendingApproval: null }))
+        updateThreadState(threadId, (state) =>
+          removePendingApprovalByRequestId(state, data.requestId)
+        )
       })
       approvalListenerCleanups.current[threadId] = [cleanupApproval, cleanupTimeout]
     },
@@ -1210,6 +1616,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     approvalListenerCleanups.current[threadId]?.forEach((c) => c())
     delete approvalListenerCleanups.current[threadId]
     delete schedulerStreamingRef.current[threadId]
+    const coordinatorNotificationTimer = coordinatorNotificationTimersRef.current[threadId]
+    if (coordinatorNotificationTimer !== undefined) {
+      window.clearTimeout(coordinatorNotificationTimer)
+    }
+    delete coordinatorNotificationTimersRef.current[threadId]
+    delete coordinatorNotificationAttemptsRef.current[threadId]
+    delete coordinatorNotificationRetryOnIdleRef.current[threadId]
 
     initializedThreadsRef.current.delete(threadId)
     delete actionsCache.current[threadId]

@@ -1,5 +1,6 @@
 import { IpcMain, BrowserWindow } from "electron"
 import { nowIsoLocal } from "../util/local-time"
+import { AsyncKeyedLock } from "./async-keyed-lock"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
 import { Command } from "@langchain/langgraph"
 import {
@@ -64,10 +65,18 @@ import {
   type WorthinessResult
 } from "../agent/skill-evolution/skill-proposal-logic"
 import {
+  adaptCoordinatorSkillUseForWorkerDelegation,
+  extractCoordinatorSelectedSkill,
   getAgentModeFromMetadata,
-  resolveCoordinatorHarnessRequest,
-  type AgentMode
-} from "../agent/coordinator-harness"
+  isCoordinatorModeForcedByEnvironment,
+  resolveCoordinatorModeRequest,
+  type AgentMode,
+  type CoordinatorSelectedSkill
+} from "../agent/coordinator-mode"
+import {
+  coordinatorWorkerManager,
+  type CoordinatorWorkerSnapshot
+} from "../agent/coordinator-worker-manager"
 import { isRetryableApiError, buildOrderedChain, type FailoverAttempt } from "../agent/failover"
 import { runHooks, type HookContext, type HookResultCallback } from "../hooks/runner"
 import type { HookResult } from "../hooks/types"
@@ -88,6 +97,68 @@ const STOP_HOOK_REVISION_PROMPT_PREFIX = "[[CMBDEVCLAW_STOP_HOOK_REVISION]]"
 
 // Track active runs for cancellation
 const activeRuns = new Map<string, AbortController>()
+const activeRunSettled = new Map<string, Promise<void>>()
+const activeRunReplacementLocks = new AsyncKeyedLock()
+const activeCoordinatorTurnPrompts = new Map<string, string | undefined>()
+const activeCoordinatorSelectedSkills = new Map<string, CoordinatorSelectedSkill | undefined>()
+const activeCoordinatorExplicitSelectedSkills = new Map<
+  string,
+  CoordinatorSelectedSkill | undefined
+>()
+const activeCoordinatorNotificationSelectedSkills = new Map<
+  string,
+  Record<string, CoordinatorSelectedSkill | undefined>
+>()
+const ACTIVE_RUN_REPLACEMENT_WARN_MS = 5_000
+const ACTIVE_RUN_REPLACEMENT_MAX_WAIT_MS = 30_000
+
+export function forgetCoordinatorThreadState(threadId: string): void {
+  activeCoordinatorTurnPrompts.delete(threadId)
+  activeCoordinatorSelectedSkills.delete(threadId)
+  activeCoordinatorExplicitSelectedSkills.delete(threadId)
+  activeCoordinatorNotificationSelectedSkills.delete(threadId)
+}
+
+export function hasActiveAgentRun(threadId: string): boolean {
+  return activeRuns.has(threadId)
+}
+
+async function waitForReplacedRunToSettle(threadId: string): Promise<"settled" | "timed_out"> {
+  const settled = activeRunSettled.get(threadId)
+  if (!settled) return "settled"
+
+  const warningTimer = setTimeout(() => {
+    console.warn(
+      `[Agent] Waiting longer than ${ACTIVE_RUN_REPLACEMENT_WARN_MS}ms for prior run to settle before replacing thread ${threadId}`
+    )
+  }, ACTIVE_RUN_REPLACEMENT_WARN_MS)
+  let timeoutTimer: ReturnType<typeof setTimeout> | undefined
+
+  try {
+    const outcome = await Promise.race([
+      settled.then(() => "settled" as const),
+      new Promise<"timed_out">((resolve) => {
+        timeoutTimer = setTimeout(() => resolve("timed_out"), ACTIVE_RUN_REPLACEMENT_MAX_WAIT_MS)
+      })
+    ])
+    if (outcome === "timed_out") {
+      console.warn(
+        `[Agent] Prior run did not settle within ${ACTIVE_RUN_REPLACEMENT_MAX_WAIT_MS}ms for thread ${threadId}; allowing replacement run to take over with late cleanup risk`
+      )
+    }
+    return outcome
+  } finally {
+    clearTimeout(warningTimer)
+    if (timeoutTimer) clearTimeout(timeoutTimer)
+  }
+}
+
+async function withActiveRunReplacementLock<T>(
+  threadId: string,
+  fn: () => Promise<T>
+): Promise<T> {
+  return activeRunReplacementLocks.withKey(threadId, fn)
+}
 
 type StopHookContext = NonNullable<HookContext["stopContext"]>
 
@@ -126,8 +197,17 @@ function formatActiveHookNotice(summary: ActiveHookSummary): string | null {
   return `本轮已启用 ${summary.total} 个钩子（${parts.join("，")}）`
 }
 
+function safeSendToWindow(window: BrowserWindow, channel: string, payload: unknown): void {
+  if (window.isDestroyed() || window.webContents.isDestroyed()) return
+  try {
+    window.webContents.send(channel, payload)
+  } catch (error) {
+    console.warn("[Agent] Failed to send stream event:", error)
+  }
+}
+
 function sendHookNotice(window: BrowserWindow, channel: string, message: string): void {
-  window.webContents.send(channel, {
+  safeSendToWindow(window, channel, {
     type: "custom",
     data: { type: "hook_notice", message }
   })
@@ -141,6 +221,605 @@ function sendActiveHookNotice(
   const message = formatActiveHookNotice(getActiveHookSummary(workspacePath))
   if (!message) return
   sendHookNotice(window, channel, message)
+}
+
+function sendCoordinatorWorkers(
+  window: BrowserWindow,
+  channel: string,
+  workers: CoordinatorWorkerSnapshot[],
+  notification?: string,
+  suppressNotificationAutoRun = false
+): void {
+  if (window.isDestroyed() || window.webContents.isDestroyed()) return
+  try {
+    safeSendToWindow(window, channel, {
+      type: "custom",
+      data: {
+        type: "coordinator_workers",
+        workers: limitCoordinatorWorkersForRenderer(workers),
+        notification,
+        suppressNotificationAutoRun
+      }
+    })
+  } catch (error) {
+    console.warn("[Agent] Failed to send coordinator worker update:", error)
+  }
+}
+
+function sendCoordinatorWorkerDelta(
+  window: BrowserWindow,
+  channel: string,
+  worker: CoordinatorWorkerSnapshot,
+  notification?: string,
+  suppressNotificationAutoRun = false
+): void {
+  if (window.isDestroyed() || window.webContents.isDestroyed()) return
+  try {
+    safeSendToWindow(window, channel, {
+      type: "custom",
+      data: {
+        type: "coordinator_workers",
+        worker,
+        notification,
+        suppressNotificationAutoRun
+      }
+    })
+  } catch (error) {
+    console.warn("[Agent] Failed to send coordinator worker delta:", error)
+  }
+}
+
+function sendCoordinatorWorkerEventToChannels(
+  window: BrowserWindow,
+  channels: string[],
+  workerEvent: {
+    worker: CoordinatorWorkerSnapshot
+    workers?: CoordinatorWorkerSnapshot[]
+    notification?: string
+    suppressNotificationAutoRun?: boolean
+  }
+): void {
+  const uniqueChannels = Array.from(new Set(channels))
+  for (const channel of uniqueChannels) {
+    if (workerEvent.workers) {
+      sendCoordinatorWorkers(
+        window,
+        channel,
+        workerEvent.workers,
+        workerEvent.notification,
+        workerEvent.suppressNotificationAutoRun
+      )
+    } else {
+      sendCoordinatorWorkerDelta(
+        window,
+        channel,
+        workerEvent.worker,
+        workerEvent.notification,
+        workerEvent.suppressNotificationAutoRun
+      )
+    }
+  }
+}
+
+const MAX_COORDINATOR_WORKERS_FOR_RENDERER = 40
+
+function limitCoordinatorWorkersForRenderer(
+  workers: CoordinatorWorkerSnapshot[]
+): CoordinatorWorkerSnapshot[] {
+  if (workers.length <= MAX_COORDINATOR_WORKERS_FOR_RENDERER) return workers
+
+  const running = workers
+    .filter((worker) => worker.status === "running")
+    .sort((a, b) => timestampMillis(b.updated_at) - timestampMillis(a.updated_at))
+    .slice(0, MAX_COORDINATOR_WORKERS_FOR_RENDERER)
+  const terminalLimit = Math.max(0, MAX_COORDINATOR_WORKERS_FOR_RENDERER - running.length)
+  const pendingTerminal = workers
+    .filter(
+      (worker) => worker.status !== "running" && worker.notification_acknowledged === false
+    )
+    .sort((a, b) => timestampMillis(b.updated_at) - timestampMillis(a.updated_at))
+  const terminal = workers
+    .filter((worker) => worker.status !== "running" && worker.notification_acknowledged !== false)
+    .sort((a, b) => timestampMillis(b.updated_at) - timestampMillis(a.updated_at))
+  const visibleTerminal = [...pendingTerminal, ...terminal].slice(0, terminalLimit)
+
+  return [...running, ...visibleTerminal].sort(
+    (a, b) => timestampMillis(b.updated_at) - timestampMillis(a.updated_at)
+  )
+}
+
+function timestampMillis(value: string | undefined): number {
+  if (!value) return 0
+  const timestamp = new Date(value).getTime()
+  return Number.isFinite(timestamp) ? timestamp : 0
+}
+
+interface CoordinatorTurnNotification {
+  id: string
+  message: string
+}
+
+const MAX_COORDINATOR_NOTIFICATIONS_IN_PROMPT = 12
+
+interface NormalModeGuardState {
+  workers: CoordinatorWorkerSnapshot[]
+  hasPendingNotifications: boolean
+  unresolvedWorkers: CoordinatorWorkerSnapshot[]
+}
+
+function extractNotificationWorkerId(notification: string): string | undefined {
+  const match = notification.match(/<task-id>([^<]+)<\/task-id>/)
+  return match?.[1]
+}
+
+function extractNotificationWorkerTurn(notification: string): number | undefined {
+  const match = notification.match(/<turn>(\d+)<\/turn>/)
+  if (!match) return undefined
+  const turn = Number(match[1])
+  return Number.isFinite(turn) ? turn : undefined
+}
+
+function buildCoordinatorNotificationId(notification: string, index: number): string {
+  const workerId = extractNotificationWorkerId(notification)
+  const turn = extractNotificationWorkerTurn(notification)
+  if (workerId && turn !== undefined) return `${workerId}@turn-${turn}`
+  if (workerId) return workerId
+  return `notification-${index + 1}`
+}
+
+function toCoordinatorTurnNotifications(notifications: string[]): CoordinatorTurnNotification[] {
+  return notifications.map((message, index) => ({
+    id: buildCoordinatorNotificationId(message, index),
+    message
+  }))
+}
+
+function parseCoordinatorSelectedSkillMetadata(
+  metadata: Record<string, unknown>
+): CoordinatorSelectedSkill | undefined {
+  const raw = metadata.coordinatorSelectedSkill
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined
+  const skill = raw as Record<string, unknown>
+  if (typeof skill.skillName !== "string" || typeof skill.skillPath !== "string") return undefined
+  return {
+    skillName: skill.skillName,
+    skillPath: skill.skillPath,
+    description: typeof skill.description === "string" ? skill.description : undefined,
+    whenToUse: typeof skill.whenToUse === "string" ? skill.whenToUse : undefined,
+    allowedTools: typeof skill.allowedTools === "string" ? skill.allowedTools : undefined
+  }
+}
+
+function parseCoordinatorExplicitSelectedSkillMetadata(
+  metadata: Record<string, unknown>
+): CoordinatorSelectedSkill | undefined {
+  const raw = metadata.coordinatorExplicitSelectedSkill
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined
+  const skill = raw as Record<string, unknown>
+  if (typeof skill.skillName !== "string" || typeof skill.skillPath !== "string") return undefined
+  return {
+    skillName: skill.skillName,
+    skillPath: skill.skillPath,
+    description: typeof skill.description === "string" ? skill.description : undefined,
+    whenToUse: typeof skill.whenToUse === "string" ? skill.whenToUse : undefined,
+    allowedTools: typeof skill.allowedTools === "string" ? skill.allowedTools : undefined
+  }
+}
+
+function parseCoordinatorTurnPromptMetadata(metadata: Record<string, unknown>): string | undefined {
+  const raw = metadata.coordinatorTurnPrompt
+  if (typeof raw !== "string") return undefined
+  return raw.trim().length > 0 ? raw : undefined
+}
+
+function parseCoordinatorNotificationSelectedSkillsMetadata(
+  metadata: Record<string, unknown>
+): Record<string, CoordinatorSelectedSkill | undefined> | undefined {
+  const raw = metadata.coordinatorNotificationSelectedSkills
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined
+  const result: Record<string, CoordinatorSelectedSkill | undefined> = {}
+  for (const [notificationId, value] of Object.entries(raw)) {
+    if (typeof notificationId !== "string" || notificationId.trim().length === 0) continue
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      result[notificationId] = undefined
+      continue
+    }
+    const skill = value as Record<string, unknown>
+    if (typeof skill.skillName !== "string" || typeof skill.skillPath !== "string") {
+      result[notificationId] = undefined
+      continue
+    }
+    result[notificationId] = {
+      skillName: skill.skillName,
+      skillPath: skill.skillPath,
+      description: typeof skill.description === "string" ? skill.description : undefined,
+      whenToUse: typeof skill.whenToUse === "string" ? skill.whenToUse : undefined,
+      allowedTools: typeof skill.allowedTools === "string" ? skill.allowedTools : undefined
+    }
+  }
+  return Object.keys(result).length > 0 ? result : undefined
+}
+
+function normalizeCoordinatorNotificationSelectedSkills(
+  notificationSelectedSkills: Record<string, CoordinatorSelectedSkill | undefined> | undefined
+): Record<string, CoordinatorSelectedSkill | undefined> | undefined {
+  if (!notificationSelectedSkills) return undefined
+  return Object.keys(notificationSelectedSkills).length > 0
+    ? notificationSelectedSkills
+    : undefined
+}
+
+function serializeCoordinatorNotificationSelectedSkillsMetadata(
+  notificationSelectedSkills: Record<string, CoordinatorSelectedSkill | undefined> | undefined
+): Record<string, CoordinatorSelectedSkill | null> | undefined {
+  const normalized = normalizeCoordinatorNotificationSelectedSkills(notificationSelectedSkills)
+  if (!normalized) return undefined
+  const serialized: Record<string, CoordinatorSelectedSkill | null> = {}
+  for (const [notificationId, selectedSkill] of Object.entries(normalized)) {
+    serialized[notificationId] = selectedSkill ?? null
+  }
+  return serialized
+}
+
+function coordinatorNotificationSelectedSkillsEqual(
+  left: Record<string, CoordinatorSelectedSkill | undefined> | undefined,
+  right: Record<string, CoordinatorSelectedSkill | undefined> | undefined
+): boolean {
+  const normalizedLeft = normalizeCoordinatorNotificationSelectedSkills(left)
+  const normalizedRight = normalizeCoordinatorNotificationSelectedSkills(right)
+  if (!normalizedLeft && !normalizedRight) return true
+  if (!normalizedLeft || !normalizedRight) return false
+  const notificationIds = new Set([
+    ...Object.keys(normalizedLeft),
+    ...Object.keys(normalizedRight)
+  ])
+  for (const notificationId of notificationIds) {
+    if (
+      !coordinatorSelectedSkillEquals(
+        normalizedLeft[notificationId],
+        normalizedRight[notificationId]
+      )
+    ) {
+      return false
+    }
+  }
+  return true
+}
+
+function omitCoordinatorNotificationSelectedSkills(
+  notificationSelectedSkills: Record<string, CoordinatorSelectedSkill | undefined> | undefined,
+  notificationIds: Iterable<string>
+): Record<string, CoordinatorSelectedSkill | undefined> | undefined {
+  const normalized = normalizeCoordinatorNotificationSelectedSkills(notificationSelectedSkills)
+  if (!normalized) return undefined
+  const nextNotificationSelectedSkills = { ...normalized }
+  let changed = false
+  for (const notificationId of notificationIds) {
+    if (notificationId in nextNotificationSelectedSkills) {
+      delete nextNotificationSelectedSkills[notificationId]
+      changed = true
+    }
+  }
+  return changed ? normalizeCoordinatorNotificationSelectedSkills(nextNotificationSelectedSkills) : normalized
+}
+
+function setCoordinatorNotificationSelectedSkillsState(
+  threadId: string,
+  metadata: Record<string, unknown>,
+  notificationSelectedSkills: Record<string, CoordinatorSelectedSkill | undefined> | undefined
+): void {
+  const normalized = normalizeCoordinatorNotificationSelectedSkills(notificationSelectedSkills)
+  if (normalized) {
+    activeCoordinatorNotificationSelectedSkills.set(threadId, normalized)
+  } else {
+    activeCoordinatorNotificationSelectedSkills.delete(threadId)
+  }
+  const serialized = serializeCoordinatorNotificationSelectedSkillsMetadata(normalized)
+  if (serialized) {
+    metadata.coordinatorNotificationSelectedSkills = serialized
+  } else {
+    delete metadata.coordinatorNotificationSelectedSkills
+  }
+}
+
+function coordinatorSelectedSkillEquals(
+  left: CoordinatorSelectedSkill | undefined,
+  right: CoordinatorSelectedSkill | undefined
+): boolean {
+  if (!left && !right) return true
+  if (!left || !right) return false
+  return (
+    left.skillName === right.skillName &&
+    left.skillPath === right.skillPath &&
+    left.description === right.description &&
+    left.whenToUse === right.whenToUse &&
+    left.allowedTools === right.allowedTools
+  )
+}
+
+function getActiveOrPersistedCoordinatorSelectedSkill(
+  threadId: string,
+  metadata: Record<string, unknown>
+): CoordinatorSelectedSkill | undefined {
+  if (activeCoordinatorSelectedSkills.has(threadId)) {
+    return activeCoordinatorSelectedSkills.get(threadId)
+  }
+  return parseCoordinatorSelectedSkillMetadata(metadata)
+}
+
+function getActiveOrPersistedCoordinatorExplicitSelectedSkill(
+  threadId: string,
+  metadata: Record<string, unknown>
+): CoordinatorSelectedSkill | undefined {
+  if (activeCoordinatorExplicitSelectedSkills.has(threadId)) {
+    return activeCoordinatorExplicitSelectedSkills.get(threadId)
+  }
+  return parseCoordinatorExplicitSelectedSkillMetadata(metadata)
+}
+
+function getActiveOrPersistedCoordinatorTurnPrompt(
+  threadId: string,
+  metadata: Record<string, unknown>
+): string | undefined {
+  if (activeCoordinatorTurnPrompts.has(threadId)) {
+    return activeCoordinatorTurnPrompts.get(threadId)
+  }
+  return parseCoordinatorTurnPromptMetadata(metadata)
+}
+
+function getActiveOrPersistedCoordinatorNotificationSelectedSkills(
+  threadId: string,
+  metadata: Record<string, unknown>
+): Record<string, CoordinatorSelectedSkill | undefined> | undefined {
+  if (activeCoordinatorNotificationSelectedSkills.has(threadId)) {
+    return activeCoordinatorNotificationSelectedSkills.get(threadId)
+  }
+  return parseCoordinatorNotificationSelectedSkillsMetadata(metadata)
+}
+
+async function prepareQueuedCoordinatorNotificationsForPrompt(
+  threadId: string,
+  onDeferred?: () => void
+): Promise<{
+  queuedNotifications: CoordinatorTurnNotification[]
+  promptNotifications: CoordinatorTurnNotification[]
+  notificationSelectedSkills: Record<string, CoordinatorSelectedSkill | undefined>
+}> {
+  const queuedNotifications = toCoordinatorTurnNotifications(
+    coordinatorWorkerManager.drainNotifications(threadId)
+  )
+  const { promptNotifications, deferredNotifications } =
+    limitCoordinatorNotificationsForPrompt(queuedNotifications)
+  if (deferredNotifications.length > 0) {
+    coordinatorWorkerManager.restoreNotifications(
+      threadId,
+      deferredNotifications.map((notification) => notification.message)
+    )
+    onDeferred?.()
+  }
+  const notificationSelectedSkills = await buildCoordinatorNotificationSelectedSkills(
+    threadId,
+    promptNotifications
+  )
+  return { queuedNotifications, promptNotifications, notificationSelectedSkills }
+}
+
+function limitCoordinatorNotificationsForPrompt(
+  notifications: CoordinatorTurnNotification[]
+): {
+  promptNotifications: CoordinatorTurnNotification[]
+  deferredNotifications: CoordinatorTurnNotification[]
+} {
+  if (notifications.length <= MAX_COORDINATOR_NOTIFICATIONS_IN_PROMPT) {
+    return { promptNotifications: notifications, deferredNotifications: [] }
+  }
+  return {
+    promptNotifications: notifications.slice(0, MAX_COORDINATOR_NOTIFICATIONS_IN_PROMPT),
+    deferredNotifications: notifications.slice(MAX_COORDINATOR_NOTIFICATIONS_IN_PROMPT)
+  }
+}
+
+async function buildCoordinatorNotificationSelectedSkills(
+  threadId: string,
+  notifications: CoordinatorTurnNotification[]
+): Promise<Record<string, CoordinatorSelectedSkill | undefined>> {
+  const selectedSkillsByNotificationId: Record<string, CoordinatorSelectedSkill | undefined> = {}
+  for (const notification of notifications) {
+    const workerId = extractNotificationWorkerId(notification.message)
+    if (!workerId) continue
+    selectedSkillsByNotificationId[notification.id] =
+      await coordinatorWorkerManager.getWorkerSelectedSkill(threadId, workerId)
+  }
+  return selectedSkillsByNotificationId
+}
+
+function deriveSharedCoordinatorSelectedSkill(
+  notificationSelectedSkills: Record<string, CoordinatorSelectedSkill | undefined>
+): CoordinatorSelectedSkill | undefined {
+  const notificationSkills = Object.values(notificationSelectedSkills)
+  if (notificationSkills.length === 0 || notificationSkills.some((selectedSkill) => !selectedSkill)) {
+    return undefined
+  }
+  const uniqueSkills = new Map<string, CoordinatorSelectedSkill>()
+  for (const selectedSkill of notificationSkills) {
+    if (!selectedSkill) continue
+    uniqueSkills.set(`${selectedSkill.skillName}@@${selectedSkill.skillPath}`, selectedSkill)
+  }
+  if (uniqueSkills.size !== 1) return undefined
+  return Array.from(uniqueSkills.values())[0]
+}
+
+async function getNormalModeGuardState(
+  threadId: string,
+  workspacePath?: string
+): Promise<NormalModeGuardState> {
+  if (workspacePath) {
+    await coordinatorWorkerManager.restoreWorkersForThread({
+      parentThreadId: threadId,
+      workspacePath,
+      mode: "active"
+    })
+  }
+  const workers = coordinatorWorkerManager.readWorkers(threadId)
+  return {
+    workers,
+    hasPendingNotifications: coordinatorWorkerManager.hasNotifications(threadId),
+    unresolvedWorkers: workers.filter(
+      (worker) => worker.status === "running" || worker.notification_acknowledged === false
+    )
+  }
+}
+
+function buildNormalModeGuardMessage(state: NormalModeGuardState): string {
+  const workerList = state.unresolvedWorkers
+    .map((worker) => `${worker.worker_id}: ${worker.description}`)
+    .join("; ")
+  const suffix = workerList ? `相关 worker：${workerList}` : "请先切回协同模式处理这些结果。"
+  return (
+    "仍有协同 worker 在运行或结果待处理，请先在协同模式处理完成后再切回普通模式。"
+    + suffix
+  )
+}
+
+function renderCoordinatorWorkerNotifications(
+  notifications: CoordinatorTurnNotification[]
+): string {
+  if (notifications.length === 0) return ""
+  const renderedNotifications = notifications.map(
+    (notification) => `### notification_id: ${notification.id}\n${notification.message}`
+  )
+  return `## Coordinator Worker Notifications
+
+The following background coordinator workers finished since your last turn. Treat these as internal task notifications, incorporate the result, and decide the next step. Do not ignore them.
+
+${renderedNotifications.join("\n\n")}`
+}
+
+function compactCoordinatorWorkerText(value: string, maxChars = 240): string {
+  const compacted = value.replace(/\s+/g, " ").trim()
+  if (compacted.length <= maxChars) return compacted
+  return `${compacted.slice(0, maxChars)}...(truncated)`
+}
+
+function formatCoordinatorWorkerUsage(worker: CoordinatorWorkerSnapshot): string {
+  const usage = worker.token_usage
+  if (!usage) return ""
+  const total = usage.total_tokens
+  const input = usage.input_tokens
+  const output = usage.output_tokens
+  const parts = [
+    typeof total === "number" ? `tokens=${total}` : "",
+    typeof input === "number" ? `input=${input}` : "",
+    typeof output === "number" ? `output=${output}` : ""
+  ].filter(Boolean)
+  return parts.length > 0 ? `, ${parts.join(", ")}` : ""
+}
+
+const MAX_RUNNING_COORDINATOR_WORKERS_IN_PROMPT = 10
+const MAX_RUNNING_READ_ONLY_WORKERS_IN_PROMPT = 6
+const MAX_TERMINAL_COORDINATOR_WORKERS_IN_PROMPT = 6
+
+function renderCoordinatorWorkerContext(workers: CoordinatorWorkerSnapshot[]): string {
+  const runningWorkers = workers
+    .filter((worker) => worker.status === "running")
+    .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
+  const runningPriorityWorkers = runningWorkers.filter((worker) => worker.workload !== "read_only")
+  const runningReadOnlyWorkers = runningWorkers.filter((worker) => worker.workload === "read_only")
+  const visibleRunningPriorityWorkers = runningPriorityWorkers.slice(
+    0,
+    MAX_RUNNING_COORDINATOR_WORKERS_IN_PROMPT
+  )
+  const remainingRunningSlots = Math.max(
+    0,
+    MAX_RUNNING_COORDINATOR_WORKERS_IN_PROMPT - visibleRunningPriorityWorkers.length
+  )
+  const visibleRunningReadOnlyWorkers = runningReadOnlyWorkers.slice(
+    0,
+    Math.min(MAX_RUNNING_READ_ONLY_WORKERS_IN_PROMPT, remainingRunningSlots)
+  )
+  const visibleRunningWorkers = [
+    ...visibleRunningPriorityWorkers,
+    ...visibleRunningReadOnlyWorkers
+  ]
+  const omittedRunningWorkersCount = Math.max(0, runningWorkers.length - visibleRunningWorkers.length)
+  const omittedReadOnlyWorkersCount = Math.max(
+    0,
+    runningReadOnlyWorkers.length - visibleRunningReadOnlyWorkers.length
+  )
+  const recentTerminalWorkers = workers
+    .filter((worker) => worker.status !== "running")
+    .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
+    .slice(0, MAX_TERMINAL_COORDINATOR_WORKERS_IN_PROMPT)
+
+  if (visibleRunningWorkers.length === 0 && recentTerminalWorkers.length === 0) return ""
+
+  const runningLines = visibleRunningWorkers.map((worker) => {
+    const lastTool = worker.last_tool_name
+      ? `, last_tool=${compactCoordinatorWorkerText(worker.last_tool_name, 80)}`
+      : ""
+    const ownedFiles =
+      worker.owned_files.length > 0 ? `, owned_files=${worker.owned_files.join(", ")}` : ""
+    return `- ${worker.worker_id} (${worker.role}, ${worker.workload}): ${compactCoordinatorWorkerText(worker.description)}; status=running, tool_uses=${worker.tool_call_count}${lastTool}${ownedFiles}, last_event=${compactCoordinatorWorkerText(worker.last_event)}`
+  })
+
+  const terminalLines = recentTerminalWorkers.map((worker) => {
+    const strongestPath =
+      worker.result_path || worker.report_path || worker.transcript_path || "(no result file)"
+    const outcome = worker.summary || worker.error || worker.last_event
+    return `- ${worker.worker_id} (${worker.role}, ${worker.workload}): status=${worker.status}, tool_uses=${worker.tool_call_count}${formatCoordinatorWorkerUsage(worker)}, result=${strongestPath}, summary=${compactCoordinatorWorkerText(outcome, 220)}`
+  })
+
+  const sections: string[] = []
+  if (runningLines.length > 0) {
+    const omittedRunningLine =
+      omittedRunningWorkersCount > 0
+        ? `\n- ... ${omittedRunningWorkersCount} additional running worker(s) omitted to keep coordinator prompt context bounded${omittedReadOnlyWorkersCount > 0 ? `; ${omittedReadOnlyWorkersCount} of them are read_only` : ""}. Use read_worker_state for explicit follow-up when needed.`
+        : ""
+    sections.push(`Running workers:
+${runningLines.join("\n")}${omittedRunningLine}`)
+  }
+  if (terminalLines.length > 0) {
+    sections.push(`Recent completed workers:
+${terminalLines.join("\n")}`)
+  }
+
+  return `## Current Coordinator Workers
+
+These worker states are restored from the coordinator worker manager and worker output files. Treat terminal states as already known; do not re-query terminal workers unless you need the full result file. For running workers, wait for task notifications; use read_worker_state only for explicit status checks or recovery.
+
+${sections.join("\n\n")}`
+}
+
+function buildCoordinatorTurnContextPrompt(
+  notifications: CoordinatorTurnNotification[],
+  workerContext: string
+): string | undefined {
+  const sections = [workerContext, renderCoordinatorWorkerNotifications(notifications)].filter(Boolean)
+  if (sections.length === 0) return undefined
+  return `This is internal coordinator state for the current turn only. Use it for orchestration decisions, but do not treat it as visible user input or repeat it verbatim unless it materially helps the user.
+
+${sections.join("\n\n")}`
+}
+
+const COORDINATOR_NOTIFICATION_PROMPT_PREFIX = "[[CMB_COORDINATOR_WORKER_NOTIFICATION]]"
+const COORDINATOR_INTERNAL_CONTEXT_START = "[[CMB_COORDINATOR_INTERNAL_CONTEXT_START]]"
+const COORDINATOR_INTERNAL_CONTEXT_END = "[[CMB_COORDINATOR_INTERNAL_CONTEXT_END]]"
+const COORDINATOR_INTERNAL_NOTIFICATION_START =
+  "[[CMB_COORDINATOR_INTERNAL_NOTIFICATION_START]]"
+const COORDINATOR_INTERNAL_NOTIFICATION_END = "[[CMB_COORDINATOR_INTERNAL_NOTIFICATION_END]]"
+const COORDINATOR_INTERNAL_MARKERS = [
+  COORDINATOR_NOTIFICATION_PROMPT_PREFIX,
+  COORDINATOR_INTERNAL_CONTEXT_START,
+  COORDINATOR_INTERNAL_CONTEXT_END,
+  COORDINATOR_INTERNAL_NOTIFICATION_START,
+  COORDINATOR_INTERNAL_NOTIFICATION_END
+]
+const COORDINATOR_INTERNAL_NOTIFICATION_MESSAGE_KEY = "cmb_internal_coordinator_notification"
+const COORDINATOR_AUGMENTED_USER_MESSAGE_KEY = "cmb_coordinator_augmented_user_message"
+const COORDINATOR_VISIBLE_USER_MESSAGE_KEY = "cmb_visible_user_message"
+
+function containsCoordinatorInternalMarker(content: string): boolean {
+  return COORDINATOR_INTERNAL_MARKERS.some((marker) => content.includes(marker))
 }
 
 interface SerializedHookMessage {
@@ -162,6 +841,90 @@ interface SerializedHookMessage {
 
 function serializeStreamData(data: unknown): unknown {
   return JSON.parse(JSON.stringify(data))
+}
+
+function serializedMessageClassName(message: unknown): string {
+  if (!message || typeof message !== "object" || Array.isArray(message)) return ""
+  const id = (message as { id?: unknown }).id
+  if (!Array.isArray(id)) return ""
+  const last = id[id.length - 1]
+  return typeof last === "string" ? last : ""
+}
+
+function isSerializedHumanMessage(message: unknown): boolean {
+  if (!message || typeof message !== "object" || Array.isArray(message)) return false
+  const className = serializedMessageClassName(message)
+  const record = message as {
+    type?: unknown
+    kwargs?: { type?: unknown }
+  }
+  const type = record.kwargs?.type ?? record.type
+  return className.includes("HumanMessage") || type === "human" || type === "user"
+}
+
+function sanitizeValuesMessagesForRenderer(messages: unknown): unknown[] | undefined {
+  if (!Array.isArray(messages)) return undefined
+
+  let currentTurnStart = 0
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (isSerializedHumanMessage(messages[index])) {
+      currentTurnStart = index + 1
+      break
+    }
+  }
+
+  const currentTurnMessages = messages.slice(currentTurnStart)
+  return currentTurnMessages.length > 0 ? currentTurnMessages : undefined
+}
+
+function sanitizeStreamDataForRenderer(mode: string, payload: unknown): unknown {
+  if (mode !== "values" || !payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return payload
+  }
+
+  const { messages, ...rest } = payload as Record<string, unknown>
+  const currentTurnMessages = sanitizeValuesMessagesForRenderer(messages)
+  if (currentTurnMessages) {
+    return { ...rest, messages: currentTurnMessages }
+  }
+  return rest
+}
+
+function asPlainRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined
+}
+
+function messageStreamMetadata(
+  mode: string,
+  payload: unknown
+): Record<string, unknown> | undefined {
+  if (mode !== "messages" || !Array.isArray(payload)) return undefined
+  return asPlainRecord(payload[1])
+}
+
+function isCoordinatorWorkerStreamChunk(mode: string, payload: unknown, threadId: string): boolean {
+  const metadata = messageStreamMetadata(mode, payload)
+  if (!metadata) return false
+  if (threadId.includes("__worker__")) return false
+
+  const workerThreadPrefix = `${threadId}__worker__`
+  const valuesToCheck = [
+    metadata.langgraph_checkpoint_ns,
+    metadata.checkpoint_ns,
+    metadata.thread_id,
+    metadata.langgraph_thread_id,
+    asPlainRecord(metadata.configurable)?.thread_id
+  ]
+
+  if (
+    valuesToCheck.some((value) => typeof value === "string" && value.includes(workerThreadPrefix))
+  ) {
+    return true
+  }
+
+  return false
 }
 
 function trimStopContextText(text: string): string {
@@ -506,7 +1269,7 @@ function buildModelRetryHooks(window: BrowserWindow, channel: string): ModelRetr
   const safeSend = (payload: unknown): void => {
     try {
       if (window.isDestroyed()) return
-      window.webContents.send(channel, payload)
+      safeSendToWindow(window, channel, payload)
     } catch {
       /* ignore — window may be gone */
     }
@@ -917,6 +1680,92 @@ async function autoProposeSKill(
 export function registerAgentHandlers(ipcMain: IpcMain): void {
   console.log("[Agent] Registering agent handlers...")
 
+  ipcMain.handle(
+    "agent:coordinator-workers",
+    async (event, payload: { threadId?: string }): Promise<CoordinatorWorkerSnapshot[]> => {
+      const threadId = payload.threadId?.trim()
+      if (!threadId) return []
+
+      try {
+        const window = BrowserWindow.fromWebContents(event.sender)
+        const thread = getThread(threadId)
+        const metadata =
+          thread?.metadata && typeof thread.metadata === "string"
+            ? (JSON.parse(thread.metadata) as Record<string, unknown>)
+            : {}
+        const workspacePath =
+          typeof metadata.workspacePath === "string" ? metadata.workspacePath : undefined
+
+        const onUpdate =
+          window && !window.isDestroyed()
+            ? (workerEvent: {
+                worker: CoordinatorWorkerSnapshot
+                workers?: CoordinatorWorkerSnapshot[]
+                notification?: string
+              }) =>
+                sendCoordinatorWorkerEventToChannels(
+                  window,
+                  [`agent:stream:${threadId}`, `agent:stream:${threadId}:coordinator-internal`],
+                  workerEvent
+                )
+            : undefined
+        const existingWorkers = coordinatorWorkerManager.readWorkers(threadId)
+        if (existingWorkers.length > 0) {
+          coordinatorWorkerManager.bindWorkerUpdates(
+            threadId,
+            onUpdate,
+            window ? `coordinator-workers:${window.id}` : undefined
+          )
+        } else if (workspacePath) {
+          await coordinatorWorkerManager.restoreWorkersForThread({
+            parentThreadId: threadId,
+            workspacePath,
+            mode: "recent",
+            onUpdate,
+            onUpdateKey: window ? `coordinator-workers:${window.id}` : undefined
+          })
+        }
+      } catch (error) {
+        console.warn("[Agent] Failed to refresh coordinator workers:", error)
+      }
+
+      return limitCoordinatorWorkersForRenderer(coordinatorWorkerManager.readWorkers(threadId))
+    }
+  )
+
+  ipcMain.handle(
+    "agent:coordinator-worker-notifications-pending",
+    async (_event, payload: { threadId?: string }): Promise<boolean> => {
+      const threadId = payload.threadId?.trim()
+      if (!threadId) return false
+      if (!coordinatorWorkerManager.hasAutoRunnableNotifications(threadId)) {
+        try {
+          const thread = getThread(threadId)
+          const metadata =
+            thread?.metadata && typeof thread.metadata === "string"
+              ? (JSON.parse(thread.metadata) as Record<string, unknown>)
+              : {}
+          const workspacePath =
+            typeof metadata.workspacePath === "string" ? metadata.workspacePath : undefined
+          if (workspacePath) {
+            await coordinatorWorkerManager.restoreWorkersForThread({
+              parentThreadId: threadId,
+              workspacePath,
+              mode: "active"
+            })
+          }
+        } catch (error) {
+          console.warn("[Agent] Failed to refresh coordinator worker notifications:", error)
+        }
+      }
+      return coordinatorWorkerManager.hasAutoRunnableNotifications(threadId)
+    }
+  )
+
+  ipcMain.handle("agent:coordinator-mode-forced", async (): Promise<boolean> => {
+    return isCoordinatorModeForcedByEnvironment()
+  })
+
   // Manual retry for skill generation — triggered when the user clicks the retry button
   // in the right panel after a generation failure.  Skips the intent banner (user already
   // accepted), jumps straight to generate → confirm → write.
@@ -955,754 +1804,977 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
   )
 
   // Handle agent invocation with streaming
-  ipcMain.on("agent:invoke", async (
-    event,
-    { threadId, message, modelId, agentMode: requestedAgentMode }: AgentInvokeParams
-  ) => {
-    const channel = `agent:stream:${threadId}`
-    const window = BrowserWindow.fromWebContents(event.sender)
-
-    console.log("[Agent] Received invoke request:", {
-      threadId,
-      message: message.substring(0, 50),
-      modelId
-    })
-
-    if (!window) {
-      console.error("[Agent] No window found")
-      return
-    }
-
-    // Abort any existing stream for this thread before starting a new one
-    // This prevents concurrent streams which can cause checkpoint corruption
-    const existingController = activeRuns.get(threadId)
-    if (existingController) {
-      console.log("[Agent] Aborting existing stream for thread:", threadId)
-      existingController.abort()
-      activeRuns.delete(threadId)
-    }
-
-    const abortController = new AbortController()
-    activeRuns.set(threadId, abortController)
-
-    // Abort the stream if the window is closed/destroyed
-    const onWindowClosed = (): void => {
-      console.log("[Agent] Window closed, aborting stream for thread:", threadId)
-      abortController.abort()
-    }
-    window.once("closed", onWindowClosed)
-
-    // Start trace collection for this invocation (modelId resolved later)
-    const tracer = new TraceCollector(threadId, message, modelId ?? "unknown")
-    const skillUsageDetector = new SkillUsageDetector()
-    const toolCallCounter = new ToolCallCounter()
-    let assistantText = ""
-    const stopContextCollector = new StopHookContextCollector(message)
-
-    const sendHookNotice = (notice: string): void => {
-      window.webContents.send(channel, {
-        type: "custom",
-        data: { type: "hook_notice", message: notice }
-      })
-    }
-
-    const sendStreamError = (error: string): void => {
-      window.webContents.send(channel, {
-        type: "error",
-        error
-      })
-    }
-
-    const onHookResult = makeHookResultCallback(window, channel)
-
-    const appendTurnToProposalWindow = (
-      status: "success" | "error",
-      errorMessage?: string
-    ): SkillProposalWindowContext => {
-      appendSkillProposalWindowTurn(threadId, {
-        userMessage: message,
-        assistantText,
-        toolCallNames: toolCallCounter.getNames(),
-        toolCallCount: toolCallCounter.getCount(),
-        status,
-        errorMessage,
-        usedSkills: skillUsageDetector.getUsedSkillNames(),
-        finishedAt: nowIsoLocal()
-      })
-
-      const context = buildSkillProposalWindowContext(snapshotSkillProposalWindow(threadId))
-      console.log(
-        `[SkillEvolution][${threadId}] Window append ${JSON.stringify({
-          status,
-          currentTurnToolCallCount: toolCallCounter.getCount(),
-          windowTurnCount: context.turnCount,
-          windowToolCallCount: context.toolCallCount,
-          usedSkills: context.usedSkills
-        })}`
-      )
-      return context
-    }
-
-    // Hoisted so catch/finally block can access them
-    let sessionWorkspacePath: string | undefined
-    let invokeRoutingResult: Awaited<ReturnType<typeof resolveModel>> | null = null
-    let toolErrorCount = 0
-    // High-water mark of input tokens — hoisted for catch/finally access
-    let highWaterInputTokens = 0
-    // Actual model used after failover — hoisted for catch/finally routing feedback
-    let usedModelId: string | undefined
-
-    try {
-      // Get workspace path from thread metadata - REQUIRED
-      const thread = getThread(threadId)
-      let metadata: Record<string, unknown> = {}
-      if (thread?.metadata) {
-        try {
-          metadata = JSON.parse(thread.metadata)
-        } catch {
-          console.warn("[Agent] Failed to parse thread metadata, using empty object")
-        }
-      }
-      console.log("[Agent] Thread metadata:", metadata)
-
-      const workspacePath = metadata.workspacePath as string | undefined
-      sessionWorkspacePath = workspacePath ?? undefined
-
-      if (!workspacePath) {
-        window.webContents.send(channel, {
-          type: "error",
-          error: "WORKSPACE_REQUIRED",
-          message: "Please select a workspace folder before sending messages."
-        })
-        await tracer.finish("error", "WORKSPACE_REQUIRED")
-        return
-      }
-
-      // Fire SessionStart once per thread lifetime (not per turn). SessionEnd fires when the
-      // thread is deleted (threads:delete) or the app is quitting.
-      fireSessionStartOnce(threadId, sessionWorkspacePath, onHookResult)
-      sendActiveHookNotice(window, channel, workspacePath)
-
-      // Fire UserPromptSubmit hook — may block the message, halt the turn, rewrite the prompt,
-      // or inject additional context that the LLM should see alongside the user's message.
-      const promptSubmitResult = await runHooksEnriched(
-        getEnabledHooks(workspacePath ?? undefined),
-        "UserPromptSubmit",
-        {
-          toolArgs: { message },
-          userPrompt: message,
-          workspacePath: workspacePath ?? undefined,
-          sessionId: threadId
-        },
-        onHookResult
-      )
-      if (promptSubmitResult?.blocked || promptSubmitResult?.continue === false) {
-        const reason =
-          promptSubmitResult.stopReason ||
-          promptSubmitResult.stderr ||
-          promptSubmitResult.stdout ||
-          "消息被 Hook 策略拦截"
-        window.webContents.send(channel, {
-          type: "error",
-          error: reason
-        })
-        return
-      }
-      // Apply hook-supplied prompt rewrite / context injection. `message` remains the raw
-      // user input for tracing and proposal capture; `effectiveMessage` is what the LLM sees.
-      let effectiveMessage = message
-      const updatedMessage =
-        promptSubmitResult?.updatedInput?.message ??
-        promptSubmitResult?.updatedInput?.prompt ??
-        promptSubmitResult?.updatedInput?.userPrompt
-      if (typeof updatedMessage === "string" && updatedMessage.length > 0) {
-        effectiveMessage = updatedMessage
-      }
-      if (promptSubmitResult?.additionalContext) {
-        effectiveMessage = `${promptSubmitResult.additionalContext}\n\n${effectiveMessage}`
-      }
-      if (promptSubmitResult?.systemMessage) {
-        window.webContents.send(channel, {
-          type: "custom",
-          data: { type: "hook_notice", message: promptSubmitResult.systemMessage }
-        })
-      }
-
-      const metadataAgentMode = getAgentModeFromMetadata(metadata)
-      const requestedMode =
-        requestedAgentMode === "coordinator" || requestedAgentMode === "normal"
-          ? requestedAgentMode
-          : undefined
-      const harnessRequest = resolveCoordinatorHarnessRequest(effectiveMessage, metadata)
-      effectiveMessage = harnessRequest.message
-
-      const effectiveAgentMode: AgentMode =
-        requestedMode ?? (harnessRequest.enabled ? "coordinator" : metadataAgentMode)
-      const shouldPersistAgentMode =
-        requestedMode !== undefined ||
-        (harnessRequest.shouldPersist && effectiveAgentMode === "coordinator")
-
-      if (shouldPersistAgentMode) {
-        metadata.agentMode = effectiveAgentMode
-        updateThread(threadId, { metadata: JSON.stringify(metadata) })
-      }
-
-      console.log("[CoordinatorHarness] mode resolved", {
+  ipcMain.on(
+    "agent:invoke",
+    async (
+      event,
+      {
         threadId,
-        requestedAgentMode: requestedMode ?? null,
-        metadataAgentMode,
-        harnessSource: harnessRequest.source ?? null,
-        harnessRequestEnabled: harnessRequest.enabled,
-        persisted: shouldPersistAgentMode,
-        effectiveAgentMode
-      })
-
-      if (effectiveAgentMode === "coordinator") {
-        window.webContents.send(channel, {
-          type: "custom",
-          data: {
-            type: "agent_mode",
-            mode: "coordinator",
-            source: requestedMode ? "ui" : harnessRequest.source ?? "metadata"
-          }
-        })
-      }
-
-      // Sync FTS index with any memory files changed since last invocation
-      if (isMemoryEnabled()) {
-        try {
-          const memoryStore = await getMemoryStore()
-          memoryStore.syncMemoryFiles()
-        } catch {
-          /* non-critical */
-        }
-      }
-
-      const requestedModelId = modelId || (metadata.model as string | undefined)
-      invokeRoutingResult = await resolveModel({
-        taskSource: "chat",
         message,
+        modelId,
+        agentMode: requestedAgentMode,
+        coordinatorInternalNotification
+      }: AgentInvokeParams
+    ) => {
+      const baseChannel = `agent:stream:${threadId}`
+      const window = BrowserWindow.fromWebContents(event.sender)
+
+      console.log("[Agent] Received invoke request:", {
         threadId,
-        requestedModelId,
-        routingMode: getGlobalRoutingMode()
-      }).catch(() => null)
-      let effectiveModelId = invokeRoutingResult?.resolvedModelId ?? requestedModelId
+        message: message.substring(0, 50),
+        modelId
+      })
 
-      // Persist routing decision for thread continuity (sticky/force logic next turn)
-      if (invokeRoutingResult) rememberRoutingDecision(threadId, invokeRoutingResult)
-
-      // Attach routing funnel record to trace (setRoutingTrace is internally safe, never throws)
-      if (invokeRoutingResult?.routingTrace) {
-        tracer.setRoutingTrace(invokeRoutingResult.routingTrace)
+      if (!window) {
+        console.error("[Agent] No window found")
+        return
       }
 
-      // Emit routing result so the frontend can display which model was selected
-      if (invokeRoutingResult) {
-        window.webContents.send(channel, {
-          type: "custom",
-          data: {
-            type: "routing_result",
-            resolvedModelId: invokeRoutingResult.resolvedModelId,
-            resolvedTier: invokeRoutingResult.resolvedTier,
-            routeReason: invokeRoutingResult.routeReason
+      const hasCoordinatorNotificationPrefixAtInvoke = message
+        .trimStart()
+        .startsWith(COORDINATOR_NOTIFICATION_PROMPT_PREFIX)
+      const isTrustedCoordinatorNotificationInvoke =
+        coordinatorInternalNotification === true && hasCoordinatorNotificationPrefixAtInvoke
+      const channel = isTrustedCoordinatorNotificationInvoke
+        ? `${baseChannel}:coordinator-internal`
+        : baseChannel
+
+      // Abort any existing stream for this thread before starting a new one
+      // This prevents concurrent streams which can cause checkpoint corruption
+      const replacement = await withActiveRunReplacementLock(threadId, async () => {
+        const existingController = activeRuns.get(threadId)
+        if (existingController) {
+          if (isTrustedCoordinatorNotificationInvoke) {
+            return { ignoredInternalNotification: true as const }
           }
+          console.log("[Agent] Aborting existing stream for thread:", threadId)
+          existingController.abort()
+          await waitForReplacedRunToSettle(threadId)
+        }
+
+        const nextAbortController = new AbortController()
+        activeRuns.set(threadId, nextAbortController)
+        let nextResolveActiveRunSettled: () => void = () => {}
+        const nextActiveRunSettledPromise = new Promise<void>((resolve) => {
+          nextResolveActiveRunSettled = resolve
+        })
+        activeRunSettled.set(threadId, nextActiveRunSettledPromise)
+        return {
+          abortController: nextAbortController,
+          activeRunSettledPromise: nextActiveRunSettledPromise,
+          resolveActiveRunSettled: nextResolveActiveRunSettled
+        }
+      })
+      if ("ignoredInternalNotification" in replacement) {
+        console.log(
+          "[CoordinatorMode] ignoring internal worker notification turn while foreground run is active",
+          { threadId }
+        )
+        safeSendToWindow(window, channel, {
+          type: "custom",
+          data: { type: "coordinator_notification_deferred" }
+        })
+        safeSendToWindow(window, channel, { type: "done" })
+        return
+      }
+      const { abortController, activeRunSettledPromise, resolveActiveRunSettled } = replacement
+
+      // Abort the stream if the window is closed/destroyed
+      const onWindowClosed = (): void => {
+        console.log("[Agent] Window closed, aborting stream for thread:", threadId)
+        abortController.abort()
+      }
+      window.once("closed", onWindowClosed)
+
+      // Start trace collection for this invocation (modelId resolved later)
+      const tracer = new TraceCollector(threadId, message, modelId ?? "unknown")
+      const skillUsageDetector = new SkillUsageDetector()
+      const toolCallCounter = new ToolCallCounter()
+      let assistantText = ""
+      let drainedCoordinatorNotifications: CoordinatorTurnNotification[] = []
+      let coordinatorNotificationsConsumed = false
+      let clearCoordinatorNotificationSelectedSkillsOnExit = false
+      const consumedCoordinatorNotificationIds = new Set<string>()
+      const trackedCoordinatorNotificationIds = new Set<string>()
+      const stopContextCollector = new StopHookContextCollector(message)
+
+      const sendHookNotice = (notice: string): void => {
+        safeSendToWindow(window, channel, {
+          type: "custom",
+          data: { type: "hook_notice", message: notice }
         })
       }
 
-      const humanMessage = new HumanMessage(effectiveMessage)
-      const streamConfig = {
-        configurable: { thread_id: threadId },
-        signal: abortController.signal,
-        streamMode: ["messages", "values"] as ("messages" | "values")[],
-        recursionLimit: 1000
+      const sendStreamError = (error: string): void => {
+        safeSendToWindow(window, channel, {
+          type: "error",
+          error
+        })
       }
-
-      // ── Failover loop: try models in order, resume from checkpoint on retryable errors ──
-      const primaryTier = invokeRoutingResult?.resolvedTier ?? "premium"
-      const orderedChain = buildOrderedChain(
-        effectiveModelId,
-        invokeRoutingResult?.fallbackChain,
-        primaryTier,
-        invokeRoutingResult?.layer !== "pinned"
-      )
-      const failoverAttempts: FailoverAttempt[] = []
-      usedModelId = effectiveModelId
-      let isFirstAttempt = true
-      let agent: Awaited<ReturnType<typeof createAgentRuntime>> | null = null
-      let stream: AsyncIterable<unknown> | null = null
-
-      for (const candidateId of orderedChain) {
-        if (abortController.signal.aborted) break
-        try {
-          agent = await createAgentRuntime({
-            threadId,
-            workspacePath,
-            modelId: candidateId,
-            abortSignal: abortController.signal,
-            noSkillEvolutionTool: true,
-            agentMode: effectiveAgentMode,
-            retryHooks: buildModelRetryHooks(window, channel),
-            maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
-            onHookResult
-          })
-          // First attempt sends the message; subsequent attempts resume from checkpoint
-          const input = isFirstAttempt ? { messages: [humanMessage] } : null
-          stream = await agent.stream(input, streamConfig)
-          usedModelId = candidateId
-          break
-        } catch (err) {
-          if (!isRetryableApiError(err)) throw err
-          failoverAttempts.push({ modelId: candidateId, error: String(err), timestamp: Date.now() })
-          console.warn(`[Agent][Failover] ${candidateId} failed: ${err}, trying next...`)
-          // Keep isFirstAttempt=true: init-time errors (createAgentRuntime / agent.stream)
-          // happen before any graph tick, so HumanMessage is NOT yet checkpointed.
-          // Next candidate must still send { messages: [humanMessage] }.
-          if (!abortController.signal.aborted) {
-            await new Promise((r) => setTimeout(r, 500))
+      const onCoordinatorWorkerEvent = (event: {
+        worker: CoordinatorWorkerSnapshot
+        workers?: CoordinatorWorkerSnapshot[]
+        notification?: string
+      }): void => {
+        if (event.workers) {
+          sendCoordinatorWorkers(window, channel, event.workers, event.notification)
+        } else {
+          sendCoordinatorWorkerDelta(window, channel, event.worker, event.notification)
+        }
+      }
+      const onCoordinatorNotificationAction = (notificationIds: string[]): void => {
+        if (drainedCoordinatorNotifications.length > 0) {
+          const drainedIds = new Set(drainedCoordinatorNotifications.map((notification) => notification.id))
+          const validNotificationIds = notificationIds
+            .map((notificationId) => notificationId.trim())
+            .filter((notificationId) => notificationId.length > 0 && drainedIds.has(notificationId))
+          if (validNotificationIds.length > 0) {
+            for (const notificationId of validNotificationIds) {
+              consumedCoordinatorNotificationIds.add(notificationId)
+            }
           }
         }
       }
 
-      // P3: user cancellation during failover should not be reported as hard error
-      if (abortController.signal.aborted) {
-        // Fall through to outer abort handling
-        throw Object.assign(new Error("aborted"), { name: "AbortError" })
+      const settleDrainedCoordinatorNotifications = async (
+        mode: "ack" | "restore" | "auto"
+      ): Promise<void> => {
+        if (coordinatorNotificationsConsumed || drainedCoordinatorNotifications.length === 0) {
+          return
+        }
+        if (mode === "ack") {
+          await coordinatorWorkerManager.acknowledgeNotificationMessages(
+            threadId,
+            drainedCoordinatorNotifications.map((notification) => notification.message)
+          )
+        } else if (mode === "restore") {
+          coordinatorWorkerManager.restoreNotifications(
+            threadId,
+            drainedCoordinatorNotifications.map((notification) => notification.message)
+          )
+        } else {
+          const acknowledgedNotifications = drainedCoordinatorNotifications.filter((notification) =>
+            consumedCoordinatorNotificationIds.has(notification.id)
+          )
+          const restoredNotifications = drainedCoordinatorNotifications.filter(
+            (notification) => !consumedCoordinatorNotificationIds.has(notification.id)
+          )
+          if (acknowledgedNotifications.length > 0) {
+            await coordinatorWorkerManager.acknowledgeNotificationMessages(
+              threadId,
+              acknowledgedNotifications.map((notification) => notification.message)
+            )
+          }
+          if (restoredNotifications.length > 0) {
+            coordinatorWorkerManager.restoreNotifications(
+              threadId,
+              restoredNotifications.map((notification) => notification.message)
+            )
+          }
+        }
+        drainedCoordinatorNotifications = []
+        consumedCoordinatorNotificationIds.clear()
+        coordinatorNotificationsConsumed = true
       }
 
-      if (!stream || !agent) {
-        const allErrors = failoverAttempts.map((a) => `${a.modelId}: ${a.error}`).join("; ")
-        throw new Error(`All models failed: ${allErrors}`)
+      const onHookResult = makeHookResultCallback(window, channel)
+
+      const appendTurnToProposalWindow = (
+        status: "success" | "error",
+        errorMessage?: string
+      ): SkillProposalWindowContext => {
+        appendSkillProposalWindowTurn(threadId, {
+          userMessage: message,
+          assistantText,
+          toolCallNames: toolCallCounter.getNames(),
+          toolCallCount: toolCallCounter.getCount(),
+          status,
+          errorMessage,
+          usedSkills: skillUsageDetector.getUsedSkillNames(),
+          finishedAt: nowIsoLocal()
+        })
+
+        const context = buildSkillProposalWindowContext(snapshotSkillProposalWindow(threadId))
+        console.log(
+          `[SkillEvolution][${threadId}] Window append ${JSON.stringify({
+            status,
+            currentTurnToolCallCount: toolCallCounter.getCount(),
+            windowTurnCount: context.turnCount,
+            windowToolCallCount: context.toolCallCount,
+            usedSkills: context.usedSkills
+          })}`
+        )
+        return context
       }
 
-      // Notify frontend if failover happened — update model display + context window
-      const notifyFailover = (): void => {
-        if (failoverAttempts.length > 0 && usedModelId !== effectiveModelId) {
-          const usedCfgId = usedModelId?.startsWith("custom:")
-            ? usedModelId.slice("custom:".length)
-            : usedModelId
-          const usedCfg = getCustomModelConfigs().find((c) => c.id === usedCfgId)
-          window.webContents.send(channel, {
+      // Hoisted so catch/finally block can access them
+      let sessionWorkspacePath: string | undefined
+      let invokeRoutingResult: Awaited<ReturnType<typeof resolveModel>> | null = null
+      let toolErrorCount = 0
+      // High-water mark of input tokens — hoisted for catch/finally access
+      let highWaterInputTokens = 0
+      // Actual model used after failover — hoisted for catch/finally routing feedback
+      let usedModelId: string | undefined
+      let metadata: Record<string, unknown> = {}
+      let coordinatorNotificationSelectedSkills: Record<
+        string,
+        CoordinatorSelectedSkill | undefined
+      > = {}
+
+      try {
+        // Get workspace path from thread metadata - REQUIRED
+        const thread = getThread(threadId)
+        if (thread?.metadata) {
+          try {
+            metadata = JSON.parse(thread.metadata)
+          } catch {
+            console.warn("[Agent] Failed to parse thread metadata, using empty object")
+          }
+        }
+        console.log("[Agent] Thread metadata:", metadata)
+
+        const workspacePath = metadata.workspacePath as string | undefined
+        sessionWorkspacePath = workspacePath ?? undefined
+
+        if (!workspacePath) {
+          safeSendToWindow(window, channel, {
+            type: "error",
+            error: "WORKSPACE_REQUIRED",
+            message: "Please select a workspace folder before sending messages."
+          })
+          await tracer.finish("error", "WORKSPACE_REQUIRED")
+          return
+        }
+
+        // Fire SessionStart once per thread lifetime (not per turn). SessionEnd fires when the
+        // thread is deleted (threads:delete) or the app is quitting.
+        fireSessionStartOnce(threadId, sessionWorkspacePath, onHookResult)
+        sendActiveHookNotice(window, channel, workspacePath)
+
+        // Apply hook-supplied prompt rewrite / context injection. `message` remains the raw
+        // user input for tracing and proposal capture; `effectiveMessage` is what the LLM sees.
+        let effectiveMessage = message
+        const hasCoordinatorNotificationPrefix = message
+          .trimStart()
+          .startsWith(COORDINATOR_NOTIFICATION_PROMPT_PREFIX)
+        const isTrustedCoordinatorNotificationRequest =
+          coordinatorInternalNotification === true && hasCoordinatorNotificationPrefix
+        const isCoordinatorNotificationTurn =
+          isTrustedCoordinatorNotificationRequest && coordinatorWorkerManager.hasNotifications(threadId)
+
+        if (isTrustedCoordinatorNotificationRequest && !isCoordinatorNotificationTurn) {
+          console.log("[CoordinatorMode] ignoring stale internal worker notification turn", {
+            threadId
+          })
+          safeSendToWindow(window, channel, { type: "done" })
+          await tracer.finish("success", "STALE_COORDINATOR_NOTIFICATION")
+          return
+        }
+
+        if (!isCoordinatorNotificationTurn) {
+          // Fire UserPromptSubmit hook — may block the message, halt the turn, rewrite the prompt,
+          // or inject additional context that the LLM should see alongside the user's message.
+          const promptSubmitResult = await runHooksEnriched(
+            getEnabledHooks(workspacePath ?? undefined),
+            "UserPromptSubmit",
+            {
+              toolArgs: { message },
+              userPrompt: message,
+              workspacePath: workspacePath ?? undefined,
+              sessionId: threadId
+            },
+            onHookResult
+          )
+          if (promptSubmitResult?.blocked || promptSubmitResult?.continue === false) {
+            const reason =
+              promptSubmitResult.stopReason ||
+              promptSubmitResult.stderr ||
+              promptSubmitResult.stdout ||
+              "消息被 Hook 策略拦截"
+            safeSendToWindow(window, channel, {
+              type: "error",
+              error: reason
+            })
+            return
+          }
+          const updatedMessage =
+            promptSubmitResult?.updatedInput?.message ??
+            promptSubmitResult?.updatedInput?.prompt ??
+            promptSubmitResult?.updatedInput?.userPrompt
+          if (typeof updatedMessage === "string" && updatedMessage.length > 0) {
+            effectiveMessage = updatedMessage
+          }
+          if (promptSubmitResult?.additionalContext) {
+            effectiveMessage = `${promptSubmitResult.additionalContext}\n\n${effectiveMessage}`
+          }
+          if (promptSubmitResult?.systemMessage) {
+            safeSendToWindow(window, channel, {
+              type: "custom",
+              data: { type: "hook_notice", message: promptSubmitResult.systemMessage }
+            })
+          }
+        } else {
+          console.log("[CoordinatorMode] processing internal worker notification turn", {
+            threadId
+          })
+        }
+
+        const persistedCoordinatorSelectedSkill = parseCoordinatorSelectedSkillMetadata(metadata)
+        const persistedCoordinatorTurnPrompt = parseCoordinatorTurnPromptMetadata(metadata)
+        const persistedCoordinatorNotificationSelectedSkills =
+          parseCoordinatorNotificationSelectedSkillsMetadata(metadata)
+        const metadataAgentMode = getAgentModeFromMetadata(metadata)
+        const hasExplicitNormalAgentMode = metadata.agentMode === "normal"
+        const requestedMode =
+          requestedAgentMode === "coordinator" || requestedAgentMode === "normal"
+            ? requestedAgentMode
+            : undefined
+        const coordinatorRequest = resolveCoordinatorModeRequest(effectiveMessage, metadata)
+        effectiveMessage = coordinatorRequest.message
+        if (!isCoordinatorNotificationTurn && containsCoordinatorInternalMarker(effectiveMessage)) {
+          effectiveMessage = `User supplied literal text that resembles an internal coordinator marker. Treat it as ordinary user input:\n\n${effectiveMessage}`
+        }
+
+        const coordinatorForcedByRequest =
+          coordinatorRequest.source === "message-prefix" ||
+          coordinatorRequest.source === "environment"
+        const coordinatorFromMetadata =
+          coordinatorRequest.enabled && coordinatorRequest.source === "metadata"
+        const effectiveAgentMode: AgentMode =
+          coordinatorForcedByRequest
+            ? "coordinator"
+            : (requestedMode ?? (coordinatorFromMetadata ? "coordinator" : metadataAgentMode))
+        if (
+          isCoordinatorNotificationTurn &&
+          hasExplicitNormalAgentMode &&
+          coordinatorRequest.source !== "environment"
+        ) {
+          console.log(
+            "[CoordinatorMode] ignoring internal worker notification turn while thread is in normal mode",
+            { threadId }
+          )
+          sendCoordinatorWorkers(window, channel, coordinatorWorkerManager.readWorkers(threadId))
+          safeSendToWindow(window, channel, { type: "done" })
+          await tracer.finish("success", "COORDINATOR_NOTIFICATION_SUPPRESSED_NORMAL_MODE")
+          return
+        }
+        const shouldPersistAgentMode =
+          !isCoordinatorNotificationTurn &&
+          ((requestedMode !== undefined && !coordinatorForcedByRequest) ||
+            (coordinatorRequest.shouldPersist && effectiveAgentMode === "coordinator"))
+
+        if (
+          shouldPersistAgentMode &&
+          requestedMode === "normal" &&
+          metadata.agentMode !== "normal"
+        ) {
+          const normalModeGuardState = await getNormalModeGuardState(threadId, workspacePath)
+          if (
+            normalModeGuardState.unresolvedWorkers.length > 0 ||
+            normalModeGuardState.hasPendingNotifications
+          ) {
+            const errorMessage = buildNormalModeGuardMessage(normalModeGuardState)
+            safeSendToWindow(window, channel, {
+              type: "error",
+              error: errorMessage
+            })
+            sendCoordinatorWorkers(window, channel, normalModeGuardState.workers)
+            await tracer.finish("error", "COORDINATOR_NORMAL_MODE_BLOCKED")
+            return
+          }
+        }
+
+        if (shouldPersistAgentMode) {
+          metadata.agentMode = effectiveAgentMode
+        }
+
+        console.log("[CoordinatorMode] mode resolved", {
+          threadId,
+          requestedAgentMode: requestedMode ?? null,
+          metadataAgentMode,
+          coordinatorSource: coordinatorRequest.source ?? null,
+          coordinatorRequestEnabled: coordinatorRequest.enabled,
+          persisted: shouldPersistAgentMode,
+          effectiveAgentMode
+        })
+
+        if (effectiveAgentMode === "normal") {
+          await coordinatorWorkerManager.restoreWorkersForThread({
+            parentThreadId: threadId,
+            workspacePath,
+            mode: "active",
+            onUpdate: (event) => {
+              sendCoordinatorWorkers(
+                window,
+                channel,
+                coordinatorWorkerManager.readWorkers(threadId),
+                event.notification
+              )
+            },
+            onUpdateKey: channel
+          })
+          const normalModeGuardState = await getNormalModeGuardState(threadId)
+          if (
+            normalModeGuardState.unresolvedWorkers.length > 0 ||
+            normalModeGuardState.hasPendingNotifications
+          ) {
+            const errorMessage = buildNormalModeGuardMessage(normalModeGuardState)
+            safeSendToWindow(window, channel, {
+              type: "error",
+              error: errorMessage
+            })
+            sendCoordinatorWorkers(window, channel, normalModeGuardState.workers)
+            await tracer.finish("error", "COORDINATOR_NORMAL_MODE_BLOCKED")
+            return
+          }
+        }
+
+        if (!isCoordinatorNotificationTurn && effectiveAgentMode === "coordinator") {
+          safeSendToWindow(window, channel, {
+            type: "custom",
+            data: {
+              type: "agent_mode",
+              mode: "coordinator",
+              source: coordinatorForcedByRequest
+                ? coordinatorRequest.source
+                : requestedMode
+                  ? "ui"
+                  : "metadata",
+              persisted: shouldPersistAgentMode
+            }
+          })
+        }
+
+        // Sync FTS index with any memory files changed since last invocation
+        if (isMemoryEnabled()) {
+          try {
+            const memoryStore = await getMemoryStore()
+            memoryStore.syncMemoryFiles()
+          } catch {
+            /* non-critical */
+          }
+        }
+
+        let coordinatorVisibleUserMessage: string | undefined
+        let coordinatorSelectedSkill: CoordinatorSelectedSkill | undefined
+        let coordinatorExplicitSelectedSkill: CoordinatorSelectedSkill | undefined
+        let coordinatorTurnPrompt: string | undefined
+        if (effectiveAgentMode === "coordinator") {
+          coordinatorVisibleUserMessage = effectiveMessage
+          const parsedCoordinatorSelectedSkill =
+            extractCoordinatorSelectedSkill(effectiveMessage) ?? undefined
+          effectiveMessage = adaptCoordinatorSkillUseForWorkerDelegation(effectiveMessage)
+          await coordinatorWorkerManager.restoreWorkersForThread({
+            parentThreadId: threadId,
+            workspacePath,
+            mode: "active",
+            onUpdate: (event) => {
+              sendCoordinatorWorkers(
+                window,
+                channel,
+                coordinatorWorkerManager.readWorkers(threadId),
+                event.notification
+              )
+            },
+            onUpdateKey: channel
+          })
+          const { queuedNotifications: notifications, promptNotifications, notificationSelectedSkills } =
+            await prepareQueuedCoordinatorNotificationsForPrompt(threadId, () => {
+              safeSendToWindow(window, channel, {
+                type: "custom",
+                data: { type: "coordinator_notification_deferred" }
+              })
+            })
+          drainedCoordinatorNotifications = promptNotifications
+          coordinatorNotificationsConsumed = promptNotifications.length === 0
+          coordinatorNotificationSelectedSkills = notificationSelectedSkills
+          for (const notificationId of Object.keys(notificationSelectedSkills)) {
+            trackedCoordinatorNotificationIds.add(notificationId)
+          }
+          coordinatorExplicitSelectedSkill = isCoordinatorNotificationTurn
+            ? undefined
+            : parsedCoordinatorSelectedSkill
+          coordinatorSelectedSkill = isCoordinatorNotificationTurn
+            ? deriveSharedCoordinatorSelectedSkill(coordinatorNotificationSelectedSkills)
+            : parsedCoordinatorSelectedSkill
+          activeCoordinatorSelectedSkills.set(threadId, coordinatorSelectedSkill)
+          activeCoordinatorExplicitSelectedSkills.set(threadId, coordinatorExplicitSelectedSkill)
+          activeCoordinatorNotificationSelectedSkills.set(
+            threadId,
+            coordinatorNotificationSelectedSkills
+          )
+          const workers = coordinatorWorkerManager.readWorkers(threadId)
+          const workersForPromptContext =
+            notifications.length > 0
+              ? workers.filter(
+                  (worker) =>
+                    worker.status === "running" || worker.notification_acknowledged !== false
+                )
+              : workers
+          const runningWorkerContext = renderCoordinatorWorkerContext(workersForPromptContext)
+          coordinatorTurnPrompt = buildCoordinatorTurnContextPrompt(
+            promptNotifications,
+            runningWorkerContext
+          )
+          activeCoordinatorTurnPrompts.set(threadId, coordinatorTurnPrompt)
+          if (
+            workers.length > 0 ||
+            promptNotifications.length > 0 ||
+            notifications.length > promptNotifications.length
+          ) {
+            sendCoordinatorWorkers(window, channel, workers)
+          }
+        }
+
+        const selectedSkillMetadataChanged = !coordinatorSelectedSkillEquals(
+          persistedCoordinatorSelectedSkill,
+          coordinatorSelectedSkill
+        )
+        const persistedCoordinatorExplicitSelectedSkill =
+          parseCoordinatorExplicitSelectedSkillMetadata(metadata)
+        const explicitSelectedSkillMetadataChanged = !coordinatorSelectedSkillEquals(
+          persistedCoordinatorExplicitSelectedSkill,
+          coordinatorExplicitSelectedSkill
+        )
+        const coordinatorTurnPromptMetadataChanged =
+          persistedCoordinatorTurnPrompt !== coordinatorTurnPrompt
+        const notificationSelectedSkillsMetadataChanged =
+          !coordinatorNotificationSelectedSkillsEqual(
+            persistedCoordinatorNotificationSelectedSkills,
+            coordinatorNotificationSelectedSkills
+          )
+        if (selectedSkillMetadataChanged) {
+          if (coordinatorSelectedSkill) {
+            metadata.coordinatorSelectedSkill = coordinatorSelectedSkill
+          } else {
+            delete metadata.coordinatorSelectedSkill
+          }
+        }
+        if (notificationSelectedSkillsMetadataChanged) {
+          setCoordinatorNotificationSelectedSkillsState(
+            threadId,
+            metadata,
+            coordinatorNotificationSelectedSkills
+          )
+        }
+        if (explicitSelectedSkillMetadataChanged) {
+          if (coordinatorExplicitSelectedSkill) {
+            metadata.coordinatorExplicitSelectedSkill = coordinatorExplicitSelectedSkill
+          } else {
+            delete metadata.coordinatorExplicitSelectedSkill
+          }
+        }
+        if (coordinatorTurnPromptMetadataChanged) {
+          if (coordinatorTurnPrompt) {
+            metadata.coordinatorTurnPrompt = coordinatorTurnPrompt
+          } else {
+            delete metadata.coordinatorTurnPrompt
+          }
+        }
+        if (
+          shouldPersistAgentMode ||
+          coordinatorTurnPromptMetadataChanged ||
+          selectedSkillMetadataChanged ||
+          explicitSelectedSkillMetadataChanged ||
+          notificationSelectedSkillsMetadataChanged
+        ) {
+          updateThread(threadId, { metadata: JSON.stringify(metadata) })
+        }
+
+        const requestedModelId = modelId || (metadata.model as string | undefined)
+        const routingDecisionMessage = (
+          effectiveAgentMode === "coordinator"
+            ? [coordinatorTurnPrompt, effectiveMessage]
+            : [effectiveMessage]
+        )
+          .filter((part): part is string => typeof part === "string" && part.length > 0)
+          .join("\n\n")
+        invokeRoutingResult = await resolveModel({
+          taskSource: "chat",
+          message: routingDecisionMessage || effectiveMessage,
+          threadId,
+          requestedModelId,
+          routingMode: getGlobalRoutingMode()
+        }).catch(() => null)
+        let effectiveModelId = invokeRoutingResult?.resolvedModelId ?? requestedModelId
+
+        // Persist routing decision for thread continuity (sticky/force logic next turn)
+        if (invokeRoutingResult) rememberRoutingDecision(threadId, invokeRoutingResult)
+
+        // Attach routing funnel record to trace (setRoutingTrace is internally safe, never throws)
+        if (invokeRoutingResult?.routingTrace) {
+          tracer.setRoutingTrace(invokeRoutingResult.routingTrace)
+        }
+
+        // Emit routing result so the frontend can display which model was selected
+        if (invokeRoutingResult) {
+          safeSendToWindow(window, channel, {
             type: "custom",
             data: {
               type: "routing_result",
-              resolvedModelId: usedModelId,
-              resolvedTier: usedCfg?.tier ?? "premium",
-              routeReason: `failover from ${failoverAttempts[0].modelId}`
+              resolvedModelId: invokeRoutingResult.resolvedModelId,
+              resolvedTier: invokeRoutingResult.resolvedTier,
+              routeReason: invokeRoutingResult.routeReason
             }
           })
-          window.webContents.send(channel, {
-            type: "custom",
-            data: { type: "model_failover", attempts: failoverAttempts, activeModelId: usedModelId }
-          })
-          // P2: persist failover model + sticky in a single atomic write
-          rememberRoutingDecision(
-            threadId,
-            {
-              resolvedModelId: usedModelId!,
-              resolvedTier: usedCfg?.tier ?? "premium",
-              routeReason: `failover from ${failoverAttempts[0].modelId}`,
-              fallbackChain: [],
-              layer: "pinned"
-            },
-            usedModelId!
-          )
-          // Update effectiveModelId for downstream trace/feedback
-          effectiveModelId = usedModelId
         }
-      }
-      notifyFailover()
 
-      // Update tracer with resolved modelId.
-      // Set modelName from config.model (the real API model name, e.g. "MiniMax-M2.7") as an
-      // initial fallback — it will be overwritten later by the actual model name from the API
-      // response metadata once the first AI message arrives (see response_metadata.model_name below).
-      if (effectiveModelId) {
-        tracer.setModelId(effectiveModelId)
-        const cfgIdForName = effectiveModelId.startsWith("custom:")
-          ? effectiveModelId.slice("custom:".length)
-          : effectiveModelId
-        const cfgForName = getCustomModelConfigs().find((c) => c.id === cfgIdForName)
-        // Use config.model (the actual API model name) as fallback, not config.name (display label)
-        if (cfgForName?.model) tracer.setModelName(cfgForName.model)
-      }
-
-      // ── Tool-call extraction (tested in __tests__/tool-call-extraction.test.ts)
-      //
-      // "messages" mode delivers one [msgChunk, metadata?] tuple per LangGraph message.
-      // AI messages carry a complete tool_calls array even in streaming mode —
-      // confirmed by stream-converter.ts and unit tests.
-      //
-      // Deduplication: same AI message ID can appear in multiple chunks
-      // (e.g. once as AIMessageChunk, once as AIMessage in a values snapshot).
-      // We track seen IDs to count each unique tool invocation exactly once.
-      // ─────────────────────────────────────────────────────────────────────────
-
-      const _countedAiMsgIds = new Set<string>()
-      const _countedModelMsgIds = new Set<string>()
-      const _countedToolResultMsgIds = new Set<string>()
-      // Track which subagent tool-call IDs we've already emitted SubagentStop for (dedupe)
-      const _subagentStopFired = new Set<string>()
-      const _llmNodeByMessageId = new Map<string, string>()
-      const _toolNodeByRef = new Map<string, string>()
-      const MODEL_INPUT_WINDOW = 12
-      const MAX_TRACE_CONTENT = 2000
-
-      const trimContent = (s: string): string =>
-        s.length > MAX_TRACE_CONTENT ? `${s.slice(0, MAX_TRACE_CONTENT)}\n…(truncated)` : s
-
-      const normalizeMessageText = (s: string): string => s.replace(/\r\n/g, "\n").trim()
-
-      // Providers may surface usage as top-level `usage_metadata` or under
-      // `response_metadata.token_usage` / `response_metadata.usage`.
-      // Normalize all variants so trace capture and UI stay aligned.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const getUsageMetadata = (kwargs: any): unknown =>
-        kwargs?.usage_metadata ??
-        kwargs?.response_metadata?.token_usage ??
-        kwargs?.response_metadata?.usage
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const extractText = (raw: any): string => {
-        if (typeof raw === "string") return trimContent(raw)
-        if (!Array.isArray(raw)) return ""
-        const text = raw
-          .map((b) => {
-            if (typeof b === "string") return b
-            if (!b || typeof b !== "object") return ""
-            if (typeof b.text === "string") return b.text
-            if (typeof b.content === "string") return b.content
-            return ""
-          })
-          .filter(Boolean)
-          .join("\n")
-        return trimContent(text)
-      }
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const toRole = (
-        className: string,
-        kwargs: any
-      ): "system" | "user" | "assistant" | "tool" | "unknown" => {
-        if (className.includes("Human")) return "user"
-        if (className.includes("AI")) return "assistant"
-        if (className.includes("System")) return "system"
-        if (className.includes("Tool")) return "tool"
-        if (kwargs?.type === "human") return "user"
-        if (kwargs?.type === "ai") return "assistant"
-        if (kwargs?.type === "system") return "system"
-        if (kwargs?.type === "tool") return "tool"
-        return "unknown"
-      }
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const normalizeTokenUsage = (
-        usage: any
-      ):
-        | {
-            inputTokens?: number
-            outputTokens?: number
-            totalTokens?: number
-            cacheReadTokens?: number
-            cacheCreationTokens?: number
-          }
-        | undefined => {
-        if (!usage || typeof usage !== "object") return undefined
-        const toNum = (v: unknown): number | undefined =>
-          typeof v === "number" && Number.isFinite(v) ? v : undefined
-        const inputTokens = toNum(usage.input_tokens ?? usage.inputTokens)
-        const outputTokens = toNum(usage.output_tokens ?? usage.outputTokens)
-        const totalTokens = toNum(usage.total_tokens ?? usage.totalTokens)
-        const cacheReadTokens = toNum(
-          usage.cache_read_input_tokens ?? usage.cacheReadInputTokens ?? usage.cacheReadTokens
-        )
-        const cacheCreationTokens = toNum(
-          usage.cache_creation_input_tokens ??
-            usage.cacheCreationInputTokens ??
-            usage.cacheCreationTokens
-        )
-        if (
-          inputTokens === undefined &&
-          outputTokens === undefined &&
-          totalTokens === undefined &&
-          cacheReadTokens === undefined &&
-          cacheCreationTokens === undefined
-        )
-          return undefined
-        return { inputTokens, outputTokens, totalTokens, cacheReadTokens, cacheCreationTokens }
-      }
-
-      const extractTextBlocks = (raw: unknown): string => {
-        if (typeof raw === "string") return raw
-        if (Array.isArray(raw)) {
-          return (raw as Array<{ type?: string; text?: string }>)
-            .filter((b) => b?.type === "text")
-            .map((b) => b.text ?? "")
-            .join("")
-        }
-        return ""
-      }
-
-      const forwardStreamChunk = (mode: string, payload: unknown): void => {
-        window.webContents.send(channel, {
-          type: "stream",
-          mode,
-          data: payload
-        })
-      }
-
-      const processMessagesSideEffects = (payload: unknown): void => {
-        try {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const [msgChunk] = payload as [any]
-          if (!msgChunk) return
-
-          const kwargs = (msgChunk.kwargs || {}) as Record<string, unknown>
-          const classId: string[] = Array.isArray(msgChunk.id) ? msgChunk.id : []
-          const className = classId[classId.length - 1] || ""
-          const isAI = className.includes("AI")
-          const isTool = className.includes("Tool")
-
-          // SubagentStop — a "task" tool message signals subagent completion
-          if (isTool && kwargs.name === "task" && kwargs.tool_call_id) {
-            const toolCallId = kwargs.tool_call_id as string
-            if (!_subagentStopFired.has(toolCallId)) {
-              _subagentStopFired.add(toolCallId)
-              const additionalKwargs = kwargs.additional_kwargs as
-                | Record<string, unknown>
-                | undefined
-              const isErr =
-                kwargs.status === "error" ||
-                kwargs.is_error === true ||
-                additionalKwargs?.is_error === true
-              runHooks(
-                getEnabledHooks(sessionWorkspacePath),
-                "SubagentStop",
-                {
-                  workspacePath: sessionWorkspacePath,
-                  sessionId: threadId,
-                  subagent: {
-                    id: toolCallId,
-                    status: isErr ? "failed" : "completed"
+        const isCoordinatorAugmentedUserTurn =
+          !isCoordinatorNotificationTurn &&
+          coordinatorVisibleUserMessage !== undefined &&
+          coordinatorVisibleUserMessage !== effectiveMessage
+        const humanMessage = new HumanMessage(
+          isCoordinatorNotificationTurn
+            ? {
+                content: effectiveMessage,
+                additional_kwargs: {
+                  [COORDINATOR_INTERNAL_NOTIFICATION_MESSAGE_KEY]: true
+                }
+              }
+            : isCoordinatorAugmentedUserTurn
+              ? {
+                  content: effectiveMessage,
+                  additional_kwargs: {
+                    [COORDINATOR_AUGMENTED_USER_MESSAGE_KEY]: true,
+                    [COORDINATOR_VISIBLE_USER_MESSAGE_KEY]: coordinatorVisibleUserMessage
                   }
-                },
-                onHookResult
-              ).catch((e) => console.warn("[Hooks] SubagentStop hook error:", e))
+                }
+            : effectiveMessage
+        )
+        const streamConfig = {
+          configurable: { thread_id: threadId },
+          signal: abortController.signal,
+          streamMode: ["messages", "values"] as ("messages" | "values")[],
+          recursionLimit: 1000
+        }
+
+        // ── Failover loop: try models in order, resume from checkpoint on retryable errors ──
+        const primaryTier = invokeRoutingResult?.resolvedTier ?? "premium"
+        const orderedChain = buildOrderedChain(
+          effectiveModelId,
+          invokeRoutingResult?.fallbackChain,
+          primaryTier,
+          invokeRoutingResult?.layer !== "pinned"
+        )
+        const failoverAttempts: FailoverAttempt[] = []
+        usedModelId = effectiveModelId
+        const isFirstAttempt = true
+        let agent: Awaited<ReturnType<typeof createAgentRuntime>> | null = null
+        let stream: AsyncIterable<unknown> | null = null
+
+        for (const candidateId of orderedChain) {
+          if (abortController.signal.aborted) break
+          try {
+            agent = await createAgentRuntime({
+              threadId,
+              workspacePath,
+              modelId: candidateId,
+              coordinatorTurnPrompt,
+              coordinatorSelectedSkill,
+              coordinatorExplicitSelectedSkill,
+              coordinatorNotificationSelectedSkills,
+              abortSignal: abortController.signal,
+              noSkillEvolutionTool: true,
+              agentMode: effectiveAgentMode,
+              retryHooks: buildModelRetryHooks(window, channel),
+              maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
+              onHookResult,
+              onCoordinatorWorkerEvent,
+              onCoordinatorNotificationAction
+            })
+            // First attempt sends the message; subsequent attempts resume from checkpoint
+            const input = isFirstAttempt ? { messages: [humanMessage] } : null
+            stream = await agent.stream(input, streamConfig)
+            usedModelId = candidateId
+            break
+          } catch (err) {
+            if (!isRetryableApiError(err)) throw err
+            failoverAttempts.push({
+              modelId: candidateId,
+              error: String(err),
+              timestamp: Date.now()
+            })
+            console.warn(`[Agent][Failover] ${candidateId} failed: ${err}, trying next...`)
+            // Keep isFirstAttempt=true: init-time errors (createAgentRuntime / agent.stream)
+            // happen before any graph tick, so HumanMessage is NOT yet checkpointed.
+            // Next candidate must still send { messages: [humanMessage] }.
+            if (!abortController.signal.aborted) {
+              await new Promise((r) => setTimeout(r, 500))
             }
           }
+        }
 
-          if (!isAI) return
+        // P3: user cancellation during failover should not be reported as hard error
+        if (abortController.signal.aborted) {
+          // Fall through to outer abort handling
+          throw Object.assign(new Error("aborted"), { name: "AbortError" })
+        }
 
-          const rawContent = kwargs.content ?? msgChunk.content
-          const visibleText = extractTextBlocks(rawContent)
-          if (visibleText) assistantText += visibleText
+        if (!stream || !agent) {
+          const allErrors = failoverAttempts.map((a) => `${a.modelId}: ${a.error}`).join("; ")
+          throw new Error(`All models failed: ${allErrors}`)
+        }
 
-          // Tool-call extraction — deduped by message ID.
-          const toolCalls = kwargs.tool_calls as
-            | Array<{
-                id?: string
-                name?: string
-                args?: Record<string, unknown>
-              }>
-            | undefined
-          const msgId = (kwargs.id as string) || ""
-          if (!toolCalls || toolCalls.length === 0) return
-          if (msgId && _countedAiMsgIds.has(msgId)) return
-          if (msgId) _countedAiMsgIds.add(msgId)
+        // Notify frontend if failover happened — update model display + context window
+        const notifyFailover = (): void => {
+          if (failoverAttempts.length > 0 && usedModelId !== effectiveModelId) {
+            const usedCfgId = usedModelId?.startsWith("custom:")
+              ? usedModelId.slice("custom:".length)
+              : usedModelId
+            const usedCfg = getCustomModelConfigs().find((c) => c.id === usedCfgId)
+            safeSendToWindow(window, channel, {
+              type: "custom",
+              data: {
+                type: "routing_result",
+                resolvedModelId: usedModelId,
+                resolvedTier: usedCfg?.tier ?? "premium",
+                routeReason: `failover from ${failoverAttempts[0].modelId}`
+              }
+            })
+            safeSendToWindow(window, channel, {
+              type: "custom",
+              data: {
+                type: "model_failover",
+                attempts: failoverAttempts,
+                activeModelId: usedModelId
+              }
+            })
+            // P2: persist failover model + sticky in a single atomic write
+            rememberRoutingDecision(
+              threadId,
+              {
+                resolvedModelId: usedModelId!,
+                resolvedTier: usedCfg?.tier ?? "premium",
+                routeReason: `failover from ${failoverAttempts[0].modelId}`,
+                fallbackChain: [],
+                layer: "pinned"
+              },
+              usedModelId!
+            )
+            // Update effectiveModelId for downstream trace/feedback
+            effectiveModelId = usedModelId
+          }
+        }
+        notifyFailover()
 
-          tracer.beginStep()
-          for (let tcIndex = 0; tcIndex < toolCalls.length; tcIndex++) {
-            const tc = toolCalls[tcIndex]
-            const tcName = tc.name ?? "unknown"
-            tracer.recordToolCall({ name: tcName, args: tc.args ?? {} })
-            const counted = toolCallCounter.register(tc, msgId, tcIndex)
+        // Update tracer with resolved modelId.
+        // Set modelName from config.model (the real API model name, e.g. "MiniMax-M2.7") as an
+        // initial fallback — it will be overwritten later by the actual model name from the API
+        // response metadata once the first AI message arrives (see response_metadata.model_name below).
+        if (effectiveModelId) {
+          tracer.setModelId(effectiveModelId)
+          const cfgIdForName = effectiveModelId.startsWith("custom:")
+            ? effectiveModelId.slice("custom:".length)
+            : effectiveModelId
+          const cfgForName = getCustomModelConfigs().find((c) => c.id === cfgIdForName)
+          // Use config.model (the actual API model name) as fallback, not config.name (display label)
+          if (cfgForName?.model) tracer.setModelName(cfgForName.model)
+        }
 
-            if (tcName === "read_file") {
-              const readPathRaw =
-                (typeof tc.args?.path === "string" && tc.args.path) ||
-                (typeof tc.args?.file_path === "string" && tc.args.file_path) ||
-                ""
-              if (readPathRaw) {
-                skillUsageDetector.onReadFilePath(readPathRaw)
+        // ── Tool-call extraction (tested in __tests__/tool-call-extraction.test.ts)
+        //
+        // "messages" mode delivers one [msgChunk, metadata?] tuple per LangGraph message.
+        // AI messages carry a complete tool_calls array even in streaming mode —
+        // confirmed by stream-converter.ts and unit tests.
+        //
+        // Deduplication: same AI message ID can appear in multiple chunks
+        // (e.g. once as AIMessageChunk, once as AIMessage in a values snapshot).
+        // We track seen IDs to count each unique tool invocation exactly once.
+        // ─────────────────────────────────────────────────────────────────────────
+
+        const _countedAiMsgIds = new Set<string>()
+        const _countedModelMsgIds = new Set<string>()
+        const _countedToolResultMsgIds = new Set<string>()
+        // Track which subagent tool-call IDs we've already emitted SubagentStop for (dedupe)
+        const _subagentStopFired = new Set<string>()
+        const _llmNodeByMessageId = new Map<string, string>()
+        const _toolNodeByRef = new Map<string, string>()
+        const MODEL_INPUT_WINDOW = 12
+        const MAX_TRACE_CONTENT = 2000
+
+        const trimContent = (s: string): string =>
+          s.length > MAX_TRACE_CONTENT ? `${s.slice(0, MAX_TRACE_CONTENT)}\n…(truncated)` : s
+
+        const normalizeMessageText = (s: string): string => s.replace(/\r\n/g, "\n").trim()
+
+        // Providers may surface usage as top-level `usage_metadata` or under
+        // `response_metadata.token_usage` / `response_metadata.usage`.
+        // Normalize all variants so trace capture and UI stay aligned.
+        const asRecord = (value: unknown): Record<string, unknown> | undefined =>
+          value && typeof value === "object" && !Array.isArray(value)
+            ? (value as Record<string, unknown>)
+            : undefined
+        const getUsageMetadata = (
+          kwargs: Record<string, unknown>
+        ): Record<string, unknown> | undefined => {
+          const responseMetadata = asRecord(kwargs.response_metadata)
+          return (
+            asRecord(kwargs.usage_metadata) ??
+            asRecord(responseMetadata?.token_usage) ??
+            asRecord(responseMetadata?.usage)
+          )
+        }
+        if (effectiveAgentMode !== "coordinator") {
+          activeCoordinatorTurnPrompts.delete(threadId)
+          activeCoordinatorSelectedSkills.delete(threadId)
+          activeCoordinatorExplicitSelectedSkills.delete(threadId)
+          activeCoordinatorNotificationSelectedSkills.delete(threadId)
+        }
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const extractText = (raw: any): string => {
+          if (typeof raw === "string") return trimContent(raw)
+          if (!Array.isArray(raw)) return ""
+          const text = raw
+            .map((b) => {
+              if (typeof b === "string") return b
+              if (!b || typeof b !== "object") return ""
+              if (typeof b.text === "string") return b.text
+              if (typeof b.content === "string") return b.content
+              return ""
+            })
+            .filter(Boolean)
+            .join("\n")
+          return trimContent(text)
+        }
+
+        const toRole = (
+          className: string,
+          kwargs: Record<string, unknown>
+        ): "system" | "user" | "assistant" | "tool" | "unknown" => {
+          if (className.includes("Human")) return "user"
+          if (className.includes("AI")) return "assistant"
+          if (className.includes("System")) return "system"
+          if (className.includes("Tool")) return "tool"
+          if (kwargs?.type === "human") return "user"
+          if (kwargs?.type === "ai") return "assistant"
+          if (kwargs?.type === "system") return "system"
+          if (kwargs?.type === "tool") return "tool"
+          return "unknown"
+        }
+
+        const normalizeTokenUsage = (
+          usage: Record<string, unknown> | null | undefined
+        ):
+          | {
+              inputTokens?: number
+              outputTokens?: number
+              totalTokens?: number
+              cacheReadTokens?: number
+              cacheCreationTokens?: number
+            }
+          | undefined => {
+          if (!usage || typeof usage !== "object") return undefined
+          const toNum = (v: unknown): number | undefined =>
+            typeof v === "number" && Number.isFinite(v) ? v : undefined
+          const inputTokens = toNum(usage.input_tokens ?? usage.inputTokens)
+          const outputTokens = toNum(usage.output_tokens ?? usage.outputTokens)
+          const totalTokens = toNum(usage.total_tokens ?? usage.totalTokens)
+          const cacheReadTokens = toNum(
+            usage.cache_read_input_tokens ?? usage.cacheReadInputTokens ?? usage.cacheReadTokens
+          )
+          const cacheCreationTokens = toNum(
+            usage.cache_creation_input_tokens ??
+              usage.cacheCreationInputTokens ??
+              usage.cacheCreationTokens
+          )
+          if (
+            inputTokens === undefined &&
+            outputTokens === undefined &&
+            totalTokens === undefined &&
+            cacheReadTokens === undefined &&
+            cacheCreationTokens === undefined
+          )
+            return undefined
+          return { inputTokens, outputTokens, totalTokens, cacheReadTokens, cacheCreationTokens }
+        }
+
+        const extractTextBlocks = (raw: unknown): string => {
+          if (typeof raw === "string") return raw
+          if (Array.isArray(raw)) {
+            return (raw as Array<{ type?: string; text?: string }>)
+              .filter((b) => b?.type === "text")
+              .map((b) => b.text ?? "")
+              .join("")
+          }
+          return ""
+        }
+
+        const forwardStreamChunk = (mode: string, payload: unknown): void => {
+          safeSendToWindow(window, channel, {
+            type: "stream",
+            mode,
+            data: sanitizeStreamDataForRenderer(mode, payload)
+          })
+        }
+
+        const processMessagesSideEffects = (payload: unknown): void => {
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const [msgChunk] = payload as [any]
+            if (!msgChunk) return
+
+            const kwargs = (msgChunk.kwargs || {}) as Record<string, unknown>
+            const classId: string[] = Array.isArray(msgChunk.id) ? msgChunk.id : []
+            const className = classId[classId.length - 1] || ""
+            const isAI = className.includes("AI")
+            const isTool = className.includes("Tool")
+
+            // SubagentStop — a "task" tool message signals subagent completion
+            if (isTool && kwargs.name === "task" && kwargs.tool_call_id) {
+              const toolCallId = kwargs.tool_call_id as string
+              if (!_subagentStopFired.has(toolCallId)) {
+                _subagentStopFired.add(toolCallId)
+                const additionalKwargs = kwargs.additional_kwargs as
+                  | Record<string, unknown>
+                  | undefined
+                const isErr =
+                  kwargs.status === "error" ||
+                  kwargs.is_error === true ||
+                  additionalKwargs?.is_error === true
+                runHooks(
+                  getEnabledHooks(sessionWorkspacePath),
+                  "SubagentStop",
+                  {
+                    workspacePath: sessionWorkspacePath,
+                    sessionId: threadId,
+                    subagent: {
+                      id: toolCallId,
+                      status: isErr ? "failed" : "completed"
+                    }
+                  },
+                  onHookResult
+                ).catch((e) => console.warn("[Hooks] SubagentStop hook error:", e))
               }
             }
 
-            if (counted) {
-              const turnCount = toolCallCounter.getCount()
-              console.log(`[Agent] Turn tool call #${turnCount} (${tcName}) in thread ${threadId}`)
-            }
-          }
-          tracer.endStep(visibleText)
-        } catch (e) {
-          console.error("[Agent] Tool-call extraction error:", e)
-        }
-      }
+            if (!isAI) return
 
-      const processValuesSideEffects = (payload: unknown): void => {
-        try {
-          const state = payload as {
-            skillsMetadata?: Array<{ name?: string; path?: string }>
-            messages?: Array<{
-              id?: string[]
-              kwargs?: {
-                id?: string
-                type?: string
-                content?: unknown
-                name?: string
-                tool_call_id?: string
-                usage_metadata?: unknown
-                response_metadata?: {
-                  token_usage?: unknown
-                  usage?: unknown
-                  model_name?: string
-                  model?: string
-                }
-                status?: string
-                is_error?: boolean
-                additional_kwargs?: Record<string, unknown>
-                tool_calls?: Array<{
+            const rawContent = kwargs.content ?? msgChunk.content
+            const visibleText = extractTextBlocks(rawContent)
+            if (visibleText) assistantText += visibleText
+
+            // Tool-call extraction — deduped by message ID.
+            const toolCalls = kwargs.tool_calls as
+              | Array<{
                   id?: string
                   name?: string
                   args?: Record<string, unknown>
                 }>
-              }
-            }>
-          }
-          const skillsMetadata = Array.isArray(state.skillsMetadata) ? state.skillsMetadata : []
-          if (skillsMetadata.length > 0) {
-            skillUsageDetector.onSkillsMetadata(skillsMetadata)
-            tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
-          }
+              | undefined
+            const msgId = (kwargs.id as string) || ""
+            if (!toolCalls || toolCalls.length === 0) return
+            if (msgId && _countedAiMsgIds.has(msgId)) return
+            if (msgId) _countedAiMsgIds.add(msgId)
 
-          if (!Array.isArray(state.messages)) return
+            tracer.beginStep()
+            for (let tcIndex = 0; tcIndex < toolCalls.length; tcIndex++) {
+              const tc = toolCalls[tcIndex]
+              const tcName = tc.name ?? "unknown"
+              tracer.recordToolCall({ name: tcName, args: tc.args ?? {} })
+              const counted = toolCallCounter.register(tc, msgId, tcIndex)
 
-          let currentTurnStartIndex = -1
-          for (let i = state.messages.length - 1; i >= 0; i--) {
-            const msg = state.messages[i]
-            const kwargs = msg?.kwargs || {}
-            const classId = Array.isArray(msg?.id) ? msg.id : []
-            const className = classId[classId.length - 1] || ""
-            const role = toRole(className, kwargs)
-            if (role !== "user") continue
-            if (
-              normalizeMessageText(extractText(kwargs.content)) === normalizeMessageText(message)
-            ) {
-              currentTurnStartIndex = i
-              break
-            }
-          }
-
-          const valuesStartIndex = currentTurnStartIndex >= 0 ? currentTurnStartIndex + 1 : 0
-
-          for (let i = valuesStartIndex; i < state.messages.length; i++) {
-            const msg = state.messages[i]
-            const tcs = msg?.kwargs?.tool_calls
-
-            const kwargs = msg?.kwargs || {}
-            const classId = Array.isArray(msg?.id) ? msg.id : []
-            const className = classId[classId.length - 1] || ""
-            const isAI = className.includes("AI") || kwargs.type === "ai"
-            const isToolMessage = className.includes("Tool") || kwargs.type === "tool"
-            const aiMsgId = typeof kwargs.id === "string" ? kwargs.id : ""
-            if (isAI && aiMsgId && !_countedModelMsgIds.has(aiMsgId)) {
-              _countedModelMsgIds.add(aiMsgId)
-
-              // Extract the real model name from API response metadata (e.g. "MiniMax-M2.7")
-              // This takes precedence over the user-configured model name (config.model)
-              const apiModelName =
-                kwargs.response_metadata?.model_name ?? kwargs.response_metadata?.model
-              if (typeof apiModelName === "string" && apiModelName) {
-                tracer.setModelName(apiModelName)
-              }
-
-              const inputSlice = state.messages
-                .slice(Math.max(0, i - MODEL_INPUT_WINDOW), i)
-                .map((m) => {
-                  const k = m?.kwargs || {}
-                  const cid = Array.isArray(m?.id) ? m.id : []
-                  const cname = cid[cid.length - 1] || ""
-                  return {
-                    role: toRole(cname, k),
-                    content: extractText(k.content),
-                    ...(typeof k.name === "string" ? { name: k.name } : {}),
-                    ...(typeof k.tool_call_id === "string" ? { toolCallId: k.tool_call_id } : {})
-                  }
-                })
-                .filter((m) => m.content || m.role === "tool")
-
-              const outputToolCalls = Array.isArray(tcs)
-                ? tcs.map((tc) => ({
-                    name: tc?.name ?? "unknown",
-                    args: tc?.args ?? {}
-                  }))
-                : []
-
-              const llmNodeId = tracer.beginLlmNode({
-                messageId: aiMsgId,
-                startedAt: nowIsoLocal(),
-                input: inputSlice,
-                metadata: {
-                  toolCallCount: outputToolCalls.length
-                }
-              })
-              _llmNodeByMessageId.set(aiMsgId, llmNodeId)
-
-              const usageForTrace = normalizeTokenUsage(getUsageMetadata(kwargs))
-
-              // Track high-water mark of input tokens for context window capacity guard
-              if (usageForTrace?.inputTokens && usageForTrace.inputTokens > highWaterInputTokens) {
-                highWaterInputTokens = usageForTrace.inputTokens
-              }
-
-              tracer.recordModelCall({
-                messageId: aiMsgId,
-                startedAt: nowIsoLocal(),
-                inputMessages: inputSlice,
-                outputMessage: {
-                  role: "assistant",
-                  content: extractText(kwargs.content)
-                },
-                toolCalls: outputToolCalls,
-                tokenUsage: usageForTrace
-              })
-
-              tracer.endLlmNode({
-                nodeId: llmNodeId,
-                output: extractText(kwargs.content),
-                status: "success",
-                metadata: {
-                  tokenUsage: usageForTrace
-                }
-              })
-            }
-
-            if (Array.isArray(tcs)) {
-              for (let tcIndex = 0; tcIndex < tcs.length; tcIndex++) {
-                const tc = tcs[tcIndex]
-                const tcId = typeof tc?.id === "string" ? tc.id : ""
-                const toolRef =
-                  tcId || `${aiMsgId || "ai_unknown"}:${tcIndex}:${JSON.stringify(tc?.args ?? {})}`
-                const counted = toolCallCounter.register(tc, aiMsgId, tcIndex)
-                if (!_toolNodeByRef.has(toolRef)) {
-                  const parentId = aiMsgId ? _llmNodeByMessageId.get(aiMsgId) : undefined
-                  const toolNodeId = tracer.addToolNode({
-                    name: tc?.name ?? "unknown",
-                    input: tc?.args ?? {},
-                    parentId,
-                    llmMessageId: aiMsgId || undefined,
-                    toolCallId: tcId || undefined,
-                    metadata: { index: tcIndex }
-                  })
-                  _toolNodeByRef.set(toolRef, toolNodeId)
-                }
-
-                if (counted) {
-                  const turnCount = toolCallCounter.getCount()
-                  console.log(
-                    `[Agent] Turn tool call #${turnCount} (${tc?.name ?? "unknown"}) in thread ${threadId} [values]`
-                  )
-                }
-
-                if (tc?.name !== "read_file") continue
+              if (tcName === "read_file") {
                 const readPathRaw =
                   (typeof tc.args?.path === "string" && tc.args.path) ||
                   (typeof tc.args?.file_path === "string" && tc.args.file_path) ||
@@ -1711,629 +2783,1171 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   skillUsageDetector.onReadFilePath(readPathRaw)
                 }
               }
-            }
 
-            if (isToolMessage) {
-              const toolMsgId =
-                typeof kwargs.id === "string"
-                  ? kwargs.id
-                  : `${kwargs.tool_call_id ?? "tool"}:${i}:${extractText(kwargs.content)}`
-              if (_countedToolResultMsgIds.has(toolMsgId)) continue
-              const toolCallId = typeof kwargs.tool_call_id === "string" ? kwargs.tool_call_id : ""
-              _countedToolResultMsgIds.add(toolMsgId)
-              const parentId = toolCallId ? _toolNodeByRef.get(toolCallId) : undefined
-              const toolOutput = extractText(kwargs.content)
-              // Detect tool error: explicit status field, is_error flag, or error-prefix in output
-              const additionalKwargs = kwargs.additional_kwargs as
-                | Record<string, unknown>
-                | undefined
-              const isToolError =
-                kwargs.status === "error" ||
-                kwargs.is_error === true ||
-                additionalKwargs?.is_error === true ||
-                /^(error:|mcp tool error:|tool error:|failed:)/i.test(toolOutput.trim())
-              if (isToolError) toolErrorCount += 1
-              tracer.addToolResultNode({
-                parentId,
-                toolCallId: toolCallId || undefined,
-                output: toolOutput,
-                status: isToolError ? "error" : "success",
-                metadata: {
-                  messageId: toolMsgId
+              if (counted) {
+                const turnCount = toolCallCounter.getCount()
+                console.log(
+                  `[Agent] Turn tool call #${turnCount} (${tcName}) in thread ${threadId}`
+                )
+              }
+            }
+            tracer.endStep(visibleText)
+          } catch (e) {
+            console.error("[Agent] Tool-call extraction error:", e)
+          }
+        }
+
+        const processValuesSideEffects = (payload: unknown): void => {
+          try {
+            const state = payload as {
+              skillsMetadata?: Array<{ name?: string; path?: string }>
+              messages?: Array<{
+                id?: string[]
+                kwargs?: {
+                  id?: string
+                  type?: string
+                  content?: unknown
+                  name?: string
+                  tool_call_id?: string
+                  usage_metadata?: unknown
+                  response_metadata?: {
+                    token_usage?: unknown
+                    usage?: unknown
+                    model_name?: string
+                    model?: string
+                  }
+                  status?: string
+                  is_error?: boolean
+                  additional_kwargs?: Record<string, unknown>
+                  tool_calls?: Array<{
+                    id?: string
+                    name?: string
+                    args?: Record<string, unknown>
+                  }>
                 }
-              })
+              }>
             }
-          }
+            const skillsMetadata = Array.isArray(state.skillsMetadata) ? state.skillsMetadata : []
+            if (skillsMetadata.length > 0) {
+              skillUsageDetector.onSkillsMetadata(skillsMetadata)
+              tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+            }
 
-          const finalMsgs = state.messages.filter((m) => {
-            const cn = Array.isArray(m.id) ? m.id[m.id.length - 1] || "" : ""
-            const kw = m.kwargs || {}
-            return (
-              cn.includes("AI") &&
-              (!kw.tool_calls || !Array.isArray(kw.tool_calls) || kw.tool_calls.length === 0)
+            if (!Array.isArray(state.messages)) return
+
+            let currentTurnStartIndex = -1
+            for (let i = state.messages.length - 1; i >= 0; i--) {
+              const msg = state.messages[i]
+              const kwargs = msg?.kwargs || {}
+              const classId = Array.isArray(msg?.id) ? msg.id : []
+              const className = classId[classId.length - 1] || ""
+              const role = toRole(className, kwargs)
+              if (role !== "user") continue
+              if (
+                normalizeMessageText(extractText(kwargs.content)) ===
+                normalizeMessageText(effectiveMessage)
+              ) {
+                currentTurnStartIndex = i
+                break
+              }
+            }
+
+            const valuesStartIndex = currentTurnStartIndex >= 0 ? currentTurnStartIndex + 1 : 0
+
+            for (let i = valuesStartIndex; i < state.messages.length; i++) {
+              const msg = state.messages[i]
+              const tcs = msg?.kwargs?.tool_calls
+
+              const kwargs = msg?.kwargs || {}
+              const classId = Array.isArray(msg?.id) ? msg.id : []
+              const className = classId[classId.length - 1] || ""
+              const isAI = className.includes("AI") || kwargs.type === "ai"
+              const isToolMessage = className.includes("Tool") || kwargs.type === "tool"
+              const aiMsgId = typeof kwargs.id === "string" ? kwargs.id : ""
+              if (isAI && aiMsgId && !_countedModelMsgIds.has(aiMsgId)) {
+                _countedModelMsgIds.add(aiMsgId)
+
+                // Extract the real model name from API response metadata (e.g. "MiniMax-M2.7")
+                // This takes precedence over the user-configured model name (config.model)
+                const apiModelName =
+                  kwargs.response_metadata?.model_name ?? kwargs.response_metadata?.model
+                if (typeof apiModelName === "string" && apiModelName) {
+                  tracer.setModelName(apiModelName)
+                }
+
+                const inputSlice = state.messages
+                  .slice(Math.max(0, i - MODEL_INPUT_WINDOW), i)
+                  .map((m) => {
+                    const k = m?.kwargs || {}
+                    const cid = Array.isArray(m?.id) ? m.id : []
+                    const cname = cid[cid.length - 1] || ""
+                    return {
+                      role: toRole(cname, k),
+                      content: extractText(k.content),
+                      ...(typeof k.name === "string" ? { name: k.name } : {}),
+                      ...(typeof k.tool_call_id === "string" ? { toolCallId: k.tool_call_id } : {})
+                    }
+                  })
+                  .filter((m) => m.content || m.role === "tool")
+
+                const outputToolCalls = Array.isArray(tcs)
+                  ? tcs.map((tc) => ({
+                      name: tc?.name ?? "unknown",
+                      args: tc?.args ?? {}
+                    }))
+                  : []
+
+                const llmNodeId = tracer.beginLlmNode({
+                  messageId: aiMsgId,
+                  startedAt: nowIsoLocal(),
+                  input: inputSlice,
+                  metadata: {
+                    toolCallCount: outputToolCalls.length
+                  }
+                })
+                _llmNodeByMessageId.set(aiMsgId, llmNodeId)
+
+                const usageForTrace = normalizeTokenUsage(getUsageMetadata(kwargs))
+
+                // Track high-water mark of input tokens for context window capacity guard
+                if (
+                  usageForTrace?.inputTokens &&
+                  usageForTrace.inputTokens > highWaterInputTokens
+                ) {
+                  highWaterInputTokens = usageForTrace.inputTokens
+                }
+
+                tracer.recordModelCall({
+                  messageId: aiMsgId,
+                  startedAt: nowIsoLocal(),
+                  inputMessages: inputSlice,
+                  outputMessage: {
+                    role: "assistant",
+                    content: extractText(kwargs.content)
+                  },
+                  toolCalls: outputToolCalls,
+                  tokenUsage: usageForTrace
+                })
+
+                tracer.endLlmNode({
+                  nodeId: llmNodeId,
+                  output: extractText(kwargs.content),
+                  status: "success",
+                  metadata: {
+                    tokenUsage: usageForTrace
+                  }
+                })
+              }
+
+              if (Array.isArray(tcs)) {
+                for (let tcIndex = 0; tcIndex < tcs.length; tcIndex++) {
+                  const tc = tcs[tcIndex]
+                  const tcId = typeof tc?.id === "string" ? tc.id : ""
+                  const toolRef =
+                    tcId ||
+                    `${aiMsgId || "ai_unknown"}:${tcIndex}:${JSON.stringify(tc?.args ?? {})}`
+                  const counted = toolCallCounter.register(tc, aiMsgId, tcIndex)
+                  if (!_toolNodeByRef.has(toolRef)) {
+                    const parentId = aiMsgId ? _llmNodeByMessageId.get(aiMsgId) : undefined
+                    const toolNodeId = tracer.addToolNode({
+                      name: tc?.name ?? "unknown",
+                      input: tc?.args ?? {},
+                      parentId,
+                      llmMessageId: aiMsgId || undefined,
+                      toolCallId: tcId || undefined,
+                      metadata: { index: tcIndex }
+                    })
+                    _toolNodeByRef.set(toolRef, toolNodeId)
+                  }
+
+                  if (counted) {
+                    const turnCount = toolCallCounter.getCount()
+                    console.log(
+                      `[Agent] Turn tool call #${turnCount} (${tc?.name ?? "unknown"}) in thread ${threadId} [values]`
+                    )
+                  }
+
+                  if (tc?.name !== "read_file") continue
+                  const readPathRaw =
+                    (typeof tc.args?.path === "string" && tc.args.path) ||
+                    (typeof tc.args?.file_path === "string" && tc.args.file_path) ||
+                    ""
+                  if (readPathRaw) {
+                    skillUsageDetector.onReadFilePath(readPathRaw)
+                  }
+                }
+              }
+
+              if (isToolMessage) {
+                const toolMsgId =
+                  typeof kwargs.id === "string"
+                    ? kwargs.id
+                    : `${kwargs.tool_call_id ?? "tool"}:${i}:${extractText(kwargs.content)}`
+                if (_countedToolResultMsgIds.has(toolMsgId)) continue
+                const toolCallId =
+                  typeof kwargs.tool_call_id === "string" ? kwargs.tool_call_id : ""
+                _countedToolResultMsgIds.add(toolMsgId)
+                const parentId = toolCallId ? _toolNodeByRef.get(toolCallId) : undefined
+                const toolOutput = extractText(kwargs.content)
+                // Detect tool error: explicit status field, is_error flag, or error-prefix in output
+                const additionalKwargs = kwargs.additional_kwargs as
+                  | Record<string, unknown>
+                  | undefined
+                const isToolError =
+                  kwargs.status === "error" ||
+                  kwargs.is_error === true ||
+                  additionalKwargs?.is_error === true ||
+                  /^(error:|mcp tool error:|tool error:|failed:)/i.test(toolOutput.trim())
+                if (isToolError) toolErrorCount += 1
+                tracer.addToolResultNode({
+                  parentId,
+                  toolCallId: toolCallId || undefined,
+                  output: toolOutput,
+                  status: isToolError ? "error" : "success",
+                  metadata: {
+                    messageId: toolMsgId
+                  }
+                })
+              }
+            }
+
+            const finalMsgs = state.messages.filter((m) => {
+              const cn = Array.isArray(m.id) ? m.id[m.id.length - 1] || "" : ""
+              const kw = m.kwargs || {}
+              return (
+                cn.includes("AI") &&
+                (!kw.tool_calls || !Array.isArray(kw.tool_calls) || kw.tool_calls.length === 0)
+              )
+            })
+            const last = finalMsgs[finalMsgs.length - 1]
+            if (last) {
+              const kw = last.kwargs || {}
+              const text = extractTextBlocks(kw.content).trim()
+              if (text) lastFinalText = text
+            }
+          } catch (e) {
+            console.error("[Agent] Values side-effect processing error:", e)
+          }
+        }
+
+        const processChunkSideEffects = (mode: string, payload: unknown): void => {
+          if (mode === "messages") {
+            processMessagesSideEffects(payload)
+            return
+          }
+          if (mode === "values") {
+            processValuesSideEffects(payload)
+          }
+        }
+
+        let lastFinalText = "" // 最终回复（不含中间工具推理），用于 ChatX HTTP 回复
+
+        // P1: Mid-stream failover — if the stream fails with a retryable error,
+        // try remaining models in the chain using resume semantics.
+        const remainingCandidates = orderedChain.slice(
+          usedModelId ? orderedChain.indexOf(usedModelId) + 1 : orderedChain.length
+        )
+        let activeStream: AsyncIterable<unknown> = stream
+
+        const consumeStreamWithSideEffects = async (
+          source: AsyncIterable<unknown>
+        ): Promise<void> => {
+          for await (const chunk of source) {
+            if (abortController.signal.aborted) break
+
+            const [mode, data] = chunk as unknown as [string, unknown]
+
+            if (isCoordinatorWorkerStreamChunk(mode, data, threadId)) {
+              continue
+            }
+            const serialized = serializeStreamData(data)
+            // UI forwarding is the primary path. Trace / metrics / skill-evolution
+            // processing below are side effects and must never block streaming.
+            forwardStreamChunk(mode, serialized)
+            processChunkSideEffects(mode, serialized)
+            stopContextCollector.processStreamChunk(mode, serialized)
+          }
+        }
+
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          try {
+            await consumeStreamWithSideEffects(activeStream)
+            break // Stream completed successfully
+          } catch (midStreamErr) {
+            if (!isRetryableApiError(midStreamErr) || remainingCandidates.length === 0) {
+              throw midStreamErr
+            }
+            if (abortController.signal.aborted) throw midStreamErr
+
+            const failedModelId = usedModelId ?? "unknown"
+            failoverAttempts.push({
+              modelId: failedModelId,
+              error: String(midStreamErr),
+              timestamp: Date.now()
+            })
+            console.warn(
+              `[Agent][Failover] Mid-stream ${failedModelId} failed: ${midStreamErr}, trying next...`
             )
-          })
-          const last = finalMsgs[finalMsgs.length - 1]
-          if (last) {
-            const kw = last.kwargs || {}
-            const text = extractTextBlocks(kw.content).trim()
-            if (text) lastFinalText = text
+
+            if (!abortController.signal.aborted) {
+              await new Promise((r) => setTimeout(r, 500))
+            }
+
+            // Try next candidate with resume semantics
+            const nextCandidate = remainingCandidates.shift()!
+            agent = await createAgentRuntime({
+              threadId,
+              workspacePath,
+              modelId: nextCandidate,
+              coordinatorTurnPrompt,
+              coordinatorSelectedSkill,
+              coordinatorExplicitSelectedSkill,
+              coordinatorNotificationSelectedSkills,
+              abortSignal: abortController.signal,
+              noSkillEvolutionTool: true,
+              agentMode: effectiveAgentMode,
+              retryHooks: buildModelRetryHooks(window, channel),
+              maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
+              onHookResult,
+              onCoordinatorWorkerEvent,
+              onCoordinatorNotificationAction
+            })
+            activeStream = await agent.stream(null, streamConfig) // resume from checkpoint
+            usedModelId = nextCandidate
+            notifyFailover()
           }
-        } catch (e) {
-          console.error("[Agent] Values side-effect processing error:", e)
         }
-      }
 
-      const processChunkSideEffects = (mode: string, payload: unknown): void => {
-        if (mode === "messages") {
-          processMessagesSideEffects(payload)
-          return
-        }
-        if (mode === "values") {
-          processValuesSideEffects(payload)
-        }
-      }
-
-      let lastFinalText = "" // 最终回复（不含中间工具推理），用于 ChatX HTTP 回复
-
-      // P1: Mid-stream failover — if the stream fails with a retryable error,
-      // try remaining models in the chain using resume semantics.
-      const remainingCandidates = orderedChain.slice(
-        usedModelId ? orderedChain.indexOf(usedModelId) + 1 : orderedChain.length
-      )
-      let activeStream: AsyncIterable<unknown> = stream
-
-      const consumeStreamWithSideEffects = async (
-        source: AsyncIterable<unknown>
-      ): Promise<void> => {
-        for await (const chunk of source) {
-          if (abortController.signal.aborted) break
-
-          const [mode, data] = chunk as unknown as [string, unknown]
-
-          // Serialize first — live BaseMessage objects must be serialized before
-          // we can inspect the LangChain class path (msgChunk.id becomes the
-          // class array ["langchain_core","messages","AIMessageChunk"] only after
-          // toJSON() / JSON.stringify; on the live object, .id is the msg-id string).
-          const serialized = serializeStreamData(data)
-          // UI forwarding is the primary path. Trace / metrics / skill-evolution
-          // processing below are side effects and must never block streaming.
-          forwardStreamChunk(mode, serialized)
-          processChunkSideEffects(mode, serialized)
-          stopContextCollector.processStreamChunk(mode, serialized)
-        }
-      }
-
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        try {
-          await consumeStreamWithSideEffects(activeStream)
-          break // Stream completed successfully
-        } catch (midStreamErr) {
-          if (!isRetryableApiError(midStreamErr) || remainingCandidates.length === 0) {
-            throw midStreamErr
-          }
-          if (abortController.signal.aborted) throw midStreamErr
-
-          const failedModelId = usedModelId ?? "unknown"
-          failoverAttempts.push({
-            modelId: failedModelId,
-            error: String(midStreamErr),
-            timestamp: Date.now()
-          })
-          console.warn(
-            `[Agent][Failover] Mid-stream ${failedModelId} failed: ${midStreamErr}, trying next...`
-          )
-
-          if (!abortController.signal.aborted) {
-            await new Promise((r) => setTimeout(r, 500))
-          }
-
-          // Try next candidate with resume semantics
-          const nextCandidate = remainingCandidates.shift()!
-          agent = await createAgentRuntime({
+        if (!abortController.signal.aborted) {
+          const stopPassed = await runStopHooksWithRevision({
             threadId,
-            workspacePath,
-            modelId: nextCandidate,
+            workspacePath: workspacePath ?? undefined,
             abortSignal: abortController.signal,
-            noSkillEvolutionTool: true,
-            agentMode: effectiveAgentMode,
-            retryHooks: buildModelRetryHooks(window, channel),
-            maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
+            getStopContext: () =>
+              stopContextCollector.snapshot({
+                userMessage: message,
+                assistantResponse: lastFinalText || assistantText.trim(),
+                toolCalls: toolCallCounter.getNames(),
+                usedSkills: skillUsageDetector.getUsedSkillNames()
+              }),
+            runRevision: async (revisionPrompt) => {
+              if (!agent)
+                throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
+              const revisionStream = await agent.stream(
+                { messages: [new HumanMessage(revisionPrompt)] },
+                streamConfig
+              )
+              await consumeStreamWithSideEffects(revisionStream)
+            },
+            sendNotice: sendHookNotice,
+            sendError: sendStreamError,
             onHookResult
           })
-          activeStream = await agent.stream(null, streamConfig) // resume from checkpoint
-          usedModelId = nextCandidate
-          notifyFailover()
-        }
-      }
 
-      if (!abortController.signal.aborted) {
-        const stopPassed = await runStopHooksWithRevision({
-          threadId,
-          workspacePath: workspacePath ?? undefined,
-          abortSignal: abortController.signal,
-          getStopContext: () =>
-            stopContextCollector.snapshot({
-              userMessage: message,
-              assistantResponse: lastFinalText || assistantText.trim(),
-              toolCalls: toolCallCounter.getNames(),
-              usedSkills: skillUsageDetector.getUsedSkillNames()
-            }),
-          runRevision: async (revisionPrompt) => {
-            if (!agent)
-              throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
-            const revisionStream = await agent.stream(
-              { messages: [new HumanMessage(revisionPrompt)] },
-              streamConfig
-            )
-            await consumeStreamWithSideEffects(revisionStream)
-          },
-          sendNotice: sendHookNotice,
-          sendError: sendStreamError,
-          onHookResult
-        })
+          if (!stopPassed) {
+            clearCoordinatorNotificationSelectedSkillsOnExit = true
+            await tracer.finish("error", "Stop hook blocked completion")
+            return
+          }
 
-        if (!stopPassed) {
-          await tracer.finish("error", "Stop hook blocked completion")
-          return
-        }
+          clearCoordinatorNotificationSelectedSkillsOnExit = true
+          safeSendToWindow(window, channel, { type: "done" })
+          await settleDrainedCoordinatorNotifications("auto")
+          notifyIfBackground("✅ 任务完成", lastFinalText || assistantText.trim() || "对话已完成")
 
-        window.webContents.send(channel, { type: "done" })
-        notifyIfBackground("✅ 任务完成", lastFinalText || assistantText.trim() || "对话已完成")
+          // Finish trace
+          tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+          await tracer.finish("success")
 
-        // Finish trace
-        tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
-        await tracer.finish("success")
+          // Write routing feedback so next turn can use sticky/force logic
+          if (invokeRoutingResult) {
+            rememberRoutingFeedback(threadId, {
+              resolvedTier: invokeRoutingResult.resolvedTier,
+              resolvedModelId: usedModelId ?? invokeRoutingResult.resolvedModelId,
+              outcome: "success",
+              toolCallCount: toolCallCounter.getCount(),
+              toolErrorCount,
+              lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
+            })
+          }
 
-        // Write routing feedback so next turn can use sticky/force logic
-        if (invokeRoutingResult) {
-          rememberRoutingFeedback(threadId, {
-            resolvedTier: invokeRoutingResult.resolvedTier,
-            resolvedModelId: usedModelId ?? invokeRoutingResult.resolvedModelId,
-            outcome: "success",
-            toolCallCount: toolCallCounter.getCount(),
-            toolErrorCount,
-            lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
-          })
-        }
+          if (!isCoordinatorNotificationTurn && isOnlineSkillEvolutionEnabled()) {
+            const proposalContext = appendTurnToProposalWindow("success")
 
-        if (isOnlineSkillEvolutionEnabled()) {
-          const proposalContext = appendTurnToProposalWindow("success")
-
-          // Check if this turn crossed the skill-evolution threshold.
-          const sessionToolCallCount = proposalContext.toolCallCount
-          const threshold = getSkillEvolutionThreshold()
-          if (shouldEvaluateSkillProposalWindow(sessionToolCallCount, threshold)) {
-            const mode = getSkillProposalMode(isSkillAutoProposeEnabled())
-            console.log(
-              `[SkillEvolution][${threadId}] Threshold reached ${JSON.stringify({
-                toolCallCount: sessionToolCallCount,
-                windowToolCallCount: proposalContext.toolCallCount,
-                threshold,
-                mode,
-                usedSkills: proposalContext.usedSkills,
-                turnCount: proposalContext.turnCount,
-                errorCount: proposalContext.errorCount,
-                toolCallSummary: proposalContext.toolCallSummary
-              })}`
-            )
-            if (proposalContext.usedSkills.length > 0) {
-              const names = ` [${proposalContext.usedSkills.join(", ")}]`
+            // Check if this turn crossed the skill-evolution threshold.
+            const sessionToolCallCount = proposalContext.toolCallCount
+            const threshold = getSkillEvolutionThreshold()
+            if (shouldEvaluateSkillProposalWindow(sessionToolCallCount, threshold)) {
+              const mode = getSkillProposalMode(isSkillAutoProposeEnabled())
               console.log(
-                `[SkillEvolution][${threadId}] Threshold skip because used skills were detected${names}`
+                `[SkillEvolution][${threadId}] Threshold reached ${JSON.stringify({
+                  toolCallCount: sessionToolCallCount,
+                  windowToolCallCount: proposalContext.toolCallCount,
+                  threshold,
+                  mode,
+                  usedSkills: proposalContext.usedSkills,
+                  turnCount: proposalContext.turnCount,
+                  errorCount: proposalContext.errorCount,
+                  toolCallSummary: proposalContext.toolCallSummary
+                })}`
               )
-            } else {
-              console.log(
-                `[SkillEvolution][${threadId}] Threshold passed without used skills, evaluating proposal mode`
-              )
-              await autoProposeSKill(threadId, proposalContext).catch((e) =>
-                console.warn("[Agent] autoProposeSKill failed:", e)
-              )
+              if (proposalContext.usedSkills.length > 0) {
+                const names = ` [${proposalContext.usedSkills.join(", ")}]`
+                console.log(
+                  `[SkillEvolution][${threadId}] Threshold skip because used skills were detected${names}`
+                )
+              } else {
+                console.log(
+                  `[SkillEvolution][${threadId}] Threshold passed without used skills, evaluating proposal mode`
+                )
+                await autoProposeSKill(threadId, proposalContext).catch((e) =>
+                  console.warn("[Agent] autoProposeSKill failed:", e)
+                )
+              }
+            }
+          } else if (!isCoordinatorNotificationTurn) {
+            resetSkillEvolutionSession(threadId)
+          }
+
+          // If this is a ChatX-linked thread, also send reply via HTTP (only final answer, no tool reasoning)
+          const chatxReply = lastFinalText || stripThink(assistantText).trim()
+          if (!isCoordinatorNotificationTurn && metadata.chatxRobotChatId && chatxReply) {
+            trySendChatXReply(metadata.chatxRobotChatId as string, chatxReply)
+          }
+
+          const conversation =
+            !isCoordinatorNotificationTurn && assistantText.trim()
+              ? `User: ${message}\n\nAssistant: ${assistantText}`
+              : ""
+
+          if (isMemoryEnabled() && conversation.length >= MIN_CHARS_FOR_MEMORY) {
+            const memoryStore = await getMemoryStore()
+            const allConfigs = getCustomModelConfigs()
+
+            // Use routing to pick memory summarization model (economy in auto mode)
+            const memRoutingResult = await resolveModel({
+              taskSource: "memory_summarize",
+              threadId,
+              requestedModelId: modelId ?? undefined,
+              routingMode: getGlobalRoutingMode()
+            }).catch(() => null)
+            const memModelId = memRoutingResult?.resolvedModelId
+            const memCfgId =
+              memModelId?.replace("custom:", "") ?? modelId?.replace("custom:", "") ?? ""
+            const config = allConfigs.find((c) => c.id === memCfgId) || allConfigs[0]
+
+            if (!config) {
+              console.warn("[Agent] No model config available — skipping memory summarization")
+            } else if (config?.apiKey) {
+              summarizeAndSave({
+                model: new ChatOpenAI({
+                  model: config.model,
+                  apiKey: config.apiKey,
+                  configuration: { baseURL: config.baseUrl }
+                }),
+                conversation,
+                memoryDir: memoryStore.getMemoryDir()
+              }).catch((e) => console.warn("[Agent] Memory summarize failed:", e))
             }
           }
+        }
+      } catch (error) {
+        await settleDrainedCoordinatorNotifications("auto")
+        // Ignore abort-related errors (expected when stream is cancelled)
+        const isAbortError =
+          error instanceof Error &&
+          (error.name === "AbortError" ||
+            error.message.includes("aborted") ||
+            error.message.includes("Controller is already closed"))
+
+        if (!isAbortError) {
+          const errMsg = error instanceof Error ? error.message : "Unknown error"
+          clearCoordinatorNotificationSelectedSkillsOnExit = true
+          console.error("[Agent] Error:", error)
+          safeSendToWindow(window, channel, {
+            type: "error",
+            error: errMsg
+          })
+          notifyIfBackground("❌ 任务失败", errMsg)
+          if (isOnlineSkillEvolutionEnabled()) {
+            appendTurnToProposalWindow("error", errMsg)
+          } else {
+            resetSkillEvolutionSession(threadId)
+          }
+          tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+          tracer.finish("error", errMsg).catch(() => {})
+          if (invokeRoutingResult) {
+            rememberRoutingFeedback(threadId, {
+              resolvedTier: invokeRoutingResult.resolvedTier,
+              resolvedModelId: usedModelId ?? invokeRoutingResult.resolvedModelId,
+              outcome: "error",
+              toolCallCount: toolCallCounter.getCount(),
+              toolErrorCount,
+              lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
+            })
+          }
         } else {
-          resetSkillEvolutionSession(threadId)
-        }
-
-        // If this is a ChatX-linked thread, also send reply via HTTP (only final answer, no tool reasoning)
-        const chatxReply = lastFinalText || stripThink(assistantText).trim()
-        if (metadata.chatxRobotChatId && chatxReply) {
-          trySendChatXReply(metadata.chatxRobotChatId as string, chatxReply)
-        }
-
-        const conversation = assistantText.trim()
-          ? `User: ${message}\n\nAssistant: ${assistantText}`
-          : ""
-
-        if (isMemoryEnabled() && conversation.length >= MIN_CHARS_FOR_MEMORY) {
-          const memoryStore = await getMemoryStore()
-          const allConfigs = getCustomModelConfigs()
-
-          // Use routing to pick memory summarization model (economy in auto mode)
-          const memRoutingResult = await resolveModel({
-            taskSource: "memory_summarize",
-            threadId,
-            requestedModelId: modelId ?? undefined,
-            routingMode: getGlobalRoutingMode()
-          }).catch(() => null)
-          const memModelId = memRoutingResult?.resolvedModelId
-          const memCfgId =
-            memModelId?.replace("custom:", "") ?? modelId?.replace("custom:", "") ?? ""
-          const config = allConfigs.find((c) => c.id === memCfgId) || allConfigs[0]
-
-          if (!config) {
-            console.warn("[Agent] No model config available — skipping memory summarization")
-          } else if (config?.apiKey) {
-            summarizeAndSave({
-              model: new ChatOpenAI({
-                model: config.model,
-                apiKey: config.apiKey,
-                configuration: { baseURL: config.baseUrl }
-              }),
-              conversation,
-              memoryDir: memoryStore.getMemoryDir()
-            }).catch((e) => console.warn("[Agent] Memory summarize failed:", e))
+          tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+          tracer.finish("cancelled").catch(() => {})
+          if (invokeRoutingResult) {
+            rememberRoutingFeedback(threadId, {
+              resolvedTier: invokeRoutingResult.resolvedTier,
+              resolvedModelId: usedModelId ?? invokeRoutingResult.resolvedModelId,
+              outcome: "cancelled",
+              toolCallCount: toolCallCounter.getCount(),
+              toolErrorCount,
+              lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
+            })
           }
         }
-      }
-    } catch (error) {
-      // Ignore abort-related errors (expected when stream is cancelled)
-      const isAbortError =
-        error instanceof Error &&
-        (error.name === "AbortError" ||
-          error.message.includes("aborted") ||
-          error.message.includes("Controller is already closed"))
-
-      if (!isAbortError) {
-        const errMsg = error instanceof Error ? error.message : "Unknown error"
-        console.error("[Agent] Error:", error)
-        window.webContents.send(channel, {
-          type: "error",
-          error: errMsg
-        })
-        notifyIfBackground("❌ 任务失败", errMsg)
-        if (isOnlineSkillEvolutionEnabled()) {
-          appendTurnToProposalWindow("error", errMsg)
-        } else {
-          resetSkillEvolutionSession(threadId)
+      } finally {
+        window.removeListener("closed", onWindowClosed)
+        await settleDrainedCoordinatorNotifications("auto")
+        if (clearCoordinatorNotificationSelectedSkillsOnExit) {
+          const nextCoordinatorNotificationSelectedSkills =
+            omitCoordinatorNotificationSelectedSkills(
+              coordinatorNotificationSelectedSkills,
+              trackedCoordinatorNotificationIds
+            )
+          if (
+            !coordinatorNotificationSelectedSkillsEqual(
+              coordinatorNotificationSelectedSkills,
+              nextCoordinatorNotificationSelectedSkills
+            )
+          ) {
+            coordinatorNotificationSelectedSkills = nextCoordinatorNotificationSelectedSkills ?? {}
+            setCoordinatorNotificationSelectedSkillsState(
+              threadId,
+              metadata,
+              nextCoordinatorNotificationSelectedSkills
+            )
+            updateThread(threadId, { metadata: JSON.stringify(metadata) })
+          }
         }
-        tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
-        tracer.finish("error", errMsg).catch(() => {})
-        if (invokeRoutingResult) {
-          rememberRoutingFeedback(threadId, {
-            resolvedTier: invokeRoutingResult.resolvedTier,
-            resolvedModelId: usedModelId ?? invokeRoutingResult.resolvedModelId,
-            outcome: "error",
-            toolCallCount: toolCallCounter.getCount(),
-            toolErrorCount,
-            lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
+        const currentController = activeRuns.get(threadId)
+        const replacedByNewRun = Boolean(currentController && currentController !== abortController)
+        if (currentController === abortController) {
+          activeRuns.delete(threadId)
+        }
+        if (!replacedByNewRun) {
+          // Clean up sandbox ACLs granted during this run (unelevated mode keeps them
+          // across commands for performance, so we revoke them when the run ends).
+          // If a newer run already owns this threadId, it shares the same sandbox runId
+          // and will perform the cleanup when that newer run finishes.
+          LocalSandbox.revokeGrantedAclsForRun(threadId).catch((err) => {
+            console.warn("[Agent] ACL cleanup error:", err)
           })
         }
-      } else {
-        tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
-        tracer.finish("cancelled").catch(() => {})
-        if (invokeRoutingResult) {
-          rememberRoutingFeedback(threadId, {
-            resolvedTier: invokeRoutingResult.resolvedTier,
-            resolvedModelId: usedModelId ?? invokeRoutingResult.resolvedModelId,
-            outcome: "cancelled",
-            toolCallCount: toolCallCounter.getCount(),
-            toolErrorCount,
-            lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
-          })
+        if (activeRunSettled.get(threadId) === activeRunSettledPromise) {
+          activeRunSettled.delete(threadId)
         }
+        resolveActiveRunSettled()
+        // SessionEnd is NOT fired here — it belongs to thread lifecycle (delete / app quit),
+        // not turn completion. See fireSessionEnd call in threads:delete handler.
       }
-    } finally {
-      activeRuns.delete(threadId)
-      // Clean up sandbox ACLs granted during this run (unelevated mode keeps them
-      // across commands for performance, so we revoke them when the run ends).
-      // Uses threadId to only release this run's ref-counts, not other concurrent runs'.
-      LocalSandbox.revokeGrantedAclsForRun(threadId).catch((err) => {
-        console.warn("[Agent] ACL cleanup error:", err)
-      })
-      // SessionEnd is NOT fired here — it belongs to thread lifecycle (delete / app quit),
-      // not turn completion. See fireSessionEnd call in threads:delete handler.
     }
-  })
+  )
 
   // Handle agent resume (after interrupt approval/rejection via useStream)
-  ipcMain.on("agent:resume", async (
-    event,
-    { threadId, command, modelId, agentMode: requestedAgentMode }: AgentResumeParams
-  ) => {
-    const channel = `agent:stream:${threadId}`
-    const window = BrowserWindow.fromWebContents(event.sender)
+  ipcMain.on(
+    "agent:resume",
+    async (
+      event,
+      { threadId, command, modelId, agentMode: requestedAgentMode }: AgentResumeParams
+    ) => {
+      const channel = `agent:stream:${threadId}`
+      const window = BrowserWindow.fromWebContents(event.sender)
 
-    console.log("[Agent] Received resume request:", { threadId, command, modelId })
+      console.log("[Agent] Received resume request:", { threadId, command, modelId })
 
-    if (!window) {
-      console.error("[Agent] No window found for resume")
-      return
-    }
-
-    // Get workspace path from thread metadata
-    const thread = getThread(threadId)
-    const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
-    const workspacePath = metadata.workspacePath as string | undefined
-    const resumeAgentMode: AgentMode =
-      requestedAgentMode === "coordinator" || requestedAgentMode === "normal"
-        ? requestedAgentMode
-        : getAgentModeFromMetadata(metadata)
-
-    if (requestedAgentMode === "coordinator" || requestedAgentMode === "normal") {
-      updateThread(threadId, {
-        metadata: JSON.stringify({ ...metadata, agentMode: requestedAgentMode })
-      })
-    }
-
-    if (!workspacePath) {
-      window.webContents.send(channel, {
-        type: "error",
-        error: "Workspace path is required"
-      })
-      return
-    }
-
-    // Abort any existing stream before resuming
-    const existingController = activeRuns.get(threadId)
-    if (existingController) {
-      existingController.abort()
-      activeRuns.delete(threadId)
-    }
-
-    const abortController = new AbortController()
-    activeRuns.set(threadId, abortController)
-    const stopContextCollector = new StopHookContextCollector()
-    const sendHookNotice = (notice: string): void => {
-      window.webContents.send(channel, {
-        type: "custom",
-        data: { type: "hook_notice", message: notice }
-      })
-    }
-    const sendStreamError = (error: string): void => {
-      window.webContents.send(channel, {
-        type: "error",
-        error
-      })
-    }
-    const onHookResult = makeHookResultCallback(window, channel)
-
-    const onWindowClosed = (): void => {
-      console.log("[Agent] Window closed, aborting resume stream for thread:", threadId)
-      abortController.abort()
-    }
-    window.once("closed", onWindowClosed)
-    sendActiveHookNotice(window, channel, workspacePath)
-
-    try {
-      const requestedModelIdResume = modelId || (metadata.model as string | undefined)
-      const resumeRoutingResult = await resolveModel({
-        taskSource: "chat",
-        threadId,
-        continuation: "resume",
-        requestedModelId: requestedModelIdResume,
-        routingMode: getGlobalRoutingMode()
-      }).catch(() => null)
-      const effectiveResumeModelId = resumeRoutingResult?.resolvedModelId ?? requestedModelIdResume
-
-      const resumeStreamConfig = {
-        configurable: { thread_id: threadId },
-        signal: abortController.signal,
-        streamMode: ["messages", "values"] as ("messages" | "values")[],
-        recursionLimit: 1000
+      if (!window) {
+        console.error("[Agent] No window found for resume")
+        return
       }
 
-      // Resume from checkpoint by streaming with Command containing the decision
-      // The HITL middleware expects one decision per pending tool call
-      const decisionType = command?.resume?.decision || "approve"
-      const pendingCount = command?.resume?.pendingCount ?? 1
-      const decisions = Array.from({ length: pendingCount }, () => ({ type: decisionType }))
-      const resumeValue = { decisions }
+      // Get workspace path from thread metadata
+      const thread = getThread(threadId)
+      const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
+      const workspacePath = metadata.workspacePath as string | undefined
+      const resumeCoordinatorRequest = resolveCoordinatorModeRequest("", metadata)
+      const resumeForcedByEnvironment = resumeCoordinatorRequest.source === "environment"
+      const resumeAgentMode: AgentMode =
+        resumeForcedByEnvironment
+          ? "coordinator"
+          : requestedAgentMode === "coordinator" || requestedAgentMode === "normal"
+            ? requestedAgentMode
+            : getAgentModeFromMetadata(metadata)
 
-      // ── Failover loop for resume ──
-      const resumePrimaryTier = resumeRoutingResult?.resolvedTier ?? "premium"
-      const resumeOrderedChain = buildOrderedChain(
-        effectiveResumeModelId,
-        resumeRoutingResult?.fallbackChain,
-        resumePrimaryTier,
-        resumeRoutingResult?.layer !== "pinned"
-      )
-      const resumeFailoverAttempts: FailoverAttempt[] = []
-      let resumeUsedModelId = effectiveResumeModelId
-      let resumeStream: AsyncIterable<unknown> | null = null
-      let resumeAgentRuntime: Awaited<ReturnType<typeof createAgentRuntime>> | null = null
-
-      for (const candidateId of resumeOrderedChain) {
-        if (abortController.signal.aborted) break
-        try {
-          const resumeAgent = await createAgentRuntime({
-            threadId,
-            workspacePath,
-            modelId: candidateId,
-            abortSignal: abortController.signal,
-            noSkillEvolutionTool: true,
-            agentMode: resumeAgentMode,
-            retryHooks: buildModelRetryHooks(window, channel),
-            maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
-            onHookResult
-          })
-          resumeStream = await resumeAgent.stream(
-            new Command({ resume: resumeValue }),
-            resumeStreamConfig
-          )
-          resumeAgentRuntime = resumeAgent
-          resumeUsedModelId = candidateId
-          break
-        } catch (err) {
-          if (!isRetryableApiError(err)) throw err
-          resumeFailoverAttempts.push({
-            modelId: candidateId,
-            error: String(err),
-            timestamp: Date.now()
-          })
-          console.warn(`[Agent][Failover][Resume] ${candidateId} failed: ${err}, trying next...`)
-          if (!abortController.signal.aborted) {
-            await new Promise((r) => setTimeout(r, 500))
+      if (
+        !resumeForcedByEnvironment &&
+        (requestedAgentMode === "coordinator" || requestedAgentMode === "normal")
+      ) {
+        if (requestedAgentMode === "normal" && metadata.agentMode !== "normal") {
+          if (!workspacePath) {
+            safeSendToWindow(window, channel, {
+              type: "error",
+              error: "WORKSPACE_REQUIRED",
+              message: "该线程缺少工作区路径，无法安全切回普通模式。请先重新选择工作区后再切换。"
+            })
+            return
+          }
+          const normalModeGuardState = await getNormalModeGuardState(threadId, workspacePath)
+          if (
+            normalModeGuardState.unresolvedWorkers.length > 0 ||
+            normalModeGuardState.hasPendingNotifications
+          ) {
+            safeSendToWindow(window, channel, {
+              type: "error",
+              error: buildNormalModeGuardMessage(normalModeGuardState)
+            })
+            sendCoordinatorWorkers(window, channel, normalModeGuardState.workers)
+            return
           }
         }
+        updateThread(threadId, {
+          metadata: JSON.stringify({ ...metadata, agentMode: requestedAgentMode })
+        })
       }
 
-      // P3: cancellation during failover
-      if (abortController.signal.aborted) {
-        throw Object.assign(new Error("aborted"), { name: "AbortError" })
+      if (!workspacePath) {
+        safeSendToWindow(window, channel, {
+          type: "error",
+          error: "Workspace path is required"
+        })
+        return
       }
 
-      if (!resumeStream) {
-        const allErrors = resumeFailoverAttempts.map((a) => `${a.modelId}: ${a.error}`).join("; ")
-        throw new Error(`All models failed during resume: ${allErrors}`)
-      }
-
-      // Notify frontend + persist routing state if failover happened
-      const notifyResumeFailover = (): void => {
-        if (resumeFailoverAttempts.length > 0 && resumeUsedModelId !== effectiveResumeModelId) {
-          const usedCfgId = resumeUsedModelId?.startsWith("custom:")
-            ? resumeUsedModelId.slice("custom:".length)
-            : resumeUsedModelId
-          const usedCfg = getCustomModelConfigs().find((c) => c.id === usedCfgId)
-          window.webContents.send(channel, {
-            type: "custom",
-            data: {
-              type: "routing_result",
-              resolvedModelId: resumeUsedModelId,
-              resolvedTier: usedCfg?.tier ?? "premium",
-              routeReason: `failover from ${resumeFailoverAttempts[0].modelId}`
-            }
-          })
-          window.webContents.send(channel, {
-            type: "custom",
-            data: {
-              type: "model_failover",
-              attempts: resumeFailoverAttempts,
-              activeModelId: resumeUsedModelId
-            }
-          })
-          // P2: persist failover model + sticky in a single atomic write
-          rememberRoutingDecision(
-            threadId,
-            {
-              resolvedModelId: resumeUsedModelId!,
-              resolvedTier: usedCfg?.tier ?? "premium",
-              routeReason: `failover from ${resumeFailoverAttempts[0].modelId}`,
-              fallbackChain: [],
-              layer: "pinned"
-            },
-            resumeUsedModelId!
-          )
+      // Abort any existing stream before resuming
+      const resumeReplacement = await withActiveRunReplacementLock(threadId, async () => {
+        const existingController = activeRuns.get(threadId)
+        if (existingController) {
+          existingController.abort()
+          await waitForReplacedRunToSettle(threadId)
         }
-      }
-      notifyResumeFailover()
-
-      // P1: Mid-stream failover for resume
-      const resumeRemainingCandidates = resumeOrderedChain.slice(
-        resumeUsedModelId
-          ? resumeOrderedChain.indexOf(resumeUsedModelId) + 1
-          : resumeOrderedChain.length
+        const nextAbortController = new AbortController()
+        activeRuns.set(threadId, nextAbortController)
+        let nextResolveResumeRunSettled: () => void = () => {}
+        const nextResumeRunSettledPromise = new Promise<void>((resolve) => {
+          nextResolveResumeRunSettled = resolve
+        })
+        activeRunSettled.set(threadId, nextResumeRunSettledPromise)
+        return {
+          abortController: nextAbortController,
+          resumeRunSettledPromise: nextResumeRunSettledPromise,
+          resolveResumeRunSettled: nextResolveResumeRunSettled
+        }
+      })
+      const { abortController, resumeRunSettledPromise, resolveResumeRunSettled } =
+        resumeReplacement
+      let resumeCoordinatorSelectedSkill = getActiveOrPersistedCoordinatorSelectedSkill(
+        threadId,
+        metadata
       )
-      let activeResumeStream: AsyncIterable<unknown> = resumeStream
-
-      const consumeResumeStream = async (source: AsyncIterable<unknown>): Promise<void> => {
-        for await (const chunk of source) {
-          if (abortController.signal.aborted) break
-          const [mode, data] = chunk as unknown as [string, unknown]
-          const serialized = serializeStreamData(data)
-          window.webContents.send(channel, {
-            type: "stream",
-            mode,
-            data: serialized
-          })
-          stopContextCollector.processStreamChunk(mode, serialized)
+      let resumeCoordinatorExplicitSelectedSkill = getActiveOrPersistedCoordinatorExplicitSelectedSkill(
+        threadId,
+        metadata
+      )
+      let resumeCoordinatorTurnPrompt = getActiveOrPersistedCoordinatorTurnPrompt(
+        threadId,
+        metadata
+      )
+      let resumeCoordinatorNotificationSelectedSkills =
+        getActiveOrPersistedCoordinatorNotificationSelectedSkills(threadId, metadata) ?? {}
+      let clearResumeCoordinatorNotificationSelectedSkillsOnExit = false
+      const trackedResumeCoordinatorNotificationIds = new Set(
+        Object.keys(resumeCoordinatorNotificationSelectedSkills)
+      )
+      let drainedResumeCoordinatorNotifications: CoordinatorTurnNotification[] = []
+      let resumeCoordinatorNotificationsConsumed = false
+      const consumedResumeCoordinatorNotificationIds = new Set<string>()
+      const stopContextCollector = new StopHookContextCollector()
+      const sendHookNotice = (notice: string): void => {
+        safeSendToWindow(window, channel, {
+          type: "custom",
+          data: { type: "hook_notice", message: notice }
+        })
+      }
+      const sendStreamError = (error: string): void => {
+        safeSendToWindow(window, channel, {
+          type: "error",
+          error
+        })
+      }
+      const onCoordinatorWorkerEvent = (event: {
+        worker: CoordinatorWorkerSnapshot
+        workers?: CoordinatorWorkerSnapshot[]
+        notification?: string
+      }): void => {
+        if (event.workers) {
+          sendCoordinatorWorkers(window, channel, event.workers, event.notification)
+        } else {
+          sendCoordinatorWorkerDelta(window, channel, event.worker, event.notification)
         }
       }
+      const onCoordinatorNotificationAction = (notificationIds: string[]): void => {
+        if (drainedResumeCoordinatorNotifications.length === 0) return
+        const drainedIds = new Set(
+          drainedResumeCoordinatorNotifications.map((notification) => notification.id)
+        )
+        const validNotificationIds = notificationIds
+          .map((notificationId) => notificationId.trim())
+          .filter((notificationId) => notificationId.length > 0 && drainedIds.has(notificationId))
+        for (const notificationId of validNotificationIds) {
+          consumedResumeCoordinatorNotificationIds.add(notificationId)
+        }
+      }
+      const onHookResult = makeHookResultCallback(window, channel)
 
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        try {
-          await consumeResumeStream(activeResumeStream)
-          break
-        } catch (midErr) {
-          if (!isRetryableApiError(midErr) || resumeRemainingCandidates.length === 0) throw midErr
-          if (abortController.signal.aborted) throw midErr
-
-          resumeFailoverAttempts.push({
-            modelId: resumeUsedModelId ?? "unknown",
-            error: String(midErr),
-            timestamp: Date.now()
-          })
-          console.warn(
-            `[Agent][Failover][Resume] Mid-stream ${resumeUsedModelId} failed: ${midErr}, trying next...`
-          )
-          if (!abortController.signal.aborted) await new Promise((r) => setTimeout(r, 500))
-
-          const nextCandidate = resumeRemainingCandidates.shift()!
-          const nextAgent = await createAgentRuntime({
+      const settleResumeDrainedCoordinatorNotifications = async (
+        mode: "ack" | "restore" | "auto"
+      ): Promise<void> => {
+        if (
+          resumeCoordinatorNotificationsConsumed ||
+          drainedResumeCoordinatorNotifications.length === 0
+        ) {
+          return
+        }
+        if (mode === "ack") {
+          await coordinatorWorkerManager.acknowledgeNotificationMessages(
             threadId,
-            workspacePath,
-            modelId: nextCandidate,
-            abortSignal: abortController.signal,
-            noSkillEvolutionTool: true,
-            agentMode: resumeAgentMode,
-            retryHooks: buildModelRetryHooks(window, channel),
-            maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
-            onHookResult
-          })
-          activeResumeStream = await nextAgent.stream(
-            new Command({ resume: resumeValue }),
-            resumeStreamConfig
+            drainedResumeCoordinatorNotifications.map((notification) => notification.message)
           )
-          resumeAgentRuntime = nextAgent
-          resumeUsedModelId = nextCandidate
-          notifyResumeFailover()
+        } else if (mode === "restore") {
+          coordinatorWorkerManager.restoreNotifications(
+            threadId,
+            drainedResumeCoordinatorNotifications.map((notification) => notification.message)
+          )
+        } else {
+          const acknowledgedNotifications = drainedResumeCoordinatorNotifications.filter(
+            (notification) => consumedResumeCoordinatorNotificationIds.has(notification.id)
+          )
+          const restoredNotifications = drainedResumeCoordinatorNotifications.filter(
+            (notification) => !consumedResumeCoordinatorNotificationIds.has(notification.id)
+          )
+          if (acknowledgedNotifications.length > 0) {
+            await coordinatorWorkerManager.acknowledgeNotificationMessages(
+              threadId,
+              acknowledgedNotifications.map((notification) => notification.message)
+            )
+          }
+          if (restoredNotifications.length > 0) {
+            coordinatorWorkerManager.restoreNotifications(
+              threadId,
+              restoredNotifications.map((notification) => notification.message)
+            )
+          }
         }
+        resumeCoordinatorNotificationsConsumed = true
       }
 
-      if (!abortController.signal.aborted) {
-        const stopPassed = await runStopHooksWithRevision({
+      if (resumeAgentMode === "coordinator") {
+        await coordinatorWorkerManager.restoreWorkersForThread({
+          parentThreadId: threadId,
+          workspacePath,
+          mode: "active",
+          onUpdate: (event) => {
+            onCoordinatorWorkerEvent(event)
+          },
+          onUpdateKey: channel
+        })
+        const {
+          queuedNotifications,
+          promptNotifications,
+          notificationSelectedSkills
+        } = await prepareQueuedCoordinatorNotificationsForPrompt(threadId, () => {
+          safeSendToWindow(window, channel, {
+            type: "custom",
+            data: { type: "coordinator_notification_deferred" }
+          })
+        })
+        drainedResumeCoordinatorNotifications = promptNotifications
+        resumeCoordinatorNotificationsConsumed = promptNotifications.length === 0
+        resumeCoordinatorNotificationSelectedSkills = {
+          ...resumeCoordinatorNotificationSelectedSkills,
+          ...notificationSelectedSkills
+        }
+        for (const notificationId of Object.keys(notificationSelectedSkills)) {
+          trackedResumeCoordinatorNotificationIds.add(notificationId)
+        }
+        if (!resumeCoordinatorSelectedSkill) {
+          resumeCoordinatorSelectedSkill = deriveSharedCoordinatorSelectedSkill(
+            resumeCoordinatorNotificationSelectedSkills
+          )
+        }
+        const workers = coordinatorWorkerManager.readWorkers(threadId)
+        const workersForPromptContext =
+          queuedNotifications.length > 0
+            ? workers.filter(
+                (worker) => worker.status === "running" || worker.notification_acknowledged !== false
+              )
+            : workers
+        resumeCoordinatorTurnPrompt = buildCoordinatorTurnContextPrompt(
+          promptNotifications,
+          renderCoordinatorWorkerContext(workersForPromptContext)
+        )
+        activeCoordinatorSelectedSkills.set(threadId, resumeCoordinatorSelectedSkill)
+        activeCoordinatorExplicitSelectedSkills.set(threadId, resumeCoordinatorExplicitSelectedSkill)
+        activeCoordinatorTurnPrompts.set(threadId, resumeCoordinatorTurnPrompt)
+        activeCoordinatorNotificationSelectedSkills.set(
           threadId,
-          workspacePath: workspacePath ?? undefined,
-          abortSignal: abortController.signal,
-          getStopContext: () => stopContextCollector.snapshot(),
-          runRevision: async (revisionPrompt) => {
-            if (!resumeAgentRuntime)
-              throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
-            const revisionStream = await resumeAgentRuntime.stream(
-              { messages: [new HumanMessage(revisionPrompt)] },
+          resumeCoordinatorNotificationSelectedSkills
+        )
+        const persistedResumeCoordinatorSelectedSkill =
+          parseCoordinatorSelectedSkillMetadata(metadata)
+        const persistedResumeCoordinatorExplicitSelectedSkill =
+          parseCoordinatorExplicitSelectedSkillMetadata(metadata)
+        const persistedResumeCoordinatorTurnPrompt = parseCoordinatorTurnPromptMetadata(metadata)
+        const persistedResumeCoordinatorNotificationSelectedSkills =
+          parseCoordinatorNotificationSelectedSkillsMetadata(metadata)
+        const selectedSkillMetadataChanged = !coordinatorSelectedSkillEquals(
+          persistedResumeCoordinatorSelectedSkill,
+          resumeCoordinatorSelectedSkill
+        )
+        const explicitSelectedSkillMetadataChanged = !coordinatorSelectedSkillEquals(
+          persistedResumeCoordinatorExplicitSelectedSkill,
+          resumeCoordinatorExplicitSelectedSkill
+        )
+        const coordinatorTurnPromptMetadataChanged =
+          persistedResumeCoordinatorTurnPrompt !== resumeCoordinatorTurnPrompt
+        const notificationSelectedSkillsMetadataChanged =
+          !coordinatorNotificationSelectedSkillsEqual(
+            persistedResumeCoordinatorNotificationSelectedSkills,
+            resumeCoordinatorNotificationSelectedSkills
+          )
+        if (selectedSkillMetadataChanged) {
+          if (resumeCoordinatorSelectedSkill) {
+            metadata.coordinatorSelectedSkill = resumeCoordinatorSelectedSkill
+          } else {
+            delete metadata.coordinatorSelectedSkill
+          }
+        }
+        if (notificationSelectedSkillsMetadataChanged) {
+          setCoordinatorNotificationSelectedSkillsState(
+            threadId,
+            metadata,
+            resumeCoordinatorNotificationSelectedSkills
+          )
+        }
+        if (explicitSelectedSkillMetadataChanged) {
+          if (resumeCoordinatorExplicitSelectedSkill) {
+            metadata.coordinatorExplicitSelectedSkill = resumeCoordinatorExplicitSelectedSkill
+          } else {
+            delete metadata.coordinatorExplicitSelectedSkill
+          }
+        }
+        if (coordinatorTurnPromptMetadataChanged) {
+          if (resumeCoordinatorTurnPrompt) {
+            metadata.coordinatorTurnPrompt = resumeCoordinatorTurnPrompt
+          } else {
+            delete metadata.coordinatorTurnPrompt
+          }
+        }
+        if (
+          selectedSkillMetadataChanged ||
+          explicitSelectedSkillMetadataChanged ||
+          coordinatorTurnPromptMetadataChanged ||
+          notificationSelectedSkillsMetadataChanged
+        ) {
+          updateThread(threadId, { metadata: JSON.stringify(metadata) })
+        }
+        sendCoordinatorWorkers(window, channel, workers)
+      }
+
+      const onWindowClosed = (): void => {
+        console.log("[Agent] Window closed, aborting resume stream for thread:", threadId)
+        abortController.abort()
+      }
+      window.once("closed", onWindowClosed)
+      sendActiveHookNotice(window, channel, workspacePath)
+
+      try {
+        const requestedModelIdResume = modelId || (metadata.model as string | undefined)
+        const resumeRoutingResult = await resolveModel({
+          taskSource: "chat",
+          threadId,
+          continuation: "resume",
+          requestedModelId: requestedModelIdResume,
+          routingMode: getGlobalRoutingMode()
+        }).catch(() => null)
+        const effectiveResumeModelId =
+          resumeRoutingResult?.resolvedModelId ?? requestedModelIdResume
+
+        const resumeStreamConfig = {
+          configurable: { thread_id: threadId },
+          signal: abortController.signal,
+          streamMode: ["messages", "values"] as ("messages" | "values")[],
+          recursionLimit: 1000
+        }
+
+        // Resume from checkpoint by streaming with Command containing the decision
+        // The HITL middleware expects one decision per pending tool call
+        const decisionType = command?.resume?.decision || "approve"
+        const pendingCount = command?.resume?.pendingCount ?? 1
+        const decisions = Array.from({ length: pendingCount }, () => ({ type: decisionType }))
+        const resumeValue = { decisions }
+
+        // ── Failover loop for resume ──
+        const resumePrimaryTier = resumeRoutingResult?.resolvedTier ?? "premium"
+        const resumeOrderedChain = buildOrderedChain(
+          effectiveResumeModelId,
+          resumeRoutingResult?.fallbackChain,
+          resumePrimaryTier,
+          resumeRoutingResult?.layer !== "pinned"
+        )
+        const resumeFailoverAttempts: FailoverAttempt[] = []
+        let resumeUsedModelId = effectiveResumeModelId
+        let resumeStream: AsyncIterable<unknown> | null = null
+        let resumeAgentRuntime: Awaited<ReturnType<typeof createAgentRuntime>> | null = null
+
+        for (const candidateId of resumeOrderedChain) {
+          if (abortController.signal.aborted) break
+          try {
+            const resumeAgent = await createAgentRuntime({
+              threadId,
+              workspacePath,
+              modelId: candidateId,
+              coordinatorTurnPrompt: resumeCoordinatorTurnPrompt,
+              coordinatorSelectedSkill: resumeCoordinatorSelectedSkill,
+              coordinatorExplicitSelectedSkill: resumeCoordinatorExplicitSelectedSkill,
+              coordinatorNotificationSelectedSkills: resumeCoordinatorNotificationSelectedSkills,
+              abortSignal: abortController.signal,
+              noSkillEvolutionTool: true,
+              agentMode: resumeAgentMode,
+              retryHooks: buildModelRetryHooks(window, channel),
+              maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
+              onHookResult,
+              onCoordinatorWorkerEvent,
+              onCoordinatorNotificationAction
+            })
+            resumeStream = await resumeAgent.stream(
+              new Command({ resume: resumeValue }),
               resumeStreamConfig
             )
-            await consumeResumeStream(revisionStream)
-          },
-          sendNotice: sendHookNotice,
-          sendError: sendStreamError,
-          onHookResult
-        })
+            resumeAgentRuntime = resumeAgent
+            resumeUsedModelId = candidateId
+            break
+          } catch (err) {
+            if (!isRetryableApiError(err)) throw err
+            resumeFailoverAttempts.push({
+              modelId: candidateId,
+              error: String(err),
+              timestamp: Date.now()
+            })
+            console.warn(`[Agent][Failover][Resume] ${candidateId} failed: ${err}, trying next...`)
+            if (!abortController.signal.aborted) {
+              await new Promise((r) => setTimeout(r, 500))
+            }
+          }
+        }
 
-        if (!stopPassed) return
+        // P3: cancellation during failover
+        if (abortController.signal.aborted) {
+          throw Object.assign(new Error("aborted"), { name: "AbortError" })
+        }
 
-        window.webContents.send(channel, { type: "done" })
+        if (!resumeStream) {
+          const allErrors = resumeFailoverAttempts.map((a) => `${a.modelId}: ${a.error}`).join("; ")
+          throw new Error(`All models failed during resume: ${allErrors}`)
+        }
+
+        // Notify frontend + persist routing state if failover happened
+        const notifyResumeFailover = (): void => {
+          if (resumeFailoverAttempts.length > 0 && resumeUsedModelId !== effectiveResumeModelId) {
+            const usedCfgId = resumeUsedModelId?.startsWith("custom:")
+              ? resumeUsedModelId.slice("custom:".length)
+              : resumeUsedModelId
+            const usedCfg = getCustomModelConfigs().find((c) => c.id === usedCfgId)
+            safeSendToWindow(window, channel, {
+              type: "custom",
+              data: {
+                type: "routing_result",
+                resolvedModelId: resumeUsedModelId,
+                resolvedTier: usedCfg?.tier ?? "premium",
+                routeReason: `failover from ${resumeFailoverAttempts[0].modelId}`
+              }
+            })
+            safeSendToWindow(window, channel, {
+              type: "custom",
+              data: {
+                type: "model_failover",
+                attempts: resumeFailoverAttempts,
+                activeModelId: resumeUsedModelId
+              }
+            })
+            // P2: persist failover model + sticky in a single atomic write
+            rememberRoutingDecision(
+              threadId,
+              {
+                resolvedModelId: resumeUsedModelId!,
+                resolvedTier: usedCfg?.tier ?? "premium",
+                routeReason: `failover from ${resumeFailoverAttempts[0].modelId}`,
+                fallbackChain: [],
+                layer: "pinned"
+              },
+              resumeUsedModelId!
+            )
+          }
+        }
+        notifyResumeFailover()
+
+        // P1: Mid-stream failover for resume
+        const resumeRemainingCandidates = resumeOrderedChain.slice(
+          resumeUsedModelId
+            ? resumeOrderedChain.indexOf(resumeUsedModelId) + 1
+            : resumeOrderedChain.length
+        )
+        let activeResumeStream: AsyncIterable<unknown> = resumeStream
+
+        const consumeResumeStream = async (source: AsyncIterable<unknown>): Promise<void> => {
+          for await (const chunk of source) {
+            if (abortController.signal.aborted) break
+            const [mode, data] = chunk as unknown as [string, unknown]
+            if (isCoordinatorWorkerStreamChunk(mode, data, threadId)) {
+              continue
+            }
+            const serialized = serializeStreamData(data)
+            safeSendToWindow(window, channel, {
+              type: "stream",
+              mode,
+              data: sanitizeStreamDataForRenderer(mode, serialized)
+            })
+            stopContextCollector.processStreamChunk(mode, serialized)
+          }
+        }
+
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          try {
+            await consumeResumeStream(activeResumeStream)
+            break
+          } catch (midErr) {
+            if (!isRetryableApiError(midErr) || resumeRemainingCandidates.length === 0) throw midErr
+            if (abortController.signal.aborted) throw midErr
+
+            resumeFailoverAttempts.push({
+              modelId: resumeUsedModelId ?? "unknown",
+              error: String(midErr),
+              timestamp: Date.now()
+            })
+            console.warn(
+              `[Agent][Failover][Resume] Mid-stream ${resumeUsedModelId} failed: ${midErr}, trying next...`
+            )
+            if (!abortController.signal.aborted) await new Promise((r) => setTimeout(r, 500))
+
+            const nextCandidate = resumeRemainingCandidates.shift()!
+            const nextAgent = await createAgentRuntime({
+              threadId,
+              workspacePath,
+              modelId: nextCandidate,
+              coordinatorTurnPrompt: resumeCoordinatorTurnPrompt,
+              coordinatorSelectedSkill: resumeCoordinatorSelectedSkill,
+              coordinatorExplicitSelectedSkill: resumeCoordinatorExplicitSelectedSkill,
+              coordinatorNotificationSelectedSkills: resumeCoordinatorNotificationSelectedSkills,
+              abortSignal: abortController.signal,
+              noSkillEvolutionTool: true,
+              agentMode: resumeAgentMode,
+              retryHooks: buildModelRetryHooks(window, channel),
+              maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
+              onHookResult,
+              onCoordinatorWorkerEvent,
+              onCoordinatorNotificationAction
+            })
+            activeResumeStream = await nextAgent.stream(
+              new Command({ resume: resumeValue }),
+              resumeStreamConfig
+            )
+            resumeAgentRuntime = nextAgent
+            resumeUsedModelId = nextCandidate
+            notifyResumeFailover()
+          }
+        }
+
+        if (!abortController.signal.aborted) {
+          const stopPassed = await runStopHooksWithRevision({
+            threadId,
+            workspacePath: workspacePath ?? undefined,
+            abortSignal: abortController.signal,
+            getStopContext: () => stopContextCollector.snapshot(),
+            runRevision: async (revisionPrompt) => {
+              if (!resumeAgentRuntime)
+                throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
+              const revisionStream = await resumeAgentRuntime.stream(
+                { messages: [new HumanMessage(revisionPrompt)] },
+                resumeStreamConfig
+              )
+              await consumeResumeStream(revisionStream)
+            },
+            sendNotice: sendHookNotice,
+            sendError: sendStreamError,
+            onHookResult
+          })
+
+          if (!stopPassed) {
+            clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
+            return
+          }
+
+          clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
+          safeSendToWindow(window, channel, { type: "done" })
+        }
+      } catch (error) {
+        const isAbortError =
+          error instanceof Error &&
+          (error.name === "AbortError" ||
+            error.message.includes("aborted") ||
+            error.message.includes("Controller is already closed"))
+
+        if (!isAbortError) {
+          clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
+          console.error("[Agent] Resume error:", error)
+          safeSendToWindow(window, channel, {
+            type: "error",
+            error: error instanceof Error ? error.message : "Unknown error"
+          })
+        }
+      } finally {
+        window.removeListener("closed", onWindowClosed)
+        await settleResumeDrainedCoordinatorNotifications("auto")
+        if (clearResumeCoordinatorNotificationSelectedSkillsOnExit) {
+          const nextResumeCoordinatorNotificationSelectedSkills =
+            omitCoordinatorNotificationSelectedSkills(
+              resumeCoordinatorNotificationSelectedSkills,
+              trackedResumeCoordinatorNotificationIds
+            )
+          if (
+            !coordinatorNotificationSelectedSkillsEqual(
+              resumeCoordinatorNotificationSelectedSkills,
+              nextResumeCoordinatorNotificationSelectedSkills
+            )
+          ) {
+            resumeCoordinatorNotificationSelectedSkills =
+              nextResumeCoordinatorNotificationSelectedSkills ?? {}
+            setCoordinatorNotificationSelectedSkillsState(
+              threadId,
+              metadata,
+              nextResumeCoordinatorNotificationSelectedSkills
+            )
+            updateThread(threadId, { metadata: JSON.stringify(metadata) })
+          }
+        }
+        const currentController = activeRuns.get(threadId)
+        const replacedByNewRun = Boolean(currentController && currentController !== abortController)
+        if (currentController === abortController) {
+          activeRuns.delete(threadId)
+        }
+        if (!replacedByNewRun) {
+          LocalSandbox.revokeGrantedAclsForRun(threadId).catch((err) => {
+            console.warn("[Agent] ACL cleanup error:", err)
+          })
+        }
+        if (activeRunSettled.get(threadId) === resumeRunSettledPromise) {
+          activeRunSettled.delete(threadId)
+        }
+        resolveResumeRunSettled()
       }
-    } catch (error) {
-      const isAbortError =
-        error instanceof Error &&
-        (error.name === "AbortError" ||
-          error.message.includes("aborted") ||
-          error.message.includes("Controller is already closed"))
-
-      if (!isAbortError) {
-        console.error("[Agent] Resume error:", error)
-        window.webContents.send(channel, {
-          type: "error",
-          error: error instanceof Error ? error.message : "Unknown error"
-        })
-      }
-    } finally {
-      activeRuns.delete(threadId)
     }
-  })
+  )
 
   // Handle HITL interrupt response
   // NOTE: With the orchestrator-based approval system, execute commands are no
@@ -2353,10 +3967,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
     const workspacePath = metadata.workspacePath as string | undefined
     const modelId = metadata.model as string | undefined
-    const interruptAgentMode = getAgentModeFromMetadata(metadata)
+    const interruptCoordinatorRequest = resolveCoordinatorModeRequest("", metadata)
+    const interruptAgentMode: AgentMode =
+      interruptCoordinatorRequest.source === "environment"
+        ? "coordinator"
+        : getAgentModeFromMetadata(metadata)
 
     if (!workspacePath) {
-      window.webContents.send(channel, {
+      safeSendToWindow(window, channel, {
         type: "error",
         error: "Workspace path is required"
       })
@@ -2364,28 +3982,241 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     }
 
     // Abort any existing stream before continuing
-    const existingController = activeRuns.get(threadId)
-    if (existingController) {
-      existingController.abort()
-      activeRuns.delete(threadId)
-    }
-
-    const abortController = new AbortController()
-    activeRuns.set(threadId, abortController)
+    const interruptReplacement = await withActiveRunReplacementLock(threadId, async () => {
+      const existingController = activeRuns.get(threadId)
+      if (existingController) {
+        existingController.abort()
+        await waitForReplacedRunToSettle(threadId)
+      }
+      const nextAbortController = new AbortController()
+      activeRuns.set(threadId, nextAbortController)
+      let nextResolveInterruptRunSettled: () => void = () => {}
+      const nextInterruptRunSettledPromise = new Promise<void>((resolve) => {
+        nextResolveInterruptRunSettled = resolve
+      })
+      activeRunSettled.set(threadId, nextInterruptRunSettledPromise)
+      return {
+        abortController: nextAbortController,
+        interruptRunSettledPromise: nextInterruptRunSettledPromise,
+        resolveInterruptRunSettled: nextResolveInterruptRunSettled
+      }
+    })
+    const { abortController, interruptRunSettledPromise, resolveInterruptRunSettled } =
+      interruptReplacement
+    let interruptCoordinatorSelectedSkill = getActiveOrPersistedCoordinatorSelectedSkill(
+      threadId,
+      metadata
+    )
+    let interruptCoordinatorExplicitSelectedSkill =
+      getActiveOrPersistedCoordinatorExplicitSelectedSkill(threadId, metadata)
+    let interruptCoordinatorTurnPrompt = getActiveOrPersistedCoordinatorTurnPrompt(
+      threadId,
+      metadata
+    )
+    let interruptCoordinatorNotificationSelectedSkills =
+      getActiveOrPersistedCoordinatorNotificationSelectedSkills(threadId, metadata) ?? {}
+    let clearInterruptCoordinatorNotificationSelectedSkillsOnExit = false
+    const trackedInterruptCoordinatorNotificationIds = new Set(
+      Object.keys(interruptCoordinatorNotificationSelectedSkills)
+    )
+    let drainedInterruptCoordinatorNotifications: CoordinatorTurnNotification[] = []
+    let interruptCoordinatorNotificationsConsumed = false
+    const consumedInterruptCoordinatorNotificationIds = new Set<string>()
     const stopContextCollector = new StopHookContextCollector()
     const sendHookNotice = (notice: string): void => {
-      window.webContents.send(channel, {
+      safeSendToWindow(window, channel, {
         type: "custom",
         data: { type: "hook_notice", message: notice }
       })
     }
     const sendStreamError = (error: string): void => {
-      window.webContents.send(channel, {
+      safeSendToWindow(window, channel, {
         type: "error",
         error
       })
     }
+    const onCoordinatorWorkerEvent = (event: {
+      worker: CoordinatorWorkerSnapshot
+      workers?: CoordinatorWorkerSnapshot[]
+      notification?: string
+    }): void => {
+      if (event.workers) {
+        sendCoordinatorWorkers(window, channel, event.workers, event.notification)
+      } else {
+        sendCoordinatorWorkerDelta(window, channel, event.worker, event.notification)
+      }
+    }
+    const onCoordinatorNotificationAction = (notificationIds: string[]): void => {
+      if (drainedInterruptCoordinatorNotifications.length === 0) return
+      const drainedIds = new Set(
+        drainedInterruptCoordinatorNotifications.map((notification) => notification.id)
+      )
+      const validNotificationIds = notificationIds
+        .map((notificationId) => notificationId.trim())
+        .filter((notificationId) => notificationId.length > 0 && drainedIds.has(notificationId))
+      for (const notificationId of validNotificationIds) {
+        consumedInterruptCoordinatorNotificationIds.add(notificationId)
+      }
+    }
     const onHookResult = makeHookResultCallback(window, channel)
+
+    const settleInterruptDrainedCoordinatorNotifications = async (
+      mode: "ack" | "restore" | "auto"
+    ): Promise<void> => {
+      if (
+        interruptCoordinatorNotificationsConsumed ||
+        drainedInterruptCoordinatorNotifications.length === 0
+      ) {
+        return
+      }
+      if (mode === "ack") {
+        await coordinatorWorkerManager.acknowledgeNotificationMessages(
+          threadId,
+          drainedInterruptCoordinatorNotifications.map((notification) => notification.message)
+        )
+      } else if (mode === "restore") {
+        coordinatorWorkerManager.restoreNotifications(
+          threadId,
+          drainedInterruptCoordinatorNotifications.map((notification) => notification.message)
+        )
+      } else {
+        const acknowledgedNotifications = drainedInterruptCoordinatorNotifications.filter(
+          (notification) => consumedInterruptCoordinatorNotificationIds.has(notification.id)
+        )
+        const restoredNotifications = drainedInterruptCoordinatorNotifications.filter(
+          (notification) => !consumedInterruptCoordinatorNotificationIds.has(notification.id)
+        )
+        if (acknowledgedNotifications.length > 0) {
+          await coordinatorWorkerManager.acknowledgeNotificationMessages(
+            threadId,
+            acknowledgedNotifications.map((notification) => notification.message)
+          )
+        }
+        if (restoredNotifications.length > 0) {
+          coordinatorWorkerManager.restoreNotifications(
+            threadId,
+            restoredNotifications.map((notification) => notification.message)
+          )
+        }
+      }
+      interruptCoordinatorNotificationsConsumed = true
+    }
+
+    if (interruptAgentMode === "coordinator") {
+      await coordinatorWorkerManager.restoreWorkersForThread({
+        parentThreadId: threadId,
+        workspacePath,
+        mode: "active",
+        onUpdate: (event) => {
+          onCoordinatorWorkerEvent(event)
+        },
+        onUpdateKey: channel
+      })
+      const {
+        queuedNotifications,
+        promptNotifications,
+        notificationSelectedSkills
+      } = await prepareQueuedCoordinatorNotificationsForPrompt(threadId, () => {
+        safeSendToWindow(window, channel, {
+          type: "custom",
+          data: { type: "coordinator_notification_deferred" }
+        })
+      })
+      drainedInterruptCoordinatorNotifications = promptNotifications
+      interruptCoordinatorNotificationsConsumed = promptNotifications.length === 0
+      interruptCoordinatorNotificationSelectedSkills = {
+        ...interruptCoordinatorNotificationSelectedSkills,
+        ...notificationSelectedSkills
+      }
+      for (const notificationId of Object.keys(notificationSelectedSkills)) {
+        trackedInterruptCoordinatorNotificationIds.add(notificationId)
+      }
+      if (!interruptCoordinatorSelectedSkill) {
+        interruptCoordinatorSelectedSkill = deriveSharedCoordinatorSelectedSkill(
+          interruptCoordinatorNotificationSelectedSkills
+        )
+      }
+      const workers = coordinatorWorkerManager.readWorkers(threadId)
+      const workersForPromptContext =
+        queuedNotifications.length > 0
+          ? workers.filter(
+              (worker) => worker.status === "running" || worker.notification_acknowledged !== false
+            )
+          : workers
+      interruptCoordinatorTurnPrompt = buildCoordinatorTurnContextPrompt(
+        promptNotifications,
+        renderCoordinatorWorkerContext(workersForPromptContext)
+      )
+      activeCoordinatorSelectedSkills.set(threadId, interruptCoordinatorSelectedSkill)
+      activeCoordinatorExplicitSelectedSkills.set(
+        threadId,
+        interruptCoordinatorExplicitSelectedSkill
+      )
+      activeCoordinatorTurnPrompts.set(threadId, interruptCoordinatorTurnPrompt)
+      activeCoordinatorNotificationSelectedSkills.set(
+        threadId,
+        interruptCoordinatorNotificationSelectedSkills
+      )
+      const persistedInterruptCoordinatorSelectedSkill =
+        parseCoordinatorSelectedSkillMetadata(metadata)
+      const persistedInterruptCoordinatorExplicitSelectedSkill =
+        parseCoordinatorExplicitSelectedSkillMetadata(metadata)
+      const persistedInterruptCoordinatorTurnPrompt = parseCoordinatorTurnPromptMetadata(metadata)
+      const persistedInterruptCoordinatorNotificationSelectedSkills =
+        parseCoordinatorNotificationSelectedSkillsMetadata(metadata)
+      const selectedSkillMetadataChanged = !coordinatorSelectedSkillEquals(
+        persistedInterruptCoordinatorSelectedSkill,
+        interruptCoordinatorSelectedSkill
+      )
+      const explicitSelectedSkillMetadataChanged = !coordinatorSelectedSkillEquals(
+        persistedInterruptCoordinatorExplicitSelectedSkill,
+        interruptCoordinatorExplicitSelectedSkill
+      )
+      const coordinatorTurnPromptMetadataChanged =
+        persistedInterruptCoordinatorTurnPrompt !== interruptCoordinatorTurnPrompt
+      const notificationSelectedSkillsMetadataChanged =
+        !coordinatorNotificationSelectedSkillsEqual(
+          persistedInterruptCoordinatorNotificationSelectedSkills,
+          interruptCoordinatorNotificationSelectedSkills
+        )
+      if (selectedSkillMetadataChanged) {
+        if (interruptCoordinatorSelectedSkill) {
+          metadata.coordinatorSelectedSkill = interruptCoordinatorSelectedSkill
+        } else {
+          delete metadata.coordinatorSelectedSkill
+        }
+      }
+      if (notificationSelectedSkillsMetadataChanged) {
+        setCoordinatorNotificationSelectedSkillsState(
+          threadId,
+          metadata,
+          interruptCoordinatorNotificationSelectedSkills
+        )
+      }
+      if (explicitSelectedSkillMetadataChanged) {
+        if (interruptCoordinatorExplicitSelectedSkill) {
+          metadata.coordinatorExplicitSelectedSkill = interruptCoordinatorExplicitSelectedSkill
+        } else {
+          delete metadata.coordinatorExplicitSelectedSkill
+        }
+      }
+      if (coordinatorTurnPromptMetadataChanged) {
+        if (interruptCoordinatorTurnPrompt) {
+          metadata.coordinatorTurnPrompt = interruptCoordinatorTurnPrompt
+        } else {
+          delete metadata.coordinatorTurnPrompt
+        }
+      }
+      if (
+        selectedSkillMetadataChanged ||
+        explicitSelectedSkillMetadataChanged ||
+        coordinatorTurnPromptMetadataChanged ||
+        notificationSelectedSkillsMetadataChanged
+      ) {
+        updateThread(threadId, { metadata: JSON.stringify(metadata) })
+      }
+      sendCoordinatorWorkers(window, channel, workers)
+    }
 
     const onWindowClosed = (): void => {
       console.log("[Agent] Window closed, aborting interrupt stream for thread:", threadId)
@@ -2433,12 +4264,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               threadId,
               workspacePath,
               modelId: candidateId,
+              coordinatorTurnPrompt: interruptCoordinatorTurnPrompt,
+              coordinatorSelectedSkill: interruptCoordinatorSelectedSkill,
+              coordinatorExplicitSelectedSkill: interruptCoordinatorExplicitSelectedSkill,
+              coordinatorNotificationSelectedSkills:
+                interruptCoordinatorNotificationSelectedSkills,
               abortSignal: abortController.signal,
               noSkillEvolutionTool: true,
               agentMode: interruptAgentMode,
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
-              onHookResult
+              onHookResult,
+              onCoordinatorWorkerEvent,
+              onCoordinatorNotificationAction
             })
             intStream = await intAgent.stream(null, interruptStreamConfig)
             intAgentRuntime = intAgent
@@ -2477,7 +4315,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               ? intUsedModelId.slice("custom:".length)
               : intUsedModelId
             const usedCfg = getCustomModelConfigs().find((c) => c.id === usedCfgId)
-            window.webContents.send(channel, {
+            safeSendToWindow(window, channel, {
               type: "custom",
               data: {
                 type: "routing_result",
@@ -2486,7 +4324,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 routeReason: `failover from ${intFailoverAttempts[0].modelId}`
               }
             })
-            window.webContents.send(channel, {
+            safeSendToWindow(window, channel, {
               type: "custom",
               data: {
                 type: "model_failover",
@@ -2520,11 +4358,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           for await (const chunk of source) {
             if (abortController.signal.aborted) break
             const [mode, data] = chunk as unknown as [string, unknown]
+            if (isCoordinatorWorkerStreamChunk(mode, data, threadId)) {
+              continue
+            }
             const serialized = serializeStreamData(data)
-            window.webContents.send(channel, {
+            safeSendToWindow(window, channel, {
               type: "stream",
               mode,
-              data: serialized
+              data: sanitizeStreamDataForRenderer(mode, serialized)
             })
             stopContextCollector.processStreamChunk(mode, serialized)
           }
@@ -2554,12 +4395,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               threadId,
               workspacePath,
               modelId: nextCandidate,
+              coordinatorTurnPrompt: interruptCoordinatorTurnPrompt,
+              coordinatorSelectedSkill: interruptCoordinatorSelectedSkill,
+              coordinatorExplicitSelectedSkill: interruptCoordinatorExplicitSelectedSkill,
+              coordinatorNotificationSelectedSkills:
+                interruptCoordinatorNotificationSelectedSkills,
               abortSignal: abortController.signal,
               noSkillEvolutionTool: true,
               agentMode: interruptAgentMode,
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
-              onHookResult
+              onHookResult,
+              onCoordinatorWorkerEvent,
+              onCoordinatorNotificationAction
             })
             activeIntStream = await nextAgent.stream(null, interruptStreamConfig)
             intAgentRuntime = nextAgent
@@ -2588,14 +4436,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             onHookResult
           })
 
-          if (!stopPassed) return
+          if (!stopPassed) {
+            clearInterruptCoordinatorNotificationSelectedSkillsOnExit = true
+            return
+          }
 
-          window.webContents.send(channel, { type: "done" })
+          clearInterruptCoordinatorNotificationSelectedSkillsOnExit = true
+          safeSendToWindow(window, channel, { type: "done" })
         }
       } else if (decision.type === "reject") {
         // For reject, we need to send a Command with reject decision
         // For now, just send done - the agent will see no resumption happened
-        window.webContents.send(channel, { type: "done" })
+        clearInterruptCoordinatorNotificationSelectedSkillsOnExit = true
+        safeSendToWindow(window, channel, { type: "done" })
       }
       // edit case handled similarly to approve with modified args
     } catch (error) {
@@ -2606,31 +4459,119 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           error.message.includes("Controller is already closed"))
 
       if (!isAbortError) {
+        clearInterruptCoordinatorNotificationSelectedSkillsOnExit = true
         console.error("[Agent] Interrupt error:", error)
-        window.webContents.send(channel, {
+        safeSendToWindow(window, channel, {
           type: "error",
           error: error instanceof Error ? error.message : "Unknown error"
         })
       }
     } finally {
-      activeRuns.delete(threadId)
+      window.removeListener("closed", onWindowClosed)
+      await settleInterruptDrainedCoordinatorNotifications("auto")
+      if (clearInterruptCoordinatorNotificationSelectedSkillsOnExit) {
+        const nextInterruptCoordinatorNotificationSelectedSkills =
+          omitCoordinatorNotificationSelectedSkills(
+            interruptCoordinatorNotificationSelectedSkills,
+            trackedInterruptCoordinatorNotificationIds
+          )
+        if (
+          !coordinatorNotificationSelectedSkillsEqual(
+            interruptCoordinatorNotificationSelectedSkills,
+            nextInterruptCoordinatorNotificationSelectedSkills
+          )
+        ) {
+          interruptCoordinatorNotificationSelectedSkills =
+            nextInterruptCoordinatorNotificationSelectedSkills ?? {}
+          setCoordinatorNotificationSelectedSkillsState(
+            threadId,
+            metadata,
+            nextInterruptCoordinatorNotificationSelectedSkills
+          )
+          updateThread(threadId, { metadata: JSON.stringify(metadata) })
+        }
+      }
+      const currentController = activeRuns.get(threadId)
+      const replacedByNewRun = Boolean(currentController && currentController !== abortController)
+      if (currentController === abortController) {
+        activeRuns.delete(threadId)
+      }
+      if (!replacedByNewRun) {
+        LocalSandbox.revokeGrantedAclsForRun(threadId).catch((err) => {
+          console.warn("[Agent] ACL cleanup error:", err)
+        })
+      }
+      if (activeRunSettled.get(threadId) === interruptRunSettledPromise) {
+        activeRunSettled.delete(threadId)
+      }
+      resolveInterruptRunSettled()
     }
   })
 
   // Handle cancellation
-  ipcMain.handle("agent:cancel", async (_event, { threadId }: AgentCancelParams) => {
-    const controller = activeRuns.get(threadId)
-    console.log(
-      `[Agent] cancel: threadId=${threadId}, hasController=${!!controller}, activeRuns=[${Array.from(activeRuns.keys()).join(", ")}]`
-    )
-    // Cancel any background tasks belonging to this thread (e.g. builds, tests)
-    LocalSandbox.cancelBackgroundTasks(threadId)
-    if (controller) {
-      controller.abort()
-      activeRuns.delete(threadId)
-      console.log(`[Agent] cancel: aborted controller for thread ${threadId}`)
-    } else {
-      console.warn(`[Agent] cancel: no active run found for thread ${threadId}`)
+  ipcMain.handle(
+    "agent:cancel",
+    async (event, { threadId, cancelWorkers = false }: AgentCancelParams) => {
+      const controller = activeRuns.get(threadId)
+      console.log(
+        `[Agent] cancel: threadId=${threadId}, hasController=${!!controller}, cancelWorkers=${cancelWorkers}, activeRuns=[${Array.from(activeRuns.keys()).join(", ")}]`
+      )
+      const workers = cancelWorkers
+        ? coordinatorWorkerManager.cancelWorkersForThread(
+            threadId,
+            "User cancelled coordinator workers.",
+            { suppressNotificationAutoRun: true }
+          )
+        : []
+      const window = BrowserWindow.fromWebContents(event.sender)
+      if (window && workers.length > 0) {
+        sendCoordinatorWorkers(
+          window,
+          `agent:stream:${threadId}`,
+          coordinatorWorkerManager.readWorkers(threadId)
+        )
+      }
+      if (workers.length > 0) {
+        void coordinatorWorkerManager
+          .waitForWorkerCleanup(
+            threadId,
+            workers.map((worker) => worker.worker_id)
+          )
+          .then(async () => {
+            await coordinatorWorkerManager.acknowledgeNotifications(
+              threadId,
+              workers.map((worker) => worker.worker_id)
+            )
+            if (!window || window.isDestroyed()) return
+            sendCoordinatorWorkers(
+              window,
+              `agent:stream:${threadId}`,
+              coordinatorWorkerManager.readWorkers(threadId)
+            )
+          })
+          .catch((error) => {
+            console.warn("[Agent] Failed to wait for coordinator worker cancellation:", error)
+            if (!window || window.isDestroyed()) return
+            sendCoordinatorWorkers(
+              window,
+              `agent:stream:${threadId}`,
+              coordinatorWorkerManager.readWorkers(threadId)
+            )
+          })
+      }
+      if (controller && !cancelWorkers) {
+        // Foreground cancellation should stop the active run and any thread-scoped
+        // background tasks it launched. "Stop background workers" uses the same IPC
+        // entrypoint with cancelWorkers=true and must not abort the foreground turn.
+        LocalSandbox.cancelBackgroundTasks(threadId)
+        controller.abort()
+        // Keep activeRuns populated until the run's finally block resolves activeRunSettled.
+        // A user can cancel and immediately send another message; the next invoke must wait
+        // for checkpoint/sandbox cleanup before opening a replacement stream.
+        console.log(`[Agent] cancel: aborted controller for thread ${threadId}`)
+      } else if (!controller && !cancelWorkers) {
+        console.warn(`[Agent] cancel: no active run found for thread ${threadId}`)
+      }
     }
-  })
+  )
 }

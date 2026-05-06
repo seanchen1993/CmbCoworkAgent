@@ -13,6 +13,7 @@ export interface AgentInvokeParams {
   message: string
   modelId?: string
   agentMode?: "normal" | "coordinator"
+  coordinatorInternalNotification?: boolean
 }
 
 export interface AgentResumeParams {
@@ -29,6 +30,7 @@ export interface AgentInterruptParams {
 
 export interface AgentCancelParams {
   threadId: string
+  cancelWorkers?: boolean
 }
 
 // Thread IPC
@@ -118,6 +120,7 @@ export type StreamEvent =
   | { type: "todos"; todos: Todo[] }
   | { type: "workspace"; files: FileInfo[]; path: string }
   | { type: "subagents"; subagents: Subagent[] }
+  | { type: "custom"; data: Record<string, unknown> }
   | { type: "done"; result: unknown }
   | { type: "error"; error: string }
 

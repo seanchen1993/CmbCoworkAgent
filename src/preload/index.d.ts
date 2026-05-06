@@ -33,6 +33,7 @@ import type {
   SavedCodeExecPreviewResult,
   SavedCodeExecToolUpdatePayload
 } from "../main/ipc/code-exec-tools"
+import type { CoordinatorWorkerSnapshot } from "../main/agent/coordinator-worker-manager"
 
 interface ElectronAPI {
   openExternal: Promise
@@ -112,7 +113,8 @@ interface CustomAPI {
       message: string,
       onEvent: (event: StreamEvent) => void,
       modelId?: string,
-      agentMode?: "normal" | "coordinator"
+      agentMode?: "normal" | "coordinator",
+      coordinatorInternalNotification?: boolean
     ) => () => void
     streamAgent: (
       threadId: string,
@@ -120,14 +122,18 @@ interface CustomAPI {
       command: unknown,
       onEvent: (event: StreamEvent) => void,
       modelId?: string,
-      agentMode?: "normal" | "coordinator"
+      agentMode?: "normal" | "coordinator",
+      coordinatorInternalNotification?: boolean
     ) => () => void
     interrupt: (
       threadId: string,
       decision: HITLDecision,
       onEvent?: (event: StreamEvent) => void
     ) => () => void
-    cancel: (threadId: string) => Promise<void>
+    cancel: (threadId: string, options?: { cancelWorkers?: boolean }) => Promise<void>
+    getCoordinatorWorkers: (threadId: string) => Promise<CoordinatorWorkerSnapshot[]>
+    hasCoordinatorWorkerNotifications: (threadId: string) => Promise<boolean>
+    isCoordinatorModeForced: () => Promise<boolean>
   }
   threads: {
     list: () => Promise<Thread[]>

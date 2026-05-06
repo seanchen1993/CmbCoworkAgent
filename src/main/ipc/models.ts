@@ -16,6 +16,11 @@ import { startWatching, stopWatching } from "../services/workspace-watcher"
 import { trackEvent } from "../services/event-reporter"
 import { getTracesDir } from "../agent/trace/collector"
 import type { AgentTrace } from "../agent/trace/types"
+import {
+  coordinatorWorkerManager,
+  deleteCoordinatorWorkerArtifacts
+} from "../agent/coordinator-worker-manager"
+import { forgetCoordinatorThreadState, hasActiveAgentRun } from "./agent"
 
 const execFileAsync = promisify(execFile)
 
@@ -145,6 +150,49 @@ function notifyWorkspaceFilesChanged(threadId: string, workspacePath: string): v
       win.webContents.send("workspace:files-changed", { threadId, workspacePath })
     }
   }
+}
+
+async function assertWorkspaceSwitchAllowed(
+  threadId: string,
+  currentPath: unknown,
+  nextPath: unknown
+): Promise<void> {
+  const normalizedCurrentPath =
+    typeof currentPath === "string" ? normalizeTrackedPath(currentPath) : ""
+  const normalizedNextPath =
+    typeof nextPath === "string" ? normalizeTrackedPath(nextPath) : ""
+  if (normalizedCurrentPath && normalizedCurrentPath === normalizedNextPath) return
+  if (currentPath === nextPath) return
+  if (hasActiveAgentRun(threadId)) {
+    throw new Error("当前线程仍有前台请求在执行，请等待该轮完成后再切换工作区。")
+  }
+  if (typeof currentPath === "string" && currentPath.trim()) {
+    await coordinatorWorkerManager.restoreWorkersForThread({
+      parentThreadId: threadId,
+      workspacePath: currentPath,
+      mode: "active"
+    })
+  }
+  const workers = coordinatorWorkerManager.readWorkers(threadId)
+  if (workers.length === 0) return
+  const blockingWorkers = workers.filter(
+    (worker) => worker.status === "running" || worker.notification_acknowledged === false
+  )
+  if (blockingWorkers.length === 0) {
+    await coordinatorWorkerManager.waitForWorkerCleanup(threadId)
+    coordinatorWorkerManager.forgetThread(threadId)
+    forgetCoordinatorThreadState(threadId)
+    if (typeof currentPath === "string" && currentPath.trim()) {
+      await deleteCoordinatorWorkerArtifacts(threadId, currentPath)
+    }
+    return
+  }
+  const workerList = blockingWorkers
+    .map((worker) => `${worker.worker_id}(${worker.role}/${worker.workload})`)
+    .join(", ")
+  throw new Error(
+    `当前线程仍有运行中或未处理通知的协同 worker，请先等待完成、处理通知或停止后台子代理后再切换工作区。相关 worker：${workerList}`
+  )
 }
 
 function normalizeTrackedPath(input: string): string {
@@ -1816,6 +1864,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       if (!thread) return null
 
       const metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
+      await assertWorkspaceSwitchAllowed(threadId, metadata.workspacePath, newPath)
       metadata.workspacePath = newPath
       clearThreadGitContextCache(metadata)
       updateThread(threadId, { metadata: JSON.stringify(metadata) })
@@ -1882,6 +1931,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       const thread = getThread(threadId)
       if (thread) {
         const metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
+        await assertWorkspaceSwitchAllowed(threadId, metadata.workspacePath, selectedPath)
         metadata.workspacePath = selectedPath
         clearThreadGitContextCache(metadata)
         updateThread(threadId, { metadata: JSON.stringify(metadata) })

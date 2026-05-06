@@ -85,9 +85,12 @@ const api = {
       message: string,
       onEvent: (event: StreamEvent) => void,
       modelId?: string,
-      agentMode?: "normal" | "coordinator"
+      agentMode?: "normal" | "coordinator",
+      coordinatorInternalNotification?: boolean
     ): (() => void) => {
-      const channel = `agent:stream:${threadId}`
+      const channel = coordinatorInternalNotification
+        ? `agent:stream:${threadId}:coordinator-internal`
+        : `agent:stream:${threadId}`
 
       const handler = (_: unknown, data: StreamEvent): void => {
         onEvent(data)
@@ -97,7 +100,13 @@ const api = {
       }
 
       ipcRenderer.on(channel, handler)
-      ipcRenderer.send("agent:invoke", { threadId, message, modelId, agentMode })
+      ipcRenderer.send("agent:invoke", {
+        threadId,
+        message,
+        modelId,
+        agentMode,
+        coordinatorInternalNotification
+      })
 
       return () => {
         ipcRenderer.removeListener(channel, handler)
@@ -109,9 +118,12 @@ const api = {
       command: unknown,
       onEvent: (event: StreamEvent) => void,
       modelId?: string,
-      agentMode?: "normal" | "coordinator"
+      agentMode?: "normal" | "coordinator",
+      coordinatorInternalNotification?: boolean
     ): (() => void) => {
-      const channel = `agent:stream:${threadId}`
+      const channel = coordinatorInternalNotification
+        ? `agent:stream:${threadId}:coordinator-internal`
+        : `agent:stream:${threadId}`
 
       const handler = (_: unknown, data: StreamEvent): void => {
         onEvent(data)
@@ -125,7 +137,13 @@ const api = {
       if (command) {
         ipcRenderer.send("agent:resume", { threadId, command, modelId, agentMode })
       } else {
-        ipcRenderer.send("agent:invoke", { threadId, message, modelId, agentMode })
+        ipcRenderer.send("agent:invoke", {
+          threadId,
+          message,
+          modelId,
+          agentMode,
+          coordinatorInternalNotification
+        })
       }
 
       return () => {
@@ -154,8 +172,19 @@ const api = {
         ipcRenderer.removeListener(channel, handler)
       }
     },
-    cancel: (threadId: string): Promise<void> => {
-      return ipcRenderer.invoke("agent:cancel", { threadId })
+    cancel: (threadId: string, options?: { cancelWorkers?: boolean }): Promise<void> => {
+      return ipcRenderer.invoke("agent:cancel", { threadId, ...options })
+    },
+    getCoordinatorWorkers: (threadId: string): Promise<unknown[]> => {
+      return ipcRenderer.invoke("agent:coordinator-workers", { threadId }) as Promise<unknown[]>
+    },
+    hasCoordinatorWorkerNotifications: (threadId: string): Promise<boolean> => {
+      return ipcRenderer.invoke("agent:coordinator-worker-notifications-pending", {
+        threadId
+      }) as Promise<boolean>
+    },
+    isCoordinatorModeForced: (): Promise<boolean> => {
+      return ipcRenderer.invoke("agent:coordinator-mode-forced") as Promise<boolean>
     }
   },
   threads: {

@@ -40,11 +40,12 @@ import { useShallow } from "zustand/react/shallow"
 import {
   useThreadState,
   useThreadStream,
+  type CoordinatorWorkerView,
   type SubagentInternalLogEntry
 } from "@/lib/thread-context"
 import { getFileType } from "@/lib/file-types"
 import { Badge } from "@/components/ui/badge"
-import { onOpenResourcePreview } from "@/lib/resource-preview-events"
+import { emitOpenResourcePreview, onOpenResourcePreview } from "@/lib/resource-preview-events"
 import type { Todo, SkillMetadata, PluginMetadata, LspConfig, LspStatus } from "@/types"
 import { SubagentCard } from "@/components/panels/SubagentPanel"
 import { LspPanel } from "@/components/customize/LspPanel"
@@ -206,7 +207,12 @@ export function RightPanel({
   const todos = threadState?.todos ?? []
   const workspaceFiles = threadState?.workspaceFiles ?? []
   const subagents = useMemo(() => threadState?.subagents ?? [], [threadState?.subagents])
+  const coordinatorWorkers = useMemo(
+    () => threadState?.coordinatorWorkers ?? [],
+    [threadState?.coordinatorWorkers]
+  )
   const runningSubagentIdsRef = useRef<Set<string>>(new Set())
+  const runningCoordinatorWorkerIdsRef = useRef<Set<string>>(new Set())
   const containerRef = useRef<HTMLDivElement>(null)
 
   const [previewPath, setPreviewPath] = useState<string | null>(null)
@@ -302,6 +308,24 @@ export function RightPanel({
 
     runningSubagentIdsRef.current = runningIds
   }, [subagents])
+
+  // Auto-open once when an async coordinator worker starts or continues.
+  useEffect(() => {
+    const runningIds = new Set(
+      coordinatorWorkers
+        .filter((worker) => worker.status === "running")
+        .map((worker) => worker.worker_id)
+    )
+    const hasNewRunning = Array.from(runningIds).some(
+      (id) => !runningCoordinatorWorkerIdsRef.current.has(id)
+    )
+
+    if (hasNewRunning) {
+      setAgentsOpen(true)
+    }
+
+    runningCoordinatorWorkerIdsRef.current = runningIds
+  }, [coordinatorWorkers])
 
   const lspHeaderStatus = useMemo(() => {
     if (!lspConfig) return null
@@ -1143,7 +1167,11 @@ export function RightPanel({
             <SectionHeader
               title="代理"
               icon={GitBranch}
-              badge={subagents.length + (skillGenerationAgent.phase !== null ? 1 : 0)}
+              badge={
+                subagents.length +
+                coordinatorWorkers.length +
+                (skillGenerationAgent.phase !== null ? 1 : 0)
+              }
               isOpen={agentsOpen}
               onToggle={() => setAgentsOpen((prev) => !prev)}
             />
@@ -1545,7 +1573,10 @@ function FilesContent(): React.JSX.Element {
     const cleanup = window.api.workspace.onFilesChanged(async (data) => {
       // Only reload if the event is for the current thread
       if (data.threadId === currentThreadId) {
-        console.log("[FilesContent] Files changed, reloading...", data)
+        console.log("[FilesContent] Files changed, reloading...", {
+          threadId: data.threadId,
+          workspacePath: data.workspacePath
+        })
         const result = await window.api.workspace.loadFromDisk(currentThreadId)
         if (result.success && result.files) {
           setWorkspaceFiles(result.files)
@@ -2224,9 +2255,14 @@ function AgentsContent(): React.JSX.Element {
   const retryInFlightRef = useRef(false)
   const threadState = useThreadState(currentThreadId)
   const subagents = threadState?.subagents ?? []
+  const coordinatorWorkers = threadState?.coordinatorWorkers ?? []
   const subagentToolCallCount = threadState?.subagentToolCallCount ?? 0
   const subagentInternalLogs = threadState?.subagentInternalLogs ?? []
   const hasRunningSubagent = subagents.some((subagent) => subagent.status === "running")
+  const hasRunningCoordinatorWorker = coordinatorWorkers.some(
+    (worker) => worker.status === "running"
+  )
+  const [sharedNowMs, setSharedNowMs] = useState(() => Date.now())
 
   const hasSkillGen = skillGenerationAgent.phase !== null
 
@@ -2244,8 +2280,15 @@ function AgentsContent(): React.JSX.Element {
       })
   }, [currentThreadId, skillRetryContext, setSkillGenerationPhase])
 
+  useEffect(() => {
+    if (!hasRunningSubagent && !hasRunningCoordinatorWorker) return
+    const timer = window.setInterval(() => setSharedNowMs(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [hasRunningSubagent, hasRunningCoordinatorWorker])
+
   if (
     subagents.length === 0 &&
+    coordinatorWorkers.length === 0 &&
     !hasSkillGen &&
     subagentToolCallCount === 0 &&
     subagentInternalLogs.length === 0
@@ -2266,6 +2309,7 @@ function AgentsContent(): React.JSX.Element {
           logs={subagentInternalLogs}
           toolCallCount={subagentToolCallCount}
           hasRunningSubagent={hasRunningSubagent}
+          nowMs={sharedNowMs}
         />
       )}
 
@@ -2290,21 +2334,281 @@ function AgentsContent(): React.JSX.Element {
       {subagents.map((agent) => (
         <SubagentCard key={agent.id} subagent={agent} />
       ))}
+      {coordinatorWorkers.map((worker) => (
+        <CoordinatorWorkerCard
+          key={worker.worker_id}
+          worker={worker}
+          threadId={currentThreadId ?? undefined}
+          nowMs={sharedNowMs}
+        />
+      ))}
     </div>
   )
+}
+
+function CoordinatorWorkerCard({
+  worker,
+  threadId,
+  nowMs
+}: {
+  worker: CoordinatorWorkerView
+  threadId?: string
+  nowMs: number
+}): React.JSX.Element {
+  const isRunning = worker.status === "running"
+  const [detailsOpen, setDetailsOpen] = useState(false)
+  const roleLabel = worker.role === "implementer" ? "实现者" : "验证者"
+  const workload = worker.workload ?? (worker.role === "verifier" ? "verify" : "write")
+  const ownedFiles = worker.owned_files ?? []
+  const workloadLabel = workload === "read_only" ? "只读" : workload === "verify" ? "验证" : "写入"
+  const statusMeta = getCoordinatorWorkerStatusMeta(worker.status)
+  const startedAtMs = safeDateMs(worker.last_started_at ?? worker.created_at)
+  const completedAtMs = isRunning
+    ? nowMs
+    : deriveCoordinatorWorkerCompletedAtMs(worker, startedAtMs)
+  const durationMs = isRunning
+    ? Math.max(0, nowMs - startedAtMs)
+    : (worker.duration_ms ?? Math.max(0, completedAtMs - startedAtMs))
+  const activityAgoMs = worker.last_activity_at
+    ? Math.max(0, nowMs - safeDateMs(worker.last_activity_at))
+    : null
+  const activityLabel =
+    isRunning && activityAgoMs !== null ? `${formatCompactElapsed(activityAgoMs)}无新工具` : null
+  const StatusIcon = statusMeta.icon
+
+  const openWorkerFile = useCallback(
+    (filePath?: string) => {
+      if (!threadId || !filePath) return
+      emitOpenResourcePreview({
+        threadId,
+        filePath: resolveCoordinatorWorkerPreviewPath(worker.parent_thread_id, filePath)
+      })
+    },
+    [threadId, worker.parent_thread_id]
+  )
+
+  const tokenLabel = formatCoordinatorWorkerTokenUsage(worker.token_usage)
+  const hasAnyFile = Boolean(worker.result_path || worker.report_path || worker.transcript_path)
+
+  return (
+    <div
+      className={cn(
+        "rounded-2xl border bg-gradient-to-br from-background to-muted/25 p-3 text-xs shadow-sm",
+        isRunning
+          ? "border-blue-300/80 shadow-blue-500/10"
+          : worker.status === "completed"
+            ? "border-emerald-300/60"
+            : worker.status === "failed"
+              ? "border-red-300/60"
+              : "border-muted-foreground/20"
+      )}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 space-y-1">
+          <div className="flex min-w-0 items-center gap-2">
+            <StatusIcon className={cn("size-4 shrink-0", statusMeta.iconClass)} />
+            <span className="truncate text-[13px] font-semibold text-foreground">{roleLabel}</span>
+            <Badge variant="outline" className="h-5 rounded-full px-2 text-[10px]">
+              {worker.turns} 轮
+            </Badge>
+            <Badge variant="secondary" className="h-5 rounded-full px-2 text-[10px]">
+              {workloadLabel}
+            </Badge>
+          </div>
+          <div className="line-clamp-2 text-muted-foreground">{worker.description}</div>
+        </div>
+        <Badge className={cn("shrink-0 rounded-full", statusMeta.badgeClass)}>
+          {statusMeta.label}
+        </Badge>
+      </div>
+
+      <div className="mt-3 rounded-xl border border-border/55 bg-background/75 px-3 py-2.5">
+        <div className="flex items-center justify-between gap-2">
+          <span className="flex min-w-0 items-center gap-2 font-medium text-sky-700 dark:text-sky-300">
+            <Code2 className="size-3.5 shrink-0" />
+            <span className="truncate">{worker.last_tool_name || "等待工具调用"}</span>
+          </span>
+          <Badge variant="outline" className="h-5 rounded-full px-2 text-[10px]">
+            {worker.tool_call_count} 次
+          </Badge>
+        </div>
+        <div className="mt-2 space-y-1 text-[11px] leading-relaxed text-muted-foreground">
+          <div className="truncate">
+            <span className="text-foreground/70">状态：</span>
+            {activityLabel || compactInline(worker.last_event || statusMeta.label)}
+          </div>
+          <div className="truncate">
+            <span className="text-foreground/70">耗时：</span>
+            {formatCompactElapsed(durationMs)}
+          </div>
+          {(worker.summary || worker.error || worker.result_path || worker.report_path) && (
+            <div className="truncate">
+              <span className="text-foreground/70">
+                {worker.status === "failed" || worker.status === "cancelled" ? "结果：" : "摘要："}
+              </span>
+              {compactInline(
+                worker.error || worker.summary || worker.result_path || worker.report_path || ""
+              )}
+            </div>
+          )}
+          {tokenLabel && (
+            <div className="truncate">
+              <span className="text-foreground/70">Token：</span>
+              {tokenLabel}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {(hasAnyFile || ownedFiles.length > 0 || tokenLabel) && (
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          {worker.result_path && (
+            <button
+              type="button"
+              onClick={() => openWorkerFile(worker.result_path)}
+              className="rounded-full border border-border/70 px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent/40 hover:text-foreground"
+            >
+              结果
+            </button>
+          )}
+          {worker.report_path && (
+            <button
+              type="button"
+              onClick={() => openWorkerFile(worker.report_path)}
+              className="rounded-full border border-border/70 px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent/40 hover:text-foreground"
+            >
+              报告
+            </button>
+          )}
+          {worker.transcript_path && (
+            <button
+              type="button"
+              onClick={() => openWorkerFile(worker.transcript_path)}
+              className="rounded-full border border-border/70 px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent/40 hover:text-foreground"
+            >
+              日志
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setDetailsOpen((open) => !open)}
+            className="rounded-full border border-border/70 px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent/40 hover:text-foreground"
+          >
+            {detailsOpen ? "收起细节" : "查看细节"}
+          </button>
+        </div>
+      )}
+
+      {detailsOpen && (
+        <div className="mt-2 space-y-1 rounded-xl border border-border/50 bg-muted/25 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
+          <div className="truncate">
+            <span className="text-foreground/70">Worker：</span>
+            {worker.worker_id}
+          </div>
+          <div className="truncate">
+            <span className="text-foreground/70">Thread：</span>
+            {worker.worker_thread_id}
+          </div>
+          {ownedFiles.length > 0 && (
+            <div className="line-clamp-2">
+              <span className="text-foreground/70">Owned files：</span>
+              {ownedFiles.join(", ")}
+            </div>
+          )}
+          {worker.result_path && (
+            <div className="truncate">
+              <span className="text-foreground/70">Result：</span>
+              {worker.result_path}
+            </div>
+          )}
+          {worker.transcript_path && (
+            <div className="truncate">
+              <span className="text-foreground/70">Transcript：</span>
+              {worker.transcript_path}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function getCoordinatorWorkerStatusMeta(status: CoordinatorWorkerView["status"]): {
+  label: string
+  icon: React.ElementType
+  iconClass: string
+  badgeClass: string
+} {
+  if (status === "running") {
+    return {
+      label: "运行中",
+      icon: Loader2,
+      iconClass: "animate-spin text-blue-600 dark:text-blue-400",
+      badgeClass: "bg-blue-500/10 text-blue-700 hover:bg-blue-500/10 dark:text-blue-300"
+    }
+  }
+  if (status === "completed") {
+    return {
+      label: "已完成",
+      icon: CheckCircle2,
+      iconClass: "text-emerald-600 dark:text-emerald-400",
+      badgeClass: "bg-emerald-500/10 text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-300"
+    }
+  }
+  if (status === "failed") {
+    return {
+      label: "失败",
+      icon: AlertCircle,
+      iconClass: "text-red-600 dark:text-red-400",
+      badgeClass: "bg-red-500/10 text-red-700 hover:bg-red-500/10 dark:text-red-300"
+    }
+  }
+  return {
+    label: "已取消",
+    icon: XCircle,
+    iconClass: "text-muted-foreground",
+    badgeClass: "bg-muted text-muted-foreground hover:bg-muted"
+  }
+}
+
+function formatCoordinatorWorkerTokenUsage(
+  usage: CoordinatorWorkerView["token_usage"] | undefined
+): string {
+  if (!usage) return ""
+  const total = usage.total_tokens
+  const input = usage.input_tokens
+  const output = usage.output_tokens
+  const parts = [
+    typeof total === "number" ? `总 ${total}` : "",
+    typeof input === "number" ? `输入 ${input}` : "",
+    typeof output === "number" ? `输出 ${output}` : ""
+  ].filter(Boolean)
+  return parts.join("，")
+}
+
+function resolveCoordinatorWorkerPreviewPath(threadId: string, filePath: string): string {
+  const normalized = filePath.trim().replace(/\\/g, "/")
+  if (!normalized) return normalized
+  if (normalized.startsWith(".cmbdevclaw/") || isAbsolutePath(normalized)) return normalized
+  if (normalized.startsWith("reports/") || normalized === "state.json") {
+    return `.cmbdevclaw/coordinator/${threadId}/${normalized}`
+  }
+  return normalized
 }
 
 function SubagentCurrentToolCard({
   logs,
   toolCallCount,
-  hasRunningSubagent
+  hasRunningSubagent,
+  nowMs
 }: {
   logs: SubagentInternalLogEntry[]
   toolCallCount: number
   hasRunningSubagent: boolean
+  nowMs: number
 }): React.JSX.Element {
-  const [nowMs, setNowMs] = useState(() => Date.now())
-  const currentLog = [...logs].reverse().find((log) => log.toolCallId || log.toolName) ?? logs.at(-1)
+  const currentLog =
+    [...logs].reverse().find((log) => log.toolCallId || log.toolName) ?? logs.at(-1)
   const isToolWaiting = currentLog
     ? currentLog.status !== "completed" && currentLog.result === undefined
     : toolCallCount > 0
@@ -2315,9 +2619,10 @@ function SubagentCurrentToolCard({
     currentLog.result !== undefined
   const isMissingFinalResult = !hasRunningSubagent && isToolWaiting && !!currentLog
   const isActive = hasRunningSubagent && (isToolWaiting || isAwaitingNextStep || !currentLog)
-  const lastActivityMs = currentLog?.createdAt
-    ? Math.max(0, nowMs - new Date(currentLog.createdAt).getTime())
-    : null
+  const lastActivityMs =
+    hasRunningSubagent && currentLog?.createdAt
+      ? Math.max(0, nowMs - new Date(currentLog.createdAt).getTime())
+      : null
   const lastActivityLabel = lastActivityMs === null ? null : formatCompactElapsed(lastActivityMs)
   const inputSummary = summarizeSubagentToolInput(currentLog)
   const resultSummary = summarizeSubagentToolResult(
@@ -2325,13 +2630,6 @@ function SubagentCurrentToolCard({
     hasRunningSubagent,
     lastActivityLabel
   )
-
-  useEffect(() => {
-    if (!hasRunningSubagent) return
-
-    const timer = window.setInterval(() => setNowMs(Date.now()), 1000)
-    return () => window.clearInterval(timer)
-  }, [hasRunningSubagent])
 
   return (
     <div className="rounded-2xl border border-border/70 bg-gradient-to-br from-background to-muted/30 p-3 text-xs shadow-sm">
@@ -2369,8 +2667,8 @@ function SubagentCurrentToolCard({
               isMissingFinalResult
                 ? "bg-amber-500/10 text-amber-700 dark:text-amber-300"
                 : isActive
-                ? "bg-sky-500/10 text-sky-700 dark:text-sky-300"
-                : "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                  ? "bg-sky-500/10 text-sky-700 dark:text-sky-300"
+                  : "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
             )}
           >
             {isMissingFinalResult
@@ -2466,7 +2764,12 @@ function firstString(...values: unknown[]): string | null {
 }
 
 function firstLine(value: string): string {
-  return value.split(/\r?\n/).find((line) => line.trim())?.trim() ?? ""
+  return (
+    value
+      .split(/\r?\n/)
+      .find((line) => line.trim())
+      ?.trim() ?? ""
+  )
 }
 
 function compactInline(value: string): string {
@@ -2481,7 +2784,27 @@ function compactPath(value: string): string {
   return `...${compacted.slice(-69)}`
 }
 
+function safeDateMs(value: string | undefined): number {
+  if (!value) return Date.now()
+  const timestamp = new Date(value).getTime()
+  return Number.isFinite(timestamp) ? timestamp : Date.now()
+}
+
+function deriveCoordinatorWorkerCompletedAtMs(
+  worker: CoordinatorWorkerView,
+  startedAtMs: number
+): number {
+  if (worker.finished_at) return safeDateMs(worker.finished_at)
+  if (worker.last_activity_at) return safeDateMs(worker.last_activity_at)
+  if (worker.updated_at) return safeDateMs(worker.updated_at)
+  if (typeof worker.duration_ms === "number" && Number.isFinite(worker.duration_ms)) {
+    return startedAtMs + Math.max(0, worker.duration_ms)
+  }
+  return startedAtMs
+}
+
 function formatCompactElapsed(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "刚刚"
   if (ms < 1000) return "刚刚"
 
   const seconds = Math.floor(ms / 1000)

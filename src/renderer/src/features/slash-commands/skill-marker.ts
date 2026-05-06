@@ -58,9 +58,29 @@ function unescapeXml(s: string): string {
  * one blank line). They are free to put attachments in between too; the chip
  * parser anchors on `lastIndexOf` so anything preceding the tag is preserved.
  */
-export function formatSkillUseBlock(skill: { name: string; path: string }): string {
+function optionalXmlLine(tag: string, value: string | undefined): string {
+  const trimmed = value?.trim()
+  return trimmed ? `<${tag}>${escapeXml(trimmed)}</${tag}>\n` : ""
+}
+
+function skillWhenToUse(skill: {
+  metadata?: Record<string, string> | null
+}): string | undefined {
+  const metadata = skill.metadata ?? undefined
+  return metadata?.whenToUse ?? metadata?.["when-to-use"] ?? metadata?.when_to_use
+}
+
+export function formatSkillUseBlock(skill: {
+  name: string
+  path: string
+  description?: string | null
+  metadata?: Record<string, string> | null
+  allowedTools?: string[] | null
+}): string {
   const name = skill.name.trim()
   const path = skill.path.trim()
+  const allowedTools =
+    skill.allowedTools && skill.allowedTools.length > 0 ? skill.allowedTools.join(", ") : undefined
   return (
     `<${TAG_NAME}>\n` +
     `<instruction>\n` +
@@ -71,6 +91,9 @@ export function formatSkillUseBlock(skill: { name: string; path: string }): stri
     `- 始终使用中文回答。\n` +
     `</instruction>\n` +
     `<name>${escapeXml(name)}</name>\n` +
+    optionalXmlLine("description", skill.description ?? undefined) +
+    optionalXmlLine("when_to_use", skillWhenToUse(skill)) +
+    optionalXmlLine("allowed_tools", allowedTools) +
     `<path>${escapeXml(path)}</path>\n` +
     `</${TAG_NAME}>`
   )

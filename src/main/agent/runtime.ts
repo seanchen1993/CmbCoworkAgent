@@ -17,7 +17,8 @@ import {
   isMemoryEnabled,
   getSkillEvolutionThreshold as getStoredSkillEvolutionThreshold,
   DEFAULT_MAX_TOKENS,
-  getEnabledPluginSkillsSources
+  getEnabledPluginSkillsSources,
+  getGlobalRoutingMode
 } from "../storage"
 
 import { ChatOpenAI } from "@langchain/openai"
@@ -25,6 +26,7 @@ import { DynamicStructuredTool, ToolInputParsingException } from "@langchain/cor
 import { SqlJsSaver } from "../checkpointer/sqljs-saver"
 import { LocalSandbox } from "./local-sandbox"
 import type { HookResultCallback } from "../hooks/runner"
+import type { HookResult } from "../hooks/types"
 import {
   createAgent,
   createMiddleware,
@@ -34,11 +36,13 @@ import {
   ToolInvocationError,
   todoListMiddleware,
   anthropicPromptCachingMiddleware,
-  humanInTheLoopMiddleware
+  humanInTheLoopMiddleware,
+  tool as createLangChainTool
 } from "langchain"
-import { ToolMessage } from "@langchain/core/messages"
+import { HumanMessage, ToolMessage } from "@langchain/core/messages"
 import { Runnable } from "@langchain/core/runnables"
 import { isGraphBubbleUp } from "@langchain/langgraph"
+import { z } from "zod"
 
 import type * as _lcTypes from "langchain"
 import type * as _lcMessages from "@langchain/core/messages"
@@ -67,10 +71,18 @@ import { createPlaywrightTool } from "./tools/playwright-tool"
 import { createToolSearchTools } from "./tools/tool-search-tool"
 import { createCodeExecTool } from "./tools/code-exec-tool"
 import { listSavedCodeExecTools } from "../code-exec/saved-tool-store"
-import { getWindowsSandboxMode, getYoloMode, getEnabledHooks, isCodeExecEnabled, getLspConfig } from "../storage"
+import {
+  getWindowsSandboxMode,
+  getYoloMode,
+  getEnabledHooks,
+  isCodeExecEnabled,
+  getLspConfig
+} from "../storage"
 import { runHooks } from "../hooks/runner"
+import { runHooksEnriched } from "../hooks/required-skill"
 import { ApprovalStore } from "./approval-store"
 import { ToolOrchestrator } from "./tool-orchestrator"
+import { SkillUsageDetector } from "./skill-evolution/usage-detector"
 import type { ApprovalRequest, ApprovalDecision } from "../types"
 import type { McpCapabilityService, McpCapabilityTool } from "../mcp/capability-types"
 import {
@@ -89,10 +101,36 @@ import {
 import {
   buildCoordinatorSystemPrompt,
   buildCoordinatorTaskPrompt,
-  buildHarnessSubagents,
-  createCoordinatorHarnessTools,
-  type AgentMode
-} from "./coordinator-harness"
+  buildCoordinatorWorkerSubagents,
+  createCoordinatorWorkerTools,
+  injectSelectedSkillIntoWorkerPrompt,
+  type AgentMode,
+  type CoordinatorSelectedSkill
+} from "./coordinator-mode"
+import {
+  coordinatorWorkerManager,
+  type CoordinatorWorkerSnapshot,
+  type CoordinatorWorkerUpdateEvent,
+  type CoordinatorWorkerRole,
+  type CoordinatorWorkerRunner,
+  type CoordinatorWorkerTokenUsage,
+  type CoordinatorWorkerWorkload
+} from "./coordinator-worker-manager"
+import {
+  applyCoordinatorWorkerFilesystemAccess,
+  filterCoordinatorWorkerFinalTools
+} from "./coordinator-worker-access"
+import {
+  createWorkerValuesSnapshotContext,
+  extractWorkerFinalText,
+  extractWorkerTranscriptLine,
+  extractWorkerUsage,
+  observeWorkerProgress,
+  summarizeWorkerText,
+  type WorkerValuesSnapshotContext
+} from "./coordinator-worker-stream"
+import { buildOrderedChain, isRetryableApiError } from "./failover"
+import { resolveModel } from "../routing"
 
 /** Decompress codex.exe.gz → codex.exe if needed (re-extract if .gz is newer than .exe). */
 async function ensureCodexExe(exePath: string): Promise<void> {
@@ -102,7 +140,11 @@ async function ensureCodexExe(exePath: string): Promise<void> {
     // Skip if exe is up-to-date (gz not newer)
     if (statSync(exePath).mtimeMs >= statSync(gzPath).mtimeMs) return
     // gz is newer — remove stale exe before re-extracting
-    try { unlinkSync(exePath) } catch { /* ignore */ }
+    try {
+      unlinkSync(exePath)
+    } catch {
+      /* ignore */
+    }
   }
   try {
     await pipeline(createReadStream(gzPath), createGunzip(), createWriteStream(exePath))
@@ -115,11 +157,14 @@ async function ensureCodexExe(exePath: string): Promise<void> {
 // ── Pending Approvals (shared between orchestrator and IPC) ──
 
 /** Map of pending approval promises keyed by request ID. */
-export const pendingApprovals = new Map<string, {
-  resolve: (decision: ApprovalDecision) => void
-  request: ApprovalRequest
-  targetWebContentsIds: number[]
-}>()
+export const pendingApprovals = new Map<
+  string,
+  {
+    resolve: (decision: ApprovalDecision) => void
+    request: ApprovalRequest
+    targetWebContentsIds: number[]
+  }
+>()
 
 /** Per-thread approval store cache. */
 const approvalStores = new Map<string, ApprovalStore>()
@@ -255,7 +300,9 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     mainTodosEnabled = true,
     subagentDefaultTools,
     taskSystemPrompt = SEQUENTIAL_TASK_PROMPT,
-    includeGeneralPurposeSubagent = true
+    includeGeneralPurposeSubagent = true,
+    mainSubagentsEnabled = true,
+    filesystemAccess
   } = params
 
   // --- systemPrompt handling (identical to original) ---
@@ -274,7 +321,6 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const filesystemBackend = backend ? backend : (config: any) => new StateBackend(config)
-
   const skillsMiddlewareArray =
     skills != null && skills.length > 0
       ? [createSkillsMiddleware({ backend: filesystemBackend, sources: skills })]
@@ -329,9 +375,13 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     if (grepTool?.schema?.shape?.pattern) {
       const oldDesc = grepTool.schema.shape.pattern.description ?? "(unknown)"
       grepTool.schema = grepTool.schema.extend({
-        pattern: grepTool.schema.shape.pattern.describe("Text pattern to search for (literal, not regex)")
+        pattern: grepTool.schema.shape.pattern.describe(
+          "Text pattern to search for (literal, not regex)"
+        )
       })
-      console.log(`[Runtime] grep schema patched: "${oldDesc}" → "${grepTool.schema.shape.pattern.description}"`)
+      console.log(
+        `[Runtime] grep schema patched: "${oldDesc}" → "${grepTool.schema.shape.pattern.description}"`
+      )
     } else {
       console.warn("[Runtime] grep tool schema patch skipped: tool or pattern field not found")
     }
@@ -339,32 +389,51 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     // Replace the default execute tool with a version that supports run_in_background.
     // Long-running commands (builds, dependency downloads) can be started in background
     // and their output retrieved later via task_output tool.
-    const { tool: lcTool } = require("langchain") as typeof import("langchain")
-    const { z } = require("zod") as typeof import("zod")
-
-    const executeIdx = mw.tools?.findIndex((t: any) => t.name === "execute") ?? -1
+    type ExecuteTool = {
+      name?: string
+      description?: string
+      invoke: (input: {
+        command: string
+        run_in_background?: boolean
+      }) => Promise<unknown> | unknown
+    }
+    const executeIdx = mw.tools?.findIndex((t: { name?: string }) => t.name === "execute") ?? -1
     if (executeIdx >= 0) {
-      const oldExecute = mw.tools![executeIdx]
-      const customExecute = lcTool(async (input: { command: string; run_in_background?: boolean }) => {
-        if (input.run_in_background) {
-          const taskId = await (filesystemBackend as LocalSandbox).executeBackground(input.command)
-          return `Background task started (id: ${taskId}). Use task_output tool with this id to check results later.`
+      const oldExecute = mw.tools![executeIdx] as ExecuteTool
+      const customExecute = createLangChainTool(
+        async (input: { command: string; run_in_background?: boolean }): Promise<string> => {
+          if (input.run_in_background) {
+            const taskId = await (filesystemBackend as LocalSandbox).executeBackground(
+              input.command
+            )
+            return `Background task started (id: ${taskId}). Use task_output tool with this id to check results later.`
+          }
+          // Delegate to original execute handler for foreground execution
+          const result = await oldExecute.invoke(input)
+          if (typeof result === "string") return result
+          try {
+            return JSON.stringify(result) ?? String(result)
+          } catch {
+            return String(result)
+          }
+        },
+        {
+          name: "execute",
+          description: oldExecute.description,
+          schema: z.object({
+            command: z.string().describe("The shell command to execute"),
+            run_in_background: z
+              .boolean()
+              .optional()
+              .describe(
+                "Set to true to run the command in the background. Returns a task ID immediately. " +
+                  "Use this for long-running commands like builds, dependency downloads, or test suites. " +
+                  "Retrieve the result later with the task_output tool."
+              )
+          })
         }
-        // Delegate to original execute handler for foreground execution
-        return (oldExecute as any).invoke(input)
-      }, {
-        name: "execute",
-        description: (oldExecute as any).description,
-        schema: z.object({
-          command: z.string().describe("The shell command to execute"),
-          run_in_background: z.boolean().optional().describe(
-            "Set to true to run the command in the background. Returns a task ID immediately. " +
-            "Use this for long-running commands like builds, dependency downloads, or test suites. " +
-            "Retrieve the result later with the task_output tool."
-          )
-        })
-      })
-      mw.tools![executeIdx] = customExecute
+      )
+      ;(mw.tools as unknown as unknown[])[executeIdx] = customExecute
       console.log("[Runtime] execute tool patched: added run_in_background support")
     }
 
@@ -372,63 +441,84 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     // Mirrors Claude Code's TaskOutput: blocks internally (100ms poll loop)
     // until the task completes or the timeout expires, so the LLM only needs
     // one tool call per check instead of burning tokens on repeated polls.
-    const taskOutputTool = lcTool(async (input: { task_id: string; block?: boolean; timeout?: number }) => {
-      const sandbox = filesystemBackend as LocalSandbox
-      const block = input.block !== false  // default true
-      const timeout = input.timeout ?? 30_000 // default 30s, max 600s
+    const taskOutputTool = createLangChainTool(
+      async (input: { task_id: string; block?: boolean; timeout?: number }) => {
+        const sandbox = filesystemBackend as LocalSandbox
+        const block = input.block !== false // default true
+        const timeout = input.timeout ?? 30_000 // default 30s, max 600s
 
-      // Non-blocking: return immediately
-      if (!block) {
-        const result = sandbox.getTaskOutput(input.task_id)
-        if (!result) return `Error: No background task found with id "${input.task_id}".`
-        if (!result.completed) {
-          return JSON.stringify({ retrieval_status: "not_ready", elapsed: result.elapsedSeconds, command: result.command })
-        }
-        const status = result.exitCode === 0 ? "succeeded" : "failed"
-        return `${result.output ?? "<no output>"}\n[Command ${status} with exit code ${result.exitCode}, elapsed: ${result.elapsedSeconds}s]`
-      }
-
-      // Blocking: poll with progressive interval until completed, timeout, or abort.
-      // First 2s at 100ms for snappy response, then 500ms to reduce CPU spin.
-      const start = Date.now()
-      while (Date.now() - start < timeout) {
-        if (sandbox.isAborted) {
-          return "Task polling aborted: conversation was cancelled by user."
-        }
-        const result = sandbox.getTaskOutput(input.task_id)
-        if (!result) return `Error: No background task found with id "${input.task_id}".`
-        if (result.completed) {
+        // Non-blocking: return immediately
+        if (!block) {
+          const result = sandbox.getTaskOutput(input.task_id)
+          if (!result) return `Error: No background task found with id "${input.task_id}".`
+          if (!result.completed) {
+            return JSON.stringify({
+              retrieval_status: "not_ready",
+              elapsed: result.elapsedSeconds,
+              command: result.command
+            })
+          }
           const status = result.exitCode === 0 ? "succeeded" : "failed"
           return `${result.output ?? "<no output>"}\n[Command ${status} with exit code ${result.exitCode}, elapsed: ${result.elapsedSeconds}s]`
         }
-        const elapsed = Date.now() - start
-        await new Promise<void>(r => setTimeout(r, elapsed < 2000 ? 100 : 500))
-      }
 
-      // Timeout — return current status so the LLM can decide to call again
-      const final = sandbox.getTaskOutput(input.task_id)
-      if (!final) return `Error: No background task found with id "${input.task_id}".`
-      if (final.completed) {
-        const status = final.exitCode === 0 ? "succeeded" : "failed"
-        return `${final.output ?? "<no output>"}\n[Command ${status} with exit code ${final.exitCode}, elapsed: ${final.elapsedSeconds}s]`
+        // Blocking: poll with progressive interval until completed, timeout, or abort.
+        // First 2s at 100ms for snappy response, then 500ms to reduce CPU spin.
+        const start = Date.now()
+        while (Date.now() - start < timeout) {
+          if (sandbox.isAborted) {
+            return "Task polling aborted: conversation was cancelled by user."
+          }
+          const result = sandbox.getTaskOutput(input.task_id)
+          if (!result) return `Error: No background task found with id "${input.task_id}".`
+          if (result.completed) {
+            const status = result.exitCode === 0 ? "succeeded" : "failed"
+            return `${result.output ?? "<no output>"}\n[Command ${status} with exit code ${result.exitCode}, elapsed: ${result.elapsedSeconds}s]`
+          }
+          const elapsed = Date.now() - start
+          await new Promise<void>((r) => setTimeout(r, elapsed < 2000 ? 100 : 500))
+        }
+
+        // Timeout — return current status so the LLM can decide to call again
+        const final = sandbox.getTaskOutput(input.task_id)
+        if (!final) return `Error: No background task found with id "${input.task_id}".`
+        if (final.completed) {
+          const status = final.exitCode === 0 ? "succeeded" : "failed"
+          return `${final.output ?? "<no output>"}\n[Command ${status} with exit code ${final.exitCode}, elapsed: ${final.elapsedSeconds}s]`
+        }
+        return JSON.stringify({
+          retrieval_status: "timeout",
+          elapsed: final.elapsedSeconds,
+          command: final.command
+        })
+      },
+      {
+        name: "task_output",
+        description:
+          "Retrieve the output of a background task started with execute(run_in_background=true). " +
+          "By default blocks up to 30 seconds waiting for the task to complete. " +
+          "If the task finishes within the timeout, returns the full output. " +
+          "If it times out, returns current status — call again to continue waiting. " +
+          "Set block=false for a non-blocking status check.",
+        schema: z.object({
+          task_id: z
+            .string()
+            .describe("The task ID returned by execute when run_in_background was true"),
+          block: z.boolean().optional().describe("Whether to wait for completion (default: true)"),
+          timeout: z
+            .number()
+            .min(0)
+            .max(600_000)
+            .optional()
+            .describe("Max wait time in ms (default: 30000)")
+        })
       }
-      return JSON.stringify({ retrieval_status: "timeout", elapsed: final.elapsedSeconds, command: final.command })
-    }, {
-      name: "task_output",
-      description:
-        "Retrieve the output of a background task started with execute(run_in_background=true). " +
-        "By default blocks up to 30 seconds waiting for the task to complete. " +
-        "If the task finishes within the timeout, returns the full output. " +
-        "If it times out, returns current status — call again to continue waiting. " +
-        "Set block=false for a non-blocking status check.",
-      schema: z.object({
-        task_id: z.string().describe("The task ID returned by execute when run_in_background was true"),
-        block: z.boolean().optional().describe("Whether to wait for completion (default: true)"),
-        timeout: z.number().min(0).max(600_000).optional().describe("Max wait time in ms (default: 30000)")
-      })
-    })
+    )
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    mw.tools = [...(mw.tools || []), taskOutputTool] as any
+    mw.tools = applyCoordinatorWorkerFilesystemAccess(
+      [...(mw.tools || []), taskOutputTool],
+      filesystemAccess
+    ) as any
     console.log("[Runtime] task_output tool added")
 
     return mw
@@ -580,15 +670,19 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
       ...(mainTodosEnabled ? [todoListMiddleware()] : []),
       ...(mainFilesystemEnabled ? [createFsMiddleware()] : []),
       toolErrorMiddleware,
-      createSubAgentMiddleware({
-        defaultModel: model,
-        defaultTools: subagentDefaultTools ?? tools,
-        defaultMiddleware: subagentMiddleware,
-        defaultInterruptOn: null,
-        subagents: availableSubagents,
-        generalPurposeAgent: false,
-        systemPrompt: taskSystemPrompt
-      } as Parameters<typeof createSubAgentMiddleware>[0]),
+      ...(mainSubagentsEnabled
+        ? [
+            createSubAgentMiddleware({
+              defaultModel: model,
+              defaultTools: subagentDefaultTools ?? tools,
+              defaultMiddleware: subagentMiddleware,
+              defaultInterruptOn: null,
+              subagents: availableSubagents,
+              generalPurposeAgent: false,
+              systemPrompt: taskSystemPrompt
+            } as Parameters<typeof createSubAgentMiddleware>[0])
+          ]
+        : []),
       createSummarizationMiddleware(summarizationOptions),
       anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
       createPatchToolCallsMiddleware(),
@@ -614,12 +708,23 @@ export type DeepAgent = ReactAgent<any>
  * @param workspacePath - The workspace path the agent is operating in
  * @returns The complete system prompt
  */
-function getShellInfo(windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated"): { name: string; isBashLike: boolean; isPowerShell: boolean } {
-  const isSandboxed = process.platform === "win32" && (windowsSandbox === "unelevated" || windowsSandbox === "readonly" || windowsSandbox === "elevated")
+function getShellInfo(windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated"): {
+  name: string
+  isBashLike: boolean
+  isPowerShell: boolean
+} {
+  const isSandboxed =
+    process.platform === "win32" &&
+    (windowsSandbox === "unelevated" ||
+      windowsSandbox === "readonly" ||
+      windowsSandbox === "elevated")
   const resolved = isSandboxed
     ? LocalSandbox.resolvedWindowsSandboxShell()
     : LocalSandbox.resolvedShell()
-  const base = path.basename(resolved).replace(/\.exe$/i, "").toLowerCase()
+  const base = path
+    .basename(resolved)
+    .replace(/\.exe$/i, "")
+    .toLowerCase()
   const isBashLike = ["bash", "sh", "zsh"].includes(base)
   const isPowerShell = ["pwsh", "powershell"].includes(base)
   return { name: base, isBashLike, isPowerShell }
@@ -629,8 +734,12 @@ function getShellInfo(windowsSandbox?: "none" | "unelevated" | "readonly" | "ele
 function formatLocalISO(date: Date, timeZone: string): string {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone,
-    year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", second: "2-digit",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
     hour12: false
   }).formatToParts(date)
   const get = (type: string): string => parts.find((p) => p.type === type)?.value ?? ""
@@ -658,7 +767,10 @@ function getRuntimeTimeContext(date: Date = new Date()): {
   }
 }
 
-function getSystemPrompt(workspacePath: string, windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated"): string {
+function getSystemPrompt(
+  workspacePath: string,
+  windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated"
+): string {
   const isWindows = process.platform === "win32"
   const platform = isWindows ? "Windows" : process.platform === "darwin" ? "macOS" : "Linux"
   const { name: shell, isBashLike, isPowerShell } = getShellInfo(windowsSandbox)
@@ -719,8 +831,9 @@ ${shellGuidance}
 **切勿**对编译、安装依赖等命令使用前台执行，否则会因超时被终止。
 `
 
-  const sandboxSection = windowsSandbox === "readonly"
-    ? `
+  const sandboxSection =
+    windowsSandbox === "readonly"
+      ? `
 ### 只读沙箱模式
 
 **重要提示：** 你正在只读沙箱环境中运行。
@@ -729,8 +842,8 @@ ${shellGuidance}
 - 此模式适用于安全审查、代码分析等只读场景。
 - 除非用户明确要求，否则避免执行写入操作，应以建议修改替代直接写入。
 `
-    : windowsSandbox === "elevated"
-    ? `
+      : windowsSandbox === "elevated"
+        ? `
 ### Elevated 沙箱模式
 
 **重要提示：** 你正在 Elevated 沙箱环境中运行。
@@ -739,10 +852,12 @@ ${shellGuidance}
 - 你可以读写工作目录内的文件，但无法访问用户的个人目录（如 .ssh、.aws）。
 - 如果命令因权限不足失败，不要反复重试，向用户说明限制即可。
 `
-    : ""
+        : ""
 
   const memorySection = isMemoryEnabled() ? MEMORY_SYSTEM_PROMPT : ""
-  return workingDirSection + backgroundExecSection + sandboxSection + BASE_SYSTEM_PROMPT + memorySection
+  return (
+    workingDirSection + backgroundExecSection + sandboxSection + BASE_SYSTEM_PROMPT + memorySection
+  )
 }
 
 // Per-thread checkpointer cache
@@ -808,9 +923,30 @@ export async function getCheckpointer(threadId: string): Promise<SqlJsSaver> {
 export async function closeCheckpointer(threadId: string): Promise<void> {
   const checkpointer = checkpointers.get(threadId)
   if (checkpointer) {
-    await checkpointer.close()
     checkpointers.delete(threadId)
+    await checkpointer.close()
   }
+  approvalStores.delete(threadId)
+}
+
+export async function closeWorkerCheckpointersForThread(parentThreadId: string): Promise<void> {
+  if (parentThreadId.includes("__worker__")) {
+    console.warn(
+      `[Runtime] Skipping worker checkpoint cleanup for invalid coordinator parent thread id: ${parentThreadId}`
+    )
+    return
+  }
+  const prefix = `${parentThreadId}__worker__`
+  const entries = Array.from(checkpointers.entries()).filter(([threadId]) =>
+    threadId.startsWith(prefix)
+  )
+  await Promise.all(
+    entries.map(async ([threadId, checkpointer]) => {
+      checkpointers.delete(threadId)
+      approvalStores.delete(threadId)
+      await checkpointer.close()
+    })
+  )
 }
 
 // Get the model instance from custom model configuration
@@ -994,6 +1130,199 @@ function createRetryingFetch(
   }
 }
 
+const MAX_WORKER_STOP_HOOK_REVISIONS = 2
+const WORKER_STOP_HOOK_REVISION_PROMPT_PREFIX = "[[CMBDEVCLAW_STOP_HOOK_REVISION]]"
+
+function getWorkerStopHookBlockReason(result: HookResult): string {
+  return (
+    result.reason ||
+    result.stopReason ||
+    result.stdout ||
+    result.stderr ||
+    "Stop hook requested revision"
+  )
+}
+
+function buildWorkerStopRevisionPrompt(result: HookResult, attempt: number): string {
+  const parts = [
+    `${WORKER_STOP_HOOK_REVISION_PROMPT_PREFIX} Internal revision request. Do not mention this marker.`,
+    "A completion hook reviewed your previous worker result and requested a revision.",
+    "Revise the work now. Address the issue directly, run any checks that are needed, and then provide an updated final handoff.",
+    `Revision attempt: ${attempt}/${MAX_WORKER_STOP_HOOK_REVISIONS}`,
+    `Hook reason:\n${getWorkerStopHookBlockReason(result)}`
+  ]
+  if (result.additionalContext) {
+    parts.push(`Additional hook context:\n${result.additionalContext}`)
+  }
+  if (result.systemMessage) {
+    parts.push(`Hook message:\n${result.systemMessage}`)
+  }
+  return parts.join("\n\n")
+}
+
+async function applyWorkerPromptSubmitHooks({
+  prompt,
+  sessionId,
+  workspacePath,
+  onHookResult,
+  metadata
+}: {
+  prompt: string
+  sessionId: string
+  workspacePath: string
+  onHookResult?: HookResultCallback
+  metadata?: Record<string, unknown>
+}): Promise<string> {
+  let effectivePrompt = prompt
+  const promptSubmitResult = await runHooksEnriched(
+    getEnabledHooks(workspacePath),
+    "UserPromptSubmit",
+    {
+      toolArgs: { message: prompt, ...(metadata ?? {}) },
+      userPrompt: prompt,
+      workspacePath,
+      sessionId
+    },
+    onHookResult
+  )
+  if (promptSubmitResult?.blocked || promptSubmitResult?.continue === false) {
+    const reason =
+      promptSubmitResult.stopReason ||
+      promptSubmitResult.stderr ||
+      promptSubmitResult.stdout ||
+      "Worker prompt was blocked by hook policy."
+    throw new Error(reason)
+  }
+  const updatedPrompt =
+    promptSubmitResult?.updatedInput?.message ??
+    promptSubmitResult?.updatedInput?.prompt ??
+    promptSubmitResult?.updatedInput?.userPrompt
+  if (typeof updatedPrompt === "string" && updatedPrompt.length > 0) {
+    effectivePrompt = updatedPrompt
+  }
+  if (promptSubmitResult?.additionalContext) {
+    effectivePrompt = `${promptSubmitResult.additionalContext}\n\n${effectivePrompt}`
+  }
+  if (promptSubmitResult?.systemMessage) {
+    console.log("[CoordinatorWorker][UserPromptSubmit]", promptSubmitResult.systemMessage)
+  }
+  return effectivePrompt
+}
+
+function getWorkerStreamObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : null
+}
+
+function observeWorkerSkillUsage(
+  mode: string,
+  payload: unknown,
+  detector: SkillUsageDetector,
+  valuesContext?: WorkerValuesSnapshotContext
+): void {
+  const observeMessage = (message: unknown): void => {
+    const data = getWorkerStreamObject(message)
+    if (!data) return
+    const kwargs = getWorkerStreamObject(data.kwargs) ?? {}
+    const toolCalls = Array.isArray(kwargs.tool_calls)
+      ? kwargs.tool_calls
+      : Array.isArray(data.tool_calls)
+        ? data.tool_calls
+        : []
+    for (const rawToolCall of toolCalls) {
+      const toolCall = getWorkerStreamObject(rawToolCall)
+      if (!toolCall || toolCall.name !== "read_file") continue
+      const args = getWorkerStreamObject(toolCall.args) ?? {}
+      const readPathRaw =
+        (typeof args.path === "string" && args.path) ||
+        (typeof args.file_path === "string" && args.file_path) ||
+        ""
+      if (readPathRaw) {
+        detector.onReadFilePath(readPathRaw)
+      }
+    }
+  }
+
+  if (mode === "messages") {
+    if (!Array.isArray(payload)) return
+    const [message] = payload as [unknown]
+    observeMessage(message)
+    return
+  }
+
+  if (mode !== "values") return
+  const resolvedValuesContext = valuesContext ?? createWorkerValuesSnapshotContext(mode, payload)
+  if (!resolvedValuesContext) return
+  if (resolvedValuesContext.skillsMetadata.length > 0) {
+    detector.onSkillsMetadata(
+      resolvedValuesContext.skillsMetadata as Array<{
+        name?: string
+        path?: string
+      }>
+    )
+  }
+  resolvedValuesContext.messages.forEach((message) => observeMessage(message))
+}
+
+async function runWorkerStopHooksWithRevision({
+  sessionId,
+  workspacePath,
+  abortSignal,
+  getStopContext,
+  runRevision,
+  sendNotice,
+  sendError,
+  onHookResult
+}: {
+  sessionId: string
+  workspacePath: string
+  abortSignal: AbortSignal
+  getStopContext: () => {
+    userMessage?: string
+    assistantResponse?: string
+    toolCalls?: string[]
+    usedSkills?: string[]
+  }
+  runRevision: (prompt: string) => Promise<void>
+  sendNotice: (message: string) => void
+  sendError: (message: string) => void
+  onHookResult?: HookResultCallback
+}): Promise<boolean> {
+  let revisionCount = 0
+  while (!abortSignal.aborted) {
+    const stopResult = await runHooksEnriched(
+      getEnabledHooks(workspacePath),
+      "Stop",
+      {
+        workspacePath,
+        sessionId,
+        stopContext: getStopContext()
+      },
+      onHookResult
+    ).catch((error) => {
+      console.warn("[Hooks] Worker Stop hook error:", error)
+      return null
+    })
+
+    if (stopResult?.decision !== "block") return true
+    if (stopResult.systemMessage) sendNotice(stopResult.systemMessage)
+
+    const reason = getWorkerStopHookBlockReason(stopResult)
+    if (revisionCount >= MAX_WORKER_STOP_HOOK_REVISIONS) {
+      sendError(
+        `Stop hook blocked worker completion after ${MAX_WORKER_STOP_HOOK_REVISIONS} revision attempts: ${reason}`
+      )
+      return false
+    }
+
+    revisionCount += 1
+    sendNotice(
+      `Stop hook requested worker revision (${revisionCount}/${MAX_WORKER_STOP_HOOK_REVISIONS}): ${reason}`
+    )
+    await runRevision(buildWorkerStopRevisionPrompt(stopResult, revisionCount))
+  }
+  return false
+}
+
 /** Default fetch (no UI hooks) for model instances without a UI context (e.g. skill generation). */
 const defaultRetryingFetch = createRetryingFetch()
 
@@ -1049,6 +1378,8 @@ function getModelInstance(
 export interface CreateAgentRuntimeOptions {
   /** Thread ID - REQUIRED for per-thread checkpointing */
   threadId: string
+  /** Optional UI thread ID for approval prompts. Async worker runtimes keep their own checkpoint thread but surface approvals on the parent thread UI. */
+  approvalThreadId?: string
   /** Optional model ID from thread/runtime config */
   modelId?: string
   /** Workspace path - REQUIRED for agent to operate on files */
@@ -1061,8 +1392,24 @@ export interface CreateAgentRuntimeOptions {
   noSkillEvolutionTool?: boolean
   /** Load workspace AGENTS.md hierarchy into the main system prompt. */
   enableAgentsPrompt?: boolean
-  /** Runtime mode. "normal" preserves the existing agent; "coordinator" enables harness orchestration. */
+  /** Turn-scoped internal coordinator context injected only into the main coordinator prompt. */
+  coordinatorTurnPrompt?: string
+  /** Explicit /skill selection parsed from the current coordinator turn, if any. */
+  coordinatorSelectedSkill?: CoordinatorSelectedSkill
+  /** Explicit user-selected /skill preserved for notification-driven worker follow-ups. */
+  coordinatorExplicitSelectedSkill?: CoordinatorSelectedSkill
+  /** notification_id -> selected skill map for the current coordinator notification turn. */
+  coordinatorNotificationSelectedSkills?: Record<string, CoordinatorSelectedSkill | undefined>
+  /** Runtime mode. "normal" preserves the existing agent; "coordinator" enables async worker orchestration. */
   agentMode?: AgentMode
+  /** Disable the synchronous deepagents task tool for leaf runtimes such as coordinator async workers. */
+  disableSubagents?: boolean
+  /** Optional filesystem access limits for coordinator async worker leaf runtimes. */
+  filesystemAccess?: {
+    workload?: CoordinatorWorkerWorkload
+    ownedFiles?: string[]
+    workspacePath?: string
+  }
   /** AbortSignal — when signalled, any running child process is killed immediately. */
   abortSignal?: AbortSignal
   /** Optional hooks invoked when the model fetch layer retries / resolves. */
@@ -1073,6 +1420,14 @@ export interface CreateAgentRuntimeOptions {
   maxRetryAttempts?: number
   /** Callback invoked after each hook executes — used to emit results to the renderer. */
   onHookResult?: HookResultCallback
+  /** Coordinator async worker updates for renderer/UI observability. */
+  onCoordinatorWorkerEvent?: (event: {
+    worker: CoordinatorWorkerSnapshot
+    workers?: CoordinatorWorkerSnapshot[]
+    notification?: string
+    suppressNotificationAutoRun?: boolean
+  }) => void
+  onCoordinatorNotificationAction?: (notificationIds: string[]) => void
 }
 
 // Create agent runtime with configured model and checkpointer
@@ -1081,15 +1436,21 @@ export type AgentRuntime = ReturnType<typeof createAgent>
 export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Promise<DeepAgent> {
   const {
     threadId,
+    approvalThreadId: requestedApprovalThreadId,
     workspacePath,
     modelId,
     extraSystemPrompt,
+    coordinatorTurnPrompt,
     retryHooks,
     maxRetryAttempts,
     enableAgentsPrompt = true,
     agentMode = "normal",
-    onHookResult
+    disableSubagents = false,
+    onHookResult,
+    onCoordinatorWorkerEvent,
+    onCoordinatorNotificationAction
   } = options
+  const approvalThreadId = requestedApprovalThreadId ?? threadId
   const isCoordinatorMode = agentMode === "coordinator"
 
   if (!threadId) {
@@ -1107,13 +1468,15 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   console.log("[Runtime] Workspace path:", workspacePath)
   console.log("[Runtime] Agent mode:", agentMode)
 
-  const selectedModelId = modelId?.startsWith("custom:") ? modelId.slice("custom:".length) : undefined
+  const selectedModelId = modelId?.startsWith("custom:")
+    ? modelId.slice("custom:".length)
+    : undefined
 
   const allCustomConfigs = getCustomModelConfigs()
   const customConfig = selectedModelId
-    ? (allCustomConfigs.find((item) => item.id === selectedModelId) ||
+    ? allCustomConfigs.find((item) => item.id === selectedModelId) ||
       allCustomConfigs.find((item) => item.model === selectedModelId) ||
-      null)
+      null
     : (allCustomConfigs[0] ?? null)
   if (!customConfig) {
     throw new Error("Custom model not configured. Please configure a model in Settings.")
@@ -1139,9 +1502,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     const candidates = [
       resolve(__dirname, "../../resources"),
       join(app.getAppPath(), "resources"),
-      join(app.getAppPath(), "..", "resources"),
+      join(app.getAppPath(), "..", "resources")
     ]
-    resourceBase = candidates.find(c => existsSync(join(c, "bin"))) ?? resolve(__dirname, "../../resources")
+    resourceBase =
+      candidates.find((c) => existsSync(join(c, "bin"))) ?? resolve(__dirname, "../../resources")
   }
   const rgDir = join(resourceBase, "bin", process.platform)
   const rgBin = join(rgDir, process.platform === "win32" ? "rg.exe" : "rg")
@@ -1159,7 +1523,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   if (process.platform === "win32") await ensureCodexExe(codexExePath)
   const codexExists = process.platform === "win32" && existsSync(codexExePath)
   const windowsSandbox = process.platform === "win32" ? getWindowsSandboxMode() : "none"
-  console.log(`[Runtime] codex.exe: ${codexExePath}, exists: ${codexExists}, sandboxMode: ${windowsSandbox}`)
+  console.log(
+    `[Runtime] codex.exe: ${codexExePath}, exists: ${codexExists}, sandboxMode: ${windowsSandbox}`
+  )
 
   const enabledHooks = getEnabledHooks(workspacePath)
   console.log(`[Runtime] Loaded ${enabledHooks.length} enabled hooks`)
@@ -1180,51 +1546,87 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // ── Wire up the approval orchestrator ──
   const yoloMode = getYoloMode()
   let approvalStore: ApprovalStore | undefined
-  let requestApproval: ((req: ApprovalRequest) => Promise<ApprovalDecision>) | undefined
   // Keep the generic approval IPC available even in YOLO mode so code_exec can still
   // ask for post-run tool promotion confirmation. Shell/file approvals remain gated by
   // whether the orchestrator is mounted below.
   const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000
-  requestApproval = (req: ApprovalRequest): Promise<ApprovalDecision> => {
-    return new Promise<ApprovalDecision>((resolve) => {
-      const timeoutId = setTimeout(() => {
+	  const requestApproval = (req: ApprovalRequest): Promise<ApprovalDecision> => {
+	    return new Promise<ApprovalDecision>((resolve) => {
+	      let settled = false
+	      let timeoutId: ReturnType<typeof setTimeout> | undefined
+	      const resolveOnce = (decision: ApprovalDecision): void => {
+	        if (settled) return
+	        settled = true
+	        if (timeoutId) clearTimeout(timeoutId)
+        options.abortSignal?.removeEventListener("abort", onApprovalAbort)
+        pendingApprovals.delete(req.id)
+        resolve(decision)
+      }
+      const rejectDecision = (): ApprovalDecision => ({
+        type: "reject",
+        tool_call_id: req.tool_call?.id ?? req.id
+      })
+      const onApprovalAbort = (): void => {
+        if (!pendingApprovals.has(req.id)) return
+        console.log(`[Orchestrator] approval request cancelled: reqId=${req.id}`)
+        for (const win of BrowserWindow.getAllWindows()) {
+          win.webContents.send(`approval:timeout:${approvalThreadId}`, { requestId: req.id })
+        }
+        resolveOnce(rejectDecision())
+      }
+	      timeoutId = setTimeout(() => {
         if (pendingApprovals.has(req.id)) {
-          pendingApprovals.delete(req.id)
-          console.warn(`[Orchestrator] approval request timed out after ${APPROVAL_TIMEOUT_MS / 1000}s: reqId=${req.id}`)
+          console.warn(
+            `[Orchestrator] approval request timed out after ${APPROVAL_TIMEOUT_MS / 1000}s: reqId=${req.id}`
+          )
           for (const win of BrowserWindow.getAllWindows()) {
-            win.webContents.send(`approval:timeout:${threadId}`, { requestId: req.id })
+            win.webContents.send(`approval:timeout:${approvalThreadId}`, { requestId: req.id })
           }
-          resolve({ type: "reject", tool_call_id: req.tool_call?.id ?? req.id })
+          resolveOnce(rejectDecision())
         }
       }, APPROVAL_TIMEOUT_MS)
 
+      if (options.abortSignal?.aborted) {
+        resolveOnce(rejectDecision())
+        return
+      }
+      options.abortSignal?.addEventListener("abort", onApprovalAbort, { once: true })
       pendingApprovals.set(req.id, {
         resolve: (decision: ApprovalDecision) => {
-          clearTimeout(timeoutId)
-          resolve(decision)
+          resolveOnce(decision)
         },
         request: req,
-        targetWebContentsIds: BrowserWindow.getAllWindows().map(w => w.webContents.id)
+        targetWebContentsIds: BrowserWindow.getAllWindows().map((w) => w.webContents.id)
       })
-      console.log(`[Orchestrator] sending approval request on channel: approval:request:${threadId}, reqId=${req.id}, command=${req.command}`)
+      console.log(
+        `[Orchestrator] sending approval request on channel: approval:request:${approvalThreadId}, reqId=${req.id}, runtimeThreadId=${threadId}, command=${req.command}`
+      )
       // Fire Notification hook — agent is now waiting on user input.
       // Fire-and-forget so it doesn't delay the UI prompt.
-      runHooks(getEnabledHooks(workspacePath), "Notification", {
-        toolName: req.tool_call?.name,
-        toolArgs: { command: req.command, reason: req.reason, filePath: req.filePath },
-        workspacePath,
-        sessionId: threadId
-      }, onHookResult).catch((e) => console.warn("[Hooks] Notification hook error:", e))
+      runHooks(
+        getEnabledHooks(workspacePath),
+        "Notification",
+        {
+          toolName: req.tool_call?.name,
+          toolArgs: { command: req.command, reason: req.reason, filePath: req.filePath },
+          workspacePath,
+          sessionId: approvalThreadId
+        },
+        onHookResult
+      ).catch((e) => console.warn("[Hooks] Notification hook error:", e))
       for (const win of BrowserWindow.getAllWindows()) {
-        win.webContents.send(`approval:request:${threadId}`, req)
+        win.webContents.send(`approval:request:${approvalThreadId}`, req)
       }
     })
   }
 
   if (!yoloMode) {
-    approvalStore = getOrCreateApprovalStore(threadId)
+    approvalStore = getOrCreateApprovalStore(approvalThreadId)
 
-    const rawExecute = (command: string, sandboxMode?: string): Promise<import("deepagents").ExecuteResponse> => {
+    const rawExecute = (
+      command: string,
+      sandboxMode?: string
+    ): Promise<import("deepagents").ExecuteResponse> => {
       return backend.executeRaw(command, sandboxMode)
     }
 
@@ -1324,10 +1726,7 @@ The workspace root is: ${workspacePath}`
   if (isMemoryEnabled()) {
     const memoryStore = await getMemoryStore()
     const memoryDir = memoryStore.getMemoryDir()
-    memoryTools = [
-      createMemorySearchTool(memoryStore),
-      createMemoryGetTool(memoryStore)
-    ]
+    memoryTools = [createMemorySearchTool(memoryStore), createMemoryGetTool(memoryStore)]
     memorySources = [join(memoryDir, "MEMORY.md")]
     console.log("[Runtime] Memory initialized, dir:", memoryDir)
   } else {
@@ -1335,29 +1734,55 @@ The workspace root is: ${workspacePath}`
   }
 
   const capabilityService = getGlobalMcpCapabilityService()
+  const isConstrainedCoordinatorWorker =
+    Boolean(options.filesystemAccess) &&
+    (options.filesystemAccess?.workload === "read_only" ||
+      options.filesystemAccess?.workload === "verify" ||
+      (options.filesystemAccess?.ownedFiles?.length ?? 0) > 0)
   const codeExecEnabled = isCodeExecEnabled()
-  const allMcpTools = await capabilityService.listTools()
-  const codeExecRouteEnabled = codeExecEnabled && allMcpTools.length > 0
-  const eagerMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "eager")
-  const lazyMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "lazy")
-  const deferredSavedTools = codeExecEnabled ? listSavedCodeExecTools() : []
-  const mcpTools = createEagerMcpTools(capabilityService, eagerMcpMetadata)
-  const toolSearchTools = await createToolSearchTools(capabilityService,
-    {workspacePath,
-    threadId: options.threadId},
-    {
-      codeExecRouteEnabled,
-      savedToolsEnabled: codeExecEnabled
-    })
+  let allMcpTools: McpCapabilityTool[] = []
+  let codeExecRouteEnabled = false
+  let eagerMcpMetadata: McpCapabilityTool[] = []
+  let lazyMcpMetadata: McpCapabilityTool[] = []
+  const deferredSavedTools = !isConstrainedCoordinatorWorker && codeExecEnabled ? listSavedCodeExecTools() : []
+  let mcpTools: ReturnType<typeof createEagerMcpTools> = []
+  let toolSearchTools: unknown[] = []
 
-  if (allMcpTools.length > 0) {
-    console.log("[Runtime] MCP tools loaded, eager:", eagerMcpMetadata.length, "lazy:", lazyMcpMetadata.length)
+  if (isConstrainedCoordinatorWorker) {
+    console.log("[Runtime] Skipping MCP and deferred tool discovery for constrained coordinator worker")
   } else {
-    console.log("[Runtime] No MCP tools available in capability service")
+    allMcpTools = await capabilityService.listTools()
+    codeExecRouteEnabled = codeExecEnabled && allMcpTools.length > 0
+    eagerMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "eager")
+    lazyMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "lazy")
+    mcpTools = createEagerMcpTools(capabilityService, eagerMcpMetadata)
+    toolSearchTools = await createToolSearchTools(
+      capabilityService,
+      { workspacePath, threadId: options.threadId },
+      {
+        codeExecRouteEnabled,
+        savedToolsEnabled: codeExecEnabled
+      }
+    )
+
+    if (allMcpTools.length > 0) {
+      console.log(
+        "[Runtime] MCP tools loaded, eager:",
+        eagerMcpMetadata.length,
+        "lazy:",
+        lazyMcpMetadata.length
+      )
+    } else {
+      console.log("[Runtime] No MCP tools available in capability service")
+    }
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const extraTools: any[] = []
+  type RuntimeTool = {
+    name?: string
+    func?: unknown
+    invoke?: unknown
+  }
+  const extraTools: RuntimeTool[] = []
   if (!options.noSchedulerTool) {
     let chatxRobotChatId: string | null = null
     if (options.threadId) {
@@ -1367,14 +1792,18 @@ The workspace root is: ${workspacePath}`
           const meta = JSON.parse(threadRow.metadata)
           chatxRobotChatId = (meta.chatxRobotChatId as string) || null
         }
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     }
-    extraTools.push(createSchedulerTool({
-      workspacePath,
-      modelId: options.modelId,
-      threadId: options.threadId,
-      chatxRobotChatId
-    }))
+    extraTools.push(
+      createSchedulerTool({
+        workspacePath,
+        modelId: options.modelId,
+        threadId: options.threadId,
+        chatxRobotChatId
+      })
+    )
   }
   if (!options.noSkillEvolutionTool) {
     extraTools.push(createSkillEvolutionTool({ threadId: options.threadId }))
@@ -1394,14 +1823,26 @@ The workspace root is: ${workspacePath}`
   }
 
   // Wrap extra tools so that errors are returned as strings instead of throwing
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  function wrapToolErrors(tools: any[]): void {
+  function wrapToolErrors(tools: RuntimeTool[]): void {
     for (const t of tools) {
       if (typeof t.func === "function") {
         const originalFunc = t.func
         t.func = async (...args: unknown[]) => {
           try {
-            return await originalFunc.apply(t, args)
+            return await Reflect.apply(originalFunc, t, args)
+          } catch (e: unknown) {
+            const msg = e instanceof Error ? e.message : String(e)
+            const level = e instanceof TypeError || e instanceof ReferenceError ? "error" : "warn"
+            console[level](`[Runtime] Tool "${t.name}" error (non-fatal):`, msg)
+            return msg
+          }
+        }
+      }
+      if (typeof t.invoke === "function") {
+        const originalInvoke = t.invoke
+        t.invoke = async (...args: unknown[]) => {
+          try {
+            return await Reflect.apply(originalInvoke, t, args)
           } catch (e: unknown) {
             const msg = e instanceof Error ? e.message : String(e)
             const level = e instanceof TypeError || e instanceof ReferenceError ? "error" : "warn"
@@ -1413,22 +1854,24 @@ The workspace root is: ${workspacePath}`
     }
   }
   wrapToolErrors(extraTools)
-  wrapToolErrors(memoryTools as any[])
+  wrapToolErrors(memoryTools as RuntimeTool[])
 
   if (toolSearchTools.length > 0) {
-    wrapToolErrors(toolSearchTools as any[])
+    wrapToolErrors(toolSearchTools as RuntimeTool[])
   }
 
   if (codeExecRouteEnabled) {
-    extraTools.push(createCodeExecTool({
-      workspacePath,
-      threadId: options.threadId,
-      modelId: options.modelId,
-      yoloMode,
-      capabilityService,
-      approvalStore,
-      requestApproval
-    }))
+    extraTools.push(
+      createCodeExecTool({
+        workspacePath,
+        threadId: options.threadId,
+        modelId: options.modelId,
+        yoloMode,
+        capabilityService,
+        approvalStore,
+        requestApproval
+      })
+    )
   }
 
   const deferredToolIds = [
@@ -1436,7 +1879,10 @@ The workspace root is: ${workspacePath}`
     ...deferredSavedTools.map((tool) => tool.toolId)
   ]
 
-  const finalTools = [...mcpTools, ...memoryTools, ...extraTools, ...toolSearchTools]
+  const finalTools = filterCoordinatorWorkerFinalTools(
+    [...mcpTools, ...memoryTools, ...extraTools, ...toolSearchTools],
+    options.filesystemAccess
+  )
   const hasNamedTool = (name: string): boolean => {
     return finalTools.some((tool) => (tool as { name?: string }).name === name)
   }
@@ -1454,16 +1900,492 @@ The workspace root is: ${workspacePath}`
     console.log("[Runtime] Added code_exec prompt")
   }
 
-  const coordinatorHarnessTools = isCoordinatorMode
-    ? createCoordinatorHarnessTools({ workspacePath, threadId })
-    : []
-  if (coordinatorHarnessTools.length > 0) {
-    wrapToolErrors(coordinatorHarnessTools as any[])
-  }
-
-  const harnessProjectInstructions = [agentsPrompt.prompt, extraSystemPrompt]
+  const coordinatorProjectInstructions = [agentsPrompt.prompt, extraSystemPrompt]
     .filter(Boolean)
     .join("\n\n")
+
+  const emitCoordinatorWorkerEvent = (event: CoordinatorWorkerUpdateEvent): void => {
+    if (!isCoordinatorMode || !onCoordinatorWorkerEvent) return
+    onCoordinatorWorkerEvent({
+      worker: event.worker,
+      notification: event.notification,
+      suppressNotificationAutoRun: event.suppressNotificationAutoRun
+    })
+  }
+
+  const mergeCoordinatorWorkerUsage = (
+    previous: CoordinatorWorkerTokenUsage | undefined,
+    next: CoordinatorWorkerTokenUsage | undefined
+  ): CoordinatorWorkerTokenUsage | undefined => {
+    if (!next) return previous
+    const merged: CoordinatorWorkerTokenUsage = { ...(previous ?? {}) }
+    for (const key of [
+      "input_tokens",
+      "output_tokens",
+      "total_tokens",
+      "cache_read_tokens",
+      "cache_creation_tokens"
+    ] as const) {
+      const value = next[key]
+      if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+        merged[key] = Math.max(merged[key] ?? 0, value)
+      }
+    }
+    return Object.keys(merged).length > 0 ? merged : undefined
+  }
+
+  const MAX_WORKER_TRANSCRIPT_CHARS = 200_000
+
+  const coordinatorWorkerRunner: CoordinatorWorkerRunner = async (workerInput) => {
+    const workerSubagent = buildCoordinatorWorkerSubagents(
+      coordinatorProjectInstructions || undefined,
+      undefined,
+      threadId,
+      timeContext
+    ).find((agentConfig) => agentConfig.name === workerInput.role)
+    const workerRolePrompt =
+      typeof workerSubagent?.systemPrompt === "string"
+        ? workerSubagent.systemPrompt
+        : `You are the ${workerInput.role} worker in CmbCowork Coordinator Mode.`
+    const ownedFilesLine =
+      workerInput.ownedFiles.length > 0
+        ? `- owned_files: ${workerInput.ownedFiles.join(", ")}\n`
+        : ""
+    const workerAccessPrompt =
+      workerInput.workload === "read_only"
+        ? "Access limits: read-only worker. You can inspect files and search, but write_file, edit_file, execute, task_output, browser_playwright, deferred tools, and eager MCP tools are unavailable. Do not claim to have run commands."
+        : workerInput.workload === "verify"
+          ? "Access limits: verifier worker. You can inspect files, run validation commands, and use browser_playwright for UI/runtime verification when available, but write_file, edit_file, deferred tools, and eager MCP tools are unavailable. Do not create, modify, or delete files in the project workspace. If a temporary script or harness is necessary, write it only under /tmp or $TMPDIR and clean it up."
+          : workerInput.ownedFiles.length > 0
+            ? `Access limits: scoped write worker. write_file and edit_file are limited to owned_files (${workerInput.ownedFiles.join(", ")}). execute, task_output, browser_playwright, deferred tools, and eager MCP tools are unavailable, so do not claim to have run shell/browser checks.`
+            : "Access limits: write worker. You may edit workspace files as needed for the assigned implementation."
+    const workerMetadataPrompt = `Async coordinator worker metadata:
+- parent_thread_id: ${workerInput.parentThreadId}
+- worker_id: ${workerInput.workerId}
+- worker_thread_id: ${workerInput.workerThreadId}
+- worker_role: ${workerInput.role}
+- worker_workload: ${workerInput.workload}
+${ownedFilesLine.trimEnd()}
+- worker_description: ${workerInput.description}
+
+${workerAccessPrompt}
+
+Use the same worker thread context for follow-up instructions. Return a concise handoff with output files, commands run, evidence, risks, and verifier notes when applicable.`
+
+    console.log("[CoordinatorWorker] run turn", {
+      parentThreadId: workerInput.parentThreadId,
+      workerId: workerInput.workerId,
+      workerThreadId: workerInput.workerThreadId,
+      role: workerInput.role,
+      workload: workerInput.workload,
+      ownedFiles: workerInput.ownedFiles
+    })
+
+    const MAX_WORKER_RAW_TEXT_CHARS = 200_000
+    const truncateWorkerRawText = (text: string): string => {
+      if (text.length <= MAX_WORKER_RAW_TEXT_CHARS) return text
+      return `${text.slice(0, MAX_WORKER_RAW_TEXT_CHARS)}\n...(raw worker output truncated)`
+    }
+    let finalText = ""
+    let tokenUsage: CoordinatorWorkerTokenUsage | undefined
+    const transcriptLines: string[] = []
+    let transcriptChars = 0
+    let transcriptLimitReached = false
+    const seenWorkerToolCallKeys = new Set<string>()
+    const workerToolNames = new Set<string>()
+    const workerSkillUsageDetector = new SkillUsageDetector()
+    const cancelWorkerBackgroundTasks = (): void => {
+      LocalSandbox.cancelBackgroundTasks(workerInput.workerThreadId)
+    }
+    const appendTranscriptLine = (line: string): void => {
+      if (!line || transcriptLimitReached) return
+      const remainingTranscriptChars = MAX_WORKER_TRANSCRIPT_CHARS - transcriptChars
+      if (remainingTranscriptChars <= 0) {
+        transcriptLimitReached = true
+        return
+      }
+      if (line.length <= remainingTranscriptChars) {
+        transcriptLines.push(line)
+        transcriptChars += line.length + 1
+        return
+      }
+      transcriptLines.push(`${line.slice(0, remainingTranscriptChars)}\n...(transcript truncated)`)
+      transcriptChars = MAX_WORKER_TRANSCRIPT_CHARS
+      transcriptLimitReached = true
+    }
+    workerInput.abortSignal.addEventListener("abort", cancelWorkerBackgroundTasks, { once: true })
+
+    try {
+      if (workerInput.abortSignal.aborted) {
+        throw new DOMException("Coordinator worker aborted before runtime creation", "AbortError")
+      }
+      const effectiveWorkerPrompt = await applyWorkerPromptSubmitHooks({
+        prompt: workerInput.prompt,
+        sessionId: workerInput.workerThreadId,
+        workspacePath,
+        onHookResult,
+        metadata: {
+          coordinatorWorkerId: workerInput.workerId,
+          coordinatorWorkerRole: workerInput.role,
+          coordinatorWorkerThreadId: workerInput.workerThreadId
+        }
+      })
+      const workerRoutingResult = await resolveModel({
+        taskSource: "chat",
+        message: effectiveWorkerPrompt,
+        threadId: workerInput.workerThreadId,
+        requestedModelId: modelId,
+        routingMode: getGlobalRoutingMode()
+      }).catch(() => null)
+      const workerOrderedChain = buildOrderedChain(
+        workerRoutingResult?.resolvedModelId ?? modelId,
+        workerRoutingResult?.fallbackChain,
+        workerRoutingResult?.resolvedTier ?? "premium",
+        workerRoutingResult?.layer !== "pinned"
+      )
+      const streamConfig = {
+        configurable: { thread_id: workerInput.workerThreadId },
+        callbacks: [],
+        signal: workerInput.abortSignal,
+        streamMode: ["messages", "values"] as ("messages" | "values")[],
+        recursionLimit: 1000
+      }
+      const consumeWorkerStream = async (stream: AsyncIterable<unknown>): Promise<void> => {
+        for await (const chunk of stream) {
+          if (workerInput.abortSignal.aborted) break
+          const [mode, data] = chunk as unknown as [string, unknown]
+          const valuesContext = createWorkerValuesSnapshotContext(
+            mode,
+            data,
+            effectiveWorkerPrompt
+          )
+          observeWorkerSkillUsage(mode, data, workerSkillUsageDetector, valuesContext)
+          observeWorkerProgress(
+            mode,
+            data,
+            seenWorkerToolCallKeys,
+            (event) => {
+              if (event.type === "tool_call" && event.toolName) {
+                workerToolNames.add(event.toolName)
+              }
+              workerInput.onProgress(event)
+            },
+            effectiveWorkerPrompt,
+            valuesContext
+          )
+          tokenUsage = mergeCoordinatorWorkerUsage(
+            tokenUsage,
+            extractWorkerUsage(mode, data, effectiveWorkerPrompt, valuesContext)
+          )
+          if (!transcriptLimitReached && transcriptChars < MAX_WORKER_TRANSCRIPT_CHARS) {
+            appendTranscriptLine(extractWorkerTranscriptLine(mode, data))
+          }
+          const extracted = extractWorkerFinalText(
+            mode,
+            data,
+            effectiveWorkerPrompt,
+            valuesContext
+          )
+          if (extracted) finalText = truncateWorkerRawText(extracted)
+        }
+      }
+
+      let workerAgent: DeepAgent | null = null
+      let workerStream: AsyncIterable<unknown> | null = null
+      let usedWorkerModelId = workerRoutingResult?.resolvedModelId ?? modelId
+
+      for (const candidateId of workerOrderedChain) {
+        if (workerInput.abortSignal.aborted) break
+        try {
+          workerAgent = await createAgentRuntime({
+            threadId: workerInput.workerThreadId,
+            approvalThreadId: workerInput.parentThreadId,
+            workspacePath,
+            modelId: candidateId,
+            extraSystemPrompt: `${workerRolePrompt}\n\n${workerMetadataPrompt}`,
+            noSchedulerTool: true,
+            noSkillEvolutionTool: true,
+            enableAgentsPrompt: false,
+            agentMode: "normal",
+            disableSubagents: true,
+            filesystemAccess: {
+              workload: workerInput.workload,
+              ownedFiles: workerInput.ownedFiles,
+              workspacePath
+            },
+            abortSignal: workerInput.abortSignal,
+            retryHooks,
+            maxRetryAttempts,
+            onHookResult
+          })
+
+          workerStream = await workerAgent.stream(
+            { messages: [new HumanMessage(effectiveWorkerPrompt)] },
+            streamConfig
+          )
+          usedWorkerModelId = candidateId
+          break
+        } catch (error) {
+          if (!isRetryableApiError(error)) throw error
+          console.warn(`[CoordinatorWorker][Failover] ${candidateId} failed:`, error)
+          if (!workerInput.abortSignal.aborted) {
+            await new Promise((resolve) => setTimeout(resolve, 500))
+          }
+        }
+      }
+
+      if (workerInput.abortSignal.aborted) {
+        throw new DOMException("Coordinator worker aborted before stream start", "AbortError")
+      }
+      if (!workerAgent || !workerStream) {
+        throw new Error("All worker model candidates failed before streaming started.")
+      }
+
+      const remainingWorkerCandidates = workerOrderedChain.slice(
+        usedWorkerModelId ? workerOrderedChain.indexOf(usedWorkerModelId) + 1 : workerOrderedChain.length
+      )
+      let activeWorkerStream = workerStream
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        try {
+          await consumeWorkerStream(activeWorkerStream)
+          break
+        } catch (error) {
+          if (!isRetryableApiError(error) || remainingWorkerCandidates.length === 0) {
+            throw error
+          }
+          if (workerInput.abortSignal.aborted) throw error
+
+          const failedModelId = usedWorkerModelId ?? "unknown"
+          console.warn(
+            `[CoordinatorWorker][Failover] Mid-stream ${failedModelId} failed:`,
+            error
+          )
+          if (!workerInput.abortSignal.aborted) {
+            await new Promise((resolve) => setTimeout(resolve, 500))
+          }
+
+          const nextCandidate = remainingWorkerCandidates.shift()!
+          workerAgent = await createAgentRuntime({
+            threadId: workerInput.workerThreadId,
+            approvalThreadId: workerInput.parentThreadId,
+            workspacePath,
+            modelId: nextCandidate,
+            extraSystemPrompt: `${workerRolePrompt}\n\n${workerMetadataPrompt}`,
+            noSchedulerTool: true,
+            noSkillEvolutionTool: true,
+            enableAgentsPrompt: false,
+            agentMode: "normal",
+            disableSubagents: true,
+            filesystemAccess: {
+              workload: workerInput.workload,
+              ownedFiles: workerInput.ownedFiles,
+              workspacePath
+            },
+            abortSignal: workerInput.abortSignal,
+            retryHooks,
+            maxRetryAttempts,
+            onHookResult
+          })
+          activeWorkerStream = await workerAgent.stream(null, streamConfig)
+          usedWorkerModelId = nextCandidate
+        }
+      }
+
+      if (workerInput.abortSignal.aborted) {
+        throw new DOMException("Coordinator worker aborted", "AbortError")
+      }
+
+      let workerStopHookFailure: string | undefined
+      const stopPassed = await runWorkerStopHooksWithRevision({
+        sessionId: workerInput.workerThreadId,
+        workspacePath,
+        abortSignal: workerInput.abortSignal,
+        getStopContext: () => ({
+          userMessage: effectiveWorkerPrompt,
+          assistantResponse: finalText.trim(),
+          toolCalls: Array.from(workerToolNames),
+          usedSkills: workerSkillUsageDetector.getUsedSkillNames()
+        }),
+        runRevision: async (revisionPrompt) => {
+          if (!workerAgent) {
+            throw new Error("Worker runtime is unavailable for Stop hook revision.")
+          }
+          const revisionStream = await workerAgent.stream(
+            { messages: [new HumanMessage(revisionPrompt)] },
+            streamConfig
+          )
+          await consumeWorkerStream(revisionStream)
+        },
+        sendNotice: (message) => {
+          console.log("[CoordinatorWorker][StopHook]", message)
+        },
+        sendError: (message) => {
+          workerStopHookFailure = message
+          console.warn("[CoordinatorWorker][StopHook]", message)
+        },
+        onHookResult
+      })
+      if (!stopPassed) {
+        throw new Error(workerStopHookFailure ?? "Stop hook blocked worker completion.")
+      }
+
+      return {
+        summary: summarizeWorkerText(finalText),
+        rawText: finalText,
+        transcriptText: transcriptLines.join("\n"),
+        tokenUsage
+      }
+    } finally {
+      workerInput.abortSignal.removeEventListener("abort", cancelWorkerBackgroundTasks)
+      const cleanupResults = await Promise.allSettled([
+        Promise.resolve().then(cancelWorkerBackgroundTasks),
+        LocalSandbox.revokeGrantedAclsForRun(workerInput.workerThreadId),
+        closeCheckpointer(workerInput.workerThreadId)
+      ])
+      for (const result of cleanupResults) {
+        if (result.status === "rejected") {
+          console.warn("[CoordinatorWorker] Worker cleanup error:", result.reason)
+        }
+      }
+    }
+  }
+
+  const coordinatorWorkerTools = isCoordinatorMode
+    ? {
+        startWorker: async (input: {
+          role: CoordinatorWorkerRole
+          workload?: CoordinatorWorkerWorkload
+          ownedFiles?: string[]
+          description: string
+          prompt: string
+          selectedSkill?: CoordinatorSelectedSkill
+        }) =>
+          coordinatorWorkerManager.startWorkerAndPersist({
+            parentThreadId: threadId,
+            workspacePath,
+            role: input.role,
+            workload: input.workload,
+            ownedFiles: input.ownedFiles,
+            description: input.description,
+            prompt: injectSelectedSkillIntoWorkerPrompt(input.prompt, input.selectedSkill),
+            selectedSkill: input.selectedSkill,
+            runner: coordinatorWorkerRunner,
+            onUpdate: emitCoordinatorWorkerEvent,
+            onUpdateKey: `runtime:${threadId}`
+          }),
+        continueWorker: async (input: {
+          workerId: string
+          workload?: CoordinatorWorkerWorkload
+          ownedFiles?: string[]
+          prompt: string
+          selectedSkill?: CoordinatorSelectedSkill
+        }) => {
+          const selectedSkill =
+            input.selectedSkill ??
+            (await coordinatorWorkerManager.getWorkerSelectedSkill(threadId, input.workerId))
+          return await coordinatorWorkerManager.continueWorkerAndPersist({
+            parentThreadId: threadId,
+            workerId: input.workerId,
+            workload: input.workload,
+            ownedFiles: input.ownedFiles,
+            prompt: injectSelectedSkillIntoWorkerPrompt(input.prompt, selectedSkill),
+            selectedSkill,
+            runner: coordinatorWorkerRunner,
+            onUpdate: emitCoordinatorWorkerEvent,
+            onUpdateKey: `runtime:${threadId}`
+          })
+        },
+        readWorkerState: async (input: {
+          workerId?: string
+          block?: boolean
+          timeoutMs?: number
+          pollIntervalMs?: number
+        }) => {
+          if (!input.workerId) {
+            await coordinatorWorkerManager.restoreWorkersForThread({
+              parentThreadId: threadId,
+              workspacePath,
+              mode: "full",
+              onUpdate: emitCoordinatorWorkerEvent,
+              onUpdateKey: `runtime:${threadId}`
+            })
+          }
+          return coordinatorWorkerManager.waitForWorkers(threadId, {
+            workerId: input.workerId,
+            block: input.block,
+            timeoutMs: input.timeoutMs,
+            pollIntervalMs: input.pollIntervalMs,
+            signal: options.abortSignal
+          })
+        },
+        readWorkerResult: async (input: {
+          workerId: string
+          includeTranscript?: boolean
+          maxChars?: number
+        }) =>
+          coordinatorWorkerManager.readWorkerResult(threadId, input.workerId, {
+            includeTranscript: input.includeTranscript,
+            maxChars: input.maxChars
+          }),
+        cancelWorker: async (input: { workerId?: string; reason?: string }) => {
+          const cancelledWorkers = input.workerId
+            ? [await coordinatorWorkerManager.cancelWorker(threadId, input.workerId, input.reason)]
+            : coordinatorWorkerManager.cancelWorkersForThread(
+                threadId,
+                input.reason ?? "Coordinator requested worker cancellation."
+              )
+          await Promise.allSettled(
+            cancelledWorkers.map((worker) =>
+              coordinatorWorkerManager.waitForWorkers(threadId, {
+                workerId: worker.worker_id,
+                timeoutMs: 5_000,
+                pollIntervalMs: 50,
+                waitForCleanup: true
+              })
+            )
+          )
+          const workers = coordinatorWorkerManager.readWorkers(threadId)
+          const returnedWorkers = input.workerId
+            ? workers.filter((worker) => worker.worker_id === input.workerId)
+            : workers
+          await coordinatorWorkerManager.acknowledgeNotifications(
+            threadId,
+            cancelledWorkers
+              .filter((worker) => worker.status === "cancelled")
+              .map((worker) => worker.worker_id)
+          )
+          if (onCoordinatorWorkerEvent) {
+            const worker = input.workerId
+              ? workers.find((item) => item.worker_id === input.workerId)
+              : cancelledWorkers.find((item) => item.status === "cancelled") ?? cancelledWorkers[0]
+            if (worker) {
+              onCoordinatorWorkerEvent({
+                worker,
+                workers
+              })
+            }
+          }
+          return returnedWorkers
+        }
+      }
+    : undefined
+
+  const coordinatorWorkerToolsForMain = isCoordinatorMode
+    ? createCoordinatorWorkerTools({
+        workspacePath,
+        threadId,
+      workerTools: coordinatorWorkerTools,
+      onNotificationsConsumed: onCoordinatorNotificationAction,
+      selectedSkill: options.coordinatorSelectedSkill,
+      explicitSelectedSkill: options.coordinatorExplicitSelectedSkill,
+      notificationSelectedSkills: options.coordinatorNotificationSelectedSkills
+    })
+    : []
+  if (coordinatorWorkerToolsForMain.length > 0) {
+    wrapToolErrors(coordinatorWorkerToolsForMain as RuntimeTool[])
+  }
+
   if (isCoordinatorMode) {
     systemPrompt = buildCoordinatorSystemPrompt({
       threadId,
@@ -1472,7 +2394,8 @@ The workspace root is: ${workspacePath}`
       shell,
       timezone: timeContext.timezone,
       currentTime: timeContext.currentTime,
-      projectInstructions: harnessProjectInstructions,
+      projectInstructions: coordinatorProjectInstructions,
+      turnContext: coordinatorTurnPrompt,
       hasBrowserTool: hasNamedTool("browser_playwright"),
       hasCodeExecTool,
       deferredToolIds
@@ -1488,29 +2411,39 @@ The workspace root is: ${workspacePath}`
   }
   console.log("[Runtime] System prompt summary:", {
     chars: systemPrompt.length,
-    hasAgentsPrompt: Boolean(agentsPrompt.prompt),
-    agentsFilesLoaded: agentsPrompt.loadedPaths.length,
-    hasExtraSystemPrompt: Boolean(extraSystemPrompt),
-    agentMode,
-    deferredToolIds: deferredToolIds.length
-  })
+      hasAgentsPrompt: Boolean(agentsPrompt.prompt),
+      agentsFilesLoaded: agentsPrompt.loadedPaths.length,
+      hasExtraSystemPrompt: Boolean(extraSystemPrompt),
+      hasCoordinatorTurnPrompt: Boolean(coordinatorTurnPrompt),
+      agentMode,
+      deferredToolIds: deferredToolIds.length
+    })
   const triggerTokens = Math.floor(maxTokens * 0.75)
   const keepTokens = Math.max(Math.floor(maxTokens * SUMMARY_KEEP_RATIO), 4_000)
   const toolEvictLimit = Math.min(20_000, Math.max(Math.floor(maxTokens * 0.08), 6_000))
-  const trimForSummary = Math.min(SUMMARY_INPUT_TOKEN_CAP, Math.floor(maxTokens * SUMMARY_INPUT_RATIO))
-  console.log("[Runtime] Context window:", maxTokens, "→ summarization trigger:", triggerTokens, "→ keep:", keepTokens, "→ tool evict limit:", toolEvictLimit, "→ trim for summary:", trimForSummary, "→ max output bytes:", maxOutputBytes)
+  const trimForSummary = Math.min(
+    SUMMARY_INPUT_TOKEN_CAP,
+    Math.floor(maxTokens * SUMMARY_INPUT_RATIO)
+  )
+  console.log(
+    "[Runtime] Context window:",
+    maxTokens,
+    "→ summarization trigger:",
+    triggerTokens,
+    "→ keep:",
+    keepTokens,
+    "→ tool evict limit:",
+    toolEvictLimit,
+    "→ trim for summary:",
+    trimForSummary,
+    "→ max output bytes:",
+    maxOutputBytes
+  )
 
   backend.setGitWorkflowCommitOnly(false)
-  const mainTools = isCoordinatorMode ? coordinatorHarnessTools : finalTools
+  const mainTools = isCoordinatorMode ? coordinatorWorkerToolsForMain : finalTools
   const workerTools = finalTools
-  const harnessSubagents = isCoordinatorMode
-    ? buildHarnessSubagents(
-        harnessProjectInstructions || undefined,
-        allSkillsSources.length > 0 ? allSkillsSources : undefined,
-        threadId,
-        timeContext
-      )
-    : []
+  const coordinatorSubagents: ReturnType<typeof buildCoordinatorWorkerSubagents> = []
 
   console.log(
     "[Runtime] Final tool list:",
@@ -1521,11 +2454,12 @@ The workspace root is: ${workspacePath}`
       "[Runtime] Coordinator worker tool list:",
       workerTools.map((t) => (t as { name?: string }).name ?? "(unnamed)")
     )
-    console.log("[CoordinatorHarness] runtime configured", {
+    console.log("[CoordinatorMode] runtime configured", {
       threadId,
       mainTools: mainTools.map((t) => (t as { name?: string }).name ?? "(unnamed)"),
       workerToolCount: workerTools.length,
-      subagents: harnessSubagents.map((agent) => agent.name),
+      subagents: coordinatorSubagents.map((agent) => agent.name),
+      mainSubagentsEnabled: false,
       mainTodosEnabled: false,
       mainFilesystemEnabled: false,
       mainSkillsEnabled: false,
@@ -1540,7 +2474,7 @@ The workspace root is: ${workspacePath}`
     model,
     tools: mainTools,
     subagentDefaultTools: workerTools,
-    subagents: harnessSubagents,
+    subagents: coordinatorSubagents,
     checkpointer,
     backend,
     systemPrompt,
@@ -1548,7 +2482,11 @@ The workspace root is: ${workspacePath}`
     subagentExtraSystemPrompt: agentsPrompt.prompt ?? undefined,
     mainTodosEnabled: !isCoordinatorMode,
     mainFilesystemEnabled: !isCoordinatorMode,
-    taskSystemPrompt: isCoordinatorMode ? buildCoordinatorTaskPrompt(threadId) : SEQUENTIAL_TASK_PROMPT,
+    mainSubagentsEnabled: !isCoordinatorMode && !disableSubagents,
+    filesystemAccess: options.filesystemAccess,
+    taskSystemPrompt: isCoordinatorMode
+      ? buildCoordinatorTaskPrompt(threadId)
+      : SEQUENTIAL_TASK_PROMPT,
     includeGeneralPurposeSubagent: !isCoordinatorMode,
     skills: mainSkillSources,
     memory: mainMemorySources,
@@ -1569,7 +2507,10 @@ The workspace root is: ${workspacePath}`
   })
 
   console.log("[Runtime] Agent created with skills parameter:", mainSkillSources)
-  console.log("[Runtime] Final skills passed to createDeepAgent:", JSON.stringify(mainSkillSources, null, 2))
+  console.log(
+    "[Runtime] Final skills passed to createDeepAgent:",
+    JSON.stringify(mainSkillSources, null, 2)
+  )
   console.log("[Runtime] Agent created with LocalSandbox at:", workspacePath)
   return agent
 }

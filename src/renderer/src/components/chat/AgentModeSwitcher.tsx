@@ -9,6 +9,7 @@ export type ChatAgentMode = "normal" | "coordinator"
 interface AgentModeSwitcherProps {
   mode: ChatAgentMode
   disabled?: boolean
+  disabledReason?: string
   onChange: (mode: ChatAgentMode) => void
 }
 
@@ -34,13 +35,14 @@ const MODES: Array<{
     shortLabel: "协同",
     description: "主 agent 编排，子代理实现和验收。",
     detail: "适合完整开发任务、文档产出和需要独立验证的改动。",
-    badge: "推荐"
+    badge: "多代理"
   }
 ]
 
 export function AgentModeSwitcher({
   mode,
   disabled,
+  disabledReason,
   onChange
 }: AgentModeSwitcherProps): JSX.Element {
   const [open, setOpen] = useState(false)
@@ -67,7 +69,7 @@ export function AgentModeSwitcher({
               ? "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300"
               : "border-border bg-background/80 text-muted-foreground hover:bg-muted hover:text-foreground"
           )}
-          title="选择执行模式"
+          title={disabled && disabledReason ? disabledReason : "选择执行模式"}
         >
           <span
             className={cn(
@@ -96,7 +98,7 @@ export function AgentModeSwitcher({
             <div className="min-w-0">
               <div className="text-sm font-semibold text-foreground">执行模式</div>
               <div className="text-xs leading-5 text-muted-foreground">
-                选择这次任务是快速直达，还是走多角色 harness。
+                选择这次任务是快速直达，还是走多角色协同。
               </div>
             </div>
           </div>

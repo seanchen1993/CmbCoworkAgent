@@ -2,6 +2,7 @@ import type { UseStreamTransport } from "@langchain/langgraph-sdk/react"
 import type { ToolCall, ToolCallChunk } from "@langchain/core/messages"
 import type { StreamPayload, StreamEvent, IPCEvent, IPCStreamEvent } from "../../../types"
 import type { Subagent } from "../types"
+import { COORDINATOR_NOTIFICATION_PROMPT } from "./message-display-helpers"
 
 /**
  * Usage metadata from LangChain model responses.
@@ -61,6 +62,7 @@ interface SerializedMessageChunk {
   /** Actual message data is in kwargs */
   kwargs?: {
     id?: string
+    type?: string
     content?: string | Array<{ type: string; text?: string }>
     tool_calls?: ToolCall[]
     tool_call_chunks?: ToolCallChunk[]
@@ -106,6 +108,8 @@ interface CompletedToolCall {
   args: Record<string, unknown>
 }
 
+const QUIET_COORDINATOR_TOOL_NAMES = new Set(["read_worker_state"])
+
 /**
  * Custom transport for useStream that uses Electron IPC instead of HTTP.
  * This allows useStream to work seamlessly in an Electron app where the
@@ -127,6 +131,14 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
   private subagentLogSequence = 0
 
+  // Coordinator worker status checks are analogous to Claude Code TaskOutput:
+  // useful as a fallback, but too noisy for the main chat transcript.
+  private quietCoordinatorToolCallIds: Set<string> = new Set()
+
+  // Values-mode snapshots contain full conversation history. Track message IDs
+  // we have already surfaced so fallback extraction can stay incremental.
+  private emittedMessageIds: Set<string> = new Set()
+
   // Track accumulated tool call chunks (for streaming tool calls)
   private accumulatedToolCalls: Map<string, AccumulatedToolCall> = new Map()
 
@@ -141,6 +153,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
     this.subagentToolLogEntryIds.clear()
     this.subagentToolCallCount = 0
     this.subagentLogSequence = 0
+    this.quietCoordinatorToolCallIds.clear()
+    this.emittedMessageIds.clear()
     this.accumulatedToolCalls.clear()
     this.completedToolCallsByName.clear()
     const threadId = payload.config?.configurable?.thread_id
@@ -149,6 +163,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
       | "normal"
       | "coordinator"
       | undefined
+    const coordinatorInternalNotification =
+      payload.config?.configurable?.coordinator_internal_notification === true
     if (!threadId) {
       return this.createErrorGenerator("MISSING_THREAD_ID", "Thread ID is required")
     }
@@ -163,7 +179,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
       | undefined
     const messages = input?.messages ?? []
     const lastHumanMessage = messages.find((m) => m.type === "human")
-    const messageContent = lastHumanMessage?.content ?? ""
+    const messageContent = coordinatorInternalNotification
+      ? COORDINATOR_NOTIFICATION_PROMPT
+      : (lastHumanMessage?.content ?? "")
 
     // Only require message content if not resuming
     if (!messageContent && !hasResumeCommand) {
@@ -177,7 +195,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
       payload.command,
       payload.signal,
       modelId,
-      agentMode
+      agentMode,
+      coordinatorInternalNotification
     )
   }
 
@@ -194,7 +213,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
     command: unknown,
     signal: AbortSignal,
     modelId?: string,
-    agentMode?: "normal" | "coordinator"
+    agentMode?: "normal" | "coordinator",
+    coordinatorInternalNotification = false
   ): AsyncGenerator<StreamEvent> {
     // Create a queue to buffer events from IPC
     const eventQueue: StreamEvent[] = []
@@ -215,14 +235,28 @@ export class ElectronIPCTransport implements UseStreamTransport {
     }
     yield this.createSubagentLogResetEvent()
     yield this.createSubagentToolCountEvent()
+    let currentAgentMode: "normal" | "coordinator" = agentMode ?? "normal"
 
     const cleanup = window.api.agent.streamAgent(
       threadId,
       message,
       command,
       (ipcEvent) => {
+        if (
+          ipcEvent.type === "custom" &&
+          (ipcEvent.data as { type?: unknown; mode?: unknown } | undefined)?.type === "agent_mode"
+        ) {
+          const nextMode = (ipcEvent.data as { mode?: unknown }).mode
+          if (nextMode === "normal" || nextMode === "coordinator") {
+            currentAgentMode = nextMode
+          }
+        }
         // Convert IPC events to SDK format
-        const sdkEvents = this.convertToSDKEvents(ipcEvent as IPCEvent, threadId)
+        const sdkEvents = this.convertToSDKEvents(
+          ipcEvent as IPCEvent,
+          threadId,
+          currentAgentMode
+        )
 
         for (const sdkEvent of sdkEvents) {
           if (sdkEvent.event === "done" || sdkEvent.event === "error") {
@@ -242,57 +276,72 @@ export class ElectronIPCTransport implements UseStreamTransport {
         }
       },
       modelId,
-      agentMode
+      agentMode,
+      coordinatorInternalNotification
     )
 
-    // Handle abort signal
-    if (signal) {
-      signal.addEventListener("abort", () => {
-        cleanup()
-        isDone = true
-        if (resolveNext) {
-          const resolve = resolveNext
-          resolveNext = null
-          resolve(null)
-        }
-      })
+    let cleanedUp = false
+    let abortListener: (() => void) | undefined
+    const cleanupOnce = (): void => {
+      if (cleanedUp) return
+      cleanedUp = true
+      cleanup()
+      if (abortListener) {
+        signal.removeEventListener("abort", abortListener)
+      }
     }
 
-    // Yield events as they come in
-    while (!isDone || eventQueue.length > 0) {
-      // Check for queued events first
-      if (eventQueue.length > 0) {
-        const event = eventQueue.shift()!
+    // Handle abort signal
+    abortListener = () => {
+      cleanupOnce()
+      isDone = true
+      if (resolveNext) {
+        const resolve = resolveNext
+        resolveNext = null
+        resolve(null)
+      }
+    }
+    signal.addEventListener("abort", abortListener)
+
+    try {
+      // Yield events as they come in
+      while (!isDone || eventQueue.length > 0) {
+        // Check for queued events first
+        if (eventQueue.length > 0) {
+          const event = eventQueue.shift()!
+          if (event.event === "done") {
+            break
+          }
+          if (event.event !== "error" || hasError) {
+            yield event
+          }
+          if (hasError) {
+            break
+          }
+          continue
+        }
+
+        // Wait for the next event
+        const event = await new Promise<StreamEvent | null>((resolve) => {
+          resolveNext = resolve
+        })
+
+        if (event === null) {
+          break
+        }
+
         if (event.event === "done") {
           break
         }
-        if (event.event !== "error" || hasError) {
-          yield event
-        }
-        if (hasError) {
+
+        yield event
+
+        if (event.event === "error") {
           break
         }
-        continue
       }
-
-      // Wait for the next event
-      const event = await new Promise<StreamEvent | null>((resolve) => {
-        resolveNext = resolve
-      })
-
-      if (event === null) {
-        break
-      }
-
-      if (event.event === "done") {
-        break
-      }
-
-      yield event
-
-      if (event.event === "error") {
-        break
-      }
+    } finally {
+      cleanupOnce()
     }
   }
 
@@ -300,13 +349,17 @@ export class ElectronIPCTransport implements UseStreamTransport {
    * Convert IPC events to LangGraph SDK format
    * Returns an array since a single IPC event may produce multiple SDK events
    */
-  private convertToSDKEvents(event: IPCEvent, threadId: string): StreamEvent[] {
+  private convertToSDKEvents(
+    event: IPCEvent,
+    threadId: string,
+    agentMode: "normal" | "coordinator" = "normal"
+  ): StreamEvent[] {
     const events: StreamEvent[] = []
 
     switch (event.type) {
       // Raw stream events from LangGraph - parse and convert
       case "stream": {
-        const streamEvents = this.processStreamEvent(event)
+        const streamEvents = this.processStreamEvent(event, agentMode)
         events.push(...streamEvents)
         break
       }
@@ -457,9 +510,13 @@ export class ElectronIPCTransport implements UseStreamTransport {
   /**
    * Process raw LangGraph stream events (mode + data tuples)
    */
-  private processStreamEvent(event: IPCStreamEvent): StreamEvent[] {
+  private processStreamEvent(
+    event: IPCStreamEvent,
+    agentMode: "normal" | "coordinator"
+  ): StreamEvent[] {
     const events: StreamEvent[] = []
     const { mode, data } = event
+    const isCoordinatorMode = agentMode === "coordinator"
 
     if (mode === "messages") {
       // Messages mode returns [message, metadata] tuples
@@ -473,6 +530,11 @@ export class ElectronIPCTransport implements UseStreamTransport {
       // Detect if this message comes from a subagent via checkpoint namespace
       const checkpointNs =
         metadata?.langgraph_checkpoint_ns || metadata?.checkpoint_ns
+      if (isCoordinatorMode && this.isCoordinatorWorkerNamespace(checkpointNs)) {
+        // Async coordinator workers have their own right-panel state stream.
+        // Their internal tool calls must not become main coordinator messages.
+        return events
+      }
       // Check if this is a ToolMessage (class name contains 'ToolMessage')
       const isToolMessage = className.includes("ToolMessage") && !!kwargs.tool_call_id
 
@@ -509,8 +571,17 @@ export class ElectronIPCTransport implements UseStreamTransport {
           const content = this.extractContent(kwargs.content)
           const msgId = kwargs.id || this.currentMessageId || crypto.randomUUID()
           this.currentMessageId = msgId
+          const visibleToolCalls = this.filterVisibleMainToolCalls(
+            kwargs.tool_calls,
+            isCoordinatorMode
+          )
+          const visibleToolCallChunks = this.filterVisibleMainToolCallChunks(
+            kwargs.tool_call_chunks,
+            isCoordinatorMode
+          )
 
-          if (content || kwargs.tool_calls?.length) {
+          if (content || visibleToolCalls.length) {
+            this.rememberEmittedMessage(msgId)
             events.push({
               event: "messages",
               data: [
@@ -518,7 +589,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
                   id: msgId,
                   type: "ai",
                   content: content || "",
-                  ...(kwargs.tool_calls?.length && { tool_calls: kwargs.tool_calls })
+                  ...(visibleToolCalls.length && { tool_calls: visibleToolCalls })
                 },
                 {
                   langgraph_node: metadata?.langgraph_node || "agent",
@@ -530,8 +601,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
           }
 
           // Handle tool call chunks (streaming) - these have args as strings
-          if (kwargs.tool_call_chunks?.length) {
-            const subagentDetectEvents = this.processToolCallChunks(kwargs.tool_call_chunks)
+          if (visibleToolCallChunks.length) {
+            const subagentDetectEvents = this.processToolCallChunks(visibleToolCallChunks)
             events.push(...subagentDetectEvents)
 
             events.push({
@@ -539,18 +610,18 @@ export class ElectronIPCTransport implements UseStreamTransport {
               data: {
                 type: "tool_call",
                 messageId: this.currentMessageId,
-                tool_calls: kwargs.tool_call_chunks
+                tool_calls: visibleToolCallChunks
               }
             })
           }
 
           // Handle complete tool calls (non-streaming) - these have args as objects
-          if (kwargs.tool_calls?.length) {
-            const subagentDetectEvents = this.processCompletedToolCalls(kwargs.tool_calls)
+          if (visibleToolCalls.length) {
+            const subagentDetectEvents = this.processCompletedToolCalls(visibleToolCalls)
             events.push(...subagentDetectEvents)
 
             // Track tool calls for HITL matching
-            for (const tc of kwargs.tool_calls) {
+            for (const tc of visibleToolCalls) {
               if (tc.id && tc.name) {
                 const existing = this.completedToolCallsByName.get(tc.name) || []
                 existing.push({ id: tc.id, name: tc.name, args: tc.args || {} })
@@ -578,6 +649,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
       // Handle ToolMessage
       if (isToolMessage && kwargs.tool_call_id) {
+        if (isCoordinatorMode && this.quietCoordinatorToolCallIds.has(kwargs.tool_call_id)) {
+          return events
+        }
         if (isFromSubagent) {
           const resultContent = this.truncateSubagentLogContent(this.extractContent(kwargs.content))
           events.push(
@@ -595,8 +669,16 @@ export class ElectronIPCTransport implements UseStreamTransport {
         } else {
           // Main agent tool message
           const content = this.extractContent(kwargs.content)
-          const msgId = kwargs.id || crypto.randomUUID()
+          const msgId =
+            kwargs.id ||
+            this.createStableFallbackMessageId({
+              type: "tool",
+              content,
+              toolCallId: kwargs.tool_call_id,
+              toolName: kwargs.name
+            })
 
+          this.rememberEmittedMessage(msgId)
           events.push({
             event: "messages",
             data: [
@@ -650,7 +732,11 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
           // Check for task tool calls in AI messages
           if (kwargs.tool_calls?.length) {
-            for (const toolCall of kwargs.tool_calls) {
+            const visibleToolCalls = this.filterVisibleMainToolCalls(
+              kwargs.tool_calls,
+              isCoordinatorMode
+            )
+            for (const toolCall of visibleToolCalls) {
               if (
                 toolCall.name === "task" &&
                 toolCall.id &&
@@ -692,43 +778,39 @@ export class ElectronIPCTransport implements UseStreamTransport {
         if (this.activeSubagents.size > 0) {
           events.push(this.createSubagentEvent())
         }
+
+        if (isCoordinatorMode) {
+          events.push(...this.createCurrentTurnMessageEventsFromValues(state.messages))
+        }
       }
-
-      // Transform messages from LangChain serialization format
-      // Filter out human messages since they're already shown from user input
-      const transformedMessages = state.messages
-        ?.filter((msg) => {
-          const classId = Array.isArray(msg.id) ? msg.id : []
-          const className = classId[classId.length - 1] || ""
-          // Filter out HumanMessage
-          return !className.includes("Human")
-        })
-        .map((msg) => {
-          const kwargs = msg.kwargs || {}
-          const classId = Array.isArray(msg.id) ? msg.id : []
-          const className = classId[classId.length - 1] || ""
-
-          // Determine message type from class name
-          const type: "ai" | "tool" = className.includes("Tool") ? "tool" : "ai"
-          const content = this.extractContent(kwargs.content)
-
-          return {
-            id: kwargs.id || crypto.randomUUID(),
-            type,
-            content,
-            // Include tool_calls for AI messages
-            ...(type === "ai" && kwargs.tool_calls && { tool_calls: kwargs.tool_calls }),
-            // Include tool_call_id and name for tool messages
-            ...(type === "tool" && kwargs.tool_call_id && { tool_call_id: kwargs.tool_call_id }),
-            ...(type === "tool" && kwargs.name && { name: kwargs.name })
-          }
-        })
 
       // Only emit values event if we have actual data to update
       // Don't emit messages: undefined as it would clear the UI
       const valuesData: Record<string, unknown> = {}
-      if (transformedMessages && transformedMessages.length > 0) {
-        valuesData.messages = transformedMessages
+      if (!isCoordinatorMode) {
+        const transformedMessages = state.messages
+          ?.filter((msg) => !this.isSerializedHumanMessage(msg))
+          .map((msg) => {
+            const kwargs = msg.kwargs || {}
+            const className = this.getSerializedMessageClassName(msg)
+            const type: "ai" | "tool" =
+              className.includes("Tool") || kwargs.type === "tool" ? "tool" : "ai"
+
+            return {
+              id: kwargs.id || crypto.randomUUID(),
+              type,
+              content: this.extractContent(kwargs.content),
+              ...(type === "ai" && kwargs.tool_calls && { tool_calls: kwargs.tool_calls }),
+              ...(type === "tool" && kwargs.tool_call_id
+                ? { tool_call_id: kwargs.tool_call_id }
+                : {}),
+              ...(type === "tool" && kwargs.name ? { name: kwargs.name } : {})
+            }
+          })
+
+        if (transformedMessages && transformedMessages.length > 0) {
+          valuesData.messages = transformedMessages
+        }
       }
       if (state.todos !== undefined) {
         valuesData.todos = state.todos
@@ -818,6 +900,193 @@ export class ElectronIPCTransport implements UseStreamTransport {
     return events
   }
 
+  private createStableFallbackMessageId(input: {
+    type: "ai" | "tool"
+    content?: string
+    toolCallId?: string
+    toolName?: string
+    toolCalls?: Array<{ id?: string; name?: string; args?: Record<string, unknown> }>
+  }): string {
+    if (input.type === "tool" && input.toolCallId) {
+      return `tool-${input.toolCallId}-${input.toolName || "result"}`
+    }
+
+    const toolCallKey = input.toolCalls
+      ?.map((toolCall, index) => {
+        const args = toolCall.args ? this.stableStringify(toolCall.args) : ""
+        return `${toolCall.id || index}:${toolCall.name || "tool"}:${args}`
+      })
+      .join("|")
+
+    const source = [
+      input.type,
+      input.toolCallId || "",
+      input.toolName || "",
+      toolCallKey || "",
+      input.content || ""
+    ].join("\u001f")
+
+    return `${input.type}-${this.stableHash(source)}`
+  }
+
+  private rememberEmittedMessage(id?: string): void {
+    if (id) this.emittedMessageIds.add(id)
+  }
+
+  private hasEmittedMessage(id?: string): boolean {
+    return !!id && this.emittedMessageIds.has(id)
+  }
+
+  private getSerializedMessageClassName(message: SerializedMessageChunk): string {
+    const classId = Array.isArray(message.id) ? message.id : []
+    return classId[classId.length - 1] || ""
+  }
+
+  private isSerializedHumanMessage(message: SerializedMessageChunk): boolean {
+    const className = this.getSerializedMessageClassName(message)
+    const type = message.kwargs?.type
+    return className.includes("HumanMessage") || type === "human" || type === "user"
+  }
+
+  private isSerializedAIMessage(message: SerializedMessageChunk): boolean {
+    const className = this.getSerializedMessageClassName(message)
+    const type = message.kwargs?.type
+    return (
+      className.includes("AI") ||
+      className.includes("AIMessageChunk") ||
+      type === "ai" ||
+      type === "assistant"
+    )
+  }
+
+  private isSerializedToolMessage(message: SerializedMessageChunk): boolean {
+    const className = this.getSerializedMessageClassName(message)
+    const type = message.kwargs?.type
+    return (
+      (className.includes("ToolMessage") || type === "tool") && !!message.kwargs?.tool_call_id
+    )
+  }
+
+  private createCurrentTurnMessageEventsFromValues(
+    messages: SerializedMessageChunk[]
+  ): StreamEvent[] {
+    const events: StreamEvent[] = []
+    let currentTurnStart = 0
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (this.isSerializedHumanMessage(messages[index])) {
+        currentTurnStart = index + 1
+        break
+      }
+    }
+
+    for (const message of messages.slice(currentTurnStart)) {
+      const kwargs = message.kwargs || {}
+      if (this.isSerializedAIMessage(message)) {
+        const content = this.extractContent(kwargs.content)
+        const visibleToolCalls = this.filterVisibleMainToolCalls(kwargs.tool_calls, true)
+        if (!content && visibleToolCalls.length === 0) continue
+
+        const msgId =
+          kwargs.id ||
+          (this.currentMessageId && this.hasEmittedMessage(this.currentMessageId)
+            ? this.currentMessageId
+            : this.createStableFallbackMessageId({
+                type: "ai",
+                content,
+                toolCalls: visibleToolCalls
+              }))
+        if (this.hasEmittedMessage(msgId)) continue
+
+        this.rememberEmittedMessage(msgId)
+        events.push({
+          event: "messages",
+          data: [
+            {
+              id: msgId,
+              type: "ai",
+              content: content || "",
+              ...(visibleToolCalls.length && { tool_calls: visibleToolCalls })
+            },
+            { langgraph_node: "agent" }
+          ]
+        })
+
+        if (visibleToolCalls.length) {
+          events.push(...this.processCompletedToolCalls(visibleToolCalls))
+          for (const toolCall of visibleToolCalls) {
+            if (!toolCall.id || !toolCall.name) continue
+            const existing = this.completedToolCallsByName.get(toolCall.name) || []
+            if (!existing.some((item) => item.id === toolCall.id)) {
+              existing.push({ id: toolCall.id, name: toolCall.name, args: toolCall.args || {} })
+              this.completedToolCallsByName.set(toolCall.name, existing)
+            }
+          }
+        }
+      }
+
+      if (this.isSerializedToolMessage(message) && kwargs.tool_call_id) {
+        if (this.quietCoordinatorToolCallIds.has(kwargs.tool_call_id)) continue
+        if (this.isQuietCoordinatorToolName(kwargs.name)) {
+          this.quietCoordinatorToolCallIds.add(kwargs.tool_call_id)
+          continue
+        }
+
+        const content = this.extractContent(kwargs.content)
+        const msgId =
+          kwargs.id ||
+          this.createStableFallbackMessageId({
+            type: "tool",
+            content,
+            toolCallId: kwargs.tool_call_id,
+            toolName: kwargs.name
+          })
+        if (this.hasEmittedMessage(msgId)) continue
+
+        this.rememberEmittedMessage(msgId)
+        events.push({
+          event: "messages",
+          data: [
+            {
+              id: msgId,
+              type: "tool",
+              content,
+              tool_call_id: kwargs.tool_call_id,
+              name: kwargs.name
+            },
+            { langgraph_node: "tools" }
+          ]
+        })
+      }
+    }
+
+    return events
+  }
+
+  private stableStringify(value: unknown): string {
+    if (value === null || typeof value !== "object") {
+      return JSON.stringify(value)
+    }
+
+    if (Array.isArray(value)) {
+      return `[${value.map((item) => this.stableStringify(item)).join(",")}]`
+    }
+
+    const record = value as Record<string, unknown>
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${this.stableStringify(record[key])}`)
+      .join(",")}}`
+  }
+
+  private stableHash(value: string): string {
+    let hash = 0x811c9dc5
+    for (let i = 0; i < value.length; i += 1) {
+      hash ^= value.charCodeAt(i)
+      hash = Math.imul(hash, 0x01000193)
+    }
+    return (hash >>> 0).toString(36)
+  }
+
   /**
    * Check if a checkpoint namespace indicates a nested subagent message.
    * Main-agent tool nodes can also contain "tools:", so callers must also
@@ -827,10 +1096,54 @@ export class ElectronIPCTransport implements UseStreamTransport {
     return !!ns && ns.includes("tools:")
   }
 
+  private isCoordinatorWorkerNamespace(ns?: string): boolean {
+    return !!ns && ns.includes("__worker__")
+  }
+
   private hasRunningSubagent(): boolean {
     return Array.from(this.activeSubagents.values()).some(
       (subagent) => subagent.status === "running"
     )
+  }
+
+  private isQuietCoordinatorToolName(toolName?: string): boolean {
+    return !!toolName && QUIET_COORDINATOR_TOOL_NAMES.has(toolName)
+  }
+
+  private filterVisibleMainToolCalls(
+    toolCalls?: Array<{ id?: string; name?: string; args?: Record<string, unknown> }>,
+    quietCoordinatorTools = false
+  ): Array<{ id?: string; name?: string; args?: Record<string, unknown> }> {
+    if (!toolCalls?.length) return []
+    if (!quietCoordinatorTools) return toolCalls
+    return toolCalls.filter((toolCall) => {
+      if (this.isQuietCoordinatorToolName(toolCall.name)) {
+        if (toolCall.id) this.quietCoordinatorToolCallIds.add(toolCall.id)
+        return false
+      }
+      if (toolCall.id && this.quietCoordinatorToolCallIds.has(toolCall.id)) {
+        return false
+      }
+      return true
+    })
+  }
+
+  private filterVisibleMainToolCallChunks(
+    chunks?: Array<{ id?: string; name?: string; args?: string }>,
+    quietCoordinatorTools = false
+  ): Array<{ id?: string; name?: string; args?: string }> {
+    if (!chunks?.length) return []
+    if (!quietCoordinatorTools) return chunks
+    return chunks.filter((chunk) => {
+      if (this.isQuietCoordinatorToolName(chunk.name)) {
+        if (chunk.id) this.quietCoordinatorToolCallIds.add(chunk.id)
+        return false
+      }
+      if (chunk.id && this.quietCoordinatorToolCallIds.has(chunk.id)) {
+        return false
+      }
+      return true
+    })
   }
 
   private processSubagentToolCalls(

@@ -234,6 +234,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       })
     } catch (error) {
       console.error("[Store] Failed to delete thread:", error)
+      throw error
     }
   },
 

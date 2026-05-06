@@ -13,7 +13,9 @@ import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
 import { useThreadState } from "@/lib/thread-context"
+import { getWorkspaceSelectionErrorMessage } from "@/lib/workspace-utils"
 import type { FileInfo } from "@/types"
+import { toast } from "sonner"
 
 export function FilesystemPanel() {
   const { currentThreadId } = useAppStore()
@@ -91,6 +93,7 @@ export function FilesystemPanel() {
       }
     } catch (e) {
       console.error("[FilesystemPanel] Select folder error:", e)
+      toast.error(getWorkspaceSelectionErrorMessage(e))
     } finally {
       setLoading(false)
     }

@@ -39,6 +39,7 @@ export function TabbedPanel({
       <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
         {isAgentTab ? (
           <ChatContainer
+            key={threadId}
             threadId={threadId}
             showGitChangeNotice={hasPendingGitDiffNotice}
             onOpenGitPanel={onRequestOpenGitPanel}

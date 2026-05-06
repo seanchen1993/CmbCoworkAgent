@@ -170,7 +170,14 @@ export function WorkspacePicker({ threadId, onGitStatusChange }: WorkspacePicker
   }, [open, isGit, gitRoot])
 
   async function handleSelectFolder(): Promise<void> {
-    await selectWorkspaceFolder(threadId, setWorkspacePath, setWorkspaceFiles, setLoading, setOpen)
+    const selection = await selectWorkspaceFolder(
+      threadId,
+      setWorkspacePath,
+      setWorkspaceFiles,
+      setLoading,
+      setOpen
+    )
+    if (selection.status !== "success") return
     const newPath = await window.api.workspace.get(threadId)
     if (newPath) {
       const gitInfo = await window.api.workspace.isGit(newPath, { includeWorktrees: false, threadId })

@@ -91,6 +91,32 @@ export function deleteThreadCheckpoint(threadId: string): void {
   }
 }
 
+export function deleteThreadWorkerCheckpoints(parentThreadId: string): number {
+  if (!SAFE_ID_RE.test(parentThreadId)) {
+    throw new Error(`Invalid threadId: ${parentThreadId}`)
+  }
+  if (parentThreadId.includes("__worker__")) {
+    throw new Error(
+      `Invalid coordinator parent threadId: ${parentThreadId}. Parent thread ids may not contain the reserved __worker__ delimiter.`
+    )
+  }
+
+  const dir = getThreadCheckpointDir()
+  const prefix = `${parentThreadId}__worker__`
+  let deleted = 0
+
+  for (const filename of readdirSync(dir)) {
+    if (!filename.endsWith(".sqlite")) continue
+    const checkpointThreadId = filename.slice(0, -".sqlite".length)
+    if (!checkpointThreadId.startsWith(prefix)) continue
+    if (!SAFE_ID_RE.test(checkpointThreadId)) continue
+    unlinkSync(join(dir, filename))
+    deleted += 1
+  }
+
+  return deleted
+}
+
 export function getEnvFilePath(): string {
   return ENV_FILE
 }
