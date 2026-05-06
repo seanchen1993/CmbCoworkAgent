@@ -45,7 +45,7 @@ import { UniversalUploadDialog } from "./UniversalUploadDialog"
 import { SkillDetail } from "./SkillsPanel"
 import { MCPConnectorDetail } from "./MCPConnectorDetail"
 import { PluginDetailPanel } from "./PluginsPanel"
-import { marketApi, MarketApiResponse, MarketItem, MarketItemType } from "../../api/market"
+import { isAutoOptimizedMarketItem, marketApi, MarketApiResponse, MarketItem, MarketItemType } from "../../api/market"
 import { getMarketMockResponse } from "./MarketMockData"
 import { getDefaultRange, parseTopUsersFromAgg } from "../dashboard/use-dashboard"
 import { toast } from "sonner"
@@ -251,6 +251,12 @@ function MarketItemCard({
               <span className="inline-flex items-center gap-1 text-[11px] font-medium bg-[#fdf3e7] text-[#c4956a] border border-[#f5d9c4] px-2 py-0.5 rounded-full shrink-0">
                 <Star className="size-3 fill-[#c4956a]" />
                 精品
+              </span>
+            )}
+            {isAutoOptimizedMarketItem(item) && (
+              <span className="inline-flex items-center gap-1 text-[11px] font-medium bg-[#eef5ff] text-[#3b68a8] border border-[#cdddf6] px-2 py-0.5 rounded-full shrink-0">
+                <Sparkles className="size-3" />
+                系统优化
               </span>
             )}
             {item.category && (
@@ -893,7 +899,8 @@ export function MarketPanel(): React.JSX.Element {
         itemName,
         activeTab,
         false,
-        item.featured === "精品"
+        item.featured === "精品",
+        item.version
       )
 
       if (response.success) {
@@ -1397,7 +1404,8 @@ export function MarketPanel(): React.JSX.Element {
         itemName,
         activeTab,
         downloadToLocal,
-        item.featured === "精品"
+        item.featured === "精品",
+        item.version
       )
       if (response.success) {
         console.log(`Downloaded ${item.name}`)
@@ -1755,6 +1763,12 @@ export function MarketPanel(): React.JSX.Element {
                       <span className="inline-flex items-center gap-1 rounded-full bg-[#fdf3e7] border border-[#f5d9c4] text-[#c4956a] px-2.5 py-1">
                         <Star className="size-3 fill-[#c4956a]" />
                         精品
+                      </span>
+                    )}
+                    {isAutoOptimizedMarketItem(selectedItem) && (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-[#eef5ff] border border-[#cdddf6] text-[#3b68a8] px-2.5 py-1">
+                        <Sparkles className="size-3" />
+                        系统优化
                       </span>
                     )}
                     {selectedItem.user_id ? (

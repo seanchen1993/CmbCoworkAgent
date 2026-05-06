@@ -53,7 +53,7 @@ function PiePanel({
               }
               labelLine={false}
               fontSize={9}
-              onClick={onSliceClick ? (entry) => onSliceClick(entry as Record<string, unknown>) : undefined}
+              onClick={onSliceClick ? (entry) => onSliceClick(entry as unknown as Record<string, unknown>) : undefined}
               style={onSliceClick ? { cursor: "pointer" } : undefined}
             >
               {data.map((_, i) => (

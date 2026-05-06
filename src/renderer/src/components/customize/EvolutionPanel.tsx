@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
-import ReactDiffViewer, { DiffMethod } from "react-diff-viewer-continued"
+import { toast } from "sonner"
 import {
   Activity,
   AlertCircle,
@@ -25,13 +25,18 @@ import {
   Wrench,
   XCircle,
   Ban,
-  RotateCcw
+  RotateCcw,
+  ShieldCheck
 } from "lucide-react"
+import { DiffDisplay } from "@/components/chat/DiffDisplay"
+import { evolutionApi, type EvolutionCandidate } from "@/api/evolution"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
+import type { SkillMetadata } from "@/types"
+import { SkillEvolutionReviewPanel } from "./SkillEvolutionReviewPanel"
 
 interface SkillCandidate {
   candidateId: string
@@ -44,6 +49,36 @@ interface SkillCandidate {
   sourceTraceIds: string[]
   generatedAt: string
   status: "pending" | "approved" | "rejected"
+}
+
+const LOCAL_CANDIDATE_PROMPT_SIGNATURE_KEY = "trace-evolver-local-candidate-prompt-signature"
+
+function localPendingCandidateSignature(candidates: SkillCandidate[]): string {
+  return candidates
+    .filter((candidate) => candidate.status === "pending")
+    .map((candidate) => candidate.candidateId)
+    .sort()
+    .join("|")
+}
+
+function getStoredLocalCandidatePromptSignature(): string {
+  try {
+    return localStorage.getItem(LOCAL_CANDIDATE_PROMPT_SIGNATURE_KEY) || ""
+  } catch {
+    return ""
+  }
+}
+
+function storeLocalCandidatePromptSignature(signature: string): void {
+  try {
+    if (signature) {
+      localStorage.setItem(LOCAL_CANDIDATE_PROMPT_SIGNATURE_KEY, signature)
+    } else {
+      localStorage.removeItem(LOCAL_CANDIDATE_PROMPT_SIGNATURE_KEY)
+    }
+  } catch {
+    // localStorage can be unavailable in restricted contexts; notification is best-effort.
+  }
 }
 
 interface TraceEntry {
@@ -110,7 +145,32 @@ interface TraceDetail extends TraceEntry {
   nodes?: TraceNode[]
 }
 
-type Tab = "candidates" | "traces"
+type Tab = "candidates" | "traces" | "review"
+
+interface UserInfoLite {
+  ystId?: string | null
+  sapId?: string | null
+  userName?: string | null
+}
+
+function getEvolutionReviewAdminYstIds(): Set<string> {
+  return new Set(
+    String(import.meta.env.VITE_TRACE_EVOLVER_REVIEW_ADMIN_YST_IDS || "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean)
+  )
+}
+
+function canReviewEvolution(userInfo: UserInfoLite | null): boolean {
+  const ystId = userInfo?.ystId?.trim()
+  if (!ystId) return false
+  return getEvolutionReviewAdminYstIds().has(ystId)
+}
+
+function isToggleKey(event: React.KeyboardEvent<HTMLDivElement>): boolean {
+  return event.key === "Enter" || event.key === " "
+}
 
 function buildFallbackNodes(detail: TraceDetail): TraceNode[] {
   const rootId = `trace:${detail.traceId}`
@@ -653,11 +713,13 @@ function OptimizeStreamCard({
 function CandidateCard({
   candidate,
   onApprove,
-  onReject
+  onReject,
+  onDelete
 }: {
   candidate: SkillCandidate
   onApprove: (id: string) => Promise<void>
   onReject: (id: string) => Promise<void>
+  onDelete: (id: string) => void
 }): React.JSX.Element {
   const [expanded, setExpanded] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -719,6 +781,8 @@ function CandidateCard({
     await onReject(candidate.candidateId)
     setLoading(false)
   }
+  const deleteCandidate = (): void => onDelete(candidate.candidateId)
+  const toggleExpanded = (): void => setExpanded((v) => !v)
 
   const statusEl = candidate.status === "approved"
     ? <Badge className="bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 gap-1 text-xs"><CheckCircle2 className="size-3" />已采纳</Badge>
@@ -728,8 +792,25 @@ function CandidateCard({
 
   return (
     <div className="rounded-lg border border-border bg-card overflow-hidden">
-      <div className="flex items-start gap-3 p-3">
-        <button className="mt-0.5 shrink-0 text-muted-foreground hover:text-foreground" onClick={() => setExpanded((v) => !v)}>
+      <div
+        className="flex cursor-pointer items-start gap-3 p-3 transition-colors hover:bg-muted/30"
+        role="button"
+        tabIndex={0}
+        onClick={toggleExpanded}
+        onKeyDown={(event) => {
+          if (!isToggleKey(event)) return
+          event.preventDefault()
+          toggleExpanded()
+        }}
+      >
+        <button
+          className="mt-0.5 shrink-0 text-muted-foreground hover:text-foreground"
+          onKeyDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation()
+            toggleExpanded()
+          }}
+        >
           {expanded ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
         </button>
         <div className="flex-1 min-w-0">
@@ -748,29 +829,54 @@ function CandidateCard({
           )}
           <p className="text-[10px] text-muted-foreground/50 mt-1">基于 {candidate.sourceTraceIds.length} 条 trace · {new Date(candidate.generatedAt).toLocaleString()}</p>
         </div>
-        {candidate.status === "pending" && (
-          <div className="flex gap-1.5 shrink-0">
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={loading}
-              className="h-7 px-2.5 text-xs border-emerald-500/40 text-emerald-600 hover:bg-emerald-500/10 hover:text-emerald-600"
-              onClick={approve}
-            >
-              {loading ? <Loader2 className="size-3 animate-spin" /> : <CheckCircle2 className="size-3 mr-1" />}
-              采纳
-            </Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={loading}
-              className="h-7 px-2.5 text-xs text-muted-foreground hover:text-destructive"
-              onClick={reject}
-            >
-              <XCircle className="size-3 mr-1" />拒绝
-            </Button>
-          </div>
-        )}
+        <div
+          className="flex gap-1.5 shrink-0"
+          onClick={(event) => event.stopPropagation()}
+          onKeyDown={(event) => event.stopPropagation()}
+        >
+          {candidate.status === "pending" && (
+            <>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={loading}
+                className="h-7 px-2.5 text-xs border-emerald-500/40 text-emerald-600 hover:bg-emerald-500/10 hover:text-emerald-600"
+                onClick={(event) => {
+                  event.stopPropagation()
+                  void approve()
+                }}
+              >
+                {loading ? <Loader2 className="size-3 animate-spin" /> : <CheckCircle2 className="size-3 mr-1" />}
+                采纳
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={loading}
+                className="h-7 px-2.5 text-xs text-muted-foreground hover:text-destructive"
+                onClick={(event) => {
+                  event.stopPropagation()
+                  void reject()
+                }}
+              >
+                <XCircle className="size-3 mr-1" />拒绝
+              </Button>
+            </>
+          )}
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={loading}
+            className="h-7 px-2 text-xs text-muted-foreground hover:text-destructive"
+            title="删除候选"
+            onClick={(event) => {
+              event.stopPropagation()
+              deleteCandidate()
+            }}
+          >
+            <Trash2 className="size-3" />
+          </Button>
+        </div>
       </div>
 
       {expanded && (
@@ -793,16 +899,7 @@ function CandidateCard({
                 </div>
               )}
               {candidate.action === "patch" && oldContentStatus === "ready" && oldContent !== null && (
-                <ReactDiffViewer
-                  oldValue={oldContent}
-                  newValue={candidate.proposedContent}
-                  splitView={false}
-                  compareMethod={DiffMethod.LINES}
-                  useDarkTheme={false}
-                  styles={{
-                    contentText: { fontSize: "12px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace", wordBreak: "break-all" }
-                  }}
-                />
+                <DiffDisplay oldValue={oldContent} newValue={candidate.proposedContent} />
               )}
               {candidate.action === "patch" && oldContentStatus === "failed" && (
                 <div className="px-3 pt-2 pb-1">
@@ -834,6 +931,153 @@ function CandidateCard({
   )
 }
 
+function CloudEvolutionUpdateCard({
+  candidate,
+  onInstall,
+  onIgnore,
+  onDelete,
+  installing
+}: {
+  candidate: EvolutionCandidate
+  onInstall: (candidate: EvolutionCandidate) => Promise<void>
+  onIgnore: (candidateId: string) => void
+  onDelete: (candidateId: string) => void
+  installing: boolean
+}): React.JSX.Element {
+  const [expanded, setExpanded] = useState(false)
+  const [diff, setDiff] = useState("")
+  const [diffLoading, setDiffLoading] = useState(false)
+
+  useEffect(() => {
+    if (!expanded || diff) return
+    let cancelled = false
+    setDiffLoading(true)
+    evolutionApi.getDiff(candidate.candidate_id)
+      .then((value) => {
+        if (!cancelled) setDiff(value)
+      })
+      .catch((error) => {
+        if (!cancelled) setDiff(error instanceof Error ? error.message : String(error))
+      })
+      .finally(() => {
+        if (!cancelled) setDiffLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [candidate.candidate_id, diff, expanded])
+  const toggleExpanded = (): void => setExpanded((v) => !v)
+
+  return (
+    <div className="rounded-lg border border-blue-200 bg-blue-50/45 overflow-hidden dark:border-blue-900 dark:bg-blue-950/20">
+      <div
+        className="flex cursor-pointer items-start gap-3 p-3 transition-colors hover:bg-blue-100/45 dark:hover:bg-blue-950/35"
+        role="button"
+        tabIndex={0}
+        onClick={toggleExpanded}
+        onKeyDown={(event) => {
+          if (!isToggleKey(event)) return
+          event.preventDefault()
+          toggleExpanded()
+        }}
+      >
+        <button
+          className="mt-0.5 shrink-0 text-muted-foreground hover:text-foreground"
+          onKeyDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation()
+            toggleExpanded()
+          }}
+        >
+          {expanded ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
+        </button>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-sm font-semibold">{candidate.skill_name}</span>
+            <Badge className="bg-blue-500/15 text-blue-600 dark:text-blue-400 border border-blue-500/20 gap-1 text-xs">
+              <Sparkles className="size-3" />
+              云端自进化
+            </Badge>
+            <Badge variant="outline" className="text-[10px] font-mono px-1.5 py-0">
+              {candidate.source_version || "unknown"} → {candidate.target_version || "unknown"}
+            </Badge>
+          </div>
+          <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
+            CMBDevClaw Trace Evolver 已发布新的优化版本，可一键更新本地同名 Skill。
+          </p>
+          <p className="text-[10px] text-muted-foreground/60 mt-1">
+            基于 {candidate.source_trace_ids.length} 条 trace · score {candidate.evaluation_score || "—"} · {candidate.published_at ? new Date(candidate.published_at).toLocaleString() : "已发布"}
+          </p>
+        </div>
+        <div
+          className="flex gap-1.5 shrink-0"
+          onClick={(event) => event.stopPropagation()}
+          onKeyDown={(event) => event.stopPropagation()}
+        >
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={installing}
+            className="h-7 px-2.5 text-xs border-blue-500/40 text-blue-600 hover:bg-blue-500/10 hover:text-blue-600"
+            onClick={(event) => {
+              event.stopPropagation()
+              void onInstall(candidate)
+            }}
+          >
+            {installing ? <Loader2 className="size-3 animate-spin" /> : <CheckCircle2 className="size-3 mr-1" />}
+            更新安装
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={installing}
+            className="h-7 px-2.5 text-xs text-muted-foreground"
+            onClick={(event) => {
+              event.stopPropagation()
+              onIgnore(candidate.candidate_id)
+            }}
+          >
+            忽略
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={installing}
+            className="h-7 px-2 text-xs text-muted-foreground hover:text-destructive"
+            title="删除候选"
+            onClick={(event) => {
+              event.stopPropagation()
+              onDelete(candidate.candidate_id)
+            }}
+          >
+            <Trash2 className="size-3" />
+          </Button>
+        </div>
+      </div>
+
+      {expanded && (
+        <div className="border-t border-blue-200/70 bg-background/60 px-4 pb-4 pt-3 space-y-3 dark:border-blue-900">
+          <div>
+            <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider mb-1">
+              云端候选 Diff
+            </p>
+            <div className="rounded border border-border bg-background max-h-96 overflow-y-auto">
+              {diffLoading ? (
+                <div className="flex items-center gap-2 px-3 py-4 text-xs text-muted-foreground">
+                  <Loader2 className="size-3.5 animate-spin" />
+                  正在加载云端 diff…
+                </div>
+              ) : (
+                <DiffDisplay diff={diff} />
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function EmptyState({ icon, title, desc }: { icon: React.ReactNode; title: string; desc: string }): React.JSX.Element {
   return (
     <div className="flex flex-col items-center justify-center py-16 text-center">
@@ -855,6 +1099,9 @@ export function EvolutionPanel(): React.JSX.Element {
   const [threshold, setThreshold] = useState(10)
   const [thresholdInput, setThresholdInput] = useState("10")
   const [thresholdSaved, setThresholdSaved] = useState(false)
+  const [cloudUpdateLoading, setCloudUpdateLoading] = useState(false)
+  const [installingCloudCandidateId, setInstallingCloudCandidateId] = useState<string | null>(null)
+  const [reviewUserInfo, setReviewUserInfo] = useState<UserInfoLite | null>(null)
   const {
     threads,
     loadThreads,
@@ -877,10 +1124,15 @@ export function EvolutionPanel(): React.JSX.Element {
     evolutionStreamError: streamError,
     setEvolutionStreamError,
     evolutionLastRunOpts: lastRunOpts,
-    setEvolutionLastRunOpts
+    setEvolutionLastRunOpts,
+    cloudEvolutionUpdates,
+    setCloudEvolutionUpdates,
+    setPendingEvolution
   } = useAppStore()
 
-  const pendingCount = candidates.filter((c) => c.status === "pending").length
+  const localPendingCandidateCount = candidates.filter((c) => c.status === "pending").length
+  const pendingCount = localPendingCandidateCount + cloudEvolutionUpdates.length
+  const showEvolutionReview = import.meta.env.DEV || canReviewEvolution(reviewUserInfo)
 
   const loadTraces = useCallback(async () => {
     setTracesLoading(true)
@@ -899,6 +1151,22 @@ export function EvolutionPanel(): React.JSX.Element {
       setTracesLoading(false)
     }
   }, [selectedTraceIds, setEvolutionSelectedTraceIds])
+
+  const refreshCloudEvolutionUpdates = useCallback(async () => {
+    setCloudUpdateLoading(true)
+    try {
+      const installedSkills = await window.api.skills.list()
+      const updates = await evolutionApi.listAvailableUpdates(installedSkills)
+      setCloudEvolutionUpdates(updates)
+      if (updates.length > 0) {
+        setPendingEvolution(true)
+      }
+    } catch (error) {
+      console.warn("[Evolution] failed to refresh cloud evolution updates:", error)
+    } finally {
+      setCloudUpdateLoading(false)
+    }
+  }, [setCloudEvolutionUpdates, setPendingEvolution])
 
   const runOptimizer = useCallback(async (
     opts?: {
@@ -937,11 +1205,50 @@ export function EvolutionPanel(): React.JSX.Element {
     window.api.optimizer.getOnlineSkillEvolutionEnabled().then(setOnlineSkillEvolutionEnabled).catch(console.warn)
     window.api.optimizer.getAutoPropose().then(setAutoPropose).catch(console.warn)
     window.api.optimizer.getCandidates().then(setCandidates).catch(console.warn)
+    window.api.models.getUserInfo().then((userInfo) => {
+      setReviewUserInfo(userInfo as UserInfoLite | null)
+    }).catch((error) => {
+      console.warn("[Evolution] failed to load user info for review permission:", error)
+      setReviewUserInfo(null)
+    })
     window.api.optimizer.getThreshold().then((v) => {
       setThreshold(v)
       setThresholdInput(String(v))
     }).catch(console.warn)
-  }, [])
+    refreshCloudEvolutionUpdates().catch(console.warn)
+  }, [refreshCloudEvolutionUpdates])
+
+  useEffect(() => {
+    if (tab === "review" && !showEvolutionReview) {
+      setTab("candidates")
+    }
+  }, [tab, showEvolutionReview, setTab])
+
+  useEffect(() => {
+    setPendingEvolution(pendingCount > 0)
+
+    const signature = localPendingCandidateSignature(candidates)
+    if (!signature) {
+      storeLocalCandidatePromptSignature("")
+      return
+    }
+
+    if (tab === "candidates") {
+      storeLocalCandidatePromptSignature(signature)
+      return
+    }
+
+    if (signature === getStoredLocalCandidatePromptSignature()) return
+    storeLocalCandidatePromptSignature(signature)
+
+    toast.info(`有 ${localPendingCandidateCount} 条优化候选待处理`, {
+      duration: 6000,
+      action: {
+        label: "查看候选",
+        onClick: () => setTab("candidates")
+      }
+    })
+  }, [candidates, localPendingCandidateCount, pendingCount, setPendingEvolution, setTab, tab])
 
   useEffect(() => {
     if (tab === "traces" && !selectedTrace) {
@@ -1025,6 +1332,58 @@ export function EvolutionPanel(): React.JSX.Element {
       candidate.candidateId === candidateId ? { ...candidate, status: "rejected" } : candidate
     )))
   }, [])
+
+  const handleDeleteCandidate = useCallback((candidateId: string) => {
+    setCandidates((prev) => prev.filter((candidate) => candidate.candidateId !== candidateId))
+  }, [])
+
+  const removeCloudUpdate = useCallback((candidateId: string) => {
+    const next = cloudEvolutionUpdates.filter((candidate) => candidate.candidate_id !== candidateId)
+    setCloudEvolutionUpdates(next)
+    if (next.length === 0) {
+      setPendingEvolution(false)
+    }
+  }, [cloudEvolutionUpdates, setCloudEvolutionUpdates, setPendingEvolution])
+
+  const handleIgnoreCloudUpdate = useCallback((candidateId: string) => {
+    evolutionApi.ignoreCandidateUpdate(candidateId)
+    removeCloudUpdate(candidateId)
+  }, [removeCloudUpdate])
+
+  const handleDeleteCloudUpdate = useCallback((candidateId: string) => {
+    evolutionApi.ignoreCandidateUpdate(candidateId)
+    removeCloudUpdate(candidateId)
+  }, [removeCloudUpdate])
+
+  const handleInstallCloudUpdate = useCallback(async (candidate: EvolutionCandidate) => {
+    setInstallingCloudCandidateId(candidate.candidate_id)
+    try {
+      const installedSkills = await window.api.skills.list()
+      const existing = installedSkills.find((skill: SkillMetadata) => skill.name === candidate.skill_name)
+      if (!existing) {
+        throw new Error(`本地未安装同名 Skill：${candidate.skill_name}`)
+      }
+
+      const bundle = await evolutionApi.downloadCandidateBundle(candidate.candidate_id)
+      const buffer = await bundle.blob.arrayBuffer()
+      const deleteResult = await window.api.skills.delete(existing.path)
+      if (!deleteResult.success) {
+        throw new Error(deleteResult.error || `删除旧版 Skill 失败：${candidate.skill_name}`)
+      }
+
+      const uploadResult = await window.api.skills.upload(buffer, bundle.filename)
+      if (!uploadResult.success) {
+        throw new Error(uploadResult.error || `安装云端自进化 Skill 失败：${candidate.skill_name}`)
+      }
+
+      removeCloudUpdate(candidate.candidate_id)
+      toast.success(`已更新「${candidate.skill_name}」到 ${candidate.target_version || "新版本"}，请新开一个会话试试效果。`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "安装云端自进化 Skill 失败")
+    } finally {
+      setInstallingCloudCandidateId(null)
+    }
+  }, [removeCloudUpdate])
 
   const handleClear = useCallback(async () => {
     await window.api.optimizer.clear()
@@ -1128,6 +1487,7 @@ export function EvolutionPanel(): React.JSX.Element {
     () => traceGroups.filter((group) => group.traces.some((trace) => selectedTraceIds.has(trace.traceId))).length,
     [traceGroups, selectedTraceIds]
   )
+  const tabItems: Tab[] = showEvolutionReview ? ["candidates", "traces", "review"] : ["candidates", "traces"]
   const allSelected = allTraceIds.length > 0 && allTraceIds.every((id) => selectedTraceIds.has(id))
 
   const handleRunSelected = useCallback(async () => {
@@ -1352,7 +1712,7 @@ export function EvolutionPanel(): React.JSX.Element {
       )}
 
       <div className="shrink-0 flex border-b border-border px-4">
-        {(["candidates", "traces"] as Tab[]).map((item) => (
+        {tabItems.map((item) => (
           <button
             key={item}
             className={cn(
@@ -1371,7 +1731,7 @@ export function EvolutionPanel(): React.JSX.Element {
                   </span>
                 )}
               </>
-            ) : (
+            ) : item === "traces" ? (
               <>
                 <Activity className="size-3.5" />
                 执行 Traces
@@ -1381,6 +1741,14 @@ export function EvolutionPanel(): React.JSX.Element {
                   </span>
                 )}
               </>
+            ) : (
+              <>
+                <ShieldCheck className="size-3.5" />
+                进化审批
+                <span className="ml-1 rounded-full bg-blue-500/15 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
+                  Admin
+                </span>
+              </>
             )}
           </button>
         ))}
@@ -1388,7 +1756,24 @@ export function EvolutionPanel(): React.JSX.Element {
 
       {tab === "candidates" && (
         <div className="shrink-0 px-4 py-2 border-b border-border flex items-center gap-2 bg-muted/10">
-          <span className="text-xs text-muted-foreground flex-1">候选 {candidates.length} 条</span>
+          <span className="text-xs text-muted-foreground flex-1">
+            候选 {candidates.length + cloudEvolutionUpdates.length} 条
+            {cloudEvolutionUpdates.length > 0 && (
+              <span className="ml-1 text-blue-600 dark:text-blue-400">
+                · 已发布可更新 {cloudEvolutionUpdates.length} 条
+              </span>
+            )}
+          </span>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 gap-1.5 text-xs"
+            onClick={() => void refreshCloudEvolutionUpdates()}
+            disabled={running || cloudUpdateLoading}
+          >
+            {cloudUpdateLoading ? <Loader2 className="size-3 animate-spin" /> : <RotateCcw className="size-3" />}
+            拉取云端
+          </Button>
           <Button
             size="sm"
             variant="outline"
@@ -1443,46 +1828,70 @@ export function EvolutionPanel(): React.JSX.Element {
         </div>
       )}
 
-      <ScrollArea className="flex-1">
-        <div className="p-4 space-y-2">
-          {tab === "candidates" ? (
-            candidates.length === 0 ? (
+      {tab === "review" ? (
+        <div className="flex min-h-0 flex-1 overflow-hidden">
+          <SkillEvolutionReviewPanel />
+        </div>
+      ) : (
+        <ScrollArea className="flex-1">
+          <div className="p-4 space-y-2">
+            {tab === "candidates" ? (
+              candidates.length === 0 && cloudEvolutionUpdates.length === 0 ? (
+                <EmptyState
+                  icon={<Sparkles className="size-8 text-muted-foreground/40 mb-3" />}
+                  title="暂无优化候选"
+                  desc="请先切换到「执行 Traces」分析本地记录，或等待云端自进化服务推送新版本"
+                />
+              ) : (
+                <>
+                  {cloudEvolutionUpdates.map((candidate) => (
+                    <CloudEvolutionUpdateCard
+                      key={candidate.candidate_id}
+                      candidate={candidate}
+                      installing={installingCloudCandidateId === candidate.candidate_id}
+                      onInstall={handleInstallCloudUpdate}
+                      onIgnore={handleIgnoreCloudUpdate}
+                      onDelete={handleDeleteCloudUpdate}
+                    />
+                  ))}
+                  {[...candidates]
+                    .sort((a, b) => b.generatedAt.localeCompare(a.generatedAt))
+                    .map((candidate) => (
+                      <CandidateCard
+                        key={candidate.candidateId}
+                        candidate={candidate}
+                        onApprove={handleApprove}
+                        onReject={handleReject}
+                        onDelete={handleDeleteCandidate}
+                      />
+                    ))}
+                </>
+              )
+            ) : tracesLoading ? (
+              <div className="flex justify-center py-16"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>
+            ) : traces.length === 0 ? (
               <EmptyState
-                icon={<Sparkles className="size-8 text-muted-foreground/40 mb-3" />}
-                title="暂无优化候选"
-                desc="请先切换到「执行 Traces」，分析会话或选中的 trace"
+                icon={<Activity className="size-8 text-muted-foreground/40 mb-3" />}
+                title="暂无执行记录"
+                desc="Traces 会按会话分组展示，每次 Agent 调用结束后自动记录到本地"
               />
             ) : (
-              [...candidates]
-                .sort((a, b) => b.generatedAt.localeCompare(a.generatedAt))
-                .map((candidate) => (
-                  <CandidateCard key={candidate.candidateId} candidate={candidate} onApprove={handleApprove} onReject={handleReject} />
-                ))
-            )
-          ) : tracesLoading ? (
-            <div className="flex justify-center py-16"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>
-          ) : traces.length === 0 ? (
-            <EmptyState
-              icon={<Activity className="size-8 text-muted-foreground/40 mb-3" />}
-              title="暂无执行记录"
-              desc="Traces 会按会话分组展示，每次 Agent 调用结束后自动记录到本地"
-            />
-          ) : (
-            traceGroups.map((group) => (
-              <TraceThreadGroupCard
-                key={group.threadId}
-                group={group}
-                selectedTraceIds={selectedTraceIds}
-                onToggleTrace={toggleTraceChecked}
-                onOpenTrace={handleExpandTrace}
-                onDeleteTrace={(traceId) => handleDeleteTraces([traceId]).catch(console.warn)}
-                onToggleThread={toggleThreadChecked}
-                onDeleteThread={(threadId) => handleDeleteThread(threadId).catch(console.warn)}
-              />
-            ))
-          )}
-        </div>
-      </ScrollArea>
+              traceGroups.map((group) => (
+                <TraceThreadGroupCard
+                  key={group.threadId}
+                  group={group}
+                  selectedTraceIds={selectedTraceIds}
+                  onToggleTrace={toggleTraceChecked}
+                  onOpenTrace={handleExpandTrace}
+                  onDeleteTrace={(traceId) => handleDeleteTraces([traceId]).catch(console.warn)}
+                  onToggleThread={toggleThreadChecked}
+                  onDeleteThread={(threadId) => handleDeleteThread(threadId).catch(console.warn)}
+                />
+              ))
+            )}
+          </div>
+        </ScrollArea>
+      )}
     </div>
   )
 }

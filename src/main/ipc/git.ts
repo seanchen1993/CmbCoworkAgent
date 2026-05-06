@@ -72,9 +72,10 @@ interface StagedCapture {
   snapshots: StagedSnapshot[]
 }
 
-function captureStagedSnapshotsForCommand(command: string): StagedCapture | null {
+async function captureStagedSnapshotsForCommand(command: string): Promise<StagedCapture | null> {
   try {
-    const workingDir = getCommandWorkingDir(command, getCurrentWorkingDirectory())
+    const parsed = parseGitCommand(command)
+    const workingDir = parsed.workingDirFromFlag || (await getCurrentWorkingDirectory())
     return { workingDir, snapshots: captureAdoptionStagedSnapshots(workingDir) }
   } catch (e) {
     console.warn("[Git] adoption pre-commit capture skipped:", e)
@@ -1016,7 +1017,7 @@ export function registerGitHandlers(): void {
       // without emitting any adoption event.
       let stagedCapture: StagedCapture | null = null
       if (isCommitCommand(command)) {
-        stagedCapture = captureStagedSnapshotsForCommand(command)
+        stagedCapture = await captureStagedSnapshotsForCommand(command)
       }
 
       // 这里最终会走 executeGitCommand -> runGitArgs -> 队列限流。

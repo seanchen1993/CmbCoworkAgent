@@ -8,8 +8,7 @@ interface StreamingMarkdownProps {
 }
 
 export const StreamingMarkdown = memo(function StreamingMarkdown({
-  children,
-  isStreaming = false
+  children
 }: StreamingMarkdownProps): React.JSX.Element {
   return (
     <div className="streaming-markdown">

@@ -197,11 +197,7 @@ export function startWatching(threadId: string, workspacePath: string): void {
   try {
     // Use recursive watching (supported on macOS and Windows)
     const watcher = fs.watch(workspacePath, { recursive: true }, (eventType, filename) => {
-      const relativePath = filename
-        ? normalizeRelativePath(
-            typeof filename === "string" ? filename : filename.toString("utf-8")
-          )
-        : ""
+      const relativePath = filename ? normalizeRelativePath(String(filename)) : ""
 
       if (relativePath && isWorkspaceHookPath(relativePath)) {
         console.log(`[WorkspaceWatcher] workspace hook ${eventType}: ${filename} in thread ${threadId}`)

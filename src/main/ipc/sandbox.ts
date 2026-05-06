@@ -134,11 +134,6 @@ export function isElevatedSetupComplete(): boolean {
   }
 }
 
-/** Escape single quotes for PowerShell single-quoted strings. */
-function psEscape(s: string): string {
-  return s.replace(/'/g, "''")
-}
-
 let _cachedIsCurrentProcessElevated: boolean | null = null
 
 function isCurrentProcessElevated(): boolean {

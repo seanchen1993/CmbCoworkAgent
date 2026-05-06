@@ -1,5 +1,5 @@
 import { GitCommit, Maximize2, Minimize2, Eye, EyeOff, Minus, Plus } from "lucide-react"
-import { memo, useEffect, useState } from "react"
+import { memo, useEffect, useMemo, useState } from "react"
 import { cn } from "@/lib/utils"
 
 type DiffViewerModule = typeof import("react-diff-viewer-continued")
@@ -19,9 +19,158 @@ export interface DiffDisplayProps {
   newValue?: string
 }
 
+interface ParsedDiffFile {
+  id: string
+  oldPath: string
+  newPath: string
+  displayPath: string
+  oldContent: string
+  newContent: string
+  totalLines: number
+  addedLines: number
+  removedLines: number
+  isNewFile: boolean
+  isDeletedFile: boolean
+}
+
+function stripDiffPath(path: string): string {
+  const normalized = path.trim().replace(/^"|"$/g, "")
+  if (!normalized || normalized === "/dev/null") return normalized
+  return normalized.replace(/^[ab]\//, "")
+}
+
+function getDisplayPath(oldPath: string, newPath: string, fallback: string): string {
+  if (newPath && newPath !== "/dev/null") return newPath
+  if (oldPath && oldPath !== "/dev/null") return oldPath
+  return fallback
+}
+
+function parseDiffSection(section: string, index: number): ParsedDiffFile | null {
+  const lines = section.split("\n")
+  const diffHeader = lines.find((line) => line.startsWith("diff --git "))
+  const headerMatch = diffHeader?.match(/^diff --git\s+a\/(.+?)\s+b\/(.+)$/)
+
+  let oldPath = headerMatch ? stripDiffPath(`a/${headerMatch[1]}`) : ""
+  let newPath = headerMatch ? stripDiffPath(`b/${headerMatch[2]}`) : ""
+  const oldLines: string[] = []
+  const newLines: string[] = []
+  let inHunk = false
+  let addedLines = 0
+  let removedLines = 0
+  let totalLines = 0
+
+  for (const line of lines) {
+    if (line.startsWith("--- ")) {
+      oldPath = stripDiffPath(line.substring(4))
+      continue
+    }
+    if (line.startsWith("+++ ")) {
+      newPath = stripDiffPath(line.substring(4))
+      continue
+    }
+    if (line.startsWith("@@")) {
+      inHunk = true
+      continue
+    }
+    if (!inHunk || line.startsWith("\\ No newline")) {
+      continue
+    }
+    if (line.startsWith("-")) {
+      oldLines.push(line.substring(1))
+      removedLines++
+      totalLines++
+      continue
+    }
+    if (line.startsWith("+")) {
+      newLines.push(line.substring(1))
+      addedLines++
+      totalLines++
+      continue
+    }
+    if (line.startsWith(" ")) {
+      oldLines.push(line.substring(1))
+      newLines.push(line.substring(1))
+      totalLines++
+    }
+  }
+
+  if (!oldPath && !newPath && totalLines === 0) {
+    return null
+  }
+
+  const displayPath = getDisplayPath(oldPath, newPath, `变更文件 ${index + 1}`)
+
+  return {
+    id: `${index}:${displayPath}`,
+    oldPath,
+    newPath,
+    displayPath,
+    oldContent: oldLines.join("\n"),
+    newContent: newLines.join("\n"),
+    totalLines,
+    addedLines,
+    removedLines,
+    isNewFile: oldPath === "/dev/null",
+    isDeletedFile: newPath === "/dev/null"
+  }
+}
+
+function parseUnifiedDiffFiles(diffText: string): ParsedDiffFile[] {
+  const normalized = diffText.replace(/\r\n/g, "\n")
+  if (!normalized.trim()) return []
+
+  const lines = normalized.split("\n")
+  const sections: string[] = []
+  let current: string[] = []
+
+  for (const line of lines) {
+    if (line.startsWith("diff --git ") && current.length > 0) {
+      sections.push(current.join("\n"))
+      current = [line]
+      continue
+    }
+    current.push(line)
+  }
+  if (current.length > 0) {
+    sections.push(current.join("\n"))
+  }
+
+  const files = sections
+    .map((section, index) => parseDiffSection(section, index))
+    .filter((file): file is ParsedDiffFile => Boolean(file))
+
+  if (files.length > 0) {
+    return files
+  }
+
+  // 兼容没有 `diff --git` 头、但仍包含 `---/+++/@@` 的 unified diff。
+  const singleFile = parseDiffSection(normalized, 0)
+  return singleFile ? [singleFile] : []
+}
+
+function buildDirectDiffFile(oldContent: string, newContent: string): ParsedDiffFile {
+  const oldLineCount = oldContent ? oldContent.split("\n").length : 0
+  const newLineCount = newContent ? newContent.split("\n").length : 0
+
+  return {
+    id: "direct:变更内容",
+    oldPath: "变更前",
+    newPath: "变更后",
+    displayPath: "变更内容",
+    oldContent,
+    newContent,
+    totalLines: Math.max(oldLineCount, newLineCount),
+    addedLines: 0,
+    removedLines: 0,
+    isNewFile: oldLineCount === 0 && newLineCount > 0,
+    isDeletedFile: newLineCount === 0 && oldLineCount > 0
+  }
+}
+
 export const DiffDisplay = memo(({ diff, oldValue, newValue }: DiffDisplayProps) => {
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [renderMode, setRenderMode] = useState<"preview" | "full">("preview")
+  const [selectedFileId, setSelectedFileId] = useState<string | null>(null)
   const [diffViewerModule, setDiffViewerModule] = useState<DiffViewerModule | null>(null)
   const [diffViewerLoadError, setDiffViewerLoadError] = useState<string | null>(null)
 
@@ -47,47 +196,29 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue }: DiffDisplayProps)
   }, [diffViewerModule])
 
   const diffToUse = diff || ""
-
-  // Parse git diff to extract old and new content
-  const parseGitDiff = (diffText: string) => {
-    const lines = diffText.split("\n")
-    let oldContent = ""
-    let newContent = ""
-    let inHunk = false
-    let totalLines = 0
-    let addedLines = 0
-    let removedLines = 0
-
-    for (const line of lines) {
-      if (line.startsWith("@@")) {
-        inHunk = true
-        continue
-      }
-      if (inHunk) {
-        totalLines++
-        if (line.startsWith("-")) {
-          oldContent += line.substring(1) + "\n"
-          removedLines++
-        } else if (line.startsWith("+")) {
-          newContent += line.substring(1) + "\n"
-          addedLines++
-        } else if (line.startsWith(" ")) {
-          oldContent += line.substring(1) + "\n"
-          newContent += line.substring(1) + "\n"
-        }
-      }
+  const diffFiles = useMemo(() => {
+    if (oldValue !== undefined || newValue !== undefined) {
+      return [buildDirectDiffFile(oldValue ?? "", newValue ?? "")]
     }
+    return parseUnifiedDiffFiles(diffToUse)
+  }, [diffToUse, oldValue, newValue])
 
-    return {
-      oldContent: oldContent.trim(),
-      newContent: newContent.trim(),
-      totalLines,
-      addedLines,
-      removedLines
-    }
-  }
+  useEffect(() => {
+    setSelectedFileId((current) => {
+      if (current && diffFiles.some((file) => file.id === current)) {
+        return current
+      }
+      return diffFiles[0]?.id ?? null
+    })
+  }, [diffFiles])
 
-  const { oldContent, newContent, totalLines, addedLines, removedLines } = parseGitDiff(diffToUse)
+  const selectedFile = diffFiles.find((file) => file.id === selectedFileId) ?? diffFiles[0]
+  const totalAddedLines = diffFiles.reduce((sum, file) => sum + file.addedLines, 0)
+  const totalRemovedLines = diffFiles.reduce((sum, file) => sum + file.removedLines, 0)
+  const totalChangedLines = diffFiles.reduce((sum, file) => sum + file.totalLines, 0)
+  const oldContent = selectedFile?.oldContent ?? ""
+  const newContent = selectedFile?.newContent ?? ""
+  const totalLines = selectedFile?.totalLines ?? 0
 
   const isLargeDiff = totalLines > 100
   const maxPreviewLines = 20
@@ -116,8 +247,49 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue }: DiffDisplayProps)
   const DiffViewerComponent = diffViewerModule?.default
   const DiffMethod = diffViewerModule?.DiffMethod
 
+  const renderFileTabs = (fullscreen: boolean) => {
+    if (diffFiles.length <= 1) return null
+
+    return (
+      <div
+        className={cn(
+          "flex gap-1 overflow-x-auto border-b border-border bg-background/80",
+          fullscreen ? "px-4 py-2" : "px-2 py-1.5"
+        )}
+      >
+        {diffFiles.map((file) => {
+          const selected = file.id === selectedFile?.id
+          return (
+            <button
+              key={file.id}
+              type="button"
+              onClick={() => setSelectedFileId(file.id)}
+              className={cn(
+                "inline-flex max-w-[16rem] shrink-0 items-center gap-1.5 rounded border px-2 py-1 text-[10px] transition-colors",
+                selected
+                  ? "border-primary/40 bg-primary/10 text-primary"
+                  : "border-border bg-muted/50 text-muted-foreground hover:bg-muted hover:text-foreground"
+              )}
+              title={file.displayPath}
+            >
+              <span className="truncate font-mono">{file.displayPath}</span>
+              {file.isNewFile && <span className="rounded bg-green-100 px-1 text-green-700">new</span>}
+              {file.isDeletedFile && <span className="rounded bg-red-100 px-1 text-red-700">del</span>}
+              {file.addedLines > 0 && <span className="text-green-700">+{file.addedLines}</span>}
+              {file.removedLines > 0 && <span className="text-red-700">-{file.removedLines}</span>}
+            </button>
+          )
+        })}
+      </div>
+    )
+  }
+
   const makeDiffViewer = (fullscreen: boolean) =>
-    !DiffViewerComponent || !DiffMethod ? (
+    !selectedFile ? (
+      <div className="flex min-h-[120px] items-center justify-center px-4 py-6 text-xs text-muted-foreground">
+        暂无 diff 内容
+      </div>
+    ) : !DiffViewerComponent || !DiffMethod ? (
       <div className="flex min-h-[120px] items-center justify-center px-4 py-6 text-xs text-muted-foreground">
         {diffViewerLoadError
           ? `Diff 组件加载失败：${diffViewerLoadError}`
@@ -125,8 +297,8 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue }: DiffDisplayProps)
       </div>
     ) : (
       <DiffViewerComponent
-        oldValue={oldValue || displayOldContent}
-        newValue={newValue || displayNewContent}
+        oldValue={displayOldContent}
+        newValue={displayNewContent}
         splitView={fullscreen}
         hideLineNumbers={!fullscreen}
         renderGutter={
@@ -239,22 +411,27 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue }: DiffDisplayProps)
           <span className="text-[11px] font-semibold text-foreground tracking-wide truncate">
             变更预览
           </span>
-          {(addedLines > 0 || removedLines > 0) && (
+          {diffFiles.length > 1 && (
+            <span className="text-[10px] text-muted-foreground shrink-0">
+              {diffFiles.length} 个文件
+            </span>
+          )}
+          {(totalAddedLines > 0 || totalRemovedLines > 0) && (
             <div className="flex items-center gap-1">
-              {addedLines > 0 && (
+              {totalAddedLines > 0 && (
                 <span className="inline-flex items-center gap-0.5 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-400">
                   <Plus className="size-2.5" />
-                  {addedLines}
+                  {totalAddedLines}
                 </span>
               )}
-              {removedLines > 0 && (
+              {totalRemovedLines > 0 && (
                 <span className="inline-flex items-center gap-0.5 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-400">
                   <Minus className="size-2.5" />
-                  {removedLines}
+                  {totalRemovedLines}
                 </span>
               )}
-              {isLargeDiff && (
-                <span className="text-[10px] text-muted-foreground">共 {totalLines} 行</span>
+              {totalChangedLines > 0 && (
+                <span className="text-[10px] text-muted-foreground">共 {totalChangedLines} 行</span>
               )}
             </div>
           )}
@@ -272,6 +449,8 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue }: DiffDisplayProps)
           </button>
         </div>
       </div>
+
+      {renderFileTabs(false)}
 
       {/* Large-file warning banner */}
       {isLargeDiff && renderMode === "full" && (
@@ -305,19 +484,22 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue }: DiffDisplayProps)
                 <span className="text-sm font-semibold">Git Diff — 全屏视图</span>
               </div>
               <div className="flex items-center gap-1.5">
-                {addedLines > 0 && (
+                {diffFiles.length > 1 && (
+                  <span className="text-xs text-muted-foreground">{diffFiles.length} 个文件</span>
+                )}
+                {totalAddedLines > 0 && (
                   <span className="inline-flex items-center gap-0.5 text-[11px] font-medium px-2 py-0.5 rounded-full bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-400">
                     <Plus className="size-3" />
-                    {addedLines} 行新增
+                    {totalAddedLines} 行新增
                   </span>
                 )}
-                {removedLines > 0 && (
+                {totalRemovedLines > 0 && (
                   <span className="inline-flex items-center gap-0.5 text-[11px] font-medium px-2 py-0.5 rounded-full bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-400">
                     <Minus className="size-3" />
-                    {removedLines} 行删除
+                    {totalRemovedLines} 行删除
                   </span>
                 )}
-                <span className="text-xs text-muted-foreground">共 {totalLines} 行</span>
+                <span className="text-xs text-muted-foreground">共 {totalChangedLines} 行</span>
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -352,6 +534,8 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue }: DiffDisplayProps)
               </button>
             </div>
           </div>
+
+          {renderFileTabs(true)}
 
           {/* Modal content */}
           <div className="flex-1 overflow-hidden p-4">

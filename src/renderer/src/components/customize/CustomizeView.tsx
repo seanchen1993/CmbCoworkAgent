@@ -39,8 +39,9 @@ export function CustomizeView(): React.JSX.Element {
     setShowCustomizeView,
     customizeInitialTab,
     pendingEvolution,
+    cloudEvolutionUpdates,
     setPendingEvolution,
-    currentThreadId
+    currentThreadId,
   } = useAppStore()
   const [activeTab, setActiveTab] = useState<CustomizeTab>(
     (customizeInitialTab as CustomizeTab) || "skills"
@@ -53,10 +54,10 @@ export function CustomizeView(): React.JSX.Element {
   }, [customizeInitialTab])
 
   useEffect(() => {
-    if (activeTab === "evolution" && pendingEvolution) {
+    if (activeTab === "evolution" && pendingEvolution && cloudEvolutionUpdates.length === 0) {
       setPendingEvolution(false)
     }
-  }, [activeTab, pendingEvolution, setPendingEvolution])
+  }, [activeTab, cloudEvolutionUpdates.length, pendingEvolution, setPendingEvolution])
 
   return (
     <div className="flex h-full overflow-hidden bg-background">

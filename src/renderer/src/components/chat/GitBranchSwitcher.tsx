@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from "react"
-import { GitBranch, Check, Loader2, RefreshCw, AlertCircle, ChevronDown, Plus } from "lucide-react"
+import { GitBranch, Check, Loader2, RefreshCw, AlertCircle, ChevronDown } from "lucide-react"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
@@ -17,10 +17,8 @@ export function GitBranchSwitcher({ workspacePath }: GitBranchSwitcherProps): Re
   const [branches, setBranches] = useState<string[]>([])
   const [searchQuery, setSearchQuery] = useState("")
   const [switching, setSwitching] = useState(false)
-  const [creatingBranch, setCreatingBranch] = useState(false)
   const [switchError, setSwitchError] = useState<string | null>(null)
   const [loadingBranches, setLoadingBranches] = useState(false)
-  const [createBranchName, setCreateBranchName] = useState("")
   const searchInputRef = useRef<HTMLInputElement>(null)
 
   // 检测是否是 git 仓库并获取当前分支
@@ -69,7 +67,6 @@ export function GitBranchSwitcher({ workspacePath }: GitBranchSwitcherProps): Re
     if (open) {
       loadBranches()
       setSearchQuery("")
-      setCreateBranchName("")
       setSwitchError(null)
       setTimeout(() => searchInputRef.current?.focus(), 50)
     }
@@ -77,7 +74,7 @@ export function GitBranchSwitcher({ workspacePath }: GitBranchSwitcherProps): Re
 
   const handleSwitchBranch = useCallback(
     async (branch: string) => {
-      if (branch === currentBranch || switching || creatingBranch) return
+      if (branch === currentBranch || switching) return
       setSwitching(true)
       setSwitchError(null)
       try {
@@ -94,46 +91,10 @@ export function GitBranchSwitcher({ workspacePath }: GitBranchSwitcherProps): Re
         setSwitching(false)
       }
     },
-    [currentBranch, switching, creatingBranch, workspacePath]
+    [currentBranch, switching, workspacePath]
   )
 
-  const handleCreateBranch = useCallback(async () => {
-    const branch = createBranchName.trim()
-    if (!branch || switching || creatingBranch) return
-    if (branch === currentBranch) {
-      setSwitchError("当前已在该分支")
-      return
-    }
-
-    setCreatingBranch(true)
-    setSwitchError(null)
-    try {
-      const result = await window.api.git.createBranch(branch, workspacePath ?? undefined)
-      if (!result.success) {
-        setSwitchError(result.error || "创建分支失败")
-        return
-      }
-      setCurrentBranch(branch)
-      setCreateBranchName("")
-      await loadBranches()
-      setOpen(false)
-    } catch (err) {
-      setSwitchError(err instanceof Error ? err.message : "创建分支失败")
-    } finally {
-      setCreatingBranch(false)
-    }
-  }, [createBranchName, switching, creatingBranch, currentBranch, workspacePath, loadBranches])
-
-  const busy = switching || creatingBranch
-  const canCreate = createBranchName.trim().length > 0 && !busy
-
-  const handleCreateBranchKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key !== "Enter") return
-    e.preventDefault()
-    void handleCreateBranch()
-  }, [handleCreateBranch])
-
-  const createActionLabel = creatingBranch ? "创建中..." : "创建并切换"
+  const busy = switching
   const headerTitle = "切换分支"
 
   const filteredBranches = branches.filter((b) =>

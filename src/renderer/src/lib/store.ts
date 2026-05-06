@@ -1,7 +1,8 @@
 import { create } from "zustand"
+import type { EvolutionCandidate } from "@/api/evolution"
 import type { Thread, ModelConfig, Provider } from "@/types"
 
-type EvolutionTab = "candidates" | "traces"
+type EvolutionTab = "candidates" | "traces" | "review"
 
 interface EvolutionRunProgress {
   runId: string
@@ -97,6 +98,8 @@ interface AppState {
   // Skill evolution — true when threshold reached, clears when Evolution panel opens
   pendingEvolution: boolean
   setPendingEvolution: (v: boolean) => void
+  cloudEvolutionUpdates: EvolutionCandidate[]
+  setCloudEvolutionUpdates: (updates: EvolutionCandidate[]) => void
 
   // Skill generation virtual subagent — shown in the right panel agents section.
   // State is stored per-thread so switching threads preserves each thread's card.
@@ -473,6 +476,8 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   pendingEvolution: false,
   setPendingEvolution: (v) => set({ pendingEvolution: v }),
+  cloudEvolutionUpdates: [],
+  setCloudEvolutionUpdates: (updates) => set({ cloudEvolutionUpdates: updates }),
 
   // Per-thread skill generation state — keyed by threadId.
   skillGenerationByThread: new Map(),

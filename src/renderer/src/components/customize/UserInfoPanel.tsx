@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Button } from '../ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
+import { Card, CardContent } from '../ui/card';
 
 interface UserInfoConfig {
     sapId: '',//8
@@ -31,7 +31,7 @@ const UserInfoPanel: React.FC = () => {
                 fetch(`https://archguardservice.paas.${import.meta.env.VITE_LOGIN_PT}.cn/cowork/login-info`, {
                     method: 'GET',
                     headers: {
-                        ystCode: userInfo.ystCode,
+                        ystCode: userInfo.ystCode || '',
                         ystRefreshToken: userInfo.ystRefreshToken || '',
                     }
                 }).then(async res => {

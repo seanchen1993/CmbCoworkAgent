@@ -162,7 +162,6 @@ function renderToolRoutingGatePrompt(options: {
     routeTools.push("code_exec")
   }
 
-  const toolList = routeTools.map((tool) => `\`${tool}\``).join(", ")
   const directRouteWarnings: string[] = []
   if (options.hasDeferredRoute) {
     directRouteWarnings.push("deferred tools")

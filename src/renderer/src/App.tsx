@@ -28,7 +28,8 @@ import { ResizeHandle } from "@/components/ui/resizable"
 import { useAppStore } from "@/lib/store"
 import { ThreadProvider } from "@/lib/thread-context"
 import { initMMJ } from "../js/mmjUtils"
-import { Toaster } from "sonner"
+import { toast, Toaster } from "sonner"
+import { evolutionApi, type EvolutionCandidate } from "@/api/evolution"
 interface UserInfoConfig {
   sapId: '',//8
   ystId: '',//6
@@ -65,6 +66,31 @@ const RIGHT_MAX = 1600
 const RIGHT_DEFAULT = 300
 const RIGHT_PREVIEW_EXPAND_VW = 0.35
 
+const CLOUD_EVOLUTION_PROMPT_SIGNATURE_KEY = "trace-evolver-cloud-update-prompt-signature"
+
+function cloudEvolutionUpdateSignature(updates: EvolutionCandidate[]): string {
+  return updates
+    .map((update) => `${update.candidate_id}:${update.target_version || ""}`)
+    .sort()
+    .join("|")
+}
+
+function getCloudEvolutionPromptSignature(): string {
+  try {
+    return localStorage.getItem(CLOUD_EVOLUTION_PROMPT_SIGNATURE_KEY) || ""
+  } catch {
+    return ""
+  }
+}
+
+function setCloudEvolutionPromptSignature(signature: string): void {
+  try {
+    localStorage.setItem(CLOUD_EVOLUTION_PROMPT_SIGNATURE_KEY, signature)
+  } catch {
+    // Prompt de-duplication is best-effort; the update list and red dot still work without storage.
+  }
+}
+
 function App(): React.JSX.Element {
   const {
     currentThreadId,
@@ -76,7 +102,10 @@ function App(): React.JSX.Element {
     toggleSidebar,
     rightPanelCollapsed,
     toggleRightPanel,
-    setPendingEvolution
+    setPendingEvolution,
+    setShowCustomizeView,
+    setEvolutionTab,
+    setCloudEvolutionUpdates
   } = useAppStore()
   const [isLoading, setIsLoading] = useState(true)
   const [leftWidth, setLeftWidth] = useState(LEFT_DEFAULT)
@@ -104,7 +133,7 @@ function App(): React.JSX.Element {
           fetch(`https://archguardservice.paas.${import.meta.env.VITE_LOGIN_PT}.cn/cowork/login-info`, {
               method: 'GET',
               headers: {
-                  ystCode: userInfo.ystCode,
+                  ystCode: userInfo.ystCode || '',
                   ystRefreshToken: userInfo.ystRefreshToken || '',
               }
           }).then(async res => {
@@ -326,6 +355,52 @@ function App(): React.JSX.Element {
     }
     init()
   }, [loadThreads, createThread])
+
+  useEffect(() => {
+    let cancelled = false
+
+    const checkOptimizedSkillUpdates = async (): Promise<void> => {
+      try {
+        const installedSkills = await window.api.skills.list()
+        const updates = await evolutionApi.listAvailableUpdates(installedSkills)
+        if (cancelled) return
+
+        setCloudEvolutionUpdates(updates)
+        setPendingEvolution(updates.length > 0)
+
+        if (updates.length === 0) return
+
+        const signature = cloudEvolutionUpdateSignature(updates)
+        if (!signature || signature === getCloudEvolutionPromptSignature()) return
+        setCloudEvolutionPromptSignature(signature)
+
+        const updateItem = updates[0]
+        const message =
+          updates.length === 1
+            ? `「${updateItem.skill_name}」有云端自进化版本可用`
+            : `有 ${updates.length} 个云端自进化版本可用`
+        toast.info(message, {
+          duration: 8000,
+          action: {
+            label: "查看候选",
+            onClick: () => {
+              setEvolutionTab("candidates")
+              setShowCustomizeView(true, "evolution")
+            }
+          }
+        })
+      } catch (error) {
+        console.warn("[SkillUpdatePrompt] failed to check optimized skill updates:", error)
+      }
+    }
+
+    void checkOptimizedSkillUpdates()
+    const timer = window.setInterval(() => void checkOptimizedSkillUpdates(), 30 * 60 * 1000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [setCloudEvolutionUpdates, setEvolutionTab, setPendingEvolution, setShowCustomizeView])
 
   // Listen for skill-evolution threshold events — set badge on Evolution tab
   useEffect(() => {

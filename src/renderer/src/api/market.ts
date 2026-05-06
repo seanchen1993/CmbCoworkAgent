@@ -52,6 +52,12 @@ export interface MarketItem {
   canDelete?: boolean
   ip?: string
   installed?: boolean // 新增已安装状态字段
+  auto_optimized?: boolean | string
+  evolution_source?: string
+  source_version?: string
+  target_version?: string
+  candidate_id?: string
+  published_at?: string
 }
 
 export interface MarketUpdateResponse {
@@ -106,6 +112,58 @@ interface CacheEntry {
 }
 
 const API_CACHE = new Map<string, CacheEntry>()
+const INSTALLED_MARKET_SKILLS_KEY = "cmbcowork-installed-market-skills"
+
+export interface InstalledMarketSkillRecord {
+  name: string
+  version: string
+  installedAt: string
+}
+
+function normalizeVersion(version?: string | null): string {
+  const raw = String(version || "").trim()
+  return raw.startsWith("v") ? raw.slice(1) : raw
+}
+
+export function compareVersions(left?: string | null, right?: string | null): number {
+  const l = normalizeVersion(left).split(".").map((part) => Number(part) || 0)
+  const r = normalizeVersion(right).split(".").map((part) => Number(part) || 0)
+  for (let i = 0; i < 3; i++) {
+    const diff = (l[i] || 0) - (r[i] || 0)
+    if (diff !== 0) return diff
+  }
+  return 0
+}
+
+export function getInstalledMarketSkills(): InstalledMarketSkillRecord[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(INSTALLED_MARKET_SKILLS_KEY) || "[]") as unknown
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is InstalledMarketSkillRecord => {
+          return Boolean(
+            item &&
+            typeof item === "object" &&
+            typeof (item as InstalledMarketSkillRecord).name === "string" &&
+            typeof (item as InstalledMarketSkillRecord).version === "string"
+          )
+        })
+      : []
+  } catch {
+    return []
+  }
+}
+
+export function recordInstalledMarketSkill(name: string, version?: string | null): void {
+  const normalizedName = name.trim()
+  if (!normalizedName || !version) return
+  const existing = getInstalledMarketSkills().filter((item) => item.name !== normalizedName)
+  existing.push({ name: normalizedName, version: normalizeVersion(version), installedAt: new Date().toISOString() })
+  localStorage.setItem(INSTALLED_MARKET_SKILLS_KEY, JSON.stringify(existing))
+}
+
+export function isAutoOptimizedMarketItem(item: MarketItem): boolean {
+  return item.auto_optimized === true || item.auto_optimized === "true" || item.evolution_source === "trace_evolver"
+}
 
 // Helper function to set cached data
 const setCachedData = (key: string, data: MarketApiResponse): void => {
@@ -347,7 +405,8 @@ export const marketApi = {
     name: string,
     type: MarketItemType,
     downloadToLocal = false,
-    _isFeatured = false
+    _isFeatured = false,
+    marketVersion?: string | null
   ): Promise<DownloadResponse> {
     console.log(`Downloading ${type} item: ${name}`)
     const { blob, filename } = await this.fetchInstallFile(name, type)
@@ -364,6 +423,9 @@ export const marketApi = {
         const arrayBuffer = await blob.arrayBuffer()
         if (typeof window.api?.skills?.upload === "function") {
           const uploadResult = await window.api.skills.upload(arrayBuffer, filename)
+          if (uploadResult.success) {
+            recordInstalledMarketSkill(name, marketVersion)
+          }
           return {
             success: uploadResult.success,
             error: uploadResult.error
