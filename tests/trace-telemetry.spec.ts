@@ -25,6 +25,10 @@ function assertArrayEqual(actual: string[], expected: string[], message: string)
   )
 }
 
+function makeLongText(prefix: string, middle: string, suffix: string, middleLength: number): string {
+  return `${prefix}${middle.repeat(middleLength)}${suffix}`
+}
+
 async function waitFor(condition: () => boolean, timeoutMs = 1000): Promise<void> {
   const startedAt = Date.now()
   while (Date.now() - startedAt < timeoutMs) {
@@ -32,6 +36,14 @@ async function waitFor(condition: () => boolean, timeoutMs = 1000): Promise<void
     await new Promise((resolve) => setTimeout(resolve, 20))
   }
   throw new Error("timed out waiting for async trace reporter")
+}
+
+function restoreTraceEnv(previousTracesDir: string | undefined): void {
+  if (previousTracesDir === undefined) {
+    delete process.env.CMB_COWORK_TRACES_DIR
+  } else {
+    process.env.CMB_COWORK_TRACES_DIR = previousTracesDir
+  }
 }
 
 function testSkillUsageDetectorNormalizesVersions(): void {
@@ -103,12 +115,122 @@ async function testTraceCollectorReportsVersionedSkills(): Promise<void> {
       "persisted trace should contain normalized usedSkills"
     )
   } finally {
-    setTraceReporter({ async report() {} })
-    if (previousTracesDir === undefined) {
-      delete process.env.CMB_COWORK_TRACES_DIR
-    } else {
-      process.env.CMB_COWORK_TRACES_DIR = previousTracesDir
+    setTraceReporter({
+      async report(trace) {
+        void trace
+      }
+    })
+    restoreTraceEnv(previousTracesDir)
+    await rm(tracesDir, { recursive: true, force: true })
+  }
+}
+
+async function testTraceCollectorSanitizesLargeFields(): Promise<void> {
+  const tracesDir = await mkdtemp(join(tmpdir(), "trace-sanitize-"))
+  const previousTracesDir = process.env.CMB_COWORK_TRACES_DIR
+  let reportedTrace: AgentTrace | undefined
+  const reporter: ITraceReporter = {
+    async report(trace) {
+      reportedTrace = trace
     }
+  }
+
+  process.env.CMB_COWORK_TRACES_DIR = tracesDir
+  setTraceReporter(reporter)
+
+  try {
+    const userMessage = makeLongText("USER_HEAD_", "u", "_USER_TAIL", 3000)
+    const toolResult = makeLongText("RESULT_HEAD_", "r", "_RESULT_TAIL", 5000)
+    const inputMessages = Array.from({ length: 12 }, (_, index) => ({
+      role: index % 2 === 0 ? "user" as const : "assistant" as const,
+      content: makeLongText(`MSG_${index}_HEAD_`, "m", `_MSG_${index}_TAIL`, 2500)
+    }))
+
+    const tracer = new TraceCollector("thread-sanitize-unit", userMessage, "model-b")
+    tracer.beginStep()
+    tracer.recordToolCall({
+      name: "exec_command",
+      args: {
+        command: makeLongText("ARGS_HEAD_", "a", "_ARGS_TAIL", 4000),
+        nested: { content: makeLongText("NESTED_HEAD_", "n", "_NESTED_TAIL", 4000) }
+      },
+      result: toolResult,
+      durationMs: 42
+    })
+    tracer.endStep(makeLongText("ASSISTANT_HEAD_", "s", "_ASSISTANT_TAIL", 4000))
+    tracer.recordModelCall({
+      messageId: "ai-large",
+      startedAt: new Date().toISOString(),
+      inputMessages,
+      outputMessage: {
+        role: "assistant",
+        content: makeLongText("OUTPUT_HEAD_", "o", "_OUTPUT_TAIL", 4000)
+      },
+      toolCalls: [
+        {
+          name: "exec_command",
+          args: { command: makeLongText("MODEL_ARGS_HEAD_", "x", "_MODEL_ARGS_TAIL", 4000) },
+          result: makeLongText("MODEL_RESULT_HEAD_", "y", "_MODEL_RESULT_TAIL", 4000)
+        }
+      ],
+      tokenUsage: { inputTokens: 123, outputTokens: 45, totalTokens: 168 }
+    })
+    tracer.addToolNode({
+      name: "exec_command",
+      input: { command: makeLongText("NODE_INPUT_HEAD_", "i", "_NODE_INPUT_TAIL", 4000) },
+      metadata: { stdout: makeLongText("NODE_META_HEAD_", "z", "_NODE_META_TAIL", 4000) }
+    })
+    tracer.addToolResultNode({
+      output: makeLongText("NODE_OUTPUT_HEAD_", "p", "_NODE_OUTPUT_TAIL", 4000)
+    })
+
+    const trace = await tracer.finish("error", makeLongText("ERROR_HEAD_", "e", "_ERROR_TAIL", 4000))
+    await waitFor(() => reportedTrace !== undefined)
+
+    assert(trace.userMessage.includes("USER_HEAD_"), "sanitized user message should keep head")
+    assert(trace.userMessage.includes("_USER_TAIL"), "sanitized user message should keep tail")
+    assert(trace.userMessage.includes("trace truncated"), "sanitized user message should mark truncation")
+    assert(trace.modelCalls?.[0]?.inputMessages.length === 12, "sanitizer should keep all LLM input messages")
+    assert(
+      trace.modelCalls?.[0]?.inputMessages[11]?.content.includes("_MSG_11_TAIL"),
+      "sanitizer should preserve tails for retained input messages"
+    )
+    assert(
+      trace.steps[0]?.toolCalls[0]?.result?.includes("_RESULT_TAIL"),
+      "tool result should keep tail"
+    )
+    assert(
+      JSON.stringify(trace.steps[0]?.toolCalls[0]?.args).includes("ARGS_HEAD_"),
+      "tool args should keep head"
+    )
+    assert(
+      trace.errorMessage?.includes("_ERROR_TAIL"),
+      "error message should keep tail"
+    )
+    assert(
+      trace.metadata?.traceTruncation &&
+        typeof trace.metadata.traceTruncation === "object" &&
+        (trace.metadata.traceTruncation as { truncated?: boolean }).truncated === true,
+      "trace metadata should record truncation"
+    )
+
+    const file = join(tracesDir, trace.threadId, `${trace.traceId}.jsonl`)
+    const persistedRaw = (await readFile(file, "utf-8")).trim()
+    const persisted = JSON.parse(persistedRaw) as AgentTrace
+    assert(persistedRaw.length < 96 * 1024, "persisted trace should fit hard limit")
+    assert(persisted.modelCalls?.[0]?.inputMessages.length === 12, "persisted trace should keep all input messages")
+    assertArrayEqual(
+      reportedTrace?.modelCalls?.[0]?.inputMessages.map((message) => message.role) ?? [],
+      persisted.modelCalls?.[0]?.inputMessages.map((message) => message.role) ?? [],
+      "reporter should receive the same sanitized message sequence as persisted trace"
+    )
+  } finally {
+    setTraceReporter({
+      async report(trace) {
+        void trace
+      }
+    })
+    restoreTraceEnv(previousTracesDir)
     await rm(tracesDir, { recursive: true, force: true })
   }
 }
@@ -118,6 +240,8 @@ async function run(): Promise<void> {
   console.log("PASS Skill usage detector version normalization")
   await testTraceCollectorReportsVersionedSkills()
   console.log("PASS trace collector telemetry usedSkills normalization")
+  await testTraceCollectorSanitizesLargeFields()
+  console.log("PASS trace collector trace field sanitization")
 }
 
 run().catch((error: Error) => {

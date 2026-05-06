@@ -20,7 +20,7 @@
 export interface TraceToolCall {
   /** Tool name, e.g. "read_file", "manage_skill" */
   name: string
-  /** Raw arguments passed to the tool */
+  /** Raw arguments passed to the tool (sanitized before trace storage/reporting). */
   args: Record<string, unknown>
   /** Tool result (string representation, may be truncated) */
   result?: string
@@ -51,7 +51,7 @@ export interface TraceModelCall {
   messageId?: string
   /** ISO timestamp when this call was recorded */
   startedAt: string
-  /** Request-side context sent to the model (trimmed to recent messages). */
+  /** Request-side context sent to the model. All messages are kept; large content is truncated before storage/reporting. */
   inputMessages: TraceChatMessage[]
   /** Final model output message */
   outputMessage: TraceChatMessage
@@ -249,7 +249,7 @@ export interface ITraceReporter {
  * Satisfies the interface but does nothing.
  */
 export class NoopTraceReporter implements ITraceReporter {
-  async report(_trace: AgentTrace): Promise<void> {
+  async report(): Promise<void> {
     // Intentionally empty — remote reporting not yet implemented
   }
 }
