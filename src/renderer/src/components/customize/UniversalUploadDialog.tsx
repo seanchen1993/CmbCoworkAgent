@@ -465,11 +465,11 @@ export function UniversalUploadDialog({
           {/* Guidance Input - Available for all modes */}
           <div className="space-y-2">
             <label htmlFor="guidance" className="block text-sm font-medium">
-              使用指引
+              使用指引（建议填写！）
             </label>
             <textarea
               id="guidance"
-              placeholder="输入使用指引（可选）- 帮助其他用户了解如何使用这个资源"
+              placeholder="帮助其他用户了解如何使用这个资源。案例，你可以告诉大模型：使用mmjtrack-updater技能给我的项目升级埋埋机到最新版本"
               value={guidance}
               onChange={(e) => setGuidance(e.target.value)}
               disabled={uploading}
