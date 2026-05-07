@@ -510,6 +510,23 @@ export function MarketPanel(): React.JSX.Element {
   const getItemKey = (item: MarketItem) => item.id || item.name
   const getMarketTypeLabel = (type: MarketItemType) =>
     type === "skill" ? "技能" : type === "mcp" ? "MCP连接器" : "插件"
+  const tabIntros: Record<MarketItemType, { title: string; description: string }> = {
+    skill: {
+      title: "Skills 是可直接调用的专项能力",
+      description:
+        "安装后可以在对话中选择或自动调用，用来完成写作、检索、分析、生成文件等具体任务。"
+    },
+    mcp: {
+      title: "MCPs 是连接外部工具和数据源的通道",
+      description:
+        "安装后可让 Agent 访问数据库、系统服务、业务 API 或远程工具，扩展它能读取和操作的范围。"
+    },
+    plugin: {
+      title: "Plugins 是打包好的功能扩展",
+      description: "安装后可一次性提供技能、MCP 连接器、钩子或界面能力，适合成套分发完整工作流。"
+    }
+  }
+  const activeTabIntro = tabIntros[activeTab]
 
   const resetDetailState = () => {
     setDetailError(null)
@@ -2007,6 +2024,25 @@ export function MarketPanel(): React.JSX.Element {
                 Plugins
               </TabsTrigger>
             </TabsList>
+            <div className="mt-3 mb-3 rounded-xl border border-[#e8e6dc] bg-white/65 px-3.5 py-3">
+              <div className="flex items-start gap-2.5">
+                {activeTab === "skill" ? (
+                  <Sparkles className="mt-0.5 size-4 shrink-0 text-[#c4956a]" />
+                ) : activeTab === "mcp" ? (
+                  <Plug className="mt-0.5 size-4 shrink-0 text-[#6f8f75]" />
+                ) : (
+                  <Puzzle className="mt-0.5 size-4 shrink-0 text-[#8b7bb8]" />
+                )}
+                <div className="min-w-0">
+                  <p className="text-sm font-medium leading-snug text-[#141413]">
+                    {activeTabIntro.title}
+                  </p>
+                  <p className="mt-1 text-xs leading-relaxed text-[#5e5d59]">
+                    {activeTabIntro.description}
+                  </p>
+                </div>
+              </div>
+            </div>
           </div>
 
           <div className="flex-1 overflow-hidden">

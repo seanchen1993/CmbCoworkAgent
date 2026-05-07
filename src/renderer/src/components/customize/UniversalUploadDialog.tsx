@@ -1,5 +1,5 @@
 import React, { useState } from "react"
-import { Upload, Copy, Check, ChevronDown, ChevronRight } from "lucide-react"
+import { Upload, Copy, Check, ChevronDown, ChevronRight, ExternalLink } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import {
@@ -53,6 +53,9 @@ const buildUserIdFromUserInfo = (userInfo: UserInfoLite | null): string | undefi
   const segments = [rawId, rawName, rawOrgName].filter(Boolean)
   return segments.length > 0 ? segments.join(" / ") : undefined
 }
+
+const PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL =
+  import.meta.env.VITE_PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL?.trim()
 
 export function UniversalUploadDialog({
   open,
@@ -384,6 +387,22 @@ export function UniversalUploadDialog({
         </DialogHeader>
 
         <div className="space-y-4 max-h-[50vh] overflow-auto">
+          {/* Plugin Template */}
+          {resourceType === "plugin" && PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL && (
+            <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
+              <span>首次上传插件？可以先下载插件模板文件，按模板结构修改后再上传。</span>
+              <a
+                href={PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL}
+                target="_blank"
+                rel="noreferrer"
+                className="ml-1 inline-flex items-center gap-1 font-medium text-blue-700 underline-offset-2 hover:underline"
+              >
+                下载插件模板
+                <ExternalLink className="size-3.5" />
+              </a>
+            </div>
+          )}
+
           {/* File Upload Area */}
           <div
             className={cn(
