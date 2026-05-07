@@ -157,7 +157,7 @@ function makeTabState(): TabState {
     editModeAvailable: false,
     selectedElement: null,
     attachedImage: null,
-    selectedModelId: null,
+    selectedModelId: getLastModelId(),  // default to last-used model
     reloadKey: 0,
     selectedSkill: null,
     codeContext: null,
@@ -221,6 +221,12 @@ let tabCounter = 1
 
 // File attachment limits — mirrors ChatContainer
 const DESIGN_MAX_ATTACHMENTS_DISPLAY = 3
+
+// Last-used model persistence
+const DESIGN_LAST_MODEL_KEY = "design_last_model_id"
+function getLastModelId(): string | null {
+  try { return localStorage.getItem(DESIGN_LAST_MODEL_KEY) } catch { return null }
+}
 
 // ─────────────────────────────────────────────────────────
 // Session persistence — localStorage
@@ -761,8 +767,7 @@ export function DesignView(): React.JSX.Element {
   const iframeRef         = useRef<HTMLIFrameElement>(null)
   const canvasContainerRef = useRef<HTMLDivElement>(null)
   const activeTabIdRef    = useRef(activeTabId)
-  const fileInputRef      = useRef<HTMLInputElement>(null)   // images only (screenshot)
-  const attachFileInputRef = useRef<HTMLInputElement>(null)  // all files (toolbar 📎)
+  const fileInputRef      = useRef<HTMLInputElement>(null)   // images only (screenshot / 📷)
 
   const ts = tabStates[activeTabId] ?? makeTabState()
 
@@ -1237,97 +1242,53 @@ export function DesignView(): React.JSX.Element {
   // ── File attachment constants (same as ChatContainer) ─────
   const DESIGN_MAX_ATTACHMENTS = 3
   const DESIGN_MAX_TOTAL_CHARS = 24_000
-  // Extensions handled by window.api.file.parse (main-process parser — supports docx, xlsx, etc.)
-  const PARSE_EXTS = new Set([".txt", ".md", ".csv", ".docx", ".xlsx", ".xls"])
 
   const [attachmentLoading, setAttachmentLoading] = useState(false)
 
-  // ── Universal file handler for toolbar 📎 ──────────────────
-  // Routes by file type:
-  //   images       → screenshot preview
-  //   PARSE_EXTS   → window.api.file.parse (docx/xlsx text extraction)
-  //   everything else → codeContext (read as text)
-  const handleAttachFile = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files
-    if (!files || files.length === 0) return
-    e.target.value = ""
+  // ── Document attachment — mirrors ChatContainer: uses Electron dialog → file paths ──
+  // This avoids the webUtils.getPathForFile reliability issue.
+  const handleDocAttach = useCallback(async () => {
+    const result = await window.api.file.select()
+    if (result.canceled || result.filePaths.length === 0) return
 
-    for (const file of Array.from(files)) {
-      const ext = ("." + (file.name.split(".").pop() ?? "")).toLowerCase()
+    setAttachmentLoading(true)
+    try {
+      const currentFiles = tabStates[activeTabId]?.attachedFiles ?? []
+      const currentChars = currentFiles.reduce((s, a) => s + a.content.length, 0)
+      let remaining = DESIGN_MAX_TOTAL_CHARS - currentChars
+      let count = currentFiles.length
 
-      // ── Image → screenshot ──
-      if (file.type.startsWith("image/")) {
-        await new Promise<void>((res) => {
-          const reader = new FileReader()
-          reader.onload = (ev) => {
-            const dataUrl  = ev.target?.result as string
-            const comma    = dataUrl.indexOf(",")
-            const base64   = dataUrl.slice(comma + 1)
-            const mimeType = dataUrl.slice(0, comma).match(/data:([^;]+)/)?.[1] ?? "image/png"
-            updateTs(activeTabId, { attachedImage: { base64, mimeType, previewUrl: dataUrl } })
-            showToast(`截图已附加：${file.name}`)
-            res()
-          }
-          reader.readAsDataURL(file)
-        })
-        continue
-      }
-
-      // ── Parseable document → window.api.file.parse ──
-      if (PARSE_EXTS.has(ext)) {
-        const snapshot = tabStates[activeTabId]?.attachedFiles ?? []
-        if (snapshot.length >= DESIGN_MAX_ATTACHMENTS) {
+      for (const filePath of result.filePaths) {
+        if (count >= DESIGN_MAX_ATTACHMENTS) {
           showToast(`最多只能添加 ${DESIGN_MAX_ATTACHMENTS} 个附件`)
           break
         }
-        const currentChars = snapshot.reduce((s, a) => s + a.content.length, 0)
-        const remaining = DESIGN_MAX_TOTAL_CHARS - currentChars
         if (remaining <= 0) {
           showToast(`附件总内容已达上限（${DESIGN_MAX_TOTAL_CHARS.toLocaleString()} 字符）`)
           break
         }
-        setAttachmentLoading(true)
         try {
-          const filePath = window.api.file.getFilePath(file)
           const res = await window.api.file.parse(filePath, remaining)
           if (res.success && res.attachment) {
             if (!res.attachment.content.trim()) {
-              showToast(`"${file.name}" 内容为空`)
+              showToast(`"${res.attachment.filename}" 内容为空`)
             } else {
               updateTs(activeTabId, (prev) => ({
                 attachedFiles: [...(prev.attachedFiles ?? []), res.attachment!],
               }))
-              showToast(`已附加：${file.name}`)
+              showToast(`已附加：${res.attachment.filename}`)
+              remaining -= res.attachment.content.length
+              count++
             }
           } else {
             showToast(res.error ?? "文件解析失败")
           }
-        } finally {
-          setAttachmentLoading(false)
+        } catch (err) {
+          showToast(`解析失败：${err instanceof Error ? err.message : filePath}`)
         }
-        continue
       }
-
-      // ── Everything else → codeContext (read as text) ──
-      await new Promise<void>((res) => {
-        const reader = new FileReader()
-        reader.onload = (ev) => {
-          const content = ev.target?.result as string ?? ""
-          updateTs(activeTabId, (prev) => {
-            const existing = prev.codeContext ?? []
-            const merged   = [...existing]
-            const idx = merged.findIndex((x) => x.filename === file.name)
-            if (idx >= 0) merged[idx] = { filename: file.name, content }
-            else merged.push({ filename: file.name, content })
-            return { codeContext: merged }
-          })
-          showToast(`代码文件已添加：${file.name}`)
-          setCodeModalOpen(true)
-          res()
-        }
-        reader.onerror = () => res()
-        reader.readAsText(file)
-      })
+    } finally {
+      setAttachmentLoading(false)
     }
   }, [activeTabId, tabStates, updateTs, showToast])
 
@@ -1822,21 +1783,13 @@ ${htmlContext}`
             )}
           </div>
 
-          {/* Hidden file input — images only (screenshot, triggered from EmptyState) */}
+          {/* Hidden file input — images only (screenshot) */}
           <input
             ref={fileInputRef}
             type="file"
             accept="image/*"
             onChange={handleFileSelect}
             style={{ display: "none" }}
-          />
-          {/* Hidden file input — all file types (toolbar 📎) */}
-          <input
-            ref={attachFileInputRef}
-            type="file"
-            multiple
-            style={{ display: "none" }}
-            onChange={handleAttachFile}
           />
 
           {/* Bottom Input */}
@@ -1972,15 +1925,22 @@ ${htmlContext}`
               <div style={S.inputToolbar}>
                 <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
                   <ToolbarIcon
-                    title="添加文件（图片→截图，docx/xlsx→附件，代码→关联代码）"
-                    onClick={() => attachFileInputRef.current?.click()}
+                    title="附加文档（txt / md / csv / docx / xlsx）"
+                    onClick={handleDocAttach}
                   >{attachmentLoading ? "⏳" : "📎"}</ToolbarIcon>
+                  <ToolbarIcon
+                    title="上传截图"
+                    onClick={() => fileInputRef.current?.click()}
+                  >📷</ToolbarIcon>
                   {/* Model selector */}
                   {availableModels.length > 0 && (
                     <ModelSelector
                       models={availableModels}
                       selectedId={ts.selectedModelId}
-                      onChange={(id) => updateTs(activeTabId, { selectedModelId: id })}
+                      onChange={(id) => {
+                        updateTs(activeTabId, { selectedModelId: id })
+                        try { localStorage.setItem(DESIGN_LAST_MODEL_KEY, id) } catch {}
+                      }}
                     />
                   )}
                 </div>
