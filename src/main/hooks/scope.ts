@@ -114,13 +114,23 @@ export function mergeHookScopeSnapshot(
   }
 }
 
-export function resolveEnabledHooksForRun(
-  workspacePath: string | undefined,
-  _event: HookEvent,
+export interface ScopedHookCandidates {
+  baseHooks: HookConfig[]
+  pluginHooks: Array<HookConfig & { pluginId?: string }>
+  skillHooks: Array<HookConfig & { pluginId?: string; skillName?: string; skillPath?: string }>
+}
+
+/**
+ * Pure scope-filter step — split out so tests can drive every branch without
+ * touching storage. `resolveEnabledHooksForRun` is a thin wrapper that pulls
+ * the candidate lists from storage and delegates here.
+ */
+export function filterScopedHooks(
+  candidates: ScopedHookCandidates,
   context: HookContext,
   scope?: HookScopeController
 ): HookConfig[] {
-  const baseHooks = getEnabledHooks(workspacePath)
+  const { baseHooks, pluginHooks, skillHooks } = candidates
   if (!scope) return baseHooks
 
   const allowedPluginIds = new Set(scope.activePluginIds)
@@ -139,17 +149,15 @@ export function resolveEnabledHooksForRun(
 
   // runHooks() filters by hook.enabled before dispatch, so we don't repeat that
   // here — keeping this resolver focused on scope/membership.
-  const pluginHooks =
+  const filteredPluginHooks =
     allowedPluginIds.size === 0
       ? []
-      : getEnabledPluginHookMetadata().filter((hook) =>
-          allowedPluginIds.has(normalizePluginId(hook.pluginId))
-        )
+      : pluginHooks.filter((hook) => allowedPluginIds.has(normalizePluginId(hook.pluginId)))
 
-  const skillHooks =
+  const filteredSkillHooks =
     allowedSkillNames.size === 0 && allowedSkillPaths.size === 0
       ? []
-      : getEnabledSkillHookMetadata().filter((hook) => {
+      : skillHooks.filter((hook) => {
           const hookSkillPaths = new Set<string>()
           addPathAliases(hookSkillPaths, hook.skillPath)
           const pathMatches = pathSetIntersects(hookSkillPaths, allowedSkillPaths)
@@ -167,5 +175,22 @@ export function resolveEnabledHooksForRun(
           return allowedSkillNames.has(normalizeSkillName(hook.skillName))
         })
 
-  return [...baseHooks, ...pluginHooks, ...skillHooks]
+  return [...baseHooks, ...filteredPluginHooks, ...filteredSkillHooks]
+}
+
+export function resolveEnabledHooksForRun(
+  workspacePath: string | undefined,
+  _event: HookEvent,
+  context: HookContext,
+  scope?: HookScopeController
+): HookConfig[] {
+  return filterScopedHooks(
+    {
+      baseHooks: getEnabledHooks(workspacePath),
+      pluginHooks: getEnabledPluginHookMetadata(),
+      skillHooks: getEnabledSkillHookMetadata()
+    },
+    context,
+    scope
+  )
 }
