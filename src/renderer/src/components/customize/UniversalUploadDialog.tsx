@@ -202,7 +202,7 @@ export function UniversalUploadDialog({
   }
 
   const handleUpload = async () => {
-    if (!file) {
+    if (!isUpdate && !file) {
       setError("请选择文件")
       return
     }
@@ -335,7 +335,7 @@ export function UniversalUploadDialog({
   const [jsonTemplateCopied, setJsonTemplateCopied] = useState(false)
   const [showJsonTemplate, setShowJsonTemplate] = useState(false)
   const canSubmit =
-    !!file &&
+    (isUpdate || !!file) &&
     !!name.trim() &&
     !!chineseName.trim() &&
     !!description.trim() &&
@@ -405,7 +405,7 @@ export function UniversalUploadDialog({
               className="hidden"
               onChange={onInputChange}
               disabled={uploading}
-              required
+              required={!isUpdate}
             />
             {file ? (
               <div>
@@ -417,7 +417,10 @@ export function UniversalUploadDialog({
               <>
                 <Upload className="size-10 mx-auto text-muted-foreground mb-2" />
                 <p className="text-sm text-muted-foreground">拖拽文件到此处，或点击选择</p>
-                <p className="text-xs text-muted-foreground mt-1">支持: {getAcceptedTypes()}</p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  支持: {getAcceptedTypes()}
+                  {isUpdate && <span className="block mt-1">更新时文件为可选项</span>}
+                </p>
               </>
             )}
           </div>
