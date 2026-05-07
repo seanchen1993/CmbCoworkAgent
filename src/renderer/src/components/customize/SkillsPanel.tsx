@@ -936,6 +936,23 @@ const SKILL_HOOK_JSON_EXAMPLE = `[
   }
 ]`
 
+const SKILL_HOOK_ENV_EXAMPLE = `const workspace = process.env.WORKSPACE_PATH
+const skillRoot = process.env.SKILL_ROOT
+const toolArgs = process.env.TOOL_ARGS
+  ? JSON.parse(process.env.TOOL_ARGS)
+  : null`
+
+const SKILL_HOOK_WINDOWS_ARG_EXAMPLE = `"command": "python hooks/check.py \\"%WORKSPACE_PATH%\\""`
+
+const SKILL_HOOK_STDIN_EXAMPLE = `{
+  "hook_event_name": "PreToolUse",
+  "cwd": "~/.cmbcoworkagent/skills/<skill-name>",
+  "tool_name": "write_file",
+  "tool_input": { "path": "src/demo.ts" },
+  "skill_name": "<skill-name>",
+  "skill_root": "~/.cmbcoworkagent/skills/<skill-name>"
+}`
+
 function SkillGuideSection(props: {
   title: string
   summary: string
@@ -1133,6 +1150,33 @@ function SkillsGuide(): React.JSX.Element {
             </SkillGuideSubSection>
 
             <SkillGuideSubSection
+              title="触发与作用域规则"
+              summary="斜杠命令、技能卡片和模型自动读取技能都会激活该技能的 Hook。"
+            >
+              <div className="space-y-2 text-sm text-muted-foreground">
+                <p>
+                  通过斜杠命令选择技能、在技能卡片里选择技能，或模型自动读取某个
+                  <code className="mx-1 font-mono text-foreground/85">SKILL.md</code>
+                  ，都会视为该技能被激活。
+                  <code className="mx-1 font-mono text-foreground/85">PreSkillUse</code>和
+                  <code className="mx-1 font-mono text-foreground/85">PostSkillUse</code>
+                  会围绕这次激活触发。
+                </p>
+                <p>
+                  技能激活后，本轮运行里它自己的
+                  <code className="mx-1 font-mono text-foreground/85">PreToolUse</code>、
+                  <code className="mx-1 font-mono text-foreground/85">PostToolUse</code>等工具 Hook
+                  会继续生效；同一个技能同一轮只会做一次激活记录，避免重复读取时反复触发激活 Hook。
+                </p>
+                <p>
+                  父技能和子技能互相独立：只选子技能时只触发子技能目录下的 Hook，不会自动触发父技能 Hook；只选父技能时也不会自动触发子技能
+                  Hook。
+                </p>
+                <p>禁用某个技能后，该技能本体和它目录下的 Skill Hook 会一起失效。</p>
+              </div>
+            </SkillGuideSubSection>
+
+            <SkillGuideSubSection
               title="最小配置示例"
               summary="下面是一个最小的 skill-level PreToolUse command hook。"
             >
@@ -1153,6 +1197,91 @@ function SkillsGuide(): React.JSX.Element {
             </SkillGuideSubSection>
 
             <SkillGuideSubSection
+              title="命令能拿到哪些上下文"
+              summary="工作区、技能目录、事件、工具参数会通过环境变量和 stdin JSON 传给 command hook。"
+            >
+              <div className="space-y-3 text-sm text-muted-foreground">
+                <p>
+                  Skill Hook 的命令默认在技能目录执行，
+                  <code className="mx-1 font-mono text-foreground/85">cwd</code>
+                  不是当前项目工作区。要访问用户当前工作区，请优先读取
+                  <code className="mx-1 font-mono text-foreground/85">WORKSPACE_PATH</code>
+                  ；兼容 Claude Code 写法时也可以读取
+                  <code className="mx-1 font-mono text-foreground/85">CLAUDE_PROJECT_DIR</code>。
+                </p>
+                <div className="space-y-1">
+                  <p className="font-medium text-foreground/85">常用环境变量：</p>
+                  <ul className="list-disc space-y-1 pl-5">
+                    <li>
+                      <code className="font-mono text-foreground/85">WORKSPACE_PATH</code> /
+                      <code className="ml-1 font-mono text-foreground/85">CLAUDE_PROJECT_DIR</code>
+                      ：当前会话的工作区路径。
+                    </li>
+                    <li>
+                      <code className="font-mono text-foreground/85">SKILL_ROOT</code>、
+                      <code className="font-mono text-foreground/85">SKILL_PATH</code>、
+                      <code className="font-mono text-foreground/85">SKILL_NAME</code>
+                      ：技能目录、技能文件路径和技能名。
+                    </li>
+                    <li>
+                      <code className="font-mono text-foreground/85">HOOK_EVENT</code>、
+                      <code className="font-mono text-foreground/85">TOOL_NAME</code>、
+                      <code className="font-mono text-foreground/85">SESSION_ID</code>、
+                      <code className="font-mono text-foreground/85">USER_PROMPT</code>
+                      ：事件名、工具名、会话 ID 和用户提示。
+                    </li>
+                    <li>
+                      <code className="font-mono text-foreground/85">TOOL_ARGS</code>、
+                      <code className="font-mono text-foreground/85">TOOL_RESULT</code>
+                      ：小体积 JSON 辅助字段；内容较大时请从 stdin JSON 读取。
+                    </li>
+                    <li>
+                      <code className="font-mono text-foreground/85">PLUGIN_ID</code>、
+                      <code className="font-mono text-foreground/85">PLUGIN_NAME</code>
+                      ：由插件带来的 Hook 会附带插件来源信息。
+                    </li>
+                  </ul>
+                </div>
+                <div className="space-y-2">
+                  <p>推荐在脚本里读环境变量，而不是把路径写死在 command 里：</p>
+                  <pre className="overflow-x-auto rounded-md border border-border/40 bg-background p-3 text-xs leading-5 text-foreground">
+                    <code>{SKILL_HOOK_ENV_EXAMPLE}</code>
+                  </pre>
+                </div>
+                <div className="space-y-2">
+                  <p>
+                    如果确实要把工作区路径作为命令参数传入，Windows 下可以这样写；跨平台脚本仍建议读取环境变量：
+                  </p>
+                  <pre className="overflow-x-auto rounded-md border border-border/40 bg-background p-3 text-xs leading-5 text-foreground">
+                    <code>{SKILL_HOOK_WINDOWS_ARG_EXAMPLE}</code>
+                  </pre>
+                </div>
+                <div className="space-y-2">
+                  <p>
+                    command hook 还会从 stdin 收到完整 JSON。这里的
+                    <code className="mx-1 font-mono text-foreground/85">cwd</code>
+                    表示命令执行目录；在 Skill Hook 里通常是技能目录，工作区路径仍以
+                    <code className="mx-1 font-mono text-foreground/85">WORKSPACE_PATH</code>
+                    为准。
+                  </p>
+                  <pre className="overflow-x-auto rounded-md border border-border/40 bg-background p-3 text-xs leading-5 text-foreground">
+                    <code>{SKILL_HOOK_STDIN_EXAMPLE}</code>
+                  </pre>
+                  <p>
+                    不同事件还会补充
+                    <code className="mx-1 font-mono text-foreground/85">prompt</code>、
+                    <code className="mx-1 font-mono text-foreground/85">tool_response</code>、
+                    <code className="mx-1 font-mono text-foreground/85">skill_trigger_tool_name</code>、
+                    <code className="mx-1 font-mono text-foreground/85">subagent</code>
+                    和
+                    <code className="mx-1 font-mono text-foreground/85">stop_context</code>
+                    等字段；完整字段以“自定义 &gt; 钩子”的事件协议说明为准。
+                  </p>
+                </div>
+              </div>
+            </SkillGuideSubSection>
+
+            <SkillGuideSubSection
               title="调试与验证"
               summary="看 Hook 执行记录、stderr 日志，以及去哪看完整事件协议。"
             >
@@ -1160,6 +1289,18 @@ function SkillsGuide(): React.JSX.Element {
                 <p>
                   命令 Hook 的调试日志建议写到 stderr；如果 stdout 输出 JSON，会被当成 Hook
                   返回值解析。
+                </p>
+                <p>
+                  常用返回包括
+                  <code className="mx-1 font-mono text-foreground/85">decision="block"</code>、
+                  <code className="mx-1 font-mono text-foreground/85">reason</code>、
+                  <code className="mx-1 font-mono text-foreground/85">systemMessage</code>、
+                  <code className="mx-1 font-mono text-foreground/85">additionalContext</code>
+                  和
+                  <code className="mx-1 font-mono text-foreground/85">requiredSkill</code>
+                  ；命令返回
+                  <code className="mx-1 font-mono text-foreground/85">exit=2</code>
+                  也会按阻断处理。
                 </p>
                 <p>
                   技能 Hook 生效后，可以在聊天区的“Hook 执行记录”里看执行结果，也可以到“自定义 &gt;
