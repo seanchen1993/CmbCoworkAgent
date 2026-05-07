@@ -1,4 +1,4 @@
-import type { AgentAutoCommitResult } from "./main/types"
+import type { AgentAutoCommitResult } from "./auto-commit-types"
 
 export function formatAutoCommitLines(result: AgentAutoCommitResult): string[] {
   const lines: string[] = []

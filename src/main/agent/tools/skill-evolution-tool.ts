@@ -22,6 +22,7 @@ import {
 import { BrowserWindow, ipcMain } from "electron"
 import {
   clearDisabledSkillsForSkillDir,
+  findExistingSkillById,
   getCustomSkillsDir,
   invalidateEnabledSkillsCache,
   prepareDisabledSkillsCleanupForSkillDir
@@ -359,6 +360,11 @@ export function createSkillEvolutionTool(context: SkillEvolutionToolContext = {}
 
           if (existsSync(skillDir)) {
             return `Error: skill already exists: ${skillId}. Use action='patch' to update it.`
+          }
+
+          const existingSkill = findExistingSkillById(skillId)
+          if (existingSkill) {
+            return `Error: skillId already exists in another source: ${skillId} (${existingSkill.rootDir}). Choose a different skillId.`
           }
 
           // ── Human confirmation gate ──────────────────────

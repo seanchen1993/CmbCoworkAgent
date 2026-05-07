@@ -36,7 +36,9 @@ import {
   type DiscoveredSkill
 } from "./skills/discovery"
 import {
+  getDiscoveredSkillId,
   isDiscoveredSkillDisabled,
+  normalizeSkillId,
   removeDisabledSkillEntriesForSkills,
   resolveDisabledSkillIds
 } from "./skills/ids"
@@ -465,6 +467,15 @@ function discoverSkillsFromSourcesSync(sourceDirs = getSkillsSources()): Discove
       return []
     }
   })
+}
+
+export function findExistingSkillById(skillId: string): DiscoveredSkill | null {
+  const normalized = normalizeSkillId(skillId)
+  if (!normalized) return null
+  return (
+    discoverSkillsFromSourcesSync().find((skill) => getDiscoveredSkillId(skill) === normalized) ??
+    null
+  )
 }
 
 function computeDisabledSkillEntriesWithoutSkillDir(skillDir: string): string[] | null {

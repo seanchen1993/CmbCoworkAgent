@@ -86,7 +86,7 @@ import {
   type AgentGitSnapshot
 } from "../services/agent-auto-commit"
 import type { AgentAutoCommitResult } from "../types"
-import { formatAutoCommitLines } from "../../auto-commit-format"
+import { formatAutoCommitLines } from "../../shared/auto-commit-format"
 import { makeHookResultCallback } from "../hooks/result-callback"
 import { notifyHooksChanged } from "../hooks/notifications"
 import type {

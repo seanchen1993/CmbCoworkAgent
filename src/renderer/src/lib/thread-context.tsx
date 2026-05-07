@@ -25,7 +25,7 @@ import type {
 import { useAppStore } from "@/lib/store"
 import type { DeepAgent } from "../../../main/agent/types"
 import { toast } from "sonner"
-import { formatAutoCommitText } from "../../../auto-commit-format"
+import { formatAutoCommitText } from "../../../shared/auto-commit-format"
 
 // Open file tab type
 export interface OpenFile {

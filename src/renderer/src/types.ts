@@ -76,11 +76,13 @@ import type {
   LspCallHierarchyIncomingCall,
   LspCallHierarchyOutgoingCall,
   LspStatus,
-  AgentAutoCommitMode,
-  AgentAutoCommitMessageStrategy,
-  AgentAutoCommitSettings,
-  AgentAutoCommitResult
 } from "../../main/types"
+import type {
+  AgentAutoCommitMessageStrategy,
+  AgentAutoCommitMode,
+  AgentAutoCommitResult,
+  AgentAutoCommitSettings
+} from "../../shared/auto-commit-types"
 import type {
   ManagedSavedCodeExecTool,
   SavedCodeExecPreviewResult,

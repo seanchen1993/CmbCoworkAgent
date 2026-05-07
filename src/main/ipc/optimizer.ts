@@ -36,6 +36,7 @@ import {
   getCustomModelConfigs,
   getCustomSkillsDir,
   clearDisabledSkillsForSkillDir,
+  findExistingSkillById,
   invalidateEnabledSkillsCache,
   isOnlineSkillEvolutionEnabled,
   setOnlineSkillEvolutionEnabled,
@@ -122,6 +123,15 @@ function applyCandidate(
 ): { success: boolean; error?: string } {
   try {
     const skillDir = join(getCustomSkillsDir(), skillId)
+    if (action === "create") {
+      const existingSkill = findExistingSkillById(skillId)
+      if (existingSkill) {
+        return {
+          success: false,
+          error: `skillId already exists in another source: ${skillId} (${existingSkill.rootDir})`
+        }
+      }
+    }
     mkdirSync(skillDir, { recursive: true })
     writeFileSync(join(skillDir, "SKILL.md"), content, "utf-8")
     if (action === "create") clearDisabledSkillsForSkillDir(skillDir)
