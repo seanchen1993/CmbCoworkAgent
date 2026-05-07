@@ -1160,6 +1160,12 @@ export class LocalSandbox
 
     if (results.length === 0) return results
 
+    // Filter out matches inside disabled skills so their content cannot leak via grep.
+    if (this._hiddenSkillDirKeys.size > 0) {
+      results = results.filter((m) => !this.isHiddenSkillPath(m.path))
+      if (results.length === 0) return results
+    }
+
     // Filter out any results from sensitive directories
     if (this.windowsSandbox === "elevated") {
       results = results.filter((m) => {
@@ -1212,7 +1218,14 @@ export class LocalSandbox
     if (this.isBlockedBySandbox(path)) {
       return []
     }
+    if (this.isHiddenSkillPath(path)) {
+      return []
+    }
     let infos = await super.globInfo(pattern, path)
+    // Hide files that fall inside any disabled skill so the agent cannot list them.
+    if (this._hiddenSkillDirKeys.size > 0) {
+      infos = infos.filter((f) => !this.isHiddenSkillPath(f.path))
+    }
     // Filter out any results that fall within sensitive directories
     if (this.windowsSandbox === "elevated") {
       infos = infos.filter((f) => {
@@ -1245,7 +1258,12 @@ export class LocalSandbox
    */
   async lsInfo(path: string): Promise<FileInfo[]> {
     if (this.isHiddenSkillPath(path)) {
-      return []
+      return [
+        {
+          path: `Error listing '${path}': skill is disabled`,
+          is_dir: false
+        } as FileInfo
+      ]
     }
     if (this.isBlockedBySandbox(path)) {
       return [

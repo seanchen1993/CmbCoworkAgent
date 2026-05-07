@@ -103,6 +103,10 @@ export async function activateSkillLifecycle(
     return { blocked: true, reason: blockReason, notes, skipped: false }
   }
 
+  // Mark fired BEFORE PostSkillUse runs — Pre already passed, so the skill is
+  // considered activated for the rest of the run. If Post throws or the run is
+  // aborted later, we still don't want a duplicate Pre to fire on a subsequent
+  // read of the same skill.
   options.firedSkillKeys?.add(key)
   options.hookScope?.activateSkill(
     options.skill.name,

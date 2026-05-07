@@ -823,6 +823,82 @@ async function testNonSkillReadDoesNotFireHooks(): Promise<void> {
   })
 }
 
+async function testDisabledSkillIsHiddenFromFilesystemView(): Promise<void> {
+  await withTempDir("skill-hidden-fs", async (base) => {
+    const source = join(base, "skills")
+    const activeSkillPath = await writeSkillDoc(source, "active/SKILL.md", {
+      raw: "---\nname: active\n---\nactive skill body\n"
+    })
+    const disabledSkillRoot = join(source, "disabled")
+    const disabledSkillPath = await writeSkillDoc(source, "disabled/SKILL.md", {
+      raw: "---\nname: disabled\n---\nsecret-marker-for-disabled-skill\n"
+    })
+    const disabledHelperPath = join(disabledSkillRoot, "helper.txt")
+    await writeFile(disabledHelperPath, "secret-marker-for-disabled-skill\n", "utf8")
+
+    const sandbox = new LocalSandbox({
+      rootDir: base,
+      skillLifecycleRegistry: new SkillLifecycleRegistry([source])
+    })
+    sandbox.setHiddenSkillDirs([disabledSkillRoot])
+
+    // read() of a file inside the disabled skill must surface the disabled error.
+    const readDoc = await sandbox.read(disabledSkillPath)
+    assert(
+      readDoc.includes("skill is disabled"),
+      `read of disabled SKILL.md should report disabled, got ${readDoc}`
+    )
+    const readHelper = await sandbox.read(disabledHelperPath)
+    assert(
+      readHelper.includes("skill is disabled"),
+      `read of disabled helper should report disabled, got ${readHelper}`
+    )
+    // Active skill content must remain readable.
+    const readActive = await sandbox.read(activeSkillPath)
+    assert(readActive.includes("active skill body"), "active skill should still be readable")
+
+    // lsInfo() inside the disabled skill returns the informative error entry, not [].
+    const lsInside = await sandbox.lsInfo(disabledSkillRoot)
+    assert(lsInside.length === 1, `lsInfo on hidden dir should return one info entry, got ${lsInside.length}`)
+    assert(
+      lsInside[0].path.includes("skill is disabled"),
+      `lsInfo on hidden dir should explain why, got ${lsInside[0].path}`
+    )
+
+    // lsInfo() of the parent must hide the disabled skill but keep the active one.
+    // Directory entries come back with a trailing separator, so trim before
+    // pulling the basename.
+    const lsParent = await sandbox.lsInfo(source)
+    const parentNames = lsParent.map((f) => {
+      const segs = f.path.split(/[\\/]/).filter(Boolean)
+      return segs[segs.length - 1] ?? ""
+    })
+    assert(parentNames.includes("active"), `parent listing should include active skill, got ${parentNames.join(",")}`)
+    assert(!parentNames.includes("disabled"), `parent listing should hide disabled skill, got ${parentNames.join(",")}`)
+
+    // globInfo() must not return paths inside the disabled skill.
+    const globResults = await sandbox.globInfo("**/SKILL.md", source)
+    const globPaths = globResults.map((f) => f.path)
+    assert(
+      globPaths.some((p) => p.includes("active")),
+      "glob should still find active skill"
+    )
+    assert(
+      !globPaths.some((p) => p.includes("disabled")),
+      `glob should not surface disabled skill paths, got ${globPaths.join(",")}`
+    )
+
+    // grepRaw() must not surface content from the disabled skill.
+    const grepResults = await sandbox.grepRaw("secret-marker-for-disabled-skill", source)
+    if (Array.isArray(grepResults)) {
+      assert(
+        !grepResults.some((m) => m.path.toLowerCase().includes("disabled")),
+        `grep should not return disabled-skill matches, got ${JSON.stringify(grepResults)}`
+      )
+    }
+  })
+}
+
 async function run(): Promise<void> {
   await testRootSkill()
   console.log("PASS A1 single SKILL.md at source root")
@@ -890,6 +966,8 @@ async function run(): Promise<void> {
   console.log("PASS D4/D5 post context queue drains cleanly")
   await testNonSkillReadDoesNotFireHooks()
   console.log("PASS D6 non-skill read does not fire hooks")
+  await testDisabledSkillIsHiddenFromFilesystemView()
+  console.log("PASS D7 disabled skills are hidden from read/ls/glob/grep")
 }
 
 run().catch((err: Error) => {

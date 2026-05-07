@@ -158,6 +158,11 @@ export function resolveEnabledHooksForRun(
             return allowedPluginIds.has(hookPluginId) && pathMatches
           }
           if (pathMatches) return true
+          // Once any skill activation has contributed a path, fall back to name-only
+          // matching is disabled — otherwise a name-only standalone hook could fire
+          // for a different skill that just happens to share the name (the bug the
+          // plugin/path scoping was added to fix). Only allow name fallback when
+          // no path scope is active for this run.
           if (allowedSkillPaths.size > 0) return false
           return allowedSkillNames.has(normalizeSkillName(hook.skillName))
         })
