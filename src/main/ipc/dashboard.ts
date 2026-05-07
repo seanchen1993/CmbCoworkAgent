@@ -141,6 +141,13 @@ interface DashboardCommitDetail {
   orgName?: string
   userIp?: string
   repoPath?: string
+  repositoryName?: string
+  repositoryFullName?: string
+  repositoryWebUrl?: string
+  commitSha?: string
+  commitUrl?: string
+  pushed: boolean
+  pushedAt?: string
   branch?: string
   filesChanged: number
   insertions: number
@@ -170,6 +177,12 @@ interface EsSearchResponse {
 
 interface UserStatsOptions {
   upperOrgLv1?: string | null
+}
+
+interface CommitDetailsOptions {
+  page?: number
+  pageSize?: number
+  pushedOnly?: boolean
 }
 
 const DISLIKE_TYPE_OPTIONS = [
@@ -275,6 +288,24 @@ function isDashboardAllowed(): boolean {
 function clampLimit(limit: number | undefined, fallback: number, max: number): number {
   if (!Number.isFinite(limit)) return fallback
   return Math.max(1, Math.min(max, Math.floor(Number(limit))))
+}
+
+function normalizeCommitDetailsOptions(value?: number | CommitDetailsOptions): Required<CommitDetailsOptions> {
+  if (typeof value === "number") {
+    return {
+      page: 1,
+      pageSize: clampLimit(value, 20, 500),
+      pushedOnly: false
+    }
+  }
+
+  const page = clampLimit(value?.page, 1, 10_000)
+  const pageSize = clampLimit(value?.pageSize, 20, 100)
+  return {
+    page,
+    pageSize,
+    pushedOnly: value?.pushedOnly === true
+  }
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -463,6 +494,13 @@ function normalizeCommitDetail(hit: EsSearchHit): DashboardCommitDetail {
     orgName: asOptionalString(source.orgName),
     userIp: asOptionalString(source.userIp),
     repoPath: asOptionalString(properties.repoPath),
+    repositoryName: asOptionalString(properties.repositoryName) ?? asOptionalString(properties.pushRepositoryName),
+    repositoryFullName: asOptionalString(properties.repositoryFullName) ?? asOptionalString(properties.pushRepositoryFullName),
+    repositoryWebUrl: asOptionalString(properties.repositoryWebUrl) ?? asOptionalString(properties.pushRepositoryWebUrl),
+    commitSha: asOptionalString(properties.commitSha),
+    commitUrl: asOptionalString(properties.commitUrl) ?? asOptionalString(properties.pushCommitUrl),
+    pushed: properties.pushed === true,
+    pushedAt: asOptionalString(properties.pushedAt),
     branch: asOptionalString(properties.branch),
     filesChanged: asNumber(properties.filesChanged),
     insertions: asNumber(properties.insertions),
@@ -1149,19 +1187,24 @@ async function fetchSkillDetail(skill: string, range: TimeRange, limit = 3): Pro
 
 async function fetchCommitDetails(
   range: TimeRange,
-  limit = 50
-): Promise<{ total: number; items: DashboardCommitDetail[] }> {
-  const size = clampLimit(limit, 50, 500)
+  options?: number | CommitDetailsOptions
+): Promise<{ total: number; page: number; pageSize: number; pushedOnly: boolean; items: DashboardCommitDetail[] }> {
+  const { page, pageSize, pushedOnly } = normalizeCommitDetailsOptions(options)
+  const filters: Record<string, unknown>[] = [
+    timeRangeFilter("eventTime", range),
+    { term: { eventName: "git.commit.created" } }
+  ]
+  if (pushedOnly) {
+    filters.push({ term: { "properties.pushed": true } })
+  }
   const body = {
     track_total_hits: true,
-    size,
+    from: (page - 1) * pageSize,
+    size: pageSize,
     sort: [{ eventTime: { order: "desc" } }],
     query: {
       bool: {
-        filter: [
-          timeRangeFilter("eventTime", range),
-          { term: { eventName: "git.commit.created" } }
-        ]
+        filter: filters
       }
     },
     _source: {
@@ -1175,6 +1218,17 @@ async function fetchCommitDetails(
         "ystId",
         "orgName",
         "properties.repoPath",
+        "properties.repositoryName",
+        "properties.repositoryFullName",
+        "properties.repositoryWebUrl",
+        "properties.pushRepositoryName",
+        "properties.pushRepositoryFullName",
+        "properties.pushRepositoryWebUrl",
+        "properties.commitSha",
+        "properties.commitUrl",
+        "properties.pushCommitUrl",
+        "properties.pushed",
+        "properties.pushedAt",
         "properties.branch",
         "properties.filesChanged",
         "properties.insertions",
@@ -1190,6 +1244,9 @@ async function fetchCommitDetails(
   const hits = raw.hits?.hits ?? []
   return {
     total: getTotalHits(raw, hits.length),
+    page,
+    pageSize,
+    pushedOnly,
     items: hits.map(normalizeCommitDetail)
   }
 }
@@ -1982,13 +2039,19 @@ function makeMockSkillDetail(skill: string, range: TimeRange, limit = 3): Dashbo
   }
 }
 
-function makeMockCommitDetails(range: TimeRange, limit = 200): { total: number; items: DashboardCommitDetail[] } {
+function makeMockCommitDetails(
+  range: TimeRange,
+  options?: number | CommitDetailsOptions
+): { total: number; page: number; pageSize: number; pushedOnly: boolean; items: DashboardCommitDetail[] } {
+  const { page, pageSize, pushedOnly } = normalizeCommitDetailsOptions(options)
   const from = new Date(range.from)
   const to = new Date(range.to)
   const spanMs = Math.max(60_000, to.getTime() - from.getTime())
-  const count = Math.min(clampLimit(limit, 200, 500), 18)
-  const items = Array.from({ length: count }, (_, index): DashboardCommitDetail => {
+  const allItems = Array.from({ length: 240 }, (_, index): DashboardCommitDetail => {
     const eventTime = new Date(to.getTime() - Math.min(spanMs - 1, index * 42 * 60 * 1000))
+    const pushed = index % 3 !== 1
+    const repoName = `cmb-${index % 3}`
+    const commitSha = `mock${String(index + 1).padStart(36, "0")}`
     return {
       eventId: `mock-commit-event-${index + 1}`,
       eventTime: eventTime.toISOString(),
@@ -1997,7 +2060,14 @@ function makeMockCommitDetails(range: TimeRange, limit = 200): { total: number; 
       ystId: `2743${String(50 + index).padStart(2, "0")}`,
       orgName: ["科技部", "零售一部", "风险管理部"][index % 3],
       userIp: `10.0.0.${20 + index}`,
-      repoPath: `/Users/demo/projects/cmb-${index % 3}`,
+      repoPath: `/Users/demo/projects/${repoName}`,
+      repositoryName: repoName,
+      repositoryFullName: `demo/${repoName}`,
+      repositoryWebUrl: `https://git.example.internal/demo/${repoName}`,
+      commitSha,
+      commitUrl: pushed ? `https://git.example.internal/demo/${repoName}/commit/${commitSha}` : undefined,
+      pushed,
+      pushedAt: pushed ? new Date(eventTime.getTime() + 30 * 60 * 1000).toISOString() : undefined,
       branch: index % 2 === 0 ? "feature/smart-model-routing" : "fix/dashboard-detail",
       filesChanged: 2 + (index % 6),
       insertions: 18 + index * 7,
@@ -2008,7 +2078,15 @@ function makeMockCommitDetails(range: TimeRange, limit = 200): { total: number; 
       skillCount: index % 2 === 0 ? 1 : 2
     }
   })
-  return { total: 240, items }
+  const filteredItems = pushedOnly ? allItems.filter((item) => item.pushed) : allItems
+  const start = (page - 1) * pageSize
+  return {
+    total: filteredItems.length,
+    page,
+    pageSize,
+    pushedOnly,
+    items: filteredItems.slice(start, start + pageSize)
+  }
 }
 
 // ─────────────────────────────────────────────────────────
@@ -2173,11 +2251,11 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   _ipcMain.handle(
     "dashboard:commitDetails",
-    async (_, range: TimeRange, limit?: number) => {
+    async (_, range: TimeRange, options?: number | CommitDetailsOptions) => {
       if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
-      if (import.meta.env.DEV) return { success: true, data: makeMockCommitDetails(range, limit) }
+      if (import.meta.env.DEV) return { success: true, data: makeMockCommitDetails(range, options) }
       try {
-        return { success: true, data: await fetchCommitDetails(range, limit) }
+        return { success: true, data: await fetchCommitDetails(range, options) }
       } catch (e) {
         console.error("[Dashboard] commitDetails error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }

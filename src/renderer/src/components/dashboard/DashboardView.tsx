@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import {
   useDashboard,
-  type DashboardCommitDetail,
+  type DashboardCommitDetailsData,
   type DashboardSkillDetail,
   type Granularity,
   type TimeRange
@@ -251,7 +251,8 @@ export function DashboardView(): React.JSX.Element {
   const [skillTracesError, setSkillTracesError] = useState<string | null>(null)
   const [commitDialogOpen, setCommitDialogOpen] = useState(false)
   const [commitScopeLabel, setCommitScopeLabel] = useState("当前范围")
-  const [commitDetails, setCommitDetails] = useState<{ total: number; items: DashboardCommitDetail[] } | null>(null)
+  const [commitDetailsRange, setCommitDetailsRange] = useState<TimeRange | null>(null)
+  const [commitDetails, setCommitDetails] = useState<DashboardCommitDetailsData | null>(null)
   const [commitDetailsLoading, setCommitDetailsLoading] = useState(false)
   const [commitDetailsError, setCommitDetailsError] = useState<string | null>(null)
 
@@ -272,21 +273,41 @@ export function DashboardView(): React.JSX.Element {
     }
   }, [range])
 
-  const loadCommitDetails = useCallback(async (targetRange: TimeRange, scopeLabel: string) => {
+  const loadCommitDetails = useCallback(async (
+    targetRange: TimeRange,
+    scopeLabel: string,
+    page = 1,
+    pushedOnly = false
+  ) => {
     setCommitScopeLabel(scopeLabel)
+    setCommitDetailsRange(targetRange)
     setCommitDialogOpen(true)
     setCommitDetails(null)
     setCommitDetailsError(null)
     setCommitDetailsLoading(true)
     try {
-      const result = await window.api.dashboard.commitDetails(targetRange, 50)
+      const result = await window.api.dashboard.commitDetails(targetRange, {
+        page,
+        pageSize: 20,
+        pushedOnly
+      })
       if (!result.success) throw new Error(result.error ?? "获取 Commit 明细失败")
-      setCommitDetails(result.data ?? { total: 0, items: [] })
+      setCommitDetails(result.data ?? { total: 0, page, pageSize: 20, pushedOnly, items: [] })
     } catch (e) {
       setCommitDetailsError(e instanceof Error ? e.message : String(e))
     } finally {
       setCommitDetailsLoading(false)
     }
+  }, [])
+
+  const reloadCommitDetails = useCallback((page: number, pushedOnly: boolean) => {
+    if (!commitDetailsRange) return
+    void loadCommitDetails(commitDetailsRange, commitScopeLabel, page, pushedOnly)
+  }, [commitDetailsRange, commitScopeLabel, loadCommitDetails])
+
+  const handleCommitExternalOpen = useCallback((url: string) => {
+    if (!url) return
+    void window.electron.openExternal(url)
   }, [])
 
   const handleCommitTotalClick = useCallback(() => {
@@ -563,6 +584,9 @@ export function DashboardView(): React.JSX.Element {
         data={commitDetails}
         loading={commitDetailsLoading}
         error={commitDetailsError}
+        onPageChange={(page) => reloadCommitDetails(page, commitDetails?.pushedOnly ?? false)}
+        onPushedOnlyChange={(pushedOnly) => reloadCommitDetails(1, pushedOnly)}
+        onOpenExternal={handleCommitExternalOpen}
       />
     </div>
   )

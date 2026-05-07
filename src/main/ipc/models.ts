@@ -2467,6 +2467,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           trackGitEventWithSkills("git.commit.created", threadId, {
             repoPath:     worktreePath,
             branch: branch || "",
+            commitSha: commitSha ?? "",
             filesChanged: commitStats.fileCount || changedFiles.length,
             insertions: commitStats.additions,
             deletions: commitStats.deletions,
@@ -2553,6 +2554,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
               trackGitEventWithSkills("git.commit.created", threadId, {
                 repoPath:     worktreePath,
                 branch,
+                commitSha: autoCommitHead || "",
                 filesChanged: commitStats.fileCount || pendingChangedFiles.length,
                 insertions: commitStats.additions,
                 deletions: commitStats.deletions,

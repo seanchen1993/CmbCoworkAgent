@@ -1,4 +1,4 @@
-import { GitCommit, Loader2 } from "lucide-react"
+import { ChevronLeft, ChevronRight, ExternalLink, GitCommit, Loader2 } from "lucide-react"
 import {
   Dialog,
   DialogContent,
@@ -7,7 +7,8 @@ import {
   DialogTitle
 } from "@/components/ui/dialog"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import type { DashboardCommitDetail } from "./use-dashboard"
+import { Button } from "@/components/ui/button"
+import type { DashboardCommitDetail, DashboardCommitDetailsData } from "./use-dashboard"
 
 function formatTime(iso: string): string {
   const date = new Date(iso)
@@ -15,13 +16,24 @@ function formatTime(iso: string): string {
   return date.toLocaleString()
 }
 
-function repoName(repoPath?: string): string {
-  if (!repoPath) return "-"
+function repoName(item: DashboardCommitDetail): string {
+  if (item.repositoryName) return item.repositoryName
+  if (!item.repoPath) return "-"
+  const repoPath = item.repoPath
   const parts = repoPath.replace(/\\/g, "/").split("/").filter(Boolean)
   return parts[parts.length - 1] || repoPath
 }
 
-function CommitRow({ item }: { item: DashboardCommitDetail }): React.JSX.Element {
+function CommitRow({
+  item,
+  onOpenExternal
+}: {
+  item: DashboardCommitDetail
+  onOpenExternal: (url: string) => void
+}): React.JSX.Element {
+  const externalUrl = item.pushed ? (item.repositoryWebUrl || item.commitUrl || "") : ""
+  const displayRepo = repoName(item)
+
   return (
     <tr className="border-b border-border/60 last:border-b-0 hover:bg-muted/20">
       <td className="whitespace-nowrap px-3 py-2 text-[11px] text-muted-foreground">
@@ -35,13 +47,34 @@ function CommitRow({ item }: { item: DashboardCommitDetail }): React.JSX.Element
         <span className="block truncate" title={item.orgName}>{item.orgName || "-"}</span>
       </td>
       <td className="max-w-[180px] px-3 py-2 text-xs">
-        <span className="block truncate font-mono text-foreground/80" title={item.repoPath}>
-          {repoName(item.repoPath)}
-        </span>
+        {externalUrl ? (
+          <button
+            type="button"
+            className="flex max-w-full items-center gap-1 truncate font-mono text-blue-600 transition-colors hover:text-blue-700 hover:underline dark:text-blue-400"
+            title={item.repositoryWebUrl || item.commitUrl || item.repoPath}
+            onClick={() => onOpenExternal(externalUrl)}
+          >
+            <span className="truncate">{displayRepo}</span>
+            <ExternalLink className="size-3 shrink-0" />
+          </button>
+        ) : (
+          <span className="block truncate font-mono text-foreground/80" title={item.repoPath}>
+            {displayRepo}
+          </span>
+        )}
       </td>
       <td className="max-w-[150px] px-3 py-2 text-xs">
         <span className="block truncate font-mono text-muted-foreground" title={item.branch}>
           {item.branch || "-"}
+        </span>
+      </td>
+      <td className="whitespace-nowrap px-3 py-2 text-xs">
+        <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
+          item.pushed
+            ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+            : "bg-muted text-muted-foreground"
+        }`}>
+          {item.pushed ? "已 Push" : "未 Push"}
         </span>
       </td>
       <td className="whitespace-nowrap px-3 py-2 text-xs">
@@ -56,23 +89,121 @@ function CommitRow({ item }: { item: DashboardCommitDetail }): React.JSX.Element
   )
 }
 
+function CommitDetailsToolbar({
+  total,
+  page,
+  pageSize,
+  pageCount,
+  fromIndex,
+  toIndex,
+  pushedOnly,
+  loading,
+  canPrev,
+  canNext,
+  onPageChange,
+  onPushedOnlyChange
+}: {
+  total: number
+  page: number
+  pageSize: number
+  pageCount: number
+  fromIndex: number
+  toIndex: number
+  pushedOnly: boolean
+  loading: boolean
+  canPrev: boolean
+  canNext: boolean
+  onPageChange: (page: number) => void
+  onPushedOnlyChange: (pushedOnly: boolean) => void
+}): React.JSX.Element {
+  return (
+    <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/10 px-5 py-2 text-xs text-muted-foreground">
+      <div className="flex items-center gap-3">
+        <span>共 {total} 条</span>
+        <span>每页 {pageSize} 条</span>
+        <span>{fromIndex}-{toIndex}</span>
+        {loading ? <Loader2 className="size-3.5 animate-spin" /> : null}
+      </div>
+      <div className="flex items-center gap-3">
+        <div className="flex h-7 items-center rounded-full bg-muted px-1 text-[11px] font-medium">
+          {[
+            { value: false, label: "全部" },
+            { value: true, label: "已 Push" }
+          ].map((option) => (
+            <button
+              key={String(option.value)}
+              type="button"
+              className={`h-5 rounded-full px-2.5 leading-5 transition-colors ${
+                pushedOnly === option.value
+                  ? "bg-background text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+              disabled={loading}
+              onClick={() => {
+                if (pushedOnly !== option.value) onPushedOnlyChange(option.value)
+              }}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 px-2"
+            disabled={!canPrev}
+            onClick={() => onPageChange(page - 1)}
+          >
+            <ChevronLeft className="size-3.5" />
+          </Button>
+          <span className="min-w-14 text-center tabular-nums">{page} / {pageCount}</span>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 px-2"
+            disabled={!canNext}
+            onClick={() => onPageChange(page + 1)}
+          >
+            <ChevronRight className="size-3.5" />
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export function CommitDetailsDialog({
   open,
   onOpenChange,
   scopeLabel,
   data,
   loading,
-  error
+  error,
+  onPageChange,
+  onPushedOnlyChange,
+  onOpenExternal
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   scopeLabel: string
-  data: { total: number; items: DashboardCommitDetail[] } | null
+  data: DashboardCommitDetailsData | null
   loading: boolean
   error: string | null
+  onPageChange: (page: number) => void
+  onPushedOnlyChange: (pushedOnly: boolean) => void
+  onOpenExternal: (url: string) => void
 }): React.JSX.Element {
   const items = data?.items ?? []
   const total = data?.total ?? 0
+  const page = data?.page ?? 1
+  const pageSize = data?.pageSize ?? 20
+  const pushedOnly = data?.pushedOnly ?? false
+  const pageCount = Math.max(1, Math.ceil(total / pageSize))
+  const fromIndex = total === 0 ? 0 : (page - 1) * pageSize + 1
+  const toIndex = Math.min(total, page * pageSize)
+  const canPrev = page > 1 && !loading
+  const canNext = page < pageCount && !loading
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -85,7 +216,7 @@ export function CommitDetailsDialog({
           <DialogDescription>{scopeLabel}</DialogDescription>
         </DialogHeader>
 
-        {loading ? (
+        {loading && !data ? (
           <div className="flex flex-1 items-center justify-center">
             <Loader2 className="size-6 animate-spin text-muted-foreground" />
           </div>
@@ -94,18 +225,44 @@ export function CommitDetailsDialog({
             {error}
           </div>
         ) : items.length === 0 ? (
-          <div className="flex flex-1 items-center justify-center px-6 text-sm text-muted-foreground">
-            该时间范围内没有 Commit 数据
+          <div className="flex min-h-0 flex-1 flex-col">
+            <CommitDetailsToolbar
+              total={total}
+              page={page}
+              pageSize={pageSize}
+              pageCount={pageCount}
+              fromIndex={fromIndex}
+              toIndex={toIndex}
+              pushedOnly={pushedOnly}
+              loading={loading}
+              canPrev={canPrev}
+              canNext={canNext}
+              onPageChange={onPageChange}
+              onPushedOnlyChange={onPushedOnlyChange}
+            />
+            <div className="flex flex-1 items-center justify-center px-6 text-sm text-muted-foreground">
+              {pushedOnly ? "该时间范围内没有已 Push 的 Commit 数据" : "该时间范围内没有 Commit 数据"}
+            </div>
           </div>
         ) : (
           <div className="flex min-h-0 flex-1 flex-col">
-            <div className="flex shrink-0 items-center gap-3 border-b border-border bg-muted/10 px-5 py-2 text-xs text-muted-foreground">
-              <span>共 {total} 条</span>
-              {total > items.length && <span>仅展示最近 {items.length} 条</span>}
-            </div>
+            <CommitDetailsToolbar
+              total={total}
+              page={page}
+              pageSize={pageSize}
+              pageCount={pageCount}
+              fromIndex={fromIndex}
+              toIndex={toIndex}
+              pushedOnly={pushedOnly}
+              loading={loading}
+              canPrev={canPrev}
+              canNext={canNext}
+              onPageChange={onPageChange}
+              onPushedOnlyChange={onPushedOnlyChange}
+            />
             <ScrollArea className="min-h-0 flex-1">
               <div className="overflow-x-auto">
-                <table className="min-w-[760px] w-full text-left">
+                <table className="min-w-[860px] w-full text-left">
                   <thead className="sticky top-0 z-10 bg-background">
                     <tr className="border-b border-border text-[11px] text-muted-foreground">
                       <th className="whitespace-nowrap px-3 py-2 font-medium">时间</th>
@@ -113,13 +270,14 @@ export function CommitDetailsDialog({
                       <th className="whitespace-nowrap px-3 py-2 font-medium">部门</th>
                       <th className="whitespace-nowrap px-3 py-2 font-medium">仓库</th>
                       <th className="whitespace-nowrap px-3 py-2 font-medium">分支</th>
+                      <th className="whitespace-nowrap px-3 py-2 font-medium">状态</th>
                       <th className="whitespace-nowrap px-3 py-2 font-medium">变更</th>
                       <th className="whitespace-nowrap px-3 py-2 font-medium">Thread</th>
                     </tr>
                   </thead>
                   <tbody>
                     {items.map((item) => (
-                      <CommitRow key={item.eventId} item={item} />
+                      <CommitRow key={item.eventId} item={item} onOpenExternal={onOpenExternal} />
                     ))}
                   </tbody>
                 </table>

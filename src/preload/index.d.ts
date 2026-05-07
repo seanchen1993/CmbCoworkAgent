@@ -35,7 +35,7 @@ import type {
 } from "../main/ipc/code-exec-tools"
 
 interface ElectronAPI {
-  openExternal: Promise
+  openExternal: (url: string) => Promise<void>
   openLoginWindow: () => void
   closeLoginWindow: () => void
   openLoginPage: () => void
@@ -95,6 +95,13 @@ interface DashboardCommitDetail {
   orgName?: string
   userIp?: string
   repoPath?: string
+  repositoryName?: string
+  repositoryFullName?: string
+  repositoryWebUrl?: string
+  commitSha?: string
+  commitUrl?: string
+  pushed: boolean
+  pushedAt?: string
   branch?: string
   filesChanged: number
   insertions: number
@@ -103,6 +110,12 @@ interface DashboardCommitDetail {
   threadId?: string
   usedSkills: string[]
   skillCount: number
+}
+
+interface DashboardCommitDetailsOptions {
+  page?: number
+  pageSize?: number
+  pushedOnly?: boolean
 }
 
 interface DashboardCodeStats {
@@ -956,10 +969,10 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; data?: DashboardSkillDetail; error?: string }>
     commitDetails: (
       range: { from: string; to: string },
-      limit?: number
+      options?: DashboardCommitDetailsOptions
     ) => Promise<{
       success: boolean
-      data?: { total: number; items: DashboardCommitDetail[] }
+      data?: { total: number; page: number; pageSize: number; pushedOnly: boolean; items: DashboardCommitDetail[] }
       error?: string
     }>
     exportExcel: (

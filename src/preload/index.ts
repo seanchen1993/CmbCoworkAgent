@@ -1716,9 +1716,9 @@ const api = {
       ipcRenderer.invoke("dashboard:skillDetail", skill, range, limit),
     commitDetails: (
       range: { from: string; to: string },
-      limit?: number
+      options?: { page?: number; pageSize?: number; pushedOnly?: boolean }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:commitDetails", range, limit),
+      ipcRenderer.invoke("dashboard:commitDetails", range, options),
     exportExcel: (
       sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>
     ): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> =>

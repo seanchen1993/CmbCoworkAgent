@@ -39,8 +39,13 @@ function testUpdateBodyIncludesOriginRepositoryFields(): void {
 
   const scriptSource = getNested(body, ["script", "source"])
   const scriptParams = getNested(body, ["script", "params"]) as Record<string, unknown>
+  const eventTerms = getNested(body, ["query", "bool", "filter", 0, "terms", "eventName"])
   const commitTerms = getNested(body, ["query", "bool", "filter", 1, "terms", "properties.commitSha"])
 
+  assert(
+    JSON.stringify(eventTerms) === JSON.stringify(["code_adopt", "git.commit.created"]),
+    "update should mark both code_adopt and git.commit.created events"
+  )
   assert(Array.isArray(commitTerms), "commitSha terms should be an array")
   assert(JSON.stringify(commitTerms) === JSON.stringify(["abc123", "def456"]), "commit shas should be trimmed and deduped")
   assert(scriptParams.repositoryName === "project", "repositoryName should come from parsed origin URL")
@@ -62,7 +67,7 @@ function testUpdateBodyIncludesOriginRepositoryFields(): void {
 
 function run(): void {
   testUpdateBodyIncludesOriginRepositoryFields()
-  console.log("PASS code_adopt pushed update repository fields")
+  console.log("PASS pushed telemetry update repository fields")
 }
 
 run()

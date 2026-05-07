@@ -1,8 +1,8 @@
 /**
- * Marks code_adopt telemetry as pushed after a successful Git push.
+ * Marks commit-related telemetry as pushed after a successful Git push.
  *
  * The dashboard can then query `properties.pushed = true` directly instead of
- * doing a runtime commitSha join between code adoption and push events.
+ * doing a runtime commitSha join between commit/adoption and push events.
  */
 
 const UPDATE_TIMEOUT_MS = 10_000
@@ -151,7 +151,7 @@ export function buildCodeAdoptionPushedUpdateBody(args: MarkCodeAdoptionPushedAr
     query: {
       bool: {
         filter: [
-          { term: { eventName: "code_adopt" } },
+          { terms: { eventName: ["code_adopt", "git.commit.created"] } },
           { terms: { "properties.commitSha": commitShas } }
         ]
       }
@@ -168,7 +168,7 @@ export function scheduleMarkCodeAdoptionCommitsPushed(args: MarkCodeAdoptionPush
       void markCodeAdoptionCommitsPushed({ ...args, commitShas })
         .then((result) => {
           console.log(
-            `[CodeAdoptionPushUpdater] marked pushed code_adopt docs: ` +
+            `[CodeAdoptionPushUpdater] marked pushed commit telemetry docs: ` +
             `updated=${result.updated ?? 0}, total=${result.total ?? 0}, commits=${commitShas.length}`
           )
           if (Array.isArray(result.failures) && result.failures.length > 0) {
@@ -176,7 +176,7 @@ export function scheduleMarkCodeAdoptionCommitsPushed(args: MarkCodeAdoptionPush
           }
         })
         .catch((e) => {
-          console.warn("[CodeAdoptionPushUpdater] failed to mark pushed code_adopt docs:", e)
+          console.warn("[CodeAdoptionPushUpdater] failed to mark pushed commit telemetry docs:", e)
         })
     }, delayMs)
     timeout.unref?.()
