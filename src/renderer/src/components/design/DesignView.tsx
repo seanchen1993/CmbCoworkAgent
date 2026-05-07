@@ -129,6 +129,9 @@ interface TabState {
   designLink: string | null
   // Generic file attachments — reuses ChatContainer's FileAttachment via window.api.file
   attachedFiles: FileAttachment[] | null
+  // Retry support — stores the last prompt sent to startGeneration
+  retryPrompt: string | null
+  retryIsIteration: boolean
 }
 
 function makeTabState(): TabState {
@@ -160,6 +163,8 @@ function makeTabState(): TabState {
     codeContext: null,
     designLink: null,
     attachedFiles: null,
+    retryPrompt: null,
+    retryIsIteration: false,
   }
 }
 
@@ -216,6 +221,142 @@ let tabCounter = 1
 
 // File attachment limits — mirrors ChatContainer
 const DESIGN_MAX_ATTACHMENTS_DISPLAY = 3
+
+// ─────────────────────────────────────────────────────────
+// Session persistence — localStorage
+// ─────────────────────────────────────────────────────────
+const DESIGN_STORAGE_KEY = "design_session_v2"
+const MAX_HTML_BYTES = 200_000 // 200 KB cap per HTML blob to keep storage reasonable
+
+type PersistedTabState = {
+  messages: Message[]
+  html: string
+  variations: Array<{ id: string; label: string; html: string }>
+  activeVariationId: string | null
+  selectedModelId: string | null
+  tweaksOn: boolean
+  zoom: number
+  comments: CommentItem[]
+  codeContext: Array<{ filename: string; content: string }> | null
+  designLink: string | null
+  rightTab: RightPanelTab
+}
+
+interface PersistedSession {
+  chatTabs: ChatTab[]
+  activeTabId: string
+  tabStates: Record<string, PersistedTabState>
+}
+
+function serializeTs(ts: TabState): PersistedTabState {
+  return {
+    messages:          ts.messages,
+    html:              ts.html.slice(0, MAX_HTML_BYTES),
+    variations:        ts.variations.map((v) => ({ id: v.id, label: v.label, html: v.html.slice(0, MAX_HTML_BYTES) })),
+    activeVariationId: ts.activeVariationId,
+    selectedModelId:   ts.selectedModelId,
+    tweaksOn:          ts.tweaksOn,
+    zoom:              ts.zoom,
+    comments:          ts.comments,
+    codeContext:       ts.codeContext,
+    designLink:        ts.designLink,
+    rightTab:          ts.rightTab,
+  }
+}
+
+function deserializeTs(p: PersistedTabState): TabState {
+  return {
+    ...makeTabState(),
+    ...p,
+    generationState: "idle",  // always reset — never restore mid-stream
+    activeMode: null,
+    inputValue: "",
+    reloadKey: 1,             // non-zero so iframe loads on restore
+  }
+}
+
+function defaultSession() {
+  return {
+    chatTabs: [{ id: "chat-1", label: "Chat" }] as ChatTab[],
+    activeTabId: "chat-1",
+    tabStates: { "chat-1": makeTabState() } as Record<string, TabState>,
+  }
+}
+
+// ── Per-session storage ───────────────────────────────────
+const SESSION_INDEX_KEY  = "design_index_v1"
+const SESSION_LAST_KEY   = "design_last_session"
+const sessionDataKey     = (id: string) => `design_session_v2_${id}`
+
+interface SessionMeta {
+  id: string
+  title: string
+  createdAt: number
+  updatedAt: number
+}
+
+function parsePersistedSession(raw: string): ReturnType<typeof defaultSession> {
+  const data: PersistedSession = JSON.parse(raw)
+  if (!Array.isArray(data.chatTabs) || !data.chatTabs.length || !data.activeTabId) return defaultSession()
+  data.chatTabs.forEach((t) => {
+    const m = t.id.match(/^chat-(\d+)$/)
+    if (m) tabCounter = Math.max(tabCounter, parseInt(m[1]))
+  })
+  const restoredStates: Record<string, TabState> = {}
+  for (const [id, st] of Object.entries(data.tabStates ?? {})) {
+    restoredStates[id] = deserializeTs(st)
+  }
+  data.chatTabs.forEach((t) => {
+    if (!restoredStates[t.id]) restoredStates[t.id] = makeTabState()
+  })
+  return { chatTabs: data.chatTabs, activeTabId: data.activeTabId, tabStates: restoredStates }
+}
+
+function loadSessionById(id: string): ReturnType<typeof defaultSession> {
+  try {
+    const raw = localStorage.getItem(sessionDataKey(id))
+    if (!raw) return defaultSession()
+    return parsePersistedSession(raw)
+  } catch { return defaultSession() }
+}
+
+function loadIndex(): SessionMeta[] {
+  try {
+    const raw = localStorage.getItem(SESSION_INDEX_KEY)
+    if (raw) return JSON.parse(raw) as SessionMeta[]
+
+    // ── One-time migration from old single-session format ──
+    const oldRaw = localStorage.getItem(DESIGN_STORAGE_KEY)
+    if (!oldRaw) return []
+    const data: PersistedSession = JSON.parse(oldRaw)
+    if (!data.chatTabs?.length) return []
+    const firstTabId = data.chatTabs[0]?.id ?? ""
+    const firstState = (data.tabStates ?? {})[firstTabId] as PersistedTabState | undefined
+    const firstMsg = firstState?.messages?.find((m) => m.role === "user")
+    const title = ((firstMsg?.content as string) ?? "").slice(0, 24) || "无标题设计"
+    const id = `ds_${uuid().slice(0, 8)}`
+    localStorage.setItem(sessionDataKey(id), oldRaw)
+    localStorage.setItem(SESSION_LAST_KEY, id)
+    const meta: SessionMeta = { id, title, createdAt: Date.now(), updatedAt: Date.now() }
+    localStorage.setItem(SESSION_INDEX_KEY, JSON.stringify([meta]))
+    return [meta]
+  } catch { return [] }
+}
+
+function saveIndex(index: SessionMeta[]) {
+  try { localStorage.setItem(SESSION_INDEX_KEY, JSON.stringify(index)) } catch {}
+}
+
+function updateIndexMeta(id: string, patch: Partial<SessionMeta>) {
+  try {
+    const index = loadIndex()
+    const i = index.findIndex((m) => m.id === id)
+    if (i >= 0) {
+      index[i] = { ...index[i], ...patch }
+      saveIndex(index)
+    }
+  } catch {}
+}
 
 const VARIATION_COLORS: Record<string, string> = {
   a: "#3b82f6",
@@ -581,9 +722,23 @@ function injectIntoIframe(iframe: HTMLIFrameElement | null, script: string) {
 // ─────────────────────────────────────────────────────────
 
 export function DesignView(): React.JSX.Element {
-  const [chatTabs, setChatTabs]       = useState<ChatTab[]>([{ id: "chat-1", label: "Chat" }])
-  const [activeTabId, setActiveTabId] = useState("chat-1")
-  const [tabStates, setTabStates]     = useState<Record<string, TabState>>({ "chat-1": makeTabState() })
+  // ── Session / gallery state ───────────────────────────────
+  const [sessionIndex, setSessionIndex] = useState<SessionMeta[]>(() => loadIndex())
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(
+    () => localStorage.getItem(SESSION_LAST_KEY) ?? null
+  )
+
+  // Load persisted session once (ref prevents re-computation on re-renders)
+  const _initRef = useRef<ReturnType<typeof loadSessionById> | null>(null)
+  if (_initRef.current === null) {
+    const sid = localStorage.getItem(SESSION_LAST_KEY)
+    _initRef.current = sid ? loadSessionById(sid) : defaultSession()
+  }
+  const _init = _initRef.current
+
+  const [chatTabs, setChatTabs]       = useState<ChatTab[]>(_init.chatTabs)
+  const [activeTabId, setActiveTabId] = useState<string>(_init.activeTabId)
+  const [tabStates, setTabStates]     = useState<Record<string, TabState>>(_init.tabStates)
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([])
   const [allSkills, setAllSkills] = useState<SkillInfo[]>([])
   // Code & link modal state
@@ -607,6 +762,7 @@ export function DesignView(): React.JSX.Element {
   const canvasContainerRef = useRef<HTMLDivElement>(null)
   const activeTabIdRef    = useRef(activeTabId)
   const fileInputRef      = useRef<HTMLInputElement>(null)   // images only (screenshot)
+  const attachFileInputRef = useRef<HTMLInputElement>(null)  // all files (toolbar 📎)
 
   const ts = tabStates[activeTabId] ?? makeTabState()
 
@@ -650,6 +806,78 @@ export function DesignView(): React.JSX.Element {
 
   // ── Keep activeTabIdRef in sync ───────────────────────────
   useEffect(() => { activeTabIdRef.current = activeTabId }, [activeTabId])
+
+  // ── Persist session to localStorage (debounced 1.5s, skip during streaming) ──
+  const _persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    if (!currentSessionId) return  // don't save while in gallery
+    if (_persistTimerRef.current) clearTimeout(_persistTimerRef.current)
+    _persistTimerRef.current = setTimeout(() => {
+      const isStreaming = Object.values(tabStates).some(
+        (s) => s.generationState === "generating" || s.generationState === "asking"
+      )
+      if (isStreaming) return
+      try {
+        const payload: PersistedSession = {
+          chatTabs,
+          activeTabId,
+          tabStates: Object.fromEntries(
+            Object.entries(tabStates).map(([id, s]) => [id, serializeTs(s)])
+          ),
+        }
+        localStorage.setItem(sessionDataKey(currentSessionId), JSON.stringify(payload))
+        // Update index metadata (title from first message, updatedAt)
+        const firstTab = chatTabs[0]
+        const firstState = tabStates[firstTab?.id]
+        const firstUserMsg = firstState?.messages?.find((m) => m.role === "user")
+        const autoTitle = firstUserMsg ? (firstUserMsg.content as string).slice(0, 24) : "新设计"
+        updateIndexMeta(currentSessionId, { updatedAt: Date.now(), title: autoTitle })
+        setSessionIndex(loadIndex())
+      } catch {}
+    }, 1500)
+    return () => { if (_persistTimerRef.current) clearTimeout(_persistTimerRef.current) }
+  }, [chatTabs, activeTabId, tabStates, currentSessionId])
+
+  // ── Session navigation ─────────────────────────────────────
+  const openSession = useCallback((id: string) => {
+    const session = loadSessionById(id)
+    setChatTabs(session.chatTabs)
+    setActiveTabId(session.activeTabId)
+    setTabStates(session.tabStates)
+    setCurrentSessionId(id)
+    localStorage.setItem(SESSION_LAST_KEY, id)
+  }, [])
+
+  const newSession = useCallback(() => {
+    const id = `ds_${uuid().slice(0, 8)}`
+    const session = defaultSession()
+    setChatTabs(session.chatTabs)
+    setActiveTabId(session.activeTabId)
+    setTabStates(session.tabStates)
+    setCurrentSessionId(id)
+    localStorage.setItem(SESSION_LAST_KEY, id)
+    const meta: SessionMeta = { id, title: "新设计", createdAt: Date.now(), updatedAt: Date.now() }
+    setSessionIndex((prev) => {
+      const next = [meta, ...prev]
+      saveIndex(next)
+      return next
+    })
+  }, [])
+
+  const backToGallery = useCallback(() => {
+    setCurrentSessionId(null)
+    localStorage.removeItem(SESSION_LAST_KEY)
+    setSessionIndex(loadIndex())
+  }, [])
+
+  const deleteSession = useCallback((id: string) => {
+    localStorage.removeItem(sessionDataKey(id))
+    setSessionIndex((prev) => {
+      const next = prev.filter((m) => m.id !== id)
+      saveIndex(next)
+      return next
+    })
+  }, [])
 
   // ── Inject / remove mode scripts when activeMode changes ─
   useEffect(() => {
@@ -851,6 +1079,8 @@ export function DesignView(): React.JSX.Element {
     updateTs(tabId, (prev) => ({
       generationState: "generating",
       rightTab: "design",
+      retryPrompt: prompt,          // store for retry
+      retryIsIteration: isIteration,
       messages: [
         ...prev.messages,
         {
@@ -1007,61 +1237,112 @@ export function DesignView(): React.JSX.Element {
   // ── File attachment constants (same as ChatContainer) ─────
   const DESIGN_MAX_ATTACHMENTS = 3
   const DESIGN_MAX_TOTAL_CHARS = 24_000
+  // Extensions handled by window.api.file.parse (main-process parser — supports docx, xlsx, etc.)
+  const PARSE_EXTS = new Set([".txt", ".md", ".csv", ".docx", ".xlsx", ".xls"])
 
-  // ── Open OS file dialog via Electron IPC (same flow as ChatContainer) ──
   const [attachmentLoading, setAttachmentLoading] = useState(false)
 
-  const handleAttachClick = useCallback(async () => {
-    const ts = tabStates[activeTabId]
-    const current = ts?.attachedFiles ?? []
-    if (current.length >= DESIGN_MAX_ATTACHMENTS) {
-      showToast(`最多只能添加 ${DESIGN_MAX_ATTACHMENTS} 个附件`)
-      return
-    }
-    const result = await window.api.file.select()
-    if (result.canceled || result.filePaths.length === 0) return
+  // ── Universal file handler for toolbar 📎 ──────────────────
+  // Routes by file type:
+  //   images       → screenshot preview
+  //   PARSE_EXTS   → window.api.file.parse (docx/xlsx text extraction)
+  //   everything else → codeContext (read as text)
+  const handleAttachFile = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files
+    if (!files || files.length === 0) return
+    e.target.value = ""
 
-    setAttachmentLoading(true)
-    try {
-      const snapshot = tabStates[activeTabId]?.attachedFiles ?? []
-      let currentChars = snapshot.reduce((s, a) => s + a.content.length, 0)
-      const existingPaths = new Set(snapshot.map((a) => a.filePath))
+    for (const file of Array.from(files)) {
+      const ext = ("." + (file.name.split(".").pop() ?? "")).toLowerCase()
 
-      for (const filePath of result.filePaths) {
-        if (existingPaths.has(filePath)) {
-          showToast(`"${filePath.replace(/^.*[/\\]/, "")}" 已添加`)
-          continue
-        }
-        const snap2 = tabStates[activeTabId]?.attachedFiles ?? []
-        if (snap2.length >= DESIGN_MAX_ATTACHMENTS) {
+      // ── Image → screenshot ──
+      if (file.type.startsWith("image/")) {
+        await new Promise<void>((res) => {
+          const reader = new FileReader()
+          reader.onload = (ev) => {
+            const dataUrl  = ev.target?.result as string
+            const comma    = dataUrl.indexOf(",")
+            const base64   = dataUrl.slice(comma + 1)
+            const mimeType = dataUrl.slice(0, comma).match(/data:([^;]+)/)?.[1] ?? "image/png"
+            updateTs(activeTabId, { attachedImage: { base64, mimeType, previewUrl: dataUrl } })
+            showToast(`截图已附加：${file.name}`)
+            res()
+          }
+          reader.readAsDataURL(file)
+        })
+        continue
+      }
+
+      // ── Parseable document → window.api.file.parse ──
+      if (PARSE_EXTS.has(ext)) {
+        const snapshot = tabStates[activeTabId]?.attachedFiles ?? []
+        if (snapshot.length >= DESIGN_MAX_ATTACHMENTS) {
           showToast(`最多只能添加 ${DESIGN_MAX_ATTACHMENTS} 个附件`)
           break
         }
+        const currentChars = snapshot.reduce((s, a) => s + a.content.length, 0)
         const remaining = DESIGN_MAX_TOTAL_CHARS - currentChars
         if (remaining <= 0) {
           showToast(`附件总内容已达上限（${DESIGN_MAX_TOTAL_CHARS.toLocaleString()} 字符）`)
           break
         }
-        const res = await window.api.file.parse(filePath, remaining)
-        if (res.success && res.attachment) {
-          if (!res.attachment.content.trim()) {
-            showToast(`"${res.attachment.filename}" 内容为空`)
-            continue
+        setAttachmentLoading(true)
+        try {
+          const filePath = window.api.file.getFilePath(file)
+          const res = await window.api.file.parse(filePath, remaining)
+          if (res.success && res.attachment) {
+            if (!res.attachment.content.trim()) {
+              showToast(`"${file.name}" 内容为空`)
+            } else {
+              updateTs(activeTabId, (prev) => ({
+                attachedFiles: [...(prev.attachedFiles ?? []), res.attachment!],
+              }))
+              showToast(`已附加：${file.name}`)
+            }
+          } else {
+            showToast(res.error ?? "文件解析失败")
           }
-          updateTs(activeTabId, (prev) => ({
-            attachedFiles: [...(prev.attachedFiles ?? []), res.attachment!],
-          }))
-          existingPaths.add(res.attachment.filePath)
-          currentChars += res.attachment.content.length
-          showToast(`已添加：${res.attachment.filename}`)
-        } else {
-          showToast(res.error ?? "文件解析失败")
+        } finally {
+          setAttachmentLoading(false)
         }
+        continue
       }
-    } finally {
-      setAttachmentLoading(false)
+
+      // ── Everything else → codeContext (read as text) ──
+      await new Promise<void>((res) => {
+        const reader = new FileReader()
+        reader.onload = (ev) => {
+          const content = ev.target?.result as string ?? ""
+          updateTs(activeTabId, (prev) => {
+            const existing = prev.codeContext ?? []
+            const merged   = [...existing]
+            const idx = merged.findIndex((x) => x.filename === file.name)
+            if (idx >= 0) merged[idx] = { filename: file.name, content }
+            else merged.push({ filename: file.name, content })
+            return { codeContext: merged }
+          })
+          showToast(`代码文件已添加：${file.name}`)
+          setCodeModalOpen(true)
+          res()
+        }
+        reader.onerror = () => res()
+        reader.readAsText(file)
+      })
     }
   }, [activeTabId, tabStates, updateTs, showToast])
+
+  // ── Retry last failed generation ─────────────────────────
+  const handleRetry = useCallback(() => {
+    const state = tabStates[activeTabId]
+    if (!state?.retryPrompt) return
+    // Remove the last assistant error message before retrying
+    updateTs(activeTabId, (prev) => {
+      const msgs = [...prev.messages]
+      if (msgs.length > 0 && msgs[msgs.length - 1].role === "assistant") msgs.pop()
+      return { messages: msgs, generationState: "idle" }
+    })
+    startGeneration(state.retryPrompt, activeTabId, state.retryIsIteration, state.selectedModelId ?? undefined)
+  }, [activeTabId, tabStates, updateTs, startGeneration])
 
   // ── Build comment prompt helper ───────────────────────────
   const buildCommentPrompt = useCallback((
@@ -1283,6 +1564,12 @@ ${htmlSnippet}`
       messages: [...prev.messages, { role: "user" as const, content: prompt + (selectedSkill ? ` ⚡${selectedSkill.name}` : "") }],
     }))
 
+    // Auto-label tab from its first prompt (for history readability)
+    if (existing.length === 0) {
+      const label = prompt.trim().slice(0, 24) + (prompt.length > 24 ? "…" : "")
+      setChatTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, label } : t))
+    }
+
     // First message → ask questions
     if (existing.length === 0) {
       startAskQuestions(prompt + contextSuffix, tabId, selectedModelId)
@@ -1421,6 +1708,18 @@ ${htmlContext}`
 
   // ── Render ─────────────────────────────────────────────────
 
+  // Show gallery when no session is active
+  if (currentSessionId === null) {
+    return (
+      <DesignGallery
+        sessionIndex={sessionIndex}
+        onOpen={openSession}
+        onNew={newSession}
+        onDelete={deleteSession}
+      />
+    )
+  }
+
   return (
     <div style={S.root}>
       {/* Code & Link modals — rendered at root so they overlay everything */}
@@ -1461,6 +1760,20 @@ ${htmlContext}`
       {/* Title Bar */}
       <div style={S.titleBar}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <button
+            onClick={backToGallery}
+            style={{
+              display: "flex", alignItems: "center", gap: 5,
+              padding: "4px 10px 4px 6px",
+              background: "none", border: "1px solid #d4d2cc",
+              borderRadius: 8, cursor: "pointer",
+              fontSize: 12, fontWeight: 500, color: "#6a6a6a",
+              fontFamily: "inherit", lineHeight: 1,
+            }}
+            title="返回历史记录"
+          >
+            ← 我的设计
+          </button>
           <div style={S.logo}>✦</div>
           <span style={S.titleText}>design</span>
         </div>
@@ -1517,7 +1830,14 @@ ${htmlContext}`
             onChange={handleFileSelect}
             style={{ display: "none" }}
           />
-          {/* Note: generic file attachments now use window.api.file.select() (same as ChatContainer) */}
+          {/* Hidden file input — all file types (toolbar 📎) */}
+          <input
+            ref={attachFileInputRef}
+            type="file"
+            multiple
+            style={{ display: "none" }}
+            onChange={handleAttachFile}
+          />
 
           {/* Bottom Input */}
           <div style={{ ...S.inputArea, position: "relative" }}>
@@ -1652,8 +1972,8 @@ ${htmlContext}`
               <div style={S.inputToolbar}>
                 <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
                   <ToolbarIcon
-                    title="添加文件 (txt, md, csv, docx, xlsx)"
-                    onClick={handleAttachClick}
+                    title="添加文件（图片→截图，docx/xlsx→附件，代码→关联代码）"
+                    onClick={() => attachFileInputRef.current?.click()}
                   >{attachmentLoading ? "⏳" : "📎"}</ToolbarIcon>
                   {/* Model selector */}
                   {availableModels.length > 0 && (
@@ -1666,6 +1986,22 @@ ${htmlContext}`
                 </div>
                 {isGenerating ? (
                   <button onClick={handleCancel} style={S.cancelBtn}>■ Stop</button>
+                ) : ts.generationState === "error" && ts.retryPrompt ? (
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button
+                      onClick={handleRetry}
+                      style={{ ...S.cancelBtn, background: "#fff3e0", color: "#c05800", border: "1px solid #f0c070" }}
+                    >🔄 重试</button>
+                    <button
+                      onClick={handleSend}
+                      disabled={!inputValue.trim() && !ts.attachedImage}
+                      style={{
+                        ...S.sendBtn,
+                        background: inputValue.trim() || ts.attachedImage ? "#cc785c" : "#e8b9a8",
+                        cursor: inputValue.trim() || ts.attachedImage ? "pointer" : "default",
+                      }}
+                    >▶ Send</button>
+                  </div>
                 ) : (
                   <button
                     onClick={handleSend}
@@ -3712,6 +4048,268 @@ function CommentDraftInput({ x, y, elementDesc, onSubmit, onSend, onCancel }: {
           发送 →
         </button>
       </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────
+// DesignGallery — history screen (Claude Design style card grid)
+// ─────────────────────────────────────────────────────────
+
+function DesignGallery({
+  sessionIndex,
+  onOpen,
+  onNew,
+  onDelete,
+}: {
+  sessionIndex: SessionMeta[]
+  onOpen: (id: string) => void
+  onNew: () => void
+  onDelete: (id: string) => void
+}) {
+  const [hoveredId, setHoveredId] = useState<string | null>(null)
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+
+  function fmt(ts: number) {
+    const d = new Date(ts)
+    const now = new Date()
+    const diffDays = Math.floor((now.getTime() - d.getTime()) / 86400000)
+    if (diffDays === 0) return "今天 " + d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })
+    if (diffDays === 1) return "昨天"
+    if (diffDays < 7)  return `${diffDays} 天前`
+    return d.toLocaleDateString("zh-CN", { month: "short", day: "numeric" })
+  }
+
+  return (
+    <div style={{
+      display: "flex", flexDirection: "column", height: "100%",
+      fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, sans-serif",
+      background: "#f0efeb",
+    }}>
+      {/* Title bar */}
+      <div style={{
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        padding: "0 28px", height: 56, background: "#f0efeb", flexShrink: 0,
+        borderBottom: "1px solid #e0ded8",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{
+            width: 30, height: 30, borderRadius: "50%",
+            background: "#cc785c",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            color: "#fff", fontSize: 15,
+          }}>✦</div>
+          <span style={{ fontSize: 17, fontWeight: 600, color: "#1a1a1a" }}>My Designs</span>
+          {sessionIndex.length > 0 && (
+            <span style={{
+              fontSize: 12, color: "#8a8a8a",
+              background: "#e8e6e0", borderRadius: 99,
+              padding: "2px 8px", fontWeight: 500,
+            }}>{sessionIndex.length}</span>
+          )}
+        </div>
+        <button
+          onClick={onNew}
+          style={{
+            display: "flex", alignItems: "center", gap: 7,
+            padding: "8px 20px", fontSize: 14, fontWeight: 600,
+            background: "#1a1a1a", color: "#fff",
+            border: "none", borderRadius: 10, cursor: "pointer",
+            fontFamily: "inherit",
+          }}
+        >
+          <span style={{ fontSize: 16, lineHeight: 1 }}>+</span>
+          新建设计
+        </button>
+      </div>
+
+      {/* Card grid */}
+      <div style={{
+        flex: 1, overflowY: "auto", padding: "32px 28px",
+      }}>
+        {sessionIndex.length === 0 ? (
+          /* Empty state */
+          <div style={{
+            display: "flex", flexDirection: "column", alignItems: "center",
+            justifyContent: "center", height: "100%", gap: 20,
+            color: "#8a8a8a",
+          }}>
+            <div style={{
+              width: 72, height: 72, borderRadius: 20,
+              background: "#ffffff", border: "2px dashed #d4d2cc",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              fontSize: 28, color: "#c0beb8",
+            }}>✦</div>
+            <div style={{ textAlign: "center" }}>
+              <p style={{ fontSize: 16, fontWeight: 600, color: "#4a4a4a", margin: "0 0 6px" }}>还没有设计记录</p>
+              <p style={{ fontSize: 13, color: "#8a8a8a", margin: 0 }}>点击「新建设计」开始创作</p>
+            </div>
+            <button
+              onClick={onNew}
+              style={{
+                padding: "10px 28px", fontSize: 14, fontWeight: 600,
+                background: "#cc785c", color: "#fff",
+                border: "none", borderRadius: 10, cursor: "pointer",
+                fontFamily: "inherit",
+              }}
+            >新建设计</button>
+          </div>
+        ) : (
+          <div style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
+            gap: 18,
+          }}>
+            {/* "New design" card — always first */}
+            <button
+              onClick={onNew}
+              style={{
+                aspectRatio: "4/3",
+                display: "flex", flexDirection: "column",
+                alignItems: "center", justifyContent: "center", gap: 10,
+                background: "#ffffff", border: "2px dashed #d4d2cc",
+                borderRadius: 16, cursor: "pointer", fontFamily: "inherit",
+                transition: "border-color 0.15s, box-shadow 0.15s",
+                color: "#8a8a8a",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.borderColor = "#cc785c"
+                e.currentTarget.style.boxShadow = "0 4px 20px rgba(204,120,92,0.12)"
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.borderColor = "#d4d2cc"
+                e.currentTarget.style.boxShadow = "none"
+              }}
+            >
+              <span style={{
+                width: 42, height: 42, borderRadius: "50%",
+                background: "#f5f4f0", border: "1px solid #d4d2cc",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                fontSize: 22, color: "#8a8a8a",
+              }}>+</span>
+              <span style={{ fontSize: 13, fontWeight: 600 }}>新建设计</span>
+            </button>
+
+            {/* Session cards */}
+            {[...sessionIndex].sort((a, b) => b.updatedAt - a.updatedAt).map((meta) => (
+              <div
+                key={meta.id}
+                onClick={() => onOpen(meta.id)}
+                onMouseEnter={() => setHoveredId(meta.id)}
+                onMouseLeave={() => setHoveredId(null)}
+                style={{
+                  aspectRatio: "4/3",
+                  position: "relative",
+                  background: "#ffffff",
+                  borderRadius: 16,
+                  border: "1px solid #e8e6e0",
+                  cursor: "pointer",
+                  overflow: "hidden",
+                  boxShadow: hoveredId === meta.id
+                    ? "0 8px 32px rgba(0,0,0,0.12)"
+                    : "0 1px 4px rgba(0,0,0,0.06)",
+                  transition: "box-shadow 0.15s",
+                  display: "flex", flexDirection: "column",
+                }}
+              >
+                {/* Preview area (placeholder pattern) */}
+                <div style={{
+                  flex: 1, background: "#f8f7f4",
+                  backgroundImage: "radial-gradient(circle, #d4d2cc 1px, transparent 1px)",
+                  backgroundSize: "18px 18px",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                }}>
+                  <span style={{ fontSize: 28, opacity: 0.25 }}>✦</span>
+                </div>
+
+                {/* Footer */}
+                <div style={{
+                  padding: "10px 14px",
+                  borderTop: "1px solid #f0eee8",
+                  background: "#ffffff",
+                }}>
+                  <div style={{
+                    fontSize: 13, fontWeight: 600, color: "#1a1a1a",
+                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                    marginBottom: 3,
+                  }} title={meta.title}>
+                    {meta.title || "无标题设计"}
+                  </div>
+                  <div style={{ fontSize: 11, color: "#a0a0a0" }}>
+                    {fmt(meta.updatedAt)}
+                  </div>
+                </div>
+
+                {/* Delete button (hover) */}
+                {hoveredId === meta.id && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setConfirmDeleteId(meta.id)
+                    }}
+                    title="删除"
+                    style={{
+                      position: "absolute", top: 10, right: 10,
+                      width: 28, height: 28, borderRadius: "50%",
+                      background: "rgba(255,255,255,0.92)",
+                      border: "1px solid #e0ded8",
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      cursor: "pointer", fontSize: 14, color: "#6a6a6a",
+                      boxShadow: "0 1px 4px rgba(0,0,0,0.1)",
+                    }}
+                  >🗑</button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Delete confirmation dialog */}
+      {confirmDeleteId && (
+        <div
+          style={{
+            position: "fixed", inset: 0,
+            background: "rgba(0,0,0,0.35)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            zIndex: 9999,
+          }}
+          onClick={() => setConfirmDeleteId(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: "#ffffff", borderRadius: 16,
+              padding: "28px 32px", width: 340,
+              boxShadow: "0 12px 48px rgba(0,0,0,0.18)",
+              fontFamily: "'Inter', -apple-system, sans-serif",
+            }}
+          >
+            <h3 style={{ margin: "0 0 10px", fontSize: 16, fontWeight: 600, color: "#1a1a1a" }}>删除这个设计？</h3>
+            <p style={{ margin: "0 0 24px", fontSize: 13, color: "#6a6a6a", lineHeight: 1.6 }}>
+              删除后无法恢复。
+            </p>
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <button
+                onClick={() => setConfirmDeleteId(null)}
+                style={{
+                  padding: "8px 20px", fontSize: 13, fontWeight: 500,
+                  background: "#f5f4f0", border: "none", borderRadius: 8,
+                  cursor: "pointer", fontFamily: "inherit", color: "#4a4a4a",
+                }}
+              >取消</button>
+              <button
+                onClick={() => { onDelete(confirmDeleteId); setConfirmDeleteId(null) }}
+                style={{
+                  padding: "8px 20px", fontSize: 13, fontWeight: 600,
+                  background: "#dc2626", color: "#fff",
+                  border: "none", borderRadius: 8, cursor: "pointer", fontFamily: "inherit",
+                }}
+              >删除</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
