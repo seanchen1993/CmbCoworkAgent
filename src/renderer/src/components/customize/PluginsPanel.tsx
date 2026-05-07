@@ -8,6 +8,7 @@ import {
   Puzzle,
   Search,
   Sparkles,
+  Store,
   Trash2,
   Upload,
   Webhook,
@@ -28,6 +29,10 @@ import {
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
 import type { PluginMetadata, PluginManifest } from "@/types"
+import { marketApi, type MarketItem } from "../../api/market"
+import { MarketPublishDialog, type MarketPublishTarget } from "./MarketPublishDialog"
+import { readUploadedItemNamesFromStorage } from "./marketPublishStorage"
+import { toast } from "sonner"
 
 type PluginHookMetadata = Awaited<ReturnType<typeof window.api.plugins.listHooks>>[number]
 const PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL =
@@ -256,10 +261,18 @@ function UploadPluginDialog(props: {
 
 export function PluginsPanel(): React.JSX.Element {
   const bumpPluginVersion = useAppStore((s) => s.bumpPluginVersion)
+  const setShowCustomizeView = useAppStore((s) => s.setShowCustomizeView)
   const [plugins, setPlugins] = useState<PluginMetadata[]>([])
   const [selectedPlugin, setSelectedPlugin] = useState<PluginMetadata | null>(null)
   const [detail, setDetail] = useState<PluginDetail | null>(null)
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false)
+  const [publishDialogOpen, setPublishDialogOpen] = useState(false)
+  const [publishTarget, setPublishTarget] = useState<MarketPublishTarget | null>(null)
+  const [publishMode, setPublishMode] = useState<"upload" | "update">("upload")
+  const [marketPluginMap, setMarketPluginMap] = useState<Record<string, MarketItem>>({})
+  const [uploadedPluginNames, setUploadedPluginNames] = useState<Set<string>>(() =>
+    readUploadedItemNamesFromStorage("plugin")
+  )
   const [searchQuery, setSearchQuery] = useState("")
   const [debouncedQuery, setDebouncedQuery] = useState("")
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
@@ -279,6 +292,21 @@ export function PluginsPanel(): React.JSX.Element {
 
   const refreshPlugins = useCallback(() => {
     window.api.plugins.list().then(setPlugins).catch(console.error)
+  }, [])
+
+  const loadMarketPlugins = useCallback(async () => {
+    try {
+      const res = await marketApi.getPlugins()
+      if (!res.success || !res.data) return
+      const next: Record<string, MarketItem> = {}
+      for (const item of res.data) {
+        const key = item.name.trim().toLowerCase()
+        if (key) next[key] = item
+      }
+      setMarketPluginMap(next)
+    } catch (e) {
+      console.warn("[PluginsPanel] Failed to load market plugins:", e)
+    }
   }, [])
 
   // After install/update, refresh the selected plugin's detail if it was affected
@@ -309,6 +337,13 @@ export function PluginsPanel(): React.JSX.Element {
   useEffect(() => {
     refreshPlugins()
   }, [refreshPlugins])
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      void loadMarketPlugins()
+    }, 0)
+    return () => clearTimeout(timer)
+  }, [loadMarketPlugins])
 
   const loadDetail = useCallback(async (plugin: PluginMetadata) => {
     setSelectedPlugin(plugin)
@@ -387,6 +422,39 @@ export function PluginsPanel(): React.JSX.Element {
       setErrorMsg(e instanceof Error ? e.message : "卸载插件失败")
     }
   }, [bumpPluginVersion, deleteTarget, selectedPlugin, refreshPlugins])
+
+  const openPublishDialog = useCallback(
+    (plugin: PluginMetadata) => {
+      const key = plugin.name.trim().toLowerCase()
+      setPublishMode(uploadedPluginNames.has(key) ? "update" : "upload")
+      setPublishTarget({
+        type: "plugin",
+        name: plugin.name,
+        description: plugin.description,
+        category: marketPluginMap[key]?.category,
+        chineseName: marketPluginMap[key]?.chinese_name
+      })
+      setPublishDialogOpen(true)
+    },
+    [marketPluginMap, uploadedPluginNames]
+  )
+
+  const buildPluginMarketFile = useCallback(
+    async (target: MarketPublishTarget) => {
+      const plugin = plugins.find((item) => item.name === target.name)
+      if (!plugin) return { success: false, error: "Plugin 不存在" }
+      const exported = await window.api.plugins.exportForMarket(plugin.id)
+      if (!exported.success || !exported.buffer) {
+        return { success: false, error: exported.error || "导出 Plugin 失败" }
+      }
+      const fileName = exported.fileName || `${plugin.name}.zip`
+      return {
+        success: true,
+        file: new File([exported.buffer], fileName, { type: "application/zip" })
+      }
+    },
+    [plugins]
+  )
 
   const filteredPlugins = useMemo(() => {
     const q = debouncedQuery.trim().toLowerCase()
@@ -535,6 +603,12 @@ export function PluginsPanel(): React.JSX.Element {
         onToggleEnabled={handleToggleEnabled}
         onToggleHookEnabled={handleToggleHookEnabled}
         onDelete={handleDeleteRequest}
+        onPublish={selectedPlugin ? () => openPublishDialog(selectedPlugin) : undefined}
+        publishLabel={
+          selectedPlugin && uploadedPluginNames.has(selectedPlugin.name.trim().toLowerCase())
+            ? "更新到市场"
+            : "发布到市场"
+        }
       />
 
       <UploadPluginDialog
@@ -555,6 +629,30 @@ export function PluginsPanel(): React.JSX.Element {
         message={errorMsg ?? ""}
         onClose={() => setErrorMsg(null)}
       />
+
+      <MarketPublishDialog
+        open={publishDialogOpen}
+        mode={publishMode}
+        target={publishTarget}
+        marketInfo={
+          publishTarget ? marketPluginMap[publishTarget.name.trim().toLowerCase()] : undefined
+        }
+        buildFile={buildPluginMarketFile}
+        onOpenChange={(open) => {
+          setPublishDialogOpen(open)
+          if (!open) setPublishTarget(null)
+        }}
+        onSuccess={({ name, mode }) => {
+          setUploadedPluginNames(readUploadedItemNamesFromStorage("plugin"))
+          void loadMarketPlugins()
+          toast.success(
+            mode === "update"
+              ? `Plugin「${name}」更新发布成功，已跳转到应用市场。`
+              : `Plugin「${name}」发布成功，已跳转到应用市场。`
+          )
+          setShowCustomizeView(true, "market")
+        }}
+      />
     </>
   )
 }
@@ -565,6 +663,8 @@ export function PluginDetailPanel(props: {
   onToggleEnabled: (plugin: PluginMetadata) => void
   onToggleHookEnabled?: (plugin: PluginMetadata, hook: PluginHookMetadata) => void
   onDelete: (plugin: PluginMetadata) => void
+  onPublish?: (plugin: PluginMetadata) => void
+  publishLabel?: string
   hideActions?: boolean
 }): React.JSX.Element {
   const {
@@ -573,6 +673,8 @@ export function PluginDetailPanel(props: {
     onToggleEnabled,
     onToggleHookEnabled,
     onDelete,
+    onPublish,
+    publishLabel = "发布到市场",
     hideActions = false
   } = props
 
@@ -694,6 +796,17 @@ export function PluginDetailPanel(props: {
         </div>
         {!hideActions && (
           <div className="flex items-center gap-1.5 shrink-0">
+            {onPublish && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 gap-1.5 text-xs"
+                onClick={() => onPublish(plugin)}
+              >
+                <Store className="size-3" />
+                {publishLabel}
+              </Button>
+            )}
             <Button
               variant="ghost"
               size="sm"

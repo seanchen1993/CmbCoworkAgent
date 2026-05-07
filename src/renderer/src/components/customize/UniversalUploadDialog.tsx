@@ -43,6 +43,15 @@ interface UniversalUploadDialogProps {
     chinese_name?: string
     user_id?: string
   }
+  generatedFile?: {
+    label?: string
+    build: () => Promise<{ success: boolean; file?: File; error?: string }>
+  }
+  lockName?: boolean
+  titleOverride?: string
+  descriptionOverride?: string
+  submitLabel?: string
+  submittingLabel?: string
 }
 
 const buildUserIdFromUserInfo = (userInfo: UserInfoLite | null): string | undefined => {
@@ -64,7 +73,13 @@ export function UniversalUploadDialog({
   resourceType,
   onUpload,
   isUpdate,
-  existingItem
+  existingItem,
+  generatedFile,
+  lockName = false,
+  titleOverride,
+  descriptionOverride,
+  submitLabel,
+  submittingLabel
 }: UniversalUploadDialogProps): React.JSX.Element {
   const [dragOver, setDragOver] = useState(false)
   const [uploading, setUploading] = useState(false)
@@ -90,14 +105,14 @@ export function UniversalUploadDialog({
 
   // Initialize form with existing data for update mode
   React.useEffect(() => {
-    if (isUpdate && existingItem && open) {
+    if (open && existingItem) {
       setName(existingItem.name || "")
       setDescription(existingItem.description || "")
       setCategory(existingItem.category || DEFAULT_SCENE_CATEGORY)
       setGuidance(existingItem.guidance || "")
       setChineseName(existingItem.chinese_name || "")
       setNameFromFile(false)
-    } else if (!isUpdate && open) {
+    } else if (open) {
       // Reset form for new upload
       setName("")
       setDescription("")
@@ -205,7 +220,7 @@ export function UniversalUploadDialog({
   }
 
   const handleUpload = async () => {
-    if (!isUpdate && !file) {
+    if (!isUpdate && !file && !generatedFile) {
       setError("请选择文件")
       return
     }
@@ -239,9 +254,19 @@ export function UniversalUploadDialog({
     setUploading(true)
 
     try {
+      let uploadFile = file
+      if (generatedFile) {
+        const generated = await generatedFile.build()
+        if (!generated.success || !generated.file) {
+          setError(generated.error || "生成上传文件失败")
+          return
+        }
+        uploadFile = generated.file
+      }
+
       const normalizedUserId = userId?.trim() || undefined
       const result = await onUpload(
-        file,
+        uploadFile,
         name.trim(),
         description.trim(),
         category,
@@ -310,6 +335,7 @@ export function UniversalUploadDialog({
   }
 
   const getTitle = () => {
+    if (titleOverride) return titleOverride
     if (isUpdate) {
       switch (resourceType) {
         case "skill":
@@ -338,7 +364,7 @@ export function UniversalUploadDialog({
   const [jsonTemplateCopied, setJsonTemplateCopied] = useState(false)
   const [showJsonTemplate, setShowJsonTemplate] = useState(false)
   const canSubmit =
-    (isUpdate || !!file) &&
+    (isUpdate || !!file || !!generatedFile) &&
     !!name.trim() &&
     !!chineseName.trim() &&
     !!description.trim() &&
@@ -383,7 +409,7 @@ export function UniversalUploadDialog({
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>{getTitle()}</DialogTitle>
-          <DialogDescription>{getFileTypeDescription()}</DialogDescription>
+          <DialogDescription>{descriptionOverride || getFileTypeDescription()}</DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4 max-h-[50vh] overflow-auto">
@@ -404,45 +430,57 @@ export function UniversalUploadDialog({
           )}
 
           {/* File Upload Area */}
-          <div
-            className={cn(
-              "border-2 border-dashed rounded-lg p-6 text-center transition-colors cursor-pointer",
-              dragOver
-                ? "border-primary bg-primary/5"
-                : "border-muted-foreground/30 hover:border-muted-foreground/50",
-              uploading && "pointer-events-none opacity-60"
-            )}
-            onDrop={onDrop}
-            onDragOver={onDragOver}
-            onDragLeave={onDragLeave}
-            onClick={() => document.getElementById("upload-file-input")?.click()}
-          >
-            <input
-              id="upload-file-input"
-              type="file"
-              accept={getAcceptedTypes()}
-              className="hidden"
-              onChange={onInputChange}
-              disabled={uploading}
-              required={!isUpdate}
-            />
-            {file ? (
-              <div>
-                <Upload className="size-8 mx-auto text-green-600 mb-2" />
-                <p className="text-sm font-medium">{file.name}</p>
-                <p className="text-xs text-muted-foreground">点击重新选择文件</p>
+          {generatedFile ? (
+            <div className="rounded-lg border border-border bg-muted/30 px-4 py-3">
+              <div className="flex items-center gap-2">
+                <Upload className="size-4 text-primary" />
+                <p className="text-sm font-medium">{generatedFile.label || "将自动生成上传文件"}</p>
               </div>
-            ) : (
-              <>
-                <Upload className="size-10 mx-auto text-muted-foreground mb-2" />
-                <p className="text-sm text-muted-foreground">拖拽文件到此处，或点击选择</p>
-                <p className="text-xs text-muted-foreground mt-1">
-                  支持: {getAcceptedTypes()}
-                  {isUpdate && <span className="block mt-1">更新时文件为可选项</span>}
-                </p>
-              </>
-            )}
-          </div>
+              <p className="mt-1 text-xs text-muted-foreground">
+                点击提交时会自动打包当前资源并上传，无需手动选择文件。
+              </p>
+            </div>
+          ) : (
+            <div
+              className={cn(
+                "border-2 border-dashed rounded-lg p-6 text-center transition-colors cursor-pointer",
+                dragOver
+                  ? "border-primary bg-primary/5"
+                  : "border-muted-foreground/30 hover:border-muted-foreground/50",
+                uploading && "pointer-events-none opacity-60"
+              )}
+              onDrop={onDrop}
+              onDragOver={onDragOver}
+              onDragLeave={onDragLeave}
+              onClick={() => document.getElementById("upload-file-input")?.click()}
+            >
+              <input
+                id="upload-file-input"
+                type="file"
+                accept={getAcceptedTypes()}
+                className="hidden"
+                onChange={onInputChange}
+                disabled={uploading}
+                required={!isUpdate}
+              />
+              {file ? (
+                <div>
+                  <Upload className="size-8 mx-auto text-green-600 mb-2" />
+                  <p className="text-sm font-medium">{file.name}</p>
+                  <p className="text-xs text-muted-foreground">点击重新选择文件</p>
+                </div>
+              ) : (
+                <>
+                  <Upload className="size-10 mx-auto text-muted-foreground mb-2" />
+                  <p className="text-sm text-muted-foreground">拖拽文件到此处，或点击选择</p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    支持: {getAcceptedTypes()}
+                    {isUpdate && <span className="block mt-1">更新时文件为可选项</span>}
+                  </p>
+                </>
+              )}
+            </div>
+          )}
 
           {/* Name Input */}
           <div className="space-y-2">
@@ -454,12 +492,14 @@ export function UniversalUploadDialog({
               placeholder="输入资源名称"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              disabled={uploading || isUpdate || nameFromFile}
-              className={isUpdate || nameFromFile ? "bg-muted" : ""}
+              disabled={uploading || isUpdate || nameFromFile || lockName}
+              className={isUpdate || nameFromFile || lockName ? "bg-muted" : ""}
               required
             />
             {isUpdate ? (
               <p className="text-xs text-muted-foreground">更新时名称不可修改</p>
+            ) : lockName ? (
+              <p className="text-xs text-muted-foreground">名称来自当前资源，不可修改</p>
             ) : nameFromFile ? (
               <p className="text-xs text-muted-foreground">名称已从文件中自动提取，不可修改</p>
             ) : resourceType === "skill" ? (
@@ -616,7 +656,9 @@ export function UniversalUploadDialog({
             取消
           </Button>
           <Button onClick={handleUpload} disabled={uploading || !canSubmit}>
-            {uploading ? (isUpdate ? "更新中..." : "上传中...") : isUpdate ? "更新" : "上传"}
+            {uploading
+              ? submittingLabel || (isUpdate ? "更新中..." : "上传中...")
+              : submitLabel || (isUpdate ? "更新" : "上传")}
           </Button>
         </DialogFooter>
       </DialogContent>
