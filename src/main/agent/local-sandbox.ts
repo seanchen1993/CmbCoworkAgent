@@ -2087,9 +2087,20 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
    */
   private static readonly CHARDET_CONFIDENCE_THRESHOLD = 0.8
 
+  /**
+   * Encoding detection runs on the main process for every shell command, so we keep
+   * the working set small. chardet is pure JS and walks the whole buffer; for our
+   * use case (telling UTF-8 from GBK/CP936 on Chinese Windows) the first ~8KB is more
+   * than enough. Avoids spending 5–15ms per maxOutputBytes-capped command.
+   */
+  private static readonly ENCODING_DETECT_HEAD_BYTES = 8 * 1024
+
   private detectCmdEncoding(buf: Buffer): string {
     if (buf.length === 0) return "utf-8"
-    const detected = chardet.detect(buf)
+    const sample = buf.length > LocalSandbox.ENCODING_DETECT_HEAD_BYTES
+      ? buf.subarray(0, LocalSandbox.ENCODING_DETECT_HEAD_BYTES)
+      : buf
+    const detected = chardet.detect(sample)
     if (!detected) return "utf-8"
     const enc = typeof detected === "string" ? detected : detected.encoding
     const confidence = typeof detected === "object" ? detected.confidence : 1
@@ -2101,10 +2112,20 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     }
     // Low confidence but buffer contains invalid UTF-8 — definitely not UTF-8,
     // trust jschardet's best guess (typically GBK/GB2312 on Chinese Windows)
-    if (!LocalSandbox.isValidUtf8(buf)) {
+    if (!LocalSandbox.isValidUtf8(sample)) {
       return enc
     }
     return "utf-8"
+  }
+
+  /**
+   * Pick the buffer to feed encoding detection. Prefer stdout (more representative of
+   * the program's text output), fall back to stderr. Avoid the third Buffer.concat
+   * the previous implementation paid for on every command — only stdoutBuf and stderrBuf
+   * are already-allocated slices we can reuse directly.
+   */
+  private static encodingDetectionBuffer(stdoutBuf: Buffer, stderrBuf: Buffer): Buffer {
+    return stdoutBuf.length > 0 ? stdoutBuf : stderrBuf
   }
 
   /** Quick check whether a buffer is valid UTF-8. */
@@ -3683,7 +3704,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
 
           const stdoutBuf = Buffer.concat(stdoutChunks)
           const stderrBuf = Buffer.concat(stderrChunks)
-          const enc = this.detectCmdEncoding(Buffer.concat([stdoutBuf, stderrBuf]))
+          const enc = this.detectCmdEncoding(LocalSandbox.encodingDetectionBuffer(stdoutBuf, stderrBuf))
 
           let output = ""
           if (stdoutBuf.length > 0) output += iconv.decode(stdoutBuf, enc)
@@ -3958,7 +3979,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
           // non-pty file descriptors. Detect the actual encoding from the
           // output buffer so CJK characters are decoded correctly.
           const enc = isWindows
-            ? this.detectCmdEncoding(Buffer.concat([stdoutBuf, stderrBuf]))
+            ? this.detectCmdEncoding(LocalSandbox.encodingDetectionBuffer(stdoutBuf, stderrBuf))
             : "utf-8"
 
           let output = ""

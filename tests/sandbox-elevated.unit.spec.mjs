@@ -411,6 +411,36 @@ test("LocalSandbox exposes a single sandbox-denial detector modelled on Codex", 
   }
 })
 
+test("output collection caps encoding detection to a small head sample", () => {
+  // Encoding detection runs on every shell command's main-thread cleanup. chardet is
+  // pure JS and linear in the input size — feeding it the full 100KB buffer adds
+  // 5-15ms of blocking per cap-hit command. Sample the head (8KB) instead.
+  assert.match(
+    localSandboxSource,
+    /private static readonly ENCODING_DETECT_HEAD_BYTES = 8 \* 1024/,
+    "ENCODING_DETECT_HEAD_BYTES should cap the sample chardet sees"
+  )
+  assert.match(
+    localSandboxSource,
+    /buf\.length > LocalSandbox\.ENCODING_DETECT_HEAD_BYTES[\s\S]*buf\.subarray\(0, LocalSandbox\.ENCODING_DETECT_HEAD_BYTES\)/,
+    "detectCmdEncoding should slice via subarray (no allocation), not pass the full buffer to chardet"
+  )
+  assert.match(
+    localSandboxSource,
+    /private static encodingDetectionBuffer\(stdoutBuf: Buffer, stderrBuf: Buffer\): Buffer/,
+    "should expose a helper that picks the encoding-detection buffer without an extra Buffer.concat"
+  )
+  // Both collectAndResolve sites should use the helper instead of Buffer.concat([stdoutBuf, stderrBuf])
+  assert.doesNotMatch(
+    localSandboxSource,
+    /Buffer\.concat\(\[stdoutBuf, stderrBuf\]\)/,
+    "neither executeOnce path should allocate a third Buffer.concat just to feed chardet"
+  )
+  // Both sites should now use the helper:
+  const helperUseCount = (localSandboxSource.match(/encodingDetectionBuffer\(stdoutBuf, stderrBuf\)/g) || []).length
+  assert.ok(helperUseCount >= 2, `encodingDetectionBuffer should be used by both collectAndResolve paths (got ${helperUseCount})`)
+})
+
 test("error 1385 from CreateProcessWithLogonW gets a specific 'switch to unelevated' guidance prompt", () => {
   // Real failure output we observed on a domain-managed machine
   const sample =
