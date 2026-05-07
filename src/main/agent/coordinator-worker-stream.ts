@@ -43,31 +43,78 @@ export function extractWorkerFinalText(
     const className = getMessageClassName(messageData)
     const kwargs = getSerializedObject(messageData?.kwargs) ?? {}
     if (className.includes("AI") && messageData && getWorkerToolCalls(messageData).length === 0) {
-      return extractTextFromUnknownContent(kwargs.content ?? messageData.content).trim()
+      const text = extractTextFromUnknownContent(kwargs.content ?? messageData.content)
+      return className.includes("AIMessageChunk") ? text : text.trim()
     }
   }
 
   if (mode === "values") {
     const messages = resolveWorkerValuesMessages(payload, currentTurnPrompt, valuesContext)
     if (!messages) return ""
-    const finalMessages = messages.filter((message) => {
+    for (let index = messages.length - 1; index >= 0; index--) {
+      const message = messages[index]
       const data = getSerializedObject(message)
-      if (!data) return false
+      if (!data) continue
       const className = getMessageClassName(data)
-      return (
-        className.includes("AI") &&
-        getWorkerToolCalls(data).length === 0
-      )
-    })
-    const last = finalMessages[finalMessages.length - 1]
-    if (last) {
-      const data = getSerializedObject(last)
-      const kwargs = getSerializedObject(data?.kwargs) ?? {}
+      if (className.includes("Tool")) return ""
+      if (!className.includes("AI")) continue
+      if (getWorkerToolCalls(data).length > 0) return ""
+      const kwargs = getSerializedObject(data.kwargs) ?? {}
       return extractTextFromUnknownContent(kwargs.content ?? data?.content).trim()
     }
   }
 
   return ""
+}
+
+export function isWorkerFinalTextDelta(mode: string, payload: unknown): boolean {
+  if (mode !== "messages" || !Array.isArray(payload)) return false
+  const [message] = payload as [unknown]
+  const messageData = getSerializedObject(message)
+  if (!messageData) return false
+  const className = getMessageClassName(messageData)
+  return className.includes("AIMessageChunk") && getWorkerToolCalls(messageData).length === 0
+}
+
+export function isWorkerToolCallMessage(mode: string, payload: unknown): boolean {
+  if (mode !== "messages" || !Array.isArray(payload)) return false
+  const [message] = payload as [unknown]
+  const messageData = getSerializedObject(message)
+  if (!messageData) return false
+  const className = getMessageClassName(messageData)
+  return className.includes("AI") && getWorkerToolCalls(messageData).length > 0
+}
+
+export function isWorkerToolResultMessage(mode: string, payload: unknown): boolean {
+  if (mode !== "messages" || !Array.isArray(payload)) return false
+  const [message] = payload as [unknown]
+  const messageData = getSerializedObject(message)
+  if (!messageData) return false
+  return getMessageClassName(messageData).includes("Tool")
+}
+
+export function shouldClearWorkerFinalText(
+  mode: string,
+  payload: unknown,
+  currentTurnPrompt?: string,
+  valuesContext?: WorkerValuesSnapshotContext
+): boolean {
+  if (isWorkerToolCallMessage(mode, payload) || isWorkerToolResultMessage(mode, payload)) {
+    return true
+  }
+
+  if (mode !== "values") return false
+  const messages = resolveWorkerValuesMessages(payload, currentTurnPrompt, valuesContext)
+  if (!messages) return false
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const data = getSerializedObject(messages[index])
+    if (!data) continue
+    const className = getMessageClassName(data)
+    if (className.includes("Tool")) return true
+    if (!className.includes("AI")) continue
+    return getWorkerToolCalls(data).length > 0
+  }
+  return false
 }
 
 export function summarizeWorkerText(text: string): string {
@@ -125,11 +172,7 @@ function sanitizeTranscriptArgs(args: unknown): unknown {
     if (typeof value === "string") {
       if (value.length > TRANSCRIPT_FIELD_MAX_CHARS) truncated = true
       sanitizedValue = truncateTranscriptValue(value)
-    } else if (
-      value == null ||
-      typeof value === "number" ||
-      typeof value === "boolean"
-    ) {
+    } else if (value == null || typeof value === "number" || typeof value === "boolean") {
       sanitizedValue = value
     } else if (Array.isArray(value)) {
       sanitizedValue = `[array ${value.length} items omitted]`
@@ -215,7 +258,9 @@ export function createWorkerValuesSnapshotContext(
   if (!state) return undefined
   const allMessages = state.messages
   return {
-    messages: Array.isArray(allMessages) ? messagesForCurrentTurn(allMessages, currentTurnPrompt) : [],
+    messages: Array.isArray(allMessages)
+      ? messagesForCurrentTurn(allMessages, currentTurnPrompt)
+      : [],
     skillsMetadata: Array.isArray(state.skillsMetadata)
       ? (state.skillsMetadata as Array<{ name?: string; path?: string }>)
       : []

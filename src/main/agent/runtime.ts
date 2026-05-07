@@ -103,6 +103,7 @@ import {
   buildCoordinatorTaskPrompt,
   buildCoordinatorWorkerSubagents,
   createCoordinatorWorkerTools,
+  getCoordinatorScratchpadDir,
   injectSelectedSkillIntoWorkerPrompt,
   type AgentMode,
   type CoordinatorSelectedSkill
@@ -125,12 +126,29 @@ import {
   extractWorkerFinalText,
   extractWorkerTranscriptLine,
   extractWorkerUsage,
+  isWorkerFinalTextDelta,
+  shouldClearWorkerFinalText,
   observeWorkerProgress,
   summarizeWorkerText,
   type WorkerValuesSnapshotContext
 } from "./coordinator-worker-stream"
 import { buildOrderedChain, isRetryableApiError } from "./failover"
 import { resolveModel } from "../routing"
+
+function isAbortError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  return error.name === "AbortError" || (error as { code?: unknown }).code === "ABORT_ERR"
+}
+
+function describeToolError(error: unknown): string {
+  if (error instanceof Error) return error.message || error.name || "Error"
+  if (typeof error === "string" && error) return error
+  try {
+    return JSON.stringify(error) ?? String(error)
+  } catch {
+    return String(error)
+  }
+}
 
 /** Decompress codex.exe.gz → codex.exe if needed (re-extract if .gz is newer than .exe). */
 async function ensureCodexExe(exePath: string): Promise<void> {
@@ -514,11 +532,11 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
         })
       }
     )
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    mw.tools = applyCoordinatorWorkerFilesystemAccess(
+    const guardedTools = applyCoordinatorWorkerFilesystemAccess(
       [...(mw.tools || []), taskOutputTool],
       filesystemAccess
-    ) as any
+    )
+    mw.tools = guardedTools as typeof mw.tools
     console.log("[Runtime] task_output tool added")
 
     return mw
@@ -544,23 +562,8 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
   // ToolMessage — the model can decide whether to retry or abandon.
   const NON_RECOVERABLE_TOOL_NAMES = new Set<string>()
 
-  const isAbortError = (error: unknown): boolean => {
-    if (!(error instanceof Error)) return false
-    return error.name === "AbortError" || (error as { code?: unknown }).code === "ABORT_ERR"
-  }
-
   const isProgrammerError = (error: unknown): boolean =>
     error instanceof TypeError || error instanceof ReferenceError
-
-  const describeToolError = (error: unknown): string => {
-    if (error instanceof Error) return error.message || error.name || "Error"
-    if (typeof error === "string" && error) return error
-    try {
-      return JSON.stringify(error) ?? String(error)
-    } catch {
-      return String(error)
-    }
-  }
 
   const unwrapToolFailure = (
     error: unknown,
@@ -1550,14 +1553,13 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // ask for post-run tool promotion confirmation. Shell/file approvals remain gated by
   // whether the orchestrator is mounted below.
   const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000
-	  const requestApproval = (req: ApprovalRequest): Promise<ApprovalDecision> => {
-	    return new Promise<ApprovalDecision>((resolve) => {
-	      let settled = false
-	      let timeoutId: ReturnType<typeof setTimeout> | undefined
-	      const resolveOnce = (decision: ApprovalDecision): void => {
-	        if (settled) return
-	        settled = true
-	        if (timeoutId) clearTimeout(timeoutId)
+  const requestApproval = (req: ApprovalRequest): Promise<ApprovalDecision> => {
+    return new Promise<ApprovalDecision>((resolve) => {
+      let settled = false
+      const resolveOnce = (decision: ApprovalDecision): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timeoutId)
         options.abortSignal?.removeEventListener("abort", onApprovalAbort)
         pendingApprovals.delete(req.id)
         resolve(decision)
@@ -1574,7 +1576,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         }
         resolveOnce(rejectDecision())
       }
-	      timeoutId = setTimeout(() => {
+      const timeoutId = setTimeout(() => {
         if (pendingApprovals.has(req.id)) {
           console.warn(
             `[Orchestrator] approval request timed out after ${APPROVAL_TIMEOUT_MS / 1000}s: reqId=${req.id}`
@@ -1744,12 +1746,15 @@ The workspace root is: ${workspacePath}`
   let codeExecRouteEnabled = false
   let eagerMcpMetadata: McpCapabilityTool[] = []
   let lazyMcpMetadata: McpCapabilityTool[] = []
-  const deferredSavedTools = !isConstrainedCoordinatorWorker && codeExecEnabled ? listSavedCodeExecTools() : []
+  const deferredSavedTools =
+    !isConstrainedCoordinatorWorker && codeExecEnabled ? listSavedCodeExecTools() : []
   let mcpTools: ReturnType<typeof createEagerMcpTools> = []
   let toolSearchTools: unknown[] = []
 
   if (isConstrainedCoordinatorWorker) {
-    console.log("[Runtime] Skipping MCP and deferred tool discovery for constrained coordinator worker")
+    console.log(
+      "[Runtime] Skipping MCP and deferred tool discovery for constrained coordinator worker"
+    )
   } else {
     allMcpTools = await capabilityService.listTools()
     codeExecRouteEnabled = codeExecEnabled && allMcpTools.length > 0
@@ -1951,14 +1956,23 @@ The workspace root is: ${workspacePath}`
       workerInput.ownedFiles.length > 0
         ? `- owned_files: ${workerInput.ownedFiles.join(", ")}\n`
         : ""
-    const workerAccessPrompt =
-      workerInput.workload === "read_only"
-        ? "Access limits: read-only worker. You can inspect files and search, but write_file, edit_file, execute, task_output, browser_playwright, deferred tools, and eager MCP tools are unavailable. Do not claim to have run commands."
-        : workerInput.workload === "verify"
-          ? "Access limits: verifier worker. You can inspect files, run validation commands, and use browser_playwright for UI/runtime verification when available, but write_file, edit_file, deferred tools, and eager MCP tools are unavailable. Do not create, modify, or delete files in the project workspace. If a temporary script or harness is necessary, write it only under /tmp or $TMPDIR and clean it up."
-          : workerInput.ownedFiles.length > 0
-            ? `Access limits: scoped write worker. write_file and edit_file are limited to owned_files (${workerInput.ownedFiles.join(", ")}). execute, task_output, browser_playwright, deferred tools, and eager MCP tools are unavailable, so do not claim to have run shell/browser checks.`
-            : "Access limits: write worker. You may edit workspace files as needed for the assigned implementation."
+    const scratchpadDir = getCoordinatorScratchpadDir(workerInput.parentThreadId)
+    const workerAccessPrompt = (() => {
+      if (workerInput.workload === "read_only") {
+        return "Access limits: read-only worker. You can inspect files and search, but write_file, edit_file, execute, task_output, browser_playwright, deferred tools, and eager MCP tools are unavailable. Do not claim to have run commands."
+      }
+      if (workerInput.workload === "verify") {
+        return "Access limits: verifier worker. You can inspect files, run validation commands, and use browser_playwright for UI/runtime verification when available, but write_file, edit_file, deferred tools, and eager MCP tools are unavailable. Do not create, modify, or delete files in the project workspace. If a temporary script or harness is necessary, write it only under /tmp or $TMPDIR and clean it up."
+      }
+      if (workerInput.ownedFiles.length > 0) {
+        return `Access limits: scoped write worker. write_file and edit_file are limited to owned_files (${workerInput.ownedFiles.join(", ")}). execute, task_output, browser_playwright, deferred tools, and eager MCP tools are unavailable, so do not claim to have run shell/browser checks. File edits may still require explicit user approval; if write_file or edit_file is denied/blocked, do not loop the same call and instead report the blocking file/action back to the coordinator.`
+      }
+      return "Access limits: write worker. You may edit workspace files as needed for the assigned implementation. File edits may still require explicit user approval; if write_file or edit_file is denied/blocked, do not loop the same call and instead report the blocking file/action back to the coordinator."
+    })()
+    const scratchpadGuidance =
+      workerInput.workload === "write"
+        ? "For long-running work, you may write concise durable notes under scratchpad_dir when future workers need shared context. Treat scratchpad_dir like any other workspace artifact: normal tool availability, approval, hook, and access limits still apply."
+        : "If the coordinator points you to scratchpad_dir, you may inspect it with available read tools. Do not write scratchpad notes unless your available tools and access policy explicitly allow it."
     const workerMetadataPrompt = `Async coordinator worker metadata:
 - parent_thread_id: ${workerInput.parentThreadId}
 - worker_id: ${workerInput.workerId}
@@ -1967,10 +1981,11 @@ The workspace root is: ${workspacePath}`
 - worker_workload: ${workerInput.workload}
 ${ownedFilesLine.trimEnd()}
 - worker_description: ${workerInput.description}
+- scratchpad_dir: ${scratchpadDir}
 
 ${workerAccessPrompt}
 
-Use the same worker thread context for follow-up instructions. Return a concise handoff with output files, commands run, evidence, risks, and verifier notes when applicable.`
+Use the same worker thread context for follow-up instructions. ${scratchpadGuidance} Return a concise handoff with output files, commands run, evidence, risks, and verifier notes when applicable.`
 
     console.log("[CoordinatorWorker] run turn", {
       parentThreadId: workerInput.parentThreadId,
@@ -1987,6 +2002,9 @@ Use the same worker thread context for follow-up instructions. Return a concise 
       return `${text.slice(0, MAX_WORKER_RAW_TEXT_CHARS)}\n...(raw worker output truncated)`
     }
     let finalText = ""
+    let messageModeFinalText = ""
+    let messageModeAssistantText = ""
+    let messageModeAssistantTextTruncated = false
     let tokenUsage: CoordinatorWorkerTokenUsage | undefined
     const transcriptLines: string[] = []
     let transcriptChars = 0
@@ -2054,11 +2072,7 @@ Use the same worker thread context for follow-up instructions. Return a concise 
         for await (const chunk of stream) {
           if (workerInput.abortSignal.aborted) break
           const [mode, data] = chunk as unknown as [string, unknown]
-          const valuesContext = createWorkerValuesSnapshotContext(
-            mode,
-            data,
-            effectiveWorkerPrompt
-          )
+          const valuesContext = createWorkerValuesSnapshotContext(mode, data, effectiveWorkerPrompt)
           observeWorkerSkillUsage(mode, data, workerSkillUsageDetector, valuesContext)
           observeWorkerProgress(
             mode,
@@ -2080,13 +2094,32 @@ Use the same worker thread context for follow-up instructions. Return a concise 
           if (!transcriptLimitReached && transcriptChars < MAX_WORKER_TRANSCRIPT_CHARS) {
             appendTranscriptLine(extractWorkerTranscriptLine(mode, data))
           }
-          const extracted = extractWorkerFinalText(
-            mode,
-            data,
-            effectiveWorkerPrompt,
-            valuesContext
-          )
-          if (extracted) finalText = truncateWorkerRawText(extracted)
+          const extracted = extractWorkerFinalText(mode, data, effectiveWorkerPrompt, valuesContext)
+          if (shouldClearWorkerFinalText(mode, data, effectiveWorkerPrompt, valuesContext)) {
+            messageModeAssistantText = ""
+            messageModeFinalText = ""
+            messageModeAssistantTextTruncated = false
+            finalText = ""
+          }
+          if (extracted) {
+            if (isWorkerFinalTextDelta(mode, data)) {
+              if (!messageModeAssistantTextTruncated) {
+                const nextAssistantText = `${messageModeAssistantText}${extracted}`
+                messageModeAssistantText = truncateWorkerRawText(nextAssistantText)
+                messageModeAssistantTextTruncated =
+                  nextAssistantText.length > MAX_WORKER_RAW_TEXT_CHARS
+              }
+              messageModeFinalText = messageModeAssistantText
+              finalText = messageModeFinalText
+            } else {
+              finalText = truncateWorkerRawText(extracted)
+              if (mode === "messages") {
+                messageModeAssistantText = finalText
+                messageModeFinalText = finalText
+                messageModeAssistantTextTruncated = extracted.length > MAX_WORKER_RAW_TEXT_CHARS
+              }
+            }
+          }
         }
       }
 
@@ -2142,10 +2175,11 @@ Use the same worker thread context for follow-up instructions. Return a concise 
       }
 
       const remainingWorkerCandidates = workerOrderedChain.slice(
-        usedWorkerModelId ? workerOrderedChain.indexOf(usedWorkerModelId) + 1 : workerOrderedChain.length
+        usedWorkerModelId
+          ? workerOrderedChain.indexOf(usedWorkerModelId) + 1
+          : workerOrderedChain.length
       )
       let activeWorkerStream = workerStream
-      // eslint-disable-next-line no-constant-condition
       while (true) {
         try {
           await consumeWorkerStream(activeWorkerStream)
@@ -2157,10 +2191,7 @@ Use the same worker thread context for follow-up instructions. Return a concise 
           if (workerInput.abortSignal.aborted) throw error
 
           const failedModelId = usedWorkerModelId ?? "unknown"
-          console.warn(
-            `[CoordinatorWorker][Failover] Mid-stream ${failedModelId} failed:`,
-            error
-          )
+          console.warn(`[CoordinatorWorker][Failover] Mid-stream ${failedModelId} failed:`, error)
           if (!workerInput.abortSignal.aborted) {
             await new Promise((resolve) => setTimeout(resolve, 500))
           }
@@ -2194,6 +2225,66 @@ Use the same worker thread context for follow-up instructions. Return a concise 
 
       if (workerInput.abortSignal.aborted) {
         throw new DOMException("Coordinator worker aborted", "AbortError")
+      }
+
+      if (!finalText.trim() && workerToolNames.size > 0 && workerAgent) {
+        console.log("[CoordinatorWorker] requesting missing final handoff", {
+          parentThreadId: workerInput.parentThreadId,
+          workerId: workerInput.workerId,
+          toolCalls: Array.from(workerToolNames)
+        })
+        try {
+          const handoffMetadataPrompt = `Async coordinator worker handoff metadata:
+- parent_thread_id: ${workerInput.parentThreadId}
+- worker_id: ${workerInput.workerId}
+- worker_thread_id: ${workerInput.workerThreadId}
+- worker_role: ${workerInput.role}
+- original_worker_workload: ${workerInput.workload}
+- handoff_workload: read_only
+- worker_description: ${workerInput.description}
+- scratchpad_dir: ${scratchpadDir}
+
+Access limits: read-only handoff continuation. Do not modify files, run commands, or call tools. Return only the concise final handoff covering files changed or inspected, commands run and results, remaining risks, and any verification still needed.`
+          const handoffAgent = await createAgentRuntime({
+            threadId: workerInput.workerThreadId,
+            approvalThreadId: workerInput.parentThreadId,
+            workspacePath,
+            modelId: usedWorkerModelId ?? modelId,
+            extraSystemPrompt: `${workerRolePrompt}\n\n${handoffMetadataPrompt}`,
+            noSchedulerTool: true,
+            noSkillEvolutionTool: true,
+            enableAgentsPrompt: false,
+            agentMode: "normal",
+            disableSubagents: true,
+            filesystemAccess: {
+              workload: "read_only",
+              ownedFiles: [],
+              workspacePath
+            },
+            abortSignal: workerInput.abortSignal,
+            retryHooks,
+            maxRetryAttempts,
+            onHookResult
+          })
+          const handoffStream = await handoffAgent.stream(
+            {
+              messages: [
+                new HumanMessage(
+                  "The previous worker turn completed tool activity but did not provide a final handoff. Do not modify files, run commands, or call tools for this handoff. Reply only with a concise final handoff covering: files changed or inspected, commands run and results, remaining risks, and any verification still needed."
+                )
+              ]
+            },
+            streamConfig
+          )
+          await consumeWorkerStream(handoffStream)
+        } catch (error) {
+          if (workerInput.abortSignal.aborted || isAbortError(error)) throw error
+          const message = describeToolError(error)
+          console.warn("[CoordinatorWorker] Missing final handoff request failed:", error)
+          finalText = truncateWorkerRawText(
+            `Worker completed tool activity but did not provide a final handoff. A follow-up handoff request failed: ${message}. Inspect the worker transcript for tool results and changed files.`
+          )
+        }
       }
 
       let workerStopHookFailure: string | undefined
@@ -2296,38 +2387,6 @@ Use the same worker thread context for follow-up instructions. Return a concise 
             onUpdateKey: `runtime:${threadId}`
           })
         },
-        readWorkerState: async (input: {
-          workerId?: string
-          block?: boolean
-          timeoutMs?: number
-          pollIntervalMs?: number
-        }) => {
-          if (!input.workerId) {
-            await coordinatorWorkerManager.restoreWorkersForThread({
-              parentThreadId: threadId,
-              workspacePath,
-              mode: "full",
-              onUpdate: emitCoordinatorWorkerEvent,
-              onUpdateKey: `runtime:${threadId}`
-            })
-          }
-          return coordinatorWorkerManager.waitForWorkers(threadId, {
-            workerId: input.workerId,
-            block: input.block,
-            timeoutMs: input.timeoutMs,
-            pollIntervalMs: input.pollIntervalMs,
-            signal: options.abortSignal
-          })
-        },
-        readWorkerResult: async (input: {
-          workerId: string
-          includeTranscript?: boolean
-          maxChars?: number
-        }) =>
-          coordinatorWorkerManager.readWorkerResult(threadId, input.workerId, {
-            includeTranscript: input.includeTranscript,
-            maxChars: input.maxChars
-          }),
         cancelWorker: async (input: { workerId?: string; reason?: string }) => {
           const cancelledWorkers = input.workerId
             ? [await coordinatorWorkerManager.cancelWorker(threadId, input.workerId, input.reason)]
@@ -2358,7 +2417,8 @@ Use the same worker thread context for follow-up instructions. Return a concise 
           if (onCoordinatorWorkerEvent) {
             const worker = input.workerId
               ? workers.find((item) => item.worker_id === input.workerId)
-              : cancelledWorkers.find((item) => item.status === "cancelled") ?? cancelledWorkers[0]
+              : (cancelledWorkers.find((item) => item.status === "cancelled") ??
+                cancelledWorkers[0])
             if (worker) {
               onCoordinatorWorkerEvent({
                 worker,
@@ -2375,12 +2435,12 @@ Use the same worker thread context for follow-up instructions. Return a concise 
     ? createCoordinatorWorkerTools({
         workspacePath,
         threadId,
-      workerTools: coordinatorWorkerTools,
-      onNotificationsConsumed: onCoordinatorNotificationAction,
-      selectedSkill: options.coordinatorSelectedSkill,
-      explicitSelectedSkill: options.coordinatorExplicitSelectedSkill,
-      notificationSelectedSkills: options.coordinatorNotificationSelectedSkills
-    })
+        workerTools: coordinatorWorkerTools,
+        onNotificationsConsumed: onCoordinatorNotificationAction,
+        selectedSkill: options.coordinatorSelectedSkill,
+        explicitSelectedSkill: options.coordinatorExplicitSelectedSkill,
+        notificationSelectedSkills: options.coordinatorNotificationSelectedSkills
+      })
     : []
   if (coordinatorWorkerToolsForMain.length > 0) {
     wrapToolErrors(coordinatorWorkerToolsForMain as RuntimeTool[])
@@ -2411,13 +2471,13 @@ Use the same worker thread context for follow-up instructions. Return a concise 
   }
   console.log("[Runtime] System prompt summary:", {
     chars: systemPrompt.length,
-      hasAgentsPrompt: Boolean(agentsPrompt.prompt),
-      agentsFilesLoaded: agentsPrompt.loadedPaths.length,
-      hasExtraSystemPrompt: Boolean(extraSystemPrompt),
-      hasCoordinatorTurnPrompt: Boolean(coordinatorTurnPrompt),
-      agentMode,
-      deferredToolIds: deferredToolIds.length
-    })
+    hasAgentsPrompt: Boolean(agentsPrompt.prompt),
+    agentsFilesLoaded: agentsPrompt.loadedPaths.length,
+    hasExtraSystemPrompt: Boolean(extraSystemPrompt),
+    hasCoordinatorTurnPrompt: Boolean(coordinatorTurnPrompt),
+    agentMode,
+    deferredToolIds: deferredToolIds.length
+  })
   const triggerTokens = Math.floor(maxTokens * 0.75)
   const keepTokens = Math.max(Math.floor(maxTokens * SUMMARY_KEEP_RATIO), 4_000)
   const toolEvictLimit = Math.min(20_000, Math.max(Math.floor(maxTokens * 0.08), 6_000))

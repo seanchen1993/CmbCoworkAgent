@@ -118,7 +118,7 @@ export function applyCoordinatorWorkerFilesystemAccess<TTool>(
       const guardAccess = (input: unknown): string | undefined => {
         const filePath = extractToolFilePath(input)
         if (!filePath || !isInsideOwnedFiles(filePath, access)) {
-          return `Error: ${runtimeTool.name} is limited to this worker's owned_files: ${ownedFiles.join(", ")}. Target was: ${filePath ?? "(missing file_path)"}.`
+          return `Error: ${runtimeTool.name} is limited to this worker's owned_files: ${ownedFiles.join(", ")}. Target was: ${filePath ?? "(missing file_path)"}. Do not retry this same path; report the blocked path in your result.`
         }
         return undefined
       }
@@ -132,7 +132,7 @@ export function applyCoordinatorWorkerFilesystemAccess<TTool>(
             return `Error: ${runtimeTool.name} cannot be invoked by the owned_files guard.`
           }
           return runtimeTool.invoke(input, config)
-        },
+        }
       })
       if (typeof runtimeTool.call === "function") {
         Object.defineProperty(guardedTool, "call", {

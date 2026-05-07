@@ -62,7 +62,7 @@ async function readJson(path: string): Promise<Record<string, unknown>> {
   return JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>
 }
 
-function workerResultPath(workspace: string, threadId: string, workerId: string): string {
+function workerResultPath(workspace: string, threadId: string, workerId: string, turn = 1): string {
   return join(
     workspace,
     ".cmbdevclaw",
@@ -70,12 +70,17 @@ function workerResultPath(workspace: string, threadId: string, workerId: string)
     threadId,
     "reports",
     "workers",
-    `${workerId}.json`
+    workerId,
+    `turn-${turn}.json`
   )
 }
 
 function workerStatePath(workspace: string, threadId: string, workerId: string): string {
   return join(workspace, ".cmbdevclaw", "coordinator", threadId, "workers", `${workerId}.json`)
+}
+
+function scratchpadPath(workspace: string, threadId: string): string {
+  return join(workspace, ".cmbdevclaw", "coordinator", threadId, "scratchpad")
 }
 
 async function testStartAndComplete(): Promise<void> {
@@ -145,7 +150,7 @@ async function testStartAndComplete(): Promise<void> {
     )
     assert(
       completed.result_path ===
-        `.cmbdevclaw/coordinator/thread-123/reports/workers/${started.worker_id}.json`,
+        `.cmbdevclaw/coordinator/thread-123/reports/workers/${started.worker_id}/turn-1.json`,
       "completed worker should expose result path"
     )
     assert(
@@ -193,11 +198,7 @@ async function testStartAndComplete(): Promise<void> {
       "hasNotifications should be false after draining notifications"
     )
 
-    const afterNoopCancel = await manager.cancelWorker(
-      "thread-123",
-      started.worker_id,
-      "too late"
-    )
+    const afterNoopCancel = await manager.cancelWorker("thread-123", started.worker_id, "too late")
     assert(afterNoopCancel.status === "completed", "cancel should not mutate completed workers")
   })
 }
@@ -257,6 +258,7 @@ async function testStartWorkerAndPersistWritesInitialStateBeforeReturning(): Pro
       persisted.worker_id === started.worker_id,
       "durable start should persist the worker id before returning"
     )
+    await access(scratchpadPath(workspace, "thread-durable-start"))
 
     run.resolve({ summary: "durable worker done" })
     await manager.waitForWorkers("thread-durable-start", {
@@ -483,7 +485,10 @@ async function testBindWorkerUpdatesSupportsMultipleListeners(): Promise<void> {
     })
 
     assert(firstWindowUpdates >= 1, "first listener should continue receiving worker updates")
-    assert(secondWindowUpdates >= 1, "second listener should receive worker updates after rebinding")
+    assert(
+      secondWindowUpdates >= 1,
+      "second listener should receive worker updates after rebinding"
+    )
   })
 }
 
@@ -688,7 +693,16 @@ async function testTerminalResultPersistenceFailurePersistsFailedState(): Promis
       )
       assert(!failed.result_path, "failed terminal persistence should not expose a result path")
 
-      const persisted = await readJson(workerStatePath(workspace, threadId, started.worker_id))
+      const statePath = workerStatePath(workspace, threadId, started.worker_id)
+      await waitFor(async () => {
+        try {
+          const persisted = await readJson(statePath)
+          return persisted.status === "failed"
+        } catch {
+          return false
+        }
+      }, "terminal persistence failure state file")
+      const persisted = await readJson(statePath)
       assert(
         persisted.status === "failed",
         "terminal persistence failure should be written to worker state file"
@@ -732,6 +746,7 @@ async function testNotificationEscapesXmlContent(): Promise<void> {
       prompt: "verify",
       runner: async () => ({
         summary: `checked <tag attr="value"> & it's ok\x01`,
+        rawText: `raw <result> & it's ok\x01`,
         reportPath: `reports/verifier-"latest".json`
       })
     })
@@ -744,12 +759,47 @@ async function testNotificationEscapesXmlContent(): Promise<void> {
     const notifications = manager.drainNotifications("thread-xml")
     assert(notifications.length === 1, "xml worker should enqueue one notification")
     assert(
-        notifications[0].includes("&lt;tag attr=&quot;value&quot;&gt;") &&
+      notifications[0].includes("&lt;tag attr=&quot;value&quot;&gt;") &&
+        notifications[0].includes("&lt;result&gt;") &&
         notifications[0].includes("&amp;") &&
         notifications[0].includes("&apos;s ok") &&
         !notifications[0].includes("\x01") &&
         notifications[0].includes("reports/verifier-&quot;latest&quot;.json"),
       "task notification should escape XML-sensitive content and strip invalid controls"
+    )
+  })
+}
+
+async function testNotificationFallsBackToSummaryWhenRawTextIsEmpty(): Promise<void> {
+  await withTempDir("coordinator-worker-manager", async (workspace) => {
+    const manager = new CoordinatorWorkerManager()
+    const started = manager.startWorker({
+      parentThreadId: "thread-empty-raw",
+      workspacePath: workspace,
+      role: "implementer",
+      description: "Produce summary only",
+      prompt: "work",
+      runner: async () => ({
+        summary: "Summary handoff is available.",
+        rawText: ""
+      })
+    })
+
+    await manager.waitForWorkers("thread-empty-raw", {
+      workerId: started.worker_id,
+      timeoutMs: 1_000,
+      pollIntervalMs: 10
+    })
+
+    const notifications = manager.drainNotifications("thread-empty-raw")
+    assert(notifications.length === 1, "empty raw-text worker should enqueue one notification")
+    assert(
+      notifications[0].includes("<result>Summary handoff is available.</result>"),
+      "notification should fall back to summary when raw text is empty"
+    )
+    assert(
+      notifications[0].includes("<result-truncated>false</result-truncated>"),
+      "summary fallback should preserve the result-truncated contract"
     )
   })
 }
@@ -780,12 +830,18 @@ async function testNotificationSummaryTruncatesButResultKeepsFullOutput(): Promi
     const notifications = manager.drainNotifications("thread-long-summary")
     assert(notifications.length === 1, "long worker should enqueue one notification")
     assert(
-      notifications[0].includes("...(truncated; read result_path for full output)"),
+      notifications[0].includes(
+        "...(truncated; continue the worker for a concise handoff if more detail is needed)"
+      ),
       "notification should truncate long summaries"
     )
     assert(
       !notifications[0].includes("-tail</summary>"),
       "notification should not include the full long summary tail"
+    )
+    assert(
+      notifications[0].includes(`<result>${longRawText}</result>`),
+      "notification should include the bounded worker result handoff"
     )
 
     const result = await readJson(
@@ -794,11 +850,9 @@ async function testNotificationSummaryTruncatesButResultKeepsFullOutput(): Promi
     assert(result.summary === longSummary, "result file should keep the full summary")
     assert(result.raw_text === longRawText, "result file should keep the full raw text")
 
-    const boundedResult = await manager.readWorkerResult(
-      "thread-long-summary",
-      started.worker_id,
-      { maxChars: 1_000 }
-    )
+    const boundedResult = await manager.readWorkerResult("thread-long-summary", started.worker_id, {
+      maxChars: 1_000
+    })
     assert(
       (boundedResult.result_chars ?? 0) > 1_000,
       "readWorkerResult should report the original result size"
@@ -808,6 +862,45 @@ async function testNotificationSummaryTruncatesButResultKeepsFullOutput(): Promi
       "readWorkerResult should mark truncated text"
     )
     assert(boundedResult.result_truncated === true, "long worker result should be truncated")
+  })
+}
+
+async function testNotificationXmlHasHardCapAfterEscaping(): Promise<void> {
+  await withTempDir("coordinator-worker-manager", async (workspace) => {
+    const manager = new CoordinatorWorkerManager()
+    const xmlExpandingRawText = `raw-${"&".repeat(80_000)}-tail`
+    const started = manager.startWorker({
+      parentThreadId: "thread-xml-hard-cap",
+      workspacePath: workspace,
+      role: "implementer",
+      description: "Produce XML-expanding output",
+      prompt: "work",
+      runner: async () => ({
+        summary: "done",
+        rawText: xmlExpandingRawText
+      })
+    })
+
+    await manager.waitForWorkers("thread-xml-hard-cap", {
+      workerId: started.worker_id,
+      timeoutMs: 1_000,
+      pollIntervalMs: 10
+    })
+
+    const notifications = manager.drainNotifications("thread-xml-hard-cap")
+    assert(notifications.length === 1, "large XML worker should enqueue one notification")
+    assert(
+      notifications[0].length <= 120_000,
+      "notification XML should be hard-capped after escaping"
+    )
+    assert(
+      notifications[0].includes("<result-truncated>true</result-truncated>"),
+      "hard-capped notification should tell coordinator the result was truncated"
+    )
+    assert(
+      notifications[0].includes("continue this worker for a concise handoff"),
+      "hard-capped notification should point coordinator to continue_worker"
+    )
   })
 }
 
@@ -907,7 +1000,8 @@ async function testWorkerTranscriptAndTokenUsagePersistence(): Promise<void> {
         "thread-transcript",
         "reports",
         "workers",
-        `${started.worker_id}.transcript.jsonl`
+        started.worker_id,
+        "turn-1.transcript.jsonl"
       ),
       "utf8"
     )
@@ -971,7 +1065,8 @@ async function testContinuedWorkerAccumulatesTokenUsage(): Promise<void> {
     })
     await waitFor(() => secondRunStarted, "continued usage runner start")
     assert(
-      manager.readWorkers("thread-continued-usage", started.worker_id)[0]?.token_usage === undefined,
+      manager.readWorkers("thread-continued-usage", started.worker_id)[0]?.token_usage ===
+        undefined,
       "continued worker should clear visible per-run usage while the new turn is running"
     )
     secondRunInput?.onProgress({
@@ -1022,7 +1117,7 @@ async function testContinuedWorkerAccumulatesTokenUsage(): Promise<void> {
     )
 
     const result = await readJson(
-      workerResultPath(workspace, "thread-continued-usage", started.worker_id)
+      workerResultPath(workspace, "thread-continued-usage", started.worker_id, 2)
     )
     assert(
       (result.token_usage as Record<string, unknown>).total_tokens === 49,
@@ -1616,6 +1711,16 @@ async function testNotificationAcknowledgement(): Promise<void> {
     }
 
     manager.restoreNotifications("thread-ack", allNotifications)
+    const peekedNotifications = manager.peekNotifications("thread-ack")
+    assert(
+      peekedNotifications.length === 2,
+      "peek should expose pending notifications without draining them"
+    )
+    assert(
+      manager.drainNotifications("thread-ack").length === 2,
+      "peek should leave notifications queued for later settlement"
+    )
+    manager.restoreNotifications("thread-ack", peekedNotifications)
     await manager.acknowledgeNotificationMessages("thread-ack", [firstNotification])
     const notifications = manager.drainNotifications("thread-ack")
     assert(notifications.length === 1, "ack should remove only selected worker notification")
@@ -1767,8 +1872,7 @@ async function testPrunedSnapshotCacheIsBounded(): Promise<void> {
       workersByParent: Map<string, Map<string, unknown>>
       prunedSnapshotsByParent: Map<string, Map<string, unknown>>
     }
-    const snapshotCount =
-      internals.prunedSnapshotsByParent.get(threadId)?.size ?? 0
+    const snapshotCount = internals.prunedSnapshotsByParent.get(threadId)?.size ?? 0
 
     assert(
       snapshotCount <= MAX_COORDINATOR_PRUNED_SNAPSHOTS_IN_MEMORY,
@@ -1988,7 +2092,10 @@ async function testRestoreReplaysUnacknowledgedTerminalNotification(): Promise<v
     )
 
     const secondManager = new CoordinatorWorkerManager()
-    await secondManager.restoreWorkersForThread({ parentThreadId: threadId, workspacePath: workspace })
+    await secondManager.restoreWorkersForThread({
+      parentThreadId: threadId,
+      workspacePath: workspace
+    })
     const restoredNotification = secondManager.drainNotifications(threadId)
     assert(
       restoredNotification.length === 1 &&
@@ -1998,12 +2105,17 @@ async function testRestoreReplaysUnacknowledgedTerminalNotification(): Promise<v
 
     await secondManager.acknowledgeNotifications(threadId, [started.worker_id])
     await waitFor(async () => {
-      const acknowledgedState = await readJson(workerStatePath(workspace, threadId, started.worker_id))
+      const acknowledgedState = await readJson(
+        workerStatePath(workspace, threadId, started.worker_id)
+      )
       return acknowledgedState.notification_acknowledged === true
     }, "notification acknowledgement persistence")
 
     const thirdManager = new CoordinatorWorkerManager()
-    await thirdManager.restoreWorkersForThread({ parentThreadId: threadId, workspacePath: workspace })
+    await thirdManager.restoreWorkersForThread({
+      parentThreadId: threadId,
+      workspacePath: workspace
+    })
     assert(
       thirdManager.drainNotifications(threadId).length === 0,
       "restore should not replay acknowledged terminal notifications"
@@ -2128,7 +2240,10 @@ async function testAcknowledgeOldTurnDoesNotRemoveFreshNotification(): Promise<v
       pollIntervalMs: 10
     })
     const [oldNotification] = manager.drainNotifications(threadId)
-    assert(oldNotification?.includes("<turn>1</turn>"), "first turn should queue turn-1 notification")
+    assert(
+      oldNotification?.includes("<turn>1</turn>"),
+      "first turn should queue turn-1 notification"
+    )
 
     await manager.continueWorker({
       parentThreadId: threadId,
@@ -2201,6 +2316,16 @@ async function testContinueReusesWorkerThread(): Promise<void> {
     })
     const firstCompleted = manager.readWorkers("thread-abc", started.worker_id)[0]
     assert(firstCompleted.result_path, "first completed turn should have result path")
+    const firstTurnResultPath = workerResultPath(workspace, "thread-abc", started.worker_id, 1)
+    assert(
+      firstCompleted.result_path ===
+        `.cmbdevclaw/coordinator/thread-abc/reports/workers/${started.worker_id}/turn-1.json`,
+      "first turn should write a turn-scoped result path"
+    )
+    assert(
+      (await readJson(firstTurnResultPath)).summary === "turn:first",
+      "first turn result should be archived before continuation"
+    )
 
     const continued = await manager.continueWorker({
       parentThreadId: "thread-abc",
@@ -2232,6 +2357,21 @@ async function testContinueReusesWorkerThread(): Promise<void> {
       manager.readWorkers("thread-abc", started.worker_id)[0]?.turns === 2,
       "second turn should persist turn count"
     )
+    const secondCompleted = manager.readWorkers("thread-abc", started.worker_id)[0]
+    assert(
+      secondCompleted.result_path ===
+        `.cmbdevclaw/coordinator/thread-abc/reports/workers/${started.worker_id}/turn-2.json`,
+      "continued turn should write a new turn-scoped result path"
+    )
+    assert(
+      (await readJson(firstTurnResultPath)).summary === "turn:first",
+      "continuation should not overwrite the first turn result archive"
+    )
+    assert(
+      (await readJson(workerResultPath(workspace, "thread-abc", started.worker_id, 2))).summary ===
+        "turn:second",
+      "second turn result should be archived separately"
+    )
     assert(seenThreads.length === 2, "runner should be invoked twice")
     assert(seenThreads[0] === seenThreads[1], "worker thread should be stable across turns")
     const secondNotifications = manager.drainNotifications("thread-abc")
@@ -2241,6 +2381,234 @@ async function testContinueReusesWorkerThread(): Promise<void> {
         !secondNotifications[0].includes("<summary>turn:first</summary>"),
       "continue completion should replace stale notification with a fresh one"
     )
+  })
+}
+
+async function testContinueWorkloadOverrideDoesNotPoisonDefault(): Promise<void> {
+  await withTempDir("coordinator-worker-manager", async (workspace) => {
+    const manager = new CoordinatorWorkerManager()
+    const seenWorkloads: string[] = []
+
+    const writer = manager.startWorker({
+      parentThreadId: "thread-workload-default",
+      workspacePath: workspace,
+      role: "implementer",
+      workload: "write",
+      description: "Implement feature",
+      prompt: "first",
+      runner: async (input) => {
+        seenWorkloads.push(input.workload)
+        return { summary: input.workload }
+      }
+    })
+    await manager.waitForWorkers("thread-workload-default", {
+      workerId: writer.worker_id,
+      timeoutMs: 1_000,
+      pollIntervalMs: 10
+    })
+
+    await manager.continueWorker({
+      parentThreadId: "thread-workload-default",
+      workerId: writer.worker_id,
+      workload: "read_only",
+      prompt: "summarize handoff only",
+      runner: async (input) => {
+        seenWorkloads.push(input.workload)
+        return { summary: input.workload }
+      }
+    })
+    await manager.waitForWorkers("thread-workload-default", {
+      workerId: writer.worker_id,
+      timeoutMs: 1_000,
+      pollIntervalMs: 10
+    })
+
+    await manager.continueWorker({
+      parentThreadId: "thread-workload-default",
+      workerId: writer.worker_id,
+      prompt: "resume implementation",
+      runner: async (input) => {
+        seenWorkloads.push(input.workload)
+        return { summary: input.workload }
+      }
+    })
+    await manager.waitForWorkers("thread-workload-default", {
+      workerId: writer.worker_id,
+      timeoutMs: 1_000,
+      pollIntervalMs: 10
+    })
+    assert(
+      seenWorkloads.join(",") === "write,read_only,write",
+      "read_only continuation should not permanently downgrade a write implementer"
+    )
+
+    const readerWorkloads: string[] = []
+    const reader = manager.startWorker({
+      parentThreadId: "thread-readonly-default",
+      workspacePath: workspace,
+      role: "implementer",
+      workload: "read_only",
+      description: "Research",
+      prompt: "research",
+      runner: async (input) => {
+        readerWorkloads.push(input.workload)
+        return { summary: input.workload }
+      }
+    })
+    await manager.waitForWorkers("thread-readonly-default", {
+      workerId: reader.worker_id,
+      timeoutMs: 1_000,
+      pollIntervalMs: 10
+    })
+    await manager.continueWorker({
+      parentThreadId: "thread-readonly-default",
+      workerId: reader.worker_id,
+      prompt: "continue research",
+      runner: async (input) => {
+        readerWorkloads.push(input.workload)
+        return { summary: input.workload }
+      }
+    })
+    await manager.waitForWorkers("thread-readonly-default", {
+      workerId: reader.worker_id,
+      timeoutMs: 1_000,
+      pollIntervalMs: 10
+    })
+    assert(
+      readerWorkloads.join(",") === "read_only,read_only",
+      "a worker that started read_only should keep read_only as its default workload"
+    )
+  })
+}
+
+async function testRunningWriteWorkerCannotDowngradeToReadOnly(): Promise<void> {
+  await withTempDir("coordinator-worker-manager", async (workspace) => {
+    const manager = new CoordinatorWorkerManager()
+    const pendingWrite = deferred<CoordinatorWorkerRunResult>()
+    const writer = manager.startWorker({
+      parentThreadId: "thread-running-write-downgrade",
+      workspacePath: workspace,
+      role: "implementer",
+      workload: "write",
+      description: "Write implementation",
+      prompt: "write",
+      runner: async () => pendingWrite.promise
+    })
+
+    let downgradeRejected = false
+    try {
+      await manager.continueWorker({
+        parentThreadId: "thread-running-write-downgrade",
+        workerId: writer.worker_id,
+        workload: "read_only",
+        prompt: "handoff only",
+        runner: async () => ({ summary: "should not run" })
+      })
+    } catch (error) {
+      downgradeRejected = String(error).includes("still running with write access")
+    }
+    assert(
+      downgradeRejected,
+      "running write worker should keep its write mutex until terminal notification"
+    )
+
+    let concurrentWriteRejected = false
+    try {
+      manager.startWorker({
+        parentThreadId: "thread-running-write-downgrade",
+        workspacePath: workspace,
+        role: "implementer",
+        workload: "write",
+        description: "Concurrent write",
+        prompt: "write too",
+        runner: async () => ({ summary: "should not start" })
+      })
+    } catch (error) {
+      concurrentWriteRejected = String(error).includes("Cannot start write worker yet")
+    }
+    assert(
+      concurrentWriteRejected,
+      "rejected read-only continuation should not release write-worker concurrency"
+    )
+
+    pendingWrite.resolve({ summary: "done" })
+    await manager.waitForWorkers("thread-running-write-downgrade", {
+      workerId: writer.worker_id,
+      timeoutMs: 1_000,
+      pollIntervalMs: 10
+    })
+
+    await manager.continueWorker({
+      parentThreadId: "thread-running-write-downgrade",
+      workerId: writer.worker_id,
+      workload: "read_only",
+      prompt: "handoff after notification",
+      runner: async (input) => ({ summary: input.workload })
+    })
+    await manager.waitForWorkers("thread-running-write-downgrade", {
+      workerId: writer.worker_id,
+      timeoutMs: 1_000,
+      pollIntervalMs: 10
+    })
+    assert(
+      manager.readWorkers("thread-running-write-downgrade", writer.worker_id)[0]?.summary ===
+        "read_only",
+      "terminal write worker can still be continued read-only for handoff"
+    )
+
+    const pendingVerifier = deferred<CoordinatorWorkerRunResult>()
+    const verifier = manager.startWorker({
+      parentThreadId: "thread-running-verifier-downgrade",
+      workspacePath: workspace,
+      role: "verifier",
+      workload: "verify",
+      description: "Verify implementation",
+      prompt: "verify",
+      runner: async () => pendingVerifier.promise
+    })
+
+    let verifierDowngradeRejected = false
+    try {
+      await manager.continueWorker({
+        parentThreadId: "thread-running-verifier-downgrade",
+        workerId: verifier.worker_id,
+        workload: "read_only",
+        prompt: "handoff only",
+        runner: async () => ({ summary: "should not run" })
+      })
+    } catch (error) {
+      verifierDowngradeRejected = String(error).includes("still running with verify access")
+    }
+    assert(
+      verifierDowngradeRejected,
+      "running verifier should keep its verification mutex until terminal notification"
+    )
+
+    let writeDuringVerifierRejected = false
+    try {
+      manager.startWorker({
+        parentThreadId: "thread-running-verifier-downgrade",
+        workspacePath: workspace,
+        role: "implementer",
+        workload: "write",
+        description: "Write during verification",
+        prompt: "write",
+        runner: async () => ({ summary: "should not start" })
+      })
+    } catch (error) {
+      writeDuringVerifierRejected = String(error).includes("Cannot start write worker yet")
+    }
+    assert(
+      writeDuringVerifierRejected,
+      "rejected verifier read-only continuation should not release verifier/write concurrency"
+    )
+
+    pendingVerifier.resolve({ summary: "verified" })
+    await manager.waitForWorkers("thread-running-verifier-downgrade", {
+      workerId: verifier.worker_id,
+      timeoutMs: 1_000,
+      pollIntervalMs: 10
+    })
   })
 }
 
@@ -2782,7 +3150,10 @@ async function testSelectedSkillPersistsWithWorkerHistory(): Promise<void> {
       "thread-selected-skill",
       started.worker_id
     )
-    assert(restoredSkill?.skillName === "release-notes", "restored worker should keep selected skill")
+    assert(
+      restoredSkill?.skillName === "release-notes",
+      "restored worker should keep selected skill"
+    )
     assert(
       restoredSkill?.skillPath === selectedSkill.skillPath,
       "restored worker should keep selected skill path"
@@ -2925,7 +3296,8 @@ async function testCancelRunningWorkers(): Promise<void> {
       "read state should show cancelled"
     )
     assert(
-      manager.readWorkers("thread-cancel", started.worker_id)[0].notification_acknowledged === false,
+      manager.readWorkers("thread-cancel", started.worker_id)[0].notification_acknowledged ===
+        false,
       "cancel should immediately expose an unresolved notification state before terminal persistence finishes"
     )
     capturedInput?.onProgress({ type: "tool_call", toolName: "late_tool" })
@@ -3007,14 +3379,9 @@ async function testCancelledWriterBlocksConflictingWorkUntilCleanup(): Promise<v
         runner: async () => ({ summary: "second writer" })
       })
     } catch (error) {
-      blocked =
-        error instanceof Error &&
-        error.message.includes("Cannot start write worker yet")
+      blocked = error instanceof Error && error.message.includes("Cannot start write worker yet")
     }
-    assert(
-      blocked,
-      "cancelled writer should keep owned_files mutex until the old runner exits"
-    )
+    assert(blocked, "cancelled writer should keep owned_files mutex until the old runner exits")
 
     run.resolve({ summary: "late first result" })
     await manager.waitForWorkerCleanup(threadId, [first.worker_id], 1_000)
@@ -3277,6 +3644,7 @@ async function testFailureAndContinueGuards(): Promise<void> {
       failedResult.error === "implementation failed",
       "failed worker result should persist error"
     )
+    await waitFor(() => manager.hasNotifications("thread-guards"), "failed worker notification")
     const failedNotifications = manager.drainNotifications("thread-guards")
     assert(failedNotifications.length === 1, "failed worker should enqueue one notification")
     assert(
@@ -3566,7 +3934,8 @@ async function testVerifyWorkloadRequiresVerifierRole(): Promise<void> {
       })
     } catch (error) {
       rejectedImplementerVerifyStart =
-        error instanceof Error && error.message.includes('Only verifier workers can use workload="verify"')
+        error instanceof Error &&
+        error.message.includes('Only verifier workers can use workload="verify"')
     }
     assert(
       rejectedImplementerVerifyStart,
@@ -3599,7 +3968,8 @@ async function testVerifyWorkloadRequiresVerifierRole(): Promise<void> {
       })
     } catch (error) {
       rejectedImplementerVerifyContinue =
-        error instanceof Error && error.message.includes('Only verifier workers can use workload="verify"')
+        error instanceof Error &&
+        error.message.includes('Only verifier workers can use workload="verify"')
     }
     assert(
       rejectedImplementerVerifyContinue,
@@ -4016,8 +4386,12 @@ async function run(): Promise<void> {
   console.log("PASS coordinator worker terminal persistence failure")
   await testNotificationEscapesXmlContent()
   console.log("PASS coordinator worker XML-safe notification")
+  await testNotificationFallsBackToSummaryWhenRawTextIsEmpty()
+  console.log("PASS coordinator worker notification summary fallback")
   await testNotificationSummaryTruncatesButResultKeepsFullOutput()
   console.log("PASS coordinator worker notification truncation")
+  await testNotificationXmlHasHardCapAfterEscaping()
+  console.log("PASS coordinator worker notification XML hard cap")
   await testWorkerRawTextIsBounded()
   console.log("PASS coordinator worker raw text bound")
   await testWorkerTranscriptAndTokenUsagePersistence()
@@ -4058,6 +4432,10 @@ async function run(): Promise<void> {
   console.log("PASS coordinator worker unknown notification ack preserves queue")
   await testContinueReusesWorkerThread()
   console.log("PASS coordinator worker continue context")
+  await testContinueWorkloadOverrideDoesNotPoisonDefault()
+  console.log("PASS coordinator worker continue workload default")
+  await testRunningWriteWorkerCannotDowngradeToReadOnly()
+  console.log("PASS coordinator worker running write downgrade guard")
   await testContinueInterruptsRunningWorker()
   console.log("PASS coordinator worker running continue interrupt")
   await testRapidContinueOnlyLaunchesLatestRestart()

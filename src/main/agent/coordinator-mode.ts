@@ -4,7 +4,6 @@ import { tool } from "langchain"
 import { z } from "zod"
 import type {
   CoordinatorWorkerRole,
-  CoordinatorWorkerResultRead,
   CoordinatorWorkerSnapshot,
   CoordinatorWorkerWorkload
 } from "./coordinator-worker-manager"
@@ -60,7 +59,6 @@ interface CoordinatorWorkerToolDelegate {
   startWorker: (input: {
     role: CoordinatorWorkerRole
     workload?: CoordinatorWorkerWorkload
-    ownedFiles?: string[]
     description: string
     prompt: string
     selectedSkill?: CoordinatorSelectedSkill
@@ -68,21 +66,9 @@ interface CoordinatorWorkerToolDelegate {
   continueWorker: (input: {
     workerId: string
     workload?: CoordinatorWorkerWorkload
-    ownedFiles?: string[]
     prompt: string
     selectedSkill?: CoordinatorSelectedSkill
   }) => Promise<CoordinatorWorkerSnapshot>
-  readWorkerState: (input: {
-    workerId?: string
-    block?: boolean
-    timeoutMs?: number
-    pollIntervalMs?: number
-  }) => Promise<CoordinatorWorkerSnapshot[]>
-  readWorkerResult: (input: {
-    workerId: string
-    includeTranscript?: boolean
-    maxChars?: number
-  }) => Promise<CoordinatorWorkerResultRead>
   cancelWorker: (input: {
     workerId?: string
     reason?: string
@@ -96,6 +82,11 @@ export interface CoordinatorSelectedSkill {
   whenToUse?: string
   allowedTools?: string
 }
+
+type CoordinatorWorkerToolSnapshot = Omit<
+  CoordinatorWorkerSnapshot,
+  "owned_files" | "base_workload"
+>
 
 function truthy(value: unknown): boolean {
   if (typeof value === "boolean") return value
@@ -126,6 +117,25 @@ function getCoordinatorDir(threadId?: string): string {
     : `${COORDINATOR_BASE_DIR}/<threadId>`
 }
 
+export function getCoordinatorScratchpadDir(threadId?: string): string {
+  return `${getCoordinatorDir(threadId)}/scratchpad`
+}
+
+function toCoordinatorWorkerToolSnapshot(
+  snapshot: CoordinatorWorkerSnapshot
+): CoordinatorWorkerToolSnapshot {
+  const { owned_files, base_workload, ...publicSnapshot } = snapshot
+  void owned_files
+  void base_workload
+  return publicSnapshot
+}
+
+function toCoordinatorWorkerToolSnapshots(
+  snapshots: CoordinatorWorkerSnapshot[]
+): CoordinatorWorkerToolSnapshot[] {
+  return snapshots.map(toCoordinatorWorkerToolSnapshot)
+}
+
 function renderTimeContext(options: CoordinatorTimeContext): string {
   return `- Timezone: ${options.timezone}
 - Current time: ${options.currentTime}
@@ -141,9 +151,7 @@ function unescapeSkillXml(value: string): string {
     .replace(/&amp;/g, "&")
 }
 
-function parseTrailingSkillUseBlock(
-  message: string
-): {
+function parseTrailingSkillUseBlock(message: string): {
   skillName: string
   skillPath: string
   description?: string
@@ -206,9 +214,7 @@ export function adaptCoordinatorSkillUseForWorkerDelegation(message: string): st
   )
 }
 
-export function extractCoordinatorSelectedSkill(
-  message: string
-): CoordinatorSelectedSkill | null {
+export function extractCoordinatorSelectedSkill(message: string): CoordinatorSelectedSkill | null {
   const parsed = parseTrailingSkillUseBlock(message)
   if (!parsed) return null
   return {
@@ -224,7 +230,8 @@ function resolveSelectedSkillForNotificationIds(
   notificationIds: string[] | undefined,
   notificationSelectedSkills: Record<string, CoordinatorSelectedSkill | undefined> | undefined
 ): CoordinatorSelectedSkill | undefined {
-  if (!notificationIds || notificationIds.length === 0 || !notificationSelectedSkills) return undefined
+  if (!notificationIds || notificationIds.length === 0 || !notificationSelectedSkills)
+    return undefined
   if (notificationIds.some((notificationId) => !notificationSelectedSkills[notificationId])) {
     return undefined
   }
@@ -332,6 +339,7 @@ export function resolveCoordinatorModeRequest(
 
 export function buildCoordinatorTaskPrompt(threadId?: string): string {
   const threadScope = threadId ? `\nCoordinator thread_id: ${threadId}\n` : "\n"
+  const scratchpadDir = getCoordinatorScratchpadDir(threadId)
   return `## coordinator worker launcher
 
 Coordinator mode uses async worker tools for delegation. Prefer start_worker / continue_worker for durable worker orchestration; do not rely on synchronous task subagents in coordinator mode.
@@ -351,20 +359,24 @@ Coordinator rules:
 - Only verifier workers may use workload="verify". If you need independent verification, spawn a fresh verifier instead of reusing an implementer as a self-verifying worker.
 - Never use workload="write" with role="verifier"; verifier workers must not modify code.
 - Launch independent read-only workers in parallel when useful.
-- For write workers, declare owned_files when known for targeted edits that can hand verification to a separate verifier; do not run overlapping write workers over the same files. If you mean a directory that does not exist yet, end the path with / so it is treated as a directory scope rather than a single file.
-- If the same write worker must run build/test/browser checks itself, omit owned_files and treat it as an unrestricted workspace writer instead of a scoped editor.
+- Treat write workers as whole-workspace implementers, matching Claude Code coordinator semantics. Avoid running overlapping write workers at the same time; use one implementer for related edits, then a fresh verifier for independent acceptance.
+- Parallelism is useful for independent research. Launch independent read-only workers in the same turn when they cover different angles.
 - Delegate implementation work to implementer.
 - Delegate final acceptance to verifier.
 - Do not treat implementer self-checks as final verification.
 - Before launching verifier, synthesize the implementer result, changed/output files, answer draft, and approach taken into a self-contained verifier prompt.
 - For deliverable work, do not report completion until verifier has returned PASS with concrete evidence, or report BLOCKED with a concrete blocker.
-- After a task notification arrives, read the worker result only if the summary is insufficient, then decide the next step.
+- After a task notification arrives, use its pushed <result> handoff to decide the next step. If the result is truncated or missing key evidence, continue that same worker and ask for a concise handoff; do not read archived output files from the coordinator.
 - Do not poll workers after starting them; briefly tell the user what was launched and end the turn.
-- If verifier returns FAIL, send a focused follow-up task to implementer. Prefer continue_worker for the same implementer; it can interrupt a running worker and reuse that worker checkpoint.`
+- Never fabricate or predict worker results. If the user asks before a notification arrives, report only that the worker is still running and what it was asked to do.
+- If verifier returns FAIL, send a focused follow-up task to implementer. Prefer continue_worker for the same implementer; it can interrupt a running worker and reuse that worker checkpoint.
+- Use cancel_worker only to stop work that should not continue. Cancelled workers are final; if you want to redirect a worker and preserve its context, use continue_worker directly.
+- Scratchpad directory for durable cross-worker notes: ${scratchpadDir}. Use it only when long-running work needs a concise shared artifact. It is an ordinary workspace artifact path; normal tool availability, approval, hook, and access limits still apply.`
 }
 
 export function buildCoordinatorSystemPrompt(options: CoordinatorPromptOptions): string {
   const coordinatorDir = getCoordinatorDir(options.threadId)
+  const scratchpadDir = getCoordinatorScratchpadDir(options.threadId)
   const projectInstructions = options.projectInstructions?.trim()
   const turnContext = options.turnContext?.trim()
   const browserLine = options.hasBrowserTool
@@ -396,9 +408,6 @@ Every message you send is to the user. Worker results and system notifications a
 - start_worker: spawn an async worker.
 - continue_worker: continue an existing worker with the same worker_id/thread context.
 - cancel_worker: stop running workers.
-- read_worker_state: fallback status/output reader. Worker notifications are the primary path.
-- read_worker_result: read the full bounded worker result file when a notification summary is insufficient.
-- mark_notifications_handled: explicitly mark current-turn notification_id values as fully processed when no worker action will consume them.
 - Skills: the coordinator main thread does not load full skill instructions. Workers receive enabled skills through their normal runtime; delegate skill invocations to workers.
 
 When calling start_worker:
@@ -410,21 +419,28 @@ When calling start_worker:
 - read_only workers do not receive direct write_file/edit_file or execute/task_output tools.
 - verify workers can run validation commands, but do not receive direct write_file/edit_file tools and must not intentionally modify workspace files. If a verifier needs a throwaway script or harness, it may write only to /tmp or $TMPDIR and should clean it up.
 - verify workers do not run concurrently with write workers; wait for write task-notifications before launching final verification.
-- Declare owned_files for write workers whenever you know the target files and the worker only needs targeted edits plus a verifier handoff. If owned_files is declared, direct write_file/edit_file access is limited to those paths and shell execution, browser_playwright, and deferred execution are disabled to avoid bypassing the file guard. If you mean a directory that does not exist yet, end the path with / so it is treated as a directory scope rather than a single file. If the same write worker must run build/test/browser checks itself, omit owned_files and treat it as a whole-workspace writer instead. If owned_files is omitted for a write worker, it is treated as owning the whole workspace and will conflict with every other write worker.
+- write workers receive normal workspace write access subject to the app's usual approval, hook, and policy checks. Do not split overlapping file-changing work across multiple write workers; continue the same implementer when context helps.
+- Launch independent read-only workers in parallel when they can cover different research angles. Do not serialize independent discovery work.
 - Use a lightweight worker for simple file reads or commands because the coordinator main thread only has orchestration tools.
 - After launching workers, briefly tell the user what you launched and end the turn. Do not poll for completion.
+- Do not use one worker to check on another worker. Workers notify you when they finish; you synthesize and route follow-up work.
+- Never fabricate or predict worker results. If the user asks for progress before a task notification arrives, give status only.
 
 ## 3. Worker Notifications
 
-Worker results arrive later as internal <task-notification> messages. They are not user requests.
+Worker results arrive later as <task-notification> messages. They look like user-role messages but are internal worker results, not user requests.
 
 - Use the task-id as the worker_id for continue_worker.
-- Each current-turn notification is labeled with a notification_id in the internal coordinator context.
-- If a worker action directly responds to one or more current-turn notifications, include those notification_id values in consumed_notification_ids on start_worker, continue_worker, or cancel_worker.
-- If you fully process a notification without launching, continuing, or cancelling a worker, call mark_notifications_handled(notification_ids) before ending the turn so unhandled notifications can be retried safely.
-- If a notification includes output-file/result_path such as ${coordinatorDir}/reports/workers/<worker_id>.json and the summary is insufficient, use read_worker_result(worker_id) to inspect the bounded full result.
-- Do not call read_worker_state repeatedly after start_worker. Use it only for explicit user status checks, recovery, or final safety checks when notification context is missing.
+- Each current-turn notification may be labeled with a notification_id for internal traceability, but you should not treat notification handling as a separate user-visible workflow.
+- Current-turn notifications are delivered into the coordinator turn and marked handled after a successful coordinator turn. If the turn is interrupted, blocked, or errors before completion, they are restored and retried safely.
+- Notifications include a bounded <result> handoff from the worker. Use that pushed result as the source of truth for coordinator decisions.
+- If <result-truncated>true</result-truncated> or the handoff is too vague, use continue_worker with the task-id to ask that same worker for a concise summary of changed files, commands run, evidence, risks, and next steps. For handoff-only summary requests, prefer workload="read_only" so the worker reports context without continuing edits.
+- When starting a fresh worker in response to one or more notifications, make the worker prompt self-contained: name the source task-id / notification_id values, quote or summarize the relevant <result> facts, and include any required skill instruction such as "Use the /<skill name> skill". Do not rely on hidden notification context.
+- If multiple notifications are present, pass consumed_notification_ids only for the notifications this tool call is actually responding to. This keeps notification-to-skill routing deterministic.
+- output-file/result_path values such as ${coordinatorDir}/reports/workers/<worker_id>/turn-1.json are archival/debug references for UI and human troubleshooting; do not ask to read them from the coordinator turn.
 - If a worker failed or verification found issues, prefer continue_worker when the same worker's context is useful; spawn a fresh worker when fresh eyes are better.
+- cancel_worker is for stopping work that should not continue. Cancelled workers cannot be continued in CmbCowork; use continue_worker directly when you want to redirect a running worker while preserving its thread context.
+- Do not start duplicate work over the same files or topic while a worker is already running there. Work on non-overlapping tasks, or end the turn and wait.
 
 ## 4. Workflow
 
@@ -435,19 +451,26 @@ Most non-trivial development work follows this shape:
 4. Run a verifier worker with a fresh, skeptical prompt for non-trivial deliverables.
 5. Integrate verifier feedback. Continue the implementer for focused fixes when its context helps, then verify again.
 
+Continue vs spawn guidance:
+- Continue a worker when its existing context overlaps strongly with the next step: focused fixes, extending its own change, or correcting its own failed checks.
+- Spawn a fresh worker when fresh eyes matter: final verification, retrying after a wrong approach, or moving to a mostly unrelated area.
+- Never tell a worker "based on your findings" without restating the concrete files, facts, and acceptance criteria you synthesized.
+
 Verification gates:
 - Do not skip verifier for file changes, documentation creation, code changes, build/test analysis, or app behavior changes.
 - Do not report success from implementer output alone. Implementer output is a handoff, not acceptance.
 - Do not launch verifier without a concrete implementer result. If the implementer output is too vague, continue implementer and ask for changed/output files, commands run, risks, and a handoff.
 - Do not report success from verifier text alone unless it includes concrete evidence: commands/tests/browser checks, checked files, and findings.
-- Do not leave running workers behind. Before reporting final completion, rely on worker notifications and the right-panel worker state; use read_worker_state only as a recovery/debug fallback if notification context is missing.
+- Do not leave running workers behind. Before reporting final completion, rely on worker notifications and the current coordinator worker context.
 
 ## 5. Writing Worker Prompts
 
 Workers cannot see your conversation. Every worker prompt must be self-contained.
 
 - Include the original user goal, relevant file paths, constraints, and expected output.
+- State the source of the task: the current user request, your synthesized plan, a previous worker handoff, or one or more task notifications.
 - Add a purpose statement so the worker can calibrate depth.
+- If the worker is responding to a task notification, include a "Source notification" section with task-id, notification_id if present, the relevant worker result facts, and the next action you want from this worker.
 - For research: say "do not modify files".
 - For implementation: say what to change, how to verify, and what report/handoff to write.
 - For verification: pass the original request, changed/output files or answer_draft, and require evidence.
@@ -455,12 +478,13 @@ Workers cannot see your conversation. Every worker prompt must be self-contained
 
 Coordinator constraints:
 - Running workers can be updated with continue_worker. This interrupts the current run and continues the same worker thread/checkpoint with the new instruction.
-- Treat write workers as exclusive unless they declare disjoint owned_files. Read-only workers can run in parallel.
+- Treat write workers as exclusive for overlapping implementation work. Read-only workers can run in parallel.
 - Do not edit application files directly.
 - Do not run shell/build/browser tools directly from the coordinator. Workers have those tools.
 - If the user selected a skill, include "Use the /<skill name> skill" in the worker prompt instead of trying to use that skill directly.
 - Keep state concise. Worker results are persisted under ${coordinatorDir}/reports/workers/ by the worker manager when available; summarize only what matters in chat.
-- Be practical: for small requests, keep acceptance criteria small; for app changes, insist on a real build/test/runtime check, but do not expect scoped owned_files writers to claim checks they do not have tool access to run.
+- Scratchpad directory: ${scratchpadDir}. For long-running tasks, ask workers with write access to place concise shared notes there only when future workers need durable context. Treat it like any other workspace artifact path; do not store secrets there. Normal tool availability, approval, hook, and access limits still apply.
+- Be practical: for small requests, keep acceptance criteria small; for app changes, insist on a real build/test/runtime check from an implementer or verifier.
 
 Worker capability summary:
 ${browserLine}
@@ -512,7 +536,7 @@ Role:
 - Implement the coordinator's requested change in the workspace.
 - Make the smallest correct code changes that satisfy the coordinator's self-contained prompt.
 - Run appropriate checks when your available tools permit it: typecheck, lint, tests, build, or targeted commands.
-- If you are a scoped owned_files writer, shell/runtime/browser tools may be unavailable. In that case, do not claim checks you could not run; instead leave a precise verification handoff for a verifier or unrestricted writer.
+- If shell/runtime/browser tools are unavailable, do not claim checks you could not run; instead leave a precise verification handoff for a verifier.
 - For frontend/app behavior, prepare the app for browser verification when feasible, or clearly call out the exact browser/runtime checks a verifier should run.
 
 Boundaries:
@@ -564,20 +588,16 @@ export function createCoordinatorWorkerTools(
   const tools: DynamicStructuredTool[] = []
 
   if (options.workerTools) {
-    const runningReadWorkerStateKeys = new Set<string>()
-
     const startWorker = tool(
       async (input: {
         subagent_type: "worker"
         role?: CoordinatorWorkerRole
         workload?: CoordinatorWorkerWorkload
-        owned_files?: string[]
         consumed_notification_ids?: string[]
         description: string
         prompt: string
       }) => {
-        const role =
-          input.role ?? (input.workload === "verify" ? "verifier" : "implementer")
+        const role = input.role ?? (input.workload === "verify" ? "verifier" : "implementer")
         const selectedSkill = resolveWorkerPromptSelectedSkill(
           input.consumed_notification_ids,
           options.notificationSelectedSkills,
@@ -587,7 +607,6 @@ export function createCoordinatorWorkerTools(
         const snapshot = await options.workerTools!.startWorker({
           role,
           workload: input.workload,
-          ownedFiles: input.owned_files,
           description: input.description,
           prompt: injectSelectedSkillIntoWorkerPrompt(input.prompt, selectedSkill),
           selectedSkill
@@ -602,8 +621,8 @@ export function createCoordinatorWorkerTools(
         return JSON.stringify(
           {
             message:
-              "Worker started asynchronously. Do not poll for completion. Briefly tell the user what was launched and end this turn; a task notification will wake the coordinator when the worker finishes.",
-            worker: snapshot
+              "Worker started asynchronously. Do not poll, duplicate this worker's files/topics, or predict results. Briefly tell the user what was launched and end this turn; a task notification will be delivered when the worker finishes.",
+            worker: toCoordinatorWorkerToolSnapshot(snapshot)
           },
           null,
           2
@@ -612,7 +631,7 @@ export function createCoordinatorWorkerTools(
       {
         name: "start_worker",
         description:
-          "Start an asynchronous coordinator worker. Always use subagent_type=\"worker\"; use role only as an optional coordinator-facing classification.",
+          'Start an asynchronous coordinator worker. Always use subagent_type="worker"; use role only as an optional coordinator-facing classification.',
         schema: z.object({
           subagent_type: coordinatorWorkerSubagentSchema.describe(
             'Always "worker" in coordinator mode, matching Claude Code coordinator.'
@@ -627,17 +646,11 @@ export function createCoordinatorWorkerTools(
             .describe(
               'Use "read_only" for research, "verify" for independent checks that may run tests/build/lint, and "write" for implementers that may edit files. Only role="verifier" may use workload="verify". Do not use "write" with role="verifier". Defaults to write for implementer and verify for verifier.'
             ),
-          owned_files: z
-            .array(z.string().trim().min(1))
-            .optional()
-            .describe(
-              "Files this write worker owns. Declare when known so disjoint write workers can run safely. Use a trailing / if you mean a directory that does not exist yet; otherwise a non-existent path is treated as a single file. Omit only when the worker may touch the whole workspace; omitted owned_files conflicts with every other write worker."
-            ),
           consumed_notification_ids: z
             .array(z.string().trim().min(1))
             .optional()
             .describe(
-              "notification_id values from the current turn's task notifications that this worker launch is responding to."
+              "notification_id values from the current turn's task notifications that this fresh worker launch is actually responding to. Use this only for notifications whose result facts are included in the prompt. This supports notification-to-skill routing and traceability; successful turns acknowledge delivered notifications as a batch."
             ),
           description: z.string().trim().min(1).describe("Short user-visible task description."),
           prompt: z
@@ -645,7 +658,7 @@ export function createCoordinatorWorkerTools(
             .trim()
             .min(1)
             .describe(
-              "Full worker instruction, including acceptance criteria, expected outputs, and verification hints."
+              "Full self-contained worker instruction, including the task source, acceptance criteria, expected outputs, and verification hints. If responding to worker notifications, include source task-id/notification_id and relevant result facts."
             )
         })
       }
@@ -655,7 +668,6 @@ export function createCoordinatorWorkerTools(
       async (input: {
         worker_id: string
         workload?: CoordinatorWorkerWorkload
-        owned_files?: string[]
         consumed_notification_ids?: string[]
         prompt: string
       }) => {
@@ -668,7 +680,6 @@ export function createCoordinatorWorkerTools(
         const snapshot = await options.workerTools!.continueWorker({
           workerId: input.worker_id,
           workload: input.workload,
-          ownedFiles: input.owned_files,
           prompt: injectSelectedSkillIntoWorkerPrompt(input.prompt, selectedSkill),
           selectedSkill
         })
@@ -684,7 +695,7 @@ export function createCoordinatorWorkerTools(
           {
             message:
               "Worker continued asynchronously with the same worker context. Do not poll for completion; wait for the task notification.",
-            worker: snapshot
+            worker: toCoordinatorWorkerToolSnapshot(snapshot)
           },
           null,
           2
@@ -698,188 +709,16 @@ export function createCoordinatorWorkerTools(
           worker_id: z.string().trim().min(1).describe("Worker id returned by start_worker."),
           workload: workerWorkloadSchema
             .optional()
-            .describe('Optional updated workload for this run. Only verifier workers may use "verify"; do not use "write" for verifier workers.'),
-          owned_files: z
-            .array(z.string().trim().min(1))
-            .optional()
-            .describe("Optional updated owned files for write-safety checks."),
+            .describe(
+              'Optional updated workload for this run. Only verifier workers may use "verify"; do not use "write" for verifier workers. For handoff-only summary requests after truncated or vague results, set workload="read_only".'
+            ),
           consumed_notification_ids: z
             .array(z.string().trim().min(1))
             .optional()
             .describe(
-              "notification_id values from the current turn's task notifications that this worker continuation is responding to."
+              "notification_id values from the current turn's task notifications that this worker continuation is actually responding to. Use this only for notifications whose result facts are included in the prompt. This supports notification-to-skill routing and traceability; successful turns acknowledge delivered notifications as a batch."
             ),
           prompt: z.string().trim().min(1).describe("Follow-up instruction for the same worker.")
-        })
-      }
-    )
-
-    const readWorkerState = tool(
-      async (input: {
-        worker_id?: string
-        block?: boolean
-        timeout_ms?: number
-        poll_interval_ms?: number
-      }) => {
-        const queryKey = input.worker_id ?? "__all__"
-        const requestedBlock = input.block ?? Boolean(input.worker_id)
-        const suppressRepeatedWaitRequest = requestedBlock && runningReadWorkerStateKeys.has(queryKey)
-        const workers = await options.workerTools!.readWorkerState({
-          workerId: input.worker_id,
-          block: suppressRepeatedWaitRequest ? false : requestedBlock,
-          timeoutMs: input.timeout_ms,
-          pollIntervalMs: input.poll_interval_ms
-        })
-        const running = workers.filter((worker) => worker.status === "running").length
-        const completed = workers.filter((worker) => worker.status === "completed").length
-        const failed = workers.filter((worker) => worker.status === "failed").length
-        const cancelled = workers.filter((worker) => worker.status === "cancelled").length
-        const retrievalStatus =
-          input.worker_id && workers.length === 0
-            ? "not_found"
-            : running > 0
-              ? "running"
-              : "complete"
-        if (running > 0) {
-          runningReadWorkerStateKeys.add(queryKey)
-        } else {
-          runningReadWorkerStateKeys.delete(queryKey)
-        }
-        const suppressRepeatedWait = suppressRepeatedWaitRequest && running > 0
-        console.log("[CoordinatorMode] read_worker_state", {
-          workspacePath: options.workspacePath,
-          threadId: options.threadId,
-          workerId: input.worker_id ?? null,
-          block: suppressRepeatedWaitRequest ? false : requestedBlock,
-          pollingSuppressed: suppressRepeatedWait,
-          workers: workers.length
-        })
-        const message =
-          retrievalStatus === "not_found"
-            ? `Worker ${input.worker_id} was not found for this coordinator thread. Use the full worker_id from start_worker, task notification, or list all workers with worker_id omitted.`
-            : suppressRepeatedWait
-              ? "Repeated blocking read_worker_state was suppressed because this worker query already returned running in this coordinator turn. Do not call read_worker_state again for the same worker now; briefly tell the user the worker is still running and wait for the task notification or a later turn."
-              : retrievalStatus === "running"
-                ? "Worker is still running. Do not loop read_worker_state for this same worker query; wait for the task notification or end this turn with a short progress note."
-                : undefined
-        return JSON.stringify(
-          {
-            workers,
-            retrieval_status: retrievalStatus,
-            polling_suppressed: suppressRepeatedWait,
-            message,
-            running,
-            completed,
-            failed,
-            cancelled
-          },
-          null,
-          2
-        )
-      },
-      {
-        name: "read_worker_state",
-        description:
-          "Fallback status/output reader for async coordinator workers, similar to Claude Code TaskOutput. Do not use for normal waiting after start_worker; task notifications are the primary path.",
-        schema: z.object({
-          worker_id: z
-            .string()
-            .trim()
-            .min(1)
-            .optional()
-            .describe(
-              "Specific worker id to inspect. Omit to list all workers for this coordinator thread."
-            ),
-          block: z
-            .boolean()
-            .optional()
-            .describe(
-              "Whether to wait for running workers. Defaults to true when worker_id is provided, and false when listing all workers."
-            ),
-          timeout_ms: z
-            .number()
-            .int()
-            .min(1_000)
-            .max(120_000)
-            .optional()
-            .describe("Maximum wait time when block=true. Defaults to 30000; minimum 1000."),
-          poll_interval_ms: z
-            .number()
-            .int()
-            .min(50)
-            .max(10_000)
-            .optional()
-            .describe("Internal wait poll interval. Defaults to 1000.")
-        })
-      }
-    )
-
-    const readWorkerResult = tool(
-      async (input: {
-        worker_id: string
-        include_transcript?: boolean
-        max_chars?: number
-      }) => {
-        const result = await options.workerTools!.readWorkerResult({
-          workerId: input.worker_id,
-          includeTranscript: input.include_transcript,
-          maxChars: input.max_chars
-        })
-        console.log("[CoordinatorMode] read_worker_result", {
-          workspacePath: options.workspacePath,
-          threadId: options.threadId,
-          workerId: input.worker_id,
-          includeTranscript: input.include_transcript ?? false,
-          resultChars: result.result_chars ?? 0,
-          transcriptChars: result.transcript_chars ?? 0
-        })
-        return JSON.stringify(result, null, 2)
-      },
-      {
-        name: "read_worker_result",
-        description:
-          "Read a bounded worker result file when a task notification or read_worker_state summary is insufficient. Use this instead of asking another worker to restate an existing result.",
-        schema: z.object({
-          worker_id: z.string().trim().min(1).describe("Worker id whose result file should be read."),
-          include_transcript: z
-            .boolean()
-            .optional()
-            .describe("Also include the worker transcript JSONL when needed. Defaults to false."),
-          max_chars: z
-            .number()
-            .int()
-            .min(1_000)
-            .max(80_000)
-            .optional()
-            .describe("Maximum characters to return per file. Defaults to 20000.")
-        })
-      }
-    )
-
-    const markNotificationsHandled = tool(
-      async (input: { notification_ids: string[] }) => {
-        options.onNotificationsConsumed?.(input.notification_ids)
-        return JSON.stringify(
-          {
-            message:
-              "Marked the specified current-turn notifications as handled. Use this when you fully processed a notification without starting, continuing, or cancelling a worker.",
-            notification_ids: input.notification_ids
-          },
-          null,
-          2
-        )
-      },
-      {
-        name: "mark_notifications_handled",
-        description:
-          "Mark current-turn task notifications as fully handled when no worker action will consume them. Use this after you have integrated a worker result directly into your response or conclusion.",
-        schema: z.object({
-          notification_ids: z
-            .array(z.string().trim().min(1))
-            .min(1)
-            .describe(
-              "notification_id values from the current turn's task notifications that have been fully handled without a worker action."
-            )
         })
       }
     )
@@ -901,7 +740,7 @@ export function createCoordinatorWorkerTools(
           workerId: input.worker_id ?? null,
           workers: workers.length
         })
-        return JSON.stringify({ workers }, null, 2)
+        return JSON.stringify({ workers: toCoordinatorWorkerToolSnapshots(workers) }, null, 2)
       },
       {
         name: "cancel_worker",
@@ -920,21 +759,14 @@ export function createCoordinatorWorkerTools(
             .array(z.string().trim().min(1))
             .optional()
             .describe(
-              "notification_id values from the current turn's task notifications that this cancellation is responding to."
+              "notification_id values from the current turn's task notifications that this cancellation is responding to. This supports notification-to-skill routing and traceability; successful turns acknowledge delivered notifications as a batch."
             ),
           reason: z.string().trim().min(1).optional().describe("Cancellation reason.")
         })
       }
     )
 
-    tools.push(
-      startWorker,
-      continueWorker,
-      readWorkerState,
-      readWorkerResult,
-      markNotificationsHandled,
-      cancelWorker
-    )
+    tools.push(startWorker, continueWorker, cancelWorker)
   }
 
   return tools

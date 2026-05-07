@@ -11,7 +11,11 @@ import {
   extractWorkerFinalText,
   extractWorkerTranscriptLine,
   extractWorkerUsage,
+  isWorkerFinalTextDelta,
+  isWorkerToolCallMessage,
+  isWorkerToolResultMessage,
   observeWorkerProgress,
+  shouldClearWorkerFinalText,
   summarizeWorkerText
 } from "../src/main/agent/coordinator-worker-stream.ts"
 import type { CoordinatorWorkerProgressEvent } from "../src/main/agent/coordinator-worker-manager.ts"
@@ -67,6 +71,15 @@ function aiChunkWithToolCallChunks(content: unknown): unknown {
   }
 }
 
+function aiTextChunk(content: unknown): unknown {
+  return {
+    id: ["langchain_core", "messages", "AIMessageChunk"],
+    kwargs: {
+      content
+    }
+  }
+}
+
 function toolMessage(name?: string): unknown {
   return {
     id: ["langchain_core", "messages", "ToolMessage"],
@@ -116,6 +129,27 @@ async function testFinalTextExtraction(): Promise<void> {
   )
 
   assert(
+    extractWorkerFinalText("values", {
+      messages: [
+        aiMessage("pre-tool narration"),
+        aiMessage("tooling", [{ id: "call-3", name: "edit_file" }]),
+        toolMessage("edit_file")
+      ]
+    }) === "",
+    "values mode should not treat assistant text before a trailing tool result as final handoff"
+  )
+  assert(
+    shouldClearWorkerFinalText("values", {
+      messages: [
+        aiMessage("pre-tool narration"),
+        aiMessage("tooling", [{ id: "call-clear", name: "edit_file" }]),
+        toolMessage("edit_file")
+      ]
+    }),
+    "values-only tool tails should clear stale final text from earlier snapshots"
+  )
+
+  assert(
     extractWorkerFinalText("messages", [aiMessageWithAdditionalToolCalls("not final")]) === "",
     "messages mode should ignore additional_kwargs tool calls"
   )
@@ -123,6 +157,30 @@ async function testFinalTextExtraction(): Promise<void> {
   assert(
     extractWorkerFinalText("messages", [aiChunkWithToolCallChunks("not final")]) === "",
     "messages mode should ignore tool_call_chunks"
+  )
+  assert(
+    isWorkerFinalTextDelta("messages", [aiTextChunk("partial")]),
+    "messages mode should identify final-text AIMessageChunk deltas"
+  )
+  assert(
+    extractWorkerFinalText("messages", [aiTextChunk("hello ")]) === "hello ",
+    "messages mode should preserve whitespace in stream deltas"
+  )
+  assert(
+    !isWorkerFinalTextDelta("messages", [aiMessage("complete")]),
+    "full AI messages should not be treated as stream deltas"
+  )
+  assert(
+    !isWorkerFinalTextDelta("messages", [aiChunkWithToolCallChunks("tooling")]),
+    "tool-call chunks should not be treated as final-text deltas"
+  )
+  assert(
+    isWorkerToolCallMessage("messages", [aiChunkWithToolCallChunks("")]),
+    "messages mode should identify tool-call chunks"
+  )
+  assert(
+    isWorkerToolResultMessage("messages", [toolMessage("edit_file")]),
+    "messages mode should identify tool result messages"
   )
 
   assert(
@@ -132,8 +190,8 @@ async function testFinalTextExtraction(): Promise<void> {
         aiMessageWithAdditionalToolCalls("not final"),
         aiChunkWithToolCallChunks("also not final")
       ]
-    }) === "first answer",
-    "values mode should ignore all AI messages that still contain tool call forms"
+    }) === "",
+    "values mode should require the last assistant step to be a text handoff"
   )
 
   assert(
@@ -399,19 +457,25 @@ async function testProgressObservation(): Promise<void> {
   const progressWithUnusedPayload = aiMessage("", [
     { id: "call-shallow-progress", name: "read_file", args: { path: "README.md" } }
   ])
-  Object.defineProperty(progressWithUnusedPayload as Record<string, unknown>, "unused_large_payload", {
-    enumerable: true,
-    get() {
-      unusedProgressPayloadAccessed = true
-      return "z".repeat(50_000)
+  Object.defineProperty(
+    progressWithUnusedPayload as Record<string, unknown>,
+    "unused_large_payload",
+    {
+      enumerable: true,
+      get() {
+        unusedProgressPayloadAccessed = true
+        return "z".repeat(50_000)
+      }
     }
-  })
+  )
   const shallowProgressEvents: CoordinatorWorkerProgressEvent[] = []
   observeWorkerProgress("messages", [progressWithUnusedPayload], new Set<string>(), (event) =>
     shallowProgressEvents.push(event)
   )
   assert(
-    shallowProgressEvents.some((event) => event.type === "tool_call" && event.toolName === "read_file"),
+    shallowProgressEvents.some(
+      (event) => event.type === "tool_call" && event.toolName === "read_file"
+    ),
     "progress observation should parse needed fields"
   )
   assert(
@@ -690,8 +754,12 @@ async function testUsageAndTranscriptExtraction(): Promise<void> {
     sharedValuesContext
   )
   assert(
-    sharedProgressEvents.some((event) => event.type === "tool_call" && event.toolName === "new_tool") &&
-      !sharedProgressEvents.some((event) => event.type === "tool_call" && event.toolName === "old_tool"),
+    sharedProgressEvents.some(
+      (event) => event.type === "tool_call" && event.toolName === "new_tool"
+    ) &&
+      !sharedProgressEvents.some(
+        (event) => event.type === "tool_call" && event.toolName === "old_tool"
+      ),
     "precomputed values context should scope progress observation to the current turn"
   )
 
@@ -768,13 +836,17 @@ async function testUsageAndTranscriptExtraction(): Promise<void> {
 
   let unusedPayloadAccessed = false
   const assistantWithUnusedPayload = aiMessage("shallow transcript")
-  Object.defineProperty(assistantWithUnusedPayload as Record<string, unknown>, "unused_large_payload", {
-    enumerable: true,
-    get() {
-      unusedPayloadAccessed = true
-      return "z".repeat(50_000)
+  Object.defineProperty(
+    assistantWithUnusedPayload as Record<string, unknown>,
+    "unused_large_payload",
+    {
+      enumerable: true,
+      get() {
+        unusedPayloadAccessed = true
+        return "z".repeat(50_000)
+      }
     }
-  })
+  )
   const shallowTranscript = extractWorkerTranscriptLine("messages", [assistantWithUnusedPayload])
   assert(shallowTranscript.includes("shallow transcript"), "transcript should parse needed fields")
   assert(
@@ -798,8 +870,7 @@ async function testUsageAndTranscriptExtraction(): Promise<void> {
     })
   ])
   assert(
-    liveToolTranscript.includes('"type":"tool_result"') &&
-      liveToolTranscript.includes("tool ok"),
+    liveToolTranscript.includes('"type":"tool_result"') && liveToolTranscript.includes("tool ok"),
     "transcript extraction should support live LangChain ToolMessage objects"
   )
 }

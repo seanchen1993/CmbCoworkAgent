@@ -32,12 +32,14 @@ function assertMatches(value: string, pattern: RegExp, label: string): void {
   assert(pattern.test(value), `${label}: expected to match ${pattern}`)
 }
 
-function assertOccurrenceCount(value: string, needle: string, expected: number, label: string): void {
+function assertOccurrenceCount(
+  value: string,
+  needle: string,
+  expected: number,
+  label: string
+): void {
   const actual = value.split(needle).length - 1
-  assert(
-    actual === expected,
-    `${label}: expected "${needle}" ${expected} time(s), got ${actual}`
-  )
+  assert(actual === expected, `${label}: expected "${needle}" ${expected} time(s), got ${actual}`)
 }
 
 function assertSourceOrder(value: string, before: string, after: string, label: string): void {
@@ -111,7 +113,7 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertIncludes(
     chat,
-    'const metadataDerivedMode: ChatAgentMode = isCoordinatorModeMetadata(currentThread?.metadata)',
+    "const metadataDerivedMode: ChatAgentMode = isCoordinatorModeMetadata(currentThread?.metadata)",
     "ChatContainer re-derives mode synchronously when switching threads"
   )
   assertIncludes(
@@ -159,12 +161,12 @@ async function testRendererSendsAgentMode(): Promise<void> {
   const threadContextSource = await readProjectFile("src/renderer/src/lib/thread-context.tsx")
   assertIncludes(
     threadContextSource,
-    'state.workspacePath === data.path\n                ? { workspacePath: data.path }\n                : { workspacePath: data.path, coordinatorWorkers: [] }',
+    "state.workspacePath === data.path\n                ? { workspacePath: data.path }\n                : { workspacePath: data.path, coordinatorWorkers: [] }",
     "ThreadContext clears stale coordinator workers when a backend workspace path change arrives"
   )
   assertIncludes(
     threadContextSource,
-    'state.workspacePath === path\n              ? { workspacePath: path }\n              : { workspacePath: path, coordinatorWorkers: [] }',
+    "state.workspacePath === path\n              ? { workspacePath: path }\n              : { workspacePath: path, coordinatorWorkers: [] }",
     "ThreadContext clears stale coordinator workers when the current thread switches workspace locally"
   )
   assertIncludes(
@@ -186,7 +188,7 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertIncludes(
     chat,
-    'coordinatorWorkers.some((worker) => worker.status === "running")',
+    "const hasRunningCoordinatorWorker = coordinatorWorkers.some(",
     "ChatContainer detects running async workers separately"
   )
   assertIncludes(
@@ -208,6 +210,16 @@ async function testRendererSendsAgentMode(): Promise<void> {
     chat,
     "handleCancelBackgroundWorkers",
     "ChatContainer separates foreground stop from explicit worker cancellation"
+  )
+  assertIncludes(
+    chat,
+    "the main stop button stops the",
+    "ChatContainer keeps the foreground stop button scoped to the current response"
+  )
+  assertIncludes(
+    chat,
+    "window.api.agent.cancel(threadId, { cancelWorkers: true })",
+    "ChatContainer exposes explicit durable coordinator worker cancellation separately"
   )
   assertIncludes(
     chat,
@@ -274,14 +286,18 @@ async function testRendererSendsAgentMode(): Promise<void> {
     "workspace selection utility returns explicit success when the workspace actually changes"
   )
 
-  const filesystemPanel = await readProjectFile("src/renderer/src/components/panels/FilesystemPanel.tsx")
+  const filesystemPanel = await readProjectFile(
+    "src/renderer/src/components/panels/FilesystemPanel.tsx"
+  )
   assertIncludes(
     filesystemPanel,
-    'toast.error(getWorkspaceSelectionErrorMessage(e))',
+    "toast.error(getWorkspaceSelectionErrorMessage(e))",
     "FilesystemPanel surfaces blocked workspace-switch errors to the user"
   )
 
-  const workspacePicker = await readProjectFile("src/renderer/src/components/chat/WorkspacePicker.tsx")
+  const workspacePicker = await readProjectFile(
+    "src/renderer/src/components/chat/WorkspacePicker.tsx"
+  )
   assertIncludes(
     workspacePicker,
     'if (selection.status !== "success") return',
@@ -296,7 +312,7 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertIncludes(
     preload,
-    '`agent:stream:${threadId}:coordinator-internal`',
+    "`agent:stream:${threadId}:coordinator-internal`",
     "preload isolates internal coordinator notification streams from foreground user streams"
   )
   assertMatches(
@@ -319,11 +335,7 @@ async function testRendererSendsAgentMode(): Promise<void> {
     'ipcRenderer.invoke("agent:coordinator-mode-forced")',
     "preload exposes environment-forced coordinator mode state for cold-start notification turns"
   )
-  assertIncludes(
-    preload,
-    "...options",
-    "preload forwards agent cancel options"
-  )
+  assertIncludes(preload, "...options", "preload forwards agent cancel options")
 
   const electronTransport = await readProjectFile("src/renderer/src/lib/electron-transport.ts")
   assertIncludes(
@@ -425,7 +437,7 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    'worker.notification_acknowledged === false\n            && worker.suppress_notification_auto_run !== true',
+    "worker.notification_acknowledged === false\n            && worker.suppress_notification_auto_run !== true",
     "thread context only treats unsuppressed terminal notifications as unresolved auto-run work"
   )
   assertIncludes(
@@ -578,7 +590,11 @@ async function testRendererSendsAgentMode(): Promise<void> {
 async function testMainResolvesAndPersistsMode(): Promise<void> {
   const agentIpc = await readProjectFile("src/main/ipc/agent.ts")
   const replacementLock = await readProjectFile("src/main/ipc/async-keyed-lock.ts")
-  assertIncludes(agentIpc, "resolveCoordinatorModeRequest", "agent IPC imports coordinator resolver")
+  assertIncludes(
+    agentIpc,
+    "resolveCoordinatorModeRequest",
+    "agent IPC imports coordinator resolver"
+  )
   assertIncludes(agentIpc, "coordinatorWorkerManager", "agent IPC imports worker manager")
   assertIncludes(
     agentIpc,
@@ -732,6 +748,11 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
+    "queuedNotifications.map((notification) => notification.message)",
+    "agent invoke restores drained worker notifications if selected-skill preparation fails"
+  )
+  assertIncludes(
+    agentIpc,
     "coordinatorNotificationSelectedSkills = notificationSelectedSkills",
     "agent invoke stores the drained notification skill mapping from the shared preparation helper"
   )
@@ -782,7 +803,12 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "notificationSkills.length === 0 || notificationSkills.some((selectedSkill) => !selectedSkill)",
+    "notificationSkills.length === 0 ||",
+    "agent invoke refuses to infer a shared selected skill when the current notification batch is empty"
+  )
+  assertIncludes(
+    agentIpc,
+    "notificationSkills.some((selectedSkill) => !selectedSkill)",
     "agent invoke refuses to infer a shared selected skill from mixed notification batches that include skill-less workers"
   )
   assertIncludes(
@@ -842,12 +868,17 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
+    "peekedNotificationSelectedSkills",
+    "agent resume and interrupt build selected-skill routing for peeked HITL notifications"
+  )
+  assertIncludes(
+    agentIpc,
     "onCoordinatorNotificationAction",
     "agent resume and interrupt expose coordinator notification action callbacks"
   )
   assertIncludes(
     agentIpc,
-    "if (resumeAgentMode === \"coordinator\")",
+    'if (resumeAgentMode === "coordinator")',
     "agent resume restores coordinator workers when re-entering a coordinator thread"
   )
   assertIncludes(
@@ -887,7 +918,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "coordinatorNotificationSelectedSkills:\n                interruptCoordinatorNotificationSelectedSkills",
+    "coordinatorNotificationSelectedSkills: interruptCoordinatorNotificationSelectedSkills",
     "agent interrupt passes notification-selected skill context into runtime recreation and failover"
   )
   assertIncludes(
@@ -897,7 +928,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "interruptCoordinatorRequest.source === \"environment\"",
+    'interruptCoordinatorRequest.source === "environment"',
     "agent interrupt honors environment-forced coordinator mode"
   )
   assertIncludes(
@@ -912,7 +943,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    '{ suppressNotificationAutoRun: true }',
+    "{ suppressNotificationAutoRun: true }",
     "agent cancel marks user-requested background worker cancellation notifications as non-resuming UI updates"
   )
   assertIncludes(
@@ -927,7 +958,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "console.warn(\"[Agent] Failed to wait for coordinator worker cancellation:\", error)\n            if (!window || window.isDestroyed()) return\n            sendCoordinatorWorkers(",
+    'console.warn("[Agent] Failed to wait for coordinator worker cancellation:", error)\n            if (!window || window.isDestroyed()) return\n            sendCoordinatorWorkers(',
     "agent cancel publishes a full worker snapshot even when cleanup wait fails"
   )
   assertIncludes(
@@ -980,7 +1011,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertSourceOrder(
     agentIpc,
-    "const hasExplicitNormalAgentMode = metadata.agentMode === \"normal\"",
+    'const hasExplicitNormalAgentMode = metadata.agentMode === "normal"',
     "const shouldPersistAgentMode",
     "agent IPC checks persisted thread mode before processing an internal coordinator notification turn"
   )
@@ -998,6 +1029,31 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     agentIpc,
     "cmb_internal_coordinator_notification",
     "agent IPC persists a trusted marker on internal coordinator notification HumanMessages"
+  )
+  assertIncludes(
+    agentIpc,
+    "isCoordinatorInternalNotificationMessage(msgChunk)",
+    "agent Stop hook context ignores trusted internal coordinator notification messages"
+  )
+  assertIncludes(
+    agentIpc,
+    "getCoordinatorVisibleUserMessage(msgChunk)",
+    "agent Stop hook context uses visible user text instead of augmented coordinator notification content"
+  )
+  assertIncludes(
+    agentIpc,
+    "lastUserIndex = i\n        break",
+    "agent Stop hook values context treats internal coordinator notification messages as the current-turn boundary"
+  )
+  assertIncludes(
+    agentIpc,
+    "isTrustedCoordinatorNotificationInvoke ? undefined : message",
+    "agent Stop hook context does not seed internal coordinator notification turns as user messages"
+  )
+  assertIncludes(
+    agentIpc,
+    "userMessage: isCoordinatorNotificationTurn ? undefined : message",
+    "agent Stop hook context does not override internal coordinator notification turns with placeholder text"
   )
   assertIncludes(
     agentIpc,
@@ -1072,43 +1128,48 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    'await settleDrainedCoordinatorNotifications("auto")',
-    "agent IPC settles drained notifications at per-notification granularity after a successful turn"
+    'await settleDrainedCoordinatorNotifications("ack")',
+    "agent IPC automatically acknowledges delivered worker notifications after a successful coordinator turn"
   )
   assertIncludes(
     agentIpc,
     "const consumedCoordinatorNotificationIds = new Set<string>()",
-    "agent IPC tracks consumed worker notifications per notification id"
+    "agent IPC still tracks consumed worker notifications for traceability and skill routing"
   )
-  assertIncludes(
+  assertNotIncludes(
     agentIpc,
     "acknowledgedNotifications = drainedCoordinatorNotifications.filter",
-    "agent IPC decides acknowledgement at per-notification granularity after failed turns"
+    "agent IPC should not rely on model-selected notification ids to acknowledge a successful turn"
   )
   assertIncludes(
     agentIpc,
-    "restoredNotifications = drainedCoordinatorNotifications.filter",
-    "agent IPC restores only notifications that were not consumed"
+    "const unconsumedNotifications = notifications.filter(",
+    "agent IPC restores only unconsumed notifications when a turn does not complete successfully"
+  )
+  assertIncludes(
+    agentIpc,
+    "const consumedNotifications = notifications.filter(",
+    "agent IPC acknowledges consumed notifications on failed turns to avoid duplicating durable worker actions"
   )
   assertIncludes(
     agentIpc,
     "onCoordinatorNotificationAction",
-    "agent IPC wires coordinator worker actions back into drained-notification settlement"
+    "agent IPC wires coordinator worker actions into notification traceability"
   )
   assertIncludes(
     agentIpc,
     "consumedCoordinatorNotificationIds.add(",
-    "agent IPC records the specific notifications consumed by worker actions"
-  )
-  assertNotIncludes(
-    agentIpc,
-    'await settleDrainedCoordinatorNotifications("ack")',
-    "agent IPC should not ack every drained notification wholesale after a successful turn"
+    "agent IPC records notification ids referenced by worker actions"
   )
   assertNotIncludes(
     agentIpc,
     "drainedCoordinatorNotifications.length === 1",
-    "agent IPC should not auto-consume a single drained notification without explicit consumed_notification_ids"
+    "agent IPC should not special-case single notification turns"
+  )
+  assertIncludes(
+    agentIpc,
+    'await settleDrainedCoordinatorNotifications("restore")',
+    "agent IPC restores drained notifications after cancellation, errors, or blocked completion"
   )
   assertIncludes(
     agentIpc,
@@ -1158,7 +1219,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    'allowing replacement run to take over with late cleanup risk',
+    "allowing replacement run to take over with late cleanup risk",
     "agent IPC warns when it must take over before a hung prior run settles"
   )
   assertIncludes(
@@ -1170,6 +1231,11 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     agentIpc,
     "MAX_COORDINATOR_NOTIFICATIONS_IN_PROMPT = 12",
     "agent IPC bounds the number of notifications injected into a single coordinator prompt"
+  )
+  assertIncludes(
+    agentIpc,
+    "MAX_COORDINATOR_NOTIFICATION_PROMPT_CHARS = 128_000",
+    "agent IPC also bounds notification prompt context by total character budget"
   )
   assertIncludes(
     agentIpc,
@@ -1193,13 +1259,28 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "buildCoordinatorTurnContextPrompt(",
-    "agent IPC builds a turn-scoped coordinator context prompt instead of persisting worker state in the HumanMessage"
+    "buildCoordinatorHumanMessageContent(",
+    "agent IPC delivers worker notifications through the current HumanMessage like Claude Code task-notifications"
+  )
+  assertNotIncludes(
+    agentIpc,
+    "buildCoordinatorNotificationCommandUpdate",
+    "agent resume and interrupt should not insert HumanMessages between pending tool calls and tool results"
+  )
+  assertIncludes(
+    agentIpc,
+    "providers require ToolMessage",
+    "agent resume documents why restored notifications stay out of HumanMessage command updates"
+  )
+  assertIncludes(
+    agentIpc,
+    "Do not drain queued worker",
+    "agent interrupt documents tool-call adjacency constraints"
   )
   assertIncludes(
     agentIpc,
     "coordinatorTurnPrompt = buildCoordinatorTurnContextPrompt(",
-    "agent IPC keeps worker notifications in turn-scoped system context"
+    "agent IPC keeps restored running worker state in turn-scoped system context"
   )
   assertNotIncludes(
     agentIpc,
@@ -1233,7 +1314,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "if (!workspacePath) {\n            safeSendToWindow(window, channel, {\n              type: \"error\",\n              error: \"WORKSPACE_REQUIRED\"",
+    'if (!workspacePath) {\n            safeSendToWindow(window, channel, {\n              type: "error",\n              error: "WORKSPACE_REQUIRED"',
     "agent resume blocks explicit normal-mode fallback when workspace metadata is missing"
   )
   assertSourceOrder(
@@ -1290,7 +1371,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "do not re-query terminal workers unless you need the full result file",
+    "Treat terminal states as already known from their task notifications",
     "worker context discourages duplicate terminal fetches"
   )
   assertIncludes(
@@ -1338,9 +1419,9 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertSourceOrder(
     agentIpc,
-    "safeSendToWindow(window, channel, { type: \"done\" })",
-    "await settleDrainedCoordinatorNotifications(\"auto\")",
-    "agent IPC tells the renderer the turn is done before settling consumed notifications"
+    'safeSendToWindow(window, channel, { type: "done" })',
+    'await settleDrainedCoordinatorNotifications("ack")',
+    "agent IPC tells the renderer the turn is done before acknowledging delivered notifications"
   )
   assertIncludes(
     agentIpc,
@@ -1491,7 +1572,7 @@ async function testWorkspaceSwitchGuardsRunningCoordinatorWorkers(): Promise<voi
   )
   assertIncludes(
     modelsIpc,
-    "await coordinatorWorkerManager.restoreWorkersForThread({\n      parentThreadId: threadId,\n      workspacePath: currentPath,\n      mode: \"active\"",
+    'await coordinatorWorkerManager.restoreWorkersForThread({\n      parentThreadId: threadId,\n      workspacePath: currentPath,\n      mode: "active"',
     "workspace IPC only restores unresolved coordinator worker state before switching workspace"
   )
   assertIncludes(
@@ -1501,7 +1582,7 @@ async function testWorkspaceSwitchGuardsRunningCoordinatorWorkers(): Promise<voi
   )
   assertIncludes(
     modelsIpc,
-    "worker.status === \"running\" || worker.notification_acknowledged === false",
+    'worker.status === "running" || worker.notification_acknowledged === false',
     "workspace IPC blocks switching only while a worker is running or has an unhandled notification"
   )
   assertIncludes(
@@ -1632,6 +1713,16 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     runtime,
+    "getCoordinatorScratchpadDir(workerInput.parentThreadId)",
+    "runtime injects a durable scratchpad path into async worker metadata"
+  )
+  assertIncludes(
+    runtime,
+    "normal tool availability, approval, hook, and access limits still apply",
+    "runtime keeps scratchpad guidance honest about existing write policies"
+  )
+  assertIncludes(
+    runtime,
     "Access limits: read-only worker",
     "runtime tells read-only workers which tools are unavailable"
   )
@@ -1680,25 +1771,15 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
     "coordinatorWorkerManager.waitForWorkers",
     "runtime waits for async worker state without polling spam"
   )
-  assertIncludes(
+  assertNotIncludes(
     runtime,
-    "if (!input.workerId) {\n            await coordinatorWorkerManager.restoreWorkersForThread({\n              parentThreadId: threadId,\n              workspacePath,\n              mode: \"full\"",
-    "runtime fully restores worker history before read_worker_state lists all workers"
-  )
-  assertIncludes(
-    runtime,
-    "await coordinatorWorkerManager.restoreWorkersForThread({\n              parentThreadId: threadId,\n              workspacePath,\n              mode: \"full\"",
-    "runtime fully restores worker history before read_worker_state lists all workers"
-  )
-  assertIncludes(
-    runtime,
-    "coordinatorWorkerManager.readWorkerResult",
-    "runtime exposes bounded worker result reads to coordinator tools"
+    "readWorkerState: async",
+    "runtime should not expose worker state polling through coordinator tools"
   )
   assertNotIncludes(
     runtime,
-    ".waitForWorkers(threadId, {\n              workerId: input.workerId,\n              block: input.block,\n              timeoutMs: input.timeoutMs,\n              pollIntervalMs: input.pollIntervalMs\n            })\n            .then(async",
-    "runtime keeps read_worker_state side-effect free instead of acknowledging notifications before turn success"
+    "readWorkerResult: async",
+    "runtime should not expose worker result reads through coordinator tools"
   )
   assertIncludes(
     runtime,
@@ -1738,7 +1819,7 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     runtime,
-    "extractWorkerFinalText(\n            mode,\n            data,\n            effectiveWorkerPrompt,\n            valuesContext",
+    "extractWorkerFinalText(mode, data, effectiveWorkerPrompt, valuesContext)",
     "runtime reuses the shared values context for final worker text extraction"
   )
   assertNotIncludes(
@@ -1748,7 +1829,7 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     runtime,
-    'const effectiveWorkerPrompt = await applyWorkerPromptSubmitHooks({',
+    "const effectiveWorkerPrompt = await applyWorkerPromptSubmitHooks({",
     "runtime applies turn-level UserPromptSubmit hooks to async coordinator workers"
   )
   assertIncludes(
@@ -1775,6 +1856,21 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
     runtime,
     "const workerOrderedChain = buildOrderedChain(",
     "runtime builds failover chains for coordinator workers"
+  )
+  assertIncludes(
+    runtime,
+    "messageModeAssistantTextTruncated",
+    "runtime stops appending worker final-text deltas after the raw handoff cap is reached"
+  )
+  assertIncludes(
+    runtime,
+    "handoff_workload: read_only",
+    "runtime makes missing-handoff retry prompts match the read-only fallback runtime"
+  )
+  assertIncludes(
+    runtime,
+    "Access limits: read-only handoff continuation.",
+    "runtime makes missing-handoff retry prompts explicitly prohibit file and command side effects"
   )
   assertIncludes(
     runtime,
@@ -1911,27 +2007,27 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   const localSandbox = await readProjectFile("src/main/agent/local-sandbox.ts")
   assertIncludes(
     localSandbox,
-    "if (this.isAborted) {\n      return { error: \"文件写入已取消。\" }",
+    'if (this.isAborted) {\n      return { error: "文件写入已取消。" }',
     "local sandbox rechecks cancellation after write approval before writing"
   )
   assertIncludes(
     localSandbox,
-    "if (preResult?.blocked) {\n      return { error: `[Hook blocked] ${preResult.stdout || \"write_file was blocked by a hook\"}` }\n    }\n    if (this.isAborted) {\n      return { error: \"文件写入已取消。\" }\n    }",
+    'if (preResult?.blocked) {\n      return { error: `[Hook blocked] ${preResult.stdout || "write_file was blocked by a hook"}` }\n    }\n    if (this.isAborted) {\n      return { error: "文件写入已取消。" }\n    }',
     "local sandbox checks cancellation after write PreToolUse hook before resolving/writing"
   )
   assertIncludes(
     localSandbox,
-    "if (this.isAborted) {\n      return { error: \"文件编辑已取消。\" }",
+    'if (this.isAborted) {\n      return { error: "文件编辑已取消。" }',
     "local sandbox rechecks cancellation after edit approval before editing"
   )
   assertIncludes(
     localSandbox,
-    "if (preResult?.blocked) {\n      return { error: `[Hook blocked] ${preResult.stdout || \"edit_file was blocked by a hook\"}` }\n    }\n    if (this.isAborted) {\n      return { error: \"文件编辑已取消。\" }\n    }",
+    'if (preResult?.blocked) {\n      return { error: `[Hook blocked] ${preResult.stdout || "edit_file was blocked by a hook"}` }\n    }\n    if (this.isAborted) {\n      return { error: "文件编辑已取消。" }\n    }',
     "local sandbox checks cancellation after edit PreToolUse hook before reading/writing"
   )
   assertSourceOrder(
     localSandbox,
-    "if (this.isAborted) {\n          return { error: \"文件编辑已取消。\" }",
+    'if (this.isAborted) {\n          return { error: "文件编辑已取消。" }',
     "await this.writeFileEncoded(resolvedPath, expectedContent, encoding)",
     "local sandbox checks cancellation immediately before encoded edit write"
   )
@@ -1939,6 +2035,36 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
     runtime,
     "filesystemAccess: {\n              workload: workerInput.workload",
     "runtime passes worker workload into leaf runtime file-access limits"
+  )
+  assertIncludes(
+    runtime,
+    "do not loop the same call and instead report the blocking file/action back to the coordinator",
+    "runtime warns write workers not to spin on denied file edits"
+  )
+  assertIncludes(
+    coordinatorMode,
+    "Notifications include a bounded <result> handoff from the worker.",
+    "coordinator prompt tells the model to rely on pushed worker results"
+  )
+  assertIncludes(
+    coordinatorMode,
+    "toCoordinatorWorkerToolSnapshot",
+    "coordinator worker tools strip internal fields before returning worker snapshots to the model"
+  )
+  assertIncludes(
+    coordinatorMode,
+    "Cancelled workers cannot be continued in CmbCowork",
+    "coordinator prompt distinguishes CmbCowork final cancellation from Claude Code resumable stop"
+  )
+  assertNotIncludes(
+    coordinatorMode,
+    'name: "read_worker_result"',
+    "coordinator should not expose result reads as a default tool"
+  )
+  assertNotIncludes(
+    coordinatorMode,
+    'name: "read_worker_state"',
+    "coordinator should not expose state polling as a default tool"
   )
   assertIncludes(
     runtime,
@@ -1963,7 +2089,7 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     runtime,
-    "if (parentThreadId.includes(\"__worker__\"))",
+    'if (parentThreadId.includes("__worker__"))',
     "runtime refuses ambiguous worker-checkpoint cleanup requests for invalid parent thread ids"
   )
   assertIncludes(
@@ -2068,13 +2194,13 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertSourceOrder(
     runtime,
-    "agentMode: \"normal\",\n            disableSubagents: true",
+    'agentMode: "normal",\n            disableSubagents: true',
     "workerStream = await workerAgent.stream",
     "async worker disables synchronous task before streaming starts"
   )
   assertIncludes(
     runtime,
-    "enableAgentsPrompt: false,\n            agentMode: \"normal\",\n            disableSubagents: true,\n            filesystemAccess: {",
+    'enableAgentsPrompt: false,\n            agentMode: "normal",\n            disableSubagents: true,\n            filesystemAccess: {',
     "async worker disables prompt/subagent inheritance before applying worker access limits"
   )
   assertIncludes(
@@ -2099,7 +2225,11 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
     "const coordinatorSubagents: ReturnType<typeof buildCoordinatorWorkerSubagents> = []",
     "runtime does not expose coordinator workers through synchronous task in coordinator"
   )
-  assertIncludes(runtime, "timeContext", "runtime passes time context into async coordinator workers")
+  assertIncludes(
+    runtime,
+    "timeContext",
+    "runtime passes time context into async coordinator workers"
+  )
   assertIncludes(
     runtime,
     "selectedSkill: options.coordinatorSelectedSkill",
@@ -2127,7 +2257,7 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     workerManager,
-    "options.mode === \"active\" &&\n      this.activeRestoreHydratedWorkspaceByParent.get(parentThreadId) === workspacePath",
+    'options.mode === "active" &&\n      this.activeRestoreHydratedWorkspaceByParent.get(parentThreadId) === workspacePath',
     "worker manager skips repeated active restore disk scans after the same thread/workspace has been hydrated"
   )
 }

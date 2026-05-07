@@ -153,10 +153,7 @@ async function waitForReplacedRunToSettle(threadId: string): Promise<"settled" |
   }
 }
 
-async function withActiveRunReplacementLock<T>(
-  threadId: string,
-  fn: () => Promise<T>
-): Promise<T> {
+async function withActiveRunReplacementLock<T>(threadId: string, fn: () => Promise<T>): Promise<T> {
   return activeRunReplacementLocks.withKey(threadId, fn)
 }
 
@@ -314,9 +311,7 @@ function limitCoordinatorWorkersForRenderer(
     .slice(0, MAX_COORDINATOR_WORKERS_FOR_RENDERER)
   const terminalLimit = Math.max(0, MAX_COORDINATOR_WORKERS_FOR_RENDERER - running.length)
   const pendingTerminal = workers
-    .filter(
-      (worker) => worker.status !== "running" && worker.notification_acknowledged === false
-    )
+    .filter((worker) => worker.status !== "running" && worker.notification_acknowledged === false)
     .sort((a, b) => timestampMillis(b.updated_at) - timestampMillis(a.updated_at))
   const terminal = workers
     .filter((worker) => worker.status !== "running" && worker.notification_acknowledged !== false)
@@ -339,7 +334,47 @@ interface CoordinatorTurnNotification {
   message: string
 }
 
+async function settleCoordinatorTurnNotifications(
+  threadId: string,
+  notifications: CoordinatorTurnNotification[],
+  consumedNotificationIds: ReadonlySet<string>,
+  mode: "ack" | "restore"
+): Promise<void> {
+  if (notifications.length === 0) return
+
+  if (mode === "ack") {
+    await coordinatorWorkerManager.acknowledgeNotificationMessages(
+      threadId,
+      notifications.map((notification) => notification.message)
+    )
+    return
+  }
+
+  // A referenced notification has already triggered a durable coordinator action
+  // such as start_worker/continue_worker/cancel_worker. If the turn later fails,
+  // replaying that notification can duplicate the side effect, so only restore
+  // notifications that no worker action consumed.
+  const consumedNotifications = notifications.filter((notification) =>
+    consumedNotificationIds.has(notification.id)
+  )
+  const unconsumedNotifications = notifications.filter(
+    (notification) => !consumedNotificationIds.has(notification.id)
+  )
+
+  if (consumedNotifications.length > 0) {
+    await coordinatorWorkerManager.acknowledgeNotificationMessages(
+      threadId,
+      consumedNotifications.map((notification) => notification.message)
+    )
+  }
+  coordinatorWorkerManager.restoreNotifications(
+    threadId,
+    unconsumedNotifications.map((notification) => notification.message)
+  )
+}
+
 const MAX_COORDINATOR_NOTIFICATIONS_IN_PROMPT = 12
+const MAX_COORDINATOR_NOTIFICATION_PROMPT_CHARS = 128_000
 
 interface NormalModeGuardState {
   workers: CoordinatorWorkerSnapshot[]
@@ -444,9 +479,7 @@ function normalizeCoordinatorNotificationSelectedSkills(
   notificationSelectedSkills: Record<string, CoordinatorSelectedSkill | undefined> | undefined
 ): Record<string, CoordinatorSelectedSkill | undefined> | undefined {
   if (!notificationSelectedSkills) return undefined
-  return Object.keys(notificationSelectedSkills).length > 0
-    ? notificationSelectedSkills
-    : undefined
+  return Object.keys(notificationSelectedSkills).length > 0 ? notificationSelectedSkills : undefined
 }
 
 function serializeCoordinatorNotificationSelectedSkillsMetadata(
@@ -469,10 +502,7 @@ function coordinatorNotificationSelectedSkillsEqual(
   const normalizedRight = normalizeCoordinatorNotificationSelectedSkills(right)
   if (!normalizedLeft && !normalizedRight) return true
   if (!normalizedLeft || !normalizedRight) return false
-  const notificationIds = new Set([
-    ...Object.keys(normalizedLeft),
-    ...Object.keys(normalizedRight)
-  ])
+  const notificationIds = new Set([...Object.keys(normalizedLeft), ...Object.keys(normalizedRight)])
   for (const notificationId of notificationIds) {
     if (
       !coordinatorSelectedSkillEquals(
@@ -500,7 +530,9 @@ function omitCoordinatorNotificationSelectedSkills(
       changed = true
     }
   }
-  return changed ? normalizeCoordinatorNotificationSelectedSkills(nextNotificationSelectedSkills) : normalized
+  return changed
+    ? normalizeCoordinatorNotificationSelectedSkills(nextNotificationSelectedSkills)
+    : normalized
 }
 
 function setCoordinatorNotificationSelectedSkillsState(
@@ -588,35 +620,53 @@ async function prepareQueuedCoordinatorNotificationsForPrompt(
   const queuedNotifications = toCoordinatorTurnNotifications(
     coordinatorWorkerManager.drainNotifications(threadId)
   )
-  const { promptNotifications, deferredNotifications } =
-    limitCoordinatorNotificationsForPrompt(queuedNotifications)
-  if (deferredNotifications.length > 0) {
+  try {
+    const { promptNotifications, deferredNotifications } =
+      limitCoordinatorNotificationsForPrompt(queuedNotifications)
+    const notificationSelectedSkills = await buildCoordinatorNotificationSelectedSkills(
+      threadId,
+      promptNotifications
+    )
+    if (deferredNotifications.length > 0) {
+      coordinatorWorkerManager.restoreNotifications(
+        threadId,
+        deferredNotifications.map((notification) => notification.message)
+      )
+      onDeferred?.()
+    }
+    return { queuedNotifications, promptNotifications, notificationSelectedSkills }
+  } catch (error) {
     coordinatorWorkerManager.restoreNotifications(
       threadId,
-      deferredNotifications.map((notification) => notification.message)
+      queuedNotifications.map((notification) => notification.message)
     )
-    onDeferred?.()
+    throw error
   }
-  const notificationSelectedSkills = await buildCoordinatorNotificationSelectedSkills(
-    threadId,
-    promptNotifications
-  )
-  return { queuedNotifications, promptNotifications, notificationSelectedSkills }
 }
 
-function limitCoordinatorNotificationsForPrompt(
-  notifications: CoordinatorTurnNotification[]
-): {
+function limitCoordinatorNotificationsForPrompt(notifications: CoordinatorTurnNotification[]): {
   promptNotifications: CoordinatorTurnNotification[]
   deferredNotifications: CoordinatorTurnNotification[]
 } {
-  if (notifications.length <= MAX_COORDINATOR_NOTIFICATIONS_IN_PROMPT) {
-    return { promptNotifications: notifications, deferredNotifications: [] }
+  const promptNotifications: CoordinatorTurnNotification[] = []
+  const deferredNotifications: CoordinatorTurnNotification[] = []
+  let usedChars = 0
+
+  for (const notification of notifications) {
+    const nextChars = notification.id.length + notification.message.length
+    const wouldExceedCount = promptNotifications.length >= MAX_COORDINATOR_NOTIFICATIONS_IN_PROMPT
+    const wouldExceedChars =
+      promptNotifications.length > 0 &&
+      usedChars + nextChars > MAX_COORDINATOR_NOTIFICATION_PROMPT_CHARS
+    if (wouldExceedCount || wouldExceedChars) {
+      deferredNotifications.push(notification)
+      continue
+    }
+    promptNotifications.push(notification)
+    usedChars += nextChars
   }
-  return {
-    promptNotifications: notifications.slice(0, MAX_COORDINATOR_NOTIFICATIONS_IN_PROMPT),
-    deferredNotifications: notifications.slice(MAX_COORDINATOR_NOTIFICATIONS_IN_PROMPT)
-  }
+
+  return { promptNotifications, deferredNotifications }
 }
 
 async function buildCoordinatorNotificationSelectedSkills(
@@ -637,7 +687,10 @@ function deriveSharedCoordinatorSelectedSkill(
   notificationSelectedSkills: Record<string, CoordinatorSelectedSkill | undefined>
 ): CoordinatorSelectedSkill | undefined {
   const notificationSkills = Object.values(notificationSelectedSkills)
-  if (notificationSkills.length === 0 || notificationSkills.some((selectedSkill) => !selectedSkill)) {
+  if (
+    notificationSkills.length === 0 ||
+    notificationSkills.some((selectedSkill) => !selectedSkill)
+  ) {
     return undefined
   }
   const uniqueSkills = new Map<string, CoordinatorSelectedSkill>()
@@ -675,10 +728,7 @@ function buildNormalModeGuardMessage(state: NormalModeGuardState): string {
     .map((worker) => `${worker.worker_id}: ${worker.description}`)
     .join("; ")
   const suffix = workerList ? `相关 worker：${workerList}` : "请先切回协同模式处理这些结果。"
-  return (
-    "仍有协同 worker 在运行或结果待处理，请先在协同模式处理完成后再切回普通模式。"
-    + suffix
-  )
+  return "仍有协同 worker 在运行或结果待处理，请先在协同模式处理完成后再切回普通模式。" + suffix
 }
 
 function renderCoordinatorWorkerNotifications(
@@ -690,9 +740,26 @@ function renderCoordinatorWorkerNotifications(
   )
   return `## Coordinator Worker Notifications
 
-The following background coordinator workers finished since your last turn. Treat these as internal task notifications, incorporate the result, and decide the next step. Do not ignore them.
+The following background coordinator workers finished since your last turn. Treat each <task-notification> as a worker result message, incorporate the pushed <result> handoff, and decide the next step. Do not ignore them.
+
+If a notification says <result-truncated>true</result-truncated> or the handoff is missing key files, commands, evidence, risks, or verifier notes, use continue_worker with that task-id to ask the same worker for a concise handoff. Do not try to read archived output files from the coordinator turn.
 
 ${renderedNotifications.join("\n\n")}`
+}
+
+function buildCoordinatorHumanMessageContent(
+  userMessage: string,
+  notifications: CoordinatorTurnNotification[],
+  isNotificationTurn: boolean
+): string {
+  const notificationBlock = renderCoordinatorWorkerNotifications(notifications)
+  if (!notificationBlock) return userMessage
+  if (isNotificationTurn) return notificationBlock
+  return `${notificationBlock}
+
+## User Request
+
+${userMessage}`
 }
 
 function compactCoordinatorWorkerText(value: string, maxChars = 240): string {
@@ -737,11 +804,11 @@ function renderCoordinatorWorkerContext(workers: CoordinatorWorkerSnapshot[]): s
     0,
     Math.min(MAX_RUNNING_READ_ONLY_WORKERS_IN_PROMPT, remainingRunningSlots)
   )
-  const visibleRunningWorkers = [
-    ...visibleRunningPriorityWorkers,
-    ...visibleRunningReadOnlyWorkers
-  ]
-  const omittedRunningWorkersCount = Math.max(0, runningWorkers.length - visibleRunningWorkers.length)
+  const visibleRunningWorkers = [...visibleRunningPriorityWorkers, ...visibleRunningReadOnlyWorkers]
+  const omittedRunningWorkersCount = Math.max(
+    0,
+    runningWorkers.length - visibleRunningWorkers.length
+  )
   const omittedReadOnlyWorkersCount = Math.max(
     0,
     runningReadOnlyWorkers.length - visibleRunningReadOnlyWorkers.length
@@ -757,9 +824,7 @@ function renderCoordinatorWorkerContext(workers: CoordinatorWorkerSnapshot[]): s
     const lastTool = worker.last_tool_name
       ? `, last_tool=${compactCoordinatorWorkerText(worker.last_tool_name, 80)}`
       : ""
-    const ownedFiles =
-      worker.owned_files.length > 0 ? `, owned_files=${worker.owned_files.join(", ")}` : ""
-    return `- ${worker.worker_id} (${worker.role}, ${worker.workload}): ${compactCoordinatorWorkerText(worker.description)}; status=running, tool_uses=${worker.tool_call_count}${lastTool}${ownedFiles}, last_event=${compactCoordinatorWorkerText(worker.last_event)}`
+    return `- ${worker.worker_id} (${worker.role}, ${worker.workload}): ${compactCoordinatorWorkerText(worker.description)}; status=running, tool_uses=${worker.tool_call_count}${lastTool}, last_event=${compactCoordinatorWorkerText(worker.last_event)}`
   })
 
   const terminalLines = recentTerminalWorkers.map((worker) => {
@@ -773,7 +838,7 @@ function renderCoordinatorWorkerContext(workers: CoordinatorWorkerSnapshot[]): s
   if (runningLines.length > 0) {
     const omittedRunningLine =
       omittedRunningWorkersCount > 0
-        ? `\n- ... ${omittedRunningWorkersCount} additional running worker(s) omitted to keep coordinator prompt context bounded${omittedReadOnlyWorkersCount > 0 ? `; ${omittedReadOnlyWorkersCount} of them are read_only` : ""}. Use read_worker_state for explicit follow-up when needed.`
+        ? `\n- ... ${omittedRunningWorkersCount} additional running worker(s) omitted to keep coordinator prompt context bounded${omittedReadOnlyWorkersCount > 0 ? `; ${omittedReadOnlyWorkersCount} of them are read_only` : ""}. Wait for task notifications instead of polling.`
         : ""
     sections.push(`Running workers:
 ${runningLines.join("\n")}${omittedRunningLine}`)
@@ -785,16 +850,18 @@ ${terminalLines.join("\n")}`)
 
   return `## Current Coordinator Workers
 
-These worker states are restored from the coordinator worker manager and worker output files. Treat terminal states as already known; do not re-query terminal workers unless you need the full result file. For running workers, wait for task notifications; use read_worker_state only for explicit status checks or recovery.
+These worker states are restored from the coordinator worker manager and worker output files. Treat terminal states as already known from their task notifications. For running workers, wait for task notifications instead of polling.
 
 ${sections.join("\n\n")}`
 }
 
 function buildCoordinatorTurnContextPrompt(
-  notifications: CoordinatorTurnNotification[],
-  workerContext: string
+  workerContext: string,
+  notifications: CoordinatorTurnNotification[] = []
 ): string | undefined {
-  const sections = [workerContext, renderCoordinatorWorkerNotifications(notifications)].filter(Boolean)
+  const sections = [workerContext, renderCoordinatorWorkerNotifications(notifications)].filter(
+    Boolean
+  )
   if (sections.length === 0) return undefined
   return `This is internal coordinator state for the current turn only. Use it for orchestration decisions, but do not treat it as visible user input or repeat it verbatim unless it materially helps the user.
 
@@ -804,8 +871,7 @@ ${sections.join("\n\n")}`
 const COORDINATOR_NOTIFICATION_PROMPT_PREFIX = "[[CMB_COORDINATOR_WORKER_NOTIFICATION]]"
 const COORDINATOR_INTERNAL_CONTEXT_START = "[[CMB_COORDINATOR_INTERNAL_CONTEXT_START]]"
 const COORDINATOR_INTERNAL_CONTEXT_END = "[[CMB_COORDINATOR_INTERNAL_CONTEXT_END]]"
-const COORDINATOR_INTERNAL_NOTIFICATION_START =
-  "[[CMB_COORDINATOR_INTERNAL_NOTIFICATION_START]]"
+const COORDINATOR_INTERNAL_NOTIFICATION_START = "[[CMB_COORDINATOR_INTERNAL_NOTIFICATION_START]]"
 const COORDINATOR_INTERNAL_NOTIFICATION_END = "[[CMB_COORDINATOR_INTERNAL_NOTIFICATION_END]]"
 const COORDINATOR_INTERNAL_MARKERS = [
   COORDINATOR_NOTIFICATION_PROMPT_PREFIX,
@@ -825,18 +891,35 @@ function containsCoordinatorInternalMarker(content: string): boolean {
 interface SerializedHookMessage {
   id?: string[]
   content?: unknown
+  additional_kwargs?: Record<string, unknown>
   kwargs?: {
     id?: string
     type?: string
     content?: unknown
     name?: string
     tool_call_id?: string
+    additional_kwargs?: Record<string, unknown>
     tool_calls?: Array<{
       id?: string
       name?: string
       args?: Record<string, unknown>
     }>
   }
+}
+
+function isCoordinatorInternalNotificationMessage(
+  message: SerializedHookMessage | undefined
+): boolean {
+  const additionalKwargs = message?.additional_kwargs ?? message?.kwargs?.additional_kwargs
+  return additionalKwargs?.[COORDINATOR_INTERNAL_NOTIFICATION_MESSAGE_KEY] === true
+}
+
+function getCoordinatorVisibleUserMessage(
+  message: SerializedHookMessage | undefined
+): string | undefined {
+  const additionalKwargs = message?.additional_kwargs ?? message?.kwargs?.additional_kwargs
+  const visible = additionalKwargs?.[COORDINATOR_VISIBLE_USER_MESSAGE_KEY]
+  return typeof visible === "string" && visible.trim() ? visible : undefined
 }
 
 function serializeStreamData(data: unknown): unknown {
@@ -1019,11 +1102,13 @@ class StopHookContextCollector {
   private processMessagePayload(payload: unknown): void {
     const [msgChunk] = payload as [SerializedHookMessage]
     if (!msgChunk) return
+    if (isCoordinatorInternalNotificationMessage(msgChunk)) return
     const kwargs = msgChunk.kwargs || {}
     const classId = Array.isArray(msgChunk.id) ? msgChunk.id : []
     const className = classId[classId.length - 1] || ""
     const role = stopContextRole(className, kwargs)
-    const text = extractStopContextText(kwargs.content ?? msgChunk.content)
+    const visibleUserMessage = getCoordinatorVisibleUserMessage(msgChunk)
+    const text = visibleUserMessage ?? extractStopContextText(kwargs.content ?? msgChunk.content)
 
     if (role === "user" && text.trim() && !isStopHookRevisionPrompt(text)) {
       this.userMessage = text.trim()
@@ -1047,11 +1132,18 @@ class StopHookContextCollector {
     let lastUserIndex = -1
     for (let i = state.messages.length - 1; i >= 0; i--) {
       const msg = state.messages[i]
+      if (isCoordinatorInternalNotificationMessage(msg)) {
+        lastUserIndex = i
+        break
+      }
       const kwargs = msg?.kwargs || {}
       const classId = Array.isArray(msg?.id) ? msg.id : []
       const className = classId[classId.length - 1] || ""
       if (stopContextRole(className, kwargs) !== "user") continue
-      const text = extractStopContextText(kwargs.content ?? msg.content).trim()
+      const visibleUserMessage = getCoordinatorVisibleUserMessage(msg)
+      const text = (
+        visibleUserMessage ?? extractStopContextText(kwargs.content ?? msg.content)
+      ).trim()
       if (text && !isStopHookRevisionPrompt(text)) {
         this.userMessage = text
         lastUserIndex = i
@@ -1896,7 +1988,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       let clearCoordinatorNotificationSelectedSkillsOnExit = false
       const consumedCoordinatorNotificationIds = new Set<string>()
       const trackedCoordinatorNotificationIds = new Set<string>()
-      const stopContextCollector = new StopHookContextCollector(message)
+      const stopContextCollector = new StopHookContextCollector(
+        isTrustedCoordinatorNotificationInvoke ? undefined : message
+      )
 
       const sendHookNotice = (notice: string): void => {
         safeSendToWindow(window, channel, {
@@ -1923,8 +2017,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
       }
       const onCoordinatorNotificationAction = (notificationIds: string[]): void => {
+        // Notification acknowledgement is batch-based after a successful turn.
+        // These ids remain useful for traceability and for notification-selected
+        // skill routing inside coordinator worker tool calls.
         if (drainedCoordinatorNotifications.length > 0) {
-          const drainedIds = new Set(drainedCoordinatorNotifications.map((notification) => notification.id))
+          const drainedIds = new Set(
+            drainedCoordinatorNotifications.map((notification) => notification.id)
+          )
           const validNotificationIds = notificationIds
             .map((notificationId) => notificationId.trim())
             .filter((notificationId) => notificationId.length > 0 && drainedIds.has(notificationId))
@@ -1937,41 +2036,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
 
       const settleDrainedCoordinatorNotifications = async (
-        mode: "ack" | "restore" | "auto"
+        mode: "ack" | "restore"
       ): Promise<void> => {
         if (coordinatorNotificationsConsumed || drainedCoordinatorNotifications.length === 0) {
           return
         }
-        if (mode === "ack") {
-          await coordinatorWorkerManager.acknowledgeNotificationMessages(
-            threadId,
-            drainedCoordinatorNotifications.map((notification) => notification.message)
-          )
-        } else if (mode === "restore") {
-          coordinatorWorkerManager.restoreNotifications(
-            threadId,
-            drainedCoordinatorNotifications.map((notification) => notification.message)
-          )
-        } else {
-          const acknowledgedNotifications = drainedCoordinatorNotifications.filter((notification) =>
-            consumedCoordinatorNotificationIds.has(notification.id)
-          )
-          const restoredNotifications = drainedCoordinatorNotifications.filter(
-            (notification) => !consumedCoordinatorNotificationIds.has(notification.id)
-          )
-          if (acknowledgedNotifications.length > 0) {
-            await coordinatorWorkerManager.acknowledgeNotificationMessages(
-              threadId,
-              acknowledgedNotifications.map((notification) => notification.message)
-            )
-          }
-          if (restoredNotifications.length > 0) {
-            coordinatorWorkerManager.restoreNotifications(
-              threadId,
-              restoredNotifications.map((notification) => notification.message)
-            )
-          }
-        }
+        await settleCoordinatorTurnNotifications(
+          threadId,
+          drainedCoordinatorNotifications,
+          consumedCoordinatorNotificationIds,
+          mode
+        )
         drainedCoordinatorNotifications = []
         consumedCoordinatorNotificationIds.clear()
         coordinatorNotificationsConsumed = true
@@ -2060,7 +2135,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const isTrustedCoordinatorNotificationRequest =
           coordinatorInternalNotification === true && hasCoordinatorNotificationPrefix
         const isCoordinatorNotificationTurn =
-          isTrustedCoordinatorNotificationRequest && coordinatorWorkerManager.hasNotifications(threadId)
+          isTrustedCoordinatorNotificationRequest &&
+          coordinatorWorkerManager.hasNotifications(threadId)
 
         if (isTrustedCoordinatorNotificationRequest && !isCoordinatorNotificationTurn) {
           console.log("[CoordinatorMode] ignoring stale internal worker notification turn", {
@@ -2140,10 +2216,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           coordinatorRequest.source === "environment"
         const coordinatorFromMetadata =
           coordinatorRequest.enabled && coordinatorRequest.source === "metadata"
-        const effectiveAgentMode: AgentMode =
-          coordinatorForcedByRequest
-            ? "coordinator"
-            : (requestedMode ?? (coordinatorFromMetadata ? "coordinator" : metadataAgentMode))
+        const effectiveAgentMode: AgentMode = coordinatorForcedByRequest
+          ? "coordinator"
+          : (requestedMode ?? (coordinatorFromMetadata ? "coordinator" : metadataAgentMode))
         if (
           isCoordinatorNotificationTurn &&
           hasExplicitNormalAgentMode &&
@@ -2278,13 +2353,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             },
             onUpdateKey: channel
           })
-          const { queuedNotifications: notifications, promptNotifications, notificationSelectedSkills } =
-            await prepareQueuedCoordinatorNotificationsForPrompt(threadId, () => {
-              safeSendToWindow(window, channel, {
-                type: "custom",
-                data: { type: "coordinator_notification_deferred" }
-              })
+          const {
+            queuedNotifications: notifications,
+            promptNotifications,
+            notificationSelectedSkills
+          } = await prepareQueuedCoordinatorNotificationsForPrompt(threadId, () => {
+            safeSendToWindow(window, channel, {
+              type: "custom",
+              data: { type: "coordinator_notification_deferred" }
             })
+          })
           drainedCoordinatorNotifications = promptNotifications
           coordinatorNotificationsConsumed = promptNotifications.length === 0
           coordinatorNotificationSelectedSkills = notificationSelectedSkills
@@ -2312,10 +2390,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 )
               : workers
           const runningWorkerContext = renderCoordinatorWorkerContext(workersForPromptContext)
-          coordinatorTurnPrompt = buildCoordinatorTurnContextPrompt(
-            promptNotifications,
-            runningWorkerContext
-          )
+          coordinatorTurnPrompt = buildCoordinatorTurnContextPrompt(runningWorkerContext)
+          if (promptNotifications.length > 0) {
+            effectiveMessage = buildCoordinatorHumanMessageContent(
+              effectiveMessage,
+              promptNotifications,
+              isCoordinatorNotificationTurn
+            )
+          }
           activeCoordinatorTurnPrompts.set(threadId, coordinatorTurnPrompt)
           if (
             workers.length > 0 ||
@@ -2439,7 +2521,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                     [COORDINATOR_VISIBLE_USER_MESSAGE_KEY]: coordinatorVisibleUserMessage
                   }
                 }
-            : effectiveMessage
+              : effectiveMessage
         )
         const streamConfig = {
           configurable: { thread_id: threadId },
@@ -3069,7 +3151,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
         }
 
-        // eslint-disable-next-line no-constant-condition
         while (true) {
           try {
             await consumeStreamWithSideEffects(activeStream)
@@ -3126,7 +3207,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             abortSignal: abortController.signal,
             getStopContext: () =>
               stopContextCollector.snapshot({
-                userMessage: message,
+                userMessage: isCoordinatorNotificationTurn ? undefined : message,
                 assistantResponse: lastFinalText || assistantText.trim(),
                 toolCalls: toolCallCounter.getNames(),
                 usedSkills: skillUsageDetector.getUsedSkillNames()
@@ -3153,7 +3234,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           clearCoordinatorNotificationSelectedSkillsOnExit = true
           safeSendToWindow(window, channel, { type: "done" })
-          await settleDrainedCoordinatorNotifications("auto")
+          await settleDrainedCoordinatorNotifications("ack")
           notifyIfBackground("✅ 任务完成", lastFinalText || assistantText.trim() || "对话已完成")
 
           // Finish trace
@@ -3253,7 +3334,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
         }
       } catch (error) {
-        await settleDrainedCoordinatorNotifications("auto")
+        await settleDrainedCoordinatorNotifications("restore")
         // Ignore abort-related errors (expected when stream is cancelled)
         const isAbortError =
           error instanceof Error &&
@@ -3303,7 +3384,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
       } finally {
         window.removeListener("closed", onWindowClosed)
-        await settleDrainedCoordinatorNotifications("auto")
+        await settleDrainedCoordinatorNotifications("restore")
         if (clearCoordinatorNotificationSelectedSkillsOnExit) {
           const nextCoordinatorNotificationSelectedSkills =
             omitCoordinatorNotificationSelectedSkills(
@@ -3372,12 +3453,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const workspacePath = metadata.workspacePath as string | undefined
       const resumeCoordinatorRequest = resolveCoordinatorModeRequest("", metadata)
       const resumeForcedByEnvironment = resumeCoordinatorRequest.source === "environment"
-      const resumeAgentMode: AgentMode =
-        resumeForcedByEnvironment
-          ? "coordinator"
-          : requestedAgentMode === "coordinator" || requestedAgentMode === "normal"
-            ? requestedAgentMode
-            : getAgentModeFromMetadata(metadata)
+      const resumeAgentMode: AgentMode = resumeForcedByEnvironment
+        ? "coordinator"
+        : requestedAgentMode === "coordinator" || requestedAgentMode === "normal"
+          ? requestedAgentMode
+          : getAgentModeFromMetadata(metadata)
 
       if (
         !resumeForcedByEnvironment &&
@@ -3444,10 +3524,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         threadId,
         metadata
       )
-      let resumeCoordinatorExplicitSelectedSkill = getActiveOrPersistedCoordinatorExplicitSelectedSkill(
-        threadId,
-        metadata
-      )
+      const resumeCoordinatorExplicitSelectedSkill =
+        getActiveOrPersistedCoordinatorExplicitSelectedSkill(threadId, metadata)
       let resumeCoordinatorTurnPrompt = getActiveOrPersistedCoordinatorTurnPrompt(
         threadId,
         metadata
@@ -3500,7 +3578,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const onHookResult = makeHookResultCallback(window, channel)
 
       const settleResumeDrainedCoordinatorNotifications = async (
-        mode: "ack" | "restore" | "auto"
+        mode: "ack" | "restore"
       ): Promise<void> => {
         if (
           resumeCoordinatorNotificationsConsumed ||
@@ -3508,36 +3586,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         ) {
           return
         }
-        if (mode === "ack") {
-          await coordinatorWorkerManager.acknowledgeNotificationMessages(
-            threadId,
-            drainedResumeCoordinatorNotifications.map((notification) => notification.message)
-          )
-        } else if (mode === "restore") {
-          coordinatorWorkerManager.restoreNotifications(
-            threadId,
-            drainedResumeCoordinatorNotifications.map((notification) => notification.message)
-          )
-        } else {
-          const acknowledgedNotifications = drainedResumeCoordinatorNotifications.filter(
-            (notification) => consumedResumeCoordinatorNotificationIds.has(notification.id)
-          )
-          const restoredNotifications = drainedResumeCoordinatorNotifications.filter(
-            (notification) => !consumedResumeCoordinatorNotificationIds.has(notification.id)
-          )
-          if (acknowledgedNotifications.length > 0) {
-            await coordinatorWorkerManager.acknowledgeNotificationMessages(
-              threadId,
-              acknowledgedNotifications.map((notification) => notification.message)
-            )
-          }
-          if (restoredNotifications.length > 0) {
-            coordinatorWorkerManager.restoreNotifications(
-              threadId,
-              restoredNotifications.map((notification) => notification.message)
-            )
-          }
-        }
+        await settleCoordinatorTurnNotifications(
+          threadId,
+          drainedResumeCoordinatorNotifications,
+          consumedResumeCoordinatorNotificationIds,
+          mode
+        )
+        drainedResumeCoordinatorNotifications = []
+        consumedResumeCoordinatorNotificationIds.clear()
         resumeCoordinatorNotificationsConsumed = true
       }
 
@@ -3551,23 +3607,23 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           },
           onUpdateKey: channel
         })
-        const {
-          queuedNotifications,
-          promptNotifications,
-          notificationSelectedSkills
-        } = await prepareQueuedCoordinatorNotificationsForPrompt(threadId, () => {
-          safeSendToWindow(window, channel, {
-            type: "custom",
-            data: { type: "coordinator_notification_deferred" }
-          })
-        })
-        drainedResumeCoordinatorNotifications = promptNotifications
-        resumeCoordinatorNotificationsConsumed = promptNotifications.length === 0
+        // Do not drain or inject worker notifications while resuming a paused
+        // tool flow. We only peek so a resumed tool call that already contains
+        // consumed_notification_ids can acknowledge the matching queued
+        // notification after it performs its durable side effect.
+        drainedResumeCoordinatorNotifications = toCoordinatorTurnNotifications(
+          coordinatorWorkerManager.peekNotifications(threadId)
+        )
+        resumeCoordinatorNotificationsConsumed = drainedResumeCoordinatorNotifications.length === 0
+        const peekedNotificationSelectedSkills = await buildCoordinatorNotificationSelectedSkills(
+          threadId,
+          drainedResumeCoordinatorNotifications
+        )
         resumeCoordinatorNotificationSelectedSkills = {
           ...resumeCoordinatorNotificationSelectedSkills,
-          ...notificationSelectedSkills
+          ...peekedNotificationSelectedSkills
         }
-        for (const notificationId of Object.keys(notificationSelectedSkills)) {
+        for (const notificationId of Object.keys(peekedNotificationSelectedSkills)) {
           trackedResumeCoordinatorNotificationIds.add(notificationId)
         }
         if (!resumeCoordinatorSelectedSkill) {
@@ -3575,19 +3631,25 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             resumeCoordinatorNotificationSelectedSkills
           )
         }
-        const workers = coordinatorWorkerManager.readWorkers(threadId)
-        const workersForPromptContext =
-          queuedNotifications.length > 0
-            ? workers.filter(
-                (worker) => worker.status === "running" || worker.notification_acknowledged !== false
-              )
-            : workers
+        const workers = coordinatorWorkerManager
+          .readWorkers(threadId)
+          .filter(
+            (worker) => worker.status === "running" || worker.notification_acknowledged !== false
+          )
+        // HITL resume may be paused immediately after an AI tool_call. Do not
+        // inject notification HumanMessages here: providers require ToolMessage
+        // results to follow tool_calls without an intervening user message. Also
+        // avoid draining new worker notifications on resume: the resumed model is
+        // primarily completing the pending tool flow, so pending notifications
+        // should stay queued for the next normal/internal coordinator turn.
         resumeCoordinatorTurnPrompt = buildCoordinatorTurnContextPrompt(
-          promptNotifications,
-          renderCoordinatorWorkerContext(workersForPromptContext)
+          renderCoordinatorWorkerContext(workers)
         )
         activeCoordinatorSelectedSkills.set(threadId, resumeCoordinatorSelectedSkill)
-        activeCoordinatorExplicitSelectedSkills.set(threadId, resumeCoordinatorExplicitSelectedSkill)
+        activeCoordinatorExplicitSelectedSkills.set(
+          threadId,
+          resumeCoordinatorExplicitSelectedSkill
+        )
         activeCoordinatorTurnPrompts.set(threadId, resumeCoordinatorTurnPrompt)
         activeCoordinatorNotificationSelectedSkills.set(
           threadId,
@@ -3816,7 +3878,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
         }
 
-        // eslint-disable-next-line no-constant-condition
         while (true) {
           try {
             await consumeResumeStream(activeResumeStream)
@@ -3890,6 +3951,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
           safeSendToWindow(window, channel, { type: "done" })
+          await settleResumeDrainedCoordinatorNotifications("restore")
         }
       } catch (error) {
         const isAbortError =
@@ -3908,7 +3970,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
       } finally {
         window.removeListener("closed", onWindowClosed)
-        await settleResumeDrainedCoordinatorNotifications("auto")
+        await settleResumeDrainedCoordinatorNotifications("restore")
         if (clearResumeCoordinatorNotificationSelectedSkillsOnExit) {
           const nextResumeCoordinatorNotificationSelectedSkills =
             omitCoordinatorNotificationSelectedSkills(
@@ -4007,7 +4069,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       threadId,
       metadata
     )
-    let interruptCoordinatorExplicitSelectedSkill =
+    const interruptCoordinatorExplicitSelectedSkill =
       getActiveOrPersistedCoordinatorExplicitSelectedSkill(threadId, metadata)
     let interruptCoordinatorTurnPrompt = getActiveOrPersistedCoordinatorTurnPrompt(
       threadId,
@@ -4061,7 +4123,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     const onHookResult = makeHookResultCallback(window, channel)
 
     const settleInterruptDrainedCoordinatorNotifications = async (
-      mode: "ack" | "restore" | "auto"
+      mode: "ack" | "restore"
     ): Promise<void> => {
       if (
         interruptCoordinatorNotificationsConsumed ||
@@ -4069,36 +4131,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       ) {
         return
       }
-      if (mode === "ack") {
-        await coordinatorWorkerManager.acknowledgeNotificationMessages(
-          threadId,
-          drainedInterruptCoordinatorNotifications.map((notification) => notification.message)
-        )
-      } else if (mode === "restore") {
-        coordinatorWorkerManager.restoreNotifications(
-          threadId,
-          drainedInterruptCoordinatorNotifications.map((notification) => notification.message)
-        )
-      } else {
-        const acknowledgedNotifications = drainedInterruptCoordinatorNotifications.filter(
-          (notification) => consumedInterruptCoordinatorNotificationIds.has(notification.id)
-        )
-        const restoredNotifications = drainedInterruptCoordinatorNotifications.filter(
-          (notification) => !consumedInterruptCoordinatorNotificationIds.has(notification.id)
-        )
-        if (acknowledgedNotifications.length > 0) {
-          await coordinatorWorkerManager.acknowledgeNotificationMessages(
-            threadId,
-            acknowledgedNotifications.map((notification) => notification.message)
-          )
-        }
-        if (restoredNotifications.length > 0) {
-          coordinatorWorkerManager.restoreNotifications(
-            threadId,
-            restoredNotifications.map((notification) => notification.message)
-          )
-        }
-      }
+      await settleCoordinatorTurnNotifications(
+        threadId,
+        drainedInterruptCoordinatorNotifications,
+        consumedInterruptCoordinatorNotificationIds,
+        mode
+      )
+      drainedInterruptCoordinatorNotifications = []
+      consumedInterruptCoordinatorNotificationIds.clear()
       interruptCoordinatorNotificationsConsumed = true
     }
 
@@ -4112,23 +4152,24 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         },
         onUpdateKey: channel
       })
-      const {
-        queuedNotifications,
-        promptNotifications,
-        notificationSelectedSkills
-      } = await prepareQueuedCoordinatorNotificationsForPrompt(threadId, () => {
-        safeSendToWindow(window, channel, {
-          type: "custom",
-          data: { type: "coordinator_notification_deferred" }
-        })
-      })
-      drainedInterruptCoordinatorNotifications = promptNotifications
-      interruptCoordinatorNotificationsConsumed = promptNotifications.length === 0
+      // Do not drain or inject worker notifications while approving/rejecting a
+      // HITL interrupt. Peek instead so a resumed tool call with
+      // consumed_notification_ids can acknowledge only the notification it
+      // actually acted on; all others remain queued for the next coordinator turn.
+      drainedInterruptCoordinatorNotifications = toCoordinatorTurnNotifications(
+        coordinatorWorkerManager.peekNotifications(threadId)
+      )
+      interruptCoordinatorNotificationsConsumed =
+        drainedInterruptCoordinatorNotifications.length === 0
+      const peekedNotificationSelectedSkills = await buildCoordinatorNotificationSelectedSkills(
+        threadId,
+        drainedInterruptCoordinatorNotifications
+      )
       interruptCoordinatorNotificationSelectedSkills = {
         ...interruptCoordinatorNotificationSelectedSkills,
-        ...notificationSelectedSkills
+        ...peekedNotificationSelectedSkills
       }
-      for (const notificationId of Object.keys(notificationSelectedSkills)) {
+      for (const notificationId of Object.keys(peekedNotificationSelectedSkills)) {
         trackedInterruptCoordinatorNotificationIds.add(notificationId)
       }
       if (!interruptCoordinatorSelectedSkill) {
@@ -4136,16 +4177,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           interruptCoordinatorNotificationSelectedSkills
         )
       }
-      const workers = coordinatorWorkerManager.readWorkers(threadId)
-      const workersForPromptContext =
-        queuedNotifications.length > 0
-          ? workers.filter(
-              (worker) => worker.status === "running" || worker.notification_acknowledged !== false
-            )
-          : workers
+      const workers = coordinatorWorkerManager
+        .readWorkers(threadId)
+        .filter(
+          (worker) => worker.status === "running" || worker.notification_acknowledged !== false
+        )
+      // Like resume, interrupt approval can continue from a checkpoint whose
+      // last AIMessage has pending tool_calls. Do not drain queued worker
+      // notifications here; let the next normal/internal coordinator turn
+      // deliver them through the notification-first path.
       interruptCoordinatorTurnPrompt = buildCoordinatorTurnContextPrompt(
-        promptNotifications,
-        renderCoordinatorWorkerContext(workersForPromptContext)
+        renderCoordinatorWorkerContext(workers)
       )
       activeCoordinatorSelectedSkills.set(threadId, interruptCoordinatorSelectedSkill)
       activeCoordinatorExplicitSelectedSkills.set(
@@ -4174,11 +4216,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       )
       const coordinatorTurnPromptMetadataChanged =
         persistedInterruptCoordinatorTurnPrompt !== interruptCoordinatorTurnPrompt
-      const notificationSelectedSkillsMetadataChanged =
-        !coordinatorNotificationSelectedSkillsEqual(
-          persistedInterruptCoordinatorNotificationSelectedSkills,
-          interruptCoordinatorNotificationSelectedSkills
-        )
+      const notificationSelectedSkillsMetadataChanged = !coordinatorNotificationSelectedSkillsEqual(
+        persistedInterruptCoordinatorNotificationSelectedSkills,
+        interruptCoordinatorNotificationSelectedSkills
+      )
       if (selectedSkillMetadataChanged) {
         if (interruptCoordinatorSelectedSkill) {
           metadata.coordinatorSelectedSkill = interruptCoordinatorSelectedSkill
@@ -4267,8 +4308,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               coordinatorTurnPrompt: interruptCoordinatorTurnPrompt,
               coordinatorSelectedSkill: interruptCoordinatorSelectedSkill,
               coordinatorExplicitSelectedSkill: interruptCoordinatorExplicitSelectedSkill,
-              coordinatorNotificationSelectedSkills:
-                interruptCoordinatorNotificationSelectedSkills,
+              coordinatorNotificationSelectedSkills: interruptCoordinatorNotificationSelectedSkills,
               abortSignal: abortController.signal,
               noSkillEvolutionTool: true,
               agentMode: interruptAgentMode,
@@ -4371,7 +4411,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
         }
 
-        // eslint-disable-next-line no-constant-condition
         while (true) {
           try {
             await consumeInterruptStream(activeIntStream)
@@ -4398,8 +4437,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               coordinatorTurnPrompt: interruptCoordinatorTurnPrompt,
               coordinatorSelectedSkill: interruptCoordinatorSelectedSkill,
               coordinatorExplicitSelectedSkill: interruptCoordinatorExplicitSelectedSkill,
-              coordinatorNotificationSelectedSkills:
-                interruptCoordinatorNotificationSelectedSkills,
+              coordinatorNotificationSelectedSkills: interruptCoordinatorNotificationSelectedSkills,
               abortSignal: abortController.signal,
               noSkillEvolutionTool: true,
               agentMode: interruptAgentMode,
@@ -4443,6 +4481,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           clearInterruptCoordinatorNotificationSelectedSkillsOnExit = true
           safeSendToWindow(window, channel, { type: "done" })
+          await settleInterruptDrainedCoordinatorNotifications("restore")
         }
       } else if (decision.type === "reject") {
         // For reject, we need to send a Command with reject decision
@@ -4468,7 +4507,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
     } finally {
       window.removeListener("closed", onWindowClosed)
-      await settleInterruptDrainedCoordinatorNotifications("auto")
+      await settleInterruptDrainedCoordinatorNotifications("restore")
       if (clearInterruptCoordinatorNotificationSelectedSkillsOnExit) {
         const nextInterruptCoordinatorNotificationSelectedSkills =
           omitCoordinatorNotificationSelectedSkills(

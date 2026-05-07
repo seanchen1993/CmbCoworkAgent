@@ -30,6 +30,29 @@ function assertNotIncludes(value: string, unexpected: string, label: string): vo
   assert(!value.includes(unexpected), `${label}: expected not to include "${unexpected}"`)
 }
 
+function toolSchemaText(tool: unknown): string {
+  const seen = new Set<object>()
+  const visit = (value: unknown, depth = 0): string[] => {
+    if (typeof value === "string") return [value]
+    if (!value || typeof value !== "object" || depth > 6) return []
+    if (seen.has(value)) return []
+    seen.add(value)
+    const entries: string[] = []
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key === "symbol") continue
+      let child: unknown
+      try {
+        child = (value as Record<string, unknown>)[key]
+      } catch {
+        continue
+      }
+      entries.push(...visit(child, depth + 1))
+    }
+    return entries
+  }
+  return visit((tool as { schema?: unknown }).schema).join("\n")
+}
+
 async function invokeTool(tool: unknown, input: Record<string, unknown>): Promise<string> {
   const result = await (tool as { invoke: (args: unknown) => Promise<unknown> }).invoke(input)
   return typeof result === "string" ? result : JSON.stringify(result)
@@ -73,7 +96,10 @@ async function testModeDetection(): Promise<void> {
   assert(metadata.shouldPersist === false, "metadata mode should not force a metadata rewrite")
 
   const legacyHarnessPrefix = resolveCoordinatorModeRequest("[harness] build a todo app", {})
-  assert(legacyHarnessPrefix.enabled === false, "legacy harness prefix should not enable coordinator")
+  assert(
+    legacyHarnessPrefix.enabled === false,
+    "legacy harness prefix should not enable coordinator"
+  )
   assert(
     legacyHarnessPrefix.message === "[harness] build a todo app",
     "legacy harness prefix should remain normal text"
@@ -134,21 +160,21 @@ async function testPromptContracts(): Promise<void> {
   assertIncludes(prompt, "start_worker", "coordinator prompt")
   assertIncludes(prompt, "continue_worker", "coordinator prompt")
   assertIncludes(prompt, "cancel_worker", "coordinator prompt")
-  assertIncludes(prompt, "read_worker_state", "coordinator prompt")
-  assertIncludes(prompt, "read_worker_result", "coordinator prompt")
+  assertNotIncludes(prompt, "read_worker_state", "coordinator prompt")
+  assertNotIncludes(prompt, "read_worker_result", "coordinator prompt")
   assertIncludes(
     prompt,
     "coordinator main thread does not load full skill instructions",
     "coordinator prompt"
   )
   assertIncludes(prompt, "delegate skill invocations to workers", "coordinator prompt")
-  assertIncludes(prompt, "summary is insufficient", "coordinator prompt")
+  assertIncludes(prompt, "bounded <result> handoff", "coordinator prompt")
+  assertIncludes(prompt, 'prefer workload="read_only"', "coordinator prompt")
   assertIncludes(prompt, "Worker Notifications", "coordinator prompt")
   assertIncludes(prompt, "Use the task-id as the worker_id", "coordinator prompt")
   assertIncludes(prompt, "notification_id", "coordinator prompt")
-  assertIncludes(prompt, "consumed_notification_ids", "coordinator prompt")
-  assertIncludes(prompt, "mark_notifications_handled", "coordinator prompt")
-  assertIncludes(prompt, "Do not call read_worker_state repeatedly", "coordinator prompt")
+  assertIncludes(prompt, "marked handled after a successful coordinator turn", "coordinator prompt")
+  assertNotIncludes(prompt, "mark_notifications_handled", "coordinator prompt")
   assertIncludes(
     prompt,
     'workload="verify" for independent verification',
@@ -169,26 +195,41 @@ async function testPromptContracts(): Promise<void> {
     "may write only to /tmp or $TMPDIR",
     "coordinator prompt should align verifier command execution with Claude Code tmp-only write guidance"
   )
-  assertIncludes(
+  assertNotIncludes(
     prompt,
-    "omitted for a write worker, it is treated as owning the whole workspace",
-    "coordinator prompt should explain omitted owned_files write-worker semantics"
+    "owned_files",
+    "coordinator prompt should not expose owned_files to the model"
   )
   assertIncludes(
     prompt,
-    "If the same write worker must run build/test/browser checks itself, omit owned_files",
-    "coordinator prompt should distinguish scoped editors from unrestricted writers"
-  )
-  assertIncludes(
-    prompt,
-    "shell execution, browser_playwright, and deferred execution are disabled",
-    "coordinator prompt should explain why owned_files writers cannot self-run runtime checks"
+    "write workers receive normal workspace write access",
+    "coordinator prompt should align write workers with Claude Code-style whole-workspace workers"
   )
   assertIncludes(prompt, "Launch independent read-only workers in parallel", "coordinator prompt")
+  assertIncludes(prompt, "Do not serialize independent discovery work", "coordinator prompt")
   assertIncludes(prompt, "Keep write-heavy workers one at a time", "coordinator prompt")
+  assertIncludes(prompt, "Do not use one worker to check on another worker", "coordinator prompt")
+  assertIncludes(prompt, "Never fabricate or predict worker results", "coordinator prompt")
+  assertIncludes(prompt, "give status only", "coordinator prompt")
+  assertIncludes(prompt, "Do not start duplicate work", "coordinator prompt")
+  assertIncludes(prompt, "Continue vs spawn guidance", "coordinator prompt")
+  assertIncludes(prompt, "Cancelled workers cannot be continued in CmbCowork", "coordinator prompt")
+  assertIncludes(prompt, ".cmbdevclaw/coordinator/thread-123/scratchpad", "coordinator prompt")
+  assertIncludes(
+    prompt,
+    "Normal tool availability, approval, hook, and access limits still apply",
+    "coordinator prompt"
+  )
   assertIncludes(prompt, "Workers cannot see your conversation", "coordinator prompt")
+  assertIncludes(prompt, "State the source of the task", "coordinator prompt")
+  assertIncludes(prompt, "Source notification", "coordinator prompt")
+  assertIncludes(prompt, "notification-to-skill routing deterministic", "coordinator prompt")
   assertIncludes(prompt, "Never write lazy prompts", "coordinator prompt")
-  assertIncludes(prompt, "Do not report success from implementer output alone", "coordinator prompt")
+  assertIncludes(
+    prompt,
+    "Do not report success from implementer output alone",
+    "coordinator prompt"
+  )
   assertIncludes(prompt, "concrete evidence", "coordinator prompt")
   assertIncludes(prompt, "Current time: 2026-04-28T16:30:00+08:00", "coordinator prompt")
   assertIncludes(prompt, "Do not invent dates or timestamps", "coordinator prompt")
@@ -208,14 +249,38 @@ async function testPromptContracts(): Promise<void> {
     "Use the /<skill name> skill",
     "coordinator prompt should match Claude Code skill delegation wording"
   )
-  assertNotIncludes(prompt, "worker_type", "coordinator prompt should not expose old worker_type API")
+  assertNotIncludes(
+    prompt,
+    "worker_type",
+    "coordinator prompt should not expose old worker_type API"
+  )
   assertNotIncludes(prompt, "Call task", "coordinator prompt should not tell model to use task")
-  assertNotIncludes(prompt, "read_harness_state", "coordinator prompt should not expose old state tools")
-  assertNotIncludes(prompt, "write_harness_state", "coordinator prompt should not expose old state tools")
-  assertNotIncludes(prompt, "check_verification_gate", "coordinator prompt should not expose old gate")
+  assertNotIncludes(
+    prompt,
+    "read_harness_state",
+    "coordinator prompt should not expose old state tools"
+  )
+  assertNotIncludes(
+    prompt,
+    "write_harness_state",
+    "coordinator prompt should not expose old state tools"
+  )
+  assertNotIncludes(
+    prompt,
+    "check_verification_gate",
+    "coordinator prompt should not expose old gate"
+  )
   assertNotIncludes(prompt, "spec.md", "coordinator prompt should not require old spec file")
-  assertNotIncludes(prompt, "contract.json", "coordinator prompt should not require old contract file")
-  assertNotIncludes(prompt, "progress.md", "coordinator prompt should not require old progress file")
+  assertNotIncludes(
+    prompt,
+    "contract.json",
+    "coordinator prompt should not require old contract file"
+  )
+  assertNotIncludes(
+    prompt,
+    "progress.md",
+    "coordinator prompt should not require old progress file"
+  )
   assertNotIncludes(
     prompt,
     "reports/implementer-latest.json",
@@ -257,10 +322,13 @@ async function testPromptContracts(): Promise<void> {
   assertIncludes(taskPrompt, 'subagent_type="worker"', "task prompt")
   assertIncludes(taskPrompt, 'role="verifier"', "task prompt")
   assertIncludes(taskPrompt, "Launch independent read-only workers in parallel", "task prompt")
-  assertIncludes(
+  assertIncludes(taskPrompt, "Scratchpad directory", "task prompt")
+  assertIncludes(taskPrompt, ".cmbdevclaw/coordinator/thread-123/scratchpad", "task prompt")
+  assertIncludes(taskPrompt, "Cancelled workers are final", "task prompt")
+  assertNotIncludes(
     taskPrompt,
-    "If the same write worker must run build/test/browser checks itself, omit owned_files",
-    "task prompt should tell the coordinator when to use unrestricted write workers"
+    "owned_files",
+    "task prompt should not expose owned_files to the model"
   )
   assertIncludes(taskPrompt, "Do not poll workers", "task prompt")
   assertIncludes(taskPrompt, "end the turn", "task prompt")
@@ -314,16 +382,8 @@ async function testSkillUseDelegation(): Promise<void> {
     "First use read_file to read /tmp/skills/release-notes/SKILL.md",
     "coordinator skill delegation"
   )
-  assertIncludes(
-    adapted,
-    "strictly follow that SKILL.md",
-    "coordinator skill delegation"
-  )
-  assertIncludes(
-    adapted,
-    "Worker runtimes receive enabled skills",
-    "coordinator skill delegation"
-  )
+  assertIncludes(adapted, "strictly follow that SKILL.md", "coordinator skill delegation")
+  assertIncludes(adapted, "Worker runtimes receive enabled skills", "coordinator skill delegation")
   assertNotIncludes(adapted, "<CMBDEVCLAW-SKILL-USE-V1>", "coordinator skill delegation")
 
   const literalText = "用户正文里提到 <CMBDEVCLAW-SKILL-USE-V1> 但没有尾部协议块"
@@ -360,7 +420,7 @@ async function testSelectedSkillPromptInjection(): Promise<void> {
           parent_thread_id: "thread-123",
           role: input.role,
           workload: input.workload ?? "write",
-          owned_files: input.ownedFiles ?? [],
+          owned_files: [],
           description: input.description,
           status: "running",
           turns: 1,
@@ -378,7 +438,7 @@ async function testSelectedSkillPromptInjection(): Promise<void> {
           parent_thread_id: "thread-123",
           role: "implementer",
           workload: input.workload ?? "write",
-          owned_files: input.ownedFiles ?? [],
+          owned_files: [],
           description: "continued",
           status: "running",
           turns: 2,
@@ -387,12 +447,6 @@ async function testSelectedSkillPromptInjection(): Promise<void> {
           tool_call_count: 0,
           last_event: "Worker continued."
         } as never
-      },
-      async readWorkerState() {
-        return [] as never
-      },
-      async readWorkerResult() {
-        throw new Error("unused")
       },
       async cancelWorker() {
         return [] as never
@@ -437,7 +491,7 @@ async function testSelectedSkillPromptInjection(): Promise<void> {
           parent_thread_id: "thread-123",
           role: input.role,
           workload: input.workload ?? "verify",
-          owned_files: input.ownedFiles ?? [],
+          owned_files: [],
           description: input.description,
           status: "running",
           turns: 1,
@@ -455,7 +509,7 @@ async function testSelectedSkillPromptInjection(): Promise<void> {
           parent_thread_id: "thread-123",
           role: "implementer",
           workload: input.workload ?? "write",
-          owned_files: input.ownedFiles ?? [],
+          owned_files: [],
           description: "continued",
           status: "running",
           turns: 2,
@@ -464,12 +518,6 @@ async function testSelectedSkillPromptInjection(): Promise<void> {
           tool_call_count: 0,
           last_event: "Worker continued."
         } as never
-      },
-      async readWorkerState() {
-        return [] as never
-      },
-      async readWorkerResult() {
-        throw new Error("unused")
       },
       async cancelWorker() {
         return [] as never
@@ -491,11 +539,7 @@ async function testSelectedSkillPromptInjection(): Promise<void> {
     "selected skill should be injected for direct worker start/continue"
   )
   for (const prompt of [...delegatedPrompts, ...notificationDelegatedPrompts]) {
-    assertIncludes(
-      prompt,
-      "[[CMB_COORDINATOR_SELECTED_SKILL_V1]]",
-      "selected skill worker prompt"
-    )
+    assertIncludes(prompt, "[[CMB_COORDINATOR_SELECTED_SKILL_V1]]", "selected skill worker prompt")
     assertIncludes(
       prompt,
       "The user explicitly selected the /release-notes skill",
@@ -530,7 +574,7 @@ async function testSelectedSkillPromptInjection(): Promise<void> {
           parent_thread_id: "thread-123",
           role: input.role,
           workload: input.workload ?? "write",
-          owned_files: input.ownedFiles ?? [],
+          owned_files: [],
           description: input.description,
           status: "running",
           turns: 1,
@@ -543,18 +587,14 @@ async function testSelectedSkillPromptInjection(): Promise<void> {
       async continueWorker() {
         return [] as never
       },
-      async readWorkerState() {
-        return [] as never
-      },
-      async readWorkerResult() {
-        throw new Error("unused")
-      },
       async cancelWorker() {
         return [] as never
       }
     }
   })
-  const explicitFallbackStartTool = explicitFallbackTools.find((tool) => tool.name === "start_worker")
+  const explicitFallbackStartTool = explicitFallbackTools.find(
+    (tool) => tool.name === "start_worker"
+  )
   assert(explicitFallbackStartTool, "explicit selected skill fallback test requires start_worker")
   await invokeTool(explicitFallbackStartTool, {
     subagent_type: "worker",
@@ -600,7 +640,7 @@ async function testSelectedSkillPromptInjection(): Promise<void> {
           parent_thread_id: "thread-123",
           role: input.role,
           workload: input.workload ?? "write",
-          owned_files: input.ownedFiles ?? [],
+          owned_files: [],
           description: input.description,
           status: "running",
           turns: 1,
@@ -618,7 +658,7 @@ async function testSelectedSkillPromptInjection(): Promise<void> {
           parent_thread_id: "thread-123",
           role: "implementer",
           workload: input.workload ?? "write",
-          owned_files: input.ownedFiles ?? [],
+          owned_files: [],
           description: "continued",
           status: "running",
           turns: 2,
@@ -628,18 +668,14 @@ async function testSelectedSkillPromptInjection(): Promise<void> {
           last_event: "Worker continued."
         } as never
       },
-      async readWorkerState() {
-        return [] as never
-      },
-      async readWorkerResult() {
-        throw new Error("unused")
-      },
       async cancelWorker() {
         return [] as never
       }
     }
   })
-  const mixedNotificationStartTool = mixedNotificationTools.find((tool) => tool.name === "start_worker")
+  const mixedNotificationStartTool = mixedNotificationTools.find(
+    (tool) => tool.name === "start_worker"
+  )
   assert(mixedNotificationStartTool, "mixed notification test requires start_worker")
   await invokeTool(mixedNotificationStartTool, {
     subagent_type: "worker",
@@ -700,7 +736,11 @@ async function testSubagentDefinitions(): Promise<void> {
     "implementer prompt should require honest handoffs from scoped writers"
   )
   assertIncludes(implementer.systemPrompt, "PROJECT_RULE", "implementer prompt")
-  assertIncludes(implementer.systemPrompt, "Current time: 2026-04-28T16:30:00+08:00", "implementer prompt")
+  assertIncludes(
+    implementer.systemPrompt,
+    "Current time: 2026-04-28T16:30:00+08:00",
+    "implementer prompt"
+  )
   assertNotIncludes(implementer.systemPrompt, "spec.md", "implementer prompt")
   assertNotIncludes(implementer.systemPrompt, "contract.json", "implementer prompt")
   assertNotIncludes(implementer.systemPrompt, "progress.md", "implementer prompt")
@@ -713,7 +753,11 @@ async function testSubagentDefinitions(): Promise<void> {
   assertIncludes(verifier.systemPrompt, "STATUS (PASS/FAIL/BLOCKED)", "verifier prompt")
   assertIncludes(verifier.systemPrompt, "CHECKED_FILES", "verifier prompt")
   assertIncludes(verifier.systemPrompt, "PROJECT_RULE", "verifier prompt")
-  assertIncludes(verifier.systemPrompt, "Current time: 2026-04-28T16:30:00+08:00", "verifier prompt")
+  assertIncludes(
+    verifier.systemPrompt,
+    "Current time: 2026-04-28T16:30:00+08:00",
+    "verifier prompt"
+  )
   assertNotIncludes(verifier.systemPrompt, "latest-verification.json", "verifier prompt")
   assertNotIncludes(verifier.systemPrompt, "check_verification_gate", "verifier prompt")
 
@@ -762,7 +806,7 @@ async function testAsyncWorkerTools(): Promise<void> {
     workerTools: {
       async startWorker(input) {
         calls.push(
-          `start:${input.role}:${input.workload ?? ""}:${(input.ownedFiles ?? []).join(",")}:${input.description}:${input.prompt}`
+          `start:${input.role}:${input.workload ?? ""}::${input.description}:${input.prompt}`
         )
         const worker = {
           worker_id: "implementer-1",
@@ -775,9 +819,7 @@ async function testAsyncWorkerTools(): Promise<void> {
         return worker as never
       },
       async continueWorker(input) {
-        calls.push(
-          `continue:${input.workerId}:${input.workload ?? ""}:${(input.ownedFiles ?? []).join(",")}:${input.prompt}`
-        )
+        calls.push(`continue:${input.workerId}:${input.workload ?? ""}::${input.prompt}`)
         const worker = {
           worker_id: input.workerId,
           status: "completed",
@@ -787,33 +829,6 @@ async function testAsyncWorkerTools(): Promise<void> {
         }
         workers.set(input.workerId, worker)
         return worker as never
-      },
-      async readWorkerState(input) {
-        calls.push(
-          `read:${input.workerId ?? "all"}:${String(input.block ?? "")}:${String(input.timeoutMs ?? "")}`
-        )
-        if (input.workerId) {
-          const worker = workers.get(input.workerId)
-          return worker ? ([worker] as never) : []
-        }
-        return Array.from(workers.values()) as never
-      },
-      async readWorkerResult(input) {
-        calls.push(
-          `result:${input.workerId}:${String(input.includeTranscript ?? "")}:${String(input.maxChars ?? "")}`
-        )
-        const worker = workers.get(input.workerId)
-        if (!worker) throw new Error(`Unknown worker: ${input.workerId}`)
-        return {
-          worker,
-          result_path: `.cmbdevclaw/coordinator/thread-123/reports/workers/${input.workerId}.json`,
-          result_text: "full worker output",
-          result_chars: 18,
-          result_truncated: false,
-          transcript_text: input.includeTranscript ? "transcript output" : undefined,
-          transcript_chars: input.includeTranscript ? 17 : undefined,
-          transcript_truncated: input.includeTranscript ? false : undefined
-        } as never
       },
       async cancelWorker(input) {
         calls.push(`cancel:${input.workerId ?? "all"}:${input.reason ?? ""}`)
@@ -831,20 +846,18 @@ async function testAsyncWorkerTools(): Promise<void> {
 
   const names = tools.map((tool) => tool.name)
   assert(
-    names.join(",") ===
-      "start_worker,continue_worker,read_worker_state,read_worker_result,mark_notifications_handled,cancel_worker",
+    names.join(",") === "start_worker,continue_worker,cancel_worker",
     "coordinator should expose only async worker tools"
   )
 
   const startTool = tools.find((tool) => tool.name === "start_worker")
   const continueTool = tools.find((tool) => tool.name === "continue_worker")
-  const readTool = tools.find((tool) => tool.name === "read_worker_state")
-  const resultTool = tools.find((tool) => tool.name === "read_worker_result")
-  const markHandledTool = tools.find((tool) => tool.name === "mark_notifications_handled")
   const cancelTool = tools.find((tool) => tool.name === "cancel_worker")
-  assert(
-    startTool && continueTool && readTool && resultTool && markHandledTool && cancelTool,
-    "all worker tools should exist"
+  assert(startTool && continueTool && cancelTool, "all worker tools should exist")
+  assertIncludes(
+    toolSchemaText(continueTool),
+    "handoff-only summary requests after truncated or vague results",
+    "continue_worker workload schema should guide read-only handoff continuations"
   )
 
   const started = JSON.parse(
@@ -852,7 +865,6 @@ async function testAsyncWorkerTools(): Promise<void> {
       subagent_type: "worker",
       role: "implementer",
       workload: "write",
-      owned_files: ["src/app.ts"],
       consumed_notification_ids: ["implementer-0@turn-1"],
       description: "Implement feature",
       prompt: "Do the work"
@@ -861,10 +873,15 @@ async function testAsyncWorkerTools(): Promise<void> {
   assert(started.worker.worker_id === "implementer-1", "start_worker should return worker id")
   assert(started.worker.role === "implementer", "start_worker should preserve explicit role")
   assertIncludes(
-    calls[0],
-    "start:implementer:write:src/app.ts:Implement feature:Do the work",
-    "start call"
+    started.message,
+    "Do not poll, duplicate this worker's files/topics, or predict results",
+    "start_worker result should align with Claude Code don't-peek/don't-race guidance"
   )
+  assert(
+    !("owned_files" in started.worker),
+    "start_worker should not expose owned_files in the coordinator-facing worker snapshot"
+  )
+  assertIncludes(calls[0], "start:implementer:write::Implement feature:Do the work", "start call")
   assert(
     consumedNotificationIds[0]?.join(",") === "implementer-0@turn-1",
     "start_worker should report consumed notification ids"
@@ -908,95 +925,19 @@ async function testAsyncWorkerTools(): Promise<void> {
     await invokeTool(continueTool, {
       worker_id: "implementer-1",
       workload: "write",
-      owned_files: ["src/app.ts"],
       consumed_notification_ids: ["implementer-1@turn-1"],
       prompt: "Fix verifier feedback"
     })
   )
+  assert(continued.worker.turns === 2, "continue_worker should preserve worker and increment turn")
   assert(
-    continued.worker.turns === 2,
-    "continue_worker should preserve worker and increment turn"
+    !("owned_files" in continued.worker),
+    "continue_worker should not expose owned_files in the coordinator-facing worker snapshot"
   )
-  assertIncludes(
-    calls[3],
-    "continue:implementer-1:write:src/app.ts:Fix verifier feedback",
-    "continue call"
-  )
+  assertIncludes(calls[3], "continue:implementer-1:write::Fix verifier feedback", "continue call")
   assert(
     consumedNotificationIds[3]?.join(",") === "implementer-1@turn-1",
     "continue_worker should report consumed notification ids"
-  )
-
-  const read = JSON.parse(
-    await invokeTool(readTool, {
-      worker_id: "implementer-1",
-      block: true,
-      timeout_ms: 1000
-    })
-  )
-  assert(read.completed === 1, "read_worker_state should summarize completed workers")
-  assert(read.retrieval_status === "complete", "read_worker_state should report completion")
-  assertIncludes(calls[4], "read:implementer-1:true:1000", "read call")
-
-  const missingWorkerRead = JSON.parse(
-    await invokeTool(readTool, {
-      worker_id: "missing-worker",
-      block: false
-    })
-  )
-  assert(
-    missingWorkerRead.retrieval_status === "not_found",
-    "read_worker_state should explicitly report unknown worker ids"
-  )
-  assertIncludes(
-    missingWorkerRead.message,
-    "Use the full worker_id",
-    "unknown worker read should explain recovery"
-  )
-  assertIncludes(calls[5], "read:missing-worker:false:", "missing worker read call")
-
-  const allWorkers = JSON.parse(await invokeTool(readTool, { block: false }))
-  assert(allWorkers.running === 1, "read_worker_state should count running workers")
-  assert(allWorkers.completed === 1, "read_worker_state should count completed workers")
-  assert(allWorkers.failed === 1, "read_worker_state should count failed workers")
-  assert(allWorkers.cancelled === 1, "read_worker_state should count cancelled workers")
-  assert(allWorkers.retrieval_status === "running", "read_worker_state should report running")
-  assertIncludes(calls[6], "read:all:false:", "read all call")
-
-  const allWorkersDefault = JSON.parse(await invokeTool(readTool, {}))
-  assert(
-    allWorkersDefault.retrieval_status === "running",
-    "read_worker_state without worker_id should still summarize running workers"
-  )
-  assertIncludes(
-    calls[7],
-    "read:all:false:",
-    "read_worker_state should default to non-blocking when listing all workers"
-  )
-
-  const workerResult = JSON.parse(
-    await invokeTool(resultTool, {
-      worker_id: "implementer-1",
-      include_transcript: true,
-      max_chars: 2000
-    })
-  )
-  assert(workerResult.result_text === "full worker output", "read_worker_result should return full result text")
-  assert(workerResult.transcript_text === "transcript output", "read_worker_result should optionally include transcript")
-  assertIncludes(calls[8], "result:implementer-1:true:2000", "read result call")
-
-  const markedHandled = JSON.parse(
-    await invokeTool(markHandledTool, {
-      notification_ids: ["verifier-1@turn-2", "implementer-1@turn-2"]
-    })
-  )
-  assert(
-    markedHandled.notification_ids.join(",") === "verifier-1@turn-2,implementer-1@turn-2",
-    "mark_notifications_handled should echo handled notification ids"
-  )
-  assert(
-    consumedNotificationIds[4]?.join(",") === "verifier-1@turn-2,implementer-1@turn-2",
-    "mark_notifications_handled should report handled notification ids"
   )
 
   const cancelledOne = JSON.parse(
@@ -1010,9 +951,13 @@ async function testAsyncWorkerTools(): Promise<void> {
     cancelledOne.workers[0].worker_id === "implementer-1",
     "cancel_worker should delegate a specific worker id"
   )
-  assertIncludes(calls[9], "cancel:implementer-1:stop one", "cancel one call")
   assert(
-    consumedNotificationIds[5]?.join(",") === "verifier-1@turn-2",
+    !("owned_files" in cancelledOne.workers[0]),
+    "cancel_worker should not expose owned_files in coordinator-facing worker snapshots"
+  )
+  assertIncludes(calls[4], "cancel:implementer-1:stop one", "cancel one call")
+  assert(
+    consumedNotificationIds[4]?.join(",") === "verifier-1@turn-2",
     "cancel_worker should report consumed notification ids"
   )
 
@@ -1021,41 +966,7 @@ async function testAsyncWorkerTools(): Promise<void> {
     cancelled.workers.every((worker: { status: string }) => worker.status === "cancelled"),
     "cancel_worker should return cancelled workers"
   )
-  assertIncludes(calls[10], "cancel:all:stop all", "cancel all call")
-
-  workers.set("implementer-running", {
-    worker_id: "implementer-running",
-    status: "running",
-    role: "implementer"
-  })
-  const firstRunningRead = JSON.parse(
-    await invokeTool(readTool, { worker_id: "implementer-running", block: true })
-  )
-  assert(firstRunningRead.retrieval_status === "running", "first running read should report running")
-  assert(
-    firstRunningRead.message?.includes("Worker is still running"),
-    "first running read should give a running message"
-  )
-  workers.set("implementer-running", {
-    worker_id: "implementer-running",
-    status: "completed",
-    role: "implementer"
-  })
-  const completedAfterSuppressedRead = JSON.parse(
-    await invokeTool(readTool, { worker_id: "implementer-running", block: true })
-  )
-  assert(
-    completedAfterSuppressedRead.retrieval_status === "complete",
-    "completed worker should report complete even after a previous running read"
-  )
-  assert(
-    completedAfterSuppressedRead.polling_suppressed === false,
-    "completed worker should not report polling_suppressed after repeated read"
-  )
-  assert(
-    completedAfterSuppressedRead.message === undefined,
-    "completed worker should not keep the stale suppressed/running message"
-  )
+  assertIncludes(calls[5], "cancel:all:stop all", "cancel all call")
 
   const startedWithDefaultRole = JSON.parse(
     await invokeTool(startTool, {
@@ -1091,10 +1002,7 @@ async function testAsyncWorkerTools(): Promise<void> {
   } catch {
     rejectedLegacyWorkerTypeOnly = true
   }
-  assert(
-    rejectedLegacyWorkerTypeOnly,
-    "start_worker should reject legacy worker_type-only calls"
-  )
+  assert(rejectedLegacyWorkerTypeOnly, "start_worker should reject legacy worker_type-only calls")
 
   let rejectedBadRole = false
   try {
@@ -1132,26 +1040,6 @@ async function testAsyncWorkerTools(): Promise<void> {
     rejectedEmptyContinueWorkerId = true
   }
   assert(rejectedEmptyContinueWorkerId, "continue_worker should reject empty worker ids")
-
-  let rejectedBadReadTimeout = false
-  try {
-    await invokeTool(readTool, {
-      timeout_ms: 120_001
-    })
-  } catch {
-    rejectedBadReadTimeout = true
-  }
-  assert(rejectedBadReadTimeout, "read_worker_state should reject unsafe timeout values")
-
-  let rejectedTooSmallReadTimeout = false
-  try {
-    await invokeTool(readTool, {
-      timeout_ms: 999
-    })
-  } catch {
-    rejectedTooSmallReadTimeout = true
-  }
-  assert(rejectedTooSmallReadTimeout, "read_worker_state should reject tiny wait timeouts")
 
   let rejectedEmptyCancelReason = false
   try {

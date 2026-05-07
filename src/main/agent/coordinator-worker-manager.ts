@@ -41,6 +41,8 @@ export interface CoordinatorWorkerRunInput {
   workerThreadId: string
   role: CoordinatorWorkerRole
   workload: CoordinatorWorkerWorkload
+  // Compatibility path for pre-V2 scoped writer records and direct manager callers.
+  // Coordinator tools no longer expose owned_files to the model.
   ownedFiles: string[]
   description: string
   prompt: string
@@ -67,6 +69,8 @@ export interface CoordinatorWorkerSnapshot {
   parent_thread_id: string
   role: CoordinatorWorkerRole
   workload: CoordinatorWorkerWorkload
+  base_workload?: CoordinatorWorkerWorkload
+  // Persisted for old worker state compatibility; stripped from coordinator-facing tool results.
   owned_files: string[]
   description: string
   status: CoordinatorWorkerStatus
@@ -111,6 +115,9 @@ interface CoordinatorWorkerRecord {
   workspacePath: string
   role: CoordinatorWorkerRole
   workload: CoordinatorWorkerWorkload
+  baseWorkload: CoordinatorWorkerWorkload
+  // Internal compatibility guard for restored scoped writers. New coordinator prompts treat
+  // write workers as whole-workspace implementers and do not ask the model for owned_files.
   ownedFiles: string[]
   description: string
   status: CoordinatorWorkerStatus
@@ -161,14 +168,13 @@ interface WorkerRestoreOptions {
 function waitOrAbort(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted || ms <= 0) return Promise.resolve()
   return new Promise((resolve) => {
-    let timeout: ReturnType<typeof setTimeout> | undefined
     const cleanup = (): void => {
-      if (timeout !== undefined) clearTimeout(timeout)
+      clearTimeout(timeout)
       signal?.removeEventListener("abort", onAbort)
       resolve()
     }
     const onAbort = (): void => cleanup()
-    timeout = setTimeout(cleanup, ms)
+    const timeout = setTimeout(cleanup, ms)
     signal?.addEventListener("abort", onAbort, { once: true })
   })
 }
@@ -225,6 +231,8 @@ const WORKER_THREAD_DELIMITER = "__worker__"
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000
 const DEFAULT_WAIT_POLL_MS = 1_000
 const MAX_NOTIFICATION_SUMMARY_CHARS = 500
+const MAX_NOTIFICATION_RESULT_CHARS = 32_000
+const MAX_NOTIFICATION_XML_CHARS = 120_000
 const DEFAULT_RESULT_READ_CHARS = 20_000
 const MAX_RESULT_READ_CHARS = 80_000
 const MAX_WORKER_RAW_TEXT_CHARS = 200_000
@@ -275,10 +283,14 @@ function normalizeWorkerWorkload(
   workload?: CoordinatorWorkerWorkload
 ): CoordinatorWorkerWorkload {
   if (role !== "verifier" && workload === "verify") {
-    throw new Error('Only verifier workers can use workload="verify". Spawn a fresh verifier instead of turning an implementer into a self-verifying worker.')
+    throw new Error(
+      'Only verifier workers can use workload="verify". Spawn a fresh verifier instead of turning an implementer into a self-verifying worker.'
+    )
   }
   if (role === "verifier" && workload === "write") {
-    throw new Error('Verifier workers cannot use workload="write"; use workload="verify" or "read_only".')
+    throw new Error(
+      'Verifier workers cannot use workload="write"; use workload="verify" or "read_only".'
+    )
   }
   if (workload === "read_only" || workload === "verify" || workload === "write") return workload
   return role === "verifier" ? "verify" : "write"
@@ -385,19 +397,33 @@ function workerStatePath(record: CoordinatorWorkerRecord): string {
   return path.resolve(root, `${normalizeWorkerId(record.workerId)}.json`)
 }
 
+function coordinatorScratchpadPath(workspacePath: string, parentThreadId: string): string {
+  return path.resolve(
+    workspacePath,
+    COORDINATOR_BASE_DIR,
+    normalizeThreadId(parentThreadId),
+    "scratchpad"
+  )
+}
+
+function workerScratchpadPath(record: CoordinatorWorkerRecord): string {
+  return coordinatorScratchpadPath(record.workspacePath, record.parentThreadId)
+}
+
 function workerResultPath(record: CoordinatorWorkerRecord): string {
   const root = path.resolve(
     record.workspacePath,
     COORDINATOR_BASE_DIR,
     normalizeThreadId(record.parentThreadId),
     "reports",
-    "workers"
+    "workers",
+    normalizeWorkerId(record.workerId)
   )
-  return path.resolve(root, `${normalizeWorkerId(record.workerId)}.json`)
+  return path.resolve(root, `turn-${Math.max(1, record.turns)}.json`)
 }
 
 function relativeWorkerResultPath(record: CoordinatorWorkerRecord): string {
-  return `${COORDINATOR_BASE_DIR}/${normalizeThreadId(record.parentThreadId)}/reports/workers/${normalizeWorkerId(record.workerId)}.json`
+  return `${COORDINATOR_BASE_DIR}/${normalizeThreadId(record.parentThreadId)}/reports/workers/${normalizeWorkerId(record.workerId)}/turn-${Math.max(1, record.turns)}.json`
 }
 
 function workerTranscriptPath(record: CoordinatorWorkerRecord): string {
@@ -406,13 +432,14 @@ function workerTranscriptPath(record: CoordinatorWorkerRecord): string {
     COORDINATOR_BASE_DIR,
     normalizeThreadId(record.parentThreadId),
     "reports",
-    "workers"
+    "workers",
+    normalizeWorkerId(record.workerId)
   )
-  return path.resolve(root, `${normalizeWorkerId(record.workerId)}.transcript.jsonl`)
+  return path.resolve(root, `turn-${Math.max(1, record.turns)}.transcript.jsonl`)
 }
 
 function relativeWorkerTranscriptPath(record: CoordinatorWorkerRecord): string {
-  return `${COORDINATOR_BASE_DIR}/${normalizeThreadId(record.parentThreadId)}/reports/workers/${normalizeWorkerId(record.workerId)}.transcript.jsonl`
+  return `${COORDINATOR_BASE_DIR}/${normalizeThreadId(record.parentThreadId)}/reports/workers/${normalizeWorkerId(record.workerId)}/turn-${Math.max(1, record.turns)}.transcript.jsonl`
 }
 
 async function writeFileAtomic(target: string, content: string): Promise<void> {
@@ -483,7 +510,47 @@ function escapeXml(value: string): string {
 function truncateNotificationSummary(value: string): string {
   const trimmed = value.trim()
   if (trimmed.length <= MAX_NOTIFICATION_SUMMARY_CHARS) return trimmed
-  return `${trimmed.slice(0, MAX_NOTIFICATION_SUMMARY_CHARS)}\n...(truncated; read result_path for full output)`
+  return `${trimmed.slice(0, MAX_NOTIFICATION_SUMMARY_CHARS)}\n...(truncated; continue the worker for a concise handoff if more detail is needed)`
+}
+
+function truncateNotificationResult(value: string | undefined): {
+  text: string
+  truncated: boolean
+} {
+  const trimmed = value?.trim()
+  if (!trimmed) return { text: "", truncated: false }
+  if (trimmed.length <= MAX_NOTIFICATION_RESULT_CHARS) {
+    return { text: trimmed, truncated: false }
+  }
+  return {
+    text: `${trimmed.slice(0, MAX_NOTIFICATION_RESULT_CHARS)}\n...(result truncated; coordinator should continue this worker for a concise handoff if more detail is needed; output-file is archived for UI/debug)`,
+    truncated: true
+  }
+}
+
+function truncateNotificationXml(
+  render: (resultText: string, resultTruncated: boolean) => string,
+  resultText: string,
+  resultTruncated: boolean,
+  fallbackXml: string,
+  emergencyFallbackXml: string
+): string {
+  let notification = render(resultText, resultTruncated)
+  if (notification.length <= MAX_NOTIFICATION_XML_CHARS) return notification
+
+  const note =
+    "\n...(notification truncated after XML escaping; continue this worker for a concise handoff if more detail is needed)"
+  let nextResultText = resultText
+  for (let attempt = 0; attempt < 8 && nextResultText.length > 500; attempt += 1) {
+    const previousLength = nextResultText.length
+    const nextLimit = Math.max(100, Math.floor((previousLength - note.length) / 2))
+    nextResultText = `${nextResultText.slice(0, nextLimit)}${note}`
+    notification = render(nextResultText, true)
+    if (notification.length <= MAX_NOTIFICATION_XML_CHARS) return notification
+    if (nextResultText.length >= previousLength) break
+  }
+
+  return fallbackXml.length <= MAX_NOTIFICATION_XML_CHARS ? fallbackXml : emergencyFallbackXml
 }
 
 function truncateWorkerRawText(value: string | undefined): string | undefined {
@@ -492,7 +559,10 @@ function truncateWorkerRawText(value: string | undefined): string | undefined {
   return `${value.slice(0, MAX_WORKER_RAW_TEXT_CHARS)}\n...(raw worker output truncated)`
 }
 
-function truncateReadText(value: string, maxChars: number): {
+function truncateReadText(
+  value: string,
+  maxChars: number
+): {
   text: string
   chars: number
   truncated: boolean
@@ -694,6 +764,7 @@ function toSnapshot(record: CoordinatorWorkerRecord): CoordinatorWorkerSnapshot 
     parent_thread_id: record.parentThreadId,
     role: record.role,
     workload: record.workload,
+    base_workload: record.baseWorkload,
     owned_files: record.ownedFiles,
     description: record.description,
     status: record.status,
@@ -741,6 +812,8 @@ export class CoordinatorWorkerManager {
     string,
     Map<string, CoordinatorWorkerSnapshot>
   >()
+  private readonly preparedScratchpadDirs = new Set<string>()
+  private readonly warnedScratchpadDirs = new Set<string>()
   private sequence = 0
 
   startWorker(options: StartWorkerOptions): CoordinatorWorkerSnapshot {
@@ -777,6 +850,7 @@ export class CoordinatorWorkerManager {
       workspacePath,
       role,
       workload,
+      baseWorkload: workload,
       ownedFiles,
       description,
       status: "running",
@@ -826,10 +900,19 @@ export class CoordinatorWorkerManager {
     }
     if (record.status !== "running" && record.terminalPersistPromise) {
       throw new Error(
-        `Worker ${record.workerId} is still finalizing its previous result. Read worker state before continuing.`
+        `Worker ${record.workerId} is still finalizing its previous result. Wait for its task-notification before continuing.`
       )
     }
-    const workload = normalizeWorkerWorkload(record.role, options.workload ?? record.workload)
+    const workload = normalizeWorkerWorkload(record.role, options.workload ?? record.baseWorkload)
+    if (
+      record.status === "running" &&
+      (record.workload === "write" || record.workload === "verify") &&
+      workload !== record.workload
+    ) {
+      throw new Error(
+        `Worker ${record.workerId} is still running with ${record.workload} access. Wait for its task-notification before changing workload for a handoff continuation.`
+      )
+    }
     const ownedFiles =
       options.ownedFiles !== undefined
         ? normalizeOwnedFiles(options.ownedFiles, record.workspacePath)
@@ -909,7 +992,9 @@ export class CoordinatorWorkerManager {
     return toSnapshot(record)
   }
 
-  async continueWorkerAndPersist(options: ContinueWorkerOptions): Promise<CoordinatorWorkerSnapshot> {
+  async continueWorkerAndPersist(
+    options: ContinueWorkerOptions
+  ): Promise<CoordinatorWorkerSnapshot> {
     const snapshot = await this.continueWorker(options)
     const record = await this.getWorkerForOperation(snapshot.parent_thread_id, snapshot.worker_id)
     if (record) {
@@ -993,7 +1078,7 @@ export class CoordinatorWorkerManager {
       transcript_truncated: transcript?.truncated,
       message: record.resultPath
         ? undefined
-        : "No result file is available yet. Wait for the worker to finish or inspect worker state."
+        : "No result file is available yet. Wait for the worker's task-notification."
     }
   }
 
@@ -1068,6 +1153,11 @@ export class CoordinatorWorkerManager {
     return [...notifications]
   }
 
+  peekNotifications(parentThreadId: string): string[] {
+    const normalized = normalizeThreadId(parentThreadId)
+    return [...(this.notificationsByParent.get(normalized) ?? [])]
+  }
+
   hasNotifications(parentThreadId: string): boolean {
     const normalized = normalizeThreadId(parentThreadId)
     return (this.notificationsByParent.get(normalized)?.length ?? 0) > 0
@@ -1091,8 +1181,7 @@ export class CoordinatorWorkerManager {
     const existing = this.notificationsByParent.get(normalized) ?? []
     const restored = notifications.filter(
       (notification) =>
-        !existing.includes(notification) &&
-        this.shouldRestoreNotification(normalized, notification)
+        !existing.includes(notification) && this.shouldRestoreNotification(normalized, notification)
     )
     if (restored.length === 0) return
     this.notificationsByParent.set(normalized, [...existing, ...restored])
@@ -1115,7 +1204,10 @@ export class CoordinatorWorkerManager {
     const results = await Promise.allSettled(persistPromises)
     for (const result of results) {
       if (result.status === "rejected") {
-        console.warn("[CoordinatorWorker] Failed to persist notification acknowledgement:", result.reason)
+        console.warn(
+          "[CoordinatorWorker] Failed to persist notification acknowledgement:",
+          result.reason
+        )
       }
     }
     this.pruneInMemoryWorkerHistory(normalized)
@@ -1152,7 +1244,10 @@ export class CoordinatorWorkerManager {
     const results = await Promise.allSettled(persistPromises)
     for (const result of results) {
       if (result.status === "rejected") {
-        console.warn("[CoordinatorWorker] Failed to persist notification acknowledgement:", result.reason)
+        console.warn(
+          "[CoordinatorWorker] Failed to persist notification acknowledgement:",
+          result.reason
+        )
       }
     }
     this.pruneInMemoryWorkerHistory(normalized)
@@ -1196,7 +1291,8 @@ export class CoordinatorWorkerManager {
       normalizedWorkerIds && normalizedWorkerIds.length === 1 ? normalizedWorkerIds[0] : undefined
     )
     const filteredRecords = records.filter((record) => {
-      if (!normalizedWorkerIds || normalizedWorkerIds.length === 0) return terminalStatus(record.status)
+      if (!normalizedWorkerIds || normalizedWorkerIds.length === 0)
+        return terminalStatus(record.status)
       return normalizedWorkerIds.includes(record.workerId) && terminalStatus(record.status)
     })
     if (filteredRecords.length === 0) return
@@ -1208,10 +1304,7 @@ export class CoordinatorWorkerManager {
       if (pending.length === 0) return
       const remainingMs = timeoutMs - (Date.now() - startedAt)
       if (remainingMs <= 0) return
-      await Promise.race([
-        Promise.allSettled(pending),
-        waitOrAbort(Math.min(remainingMs, 250))
-      ])
+      await Promise.race([Promise.allSettled(pending), waitOrAbort(Math.min(remainingMs, 250))])
     }
   }
 
@@ -1242,10 +1335,7 @@ export class CoordinatorWorkerManager {
       if (pending.length === 0) return
       const remainingMs = timeoutMs - (Date.now() - startedAt)
       if (remainingMs <= 0) break
-      await Promise.race([
-        Promise.allSettled(pending),
-        waitOrAbort(Math.min(remainingMs, 250))
-      ])
+      await Promise.race([Promise.allSettled(pending), waitOrAbort(Math.min(remainingMs, 250))])
     }
     if ((await readPendingRecords()).length === 0) {
       return
@@ -1376,6 +1466,12 @@ export class CoordinatorWorkerManager {
     this.workersByParent.delete(normalized)
     this.notificationsByParent.delete(normalized)
     this.prunedSnapshotsByParent.delete(normalized)
+    const workspacePath = this.workspacePathByParent.get(normalized)
+    if (workspacePath) {
+      const scratchpadPath = coordinatorScratchpadPath(workspacePath, normalized)
+      this.preparedScratchpadDirs.delete(scratchpadPath)
+      this.warnedScratchpadDirs.delete(scratchpadPath)
+    }
     this.workspacePathByParent.delete(normalized)
     this.activeRestoreHydratedWorkspaceByParent.delete(normalized)
   }
@@ -1399,6 +1495,8 @@ export class CoordinatorWorkerManager {
     this.prunedSnapshotsByParent.clear()
     this.workspacePathByParent.clear()
     this.activeRestoreHydratedWorkspaceByParent.clear()
+    this.preparedScratchpadDirs.clear()
+    this.warnedScratchpadDirs.clear()
   }
 
   private nextWorkerId(role: CoordinatorWorkerRole): string {
@@ -1429,7 +1527,11 @@ export class CoordinatorWorkerManager {
     const normalizedWorkerId = normalizeWorkerId(workerId)
     const existing = this.getParentMap(normalizedParentThreadId)?.get(normalizedWorkerId)
     if (existing) return existing
-    return this.restorePrunedWorkerFromSnapshot(normalizedParentThreadId, normalizedWorkerId, options)
+    return this.restorePrunedWorkerFromSnapshot(
+      normalizedParentThreadId,
+      normalizedWorkerId,
+      options
+    )
   }
 
   private restorePrunedWorkerFromSnapshot(
@@ -1471,7 +1573,9 @@ export class CoordinatorWorkerManager {
       `${workerId}.json`
     )
     try {
-      const snapshot = JSON.parse(await readFile(statePath, "utf8")) as Partial<CoordinatorWorkerSnapshot>
+      const snapshot = JSON.parse(
+        await readFile(statePath, "utf8")
+      ) as Partial<CoordinatorWorkerSnapshot>
       const record = this.recordFromSnapshot(snapshot, workspacePath)
       if (!record || record.parentThreadId !== parentThreadId || record.workerId !== workerId) {
         return undefined
@@ -1549,7 +1653,7 @@ export class CoordinatorWorkerManager {
       )
     }
     throw new Error(
-      `Cannot start write worker yet: running worker ${conflicting.workerId} already owns ${otherScope}. Requested ${scope}. Wait for its task-notification, use continue_worker on that worker, or declare a disjoint owned_files set.`
+      `Cannot start write worker yet: running worker ${conflicting.workerId} already owns ${otherScope}. Requested ${scope}. Wait for its task-notification or use continue_worker on that worker.`
     )
   }
 
@@ -1565,6 +1669,7 @@ export class CoordinatorWorkerManager {
     const role = snapshot.role
     const status = normalizeWorkerStatus(snapshot.status)
     const workload = normalizeWorkload(snapshot.workload)
+    const baseWorkload = normalizeWorkload(snapshot.base_workload)
     const description = optionalString(snapshot.description)
     const createdAt = optionalString(snapshot.created_at)
     const updatedAt = optionalString(snapshot.updated_at)
@@ -1596,14 +1701,17 @@ export class CoordinatorWorkerManager {
     if (!workerThreadId.startsWith(`${normalizedParentThreadId}${WORKER_THREAD_DELIMITER}`)) {
       return undefined
     }
+    const normalizedRole = normalizeWorkerRole(role)
+    const normalizedWorkload = normalizeWorkerWorkload(normalizedRole, workload)
 
     const record: CoordinatorWorkerRecord = {
       workerId: normalizedWorkerId,
       workerThreadId,
       parentThreadId: normalizedParentThreadId,
       workspacePath,
-      role: normalizeWorkerRole(role),
-      workload: normalizeWorkerWorkload(normalizeWorkerRole(role), workload),
+      role: normalizedRole,
+      workload: normalizedWorkload,
+      baseWorkload: normalizeWorkerWorkload(normalizedRole, baseWorkload ?? normalizedWorkload),
       ownedFiles: normalizeOwnedFiles(snapshot.owned_files, workspacePath),
       description,
       status,
@@ -2088,21 +2196,55 @@ export class CoordinatorWorkerManager {
     const transcriptPath = snapshot.transcript_path
       ? `\n<transcript-path>${escapeXml(snapshot.transcript_path)}</transcript-path>`
       : ""
-    return `<task-notification>
-<task-id>${escapeXml(snapshot.worker_id)}</task-id>
-<worker-thread-id>${escapeXml(snapshot.worker_thread_id)}</worker-thread-id>
-<worker-role>${escapeXml(snapshot.role)}</worker-role>
-<turn>${snapshot.turns}</turn>
-<status>${escapeXml(status)}</status>
-<summary>${escapeXml(truncateNotificationSummary(summary))}</summary>${reportPath}${resultPath}${transcriptPath}
+    const resultSource = record.rawText?.trim() ? record.rawText : summary
+    const result = truncateNotificationResult(resultSource)
+    const renderNotification = (
+      resultText: string,
+      resultTruncated: boolean,
+      includeDebugPaths = true
+    ): string => {
+      const resultBlock = resultText
+        ? `\n<result>${escapeXml(resultText)}</result>\n<result-truncated>${String(resultTruncated)}</result-truncated>`
+        : ""
+      const debugPaths = includeDebugPaths ? `${reportPath}${resultPath}${transcriptPath}` : ""
+      const usage = includeDebugPaths
+        ? `
 <usage>
   <tool_uses>${snapshot.tool_call_count}</tool_uses>
   <duration_ms>${snapshot.duration_ms ?? 0}</duration_ms>
   <input_tokens>${snapshot.token_usage?.input_tokens ?? 0}</input_tokens>
   <output_tokens>${snapshot.token_usage?.output_tokens ?? 0}</output_tokens>
   <total_tokens>${snapshot.token_usage?.total_tokens ?? 0}</total_tokens>
-</usage>
+</usage>`
+        : ""
+      return `<task-notification>
+<task-id>${escapeXml(snapshot.worker_id)}</task-id>
+<worker-thread-id>${escapeXml(snapshot.worker_thread_id)}</worker-thread-id>
+<worker-role>${escapeXml(snapshot.role)}</worker-role>
+<turn>${snapshot.turns}</turn>
+<status>${escapeXml(status)}</status>
+<summary>${escapeXml(truncateNotificationSummary(summary))}</summary>${resultBlock}${debugPaths}${usage}
 </task-notification>`
+    }
+    return truncateNotificationXml(
+      renderNotification,
+      result.text,
+      result.truncated,
+      renderNotification(
+        "Notification was too large to deliver inline. Continue this worker for a concise handoff if more detail is needed.",
+        true,
+        false
+      ),
+      `<task-notification>
+<task-id>${escapeXml(snapshot.worker_id)}</task-id>
+<worker-thread-id>${escapeXml(snapshot.worker_thread_id)}</worker-thread-id>
+<worker-role>${escapeXml(snapshot.role)}</worker-role>
+<turn>${snapshot.turns}</turn>
+<status>${escapeXml(status)}</status>
+<summary>Notification was too large to deliver inline. Continue this worker for a concise handoff if more detail is needed.</summary>
+<result-truncated>true</result-truncated>
+</task-notification>`
+    )
   }
 
   private async persistTerminalRecord(record: CoordinatorWorkerRecord): Promise<void> {
@@ -2123,6 +2265,7 @@ export class CoordinatorWorkerManager {
           parent_thread_id: record.parentThreadId,
           role: record.role,
           workload: record.workload,
+          base_workload: record.baseWorkload,
           owned_files: record.ownedFiles,
           description: record.description,
           status: record.status,
@@ -2170,7 +2313,25 @@ export class CoordinatorWorkerManager {
 
   private async persistWorkerState(record: CoordinatorWorkerRecord): Promise<void> {
     const target = workerStatePath(record)
+    await this.ensureScratchpadDirBestEffort(record)
     await writeFileAtomic(target, JSON.stringify(toPersistedWorkerState(record), null, 2))
+  }
+
+  private async ensureScratchpadDirBestEffort(record: CoordinatorWorkerRecord): Promise<void> {
+    const scratchpadPath = workerScratchpadPath(record)
+    if (this.preparedScratchpadDirs.has(scratchpadPath)) return
+    try {
+      await mkdir(scratchpadPath, { recursive: true })
+      this.preparedScratchpadDirs.add(scratchpadPath)
+    } catch (error) {
+      if (!this.warnedScratchpadDirs.has(scratchpadPath)) {
+        this.warnedScratchpadDirs.add(scratchpadPath)
+        console.warn(
+          `[CoordinatorWorker] Failed to prepare scratchpad directory; continuing without scratchpad: ${scratchpadPath}`,
+          error
+        )
+      }
+    }
   }
 }
 

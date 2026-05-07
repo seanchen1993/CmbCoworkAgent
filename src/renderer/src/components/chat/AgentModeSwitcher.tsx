@@ -162,10 +162,6 @@ export function AgentModeSwitcher({
             )
           })}
         </div>
-
-        <div className="border-t border-border bg-muted/30 px-4 py-2.5 text-[11px] leading-5 text-muted-foreground">
-          提示：协同模式会先生成计划和验收标准，再由实现代理与验证代理协作，耗时更长但更适合完整交付。
-        </div>
       </PopoverContent>
     </Popover>
   )

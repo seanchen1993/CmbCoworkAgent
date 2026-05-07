@@ -462,7 +462,9 @@ export function ChatContainer({
   )
 
   const loadResolvedAgentMode = useCallback(async (): Promise<ChatAgentMode> => {
-    const currentThread = useAppStore.getState().threads.find((thread) => thread.thread_id === threadId)
+    const currentThread = useAppStore
+      .getState()
+      .threads.find((thread) => thread.thread_id === threadId)
     if (currentThread) {
       return resolveAgentMode(currentThread.metadata ?? {})
     }
@@ -665,7 +667,9 @@ export function ChatContainer({
     setSavedToolNameInput("")
     setSavedToolDescriptionInput("")
   }, [pendingApproval])
-  const hasRunningCoordinatorWorker = coordinatorWorkers.some((worker) => worker.status === "running")
+  const hasRunningCoordinatorWorker = coordinatorWorkers.some(
+    (worker) => worker.status === "running"
+  )
   const isLoading = streamData.isLoading || scheduledTaskLoading
   const agentModeSwitchDisabledReason = !canChangeAgentMode
     ? "当前线程已有消息，不能再切换执行模式。请新开线程选择其他模式。"
@@ -697,7 +701,9 @@ export function ChatContainer({
             (worker) => worker.status === "running" || worker.notification_acknowledged === false
           )
           if (hasRemoteUnresolvedWorkers || hasPendingNotifications) {
-            toast.error("仍有协同 worker 在运行或结果待处理，请先在协同模式处理完成后再切回普通模式")
+            toast.error(
+              "仍有协同 worker 在运行或结果待处理，请先在协同模式处理完成后再切回普通模式"
+            )
             return
           }
         }
@@ -1137,11 +1143,11 @@ export function ChatContainer({
 
   const prevLoadingRef = useRef(false)
   useEffect(() => {
-	    if (prevLoadingRef.current && !isLoading) {
-	      for (const rawMsg of streamData.messages) {
-	        const msg = rawMsg as StreamMessage
-	        if (msg.type === "human" && isCoordinatorNotificationPrompt(msg.content)) continue
-	        if (msg.id) {
+    if (prevLoadingRef.current && !isLoading) {
+      for (const rawMsg of streamData.messages) {
+        const msg = rawMsg as StreamMessage
+        if (msg.type === "human" && isCoordinatorNotificationPrompt(msg.content)) continue
+        if (msg.id) {
           const streamMsg = msg as StreamMessage & { id: string }
 
           let role: Message["role"] = "assistant"
@@ -1170,10 +1176,10 @@ export function ChatContainer({
   const displayMessages = useMemo(() => {
     const threadMessageIds = new Set(threadMessages.map((m) => m.id))
 
-	  const streamingMsgs: Message[] = ((streamData.messages || []) as StreamMessage[])
-	      .filter((m): m is StreamMessage & { id: string } => !!m.id && !threadMessageIds.has(m.id))
-	      .filter((m) => !(m.type === "human" && isCoordinatorNotificationPrompt(m.content)))
-	      .map((streamMsg) => {
+    const streamingMsgs: Message[] = ((streamData.messages || []) as StreamMessage[])
+      .filter((m): m is StreamMessage & { id: string } => !!m.id && !threadMessageIds.has(m.id))
+      .filter((m) => !(m.type === "human" && isCoordinatorNotificationPrompt(m.content)))
+      .map((streamMsg) => {
         let role: Message["role"] = "assistant"
         if (streamMsg.type === "human") role = "user"
         else if (streamMsg.type === "tool") role = "tool"
@@ -1708,8 +1714,9 @@ export function ChatContainer({
         console.error("[ChatContainer] Failed to cancel ChatX thread:", err)
       }
     } else {
-      // Stop the foreground answer only. Async coordinator workers are durable
-      // and should keep running unless the user explicitly stops them.
+      // Match Claude Code coordinator semantics: the main stop button stops the
+      // foreground turn only. Durable background workers are stopped explicitly
+      // via the separate background-worker stop control.
       await Promise.all([stream?.stop(), window.api.agent.cancel(threadId)])
     }
   }
@@ -3080,6 +3087,7 @@ export function ChatContainer({
                         type="button"
                         onClick={handleCancel}
                         aria-label="停止生成"
+                        title="停止生成"
                         className="flex items-center justify-center size-7 rounded-md bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
                       >
                         <Square className="size-3 fill-current" />
