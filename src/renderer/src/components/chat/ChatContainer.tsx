@@ -55,13 +55,11 @@ import { ContextUsageIndicator } from "./ContextUsageIndicator"
 import type { Message, SkillMetadata } from "@/types"
 import { MessageBubble } from "./MessageBubble"
 import { ChatScrollNavigator, type ChatScrollQuestion } from "./ChatScrollNavigator"
-import { UpdateStatusCard } from "./UpdateStatusCard"
 import { SkillsByCategorySection } from "./SkillsByCategorySection"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
 import { uploadChatData, ChatReportPayload } from "@/api"
 import { marketApi, MarketItem } from "../../api/market"
 import { insertLog, updateMMJUserInfo } from "../../../js/mmjUtils"
-import { UpdateDialog } from "../update/UpdateDialog"
 import { toast } from "sonner"
 import { SlashCommandPopover } from "@/features/slash-commands/SlashCommandPopover"
 import { useSlashCommands } from "@/features/slash-commands/useSlashCommands"
@@ -363,9 +361,7 @@ export function ChatContainer({
   const thinkingCycleRef = useRef(-1)
   const wasLoadingRef = useRef(false)
   const loadingMessageCountRef = useRef(0)
-  const [needUpdateVersion, setNeedUpdateVersion] = useState(false)
   const [modelContextLimit, setModelContextLimit] = useState<number | undefined>(undefined)
-  const [updateDialogOpen, setUpdateDialogOpen] = useState(false)
 
   useEffect(() => {
     const { ipcRenderer } = window.electron
@@ -773,43 +769,6 @@ export function ChatContainer({
       ignore = true
     }
   }, [currentModel])
-
-  const syncNeedUpdateVersion = useCallback(async () => {
-    try {
-      const status = await window.api.update.getStatus()
-      setNeedUpdateVersion(Boolean(status.update) && status.status !== "idle")
-    } catch (error) {
-      console.warn("[ChatContainer] Failed to sync update status:", error)
-      setNeedUpdateVersion(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    const updateApi = window.api.update
-    void syncNeedUpdateVersion()
-
-    const removeAvailable = updateApi.onAvailable(() => {
-      setNeedUpdateVersion(true)
-    })
-    const removeDownloaded = updateApi.onDownloaded(() => {
-      setNeedUpdateVersion(true)
-    })
-    const removeError = updateApi.onError(() => {
-      void syncNeedUpdateVersion()
-    })
-
-    return () => {
-      removeAvailable()
-      removeDownloaded()
-      removeError()
-    }
-  }, [syncNeedUpdateVersion])
-
-  useEffect(() => {
-    if (!updateDialogOpen) {
-      void syncNeedUpdateVersion()
-    }
-  }, [updateDialogOpen, syncNeedUpdateVersion])
 
   useEffect(() => {
     queryRemoteSkills()
@@ -1257,6 +1216,11 @@ export function ChatContainer({
   // Auto-scroll on new messages only if already at bottom
   useEffect(() => {
     const viewport = getViewport()
+    if (viewport && displayMessages.length === 0) {
+      viewport.scrollTop = 0
+      isAtBottomRef.current = true
+      return
+    }
     if (viewport && isAtBottomRef.current) {
       viewport.scrollTop = viewport.scrollHeight
     }
@@ -1276,10 +1240,15 @@ export function ChatContainer({
   useEffect(() => {
     const viewport = getViewport()
     if (viewport) {
+      if (displayMessages.length === 0) {
+        viewport.scrollTop = 0
+        isAtBottomRef.current = true
+        return
+      }
       viewport.scrollTop = viewport.scrollHeight
       isAtBottomRef.current = true
     }
-  }, [threadId, getViewport])
+  }, [displayMessages.length, threadId, getViewport])
 
   // Focus input on mount
   useEffect(() => {
@@ -2378,13 +2347,7 @@ export function ChatContainer({
                               <div className="text-xs text-foreground leading-5">操作说明文档</div>
                             </div>
                           </button>
-
-                          <UpdateStatusCard
-                            hasUpdate={needUpdateVersion}
-                            onClick={() => {
-                              setUpdateDialogOpen(true)
-                            }}
-                          />
+                          {/*<UpdateActionButton />*/}
                         </div>
                       </TabsContent>
                     </Tabs>
@@ -2949,7 +2912,6 @@ export function ChatContainer({
           </div>
         </form>
       </div>
-      <UpdateDialog open={updateDialogOpen} onOpenChange={setUpdateDialogOpen} />
     </div>
   )
 }

@@ -95,15 +95,35 @@ function normalizeTrace(parsed: AgentTrace): AgentTrace {
   }
 }
 
-function deriveUpperOrgLevels(pathName?: string): Pick<AgentTrace, "upperOrgLv1" | "upperOrgLv2" | "upperOrgLv3"> {
+function deriveUpperOrgLevels(pathName?: string): Pick<AgentTrace, "upperOrgLv0" | "upperOrgLv1" | "upperOrgLv2" | "upperOrgLv3"> {
+  const emptyLevels = {
+    upperOrgLv0: "",
+    upperOrgLv1: "",
+    upperOrgLv2: "",
+    upperOrgLv3: ""
+  }
   const parts = typeof pathName === "string"
     ? pathName.split("/").map((part) => part.trim()).filter(Boolean)
     : []
+  const itDeptIndex = parts.findIndex((part) => part.includes("信息技术部"))
+  if (itDeptIndex < 0) return emptyLevels
+
+  const lowerParts = parts.slice(itDeptIndex + 1)
+  const startsWithTeam = lowerParts[0]?.includes("团队") ?? false
+  if (startsWithTeam) {
+    return {
+      upperOrgLv0: lowerParts[2] ?? "",
+      upperOrgLv1: lowerParts[1] ?? "",
+      upperOrgLv2: lowerParts[0] ?? "",
+      upperOrgLv3: "本部团队"
+    }
+  }
 
   return {
-    upperOrgLv1: parts.length >= 2 ? parts[parts.length - 2] : "",
-    upperOrgLv2: parts.length >= 3 ? parts[parts.length - 3] : "",
-    upperOrgLv3: parts.length >= 4 ? parts[parts.length - 4] : ""
+    upperOrgLv0: lowerParts[3] ?? "",
+    upperOrgLv1: lowerParts[2] ?? "",
+    upperOrgLv2: lowerParts[1] ?? "",
+    upperOrgLv3: lowerParts[0] ?? ""
   }
 }
 
@@ -430,6 +450,7 @@ export class TraceCollector {
       orgName: userInfo?.orgName,
       pathName: userInfo?.pathName,
       pathId: userInfo?.originPathId,
+      upperOrgLv0: upperOrgLevels.upperOrgLv0,
       upperOrgLv1: upperOrgLevels.upperOrgLv1,
       upperOrgLv2: upperOrgLevels.upperOrgLv2,
       upperOrgLv3: upperOrgLevels.upperOrgLv3,

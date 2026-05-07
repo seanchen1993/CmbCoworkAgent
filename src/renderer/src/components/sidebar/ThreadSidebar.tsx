@@ -1,11 +1,35 @@
 import { useState, useCallback, useEffect, useRef } from "react"
 import { Plus, MessageSquare, Trash2, Pencil, Loader2, AlertCircle, Briefcase, HeartPulse, LayoutDashboard, Cpu, Radio, Terminal, BarChart3,Palette } from "lucide-react"
+import { useState, useCallback, useEffect, useMemo, useRef } from "react"
+import {
+  Plus,
+  Trash2,
+  Pencil,
+  Loader2,
+  AlertCircle,
+  Briefcase,
+  LayoutDashboard,
+  Cpu,
+  Terminal,
+  BarChart3,
+  ChevronDown,
+  ChevronRight,
+  FolderOpen,
+  Maximize2,
+  Minimize2, FolderPlus
+} from "lucide-react"
 import type { ChatXRobotConfig } from "@/types"
 import { Button } from "@/components/ui/button"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { UpdateActionButton } from "@/components/update/UpdateActionButton"
 import { useAppStore } from "@/lib/store"
-import { useAllStreamLoadingStates, useAllThreadStates, useThreadContext } from "@/lib/thread-context"
-import { cn, formatRelativeTime, truncate } from "@/lib/utils"
+import {
+  useAllStreamLoadingStates,
+  useAllThreadStates,
+  useThreadContext
+} from "@/lib/thread-context"
+import { cn, truncate } from "@/lib/utils"
 import {
   ContextMenu,
   ContextMenuContent,
@@ -14,6 +38,48 @@ import {
   ContextMenuTrigger
 } from "@/components/ui/context-menu"
 import type { Thread } from "@/types"
+
+const NO_WORKSPACE_PROJECT_KEY = "__no_workspace__"
+const COLLAPSED_PROJECTS_STORAGE_KEY = "threads:collapsedProjects"
+
+interface ThreadProject {
+  key: string
+  name: string
+  path: string | null
+  threads: Thread[]
+}
+
+function getThreadWorkspacePath(thread: Thread, statePath?: string | null): string | null {
+  if (statePath) return statePath
+  const metadataPath = thread.metadata?.workspacePath
+  return typeof metadataPath === "string" && metadataPath.trim() ? metadataPath : null
+}
+
+function getWorkspaceName(path: string | null): string {
+  if (!path) return "未关联项目"
+  const segments = path.split(/[\\/]/).filter(Boolean)
+  return segments.at(-1) || path
+}
+
+function formatCompactTime(date: Date | string): string {
+  const d = typeof date === "string" ? new Date(date) : date
+  const now = new Date()
+  const diff = now.getTime() - d.getTime()
+
+  const minutes = Math.floor(diff / 60000)
+  const hours = Math.floor(minutes / 60)
+  const days = Math.floor(hours / 24)
+
+  if (minutes < 1) return "刚刚"
+  if (minutes < 60) return `${minutes}分钟`
+  if (hours < 24) return `${hours}小时`
+  if (days < 7) return `${days}天`
+
+  const month = d.getMonth() + 1
+  const day = d.getDate()
+  if (d.getFullYear() === now.getFullYear()) return `${month}/${day}`
+  return `${String(d.getFullYear()).slice(2)}/${month}/${day}`
+}
 
 // Thread status indicator that shows loading, interrupted, or default state
 function ThreadStatusIcon({
@@ -24,7 +90,7 @@ function ThreadStatusIcon({
   isLoading: boolean
   pendingApproval: boolean
   scheduledTaskLoading: boolean
-}): React.JSX.Element {
+}): React.JSX.Element | null {
   if (isLoading || scheduledTaskLoading) {
     return <Loader2 className="size-4 shrink-0 text-status-info animate-spin" />
   }
@@ -33,7 +99,7 @@ function ThreadStatusIcon({
     return <AlertCircle className="size-4 shrink-0 text-status-warning" />
   }
 
-  return <MessageSquare className="size-4 shrink-0 text-muted-foreground" />
+  return null
 }
 
 function ThreadListItem({
@@ -72,7 +138,10 @@ function ThreadListItem({
   const isRunning = isLoading || scheduledTaskLoading
   const wasRunningRef = useRef(false)
   const onRunFinishedRef = useRef(onRunFinished)
-  onRunFinishedRef.current = onRunFinished
+
+  useEffect(() => {
+    onRunFinishedRef.current = onRunFinished
+  }, [onRunFinished])
 
   useEffect(() => {
     if (wasRunningRef.current && !isRunning) {
@@ -117,57 +186,64 @@ function ThreadListItem({
                 onClick={(e) => e.stopPropagation()}
               />
             ) : (
-              <>
-                <div
-                  className="text-sm truncate block flex items-center gap-1"
-                  title={thread.title || thread.thread_id}
-                >
-                  {thread.title?.startsWith("[Heartbeat]") ? (
-                    <>
-                      <HeartPulse className="size-3 shrink-0 text-red-400" />
-                      <span className="truncate">{thread.title.slice(12)}</span>
-                    </>
-                  ) : thread.title?.startsWith("[定时]") ? (
-                    <>
-                      <span className="shrink-0 text-[10px] px-1 py-px rounded bg-primary/15 text-primary font-medium">定时</span>
-                      <span className="truncate">{thread.title.slice(5)}</span>
-                    </>
-                  ) : thread.title?.startsWith("[远端机器人] ") ? (
-                    <>
-                      <Radio className="size-3 shrink-0 text-green-400" />
-                      <span className="truncate">(远端) {thread.title.slice(8)}</span>
-                    </>
-                  ) : thread.title?.startsWith("[机器人] ") ? (
-                    <>
-                      <Cpu className="size-3 shrink-0 text-blue-400" />
-                      <span className="truncate">{thread.title.slice(6)}</span>
-                    </>
-                  ) : (
-                    <span className="truncate">{thread.title || truncate(thread.thread_id, 20)}</span>
-                  )}
-                </div>
-                <div className="text-[10px] text-muted-foreground truncate">
-                  {formatRelativeTime(thread.updated_at)}
-                </div>
-              </>
+              <div
+                className="flex min-w-0 items-center text-sm"
+                title={thread.title || thread.thread_id}
+              >
+                {thread.title?.startsWith("[Heartbeat]") ? (
+                  <span className="min-w-0 flex-1 truncate">{thread.title.slice(12)}</span>
+                ) : thread.title?.startsWith("[定时]") ? (
+                  <>
+                    <span className="shrink-0 text-[10px] px-1 py-px rounded bg-primary/15 text-primary font-medium">
+                      定时
+                    </span>
+                    <span className="min-w-0 flex-1 truncate">{thread.title.slice(5)}</span>
+                  </>
+                ) : thread.title?.startsWith("[远端机器人] ") ? (
+                  <span className="min-w-0 flex-1 truncate">(远端) {thread.title.slice(8)}</span>
+                ) : thread.title?.startsWith("[机器人] ") ? (
+                  <span className="min-w-0 flex-1 truncate">{thread.title.slice(6)}</span>
+                ) : (
+                  <span className="min-w-0 flex-1 truncate">
+                    {thread.title || truncate(thread.thread_id, 20)}
+                  </span>
+                )}
+              </div>
             )}
           </div>
-          {isUnread && !isRunning && (
-            <span className="w-2 h-2 rounded-full bg-blue-500 shrink-0" />
-          )}
-          <span className="shrink-0" title={isRunning ? "任务运行中，无法删除" : undefined}>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              className={cn("opacity-0 group-hover:opacity-100", isRunning && "cursor-not-allowed !opacity-30")}
-              disabled={isRunning}
-              onClick={(e) => {
-                e.stopPropagation()
-                onDelete()
-              }}
+          {isUnread && !isRunning && <span className="w-2 h-2 rounded-full bg-blue-500 shrink-0" />}
+          <span className="relative ml-auto flex h-6 w-14 shrink-0 items-center justify-end overflow-hidden">
+            <span className="absolute right-0 text-[10px] text-muted-foreground transition-opacity group-hover:opacity-0">
+              {formatCompactTime(thread.updated_at)}
+            </span>
+            <span
+              className="pointer-events-none absolute right-0 flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100"
+              title={isRunning ? "任务运行中，无法删除" : undefined}
             >
-              <Trash2 className="size-3" />
-            </Button>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="size-6"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onStartEditing()
+                }}
+              >
+                <Pencil className="size-3" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className={cn("size-6", isRunning && "cursor-not-allowed !opacity-30")}
+                disabled={isRunning}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onDelete()
+                }}
+              >
+                <Trash2 className="size-3" />
+              </Button>
+            </span>
           </span>
         </div>
       </ContextMenuTrigger>
@@ -237,9 +313,23 @@ export function ThreadSidebar(): React.JSX.Element {
       return new Set()
     }
   })
+  const [collapsedProjectKeys, setCollapsedProjectKeys] = useState<Set<string>>(() => {
+    try {
+      const arr = JSON.parse(localStorage.getItem(COLLAPSED_PROJECTS_STORAGE_KEY) || "[]")
+      return new Set(arr)
+    } catch {
+      return new Set()
+    }
+  })
+  const [hoveredProjectKey, setHoveredProjectKey] = useState<string | null>(null)
+  const [selectingProjectFolder, setSelectingProjectFolder] = useState(false)
 
   const persistUnread = useCallback((ids: Set<string>) => {
     localStorage.setItem("threads:unreadIds", JSON.stringify([...ids]))
+  }, [])
+
+  const persistCollapsedProjects = useCallback((keys: Set<string>) => {
+    localStorage.setItem(COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify([...keys]))
   }, [])
 
   const currentThreadIdRef = useRef(currentThreadId)
@@ -247,26 +337,92 @@ export function ThreadSidebar(): React.JSX.Element {
   const mainViewRef = useRef(mainView)
   mainViewRef.current = mainView
 
-  const handleRunFinished = useCallback((threadId: string) => {
-    if (threadId === currentThreadIdRef.current && mainViewRef.current === "thread") return
-    setUnreadIds((prev) => {
-      if (prev.has(threadId)) return prev
-      const next = new Set(prev)
-      next.add(threadId)
-      persistUnread(next)
-      return next
-    })
-  }, [persistUnread])
+  const handleRunFinished = useCallback(
+    (threadId: string) => {
+      if (threadId === currentThreadIdRef.current && mainViewRef.current === "thread") return
+      setUnreadIds((prev) => {
+        if (prev.has(threadId)) return prev
+        const next = new Set(prev)
+        next.add(threadId)
+        persistUnread(next)
+        return next
+      })
+    },
+    [persistUnread]
+  )
 
-  const markRead = useCallback((threadId: string) => {
-    setUnreadIds((prev) => {
-      if (!prev.has(threadId)) return prev
+  const markRead = useCallback(
+    (threadId: string) => {
+      setUnreadIds((prev) => {
+        if (!prev.has(threadId)) return prev
+        const next = new Set(prev)
+        next.delete(threadId)
+        persistUnread(next)
+        return next
+      })
+    },
+    [persistUnread]
+  )
+
+  const threadProjects = useMemo<ThreadProject[]>(() => {
+    const projectMap = new Map<string, ThreadProject>()
+
+    for (const thread of threads) {
+      const path = getThreadWorkspacePath(thread, allThreadStates[thread.thread_id]?.workspacePath)
+      const key = path || NO_WORKSPACE_PROJECT_KEY
+      const existing = projectMap.get(key)
+
+      if (existing) {
+        existing.threads.push(thread)
+      } else {
+        projectMap.set(key, {
+          key,
+          name: getWorkspaceName(path),
+          path,
+          threads: [thread]
+        })
+      }
+    }
+
+    return Array.from(projectMap.values())
+  }, [allThreadStates, threads])
+
+  const toggleProject = useCallback(
+    (projectKey: string) => {
+      setCollapsedProjectKeys((prev) => {
+        const next = new Set(prev)
+        if (next.has(projectKey)) {
+          next.delete(projectKey)
+        } else {
+          next.add(projectKey)
+        }
+        persistCollapsedProjects(next)
+        return next
+      })
+    },
+    [persistCollapsedProjects]
+  )
+
+  const allProjectsCollapsed =
+    threadProjects.length > 0 &&
+    threadProjects.every((project) => collapsedProjectKeys.has(project.key))
+
+  const toggleAllProjects = useCallback(() => {
+    setCollapsedProjectKeys((prev) => {
       const next = new Set(prev)
-      next.delete(threadId)
-      persistUnread(next)
+      if (allProjectsCollapsed) {
+        for (const project of threadProjects) {
+          next.delete(project.key)
+        }
+      } else {
+        for (const project of threadProjects) {
+          next.add(project.key)
+        }
+      }
+      persistCollapsedProjects(next)
       return next
     })
-  }, [persistUnread])
+  }, [allProjectsCollapsed, persistCollapsedProjects, threadProjects])
 
   const startEditing = (threadId: string, currentTitle: string): void => {
     setEditingThreadId(threadId)
@@ -295,10 +451,18 @@ export function ThreadSidebar(): React.JSX.Element {
       }
       // Only show robots that have all required fields filled
       const valid = (config.robots || []).filter(
-        (r) => r.chatId && r.fromId && r.clientId && r.clientSecret && r.workDir && r.toUserList.length > 0
+        (r) =>
+          r.chatId &&
+          r.fromId &&
+          r.clientId &&
+          r.clientSecret &&
+          r.workDir &&
+          r.toUserList.length > 0
       )
       setRobots(valid)
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }, [])
 
   useEffect(() => {
@@ -309,7 +473,29 @@ export function ThreadSidebar(): React.JSX.Element {
     await createThread({ title: `Thread ${new Date().toLocaleDateString()}` })
   }
 
+  const handleNewProjectThread = async (project: ThreadProject): Promise<void> => {
+    await createThread({
+      title: `Thread ${new Date().toLocaleDateString()}`,
+      workspacePath: project.path ?? null
+    })
+  }
+
   const [creatingRobot, setCreatingRobot] = useState(false)
+
+  const handleAddProject = async (): Promise<void> => {
+    if (selectingProjectFolder) return
+    setSelectingProjectFolder(true)
+    try {
+      const workspacePath = await window.api.workspace.select()
+      if (!workspacePath) return
+      await createThread({
+        title: `Thread ${new Date().toLocaleDateString()}`,
+        workspacePath
+      })
+    } finally {
+      setSelectingProjectFolder(false)
+    }
+  }
 
   const handleNewRobotThread = async (robot: ChatXRobotConfig): Promise<void> => {
     if (creatingRobot) return
@@ -334,16 +520,19 @@ export function ThreadSidebar(): React.JSX.Element {
     }
   }
 
-  const [version, setVersion] = useState('')
+  const [version, setVersion] = useState("")
 
   useEffect(() => {
     // Fetch version proactively — the did-finish-load event may have
     // already fired before this component mounts.
-    window.electron.ipcRenderer.invoke("get-version").then((ver) => {
-      setVersion(ver as string)
-    }).catch(() => {
-      // ignore — version display is non-critical
-    })
+    window.electron.ipcRenderer
+      .invoke("get-version")
+      .then((ver) => {
+        setVersion(ver as string)
+      })
+      .catch(() => {
+        // ignore — version display is non-critical
+      })
   }, [])
 
   return (
@@ -469,41 +658,156 @@ export function ThreadSidebar(): React.JSX.Element {
         )}
       </div>
 
+      <div className="flex items-center gap-2 px-4 py-1.5 text-xs font-medium text-muted-foreground">
+        <span className="min-w-0 flex-1 truncate">项目 {threadProjects.length}</span>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          className="size-6 shrink-0"
+          title={allProjectsCollapsed ? "全部展开项目" : "全部收起项目"}
+          onClick={toggleAllProjects}
+          disabled={threadProjects.length === 0}
+        >
+          {allProjectsCollapsed ? (
+            <Maximize2 className="size-3.5" />
+          ) : (
+            <Minimize2 className="size-3.5" />
+          )}
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          className="size-6 shrink-0"
+          title="新增项目"
+          onClick={handleAddProject}
+          disabled={selectingProjectFolder}
+        >
+          {selectingProjectFolder ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : (
+            <FolderPlus className="size-3.5" />
+          )}
+        </Button>
+      </div>
+
       {/* Thread List */}
       <ScrollArea className="flex-1 min-h-0">
-        <div className="p-2 space-y-1 overflow-hidden">
-          {threads.map((thread) => {
-            const threadState = allThreadStates[thread.thread_id]
-            const isLoading = allStreamLoadingStates[thread.thread_id] ?? false
-            const scheduledTaskLoading = Boolean(threadState?.scheduledTaskLoading)
-            const hasPendingApproval = Boolean(threadState?.pendingApproval)
+        <div className="px-2 pb-2 space-y-1 overflow-hidden">
+          {threadProjects.map((project) => {
+            const isCollapsed = collapsedProjectKeys.has(project.key)
+            const hasSelectedThread = project.threads.some(
+              (thread) => thread.thread_id === currentThreadId
+            )
+            const unreadCount = project.threads.filter((thread) =>
+              unreadIds.has(thread.thread_id)
+            ).length
 
             return (
-              <ThreadListItem
-                key={thread.thread_id}
-                thread={thread}
-                isLoading={isLoading}
-                hasPendingApproval={hasPendingApproval}
-                scheduledTaskLoading={scheduledTaskLoading}
-                isSelected={currentThreadId === thread.thread_id}
-                isEditing={editingThreadId === thread.thread_id}
-                isUnread={unreadIds.has(thread.thread_id)}
-                editingTitle={editingTitle}
-                onSelect={() => {
-                  selectThread(thread.thread_id)
-                  markRead(thread.thread_id)
-                }}
-                onRunFinished={() => handleRunFinished(thread.thread_id)}
-                onDelete={() => {
-                  cleanupThread(thread.thread_id)
-                  deleteThread(thread.thread_id)
-                  markRead(thread.thread_id)
-                }}
-                onStartEditing={() => startEditing(thread.thread_id, thread.title || "")}
-                onSaveTitle={saveTitle}
-                onCancelEditing={cancelEditing}
-                onEditingTitleChange={setEditingTitle}
-              />
+              <div key={project.key} className="space-y-1">
+                <Popover open={hoveredProjectKey === project.key}>
+                  <PopoverTrigger asChild>
+                    <div
+                      className={cn(
+                        "group flex w-full items-center gap-1.5 rounded-sm px-2 py-1.5 text-left transition-colors",
+                        hasSelectedThread
+                          ? "bg-sidebar-accent/70 text-sidebar-accent-foreground"
+                          : "hover:bg-sidebar-accent/40"
+                      )}
+                      onMouseEnter={() => setHoveredProjectKey(project.key)}
+                      onMouseLeave={() => setHoveredProjectKey(null)}
+                      onFocus={() => setHoveredProjectKey(project.key)}
+                      onBlur={(e) => {
+                        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+                          setHoveredProjectKey(null)
+                        }
+                      }}
+                    >
+                      <button
+                        type="button"
+                        className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+                        onClick={() => toggleProject(project.key)}
+                      >
+                        {isCollapsed ? (
+                          <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
+                        ) : (
+                          <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+                        )}
+                        <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
+                        <span className="min-w-0 flex-1 truncate text-xs font-medium">
+                          {project.name}
+                        </span>
+                      </button>
+                      {unreadCount > 0 && (
+                        <span className="size-2 rounded-full bg-blue-500 shrink-0" />
+                      )}
+                      {/*<span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">*/}
+                      {/*  {project.threads.length}*/}
+                      {/*</span>*/}
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        className="size-6 shrink-0 opacity-70 hover:opacity-100"
+                        title="新增任务"
+                        onClick={() => handleNewProjectThread(project)}
+                      >
+                        <Plus className="size-3" />
+                      </Button>
+                    </div>
+                  </PopoverTrigger>
+                  <PopoverContent
+                    side="right"
+                    align="start"
+                    className="w-72 p-2 text-xs"
+                    onOpenAutoFocus={(e) => e.preventDefault()}
+                    onMouseEnter={() => setHoveredProjectKey(project.key)}
+                    onMouseLeave={() => setHoveredProjectKey(null)}
+                  >
+                    <div className="mb-1 font-medium text-muted-foreground">工作区路径</div>
+                    <div className="break-all text-foreground">
+                      {project.path || "未关联工作区"}
+                    </div>
+                  </PopoverContent>
+                </Popover>
+
+                {!isCollapsed && (
+                  <div className="ml-4 space-y-1 border-l border-border/70 pl-2">
+                    {project.threads.map((thread) => {
+                      const threadState = allThreadStates[thread.thread_id]
+                      const isLoading = allStreamLoadingStates[thread.thread_id] ?? false
+                      const scheduledTaskLoading = Boolean(threadState?.scheduledTaskLoading)
+                      const hasPendingApproval = Boolean(threadState?.pendingApproval)
+
+                      return (
+                        <ThreadListItem
+                          key={thread.thread_id}
+                          thread={thread}
+                          isLoading={isLoading}
+                          hasPendingApproval={hasPendingApproval}
+                          scheduledTaskLoading={scheduledTaskLoading}
+                          isSelected={currentThreadId === thread.thread_id}
+                          isEditing={editingThreadId === thread.thread_id}
+                          isUnread={unreadIds.has(thread.thread_id)}
+                          editingTitle={editingTitle}
+                          onSelect={() => {
+                            selectThread(thread.thread_id)
+                            markRead(thread.thread_id)
+                          }}
+                          onRunFinished={() => handleRunFinished(thread.thread_id)}
+                          onDelete={() => {
+                            cleanupThread(thread.thread_id)
+                            deleteThread(thread.thread_id)
+                            markRead(thread.thread_id)
+                          }}
+                          onStartEditing={() => startEditing(thread.thread_id, thread.title || "")}
+                          onSaveTitle={saveTitle}
+                          onCancelEditing={cancelEditing}
+                          onEditingTitleChange={setEditingTitle}
+                        />
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
             )
           })}
 
