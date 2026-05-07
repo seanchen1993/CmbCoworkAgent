@@ -400,7 +400,8 @@ test("LocalSandbox exposes a single sandbox-denial detector modelled on Codex", 
     "winerror 5",
     "winerror 1314",
     "dubious ownership",
-    "spawn eperm"
+    "spawn eperm",
+    "createprocesswithlogonw failed"  // domain-policy-blocked elevated sandbox (error 1385)
   ]) {
     assert.match(
       localSandboxSource,
@@ -408,6 +409,51 @@ test("LocalSandbox exposes a single sandbox-denial detector modelled on Codex", 
       `Windows-specific "${winKw}" keyword should appear in SANDBOX_DENIED_KEYWORDS`
     )
   }
+})
+
+test("error 1385 from CreateProcessWithLogonW gets a specific 'switch to unelevated' guidance prompt", () => {
+  // Real failure output we observed on a domain-managed machine
+  const sample =
+    '[stderr] windows sandbox failed: CreateProcessWithLogonW failed: 1385\n[Command failed with exit code 1]'
+
+  // Replicate the source helper to verify behaviour:
+  function getSandboxBypassGuidance(output) {
+    if (!output) return null
+    const lower = output.toLowerCase()
+    if (
+      lower.includes("createprocesswithlogonw failed: 1385")
+      || (lower.includes("windows sandbox failed") && lower.includes("1385"))
+    ) {
+      return "elevated-1385"  // sentinel for the test
+    }
+    return null
+  }
+
+  assert.equal(getSandboxBypassGuidance(sample), "elevated-1385", "1385 from CreateProcessWithLogonW should match")
+  assert.equal(getSandboxBypassGuidance(""), null, "empty output should not match")
+  assert.equal(getSandboxBypassGuidance("Error: spawn EPERM"), null, "unrelated EPERM should not match")
+
+  // Verify the source carries the specific guidance message and the orchestrator wires it in:
+  assert.match(
+    localSandboxSource,
+    /static getSandboxBypassGuidance\(output: string\): string \| null/,
+    "LocalSandbox should expose getSandboxBypassGuidance for the orchestrator to consume"
+  )
+  assert.match(
+    localSandboxSource,
+    /CodexSandboxOnline[\s\S]*1385[\s\S]*SeInteractiveLogonRight/,
+    "the 1385 guidance text should name the sandbox user, the error code, and the underlying logon-right"
+  )
+  assert.match(
+    localSandboxSource,
+    /设置 → 沙箱模式[\s\S]*Unelevated/,
+    "the 1385 guidance should point users at the sandbox-mode setting"
+  )
+  assert.match(
+    toolOrchestratorSource,
+    /LocalSandbox\.getSandboxBypassGuidance\([^)]+\)\s*\?\?\s*SANDBOX_BYPASS_PROMPT_REASON/,
+    "the orchestrator should prefer LocalSandbox.getSandboxBypassGuidance and fall back to the generic prompt"
+  )
 })
 
 test("sandbox preemptive routing has been removed in favour of the prompt-then-retry flow", () => {
@@ -512,13 +558,18 @@ test("orchestrator wraps every sandbox failure in Codex's single retry-without-s
   )
   assert.match(
     toolOrchestratorSource,
-    /isLikelySandboxDenied\(sandboxResult\.exitCode, sandboxResult\.output \?\? ""\)/,
+    /isLikelySandboxDenied\(sandboxResult\.exitCode,\s*output\)/,
     "the orchestrator should call LocalSandbox.isLikelySandboxDenied (output + exit code) instead of multiple ad-hoc detectors"
   )
   assert.match(
     bypassSection,
-    /requestApproval\([\s\S]*retry_reason: SANDBOX_BYPASS_PROMPT_REASON/,
-    "the bypass prompt should populate retry_reason from a single shared message constant — Codex-style"
+    /retry_reason: promptReason/,
+    "the bypass prompt should populate retry_reason from a resolved promptReason (specific guidance or generic fallback)"
+  )
+  assert.match(
+    bypassSection,
+    /LocalSandbox\.getSandboxBypassGuidance\(output\)\s*\?\?\s*SANDBOX_BYPASS_PROMPT_REASON/,
+    "the orchestrator should prefer LocalSandbox.getSandboxBypassGuidance, falling back to the Codex-style generic prompt"
   )
   assert.match(
     bypassSection,

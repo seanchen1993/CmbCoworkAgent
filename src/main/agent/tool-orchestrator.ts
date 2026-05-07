@@ -187,9 +187,16 @@ export class ToolOrchestrator {
     sandboxMode: string,
     sandboxResult: ExecuteResponse
   ): Promise<ExecuteResponse> {
-    if (!LocalSandbox.isLikelySandboxDenied(sandboxResult.exitCode, sandboxResult.output ?? "")) {
+    const output = sandboxResult.output ?? ""
+    if (!LocalSandbox.isLikelySandboxDenied(sandboxResult.exitCode, output)) {
       return sandboxResult
     }
+    // Pick a tailored guidance message for known recovery-by-config-change cases
+    // (e.g. error 1385 = elevated sandbox blocked by domain policy → tell the user
+    // to switch sandbox mode, not just approve a per-command bypass). Falls back to
+    // Codex's generic "command failed; retry without sandbox?" prompt otherwise.
+    const promptReason = LocalSandbox.getSandboxBypassGuidance(output)
+      ?? SANDBOX_BYPASS_PROMPT_REASON
     console.warn(`[Orchestrator] sandbox bypass eligible for "${command}" (sandbox=${sandboxMode})`)
     const approval = await this.requestApproval({
       id: randomUUID(),
@@ -198,8 +205,8 @@ export class ToolOrchestrator {
       operation: "execute",
       command,
       cwd,
-      reason: SANDBOX_BYPASS_PROMPT_REASON,
-      retry_reason: SANDBOX_BYPASS_PROMPT_REASON,
+      reason: promptReason,
+      retry_reason: promptReason,
       allowed_decisions: ["approve", "reject"],
       allowed_approval_types: ["approve", "reject"]
     })

@@ -1142,7 +1142,36 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     "eacces: permission",          // Node fs syscall errors
     "eperm: operation",            // Node fs syscall errors
     "permissionerror: [errno 13",  // Python explicit
+    "createprocesswithlogonw failed", // elevated mode: domain GPO blocking SeInteractiveLogonRight
   ]
+
+  /**
+   * For known failure patterns whose recovery is *not* "retry this one command outside the
+   * sandbox" but rather "change a setting / talk to IT", return a tailored guidance string
+   * for the approval prompt. Returning null falls back to the generic "command failed,
+   * retry without sandbox?" message.
+   *
+   * Currently special-cases:
+   *   - Win32 error 1385 from CreateProcessWithLogonW (elevated sandbox): this means the
+   *     domain or local security policy denies SeInteractiveLogonRight to the dedicated
+   *     sandbox user, and *every* subsequent elevated command will hit the same wall.
+   *     Telling the user to switch sandbox mode is more useful than a per-command bypass.
+   */
+  static getSandboxBypassGuidance(output: string): string | null {
+    if (!output) return null
+    const lower = output.toLowerCase()
+    if (
+      lower.includes("createprocesswithlogonw failed: 1385")
+      || (lower.includes("windows sandbox failed") && lower.includes("1385"))
+    ) {
+      return [
+        "Elevated 沙箱无法在这台电脑上启动子进程。",
+        "原因：Windows 域/本地安全策略不允许沙箱用户（CodexSandboxOnline）进行本地登录（错误 1385 / SeInteractiveLogonRight 缺失）。",
+        "建议：到「设置 → 沙箱模式」切换为 Unelevated；或先允许这次在沙箱外运行该命令（之后每条命令都会再问，不便建议直接换模式）。"
+      ].join("\n")
+    }
+    return null
+  }
 
   /**
    * Detect commands that are known to fail in elevated mode due to permission/cert issues.
