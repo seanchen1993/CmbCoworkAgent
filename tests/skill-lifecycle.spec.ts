@@ -11,18 +11,20 @@ import { tmpdir } from "os"
 import { join, sep } from "path"
 import * as iconv from "iconv-lite"
 import { LocalSandbox } from "../src/main/agent/local-sandbox.ts"
+import { activateSkillLifecycle } from "../src/main/agent/skill-lifecycle/activation.ts"
+import { parseSkillUseBlock } from "../src/main/agent/skill-lifecycle/marker.ts"
 import { SkillLifecycleRegistry } from "../src/main/agent/skill-lifecycle/registry.ts"
 import { createHookScope, mergeHookScopeSnapshot } from "../src/main/hooks/scope.ts"
-import { discoverSkillsSync, expandSkillMiddlewareSourceDirs } from "../src/main/skills/discovery.ts"
+import {
+  discoverSkillsSync,
+  expandSkillMiddlewareSourceDirs
+} from "../src/main/skills/discovery.ts"
 import {
   isDiscoveredSkillDisabled,
   removeDisabledSkillEntriesForSkills,
   resolveDisabledSkillIds
 } from "../src/main/skills/ids.ts"
-import {
-  decodeArchiveEntryName,
-  selectRootSkillMarkdownEntry
-} from "../src/main/skills/archive.ts"
+import { decodeArchiveEntryName, selectRootSkillMarkdownEntry } from "../src/main/skills/archive.ts"
 import type { HookConfig } from "../src/main/hooks/types.ts"
 
 function assert(cond: unknown, msg: string): void {
@@ -126,7 +128,10 @@ async function testDeepNestedLayout(): Promise<void> {
     assert(parent?.name === "office", `expected office got ${parent?.name}`)
     assert(child?.name === "pdf", `expected pdf got ${child?.name}`)
     assert(grandchild?.name === "pdf-extract", `expected pdf-extract got ${grandchild?.name}`)
-    assert(tooDeep?.name === "pdf-extract", `too-deep skill should not be discovered, got ${tooDeep?.name}`)
+    assert(
+      tooDeep?.name === "pdf-extract",
+      `too-deep skill should not be discovered, got ${tooDeep?.name}`
+    )
   })
 }
 
@@ -158,7 +163,10 @@ async function testDisabledSkillIdsResolveByPathAndLegacyName(): Promise<void> {
 
     const skills = discoverSkillsSync(source)
     const disabledByPath = resolveDisabledSkillIds(["office/pdf"], skills)
-    assert(disabledByPath.includes("office/pdf"), "path id should disable the targeted nested skill")
+    assert(
+      disabledByPath.includes("office/pdf"),
+      "path id should disable the targeted nested skill"
+    )
     assert(
       !disabledByPath.includes("reports/pdf"),
       "path id should not disable a same-name nested sibling"
@@ -166,8 +174,7 @@ async function testDisabledSkillIdsResolveByPathAndLegacyName(): Promise<void> {
 
     const disabledByLegacyName = resolveDisabledSkillIds(["shared-pdf"], skills)
     assert(
-      disabledByLegacyName.includes("office/pdf") &&
-        disabledByLegacyName.includes("reports/pdf"),
+      disabledByLegacyName.includes("office/pdf") && disabledByLegacyName.includes("reports/pdf"),
       `legacy name should expand to all matching skill ids, got ${disabledByLegacyName.join(",")}`
     )
   })
@@ -229,10 +236,10 @@ async function testZipRootSkillSelectionPrefersShallowSkillMd(): Promise<void> {
 }
 
 async function testZipEntryNameDecodesGbkPluginSkillPath(): Promise<void> {
-  const rawName = "Code-Review-Helper - 副本/skills/架构红线高整改等级问题智能检测与修复/imagegen/SKILL.md"
+  const rawName =
+    "Code-Review-Helper - 副本/skills/架构红线高整改等级问题智能检测与修复/imagegen/SKILL.md"
   const decoded = decodeArchiveEntryName({
-    entryName:
-      "Code-Review-Helper - ����/skills/�ܹ����߸����ĵȼ��������ܼ�����޸�/imagegen/SKILL.md",
+    entryName: "Code-Review-Helper - ����/skills/�ܹ����߸����ĵȼ��������ܼ�����޸�/imagegen/SKILL.md",
     rawEntryName: iconv.encode(rawName, "gb18030"),
     header: { flags_efs: false }
   })
@@ -273,6 +280,52 @@ async function testResolveByDocPath(): Promise<void> {
     const match = reg.resolveRead(docPath)
     assert(match?.name === "docs", `expected docs got ${match?.name}`)
     assert(match?.path === docPath, `expected path=${docPath} got ${match?.path}`)
+  })
+}
+
+async function testSkillUseMarkerParsesTrailingBlock(): Promise<void> {
+  const block = [
+    "<CMBDEVCLAW-SKILL-USE-V1>",
+    "<instruction>read it</instruction>",
+    "<name>pdf</name>",
+    "<path>C:/skills/office/pdf/SKILL.md</path>",
+    "</CMBDEVCLAW-SKILL-USE-V1>"
+  ].join("\n")
+  const parsed = parseSkillUseBlock(`请用这个技能\n\n${block}`)
+  assert(parsed?.skillName === "pdf", `expected marker skillName=pdf got ${parsed?.skillName}`)
+  assert(
+    parsed?.skillPath === "C:/skills/office/pdf/SKILL.md",
+    `expected marker skillPath to round-trip got ${parsed?.skillPath}`
+  )
+  assert(parsed?.rest === "请用这个技能", `expected rest to preserve user text got ${parsed?.rest}`)
+  assert(parsed?.block === block, "parsed block should preserve the exact marker payload")
+}
+
+async function testResolveExplicitPrefersExactNestedSkillPath(): Promise<void> {
+  await withTempDir("skill-explicit-nested", async (base) => {
+    const source = join(base, "skills")
+    const parentDoc = await writeSkillDoc(source, "office/SKILL.md", { name: "office" })
+    const childDoc = await writeSkillDoc(source, "office/pdf/SKILL.md", { name: "pdf" })
+    const reg = new SkillLifecycleRegistry([source])
+
+    const byChildDoc = reg.resolveExplicit({ skillName: "office", skillPath: childDoc })
+    const byChildRoot = reg.resolveExplicit({
+      skillPath: join(source, "office", "pdf")
+    })
+    const byParentDoc = reg.resolveExplicit({ skillPath: parentDoc })
+
+    assert(
+      byChildDoc?.name === "pdf",
+      `explicit child doc should resolve child, got ${byChildDoc?.name}`
+    )
+    assert(
+      byChildRoot?.name === "pdf",
+      `explicit child root should resolve child, got ${byChildRoot?.name}`
+    )
+    assert(
+      byParentDoc?.name === "office",
+      `explicit parent doc should resolve parent, got ${byParentDoc?.name}`
+    )
   })
 }
 
@@ -372,13 +425,12 @@ async function testHookScopeSnapshotMergesNamesAndPathsIndependently(): Promise<
     activeSkillPaths: ["C:/tmp/PathSkill"]
   })
 
-  assert(target.activeSkillNames.has("name only skill"), "snapshot merge should preserve skill names")
-  const expectedPath =
-    process.platform === "win32" ? "c:/tmp/pathskill" : "C:/tmp/PathSkill"
   assert(
-    target.activeSkillPaths.has(expectedPath),
-    "snapshot merge should preserve skill paths"
+    target.activeSkillNames.has("name only skill"),
+    "snapshot merge should preserve skill names"
   )
+  const expectedPath = process.platform === "win32" ? "c:/tmp/pathskill" : "C:/tmp/PathSkill"
+  assert(target.activeSkillPaths.has(expectedPath), "snapshot merge should preserve skill paths")
 }
 
 async function testPluginSkillMetadata(): Promise<void> {
@@ -406,7 +458,9 @@ async function testPluginSkillActivatesScopedHooks(): Promise<void> {
     const scopedHook = makeHook({
       event: "PreToolUse",
       matcher: "write_file",
-      command: nodeCommand(`require('fs').writeFileSync(${JSON.stringify(outputPath)}, 'plugin active')`)
+      command: nodeCommand(
+        `require('fs').writeFileSync(${JSON.stringify(outputPath)}, 'plugin active')`
+      )
     })
     const sandbox = new LocalSandbox({
       rootDir: base,
@@ -436,7 +490,8 @@ async function testNestedSkillActivatesOnlyMatchedScopedHooks(): Promise<void> {
     })
     const parentRoot = join(source, "office")
     const childRoot = join(source, "office", "pdf")
-    const pathKey = (value: string): string => value.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase()
+    const pathKey = (value: string): string =>
+      value.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase()
     const parentMarker = join(base, "parent-hit.txt")
     const childMarker = join(base, "child-hit.txt")
     const hookScope = createHookScope()
@@ -470,6 +525,65 @@ async function testNestedSkillActivatesOnlyMatchedScopedHooks(): Promise<void> {
   })
 }
 
+async function testExplicitActivationFiresLifecycleOnceAndSuppressesReadDuplicate(): Promise<void> {
+  await withTempDir("skill-explicit-once", async (base) => {
+    const source = join(base, "skills")
+    const skillPath = await writeSkillDoc(source, "explicit/SKILL.md", {
+      raw: "---\nname: explicit\n---\nbody\n"
+    })
+    const registry = new SkillLifecycleRegistry([source])
+    const skill = registry.resolveExplicit({ skillName: "explicit", skillPath })
+    assert(skill, "explicit skill should resolve")
+
+    const counterPath = join(base, "count.txt")
+    const lifecycleHook = makeHook({
+      event: "PreSkillUse",
+      matcher: "explicit",
+      command: nodeCommand(`
+const fs = require('fs')
+const p = ${JSON.stringify(counterPath)}
+const n = fs.existsSync(p) ? Number(fs.readFileSync(p, 'utf8')) : 0
+fs.writeFileSync(p, String(n + 1))
+`)
+    })
+    const hookScope = createHookScope()
+    const skillHookKeys = new Set<string>()
+
+    await activateSkillLifecycle({
+      skill: skill!,
+      trigger: "explicit",
+      toolName: "skill_select",
+      toolArgs: { skillName: "explicit", skillPath },
+      workspacePath: base,
+      sessionId: "explicit-test",
+      hookScope,
+      firedSkillKeys: skillHookKeys,
+      resolveHooks: (event) => (event === "PreSkillUse" ? [lifecycleHook] : [])
+    })
+
+    const sandbox = new LocalSandbox({
+      rootDir: base,
+      skillLifecycleRegistry: registry,
+      hooks: [lifecycleHook],
+      hookScope,
+      skillHookKeys
+    })
+
+    await sandbox.read(skillPath)
+    const count = existsSync(counterPath) ? (await readFile(counterPath, "utf8")).trim() : "0"
+
+    assert(count === "1", `explicit selection + read should fire lifecycle once, got ${count}`)
+    const expectedPath =
+      process.platform === "win32"
+        ? skill!.rootDir.replace(/\\/g, "/").toLowerCase()
+        : skill!.rootDir.replace(/\\/g, "/")
+    assert(
+      hookScope.activeSkillPaths.has(expectedPath),
+      "explicit selection should activate the selected skill path in hook scope"
+    )
+  })
+}
+
 async function testPluginSkillHookDoesNotMatchStandaloneSkillByName(): Promise<void> {
   await withTempDir("skill-plugin-name-collision", async (base) => {
     const localSource = join(base, "skills")
@@ -494,7 +608,9 @@ async function testPluginSkillHookDoesNotMatchStandaloneSkillByName(): Promise<v
       ...makeHook({
         event: "PreToolUse",
         matcher: "write_file",
-        command: nodeCommand(`require('fs').writeFileSync(${JSON.stringify(pluginMarker)}, 'plugin')`)
+        command: nodeCommand(
+          `require('fs').writeFileSync(${JSON.stringify(pluginMarker)}, 'plugin')`
+        )
       }),
       skillName: "shared-name",
       skillPath: pluginSkillRoot,
@@ -732,6 +848,10 @@ async function run(): Promise<void> {
   console.log("PASS A4 CRLF + mixed-case frontmatter Name")
   await testResolveByDocPath()
   console.log("PASS A5 resolve by absolute SKILL.md doc path")
+  await testSkillUseMarkerParsesTrailingBlock()
+  console.log("PASS A5b explicit skill marker parses trailing block")
+  await testResolveExplicitPrefersExactNestedSkillPath()
+  console.log("PASS A5c explicit skill selection resolves exact nested path")
   await testResolveByRootDir()
   console.log("PASS A6 resolve by rootDir")
   await testResolveBySubFile()
@@ -754,6 +874,8 @@ async function run(): Promise<void> {
   console.log("PASS A13 plugin skill activates scoped hooks")
   await testNestedSkillActivatesOnlyMatchedScopedHooks()
   console.log("PASS A14 nested skill activates only the matched scoped hook")
+  await testExplicitActivationFiresLifecycleOnceAndSuppressesReadDuplicate()
+  console.log("PASS A14b explicit selection fires lifecycle once and shares read de-dupe")
   await testPluginSkillHookDoesNotMatchStandaloneSkillByName()
   console.log("PASS A15 plugin skill hook does not match standalone skill by name")
   await testSkillReadContentIsNotPolluted()

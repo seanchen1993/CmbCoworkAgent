@@ -1,10 +1,6 @@
 import { runHooks, type HookResultCallback } from "./runner"
 import type { HookContext } from "./runner"
-import {
-  mergeHookScopeSnapshot,
-  resolveEnabledHooksForRun,
-  type HookScopeController
-} from "./scope"
+import { resolveEnabledHooksForRun, type HookScopeController } from "./scope"
 
 // Map<threadId, workspacePath?>. Cleanup paths:
 //   - fireSessionEnd(threadId)  ← threads:delete handler removes the entry
@@ -31,10 +27,10 @@ export function fireSessionStartOnce(
 ): void {
   const existing = startedSessions.get(threadId)
   if (existing) {
-    if (hookScope && existing.hookScope !== hookScope) {
-      if (existing.hookScope) mergeHookScopeSnapshot(hookScope, existing.hookScope.snapshot())
-      startedSessions.set(threadId, { workspacePath: workspacePath ?? existing.workspacePath, hookScope })
-    }
+    startedSessions.set(threadId, {
+      workspacePath: workspacePath ?? existing.workspacePath,
+      hookScope: existing.hookScope
+    })
     return
   }
   startedSessions.set(threadId, { workspacePath, hookScope })
@@ -43,9 +39,7 @@ export function fireSessionStartOnce(
     sessionId: threadId
   }
   runHooks(
-    resolveEnabledHooksForRun(workspacePath, "SessionStart", context, hookScope, {
-      includeAllScoped: true
-    }),
+    resolveEnabledHooksForRun(workspacePath, "SessionStart", context, hookScope),
     "SessionStart",
     context,
     onHookResult

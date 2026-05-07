@@ -22,7 +22,10 @@ import {
   getHooks,
   getWorkspaceHooks,
   getEnabledPluginHooks,
-  getEnabledSkillHooks
+  getEnabledSkillHooks,
+  getEnabledSkillsSources,
+  getEnabledPluginSkillSourceMetadata,
+  getDisabledSkillDirs
 } from "../storage"
 import { resolveModel, rememberRoutingDecision, rememberRoutingFeedback } from "../routing"
 import { notifyIfBackground, stripThink } from "../services/notify"
@@ -35,7 +38,7 @@ import {
   sanitizeSkillId
 } from "../agent/tools/skill-evolution-tool"
 import { mkdirSync, writeFileSync } from "fs"
-import { join } from "path"
+import { join, resolve } from "path"
 import { v4 as uuid } from "uuid"
 import { LocalSandbox } from "../agent/local-sandbox"
 import { SkillUsageDetector } from "../agent/skill-evolution/usage-detector"
@@ -64,10 +67,17 @@ import {
 } from "../agent/skill-evolution/skill-proposal-logic"
 import { isRetryableApiError, buildOrderedChain, type FailoverAttempt } from "../agent/failover"
 import { runHooks, type HookContext, type HookResultCallback } from "../hooks/runner"
-import { createHookScope, resolveEnabledHooksForRun, type HookScopeController } from "../hooks/scope"
-import type { HookResult } from "../hooks/types"
+import {
+  createHookScope,
+  resolveEnabledHooksForRun,
+  type HookScopeController
+} from "../hooks/scope"
+import type { HookConfig, HookEvent, HookResult } from "../hooks/types"
 import { fireSessionStartOnce } from "../hooks/session-lifecycle"
 import { runHooksEnriched } from "../hooks/required-skill"
+import { activateSkillLifecycle, formatSkillHookContext } from "../agent/skill-lifecycle/activation"
+import { parseSkillUseBlock, type ParsedSkillUseBlock } from "../agent/skill-lifecycle/marker"
+import { SkillLifecycleRegistry, type SkillLifecycleMatch } from "../agent/skill-lifecycle/registry"
 import {
   discardAgentAutoCommitTracking,
   maybeAutoCommitAfterAgentRun,
@@ -93,6 +103,100 @@ const STOP_HOOK_REVISION_PROMPT_PREFIX = "[[CMBDEVCLAW_STOP_HOOK_REVISION]]"
 
 // Track active runs for cancellation
 const activeRuns = new Map<string, AbortController>()
+
+interface ExplicitSkillActivation {
+  parsed: ParsedSkillUseBlock
+  skill?: SkillLifecycleMatch
+  hookContext?: string
+  blocked: boolean
+  reason?: string
+}
+
+function normalizeSkillPathKey(input: string): string {
+  const normalized = resolve(input).replace(/\\/g, "/").replace(/\/+$/, "")
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized
+}
+
+function isSameOrChildSkillPath(targetPath: string, parentPath: string): boolean {
+  const target = normalizeSkillPathKey(targetPath)
+  const parent = normalizeSkillPathKey(parentPath)
+  return target === parent || target.startsWith(`${parent}/`)
+}
+
+function isDisabledSkillMatch(skill: SkillLifecycleMatch): boolean {
+  return getDisabledSkillDirs().some((dir) => isSameOrChildSkillPath(skill.rootDir, dir))
+}
+
+async function buildSkillLifecycleRegistryForHooks(): Promise<SkillLifecycleRegistry | null> {
+  const rootSources = await getEnabledSkillsSources()
+  const pluginSources = getEnabledPluginSkillSourceMetadata()
+  const sources = [...rootSources, ...pluginSources]
+  return sources.length > 0 ? new SkillLifecycleRegistry(sources) : null
+}
+
+async function activateExplicitSkillFromMessage({
+  message,
+  workspacePath,
+  sessionId,
+  hookScope,
+  firedSkillKeys,
+  onHookResult
+}: {
+  message: string
+  workspacePath: string
+  sessionId: string
+  hookScope: HookScopeController
+  firedSkillKeys: Set<string>
+  onHookResult?: HookResultCallback
+}): Promise<ExplicitSkillActivation | null> {
+  const parsed = parseSkillUseBlock(message)
+  if (!parsed) return null
+
+  const registry = await buildSkillLifecycleRegistryForHooks()
+  const skill = registry?.resolveExplicit({
+    skillName: parsed.skillName,
+    skillPath: parsed.skillPath
+  })
+
+  if (!skill || isDisabledSkillMatch(skill)) {
+    return {
+      parsed,
+      blocked: true,
+      reason: `显式选择的技能不存在或已禁用：${parsed.skillName}`
+    }
+  }
+
+  const result = await activateSkillLifecycle({
+    skill,
+    trigger: "explicit",
+    toolName: "skill_select",
+    toolArgs: {
+      skillName: parsed.skillName,
+      skillPath: parsed.skillPath
+    },
+    toolResult: JSON.stringify({
+      selected: true,
+      trigger: "explicit",
+      skillName: skill.name,
+      skillPath: skill.path
+    }),
+    workspacePath,
+    sessionId,
+    hookScope,
+    firedSkillKeys,
+    resolveHooks: (event: HookEvent, context: HookContext): HookConfig[] =>
+      resolveEnabledHooksForRun(workspacePath, event, context, hookScope),
+    onHookResult
+  })
+
+  return {
+    parsed,
+    skill,
+    hookContext: formatSkillHookContext(skill, result.notes) ?? undefined,
+    blocked: result.blocked,
+    reason: result.reason
+  }
+}
 
 type StopHookContext = NonNullable<HookContext["stopContext"]>
 
@@ -1081,6 +1185,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     const abortController = new AbortController()
     activeRuns.set(threadId, abortController)
     const hookScope = createHookScope()
+    const skillHookKeys = new Set<string>()
 
     // Abort the stream if the window is closed/destroyed
     const onWindowClosed = (): void => {
@@ -1175,6 +1280,34 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         return
       }
 
+      const explicitSkillActivation = await activateExplicitSkillFromMessage({
+        message,
+        workspacePath,
+        sessionId: threadId,
+        hookScope,
+        firedSkillKeys: skillHookKeys,
+        onHookResult
+      })
+      if (explicitSkillActivation?.blocked) {
+        const reason = explicitSkillActivation.reason || "显式选择的技能被 Hook 拦截"
+        window.webContents.send(channel, {
+          type: "error",
+          error: reason
+        })
+        await tracer.finish("error", reason)
+        return
+      }
+      if (explicitSkillActivation?.skill) {
+        skillUsageDetector.onSkillsMetadata([
+          {
+            name: explicitSkillActivation.skill.name,
+            path: explicitSkillActivation.skill.path
+          }
+        ])
+        skillUsageDetector.onReadFilePath(explicitSkillActivation.skill.path)
+        tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+      }
+
       // Fire SessionStart once per thread lifetime (not per turn). SessionEnd fires when the
       // thread is deleted (threads:delete) or the app is quitting.
       fireSessionStartOnce(threadId, sessionWorkspacePath, onHookResult, hookScope)
@@ -1221,8 +1354,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       if (typeof updatedMessage === "string" && updatedMessage.length > 0) {
         effectiveMessage = updatedMessage
       }
-      if (promptSubmitResult?.additionalContext) {
-        effectiveMessage = `${promptSubmitResult.additionalContext}\n\n${effectiveMessage}`
+      if (explicitSkillActivation?.parsed && !parseSkillUseBlock(effectiveMessage)) {
+        effectiveMessage = [effectiveMessage.trimEnd(), explicitSkillActivation.parsed.block]
+          .filter(Boolean)
+          .join("\n\n")
+      }
+      const promptContextBlocks = [
+        explicitSkillActivation?.hookContext,
+        promptSubmitResult?.additionalContext
+      ].filter((item): item is string => Boolean(item?.trim()))
+      if (promptContextBlocks.length > 0) {
+        effectiveMessage = `${promptContextBlocks.join("\n\n")}\n\n${effectiveMessage}`
       }
       if (promptSubmitResult?.systemMessage) {
         window.webContents.send(channel, {
@@ -1309,6 +1451,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
             onHookResult,
             hookScope,
+            skillHookKeys,
             onFileMutation: autoCommit.onFileMutation
           })
           // First attempt sends the message; subsequent attempts resume from checkpoint
@@ -1913,6 +2056,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
             onHookResult,
             hookScope,
+            skillHookKeys,
             onFileMutation: autoCommit.onFileMutation
           })
           activeStream = await agent.stream(null, streamConfig) // resume from checkpoint
@@ -2155,6 +2299,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     const abortController = new AbortController()
     activeRuns.set(threadId, abortController)
     const hookScope = createHookScope()
+    const skillHookKeys = new Set<string>()
     const stopContextCollector = new StopHookContextCollector()
     const sendHookNotice = (notice: string): void => {
       window.webContents.send(channel, {
@@ -2229,6 +2374,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
             onHookResult,
             hookScope,
+            skillHookKeys,
             onFileMutation: autoCommit.onFileMutation
           })
           resumeStream = await resumeAgent.stream(
@@ -2354,6 +2500,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
             onHookResult,
             hookScope,
+            skillHookKeys,
             onFileMutation: autoCommit.onFileMutation
           })
           activeResumeStream = await nextAgent.stream(
@@ -2456,6 +2603,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     const abortController = new AbortController()
     activeRuns.set(threadId, abortController)
     const hookScope = createHookScope()
+    const skillHookKeys = new Set<string>()
     const stopContextCollector = new StopHookContextCollector()
     const sendHookNotice = (notice: string): void => {
       window.webContents.send(channel, {
@@ -2524,6 +2672,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
               hookScope,
+              skillHookKeys,
               onFileMutation: autoCommit.onFileMutation
             })
             intStream = await intAgent.stream(null, interruptStreamConfig)
@@ -2646,6 +2795,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
               hookScope,
+              skillHookKeys,
               onFileMutation: autoCommit.onFileMutation
             })
             activeIntStream = await nextAgent.stream(null, interruptStreamConfig)

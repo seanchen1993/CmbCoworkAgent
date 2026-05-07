@@ -26,22 +26,30 @@ function normalizePath(input: string): string {
   return process.platform === "win32" ? normalized.toLowerCase() : normalized
 }
 
+function normalizeSkillName(input: string | undefined | null): string {
+  return input?.trim().toLowerCase() ?? ""
+}
+
 function normalizeSource(source: string | SkillLifecycleSource): SkillLifecycleSource {
   return typeof source === "string" ? { sourceDir: source } : source
 }
 
-function collectSkillEntriesFromSource(rawSource: string | SkillLifecycleSource): SkillLifecycleEntry[] {
+function collectSkillEntriesFromSource(
+  rawSource: string | SkillLifecycleSource
+): SkillLifecycleEntry[] {
   const source = normalizeSource(rawSource)
   const sourcePath = resolve(source.sourceDir)
-  return discoverSkillsSync(sourcePath, source.maxDepth).map((skill): SkillLifecycleEntry => ({
-    name: skill.name,
-    path: skill.skillMdPath,
-    rootDir: skill.rootDir,
-    pluginId: source.pluginId,
-    pluginName: source.pluginName,
-    normalizedDocPath: normalizePath(skill.skillMdPath),
-    normalizedRootDir: normalizePath(skill.rootDir)
-  }))
+  return discoverSkillsSync(sourcePath, source.maxDepth).map(
+    (skill): SkillLifecycleEntry => ({
+      name: skill.name,
+      path: skill.skillMdPath,
+      rootDir: skill.rootDir,
+      pluginId: source.pluginId,
+      pluginName: source.pluginName,
+      normalizedDocPath: normalizePath(skill.skillMdPath),
+      normalizedRootDir: normalizePath(skill.rootDir)
+    })
+  )
 }
 
 export class SkillLifecycleRegistry {
@@ -58,9 +66,42 @@ export class SkillLifecycleRegistry {
         entries.push(entry)
       }
     }
-    this.entries = entries.sort(
-      (a, b) => b.normalizedRootDir.length - a.normalizedRootDir.length
-    )
+    this.entries = entries.sort((a, b) => b.normalizedRootDir.length - a.normalizedRootDir.length)
+  }
+
+  private toMatch(entry: SkillLifecycleEntry): SkillLifecycleMatch {
+    return {
+      name: entry.name,
+      path: entry.path,
+      rootDir: entry.rootDir,
+      pluginId: entry.pluginId,
+      pluginName: entry.pluginName
+    }
+  }
+
+  resolveExplicit(input: {
+    skillName?: string | null
+    skillPath?: string | null
+  }): SkillLifecycleMatch | null {
+    const pathCandidates = [
+      input.skillPath ? normalizePath(resolve(input.skillPath)) : "",
+      input.skillPath ? normalizePath(input.skillPath) : ""
+    ].filter(Boolean)
+
+    for (const candidate of pathCandidates) {
+      for (const entry of this.entries) {
+        if (candidate === entry.normalizedDocPath || candidate === entry.normalizedRootDir) {
+          return this.toMatch(entry)
+        }
+      }
+    }
+
+    const requestedName = normalizeSkillName(input.skillName)
+    if (!requestedName) return null
+    for (const entry of this.entries) {
+      if (normalizeSkillName(entry.name) === requestedName) return this.toMatch(entry)
+    }
+    return null
   }
 
   resolveRead(rawPath: string, resolvedPath?: string): SkillLifecycleMatch | null {
@@ -77,13 +118,7 @@ export class SkillLifecycleRegistry {
           candidate === entry.normalizedRootDir ||
           candidate.startsWith(`${entry.normalizedRootDir}/`)
         ) {
-          return {
-            name: entry.name,
-            path: entry.path,
-            rootDir: entry.rootDir,
-            pluginId: entry.pluginId,
-            pluginName: entry.pluginName
-          }
+          return this.toMatch(entry)
         }
       }
     }

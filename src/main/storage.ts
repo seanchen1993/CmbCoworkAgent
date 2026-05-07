@@ -18,7 +18,7 @@ import {
   type HookUpsert
 } from "./hooks/types"
 import type { AgentAutoCommitSettings } from "./types"
-import { readdir, rm, mkdir, stat as fsStat } from "fs/promises"
+import { readdir, rm, mkdir } from "fs/promises"
 import { app } from "electron"
 import { resolveMcpConnectorKind } from "./mcp/connector-kind"
 import type {
@@ -33,7 +33,6 @@ import {
   discoverSkillsSync,
   expandSkillMiddlewareSourceDirs,
   makeFlattenedSkillDirName,
-  normalizeSkillRelativePath,
   type DiscoveredSkill
 } from "./skills/discovery"
 import {
@@ -429,6 +428,14 @@ export function getDisabledSkills(): string[] {
   return resolveDisabledSkillEntries(readDisabledSkillEntries())
 }
 
+export function getDisabledSkillDirs(): string[] {
+  const disabled = new Set(getDisabledSkills().map((name) => name.trim().toLowerCase()))
+  if (disabled.size === 0) return []
+  return discoverSkillsFromSourcesSync()
+    .filter((skill) => isDiscoveredSkillDisabled(skill, disabled))
+    .map((skill) => skill.rootDir)
+}
+
 export function setDisabledSkills(skillIds: string[]): void {
   writeDisabledSkillEntries(resolveDisabledSkillEntries(skillIds))
 }
@@ -483,195 +490,34 @@ export function prepareDisabledSkillsCleanupForSkillDir(skillDir: string): () =>
   }
 }
 
-const ENABLED_SKILLS_DIR = join(OPENWORK_DIR, "enabled-skills")
-const ENABLED_SKILLS_BUILTIN_DIR = join(OPENWORK_DIR, "enabled-skills-builtin")
-const ENABLED_SKILLS_CUSTOM_DIR = join(OPENWORK_DIR, "enabled-skills-custom")
+const LEGACY_ENABLED_SKILLS_DIRS = [
+  join(OPENWORK_DIR, "enabled-skills"),
+  join(OPENWORK_DIR, "enabled-skills-builtin"),
+  join(OPENWORK_DIR, "enabled-skills-custom")
+]
 
-// Fingerprints for separate builtin and custom enabled skills
-let _enabledSkillsBuiltinFingerprint: string | null = null
-let _enabledSkillsCustomFingerprint: string | null = null
+let _legacyEnabledSkillsCleanup: Promise<void> | null = null
 
-async function computeEnabledSkillsFingerprint(
-  disabledList: string[],
-  sourceDirs: string[]
-): Promise<string> {
-  const parts = [[...disabledList].sort().join(","), sourceDirs.join("|")]
-  for (const dir of sourceDirs) {
-    if (!existsSync(dir)) continue
-    try {
-      const dirNames: string[] = []
-      const skills = await discoverSkills(dir)
-      for (const skill of skills) {
-        dirNames.push(skill.relativePath || ".")
-        for (const fileName of ["SKILL.md", ...SKILL_HOOKS_FILES]) {
-          const filePath = join(skill.rootDir, fileName)
-          try {
-            const st = await fsStat(filePath)
-            dirNames.push(`${fileName}:${st.mtimeMs}`)
-          } catch {
-            /* missing or unreadable */
-          }
-        }
-      }
-      parts.push(dirNames.sort().join(","))
-    } catch {
-      /* ignore */
-    }
-  }
-  return createHash("sha256").update(parts.join(":")).digest("hex").slice(0, 16)
-}
-
-async function copyEnabledSkillsFromSourceAsync(
-  sourceDir: string,
-  disabled: Set<string>,
-  destDir?: string
-): Promise<number> {
-  const skills = await discoverSkills(sourceDir)
-  const enabledSkills = skills.filter((skill) => !isDiscoveredSkillDisabled(skill, disabled))
-  const topLevelDirs = new Map<string, { src: string; dest: string }>()
-  const targetRoot = destDir ?? ENABLED_SKILLS_DIR
-
-  const topLevelFor = (relativePath: string): string => {
-    const normalized = normalizeSkillRelativePath(relativePath)
-    if (!normalized) return basename(sourceDir)
-    return normalized.split("/")[0] || basename(sourceDir)
-  }
-
-  for (const skill of enabledSkills) {
-    const topLevel = topLevelFor(skill.relativePath)
-    if (topLevelDirs.has(topLevel)) continue
-    topLevelDirs.set(topLevel, {
-      src: skill.relativePath ? join(sourceDir, topLevel) : sourceDir,
-      dest: join(targetRoot, topLevel)
-    })
-  }
-
-  const copiedTopLevels = new Set<string>()
-  for (const [topLevel, paths] of topLevelDirs) {
-    try {
-      await copyDirRecursive(paths.src, paths.dest)
-      copiedTopLevels.add(topLevel)
-    } catch (e) {
-      console.warn(`[Storage] Failed to copy skill tree ${topLevel}:`, e)
+async function cleanupLegacyEnabledSkillsDirsAsync(): Promise<void> {
+  if (_legacyEnabledSkillsCleanup) return _legacyEnabledSkillsCleanup
+  _legacyEnabledSkillsCleanup = Promise.all(
+    LEGACY_ENABLED_SKILLS_DIRS.map(async (dir) => {
+      if (!existsSync(dir)) return
       try {
-        await rm(paths.dest, { recursive: true, force: true })
-      } catch {
-        /* ignore */
+        await rm(dir, { recursive: true, force: true })
+        console.log(`[Storage] Removed legacy enabled skills cache: ${dir}`)
+      } catch (e) {
+        console.warn(`[Storage] Failed to remove legacy enabled skills cache ${dir}:`, e)
       }
-    }
-  }
-
-  for (const skill of skills) {
-    if (!isDiscoveredSkillDisabled(skill, disabled)) continue
-    const topLevel = topLevelFor(skill.relativePath)
-    if (!copiedTopLevels.has(topLevel)) continue
-    const normalizedRel = normalizeSkillRelativePath(skill.relativePath)
-    const destSkillDir = normalizedRel
-      ? join(targetRoot, normalizedRel)
-      : join(targetRoot, basename(sourceDir))
-    try {
-      await rm(join(destSkillDir, "SKILL.md"), { force: true })
-      for (const hooksFileName of SKILL_HOOKS_FILES) {
-        await rm(join(destSkillDir, hooksFileName), { force: true })
-      }
-    } catch (e) {
-      console.warn(`[Storage] Failed to prune disabled skill ${skill.name}:`, e)
-    }
-  }
-
-  return enabledSkills.filter((skill) => copiedTopLevels.has(topLevelFor(skill.relativePath)))
-    .length
-}
-
-let _enabledSkillsBuildLock: Promise<string[]> | null = null
-
-/**
- * Ensures separate enabled-skills directories exist for builtin and custom skills.
- * Uses async I/O to avoid blocking the main process event loop.
- * Skips rebuild if the disabled list and source dirs haven't changed.
- * Serialized via a Promise lock to prevent concurrent rm/mkdir/copyFile races.
- */
-async function ensureEnabledSkillsDirsAsync(): Promise<string[]> {
-  if (_enabledSkillsBuildLock) return _enabledSkillsBuildLock
-  _enabledSkillsBuildLock = _ensureEnabledSkillsDirsImpl()
-  try {
-    return await _enabledSkillsBuildLock
-  } finally {
-    _enabledSkillsBuildLock = null
-  }
-}
-
-async function _ensureEnabledSkillsDirsImpl(): Promise<string[]> {
-  getOpenworkDir()
-  const builtinDir = getSkillsDir()
-  const customDir = getCustomSkillsDir()
-  const disabled = getDisabledSkills()
-  const disabledSet = new Set(disabled.map((s) => s.trim().toLowerCase()))
-
-  const results: string[] = []
-
-  // Handle builtin skills
-  if (existsSync(builtinDir)) {
-    const builtinFingerprint = await computeEnabledSkillsFingerprint(disabled, [builtinDir])
-    if (
-      _enabledSkillsBuiltinFingerprint !== builtinFingerprint ||
-      !existsSync(ENABLED_SKILLS_BUILTIN_DIR)
-    ) {
-      if (existsSync(ENABLED_SKILLS_BUILTIN_DIR)) {
-        await rm(ENABLED_SKILLS_BUILTIN_DIR, { recursive: true })
-      }
-      await mkdir(ENABLED_SKILLS_BUILTIN_DIR, { recursive: true })
-
-      const count = await copyEnabledSkillsFromSourceAsync(
-        builtinDir,
-        disabledSet,
-        ENABLED_SKILLS_BUILTIN_DIR
-      )
-      console.log(
-        `[Storage] Copied ${count} enabled builtin skills to ${ENABLED_SKILLS_BUILTIN_DIR}`
-      )
-      _enabledSkillsBuiltinFingerprint = builtinFingerprint
-    }
-    if (existsSync(ENABLED_SKILLS_BUILTIN_DIR)) {
-      results.push(ENABLED_SKILLS_BUILTIN_DIR)
-    }
-  }
-
-  // Handle custom skills
-  if (existsSync(customDir)) {
-    const customFingerprint = await computeEnabledSkillsFingerprint(disabled, [customDir])
-    if (
-      _enabledSkillsCustomFingerprint !== customFingerprint ||
-      !existsSync(ENABLED_SKILLS_CUSTOM_DIR)
-    ) {
-      if (existsSync(ENABLED_SKILLS_CUSTOM_DIR)) {
-        await rm(ENABLED_SKILLS_CUSTOM_DIR, { recursive: true })
-      }
-      await mkdir(ENABLED_SKILLS_CUSTOM_DIR, { recursive: true })
-
-      const count = await copyEnabledSkillsFromSourceAsync(
-        customDir,
-        disabledSet,
-        ENABLED_SKILLS_CUSTOM_DIR
-      )
-      console.log(`[Storage] Copied ${count} enabled custom skills to ${ENABLED_SKILLS_CUSTOM_DIR}`)
-      _enabledSkillsCustomFingerprint = customFingerprint
-    }
-    if (existsSync(ENABLED_SKILLS_CUSTOM_DIR)) {
-      results.push(ENABLED_SKILLS_CUSTOM_DIR)
-    }
-  }
-
-  return results
+    })
+  ).then(() => undefined)
+  return _legacyEnabledSkillsCleanup
 }
 
 /**
- * Invalidate the enabled-skills cache so the next call rebuilds.
- * Should be called when disabled skills list changes.
+ * Invalidate skill-derived caches after skill enablement or plugin changes.
  */
 export function invalidateEnabledSkillsCache(): void {
-  _enabledSkillsBuiltinFingerprint = null
-  _enabledSkillsCustomFingerprint = null
   _pluginSkillsCache = null
   _pluginSkillSourcesCache = null
   _pluginMcpCache = null
@@ -681,16 +527,12 @@ export function invalidateEnabledSkillsCache(): void {
 }
 
 /**
- * Returns skills sources for the agent: either the filtered enabled-skills dirs
- * or the full skills dirs if no skills are disabled.
+ * Returns original skills sources for the agent. Disabled skills are filtered
+ * by the runtime filesystem view instead of copying enabled-only directories.
  */
 export async function getEnabledSkillsSources(): Promise<string[]> {
-  const disabled = getDisabledSkills()
-  if (disabled.length === 0) return getSkillsSources()
-
-  // When skills are disabled, create separate filtered directories for builtin and custom skills
-  const enabledDirs = await ensureEnabledSkillsDirsAsync()
-  return enabledDirs.filter((dir) => existsSync(dir))
+  await cleanupLegacyEnabledSkillsDirsAsync()
+  return getSkillsSources()
 }
 
 /**
@@ -734,12 +576,14 @@ export async function syncSkillsToClaudeDir(workDir: string): Promise<void> {
 
   // Copy enabled skills
   const sourceDirs = await getEnabledSkillsSources()
+  const disabled = new Set(getDisabledSkills().map((name) => name.trim().toLowerCase()))
   let count = 0
   const usedDestNames = new Map<string, string>()
   for (const sourceDir of sourceDirs) {
     if (!existsSync(sourceDir)) continue
     const skills = await discoverSkills(sourceDir)
     for (const skill of skills) {
+      if (isDiscoveredSkillDisabled(skill, disabled)) continue
       const relativeName = skill.relativePath || basename(skill.rootDir)
       let destName = CMB_SKILL_PREFIX + makeFlattenedSkillDirName(relativeName)
       const existingRelativeName = usedDestNames.get(destName)

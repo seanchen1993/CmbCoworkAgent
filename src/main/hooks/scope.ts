@@ -1,10 +1,7 @@
 import {
   getEnabledPluginHookMetadata,
   getEnabledSkillHookMetadata,
-  getEnabledHooks,
-  getCustomSkillsDir,
-  getOpenworkDir,
-  getSkillsDir
+  getEnabledHooks
 } from "../storage"
 import type { HookContext } from "./runner"
 import type { HookConfig, HookEvent } from "./types"
@@ -20,7 +17,11 @@ export interface HookScopeController {
   readonly activeSkillNames: ReadonlySet<string>
   readonly activeSkillPaths: ReadonlySet<string>
   activatePlugin(pluginId?: string | null): void
-  activateSkill(skillName?: string | null, pluginId?: string | null, skillPath?: string | null): void
+  activateSkill(
+    skillName?: string | null,
+    pluginId?: string | null,
+    skillPath?: string | null
+  ): void
   snapshot(): HookScopeSnapshot
 }
 
@@ -50,23 +51,6 @@ function addPathAliases(target: Set<string>, path: string | undefined | null): v
   const normalized = normalizePathKey(path)
   if (!normalized) return
   addNormalizedPathAlias(target, normalized)
-
-  const openworkDir = normalizePathKey(getOpenworkDir())
-  const customSkillsDir = normalizePathKey(getCustomSkillsDir())
-  const builtinSkillsDir = normalizePathKey(getSkillsDir())
-  const enabledCustomPrefix = `${openworkDir}/enabled-skills-custom/`
-  const enabledBuiltinPrefix = `${openworkDir}/enabled-skills-builtin/`
-  const enabledLegacyPrefix = `${openworkDir}/enabled-skills/`
-
-  if (normalized.startsWith(enabledCustomPrefix)) {
-    addNormalizedPathAlias(target, `${customSkillsDir}/${normalized.slice(enabledCustomPrefix.length)}`)
-  } else if (normalized.startsWith(enabledBuiltinPrefix)) {
-    addNormalizedPathAlias(target, `${builtinSkillsDir}/${normalized.slice(enabledBuiltinPrefix.length)}`)
-  } else if (normalized.startsWith(enabledLegacyPrefix)) {
-    const relativePath = normalized.slice(enabledLegacyPrefix.length)
-    addNormalizedPathAlias(target, `${customSkillsDir}/${relativePath}`)
-    addNormalizedPathAlias(target, `${builtinSkillsDir}/${relativePath}`)
-  }
 }
 
 function pathSetIntersects(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
@@ -134,14 +118,10 @@ export function resolveEnabledHooksForRun(
   workspacePath: string | undefined,
   _event: HookEvent,
   context: HookContext,
-  scope?: HookScopeController,
-  options: { includeAllScoped?: boolean } = {}
+  scope?: HookScopeController
 ): HookConfig[] {
   const baseHooks = getEnabledHooks(workspacePath)
   if (!scope) return baseHooks
-  if (options.includeAllScoped) {
-    return [...baseHooks, ...getEnabledPluginHookMetadata(), ...getEnabledSkillHookMetadata()]
-  }
 
   const allowedPluginIds = new Set(scope.activePluginIds)
   const currentPluginId = normalizePluginId(context.pluginId)
@@ -178,6 +158,7 @@ export function resolveEnabledHooksForRun(
             return allowedPluginIds.has(hookPluginId) && pathMatches
           }
           if (pathMatches) return true
+          if (allowedSkillPaths.size > 0) return false
           return allowedSkillNames.has(normalizeSkillName(hook.skillName))
         })
 

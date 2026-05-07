@@ -20,7 +20,8 @@ import {
   DEFAULT_MAX_TOKENS,
   getEnabledPluginSkillSourceMetadata,
   getEnabledPluginSkillMiddlewareSources,
-  getPlugins
+  getPlugins,
+  getDisabledSkillDirs
 } from "../storage"
 
 import { ChatOpenAI } from "@langchain/openai"
@@ -72,7 +73,13 @@ import { createPlaywrightTool } from "./tools/playwright-tool"
 import { createToolSearchTools } from "./tools/tool-search-tool"
 import { createCodeExecTool } from "./tools/code-exec-tool"
 import { listSavedCodeExecTools } from "../code-exec/saved-tool-store"
-import { getWindowsSandboxMode, getYoloMode, getEnabledHooks, isCodeExecEnabled, getLspConfig } from "../storage"
+import {
+  getWindowsSandboxMode,
+  getYoloMode,
+  getEnabledHooks,
+  isCodeExecEnabled,
+  getLspConfig
+} from "../storage"
 import { runHooks } from "../hooks/runner"
 import type { HookContext } from "../hooks/runner"
 import type { HookEvent, HookResult } from "../hooks/types"
@@ -109,7 +116,11 @@ async function ensureCodexExe(exePath: string): Promise<void> {
     // Skip if exe is up-to-date (gz not newer)
     if (statSync(exePath).mtimeMs >= statSync(gzPath).mtimeMs) return
     // gz is newer — remove stale exe before re-extracting
-    try { unlinkSync(exePath) } catch { /* ignore */ }
+    try {
+      unlinkSync(exePath)
+    } catch {
+      /* ignore */
+    }
   }
   try {
     await pipeline(createReadStream(gzPath), createGunzip(), createWriteStream(exePath))
@@ -122,11 +133,14 @@ async function ensureCodexExe(exePath: string): Promise<void> {
 // ── Pending Approvals (shared between orchestrator and IPC) ──
 
 /** Map of pending approval promises keyed by request ID. */
-export const pendingApprovals = new Map<string, {
-  resolve: (decision: ApprovalDecision) => void
-  request: ApprovalRequest
-  targetWebContentsIds: number[]
-}>()
+export const pendingApprovals = new Map<
+  string,
+  {
+    resolve: (decision: ApprovalDecision) => void
+    request: ApprovalRequest
+    targetWebContentsIds: number[]
+  }
+>()
 
 /** Per-thread approval store cache. */
 const approvalStores = new Map<string, ApprovalStore>()
@@ -254,11 +268,11 @@ function createScopedMcpCapabilityService(
       )
       if (preResult?.blocked || preResult?.continue === false || preResult?.decision === "block") {
         throw new Error(
-          preResult.reason
-            || preResult.stopReason
-            || preResult.stdout
-            || preResult.stderr
-            || `MCP tool ${tool.toolId} was blocked by a hook`
+          preResult.reason ||
+            preResult.stopReason ||
+            preResult.stdout ||
+            preResult.stderr ||
+            `MCP tool ${tool.toolId} was blocked by a hook`
         )
       }
 
@@ -462,9 +476,13 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     if (grepTool?.schema?.shape?.pattern) {
       const oldDesc = grepTool.schema.shape.pattern.description ?? "(unknown)"
       grepTool.schema = grepTool.schema.extend({
-        pattern: grepTool.schema.shape.pattern.describe("Text pattern to search for (literal, not regex)")
+        pattern: grepTool.schema.shape.pattern.describe(
+          "Text pattern to search for (literal, not regex)"
+        )
       })
-      console.log(`[Runtime] grep schema patched: "${oldDesc}" → "${grepTool.schema.shape.pattern.description}"`)
+      console.log(
+        `[Runtime] grep schema patched: "${oldDesc}" → "${grepTool.schema.shape.pattern.description}"`
+      )
     } else {
       console.warn("[Runtime] grep tool schema patch skipped: tool or pattern field not found")
     }
@@ -478,25 +496,33 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     const executeIdx = mw.tools?.findIndex((t: any) => t.name === "execute") ?? -1
     if (executeIdx >= 0) {
       const oldExecute = mw.tools![executeIdx]
-      const customExecute = lcTool(async (input: { command: string; run_in_background?: boolean }) => {
-        if (input.run_in_background) {
-          const taskId = await (filesystemBackend as LocalSandbox).executeBackground(input.command)
-          return `Background task started (id: ${taskId}). Use task_output tool with this id to check results later.`
+      const customExecute = lcTool(
+        async (input: { command: string; run_in_background?: boolean }) => {
+          if (input.run_in_background) {
+            const taskId = await (filesystemBackend as LocalSandbox).executeBackground(
+              input.command
+            )
+            return `Background task started (id: ${taskId}). Use task_output tool with this id to check results later.`
+          }
+          // Delegate to original execute handler for foreground execution
+          return (oldExecute as any).invoke(input)
+        },
+        {
+          name: "execute",
+          description: (oldExecute as any).description,
+          schema: z.object({
+            command: z.string().describe("The shell command to execute"),
+            run_in_background: z
+              .boolean()
+              .optional()
+              .describe(
+                "Set to true to run the command in the background. Returns a task ID immediately. " +
+                  "Use this for long-running commands like builds, dependency downloads, or test suites. " +
+                  "Retrieve the result later with the task_output tool."
+              )
+          })
         }
-        // Delegate to original execute handler for foreground execution
-        return (oldExecute as any).invoke(input)
-      }, {
-        name: "execute",
-        description: (oldExecute as any).description,
-        schema: z.object({
-          command: z.string().describe("The shell command to execute"),
-          run_in_background: z.boolean().optional().describe(
-            "Set to true to run the command in the background. Returns a task ID immediately. " +
-            "Use this for long-running commands like builds, dependency downloads, or test suites. " +
-            "Retrieve the result later with the task_output tool."
-          )
-        })
-      })
+      )
       mw.tools![executeIdx] = customExecute
       console.log("[Runtime] execute tool patched: added run_in_background support")
     }
@@ -505,61 +531,79 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     // Mirrors Claude Code's TaskOutput: blocks internally (100ms poll loop)
     // until the task completes or the timeout expires, so the LLM only needs
     // one tool call per check instead of burning tokens on repeated polls.
-    const taskOutputTool = lcTool(async (input: { task_id: string; block?: boolean; timeout?: number }) => {
-      const sandbox = filesystemBackend as LocalSandbox
-      const block = input.block !== false  // default true
-      const timeout = input.timeout ?? 30_000 // default 30s, max 600s
+    const taskOutputTool = lcTool(
+      async (input: { task_id: string; block?: boolean; timeout?: number }) => {
+        const sandbox = filesystemBackend as LocalSandbox
+        const block = input.block !== false // default true
+        const timeout = input.timeout ?? 30_000 // default 30s, max 600s
 
-      // Non-blocking: return immediately
-      if (!block) {
-        const result = sandbox.getTaskOutput(input.task_id)
-        if (!result) return `Error: No background task found with id "${input.task_id}".`
-        if (!result.completed) {
-          return JSON.stringify({ retrieval_status: "not_ready", elapsed: result.elapsedSeconds, command: result.command })
-        }
-        const status = result.exitCode === 0 ? "succeeded" : "failed"
-        return `${result.output ?? "<no output>"}\n[Command ${status} with exit code ${result.exitCode}, elapsed: ${result.elapsedSeconds}s]`
-      }
-
-      // Blocking: poll with progressive interval until completed, timeout, or abort.
-      // First 2s at 100ms for snappy response, then 500ms to reduce CPU spin.
-      const start = Date.now()
-      while (Date.now() - start < timeout) {
-        if (sandbox.isAborted) {
-          return "Task polling aborted: conversation was cancelled by user."
-        }
-        const result = sandbox.getTaskOutput(input.task_id)
-        if (!result) return `Error: No background task found with id "${input.task_id}".`
-        if (result.completed) {
+        // Non-blocking: return immediately
+        if (!block) {
+          const result = sandbox.getTaskOutput(input.task_id)
+          if (!result) return `Error: No background task found with id "${input.task_id}".`
+          if (!result.completed) {
+            return JSON.stringify({
+              retrieval_status: "not_ready",
+              elapsed: result.elapsedSeconds,
+              command: result.command
+            })
+          }
           const status = result.exitCode === 0 ? "succeeded" : "failed"
           return `${result.output ?? "<no output>"}\n[Command ${status} with exit code ${result.exitCode}, elapsed: ${result.elapsedSeconds}s]`
         }
-        const elapsed = Date.now() - start
-        await new Promise<void>(r => setTimeout(r, elapsed < 2000 ? 100 : 500))
-      }
 
-      // Timeout — return current status so the LLM can decide to call again
-      const final = sandbox.getTaskOutput(input.task_id)
-      if (!final) return `Error: No background task found with id "${input.task_id}".`
-      if (final.completed) {
-        const status = final.exitCode === 0 ? "succeeded" : "failed"
-        return `${final.output ?? "<no output>"}\n[Command ${status} with exit code ${final.exitCode}, elapsed: ${final.elapsedSeconds}s]`
+        // Blocking: poll with progressive interval until completed, timeout, or abort.
+        // First 2s at 100ms for snappy response, then 500ms to reduce CPU spin.
+        const start = Date.now()
+        while (Date.now() - start < timeout) {
+          if (sandbox.isAborted) {
+            return "Task polling aborted: conversation was cancelled by user."
+          }
+          const result = sandbox.getTaskOutput(input.task_id)
+          if (!result) return `Error: No background task found with id "${input.task_id}".`
+          if (result.completed) {
+            const status = result.exitCode === 0 ? "succeeded" : "failed"
+            return `${result.output ?? "<no output>"}\n[Command ${status} with exit code ${result.exitCode}, elapsed: ${result.elapsedSeconds}s]`
+          }
+          const elapsed = Date.now() - start
+          await new Promise<void>((r) => setTimeout(r, elapsed < 2000 ? 100 : 500))
+        }
+
+        // Timeout — return current status so the LLM can decide to call again
+        const final = sandbox.getTaskOutput(input.task_id)
+        if (!final) return `Error: No background task found with id "${input.task_id}".`
+        if (final.completed) {
+          const status = final.exitCode === 0 ? "succeeded" : "failed"
+          return `${final.output ?? "<no output>"}\n[Command ${status} with exit code ${final.exitCode}, elapsed: ${final.elapsedSeconds}s]`
+        }
+        return JSON.stringify({
+          retrieval_status: "timeout",
+          elapsed: final.elapsedSeconds,
+          command: final.command
+        })
+      },
+      {
+        name: "task_output",
+        description:
+          "Retrieve the output of a background task started with execute(run_in_background=true). " +
+          "By default blocks up to 30 seconds waiting for the task to complete. " +
+          "If the task finishes within the timeout, returns the full output. " +
+          "If it times out, returns current status — call again to continue waiting. " +
+          "Set block=false for a non-blocking status check.",
+        schema: z.object({
+          task_id: z
+            .string()
+            .describe("The task ID returned by execute when run_in_background was true"),
+          block: z.boolean().optional().describe("Whether to wait for completion (default: true)"),
+          timeout: z
+            .number()
+            .min(0)
+            .max(600_000)
+            .optional()
+            .describe("Max wait time in ms (default: 30000)")
+        })
       }
-      return JSON.stringify({ retrieval_status: "timeout", elapsed: final.elapsedSeconds, command: final.command })
-    }, {
-      name: "task_output",
-      description:
-        "Retrieve the output of a background task started with execute(run_in_background=true). " +
-        "By default blocks up to 30 seconds waiting for the task to complete. " +
-        "If the task finishes within the timeout, returns the full output. " +
-        "If it times out, returns current status — call again to continue waiting. " +
-        "Set block=false for a non-blocking status check.",
-      schema: z.object({
-        task_id: z.string().describe("The task ID returned by execute when run_in_background was true"),
-        block: z.boolean().optional().describe("Whether to wait for completion (default: true)"),
-        timeout: z.number().min(0).max(600_000).optional().describe("Max wait time in ms (default: 30000)")
-      })
-    })
+    )
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     mw.tools = [...(mw.tools || []), taskOutputTool] as any
     console.log("[Runtime] task_output tool added")
@@ -746,12 +790,23 @@ export type DeepAgent = ReactAgent<any>
  * @param workspacePath - The workspace path the agent is operating in
  * @returns The complete system prompt
  */
-function getShellInfo(windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated"): { name: string; isBashLike: boolean; isPowerShell: boolean } {
-  const isSandboxed = process.platform === "win32" && (windowsSandbox === "unelevated" || windowsSandbox === "readonly" || windowsSandbox === "elevated")
+function getShellInfo(windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated"): {
+  name: string
+  isBashLike: boolean
+  isPowerShell: boolean
+} {
+  const isSandboxed =
+    process.platform === "win32" &&
+    (windowsSandbox === "unelevated" ||
+      windowsSandbox === "readonly" ||
+      windowsSandbox === "elevated")
   const resolved = isSandboxed
     ? LocalSandbox.resolvedWindowsSandboxShell()
     : LocalSandbox.resolvedShell()
-  const base = path.basename(resolved).replace(/\.exe$/i, "").toLowerCase()
+  const base = path
+    .basename(resolved)
+    .replace(/\.exe$/i, "")
+    .toLowerCase()
   const isBashLike = ["bash", "sh", "zsh"].includes(base)
   const isPowerShell = ["pwsh", "powershell"].includes(base)
   return { name: base, isBashLike, isPowerShell }
@@ -761,8 +816,12 @@ function getShellInfo(windowsSandbox?: "none" | "unelevated" | "readonly" | "ele
 function formatLocalISO(date: Date, timeZone: string): string {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone,
-    year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", second: "2-digit",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
     hour12: false
   }).formatToParts(date)
   const get = (type: string): string => parts.find((p) => p.type === type)?.value ?? ""
@@ -778,7 +837,10 @@ function formatLocalISO(date: Date, timeZone: string): string {
   return `${local}${sign}${oh}:${om}`
 }
 
-function getSystemPrompt(workspacePath: string, windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated"): string {
+function getSystemPrompt(
+  workspacePath: string,
+  windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated"
+): string {
   const isWindows = process.platform === "win32"
   const platform = isWindows ? "Windows" : process.platform === "darwin" ? "macOS" : "Linux"
   const { name: shell, isBashLike, isPowerShell } = getShellInfo(windowsSandbox)
@@ -839,8 +901,9 @@ ${shellGuidance}
 **切勿**对编译、安装依赖等命令使用前台执行，否则会因超时被终止。
 `
 
-  const sandboxSection = windowsSandbox === "readonly"
-    ? `
+  const sandboxSection =
+    windowsSandbox === "readonly"
+      ? `
 ### 只读沙箱模式
 
 **重要提示：** 你正在只读沙箱环境中运行。
@@ -849,8 +912,8 @@ ${shellGuidance}
 - 此模式适用于安全审查、代码分析等只读场景。
 - 除非用户明确要求，否则避免执行写入操作，应以建议修改替代直接写入。
 `
-    : windowsSandbox === "elevated"
-    ? `
+      : windowsSandbox === "elevated"
+        ? `
 ### Elevated 沙箱模式
 
 **重要提示：** 你正在 Elevated 沙箱环境中运行。
@@ -859,10 +922,12 @@ ${shellGuidance}
 - 你可以读写工作目录内的文件，但无法访问用户的个人目录（如 .ssh、.aws）。
 - 如果命令因权限不足失败，不要反复重试，向用户说明限制即可。
 `
-    : ""
+        : ""
 
   const memorySection = isMemoryEnabled() ? MEMORY_SYSTEM_PROMPT : ""
-  return workingDirSection + backgroundExecSection + sandboxSection + BASE_SYSTEM_PROMPT + memorySection
+  return (
+    workingDirSection + backgroundExecSection + sandboxSection + BASE_SYSTEM_PROMPT + memorySection
+  )
 }
 
 // Per-thread checkpointer cache
@@ -1193,6 +1258,8 @@ export interface CreateAgentRuntimeOptions {
   onHookResult?: HookResultCallback
   /** Run-scoped plugin/skill activation state for hook resolution. */
   hookScope?: HookScopeController
+  /** Shared run-scoped set used to avoid firing skill lifecycle hooks twice. */
+  skillHookKeys?: Set<string>
   /** Callback invoked after successful write/edit/upload filesystem operations. */
   onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
 }
@@ -1211,6 +1278,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     enableAgentsPrompt = true,
     onHookResult,
     hookScope: providedHookScope,
+    skillHookKeys,
     onFileMutation
   } = options
 
@@ -1231,13 +1299,15 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const resolveHooksForContext = (event: HookEvent, context: HookContext) =>
     resolveEnabledHooksForRun(workspacePath, event, context, hookScope)
 
-  const selectedModelId = modelId?.startsWith("custom:") ? modelId.slice("custom:".length) : undefined
+  const selectedModelId = modelId?.startsWith("custom:")
+    ? modelId.slice("custom:".length)
+    : undefined
 
   const allCustomConfigs = getCustomModelConfigs()
   const customConfig = selectedModelId
-    ? (allCustomConfigs.find((item) => item.id === selectedModelId) ||
+    ? allCustomConfigs.find((item) => item.id === selectedModelId) ||
       allCustomConfigs.find((item) => item.model === selectedModelId) ||
-      null)
+      null
     : (allCustomConfigs[0] ?? null)
   if (!customConfig) {
     throw new Error("Custom model not configured. Please configure a model in Settings.")
@@ -1263,9 +1333,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     const candidates = [
       resolve(__dirname, "../../resources"),
       join(app.getAppPath(), "resources"),
-      join(app.getAppPath(), "..", "resources"),
+      join(app.getAppPath(), "..", "resources")
     ]
-    resourceBase = candidates.find(c => existsSync(join(c, "bin"))) ?? resolve(__dirname, "../../resources")
+    resourceBase =
+      candidates.find((c) => existsSync(join(c, "bin"))) ?? resolve(__dirname, "../../resources")
   }
   const rgDir = join(resourceBase, "bin", process.platform)
   const rgBin = join(rgDir, process.platform === "win32" ? "rg.exe" : "rg")
@@ -1283,7 +1354,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   if (process.platform === "win32") await ensureCodexExe(codexExePath)
   const codexExists = process.platform === "win32" && existsSync(codexExePath)
   const windowsSandbox = process.platform === "win32" ? getWindowsSandboxMode() : "none"
-  console.log(`[Runtime] codex.exe: ${codexExePath}, exists: ${codexExists}, sandboxMode: ${windowsSandbox}`)
+  console.log(
+    `[Runtime] codex.exe: ${codexExePath}, exists: ${codexExists}, sandboxMode: ${windowsSandbox}`
+  )
 
   const baseHooks = getEnabledHooks(workspacePath)
   console.log(`[Runtime] Loaded ${baseHooks.length} base enabled hooks`)
@@ -1300,7 +1373,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     onHookResult,
     onFileMutation,
     abortSignal: options.abortSignal,
-    runId: threadId
+    runId: threadId,
+    skillHookKeys
   })
 
   // ── Wire up the approval orchestrator ──
@@ -1316,7 +1390,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       const timeoutId = setTimeout(() => {
         if (pendingApprovals.has(req.id)) {
           pendingApprovals.delete(req.id)
-          console.warn(`[Orchestrator] approval request timed out after ${APPROVAL_TIMEOUT_MS / 1000}s: reqId=${req.id}`)
+          console.warn(
+            `[Orchestrator] approval request timed out after ${APPROVAL_TIMEOUT_MS / 1000}s: reqId=${req.id}`
+          )
           for (const win of BrowserWindow.getAllWindows()) {
             win.webContents.send(`approval:timeout:${threadId}`, { requestId: req.id })
           }
@@ -1330,9 +1406,11 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
           resolve(decision)
         },
         request: req,
-        targetWebContentsIds: BrowserWindow.getAllWindows().map(w => w.webContents.id)
+        targetWebContentsIds: BrowserWindow.getAllWindows().map((w) => w.webContents.id)
       })
-      console.log(`[Orchestrator] sending approval request on channel: approval:request:${threadId}, reqId=${req.id}, command=${req.command}`)
+      console.log(
+        `[Orchestrator] sending approval request on channel: approval:request:${threadId}, reqId=${req.id}, command=${req.command}`
+      )
       // Fire Notification hook — agent is now waiting on user input.
       // Fire-and-forget so it doesn't delay the UI prompt.
       const notificationContext: HookContext = {
@@ -1356,7 +1434,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   if (!yoloMode) {
     approvalStore = getOrCreateApprovalStore(threadId)
 
-    const rawExecute = (command: string, sandboxMode?: string): Promise<import("deepagents").ExecuteResponse> => {
+    const rawExecute = (
+      command: string,
+      sandboxMode?: string
+    ): Promise<import("deepagents").ExecuteResponse> => {
       return backend.executeRaw(command, sandboxMode)
     }
 
@@ -1433,9 +1514,15 @@ The workspace root is: ${workspacePath}`
 
   const skillLifecycleRootSources = await getEnabledSkillsSources()
   const skillsSources = await getEnabledSkillMiddlewareSources()
-  console.log("[Runtime] Raw skills sources from getEnabledSkillsSources():", skillLifecycleRootSources)
+  console.log(
+    "[Runtime] Raw skills sources from getEnabledSkillsSources():",
+    skillLifecycleRootSources
+  )
   console.log("[Runtime] Raw skills sources count:", skillLifecycleRootSources.length)
-  console.log("[Runtime] Raw skills sources content:", JSON.stringify(skillLifecycleRootSources, null, 2))
+  console.log(
+    "[Runtime] Raw skills sources content:",
+    JSON.stringify(skillLifecycleRootSources, null, 2)
+  )
   console.log("[Runtime] Skill middleware sources:", skillsSources)
 
   // Merge plugin skills sources
@@ -1446,6 +1533,7 @@ The workspace root is: ${workspacePath}`
 
   const allSkillsSources = [...skillsSources, ...pluginSkillsSources]
   const skillLifecycleSources = [...skillLifecycleRootSources, ...pluginSkillSourceMetadata]
+  backend.setHiddenSkillDirs(getDisabledSkillDirs())
   backend.setSkillLifecycleRegistry(
     skillLifecycleSources.length > 0 ? new SkillLifecycleRegistry(skillLifecycleSources) : undefined
   )
@@ -1459,10 +1547,7 @@ The workspace root is: ${workspacePath}`
   if (isMemoryEnabled()) {
     const memoryStore = await getMemoryStore()
     const memoryDir = memoryStore.getMemoryDir()
-    memoryTools = [
-      createMemorySearchTool(memoryStore),
-      createMemoryGetTool(memoryStore)
-    ]
+    memoryTools = [createMemorySearchTool(memoryStore), createMemoryGetTool(memoryStore)]
     memorySources = [join(memoryDir, "MEMORY.md")]
     console.log("[Runtime] Memory initialized, dir:", memoryDir)
   } else {
@@ -1483,16 +1568,22 @@ The workspace root is: ${workspacePath}`
   const lazyMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "lazy")
   const deferredSavedTools = codeExecEnabled ? listSavedCodeExecTools() : []
   const mcpTools = createEagerMcpTools(capabilityService, eagerMcpMetadata)
-  const toolSearchTools = await createToolSearchTools(capabilityService,
-    {workspacePath,
-    threadId: options.threadId},
+  const toolSearchTools = await createToolSearchTools(
+    capabilityService,
+    { workspacePath, threadId: options.threadId },
     {
       codeExecRouteEnabled,
       savedToolsEnabled: codeExecEnabled
-    })
+    }
+  )
 
   if (allMcpTools.length > 0) {
-    console.log("[Runtime] MCP tools loaded, eager:", eagerMcpMetadata.length, "lazy:", lazyMcpMetadata.length)
+    console.log(
+      "[Runtime] MCP tools loaded, eager:",
+      eagerMcpMetadata.length,
+      "lazy:",
+      lazyMcpMetadata.length
+    )
   } else {
     console.log("[Runtime] No MCP tools available in capability service")
   }
@@ -1508,14 +1599,18 @@ The workspace root is: ${workspacePath}`
           const meta = JSON.parse(threadRow.metadata)
           chatxRobotChatId = (meta.chatxRobotChatId as string) || null
         }
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     }
-    extraTools.push(createSchedulerTool({
-      workspacePath,
-      modelId: options.modelId,
-      threadId: options.threadId,
-      chatxRobotChatId
-    }))
+    extraTools.push(
+      createSchedulerTool({
+        workspacePath,
+        modelId: options.modelId,
+        threadId: options.threadId,
+        chatxRobotChatId
+      })
+    )
   }
   if (!options.noSkillEvolutionTool) {
     extraTools.push(createSkillEvolutionTool({ threadId: options.threadId }))
@@ -1561,15 +1656,17 @@ The workspace root is: ${workspacePath}`
   }
 
   if (codeExecRouteEnabled) {
-    extraTools.push(createCodeExecTool({
-      workspacePath,
-      threadId: options.threadId,
-      modelId: options.modelId,
-      yoloMode,
-      capabilityService,
-      approvalStore,
-      requestApproval
-    }))
+    extraTools.push(
+      createCodeExecTool({
+        workspacePath,
+        threadId: options.threadId,
+        modelId: options.modelId,
+        yoloMode,
+        capabilityService,
+        approvalStore,
+        requestApproval
+      })
+    )
   }
 
   const deferredToolIds = [
@@ -1612,11 +1709,30 @@ The workspace root is: ${workspacePath}`
   const triggerTokens = Math.floor(maxTokens * 0.75)
   const keepTokens = Math.max(Math.floor(maxTokens * SUMMARY_KEEP_RATIO), 4_000)
   const toolEvictLimit = Math.min(20_000, Math.max(Math.floor(maxTokens * 0.08), 6_000))
-  const trimForSummary = Math.min(SUMMARY_INPUT_TOKEN_CAP, Math.floor(maxTokens * SUMMARY_INPUT_RATIO))
-  console.log("[Runtime] Context window:", maxTokens, "→ summarization trigger:", triggerTokens, "→ keep:", keepTokens, "→ tool evict limit:", toolEvictLimit, "→ trim for summary:", trimForSummary, "→ max output bytes:", maxOutputBytes)
+  const trimForSummary = Math.min(
+    SUMMARY_INPUT_TOKEN_CAP,
+    Math.floor(maxTokens * SUMMARY_INPUT_RATIO)
+  )
+  console.log(
+    "[Runtime] Context window:",
+    maxTokens,
+    "→ summarization trigger:",
+    triggerTokens,
+    "→ keep:",
+    keepTokens,
+    "→ tool evict limit:",
+    toolEvictLimit,
+    "→ trim for summary:",
+    trimForSummary,
+    "→ max output bytes:",
+    maxOutputBytes
+  )
 
   backend.setGitWorkflowCommitOnly(false)
-  console.log("[Runtime] Final tool list:", finalTools.map((t) => (t as { name?: string }).name ?? "(unnamed)"))
+  console.log(
+    "[Runtime] Final tool list:",
+    finalTools.map((t) => (t as { name?: string }).name ?? "(unnamed)")
+  )
 
   const agent = createDeepAgent({
     model,
@@ -1644,8 +1760,14 @@ The workspace root is: ${workspacePath}`
     }
   })
 
-  console.log("[Runtime] Agent created with skills parameter:", allSkillsSources.length > 0 ? allSkillsSources : undefined)
-  console.log("[Runtime] Final skills passed to createDeepAgent:", JSON.stringify(allSkillsSources.length > 0 ? allSkillsSources : undefined, null, 2))
+  console.log(
+    "[Runtime] Agent created with skills parameter:",
+    allSkillsSources.length > 0 ? allSkillsSources : undefined
+  )
+  console.log(
+    "[Runtime] Final skills passed to createDeepAgent:",
+    JSON.stringify(allSkillsSources.length > 0 ? allSkillsSources : undefined, null, 2)
+  )
   console.log("[Runtime] Agent created with LocalSandbox at:", workspacePath)
   return agent
 }

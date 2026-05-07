@@ -1,8 +1,12 @@
 import { existsSync } from "node:fs"
 import { readFile } from "node:fs/promises"
-import { getEnabledSkillsSources } from "../storage"
+import { getDisabledSkills, getEnabledSkillsSources } from "../storage"
 import { discoverSkills } from "../skills/discovery"
-import { getDiscoveredSkillAliases, normalizeSkillId } from "../skills/ids"
+import {
+  getDiscoveredSkillAliases,
+  isDiscoveredSkillDisabled,
+  normalizeSkillId
+} from "../skills/ids"
 import { runHooks } from "./runner"
 import { joinHookText } from "./text"
 import type { HookResult } from "./types"
@@ -41,10 +45,12 @@ async function resolveSkillGuidance(requiredSkill: string): Promise<ResolvedSkil
   if (!normalized) return null
 
   const sourceDirs = await getEnabledSkillsSources()
+  const disabled = new Set(getDisabledSkills().map((name) => name.trim().toLowerCase()))
   for (const sourceDir of sourceDirs) {
     if (!existsSync(sourceDir)) continue
 
     for (const skill of await discoverSkills(sourceDir)) {
+      if (isDiscoveredSkillDisabled(skill, disabled)) continue
       try {
         const content = await readFile(skill.skillMdPath, "utf-8")
         const frontmatter = parseYamlFrontmatter(content)
@@ -101,22 +107,14 @@ export async function enrichHookResultWithRequiredSkill(
   }
 
   const shouldSurfaceInPrimaryMessage =
-    result.blocked ||
-    result.decision === "block" ||
-    result.continue === false
+    result.blocked || result.decision === "block" || result.continue === false
 
   if (!shouldSurfaceInPrimaryMessage) return next
 
-  const surfacedReason = joinHookText(
-    result.reason ?? result.stopReason ?? result.stdout,
-    guidance,
-    "\n\n"
-  ) ?? guidance
-  const surfacedStopReason = joinHookText(
-    result.stopReason ?? result.reason ?? result.stdout,
-    guidance,
-    "\n\n"
-  ) ?? guidance
+  const surfacedReason =
+    joinHookText(result.reason ?? result.stopReason ?? result.stdout, guidance, "\n\n") ?? guidance
+  const surfacedStopReason =
+    joinHookText(result.stopReason ?? result.reason ?? result.stdout, guidance, "\n\n") ?? guidance
 
   return {
     ...next,
