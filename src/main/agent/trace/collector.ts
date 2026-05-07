@@ -52,7 +52,7 @@ import {
   setAdoptionContext,
   clearAdoptionContext
 } from "../../services/adoption-tracker"
-import { sanitizeTraceForStorage } from "./sanitizer"
+import { sanitizeTraceForCloudUpload } from "./sanitizer"
 
 // ─────────────────────────────────────────────────────────
 // Global reporter registry
@@ -503,14 +503,12 @@ export class TraceCollector {
       ...(this.routingTrace ? { metadata: { routingTrace: this.routingTrace } } : {})
     }
 
-    const sanitizedTrace = sanitizeTraceForStorage(trace)
-
-    writeTraceFile(sanitizedTrace)
+    writeTraceFile(trace)
 
     // Fire-and-forget: trace upload is a side-channel operation and must
     // never block the main agent flow. Errors are logged and swallowed.
     void Promise.resolve()
-      .then(() => _reporter.report(sanitizedTrace))
+      .then(() => _reporter.report(sanitizeTraceForCloudUpload(trace)))
       .catch((e) => {
         console.warn("[Tracer] Reporter.report() threw:", e)
       })
@@ -523,7 +521,7 @@ export class TraceCollector {
       // ignore
     }
 
-    return sanitizedTrace
+    return trace
   }
 
   private finalizeNodes(outcome: TraceOutcome, endedAt: string, errorMessage?: string): TraceNode[] {

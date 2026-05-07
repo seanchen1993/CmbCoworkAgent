@@ -304,7 +304,7 @@ function summarizeOversizedTrace(trace: AgentTrace, state: TruncationState): Age
   }
 }
 
-export function sanitizeTraceForStorage(trace: AgentTrace): AgentTrace {
+export function sanitizeTraceForCloudUpload(trace: AgentTrace): AgentTrace {
   let { trace: sanitized, state } = sanitizeTraceFields(trace)
 
   if (byteSize(sanitized) > SOFT_TRACE_BYTES) {
@@ -319,4 +319,3 @@ export function sanitizeTraceForStorage(trace: AgentTrace): AgentTrace {
 
   return withTruncationMetadata(sanitized, state)
 }
-

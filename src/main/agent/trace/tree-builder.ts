@@ -6,9 +6,50 @@ function outcomeToStatus(outcome: AgentTrace["outcome"]): TraceNodeStatus {
   return "success"
 }
 
+function hasUserMessageNode(trace: AgentTrace, nodes: TraceNode[]): boolean {
+  return nodes.some((node) => {
+    if (node.type !== "message") return false
+    if (node.name === "User Message") return true
+    if (typeof node.output === "string" && node.output === trace.userMessage) return true
+    if (node.input && typeof node.input === "object" && "userMessage" in node.input) return true
+    return false
+  })
+}
+
+function createUserMessageNode(trace: AgentTrace, parentId: string): TraceNode {
+  return {
+    id: `legacy:user:${trace.traceId}`,
+    type: "message",
+    parentId,
+    name: "User Message",
+    status: "success",
+    startedAt: trace.startedAt,
+    endedAt: trace.startedAt,
+    output: trace.userMessage
+  }
+}
+
 function ensureRootNode(trace: AgentTrace, nodes: TraceNode[]): TraceNode[] {
-  if (nodes.some((n) => n.parentId === null || n.type === "trace")) return nodes
   const rootId = `trace:${trace.traceId}`
+  const root = nodes.find((node) => node.parentId === null || node.type === "trace")
+  if (root) {
+    const normalized = nodes.map((node) => {
+      if (node !== root) {
+        return node.parentId ? node : { ...node, parentId: root.id }
+      }
+      return {
+        ...node,
+        parentId: null,
+        input: node.input ?? { userMessage: trace.userMessage }
+      }
+    })
+    const rootNode = normalized.find((node) => node.id === root.id) ?? normalized[0]
+    const rest = normalized.filter((node) => node !== rootNode)
+    return hasUserMessageNode(trace, normalized)
+      ? normalized
+      : [rootNode, createUserMessageNode(trace, root.id), ...rest]
+  }
+
   return [
     {
       id: rootId,
@@ -29,6 +70,7 @@ function ensureRootNode(trace: AgentTrace, nodes: TraceNode[]): TraceNode[] {
         modelId: trace.modelId
       }
     },
+    createUserMessageNode(trace, rootId),
     ...nodes.map((node) => ({
       ...node,
       parentId: node.parentId ?? rootId
@@ -174,4 +216,3 @@ export function buildTraceTree(trace: AgentTrace): TraceNode[] {
 
   return nodes
 }
-

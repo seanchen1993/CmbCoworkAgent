@@ -56,12 +56,20 @@ function testUpdateBodyIncludesOriginRepositoryFields(): void {
     "code_adopt update should write repositoryName"
   )
   assert(
+    typeof scriptSource === "string" && scriptSource.includes("ctx._source.properties.remoteUrl = params.remoteUrl;"),
+    "code_adopt update should write canonical remoteUrl"
+  )
+  assert(
     typeof scriptSource === "string" && scriptSource.includes("ctx._source.properties.commitUrl = commitUrl;"),
     "code_adopt update should write commitUrl"
   )
   assert(
-    typeof scriptSource === "string" && scriptSource.includes("ctx._source.properties.pushRepositoryName = params.repositoryName;"),
-    "code_adopt update should retain pushRepositoryName audit field"
+    typeof scriptSource === "string" && !scriptSource.includes("pushRepositoryName"),
+    "code_adopt update should not duplicate repository fields under pushRepositoryName"
+  )
+  assert(
+    typeof scriptSource === "string" && !scriptSource.includes("pushCommitUrl"),
+    "code_adopt update should not duplicate commitUrl under pushCommitUrl"
   )
 }
 

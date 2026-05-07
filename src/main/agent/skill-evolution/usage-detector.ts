@@ -11,6 +11,18 @@ function normalizePath(path: string): string {
   return path.replace(/\\/g, "/").replace(/\/+/g, "/").replace(/\/$/, "")
 }
 
+function getSkillPathAliases(skillPath: string): string[] {
+  const aliases = new Set<string>([skillPath])
+  const enabledCustomSegment = "/enabled-skills-custom/"
+  const customSegmentIndex = skillPath.indexOf(enabledCustomSegment)
+  if (customSegmentIndex >= 0) {
+    aliases.add(
+      `${skillPath.slice(0, customSegmentIndex)}/skills/${skillPath.slice(customSegmentIndex + enabledCustomSegment.length)}`
+    )
+  }
+  return Array.from(aliases)
+}
+
 export class SkillUsageDetector {
   private readonly loadedSkillsByDocPath = new Map<string, string>()
   private readonly loadedSkillsByRootDir = new Map<string, string>()
@@ -23,10 +35,12 @@ export class SkillUsageDetector {
       const skillIdentifier = ensureVersionedSkillIdentifier(skillName, skill.version)
       if (!skillName || !skillPath || !skillIdentifier) continue
 
-      this.loadedSkillsByDocPath.set(skillPath, skillIdentifier)
-      const rootDir = normalizePath(pathPosix.dirname(skillPath))
-      if (rootDir && rootDir !== ".") {
-        this.loadedSkillsByRootDir.set(rootDir, skillIdentifier)
+      for (const candidatePath of getSkillPathAliases(skillPath)) {
+        this.loadedSkillsByDocPath.set(candidatePath, skillIdentifier)
+        const rootDir = normalizePath(pathPosix.dirname(candidatePath))
+        if (rootDir && rootDir !== ".") {
+          this.loadedSkillsByRootDir.set(rootDir, skillIdentifier)
+        }
       }
     }
   }

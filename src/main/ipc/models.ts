@@ -20,7 +20,7 @@ import { scheduleMarkCodeAdoptionCommitsPushed } from "../services/code-adoption
 import { getTracesDir } from "../agent/trace/collector"
 import type { AgentTrace } from "../agent/trace/types"
 import { nowIsoLocal } from "../util/local-time"
-import { buildGitCommitUrl, parseGitRemoteInfo } from "../utils/git-remote"
+import { parseGitRemoteInfo } from "../utils/git-remote"
 
 const execFileAsync = promisify(execFile)
 
@@ -2661,9 +2661,6 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           } catch { /* best-effort */ }
           const remoteInfo = parseGitRemoteInfo(remoteUrl)
           const pushedCommitShas = pushedCommits.map((commit) => commit.hash)
-          const pushedCommitUrls = pushedCommitShas
-            .map((sha) => buildGitCommitUrl(remoteInfo, sha))
-            .filter(Boolean)
           scheduleMarkCodeAdoptionCommitsPushed({
             commitShas: pushedCommitShas,
             repoPath: worktreePath,
@@ -2685,9 +2682,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
             repositoryFullName: remoteInfo?.repositoryFullName ?? "",
             repositoryHost: remoteInfo?.repositoryHost ?? "",
             repositoryWebUrl: remoteInfo?.repositoryWebUrl ?? "",
-            commitUrlTemplate: remoteInfo?.commitUrlTemplate ?? "",
             pushedCommitShas,
-            pushedCommitUrls,
             pushedCommitCount: pushedCommitShas.length,
             pushedAt,
             pushOperationId

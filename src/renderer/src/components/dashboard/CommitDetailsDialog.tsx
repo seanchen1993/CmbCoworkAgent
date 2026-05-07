@@ -31,7 +31,7 @@ function CommitRow({
   item: DashboardCommitDetail
   onOpenExternal: (url: string) => void
 }): React.JSX.Element {
-  const externalUrl = item.pushed ? (item.repositoryWebUrl || item.commitUrl || "") : ""
+  const externalUrl = item.pushed ? (item.commitUrl || item.repositoryWebUrl || "") : ""
   const displayRepo = repoName(item)
 
   return (
@@ -51,7 +51,7 @@ function CommitRow({
           <button
             type="button"
             className="flex max-w-full items-center gap-1 truncate font-mono text-blue-600 transition-colors hover:text-blue-700 hover:underline dark:text-blue-400"
-            title={item.repositoryWebUrl || item.commitUrl || item.repoPath}
+            title={item.commitUrl || item.repositoryWebUrl || item.repoPath}
             onClick={() => onOpenExternal(externalUrl)}
           >
             <span className="truncate">{displayRepo}</span>

@@ -109,14 +109,7 @@ export function buildCodeAdoptionPushedUpdateBody(args: MarkCodeAdoptionPushedAr
         }
         ctx._source.properties.pushed = true;
         ctx._source.properties.pushedAt = params.pushedAt;
-        ctx._source.properties.pushRepoPath = params.repoPath;
-        ctx._source.properties.pushBranch = params.branch;
-        ctx._source.properties.pushRemoteUrl = params.remoteUrl;
-        ctx._source.properties.pushRepositoryName = params.repositoryName;
-        ctx._source.properties.pushRepositoryFullName = params.repositoryFullName;
-        ctx._source.properties.pushRepositoryHost = params.repositoryHost;
-        ctx._source.properties.pushRepositoryWebUrl = params.repositoryWebUrl;
-        ctx._source.properties.pushCommitUrlTemplate = params.commitUrlTemplate;
+        ctx._source.properties.remoteUrl = params.remoteUrl;
         ctx._source.properties.repositoryName = params.repositoryName;
         ctx._source.properties.repositoryFullName = params.repositoryFullName;
         ctx._source.properties.repositoryHost = params.repositoryHost;
@@ -130,7 +123,6 @@ export function buildCodeAdoptionPushedUpdateBody(args: MarkCodeAdoptionPushedAr
           commitUrl = commitUrl.replace('{repositoryFullName}', params.repositoryFullName);
           commitUrl = commitUrl.replace('{sha}', ctx._source.properties.commitSha);
           commitUrl = commitUrl.replace('{commitSha}', ctx._source.properties.commitSha);
-          ctx._source.properties.pushCommitUrl = commitUrl;
           ctx._source.properties.commitUrl = commitUrl;
         }
         ctx._source.properties.pushOperationId = params.pushOperationId;
