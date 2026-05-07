@@ -87,6 +87,10 @@ function getPrimaryCategory(category?: string): string {
   return parts[0]
 }
 
+function getCategoryFilterName(category?: string): string {
+  return getSecondaryCategory(category) || "未分类"
+}
+
 interface UploadedItemRecord {
   name: string
   type: MarketItemType
@@ -190,20 +194,20 @@ interface MarketItemCardProps {
 }
 
 function MarketItemCard({
-                          item,
-                          onOpenDetail,
-                          onDelete,
-                          onUpdate,
-                          onDownload,
-                          onUpdateInstall,
-                          onUninstall,
-                          isDownloading = false,
-                          isInstalled = false,
-                          isUpdating = false,
-                          skillCallCount = null,
-                          skillUserCount = null,
-                          uploaderProfile = null
-                        }: MarketItemCardProps) {
+  item,
+  onOpenDetail,
+  onDelete,
+  onUpdate,
+  onDownload,
+  onUpdateInstall,
+  onUninstall,
+  isDownloading = false,
+  isInstalled = false,
+  isUpdating = false,
+  skillCallCount = null,
+  skillUserCount = null,
+  uploaderProfile = null
+}: MarketItemCardProps) {
   const formatMetricValue = (value: number | null): string => {
     if (value === null) return "0"
     if (value >= 100000000) return `${(value / 100000000).toFixed(1)}亿`
@@ -510,6 +514,8 @@ export function MarketPanel(): React.JSX.Element {
   const getItemKey = (item: MarketItem) => item.id || item.name
   const getMarketTypeLabel = (type: MarketItemType) =>
     type === "skill" ? "技能" : type === "mcp" ? "MCP连接器" : "插件"
+  const getMarketTypePluralLabel = (type: MarketItemType) =>
+    type === "skill" ? "Skills" : type === "mcp" ? "MCPs" : "Plugins"
   const tabIntros: Record<MarketItemType, { title: string; description: string }> = {
     skill: {
       title: "Skills 是可直接调用的专项能力",
@@ -634,7 +640,7 @@ export function MarketPanel(): React.JSX.Element {
         setCurrentUserUploadCandidates([])
         return
       }
-      const userInfo = await window.api.models.getUserInfo() as UserInfoLite | null
+      const userInfo = (await window.api.models.getUserInfo()) as UserInfoLite | null
       const normalizedIds = [userInfo?.sapId, userInfo?.ystId]
         .map((value) => String(value || "").trim())
         .filter(Boolean)
@@ -1060,13 +1066,8 @@ export function MarketPanel(): React.JSX.Element {
     setDetailMode("list")
     setSelectedItemKey(null)
     resetDetailState()
+    setCategoryFilter(null)
   }, [activeTab])
-
-  useEffect(() => {
-    if (activeTab !== "skill" && categoryFilter !== null) {
-      setCategoryFilter(null)
-    }
-  }, [activeTab, categoryFilter])
 
   const getCurrentData = () => {
     switch (activeTab) {
@@ -1258,10 +1259,10 @@ export function MarketPanel(): React.JSX.Element {
         if (uploadFilterMode === "installed" && !item.installed) return false
         if (uploadFilterMode === "featured" && item.featured !== "精品") return false
 
-        if (activeTab !== "skill" || !categoryFilter) return true
-        return getSecondaryCategory(item.category) === categoryFilter
+        if (!categoryFilter) return true
+        return getCategoryFilterName(item.category) === categoryFilter
       }),
-    [activeTab, categoryFilter, currentData, isMineUploadedItem, searchQuery, uploadFilterMode]
+    [categoryFilter, currentData, isMineUploadedItem, searchQuery, uploadFilterMode]
   )
 
   const sortedSkillData = useMemo(() => {
@@ -1269,7 +1270,7 @@ export function MarketPanel(): React.JSX.Element {
     if (filteredData.length === 0) return []
     return sortSkillItemsByUsage(filteredData, skillUsageSummary, skillSortMode)
   }, [activeTab, filteredData, skillSortMode, skillUsageSummary])
-  const visibleSkillData = activeTab === "skill" && filteredData.length > 0 ? sortedSkillData : []
+  const visibleMarketData = activeTab === "skill" ? sortedSkillData : filteredData
   const emptyResultMessage = searchQuery
     ? "未找到匹配的项目"
     : uploadFilterMode === "mine"
@@ -1280,12 +1281,10 @@ export function MarketPanel(): React.JSX.Element {
           ? "未找到精品项目"
           : "暂无可用项目"
 
-  const skillCategoryStats = useMemo(() => {
-    if (activeTab !== "skill") return []
-
+  const marketCategoryStats = useMemo(() => {
     const categoryCounter = new Map<string, { primary: string; count: number }>()
-    for (const item of skillsData) {
-      const categoryName = getSecondaryCategory(item.category) || "未分类"
+    for (const item of currentData) {
+      const categoryName = getCategoryFilterName(item.category)
       const primaryName = getPrimaryCategory(item.category) || "未分类"
       const existing = categoryCounter.get(categoryName)
       if (!existing) {
@@ -1305,7 +1304,7 @@ export function MarketPanel(): React.JSX.Element {
         if (a.primary !== b.primary) return a.primary.localeCompare(b.primary, "zh-CN")
         return a.name.localeCompare(b.name, "zh-CN")
       })
-  }, [activeTab, skillsData])
+  }, [currentData])
 
   const openItemDetail = async (item: MarketItem) => {
     setSelectedItemKey(getItemKey(item))
@@ -1474,9 +1473,7 @@ export function MarketPanel(): React.JSX.Element {
   }
 
   const handleUploadSuccess = () => {
-    toast.success(
-      `${getMarketTypeLabel(activeTab)}已上传到 Market，请新开一个会话试试效果。`
-    )
+    toast.success(`${getMarketTypeLabel(activeTab)}已上传到 Market，请新开一个会话试试效果。`)
     // Reload the current tab data
     triggerReload()
   }
@@ -1576,9 +1573,7 @@ export function MarketPanel(): React.JSX.Element {
   }
 
   const handleUpdateSuccess = () => {
-    toast.success(
-      `${getMarketTypeLabel(activeTab)}已更新到 Market，请新开一个会话试试效果。`
-    )
+    toast.success(`${getMarketTypeLabel(activeTab)}已更新到 Market，请新开一个会话试试效果。`)
     setUpdateDialog({ open: false, item: null })
     // Reload the current tab data
     triggerReload()
@@ -2072,14 +2067,7 @@ export function MarketPanel(): React.JSX.Element {
                         重试
                       </Button>
                     </div>
-                  ) : activeTab !== "skill" && filteredData.length === 0 ? (
-                    <div className="flex flex-col items-center justify-center py-16 text-[#87867f]">
-                      <div className="size-10 rounded-2xl bg-[#f5f4ed] border border-[#e8e6dc] flex items-center justify-center mb-3">
-                        <ShoppingBag className="size-5 text-[#b0aea5]" />
-                      </div>
-                      <p className="text-sm">{emptyResultMessage}</p>
-                    </div>
-                  ) : activeTab === "skill" ? (
+                  ) : (
                     <div className="grid grid-cols-1 xl:grid-cols-[240px_minmax(0,1fr)] gap-4 items-start">
                       <aside className="rounded-2xl border border-[#e8e6dc] bg-[#faf9f5] p-3 xl:sticky xl:top-4">
                         <div className="flex items-center justify-between mb-2 px-1">
@@ -2095,10 +2083,10 @@ export function MarketPanel(): React.JSX.Element {
                           )}
                         </div>
                         <div className="space-y-1.5 max-h-[60vh] overflow-y-auto pr-1">
-                          {skillCategoryStats.length === 0 ? (
+                          {marketCategoryStats.length === 0 ? (
                             <p className="text-xs text-[#87867f] px-2 py-1.5">暂无分类</p>
                           ) : (
-                            skillCategoryStats.map((category) => {
+                            marketCategoryStats.map((category) => {
                               const isActive = categoryFilter === category.name
                               return (
                                 <button
@@ -2134,17 +2122,22 @@ export function MarketPanel(): React.JSX.Element {
                         </div>
                       </aside>
 
-                        <div
-                          key={filteredData.length === 0 ? "skill-results-empty" : "skill-results-list"}
-                          className="space-y-3 min-w-0"
-                        >
-                          <div className="flex items-center justify-between text-xs text-[#87867f] px-1">
-                            <span>
-                              {categoryFilter ? `当前分类：${categoryFilter}` : "全部 Skills"}
-                              {` · 筛选结果 ${filteredData.length} 个`}
-                            </span>
+                      <div
+                        key={
+                          filteredData.length === 0 ? "market-results-empty" : "market-results-list"
+                        }
+                        className="space-y-3 min-w-0"
+                      >
+                        <div className="flex items-center justify-between text-xs text-[#87867f] px-1">
+                          <span>
+                            {categoryFilter
+                              ? `当前分类：${categoryFilter}`
+                              : `全部 ${getMarketTypePluralLabel(activeTab)}`}
+                            {` · 筛选结果 ${filteredData.length} 个`}
+                          </span>
+                          {activeTab === "skill" && (
                             <div className="flex items-center gap-2">
-                              <div className={'inline-block w-10'}>排序</div>
+                              <div className="inline-block w-10">排序</div>
                               <Select
                                 value={skillSortMode}
                                 onValueChange={(value) => setSkillSortMode(value as SkillSortMode)}
@@ -2161,65 +2154,60 @@ export function MarketPanel(): React.JSX.Element {
                                 </SelectContent>
                               </Select>
                             </div>
-                          </div>
-                          {filteredData.length === 0 ? (
-                            <div
-                              key="skill-empty-results"
-                              className="flex flex-col items-center justify-center py-16 text-[#87867f]"
-                            >
-                              <div className="size-10 rounded-2xl bg-[#f5f4ed] border border-[#e8e6dc] flex items-center justify-center mb-3">
-                                <ShoppingBag className="size-5 text-[#b0aea5]" />
-                              </div>
-                              <p className="text-sm">{emptyResultMessage}</p>
-                            </div>
-                          ) : (
-                            <div
-                              key="skill-card-results"
-                              className="grid grid-cols-1 2xl:grid-cols-2 gap-3"
-                            >
-                              {visibleSkillData.map((item) => (
-                                <MarketItemCard
-                                  key={getItemKey(item)}
-                                  item={item}
-                                  onOpenDetail={openItemDetail}
-                                  onDelete={handleDelete}
-                                  onUpdate={handleUpdate}
-                                  onDownload={handleDownload}
-                                  onUpdateInstall={handleUpdateInstall}
-                                  onUninstall={handleUninstall}
-                                  isDownloading={downloadingItems.has(item.id || item.name)}
-                                  isInstalled={item.installed}
-                                  isUpdating={updatingItems.has(item.id || item.name)}
-                                  skillCallCount={getSkillMetricByName(skillUsageSummary, item.name)?.calls ?? 0}
-                                  skillUserCount={getSkillMetricByName(skillUsageSummary, item.name)?.users ?? 0}
-                                  uploaderProfile={item.user_id ? uploaderProfiles[item.user_id] ?? null : null}
-                                />
-                              ))}
-                            </div>
                           )}
                         </div>
+                        {filteredData.length === 0 ? (
+                          <div
+                            key="market-empty-results"
+                            className="flex flex-col items-center justify-center py-16 text-[#87867f]"
+                          >
+                            <div className="size-10 rounded-2xl bg-[#f5f4ed] border border-[#e8e6dc] flex items-center justify-center mb-3">
+                              <ShoppingBag className="size-5 text-[#b0aea5]" />
+                            </div>
+                            <p className="text-sm">{emptyResultMessage}</p>
+                          </div>
+                        ) : (
+                          <div
+                            key="market-card-results"
+                            className="grid grid-cols-1 2xl:grid-cols-2 gap-3"
+                          >
+                            {visibleMarketData.map((item) => (
+                              <MarketItemCard
+                                key={getItemKey(item)}
+                                item={item}
+                                onOpenDetail={openItemDetail}
+                                onDelete={handleDelete}
+                                onUpdate={handleUpdate}
+                                onDownload={handleDownload}
+                                onUpdateInstall={handleUpdateInstall}
+                                onUninstall={handleUninstall}
+                                isDownloading={downloadingItems.has(item.id || item.name)}
+                                isInstalled={item.installed}
+                                isUpdating={updatingItems.has(item.id || item.name)}
+                                skillCallCount={
+                                  activeTab === "skill"
+                                    ? (getSkillMetricByName(skillUsageSummary, item.name)?.calls ??
+                                      0)
+                                    : null
+                                }
+                                skillUserCount={
+                                  activeTab === "skill"
+                                    ? (getSkillMetricByName(skillUsageSummary, item.name)?.users ??
+                                      0)
+                                    : null
+                                }
+                                uploaderProfile={
+                                  activeTab === "skill" && item.user_id
+                                    ? (uploaderProfiles[item.user_id] ?? null)
+                                    : null
+                                }
+                              />
+                            ))}
+                          </div>
+                        )}
                       </div>
-                    ) : (
-                      filteredData.map((item) => (
-                        <MarketItemCard
-                          key={getItemKey(item)}
-                          item={item}
-                          onOpenDetail={openItemDetail}
-                          onDelete={handleDelete}
-                          onUpdate={handleUpdate}
-                          onDownload={handleDownload}
-                          onUpdateInstall={handleUpdateInstall}
-                          onUninstall={handleUninstall}
-                          isDownloading={downloadingItems.has(item.id || item.name)}
-                          isInstalled={item.installed}
-                          isUpdating={updatingItems.has(item.id || item.name)}
-                          skillCallCount={null}
-                          skillUserCount={null}
-                          uploaderProfile={null}
-                        />
-                      ))
-                    )
-                  }
+                    </div>
+                  )}
                 </div>
               </ScrollArea>
             </TabsContent>
