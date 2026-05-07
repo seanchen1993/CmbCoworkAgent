@@ -20,7 +20,12 @@ import {
   rmSync
 } from "fs"
 import { BrowserWindow, ipcMain } from "electron"
-import { getCustomSkillsDir, invalidateEnabledSkillsCache } from "../../storage"
+import {
+  clearDisabledSkillsForSkillDir,
+  getCustomSkillsDir,
+  invalidateEnabledSkillsCache,
+  prepareDisabledSkillsCleanupForSkillDir
+} from "../../storage"
 import { v4 as uuid } from "uuid"
 import type { SkillProposalWindowContext } from "../skill-evolution/proposal-window"
 import { discoverSkillsSync } from "../../skills/discovery"
@@ -381,6 +386,7 @@ export function createSkillEvolutionTool(context: SkillEvolutionToolContext = {}
 
           mkdirSync(skillDir, { recursive: true })
           writeFileSync(join(skillDir, "SKILL.md"), input.content, "utf-8")
+          clearDisabledSkillsForSkillDir(skillDir)
 
           // Invalidate skills cache so runtime picks up the new skill next invocation
           invalidateEnabledSkillsCache()
@@ -449,8 +455,10 @@ export function createSkillEvolutionTool(context: SkillEvolutionToolContext = {}
           if (!resolved) return `Error: invalid skillId: ${input.skillId}`
           const skillDir = resolved.dir
           if (!existsSync(skillDir)) return `Error: skill not found: ${input.skillId}`
+          const cleanupDisabledSkills = prepareDisabledSkillsCleanupForSkillDir(skillDir)
 
           rmSync(skillDir, { recursive: true, force: true })
+          cleanupDisabledSkills()
           invalidateEnabledSkillsCache()
           notifyRenderer("skills:changed")
 

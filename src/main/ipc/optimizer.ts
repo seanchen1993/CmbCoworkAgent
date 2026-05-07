@@ -35,6 +35,7 @@ import type { AgentTrace } from "../agent/trace/types"
 import {
   getCustomModelConfigs,
   getCustomSkillsDir,
+  clearDisabledSkillsForSkillDir,
   invalidateEnabledSkillsCache,
   isOnlineSkillEvolutionEnabled,
   setOnlineSkillEvolutionEnabled,
@@ -114,11 +115,16 @@ function mergePendingCandidates(newCandidates: OptimizationRunResult["candidates
   return merged
 }
 
-function applyCandidate(skillId: string, content: string): { success: boolean; error?: string } {
+function applyCandidate(
+  action: OptimizationRunResult["candidates"][number]["action"],
+  skillId: string,
+  content: string
+): { success: boolean; error?: string } {
   try {
     const skillDir = join(getCustomSkillsDir(), skillId)
     mkdirSync(skillDir, { recursive: true })
     writeFileSync(join(skillDir, "SKILL.md"), content, "utf-8")
+    if (action === "create") clearDisabledSkillsForSkillDir(skillDir)
     invalidateEnabledSkillsCache()
     notifyRenderer("skills:changed")
     return { success: true }
@@ -275,7 +281,7 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
         return { success: false, error: `Candidate ${candidateId} not found` }
       }
 
-      const result = applyCandidate(candidate.skillId, candidate.proposedContent)
+      const result = applyCandidate(candidate.action, candidate.skillId, candidate.proposedContent)
       if (!result.success) {
         updateCandidateStatus(candidateId, "rejected")
         return { success: false, skillId: candidate.skillId, error: result.error }
