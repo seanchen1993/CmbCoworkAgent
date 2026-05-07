@@ -1384,9 +1384,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const yoloMode = getYoloMode()
   let approvalStore: ApprovalStore | undefined
   let requestApproval: ((req: ApprovalRequest) => Promise<ApprovalDecision>) | undefined
-  // Keep the generic approval IPC available even in YOLO mode so code_exec can still
-  // ask for post-run tool promotion confirmation. Shell/file approvals remain gated by
-  // whether the orchestrator is mounted below.
+  // Keep approval IPC available even in YOLO mode. YOLO skips the initial shell/file
+  // approval, but escaping the sandbox after a sandbox denial still needs explicit
+  // one-shot user approval, matching Codex's retry-without-sandbox flow.
   const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000
   requestApproval = (req: ApprovalRequest): Promise<ApprovalDecision> => {
     // IPC fires immediately; the renderer owns the queue (pendingApprovals[]).
@@ -1426,16 +1426,14 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     })
   }
 
-  if (!yoloMode) {
-    approvalStore = getOrCreateApprovalStore(threadId)
+  approvalStore = getOrCreateApprovalStore(threadId)
 
-    const rawExecute = (command: string, sandboxMode?: string): Promise<import("deepagents").ExecuteResponse> => {
-      return backend.executeRaw(command, sandboxMode)
-    }
-
-    const orchestrator = new ToolOrchestrator(approvalStore, rawExecute, requestApproval, false)
-    backend.setOrchestrator(orchestrator)
+  const rawExecute = (command: string, sandboxMode?: string): Promise<import("deepagents").ExecuteResponse> => {
+    return backend.executeRaw(command, sandboxMode)
   }
+
+  const orchestrator = new ToolOrchestrator(approvalStore, rawExecute, requestApproval, yoloMode)
+  backend.setOrchestrator(orchestrator)
 
   let systemPrompt = getSystemPrompt(workspacePath, windowsSandbox)
   let agentsPrompt: Awaited<ReturnType<typeof loadAgentsPromptForWorkspace>> = {
@@ -1688,9 +1686,8 @@ The workspace root is: ${workspacePath}`
     subagentExtraSystemPrompt: agentsPrompt.prompt ?? undefined,
     skills: allSkillsSources.length > 0 ? allSkillsSources : undefined,
     memory: memorySources?.length ? memorySources : undefined,
-    // When the orchestrator is active (non-YOLO), it handles execute approval
-    // internally via IPC — no need for the HITL middleware to intercept execute.
-    // HITL middleware is still used in YOLO=false mode for non-execute tools if needed.
+    // The orchestrator handles execute/file approval internally via IPC. In YOLO
+    // mode it skips initial approvals but still prompts before sandbox escape.
     interruptOn: undefined,
     summarizationTrigger: { type: "tokens", value: triggerTokens },
     summarizationKeep: { type: "tokens", value: keepTokens },

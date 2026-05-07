@@ -172,8 +172,8 @@ function renderToolRoutingGatePrompt(options: {
   }
 
   const lines = [
-    TOOL_ROUTING_GATE_PROMPT_PREFIX.trim()
-    // `Before using ${toolList}, first choose exactly one route:`
+    TOOL_ROUTING_GATE_PROMPT_PREFIX.trim(),
+    `Before using ${toolList}, first choose exactly one route:`
   ]
   lines.push(
     "- **Direct-Tool Call:** Use this IF the required tool is already listed in your standard callable tools. Call it directly."

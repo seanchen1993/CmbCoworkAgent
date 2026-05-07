@@ -13,6 +13,7 @@ import { randomUUID } from "crypto"
 import path from "path"
 import { ApprovalStore } from "./approval-store"
 import { assessCommandSafety, derivePermanentApprovalPattern } from "./exec-policy"
+import { LocalSandbox } from "./local-sandbox"
 import type {
   ApprovalRequest,
   ApprovalDecision,
@@ -26,6 +27,14 @@ export type RawExecuteFn = (command: string, sandboxMode?: string) => Promise<Ex
 
 /** Function to request interactive approval from the user (renderer). */
 export type RequestApprovalFn = (req: ApprovalRequest) => Promise<ApprovalDecision>
+
+/**
+ * Generic prompt shown when a sandboxed command fails with output that looks like a
+ * sandbox-induced denial. Mirrors Codex's `command failed; retry without sandbox?` —
+ * intentionally non-specific so we don't have to enumerate every tool-specific failure.
+ */
+const SANDBOX_BYPASS_PROMPT_REASON =
+  "命令在沙箱内执行失败，疑似受沙箱限制。是否允许我在沙箱外重试同一命令？"
 
 export class ToolOrchestrator {
   constructor(
@@ -65,15 +74,18 @@ export class ToolOrchestrator {
         }
       }
 
-      // 3. YOLO mode: skip approval for safe + needs_approval commands
+      // 3. YOLO mode: skip the initial command approval for safe + needs_approval
+      // commands, but still require explicit approval before escaping the sandbox.
       if (this.yoloMode) {
-        return this.rawExecute(command, sandboxMode)
+        const result = await this.rawExecute(command, sandboxMode)
+        return this.maybeRetryOutsideSandbox(command, cwd, sandboxMode, result)
       }
 
       // 4. Safe commands → execute directly
       if (safety.level === "safe") {
         console.log("[Orchestrator] safe → rawExecute")
-        return this.rawExecute(command, sandboxMode)
+        const result = await this.rawExecute(command, sandboxMode)
+        return this.maybeRetryOutsideSandbox(command, cwd, sandboxMode, result)
       }
 
       // 5. Needs approval → check cache, then ask user
@@ -119,13 +131,11 @@ export class ToolOrchestrator {
         }
       }
 
-      // 6. Execute (with sandbox)
+      // 6. Execute (with sandbox), then offer a one-shot bypass prompt if the failure
+      // looks sandbox-induced.
       try {
         const result = await this.rawExecute(command, sandboxMode)
-        if (sandboxMode !== "none" && this.isSandboxDeniedResponse(result)) {
-          return this.handleSandboxRetry(command, cwd, result.output)
-        }
-        return result
+        return await this.maybeRetryOutsideSandbox(command, cwd, sandboxMode, result)
       } catch (err) {
         // 7. Sandbox denial → block and inform user
         if (sandboxMode !== "none" && this.isSandboxDenialError(err)) {
@@ -138,6 +148,69 @@ export class ToolOrchestrator {
         throw err
       }
     }
+  }
+
+  /**
+   * After a sandboxed rawExecute call returns, check whether the failure is one we can
+   * recover from by re-running outside the sandbox (git metadata writes, piped sub-spawns).
+   * If so, ask the user; on approval re-run with `mode="none"`. Used by both the
+   * foreground execute() path and LocalSandbox.executeBackground so background `npm run
+   * build` tasks get the same prompt UX as foreground commands.
+   */
+  async maybeRetryOutsideSandbox(
+    command: string,
+    cwd: string,
+    sandboxMode: string,
+    result: ExecuteResponse
+  ): Promise<ExecuteResponse> {
+    if (sandboxMode === "none") return result
+    // Single Codex-style bypass check — covers piped-spawn EPERM, git .git writes,
+    // dubious ownership, ssh auth, generic EACCES/Access-is-denied/拒绝访问, etc.
+    return this.maybeRequestSandboxBypass(command, cwd, sandboxMode, result)
+  }
+
+  /**
+   * Mirrors Codex's `command failed; retry without sandbox?` flow
+   * (codex-rs/core/src/tools/orchestrator.rs::build_denial_reason_from_output).
+   *
+   * If `LocalSandbox.isLikelySandboxDenied` finds a sandbox-denial keyword in the output,
+   * surface a single-shot approval prompt with `retry_reason` populated so the renderer
+   * shows the amber retry banner. On approve we re-run with `mode="none"`; on reject we
+   * return the original sandbox output back to the agent so it can adjust its plan.
+   *
+   * Detection is output-only — wrappers like `cd workdir && cmd`, `pwsh -c "..."`, or
+   * background tasks all benefit, and we don't need to hand-curate per-tool detectors.
+   */
+  private async maybeRequestSandboxBypass(
+    command: string,
+    cwd: string,
+    sandboxMode: string,
+    sandboxResult: ExecuteResponse
+  ): Promise<ExecuteResponse> {
+    if (!LocalSandbox.isLikelySandboxDenied(sandboxResult.exitCode, sandboxResult.output ?? "")) {
+      return sandboxResult
+    }
+    console.warn(`[Orchestrator] sandbox bypass eligible for "${command}" (sandbox=${sandboxMode})`)
+    const approval = await this.requestApproval({
+      id: randomUUID(),
+      tool_call: { id: randomUUID(), name: "execute", args: { command } },
+      safety_level: "needs_approval",
+      operation: "execute",
+      command,
+      cwd,
+      reason: SANDBOX_BYPASS_PROMPT_REASON,
+      retry_reason: SANDBOX_BYPASS_PROMPT_REASON,
+      allowed_decisions: ["approve", "reject"],
+      allowed_approval_types: ["approve", "reject"]
+    })
+    const decision = this.mapDecisionToReview(approval.type)
+    if (decision === "denied" || decision === "abort") {
+      // Surface the original sandbox failure to the agent so it can adjust its plan.
+      console.warn(`[Orchestrator] sandbox bypass rejected for "${command}" — returning original sandbox output`)
+      return sandboxResult
+    }
+    console.warn(`[Orchestrator] sandbox bypass approved for "${command}" — retrying outside sandbox`)
+    return this.rawExecute(command, "none")
   }
 
   /**
@@ -214,21 +287,6 @@ export class ToolOrchestrator {
       msg.includes("sandbox blocked") ||
       msg.includes("sandbox denied") ||
       msg.includes("sandbox policy")
-    )
-  }
-
-  private isSandboxDeniedResponse(result: ExecuteResponse): boolean {
-    if (result.exitCode === 0) return false
-    const msg = (result.output ?? "").toLowerCase()
-    return (
-      msg.includes("blocked by policy") ||
-      msg.includes("setup refresh failed") ||
-      msg.includes("sandbox blocked") ||
-      msg.includes("sandbox denied") ||
-      msg.includes("sandbox policy") ||
-      msg.includes("沙箱阻止") ||
-      msg.includes("沙箱拦截") ||
-      msg.includes("沙箱拒绝")
     )
   }
 

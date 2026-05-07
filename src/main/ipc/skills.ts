@@ -252,7 +252,7 @@ async function repairMojibakeNamesInSkillDir(skillDirPath: string): Promise<void
   const dirQueue: string[] = [skillDirPath]
   for (let i = 0; i < dirQueue.length; i++) {
     const currentDir = dirQueue[i]
-    let entries: Awaited<ReturnType<typeof fs.readdir>>
+    let entries
     try {
       entries = await fs.readdir(currentDir, { withFileTypes: true })
     } catch {
@@ -268,7 +268,7 @@ async function repairMojibakeNamesInSkillDir(skillDirPath: string): Promise<void
   dirQueue.sort((a, b) => b.length - a.length)
 
   for (const dirPath of dirQueue) {
-    let entries: Awaited<ReturnType<typeof fs.readdir>>
+    let entries
     try {
       entries = await fs.readdir(dirPath, { withFileTypes: true })
     } catch {

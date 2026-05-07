@@ -185,7 +185,12 @@ function cmdSetLiteral(value: string): string {
 }
 
 function nodeOptionsQuote(value: string): string {
-  return `"${value.replace(/"/g, '\\"')}"`
+  // NODE_OPTIONS is parsed with shell-like quoting: inside double quotes, `\` is
+  // an escape character. A bare backslash is silently dropped (e.g. `\U` → `U`),
+  // so a Windows path like `C:\Users\...` becomes `C:Users...` and `require()`
+  // can't resolve the preload script. Escape `\` and `"` so Node sees the
+  // literal path back.
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`
 }
 
 function tomlBasicString(value: string): string {
@@ -238,13 +243,6 @@ interface ExecuteRawOptions {
 
 type WindowsSandboxMode = "none" | "unelevated" | "readonly" | "elevated"
 
-type WindowsSandboxHostBrokerKind = "git-metadata"
-
-interface WindowsSandboxHostBrokerPlan {
-  kind: WindowsSandboxHostBrokerKind
-  reason: string
-}
-
 interface WindowsSandboxNativeHelperAccess {
   path: string
   reason: string
@@ -259,7 +257,6 @@ interface WindowsSandboxMaterializedHelper {
 
 interface WindowsSandboxExecutionPlan {
   mode: WindowsSandboxMode
-  hostBroker?: WindowsSandboxHostBrokerPlan
   writableRoots: string[]
   nativeHelperAccess: WindowsSandboxNativeHelperAccess[]
   materializedHelpers: WindowsSandboxMaterializedHelper[]
@@ -719,19 +716,13 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
   }
 
   private static buildWindowsSandboxExecutionPlan(
-    command: string,
+    _command: string,
     mode: WindowsSandboxMode,
     sandboxCacheRoots: string[]
   ): WindowsSandboxExecutionPlan {
     const plan = LocalSandbox.createBaseWindowsSandboxExecutionPlan(mode)
     if (mode === "elevated" || mode === "unelevated") {
       plan.writableRoots.push(...sandboxCacheRoots)
-    }
-    if (LocalSandbox.shouldRunGitMetadataOutsideWindowsSandbox(command)) {
-      plan.hostBroker = {
-        kind: "git-metadata",
-        reason: "Codex Windows workspace-write sandbox intentionally denies writes under .git"
-      }
     }
     return plan
   }
@@ -1323,10 +1314,15 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     // sbt/ivy: keep writable state out of the host user's real ~/.sbt / ~/.ivy2.
     const sbtFlags = `-Dsbt.global.base=${toolDirs.sbtBase} -Divy.home=${toolDirs.ivyHome}`
 
-    // Force git to use OpenSSL instead of SChannel. The sandbox user (CodexSandboxOnline)
-    // doesn't have access to the Windows LSA for SChannel credential initialization.
-    const gitSslCmd = 'set "GIT_CONFIG_COUNT=1" & set "GIT_CONFIG_KEY_0=http.sslBackend" & set "GIT_CONFIG_VALUE_0=openssl"'
-    const gitSslPs  = "$env:GIT_CONFIG_COUNT='1'; $env:GIT_CONFIG_KEY_0='http.sslBackend'; $env:GIT_CONFIG_VALUE_0='openssl'"
+    // Inject git config for the sandbox user via GIT_CONFIG_COUNT/KEY/VALUE (git ≥ 2.31):
+    //   * http.sslBackend=openssl — sandbox user lacks access to the Windows LSA so SChannel
+    //     credential init fails; OpenSSL works under restricted tokens.
+    //   * safe.directory=*       — the elevated sandbox runs as CodexSandboxOnline but the
+    //     repo is owned by the host user, which trips git's "dubious ownership" check on every
+    //     command. Trusting all paths inside the sandbox shell is safe — Codex's sandbox token
+    //     already restricts what the user can read/write at the OS level.
+    const gitSslCmd = 'set "GIT_CONFIG_COUNT=2" & set "GIT_CONFIG_KEY_0=http.sslBackend" & set "GIT_CONFIG_VALUE_0=openssl" & set "GIT_CONFIG_KEY_1=safe.directory" & set "GIT_CONFIG_VALUE_1=*"'
+    const gitSslPs  = "$env:GIT_CONFIG_COUNT='2'; $env:GIT_CONFIG_KEY_0='http.sslBackend'; $env:GIT_CONFIG_VALUE_0='openssl'; $env:GIT_CONFIG_KEY_1='safe.directory'; $env:GIT_CONFIG_VALUE_1='*'"
 
     // The elevated sandbox runs as CodexSandboxOnline whose registry PATH only has System32.
     // codex.exe's CreateProcessAsUser loads that minimal PATH — the main-process PATH (with
@@ -1451,33 +1447,6 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       || (lower.includes("accessdeniedexception") || lower.includes("access is denied"))
   }
 
-  private static readonly GIT_NETWORK_SUBCOMMANDS = new Set([
-    "clone",
-    "fetch",
-    "pull"
-  ])
-
-  private static readonly GIT_SUBMODULE_METADATA_SUBCOMMANDS = new Set([
-    "init",
-    "sync",
-    "update"
-  ])
-
-  private static readonly GIT_LFS_METADATA_SUBCOMMANDS = new Set([
-    "fetch",
-    "pull"
-  ])
-
-  private static readonly GIT_GLOBAL_OPTIONS_WITH_VALUE = new Set([
-    "-c",
-    "--config-env",
-    "--exec-path",
-    "--git-dir",
-    "--namespace",
-    "--super-prefix",
-    "--work-tree"
-  ])
-
   private static tokenizeRoutingCommand(command: string): string[] | null {
     const tokens: string[] = []
     let current = ""
@@ -1558,87 +1527,52 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     return tokens
   }
 
-  private static isGitExecutableToken(token: string): boolean {
-    return LocalSandbox.executableBaseName(token) === "git"
-  }
-
-  private static findGitMetadataSubcommand(tokens: string[]): string | null {
-    if (!LocalSandbox.isGitExecutableToken(tokens[0])) return null
-
-    let skipNext = false
-    for (let i = 1; i < tokens.length; i++) {
-      if (skipNext) {
-        skipNext = false
-        continue
-      }
-
-      const lower = tokens[i].toLowerCase()
-      if (LocalSandbox.GIT_GLOBAL_OPTIONS_WITH_VALUE.has(lower)) {
-        skipNext = true
-        continue
-      }
-      if (
-        lower.startsWith("--config-env=")
-        || lower.startsWith("--exec-path=")
-        || lower.startsWith("--git-dir=")
-        || lower.startsWith("--namespace=")
-        || lower.startsWith("--super-prefix=")
-        || lower.startsWith("--work-tree=")
-        || (lower.startsWith("-c") && lower.length > 2)
-      ) {
-        continue
-      }
-      if (lower === "--" || lower.startsWith("-")) {
-        continue
-      }
-
-      if (LocalSandbox.GIT_NETWORK_SUBCOMMANDS.has(lower)) {
-        return lower
-      }
-      if (lower === "submodule" || lower === "lfs") {
-        const nestedSubcommand = LocalSandbox.findNestedGitSubcommand(tokens.slice(i + 1))
-        const allowedNestedSubcommands = lower === "submodule"
-          ? LocalSandbox.GIT_SUBMODULE_METADATA_SUBCOMMANDS
-          : LocalSandbox.GIT_LFS_METADATA_SUBCOMMANDS
-        return nestedSubcommand && allowedNestedSubcommands.has(nestedSubcommand)
-          ? `${lower} ${nestedSubcommand}`
-          : null
-      }
-
-      return null
-    }
-
-    return null
-  }
-
-  private static findNestedGitSubcommand(tokens: string[]): string | null {
-    for (const token of tokens) {
-      const lower = token.toLowerCase()
-      if (lower === "--" || lower.startsWith("-")) {
-        continue
-      }
-      return lower
-    }
-    return null
-  }
-
-  private static shouldRunGitMetadataOutsideWindowsSandbox(command: string): boolean {
-    const tokens = LocalSandbox.gitRoutingTokens(command)
-    return !!tokens && LocalSandbox.findGitMetadataSubcommand(tokens) !== null
-  }
-
-  private static isGitMetadataPermissionFailure(output: string): boolean {
+  /**
+   * Decide whether a non-zero exit was *likely* caused by the sandbox restricting the
+   * command — i.e. running the same command outside the sandbox might succeed. Models
+   * Codex's `is_likely_sandbox_denied` (codex-rs/core/src/exec.rs):
+   *
+   *   1. Skip if the command succeeded.
+   *   2. If the output contains any sandbox-denial keyword, return true.
+   *   3. Otherwise return false.
+   *
+   * We extend Codex's Linux/macOS-first keyword list with Windows-specific signals
+   * (Access is denied, WinError 5/1314, dubious ownership, spawn EPERM, …) because
+   * Codex's wall of "permission denied" is mostly POSIX phrasing.
+   */
+  static isLikelySandboxDenied(exitCode: number | null, output: string): boolean {
+    if (exitCode === 0 || !output) return false
     const lower = output.toLowerCase()
-    const denied = lower.includes("permission denied")
-      || lower.includes("access is denied")
-      || output.includes("拒绝访问")
-    const gitMetadata = lower.includes(".git/")
-      || lower.includes(".git\\")
-      || lower.includes("fetch_head")
-      || lower.includes("index.lock")
-      || lower.includes("packed-refs")
-    return denied && gitMetadata
+    return LocalSandbox.SANDBOX_DENIED_KEYWORDS.some((needle) => lower.includes(needle))
   }
+
+  /**
+   * Keywords whose presence in a command's output strongly suggests a sandbox-induced
+   * failure. Lowercase comparisons only.
+   *
+   * Codex's original 7 (LF-family) + Windows-specific additions for elevated/unelevated
+   * Codex Windows sandbox modes that Codex itself doesn't ship signals for.
+   */
+  static readonly SANDBOX_DENIED_KEYWORDS: readonly string[] = [
+    // Codex's Linux/macOS-flavored set:
+    "operation not permitted",
+    "permission denied",
+    "read-only file system",
+    "seccomp",
+    "sandbox",
+    "landlock",
+    "failed to write file",
+    // Windows additions:
+    "access is denied",            // cmd.exe / icacls / Win32 ERROR_ACCESS_DENIED
+    "拒绝访问",                     // Chinese Windows variant of the above
+    "winerror 5",                  // Python OSError on Win ERROR_ACCESS_DENIED
+    "winerror 1314",               // Python OSError on Win SeAssignPrimaryToken etc.
+    "dubious ownership",           // git when host user owns the repo, sandbox runs as different user
+    "spawn eperm",                 // libuv named pipe creation under WRITE_RESTRICTED token
+    "eacces: permission",          // Node fs syscall errors
+    "eperm: operation",            // Node fs syscall errors
+    "permissionerror: [errno 13",  // Python explicit
+  ]
 
   /**
    * Detect commands that are known to fail in elevated mode due to permission/cert issues.
@@ -3612,8 +3546,20 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       LocalSandbox.BACKGROUND_TIMEOUT_MS,
       taskAbortController.signal,
       { background: true }
-    ).then(result => {
+    ).then(async rawResult => {
       // Guard: if already completed (e.g. cancelled via cancelBackgroundTasks), don't overwrite.
+      if (task.completed) return
+      // Background tasks bypass the foreground orchestrator path, but failures that need
+      // a sandbox-escape (git metadata writes, piped sub-spawns) still need the user's
+      // approval. Route the result back through the orchestrator's bypass check so the
+      // approval prompt renders for backgrounded `npm run build` etc. before the task
+      // is marked complete and task_output() returns to the agent.
+      const result = this.orchestrator
+        ? await this.orchestrator.maybeRetryOutsideSandbox(command, this.workingDir, this.windowsSandbox, rawResult).catch((err) => {
+            console.warn(`[LocalSandbox] background bypass check failed for task ${taskId}:`, err)
+            return rawResult
+          })
+        : rawResult
       if (task.completed) return
       task.result = result
       // Append final output to chunks for completeness
@@ -3778,22 +3724,10 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     console.log(`[LocalSandbox] executeRaw: command="${command}" effectiveMode=${effectiveSandboxMode} override=${sandboxModeOverride} timeout=${effectiveTimeout}ms overrideAbort=${!!overrideAbortSignal}`)
 
     if (process.platform === "win32" && effectiveSandboxMode !== "none") {
-      const initialPlan = LocalSandbox.buildWindowsSandboxExecutionPlan(command, effectiveSandboxMode, [])
-      if (initialPlan.hostBroker?.kind === "git-metadata") {
-        if (initialPlan.mode !== "elevated" && initialPlan.mode !== "unelevated") {
-          console.warn("[LocalSandbox] git metadata command is blocked by readonly Windows sandbox")
-          return {
-            output: "Git metadata commands such as pull/fetch/clone cannot run in readonly Windows sandbox mode because they modify .git. Switch to elevated/unelevated/none and retry.",
-            exitCode: 1,
-            truncated: false
-          }
-        }
-        // Codex workspace-write policies intentionally protect .git. Git metadata
-        // commands mutate refs/FETCH_HEAD/index, so keep this host-token escape
-        // isolated in the Windows execution plan until a git_workflow broker exists.
-        console.warn(`[LocalSandbox] ${initialPlan.hostBroker.reason}; running git metadata command outside Windows sandbox`)
-        return this.executeRawUnserialized(command, "none", timeoutMs, overrideAbortSignal)
-      }
+      // Commands that need to escape the Windows sandbox (e.g. `git pull` writing .git,
+      // `npm run build` spawning esbuild via piped stdio) are no longer auto-routed here.
+      // The orchestrator inspects the post-run output, asks the user for permission, and
+      // retries with `mode="none"` only after explicit approval — same UX as Codex CLI.
       console.log("[LocalSandbox] -> executeInWindowsSandbox")
       return this.executeInWindowsSandbox(command, 1, effectiveSandboxMode, effectiveTimeout, overrideAbortSignal)
     }
@@ -3989,8 +3923,8 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     // GIT_CONFIG_COUNT/KEY/VALUE injects git config for this invocation only (git ≥ 2.31).
     const clearProxyPreamble = !isElevatedSandbox && effectiveMode !== "none"
       ? (shellBase === "cmd"
-          ? 'set "HTTP_PROXY=" & set "HTTPS_PROXY=" & set "ALL_PROXY=" & set "GIT_HTTP_PROXY=" & set "GIT_HTTPS_PROXY=" & set "GIT_SSH_COMMAND=" & set "GIT_ALLOW_PROTOCOLS=" & set "PIP_NO_INDEX=" & set "NPM_CONFIG_OFFLINE=" & set "CARGO_NET_OFFLINE=" & set "SBX_NONET_ACTIVE=" & set "GIT_CONFIG_COUNT=1" & set "GIT_CONFIG_KEY_0=http.sslBackend" & set "GIT_CONFIG_VALUE_0=openssl"'
-          : '$env:HTTP_PROXY=$null; $env:HTTPS_PROXY=$null; $env:ALL_PROXY=$null; $env:GIT_HTTP_PROXY=$null; $env:GIT_HTTPS_PROXY=$null; $env:GIT_SSH_COMMAND=$null; $env:GIT_ALLOW_PROTOCOLS=$null; $env:PIP_NO_INDEX=$null; $env:NPM_CONFIG_OFFLINE=$null; $env:CARGO_NET_OFFLINE=$null; $env:SBX_NONET_ACTIVE=$null; $env:GIT_CONFIG_COUNT=\'1\'; $env:GIT_CONFIG_KEY_0=\'http.sslBackend\'; $env:GIT_CONFIG_VALUE_0=\'openssl\'')
+          ? 'set "HTTP_PROXY=" & set "HTTPS_PROXY=" & set "ALL_PROXY=" & set "GIT_HTTP_PROXY=" & set "GIT_HTTPS_PROXY=" & set "GIT_SSH_COMMAND=" & set "GIT_ALLOW_PROTOCOLS=" & set "PIP_NO_INDEX=" & set "NPM_CONFIG_OFFLINE=" & set "CARGO_NET_OFFLINE=" & set "SBX_NONET_ACTIVE=" & set "GIT_CONFIG_COUNT=2" & set "GIT_CONFIG_KEY_0=http.sslBackend" & set "GIT_CONFIG_VALUE_0=openssl" & set "GIT_CONFIG_KEY_1=safe.directory" & set "GIT_CONFIG_VALUE_1=*"'
+          : '$env:HTTP_PROXY=$null; $env:HTTPS_PROXY=$null; $env:ALL_PROXY=$null; $env:GIT_HTTP_PROXY=$null; $env:GIT_HTTPS_PROXY=$null; $env:GIT_SSH_COMMAND=$null; $env:GIT_ALLOW_PROTOCOLS=$null; $env:PIP_NO_INDEX=$null; $env:NPM_CONFIG_OFFLINE=$null; $env:CARGO_NET_OFFLINE=$null; $env:SBX_NONET_ACTIVE=$null; $env:GIT_CONFIG_COUNT=\'2\'; $env:GIT_CONFIG_KEY_0=\'http.sslBackend\'; $env:GIT_CONFIG_VALUE_0=\'openssl\'; $env:GIT_CONFIG_KEY_1=\'safe.directory\'; $env:GIT_CONFIG_VALUE_1=\'*\'')
       : ""
     // Unelevated sandbox: set shared tool env vars to the persistent writable cache root.
     const unelevatedJvmPreamble = !isElevatedSandbox && effectiveMode !== "none"
@@ -4313,15 +4247,8 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       }
     }
 
-    if (
-      (effectiveMode === "elevated" || effectiveMode === "unelevated")
-      && result.exitCode !== 0
-      && LocalSandbox.shouldRunGitMetadataOutsideWindowsSandbox(command)
-      && LocalSandbox.isGitMetadataPermissionFailure(result.output)
-    ) {
-      console.warn("[LocalSandbox] Windows sandbox could not write git metadata; retrying outside sandbox")
-      return this.executeRaw(command, "none", timeoutMs, overrideAbortSignal)
-    }
+    // Git metadata sandbox-failure no longer auto-retries here — the orchestrator owns
+    // the fail → prompt-user → retry-outside loop so the user can grant permission per-call.
 
     if (
       isElevatedSandbox

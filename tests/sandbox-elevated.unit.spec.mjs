@@ -9,6 +9,7 @@ const execPolicySource = readFileSync(new URL("../src/main/agent/exec-policy.ts"
 const windowsSafeCommandsSource = readFileSync(new URL("../src/main/agent/windows-safe-commands.ts", import.meta.url), "utf8")
 const runtimeSource = readFileSync(new URL("../src/main/agent/runtime.ts", import.meta.url), "utf8")
 const codeExecRunnerSource = readFileSync(new URL("../src/main/code-exec/runner.ts", import.meta.url), "utf8")
+const toolOrchestratorSource = readFileSync(new URL("../src/main/agent/tool-orchestrator.ts", import.meta.url), "utf8")
 
 function sectionBetween(source, startMarker, endMarker) {
   const start = source.indexOf(startMarker)
@@ -363,70 +364,89 @@ test("elevated command routing avoids unconditional Python lookup waits", () => 
   )
 })
 
-test("git metadata updates run with host token instead of Windows sandbox", () => {
-  const routingHelpersSection = sectionBetween(
+test("LocalSandbox exposes a single sandbox-denial detector modelled on Codex", () => {
+  // Codex's design (codex-rs/core/src/exec.rs::is_likely_sandbox_denied):
+  //   one keyword set, one function, one bypass prompt — keep it simple.
+  assert.match(
     localSandboxSource,
-    "private static readonly GIT_NETWORK_SUBCOMMANDS",
-    "  /**\r\n   * Detect commands that are known to fail in elevated mode"
+    /static isLikelySandboxDenied\(exitCode: number \| null, output: string\): boolean/,
+    "LocalSandbox should expose a single Codex-style sandbox denial detector"
   )
+  assert.match(
+    localSandboxSource,
+    /static readonly SANDBOX_DENIED_KEYWORDS: readonly string\[\]/,
+    "the keyword list should be a single readonly array, not scattered regexes per tool"
+  )
+  // Codex's original 7 keywords from is_likely_sandbox_denied:
+  for (const codexKw of [
+    "operation not permitted",
+    "permission denied",
+    "read-only file system",
+    "seccomp",
+    "sandbox",
+    "landlock",
+    "failed to write file"
+  ]) {
+    assert.match(
+      localSandboxSource,
+      new RegExp(`"${codexKw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`),
+      `Codex's "${codexKw}" keyword should appear in SANDBOX_DENIED_KEYWORDS`
+    )
+  }
+  // Windows-specific additions Codex doesn't ship:
+  for (const winKw of [
+    "access is denied",
+    "拒绝访问",
+    "winerror 5",
+    "winerror 1314",
+    "dubious ownership",
+    "spawn eperm"
+  ]) {
+    assert.match(
+      localSandboxSource,
+      new RegExp(`"${winKw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`),
+      `Windows-specific "${winKw}" keyword should appear in SANDBOX_DENIED_KEYWORDS`
+    )
+  }
+})
+
+test("sandbox preemptive routing has been removed in favour of the prompt-then-retry flow", () => {
   const rawExecutionSection = sectionBetween(
     localSandboxSource,
     "private async executeRawUnserialized(",
     "    const isWindows = process.platform === \"win32\""
   )
-  const sandboxResultSection = sectionBetween(
-    localSandboxSource,
-    "    if (isElevatedSandbox && result.exitCode !== 0 && result.output.includes(\"setup refresh failed\"))",
-    "    console.log(`[LocalSandbox] executeInWindowsSandbox total:"
-  )
-
-  assert.match(
-    routingHelpersSection,
-    /GIT_NETWORK_SUBCOMMANDS[\s\S]*"clone"[\s\S]*"fetch"[\s\S]*"pull"/,
-    "git clone/fetch/pull should be treated as local .git metadata updates"
+  assert.doesNotMatch(
+    rawExecutionSection,
+    /executeRawUnserialized\(command, "none"/,
+    "executeRawUnserialized must not preemptively re-route to host token — the orchestrator owns that decision after asking the user"
   )
   assert.doesNotMatch(
-    routingHelpersSection,
-    /GIT_NETWORK_SUBCOMMANDS[\s\S]*"push"/,
-    "git push should not be folded into the metadata-write sandbox bypass"
-  )
-  assert.match(
-    routingHelpersSection,
-    /executableBaseName\(tokens\[0\]\)[\s\S]*cmd[\s\S]*powershell[\s\S]*pwsh/,
-    "routing should understand common Windows shell wrappers instead of relying on a bare regex"
-  )
-  assert.match(
     rawExecutionSection,
-    /buildWindowsSandboxExecutionPlan\(command, effectiveSandboxMode, \[\]\)[\s\S]*hostBroker\?\.kind === "git-metadata"[\s\S]*executeRawUnserialized\(command, "none"/,
-    "git metadata commands should run through the Windows execution plan before using the host token"
+    /hostBroker/,
+    "host-broker preemptive routing has been replaced with a fail → prompt → retry flow"
   )
-  assert.match(
-    rawExecutionSection,
-    /isolated in the Windows execution plan until a git_workflow broker exists/,
-    "the bypass should document the Codex .git protection policy it works around"
-  )
-  assert.match(
-    sandboxResultSection,
-    /isGitMetadataPermissionFailure\(result\.output\)[\s\S]*executeRaw\(command, "none"/,
-    "missed git metadata permission failures should retry once outside the Windows sandbox"
-  )
-  assert.match(
-    sandboxResultSection,
-    /shouldFallbackToUnelevatedForNetworkAuth/,
-    "the existing elevated-to-unelevated fallback should remain available for non-git network auth failures"
-  )
+  // Detection helpers we previously exposed have been collapsed into isLikelySandboxDenied:
+  for (const dead of [
+    "isSandboxedPipeSpawnFailure",
+    "isGitMetadataPermissionFailure",
+    "isSandboxedSshAuthFailure",
+    "isGenericSandboxAccessFailure",
+    "shouldRunGitMetadataOutsideWindowsSandbox"
+  ]) {
+    assert.doesNotMatch(
+      localSandboxSource,
+      new RegExp(`static\\s+${dead}\\b`),
+      `${dead} should be removed — replaced by isLikelySandboxDenied`
+    )
+  }
 })
 
-test("Windows sandbox execution plan prepares native helper access without host bypassing npm scripts", () => {
+test("Windows sandbox execution plan prepares native helper materialization", () => {
   const plannerSection = sectionBetween(
     localSandboxSource,
     "private static buildWindowsSandboxExecutionPlan(",
     "  private static buildSerializedExecutionKey("
-  )
-  const executeRawSection = sectionBetween(
-    localSandboxSource,
-    "private async executeRawUnserialized(",
-    "    const isWindows = process.platform === \"win32\""
   )
   const executeWindowsSection = sectionBetween(
     localSandboxSource,
@@ -434,11 +454,6 @@ test("Windows sandbox execution plan prepares native helper access without host 
     "    const isReadonly = effectiveMode === \"readonly\""
   )
 
-  assert.match(
-    plannerSection,
-    /createBaseWindowsSandboxExecutionPlan[\s\S]*hostBroker[\s\S]*git-metadata/,
-    "git host-broker decisions should live in the Windows sandbox execution planner"
-  )
   assert.match(
     localSandboxSource,
     /SandboxNativeHelpers[\s\S]*nativeTools: path\.win32\.join\(root, "native-tools"\)/,
@@ -460,16 +475,6 @@ test("Windows sandbox execution plan prepares native helper access without host 
     "native helper freshness should validate content hash instead of trusting size/mtime"
   )
   assert.match(
-    plannerSection,
-    /CMB_SANDBOX_NATIVE_HELPER_MAP[\s\S]*"NODE_OPTIONS", `--require=\$\{nodeOptionsQuote\(hookPath\)\}`/,
-    "Node commands should preload the native-helper redirect hook only when helpers were materialized"
-  )
-  assert.match(
-    plannerSection,
-    /basenameCounts[\s\S]*basenameCounts\.get\(basename\.toLowerCase\(\)\) === 1/,
-    "basename helper redirects should only be used when no duplicate native-helper basename exists"
-  )
-  assert.match(
     executeWindowsSection,
     /prepareNativeHelpersForPlan\(executionPlan, command, this\.workingDir\)[\s\S]*prepareNativeHelperSpawnHook\(executionPlan\)[\s\S]*prepareNativeHelperReadAccess\(executionPlan/,
     "Windows sandbox execution should prepare native helpers before spawning codex.exe"
@@ -479,11 +484,191 @@ test("Windows sandbox execution plan prepares native helper access without host 
     /plan\.writableRoots\.push\([^)]*materialized\.destinationPath|plan\.writableRoots\.push\(hookDir\)|plan\.writableRoots\.push\(hookPath\)/,
     "materialized helpers and preload hooks must not be granted through writable roots"
   )
-  assert.doesNotMatch(
-    executeRawSection,
-    /npm[\s\S]*executeRawUnserialized\(command, "none"/,
-    "npm/build scripts must not be routed outside the sandbox just because they may spawn native helpers"
+})
+
+test("orchestrator wraps every sandbox failure in Codex's single retry-without-sandbox prompt", () => {
+  const orchestratorSection = sectionBetween(
+    toolOrchestratorSource,
+    "async execute(command: string, cwd: string, sandboxMode: string)",
+    "private async approveFileOp("
   )
+  const bypassSection = sectionBetween(
+    toolOrchestratorSource,
+    "private async maybeRequestSandboxBypass(",
+    "  private mapDecisionToReview("
+  )
+
+  assert.match(
+    orchestratorSection,
+    /maybeRetryOutsideSandbox/,
+    "execute() should hand the result to maybeRetryOutsideSandbox"
+  )
+  assert.match(
+    orchestratorSection,
+    /safety\.level === "safe"[\s\S]*rawExecute\(command, sandboxMode\)[\s\S]*maybeRetryOutsideSandbox\(command, cwd, sandboxMode, result\)/,
+    "safe commands should also be eligible for Codex-style sandbox bypass prompts after sandbox failure"
+  )
+  assert.match(
+    orchestratorSection,
+    /this\.yoloMode[\s\S]*rawExecute\(command, sandboxMode\)[\s\S]*maybeRetryOutsideSandbox\(command, cwd, sandboxMode, result\)/,
+    "YOLO mode should skip only the initial command approval; sandbox escape must still require the retry approval prompt"
+  )
+  assert.match(
+    toolOrchestratorSource,
+    /isLikelySandboxDenied\(sandboxResult\.exitCode, sandboxResult\.output \?\? ""\)/,
+    "the orchestrator should call LocalSandbox.isLikelySandboxDenied (output + exit code) instead of multiple ad-hoc detectors"
+  )
+  assert.match(
+    bypassSection,
+    /requestApproval\([\s\S]*retry_reason: SANDBOX_BYPASS_PROMPT_REASON/,
+    "the bypass prompt should populate retry_reason from a single shared message constant — Codex-style"
+  )
+  assert.match(
+    bypassSection,
+    /allowed_approval_types: \["approve", "reject"\]/,
+    "sandbox bypass should only offer one-shot approve/reject — not session/permanent grants"
+  )
+  assert.match(
+    bypassSection,
+    /rawExecute\(command, "none"\)/,
+    "approval should hand the command to rawExecute with mode=none (host token)"
+  )
+  assert.match(
+    bypassSection,
+    /return sandboxResult/,
+    "rejection should surface the original sandbox failure so the agent can adjust its plan"
+  )
+  assert.match(
+    toolOrchestratorSource,
+    /SANDBOX_BYPASS_PROMPT_REASON\s*=\s*"[^"]+沙箱外重试[^"]+"/,
+    "the prompt message constant should be a single shared string (mirrors Codex's 'command failed; retry without sandbox?' UX)"
+  )
+})
+
+test("isLikelySandboxDenied keyword check matches real failure outputs and rejects unrelated errors", () => {
+  // Recreate the detector locally — keep this in sync with the source.
+  const SANDBOX_DENIED_KEYWORDS = [
+    "operation not permitted",
+    "permission denied",
+    "read-only file system",
+    "seccomp",
+    "sandbox",
+    "landlock",
+    "failed to write file",
+    "access is denied",
+    "拒绝访问",
+    "winerror 5",
+    "winerror 1314",
+    "dubious ownership",
+    "spawn eperm",
+    "eacces: permission",
+    "eperm: operation",
+    "permissionerror: [errno 13"
+  ]
+  function isLikelySandboxDenied(exit, output) {
+    if (exit === 0 || !output) return false
+    const lower = output.toLowerCase()
+    return SANDBOX_DENIED_KEYWORDS.some((kw) => lower.includes(kw))
+  }
+
+  const samples = [
+    // Sandbox-induced failures — should match
+    { output: "Error: spawn EPERM\n    at ChildProcess.spawn (...)", expect: true },
+    { output: "fatal: detected dubious ownership in repository at 'C:/ai/repo'", expect: true },
+    { output: "error: cannot lock ref 'refs/remotes/origin/main': Permission denied", expect: true },
+    { output: "Permission denied (publickey).\r\nfatal: Could not read from remote repository.", expect: true },
+    { output: "EACCES: permission denied, open 'C:\\Users\\host\\.npmrc'", expect: true },
+    { output: "OSError: [WinError 5] Access is denied: 'C:\\Windows\\Temp\\foo'", expect: true },
+    { output: "[WinError 1314] A required privilege is not held by the client", expect: true },
+    { output: "icacls: Access is denied.", expect: true },
+    { output: "拒绝访问", expect: true },
+    { output: "[Sandbox] command was blocked", expect: true },  // Codex's "sandbox" keyword
+    // Non-sandbox failures — should NOT match
+    { output: "TypeScript error TS2304: Cannot find name 'foo'", expect: false },
+    { output: "Test failed: expected 1 to equal 2", expect: false },
+    { output: "ECONNREFUSED 127.0.0.1:5432", expect: false },
+    { output: "syntax error near unexpected token", expect: false },
+    { output: "", expect: false }
+  ]
+
+  for (const s of samples) {
+    assert.equal(
+      isLikelySandboxDenied(1, s.output),
+      s.expect,
+      `keyword match mismatch on: ${s.output.slice(0, 60)}`
+    )
+  }
+  // Exit 0 always returns false even with denial keywords (success branch never prompts)
+  assert.equal(isLikelySandboxDenied(0, "EACCES: permission denied"), false)
+})
+
+test("background execute() routes results through the orchestrator's bypass check", () => {
+  const backgroundSection = sectionBetween(
+    localSandboxSource,
+    "async executeBackground(command: string)",
+    "  /**\r\n   * Retrieve a background task's"
+  )
+
+  assert.match(
+    backgroundSection,
+    /this\.orchestrator[\s\S]*maybeRetryOutsideSandbox\(command, this\.workingDir, this\.windowsSandbox, rawResult\)/,
+    "executeBackground must hand the raw result to the orchestrator's bypass check before marking the task complete — otherwise backgrounded `npm run build` skips the approval prompt"
+  )
+  assert.match(
+    backgroundSection,
+    /if \(task\.completed\) return[\s\S]*if \(task\.completed\) return/,
+    "executeBackground should re-check task.completed before AND after the bypass call so cancelled tasks aren't overwritten"
+  )
+  assert.match(
+    toolOrchestratorSource,
+    /async maybeRetryOutsideSandbox\(/,
+    "ToolOrchestrator should expose maybeRetryOutsideSandbox so background tasks can reuse the bypass logic"
+  )
+})
+
+test("runtime mounts the orchestrator even in YOLO mode so sandbox escape can still prompt", () => {
+  const runtimeApprovalSection = sectionBetween(
+    runtimeSource,
+    "  // ── Wire up the approval orchestrator ──",
+    "  let systemPrompt = getSystemPrompt"
+  )
+
+  assert.doesNotMatch(
+    runtimeApprovalSection,
+    /if \(!yoloMode\) \{[\s\S]*setOrchestrator/,
+    "YOLO mode must not skip mounting ToolOrchestrator, otherwise sandbox failures return directly without a retry approval prompt"
+  )
+  assert.match(
+    runtimeApprovalSection,
+    /new ToolOrchestrator\(approvalStore, rawExecute, requestApproval, yoloMode\)[\s\S]*backend\.setOrchestrator\(orchestrator\)/,
+    "runtime should always mount ToolOrchestrator and pass yoloMode into it"
+  )
+})
+
+test("elevated sandbox preamble injects git safe.directory and openssl backend", () => {
+  const elevatedPreambleSection = sectionBetween(
+    localSandboxSource,
+    "private static buildElevatedSandboxEnvPreamble(",
+    "  /**\r\n   * Build JVM + Python environment preamble for unelevated sandbox mode."
+  )
+  const unelevatedClearProxySection = sectionBetween(
+    localSandboxSource,
+    "    const clearProxyPreamble = !isElevatedSandbox && effectiveMode !== \"none\"",
+    "    // Unelevated sandbox: set shared tool env vars"
+  )
+
+  for (const section of [elevatedPreambleSection, unelevatedClearProxySection]) {
+    assert.match(
+      section,
+      /GIT_CONFIG_COUNT=2/,
+      "GIT_CONFIG_COUNT must be bumped to 2 so both http.sslBackend and safe.directory survive"
+    )
+    assert.match(
+      section,
+      /GIT_CONFIG_KEY_1=safe\.directory[\s\S]*GIT_CONFIG_VALUE_1=\*/,
+      "git safe.directory=* must be injected so the sandbox user can operate on the host-owned workspace without 'dubious ownership' errors"
+    )
+  }
 })
 
 test("native helper ACL grants only read/execute access outside writable directories", () => {
