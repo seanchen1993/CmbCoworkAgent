@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
+  ExternalLink,
   FolderOpen,
   Plug,
   Plus,
@@ -29,6 +30,8 @@ import { useAppStore } from "@/lib/store"
 import type { PluginMetadata, PluginManifest } from "@/types"
 
 type PluginHookMetadata = Awaited<ReturnType<typeof window.api.plugins.listHooks>>[number]
+const PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL =
+  import.meta.env.VITE_PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL?.trim()
 
 interface PluginDetail {
   skills: string[]
@@ -189,6 +192,20 @@ function UploadPluginDialog(props: {
             hooks/hooks.json。
           </DialogDescription>
         </DialogHeader>
+        {PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL && (
+          <div className="mt-4 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
+            <span>需要创建插件？可以先下载插件模板文件，按模板结构修改后再上传。</span>
+            <a
+              href={PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="ml-1 inline-flex items-center gap-1 font-medium text-blue-700 underline-offset-2 hover:underline"
+            >
+              下载插件模板
+              <ExternalLink className="size-3.5" />
+            </a>
+          </div>
+        )}
         <div
           className={cn(
             "mt-4 border-2 border-dashed rounded-lg p-8 text-center transition-colors cursor-pointer",
@@ -287,7 +304,7 @@ export function PluginsPanel(): React.JSX.Element {
         }
       })
       .catch(console.error)
-  }, [selectedPlugin])
+  }, [bumpPluginVersion, selectedPlugin])
 
   useEffect(() => {
     refreshPlugins()
@@ -326,7 +343,7 @@ export function PluginsPanel(): React.JSX.Element {
         setErrorMsg(e instanceof Error ? e.message : "启用/禁用插件失败")
       }
     },
-    [selectedPlugin, refreshPlugins]
+    [bumpPluginVersion, selectedPlugin, refreshPlugins]
   )
 
   const handleToggleHookEnabled = useCallback(
@@ -369,7 +386,7 @@ export function PluginsPanel(): React.JSX.Element {
     } catch (e) {
       setErrorMsg(e instanceof Error ? e.message : "卸载插件失败")
     }
-  }, [deleteTarget, selectedPlugin, refreshPlugins])
+  }, [bumpPluginVersion, deleteTarget, selectedPlugin, refreshPlugins])
 
   const filteredPlugins = useMemo(() => {
     const q = debouncedQuery.trim().toLowerCase()
