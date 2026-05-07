@@ -48,6 +48,8 @@ export function isSupportedHookEvent(value: unknown): value is SupportedHookEven
  */
 export type HookType = "command" | "prompt"
 
+export type HookSourceType = "global" | "workspace" | "plugin" | "skill"
+
 /** What the LLM should do when a prompt-hook times out or returns invalid JSON */
 export type PromptHookFallback = "allow" | "block"
 
@@ -79,6 +81,12 @@ export interface HookConfig {
   enabled: boolean
   createdAt: string
   updatedAt: string
+  /** Runtime-only source metadata used to choose command cwd. Not persisted for global hooks. */
+  hookSourceType?: HookSourceType
+  hookSourceRoot?: string
+  hookSourcePath?: string
+  /** Plugin root when this hook or skill comes from a plugin. */
+  pluginRoot?: string
 }
 
 export interface HookResult {
@@ -106,11 +114,15 @@ export interface HookResult {
 /** Environment variables passed to the hook command */
 export interface HookEnv {
   HOOK_EVENT: HookEvent
+  HOOK_SOURCE_TYPE?: HookSourceType
+  HOOK_SOURCE_ROOT?: string
+  HOOK_SOURCE_PATH?: string
   TOOL_NAME?: string
   TOOL_ARGS?: string // JSON, best-effort only for compact payloads; stdin remains canonical
   TOOL_RESULT?: string // PostToolUse only, best-effort only for compact payloads
   PLUGIN_ID?: string
   PLUGIN_NAME?: string
+  PLUGIN_ROOT?: string
   SKILL_NAME?: string
   SKILL_PATH?: string
   SKILL_ROOT?: string

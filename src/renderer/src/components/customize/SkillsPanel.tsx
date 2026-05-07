@@ -938,6 +938,7 @@ const SKILL_HOOK_JSON_EXAMPLE = `[
 
 const SKILL_HOOK_ENV_EXAMPLE = `const workspace = process.env.WORKSPACE_PATH
 const skillRoot = process.env.SKILL_ROOT
+const hookRoot = process.env.HOOK_SOURCE_ROOT
 const toolArgs = process.env.TOOL_ARGS
   ? JSON.parse(process.env.TOOL_ARGS)
   : null`
@@ -950,6 +951,8 @@ const SKILL_HOOK_STDIN_EXAMPLE = `{
   "tool_name": "write_file",
   "tool_input": { "path": "src/demo.ts" },
   "skill_name": "<skill-name>",
+  "hook_source_type": "skill",
+  "hook_source_root": "~/.cmbcoworkagent/skills/<skill-name>",
   "skill_root": "~/.cmbcoworkagent/skills/<skill-name>"
 }`
 
@@ -1143,6 +1146,7 @@ function SkillsGuide(): React.JSX.Element {
                   执行；脚本放在技能目录时，可以在
                   <code className="mx-1 font-mono text-foreground/85">command</code>
                   里直接写相对路径，也可以继续用
+                  <code className="mx-1 font-mono text-foreground/85">HOOK_SOURCE_ROOT</code>或
                   <code className="mx-1 font-mono text-foreground/85">SKILL_ROOT</code>
                   环境变量定位。
                 </p>
@@ -1204,7 +1208,11 @@ function SkillsGuide(): React.JSX.Element {
                 <p>
                   Skill Hook 的命令默认在技能目录执行，
                   <code className="mx-1 font-mono text-foreground/85">cwd</code>
-                  不是当前项目工作区。要访问用户当前工作区，请优先读取
+                  不是当前项目工作区。Skill Hook 里
+                  <code className="mx-1 font-mono text-foreground/85">HOOK_SOURCE_ROOT</code>
+                  与
+                  <code className="mx-1 font-mono text-foreground/85">SKILL_ROOT</code>
+                  通常相同；要访问用户当前工作区，请优先读取
                   <code className="mx-1 font-mono text-foreground/85">WORKSPACE_PATH</code>
                   ；兼容 Claude Code 写法时也可以读取
                   <code className="mx-1 font-mono text-foreground/85">CLAUDE_PROJECT_DIR</code>。
@@ -1218,10 +1226,19 @@ function SkillsGuide(): React.JSX.Element {
                       ：当前会话的工作区路径。
                     </li>
                     <li>
+                      <code className="font-mono text-foreground/85">HOOK_SOURCE_ROOT</code>、
+                      <code className="font-mono text-foreground/85">HOOK_SOURCE_TYPE</code>、
+                      <code className="font-mono text-foreground/85">HOOK_SOURCE_PATH</code>
+                      ：当前这条 Hook 的来源目录、来源类型和配置文件路径；command 的
+                      <code className="mx-1 font-mono text-foreground/85">cwd</code>
+                      默认就是来源目录。
+                    </li>
+                    <li>
                       <code className="font-mono text-foreground/85">SKILL_ROOT</code>、
                       <code className="font-mono text-foreground/85">SKILL_PATH</code>、
                       <code className="font-mono text-foreground/85">SKILL_NAME</code>
-                      ：技能目录、技能文件路径和技能名。
+                      ：事件关联的技能目录、技能文件路径和技能名；它们不决定非 Skill Hook
+                      的执行目录。
                     </li>
                     <li>
                       <code className="font-mono text-foreground/85">HOOK_EVENT</code>、
@@ -1237,7 +1254,8 @@ function SkillsGuide(): React.JSX.Element {
                     </li>
                     <li>
                       <code className="font-mono text-foreground/85">PLUGIN_ID</code>、
-                      <code className="font-mono text-foreground/85">PLUGIN_NAME</code>
+                      <code className="font-mono text-foreground/85">PLUGIN_NAME</code>、
+                      <code className="font-mono text-foreground/85">PLUGIN_ROOT</code>
                       ：由插件带来的 Hook 会附带插件来源信息。
                     </li>
                   </ul>
@@ -1260,7 +1278,9 @@ function SkillsGuide(): React.JSX.Element {
                   <p>
                     command hook 还会从 stdin 收到完整 JSON。这里的
                     <code className="mx-1 font-mono text-foreground/85">cwd</code>
-                    表示命令执行目录；在 Skill Hook 里通常是技能目录，工作区路径仍以
+                    表示命令实际执行目录，也就是
+                    <code className="mx-1 font-mono text-foreground/85">hook_source_root</code>
+                    ；在 Skill Hook 里通常是技能目录，工作区路径仍以
                     <code className="mx-1 font-mono text-foreground/85">WORKSPACE_PATH</code>
                     为准。
                   </p>

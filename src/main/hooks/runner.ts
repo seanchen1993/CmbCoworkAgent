@@ -27,6 +27,10 @@ export interface HookContext {
   /** Plugin that owns the capability currently being used, when known. */
   pluginId?: string
   pluginName?: string
+  pluginRoot?: string
+  hookSourceType?: HookConfig["hookSourceType"]
+  hookSourceRoot?: string
+  hookSourcePath?: string
   /** User prompt text for UserPromptSubmit — exposed as USER_PROMPT env and prompt in stdin JSON */
   userPrompt?: string
   /** Skill lifecycle context for PreSkillUse/PostSkillUse. */
@@ -43,6 +47,10 @@ export interface HookContext {
     toolCalls?: string[]
     usedSkills?: string[]
   }
+}
+
+function getCommandCwd(context: HookContext): string {
+  return context.hookSourceRoot ?? context.workspacePath ?? process.cwd()
 }
 
 /**
@@ -107,8 +115,12 @@ function buildHookEnv(event: HookEvent, context: HookContext): Record<string, st
     HOOK_EVENT: event
   }
   if (context.toolName) env.TOOL_NAME = context.toolName
+  if (context.hookSourceType) env.HOOK_SOURCE_TYPE = context.hookSourceType
+  if (context.hookSourceRoot) env.HOOK_SOURCE_ROOT = context.hookSourceRoot
+  if (context.hookSourcePath) env.HOOK_SOURCE_PATH = context.hookSourcePath
   if (context.pluginId) env.PLUGIN_ID = context.pluginId
   if (context.pluginName) env.PLUGIN_NAME = context.pluginName
+  if (context.pluginRoot) env.PLUGIN_ROOT = context.pluginRoot
   if (context.skillName) env.SKILL_NAME = context.skillName
   if (context.skillPath) env.SKILL_PATH = context.skillPath
   if (context.skillRoot) env.SKILL_ROOT = context.skillRoot
@@ -137,12 +149,16 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext): string {
   const payload: Record<string, unknown> = {
     hook_event_name: event,
     session_id: context.sessionId ?? "",
-    cwd: context.skillRoot ?? context.workspacePath ?? process.cwd()
+    cwd: getCommandCwd(context)
   }
+  if (context.hookSourceType) payload.hook_source_type = context.hookSourceType
+  if (context.hookSourceRoot) payload.hook_source_root = context.hookSourceRoot
+  if (context.hookSourcePath) payload.hook_source_path = context.hookSourcePath
   if (context.toolName) payload.tool_name = context.toolName
   if (context.toolArgs) payload.tool_input = context.toolArgs
   if (context.pluginId) payload.plugin_id = context.pluginId
   if (context.pluginName) payload.plugin_name = context.pluginName
+  if (context.pluginRoot) payload.plugin_root = context.pluginRoot
   if (context.toolResult !== undefined) {
     // Upstream passes JSON.stringify(result); parse it back so hooks see a real object
     // (matches Claude Code spec where tool_response is the structured response).
@@ -257,7 +273,7 @@ function executeCommandHook(
       shell: isWindows ? true : false,
       stdio: ["pipe", "pipe", "pipe"],
       timeout,
-      cwd: env.SKILL_ROOT || env.WORKSPACE_PATH || process.cwd()
+      cwd: env.HOOK_SOURCE_ROOT || env.WORKSPACE_PATH || process.cwd()
     })
 
     // Write the Claude Code JSON payload to stdin so hooks can parse structured input.
@@ -463,6 +479,11 @@ async function executePromptHook(
       ...(context.skillName ? { skill_name: context.skillName } : {}),
       ...(context.skillPath ? { skill_path: context.skillPath } : {}),
       ...(context.skillRoot ? { skill_root: context.skillRoot } : {}),
+      ...(context.pluginRoot ? { plugin_root: context.pluginRoot } : {}),
+      ...(context.hookSourceType ? { hook_source_type: context.hookSourceType } : {}),
+      ...(context.hookSourceRoot ? { hook_source_root: context.hookSourceRoot } : {}),
+      ...(context.hookSourcePath ? { hook_source_path: context.hookSourcePath } : {}),
+      cwd: getCommandCwd(context),
       ...(context.stopContext ? { stop_context: context.stopContext } : {}),
       workspace: context.workspacePath ?? ""
     },
@@ -679,7 +700,7 @@ export type HookResultCallback = (event: HookEvent, hook: HookConfig, result: Ho
  * to recover those fields without forcing every caller to know which kind it is.
  */
 type ScopedHook = HookConfig &
-  Partial<Pick<PluginHookMetadata, "pluginId" | "pluginName">> &
+  Partial<Pick<PluginHookMetadata, "pluginId" | "pluginName" | "pluginRoot">> &
   Partial<Pick<SkillHookMetadata, "skillName" | "skillPath" | "skillRoot">>
 
 function enrichContextFromHook(hook: HookConfig, context: HookContext): HookContext {
@@ -688,6 +709,10 @@ function enrichContextFromHook(hook: HookConfig, context: HookContext): HookCont
     ...context,
     pluginId: context.pluginId ?? scopedHook.pluginId,
     pluginName: context.pluginName ?? scopedHook.pluginName,
+    pluginRoot: context.pluginRoot ?? scopedHook.pluginRoot,
+    hookSourceType: context.hookSourceType ?? scopedHook.hookSourceType,
+    hookSourceRoot: context.hookSourceRoot ?? scopedHook.hookSourceRoot,
+    hookSourcePath: context.hookSourcePath ?? scopedHook.hookSourcePath,
     skillName: context.skillName ?? scopedHook.skillName,
     skillPath: context.skillPath ?? scopedHook.skillPath,
     skillRoot: context.skillRoot ?? scopedHook.skillRoot

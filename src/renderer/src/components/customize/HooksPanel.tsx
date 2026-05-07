@@ -1141,6 +1141,15 @@ function HooksGuide(): React.JSX.Element {
               <p>
                 工作区 Hook 适合跟项目一起分发；脚本或策略本体建议放在项目目录里跟代码一起维护。
               </p>
+              <p>
+                command Hook 的默认执行目录由 Hook 来源决定：
+                全局 Hook 在
+                <code className="mx-1 font-mono text-foreground/85">~/.cmbcoworkagent</code>
+                执行，插件 Hook 在插件根目录执行，技能 Hook 在技能目录执行，工作区 Hook
+                在当前 workspace 执行。事件里的
+                <code className="mx-1 font-mono text-foreground/85">SKILL_ROOT</code>
+                只表示本次关联的技能，不会改变非 Skill Hook 的执行目录。
+              </p>
             </div>
           </GuideSubSection>
 
@@ -1189,6 +1198,7 @@ function HooksGuide(): React.JSX.Element {
                 执行；脚本放在技能目录时，可以在
                 <code className="mx-1 font-mono text-foreground/85">command</code>
                 里直接写相对路径，也可以通过
+                <code className="mx-1 font-mono text-foreground/85">HOOK_SOURCE_ROOT</code>或
                 <code className="mx-1 font-mono text-foreground/85">SKILL_ROOT</code>
                 环境变量定位。
               </p>
@@ -1261,6 +1271,11 @@ function HooksGuide(): React.JSX.Element {
               <p>
                 在<code className="mx-1 font-mono text-foreground/85">插件</code>
                 页面启用或停用插件，对应的 Hook 随之生效或移除。
+                command 默认在插件根目录执行，可通过
+                <code className="mx-1 font-mono text-foreground/85">HOOK_SOURCE_ROOT</code>
+                或
+                <code className="mx-1 font-mono text-foreground/85">PLUGIN_ROOT</code>
+                定位插件内脚本。
               </p>
             </div>
           </GuideSubSection>
@@ -1298,7 +1313,11 @@ function HooksGuide(): React.JSX.Element {
                 <code className="mx-1 font-mono text-foreground/85">
                   python .cmbdevclaw/hooks/check.py
                 </code>
-                。
+                ；也可以读取
+                <code className="mx-1 font-mono text-foreground/85">HOOK_SOURCE_ROOT</code>
+                或
+                <code className="mx-1 font-mono text-foreground/85">WORKSPACE_PATH</code>
+                获取这个路径。
               </p>
               <p>当前工作区 Hook 默认直接生效，不需要再单独点“信任”。</p>
               <p>

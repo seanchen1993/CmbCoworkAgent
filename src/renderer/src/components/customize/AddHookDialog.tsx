@@ -154,6 +154,26 @@ export interface CommandHookReadableContextDoc {
   extraObjects: HookReadableObjectDoc[]
 }
 
+const COMMAND_HOOK_SOURCE_INPUT_FIELDS = [
+  "hook_source_type",
+  "hook_source_root",
+  "hook_source_path"
+]
+
+const COMMAND_HOOK_SOURCE_ENV_FIELDS = [
+  "HOOK_SOURCE_TYPE",
+  "HOOK_SOURCE_ROOT",
+  "HOOK_SOURCE_PATH"
+]
+
+function mergeCommandHookFieldKeys(fields: string[], extra: string[]): string[] {
+  const result = [...fields]
+  for (const field of extra) {
+    if (!result.includes(field)) result.push(field)
+  }
+  return result
+}
+
 export const COMMAND_HOOK_EVENT_DOCS: Partial<Record<HookEvent, CommandHookEventDoc>> = {
   PreToolUse: {
     inputDescription: "当前事件发生在工具真正执行前，最常见的输入是工具名和工具参数。",
@@ -913,7 +933,24 @@ export function getCommandHookReadableContextDocs(event: HookEvent): CommandHook
       description: "当前 Hook 事件名，可用来区分 PreToolUse、Stop 等不同生命周期节点。"
     },
     { key: "session_id", description: "当前线程 / 会话 ID，适合关联日志、缓存或外部系统记录。" },
-    { key: "cwd", description: "当前工作目录；有工作区时通常就是当前工作区路径。" }
+    {
+      key: "cwd",
+      description:
+        "当前命令实际执行目录，等于 Hook 来源默认目录；全局 / 工作区 / 插件 / 技能 Hook 会分别指向各自来源根目录。"
+    },
+    {
+      key: "hook_source_type",
+      description: "当前 Hook 来源类型：global、workspace、plugin 或 skill。"
+    },
+    {
+      key: "hook_source_root",
+      description:
+        "当前 Hook 来源根目录，也是 command hook 默认 cwd。需要按 Hook 文件所在目录找脚本时优先读这个字段。"
+    },
+    {
+      key: "hook_source_path",
+      description: "当前 Hook 配置文件路径，方便日志定位这条规则来自哪个 hooks.json 或工作区文件。"
+    }
   ]
 
   const envFields: HookReadableFieldDoc[] = [
@@ -923,6 +960,23 @@ export function getCommandHookReadableContextDocs(event: HookEvent): CommandHook
     {
       key: "CLAUDE_PROJECT_DIR",
       description: "WORKSPACE_PATH 的兼容别名，方便直接复用 Claude Code 社区脚本。"
+    },
+    {
+      key: "HOOK_SOURCE_TYPE",
+      description: "当前 Hook 来源类型，对应 stdin 里的 hook_source_type。"
+    },
+    {
+      key: "HOOK_SOURCE_ROOT",
+      description:
+        "当前 Hook 来源根目录，也是 command hook 默认执行目录；不要用 SKILL_ROOT 推断全局或工作区 Hook 的 cwd。"
+    },
+    {
+      key: "HOOK_SOURCE_PATH",
+      description: "当前 Hook 配置文件路径，对应 stdin 里的 hook_source_path。"
+    },
+    {
+      key: "PLUGIN_ROOT",
+      description: "插件 Hook 或插件技能 Hook 关联的插件根目录；非插件来源时可能不存在。"
     }
   ]
 
@@ -968,7 +1022,7 @@ export function getCommandHookReadableContextDocs(event: HookEvent): CommandHook
       },
       {
         key: "skill_root",
-        description: "当前技能目录。"
+        description: "当前事件关联的技能目录；它是 Skill 上下文，不决定非 Skill Hook 的执行目录。"
       },
       {
         key: "skill_trigger_tool_name",
@@ -978,7 +1032,10 @@ export function getCommandHookReadableContextDocs(event: HookEvent): CommandHook
     envFields.push(
       { key: "SKILL_NAME", description: "当前技能名，对应 stdin 里的 skill_name。" },
       { key: "SKILL_PATH", description: "当前 SKILL.md 路径，对应 stdin 里的 skill_path。" },
-      { key: "SKILL_ROOT", description: "当前技能目录，对应 stdin 里的 skill_root。" }
+      {
+        key: "SKILL_ROOT",
+        description: "当前事件关联的技能目录，对应 stdin 里的 skill_root；非 Skill Hook 的 cwd 请看 HOOK_SOURCE_ROOT。"
+      }
     )
     extraObjects.push({
       key: "skill",
@@ -1470,7 +1527,7 @@ export function AddHookDialog(props: {
                 <p className="text-xs text-muted-foreground">
                   脚本会收到一份 stdin JSON 和若干环境变量，其中 stdin 是完整权威输入； `TOOL_ARGS`
                   / `TOOL_RESULT` 这类大字段只会在 payload 较小时附带。想返回结构化结果时， `stdout`
-                  必须只输出最终文本或 JSON；调试日志请写到 `stderr`。
+                  必须只输出最终文本或 JSON；`cwd` 和 `HOOK_SOURCE_ROOT` 表示命令实际执行目录，调试日志请写到 `stderr`。
                 </p>
                 <details className="rounded-md border border-border/60 bg-muted/20 px-3 py-2">
                   <summary className="cursor-pointer text-xs font-medium text-foreground">
@@ -1489,7 +1546,10 @@ export function AddHookDialog(props: {
                       </p>
                       <div className="space-y-1">
                         <div className="flex flex-wrap gap-1.5">
-                          {currentCommandHookDoc.inputFields.map((field) => (
+                          {mergeCommandHookFieldKeys(
+                            currentCommandHookDoc.inputFields,
+                            COMMAND_HOOK_SOURCE_INPUT_FIELDS
+                          ).map((field) => (
                             <span
                               key={field}
                               className="rounded-full border border-border/50 bg-background px-2 py-0.5 font-mono text-[10px] text-foreground/80"
@@ -1499,7 +1559,10 @@ export function AddHookDialog(props: {
                           ))}
                         </div>
                         <div className="flex flex-wrap gap-1.5">
-                          {currentCommandHookDoc.envFields.map((field) => (
+                          {mergeCommandHookFieldKeys(
+                            currentCommandHookDoc.envFields,
+                            COMMAND_HOOK_SOURCE_ENV_FIELDS
+                          ).map((field) => (
                             <span
                               key={field}
                               className="rounded-full border border-dashed border-border/50 bg-background px-2 py-0.5 font-mono text-[10px] text-muted-foreground"

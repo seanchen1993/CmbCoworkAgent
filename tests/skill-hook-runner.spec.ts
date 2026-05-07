@@ -254,12 +254,71 @@ process.stdin.on('end', () => require('fs').writeFileSync(${JSON.stringify(out)}
   })
 }
 
-async function testSkillRootIsDefaultCommandCwd(): Promise<void> {
-  await withTempDir("hook-cwd", async (dir) => {
+function normalizePathForAssert(value: string): string {
+  return value.trim().replace(/\\/g, "/").toLowerCase()
+}
+
+async function testHookSourceRootControlsCommandCwd(): Promise<void> {
+  await withTempDir("hook-source-cwd", async (dir) => {
+    const globalRoot = join(dir, "openwork")
+    const workspaceRoot = join(dir, "360用户文件")
     const skillRoot = join(dir, "skills", "cwd-skill")
-    await writeFile(join(dir, "workspace-marker.txt"), "workspace", "utf8")
+    await mkdir(globalRoot, { recursive: true })
+    await mkdir(workspaceRoot, { recursive: true })
     await mkdir(skillRoot, { recursive: true })
-    const out = join(dir, "cwd.txt")
+    const out = join(dir, "cwd.json")
+    const command = nodeCommand(`
+const fs = require('fs')
+let input = ''
+process.stdin.on('data', (chunk) => { input += chunk })
+process.stdin.on('end', () => {
+  fs.writeFileSync(${JSON.stringify(out)}, JSON.stringify({
+    cwd: process.cwd(),
+    hookSourceType: process.env.HOOK_SOURCE_TYPE || '',
+    hookSourceRoot: process.env.HOOK_SOURCE_ROOT || '',
+    hookSourcePath: process.env.HOOK_SOURCE_PATH || '',
+    workspacePath: process.env.WORKSPACE_PATH || '',
+    skillRoot: process.env.SKILL_ROOT || '',
+    stdin: JSON.parse(input)
+  }))
+})
+`)
+    const hook = makeHook({
+      event: "PreToolUse",
+      matcher: "*",
+      command,
+      hookSourceType: "global",
+      hookSourceRoot: globalRoot,
+      hookSourcePath: join(globalRoot, "hooks.json")
+    })
+    await runHooks([hook], "PreToolUse", {
+      toolName: "execute",
+      workspacePath: workspaceRoot,
+      skillRoot
+    })
+    assert(existsSync(out), "hook should have written cwd output")
+    const payload = JSON.parse(await readFile(out, "utf8")) as Record<string, unknown>
+    const cwd = normalizePathForAssert(String(payload.cwd))
+    const expected = normalizePathForAssert(globalRoot)
+    assert(cwd === expected, `hook command cwd should use hookSourceRoot, got ${cwd}`)
+    assert(payload.hookSourceType === "global", `HOOK_SOURCE_TYPE mismatch: ${payload.hookSourceType}`)
+    assert(payload.hookSourceRoot === globalRoot, `HOOK_SOURCE_ROOT mismatch: ${payload.hookSourceRoot}`)
+    assert(payload.workspacePath === workspaceRoot, `WORKSPACE_PATH mismatch: ${payload.workspacePath}`)
+    assert(payload.skillRoot === skillRoot, `SKILL_ROOT should remain event context, got ${payload.skillRoot}`)
+    const stdin = payload.stdin as Record<string, unknown>
+    assert(stdin.cwd === globalRoot, `stdin cwd should use hookSourceRoot, got ${stdin.cwd}`)
+    assert(stdin.hook_source_root === globalRoot, `stdin hook_source_root mismatch: ${stdin.hook_source_root}`)
+    assert(stdin.skill_root === skillRoot, `stdin skill_root should remain event context, got ${stdin.skill_root}`)
+  })
+}
+
+async function testWorkspaceHookCwdSupportsChinesePath(): Promise<void> {
+  await withTempDir("hook-workspace-cwd", async (dir) => {
+    const workspaceRoot = join(dir, "360用户文件")
+    const skillRoot = join(dir, "skills", "cwd-skill")
+    await mkdir(workspaceRoot, { recursive: true })
+    await mkdir(skillRoot, { recursive: true })
+    const out = join(dir, "workspace-cwd.txt")
     const command = nodeCommand(`
 const fs = require('fs')
 fs.writeFileSync(${JSON.stringify(out)}, process.cwd())
@@ -267,17 +326,105 @@ fs.writeFileSync(${JSON.stringify(out)}, process.cwd())
     const hook = makeHook({
       event: "PreToolUse",
       matcher: "*",
-      command
+      command,
+      hookSourceType: "workspace",
+      hookSourceRoot: workspaceRoot,
+      hookSourcePath: join(workspaceRoot, ".cmbdevclaw", "hooks", "check.json")
     })
     await runHooks([hook], "PreToolUse", {
       toolName: "execute",
-      workspacePath: dir,
+      workspacePath: workspaceRoot,
       skillRoot
     })
-    assert(existsSync(out), "hook should have written cwd output")
-    const cwd = (await readFile(out, "utf8")).trim().replace(/\\/g, "/").toLowerCase()
-    const expected = skillRoot.replace(/\\/g, "/").toLowerCase()
-    assert(cwd === expected, `hook command cwd should default to skillRoot, got ${cwd}`)
+    assert(existsSync(out), "workspace hook should have written cwd output")
+    const cwd = normalizePathForAssert(await readFile(out, "utf8"))
+    const expected = normalizePathForAssert(workspaceRoot)
+    assert(cwd === expected, `workspace hook cwd should support Chinese path, got ${cwd}`)
+  })
+}
+
+async function testSkillHookSourceRootDefaultsToSkillDir(): Promise<void> {
+  await withTempDir("hook-skill-cwd", async (dir) => {
+    const workspaceRoot = join(dir, "360用户文件")
+    const skillRoot = join(dir, "skills", "cwd-skill")
+    await mkdir(workspaceRoot, { recursive: true })
+    await mkdir(skillRoot, { recursive: true })
+    const out = join(dir, "skill-cwd.txt")
+    const command = nodeCommand(`
+const fs = require('fs')
+fs.writeFileSync(${JSON.stringify(out)}, process.cwd())
+`)
+    const hook = makeHook({
+      event: "PreToolUse",
+      matcher: "*",
+      command,
+      hookSourceType: "skill",
+      hookSourceRoot: skillRoot,
+      hookSourcePath: join(skillRoot, "hooks", "hooks.json"),
+      skillName: "cwd-skill",
+      skillPath: skillRoot,
+      skillRoot
+    } as Partial<HookConfig> & Pick<HookConfig, "event" | "command">)
+    await runHooks([hook], "PreToolUse", {
+      toolName: "execute",
+      workspacePath: workspaceRoot
+    })
+    assert(existsSync(out), "skill hook should have written cwd output")
+    const cwd = normalizePathForAssert(await readFile(out, "utf8"))
+    const expected = normalizePathForAssert(skillRoot)
+    assert(cwd === expected, `skill hook cwd should default to skill source root, got ${cwd}`)
+  })
+}
+
+async function testPluginHookSourceRootDefaultsToPluginDir(): Promise<void> {
+  await withTempDir("hook-plugin-cwd", async (dir) => {
+    const workspaceRoot = join(dir, "360用户文件")
+    const pluginRoot = join(dir, "plugins", "demo-plugin")
+    const skillRoot = join(dir, "skills", "cwd-skill")
+    await mkdir(workspaceRoot, { recursive: true })
+    await mkdir(pluginRoot, { recursive: true })
+    await mkdir(skillRoot, { recursive: true })
+    const out = join(dir, "plugin-cwd.json")
+    const command = nodeCommand(`
+const fs = require('fs')
+fs.writeFileSync(${JSON.stringify(out)}, JSON.stringify({
+  cwd: process.cwd(),
+  hookSourceType: process.env.HOOK_SOURCE_TYPE || '',
+  hookSourceRoot: process.env.HOOK_SOURCE_ROOT || '',
+  pluginRoot: process.env.PLUGIN_ROOT || '',
+  workspacePath: process.env.WORKSPACE_PATH || '',
+  skillRoot: process.env.SKILL_ROOT || ''
+}))
+`)
+    const hook = makeHook({
+      event: "PreToolUse",
+      matcher: "*",
+      command,
+      hookSourceType: "plugin",
+      hookSourceRoot: pluginRoot,
+      hookSourcePath: join(pluginRoot, "hooks", "hooks.json"),
+      pluginId: "demo-plugin",
+      pluginName: "Demo Plugin",
+      pluginRoot
+    } as Partial<HookConfig> & Pick<HookConfig, "event" | "command">)
+    await runHooks([hook], "PreToolUse", {
+      toolName: "execute",
+      workspacePath: workspaceRoot,
+      skillRoot
+    })
+    assert(existsSync(out), "plugin hook should have written cwd output")
+    const payload = JSON.parse(await readFile(out, "utf8")) as Record<string, unknown>
+    const cwd = normalizePathForAssert(String(payload.cwd))
+    const expected = normalizePathForAssert(pluginRoot)
+    assert(cwd === expected, `plugin hook cwd should default to plugin source root, got ${cwd}`)
+    assert(payload.hookSourceType === "plugin", `HOOK_SOURCE_TYPE mismatch: ${payload.hookSourceType}`)
+    assert(payload.hookSourceRoot === pluginRoot, `HOOK_SOURCE_ROOT mismatch: ${payload.hookSourceRoot}`)
+    assert(payload.pluginRoot === pluginRoot, `PLUGIN_ROOT mismatch: ${payload.pluginRoot}`)
+    assert(payload.workspacePath === workspaceRoot, `WORKSPACE_PATH mismatch: ${payload.workspacePath}`)
+    assert(
+      payload.skillRoot === skillRoot,
+      `SKILL_ROOT should remain event context, got ${payload.skillRoot}`
+    )
   })
 }
 
@@ -386,8 +533,14 @@ async function run(): Promise<void> {
   console.log("PASS B8 SKILL_NAME/SKILL_PATH/SKILL_ROOT env vars injected")
   await testStdinPayloadIncludesSkillFields()
   console.log("PASS B9 stdin payload includes skill_* fields")
-  await testSkillRootIsDefaultCommandCwd()
-  console.log("PASS B11 skill hook command cwd defaults to SKILL_ROOT")
+  await testHookSourceRootControlsCommandCwd()
+  console.log("PASS B11 hook source root controls command cwd")
+  await testWorkspaceHookCwdSupportsChinesePath()
+  console.log("PASS B12 workspace hook cwd supports Chinese path")
+  await testSkillHookSourceRootDefaultsToSkillDir()
+  console.log("PASS B13 skill hook command cwd defaults to skill source root")
+  await testPluginHookSourceRootDefaultsToPluginDir()
+  console.log("PASS B14 plugin hook command cwd defaults to plugin source root")
   await testSkillEventDoesNotMatchToolEvent()
   console.log("PASS event isolation: PreSkillUse hooks don't fire on PreToolUse")
   await testToolEventDoesNotMatchSkillEvent()

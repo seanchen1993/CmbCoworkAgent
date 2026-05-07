@@ -15,6 +15,7 @@ import {
   isSupportedHookEvent,
   type HookConfig,
   type HookOnBlockConfig,
+  type HookSourceType,
   type HookUpsert
 } from "./hooks/types"
 import type { AgentAutoCommitSettings } from "./types"
@@ -1713,6 +1714,7 @@ export interface PluginSkillSourceMetadata {
   sourceDir: string
   pluginId: string
   pluginName: string
+  pluginRoot: string
   maxDepth?: number
 }
 
@@ -1726,7 +1728,8 @@ export function getEnabledPluginSkillSourceMetadata(): PluginSkillSourceMetadata
       sources.push({
         sourceDir: skillsDir,
         pluginId: plugin.id,
-        pluginName: plugin.name
+        pluginName: plugin.name,
+        pluginRoot: plugin.path
       })
     } else {
       const rootSkillMd = join(plugin.path, "SKILL.md")
@@ -1735,6 +1738,7 @@ export function getEnabledPluginSkillSourceMetadata(): PluginSkillSourceMetadata
           sourceDir: plugin.path,
           pluginId: plugin.id,
           pluginName: plugin.name,
+          pluginRoot: plugin.path,
           maxDepth: 0
         })
       }
@@ -2019,6 +2023,20 @@ function parseHookOnBlock(raw: unknown): HookOnBlockConfig | undefined {
   return onBlock
 }
 
+function withHookSource<T extends HookConfig>(
+  hook: T,
+  hookSourceType: HookSourceType,
+  hookSourceRoot: string,
+  hookSourcePath: string
+): T {
+  return {
+    ...hook,
+    hookSourceType,
+    hookSourceRoot,
+    hookSourcePath
+  }
+}
+
 // ── Claude Code format compatibility ─────────────────────────────────────────
 // CC hooks.json uses a different structure from our flat array:
 //   Global/settings: { EventName: [{ matcher?, hooks: [...] }] }
@@ -2246,8 +2264,12 @@ function parsePluginHooks(plugin: PluginMetadata): PluginHookMetadata[] {
       ...c,
       pluginId: plugin.id,
       pluginName: plugin.name,
+      pluginRoot: plugin.path,
       pluginEnabled: plugin.enabled,
-      hookPath: hooksRelPath
+      hookPath: hooksRelPath,
+      hookSourceType: "plugin",
+      hookSourceRoot: plugin.path,
+      hookSourcePath: hooksFilePath
     })) as PluginHookMetadata[]
 
   try {
@@ -2350,6 +2372,7 @@ interface SkillHookSource {
   skillName: string
   pluginId?: string
   pluginName?: string
+  pluginRoot?: string
 }
 
 function collectSkillHookSourcesFromDir(
@@ -2357,7 +2380,7 @@ function collectSkillHookSourcesFromDir(
   disabledSkills: Set<string>,
   respectDisabledList: boolean,
   seenDirs: Set<string>,
-  pluginMeta?: { pluginId: string; pluginName: string },
+  pluginMeta?: { pluginId: string; pluginName: string; pluginRoot: string },
   maxDepth?: number
 ): SkillHookSource[] {
   const result: SkillHookSource[] = []
@@ -2398,7 +2421,7 @@ function getEnabledSkillHookSources(): SkillHookSource[] {
         disabledSkills,
         false,
         seenDirs,
-        { pluginId: source.pluginId, pluginName: source.pluginName },
+        { pluginId: source.pluginId, pluginName: source.pluginName, pluginRoot: source.pluginRoot },
         source.maxDepth
       )
     )
@@ -2469,7 +2492,7 @@ function parseSkillHooks(skillDir: string, skillName: string, hooksRelPath: stri
 
 function buildEnabledSkillHookMetadata(): SkillHookMetadata[] {
   return getEnabledSkillHookSources().flatMap(
-    ({ skillDir, skillName, pluginId, pluginName }): SkillHookMetadata[] => {
+    ({ skillDir, skillName, pluginId, pluginName, pluginRoot }): SkillHookMetadata[] => {
       return SKILL_HOOKS_FILES.flatMap((hooksRelPath): SkillHookMetadata[] => {
         const hookPath = join(skillDir, hooksRelPath)
         return parseSkillHooks(skillDir, skillName, hooksRelPath).map((hook) => ({
@@ -2479,7 +2502,11 @@ function buildEnabledSkillHookMetadata(): SkillHookMetadata[] {
           skillRoot: skillDir,
           hookPath,
           pluginId,
-          pluginName
+          pluginName,
+          pluginRoot,
+          hookSourceType: "skill",
+          hookSourceRoot: skillDir,
+          hookSourcePath: hookPath
         }))
       })
     }
@@ -2707,7 +2734,9 @@ export function getWorkspaceHooks(workspacePath: string): HookConfig[] {
             createdAt: now,
             updatedAt: now
           })
-          result.push(...hooks)
+          result.push(
+            ...hooks.map((hook) => withHookSource(hook, "workspace", workspacePath, filePath))
+          )
           continue
         }
 
@@ -2721,21 +2750,28 @@ export function getWorkspaceHooks(workspacePath: string): HookConfig[] {
         if (hookType === "prompt" && typeof raw.prompt !== "string") continue
         if (hookType === "command" && typeof raw.command !== "string") continue
         if (raw.enabled === false) continue
-        result.push({
-          id: `ws:${baseName}`,
-          event: raw.event as HookConfig["event"],
-          matcher: typeof raw.matcher === "string" ? raw.matcher : undefined,
-          type: (hookType === "prompt" ? "prompt" : "command") as HookConfig["type"],
-          command: typeof raw.command === "string" ? raw.command : undefined,
-          prompt: typeof raw.prompt === "string" ? raw.prompt : undefined,
-          modelId: typeof raw.modelId === "string" ? raw.modelId : undefined,
-          fallback: raw.fallback === "block" ? "block" : "allow",
-          onBlock: parseHookOnBlock(raw.onBlock),
-          timeout: typeof raw.timeout === "number" ? raw.timeout : undefined,
-          enabled: true,
-          createdAt: now,
-          updatedAt: now
-        })
+        result.push(
+          withHookSource(
+            {
+              id: `ws:${baseName}`,
+              event: raw.event as HookConfig["event"],
+              matcher: typeof raw.matcher === "string" ? raw.matcher : undefined,
+              type: (hookType === "prompt" ? "prompt" : "command") as HookConfig["type"],
+              command: typeof raw.command === "string" ? raw.command : undefined,
+              prompt: typeof raw.prompt === "string" ? raw.prompt : undefined,
+              modelId: typeof raw.modelId === "string" ? raw.modelId : undefined,
+              fallback: raw.fallback === "block" ? "block" : "allow",
+              onBlock: parseHookOnBlock(raw.onBlock),
+              timeout: typeof raw.timeout === "number" ? raw.timeout : undefined,
+              enabled: true,
+              createdAt: now,
+              updatedAt: now
+            },
+            "workspace",
+            workspacePath,
+            filePath
+          )
+        )
       } catch {
         console.warn(`[Hooks] Failed to parse workspace hook file: ${file}`)
       }
@@ -2749,7 +2785,9 @@ export function getWorkspaceHooks(workspacePath: string): HookConfig[] {
 export function getEnabledHooks(workspacePath?: string): HookConfig[] {
   // Runtime base hooks only. Plugin/skill hooks are added by the run-scoped
   // resolver after the corresponding plugin or skill is actually used.
-  const globalHooks = getHooks().filter((h) => h.enabled)
+  const globalHooks = getHooks()
+    .filter((h) => h.enabled)
+    .map((hook) => withHookSource(hook, "global", getOpenworkDir(), HOOKS_FILE))
   const workspaceHooks = workspacePath ? getWorkspaceHooks(workspacePath) : []
   return [...globalHooks, ...workspaceHooks]
 }

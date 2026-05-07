@@ -340,6 +340,7 @@ export interface PluginMetadata {
 export interface PluginHookMetadata extends HookConfig {
   pluginId: string
   pluginName: string
+  pluginRoot: string
   pluginEnabled: boolean
   hookPath: string
 }
@@ -351,6 +352,7 @@ export interface SkillHookMetadata extends HookConfig {
   hookPath: string
   pluginId?: string
   pluginName?: string
+  pluginRoot?: string
 }
 
 export interface PluginMcpServerConfig {
