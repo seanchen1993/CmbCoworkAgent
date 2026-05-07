@@ -11,7 +11,7 @@
 
 import { spawn, execFile, type ChildProcess } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
-import { constants as fsConstants, createReadStream } from "node:fs"
+import { constants as fsConstants } from "node:fs"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { promisify } from "node:util"
@@ -122,40 +122,6 @@ if os.name == "nt" and os.environ.get("CMB_SANDBOX_FIX_PYTHON_TEMP_ACL") == "1":
     os.mkdir = _mkdir_inherit_acl
 `
 
-const NATIVE_HELPER_SPAWN_HOOK = `"use strict";
-const path = require("path");
-const childProcess = require("child_process");
-
-function normalize(value) {
-  return path.win32.normalize(String(value)).toLowerCase();
-}
-
-let helperMap = new Map();
-try {
-  const raw = process.env.CMB_SANDBOX_NATIVE_HELPER_MAP || "{}";
-  const parsed = JSON.parse(raw);
-  helperMap = new Map(Object.entries(parsed).map(([source, target]) => [normalize(source), String(target)]));
-} catch {
-  helperMap = new Map();
-}
-
-function redirect(command) {
-  if (typeof command !== "string") return command;
-  return helperMap.get(normalize(command)) || command;
-}
-
-function wrap(fn) {
-  return function(command, ...args) {
-    return fn.call(this, redirect(command), ...args);
-  };
-}
-
-childProcess.spawn = wrap(childProcess.spawn);
-childProcess.spawnSync = wrap(childProcess.spawnSync);
-childProcess.execFile = wrap(childProcess.execFile);
-childProcess.execFileSync = wrap(childProcess.execFileSync);
-`
-
 /**
  * Check if a path falls within a sensitive directory that should be blocked
  * when sandbox mode is elevated.
@@ -182,15 +148,6 @@ function powershellSingleQuote(value: string): string {
 
 function cmdSetLiteral(value: string): string {
   return value.replace(/"/g, '""')
-}
-
-function nodeOptionsQuote(value: string): string {
-  // NODE_OPTIONS is parsed with shell-like quoting: inside double quotes, `\` is
-  // an escape character. A bare backslash is silently dropped (e.g. `\U` → `U`),
-  // so a Windows path like `C:\Users\...` becomes `C:Users...` and `require()`
-  // can't resolve the preload script. Escape `\` and `"` so Node sees the
-  // literal path back.
-  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`
 }
 
 function tomlBasicString(value: string): string {
@@ -243,24 +200,9 @@ interface ExecuteRawOptions {
 
 type WindowsSandboxMode = "none" | "unelevated" | "readonly" | "elevated"
 
-interface WindowsSandboxNativeHelperAccess {
-  path: string
-  reason: string
-}
-
-interface WindowsSandboxMaterializedHelper {
-  label: string
-  sourcePath: string
-  destinationPath: string
-  env: Array<[string, string]>
-}
-
 interface WindowsSandboxExecutionPlan {
   mode: WindowsSandboxMode
   writableRoots: string[]
-  nativeHelperAccess: WindowsSandboxNativeHelperAccess[]
-  materializedHelpers: WindowsSandboxMaterializedHelper[]
-  env: Array<[string, string]>
 }
 
 type ExecutionConcurrencyMode = "shared" | "exclusive"
@@ -438,20 +380,6 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       // Missing or inaccessible workspaces still need a stable fallback cache key.
     }
     return LocalSandbox.buildSandboxCacheRootFromCanonical(env, canonicalWorkingDir)
-  }
-
-  private static buildNativeHelperCacheBase(): string {
-    const localAppData = process.env.LOCALAPPDATA
-      || path.win32.join(homedir(), "AppData", "Local")
-    return path.win32.join(localAppData, "CmbCoworkAgent", "SandboxNativeHelpers")
-  }
-
-  private static getNativeHelperCacheDirs() {
-    const root = LocalSandbox.buildNativeHelperCacheBase()
-    return {
-      root,
-      nativeTools: path.win32.join(root, "native-tools")
-    }
   }
 
   private static getSandboxToolCacheDirs(cacheRoot: string, sharedCacheRoot = cacheRoot) {
@@ -708,10 +636,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
   private static createBaseWindowsSandboxExecutionPlan(mode: WindowsSandboxMode): WindowsSandboxExecutionPlan {
     return {
       mode,
-      writableRoots: [],
-      nativeHelperAccess: [],
-      materializedHelpers: [],
-      env: []
+      writableRoots: []
     }
   }
 
@@ -725,271 +650,6 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       plan.writableRoots.push(...sandboxCacheRoots)
     }
     return plan
-  }
-
-  private static isWindowsNativeExecutablePath(filePath: string): boolean {
-    return /\.exe$/i.test(filePath)
-  }
-
-  private static async fileContentHash(filePath: string): Promise<string> {
-    return new Promise<string>((resolve, reject) => {
-      const hash = createHash("sha256")
-      const stream = createReadStream(filePath)
-      stream.on("data", (chunk) => {
-        hash.update(chunk)
-      })
-      stream.on("error", reject)
-      stream.on("end", () => {
-        resolve(hash.digest("hex"))
-      })
-    })
-  }
-
-  private static async fileContentSignature(filePath: string): Promise<{
-    size: number
-    hash: string
-    atime: Date
-    mtime: Date
-  }> {
-    const stats = await fs.stat(filePath)
-    const hash = await LocalSandbox.fileContentHash(filePath)
-    return {
-      size: stats.size,
-      hash,
-      atime: stats.atime,
-      mtime: stats.mtime
-    }
-  }
-
-  private static nativeHelperSignature(sourceInfo: { size: number; hash: string }): string {
-    return `${sourceInfo.size}-${sourceInfo.hash.slice(0, 16)}`
-  }
-
-  private static materializedHelperDestination(
-    sourcePath: string,
-    label: string,
-    signature: string
-  ): string {
-    const parsed = path.win32.parse(sourcePath)
-    const safeLabel = label.replace(/[^a-zA-Z0-9._-]/g, "_") || "helper"
-    const safeSignature = signature.replace(/[^a-zA-Z0-9._-]/g, "_")
-    const sourceHash = createHash("sha256").update(path.win32.normalize(sourcePath).toLowerCase()).digest("hex").slice(0, 8)
-    const extension = parsed.ext || ".exe"
-    const fileName = `${parsed.name}-${sourceHash}-${safeSignature}${extension}`
-    return path.win32.join(
-      LocalSandbox.getNativeHelperCacheDirs().nativeTools,
-      safeLabel,
-      fileName
-    )
-  }
-
-  private static async destinationIsFresh(
-    sourceInfo: { size: number; hash: string },
-    destinationPath: string
-  ): Promise<boolean> {
-    let destinationStats
-    try {
-      destinationStats = await fs.stat(destinationPath)
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return false
-      throw err
-    }
-    if (destinationStats.size !== sourceInfo.size) return false
-    return await LocalSandbox.fileContentHash(destinationPath) === sourceInfo.hash
-  }
-
-  private static async materializeNativeHelper(
-    sourcePath: string,
-    label: string
-  ): Promise<WindowsSandboxMaterializedHelper | null> {
-    if (!LocalSandbox.isWindowsNativeExecutablePath(sourcePath)) return null
-    const sourceInfo = await LocalSandbox.fileContentSignature(sourcePath)
-    const signature = LocalSandbox.nativeHelperSignature(sourceInfo)
-    const destinationPath = LocalSandbox.materializedHelperDestination(sourcePath, label, signature)
-    if (!(await LocalSandbox.destinationIsFresh(sourceInfo, destinationPath))) {
-      const destinationDir = path.win32.dirname(destinationPath)
-      await fs.mkdir(destinationDir, { recursive: true })
-      const tempPath = path.win32.join(destinationDir, `.tmp-${process.pid}-${Date.now()}-${randomUUID()}${path.win32.extname(destinationPath)}`)
-      try {
-        await fs.copyFile(sourcePath, tempPath)
-        if (!(await LocalSandbox.destinationIsFresh(sourceInfo, tempPath))) {
-          throw new Error(`Native helper copy verification failed for ${sourcePath}`)
-        }
-        await fs.rm(destinationPath, { force: true })
-        try {
-          await fs.rename(tempPath, destinationPath)
-        } catch (err) {
-          if (!(await LocalSandbox.destinationIsFresh(sourceInfo, destinationPath))) {
-            throw err
-          }
-        }
-        await fs.utimes(destinationPath, sourceInfo.atime, sourceInfo.mtime).catch(() => undefined)
-      } finally {
-        await fs.rm(tempPath, { force: true }).catch(() => undefined)
-      }
-    }
-    return {
-      label,
-      sourcePath,
-      destinationPath,
-      env: []
-    }
-  }
-
-  private static getWindowsArchPackageSuffix(): string | null {
-    if (process.platform !== "win32") return null
-    switch (process.arch) {
-      case "x64":
-        return "win32-x64"
-      case "arm64":
-        return "win32-arm64"
-      case "ia32":
-        return "win32-ia32"
-      default:
-        return null
-    }
-  }
-
-  private static shouldPrepareJavaScriptNativeHelpers(command: string): boolean {
-    const tokens = LocalSandbox.gitRoutingTokens(command) ?? LocalSandbox.tokenizeRoutingCommand(command)
-    if (!tokens || tokens.length === 0) return false
-    const executable = LocalSandbox.executableBaseName(tokens[0])
-    if (["npm", "pnpm", "yarn", "npx", "node", "vite", "electron-vite", "electron-builder", "rollup", "esbuild", "tsup"].includes(executable)) {
-      return true
-    }
-    if (executable === "cmd" || executable === "powershell" || executable === "pwsh") {
-      return tokens.some((token) => {
-        const lower = token.toLowerCase()
-        return lower.includes("npm")
-          || lower.includes("pnpm")
-          || lower.includes("yarn")
-          || lower.includes("node")
-          || lower.includes("vite")
-          || lower.includes("electron")
-          || lower.includes("rollup")
-          || lower.includes("esbuild")
-      })
-    }
-    return tokens.some((token) => {
-      const lower = token.toLowerCase()
-      return lower === "build"
-        || lower === "dev"
-        || lower === "dist"
-        || lower === "electron-vite"
-        || lower === "vite"
-        || lower === "electron-builder"
-        || lower === "rollup"
-        || lower === "esbuild"
-    })
-  }
-
-  private static async findWorkspaceEsbuildBinaryRoots(workingDir: string): Promise<string[]> {
-    const archSuffix = LocalSandbox.getWindowsArchPackageSuffix()
-    if (!archSuffix) return []
-    const candidateRoots = [
-      path.win32.join(workingDir, "node_modules"),
-      path.win32.join(workingDir, "node_modules", "vite", "node_modules")
-    ]
-    const candidates = candidateRoots.map((root) =>
-      path.win32.join(root, "@esbuild", archSuffix, "esbuild.exe")
-    )
-    const existing: string[] = []
-    for (const candidate of candidates) {
-      if (await pathExists(candidate)) {
-        existing.push(path.win32.normalize(candidate))
-      }
-    }
-    const pathCandidates: string[] = []
-    for (const pathEntry of (process.env.PATH || "").split(";")) {
-      if (!pathEntry) continue
-      const candidate = path.win32.join(pathEntry, "esbuild.exe")
-      if (await pathExists(candidate)) {
-        pathCandidates.push(path.win32.normalize(candidate))
-      }
-    }
-    return Array.from(new Set([...existing, ...pathCandidates]))
-  }
-
-  private static async prepareNativeHelpersForPlan(
-    plan: WindowsSandboxExecutionPlan,
-    command: string,
-    workingDir: string
-  ): Promise<void> {
-    if (plan.mode === "none" || plan.mode === "readonly") return
-    if (!LocalSandbox.shouldPrepareJavaScriptNativeHelpers(command)) return
-
-    const esbuildHelpers = await LocalSandbox.findWorkspaceEsbuildBinaryRoots(workingDir)
-    for (const helperPath of esbuildHelpers) {
-      const materialized = await LocalSandbox.materializeNativeHelper(helperPath, "esbuild")
-      if (materialized) {
-        plan.materializedHelpers.push(materialized)
-        plan.nativeHelperAccess.push({
-          path: materialized.destinationPath,
-          reason: "esbuild spawns a native Windows helper that can fail under a WRITE_RESTRICTED token"
-        })
-      }
-    }
-  }
-
-  private static async prepareNativeHelperSpawnHook(
-    plan: WindowsSandboxExecutionPlan
-  ): Promise<void> {
-    if (plan.materializedHelpers.length === 0) return
-    const nativeToolsDir = LocalSandbox.getNativeHelperCacheDirs().nativeTools
-    const hookDir = path.win32.join(nativeToolsDir, "node-hook")
-    const hookPath = path.win32.join(hookDir, "native-helper-spawn-hook.cjs")
-    await fs.mkdir(hookDir, { recursive: true })
-    await fs.writeFile(hookPath, NATIVE_HELPER_SPAWN_HOOK, "utf8")
-    plan.nativeHelperAccess.push({
-      path: hookPath,
-      reason: "Node preload hook redirects known native helper spawns to sandbox-owned copies"
-    })
-    const basenameCounts = new Map<string, number>()
-    for (const helper of plan.materializedHelpers) {
-      const basename = path.win32.basename(helper.sourcePath).toLowerCase()
-      basenameCounts.set(basename, (basenameCounts.get(basename) ?? 0) + 1)
-    }
-    const helperMapEntries: Array<[string, string]> = []
-    for (const helper of plan.materializedHelpers) {
-      const normalizedSource = path.win32.normalize(helper.sourcePath)
-      const normalizedDestination = path.win32.normalize(helper.destinationPath)
-      helperMapEntries.push([normalizedSource, normalizedDestination])
-      const basename = path.win32.basename(normalizedSource)
-      if (basenameCounts.get(basename.toLowerCase()) === 1) {
-        helperMapEntries.push([basename, normalizedDestination])
-      }
-    }
-    const helperMap = Object.fromEntries(helperMapEntries)
-    plan.env.push(
-      ["CMB_SANDBOX_NATIVE_HELPER_MAP", JSON.stringify(helperMap)],
-      ["NODE_OPTIONS", `--require=${nodeOptionsQuote(hookPath)}`]
-    )
-  }
-
-  private static getNativeHelperReadAccessPaths(plan: WindowsSandboxExecutionPlan): string[] {
-    if (plan.nativeHelperAccess.length === 0) return []
-    const helperDirs = LocalSandbox.getNativeHelperCacheDirs()
-    return Array.from(new Set([
-      helperDirs.root,
-      helperDirs.nativeTools,
-      ...plan.nativeHelperAccess.flatMap((helper) => [
-        path.win32.dirname(helper.path),
-        helper.path
-      ])
-    ].map((entry) => path.win32.normalize(entry))))
-  }
-
-  private static async prepareNativeHelperReadAccess(
-    plan: WindowsSandboxExecutionPlan,
-    abortSignal?: AbortSignal
-  ): Promise<void> {
-    const accessPaths = LocalSandbox.getNativeHelperReadAccessPaths(plan)
-    if (accessPaths.length === 0) return
-    await mapLimit(
-      accessPaths,
-      LocalSandbox.ACL_OPERATION_CONCURRENCY,
-      (target) => LocalSandbox.grantSandboxReadExecuteAcl(target, abortSignal)
-    )
   }
 
   private static buildSerializedExecutionKey(
@@ -1261,8 +921,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     shellBase: string,
     cacheRoot: string,
     sharedCacheRoot = cacheRoot,
-    hostEnv?: Record<string, string>,
-    extraEnv: Array<[string, string]> = []
+    hostEnv?: Record<string, string>
   ): string {
     const profileRoot = LocalSandbox.getElevatedSandboxUserProfileRoot(true)
     const homeDrive = path.win32.parse(profileRoot).root.replace(/\\$/, "")
@@ -1287,8 +946,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       ["LOCALAPPDATA", localAppData],
       ["USERNAME", WINDOWS_SANDBOX_ONLINE_USERNAME],
       ["LOGNAME", WINDOWS_SANDBOX_ONLINE_USERNAME],
-      ...toolEnv.env,
-      ...extraEnv
+      ...toolEnv.env
     ]
 
     // Preserve host user's JAVA_HOME so the sandbox user can locate the JDK.
@@ -1346,9 +1004,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       const pathPreamble = fullPrefix ? `set "PATH=${cmdSetLiteral(fullPrefix)};%PATH%"` : ""
       const pythonPathPreamble = `set "PYTHONPATH=${cmdSetLiteral(toolDirs.pythonSiteCustomize)};%PYTHONPATH%"`
       const jvmOpts = `set "JAVA_TOOL_OPTIONS=%JAVA_TOOL_OPTIONS% ${cmdSetLiteral(javaToolFlags)}" & set "MAVEN_OPTS=%MAVEN_OPTS% ${cmdSetLiteral(mavenFlags)}" & set "SBT_OPTS=%SBT_OPTS% ${cmdSetLiteral(sbtFlags)}"`
-      const nodeOptions = extraEnv.some(([key]) => key.toUpperCase() === "NODE_OPTIONS")
-        ? ""
-        : 'set "NODE_OPTIONS="'
+      const nodeOptions = 'set "NODE_OPTIONS="'
       return [base, pathPreamble, pythonPathPreamble, jvmOpts, nodeOptions, gitSslCmd].filter(Boolean).join(" & ")
     }
 
@@ -1363,9 +1019,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       const mavenFlagsEscaped = mavenFlags.replace(/\\/g, "\\\\")
       const sbtFlagsEscaped = sbtFlags.replace(/\\/g, "\\\\")
       const jvmOpts = `$env:JAVA_TOOL_OPTIONS="$($env:JAVA_TOOL_OPTIONS) ${javaToolFlagsEscaped}"; $env:MAVEN_OPTS="$($env:MAVEN_OPTS) ${mavenFlagsEscaped}"; $env:SBT_OPTS="$($env:SBT_OPTS) ${sbtFlagsEscaped}"`
-      const nodeOptions = extraEnv.some(([key]) => key.toUpperCase() === "NODE_OPTIONS")
-        ? ""
-        : "$env:NODE_OPTIONS=$null"
+      const nodeOptions = "$env:NODE_OPTIONS=$null"
       return [base, pathPreamble, pythonPathPreamble, jvmOpts, nodeOptions, gitSslPs].filter(Boolean).join("; ")
     }
 
@@ -1379,7 +1033,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
    * are redirected to the same app-owned persistent cache root used by elevated mode.
    * No user.home redirect needed — keep JVM home behavior aligned with Codex.
    */
-  private static buildUnelevatedEnvPreamble(shellBase: string, cacheRoot: string, sharedCacheRoot = cacheRoot, extraEnv: Array<[string, string]> = []): string {
+  private static buildUnelevatedEnvPreamble(shellBase: string, cacheRoot: string, sharedCacheRoot = cacheRoot): string {
     const toolEnv = LocalSandbox.buildSandboxToolEnv(cacheRoot, sharedCacheRoot)
     const toolDirs = LocalSandbox.getSandboxToolCacheDirs(cacheRoot, sharedCacheRoot)
     const pathPrefix = Array.from(new Set(toolEnv.pathEntries)).join(";")
@@ -1392,20 +1046,18 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     const sbtFlags = `-Dsbt.global.base=${toolDirs.sbtBase} -Divy.home=${toolDirs.ivyHome}`
 
     if (shellBase === "cmd") {
-      const toolCache = [...toolEnv.env, ...extraEnv]
+      const toolCache = toolEnv.env
         .map(([key, value]) => `set "${key}=${cmdSetLiteral(value)}"`)
         .join(" & ")
       const pathPreamble = pathPrefix ? `set "PATH=${cmdSetLiteral(pathPrefix)};%PATH%"` : ""
       const pythonPathPreamble = `set "PYTHONPATH=${cmdSetLiteral(toolDirs.pythonSiteCustomize)};%PYTHONPATH%"`
       const jvmOpts = `set "JAVA_TOOL_OPTIONS=%JAVA_TOOL_OPTIONS% ${cmdSetLiteral(javaToolFlags)}" & set "MAVEN_OPTS=%MAVEN_OPTS% ${cmdSetLiteral(mavenFlags)}" & set "SBT_OPTS=%SBT_OPTS% ${cmdSetLiteral(sbtFlags)}"`
-      const nodeOptions = extraEnv.some(([key]) => key.toUpperCase() === "NODE_OPTIONS")
-        ? ""
-        : 'set "NODE_OPTIONS="'
+      const nodeOptions = 'set "NODE_OPTIONS="'
       return [toolCache, pathPreamble, pythonPathPreamble, jvmOpts, nodeOptions].filter(Boolean).join(" & ")
     }
 
     if (shellBase === "pwsh" || shellBase === "powershell") {
-      const toolCache = [...toolEnv.env, ...extraEnv]
+      const toolCache = toolEnv.env
         .map(([key, value]) => `$env:${key}=${powershellSingleQuote(value)}`)
         .join("; ")
       const pathPreamble = pathPrefix ? `$env:PATH=${powershellSingleQuote(pathPrefix)} + ';' + $env:PATH` : ""
@@ -1414,9 +1066,7 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       const mavenFlagsEscaped = mavenFlags.replace(/\\/g, "\\\\")
       const sbtFlagsEscaped = sbtFlags.replace(/\\/g, "\\\\")
       const jvmOpts = `$env:JAVA_TOOL_OPTIONS="$($env:JAVA_TOOL_OPTIONS) ${javaToolFlagsEscaped}"; $env:MAVEN_OPTS="$($env:MAVEN_OPTS) ${mavenFlagsEscaped}"; $env:SBT_OPTS="$($env:SBT_OPTS) ${sbtFlagsEscaped}"`
-      const nodeOptions = extraEnv.some(([key]) => key.toUpperCase() === "NODE_OPTIONS")
-        ? ""
-        : "$env:NODE_OPTIONS=$null"
+      const nodeOptions = "$env:NODE_OPTIONS=$null"
       return [toolCache, pathPreamble, pythonPathPreamble, jvmOpts, nodeOptions].filter(Boolean).join("; ")
     }
 
@@ -1445,86 +1095,6 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       || (lower.includes("permission denied") && lower.includes("errno 13"))
       || (lower.includes("oserror") && lower.includes("permission denied"))
       || (lower.includes("accessdeniedexception") || lower.includes("access is denied"))
-  }
-
-  private static tokenizeRoutingCommand(command: string): string[] | null {
-    const tokens: string[] = []
-    let current = ""
-    let quote: "'" | "\"" | null = null
-    let escaped = false
-
-    const pushCurrent = () => {
-      if (current.length > 0) {
-        tokens.push(current)
-        current = ""
-      }
-    }
-
-    for (const ch of command.trim()) {
-      if (escaped) {
-        current += ch
-        escaped = false
-        continue
-      }
-      if (quote) {
-        if (ch === quote) {
-          quote = null
-          continue
-        }
-        if (quote === "\"" && ch === "\\") {
-          escaped = true
-          continue
-        }
-        current += ch
-        continue
-      }
-      if (ch === "'" || ch === "\"") {
-        quote = ch
-        continue
-      }
-      if (/\s/.test(ch)) {
-        pushCurrent()
-        continue
-      }
-      if ("|&;<>`".includes(ch)) {
-        return null
-      }
-      current += ch
-    }
-
-    if (quote || escaped) return null
-    pushCurrent()
-    return tokens
-  }
-
-  private static executableBaseName(token: string): string {
-    return path.win32.basename(token).replace(/\.(?:exe|cmd|bat)$/i, "").toLowerCase()
-  }
-
-  private static gitRoutingTokens(command: string): string[] | null {
-    const tokens = LocalSandbox.tokenizeRoutingCommand(command)
-    if (!tokens || tokens.length === 0) return null
-
-    const executable = LocalSandbox.executableBaseName(tokens[0])
-    if (executable === "cmd") {
-      const commandSwitchIndex = tokens.findIndex((token, index) => (
-        index > 0 && ["/c", "-c"].includes(token.toLowerCase())
-      ))
-      if (commandSwitchIndex !== -1 && commandSwitchIndex + 1 < tokens.length) {
-        return LocalSandbox.tokenizeRoutingCommand(tokens.slice(commandSwitchIndex + 1).join(" "))
-      }
-    }
-
-    if (executable === "powershell" || executable === "pwsh") {
-      const commandSwitchIndex = tokens.findIndex((token, index) => (
-        index > 0 && ["-command", "-c"].includes(token.toLowerCase())
-      ))
-      if (commandSwitchIndex !== -1 && commandSwitchIndex + 1 < tokens.length) {
-        return LocalSandbox.tokenizeRoutingCommand(tokens.slice(commandSwitchIndex + 1).join(" "))
-      }
-    }
-
-    return tokens
   }
 
   /**
@@ -3010,54 +2580,6 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
     })
   }
 
-  private static async grantSandboxReadExecuteAcl(target: string, abortSignal?: AbortSignal): Promise<void> {
-    LocalSandbox.throwIfAborted(abortSignal)
-    let isDirectory = true
-    try {
-      isDirectory = (await fs.stat(target)).isDirectory()
-    } catch {
-      isDirectory = true
-    }
-    return new Promise<void>((resolve, reject) => {
-      const grantSuffix = isDirectory ? "(OI)(CI)(RX)" : "RX"
-      const args = [
-        target,
-        "/grant",
-        `${LocalSandbox.EVERYONE_SID}:${grantSuffix}`,
-        "/Q"
-      ]
-      const proc = spawn("icacls", args, {
-        stdio: "ignore",
-        windowsHide: true
-      })
-      const onAbort = () => {
-        clearTimeout(timeoutId)
-        try { proc.kill() } catch { /* already exited */ }
-        reject(LocalSandbox.createAbortError())
-      }
-      const timeoutId = setTimeout(() => {
-        console.warn(`[LocalSandbox] icacls RX grant timed out after ${LocalSandbox.ICACLS_TIMEOUT_MS}ms on ${target}, killing`)
-        try { proc.kill() } catch { /* already exited */ }
-        resolve()
-      }, LocalSandbox.ICACLS_TIMEOUT_MS)
-      abortSignal?.addEventListener("abort", onAbort, { once: true })
-      proc.on("exit", (code) => {
-        clearTimeout(timeoutId)
-        abortSignal?.removeEventListener("abort", onAbort)
-        if (code !== 0) {
-          console.warn(`[LocalSandbox] icacls RX grant exited ${code} on ${target}`)
-        }
-        resolve()
-      })
-      proc.on("error", (err) => {
-        clearTimeout(timeoutId)
-        abortSignal?.removeEventListener("abort", onAbort)
-        console.warn(`[LocalSandbox] icacls RX grant error on ${target}:`, err.message)
-        resolve()
-      })
-    })
-  }
-
   /** Remove the Everyone ACE added by grantSandboxWriteAcl. Only actually calls
    *  icacls when the ref count drops to 0 (no other runs using this dir). */
   private static revokeSandboxWriteAcl(dir: string): Promise<void> {
@@ -3826,19 +3348,6 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       this._sharedSandboxCacheRoot
     ].map((dir) => path.win32.normalize(dir))))
     const executionPlan = LocalSandbox.buildWindowsSandboxExecutionPlan(command, effectiveMode, sandboxCacheRoots)
-    try {
-      await LocalSandbox.raceWithAbort(
-        LocalSandbox.prepareNativeHelpersForPlan(executionPlan, command, this.workingDir)
-          .then(() => LocalSandbox.prepareNativeHelperSpawnHook(executionPlan))
-          .then(() => LocalSandbox.prepareNativeHelperReadAccess(executionPlan, effectiveAbortSignal)),
-        effectiveAbortSignal
-      )
-    } catch (err) {
-      if (LocalSandbox.isAbortError(err) || effectiveAbortSignal?.aborted) {
-        return LocalSandbox.createAbortedExecuteResponse()
-      }
-      console.warn("[LocalSandbox] native helper plan preparation failed:", err)
-    }
     executionPlan.writableRoots = Array.from(new Set(executionPlan.writableRoots.map((dir) => path.win32.normalize(dir))))
     const sandboxCacheWritableRootsOverride = executionPlan.writableRoots.length > 0
       ? LocalSandbox.buildWritableRootsOverride(executionPlan.writableRoots)
@@ -3928,11 +3437,11 @@ export class LocalSandbox extends FilesystemBackend implements SandboxBackendPro
       : ""
     // Unelevated sandbox: set shared tool env vars to the persistent writable cache root.
     const unelevatedJvmPreamble = !isElevatedSandbox && effectiveMode !== "none"
-      ? LocalSandbox.buildUnelevatedEnvPreamble(shellBase, sandboxCacheRoot, this._sharedSandboxCacheRoot, executionPlan.env)
+      ? LocalSandbox.buildUnelevatedEnvPreamble(shellBase, sandboxCacheRoot, this._sharedSandboxCacheRoot)
       : ""
     const unelevatedPreamble = [clearProxyPreamble, unelevatedJvmPreamble].filter(Boolean).join(shellBase === "cmd" ? " & " : "; ")
     const sandboxUserEnvPreamble = isElevatedSandbox
-      ? LocalSandbox.buildElevatedSandboxEnvPreamble(shellBase, sandboxCacheRoot, this._sharedSandboxCacheRoot, this.env, executionPlan.env)
+      ? LocalSandbox.buildElevatedSandboxEnvPreamble(shellBase, sandboxCacheRoot, this._sharedSandboxCacheRoot, this.env)
       : unelevatedPreamble
     const commandWithSandboxEnv = sandboxUserEnvPreamble
       ? shellBase === "cmd"
