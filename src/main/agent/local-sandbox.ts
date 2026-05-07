@@ -1103,7 +1103,12 @@ export class LocalSandbox
     const t0 = Date.now()
     let rgResult: Record<string, Array<[number, string]>> | null | undefined
     if (typeof ripgrepSearch === "function") {
-      rgResult = await ripgrepSearch.call(this, pattern, baseFull, glob ?? null)
+      try {
+        rgResult = await ripgrepSearch.call(this, pattern, baseFull, glob ?? null)
+      } catch (error) {
+        console.warn("[LocalSandbox] ripgrepSearch failed, falling back:", error)
+        rgResult = undefined
+      }
     }
     const rgMs = Date.now() - t0
     // undefined = method missing (upstream API changed), treat same as unavailable
