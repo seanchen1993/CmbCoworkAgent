@@ -132,6 +132,11 @@ interface TabState {
   // Retry support — stores the last prompt sent to startGeneration
   retryPrompt: string | null
   retryIsIteration: boolean
+  // Multi-turn conversation history for the API (user+assistant pairs, sans HTML)
+  apiHistory: Array<{ role: "user" | "assistant"; content: string }>
+  // Stored with retry so we can replay with the same history context
+  retryHistory: Array<{ role: "user" | "assistant"; content: string }>
+  retryCleanMsg: string | null
 }
 
 function makeTabState(): TabState {
@@ -165,6 +170,9 @@ function makeTabState(): TabState {
     attachedFiles: null,
     retryPrompt: null,
     retryIsIteration: false,
+    apiHistory: [],
+    retryHistory: [],
+    retryCleanMsg: null,
   }
 }
 
@@ -246,6 +254,7 @@ type PersistedTabState = {
   codeContext: Array<{ filename: string; content: string }> | null
   designLink: string | null
   rightTab: RightPanelTab
+  apiHistory?: Array<{ role: "user" | "assistant"; content: string }>
 }
 
 interface PersistedSession {
@@ -267,6 +276,7 @@ function serializeTs(ts: TabState): PersistedTabState {
     codeContext:       ts.codeContext,
     designLink:        ts.designLink,
     rightTab:          ts.rightTab,
+    apiHistory:        ts.apiHistory,
   }
 }
 
@@ -274,6 +284,7 @@ function deserializeTs(p: PersistedTabState): TabState {
   return {
     ...makeTabState(),
     ...p,
+    apiHistory:      p.apiHistory ?? [],
     generationState: "idle",  // always reset — never restore mid-stream
     activeMode: null,
     inputValue: "",
@@ -1079,13 +1090,26 @@ export function DesignView(): React.JSX.Element {
 
   // ── Generate Design ───────────────────────────────────────
 
-  const startGeneration = useCallback((prompt: string, tabId: string, isIteration = false, modelId?: string) => {
+  const startGeneration = useCallback((
+    prompt: string,
+    tabId: string,
+    isIteration = false,
+    modelId?: string,
+    /** Prior API history (user+assistant pairs) for multi-turn context */
+    history?: Array<{ role: "user" | "assistant"; content: string }>,
+    /** tabId passed to main so it can look up the stored HTML */
+    historyTabId?: string,
+    /** Clean user message to append to apiHistory after success (no HTML/suffix) */
+    cleanUserMsg?: string,
+  ) => {
     const sessionId = uuid()
     updateTs(tabId, (prev) => ({
       generationState: "generating",
       rightTab: "design",
-      retryPrompt: prompt,          // store for retry
+      retryPrompt: prompt,
       retryIsIteration: isIteration,
+      retryHistory: history ?? prev.apiHistory,
+      retryCleanMsg: cleanUserMsg ?? null,
       messages: [
         ...prev.messages,
         {
@@ -1107,21 +1131,36 @@ export function DesignView(): React.JSX.Element {
         const patchedHtml = ensureEditMode(event.html)
         const variations = parseVariations(patchedHtml)
 
+        // Store full HTML in main process for next iteration (avoids truncation)
+        window.api.design.storeHtml(historyTabId ?? tabId, patchedHtml).catch(() => {})
+
         updateTs(tabId, (prev) => {
           const msgs = [...prev.messages]
           const last = msgs.length - 1
+          const doneLabel = variations.length > 0
+            ? `✓ ${isIteration ? "Design updated" : "Design generated"} — ${variations.length} variations`
+            : isIteration ? "✓ Design updated" : "✓ Design generated"
           if (msgs[last]?.role === "assistant") {
-            const doneLabel = variations.length > 0
-              ? `✓ ${isIteration ? "Design updated" : "Design generated"} — ${variations.length} variations`
-              : isIteration ? "✓ Design updated" : "✓ Design generated"
             msgs[last] = { ...msgs[last], content: doneLabel, isStreaming: false }
           }
+
+          // Append this turn (user + assistant) to apiHistory for future iterations
+          const prevHistory = prev.apiHistory ?? []
+          const newHistory: Array<{ role: "user" | "assistant"; content: string }> = cleanUserMsg
+            ? [
+                ...prevHistory,
+                { role: "user" as const, content: cleanUserMsg },
+                { role: "assistant" as const, content: doneLabel },
+              ]
+            : prevHistory
+
           return {
             generationState: "done",
             html: patchedHtml,
             messages: msgs,
             variations,
             activeVariationId: variations[0]?.id ?? null,
+            apiHistory: newHistory,
           }
         })
 
@@ -1148,7 +1187,7 @@ export function DesignView(): React.JSX.Element {
         })
         tabSessionsRef.current.delete(tabId)
       }
-    }, modelId)
+    }, modelId, history, historyTabId ?? tabId)
     tabSessionsRef.current.set(tabId, { cleanup, sessionId })
   }, [updateTs])
 
@@ -1177,6 +1216,8 @@ export function DesignView(): React.JSX.Element {
       console.log(`[Design:Image] Renderer received event: type=${event.type}${event.error ? " error=" + event.error : ""}`)
       if (event.type === "done" && event.html) {
         const patchedHtml = ensureEditMode(event.html)
+        // Store full HTML in main process so subsequent text iterations can reference it
+        window.api.design.storeHtml(tabId, patchedHtml).catch(() => {})
         updateTs(tabId, (prev) => {
           const msgs = [...prev.messages]
           const last = msgs.length - 1
@@ -1189,6 +1230,11 @@ export function DesignView(): React.JSX.Element {
             messages: msgs,
             variations: [],
             activeVariationId: null,
+            // Seed history so subsequent text iterations have context
+            apiHistory: [
+              { role: "user" as const, content: (prompt || "截图设计").slice(0, 200) },
+              { role: "assistant" as const, content: "✓ 设计已生成" },
+            ],
           }
         })
         window.api.design.saveVariant("image", patchedHtml).catch(() => {})
@@ -1302,38 +1348,39 @@ export function DesignView(): React.JSX.Element {
       if (msgs.length > 0 && msgs[msgs.length - 1].role === "assistant") msgs.pop()
       return { messages: msgs, generationState: "idle" }
     })
-    startGeneration(state.retryPrompt, activeTabId, state.retryIsIteration, state.selectedModelId ?? undefined)
+    startGeneration(
+      state.retryPrompt,
+      activeTabId,
+      state.retryIsIteration,
+      state.selectedModelId ?? undefined,
+      state.retryHistory.length > 0 ? state.retryHistory : undefined,
+      activeTabId,
+      state.retryCleanMsg ?? undefined,
+    )
   }, [activeTabId, tabStates, updateTs, startGeneration])
 
   // ── Build comment prompt helper ───────────────────────────
+  // Returns both the instruction prompt (no HTML — main process injects via htmlStore)
+  // and the current HTML so the caller can push it to the store.
   const buildCommentPrompt = useCallback((
     comments: { elementDesc: string; text: string }[],
     state: TabState
-  ): string => {
+  ): { prompt: string; contextHtml: string } => {
     const activeVarId = state.activeVariationId
     const contextHtml = activeVarId
       ? (state.variations.find((v) => v.id === activeVarId)?.html ?? state.html)
       : state.html
 
-    const MAX_HTML_CHARS = 6000
-    const htmlSnippet = contextHtml.length > MAX_HTML_CHARS
-      ? contextHtml.slice(0, MAX_HTML_CHARS) + "\n<!-- ...truncated... -->"
-      : contextHtml
-
-    const variantNote = activeVarId ? `正在迭代变体 ${activeVarId.toUpperCase()}。` : ""
+    const variantNote = activeVarId ? `\n[正在迭代变体 ${activeVarId.toUpperCase()}。]` : ""
     const commentLines = comments
       .map((c, i) => `[${i + 1}] 元素 (${c.elementDesc}): ${c.text}`)
       .join("\n")
 
-    return `用户通过 Comment 模式在设计上标注了以下修改意见。请严格按照每条批注对对应元素进行修改，其他部分完全保持不变：
+    const prompt = `用户通过 Comment 模式在设计上标注了以下修改意见。请严格按照每条批注对对应元素进行修改，其他部分完全保持不变：
 
-${commentLines}
+${commentLines}${variantNote}`
 
-${variantNote}
-
----
-CURRENT DESIGN HTML (iterate on this — do NOT ignore it):
-${htmlSnippet}`
+    return { prompt, contextHtml }
   }, [])
 
   // ── Send a single comment directly (without saving to list) ─
@@ -1342,17 +1389,21 @@ ${htmlSnippet}`
     const state = tabStates[tabId]
     if (!state || !text.trim()) return
 
-    const prompt = buildCommentPrompt([{ elementDesc, text }], state)
+    const { prompt, contextHtml } = buildCommentPrompt([{ elementDesc, text }], state)
+    const cleanMsg = `📝 ${text.trim().slice(0, 60)}`
+    const currentApiHistory = (state.apiHistory ?? []).slice(-16)
+
+    if (contextHtml) window.api.design.storeHtml(tabId, contextHtml).catch(() => {})
 
     updateTs(tabId, (prev) => ({
       draftComment: null,
       activeCommentId: null,
       messages: [
         ...prev.messages,
-        { role: "user" as const, content: `📝 ${text.trim().slice(0, 50)}${text.length > 50 ? "…" : ""}` },
+        { role: "user" as const, content: cleanMsg },
       ],
     }))
-    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined)
+    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined, currentApiHistory, tabId, cleanMsg)
   }, [activeTabId, tabStates, updateTs, startGeneration, buildCommentPrompt])
 
   // ── Send a saved comment pin → model ─────────────────────
@@ -1365,7 +1416,11 @@ ${htmlSnippet}`
     if (!comment) return
 
     const text = overrideText ?? comment.text
-    const prompt = buildCommentPrompt([{ elementDesc: comment.elementDesc, text }], state)
+    const { prompt, contextHtml } = buildCommentPrompt([{ elementDesc: comment.elementDesc, text }], state)
+    const cleanMsg = `📝 ${text.trim().slice(0, 60)}`
+    const currentApiHistory = (state.apiHistory ?? []).slice(-16)
+
+    if (contextHtml) window.api.design.storeHtml(tabId, contextHtml).catch(() => {})
 
     updateTs(tabId, (prev) => ({
       comments: prev.comments.filter((c) => c.id !== commentId),
@@ -1373,10 +1428,10 @@ ${htmlSnippet}`
       activeCommentId: null,
       messages: [
         ...prev.messages,
-        { role: "user" as const, content: `📝 ${text.trim().slice(0, 50)}${text.length > 50 ? "…" : ""}` },
+        { role: "user" as const, content: cleanMsg },
       ],
     }))
-    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined)
+    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined, currentApiHistory, tabId, cleanMsg)
   }, [activeTabId, tabStates, updateTs, startGeneration, buildCommentPrompt])
 
   // ── Edit a saved comment's text ───────────────────────────
@@ -1443,10 +1498,14 @@ ${htmlSnippet}`
     const pending = state?.comments ?? []
     if (pending.length === 0) return
 
-    const prompt = buildCommentPrompt(
+    const { prompt, contextHtml } = buildCommentPrompt(
       pending.map((c) => ({ elementDesc: c.elementDesc, text: c.text })),
       state
     )
+    const cleanMsg = `📝 发送 ${pending.length} 条批注`
+    const currentApiHistory = (state?.apiHistory ?? []).slice(-16)
+
+    if (contextHtml) window.api.design.storeHtml(tabId, contextHtml).catch(() => {})
 
     updateTs(tabId, (prev) => ({
       comments: [],
@@ -1454,11 +1513,11 @@ ${htmlSnippet}`
       activeCommentId: null,
       messages: [
         ...prev.messages,
-        { role: "user" as const, content: `📝 发送 ${pending.length} 条批注` },
+        { role: "user" as const, content: cleanMsg },
       ],
     }))
 
-    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined)
+    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined, currentApiHistory, tabId, cleanMsg)
   }, [activeTabId, tabStates, updateTs, startGeneration, buildCommentPrompt])
 
   // ── Send message ──────────────────────────────────────────
@@ -1542,27 +1601,40 @@ ${htmlSnippet}`
         ? (currentState?.variations.find((v) => v.id === activeVarId)?.html ?? currentState?.html ?? "")
         : (currentState?.html ?? "")
 
-      let iterationPrompt = prompt
+      // ── Multi-turn iteration ──────────────────────────────
+      // Instead of embedding potentially-truncated HTML inline, we:
+      // 1. Push the full HTML to the main-process htmlStore (via storeHtml)
+      // 2. Pass the prior conversation history so the model has full context
+      // 3. Send just the user's instruction as the prompt
+      // The main process will inject the full HTML into the final user message.
+
+      const currentApiHistory = currentState?.apiHistory ?? []
+      // Trim history to avoid unbounded context growth (keep last 8 turns = 16 entries)
+      const MAX_HISTORY_ENTRIES = 16
+      const historyToPass = currentApiHistory.slice(-MAX_HISTORY_ENTRIES)
+
+      const variantNote = activeVarId
+        ? `\n[Iterating on Variation ${activeVarId.toUpperCase()} specifically.]`
+        : ""
+
+      // The prompt sent to main is the instruction only — no HTML embedded.
+      // Main process appends the full stored HTML automatically when history+tabId are present.
+      const iterationPrompt = `User follow-up instruction: ${prompt}${variantNote}`
 
       if (contextHtml) {
-        const MAX_HTML_CHARS = 6000
-        const htmlContext = contextHtml.length > MAX_HTML_CHARS
-          ? contextHtml.slice(0, MAX_HTML_CHARS) + "\n<!-- ...truncated... -->"
-          : contextHtml
-
-        const variantNote = activeVarId
-          ? `Iterating on Variation ${activeVarId.toUpperCase()} specifically.`
-          : ""
-
-        iterationPrompt = `User follow-up instruction: ${prompt}
-${variantNote}
-
----
-CURRENT DESIGN HTML (iterate on this — do NOT ignore it):
-${htmlContext}`
+        // Push the current HTML to main process store so the model can get the full version
+        window.api.design.storeHtml(tabId, contextHtml).catch(() => {})
       }
 
-      startGeneration(iterationPrompt + contextSuffix, tabId, /* isIteration */ !!contextHtml, selectedModelId)
+      startGeneration(
+        iterationPrompt + contextSuffix,
+        tabId,
+        /* isIteration */ !!contextHtml,
+        selectedModelId,
+        historyToPass.length > 0 ? historyToPass : undefined,
+        tabId,
+        prompt,   // clean user message for apiHistory recording
+      )
     }
   }, [activeTabId, tabStates, updateTs, startAskQuestions, startGeneration, startGenerationFromImage])
 
@@ -1606,7 +1678,8 @@ ${htmlContext}`
       answers,
     }))
 
-    startGeneration(enrichedPrompt, tabId, false, state.selectedModelId ?? undefined)
+    // Pass originalPrompt as cleanUserMsg so it's recorded in apiHistory after generation
+    startGeneration(enrichedPrompt, tabId, false, state.selectedModelId ?? undefined, undefined, tabId, originalPrompt)
   }, [activeTabId, tabStates, updateTs, startGeneration])
 
   const handleCancel = useCallback(() => {

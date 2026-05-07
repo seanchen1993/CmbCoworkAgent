@@ -11,7 +11,7 @@ import fs from "fs"
 import path from "path"
 import { ipcMain, BrowserWindow, app } from "electron"
 import { ChatOpenAI } from "@langchain/openai"
-import { HumanMessage, SystemMessage } from "@langchain/core/messages"
+import { HumanMessage, SystemMessage, AIMessage } from "@langchain/core/messages"
 import { getCustomModelConfigs } from "../storage"
 
 // ─────────────────────────────────────────────────────────
@@ -312,6 +312,18 @@ function getModel(modelId?: string): ChatOpenAI | null {
 const activeSessions = new Map<string, AbortController>()
 
 // ─────────────────────────────────────────────────────────
+// HTML store — keeps the latest generated HTML per tab so
+// iteration prompts can reference the full document without
+// having to send it over IPC on every round trip.
+// ─────────────────────────────────────────────────────────
+
+const htmlStore = new Map<string, string>()  // tabId → latest HTML
+
+// Max turns kept in history to avoid blowing up context.
+// Each "turn" = one user message + one assistant message = 2 entries.
+const MAX_HISTORY_ENTRIES = 16  // 8 turns
+
+// ─────────────────────────────────────────────────────────
 // IPC Registration
 // ─────────────────────────────────────────────────────────
 
@@ -377,7 +389,17 @@ export function registerDesignHandlers(): void {
   // design:generate — streaming, same pattern as agent:invoke
   ipcMain.on(
     "design:generate",
-    async (event, { sessionId, prompt, modelId }: { sessionId: string; prompt: string; modelId?: string }) => {
+    async (event, {
+      sessionId, prompt, modelId, history, tabId,
+    }: {
+      sessionId: string
+      prompt: string
+      modelId?: string
+      /** Prior conversation turns to include for multi-turn context */
+      history?: Array<{ role: "user" | "assistant"; content: string }>
+      /** Tab ID used to look up the latest stored HTML for iteration */
+      tabId?: string
+    }) => {
       const channel = `design:stream:${sessionId}`
       const window = BrowserWindow.fromWebContents(event.sender)
 
@@ -402,13 +424,45 @@ export function registerDesignHandlers(): void {
 
       let fullText = ""
 
+      // ── Build the message array ───────────────────────────
+      // If we have prior history + a stored HTML for this tab,
+      // build a multi-turn conversation so the model sees previous
+      // instructions and the full current design without truncation.
+      const storedHtml = tabId ? htmlStore.get(tabId) : undefined
+      const trimmedHistory = history && history.length > 0
+        ? history.slice(-MAX_HISTORY_ENTRIES)
+        : undefined
+
+      type LangChainMessage = SystemMessage | HumanMessage | AIMessage
+      let messages: LangChainMessage[]
+
+      if (trimmedHistory && trimmedHistory.length > 0 && storedHtml) {
+        // Multi-turn iteration: inject full stored HTML into the final user message
+        const finalUserContent =
+          `${prompt}\n\n---\nCURRENT DESIGN HTML (iterate on this — do NOT ignore it):\n${storedHtml}`
+        messages = [
+          new SystemMessage(DESIGN_SYSTEM_PROMPT),
+          ...trimmedHistory.map((m): LangChainMessage =>
+            m.role === "user" ? new HumanMessage(m.content) : new AIMessage(m.content)
+          ),
+          new HumanMessage(finalUserContent),
+        ]
+        console.log(
+          `[Design] Multi-turn generation — ${trimmedHistory.length} history entries, ` +
+          `HTML=${storedHtml.length} chars, tabId=${tabId}`
+        )
+      } else {
+        // First generation (no history) or fallback — send prompt as-is
+        messages = [new SystemMessage(DESIGN_SYSTEM_PROMPT), new HumanMessage(prompt)]
+        if (history && history.length > 0) {
+          console.log(`[Design] History provided but no storedHtml for tabId=${tabId} — falling back to single-turn`)
+        }
+      }
+
       try {
         send({ type: "start" })
 
-        const stream = await model.stream(
-          [new SystemMessage(DESIGN_SYSTEM_PROMPT), new HumanMessage(prompt)],
-          { signal: controller.signal }
-        )
+        const stream = await model.stream(messages, { signal: controller.signal })
 
         for await (const chunk of stream) {
           if (controller.signal.aborted) break
@@ -566,6 +620,16 @@ export function registerDesignHandlers(): void {
       }
     }
   )
+
+  // design:store-html — renderer calls this after each generation so the main
+  // process has the latest full HTML for the tab, used by multi-turn iteration.
+  ipcMain.handle("design:store-html", (_event, tabId: string, html: string) => {
+    if (tabId && html) {
+      htmlStore.set(tabId, html)
+      console.log(`[Design] Stored HTML for tabId=${tabId} (${html.length} chars)`)
+    }
+    return { ok: true }
+  })
 
   // design:cancel — abort an active session
   ipcMain.handle("design:cancel", (_event, sessionId: string) => {

@@ -1699,7 +1699,9 @@ const api = {
       sessionId: string,
       prompt: string,
       onEvent: (event: { type: string; token?: string; html?: string; error?: string }) => void,
-      modelId?: string
+      modelId?: string,
+      history?: Array<{ role: "user" | "assistant"; content: string }>,
+      tabId?: string
     ): (() => void) => {
       const channel = `design:stream:${sessionId}`
       const handler = (_: unknown, data: { type: string; token?: string; html?: string; error?: string }): void => {
@@ -1709,9 +1711,11 @@ const api = {
         }
       }
       ipcRenderer.on(channel, handler)
-      ipcRenderer.send("design:generate", { sessionId, prompt, modelId })
+      ipcRenderer.send("design:generate", { sessionId, prompt, modelId, history, tabId })
       return () => ipcRenderer.removeListener(channel, handler)
     },
+    storeHtml: (tabId: string, html: string): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke("design:store-html", tabId, html),
     askQuestions: (
       sessionId: string,
       prompt: string,
