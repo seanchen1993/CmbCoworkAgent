@@ -673,7 +673,11 @@ const api = {
     },
     supportedExtensions: (): Promise<string[]> => {
       return ipcRenderer.invoke("file:supportedExtensions")
-    }
+    },
+    selectCode: (): Promise<{ canceled: boolean; filePaths: string[] }> =>
+      ipcRenderer.invoke("file:select-code"),
+    readText: (filePath: string): Promise<{ success: boolean; filename?: string; content?: string; error?: string }> =>
+      ipcRenderer.invoke("file:read-text", filePath),
   },
   skills: {
     list: (): Promise<SkillMetadata[]> => {

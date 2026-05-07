@@ -2945,6 +2945,44 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     return { canceled: false, filePaths: result.filePaths }
   })
 
+  // Open native file picker for code files (关联代码 modal)
+  ipcMain.handle("file:select-code", async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) return { canceled: true, filePaths: [] }
+    const result = await dialog.showOpenDialog(win, {
+      properties: ["openFile", "multiSelections"],
+      title: "选择代码文件",
+      filters: [
+        { name: "代码文件", extensions: ["ts", "tsx", "js", "jsx", "css", "scss", "less", "py", "vue", "html", "json", "md", "txt", "yaml", "yml", "sh"] },
+        { name: "所有文件", extensions: ["*"] },
+      ]
+    })
+    if (result.canceled || result.filePaths.length === 0) {
+      return { canceled: true, filePaths: [] }
+    }
+    return { canceled: false, filePaths: result.filePaths }
+  })
+
+  // Read any file as plain UTF-8 text (for code context)
+  ipcMain.handle(
+    "file:read-text",
+    async (_event, filePath: string): Promise<{ success: boolean; filename?: string; content?: string; error?: string }> => {
+      try {
+        const fs = await import("fs/promises")
+        const path = await import("path")
+        const stat = await fs.stat(filePath)
+        if (stat.size > 5 * 1024 * 1024) {
+          return { success: false, error: "文件超过 5 MB 限制" }
+        }
+        const content = await fs.readFile(filePath, "utf-8")
+        const filename = path.basename(filePath)
+        return { success: true, filename, content }
+      } catch (e) {
+        return { success: false, error: e instanceof Error ? e.message : "读取文件失败" }
+      }
+    }
+  )
+
   // Get supported file extensions
   ipcMain.handle("file:supportedExtensions", async () => {
     const { getSupportedExtensions } = await import("../file-parser")

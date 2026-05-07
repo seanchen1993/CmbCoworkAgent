@@ -3371,7 +3371,7 @@ function CodeModal({ open, initialFiles, onConfirm, onClose }: {
   const [selectedIdx, setSelectedIdx] = React.useState(0)
   const [dragging, setDragging]     = React.useState(false)
   const [editingName, setEditingName] = React.useState(false)
-  const fileInputRef = React.useRef<HTMLInputElement>(null)
+  const [uploading, setUploading]   = React.useState(false)
 
   // Sync when modal re-opens with new initialFiles
   React.useEffect(() => {
@@ -3380,6 +3380,35 @@ function CodeModal({ open, initialFiles, onConfirm, onClose }: {
 
   const selected = files[selectedIdx]
 
+  const mergeCodeFiles = (incoming: CodeFile[]) => {
+    setFiles((prev) => {
+      const merged = [...prev]
+      incoming.forEach((nf) => {
+        const existing = merged.findIndex((f) => f.filename === nf.filename)
+        if (existing >= 0) merged[existing] = nf
+        else merged.push(nf)
+      })
+      return merged
+    })
+  }
+
+  // Use Electron's native dialog — avoids the hidden-input backdrop-click race condition
+  const handleUploadClick = async () => {
+    const result = await window.api.file.selectCode()
+    if (result.canceled || result.filePaths.length === 0) return
+    setUploading(true)
+    try {
+      const results = await Promise.all(result.filePaths.map((fp) => window.api.file.readText(fp)))
+      const loaded: CodeFile[] = results
+        .filter((r): r is { success: true; filename: string; content: string } => r.success && !!r.filename)
+        .map((r) => ({ filename: r.filename, content: r.content }))
+      if (loaded.length > 0) mergeCodeFiles(loaded)
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  // Drag & drop still uses FileReader (drag events don't have the same Electron issue)
   const readFileAsText = (file: File): Promise<CodeFile> =>
     new Promise((res) => {
       const reader = new FileReader()
@@ -3387,23 +3416,11 @@ function CodeModal({ open, initialFiles, onConfirm, onClose }: {
       reader.readAsText(file)
     })
 
-  const addFiles = async (fileList: FileList) => {
-    const newFiles = await Promise.all(Array.from(fileList).map(readFileAsText))
-    setFiles((prev) => {
-      const merged = [...prev]
-      newFiles.forEach((nf) => {
-        const existing = merged.findIndex((f) => f.filename === nf.filename)
-        if (existing >= 0) merged[existing] = nf
-        else merged.push(nf)
-      })
-      return merged
-    })
-    setSelectedIdx((prev) => prev)
-  }
-
-  const handleDrop = (e: React.DragEvent) => {
+  const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault(); setDragging(false)
-    if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files)
+    if (!e.dataTransfer.files.length) return
+    const loaded = await Promise.all(Array.from(e.dataTransfer.files).map(readFileAsText))
+    mergeCodeFiles(loaded)
   }
 
   const addBlankFile = () => {
@@ -3443,17 +3460,15 @@ function CodeModal({ open, initialFiles, onConfirm, onClose }: {
       onClick={onClose}
       onDragOver={(e) => { e.preventDefault(); setDragging(true) }}
       onDragLeave={() => setDragging(false)}
-      onDrop={handleDrop}
+      onDrop={(e) => { e.preventDefault(); setDragging(false); handleDrop(e) }}
     >
-      {/* Hidden file input */}
-      <input ref={fileInputRef} type="file" multiple accept=".ts,.tsx,.js,.jsx,.css,.scss,.py,.vue,.html,.json,.md,.txt" style={{ display: "none" }} onChange={(e) => { if (e.target.files) addFiles(e.target.files); e.target.value = "" }} />
 
       <div
         style={{ background: "#f8f7f4", borderRadius: 16, width: 820, height: 580, display: "flex", flexDirection: "column", boxShadow: "0 12px 48px rgba(0,0,0,0.22)", border: dragging ? "2px dashed #cc785c" : "2px solid transparent", overflow: "hidden" }}
         onClick={(e) => e.stopPropagation()}
         onDragOver={(e) => { e.preventDefault(); setDragging(true) }}
         onDragLeave={(e) => { e.stopPropagation(); setDragging(false) }}
-        onDrop={(e) => { e.stopPropagation(); e.preventDefault(); setDragging(false); if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files) }}
+        onDrop={(e) => { e.stopPropagation(); handleDrop(e) }}
       >
         {/* Header */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 20px", borderBottom: "1px solid #e8e6e0", background: "#fff" }}>
@@ -3464,9 +3479,10 @@ function CodeModal({ open, initialFiles, onConfirm, onClose }: {
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <button
-              onClick={() => fileInputRef.current?.click()}
-              style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 14px", borderRadius: 8, border: "1px solid #e0ded8", background: "#fff", fontSize: 13, cursor: "pointer", fontFamily: "inherit", fontWeight: 500, color: "#1a1a1a" }}
-            >⬆ 上传文件</button>
+              onClick={handleUploadClick}
+              disabled={uploading}
+              style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 14px", borderRadius: 8, border: "1px solid #e0ded8", background: "#fff", fontSize: 13, cursor: uploading ? "default" : "pointer", fontFamily: "inherit", fontWeight: 500, color: "#1a1a1a", opacity: uploading ? 0.6 : 1 }}
+            >{uploading ? "⏳ 读取中…" : "⬆ 上传文件"}</button>
             <button
               onClick={addBlankFile}
               style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 14px", borderRadius: 8, border: "none", background: "#1a1a1a", fontSize: 13, cursor: "pointer", fontFamily: "inherit", fontWeight: 500, color: "#fff" }}
