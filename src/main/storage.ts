@@ -428,12 +428,19 @@ export function getDisabledSkills(): string[] {
   return resolveDisabledSkillEntries(readDisabledSkillEntries())
 }
 
+let _disabledSkillDirsCache: string[] | null = null
+
 export function getDisabledSkillDirs(): string[] {
+  if (_disabledSkillDirsCache) return _disabledSkillDirsCache
   const disabled = new Set(getDisabledSkills().map((name) => name.trim().toLowerCase()))
-  if (disabled.size === 0) return []
-  return discoverSkillsFromSourcesSync()
-    .filter((skill) => isDiscoveredSkillDisabled(skill, disabled))
-    .map((skill) => skill.rootDir)
+  const result =
+    disabled.size === 0
+      ? []
+      : discoverSkillsFromSourcesSync()
+          .filter((skill) => isDiscoveredSkillDisabled(skill, disabled))
+          .map((skill) => skill.rootDir)
+  _disabledSkillDirsCache = result
+  return result
 }
 
 export function setDisabledSkills(skillIds: string[]): void {
@@ -524,6 +531,7 @@ export function invalidateEnabledSkillsCache(): void {
   _pluginHooksCache = null
   _skillHooksCache = null
   _skillHookMetadataCache = null
+  _disabledSkillDirsCache = null
 }
 
 /**
