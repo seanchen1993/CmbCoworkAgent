@@ -13,10 +13,18 @@ interface ChatTab {
   label: string
 }
 
+interface MessageAttachment {
+  filename: string
+  kind: "code" | "doc"     // code = from codeContext/🗂️, doc = from attachedFiles/📎
+  meta?: string            // e.g. "1359 行" or "6,709 字符"
+}
+
 interface Message {
   role: "user" | "assistant" | "questions-prompt"
   content: string
   tags?: string[]           // pill tags shown after question phase for user message
+  skillName?: string        // skill applied to this message — shown as a styled pill
+  attachments?: MessageAttachment[]  // files included with this message
   isStreaming?: boolean
   isIteration?: boolean     // true = follow-up iteration, false = first generation
   imageUrl?: string         // data URL for screenshot attached to this message
@@ -1647,8 +1655,22 @@ ${commentLines}${variantNote}`
     if (!prompt && !attachedImage) return
     const state = tabStates[activeTabId]?.generationState ?? "idle"
     if (state === "asking" || state === "generating") return
-    // Clear transient context after send (code/link are kept for follow-ups; skill clears per-send)
-    updateTs(activeTabId, { inputValue: "", selectedSkill: null })
+    // Build the list of file pills to show in the message record before clearing state
+    const messageAttachments: MessageAttachment[] = [
+      ...(codeContext ?? []).map((f): MessageAttachment => ({
+        filename: f.filename,
+        kind: "code",
+        meta: `${f.content.split("\n").length.toLocaleString()} 行`,
+      })),
+      ...(attachedFiles ?? []).map((f): MessageAttachment => ({
+        filename: f.filename,
+        kind: "doc",
+        meta: `${f.content.length.toLocaleString()} 字符`,
+      })),
+    ]
+
+    // Clear transient context after send — skill, files, and code all clear per-send
+    updateTs(activeTabId, { inputValue: "", selectedSkill: null, attachedFiles: null, codeContext: null })
 
     const tabId = activeTabId
     const existing = tabStates[tabId]?.messages ?? []
@@ -1657,6 +1679,9 @@ ${commentLines}${variantNote}`
     const designOutputConstraint =
       `IMPORTANT: Regardless of what the skill says about output format, you MUST output a complete standalone ` +
       `<!DOCTYPE html> … </html> file (not a component file, not a code snippet). ` +
+      `Because this request explicitly uses a skill, output exactly ONE final design page. ` +
+      `Do NOT generate A/B variations, do NOT create elements with id="variation-a" or id="variation-b", ` +
+      `and do NOT present alternative versions. ` +
       `The file must include the EDITMODE Tweaks system as required by the system prompt ` +
       `(TWEAK_DEFAULTS with /*EDITMODE-BEGIN*/…/*EDITMODE-END*/ markers, postMessage listener, applyTweaks with CSS variables). ` +
       `Apply the skill's design tokens and patterns inside that HTML file.`
@@ -1682,7 +1707,7 @@ ${commentLines}${variantNote}`
         ).join("\n\n")
       : ""
     const skillMarkerSuffix =
-      selectedSkill && !attachedImage
+      selectedSkill
         ? `\n\n${formatSkillUseBlock({ name: selectedSkill.name, path: selectedSkill.path })}`
         : ""
     const contextSuffix = skillContext + codeSuffix + linkSuffix + filesSuffix + skillMarkerSuffix
@@ -1696,7 +1721,12 @@ ${commentLines}${variantNote}`
         attachedImage: null,
         messages: [
           ...prev.messages,
-          { role: "user" as const, content: userContent + (selectedSkill ? ` ⚡${selectedSkill.name}` : ""), imageUrl: attachedImage.previewUrl },
+          {
+            role: "user" as const, content: userContent,
+            skillName: selectedSkill?.name,
+            attachments: messageAttachments.length > 0 ? messageAttachments : undefined,
+            imageUrl: attachedImage.previewUrl,
+          },
         ],
       }))
       if (selectedSkill) {
@@ -1714,9 +1744,16 @@ ${commentLines}${variantNote}`
       return
     }
 
-    // Always add user message first (show skill tag in chat bubble)
+    // Always add user message first (skill shown as pill, not embedded in text)
     updateTs(tabId, (prev) => ({
-      messages: [...prev.messages, { role: "user" as const, content: prompt + (selectedSkill ? ` ⚡${selectedSkill.name}` : "") }],
+      messages: [
+        ...prev.messages,
+        {
+          role: "user" as const, content: prompt,
+          skillName: selectedSkill?.name,
+          attachments: messageAttachments.length > 0 ? messageAttachments : undefined,
+        },
+      ],
     }))
 
     // Auto-label tab from its first prompt (for history readability)
@@ -2144,6 +2181,10 @@ ${commentLines}${variantNote}`
                     title="附加文档（txt / md / csv / docx / xlsx）"
                     onClick={handleDocAttach}
                   >{attachmentLoading ? "⏳" : "📎"}</ToolbarIcon>
+                  <ToolbarIcon
+                    title="关联代码（ts / tsx / js / css / py 等）"
+                    onClick={() => setCodeModalOpen(true)}
+                  >🗂️</ToolbarIcon>
                   <ToolbarIcon
                     title="上传截图"
                     onClick={() => fileInputRef.current?.click()}
@@ -3783,14 +3824,50 @@ function MessageBubble({ message }: { message: Message }) {
           />
         </div>
       )}
+      {!isUser && <DesignExecutionPanel events={message.executionEvents} />}
       <div style={{ display: "flex", justifyContent: isUser ? "flex-end" : "flex-start" }}>
         <div style={{ maxWidth: "85%", padding: "9px 13px", borderRadius: isUser ? "16px 16px 4px 16px" : "16px 16px 16px 4px", background: isUser ? "#1a1a1a" : "#f4f3ef", color: isUser ? "#fff" : "#1a1a1a", fontSize: 13, lineHeight: 1.6, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+          {/* File attachment pills — shown at the top of the user bubble */}
+          {isUser && message.attachments && message.attachments.length > 0 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: message.content ? 8 : 0 }}>
+              {message.attachments.map((att, i) => (
+                <div key={i} style={{
+                  display: "inline-flex", alignItems: "center", gap: 5,
+                  padding: "3px 9px", borderRadius: 7,
+                  background: "rgba(255,255,255,0.12)", border: "1px solid rgba(255,255,255,0.18)",
+                  fontSize: 11, color: "rgba(255,255,255,0.92)", fontWeight: 500,
+                  maxWidth: 220, overflow: "hidden",
+                }}>
+                  <span style={{ flexShrink: 0 }}>{att.kind === "code" ? "🗂️" : "📎"}</span>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {att.filename.length > 28 ? att.filename.slice(0, 25) + "…" + att.filename.slice(att.filename.lastIndexOf(".")) : att.filename}
+                  </span>
+                  {att.meta && (
+                    <span style={{ flexShrink: 0, opacity: 0.65, fontSize: 10 }}>{att.meta}</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
           {message.content || (message.isStreaming
             ? <span style={{ opacity: 0.4 }}>{message.isIteration ? "Updating design…" : "Generating…"}</span>
             : "")}
         </div>
       </div>
-      {!isUser && <DesignExecutionPanel events={message.executionEvents} />}
+      {/* Skill pill — shown for user messages that used a skill */}
+      {isUser && message.skillName && (
+        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 5 }}>
+          <span style={{
+            display: "inline-flex", alignItems: "center", gap: 4,
+            padding: "2px 9px", borderRadius: 999,
+            background: "#eff0fb", border: "1px solid #c7c9ef",
+            color: "#3a3a8a", fontSize: 11, fontWeight: 600,
+          }}>
+            <span style={{ fontSize: 12 }}>⚡</span>
+            {message.skillName}
+          </span>
+        </div>
+      )}
       {/* Pill tags for user messages after question submission */}
       {isUser && message.tags && message.tags.length > 0 && (
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 4, flexWrap: "wrap", marginTop: 6 }}>
