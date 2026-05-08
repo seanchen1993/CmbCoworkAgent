@@ -43,13 +43,13 @@ const EVENT_BADGE: Record<
     label: "技能前",
     className: "bg-blue-500/15 text-blue-600 dark:text-blue-400",
     english: "PreSkillUse",
-    tip: "Agent 首次读取某个技能前触发，可按技能名拦截"
+    tip: "技能被选择、激活或首次读取前触发，可按技能名拦截"
   },
   PostSkillUse: {
     label: "技能后",
     className: "bg-green-500/15 text-green-600 dark:text-green-400",
     english: "PostSkillUse",
-    tip: "Agent 首次读取某个技能后触发，可记录或注入补充上下文"
+    tip: "本轮结束时对已激活技能触发，可记录结果或要求修订"
   },
   PostToolUseFailure: {
     label: "调用失败",

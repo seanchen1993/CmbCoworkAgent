@@ -72,12 +72,20 @@ import {
   resolveEnabledHooksForRun,
   type HookScopeController
 } from "../hooks/scope"
-import type { HookConfig, HookEvent, HookResult } from "../hooks/types"
+import type { HookConfig, HookEvent } from "../hooks/types"
 import { fireSessionStartOnce } from "../hooks/session-lifecycle"
 import { runHooksEnriched } from "../hooks/required-skill"
 import { activateSkillLifecycle, formatSkillHookContext } from "../agent/skill-lifecycle/activation"
 import { parseSkillUseBlock, type ParsedSkillUseBlock } from "../agent/skill-lifecycle/marker"
 import { SkillLifecycleRegistry, type SkillLifecycleMatch } from "../agent/skill-lifecycle/registry"
+import {
+  createSkillUseTracker,
+  type SkillUseTracker
+} from "../agent/skill-lifecycle/tracker"
+import {
+  runCompletionHooksWithRevision,
+  type StopHookContext
+} from "../agent/skill-lifecycle/completion-hooks"
 import {
   discardAgentAutoCommitTracking,
   maybeAutoCommitAfterAgentRun,
@@ -140,6 +148,7 @@ async function activateExplicitSkillFromMessage({
   sessionId,
   hookScope,
   firedSkillKeys,
+  skillUseTracker,
   onHookResult
 }: {
   message: string
@@ -147,6 +156,7 @@ async function activateExplicitSkillFromMessage({
   sessionId: string
   hookScope: HookScopeController
   firedSkillKeys: Set<string>
+  skillUseTracker: SkillUseTracker
   onHookResult?: HookResultCallback
 }): Promise<ExplicitSkillActivation | null> {
   const parsed = parseSkillUseBlock(message)
@@ -184,6 +194,7 @@ async function activateExplicitSkillFromMessage({
     sessionId,
     hookScope,
     firedSkillKeys,
+    skillUseTracker,
     resolveHooks: (event: HookEvent, context: HookContext): HookConfig[] =>
       resolveEnabledHooksForRun(workspacePath, event, context, hookScope),
     onHookResult
@@ -197,8 +208,6 @@ async function activateExplicitSkillFromMessage({
     reason: result.reason
   }
 }
-
-type StopHookContext = NonNullable<HookContext["stopContext"]>
 
 interface ActiveHookSummary {
   global: number
@@ -537,91 +546,6 @@ class StopHookContextCollector {
       if (readPathRaw) this.skillUsageDetector.onReadFilePath(readPathRaw)
     }
   }
-}
-
-function getStopHookBlockReason(result: HookResult): string {
-  return (
-    result.reason ||
-    result.stopReason ||
-    result.stdout ||
-    result.stderr ||
-    "Stop hook requested revision"
-  )
-}
-
-function buildStopRevisionPrompt(result: HookResult, attempt: number): string {
-  const parts = [
-    `${STOP_HOOK_REVISION_PROMPT_PREFIX} Internal revision request. Do not mention this marker.`,
-    "A completion hook reviewed your previous response and requested a revision.",
-    "Revise the work now. Address the issue directly, run any checks that are needed, and then provide an updated final answer.",
-    `Revision attempt: ${attempt}/${MAX_STOP_HOOK_REVISIONS}`,
-    `Hook reason:\n${getStopHookBlockReason(result)}`
-  ]
-  if (result.additionalContext) {
-    parts.push(`Additional hook context:\n${result.additionalContext}`)
-  }
-  if (result.systemMessage) {
-    parts.push(`Hook message:\n${result.systemMessage}`)
-  }
-  return parts.join("\n\n")
-}
-
-async function runStopHooksWithRevision({
-  threadId,
-  workspacePath,
-  abortSignal,
-  getStopContext,
-  hookScope,
-  runRevision,
-  sendNotice,
-  sendError,
-  onHookResult
-}: {
-  threadId: string
-  workspacePath?: string
-  abortSignal: AbortSignal
-  getStopContext: () => StopHookContext
-  hookScope: HookScopeController
-  runRevision: (prompt: string) => Promise<void>
-  sendNotice: (message: string) => void
-  sendError: (message: string) => void
-  onHookResult?: HookResultCallback
-}): Promise<boolean> {
-  let revisionCount = 0
-  while (!abortSignal.aborted) {
-    const context: HookContext = {
-      workspacePath,
-      sessionId: threadId,
-      stopContext: getStopContext()
-    }
-    const stopResult = await runHooksEnriched(
-      resolveEnabledHooksForRun(workspacePath, "Stop", context, hookScope),
-      "Stop",
-      context,
-      onHookResult
-    ).catch((e) => {
-      console.warn("[Hooks] Stop hook error:", e)
-      return null
-    })
-
-    if (stopResult?.decision !== "block") return true
-    if (stopResult.systemMessage) sendNotice(stopResult.systemMessage)
-
-    const reason = getStopHookBlockReason(stopResult)
-    if (revisionCount >= MAX_STOP_HOOK_REVISIONS) {
-      sendError(
-        `Stop hook blocked completion after ${MAX_STOP_HOOK_REVISIONS} revision attempts: ${reason}`
-      )
-      return false
-    }
-
-    revisionCount += 1
-    sendNotice(
-      `Stop hook requested revision (${revisionCount}/${MAX_STOP_HOOK_REVISIONS}): ${reason}`
-    )
-    await runRevision(buildStopRevisionPrompt(stopResult, revisionCount))
-  }
-  return false
 }
 
 // ─────────────────────────────────────────────────────────
@@ -1186,6 +1110,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     activeRuns.set(threadId, abortController)
     const hookScope = createHookScope()
     const skillHookKeys = new Set<string>()
+    const skillUseTracker = createSkillUseTracker()
 
     // Abort the stream if the window is closed/destroyed
     const onWindowClosed = (): void => {
@@ -1286,6 +1211,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         sessionId: threadId,
         hookScope,
         firedSkillKeys: skillHookKeys,
+        skillUseTracker,
         onHookResult
       })
       if (explicitSkillActivation?.blocked) {
@@ -1452,6 +1378,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             onHookResult,
             hookScope,
             skillHookKeys,
+            skillUseTracker,
             onFileMutation: autoCommit.onFileMutation
           })
           // First attempt sends the message; subsequent attempts resume from checkpoint
@@ -2057,6 +1984,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             onHookResult,
             hookScope,
             skillHookKeys,
+            skillUseTracker,
             onFileMutation: autoCommit.onFileMutation
           })
           activeStream = await agent.stream(null, streamConfig) // resume from checkpoint
@@ -2066,7 +1994,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
 
       if (!abortController.signal.aborted) {
-        const stopPassed = await runStopHooksWithRevision({
+        const stopPassed = await runCompletionHooksWithRevision({
           threadId,
           workspacePath: workspacePath ?? undefined,
           abortSignal: abortController.signal,
@@ -2089,6 +2017,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           sendNotice: sendHookNotice,
           sendError: sendStreamError,
           hookScope,
+          skillUseTracker,
+          maxRevisionAttempts: MAX_STOP_HOOK_REVISIONS,
+          revisionPromptPrefix: STOP_HOOK_REVISION_PROMPT_PREFIX,
           onHookResult
         })
 
@@ -2300,6 +2231,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     activeRuns.set(threadId, abortController)
     const hookScope = createHookScope()
     const skillHookKeys = new Set<string>()
+    const skillUseTracker = createSkillUseTracker()
     const stopContextCollector = new StopHookContextCollector()
     const sendHookNotice = (notice: string): void => {
       window.webContents.send(channel, {
@@ -2375,6 +2307,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             onHookResult,
             hookScope,
             skillHookKeys,
+            skillUseTracker,
             onFileMutation: autoCommit.onFileMutation
           })
           resumeStream = await resumeAgent.stream(
@@ -2501,6 +2434,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             onHookResult,
             hookScope,
             skillHookKeys,
+            skillUseTracker,
             onFileMutation: autoCommit.onFileMutation
           })
           activeResumeStream = await nextAgent.stream(
@@ -2514,7 +2448,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
 
       if (!abortController.signal.aborted) {
-        const stopPassed = await runStopHooksWithRevision({
+        const stopPassed = await runCompletionHooksWithRevision({
           threadId,
           workspacePath: workspacePath ?? undefined,
           abortSignal: abortController.signal,
@@ -2531,6 +2465,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           sendNotice: sendHookNotice,
           sendError: sendStreamError,
           hookScope,
+          skillUseTracker,
+          maxRevisionAttempts: MAX_STOP_HOOK_REVISIONS,
+          revisionPromptPrefix: STOP_HOOK_REVISION_PROMPT_PREFIX,
           onHookResult
         })
 
@@ -2604,6 +2541,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     activeRuns.set(threadId, abortController)
     const hookScope = createHookScope()
     const skillHookKeys = new Set<string>()
+    const skillUseTracker = createSkillUseTracker()
     const stopContextCollector = new StopHookContextCollector()
     const sendHookNotice = (notice: string): void => {
       window.webContents.send(channel, {
@@ -2673,6 +2611,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               onHookResult,
               hookScope,
               skillHookKeys,
+              skillUseTracker,
               onFileMutation: autoCommit.onFileMutation
             })
             intStream = await intAgent.stream(null, interruptStreamConfig)
@@ -2796,6 +2735,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               onHookResult,
               hookScope,
               skillHookKeys,
+              skillUseTracker,
               onFileMutation: autoCommit.onFileMutation
             })
             activeIntStream = await nextAgent.stream(null, interruptStreamConfig)
@@ -2806,7 +2746,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
 
         if (!abortController.signal.aborted) {
-          const stopPassed = await runStopHooksWithRevision({
+          const stopPassed = await runCompletionHooksWithRevision({
             threadId,
             workspacePath: workspacePath ?? undefined,
             abortSignal: abortController.signal,
@@ -2823,6 +2763,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             sendNotice: sendHookNotice,
             sendError: sendStreamError,
             hookScope,
+            skillUseTracker,
+            maxRevisionAttempts: MAX_STOP_HOOK_REVISIONS,
+            revisionPromptPrefix: STOP_HOOK_REVISION_PROMPT_PREFIX,
             onHookResult
           })
 

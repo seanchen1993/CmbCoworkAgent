@@ -29,6 +29,7 @@ import { DynamicStructuredTool, ToolInputParsingException } from "@langchain/cor
 import { SqlJsSaver } from "../checkpointer/sqljs-saver"
 import { LocalSandbox, type SkillHookContextProvider } from "./local-sandbox"
 import { SkillLifecycleRegistry } from "./skill-lifecycle/registry"
+import type { SkillUseTracker } from "./skill-lifecycle/tracker"
 import type { AgentFileMutationKind } from "../services/agent-auto-commit"
 import type { HookResultCallback } from "../hooks/runner"
 import {
@@ -1260,6 +1261,8 @@ export interface CreateAgentRuntimeOptions {
   hookScope?: HookScopeController
   /** Shared run-scoped set used to avoid firing skill lifecycle hooks twice. */
   skillHookKeys?: Set<string>
+  /** Run-scoped tracker for skills used this turn. */
+  skillUseTracker?: SkillUseTracker
   /** Callback invoked after successful write/edit/upload filesystem operations. */
   onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
 }
@@ -1279,6 +1282,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     onHookResult,
     hookScope: providedHookScope,
     skillHookKeys,
+    skillUseTracker,
     onFileMutation
   } = options
 
@@ -1374,7 +1378,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     onFileMutation,
     abortSignal: options.abortSignal,
     runId: threadId,
-    skillHookKeys
+    skillHookKeys,
+    skillUseTracker
   })
 
   // ── Wire up the approval orchestrator ──

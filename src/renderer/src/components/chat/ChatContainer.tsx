@@ -151,10 +151,15 @@ function countWelcomeSkillTreeCards(node: WelcomeSkillTreeNode): number {
 }
 
 function getWelcomeSkillTopLevelKey(skill: SkillMetadata): string {
-  return normalizeSkillId(getWelcomeSkillTreePath(skill).split("/").filter(Boolean)[0] || skill.name)
+  return normalizeSkillId(
+    getWelcomeSkillTreePath(skill).split("/").filter(Boolean)[0] || skill.name
+  )
 }
 
-function limitWelcomeSkillsByTopLevel(skills: SkillMetadata[], previewLimit: number): SkillMetadata[] {
+function limitWelcomeSkillsByTopLevel(
+  skills: SkillMetadata[],
+  previewLimit: number
+): SkillMetadata[] {
   if (previewLimit <= 0) return []
   const selectedRoots = new Set<string>()
 
@@ -360,7 +365,7 @@ function HookLogsPanel({ logs }: { logs: HookLogEntry[] }): React.JSX.Element {
           <div className="px-3 py-2 text-[11px] text-muted-foreground">
             调试日志建议写到 <span className="font-mono text-foreground/80">stderr</span>。 如果{" "}
             <span className="font-mono text-foreground/80">stdout</span> 输出的是 JSON，它会被当成
-            Hook 返回值解析。
+            Hook 返回值解析，结构化的 additionalContext 也会在这里显示。
           </div>
           {logs.map((log) => {
             const ok = !log.blocked && log.exitCode === 0
@@ -409,6 +414,16 @@ function HookLogsPanel({ logs }: { logs: HookLogEntry[] }): React.JSX.Element {
                     </div>
                     <div className="max-h-48 overflow-auto rounded-md border border-red-300/40 bg-red-50/40 px-2 py-1 text-red-500/80 whitespace-pre-wrap break-all dark:border-red-500/30 dark:bg-red-500/10">
                       {log.stderr}
+                    </div>
+                  </div>
+                )}
+                {log.additionalContext && (
+                  <div className="pl-4 space-y-1">
+                    <div className="text-[10px] uppercase tracking-wide text-blue-500/70">
+                      additionalContext
+                    </div>
+                    <div className="max-h-40 overflow-auto rounded-md border border-blue-300/40 bg-blue-50/40 px-2 py-1 text-blue-600/90 whitespace-pre-wrap break-all dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300/90">
+                      {log.additionalContext}
                     </div>
                   </div>
                 )}

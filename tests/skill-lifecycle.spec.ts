@@ -14,6 +14,7 @@ import { LocalSandbox } from "../src/main/agent/local-sandbox.ts"
 import { activateSkillLifecycle } from "../src/main/agent/skill-lifecycle/activation.ts"
 import { parseSkillUseBlock } from "../src/main/agent/skill-lifecycle/marker.ts"
 import { SkillLifecycleRegistry } from "../src/main/agent/skill-lifecycle/registry.ts"
+import { createSkillUseTracker } from "../src/main/agent/skill-lifecycle/tracker.ts"
 import { createHookScope, mergeHookScopeSnapshot } from "../src/main/hooks/scope.ts"
 import {
   discoverSkillsSync,
@@ -438,12 +439,18 @@ async function testPluginSkillMetadata(): Promise<void> {
     const source = join(base, "plugin", "skills")
     const skillPath = await writeSkillDoc(source, "plugged/SKILL.md", { name: "plugged" })
     const reg = new SkillLifecycleRegistry([
-      { sourceDir: source, pluginId: "plugin-a", pluginName: "Plugin A" }
+      {
+        sourceDir: source,
+        pluginId: "plugin-a",
+        pluginName: "Plugin A",
+        pluginRoot: join(base, "plugin")
+      }
     ])
     const match = reg.resolveRead(skillPath)
     assert(match?.name === "plugged", `expected plugged got ${match?.name}`)
     assert(match?.pluginId === "plugin-a", `expected plugin-a got ${match?.pluginId}`)
     assert(match?.pluginName === "Plugin A", `expected Plugin A got ${match?.pluginName}`)
+    assert(match?.pluginRoot === join(base, "plugin"), `expected pluginRoot got ${match?.pluginRoot}`)
   })
 }
 
@@ -536,6 +543,7 @@ async function testExplicitActivationFiresLifecycleOnceAndSuppressesReadDuplicat
     assert(skill, "explicit skill should resolve")
 
     const counterPath = join(base, "count.txt")
+    const postCounterPath = join(base, "post-count.txt")
     const lifecycleHook = makeHook({
       event: "PreSkillUse",
       matcher: "explicit",
@@ -546,8 +554,14 @@ const n = fs.existsSync(p) ? Number(fs.readFileSync(p, 'utf8')) : 0
 fs.writeFileSync(p, String(n + 1))
 `)
     })
+    const postHook = makeHook({
+      event: "PostSkillUse",
+      matcher: "explicit",
+      command: nodeCommand(`require('fs').writeFileSync(${JSON.stringify(postCounterPath)}, '1')`)
+    })
     const hookScope = createHookScope()
     const skillHookKeys = new Set<string>()
+    const skillUseTracker = createSkillUseTracker()
 
     await activateSkillLifecycle({
       skill: skill!,
@@ -558,7 +572,9 @@ fs.writeFileSync(p, String(n + 1))
       sessionId: "explicit-test",
       hookScope,
       firedSkillKeys: skillHookKeys,
-      resolveHooks: (event) => (event === "PreSkillUse" ? [lifecycleHook] : [])
+      skillUseTracker,
+      resolveHooks: (event) =>
+        event === "PreSkillUse" ? [lifecycleHook] : event === "PostSkillUse" ? [postHook] : []
     })
 
     const sandbox = new LocalSandbox({
@@ -566,13 +582,19 @@ fs.writeFileSync(p, String(n + 1))
       skillLifecycleRegistry: registry,
       hooks: [lifecycleHook],
       hookScope,
-      skillHookKeys
+      skillHookKeys,
+      skillUseTracker
     })
 
     await sandbox.read(skillPath)
     const count = existsSync(counterPath) ? (await readFile(counterPath, "utf8")).trim() : "0"
 
     assert(count === "1", `explicit selection + read should fire lifecycle once, got ${count}`)
+    assert(!existsSync(postCounterPath), "PostSkillUse should not fire during explicit activation")
+    assert(
+      skillUseTracker.getPendingPostSkillUses().length === 1,
+      "explicit activation should defer PostSkillUse until turn completion"
+    )
     const expectedPath =
       process.platform === "win32"
         ? skill!.rootDir.replace(/\\/g, "/").toLowerCase()
@@ -646,31 +668,34 @@ async function testPluginSkillHookDoesNotMatchStandaloneSkillByName(): Promise<v
   })
 }
 
-async function testSkillReadContentIsNotPolluted(): Promise<void> {
+async function testPostSkillUseDoesNotRunDuringSkillRead(): Promise<void> {
   await withTempDir("skill-read-clean", async (base) => {
     const source = join(base, "skills")
     const skillPath = await writeSkillDoc(source, "clean/SKILL.md", {
       raw: "---\nname: clean\n---\nreal skill body\n"
     })
     const registry = new SkillLifecycleRegistry([source])
+    const markerPath = join(base, "post-hit.txt")
+    const skillUseTracker = createSkillUseTracker()
     const sandbox = new LocalSandbox({
       rootDir: base,
       skillLifecycleRegistry: registry,
+      skillUseTracker,
       hooks: [
         makeHook({
           event: "PostSkillUse",
           matcher: "clean",
-          command: nodeCommand("console.log(JSON.stringify({additionalContext:'post guidance'}))")
+          command: nodeCommand(`require('fs').writeFileSync(${JSON.stringify(markerPath)}, 'post')`)
         })
       ]
     })
 
     const result = await sandbox.read(skillPath)
     assert(result.includes("real skill body"), "read result should include SKILL.md body")
-    assert(!result.includes("post guidance"), "read result must not include hook guidance")
+    assert(!existsSync(markerPath), "PostSkillUse should not run while reading SKILL.md")
     assert(
-      sandbox.drainSkillHookContexts().some((ctx) => ctx.includes("post guidance")),
-      "post guidance should be queued for system-message injection"
+      skillUseTracker.getPendingPostSkillUses().length === 1,
+      "read skill should record a pending PostSkillUse"
     )
   })
 }
@@ -767,7 +792,7 @@ fs.appendFileSync(${JSON.stringify(hitsPath)}, (process.env.SKILL_ROOT || '') + 
   })
 }
 
-async function testPostSkillContextQueueAndDrain(): Promise<void> {
+async function testPreSkillContextQueueAndDrain(): Promise<void> {
   await withTempDir("skill-drain", async (base) => {
     const source = join(base, "skills")
     const skillPath = await writeSkillDoc(source, "queued/SKILL.md", {
@@ -778,7 +803,7 @@ async function testPostSkillContextQueueAndDrain(): Promise<void> {
       skillLifecycleRegistry: new SkillLifecycleRegistry([source]),
       hooks: [
         makeHook({
-          event: "PostSkillUse",
+          event: "PreSkillUse",
           matcher: "queued",
           command: nodeCommand("console.log(JSON.stringify({systemMessage:'remember queued'}))")
         })
@@ -954,16 +979,16 @@ async function run(): Promise<void> {
   console.log("PASS A14b explicit selection fires lifecycle once and shares read de-dupe")
   await testPluginSkillHookDoesNotMatchStandaloneSkillByName()
   console.log("PASS A15 plugin skill hook does not match standalone skill by name")
-  await testSkillReadContentIsNotPolluted()
-  console.log("PASS D1 SKILL.md content not polluted")
+  await testPostSkillUseDoesNotRunDuringSkillRead()
+  console.log("PASS D1 PostSkillUse is deferred until turn completion")
   await testPreSkillBlockStopsRead()
   console.log("PASS D2 PreSkillUse block stops skill read")
   await testSameSkillReadFiresOnce()
   console.log("PASS D3 same skill read fires hooks once")
   await testSameNameDifferentSkillsFireSeparately()
   console.log("PASS D3b same-name skills fire separately")
-  await testPostSkillContextQueueAndDrain()
-  console.log("PASS D4/D5 post context queue drains cleanly")
+  await testPreSkillContextQueueAndDrain()
+  console.log("PASS D4/D5 PreSkillUse context queue drains cleanly")
   await testNonSkillReadDoesNotFireHooks()
   console.log("PASS D6 non-skill read does not fire hooks")
   await testDisabledSkillIsHiddenFromFilesystemView()

@@ -1,11 +1,9 @@
-import { resolve } from "path"
 import { runHooksEnriched } from "../../hooks/required-skill"
 import type { HookContext, HookResultCallback } from "../../hooks/runner"
 import type { HookConfig, HookEvent, HookResult } from "../../hooks/types"
 import type { HookScopeController } from "../../hooks/scope"
 import type { SkillLifecycleMatch } from "./registry"
-
-export type SkillActivationTrigger = "explicit" | "read_file"
+import { getSkillUseKey, type SkillActivationTrigger, type SkillUseTracker } from "./tracker"
 
 export interface SkillActivationOptions {
   skill: SkillLifecycleMatch
@@ -17,6 +15,7 @@ export interface SkillActivationOptions {
   sessionId?: string
   hookScope?: HookScopeController
   firedSkillKeys?: Set<string>
+  skillUseTracker?: SkillUseTracker
   resolveHooks: (event: HookEvent, context: HookContext) => HookConfig[]
   onHookResult?: HookResultCallback
 }
@@ -28,13 +27,8 @@ export interface SkillActivationResult {
   skipped: boolean
 }
 
-function normalizePathKey(input: string): string {
-  const normalized = resolve(input).replace(/\\/g, "/").replace(/\/+$/, "")
-  return process.platform === "win32" ? normalized.toLowerCase() : normalized
-}
-
 export function getSkillActivationKey(skill: SkillLifecycleMatch): string {
-  return normalizePathKey(skill.rootDir)
+  return getSkillUseKey(skill)
 }
 
 function collectHookNotes(result: HookResult | null): string[] {
@@ -71,6 +65,7 @@ function buildSkillContext(options: SkillActivationOptions): HookContext {
     skillRoot: options.skill.rootDir,
     pluginId: options.skill.pluginId,
     pluginName: options.skill.pluginName,
+    pluginRoot: options.skill.pluginRoot,
     skillTriggerToolName: options.toolName
   }
 }
@@ -103,25 +98,19 @@ export async function activateSkillLifecycle(
     return { blocked: true, reason: blockReason, notes, skipped: false }
   }
 
-  // Mark fired BEFORE PostSkillUse runs — Pre already passed, so the skill is
-  // considered activated for the rest of the run. If Post throws or the run is
-  // aborted later, we still don't want a duplicate Pre to fire on a subsequent
-  // read of the same skill.
+  // Mark fired after Pre passes — the skill is now considered activated for
+  // the rest of the run. PostSkillUse runs later at turn completion, so a later
+  // read of the same skill should not re-run PreSkillUse.
   options.firedSkillKeys?.add(key)
   options.hookScope?.activateSkill(
     options.skill.name,
     options.skill.pluginId,
     options.skill.rootDir
   )
-
-  const postContext = buildSkillContext(options)
-  const postResult = await runHooksEnriched(
-    options.resolveHooks("PostSkillUse", postContext),
-    "PostSkillUse",
-    postContext,
-    options.onHookResult
-  )
-  notes.push(...collectHookNotes(postResult))
+  options.skillUseTracker?.recordSkillUse(options.skill, {
+    trigger: options.trigger,
+    triggerToolName: options.toolName
+  })
 
   return { blocked: false, notes, skipped: false }
 }

@@ -52,6 +52,7 @@ import { runHooksEnriched } from "../hooks/required-skill"
 import type { HookScopeController } from "../hooks/scope"
 import type { SkillLifecycleMatch, SkillLifecycleRegistry } from "./skill-lifecycle/registry"
 import { getSkillActivationKey } from "./skill-lifecycle/activation"
+import type { SkillUseTracker } from "./skill-lifecycle/tracker"
 import type { AgentFileMutationKind } from "../services/agent-auto-commit"
 
 /**
@@ -199,6 +200,8 @@ export interface LocalSandboxOptions {
   skillLifecycleRegistry?: SkillLifecycleRegistry
   /** Shared run-scoped set used to avoid firing skill lifecycle hooks twice. */
   skillHookKeys?: Set<string>
+  /** Records skills activated this turn so PostSkillUse can run at turn completion. */
+  skillUseTracker?: SkillUseTracker
 }
 
 /**
@@ -265,6 +268,7 @@ export class LocalSandbox
   private readonly _onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
   private _skillLifecycleRegistry?: SkillLifecycleRegistry
   private readonly _skillHooksFired: Set<string>
+  private readonly _skillUseTracker?: SkillUseTracker
   private readonly _pendingSkillHookContexts: PendingSkillHookContext[] = []
   private readonly _hiddenSkillDirKeys = new Set<string>()
 
@@ -902,6 +906,7 @@ export class LocalSandbox
     this._onFileMutation = options.onFileMutation
     this._skillLifecycleRegistry = options.skillLifecycleRegistry
     this._skillHooksFired = options.skillHookKeys ?? new Set<string>()
+    this._skillUseTracker = options.skillUseTracker
     this._sandboxCacheRoot = LocalSandbox.buildSandboxCacheRoot(baseEnv, this.workingDir)
     this._sharedSandboxCacheRoot = LocalSandbox.buildSharedSandboxCacheRoot(baseEnv)
     this.abortSignal = options.abortSignal
@@ -1441,11 +1446,10 @@ export class LocalSandbox
     }
     let skillMatch: SkillLifecycleMatch | null = null
     let fireSkillHooks = false
-    let resolvedForSkill: string | undefined
     const skillHookNotes: string[] = []
     try {
       try {
-        resolvedForSkill = this._resolvePath(filePath)
+        const resolvedForSkill = this._resolvePath(filePath)
         skillMatch = this._skillLifecycleRegistry?.resolveRead(filePath, resolvedForSkill) ?? null
         const skillHookKey = skillMatch ? this.getSkillHookKey(skillMatch) : ""
         if (skillMatch && !this._skillHooksFired.has(skillHookKey)) {
@@ -1460,6 +1464,7 @@ export class LocalSandbox
             skillRoot: skillMatch.rootDir,
             pluginId: skillMatch.pluginId,
             pluginName: skillMatch.pluginName,
+            pluginRoot: skillMatch.pluginRoot,
             skillTriggerToolName: "read_file"
           }
           const preResult = await this.runHooks("PreSkillUse", preContext)
@@ -1512,41 +1517,10 @@ export class LocalSandbox
 
       if (fireSkillHooks && skillMatch) {
         this._hookScope?.activateSkill(skillMatch.name, skillMatch.pluginId, skillMatch.rootDir)
-        try {
-          const resultPreview =
-            result.length > 20_000
-              ? `${result.slice(0, 20_000)}\n...[truncated ${result.length - 20_000} chars]`
-              : result
-          const postContext: HookContext = {
-            toolName: "read_file",
-            toolArgs: { filePath, offset, limit },
-            toolResult: JSON.stringify({
-              path: filePath,
-              resolvedPath: resolvedForSkill ?? resolvedPath,
-              content: resultPreview,
-              truncated: resultPreview.length !== result.length
-            }),
-            workspacePath: this.workingDir,
-            sessionId: this.runId,
-            skillName: skillMatch.name,
-            skillPath: skillMatch.path,
-            skillRoot: skillMatch.rootDir,
-            pluginId: skillMatch.pluginId,
-            pluginName: skillMatch.pluginName,
-            skillTriggerToolName: "read_file"
-          }
-          const postResult = await this.runHooks("PostSkillUse", postContext)
-          skillHookNotes.push(
-            ...[
-              postResult?.stdout,
-              postResult?.additionalContext,
-              postResult?.systemMessage,
-              postResult?.decision === "block" ? postResult.reason : undefined
-            ].filter((item): item is string => Boolean(item))
-          )
-        } catch (hookError) {
-          console.warn("[Hooks] PostSkillUse error:", hookError)
-        }
+        this._skillUseTracker?.recordSkillUse(skillMatch, {
+          trigger: "read_file",
+          triggerToolName: "read_file"
+        })
         this.enqueueSkillHookContext(skillMatch, skillHookNotes)
       }
 

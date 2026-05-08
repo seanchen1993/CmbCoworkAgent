@@ -71,6 +71,7 @@ export interface HookLogEntry {
   decision?: string
   stdout: string
   stderr: string
+  additionalContext?: string
   systemMessage?: string
   timestamp: Date
 }
@@ -226,6 +227,7 @@ interface CustomEventData {
   decision?: string
   stdout?: string
   stderr?: string
+  additionalContext?: string
   systemMessage?: string
   result?: AgentAutoCommitResult
 }
@@ -331,7 +333,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       hookLogsSubscribersRef.current[threadId] = new Set()
     }
     hookLogsSubscribersRef.current[threadId].add(callback)
-    return () => { hookLogsSubscribersRef.current[threadId]?.delete(callback) }
+    return () => {
+      hookLogsSubscribersRef.current[threadId]?.delete(callback)
+    }
   }, [])
 
   const getHookLogs = useCallback((threadId: string): HookLogEntry[] => {
@@ -434,7 +438,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     const raw = typeof error === "string" ? error : error.message
 
     // Strip LangChain troubleshooting URL suffix (appended by @langchain/openai on 4xx errors)
-    const errorMessage = raw.replace(/\n\nTroubleshooting URL: https:\/\/docs\.langchain\.com\S*/g, "").trim()
+    const errorMessage = raw
+      .replace(/\n\nTroubleshooting URL: https:\/\/docs\.langchain\.com\S*/g, "")
+      .trim()
 
     // Check for context window exceeded errors
     const contextWindowMatch = errorMessage.match(
@@ -464,7 +470,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     // Check for model not found (404 — wrong model name)
     // Use lc_error_code as primary signal; fall back to pattern matching "404" + model-related keywords
     const lcCode = (error as Error & { lc_error_code?: string }).lc_error_code
-    if (lcCode === "MODEL_NOT_FOUND" || (/\b404\b/.test(errorMessage) && /model|not.found|does.not.exist/i.test(errorMessage))) {
+    if (
+      lcCode === "MODEL_NOT_FOUND" ||
+      (/\b404\b/.test(errorMessage) && /model|not.found|does.not.exist/i.test(errorMessage))
+    ) {
       return `模型不存在，请检查设置中的模型名称是否正确。\n${errorMessage}`
     }
 
@@ -594,6 +603,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             decision: data.decision,
             stdout: data.stdout ?? "",
             stderr: data.stderr ?? "",
+            additionalContext: data.additionalContext,
             systemMessage: data.systemMessage,
             timestamp: new Date()
           }
@@ -769,7 +779,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           const routingState = metadata.routingState as
             | { lastResolvedModelId?: string; lastResolvedTier?: string }
             | undefined
-          const effectiveModel = routingState?.lastResolvedModelId || (metadata.model as string) || ""
+          const effectiveModel =
+            routingState?.lastResolvedModelId || (metadata.model as string) || ""
           if (effectiveModel) {
             updateThreadState(threadId, () => ({
               currentModel: effectiveModel,
@@ -777,7 +788,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 ? {
                     routingResult: {
                       resolvedModelId: routingState.lastResolvedModelId!,
-                      resolvedTier: (routingState.lastResolvedTier as "premium" | "economy") ?? "premium",
+                      resolvedTier:
+                        (routingState.lastResolvedTier as "premium" | "economy") ?? "premium",
                       routeReason: "restored from thread state"
                     }
                   }
@@ -1131,7 +1143,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         updateThreadState(threadId, () => ({
           pendingApproval: {
             id: (req.id as string) || "",
-            tool_call: (req.tool_call as { id: string; name: string; args: Record<string, unknown> }) || { id: "", name: "execute", args: {} },
+            tool_call: (req.tool_call as {
+              id: string
+              name: string
+              args: Record<string, unknown>
+            }) || { id: "", name: "execute", args: {} },
             allowed_decisions: ["approve", "reject"],
             command: req.command,
             reason: req.reason,
@@ -1157,7 +1173,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         }
       })
       const cleanupTimeout = window.api.sandbox.onApprovalTimeout(threadId, (data) => {
-        console.warn(`[ThreadProvider] Approval timed out for thread ${threadId}: requestId=${data.requestId}`)
+        console.warn(
+          `[ThreadProvider] Approval timed out for thread ${threadId}: requestId=${data.requestId}`
+        )
         updateThreadState(threadId, () => ({ pendingApproval: null }))
       })
       approvalListenerCleanups.current[threadId] = [cleanupApproval, cleanupTimeout]

@@ -95,7 +95,7 @@ export interface HookResult {
   stderr: string
   blocked: boolean // exit code 2 = intentional block (PreToolUse / UserPromptSubmit)
   /** Structured fields parsed from JSON stdout (exit 0 only) */
-  additionalContext?: string // injected into agent context (invisible to user)
+  additionalContext?: string // event-specific context; some hook types keep this as log-only
   systemMessage?: string // visible warning to user
   /** Optional skill to load as remediation guidance when the hook fires. */
   requiredSkill?: string

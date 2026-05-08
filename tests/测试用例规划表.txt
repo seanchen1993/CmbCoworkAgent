@@ -51,8 +51,8 @@ D. LocalSandbox.read + Skill Hook 集成
 D1	read SKILL.md，PreSkillUse 通过 → 返回纯净文件内容（不含 hook notes）	文件内容不被污染
 D2	read SKILL.md，PreSkillUse blocked → 返回 Error reading skill ...	不实际读文件
 D3	read 同一 SKILL.md 两次 → PreSkillUse 只触发一次	_skillHooksFired 去重
-D4	PostSkillUse 入队 → drainSkillHookContexts() 返回带 Skill: <name>\nSkill path: <path> 头部	队列结构正确
-D5	drain 后队列清空	splice(0) 语义
+D4	PreSkillUse 输出入队 → drainSkillHookContexts() 返回带 Skill: <name>\nSkill path: <path> 头部	队列结构正确
+D5	drain 后队列清空；PostSkillUse 延迟到本轮结束阶段，不在 read 后入队	splice(0) 语义与新生命周期语义
 D6	read 非 SKILL.md 文件	不触发 skill hooks
 E. Middleware 注入（runtime.ts createSkillHookContextMiddleware）
 #	用例	验证点

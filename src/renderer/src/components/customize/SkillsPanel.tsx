@@ -1164,7 +1164,7 @@ function SkillsGuide(): React.JSX.Element {
                   ，都会视为该技能被激活。
                   <code className="mx-1 font-mono text-foreground/85">PreSkillUse</code>和
                   <code className="mx-1 font-mono text-foreground/85">PostSkillUse</code>
-                  会围绕这次激活触发。
+                  会围绕这次激活触发；前者在使用前，后者在本轮结束阶段。
                 </p>
                 <p>
                   技能激活后，本轮运行里它自己的

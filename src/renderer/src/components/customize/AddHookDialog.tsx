@@ -61,12 +61,12 @@ const HOOK_EVENTS: { value: HookEvent; label: string; description: string }[] = 
   {
     value: "PreSkillUse",
     label: "技能使用前（PreSkillUse）",
-    description: "在 Agent 首次读取某个 Skill 前触发，可按技能名拦截或注入上下文"
+    description: "在技能被选择、激活或首次读取前触发，可按技能名拦截或注入使用前上下文"
   },
   {
     value: "PostSkillUse",
     label: "技能使用后（PostSkillUse）",
-    description: "在 Agent 首次读取某个 Skill 后触发，可记录使用情况或补充技能约束"
+    description: "在本轮结束时，对本轮实际激活过的技能触发，可记录使用结果或要求 Agent 修订"
   },
   {
     value: "UserPromptSubmit",
@@ -160,11 +160,7 @@ const COMMAND_HOOK_SOURCE_INPUT_FIELDS = [
   "hook_source_path"
 ]
 
-const COMMAND_HOOK_SOURCE_ENV_FIELDS = [
-  "HOOK_SOURCE_TYPE",
-  "HOOK_SOURCE_ROOT",
-  "HOOK_SOURCE_PATH"
-]
+const COMMAND_HOOK_SOURCE_ENV_FIELDS = ["HOOK_SOURCE_TYPE", "HOOK_SOURCE_ROOT", "HOOK_SOURCE_PATH"]
 
 function mergeCommandHookFieldKeys(fields: string[], extra: string[]): string[] {
   const result = [...fields]
@@ -350,7 +346,8 @@ exit 0
 `
   },
   PreSkillUse: {
-    inputDescription: "当前事件发生在 Agent 首次读取某个 Skill 前，重点字段是技能名、技能路径和触发读取的工具。",
+    inputDescription:
+      "当前事件发生在技能被选择、激活或首次读取前，重点字段是技能名、技能路径和触发技能的工具。",
     inputFields: [
       "hook_event_name",
       "session_id",
@@ -383,7 +380,8 @@ exit 0
     "filePath": "C:\\\\Users\\\\me\\\\.codex\\\\skills\\\\code-review\\\\SKILL.md"
   }
 }`,
-    outputDescription: "当前事件适合做技能准入、审计登记，或给 Agent 注入使用该技能前必须遵守的约束。",
+    outputDescription:
+      "当前事件适合做技能准入、审计登记，或给 Agent 注入使用该技能前必须遵守的约束。",
     outputNotes: [
       "`exit = 2` 或 `decision=block` 可阻止本次技能读取。",
       "`additionalContext` / 普通 stdout 会追加到 Agent 上下文。"
@@ -429,7 +427,8 @@ exit 0
 `
   },
   PostSkillUse: {
-    inputDescription: "当前事件发生在 Agent 首次读取某个 Skill 后，可读取技能信息、触发工具和读取结果摘要。",
+    inputDescription:
+      "当前事件发生在本轮结束阶段；每个本轮实际激活过的技能触发一次，可读取技能信息、触发方式和 stop_context。",
     inputFields: [
       "hook_event_name",
       "session_id",
@@ -439,7 +438,7 @@ exit 0
       "skill_root",
       "tool_name",
       "tool_input",
-      "tool_response"
+      "stop_context"
     ],
     envFields: [
       "HOOK_EVENT",
@@ -449,8 +448,7 @@ exit 0
       "SKILL_PATH",
       "SKILL_ROOT",
       "TOOL_NAME",
-      "TOOL_ARGS",
-      "TOOL_RESULT"
+      "TOOL_ARGS"
     ],
     stdinExample: `{
   "hook_event_name": "PostSkillUse",
@@ -458,14 +456,25 @@ exit 0
   "cwd": "C:\\\\ai\\\\demo",
   "skill_name": "code-review",
   "tool_name": "read_file",
-  "tool_response": {
-    "path": "C:\\\\Users\\\\me\\\\.codex\\\\skills\\\\code-review\\\\SKILL.md"
+  "tool_input": {
+    "trigger": "read_file",
+    "skillName": "code-review",
+    "skillPath": "C:\\\\Users\\\\me\\\\.codex\\\\skills\\\\code-review\\\\SKILL.md"
+  },
+  "stop_context": {
+    "userMessage": "帮我审查这次修改",
+    "assistantResponse": "已完成审查...",
+    "toolCalls": ["read_file", "grep"],
+    "usedSkills": ["code-review"]
   }
 }`,
-    outputDescription: "当前事件适合做使用记录、指标上报，或把技能后的补充检查要求回灌给 Agent。",
+    outputDescription:
+      "当前事件适合做使用记录、指标上报，或在本轮结束前要求 Agent 根据技能要求修订结果。",
     outputNotes: [
-      "普通 stdout 会追加到 Agent 下一轮上下文。",
-      "如需让 Agent 重新审视技能使用结果，可返回 `decision=block` 与 `reason`。"
+      "非阻塞 stdout / stderr / additionalContext / systemMessage 只保留在 Hook 执行记录里，不会注入模型上下文，也不会触发修订。",
+      "如需让 Agent 重新审视本轮结果，必须返回 `decision=block` 与 `reason`；此时 blocking 结果里的 `additionalContext` / `systemMessage` 会进入修订提示。",
+      "PostSkillUse 的修订次数与 Stop Hook 分开计算，避免技能后检查抢占最终 Stop 验收额度。",
+      "如果用户中止本轮或运行异常导致未进入结束阶段，pending 的 PostSkillUse 不会补跑。"
     ],
     outputExample: `已记录技能使用：code-review`,
     pythonExample: `import json
@@ -883,7 +892,8 @@ export const SKILL_USE_TOOL_INPUT_DOC: ToolInputDoc = {
   key: "skill-use",
   label: "SkillUse",
   fields: ["filePath", "offset", "limit"],
-  description: "触发技能加载的工具入参通常来自 read_file；技能名和路径在顶层 skill_name / skill_path 字段。",
+  description:
+    "PreSkillUse 通常来自 read_file 或显式选择；PostSkillUse 还会包含本轮结束阶段的 stop_context。",
   fileHint: "skill_path 指向被读取的 SKILL.md，skill_root 指向技能目录。"
 }
 
@@ -912,7 +922,7 @@ export function getCommandHookToolInputSummary(event: HookEvent, matcher?: strin
     return "当前事件的 tool_input 来自审批请求，常见字段是 command、reason、filePath。"
   }
   if (event === "PreSkillUse" || event === "PostSkillUse") {
-    return "当前 matcher 命中技能名；技能信息在 skill_name、skill_path、skill_root，触发读取参数在 tool_input。"
+    return "当前 matcher 命中技能名；技能信息在 skill_name、skill_path、skill_root，触发方式在 tool_input。"
   }
   if (event === "PreToolUse" || event === "PostToolUse") {
     if (!matcher || matcher === "*") {
@@ -1014,7 +1024,7 @@ export function getCommandHookReadableContextDocs(event: HookEvent): CommandHook
     stdinFields.push(
       {
         key: "skill_name",
-        description: "当前被读取的技能名；matcher 对这个字段生效。"
+        description: "当前被激活或使用完毕的技能名；matcher 对这个字段生效。"
       },
       {
         key: "skill_path",
@@ -1034,17 +1044,18 @@ export function getCommandHookReadableContextDocs(event: HookEvent): CommandHook
       { key: "SKILL_PATH", description: "当前 SKILL.md 路径，对应 stdin 里的 skill_path。" },
       {
         key: "SKILL_ROOT",
-        description: "当前事件关联的技能目录，对应 stdin 里的 skill_root；非 Skill Hook 的 cwd 请看 HOOK_SOURCE_ROOT。"
+        description:
+          "当前事件关联的技能目录，对应 stdin 里的 skill_root；非 Skill Hook 的 cwd 请看 HOOK_SOURCE_ROOT。"
       }
     )
     extraObjects.push({
       key: "skill",
       fields: ["skill_name", "skill_path", "skill_root", "skill_trigger_tool_name"],
-      description: "描述当前首次读取的技能，以及触发读取的工具。"
+      description: "描述当前技能，以及触发该技能的工具或显式选择动作。"
     })
   }
 
-  if (event === "PostToolUse" || event === "PostSkillUse") {
+  if (event === "PostToolUse") {
     stdinFields.push({
       key: "tool_response",
       description: "工具执行后的结构化返回；stdin 里会尽量还原成对象，便于脚本直接读取。"
@@ -1059,6 +1070,19 @@ export function getCommandHookReadableContextDocs(event: HookEvent): CommandHook
       description:
         "结构随实际工具返回而变。比如写文件可能会有 success、message 等字段，其他工具则会带自己的返回结构。",
       note: "如果上游结果不是合法 JSON，stdin 里的 tool_response 会保留原始字符串。"
+    })
+  }
+
+  if (event === "PostSkillUse") {
+    stdinFields.push({
+      key: "stop_context",
+      description: "Agent 本轮结束前的摘要信息，用于判断该技能使用后的结果是否满足要求。"
+    })
+    extraObjects.push({
+      key: "stop_context",
+      fields: ["userMessage", "assistantResponse", "toolCalls", "usedSkills"],
+      description: "包含本轮用户目标、Agent 最终回复、调用过的工具，以及已使用的技能。",
+      note: "stop_context 目前只在 stdin JSON 中提供，没有对应的专用环境变量。"
     })
   }
 
@@ -1211,8 +1235,7 @@ export function AddHookDialog(props: {
     [event]
   )
   const isSkillMatcherEvent = event === "PreSkillUse" || event === "PostSkillUse"
-  const showMatcher =
-    event === "PreToolUse" || event === "PostToolUse" || isSkillMatcherEvent
+  const showMatcher = event === "PreToolUse" || event === "PostToolUse" || isSkillMatcherEvent
   const skillMatcherOptions = useMemo(
     () => [
       { value: "*", label: "所有技能（*）", description: "匹配任意技能读取" },
@@ -1527,7 +1550,8 @@ export function AddHookDialog(props: {
                 <p className="text-xs text-muted-foreground">
                   脚本会收到一份 stdin JSON 和若干环境变量，其中 stdin 是完整权威输入； `TOOL_ARGS`
                   / `TOOL_RESULT` 这类大字段只会在 payload 较小时附带。想返回结构化结果时， `stdout`
-                  必须只输出最终文本或 JSON；`cwd` 和 `HOOK_SOURCE_ROOT` 表示命令实际执行目录，调试日志请写到 `stderr`。
+                  必须只输出最终文本或 JSON；`cwd` 和 `HOOK_SOURCE_ROOT`
+                  表示命令实际执行目录，调试日志请写到 `stderr`。
                 </p>
                 <details className="rounded-md border border-border/60 bg-muted/20 px-3 py-2">
                   <summary className="cursor-pointer text-xs font-medium text-foreground">

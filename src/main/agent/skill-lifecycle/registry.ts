@@ -7,6 +7,7 @@ export interface SkillLifecycleMatch {
   rootDir: string
   pluginId?: string
   pluginName?: string
+  pluginRoot?: string
 }
 
 interface SkillLifecycleEntry extends SkillLifecycleMatch {
@@ -18,6 +19,7 @@ export interface SkillLifecycleSource {
   sourceDir: string
   pluginId?: string
   pluginName?: string
+  pluginRoot?: string
   maxDepth?: number
 }
 
@@ -46,6 +48,7 @@ function collectSkillEntriesFromSource(
       rootDir: skill.rootDir,
       pluginId: source.pluginId,
       pluginName: source.pluginName,
+      pluginRoot: source.pluginRoot,
       normalizedDocPath: normalizePath(skill.skillMdPath),
       normalizedRootDir: normalizePath(skill.rootDir)
     })
@@ -75,7 +78,8 @@ export class SkillLifecycleRegistry {
       path: entry.path,
       rootDir: entry.rootDir,
       pluginId: entry.pluginId,
-      pluginName: entry.pluginName
+      pluginName: entry.pluginName,
+      pluginRoot: entry.pluginRoot
     }
   }
 

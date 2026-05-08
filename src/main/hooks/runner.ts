@@ -689,7 +689,8 @@ async function executeHook(
  * Run all matching hooks for a given event.
  *
  * - PreToolUse/PreSkillUse/UserPromptSubmit: exit code 2 or decision=block stops the turn.
- * - PostToolUse/PostSkillUse: collects stdout from all hooks as extra context.
+ * - PostToolUse: collects hook output so callers can decide how to surface it.
+ * - PostSkillUse: logs every hook result, but only blocking results are returned for revision.
  * - Stop/SubagentStop/Notification/SessionStart/SessionEnd: fire-and-forget.
  */
 export type HookResultCallback = (event: HookEvent, hook: HookConfig, result: HookResult) => void
@@ -797,7 +798,7 @@ export async function runHooks(
     }
   }
 
-  if (event === "PostToolUse" || event === "PostSkillUse") {
+  if (event === "PostToolUse") {
     const outputs: string[] = []
     const contexts: string[] = []
     const messages: string[] = []
@@ -815,7 +816,7 @@ export async function runHooks(
         shouldHalt = true
         haltReason = result.stopReason ?? haltReason
       }
-      // Post* decision=block: feed reason back to agent for reconsideration
+      // PostToolUse decision=block: feed reason back to agent for reconsideration.
       if (result.decision === "block" && result.reason) {
         blockReasons.push(result.reason)
       }
@@ -832,6 +833,46 @@ export async function runHooks(
       stopReason: haltReason,
       decision: blockReasons.length > 0 ? "block" : undefined,
       reason: blockReasons.length > 0 ? blockReasons.join("\n") : undefined,
+      additionalContext: contexts.length > 0 ? contexts.join("\n") : undefined,
+      systemMessage: messages.length > 0 ? messages.join("\n") : undefined
+    }
+  }
+
+  if (event === "PostSkillUse") {
+    const contexts: string[] = []
+    const messages: string[] = []
+    const blockReasons: string[] = []
+    for (const hook of matched) {
+      const hookContext = enrichContextFromHook(hook, context)
+      const result = await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event)
+      console.log(
+        `[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}`
+      )
+      onHookResult?.(event, hook, result)
+
+      if (!isBlockingResult(result)) continue
+
+      blockReasons.push(
+        result.reason ||
+          result.stopReason ||
+          result.stdout ||
+          result.stderr ||
+          "PostSkillUse hook requested revision"
+      )
+      if (result.additionalContext) contexts.push(result.additionalContext)
+      if (result.systemMessage) messages.push(result.systemMessage)
+    }
+
+    if (blockReasons.length === 0) return null
+
+    return {
+      exitCode: 0,
+      stdout: blockReasons.join("\n"),
+      stderr: "",
+      blocked: true,
+      continue: false,
+      decision: "block",
+      reason: blockReasons.join("\n"),
       additionalContext: contexts.length > 0 ? contexts.join("\n") : undefined,
       systemMessage: messages.length > 0 ? messages.join("\n") : undefined
     }

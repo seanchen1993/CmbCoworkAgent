@@ -4,7 +4,7 @@
  * Verifies:
  *  - matcher matches against `skillName` (not `toolName`) for skill events
  *  - blocking semantics (exit code 2, JSON decision=block)
- *  - additionalContext / systemMessage propagation from PostSkillUse
+ *  - non-blocking PostSkillUse output remains observable-only
  *  - SKILL_NAME / SKILL_PATH / SKILL_ROOT env var injection
  *  - stdin payload contains skill_* fields
  *
@@ -165,19 +165,75 @@ async function testPreSkillBlocksOnJsonDecision(): Promise<void> {
   )
 }
 
-async function testPostSkillAdditionalContextFlows(): Promise<void> {
-  const command = nodeCommand("console.log(JSON.stringify({additionalContext:'extra hint'}))")
+async function testPostSkillNonBlockingOutputIsObservableOnly(): Promise<void> {
+  const command = nodeCommand(
+    "console.log(JSON.stringify({additionalContext:'extra hint', systemMessage:'notice'}))"
+  )
   const hook = makeHook({
     event: "PostSkillUse",
     matcher: "*",
     command
   })
-  const result = await runHooks([hook], "PostSkillUse", { skillName: "any" })
-  assert(result !== null, "PostSkillUse hook should produce result")
-  // For post events, additionalContext is collected into result.additionalContext
+  let observedAdditionalContext = ""
+  let observedSystemMessage = ""
+  const result = await runHooks(
+    [hook],
+    "PostSkillUse",
+    { skillName: "any" },
+    (_event, _hook, hookResult) => {
+      observedAdditionalContext = hookResult.additionalContext ?? ""
+      observedSystemMessage = hookResult.systemMessage ?? ""
+    }
+  )
+  assert(result === null, "non-blocking PostSkillUse output should not return aggregate context")
   assert(
-    (result!.additionalContext ?? "").includes("extra hint"),
-    `expected additionalContext to include "extra hint", got "${result!.additionalContext}"`
+    observedAdditionalContext.includes("extra hint"),
+    "additionalContext should remain visible to hook logs"
+  )
+  assert(
+    observedSystemMessage.includes("notice"),
+    "systemMessage should remain visible to hook logs"
+  )
+}
+
+async function testPostSkillOnlyBlockingOutputFeedsRevision(): Promise<void> {
+  const nonBlockingHook = makeHook({
+    id: "non-blocking",
+    event: "PostSkillUse",
+    matcher: "*",
+    command: nodeCommand(
+      "console.log(JSON.stringify({additionalContext:'non-block context', systemMessage:'non-block notice'}))"
+    )
+  })
+  const blockingHook = makeHook({
+    id: "blocking",
+    event: "PostSkillUse",
+    matcher: "*",
+    command: nodeCommand(
+      "console.log(JSON.stringify({decision:'block', reason:'needs revision', additionalContext:'block context', systemMessage:'block notice'}))"
+    )
+  })
+
+  const observedHookIds: string[] = []
+  const result = await runHooks(
+    [nonBlockingHook, blockingHook],
+    "PostSkillUse",
+    { skillName: "any" },
+    (_event, hook) => {
+      observedHookIds.push(hook.id)
+    }
+  )
+
+  assert(observedHookIds.length === 2, "both PostSkillUse hooks should be logged")
+  assert(result?.decision === "block", "blocking PostSkillUse should return aggregate block")
+  assert(result.reason?.includes("needs revision"), "blocking reason should feed revision")
+  assert(
+    result.additionalContext === "block context",
+    `only blocking additionalContext should feed revision, got "${result.additionalContext}"`
+  )
+  assert(
+    result.systemMessage === "block notice",
+    `only blocking systemMessage should feed revision, got "${result.systemMessage}"`
   )
 }
 
@@ -301,14 +357,32 @@ process.stdin.on('end', () => {
     const cwd = normalizePathForAssert(String(payload.cwd))
     const expected = normalizePathForAssert(globalRoot)
     assert(cwd === expected, `hook command cwd should use hookSourceRoot, got ${cwd}`)
-    assert(payload.hookSourceType === "global", `HOOK_SOURCE_TYPE mismatch: ${payload.hookSourceType}`)
-    assert(payload.hookSourceRoot === globalRoot, `HOOK_SOURCE_ROOT mismatch: ${payload.hookSourceRoot}`)
-    assert(payload.workspacePath === workspaceRoot, `WORKSPACE_PATH mismatch: ${payload.workspacePath}`)
-    assert(payload.skillRoot === skillRoot, `SKILL_ROOT should remain event context, got ${payload.skillRoot}`)
+    assert(
+      payload.hookSourceType === "global",
+      `HOOK_SOURCE_TYPE mismatch: ${payload.hookSourceType}`
+    )
+    assert(
+      payload.hookSourceRoot === globalRoot,
+      `HOOK_SOURCE_ROOT mismatch: ${payload.hookSourceRoot}`
+    )
+    assert(
+      payload.workspacePath === workspaceRoot,
+      `WORKSPACE_PATH mismatch: ${payload.workspacePath}`
+    )
+    assert(
+      payload.skillRoot === skillRoot,
+      `SKILL_ROOT should remain event context, got ${payload.skillRoot}`
+    )
     const stdin = payload.stdin as Record<string, unknown>
     assert(stdin.cwd === globalRoot, `stdin cwd should use hookSourceRoot, got ${stdin.cwd}`)
-    assert(stdin.hook_source_root === globalRoot, `stdin hook_source_root mismatch: ${stdin.hook_source_root}`)
-    assert(stdin.skill_root === skillRoot, `stdin skill_root should remain event context, got ${stdin.skill_root}`)
+    assert(
+      stdin.hook_source_root === globalRoot,
+      `stdin hook_source_root mismatch: ${stdin.hook_source_root}`
+    )
+    assert(
+      stdin.skill_root === skillRoot,
+      `stdin skill_root should remain event context, got ${stdin.skill_root}`
+    )
   })
 }
 
@@ -417,10 +491,19 @@ fs.writeFileSync(${JSON.stringify(out)}, JSON.stringify({
     const cwd = normalizePathForAssert(String(payload.cwd))
     const expected = normalizePathForAssert(pluginRoot)
     assert(cwd === expected, `plugin hook cwd should default to plugin source root, got ${cwd}`)
-    assert(payload.hookSourceType === "plugin", `HOOK_SOURCE_TYPE mismatch: ${payload.hookSourceType}`)
-    assert(payload.hookSourceRoot === pluginRoot, `HOOK_SOURCE_ROOT mismatch: ${payload.hookSourceRoot}`)
+    assert(
+      payload.hookSourceType === "plugin",
+      `HOOK_SOURCE_TYPE mismatch: ${payload.hookSourceType}`
+    )
+    assert(
+      payload.hookSourceRoot === pluginRoot,
+      `HOOK_SOURCE_ROOT mismatch: ${payload.hookSourceRoot}`
+    )
     assert(payload.pluginRoot === pluginRoot, `PLUGIN_ROOT mismatch: ${payload.pluginRoot}`)
-    assert(payload.workspacePath === workspaceRoot, `WORKSPACE_PATH mismatch: ${payload.workspacePath}`)
+    assert(
+      payload.workspacePath === workspaceRoot,
+      `WORKSPACE_PATH mismatch: ${payload.workspacePath}`
+    )
     assert(
       payload.skillRoot === skillRoot,
       `SKILL_ROOT should remain event context, got ${payload.skillRoot}`
@@ -527,8 +610,10 @@ async function run(): Promise<void> {
   console.log("PASS B5 PreSkillUse blocks on exit 2")
   await testPreSkillBlocksOnJsonDecision()
   console.log("PASS B6 PreSkillUse blocks on decision=block")
-  await testPostSkillAdditionalContextFlows()
-  console.log("PASS B7 PostSkillUse additionalContext flows")
+  await testPostSkillNonBlockingOutputIsObservableOnly()
+  console.log("PASS B7a non-blocking PostSkillUse output is observable-only")
+  await testPostSkillOnlyBlockingOutputFeedsRevision()
+  console.log("PASS B7b only blocking PostSkillUse output feeds revision")
   await testEnvVarsAreInjected()
   console.log("PASS B8 SKILL_NAME/SKILL_PATH/SKILL_ROOT env vars injected")
   await testStdinPayloadIncludesSkillFields()
