@@ -5,7 +5,7 @@
  *   npx tsx tests/trace-telemetry.spec.ts
  */
 
-import { mkdtemp, readFile, rm } from "fs/promises"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "fs/promises"
 import { tmpdir } from "os"
 import { join } from "path"
 import { SkillUsageDetector } from "../src/main/agent/skill-evolution/usage-detector.ts"
@@ -70,6 +70,55 @@ function testSkillUsageDetectorNormalizesVersions(): void {
     ["代码审查-v1.0.0", "接口设计-v2.3.4", "斜杠技能-v3.1.4"],
     "Skill detector should emit versioned identifiers with default version fallback"
   )
+}
+
+async function testSkillUsageDetectorReadsSkillMetadataDirectly(): Promise<void> {
+  const rootDir = await mkdtemp(join(tmpdir(), "slash-skill-direct-"))
+  const skillDir = join(rootDir, ".cmbcoworkagent", "skills", "elementui-page")
+  const skillMdPath = join(skillDir, "SKILL.md")
+
+  try {
+    await mkdir(skillDir, { recursive: true })
+    await writeFile(
+      skillMdPath,
+      [
+        "---",
+        "name: elementui-page",
+        "description: Element UI page generator",
+        "version: v1.0.3",
+        "---",
+        "",
+        "Use Element UI components."
+      ].join("\n"),
+      "utf8"
+    )
+
+    const detector = new SkillUsageDetector()
+    detector.onSkillsMetadata([{ name: "elementui-page", path: skillMdPath }])
+    assert(
+      detector.onReadFilePath(skillMdPath),
+      "SKILL.md read should resolve name/version even when preloaded metadata has no version"
+    )
+    assertArrayEqual(
+      detector.getUsedSkillNames(),
+      ["elementui-page-v1.0.3"],
+      "direct slash command skill detection should preserve the SKILL.md version"
+    )
+    assert(!detector.onReadFilePath(skillMdPath), "duplicate skill reads should not add again")
+
+    const directDetector = new SkillUsageDetector()
+    assert(
+      directDetector.onReadFilePath(join(skillDir, "references", "usage.md")),
+      "slash command child file reads should resolve name/version without preloaded metadata"
+    )
+    assertArrayEqual(
+      directDetector.getUsedSkillNames(),
+      ["elementui-page-v1.0.3"],
+      "direct slash command skill detection should preserve the SKILL.md version"
+    )
+  } finally {
+    await rm(rootDir, { recursive: true, force: true })
+  }
 }
 
 async function testTraceCollectorReportsVersionedSkills(): Promise<void> {
@@ -258,6 +307,8 @@ async function testTraceCollectorSanitizesLargeFields(): Promise<void> {
 async function run(): Promise<void> {
   testSkillUsageDetectorNormalizesVersions()
   console.log("PASS Skill usage detector version normalization")
+  await testSkillUsageDetectorReadsSkillMetadataDirectly()
+  console.log("PASS Skill usage detector direct SKILL.md metadata lookup")
   await testTraceCollectorReportsVersionedSkills()
   console.log("PASS trace collector telemetry usedSkills normalization")
   await testTraceCollectorSanitizesLargeFields()

@@ -13,6 +13,7 @@ import {
   setDisabledSkills
 } from "../storage"
 import type { SkillMetadata } from "../types"
+import { parseYamlFrontmatter } from "../utils/skill-identifiers"
 
 interface ZipEntryLike {
   entryName: string
@@ -287,23 +288,6 @@ async function repairMojibakeNamesInSkillDir(skillDirPath: string): Promise<void
       }
     }
   }
-}
-
-function parseYamlFrontmatter(content: string): Record<string, string> {
-  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/)
-  if (!match) return {}
-
-  const yaml = match[1]
-  const result: Record<string, string> = {}
-  for (const line of yaml.split("\n")) {
-    const colonIdx = line.indexOf(":")
-    if (colonIdx > 0) {
-      const key = line.slice(0, colonIdx).trim()
-      const value = line.slice(colonIdx + 1).trim()
-      result[key] = value
-    }
-  }
-  return result
 }
 
 function makeSafeZipFileName(rawName: string): string {

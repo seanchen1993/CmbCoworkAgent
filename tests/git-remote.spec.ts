@@ -41,7 +41,7 @@ function testSshUrlRemoteWithPort(): void {
 }
 
 function testConfiguredGiteeCommitUrl(): void {
-  process.env.VITE_GIT_COMMIT_URL_MATCH_HOST = "git.example.internal,git-paas.example.internal"
+  process.env.VITE_GIT_COMMIT_URL_MATCH_HOST = "git.example.internal,git-paas.example.internal,git-paas-alias.example.internal"
   process.env.VITE_GIT_REPOSITORY_URL_TEMPLATE = "http://git.example.internal/company/_source/{repositoryFullName}"
   process.env.VITE_GIT_COMMIT_URL_TEMPLATE = "http://git.example.internal/company/_source/{repositoryFullName}/-/commit/{sha}"
 
@@ -57,6 +57,13 @@ function testConfiguredGiteeCommitUrl(): void {
     buildGitCommitUrl(info, "118b1f336231137d67503b4a5abf251e75b6ce4c") ===
       "http://git.example.internal/company/_source/S992391/LF39.05_BCWplus_cust/-/commit/118b1f336231137d67503b4a5abf251e75b6ce4c",
     "configured commit URL should use the env template"
+  )
+
+  const aliasInfo = parseGitRemoteInfo("https://git-paas-alias.example.internal/S992391/LF39.05_BCWplus_cust.git")
+  assert(
+    buildGitCommitUrl(aliasInfo, "118b1f336231137d67503b4a5abf251e75b6ce4c") ===
+      "http://git.example.internal/company/_source/S992391/LF39.05_BCWplus_cust/-/commit/118b1f336231137d67503b4a5abf251e75b6ce4c",
+    "configured commit URL should support multiple matched remote hosts"
   )
 
   delete process.env.VITE_GIT_COMMIT_URL_MATCH_HOST

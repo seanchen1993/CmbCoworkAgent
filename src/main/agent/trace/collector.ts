@@ -45,6 +45,7 @@ import { getUserInfo } from "../../storage"
 import { listAllSkills } from "../../ipc/skills"
 import { nowIsoLocal } from "../../util/local-time"
 import {
+  DEFAULT_SKILL_VERSION,
   ensureVersionedSkillIdentifier,
   parseSkillIdentifier
 } from "../../utils/skill-identifiers"
@@ -450,9 +451,14 @@ export class TraceCollector {
             this.usedSkills
               .map((skill) => {
                 const parsed = parseSkillIdentifier(skill)
+                const listedVersion = skillVersionMap.get(parsed.name)
+                const resolvedVersion =
+                  parsed.version && parsed.version !== DEFAULT_SKILL_VERSION
+                    ? parsed.version
+                    : listedVersion ?? parsed.version
                 return ensureVersionedSkillIdentifier(
                   parsed.name,
-                  parsed.version ?? skillVersionMap.get(parsed.name)
+                  resolvedVersion
                 )
               })
               .filter(Boolean)
@@ -495,7 +501,7 @@ export class TraceCollector {
       appVersion: getAppVersionForTrace(),
       steps: this.steps,
       modelCalls: this.modelCalls,
-      nodes: this.finalizeNodes(outcome, endedAt, errorMessage),
+      nodes: this.finalizeNodes(outcome, endedAt, usedSkillsWithVersions, errorMessage),
       totalToolCalls,
       outcome,
       ...(errorMessage ? { errorMessage } : {}),
@@ -524,7 +530,7 @@ export class TraceCollector {
     return trace
   }
 
-  private finalizeNodes(outcome: TraceOutcome, endedAt: string, errorMessage?: string): TraceNode[] {
+  private finalizeNodes(outcome: TraceOutcome, endedAt: string, resolvedUsedSkills: string[], errorMessage?: string): TraceNode[] {
     for (const node of this.nodes) {
       if (node.type === "llm" || node.type === "tool") {
         if (node.status === "running") {
@@ -573,7 +579,7 @@ export class TraceCollector {
       }
       root.metadata = {
         ...(root.metadata ?? {}),
-        usedSkills: [...this.usedSkills]
+        usedSkills: [...resolvedUsedSkills]
       }
     }
 
