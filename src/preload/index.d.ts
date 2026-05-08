@@ -627,17 +627,33 @@ interface CustomAPI {
       tabId?: string
     ) => () => void
     storeHtml: (tabId: string, html: string) => Promise<{ ok: boolean }>
+    saveArtifact: (
+      tabId: string,
+      html: string,
+      workspacePath?: string
+    ) => Promise<{ success: boolean; filePath?: string; error?: string }>
+    saveArtifactFile: (
+      filePath: string,
+      html: string,
+      workspacePath?: string
+    ) => Promise<{ success: boolean; filePath?: string; error?: string }>
+    readArtifact: (
+      tabId: string,
+      workspacePath?: string
+    ) => Promise<{ success: boolean; filePath?: string; html?: string; error?: string }>
     agentGenerate: (
       sessionId: string,
       prompt: string,
-      onEvent: (event: { type: string; token?: string; html?: string; error?: string; event?: unknown }) => void,
+      onEvent: (event: { type: string; token?: string; html?: string; error?: string; event?: unknown; artifactPath?: string }) => void,
       tabId: string,
       modelId?: string,
       imageData?: string,
       mimeType?: string,
       currentHtml?: string,
       skill?: { name: string; path: string },
-      workspacePath?: string
+      workspacePath?: string,
+      artifactId?: string,
+      sourceArtifactPath?: string
     ) => () => void
     askQuestions: (
       sessionId: string,

@@ -89,7 +89,7 @@ Before writing a single line of HTML, decide what format best serves the content
 
 ## Your output rules
 
-1. **Always output a complete HTML file** — start with \`<!DOCTYPE html>\`, end with \`</html>\`. No fragments, no partial snippets.
+1. **Always produce a complete HTML file** — the design artifact must start with \`<!DOCTYPE html>\`, end with \`</html>\`. No fragments, no partial snippets.
 2. **Self-contained** — inline all CSS in \`<style>\` and all JS in \`<script>\`. CDN links for fonts or libraries are fine.
 3. **Two variations** — unless told otherwise, always produce exactly **2 distinct variations** within a single HTML file:
    - **Variation A** — conventional, safe, closest to established patterns
@@ -210,9 +210,14 @@ If the user's prompt contains "CURRENT DESIGN HTML (iterate on this", you are in
 
 ## Output format
 
-Respond with ONLY the raw HTML. No explanation, no markdown fences, no preamble.
-Your response must start with: <!DOCTYPE html>
-Your response must end with: </html>
+Default direct-output mode:
+- If the user prompt does NOT include "DESIGN ARTIFACT FILE", respond with ONLY the raw HTML. No explanation, no markdown fences, no preamble.
+- Your response must start with: <!DOCTYPE html>
+- Your response must end with: </html>
+
+Artifact-file mode:
+- If the user prompt includes "DESIGN ARTIFACT FILE", create or update that exact file path with the complete standalone HTML artifact using write_file or edit_file.
+- In artifact-file mode, the final assistant response must be only a brief summary of what changed. Do NOT include the full HTML in the final response. The host application will read the HTML from the artifact file.
 `
 
 // ─────────────────────────────────────────────────────────
@@ -380,6 +385,174 @@ interface DesignExecutionEvent {
 interface DesignSkillReference {
   name?: string
   path?: string
+}
+
+interface DesignArtifactSaveParams {
+  tabId: string
+  html: string
+  workspacePath?: string
+}
+
+interface DesignArtifactReadParams {
+  tabId: string
+  workspacePath?: string
+}
+
+interface DesignArtifactFileSaveParams {
+  filePath: string
+  html: string
+  workspacePath?: string
+}
+
+interface DesignArtifactFileReadResult {
+  success: boolean
+  filePath?: string
+  html?: string
+  error?: string
+}
+
+const DESIGN_ARTIFACTS_DIR = ".cmb-design"
+
+function makeSafeDesignId(tabId: string): string {
+  const safeId = String(tabId || "tab")
+    .replace(/[^a-zA-Z0-9_-]/g, "_")
+    .replace(/^_+|_+$/g, "")
+  return (safeId || "tab").slice(0, 120)
+}
+
+function resolveDesignArtifactPath(tabId: string, workspacePath?: string): { filePath?: string; error?: string } {
+  const workspace = typeof workspacePath === "string" && workspacePath.trim()
+    ? workspacePath.trim()
+    : app.getPath("userData")
+
+  try {
+    const workspaceRoot = path.resolve(workspace)
+    if (!fs.existsSync(workspaceRoot) || !fs.statSync(workspaceRoot).isDirectory()) {
+      return { error: `Design workspace is not available: ${workspaceRoot}` }
+    }
+
+    const artifactDir = path.join(workspaceRoot, DESIGN_ARTIFACTS_DIR, makeSafeDesignId(tabId))
+    const artifactPath = path.join(artifactDir, "index.html")
+    const resolvedArtifact = path.resolve(artifactPath)
+    const normalizedRoot = workspaceRoot.toLowerCase()
+    const normalizedArtifact = resolvedArtifact.toLowerCase()
+    if (normalizedArtifact !== normalizedRoot && !normalizedArtifact.startsWith(normalizedRoot + path.sep)) {
+      return { error: `Design artifact path escaped workspace: ${resolvedArtifact}` }
+    }
+    return { filePath: resolvedArtifact }
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+function saveDesignArtifact(tabId: string, html: string, workspacePath?: string): { success: boolean; filePath?: string; error?: string } {
+  const resolved = resolveDesignArtifactPath(tabId, workspacePath)
+  if (!resolved.filePath) return { success: false, error: resolved.error ?? "Failed to resolve design artifact path" }
+
+  try {
+    fs.mkdirSync(path.dirname(resolved.filePath), { recursive: true })
+    fs.writeFileSync(resolved.filePath, html, "utf-8")
+    return { success: true, filePath: resolved.filePath }
+  } catch (err) {
+    return { success: false, filePath: resolved.filePath, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+function resolveDesignArtifactFilePath(filePath: string, workspacePath?: string): { filePath?: string; error?: string } {
+  const workspace = typeof workspacePath === "string" && workspacePath.trim()
+    ? workspacePath.trim()
+    : app.getPath("userData")
+
+  try {
+    const workspaceRoot = path.resolve(workspace)
+    if (!fs.existsSync(workspaceRoot) || !fs.statSync(workspaceRoot).isDirectory()) {
+      return { error: `Design workspace is not available: ${workspaceRoot}` }
+    }
+    const artifactsRoot = path.resolve(workspaceRoot, DESIGN_ARTIFACTS_DIR)
+    const resolvedFile = path.resolve(filePath)
+    const normalizedArtifactsRoot = artifactsRoot.toLowerCase()
+    const normalizedFile = resolvedFile.toLowerCase()
+    if (normalizedFile !== normalizedArtifactsRoot && !normalizedFile.startsWith(normalizedArtifactsRoot + path.sep)) {
+      return { error: `Design artifact file escaped artifact directory: ${resolvedFile}` }
+    }
+    return { filePath: resolvedFile }
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+function saveDesignArtifactFile(filePath: string, html: string, workspacePath?: string): { success: boolean; filePath?: string; error?: string } {
+  const resolved = resolveDesignArtifactFilePath(filePath, workspacePath)
+  if (!resolved.filePath) return { success: false, error: resolved.error ?? "Failed to resolve design artifact file" }
+
+  try {
+    fs.mkdirSync(path.dirname(resolved.filePath), { recursive: true })
+    fs.writeFileSync(resolved.filePath, html, "utf-8")
+    return { success: true, filePath: resolved.filePath }
+  } catch (err) {
+    return { success: false, filePath: resolved.filePath, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+function readDesignArtifact(tabId: string, workspacePath?: string): { success: boolean; filePath?: string; html?: string; error?: string } {
+  const resolved = resolveDesignArtifactPath(tabId, workspacePath)
+  if (!resolved.filePath) return { success: false, error: resolved.error ?? "Failed to resolve design artifact path" }
+
+  try {
+    if (!fs.existsSync(resolved.filePath)) {
+      return { success: false, filePath: resolved.filePath, error: `Design artifact not found: ${resolved.filePath}` }
+    }
+    return { success: true, filePath: resolved.filePath, html: fs.readFileSync(resolved.filePath, "utf-8") }
+  } catch (err) {
+    return { success: false, filePath: resolved.filePath, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+function readDesignArtifactFile(filePath: string | undefined, workspacePath: string): DesignArtifactFileReadResult {
+  if (typeof filePath !== "string" || !filePath.trim()) {
+    return { success: false, error: "Design source artifact path is empty" }
+  }
+
+  try {
+    const workspaceRoot = path.resolve(workspacePath)
+    const resolvedFile = path.resolve(filePath.trim())
+    const normalizedRoot = workspaceRoot.toLowerCase()
+    const normalizedFile = resolvedFile.toLowerCase()
+    if (normalizedFile !== normalizedRoot && !normalizedFile.startsWith(normalizedRoot + path.sep)) {
+      return { success: false, filePath: resolvedFile, error: `Design source artifact path escaped workspace: ${resolvedFile}` }
+    }
+    if (!fs.existsSync(resolvedFile) || !fs.statSync(resolvedFile).isFile()) {
+      return { success: false, filePath: resolvedFile, error: `Design source artifact not found: ${resolvedFile}` }
+    }
+    return { success: true, filePath: resolvedFile, html: fs.readFileSync(resolvedFile, "utf-8") }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+function prepareDesignArtifact(tabId: string, workspacePath?: string): { filePath?: string; error?: string } {
+  const resolved = resolveDesignArtifactPath(tabId, workspacePath)
+  if (!resolved.filePath) return { error: resolved.error ?? "Failed to resolve design artifact path" }
+
+  try {
+    fs.mkdirSync(path.dirname(resolved.filePath), { recursive: true })
+    return { filePath: resolved.filePath }
+  } catch (err) {
+    return { filePath: resolved.filePath, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+function buildDesignArtifactInstruction(filePath: string, exists: boolean, sourceFilePath?: string): string {
+  return `\n\n---\nDESIGN ARTIFACT FILE\n` +
+    (sourceFilePath
+      ? `Read the current design source artifact first:\n${sourceFilePath}\n\n`
+      : "") +
+    `Write the new complete standalone HTML artifact to this exact absolute output file path:\n${filePath}\n\n` +
+    `${exists ? "The output artifact already exists. Read it with read_file before editing." : "The output artifact does not exist yet. Create it with write_file."}\n` +
+    `If a source artifact path is provided, use it only as input/reference and write the updated complete HTML to the output file path above. ` +
+    `Use write_file for a new output artifact, or edit_file only if the output file already exists. ` +
+    `Do not paste the full HTML into the final chat response. After the file is updated, respond with only a brief summary of what changed. ` +
+    `The host application will read and render the HTML from this file.`
 }
 
 function getSerializedClassName(msg: Record<string, unknown>): string {
@@ -751,6 +924,41 @@ export function registerDesignHandlers(): void {
     return { ok: true }
   })
 
+  ipcMain.handle(
+    "design:save-artifact",
+    (_event, { tabId, html, workspacePath }: DesignArtifactSaveParams) => {
+      if (!tabId || !html) {
+        return { success: false, error: "tabId and html are required" }
+      }
+      const result = saveDesignArtifact(tabId, html, workspacePath)
+      if (result.success && result.filePath) {
+        htmlStore.set(tabId, html)
+        console.log(`[Design] Saved artifact for tabId=${tabId} -> ${result.filePath}`)
+      }
+      return result
+    }
+  )
+
+  ipcMain.handle(
+    "design:save-artifact-file",
+    (_event, { filePath, html, workspacePath }: DesignArtifactFileSaveParams) => {
+      if (!filePath || !html) {
+        return { success: false, error: "filePath and html are required" }
+      }
+      const result = saveDesignArtifactFile(filePath, html, workspacePath)
+      if (result.success && result.filePath) {
+        console.log(`[Design] Saved artifact file -> ${result.filePath}`)
+      }
+      return result
+    }
+  )
+
+  ipcMain.handle(
+    "design:read-artifact",
+    (_event, { tabId, workspacePath }: DesignArtifactReadParams) =>
+      readDesignArtifact(tabId, workspacePath)
+  )
+
   // ─────────────────────────────────────────────────────────
   // design:agent-generate — routes through the full Agent Runtime so Design
   // naturally inherits Skills, MCP tools, Hooks, Approvals and context
@@ -759,7 +967,7 @@ export function registerDesignHandlers(): void {
   ipcMain.on(
     "design:agent-generate",
     async (event, {
-      sessionId, prompt, modelId, tabId, imageData, mimeType, currentHtml, skill, workspacePath: requestedWorkspacePath,
+      sessionId, prompt, modelId, tabId, imageData, mimeType, currentHtml, skill, workspacePath: requestedWorkspacePath, artifactId, sourceArtifactPath,
     }: {
       sessionId: string
       prompt: string
@@ -770,6 +978,8 @@ export function registerDesignHandlers(): void {
       currentHtml?: string
       skill?: DesignSkillReference
       workspacePath?: string
+      artifactId?: string
+      sourceArtifactPath?: string
     }) => {
       const channel = `design:stream:${sessionId}`
       const win = BrowserWindow.fromWebContents(event.sender)
@@ -870,6 +1080,28 @@ export function registerDesignHandlers(): void {
           }
         }
 
+        const resolvedArtifactId = artifactId || tabId
+        const preparedArtifact = tabId ? prepareDesignArtifact(resolvedArtifactId, workspacePath) : null
+        if (preparedArtifact?.error || !preparedArtifact?.filePath) {
+          send({
+            type: "error",
+            error: preparedArtifact?.error ?? "Failed to prepare design artifact file"
+          })
+          return
+        }
+        const existingOutputArtifact = readDesignArtifact(resolvedArtifactId, workspacePath)
+        const sourceArtifact = readDesignArtifactFile(sourceArtifactPath, workspacePath)
+        const hasExistingArtifactHtml = Boolean(
+          existingOutputArtifact.success && existingOutputArtifact.html?.trim()
+        ) || Boolean(
+          sourceArtifact.success && sourceArtifact.html?.trim()
+        )
+        const artifactInstruction = buildDesignArtifactInstruction(
+          preparedArtifact.filePath,
+          Boolean(existingOutputArtifact.success && existingOutputArtifact.html?.trim()),
+          sourceArtifact.success ? sourceArtifact.filePath : undefined
+        )
+
         const agent = await createAgentRuntime({
           threadId,
           workspacePath,
@@ -889,18 +1121,21 @@ export function registerDesignHandlers(): void {
         }
 
         const shouldUseStoredHtmlFallback =
-          prompt.includes("CURRENT DESIGN HTML") ||
-          prompt.includes("User follow-up instruction:") ||
-          prompt.includes("用户通过 Comment 模式")
+          !hasExistingArtifactHtml && (
+            prompt.includes("CURRENT DESIGN HTML") ||
+            prompt.includes("User follow-up instruction:") ||
+            prompt.includes("用户通过 Comment 模式")
+          )
         const storedHtml = tabId && shouldUseStoredHtmlFallback ? htmlStore.get(tabId) : undefined
         const htmlForIteration =
-          typeof currentHtml === "string" && currentHtml.trim()
+          !hasExistingArtifactHtml && typeof currentHtml === "string" && currentHtml.trim()
             ? currentHtml
             : storedHtml
         const promptWithCurrentHtml = htmlForIteration
           ? `${prompt}\n\n---\nCURRENT DESIGN HTML (iterate on this — do NOT ignore it):\n${htmlForIteration}`
           : prompt
         const promptWithSkill = skillContext ? `${promptWithCurrentHtml}${skillContext}` : promptWithCurrentHtml
+        const promptWithArtifact = `${promptWithSkill}${artifactInstruction}`
         if (tabId && htmlForIteration) htmlStore.set(tabId, htmlForIteration)
 
         const humanMessage =
@@ -911,10 +1146,10 @@ export function registerDesignHandlers(): void {
                     type: "image_url",
                     image_url: { url: `data:${mimeType};base64,${imageData}`, detail: "high" },
                   },
-                  { type: "text", text: promptWithSkill },
+                  { type: "text", text: promptWithArtifact },
                 ],
               })
-            : new HumanMessage(promptWithSkill)
+            : new HumanMessage(promptWithArtifact)
 
         const stream = await agent.stream(
           { messages: [humanMessage] },
@@ -1171,8 +1406,15 @@ export function registerDesignHandlers(): void {
         if (html && (html.includes("<!DOCTYPE") || html.includes("<html"))) {
           // Store for potential future reference (storeHtml protocol)
           if (tabId) htmlStore.set(tabId, html)
-          send({ type: "done", html })
+          const saved = tabId ? saveDesignArtifact(resolvedArtifactId, html, workspacePath) : null
+          send({ type: "done", html, ...(saved?.filePath ? { artifactPath: saved.filePath } : {}) })
         } else {
+          const artifact = tabId ? readDesignArtifact(resolvedArtifactId, workspacePath) : null
+          if (artifact?.success && artifact.html && (artifact.html.includes("<!DOCTYPE") || artifact.html.includes("<html"))) {
+            htmlStore.set(tabId, artifact.html)
+            send({ type: "done", html: artifact.html, artifactPath: artifact.filePath })
+            return
+          }
           send({
             type: "error",
             error: fullText.trim()

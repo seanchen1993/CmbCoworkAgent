@@ -187,6 +187,7 @@ interface TabState {
   retryIsIteration: boolean
   retryCleanMsg: string | null
   retrySkill: DesignSkillReference | null
+  artifactPath: string | null
   // Multi-turn conversation history for the API (user+assistant pairs, sans HTML)
   // Source of truth for multi-turn is LangGraph checkpoint; this is for display / session backup.
   apiHistory: Array<{ role: "user" | "assistant"; content: string }>
@@ -226,6 +227,7 @@ function makeTabState(): TabState {
     retryIsIteration: false,
     retryCleanMsg: null,
     retrySkill: null,
+    artifactPath: null,
     apiHistory: [],
     pendingApproval: null,
   }
@@ -245,6 +247,46 @@ function getCurrentDesignHtml(state: TabState | undefined): string {
     if (variationHtml?.trim()) return variationHtml
   }
   return state.html?.trim() ?? ""
+}
+
+function saveDesignArtifactForTab(
+  artifactId: string,
+  html: string,
+  workspacePath: string | null,
+  tabId: string,
+  updateTs: (tabId: string, patch: Partial<TabState> | ((prev: TabState) => Partial<TabState>)) => void,
+  existingArtifactPath?: string | null
+): void {
+  if (!html.trim()) return
+  const savePromise = existingArtifactPath
+    ? window.api.design.saveArtifactFile(existingArtifactPath, html, workspacePath ?? undefined)
+    : window.api.design.saveArtifact(artifactId, html, workspacePath ?? undefined)
+  savePromise
+    .then(async (result) => {
+      if (!result.success && existingArtifactPath) {
+        result = await window.api.design.saveArtifact(artifactId, html, workspacePath ?? undefined)
+      }
+      if (result.success && result.filePath) {
+        window.api.design.storeHtml(tabId, html).catch(() => {})
+        updateTs(tabId, { artifactPath: result.filePath })
+      }
+    })
+    .catch(() => {
+      if (existingArtifactPath) {
+        window.api.design.saveArtifact(artifactId, html, workspacePath ?? undefined)
+          .then((result) => {
+            if (result.success && result.filePath) {
+              window.api.design.storeHtml(tabId, html).catch(() => {})
+              updateTs(tabId, { artifactPath: result.filePath })
+            }
+          })
+          .catch(() => {})
+      }
+    })
+}
+
+function makeDesignArtifactId(sessionId: string | null, tabId: string): string {
+  return `${sessionId ?? "session"}_${tabId}`
 }
 
 function asDesignApprovalRequest(request: unknown): DesignApprovalRequest {
@@ -401,6 +443,7 @@ type PersistedTabState = {
   designLink: string | null
   rightTab: RightPanelTab
   apiHistory?: Array<{ role: "user" | "assistant"; content: string }>
+  artifactPath?: string | null
 }
 
 interface PersistedSession {
@@ -423,6 +466,7 @@ function serializeTs(ts: TabState): PersistedTabState {
     designLink:        ts.designLink,
     rightTab:          ts.rightTab,
     apiHistory:        ts.apiHistory,
+    artifactPath:      ts.artifactPath,
   }
 }
 
@@ -431,6 +475,7 @@ function deserializeTs(p: PersistedTabState): TabState {
     ...makeTabState(),
     ...p,
     apiHistory:      p.apiHistory ?? [],
+    artifactPath:    p.artifactPath ?? null,
     generationState: "idle",  // always reset — never restore mid-stream
     activeMode: null,
     inputValue: "",
@@ -913,6 +958,7 @@ export function DesignView(): React.JSX.Element {
   const iframeRef         = useRef<HTMLIFrameElement>(null)
   const canvasContainerRef = useRef<HTMLDivElement>(null)
   const activeTabIdRef    = useRef(activeTabId)
+  const tabStatesRef      = useRef(tabStates)
   const fileInputRef      = useRef<HTMLInputElement>(null)   // images only (screenshot / 📷)
 
   const ts = tabStates[activeTabId] ?? makeTabState()
@@ -982,6 +1028,7 @@ export function DesignView(): React.JSX.Element {
 
   // ── Keep activeTabIdRef in sync ───────────────────────────
   useEffect(() => { activeTabIdRef.current = activeTabId }, [activeTabId])
+  useEffect(() => { tabStatesRef.current = tabStates }, [tabStates])
 
   // ── Persist session to localStorage (debounced 1.5s, skip during streaming) ──
   const _persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -1127,10 +1174,19 @@ export function DesignView(): React.JSX.Element {
       if (msg.type === "__edit_html") {
         const { html } = msg as { html: string }
         const tabId = activeTabIdRef.current
+        const state = tabStatesRef.current[tabId]
+        const patchedHtml = ensureEditMode(html)
+        saveDesignArtifactForTab(
+          makeDesignArtifactId(currentSessionId, tabId),
+          patchedHtml,
+          workspacePath,
+          tabId,
+          updateTs,
+          state?.artifactPath ?? null
+        )
         setTabStates((prev) => {
           const state = prev[tabId]
           if (!state) return prev
-          const patchedHtml = ensureEditMode(html)
           if (state.activeVariationId) {
             return {
               ...prev,
@@ -1151,27 +1207,37 @@ export function DesignView(): React.JSX.Element {
       if (msg.type === "__edit_mode_set_keys") {
         const edits = msg.edits as Record<string, unknown>
         const tabId = activeTabIdRef.current
+        const state = tabStatesRef.current[tabId]
+        if (!state) return
+        const targetHtml = state.activeVariationId
+          ? (state.variations.find((v) => v.id === state.activeVariationId)?.html ?? state.html)
+          : state.html
+        const updated = mergeEditModeKeys(targetHtml, edits)
+        saveDesignArtifactForTab(
+          makeDesignArtifactId(currentSessionId, tabId),
+          updated,
+          workspacePath,
+          tabId,
+          updateTs,
+          state.artifactPath
+        )
         setTabStates((prev) => {
-          const state = prev[tabId]
-          if (!state) return prev
+          const latest = prev[tabId]
+          if (!latest) return prev
           // Merge edits into the EDITMODE-BEGIN block of the active HTML
-          const targetHtml = state.activeVariationId
-            ? (state.variations.find((v) => v.id === state.activeVariationId)?.html ?? state.html)
-            : state.html
-          const updated = mergeEditModeKeys(targetHtml, edits)
-          if (state.activeVariationId) {
+          if (latest.activeVariationId) {
             // Update the specific variation's html
             return {
               ...prev,
               [tabId]: {
-                ...state,
-                variations: state.variations.map((v) =>
-                  v.id === state.activeVariationId ? { ...v, html: updated } : v
+                ...latest,
+                variations: latest.variations.map((v) =>
+                  v.id === latest.activeVariationId ? { ...v, html: updated } : v
                 ),
               },
             }
           }
-          return { ...prev, [tabId]: { ...state, html: updated } }
+          return { ...prev, [tabId]: { ...latest, html: updated } }
         })
         return
       }
@@ -1259,6 +1325,7 @@ export function DesignView(): React.JSX.Element {
     cleanUserMsg?: string,
     image?: { base64: string; mimeType: string },
     skill?: DesignSkillReference | null,
+    sourceArtifactPath?: string | null,
   ) => {
     const sessionId = uuid()
     updateTs(tabId, (prev) => ({
@@ -1315,6 +1382,7 @@ export function DesignView(): React.JSX.Element {
       html?: string
       error?: string
       event?: unknown
+      artifactPath?: string
     }) => {
       if (event.type === "execution") {
         const executionEvent = asDesignExecutionEvent(event.event)
@@ -1339,6 +1407,11 @@ export function DesignView(): React.JSX.Element {
 
         // Keep htmlStore in sync (used as fallback / reference)
         window.api.design.storeHtml(tabId, patchedHtml).catch(() => {})
+        if (event.artifactPath) {
+          updateTs(tabId, { artifactPath: event.artifactPath })
+        } else {
+          saveDesignArtifactForTab(`${sessionId}_${tabId}`, patchedHtml, workspacePath, tabId, updateTs)
+        }
 
         updateTs(tabId, (prev) => {
           const msgs = [...prev.messages]
@@ -1408,7 +1481,9 @@ export function DesignView(): React.JSX.Element {
       image?.mimeType,
       isIteration ? getCurrentDesignHtml(tabStates[tabId]) : undefined,
       skill ?? undefined,
-      workspacePath ?? undefined
+      workspacePath ?? undefined,
+      `${sessionId}_${tabId}`,
+      sourceArtifactPath ?? undefined
     )
     tabSessionsRef.current.set(tabId, { cleanup, sessionId })
   }, [tabStates, updateTs, workspacePath])
@@ -1440,6 +1515,7 @@ export function DesignView(): React.JSX.Element {
         const patchedHtml = ensureEditMode(event.html)
         // Store full HTML in main process so subsequent text iterations can reference it
         window.api.design.storeHtml(tabId, patchedHtml).catch(() => {})
+        saveDesignArtifactForTab(makeDesignArtifactId(currentSessionId, tabId), patchedHtml, workspacePath, tabId, updateTs)
         updateTs(tabId, (prev) => {
           const msgs = [...prev.messages]
           const last = msgs.length - 1
@@ -1482,7 +1558,7 @@ export function DesignView(): React.JSX.Element {
       }
     }, modelId)
     tabSessionsRef.current.set(tabId, { cleanup, sessionId })
-  }, [updateTs])
+  }, [currentSessionId, updateTs, workspacePath])
 
   // ── Handle file input selection (screenshot upload) ───────
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1578,6 +1654,7 @@ export function DesignView(): React.JSX.Element {
       state.retryCleanMsg ?? undefined,
       undefined,
       state.retrySkill ?? undefined,
+      state.artifactPath,
     )
   }, [activeTabId, tabStates, updateTs, startGeneration])
 
@@ -1618,7 +1695,7 @@ ${commentLines}${variantNote}`
         { role: "user" as const, content: cleanMsg },
       ],
     }))
-    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined, cleanMsg)
+    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined, cleanMsg, undefined, undefined, state.artifactPath)
   }, [activeTabId, tabStates, updateTs, startGeneration, buildCommentPrompt])
 
   // ── Send a saved comment pin → model ─────────────────────
@@ -1643,7 +1720,7 @@ ${commentLines}${variantNote}`
         { role: "user" as const, content: cleanMsg },
       ],
     }))
-    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined, cleanMsg)
+    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined, cleanMsg, undefined, undefined, state.artifactPath)
   }, [activeTabId, tabStates, updateTs, startGeneration, buildCommentPrompt])
 
   // ── Edit a saved comment's text ───────────────────────────
@@ -1693,7 +1770,7 @@ ${commentLines}${variantNote}`
       ],
     }))
 
-    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined, cleanMsg)
+    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined, cleanMsg, undefined, undefined, state.artifactPath)
   }, [activeTabId, tabStates, updateTs, startGeneration, buildCommentPrompt])
 
   // ── Send message ──────────────────────────────────────────
@@ -1786,7 +1863,8 @@ ${commentLines}${variantNote}`
           selectedModelId,
           userContent,
           { base64: attachedImage.base64, mimeType: attachedImage.mimeType },
-          skillReference
+          skillReference,
+          tabStates[tabId]?.artifactPath ?? null
         )
       } else {
         startGenerationFromImage(prompt + contextSuffix, attachedImage.base64, attachedImage.mimeType, tabId, selectedModelId)
@@ -1837,6 +1915,7 @@ ${commentLines}${variantNote}`
         : ""
 
       const iterationPrompt = `User follow-up instruction: ${prompt}${variantNote}`
+      const artifactPath = currentState?.artifactPath
 
       startGeneration(
         iterationPrompt + contextSuffix,
@@ -1845,7 +1924,8 @@ ${commentLines}${variantNote}`
         selectedModelId,
         prompt,   // clean user message for apiHistory recording
         undefined,
-        skillReference
+        skillReference,
+        artifactPath ?? null
       )
     }
   }, [activeTabId, tabStates, updateTs, startAskQuestions, startGeneration, startGenerationFromImage])
