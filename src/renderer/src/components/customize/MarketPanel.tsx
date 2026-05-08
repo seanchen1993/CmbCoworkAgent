@@ -288,7 +288,7 @@ function MarketItemCard({
             {skillCallCount !== null && (
               <div className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg border border-[#d7e2f5] bg-[linear-gradient(135deg,#f4f8ff_0%,#ebf2ff_100%)] text-[#365d97] shadow-[rgba(54,93,151,0.06)_0px_2px_6px]">
                 <BarChart3 className="size-3 shrink-0" />
-                <span className="text-[11px] text-[#6a7fa5]">调用</span>
+                <span className="text-[11px] text-[#6a7fa5]">本月调用</span>
                 <span className="text-[12px] font-semibold tabular-nums">
                   {formatMetricValue(skillCallCount)}
                 </span>
@@ -297,7 +297,7 @@ function MarketItemCard({
             {skillUserCount !== null && (
               <div className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg border border-[#cfe4d9] bg-[linear-gradient(135deg,#f2faf5_0%,#e9f7ef_100%)] text-[#2f7a55] shadow-[rgba(47,122,85,0.06)_0px_2px_6px]">
                 <User className="size-3 shrink-0" />
-                <span className="text-[11px] text-[#4c8669]">用户</span>
+                <span className="text-[11px] text-[#4c8669]">本月用户</span>
                 <span className="text-[12px] font-semibold tabular-nums">
                   {formatMetricValue(skillUserCount)}
                 </span>
@@ -1947,7 +1947,7 @@ export function MarketPanel(): React.JSX.Element {
                 {activeTab === "skill" && canViewSkillUserDetail && (
                   <div className="rounded-2xl border border-[#e8e6dc] bg-[#faf9f5] p-4 space-y-3 shadow-[rgba(0,0,0,0.03)_0px_2px_10px]">
                     <div className="flex items-center justify-between">
-                      <h4 className="text-[13px] font-medium text-[#141413]">使用用户明细</h4>
+                      <h4 className="text-[13px] font-medium text-[#141413]">使用用户明细（本月）</h4>
                       <div className="flex items-center gap-1.5">
                         <span className="inline-flex items-center gap-1 rounded-full border border-[#d7e2f5] bg-[#eef4ff] px-2 py-0.5 text-[11px] text-[#365d97]">
                           <BarChart3 className="size-3" />
