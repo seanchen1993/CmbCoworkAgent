@@ -426,7 +426,8 @@ export function ChatContainer({
     loadThreads,
     generateTitleForFirstMessage,
     setShowCustomizeView,
-    setMarketInitialSkillCategory
+    setMarketInitialSkillCategory,
+    setMarketInitialSkillDetailName
   } = useAppStore()
 
   const allSkillsRef = useRef<MarketItem[]>([])
@@ -1936,6 +1937,14 @@ export function ChatContainer({
     [setMarketInitialSkillCategory, setShowCustomizeView]
   )
 
+  const handleOpenMarketBySkill = useCallback(
+    (skillName: string): void => {
+      setMarketInitialSkillDetailName(skillName)
+      setShowCustomizeView(true, "market")
+    },
+    [setMarketInitialSkillDetailName, setShowCustomizeView]
+  )
+
   const programmingSkillCards = useMemo(() => {
     const source = showAllProgrammingSkills ? programmingSkills : programmingSkills.slice(0, 8)
     return source.map((skill) => ({
@@ -2258,6 +2267,7 @@ export function ChatContainer({
                           skills={skills}
                           previewLimit={GOOD_SKILLS_PREVIEW_LIMIT}
                           onOpenMarketByCategory={handleOpenMarketBySecondaryCategory}
+                          onOpenMarketBySkill={handleOpenMarketBySkill}
                           onUseSkillPrompt={handleUseSkillPrompt}
                         />
                       </TabsContent>

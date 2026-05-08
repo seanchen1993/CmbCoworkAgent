@@ -461,7 +461,9 @@ export function MarketPanel(): React.JSX.Element {
     marketInitialSkillCategory,
     setMarketInitialSkillCategory,
     marketInitialSkillSearchQuery,
-    setMarketInitialSkillSearchQuery
+    setMarketInitialSkillSearchQuery,
+    marketInitialSkillDetailName,
+    setMarketInitialSkillDetailName
   } = useAppStore()
   const [activeTab, setActiveTab] = useState<MarketItemType>("skill")
   const [searchQuery, setSearchQuery] = useState("")
@@ -512,6 +514,7 @@ export function MarketPanel(): React.JSX.Element {
   const installedSkillsRef = useRef<string[]>([])
   const installedMcpsRef = useRef<string[]>([])
   const installedPluginsRef = useRef<string[]>([])
+  const openItemDetailRef = useRef<(item: MarketItem) => Promise<void>>(async () => {})
   const currentUserCandidateSet = useMemo(
     () => new Set(currentUserUploadCandidates),
     [currentUserUploadCandidates]
@@ -788,22 +791,28 @@ export function MarketPanel(): React.JSX.Element {
   useEffect(() => {
     const hasInitialCategory = !!marketInitialSkillCategory
     const hasInitialSearch = !!marketInitialSkillSearchQuery?.trim()
-    if (!hasInitialCategory && !hasInitialSearch) return
+    const hasInitialDetail = !!marketInitialSkillDetailName?.trim()
+    if (!hasInitialCategory && !hasInitialSearch && !hasInitialDetail) return
 
     setActiveTab("skill")
     setDetailMode("list")
     setSelectedItemKey(null)
-    if (hasInitialCategory) {
+    if (hasInitialDetail) {
+      setCategoryFilter(null)
+    } else if (hasInitialCategory) {
       setCategoryFilter(marketInitialSkillCategory)
     } else {
       // 按名称跳转搜索时，避免历史分类筛选把结果“过滤没了”。
       setCategoryFilter(null)
     }
-    setSearchQuery(marketInitialSkillSearchQuery?.trim() || "")
+    setSearchQuery(
+      marketInitialSkillDetailName?.trim() || marketInitialSkillSearchQuery?.trim() || ""
+    )
     setMarketInitialSkillCategory(null)
     setMarketInitialSkillSearchQuery(null)
   }, [
     marketInitialSkillCategory,
+    marketInitialSkillDetailName,
     marketInitialSkillSearchQuery,
     setMarketInitialSkillCategory,
     setMarketInitialSkillSearchQuery
@@ -1332,6 +1341,26 @@ export function MarketPanel(): React.JSX.Element {
     detailTasks.push(loadDetailDataForItem(item))
     await Promise.all(detailTasks)
   }
+  openItemDetailRef.current = openItemDetail
+
+  useEffect(() => {
+    const detailName = marketInitialSkillDetailName?.trim()
+    if (!detailName || activeTab !== "skill" || loading) return
+    const targetItem = skillsData.find((item) => item.name === detailName)
+    if (!targetItem) {
+      if (skillsData.length > 0) setMarketInitialSkillDetailName(null)
+      return
+    }
+
+    setMarketInitialSkillDetailName(null)
+    void openItemDetailRef.current(targetItem)
+  }, [
+    activeTab,
+    loading,
+    marketInitialSkillDetailName,
+    setMarketInitialSkillDetailName,
+    skillsData
+  ])
 
   const backToList = () => {
     setDetailMode("list")
