@@ -68,10 +68,21 @@ export interface HookLogEntry {
   toolSuffix: string
   exitCode: number | null
   blocked: boolean
+  continue?: boolean
+  stopReason?: string
   decision?: string
+  reason?: string
   stdout: string
   stderr: string
   additionalContext?: string
+  systemMessage?: string
+  timestamp: Date
+}
+
+export interface HookInterruptionState {
+  event: string
+  action: "block" | "halt"
+  reason: string
   systemMessage?: string
   timestamp: Date
 }
@@ -85,6 +96,7 @@ export interface ThreadState {
   subagents: Subagent[]
   pendingApproval: HITLRequest | null
   error: string | null
+  hookInterruption: HookInterruptionState | null
   currentModel: string
   openFiles: OpenFile[]
   activeTab: "agent" | string
@@ -124,6 +136,7 @@ export interface ThreadActions {
   setPendingApproval: (request: HITLRequest | null) => void
   setError: (error: string | null) => void
   clearError: () => void
+  clearHookInterruption: () => void
   setCurrentModel: (modelId: string) => void
   openFile: (path: string, name: string) => void
   closeFile: (path: string) => void
@@ -162,6 +175,7 @@ const createDefaultThreadState = (): ThreadState => ({
   subagents: [],
   pendingApproval: null,
   error: null,
+  hookInterruption: null,
   currentModel: "",
   openFiles: [],
   activeTab: "agent",
@@ -220,10 +234,14 @@ interface CustomEventData {
   // hook_executed fields
   event?: string
   hookType?: string
+  hookEvent?: string
+  action?: string
   label?: string
   toolSuffix?: string
   exitCode?: number | null
   blocked?: boolean
+  continue?: boolean
+  stopReason?: string
   decision?: string
   stdout?: string
   stderr?: string
@@ -579,6 +597,33 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             toast.info(data.message)
           }
           break
+        case "hook_blocked": {
+          const reason =
+            (typeof data.reason === "string" && data.reason.trim()) ||
+            (typeof data.message === "string" && data.message.trim()) ||
+            "Hook 已阻断本轮"
+          const action = data.action === "halt" ? "halt" : "block"
+          const eventName =
+            (typeof data.hookEvent === "string" && data.hookEvent) ||
+            (typeof data.event === "string" && data.event) ||
+            "Hook"
+          const systemMessage =
+            typeof data.systemMessage === "string" && data.systemMessage.trim()
+              ? data.systemMessage
+              : undefined
+          updateThreadState(threadId, () => ({
+            error: null,
+            hookInterruption: {
+              event: eventName,
+              action,
+              reason,
+              systemMessage,
+              timestamp: new Date()
+            }
+          }))
+          toast.warning(action === "halt" ? `Hook 已停止本轮：${reason}` : `Hook 已阻断：${reason}`)
+          break
+        }
         case "auto_commit_result":
           if (data.result) {
             const message = formatAutoCommitText(data.result)
@@ -600,7 +645,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             toolSuffix: data.toolSuffix ?? "",
             exitCode: data.exitCode ?? null,
             blocked: data.blocked ?? false,
+            continue: data.continue,
+            stopReason: data.stopReason,
             decision: data.decision,
+            reason: data.reason,
             stdout: data.stdout ?? "",
             stderr: data.stderr ?? "",
             additionalContext: data.additionalContext,
@@ -666,9 +714,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           updateThreadState(threadId, (state) => {
             const exists = state.messages.some((m) => m.id === message.id)
             if (exists) {
-              return { messages: state.messages.map((m) => (m.id === message.id ? message : m)) }
+              return {
+                messages: state.messages.map((m) => (m.id === message.id ? message : m)),
+                hookInterruption: message.role === "user" ? null : state.hookInterruption
+              }
             }
-            return { messages: [...state.messages, message] }
+            return {
+              messages: [...state.messages, message],
+              hookInterruption: message.role === "user" ? null : state.hookInterruption
+            }
           })
         },
         setMessages: (messages: Message[]) => {
@@ -696,6 +750,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         },
         clearError: () => {
           updateThreadState(threadId, () => ({ error: null }))
+        },
+        clearHookInterruption: () => {
+          updateThreadState(threadId, () => ({ hookInterruption: null }))
         },
         setCurrentModel: (modelId: string) => {
           updateThreadState(threadId, () => ({ currentModel: modelId }))

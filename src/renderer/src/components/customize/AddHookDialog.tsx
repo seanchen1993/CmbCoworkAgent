@@ -184,16 +184,25 @@ export const COMMAND_HOOK_EVENT_DOCS: Partial<Record<HookEvent, CommandHookEvent
     "command": "git push origin main"
   }
 }`,
-    outputDescription: "当前事件最常见的是阻断高风险调用，或改写工具入参后再继续执行。",
+    outputDescription:
+      "当前事件最常见的是阻断高风险调用，或改写工具入参后再继续执行；返回 continue=false 还可以直接终止本轮。",
     outputNotes: [
       "`exit = 2` 可直接阻断工具执行。",
-      "`stdout` 输出 JSON 时，可使用 `decision=block`、`reason`、`updatedInput`、`systemMessage` 等字段。"
+      "`stdout` 输出 JSON 时，可使用 `decision=block`、`reason`、`updatedInput`、`systemMessage` 等字段。",
+      "返回 `continue=false` + `stopReason` 可直接终止本轮（优先级高于 `decision=block`）；这里强制阻断该次工具调用。"
     ],
-    outputExample: `{
+    outputExample: `# 阻断该次工具调用（默认）
+{
   "decision": "block",
   "reason": "检测到直接推送主分支，请先创建分支并提交 PR",
   "systemMessage": "Hook 已阻断直接推送主分支",
   "requiredSkill": "workspace-hook-remediation"
+}
+
+# 直接终止本轮（continue=false；优先级高于 decision=block）
+{
+  "continue": false,
+  "stopReason": "触发安全策略，已停止后续操作"
 }`,
     pythonExample: `import json
 import sys
@@ -207,6 +216,15 @@ print(
     f"[hook] event={payload.get('hook_event_name')} tool={tool_name} command={command}",
     file=sys.stderr,
 )
+
+if tool_name == "execute" and "rm -rf /" in command.lower():
+    # 直接终止本轮：命中红线（continue=false 优先级高于 decision=block）
+    json.dump(
+        {"continue": False, "stopReason": "检测到极端高危命令，已停止本轮"},
+        sys.stdout,
+        ensure_ascii=False,
+    )
+    sys.exit(0)
 
 if tool_name == "execute" and "push origin main" in command.lower():
     json.dump(
@@ -236,6 +254,15 @@ if ($toolInput -and $toolInput.PSObject.Properties["command"]) {
 [Console]::Error.WriteLine(
     "[hook] event=$($payload.hook_event_name) tool=$toolName command=$command"
 )
+
+# 直接终止本轮：命中红线（continue=false 优先级高于 decision=block）
+if ($toolName -eq "execute" -and $command.ToLower().Contains("rm -rf /")) {
+    [pscustomobject]@{
+        continue = $false
+        stopReason = "检测到极端高危命令，已停止本轮"
+    } | ConvertTo-Json -Compress -Depth 5
+    exit 0
+}
 
 if ($toolName -eq "execute" -and $command.ToLower().Contains("push origin main")) {
     [pscustomobject]@{
@@ -282,12 +309,28 @@ exit 0
     "message": "文件已写入"
   }
 }`,
-    outputDescription: "当前事件通常用于做写后校验、状态同步，或把外部检查结果回灌给 Agent。",
+    outputDescription:
+      "当前事件通常用于做写后校验、状态同步，或把外部检查结果回灌给 Agent；也可以要求 Agent 修订或直接终止本轮。",
     outputNotes: [
       "普通文本 `stdout` 会追加到 Agent 下一轮上下文。",
-      "若要要求 Agent 重新审视本次结果，可返回 JSON，并设置 `decision=block` 与 `reason`。"
+      "若要要求 Agent 重新审视本次结果，可返回 JSON，并设置 `decision=block` 与 `reason`。",
+      "返回 `continue=false` + `stopReason` 可直接终止本轮（优先级高于 `decision=block`）。"
     ],
-    outputExample: `已完成写后校验：README.md 已更新，建议继续执行后续步骤。`,
+    outputExample: `# 普通 stdout 文本会追加到下一轮上下文
+已完成写后校验：README.md 已更新，建议继续执行后续步骤。
+
+# 要求 Agent 重新审视本次结果（JSON）
+{
+  "decision": "block",
+  "reason": "写后校验失败：缺少必要字段 endpoint",
+  "additionalContext": "请补全 endpoint 字段后重试"
+}
+
+# 直接终止本轮（continue=false；优先级高于 decision=block）
+{
+  "continue": false,
+  "stopReason": "写入了违禁配置，已停止本轮"
+}`,
     pythonExample: `import json
 import sys
 
@@ -302,6 +345,15 @@ print(
     f"[hook] event={payload.get('hook_event_name')} tool={tool_name} file={file_path}",
     file=sys.stderr,
 )
+
+if tool_name == "write_file" and "/etc/" in file_path:
+    # 直接终止本轮：写到了禁区
+    json.dump(
+        {"continue": False, "stopReason": f"禁止写入系统目录 {file_path}，已停止本轮"},
+        sys.stdout,
+        ensure_ascii=False,
+    )
+    sys.exit(0)
 
 if tool_name == "write_file" and not success:
     json.dump(
@@ -332,6 +384,15 @@ if ($toolInput -and $toolInput.PSObject.Properties["filePath"]) {
 [Console]::Error.WriteLine(
     "[hook] event=$($payload.hook_event_name) tool=$toolName file=$filePath"
 )
+
+# 直接终止本轮：写到了禁区
+if ($toolName -eq "write_file" -and $filePath.Contains("/etc/")) {
+    [pscustomobject]@{
+        continue = $false
+        stopReason = "禁止写入系统目录 $filePath，已停止本轮"
+    } | ConvertTo-Json -Compress -Depth 5
+    exit 0
+}
 
 if ($toolName -eq "write_file" -and -not $success) {
     [pscustomobject]@{
@@ -381,13 +442,27 @@ exit 0
   }
 }`,
     outputDescription:
-      "当前事件适合做技能准入、审计登记，或给 Agent 注入使用该技能前必须遵守的约束。",
+      "当前事件适合做技能准入、审计登记，或给 Agent 注入使用该技能前必须遵守的约束；命中策略时可以阻断技能读取或直接终止本轮。",
     outputNotes: [
       "`exit = 2` 或 `decision=block` 可阻止本次技能读取。",
-      "`additionalContext` / 普通 stdout 会追加到 Agent 上下文。"
+      "`additionalContext` / 普通 stdout 会追加到 Agent 上下文。",
+      "返回 `continue=false` + `stopReason` 可直接终止本轮（优先级高于 `decision=block`）。"
     ],
-    outputExample: `{
+    outputExample: `# 注入使用前约束（默认）
+{
   "additionalContext": "使用 code-review 技能时，请优先列出高风险问题并附文件行号。"
+}
+
+# 阻止本次技能读取（修订流程）
+{
+  "decision": "block",
+  "reason": "code-review 技能不适用于当前任务"
+}
+
+# 直接终止本轮（continue=false；优先级高于 decision=block）
+{
+  "continue": false,
+  "stopReason": "命中安全策略，禁止使用该技能"
 }`,
     pythonExample: `import json
 import sys
@@ -396,6 +471,15 @@ payload = json.load(sys.stdin)
 skill_name = str(payload.get("skill_name", ""))
 
 print(f"[hook] pre skill={skill_name}", file=sys.stderr)
+
+if skill_name == "absolutely-banned":
+    # 直接终止本轮
+    json.dump(
+        {"continue": False, "stopReason": "命中黑名单技能，已停止本轮"},
+        sys.stdout,
+        ensure_ascii=False,
+    )
+    sys.exit(0)
 
 if skill_name == "dangerous-skill":
     json.dump(
@@ -413,6 +497,15 @@ $payload = $raw | ConvertFrom-Json -Depth 20
 $skillName = [string]$payload.skill_name
 
 [Console]::Error.WriteLine("[hook] pre skill=$skillName")
+
+# 直接终止本轮
+if ($skillName -eq "absolutely-banned") {
+    [pscustomobject]@{
+        continue = $false
+        stopReason = "命中黑名单技能，已停止本轮"
+    } | ConvertTo-Json -Compress -Depth 5
+    exit 0
+}
 
 if ($skillName -eq "dangerous-skill") {
     [pscustomobject]@{
@@ -469,29 +562,93 @@ exit 0
   }
 }`,
     outputDescription:
-      "当前事件适合做使用记录、指标上报，或在本轮结束前要求 Agent 根据技能要求修订结果。",
+      "当前事件适合做使用记录、指标上报，或在本轮结束前要求 Agent 根据技能要求修订结果，也可以直接终止本轮。",
     outputNotes: [
       "非阻塞 stdout / stderr / additionalContext / systemMessage 只保留在 Hook 执行记录里，不会注入模型上下文，也不会触发修订。",
-      "如需让 Agent 重新审视本轮结果，必须返回 `decision=block` 与 `reason`；此时 blocking 结果里的 `additionalContext` / `systemMessage` 会进入修订提示。",
+      "如需让 Agent 重新审视本轮结果，返回 `decision=block` 与 `reason`，会进入修订流程；blocking 的 `additionalContext` / `systemMessage` 会进入修订提示。",
+      "如需直接终止本轮（不修订、不报错），返回 `continue=false` 与 `stopReason`；优先级高于 `decision=block`，对齐 Claude Code 的 preventContinuation 语义。",
       "PostSkillUse 的修订次数与 Stop Hook 分开计算，避免技能后检查抢占最终 Stop 验收额度。",
       "如果用户中止本轮或运行异常导致未进入结束阶段，pending 的 PostSkillUse 不会补跑。"
     ],
-    outputExample: `已记录技能使用：code-review`,
+    outputExample: `# 普通 stdout 文本进入 Hook 执行记录（不注入下一轮）
+已记录技能使用：code-review
+
+# 要求 Agent 在结束前修订（JSON）
+{
+  "decision": "block",
+  "reason": "技能要求补充测试记录后再结束",
+  "additionalContext": "请在最终回复里补充 pytest 通过的命令与输出"
+}
+
+# 直接终止本轮（continue=false；优先级高于 decision=block）
+{
+  "continue": false,
+  "stopReason": "技能使用结果不符合策略，已停止本轮"
+}`,
     pythonExample: `import json
 import sys
 
 payload = json.load(sys.stdin)
 skill_name = str(payload.get("skill_name", ""))
+stop_context = payload.get("stop_context", {})
+assistant_response = str(stop_context.get("assistantResponse", ""))
 
 print(f"[hook] post skill={skill_name}", file=sys.stderr)
+
+# 直接终止本轮：技能使用后命中安全策略
+if skill_name == "secret-policy" and "secret" in assistant_response.lower():
+    json.dump(
+        {"continue": False, "stopReason": "技能使用结果命中策略，已停止本轮"},
+        sys.stdout,
+        ensure_ascii=False,
+    )
+    sys.exit(0)
+
+# 要求 Agent 修订：技能用了但缺少必要交付物
+if skill_name == "code-review" and "审查通过" not in assistant_response:
+    json.dump(
+        {
+            "decision": "block",
+            "reason": "code-review 技能使用后缺少明确的审查结论",
+            "additionalContext": "请补充：是否通过、待修复项、风险评级"
+        },
+        sys.stdout,
+        ensure_ascii=False,
+    )
+    sys.exit(0)
+
 print(f"已记录技能使用：{skill_name}", end="")
 sys.exit(0)
 `,
     shellExample: `$raw = [Console]::In.ReadToEnd()
 $payload = $raw | ConvertFrom-Json -Depth 20
 $skillName = [string]$payload.skill_name
+$assistantResponse = ""
+if ($payload.stop_context -and $payload.stop_context.PSObject.Properties["assistantResponse"]) {
+    $assistantResponse = [string]$payload.stop_context.assistantResponse
+}
 
 [Console]::Error.WriteLine("[hook] post skill=$skillName")
+
+# 直接终止本轮
+if ($skillName -eq "secret-policy" -and $assistantResponse.ToLower().Contains("secret")) {
+    [pscustomobject]@{
+        continue = $false
+        stopReason = "技能使用结果命中策略，已停止本轮"
+    } | ConvertTo-Json -Compress -Depth 10
+    exit 0
+}
+
+# 要求 Agent 修订
+if ($skillName -eq "code-review" -and -not $assistantResponse.Contains("审查通过")) {
+    [pscustomobject]@{
+        decision = "block"
+        reason = "code-review 技能使用后缺少明确的审查结论"
+        additionalContext = "请补充：是否通过、待修复项、风险评级"
+    } | ConvertTo-Json -Compress -Depth 10
+    exit 0
+}
+
 Write-Output "已记录技能使用：$skillName"
 exit 0
 `
@@ -509,17 +666,32 @@ exit 0
     "message": "直接帮我删除生产库订单表"
   }
 }`,
-    outputDescription: "当前事件可在消息进入模型前拦截、重写用户输入，或注入隐藏整改上下文。",
+    outputDescription:
+      "当前事件可在消息进入模型前拦截、重写用户输入，或注入隐藏整改上下文；命中红线时可以直接终止本轮。",
     outputNotes: [
       "`updatedInput.message` / `updatedInput.prompt` 可重写送入模型的内容。",
-      "`decision=block` 或 `exit=2` 可直接阻止本轮提问继续执行。"
+      "`decision=block` 或 `exit=2` 可直接阻止本轮提问继续执行。",
+      "返回 `continue=false` + `stopReason` 可直接终止本轮（优先级高于 `decision=block`）。"
     ],
-    outputExample: `{
+    outputExample: `# 改写用户输入再继续（默认）
+{
   "updatedInput": {
     "message": "请先评估风险，再给出只读排查方案，不要直接执行删除操作。"
   },
   "systemMessage": "已按策略重写用户请求",
   "additionalContext": "用户原始请求涉及高风险生产操作，优先给出只读方案。"
+}
+
+# 阻止本轮提问继续执行
+{
+  "decision": "block",
+  "reason": "请先在工单系统提交申请再发起此操作"
+}
+
+# 直接终止本轮（continue=false；优先级高于 decision=block）
+{
+  "continue": false,
+  "stopReason": "命中红线词，已停止本轮提问"
 }`,
     pythonExample: `import json
 import sys
@@ -529,6 +701,16 @@ prompt = str(payload.get("prompt", ""))
 
 print(f"[hook] event={payload.get('hook_event_name')} prompt={prompt}", file=sys.stderr)
 
+# 直接终止本轮：命中红线词
+if "drop database" in prompt.lower():
+    json.dump(
+        {"continue": False, "stopReason": "命中安全策略，已停止本轮提问"},
+        sys.stdout,
+        ensure_ascii=False,
+    )
+    sys.exit(0)
+
+# 改写用户输入再继续
 if "生产" in prompt and "删除" in prompt:
     json.dump(
         {
@@ -556,6 +738,16 @@ if ($payload.PSObject.Properties["prompt"]) {
 
 [Console]::Error.WriteLine("[hook] event=$($payload.hook_event_name) prompt=$prompt")
 
+# 直接终止本轮：命中红线词
+if ($prompt.ToLower().Contains("drop database")) {
+    [pscustomobject]@{
+        continue = $false
+        stopReason = "命中安全策略，已停止本轮提问"
+    } | ConvertTo-Json -Compress -Depth 10
+    exit 0
+}
+
+# 改写用户输入再继续
 if ($prompt.Contains("生产") -and $prompt.Contains("删除")) {
     [pscustomobject]@{
         updatedInput = @{
@@ -674,15 +866,23 @@ exit 0
     "usedSkills": ["bugfix-playbook"]
   }
 }`,
-    outputDescription: "当前事件适合做任务验收和结果复查，发现质量问题时可以要求 Agent 返工。",
+    outputDescription: "当前事件适合做任务验收和结果复查，发现质量问题时可以要求 Agent 返工，或直接终止本轮。",
     outputNotes: [
-      "返回 `decision=block`、`continue=false` 或 `exit=2` 都可以阻止本轮结束。",
-      "`additionalContext` 可把整改建议带回下一轮。"
+      "返回 `decision=block` 或 `exit=2` → 触发修订流程，把 `reason` 与 `additionalContext` 喂回 Agent 让它重做（受最大修订次数限制）。",
+      "返回 `continue=false` 与 `stopReason` → 直接终止本轮，不修订、不报错；优先级高于 `decision=block`，对齐 Claude Code 的 preventContinuation 语义。",
+      "`additionalContext` 仅在 block 路径生效，会一起带进修订提示；halt 路径不会注入下一轮。"
     ],
-    outputExample: `{
+    outputExample: `# 要求 Agent 修订后再结束（默认）
+{
   "decision": "block",
   "reason": "本轮缺少测试结果与验收结论，请补充后再结束",
   "additionalContext": "请先运行相关测试，并在回复中明确说明验证结果。"
+}
+
+# 直接终止本轮（continue=false；优先级高于 decision=block）
+{
+  "continue": false,
+  "stopReason": "已达到本日操作上限，停止后续任务"
 }`,
     pythonExample: `import json
 import sys
@@ -694,6 +894,16 @@ assistant_response = str(stop_context.get("assistantResponse", ""))
 
 print(f"[hook] stop tool_calls={tool_calls}", file=sys.stderr)
 
+# 直接终止本轮：命中红线词时优先于修订
+if "rm -rf /" in assistant_response.lower():
+    json.dump(
+        {"continue": False, "stopReason": "命中安全策略，已停止本轮"},
+        sys.stdout,
+        ensure_ascii=False,
+    )
+    sys.exit(0)
+
+# 要求 Agent 修订：缺少测试就回头补
 if "pytest" not in " ".join(map(str, tool_calls)).lower():
     json.dump(
         {
@@ -721,6 +931,16 @@ if ($stopContext -and $stopContext.PSObject.Properties["assistantResponse"]) {
 
 [Console]::Error.WriteLine("[hook] stop tool_calls=$($toolCalls -join ', ')")
 
+# 直接终止本轮：命中红线词时优先于修订
+if ($assistantResponse.ToLower().Contains('rm -rf /')) {
+    [pscustomobject]@{
+        continue = $false
+        stopReason = "命中安全策略，已停止本轮"
+    } | ConvertTo-Json -Compress -Depth 10
+    exit 0
+}
+
+# 要求 Agent 修订：缺少测试就回头补
 if (-not (($toolCalls -join ' ').ToLower().Contains('pytest'))) {
     [pscustomobject]@{
         decision = "block"
@@ -1201,6 +1421,10 @@ export function AddHookDialog(props: {
   const [onBlockAdditionalContext, setOnBlockAdditionalContext] = useState(
     editHook?.onBlock?.additionalContext ?? ""
   )
+  const [forcedOutcome, setForcedOutcome] = useState<"follow" | "always-revise" | "always-halt">(
+    editHook?.forcedOutcome ?? "follow"
+  )
+  const [forcedReason, setForcedReason] = useState(editHook?.forcedReason ?? "")
   const [commandExampleKind, setCommandExampleKind] = useState<CommandExampleKind>("python")
   // shared
   const [timeout, setTimeout_] = useState(String(editHook?.timeout ?? 10000))
@@ -1281,6 +1505,8 @@ export function AddHookDialog(props: {
       setOnBlockSystemMessage(h.onBlock?.systemMessage ?? "")
       setOnBlockRequiredSkill(h.onBlock?.requiredSkill ?? "")
       setOnBlockAdditionalContext(h.onBlock?.additionalContext ?? "")
+      setForcedOutcome(h.forcedOutcome ?? "follow")
+      setForcedReason(h.forcedReason ?? "")
       setTimeout_(String(h.timeout ?? 10000))
     } else {
       setHookType("command")
@@ -1295,6 +1521,8 @@ export function AddHookDialog(props: {
       setOnBlockSystemMessage("")
       setOnBlockRequiredSkill("")
       setOnBlockAdditionalContext("")
+      setForcedOutcome("follow")
+      setForcedReason("")
       setTimeout_("10000")
     }
     setError(null)
@@ -1363,6 +1591,12 @@ export function AddHookDialog(props: {
         config.onBlock = onBlock
       }
 
+      if (forcedOutcome === "always-revise" || forcedOutcome === "always-halt") {
+        config.forcedOutcome = forcedOutcome
+        const trimmed = forcedReason.trim()
+        if (trimmed) config.forcedReason = trimmed
+      }
+
       if (editHook) {
         await window.api.hooks.update({ ...config, id: editHook.id })
       } else {
@@ -1389,6 +1623,8 @@ export function AddHookDialog(props: {
     onBlockSystemMessage,
     onBlockRequiredSkill,
     onBlockAdditionalContext,
+    forcedOutcome,
+    forcedReason,
     editHook,
     onSuccess,
     handleOpenChange,
@@ -2020,6 +2256,91 @@ export function AddHookDialog(props: {
                   className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-ring"
                 />
               </div>
+            </div>
+
+            <div className="space-y-3 rounded-md border border-border/60 bg-muted/20 p-3">
+              <div className="space-y-1">
+                <label className="text-sm font-medium">触发后的处理方式</label>
+                <p className="text-xs text-muted-foreground">
+                  覆盖 hook 命令的运行时输出。默认让 hook 自己决定（输出 JSON 字段），
+                  也可以无条件强制走修订或终止本轮。所有事件都生效——
+                  Stop / PostSkillUse 的“终止”会结束整轮；Pre*/Post* 工具事件的“终止”等同强制阻断该次操作。
+                </p>
+              </div>
+              <Select
+                value={forcedOutcome}
+                onValueChange={(v) =>
+                  setForcedOutcome(v as "follow" | "always-revise" | "always-halt")
+                }
+              >
+                <SelectTrigger className="h-9">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="follow">跟随 hook stdout（默认；不写 forcedOutcome）</SelectItem>
+                  <SelectItem value="always-revise">
+                    总是要求 Agent 修订（forcedOutcome=&quot;always-revise&quot;）
+                  </SelectItem>
+                  <SelectItem value="always-halt">
+                    总是直接终止本轮（forcedOutcome=&quot;always-halt&quot;）
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                JSON 字段：
+                <code className="mx-1 font-mono text-foreground/85">forcedOutcome</code>
+                可选
+                <code className="mx-1 font-mono text-foreground/85">"always-revise"</code>
+                /
+                <code className="mx-1 font-mono text-foreground/85">"always-halt"</code>
+                ，省略即跟随 stdout；
+                <code className="mx-1 font-mono text-foreground/85">forcedReason</code>
+                可选，用作静态原因。
+              </p>
+
+              {forcedOutcome !== "follow" && (
+                <div className="space-y-2">
+                  <label htmlFor="hook-forced-reason" className="text-sm font-medium">
+                    {forcedOutcome === "always-halt" ? "停止原因（stopReason）" : "修订原因（reason）"}
+                    （可选）
+                  </label>
+                  <Input
+                    id="hook-forced-reason"
+                    placeholder={
+                      forcedOutcome === "always-halt"
+                        ? "例如：触发安全策略，已停止本轮"
+                        : "例如：本轮缺少必要校验，请补充后重试"
+                    }
+                    value={forcedReason}
+                    onChange={(e) => setForcedReason(e.target.value)}
+                    className="h-9"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    若不填，会回退到 hook 自身输出的字段，再回退到默认提示。
+                  </p>
+                </div>
+              )}
+
+              <details className="text-xs text-muted-foreground">
+                <summary className="cursor-pointer select-none">
+                  想要 hook 自己动态决定？参考 stdout 输出示例
+                </summary>
+                <div className="mt-2 space-y-2">
+                  <p>把 hook 命令的 stdout 输出成 JSON：</p>
+                  <pre className="rounded bg-muted/40 p-2 font-mono text-[11px] leading-relaxed">{`# 直接终止本轮
+echo '{"continue":false,"stopReason":"已满足终止条件"}'
+
+# 要求 Agent 修订
+echo '{"decision":"block","reason":"请补充测试再结束"}'
+
+# 携带额外整改上下文
+echo '{"decision":"block","reason":"…","additionalContext":"提示：先跑 pytest"}'`}</pre>
+                  <p>
+                    优先级：<code>continue=false</code> {">"} <code>decision=block</code>。
+                    若同时设置上面的“处理方式”选项，则配置项覆盖 stdout 输出。
+                  </p>
+                </div>
+              </details>
             </div>
           </div>
         </div>

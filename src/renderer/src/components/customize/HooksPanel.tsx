@@ -31,25 +31,25 @@ const EVENT_BADGE: Record<
     label: "调用前",
     className: "bg-blue-500/15 text-blue-600 dark:text-blue-400",
     english: "PreToolUse",
-    tip: "工具执行前触发，可拦截并阻止执行"
+    tip: "工具执行前触发，可拦截阻断；continue=false 强制阻断该次工具调用"
   },
   PostToolUse: {
     label: "调用后",
     className: "bg-green-500/15 text-green-600 dark:text-green-400",
     english: "PostToolUse",
-    tip: "工具执行后触发，输出追加到 Agent 上下文"
+    tip: "工具执行后触发，输出追加到 Agent 上下文，可要求修订或终止本轮"
   },
   PreSkillUse: {
     label: "技能前",
     className: "bg-blue-500/15 text-blue-600 dark:text-blue-400",
     english: "PreSkillUse",
-    tip: "技能被选择、激活或首次读取前触发，可按技能名拦截"
+    tip: "技能被选择、激活或首次读取前触发，可按技能名拦截或直接终止本轮"
   },
   PostSkillUse: {
     label: "技能后",
     className: "bg-green-500/15 text-green-600 dark:text-green-400",
     english: "PostSkillUse",
-    tip: "本轮结束时对已激活技能触发，可记录结果或要求修订"
+    tip: "本轮结束时对已激活技能触发，可记录结果、要求修订或直接终止本轮"
   },
   PostToolUseFailure: {
     label: "调用失败",
@@ -61,7 +61,7 @@ const EVENT_BADGE: Record<
     label: "提交",
     className: "bg-cyan-500/15 text-cyan-600 dark:text-cyan-400",
     english: "UserPromptSubmit",
-    tip: "用户消息进入模型前触发，可阻断或重写"
+    tip: "用户消息进入模型前触发，可阻断、重写或直接终止本轮"
   },
   SessionStart: {
     label: "会话始",
@@ -79,7 +79,7 @@ const EVENT_BADGE: Record<
     label: "停止",
     className: "bg-amber-500/15 text-amber-600 dark:text-amber-400",
     english: "Stop",
-    tip: "Agent 完成任务停止时触发，可请求返工"
+    tip: "Agent 完成任务停止时触发，可请求返工或直接终止本轮"
   },
   StopFailure: {
     label: "停止失败",
@@ -172,6 +172,15 @@ const COMMON_COMMAND_RESULT_FIELDS: Array<{ key: string; description: string }> 
     description: "阻断原因；会显示给 Agent，用于指导下一步整改。"
   },
   {
+    key: "continue=false",
+    description:
+      "直接终止本轮（不修订、不报错），优先级高于 decision=block；Stop / PostSkillUse 上是真的结束整轮，Pre / Post 工具事件等同强制阻断该次操作。"
+  },
+  {
+    key: "stopReason",
+    description: "搭配 continue=false 使用，作为终止原因展示给用户和 Agent。"
+  },
+  {
     key: "systemMessage",
     description: "直接展示给用户的可见提示，适合写审批说明或风险提醒。"
   },
@@ -186,6 +195,24 @@ const COMMON_COMMAND_RESULT_FIELDS: Array<{ key: string; description: string }> 
   {
     key: "requiredSkill",
     description: "阻断时指定整改技能，让 Agent 明确下一步应调用哪个技能。"
+  }
+]
+
+const FORCED_OUTCOME_FIELDS: Array<{ key: string; description: string }> = [
+  {
+    key: 'forcedOutcome="always-revise"',
+    description:
+      "无视 hook stdout，强制走修订流程（等同 hook 总是返回 decision=block）；此时 forcedReason 作为 reason 传给 Agent。"
+  },
+  {
+    key: 'forcedOutcome="always-halt"',
+    description:
+      "无视 hook stdout，强制终止本轮（等同 hook 总是返回 continue=false）；此时 forcedReason 作为 stopReason；优先级高于 always-revise。"
+  },
+  {
+    key: "forcedReason",
+    description:
+      "可选；为 always-revise / always-halt 提供静态原因。不填则回退到 hook 自身输出的 reason / stopReason。"
   }
 ]
 
@@ -218,6 +245,14 @@ const SKILL_HOOK_FLAT_EXAMPLE = `[
     "event": "Stop",
     "type": "command",
     "command": "python hooks/post-check.py"
+  },
+  {
+    "event": "PostSkillUse",
+    "matcher": "secret-policy",
+    "type": "command",
+    "command": "python hooks/post-skill-audit.py",
+    "forcedOutcome": "always-halt",
+    "forcedReason": "安全策略命中，直接终止本轮"
   }
 ]`
 
@@ -233,6 +268,19 @@ const SKILL_HOOK_CC_EXAMPLE = `{
         }
       ]
     }
+  ],
+  "PostSkillUse": [
+    {
+      "matcher": "secret-policy",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python hooks/post-skill-audit.py",
+          "forcedOutcome": "always-halt",
+          "forcedReason": "命中策略，直接终止本轮"
+        }
+      ]
+    }
   ]
 }`
 
@@ -243,6 +291,13 @@ const PLUGIN_HOOK_FLAT_EXAMPLE = `[
     "type": "command",
     "command": "python hooks/pre-write.py",
     "timeout": 10000
+  },
+  {
+    "event": "Stop",
+    "type": "command",
+    "command": "python hooks/budget-check.py",
+    "forcedOutcome": "always-halt",
+    "forcedReason": "已达到本日操作上限，停止本轮"
   }
 ]`
 
@@ -255,7 +310,9 @@ const WORKSPACE_HOOK_FLAT_EXAMPLE = `{
   "onBlock": {
     "reason": "检测到高风险写入，请先按整改流程处理",
     "requiredSkill": "workspace-hook-remediation"
-  }
+  },
+  "forcedOutcome": "always-revise",
+  "forcedReason": "本工作区禁止直接写入，请先生成 PR 模板"
 }`
 
 const WORKSPACE_HOOK_CC_EXAMPLE = `{
@@ -270,7 +327,9 @@ const WORKSPACE_HOOK_CC_EXAMPLE = `{
           "onBlock": {
             "systemMessage": "请先按整改技能修复，再重试",
             "requiredSkill": "workspace-hook-remediation"
-          }
+          },
+          "forcedOutcome": "always-revise",
+          "forcedReason": "本工作区禁止直接写入，请先生成 PR 模板"
         }
       ]
     }
@@ -297,6 +356,68 @@ function getHookSourceLabel(source: DisplayHook["source"]): string {
 
 function getHookSourceDetailLabel(source: DisplayHook["source"]): string {
   return `${getHookSourceLabel(source)} Hook`
+}
+
+const FIRE_AND_FORGET_EVENTS = new Set<HookEvent>([
+  "SessionStart",
+  "SessionEnd",
+  "Notification",
+  "SubagentStop"
+])
+
+function getHookOwnerLabel(hook: DisplayHook): string {
+  if (hook.source === "plugin") return hook.pluginName
+  if (hook.source === "skill") {
+    return hook.pluginName ? `${hook.skillName} · ${hook.pluginName}` : hook.skillName
+  }
+  return "全局"
+}
+
+function getMatcherKind(event: HookEvent): string {
+  if (event === "PreSkillUse" || event === "PostSkillUse") return "技能"
+  if (event === "UserPromptSubmit") return "用户消息"
+  if (event === "SessionStart" || event === "SessionEnd") return "会话"
+  if (event === "Notification") return "通知"
+  if (event === "SubagentStop" || event === "SubagentStart") return "子 Agent"
+  if (event === "Stop" || event === "StopFailure") return "收尾"
+  return "工具"
+}
+
+function getMatcherInfo(hook: DisplayHook): { label: string; detail?: string; mono?: boolean } {
+  const kind = getMatcherKind(hook.event)
+  if (!hook.matcher || hook.matcher === "*") return { label: `${kind}: 全部` }
+  const preset = COMMON_TOOLS.find((tool) => tool.value !== "custom" && tool.value === hook.matcher)
+  if (preset) return { label: `${kind}: ${preset.label}`, detail: hook.matcher }
+  return { label: `${kind}: ${hook.matcher}`, mono: true }
+}
+
+function getHookConfigPath(hook: DisplayHook): string {
+  if (hook.source === "plugin" || hook.source === "skill") return hook.hookPath
+  return hook.hookSourcePath || "~/.cmbcoworkagent/hooks.json"
+}
+
+function getHookExecutionRoot(hook: DisplayHook): string {
+  if (hook.source === "plugin") return hook.pluginRoot
+  if (hook.source === "skill") return hook.skillPath
+  return hook.hookSourceRoot || "~/.cmbcoworkagent"
+}
+
+function getForcedOutcomeLabel(hook: DisplayHook): string | null {
+  if (hook.forcedOutcome === "always-revise") return "强制修订"
+  if (hook.forcedOutcome === "always-halt") return "直接停止"
+  return null
+}
+
+function getForcedOutcomeDescription(hook: DisplayHook): string {
+  if (!hook.forcedOutcome) return "跟随脚本 stdout 返回值。"
+  const base =
+    hook.forcedOutcome === "always-halt"
+      ? "无视脚本 stdout，强制按 continue=false 处理。"
+      : "无视脚本 stdout，强制按 decision=block 处理。"
+  if (FIRE_AND_FORGET_EVENTS.has(hook.event)) {
+    return `${base}该事件是异步 fire-and-forget，只更新执行记录和回调语义，不会阻断主流程。`
+  }
+  return base
 }
 
 export function HooksPanel(): React.JSX.Element {
@@ -487,77 +608,88 @@ export function HooksPanel(): React.JSX.Element {
                 const badge = EVENT_BADGE[hook.event]
                 const isPrompt = hook.type === "prompt"
                 const isPluginHook = hook.source === "plugin"
-                const isSkillHook = hook.source === "skill"
                 const summary = hookSummary(hook)
+                const matcherInfo = getMatcherInfo(hook)
+                const ownerLabel = getHookOwnerLabel(hook)
+                const forcedLabel = getForcedOutcomeLabel(hook)
                 return (
                   <button
                     key={hook.id}
                     className={cn(
-                      "w-full flex items-center gap-2 px-2 py-1.5 rounded-md border border-border/70 text-left transition-colors",
+                      "w-full rounded-md border border-border/70 px-2.5 py-2 text-left transition-colors",
                       selectedHook?.id === hook.id ? "bg-muted/70" : "hover:bg-muted/50"
                     )}
                     onClick={() => setSelectedHook(hook)}
                   >
-                    <TooltipProvider delayDuration={200}>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <span
-                            className={cn(
-                              "text-[10px] font-medium px-1.5 py-0.5 rounded-full shrink-0 cursor-default",
-                              badge.className
-                            )}
-                          >
-                            {badge.label}
-                          </span>
-                        </TooltipTrigger>
-                        <TooltipContent side="top">
-                          <p className="font-mono text-xs font-semibold">{badge.english}</p>
-                          <p className="text-xs text-muted-foreground">{badge.tip}</p>
-                        </TooltipContent>
-                      </Tooltip>
-                    </TooltipProvider>
-                    {/* type icon */}
-                    {isPrompt ? (
-                      <BrainCircuit className="size-3 shrink-0 text-violet-500" />
-                    ) : (
-                      <Terminal className="size-3 shrink-0 text-muted-foreground" />
-                    )}
-                    <span
-                      className={cn(
-                        "text-[10px] font-medium px-1.5 py-0.5 rounded-full shrink-0",
-                        HOOK_SOURCE_BADGE_CLASS[hook.source]
-                      )}
-                    >
-                      {getHookSourceLabel(hook.source)}
-                    </span>
-                    {isPluginHook && (
-                      <span className="text-[10px] text-muted-foreground shrink-0 truncate max-w-[88px]">
-                        {hook.pluginName}
-                      </span>
-                    )}
-                    {isSkillHook && (
-                      <span className="text-[10px] text-muted-foreground shrink-0 truncate max-w-[88px]">
-                        {hook.skillName}
-                      </span>
-                    )}
-                    <span
-                      className={cn(
-                        "text-sm truncate flex-1",
-                        isPrompt ? "italic" : "font-mono",
-                        !hook.enabled && "text-muted-foreground"
-                      )}
-                    >
-                      {summary}
-                    </span>
-                    <div className="flex items-center gap-1 shrink-0">
-                      {isPluginHook && !hook.pluginEnabled && (
-                        <span className="text-[10px] text-amber-600 dark:text-amber-400">
-                          插件停用
+                    <div className="space-y-1.5">
+                      <div className="flex items-center gap-1.5">
+                        <TooltipProvider delayDuration={200}>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span
+                                className={cn(
+                                  "text-[10px] font-medium px-1.5 py-0.5 rounded-full shrink-0 cursor-default",
+                                  badge.className
+                                )}
+                              >
+                                {badge.label}
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent side="top">
+                              <p className="font-mono text-xs font-semibold">{badge.english}</p>
+                              <p className="text-xs text-muted-foreground">{badge.tip}</p>
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                        <span
+                          className={cn(
+                            "text-[10px] font-medium px-1.5 py-0.5 rounded-full shrink-0",
+                            HOOK_SOURCE_BADGE_CLASS[hook.source]
+                          )}
+                        >
+                          {getHookSourceLabel(hook.source)}
                         </span>
-                      )}
-                      {!hook.enabled && (
-                        <span className="text-[10px] text-muted-foreground">已禁用</span>
-                      )}
+                        <span className="min-w-0 truncate text-xs font-medium text-foreground/90">
+                          {ownerLabel}
+                        </span>
+                        <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">
+                          {hook.enabled
+                            ? isPluginHook && !hook.pluginEnabled
+                              ? "插件停用"
+                              : "启用"
+                            : "禁用"}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                        {isPrompt ? (
+                          <BrainCircuit className="size-3 shrink-0 text-violet-500" />
+                        ) : (
+                          <Terminal className="size-3 shrink-0" />
+                        )}
+                        <span className="shrink-0">{isPrompt ? "自然语言策略" : "Shell 命令"}</span>
+                        <span className="rounded-full border border-border/50 px-1.5 py-0.5">
+                          {matcherInfo.label}
+                        </span>
+                        {forcedLabel && (
+                          <span className="rounded-full border border-amber-300/50 bg-amber-50 px-1.5 py-0.5 text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">
+                            {forcedLabel}
+                          </span>
+                        )}
+                        {hook.onBlock && (
+                          <span className="rounded-full border border-blue-300/50 bg-blue-50 px-1.5 py-0.5 text-blue-700 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300">
+                            onBlock
+                          </span>
+                        )}
+                      </div>
+                      <div
+                        className={cn(
+                          "truncate text-xs",
+                          isPrompt ? "italic text-foreground/85" : "font-mono text-foreground/80",
+                          !hook.enabled && "text-muted-foreground"
+                        )}
+                      >
+                        {summary || "未配置执行内容"}
+                      </div>
                     </div>
                   </button>
                 )
@@ -621,6 +753,11 @@ function HookDetail(props: {
   const readableContextDocs = getCommandHookReadableContextDocs(hook.event)
   const toolInputDocs = getCommandHookToolInputDocs(hook.event, hook.matcher)
   const toolInputSummary = getCommandHookToolInputSummary(hook.event, hook.matcher)
+  const ownerLabel = getHookOwnerLabel(hook)
+  const matcherInfo = getMatcherInfo(hook)
+  const configPath = getHookConfigPath(hook)
+  const executionRoot = getHookExecutionRoot(hook)
+  const forcedLabel = getForcedOutcomeLabel(hook)
 
   return (
     <div className="p-6 space-y-6">
@@ -676,29 +813,6 @@ function HookDetail(props: {
             >
               {getHookSourceDetailLabel(hook.source)}
             </span>
-            {hook.matcher &&
-              (() => {
-                const preset = COMMON_TOOLS.find(
-                  (t) => t.value !== "custom" && t.value === hook.matcher
-                )
-                return (
-                  <TooltipProvider delayDuration={200}>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <span className="text-xs text-muted-foreground font-mono cursor-default">
-                          {preset ? preset.label : hook.matcher}
-                        </span>
-                      </TooltipTrigger>
-                      <TooltipContent side="bottom">
-                        <p className="font-mono text-xs font-semibold">{hook.matcher}</p>
-                        {preset && (
-                          <p className="text-xs text-muted-foreground">{preset.description}</p>
-                        )}
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                )
-              })()}
           </div>
         </div>
         <div className="flex items-center gap-1 shrink-0">
@@ -742,56 +856,47 @@ function HookDetail(props: {
 
       {/* Details */}
       <div className="space-y-4">
-        <DetailRow label="来源" value={getHookSourceDetailLabel(hook.source)} />
-        {isGlobalHook && <DetailRow label="管理方式" value="这里可以直接启停、编辑和删除。" />}
-        {isPluginHook && (
-          <DetailRow
-            label="所属插件"
-            value={hook.pluginName}
-            subtext={hook.pluginEnabled ? "插件当前已启用" : "插件当前已禁用，此 Hook 不会执行"}
+        <div className="grid gap-3 md:grid-cols-2">
+          <DetailCard
+            label="归属"
+            value={ownerLabel}
+            subtext={
+              isPluginHook
+                ? hook.pluginEnabled
+                  ? "插件当前已启用"
+                  : "插件当前已禁用，此 Hook 不会执行"
+                : isSkillHook
+                  ? "跟随技能加载；停用技能后会一起移除"
+                  : "全局 Hook，可在这里直接编辑和删除"
+            }
           />
-        )}
-        {isPluginHook && <DetailRow label="配置文件" value={hook.hookPath} mono />}
-        {isPluginHook && (
-          <DetailRow
-            label="管理方式"
-            value="这里可以切换启停；如需修改脚本或策略内容，请到插件详情页或插件目录中调整。"
+          <DetailCard
+            label="触发"
+            value={`${badge.label}（${badge.english}）`}
+            subtext={`${matcherInfo.label}${matcherInfo.detail ? ` · ${matcherInfo.detail}` : ""}`}
           />
-        )}
-        {isSkillHook && (
-          <DetailRow
-            label="所属技能"
-            value={hook.skillName}
-            subtext="该 Hook 跟随技能一起加载；停用技能后会一起移除。"
+          <DetailCard
+            label="执行目录"
+            value={executionRoot}
+            mono
+            subtext={
+              isPrompt
+                ? "自然语言策略不启动本地命令；此目录仅用于说明来源"
+                : "相对路径命令会基于这里解析"
+            }
           />
-        )}
-        {isSkillHook && <DetailRow label="配置文件" value={hook.hookPath} mono />}
-        {isSkillHook && <DetailRow label="技能目录" value={hook.skillPath} mono />}
-        {isSkillHook && (
-          <DetailRow
-            label="管理方式"
-            value="这里用于查看；如需停用，请到技能管理页停用技能；如需修改脚本或策略内容，请到技能目录中调整 hooks/hooks.json（或旧版 hooks.json）。"
+          <DetailCard label="配置文件" value={configPath} mono />
+        </div>
+
+        <div className="grid gap-3 md:grid-cols-3">
+          <DetailCard label="状态" value={hook.enabled ? "已启用" : "已禁用"} />
+          <DetailCard label="超时" value={`${hook.timeout ?? 10000}ms`} />
+          <DetailCard
+            label="行为"
+            value={forcedLabel ?? "跟随脚本"}
+            subtext={hook.onBlock ? "含 onBlock 补充配置" : undefined}
           />
-        )}
-        <DetailRow label="状态" value={hook.enabled ? "已启用" : "已禁用"} />
-        <DetailRow
-          label="事件类型"
-          value={`${badge.label}（${badge.english}）`}
-          subtext={badge.tip}
-        />
-        {hook.matcher &&
-          (() => {
-            const preset = COMMON_TOOLS.find(
-              (t) => t.value !== "custom" && t.value === hook.matcher
-            )
-            return (
-              <DetailRow
-                label="工具匹配"
-                value={preset ? `${preset.label}（${hook.matcher}）` : hook.matcher}
-                mono={!preset}
-              />
-            )
-          })()}
+        </div>
 
         {isPrompt ? (
           <>
@@ -814,109 +919,124 @@ function HookDetail(props: {
               label="输入协议"
               value="脚本通过 stdin JSON + 环境变量接收上下文；stdout 可返回纯文本或 JSON，stderr 用于调试日志。"
             />
-            <div className="flex items-start gap-4">
-              <span className="text-sm text-muted-foreground w-20 shrink-0">脚本输入</span>
-              <div className="flex-1 space-y-2 rounded-md border border-border/50 bg-muted/30 px-3 py-2">
-                <p className="text-sm text-foreground/90">{commandHookDoc.inputDescription}</p>
-                <div className="flex flex-wrap gap-1.5">
-                  {commandHookDoc.inputFields.map((field) => (
-                    <span
-                      key={field}
-                      className="rounded-full border border-border/50 bg-background px-2 py-0.5 font-mono text-[10px] text-foreground/80"
-                    >
-                      {field}
-                    </span>
-                  ))}
-                </div>
-                <div className="flex flex-wrap gap-1.5">
-                  {commandHookDoc.envFields.map((field) => (
-                    <span
-                      key={field}
-                      className="rounded-full border border-dashed border-border/50 bg-background px-2 py-0.5 font-mono text-[10px] text-muted-foreground"
-                    >
-                      {field}
-                    </span>
-                  ))}
-                </div>
-                <div className="rounded-md border border-border/40 bg-background/80 px-3 py-2 space-y-3">
-                  <div className="space-y-1">
-                    <p className="text-sm font-medium text-foreground">可读取信息总览</p>
-                    <p className="text-sm text-muted-foreground">
-                      当前事件下，脚本可直接从 stdin JSON、环境变量和事件专属对象里读取这些信息。
+            <details className="rounded-md border border-border/50 bg-muted/20">
+              <summary className="cursor-pointer list-none px-3 py-2.5 [&::-webkit-details-marker]:hidden">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-medium text-foreground">脚本输入参考</p>
+                    <p className="text-xs text-muted-foreground">
+                      展开查看 stdin、环境变量和 tool_input 字段。
                     </p>
                   </div>
-                  <div className="space-y-2">
-                    <p className="text-xs font-medium text-foreground/90">stdin 顶层字段</p>
-                    <div className="space-y-2">
-                      {readableContextDocs.stdinFields.map((field) => (
-                        <div
-                          key={field.key}
-                          className="rounded-md border border-border/40 bg-muted/20 px-3 py-2 space-y-1"
-                        >
-                          <span className="inline-flex rounded-full border border-border/50 bg-background px-2 py-0.5 font-mono text-[10px] text-foreground/80">
-                            {field.key}
-                          </span>
-                          <p className="text-sm text-muted-foreground">{field.description}</p>
-                          {field.note && <p className="text-xs text-foreground/80">{field.note}</p>}
-                        </div>
-                      ))}
-                    </div>
+                  <span className="shrink-0 rounded-full border border-border/50 bg-background px-2 py-0.5 text-[10px] text-muted-foreground">
+                    展开
+                  </span>
+                </div>
+              </summary>
+              <div className="space-y-4 border-t border-border/40 p-3">
+                <div className="space-y-2 rounded-md border border-border/50 bg-muted/30 px-3 py-2">
+                  <p className="text-sm text-foreground/90">{commandHookDoc.inputDescription}</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {commandHookDoc.inputFields.map((field) => (
+                      <span
+                        key={field}
+                        className="rounded-full border border-border/50 bg-background px-2 py-0.5 font-mono text-[10px] text-foreground/80"
+                      >
+                        {field}
+                      </span>
+                    ))}
                   </div>
-                  <div className="space-y-2">
-                    <p className="text-xs font-medium text-foreground/90">环境变量</p>
-                    <div className="space-y-2">
-                      {readableContextDocs.envFields.map((field) => (
-                        <div
-                          key={field.key}
-                          className="rounded-md border border-border/40 bg-muted/20 px-3 py-2 space-y-1"
-                        >
-                          <span className="inline-flex rounded-full border border-dashed border-border/50 bg-background px-2 py-0.5 font-mono text-[10px] text-muted-foreground">
-                            {field.key}
-                          </span>
-                          <p className="text-sm text-muted-foreground">{field.description}</p>
-                          {field.note && <p className="text-xs text-foreground/80">{field.note}</p>}
-                        </div>
-                      ))}
-                    </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {commandHookDoc.envFields.map((field) => (
+                      <span
+                        key={field}
+                        className="rounded-full border border-dashed border-border/50 bg-background px-2 py-0.5 font-mono text-[10px] text-muted-foreground"
+                      >
+                        {field}
+                      </span>
+                    ))}
                   </div>
-                  {readableContextDocs.extraObjects.length > 0 && (
+                  <div className="rounded-md border border-border/40 bg-background/80 px-3 py-2 space-y-3">
+                    <div className="space-y-1">
+                      <p className="text-sm font-medium text-foreground">可读取信息总览</p>
+                      <p className="text-sm text-muted-foreground">
+                        当前事件下，脚本可直接从 stdin JSON、环境变量和事件专属对象里读取这些信息。
+                      </p>
+                    </div>
                     <div className="space-y-2">
-                      <p className="text-xs font-medium text-foreground/90">事件专属对象</p>
+                      <p className="text-xs font-medium text-foreground/90">stdin 顶层字段</p>
                       <div className="space-y-2">
-                        {readableContextDocs.extraObjects.map((doc) => (
+                        {readableContextDocs.stdinFields.map((field) => (
                           <div
-                            key={doc.key}
-                            className="rounded-md border border-border/40 bg-muted/20 px-3 py-2 space-y-1.5"
+                            key={field.key}
+                            className="rounded-md border border-border/40 bg-muted/20 px-3 py-2 space-y-1"
                           >
                             <span className="inline-flex rounded-full border border-border/50 bg-background px-2 py-0.5 font-mono text-[10px] text-foreground/80">
-                              {doc.key}
+                              {field.key}
                             </span>
-                            {doc.fields && doc.fields.length > 0 && (
-                              <div className="flex flex-wrap gap-1.5">
-                                {doc.fields.map((field) => (
-                                  <span
-                                    key={`${doc.key}-${field}`}
-                                    className="rounded-full border border-dashed border-border/50 bg-background px-2 py-0.5 font-mono text-[10px] text-muted-foreground"
-                                  >
-                                    {field}
-                                  </span>
-                                ))}
-                              </div>
+                            <p className="text-sm text-muted-foreground">{field.description}</p>
+                            {field.note && (
+                              <p className="text-xs text-foreground/80">{field.note}</p>
                             )}
-                            <p className="text-sm text-muted-foreground">{doc.description}</p>
-                            {doc.note && <p className="text-xs text-foreground/80">{doc.note}</p>}
                           </div>
                         ))}
                       </div>
                     </div>
-                  )}
+                    <div className="space-y-2">
+                      <p className="text-xs font-medium text-foreground/90">环境变量</p>
+                      <div className="space-y-2">
+                        {readableContextDocs.envFields.map((field) => (
+                          <div
+                            key={field.key}
+                            className="rounded-md border border-border/40 bg-muted/20 px-3 py-2 space-y-1"
+                          >
+                            <span className="inline-flex rounded-full border border-dashed border-border/50 bg-background px-2 py-0.5 font-mono text-[10px] text-muted-foreground">
+                              {field.key}
+                            </span>
+                            <p className="text-sm text-muted-foreground">{field.description}</p>
+                            {field.note && (
+                              <p className="text-xs text-foreground/80">{field.note}</p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    {readableContextDocs.extraObjects.length > 0 && (
+                      <div className="space-y-2">
+                        <p className="text-xs font-medium text-foreground/90">事件专属对象</p>
+                        <div className="space-y-2">
+                          {readableContextDocs.extraObjects.map((doc) => (
+                            <div
+                              key={doc.key}
+                              className="rounded-md border border-border/40 bg-muted/20 px-3 py-2 space-y-1.5"
+                            >
+                              <span className="inline-flex rounded-full border border-border/50 bg-background px-2 py-0.5 font-mono text-[10px] text-foreground/80">
+                                {doc.key}
+                              </span>
+                              {doc.fields && doc.fields.length > 0 && (
+                                <div className="flex flex-wrap gap-1.5">
+                                  {doc.fields.map((field) => (
+                                    <span
+                                      key={`${doc.key}-${field}`}
+                                      className="rounded-full border border-dashed border-border/50 bg-background px-2 py-0.5 font-mono text-[10px] text-muted-foreground"
+                                    >
+                                      {field}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                              <p className="text-sm text-muted-foreground">{doc.description}</p>
+                              {doc.note && <p className="text-xs text-foreground/80">{doc.note}</p>}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
-            </div>
-            {toolInputDocs.length > 0 && (
-              <div className="flex items-start gap-4">
-                <span className="text-sm text-muted-foreground w-20 shrink-0">tool_input</span>
-                <div className="flex-1 space-y-2 rounded-md border border-border/50 bg-muted/30 px-3 py-2">
+              {toolInputDocs.length > 0 && (
+                <div className="space-y-2 rounded-md border border-border/50 bg-muted/30 px-3 py-2">
                   <p className="text-sm text-foreground/90">{toolInputSummary}</p>
                   {toolInputDocs.map((doc) => (
                     <div
@@ -952,12 +1072,30 @@ function HookDetail(props: {
                     </div>
                   ))}
                 </div>
-              </div>
-            )}
+              )}
+            </details>
             <DetailRow
               label="日志查看"
               value="运行后回到聊天区，展开“Hook 执行记录”；调试日志建议输出到 stderr，如果 stdout 输出 JSON，会被当成 Hook 返回值解析。想确认某个事件的原始 payload，也可以先把 payload 整体打印到 stderr。"
             />
+          </>
+        )}
+
+        {hook.forcedOutcome && (
+          <>
+            <div className="pt-2 border-t border-border/50">
+              <h4 className="text-sm font-medium">强制行为</h4>
+            </div>
+            <DetailRow
+              label="策略"
+              value={
+                hook.forcedOutcome === "always-halt"
+                  ? "always-halt：直接停止"
+                  : "always-revise：要求修订"
+              }
+            />
+            {hook.forcedReason && <DetailRow label="原因" value={hook.forcedReason} />}
+            <DetailRow label="说明" value={getForcedOutcomeDescription(hook)} />
           </>
         )}
 
@@ -984,10 +1122,24 @@ function HookDetail(props: {
           </>
         )}
 
-        <DetailRow label="超时" value={`${hook.timeout ?? 10000}ms`} />
         <DetailRow label="创建时间" value={formatTime(hook.createdAt)} />
         <DetailRow label="更新时间" value={formatTime(hook.updatedAt)} />
       </div>
+    </div>
+  )
+}
+
+function DetailCard(props: {
+  label: string
+  value: string
+  mono?: boolean
+  subtext?: string
+}): React.JSX.Element {
+  return (
+    <div className="rounded-md border border-border/50 bg-muted/25 px-3 py-2">
+      <div className="text-[10px] uppercase tracking-wide text-muted-foreground">{props.label}</div>
+      <div className={cn("mt-1 text-sm break-all", props.mono && "font-mono")}>{props.value}</div>
+      {props.subtext && <p className="mt-1 text-xs text-muted-foreground">{props.subtext}</p>}
     </div>
   )
 }
@@ -1142,11 +1294,10 @@ function HooksGuide(): React.JSX.Element {
                 工作区 Hook 适合跟项目一起分发；脚本或策略本体建议放在项目目录里跟代码一起维护。
               </p>
               <p>
-                command Hook 的默认执行目录由 Hook 来源决定：
-                全局 Hook 在
+                command Hook 的默认执行目录由 Hook 来源决定： 全局 Hook 在
                 <code className="mx-1 font-mono text-foreground/85">~/.cmbcoworkagent</code>
-                执行，插件 Hook 在插件根目录执行，技能 Hook 在技能目录执行，工作区 Hook
-                在当前 workspace 执行。事件里的
+                执行，插件 Hook 在插件根目录执行，技能 Hook 在技能目录执行，工作区 Hook 在当前
+                workspace 执行。事件里的
                 <code className="mx-1 font-mono text-foreground/85">SKILL_ROOT</code>
                 只表示本次关联的技能，不会改变非 Skill Hook 的执行目录。
               </p>
@@ -1168,6 +1319,35 @@ function HooksGuide(): React.JSX.Element {
                 </div>
               ))}
             </div>
+          </GuideSubSection>
+
+          <GuideSubSection
+            title="强制行为 forcedOutcome"
+            summary='可选值仅两个："always-revise" 或 "always-halt"；不写则跟随 hook 脚本 stdout。'
+          >
+            <p className="mb-2 text-sm text-muted-foreground">
+              <code className="font-mono text-foreground/85">forcedOutcome</code>
+              {" 取值："}
+              <code className="mx-1 font-mono text-foreground/85">"always-revise"</code>
+              （强制走修订流程）/
+              <code className="mx-1 font-mono text-foreground/85">"always-halt"</code>
+              （强制终止本轮）；省略该字段时跟随 hook stdout 决定。
+            </p>
+            <div className="space-y-2">
+              {FORCED_OUTCOME_FIELDS.map((field) => (
+                <div
+                  key={field.key}
+                  className="rounded-md border border-border/40 bg-background px-3 py-2"
+                >
+                  <p className="font-mono text-[11px] text-foreground/85">{field.key}</p>
+                  <p className="text-sm text-muted-foreground">{field.description}</p>
+                </div>
+              ))}
+            </div>
+            <p className="mt-2 text-xs text-muted-foreground">
+              对所有事件生效；与 onBlock 共存（forcedOutcome 决定行为，onBlock 补全字段）。 若 hook
+              脚本同时输出 continue=false，仍按 forcedOutcome 配置覆盖。
+            </p>
           </GuideSubSection>
         </div>
       </GuideSection>
@@ -1270,10 +1450,9 @@ function HooksGuide(): React.JSX.Element {
               </pre>
               <p>
                 在<code className="mx-1 font-mono text-foreground/85">插件</code>
-                页面启用或停用插件，对应的 Hook 随之生效或移除。
-                command 默认在插件根目录执行，可通过
-                <code className="mx-1 font-mono text-foreground/85">HOOK_SOURCE_ROOT</code>
-                或
+                页面启用或停用插件，对应的 Hook 随之生效或移除。 command
+                默认在插件根目录执行，可通过
+                <code className="mx-1 font-mono text-foreground/85">HOOK_SOURCE_ROOT</code>或
                 <code className="mx-1 font-mono text-foreground/85">PLUGIN_ROOT</code>
                 定位插件内脚本。
               </p>
@@ -1314,8 +1493,7 @@ function HooksGuide(): React.JSX.Element {
                   python .cmbdevclaw/hooks/check.py
                 </code>
                 ；也可以读取
-                <code className="mx-1 font-mono text-foreground/85">HOOK_SOURCE_ROOT</code>
-                或
+                <code className="mx-1 font-mono text-foreground/85">HOOK_SOURCE_ROOT</code>或
                 <code className="mx-1 font-mono text-foreground/85">WORKSPACE_PATH</code>
                 获取这个路径。
               </p>

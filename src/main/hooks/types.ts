@@ -64,6 +64,18 @@ export interface HookOnBlockConfig {
   requiredSkill?: string
 }
 
+/**
+ * Static override for the hook's runtime decision. Undefined = follow whatever
+ * the hook script outputs (default behaviour). Otherwise the runner rewrites
+ * the hook result before any aggregator sees it:
+ *
+ * - "always-revise" → force `decision="block"` (re-feed reason to agent for
+ *   revision; for Pre* hooks this denies the operation)
+ * - "always-halt"   → force `continue=false` (Stop/PostSkillUse halt the turn;
+ *   Pre hooks deny the operation; Post tool / fire-and-forget events ignore halt)
+ */
+export type HookForcedOutcome = "always-revise" | "always-halt"
+
 export interface HookConfig {
   id: string
   event: HookEvent
@@ -77,6 +89,10 @@ export interface HookConfig {
   fallback?: PromptHookFallback // Behaviour on timeout / parse failure; default "allow"
   // ── shared ────────────────────────────────────────────────────────────────
   onBlock?: HookOnBlockConfig // static block-time remediation metadata
+  /** Static override of the hook's outcome. Undefined = follow stdout. */
+  forcedOutcome?: HookForcedOutcome
+  /** Reason / stopReason used when forcedOutcome is set. */
+  forcedReason?: string
   timeout?: number // Timeout in ms, default 10000
   enabled: boolean
   createdAt: string
@@ -141,6 +157,8 @@ export interface HookUpsert {
   modelId?: string
   fallback?: PromptHookFallback
   onBlock?: HookOnBlockConfig
+  forcedOutcome?: HookForcedOutcome
+  forcedReason?: string
   timeout?: number
   enabled?: boolean
 }

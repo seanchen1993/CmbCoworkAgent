@@ -36,7 +36,10 @@ function sendHookResult(
       toolSuffix,
       exitCode: result.exitCode,
       blocked: result.blocked,
+      continue: result.continue,
+      stopReason: result.stopReason,
       decision: result.decision,
+      reason: result.reason,
       stdout: truncatePreview(result.stdout, MAX_STDOUT_PREVIEW_CHARS),
       stderr: truncatePreview(result.stderr, MAX_STDERR_PREVIEW_CHARS),
       additionalContext: truncatePreview(

@@ -72,16 +72,13 @@ import {
   resolveEnabledHooksForRun,
   type HookScopeController
 } from "../hooks/scope"
-import type { HookConfig, HookEvent } from "../hooks/types"
+import type { HookConfig, HookEvent, HookResult } from "../hooks/types"
 import { fireSessionStartOnce } from "../hooks/session-lifecycle"
 import { runHooksEnriched } from "../hooks/required-skill"
 import { activateSkillLifecycle, formatSkillHookContext } from "../agent/skill-lifecycle/activation"
 import { parseSkillUseBlock, type ParsedSkillUseBlock } from "../agent/skill-lifecycle/marker"
 import { SkillLifecycleRegistry, type SkillLifecycleMatch } from "../agent/skill-lifecycle/registry"
-import {
-  createSkillUseTracker,
-  type SkillUseTracker
-} from "../agent/skill-lifecycle/tracker"
+import { createSkillUseTracker, type SkillUseTracker } from "../agent/skill-lifecycle/tracker"
 import {
   runCompletionHooksWithRevision,
   type StopHookContext
@@ -1140,6 +1137,27 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       })
     }
 
+    const sendHookBlocked = (
+      event: HookEvent,
+      result: HookResult,
+      fallbackReason: string
+    ): void => {
+      const reason =
+        result.stopReason || result.reason || result.stderr || result.stdout || fallbackReason
+      const action = result.continue === false ? "halt" : "block"
+      window.webContents.send(channel, {
+        type: "custom",
+        data: {
+          type: "hook_blocked",
+          hookEvent: event,
+          action,
+          reason,
+          systemMessage: result.systemMessage
+        }
+      })
+      window.webContents.send(channel, { type: "done" })
+    }
+
     const onHookResult = makeHookResultCallback(window, channel)
 
     const appendTurnToProposalWindow = (
@@ -1259,15 +1277,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         onHookResult
       )
       if (promptSubmitResult?.blocked || promptSubmitResult?.continue === false) {
-        const reason =
-          promptSubmitResult.stopReason ||
-          promptSubmitResult.stderr ||
-          promptSubmitResult.stdout ||
-          "消息被 Hook 策略拦截"
-        window.webContents.send(channel, {
-          type: "error",
-          error: reason
-        })
+        sendHookBlocked("UserPromptSubmit", promptSubmitResult, "消息被 Hook 策略拦截")
+        await tracer.finish("cancelled", "UserPromptSubmit hook stopped the turn")
         return
       }
       // Apply hook-supplied prompt rewrite / context injection. `message` remains the raw
@@ -1994,7 +2005,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
 
       if (!abortController.signal.aborted) {
-        const stopPassed = await runCompletionHooksWithRevision({
+        const completionOutcome = await runCompletionHooksWithRevision({
           threadId,
           workspacePath: workspacePath ?? undefined,
           abortSignal: abortController.signal,
@@ -2023,10 +2034,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           onHookResult
         })
 
-        if (!stopPassed) {
+        if (completionOutcome === "failed") {
           await tracer.finish("error", "Stop hook blocked completion")
           return
         }
+        // "halted" falls through to the normal done path so the renderer stops
+        // its loading indicator. The hook already explained why via sendNotice.
 
         await finalizeAutoCommit({
           threadId,
@@ -2448,7 +2461,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
 
       if (!abortController.signal.aborted) {
-        const stopPassed = await runCompletionHooksWithRevision({
+        const completionOutcome = await runCompletionHooksWithRevision({
           threadId,
           workspacePath: workspacePath ?? undefined,
           abortSignal: abortController.signal,
@@ -2471,7 +2484,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           onHookResult
         })
 
-        if (!stopPassed) return
+        if (completionOutcome === "failed") return
+        // "halted" falls through to the done path so the renderer stops loading.
 
         await finalizeAutoCommit({
           threadId,
@@ -2746,7 +2760,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
 
         if (!abortController.signal.aborted) {
-          const stopPassed = await runCompletionHooksWithRevision({
+          const completionOutcome = await runCompletionHooksWithRevision({
             threadId,
             workspacePath: workspacePath ?? undefined,
             abortSignal: abortController.signal,
@@ -2769,7 +2783,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             onHookResult
           })
 
-          if (!stopPassed) return
+          if (completionOutcome === "failed") return
+          // "halted" falls through to the done path so the renderer stops loading.
 
           await finalizeAutoCommit({
             threadId,

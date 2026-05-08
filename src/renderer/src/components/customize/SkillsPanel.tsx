@@ -933,8 +933,46 @@ const SKILL_HOOK_JSON_EXAMPLE = `[
       "systemMessage": "请先按技能要求整改，再重试",
       "requiredSkill": "<skill-name>"
     }
+  },
+  {
+    "event": "PostSkillUse",
+    "matcher": "<skill-name>",
+    "type": "command",
+    "command": "python hooks/post_skill_audit.py",
+    "forcedOutcome": "always-halt",
+    "forcedReason": "技能使用结果命中策略，直接终止本轮"
   }
 ]`
+
+// Claude Code 嵌套格式：按事件名分组，每组多个 matcher，每个 matcher 又可挂多个 hook。
+// timeout 单位是秒（运行时自动 ×1000 转毫秒）。
+const SKILL_HOOK_CC_EXAMPLE = `{
+  "PreToolUse": [
+    {
+      "matcher": "write_file|edit_file",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python hooks/pre_write_guard.py",
+          "timeout": 10
+        }
+      ]
+    }
+  ],
+  "PostSkillUse": [
+    {
+      "matcher": "<skill-name>",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python hooks/post_skill_audit.py",
+          "forcedOutcome": "always-halt",
+          "forcedReason": "技能使用结果命中策略，直接终止本轮"
+        }
+      ]
+    }
+  ]
+}`
 
 const SKILL_HOOK_ENV_EXAMPLE = `const workspace = process.env.WORKSPACE_PATH
 const skillRoot = process.env.SKILL_ROOT
@@ -1182,11 +1220,18 @@ function SkillsGuide(): React.JSX.Element {
 
             <SkillGuideSubSection
               title="最小配置示例"
-              summary="下面是一个最小的 skill-level PreToolUse command hook。"
+              summary="支持扁平数组和 Claude Code 嵌套两种格式；运行时自动识别。"
             >
-              <div className="space-y-2 text-sm text-muted-foreground">
+              <div className="space-y-3 text-sm text-muted-foreground">
+                <p className="font-medium text-foreground/85">扁平数组（推荐）</p>
                 <pre className="overflow-x-auto rounded-md border border-border/40 bg-background p-3 text-xs leading-5 text-foreground">
                   <code>{SKILL_HOOK_JSON_EXAMPLE}</code>
+                </pre>
+                <p className="font-medium text-foreground/85">
+                  Claude Code 嵌套格式（兼容 CC 写法）
+                </p>
+                <pre className="overflow-x-auto rounded-md border border-border/40 bg-background p-3 text-xs leading-5 text-foreground">
+                  <code>{SKILL_HOOK_CC_EXAMPLE}</code>
                 </pre>
                 <p>
                   如果要用自然语言策略 Hook，可以把
@@ -1196,6 +1241,16 @@ function SkillsGuide(): React.JSX.Element {
                   ，再提供
                   <code className="mx-1 font-mono text-foreground/85">prompt</code>
                   字段。
+                </p>
+                <p>
+                  <code className="mx-1 font-mono text-foreground/85">forcedOutcome</code>
+                  取值：
+                  <code className="mx-1 font-mono text-foreground/85">"always-revise"</code>
+                  （强制走修订）/
+                  <code className="mx-1 font-mono text-foreground/85">"always-halt"</code>
+                  （强制终止本轮）；不写则跟随 hook stdout 输出。可选
+                  <code className="mx-1 font-mono text-foreground/85">forcedReason</code>
+                  作为静态原因。
                 </p>
               </div>
             </SkillGuideSubSection>
@@ -1321,6 +1376,23 @@ function SkillsGuide(): React.JSX.Element {
                   ；命令返回
                   <code className="mx-1 font-mono text-foreground/85">exit=2</code>
                   也会按阻断处理。
+                </p>
+                <p>
+                  所有事件都支持
+                  <code className="mx-1 font-mono text-foreground/85">continue=false</code>
+                  +
+                  <code className="mx-1 font-mono text-foreground/85">stopReason</code>
+                  ，优先级高于
+                  <code className="mx-1 font-mono text-foreground/85">decision=block</code>
+                  ：Stop / PostSkillUse 上是真的终止整轮；Pre / Post 工具事件上等同强制阻断该次操作。
+                </p>
+                <p>
+                  如果不想让脚本动态决定，可以在 Hook 配置里直接锁定行为：
+                  <code className="mx-1 font-mono text-foreground/85">{`"forcedOutcome": "always-revise"`}</code>
+                  / <code className="mx-1 font-mono text-foreground/85">{`"always-halt"`}</code>
+                  ，可选搭配
+                  <code className="mx-1 font-mono text-foreground/85">forcedReason</code>
+                  作为静态原因；hook 的 stdout 输出会被覆盖。
                 </p>
                 <p>
                   技能 Hook 生效后，可以在聊天区的“Hook 执行记录”里看执行结果，也可以到“自定义 &gt;

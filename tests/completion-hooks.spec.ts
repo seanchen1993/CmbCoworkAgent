@@ -66,6 +66,17 @@ function nonBlockingResult(): HookResult {
   }
 }
 
+function preventContinuationResult(reason: string): HookResult {
+  return {
+    exitCode: 0,
+    stdout: "",
+    stderr: "",
+    blocked: false,
+    continue: false,
+    stopReason: reason
+  }
+}
+
 async function testPostSkillUseMarksFiredEvenWhenBlocking(): Promise<void> {
   await withTempDir("completion-post-fired", async (base) => {
     const tracker = createSkillUseTracker()
@@ -194,7 +205,7 @@ async function testAbortSkipsCompletionHooks(): Promise<void> {
     }
   })
 
-  assert(ok === false, "aborted completion should return false")
+  assert(ok === "failed", `aborted completion should return "failed", got ${ok}`)
   assert(postCalls === 0, `aborted turn should not run PostSkillUse, got ${postCalls}`)
   assert(stopCalls === 0, `aborted turn should not run Stop, got ${stopCalls}`)
 }
@@ -220,7 +231,7 @@ async function testNonBlockingPostSkillNoticeDoesNotSurface(): Promise<void> {
     runStopHooks: async () => null
   })
 
-  assert(ok === true, "completion should pass with non-blocking PostSkillUse output")
+  assert(ok === "passed", `completion should pass with non-blocking PostSkillUse output, got ${ok}`)
   assert(
     notices.length === 0,
     `non-blocking PostSkillUse systemMessage should not send notices, got ${notices.join("\n")}`
@@ -261,7 +272,10 @@ async function testPostAndStopRevisionCountsAreIndependent(): Promise<void> {
     }
   })
 
-  assert(ok === true, "completion should pass after independent PostSkillUse and Stop revisions")
+  assert(
+    ok === "passed",
+    `completion should pass after independent PostSkillUse and Stop revisions, got ${ok}`
+  )
   assert(errors.length === 0, `expected no errors, got ${errors.join("\n")}`)
   assert(revisions.length === 4, `expected four revision prompts, got ${revisions.length}`)
   assert(
@@ -272,6 +286,81 @@ async function testPostAndStopRevisionCountsAreIndependent(): Promise<void> {
     revisions.filter((prompt) => prompt.includes("Hook type: Stop")).length === 2,
     "expected two Stop revision prompts"
   )
+}
+
+async function testPostSkillUseContinueFalseStopsTurnImmediately(): Promise<void> {
+  const abortController = new AbortController()
+  const notices: string[] = []
+  const errors: string[] = []
+  let revisionCalls = 0
+  let stopCalls = 0
+
+  const ok = await runCompletionHooksWithRevision({
+    threadId: "thread-prevent",
+    workspacePath: "workspace",
+    abortSignal: abortController.signal,
+    getStopContext: () => ({ assistantResponse: "draft" }),
+    hookScope: createHookScope(),
+    runRevision: async () => {
+      revisionCalls += 1
+    },
+    sendNotice: (m) => notices.push(m),
+    sendError: (m) => errors.push(m),
+    maxRevisionAttempts: 5,
+    revisionPromptPrefix: "[[TEST]]",
+    runPostSkillUseHooks: async () => preventContinuationResult("user policy violated"),
+    runStopHooks: async () => {
+      stopCalls += 1
+      return null
+    }
+  })
+
+  assert(ok === "halted", `continue:false in PostSkillUse must halt the turn, got ${ok}`)
+  assert(revisionCalls === 0, "continue:false must skip revision flow entirely")
+  assert(stopCalls === 0, "continue:false must short-circuit before Stop hooks fire")
+  assert(errors.length === 0, `continue:false should not raise errors, got ${errors.join("\n")}`)
+  assert(
+    notices.some((m) => m.includes("user policy violated")),
+    `expected stop notice with reason; got ${notices.join("\n")}`
+  )
+}
+
+async function testPreventContinuationBeatsRevisionOnSameHook(): Promise<void> {
+  const abortController = new AbortController()
+  const errors: string[] = []
+  let revisionCalls = 0
+
+  // A hook that asks for both revision AND halt — halt must win.
+  const conflicting: HookResult = {
+    exitCode: 0,
+    stdout: "",
+    stderr: "",
+    blocked: true,
+    decision: "block",
+    reason: "needs revision",
+    continue: false,
+    stopReason: "actually halt"
+  }
+
+  const ok = await runCompletionHooksWithRevision({
+    threadId: "thread-priority",
+    workspacePath: "workspace",
+    abortSignal: abortController.signal,
+    getStopContext: () => ({ assistantResponse: "draft" }),
+    hookScope: createHookScope(),
+    runRevision: async () => {
+      revisionCalls += 1
+    },
+    sendNotice: () => {},
+    sendError: (m) => errors.push(m),
+    maxRevisionAttempts: 3,
+    revisionPromptPrefix: "[[TEST]]",
+    runStopHooks: async () => conflicting
+  })
+
+  assert(ok === "halted", `halt+revision combo must halt the turn, got ${ok}`)
+  assert(revisionCalls === 0, "halt priority should suppress revision")
+  assert(errors.length === 0, "halt should not surface as error")
 }
 
 async function run(): Promise<void> {
@@ -285,6 +374,10 @@ async function run(): Promise<void> {
   console.log("PASS C2b non-blocking PostSkillUse notice does not surface")
   await testPostAndStopRevisionCountsAreIndependent()
   console.log("PASS C3 PostSkillUse and Stop revision counts are independent")
+  await testPostSkillUseContinueFalseStopsTurnImmediately()
+  console.log("PASS C4 PostSkillUse continue:false stops the turn immediately")
+  await testPreventContinuationBeatsRevisionOnSameHook()
+  console.log("PASS C5 prevent-continuation has priority over revision on same hook")
 }
 
 run().catch((err: Error) => {

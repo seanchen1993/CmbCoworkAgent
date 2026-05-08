@@ -344,7 +344,12 @@ function WelcomeSkillTreeList(props: {
 function HookLogsPanel({ logs }: { logs: HookLogEntry[] }): React.JSX.Element {
   const [expanded, setExpanded] = React.useState(false)
   const hasIssue = logs.some(
-    (l) => l.blocked || l.exitCode === null || (l.exitCode !== 0 && l.exitCode !== 2)
+    (l) =>
+      l.blocked ||
+      l.continue === false ||
+      l.decision === "block" ||
+      l.exitCode === null ||
+      (l.exitCode !== 0 && l.exitCode !== 2)
   )
   return (
     <div
@@ -368,18 +373,27 @@ function HookLogsPanel({ logs }: { logs: HookLogEntry[] }): React.JSX.Element {
             Hook 返回值解析，结构化的 additionalContext 也会在这里显示。
           </div>
           {logs.map((log) => {
-            const ok = !log.blocked && log.exitCode === 0
+            const ok =
+              !log.blocked &&
+              log.continue !== false &&
+              log.decision !== "block" &&
+              log.exitCode === 0
+            const statusText = ok
+              ? "✓"
+              : log.continue === false
+                ? "终止"
+                : log.decision === "block"
+                  ? "修订"
+                  : log.blocked
+                    ? "✗ 拦截"
+                    : log.exitCode === null
+                      ? "✗ 超时"
+                      : `✗ exit=${log.exitCode}`
             return (
               <div key={log.id} className="px-3 py-2 space-y-0.5">
                 <div className="flex items-center gap-2">
                   <span className={ok ? "text-green-600 dark:text-green-400" : "text-red-500"}>
-                    {ok
-                      ? "✓"
-                      : log.blocked
-                        ? "✗ 拦截"
-                        : log.exitCode === null
-                          ? "✗ 超时"
-                          : `✗ exit=${log.exitCode}`}
+                    {statusText}
                   </span>
                   <span className="text-foreground/80 font-semibold">
                     [{log.event}
@@ -393,10 +407,23 @@ function HookLogsPanel({ logs }: { logs: HookLogEntry[] }): React.JSX.Element {
                       {log.decision}
                     </span>
                   )}
+                  {log.continue === false && (
+                    <span className="text-xs text-red-600 dark:text-red-400">continue=false</span>
+                  )}
                   <span className="ml-auto text-[10px] text-muted-foreground/70">
                     {log.timestamp.toLocaleTimeString()}
                   </span>
                 </div>
+                {(log.reason || log.stopReason) && (
+                  <div className="pl-4 space-y-1">
+                    <div className="text-[10px] uppercase tracking-wide text-amber-600/80 dark:text-amber-400/80">
+                      {log.stopReason ? "stopReason" : "reason"}
+                    </div>
+                    <div className="max-h-40 overflow-auto rounded-md border border-amber-300/40 bg-amber-50/40 px-2 py-1 text-amber-700/90 whitespace-pre-wrap break-all dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300/90">
+                      {log.stopReason || log.reason}
+                    </div>
+                  </div>
+                )}
                 {log.stdout && (
                   <div className="pl-4 space-y-1">
                     <div className="text-[10px] uppercase tracking-wide text-muted-foreground/70">
@@ -839,6 +866,7 @@ export function ChatContainer({
     pendingApproval,
     todos,
     error: threadError,
+    hookInterruption,
     workspacePath,
     tokenUsage,
     currentModel,
@@ -852,6 +880,7 @@ export function ChatContainer({
     appendMessage,
     setError,
     clearError,
+    clearHookInterruption,
     setDraftInput: setInput,
     setDraftSkill: setSelectedSkill
   } = useCurrentThread(threadId)
@@ -2829,6 +2858,40 @@ export function ChatContainer({
                   </span>
                 </div>
                 {todos.length > 0 && <ChatTodos todos={todos} />}
+              </div>
+            )}
+            {hookInterruption && !isLoading && (
+              <div className="flex items-start gap-3 rounded-md border border-amber-400/60 bg-amber-50/50 p-4 dark:border-amber-500/40 dark:bg-amber-500/10">
+                <ShieldCheck className="size-5 text-amber-600 shrink-0 mt-0.5 dark:text-amber-300" />
+                <div className="flex-1 min-w-0">
+                  <div className="font-medium text-amber-800 text-sm dark:text-amber-200">
+                    {hookInterruption.action === "halt" ? "Hook 已停止本轮" : "Hook 已阻断本轮"}
+                  </div>
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-amber-700/80 dark:text-amber-200/80">
+                    <span className="rounded border border-amber-400/50 px-1.5 py-0.5 font-mono">
+                      {hookInterruption.event}
+                    </span>
+                    <span>{hookInterruption.timestamp.toLocaleTimeString()}</span>
+                  </div>
+                  <div className="text-sm text-amber-900/90 mt-2 break-words dark:text-amber-100/90">
+                    {hookInterruption.reason}
+                  </div>
+                  {hookInterruption.systemMessage && (
+                    <div className="text-xs text-amber-700/80 mt-2 break-words dark:text-amber-200/80">
+                      {hookInterruption.systemMessage}
+                    </div>
+                  )}
+                  <div className="text-xs text-muted-foreground mt-2">
+                    这是 Hook 策略结果，不是 Agent 运行错误。你可以发送新消息继续对话。
+                  </div>
+                </div>
+                <button
+                  onClick={clearHookInterruption}
+                  className="shrink-0 rounded p-1 hover:bg-amber-500/20 transition-colors"
+                  aria-label="Dismiss hook notice"
+                >
+                  <X className="size-4 text-muted-foreground" />
+                </button>
               </div>
             )}
             {/* Error state */}

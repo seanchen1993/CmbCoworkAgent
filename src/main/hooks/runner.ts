@@ -183,6 +183,49 @@ function isBlockingResult(result: HookResult): boolean {
   return result.blocked || result.decision === "block" || result.continue === false
 }
 
+/**
+ * Rewrite a hook's runtime result based on the hook's static `forcedOutcome`
+ * config. Always called once per hook invocation, before any aggregator sees
+ * the result, so all event branches can stay agnostic of the override.
+ */
+function applyForcedOutcome(result: HookResult, hook: HookConfig): HookResult {
+  if (!hook.forcedOutcome) return result
+  const reason =
+    (hook.forcedReason && hook.forcedReason.trim()) ||
+    result.reason ||
+    result.stopReason ||
+    result.stdout ||
+    result.stderr ||
+    (hook.forcedOutcome === "always-halt"
+      ? "Hook 配置为直接终止本轮"
+      : "Hook 配置为要求 Agent 修订")
+
+  if (hook.forcedOutcome === "always-halt") {
+    return {
+      ...result,
+      // Halt overrides revision — clear decision/blocked so aggregators don't
+      // also feed a revision request.
+      blocked: false,
+      decision: undefined,
+      reason: undefined,
+      continue: false,
+      stopReason: reason
+    }
+  }
+
+  // "always-revise" → force decision=block, leave continue alone
+  return {
+    ...result,
+    blocked: true,
+    decision: "block",
+    reason,
+    // If the script already asked for halt, the user's "always-revise" config
+    // explicitly opts back into revision — clear the halt signal.
+    continue: undefined,
+    stopReason: undefined
+  }
+}
+
 function isValidUtf8(buf: Buffer): boolean {
   try {
     new TextDecoder("utf-8", { fatal: true }).decode(buf)
@@ -739,7 +782,10 @@ export async function runHooks(
     let mergedSystemMessage: string | undefined
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
-      const result = await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event)
+      const result = applyForcedOutcome(
+        await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event),
+        hook
+      )
       console.log(
         `[Hooks] ${event} hook (${hook.type ?? "command"}) "${(hook.command ?? hook.prompt ?? "").slice(0, 60)}" → exit=${result.exitCode}, blocked=${result.blocked}`
       )
@@ -807,7 +853,10 @@ export async function runHooks(
     let haltReason: string | undefined
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
-      const result = await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event)
+      const result = applyForcedOutcome(
+        await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event),
+        hook
+      )
       console.log(
         `[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}`
       )
@@ -841,57 +890,93 @@ export async function runHooks(
   if (event === "PostSkillUse") {
     const contexts: string[] = []
     const messages: string[] = []
-    const blockReasons: string[] = []
+    const revisionReasons: string[] = []
+    const stopReasons: string[] = []
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
-      const result = await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event)
+      const result = applyForcedOutcome(
+        await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event),
+        hook
+      )
       console.log(
-        `[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}`
+        `[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}, continue=${result.continue}`
       )
       onHookResult?.(event, hook, result)
 
-      if (!isBlockingResult(result)) continue
-
-      blockReasons.push(
-        result.reason ||
+      // continue:false → halt the turn (no revision); takes priority over decision:block.
+      // Non-blocking PostSkillUse output is intentionally dropped here — it remains observable
+      // through onHookResult callbacks but must not pollute the revision/halt context.
+      if (result.continue === false) {
+        stopReasons.push(
           result.stopReason ||
-          result.stdout ||
-          result.stderr ||
-          "PostSkillUse hook requested revision"
-      )
-      if (result.additionalContext) contexts.push(result.additionalContext)
-      if (result.systemMessage) messages.push(result.systemMessage)
+            result.reason ||
+            result.stdout ||
+            result.stderr ||
+            "PostSkillUse hook stopped the turn"
+        )
+        if (result.additionalContext) contexts.push(result.additionalContext)
+        if (result.systemMessage) messages.push(result.systemMessage)
+      } else if (result.blocked || result.decision === "block") {
+        revisionReasons.push(
+          result.reason ||
+            result.stopReason ||
+            result.stdout ||
+            result.stderr ||
+            "PostSkillUse hook requested revision"
+        )
+        if (result.additionalContext) contexts.push(result.additionalContext)
+        if (result.systemMessage) messages.push(result.systemMessage)
+      }
     }
 
-    if (blockReasons.length === 0) return null
+    if (stopReasons.length === 0 && revisionReasons.length === 0) return null
 
+    const halt = stopReasons.length > 0
+    const reasons = halt ? stopReasons : revisionReasons
     return {
       exitCode: 0,
-      stdout: blockReasons.join("\n"),
+      stdout: reasons.join("\n"),
       stderr: "",
-      blocked: true,
-      continue: false,
-      decision: "block",
-      reason: blockReasons.join("\n"),
+      blocked: !halt && revisionReasons.length > 0,
+      continue: halt ? false : undefined,
+      stopReason: halt ? stopReasons.join("\n") : undefined,
+      decision: halt ? undefined : revisionReasons.length > 0 ? "block" : undefined,
+      reason: halt
+        ? undefined
+        : revisionReasons.length > 0
+          ? revisionReasons.join("\n")
+          : undefined,
       additionalContext: contexts.length > 0 ? contexts.join("\n") : undefined,
       systemMessage: messages.length > 0 ? messages.join("\n") : undefined
     }
   }
 
-  // Stop: awaited — results can trigger revision or inject feedback
+  // Stop: awaited — results can trigger revision, inject feedback, or halt the turn
   if (event === "Stop") {
-    const blockReasons: string[] = []
+    const revisionReasons: string[] = []
+    const stopReasons: string[] = []
     let additionalContext: string | undefined
     let systemMessage: string | undefined
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
-      const result = await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event)
+      const result = applyForcedOutcome(
+        await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event),
+        hook
+      )
       console.log(
-        `[Hooks] Stop hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}`
+        `[Hooks] Stop hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}, continue=${result.continue}`
       )
       onHookResult?.(event, hook, result)
-      if (isBlockingResult(result)) {
-        blockReasons.push(
+      if (result.continue === false) {
+        stopReasons.push(
+          result.stopReason ||
+            result.reason ||
+            result.stdout ||
+            result.stderr ||
+            "Stop hook stopped the turn"
+        )
+      } else if (result.blocked || result.decision === "block") {
+        revisionReasons.push(
           result.reason ||
             result.stopReason ||
             result.stdout ||
@@ -906,14 +991,26 @@ export async function runHooks(
         systemMessage = joinHookText(systemMessage, result.systemMessage)
       }
     }
-    if (blockReasons.length > 0 || additionalContext || systemMessage) {
+    if (
+      stopReasons.length > 0 ||
+      revisionReasons.length > 0 ||
+      additionalContext ||
+      systemMessage
+    ) {
+      const halt = stopReasons.length > 0
       return {
         exitCode: 0,
-        stdout: blockReasons.join("\n"),
+        stdout: (halt ? stopReasons : revisionReasons).join("\n"),
         stderr: "",
-        blocked: blockReasons.length > 0,
-        decision: blockReasons.length > 0 ? "block" : undefined,
-        reason: blockReasons.length > 0 ? blockReasons.join("\n") : undefined,
+        blocked: !halt && revisionReasons.length > 0,
+        continue: halt ? false : undefined,
+        stopReason: halt ? stopReasons.join("\n") : undefined,
+        decision: halt ? undefined : revisionReasons.length > 0 ? "block" : undefined,
+        reason: halt
+          ? undefined
+          : revisionReasons.length > 0
+            ? revisionReasons.join("\n")
+            : undefined,
         additionalContext,
         systemMessage
       }
@@ -925,8 +1022,11 @@ export async function runHooks(
   for (const hook of matched) {
     const hookContext = enrichContextFromHook(hook, context)
     executeHook(hook, buildHookEnv(event, hookContext), hookContext, event)
-      .then((result) => {
-        console.log(`[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}`)
+      .then((rawResult) => {
+        const result = applyForcedOutcome(rawResult, hook)
+        console.log(
+          `[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}, continue=${result.continue}`
+        )
         onHookResult?.(event, hook, result)
         if (result.stderr) {
           console.warn(`[Hooks] ${event} hook stderr:`, result.stderr)

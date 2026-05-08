@@ -19,7 +19,7 @@ import { join } from "path"
 import { SystemMessage } from "@langchain/core/messages"
 import { createSkillHookContextMiddleware } from "../src/main/agent/runtime.ts"
 import { runHooks, type HookContext } from "../src/main/hooks/runner.ts"
-import type { HookConfig } from "../src/main/hooks/types.ts"
+import type { HookConfig, HookResult } from "../src/main/hooks/types.ts"
 
 function assert(cond: unknown, msg: string): void {
   if (!cond) throw new Error(msg)
@@ -32,6 +32,15 @@ async function withTempDir<T>(name: string, fn: (dir: string) => Promise<T>): Pr
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+}
+
+async function waitFor(predicate: () => boolean, message: string): Promise<void> {
+  const deadline = Date.now() + 2000
+  while (Date.now() < deadline) {
+    if (predicate()) return
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  assert(false, message)
 }
 
 const isWin = process.platform === "win32"
@@ -234,6 +243,182 @@ async function testPostSkillOnlyBlockingOutputFeedsRevision(): Promise<void> {
   assert(
     result.systemMessage === "block notice",
     `only blocking systemMessage should feed revision, got "${result.systemMessage}"`
+  )
+}
+
+async function testPostSkillContinueFalsePropagatesAsHalt(): Promise<void> {
+  const haltHook = makeHook({
+    id: "halt",
+    event: "PostSkillUse",
+    matcher: "*",
+    command: nodeCommand(
+      "console.log(JSON.stringify({continue:false, stopReason:'policy violated'}))"
+    )
+  })
+  const reviseHook = makeHook({
+    id: "revise",
+    event: "PostSkillUse",
+    matcher: "*",
+    command: nodeCommand("console.log(JSON.stringify({decision:'block', reason:'wants revision'}))")
+  })
+
+  const result = await runHooks([haltHook, reviseHook], "PostSkillUse", { skillName: "any" })
+
+  assert(result?.continue === false, "halt should produce continue:false at runner level")
+  assert(result.decision === undefined, "halt result must not also carry decision:block")
+  assert(result.blocked === false, "halt result must not flip blocked flag")
+  assert(
+    typeof result.stopReason === "string" && result.stopReason.includes("policy violated"),
+    `halt should preserve stopReason; got ${result.stopReason}`
+  )
+}
+
+async function testForcedOutcomeAlwaysHaltOverridesScript(): Promise<void> {
+  // Hook script outputs decision=block (revision) but config forces halt.
+  const hook = makeHook({
+    id: "force-halt",
+    event: "Stop",
+    matcher: "*",
+    command: nodeCommand(
+      "console.log(JSON.stringify({decision:'block', reason:'wants revision'}))"
+    ),
+    forcedOutcome: "always-halt",
+    forcedReason: "policy override"
+  })
+
+  const result = await runHooks([hook], "Stop", {})
+
+  assert(result?.continue === false, "force-halt must produce continue:false")
+  assert(result.decision === undefined, "force-halt must clear decision:block")
+  assert(
+    typeof result.stopReason === "string" && result.stopReason.includes("policy override"),
+    `force-halt should use forcedReason; got ${result.stopReason}`
+  )
+}
+
+async function testForcedOutcomeAlwaysReviseOverridesHaltScript(): Promise<void> {
+  // Hook script outputs continue:false but config forces revision.
+  const hook = makeHook({
+    id: "force-revise",
+    event: "Stop",
+    matcher: "*",
+    command: nodeCommand("console.log(JSON.stringify({continue:false, stopReason:'wants halt'}))"),
+    forcedOutcome: "always-revise",
+    forcedReason: "must revise"
+  })
+
+  const result = await runHooks([hook], "Stop", {})
+
+  assert(result?.decision === "block", "force-revise must produce decision:block")
+  assert(result.continue !== false, "force-revise must clear continue:false from script")
+  assert(
+    typeof result.reason === "string" && result.reason.includes("must revise"),
+    `force-revise should use forcedReason; got ${result.reason}`
+  )
+}
+
+async function testForcedOutcomeFallbackReason(): Promise<void> {
+  // No forcedReason set — should fall back to the script's reason.
+  const hook = makeHook({
+    id: "force-halt-fallback",
+    event: "PostSkillUse",
+    matcher: "*",
+    command: nodeCommand(
+      "console.log(JSON.stringify({decision:'block', reason:'script said this'}))"
+    ),
+    forcedOutcome: "always-halt"
+  })
+
+  const result = await runHooks([hook], "PostSkillUse", { skillName: "any" })
+
+  assert(result?.continue === false, "force-halt should still produce continue:false")
+  assert(
+    typeof result.stopReason === "string" && result.stopReason.includes("script said this"),
+    `forcedReason fallback should use script's reason; got ${result.stopReason}`
+  )
+}
+
+async function testForcedOutcomeAlwaysHaltAppliesToFireAndForget(): Promise<void> {
+  let observed: HookResult | undefined
+  const hook = makeHook({
+    id: "force-halt-session",
+    event: "SessionStart",
+    matcher: "*",
+    command: nodeCommand(
+      "console.log(JSON.stringify({decision:'block', reason:'script wants revision'}))"
+    ),
+    forcedOutcome: "always-halt",
+    forcedReason: "session should stop"
+  })
+
+  const result = await runHooks(
+    [hook],
+    "SessionStart",
+    { sessionId: "session-1" },
+    (_event, _hook, hookResult) => {
+      observed = hookResult
+    }
+  )
+
+  assert(result === null, "fire-and-forget hook should not block the caller")
+  await waitFor(() => observed !== undefined, "SessionStart hook callback should fire")
+  assert(observed?.continue === false, "force-halt should be visible in hook result callback")
+  assert(observed.decision === undefined, "force-halt should clear decision:block")
+  assert(observed.blocked === false, "force-halt should clear blocked flag")
+  assert(
+    typeof observed.stopReason === "string" && observed.stopReason.includes("session should stop"),
+    `force-halt should use forcedReason for fire-and-forget; got ${observed.stopReason}`
+  )
+}
+
+async function testForcedOutcomeAlwaysReviseAppliesToFireAndForget(): Promise<void> {
+  let observed: HookResult | undefined
+  const hook = makeHook({
+    id: "force-revise-notification",
+    event: "Notification",
+    matcher: "*",
+    command: nodeCommand(
+      "console.log(JSON.stringify({continue:false, stopReason:'script wants halt'}))"
+    ),
+    forcedOutcome: "always-revise",
+    forcedReason: "notification should revise"
+  })
+
+  const result = await runHooks([hook], "Notification", {}, (_event, _hook, hookResult) => {
+    observed = hookResult
+  })
+
+  assert(result === null, "fire-and-forget hook should not block the caller")
+  await waitFor(() => observed !== undefined, "Notification hook callback should fire")
+  assert(observed?.decision === "block", "force-revise should be visible in hook result callback")
+  assert(observed.continue !== false, "force-revise should clear continue:false")
+  assert(
+    typeof observed.reason === "string" && observed.reason.includes("notification should revise"),
+    `force-revise should use forcedReason for fire-and-forget; got ${observed.reason}`
+  )
+}
+
+async function testStopContinueFalsePropagatesAsHalt(): Promise<void> {
+  const haltHook = makeHook({
+    id: "halt",
+    event: "Stop",
+    matcher: "*",
+    command: nodeCommand("console.log(JSON.stringify({continue:false, stopReason:'turn done'}))")
+  })
+  const reviseHook = makeHook({
+    id: "revise",
+    event: "Stop",
+    matcher: "*",
+    command: nodeCommand("console.log(JSON.stringify({decision:'block', reason:'try again'}))")
+  })
+
+  const result = await runHooks([haltHook, reviseHook], "Stop", {})
+
+  assert(result?.continue === false, "Stop halt should produce continue:false")
+  assert(result.decision === undefined, "Stop halt must not double-set decision:block")
+  assert(
+    typeof result.stopReason === "string" && result.stopReason.includes("turn done"),
+    `Stop halt should preserve stopReason; got ${result.stopReason}`
   )
 }
 
@@ -614,6 +799,20 @@ async function run(): Promise<void> {
   console.log("PASS B7a non-blocking PostSkillUse output is observable-only")
   await testPostSkillOnlyBlockingOutputFeedsRevision()
   console.log("PASS B7b only blocking PostSkillUse output feeds revision")
+  await testPostSkillContinueFalsePropagatesAsHalt()
+  console.log("PASS B7c PostSkillUse continue:false propagates as halt, not revision")
+  await testStopContinueFalsePropagatesAsHalt()
+  console.log("PASS B7d Stop hook continue:false propagates as halt, not revision")
+  await testForcedOutcomeAlwaysHaltOverridesScript()
+  console.log("PASS B7e forcedOutcome=always-halt overrides script's decision:block")
+  await testForcedOutcomeAlwaysReviseOverridesHaltScript()
+  console.log("PASS B7f forcedOutcome=always-revise overrides script's continue:false")
+  await testForcedOutcomeFallbackReason()
+  console.log("PASS B7g forcedOutcome falls back to script reason when forcedReason missing")
+  await testForcedOutcomeAlwaysHaltAppliesToFireAndForget()
+  console.log("PASS B7h forcedOutcome=always-halt applies to fire-and-forget hooks")
+  await testForcedOutcomeAlwaysReviseAppliesToFireAndForget()
+  console.log("PASS B7i forcedOutcome=always-revise applies to fire-and-forget hooks")
   await testEnvVarsAreInjected()
   console.log("PASS B8 SKILL_NAME/SKILL_PATH/SKILL_ROOT env vars injected")
   await testStdinPayloadIncludesSkillFields()

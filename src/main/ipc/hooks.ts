@@ -81,6 +81,17 @@ function validateHookConfig(config: HookUpsert): void {
   }
 
   validateOnBlockConfig(config.onBlock)
+
+  if (
+    config.forcedOutcome !== undefined &&
+    config.forcedOutcome !== "always-revise" &&
+    config.forcedOutcome !== "always-halt"
+  ) {
+    throw new Error("forcedOutcome 必须为 always-revise 或 always-halt")
+  }
+  if (config.forcedReason !== undefined && typeof config.forcedReason !== "string") {
+    throw new Error("forcedReason 必须为字符串")
+  }
 }
 
 export function registerHooksHandlers(ipcMain: IpcMain): void {

@@ -2000,6 +2000,10 @@ function normalizeOptionalHookString(value: unknown): string | undefined {
   return trimmed ? trimmed : undefined
 }
 
+function parseForcedOutcome(value: unknown): "always-revise" | "always-halt" | undefined {
+  return value === "always-revise" || value === "always-halt" ? value : undefined
+}
+
 function parseHookOnBlock(raw: unknown): HookOnBlockConfig | undefined {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined
 
@@ -2114,6 +2118,8 @@ function ccCommandToHookConfig(
       type: "command",
       command: h.command,
       onBlock: parseHookOnBlock(h.onBlock),
+      forcedOutcome: parseForcedOutcome(h.forcedOutcome),
+      forcedReason: normalizeOptionalHookString(h.forcedReason),
       timeout,
       enabled,
       createdAt: meta.createdAt,
@@ -2137,6 +2143,8 @@ function ccCommandToHookConfig(
             : undefined,
       fallback: h.fallback === "block" ? "block" : "allow",
       onBlock: parseHookOnBlock(h.onBlock),
+      forcedOutcome: parseForcedOutcome(h.forcedOutcome),
+      forcedReason: normalizeOptionalHookString(h.forcedReason),
       timeout,
       enabled,
       createdAt: meta.createdAt,
@@ -2234,6 +2242,8 @@ export function getHooks(): HookConfig[] {
           fallback:
             hookType === "prompt" ? (h.fallback === "block" ? "block" : "allow") : undefined,
           onBlock: parseHookOnBlock(h.onBlock),
+          forcedOutcome: parseForcedOutcome(h.forcedOutcome),
+          forcedReason: normalizeOptionalHookString(h.forcedReason),
           timeout: typeof h.timeout === "number" ? h.timeout : undefined,
           enabled: h.enabled !== false,
           createdAt: typeof h.createdAt === "string" ? h.createdAt : now,
@@ -2477,6 +2487,8 @@ function parseSkillHooks(skillDir: string, skillName: string, hooksRelPath: stri
           modelId: typeof h.modelId === "string" ? h.modelId : undefined,
           fallback: h.fallback === "block" ? "block" : "allow",
           onBlock: parseHookOnBlock(h.onBlock),
+          forcedOutcome: parseForcedOutcome(h.forcedOutcome),
+          forcedReason: normalizeOptionalHookString(h.forcedReason),
           timeout: typeof h.timeout === "number" ? h.timeout : undefined,
           enabled: h.enabled !== false,
           createdAt: now,
@@ -2762,6 +2774,8 @@ export function getWorkspaceHooks(workspacePath: string): HookConfig[] {
               modelId: typeof raw.modelId === "string" ? raw.modelId : undefined,
               fallback: raw.fallback === "block" ? "block" : "allow",
               onBlock: parseHookOnBlock(raw.onBlock),
+              forcedOutcome: parseForcedOutcome(raw.forcedOutcome),
+              forcedReason: normalizeOptionalHookString(raw.forcedReason),
               timeout: typeof raw.timeout === "number" ? raw.timeout : undefined,
               enabled: true,
               createdAt: now,
@@ -2815,6 +2829,8 @@ export function upsertHook(config: HookUpsert & { id?: string }): string {
     modelId: hookType === "prompt" ? config.modelId : undefined,
     fallback: hookType === "prompt" ? (config.fallback ?? "allow") : undefined,
     onBlock: parseHookOnBlock(config.onBlock),
+    forcedOutcome: parseForcedOutcome(config.forcedOutcome),
+    forcedReason: normalizeOptionalHookString(config.forcedReason),
     timeout: config.timeout,
     enabled: config.enabled ?? true,
     createdAt: existing?.createdAt ?? now,
