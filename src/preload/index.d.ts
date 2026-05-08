@@ -404,6 +404,10 @@ interface CustomAPI {
     getFilePath: (file: File) => string
     select: () => Promise<{ canceled: boolean; filePaths: string[] }>
     supportedExtensions: () => Promise<string[]>
+    selectCode: () => Promise<{ canceled: boolean; filePaths: string[] }>
+    readText: (
+      filePath: string
+    ) => Promise<{ success: boolean; filename?: string; content?: string; error?: string }>
   }
   skills: {
     list: () => Promise<SkillMetadata[]>
@@ -612,6 +616,42 @@ interface CustomAPI {
     saveConfig: (updates: Partial<ChatXConfig>) => Promise<void>
     restart: () => Promise<void>
     cancelByThread: (threadId: string) => Promise<boolean>
+  }
+  design: {
+    generate: (
+      sessionId: string,
+      prompt: string,
+      onEvent: (event: { type: string; token?: string; html?: string; error?: string }) => void,
+      modelId?: string,
+      history?: Array<{ role: "user" | "assistant"; content: string }>,
+      tabId?: string
+    ) => () => void
+    storeHtml: (tabId: string, html: string) => Promise<{ ok: boolean }>
+    agentGenerate: (
+      sessionId: string,
+      prompt: string,
+      onEvent: (event: { type: string; token?: string; html?: string; error?: string; event?: unknown }) => void,
+      tabId: string,
+      modelId?: string,
+      imageData?: string,
+      mimeType?: string
+    ) => () => void
+    askQuestions: (
+      sessionId: string,
+      prompt: string,
+      onEvent: (event: { type: string; questions?: unknown[]; error?: string }) => void,
+      modelId?: string
+    ) => () => void
+    generateFromImage: (
+      sessionId: string,
+      prompt: string,
+      imageData: string,
+      mimeType: string,
+      onEvent: (event: { type: string; token?: string; html?: string; error?: string }) => void,
+      modelId?: string
+    ) => () => void
+    cancel: (sessionId: string) => Promise<void>
+    saveVariant: (variantId: string, html: string) => Promise<{ filePath: string }>
   }
   sandbox: {
     getMode: () => Promise<"none" | "unelevated" | "readonly" | "elevated">

@@ -29,20 +29,24 @@ export class SkillUsageDetector {
   }
 
   onReadFilePath(rawPath: string): void {
+    const skillName = this.getSkillNameForReadFilePath(rawPath)
+    if (skillName) {
+      this.usedSkillNames.add(skillName)
+    }
+  }
+
+  getSkillNameForReadFilePath(rawPath: string): string {
     const normalized = normalizePath(rawPath.trim())
-    if (!normalized) return
+    if (!normalized) return ""
 
     const exactMatch = this.loadedSkillsByDocPath.get(normalized)
-    if (exactMatch) {
-      this.usedSkillNames.add(exactMatch)
-      return
-    }
+    if (exactMatch) return exactMatch
 
     for (const [rootDir, skillName] of this.loadedSkillsByRootDir.entries()) {
-      if (normalized === rootDir || normalized.startsWith(`${rootDir}/`)) {
-        this.usedSkillNames.add(skillName)
-      }
+      if (normalized === rootDir || normalized.startsWith(`${rootDir}/`)) return skillName
     }
+
+    return ""
   }
 
   getUsedSkillNames(): string[] {
