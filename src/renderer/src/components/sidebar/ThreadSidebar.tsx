@@ -14,7 +14,8 @@ import {
   ChevronRight,
   FolderOpen,
   Maximize2,
-  Minimize2, FolderPlus
+  Minimize2,
+  FolderPlus
 } from "lucide-react"
 import type { ChatXRobotConfig } from "@/types"
 import { Button } from "@/components/ui/button"
@@ -77,6 +78,21 @@ function formatCompactTime(date: Date | string): string {
   const day = d.getDate()
   if (d.getFullYear() === now.getFullYear()) return `${month}/${day}`
   return `${String(d.getFullYear()).slice(2)}/${month}/${day}`
+}
+
+function getDisplayThreadTitle(thread: Thread): string {
+  const title = thread.title?.trim()
+
+  if (!title || title === "..." || title === "…") {
+    return truncate(thread.thread_id, 20)
+  }
+
+  if (title.startsWith("[Heartbeat]")) return title.slice(12).trim()
+  if (title.startsWith("[定时]")) return title.slice(5).trim()
+  if (title.startsWith("[远端机器人] ")) return `(远端) ${title.slice(8).trim()}`
+  if (title.startsWith("[机器人] ")) return title.slice(6).trim()
+
+  return title
 }
 
 // Thread status indicator that shows loading, interrupted, or default state
@@ -147,6 +163,9 @@ function ThreadListItem({
     }
     wasRunningRef.current = isRunning
   }, [isRunning])
+
+  const displayTitle = getDisplayThreadTitle(thread)
+
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
@@ -188,23 +207,15 @@ function ThreadListItem({
                 className="flex min-w-0 items-center text-sm"
                 title={thread.title || thread.thread_id}
               >
-                {thread.title?.startsWith("[Heartbeat]") ? (
-                  <span className="min-w-0 flex-1 truncate">{thread.title.slice(12)}</span>
-                ) : thread.title?.startsWith("[定时]") ? (
+                {thread.title?.startsWith("[定时]") ? (
                   <>
                     <span className="shrink-0 text-[10px] px-1 py-px rounded bg-primary/15 text-primary font-medium">
                       定时
                     </span>
-                    <span className="min-w-0 flex-1 truncate">{thread.title.slice(5)}</span>
+                    <span className="min-w-0 flex-1 truncate">{displayTitle}</span>
                   </>
-                ) : thread.title?.startsWith("[远端机器人] ") ? (
-                  <span className="min-w-0 flex-1 truncate">(远端) {thread.title.slice(8)}</span>
-                ) : thread.title?.startsWith("[机器人] ") ? (
-                  <span className="min-w-0 flex-1 truncate">{thread.title.slice(6)}</span>
                 ) : (
-                  <span className="min-w-0 flex-1 truncate">
-                    {thread.title || truncate(thread.thread_id, 20)}
-                  </span>
+                  <span className="min-w-0 flex-1 truncate">{displayTitle}</span>
                 )}
               </div>
             )}
