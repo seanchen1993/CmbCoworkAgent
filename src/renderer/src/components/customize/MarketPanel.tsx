@@ -230,6 +230,7 @@ function MarketItemCard({
 
   const ip = localStorage.getItem("localIp")
   const isFeatured = item.featured === "精品"
+  const itemTag = item.tag?.trim()
   const isSkillCard = skillCallCount !== null || skillUserCount !== null
   const uploaderSapId = uploaderProfile?.sapId || item.user_id || ""
   const uploaderUserName = uploaderProfile?.userName || ""
@@ -256,6 +257,11 @@ function MarketItemCard({
               <span className="inline-flex items-center gap-1 text-[11px] font-medium bg-[#fdf3e7] text-[#c4956a] border border-[#f5d9c4] px-2 py-0.5 rounded-full shrink-0">
                 <Star className="size-3 fill-[#c4956a]" />
                 精品
+              </span>
+            )}
+            {itemTag && (
+              <span className="inline-flex items-center gap-1 text-[11px] font-medium bg-[#edf4ff] text-[#3766a6] border border-[#ccdcf5] px-2 py-0.5 rounded-full shrink-0">
+                {itemTag}
               </span>
             )}
             {item.category && (
