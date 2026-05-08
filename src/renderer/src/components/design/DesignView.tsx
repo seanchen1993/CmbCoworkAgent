@@ -1,7 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect } from "react"
 import { v4 as uuid } from "uuid"
 import type { FileAttachment } from "@/types"
-import { formatSkillUseBlock } from "@/features/slash-commands/skill-marker"
 import { getToolLabel } from "@/lib/tool-labels"
 
 // ─────────────────────────────────────────────────────────
@@ -99,6 +98,11 @@ interface SkillInfo {
   content?: string   // SKILL.md content, loaded on selection
 }
 
+interface DesignSkillReference {
+  name: string
+  path: string
+}
+
 type DesignApprovalDecision = "approve" | "approve_session" | "approve_permanent" | "reject"
 type DesignExecutionStatus = "running" | "success" | "error"
 
@@ -177,6 +181,7 @@ interface TabState {
   retryPrompt: string | null
   retryIsIteration: boolean
   retryCleanMsg: string | null
+  retrySkill: DesignSkillReference | null
   // Multi-turn conversation history for the API (user+assistant pairs, sans HTML)
   // Source of truth for multi-turn is LangGraph checkpoint; this is for display / session backup.
   apiHistory: Array<{ role: "user" | "assistant"; content: string }>
@@ -215,6 +220,7 @@ function makeTabState(): TabState {
     retryPrompt: null,
     retryIsIteration: false,
     retryCleanMsg: null,
+    retrySkill: null,
     apiHistory: [],
     pendingApproval: null,
   }
@@ -225,6 +231,15 @@ function makeDesignAgentThreadId(tabId: string): string {
     .replace(/[^a-zA-Z0-9_-]/g, "_")
     .replace(/^_+|_+$/g, "") || "tab"
   return `design_${safeTabId}`.slice(0, 120)
+}
+
+function getCurrentDesignHtml(state: TabState | undefined): string {
+  if (!state) return ""
+  if (state.activeVariationId) {
+    const variationHtml = state.variations.find((v) => v.id === state.activeVariationId)?.html
+    if (variationHtml?.trim()) return variationHtml
+  }
+  return state.html?.trim() ?? ""
 }
 
 function asDesignApprovalRequest(request: unknown): DesignApprovalRequest {
@@ -1211,6 +1226,7 @@ export function DesignView(): React.JSX.Element {
     /** Clean user message to append to apiHistory after success (no HTML/suffix) */
     cleanUserMsg?: string,
     image?: { base64: string; mimeType: string },
+    skill?: DesignSkillReference | null,
   ) => {
     const sessionId = uuid()
     updateTs(tabId, (prev) => ({
@@ -1220,6 +1236,7 @@ export function DesignView(): React.JSX.Element {
       retryPrompt: prompt,
       retryIsIteration: isIteration,
       retryCleanMsg: cleanUserMsg ?? null,
+      retrySkill: skill ?? null,
       messages: [
         ...prev.messages,
         {
@@ -1356,10 +1373,12 @@ export function DesignView(): React.JSX.Element {
       tabId,
       modelId,
       image?.base64,
-      image?.mimeType
+      image?.mimeType,
+      isIteration ? getCurrentDesignHtml(tabStates[tabId]) : undefined,
+      skill ?? undefined
     )
     tabSessionsRef.current.set(tabId, { cleanup, sessionId })
-  }, [updateTs])
+  }, [tabStates, updateTs])
 
   // ── Generate Design from Screenshot ──────────────────────
 
@@ -1524,6 +1543,8 @@ export function DesignView(): React.JSX.Element {
       state.retryIsIteration,
       state.selectedModelId ?? undefined,
       state.retryCleanMsg ?? undefined,
+      undefined,
+      state.retrySkill ?? undefined,
     )
   }, [activeTabId, tabStates, updateTs, startGeneration])
 
@@ -1685,11 +1706,7 @@ ${commentLines}${variantNote}`
       `The file must include the EDITMODE Tweaks system as required by the system prompt ` +
       `(TWEAK_DEFAULTS with /*EDITMODE-BEGIN*/…/*EDITMODE-END*/ markers, postMessage listener, applyTweaks with CSS variables). ` +
       `Apply the skill's design tokens and patterns inside that HTML file.`
-    const skillContext = selectedSkill && attachedImage
-      ? `\n\n---\n[Design skill applied: ${selectedSkill.name}]\n${selectedSkill.content?.slice(0, 4000) ?? selectedSkill.description}\n\n${designOutputConstraint}`
-      : selectedSkill
-        ? `\n\n---\n${designOutputConstraint}`
-        : ""
+    const skillContext = selectedSkill ? `\n\n---\n${designOutputConstraint}` : ""
     const codeSuffix = codeContext && codeContext.length > 0
       ? "\n\n---\n[Code context — " + codeContext.length + " file(s)]\n" +
         codeContext.map((f) => {
@@ -1706,11 +1723,10 @@ ${commentLines}${variantNote}`
           `### ${f.filename}${f.truncated ? " (truncated)" : ""}\n${f.content}`
         ).join("\n\n")
       : ""
-    const skillMarkerSuffix =
-      selectedSkill
-        ? `\n\n${formatSkillUseBlock({ name: selectedSkill.name, path: selectedSkill.path })}`
-        : ""
-    const contextSuffix = skillContext + codeSuffix + linkSuffix + filesSuffix + skillMarkerSuffix
+    const contextSuffix = skillContext + codeSuffix + linkSuffix + filesSuffix
+    const skillReference = selectedSkill
+      ? { name: selectedSkill.name, path: selectedSkill.path }
+      : undefined
 
     // If a screenshot is attached — skip questions. Skill sends still go through
     // Agent Runtime so the selected skill is read/executed and visible in the
@@ -1736,7 +1752,8 @@ ${commentLines}${variantNote}`
           false,
           selectedModelId,
           userContent,
-          { base64: attachedImage.base64, mimeType: attachedImage.mimeType }
+          { base64: attachedImage.base64, mimeType: attachedImage.mimeType },
+          skillReference
         )
       } else {
         startGenerationFromImage(prompt + contextSuffix, attachedImage.base64, attachedImage.mimeType, tabId, selectedModelId)
@@ -1767,7 +1784,7 @@ ${commentLines}${variantNote}`
     // startGeneration still patches the output with EDITMODE so Tweaks remains available.
     if (existing.length === 0) {
       if (selectedSkill) {
-        startGeneration(prompt + contextSuffix, tabId, false, selectedModelId, prompt)
+        startGeneration(prompt + contextSuffix, tabId, false, selectedModelId, prompt, undefined, skillReference)
       } else {
         startAskQuestions(prompt + contextSuffix, tabId, selectedModelId)
       }
@@ -1794,6 +1811,8 @@ ${commentLines}${variantNote}`
         /* isIteration */ !!contextHtml,
         selectedModelId,
         prompt,   // clean user message for apiHistory recording
+        undefined,
+        skillReference
       )
     }
   }, [activeTabId, tabStates, updateTs, startAskQuestions, startGeneration, startGenerationFromImage])

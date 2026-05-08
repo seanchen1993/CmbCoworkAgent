@@ -1734,6 +1734,8 @@ const api = {
       modelId?: string,
       imageData?: string,
       mimeType?: string,
+      currentHtml?: string,
+      skill?: { name: string; path: string },
     ): (() => void) => {
       const channel = `design:stream:${sessionId}`
       const handler = (_: unknown, data: { type: string; token?: string; html?: string; error?: string; event?: unknown }): void => {
@@ -1743,7 +1745,7 @@ const api = {
         }
       }
       ipcRenderer.on(channel, handler)
-      ipcRenderer.send("design:agent-generate", { sessionId, prompt, modelId, tabId, imageData, mimeType })
+      ipcRenderer.send("design:agent-generate", { sessionId, prompt, modelId, tabId, imageData, mimeType, currentHtml, skill })
       return () => ipcRenderer.removeListener(channel, handler)
     },
     askQuestions: (

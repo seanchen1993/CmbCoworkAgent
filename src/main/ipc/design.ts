@@ -195,12 +195,13 @@ applyTweaks({}); // apply defaults on load
 ## Context from user's session
 
 The user's prompt will include their clarifying answers (output type, fidelity, style direction, reference context). Use those answers to shape which medium you pick, how polished you go, and what aesthetic direction to take.
+If the prompt includes "CURRENT DESIGN HTML", treat that HTML as the source of truth for the visible canvas. Prior chat history is background only; never override explicit current HTML with assumptions from older turns.
 
 ## Iteration mode
 
 If the user's prompt contains "CURRENT DESIGN HTML (iterate on this", you are in **iteration mode**:
 
-- Read the existing HTML **carefully** before touching anything.
+- Read the existing HTML **carefully** before touching anything. Preserve IDs, scripts, postMessage hooks, tweak keys, comments, data attributes, and unrelated copy unless the user explicitly asks to change them.
 - Apply the user's follow-up instruction precisely. Change only what is asked; preserve everything else (colors, fonts, spacing, overall structure, content).
 - **Do NOT regenerate from scratch.** The existing design is the baseline — iterate on it.
 - If the instruction is a targeted tweak (e.g. "change button color", "add a footer"), output **one refined version** — no A/B/C labels needed.
@@ -376,6 +377,11 @@ interface DesignExecutionEvent {
   timestamp: number
 }
 
+interface DesignSkillReference {
+  name?: string
+  path?: string
+}
+
 function getSerializedClassName(msg: Record<string, unknown>): string {
   const classId: string[] = Array.isArray(msg.id) ? (msg.id as string[]) : []
   return classId[classId.length - 1] ?? ""
@@ -413,6 +419,28 @@ function isToolMessageError(kwargs: Record<string, unknown>): boolean {
     kwargs.is_error === true ||
     (kwargs.additional_kwargs as Record<string, unknown> | undefined)?.is_error === true
   )
+}
+
+function normalizeDesignSkillReference(raw: unknown): { name: string; path: string } | null {
+  if (!raw || typeof raw !== "object") return null
+  const skill = raw as DesignSkillReference
+  const name = typeof skill.name === "string" ? skill.name.trim() : ""
+  const skillPath = typeof skill.path === "string" ? skill.path.trim() : ""
+  if (!name || !skillPath) return null
+  return { name, path: skillPath }
+}
+
+function readDesignSkillContent(skillPath: string): { content?: string; error?: string } {
+  try {
+    const resolvedPath = path.resolve(skillPath)
+    if (!fs.existsSync(resolvedPath)) return { error: `Skill file not found: ${skillPath}` }
+    const stat = fs.statSync(resolvedPath)
+    if (!stat.isFile()) return { error: `Skill path is not a file: ${skillPath}` }
+    if (path.basename(resolvedPath) !== "SKILL.md") return { error: `Skill path must point to SKILL.md: ${skillPath}` }
+    return { content: fs.readFileSync(resolvedPath, "utf-8") }
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) }
+  }
 }
 
 // ─────────────────────────────────────────────────────────
@@ -731,7 +759,7 @@ export function registerDesignHandlers(): void {
   ipcMain.on(
     "design:agent-generate",
     async (event, {
-      sessionId, prompt, modelId, tabId, imageData, mimeType,
+      sessionId, prompt, modelId, tabId, imageData, mimeType, currentHtml, skill,
     }: {
       sessionId: string
       prompt: string
@@ -739,6 +767,8 @@ export function registerDesignHandlers(): void {
       tabId: string
       imageData?: string
       mimeType?: string
+      currentHtml?: string
+      skill?: DesignSkillReference
     }) => {
       const channel = `design:stream:${sessionId}`
       const win = BrowserWindow.fromWebContents(event.sender)
@@ -770,6 +800,59 @@ export function registerDesignHandlers(): void {
       try {
         send({ type: "start" })
 
+        const selectedSkill = normalizeDesignSkillReference(skill)
+        let skillContext = ""
+        if (selectedSkill) {
+          const skillEventId = `selected-skill:${selectedSkill.name}:${Date.now()}`
+          send({
+            type: "execution",
+            event: {
+              kind: "used_skill",
+              id: skillEventId,
+              toolCallId: skillEventId,
+              name: selectedSkill.name,
+              status: "running",
+              timestamp: Date.now(),
+            } satisfies DesignExecutionEvent,
+          })
+
+          const result = readDesignSkillContent(selectedSkill.path)
+          if (result.content) {
+            skillContext =
+              `\n\n---\n[Selected Design Skill: ${selectedSkill.name}]\n` +
+              `The user explicitly selected this skill for the current design request. ` +
+              `Follow the skill instructions below as authoritative guidance for this turn, while still obeying the Design system prompt's requirement to output complete standalone HTML.\n\n` +
+              `${result.content}`
+            send({
+              type: "execution",
+              event: {
+                kind: "used_skill",
+                id: `${skillEventId}:result`,
+                toolCallId: skillEventId,
+                name: selectedSkill.name,
+                status: "success",
+                timestamp: Date.now(),
+              } satisfies DesignExecutionEvent,
+            })
+          } else {
+            send({
+              type: "execution",
+              event: {
+                kind: "used_skill",
+                id: `${skillEventId}:result`,
+                toolCallId: skillEventId,
+                name: selectedSkill.name,
+                status: "error",
+                isError: true,
+                content: result.error,
+                timestamp: Date.now(),
+              } satisfies DesignExecutionEvent,
+            })
+            send({ type: "error", error: result.error ?? `Failed to load selected skill: ${selectedSkill.name}` })
+            return
+          }
+        }
+
         const agent = await createAgentRuntime({
           threadId,
           workspacePath,
@@ -788,6 +871,21 @@ export function registerDesignHandlers(): void {
           recursionLimit: 200,
         }
 
+        const shouldUseStoredHtmlFallback =
+          prompt.includes("CURRENT DESIGN HTML") ||
+          prompt.includes("User follow-up instruction:") ||
+          prompt.includes("用户通过 Comment 模式")
+        const storedHtml = tabId && shouldUseStoredHtmlFallback ? htmlStore.get(tabId) : undefined
+        const htmlForIteration =
+          typeof currentHtml === "string" && currentHtml.trim()
+            ? currentHtml
+            : storedHtml
+        const promptWithCurrentHtml = htmlForIteration
+          ? `${prompt}\n\n---\nCURRENT DESIGN HTML (iterate on this — do NOT ignore it):\n${htmlForIteration}`
+          : prompt
+        const promptWithSkill = skillContext ? `${promptWithCurrentHtml}${skillContext}` : promptWithCurrentHtml
+        if (tabId && htmlForIteration) htmlStore.set(tabId, htmlForIteration)
+
         const humanMessage =
           imageData && mimeType
             ? new HumanMessage({
@@ -796,10 +894,10 @@ export function registerDesignHandlers(): void {
                     type: "image_url",
                     image_url: { url: `data:${mimeType};base64,${imageData}`, detail: "high" },
                   },
-                  { type: "text", text: prompt },
+                  { type: "text", text: promptWithSkill },
                 ],
               })
-            : new HumanMessage(prompt)
+            : new HumanMessage(promptWithSkill)
 
         const stream = await agent.stream(
           { messages: [humanMessage] },

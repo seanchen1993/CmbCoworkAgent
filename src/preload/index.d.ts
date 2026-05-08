@@ -634,7 +634,9 @@ interface CustomAPI {
       tabId: string,
       modelId?: string,
       imageData?: string,
-      mimeType?: string
+      mimeType?: string,
+      currentHtml?: string,
+      skill?: { name: string; path: string }
     ) => () => void
     askQuestions: (
       sessionId: string,
