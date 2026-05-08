@@ -170,6 +170,11 @@ async function testPromptContracts(): Promise<void> {
   assertIncludes(prompt, "delegate skill invocations to workers", "coordinator prompt")
   assertIncludes(prompt, "bounded <result> handoff", "coordinator prompt")
   assertIncludes(prompt, 'prefer workload="read_only"', "coordinator prompt")
+  assertIncludes(
+    prompt,
+    'continuation_intent="redirect_running_worker"',
+    "coordinator prompt should prevent running-worker polling"
+  )
   assertIncludes(prompt, "Worker Notifications", "coordinator prompt")
   assertIncludes(prompt, "Use the task-id as the worker_id", "coordinator prompt")
   assertIncludes(prompt, "notification_id", "coordinator prompt")
@@ -206,8 +211,9 @@ async function testPromptContracts(): Promise<void> {
     "coordinator prompt should align write workers with Claude Code-style whole-workspace workers"
   )
   assertIncludes(prompt, "Launch independent read-only workers in parallel", "coordinator prompt")
-  assertIncludes(prompt, "Do not serialize independent discovery work", "coordinator prompt")
-  assertIncludes(prompt, "Keep write-heavy workers one at a time", "coordinator prompt")
+  assertIncludes(prompt, "Worker action budget per turn", "coordinator prompt")
+  assertIncludes(prompt, "You may start up to 3 read_only workers", "coordinator prompt")
+  assertIncludes(prompt, "Start at most one write or verify worker", "coordinator prompt")
   assertIncludes(prompt, "Do not use one worker to check on another worker", "coordinator prompt")
   assertIncludes(prompt, "Never fabricate or predict worker results", "coordinator prompt")
   assertIncludes(prompt, "give status only", "coordinator prompt")
@@ -321,7 +327,8 @@ async function testPromptContracts(): Promise<void> {
   assertIncludes(taskPrompt, "Answer directly when possible", "task prompt")
   assertIncludes(taskPrompt, 'subagent_type="worker"', "task prompt")
   assertIncludes(taskPrompt, 'role="verifier"', "task prompt")
-  assertIncludes(taskPrompt, "Launch independent read-only workers in parallel", "task prompt")
+  assertIncludes(taskPrompt, "Default to one worker", "task prompt")
+  assertIncludes(taskPrompt, "Do not launch implementation and verification in the same turn", "task prompt")
   assertIncludes(taskPrompt, "Scratchpad directory", "task prompt")
   assertIncludes(taskPrompt, ".cmbdevclaw/coordinator/thread-123/scratchpad", "task prompt")
   assertIncludes(taskPrompt, "Cancelled workers are final", "task prompt")
@@ -411,6 +418,7 @@ async function testSelectedSkillPromptInjection(): Promise<void> {
     workspacePath: "/tmp/workspace",
     threadId: "thread-123",
     selectedSkill: selectedSkill ?? undefined,
+    disableTurnPlanningGuards: true,
     workerTools: {
       async startWorker(input) {
         delegatedPrompts.push(input.prompt)
@@ -479,6 +487,7 @@ async function testSelectedSkillPromptInjection(): Promise<void> {
   const notificationTools = createCoordinatorWorkerTools({
     workspacePath: "/tmp/workspace",
     threadId: "thread-123",
+    disableTurnPlanningGuards: true,
     notificationSelectedSkills: {
       "implementer-1@turn-1": selectedSkill ?? undefined
     },
@@ -560,6 +569,7 @@ async function testSelectedSkillPromptInjection(): Promise<void> {
   const explicitFallbackTools = createCoordinatorWorkerTools({
     workspacePath: "/tmp/workspace",
     threadId: "thread-123",
+    disableTurnPlanningGuards: true,
     explicitSelectedSkill: selectedSkill ?? undefined,
     notificationSelectedSkills: {
       "implementer-1@turn-1": selectedSkill ?? undefined,
@@ -627,6 +637,7 @@ async function testSelectedSkillPromptInjection(): Promise<void> {
     workspacePath: "/tmp/workspace",
     threadId: "thread-123",
     selectedSkill: selectedSkill ?? undefined,
+    disableTurnPlanningGuards: true,
     notificationSelectedSkills: {
       "implementer-1@turn-1": selectedSkill ?? undefined,
       "implementer-2@turn-1": undefined
@@ -800,6 +811,7 @@ async function testAsyncWorkerTools(): Promise<void> {
   const tools = createCoordinatorWorkerTools({
     workspacePath: "/tmp/workspace",
     threadId: "thread-123",
+    disableTurnPlanningGuards: true,
     onNotificationsConsumed: (notificationIds) => {
       consumedNotificationIds.push(notificationIds)
     },
@@ -858,6 +870,11 @@ async function testAsyncWorkerTools(): Promise<void> {
     toolSchemaText(continueTool),
     "handoff-only summary requests after truncated or vague results",
     "continue_worker workload schema should guide read-only handoff continuations"
+  )
+  assertIncludes(
+    toolSchemaText(continueTool),
+    "Never use continue_worker to poll status or inspect partial results",
+    "continue_worker schema should reject polling semantics"
   )
 
   const started = JSON.parse(
@@ -1052,6 +1069,218 @@ async function testAsyncWorkerTools(): Promise<void> {
   assert(rejectedEmptyCancelReason, "cancel_worker should reject empty cancellation reasons")
 }
 
+async function testCoordinatorWorkerPlanningGuards(): Promise<void> {
+  const createGuardedTools = (): {
+    startTool: unknown
+    continueTool: unknown
+    cancelTool: unknown
+  } => {
+    let sequence = 0
+    const tools = createCoordinatorWorkerTools({
+      workspacePath: "/tmp/workspace",
+      threadId: "thread-guards",
+      workerTools: {
+        async startWorker(input) {
+          sequence += 1
+          return {
+            worker_id: `${input.role}-${sequence}`,
+            worker_thread_id: `thread-guards__worker__${input.role}-${sequence}`,
+            parent_thread_id: "thread-guards",
+            role: input.role,
+            workload: input.workload ?? (input.role === "verifier" ? "verify" : "write"),
+            owned_files: [],
+            description: input.description,
+            status: "running",
+            turns: 1,
+            created_at: "2026-04-28T16:30:00+08:00",
+            updated_at: "2026-04-28T16:30:00+08:00",
+            tool_call_count: 0,
+            last_event: "Worker started."
+          } as never
+        },
+        async continueWorker(input) {
+          return {
+            worker_id: input.workerId,
+            worker_thread_id: `thread-guards__worker__${input.workerId}`,
+            parent_thread_id: "thread-guards",
+            role: "implementer",
+            workload: input.workload ?? "write",
+            owned_files: [],
+            description: "continued",
+            status: "running",
+            turns: 2,
+            created_at: "2026-04-28T16:30:00+08:00",
+            updated_at: "2026-04-28T16:31:00+08:00",
+            tool_call_count: 0,
+            last_event: "Worker continued."
+          } as never
+        },
+        async cancelWorker() {
+          return [] as never
+        }
+      }
+    })
+    const startTool = tools.find((tool) => tool.name === "start_worker")
+    const continueTool = tools.find((tool) => tool.name === "continue_worker")
+    const cancelTool = tools.find((tool) => tool.name === "cancel_worker")
+    assert(startTool && continueTool && cancelTool, "planning guard test requires all tools")
+    return { startTool, continueTool, cancelTool }
+  }
+
+  const readOnly = createGuardedTools()
+  for (let index = 0; index < 3; index += 1) {
+    await invokeTool(readOnly.startTool, {
+      subagent_type: "worker",
+      workload: "read_only",
+      description: `Research ${index}`,
+      prompt: `Research angle ${index}`
+    })
+  }
+  let rejectedFourthReadOnly = false
+  try {
+    await invokeTool(readOnly.startTool, {
+      subagent_type: "worker",
+      workload: "read_only",
+      description: "Research overflow",
+      prompt: "Too much parallel research"
+    })
+  } catch (error) {
+    rejectedFourthReadOnly = String(error).includes("Too many read-only workers")
+  }
+  assert(rejectedFourthReadOnly, "planning guard should cap read-only starts per turn")
+
+  const mixedStart = createGuardedTools()
+  await invokeTool(mixedStart.startTool, {
+    subagent_type: "worker",
+    role: "implementer",
+    workload: "write",
+    description: "Implement",
+    prompt: "Write the change"
+  })
+  let rejectedMixedStart = false
+  try {
+    await invokeTool(mixedStart.startTool, {
+      subagent_type: "worker",
+      workload: "read_only",
+      description: "Also research",
+      prompt: "Research while writing"
+    })
+  } catch (error) {
+    rejectedMixedStart = String(error).includes("Do not mix read-only research workers")
+  }
+  assert(rejectedMixedStart, "planning guard should reject mixed start phases")
+
+  const mixedAction = createGuardedTools()
+  await invokeTool(mixedAction.continueTool, {
+    worker_id: "implementer-1",
+    prompt: "Fix verifier feedback"
+  })
+  let rejectedStartAfterContinue = false
+  try {
+    await invokeTool(mixedAction.startTool, {
+      subagent_type: "worker",
+      workload: "read_only",
+      description: "Late research",
+      prompt: "Do not mix actions"
+    })
+  } catch (error) {
+    rejectedStartAfterContinue = String(error).includes("Do not mix start_worker")
+  }
+  assert(rejectedStartAfterContinue, "planning guard should reject mixed tool families")
+
+  const cancelAction = createGuardedTools()
+  await invokeTool(cancelAction.startTool, {
+    subagent_type: "worker",
+    workload: "read_only",
+    description: "Research",
+    prompt: "Research"
+  })
+  let rejectedCancelAfterStart = false
+  try {
+    await invokeTool(cancelAction.cancelTool, {
+      reason: "panic cancel"
+    })
+  } catch (error) {
+    rejectedCancelAfterStart = String(error).includes("Do not mix cancel_worker")
+  }
+  assert(rejectedCancelAfterStart, "planning guard should reject cancel mixed with starts")
+
+  const doubleCancelAction = createGuardedTools()
+  await invokeTool(doubleCancelAction.cancelTool, {
+    workerId: "worker-a",
+    reason: "stop stale work"
+  })
+  let rejectedSecondCancel = false
+  try {
+    await invokeTool(doubleCancelAction.cancelTool, {
+      workerId: "worker-b",
+      reason: "stop another stale work"
+    })
+  } catch (error) {
+    rejectedSecondCancel = String(error).includes("Do not call cancel_worker more than once")
+  }
+  assert(rejectedSecondCancel, "planning guard should reject repeated cancel calls")
+
+  let failedStartAttempts = 0
+  const recoveryTools = createCoordinatorWorkerTools({
+    workspacePath: "/tmp/workspace",
+    threadId: "thread-guard-recovery",
+    workerTools: {
+      async startWorker() {
+        failedStartAttempts += 1
+        throw new Error("Cannot start write worker yet: wait for notification")
+      },
+      async continueWorker(input) {
+        return {
+          worker_id: input.workerId,
+          worker_thread_id: `thread-guard-recovery__worker__${input.workerId}`,
+          parent_thread_id: "thread-guard-recovery",
+          role: "implementer",
+          workload: "write",
+          owned_files: [],
+          description: "continued after failed start",
+          status: "running",
+          turns: 2,
+          created_at: "2026-04-28T16:30:00+08:00",
+          updated_at: "2026-04-28T16:31:00+08:00",
+          tool_call_count: 0,
+          last_event: "Worker continued."
+        } as never
+      },
+      async cancelWorker() {
+        return [] as never
+      }
+    }
+  })
+  const recoveryStartTool = recoveryTools.find((tool) => tool.name === "start_worker")
+  const recoveryContinueTool = recoveryTools.find((tool) => tool.name === "continue_worker")
+  assert(recoveryStartTool && recoveryContinueTool, "planning recovery test requires tools")
+  let rejectedByDelegate = false
+  try {
+    await invokeTool(recoveryStartTool, {
+      subagent_type: "worker",
+      role: "implementer",
+      workload: "write",
+      description: "Start while writer active",
+      prompt: "Try to start a conflicting writer"
+    })
+  } catch (error) {
+    rejectedByDelegate = String(error).includes("Cannot start write worker yet")
+  }
+  assert(rejectedByDelegate, "planning recovery test should exercise delegate failure")
+  assert(failedStartAttempts === 1, "failing start should reach delegate once")
+  const recovered = JSON.parse(
+    await invokeTool(recoveryContinueTool, {
+      worker_id: "implementer-1",
+      prompt: "Redirect the existing worker instead"
+    })
+  )
+  assert(
+    recovered.worker.worker_id === "implementer-1",
+    "failed tool calls should not consume the successful-action planning budget"
+  )
+}
+
 async function run(): Promise<void> {
   await testModeDetection()
   console.log("PASS coordinator mode detection")
@@ -1065,6 +1294,8 @@ async function run(): Promise<void> {
   console.log("PASS coordinator worker definitions")
   await testAsyncWorkerTools()
   console.log("PASS coordinator async worker tools")
+  await testCoordinatorWorkerPlanningGuards()
+  console.log("PASS coordinator worker planning guards")
 }
 
 run().catch((error: Error) => {

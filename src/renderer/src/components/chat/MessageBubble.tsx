@@ -12,6 +12,10 @@ import {
 } from "./MessageFeedbackDialog"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
 import { parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
+import {
+  isCoordinatorWorkerToolName,
+  normalizeCoordinatorWorkerToolArgsForDisplay
+} from "@/lib/coordinator-worker-tool-args"
 
 /**
  * Strip the trailing `<CMBDEVCLAW-SKILL-USE-V1>…</…>` block when present.
@@ -40,6 +44,16 @@ function extractMessagePlainText(
     })
     .filter(Boolean)
     .join("\n")
+}
+
+function normalizeToolCallForDisplay<T extends { name: string; args?: Record<string, unknown> }>(
+  toolCall: T
+): T {
+  if (!toolCall.args || !isCoordinatorWorkerToolName(toolCall.name)) return toolCall
+  return {
+    ...toolCall,
+    args: normalizeCoordinatorWorkerToolArgsForDisplay(toolCall.name, toolCall.args)
+  }
 }
 
 // 获取工具调用的简要描述
@@ -169,7 +183,7 @@ export function MessageBubble({
         const skillParsed = parseSkillUseBlock(message.content)
         const visibleText = skillParsed ? skillParsed.rest : message.content
         return (
-          <div className="whitespace-pre-wrap text-[15px] leading-7 text-foreground/95">
+          <div className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground/95 [overflow-wrap:anywhere]">
             {skillParsed && (
               <SkillChip label={skillParsed.skillName} compact className="mr-2" />
             )}
@@ -191,7 +205,7 @@ export function MessageBubble({
             return (
               <div
                 key={index}
-                className="whitespace-pre-wrap text-[15px] leading-7 text-foreground/95"
+                className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground/95 [overflow-wrap:anywhere]"
               >
                 {skillParsed && (
                   <SkillChip label={skillParsed.skillName} compact className="mr-2" />
@@ -214,7 +228,8 @@ export function MessageBubble({
   }
 
   const content = renderContent()
-  const hasToolCalls = message.tool_calls && message.tool_calls.length > 0
+  const displayToolCalls = message.tool_calls?.map(normalizeToolCallForDisplay)
+  const hasToolCalls = displayToolCalls && displayToolCalls.length > 0
   // Only strip the skill-use tail from OUR user messages; assistant text that
   // happens to quote the tag (e.g. while discussing the protocol) copies verbatim.
   const plainTextForCopy = extractMessagePlainText(message.content, { stripSkillUse: isUser })
@@ -294,8 +309,8 @@ export function MessageBubble({
   if (isUser) {
     return (
       <div className="group flex justify-end overflow-hidden py-4">
-        <div className="flex max-w-[80%] flex-col items-end gap-1">
-          <div className="rounded-lg p-3 overflow-hidden bg-primary/10">
+        <div className="flex min-w-0 max-w-[80%] flex-col items-end gap-1">
+          <div className="min-w-0 max-w-full overflow-hidden rounded-lg bg-primary/10 p-3">
             {content}
           </div>
           <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
@@ -358,7 +373,11 @@ export function MessageBubble({
         </div>
       )}
       <div className="flex-1 min-w-0 space-y-2 overflow-hidden pl-7">
-        {content && <div className="rounded-lg px-3 overflow-hidden">{content}</div>}
+        {content && (
+          <div className="min-w-0 max-w-full overflow-hidden break-words rounded-lg px-3 [overflow-wrap:anywhere]">
+            {content}
+          </div>
+        )}
         {content && showAssistantMeta && !isLoading && (
           <div className="flex items-center gap-1 px-3 opacity-0 transition-opacity group-hover:opacity-100">
             {/*<span className="text-[11px] text-muted-foreground">{createdAtLabel}</span>*/}
@@ -417,7 +436,7 @@ export function MessageBubble({
         )}
         {hasToolCalls && (
           <div className="space-y-2 overflow-hidden">
-            {message.tool_calls!.map((toolCall, index) => {
+            {displayToolCalls!.map((toolCall, index) => {
               const toolId = toolCall.id || `${message.id}-${index}`;
               const result = toolResults?.get(toolCall.id);
               const pendingIds = pendingApproval?.pendingToolCallIds;

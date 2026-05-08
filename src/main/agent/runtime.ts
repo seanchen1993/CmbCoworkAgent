@@ -111,6 +111,7 @@ import {
 import {
   coordinatorWorkerManager,
   type CoordinatorWorkerSnapshot,
+  type CoordinatorWorkerContinuationIntent,
   type CoordinatorWorkerUpdateEvent,
   type CoordinatorWorkerRole,
   type CoordinatorWorkerRunner,
@@ -124,7 +125,6 @@ import {
 import {
   createWorkerValuesSnapshotContext,
   extractWorkerFinalText,
-  extractWorkerTranscriptLine,
   extractWorkerUsage,
   isWorkerFinalTextDelta,
   shouldClearWorkerFinalText,
@@ -1939,8 +1939,6 @@ The workspace root is: ${workspacePath}`
     return Object.keys(merged).length > 0 ? merged : undefined
   }
 
-  const MAX_WORKER_TRANSCRIPT_CHARS = 200_000
-
   const coordinatorWorkerRunner: CoordinatorWorkerRunner = async (workerInput) => {
     const workerSubagent = buildCoordinatorWorkerSubagents(
       coordinatorProjectInstructions || undefined,
@@ -2006,30 +2004,11 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
     let messageModeAssistantText = ""
     let messageModeAssistantTextTruncated = false
     let tokenUsage: CoordinatorWorkerTokenUsage | undefined
-    const transcriptLines: string[] = []
-    let transcriptChars = 0
-    let transcriptLimitReached = false
     const seenWorkerToolCallKeys = new Set<string>()
     const workerToolNames = new Set<string>()
     const workerSkillUsageDetector = new SkillUsageDetector()
     const cancelWorkerBackgroundTasks = (): void => {
       LocalSandbox.cancelBackgroundTasks(workerInput.workerThreadId)
-    }
-    const appendTranscriptLine = (line: string): void => {
-      if (!line || transcriptLimitReached) return
-      const remainingTranscriptChars = MAX_WORKER_TRANSCRIPT_CHARS - transcriptChars
-      if (remainingTranscriptChars <= 0) {
-        transcriptLimitReached = true
-        return
-      }
-      if (line.length <= remainingTranscriptChars) {
-        transcriptLines.push(line)
-        transcriptChars += line.length + 1
-        return
-      }
-      transcriptLines.push(`${line.slice(0, remainingTranscriptChars)}\n...(transcript truncated)`)
-      transcriptChars = MAX_WORKER_TRANSCRIPT_CHARS
-      transcriptLimitReached = true
     }
     workerInput.abortSignal.addEventListener("abort", cancelWorkerBackgroundTasks, { once: true })
 
@@ -2072,6 +2051,12 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
         for await (const chunk of stream) {
           if (workerInput.abortSignal.aborted) break
           const [mode, data] = chunk as unknown as [string, unknown]
+          if (mode === "messages" || mode === "values") {
+            workerInput.onProgress({
+              type: "stream",
+              stream: { mode: mode as "messages" | "values", data }
+            })
+          }
           const valuesContext = createWorkerValuesSnapshotContext(mode, data, effectiveWorkerPrompt)
           observeWorkerSkillUsage(mode, data, workerSkillUsageDetector, valuesContext)
           observeWorkerProgress(
@@ -2091,9 +2076,6 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             tokenUsage,
             extractWorkerUsage(mode, data, effectiveWorkerPrompt, valuesContext)
           )
-          if (!transcriptLimitReached && transcriptChars < MAX_WORKER_TRANSCRIPT_CHARS) {
-            appendTranscriptLine(extractWorkerTranscriptLine(mode, data))
-          }
           const extracted = extractWorkerFinalText(mode, data, effectiveWorkerPrompt, valuesContext)
           if (shouldClearWorkerFinalText(mode, data, effectiveWorkerPrompt, valuesContext)) {
             messageModeAssistantText = ""
@@ -2282,7 +2264,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
           const message = describeToolError(error)
           console.warn("[CoordinatorWorker] Missing final handoff request failed:", error)
           finalText = truncateWorkerRawText(
-            `Worker completed tool activity but did not provide a final handoff. A follow-up handoff request failed: ${message}. Inspect the worker transcript for tool results and changed files.`
+            `Worker completed tool activity but did not provide a final handoff. A follow-up handoff request failed: ${message}. Open the worker tool stream to inspect tool results and changed files.`
           )
         }
       }
@@ -2324,7 +2306,6 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       return {
         summary: summarizeWorkerText(finalText),
         rawText: finalText,
-        transcriptText: transcriptLines.join("\n"),
         tokenUsage
       }
     } finally {
@@ -2367,6 +2348,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
           }),
         continueWorker: async (input: {
           workerId: string
+          continuationIntent?: CoordinatorWorkerContinuationIntent
           workload?: CoordinatorWorkerWorkload
           ownedFiles?: string[]
           prompt: string
@@ -2378,6 +2360,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
           return await coordinatorWorkerManager.continueWorkerAndPersist({
             parentThreadId: threadId,
             workerId: input.workerId,
+            continuationIntent: input.continuationIntent,
             workload: input.workload,
             ownedFiles: input.ownedFiles,
             prompt: injectSelectedSkillIntoWorkerPrompt(input.prompt, selectedSkill),

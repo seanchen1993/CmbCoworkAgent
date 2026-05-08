@@ -284,6 +284,24 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     }
   })
 
+  // Get the latest checkpoint only. Worker tool-flow restore uses this to avoid
+  // materializing a long checkpoint history in the renderer process.
+  ipcMain.handle("threads:latest-checkpoint", async (_event, threadId: string) => {
+    try {
+      const checkpointer = await getCheckpointer(threadId)
+      const config = { configurable: { thread_id: threadId } }
+
+      for await (const checkpoint of checkpointer.list(config, { limit: 1 })) {
+        return checkpoint
+      }
+
+      return null
+    } catch (e) {
+      console.warn("Failed to get latest thread checkpoint:", e)
+      return null
+    }
+  })
+
   // Generate a title from a message
   ipcMain.handle("threads:generateTitle", async (_event, message: string) => {
     return generateTitle(message)

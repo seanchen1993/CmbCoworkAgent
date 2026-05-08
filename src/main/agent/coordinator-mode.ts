@@ -3,6 +3,7 @@ import type { SubAgent } from "deepagents"
 import { tool } from "langchain"
 import { z } from "zod"
 import type {
+  CoordinatorWorkerContinuationIntent,
   CoordinatorWorkerRole,
   CoordinatorWorkerSnapshot,
   CoordinatorWorkerWorkload
@@ -53,6 +54,7 @@ interface CoordinatorWorkerToolOptions {
   selectedSkill?: CoordinatorSelectedSkill
   explicitSelectedSkill?: CoordinatorSelectedSkill
   notificationSelectedSkills?: Record<string, CoordinatorSelectedSkill | undefined>
+  disableTurnPlanningGuards?: boolean
 }
 
 interface CoordinatorWorkerToolDelegate {
@@ -65,6 +67,7 @@ interface CoordinatorWorkerToolDelegate {
   }) => Promise<CoordinatorWorkerSnapshot>
   continueWorker: (input: {
     workerId: string
+    continuationIntent?: CoordinatorWorkerContinuationIntent
     workload?: CoordinatorWorkerWorkload
     prompt: string
     selectedSkill?: CoordinatorSelectedSkill
@@ -358,9 +361,9 @@ Coordinator rules:
 - Use workload="read_only" for investigation, workload="verify" for independent verification that may run tests/build/lint, and workload="write" for file-changing work.
 - Only verifier workers may use workload="verify". If you need independent verification, spawn a fresh verifier instead of reusing an implementer as a self-verifying worker.
 - Never use workload="write" with role="verifier"; verifier workers must not modify code.
-- Launch independent read-only workers in parallel when useful.
+- Default to one worker. Launch 2-3 read-only workers in parallel only when the research angles are clearly independent and each prompt owns a different question.
 - Treat write workers as whole-workspace implementers, matching Claude Code coordinator semantics. Avoid running overlapping write workers at the same time; use one implementer for related edits, then a fresh verifier for independent acceptance.
-- Parallelism is useful for independent research. Launch independent read-only workers in the same turn when they cover different angles.
+- Do not launch implementation and verification in the same turn. Implementer finishes first, then verifier starts from the implementer task-notification.
 - Delegate implementation work to implementer.
 - Delegate final acceptance to verifier.
 - Do not treat implementer self-checks as final verification.
@@ -368,9 +371,13 @@ Coordinator rules:
 - For deliverable work, do not report completion until verifier has returned PASS with concrete evidence, or report BLOCKED with a concrete blocker.
 - After a task notification arrives, use its pushed <result> handoff to decide the next step. If the result is truncated or missing key evidence, continue that same worker and ask for a concise handoff; do not read archived output files from the coordinator.
 - Do not poll workers after starting them; briefly tell the user what was launched and end the turn.
+- A coordinator turn is one assistant response after a user message or worker notification. Once you call a worker tool in that response, the next correct step is usually to stop using worker tools and let the next turn carry the result.
 - Never fabricate or predict worker results. If the user asks before a notification arrives, report only that the worker is still running and what it was asked to do.
-- If verifier returns FAIL, send a focused follow-up task to implementer. Prefer continue_worker for the same implementer; it can interrupt a running worker and reuse that worker checkpoint.
+- If verifier returns FAIL, send a focused follow-up task to implementer. Prefer continue_worker for the same implementer after its task-notification, or use running continuation only to redirect active work.
 - Use cancel_worker only to stop work that should not continue. Cancelled workers are final; if you want to redirect a worker and preserve its context, use continue_worker directly.
+- A successful start_worker result means "worker launched", not "worker finished". Never follow a start_worker result with continue_worker to inspect status or results; wait for the worker task-notification.
+- A worker action is a commitment for this coordinator turn. After a successful start_worker / continue_worker / cancel_worker, stop using worker tools and end the turn, except for an intentional 2-3 worker read-only research fan-out.
+- If a worker planning guard rejects a tool call, do not recover by trying a different worker tool in the same turn. Tell the user the current state briefly and wait for the next task-notification or user message.
 - Scratchpad directory for durable cross-worker notes: ${scratchpadDir}. Use it only when long-running work needs a concise shared artifact. It is an ordinary workspace artifact path; normal tool availability, approval, hook, and access limits still apply.`
 }
 
@@ -410,6 +417,26 @@ Every message you send is to the user. Worker results and system notifications a
 - cancel_worker: stop running workers.
 - Skills: the coordinator main thread does not load full skill instructions. Workers receive enabled skills through their normal runtime; delegate skill invocations to workers.
 
+Worker action budget per turn:
+- A "turn" means this single coordinator response after the latest user message or <task-notification>. Tool calls in that response are part of the same turn.
+- Prefer exactly one worker action unless there is a clear reason.
+- You may start up to 3 read_only workers in one turn only for independent research angles.
+- Start at most one write or verify worker in a turn.
+- Do not mix start_worker with continue_worker or cancel_worker in the same turn.
+- After starting any write or verify worker, briefly tell the user what was launched and end the turn.
+- A successful start_worker tool result only confirms launch. It is not a worker result, completion signal, or invitation to continue_worker.
+- If a worker tool is rejected by a planning guard, do not keep trying alternative worker-tool combinations in the same turn. Explain the current state briefly and wait for the next task-notification or user input.
+- If you call continue_worker successfully, end the turn after a short user-facing status. Do not then start a replacement worker in the same turn, even if you suspect the previous worker was interrupted.
+- If you call cancel_worker successfully, end the turn. Do not start the replacement until the next user message or task-notification turn.
+- If the user asks "how is it going?" while workers are still running, do not call continue_worker. Answer from current worker context: what is running, what it was asked to do, and that results arrive by task notification.
+
+Tool choice:
+- Use start_worker for fresh independent work: first research, a focused implementation after synthesis, or a fresh verifier.
+- Use continue_worker after a task-notification when the same worker's context helps: fix its own failed change, extend its own work, or request a concise handoff.
+- Use continue_worker with continuation_intent="redirect_running_worker" only when a still-running worker needs replacement instructions because requirements changed or the approach is wrong.
+- Use cancel_worker only when active work should stop and should not continue. Prefer continue_worker for redirecting a worker you still want to preserve.
+- If you are unsure whether a worker is done, do not call tools. Wait for its task-notification and tell the user it is still running.
+
 When calling start_worker:
 - Always use subagent_type="worker", matching Claude Code coordinator semantics.
 - Use role="verifier" only for independent verification. Use role="implementer" or omit role for implementation, research that feeds implementation, and file creation.
@@ -420,11 +447,20 @@ When calling start_worker:
 - verify workers can run validation commands, but do not receive direct write_file/edit_file tools and must not intentionally modify workspace files. If a verifier needs a throwaway script or harness, it may write only to /tmp or $TMPDIR and should clean it up.
 - verify workers do not run concurrently with write workers; wait for write task-notifications before launching final verification.
 - write workers receive normal workspace write access subject to the app's usual approval, hook, and policy checks. Do not split overlapping file-changing work across multiple write workers; continue the same implementer when context helps.
-- Launch independent read-only workers in parallel when they can cover different research angles. Do not serialize independent discovery work.
+- Launch independent read-only workers in parallel only when they cover different research angles. Do not launch many workers for one undifferentiated task.
 - Use a lightweight worker for simple file reads or commands because the coordinator main thread only has orchestration tools.
 - After launching workers, briefly tell the user what you launched and end the turn. Do not poll for completion.
+- Never call continue_worker immediately after start_worker just because the start_worker call returned OK. OK means launched asynchronously; the worker result arrives later as <task-notification>.
 - Do not use one worker to check on another worker. Workers notify you when they finish; you synthesize and route follow-up work.
 - Never fabricate or predict worker results. If the user asks for progress before a task notification arrives, give status only.
+
+Turn examples:
+- Good research turn: call start_worker for 1-3 independent read_only investigations, tell the user what was launched, then stop. Do not continue or cancel in that same response.
+- Good notification turn: read one task-notification, synthesize its facts, optionally call exactly one continue_worker or one start_worker for the next phase, tell the user what is now in progress, then stop.
+- Good redirect turn: if requirements changed while a worker is running, call continue_worker with continuation_intent="redirect_running_worker", tell the user you redirected it, then stop.
+- Bad turn: start_worker returns OK, then continue_worker asks for status/results. OK only means launched.
+- Bad turn: continue_worker returns OK or a planning guard error, then start_worker tries to "restart" the work. Stop and wait instead.
+- Bad turn: cancel_worker stops a worker and start_worker immediately launches a replacement. Split that into two turns.
 
 ## 3. Worker Notifications
 
@@ -439,6 +475,7 @@ Worker results arrive later as <task-notification> messages. They look like user
 - If multiple notifications are present, pass consumed_notification_ids only for the notifications this tool call is actually responding to. This keeps notification-to-skill routing deterministic.
 - output-file/result_path values such as ${coordinatorDir}/reports/workers/<worker_id>/turn-1.json are archival/debug references for UI and human troubleshooting; do not ask to read them from the coordinator turn.
 - If a worker failed or verification found issues, prefer continue_worker when the same worker's context is useful; spawn a fresh worker when fresh eyes are better.
+- Do not use continue_worker to check whether a running worker is done or to inspect partial results. Running workers notify you when finished. Only continue a running worker when you need to redirect or replace its active instructions, and set continuation_intent="redirect_running_worker".
 - cancel_worker is for stopping work that should not continue. Cancelled workers cannot be continued in CmbCowork; use continue_worker directly when you want to redirect a running worker while preserving its thread context.
 - Do not start duplicate work over the same files or topic while a worker is already running there. Work on non-overlapping tasks, or end the turn and wait.
 
@@ -452,9 +489,31 @@ Most non-trivial development work follows this shape:
 5. Integrate verifier feedback. Continue the implementer for focused fixes when its context helps, then verify again.
 
 Continue vs spawn guidance:
-- Continue a worker when its existing context overlaps strongly with the next step: focused fixes, extending its own change, or correcting its own failed checks.
-- Spawn a fresh worker when fresh eyes matter: final verification, retrying after a wrong approach, or moving to a mostly unrelated area.
+- Continue a worker when its existing context overlaps strongly with the next step: focused fixes, extending its own change, correcting its own failed checks, or asking it for a concise handoff after a vague/truncated notification.
+- Spawn a fresh worker when fresh eyes matter: final verification, retrying after a wrong approach, broad research from a clean slate, or moving to a mostly unrelated area.
 - Never tell a worker "based on your findings" without restating the concrete files, facts, and acceptance criteria you synthesized.
+- If the choice is ambiguous, prefer the safer turn boundary: summarize what you know to the user and wait for the next task-notification or user input instead of chaining worker tools.
+
+Decision table:
+| Situation | Tool | Parallel? |
+|---|---|---|
+| Need broad codebase understanding | start_worker read_only | Yes, 2-3 independent angles max |
+| Need simple targeted file lookup | start_worker read_only | Usually one worker |
+| Need implementation after research | start_worker or continue_worker write | One write worker; do not parallelize overlapping edits |
+| Existing worker found/fixed something and needs a focused correction | continue_worker | One continuation |
+| Worker is still running but requirements changed | continue_worker with continuation_intent="redirect_running_worker" | One redirect |
+| Final verification of another worker's change | start_worker role="verifier" workload="verify" | One fresh verifier after implementer notification |
+| Worker went in the wrong direction and should stop | cancel_worker | Do not also start replacements in the same turn |
+| User asks progress while worker is running | no worker tool | Status only; wait for task-notification |
+| Planning guard rejects a worker tool | no more worker tools | Explain briefly; wait for next turn |
+
+Bad worker-tool patterns:
+- start_worker -> continue_worker in the same turn to ask "are you done?" or "what happened?"
+- start_worker write -> start_worker verifier before the write worker has sent a task-notification.
+- cancel_worker -> start_worker replacement in the same turn; stop first, then wait for the next turn.
+- continue_worker -> start_worker replacement in the same turn after deciding the continued worker is interrupted. Wait for the continuation task-notification first.
+- Any worker-tool error -> another worker tool as a recovery attempt in the same turn.
+- Multiple read_only workers with the same prompt or same file/topic.
 
 Verification gates:
 - Do not skip verifier for file changes, documentation creation, code changes, build/test analysis, or app behavior changes.
@@ -478,6 +537,7 @@ Workers cannot see your conversation. Every worker prompt must be self-contained
 
 Coordinator constraints:
 - Running workers can be updated with continue_worker. This interrupts the current run and continues the same worker thread/checkpoint with the new instruction.
+- Running continue_worker requires continuation_intent="redirect_running_worker"; never use it for status/result polling.
 - Treat write workers as exclusive for overlapping implementation work. Read-only workers can run in parallel.
 - Do not edit application files directly.
 - Do not run shell/build/browser tools directly from the coordinator. Workers have those tools.
@@ -588,6 +648,87 @@ export function createCoordinatorWorkerTools(
   const tools: DynamicStructuredTool[] = []
 
   if (options.workerTools) {
+    type PlanningReservation = () => void
+    const turnPlanning = {
+      starts: 0,
+      readOnlyStarts: 0,
+      writeOrVerifyStarts: 0,
+      continues: 0,
+      cancels: 0
+    }
+    const planningGuardsEnabled = options.disableTurnPlanningGuards !== true
+    const reserveStartAllowed = (workload: CoordinatorWorkerWorkload): PlanningReservation => {
+      if (!planningGuardsEnabled) return () => {}
+      if (turnPlanning.continues > 0 || turnPlanning.cancels > 0) {
+        throw new Error(
+          "Do not mix start_worker with continue_worker or cancel_worker in the same coordinator turn. Do not try another worker tool as recovery. Finish this turn and wait for the next task-notification or user message."
+        )
+      }
+      if (workload === "read_only") {
+        if (turnPlanning.writeOrVerifyStarts > 0) {
+          throw new Error(
+            "Do not mix read-only research workers with write/verify workers in the same coordinator turn. Choose one phase and end the turn."
+          )
+        }
+        if (turnPlanning.readOnlyStarts >= 3) {
+          throw new Error(
+            "Too many read-only workers in one coordinator turn. Launch at most 3 independent research workers, then end the turn."
+          )
+        }
+        turnPlanning.readOnlyStarts += 1
+      } else {
+        if (turnPlanning.starts > 0) {
+          throw new Error(
+            "Start at most one write or verify worker in a coordinator turn, and do not mix it with other worker starts."
+          )
+        }
+        turnPlanning.writeOrVerifyStarts += 1
+      }
+      turnPlanning.starts += 1
+      return () => {
+        turnPlanning.starts = Math.max(0, turnPlanning.starts - 1)
+        if (workload === "read_only") {
+          turnPlanning.readOnlyStarts = Math.max(0, turnPlanning.readOnlyStarts - 1)
+        } else {
+          turnPlanning.writeOrVerifyStarts = Math.max(0, turnPlanning.writeOrVerifyStarts - 1)
+        }
+      }
+    }
+    const reserveContinueAllowed = (): PlanningReservation => {
+      if (!planningGuardsEnabled) return () => {}
+      if (turnPlanning.starts > 0 || turnPlanning.cancels > 0) {
+        throw new Error(
+          "Do not mix continue_worker with start_worker or cancel_worker in the same coordinator turn. Do not try another worker tool as recovery. Choose the single next action and end the turn."
+        )
+      }
+      if (turnPlanning.continues >= 1) {
+        throw new Error(
+          "Do not call continue_worker more than once in the same coordinator turn. Continue only the worker whose context is needed, then end the turn."
+        )
+      }
+      turnPlanning.continues += 1
+      return () => {
+        turnPlanning.continues = Math.max(0, turnPlanning.continues - 1)
+      }
+    }
+    const reserveCancelAllowed = (): PlanningReservation => {
+      if (!planningGuardsEnabled) return () => {}
+      if (turnPlanning.starts > 0 || turnPlanning.continues > 0) {
+        throw new Error(
+          "Do not mix cancel_worker with start_worker or continue_worker in the same coordinator turn. Do not try another worker tool as recovery. Stop work first, then wait for the next turn before launching replacements."
+        )
+      }
+      if (turnPlanning.cancels >= 1) {
+        throw new Error(
+          "Do not call cancel_worker more than once in the same coordinator turn. Cancel the single worker or all workers, then end the turn."
+        )
+      }
+      turnPlanning.cancels += 1
+      return () => {
+        turnPlanning.cancels = Math.max(0, turnPlanning.cancels - 1)
+      }
+    }
+
     const startWorker = tool(
       async (input: {
         subagent_type: "worker"
@@ -598,19 +739,27 @@ export function createCoordinatorWorkerTools(
         prompt: string
       }) => {
         const role = input.role ?? (input.workload === "verify" ? "verifier" : "implementer")
+        const effectiveWorkload = input.workload ?? (role === "verifier" ? "verify" : "write")
+        const releasePlanningReservation = reserveStartAllowed(effectiveWorkload)
         const selectedSkill = resolveWorkerPromptSelectedSkill(
           input.consumed_notification_ids,
           options.notificationSelectedSkills,
           options.selectedSkill,
           options.explicitSelectedSkill
         )
-        const snapshot = await options.workerTools!.startWorker({
-          role,
-          workload: input.workload,
-          description: input.description,
-          prompt: injectSelectedSkillIntoWorkerPrompt(input.prompt, selectedSkill),
-          selectedSkill
-        })
+        let snapshot: CoordinatorWorkerSnapshot
+        try {
+          snapshot = await options.workerTools!.startWorker({
+            role,
+            workload: input.workload,
+            description: input.description,
+            prompt: injectSelectedSkillIntoWorkerPrompt(input.prompt, selectedSkill),
+            selectedSkill
+          })
+        } catch (error) {
+          releasePlanningReservation()
+          throw error
+        }
         options.onNotificationsConsumed?.(input.consumed_notification_ids ?? [])
         console.log("[CoordinatorMode] start_worker", {
           workspacePath: options.workspacePath,
@@ -621,7 +770,7 @@ export function createCoordinatorWorkerTools(
         return JSON.stringify(
           {
             message:
-              "Worker started asynchronously. Do not poll, duplicate this worker's files/topics, or predict results. Briefly tell the user what was launched and end this turn; a task notification will be delivered when the worker finishes.",
+              "Worker started asynchronously. Do not poll, duplicate this worker's files/topics, or predict results. Do not continue or cancel workers in this turn. Briefly tell the user what was launched and end this turn; a task notification will be delivered when the worker finishes.",
             worker: toCoordinatorWorkerToolSnapshot(snapshot)
           },
           null,
@@ -631,7 +780,7 @@ export function createCoordinatorWorkerTools(
       {
         name: "start_worker",
         description:
-          'Start an asynchronous coordinator worker. Always use subagent_type="worker"; use role only as an optional coordinator-facing classification.',
+          'Start an asynchronous coordinator worker. Always use subagent_type="worker"; use role only as an optional coordinator-facing classification. A successful result means launched, not completed; end the turn unless this is an intentional read_only research fan-out.',
         schema: z.object({
           subagent_type: coordinatorWorkerSubagentSchema.describe(
             'Always "worker" in coordinator mode, matching Claude Code coordinator.'
@@ -658,7 +807,7 @@ export function createCoordinatorWorkerTools(
             .trim()
             .min(1)
             .describe(
-              "Full self-contained worker instruction, including the task source, acceptance criteria, expected outputs, and verification hints. If responding to worker notifications, include source task-id/notification_id and relevant result facts."
+              "Full self-contained worker instruction, including the task source, acceptance criteria, expected outputs, and verification hints. If responding to worker notifications, include source task-id/notification_id and relevant result facts. Do not duplicate another running worker's files/topic."
             )
         })
       }
@@ -667,22 +816,31 @@ export function createCoordinatorWorkerTools(
     const continueWorker = tool(
       async (input: {
         worker_id: string
+        continuation_intent?: CoordinatorWorkerContinuationIntent
         workload?: CoordinatorWorkerWorkload
         consumed_notification_ids?: string[]
         prompt: string
       }) => {
+        const releasePlanningReservation = reserveContinueAllowed()
         const selectedSkill = resolveWorkerPromptSelectedSkill(
           input.consumed_notification_ids,
           options.notificationSelectedSkills,
           options.selectedSkill,
           options.explicitSelectedSkill
         )
-        const snapshot = await options.workerTools!.continueWorker({
-          workerId: input.worker_id,
-          workload: input.workload,
-          prompt: injectSelectedSkillIntoWorkerPrompt(input.prompt, selectedSkill),
-          selectedSkill
-        })
+        let snapshot: CoordinatorWorkerSnapshot
+        try {
+          snapshot = await options.workerTools!.continueWorker({
+            workerId: input.worker_id,
+            continuationIntent: input.continuation_intent,
+            workload: input.workload,
+            prompt: injectSelectedSkillIntoWorkerPrompt(input.prompt, selectedSkill),
+            selectedSkill
+          })
+        } catch (error) {
+          releasePlanningReservation()
+          throw error
+        }
         options.onNotificationsConsumed?.(input.consumed_notification_ids ?? [])
         console.log("[CoordinatorMode] continue_worker", {
           workspacePath: options.workspacePath,
@@ -694,7 +852,7 @@ export function createCoordinatorWorkerTools(
         return JSON.stringify(
           {
             message:
-              "Worker continued asynchronously with the same worker context. Do not poll for completion; wait for the task notification.",
+              "Worker continued asynchronously with the same worker context. Do not start or cancel workers as recovery in this turn. Briefly tell the user what was redirected/continued and end this turn; wait for the task notification.",
             worker: toCoordinatorWorkerToolSnapshot(snapshot)
           },
           null,
@@ -704,9 +862,15 @@ export function createCoordinatorWorkerTools(
       {
         name: "continue_worker",
         description:
-          "Continue an existing coordinator worker with the same worker context/checkpoint. If the worker is currently running, this interrupts the active run and starts a new run on the same worker thread.",
+          "Continue an existing coordinator worker with the same worker context/checkpoint after its task-notification, or redirect a still-running worker when requirements changed. Do not call this immediately after start_worker to check status/results.",
         schema: z.object({
           worker_id: z.string().trim().min(1).describe("Worker id returned by start_worker."),
+          continuation_intent: z
+            .enum(["follow_up_after_notification", "redirect_running_worker"])
+            .optional()
+            .describe(
+              'Use "follow_up_after_notification" after a worker task-notification. Use "redirect_running_worker" only when the worker is still running and you need to replace or redirect its active instructions. Never use continue_worker to poll status or inspect partial results.'
+            ),
           workload: workerWorkloadSchema
             .optional()
             .describe(
@@ -718,7 +882,13 @@ export function createCoordinatorWorkerTools(
             .describe(
               "notification_id values from the current turn's task notifications that this worker continuation is actually responding to. Use this only for notifications whose result facts are included in the prompt. This supports notification-to-skill routing and traceability; successful turns acknowledge delivered notifications as a batch."
             ),
-          prompt: z.string().trim().min(1).describe("Follow-up instruction for the same worker.")
+          prompt: z
+            .string()
+            .trim()
+            .min(1)
+            .describe(
+              "Follow-up instruction for the same worker. Restate the concrete task-notification facts or the replacement instruction; never ask only for status/progress."
+            )
         })
       }
     )
@@ -729,10 +899,17 @@ export function createCoordinatorWorkerTools(
         reason?: string
         consumed_notification_ids?: string[]
       }) => {
-        const workers = await options.workerTools!.cancelWorker({
-          workerId: input.worker_id,
-          reason: input.reason
-        })
+        const releasePlanningReservation = reserveCancelAllowed()
+        let workers: CoordinatorWorkerSnapshot[]
+        try {
+          workers = await options.workerTools!.cancelWorker({
+            workerId: input.worker_id,
+            reason: input.reason
+          })
+        } catch (error) {
+          releasePlanningReservation()
+          throw error
+        }
         options.onNotificationsConsumed?.(input.consumed_notification_ids ?? [])
         console.log("[CoordinatorMode] cancel_worker", {
           workspacePath: options.workspacePath,
@@ -740,12 +917,20 @@ export function createCoordinatorWorkerTools(
           workerId: input.worker_id ?? null,
           workers: workers.length
         })
-        return JSON.stringify({ workers: toCoordinatorWorkerToolSnapshots(workers) }, null, 2)
+        return JSON.stringify(
+          {
+            message:
+              "Worker cancellation was requested. Do not start replacement workers in this turn. Briefly tell the user what was stopped and wait for the next task-notification or user message.",
+            workers: toCoordinatorWorkerToolSnapshots(workers)
+          },
+          null,
+          2
+        )
       },
       {
         name: "cancel_worker",
         description:
-          "Cancel one running coordinator worker, or all workers for this coordinator thread when worker_id is omitted.",
+          "Cancel one running coordinator worker, or all workers for this coordinator thread when worker_id is omitted. Use only for work that should stop and should not continue; after canceling, end the turn.",
         schema: z.object({
           worker_id: z
             .string()

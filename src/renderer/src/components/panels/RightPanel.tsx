@@ -2357,6 +2357,7 @@ function CoordinatorWorkerCard({
 }): React.JSX.Element {
   const isRunning = worker.status === "running"
   const [detailsOpen, setDetailsOpen] = useState(false)
+  const openWorkerFocusView = useAppStore((state) => state.openWorkerFocusView)
   const roleLabel = worker.role === "implementer" ? "实现者" : "验证者"
   const workload = worker.workload ?? (worker.role === "verifier" ? "verify" : "write")
   const ownedFiles = worker.owned_files ?? []
@@ -2388,7 +2389,7 @@ function CoordinatorWorkerCard({
   )
 
   const tokenLabel = formatCoordinatorWorkerTokenUsage(worker.token_usage)
-  const hasAnyFile = Boolean(worker.result_path || worker.report_path || worker.transcript_path)
+  const hasAnyFile = Boolean(worker.result_path || worker.report_path)
 
   return (
     <div
@@ -2460,7 +2461,7 @@ function CoordinatorWorkerCard({
         </div>
       </div>
 
-      {(hasAnyFile || ownedFiles.length > 0 || tokenLabel) && (
+      {(hasAnyFile || ownedFiles.length > 0 || tokenLabel || threadId) && (
         <div className="mt-2 flex flex-wrap items-center gap-2">
           {worker.result_path && (
             <button
@@ -2480,15 +2481,6 @@ function CoordinatorWorkerCard({
               报告
             </button>
           )}
-          {worker.transcript_path && (
-            <button
-              type="button"
-              onClick={() => openWorkerFile(worker.transcript_path)}
-              className="rounded-full border border-border/70 px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent/40 hover:text-foreground"
-            >
-              日志
-            </button>
-          )}
           <button
             type="button"
             onClick={() => setDetailsOpen((open) => !open)}
@@ -2496,6 +2488,23 @@ function CoordinatorWorkerCard({
           >
             {detailsOpen ? "收起细节" : "查看细节"}
           </button>
+          {threadId && worker.worker_thread_id && (
+            <button
+              type="button"
+              onClick={() =>
+                openWorkerFocusView({
+                  threadId,
+                  workerId: worker.worker_id,
+                  workerThreadId: worker.worker_thread_id,
+                  role: worker.role,
+                  description: worker.description
+                })
+              }
+              className="rounded-full border border-emerald-300/70 bg-emerald-500/10 px-2 py-1 text-[11px] font-medium text-emerald-700 hover:bg-emerald-500/15 dark:text-emerald-300"
+            >
+              工具流
+            </button>
+          )}
         </div>
       )}
 
@@ -2519,12 +2528,6 @@ function CoordinatorWorkerCard({
             <div className="truncate">
               <span className="text-foreground/70">Result：</span>
               {worker.result_path}
-            </div>
-          )}
-          {worker.transcript_path && (
-            <div className="truncate">
-              <span className="text-foreground/70">Transcript：</span>
-              {worker.transcript_path}
             </div>
           )}
         </div>

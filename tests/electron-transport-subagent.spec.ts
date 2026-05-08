@@ -10,6 +10,7 @@
  */
 
 import { ElectronIPCTransport } from "../src/renderer/src/lib/electron-transport.ts"
+import { useAppStore } from "../src/renderer/src/lib/store.ts"
 
 interface SdkEvent {
   event: string
@@ -63,6 +64,21 @@ function aiMessage(input: {
       id: input.id,
       content: input.content ?? "",
       tool_calls: input.toolCalls
+    }
+  }
+}
+
+function aiMessageChunk(input: {
+  id?: string
+  content?: unknown
+  toolCallChunks?: Array<{ id?: string; name?: string; args?: string }>
+}): unknown {
+  return {
+    id: ["langchain_core", "messages", "AIMessageChunk"],
+    kwargs: {
+      id: input.id,
+      content: input.content ?? "",
+      tool_call_chunks: input.toolCallChunks
     }
   }
 }
@@ -400,6 +416,314 @@ async function testAsyncWorkerInternalsStayOutOfMainThread(): Promise<void> {
   assert(
     messageEvents(startWorkerResultEvents).length === 1,
     "main start_worker result should remain visible even when content mentions worker_thread_id"
+  )
+}
+
+async function testFocusedAsyncWorkerStreamsToWorkerPanel(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  useAppStore.setState({
+    workerFocusView: {
+      threadId: "thread-123",
+      workerId: "implementer-1",
+      workerThreadId: "thread-123__worker__implementer-1",
+      role: "implementer",
+      description: "Inspect worker stream"
+    },
+    workerFocusMessages: []
+  })
+
+  try {
+    const workerToolEvents = convertCoordinator(
+      transport,
+      streamMessageEvent(
+        aiMessage({
+          id: "focused-worker-ai-1",
+          toolCalls: [
+            {
+              id: "focused-worker-tool-1",
+              name: "read_file",
+              args: { file_path: "README.md" }
+            }
+          ]
+        }),
+        { langgraph_checkpoint_ns: "graph:thread-123__worker__implementer-1:agent" }
+      )
+    )
+
+    assert(
+      messageEvents(workerToolEvents).length === 0,
+      "focused worker internals should still stay out of main chat messages"
+    )
+    assert(
+      customEvents(workerToolEvents, "coordinator_worker_stream_message").length === 0,
+      "main coordinator stream should not parse focused worker internals; worker panel uses the side channel"
+    )
+
+    const directSideChannelMessages = transport.convertFocusedCoordinatorWorkerIPCEvent(
+      streamMessageEvent(
+        aiMessage({
+          id: "focused-worker-ai-direct",
+          toolCalls: [
+            {
+              id: "focused-worker-tool-direct",
+              name: "execute",
+              args: { command: "npm test" }
+            }
+          ]
+        }),
+        {}
+      ) as never,
+      "thread-123"
+    )
+    assert(
+      directSideChannelMessages.length === 1,
+      "worker side-channel should not require checkpoint namespace metadata"
+    )
+    assert(
+      directSideChannelMessages[0]?.tool_calls?.[0]?.name === "execute",
+      "worker side-channel should parse live tool calls without namespace metadata"
+    )
+
+    const directValuesMessages = transport.convertFocusedCoordinatorWorkerIPCEvent(
+      streamValuesEvent([
+        humanMessage("Worker prompt"),
+        aiMessage({
+          id: "focused-worker-values-ai",
+          content: "I will inspect files",
+          toolCalls: [
+            {
+              id: "focused-worker-values-tool",
+              name: "list_dir",
+              args: { path: "src" }
+            }
+          ]
+        }),
+        toolMessage({
+          id: "focused-worker-values-result",
+          name: "list_dir",
+          toolCallId: "focused-worker-values-tool",
+          content: "src/main"
+        })
+      ]) as never,
+      "thread-123"
+    )
+    assert(
+      directValuesMessages.some(
+        (message) => message.role === "assistant" && message.tool_calls?.[0]?.name === "list_dir"
+      ),
+      "worker side-channel should use values snapshots as a live fallback"
+    )
+    assert(
+      directValuesMessages.some(
+        (message) =>
+          message.role === "tool" &&
+          message.tool_call_id === "focused-worker-values-tool" &&
+          message.content === "src/main"
+      ),
+      "worker values fallback should surface tool results"
+    )
+  } finally {
+    useAppStore.getState().closeWorkerFocusView()
+  }
+}
+
+async function testCoordinatorToolCallChunksHydrateDisplayedArgs(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const firstEvents = convertCoordinator(
+    transport,
+    streamMessageEvent(
+      aiMessageChunk({
+        id: "coordinator-ai-args",
+        toolCallChunks: [
+          {
+            id: "start-worker-1",
+            name: "start_worker",
+            args: '{"subagent_type":"worker","workload":"read_only",'
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+  assert(
+    messageEvents(firstEvents).length === 0,
+    "incomplete tool-call args should not force a visible message update"
+  )
+
+  const completedEvents = convertCoordinator(
+    transport,
+    streamMessageEvent(
+      aiMessageChunk({
+        id: "coordinator-ai-args",
+        toolCallChunks: [
+          {
+            id: "start-worker-1",
+            args: '"description":"Search clients","prompt":"Find Elasticsearch usages"}'
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+  const message = firstMessage(completedEvents)
+  const toolCalls = message.tool_calls as Array<{
+    id?: string
+    name?: string
+    args?: Record<string, unknown>
+  }>
+  assert(toolCalls?.[0]?.name === "start_worker", "completed chunk should emit start_worker")
+  assert(
+    toolCalls[0]?.args?.description === "Search clients",
+    "completed chunk args should replace the early empty args placeholder"
+  )
+  assert(
+    toolCalls[0]?.args?.prompt === "Find Elasticsearch usages",
+    "completed chunk should preserve full prompt args for raw argument display"
+  )
+}
+
+async function testCoordinatorToolCallChunksHandleCumulativeProviderArgs(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const cumulativeArgs =
+    '{"subagent_type":"worker","role":"implementer","workload":"read_only","description":"Search clients","prompt":"Find Elasticsearch usages"}'
+
+  convertCoordinator(
+    transport,
+    streamMessageEvent(
+      aiMessageChunk({
+        id: "coordinator-ai-cumulative",
+        toolCallChunks: [
+          {
+            id: "start-worker-cumulative",
+            name: "start_worker",
+            args: cumulativeArgs
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+  const repeatedEvents = convertCoordinator(
+    transport,
+    streamMessageEvent(
+      aiMessageChunk({
+        id: "coordinator-ai-cumulative",
+        toolCallChunks: [
+          {
+            id: "start-worker-cumulative",
+            name: "start_worker",
+            args: cumulativeArgs
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+  const message = firstMessage(repeatedEvents)
+  const toolCalls = message.tool_calls as Array<{
+    id?: string
+    name?: string
+    args?: Record<string, unknown>
+  }>
+  assert(
+    toolCalls[0]?.args?.subagent_type === "worker",
+    "repeated cumulative chunks should not duplicate string argument values"
+  )
+  assert(
+    toolCalls[0]?.args?.prompt === "Find Elasticsearch usages",
+    "repeated cumulative chunks should preserve prompt once"
+  )
+
+  const overlapTransport = new ElectronIPCTransport()
+  convertCoordinator(
+    overlapTransport,
+    streamMessageEvent(
+      aiMessageChunk({
+        id: "coordinator-ai-overlap",
+        toolCallChunks: [
+          {
+            id: "start-worker-overlap",
+            name: "start_worker",
+            args: '{"subagent_type":"worker","workload":"read_only","description":"调研'
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+  const overlapEvents = convertCoordinator(
+    overlapTransport,
+    streamMessageEvent(
+      aiMessageChunk({
+        id: "coordinator-ai-overlap",
+        toolCallChunks: [
+          {
+            id: "start-worker-overlap",
+            args: '调研项目","prompt":"请调研controller结构"}'
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+  const overlapMessage = firstMessage(overlapEvents)
+  const overlapToolCalls = overlapMessage.tool_calls as Array<{
+    id?: string
+    name?: string
+    args?: Record<string, unknown>
+  }>
+  assert(
+    overlapToolCalls[0]?.args?.description === "调研项目",
+    "overlapping tool-call chunks should not duplicate string argument suffixes"
+  )
+
+  const exactDuplicateEvents = convertCoordinator(
+    new ElectronIPCTransport(),
+    streamMessageEvent(
+      aiMessage({
+        id: "coordinator-ai-exact-duplicate",
+        toolCalls: [
+          {
+            id: "start-worker-exact-duplicate",
+            name: "start_worker",
+            args: {
+              subagent_type: "workerworker",
+              consumed_notification_ids: [
+                "implementer-1@turn-1",
+                "implementer-1@turn-1"
+              ],
+              workload: "read_onlyread_only",
+              description: "调研项目controller结构调研项目controller结构",
+              prompt: "请调研controller结构。请调研controller结构。"
+            }
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+  const exactDuplicateMessage = firstMessage(exactDuplicateEvents)
+  const exactDuplicateToolCalls = exactDuplicateMessage.tool_calls as Array<{
+    id?: string
+    name?: string
+    args?: Record<string, unknown>
+  }>
+  assert(
+    exactDuplicateToolCalls[0]?.args?.subagent_type === "worker",
+    "exact duplicate string args should be collapsed for coordinator worker tools"
+  )
+  assert(
+    exactDuplicateToolCalls[0]?.args?.workload === "read_only",
+    "exact duplicate short enum args should be collapsed for coordinator worker tools"
+  )
+  assert(
+    JSON.stringify(exactDuplicateToolCalls[0]?.args?.consumed_notification_ids) ===
+      JSON.stringify(["implementer-1@turn-1"]),
+    "duplicate consumed notification ids should be removed for coordinator worker tool display"
+  )
+  assert(
+    exactDuplicateToolCalls[0]?.args?.prompt === "请调研controller结构。请调研controller结构。",
+    "freeform prompt args should not be collapsed because repeated text may be intentional"
   )
 }
 
@@ -921,6 +1245,12 @@ async function run(): Promise<void> {
   console.log("PASS electron transport avoids false subagent classification")
   await testAsyncWorkerInternalsStayOutOfMainThread()
   console.log("PASS electron transport hides async worker internals")
+  await testFocusedAsyncWorkerStreamsToWorkerPanel()
+  console.log("PASS electron transport routes focused worker internals")
+  await testCoordinatorToolCallChunksHydrateDisplayedArgs()
+  console.log("PASS electron transport hydrates coordinator tool-call chunk args")
+  await testCoordinatorToolCallChunksHandleCumulativeProviderArgs()
+  console.log("PASS electron transport handles cumulative tool-call chunk args")
   await testReadWorkerStateIsQuietLikeTaskOutput()
   console.log("PASS electron transport hides read_worker_state-only checks")
   await testReadWorkerStateIsRemovedFromMixedToolCalls()

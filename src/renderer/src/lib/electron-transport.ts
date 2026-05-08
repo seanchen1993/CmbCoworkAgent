@@ -1,8 +1,13 @@
 import type { UseStreamTransport } from "@langchain/langgraph-sdk/react"
 import type { ToolCall, ToolCallChunk } from "@langchain/core/messages"
 import type { StreamPayload, StreamEvent, IPCEvent, IPCStreamEvent } from "../../../types"
-import type { Subagent } from "../types"
+import type { Message, Subagent } from "../types"
 import { COORDINATOR_NOTIFICATION_PROMPT } from "./message-display-helpers"
+import { useAppStore } from "./store"
+import {
+  isCoordinatorWorkerToolName,
+  normalizeCoordinatorWorkerToolArgsForDisplay
+} from "./coordinator-worker-tool-args"
 
 /**
  * Usage metadata from LangChain model responses.
@@ -119,6 +124,10 @@ export class ElectronIPCTransport implements UseStreamTransport {
   // Track current message ID for grouping tokens across chunks
   private currentMessageId: string | null = null
 
+  private workerCurrentMessageIds: Map<string, string> = new Map()
+
+  private workerAssistantTextByMessageId: Map<string, string> = new Map()
+
   // Track active subagents by their tool_call_id
   private activeSubagents: Map<string, Subagent> = new Map()
 
@@ -142,12 +151,21 @@ export class ElectronIPCTransport implements UseStreamTransport {
   // Track accumulated tool call chunks (for streaming tool calls)
   private accumulatedToolCalls: Map<string, AccumulatedToolCall> = new Map()
 
+  private lastToolCallChunkArgsById: Map<string, string> = new Map()
+
   // Track completed tool calls by name for HITL matching
   private completedToolCallsByName: Map<string, CompletedToolCall[]> = new Map()
+
+  // Streaming tool-call chunks can contain the real JSON args before the
+  // message-level tool_calls array is fully hydrated. Keep the parsed result so
+  // the chat card does not get stuck showing an early `{}` placeholder.
+  private completedToolCallsByMessageId: Map<string, Map<string, CompletedToolCall>> = new Map()
 
   async stream(payload: StreamPayload): Promise<AsyncGenerator<StreamEvent>> {
     // Reset state for new stream
     this.currentMessageId = null
+    this.workerCurrentMessageIds.clear()
+    this.workerAssistantTextByMessageId.clear()
     this.activeSubagents.clear()
     this.subagentToolCallIds.clear()
     this.subagentToolLogEntryIds.clear()
@@ -156,7 +174,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
     this.quietCoordinatorToolCallIds.clear()
     this.emittedMessageIds.clear()
     this.accumulatedToolCalls.clear()
+    this.lastToolCallChunkArgsById.clear()
     this.completedToolCallsByName.clear()
+    this.completedToolCallsByMessageId.clear()
     const threadId = payload.config?.configurable?.thread_id
     const modelId = payload.config?.configurable?.model_id as string | undefined
     const agentMode = payload.config?.configurable?.agent_mode as
@@ -198,6 +218,51 @@ export class ElectronIPCTransport implements UseStreamTransport {
       agentMode,
       coordinatorInternalNotification
     )
+  }
+
+  convertFocusedCoordinatorWorkerIPCEvent(
+    event: IPCStreamEvent,
+    parentThreadId: string
+  ): Message[] {
+    const focused = useAppStore.getState().workerFocusView
+    if (!focused || focused.threadId !== parentThreadId) return []
+
+    if (event.mode === "messages") {
+      const [msgChunk, metadata] = event.data as [SerializedMessageChunk, MessageMetadata]
+      const kwargs = msgChunk?.kwargs || {}
+      const classId = Array.isArray(msgChunk?.id) ? msgChunk.id : []
+      const className = classId[classId.length - 1] || ""
+
+      return this.createFocusedCoordinatorWorkerEvents({
+        parentThreadId,
+        // The worker side-channel is already filtered by worker_thread_id in the
+        // main process. Some providers do not include a worker checkpoint
+        // namespace in this direct stream, so pass the focused worker id as the
+        // routing namespace instead of dropping the event.
+        checkpointNs: focused.workerThreadId,
+        className,
+        kwargs,
+        metadata
+      })
+        .filter((sdkEvent) => sdkEvent.event === "custom")
+        .map((sdkEvent) => sdkEvent.data as { type?: unknown; workerMessage?: unknown })
+        .filter((data) => data.type === "coordinator_worker_stream_message")
+        .map((data) => data.workerMessage)
+        .filter((message): message is Message => Boolean(message && typeof message === "object"))
+    }
+
+    if (event.mode === "values") {
+      const state = event.data as { messages?: SerializedMessageChunk[] }
+      if (!Array.isArray(state.messages)) return []
+      return this.createFocusedCoordinatorWorkerEventsFromValues(state.messages)
+    }
+
+    return this.processStreamEvent(event, "coordinator")
+      .filter((sdkEvent) => sdkEvent.event === "custom")
+      .map((sdkEvent) => sdkEvent.data as { type?: unknown; workerMessage?: unknown })
+      .filter((data) => data.type === "coordinator_worker_stream_message")
+      .map((data) => data.workerMessage)
+      .filter((message): message is Message => Boolean(message && typeof message === "object"))
   }
 
   private async *createErrorGenerator(code: string, message: string): AsyncGenerator<StreamEvent> {
@@ -281,18 +346,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     )
 
     let cleanedUp = false
-    let abortListener: (() => void) | undefined
-    const cleanupOnce = (): void => {
-      if (cleanedUp) return
-      cleanedUp = true
-      cleanup()
-      if (abortListener) {
-        signal.removeEventListener("abort", abortListener)
-      }
-    }
-
-    // Handle abort signal
-    abortListener = () => {
+    const abortListener = (): void => {
       cleanupOnce()
       isDone = true
       if (resolveNext) {
@@ -301,6 +355,14 @@ export class ElectronIPCTransport implements UseStreamTransport {
         resolve(null)
       }
     }
+    const cleanupOnce = (): void => {
+      if (cleanedUp) return
+      cleanedUp = true
+      cleanup()
+      signal.removeEventListener("abort", abortListener)
+    }
+
+    // Handle abort signal
     signal.addEventListener("abort", abortListener)
 
     try {
@@ -507,6 +569,53 @@ export class ElectronIPCTransport implements UseStreamTransport {
     return events
   }
 
+  private createFocusedCoordinatorWorkerEventsFromValues(messages: SerializedMessageChunk[]): Message[] {
+    const converted: Message[] = []
+    for (let index = 0; index < messages.length; index += 1) {
+      const message = messages[index]
+      const kwargs = message.kwargs || {}
+      const className = this.getSerializedMessageClassName(message)
+      const additionalKwargs = kwargs.additional_kwargs
+      if (additionalKwargs?.cmb_internal_coordinator_notification === true) continue
+      if (className.includes("System") || kwargs.type === "system") continue
+
+      const rawId = kwargs.id || `worker-values-${index}`
+      if (this.isSerializedHumanMessage(message)) {
+        converted.push({
+          id: rawId,
+          role: "user",
+          content: this.extractContent(kwargs.content),
+          created_at: new Date()
+        })
+        continue
+      }
+
+      if (this.isSerializedAIMessage(message)) {
+        const toolCalls = this.hydrateToolCallsWithAccumulatedArgs(kwargs.tool_calls ?? [])
+        converted.push({
+          id: rawId,
+          role: "assistant",
+          content: this.extractContent(kwargs.content),
+          ...(toolCalls.length && { tool_calls: toolCalls as Message["tool_calls"] }),
+          created_at: new Date()
+        })
+        continue
+      }
+
+      if (this.isSerializedToolMessage(message) && kwargs.tool_call_id) {
+        converted.push({
+          id: rawId,
+          role: "tool",
+          content: this.extractContent(kwargs.content),
+          tool_call_id: kwargs.tool_call_id,
+          ...(kwargs.name && { name: kwargs.name }),
+          created_at: new Date()
+        })
+      }
+    }
+    return converted
+  }
+
   /**
    * Process raw LangGraph stream events (mode + data tuples)
    */
@@ -531,8 +640,10 @@ export class ElectronIPCTransport implements UseStreamTransport {
       const checkpointNs =
         metadata?.langgraph_checkpoint_ns || metadata?.checkpoint_ns
       if (isCoordinatorMode && this.isCoordinatorWorkerNamespace(checkpointNs)) {
-        // Async coordinator workers have their own right-panel state stream.
-        // Their internal tool calls must not become main coordinator messages.
+        // Async coordinator workers must not become main coordinator messages.
+        // The focused worker panel receives these through the dedicated
+        // coordinator-worker side channel, so the main stream transport should
+        // not parse or cache worker content.
         return events
       }
       // Check if this is a ToolMessage (class name contains 'ToolMessage')
@@ -571,9 +682,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
           const content = this.extractContent(kwargs.content)
           const msgId = kwargs.id || this.currentMessageId || crypto.randomUUID()
           this.currentMessageId = msgId
-          const visibleToolCalls = this.filterVisibleMainToolCalls(
-            kwargs.tool_calls,
-            isCoordinatorMode
+          const visibleToolCalls = this.hydrateToolCallsWithAccumulatedArgs(
+            this.filterVisibleMainToolCalls(kwargs.tool_calls, isCoordinatorMode)
           )
           const visibleToolCallChunks = this.filterVisibleMainToolCallChunks(
             kwargs.tool_call_chunks,
@@ -581,6 +691,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
           )
 
           if (content || visibleToolCalls.length) {
+            if (visibleToolCalls.length) {
+              this.rememberCompletedToolCallsForMessage(msgId, visibleToolCalls)
+            }
             this.rememberEmittedMessage(msgId)
             events.push({
               event: "messages",
@@ -604,6 +717,34 @@ export class ElectronIPCTransport implements UseStreamTransport {
           if (visibleToolCallChunks.length) {
             const subagentDetectEvents = this.processToolCallChunks(visibleToolCallChunks)
             events.push(...subagentDetectEvents)
+
+            const completedChunkToolCalls =
+              this.completedToolCallsFromAccumulatedChunks(visibleToolCallChunks)
+            if (completedChunkToolCalls.length && this.currentMessageId) {
+              this.rememberCompletedToolCallsForMessage(
+                this.currentMessageId,
+                completedChunkToolCalls
+              )
+              const completedToolCalls = this.getCompletedToolCallsForMessage(
+                this.currentMessageId
+              )
+              events.push({
+                event: "messages",
+                data: [
+                  {
+                    id: this.currentMessageId,
+                    type: "ai",
+                    content: "",
+                    tool_calls: completedToolCalls
+                  },
+                  {
+                    langgraph_node: metadata?.langgraph_node || "agent",
+                    langgraph_checkpoint_ns: metadata?.langgraph_checkpoint_ns,
+                    checkpoint_ns: metadata?.checkpoint_ns
+                  }
+                ]
+              })
+            }
 
             events.push({
               event: "custom",
@@ -900,6 +1041,125 @@ export class ElectronIPCTransport implements UseStreamTransport {
     return events
   }
 
+  private createFocusedCoordinatorWorkerEvents(input: {
+    parentThreadId: string
+    checkpointNs?: string
+    className: string
+    kwargs: SerializedMessageChunk["kwargs"]
+    metadata?: MessageMetadata
+  }): StreamEvent[] {
+    const focused = useAppStore.getState().workerFocusView
+    if (
+      !focused ||
+      focused.threadId !== input.parentThreadId ||
+      !input.checkpointNs?.includes(focused.workerThreadId)
+    ) {
+      return []
+    }
+
+    const events: StreamEvent[] = []
+    const kwargs = input.kwargs || {}
+    const isToolMessage = input.className.includes("ToolMessage") && !!kwargs.tool_call_id
+    const isAIMessage = input.className.includes("AI") || input.className.includes("AIMessageChunk")
+
+    if (isAIMessage) {
+      const isChunk = input.className.includes("Chunk")
+      const extractedContent = this.extractContent(kwargs.content)
+      const msgId =
+        kwargs.id ||
+        this.workerCurrentMessageIds.get(focused.workerThreadId) ||
+        crypto.randomUUID()
+      this.workerCurrentMessageIds.set(focused.workerThreadId, msgId)
+
+      let content = extractedContent
+      if (isChunk && extractedContent) {
+        content = `${this.workerAssistantTextByMessageId.get(msgId) ?? ""}${extractedContent}`
+        this.workerAssistantTextByMessageId.set(msgId, content)
+      } else if (extractedContent) {
+        this.workerAssistantTextByMessageId.set(msgId, extractedContent)
+      } else {
+        content = this.workerAssistantTextByMessageId.get(msgId) ?? ""
+      }
+
+      const toolCalls = this.hydrateToolCallsWithAccumulatedArgs(kwargs.tool_calls ?? [])
+      if (toolCalls.length) {
+        this.rememberCompletedToolCallsForMessage(msgId, toolCalls)
+      }
+
+      if (content || toolCalls.length) {
+        events.push(
+          this.createCoordinatorWorkerStreamMessageEvent(focused.workerThreadId, {
+            id: msgId,
+            role: "assistant",
+            content,
+            ...(toolCalls.length && { tool_calls: toolCalls as Message["tool_calls"] }),
+            created_at: new Date()
+          })
+        )
+      }
+
+      if (kwargs.tool_call_chunks?.length) {
+        this.accumulateToolCallChunks(kwargs.tool_call_chunks)
+        const completedToolCalls = this.completedToolCallsFromAccumulatedChunks(
+          kwargs.tool_call_chunks
+        )
+        if (completedToolCalls.length) {
+          this.rememberCompletedToolCallsForMessage(msgId, completedToolCalls)
+          events.push(
+            this.createCoordinatorWorkerStreamMessageEvent(focused.workerThreadId, {
+              id: msgId,
+              role: "assistant",
+              content: this.workerAssistantTextByMessageId.get(msgId) ?? "",
+              tool_calls: this.getCompletedToolCallsForMessage(msgId) as Message["tool_calls"],
+              created_at: new Date()
+            })
+          )
+        }
+      }
+
+      return events
+    }
+
+    if (isToolMessage && kwargs.tool_call_id) {
+      const content = this.extractContent(kwargs.content)
+      const msgId =
+        kwargs.id ||
+        this.createStableFallbackMessageId({
+          type: "tool",
+          content,
+          toolCallId: kwargs.tool_call_id,
+          toolName: kwargs.name
+        })
+
+      events.push(
+        this.createCoordinatorWorkerStreamMessageEvent(focused.workerThreadId, {
+          id: msgId,
+          role: "tool",
+          content,
+          tool_call_id: kwargs.tool_call_id,
+          ...(kwargs.name && { name: kwargs.name }),
+          created_at: new Date()
+        })
+      )
+    }
+
+    return events
+  }
+
+  private createCoordinatorWorkerStreamMessageEvent(
+    workerThreadId: string,
+    message: Message
+  ): StreamEvent {
+    return {
+      event: "custom",
+      data: {
+        type: "coordinator_worker_stream_message",
+        workerThreadId,
+        workerMessage: message
+      }
+    }
+  }
+
   private createStableFallbackMessageId(input: {
     type: "ai" | "tool"
     content?: string
@@ -983,7 +1243,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
       const kwargs = message.kwargs || {}
       if (this.isSerializedAIMessage(message)) {
         const content = this.extractContent(kwargs.content)
-        const visibleToolCalls = this.filterVisibleMainToolCalls(kwargs.tool_calls, true)
+        const visibleToolCalls = this.hydrateToolCallsWithAccumulatedArgs(
+          this.filterVisibleMainToolCalls(kwargs.tool_calls, true)
+        )
         if (!content && visibleToolCalls.length === 0) continue
 
         const msgId =
@@ -1255,6 +1517,147 @@ export class ElectronIPCTransport implements UseStreamTransport {
     return ""
   }
 
+  private hasToolArgs(args: unknown): boolean {
+    return Boolean(args && typeof args === "object" && Object.keys(args).length > 0)
+  }
+
+  private parseAccumulatedToolCall(id?: string): CompletedToolCall | null {
+    if (!id) return null
+    const accumulated = this.accumulatedToolCalls.get(id)
+    if (!accumulated?.name || !accumulated.args) return null
+
+    try {
+      const args = JSON.parse(accumulated.args)
+      if (!args || typeof args !== "object" || Array.isArray(args)) return null
+      return {
+        id: accumulated.id,
+        name: accumulated.name,
+        args: this.normalizeToolCallArgsForDisplay(
+          accumulated.name,
+          args as Record<string, unknown>
+        )
+      }
+    } catch {
+      return null
+    }
+  }
+
+  private hydrateToolCallsWithAccumulatedArgs(
+    toolCalls: Array<{ id?: string; name?: string; args?: Record<string, unknown> }>
+  ): Array<{ id?: string; name?: string; args?: Record<string, unknown> }> {
+    return toolCalls.map((toolCall) => {
+      if (this.hasToolArgs(toolCall.args)) {
+        return {
+          ...toolCall,
+          args: this.normalizeToolCallArgsForDisplay(toolCall.name, toolCall.args!)
+        }
+      }
+
+      const completed = this.parseAccumulatedToolCall(toolCall.id)
+      if (!completed) return toolCall
+
+      return {
+        ...toolCall,
+        name: toolCall.name || completed.name,
+        args: this.normalizeToolCallArgsForDisplay(toolCall.name || completed.name, completed.args)
+      }
+    })
+  }
+
+  private normalizeToolCallArgsForDisplay(
+    toolName: string | undefined,
+    args: Record<string, unknown>
+  ): Record<string, unknown> {
+    if (!isCoordinatorWorkerToolName(toolName)) return args
+    return normalizeCoordinatorWorkerToolArgsForDisplay(toolName, args)
+  }
+
+  private completedToolCallsFromAccumulatedChunks(
+    chunks: Array<{ id?: string }>
+  ): CompletedToolCall[] {
+    const completed: CompletedToolCall[] = []
+    const seen = new Set<string>()
+
+    for (const chunk of chunks) {
+      if (!chunk.id || seen.has(chunk.id)) continue
+      seen.add(chunk.id)
+
+      const parsed = this.parseAccumulatedToolCall(chunk.id)
+      if (parsed) completed.push(parsed)
+    }
+
+    return completed
+  }
+
+  private rememberCompletedToolCallsForMessage(
+    messageId: string,
+    toolCalls: Array<{ id?: string; name?: string; args?: Record<string, unknown> }>
+  ): void {
+    let byToolId = this.completedToolCallsByMessageId.get(messageId)
+    if (!byToolId) {
+      byToolId = new Map()
+      this.completedToolCallsByMessageId.set(messageId, byToolId)
+    }
+
+    for (const toolCall of toolCalls) {
+      if (!toolCall.id || !toolCall.name || !this.hasToolArgs(toolCall.args)) continue
+      byToolId.set(toolCall.id, {
+        id: toolCall.id,
+        name: toolCall.name,
+        args: toolCall.args!
+      })
+    }
+  }
+
+  private getCompletedToolCallsForMessage(messageId: string): CompletedToolCall[] {
+    return Array.from(this.completedToolCallsByMessageId.get(messageId)?.values() ?? [])
+  }
+
+  private accumulateToolCallChunks(
+    chunks: Array<{ id?: string; name?: string; args?: string }>
+  ): void {
+    for (const chunk of chunks) {
+      if (!chunk.id) continue
+
+      let accumulated = this.accumulatedToolCalls.get(chunk.id)
+      if (!accumulated) {
+        accumulated = { id: chunk.id, name: chunk.name || "", args: "" }
+        this.accumulatedToolCalls.set(chunk.id, accumulated)
+      }
+
+      if (chunk.name) {
+        accumulated.name = chunk.name
+      }
+      if (chunk.args) {
+        const previousChunkArgs = this.lastToolCallChunkArgsById.get(chunk.id)
+        if (chunk.args !== previousChunkArgs) {
+          if (accumulated.args && chunk.args.startsWith(accumulated.args)) {
+            // Some providers stream cumulative args snapshots instead of deltas.
+            accumulated.args = chunk.args
+          } else {
+            accumulated.args = this.appendToolCallChunkArgs(accumulated.args, chunk.args)
+          }
+        }
+        this.lastToolCallChunkArgsById.set(chunk.id, chunk.args)
+      }
+    }
+  }
+
+  private appendToolCallChunkArgs(existing: string, nextChunk: string): string {
+    if (!existing) return nextChunk
+    if (!nextChunk) return existing
+    if (existing.endsWith(nextChunk)) return existing
+
+    const maxOverlap = Math.min(existing.length, nextChunk.length)
+    for (let overlap = maxOverlap; overlap >= 2; overlap -= 1) {
+      if (existing.slice(-overlap) === nextChunk.slice(0, overlap)) {
+        return `${existing}${nextChunk.slice(overlap)}`
+      }
+    }
+
+    return `${existing}${nextChunk}`
+  }
+
   /**
    * Process streaming tool call chunks and detect task subagent invocations
    * Tool calls are streamed incrementally, so we accumulate args until we have enough
@@ -1263,26 +1666,12 @@ export class ElectronIPCTransport implements UseStreamTransport {
     chunks: Array<{ id?: string; name?: string; args?: string }>
   ): StreamEvent[] {
     const events: StreamEvent[] = []
+    this.accumulateToolCallChunks(chunks)
 
     for (const chunk of chunks) {
       if (!chunk.id) continue
-
-      // Get or create accumulated tool call
-      let accumulated = this.accumulatedToolCalls.get(chunk.id)
-      if (!accumulated) {
-        accumulated = { id: chunk.id, name: chunk.name || "", args: "" }
-        this.accumulatedToolCalls.set(chunk.id, accumulated)
-      }
-
-      // Update name if provided
-      if (chunk.name) {
-        accumulated.name = chunk.name
-      }
-
-      // Accumulate args
-      if (chunk.args) {
-        accumulated.args += chunk.args
-      }
+      const accumulated = this.accumulatedToolCalls.get(chunk.id)
+      if (!accumulated) continue
 
       // Check if this is a "task" tool call and try to parse args
       if (accumulated.name === "task") {

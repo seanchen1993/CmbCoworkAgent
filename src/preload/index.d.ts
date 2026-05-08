@@ -133,6 +133,19 @@ interface CustomAPI {
     cancel: (threadId: string, options?: { cancelWorkers?: boolean }) => Promise<void>
     getCoordinatorWorkers: (threadId: string) => Promise<CoordinatorWorkerSnapshot[]>
     hasCoordinatorWorkerNotifications: (threadId: string) => Promise<boolean>
+    onCoordinatorWorkerStream: (
+      threadId: string,
+      callback: (event: { type: "stream"; mode: "messages" | "values"; data: unknown }) => void
+    ) => () => void
+    setCoordinatorWorkerStreamFocus: (
+      threadId: string,
+      workerThreadId: string | null,
+      options?: {
+        expectedWorkerThreadId?: string | null
+        focusToken?: string | null
+        expectedFocusToken?: string | null
+      }
+    ) => Promise<void>
     isCoordinatorModeForced: () => Promise<boolean>
   }
   threads: {
@@ -142,6 +155,7 @@ interface CustomAPI {
     update: (threadId: string, updates: Partial<Thread>) => Promise<Thread>
     delete: (threadId: string) => Promise<void>
     getHistory: (threadId: string) => Promise<unknown[]>
+    getLatestCheckpoint: (threadId: string) => Promise<unknown | null>
     generateTitle: (message: string) => Promise<string>
     onThreadsChanged: (callback: () => void) => () => void
   }

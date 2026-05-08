@@ -11,6 +11,9 @@ import type { CoordinatorSelectedSkill } from "./coordinator-mode"
 export type CoordinatorWorkerRole = "implementer" | "verifier"
 export type CoordinatorWorkerStatus = "running" | "completed" | "failed" | "cancelled"
 export type CoordinatorWorkerWorkload = "read_only" | "verify" | "write"
+export type CoordinatorWorkerContinuationIntent =
+  | "follow_up_after_notification"
+  | "redirect_running_worker"
 
 export interface CoordinatorWorkerTokenUsage {
   input_tokens?: number
@@ -21,16 +24,24 @@ export interface CoordinatorWorkerTokenUsage {
 }
 
 export interface CoordinatorWorkerProgressEvent {
-  type: "tool_call" | "activity" | "usage"
+  type: "tool_call" | "activity" | "usage" | "stream"
   toolName?: string
   message?: string
   usage?: CoordinatorWorkerTokenUsage
+  stream?: {
+    mode: "messages" | "values"
+    data: unknown
+  }
 }
 
 export interface CoordinatorWorkerUpdateEvent {
   worker: CoordinatorWorkerSnapshot
   notification?: string
   suppressNotificationAutoRun?: boolean
+  stream?: {
+    mode: "messages" | "values"
+    data: unknown
+  }
 }
 
 export type CoordinatorWorkerUpdateCallback = (event: CoordinatorWorkerUpdateEvent) => void
@@ -101,10 +112,6 @@ export interface CoordinatorWorkerResultRead {
   result_text?: string
   result_chars?: number
   result_truncated?: boolean
-  transcript_path?: string
-  transcript_text?: string
-  transcript_chars?: number
-  transcript_truncated?: boolean
   message?: string
 }
 
@@ -198,6 +205,7 @@ interface ContinueWorkerOptions {
   parentThreadId: string
   workerId: string
   prompt: string
+  continuationIntent?: CoordinatorWorkerContinuationIntent
   workload?: CoordinatorWorkerWorkload
   ownedFiles?: string[]
   selectedSkill?: CoordinatorSelectedSkill
@@ -424,22 +432,6 @@ function workerResultPath(record: CoordinatorWorkerRecord): string {
 
 function relativeWorkerResultPath(record: CoordinatorWorkerRecord): string {
   return `${COORDINATOR_BASE_DIR}/${normalizeThreadId(record.parentThreadId)}/reports/workers/${normalizeWorkerId(record.workerId)}/turn-${Math.max(1, record.turns)}.json`
-}
-
-function workerTranscriptPath(record: CoordinatorWorkerRecord): string {
-  const root = path.resolve(
-    record.workspacePath,
-    COORDINATOR_BASE_DIR,
-    normalizeThreadId(record.parentThreadId),
-    "reports",
-    "workers",
-    normalizeWorkerId(record.workerId)
-  )
-  return path.resolve(root, `turn-${Math.max(1, record.turns)}.transcript.jsonl`)
-}
-
-function relativeWorkerTranscriptPath(record: CoordinatorWorkerRecord): string {
-  return `${COORDINATOR_BASE_DIR}/${normalizeThreadId(record.parentThreadId)}/reports/workers/${normalizeWorkerId(record.workerId)}/turn-${Math.max(1, record.turns)}.transcript.jsonl`
 }
 
 async function writeFileAtomic(target: string, content: string): Promise<void> {
@@ -903,6 +895,14 @@ export class CoordinatorWorkerManager {
         `Worker ${record.workerId} is still finalizing its previous result. Wait for its task-notification before continuing.`
       )
     }
+    if (
+      record.status === "running" &&
+      options.continuationIntent !== "redirect_running_worker"
+    ) {
+      throw new Error(
+        `Worker ${record.workerId} is still running. Do not use continue_worker to check status or results; wait for its task-notification. If you need to redirect active work, call continue_worker with continuation_intent="redirect_running_worker" and a concrete replacement instruction.`
+      )
+    }
     const workload = normalizeWorkerWorkload(record.role, options.workload ?? record.baseWorkload)
     if (
       record.status === "running" &&
@@ -1037,7 +1037,7 @@ export class CoordinatorWorkerManager {
   async readWorkerResult(
     parentThreadId: string,
     workerId: string,
-    options: { includeTranscript?: boolean; maxChars?: number } = {}
+    options: { maxChars?: number } = {}
   ): Promise<CoordinatorWorkerResultRead> {
     const record = await this.getWorkerForOperation(parentThreadId, workerId, {
       cache: false
@@ -1062,9 +1062,6 @@ export class CoordinatorWorkerManager {
     }
 
     const result = await readRelativeFile(record.resultPath)
-    const transcript = options.includeTranscript
-      ? await readRelativeFile(record.transcriptPath)
-      : undefined
 
     return {
       worker: toSnapshot(record),
@@ -1072,10 +1069,6 @@ export class CoordinatorWorkerManager {
       result_text: result?.text,
       result_chars: result?.chars,
       result_truncated: result?.truncated,
-      transcript_path: record.transcriptPath,
-      transcript_text: transcript?.text,
-      transcript_chars: transcript?.chars,
-      transcript_truncated: transcript?.truncated,
       message: record.resultPath
         ? undefined
         : "No result file is available yet. Wait for the worker's task-notification."
@@ -1940,7 +1933,6 @@ export class CoordinatorWorkerManager {
           record.summary = result.summary
           record.reportPath = result.reportPath
           record.rawText = truncateWorkerRawText(result.rawText)
-          record.transcriptText = result.transcriptText
           const currentRunUsage = mergeTokenUsage(record.currentRunTokenUsage, result.tokenUsage)
           record.tokenUsage = record.previousTokenUsage
             ? addTokenUsage(record.previousTokenUsage, currentRunUsage)
@@ -2036,6 +2028,10 @@ export class CoordinatorWorkerManager {
     event: CoordinatorWorkerProgressEvent
   ): void {
     if (record.discarded || record.status !== "running") return
+    if (event.type === "stream") {
+      this.emitUpdate(record, undefined, event.stream)
+      return
+    }
     if (event.type === "usage") {
       record.currentRunTokenUsage = mergeTokenUsage(record.currentRunTokenUsage, event.usage)
       const nextUsage = record.previousTokenUsage
@@ -2193,9 +2189,6 @@ export class CoordinatorWorkerManager {
     const resultPath = snapshot.result_path
       ? `\n<output-file>${escapeXml(snapshot.result_path)}</output-file>\n<result-path>${escapeXml(snapshot.result_path)}</result-path>`
       : ""
-    const transcriptPath = snapshot.transcript_path
-      ? `\n<transcript-path>${escapeXml(snapshot.transcript_path)}</transcript-path>`
-      : ""
     const resultSource = record.rawText?.trim() ? record.rawText : summary
     const result = truncateNotificationResult(resultSource)
     const renderNotification = (
@@ -2206,7 +2199,7 @@ export class CoordinatorWorkerManager {
       const resultBlock = resultText
         ? `\n<result>${escapeXml(resultText)}</result>\n<result-truncated>${String(resultTruncated)}</result-truncated>`
         : ""
-      const debugPaths = includeDebugPaths ? `${reportPath}${resultPath}${transcriptPath}` : ""
+      const debugPaths = includeDebugPaths ? `${reportPath}${resultPath}` : ""
       const usage = includeDebugPaths
         ? `
 <usage>
@@ -2250,12 +2243,9 @@ export class CoordinatorWorkerManager {
   private async persistTerminalRecord(record: CoordinatorWorkerRecord): Promise<void> {
     const target = workerResultPath(record)
     const resultPath = relativeWorkerResultPath(record)
-    const transcriptPath = relativeWorkerTranscriptPath(record)
     await mkdir(path.dirname(target), { recursive: true })
-    if (record.transcriptText?.trim()) {
-      await writeFileAtomic(workerTranscriptPath(record), record.transcriptText)
-      record.transcriptPath = transcriptPath
-    }
+    record.transcriptPath = undefined
+    record.transcriptText = undefined
     await writeFileAtomic(
       target,
       JSON.stringify(
@@ -2283,7 +2273,6 @@ export class CoordinatorWorkerManager {
           error: record.error,
           report_path: record.reportPath,
           result_path: resultPath,
-          transcript_path: record.transcriptPath,
           token_usage: record.tokenUsage,
           raw_text: truncateWorkerRawText(record.rawText)
         },
@@ -2295,7 +2284,11 @@ export class CoordinatorWorkerManager {
     await this.persistWorkerState(record)
   }
 
-  private emitUpdate(record: CoordinatorWorkerRecord, notification?: string): void {
+  private emitUpdate(
+    record: CoordinatorWorkerRecord,
+    notification?: string,
+    stream?: CoordinatorWorkerUpdateEvent["stream"]
+  ): void {
     if (record.discarded) return
     const callbacks = Array.from(record.onUpdateCallbacks?.values() ?? [])
     for (const callback of callbacks) {
@@ -2303,7 +2296,8 @@ export class CoordinatorWorkerManager {
         callback({
           worker: toSnapshot(record),
           notification,
-          suppressNotificationAutoRun: notification ? record.suppressNotificationAutoRun : undefined
+          suppressNotificationAutoRun: notification ? record.suppressNotificationAutoRun : undefined,
+          stream
         })
       } catch (error) {
         console.warn("[CoordinatorWorker] Worker update callback failed:", error)

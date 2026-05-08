@@ -1791,16 +1791,10 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
     "workerInput.prompt",
     "runtime passes the current worker prompt to stream parsers"
   )
-  assertIncludes(
+  assertNotIncludes(
     runtime,
     "extractWorkerTranscriptLine(mode, data)",
-    "runtime captures async worker transcript output"
-  )
-  assertSourceOrder(
-    runtime,
-    "if (!transcriptLimitReached && transcriptChars < MAX_WORKER_TRANSCRIPT_CHARS)",
-    "appendTranscriptLine(extractWorkerTranscriptLine(mode, data))",
-    "runtime avoids extracting transcript payloads after reaching the transcript cap"
+    "runtime no longer writes async worker transcript debug files"
   )
   assertIncludes(
     runtime,

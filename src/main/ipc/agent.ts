@@ -109,8 +109,26 @@ const activeCoordinatorNotificationSelectedSkills = new Map<
   string,
   Record<string, CoordinatorSelectedSkill | undefined>
 >()
+type FocusedCoordinatorWorkerStream = {
+  workerThreadId: string
+  focusToken?: string
+}
+const focusedCoordinatorWorkerStreamByWindow = new Map<
+  number,
+  Map<string, FocusedCoordinatorWorkerStream>
+>()
+const DEBUG_COORDINATOR_WORKER_STREAM =
+  process.env.CMB_COORDINATOR_WORKER_STREAM_DEBUG === "1"
 const ACTIVE_RUN_REPLACEMENT_WARN_MS = 5_000
 const ACTIVE_RUN_REPLACEMENT_MAX_WAIT_MS = 30_000
+
+function debugCoordinatorWorkerStream(
+  event: string,
+  payload: Record<string, unknown>
+): void {
+  if (!DEBUG_COORDINATOR_WORKER_STREAM) return
+  console.info(`[CoordinatorWorkerStream] ${event}`, payload)
+}
 
 export function forgetCoordinatorThreadState(threadId: string): void {
   activeCoordinatorTurnPrompts.delete(threadId)
@@ -266,6 +284,46 @@ function sendCoordinatorWorkerDelta(
   }
 }
 
+function sendCoordinatorWorkerStream(
+  window: BrowserWindow,
+  parentThreadId: string,
+  workerThreadId: string,
+  stream: { mode: "messages" | "values"; data: unknown }
+): void {
+  const focusedWorker = focusedCoordinatorWorkerStreamByWindow
+    .get(window.id)
+    ?.get(parentThreadId)
+  if (focusedWorker?.workerThreadId !== workerThreadId) {
+    debugCoordinatorWorkerStream("drop", {
+      windowId: window.id,
+      parentThreadId,
+      workerThreadId,
+      focusedWorkerThreadId: focusedWorker?.workerThreadId,
+      mode: stream.mode
+    })
+    return
+  }
+  debugCoordinatorWorkerStream("send", {
+    windowId: window.id,
+    parentThreadId,
+    workerThreadId,
+    mode: stream.mode
+  })
+  let data: unknown
+  try {
+    const serialized = serializeStreamData(stream.data)
+    data = sanitizeStreamDataForRenderer(stream.mode, serialized)
+  } catch (error) {
+    console.warn("[Agent] Failed to serialize coordinator worker stream event:", error)
+    return
+  }
+  safeSendToWindow(window, `agent:coordinator-worker-stream:${parentThreadId}`, {
+    type: "stream",
+    mode: stream.mode,
+    data
+  })
+}
+
 function sendCoordinatorWorkerEventToChannels(
   window: BrowserWindow,
   channels: string[],
@@ -274,8 +332,18 @@ function sendCoordinatorWorkerEventToChannels(
     workers?: CoordinatorWorkerSnapshot[]
     notification?: string
     suppressNotificationAutoRun?: boolean
+    stream?: { mode: "messages" | "values"; data: unknown }
   }
 ): void {
+  if (workerEvent.stream) {
+    sendCoordinatorWorkerStream(
+      window,
+      workerEvent.worker.parent_thread_id,
+      workerEvent.worker.worker_thread_id,
+      workerEvent.stream
+    )
+    return
+  }
   const uniqueChannels = Array.from(new Set(channels))
   for (const channel of uniqueChannels) {
     if (workerEvent.workers) {
@@ -1794,6 +1862,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 worker: CoordinatorWorkerSnapshot
                 workers?: CoordinatorWorkerSnapshot[]
                 notification?: string
+                stream?: { mode: "messages" | "values"; data: unknown }
               }) =>
                 sendCoordinatorWorkerEventToChannels(
                   window,
@@ -1851,6 +1920,83 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
       }
       return coordinatorWorkerManager.hasAutoRunnableNotifications(threadId)
+    }
+  )
+
+  ipcMain.handle(
+    "agent:coordinator-worker-stream-focus",
+    (
+      event,
+      payload: {
+        threadId?: string
+        workerThreadId?: string | null
+        expectedWorkerThreadId?: string | null
+        focusToken?: string | null
+        expectedFocusToken?: string | null
+      }
+    ): void => {
+      const window = BrowserWindow.fromWebContents(event.sender)
+      if (!window || window.isDestroyed()) return
+      const threadId = payload.threadId?.trim()
+      if (!threadId) return
+
+      let focusedByThread = focusedCoordinatorWorkerStreamByWindow.get(window.id)
+      if (!focusedByThread) {
+        focusedByThread = new Map()
+        focusedCoordinatorWorkerStreamByWindow.set(window.id, focusedByThread)
+        window.once("closed", () => {
+          focusedCoordinatorWorkerStreamByWindow.delete(window.id)
+        })
+      }
+
+      const workerThreadId = payload.workerThreadId?.trim()
+      if (workerThreadId) {
+        const focusToken = payload.focusToken?.trim() || undefined
+        focusedByThread.set(threadId, { workerThreadId, focusToken })
+        debugCoordinatorWorkerStream("focus", {
+          windowId: window.id,
+          threadId,
+          workerThreadId,
+          focusToken
+        })
+      } else {
+        const expectedWorkerThreadId = payload.expectedWorkerThreadId?.trim()
+        const expectedFocusToken = payload.expectedFocusToken?.trim()
+        const focused = focusedByThread.get(threadId)
+        if (
+          expectedWorkerThreadId &&
+          focused?.workerThreadId !== expectedWorkerThreadId
+        ) {
+          debugCoordinatorWorkerStream("skip-clear-worker", {
+            windowId: window.id,
+            threadId,
+            expectedWorkerThreadId,
+            currentWorkerThreadId: focused?.workerThreadId
+          })
+          return
+        }
+        if (expectedFocusToken && focused?.focusToken !== expectedFocusToken) {
+          debugCoordinatorWorkerStream("skip-clear-token", {
+            windowId: window.id,
+            threadId,
+            expectedWorkerThreadId,
+            expectedFocusToken,
+            currentWorkerThreadId: focused?.workerThreadId,
+            currentFocusToken: focused?.focusToken
+          })
+          return
+        }
+        focusedByThread.delete(threadId)
+        debugCoordinatorWorkerStream("clear", {
+          windowId: window.id,
+          threadId,
+          expectedWorkerThreadId,
+          expectedFocusToken
+        })
+        if (focusedByThread.size === 0) {
+          focusedCoordinatorWorkerStreamByWindow.delete(window.id)
+        }
+      }
     }
   )
 
@@ -2009,7 +2155,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         worker: CoordinatorWorkerSnapshot
         workers?: CoordinatorWorkerSnapshot[]
         notification?: string
+        stream?: { mode: "messages" | "values"; data: unknown }
       }): void => {
+        if (event.stream) {
+          sendCoordinatorWorkerStream(
+            window,
+            event.worker.parent_thread_id,
+            event.worker.worker_thread_id,
+            event.stream
+          )
+          return
+        }
         if (event.workers) {
           sendCoordinatorWorkers(window, channel, event.workers, event.notification)
         } else {
@@ -3556,7 +3712,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         worker: CoordinatorWorkerSnapshot
         workers?: CoordinatorWorkerSnapshot[]
         notification?: string
+        stream?: { mode: "messages" | "values"; data: unknown }
       }): void => {
+        if (event.stream) {
+          sendCoordinatorWorkerStream(
+            window,
+            event.worker.parent_thread_id,
+            event.worker.worker_thread_id,
+            event.stream
+          )
+          return
+        }
         if (event.workers) {
           sendCoordinatorWorkers(window, channel, event.workers, event.notification)
         } else {
@@ -4101,7 +4267,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       worker: CoordinatorWorkerSnapshot
       workers?: CoordinatorWorkerSnapshot[]
       notification?: string
+      stream?: { mode: "messages" | "values"; data: unknown }
     }): void => {
+      if (event.stream) {
+        sendCoordinatorWorkerStream(
+          window,
+          event.worker.parent_thread_id,
+          event.worker.worker_thread_id,
+          event.stream
+        )
+        return
+      }
       if (event.workers) {
         sendCoordinatorWorkers(window, channel, event.workers, event.notification)
       } else {

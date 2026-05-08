@@ -644,6 +644,7 @@ async function testPersistenceFailureFailsWorkerSafely(): Promise<void> {
         failed.last_event.includes("Worker result persistence failed"),
         "persistence failure should be visible in last_event"
       )
+      await manager.waitForTerminalPersistence("thread-persist-fail", [started.worker_id])
       const notifications = manager.drainNotifications("thread-persist-fail")
       assert(notifications.length === 1, "persistence failure should enqueue one notification")
       assert(
@@ -940,7 +941,7 @@ async function testWorkerRawTextIsBounded(): Promise<void> {
   })
 }
 
-async function testWorkerTranscriptAndTokenUsagePersistence(): Promise<void> {
+async function testWorkerResultAndTokenUsagePersistence(): Promise<void> {
   await withTempDir("coordinator-worker-manager", async (workspace) => {
     const manager = new CoordinatorWorkerManager()
     const started = manager.startWorker({
@@ -949,7 +950,7 @@ async function testWorkerTranscriptAndTokenUsagePersistence(): Promise<void> {
       role: "implementer",
       workload: "write",
       ownedFiles: ["src/app.ts"],
-      description: "Persist transcript and usage",
+      description: "Persist result and usage",
       prompt: "work",
       runner: async (input) => {
         input.onProgress({
@@ -959,10 +960,6 @@ async function testWorkerTranscriptAndTokenUsagePersistence(): Promise<void> {
         return {
           summary: "transcript done",
           rawText: "full raw output",
-          transcriptText: [
-            JSON.stringify({ type: "user", content: input.prompt }),
-            JSON.stringify({ type: "assistant", content: "done" })
-          ].join("\n"),
           tokenUsage: { input_tokens: 12, output_tokens: 7, total_tokens: 19 }
         }
       }
@@ -977,45 +974,31 @@ async function testWorkerTranscriptAndTokenUsagePersistence(): Promise<void> {
     const completed = manager.readWorkers("thread-transcript", started.worker_id)[0]
     assert(completed.workload === "write", "worker workload should be exposed")
     assert(completed.owned_files.join(",") === "src/app.ts", "owned files should be exposed")
-    assert(completed.transcript_path, "completed worker should expose transcript path")
+    assert(!completed.transcript_path, "new worker results should not expose transcript path")
     assert(completed.token_usage?.total_tokens === 19, "completed worker should merge token usage")
 
     const result = await readJson(
       workerResultPath(workspace, "thread-transcript", started.worker_id)
     )
     assert(
-      result.transcript_path === completed.transcript_path,
-      "result should persist transcript path"
+      result.transcript_path === undefined,
+      "result should not persist transcript path"
     )
     assert(
       (result.token_usage as Record<string, unknown>).total_tokens === 19,
       "result should persist token usage"
     )
 
-    const transcript = await readFile(
-      join(
-        workspace,
-        ".cmbdevclaw",
-        "coordinator",
-        "thread-transcript",
-        "reports",
-        "workers",
-        started.worker_id,
-        "turn-1.transcript.jsonl"
-      ),
-      "utf8"
-    )
     assert(
-      transcript.includes("full raw output") === false,
-      "transcript should use transcript text"
+      (result.raw_text as string | undefined) === "full raw output",
+      "result should persist raw worker output"
     )
-    assert(transcript.includes('"type":"assistant"'), "transcript file should persist JSONL lines")
 
     const notifications = manager.drainNotifications("thread-transcript")
     assert(
-      notifications[0].includes("<transcript-path>") &&
+      !notifications[0].includes("<transcript-path>") &&
         notifications[0].includes("<total_tokens>19</total_tokens>"),
-      "notification should include transcript path and usage"
+      "notification should include usage without transcript path"
     )
   })
 }
@@ -1279,6 +1262,7 @@ async function testStaleProgressFromInterruptedRunIsIgnored(): Promise<void> {
     await manager.continueWorker({
       parentThreadId: "thread-stale-progress",
       workerId: started.worker_id,
+      continuationIntent: "redirect_running_worker",
       workload: "write",
       ownedFiles: ["src/app.ts"],
       prompt: "second",
@@ -2500,6 +2484,7 @@ async function testRunningWriteWorkerCannotDowngradeToReadOnly(): Promise<void> 
       await manager.continueWorker({
         parentThreadId: "thread-running-write-downgrade",
         workerId: writer.worker_id,
+        continuationIntent: "redirect_running_worker",
         workload: "read_only",
         prompt: "handoff only",
         runner: async () => ({ summary: "should not run" })
@@ -2572,6 +2557,7 @@ async function testRunningWriteWorkerCannotDowngradeToReadOnly(): Promise<void> 
       await manager.continueWorker({
         parentThreadId: "thread-running-verifier-downgrade",
         workerId: verifier.worker_id,
+        continuationIntent: "redirect_running_worker",
         workload: "read_only",
         prompt: "handoff only",
         runner: async () => ({ summary: "should not run" })
@@ -3698,9 +3684,23 @@ async function testContinueInterruptsRunningWorker(): Promise<void> {
     })
 
     await waitFor(() => prompts.includes("first"), "first interruptible run start")
+    let pollingRejected = false
+    try {
+      await manager.continueWorker({
+        parentThreadId: "thread-interrupt",
+        workerId: started.worker_id,
+        prompt: "are you done yet?",
+        runner: async () => ({ summary: "should not run" })
+      })
+    } catch (error) {
+      pollingRejected = String(error).includes("Do not use continue_worker to check status")
+    }
+    assert(pollingRejected, "running continue without redirect intent should be rejected")
+
     const continued = await manager.continueWorker({
       parentThreadId: "thread-interrupt",
       workerId: started.worker_id,
+      continuationIntent: "redirect_running_worker",
       prompt: "second",
       runner: async (input) => {
         prompts.push(input.prompt)
@@ -3768,6 +3768,7 @@ async function testRapidContinueOnlyLaunchesLatestRestart(): Promise<void> {
     await manager.continueWorker({
       parentThreadId: "thread-rapid-continue",
       workerId: started.worker_id,
+      continuationIntent: "redirect_running_worker",
       prompt: "second",
       runner: async (input) => {
         prompts.push(input.prompt)
@@ -3778,6 +3779,7 @@ async function testRapidContinueOnlyLaunchesLatestRestart(): Promise<void> {
     await manager.continueWorker({
       parentThreadId: "thread-rapid-continue",
       workerId: started.worker_id,
+      continuationIntent: "redirect_running_worker",
       prompt: "third",
       runner: async (input) => {
         prompts.push(input.prompt)
@@ -3828,6 +3830,7 @@ async function testCancelDuringInterruptedRestartPreventsNewRun(): Promise<void>
     await manager.continueWorker({
       parentThreadId: "thread-interrupt-cancel",
       workerId: started.worker_id,
+      continuationIntent: "redirect_running_worker",
       prompt: "second",
       runner: async (input) => {
         prompts.push(input.prompt)
@@ -4394,8 +4397,8 @@ async function run(): Promise<void> {
   console.log("PASS coordinator worker notification XML hard cap")
   await testWorkerRawTextIsBounded()
   console.log("PASS coordinator worker raw text bound")
-  await testWorkerTranscriptAndTokenUsagePersistence()
-  console.log("PASS coordinator worker transcript and usage persistence")
+  await testWorkerResultAndTokenUsagePersistence()
+  console.log("PASS coordinator worker result and usage persistence")
   await testContinuedWorkerAccumulatesTokenUsage()
   console.log("PASS coordinator worker continued token usage")
   await testUsageProgressDoesNotHideLastToolEvent()

@@ -294,6 +294,8 @@ interface CustomEventData {
   }>
   workers?: CoordinatorWorkerView[]
   worker?: CoordinatorWorkerView
+  workerThreadId?: string
+  workerMessage?: Message
   notification?: string
   suppressNotificationAutoRun?: boolean
   mode?: "normal" | "coordinator"
@@ -875,6 +877,21 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         case "coordinator_notification_deferred":
           scheduleCoordinatorNotificationTurn(threadId)
           break
+        case "coordinator_worker_stream_message": {
+          const focused = useAppStore.getState().workerFocusView
+          const workerThreadId = data.workerThreadId
+          const message = data.workerMessage
+          if (
+            focused &&
+            workerThreadId &&
+            focused.threadId === threadId &&
+            focused.workerThreadId === workerThreadId &&
+            message
+          ) {
+            useAppStore.getState().appendWorkerFocusMessage(workerThreadId, message)
+          }
+          break
+        }
         case "subagent_tool_count":
           if (typeof data.count === "number" && Number.isFinite(data.count)) {
             updateThreadState(threadId, () => ({

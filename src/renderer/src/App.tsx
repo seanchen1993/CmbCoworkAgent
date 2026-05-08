@@ -3,6 +3,7 @@ import {
   Briefcase,
   Eye,
   GitBranch,
+  GripVertical,
   Loader2,
   PanelLeftClose,
   PanelLeftOpen,
@@ -12,6 +13,7 @@ import {
 import { ThreadSidebar } from "@/components/sidebar/ThreadSidebar"
 import { TabbedPanel } from "@/components/tabs"
 import { RightPanel } from "@/components/panels/RightPanel"
+import { WorkerStreamPanel } from "@/components/chat/WorkerStreamPanel"
 const KanbanView = lazy(() =>
   import("@/components/kanban").then((m) => ({ default: m.KanbanView }))
 )
@@ -27,8 +29,10 @@ const DashboardView = lazy(() =>
 import { ResizeHandle } from "@/components/ui/resizable"
 import { useAppStore } from "@/lib/store"
 import { ThreadProvider } from "@/lib/thread-context"
+import { ElectronIPCTransport } from "@/lib/electron-transport"
 import { initMMJ } from "../js/mmjUtils"
 import { Toaster } from "sonner"
+import { useShallow } from "zustand/react/shallow"
 interface UserInfoConfig {
   sapId: '',//8
   ystId: '',//6
@@ -65,6 +69,53 @@ const RIGHT_MAX = 1600
 const RIGHT_DEFAULT = 300
 const RIGHT_PREVIEW_EXPAND_VW = 0.35
 
+interface WorkerSplitHandleProps {
+  onDrag: (totalDelta: number) => void
+}
+
+function WorkerSplitHandle({ onDrag }: WorkerSplitHandleProps): React.JSX.Element {
+  const startXRef = useRef(0)
+
+  const handleMouseDown = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      event.preventDefault()
+      startXRef.current = event.clientX
+
+      const handleMouseMove = (moveEvent: MouseEvent): void => {
+        onDrag(moveEvent.clientX - startXRef.current)
+      }
+
+      const handleMouseUp = (): void => {
+        document.removeEventListener("mousemove", handleMouseMove)
+        document.removeEventListener("mouseup", handleMouseUp)
+        document.body.style.cursor = ""
+        document.body.style.userSelect = ""
+      }
+
+      document.addEventListener("mousemove", handleMouseMove)
+      document.addEventListener("mouseup", handleMouseUp)
+      document.body.style.cursor = "col-resize"
+      document.body.style.userSelect = "none"
+    },
+    [onDrag]
+  )
+
+  return (
+    <div
+      role="separator"
+      aria-orientation="vertical"
+      title="拖动调整主对话和 Worker 工具流宽度"
+      onMouseDown={handleMouseDown}
+      className="group relative z-20 flex h-full w-5 shrink-0 cursor-col-resize select-none items-center justify-center border-x border-stone-300/70 bg-stone-100/55 shadow-[0_0_18px_rgba(120,113,108,0.12)] backdrop-blur transition-colors hover:border-stone-400/80 hover:bg-stone-200/45 dark:border-stone-700/70 dark:bg-stone-900/35 dark:hover:border-stone-500/80 dark:hover:bg-stone-800/45"
+    >
+      <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-gradient-to-b from-transparent via-stone-500/45 to-transparent" />
+      <div className="relative flex h-12 w-3 items-center justify-center rounded-full border border-stone-300/80 bg-background text-stone-500 opacity-75 shadow-sm transition-all group-hover:scale-105 group-hover:border-stone-400 group-hover:text-stone-700 group-hover:opacity-100 dark:border-stone-700 dark:text-stone-400 dark:group-hover:text-stone-200">
+        <GripVertical className="size-3" strokeWidth={2.2} />
+      </div>
+    </div>
+  )
+}
+
 function App(): React.JSX.Element {
   const {
     currentThreadId,
@@ -76,17 +127,34 @@ function App(): React.JSX.Element {
     toggleSidebar,
     rightPanelCollapsed,
     toggleRightPanel,
-    setPendingEvolution
-  } = useAppStore()
+    setPendingEvolution,
+    workerFocusView
+  } = useAppStore(
+    useShallow((state) => ({
+      currentThreadId: state.currentThreadId,
+      loadThreads: state.loadThreads,
+      loadDashboardAllowed: state.loadDashboardAllowed,
+      createThread: state.createThread,
+      mainView: state.mainView,
+      sidebarCollapsed: state.sidebarCollapsed,
+      toggleSidebar: state.toggleSidebar,
+      rightPanelCollapsed: state.rightPanelCollapsed,
+      toggleRightPanel: state.toggleRightPanel,
+      setPendingEvolution: state.setPendingEvolution,
+      workerFocusView: state.workerFocusView
+    }))
+  )
   const [isLoading, setIsLoading] = useState(true)
   const [leftWidth, setLeftWidth] = useState(LEFT_DEFAULT)
   const [rightWidth, setRightWidth] = useState(RIGHT_DEFAULT)
+  const [workerSplitLeftPercent, setWorkerSplitLeftPercent] = useState(50)
   const [rightModule, setRightModule] = useState<"work" | "preview" | "git">("work")
   const [previewFullscreen, setPreviewFullscreen] = useState(false)
   const [pendingGitDiffByThread, setPendingGitDiffByThread] = useState<Record<string, boolean>>({})
   const [isGitWorkspaceByThread, setIsGitWorkspaceByThread] = useState<Record<string, boolean>>({})
   const [zoomLevel, setZoomLevel] = useState(1)
   const [bus, setBus] = useState(true)
+  const workerFocusTransportRef = useRef<ElectronIPCTransport | null>(null)
   // Delay loading ClaudeCodePanel code until user opens it once.
   // After first open, keep it mounted (hidden when inactive) to preserve sessions.
   const [claudeCodeMounted, setClaudeCodeMounted] = useState(false)
@@ -96,6 +164,61 @@ function App(): React.JSX.Element {
   const moduleInactiveClass = "text-foreground hover:bg-muted/45"
   const sidebarToggleText = sidebarCollapsed ? "显示侧边栏" : "隐藏侧边栏"
   const rightPanelToggleText = rightPanelCollapsed ? "显示右侧面板" : "隐藏右侧面板"
+  const isWorkerFocusActive =
+    mainView === "thread" &&
+    Boolean(currentThreadId && workerFocusView?.threadId === currentThreadId)
+
+  useEffect(() => {
+    if (!workerFocusView?.threadId || !workerFocusView.workerThreadId) return
+
+    const threadId = workerFocusView.threadId
+    const workerThreadId = workerFocusView.workerThreadId
+    const focusToken =
+      typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`
+    let cancelled = false
+    const transport = new ElectronIPCTransport()
+    workerFocusTransportRef.current = transport
+
+    const unsubscribe = window.api.agent.onCoordinatorWorkerStream(threadId, (event) => {
+      if (workerFocusTransportRef.current !== transport) return
+      const messages = transport.convertFocusedCoordinatorWorkerIPCEvent(event, threadId)
+      for (const message of messages) {
+        useAppStore.getState().appendWorkerFocusMessage(workerThreadId, message)
+      }
+    })
+
+    void (async () => {
+      try {
+        await window.api.agent.setCoordinatorWorkerStreamFocus(threadId, workerThreadId, {
+          focusToken
+        })
+        if (cancelled) {
+          await window.api.agent.setCoordinatorWorkerStreamFocus(threadId, null, {
+            expectedWorkerThreadId: workerThreadId,
+            expectedFocusToken: focusToken
+          })
+          return
+        }
+        await window.api.agent.getCoordinatorWorkers(threadId)
+      } catch (error) {
+        console.warn("[WorkerFocusStream] Failed to bind worker stream:", error)
+      }
+    })()
+
+    return () => {
+      cancelled = true
+      if (workerFocusTransportRef.current === transport) {
+        workerFocusTransportRef.current = null
+      }
+      unsubscribe()
+      void window.api.agent.setCoordinatorWorkerStreamFocus(threadId, null, {
+        expectedWorkerThreadId: workerThreadId,
+        expectedFocusToken: focusToken
+      })
+    }
+  }, [workerFocusView?.threadId, workerFocusView?.workerThreadId])
 
   const initUser = () => {
     window.api.models.getUserInfo().then(user => {
@@ -152,6 +275,8 @@ function App(): React.JSX.Element {
 
   // Track drag start widths
   const dragStartWidths = useRef<{ left: number; right: number } | null>(null)
+  const workerSplitRef = useRef<HTMLDivElement>(null)
+  const workerSplitStartRef = useRef<{ leftPercent: number; width: number } | null>(null)
   const previewCollapsedWidthRef = useRef<number | null>(null)
 
   // Set platform-specific titlebar insets and track zoom
@@ -219,6 +344,21 @@ function App(): React.JSX.Element {
       setRightWidth(Math.min(RIGHT_MAX, Math.max(RIGHT_MIN, newWidth)))
     },
     [leftWidth, rightWidth]
+  )
+
+  const handleWorkerSplitResize = useCallback(
+    (totalDelta: number) => {
+      if (!workerSplitStartRef.current) {
+        workerSplitStartRef.current = {
+          leftPercent: workerSplitLeftPercent,
+          width: workerSplitRef.current?.clientWidth || window.innerWidth
+        }
+      }
+      const { leftPercent, width } = workerSplitStartRef.current
+      const nextPercent = leftPercent + (totalDelta / Math.max(1, width)) * 100
+      setWorkerSplitLeftPercent(Math.min(70, Math.max(30, nextPercent)))
+    },
+    [workerSplitLeftPercent]
   )
 
   const handlePreviewExpand = useCallback(() => {
@@ -304,6 +444,7 @@ function App(): React.JSX.Element {
   useEffect(() => {
     const handleMouseUp = (): void => {
       dragStartWidths.current = null
+      workerSplitStartRef.current = null
     }
     document.addEventListener("mouseup", handleMouseUp)
     return () => document.removeEventListener("mouseup", handleMouseUp)
@@ -388,7 +529,7 @@ function App(): React.JSX.Element {
             className="flex flex-1 h-9 min-w-0 items-center"
             style={{ marginLeft: "var(--titlebar-inset-left, 0px)" }}
           >
-            {mainView !== "customize" && (
+            {mainView !== "customize" && !isWorkerFocusActive && (
               <button
                 type="button"
                 className={`${panelToggleBaseClass} ${
@@ -454,7 +595,7 @@ function App(): React.JSX.Element {
           <div
             className="flex flex-1 h-full items-center justify-end pl-1 gap-1"
           >
-            {mainView === "thread" && (
+            {mainView === "thread" && !isWorkerFocusActive && (
               <>
                 <button
                   type="button"
@@ -505,7 +646,7 @@ function App(): React.JSX.Element {
                 </button>
               </>
             )}
-            {mainView !== "customize" && (
+            {mainView !== "customize" && !isWorkerFocusActive && (
               <button
                 type="button"
                 className={`${panelToggleBaseClass} ${
@@ -548,7 +689,7 @@ function App(): React.JSX.Element {
         ) : mainView !== "claudecode" && mainView !== "dashboard" ? (
           <div className="relative flex flex-1 overflow-hidden bg-grid-subtle">
             {/* Left Sidebar */}
-            {!sidebarCollapsed && (
+            {!sidebarCollapsed && !isWorkerFocusActive && (
               <>
                 <div style={{ width: leftWidth }} className="shrink-0">
                   <ThreadSidebar />
@@ -566,7 +707,35 @@ function App(): React.JSX.Element {
             ) : (
               <>
                 {/* Center - Content Panel */}
-                {!previewFullscreen && (
+                {isWorkerFocusActive ? (
+                  <main
+                    ref={workerSplitRef}
+                    className="relative flex flex-1 min-w-0 overflow-hidden bg-grid-subtle"
+                  >
+                    <section
+                      className="flex min-w-0 flex-col overflow-hidden"
+                      style={{ width: `${workerSplitLeftPercent}%` }}
+                    >
+                      {currentThreadId ? (
+                        <TabbedPanel
+                          threadId={currentThreadId}
+                          showTabBar={false}
+                          hasPendingGitDiffNotice={hasPendingGitDiff && rightModule !== "git"}
+                          onRequestOpenGitPanel={selectGitModule}
+                          onThreadGitStatusChange={handleThreadGitStatusChange}
+                        />
+                      ) : (
+                        <div className="flex flex-1 items-center justify-center text-muted-foreground">
+                          选择或创建一个任务开始
+                        </div>
+                      )}
+                    </section>
+                    <WorkerSplitHandle onDrag={handleWorkerSplitResize} />
+                    <section className="flex min-w-0 flex-1 flex-col overflow-hidden">
+                      <WorkerStreamPanel />
+                    </section>
+                  </main>
+                ) : !previewFullscreen && (
                   <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
                     {currentThreadId ? (
                       <TabbedPanel
@@ -586,7 +755,7 @@ function App(): React.JSX.Element {
               </>
             )}
 
-            {mainView === "thread" && !rightPanelCollapsed && (
+            {mainView === "thread" && !rightPanelCollapsed && !isWorkerFocusActive && (
               <>
                 {!previewFullscreen && <ResizeHandle onDrag={handleRightResize} />}
                 {/* Right Panel - floating style */}

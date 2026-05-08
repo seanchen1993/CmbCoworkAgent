@@ -183,6 +183,36 @@ const api = {
         threadId
       }) as Promise<boolean>
     },
+    onCoordinatorWorkerStream: (
+      threadId: string,
+      callback: (event: { type: "stream"; mode: "messages" | "values"; data: unknown }) => void
+    ): (() => void) => {
+      const channel = `agent:coordinator-worker-stream:${threadId}`
+      const handler = (_: unknown, data: { type: "stream"; mode: "messages" | "values"; data: unknown }): void => {
+        callback(data)
+      }
+      ipcRenderer.on(channel, handler)
+      return () => {
+        ipcRenderer.removeListener(channel, handler)
+      }
+    },
+    setCoordinatorWorkerStreamFocus: (
+      threadId: string,
+      workerThreadId: string | null,
+      options?: {
+        expectedWorkerThreadId?: string | null
+        focusToken?: string | null
+        expectedFocusToken?: string | null
+      }
+    ): Promise<void> => {
+      return ipcRenderer.invoke("agent:coordinator-worker-stream-focus", {
+        threadId,
+        workerThreadId,
+        expectedWorkerThreadId: options?.expectedWorkerThreadId,
+        focusToken: options?.focusToken,
+        expectedFocusToken: options?.expectedFocusToken
+      }) as Promise<void>
+    },
     isCoordinatorModeForced: (): Promise<boolean> => {
       return ipcRenderer.invoke("agent:coordinator-mode-forced") as Promise<boolean>
     }
@@ -205,6 +235,9 @@ const api = {
     },
     getHistory: (threadId: string): Promise<unknown[]> => {
       return ipcRenderer.invoke("threads:history", threadId)
+    },
+    getLatestCheckpoint: (threadId: string): Promise<unknown | null> => {
+      return ipcRenderer.invoke("threads:latest-checkpoint", threadId)
     },
     generateTitle: (message: string): Promise<string> => {
       return ipcRenderer.invoke("threads:generateTitle", message)

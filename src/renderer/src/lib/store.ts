@@ -1,5 +1,5 @@
 import { create } from "zustand"
-import type { Thread, ModelConfig, Provider } from "@/types"
+import type { Thread, ModelConfig, Provider, Message } from "@/types"
 
 type EvolutionTab = "candidates" | "traces"
 
@@ -11,6 +11,14 @@ interface EvolutionRunProgress {
   status: "pending" | "running" | "completed" | "failed"
   message?: string
   candidateCount?: number
+}
+
+export interface WorkerFocusView {
+  threadId: string
+  workerId: string
+  workerThreadId: string
+  role: "implementer" | "verifier"
+  description: string
 }
 
 interface AppState {
@@ -34,6 +42,13 @@ interface AppState {
   // Sidebar state
   sidebarCollapsed: boolean
   rightPanelCollapsed: boolean
+
+  // Split view for inspecting a single coordinator worker stream.
+  workerFocusView: WorkerFocusView | null
+  workerFocusMessages: Message[]
+  openWorkerFocusView: (view: WorkerFocusView) => void
+  closeWorkerFocusView: () => void
+  appendWorkerFocusMessage: (workerThreadId: string, message: Message) => void
 
   // Kanban view state
   showKanbanView: boolean
@@ -148,6 +163,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   settingsOpen: false,
   sidebarCollapsed: false,
   rightPanelCollapsed: false,
+  workerFocusView: null,
+  workerFocusMessages: [],
   mainView: "thread",
   showKanbanView: false,
   showSubagentsInKanban: true,
@@ -191,7 +208,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       showClaudeCodeView: false,
       showDashboardView: false,
       previousThreadId: null,
-      mainView: "thread"
+      mainView: "thread",
+      workerFocusView: null,
+      workerFocusMessages: []
       // skillGenerationByThread is NOT reset here: new threads start with no entry
       // in the map, so the card is naturally absent without discarding other threads' state.
     }))
@@ -206,7 +225,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       showClaudeCodeView: false,
       showDashboardView: false,
       previousThreadId: null,
-      mainView: "thread"
+      mainView: "thread",
+      workerFocusView: null,
+      workerFocusMessages: []
       // skillGenerationByThread is NOT cleared here: each thread retains its own card
       // state so switching back to a thread shows the card exactly as it was left.
     })
@@ -229,7 +250,10 @@ export const useAppStore = create<AppState>((set, get) => ({
           threads,
           currentThreadId: newCurrentId,
           // 如果被删除的线程是之前保存的，清掉避免恢复到无效 id
-          previousThreadId: state.previousThreadId === threadId ? null : state.previousThreadId
+          previousThreadId: state.previousThreadId === threadId ? null : state.previousThreadId,
+          ...(state.workerFocusView?.threadId === threadId
+            ? { workerFocusView: null, workerFocusMessages: [] }
+            : {})
         }
       })
     } catch (error) {
@@ -292,6 +316,48 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ rightPanelCollapsed: collapsed })
   },
 
+  openWorkerFocusView: (view) => {
+    set({
+      workerFocusView: view,
+      workerFocusMessages: []
+    })
+  },
+
+  closeWorkerFocusView: () => {
+    set({
+      workerFocusView: null,
+      workerFocusMessages: []
+    })
+  },
+
+  appendWorkerFocusMessage: (workerThreadId, message) => {
+    set((state) => {
+      if (state.workerFocusView?.workerThreadId !== workerThreadId) return {}
+
+      const next = [...state.workerFocusMessages]
+      const existingIndex = next.findIndex((item) => item.id === message.id)
+      if (existingIndex === -1) {
+        next.push(message)
+        return { workerFocusMessages: next }
+      }
+
+      const existing = next[existingIndex]
+      next[existingIndex] = {
+        ...existing,
+        ...message,
+        content:
+          message.content === "" || (Array.isArray(message.content) && message.content.length === 0)
+            ? existing.content
+            : message.content,
+        tool_calls:
+          message.tool_calls && message.tool_calls.length > 0
+            ? message.tool_calls
+            : existing.tool_calls
+      }
+      return { workerFocusMessages: next }
+    })
+  },
+
   // Claude Code actions
   setShowClaudeCodeView: (show: boolean) => {
     if (show) {
@@ -304,7 +370,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         showDashboardView: false,
         mainView: "claudecode",
         previousThreadId: prev,
-        currentThreadId: null
+        currentThreadId: null,
+        workerFocusView: null,
+        workerFocusMessages: []
       })
     } else {
       const restored = get().previousThreadId
@@ -333,7 +401,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         showCustomizeView: false,
         mainView: "dashboard",
         previousThreadId: prev,
-        currentThreadId: null
+        currentThreadId: null,
+        workerFocusView: null,
+        workerFocusMessages: []
       })
     } else {
       const restored = get().previousThreadId
@@ -357,7 +427,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         showDashboardView: false,
         mainView: "kanban",
         currentThreadId: null,
-        previousThreadId: prev
+        previousThreadId: prev,
+        workerFocusView: null,
+        workerFocusMessages: []
       })
     } else {
       const restored = get().previousThreadId
@@ -377,7 +449,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         showClaudeCodeView: false,
         showDashboardView: false,
         customizeInitialTab: tab ?? null,
-        mainView: "customize"
+        mainView: "customize",
+        workerFocusView: null,
+        workerFocusMessages: []
       })
     } else {
       const restored = get().previousThreadId
@@ -405,7 +479,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         showKanbanView: true,
         showCustomizeView: false,
         showClaudeCodeView: false,
-        currentThreadId: null
+        currentThreadId: null,
+        workerFocusView: null,
+        workerFocusMessages: []
       })
       return
     }
@@ -415,7 +491,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         mainView: "customize",
         showCustomizeView: true,
         showKanbanView: false,
-        showClaudeCodeView: false
+        showClaudeCodeView: false,
+        workerFocusView: null,
+        workerFocusMessages: []
       })
       return
     }
@@ -426,7 +504,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         showCustomizeView: true,
         showKanbanView: false,
         showClaudeCodeView: false,
-        customizeInitialTab: "evolution"
+        customizeInitialTab: "evolution",
+        workerFocusView: null,
+        workerFocusMessages: []
       })
       return
     }
@@ -440,7 +520,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         showKanbanView: false,
         showClaudeCodeView: false,
         previousThreadId: prev,
-        currentThreadId: null
+        currentThreadId: null,
+        workerFocusView: null,
+        workerFocusMessages: []
       })
       return
     }
@@ -453,7 +535,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         showCustomizeView: false,
         showKanbanView: false,
         previousThreadId: prev,
-        currentThreadId: null
+        currentThreadId: null,
+        workerFocusView: null,
+        workerFocusMessages: []
       })
       return
     }
