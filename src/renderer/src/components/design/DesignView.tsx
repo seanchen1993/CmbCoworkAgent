@@ -1,6 +1,8 @@
 import React, { useState, useRef, useCallback, useEffect } from "react"
 import { v4 as uuid } from "uuid"
 import type { FileAttachment } from "@/types"
+import { formatSkillUseBlock } from "@/features/slash-commands/skill-marker"
+import { getToolLabel } from "@/lib/tool-labels"
 
 // ─────────────────────────────────────────────────────────
 // Types
@@ -18,6 +20,7 @@ interface Message {
   isStreaming?: boolean
   isIteration?: boolean     // true = follow-up iteration, false = first generation
   imageUrl?: string         // data URL for screenshot attached to this message
+  executionEvents?: DesignExecutionEvent[]
 }
 
 interface QuestionDef {
@@ -88,6 +91,39 @@ interface SkillInfo {
   content?: string   // SKILL.md content, loaded on selection
 }
 
+type DesignApprovalDecision = "approve" | "approve_session" | "approve_permanent" | "reject"
+type DesignExecutionStatus = "running" | "success" | "error"
+
+interface DesignExecutionEvent {
+  kind: "tool_call" | "tool_result" | "used_skill"
+  id?: string
+  toolCallId?: string
+  name?: string
+  args?: Record<string, unknown>
+  content?: string
+  isError?: boolean
+  status?: DesignExecutionStatus
+  timestamp: number
+}
+
+interface DesignApprovalRequest {
+  _orchestratorRequestId?: string
+  _approvalTypes?: DesignApprovalDecision[]
+  operation?: string
+  command?: string
+  code?: string
+  filePath?: string
+  reason?: string
+  _retryReason?: string
+  tool_call?: {
+    id?: string
+    name?: string
+    args?: Record<string, unknown>
+  }
+  params?: Record<string, unknown>
+  timeoutMs?: number
+}
+
 interface TabState {
   messages: Message[]
   html: string
@@ -132,11 +168,11 @@ interface TabState {
   // Retry support — stores the last prompt sent to startGeneration
   retryPrompt: string | null
   retryIsIteration: boolean
-  // Multi-turn conversation history for the API (user+assistant pairs, sans HTML)
-  apiHistory: Array<{ role: "user" | "assistant"; content: string }>
-  // Stored with retry so we can replay with the same history context
-  retryHistory: Array<{ role: "user" | "assistant"; content: string }>
   retryCleanMsg: string | null
+  // Multi-turn conversation history for the API (user+assistant pairs, sans HTML)
+  // Source of truth for multi-turn is LangGraph checkpoint; this is for display / session backup.
+  apiHistory: Array<{ role: "user" | "assistant"; content: string }>
+  pendingApproval: DesignApprovalRequest | null
 }
 
 function makeTabState(): TabState {
@@ -170,10 +206,92 @@ function makeTabState(): TabState {
     attachedFiles: null,
     retryPrompt: null,
     retryIsIteration: false,
-    apiHistory: [],
-    retryHistory: [],
     retryCleanMsg: null,
+    apiHistory: [],
+    pendingApproval: null,
   }
+}
+
+function makeDesignAgentThreadId(tabId: string): string {
+  const safeTabId = String(tabId || "tab")
+    .replace(/[^a-zA-Z0-9_-]/g, "_")
+    .replace(/^_+|_+$/g, "") || "tab"
+  return `design_${safeTabId}`.slice(0, 120)
+}
+
+function asDesignApprovalRequest(request: unknown): DesignApprovalRequest {
+  if (!request || typeof request !== "object") return {}
+  const req = request as Record<string, unknown>
+  return {
+    ...req,
+    _orchestratorRequestId: typeof req.id === "string" ? req.id : undefined,
+    _retryReason: typeof req.retry_reason === "string" ? req.retry_reason : undefined,
+    _approvalTypes: Array.isArray(req.allowed_approval_types)
+      ? req.allowed_approval_types as DesignApprovalDecision[]
+      : undefined,
+  } as DesignApprovalRequest
+}
+
+function asDesignExecutionEvent(event: unknown): DesignExecutionEvent | null {
+  if (!event || typeof event !== "object") return null
+  const raw = event as Partial<DesignExecutionEvent>
+  if (raw.kind !== "tool_call" && raw.kind !== "tool_result" && raw.kind !== "used_skill") return null
+  return {
+    kind: raw.kind,
+    id: typeof raw.id === "string" ? raw.id : undefined,
+    toolCallId: typeof raw.toolCallId === "string" ? raw.toolCallId : undefined,
+    name: typeof raw.name === "string" ? raw.name : undefined,
+    args: raw.args && typeof raw.args === "object" && !Array.isArray(raw.args)
+      ? raw.args
+      : undefined,
+    content: typeof raw.content === "string" ? raw.content : undefined,
+    isError: raw.isError === true,
+    status: raw.status === "success" || raw.status === "error" || raw.status === "running"
+      ? raw.status
+      : raw.kind === "tool_result"
+        ? raw.isError ? "error" : "success"
+        : "running",
+    timestamp: typeof raw.timestamp === "number" ? raw.timestamp : Date.now(),
+  }
+}
+
+function appendDesignExecutionEvent(events: DesignExecutionEvent[], event: DesignExecutionEvent): DesignExecutionEvent[] {
+  if (event.kind === "used_skill") {
+    if (!event.name) {
+      return events
+    }
+    const index = events.findIndex((item) => item.kind === "used_skill" && item.name === event.name)
+    if (index < 0) return [...events, event]
+    const next = [...events]
+    const current = next[index]
+    const shouldKeepCompletedStatus = (current.status === "success" || current.status === "error") && event.status === "running"
+    next[index] = {
+      ...current,
+      ...event,
+      status: shouldKeepCompletedStatus ? current.status : event.status,
+      isError: shouldKeepCompletedStatus ? current.isError : event.isError,
+    }
+    return next
+  }
+
+  if (event.kind === "tool_call") {
+    const toolCallId = event.toolCallId || event.id
+    if (toolCallId && events.some((item) => item.kind === "tool_call" && (item.toolCallId || item.id) === toolCallId)) {
+      return events
+    }
+    return [...events, event]
+  }
+
+  const resultKey = event.id || event.toolCallId
+  if (resultKey && events.some((item) => item.kind === "tool_result" && (item.id || item.toolCallId) === resultKey)) {
+    return events
+  }
+  const next = events.map((item) => {
+    if (item.kind !== "tool_call") return item
+    if (!event.toolCallId || (item.toolCallId || item.id) !== event.toolCallId) return item
+    return { ...item, status: event.status, isError: event.isError }
+  })
+  return [...next, event]
 }
 
 // ─────────────────────────────────────────────────────────
@@ -427,8 +545,6 @@ const SCROLL_INJECT = `(function(){
   };
 })();`
 
-const SCROLL_CLEANUP = `(function(){if(window.__st_cleanup)window.__st_cleanup();})();`
-
 // ─────────────────────────────────────────────────────────
 // Comment mode injection script (runs inside the iframe)
 // ─────────────────────────────────────────────────────────
@@ -532,17 +648,6 @@ const EDIT_SELECT_INJECT = `(function(){
 })();`
 
 const EDIT_SELECT_CLEANUP = `(function(){if(window.__ed_cleanup)window.__ed_cleanup();})();`
-
-// Parse the current values from the /*EDITMODE-BEGIN*/.../*EDITMODE-END*/ block
-function parseEditModeDefaults(html: string): Record<string, unknown> | null {
-  const match = html.match(/\/\*EDITMODE-BEGIN\*\/([\s\S]*?)\/\*EDITMODE-END\*\//)
-  if (!match) return null
-  try {
-    return JSON.parse(match[1].trim()) as Record<string, unknown>
-  } catch {
-    return null
-  }
-}
 
 /**
  * Ensures every HTML file has a functioning EDITMODE block so Edit mode always works.
@@ -1095,20 +1200,17 @@ export function DesignView(): React.JSX.Element {
     tabId: string,
     isIteration = false,
     modelId?: string,
-    /** Prior API history (user+assistant pairs) for multi-turn context */
-    history?: Array<{ role: "user" | "assistant"; content: string }>,
-    /** tabId passed to main so it can look up the stored HTML */
-    historyTabId?: string,
     /** Clean user message to append to apiHistory after success (no HTML/suffix) */
     cleanUserMsg?: string,
+    image?: { base64: string; mimeType: string },
   ) => {
     const sessionId = uuid()
     updateTs(tabId, (prev) => ({
       generationState: "generating",
       rightTab: "design",
+      pendingApproval: null,
       retryPrompt: prompt,
       retryIsIteration: isIteration,
-      retryHistory: history ?? prev.apiHistory,
       retryCleanMsg: cleanUserMsg ?? null,
       messages: [
         ...prev.messages,
@@ -1117,6 +1219,7 @@ export function DesignView(): React.JSX.Element {
           content: "",
           isStreaming: true,
           isIteration,
+          executionEvents: [],
         },
       ],
     }))
@@ -1125,14 +1228,60 @@ export function DesignView(): React.JSX.Element {
     const existing = tabSessionsRef.current.get(tabId)
     if (existing) { existing.cleanup(); window.api.design.cancel(existing.sessionId).catch(() => {}) }
 
-    const cleanup = window.api.design.generate(sessionId, prompt, (event) => {
+    // Route through the full Agent Runtime: Skills, MCP tools, Hooks, Approvals,
+    // context summarisation. tabId = LangGraph thread ID → native multi-turn.
+    const agentThreadId = makeDesignAgentThreadId(tabId)
+    const cleanupApprovalRequest = window.api.sandbox.onApprovalRequest(agentThreadId, (request) => {
+      updateTs(tabId, { pendingApproval: asDesignApprovalRequest(request) })
+    })
+    const cleanupApprovalTimeout = window.api.sandbox.onApprovalTimeout(agentThreadId, (data) => {
+      updateTs(tabId, (prev) => {
+        if (prev.pendingApproval?._orchestratorRequestId !== data.requestId) return {}
+        return { pendingApproval: null }
+      })
+    })
+
+    let cleanupStream: (() => void) | null = null
+    let cleanedUp = false
+    const cleanup = () => {
+      if (cleanedUp) return
+      cleanedUp = true
+      cleanupStream?.()
+      cleanupApprovalRequest()
+      cleanupApprovalTimeout()
+      updateTs(tabId, { pendingApproval: null })
+    }
+
+    const onEvent = (event: {
+      type: string
+      token?: string
+      html?: string
+      error?: string
+      event?: unknown
+    }) => {
+      if (event.type === "execution") {
+        const executionEvent = asDesignExecutionEvent(event.event)
+        if (!executionEvent) return
+        updateTs(tabId, (prev) => {
+          const msgs = [...prev.messages]
+          const last = msgs.length - 1
+          if (msgs[last]?.role !== "assistant") return {}
+          msgs[last] = {
+            ...msgs[last],
+            executionEvents: appendDesignExecutionEvent(msgs[last].executionEvents ?? [], executionEvent),
+          }
+          return { messages: msgs }
+        })
+        return
+      }
+
       if (event.type === "done" && event.html) {
         // Guarantee every generated design has a working EDITMODE block
         const patchedHtml = ensureEditMode(event.html)
         const variations = parseVariations(patchedHtml)
 
-        // Store full HTML in main process for next iteration (avoids truncation)
-        window.api.design.storeHtml(historyTabId ?? tabId, patchedHtml).catch(() => {})
+        // Keep htmlStore in sync (used as fallback / reference)
+        window.api.design.storeHtml(tabId, patchedHtml).catch(() => {})
 
         updateTs(tabId, (prev) => {
           const msgs = [...prev.messages]
@@ -1144,7 +1293,7 @@ export function DesignView(): React.JSX.Element {
             msgs[last] = { ...msgs[last], content: doneLabel, isStreaming: false }
           }
 
-          // Append this turn (user + assistant) to apiHistory for future iterations
+          // Keep apiHistory in sync for display / session backup
           const prevHistory = prev.apiHistory ?? []
           const newHistory: Array<{ role: "user" | "assistant"; content: string }> = cleanUserMsg
             ? [
@@ -1167,6 +1316,7 @@ export function DesignView(): React.JSX.Element {
         if (variations.length > 0) {
           variations.forEach((v) => { window.api.design.saveVariant(v.id, v.html).catch(() => {}) })
         }
+        cleanup()
         tabSessionsRef.current.delete(tabId)
       } else if (event.type === "error") {
         updateTs(tabId, (prev) => {
@@ -1177,6 +1327,7 @@ export function DesignView(): React.JSX.Element {
           }
           return { generationState: "error", messages: msgs }
         })
+        cleanup()
         tabSessionsRef.current.delete(tabId)
       } else if (event.type === "cancelled") {
         updateTs(tabId, (prev) => {
@@ -1185,9 +1336,20 @@ export function DesignView(): React.JSX.Element {
           if (msgs[last]?.isStreaming) msgs[last] = { ...msgs[last], isStreaming: false }
           return { generationState: "idle", messages: msgs }
         })
+        cleanup()
         tabSessionsRef.current.delete(tabId)
       }
-    }, modelId, history, historyTabId ?? tabId)
+    }
+
+    cleanupStream = window.api.design.agentGenerate(
+      sessionId,
+      prompt,
+      onEvent,
+      tabId,
+      modelId,
+      image?.base64,
+      image?.mimeType
+    )
     tabSessionsRef.current.set(tabId, { cleanup, sessionId })
   }, [updateTs])
 
@@ -1353,8 +1515,6 @@ export function DesignView(): React.JSX.Element {
       activeTabId,
       state.retryIsIteration,
       state.selectedModelId ?? undefined,
-      state.retryHistory.length > 0 ? state.retryHistory : undefined,
-      activeTabId,
       state.retryCleanMsg ?? undefined,
     )
   }, [activeTabId, tabStates, updateTs, startGeneration])
@@ -1365,12 +1525,8 @@ export function DesignView(): React.JSX.Element {
   const buildCommentPrompt = useCallback((
     comments: { elementDesc: string; text: string }[],
     state: TabState
-  ): { prompt: string; contextHtml: string } => {
+  ): { prompt: string } => {
     const activeVarId = state.activeVariationId
-    const contextHtml = activeVarId
-      ? (state.variations.find((v) => v.id === activeVarId)?.html ?? state.html)
-      : state.html
-
     const variantNote = activeVarId ? `\n[正在迭代变体 ${activeVarId.toUpperCase()}。]` : ""
     const commentLines = comments
       .map((c, i) => `[${i + 1}] 元素 (${c.elementDesc}): ${c.text}`)
@@ -1380,7 +1536,7 @@ export function DesignView(): React.JSX.Element {
 
 ${commentLines}${variantNote}`
 
-    return { prompt, contextHtml }
+    return { prompt }
   }, [])
 
   // ── Send a single comment directly (without saving to list) ─
@@ -1389,11 +1545,8 @@ ${commentLines}${variantNote}`
     const state = tabStates[tabId]
     if (!state || !text.trim()) return
 
-    const { prompt, contextHtml } = buildCommentPrompt([{ elementDesc, text }], state)
+    const { prompt } = buildCommentPrompt([{ elementDesc, text }], state)
     const cleanMsg = `📝 ${text.trim().slice(0, 60)}`
-    const currentApiHistory = (state.apiHistory ?? []).slice(-16)
-
-    if (contextHtml) window.api.design.storeHtml(tabId, contextHtml).catch(() => {})
 
     updateTs(tabId, (prev) => ({
       draftComment: null,
@@ -1403,7 +1556,7 @@ ${commentLines}${variantNote}`
         { role: "user" as const, content: cleanMsg },
       ],
     }))
-    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined, currentApiHistory, tabId, cleanMsg)
+    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined, cleanMsg)
   }, [activeTabId, tabStates, updateTs, startGeneration, buildCommentPrompt])
 
   // ── Send a saved comment pin → model ─────────────────────
@@ -1416,11 +1569,8 @@ ${commentLines}${variantNote}`
     if (!comment) return
 
     const text = overrideText ?? comment.text
-    const { prompt, contextHtml } = buildCommentPrompt([{ elementDesc: comment.elementDesc, text }], state)
+    const { prompt } = buildCommentPrompt([{ elementDesc: comment.elementDesc, text }], state)
     const cleanMsg = `📝 ${text.trim().slice(0, 60)}`
-    const currentApiHistory = (state.apiHistory ?? []).slice(-16)
-
-    if (contextHtml) window.api.design.storeHtml(tabId, contextHtml).catch(() => {})
 
     updateTs(tabId, (prev) => ({
       comments: prev.comments.filter((c) => c.id !== commentId),
@@ -1431,7 +1581,7 @@ ${commentLines}${variantNote}`
         { role: "user" as const, content: cleanMsg },
       ],
     }))
-    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined, currentApiHistory, tabId, cleanMsg)
+    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined, cleanMsg)
   }, [activeTabId, tabStates, updateTs, startGeneration, buildCommentPrompt])
 
   // ── Edit a saved comment's text ───────────────────────────
@@ -1442,34 +1592,6 @@ ${commentLines}${variantNote}`
       ),
     }))
   }, [activeTabId, updateTs])
-
-  // ── Edit mode: apply a tweak live to iframe + persist in HTML ─
-  const handleTweakChange = useCallback((key: string, value: unknown) => {
-    // 1. Send live to iframe via CSS-variable protocol
-    sendToIframe(iframeRef.current, { type: "__set_tweak_keys", edits: { [key]: value } })
-    // 2. Persist into the EDITMODE-BEGIN block so the change survives reloads
-    const tabId = activeTabId
-    setTabStates((prev) => {
-      const state = prev[tabId]
-      if (!state) return prev
-      const targetHtml = state.activeVariationId
-        ? (state.variations.find((v) => v.id === state.activeVariationId)?.html ?? state.html)
-        : state.html
-      const updated = mergeEditModeKeys(targetHtml, { [key]: value })
-      if (state.activeVariationId) {
-        return {
-          ...prev,
-          [tabId]: {
-            ...state,
-            variations: state.variations.map((v) =>
-              v.id === state.activeVariationId ? { ...v, html: updated } : v
-            ),
-          },
-        }
-      }
-      return { ...prev, [tabId]: { ...state, html: updated } }
-    })
-  }, [activeTabId, setTabStates])
 
   // ── Edit select: apply a style property to the selected element live ─
   const handleEditStyleChange = useCallback((property: string, value: unknown) => {
@@ -1486,11 +1608,6 @@ ${commentLines}${variantNote}`
     })
   }, [activeTabId, updateTs])
 
-  // ── Edit select: request iframe's current HTML so we can persist changes ─
-  const handleSaveElementEdit = useCallback(() => {
-    sendToIframe(iframeRef.current, { type: "__edit_get_html" })
-  }, [])
-
   // ── Apply ALL saved comments → send to model ─────────────
   const handleApplyComments = useCallback(() => {
     const tabId = activeTabId
@@ -1498,14 +1615,11 @@ ${commentLines}${variantNote}`
     const pending = state?.comments ?? []
     if (pending.length === 0) return
 
-    const { prompt, contextHtml } = buildCommentPrompt(
+    const { prompt } = buildCommentPrompt(
       pending.map((c) => ({ elementDesc: c.elementDesc, text: c.text })),
       state
     )
     const cleanMsg = `📝 发送 ${pending.length} 条批注`
-    const currentApiHistory = (state?.apiHistory ?? []).slice(-16)
-
-    if (contextHtml) window.api.design.storeHtml(tabId, contextHtml).catch(() => {})
 
     updateTs(tabId, (prev) => ({
       comments: [],
@@ -1517,7 +1631,7 @@ ${commentLines}${variantNote}`
       ],
     }))
 
-    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined, currentApiHistory, tabId, cleanMsg)
+    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined, cleanMsg)
   }, [activeTabId, tabStates, updateTs, startGeneration, buildCommentPrompt])
 
   // ── Send message ──────────────────────────────────────────
@@ -1540,14 +1654,17 @@ ${commentLines}${variantNote}`
     const existing = tabStates[tabId]?.messages ?? []
 
     // Build context suffixes — included in generation prompt but not displayed in chat
-    const skillSuffix = selectedSkill
-      ? `\n\n---\n[Design skill applied: ${selectedSkill.name}]\n${selectedSkill.content?.slice(0, 4000) ?? selectedSkill.description}\n\n` +
-        `IMPORTANT: Regardless of what the skill says about output format, you MUST output a complete standalone ` +
-        `<!DOCTYPE html> … </html> file (not a component file, not a code snippet). ` +
-        `The file must include the EDITMODE Tweaks system as required by the system prompt ` +
-        `(TWEAK_DEFAULTS with /*EDITMODE-BEGIN*/…/*EDITMODE-END*/ markers, postMessage listener, applyTweaks with CSS variables). ` +
-        `Apply the skill's design tokens and patterns inside that HTML file.`
-      : ""
+    const designOutputConstraint =
+      `IMPORTANT: Regardless of what the skill says about output format, you MUST output a complete standalone ` +
+      `<!DOCTYPE html> … </html> file (not a component file, not a code snippet). ` +
+      `The file must include the EDITMODE Tweaks system as required by the system prompt ` +
+      `(TWEAK_DEFAULTS with /*EDITMODE-BEGIN*/…/*EDITMODE-END*/ markers, postMessage listener, applyTweaks with CSS variables). ` +
+      `Apply the skill's design tokens and patterns inside that HTML file.`
+    const skillContext = selectedSkill && attachedImage
+      ? `\n\n---\n[Design skill applied: ${selectedSkill.name}]\n${selectedSkill.content?.slice(0, 4000) ?? selectedSkill.description}\n\n${designOutputConstraint}`
+      : selectedSkill
+        ? `\n\n---\n${designOutputConstraint}`
+        : ""
     const codeSuffix = codeContext && codeContext.length > 0
       ? "\n\n---\n[Code context — " + codeContext.length + " file(s)]\n" +
         codeContext.map((f) => {
@@ -1564,18 +1681,36 @@ ${commentLines}${variantNote}`
           `### ${f.filename}${f.truncated ? " (truncated)" : ""}\n${f.content}`
         ).join("\n\n")
       : ""
-    const contextSuffix = skillSuffix + codeSuffix + linkSuffix + filesSuffix
+    const skillMarkerSuffix =
+      selectedSkill && !attachedImage
+        ? `\n\n${formatSkillUseBlock({ name: selectedSkill.name, path: selectedSkill.path })}`
+        : ""
+    const contextSuffix = skillContext + codeSuffix + linkSuffix + filesSuffix + skillMarkerSuffix
 
-    // If a screenshot is attached — skip questions, go straight to image-based generation
+    // If a screenshot is attached — skip questions. Skill sends still go through
+    // Agent Runtime so the selected skill is read/executed and visible in the
+    // execution panel; no-skill screenshot sends keep the lean direct vision path.
     if (attachedImage) {
       const userContent = prompt || "请参考截图，生成改进版设计。"
       updateTs(tabId, (prev) => ({
+        attachedImage: null,
         messages: [
           ...prev.messages,
           { role: "user" as const, content: userContent + (selectedSkill ? ` ⚡${selectedSkill.name}` : ""), imageUrl: attachedImage.previewUrl },
         ],
       }))
-      startGenerationFromImage(prompt + contextSuffix, attachedImage.base64, attachedImage.mimeType, tabId, selectedModelId)
+      if (selectedSkill) {
+        startGeneration(
+          (prompt || userContent) + contextSuffix,
+          tabId,
+          false,
+          selectedModelId,
+          userContent,
+          { base64: attachedImage.base64, mimeType: attachedImage.mimeType }
+        )
+      } else {
+        startGenerationFromImage(prompt + contextSuffix, attachedImage.base64, attachedImage.mimeType, tabId, selectedModelId)
+      }
       return
     }
 
@@ -1590,9 +1725,15 @@ ${commentLines}${variantNote}`
       setChatTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, label } : t))
     }
 
-    // First message → ask questions
+    // First message with an explicit skill → run the skill workflow directly.
+    // Skill-authored flows should not be interrupted by Design's clarifying-question step;
+    // startGeneration still patches the output with EDITMODE so Tweaks remains available.
     if (existing.length === 0) {
-      startAskQuestions(prompt + contextSuffix, tabId, selectedModelId)
+      if (selectedSkill) {
+        startGeneration(prompt + contextSuffix, tabId, false, selectedModelId, prompt)
+      } else {
+        startAskQuestions(prompt + contextSuffix, tabId, selectedModelId)
+      }
     } else {
       // Subsequent messages → iterate on existing design
       const currentState = tabStates[tabId]
@@ -1602,37 +1743,19 @@ ${commentLines}${variantNote}`
         : (currentState?.html ?? "")
 
       // ── Multi-turn iteration ──────────────────────────────
-      // Instead of embedding potentially-truncated HTML inline, we:
-      // 1. Push the full HTML to the main-process htmlStore (via storeHtml)
-      // 2. Pass the prior conversation history so the model has full context
-      // 3. Send just the user's instruction as the prompt
-      // The main process will inject the full HTML into the final user message.
-
-      const currentApiHistory = currentState?.apiHistory ?? []
-      // Trim history to avoid unbounded context growth (keep last 8 turns = 16 entries)
-      const MAX_HISTORY_ENTRIES = 16
-      const historyToPass = currentApiHistory.slice(-MAX_HISTORY_ENTRIES)
-
+      // LangGraph checkpointing (threadId = tabId) automatically provides full
+      // conversation history to the model — no need to embed HTML or pass history manually.
       const variantNote = activeVarId
         ? `\n[Iterating on Variation ${activeVarId.toUpperCase()} specifically.]`
         : ""
 
-      // The prompt sent to main is the instruction only — no HTML embedded.
-      // Main process appends the full stored HTML automatically when history+tabId are present.
       const iterationPrompt = `User follow-up instruction: ${prompt}${variantNote}`
-
-      if (contextHtml) {
-        // Push the current HTML to main process store so the model can get the full version
-        window.api.design.storeHtml(tabId, contextHtml).catch(() => {})
-      }
 
       startGeneration(
         iterationPrompt + contextSuffix,
         tabId,
         /* isIteration */ !!contextHtml,
         selectedModelId,
-        historyToPass.length > 0 ? historyToPass : undefined,
-        tabId,
         prompt,   // clean user message for apiHistory recording
       )
     }
@@ -1679,7 +1802,7 @@ ${commentLines}${variantNote}`
     }))
 
     // Pass originalPrompt as cleanUserMsg so it's recorded in apiHistory after generation
-    startGeneration(enrichedPrompt, tabId, false, state.selectedModelId ?? undefined, undefined, tabId, originalPrompt)
+    startGeneration(enrichedPrompt, tabId, false, state.selectedModelId ?? undefined, originalPrompt)
   }, [activeTabId, tabStates, updateTs, startGeneration])
 
   const handleCancel = useCallback(() => {
@@ -1689,8 +1812,23 @@ ${commentLines}${variantNote}`
       window.api.design.cancel(entry.sessionId).catch(() => {})
       tabSessionsRef.current.delete(activeTabId)
     }
-    updateTs(activeTabId, { generationState: "idle" })
+    updateTs(activeTabId, { generationState: "idle", pendingApproval: null })
   }, [activeTabId, updateTs])
+
+  const handleDesignApprovalDecision = useCallback((decision: DesignApprovalDecision) => {
+    const pendingApproval = tabStates[activeTabId]?.pendingApproval
+    if (!pendingApproval) return
+
+    if (pendingApproval._orchestratorRequestId) {
+      window.api.sandbox.sendApprovalDecision({
+        requestId: pendingApproval._orchestratorRequestId,
+        type: decision,
+        tool_call_id: pendingApproval.tool_call?.id || "",
+      })
+    }
+
+    updateTs(activeTabId, { pendingApproval: null })
+  }, [activeTabId, tabStates, updateTs])
 
   // ── Slash-command skill picker ────────────────────────────
   // Triggered when the input value is just "/" optionally followed by a filter word
@@ -1707,7 +1845,7 @@ ${commentLines}${variantNote}`
     updateTs(activeTabId, (prev) => ({ ...prev, selectedSkill: { ...skill } }))
     // Try to load the SKILL.md content
     try {
-      const result = await window.api.skills.read(skill.path + "/SKILL.md")
+      const result = await window.api.skills.read(skill.path)
       if (result.success && result.content) {
         updateTs(activeTabId, (prev) => ({
           ...prev,
@@ -1836,7 +1974,6 @@ ${commentLines}${variantNote}`
           <div style={S.chatBody}>
             {ts.messages.length === 0 ? (
               <EmptyState
-                onSuggestion={(s) => setInputValue(s)}
                 onUploadScreenshot={() => fileInputRef.current?.click()}
                 onAttachCode={() => setCodeModalOpen(true)}
                 onAttachLink={() => { setLinkModalText(""); setLinkModalOpen(true) }}
@@ -1985,6 +2122,12 @@ ${commentLines}${variantNote}`
                     </span>
                   )}
                 </div>
+              )}
+              {ts.pendingApproval && (
+                <DesignApprovalBar
+                  approval={ts.pendingApproval}
+                  onDecision={handleDesignApprovalDecision}
+                />
               )}
               <textarea
                 value={inputValue}
@@ -2825,232 +2968,6 @@ function TweaksFloatingPanel({
 }
 
 // ─────────────────────────────────────────────────────────
-// Edit Tweaks Panel — floating card (bottom-left) for Edit mode
-// Reads EDITMODE-BEGIN/END block, renders live controls, sends
-// changes to iframe via __set_tweak_keys and persists in HTML.
-// ─────────────────────────────────────────────────────────
-
-function tweakLabel(key: string): string {
-  return key.replace(/([A-Z])/g, " $1").replace(/^./, (s) => s.toUpperCase())
-}
-
-function isColorValue(v: unknown): v is string {
-  if (typeof v !== "string") return false
-  return /^#[0-9a-fA-F]{3,8}$/.test(v) || /^(rgb|hsl)/.test(v)
-}
-
-function TweakControl({ name, value, onChange }: {
-  name: string
-  value: unknown
-  onChange: (v: unknown) => void
-}) {
-  const label = tweakLabel(name)
-
-  // ── Boolean toggle ────────────────────────────────────────
-  if (typeof value === "boolean") {
-    return (
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
-        <span style={{ fontSize: 13, fontWeight: 500, color: "#1a1a1a" }}>{label}</span>
-        <button
-          onClick={() => onChange(!value)}
-          style={{
-            width: 36, height: 20, borderRadius: 999, border: "none", cursor: "pointer",
-            background: value ? "#1a1a1a" : "#d4d2cc",
-            position: "relative", padding: 0, transition: "background 0.2s", flexShrink: 0,
-          }}
-        >
-          <span style={{
-            position: "absolute", top: 3, left: value ? 18 : 3,
-            width: 14, height: 14, borderRadius: "50%", background: "#fff",
-            transition: "left 0.2s", display: "block",
-          }} />
-        </button>
-      </div>
-    )
-  }
-
-  // ── Color picker ──────────────────────────────────────────
-  if (isColorValue(value)) {
-    return (
-      <div style={{ marginBottom: 14 }}>
-        <span style={{ display: "block", fontSize: 12, fontWeight: 500, color: "#6a6a6a", marginBottom: 6 }}>{label}</span>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <input
-            type="color"
-            value={value as string}
-            onChange={(e) => onChange(e.target.value)}
-            style={{
-              width: 32, height: 32, border: "none", padding: 2,
-              borderRadius: 8, cursor: "pointer", background: "none",
-              flexShrink: 0,
-            }}
-          />
-          <input
-            type="text"
-            value={value as string}
-            onChange={(e) => onChange(e.target.value)}
-            style={{
-              flex: 1, padding: "5px 8px", fontSize: 12, fontFamily: "monospace",
-              border: "1px solid #e0ded8", borderRadius: 7, outline: "none",
-              color: "#1a1a1a", background: "#fafaf8",
-            }}
-          />
-        </div>
-      </div>
-    )
-  }
-
-  // ── Number slider ─────────────────────────────────────────
-  if (typeof value === "number") {
-    const isSmall = value <= 64
-    const max = isSmall ? 96 : value <= 200 ? 400 : 2000
-    const min = isSmall ? 0 : 0
-    return (
-      <div style={{ marginBottom: 14 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 5 }}>
-          <span style={{ fontSize: 12, fontWeight: 500, color: "#6a6a6a" }}>{label}</span>
-          <span style={{ fontSize: 12, fontWeight: 600, color: "#1a1a1a", minWidth: 28, textAlign: "right" }}>
-            {value}
-          </span>
-        </div>
-        <input
-          type="range"
-          min={min}
-          max={max}
-          step={isSmall ? 1 : 2}
-          value={value as number}
-          onChange={(e) => onChange(Number(e.target.value))}
-          style={{ width: "100%", accentColor: "#1a1a1a", cursor: "pointer" }}
-        />
-      </div>
-    )
-  }
-
-  // ── String text input ─────────────────────────────────────
-  return (
-    <div style={{ marginBottom: 14 }}>
-      <span style={{ display: "block", fontSize: 12, fontWeight: 500, color: "#6a6a6a", marginBottom: 5 }}>{label}</span>
-      <input
-        type="text"
-        value={String(value ?? "")}
-        onChange={(e) => onChange(e.target.value)}
-        style={{
-          width: "100%", padding: "6px 9px", fontSize: 13, fontFamily: "inherit",
-          border: "1px solid #e0ded8", borderRadius: 7, outline: "none",
-          color: "#1a1a1a", background: "#fafaf8", boxSizing: "border-box",
-        }}
-      />
-    </div>
-  )
-}
-
-function EditTweaksPanel({ html, onTweakChange, onClose }: {
-  html: string
-  onTweakChange: (key: string, value: unknown) => void
-  onClose: () => void
-}) {
-  const [collapsed, setCollapsed] = useState(false)
-  const defaults = parseEditModeDefaults(html)
-
-  // Local mirror of tweak values — initialised from HTML, updated on user change
-  const [values, setValues] = useState<Record<string, unknown>>(defaults ?? {})
-
-  // Re-sync when the HTML's EDITMODE block changes (e.g. after a variation switch)
-  useEffect(() => {
-    const fresh = parseEditModeDefaults(html)
-    if (fresh) setValues(fresh)
-  }, [html])
-
-  const change = (key: string, v: unknown) => {
-    setValues((prev) => ({ ...prev, [key]: v }))
-    onTweakChange(key, v)
-  }
-
-  if (collapsed) {
-    return (
-      <div style={{ position: "absolute", bottom: 28, left: 28, zIndex: 30, userSelect: "none" }}>
-        <button
-          onClick={() => setCollapsed(false)}
-          style={{
-            display: "flex", alignItems: "center", gap: 8,
-            padding: "8px 16px",
-            background: "#1a1a1a", borderRadius: 999, border: "none",
-            cursor: "pointer", color: "#fff", fontSize: 12, fontWeight: 700,
-            letterSpacing: "0.06em", fontFamily: "inherit",
-            boxShadow: "0 4px 16px rgba(0,0,0,0.18)",
-          }}
-        >
-          <EditIcon active={true} />
-          EDIT
-        </button>
-      </div>
-    )
-  }
-
-  return (
-    <div
-      style={{
-        position: "absolute", bottom: 28, left: 28, zIndex: 30,
-        width: 240,
-        background: "#ffffff",
-        borderRadius: 20,
-        boxShadow: "0 8px 40px rgba(0,0,0,0.14), 0 2px 8px rgba(0,0,0,0.06)",
-        userSelect: "none",
-        // Scroll if there are many controls
-        maxHeight: "60vh",
-        display: "flex", flexDirection: "column",
-      }}
-    >
-      {/* Header */}
-      <div style={{
-        display: "flex", alignItems: "center", justifyContent: "space-between",
-        padding: "16px 18px 12px",
-        borderBottom: defaults ? "1px solid #f0efeb" : "none",
-        flexShrink: 0,
-      }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-          <EditIcon active={true} />
-          <span style={{ fontSize: 12, fontWeight: 700, letterSpacing: "0.08em", color: "#1a1a1a", textTransform: "uppercase" }}>
-            Edit
-          </span>
-        </div>
-        <div style={{ display: "flex", gap: 4 }}>
-          <button
-            onClick={() => setCollapsed(true)}
-            title="折叠"
-            style={{ background: "none", border: "none", cursor: "pointer", fontSize: 15, color: "#aaa", lineHeight: 1, padding: "0 3px", fontFamily: "inherit" }}
-          >
-            −
-          </button>
-          <button
-            onClick={onClose}
-            title="关闭编辑模式"
-            style={{ background: "none", border: "none", cursor: "pointer", fontSize: 15, color: "#aaa", lineHeight: 1, padding: "0 3px", fontFamily: "inherit" }}
-          >
-            ×
-          </button>
-        </div>
-      </div>
-
-      {/* Controls */}
-      <div style={{ flex: 1, overflowY: "auto", padding: "14px 18px 16px" }}>
-        {!defaults ? (
-          <div style={{ textAlign: "center", padding: "20px 0" }}>
-            <div style={{ fontSize: 20, marginBottom: 8 }}>✏️</div>
-            <p style={{ fontSize: 12, color: "#8a8a8a", lineHeight: 1.6, margin: 0 }}>
-              此设计不包含可编辑参数。<br />
-              重新生成设计即可启用编辑模式。
-            </p>
-          </div>
-        ) : Object.entries(values).map(([key, value]) => (
-          <TweakControl key={key} name={key} value={value} onChange={(v) => change(key, v)} />
-        ))}
-      </div>
-    </div>
-  )
-}
-
-// ─────────────────────────────────────────────────────────
 // Questions Panel — rendered in right canvas
 // ─────────────────────────────────────────────────────────
 
@@ -3207,8 +3124,7 @@ function QuestionsPanel({
 // Sub-components
 // ─────────────────────────────────────────────────────────
 
-function EmptyState({ onSuggestion, onUploadScreenshot, onAttachCode, onAttachLink }: {
-  onSuggestion: (s: string) => void
+function EmptyState({ onUploadScreenshot, onAttachCode, onAttachLink }: {
   onUploadScreenshot: () => void
   onAttachCode: () => void
   onAttachLink: () => void
@@ -3249,36 +3165,92 @@ function TabButton({
   )
 }
 
-function VariationTabBtn({ label, active, color, onClick }: {
-  label: string; active: boolean; color: string; onClick: () => void
+function DesignApprovalBar({
+  approval,
+  onDecision,
+}: {
+  approval: DesignApprovalRequest
+  onDecision: (decision: DesignApprovalDecision) => void
 }) {
+  const operation = approval.operation || approval.tool_call?.name || "execute"
+  const isFileApproval = operation === "write_file" || operation === "edit_file"
+  const isCodeApproval =
+    operation === "code_exec" ||
+    operation === "prepare_save_code_exec_tool" ||
+    operation === "save_code_exec_tool"
+  const approvalTypes = approval._approvalTypes ?? ["approve", "approve_session", "approve_permanent", "reject"]
+  const args = approval.tool_call?.args ?? {}
+  const detail =
+    isFileApproval
+      ? `${operation === "write_file" ? "写入" : "编辑"}: ${String(approval.filePath || args.filePath || "unknown")}`
+      : approval.command
+        ? approval.command
+        : isCodeApproval
+          ? String(approval.code || args.code || "")
+          : String(args.command || "unknown command")
+
   return (
-    <button
-      onClick={onClick}
-      title={active ? `Viewing ${label} — follow-up messages will iterate this variant` : `Switch to ${label}`}
-      style={{
-        display: "flex", alignItems: "center", gap: 6,
-        padding: "0 14px", height: 44,
-        fontSize: 13, fontWeight: active ? 700 : 500,
-        color: active ? color : "#6a6a6a",
-        background: active ? "#ffffff" : "transparent",
-        border: "1px solid",
-        borderColor: active ? color : "transparent",
-        borderBottom: active ? `2px solid ${color}` : "1px solid transparent",
-        borderRadius: active ? "6px 6px 0 0" : 0,
-        cursor: "pointer", fontFamily: "inherit",
-        position: "relative", top: 1,
-        transition: "all 0.12s ease",
-      }}
-    >
-      {/* Color dot */}
-      <span style={{
-        width: 7, height: 7, borderRadius: "50%", flexShrink: 0,
-        background: active ? color : "#c8c6c0",
-        transition: "background 0.12s",
-      }} />
-      {label}
-    </button>
+    <div style={{
+      margin: "10px 12px 0",
+      padding: 12,
+      borderRadius: 10,
+      border: `1px solid ${isFileApproval ? "#9bbcf0" : isCodeApproval ? "#9fd3b2" : "#efcf8b"}`,
+      background: isFileApproval ? "#f2f7ff" : isCodeApproval ? "#f0faf4" : "#fff8e8",
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+        <span style={{ fontSize: 14 }}>{isFileApproval ? "✎" : isCodeApproval ? "{}" : "!"}</span>
+        <span style={{ fontSize: 13, fontWeight: 700, color: "#1f2933" }}>
+          {operation === "write_file"
+            ? "写入文件需要审批"
+            : operation === "edit_file"
+              ? "编辑文件需要审批"
+              : isCodeApproval
+                ? "执行脚本需要审批"
+                : "命令需要审批"}
+        </span>
+      </div>
+      <pre style={{
+        margin: 0,
+        maxHeight: 120,
+        overflow: "auto",
+        padding: "8px 10px",
+        borderRadius: 8,
+        background: "rgba(255,255,255,0.72)",
+        color: "#2f3437",
+        fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+        fontSize: 12,
+        lineHeight: 1.45,
+        whiteSpace: "pre-wrap",
+        wordBreak: "break-word",
+      }}>{detail}</pre>
+      {(approval.reason || approval._retryReason) && (
+        <div style={{ marginTop: 8, fontSize: 12, lineHeight: 1.45, color: "#6a5a2a" }}>
+          {approval._retryReason || approval.reason}
+        </div>
+      )}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
+        {approvalTypes.includes("approve") && (
+          <button onClick={() => onDecision("approve")} style={{ ...S.approvalPrimaryBtn }}>
+            {isFileApproval ? "允许" : isCodeApproval ? "执行" : "运行"}
+          </button>
+        )}
+        {approvalTypes.includes("approve_session") && (
+          <button onClick={() => onDecision("approve_session")} style={{ ...S.approvalSessionBtn }}>
+            本会话允许
+          </button>
+        )}
+        {approvalTypes.includes("approve_permanent") && (
+          <button onClick={() => onDecision("approve_permanent")} style={{ ...S.approvalPermanentBtn }}>
+            始终允许
+          </button>
+        )}
+        {approvalTypes.includes("reject") && (
+          <button onClick={() => onDecision("reject")} style={{ ...S.approvalRejectBtn }}>
+            拒绝
+          </button>
+        )}
+      </div>
+    </div>
   )
 }
 
@@ -3568,7 +3540,7 @@ function CodeModal({ open, initialFiles, onConfirm, onClose }: {
             <div
               style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12, color: "#aaa" }}
               onDragOver={(e) => { e.preventDefault(); setDragging(true) }}
-              onDrop={(e) => { e.preventDefault(); setDragging(false); if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files) }}
+              onDrop={handleDrop}
             >
               <span style={{ fontSize: 40 }}>⬆</span>
               <p style={{ margin: 0, fontSize: 14, color: "#888", textAlign: "center", lineHeight: 1.6 }}>将代码文件拖拽到此处<br /><span style={{ fontSize: 12 }}>或点击右上角「上传文件」</span></p>
@@ -3643,6 +3615,147 @@ function LinkModal({ open, url, onUrlChange, onConfirm, onClose }: {
   )
 }
 
+function getDesignToolLabel(name: string): string {
+  return getToolLabel(name, { showToolName: false })
+}
+
+function getDesignToolParam(args?: Record<string, unknown>): string {
+  if (!args) return ""
+  const raw =
+    args.path ??
+    args.file_path ??
+    args.command ??
+    args.pattern ??
+    args.query ??
+    args.name ??
+    ""
+  if (typeof raw !== "string") return ""
+  const value = raw.includes("/") ? raw.split("/").pop() || raw : raw
+  return value.length > 42 ? `${value.slice(0, 39)}...` : value
+}
+
+function DesignExecutionPanel({ events }: { events?: DesignExecutionEvent[] }) {
+  if (!events || events.length === 0) return null
+
+  const skills = events.filter((event) => event.kind === "used_skill" && event.name)
+  const calls = events.filter((event) => event.kind === "tool_call")
+  const resultsByToolCallId = new Map<string, DesignExecutionEvent>()
+  for (const event of events) {
+    if (event.kind === "tool_result" && event.toolCallId) {
+      resultsByToolCallId.set(event.toolCallId, event)
+    }
+  }
+
+  return (
+    <div style={{
+      marginTop: 8,
+      maxWidth: "85%",
+      border: "1px solid #e2e0da",
+      borderRadius: 10,
+      background: "#fbfaf7",
+      overflow: "hidden",
+    }}>
+      <div style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "8px 10px",
+        borderBottom: calls.length > 0 ? "1px solid #ebe9e3" : "none",
+      }}>
+        <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#cc785c", flexShrink: 0 }} />
+        <span style={{ fontSize: 12, fontWeight: 700, color: "#2f3437" }}>技能执行</span>
+        {skills.length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+            {skills.map((skill) => (
+              <span key={skill.name} style={{
+                padding: "2px 7px",
+                borderRadius: 999,
+                background: skill.status === "error" ? "#fee2e2" : skill.status === "success" ? "#dcfce7" : "#eff0fb",
+                color: skill.status === "error" ? "#991b1b" : skill.status === "success" ? "#166534" : "#3a3a8a",
+                border: `1px solid ${skill.status === "error" ? "#fecaca" : skill.status === "success" ? "#bbf7d0" : "#c7c9ef"}`,
+                fontSize: 11,
+                fontWeight: 600,
+              }}>
+                {skill.name}{skill.status === "error" ? " 失败" : skill.status === "success" ? " 成功" : " 执行中"}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+      {calls.length > 0 && (
+        <div style={{ padding: "6px 8px", display: "flex", flexDirection: "column", gap: 5 }}>
+          {calls.map((call) => {
+            const key = call.toolCallId || call.id || `${call.name}-${call.timestamp}`
+            const result = call.toolCallId ? resultsByToolCallId.get(call.toolCallId) : undefined
+            const status = result?.isError || call.status === "error"
+              ? "error"
+              : result || call.status === "success"
+                ? "success"
+                : "running"
+            const param = getDesignToolParam(call.args)
+            return (
+              <details key={key} style={{
+                border: "1px solid #ebe9e3",
+                borderRadius: 8,
+                background: "#ffffff",
+              }}>
+                <summary style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  padding: "7px 9px",
+                  cursor: "pointer",
+                  listStyle: "none",
+                }}>
+                  <span style={{
+                    width: 7,
+                    height: 7,
+                    borderRadius: "50%",
+                    background: status === "success" ? "#16a34a" : status === "error" ? "#dc2626" : "#d0a032",
+                    flexShrink: 0,
+                  }} />
+                  <span style={{ fontSize: 12, fontWeight: 600, color: "#343a40", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {getDesignToolLabel(call.name || "tool")}{param ? `: ${param}` : ""}
+                  </span>
+                  <span style={{
+                    marginLeft: "auto",
+                    padding: "1px 6px",
+                    borderRadius: 5,
+                    fontSize: 10,
+                    fontWeight: 700,
+                    color: status === "success" ? "#166534" : status === "error" ? "#991b1b" : "#7c5b12",
+                    background: status === "success" ? "#dcfce7" : status === "error" ? "#fee2e2" : "#fef3c7",
+                    flexShrink: 0,
+                  }}>
+                    {status === "success" ? "成功" : status === "error" ? "失败" : "执行中"}
+                  </span>
+                </summary>
+                <div style={{ borderTop: "1px solid #f0eee8", padding: "7px 9px" }}>
+                  <pre style={{
+                    margin: 0,
+                    maxHeight: 150,
+                    overflow: "auto",
+                    fontSize: 11,
+                    lineHeight: 1.45,
+                    color: "#4b5563",
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-word",
+                    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                  }}>
+                    {result?.content
+                      ? result.content.slice(0, 1600)
+                      : JSON.stringify(call.args ?? {}, null, 2)}
+                  </pre>
+                </div>
+              </details>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function MessageBubble({ message }: { message: Message }) {
   const isUser = message.role === "user"
   const isQPrompt = message.role === "questions-prompt"
@@ -3677,6 +3790,7 @@ function MessageBubble({ message }: { message: Message }) {
             : "")}
         </div>
       </div>
+      {!isUser && <DesignExecutionPanel events={message.executionEvents} />}
       {/* Pill tags for user messages after question submission */}
       {isUser && message.tags && message.tags.length > 0 && (
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 4, flexWrap: "wrap", marginTop: 6 }}>
@@ -3696,7 +3810,6 @@ function ModelSelector({ models, selectedId, onChange }: {
   selectedId: string | null
   onChange: (id: string) => void
 }) {
-  const selected = selectedId ? models.find((m) => m.id === selectedId) : models[0]
   return (
     <div style={{ position: "relative", display: "inline-block" }}>
       <select
@@ -3788,15 +3901,6 @@ function EditIcon({ active }: { active: boolean }) {
     <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
       <path d="M11 2l3 3-8 8H3v-3l8-8z"
         stroke={active ? "#3b82f6" : "#6a6a6a"} strokeWidth="1.5" fill={active ? "rgba(59,130,246,0.12)" : "none"} strokeLinejoin="round" strokeLinecap="round" />
-    </svg>
-  )
-}
-
-function DrawIcon({ active }: { active: boolean }) {
-  return (
-    <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-      <path d="M2 13c1-1 2-3 4-4s4 0 5-1 1-3 3-4" stroke={active ? "#8b5cf6" : "#6a6a6a"} strokeWidth="1.5" strokeLinecap="round" />
-      <circle cx="14" cy="4" r="1.5" fill={active ? "#8b5cf6" : "#6a6a6a"} />
     </svg>
   )
 }
@@ -4392,6 +4496,10 @@ const S: Record<string, React.CSSProperties> = {
   importBtn:         { padding: "4px 10px", fontSize: 12, fontWeight: 500, background: "none", border: "1px solid #d0cec8", borderRadius: 6, cursor: "pointer", color: "#4a4a4a", fontFamily: "inherit" },
   sendBtn:           { padding: "6px 16px", fontSize: 13, fontWeight: 600, color: "#fff", border: "none", borderRadius: 8, fontFamily: "inherit", transition: "background 0.15s" },
   cancelBtn:         { padding: "6px 16px", fontSize: 13, fontWeight: 600, background: "#e8e6e0", color: "#4a4a4a", border: "none", borderRadius: 8, cursor: "pointer", fontFamily: "inherit" },
+  approvalPrimaryBtn: { padding: "6px 12px", fontSize: 12, fontWeight: 700, background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 7, cursor: "pointer", fontFamily: "inherit" },
+  approvalSessionBtn: { padding: "6px 12px", fontSize: 12, fontWeight: 600, background: "#2563eb", color: "#fff", border: "none", borderRadius: 7, cursor: "pointer", fontFamily: "inherit" },
+  approvalPermanentBtn: { padding: "6px 12px", fontSize: 12, fontWeight: 600, background: "#16a34a", color: "#fff", border: "none", borderRadius: 7, cursor: "pointer", fontFamily: "inherit" },
+  approvalRejectBtn: { padding: "6px 12px", fontSize: 12, fontWeight: 600, background: "#ffffff", color: "#4a4a4a", border: "1px solid #d0cec8", borderRadius: 7, cursor: "pointer", fontFamily: "inherit" },
 
   // Right panel
   rightPanel:        { flex: 1, display: "flex", flexDirection: "column", background: "#f0efeb", overflow: "hidden" },

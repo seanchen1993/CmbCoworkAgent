@@ -1044,6 +1044,13 @@ export interface CreateAgentRuntimeOptions {
   maxRetryAttempts?: number
   /** Callback invoked after each hook executes — used to emit results to the renderer. */
   onHookResult?: HookResultCallback
+  /**
+   * When provided, replaces the default coding-assistant system prompt entirely.
+   * AGENTS.md injection and extraSystemPrompt are both skipped.
+   * Skills middleware, MCP tools, hooks and approvals all remain active.
+   * Use this to embed a domain-specific persona (e.g. the Design agent).
+   */
+  systemPromptOverride?: string
 }
 
 // Create agent runtime with configured model and checkpointer
@@ -1200,35 +1207,44 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     backend.setOrchestrator(orchestrator)
   }
 
-  let systemPrompt = getSystemPrompt(workspacePath, windowsSandbox)
+  let systemPrompt: string
   let agentsPrompt: Awaited<ReturnType<typeof loadAgentsPromptForWorkspace>> = {
     prompt: null,
     projectRoot: workspacePath,
     loadedPaths: [],
     truncated: false
   }
-  if (enableAgentsPrompt) {
-    agentsPrompt = await loadAgentsPromptForWorkspace(workspacePath, {
-      globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
-      projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
-    })
-    if (agentsPrompt.prompt) {
-      systemPrompt += "\n\n" + agentsPrompt.prompt
-      console.log("[Runtime] Loaded AGENTS.md files:", agentsPrompt.loadedPaths)
-      if (agentsPrompt.truncated) {
-        console.warn("[Runtime] AGENTS.md content exceeded prompt budget and was truncated:", {
-          globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
-          projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
-        })
+
+  if (options.systemPromptOverride) {
+    // Domain-specific persona (e.g. Design agent): skip the default coding-assistant prompt
+    // and AGENTS.md hierarchy. Skills, MCP tools, hooks and approvals all remain active.
+    systemPrompt = options.systemPromptOverride
+    console.log("[Runtime] Using systemPromptOverride — skipping default prompt and AGENTS.md")
+  } else {
+    systemPrompt = getSystemPrompt(workspacePath, windowsSandbox)
+    if (enableAgentsPrompt) {
+      agentsPrompt = await loadAgentsPromptForWorkspace(workspacePath, {
+        globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
+        projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
+      })
+      if (agentsPrompt.prompt) {
+        systemPrompt += "\n\n" + agentsPrompt.prompt
+        console.log("[Runtime] Loaded AGENTS.md files:", agentsPrompt.loadedPaths)
+        if (agentsPrompt.truncated) {
+          console.warn("[Runtime] AGENTS.md content exceeded prompt budget and was truncated:", {
+            globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
+            projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
+          })
+        }
+      } else {
+        console.log("[Runtime] No AGENTS.md files discovered for workspace:", workspacePath)
       }
     } else {
-      console.log("[Runtime] No AGENTS.md files discovered for workspace:", workspacePath)
+      console.log("[Runtime] AGENTS.md prompt injection disabled for this runtime")
     }
-  } else {
-    console.log("[Runtime] AGENTS.md prompt injection disabled for this runtime")
-  }
-  if (extraSystemPrompt) {
-    systemPrompt += "\n\n" + extraSystemPrompt
+    if (extraSystemPrompt) {
+      systemPrompt += "\n\n" + extraSystemPrompt
+    }
   }
 
   const isWindows = process.platform === "win32"

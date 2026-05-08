@@ -10,9 +10,12 @@
 import fs from "fs"
 import path from "path"
 import { ipcMain, BrowserWindow, app } from "electron"
+import Store from "electron-store"
 import { ChatOpenAI } from "@langchain/openai"
 import { HumanMessage, SystemMessage, AIMessage } from "@langchain/core/messages"
-import { getCustomModelConfigs } from "../storage"
+import { getCustomModelConfigs, getOpenworkDir } from "../storage"
+import { createAgentRuntime } from "../agent/runtime"
+import { SkillUsageDetector } from "../agent/skill-evolution/usage-detector"
 
 // ─────────────────────────────────────────────────────────
 // System Prompt — Dynamic Questions Generation
@@ -324,6 +327,95 @@ const htmlStore = new Map<string, string>()  // tabId → latest HTML
 const MAX_HISTORY_ENTRIES = 16  // 8 turns
 
 // ─────────────────────────────────────────────────────────
+// Active agent sessions for cancellation (design:agent-generate)
+// ─────────────────────────────────────────────────────────
+const activeDesignAgents = new Map<string, AbortController>()
+
+// Persistent store for reading workspace path (same key used by main settings)
+const designAgentStore = new Store({ name: "settings", cwd: getOpenworkDir() })
+
+function makeDesignAgentThreadId(tabId: string): string {
+  const safeTabId = String(tabId || "tab")
+    .replace(/[^a-zA-Z0-9_-]/g, "_")
+    .replace(/^_+|_+$/g, "") || "tab"
+  return `design_${safeTabId}`.slice(0, 120)
+}
+
+function serializeStreamData(data: unknown): unknown {
+  return JSON.parse(JSON.stringify(data))
+}
+
+function extractTextContent(content: unknown): string {
+  if (typeof content === "string") return content
+  if (!Array.isArray(content)) return ""
+
+  return content
+    .map((block) => {
+      if (typeof block === "string") return block
+      if (!block || typeof block !== "object") return ""
+
+      const item = block as { text?: unknown; content?: unknown }
+      if (typeof item.text === "string") return item.text
+      if (typeof item.content === "string") return item.content
+      return ""
+    })
+    .join("")
+}
+
+type DesignExecutionStatus = "running" | "success" | "error"
+
+interface DesignExecutionEvent {
+  kind: "tool_call" | "tool_result" | "used_skill"
+  id?: string
+  toolCallId?: string
+  name?: string
+  args?: Record<string, unknown>
+  content?: string
+  isError?: boolean
+  status?: DesignExecutionStatus
+  timestamp: number
+}
+
+function getSerializedClassName(msg: Record<string, unknown>): string {
+  const classId: string[] = Array.isArray(msg.id) ? (msg.id as string[]) : []
+  return classId[classId.length - 1] ?? ""
+}
+
+function normalizeToolCalls(raw: unknown): Array<{ id?: string; name?: string; args?: Record<string, unknown> }> {
+  if (!Array.isArray(raw)) return []
+  const normalized: Array<{ id?: string; name?: string; args?: Record<string, unknown> }> = []
+  for (const toolCall of raw) {
+    if (!toolCall || typeof toolCall !== "object") continue
+    const item = toolCall as { id?: unknown; name?: unknown; args?: unknown }
+    normalized.push({
+      id: typeof item.id === "string" ? item.id : undefined,
+      name: typeof item.name === "string" ? item.name : undefined,
+      args: item.args && typeof item.args === "object" && !Array.isArray(item.args)
+        ? item.args as Record<string, unknown>
+        : {},
+    })
+  }
+  return normalized
+}
+
+function getReadFilePath(args: Record<string, unknown> | undefined): string {
+  if (!args) return ""
+  return (
+    (typeof args.path === "string" && args.path) ||
+    (typeof args.file_path === "string" && args.file_path) ||
+    ""
+  )
+}
+
+function isToolMessageError(kwargs: Record<string, unknown>): boolean {
+  return (
+    kwargs.status === "error" ||
+    kwargs.is_error === true ||
+    (kwargs.additional_kwargs as Record<string, unknown> | undefined)?.is_error === true
+  )
+}
+
+// ─────────────────────────────────────────────────────────
 // IPC Registration
 // ─────────────────────────────────────────────────────────
 
@@ -631,12 +723,375 @@ export function registerDesignHandlers(): void {
     return { ok: true }
   })
 
+  // ─────────────────────────────────────────────────────────
+  // design:agent-generate — routes through the full Agent Runtime so Design
+  // naturally inherits Skills, MCP tools, Hooks, Approvals and context
+  // summarization. Uses tabId as the LangGraph thread ID for native multi-turn.
+  // ─────────────────────────────────────────────────────────
+  ipcMain.on(
+    "design:agent-generate",
+    async (event, {
+      sessionId, prompt, modelId, tabId, imageData, mimeType,
+    }: {
+      sessionId: string
+      prompt: string
+      modelId?: string
+      tabId: string
+      imageData?: string
+      mimeType?: string
+    }) => {
+      const channel = `design:stream:${sessionId}`
+      const win = BrowserWindow.fromWebContents(event.sender)
+      const send = (data: object) => {
+        if (win && !win.isDestroyed()) event.sender.send(channel, data)
+      }
+
+      // Cancel any existing agent session for this sessionId
+      const existingCtrl = activeDesignAgents.get(sessionId)
+      if (existingCtrl) existingCtrl.abort()
+
+      const controller = new AbortController()
+      activeDesignAgents.set(sessionId, controller)
+
+      // workspacePath: required by agent runtime for hooks & tools.
+      // Read from the same settings key used by the main app workspace picker.
+      // Fall back to app userData so hooks still have a valid path even if no
+      // project workspace has been selected.
+      const storedWorkspace = designAgentStore.get("workspacePath", null)
+      const workspacePath =
+        typeof storedWorkspace === "string" && storedWorkspace
+          ? storedWorkspace
+          : app.getPath("userData")
+
+      // Each Design tab gets its own LangGraph thread — native multi-turn persistence.
+      // Checkpoint paths only allow [a-zA-Z0-9_-], so keep this in sync with renderer approval listeners.
+      const threadId = makeDesignAgentThreadId(tabId)
+
+      try {
+        send({ type: "start" })
+
+        const agent = await createAgentRuntime({
+          threadId,
+          workspacePath,
+          modelId,
+          systemPromptOverride: DESIGN_SYSTEM_PROMPT,
+          noSchedulerTool: true,
+          noSkillEvolutionTool: true,
+          enableAgentsPrompt: false,   // skip AGENTS.md — design persona is self-contained
+          abortSignal: controller.signal,
+        })
+
+        const streamConfig = {
+          configurable: { thread_id: threadId },
+          signal: controller.signal,
+          streamMode: ["messages", "values"] as ("messages" | "values")[],
+          recursionLimit: 200,
+        }
+
+        const humanMessage =
+          imageData && mimeType
+            ? new HumanMessage({
+                content: [
+                  {
+                    type: "image_url",
+                    image_url: { url: `data:${mimeType};base64,${imageData}`, detail: "high" },
+                  },
+                  { type: "text", text: prompt },
+                ],
+              })
+            : new HumanMessage(prompt)
+
+        const stream = await agent.stream(
+          { messages: [humanMessage] },
+          streamConfig
+        )
+
+        let streamedText = ""
+        let finalMessageText = ""
+        const skillUsageDetector = new SkillUsageDetector()
+        const skillToolCallIds = new Map<string, string>()
+        const pendingSkillReadPathsByToolCallId = new Map<string, string>()
+        const pendingSkillResultsByToolCallId = new Map<string, boolean>()
+        const emittedSkillStartToolCallIds = new Set<string>()
+        const emittedSkillResultToolCallIds = new Set<string>()
+        const emittedToolCallIds = new Set<string>()
+        const emittedToolResultIds = new Set<string>()
+
+        const getSkillNameForReadPath = (rawPath: string): string => {
+          return skillUsageDetector.getSkillNameForReadFilePath(rawPath)
+        }
+
+        const emitSkillStart = (toolCallId: string, skillName: string) => {
+          if (emittedSkillStartToolCallIds.has(toolCallId)) return
+          emittedSkillStartToolCallIds.add(toolCallId)
+          skillToolCallIds.set(toolCallId, skillName)
+          send({
+            type: "execution",
+            event: {
+              kind: "used_skill",
+              id: toolCallId,
+              toolCallId,
+              name: skillName,
+              status: "running",
+              timestamp: Date.now(),
+            } satisfies DesignExecutionEvent,
+          })
+        }
+
+        const emitSkillResult = (toolCallId: string, isError: boolean) => {
+          if (emittedSkillResultToolCallIds.has(toolCallId)) return
+          const skillName = skillToolCallIds.get(toolCallId)
+          if (!skillName) return
+          emittedSkillResultToolCallIds.add(toolCallId)
+          send({
+            type: "execution",
+            event: {
+              kind: "used_skill",
+              id: `${toolCallId}:skill-result`,
+              toolCallId,
+              name: skillName,
+              status: isError ? "error" : "success",
+              isError,
+              timestamp: Date.now(),
+            } satisfies DesignExecutionEvent,
+          })
+        }
+
+        const flushPendingSkillReads = () => {
+          for (const [toolCallId, readPath] of pendingSkillReadPathsByToolCallId.entries()) {
+            const skillName = getSkillNameForReadPath(readPath)
+            if (!skillName) continue
+
+            pendingSkillReadPathsByToolCallId.delete(toolCallId)
+            emitSkillStart(toolCallId, skillName)
+
+            const pendingResult = pendingSkillResultsByToolCallId.get(toolCallId)
+            if (pendingResult !== undefined) {
+              pendingSkillResultsByToolCallId.delete(toolCallId)
+              emitSkillResult(toolCallId, pendingResult)
+            }
+          }
+        }
+
+        const rememberSkillMetadata = (skills: Array<{ name?: string; path?: string }>) => {
+          skillUsageDetector.onSkillsMetadata(skills)
+          flushPendingSkillReads()
+        }
+
+        const maybeEmitSkillStart = (toolCall: { id?: string; name?: string; args?: Record<string, unknown> }) => {
+          if (toolCall.name !== "read_file" || !toolCall.id) return
+          const readPath = getReadFilePath(toolCall.args)
+          if (!readPath) return
+
+          const skillName = getSkillNameForReadPath(readPath)
+          if (!skillName) {
+            pendingSkillReadPathsByToolCallId.set(toolCall.id, readPath)
+            return
+          }
+
+          emitSkillStart(toolCall.id, skillName)
+        }
+
+        const maybeEmitSkillResult = (toolCallId: string, isError: boolean) => {
+          if (!skillToolCallIds.has(toolCallId)) {
+            if (pendingSkillReadPathsByToolCallId.has(toolCallId)) {
+              pendingSkillResultsByToolCallId.set(toolCallId, isError)
+              flushPendingSkillReads()
+            }
+            return
+          }
+          emitSkillResult(toolCallId, isError)
+        }
+
+        for await (const rawChunk of stream) {
+          if (controller.signal.aborted) break
+
+          const [mode, data] = rawChunk as [string, unknown]
+
+          // Serialize to get stable class path (same as forwardStreamChunk in agent.ts)
+          const serialized = serializeStreamData(data)
+          if (mode === "values") {
+            const state = serialized as {
+              skillsMetadata?: Array<{ name?: string; path?: string }>
+              messages?: Array<Record<string, unknown>>
+            }
+            if (Array.isArray(state.skillsMetadata)) {
+              rememberSkillMetadata(state.skillsMetadata)
+            }
+            if (Array.isArray(state.messages)) {
+              let startIndex = 0
+              for (let index = state.messages.length - 1; index >= 0; index--) {
+                const msg = state.messages[index]
+                if (getSerializedClassName(msg).includes("Human")) {
+                  startIndex = index + 1
+                  break
+                }
+              }
+
+              for (const msg of state.messages.slice(startIndex)) {
+                const kwargs = (msg.kwargs ?? {}) as Record<string, unknown>
+                const className = getSerializedClassName(msg)
+                if (className.includes("AI")) {
+                  for (const toolCall of normalizeToolCalls(kwargs.tool_calls)) {
+                    if (!toolCall.id) continue
+                    maybeEmitSkillStart(toolCall)
+                    if (emittedToolCallIds.has(toolCall.id)) continue
+                    emittedToolCallIds.add(toolCall.id)
+                    send({
+                      type: "execution",
+                      event: {
+                        kind: "tool_call",
+                        id: toolCall.id,
+                        toolCallId: toolCall.id,
+                        name: toolCall.name,
+                        args: toolCall.args,
+                        status: "running",
+                        timestamp: Date.now(),
+                      } satisfies DesignExecutionEvent,
+                    })
+                  }
+                }
+                if (className.includes("Tool")) {
+                  const toolCallId = typeof kwargs.tool_call_id === "string" ? kwargs.tool_call_id : ""
+                  const resultKey = `${toolCallId || "tool"}:${String(kwargs.id || "")}`
+                  if (!toolCallId || emittedToolResultIds.has(resultKey)) continue
+                  emittedToolResultIds.add(resultKey)
+                  const isError = isToolMessageError(kwargs)
+                  send({
+                    type: "execution",
+                    event: {
+                      kind: "tool_result",
+                      id: resultKey,
+                      toolCallId,
+                      name: typeof kwargs.name === "string" ? kwargs.name : undefined,
+                      content: extractTextContent(kwargs.content ?? msg.content),
+                      isError,
+                      status: isError ? "error" : "success",
+                      timestamp: Date.now(),
+                    } satisfies DesignExecutionEvent,
+                  })
+                  maybeEmitSkillResult(toolCallId, isError)
+                }
+              }
+            }
+            continue
+          }
+
+          if (mode !== "messages") continue
+
+          const [msgChunk] = (serialized as unknown[]) as [Record<string, unknown>]
+          if (!msgChunk) continue
+
+          const kwargs = (msgChunk.kwargs ?? {}) as Record<string, unknown>
+          const className = getSerializedClassName(msgChunk)
+
+          if (className.includes("AI")) {
+            for (const toolCall of normalizeToolCalls(kwargs.tool_calls)) {
+              if (!toolCall.id) continue
+              maybeEmitSkillStart(toolCall)
+              if (emittedToolCallIds.has(toolCall.id)) continue
+              emittedToolCallIds.add(toolCall.id)
+              send({
+                type: "execution",
+                event: {
+                  kind: "tool_call",
+                  id: toolCall.id,
+                  toolCallId: toolCall.id,
+                  name: toolCall.name,
+                  args: toolCall.args,
+                  status: "running",
+                  timestamp: Date.now(),
+                } satisfies DesignExecutionEvent,
+              })
+            }
+          }
+
+          if (className.includes("Tool")) {
+            const toolCallId = typeof kwargs.tool_call_id === "string" ? kwargs.tool_call_id : ""
+            const resultKey = `${toolCallId || "tool"}:${String(kwargs.id || "")}`
+            if (toolCallId && !emittedToolResultIds.has(resultKey)) {
+              emittedToolResultIds.add(resultKey)
+              const isError = isToolMessageError(kwargs)
+              send({
+                type: "execution",
+                event: {
+                  kind: "tool_result",
+                  id: resultKey,
+                  toolCallId,
+                  name: typeof kwargs.name === "string" ? kwargs.name : undefined,
+                  content: extractTextContent(kwargs.content ?? msgChunk.content),
+                  isError,
+                  status: isError ? "error" : "success",
+                  timestamp: Date.now(),
+                } satisfies DesignExecutionEvent,
+              })
+              maybeEmitSkillResult(toolCallId, isError)
+            }
+            continue
+          }
+
+          // Only process AI messages (AIMessageChunk during streaming, AIMessage at end)
+          if (!className.includes("AI")) continue
+
+          // Extract text content — can be a plain string or an array of content blocks
+          const token = extractTextContent(kwargs.content)
+          if (!token) continue
+
+          if (className.includes("Chunk")) {
+            streamedText += token
+            send({ type: "token", token })
+          } else {
+            finalMessageText = token
+          }
+        }
+
+        if (controller.signal.aborted) {
+          send({ type: "cancelled" })
+          return
+        }
+
+        // Extract HTML from the agent's complete text output
+        const fullText = streamedText || finalMessageText
+        const html = extractHtml(fullText)
+        if (html && (html.includes("<!DOCTYPE") || html.includes("<html"))) {
+          // Store for potential future reference (storeHtml protocol)
+          if (tabId) htmlStore.set(tabId, html)
+          send({ type: "done", html })
+        } else {
+          send({
+            type: "error",
+            error: fullText.trim()
+              ? `模型返回了文本但未找到有效的 HTML。请检查模型配置或重试。\n\n模型输出片段：${fullText.slice(0, 300)}`
+              : "生成未返回任何内容，请重试。",
+          })
+        }
+      } catch (err) {
+        if (controller.signal.aborted) {
+          send({ type: "cancelled" })
+        } else {
+          const msg = err instanceof Error ? err.message : String(err)
+          console.error("[Design:Agent] Generation error:", msg)
+          send({ type: "error", error: msg })
+        }
+      } finally {
+        activeDesignAgents.delete(sessionId)
+      }
+    }
+  )
+
   // design:cancel — abort an active session
   ipcMain.handle("design:cancel", (_event, sessionId: string) => {
+    // Cancel direct-model sessions
     const controller = activeSessions.get(sessionId)
     if (controller) {
       controller.abort()
       activeSessions.delete(sessionId)
+    }
+    // Cancel agent-runtime sessions
+    const agentCtrl = activeDesignAgents.get(sessionId)
+    if (agentCtrl) {
+      agentCtrl.abort()
+      activeDesignAgents.delete(sessionId)
     }
   })
 
@@ -670,6 +1125,13 @@ function extractHtml(text: string): string {
 
   // 3. 如果直接以 HTML 声明开头，直接返回
   if (cleaned.startsWith("<!DOCTYPE") || cleaned.startsWith("<html")) return cleaned
+
+  // Agent Runtime may emit a short preamble before the final HTML after tool use.
+  const doctypeIndex = cleaned.search(/<!DOCTYPE/i)
+  if (doctypeIndex >= 0) return cleaned.slice(doctypeIndex).trim()
+
+  const htmlIndex = cleaned.search(/<html[\s>]/i)
+  if (htmlIndex >= 0) return cleaned.slice(htmlIndex).trim()
 
   return cleaned
 }

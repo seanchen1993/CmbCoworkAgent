@@ -1702,13 +1702,13 @@ const api = {
     generate: (
       sessionId: string,
       prompt: string,
-      onEvent: (event: { type: string; token?: string; html?: string; error?: string }) => void,
+      onEvent: (event: { type: string; token?: string; html?: string; error?: string; event?: unknown }) => void,
       modelId?: string,
       history?: Array<{ role: "user" | "assistant"; content: string }>,
       tabId?: string
     ): (() => void) => {
       const channel = `design:stream:${sessionId}`
-      const handler = (_: unknown, data: { type: string; token?: string; html?: string; error?: string }): void => {
+      const handler = (_: unknown, data: { type: string; token?: string; html?: string; error?: string; event?: unknown }): void => {
         onEvent(data)
         if (data.type === "done" || data.type === "error" || data.type === "cancelled") {
           ipcRenderer.removeListener(channel, handler)
@@ -1720,6 +1720,32 @@ const api = {
     },
     storeHtml: (tabId: string, html: string): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke("design:store-html", tabId, html),
+    /**
+     * Full Agent Runtime path — gives Design access to Skills, MCP tools,
+     * Hooks, Approvals and context summarisation.
+     * Uses tabId as the LangGraph thread ID so multi-turn is handled natively
+     * by the checkpoint store (no manual apiHistory management needed).
+     */
+    agentGenerate: (
+      sessionId: string,
+      prompt: string,
+      onEvent: (event: { type: string; token?: string; html?: string; error?: string; event?: unknown }) => void,
+      tabId: string,
+      modelId?: string,
+      imageData?: string,
+      mimeType?: string,
+    ): (() => void) => {
+      const channel = `design:stream:${sessionId}`
+      const handler = (_: unknown, data: { type: string; token?: string; html?: string; error?: string; event?: unknown }): void => {
+        onEvent(data)
+        if (data.type === "done" || data.type === "error" || data.type === "cancelled") {
+          ipcRenderer.removeListener(channel, handler)
+        }
+      }
+      ipcRenderer.on(channel, handler)
+      ipcRenderer.send("design:agent-generate", { sessionId, prompt, modelId, tabId, imageData, mimeType })
+      return () => ipcRenderer.removeListener(channel, handler)
+    },
     askQuestions: (
       sessionId: string,
       prompt: string,
