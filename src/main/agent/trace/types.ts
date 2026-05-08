@@ -192,7 +192,8 @@ export interface AgentTrace {
   pathName?: string
   /** Organization path ID from UserInfo.originPathId */
   pathId?: string
-  /** Parent organization levels derived from pathName */
+  /** Organization levels derived from pathName under 信息技术部 */
+  upperOrgLv0?: string
   upperOrgLv1?: string
   upperOrgLv2?: string
   upperOrgLv3?: string

@@ -53,7 +53,7 @@ function PiePanel({
               }
               labelLine={false}
               fontSize={9}
-              onClick={onSliceClick ? (entry) => onSliceClick(entry as Record<string, unknown>) : undefined}
+              onClick={onSliceClick ? (entry) => onSliceClick(entry as unknown as Record<string, unknown>) : undefined}
               style={onSliceClick ? { cursor: "pointer" } : undefined}
             >
               {data.map((_, i) => (
@@ -142,11 +142,11 @@ export function UserPanel({
 
       {/* Org distribution */}
       <PiePanel
-        title="部门分布"
+        title={isDrilledDown ? `${data.selectedUpperOrgLv1 || "未知"}下级分布` : "部门分布"}
         data={orgData as Record<string, unknown>[]}
         dataKey="count"
         nameKey="org"
-        helperText={`当前为 ${orgMetric.toUpperCase()} 视角，按${orgUnit}统计。点击可查看下级组织使用情况`}
+        helperText={`当前为 ${orgMetric.toUpperCase()} 视角，按${orgUnit}统计。${!isDrilledDown ? "点击可查看下级组织使用情况" : ""}`}
         action={(
           <div className="flex items-center gap-2">
             <div className="flex h-7 items-center rounded-full bg-muted px-1 text-[11px] font-medium text-muted-foreground">

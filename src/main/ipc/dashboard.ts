@@ -719,26 +719,29 @@ async function fetchModelStats(range: TimeRange, granularity: Granularity): Prom
 }
 
 function buildUpperOrgLv1Filter(upperOrgLv1: string): Record<string, unknown> {
-  if (upperOrgLv1 === "") {
-    return {
-      bool: {
-        should: [
-          { term: { upperOrgLv1: "" } },
-          { bool: { must_not: [{ exists: { field: "upperOrgLv1" } }] } }
-        ],
-        minimum_should_match: 1
-      }
+  return { term: { upperOrgLv1 } }
+}
+
+function normalizeUpperOrgLv1Option(upperOrgLv1?: string | null): string | null {
+  if (typeof upperOrgLv1 !== "string") return null
+  const normalized = upperOrgLv1.trim()
+  return normalized ? normalized : null
+}
+
+function buildNonEmptyOrgLevelFilter(field: "upperOrgLv0" | "upperOrgLv1"): Record<string, unknown> {
+  return {
+    bool: {
+      must: [{ exists: { field } }],
+      must_not: [{ term: { [field]: "" } }]
     }
   }
-
-  return { term: { upperOrgLv1 } }
 }
 
 function buildOrgDistributionAgg(
   selectedUpperOrgLv1: string | null,
   metric: "pv" | "uv"
 ): Record<string, unknown> {
-  const field = selectedUpperOrgLv1 !== null ? "orgName" : "upperOrgLv1"
+  const field = selectedUpperOrgLv1 !== null ? "upperOrgLv0" : "upperOrgLv1"
   const terms: Record<string, unknown> = { field, size: 30, missing: "" }
   const aggs = metric === "uv" ? { unique_users: { cardinality: { field: "sapId" } } } : undefined
 
@@ -747,27 +750,41 @@ function buildOrgDistributionAgg(
   }
 
   const items = aggs ? { terms, aggs } : { terms }
-  if (selectedUpperOrgLv1 === null) return items
+  const filters = [buildNonEmptyOrgLevelFilter(field)]
+  if (selectedUpperOrgLv1 !== null) {
+    filters.push(buildUpperOrgLv1Filter(selectedUpperOrgLv1))
+  }
 
   return {
-    filter: buildUpperOrgLv1Filter(selectedUpperOrgLv1),
+    filter: { bool: { filter: filters } },
     aggs: { items }
   }
 }
 
 async function fetchUserStats(range: TimeRange, granularity: Granularity, opts?: UserStatsOptions): Promise<unknown> {
   void granularity
-  const selectedUpperOrgLv1 = opts?.upperOrgLv1 ?? null
+  const selectedUpperOrgLv1 = normalizeUpperOrgLv1Option(opts?.upperOrgLv1)
+  const queryFilters = [timeRangeFilter("startedAt", range)]
+  if (selectedUpperOrgLv1 !== null) {
+    queryFilters.push(buildUpperOrgLv1Filter(selectedUpperOrgLv1))
+  }
+
   const body = {
     size: 0,
-    query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
+    query: { bool: { filter: queryFilters } },
     aggs: {
       top_users: {
         terms: { field: "sapId", size: 50 },
         aggs: {
-          user_name: { terms: { field: "userName",  size: 1 } },
-          org_name:  { terms: { field: "orgName",   size: 1 } },
-          upper_org_lv1: { terms: { field: "upperOrgLv1", size: 1, missing: "" } }
+          latest_user_info: {
+            top_hits: {
+              size: 1,
+              sort: [{ startedAt: { order: "desc" } }],
+              _source: {
+                includes: ["userName", "orgName", "upperOrgLv0", "upperOrgLv1"]
+              }
+            }
+          }
         }
       },
       by_org: buildOrgDistributionAgg(selectedUpperOrgLv1, "pv"),
@@ -1580,7 +1597,7 @@ function makeMockUserStats(range: TimeRange, opts?: UserStatsOptions): unknown {
   const to = new Date(range.to)
   const diffMs = to.getTime() - from.getTime()
   const diffDays = diffMs / (1000 * 60 * 60 * 24)
-  const selectedUpperOrgLv1 = opts?.upperOrgLv1 ?? null
+  const selectedUpperOrgLv1 = normalizeUpperOrgLv1Option(opts?.upperOrgLv1)
 
   const trendBuckets: Date[] = []
   if (diffDays <= 1) {
@@ -1600,65 +1617,67 @@ function makeMockUserStats(range: TimeRange, opts?: UserStatsOptions): unknown {
 
   const byOrgBuckets = selectedUpperOrgLv1 === null
     ? [
-        { key: "零售金融", doc_count: 748, unique_users: { value: 60 } },
-        { key: "公司金融", doc_count: 245, unique_users: { value: 20 } },
-        { key: "风险管理", doc_count: 189, unique_users: { value: 15 } },
-        { key: "科技管理", doc_count: 65, unique_users: { value: 5 } }
+        { key: "测试 1 部", doc_count: 748, unique_users: { value: 60 } },
+        { key: "开发二部", doc_count: 245, unique_users: { value: 20 } },
+        { key: "平台三部", doc_count: 189, unique_users: { value: 15 } }
       ]
-    : selectedUpperOrgLv1 === "零售金融"
+    : selectedUpperOrgLv1 === "测试 1 部"
       ? [
-          { key: "零售一部", doc_count: 430, unique_users: { value: 36 } },
-          { key: "零售二部", doc_count: 318, unique_users: { value: 24 } }
+          { key: "测试 1 组", doc_count: 430, unique_users: { value: 36 } },
+          { key: "测试 2 组", doc_count: 318, unique_users: { value: 24 } }
         ]
-      : selectedUpperOrgLv1 === "公司金融"
+      : selectedUpperOrgLv1 === "开发二部"
         ? [
-            { key: "企业金融部", doc_count: 245, unique_users: { value: 20 } }
+            { key: "开发三组", doc_count: 245, unique_users: { value: 20 } }
           ]
-        : selectedUpperOrgLv1 === "风险管理"
+        : selectedUpperOrgLv1 === "平台三部"
           ? [
-              { key: "风险管理部", doc_count: 189, unique_users: { value: 15 } }
+              { key: "平台一组", doc_count: 189, unique_users: { value: 15 } }
             ]
-          : selectedUpperOrgLv1 === "科技管理"
-            ? [
-                { key: "科技部", doc_count: 65, unique_users: { value: 5 } }
-              ]
-            : []
-  const byOrgPv = selectedUpperOrgLv1 === null
-    ? { buckets: byOrgBuckets }
-    : {
-        doc_count: byOrgBuckets.reduce((sum, bucket) => sum + bucket.doc_count, 0),
-        items: { buckets: byOrgBuckets }
-      }
-  const byOrgUv = selectedUpperOrgLv1 === null
-    ? { buckets: byOrgBuckets }
-    : {
-        doc_count: byOrgBuckets.reduce((sum, bucket) => sum + bucket.doc_count, 0),
-        items: { buckets: byOrgBuckets }
-      }
+          : []
+
+  const makeOrgAgg = (buckets: typeof byOrgBuckets): Record<string, unknown> => {
+    const docCount = buckets.reduce((sum, bucket) => sum + bucket.doc_count, 0)
+    return { doc_count: docCount, items: { buckets } }
+  }
+  const byOrgPv = makeOrgAgg(byOrgBuckets)
+  const byOrgUv = makeOrgAgg(byOrgBuckets)
+
+  const allTopUserBuckets = [
+    { key: "10010001", doc_count: 142, latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "张三", orgName: "测试 1 组", upperOrgLv1: "测试 1 部", upperOrgLv0: "测试 1 组" } }] } } },
+    { key: "10010002", doc_count: 118, latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "李四", orgName: "测试 2 组", upperOrgLv1: "测试 1 部", upperOrgLv0: "测试 2 组" } }] } } },
+    { key: "10010003", doc_count: 97,  latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "王五", orgName: "开发三组", upperOrgLv1: "开发二部", upperOrgLv0: "开发三组" } }] } } },
+    { key: "10010004", doc_count: 85,  latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "赵六", orgName: "测试 1 组", upperOrgLv1: "测试 1 部", upperOrgLv0: "测试 1 组" } }] } } },
+    { key: "10010005", doc_count: 73,  latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "钱七", orgName: "平台一组", upperOrgLv1: "平台三部", upperOrgLv0: "平台一组" } }] } } },
+    { key: "10010006", doc_count: 61,  latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "孙八", orgName: "开发三组", upperOrgLv1: "开发二部", upperOrgLv0: "开发三组" } }] } } }
+  ]
+  const topUserBuckets = selectedUpperOrgLv1 === null
+    ? allTopUserBuckets
+    : allTopUserBuckets.filter((bucket) => bucket.latest_user_info.hits.hits[0]._source.upperOrgLv1 === selectedUpperOrgLv1)
+
+  const byVersionBuckets = selectedUpperOrgLv1 === null
+    ? [
+        { key: "1.3.0", doc_count: 512, unique_users: { value: 98 } },
+        { key: "1.2.5", doc_count: 298, unique_users: { value: 62 } },
+        { key: "1.2.0", doc_count: 187, unique_users: { value: 41 } },
+        { key: "1.1.x", doc_count: 143, unique_users: { value: 28 } },
+        { key: "1.0.x", doc_count: 107, unique_users: { value: 19 } }
+      ]
+    : [
+        { key: "1.3.0", doc_count: Math.max(12, byOrgBuckets[0]?.doc_count ?? 0), unique_users: { value: Math.max(3, topUserBuckets.length) } },
+        { key: "1.2.5", doc_count: Math.max(6, Math.floor((byOrgBuckets[1]?.doc_count ?? byOrgBuckets[0]?.doc_count ?? 0) * 0.4)), unique_users: { value: Math.max(1, Math.ceil(topUserBuckets.length / 2)) } }
+      ]
 
   return {
     aggregations: {
       top_users: {
-        buckets: [
-          { key: "10010001", doc_count: 142, user_name: { buckets: [{ key: "张三", doc_count: 142 }] }, org_name: { buckets: [{ key: "零售一部", doc_count: 142 }] }, upper_org_lv1: { buckets: [{ key: "零售金融", doc_count: 142 }] }, success_count: { doc_count: 130 } },
-          { key: "10010002", doc_count: 118, user_name: { buckets: [{ key: "李四", doc_count: 118 }] }, org_name: { buckets: [{ key: "零售二部", doc_count: 118 }] }, upper_org_lv1: { buckets: [{ key: "零售金融", doc_count: 118 }] }, success_count: { doc_count: 110 } },
-          { key: "10010003", doc_count: 97,  user_name: { buckets: [{ key: "王五", doc_count: 97  }] }, org_name: { buckets: [{ key: "企业金融部", doc_count: 97  }] }, upper_org_lv1: { buckets: [{ key: "公司金融", doc_count: 97 }] }, success_count: { doc_count: 89  } },
-          { key: "10010004", doc_count: 85,  user_name: { buckets: [{ key: "赵六", doc_count: 85  }] }, org_name: { buckets: [{ key: "零售一部", doc_count: 85  }] }, upper_org_lv1: { buckets: [{ key: "零售金融", doc_count: 85 }] }, success_count: { doc_count: 72  } },
-          { key: "10010005", doc_count: 73,  user_name: { buckets: [{ key: "钱七", doc_count: 73  }] }, org_name: { buckets: [{ key: "风险管理部", doc_count: 73  }] }, upper_org_lv1: { buckets: [{ key: "风险管理", doc_count: 73 }] }, success_count: { doc_count: 68  } },
-          { key: "10010006", doc_count: 61,  user_name: { buckets: [{ key: "孙八", doc_count: 61  }] }, org_name: { buckets: [{ key: "科技部",    doc_count: 61  }] }, upper_org_lv1: { buckets: [{ key: "科技管理", doc_count: 61 }] }, success_count: { doc_count: 55  } }
-        ]
+        buckets: topUserBuckets
       },
       by_org: byOrgPv,
       by_org_pv: byOrgPv,
       by_org_uv: byOrgUv,
       by_version: {
-        buckets: [
-          { key: "1.3.0", doc_count: 512, unique_users: { value: 98 } },
-          { key: "1.2.5", doc_count: 298, unique_users: { value: 62 } },
-          { key: "1.2.0", doc_count: 187, unique_users: { value: 41 } },
-          { key: "1.1.x", doc_count: 143, unique_users: { value: 28 } },
-          { key: "1.0.x", doc_count: 107, unique_users: { value: 19 } }
-        ]
+        buckets: byVersionBuckets
       },
       user_trend: { buckets: trend }
     }
