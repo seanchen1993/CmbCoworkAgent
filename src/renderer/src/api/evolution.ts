@@ -1,5 +1,9 @@
+function normalizeBaseUrl(value: string | undefined): string {
+  return value?.trim().replace(/\/+$/, "") || ""
+}
+
 const TRACE_EVOLVER_BASE_URL =
-  (import.meta.env.VITE_TRACE_EVOLVER_BASE_URL as string | undefined)?.replace(/\/+$/, "") ||
+  normalizeBaseUrl(import.meta.env.VITE_TRACE_EVOLVER_ENDPOINT as string | undefined) ||
   "http://127.0.0.1:8017"
 const USE_DEV_MOCK =
   import.meta.env.DEV &&
