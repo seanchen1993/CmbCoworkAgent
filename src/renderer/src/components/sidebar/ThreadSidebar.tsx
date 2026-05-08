@@ -55,7 +55,7 @@ function getThreadWorkspacePath(thread: Thread, statePath?: string | null): stri
 }
 
 function getWorkspaceName(path: string | null): string {
-  if (!path) return "未关联项目"
+  if (!path) return "未关联工作区"
   const segments = path.split(/[\\/]/).filter(Boolean)
   return segments.at(-1) || path
 }
@@ -651,12 +651,12 @@ export function ThreadSidebar(): React.JSX.Element {
       </div>
 
       <div className="flex items-center gap-2 px-4 py-1.5 text-xs font-medium text-muted-foreground">
-        <span className="min-w-0 flex-1 truncate">项目 {threadProjects.length}</span>
+        <span className="min-w-0 flex-1 truncate">工作区 {threadProjects.length}</span>
         <Button
           variant="ghost"
           size="icon-sm"
           className="size-6 shrink-0"
-          title={allProjectsCollapsed ? "全部展开项目" : "全部收起项目"}
+          title={allProjectsCollapsed ? "全部展开工作区" : "全部收起工作区"}
           onClick={toggleAllProjects}
           disabled={threadProjects.length === 0}
         >
@@ -670,7 +670,7 @@ export function ThreadSidebar(): React.JSX.Element {
           variant="ghost"
           size="icon-sm"
           className="size-6 shrink-0"
-          title="新增项目"
+          title="新增工作区"
           onClick={handleAddProject}
           disabled={selectingProjectFolder}
         >
