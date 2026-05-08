@@ -103,6 +103,11 @@ interface DesignSkillReference {
   path: string
 }
 
+function getPathName(filePath: string | null): string {
+  if (!filePath) return ""
+  return filePath.split(/[\\/]/).filter(Boolean).pop() ?? filePath
+}
+
 type DesignApprovalDecision = "approve" | "approve_session" | "approve_permanent" | "reject"
 type DesignExecutionStatus = "running" | "success" | "error"
 
@@ -886,6 +891,8 @@ export function DesignView(): React.JSX.Element {
   const [tabStates, setTabStates]     = useState<Record<string, TabState>>(_init.tabStates)
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([])
   const [allSkills, setAllSkills] = useState<SkillInfo[]>([])
+  const [workspacePath, setWorkspacePath] = useState<string | null>(null)
+  const [workspaceLoading, setWorkspaceLoading] = useState(false)
   // Code & link modal state
   const [codeModalOpen, setCodeModalOpen] = useState(false)
   const [linkModalOpen, setLinkModalOpen] = useState(false)
@@ -947,6 +954,31 @@ export function DesignView(): React.JSX.Element {
       setAllSkills(skills.map((s) => ({ name: s.name, description: s.description, path: s.path })))
     }).catch(() => {})
   }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    window.api.workspace.get().then((path) => {
+      if (!cancelled) setWorkspacePath(path)
+    }).catch(() => {
+      if (!cancelled) setWorkspacePath(null)
+    })
+    return () => { cancelled = true }
+  }, [])
+
+  const handleSelectWorkspace = useCallback(async () => {
+    setWorkspaceLoading(true)
+    try {
+      const selectedPath = await window.api.workspace.select()
+      if (selectedPath) {
+        setWorkspacePath(selectedPath)
+        showToast(`工作目录已切换：${getPathName(selectedPath)}`)
+      }
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "选择工作目录失败")
+    } finally {
+      setWorkspaceLoading(false)
+    }
+  }, [showToast])
 
   // ── Keep activeTabIdRef in sync ───────────────────────────
   useEffect(() => { activeTabIdRef.current = activeTabId }, [activeTabId])
@@ -1375,10 +1407,11 @@ export function DesignView(): React.JSX.Element {
       image?.base64,
       image?.mimeType,
       isIteration ? getCurrentDesignHtml(tabStates[tabId]) : undefined,
-      skill ?? undefined
+      skill ?? undefined,
+      workspacePath ?? undefined
     )
     tabSessionsRef.current.set(tabId, { cleanup, sessionId })
-  }, [tabStates, updateTs])
+  }, [tabStates, updateTs, workspacePath])
 
   // ── Generate Design from Screenshot ──────────────────────
 
@@ -2005,7 +2038,31 @@ ${commentLines}${variantNote}`
           <div style={S.logo}>✦</div>
           <span style={S.titleText}>design</span>
         </div>
-        <button style={S.shareBtn}>Share</button>
+        <div style={S.titleActions}>
+          <button
+            onClick={handleSelectWorkspace}
+            disabled={workspaceLoading || isGenerating}
+            style={{
+              ...S.workspaceBtn,
+              opacity: workspaceLoading ? 0.65 : 1,
+              cursor: workspaceLoading || isGenerating ? "default" : "pointer",
+              color: workspacePath ? "#1a1a1a" : "#9a5b00",
+              borderColor: workspacePath ? "#d4d2cc" : "#e7bf7a",
+              background: workspacePath ? "#ffffff" : "#fff7e6",
+            }}
+            title={workspacePath ?? "选择工作目录"}
+          >
+            <span style={S.workspaceIcon}>▣</span>
+            <span style={S.workspaceText}>
+              {workspaceLoading
+                ? "选择中..."
+                : workspacePath
+                  ? getPathName(workspacePath)
+                  : "选择工作目录"}
+            </span>
+          </button>
+          <button style={S.shareBtn}>Share</button>
+        </div>
       </div>
 
       <div style={S.mainContent}>
@@ -4572,6 +4629,10 @@ const S: Record<string, React.CSSProperties> = {
   titleBar:          { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 16px", height: 48, background: "#f0efeb", flexShrink: 0 },
   logo:              { width: 28, height: 28, borderRadius: "50%", background: "#cc785c", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 14 },
   titleText:         { fontSize: 15, fontWeight: 500, color: "#1a1a1a" },
+  titleActions:      { display: "flex", alignItems: "center", gap: 8, minWidth: 0 },
+  workspaceBtn:      { display: "inline-flex", alignItems: "center", gap: 6, maxWidth: 240, padding: "6px 10px", fontSize: 12, fontWeight: 600, border: "1px solid #d4d2cc", borderRadius: 8, fontFamily: "inherit", minWidth: 0 },
+  workspaceIcon:     { fontSize: 12, lineHeight: 1, color: "inherit", flexShrink: 0 },
+  workspaceText:     { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const, minWidth: 0 },
   shareBtn:          { padding: "6px 16px", fontSize: 13, fontWeight: 600, background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 8, cursor: "pointer" },
   mainContent:       { display: "flex", flex: 1, overflow: "hidden" },
 

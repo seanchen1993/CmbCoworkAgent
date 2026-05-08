@@ -759,7 +759,7 @@ export function registerDesignHandlers(): void {
   ipcMain.on(
     "design:agent-generate",
     async (event, {
-      sessionId, prompt, modelId, tabId, imageData, mimeType, currentHtml, skill,
+      sessionId, prompt, modelId, tabId, imageData, mimeType, currentHtml, skill, workspacePath: requestedWorkspacePath,
     }: {
       sessionId: string
       prompt: string
@@ -769,6 +769,7 @@ export function registerDesignHandlers(): void {
       mimeType?: string
       currentHtml?: string
       skill?: DesignSkillReference
+      workspacePath?: string
     }) => {
       const channel = `design:stream:${sessionId}`
       const win = BrowserWindow.fromWebContents(event.sender)
@@ -784,14 +785,30 @@ export function registerDesignHandlers(): void {
       activeDesignAgents.set(sessionId, controller)
 
       // workspacePath: required by agent runtime for hooks & tools.
-      // Read from the same settings key used by the main app workspace picker.
-      // Fall back to app userData so hooks still have a valid path even if no
-      // project workspace has been selected.
+      // Prefer the Design renderer's explicit selection, then fall back to the
+      // same global setting used by the Chat workspace picker.
       const storedWorkspace = designAgentStore.get("workspacePath", null)
-      const workspacePath =
-        typeof storedWorkspace === "string" && storedWorkspace
-          ? storedWorkspace
-          : app.getPath("userData")
+      const explicitWorkspace =
+        typeof requestedWorkspacePath === "string" && requestedWorkspacePath.trim()
+          ? requestedWorkspacePath.trim()
+          : null
+      const storedWorkspacePath =
+        typeof storedWorkspace === "string" && storedWorkspace.trim()
+          ? storedWorkspace.trim()
+          : null
+      const workspacePath = explicitWorkspace ?? storedWorkspacePath ?? app.getPath("userData")
+      try {
+        if (!fs.existsSync(workspacePath) || !fs.statSync(workspacePath).isDirectory()) {
+          send({ type: "error", error: `Design workspace is not available: ${workspacePath}` })
+          activeDesignAgents.delete(sessionId)
+          return
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        send({ type: "error", error: `Design workspace is not accessible: ${workspacePath}\n${message}` })
+        activeDesignAgents.delete(sessionId)
+        return
+      }
 
       // Each Design tab gets its own LangGraph thread — native multi-turn persistence.
       // Checkpoint paths only allow [a-zA-Z0-9_-], so keep this in sync with renderer approval listeners.

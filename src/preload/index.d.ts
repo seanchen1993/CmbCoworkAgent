@@ -636,7 +636,8 @@ interface CustomAPI {
       imageData?: string,
       mimeType?: string,
       currentHtml?: string,
-      skill?: { name: string; path: string }
+      skill?: { name: string; path: string },
+      workspacePath?: string
     ) => () => void
     askQuestions: (
       sessionId: string,
