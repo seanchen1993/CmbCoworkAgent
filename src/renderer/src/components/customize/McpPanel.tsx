@@ -27,6 +27,7 @@ function buildMcpMarketConfig(connector: McpConnectorConfig): Record<string, unk
     connector.kind === "stdio" || connector.command
       ? {
           name: connector.name,
+          type: "stdio",
           transport: "stdio",
           command: connector.command,
           args: connector.args ?? [],
@@ -34,6 +35,7 @@ function buildMcpMarketConfig(connector: McpConnectorConfig): Record<string, unk
         }
       : {
           name: connector.name,
+          type: connector.advanced?.transport ?? "streamable-http",
           url: connector.url,
           ...(connector.advanced?.transport ? { transport: connector.advanced.transport } : {}),
           ...(connector.advanced?.headers ? { headers: connector.advanced.headers } : {}),
