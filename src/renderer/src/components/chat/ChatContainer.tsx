@@ -34,11 +34,13 @@ import {
   CircleAlert,
   FilePenLine,
   Plus,
-  Loader2
+  Loader2,
+  CornerDownLeft
 } from "lucide-react"
 import type { FileAttachment } from "@/types"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { useAppStore } from "@/lib/store"
 import { cn } from "@/lib/utils"
 import { useShallow } from "zustand/react/shallow"
@@ -1479,6 +1481,24 @@ export function ChatContainer({
     }
   }
 
+  const handleInsertNewline = useCallback((): void => {
+    if (isLoading) return
+
+    const textarea = inputRef.current
+    const selectionStart = textarea?.selectionStart ?? input.length
+    const selectionEnd = textarea?.selectionEnd ?? input.length
+    const nextInput = `${input.slice(0, selectionStart)}\n${input.slice(selectionEnd)}`
+    const nextCursor = selectionStart + 1
+
+    setInput(nextInput)
+    requestAnimationFrame(() => {
+      const target = inputRef.current
+      if (!target) return
+      target.focus()
+      target.setSelectionRange(nextCursor, nextCursor)
+    })
+  }, [input, isLoading, setInput])
+
   // Auto-resize textarea based on content
   const adjustTextareaHeight = (): void => {
     const textarea = inputRef.current
@@ -2821,7 +2841,7 @@ export function ChatContainer({
                   placeholder={
                     attachments.length > 0
                       ? "输入消息或直接发送文件..."
-                      : "向 CMBDevClaw 提问，/ 输入命令"
+                      : "向 CMBDevClaw 提问，/ 输入命令；Shift + Enter 换行"
                   }
                   disabled={isLoading}
                   className={cn(
@@ -2859,6 +2879,24 @@ export function ChatContainer({
                     />
                   </div>
                   <div className="flex items-center gap-2">
+                    <TooltipProvider delayDuration={180}>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            type="button"
+                            disabled={isLoading}
+                            onClick={handleInsertNewline}
+                            aria-label="换行"
+                            className="cursor-pointer flex items-center justify-center size-7 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            <CornerDownLeft className="size-3.5" />
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent side="top" sideOffset={6}>
+                          Shift + Enter 换行
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
                     {isLoading ? (
                       <button
                         type="button"
