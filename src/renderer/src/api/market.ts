@@ -54,6 +54,8 @@ export interface MarketItem {
   canDelete?: boolean
   ip?: string
   installed?: boolean // 新增已安装状态字段
+  installedVersion?: string
+  updateAvailable?: boolean
 }
 
 export interface MarketUpdateResponse {

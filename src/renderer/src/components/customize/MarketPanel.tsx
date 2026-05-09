@@ -46,6 +46,12 @@ import { UniversalUploadDialog } from "./UniversalUploadDialog"
 import { SkillDetail } from "./SkillsPanel"
 import { MCPConnectorDetail } from "./MCPConnectorDetail"
 import { PluginDetailPanel } from "./PluginsPanel"
+import {
+  buildMarketInstalledFlags,
+  marketInstalledVersionStorage,
+  MarketUpdateBadge,
+  UpdateVersionTooltip
+} from "./MarketUpdateBadge"
 import { marketApi, MarketApiResponse, MarketItem, MarketItemType } from "../../api/market"
 import { getMarketMockResponse } from "./MarketMockData"
 import { getDefaultRange, parseTopUsersFromAgg } from "../dashboard/use-dashboard"
@@ -188,6 +194,9 @@ interface MarketItemCardProps {
   isDownloading?: boolean
   isInstalled?: boolean // 新增已安装状态
   isUpdating?: boolean // 新增更新中状态
+  installedVersion?: string | null
+  updateAvailable?: boolean
+  marketTypeLabel: string
   skillCallCount?: number | null
   skillUserCount?: number | null
   uploaderProfile?: UploaderProfile | null
@@ -204,6 +213,9 @@ function MarketItemCard({
   isDownloading = false,
   isInstalled = false,
   isUpdating = false,
+  installedVersion = null,
+  updateAvailable = false,
+  marketTypeLabel,
   skillCallCount = null,
   skillUserCount = null,
   uploaderProfile = null
@@ -276,6 +288,13 @@ function MarketItemCard({
                 已安装
               </span>
             )}
+            {updateAvailable && (
+              <MarketUpdateBadge
+                typeLabel={marketTypeLabel}
+                installedVersion={installedVersion}
+                currentVersion={item.version}
+              />
+            )}
           </div>
           {item.description && (
             <p className="text-sm text-[#87867f] leading-relaxed line-clamp-2 mt-2">
@@ -325,7 +344,10 @@ function MarketItemCard({
           {item.version && (
             <div className="flex items-center gap-1">
               <GitBranch className="size-3 shrink-0" />
-              <span>v{item.version}</span>
+              <span>
+                {updateAvailable && installedVersion ? `v${installedVersion} -> ` : ""}v
+                {item.version}
+              </span>
             </div>
           )}
           {item.user_id ? (
@@ -367,15 +389,31 @@ function MarketItemCard({
                     <Zap className="size-3" />
                     自动保持最新
                   </span>
+                ) : updateAvailable ? (
+                  <UpdateVersionTooltip
+                    typeLabel={marketTypeLabel}
+                    installedVersion={installedVersion}
+                    currentVersion={item.version}
+                  >
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="market-update-bounce h-7 px-3 gap-1 text-xs cursor-pointer rounded-lg text-[#0f766e] border-[#78d7cb] bg-[#e5fbf7] hover:bg-[#d4f7f0]"
+                      onClick={handleUpdateInstall}
+                    >
+                      <Zap className="size-3" />
+                      更新
+                    </Button>
+                  </UpdateVersionTooltip>
                 ) : (
                   <Button
                     variant="outline"
                     size="sm"
-                    className="h-7 px-3 gap-1 text-xs text-[#5e5d59] border-[#e8e6dc] bg-[#f5f4ed] hover:bg-[#e8e6dc] cursor-pointer rounded-lg"
+                    className="h-7 px-3 gap-1 text-xs cursor-pointer rounded-lg text-[#5e5d59] border-[#e8e6dc] bg-[#f5f4ed] hover:bg-[#e8e6dc]"
                     onClick={handleUpdateInstall}
                   >
                     <Zap className="size-3" />
-                    更新
+                    重装
                   </Button>
                 )
               ) : (
@@ -514,6 +552,7 @@ export function MarketPanel(): React.JSX.Element {
   const installedSkillsRef = useRef<string[]>([])
   const installedMcpsRef = useRef<string[]>([])
   const installedPluginsRef = useRef<string[]>([])
+  const updateNoticeShownRef = useRef<Set<string>>(new Set())
   const openItemDetailRef = useRef<(item: MarketItem) => Promise<void>>(async () => {})
   const currentUserCandidateSet = useMemo(
     () => new Set(currentUserUploadCandidates),
@@ -821,13 +860,16 @@ export function MarketPanel(): React.JSX.Element {
   // 同步已安装状态，不触发额外的 market 接口请求
   useEffect(() => {
     setSkillsData((prev) =>
-      prev.map((item) => ({
-        ...item,
-        canDelete: localStorageHelper.canDeleteItem(item.name, "skill"),
-        installed:
+      prev.map((item) => {
+        const isInstalled =
           installedSkills.includes(item.name) ||
           installedSkills.some((str) => item.name === str || item.filename?.includes(str))
-      }))
+        return {
+          ...item,
+          canDelete: localStorageHelper.canDeleteItem(item.name, "skill"),
+          ...buildMarketInstalledFlags(item, "skill", isInstalled)
+        }
+      })
     )
   }, [installedSkills])
 
@@ -849,7 +891,7 @@ export function MarketPanel(): React.JSX.Element {
       prev.map((item) => ({
         ...item,
         canDelete: localStorageHelper.canDeleteItem(item.name, "mcp"),
-        installed: installedMcps.includes(item.name)
+        ...buildMarketInstalledFlags(item, "mcp", installedMcps.includes(item.name))
       }))
     )
   }, [installedMcps])
@@ -863,7 +905,7 @@ export function MarketPanel(): React.JSX.Element {
       prev.map((item) => ({
         ...item,
         canDelete: localStorageHelper.canDeleteItem(item.name, "plugin"),
-        installed: installedPlugins.includes(item.name)
+        ...buildMarketInstalledFlags(item, "plugin", installedPlugins.includes(item.name))
       }))
     )
   }, [installedPlugins])
@@ -939,6 +981,7 @@ export function MarketPanel(): React.JSX.Element {
 
       if (response.success) {
         console.log(`Successfully updated and installed ${item.name}`)
+        marketInstalledVersionStorage.setVersion(itemName, activeTab, item.version)
         toast.success(
           `已为您更新并安装「${item.name}」到${getMarketTypeLabel(activeTab)}，请新开一个会话试试效果。`
         )
@@ -951,6 +994,7 @@ export function MarketPanel(): React.JSX.Element {
         } else if (activeTab === "plugin") {
           await loadInstalledPlugins()
         }
+        triggerReload()
       } else {
         console.error("Update install failed:", response.error)
         setError(response.error || "更新安装失败")
@@ -996,7 +1040,7 @@ export function MarketPanel(): React.JSX.Element {
         return {
           ...item,
           canDelete: localStorageHelper.canDeleteItem(item.name, type),
-          installed: isInstalled
+          ...buildMarketInstalledFlags(item, type, isInstalled)
         }
       })
     }
@@ -1098,6 +1142,26 @@ export function MarketPanel(): React.JSX.Element {
   }
 
   const currentData = getCurrentData()
+  useEffect(() => {
+    if (loading) return
+    const updatedItems = currentData.filter((item) => item.installed && item.updateAvailable)
+    if (updatedItems.length === 0) return
+
+    const noticeKey = `${activeTab}:${updatedItems
+      .map((item) => `${item.name}@${item.version || ""}`)
+      .join("|")}`
+    if (updateNoticeShownRef.current.has(noticeKey)) return
+
+    updateNoticeShownRef.current.add(noticeKey)
+    const firstItem = updatedItems[0]
+    const extraCount = updatedItems.length - 1
+    toast.info(
+      extraCount > 0
+        ? `已安装的「${firstItem.name}」等 ${updatedItems.length} 个${getMarketTypeLabel(activeTab)}有更新，可点击更新安装。`
+        : `已安装的「${firstItem.name}」有更新，可点击更新安装。`
+    )
+  }, [activeTab, currentData, loading])
+
   const selectedItem =
     selectedItemKey !== null
       ? currentData.find((item) => getItemKey(item) === selectedItemKey) || null
@@ -1383,6 +1447,7 @@ export function MarketPanel(): React.JSX.Element {
         if (existingSkill) {
           await window.api.skills.delete(existingSkill.path)
         }
+        marketInstalledVersionStorage.removeVersion(itemName, activeTab)
         await loadInstalledSkills()
       } else if (activeTab === "mcp" && window.api?.mcp?.delete) {
         const mcpsMetadata = await window.api.mcp.list()
@@ -1390,6 +1455,7 @@ export function MarketPanel(): React.JSX.Element {
         if (existingMcp) {
           await window.api.mcp.delete(existingMcp.id)
         }
+        marketInstalledVersionStorage.removeVersion(itemName, activeTab)
         await loadInstalledMcps()
       } else if (activeTab === "plugin" && window.api?.plugins?.delete) {
         const pluginsMetadata = await window.api.plugins.list()
@@ -1397,6 +1463,7 @@ export function MarketPanel(): React.JSX.Element {
         if (existingPlugin) {
           await window.api.plugins.delete(existingPlugin.path)
         }
+        marketInstalledVersionStorage.removeVersion(itemName, activeTab)
         await loadInstalledPlugins()
       }
     } catch (error) {
@@ -1477,6 +1544,7 @@ export function MarketPanel(): React.JSX.Element {
         if (downloadToLocal) {
           toast.success(`「${item.name}」已保存到本地。`)
         } else {
+          marketInstalledVersionStorage.setVersion(itemName, activeTab, item.version)
           toast.success(
             `「${item.name}」已安装到${getMarketTypeLabel(activeTab)}，请新开一个会话试试效果。`
           )
@@ -1825,7 +1893,10 @@ export function MarketPanel(): React.JSX.Element {
                     )}
                     {selectedItem.version && (
                       <span className="inline-flex items-center gap-1 rounded-full bg-[#f5f4ed] border border-[#e8e6dc] text-[#5e5d59] px-2.5 py-1">
-                        <GitBranch className="size-3" />v{selectedItem.version}
+                        <GitBranch className="size-3" />
+                        {selectedItem.updateAvailable && selectedItem.installedVersion
+                          ? `v${selectedItem.installedVersion} -> v${selectedItem.version}`
+                          : `v${selectedItem.version}`}
                       </span>
                     )}
                     <span className="inline-flex items-center gap-1 rounded-full bg-[#f5f4ed] border border-[#e8e6dc] text-[#5e5d59] px-2.5 py-1">
@@ -1837,6 +1908,15 @@ export function MarketPanel(): React.JSX.Element {
                         <CheckCircle className="size-3" />
                         已安装
                       </span>
+                    )}
+                    {selectedItem.updateAvailable && (
+                      <MarketUpdateBadge
+                        typeLabel={getMarketTypeLabel(activeTab)}
+                        installedVersion={selectedItem.installedVersion}
+                        currentVersion={selectedItem.version}
+                        label={`当前${getMarketTypeLabel(activeTab)}有更新`}
+                        className="text-[12px] px-3 py-1"
+                      />
                     )}
                     {selectedItem.featured === "精品" && (
                       <span className="inline-flex items-center gap-1 rounded-full bg-[#fdf3e7] border border-[#f5d9c4] text-[#c4956a] px-2.5 py-1">
@@ -1882,16 +1962,33 @@ export function MarketPanel(): React.JSX.Element {
                           <Zap className="size-3" />
                           自动保持最新
                         </span>
+                      ) : selectedItem.updateAvailable ? (
+                        <UpdateVersionTooltip
+                          typeLabel={getMarketTypeLabel(activeTab)}
+                          installedVersion={selectedItem.installedVersion}
+                          currentVersion={selectedItem.version}
+                        >
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="market-update-bounce h-8 gap-1.5 text-xs rounded-lg cursor-pointer text-[#0f766e] border-[#78d7cb] bg-[#e5fbf7] hover:bg-[#d4f7f0]"
+                            onClick={() => handleUpdateInstall(selectedItem)}
+                            disabled={updatingItems.has(getItemKey(selectedItem))}
+                          >
+                            <Zap className="size-3" />
+                            更新安装
+                          </Button>
+                        </UpdateVersionTooltip>
                       ) : (
                         <Button
                           variant="outline"
                           size="sm"
-                          className="h-8 gap-1.5 text-xs text-[#5e5d59] border-[#e8e6dc] bg-[#f5f4ed] hover:bg-[#e8e6dc] rounded-lg cursor-pointer"
+                          className="h-8 gap-1.5 text-xs rounded-lg cursor-pointer text-[#5e5d59] border-[#e8e6dc] bg-[#f5f4ed] hover:bg-[#e8e6dc]"
                           onClick={() => handleUpdateInstall(selectedItem)}
                           disabled={updatingItems.has(getItemKey(selectedItem))}
                         >
                           <Zap className="size-3" />
-                          更新安装
+                          重新安装
                         </Button>
                       )
                     ) : (
@@ -1947,7 +2044,9 @@ export function MarketPanel(): React.JSX.Element {
                 {activeTab === "skill" && canViewSkillUserDetail && (
                   <div className="rounded-2xl border border-[#e8e6dc] bg-[#faf9f5] p-4 space-y-3 shadow-[rgba(0,0,0,0.03)_0px_2px_10px]">
                     <div className="flex items-center justify-between">
-                      <h4 className="text-[13px] font-medium text-[#141413]">使用用户明细（本月）</h4>
+                      <h4 className="text-[13px] font-medium text-[#141413]">
+                        使用用户明细（本月）
+                      </h4>
                       <div className="flex items-center gap-1.5">
                         <span className="inline-flex items-center gap-1 rounded-full border border-[#d7e2f5] bg-[#eef4ff] px-2 py-0.5 text-[11px] text-[#365d97]">
                           <BarChart3 className="size-3" />
@@ -2219,6 +2318,9 @@ export function MarketPanel(): React.JSX.Element {
                                 isDownloading={downloadingItems.has(item.id || item.name)}
                                 isInstalled={item.installed}
                                 isUpdating={updatingItems.has(item.id || item.name)}
+                                installedVersion={item.installedVersion}
+                                updateAvailable={item.updateAvailable}
+                                marketTypeLabel={getMarketTypeLabel(activeTab)}
                                 skillCallCount={
                                   activeTab === "skill"
                                     ? (getSkillMetricByName(skillUsageSummary, item.name)?.calls ??
