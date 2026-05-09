@@ -19,6 +19,9 @@ import {
   isOnlineSkillEvolutionEnabled,
   isSkillAutoProposeEnabled,
   getGlobalRoutingMode,
+  getEnabledHooks,
+  getEnabledPluginHookMetadata,
+  getEnabledSkillHookMetadata,
   getHooks,
   getWorkspaceHooks,
   getEnabledPluginHooks,
@@ -69,6 +72,9 @@ import { isRetryableApiError, buildOrderedChain, type FailoverAttempt } from "..
 import { runHooks, type HookContext, type HookResultCallback } from "../hooks/runner"
 import {
   createHookScope,
+  normalizePathKey,
+  normalizePluginId,
+  normalizeSkillName,
   resolveEnabledHooksForRun,
   type HookScopeController
 } from "../hooks/scope"
@@ -108,6 +114,163 @@ const STOP_HOOK_REVISION_PROMPT_PREFIX = "[[CMBDEVCLAW_STOP_HOOK_REVISION]]"
 
 // Track active runs for cancellation
 const activeRuns = new Map<string, AbortController>()
+
+/**
+ * Thread-scoped hook state shared across IPC handler boundaries. A new
+ * `agent:invoke` starts a fresh turn, but keeps the session-level persistent
+ * hook keys that were activated by earlier skill / plugin use in this thread.
+ * `agent:resume` / `agent:interrupt` reuse the current turn state. Without
+ * this Map, every IPC handler entry would reset hookScope etc. and scoped
+ * hooks would stop firing after a HITL pause or later user message.
+ */
+interface TurnState {
+  hookScope: HookScopeController
+  skillUseTracker: SkillUseTracker
+  skillHookKeys: Set<string>
+  stopContextCollector: StopHookContextCollector
+  runToken: string
+}
+
+const turnStates = new Map<string, TurnState>()
+
+function createTurnState(initialUserMessage?: string): TurnState {
+  return {
+    hookScope: createHookScope(),
+    skillUseTracker: createSkillUseTracker(),
+    skillHookKeys: new Set<string>(),
+    stopContextCollector: new StopHookContextCollector(initialUserMessage),
+    runToken: uuid()
+  }
+}
+
+function resetTurnStateForNewInvoke(state: TurnState, initialUserMessage?: string): void {
+  const snapshot = state.hookScope.snapshot()
+  state.hookScope = createHookScope()
+  state.hookScope.activatePersistentHookKeys(snapshot.persistentHookKeys ?? [])
+  state.skillUseTracker = createSkillUseTracker()
+  state.skillHookKeys = new Set<string>()
+  state.stopContextCollector = new StopHookContextCollector(initialUserMessage)
+}
+
+function getOrCreateTurnState(threadId: string, initialUserMessage?: string): TurnState {
+  const existing = turnStates.get(threadId)
+  if (existing) return existing
+  const fresh = createTurnState(initialUserMessage)
+  turnStates.set(threadId, fresh)
+  return fresh
+}
+
+function disposeTurnState(threadId: string): void {
+  turnStates.delete(threadId)
+}
+
+export function disposeAgentThreadState(threadId: string): void {
+  disposeTurnState(threadId)
+}
+
+export function disposeAllAgentThreadStates(): void {
+  turnStates.clear()
+}
+
+function disposeTurnRuntimeState(state: TurnState): void {
+  state.skillUseTracker = createSkillUseTracker()
+  state.skillHookKeys = new Set<string>()
+  state.stopContextCollector = new StopHookContextCollector()
+}
+
+function startTurnStateRun(state: TurnState): string {
+  state.runToken = uuid()
+  return state.runToken
+}
+
+function shouldDisposeTurnState(threadId: string, runToken: string): boolean {
+  return turnStates.get(threadId)?.runToken === runToken
+}
+
+/**
+ * Snapshot every enabled hook (global + workspace + plugin + skill) so the
+ * prune step can search across all sources for `persistAfterInterrupt: true`.
+ * The lists are filtered for `enabled` already at the storage layer.
+ */
+function getAllEnabledHooksForInterrupt(workspacePath: string | undefined): HookConfig[] {
+  return [
+    ...getEnabledHooks(workspacePath),
+    ...getEnabledPluginHookMetadata(),
+    ...getEnabledSkillHookMetadata()
+  ]
+}
+
+/**
+ * At a HITL interrupt boundary (resume / interrupt entry), drop activations
+ * for skills / plugins that have no `persistAfterInterrupt: true` hook.
+ * Anything kept stays scoped for the next stream; anything pruned reverts to
+ * pre-interrupt fresh-state behaviour. `stopContextCollector` is intentionally
+ * not pruned — it tracks turn-wide history regardless of skill scope.
+ */
+function pruneTurnStateAtInterrupt(
+  state: TurnState,
+  allHooks: readonly HookConfig[]
+): void {
+  const keepPluginIds = new Set<string>()
+  const keepSkillPaths = new Set<string>()
+  const keepSkillNames = new Set<string>()
+  for (const hook of allHooks) {
+    if (hook.persistAfterInterrupt !== true) continue
+    const scoped = hook as HookConfig & {
+      pluginId?: string
+      skillName?: string
+      skillPath?: string
+      skillRoot?: string
+    }
+    if (typeof scoped.pluginId === "string" && scoped.pluginId.length > 0) {
+      keepPluginIds.add(normalizePluginId(scoped.pluginId))
+    }
+    const skillPath = scoped.skillPath ?? scoped.skillRoot ?? hook.hookSourceRoot
+    if (typeof skillPath === "string" && skillPath.length > 0) {
+      keepSkillPaths.add(normalizePathKey(skillPath))
+    }
+    if (typeof scoped.skillName === "string" && scoped.skillName.length > 0) {
+      keepSkillNames.add(normalizeSkillName(scoped.skillName))
+    }
+  }
+
+  state.hookScope.activatePersistentHooks(
+    allHooks.filter((hook) => {
+      if (hook.persistAfterInterrupt !== true) return false
+      const scoped = hook as HookConfig & {
+        pluginId?: string
+        skillName?: string
+        skillPath?: string
+        skillRoot?: string
+      }
+      const hookPluginId = normalizePluginId(scoped.pluginId)
+      const hookSkillPath = normalizePathKey(scoped.skillPath ?? scoped.skillRoot ?? hook.hookSourceRoot)
+      const hookSkillName = normalizeSkillName(scoped.skillName)
+      return (
+        (hookPluginId && state.hookScope.activePluginIds.has(hookPluginId)) ||
+        (hookSkillPath && state.hookScope.activeSkillPaths.has(hookSkillPath)) ||
+        (hookSkillName && state.hookScope.activeSkillNames.has(hookSkillName))
+      )
+    })
+  )
+
+  state.hookScope.pruneActivations({
+    keepPluginId: (id) => keepPluginIds.has(id),
+    keepSkillPath: (path) => keepSkillPaths.has(path),
+    keepSkillName: (name) => keepSkillNames.has(name)
+  })
+  state.skillUseTracker.pruneRecords((record) => {
+    return (
+      keepSkillPaths.has(normalizePathKey(record.rootDir)) ||
+      keepSkillNames.has(normalizeSkillName(record.name))
+    )
+  })
+  // skillHookKeys is keyed by the same normalized rootDir path the scope
+  // uses, so we can filter against keepSkillPaths directly.
+  for (const key of [...state.skillHookKeys]) {
+    if (!keepSkillPaths.has(key)) state.skillHookKeys.delete(key)
+  }
+}
 
 interface ExplicitSkillActivation {
   parsed: ParsedSkillUseBlock
@@ -1105,9 +1268,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
     const abortController = new AbortController()
     activeRuns.set(threadId, abortController)
-    const hookScope = createHookScope()
-    const skillHookKeys = new Set<string>()
-    const skillUseTracker = createSkillUseTracker()
+    const turnState = getOrCreateTurnState(threadId, message)
+    resetTurnStateForNewInvoke(turnState, message)
+    const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
+    const runToken = startTurnStateRun(turnState)
+    let turnStateShouldDispose = false
 
     // Abort the stream if the window is closed/destroyed
     const onWindowClosed = (): void => {
@@ -1121,7 +1286,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     const skillUsageDetector = new SkillUsageDetector()
     const toolCallCounter = new ToolCallCounter()
     let assistantText = ""
-    const stopContextCollector = new StopHookContextCollector(message)
 
     const sendHookNotice = (notice: string): void => {
       window.webContents.send(channel, {
@@ -1155,6 +1319,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           systemMessage: result.systemMessage
         }
       })
+      turnStateShouldDispose = true
       window.webContents.send(channel, { type: "done" })
     }
 
@@ -1220,6 +1385,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           message: "Please select a workspace folder before sending messages."
         })
         await tracer.finish("error", "WORKSPACE_REQUIRED")
+        turnStateShouldDispose = true
         return
       }
 
@@ -1239,6 +1405,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           error: reason
         })
         await tracer.finish("error", reason)
+        turnStateShouldDispose = true
         return
       }
       if (explicitSkillActivation?.skill) {
@@ -1279,6 +1446,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       if (promptSubmitResult?.blocked || promptSubmitResult?.continue === false) {
         sendHookBlocked("UserPromptSubmit", promptSubmitResult, "消息被 Hook 策略拦截")
         await tracer.finish("cancelled", "UserPromptSubmit hook stopped the turn")
+        turnStateShouldDispose = true
         return
       }
       // Apply hook-supplied prompt rewrite / context injection. `message` remains the raw
@@ -2036,6 +2204,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
         if (completionOutcome === "failed") {
           await tracer.finish("error", "Stop hook blocked completion")
+          turnStateShouldDispose = true
           return
         }
         // "halted" falls through to the normal done path so the renderer stops
@@ -2049,6 +2218,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           window,
           channel
         })
+        turnStateShouldDispose = true
         window.webContents.send(channel, { type: "done" })
         notifyIfBackground("✅ 任务完成", lastFinalText || assistantText.trim() || "对话已完成")
 
@@ -2180,6 +2350,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
           })
         }
+        turnStateShouldDispose = true
       } else {
         tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
         tracer.finish("cancelled").catch(() => {})
@@ -2193,9 +2364,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
           })
         }
+        turnStateShouldDispose = true
       }
     } finally {
-      activeRuns.delete(threadId)
+      if (activeRuns.get(threadId) === abortController) {
+        activeRuns.delete(threadId)
+      }
+      if (turnStateShouldDispose && shouldDisposeTurnState(threadId, runToken)) {
+        disposeTurnRuntimeState(turnState)
+      }
       discardAgentAutoCommitTracking(threadId)
       // Clean up sandbox ACLs granted during this run (unelevated mode keeps them
       // across commands for performance, so we revoke them when the run ends).
@@ -2230,6 +2407,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         type: "error",
         error: "Workspace path is required"
       })
+      disposeTurnState(threadId)
       return
     }
 
@@ -2242,10 +2420,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
     const abortController = new AbortController()
     activeRuns.set(threadId, abortController)
-    const hookScope = createHookScope()
-    const skillHookKeys = new Set<string>()
-    const skillUseTracker = createSkillUseTracker()
-    const stopContextCollector = new StopHookContextCollector()
+    // Resume = same logical turn as the original `agent:invoke`. Reuse the
+    // existing turn-state if it's still alive, then prune skill / plugin
+    // scopes that didn't opt in to `persistAfterInterrupt`. Falls back to a
+    // fresh state if the turn-state was disposed (e.g. process restart between
+    // invoke and resume).
+    const turnState = getOrCreateTurnState(threadId)
+    const runToken = startTurnStateRun(turnState)
+    pruneTurnStateAtInterrupt(turnState, getAllEnabledHooksForInterrupt(workspacePath))
+    const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
+    let turnStateShouldDispose = false
     const sendHookNotice = (notice: string): void => {
       window.webContents.send(channel, {
         type: "custom",
@@ -2484,7 +2668,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           onHookResult
         })
 
-        if (completionOutcome === "failed") return
+        if (completionOutcome === "failed") {
+          turnStateShouldDispose = true
+          return
+        }
         // "halted" falls through to the done path so the renderer stops loading.
 
         await finalizeAutoCommit({
@@ -2495,6 +2682,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           window,
           channel
         })
+        turnStateShouldDispose = true
         window.webContents.send(channel, { type: "done" })
       }
     } catch (error) {
@@ -2511,8 +2699,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           error: error instanceof Error ? error.message : "Unknown error"
         })
       }
+      turnStateShouldDispose = true
     } finally {
-      activeRuns.delete(threadId)
+      if (activeRuns.get(threadId) === abortController) {
+        activeRuns.delete(threadId)
+      }
+      if (turnStateShouldDispose && shouldDisposeTurnState(threadId, runToken)) {
+        disposeTurnRuntimeState(turnState)
+      }
       discardAgentAutoCommitTracking(threadId)
     }
   })
@@ -2541,6 +2735,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         type: "error",
         error: "Workspace path is required"
       })
+      disposeTurnState(threadId)
       return
     }
 
@@ -2553,10 +2748,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
     const abortController = new AbortController()
     activeRuns.set(threadId, abortController)
-    const hookScope = createHookScope()
-    const skillHookKeys = new Set<string>()
-    const skillUseTracker = createSkillUseTracker()
-    const stopContextCollector = new StopHookContextCollector()
+    // Same-turn resume from a tool-call interrupt — reuse turn-state and
+    // prune non-persistent skills (mirrors `agent:resume`).
+    const turnState = getOrCreateTurnState(threadId)
+    const runToken = startTurnStateRun(turnState)
+    pruneTurnStateAtInterrupt(turnState, getAllEnabledHooksForInterrupt(workspacePath))
+    const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
+    let turnStateShouldDispose = false
     const sendHookNotice = (notice: string): void => {
       window.webContents.send(channel, {
         type: "custom",
@@ -2783,7 +2981,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             onHookResult
           })
 
-          if (completionOutcome === "failed") return
+          if (completionOutcome === "failed") {
+            turnStateShouldDispose = true
+            return
+          }
           // "halted" falls through to the done path so the renderer stops loading.
 
           await finalizeAutoCommit({
@@ -2794,11 +2995,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             window,
             channel
           })
+          turnStateShouldDispose = true
           window.webContents.send(channel, { type: "done" })
         }
       } else if (decision.type === "reject") {
         // For reject, we need to send a Command with reject decision
         // For now, just send done - the agent will see no resumption happened
+        turnStateShouldDispose = true
         window.webContents.send(channel, { type: "done" })
       }
       // edit case handled similarly to approve with modified args
@@ -2816,8 +3019,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           error: error instanceof Error ? error.message : "Unknown error"
         })
       }
+      turnStateShouldDispose = true
     } finally {
-      activeRuns.delete(threadId)
+      if (activeRuns.get(threadId) === abortController) {
+        activeRuns.delete(threadId)
+      }
+      if (turnStateShouldDispose && shouldDisposeTurnState(threadId, runToken)) {
+        disposeTurnRuntimeState(turnState)
+      }
       discardAgentAutoCommitTracking(threadId)
     }
   })

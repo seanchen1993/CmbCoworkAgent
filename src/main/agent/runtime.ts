@@ -278,6 +278,7 @@ function createScopedMcpCapabilityService(
       }
 
       hookScope.activatePlugin(pluginId)
+      hookScope.activatePersistentHooks(resolveHooksForContext("PreToolUse", hookContext))
       const result = await service.invoke(idOrAlias, args)
       const postContext: HookContext = {
         ...hookContext,

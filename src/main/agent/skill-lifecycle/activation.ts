@@ -80,6 +80,9 @@ export async function activateSkillLifecycle(
       options.skill.pluginId,
       options.skill.rootDir
     )
+    options.hookScope?.activatePersistentHooks(
+      options.resolveHooks("PreToolUse", buildSkillContext(options))
+    )
     return { blocked: false, notes: [], skipped: true }
   }
 
@@ -107,6 +110,7 @@ export async function activateSkillLifecycle(
     options.skill.pluginId,
     options.skill.rootDir
   )
+  options.hookScope?.activatePersistentHooks(options.resolveHooks("PreToolUse", preContext))
   options.skillUseTracker?.recordSkillUse(options.skill, {
     trigger: options.trigger,
     triggerToolName: options.toolName

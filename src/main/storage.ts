@@ -36,6 +36,7 @@ import {
   makeFlattenedSkillDirName,
   type DiscoveredSkill
 } from "./skills/discovery"
+import { parseSkillFrontmatter } from "./skills/frontmatter"
 import {
   getDiscoveredSkillId,
   isDiscoveredSkillDisabled,
@@ -43,6 +44,11 @@ import {
   removeDisabledSkillEntriesForSkills,
   resolveDisabledSkillIds
 } from "./skills/ids"
+import {
+  DEFAULT_PLUGIN_HOOKS_PATH,
+  getPluginSkillSearchSources,
+  readPluginManifest
+} from "./plugins/manifest"
 const OPENWORK_DIR = join(homedir(), ".cmbcoworkagent")
 const ENV_FILE = join(OPENWORK_DIR, ".env")
 
@@ -1621,7 +1627,6 @@ export function resetLspConfig(): import("./types").LspConfig {
 
 const PLUGINS_DIR = join(OPENWORK_DIR, "plugins")
 const PLUGINS_FILE = join(OPENWORK_DIR, "plugins.json")
-const DEFAULT_PLUGIN_HOOKS_PATH = "hooks/hooks.json"
 const SKILL_HOOKS_FILE = "hooks.json"
 const SKILL_HOOKS_FOLDER_FILE = "hooks/hooks.json"
 const SKILL_HOOKS_FILES = [SKILL_HOOKS_FILE, SKILL_HOOKS_FOLDER_FILE] as const
@@ -1723,25 +1728,15 @@ export function getEnabledPluginSkillSourceMetadata(): PluginSkillSourceMetadata
   const plugins = getPlugins().filter((p) => p.enabled && p.skillCount > 0)
   const sources: PluginSkillSourceMetadata[] = []
   for (const plugin of plugins) {
-    const skillsDir = join(plugin.path, "skills")
-    if (existsSync(skillsDir)) {
+    const manifest = readPluginManifest(plugin.path)?.manifest ?? null
+    for (const source of getPluginSkillSearchSources(plugin.path, manifest)) {
       sources.push({
-        sourceDir: skillsDir,
+        sourceDir: source.sourceDir,
         pluginId: plugin.id,
         pluginName: plugin.name,
-        pluginRoot: plugin.path
+        pluginRoot: plugin.path,
+        maxDepth: source.maxDepth
       })
-    } else {
-      const rootSkillMd = join(plugin.path, "SKILL.md")
-      if (existsSync(rootSkillMd)) {
-        sources.push({
-          sourceDir: plugin.path,
-          pluginId: plugin.id,
-          pluginName: plugin.name,
-          pluginRoot: plugin.path,
-          maxDepth: 0
-        })
-      }
     }
   }
   _pluginSkillSourcesCache = sources
@@ -2004,6 +1999,22 @@ function parseForcedOutcome(value: unknown): "always-revise" | "always-halt" | u
   return value === "always-revise" || value === "always-halt" ? value : undefined
 }
 
+function parseOptionalHookBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined
+}
+
+function parseNativeHookTimeout(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined
+}
+
+function parseClaudeHookTimeoutMs(raw: Record<string, unknown>): number | undefined {
+  const timeoutMs = parseNativeHookTimeout(raw.timeoutMs)
+  if (timeoutMs !== undefined) return Math.round(timeoutMs)
+
+  const timeoutSeconds = parseNativeHookTimeout(raw.timeout)
+  return timeoutSeconds !== undefined ? Math.round(timeoutSeconds * 1000) : undefined
+}
+
 function parseHookOnBlock(raw: unknown): HookOnBlockConfig | undefined {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined
 
@@ -2106,10 +2117,15 @@ function ccCommandToHookConfig(
 ): HookConfig | null {
   // inherit per-hook enabled extension field if present
   const enabled = h.enabled !== false && meta.enabled
-  // CC timeout in seconds → ms
-  const timeout = typeof h.timeout === "number" ? Math.round(h.timeout * 1000) : undefined
+  const timeout = parseClaudeHookTimeoutMs(h)
+  const once = parseOptionalHookBoolean(h.once)
+  const persistAfterInterrupt = parseOptionalHookBoolean(h.persistAfterInterrupt)
+  const modelId =
+    typeof h.modelId === "string" ? h.modelId : typeof h.model === "string" ? h.model : undefined
+  const hookType =
+    typeof h.type === "string" ? h.type : typeof h.prompt === "string" ? "prompt" : "command"
 
-  if (h.type === "command") {
+  if (hookType === "command") {
     if (typeof h.command !== "string") return null
     return {
       id,
@@ -2120,13 +2136,15 @@ function ccCommandToHookConfig(
       onBlock: parseHookOnBlock(h.onBlock),
       forcedOutcome: parseForcedOutcome(h.forcedOutcome),
       forcedReason: normalizeOptionalHookString(h.forcedReason),
+      once,
+      persistAfterInterrupt,
       timeout,
       enabled,
       createdAt: meta.createdAt,
       updatedAt: meta.updatedAt
     }
   }
-  if (h.type === "prompt") {
+  if (hookType === "prompt") {
     if (typeof h.prompt !== "string") return null
     return {
       id,
@@ -2134,17 +2152,14 @@ function ccCommandToHookConfig(
       matcher,
       type: "prompt",
       prompt: h.prompt,
-      // CC uses `model`, we use `modelId`
-      modelId:
-        typeof h.model === "string"
-          ? h.model
-          : typeof h.modelId === "string"
-            ? h.modelId
-            : undefined,
+      // CC uses `model`, we use `modelId`; both are accepted.
+      modelId,
       fallback: h.fallback === "block" ? "block" : "allow",
       onBlock: parseHookOnBlock(h.onBlock),
       forcedOutcome: parseForcedOutcome(h.forcedOutcome),
       forcedReason: normalizeOptionalHookString(h.forcedReason),
+      once,
+      persistAfterInterrupt,
       timeout,
       enabled,
       createdAt: meta.createdAt,
@@ -2186,11 +2201,13 @@ function expandCcHooksSettings(
       const hooksArr = Array.isArray(me.hooks) ? me.hooks : []
       hooksArr.forEach((rawHook: unknown, hi: number) => {
         if (!rawHook || typeof rawHook !== "object" || Array.isArray(rawHook)) return
+        const rawHookObj = rawHook as Record<string, unknown>
+        const rawHookId = normalizeOptionalHookString(rawHookObj.id)
         const cfg = ccCommandToHookConfig(
           event,
           matcher,
-          rawHook as Record<string, unknown>,
-          `${idPrefix}/${event}:${mi}:${hi}`,
+          rawHookObj,
+          rawHookId ? `${idPrefix}/${event}:${rawHookId}` : `${idPrefix}/${event}:${mi}:${hi}`,
           meta
         )
         if (cfg) result.push(cfg)
@@ -2238,13 +2255,20 @@ export function getHooks(): HookConfig[] {
           type: (hookType === "prompt" ? "prompt" : "command") as HookConfig["type"],
           command: typeof h.command === "string" ? h.command : undefined,
           prompt: typeof h.prompt === "string" ? h.prompt : undefined,
-          modelId: typeof h.modelId === "string" ? h.modelId : undefined,
+          modelId:
+            typeof h.modelId === "string"
+              ? h.modelId
+              : typeof h.model === "string"
+                ? h.model
+                : undefined,
           fallback:
             hookType === "prompt" ? (h.fallback === "block" ? "block" : "allow") : undefined,
           onBlock: parseHookOnBlock(h.onBlock),
           forcedOutcome: parseForcedOutcome(h.forcedOutcome),
           forcedReason: normalizeOptionalHookString(h.forcedReason),
-          timeout: typeof h.timeout === "number" ? h.timeout : undefined,
+          once: parseOptionalHookBoolean(h.once),
+          persistAfterInterrupt: parseOptionalHookBoolean(h.persistAfterInterrupt),
+          timeout: parseNativeHookTimeout(h.timeoutMs) ?? parseNativeHookTimeout(h.timeout),
           enabled: h.enabled !== false,
           createdAt: typeof h.createdAt === "string" ? h.createdAt : now,
           updatedAt: typeof h.updatedAt === "string" ? h.updatedAt : now
@@ -2324,10 +2348,19 @@ function parsePluginHooks(plugin: PluginMetadata): PluginHookMetadata[] {
             type: (hookType === "prompt" ? "prompt" : "command") as HookConfig["type"],
             command: typeof h.command === "string" ? h.command : undefined,
             prompt: typeof h.prompt === "string" ? h.prompt : undefined,
-            modelId: typeof h.modelId === "string" ? h.modelId : undefined,
+            modelId:
+              typeof h.modelId === "string"
+                ? h.modelId
+                : typeof h.model === "string"
+                  ? h.model
+                  : undefined,
             fallback: h.fallback === "block" ? "block" : "allow",
             onBlock: parseHookOnBlock(h.onBlock),
-            timeout: typeof h.timeout === "number" ? h.timeout : undefined,
+            forcedOutcome: parseForcedOutcome(h.forcedOutcome),
+            forcedReason: normalizeOptionalHookString(h.forcedReason),
+            once: parseOptionalHookBoolean(h.once),
+            persistAfterInterrupt: parseOptionalHookBoolean(h.persistAfterInterrupt),
+            timeout: parseNativeHookTimeout(h.timeoutMs) ?? parseNativeHookTimeout(h.timeout),
             enabled: h.enabled !== false,
             createdAt: plugin.createdAt,
             updatedAt: plugin.updatedAt
@@ -2375,6 +2408,41 @@ function buildSkillHookId(
   const hookId = typeof rawId === "string" ? rawId : String(index)
   const filePrefix = hooksRelPath === SKILL_HOOKS_FILE ? "" : `${hooksRelPath}:`
   return `skill:${skillName}/${filePrefix}${hookId}`
+}
+
+function readSkillFrontmatterHooksSettings(skillMdPath: string): Record<string, unknown> | null {
+  if (!existsSync(skillMdPath)) return null
+  try {
+    const { frontmatter } = parseSkillFrontmatter(readFileSync(skillMdPath, "utf-8"))
+    const hooksRaw = frontmatter.hooks
+    if (!hooksRaw || typeof hooksRaw !== "object" || Array.isArray(hooksRaw)) return null
+
+    const hooksObj = hooksRaw as Record<string, unknown>
+    const fmt = detectHooksFileFormat(hooksObj)
+    if (fmt === "cc_plugin") {
+      return hooksObj.hooks as Record<string, unknown>
+    }
+    if (fmt === "cc_settings") {
+      return hooksObj
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+export function parseSkillFrontmatterHooks(skillDir: string, skillName: string): HookConfig[] {
+  const skillMdPath = join(skillDir, "SKILL.md")
+  const settingsObj = readSkillFrontmatterHooksSettings(skillMdPath)
+  if (!settingsObj) return []
+
+  const now = new Date().toISOString()
+  return expandCcHooksSettings(
+    settingsObj,
+    `skill:${skillName}/SKILL.md`,
+    { enabled: true, createdAt: now, updatedAt: now },
+    skillName
+  )
 }
 
 interface SkillHookSource {
@@ -2484,12 +2552,19 @@ function parseSkillHooks(skillDir: string, skillName: string, hooksRelPath: stri
           type: (hookType === "prompt" ? "prompt" : "command") as HookConfig["type"],
           command: typeof h.command === "string" ? h.command : undefined,
           prompt: typeof h.prompt === "string" ? h.prompt : undefined,
-          modelId: typeof h.modelId === "string" ? h.modelId : undefined,
+          modelId:
+            typeof h.modelId === "string"
+              ? h.modelId
+              : typeof h.model === "string"
+                ? h.model
+                : undefined,
           fallback: h.fallback === "block" ? "block" : "allow",
           onBlock: parseHookOnBlock(h.onBlock),
           forcedOutcome: parseForcedOutcome(h.forcedOutcome),
           forcedReason: normalizeOptionalHookString(h.forcedReason),
-          timeout: typeof h.timeout === "number" ? h.timeout : undefined,
+          once: parseOptionalHookBoolean(h.once),
+          persistAfterInterrupt: parseOptionalHookBoolean(h.persistAfterInterrupt),
+          timeout: parseNativeHookTimeout(h.timeoutMs) ?? parseNativeHookTimeout(h.timeout),
           enabled: h.enabled !== false,
           createdAt: now,
           updatedAt: now
@@ -2505,9 +2580,9 @@ function parseSkillHooks(skillDir: string, skillName: string, hooksRelPath: stri
 function buildEnabledSkillHookMetadata(): SkillHookMetadata[] {
   return getEnabledSkillHookSources().flatMap(
     ({ skillDir, skillName, pluginId, pluginName, pluginRoot }): SkillHookMetadata[] => {
-      return SKILL_HOOKS_FILES.flatMap((hooksRelPath): SkillHookMetadata[] => {
-        const hookPath = join(skillDir, hooksRelPath)
-        return parseSkillHooks(skillDir, skillName, hooksRelPath).map((hook) => ({
+      const skillMdPath = join(skillDir, "SKILL.md")
+      const addSkillMeta = (hookPath: string, hooks: HookConfig[]): SkillHookMetadata[] =>
+        hooks.map((hook) => ({
           ...hook,
           skillName,
           skillPath: skillDir,
@@ -2520,7 +2595,16 @@ function buildEnabledSkillHookMetadata(): SkillHookMetadata[] {
           hookSourceRoot: skillDir,
           hookSourcePath: hookPath
         }))
+
+      const frontmatterHooks = addSkillMeta(
+        skillMdPath,
+        parseSkillFrontmatterHooks(skillDir, skillName)
+      )
+      const fileHooks = SKILL_HOOKS_FILES.flatMap((hooksRelPath): SkillHookMetadata[] => {
+        const hookPath = join(skillDir, hooksRelPath)
+        return addSkillMeta(hookPath, parseSkillHooks(skillDir, skillName, hooksRelPath))
       })
+      return [...frontmatterHooks, ...fileHooks]
     }
   )
 }
@@ -2771,12 +2855,19 @@ export function getWorkspaceHooks(workspacePath: string): HookConfig[] {
               type: (hookType === "prompt" ? "prompt" : "command") as HookConfig["type"],
               command: typeof raw.command === "string" ? raw.command : undefined,
               prompt: typeof raw.prompt === "string" ? raw.prompt : undefined,
-              modelId: typeof raw.modelId === "string" ? raw.modelId : undefined,
+              modelId:
+                typeof raw.modelId === "string"
+                  ? raw.modelId
+                  : typeof raw.model === "string"
+                    ? raw.model
+                    : undefined,
               fallback: raw.fallback === "block" ? "block" : "allow",
               onBlock: parseHookOnBlock(raw.onBlock),
               forcedOutcome: parseForcedOutcome(raw.forcedOutcome),
               forcedReason: normalizeOptionalHookString(raw.forcedReason),
-              timeout: typeof raw.timeout === "number" ? raw.timeout : undefined,
+              once: parseOptionalHookBoolean(raw.once),
+              persistAfterInterrupt: parseOptionalHookBoolean(raw.persistAfterInterrupt),
+              timeout: parseNativeHookTimeout(raw.timeoutMs) ?? parseNativeHookTimeout(raw.timeout),
               enabled: true,
               createdAt: now,
               updatedAt: now
@@ -2831,6 +2922,8 @@ export function upsertHook(config: HookUpsert & { id?: string }): string {
     onBlock: parseHookOnBlock(config.onBlock),
     forcedOutcome: parseForcedOutcome(config.forcedOutcome),
     forcedReason: normalizeOptionalHookString(config.forcedReason),
+    once: config.once,
+    persistAfterInterrupt: config.persistAfterInterrupt,
     timeout: config.timeout,
     enabled: config.enabled ?? true,
     createdAt: existing?.createdAt ?? now,

@@ -216,6 +216,39 @@ const FORCED_OUTCOME_FIELDS: Array<{ key: string; description: string }> = [
   }
 ]
 
+const HOOK_CONFIG_EXTENSION_FIELDS: Array<{ key: string; description: string }> = [
+  {
+    key: "once",
+    description:
+      "兼容 Claude Code 的一次性执行开关。设为 true 后，同一会话里同一条 Hook 第一次成功执行（exit=0）后不再重复执行；不同事件、来源或 Hook ID 分别计算。脚本失败 / 超时（exit≠0）不会标记为已执行，下次匹配时仍会再试。会话结束（线程删除或应用退出）会清除已执行状态；编辑、禁用再启用、删除该 Hook 也会立即清除。注意：在 SubagentStop / Notification / SessionStart / SessionEnd 等 fire-and-forget 事件下，并发触发可能仍执行多次，如需严格只跑一次请使用 PreToolUse / PostToolUse / Stop 等同步事件。"
+  },
+  {
+    key: "persistAfterInterrupt",
+    description:
+      "CMB 扩展字段。仅对插件 / 技能 Hook 的作用域有意义；设为 true 后，只要本会话里触发过该 Hook 所属的插件或技能，这条 Hook 后续轮次也会继续命中。持久化按 Hook 身份计算，不会让同技能下未开启的兄弟 Hook 一起生效。"
+  },
+  {
+    key: "timeout",
+    description:
+      "超时时间。扁平数组 / 单对象格式按毫秒解释；Claude Code hooks settings 格式按秒解释。"
+  },
+  {
+    key: "timeoutMs",
+    description:
+      "CMB 扩展字段，始终按毫秒解释；在 Claude Code hooks settings / SKILL.md frontmatter 中优先级高于 timeout。"
+  },
+  {
+    key: "id",
+    description:
+      "可选稳定 ID；在 Claude Code 多 Hook 格式里建议填写，方便一次性执行、日志和后续定位保持稳定。"
+  },
+  {
+    key: "model / modelId",
+    description:
+      "自然语言策略 Hook 的判决模型。兼容 Claude Code 的 model，也支持 CMB 原生 modelId。"
+  }
+]
+
 const ON_BLOCK_FIELDS: Array<{ key: string; description: string }> = [
   { key: "reason", description: "Hook 阻断但没返回 reason 时，使用这里的默认回退原因。" },
   { key: "systemMessage", description: "阻断后展示给用户的提示，适合写整改入口或说明。" },
@@ -236,6 +269,8 @@ const SKILL_HOOK_FLAT_EXAMPLE = `[
     "type": "command",
     "command": "python hooks/pre-write-check.py",
     "timeout": 10000,
+    "once": true,
+    "persistAfterInterrupt": true,
     "onBlock": {
       "reason": "高风险写入，请先按整改流程处理",
       "requiredSkill": "my-skill-name"
@@ -262,9 +297,13 @@ const SKILL_HOOK_CC_EXAMPLE = `{
       "matcher": "write_file|edit_file",
       "hooks": [
         {
+          "id": "pre-write-check",
           "type": "command",
           "command": "python hooks/pre-write-check.py",
-          "timeout": 10
+          "timeout": 10,
+          "timeoutMs": 12000,
+          "once": true,
+          "persistAfterInterrupt": true
         }
       ]
     }
@@ -274,6 +313,7 @@ const SKILL_HOOK_CC_EXAMPLE = `{
       "matcher": "secret-policy",
       "hooks": [
         {
+          "id": "post-skill-audit",
           "type": "command",
           "command": "python hooks/post-skill-audit.py",
           "forcedOutcome": "always-halt",
@@ -284,13 +324,45 @@ const SKILL_HOOK_CC_EXAMPLE = `{
   ]
 }`
 
+const SKILL_HOOK_FRONTMATTER_EXAMPLE = `---
+name: secret-policy
+description: 处理敏感信息前必须使用。用户提到密钥、凭据、脱敏、审计或 secret 时使用。
+hooks:
+  PreToolUse:
+    - matcher: write_file|edit_file
+      hooks:
+        - id: pre-write-check
+          type: command
+          command: python hooks/pre-write-check.py
+          timeout: 10
+          timeoutMs: 12000
+          once: true
+          persistAfterInterrupt: true
+          onBlock:
+            reason: 高风险写入，请先按技能流程处理
+            requiredSkill: secret-policy
+  PostSkillUse:
+    - hooks:
+        - id: post-skill-audit
+          type: command
+          command: python hooks/post-skill-audit.py
+          forcedOutcome: always-revise
+          forcedReason: 技能使用后需要补充审计结论
+---
+
+# Secret Policy
+
+按敏感信息处理流程完成任务。`
+
 const PLUGIN_HOOK_FLAT_EXAMPLE = `[
   {
     "event": "PreToolUse",
     "matcher": "write_file",
     "type": "command",
     "command": "python hooks/pre-write.py",
-    "timeout": 10000
+    "timeout": 10000,
+    "once": true,
+    "persistAfterInterrupt": true
   },
   {
     "event": "Stop",
@@ -307,6 +379,7 @@ const WORKSPACE_HOOK_FLAT_EXAMPLE = `{
   "type": "command",
   "command": "python .cmbdevclaw/hooks/pre-write-check.py",
   "timeout": 10000,
+  "once": true,
   "onBlock": {
     "reason": "检测到高风险写入，请先按整改流程处理",
     "requiredSkill": "workspace-hook-remediation"
@@ -324,6 +397,7 @@ const WORKSPACE_HOOK_CC_EXAMPLE = `{
           "type": "command",
           "command": "python .cmbdevclaw/hooks/pre-write-check.py",
           "timeout": 10,
+          "once": true,
           "onBlock": {
             "systemMessage": "请先按整改技能修复，再重试",
             "requiredSkill": "workspace-hook-remediation"
@@ -509,7 +583,8 @@ export function HooksPanel(): React.JSX.Element {
         (h.source === "plugin" && h.pluginName.toLowerCase().includes(q)) ||
         (h.source === "skill" && h.skillName.toLowerCase().includes(q)) ||
         getHookSourceLabel(h.source).includes(q) ||
-        (h.type === "prompt" ? "自然语言策略" : "命令").includes(q)
+        (h.type === "prompt" ? "自然语言策略" : "命令").includes(q) ||
+        (h.once === true && ("once".includes(q) || "一次性".includes(q)))
       )
     })
   }, [hooks, debouncedQuery])
@@ -673,6 +748,16 @@ export function HooksPanel(): React.JSX.Element {
                         {forcedLabel && (
                           <span className="rounded-full border border-amber-300/50 bg-amber-50 px-1.5 py-0.5 text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">
                             {forcedLabel}
+                          </span>
+                        )}
+                        {hook.once && (
+                          <span className="rounded-full border border-emerald-300/50 bg-emerald-50 px-1.5 py-0.5 text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300">
+                            once
+                          </span>
+                        )}
+                        {hook.persistAfterInterrupt && (
+                          <span className="rounded-full border border-cyan-300/50 bg-cyan-50 px-1.5 py-0.5 text-cyan-700 dark:border-cyan-500/30 dark:bg-cyan-500/10 dark:text-cyan-300">
+                            persist
                           </span>
                         )}
                         {hook.onBlock && (
@@ -888,9 +973,23 @@ function HookDetail(props: {
           <DetailCard label="配置文件" value={configPath} mono />
         </div>
 
-        <div className="grid gap-3 md:grid-cols-3">
+        <div className="grid gap-3 md:grid-cols-5">
           <DetailCard label="状态" value={hook.enabled ? "已启用" : "已禁用"} />
           <DetailCard label="超时" value={`${hook.timeout ?? 10000}ms`} />
+          <DetailCard
+            label="一次性"
+            value={hook.once ? "成功后跳过" : "每次匹配执行"}
+            subtext={hook.once ? "同一会话内按事件、来源和 Hook ID 记忆" : undefined}
+          />
+          <DetailCard
+            label="会话持久"
+            value={hook.persistAfterInterrupt ? "触发后持续" : "仅当前作用域"}
+            subtext={
+              hook.persistAfterInterrupt
+                ? "所属插件 / 技能触发一次后本会话继续命中"
+                : "未触发所属插件 / 技能时不会命中"
+            }
+          />
           <DetailCard
             label="行为"
             value={forcedLabel ?? "跟随脚本"}
@@ -1243,7 +1342,7 @@ function HooksGuide(): React.JSX.Element {
 
       <GuideSection
         title="概览：类型、来源与 onBlock"
-        summary="Shell 命令 Hook、自然语言策略、全局 / 插件 / 工作区三种来源，以及阻断后附加配置都在这里。"
+        summary="Shell 命令 Hook、自然语言策略、全局 / 插件 / 技能 / 工作区四种来源，以及常用扩展字段都在这里。"
       >
         <div className="space-y-3">
           <GuideSubSection
@@ -1283,11 +1382,14 @@ function HooksGuide(): React.JSX.Element {
               <p>
                 插件 Hook 来自插件目录下的
                 hooks/hooks.json，随插件启停，这里可以统一控制，但不直接编辑脚本内容。
+                需要在插件 / 技能触发后让某条 Hook 本会话持续生效时，可以在对应 Hook 上加
+                <code className="mx-1 font-mono text-foreground/85">persistAfterInterrupt: true</code>
+                。
               </p>
               <p>
-                技能 Hook 来自技能目录下的
-                hooks/hooks.json，随技能一起加载，启停技能时同步生效；根目录 hooks.json
-                仍兼容旧包，嵌套子技能可以拥有自己的 hooks/hooks.json。
+                技能 Hook 可以来自技能目录下的 hooks/hooks.json、根目录 hooks.json，或 SKILL.md YAML
+                frontmatter 里的 hooks
+                字段，随技能一起加载，启停技能时同步生效；嵌套子技能可以拥有自己的 Hook。
                 适合把某项技能的配套拦截或校验逻辑打包进技能本体一起分发。
               </p>
               <p>
@@ -1301,6 +1403,23 @@ function HooksGuide(): React.JSX.Element {
                 <code className="mx-1 font-mono text-foreground/85">SKILL_ROOT</code>
                 只表示本次关联的技能，不会改变非 Skill Hook 的执行目录。
               </p>
+            </div>
+          </GuideSubSection>
+
+          <GuideSubSection
+            title="常用扩展字段"
+            summary="这些字段在全局、插件、技能、工作区 Hook 里都可使用；SKILL.md frontmatter 也支持。"
+          >
+            <div className="space-y-2">
+              {HOOK_CONFIG_EXTENSION_FIELDS.map((field) => (
+                <div
+                  key={field.key}
+                  className="rounded-md border border-border/40 bg-background px-3 py-2"
+                >
+                  <p className="font-mono text-[11px] text-foreground/85">{field.key}</p>
+                  <p className="text-sm text-muted-foreground">{field.description}</p>
+                </div>
+              ))}
             </div>
           </GuideSubSection>
 
@@ -1354,12 +1473,12 @@ function HooksGuide(): React.JSX.Element {
 
       <GuideSection
         title="技能 Hook 怎么配"
-        summary="把 hooks/hooks.json 放到技能目录里，父技能和嵌套子技能都可以拥有自己的 Hook。"
+        summary="可写在技能目录 hooks/hooks.json，也可直接写进 SKILL.md YAML frontmatter；父技能和嵌套子技能都支持。"
       >
         <div className="space-y-3">
           <GuideSubSection
             title="加载规则"
-            summary="技能目录下放 hooks/hooks.json，启用该技能时自动加载，停用时同步移除。"
+            summary="启用技能时自动加载该技能目录里的 hooks；停用技能时同步移除。"
           >
             <div className="space-y-2 text-sm text-muted-foreground">
               <p>
@@ -1367,7 +1486,11 @@ function HooksGuide(): React.JSX.Element {
                 <code className="mx-1 font-mono text-foreground/85">hooks/hooks.json</code>
                 即可；根目录
                 <code className="mx-1 font-mono text-foreground/85">hooks.json</code>
-                仍兼容旧包。如果是嵌套子技能，就放在子技能自己的目录里。
+                仍兼容旧包；也可以直接写在
+                <code className="mx-1 font-mono text-foreground/85">SKILL.md</code>
+                顶部 YAML frontmatter 的
+                <code className="mx-1 font-mono text-foreground/85">hooks</code>
+                字段里。如果是嵌套子技能，就放在子技能自己的目录里。
               </p>
               <pre className="rounded-md border border-border/40 bg-background p-2 text-xs leading-5">
                 {`~/.cmbcoworkagent/skills/office/\n  SKILL.md\n  hooks/\n    hooks.json\n    pre-write-check.py\n  pdf/\n    SKILL.md\n    hooks/\n      hooks.json      ← 子技能自己的 Hook\n      pre-write-check.py`}
@@ -1387,12 +1510,16 @@ function HooksGuide(): React.JSX.Element {
                 <code className="mx-1 font-mono text-foreground/85">{`"enabled": false`}</code>
                 可关闭单条规则；在应用里停用技能则整批移除。
               </p>
+              <p>
+                如果 Hook 写在 SKILL.md frontmatter 里，配置来源会显示为 SKILL.md；command
+                仍默认在技能目录执行，和 hooks/hooks.json 保持一致。
+              </p>
             </div>
           </GuideSubSection>
 
           <GuideSubSection
             title="支持格式"
-            summary="扁平数组（推荐）、Claude Code hooks settings 格式、带 hooks 包裹层三种都支持。"
+            summary="扁平数组（推荐）、Claude Code hooks settings、带 hooks 包裹层，以及 SKILL.md frontmatter 都支持。"
           >
             <div className="space-y-2 text-sm text-muted-foreground">
               <p>推荐用扁平数组格式（顶层是数组），可以在一个文件里放多条规则，结构最直观。</p>
@@ -1405,7 +1532,31 @@ function HooksGuide(): React.JSX.Element {
                 <code className="mx-1 font-mono text-foreground/85">{`{ hooks: { ... } }`}</code>
                 形式。
               </p>
+              <p>
+                SKILL.md frontmatter 的 hooks 字段使用 YAML，内部结构与 Claude Code hooks settings
+                一致，并额外支持
+                <code className="mx-1 font-mono text-foreground/85">once</code>、
+                <code className="mx-1 font-mono text-foreground/85">persistAfterInterrupt</code>、
+                <code className="mx-1 font-mono text-foreground/85">timeoutMs</code>、
+                <code className="mx-1 font-mono text-foreground/85">forcedOutcome</code>、
+                <code className="mx-1 font-mono text-foreground/85">forcedReason</code>、
+                <code className="mx-1 font-mono text-foreground/85">onBlock</code>和
+                <code className="mx-1 font-mono text-foreground/85">modelId</code>。
+              </p>
+              <p>
+                对 PreSkillUse / PostSkillUse，如果 frontmatter 里的 matcher
+                省略，默认匹配当前技能名；只选中子技能时，只会激活子技能自己的 Hook。
+              </p>
             </div>
+          </GuideSubSection>
+
+          <GuideSubSection
+            title="最小示例：SKILL.md frontmatter"
+            summary="适合把技能说明和配套 Hook 放在同一个 SKILL.md 里；YAML 字段无需加引号。"
+          >
+            <pre className="overflow-x-auto rounded-md border border-border/40 bg-background p-3 text-xs leading-5 text-foreground">
+              <code>{SKILL_HOOK_FRONTMATTER_EXAMPLE}</code>
+            </pre>
           </GuideSubSection>
 
           <GuideSubSection
@@ -1455,6 +1606,14 @@ function HooksGuide(): React.JSX.Element {
                 <code className="mx-1 font-mono text-foreground/85">HOOK_SOURCE_ROOT</code>或
                 <code className="mx-1 font-mono text-foreground/85">PLUGIN_ROOT</code>
                 定位插件内脚本。
+              </p>
+              <p>
+                插件内的
+                <code className="mx-1 font-mono text-foreground/85">
+                  skills/&lt;skill&gt;/SKILL.md
+                </code>
+                也可以使用 frontmatter hooks；这类 Hook 仍按技能 Hook
+                处理，默认执行目录是该技能目录，同时会携带插件来源信息。
               </p>
             </div>
           </GuideSubSection>
@@ -1564,6 +1723,17 @@ function HooksGuide(): React.JSX.Element {
                 <code className="mx-1 font-mono text-foreground/85">onBlock.systemMessage</code>、
                 <code className="mx-1 font-mono text-foreground/85">onBlock.additionalContext</code>
                 、<code className="mx-1 font-mono text-foreground/85">onBlock.requiredSkill</code>。
+              </p>
+              <p>
+                也支持
+                <code className="mx-1 font-mono text-foreground/85">once</code>、
+                <code className="mx-1 font-mono text-foreground/85">persistAfterInterrupt</code>、
+                <code className="mx-1 font-mono text-foreground/85">timeoutMs</code>、
+                <code className="mx-1 font-mono text-foreground/85">forcedOutcome</code>和
+                <code className="mx-1 font-mono text-foreground/85">forcedReason</code>；如果使用
+                Claude Code 多 Hook 格式，
+                <code className="mx-1 font-mono text-foreground/85">timeout</code>
+                按秒解释。
               </p>
               <p>
                 想查脚本到底收到了什么输入，最直接的办法还是把 payload 打到

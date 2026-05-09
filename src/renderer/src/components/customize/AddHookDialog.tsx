@@ -866,7 +866,8 @@ exit 0
     "usedSkills": ["bugfix-playbook"]
   }
 }`,
-    outputDescription: "当前事件适合做任务验收和结果复查，发现质量问题时可以要求 Agent 返工，或直接终止本轮。",
+    outputDescription:
+      "当前事件适合做任务验收和结果复查，发现质量问题时可以要求 Agent 返工，或直接终止本轮。",
     outputNotes: [
       "返回 `decision=block` 或 `exit=2` → 触发修订流程，把 `reason` 与 `additionalContext` 喂回 Agent 让它重做（受最大修订次数限制）。",
       "返回 `continue=false` 与 `stopReason` → 直接终止本轮，不修订、不报错；优先级高于 `decision=block`，对齐 Claude Code 的 preventContinuation 语义。",
@@ -1425,6 +1426,10 @@ export function AddHookDialog(props: {
     editHook?.forcedOutcome ?? "follow"
   )
   const [forcedReason, setForcedReason] = useState(editHook?.forcedReason ?? "")
+  const [once, setOnce] = useState(editHook?.once === true)
+  const [persistAfterInterrupt, setPersistAfterInterrupt] = useState(
+    editHook?.persistAfterInterrupt === true
+  )
   const [commandExampleKind, setCommandExampleKind] = useState<CommandExampleKind>("python")
   // shared
   const [timeout, setTimeout_] = useState(String(editHook?.timeout ?? 10000))
@@ -1507,6 +1512,8 @@ export function AddHookDialog(props: {
       setOnBlockAdditionalContext(h.onBlock?.additionalContext ?? "")
       setForcedOutcome(h.forcedOutcome ?? "follow")
       setForcedReason(h.forcedReason ?? "")
+      setOnce(h.once === true)
+      setPersistAfterInterrupt(h.persistAfterInterrupt === true)
       setTimeout_(String(h.timeout ?? 10000))
     } else {
       setHookType("command")
@@ -1523,6 +1530,8 @@ export function AddHookDialog(props: {
       setOnBlockAdditionalContext("")
       setForcedOutcome("follow")
       setForcedReason("")
+      setOnce(false)
+      setPersistAfterInterrupt(false)
       setTimeout_("10000")
     }
     setError(null)
@@ -1596,6 +1605,8 @@ export function AddHookDialog(props: {
         const trimmed = forcedReason.trim()
         if (trimmed) config.forcedReason = trimmed
       }
+      if (once) config.once = true
+      if (persistAfterInterrupt) config.persistAfterInterrupt = true
 
       if (editHook) {
         await window.api.hooks.update({ ...config, id: editHook.id })
@@ -1625,6 +1636,8 @@ export function AddHookDialog(props: {
     onBlockAdditionalContext,
     forcedOutcome,
     forcedReason,
+    once,
+    persistAfterInterrupt,
     editHook,
     onSuccess,
     handleOpenChange,
@@ -2135,6 +2148,56 @@ export function AddHookDialog(props: {
               </p>
             </div>
 
+            <div className="rounded-md border border-border/60 bg-muted/20 p-3">
+              <div className="flex items-start gap-2">
+                <input
+                  type="checkbox"
+                  id="hook-once"
+                  checked={once}
+                  onChange={(e) => setOnce(e.target.checked)}
+                  className="mt-0.5 size-4"
+                />
+                <div className="space-y-1">
+                  <label htmlFor="hook-once" className="text-sm font-medium">
+                    本会话成功执行一次后跳过
+                  </label>
+                  <p className="text-xs text-muted-foreground">
+                    兼容 Claude Code 的
+                    <code className="mx-1 font-mono text-foreground/85">once: true</code>
+                    。同一会话里，同一条 Hook 第一次成功执行（exit=0）后不再重复执行；不同事件、来源或
+                    Hook ID 分别计算。脚本失败或超时（exit≠0）不会标记为已执行，下次匹配时仍会再试。
+                    会话结束、编辑、禁用再启用或删除该 Hook 都会立即清除"已执行"状态。
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    在 SubagentStop / Notification / SessionStart / SessionEnd 等
+                    fire-and-forget 事件下，并发触发可能仍执行多次（runner 不加同步锁）；如需严格只跑一次，请使用
+                    PreToolUse / PostToolUse / Stop 等同步事件。
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-md border border-border/60 bg-muted/20 p-3">
+              <div className="flex items-start gap-2">
+                <input
+                  type="checkbox"
+                  id="hook-persist-after-interrupt"
+                  checked={persistAfterInterrupt}
+                  onChange={(e) => setPersistAfterInterrupt(e.target.checked)}
+                  className="mt-0.5 size-4"
+                />
+                <div className="space-y-1">
+                  <label htmlFor="hook-persist-after-interrupt" className="text-sm font-medium">
+                    触发后本会话持续生效
+                  </label>
+                  <p className="text-xs text-muted-foreground">
+                    仅对插件和技能 Hook 生效。开启后，只要本会话里触发过该 Hook 所属的插件或技能，
+                    这条 Hook 后续轮次也会继续命中；同一技能下未开启的兄弟 Hook 不会被一起保留。
+                  </p>
+                </div>
+              </div>
+            </div>
+
             <div className="space-y-3 rounded-md border border-border/60 bg-muted/20 p-3">
               <div className="space-y-1">
                 <label className="text-sm font-medium">阻断后补充配置（onBlock）</label>
@@ -2263,8 +2326,8 @@ export function AddHookDialog(props: {
                 <label className="text-sm font-medium">触发后的处理方式</label>
                 <p className="text-xs text-muted-foreground">
                   覆盖 hook 命令的运行时输出。默认让 hook 自己决定（输出 JSON 字段），
-                  也可以无条件强制走修订或终止本轮。所有事件都生效——
-                  Stop / PostSkillUse 的“终止”会结束整轮；Pre*/Post* 工具事件的“终止”等同强制阻断该次操作。
+                  也可以无条件强制走修订或终止本轮。所有事件都生效—— Stop / PostSkillUse
+                  的“终止”会结束整轮；Pre*/Post* 工具事件的“终止”等同强制阻断该次操作。
                 </p>
               </div>
               <Select
@@ -2277,7 +2340,9 @@ export function AddHookDialog(props: {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="follow">跟随 hook stdout（默认；不写 forcedOutcome）</SelectItem>
+                  <SelectItem value="follow">
+                    跟随 hook stdout（默认；不写 forcedOutcome）
+                  </SelectItem>
                   <SelectItem value="always-revise">
                     总是要求 Agent 修订（forcedOutcome=&quot;always-revise&quot;）
                   </SelectItem>
@@ -2290,8 +2355,7 @@ export function AddHookDialog(props: {
                 JSON 字段：
                 <code className="mx-1 font-mono text-foreground/85">forcedOutcome</code>
                 可选
-                <code className="mx-1 font-mono text-foreground/85">"always-revise"</code>
-                /
+                <code className="mx-1 font-mono text-foreground/85">"always-revise"</code>/
                 <code className="mx-1 font-mono text-foreground/85">"always-halt"</code>
                 ，省略即跟随 stdout；
                 <code className="mx-1 font-mono text-foreground/85">forcedReason</code>
@@ -2301,7 +2365,9 @@ export function AddHookDialog(props: {
               {forcedOutcome !== "follow" && (
                 <div className="space-y-2">
                   <label htmlFor="hook-forced-reason" className="text-sm font-medium">
-                    {forcedOutcome === "always-halt" ? "停止原因（stopReason）" : "修订原因（reason）"}
+                    {forcedOutcome === "always-halt"
+                      ? "停止原因（stopReason）"
+                      : "修订原因（reason）"}
                     （可选）
                   </label>
                   <Input

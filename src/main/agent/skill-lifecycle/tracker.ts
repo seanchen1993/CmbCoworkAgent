@@ -20,6 +20,14 @@ export interface SkillUseTracker {
   getPendingPostSkillUses(): SkillUseRecord[]
   markPostSkillUseFired(key: string): void
   getUsedSkillNames(): string[]
+  /**
+   * Drop records whose `shouldKeep` predicate returns false. Called at
+   * HITL interrupt boundaries so non-persistent skills' pending PostSkillUse
+   * are not retained across the boundary. Also clears the corresponding
+   * `markPostSkillUseFired` entries so a re-activated skill can fire Post
+   * again at terminal completion.
+   */
+  pruneRecords(shouldKeep: (record: SkillUseRecord) => boolean): void
 }
 
 function normalizePathKey(input: string): string {
@@ -62,6 +70,14 @@ export function createSkillUseTracker(): SkillUseTracker {
         names.push(record.name)
       }
       return names
+    },
+    pruneRecords(shouldKeep) {
+      for (const [key, record] of [...records.entries()]) {
+        if (!shouldKeep(record)) {
+          records.delete(key)
+          postSkillUseFired.delete(key)
+        }
+      }
     }
   }
 }

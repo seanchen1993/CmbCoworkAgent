@@ -1517,6 +1517,21 @@ export class LocalSandbox
 
       if (fireSkillHooks && skillMatch) {
         this._hookScope?.activateSkill(skillMatch.name, skillMatch.pluginId, skillMatch.rootDir)
+        this._hookScope?.activatePersistentHooks(
+          this.resolveHooks("PreToolUse", {
+            toolName: "read_file",
+            toolArgs: { filePath, offset, limit },
+            workspacePath: this.workingDir,
+            sessionId: this.runId,
+            skillName: skillMatch.name,
+            skillPath: skillMatch.path,
+            skillRoot: skillMatch.rootDir,
+            pluginId: skillMatch.pluginId,
+            pluginName: skillMatch.pluginName,
+            pluginRoot: skillMatch.pluginRoot,
+            skillTriggerToolName: "read_file"
+          })
+        )
         this._skillUseTracker?.recordSkillUse(skillMatch, {
           trigger: "read_file",
           triggerToolName: "read_file"

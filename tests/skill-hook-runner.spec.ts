@@ -18,7 +18,13 @@ import { tmpdir } from "os"
 import { join } from "path"
 import { SystemMessage } from "@langchain/core/messages"
 import { createSkillHookContextMiddleware } from "../src/main/agent/runtime.ts"
-import { runHooks, type HookContext } from "../src/main/hooks/runner.ts"
+import {
+  clearOnceStateForHook,
+  clearOnceStateForSession,
+  resetHookOnceStateForTests,
+  runHooks,
+  type HookContext
+} from "../src/main/hooks/runner.ts"
 import type { HookConfig, HookResult } from "../src/main/hooks/types.ts"
 
 function assert(cond: unknown, msg: string): void {
@@ -396,6 +402,163 @@ async function testForcedOutcomeAlwaysReviseAppliesToFireAndForget(): Promise<vo
     typeof observed.reason === "string" && observed.reason.includes("notification should revise"),
     `force-revise should use forcedReason for fire-and-forget; got ${observed.reason}`
   )
+}
+
+async function testOnceHookRunsOnlyOncePerSession(): Promise<void> {
+  resetHookOnceStateForTests()
+  await withTempDir("hook-once", async (dir) => {
+    const out = join(dir, "once.txt")
+    const skillRoot = join(dir, "skills", "demo")
+    await mkdir(skillRoot, { recursive: true })
+    const hook = makeHook({
+      id: "once-success",
+      event: "PreToolUse",
+      matcher: "execute",
+      command: nodeCommand(`
+const fs = require('fs')
+fs.appendFileSync(${JSON.stringify(out)}, 'hit\\n')
+`),
+      once: true,
+      hookSourceType: "skill",
+      hookSourceRoot: skillRoot,
+      hookSourcePath: join(skillRoot, "SKILL.md")
+    })
+
+    await runHooks([hook], "PreToolUse", { toolName: "execute", sessionId: "session-a" })
+    const second = await runHooks([hook], "PreToolUse", {
+      toolName: "execute",
+      sessionId: "session-a"
+    })
+    await runHooks([hook], "PreToolUse", { toolName: "execute", sessionId: "session-b" })
+
+    assert(second === null, "once hook should be skipped on second run in same session")
+    const hits = (await readFile(out, "utf8")).trim().split(/\r?\n/).filter(Boolean)
+    assert(hits.length === 2, `once hook should run once per session, got ${hits.length}`)
+  })
+}
+
+async function testOnceHookFailureDoesNotConsume(): Promise<void> {
+  resetHookOnceStateForTests()
+  await withTempDir("hook-once-fail", async (dir) => {
+    const out = join(dir, "once-fail.txt")
+    const hook = makeHook({
+      id: "once-failure",
+      event: "PreToolUse",
+      matcher: "execute",
+      command: nodeCommand(`
+const fs = require('fs')
+fs.appendFileSync(${JSON.stringify(out)}, 'fail\\n')
+process.exit(2)
+`),
+      once: true
+    })
+
+    await runHooks([hook], "PreToolUse", { toolName: "execute", sessionId: "same-session" })
+    await runHooks([hook], "PreToolUse", { toolName: "execute", sessionId: "same-session" })
+
+    const hits = (await readFile(out, "utf8")).trim().split(/\r?\n/).filter(Boolean)
+    assert(hits.length === 2, `failing once hook should not be consumed, got ${hits.length}`)
+  })
+}
+
+async function testClearOnceStateForSessionResetsThatSessionOnly(): Promise<void> {
+  resetHookOnceStateForTests()
+  await withTempDir("hook-once-session-clear", async (dir) => {
+    const out = join(dir, "session-clear.txt")
+    const hook = makeHook({
+      id: "once-session-clear",
+      event: "PreToolUse",
+      matcher: "execute",
+      command: nodeCommand(`
+const fs = require('fs')
+fs.appendFileSync(${JSON.stringify(out)}, 'hit\\n')
+`),
+      once: true
+    })
+
+    // Two sessions both consume once.
+    await runHooks([hook], "PreToolUse", { toolName: "execute", sessionId: "session-x" })
+    await runHooks([hook], "PreToolUse", { toolName: "execute", sessionId: "session-y" })
+
+    // Clear only session-x.
+    clearOnceStateForSession("session-x")
+
+    // session-x can fire again, session-y still suppressed.
+    await runHooks([hook], "PreToolUse", { toolName: "execute", sessionId: "session-x" })
+    const skipped = await runHooks([hook], "PreToolUse", {
+      toolName: "execute",
+      sessionId: "session-y"
+    })
+
+    assert(skipped === null, "session-y once should still be consumed after clearing session-x only")
+    const hits = (await readFile(out, "utf8")).trim().split(/\r?\n/).filter(Boolean)
+    assert(
+      hits.length === 3,
+      `expected 3 hits (session-x x2 + session-y x1), got ${hits.length}`
+    )
+  })
+}
+
+async function testClearOnceStateForHookResetsAcrossSessions(): Promise<void> {
+  resetHookOnceStateForTests()
+  await withTempDir("hook-once-hook-clear", async (dir) => {
+    const out = join(dir, "hook-clear.txt")
+    const hook = makeHook({
+      id: "once-hook-clear",
+      event: "PreToolUse",
+      matcher: "execute",
+      command: nodeCommand(`
+const fs = require('fs')
+fs.appendFileSync(${JSON.stringify(out)}, 'hit\\n')
+`),
+      once: true
+    })
+
+    // Two sessions consume once.
+    await runHooks([hook], "PreToolUse", { toolName: "execute", sessionId: "s1" })
+    await runHooks([hook], "PreToolUse", { toolName: "execute", sessionId: "s2" })
+
+    // Simulate hook update — drops once-state across all sessions.
+    clearOnceStateForHook("once-hook-clear")
+
+    // Both sessions can fire again.
+    await runHooks([hook], "PreToolUse", { toolName: "execute", sessionId: "s1" })
+    await runHooks([hook], "PreToolUse", { toolName: "execute", sessionId: "s2" })
+
+    const hits = (await readFile(out, "utf8")).trim().split(/\r?\n/).filter(Boolean)
+    assert(hits.length === 4, `expected 4 hits after hook reset, got ${hits.length}`)
+  })
+}
+
+async function testClearOnceStateForHookDoesNotAffectOtherHooks(): Promise<void> {
+  resetHookOnceStateForTests()
+  await withTempDir("hook-once-other-hook", async (dir) => {
+    const outA = join(dir, "hook-a.txt")
+    const outB = join(dir, "hook-b.txt")
+    const hookA = makeHook({
+      id: "once-a",
+      event: "PreToolUse",
+      matcher: "execute",
+      command: nodeCommand(`require('fs').appendFileSync(${JSON.stringify(outA)}, 'A\\n')`),
+      once: true
+    })
+    const hookB = makeHook({
+      id: "once-b",
+      event: "PreToolUse",
+      matcher: "execute",
+      command: nodeCommand(`require('fs').appendFileSync(${JSON.stringify(outB)}, 'B\\n')`),
+      once: true
+    })
+
+    await runHooks([hookA, hookB], "PreToolUse", { toolName: "execute", sessionId: "shared" })
+    clearOnceStateForHook("once-a")
+    await runHooks([hookA, hookB], "PreToolUse", { toolName: "execute", sessionId: "shared" })
+
+    const hitsA = (await readFile(outA, "utf8")).trim().split(/\r?\n/).filter(Boolean)
+    const hitsB = (await readFile(outB, "utf8")).trim().split(/\r?\n/).filter(Boolean)
+    assert(hitsA.length === 2, `hookA should fire twice after its once-state is cleared, got ${hitsA.length}`)
+    assert(hitsB.length === 1, `hookB once should remain consumed, got ${hitsB.length}`)
+  })
 }
 
 async function testStopContinueFalsePropagatesAsHalt(): Promise<void> {
@@ -813,6 +976,16 @@ async function run(): Promise<void> {
   console.log("PASS B7h forcedOutcome=always-halt applies to fire-and-forget hooks")
   await testForcedOutcomeAlwaysReviseAppliesToFireAndForget()
   console.log("PASS B7i forcedOutcome=always-revise applies to fire-and-forget hooks")
+  await testOnceHookRunsOnlyOncePerSession()
+  console.log("PASS B7j once hook runs only once per session")
+  await testOnceHookFailureDoesNotConsume()
+  console.log("PASS B7k failing once hook is not consumed")
+  await testClearOnceStateForSessionResetsThatSessionOnly()
+  console.log("PASS B7l clearOnceStateForSession resets that session only")
+  await testClearOnceStateForHookResetsAcrossSessions()
+  console.log("PASS B7m clearOnceStateForHook resets a hook id across sessions")
+  await testClearOnceStateForHookDoesNotAffectOtherHooks()
+  console.log("PASS B7n clearOnceStateForHook does not affect other hook ids")
   await testEnvVarsAreInjected()
   console.log("PASS B8 SKILL_NAME/SKILL_PATH/SKILL_ROOT env vars injected")
   await testStdinPayloadIncludesSkillFields()

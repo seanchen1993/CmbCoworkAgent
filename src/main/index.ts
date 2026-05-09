@@ -125,7 +125,7 @@ process.on("uncaughtException", (err: NodeJS.ErrnoException) => {
 process.on("unhandledRejection", (reason) => {
   console.error("[Main] Unhandled rejection:", reason)
 })
-import { registerAgentHandlers } from "./ipc/agent"
+import { disposeAllAgentThreadStates, registerAgentHandlers } from "./ipc/agent"
 import { registerThreadHandlers } from "./ipc/threads"
 import { registerModelHandlers } from "./ipc/models"
 import { registerSkillsHandlers } from "./ipc/skills"
@@ -544,6 +544,7 @@ if (!gotTheLock) {
     event.preventDefault()
     fireSessionEndAll(5000, (threadId) => makeBroadcastHookResultCallback(`agent:stream:${threadId}`))
       .catch((e) => console.warn("[Main] SessionEnd hooks error:", e))
+      .finally(() => disposeAllAgentThreadStates())
       .finally(() => {
         sessionEndDone = true
         app.quit()

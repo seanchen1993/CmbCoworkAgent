@@ -93,6 +93,20 @@ export interface HookConfig {
   forcedOutcome?: HookForcedOutcome
   /** Reason / stopReason used when forcedOutcome is set. */
   forcedReason?: string
+  /** Claude Code compatible one-shot hook: consumed in memory after a successful run. */
+  once?: boolean
+  /**
+   * If true, this skill / plugin hook stays active for the rest of the thread
+   * session after its owning skill / plugin is triggered once. Default false:
+   * scoped hooks only run while the owning skill / plugin is active this turn.
+   *
+   * Persistence is per hook identity, not per whole skill/plugin scope, so a
+   * persistent hook does not make sibling non-persistent hooks fire later.
+   *
+   * No-op for hooks that aren't skill / plugin scoped (workspace / global hooks
+   * are always in scope by definition).
+   */
+  persistAfterInterrupt?: boolean
   timeout?: number // Timeout in ms, default 10000
   enabled: boolean
   createdAt: string
@@ -159,6 +173,8 @@ export interface HookUpsert {
   onBlock?: HookOnBlockConfig
   forcedOutcome?: HookForcedOutcome
   forcedReason?: string
+  once?: boolean
+  persistAfterInterrupt?: boolean
   timeout?: number
   enabled?: boolean
 }

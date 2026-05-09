@@ -264,6 +264,106 @@ async function testMergeHookScopeSnapshotIsAdditive(): Promise<void> {
   assert(target.activeSkillPaths.has(expectedSecond), "merge should add new path")
 }
 
+async function testPruneActivationsDropsUnkeptScope(): Promise<void> {
+  const scope = createHookScope()
+  scope.activatePlugin("plugin-a")
+  scope.activatePlugin("plugin-b")
+  scope.activateSkill("keep-name", undefined, "C:/skills/keep")
+  scope.activateSkill("drop-name", undefined, "C:/skills/drop")
+
+  scope.pruneActivations({
+    keepPluginId: (id) => id === "plugin-a",
+    keepSkillPath: (skillPath) => skillPath.endsWith("/keep"),
+    keepSkillName: (skillName) => skillName === "keep-name"
+  })
+
+  assert(scope.activePluginIds.has("plugin-a"), "kept plugin should remain")
+  assert(!scope.activePluginIds.has("plugin-b"), "unkept plugin should be pruned")
+  assert(scope.activeSkillPaths.has("c:/skills/keep") || scope.activeSkillPaths.has("C:/skills/keep"), "kept skill path should remain")
+  assert(!scope.activeSkillPaths.has("c:/skills/drop") && !scope.activeSkillPaths.has("C:/skills/drop"), "unkept skill path should be pruned")
+  assert(scope.activeSkillNames.has("keep-name"), "kept skill name should remain")
+  assert(!scope.activeSkillNames.has("drop-name"), "unkept skill name should be pruned")
+}
+
+async function testPersistentHookIdFiresWithoutCurrentSkillScope(): Promise<void> {
+  const skillRoot = "C:/skills/persistent"
+  const persistent = {
+    ...makeHook({
+      id: "persistent-hook",
+      event: "PreToolUse",
+      matcher: "write_file",
+      command: "echo persistent",
+      persistAfterInterrupt: true
+    }),
+    skillName: "persistent",
+    skillPath: skillRoot
+  } as HookConfig & { skillName: string; skillPath: string }
+  const ephemeral = {
+    ...makeHook({
+      id: "ephemeral-hook",
+      event: "PreToolUse",
+      matcher: "write_file",
+      command: "echo ephemeral"
+    }),
+    skillName: "persistent",
+    skillPath: skillRoot
+  } as HookConfig & { skillName: string; skillPath: string }
+
+  const scope = createHookScope()
+  scope.activatePersistentHooks([persistent])
+
+  const result = filterScopedHooks(
+    { baseHooks: [], pluginHooks: [], skillHooks: [persistent, ephemeral] },
+    emptyContext(),
+    scope
+  )
+
+  assert(result.length === 1, `expected only persistent hook, got ${result.length}`)
+  assert(result[0].id === "persistent-hook", `expected persistent hook, got ${result[0].id}`)
+}
+
+async function testPersistentHookKeyDoesNotLeakAcrossSameIdSkills(): Promise<void> {
+  const activated = {
+    ...makeHook({
+      id: "same-id",
+      event: "PreToolUse",
+      matcher: "write_file",
+      command: "echo activated",
+      persistAfterInterrupt: true
+    }),
+    skillName: "shared",
+    skillPath: "C:/skills/activated",
+    hookSourceType: "skill",
+    hookSourceRoot: "C:/skills/activated",
+    hookSourcePath: "C:/skills/activated/hooks/hooks.json"
+  } as HookConfig & { skillName: string; skillPath: string }
+  const other = {
+    ...makeHook({
+      id: "same-id",
+      event: "PreToolUse",
+      matcher: "write_file",
+      command: "echo other",
+      persistAfterInterrupt: true
+    }),
+    skillName: "shared",
+    skillPath: "C:/skills/other",
+    hookSourceType: "skill",
+    hookSourceRoot: "C:/skills/other",
+    hookSourcePath: "C:/skills/other/hooks/hooks.json"
+  } as HookConfig & { skillName: string; skillPath: string }
+
+  const scope = createHookScope()
+  scope.activatePersistentHooks([activated])
+  const result = filterScopedHooks(
+    { baseHooks: [], pluginHooks: [], skillHooks: [activated, other] },
+    emptyContext(),
+    scope
+  )
+
+  assert(result.length === 1, `expected only activated hook, got ${result.length}`)
+  assert(result[0].hookSourceRoot === "C:/skills/activated", "persistent hook key should include source")
+}
+
 async function testEmptyCandidatesProduceEmptyResult(): Promise<void> {
   const scope = createHookScope()
   scope.activatePlugin("plugin-a")
@@ -293,6 +393,12 @@ async function run(): Promise<void> {
   console.log("PASS S9 extractPluginIdFromProviderKey edge cases")
   await testMergeHookScopeSnapshotIsAdditive()
   console.log("PASS S10 mergeHookScopeSnapshot adds without dropping prior state")
+  await testPruneActivationsDropsUnkeptScope()
+  console.log("PASS S10b pruneActivations drops unkept plugin / skill scope")
+  await testPersistentHookIdFiresWithoutCurrentSkillScope()
+  console.log("PASS S10c persistent hook id fires without current skill scope")
+  await testPersistentHookKeyDoesNotLeakAcrossSameIdSkills()
+  console.log("PASS S10d persistent hook key does not leak across same-id skills")
   await testEmptyCandidatesProduceEmptyResult()
   console.log("PASS S11 empty candidates yield empty result regardless of scope")
 }

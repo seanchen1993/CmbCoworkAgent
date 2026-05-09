@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, readdirSync } from "fs"
 import { readdir, readFile } from "fs/promises"
 import { basename, dirname, join, relative } from "path"
+import { parseSkillNameFromFrontmatterYaml } from "./frontmatter"
 
 export const MAX_SKILL_DISCOVERY_DEPTH = 3
 
@@ -18,15 +19,7 @@ export function normalizeSkillRelativePath(input: string): string {
 }
 
 export function parseSkillNameFromFrontmatter(content: string): string | null {
-  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/)
-  if (!match) return null
-  for (const line of match[1].split("\n")) {
-    const colonIdx = line.indexOf(":")
-    if (colonIdx > 0 && line.slice(0, colonIdx).trim().toLowerCase() === "name") {
-      return line.slice(colonIdx + 1).trim()
-    }
-  }
-  return null
+  return parseSkillNameFromFrontmatterYaml(content)
 }
 
 export function getSkillNameFromContent(content: string, fallbackName: string): string {

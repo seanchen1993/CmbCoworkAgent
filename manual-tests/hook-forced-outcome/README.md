@@ -3,6 +3,11 @@
 This fixture verifies `forcedOutcome` in the running Agent UI, especially
 fire-and-forget events that do not block the main turn.
 
+`forcedOutcome` is supported on every hook source and format, including global
+hooks, workspace hooks, plugin hooks, skill `hooks/hooks.json`, and skill
+`SKILL.md` YAML frontmatter. For fire-and-forget events it changes the recorded
+hook result semantics, but it does not stop or revise the main Agent turn.
+
 Default workspace:
 
 ```powershell

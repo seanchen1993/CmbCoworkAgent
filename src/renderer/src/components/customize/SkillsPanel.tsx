@@ -929,6 +929,7 @@ const SKILL_HOOK_JSON_EXAMPLE = `[
     "type": "command",
     "command": "python hooks/pre_write_guard.py",
     "timeout": 10000,
+    "persistAfterInterrupt": true,
     "onBlock": {
       "systemMessage": "请先按技能要求整改，再重试",
       "requiredSkill": "<skill-name>"
@@ -954,7 +955,8 @@ const SKILL_HOOK_CC_EXAMPLE = `{
         {
           "type": "command",
           "command": "python hooks/pre_write_guard.py",
-          "timeout": 10
+          "timeout": 10,
+          "persistAfterInterrupt": true
         }
       ]
     }
@@ -973,6 +975,36 @@ const SKILL_HOOK_CC_EXAMPLE = `{
     }
   ]
 }`
+
+const SKILL_HOOK_FRONTMATTER_EXAMPLE = `---
+name: secret-policy
+description: 处理敏感信息前必须使用。用户提到密钥、凭据、脱敏、审计或 secret 时使用。
+hooks:
+  PreToolUse:
+    - matcher: write_file|edit_file
+      hooks:
+        - id: pre-write-check
+          type: command
+          command: python hooks/pre-write-check.py
+          timeout: 10
+          timeoutMs: 12000
+          once: true
+          persistAfterInterrupt: true
+          onBlock:
+            reason: 高风险写入，请先按技能流程处理
+            requiredSkill: secret-policy
+  PostSkillUse:
+    - hooks:
+        - id: post-skill-audit
+          type: command
+          command: python hooks/post-skill-audit.py
+          forcedOutcome: always-revise
+          forcedReason: 技能使用后需要补充审计结论
+---
+
+# Secret Policy
+
+按敏感信息处理流程完成任务。`
 
 const SKILL_HOOK_ENV_EXAMPLE = `const workspace = process.env.WORKSPACE_PATH
 const skillRoot = process.env.SKILL_ROOT
@@ -1071,6 +1103,20 @@ function SkillsGuide(): React.JSX.Element {
                   ，用来定义任务目标、执行步骤、输出要求等。
                 </p>
                 <p>
+                  <code className="mx-1 font-mono text-foreground/85">SKILL.md</code>
+                  顶部可以带 YAML frontmatter；技能模块会从这里读取
+                  <code className="mx-1 font-mono text-foreground/85">name</code>、
+                  <code className="mx-1 font-mono text-foreground/85">description</code>
+                  等元信息，也会加载
+                  <code className="mx-1 font-mono text-foreground/85">hooks</code>
+                  字段里的配套 Skill Hook。frontmatter 后面的正文仍是技能说明，会按正常技能内容读取。
+                </p>
+                <p>
+                  如果某个 Skill Hook 需要在技能触发后于本会话持续生效，可以在该 Hook 上加
+                  <code className="mx-1 font-mono text-foreground/85">persistAfterInterrupt: true</code>
+                  ；这个字段只对技能 / 插件 Hook 有意义，并且按 Hook 自己的身份持久化。
+                </p>
+                <p>
                   一个技能目录下如果还有子目录包含
                   <code className="mx-1 font-mono text-foreground/85">SKILL.md</code>
                   ，会被识别为独立的子技能；系统按目录路径区分父子技能和同名技能。
@@ -1101,6 +1147,11 @@ function SkillsGuide(): React.JSX.Element {
                   子技能可以拥有自己的
                   <code className="mx-1 font-mono text-foreground/85">hooks/hooks.json</code>
                   ；触发子技能时只激活它自己目录下的 Skill Hook，不会串到同名的其他技能。
+                </p>
+                <p>
+                  父技能和子技能都支持
+                  <code className="mx-1 font-mono text-foreground/85">persistAfterInterrupt</code>
+                  ，是否在会话后续轮次继续命中由各自 Hook 自己决定。
                 </p>
               </div>
             </SkillGuideSubSection>
@@ -1143,7 +1194,7 @@ function SkillsGuide(): React.JSX.Element {
 
         <SkillGuideSection
           title="Skill Hook 配置说明"
-          summary="把 hooks/hooks.json 放进技能目录后，技能启用时会自动加载对应 Hook。"
+          summary="把 hooks/hooks.json 放进技能目录，或写进 SKILL.md frontmatter，技能启用时会自动加载对应 Hook。"
         >
           <div className="space-y-3">
             <SkillGuideSubSection
@@ -1176,7 +1227,13 @@ function SkillsGuide(): React.JSX.Element {
                   <code className="mx-1 font-mono text-foreground/85">hooks/hooks.json</code>
                   ，启用对应技能时就会自动加载；根目录
                   <code className="mx-1 font-mono text-foreground/85">hooks.json</code>
-                  仍兼容旧包，嵌套子技能的 Hook 放在子技能自己的目录下。
+                  仍兼容旧包；也可以直接写在
+                  <code className="mx-1 font-mono text-foreground/85">SKILL.md</code>
+                  顶部 YAML frontmatter 的
+                  <code className="mx-1 font-mono text-foreground/85">hooks</code>
+                  字段里。嵌套子技能的 Hook 放在子技能自己的目录或子技能自己的
+                  <code className="mx-1 font-mono text-foreground/85">SKILL.md</code>
+                  里。
                 </p>
                 <p>
                   Skill Hook 命令默认按技能所在目录作为
@@ -1187,6 +1244,15 @@ function SkillsGuide(): React.JSX.Element {
                   <code className="mx-1 font-mono text-foreground/85">HOOK_SOURCE_ROOT</code>或
                   <code className="mx-1 font-mono text-foreground/85">SKILL_ROOT</code>
                   环境变量定位。
+                </p>
+                <p>
+                  Hook 写在
+                  <code className="mx-1 font-mono text-foreground/85">SKILL.md frontmatter</code>
+                  里时，配置来源会显示为
+                  <code className="mx-1 font-mono text-foreground/85">SKILL.md</code>
+                  ；命令默认执行目录仍是该技能目录，和
+                  <code className="mx-1 font-mono text-foreground/85">hooks/hooks.json</code>
+                  保持一致。
                 </p>
               </div>
             </SkillGuideSubSection>
@@ -1220,9 +1286,35 @@ function SkillsGuide(): React.JSX.Element {
 
             <SkillGuideSubSection
               title="最小配置示例"
-              summary="支持扁平数组和 Claude Code 嵌套两种格式；运行时自动识别。"
+              summary="支持 SKILL.md frontmatter、扁平数组和 Claude Code 嵌套格式；运行时自动识别。"
             >
               <div className="space-y-3 text-sm text-muted-foreground">
+                <p className="font-medium text-foreground/85">
+                  SKILL.md frontmatter（技能说明和配套 Hook 放在同一个文件）
+                </p>
+                <pre className="overflow-x-auto rounded-md border border-border/40 bg-background p-3 text-xs leading-5 text-foreground">
+                  <code>{SKILL_HOOK_FRONTMATTER_EXAMPLE}</code>
+                </pre>
+                <p>
+                frontmatter 使用 YAML，字段无需加引号；内部
+                <code className="mx-1 font-mono text-foreground/85">hooks</code>
+                结构与 Claude Code hooks settings 一致，并支持
+                <code className="mx-1 font-mono text-foreground/85">once</code>、
+                <code className="mx-1 font-mono text-foreground/85">persistAfterInterrupt</code>、
+                <code className="mx-1 font-mono text-foreground/85">timeoutMs</code>、
+                <code className="mx-1 font-mono text-foreground/85">forcedOutcome</code>、
+                <code className="mx-1 font-mono text-foreground/85">forcedReason</code>、
+                <code className="mx-1 font-mono text-foreground/85">onBlock</code>和
+                <code className="mx-1 font-mono text-foreground/85">modelId</code>。
+                </p>
+                <p>
+                  对
+                  <code className="mx-1 font-mono text-foreground/85">PreSkillUse</code>/
+                  <code className="mx-1 font-mono text-foreground/85">PostSkillUse</code>
+                  ，如果 frontmatter 里的
+                  <code className="mx-1 font-mono text-foreground/85">matcher</code>
+                  省略，默认匹配当前技能名；只选中子技能时，只会激活子技能自己的 Hook。
+                </p>
                 <p className="font-medium text-foreground/85">扁平数组（推荐）</p>
                 <pre className="overflow-x-auto rounded-md border border-border/40 bg-background p-3 text-xs leading-5 text-foreground">
                   <code>{SKILL_HOOK_JSON_EXAMPLE}</code>

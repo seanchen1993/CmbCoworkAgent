@@ -13,6 +13,12 @@ const MAX_OUTPUT_BYTES = 1_000_000 // 1 MB per hook
 const CHARDET_CONFIDENCE_THRESHOLD = 0.8
 const CHARDET_SAMPLE_BYTES = 8_192
 const MAX_HOOK_ENV_JSON_CHARS = 4_096
+const ONCE_HOOK_KEY_SEPARATOR = "\u0000"
+// `once` fired-state, partitioned by sessionId so we can drop a session's
+// entries when a thread ends (or when a hook is mutated). Aligns conceptually
+// with CC's session-scoped session-hooks Map, except we track fired state
+// rather than registering ephemeral hooks.
+const firedOnceHookKeys = new Map<string, Set<string>>()
 
 // Compiled regex cache keyed by matcher string. null = invalid pattern (fallback to exact match).
 const _regexCache = new Map<string, RegExp | null>()
@@ -747,6 +753,78 @@ type ScopedHook = HookConfig &
   Partial<Pick<PluginHookMetadata, "pluginId" | "pluginName" | "pluginRoot">> &
   Partial<Pick<SkillHookMetadata, "skillName" | "skillPath" | "skillRoot">>
 
+function getOnceSessionId(context: HookContext): string {
+  return context.sessionId ?? ""
+}
+
+/**
+ * Per-hook part of the once-key. sessionId is intentionally excluded — we use
+ * it as the outer Map key so a session's entries can be dropped in O(1) on
+ * `clearOnceStateForSession`.
+ */
+function getOnceHookKey(hook: HookConfig, event: HookEvent, context: HookContext): string {
+  const scopedHook = hook as ScopedHook
+  return [
+    event,
+    hook.hookSourceType ?? scopedHook.hookSourceType ?? "",
+    hook.hookSourceRoot ?? scopedHook.hookSourceRoot ?? "",
+    hook.hookSourcePath ?? scopedHook.hookSourcePath ?? "",
+    scopedHook.pluginId ?? context.pluginId ?? "",
+    scopedHook.skillPath ?? context.skillPath ?? "",
+    hook.id
+  ].join(ONCE_HOOK_KEY_SEPARATOR)
+}
+
+function shouldSkipOnceHook(hook: HookConfig, event: HookEvent, context: HookContext): boolean {
+  if (hook.once !== true) return false
+  const sessionSet = firedOnceHookKeys.get(getOnceSessionId(context))
+  if (!sessionSet) return false
+  return sessionSet.has(getOnceHookKey(hook, event, context))
+}
+
+function shouldConsumeOnceHook(result: HookResult): boolean {
+  return result.exitCode === 0
+}
+
+function markOnceHookIfNeeded(
+  hook: HookConfig,
+  event: HookEvent,
+  context: HookContext,
+  result: HookResult
+): void {
+  if (hook.once !== true || !shouldConsumeOnceHook(result)) return
+  const sessionId = getOnceSessionId(context)
+  let sessionSet = firedOnceHookKeys.get(sessionId)
+  if (!sessionSet) {
+    sessionSet = new Set<string>()
+    firedOnceHookKeys.set(sessionId, sessionSet)
+  }
+  sessionSet.add(getOnceHookKey(hook, event, context))
+}
+
+/** Drop all once-fired entries belonging to a session — call from fireSessionEnd. */
+export function clearOnceStateForSession(sessionId: string): void {
+  firedOnceHookKeys.delete(sessionId)
+}
+
+/**
+ * Drop once-fired entries that match a hook id across all sessions. Called
+ * after the hook is created/updated/deleted/toggled so a fresh `once` cycle
+ * applies — mirrors CC's "register/unregister hook" semantics.
+ */
+export function clearOnceStateForHook(hookId: string): void {
+  const suffix = ONCE_HOOK_KEY_SEPARATOR + hookId
+  for (const sessionSet of firedOnceHookKeys.values()) {
+    for (const key of [...sessionSet]) {
+      if (key.endsWith(suffix)) sessionSet.delete(key)
+    }
+  }
+}
+
+export function resetHookOnceStateForTests(): void {
+  firedOnceHookKeys.clear()
+}
+
 function enrichContextFromHook(hook: HookConfig, context: HookContext): HookContext {
   const scopedHook = hook as ScopedHook
   return {
@@ -771,7 +849,10 @@ export async function runHooks(
 ): Promise<HookResult | null> {
   const matched = hooks.filter(
     (h) =>
-      h.enabled && h.event === event && matchesName(h.matcher, getMatcherTarget(event, context))
+      h.enabled &&
+      h.event === event &&
+      matchesName(h.matcher, getMatcherTarget(event, context)) &&
+      !shouldSkipOnceHook(h, event, context)
   )
 
   if (matched.length === 0) return null
@@ -790,6 +871,7 @@ export async function runHooks(
         `[Hooks] ${event} hook (${hook.type ?? "command"}) "${(hook.command ?? hook.prompt ?? "").slice(0, 60)}" → exit=${result.exitCode}, blocked=${result.blocked}`
       )
       onHookResult?.(event, hook, result)
+      markOnceHookIfNeeded(hook, event, hookContext, result)
       // continue=false halts the entire agent turn, overrides everything else
       if (result.continue === false) {
         const reason =
@@ -861,6 +943,7 @@ export async function runHooks(
         `[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}`
       )
       onHookResult?.(event, hook, result)
+      markOnceHookIfNeeded(hook, event, hookContext, result)
       if (result.continue === false) {
         shouldHalt = true
         haltReason = result.stopReason ?? haltReason
@@ -902,6 +985,7 @@ export async function runHooks(
         `[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}, continue=${result.continue}`
       )
       onHookResult?.(event, hook, result)
+      markOnceHookIfNeeded(hook, event, hookContext, result)
 
       // continue:false → halt the turn (no revision); takes priority over decision:block.
       // Non-blocking PostSkillUse output is intentionally dropped here — it remains observable
@@ -967,6 +1051,7 @@ export async function runHooks(
         `[Hooks] Stop hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}, continue=${result.continue}`
       )
       onHookResult?.(event, hook, result)
+      markOnceHookIfNeeded(hook, event, hookContext, result)
       if (result.continue === false) {
         stopReasons.push(
           result.stopReason ||
@@ -1028,6 +1113,7 @@ export async function runHooks(
           `[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}, continue=${result.continue}`
         )
         onHookResult?.(event, hook, result)
+        markOnceHookIfNeeded(hook, event, hookContext, result)
         if (result.stderr) {
           console.warn(`[Hooks] ${event} hook stderr:`, result.stderr)
         }

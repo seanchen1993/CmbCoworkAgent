@@ -1,4 +1,4 @@
-import { runHooks, type HookResultCallback } from "./runner"
+import { clearOnceStateForSession, runHooks, type HookResultCallback } from "./runner"
 import type { HookContext } from "./runner"
 import { resolveEnabledHooksForRun, type HookScopeController } from "./scope"
 
@@ -29,7 +29,7 @@ export function fireSessionStartOnce(
   if (existing) {
     startedSessions.set(threadId, {
       workspacePath: workspacePath ?? existing.workspacePath,
-      hookScope: existing.hookScope
+      hookScope: hookScope ?? existing.hookScope
     })
     return
   }
@@ -66,6 +66,10 @@ export async function fireSessionEnd(
     context,
     onHookResult
   ).catch((e) => console.warn("[Hooks] SessionEnd hook error:", e))
+  // Drop this thread's `once` fired-state so a future thread with the same id
+  // (re-import / re-create) starts fresh. Bounded — runs after SessionEnd hooks
+  // complete so `once` SessionEnd hooks themselves still fire correctly.
+  clearOnceStateForSession(threadId)
 }
 
 /**
@@ -89,7 +93,7 @@ export async function fireSessionEndAll(
         "SessionEnd",
         context,
         getOnHookResult?.(id)
-      )
+      ).finally(() => clearOnceStateForSession(id))
     })
   )
   const timeout = new Promise<void>((resolve) => setTimeout(resolve, timeoutMs))
