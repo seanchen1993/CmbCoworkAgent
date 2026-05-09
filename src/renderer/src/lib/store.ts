@@ -1,6 +1,173 @@
 import { create } from "zustand"
 import type { Thread, ModelConfig, Provider, Message } from "@/types"
 
+const MAX_WORKER_FOCUS_MESSAGES = 2_000
+const MAX_WORKER_SIGNATURE_CHARS = 512
+
+function contentTextLength(content: Message["content"] | undefined): number {
+  if (typeof content === "string") return content.length
+  if (!Array.isArray(content)) return 0
+
+  return content.reduce((total, block) => {
+    if (typeof block.text === "string") return total + block.text.length
+    if (typeof block.content === "string") return total + block.content.length
+    return total
+  }, 0)
+}
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`)
+      .join(",")}}`
+  }
+  return JSON.stringify(value)
+}
+
+function boundedTextSignature(value: string): string {
+  if (value.length <= MAX_WORKER_SIGNATURE_CHARS * 2) return value
+  return [
+    value.length,
+    value.slice(0, MAX_WORKER_SIGNATURE_CHARS),
+    value.slice(-MAX_WORKER_SIGNATURE_CHARS)
+  ].join("\u001e")
+}
+
+function contentSignatureKey(content: Message["content"] | undefined): string {
+  if (typeof content === "string") return boundedTextSignature(content)
+  if (!Array.isArray(content)) return ""
+
+  const text = content
+    .map((block) => {
+      if (typeof block.text === "string") return block.text
+      if (typeof block.content === "string") return block.content
+      return block.type ?? ""
+    })
+    .join("\n")
+  return boundedTextSignature(text)
+}
+
+function toolCallsSignatureKey(toolCalls: Message["tool_calls"] | undefined): string {
+  if (!toolCalls?.length) return ""
+  return boundedTextSignature(
+    toolCalls
+      .map((toolCall, index) =>
+        [
+          toolCall.id ?? index,
+          toolCall.name ?? "",
+          toolCall.args ? boundedTextSignature(stableStringify(toolCall.args)) : ""
+        ].join(":")
+      )
+      .join("|")
+  )
+}
+
+function workerFocusMessageSignature(message: Message): string | undefined {
+  const contentKey = contentSignatureKey(message.content)
+  if (message.role === "assistant") {
+    const toolCallKey = toolCallsSignatureKey(message.tool_calls)
+    if (!contentKey && !toolCallKey) return undefined
+    return ["assistant", contentKey, toolCallKey].join("\u001f")
+  }
+  if (message.role === "tool" && message.tool_call_id) {
+    return ["tool", message.tool_call_id, message.name ?? "", contentKey].join("\u001f")
+  }
+  return undefined
+}
+
+function isWorkerSnapshotMessageId(id: string): boolean {
+  return id.startsWith("worker-snapshot-")
+}
+
+function isWorkerNonSnapshotMessageId(id: string): boolean {
+  return !isWorkerSnapshotMessageId(id)
+}
+
+function isWorkerSnapshotPair(a: Message, b: Message): boolean {
+  return (
+    (isWorkerSnapshotMessageId(a.id) && isWorkerNonSnapshotMessageId(b.id)) ||
+    (isWorkerNonSnapshotMessageId(a.id) && isWorkerSnapshotMessageId(b.id))
+  )
+}
+
+function isSameWorkerAssistantText(a: Message, b: Message): boolean {
+  if (a.role !== "assistant" || b.role !== "assistant") return false
+  if (!isWorkerSnapshotPair(a, b)) return false
+  if (a.tool_calls?.length || b.tool_calls?.length) return false
+  if (typeof a.content !== "string" || typeof b.content !== "string") return false
+  const first = a.content.trim()
+  const second = b.content.trim()
+  if (!first || !second) return false
+  return first.includes(second) || second.includes(first)
+}
+
+function findSameWorkerAssistantTextIndex(messages: Message[], message: Message): number | undefined {
+  const index = messages.findIndex((item) => isSameWorkerAssistantText(item, message))
+  return index >= 0 ? index : undefined
+}
+
+function incrementSignatureCount(map: Map<string, number>, signature: string | undefined): void {
+  if (!signature) return
+  map.set(signature, (map.get(signature) ?? 0) + 1)
+}
+
+function takeWindowedSignatureMatch(
+  indexes: number[] | undefined,
+  remainingBySignature: Map<string, number>,
+  signature: string | undefined
+): number | undefined {
+  if (!indexes?.length || !signature) return undefined
+  const remaining = remainingBySignature.get(signature) ?? 0
+  if (remaining <= 0) return indexes.shift()
+
+  // Focused live events normally describe the newest worker turn. If older
+  // turns produced identical text, match against the newest compatible replay
+  // window rather than the oldest matching snapshot.
+  const matchPosition = Math.max(0, indexes.length - remaining)
+  const [index] = indexes.splice(matchPosition, 1)
+  remainingBySignature.set(signature, remaining - 1)
+  return index
+}
+
+function pruneWorkerFocusMessages(messages: Message[]): Message[] {
+  if (messages.length <= MAX_WORKER_FOCUS_MESSAGES) return messages
+  return messages.slice(-MAX_WORKER_FOCUS_MESSAGES)
+}
+
+function resolveWorkerFocusContent(
+  existingMessage: Message,
+  incomingMessage: Message
+): Message["content"] {
+  if (isWorkerNonSnapshotMessageId(existingMessage.id) && existingMessage.id === incomingMessage.id) {
+    return incomingMessage.content ?? existingMessage.content ?? ""
+  }
+
+  if (isWorkerSnapshotMessageId(incomingMessage.id)) {
+    return preferIncomingContent(existingMessage.content, incomingMessage.content)
+  }
+
+  if (isWorkerSnapshotMessageId(existingMessage.id)) {
+    return preferIncomingContent(incomingMessage.content, existingMessage.content)
+  }
+
+  return preferIncomingContent(existingMessage.content, incomingMessage.content)
+}
+
+function preferIncomingContent(
+  existing: Message["content"] | undefined,
+  incoming: Message["content"] | undefined
+): Message["content"] {
+  const existingLength = contentTextLength(existing)
+  const incomingLength = contentTextLength(incoming)
+  if (incomingLength === 0) return existing ?? ""
+  if (existingLength > incomingLength) return existing ?? ""
+
+  return incoming ?? ""
+}
+
 type EvolutionTab = "candidates" | "traces"
 
 interface EvolutionRunProgress {
@@ -19,6 +186,7 @@ export interface WorkerFocusView {
   workerThreadId: string
   role: "implementer" | "verifier"
   description: string
+  status?: "running" | "completed" | "failed" | "cancelled"
 }
 
 interface AppState {
@@ -45,10 +213,12 @@ interface AppState {
 
   // Split view for inspecting a single coordinator worker stream.
   workerFocusView: WorkerFocusView | null
+  workerFocusMessagesThreadId: string | null
   workerFocusMessages: Message[]
   openWorkerFocusView: (view: WorkerFocusView) => void
   closeWorkerFocusView: () => void
   appendWorkerFocusMessage: (workerThreadId: string, message: Message) => void
+  appendWorkerFocusMessages: (workerThreadId: string, messages: Message[]) => void
 
   // Kanban view state
   showKanbanView: boolean
@@ -56,13 +226,13 @@ interface AppState {
 
   // Claude Code view state
   showClaudeCodeView: boolean
-  previousThreadId: string | null  // 切换到 Claude Code 前保存的线程 ID
+  previousThreadId: string | null // 切换到 Claude Code 前保存的线程 ID
   setShowClaudeCodeView: (show: boolean) => void
 
   // Dashboard view state
   showDashboardView: boolean
   setShowDashboardView: (show: boolean) => void
-  dashboardAllowed: boolean | null  // null = loading
+  dashboardAllowed: boolean | null // null = loading
   loadDashboardAllowed: () => Promise<void>
 
   // Customize view state
@@ -103,7 +273,9 @@ interface AppState {
   setShowCustomizeView: (show: boolean, tab?: string) => void
   setMarketInitialSkillCategory: (category: string | null) => void
   setMarketInitialSkillSearchQuery: (query: string | null) => void
-  setMainView: (view: "thread" | "customize" | "evolution" | "kanban" | "claudecode" | "dashboard") => void
+  setMainView: (
+    view: "thread" | "customize" | "evolution" | "kanban" | "claudecode" | "dashboard"
+  ) => void
 
   // Plugin state sync — increment to trigger RightPanel refresh
   pluginVersion: number
@@ -115,11 +287,14 @@ interface AppState {
 
   // Skill generation virtual subagent — shown in the right panel agents section.
   // State is stored per-thread so switching threads preserves each thread's card.
-  skillGenerationByThread: Map<string, {
-    phase: "generating" | "done" | "error" | null
-    streamedText: string
-    errorText: string
-  }>
+  skillGenerationByThread: Map<
+    string,
+    {
+      phase: "generating" | "done" | "error" | null
+      streamedText: string
+      errorText: string
+    }
+  >
   setSkillGenerationPhase: (phase: "generating" | "done" | "error" | null, text?: string) => void
   appendSkillGenerationToken: (token: string) => void
 
@@ -149,8 +324,20 @@ interface AppState {
   evolutionStreamError: string | null
   setEvolutionStreamError: (err: string | null) => void
   // Options used for the last optimizer run (for retry)
-  evolutionLastRunOpts: { mode?: "auto" | "selected"; traceIds?: string[]; threadId?: string; traceLimit?: number } | null
-  setEvolutionLastRunOpts: (opts: { mode?: "auto" | "selected"; traceIds?: string[]; threadId?: string; traceLimit?: number } | null) => void
+  evolutionLastRunOpts: {
+    mode?: "auto" | "selected"
+    traceIds?: string[]
+    threadId?: string
+    traceLimit?: number
+  } | null
+  setEvolutionLastRunOpts: (
+    opts: {
+      mode?: "auto" | "selected"
+      traceIds?: string[]
+      threadId?: string
+      traceLimit?: number
+    } | null
+  ) => void
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -164,6 +351,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   sidebarCollapsed: false,
   rightPanelCollapsed: false,
   workerFocusView: null,
+  workerFocusMessagesThreadId: null,
   workerFocusMessages: [],
   mainView: "thread",
   showKanbanView: false,
@@ -210,6 +398,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       previousThreadId: null,
       mainView: "thread",
       workerFocusView: null,
+      workerFocusMessagesThreadId: null,
       workerFocusMessages: []
       // skillGenerationByThread is NOT reset here: new threads start with no entry
       // in the map, so the card is naturally absent without discarding other threads' state.
@@ -227,6 +416,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       previousThreadId: null,
       mainView: "thread",
       workerFocusView: null,
+      workerFocusMessagesThreadId: null,
       workerFocusMessages: []
       // skillGenerationByThread is NOT cleared here: each thread retains its own card
       // state so switching back to a thread shows the card exactly as it was left.
@@ -252,7 +442,11 @@ export const useAppStore = create<AppState>((set, get) => ({
           // 如果被删除的线程是之前保存的，清掉避免恢复到无效 id
           previousThreadId: state.previousThreadId === threadId ? null : state.previousThreadId,
           ...(state.workerFocusView?.threadId === threadId
-            ? { workerFocusView: null, workerFocusMessages: [] }
+            ? {
+                workerFocusView: null,
+                workerFocusMessagesThreadId: null,
+                workerFocusMessages: []
+              }
             : {})
         }
       })
@@ -319,6 +513,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   openWorkerFocusView: (view) => {
     set({
       workerFocusView: view,
+      workerFocusMessagesThreadId: view.workerThreadId,
       workerFocusMessages: []
     })
   },
@@ -326,35 +521,108 @@ export const useAppStore = create<AppState>((set, get) => ({
   closeWorkerFocusView: () => {
     set({
       workerFocusView: null,
+      workerFocusMessagesThreadId: null,
       workerFocusMessages: []
     })
   },
 
   appendWorkerFocusMessage: (workerThreadId, message) => {
+    get().appendWorkerFocusMessages(workerThreadId, [message])
+  },
+
+  appendWorkerFocusMessages: (workerThreadId, messages) => {
+    if (messages.length === 0) return
     set((state) => {
       if (state.workerFocusView?.workerThreadId !== workerThreadId) return {}
+      const existingMessages =
+        state.workerFocusMessagesThreadId === workerThreadId ? state.workerFocusMessages : []
 
-      const next = [...state.workerFocusMessages]
-      const existingIndex = next.findIndex((item) => item.id === message.id)
-      if (existingIndex === -1) {
-        next.push(message)
-        return { workerFocusMessages: next }
+      const next = [...existingMessages]
+      const indexById = new Map(next.map((item, index) => [item.id, index]))
+      const liveIndexesBySignature = new Map<string, number[]>()
+      const snapshotIndexesBySignature = new Map<string, number[]>()
+      const incomingLiveCountsBySignature = new Map<string, number>()
+      const incomingSnapshotCountsBySignature = new Map<string, number>()
+      for (const message of messages) {
+        const signature = workerFocusMessageSignature(message)
+        if (isWorkerNonSnapshotMessageId(message.id)) {
+          incrementSignatureCount(incomingLiveCountsBySignature, signature)
+        }
+        if (isWorkerSnapshotMessageId(message.id)) {
+          incrementSignatureCount(incomingSnapshotCountsBySignature, signature)
+        }
       }
+      next.forEach((item, index) => {
+        const signature = workerFocusMessageSignature(item)
+        if (signature && isWorkerNonSnapshotMessageId(item.id)) {
+          const indexes = liveIndexesBySignature.get(signature) ?? []
+          indexes.push(index)
+          liveIndexesBySignature.set(signature, indexes)
+        }
+        if (signature && isWorkerSnapshotMessageId(item.id)) {
+          const indexes = snapshotIndexesBySignature.get(signature) ?? []
+          indexes.push(index)
+          snapshotIndexesBySignature.set(signature, indexes)
+        }
+      })
 
-      const existing = next[existingIndex]
-      next[existingIndex] = {
-        ...existing,
-        ...message,
-        content:
-          message.content === "" || (Array.isArray(message.content) && message.content.length === 0)
-            ? existing.content
-            : message.content,
-        tool_calls:
-          message.tool_calls && message.tool_calls.length > 0
-            ? message.tool_calls
-            : existing.tool_calls
+      for (const message of messages) {
+        const signature = workerFocusMessageSignature(message)
+        const existingIndex =
+          indexById.get(message.id) ??
+          (signature && isWorkerSnapshotMessageId(message.id)
+            ? takeWindowedSignatureMatch(
+                liveIndexesBySignature.get(signature),
+                incomingSnapshotCountsBySignature,
+                signature
+              )
+            : undefined) ??
+          (signature && isWorkerNonSnapshotMessageId(message.id)
+            ? takeWindowedSignatureMatch(
+                snapshotIndexesBySignature.get(signature),
+                incomingLiveCountsBySignature,
+                signature
+              )
+            : undefined) ??
+          findSameWorkerAssistantTextIndex(next, message)
+        if (existingIndex === undefined) {
+          indexById.set(message.id, next.length)
+          if (signature && isWorkerNonSnapshotMessageId(message.id)) {
+            const indexes = liveIndexesBySignature.get(signature) ?? []
+            indexes.push(next.length)
+            liveIndexesBySignature.set(signature, indexes)
+          }
+          if (signature && isWorkerSnapshotMessageId(message.id)) {
+            const indexes = snapshotIndexesBySignature.get(signature) ?? []
+            indexes.push(next.length)
+            snapshotIndexesBySignature.set(signature, indexes)
+          }
+          next.push(message)
+          continue
+        }
+
+        const existing = next[existingIndex]
+        const id = existing.id
+        next[existingIndex] = {
+          ...existing,
+          ...message,
+          id,
+          content: resolveWorkerFocusContent(existing, message),
+          tool_calls:
+            message.tool_calls && message.tool_calls.length > 0
+              ? message.tool_calls
+              : existing.tool_calls,
+          status: message.status ?? existing.status,
+          is_error: message.is_error ?? existing.is_error
+        }
+        indexById.set(id, existingIndex)
+        indexById.set(message.id, existingIndex)
       }
-      return { workerFocusMessages: next }
+      const prunedMessages = pruneWorkerFocusMessages(next)
+      return {
+        workerFocusMessagesThreadId: workerThreadId,
+        workerFocusMessages: prunedMessages
+      }
     })
   },
 
@@ -372,6 +640,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         previousThreadId: prev,
         currentThreadId: null,
         workerFocusView: null,
+        workerFocusMessagesThreadId: null,
         workerFocusMessages: []
       })
     } else {
@@ -403,6 +672,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         previousThreadId: prev,
         currentThreadId: null,
         workerFocusView: null,
+        workerFocusMessagesThreadId: null,
         workerFocusMessages: []
       })
     } else {
@@ -429,11 +699,16 @@ export const useAppStore = create<AppState>((set, get) => ({
         currentThreadId: null,
         previousThreadId: prev,
         workerFocusView: null,
+        workerFocusMessagesThreadId: null,
         workerFocusMessages: []
       })
     } else {
       const restored = get().previousThreadId
-      set({ showKanbanView: false, mainView: "thread", ...(restored ? { currentThreadId: restored, previousThreadId: null } : {}) })
+      set({
+        showKanbanView: false,
+        mainView: "thread",
+        ...(restored ? { currentThreadId: restored, previousThreadId: null } : {})
+      })
     }
   },
 
@@ -451,6 +726,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         customizeInitialTab: tab ?? null,
         mainView: "customize",
         workerFocusView: null,
+        workerFocusMessagesThreadId: null,
         workerFocusMessages: []
       })
     } else {
@@ -481,6 +757,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         showClaudeCodeView: false,
         currentThreadId: null,
         workerFocusView: null,
+        workerFocusMessagesThreadId: null,
         workerFocusMessages: []
       })
       return
@@ -493,6 +770,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         showKanbanView: false,
         showClaudeCodeView: false,
         workerFocusView: null,
+        workerFocusMessagesThreadId: null,
         workerFocusMessages: []
       })
       return
@@ -506,6 +784,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         showClaudeCodeView: false,
         customizeInitialTab: "evolution",
         workerFocusView: null,
+        workerFocusMessagesThreadId: null,
         workerFocusMessages: []
       })
       return
@@ -522,6 +801,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         previousThreadId: prev,
         currentThreadId: null,
         workerFocusView: null,
+        workerFocusMessagesThreadId: null,
         workerFocusMessages: []
       })
       return
@@ -537,6 +817,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         previousThreadId: prev,
         currentThreadId: null,
         workerFocusView: null,
+        workerFocusMessagesThreadId: null,
         workerFocusMessages: []
       })
       return
@@ -601,8 +882,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((state) => {
       const threadId = state.currentThreadId
       if (!threadId) return {}
-      const current = state.skillGenerationByThread.get(threadId)
-        ?? { phase: "generating" as const, streamedText: "", errorText: "" }
+      const current = state.skillGenerationByThread.get(threadId) ?? {
+        phase: "generating" as const,
+        streamedText: "",
+        errorText: ""
+      }
       const next = new Map(state.skillGenerationByThread)
       next.set(threadId, { ...current, streamedText: current.streamedText + token })
       return { skillGenerationByThread: next }

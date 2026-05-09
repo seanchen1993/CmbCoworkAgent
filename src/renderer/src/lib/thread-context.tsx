@@ -107,6 +107,33 @@ export interface ThreadState {
   modelRetry: ModelRetryState | null
 }
 
+function debugMessageContentLength(content: Message["content"] | undefined): number {
+  if (typeof content === "string") return content.length
+  if (!Array.isArray(content)) return 0
+
+  return content.reduce((total, block) => {
+    if (typeof block.text === "string") return total + block.text.length
+    if (typeof block.content === "string") return total + block.content.length
+    return total
+  }, 0)
+}
+
+function debugMessagesTextLength(messages: Message[] | undefined): number {
+  if (!Array.isArray(messages)) return 0
+  return messages.reduce((total, message) => total + debugMessageContentLength(message.content), 0)
+}
+
+function debugRuntimeMessagesLength(messages: StreamData["messages"] | undefined): number {
+  if (!Array.isArray(messages)) return 0
+  return messages.reduce((total, message) => {
+    const content = (message as { content?: Message["content"] }).content
+    return total + debugMessageContentLength(content)
+  }, 0)
+}
+
+type CmbMemoryDebugWindow = Window & {
+  __cmbCoworkMemorySnapshot?: () => unknown
+}
 
 // Stream instance type
 type StreamInstance = ReturnType<typeof useStream<DeepAgent>>
@@ -157,6 +184,7 @@ interface ThreadContextValue {
   getAllStreamLoadingStates: () => Record<string, boolean>
   // Subscribe to all stream updates
   subscribeToAllStreams: (callback: () => void) => () => void
+  suppressCoordinatorNotificationAutoRun: (threadId: string) => void
 }
 
 // Default thread state
@@ -203,6 +231,7 @@ const defaultStreamData: StreamData = {
 const EMPTY_HOOK_LOGS: HookLogEntry[] = []
 const COORDINATOR_NOTIFICATION_RETRY_MS = 1_000
 const COORDINATOR_NOTIFICATION_MAX_RETRIES = 30
+const COORDINATOR_NOTIFICATION_SUPPRESS_MS = 15_000
 
 function isTerminalCoordinatorWorker(worker: CoordinatorWorkerView): boolean {
   return (
@@ -411,10 +440,12 @@ function ThreadStreamHolder({
 }
 
 export function ThreadProvider({ children }: { children: ReactNode }) {
+  const currentThreadId = useAppStore((state) => state.currentThreadId)
   const [threadStates, setThreadStates] = useState<Record<string, ThreadState>>({})
   const [activeThreadIds, setActiveThreadIds] = useState<Set<string>>(new Set())
   const [loadingStates, setLoadingStates] = useState<Record<string, boolean>>({})
   const initializedThreadsRef = useRef<Set<string>>(new Set())
+  const previousCurrentThreadIdRef = useRef<string | null>(null)
   const actionsCache = useRef<Record<string, ThreadActions>>({})
 
   // Stream data store (not React state - we use subscriptions)
@@ -425,6 +456,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const coordinatorNotificationTimersRef = useRef<Record<string, number>>({})
   const coordinatorNotificationAttemptsRef = useRef<Record<string, number>>({})
   const coordinatorNotificationRetryOnIdleRef = useRef<Record<string, boolean>>({})
+  const coordinatorNotificationAutoRunSuppressedRef = useRef<Set<string>>(new Set())
+  const coordinatorNotificationSuppressTimersRef = useRef<Record<string, number>>({})
   const environmentCoordinatorThreadIdsRef = useRef<Set<string>>(new Set())
 
   // Hook logs store (not React state — avoids re-rendering chat on every hook fire)
@@ -434,6 +467,86 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     threadStatesRef.current = threadStates
   }, [threadStates])
+
+  useEffect(() => {
+    if (!import.meta.env.DEV) return
+
+    const snapshot = (): unknown => {
+      const appState = useAppStore.getState()
+      const states = threadStatesRef.current
+      const streamData = streamDataRef.current
+      const workerFocusMessages = appState.workerFocusMessages
+      const currentThreadId = appState.currentThreadId
+      const currentThreadState = currentThreadId ? states[currentThreadId] : undefined
+      const allThreadMessages = Object.values(states).reduce(
+        (total, state) => total + state.messages.length,
+        0
+      )
+      const allThreadMessageChars = Object.values(states).reduce(
+        (total, state) => total + debugMessagesTextLength(state.messages),
+        0
+      )
+      const streamMessages = Object.values(streamData).reduce(
+        (total, data) => total + (Array.isArray(data.messages) ? data.messages.length : 0),
+        0
+      )
+      const streamMessageChars = Object.values(streamData).reduce(
+        (total, data) => total + debugRuntimeMessagesLength(data.messages),
+        0
+      )
+      const performanceMemory = (
+        performance as Performance & {
+          memory?: {
+            usedJSHeapSize?: number
+            totalJSHeapSize?: number
+            jsHeapSizeLimit?: number
+          }
+        }
+      ).memory
+      const result = {
+        usedJSHeapMB: performanceMemory?.usedJSHeapSize
+          ? Math.round(performanceMemory.usedJSHeapSize / 1024 / 1024)
+          : null,
+        totalJSHeapMB: performanceMemory?.totalJSHeapSize
+          ? Math.round(performanceMemory.totalJSHeapSize / 1024 / 1024)
+          : null,
+        domNodes: document.getElementsByTagName("*").length,
+        currentThreadId,
+        currentThreadMessages: currentThreadState?.messages.length ?? 0,
+        currentThreadMessageChars: debugMessagesTextLength(currentThreadState?.messages),
+        allThreadCount: Object.keys(states).length,
+        allThreadMessages,
+        allThreadMessageChars,
+        streamThreadCount: Object.keys(streamData).length,
+        streamMessages,
+        streamMessageChars,
+        workerFocusOpen: Boolean(appState.workerFocusView),
+        workerFocusMessages: workerFocusMessages.length,
+        workerFocusMessageChars: debugMessagesTextLength(workerFocusMessages),
+        coordinatorWorkers: currentThreadState?.coordinatorWorkers.length ?? 0
+      }
+      console.info("[CMBMemorySnapshot]", result)
+      return result
+    }
+
+    ;(window as CmbMemoryDebugWindow).__cmbCoworkMemorySnapshot = snapshot
+
+    const interval = window.setInterval(() => {
+      const hasLoadingStream = Object.values(streamDataRef.current).some((data) => data.isLoading)
+      const hasWorkerFocus = Boolean(useAppStore.getState().workerFocusView)
+      if (hasLoadingStream || hasWorkerFocus) {
+        snapshot()
+      }
+    }, 10000)
+
+    return () => {
+      window.clearInterval(interval)
+      const debugWindow = window as CmbMemoryDebugWindow
+      if (debugWindow.__cmbCoworkMemorySnapshot === snapshot) {
+        delete debugWindow.__cmbCoworkMemorySnapshot
+      }
+    }
+  }, [])
 
   const notifyHookLogSubscribers = useCallback((threadId: string) => {
     hookLogsSubscribersRef.current[threadId]?.forEach((cb) => cb())
@@ -576,14 +689,17 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   )
 
   const scheduleCoordinatorNotificationTurn = useCallback((threadId: string) => {
+    if (coordinatorNotificationAutoRunSuppressedRef.current.has(threadId)) return
     if (coordinatorNotificationTimersRef.current[threadId] !== undefined) return
 
     coordinatorNotificationTimersRef.current[threadId] = window.setTimeout(async () => {
       delete coordinatorNotificationTimersRef.current[threadId]
+      if (coordinatorNotificationAutoRunSuppressedRef.current.has(threadId)) return
 
       try {
         const hasPendingNotification =
           await window.api.agent.hasCoordinatorWorkerNotifications(threadId)
+        if (coordinatorNotificationAutoRunSuppressedRef.current.has(threadId)) return
         if (!hasPendingNotification) {
           delete coordinatorNotificationAttemptsRef.current[threadId]
           delete coordinatorNotificationRetryOnIdleRef.current[threadId]
@@ -601,6 +717,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           } catch (error) {
             console.warn("[ThreadContext] Failed to check coordinator mode override:", error)
           }
+          if (coordinatorNotificationAutoRunSuppressedRef.current.has(threadId)) return
         }
 
         if (isThreadMetadataExplicitNormalMode(threadId) && !isEnvironmentCoordinatorMode) {
@@ -635,6 +752,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         }
 
         const threadState = threadStatesRef.current[threadId] ?? createDefaultThreadState()
+        if (coordinatorNotificationAutoRunSuppressedRef.current.has(threadId)) return
         await streamData.stream.submit(
           null,
           {
@@ -651,6 +769,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         delete coordinatorNotificationAttemptsRef.current[threadId]
         delete coordinatorNotificationRetryOnIdleRef.current[threadId]
       } catch (error) {
+        if (coordinatorNotificationAutoRunSuppressedRef.current.has(threadId)) return
         console.warn("[ThreadContext] Failed to auto-run coordinator notification turn:", error)
         const attempts = (coordinatorNotificationAttemptsRef.current[threadId] ?? 0) + 1
         coordinatorNotificationAttemptsRef.current[threadId] = attempts
@@ -662,6 +781,26 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       }
     }, COORDINATOR_NOTIFICATION_RETRY_MS)
   }, [])
+
+  const suppressCoordinatorNotificationAutoRun = useCallback((threadId: string) => {
+    coordinatorNotificationAutoRunSuppressedRef.current.add(threadId)
+    const existingSuppressTimer = coordinatorNotificationSuppressTimersRef.current[threadId]
+    if (existingSuppressTimer !== undefined) {
+      window.clearTimeout(existingSuppressTimer)
+    }
+    const coordinatorNotificationTimer = coordinatorNotificationTimersRef.current[threadId]
+    if (coordinatorNotificationTimer !== undefined) {
+      window.clearTimeout(coordinatorNotificationTimer)
+    }
+    delete coordinatorNotificationTimersRef.current[threadId]
+    delete coordinatorNotificationAttemptsRef.current[threadId]
+    delete coordinatorNotificationRetryOnIdleRef.current[threadId]
+    coordinatorNotificationSuppressTimersRef.current[threadId] = window.setTimeout(() => {
+      delete coordinatorNotificationSuppressTimersRef.current[threadId]
+      if (!coordinatorNotificationAutoRunSuppressedRef.current.delete(threadId)) return
+      scheduleCoordinatorNotificationTurn(threadId)
+    }, COORDINATOR_NOTIFICATION_SUPPRESS_MS)
+  }, [scheduleCoordinatorNotificationTurn])
 
   useEffect(() => {
     const previous = previousLoadingStatesRef.current
@@ -693,7 +832,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       await Promise.all(
         unresolvedThreadIds.map(async (threadId) => {
           try {
-            const workers = await window.api.agent.getCoordinatorWorkers(threadId)
+            const workers = await window.api.agent.getCoordinatorWorkers(threadId, {
+              subscribeUpdates: false
+            })
             if (cancelled) return
             const previousWorkers = threadStatesRef.current[threadId]?.coordinatorWorkers ?? []
             const previousById = new Map(
@@ -877,21 +1018,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         case "coordinator_notification_deferred":
           scheduleCoordinatorNotificationTurn(threadId)
           break
-        case "coordinator_worker_stream_message": {
-          const focused = useAppStore.getState().workerFocusView
-          const workerThreadId = data.workerThreadId
-          const message = data.workerMessage
-          if (
-            focused &&
-            workerThreadId &&
-            focused.threadId === threadId &&
-            focused.workerThreadId === workerThreadId &&
-            message
-          ) {
-            useAppStore.getState().appendWorkerFocusMessage(workerThreadId, message)
-          }
+        case "coordinator_worker_stream_message":
+          // Focused coordinator worker streams are delivered through App.tsx's
+          // dedicated side channel. Keeping a second append path here doubles
+          // renderer churn when a worker emits values snapshots.
           break
-        }
         case "subagent_tool_count":
           if (typeof data.count === "number" && Number.isFinite(data.count)) {
             updateThreadState(threadId, () => ({
@@ -1045,6 +1176,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           if (message.role === "user") {
             hookLogsRef.current[threadId] = []
             notifyHookLogSubscribers(threadId)
+            coordinatorNotificationAutoRunSuppressedRef.current.delete(threadId)
+            const suppressTimer = coordinatorNotificationSuppressTimersRef.current[threadId]
+            if (suppressTimer !== undefined) {
+              window.clearTimeout(suppressTimer)
+            }
+            delete coordinatorNotificationSuppressTimersRef.current[threadId]
           }
           updateThreadState(threadId, (state) => {
             const exists = state.messages.some((m) => m.id === message.id)
@@ -1210,7 +1347,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           }
 
           window.api.agent
-            .getCoordinatorWorkers(threadId)
+            .getCoordinatorWorkers(threadId, { subscribeUpdates: false })
             .then((workers) => {
               updateThreadState(threadId, (prev) => ({
                 coordinatorWorkers: mergeCoordinatorWorkers(prev.coordinatorWorkers, workers, {
@@ -1304,10 +1441,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
               let content: Message["content"] = ""
               const visibleUserMessage = additionalKwargs?.cmb_visible_user_message
-              const rawContent = msg.content ?? msg.kwargs?.content
-              if (role === "user" && typeof visibleUserMessage === "string") {
-                content = visibleUserMessage
-              } else if (typeof rawContent === "string") content = rawContent
+              const rawContent =
+                role === "user" &&
+                typeof visibleUserMessage === "string" &&
+                visibleUserMessage.length > 0
+                  ? visibleUserMessage
+                  : msg.content ?? msg.kwargs?.content
+              if (typeof rawContent === "string") content = rawContent
               else if (Array.isArray(rawContent)) content = rawContent as Message["content"]
 
               const toolCalls = msg.tool_calls ?? msg.kwargs?.tool_calls
@@ -1625,7 +1765,43 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     [loadThreadHistory, processSchedulerEvent, updateThreadState]
   )
 
+  useEffect(() => {
+    const previousThreadId = previousCurrentThreadIdRef.current
+    if (previousThreadId && previousThreadId !== currentThreadId) {
+      void window.api.agent.unbindCoordinatorWorkers(previousThreadId).catch((error: unknown) => {
+        console.warn("[ThreadProvider] Failed to unbind inactive coordinator worker updates:", error)
+      })
+    }
+    previousCurrentThreadIdRef.current = currentThreadId
+
+    if (!currentThreadId) return
+
+    let cancelled = false
+    void window.api.agent
+      .getCoordinatorWorkers(currentThreadId, { subscribeUpdates: true })
+      .then((workers) => {
+        if (cancelled) return
+        updateThreadState(currentThreadId, (prev) => {
+          const merged = mergeCoordinatorWorkers(prev.coordinatorWorkers, workers, {
+            authoritative: true
+          })
+          if (coordinatorWorkersEqual(prev.coordinatorWorkers, merged)) return {}
+          return { coordinatorWorkers: merged }
+        })
+      })
+      .catch((error) => {
+        console.warn("[ThreadProvider] Failed to bind active coordinator worker updates:", error)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [currentThreadId, updateThreadState])
+
   const cleanupThread = useCallback((threadId: string) => {
+    void window.api.agent.unbindCoordinatorWorkers(threadId).catch((error: unknown) => {
+      console.warn("[ThreadProvider] Failed to unbind coordinator worker updates:", error)
+    })
     schedulerListenerCleanups.current[threadId]?.()
     delete schedulerListenerCleanups.current[threadId]
     heartbeatListenerCleanups.current[threadId]?.()
@@ -1640,6 +1816,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     delete coordinatorNotificationTimersRef.current[threadId]
     delete coordinatorNotificationAttemptsRef.current[threadId]
     delete coordinatorNotificationRetryOnIdleRef.current[threadId]
+    coordinatorNotificationAutoRunSuppressedRef.current.delete(threadId)
+    const coordinatorNotificationSuppressTimer =
+      coordinatorNotificationSuppressTimersRef.current[threadId]
+    if (coordinatorNotificationSuppressTimer !== undefined) {
+      window.clearTimeout(coordinatorNotificationSuppressTimer)
+    }
+    delete coordinatorNotificationSuppressTimersRef.current[threadId]
 
     initializedThreadsRef.current.delete(threadId)
     delete actionsCache.current[threadId]
@@ -1671,7 +1854,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       getHookLogs,
       getAllThreadStates,
       getAllStreamLoadingStates,
-      subscribeToAllStreams
+      subscribeToAllStreams,
+      suppressCoordinatorNotificationAutoRun
     }),
     [
       getThreadState,
@@ -1684,7 +1868,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       getHookLogs,
       getAllThreadStates,
       getAllStreamLoadingStates,
-      subscribeToAllStreams
+      subscribeToAllStreams,
+      suppressCoordinatorNotificationAutoRun
     ]
   )
 

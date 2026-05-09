@@ -253,6 +253,8 @@
 
 .streaming-markdown p {
   margin-bottom: 0.75em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .streaming-markdown p:last-child {

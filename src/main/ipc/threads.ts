@@ -36,6 +36,16 @@ const settingsStore = new Store({
   cwd: getOpenworkDir()
 })
 
+const CHECKPOINT_THREAD_ID_PATTERN = /^[A-Za-z0-9_-]+$/
+
+function assertValidCheckpointThreadId(threadId: string): string {
+  const normalized = threadId.trim()
+  if (!CHECKPOINT_THREAD_ID_PATTERN.test(normalized)) {
+    throw new Error(`Invalid checkpoint threadId: ${threadId}`)
+  }
+  return normalized
+}
+
 async function assertCanPersistExplicitNormalMode(
   threadId: string,
   currentMetadata: Record<string, unknown>,
@@ -288,8 +298,9 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
   // materializing a long checkpoint history in the renderer process.
   ipcMain.handle("threads:latest-checkpoint", async (_event, threadId: string) => {
     try {
-      const checkpointer = await getCheckpointer(threadId)
-      const config = { configurable: { thread_id: threadId } }
+      const normalizedThreadId = assertValidCheckpointThreadId(threadId)
+      const checkpointer = await getCheckpointer(normalizedThreadId)
+      const config = { configurable: { thread_id: normalizedThreadId } }
 
       for await (const checkpoint of checkpointer.list(config, { limit: 1 })) {
         return checkpoint

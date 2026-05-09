@@ -54,7 +54,26 @@ interface CoordinatorWorkerToolOptions {
   selectedSkill?: CoordinatorSelectedSkill
   explicitSelectedSkill?: CoordinatorSelectedSkill
   notificationSelectedSkills?: Record<string, CoordinatorSelectedSkill | undefined>
+  turnPlanning?: CoordinatorWorkerTurnPlanningState
   disableTurnPlanningGuards?: boolean
+}
+
+export interface CoordinatorWorkerTurnPlanningState {
+  starts: number
+  readOnlyStarts: number
+  writeOrVerifyStarts: number
+  continues: number
+  cancels: number
+}
+
+export function createCoordinatorWorkerTurnPlanningState(): CoordinatorWorkerTurnPlanningState {
+  return {
+    starts: 0,
+    readOnlyStarts: 0,
+    writeOrVerifyStarts: 0,
+    continues: 0,
+    cancels: 0
+  }
 }
 
 interface CoordinatorWorkerToolDelegate {
@@ -440,7 +459,9 @@ Tool choice:
 When calling start_worker:
 - Always use subagent_type="worker", matching Claude Code coordinator semantics.
 - Use role="verifier" only for independent verification. Use role="implementer" or omit role for implementation, research that feeds implementation, and file creation.
-- Use workload="read_only" for research workers that only need to inspect files. Use workload="verify" for independent verification that may run tests/build/lint. Use workload="write" for file-changing workers.
+- Always set workload explicitly so long-running worker state is auditable after restore.
+- Use workload="read_only" for research workers that only need to inspect files.
+- Use workload="verify" for independent verification that may run tests/build/lint. Use workload="write" for file-changing workers. If workload is omitted for an implementer, the compatibility fallback is write, matching Claude Code's general worker capability model; do not rely on this fallback.
 - Only verifier workers may use workload="verify". Verification must stay independent, so do not repurpose an implementer as a verifier by changing only the workload.
 - Never combine role="verifier" with workload="write"; verification must stay independent.
 - read_only workers do not receive direct write_file/edit_file or execute/task_output tools.
@@ -649,13 +670,7 @@ export function createCoordinatorWorkerTools(
 
   if (options.workerTools) {
     type PlanningReservation = () => void
-    const turnPlanning = {
-      starts: 0,
-      readOnlyStarts: 0,
-      writeOrVerifyStarts: 0,
-      continues: 0,
-      cancels: 0
-    }
+    const turnPlanning = options.turnPlanning ?? createCoordinatorWorkerTurnPlanningState()
     const planningGuardsEnabled = options.disableTurnPlanningGuards !== true
     const reserveStartAllowed = (workload: CoordinatorWorkerWorkload): PlanningReservation => {
       if (!planningGuardsEnabled) return () => {}
@@ -793,7 +808,7 @@ export function createCoordinatorWorkerTools(
           workload: workerWorkloadSchema
             .optional()
             .describe(
-              'Use "read_only" for research, "verify" for independent checks that may run tests/build/lint, and "write" for implementers that may edit files. Only role="verifier" may use workload="verify". Do not use "write" with role="verifier". Defaults to write for implementer and verify for verifier.'
+              'Always set this explicitly for auditable long-running work. Use "read_only" for research, "verify" for independent checks that may run tests/build/lint, and "write" for implementers that may edit files. Only role="verifier" may use workload="verify". Do not use "write" with role="verifier". Compatibility fallback: write for implementer and verify for verifier.'
             ),
           consumed_notification_ids: z
             .array(z.string().trim().min(1))

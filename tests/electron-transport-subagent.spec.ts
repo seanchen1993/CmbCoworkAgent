@@ -10,7 +10,7 @@
  */
 
 import { ElectronIPCTransport } from "../src/renderer/src/lib/electron-transport.ts"
-import { useAppStore } from "../src/renderer/src/lib/store.ts"
+import { useAppStore, type WorkerFocusView } from "../src/renderer/src/lib/store.ts"
 
 interface SdkEvent {
   event: string
@@ -51,6 +51,25 @@ function firstMessage(events: SdkEvent[]): Record<string, unknown> {
   const data = messageEvent.data as Array<Record<string, unknown>>
   assert(Array.isArray(data) && data[0], "expected message data")
   return data[0]
+}
+
+function resetWorkerFocusStore(): void {
+  useAppStore.setState({
+    workerFocusView: null,
+    workerFocusMessagesThreadId: null,
+    workerFocusMessages: []
+  })
+}
+
+function openWorkerFocusViewForTest(
+  view: Omit<WorkerFocusView, "role" | "description"> &
+    Partial<Pick<WorkerFocusView, "role" | "description">>
+): void {
+  useAppStore.getState().openWorkerFocusView({
+    role: "implementer",
+    description: "Inspect worker stream",
+    ...view
+  })
 }
 
 function aiMessage(input: {
@@ -429,6 +448,7 @@ async function testFocusedAsyncWorkerStreamsToWorkerPanel(): Promise<void> {
       role: "implementer",
       description: "Inspect worker stream"
     },
+    workerFocusMessagesThreadId: "thread-123__worker__implementer-1",
     workerFocusMessages: []
   })
 
@@ -484,6 +504,112 @@ async function testFocusedAsyncWorkerStreamsToWorkerPanel(): Promise<void> {
       "worker side-channel should parse live tool calls without namespace metadata"
     )
 
+    const directHumanSideChannelMessages = transport.convertFocusedCoordinatorWorkerIPCEvent(
+      streamMessageEvent(humanMessage("Continue with the redirected worker instructions"), {}) as never,
+      "thread-123"
+    )
+    assert(
+      directHumanSideChannelMessages.some(
+        (message) =>
+          message.role === "user" &&
+          message.content === "Continue with the redirected worker instructions"
+      ),
+      "worker side-channel should display live human continuation prompts"
+    )
+
+    const directFailedToolMessages = transport.convertFocusedCoordinatorWorkerIPCEvent(
+      streamMessageEvent(
+        toolMessage({
+          name: "read_file",
+          toolCallId: "focused-worker-failed-tool",
+          content: "Permission denied",
+          status: "error"
+        }),
+        {}
+      ) as never,
+      "thread-123"
+    )
+    assert(
+      directFailedToolMessages.some(
+        (message) =>
+          message.role === "tool" &&
+          message.tool_call_id === "focused-worker-failed-tool" &&
+          message.is_error === true &&
+          message.status === "error"
+      ),
+      "worker side-channel should preserve failed tool result status"
+    )
+
+    const cumulativeTextTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "worker-1",
+      workerThreadId: "thread-123__worker__worker-1"
+    })
+    cumulativeTextTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      streamMessageEvent(aiMessageChunk({ content: "## 项目" }), {}) as never,
+      "thread-123"
+    )
+    cumulativeTextTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      streamMessageEvent(aiMessageChunk({ content: "## 项目架构" }), {}) as never,
+      "thread-123"
+    )
+    const cumulativeFinal = cumulativeTextTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      streamMessageEvent(aiMessageChunk({ content: "## 项目架构\n\n- controller" }), {}) as never,
+      "thread-123"
+    )
+    assert(
+      cumulativeFinal.find((message) => message.role === "assistant")?.content ===
+        "## 项目架构\n\n- controller",
+      "worker side-channel should replace cumulative assistant chunks instead of appending duplicated text"
+    )
+
+    const overlappingTextTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "worker-1",
+      workerThreadId: "thread-123__worker__worker-1"
+    })
+    overlappingTextTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      streamMessageEvent(aiMessageChunk({ content: "Controller" }), {}) as never,
+      "thread-123"
+    )
+    const overlappingFinal = overlappingTextTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      streamMessageEvent(aiMessageChunk({ content: "Controller 层" }), {}) as never,
+      "thread-123"
+    )
+    assert(
+      overlappingFinal.find((message) => message.role === "assistant")?.content ===
+        "Controller 层",
+      "worker side-channel should merge overlapping assistant chunks without duplicating text"
+    )
+
+    const deltaTextTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "worker-1",
+      workerThreadId: "thread-123__worker__worker-1"
+    })
+    deltaTextTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      streamMessageEvent(aiMessageChunk({ content: "## " }), {}) as never,
+      "thread-123"
+    )
+    deltaTextTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      streamMessageEvent(aiMessageChunk({ content: "项目" }), {}) as never,
+      "thread-123"
+    )
+    const deltaFinal = deltaTextTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      streamMessageEvent(aiMessageChunk({ content: "架构" }), {}) as never,
+      "thread-123"
+    )
+    assert(
+      deltaFinal.find((message) => message.role === "assistant")?.content === "## 项目架构",
+      "worker side-channel should still append true assistant deltas"
+    )
+
     const directValuesMessages = transport.convertFocusedCoordinatorWorkerIPCEvent(
       streamValuesEvent([
         humanMessage("Worker prompt"),
@@ -522,9 +648,470 @@ async function testFocusedAsyncWorkerStreamsToWorkerPanel(): Promise<void> {
       ),
       "worker values fallback should surface tool results"
     )
+
+    const snapshotFallbackTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "worker-1",
+      workerThreadId: "thread-123__worker__worker-1"
+    })
+
+    const directValuesWithoutIds =
+      snapshotFallbackTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        streamValuesEvent([
+          {
+            id: ["langchain_core", "messages", "HumanMessage"],
+            kwargs: { content: "Worker prompt without provider id" }
+          },
+          aiMessage({ content: "id-less assistant output" }),
+          toolMessage({
+            name: "read_file",
+            toolCallId: "id-less-tool-call",
+            content: "tool result without provider id"
+          })
+        ]) as never,
+        "thread-123"
+      )
+    assert(
+      directValuesWithoutIds[0]?.id === "worker-snapshot-0" &&
+        directValuesWithoutIds[1]?.id === "worker-snapshot-1" &&
+        directValuesWithoutIds[2]?.id === "worker-snapshot-2",
+      "worker values fallback IDs should match checkpoint history fallback IDs"
+    )
+
+    const directValuesWithOriginalIndexes =
+      snapshotFallbackTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        streamValuesEvent([
+          {
+            id: ["langchain_core", "messages", "HumanMessage"],
+            kwargs: {
+              content: "continued worker prompt",
+              additional_kwargs: { cmb_worker_snapshot_index: 16 }
+            }
+          },
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: {
+              content: "continued worker answer",
+              additional_kwargs: { cmb_worker_snapshot_index: 17 }
+            }
+          }
+        ]) as never,
+        "thread-123"
+      )
+    assert(
+      directValuesWithOriginalIndexes[0]?.id === "worker-snapshot-16" &&
+        directValuesWithOriginalIndexes[1]?.id === "worker-snapshot-17",
+      "worker values fallback IDs should use original checkpoint indexes after current-turn slicing"
+    )
+
+    const liveThenValuesTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "worker-1",
+      workerThreadId: "thread-123__worker__worker-1"
+    })
+    const liveAiMessages = liveThenValuesTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      streamMessageEvent(aiMessage({ content: "same assistant before tool" }), {}) as never,
+      "thread-123"
+    )
+    const liveAiId = liveAiMessages.find((message) => message.role === "assistant")?.id
+    assert(
+      typeof liveAiId === "string" && liveAiId.startsWith("worker-live-"),
+      "id-less live worker assistant messages should receive a stable live fallback id"
+    )
+    useAppStore.getState().appendWorkerFocusMessages("thread-123__worker__worker-1", liveAiMessages)
+    liveThenValuesTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      streamMessageEvent(
+        toolMessage({
+          name: "read_file",
+          toolCallId: "id-less-live-tool-call",
+          content: "tool completed after live assistant"
+        }),
+        {}
+      ) as never,
+      "thread-123"
+    )
+    const valuesAfterTool = liveThenValuesTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      streamValuesEvent([
+        {
+          id: ["langchain_core", "messages", "HumanMessage"],
+          kwargs: { content: "prompt before live assistant" }
+        },
+        aiMessage({ content: "same assistant before tool" }),
+        toolMessage({
+          name: "read_file",
+          toolCallId: "id-less-live-tool-call",
+          content: "tool completed after live assistant"
+        })
+      ]) as never,
+      "thread-123"
+    )
+    assert(
+      valuesAfterTool.find((message) => message.role === "assistant")?.id === "worker-snapshot-1",
+      "worker values snapshots should keep checkpoint-compatible fallback ids"
+    )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages("thread-123__worker__worker-1", valuesAfterTool)
+    const mergedAssistants = useAppStore
+      .getState()
+      .workerFocusMessages.filter((message) => message.role === "assistant")
+    assert(
+      mergedAssistants.length === 1 && mergedAssistants[0]?.id === liveAiId,
+      "worker focus store should merge snapshot replay into the existing live assistant message"
+    )
+
+    const turnBoundaryTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "worker-1",
+      workerThreadId: "thread-123__worker__worker-1"
+    })
+    const firstTurnAssistant = turnBoundaryTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      {
+        ...(streamMessageEvent(aiMessage({ content: "first assistant-only turn" }), {}) as object),
+        workerTurn: 1
+      } as never,
+      "thread-123"
+    )
+    const secondTurnAssistant = turnBoundaryTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      {
+        ...(streamMessageEvent(aiMessage({ content: "second assistant-only turn" }), {}) as object),
+        workerTurn: 2
+      } as never,
+      "thread-123"
+    )
+    const firstTurnId = firstTurnAssistant.find((message) => message.role === "assistant")?.id
+    const secondTurnId = secondTurnAssistant.find((message) => message.role === "assistant")?.id
+    assert(
+      typeof firstTurnId === "string" &&
+        typeof secondTurnId === "string" &&
+        firstTurnId !== secondTurnId,
+      "focused worker assistant-only turns should not reuse the previous live assistant id"
+    )
+
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "worker-1",
+      workerThreadId: "thread-123__worker__worker-1"
+    })
+    useAppStore.getState().appendWorkerFocusMessages("thread-123__worker__worker-1", [
+      {
+        id: "worker-live-thread-123__worker__worker-1-1",
+        role: "assistant",
+        content: "same repeated assistant",
+        created_at: new Date()
+      },
+      {
+        id: "worker-live-thread-123__worker__worker-1-2",
+        role: "assistant",
+        content: "same repeated assistant",
+        created_at: new Date()
+      }
+    ])
+    useAppStore.getState().appendWorkerFocusMessages("thread-123__worker__worker-1", [
+      {
+        id: "worker-snapshot-1",
+        role: "assistant",
+        content: "same repeated assistant",
+        created_at: new Date()
+      },
+      {
+        id: "worker-snapshot-3",
+        role: "assistant",
+        content: "same repeated assistant",
+        created_at: new Date()
+      }
+    ])
+    const repeatedAssistants = useAppStore
+      .getState()
+      .workerFocusMessages.filter((message) => message.role === "assistant")
+    assert(
+      repeatedAssistants.length === 2 &&
+        repeatedAssistants[0]?.id === "worker-live-thread-123__worker__worker-1-1" &&
+        repeatedAssistants[1]?.id === "worker-live-thread-123__worker__worker-1-2",
+      "worker focus store should match repeated identical snapshot/live assistants by occurrence order"
+    )
+
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "worker-1",
+      workerThreadId: "thread-123__worker__worker-1"
+    })
+    useAppStore.getState().appendWorkerFocusMessages("thread-123__worker__worker-1", [
+      {
+        id: "worker-snapshot-1",
+        role: "assistant",
+        content: "snapshot before live",
+        created_at: new Date()
+      }
+    ])
+    useAppStore.getState().appendWorkerFocusMessages("thread-123__worker__worker-1", [
+      {
+        id: "worker-live-thread-123__worker__worker-1-1",
+        role: "assistant",
+        content: "snapshot before live",
+        created_at: new Date()
+      }
+    ])
+    const snapshotFirstAssistants = useAppStore
+      .getState()
+      .workerFocusMessages.filter((message) => message.role === "assistant")
+    assert(
+      snapshotFirstAssistants.length === 1 &&
+        snapshotFirstAssistants[0]?.id === "worker-snapshot-1",
+      "worker focus store should also merge when snapshot arrives before live stream"
+    )
+
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "worker-1",
+      workerThreadId: "thread-123__worker__worker-1"
+    })
+    const oldSnapshotDate = new Date("2026-01-01T00:00:00.000Z")
+    const newSnapshotDate = new Date("2026-01-02T00:00:00.000Z")
+    const liveReplayDate = new Date("2026-01-03T00:00:00.000Z")
+    useAppStore.getState().appendWorkerFocusMessages("thread-123__worker__worker-1", [
+      {
+        id: "worker-snapshot-1",
+        role: "assistant",
+        content: "repeated cross-turn assistant",
+        created_at: oldSnapshotDate
+      },
+      {
+        id: "worker-snapshot-5",
+        role: "assistant",
+        content: "repeated cross-turn assistant",
+        created_at: newSnapshotDate
+      }
+    ])
+    useAppStore.getState().appendWorkerFocusMessages("thread-123__worker__worker-1", [
+      {
+        id: "worker-live-thread-123__worker__worker-1-9",
+        role: "assistant",
+        content: "repeated cross-turn assistant",
+        created_at: liveReplayDate
+      }
+    ])
+    const crossTurnAssistants = useAppStore
+      .getState()
+      .workerFocusMessages.filter((message) => message.role === "assistant")
+    assert(
+      crossTurnAssistants.length === 2 &&
+        crossTurnAssistants[0]?.id === "worker-snapshot-1" &&
+        crossTurnAssistants[0]?.created_at === oldSnapshotDate &&
+        crossTurnAssistants[1]?.id === "worker-snapshot-5" &&
+        crossTurnAssistants[1]?.created_at === liveReplayDate,
+      "worker focus store should match repeated live text to the newest compatible snapshot"
+    )
+
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "worker-1",
+      workerThreadId: "thread-123__worker__worker-1"
+    })
+    useAppStore.getState().appendWorkerFocusMessages("thread-123__worker__worker-1", [
+      {
+        id: "tool-id-less-live-tool-call-read_file",
+        role: "tool",
+        name: "read_file",
+        tool_call_id: "id-less-live-tool-call",
+        content: "tool completed after live assistant",
+        created_at: new Date()
+      }
+    ])
+    useAppStore.getState().appendWorkerFocusMessages("thread-123__worker__worker-1", [
+      {
+        id: "worker-snapshot-2",
+        role: "tool",
+        name: "read_file",
+        tool_call_id: "id-less-live-tool-call",
+        content: "tool completed after live assistant",
+        created_at: new Date()
+      }
+    ])
+    const liveFirstTools = useAppStore
+      .getState()
+      .workerFocusMessages.filter((message) => message.role === "tool")
+    assert(
+      liveFirstTools.length === 1 && liveFirstTools[0]?.id === "tool-id-less-live-tool-call-read_file",
+      "worker focus store should merge snapshot tool result replay into the existing live tool result"
+    )
+
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "worker-1",
+      workerThreadId: "thread-123__worker__worker-1"
+    })
+    useAppStore.getState().appendWorkerFocusMessages("thread-123__worker__worker-1", [
+      {
+        id: "worker-snapshot-2",
+        role: "tool",
+        name: "read_file",
+        tool_call_id: "id-less-live-tool-call",
+        content: "tool completed after live assistant",
+        created_at: new Date()
+      }
+    ])
+    useAppStore.getState().appendWorkerFocusMessages("thread-123__worker__worker-1", [
+      {
+        id: "tool-id-less-live-tool-call-read_file",
+        role: "tool",
+        name: "read_file",
+        tool_call_id: "id-less-live-tool-call",
+        content: "tool completed after live assistant",
+        created_at: new Date()
+      }
+    ])
+    const snapshotFirstTools = useAppStore
+      .getState()
+      .workerFocusMessages.filter((message) => message.role === "tool")
+    assert(
+      snapshotFirstTools.length === 1 && snapshotFirstTools[0]?.id === "worker-snapshot-2",
+      "worker focus store should also merge tool results when snapshot arrives before live stream"
+    )
+
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "worker-1",
+      workerThreadId: "thread-123__worker__worker-1"
+    })
+    useAppStore.getState().appendWorkerFocusMessages("thread-123__worker__worker-1", [
+      {
+        id: "worker-live-thread-123__worker__worker-1-1",
+        role: "assistant",
+        content: "middle of a fenced block without opening fence",
+        created_at: new Date()
+      }
+    ])
+    useAppStore.getState().appendWorkerFocusMessages("thread-123__worker__worker-1", [
+      {
+        id: "worker-snapshot-1",
+        role: "assistant",
+        content:
+          "# Full report\n\n```text\nbeginning of fenced block\nmiddle of a fenced block without opening fence\n```",
+        created_at: new Date()
+      }
+    ])
+    const completeSnapshotMessages = useAppStore
+      .getState()
+      .workerFocusMessages.filter((message) => message.role === "assistant")
+    assert(
+      completeSnapshotMessages.length === 1 &&
+        typeof completeSnapshotMessages[0]?.content === "string" &&
+        completeSnapshotMessages[0].content.startsWith("# Full report"),
+      "worker focus store should keep complete checkpoint text over shorter live fragments"
+    )
   } finally {
-    useAppStore.getState().closeWorkerFocusView()
+    resetWorkerFocusStore()
   }
+}
+
+async function testWorkerFocusCloseDropsLiveBufferForCheckpointRestore(): Promise<void> {
+  openWorkerFocusViewForTest({
+    threadId: "thread-123",
+    workerId: "implementer-1",
+    workerThreadId: "thread-123__worker__implementer-1",
+    role: "implementer",
+    description: "Inspect worker stream"
+  })
+  useAppStore.getState().appendWorkerFocusMessages("thread-123__worker__implementer-1", [
+    {
+      id: "worker-live-assistant-1",
+      role: "assistant",
+      content: "partial live worker text",
+      created_at: new Date()
+    }
+  ])
+
+  useAppStore.getState().closeWorkerFocusView()
+  openWorkerFocusViewForTest({
+    threadId: "thread-123",
+    workerId: "implementer-1",
+    workerThreadId: "thread-123__worker__implementer-1",
+    role: "implementer",
+    description: "Inspect worker stream",
+    status: "running"
+  })
+
+  const preservedMessages = useAppStore.getState().workerFocusMessages
+  assert(
+    preservedMessages.length === 0,
+    "closing a worker focus view should drop live buffer and let checkpoint restore history"
+  )
+  useAppStore.getState().appendWorkerFocusMessages("thread-123__worker__implementer-1", [
+    {
+      id: "worker-live-assistant-1",
+      role: "assistant",
+      content: "partial live worker text plus the final summary",
+      created_at: new Date()
+    }
+  ])
+  const resumedMessages = useAppStore.getState().workerFocusMessages
+  assert(
+    resumedMessages.length === 1 &&
+      resumedMessages[0]?.content === "partial live worker text plus the final summary",
+    "new live chunks after reopening should start from a clean worker buffer"
+  )
+
+  useAppStore.getState().closeWorkerFocusView()
+  openWorkerFocusViewForTest({
+    threadId: "thread-123",
+    workerId: "implementer-1",
+    workerThreadId: "thread-123__worker__implementer-1",
+    role: "implementer",
+    description: "Inspect worker stream",
+    status: "completed"
+  })
+  assert(
+    useAppStore.getState().workerFocusMessages.length === 0,
+    "closing without preserve should drop stale live text"
+  )
+
+  openWorkerFocusViewForTest({
+    threadId: "thread-123",
+    workerId: "implementer-2",
+    workerThreadId: "thread-123__worker__implementer-2",
+    role: "implementer",
+    description: "Inspect another worker"
+  })
+  assert(
+    useAppStore.getState().workerFocusMessages.length === 0,
+    "opening a different worker should clear the previous worker buffer"
+  )
+  useAppStore.getState().appendWorkerFocusMessages("thread-123__worker__implementer-2", [
+    {
+      id: "worker-live-assistant-2",
+      role: "assistant",
+      content: "other live worker text",
+      created_at: new Date()
+    }
+  ])
+  openWorkerFocusViewForTest({
+    threadId: "thread-123",
+    workerId: "implementer-1",
+    workerThreadId: "thread-123__worker__implementer-1",
+    role: "implementer",
+    description: "Inspect worker stream",
+    status: "running"
+  })
+  assert(
+    useAppStore.getState().workerFocusMessages.length === 0,
+    "switching away to another worker and back should not restore stale live text"
+  )
+
+  useAppStore.getState().closeWorkerFocusView()
 }
 
 async function testCoordinatorToolCallChunksHydrateDisplayedArgs(): Promise<void> {
@@ -677,6 +1264,107 @@ async function testCoordinatorToolCallChunksHandleCumulativeProviderArgs(): Prom
     "overlapping tool-call chunks should not duplicate string argument suffixes"
   )
 
+  const repeatedSuffixTransport = new ElectronIPCTransport()
+  convertCoordinator(
+    repeatedSuffixTransport,
+    streamMessageEvent(
+      aiMessageChunk({
+        id: "coordinator-ai-repeated-suffix",
+        toolCallChunks: [
+          {
+            id: "start-worker-repeated-suffix",
+            name: "start_worker",
+            args: '{"subagent_type":"worker","workload":"read_only","description":"foo'
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+  convertCoordinator(
+    repeatedSuffixTransport,
+    streamMessageEvent(
+      aiMessageChunk({
+        id: "coordinator-ai-repeated-suffix",
+        toolCallChunks: [
+          {
+            id: "start-worker-repeated-suffix",
+            args: 'foo'
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+  const repeatedSuffixEvents = convertCoordinator(
+    repeatedSuffixTransport,
+    streamMessageEvent(
+      aiMessageChunk({
+        id: "coordinator-ai-repeated-suffix",
+        toolCallChunks: [
+          {
+            id: "start-worker-repeated-suffix",
+            args: '","prompt":"done"}'
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+  const repeatedSuffixMessage = firstMessage(repeatedSuffixEvents)
+  const repeatedSuffixToolCalls = repeatedSuffixMessage.tool_calls as Array<{
+    id?: string
+    name?: string
+    args?: Record<string, unknown>
+  }>
+  assert(
+    repeatedSuffixToolCalls[0]?.args?.description === "foofoo",
+    "legitimate repeated suffix chunks should not be mistaken for replayed chunks"
+  )
+
+  const repeatedPrefixWithTailTransport = new ElectronIPCTransport()
+  convertCoordinator(
+    repeatedPrefixWithTailTransport,
+    streamMessageEvent(
+      aiMessageChunk({
+        id: "coordinator-ai-repeated-prefix-tail",
+        toolCallChunks: [
+          {
+            id: "start-worker-repeated-prefix-tail",
+            name: "start_worker",
+            args: '{"subagent_type":"worker","workload":"read_only","description":"foo'
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+  const repeatedPrefixWithTailEvents = convertCoordinator(
+    repeatedPrefixWithTailTransport,
+    streamMessageEvent(
+      aiMessageChunk({
+        id: "coordinator-ai-repeated-prefix-tail",
+        toolCallChunks: [
+          {
+            id: "start-worker-repeated-prefix-tail",
+            args: 'foo","prompt":"done"}'
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+  const repeatedPrefixWithTailMessage = firstMessage(repeatedPrefixWithTailEvents)
+  const repeatedPrefixWithTailToolCalls = repeatedPrefixWithTailMessage.tool_calls as Array<{
+    id?: string
+    name?: string
+    args?: Record<string, unknown>
+  }>
+  assert(
+    repeatedPrefixWithTailToolCalls[0]?.args?.description === "foofoo",
+    "legitimate repeated prefix plus tail chunks should not be collapsed as overlap"
+  )
+
   const exactDuplicateEvents = convertCoordinator(
     new ElectronIPCTransport(),
     streamMessageEvent(
@@ -688,10 +1376,7 @@ async function testCoordinatorToolCallChunksHandleCumulativeProviderArgs(): Prom
             name: "start_worker",
             args: {
               subagent_type: "workerworker",
-              consumed_notification_ids: [
-                "implementer-1@turn-1",
-                "implementer-1@turn-1"
-              ],
+              consumed_notification_ids: ["implementer-1@turn-1", "implementer-1@turn-1"],
               workload: "read_onlyread_only",
               description: "调研项目controller结构调研项目controller结构",
               prompt: "请调研controller结构。请调研controller结构。"
@@ -897,11 +1582,13 @@ async function testCoordinatorValuesModeForwardsCurrentTurnToolDeltas(): Promise
   const first = events[0]?.data as Array<Record<string, unknown>>
   const second = events[1]?.data as Array<Record<string, unknown>>
   assert(
-    (first?.[0]?.tool_calls as Array<{ name?: string }> | undefined)?.[0]?.name ===
-      "read_file",
+    (first?.[0]?.tool_calls as Array<{ name?: string }> | undefined)?.[0]?.name === "read_file",
     "coordinator values-mode AI message should include visible tool call"
   )
-  assert(second?.[0]?.type === "tool", "coordinator values-mode should surface current-turn tool result")
+  assert(
+    second?.[0]?.type === "tool",
+    "coordinator values-mode should surface current-turn tool result"
+  )
 }
 
 async function testCoordinatorValuesModeDoesNotReplayPreviousTurnHistory(): Promise<void> {
@@ -934,7 +1621,10 @@ async function testCoordinatorValuesModeDoesNotReplayPreviousTurnHistory(): Prom
   ])
 
   const events = messageEvents(convertCoordinator(transport, snapshot))
-  assert(events.length === 1, "coordinator values-mode should only emit messages after the latest human turn")
+  assert(
+    events.length === 1,
+    "coordinator values-mode should only emit messages after the latest human turn"
+  )
   const data = events[0]?.data as Array<{ id?: string; tool_calls?: Array<{ id?: string }> }>
   assert(data?.[0]?.id === "new-ai", "values-mode should emit the current-turn AI message")
   assert(
@@ -1062,8 +1752,7 @@ async function testNormalValuesModeRestoresFullToolMessages(): Promise<void> {
   assert(messages.length === 4, "normal values mode should keep full non-human message history")
   assert(messages[0]?.id === "old-ai", "normal values mode should preserve old AI tool call")
   assert(
-    (messages[0]?.tool_calls as Array<{ name?: string }> | undefined)?.[0]?.name ===
-      "read_file",
+    (messages[0]?.tool_calls as Array<{ name?: string }> | undefined)?.[0]?.name === "read_file",
     "normal values mode should preserve old AI tool call details"
   )
   assert(messages[1]?.type === "tool", "normal values mode should preserve old tool result")
@@ -1247,6 +1936,8 @@ async function run(): Promise<void> {
   console.log("PASS electron transport hides async worker internals")
   await testFocusedAsyncWorkerStreamsToWorkerPanel()
   console.log("PASS electron transport routes focused worker internals")
+  await testWorkerFocusCloseDropsLiveBufferForCheckpointRestore()
+  console.log("PASS worker focus drops live buffer across close/reopen")
   await testCoordinatorToolCallChunksHydrateDisplayedArgs()
   console.log("PASS electron transport hydrates coordinator tool-call chunk args")
   await testCoordinatorToolCallChunksHandleCumulativeProviderArgs()

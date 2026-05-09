@@ -694,7 +694,9 @@ export function ChatContainer({
             return
           }
           const [workers, hasPendingNotifications] = await Promise.all([
-            window.api.agent.getCoordinatorWorkers(threadId).catch(() => []),
+            window.api.agent
+              .getCoordinatorWorkers(threadId, { subscribeUpdates: false })
+              .catch(() => []),
             window.api.agent.hasCoordinatorWorkerNotifications(threadId).catch(() => false)
           ])
           const hasRemoteUnresolvedWorkers = workers.some(
@@ -1717,6 +1719,7 @@ export function ChatContainer({
       // Match Claude Code coordinator semantics: the main stop button stops the
       // foreground turn only. Durable background workers are stopped explicitly
       // via the separate background-worker stop control.
+      threadContext.suppressCoordinatorNotificationAutoRun(threadId)
       await Promise.all([stream?.stop(), window.api.agent.cancel(threadId)])
     }
   }
@@ -3100,7 +3103,7 @@ export function ChatContainer({
                             onClick={handleCancelBackgroundWorkers}
                             aria-label="停止后台子代理"
                             title="停止后台子代理"
-                            className="flex items-center justify-center size-7 rounded-md bg-destructive/10 text-destructive hover:bg-destructive hover:text-destructive-foreground transition-colors"
+                            className="flex items-center justify-center size-7 rounded-md border border-border/70 bg-background text-muted-foreground transition-colors hover:border-red-200 hover:bg-red-50/70 hover:text-red-600 dark:hover:border-red-900/60 dark:hover:bg-red-950/30 dark:hover:text-red-300"
                           >
                             <Square className="size-3 fill-current" />
                           </button>

@@ -492,6 +492,55 @@ async function testBindWorkerUpdatesSupportsMultipleListeners(): Promise<void> {
   })
 }
 
+async function testUnbindWorkerUpdatesStopsInactiveListener(): Promise<void> {
+  await withTempDir("coordinator-worker-manager", async (workspace) => {
+    const manager = new CoordinatorWorkerManager()
+    const run = deferred<CoordinatorWorkerRunResult>()
+    let activeWindowUpdates = 0
+    let inactiveWindowUpdates = 0
+    let runnerStarted = false
+
+    manager.startWorker({
+      parentThreadId: "thread-unbind-update",
+      workspacePath: workspace,
+      role: "implementer",
+      description: "Unbind update worker",
+      prompt: "work",
+      runner: async (input) => {
+        runnerStarted = true
+        input.onProgress({ type: "tool_call", toolName: "initial" })
+        return run.promise
+      }
+    })
+
+    await waitFor(() => runnerStarted, "unbind update runner start")
+    manager.bindWorkerUpdates(
+      "thread-unbind-update",
+      () => {
+        activeWindowUpdates += 1
+      },
+      "window:active"
+    )
+    manager.bindWorkerUpdates(
+      "thread-unbind-update",
+      () => {
+        inactiveWindowUpdates += 1
+      },
+      "window:inactive"
+    )
+    manager.unbindWorkerUpdates("thread-unbind-update", "window:inactive")
+
+    run.resolve({ summary: "done" })
+    await manager.waitForWorkers("thread-unbind-update", {
+      timeoutMs: 1_000,
+      pollIntervalMs: 10
+    })
+
+    assert(activeWindowUpdates >= 1, "active listener should continue receiving worker updates")
+    assert(inactiveWindowUpdates === 0, "unbound inactive listener should not receive worker updates")
+  })
+}
+
 async function testWaitForWorkerCleanupDoesNotFalseTimeoutAtBoundary(): Promise<void> {
   const manager = new CoordinatorWorkerManager()
   const originalDateNow = Date.now
@@ -980,10 +1029,7 @@ async function testWorkerResultAndTokenUsagePersistence(): Promise<void> {
     const result = await readJson(
       workerResultPath(workspace, "thread-transcript", started.worker_id)
     )
-    assert(
-      result.transcript_path === undefined,
-      "result should not persist transcript path"
-    )
+    assert(result.transcript_path === undefined, "result should not persist transcript path")
     assert(
       (result.token_usage as Record<string, unknown>).total_tokens === 19,
       "result should persist token usage"
@@ -2462,6 +2508,27 @@ async function testContinueWorkloadOverrideDoesNotPoisonDefault(): Promise<void>
       readerWorkloads.join(",") === "read_only,read_only",
       "a worker that started read_only should keep read_only as its default workload"
     )
+
+    const implicitWorkloads: string[] = []
+    manager.startWorker({
+      parentThreadId: "thread-implicit-write-default",
+      workspacePath: workspace,
+      role: "implementer",
+      description: "Implicit implementation",
+      prompt: "implementation without workload",
+      runner: async (input) => {
+        implicitWorkloads.push(input.workload)
+        return { summary: input.workload }
+      }
+    })
+    await manager.waitForWorkers("thread-implicit-write-default", {
+      timeoutMs: 1_000,
+      pollIntervalMs: 10
+    })
+    assert(
+      implicitWorkloads.join(",") === "write",
+      "an implementer without explicit workload should use the Claude Code-compatible write fallback"
+    )
   })
 }
 
@@ -2624,7 +2691,9 @@ async function testRestoreCompletedWorkerAndContinue(): Promise<void> {
           last_activity_at: "2026-04-29T00:01:00.000Z",
           finished_at: "2026-04-29T00:01:00.000Z",
           summary: "already done",
+          report_path: "/etc/hosts",
           result_path: `.cmbdevclaw/coordinator/${threadId}/reports/workers/${workerId}.json`,
+          transcript_path: "../secret.transcript.jsonl",
           tool_call_count: 3,
           last_tool_name: "write_file",
           last_event: "Worker completed."
@@ -2645,6 +2714,9 @@ async function testRestoreCompletedWorkerAndContinue(): Promise<void> {
       restored[0].worker_thread_id === workerThreadId,
       "restore should preserve worker thread id"
     )
+    assert(restored[0].result_path?.includes(`/reports/`), "safe result path should be restored")
+    assert(!restored[0].report_path, "unsafe absolute report path should be dropped on restore")
+    assert(!restored[0].transcript_path, "unsafe relative transcript path should be dropped on restore")
     assert(
       manager.drainNotifications(threadId).length === 0,
       "restoring old completed workers should not replay stale notifications"
@@ -4379,6 +4451,8 @@ async function run(): Promise<void> {
   console.log("PASS coordinator worker update callback guard")
   await testBindWorkerUpdatesSupportsMultipleListeners()
   console.log("PASS coordinator worker update callback multi-listener")
+  await testUnbindWorkerUpdatesStopsInactiveListener()
+  console.log("PASS coordinator worker update callback unbind")
   await testBlockingWaitForWorkerCompletion()
   console.log("PASS coordinator worker blocking wait")
   await testNonBlockingWaitAndUnknownWorkerRead()

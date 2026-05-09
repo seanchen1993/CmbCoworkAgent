@@ -30,7 +30,11 @@ interface UsageMetadata {
 
 function getUsageMetadata(kwargs?: SerializedMessageChunk["kwargs"]): UsageMetadata | undefined {
   if (!kwargs) return undefined
-  return kwargs.usage_metadata || kwargs.response_metadata?.token_usage || kwargs.response_metadata?.usage
+  return (
+    kwargs.usage_metadata ||
+    kwargs.response_metadata?.token_usage ||
+    kwargs.response_metadata?.usage
+  )
 }
 
 function createTokenUsageEvent(usageMetadata: UsageMetadata): StreamEvent | null {
@@ -114,6 +118,44 @@ interface CompletedToolCall {
 }
 
 const QUIET_COORDINATOR_TOOL_NAMES = new Set(["read_worker_state"])
+const WORKER_SNAPSHOT_INDEX_MESSAGE_KEY = "cmb_worker_snapshot_index"
+const MAX_TRACKED_EMITTED_MESSAGES = 2_000
+const MAX_TRACKED_TOOL_CALLS = 2_000
+const MAX_TRACKED_TOOL_CALL_NAMES = 300
+const MAX_TRACKED_TOOL_CALLS_PER_NAME = 50
+const MAX_TRACKED_MESSAGE_TOOL_CALLS = 1_000
+
+function pruneMapToLimit<K, V>(map: Map<K, V>, limit: number): void {
+  while (map.size > limit) {
+    const oldest = map.keys().next()
+    if (oldest.done) return
+    map.delete(oldest.value)
+  }
+}
+
+function pruneSetToLimit<T>(set: Set<T>, limit: number): void {
+  while (set.size > limit) {
+    const oldest = set.values().next()
+    if (oldest.done) return
+    set.delete(oldest.value)
+  }
+}
+
+function keepRecentItems<T>(items: T[], limit: number): T[] {
+  return items.length > limit ? items.slice(-limit) : items
+}
+
+function createWorkerSnapshotFallbackMessageId(index: number): string {
+  return `worker-snapshot-${index}`
+}
+
+function getWorkerSnapshotFallbackIndex(
+  message: SerializedMessageChunk,
+  fallbackIndex: number
+): number {
+  const value = message.kwargs?.additional_kwargs?.[WORKER_SNAPSHOT_INDEX_MESSAGE_KEY]
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : fallbackIndex
+}
 
 /**
  * Custom transport for useStream that uses Electron IPC instead of HTTP.
@@ -127,6 +169,10 @@ export class ElectronIPCTransport implements UseStreamTransport {
   private workerCurrentMessageIds: Map<string, string> = new Map()
 
   private workerAssistantTextByMessageId: Map<string, string> = new Map()
+
+  private workerLiveMessageSequenceByThread: Map<string, number> = new Map()
+
+  private workerCurrentTurnByThread: Map<string, number> = new Map()
 
   // Track active subagents by their tool_call_id
   private activeSubagents: Map<string, Subagent> = new Map()
@@ -166,6 +212,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
     this.currentMessageId = null
     this.workerCurrentMessageIds.clear()
     this.workerAssistantTextByMessageId.clear()
+    this.workerLiveMessageSequenceByThread.clear()
+    this.workerCurrentTurnByThread.clear()
     this.activeSubagents.clear()
     this.subagentToolCallIds.clear()
     this.subagentToolLogEntryIds.clear()
@@ -226,6 +274,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
   ): Message[] {
     const focused = useAppStore.getState().workerFocusView
     if (!focused || focused.threadId !== parentThreadId) return []
+    this.syncWorkerTurnBoundary(focused.workerThreadId, event.workerTurn)
 
     if (event.mode === "messages") {
       const [msgChunk, metadata] = event.data as [SerializedMessageChunk, MessageMetadata]
@@ -254,7 +303,10 @@ export class ElectronIPCTransport implements UseStreamTransport {
     if (event.mode === "values") {
       const state = event.data as { messages?: SerializedMessageChunk[] }
       if (!Array.isArray(state.messages)) return []
-      return this.createFocusedCoordinatorWorkerEventsFromValues(state.messages)
+      return this.createFocusedCoordinatorWorkerEventsFromValues(
+        state.messages,
+        focused.workerThreadId
+      )
     }
 
     return this.processStreamEvent(event, "coordinator")
@@ -317,11 +369,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
           }
         }
         // Convert IPC events to SDK format
-        const sdkEvents = this.convertToSDKEvents(
-          ipcEvent as IPCEvent,
-          threadId,
-          currentAgentMode
-        )
+        const sdkEvents = this.convertToSDKEvents(ipcEvent as IPCEvent, threadId, currentAgentMode)
 
         for (const sdkEvent of sdkEvents) {
           if (sdkEvent.event === "done" || sdkEvent.event === "error") {
@@ -569,8 +617,18 @@ export class ElectronIPCTransport implements UseStreamTransport {
     return events
   }
 
-  private createFocusedCoordinatorWorkerEventsFromValues(messages: SerializedMessageChunk[]): Message[] {
+  private createFocusedCoordinatorWorkerEventsFromValues(
+    messages: SerializedMessageChunk[],
+    workerThreadId: string
+  ): Message[] {
     const converted: Message[] = []
+    let latestAiIndex = -1
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (this.isSerializedAIMessage(messages[index])) {
+        latestAiIndex = index
+        break
+      }
+    }
     for (let index = 0; index < messages.length; index += 1) {
       const message = messages[index]
       const kwargs = message.kwargs || {}
@@ -579,23 +637,32 @@ export class ElectronIPCTransport implements UseStreamTransport {
       if (additionalKwargs?.cmb_internal_coordinator_notification === true) continue
       if (className.includes("System") || kwargs.type === "system") continue
 
-      const rawId = kwargs.id || `worker-values-${index}`
+      const content = this.extractContent(kwargs.content)
+      const toolCalls = this.isSerializedAIMessage(message)
+        ? this.hydrateToolCallsWithAccumulatedArgs(kwargs.tool_calls ?? [])
+        : []
+      const snapshotIndex = getWorkerSnapshotFallbackIndex(message, index)
+      const snapshotFallbackId = createWorkerSnapshotFallbackMessageId(snapshotIndex)
+      const liveAssistantId =
+        this.isSerializedAIMessage(message) && index === latestAiIndex
+          ? this.workerCurrentMessageIds.get(workerThreadId)
+          : undefined
+      const rawId = kwargs.id || liveAssistantId || snapshotFallbackId
       if (this.isSerializedHumanMessage(message)) {
         converted.push({
           id: rawId,
           role: "user",
-          content: this.extractContent(kwargs.content),
+          content,
           created_at: new Date()
         })
         continue
       }
 
       if (this.isSerializedAIMessage(message)) {
-        const toolCalls = this.hydrateToolCallsWithAccumulatedArgs(kwargs.tool_calls ?? [])
         converted.push({
           id: rawId,
           role: "assistant",
-          content: this.extractContent(kwargs.content),
+          content,
           ...(toolCalls.length && { tool_calls: toolCalls as Message["tool_calls"] }),
           created_at: new Date()
         })
@@ -603,12 +670,15 @@ export class ElectronIPCTransport implements UseStreamTransport {
       }
 
       if (this.isSerializedToolMessage(message) && kwargs.tool_call_id) {
+        const isError = this.isToolMessageError(kwargs)
         converted.push({
           id: rawId,
           role: "tool",
           content: this.extractContent(kwargs.content),
           tool_call_id: kwargs.tool_call_id,
           ...(kwargs.name && { name: kwargs.name }),
+          ...(kwargs.status && { status: kwargs.status }),
+          ...(isError && { is_error: true }),
           created_at: new Date()
         })
       }
@@ -637,8 +707,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
       const className = classId[classId.length - 1] || ""
 
       // Detect if this message comes from a subagent via checkpoint namespace
-      const checkpointNs =
-        metadata?.langgraph_checkpoint_ns || metadata?.checkpoint_ns
+      const checkpointNs = metadata?.langgraph_checkpoint_ns || metadata?.checkpoint_ns
       if (isCoordinatorMode && this.isCoordinatorWorkerNamespace(checkpointNs)) {
         // Async coordinator workers must not become main coordinator messages.
         // The focused worker panel receives these through the dedicated
@@ -725,9 +794,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
                 this.currentMessageId,
                 completedChunkToolCalls
               )
-              const completedToolCalls = this.getCompletedToolCallsForMessage(
-                this.currentMessageId
-              )
+              const completedToolCalls = this.getCompletedToolCallsForMessage(this.currentMessageId)
               events.push({
                 event: "messages",
                 data: [
@@ -766,7 +833,11 @@ export class ElectronIPCTransport implements UseStreamTransport {
               if (tc.id && tc.name) {
                 const existing = this.completedToolCallsByName.get(tc.name) || []
                 existing.push({ id: tc.id, name: tc.name, args: tc.args || {} })
-                this.completedToolCallsByName.set(tc.name, existing)
+                this.completedToolCallsByName.set(
+                  tc.name,
+                  keepRecentItems(existing, MAX_TRACKED_TOOL_CALLS_PER_NAME)
+                )
+                pruneMapToLimit(this.completedToolCallsByName, MAX_TRACKED_TOOL_CALL_NAMES)
               }
             }
           }
@@ -997,7 +1068,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
         if (actionRequests.length) {
           const firstAction = actionRequests[0]
-          const reviewConfig = reviewConfigs?.find((rc: { actionName: string }) => rc.actionName === firstAction.name)
+          const reviewConfig = reviewConfigs?.find(
+            (rc: { actionName: string }) => rc.actionName === firstAction.name
+          )
 
           // Collect pending tool call IDs
           const nameCount = new Map<string, number>()
@@ -1059,8 +1132,26 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
     const events: StreamEvent[] = []
     const kwargs = input.kwargs || {}
+    const isHumanMessage =
+      input.className.includes("HumanMessage") || kwargs.type === "human"
     const isToolMessage = input.className.includes("ToolMessage") && !!kwargs.tool_call_id
     const isAIMessage = input.className.includes("AI") || input.className.includes("AIMessageChunk")
+
+    if (isHumanMessage) {
+      this.resetWorkerCurrentAssistant(focused.workerThreadId)
+      const content = this.extractContent(kwargs.content)
+      if (content) {
+        events.push(
+          this.createCoordinatorWorkerStreamMessageEvent(focused.workerThreadId, {
+            id: kwargs.id || this.createWorkerLiveFallbackMessageId(focused.workerThreadId),
+            role: "user",
+            content,
+            created_at: new Date()
+          })
+        )
+      }
+      return events
+    }
 
     if (isAIMessage) {
       const isChunk = input.className.includes("Chunk")
@@ -1068,12 +1159,15 @@ export class ElectronIPCTransport implements UseStreamTransport {
       const msgId =
         kwargs.id ||
         this.workerCurrentMessageIds.get(focused.workerThreadId) ||
-        crypto.randomUUID()
+        this.createWorkerLiveFallbackMessageId(focused.workerThreadId)
       this.workerCurrentMessageIds.set(focused.workerThreadId, msgId)
 
       let content = extractedContent
       if (isChunk && extractedContent) {
-        content = `${this.workerAssistantTextByMessageId.get(msgId) ?? ""}${extractedContent}`
+        content = this.mergeWorkerAssistantTextChunk(
+          this.workerAssistantTextByMessageId.get(msgId) ?? "",
+          extractedContent
+        )
         this.workerAssistantTextByMessageId.set(msgId, content)
       } else if (extractedContent) {
         this.workerAssistantTextByMessageId.set(msgId, extractedContent)
@@ -1122,6 +1216,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
     if (isToolMessage && kwargs.tool_call_id) {
       const content = this.extractContent(kwargs.content)
+      const isError = this.isToolMessageError(kwargs)
       const msgId =
         kwargs.id ||
         this.createStableFallbackMessageId({
@@ -1138,9 +1233,12 @@ export class ElectronIPCTransport implements UseStreamTransport {
           content,
           tool_call_id: kwargs.tool_call_id,
           ...(kwargs.name && { name: kwargs.name }),
+          ...(kwargs.status && { status: kwargs.status }),
+          ...(isError && { is_error: true }),
           created_at: new Date()
         })
       )
+      this.workerCurrentMessageIds.delete(focused.workerThreadId)
     }
 
     return events
@@ -1158,6 +1256,50 @@ export class ElectronIPCTransport implements UseStreamTransport {
         workerMessage: message
       }
     }
+  }
+
+  private createWorkerLiveFallbackMessageId(workerThreadId: string): string {
+    const next = (this.workerLiveMessageSequenceByThread.get(workerThreadId) ?? 0) + 1
+    this.workerLiveMessageSequenceByThread.set(workerThreadId, next)
+    return `worker-live-${workerThreadId}-${next}`
+  }
+
+  private syncWorkerTurnBoundary(workerThreadId: string, workerTurn?: number): void {
+    if (typeof workerTurn !== "number" || !Number.isFinite(workerTurn)) return
+    const previousTurn = this.workerCurrentTurnByThread.get(workerThreadId)
+    if (previousTurn === workerTurn) return
+    this.workerCurrentTurnByThread.set(workerThreadId, workerTurn)
+    this.resetWorkerCurrentAssistant(workerThreadId)
+  }
+
+  private resetWorkerCurrentAssistant(workerThreadId: string): void {
+    const messageId = this.workerCurrentMessageIds.get(workerThreadId)
+    this.workerCurrentMessageIds.delete(workerThreadId)
+    if (messageId) {
+      this.workerAssistantTextByMessageId.delete(messageId)
+    }
+  }
+
+  private mergeWorkerAssistantTextChunk(existing: string, nextChunk: string): string {
+    if (!existing) return nextChunk
+    if (!nextChunk) return existing
+    if (nextChunk === existing || nextChunk.startsWith(existing)) {
+      // Some providers stream cumulative assistant snapshots instead of deltas.
+      return nextChunk
+    }
+    if (existing.endsWith(nextChunk)) {
+      // Guard against exact duplicate chunk replays.
+      return existing
+    }
+
+    const maxOverlap = Math.min(existing.length, nextChunk.length) - 1
+    for (let overlap = maxOverlap; overlap >= 2; overlap -= 1) {
+      if (existing.slice(-overlap) === nextChunk.slice(0, overlap)) {
+        return `${existing}${nextChunk.slice(overlap)}`
+      }
+    }
+
+    return `${existing}${nextChunk}`
   }
 
   private createStableFallbackMessageId(input: {
@@ -1190,7 +1332,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
   }
 
   private rememberEmittedMessage(id?: string): void {
-    if (id) this.emittedMessageIds.add(id)
+    if (!id) return
+    this.emittedMessageIds.add(id)
+    pruneSetToLimit(this.emittedMessageIds, MAX_TRACKED_EMITTED_MESSAGES)
   }
 
   private hasEmittedMessage(id?: string): boolean {
@@ -1222,9 +1366,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
   private isSerializedToolMessage(message: SerializedMessageChunk): boolean {
     const className = this.getSerializedMessageClassName(message)
     const type = message.kwargs?.type
-    return (
-      (className.includes("ToolMessage") || type === "tool") && !!message.kwargs?.tool_call_id
-    )
+    return (className.includes("ToolMessage") || type === "tool") && !!message.kwargs?.tool_call_id
   }
 
   private createCurrentTurnMessageEventsFromValues(
@@ -1280,7 +1422,11 @@ export class ElectronIPCTransport implements UseStreamTransport {
             const existing = this.completedToolCallsByName.get(toolCall.name) || []
             if (!existing.some((item) => item.id === toolCall.id)) {
               existing.push({ id: toolCall.id, name: toolCall.name, args: toolCall.args || {} })
-              this.completedToolCallsByName.set(toolCall.name, existing)
+              this.completedToolCallsByName.set(
+                toolCall.name,
+                keepRecentItems(existing, MAX_TRACKED_TOOL_CALLS_PER_NAME)
+              )
+              pruneMapToLimit(this.completedToolCallsByName, MAX_TRACKED_TOOL_CALL_NAMES)
             }
           }
         }
@@ -1607,6 +1753,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
         args: toolCall.args!
       })
     }
+    pruneMapToLimit(this.completedToolCallsByMessageId, MAX_TRACKED_MESSAGE_TOOL_CALLS)
   }
 
   private getCompletedToolCallsForMessage(messageId: string): CompletedToolCall[] {
@@ -1640,17 +1787,26 @@ export class ElectronIPCTransport implements UseStreamTransport {
         }
         this.lastToolCallChunkArgsById.set(chunk.id, chunk.args)
       }
+      pruneMapToLimit(this.accumulatedToolCalls, MAX_TRACKED_TOOL_CALLS)
+      pruneMapToLimit(this.lastToolCallChunkArgsById, MAX_TRACKED_TOOL_CALLS)
     }
   }
 
   private appendToolCallChunkArgs(existing: string, nextChunk: string): string {
     if (!existing) return nextChunk
     if (!nextChunk) return existing
-    if (existing.endsWith(nextChunk)) return existing
 
-    const maxOverlap = Math.min(existing.length, nextChunk.length)
+    const maxOverlap = Math.min(existing.length, nextChunk.length) - 1
     for (let overlap = maxOverlap; overlap >= 2; overlap -= 1) {
       if (existing.slice(-overlap) === nextChunk.slice(0, overlap)) {
+        const remainder = nextChunk.slice(overlap)
+        if (/^["},\]:]/.test(remainder)) {
+          // If the duplicate-looking prefix is immediately followed by JSON
+          // structure, it is likely real repeated string content, not a replayed
+          // overlap. Example: existing ends with "foo" and next is
+          // `foo","prompt":...`; collapsing would turn "foofoo" into "foo".
+          continue
+        }
         return `${existing}${nextChunk.slice(overlap)}`
       }
     }

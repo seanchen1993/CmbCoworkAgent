@@ -135,6 +135,9 @@ export interface Message {
   tool_call_id?: string
   // For tool messages - the name of the tool
   name?: string
+  // For tool messages - provider/tool execution status
+  status?: string
+  is_error?: boolean
   created_at: Date
 }
 

@@ -106,7 +106,8 @@ import {
   getCoordinatorScratchpadDir,
   injectSelectedSkillIntoWorkerPrompt,
   type AgentMode,
-  type CoordinatorSelectedSkill
+  type CoordinatorSelectedSkill,
+  type CoordinatorWorkerTurnPlanningState
 } from "./coordinator-mode"
 import {
   coordinatorWorkerManager,
@@ -1403,6 +1404,8 @@ export interface CreateAgentRuntimeOptions {
   coordinatorExplicitSelectedSkill?: CoordinatorSelectedSkill
   /** notification_id -> selected skill map for the current coordinator notification turn. */
   coordinatorNotificationSelectedSkills?: Record<string, CoordinatorSelectedSkill | undefined>
+  /** Shared per-turn worker planning counters, reused across failover runtime rebuilds. */
+  coordinatorWorkerTurnPlanning?: CoordinatorWorkerTurnPlanningState
   /** Runtime mode. "normal" preserves the existing agent; "coordinator" enables async worker orchestration. */
   agentMode?: AgentMode
   /** Disable the synchronous deepagents task tool for leaf runtimes such as coordinator async workers. */
@@ -1428,6 +1431,7 @@ export interface CreateAgentRuntimeOptions {
     worker: CoordinatorWorkerSnapshot
     workers?: CoordinatorWorkerSnapshot[]
     notification?: string
+    stream?: { mode: "messages" | "values"; data: unknown }
     suppressNotificationAutoRun?: boolean
   }) => void
   onCoordinatorNotificationAction?: (notificationIds: string[]) => void
@@ -1446,6 +1450,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     coordinatorTurnPrompt,
     retryHooks,
     maxRetryAttempts,
+    coordinatorWorkerTurnPlanning,
     enableAgentsPrompt = true,
     agentMode = "normal",
     disableSubagents = false,
@@ -1914,6 +1919,7 @@ The workspace root is: ${workspacePath}`
     onCoordinatorWorkerEvent({
       worker: event.worker,
       notification: event.notification,
+      stream: event.stream,
       suppressNotificationAutoRun: event.suppressNotificationAutoRun
     })
   }
@@ -2422,7 +2428,8 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
         onNotificationsConsumed: onCoordinatorNotificationAction,
         selectedSkill: options.coordinatorSelectedSkill,
         explicitSelectedSkill: options.coordinatorExplicitSelectedSkill,
-        notificationSelectedSkills: options.coordinatorNotificationSelectedSkills
+        notificationSelectedSkills: options.coordinatorNotificationSelectedSkills,
+        turnPlanning: coordinatorWorkerTurnPlanning
       })
     : []
   if (coordinatorWorkerToolsForMain.length > 0) {

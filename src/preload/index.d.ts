@@ -131,11 +131,20 @@ interface CustomAPI {
       onEvent?: (event: StreamEvent) => void
     ) => () => void
     cancel: (threadId: string, options?: { cancelWorkers?: boolean }) => Promise<void>
-    getCoordinatorWorkers: (threadId: string) => Promise<CoordinatorWorkerSnapshot[]>
+    getCoordinatorWorkers: (
+      threadId: string,
+      options?: { subscribeUpdates?: boolean }
+    ) => Promise<CoordinatorWorkerSnapshot[]>
+    unbindCoordinatorWorkers: (threadId: string) => Promise<void>
     hasCoordinatorWorkerNotifications: (threadId: string) => Promise<boolean>
     onCoordinatorWorkerStream: (
       threadId: string,
-      callback: (event: { type: "stream"; mode: "messages" | "values"; data: unknown }) => void
+      callback: (event: {
+        type: "stream"
+        mode: "messages" | "values"
+        data: unknown
+        workerTurn?: number
+      }) => void
     ) => () => void
     setCoordinatorWorkerStreamFocus: (
       threadId: string,

@@ -175,8 +175,20 @@ const api = {
     cancel: (threadId: string, options?: { cancelWorkers?: boolean }): Promise<void> => {
       return ipcRenderer.invoke("agent:cancel", { threadId, ...options })
     },
-    getCoordinatorWorkers: (threadId: string): Promise<unknown[]> => {
-      return ipcRenderer.invoke("agent:coordinator-workers", { threadId }) as Promise<unknown[]>
+    getCoordinatorWorkers: (
+      threadId: string,
+      options?: { subscribeUpdates?: boolean }
+    ): Promise<unknown[]> => {
+      if (!options) {
+        return ipcRenderer.invoke("agent:coordinator-workers", { threadId }) as Promise<unknown[]>
+      }
+      return ipcRenderer.invoke("agent:coordinator-workers", {
+        threadId,
+        ...options
+      }) as Promise<unknown[]>
+    },
+    unbindCoordinatorWorkers: (threadId: string): Promise<void> => {
+      return ipcRenderer.invoke("agent:coordinator-workers-unsubscribe", { threadId }) as Promise<void>
     },
     hasCoordinatorWorkerNotifications: (threadId: string): Promise<boolean> => {
       return ipcRenderer.invoke("agent:coordinator-worker-notifications-pending", {
@@ -185,10 +197,18 @@ const api = {
     },
     onCoordinatorWorkerStream: (
       threadId: string,
-      callback: (event: { type: "stream"; mode: "messages" | "values"; data: unknown }) => void
+      callback: (event: {
+        type: "stream"
+        mode: "messages" | "values"
+        data: unknown
+        workerTurn?: number
+      }) => void
     ): (() => void) => {
       const channel = `agent:coordinator-worker-stream:${threadId}`
-      const handler = (_: unknown, data: { type: "stream"; mode: "messages" | "values"; data: unknown }): void => {
+      const handler = (
+        _: unknown,
+        data: { type: "stream"; mode: "messages" | "values"; data: unknown; workerTurn?: number }
+      ): void => {
         callback(data)
       }
       ipcRenderer.on(channel, handler)

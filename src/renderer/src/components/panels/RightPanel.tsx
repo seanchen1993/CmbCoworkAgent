@@ -212,7 +212,7 @@ export function RightPanel({
     [threadState?.coordinatorWorkers]
   )
   const runningSubagentIdsRef = useRef<Set<string>>(new Set())
-  const runningCoordinatorWorkerIdsRef = useRef<Set<string>>(new Set())
+  const runningCoordinatorWorkerRunKeysRef = useRef<Set<string>>(new Set())
   const containerRef = useRef<HTMLDivElement>(null)
 
   const [previewPath, setPreviewPath] = useState<string | null>(null)
@@ -311,20 +311,23 @@ export function RightPanel({
 
   // Auto-open once when an async coordinator worker starts or continues.
   useEffect(() => {
-    const runningIds = new Set(
+    const runningKeys = new Set(
       coordinatorWorkers
         .filter((worker) => worker.status === "running")
-        .map((worker) => worker.worker_id)
+        .map(
+          (worker) =>
+            `${worker.worker_id}:${worker.turns ?? 0}:${worker.last_started_at ?? worker.created_at}`
+        )
     )
-    const hasNewRunning = Array.from(runningIds).some(
-      (id) => !runningCoordinatorWorkerIdsRef.current.has(id)
+    const hasNewRunning = Array.from(runningKeys).some(
+      (key) => !runningCoordinatorWorkerRunKeysRef.current.has(key)
     )
 
     if (hasNewRunning) {
       setAgentsOpen(true)
     }
 
-    runningCoordinatorWorkerIdsRef.current = runningIds
+    runningCoordinatorWorkerRunKeysRef.current = runningKeys
   }, [coordinatorWorkers])
 
   const lspHeaderStatus = useMemo(() => {
@@ -2380,9 +2383,14 @@ function CoordinatorWorkerCard({
   const openWorkerFile = useCallback(
     (filePath?: string) => {
       if (!threadId || !filePath) return
+      const resolvedPath = resolveCoordinatorWorkerPreviewPath(worker.parent_thread_id, filePath)
+      if (!resolvedPath) {
+        toast.error("Worker 结果路径无效，已阻止打开")
+        return
+      }
       emitOpenResourcePreview({
         threadId,
-        filePath: resolveCoordinatorWorkerPreviewPath(worker.parent_thread_id, filePath)
+        filePath: resolvedPath
       })
     },
     [threadId, worker.parent_thread_id]
@@ -2390,126 +2398,176 @@ function CoordinatorWorkerCard({
 
   const tokenLabel = formatCoordinatorWorkerTokenUsage(worker.token_usage)
   const hasAnyFile = Boolean(worker.result_path || worker.report_path)
+  const canOpenToolStream = Boolean(threadId && worker.worker_thread_id)
+  const openWorkerStream = useCallback((): void => {
+    if (!threadId || !worker.worker_thread_id) return
+    openWorkerFocusView({
+      threadId,
+      workerId: worker.worker_id,
+      workerThreadId: worker.worker_thread_id,
+      role: worker.role,
+      description: worker.description,
+      status: worker.status
+    })
+  }, [
+    openWorkerFocusView,
+    threadId,
+    worker.description,
+    worker.role,
+    worker.status,
+    worker.worker_id,
+    worker.worker_thread_id
+  ])
 
   return (
     <div
       className={cn(
-        "rounded-2xl border bg-gradient-to-br from-background to-muted/25 p-3 text-xs shadow-sm",
+        "group overflow-hidden rounded-xl border bg-background/95 text-xs shadow-sm transition-colors",
         isRunning
-          ? "border-blue-300/80 shadow-blue-500/10"
+          ? "border-sky-300/80 shadow-sky-500/10"
           : worker.status === "completed"
-            ? "border-emerald-300/60"
+            ? "border-border/80"
             : worker.status === "failed"
-              ? "border-red-300/60"
-              : "border-muted-foreground/20"
+              ? "border-red-300/70"
+              : "border-border/70"
       )}
     >
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0 space-y-1">
-          <div className="flex min-w-0 items-center gap-2">
-            <StatusIcon className={cn("size-4 shrink-0", statusMeta.iconClass)} />
-            <span className="truncate text-[13px] font-semibold text-foreground">{roleLabel}</span>
-            <Badge variant="outline" className="h-5 rounded-full px-2 text-[10px]">
-              {worker.turns} 轮
-            </Badge>
-            <Badge variant="secondary" className="h-5 rounded-full px-2 text-[10px]">
-              {workloadLabel}
-            </Badge>
+      <div className="border-b border-border/60 px-3 py-3">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex min-w-0 items-start gap-2.5">
+            <div
+              className={cn(
+                "mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border",
+                isRunning
+                  ? "border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-900/70 dark:bg-sky-950/35 dark:text-sky-300"
+                  : worker.status === "failed"
+                    ? "border-red-200 bg-red-50 text-red-700 dark:border-red-900/70 dark:bg-red-950/35 dark:text-red-300"
+                    : "border-stone-200 bg-stone-50 text-stone-700 dark:border-stone-800 dark:bg-stone-900/50 dark:text-stone-300"
+              )}
+            >
+              <StatusIcon className={cn("size-4", statusMeta.iconClass)} />
+            </div>
+            <div className="min-w-0 space-y-1">
+              <div className="flex min-w-0 items-center gap-2">
+                <span className="truncate text-[13px] font-semibold text-foreground">
+                  {roleLabel}
+                </span>
+                <span className="rounded-md border border-border/70 bg-muted/45 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                  {worker.turns} 轮
+                </span>
+                <span className="rounded-md border border-border/70 bg-muted/45 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                  {workloadLabel}
+                </span>
+              </div>
+              <div className="line-clamp-2 text-[12px] leading-relaxed text-muted-foreground">
+                {worker.description}
+              </div>
+            </div>
           </div>
-          <div className="line-clamp-2 text-muted-foreground">{worker.description}</div>
-        </div>
-        <Badge className={cn("shrink-0 rounded-full", statusMeta.badgeClass)}>
-          {statusMeta.label}
-        </Badge>
-      </div>
-
-      <div className="mt-3 rounded-xl border border-border/55 bg-background/75 px-3 py-2.5">
-        <div className="flex items-center justify-between gap-2">
-          <span className="flex min-w-0 items-center gap-2 font-medium text-sky-700 dark:text-sky-300">
-            <Code2 className="size-3.5 shrink-0" />
-            <span className="truncate">{worker.last_tool_name || "等待工具调用"}</span>
-          </span>
-          <Badge variant="outline" className="h-5 rounded-full px-2 text-[10px]">
-            {worker.tool_call_count} 次
+          <Badge className={cn("shrink-0 rounded-md border px-2 py-0.5", statusMeta.badgeClass)}>
+            {statusMeta.label}
           </Badge>
         </div>
-        <div className="mt-2 space-y-1 text-[11px] leading-relaxed text-muted-foreground">
-          <div className="truncate">
-            <span className="text-foreground/70">状态：</span>
-            {activityLabel || compactInline(worker.last_event || statusMeta.label)}
-          </div>
-          <div className="truncate">
-            <span className="text-foreground/70">耗时：</span>
-            {formatCompactElapsed(durationMs)}
-          </div>
-          {(worker.summary || worker.error || worker.result_path || worker.report_path) && (
-            <div className="truncate">
-              <span className="text-foreground/70">
-                {worker.status === "failed" || worker.status === "cancelled" ? "结果：" : "摘要："}
-              </span>
-              {compactInline(
-                worker.error || worker.summary || worker.result_path || worker.report_path || ""
-              )}
-            </div>
-          )}
-          {tokenLabel && (
-            <div className="truncate">
-              <span className="text-foreground/70">Token：</span>
-              {tokenLabel}
-            </div>
-          )}
-        </div>
       </div>
 
-      {(hasAnyFile || ownedFiles.length > 0 || tokenLabel || threadId) && (
-        <div className="mt-2 flex flex-wrap items-center gap-2">
-          {worker.result_path && (
-            <button
-              type="button"
-              onClick={() => openWorkerFile(worker.result_path)}
-              className="rounded-full border border-border/70 px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent/40 hover:text-foreground"
-            >
-              结果
-            </button>
-          )}
-          {worker.report_path && (
-            <button
-              type="button"
-              onClick={() => openWorkerFile(worker.report_path)}
-              className="rounded-full border border-border/70 px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent/40 hover:text-foreground"
-            >
-              报告
-            </button>
-          )}
+      <div className="px-3 py-3">
+        {canOpenToolStream && (
           <button
             type="button"
-            onClick={() => setDetailsOpen((open) => !open)}
-            className="rounded-full border border-border/70 px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent/40 hover:text-foreground"
+            onClick={openWorkerStream}
+            className={cn(
+              "mb-3 flex w-full items-center justify-between gap-3 rounded-xl border px-3 py-2.5 text-left transition-all",
+              "border-slate-200/90 bg-gradient-to-b from-white to-slate-50/90 text-slate-900 shadow-[0_1px_2px_rgba(15,23,42,0.06)]",
+              "hover:border-slate-300 hover:from-white hover:to-slate-100 hover:shadow-[0_4px_14px_rgba(15,23,42,0.08)]",
+              "dark:border-slate-700/80 dark:from-slate-900 dark:to-slate-950 dark:text-slate-100 dark:hover:border-slate-600"
+            )}
           >
-            {detailsOpen ? "收起细节" : "查看细节"}
+            <span className="flex min-w-0 items-center gap-2.5">
+              <span className="flex size-7 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-sky-600 shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-sky-300">
+                <Code2 className="size-3.5" />
+              </span>
+              <span className="min-w-0">
+                <span className="block text-[12px] font-semibold leading-none">打开工具流</span>
+                <span className="mt-1 block truncate text-[10px] text-slate-500 dark:text-slate-400">
+                  查看消息、工具参数和执行结果
+                </span>
+              </span>
+            </span>
+            <ChevronRight className="size-4 shrink-0 text-slate-400 transition-transform group-hover:translate-x-0.5 dark:text-slate-500" />
           </button>
-          {threadId && worker.worker_thread_id && (
+        )}
+
+        <div className="rounded-lg border border-border/55 bg-muted/20 px-3 py-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <span className="flex min-w-0 items-center gap-2 font-medium text-foreground/90">
+              <Code2 className="size-3.5 shrink-0 text-muted-foreground" />
+              <span className="truncate">{worker.last_tool_name || "等待工具调用"}</span>
+            </span>
+            <span className="shrink-0 rounded-md border border-border/70 bg-background px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+              {worker.tool_call_count} 次
+            </span>
+          </div>
+          <div className="mt-2 space-y-1 text-[11px] leading-relaxed text-muted-foreground">
+            <div className="truncate">
+              <span className="text-foreground/70">状态：</span>
+              {activityLabel || compactInline(worker.last_event || statusMeta.label)}
+            </div>
+            <div className="truncate">
+              <span className="text-foreground/70">耗时：</span>
+              {formatCompactElapsed(durationMs)}
+            </div>
+            {(worker.summary || worker.error || worker.result_path || worker.report_path) && (
+              <div className="truncate">
+                <span className="text-foreground/70">
+                  {worker.status === "failed" || worker.status === "cancelled" ? "结果：" : "摘要："}
+                </span>
+                {compactInline(
+                  worker.error || worker.summary || worker.result_path || worker.report_path || ""
+                )}
+              </div>
+            )}
+            {tokenLabel && (
+              <div className="truncate">
+                <span className="text-foreground/70">Token：</span>
+                {tokenLabel}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {(hasAnyFile || ownedFiles.length > 0 || tokenLabel) && (
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            {worker.result_path && (
+              <button
+                type="button"
+                onClick={() => openWorkerFile(worker.result_path)}
+                className="rounded-md border border-border/70 px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground"
+              >
+                结果
+              </button>
+            )}
+            {worker.report_path && (
+              <button
+                type="button"
+                onClick={() => openWorkerFile(worker.report_path)}
+                className="rounded-md border border-border/70 px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground"
+              >
+                报告
+              </button>
+            )}
             <button
               type="button"
-              onClick={() =>
-                openWorkerFocusView({
-                  threadId,
-                  workerId: worker.worker_id,
-                  workerThreadId: worker.worker_thread_id,
-                  role: worker.role,
-                  description: worker.description
-                })
-              }
-              className="rounded-full border border-emerald-300/70 bg-emerald-500/10 px-2 py-1 text-[11px] font-medium text-emerald-700 hover:bg-emerald-500/15 dark:text-emerald-300"
+              onClick={() => setDetailsOpen((open) => !open)}
+              className="rounded-md border border-border/70 px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground"
             >
-              工具流
+              {detailsOpen ? "收起细节" : "更多信息"}
             </button>
-          )}
-        </div>
-      )}
+          </div>
+        )}
+      </div>
 
       {detailsOpen && (
-        <div className="mt-2 space-y-1 rounded-xl border border-border/50 bg-muted/25 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
+        <div className="mx-3 mb-3 space-y-1 rounded-lg border border-border/50 bg-muted/25 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
           <div className="truncate">
             <span className="text-foreground/70">Worker：</span>
             {worker.worker_id}
@@ -2554,8 +2612,9 @@ function getCoordinatorWorkerStatusMeta(status: CoordinatorWorkerView["status"])
     return {
       label: "已完成",
       icon: CheckCircle2,
-      iconClass: "text-emerald-600 dark:text-emerald-400",
-      badgeClass: "bg-emerald-500/10 text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-300"
+      iconClass: "text-stone-600 dark:text-stone-300",
+      badgeClass:
+        "border-stone-200 bg-stone-100 text-stone-700 hover:bg-stone-100 dark:border-stone-800 dark:bg-stone-900/65 dark:text-stone-300"
     }
   }
   if (status === "failed") {
@@ -2589,14 +2648,21 @@ function formatCoordinatorWorkerTokenUsage(
   return parts.join("，")
 }
 
-function resolveCoordinatorWorkerPreviewPath(threadId: string, filePath: string): string {
+function resolveCoordinatorWorkerPreviewPath(
+  threadId: string,
+  filePath: string
+): string | undefined {
   const normalized = filePath.trim().replace(/\\/g, "/")
-  if (!normalized) return normalized
-  if (normalized.startsWith(".cmbdevclaw/") || isAbsolutePath(normalized)) return normalized
+  if (!normalized) return undefined
+  if (isAbsolutePath(normalized) || normalized.split("/").includes("..")) return undefined
+  const coordinatorReportsPrefix = `.cmbdevclaw/coordinator/${threadId}/reports/`
+  if (normalized.startsWith(".cmbdevclaw/")) {
+    return normalized.startsWith(coordinatorReportsPrefix) ? normalized : undefined
+  }
   if (normalized.startsWith("reports/") || normalized === "state.json") {
     return `.cmbdevclaw/coordinator/${threadId}/${normalized}`
   }
-  return normalized
+  return undefined
 }
 
 function SubagentCurrentToolCard({

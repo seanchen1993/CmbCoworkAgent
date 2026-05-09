@@ -156,8 +156,18 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    "getCoordinatorWorkers(threadId)",
-    "thread context refreshes coordinator workers outside the active stream"
+    "getCoordinatorWorkers(threadId, { subscribeUpdates: false })",
+    "thread context refreshes coordinator workers outside the active stream without registering stale update callbacks"
+  )
+  assertIncludes(
+    threadContext,
+    "unbindCoordinatorWorkers(previousThreadId)",
+    "thread context unsubscribes worker update callbacks when the active thread changes"
+  )
+  assertIncludes(
+    threadContext,
+    "getCoordinatorWorkers(currentThreadId, { subscribeUpdates: true })",
+    "thread context subscribes worker updates only for the active thread"
   )
   assertIncludes(
     threadContext,
@@ -223,10 +233,35 @@ async function testRightPanelDisplaysAndAutoOpens(): Promise<void> {
   assertIncludes(rightPanel, "runningSubagentIdsRef", "right panel tracks newly running subagents")
   assertIncludes(
     rightPanel,
+    "runningCoordinatorWorkerRunKeysRef",
+    "right panel tracks newly running coordinator worker runs"
+  )
+  assertNotIncludes(
+    rightPanel,
     "runningCoordinatorWorkerIdsRef",
-    "right panel tracks newly running coordinator workers"
+    "right panel no longer keys coordinator auto-open only by worker id"
   )
   assertIncludes(rightPanel, "setAgentsOpen(true)", "right panel auto-opens agents section")
+  assertIncludes(
+    rightPanel,
+    "worker.turns ?? 0",
+    "right panel includes worker turn count in coordinator run key detection"
+  )
+  assertIncludes(
+    rightPanel,
+    "worker.last_started_at ?? worker.created_at",
+    "right panel treats continue_worker restarts as a fresh run for auto-open"
+  )
+  assertIncludes(
+    rightPanel,
+    "const hasNewRunning = Array.from(runningKeys).some(",
+    "right panel compares coordinator running keys against the previous snapshot"
+  )
+  assertIncludes(
+    rightPanel,
+    "runningCoordinatorWorkerRunKeysRef.current = runningKeys",
+    "right panel stores the latest coordinator run keys after auto-open checks"
+  )
   assertIncludes(rightPanel, "subagentToolCallCount", "right panel reads aggregate tool count")
   assertIncludes(
     rightPanel,
@@ -331,6 +366,17 @@ async function testRightPanelDisplaysAndAutoOpens(): Promise<void> {
     "formatCompactElapsed",
     "right panel shows elapsed time since last tool activity"
   )
+  assertIncludes(
+    rightPanel,
+    "openWorkerFocusView({",
+    "right panel wires coordinator worker cards to the tool-flow focus view"
+  )
+  assertIncludes(rightPanel, "打开工具流", "right panel exposes a tool-flow entrypoint")
+  assertIncludes(
+    rightPanel,
+    "查看消息、工具参数和执行结果",
+    "right panel explains the worker tool-flow drawer content"
+  )
 }
 
 async function testSidebarKeepsThreadLoadingWhileWorkerRuns(): Promise<void> {
@@ -359,6 +405,55 @@ async function testSidebarKeepsThreadLoadingWhileWorkerRuns(): Promise<void> {
   )
 }
 
+async function testWorkerToolFlowPreservesToolErrorStatus(): Promise<void> {
+  const transport = await readProjectFile("src/renderer/src/lib/electron-transport.ts")
+  const workerStreamPanel = await readProjectFile(
+    "src/renderer/src/components/chat/WorkerStreamPanel.tsx"
+  )
+  const rendererTypes = await readProjectFile("src/renderer/src/types.ts")
+
+  assertIncludes(
+    transport,
+    "const isError = this.isToolMessageError(kwargs)",
+    "focused worker transport derives tool error state from provider payloads"
+  )
+  assertIncludes(
+    transport,
+    "...(kwargs.status && { status: kwargs.status })",
+    "focused worker transport forwards tool execution status to the worker panel"
+  )
+  assertIncludes(
+    transport,
+    "...(isError && { is_error: true })",
+    "focused worker transport forwards failed tool results as is_error"
+  )
+  assertIncludes(
+    workerStreamPanel,
+    "status: live.status ?? existing.status",
+    "worker stream panel preserves tool status while merging live and checkpoint messages"
+  )
+  assertIncludes(
+    workerStreamPanel,
+    "is_error: live.is_error ?? existing.is_error",
+    "worker stream panel preserves tool error flags while merging live and checkpoint messages"
+  )
+  assertIncludes(
+    workerStreamPanel,
+    'is_error: message.is_error === true || message.status === "error"',
+    "worker stream panel derives tool result errors from either explicit flags or error status"
+  )
+  assertIncludes(
+    rendererTypes,
+    "status?: string",
+    "renderer message type exposes provider tool status for worker tool-flow messages"
+  )
+  assertIncludes(
+    rendererTypes,
+    "is_error?: boolean",
+    "renderer message type exposes tool failure state for worker tool-flow messages"
+  )
+}
+
 async function run(): Promise<void> {
   await testTransportCountsHiddenSubagentTools()
   console.log("PASS subagent transport aggregate tool count")
@@ -368,6 +463,8 @@ async function run(): Promise<void> {
   console.log("PASS subagent right panel observability")
   await testSidebarKeepsThreadLoadingWhileWorkerRuns()
   console.log("PASS sidebar coordinator worker loading state")
+  await testWorkerToolFlowPreservesToolErrorStatus()
+  console.log("PASS worker tool flow error status wiring")
 }
 
 run().catch((error: Error) => {

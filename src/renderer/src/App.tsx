@@ -34,16 +34,16 @@ import { initMMJ } from "../js/mmjUtils"
 import { Toaster } from "sonner"
 import { useShallow } from "zustand/react/shallow"
 interface UserInfoConfig {
-  sapId: '',//8
-  ystId: '',//6
-  userName: '',
-  originOrgId: '',
-  orgName: '',
-  pathName: '',
-  originPathId: '',
-  ystRefreshToken: '',
-  ystCode: '',
-  ystAccessToken: '',
+  sapId: string
+  ystId: string
+  userName: string
+  originOrgId: string
+  orgName: string
+  pathName: string
+  originPathId: string
+  ystRefreshToken: string
+  ystCode: string
+  ystAccessToken: string
 }
 
 async function migrateDisabledSkillsFromLocalStorage(): Promise<void> {
@@ -184,8 +184,8 @@ function App(): React.JSX.Element {
     const unsubscribe = window.api.agent.onCoordinatorWorkerStream(threadId, (event) => {
       if (workerFocusTransportRef.current !== transport) return
       const messages = transport.convertFocusedCoordinatorWorkerIPCEvent(event, threadId)
-      for (const message of messages) {
-        useAppStore.getState().appendWorkerFocusMessage(workerThreadId, message)
+      if (messages.length > 0) {
+        useAppStore.getState().appendWorkerFocusMessages(workerThreadId, messages)
       }
     })
 
@@ -227,7 +227,7 @@ function App(): React.JSX.Element {
           fetch(`https://archguardservice.paas.${import.meta.env.VITE_LOGIN_PT}.cn/cowork/login-info`, {
               method: 'GET',
               headers: {
-                  ystCode: userInfo.ystCode,
+                  ystCode: userInfo.ystCode || '',
                   ystRefreshToken: userInfo.ystRefreshToken || '',
               }
           }).then(async res => {

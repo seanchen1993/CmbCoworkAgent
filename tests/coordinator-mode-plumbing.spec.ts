@@ -392,11 +392,6 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    "additionalKwargs?.cmb_visible_user_message",
-    "thread context restores user-visible text instead of coordinator internal context blocks"
-  )
-  assertIncludes(
-    threadContext,
     "msg.additional_kwargs ?? msg.kwargs?.additional_kwargs",
     "thread context recognizes internal notification metadata from live and serialized messages"
   )
@@ -653,8 +648,23 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "bindWorkerUpdates(\n            threadId,\n            onUpdate,\n            window ? `coordinator-workers:${window.id}` : undefined",
-    "agent IPC rebinds worker updates when coordinator worker polling refreshes an active thread"
+    "bindWorkerUpdates(threadId, onUpdate, updateKey)",
+    "agent IPC rebinds worker updates with a tracked callback key when coordinator worker polling refreshes an active thread"
+  )
+  assertIncludes(
+    agentIpc,
+    "payload: { threadId?: string; subscribeUpdates?: boolean }",
+    "agent IPC lets passive coordinator worker refreshes avoid long-lived renderer update callbacks"
+  )
+  assertIncludes(
+    agentIpc,
+    "const subscribeUpdates = payload.subscribeUpdates !== false",
+    "agent IPC defaults coordinator worker refreshes to the existing subscribed behavior"
+  )
+  assertIncludes(
+    agentIpc,
+    "unbindWorkerUpdates(boundThreadId, updateKey)",
+    "agent IPC unbinds coordinator worker update callbacks when the renderer window closes"
   )
   assertIncludes(
     agentIpc,
@@ -713,7 +723,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "coordinatorWorkerManager.bindWorkerUpdates(\n            threadId,\n            onUpdate,\n            window ? `coordinator-workers:${window.id}` : undefined",
+    "coordinatorWorkerManager.bindWorkerUpdates(threadId, onUpdate, updateKey)",
     "agent IPC rebinds in-memory worker updates without polling historical worker files"
   )
   assertIncludes(
@@ -813,8 +823,13 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "coordinatorNotificationSelectedSkills,\n              abortSignal: abortController.signal",
+    "coordinatorNotificationSelectedSkills,\n              coordinatorWorkerTurnPlanning,\n              abortSignal: abortController.signal",
     "agent invoke passes notification-selected skill context into the first coordinator runtime"
+  )
+  assertIncludes(
+    agentIpc,
+    "const coordinatorWorkerTurnPlanning = createCoordinatorWorkerTurnPlanningState()",
+    "agent invoke preserves coordinator worker planning counters across failover runtime rebuilds"
   )
   assertIncludes(
     agentIpc,
@@ -1037,11 +1052,6 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "getCoordinatorVisibleUserMessage(msgChunk)",
-    "agent Stop hook context uses visible user text instead of augmented coordinator notification content"
-  )
-  assertIncludes(
-    agentIpc,
     "lastUserIndex = i\n        break",
     "agent Stop hook values context treats internal coordinator notification messages as the current-turn boundary"
   )
@@ -1054,11 +1064,6 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     agentIpc,
     "userMessage: isCoordinatorNotificationTurn ? undefined : message",
     "agent Stop hook context does not override internal coordinator notification turns with placeholder text"
-  )
-  assertIncludes(
-    agentIpc,
-    "cmb_visible_user_message",
-    "agent IPC stores display text for coordinator user turns augmented with internal context"
   )
   assertIncludes(
     agentIpc,
@@ -1097,8 +1102,13 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "messages.slice(currentTurnStart)",
+    ".slice(currentTurnStart)",
     "agent IPC avoids forwarding full values-mode message history"
+  )
+  assertIncludes(
+    agentIpc,
+    "cmb_worker_snapshot_index",
+    "agent IPC preserves original checkpoint indexes for worker values fallback IDs"
   )
   assertIncludes(
     agentIpc,
@@ -1128,8 +1138,20 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    'await settleDrainedCoordinatorNotifications("ack")',
-    "agent IPC automatically acknowledges delivered worker notifications after a successful coordinator turn"
+    "acknowledgeDeliveredCoordinatorNotificationsIfNeeded",
+    "agent IPC acknowledges task-notifications when they are delivered into the coordinator turn, matching Claude Code queue removal"
+  )
+  assertSourceOrder(
+    agentIpc,
+    "const humanMessages = [",
+    "const acknowledgeDeliveredCoordinatorNotificationsIfNeeded",
+    "agent IPC delivery-acknowledges task-notifications only after constructing the internal HumanMessage batch"
+  )
+  assertSourceOrder(
+    agentIpc,
+    "for await (const chunk of source)",
+    "await acknowledgeDeliveredCoordinatorNotificationsIfNeeded()",
+    "agent IPC removes delivered task-notifications from the queue only after the coordinator stream starts producing output"
   )
   assertIncludes(
     agentIpc,
@@ -1169,7 +1191,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   assertIncludes(
     agentIpc,
     'await settleDrainedCoordinatorNotifications("restore")',
-    "agent IPC restores drained notifications after cancellation, errors, or blocked completion"
+    "agent IPC restores notifications only if a turn exits before delivery-acknowledgement, while HITL paths restore unconsumed peeked notifications"
   )
   assertIncludes(
     agentIpc,
@@ -1179,7 +1201,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   assertIncludes(
     agentIpc,
     "const settleDrainedCoordinatorNotifications = async",
-    "agent IPC centralizes drained notification settlement for success, failure, and cancellation"
+    "agent IPC centralizes pre-delivery notification restoration for failure and cancellation"
   )
   assertIncludes(
     agentIpc,
@@ -1259,8 +1281,28 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "buildCoordinatorHumanMessageContent(",
-    "agent IPC delivers worker notifications through the current HumanMessage like Claude Code task-notifications"
+    "buildCoordinatorNotificationHumanMessage(promptNotifications)",
+    "agent IPC delivers worker notifications as a bounded internal HumanMessage for the current coordinator turn"
+  )
+  assertIncludes(
+    agentIpc,
+    "[COORDINATOR_VISIBLE_USER_MESSAGE_KEY]: message",
+    "agent IPC persists hook-augmented prompts with the original visible user message"
+  )
+  assertIncludes(
+    agentIpc,
+    "getCoordinatorVisibleUserMessage(msg)",
+    "agent IPC uses visible user message metadata when collecting Stop hook context"
+  )
+  assertIncludes(
+    agentIpc,
+    "userHumanMessage",
+    "agent IPC includes both normal user input and worker notifications when they arrive in the same coordinator turn"
+  )
+  assertIncludes(
+    agentIpc,
+    "persistedCoordinatorTurnPromptForMetadata =\n            buildCoordinatorTurnContextPrompt(runningWorkerContext)",
+    "agent IPC persists only worker context metadata, not full worker notification XML"
   )
   assertNotIncludes(
     agentIpc,
@@ -1417,11 +1459,15 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "currentController === abortController",
     "agent IPC does not delete a newer active run during old-run cleanup"
   )
-  assertSourceOrder(
+  assertIncludes(
     agentIpc,
-    'safeSendToWindow(window, channel, { type: "done" })',
     'await settleDrainedCoordinatorNotifications("ack")',
-    "agent IPC tells the renderer the turn is done before acknowledging delivered notifications"
+    "agent IPC still finalizes delivered task-notifications after a successful turn"
+  )
+  assertIncludes(
+    agentIpc,
+    "coordinatorNotificationsDelivered",
+    "agent IPC separates task-notification delivery ack from final turn settlement"
   )
   assertIncludes(
     agentIpc,

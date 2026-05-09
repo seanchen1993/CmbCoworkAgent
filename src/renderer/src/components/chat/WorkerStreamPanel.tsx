@@ -8,6 +8,8 @@ import { useAppStore } from "@/lib/store"
 import type { Message } from "@/types"
 import { cn } from "@/lib/utils"
 
+const MAX_WORKER_SIGNATURE_CHARS = 512
+
 type SerializedCheckpointMessage = {
   id?: string | string[]
   _getType?: () => string
@@ -16,6 +18,8 @@ type SerializedCheckpointMessage = {
   tool_calls?: Message["tool_calls"]
   tool_call_id?: string
   name?: string
+  status?: string
+  is_error?: boolean
   additional_kwargs?: Record<string, unknown>
   kwargs?: {
     id?: string
@@ -24,6 +28,8 @@ type SerializedCheckpointMessage = {
     tool_calls?: Message["tool_calls"]
     tool_call_id?: string
     name?: string
+    status?: string
+    is_error?: boolean
     additional_kwargs?: Record<string, unknown>
   }
 }
@@ -34,6 +40,64 @@ type ThreadHistoryEntry = {
       messages?: unknown[]
     }
   }
+}
+
+function createWorkerSnapshotFallbackMessageId(index: number): string {
+  return `worker-snapshot-${index}`
+}
+
+function isWorkerSnapshotMessageId(id: string): boolean {
+  return id.startsWith("worker-snapshot-")
+}
+
+function isWorkerNonSnapshotMessageId(id: string): boolean {
+  return !isWorkerSnapshotMessageId(id)
+}
+
+function isWorkerSnapshotPair(a: Message, b: Message): boolean {
+  return (
+    (isWorkerSnapshotMessageId(a.id) && isWorkerNonSnapshotMessageId(b.id)) ||
+    (isWorkerNonSnapshotMessageId(a.id) && isWorkerSnapshotMessageId(b.id))
+  )
+}
+
+function isSameWorkerAssistantText(a: Message, b: Message): boolean {
+  if (a.role !== "assistant" || b.role !== "assistant") return false
+  if (!isWorkerSnapshotPair(a, b)) return false
+  if (a.tool_calls?.length || b.tool_calls?.length) return false
+  if (typeof a.content !== "string" || typeof b.content !== "string") return false
+  const first = a.content.trim()
+  const second = b.content.trim()
+  if (!first || !second) return false
+  return first.includes(second) || second.includes(first)
+}
+
+function findSameWorkerAssistantTextIndex(messages: Message[], message: Message): number | undefined {
+  const index = messages.findIndex((item) => isSameWorkerAssistantText(item, message))
+  return index >= 0 ? index : undefined
+}
+
+function incrementSignatureCount(map: Map<string, number>, signature: string | undefined): void {
+  if (!signature) return
+  map.set(signature, (map.get(signature) ?? 0) + 1)
+}
+
+function takeWindowedSignatureMatch(
+  indexes: number[] | undefined,
+  remainingBySignature: Map<string, number>,
+  signature: string | undefined
+): number | undefined {
+  if (!indexes?.length || !signature) return undefined
+  const remaining = remainingBySignature.get(signature) ?? 0
+  if (remaining <= 0) return indexes.shift()
+
+  // If the same text appears in multiple worker turns, live messages usually
+  // belong to the most recent slice. Match the last N compatible snapshots
+  // instead of blindly consuming the oldest one.
+  const matchPosition = Math.max(0, indexes.length - remaining)
+  const [index] = indexes.splice(matchPosition, 1)
+  remainingBySignature.set(signature, remaining - 1)
+  return index
 }
 
 const WORKER_THINKING_MESSAGES = [
@@ -110,8 +174,15 @@ function messageFromCheckpoint(
   const toolCalls = message.tool_calls ?? message.kwargs?.tool_calls
   const toolCallId = message.tool_call_id ?? message.kwargs?.tool_call_id
   const toolName = message.name ?? message.kwargs?.name
+  const toolStatus = message.status ?? message.kwargs?.status
+  const isToolError =
+    message.is_error === true ||
+    message.kwargs?.is_error === true ||
+    additionalKwargs?.is_error === true ||
+    toolStatus === "error"
   const messageId =
-    message.kwargs?.id ?? (typeof message.id === "string" ? message.id : `worker-msg-${index}`)
+    message.kwargs?.id ??
+    (typeof message.id === "string" ? message.id : createWorkerSnapshotFallbackMessageId(index))
 
   return {
     id: messageId,
@@ -120,45 +191,108 @@ function messageFromCheckpoint(
     tool_calls: toolCalls,
     ...(role === "tool" && toolCallId && { tool_call_id: toolCallId }),
     ...(role === "tool" && toolName && { name: toolName }),
+    ...(role === "tool" && toolStatus && { status: toolStatus }),
+    ...(role === "tool" && isToolError && { is_error: true }),
     created_at: new Date()
   }
 }
 
 function mergeMessages(baseMessages: Message[], liveMessages: Message[]): Message[] {
+  if (baseMessages.length === 0) return liveMessages
+  if (liveMessages.length === 0) return baseMessages
+
   const merged: Message[] = [...baseMessages]
   const indexById = new Map(merged.map((message, index) => [message.id, index]))
+  const snapshotIndexesBySignature = new Map<string, number[]>()
+  const liveIndexesBySignature = new Map<string, number[]>()
+  const incomingLiveCountsBySignature = new Map<string, number>()
+  const incomingSnapshotCountsBySignature = new Map<string, number>()
+  for (const message of liveMessages) {
+    const signature = workerFocusMessageSignature(message)
+    if (isWorkerNonSnapshotMessageId(message.id)) {
+      incrementSignatureCount(incomingLiveCountsBySignature, signature)
+    }
+    if (isWorkerSnapshotMessageId(message.id)) {
+      incrementSignatureCount(incomingSnapshotCountsBySignature, signature)
+    }
+  }
+  merged.forEach((message, index) => {
+    const signature = workerFocusMessageSignature(message)
+    if (signature && isWorkerSnapshotMessageId(message.id)) {
+      const indexes = snapshotIndexesBySignature.get(signature) ?? []
+      indexes.push(index)
+      snapshotIndexesBySignature.set(signature, indexes)
+    }
+    if (signature && isWorkerNonSnapshotMessageId(message.id)) {
+      const indexes = liveIndexesBySignature.get(signature) ?? []
+      indexes.push(index)
+      liveIndexesBySignature.set(signature, indexes)
+    }
+  })
 
   for (const live of liveMessages) {
-    const index = indexById.get(live.id)
+    const signature = workerFocusMessageSignature(live)
+    const index =
+      indexById.get(live.id) ??
+      (signature && isWorkerNonSnapshotMessageId(live.id)
+        ? takeWindowedSignatureMatch(
+            snapshotIndexesBySignature.get(signature),
+            incomingLiveCountsBySignature,
+            signature
+          )
+        : undefined) ??
+      (signature && isWorkerSnapshotMessageId(live.id)
+        ? takeWindowedSignatureMatch(
+            liveIndexesBySignature.get(signature),
+            incomingSnapshotCountsBySignature,
+            signature
+          )
+        : undefined) ??
+      findSameWorkerAssistantTextIndex(merged, live)
     if (index === undefined) {
       indexById.set(live.id, merged.length)
+      if (signature && isWorkerSnapshotMessageId(live.id)) {
+        const indexes = snapshotIndexesBySignature.get(signature) ?? []
+        indexes.push(merged.length)
+        snapshotIndexesBySignature.set(signature, indexes)
+      }
+      if (signature && isWorkerNonSnapshotMessageId(live.id)) {
+        const indexes = liveIndexesBySignature.get(signature) ?? []
+        indexes.push(merged.length)
+        liveIndexesBySignature.set(signature, indexes)
+      }
       merged.push(live)
       continue
     }
 
     const existing = merged[index]
+    const id = existing.id
     merged[index] = {
       ...existing,
       ...live,
-      content:
-        live.content === "" || (Array.isArray(live.content) && live.content.length === 0)
-          ? existing.content
-          : live.content,
+      id,
+      content: resolveWorkerPanelContent(existing, live),
       tool_calls:
-        live.tool_calls && live.tool_calls.length > 0 ? live.tool_calls : existing.tool_calls
+        live.tool_calls && live.tool_calls.length > 0 ? live.tool_calls : existing.tool_calls,
+      status: live.status ?? existing.status,
+      is_error: live.is_error ?? existing.is_error
     }
+    indexById.set(id, index)
+    indexById.set(live.id, index)
   }
 
   return merged
 }
 
-function buildToolResults(messages: Message[]): Map<string, { content: string | unknown; is_error?: boolean }> {
+function buildToolResults(
+  messages: Message[]
+): Map<string, { content: string | unknown; is_error?: boolean }> {
   const results = new Map<string, { content: string | unknown; is_error?: boolean }>()
   for (const message of messages) {
     if (message.role === "tool" && message.tool_call_id) {
       results.set(message.tool_call_id, {
         content: message.content,
-        is_error: false
+        is_error: message.is_error === true || message.status === "error"
       })
     }
   }
@@ -174,6 +308,100 @@ function messageContentLength(content: Message["content"] | undefined): number {
     if (typeof block.content === "string") return total + block.content.length
     return total
   }, 0)
+}
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`)
+      .join(",")}}`
+  }
+  return JSON.stringify(value)
+}
+
+function boundedTextSignature(value: string): string {
+  if (value.length <= MAX_WORKER_SIGNATURE_CHARS * 2) return value
+  return [
+    value.length,
+    value.slice(0, MAX_WORKER_SIGNATURE_CHARS),
+    value.slice(-MAX_WORKER_SIGNATURE_CHARS)
+  ].join("\u001e")
+}
+
+function contentSignatureKey(content: Message["content"] | undefined): string {
+  if (typeof content === "string") return boundedTextSignature(content)
+  if (!Array.isArray(content)) return ""
+
+  const text = content
+    .map((block) => {
+      if (typeof block.text === "string") return block.text
+      if (typeof block.content === "string") return block.content
+      return block.type ?? ""
+    })
+    .join("\n")
+  return boundedTextSignature(text)
+}
+
+function toolCallsSignatureKey(toolCalls: Message["tool_calls"] | undefined): string {
+  if (!toolCalls?.length) return ""
+  return boundedTextSignature(
+    toolCalls
+      .map((toolCall, index) =>
+        [
+          toolCall.id ?? index,
+          toolCall.name ?? "",
+          toolCall.args ? boundedTextSignature(stableStringify(toolCall.args)) : ""
+        ].join(":")
+      )
+      .join("|")
+  )
+}
+
+function workerFocusMessageSignature(message: Message): string | undefined {
+  const contentKey = contentSignatureKey(message.content)
+  if (message.role === "assistant") {
+    const toolCallKey = toolCallsSignatureKey(message.tool_calls)
+    if (!contentKey && !toolCallKey) return undefined
+    return ["assistant", contentKey, toolCallKey].join("\u001f")
+  }
+  if (message.role === "tool" && message.tool_call_id) {
+    return ["tool", message.tool_call_id, message.name ?? "", contentKey].join("\u001f")
+  }
+  return undefined
+}
+
+function preferIncomingContent(
+  existing: Message["content"] | undefined,
+  incoming: Message["content"] | undefined
+): Message["content"] {
+  const existingLength = messageContentLength(existing)
+  const incomingLength = messageContentLength(incoming)
+  if (incomingLength === 0) return existing ?? ""
+  if (existingLength > incomingLength) return existing ?? ""
+
+  return incoming ?? ""
+}
+
+function resolveWorkerPanelContent(
+  existingMessage: Message,
+  incomingMessage: Message
+): Message["content"] {
+  if (isWorkerNonSnapshotMessageId(existingMessage.id) && existingMessage.id === incomingMessage.id) {
+    return incomingMessage.content ?? existingMessage.content ?? ""
+  }
+
+  if (isWorkerSnapshotMessageId(incomingMessage.id)) {
+    return preferIncomingContent(existingMessage.content, incomingMessage.content)
+  }
+
+  if (isWorkerSnapshotMessageId(existingMessage.id)) {
+    return preferIncomingContent(incomingMessage.content, existingMessage.content)
+  }
+
+  return preferIncomingContent(existingMessage.content, incomingMessage.content)
 }
 
 export function WorkerStreamPanel(): React.JSX.Element {
@@ -198,8 +426,9 @@ export function WorkerStreamPanel(): React.JSX.Element {
     if (!workerFocusView?.workerThreadId) return
 
     let cancelled = false
+    setHistoryMessages([])
+    setLoadingHistory(true)
     void (async () => {
-      setLoadingHistory(true)
       try {
         const latestCheckpoint = (await window.api.threads.getLatestCheckpoint(
           workerFocusView.workerThreadId
@@ -229,18 +458,56 @@ export function WorkerStreamPanel(): React.JSX.Element {
     return () => {
       cancelled = true
     }
-  }, [workerFocusView?.workerThreadId])
+  }, [currentWorker?.turns, workerFocusView?.workerThreadId])
 
   const messages = useMemo(
     () => mergeMessages(historyMessages, workerFocusMessages),
     [historyMessages, workerFocusMessages]
   )
+  const showAssistantMetaByIndex = useMemo(() => {
+    const result = new Array<boolean>(messages.length)
+    let nextNonToolMessage: Message | null = null
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index]
+      result[index] =
+        message.role !== "assistant" ||
+        !nextNonToolMessage ||
+        nextNonToolMessage.role !== "assistant"
+      if (message.role !== "tool") {
+        nextNonToolMessage = message
+      }
+    }
+    return result
+  }, [messages])
   const toolResults = useMemo(() => buildToolResults(messages), [messages])
   const getScrollViewport = useCallback((): HTMLDivElement | null => {
-    return scrollRef.current?.querySelector(
-      "[data-radix-scroll-area-viewport]"
-    ) as HTMLDivElement | null
+    const root = scrollRef.current
+    if (!root) return null
+    if (root.matches("[data-radix-scroll-area-viewport]")) return root
+    return root.querySelector("[data-radix-scroll-area-viewport]") as HTMLDivElement | null
   }, [])
+  const scrollToBottom = useCallback(() => {
+    const scroll = () => {
+      const viewport = getScrollViewport()
+      if (!viewport) return
+      viewport.scrollTop = viewport.scrollHeight
+      isAtBottomRef.current = true
+    }
+
+    let innerFrame: number | undefined
+    let timeout: number | undefined
+    const frame = window.requestAnimationFrame(() => {
+      scroll()
+      innerFrame = window.requestAnimationFrame(scroll)
+      timeout = window.setTimeout(scroll, 80)
+    })
+
+    return () => {
+      window.cancelAnimationFrame(frame)
+      if (innerFrame !== undefined) window.cancelAnimationFrame(innerFrame)
+      if (timeout !== undefined) window.clearTimeout(timeout)
+    }
+  }, [getScrollViewport])
   const updateIsAtBottom = useCallback(() => {
     const viewport = getScrollViewport()
     if (!viewport) return
@@ -264,7 +531,13 @@ export function WorkerStreamPanel(): React.JSX.Element {
 
   useEffect(() => {
     isAtBottomRef.current = true
-  }, [workerFocusView?.workerThreadId])
+    return scrollToBottom()
+  }, [scrollToBottom, workerFocusView?.workerThreadId])
+
+  useEffect(() => {
+    if (loadingHistory) return
+    return scrollToBottom()
+  }, [loadingHistory, scrollToBottom, workerFocusView?.workerThreadId])
 
   useEffect(() => {
     const viewport = getScrollViewport()
@@ -286,8 +559,7 @@ export function WorkerStreamPanel(): React.JSX.Element {
     }
 
     if (!wasRunningRef.current) {
-      thinkingCycleRef.current =
-        (thinkingCycleRef.current + 1) % WORKER_THINKING_MESSAGES.length
+      thinkingCycleRef.current = (thinkingCycleRef.current + 1) % WORKER_THINKING_MESSAGES.length
       setThinkingMessageIndex(thinkingCycleRef.current)
       runningMessageCountRef.current = messages.length
       wasRunningRef.current = true
@@ -295,8 +567,7 @@ export function WorkerStreamPanel(): React.JSX.Element {
     }
 
     if (messages.length > runningMessageCountRef.current) {
-      thinkingCycleRef.current =
-        (thinkingCycleRef.current + 1) % WORKER_THINKING_MESSAGES.length
+      thinkingCycleRef.current = (thinkingCycleRef.current + 1) % WORKER_THINKING_MESSAGES.length
       setThinkingMessageIndex(thinkingCycleRef.current)
       runningMessageCountRef.current = messages.length
     }
@@ -332,7 +603,7 @@ export function WorkerStreamPanel(): React.JSX.Element {
             variant="ghost"
             size="sm"
             type="button"
-            onClick={closeWorkerFocusView}
+            onClick={() => closeWorkerFocusView()}
             className="h-7 w-9 p-0"
             title="返回"
             aria-label="返回"
@@ -376,12 +647,6 @@ export function WorkerStreamPanel(): React.JSX.Element {
             {messages.map((message, index) => {
               const previousMessage = index > 0 ? messages[index - 1] : null
               const isLastMessage = index === messages.length - 1
-              const nextNonToolMessage =
-                messages.slice(index + 1).find((candidate) => candidate.role !== "tool") ?? null
-              const showAssistantMeta =
-                message.role !== "assistant" ||
-                !nextNonToolMessage ||
-                nextNonToolMessage.role !== "assistant"
 
               return (
                 <MessageBubble
@@ -389,7 +654,7 @@ export function WorkerStreamPanel(): React.JSX.Element {
                   message={message}
                   previousMessage={previousMessage}
                   isStreaming={isRunning && isLastMessage}
-                  showAssistantMeta={showAssistantMeta}
+                  showAssistantMeta={showAssistantMetaByIndex[index] ?? true}
                   toolResults={toolResults}
                   threadId={workerFocusView.threadId}
                   isLoading={isRunning}

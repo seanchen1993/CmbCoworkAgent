@@ -52,6 +52,7 @@ export interface IPCStreamEvent {
   type: "stream"
   mode: "messages" | "values"
   data: unknown
+  workerTurn?: number
 }
 
 export interface IPCDoneEvent {

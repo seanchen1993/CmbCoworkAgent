@@ -328,7 +328,11 @@ async function testPromptContracts(): Promise<void> {
   assertIncludes(taskPrompt, 'subagent_type="worker"', "task prompt")
   assertIncludes(taskPrompt, 'role="verifier"', "task prompt")
   assertIncludes(taskPrompt, "Default to one worker", "task prompt")
-  assertIncludes(taskPrompt, "Do not launch implementation and verification in the same turn", "task prompt")
+  assertIncludes(
+    taskPrompt,
+    "Do not launch implementation and verification in the same turn",
+    "task prompt"
+  )
   assertIncludes(taskPrompt, "Scratchpad directory", "task prompt")
   assertIncludes(taskPrompt, ".cmbdevclaw/coordinator/thread-123/scratchpad", "task prompt")
   assertIncludes(taskPrompt, "Cancelled workers are final", "task prompt")
@@ -1148,6 +1152,27 @@ async function testCoordinatorWorkerPlanningGuards(): Promise<void> {
     rejectedFourthReadOnly = String(error).includes("Too many read-only workers")
   }
   assert(rejectedFourthReadOnly, "planning guard should cap read-only starts per turn")
+
+  const implicitWrite = createGuardedTools()
+  await invokeTool(implicitWrite.startTool, {
+    subagent_type: "worker",
+    description: "Implicit implementation",
+    prompt: "Implementation without explicit workload"
+  })
+  let rejectedSecondImplicitWrite = false
+  try {
+    await invokeTool(implicitWrite.startTool, {
+      subagent_type: "worker",
+      description: "Implicit implementation overflow",
+      prompt: "Second implementation without explicit workload"
+    })
+  } catch (error) {
+    rejectedSecondImplicitWrite = String(error).includes("Start at most one write or verify worker")
+  }
+  assert(
+    rejectedSecondImplicitWrite,
+    "planning guard should treat omitted implementer workload as write compatibility fallback"
+  )
 
   const mixedStart = createGuardedTools()
   await invokeTool(mixedStart.startTool, {

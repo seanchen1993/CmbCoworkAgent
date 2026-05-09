@@ -434,6 +434,40 @@ function relativeWorkerResultPath(record: CoordinatorWorkerRecord): string {
   return `${COORDINATOR_BASE_DIR}/${normalizeThreadId(record.parentThreadId)}/reports/workers/${normalizeWorkerId(record.workerId)}/turn-${Math.max(1, record.turns)}.json`
 }
 
+function normalizeWorkerArtifactPath(
+  value: unknown,
+  parentThreadId: string
+): string | undefined {
+  const rawPath = optionalString(value)
+  if (!rawPath) return undefined
+
+  const slashNormalized = rawPath.trim().replace(/\\/g, "/")
+  if (
+    !slashNormalized ||
+    slashNormalized.startsWith("/") ||
+    path.win32.isAbsolute(rawPath.trim()) ||
+    /^[A-Za-z]:\//.test(slashNormalized)
+  ) {
+    return undefined
+  }
+
+  const normalizedPath = path.posix.normalize(slashNormalized).replace(/^\.\/+/, "")
+  if (
+    !normalizedPath ||
+    normalizedPath === "." ||
+    normalizedPath.startsWith("../") ||
+    normalizedPath.includes("/../")
+  ) {
+    return undefined
+  }
+
+  const normalizedParentThreadId = normalizeThreadId(parentThreadId)
+  const coordinatorReportsPrefix = `${COORDINATOR_BASE_DIR}/${normalizedParentThreadId}/reports/`
+  if (normalizedPath.startsWith(coordinatorReportsPrefix)) return normalizedPath
+  if (normalizedPath.startsWith("reports/")) return normalizedPath
+  return undefined
+}
+
 async function writeFileAtomic(target: string, content: string): Promise<void> {
   await mkdir(path.dirname(target), { recursive: true })
   const temp = path.join(
@@ -895,10 +929,7 @@ export class CoordinatorWorkerManager {
         `Worker ${record.workerId} is still finalizing its previous result. Wait for its task-notification before continuing.`
       )
     }
-    if (
-      record.status === "running" &&
-      options.continuationIntent !== "redirect_running_worker"
-    ) {
+    if (record.status === "running" && options.continuationIntent !== "redirect_running_worker") {
       throw new Error(
         `Worker ${record.workerId} is still running. Do not use continue_worker to check status or results; wait for its task-notification. If you need to redirect active work, call continue_worker with continuation_intent="redirect_running_worker" and a concrete replacement instruction.`
       )
@@ -1031,6 +1062,18 @@ export class CoordinatorWorkerManager {
     if (!records) return
     for (const record of records.values()) {
       this.setUpdateCallback(record, onUpdate, onUpdateKey)
+    }
+  }
+
+  unbindWorkerUpdates(parentThreadId: string, onUpdateKey?: string): void {
+    const key = onUpdateKey ?? DEFAULT_WORKER_UPDATE_CALLBACK_KEY
+    const records = this.getParentMap(parentThreadId)
+    if (!records) return
+    for (const record of records.values()) {
+      record.onUpdateCallbacks?.delete(key)
+      if (record.onUpdateCallbacks?.size === 0) {
+        record.onUpdateCallbacks = undefined
+      }
     }
   }
 
@@ -1178,6 +1221,35 @@ export class CoordinatorWorkerManager {
     )
     if (restored.length === 0) return
     this.notificationsByParent.set(normalized, [...existing, ...restored])
+  }
+
+  async restoreNotificationMessages(parentThreadId: string, notifications: string[]): Promise<void> {
+    if (notifications.length === 0) return
+    const normalized = normalizeThreadId(parentThreadId)
+    this.restoreNotifications(normalized, notifications)
+    const refs = notifications
+      .map((notification): NotificationRef | undefined => {
+        const workerId = this.extractNotificationWorkerId(notification)
+        if (!workerId) return undefined
+        return { workerId, turn: this.extractNotificationWorkerTurn(notification) }
+      })
+      .filter((ref): ref is NotificationRef => Boolean(ref))
+    const persistPromises: Promise<void>[] = []
+    for (const ref of refs) {
+      const normalizedWorkerId = normalizeWorkerId(ref.workerId)
+      const record = this.getWorker(normalized, normalizedWorkerId)
+      if (!record || !terminalStatus(record.status)) continue
+      if (ref.turn !== undefined && record.turns !== ref.turn) continue
+      record.notificationAcknowledged = false
+      record.notificationEnqueued = true
+      persistPromises.push(this.queuePersistWorkerState(record))
+    }
+    const results = await Promise.allSettled(persistPromises)
+    for (const result of results) {
+      if (result.status === "rejected") {
+        console.warn("[CoordinatorWorker] Failed to persist notification restore:", result.reason)
+      }
+    }
   }
 
   async acknowledgeNotifications(parentThreadId: string, workerIds: string[]): Promise<void> {
@@ -1716,9 +1788,12 @@ export class CoordinatorWorkerManager {
       finishedAt: optionalString(snapshot.finished_at),
       summary: optionalString(snapshot.summary),
       error: optionalString(snapshot.error),
-      reportPath: optionalString(snapshot.report_path),
-      resultPath: optionalString(snapshot.result_path),
-      transcriptPath: optionalString(snapshot.transcript_path),
+      reportPath: normalizeWorkerArtifactPath(snapshot.report_path, normalizedParentThreadId),
+      resultPath: normalizeWorkerArtifactPath(snapshot.result_path, normalizedParentThreadId),
+      transcriptPath: normalizeWorkerArtifactPath(
+        snapshot.transcript_path,
+        normalizedParentThreadId
+      ),
       selectedSkill: parseSelectedSkill(snapshot.selected_skill),
       tokenUsage: parseTokenUsage(snapshot.token_usage),
       toolCallCount: numericValue(snapshot.tool_call_count, 0),
@@ -1931,7 +2006,7 @@ export class CoordinatorWorkerManager {
           record.status = "completed"
           record.notificationAcknowledged = false
           record.summary = result.summary
-          record.reportPath = result.reportPath
+          record.reportPath = normalizeWorkerArtifactPath(result.reportPath, record.parentThreadId)
           record.rawText = truncateWorkerRawText(result.rawText)
           const currentRunUsage = mergeTokenUsage(record.currentRunTokenUsage, result.tokenUsage)
           record.tokenUsage = record.previousTokenUsage
@@ -2296,7 +2371,9 @@ export class CoordinatorWorkerManager {
         callback({
           worker: toSnapshot(record),
           notification,
-          suppressNotificationAutoRun: notification ? record.suppressNotificationAutoRun : undefined,
+          suppressNotificationAutoRun: notification
+            ? record.suppressNotificationAutoRun
+            : undefined,
           stream
         })
       } catch (error) {
