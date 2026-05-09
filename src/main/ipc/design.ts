@@ -426,6 +426,19 @@ interface DesignImportUrlParams {
   url: string
 }
 
+interface DesignContextFileSyncItem {
+  filename: string
+  sourcePath?: string
+  content?: string
+}
+
+interface DesignContextFilesSyncParams {
+  workspacePath?: string
+  designSessionId?: string
+  kind: "attachments" | "code"
+  files: DesignContextFileSyncItem[]
+}
+
 const DESIGN_ARTIFACTS_DIR = ".cmb-design"
 
 function makeSafeDesignId(tabId: string): string {
@@ -554,6 +567,93 @@ function prepareDesignArtifact(tabId: string, workspacePath?: string): { filePat
     return { filePath: resolved.filePath }
   } catch (err) {
     return { filePath: resolved.filePath, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+function sanitizeDesignContextName(name: string): string {
+  const trimmed = String(name || "").trim()
+  const normalized = trimmed.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
+  return (normalized || "file").slice(0, 120)
+}
+
+function resolveDesignContextDir(
+  workspacePath: string | undefined,
+  designSessionId: string | undefined,
+  kind: "attachments" | "code"
+): { dirPath?: string; error?: string } {
+  const workspace = typeof workspacePath === "string" && workspacePath.trim()
+    ? workspacePath.trim()
+    : app.getPath("userData")
+  const safeSessionId = makeSafeDesignId(designSessionId || "session")
+
+  try {
+    const workspaceRoot = path.resolve(workspace)
+    if (!fs.existsSync(workspaceRoot) || !fs.statSync(workspaceRoot).isDirectory()) {
+      return { error: `Design workspace is not available: ${workspaceRoot}` }
+    }
+
+    const contextDir = path.resolve(workspaceRoot, DESIGN_ARTIFACTS_DIR, safeSessionId, "context", kind)
+    const normalizedRoot = workspaceRoot.toLowerCase()
+    const normalizedContext = contextDir.toLowerCase()
+    if (normalizedContext !== normalizedRoot && !normalizedContext.startsWith(normalizedRoot + path.sep)) {
+      return { error: `Design context path escaped workspace: ${contextDir}` }
+    }
+    return { dirPath: contextDir }
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+function syncDesignContextFiles(params: DesignContextFilesSyncParams): {
+  success: boolean
+  dirPath?: string
+  files?: Array<{ sourcePath: string; targetPath: string; filename: string }>
+  error?: string
+} {
+  const resolvedDir = resolveDesignContextDir(params.workspacePath, params.designSessionId, params.kind)
+  if (!resolvedDir.dirPath) {
+    return { success: false, error: resolvedDir.error ?? "Failed to resolve design context directory" }
+  }
+
+  try {
+    fs.mkdirSync(resolvedDir.dirPath, { recursive: true })
+    const copied: Array<{ sourcePath: string; targetPath: string; filename: string }> = []
+    const usedNames = new Set<string>()
+
+    for (const item of params.files) {
+      const rawName = typeof item.filename === "string" ? item.filename.trim() : ""
+      const sourcePath = typeof item.sourcePath === "string" ? item.sourcePath.trim() : ""
+      const content = typeof item.content === "string" ? item.content : null
+      if (!rawName) continue
+
+      const parsed = path.parse(sanitizeDesignContextName(rawName))
+      const baseName = parsed.name || "file"
+      const ext = parsed.ext || path.extname(sourcePath || rawName)
+      let candidate = `${baseName}${ext}`
+      let suffix = 1
+      while (usedNames.has(candidate.toLowerCase())) {
+        candidate = `${baseName}_${suffix}${ext}`
+        suffix += 1
+      }
+      usedNames.add(candidate.toLowerCase())
+
+      const targetPath = path.join(resolvedDir.dirPath, candidate)
+      if (content !== null) {
+        fs.writeFileSync(targetPath, content, "utf-8")
+        copied.push({ sourcePath: sourcePath || candidate, targetPath, filename: candidate })
+        continue
+      }
+
+      if (!sourcePath) continue
+      const resolvedSource = path.resolve(sourcePath)
+      if (!fs.existsSync(resolvedSource) || !fs.statSync(resolvedSource).isFile()) continue
+      fs.copyFileSync(resolvedSource, targetPath)
+      copied.push({ sourcePath: resolvedSource, targetPath, filename: candidate })
+    }
+
+    return { success: true, dirPath: resolvedDir.dirPath, files: copied }
+  } catch (err) {
+    return { success: false, dirPath: resolvedDir.dirPath, error: err instanceof Error ? err.message : String(err) }
   }
 }
 
@@ -790,6 +890,24 @@ export function registerDesignHandlers(): void {
       } finally {
         clearTimeout(timeout)
       }
+    }
+  )
+
+  ipcMain.handle(
+    "design:sync-context-files",
+    async (_event, params: DesignContextFilesSyncParams): Promise<{
+      success: boolean
+      dirPath?: string
+      files?: Array<{ sourcePath: string; targetPath: string; filename: string }>
+      error?: string
+    }> => {
+      if (!params || !Array.isArray(params.files) || params.files.length === 0) {
+        return { success: false, error: "No files to sync" }
+      }
+      if (params.kind !== "attachments" && params.kind !== "code") {
+        return { success: false, error: `Unsupported context kind: ${String((params as { kind?: unknown }).kind)}` }
+      }
+      return syncDesignContextFiles(params)
     }
   )
 

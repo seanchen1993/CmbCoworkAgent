@@ -115,6 +115,13 @@ interface DesignSourceInfo {
   detail?: string
 }
 
+interface DesignContextSyncResult {
+  attachmentsDir?: string
+  attachmentFiles?: Array<{ sourcePath: string; targetPath: string; filename: string }>
+  codeDir?: string
+  codeFiles?: Array<{ sourcePath: string; targetPath: string; filename: string }>
+}
+
 function getPathName(filePath: string | null): string {
   if (!filePath) return ""
   return filePath.split(/[\\/]/).filter(Boolean).pop() ?? filePath
@@ -1253,6 +1260,52 @@ export function DesignView(): React.JSX.Element {
     return result.success ? (result.content ?? null) : null
   }, [])
 
+  const syncContextFilesToWorkspace = useCallback(async (options: {
+    codeContext: Array<{ filename: string; content: string }> | null
+    attachedFiles: FileAttachment[] | null
+  }): Promise<DesignContextSyncResult> => {
+    if (!workspacePath || !currentSessionIdRef.current) return {}
+
+    const result: DesignContextSyncResult = {}
+
+    if (options.attachedFiles && options.attachedFiles.length > 0) {
+      const synced = await window.api.design.syncContextFiles({
+        workspacePath,
+        designSessionId: currentSessionIdRef.current,
+        kind: "attachments",
+        files: options.attachedFiles.map((file) => ({
+          filename: file.filename,
+          sourcePath: file.filePath,
+        })),
+      })
+      if (!synced.success) {
+        throw new Error(synced.error || "同步附件到工作目录失败")
+      }
+      result.attachmentsDir = synced.dirPath
+      result.attachmentFiles = synced.files
+    }
+
+    if (options.codeContext && options.codeContext.length > 0) {
+      const synced = await window.api.design.syncContextFiles({
+        workspacePath,
+        designSessionId: currentSessionIdRef.current,
+        kind: "code",
+        files: options.codeContext.map((file) => ({
+          filename: getPathName(file.filename) || file.filename,
+          sourcePath: /[\\/]/.test(file.filename) ? file.filename : undefined,
+          content: file.content,
+        })),
+      })
+      if (!synced.success) {
+        throw new Error(synced.error || "同步代码上下文到工作目录失败")
+      }
+      result.codeDir = synced.dirPath
+      result.codeFiles = synced.files
+    }
+
+    return result
+  }, [workspacePath])
+
   const applyImportedDesign = useCallback((options: {
     sessionId: string
     html: string
@@ -2248,7 +2301,7 @@ ${commentLines}${variantNote}`
 
   // ── Send message ──────────────────────────────────────────
 
-  const handleSend = useCallback(() => {
+  const handleSend = useCallback(async () => {
     const prompt = (tabStates[activeTabId]?.inputValue ?? "").trim()
     const attachedImage = tabStates[activeTabId]?.attachedImage ?? null
     const selectedModelId = tabStates[activeTabId]?.selectedModelId ?? undefined
@@ -2267,6 +2320,14 @@ ${commentLines}${variantNote}`
     })
     if (!workspacePath && workspaceRequirementReason) {
       showToast(`${workspaceRequirementReason}，请先选择工作目录。`)
+      return
+    }
+
+    let syncedContext: DesignContextSyncResult = {}
+    try {
+      syncedContext = await syncContextFilesToWorkspace({ codeContext, attachedFiles })
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "同步上下文文件到工作目录失败")
       return
     }
 
@@ -2301,7 +2362,7 @@ ${commentLines}${variantNote}`
       `(TWEAK_DEFAULTS with /*EDITMODE-BEGIN*/…/*EDITMODE-END*/ markers, postMessage listener, applyTweaks with CSS variables). ` +
       `Apply the skill's design tokens and patterns inside that HTML file.`
     const skillContext = selectedSkill ? `\n\n---\n${designOutputConstraint}` : ""
-    const codeSuffix = codeContext && codeContext.length > 0
+    const inlineCodeSuffix = codeContext && codeContext.length > 0
       ? "\n\n---\n[Code context — " + codeContext.length + " file(s)]\n" +
         codeContext.map((f) => {
           const ext = f.filename.split(".").pop() ?? ""
@@ -2311,13 +2372,55 @@ ${commentLines}${variantNote}`
     const linkSuffix = designLink
       ? `\n\n---\n[Design reference URL: ${designLink}]\nPlease use this as a visual/layout reference for the design.`
       : ""
-    const filesSuffix = attachedFiles && attachedFiles.length > 0
+    const workspaceFilesSuffix = (() => {
+      const lines: string[] = []
+      if (syncedContext.attachmentsDir) {
+        lines.push(`[Workspace attachment directory]\n${syncedContext.attachmentsDir}`)
+        if (syncedContext.attachmentFiles && syncedContext.attachmentFiles.length > 0) {
+          lines.push(...syncedContext.attachmentFiles.map((file) => `- ${file.filename}: ${file.targetPath}`))
+        }
+      }
+      if (syncedContext.codeDir) {
+        lines.push(`[Workspace code-context directory]\n${syncedContext.codeDir}`)
+        if (syncedContext.codeFiles && syncedContext.codeFiles.length > 0) {
+          lines.push(...syncedContext.codeFiles.map((file) => `- ${file.filename}: ${file.targetPath}`))
+        }
+      }
+      if (lines.length === 0) return ""
+      return "\n\n---\n[Workspace-synced context files]\n" +
+        "These files were copied into the current design workspace before this request. " +
+        "If you need to inspect or search the uploaded files, use these workspace paths instead of assuming the originals are present.\n" +
+        lines.join("\n")
+    })()
+    const workspaceFileSummarySuffix = selectedSkill
+      ? (() => {
+          const lines: string[] = []
+          if (codeContext && codeContext.length > 0) {
+            lines.push(`[Code context summary — ${codeContext.length} file(s)]`)
+            lines.push(...codeContext.map((file) => `- ${getPathName(file.filename) || file.filename}`))
+          }
+          if (attachedFiles && attachedFiles.length > 0) {
+            lines.push(`[Attached file summary — ${attachedFiles.length} file(s)]`)
+            lines.push(...attachedFiles.map((file) => `- ${file.filename}${file.truncated ? " (truncated preview available in UI)" : ""}`))
+          }
+          if (lines.length === 0) return ""
+          return "\n\n---\n[Context file summary]\n" +
+            "These files are available in the synced workspace paths above. Prefer reading/searching those files from the workspace instead of relying on inline prompt copies.\n" +
+            lines.join("\n")
+        })()
+      : ""
+    const inlineFilesSuffix = attachedFiles && attachedFiles.length > 0
       ? "\n\n---\n[Attached files — " + attachedFiles.length + " file(s)]\n" +
         attachedFiles.map((f) =>
           `### ${f.filename}${f.truncated ? " (truncated)" : ""}\n${f.content}`
         ).join("\n\n")
       : ""
-    const contextSuffix = skillContext + codeSuffix + linkSuffix + filesSuffix
+    const contextSuffix = skillContext
+      + linkSuffix
+      + workspaceFilesSuffix
+      + workspaceFileSummarySuffix
+      + (selectedSkill ? "" : inlineCodeSuffix)
+      + (selectedSkill ? "" : inlineFilesSuffix)
     const skillReference = selectedSkill
       ? { name: selectedSkill.name, path: selectedSkill.path }
       : undefined
@@ -2406,7 +2509,7 @@ ${commentLines}${variantNote}`
         artifactPath ?? null
       )
     }
-  }, [activeTabId, tabStates, updateTs, startAskQuestions, startGeneration, startGenerationFromImage, workspacePath, showToast])
+  }, [activeTabId, tabStates, updateTs, startAskQuestions, startGeneration, startGenerationFromImage, workspacePath, showToast, syncContextFilesToWorkspace])
 
   // ── Continue (submit answers) ─────────────────────────────
 

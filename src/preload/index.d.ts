@@ -640,6 +640,17 @@ interface CustomAPI {
     importFromUrl: (
       url: string
     ) => Promise<{ success: boolean; html?: string; finalUrl?: string; title?: string; error?: string }>
+    syncContextFiles: (params: {
+      workspacePath?: string
+      designSessionId?: string
+      kind: "attachments" | "code"
+      files: Array<{ filename: string; sourcePath?: string; content?: string }>
+    }) => Promise<{
+      success: boolean
+      dirPath?: string
+      files?: Array<{ sourcePath: string; targetPath: string; filename: string }>
+      error?: string
+    }>
     readArtifact: (
       tabId: string,
       workspacePath?: string

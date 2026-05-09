@@ -1750,6 +1750,23 @@ const api = {
         title?: string
         error?: string
       }>,
+    syncContextFiles: (params: {
+      workspacePath?: string
+      designSessionId?: string
+      kind: "attachments" | "code"
+      files: Array<{ filename: string; sourcePath?: string; content?: string }>
+    }): Promise<{
+      success: boolean
+      dirPath?: string
+      files?: Array<{ sourcePath: string; targetPath: string; filename: string }>
+      error?: string
+    }> =>
+      ipcRenderer.invoke("design:sync-context-files", params) as Promise<{
+        success: boolean
+        dirPath?: string
+        files?: Array<{ sourcePath: string; targetPath: string; filename: string }>
+        error?: string
+      }>,
     readArtifact: (
       tabId: string,
       workspacePath?: string
