@@ -34,7 +34,7 @@ function StatCard({
     return (
       <button
         type="button"
-        className="flex items-center gap-3 rounded-xl border border-border bg-card px-4 py-3 text-left transition-colors hover:bg-muted/30 focus:outline-none focus:ring-2 focus:ring-ring"
+        className="flex cursor-pointer items-center gap-3 rounded-xl border border-border bg-card px-4 py-3 text-left transition-colors hover:border-primary/40 hover:bg-muted/30 focus:outline-none focus:ring-2 focus:ring-ring"
         onClick={onClick}
       >
         {content}
@@ -157,6 +157,7 @@ export function ProductivityPanel({
                 fill="#3b82f6"
                 radius={[4, 4, 0, 0]}
                 cursor={onCommitBucketClick ? "pointer" : undefined}
+                activeBar={onCommitBucketClick ? { fill: "#2563eb", radius: [4, 4, 0, 0] } : false}
                 onClick={(entry: unknown) => {
                   const bucket = getCommitBucketPayload(entry)
                   if (!bucket) return

@@ -1,5 +1,6 @@
 import { IpcMain, dialog, app, BrowserWindow } from "electron"
 import Store from "electron-store"
+import { randomUUID } from "crypto"
 import * as fs from "fs/promises"
 import { existsSync } from "fs"
 import * as path from "path"
@@ -14,8 +15,12 @@ import type {
 } from "../types"
 import { startWatching, stopWatching } from "../services/workspace-watcher"
 import { trackEvent } from "../services/event-reporter"
+import { captureStagedSnapshotsForCommit, measureForCommit } from "../services/adoption-tracker"
+import { scheduleMarkCodeAdoptionCommitsPushed } from "../services/code-adoption-push-updater"
 import { getTracesDir } from "../agent/trace/collector"
 import type { AgentTrace } from "../agent/trace/types"
+import { nowIsoLocal } from "../util/local-time"
+import { parseGitRemoteInfo } from "../utils/git-remote"
 
 const execFileAsync = promisify(execFile)
 
@@ -1571,7 +1576,12 @@ import {
   getUserInfo,
   DEFAULT_MAX_TOKENS,
   MIN_MAX_TOKENS,
-  MAX_MAX_TOKENS
+  MAX_MAX_TOKENS,
+  DEFAULT_MAX_OUTPUT_TOKENS,
+  MIN_MAX_OUTPUT_TOKENS,
+  MAX_MAX_OUTPUT_TOKENS,
+  DEFAULT_TEMPERATURE,
+  MAX_TEMPERATURE
 } from "../storage"
 import type { CustomModelConfig } from "../storage"
 
@@ -1676,7 +1686,12 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     return {
       defaultMaxTokens: DEFAULT_MAX_TOKENS,
       minMaxTokens: MIN_MAX_TOKENS,
-      maxMaxTokens: MAX_MAX_TOKENS
+      maxMaxTokens: MAX_MAX_TOKENS,
+      defaultMaxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
+      minMaxOutputTokens: MIN_MAX_OUTPUT_TOKENS,
+      maxMaxOutputTokens: MAX_MAX_OUTPUT_TOKENS,
+      defaultTemperature: DEFAULT_TEMPERATURE,
+      maxTemperature: MAX_TEMPERATURE
     }
   })
 
@@ -1685,11 +1700,20 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     "models:testConnection",
     async (
       _event,
-      params: { id?: string; baseUrl?: string; model?: string; apiKey?: string }
+      params: {
+        id?: string
+        baseUrl?: string
+        model?: string
+        apiKey?: string
+        maxOutputTokens?: number
+        temperature?: number
+      }
     ): Promise<{ success: boolean; error?: string; latencyMs?: number }> => {
       let baseUrl: string
       let model: string
       let apiKey: string
+      let maxOutputTokens: number
+      let temperature: number
 
       if (params.id) {
         // Test an existing saved config — read API key from storage
@@ -1698,10 +1722,14 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         baseUrl = params.baseUrl || saved.baseUrl
         model = params.model || saved.model
         apiKey = params.apiKey || saved.apiKey || ""
+        maxOutputTokens = params.maxOutputTokens ?? saved.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
+        temperature = params.temperature ?? saved.temperature ?? DEFAULT_TEMPERATURE
       } else {
         baseUrl = params.baseUrl || ""
         model = params.model || ""
         apiKey = params.apiKey || ""
+        maxOutputTokens = params.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
+        temperature = params.temperature ?? DEFAULT_TEMPERATURE
       }
 
       if (!baseUrl) return { success: false, error: "接口地址不能为空" }
@@ -1736,7 +1764,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           body: JSON.stringify({
             model,
             messages: [{ role: "user", content: "Hi" }],
-            max_tokens: 1,
+            max_tokens: maxOutputTokens,
+            temperature,
             stream: false
           }),
           signal: controller.signal
@@ -2401,10 +2430,20 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
         logGitStep(threadId, "commit", `add 文件数：${changedFiles.length}`)
         await runGit(worktreePath, ["add", "--", ...changedFiles])
+        const adoptionSnapshots = captureStagedSnapshotsForCommit(worktreePath)
         logGitStep(threadId, "commit", `commit message: ${message}`)
         await runGit(worktreePath, ["commit", "-m", message])
+        let commitSha: string | undefined
+        try {
+          commitSha = (await runGit(worktreePath, ["rev-parse", "HEAD"], { silent: true })).trim() || undefined
+        } catch {
+          // best-effort: adoption can still be measured without the SHA
+        }
         // 提交后主动刷新 HEAD 短缓存，保证后续 push/telemetry 读取到最新提交。
         void getHeadCommitCached(worktreePath, { silent: true, forceRefresh: true }).catch(() => null)
+        if (adoptionSnapshots.length > 0) {
+          measureForCommit(adoptionSnapshots, commitSha)
+        }
         const { getThread, updateThread } = await import("../db")
         const thread = getThread(threadId)
         if (thread) {
@@ -2428,6 +2467,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           trackGitEventWithSkills("git.commit.created", threadId, {
             repoPath:     worktreePath,
             branch: branch || "",
+            commitSha: commitSha ?? "",
             filesChanged: commitStats.fileCount || changedFiles.length,
             insertions: commitStats.additions,
             deletions: commitStats.deletions,
@@ -2449,6 +2489,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       logGitStep(threadId, "push", "开始推送流程")
       let autoCommitted = false
       let autoCommitHead: string | null = null
+      let pushedCommits: Array<{ hash: string; message: string; date: string }> = []
       const steps: PushStepResult[] = []
       try {
         const context = await resolveThreadWorkspaceContext(threadId)
@@ -2490,6 +2531,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           try {
             logGitStep(threadId, "push", `自动提交 message: ${commitMessage}`)
             await runGit(worktreePath, ["add", "--", ...pendingChangedFiles])
+            const adoptionSnapshots = captureStagedSnapshotsForCommit(worktreePath)
             await runGit(worktreePath, ["commit", "-m", commitMessage])
             autoCommitted = true
             autoCommitHead = await getHeadCommitCached(worktreePath, {
@@ -2500,6 +2542,9 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
               // 极端情况下缓存刷新失败，回退到直接 rev-parse，保证流程鲁棒性。
               autoCommitHead = (await runGit(worktreePath, ["rev-parse", "HEAD"], { silent: true })).trim()
             }
+            if (adoptionSnapshots.length > 0) {
+              measureForCommit(adoptionSnapshots, autoCommitHead || undefined)
+            }
             steps.push({ step: "commit", status: "ok", detail: `自动提交成功：${commitMessage}` })
 
             // Operational telemetry (fire-and-forget, never blocks push flow)
@@ -2509,6 +2554,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
               trackGitEventWithSkills("git.commit.created", threadId, {
                 repoPath:     worktreePath,
                 branch,
+                commitSha: autoCommitHead || "",
                 filesChanged: commitStats.fileCount || pendingChangedFiles.length,
                 insertions: commitStats.additions,
                 deletions: commitStats.deletions,
@@ -2558,6 +2604,14 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           }
         }
 
+        const pushabilityBeforePush = await getPushabilitySnapshot(
+          worktreePath,
+          branch,
+          context.worktreeBaseCommit,
+          { silent: true }
+        )
+        pushedCommits = pushabilityBeforePush.pendingCommits
+
         // Step 2: Push
         try {
           logGitStep(threadId, "push", `执行 push origin ${branch}`)
@@ -2599,14 +2653,39 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
         // Operational telemetry (fire-and-forget, never blocks return)
         {
+          const pushOperationId = randomUUID()
+          const pushedAt = nowIsoLocal()
           let remoteUrl = ""
           try {
             remoteUrl = (await runGit(worktreePath, ["remote", "get-url", "origin"], { silent: true })).trim()
           } catch { /* best-effort */ }
+          const remoteInfo = parseGitRemoteInfo(remoteUrl)
+          const pushedCommitShas = pushedCommits.map((commit) => commit.hash)
+          scheduleMarkCodeAdoptionCommitsPushed({
+            commitShas: pushedCommitShas,
+            repoPath: worktreePath,
+            branch,
+            remoteUrl,
+            repositoryName: remoteInfo?.repositoryName ?? "",
+            repositoryFullName: remoteInfo?.repositoryFullName ?? "",
+            repositoryHost: remoteInfo?.repositoryHost ?? "",
+            repositoryWebUrl: remoteInfo?.repositoryWebUrl ?? "",
+            commitUrlTemplate: remoteInfo?.commitUrlTemplate ?? "",
+            pushedAt,
+            pushOperationId
+          })
           trackGitEventWithSkills("git.push.executed", threadId, {
             repoPath: worktreePath,
             branch,
-            remoteUrl
+            remoteUrl,
+            repositoryName: remoteInfo?.repositoryName ?? "",
+            repositoryFullName: remoteInfo?.repositoryFullName ?? "",
+            repositoryHost: remoteInfo?.repositoryHost ?? "",
+            repositoryWebUrl: remoteInfo?.repositoryWebUrl ?? "",
+            pushedCommitShas,
+            pushedCommitCount: pushedCommitShas.length,
+            pushedAt,
+            pushOperationId
           })
         }
 

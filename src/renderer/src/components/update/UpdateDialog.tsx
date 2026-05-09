@@ -68,11 +68,16 @@ export function UpdateDialog({
   useEffect(() => {
     if (startupChecked.current) return
     startupChecked.current = true
-    window.api.update.getStartupResult().then((r) => {
-      if (r.updatedTo) {
-        toast.success(`已成功更新到 v${r.updatedTo}`, { duration: 5000 })
-      }
-    }).catch(() => { /* ignore */ })
+    window.api.update
+      .getStartupResult()
+      .then((r) => {
+        if (r.updatedTo) {
+          toast.success(`已成功更新到 v${r.updatedTo}`, { duration: 5000 })
+        }
+      })
+      .catch(() => {
+        /* ignore */
+      })
   }, [])
 
   // Listen for main process push events
@@ -80,29 +85,34 @@ export function UpdateDialog({
     const api = window.api.update
 
     // On mount, pull current status in case update was detected before renderer loaded
-    api.getStatus().then((s) => {
-      if (s.status === "available" && s.update) {
-        setUpdateInfo(s.update)
-        setStage("available")
-        onOpenChange(true)
-      } else if (s.status === "downloading" && s.update) {
-        // Background download already in progress — only show if dialog is manually opened
-        setUpdateInfo(s.update)
-        setProgress(s.progress)
-        setStage("downloading")
-      } else if (s.status === "downloaded" && s.update) {
-        setUpdateInfo(s.update)
-        setProgress(null)
-        setStage("downloaded")
-        onOpenChange(true)
-      } else if (s.status === "error" && s.update) {
-        setUpdateInfo(s.update)
-        setProgress(null)
-        setErrorMsg(s.errorMessage ?? "更新失败")
-        setStage("error")
-        onOpenChange(true)
-      }
-    }).catch(() => { /* ignore */ })
+    api
+      .getStatus()
+      .then((s) => {
+        if (s.status === "available" && s.update) {
+          setUpdateInfo(s.update)
+          setStage("available")
+          onOpenChange(true)
+        } else if (s.status === "downloading" && s.update) {
+          // Background download already in progress — only show if dialog is manually opened
+          setUpdateInfo(s.update)
+          setProgress(s.progress)
+          setStage("downloading")
+        } else if (s.status === "downloaded" && s.update) {
+          setUpdateInfo(s.update)
+          setProgress(null)
+          setStage("downloaded")
+          onOpenChange(true)
+        } else if (s.status === "error" && s.update) {
+          setUpdateInfo(s.update)
+          setProgress(null)
+          setErrorMsg(s.errorMessage ?? "更新失败")
+          setStage("error")
+          onOpenChange(true)
+        }
+      })
+      .catch(() => {
+        /* ignore */
+      })
 
     const removeAvailable = api.onAvailable((info) => {
       setUpdateInfo(info)
@@ -121,13 +131,17 @@ export function UpdateDialog({
     })
 
     const removeDownloaded = api.onDownloaded((info) => {
-      setUpdateInfo((prev) => prev ? { ...prev, ...info } : {
-        version: info.version,
-        updateType: info.updateType,
-        releaseNotes: info.releaseNotes ?? "",
-        size: info.size ?? 0,
-        mandatory: info.mandatory ?? false
-      })
+      setUpdateInfo((prev) =>
+        prev
+          ? { ...prev, ...info }
+          : {
+              version: info.version,
+              updateType: info.updateType,
+              releaseNotes: info.releaseNotes ?? "",
+              size: info.size ?? 0,
+              mandatory: info.mandatory ?? false
+            }
+      )
       setProgress(null)
       setStage("downloaded")
       onOpenChange(true) // always pop up when download completes
@@ -163,7 +177,8 @@ export function UpdateDialog({
         })
         // Restore the correct stage based on what main process reports
         const status = (result as { currentStatus?: string }).currentStatus
-        const currentProgress = (result as { currentProgress?: DownloadProgress | null }).currentProgress
+        const currentProgress = (result as { currentProgress?: DownloadProgress | null })
+          .currentProgress
         const currentError = (result as { currentError?: string | null }).currentError
         if (status === "downloading") {
           setProgress(currentProgress ?? null)
@@ -248,18 +263,20 @@ export function UpdateDialog({
   const isMandatory = updateInfo?.mandatory ?? false
 
   return (
-    <Dialog open={open} onOpenChange={(v) => {
-      if (!v && stage === "installing") return
-      if (!v && stage === "downloading") {
-        handleHideDownloading()
-        return
-      }
-      if (!v && isMandatory && stage !== "downloaded") return
-      if (!v) handleDismiss()
-      else onOpenChange(v)
-    }}>
+    <Dialog
+      open={open}
+      onOpenChange={(v) => {
+        if (!v && stage === "installing") return
+        if (!v && stage === "downloading") {
+          handleHideDownloading()
+          return
+        }
+        if (!v && isMandatory && stage !== "downloaded") return
+        if (!v) handleDismiss()
+        else onOpenChange(v)
+      }}
+    >
       <DialogContent className="sm:max-w-md">
-
         {/* idle / checking */}
         {stage === "idle" && (
           <>
@@ -321,12 +338,8 @@ export function UpdateDialog({
         {stage === "downloading" && (
           <>
             <DialogHeader>
-              <DialogTitle>
-                {getProgressTitle(progress, updateInfo?.version)}
-              </DialogTitle>
-              <DialogDescription>
-                {getProgressDescription(progress)}
-              </DialogDescription>
+              <DialogTitle>{getProgressTitle(progress, updateInfo?.version)}</DialogTitle>
+              <DialogDescription>{getProgressDescription(progress)}</DialogDescription>
             </DialogHeader>
 
             <div className="space-y-3">
@@ -340,7 +353,7 @@ export function UpdateDialog({
                 <span>
                   {progress?.phase === "downloading" && progress
                     ? `${formatSize(progress.transferred)} / ${formatSize(progress.total)}`
-                    : progress?.message ?? "准备下载..."}
+                    : (progress?.message ?? "准备下载...")}
                 </span>
                 <span>
                   {progress
@@ -387,9 +400,7 @@ export function UpdateDialog({
           <>
             <DialogHeader>
               <DialogTitle>正在安装更新</DialogTitle>
-              <DialogDescription>
-                请稍候，应用即将自动重启...
-              </DialogDescription>
+              <DialogDescription>请稍候，应用即将自动重启...</DialogDescription>
             </DialogHeader>
             <div className="flex items-center justify-center py-4">
               <div className="h-6 w-6 animate-spin rounded-full border-2 border-primary border-t-transparent" />
@@ -405,14 +416,19 @@ export function UpdateDialog({
               <DialogDescription>{errorMsg || "未知错误"}</DialogDescription>
             </DialogHeader>
             <DialogFooter>
-              <Button variant="outline" onClick={() => { setStage("idle"); onOpenChange(false) }}>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setStage("idle")
+                  onOpenChange(false)
+                }}
+              >
                 关闭
               </Button>
               <Button onClick={handleRetry}>重试</Button>
             </DialogFooter>
           </>
         )}
-
       </DialogContent>
     </Dialog>
   )

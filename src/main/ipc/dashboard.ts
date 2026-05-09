@@ -11,6 +11,14 @@ import { getUserInfo } from "../storage"
 import * as fs from "fs"
 import { buildTraceTree } from "../agent/trace/tree-builder"
 import type { AgentTrace, TraceNode } from "../agent/trace/types"
+import { getSkillIdentifierLookupTerms } from "../utils/skill-identifiers"
+import {
+  effectiveGeneratedLinesSumAgg,
+  makeDashboardCodeStats,
+  normalizeCodeStatsFromAggs,
+  normalizeSkillCodeAdoptionBuckets,
+  type DashboardCodeStats
+} from "./dashboard-code-stats"
 
 // ─────────────────────────────────────────────────────────
 // ES Configuration (from .env)
@@ -133,6 +141,13 @@ interface DashboardCommitDetail {
   orgName?: string
   userIp?: string
   repoPath?: string
+  repositoryName?: string
+  repositoryFullName?: string
+  repositoryWebUrl?: string
+  commitSha?: string
+  commitUrl?: string
+  pushed: boolean
+  pushedAt?: string
   branch?: string
   filesChanged: number
   insertions: number
@@ -141,6 +156,11 @@ interface DashboardCommitDetail {
   threadId?: string
   usedSkills: string[]
   skillCount: number
+}
+
+interface DashboardSkillDetail {
+  stats: DashboardCodeStats
+  traces: DashboardTraceDetail[]
 }
 
 interface EsSearchHit {
@@ -157,6 +177,12 @@ interface EsSearchResponse {
 
 interface UserStatsOptions {
   upperOrgLv1?: string | null
+}
+
+interface CommitDetailsOptions {
+  page?: number
+  pageSize?: number
+  pushedOnly?: boolean
 }
 
 const DISLIKE_TYPE_OPTIONS = [
@@ -264,6 +290,24 @@ function clampLimit(limit: number | undefined, fallback: number, max: number): n
   return Math.max(1, Math.min(max, Math.floor(Number(limit))))
 }
 
+function normalizeCommitDetailsOptions(value?: number | CommitDetailsOptions): Required<CommitDetailsOptions> {
+  if (typeof value === "number") {
+    return {
+      page: 1,
+      pageSize: clampLimit(value, 20, 500),
+      pushedOnly: false
+    }
+  }
+
+  const page = clampLimit(value?.page, 1, 10_000)
+  const pageSize = clampLimit(value?.pageSize, 20, 100)
+  return {
+    page,
+    pageSize,
+    pushedOnly: value?.pushedOnly === true
+  }
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {}
   return value as Record<string, unknown>
@@ -290,6 +334,15 @@ function asNumber(value: unknown, fallback = 0): number {
 function asStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return []
   return value.filter((item): item is string => typeof item === "string")
+}
+
+function codeAdoptPushedAggs(): Record<string, unknown> {
+  return {
+    pushed_measured_generated_lines: { sum: { field: "properties.generatedLineCount" } },
+    pushed_effective_generated_lines: effectiveGeneratedLinesSumAgg(),
+    pushed_adopted_lines: { sum: { field: "properties.adoptedLineCount" } },
+    pushed_commit_count: { cardinality: { field: "properties.commitSha" } }
+  }
 }
 
 function summarizeTraceTokenUsage(modelCalls: AgentTrace["modelCalls"]): {
@@ -441,6 +494,13 @@ function normalizeCommitDetail(hit: EsSearchHit): DashboardCommitDetail {
     orgName: asOptionalString(source.orgName),
     userIp: asOptionalString(source.userIp),
     repoPath: asOptionalString(properties.repoPath),
+    repositoryName: asOptionalString(properties.repositoryName),
+    repositoryFullName: asOptionalString(properties.repositoryFullName),
+    repositoryWebUrl: asOptionalString(properties.repositoryWebUrl),
+    commitSha: asOptionalString(properties.commitSha),
+    commitUrl: asOptionalString(properties.commitUrl),
+    pushed: properties.pushed === true,
+    pushedAt: asOptionalString(properties.pushedAt),
     branch: asOptionalString(properties.branch),
     filesChanged: asNumber(properties.filesChanged),
     insertions: asNumber(properties.insertions),
@@ -458,7 +518,21 @@ function normalizeCommitDetail(hit: EsSearchHit): DashboardCommitDetail {
 
 async function fetchOverview(range: TimeRange, granularity: Granularity): Promise<unknown> {
   const interval = getCalendarInterval(granularity, range.from, range.to)
-  const body = {
+  const rankingTopSize = 20
+  const rankingSearchSize = 1000
+  const filteredToolExcludes = [
+    // Claude Code 内置文件 / 系统工具
+    "execute", "read_file", "write_file", "glob", "grep",
+    "list_directory", "task", "task_output",
+    "ls", "edit_file",
+    // 工具搜索 / 元工具
+    "search_tool", "inspect_tool", "invoke_deferred_tool",
+    // 内置代码执行辅助
+    "code_exec", "prepare_save_code_exec_tool", "save_code_exec_tool",
+    // 内置任务管理
+    "write_todos"
+  ]
+  const traceBody = {
     size: 0,
     query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
     aggs: {
@@ -471,27 +545,27 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
       total_tools:        { cardinality: { field: "toolNames" } },
       total_skill_calls:  { value_count: { field: "usedSkills" } },
       total_tool_calls:   { value_count: { field: "toolNames" } },
-      by_skill: { terms: { field: "usedSkills",  size: 20 } },
+      by_skill: { terms: { field: "usedSkills", size: rankingTopSize } },
+      by_skill_all: { terms: { field: "usedSkills", size: rankingSearchSize } },
       by_tool: {
         terms: {
           field: "toolNames",
-          size: 20,
-          exclude: [
-            // Claude Code 内置文件 / 系统工具
-            "execute", "read_file", "write_file", "glob", "grep",
-            "list_directory", "task", "task_output",
-            "ls", "edit_file",
-            // 工具搜索 / 元工具
-            "search_tool", "inspect_tool", "invoke_deferred_tool",
-            // 内置代码执行辅助
-            "code_exec", "prepare_save_code_exec_tool", "save_code_exec_tool",
-            // 内置任务管理
-            "write_todos"
-          ]
+          size: rankingTopSize,
+          exclude: filteredToolExcludes
+        }
+      },
+      by_tool_filtered_all: {
+        terms: {
+          field: "toolNames",
+          size: rankingSearchSize,
+          exclude: filteredToolExcludes
         }
       },
       by_tool_all: {
-        terms: { field: "toolNames", size: 20 }
+        terms: { field: "toolNames", size: rankingTopSize }
+      },
+      by_tool_all_full: {
+        terms: { field: "toolNames", size: rankingSearchSize }
       },
       trend: {
         date_histogram: { field: "startedAt", calendar_interval: interval, time_zone: "Asia/Shanghai" },
@@ -501,7 +575,123 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
       }
     }
   }
-  return esQuery(getEsIndex("trace"), body)
+  const codeGenFilters: Record<string, unknown>[] = [
+    { term: { eventName: "code_gen" } },
+    timeRangeFilter("eventTime", range)
+  ]
+  const codeAdoptFilters: Record<string, unknown>[] = [
+    { term: { eventName: "code_adopt" } },
+    { exists: { field: "properties.adoptedLineCount" } },
+    { exists: { field: "properties.generatedLineCount" } },
+    { exists: { field: "properties.effectiveGeneratedLineCount" } },
+    timeRangeFilter("properties.generatedAt", range)
+  ]
+  const codeAdoptPushedFilters: Record<string, unknown>[] = [
+    ...codeAdoptFilters,
+    { term: { "properties.pushed": true } }
+  ]
+  const codeBody = {
+    size: 0,
+    query: {
+      bool: {
+        should: [
+          { bool: { filter: codeGenFilters } },
+          { bool: { filter: codeAdoptFilters } }
+        ],
+        minimum_should_match: 1
+      }
+    },
+    aggs: {
+      code_gen: {
+        filter: { bool: { filter: codeGenFilters } },
+        aggs: {
+          generated_lines: { sum: { field: "properties.lineCount" } },
+          deleted_lines: { sum: { field: "properties.deletedLineCount" } }
+        }
+      },
+      code_adopt_measured: {
+        filter: { bool: { filter: codeAdoptFilters } },
+        aggs: {
+          measured_generated_lines: { sum: { field: "properties.generatedLineCount" } },
+          effective_generated_lines: effectiveGeneratedLinesSumAgg(),
+          adopted_lines: { sum: { field: "properties.adoptedLineCount" } }
+        }
+      },
+      code_adopt_pushed: {
+        filter: { bool: { filter: codeAdoptPushedFilters } },
+        aggs: codeAdoptPushedAggs()
+      },
+      by_skill_adoption: {
+        terms: { field: "properties.usedSkills", size: rankingSearchSize },
+        aggs: {
+          code_gen: {
+            filter: { bool: { filter: codeGenFilters } },
+            aggs: {
+              generated_lines: { sum: { field: "properties.lineCount" } },
+              deleted_lines: { sum: { field: "properties.deletedLineCount" } }
+            }
+          },
+          code_adopt_measured: {
+            filter: { bool: { filter: codeAdoptFilters } },
+            aggs: {
+              measured_generated_lines: { sum: { field: "properties.generatedLineCount" } },
+              effective_generated_lines: effectiveGeneratedLinesSumAgg(),
+              adopted_lines: { sum: { field: "properties.adoptedLineCount" } },
+              commit_count: { cardinality: { field: "properties.commitSha" } }
+            }
+          },
+          code_adopt_pushed: {
+            filter: { bool: { filter: codeAdoptPushedFilters } },
+            aggs: codeAdoptPushedAggs()
+          }
+        }
+      }
+    }
+  }
+
+  const [traceRaw, codeRaw] = await Promise.all([
+    esQuery(getEsIndex("trace"), traceBody),
+    esQuery(getEsIndex("event"), codeBody)
+  ])
+  const codeStats = normalizeCodeStatsFromAggs(codeRaw)
+  const skillCodeAdoption = normalizeSkillCodeAdoptionBuckets(codeRaw)
+  const traceRecord = asRecord(traceRaw)
+  return {
+    ...traceRecord,
+    aggregations: {
+      ...asRecord(traceRecord.aggregations),
+      code_generated_lines: { value: codeStats.generatedLines },
+      code_deleted_lines: { value: codeStats.deletedLines },
+      code_effective_generated_lines: { value: codeStats.effectiveGeneratedLines },
+      code_measured_generated_lines: { value: codeStats.measuredGeneratedLines },
+      code_unmeasured_generated_lines: { value: codeStats.unmeasuredGeneratedLines },
+      code_inclusive_effective_generated_lines: { value: codeStats.inclusiveEffectiveGeneratedLines },
+      code_adopted_lines: { value: codeStats.adoptedLines },
+      code_pushed_measured_generated_lines: { value: codeStats.pushedMeasuredGeneratedLines },
+      code_pushed_effective_generated_lines: { value: codeStats.pushedEffectiveGeneratedLines },
+      code_pushed_adopted_lines: { value: codeStats.pushedAdoptedLines },
+      code_pushed_commit_count: { value: codeStats.pushedCommitCount },
+      code_by_skill_adoption: {
+        buckets: skillCodeAdoption.map((item) => ({
+          key: item.skill,
+          generated_lines: { value: item.generatedLines },
+          measured_generated_lines: { value: item.measuredGeneratedLines },
+          effective_generated_lines: { value: item.effectiveGeneratedLines },
+          unmeasured_generated_lines: { value: item.unmeasuredGeneratedLines },
+          inclusive_effective_generated_lines: { value: item.inclusiveEffectiveGeneratedLines },
+          adopted_lines: { value: item.adoptedLines },
+          measured_adoption_rate: { value: item.measuredAdoptionRate },
+          inclusive_adoption_rate: { value: item.inclusiveAdoptionRate },
+          commit_count: { value: item.commitCount },
+          pushed_measured_generated_lines: { value: item.pushedMeasuredGeneratedLines },
+          pushed_effective_generated_lines: { value: item.pushedEffectiveGeneratedLines },
+          pushed_adopted_lines: { value: item.pushedAdoptedLines },
+          pushed_adoption_rate: { value: item.pushedAdoptionRate },
+          pushed_commit_count: { value: item.pushedCommitCount }
+        }))
+      }
+    }
+  }
 }
 
 async function fetchModelStats(range: TimeRange, granularity: Granularity): Promise<unknown> {
@@ -547,6 +737,30 @@ function buildNonEmptyOrgLevelFilter(field: "upperOrgLv0" | "upperOrgLv1"): Reco
   }
 }
 
+function buildOrgDistributionAgg(
+  selectedUpperOrgLv1: string | null,
+  metric: "pv" | "uv"
+): Record<string, unknown> {
+  const field = selectedUpperOrgLv1 !== null ? "upperOrgLv0" : "upperOrgLv1"
+  const terms: Record<string, unknown> = { field, size: 30, missing: "" }
+  const aggs = metric === "uv" ? { unique_users: { cardinality: { field: "sapId" } } } : undefined
+
+  if (metric === "uv") {
+    terms.order = { unique_users: "desc" }
+  }
+
+  const items = aggs ? { terms, aggs } : { terms }
+  const filters = [buildNonEmptyOrgLevelFilter(field)]
+  if (selectedUpperOrgLv1 !== null) {
+    filters.push(buildUpperOrgLv1Filter(selectedUpperOrgLv1))
+  }
+
+  return {
+    filter: { bool: { filter: filters } },
+    aggs: { items }
+  }
+}
+
 async function fetchUserStats(range: TimeRange, granularity: Granularity, opts?: UserStatsOptions): Promise<unknown> {
   void granularity
   const selectedUpperOrgLv1 = normalizeUpperOrgLv1Option(opts?.upperOrgLv1)
@@ -573,19 +787,9 @@ async function fetchUserStats(range: TimeRange, granularity: Granularity, opts?:
           }
         }
       },
-      by_org: selectedUpperOrgLv1 !== null
-        ? {
-            filter: buildNonEmptyOrgLevelFilter("upperOrgLv0"),
-            aggs: {
-              items: { terms: { field: "upperOrgLv0", size: 30 } }
-            }
-          }
-        : {
-            filter: buildNonEmptyOrgLevelFilter("upperOrgLv1"),
-            aggs: {
-              items: { terms: { field: "upperOrgLv1", size: 30 } }
-            }
-          },
+      by_org: buildOrgDistributionAgg(selectedUpperOrgLv1, "pv"),
+      by_org_pv: buildOrgDistributionAgg(selectedUpperOrgLv1, "pv"),
+      by_org_uv: buildOrgDistributionAgg(selectedUpperOrgLv1, "uv"),
       by_version: {
         terms: { field: "appVersion", size: 20 },
         aggs: { unique_users: { cardinality: { field: "sapId" } } }
@@ -898,6 +1102,7 @@ async function fetchSkillRecentTraces(
   limit = 10
 ): Promise<DashboardTraceDetail[]> {
   const size = clampLimit(limit, 10, 10)
+  const skillTerms = getSkillIdentifierLookupTerms(skill)
   const body = {
     size,
     sort: [{ startedAt: { order: "desc" } }],
@@ -905,7 +1110,7 @@ async function fetchSkillRecentTraces(
       bool: {
         filter: [
           timeRangeFilter("startedAt", range),
-          { term: { usedSkills: skill } }
+          { terms: { usedSkills: skillTerms } }
         ]
       }
     },
@@ -933,21 +1138,90 @@ async function fetchSkillRecentTraces(
   return (raw.hits?.hits ?? []).map(normalizeTraceDetail)
 }
 
+async function fetchSkillCodeStats(skill: string, range: TimeRange): Promise<DashboardCodeStats> {
+  const skillTerms = getSkillIdentifierLookupTerms(skill)
+  const codeGenFilters: Record<string, unknown>[] = [
+    { term: { eventName: "code_gen" } },
+    timeRangeFilter("eventTime", range),
+    { terms: { "properties.usedSkills": skillTerms } }
+  ]
+  const codeAdoptFilters: Record<string, unknown>[] = [
+    { term: { eventName: "code_adopt" } },
+    { exists: { field: "properties.adoptedLineCount" } },
+    { exists: { field: "properties.generatedLineCount" } },
+    { exists: { field: "properties.effectiveGeneratedLineCount" } },
+    timeRangeFilter("properties.generatedAt", range),
+    { terms: { "properties.usedSkills": skillTerms } }
+  ]
+  const codeAdoptPushedFilters: Record<string, unknown>[] = [
+    ...codeAdoptFilters,
+    { term: { "properties.pushed": true } }
+  ]
+  const body = {
+    size: 0,
+    query: {
+      bool: {
+        should: [
+          { bool: { filter: codeGenFilters } },
+          { bool: { filter: codeAdoptFilters } }
+        ],
+        minimum_should_match: 1
+      }
+    },
+    aggs: {
+      code_gen: {
+        filter: { bool: { filter: codeGenFilters } },
+        aggs: {
+          generated_lines: { sum: { field: "properties.lineCount" } },
+          deleted_lines: { sum: { field: "properties.deletedLineCount" } }
+        }
+      },
+      code_adopt_measured: {
+        filter: { bool: { filter: codeAdoptFilters } },
+        aggs: {
+          measured_generated_lines: { sum: { field: "properties.generatedLineCount" } },
+          effective_generated_lines: effectiveGeneratedLinesSumAgg(),
+          adopted_lines: { sum: { field: "properties.adoptedLineCount" } }
+        }
+      },
+      code_adopt_pushed: {
+        filter: { bool: { filter: codeAdoptPushedFilters } },
+        aggs: codeAdoptPushedAggs()
+      }
+    }
+  }
+  const raw = await esQuery(getEsIndex("event"), body)
+  return normalizeCodeStatsFromAggs(raw)
+}
+
+async function fetchSkillDetail(skill: string, range: TimeRange, limit = 3): Promise<DashboardSkillDetail> {
+  const [stats, traces] = await Promise.all([
+    fetchSkillCodeStats(skill, range),
+    fetchSkillRecentTraces(skill, range, limit)
+  ])
+  return { stats, traces }
+}
+
 async function fetchCommitDetails(
   range: TimeRange,
-  limit = 50
-): Promise<{ total: number; items: DashboardCommitDetail[] }> {
-  const size = clampLimit(limit, 50, 500)
+  options?: number | CommitDetailsOptions
+): Promise<{ total: number; page: number; pageSize: number; pushedOnly: boolean; items: DashboardCommitDetail[] }> {
+  const { page, pageSize, pushedOnly } = normalizeCommitDetailsOptions(options)
+  const filters: Record<string, unknown>[] = [
+    timeRangeFilter("eventTime", range),
+    { term: { eventName: "git.commit.created" } }
+  ]
+  if (pushedOnly) {
+    filters.push({ term: { "properties.pushed": true } })
+  }
   const body = {
     track_total_hits: true,
-    size,
+    from: (page - 1) * pageSize,
+    size: pageSize,
     sort: [{ eventTime: { order: "desc" } }],
     query: {
       bool: {
-        filter: [
-          timeRangeFilter("eventTime", range),
-          { term: { eventName: "git.commit.created" } }
-        ]
+        filter: filters
       }
     },
     _source: {
@@ -961,6 +1235,13 @@ async function fetchCommitDetails(
         "ystId",
         "orgName",
         "properties.repoPath",
+        "properties.repositoryName",
+        "properties.repositoryFullName",
+        "properties.repositoryWebUrl",
+        "properties.commitSha",
+        "properties.commitUrl",
+        "properties.pushed",
+        "properties.pushedAt",
         "properties.branch",
         "properties.filesChanged",
         "properties.insertions",
@@ -976,6 +1257,9 @@ async function fetchCommitDetails(
   const hits = raw.hits?.hits ?? []
   return {
     total: getTotalHits(raw, hits.length),
+    page,
+    pageSize,
+    pushedOnly,
     items: hits.map(normalizeCommitDetail)
   }
 }
@@ -1035,6 +1319,17 @@ function makeMockOverview(range: TimeRange): unknown {
       total_tools: { value: 27 },
       total_skill_calls: { value: 2022 },
       total_tool_calls: { value: 6538 },
+      code_generated_lines: { value: 4820 },
+      code_deleted_lines: { value: 930 },
+      code_measured_generated_lines: { value: 3900 },
+      code_effective_generated_lines: { value: 3720 },
+      code_unmeasured_generated_lines: { value: 920 },
+      code_inclusive_effective_generated_lines: { value: 4640 },
+      code_adopted_lines: { value: 2860 },
+      code_pushed_measured_generated_lines: { value: 2500 },
+      code_pushed_effective_generated_lines: { value: 2360 },
+      code_pushed_adopted_lines: { value: 1880 },
+      code_pushed_commit_count: { value: 21 },
       by_skill: {
         buckets: [
           { key: "代码审查",     doc_count: 312 },
@@ -1057,6 +1352,107 @@ function makeMockOverview(range: TimeRange): unknown {
           { key: "埋点分析",     doc_count: 18  },
           { key: "前端走查",     doc_count: 13  },
           { key: "脚本生成",     doc_count: 9   }
+        ]
+      },
+      by_skill_all: {
+        buckets: [
+          { key: "代码审查",     doc_count: 312 },
+          { key: "需求分析",     doc_count: 278 },
+          { key: "文档生成",     doc_count: 245 },
+          { key: "单元测试",     doc_count: 198 },
+          { key: "SQL优化",      doc_count: 167 },
+          { key: "接口设计",     doc_count: 143 },
+          { key: "日志分析",     doc_count: 121 },
+          { key: "数据清洗",     doc_count: 98  },
+          { key: "性能诊断",     doc_count: 87  },
+          { key: "安全扫描",     doc_count: 62  },
+          { key: "代码重构",     doc_count: 54  },
+          { key: "异常排查",     doc_count: 49  },
+          { key: "接口联调",     doc_count: 44  },
+          { key: "依赖升级",     doc_count: 38  },
+          { key: "配置检查",     doc_count: 33  },
+          { key: "发布诊断",     doc_count: 29  },
+          { key: "性能优化",     doc_count: 24  },
+          { key: "埋点分析",     doc_count: 18  },
+          { key: "前端走查",     doc_count: 13  },
+          { key: "脚本生成",     doc_count: 9   },
+          { key: "冒烟测试",     doc_count: 8   },
+          { key: "链路排查",     doc_count: 7   },
+          { key: "Schema 校验",  doc_count: 6   },
+          { key: "接口 Mock",    doc_count: 5   },
+          { key: "灰度检查",     doc_count: 4   }
+        ]
+      },
+      code_by_skill_adoption: {
+        buckets: [
+          {
+            key: "代码审查",
+            generated_lines: { value: 850 },
+            measured_generated_lines: { value: 760 },
+            effective_generated_lines: { value: 700 },
+            unmeasured_generated_lines: { value: 90 },
+            inclusive_effective_generated_lines: { value: 790 },
+            adopted_lines: { value: 511 },
+            measured_adoption_rate: { value: 511 / 700 },
+            inclusive_adoption_rate: { value: 511 / 790 },
+            pushed_measured_generated_lines: { value: 520 },
+            pushed_effective_generated_lines: { value: 490 },
+            pushed_adopted_lines: { value: 380 },
+            pushed_adoption_rate: { value: 380 / 490 },
+            pushed_commit_count: { value: 8 },
+            commit_count: { value: 18 }
+          },
+          {
+            key: "单元测试",
+            generated_lines: { value: 620 },
+            measured_generated_lines: { value: 620 },
+            effective_generated_lines: { value: 560 },
+            unmeasured_generated_lines: { value: 0 },
+            inclusive_effective_generated_lines: { value: 560 },
+            adopted_lines: { value: 470 },
+            measured_adoption_rate: { value: 470 / 560 },
+            inclusive_adoption_rate: { value: 470 / 560 },
+            pushed_measured_generated_lines: { value: 420 },
+            pushed_effective_generated_lines: { value: 380 },
+            pushed_adopted_lines: { value: 340 },
+            pushed_adoption_rate: { value: 340 / 380 },
+            pushed_commit_count: { value: 6 },
+            commit_count: { value: 12 }
+          },
+          {
+            key: "SQL优化",
+            generated_lines: { value: 460 },
+            measured_generated_lines: { value: 360 },
+            effective_generated_lines: { value: 330 },
+            unmeasured_generated_lines: { value: 100 },
+            inclusive_effective_generated_lines: { value: 430 },
+            adopted_lines: { value: 260 },
+            measured_adoption_rate: { value: 260 / 330 },
+            inclusive_adoption_rate: { value: 260 / 430 },
+            pushed_measured_generated_lines: { value: 200 },
+            pushed_effective_generated_lines: { value: 180 },
+            pushed_adopted_lines: { value: 140 },
+            pushed_adoption_rate: { value: 140 / 180 },
+            pushed_commit_count: { value: 3 },
+            commit_count: { value: 7 }
+          },
+          {
+            key: "接口设计",
+            generated_lines: { value: 380 },
+            measured_generated_lines: { value: 0 },
+            effective_generated_lines: { value: 0 },
+            unmeasured_generated_lines: { value: 380 },
+            inclusive_effective_generated_lines: { value: 380 },
+            adopted_lines: { value: 0 },
+            measured_adoption_rate: { value: null },
+            inclusive_adoption_rate: { value: 0 },
+            pushed_measured_generated_lines: { value: 0 },
+            pushed_effective_generated_lines: { value: 0 },
+            pushed_adopted_lines: { value: 0 },
+            pushed_adoption_rate: { value: null },
+            pushed_commit_count: { value: 0 },
+            commit_count: { value: 0 }
+          }
         ]
       },
       by_tool: {
@@ -1083,6 +1479,33 @@ function makeMockOverview(range: TimeRange): unknown {
           { key: "ticket_update",      doc_count: 12  }
         ]
       },
+      by_tool_filtered_all: {
+        buckets: [
+          { key: "git_workflow",       doc_count: 412 },
+          { key: "browser_playwright", doc_count: 356 },
+          { key: "manage_skill",       doc_count: 298 },
+          { key: "manage_scheduler",   doc_count: 241 },
+          { key: "web_search",         doc_count: 198 },
+          { key: "db_query",           doc_count: 163 },
+          { key: "create_pr",          doc_count: 134 },
+          { key: "run_tests",          doc_count: 112 },
+          { key: "search_code",        doc_count: 98  },
+          { key: "notify",             doc_count: 76  },
+          { key: "query_logs",         doc_count: 68  },
+          { key: "schema_check",       doc_count: 59  },
+          { key: "open_preview",       doc_count: 53  },
+          { key: "analyze_diff",       doc_count: 47  },
+          { key: "format_code",        doc_count: 42  },
+          { key: "lint_fix",           doc_count: 36  },
+          { key: "dependency_audit",   doc_count: 31  },
+          { key: "deploy_check",       doc_count: 26  },
+          { key: "trace_lookup",       doc_count: 19  },
+          { key: "ticket_update",      doc_count: 12  },
+          { key: "mcp_sqlQuery",       doc_count: 11  },
+          { key: "browser_visualDiff", doc_count: 9   },
+          { key: "workflow_template",  doc_count: 7   }
+        ]
+      },
       by_tool_all: {
         buckets: [
           { key: "read_file",          doc_count: 1823 },
@@ -1105,6 +1528,35 @@ function makeMockOverview(range: TimeRange): unknown {
           { key: "run_tests",          doc_count: 112  },
           { key: "search_code",        doc_count: 98   },
           { key: "code_exec",          doc_count: 92   }
+        ]
+      },
+      by_tool_all_full: {
+        buckets: [
+          { key: "read_file",                  doc_count: 1823 },
+          { key: "write_file",                 doc_count: 1245 },
+          { key: "execute",                    doc_count: 987  },
+          { key: "grep",                       doc_count: 876  },
+          { key: "glob",                       doc_count: 654  },
+          { key: "git_workflow",               doc_count: 412  },
+          { key: "browser_playwright",         doc_count: 356  },
+          { key: "manage_skill",               doc_count: 298  },
+          { key: "edit_file",                  doc_count: 267  },
+          { key: "manage_scheduler",           doc_count: 241  },
+          { key: "web_search",                 doc_count: 198  },
+          { key: "list_directory",             doc_count: 187  },
+          { key: "db_query",                   doc_count: 163  },
+          { key: "task",                       doc_count: 156  },
+          { key: "task_output",                doc_count: 148  },
+          { key: "create_pr",                  doc_count: 134  },
+          { key: "search_tool",                doc_count: 128  },
+          { key: "run_tests",                  doc_count: 112  },
+          { key: "search_code",                doc_count: 98   },
+          { key: "code_exec",                  doc_count: 92   },
+          { key: "prepare_save_code_exec_tool",doc_count: 81   },
+          { key: "notify",                     doc_count: 76   },
+          { key: "query_logs",                 doc_count: 68   },
+          { key: "schema_check",               doc_count: 59   },
+          { key: "open_preview",               doc_count: 53   }
         ]
       },
       trend: { buckets: trend }
@@ -1165,24 +1617,31 @@ function makeMockUserStats(range: TimeRange, opts?: UserStatsOptions): unknown {
 
   const byOrgBuckets = selectedUpperOrgLv1 === null
     ? [
-        { key: "测试 1 部", doc_count: 748 },
-        { key: "开发二部", doc_count: 245 },
-        { key: "平台三部", doc_count: 189 }
+        { key: "测试 1 部", doc_count: 748, unique_users: { value: 60 } },
+        { key: "开发二部", doc_count: 245, unique_users: { value: 20 } },
+        { key: "平台三部", doc_count: 189, unique_users: { value: 15 } }
       ]
     : selectedUpperOrgLv1 === "测试 1 部"
       ? [
-          { key: "测试 1 组", doc_count: 430 },
-          { key: "测试 2 组", doc_count: 318 }
+          { key: "测试 1 组", doc_count: 430, unique_users: { value: 36 } },
+          { key: "测试 2 组", doc_count: 318, unique_users: { value: 24 } }
         ]
       : selectedUpperOrgLv1 === "开发二部"
         ? [
-            { key: "开发三组", doc_count: 245 }
+            { key: "开发三组", doc_count: 245, unique_users: { value: 20 } }
           ]
         : selectedUpperOrgLv1 === "平台三部"
           ? [
-              { key: "平台一组", doc_count: 189 }
+              { key: "平台一组", doc_count: 189, unique_users: { value: 15 } }
             ]
           : []
+
+  const makeOrgAgg = (buckets: typeof byOrgBuckets): Record<string, unknown> => {
+    const docCount = buckets.reduce((sum, bucket) => sum + bucket.doc_count, 0)
+    return { doc_count: docCount, items: { buckets } }
+  }
+  const byOrgPv = makeOrgAgg(byOrgBuckets)
+  const byOrgUv = makeOrgAgg(byOrgBuckets)
 
   const allTopUserBuckets = [
     { key: "10010001", doc_count: 142, latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "张三", orgName: "测试 1 组", upperOrgLv1: "测试 1 部", upperOrgLv0: "测试 1 组" } }] } } },
@@ -1214,10 +1673,9 @@ function makeMockUserStats(range: TimeRange, opts?: UserStatsOptions): unknown {
       top_users: {
         buckets: topUserBuckets
       },
-      by_org: {
-        doc_count: byOrgBuckets.reduce((sum, bucket) => sum + bucket.doc_count, 0),
-        items: { buckets: byOrgBuckets }
-      },
+      by_org: byOrgPv,
+      by_org_pv: byOrgPv,
+      by_org_uv: byOrgUv,
       by_version: {
         buckets: byVersionBuckets
       },
@@ -1573,13 +2031,42 @@ function makeMockSkillRecentTraces(skill: string, range: TimeRange, limit = 10):
   })
 }
 
-function makeMockCommitDetails(range: TimeRange, limit = 200): { total: number; items: DashboardCommitDetail[] } {
+function makeMockSkillCodeStats(skill: string): DashboardCodeStats {
+  const seed = Array.from(skill).reduce((acc, char) => acc + char.charCodeAt(0), 0)
+  const generatedLines = 680 + (seed % 360)
+  const deletedLines = 80 + (seed % 90)
+  const measuredGeneratedLines = Math.max(0, generatedLines - 120)
+  const effectiveGeneratedLines = Math.max(0, measuredGeneratedLines - 30)
+  const adoptedLines = Math.round(effectiveGeneratedLines * (0.62 + (seed % 18) / 100))
+  return makeDashboardCodeStats({
+    generatedLines,
+    deletedLines,
+    effectiveGeneratedLines,
+    measuredGeneratedLines,
+    adoptedLines
+  })
+}
+
+function makeMockSkillDetail(skill: string, range: TimeRange, limit = 3): DashboardSkillDetail {
+  return {
+    stats: makeMockSkillCodeStats(skill),
+    traces: makeMockSkillRecentTraces(skill, range, limit)
+  }
+}
+
+function makeMockCommitDetails(
+  range: TimeRange,
+  options?: number | CommitDetailsOptions
+): { total: number; page: number; pageSize: number; pushedOnly: boolean; items: DashboardCommitDetail[] } {
+  const { page, pageSize, pushedOnly } = normalizeCommitDetailsOptions(options)
   const from = new Date(range.from)
   const to = new Date(range.to)
   const spanMs = Math.max(60_000, to.getTime() - from.getTime())
-  const count = Math.min(clampLimit(limit, 200, 500), 18)
-  const items = Array.from({ length: count }, (_, index): DashboardCommitDetail => {
+  const allItems = Array.from({ length: 240 }, (_, index): DashboardCommitDetail => {
     const eventTime = new Date(to.getTime() - Math.min(spanMs - 1, index * 42 * 60 * 1000))
+    const pushed = index % 3 !== 1
+    const repoName = `cmb-${index % 3}`
+    const commitSha = `mock${String(index + 1).padStart(36, "0")}`
     return {
       eventId: `mock-commit-event-${index + 1}`,
       eventTime: eventTime.toISOString(),
@@ -1588,7 +2075,14 @@ function makeMockCommitDetails(range: TimeRange, limit = 200): { total: number; 
       ystId: `2743${String(50 + index).padStart(2, "0")}`,
       orgName: ["科技部", "零售一部", "风险管理部"][index % 3],
       userIp: `10.0.0.${20 + index}`,
-      repoPath: `/Users/demo/projects/cmb-${index % 3}`,
+      repoPath: `/Users/demo/projects/${repoName}`,
+      repositoryName: repoName,
+      repositoryFullName: `demo/${repoName}`,
+      repositoryWebUrl: `https://git.example.internal/demo/${repoName}`,
+      commitSha,
+      commitUrl: pushed ? `https://git.example.internal/demo/${repoName}/commit/${commitSha}` : undefined,
+      pushed,
+      pushedAt: pushed ? new Date(eventTime.getTime() + 30 * 60 * 1000).toISOString() : undefined,
       branch: index % 2 === 0 ? "feature/smart-model-routing" : "fix/dashboard-detail",
       filesChanged: 2 + (index % 6),
       insertions: 18 + index * 7,
@@ -1599,7 +2093,15 @@ function makeMockCommitDetails(range: TimeRange, limit = 200): { total: number; 
       skillCount: index % 2 === 0 ? 1 : 2
     }
   })
-  return { total: 240, items }
+  const filteredItems = pushedOnly ? allItems.filter((item) => item.pushed) : allItems
+  const start = (page - 1) * pageSize
+  return {
+    total: filteredItems.length,
+    page,
+    pageSize,
+    pushedOnly,
+    items: filteredItems.slice(start, start + pageSize)
+  }
 }
 
 // ─────────────────────────────────────────────────────────
@@ -1749,12 +2251,26 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   )
 
   _ipcMain.handle(
-    "dashboard:commitDetails",
-    async (_, range: TimeRange, limit?: number) => {
+    "dashboard:skillDetail",
+    async (_, skill: string, range: TimeRange, limit?: number) => {
       if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
-      if (import.meta.env.DEV) return { success: true, data: makeMockCommitDetails(range, limit) }
+      if (import.meta.env.DEV) return { success: true, data: makeMockSkillDetail(skill, range, limit) }
       try {
-        return { success: true, data: await fetchCommitDetails(range, limit) }
+        return { success: true, data: await fetchSkillDetail(skill, range, limit) }
+      } catch (e) {
+        console.error("[Dashboard] skillDetail error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:commitDetails",
+    async (_, range: TimeRange, options?: number | CommitDetailsOptions) => {
+      if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
+      if (import.meta.env.DEV) return { success: true, data: makeMockCommitDetails(range, options) }
+      try {
+        return { success: true, data: await fetchCommitDetails(range, options) }
       } catch (e) {
         console.error("[Dashboard] commitDetails error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }

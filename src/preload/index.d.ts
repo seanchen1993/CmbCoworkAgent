@@ -36,7 +36,7 @@ import type {
 } from "../main/ipc/code-exec-tools"
 
 interface ElectronAPI {
-  openExternal: Promise
+  openExternal: (url: string) => Promise<void>
   openLoginWindow: () => void
   closeLoginWindow: () => void
   openLoginPage: () => void
@@ -96,6 +96,13 @@ interface DashboardCommitDetail {
   orgName?: string
   userIp?: string
   repoPath?: string
+  repositoryName?: string
+  repositoryFullName?: string
+  repositoryWebUrl?: string
+  commitSha?: string
+  commitUrl?: string
+  pushed: boolean
+  pushedAt?: string
   branch?: string
   filesChanged: number
   insertions: number
@@ -104,6 +111,35 @@ interface DashboardCommitDetail {
   threadId?: string
   usedSkills: string[]
   skillCount: number
+}
+
+interface DashboardCommitDetailsOptions {
+  page?: number
+  pageSize?: number
+  pushedOnly?: boolean
+}
+
+interface DashboardCodeStats {
+  generatedLines: number
+  deletedLines: number
+  effectiveGeneratedLines: number
+  measuredGeneratedLines: number
+  unmeasuredGeneratedLines: number
+  inclusiveEffectiveGeneratedLines: number
+  adoptedLines: number
+  pushedMeasuredGeneratedLines: number
+  pushedEffectiveGeneratedLines: number
+  pushedAdoptedLines: number
+  pushedCommitCount: number
+  measuredAdoptionRate: number | null
+  inclusiveAdoptionRate: number | null
+  pushedAdoptionRate: number | null
+  adoptionRate: number | null
+}
+
+interface DashboardSkillDetail {
+  stats: DashboardCodeStats
+  traces: DashboardTraceDetail[]
 }
 
 interface CustomAPI {
@@ -147,19 +183,24 @@ interface CustomAPI {
       defaultMaxTokens: number
       minMaxTokens: number
       maxMaxTokens: number
+      defaultMaxOutputTokens: number
+      minMaxOutputTokens: number
+      maxMaxOutputTokens: number
+      defaultTemperature: number
+      maxTemperature: number
     }>
-    getCustomConfigs: () => Promise<
-      Array<{
-        id: string
-        name: string
-        baseUrl: string
-        model: string
-        hasApiKey: boolean
-        maxTokens: number
-        interleavedThinking?: boolean
-        tier?: "premium" | "economy"
-      }>
-    >
+    getCustomConfigs: () => Promise<Array<{
+      id: string
+      name: string
+      baseUrl: string
+      model: string
+      hasApiKey: boolean
+      maxTokens: number
+      maxOutputTokens: number
+      temperature: number
+      interleavedThinking?: boolean
+      tier?: "premium" | "economy"
+    }>>
     getCustomConfig: (id?: string) => Promise<{
       id: string
       name: string
@@ -167,6 +208,8 @@ interface CustomAPI {
       model: string
       hasApiKey: boolean
       maxTokens: number
+      maxOutputTokens: number
+      temperature: number
       interleavedThinking?: boolean
       tier?: "premium" | "economy"
     } | null>
@@ -177,6 +220,8 @@ interface CustomAPI {
       model: string
       apiKey?: string
       maxTokens?: number
+      maxOutputTokens?: number
+      temperature?: number
       interleavedThinking?: boolean
       tier?: "premium" | "economy"
     }) => Promise<void>
@@ -188,6 +233,8 @@ interface CustomAPI {
       model: string
       apiKey?: string
       maxTokens?: number
+      maxOutputTokens?: number
+      temperature?: number
       interleavedThinking?: boolean
       tier?: "premium" | "economy"
     }) => Promise<{ id: string }>
@@ -199,6 +246,8 @@ interface CustomAPI {
       baseUrl?: string
       model?: string
       apiKey?: string
+      maxOutputTokens?: number
+      temperature?: number
     }) => Promise<{ success: boolean; error?: string; latencyMs?: number }>
   }
   workspace: {
@@ -605,6 +654,9 @@ interface CustomAPI {
       fileName: string
     ) => Promise<{ success: boolean; pluginName?: string; error?: string }>
     installFromDir: () => Promise<{ success: boolean; pluginName?: string; error?: string }>
+    exportForMarket: (
+      id: string
+    ) => Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }>
     delete: (id: string) => Promise<{ success: boolean; error?: string }>
     setEnabled: (id: string, enabled: boolean) => Promise<void>
     getDetail: (id: string) => Promise<{
@@ -928,12 +980,17 @@ interface CustomAPI {
       range: { from: string; to: string },
       limit?: number
     ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
-    commitDetails: (
+    skillDetail: (
+      skill: string,
       range: { from: string; to: string },
       limit?: number
+    ) => Promise<{ success: boolean; data?: DashboardSkillDetail; error?: string }>
+    commitDetails: (
+      range: { from: string; to: string },
+      options?: DashboardCommitDetailsOptions
     ) => Promise<{
       success: boolean
-      data?: { total: number; items: DashboardCommitDetail[] }
+      data?: { total: number; page: number; pageSize: number; pushedOnly: boolean; items: DashboardCommitDetail[] }
       error?: string
     }>
     exportExcel: (

@@ -88,8 +88,8 @@ function getDefaultModel(): ChatOpenAI | null {
     model: config.model,
     apiKey: config.apiKey,
     configuration: { baseURL: config.baseUrl },
-    maxTokens: 4096,
-    temperature: 0.3,
+    maxTokens: config.maxOutputTokens,
+    temperature: config.temperature,
     streaming: true
   })
 }

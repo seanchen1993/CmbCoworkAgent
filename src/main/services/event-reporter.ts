@@ -32,7 +32,7 @@ type FetchTimeout = typeof FETCH_TIMEOUT
 // Types
 // ─────────────────────────────────────────────────────────
 
-export type EventCategory = "skill" | "git"
+export type EventCategory = "skill" | "git" | "code_adoption"
 
 /**
  * Wire format expected by the server.

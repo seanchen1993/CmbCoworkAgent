@@ -1,6 +1,27 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react"
-import { ChevronDown, ChevronRight, Loader2, Zap, Wrench } from "lucide-react"
+import {
+  Building2,
+  ChevronDown,
+  ChevronRight,
+  Code2,
+  Layers3,
+  Loader2,
+  ShieldCheck,
+  ShoppingBag,
+  Sparkles,
+  Zap,
+  Wrench
+} from "lucide-react"
 import type { SkillMetadata } from "@/types"
+import { Button } from "@/components/ui/button"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle
+} from "@/components/ui/dialog"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { getAllSkills, SCENE_CATEGORY_OPTIONS, type SkillWithUsage } from "@/lib/skill-data-service"
 import type { MarketItem } from "../../api/market"
@@ -9,7 +30,9 @@ export interface SkillsByCategoryItem {
   skill: SkillMetadata
   label: string
   marketItem: MarketItem
+  isInstalled: boolean
   isFeatured: boolean
+  isCertified: boolean
   calls: number
 }
 
@@ -26,6 +49,7 @@ interface SkillsByCategorySectionProps {
   skills: SkillMetadata[]
   previewLimit: number
   onOpenMarketByCategory: (category: string) => void
+  onOpenMarketBySkill: (skillName: string) => void
   onUseSkillPrompt: (skill: SkillMetadata, label?: string) => void
 }
 
@@ -127,6 +151,28 @@ function countSceneSkillTreeItems(node: SceneSkillTreeNode): number {
   )
 }
 
+const ORGANIZATION_CATEGORY = "组织级技能"
+const COMMON_CATEGORY = "通用场景"
+const LEGACY_RESEARCH_CATEGORY = "研发场景"
+const categoryIconMap: Record<string, React.ComponentType<{ className?: string }>> = {
+  治理类场景: ShieldCheck,
+  研发类场景: Code2,
+  组织级技能: Building2,
+  通用场景: Sparkles,
+  精品技能: Zap
+}
+const COMMON_PINNED_SKILLS = [
+  {
+    name: "scheduler-assistant",
+    label: "定时任务管理",
+    description: "创建、修改和管理定时提醒或周期任务。"
+  },
+  {
+    name: "skill-creator",
+    label: "创建新技能包",
+    description: "创建一个新的技能包，并生成结构、说明和示例。"
+  }
+] as const
 const primaryCategoryOrder = new Map<string, number>()
 const secondaryCategoryOrder = new Map<string, number>()
 let cachedMarketSkillsData: SkillWithUsage[] | null = null
@@ -170,19 +216,27 @@ async function loadMarketSkillsOnce(): Promise<SkillWithUsage[]> {
 
 function SceneSkillButton({
   item,
-  onUseSkillPrompt
+  onUseSkillPrompt,
+  onRequestInstall
 }: {
   item: SkillsByCategoryItem
   onUseSkillPrompt: (skill: SkillMetadata, label?: string) => void
+  onRequestInstall?: (item: SkillsByCategoryItem) => void
 }): React.JSX.Element {
-  const { skill, label, marketItem, isFeatured } = item
+  const { skill, label, marketItem, isFeatured, isInstalled } = item
 
   return (
     <Tooltip key={marketItem.name}>
       <TooltipTrigger asChild>
         <button
           type="button"
-          onClick={() => onUseSkillPrompt(skill, label)}
+          onClick={() => {
+            if (!isInstalled && onRequestInstall) {
+              onRequestInstall(item)
+              return
+            }
+            onUseSkillPrompt(skill, label)
+          }}
           className={
             isFeatured
               ? "group w-full rounded-xl border border-amber-200/70 bg-amber-50/60 px-3 py-2 text-left hover:bg-amber-100/70 hover:border-amber-300 transition-colors"
@@ -217,11 +271,13 @@ function SceneSkillButton({
 function SceneSkillTreeGrid({
   items,
   previewLimit,
-  onUseSkillPrompt
+  onUseSkillPrompt,
+  onRequestInstall
 }: {
   items: SkillsByCategoryItem[]
   previewLimit: number
   onUseSkillPrompt: (skill: SkillMetadata, label?: string) => void
+  onRequestInstall?: (item: SkillsByCategoryItem) => void
 }): React.JSX.Element {
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
   const tree = useMemo(
@@ -244,6 +300,7 @@ function SceneSkillTreeGrid({
       expandedNodes={expandedNodes}
       onToggleNode={toggleNode}
       onUseSkillPrompt={onUseSkillPrompt}
+      onRequestInstall={onRequestInstall}
     />
   )
 }
@@ -253,13 +310,15 @@ function SceneSkillTreeList({
   nested,
   expandedNodes,
   onToggleNode,
-  onUseSkillPrompt
+  onUseSkillPrompt,
+  onRequestInstall
 }: {
   nodes: SceneSkillTreeNode[]
   nested: boolean
   expandedNodes: Set<string>
   onToggleNode: (nodeKey: string) => void
   onUseSkillPrompt: (skill: SkillMetadata, label?: string) => void
+  onRequestInstall?: (item: SkillsByCategoryItem) => void
 }): React.JSX.Element {
   return (
     <div className={nested ? "grid grid-cols-1 gap-1.5" : "grid grid-cols-4 gap-2"}>
@@ -273,7 +332,11 @@ function SceneSkillTreeList({
         return (
           <div key={node.key} className="min-w-0 space-y-1.5">
             {node.item ? (
-              <SceneSkillButton item={node.item} onUseSkillPrompt={onUseSkillPrompt} />
+              <SceneSkillButton
+                item={node.item}
+                onUseSkillPrompt={onUseSkillPrompt}
+                onRequestInstall={onRequestInstall}
+              />
             ) : (
               <button
                 type="button"
@@ -322,6 +385,7 @@ function SceneSkillTreeList({
                   expandedNodes={expandedNodes}
                   onToggleNode={onToggleNode}
                   onUseSkillPrompt={onUseSkillPrompt}
+                  onRequestInstall={onRequestInstall}
                 />
               </div>
             )}
@@ -336,10 +400,12 @@ export function SkillsByCategorySection({
   skills,
   previewLimit,
   onOpenMarketByCategory,
+  onOpenMarketBySkill,
   onUseSkillPrompt
 }: SkillsByCategorySectionProps): React.JSX.Element {
   const [marketSkillsLoading, setMarketSkillsLoading] = useState(true)
   const [marketSkillsData, setMarketSkillsData] = useState<SkillWithUsage[]>([])
+  const [installPromptItem, setInstallPromptItem] = useState<SkillsByCategoryItem | null>(null)
 
   useEffect(() => {
     let canceled = false
@@ -367,11 +433,16 @@ export function SkillsByCategorySection({
     const localSkillMap = new Map(
       skills.filter((skill) => skill.source === "user").map((skill) => [skill.name, skill])
     )
+    const allSkillMap = new Map(skills.map((skill) => [skill.name, skill]))
     const groups = new Map<string, Map<string, SkillsByCategoryItem[]>>()
 
     for (const item of marketSkillsData) {
       const localSkill = localSkillMap.get(item.name)
       const { primary, secondary } = splitCategory(item.category)
+      const isOrganizationSkill = primary === ORGANIZATION_CATEGORY
+      if (primary === LEGACY_RESEARCH_CATEGORY) continue
+      if (!isOrganizationSkill && item.featured !== "精品" && item.tag !== "认证") continue
+
       if (!groups.has(primary)) groups.set(primary, new Map())
       const secondaryGroups = groups.get(primary)!
       if (!secondaryGroups.has(secondary)) secondaryGroups.set(secondary, [])
@@ -384,7 +455,9 @@ export function SkillsByCategorySection({
         },
         label: item.chinese_name || item.name,
         marketItem: item,
+        isInstalled: !!localSkill,
         isFeatured: item.featured === "精品",
+        isCertified: item.tag === "认证",
         calls: item.calls ?? 0
       })
     }
@@ -400,7 +473,46 @@ export function SkillsByCategorySection({
         })
       })
     })
+
+    const commonGroups = groups.get(COMMON_CATEGORY) ?? new Map<string, SkillsByCategoryItem[]>()
+    const commonPrimaryItems = commonGroups.get("") ?? []
+    const pinnedNames = new Set<string>(COMMON_PINNED_SKILLS.map((skill) => skill.name))
+    const pinnedItems: SkillsByCategoryItem[] = COMMON_PINNED_SKILLS.map(({ name, label, description }) => {
+      const skill = allSkillMap.get(name) ?? {
+        name,
+        description,
+        path: `skills/${name}`,
+        source: "project" as const
+      }
+
+      return {
+        skill,
+        label,
+        marketItem: {
+          name,
+          chinese_name: label,
+          description,
+          filename: skill.path,
+          category: COMMON_CATEGORY,
+          created_at: ""
+        },
+        isInstalled: true,
+        isFeatured: false,
+        isCertified: false,
+        calls: 0
+      }
+    })
+    commonGroups.set(
+      "",
+      pinnedItems.concat(
+        commonPrimaryItems.filter((item) => !pinnedNames.has(item.marketItem.name))
+      )
+    )
+    groups.set(COMMON_CATEGORY, commonGroups)
+
     const orderedPrimaryEntries = Array.from(groups.entries()).sort(([primaryA], [primaryB]) => {
+      if (primaryA === COMMON_CATEGORY && primaryB !== COMMON_CATEGORY) return 1
+      if (primaryB === COMMON_CATEGORY && primaryA !== COMMON_CATEGORY) return -1
       const orderA = primaryCategoryOrder.get(primaryA) ?? Number.MAX_SAFE_INTEGER
       const orderB = primaryCategoryOrder.get(primaryB) ?? Number.MAX_SAFE_INTEGER
       if (orderA !== orderB) return orderA - orderB
@@ -449,73 +561,110 @@ export function SkillsByCategorySection({
     <TooltipProvider delayDuration={250}>
       <div className="space-y-0">
         {Array.from(skillsByCategory.entries()).map(([primaryCategory, secondaryGroups], index) => {
-        const onlyPrimaryLevel = secondaryGroups.size === 1 && secondaryGroups.has("")
-        const primaryLevelItems = onlyPrimaryLevel ? (secondaryGroups.get("") || []) : []
+          const onlyPrimaryLevel = secondaryGroups.size === 1 && secondaryGroups.has("")
+          const primaryLevelItems = onlyPrimaryLevel ? secondaryGroups.get("") || [] : []
+          const showAllPrimaryItems = primaryCategory === ORGANIZATION_CATEGORY
+          const CategoryIcon = categoryIconMap[primaryCategory] ?? Layers3
 
-        return (
-          <div
-            key={primaryCategory}
-            className={`space-y-2.5 py-4 ${index > 0 ? "pt-5" : "pt-0"} last:pb-0`}
-          >
-            {index > 0 && (
-              <div className="h-px bg-gradient-to-r from-transparent via-slate-400/90 to-transparent dark:via-slate-500/85 -mt-2 mb-4" />
-            )}
-            <div className="text-xs text-muted-foreground font-medium tracking-wider flex items-center justify-between gap-1">
-              <div className="flex items-center gap-1">
-                <Zap className="size-3 text-amber-500" />
-                <span className={'text-black'}>{primaryCategory}</span>
-              </div>
-              {onlyPrimaryLevel && (
-                <button
-                  type="button"
-                  onClick={() => onOpenMarketByCategory(primaryCategory)}
-                  className="text-xs text-amber-600 hover:text-amber-700 transition-colors cursor-pointer"
-                >
-                  更多
-                  {primaryLevelItems.length > previewLimit
-                    ? `（+${primaryLevelItems.length - previewLimit}）`
-                    : ""}
-                </button>
+          return (
+            <div
+              key={primaryCategory}
+              className={`space-y-2.5 py-4 ${index > 0 ? "pt-5" : "pt-0"} last:pb-0`}
+            >
+              {index > 0 && (
+                <div className="h-px bg-gradient-to-r from-transparent via-slate-400/90 to-transparent dark:via-slate-500/85 -mt-2 mb-4" />
               )}
-            </div>
-            {Array.from(secondaryGroups.entries()).map(([secondaryCategory, items]) => {
-              const hideSecondaryHeader = onlyPrimaryLevel && !secondaryCategory
-              return (
-                <div
-                  key={`${primaryCategory}/${secondaryCategory || "__no_secondary__"}`}
-                  className="space-y-2"
-                >
-                  {!hideSecondaryHeader && (
-                    <div
-                      className={`flex items-center px-1 ${secondaryCategory ? "justify-between" : "justify-end"}`}
-                    >
-                      {secondaryCategory ? (
-                        <div className="text-xs text-gray-700 dark:text-gray-300">{secondaryCategory}</div>
-                      ) : null}
-                      <button
-                        type="button"
-                        onClick={() =>
-                          onOpenMarketByCategory(secondaryCategory || primaryCategory)
-                        }
-                        className="text-xs text-amber-600 hover:text-amber-700 transition-colors cursor-pointer"
-                      >
-                        更多
-                        {items.length > previewLimit ? `（+${items.length - previewLimit}）` : ""}
-                      </button>
-                    </div>
-                  )}
-                  <SceneSkillTreeGrid
-                    items={items}
-                    previewLimit={previewLimit}
-                    onUseSkillPrompt={onUseSkillPrompt}
-                  />
+              <div className="text-xs text-muted-foreground font-medium tracking-wider flex items-center justify-between gap-1">
+                <div className="flex items-center gap-1">
+                  <CategoryIcon className="size-3 text-amber-500" />
+                  <span className={"text-black"}>{primaryCategory}</span>
                 </div>
-              )
-            })}
-          </div>
-        )
+                {onlyPrimaryLevel && (
+                  <button
+                    type="button"
+                    onClick={() => onOpenMarketByCategory(primaryCategory)}
+                    className="text-xs text-amber-600 hover:text-amber-700 transition-colors cursor-pointer"
+                  >
+                    更多
+                    {!showAllPrimaryItems && primaryLevelItems.length > previewLimit
+                      ? `（+${primaryLevelItems.length - previewLimit}）`
+                      : ""}
+                  </button>
+                )}
+              </div>
+              {Array.from(secondaryGroups.entries()).map(([secondaryCategory, items]) => {
+                const hideSecondaryHeader = onlyPrimaryLevel && !secondaryCategory
+                const showAllItems = primaryCategory === ORGANIZATION_CATEGORY
+                return (
+                  <div
+                    key={`${primaryCategory}/${secondaryCategory || "__no_secondary__"}`}
+                    className="space-y-2"
+                  >
+                    {!hideSecondaryHeader && (
+                      <div
+                        className={`flex items-center px-1 ${secondaryCategory ? "justify-between" : "justify-end"}`}
+                      >
+                        {secondaryCategory ? (
+                          <div className="text-xs text-gray-700 dark:text-gray-300">
+                            {secondaryCategory}
+                          </div>
+                        ) : null}
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onOpenMarketByCategory(secondaryCategory || primaryCategory)
+                          }
+                          className="text-xs text-amber-600 hover:text-amber-700 transition-colors cursor-pointer"
+                        >
+                          更多
+                          {!showAllItems && items.length > previewLimit
+                            ? `（+${items.length - previewLimit}）`
+                            : ""}
+                        </button>
+                      </div>
+                    )}
+                    <SceneSkillTreeGrid
+                      items={items}
+                      previewLimit={previewLimit}
+                      onUseSkillPrompt={onUseSkillPrompt}
+                      onRequestInstall={setInstallPromptItem}
+                    />
+                  </div>
+                )
+              })}
+            </div>
+          )
         })}
       </div>
+      <Dialog
+        open={!!installPromptItem}
+        onOpenChange={(open) => !open && setInstallPromptItem(null)}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>安装技能</DialogTitle>
+            <DialogDescription>
+              {`技能「${installPromptItem?.label || installPromptItem?.marketItem.name || ""}」尚未安装。是否前往应用市场查看并安装？`}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setInstallPromptItem(null)}>
+              取消
+            </Button>
+            <Button
+              onClick={() => {
+                const skillName = installPromptItem?.marketItem.name
+                if (!skillName) return
+                setInstallPromptItem(null)
+                onOpenMarketBySkill(skillName)
+              }}
+            >
+              <ShoppingBag className="mr-2 size-4" />
+              去应用市场
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </TooltipProvider>
   )
 }

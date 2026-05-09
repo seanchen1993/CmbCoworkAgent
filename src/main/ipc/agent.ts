@@ -34,6 +34,7 @@ import { resolveModel, rememberRoutingDecision, rememberRoutingFeedback } from "
 import { notifyIfBackground, stripThink } from "../services/notify"
 import { trackEvent } from "../services/event-reporter"
 import { trySendChatXReply } from "../services/chatx"
+import { setAdoptionContext } from "../services/adoption-tracker"
 import { TraceCollector } from "../agent/trace/collector"
 import {
   requestSkillIntent,
@@ -854,8 +855,8 @@ async function judgeSkillWorthiness(
     model: config.model,
     apiKey: config.apiKey,
     configuration: { baseURL: config.baseUrl },
-    maxTokens: 1024,
-    temperature: 0
+    maxTokens: config.maxOutputTokens,
+    temperature: config.temperature
   })
 
   const userPrompt = `## Conversation window since last skill-evolution reset (${context.turnCount} turns)
@@ -943,8 +944,8 @@ Based on this conversation, generate a reusable skill. Output JSON only.`
       model: config.model,
       apiKey: config.apiKey,
       configuration: { baseURL: config.baseUrl },
-      maxTokens: 2048,
-      temperature: 0.3,
+      maxTokens: config.maxOutputTokens,
+      temperature: config.temperature,
       streaming: true
     })
 
@@ -1286,6 +1287,30 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     const skillUsageDetector = new SkillUsageDetector()
     const toolCallCounter = new ToolCallCounter()
     let assistantText = ""
+    const recentCompletedTurns = snapshotSkillProposalWindow(threadId).slice(-2)
+
+    const computeCodeGenAttributionSkills = (currentRunSkills: string[]): string[] => {
+      const inheritedTurns =
+        currentRunSkills.length > 0 ? recentCompletedTurns.slice(-1) : recentCompletedTurns
+
+      return Array.from(
+        new Set([
+          ...currentRunSkills,
+          ...inheritedTurns.flatMap((turn) => turn.usedSkills)
+        ])
+      )
+    }
+
+    const syncUsedSkillsContext = (): void => {
+      const currentRunSkills = skillUsageDetector.getUsedSkillNames()
+      tracer.setUsedSkills(currentRunSkills)
+      setAdoptionContext(threadId, {
+        usedSkills: computeCodeGenAttributionSkills(currentRunSkills)
+      })
+    }
+
+    syncUsedSkillsContext()
+    // stopContextCollector lives in turnState (destructured above) so it survives HITL pauses.
 
     const sendHookNotice = (notice: string): void => {
       window.webContents.send(channel, {
@@ -1843,7 +1868,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 (typeof tc.args?.file_path === "string" && tc.args.file_path) ||
                 ""
               if (readPathRaw) {
-                skillUsageDetector.onReadFilePath(readPathRaw)
+                const hit = skillUsageDetector.onReadFilePath(readPathRaw)
+                // Sync tracer + adoption context immediately when the hit set
+                // grows. Without this, a write_file/edit_file that follows in
+                // the *same* values batch would snapshot an empty usedSkills
+                // and the resulting code_gen would be missing skill attribution.
+                if (hit) {
+                  syncUsedSkillsContext()
+                }
               }
             }
 
@@ -1861,7 +1893,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const processValuesSideEffects = (payload: unknown): void => {
         try {
           const state = payload as {
-            skillsMetadata?: Array<{ name?: string; path?: string }>
+            skillsMetadata?: Array<{ name?: string; path?: string; version?: string }>
             messages?: Array<{
               id?: string[]
               kwargs?: {
@@ -1891,7 +1923,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const skillsMetadata = Array.isArray(state.skillsMetadata) ? state.skillsMetadata : []
           if (skillsMetadata.length > 0) {
             skillUsageDetector.onSkillsMetadata(skillsMetadata)
-            tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+            syncUsedSkillsContext()
           }
 
           if (!Array.isArray(state.messages)) return
@@ -2029,7 +2061,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   (typeof tc.args?.file_path === "string" && tc.args.file_path) ||
                   ""
                 if (readPathRaw) {
-                  skillUsageDetector.onReadFilePath(readPathRaw)
+                  const hit = skillUsageDetector.onReadFilePath(readPathRaw)
+                  // See the read_file branch in processMessagesSideEffects —
+                  // a following write/edit in this same messages loop would
+                  // otherwise see a stale usedSkills snapshot.
+                  if (hit) {
+                    syncUsedSkillsContext()
+                  }
                 }
               }
             }
@@ -2309,7 +2347,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               model: new ChatOpenAI({
                 model: config.model,
                 apiKey: config.apiKey,
-                configuration: { baseURL: config.baseUrl }
+                configuration: { baseURL: config.baseUrl },
+                maxTokens: config.maxOutputTokens,
+                temperature: config.temperature
               }),
               conversation,
               memoryDir: memoryStore.getMemoryDir()

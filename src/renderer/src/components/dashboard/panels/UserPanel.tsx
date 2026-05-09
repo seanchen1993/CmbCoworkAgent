@@ -1,4 +1,4 @@
-import type { ReactNode } from "react"
+import { useState, type ReactNode } from "react"
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from "recharts"
 import { ChevronLeft } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -36,14 +36,14 @@ function PiePanel({
 }) {
   return (
     <div className="rounded-xl border border-border bg-card p-4">
-      <div className="mb-3 flex items-start justify-between gap-3">
-        <div>
+      <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0 flex-1">
           <h3 className="text-xs font-medium text-muted-foreground">{title}</h3>
           {helperText ? (
             <p className="mt-1 text-[11px] text-muted-foreground/80">{helperText}</p>
           ) : null}
         </div>
-        {action}
+        {action ? <div className="shrink-0">{action}</div> : null}
       </div>
       {data.length > 0 ? (
         <ResponsiveContainer width="100%" height={240}>
@@ -101,12 +101,16 @@ export function UserPanel({
   onDrillDownOrg: (orgLv1: string) => void
   onResetOrgDrilldown: () => void
 }) {
+  const [orgMetric, setOrgMetric] = useState<"pv" | "uv">("pv")
+
   if (loading && !data) {
     return <div className="text-sm text-muted-foreground py-8 text-center">加载中...</div>
   }
   if (!data) return null
 
   const isDrilledDown = data.selectedUpperOrgLv1 !== null
+  const orgData = orgMetric === "pv" ? data.byOrgPv : data.byOrgUv
+  const orgUnit = orgMetric === "pv" ? "调用次数" : "活跃用户数"
 
   return (
     <div className="grid grid-cols-3 gap-4">
@@ -153,22 +157,40 @@ export function UserPanel({
       {/* Org distribution */}
       <PiePanel
         title={isDrilledDown ? `${data.selectedUpperOrgLv1 || "未知"}下级分布` : "部门分布"}
-        data={data.byOrg as Record<string, unknown>[]}
+        data={orgData as Record<string, unknown>[]}
         dataKey="count"
         nameKey="org"
-        helperText={!isDrilledDown ? "点击可查看下级组织使用情况" : undefined}
+        helperText={`当前为 ${orgMetric.toUpperCase()} 视角，按${orgUnit}统计。${!isDrilledDown ? "点击可查看下级组织使用情况" : ""}`}
         action={
-          isDrilledDown ? (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 gap-1 px-2 text-xs"
-              onClick={onResetOrgDrilldown}
-            >
-              <ChevronLeft className="size-3.5" />
-              返回上级
-            </Button>
-          ) : undefined
+          <div className="flex items-center gap-2">
+            <div className="flex h-7 items-center rounded-full bg-muted px-1 text-[11px] font-medium text-muted-foreground">
+              {(["pv", "uv"] as const).map((metric) => (
+                <button
+                  key={metric}
+                  type="button"
+                  className={`h-5 rounded-full px-2.5 leading-5 transition-colors ${
+                    orgMetric === metric
+                      ? "bg-background text-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                  onClick={() => setOrgMetric(metric)}
+                >
+                  {metric.toUpperCase()}
+                </button>
+              ))}
+            </div>
+            {isDrilledDown ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 gap-1 px-2 text-xs"
+                onClick={onResetOrgDrilldown}
+              >
+                <ChevronLeft className="size-3.5" />
+                返回上级
+              </Button>
+            ) : null}
+          </div>
         }
         onSliceClick={
           !isDrilledDown

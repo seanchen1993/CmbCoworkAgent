@@ -24,7 +24,8 @@ import {
   existsSync,
   unlinkSync,
   rmdirSync,
-  writeFileSync
+  writeFileSync,
+  statSync
 } from "fs"
 import { v4 as uuid } from "uuid"
 import type {
@@ -44,6 +45,16 @@ import { getLocalIP } from "../../net-utils"
 import { getUserInfo } from "../../storage"
 import { listAllSkills } from "../../ipc/skills"
 import { nowIsoLocal } from "../../util/local-time"
+import {
+  DEFAULT_SKILL_VERSION,
+  ensureVersionedSkillIdentifier,
+  parseSkillIdentifier
+} from "../../utils/skill-identifiers"
+import {
+  setAdoptionContext,
+  clearAdoptionContext
+} from "../../services/adoption-tracker"
+import { sanitizeTraceForCloudUpload } from "./sanitizer"
 
 // ─────────────────────────────────────────────────────────
 // Global reporter registry
@@ -76,6 +87,8 @@ function getThreadTracesDir(threadId: string): string {
   return join(getTracesRootDir(), threadId)
 }
 
+const MAX_TRACES_PER_THREAD = 50
+
 function writeTraceFile(trace: AgentTrace): void {
   try {
     const dir = getThreadTracesDir(trace.threadId)
@@ -83,8 +96,47 @@ function writeTraceFile(trace: AgentTrace): void {
     const filePath = join(dir, `${trace.traceId}.jsonl`)
     appendFileSync(filePath, JSON.stringify(trace) + "\n", "utf-8")
     console.log(`[Tracer] Written trace ${trace.traceId} to ${filePath}`)
+    // Prune oldest traces if over the per-thread limit.
+    pruneOldTraces(trace.threadId)
   } catch (e) {
     console.warn("[Tracer] Failed to write trace file:", e)
+  }
+}
+
+/** Delete the oldest trace files in a thread directory, keeping at most MAX_TRACES_PER_THREAD. */
+function pruneOldTraces(threadId: string): void {
+  try {
+    const dir = getThreadTracesDir(threadId)
+    if (!existsSync(dir)) return
+
+    const files = readdirSync(dir)
+      .filter((f) => f.endsWith(".jsonl"))
+      .map((name) => {
+        const filePath = join(dir, name)
+        try {
+          return { name, filePath, mtimeMs: statSync(filePath).mtimeMs }
+        } catch {
+          return null
+        }
+      })
+      .filter((e): e is { name: string; filePath: string; mtimeMs: number } => e !== null)
+
+    if (files.length <= MAX_TRACES_PER_THREAD) return
+
+    // Sort newest first, delete the tail.
+    files.sort((a, b) => b.mtimeMs - a.mtimeMs)
+    const toDelete = files.slice(MAX_TRACES_PER_THREAD)
+
+    for (const entry of toDelete) {
+      try {
+        unlinkSync(entry.filePath)
+        console.log(`[Tracer] Pruned old trace: ${entry.name} (thread ${threadId})`)
+      } catch (e) {
+        console.warn(`[Tracer] Failed to prune trace ${entry.name}:`, e)
+      }
+    }
+  } catch (e) {
+    console.warn("[Tracer] Failed to prune old traces:", e)
   }
 }
 
@@ -124,6 +176,14 @@ function deriveUpperOrgLevels(pathName?: string): Pick<AgentTrace, "upperOrgLv0"
     upperOrgLv1: lowerParts[2] ?? "",
     upperOrgLv2: lowerParts[1] ?? "",
     upperOrgLv3: lowerParts[0] ?? ""
+  }
+}
+
+function getAppVersionForTrace(): string {
+  try {
+    return typeof app?.getVersion === "function" ? app.getVersion() : "unknown"
+  } catch {
+    return "unknown"
   }
 }
 
@@ -176,6 +236,15 @@ export class TraceCollector {
         modelId: this.modelId
       }
     })
+    // Publish context to adoption tracker (side-effect only)
+    try {
+      setAdoptionContext(this.threadId, {
+        traceId: this.traceId,
+        modelId: this.modelId
+      })
+    } catch {
+      // never block trace setup
+    }
   }
 
   /** Update the modelId (can be resolved after construction). */
@@ -185,6 +254,11 @@ export class TraceCollector {
     if (root) {
       root.metadata = { ...(root.metadata ?? {}), modelId: id }
     }
+    try {
+      setAdoptionContext(this.threadId, { modelId: id })
+    } catch {
+      // ignore
+    }
   }
 
   /** Set the human-readable model name (e.g. "minmax") for display in trace UI. */
@@ -193,6 +267,11 @@ export class TraceCollector {
     const root = this.getNode(this.rootNodeId)
     if (root) {
       root.metadata = { ...(root.metadata ?? {}), modelName: name }
+    }
+    try {
+      setAdoptionContext(this.threadId, { modelName: name })
+    } catch {
+      // ignore
     }
   }
 
@@ -218,6 +297,13 @@ export class TraceCollector {
     const root = this.getNode(this.rootNodeId)
     if (root) {
       root.metadata = { ...(root.metadata ?? {}), usedSkills: [...skills] }
+    }
+    try {
+      setAdoptionContext(this.threadId, {
+        usedSkills: [...skills]
+      })
+    } catch {
+      // ignore
     }
   }
 
@@ -422,12 +508,33 @@ export class TraceCollector {
       try {
         const allSkills = await listAllSkills()
         const skillVersionMap = new Map(allSkills.map((s) => [s.name, s.version]))
-        usedSkillsWithVersions = this.usedSkills.map((name) => {
-          const version = skillVersionMap.get(name) ?? "v1.0.0"
-          return `${name}-${version}`
-        })
+        usedSkillsWithVersions = Array.from(
+          new Set(
+            this.usedSkills
+              .map((skill) => {
+                const parsed = parseSkillIdentifier(skill)
+                const listedVersion = skillVersionMap.get(parsed.name)
+                const resolvedVersion =
+                  parsed.version && parsed.version !== DEFAULT_SKILL_VERSION
+                    ? parsed.version
+                    : listedVersion ?? parsed.version
+                return ensureVersionedSkillIdentifier(
+                  parsed.name,
+                  resolvedVersion
+                )
+              })
+              .filter(Boolean)
+          )
+        )
       } catch (e) {
         console.warn("[Tracer] Failed to resolve skill versions:", e)
+        usedSkillsWithVersions = Array.from(
+          new Set(
+            this.usedSkills
+              .map((skill) => ensureVersionedSkillIdentifier(skill))
+              .filter(Boolean)
+          )
+        )
       }
     }
 
@@ -454,10 +561,10 @@ export class TraceCollector {
       upperOrgLv1: upperOrgLevels.upperOrgLv1,
       upperOrgLv2: upperOrgLevels.upperOrgLv2,
       upperOrgLv3: upperOrgLevels.upperOrgLv3,
-      appVersion: app.getVersion(),
+      appVersion: getAppVersionForTrace(),
       steps: this.steps,
       modelCalls: this.modelCalls,
-      nodes: this.finalizeNodes(outcome, endedAt, errorMessage),
+      nodes: this.finalizeNodes(outcome, endedAt, usedSkillsWithVersions, errorMessage),
       totalToolCalls,
       outcome,
       ...(errorMessage ? { errorMessage } : {}),
@@ -470,15 +577,23 @@ export class TraceCollector {
     // Fire-and-forget: trace upload is a side-channel operation and must
     // never block the main agent flow. Errors are logged and swallowed.
     void Promise.resolve()
-      .then(() => _reporter.report(trace))
+      .then(() => _reporter.report(sanitizeTraceForCloudUpload(trace)))
       .catch((e) => {
         console.warn("[Tracer] Reporter.report() threw:", e)
       })
 
+    // Clear adoption context — subsequent write_file calls on this thread
+    // will no longer carry this trace's attribution.
+    try {
+      clearAdoptionContext(this.threadId)
+    } catch {
+      // ignore
+    }
+
     return trace
   }
 
-  private finalizeNodes(outcome: TraceOutcome, endedAt: string, errorMessage?: string): TraceNode[] {
+  private finalizeNodes(outcome: TraceOutcome, endedAt: string, resolvedUsedSkills: string[], errorMessage?: string): TraceNode[] {
     for (const node of this.nodes) {
       if (node.type === "llm" || node.type === "tool") {
         if (node.status === "running") {
@@ -527,7 +642,7 @@ export class TraceCollector {
       }
       root.metadata = {
         ...(root.metadata ?? {}),
-        usedSkills: [...this.usedSkills]
+        usedSkills: [...resolvedUsedSkills]
       }
     }
 

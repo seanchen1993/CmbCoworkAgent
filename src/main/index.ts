@@ -149,6 +149,7 @@ import { stopAllLsp } from "./lsp"
 import { setTraceReporter } from "./agent/trace/collector"
 import { CloudTraceReporter } from "./agent/trace/cloud-reporter"
 import { setEventReporter, HttpEventReporter } from "./services/event-reporter"
+import { initializeAdoptionTracker, shutdownAdoptionTracker } from "./services/adoption-tracker"
 import { initializeDatabase, flush } from "./db"
 import { startScheduler, stopScheduler } from "./services/scheduler"
 import { startHeartbeat, stopHeartbeat } from "./services/heartbeat"
@@ -368,6 +369,13 @@ if (!gotTheLock) {
     // Initialize database
     await initializeDatabase()
 
+    // Initialize adoption tracker (side-effect only; never blocks startup)
+    try {
+      await initializeAdoptionTracker()
+    } catch (err) {
+      console.warn("[Main] AdoptionTracker init failed (disabled):", err)
+    }
+
     // Register IPC handlers
     registerAgentHandlers(ipcMain)
     registerThreadHandlers(ipcMain)
@@ -568,6 +576,11 @@ if (!gotTheLock) {
     stopChatX()
     stopHookConfigWatcher()
     stopUpdateChecker()
+    try {
+      shutdownAdoptionTracker()
+    } catch (err) {
+      console.warn("[Main] shutdownAdoptionTracker error:", err)
+    }
 
     const cleanup = Promise.all([
       stopAllLsp().catch((err) => console.warn("[Main] stopAllLsp error:", err)),

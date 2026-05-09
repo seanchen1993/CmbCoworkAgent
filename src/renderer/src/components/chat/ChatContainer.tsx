@@ -35,12 +35,14 @@ import {
   CircleAlert,
   FilePenLine,
   Plus,
-  Loader2
+  Loader2,
+  CornerDownLeft
 } from "lucide-react"
 import type { FileAttachment } from "@/types"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Badge } from "@/components/ui/badge"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { useAppStore } from "@/lib/store"
 import { cn } from "@/lib/utils"
 import { useShallow } from "zustand/react/shallow"
@@ -57,13 +59,11 @@ import { ContextUsageIndicator } from "./ContextUsageIndicator"
 import type { Message, SkillMetadata } from "@/types"
 import { MessageBubble } from "./MessageBubble"
 import { ChatScrollNavigator, type ChatScrollQuestion } from "./ChatScrollNavigator"
-import { UpdateStatusCard } from "./UpdateStatusCard"
 import { SkillsByCategorySection } from "./SkillsByCategorySection"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
 import { uploadChatData, ChatReportPayload } from "@/api"
 import { marketApi, MarketItem } from "../../api/market"
 import { insertLog, updateMMJUserInfo } from "../../../js/mmjUtils"
-import { UpdateDialog } from "../update/UpdateDialog"
 import { toast } from "sonner"
 import { SlashCommandPopover } from "@/features/slash-commands/SlashCommandPopover"
 import { useSlashCommands } from "@/features/slash-commands/useSlashCommands"
@@ -674,9 +674,7 @@ export function ChatContainer({
   const thinkingCycleRef = useRef(-1)
   const wasLoadingRef = useRef(false)
   const loadingMessageCountRef = useRef(0)
-  const [needUpdateVersion, setNeedUpdateVersion] = useState(false)
   const [modelContextLimit, setModelContextLimit] = useState<number | undefined>(undefined)
-  const [updateDialogOpen, setUpdateDialogOpen] = useState(false)
 
   useEffect(() => {
     const { ipcRenderer } = window.electron
@@ -739,7 +737,8 @@ export function ChatContainer({
     loadThreads,
     generateTitleForFirstMessage,
     setShowCustomizeView,
-    setMarketInitialSkillCategory
+    setMarketInitialSkillCategory,
+    setMarketInitialSkillDetailName
   } = useAppStore()
 
   const allSkillsRef = useRef<MarketItem[]>([])
@@ -1089,43 +1088,6 @@ export function ChatContainer({
       ignore = true
     }
   }, [currentModel])
-
-  const syncNeedUpdateVersion = useCallback(async () => {
-    try {
-      const status = await window.api.update.getStatus()
-      setNeedUpdateVersion(Boolean(status.update) && status.status !== "idle")
-    } catch (error) {
-      console.warn("[ChatContainer] Failed to sync update status:", error)
-      setNeedUpdateVersion(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    const updateApi = window.api.update
-    void syncNeedUpdateVersion()
-
-    const removeAvailable = updateApi.onAvailable(() => {
-      setNeedUpdateVersion(true)
-    })
-    const removeDownloaded = updateApi.onDownloaded(() => {
-      setNeedUpdateVersion(true)
-    })
-    const removeError = updateApi.onError(() => {
-      void syncNeedUpdateVersion()
-    })
-
-    return () => {
-      removeAvailable()
-      removeDownloaded()
-      removeError()
-    }
-  }, [syncNeedUpdateVersion])
-
-  useEffect(() => {
-    if (!updateDialogOpen) {
-      void syncNeedUpdateVersion()
-    }
-  }, [updateDialogOpen, syncNeedUpdateVersion])
 
   useEffect(() => {
     queryRemoteSkills()
@@ -1573,6 +1535,11 @@ export function ChatContainer({
   // Auto-scroll on new messages only if already at bottom
   useEffect(() => {
     const viewport = getViewport()
+    if (viewport && displayMessages.length === 0) {
+      viewport.scrollTop = 0
+      isAtBottomRef.current = true
+      return
+    }
     if (viewport && isAtBottomRef.current) {
       viewport.scrollTop = viewport.scrollHeight
     }
@@ -1592,10 +1559,15 @@ export function ChatContainer({
   useEffect(() => {
     const viewport = getViewport()
     if (viewport) {
+      if (displayMessages.length === 0) {
+        viewport.scrollTop = 0
+        isAtBottomRef.current = true
+        return
+      }
       viewport.scrollTop = viewport.scrollHeight
       isAtBottomRef.current = true
     }
-  }, [threadId, getViewport])
+  }, [displayMessages.length, threadId, getViewport])
 
   // Focus input on mount
   useEffect(() => {
@@ -1835,6 +1807,24 @@ export function ChatContainer({
       handleSubmit(e)
     }
   }
+
+  const handleInsertNewline = useCallback((): void => {
+    if (isLoading) return
+
+    const textarea = inputRef.current
+    const selectionStart = textarea?.selectionStart ?? input.length
+    const selectionEnd = textarea?.selectionEnd ?? input.length
+    const nextInput = `${input.slice(0, selectionStart)}\n${input.slice(selectionEnd)}`
+    const nextCursor = selectionStart + 1
+
+    setInput(nextInput)
+    requestAnimationFrame(() => {
+      const target = inputRef.current
+      if (!target) return
+      target.focus()
+      target.setSelectionRange(nextCursor, nextCursor)
+    })
+  }, [input, isLoading, setInput])
 
   // Auto-resize textarea based on content
   const adjustTextareaHeight = (): void => {
@@ -2259,6 +2249,14 @@ export function ChatContainer({
     [setMarketInitialSkillCategory, setShowCustomizeView]
   )
 
+  const handleOpenMarketBySkill = useCallback(
+    (skillName: string): void => {
+      setMarketInitialSkillDetailName(skillName)
+      setShowCustomizeView(true, "market")
+    },
+    [setMarketInitialSkillDetailName, setShowCustomizeView]
+  )
+
   const programmingSkillCards = useMemo(() => {
     const source = showAllProgrammingSkills ? programmingSkills : programmingSkills.slice(0, 8)
     return source.map((skill) => ({
@@ -2633,6 +2631,7 @@ export function ChatContainer({
                           skills={enabledSkillsForSlash}
                           previewLimit={GOOD_SKILLS_PREVIEW_LIMIT}
                           onOpenMarketByCategory={handleOpenMarketBySecondaryCategory}
+                          onOpenMarketBySkill={handleOpenMarketBySkill}
                           onUseSkillPrompt={handleUseSkillPrompt}
                         />
                       </TabsContent>
@@ -2776,13 +2775,7 @@ export function ChatContainer({
                               <div className="text-xs text-foreground leading-5">操作说明文档</div>
                             </div>
                           </button>
-
-                          <UpdateStatusCard
-                            hasUpdate={needUpdateVersion}
-                            onClick={() => {
-                              setUpdateDialogOpen(true)
-                            }}
-                          />
+                          {/*<UpdateActionButton />*/}
                         </div>
                       </TabsContent>
                     </Tabs>
@@ -3290,7 +3283,7 @@ export function ChatContainer({
                   placeholder={
                     attachments.length > 0
                       ? "输入消息或直接发送文件..."
-                      : "向 CMBDevClaw 提问，/ 输入命令"
+                      : "向 CMBDevClaw 提问，/ 输入命令；Shift + Enter 换行"
                   }
                   disabled={isLoading}
                   className={cn(
@@ -3328,6 +3321,24 @@ export function ChatContainer({
                     />
                   </div>
                   <div className="flex items-center gap-2">
+                    <TooltipProvider delayDuration={180}>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            type="button"
+                            disabled={isLoading}
+                            onClick={handleInsertNewline}
+                            aria-label="换行"
+                            className="cursor-pointer flex items-center justify-center size-7 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            <CornerDownLeft className="size-3.5" />
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent side="top" sideOffset={6}>
+                          Shift + Enter 换行
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
                     {isLoading ? (
                       <button
                         type="button"
@@ -3381,7 +3392,6 @@ export function ChatContainer({
           </div>
         </form>
       </div>
-      <UpdateDialog open={updateDialogOpen} onOpenChange={setUpdateDialogOpen} />
     </div>
   )
 }
