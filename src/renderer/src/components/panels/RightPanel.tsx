@@ -1170,7 +1170,9 @@ export function RightPanel({
             <SectionHeader
               title="技能"
               icon={Sparkles}
-              badge={skills.length}
+              badge={
+                splitRightPanelSkillsByEnabled(skills, disabledSkills).enabled.length
+              }
               isOpen={skillsOpen}
               onToggle={() => setSkillsOpen((prev) => !prev)}
             />
@@ -2437,7 +2439,7 @@ function SkillsContent({
             <div key={node.key} className="space-y-2">
               {node.skill ? (
                 <div className={cn("p-3 rounded-sm border border-border", disabled && "opacity-60")}>
-                  <div className="flex items-center gap-2 text-sm font-medium">
+                  <div className="flex min-w-0 items-center gap-2 text-sm font-medium">
                     <Sparkles
                       className={cn(
                         "size-3.5 shrink-0",
@@ -2446,21 +2448,12 @@ function SkillsContent({
                     />
                     <span
                       className={cn(
-                        "flex-1 truncate",
+                        "min-w-0 flex-1 truncate",
                         disabled && "text-muted-foreground line-through"
                       )}
                     >
                       {node.skill.name}
                     </span>
-                    {node.skill.pluginName && (
-                      <Badge
-                        variant="outline"
-                        className="text-[10px] h-4 px-1.5 shrink-0 border-violet-300/70 bg-violet-500/10 text-violet-700 dark:border-violet-500/30 dark:text-violet-300"
-                        title={`来自插件：${node.skill.pluginName}`}
-                      >
-                        插件 · {node.skill.pluginName}
-                      </Badge>
-                    )}
                     {childCount > 0 && (
                       <Badge variant="outline" className="text-[10px] h-4 px-1.5 shrink-0 gap-1">
                         <Folder className="mr-1 size-2.5" />
@@ -2473,6 +2466,17 @@ function SkillsContent({
                       </Badge>
                     )}
                   </div>
+                  {node.skill.pluginName && (
+                    <div className="mt-1 flex min-w-0 items-center gap-1">
+                      <Badge
+                        variant="outline"
+                        className="min-w-0 max-w-full text-[10px] h-4 px-1.5 border-violet-300/70 bg-violet-500/10 text-violet-700 dark:border-violet-500/30 dark:text-violet-300"
+                        title={`来自插件：${node.skill.pluginName}`}
+                      >
+                        <span className="truncate">插件 · {node.skill.pluginName}</span>
+                      </Badge>
+                    </div>
+                  )}
                   {node.skill.description && (
                     <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
                       {node.skill.description}
