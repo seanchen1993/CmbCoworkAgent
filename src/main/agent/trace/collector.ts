@@ -24,7 +24,8 @@ import {
   existsSync,
   unlinkSync,
   rmdirSync,
-  writeFileSync
+  writeFileSync,
+  statSync
 } from "fs"
 import { v4 as uuid } from "uuid"
 import type {
@@ -86,6 +87,8 @@ function getThreadTracesDir(threadId: string): string {
   return join(getTracesRootDir(), threadId)
 }
 
+const MAX_TRACES_PER_THREAD = 50
+
 function writeTraceFile(trace: AgentTrace): void {
   try {
     const dir = getThreadTracesDir(trace.threadId)
@@ -93,8 +96,47 @@ function writeTraceFile(trace: AgentTrace): void {
     const filePath = join(dir, `${trace.traceId}.jsonl`)
     appendFileSync(filePath, JSON.stringify(trace) + "\n", "utf-8")
     console.log(`[Tracer] Written trace ${trace.traceId} to ${filePath}`)
+    // Prune oldest traces if over the per-thread limit.
+    pruneOldTraces(trace.threadId)
   } catch (e) {
     console.warn("[Tracer] Failed to write trace file:", e)
+  }
+}
+
+/** Delete the oldest trace files in a thread directory, keeping at most MAX_TRACES_PER_THREAD. */
+function pruneOldTraces(threadId: string): void {
+  try {
+    const dir = getThreadTracesDir(threadId)
+    if (!existsSync(dir)) return
+
+    const files = readdirSync(dir)
+      .filter((f) => f.endsWith(".jsonl"))
+      .map((name) => {
+        const filePath = join(dir, name)
+        try {
+          return { name, filePath, mtimeMs: statSync(filePath).mtimeMs }
+        } catch {
+          return null
+        }
+      })
+      .filter((e): e is { name: string; filePath: string; mtimeMs: number } => e !== null)
+
+    if (files.length <= MAX_TRACES_PER_THREAD) return
+
+    // Sort newest first, delete the tail.
+    files.sort((a, b) => b.mtimeMs - a.mtimeMs)
+    const toDelete = files.slice(MAX_TRACES_PER_THREAD)
+
+    for (const entry of toDelete) {
+      try {
+        unlinkSync(entry.filePath)
+        console.log(`[Tracer] Pruned old trace: ${entry.name} (thread ${threadId})`)
+      } catch (e) {
+        console.warn(`[Tracer] Failed to prune trace ${entry.name}:`, e)
+      }
+    }
+  } catch (e) {
+    console.warn("[Tracer] Failed to prune old traces:", e)
   }
 }
 
