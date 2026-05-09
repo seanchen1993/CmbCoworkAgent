@@ -1,6 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect } from "react"
 import { v4 as uuid } from "uuid"
-import { PenLine, SendHorizontal, Trash2, Undo2 } from "lucide-react"
+import { MousePointer2, PenLine, SendHorizontal, Trash2, Undo2, X } from "lucide-react"
 import type { FileAttachment } from "@/types"
 import { getToolLabel } from "@/lib/tool-labels"
 import { inlineHtmlSiblingAssets } from "@/lib/html-srcdoc"
@@ -83,6 +83,23 @@ interface DrawStroke {
 
 interface DrawElementHint {
   strokeId: string
+  elements: string[]
+}
+
+type DrawToolMode = "draw" | "note"
+
+interface DrawNote {
+  id: string
+  pageX: number
+  pageY: number
+  text: string
+  elements: string[]
+  createdAt: number
+}
+
+interface DraftDrawNote {
+  pageX: number
+  pageY: number
   elements: string[]
 }
 
@@ -234,6 +251,9 @@ interface TabState {
   // Per-tab draw annotations. Coordinates are iframe document pixels.
   drawStrokes: DrawStroke[]
   drawElementHints: DrawElementHint[]
+  drawNotes: DrawNote[]
+  draftDrawNote: DraftDrawNote | null
+  drawToolMode: DrawToolMode
   // Iframe scroll position — updated continuously via __iframe_scroll postMessage
   iframeScrollX: number
   iframeScrollY: number
@@ -286,6 +306,9 @@ function makeTabState(): TabState {
     activeCommentId: null,
     drawStrokes: [],
     drawElementHints: [],
+    drawNotes: [],
+    draftDrawNote: null,
+    drawToolMode: "draw",
     iframeScrollX: 0,
     iframeScrollY: 0,
     editModeAvailable: false,
@@ -580,6 +603,8 @@ type PersistedTabState = {
   comments: CommentItem[]
   drawStrokes?: DrawStroke[]
   drawElementHints?: DrawElementHint[]
+  drawNotes?: DrawNote[]
+  drawToolMode?: DrawToolMode
   codeContext: Array<{ filename: string; content: string }> | null
   designLink: string | null
   rightTab: RightPanelTab
@@ -606,6 +631,8 @@ function serializeTs(ts: TabState): PersistedTabState {
     comments:          ts.comments,
     drawStrokes:       ts.drawStrokes,
     drawElementHints:  ts.drawElementHints,
+    drawNotes:         ts.drawNotes,
+    drawToolMode:      ts.drawToolMode,
     codeContext:       ts.codeContext,
     designLink:        ts.designLink,
     rightTab:          ts.rightTab,
@@ -621,6 +648,8 @@ function deserializeTs(p: PersistedTabState): TabState {
     sourceInfo:      p.sourceInfo ?? null,
     drawStrokes:     p.drawStrokes ?? [],
     drawElementHints:p.drawElementHints ?? [],
+    drawNotes:       p.drawNotes ?? [],
+    drawToolMode:    p.drawToolMode ?? "draw",
     apiHistory:      p.apiHistory ?? [],
     artifactPath:    p.artifactPath ?? null,
     generationState: "idle",  // always reset — never restore mid-stream
@@ -1178,7 +1207,10 @@ export function DesignView(): React.JSX.Element {
   const setTweaksOn   = (val: boolean | ((v: boolean) => boolean)) =>
     updateTs(activeTabId, (prev) => ({ tweaksOn: typeof val === "function" ? val(prev.tweaksOn) : val }))
   const setActiveMode = (val: "comment" | "edit" | "draw" | null) =>
-    updateTs(activeTabId, { activeMode: val })
+    updateTs(activeTabId, (prev) => ({
+      activeMode: val,
+      draftDrawNote: val === "draw" ? prev.draftDrawNote : null,
+    }))
   const setZoom = (val: number | ((v: number) => number)) =>
     updateTs(activeTabId, (prev) => ({ zoom: typeof val === "function" ? val(prev.zoom) : val }))
 
@@ -1379,6 +1411,9 @@ export function DesignView(): React.JSX.Element {
       activeCommentId: null,
       drawStrokes: [],
       drawElementHints: [],
+      drawNotes: [],
+      draftDrawNote: null,
+      drawToolMode: "draw",
       iframeScrollX: 0,
       iframeScrollY: 0,
       editModeAvailable: false,
@@ -2334,16 +2369,16 @@ ${commentLines}${variantNote}`
     startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined, cleanMsg, undefined, undefined, state.artifactPath)
   }, [activeTabId, tabStates, updateTs, startGeneration, buildCommentPrompt])
 
-  const collectDrawElementHint = useCallback((stroke: DrawStroke): DrawElementHint => {
+  const collectDrawElementLabels = useCallback((points: DrawPoint[]): string[] => {
     const doc = iframeRef.current?.contentDocument
     const win = iframeRef.current?.contentWindow
-    if (!doc || !win || stroke.points.length === 0) return { strokeId: stroke.id, elements: [] }
+    if (!doc || !win || points.length === 0) return []
 
-    const sampleCount = Math.min(6, stroke.points.length)
-    const step = Math.max(1, Math.floor(stroke.points.length / sampleCount))
-    const points = stroke.points.filter((_, index) => index % step === 0).slice(0, sampleCount)
+    const sampleCount = Math.min(6, points.length)
+    const step = Math.max(1, Math.floor(points.length / sampleCount))
+    const sampledPoints = points.filter((_, index) => index % step === 0).slice(0, sampleCount)
     const seen = new Set<string>()
-    points.forEach((point) => {
+    sampledPoints.forEach((point) => {
       const element = doc.elementFromPoint(
         Math.round(point.x - win.scrollX),
         Math.round(point.y - win.scrollY)
@@ -2351,8 +2386,53 @@ ${commentLines}${variantNote}`
       const label = getDrawElementLabel(element)
       if (label) seen.add(label)
     })
-    return { strokeId: stroke.id, elements: Array.from(seen).slice(0, 8) }
+    return Array.from(seen).slice(0, 8)
   }, [])
+
+  const collectDrawElementHint = useCallback((stroke: DrawStroke): DrawElementHint => {
+    return { strokeId: stroke.id, elements: collectDrawElementLabels(stroke.points) }
+  }, [collectDrawElementLabels])
+
+  const handleDrawNoteDraft = useCallback((point: DrawPoint) => {
+    updateTs(activeTabId, {
+      draftDrawNote: {
+        pageX: point.x,
+        pageY: point.y,
+        elements: collectDrawElementLabels([point]),
+      },
+    })
+  }, [activeTabId, updateTs, collectDrawElementLabels])
+
+  const handleDrawNoteSubmit = useCallback((text: string) => {
+    const value = text.trim()
+    if (!value) {
+      updateTs(activeTabId, { draftDrawNote: null })
+      return
+    }
+    updateTs(activeTabId, (prev) => {
+      if (!prev.draftDrawNote) return {}
+      const note: DrawNote = {
+        id: uuid(),
+        pageX: prev.draftDrawNote.pageX,
+        pageY: prev.draftDrawNote.pageY,
+        text: value,
+        elements: prev.draftDrawNote.elements,
+        createdAt: Date.now(),
+      }
+      return {
+        drawNotes: [...prev.drawNotes, note],
+        draftDrawNote: null,
+      }
+    })
+  }, [activeTabId, updateTs])
+
+  const handleDrawNoteCancel = useCallback(() => {
+    updateTs(activeTabId, { draftDrawNote: null })
+  }, [activeTabId, updateTs])
+
+  const handleDrawToolModeChange = useCallback((mode: DrawToolMode) => {
+    updateTs(activeTabId, { drawToolMode: mode, draftDrawNote: null })
+  }, [activeTabId, updateTs])
 
   const handleDrawStrokeComplete = useCallback((stroke: DrawStroke) => {
     const hint = collectDrawElementHint(stroke)
@@ -2367,18 +2447,26 @@ ${commentLines}${variantNote}`
 
   const handleUndoDrawStroke = useCallback(() => {
     updateTs(activeTabId, (prev) => {
-      const removed = prev.drawStrokes[prev.drawStrokes.length - 1]
+      const removedStroke = prev.drawStrokes[prev.drawStrokes.length - 1]
+      const removedNote = prev.drawNotes[prev.drawNotes.length - 1]
+      if (removedNote && (!removedStroke || removedNote.createdAt > removedStroke.createdAt)) {
+        return {
+          drawNotes: prev.drawNotes.slice(0, -1),
+          draftDrawNote: null,
+        }
+      }
       return {
         drawStrokes: prev.drawStrokes.slice(0, -1),
-        drawElementHints: removed
-          ? prev.drawElementHints.filter((hint) => hint.strokeId !== removed.id)
+        drawElementHints: removedStroke
+          ? prev.drawElementHints.filter((hint) => hint.strokeId !== removedStroke.id)
           : prev.drawElementHints,
+        draftDrawNote: null,
       }
     })
   }, [activeTabId, updateTs])
 
   const handleClearDrawStrokes = useCallback(() => {
-    updateTs(activeTabId, { drawStrokes: [], drawElementHints: [] })
+    updateTs(activeTabId, { drawStrokes: [], drawElementHints: [], drawNotes: [], draftDrawNote: null })
   }, [activeTabId, updateTs])
 
   const handleDrawWheel = useCallback((deltaX: number, deltaY: number) => {
@@ -2397,7 +2485,7 @@ ${commentLines}${variantNote}`
     const instruction = userInstruction.trim()
     const instructionLine = instruction
       ? `\n用户补充说明：${instruction}\n`
-      : "\n用户没有补充文字时，请把绘制区域理解为需要重点优化或修正的 UI 区域。\n"
+      : "\n用户没有补充文字时，请优先遵循黄色 note 的文本，并把红色绘制区域理解为需要重点优化或修正的 UI 区域。\n"
     const strokeLines = state.drawStrokes.filter((stroke) => stroke.points.length > 0).map((stroke, index) => {
       const xs = stroke.points.map((point) => point.x)
       const ys = stroke.points.map((point) => point.y)
@@ -2409,12 +2497,19 @@ ${commentLines}${variantNote}`
       const elementText = elements.length > 0 ? `；覆盖/接近元素：${elements.join(", ")}` : ""
       return `[${index + 1}] ${stroke.color} 画笔，粗细 ${stroke.width}px，区域 x:${minX}-${maxX}, y:${minY}-${maxY}，${stroke.points.length} 个点${elementText}`
     }).join("\n")
+    const noteLines = state.drawNotes.map((note, index) => {
+      const elementText = note.elements.length > 0 ? `；接近元素：${note.elements.join(", ")}` : ""
+      return `[${index + 1}] note 坐标 x:${Math.round(note.pageX)}, y:${Math.round(note.pageY)}${elementText}\n内容：${note.text}`
+    }).join("\n")
 
-    const prompt = `用户通过 Draw 模式直接在设计预览上画了标记。请把这些画线理解为视觉指向和编辑意图：线条圈出的、划过的或指向的区域是需要重点调整的区域；不要把画线本身画进最终页面。请根据线条位置对当前设计做有针对性的视觉优化，保持未标记区域尽量不变。
+    const prompt = `用户通过 Draw 模式直接在设计预览上做了标记。请把红色画线理解为视觉指向和编辑意图：线条圈出的、划过的或指向的区域是需要重点调整的区域。黄色 note 是用户在页面任意位置添加的明确文本指令，优先按 note 内容执行。不要把画线或 note 本身渲染进最终页面。请根据标记位置对当前设计做有针对性的视觉优化，保持未标记区域尽量不变。
 ${instructionLine}
 
-绘制标记：
-${strokeLines}${variantNote}`
+红色绘制标记：
+${strokeLines || "无"}
+
+黄色 note：
+${noteLines || "无"}${variantNote}`
 
     return { prompt }
   }, [])
@@ -2422,18 +2517,21 @@ ${strokeLines}${variantNote}`
   const handleSendDrawStrokes = useCallback(() => {
     const tabId = activeTabId
     const state = tabStates[tabId]
-    if (!state || state.drawStrokes.length === 0) return
+    const annotationCount = (state?.drawStrokes.length ?? 0) + (state?.drawNotes.length ?? 0)
+    if (!state || annotationCount === 0) return
 
     const userInstruction = state.inputValue.trim()
     const { prompt } = buildDrawPrompt(state, userInstruction)
     const cleanMsg = userInstruction
       ? `✏️ ${userInstruction.slice(0, 60)}`
-      : `✏️ 发送 ${state.drawStrokes.length} 条绘制标记`
+      : `✏️ 发送 ${annotationCount} 条 Draw 标记`
 
     updateTs(tabId, (prev) => ({
       inputValue: "",
       drawStrokes: [],
       drawElementHints: [],
+      drawNotes: [],
+      draftDrawNote: null,
       messages: [
         ...prev.messages,
         { role: "user" as const, content: cleanMsg },
@@ -3381,22 +3479,31 @@ ${strokeLines}${variantNote}`
                         }}
                       />
                     </div>
-                    {(activeMode === "draw" || ts.drawStrokes.length > 0) && (
+                    {(activeMode === "draw" || ts.drawStrokes.length > 0 || ts.drawNotes.length > 0) && (
                       <DrawLayer
                         key={activeMode === "draw" ? "draw-active" : "draw-idle"}
                         active={activeMode === "draw"}
+                        mode={ts.drawToolMode}
                         strokes={ts.drawStrokes}
+                        notes={ts.drawNotes}
+                        draftNote={ts.draftDrawNote}
                         zoom={zoom}
                         scrollX={ts.iframeScrollX}
                         scrollY={ts.iframeScrollY}
                         onStrokeComplete={handleDrawStrokeComplete}
+                        onNoteDraft={handleDrawNoteDraft}
+                        onNoteSubmit={handleDrawNoteSubmit}
+                        onNoteCancel={handleDrawNoteCancel}
                         onWheelScroll={handleDrawWheel}
                       />
                     )}
 
                     {activeMode === "draw" && (
                       <DrawActionBar
-                        count={ts.drawStrokes.length}
+                        mode={ts.drawToolMode}
+                        count={ts.drawStrokes.length + ts.drawNotes.length}
+                        onModeChange={handleDrawToolModeChange}
+                        onClose={() => setActiveMode(null)}
                         onUndo={handleUndoDrawStroke}
                         onClear={handleClearDrawStrokes}
                         onSend={handleSendDrawStrokes}
@@ -5178,19 +5285,31 @@ function getDrawElementLabel(element: Element | null): string {
 
 function DrawLayer({
   active,
+  mode,
   strokes,
+  notes,
+  draftNote,
   zoom,
   scrollX,
   scrollY,
   onStrokeComplete,
+  onNoteDraft,
+  onNoteSubmit,
+  onNoteCancel,
   onWheelScroll,
 }: {
   active: boolean
+  mode: DrawToolMode
   strokes: DrawStroke[]
+  notes: DrawNote[]
+  draftNote: DraftDrawNote | null
   zoom: number
   scrollX: number
   scrollY: number
   onStrokeComplete: (stroke: DrawStroke) => void
+  onNoteDraft: (point: DrawPoint) => void
+  onNoteSubmit: (text: string) => void
+  onNoteCancel: () => void
   onWheelScroll: (deltaX: number, deltaY: number) => void
 }) {
   const [draft, setDraft] = useState<DrawPoint[]>([])
@@ -5221,16 +5340,21 @@ function DrawLayer({
     if (!active || e.button !== 0) return
     e.preventDefault()
     e.stopPropagation()
+    const point = getPointerDrawPoint(e, scrollX, scrollY, zoom)
+    if (mode === "note") {
+      onNoteDraft(point)
+      return
+    }
     drawingRef.current = true
     pointerIdRef.current = e.pointerId
     e.currentTarget.setPointerCapture(e.pointerId)
-    const points = [getPointerDrawPoint(e, scrollX, scrollY, zoom)]
+    const points = [point]
     draftRef.current = points
     setDraft(points)
   }
 
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!active || !drawingRef.current || pointerIdRef.current !== e.pointerId) return
+    if (!active || mode !== "draw" || !drawingRef.current || pointerIdRef.current !== e.pointerId) return
     e.preventDefault()
     const next = getPointerDrawPoint(e, scrollX, scrollY, zoom)
     const last = draftRef.current[draftRef.current.length - 1]
@@ -5266,7 +5390,7 @@ function DrawLayer({
         inset: 0,
         zIndex: active ? 18 : 6,
         pointerEvents: active ? "auto" : "none",
-        cursor: active ? "crosshair" : "default",
+        cursor: active ? (mode === "draw" ? "crosshair" : "text") : "default",
         touchAction: "none",
       }}
     >
@@ -5299,17 +5423,39 @@ function DrawLayer({
           />
         )}
       </svg>
+      {notes.map((note) => (
+        <DrawNoteBadge
+          key={note.id}
+          x={(note.pageX - scrollX) * scale}
+          y={(note.pageY - scrollY) * scale}
+          text={note.text}
+        />
+      ))}
+      {draftNote && (
+        <DrawNoteDraft
+          x={(draftNote.pageX - scrollX) * scale}
+          y={(draftNote.pageY - scrollY) * scale}
+          onSubmit={onNoteSubmit}
+          onCancel={onNoteCancel}
+        />
+      )}
     </div>
   )
 }
 
 function DrawActionBar({
+  mode,
   count,
+  onModeChange,
+  onClose,
   onUndo,
   onClear,
   onSend,
 }: {
+  mode: DrawToolMode
   count: number
+  onModeChange: (mode: DrawToolMode) => void
+  onClose: () => void
   onUndo: () => void
   onClear: () => void
   onSend: () => void
@@ -5325,59 +5471,246 @@ function DrawActionBar({
         zIndex: 28,
         display: "flex",
         alignItems: "center",
-        gap: 6,
-        padding: "6px",
+        gap: 8,
+        padding: "8px 10px",
         borderRadius: 999,
-        background: "rgba(26,26,26,0.84)",
-        backdropFilter: "blur(8px)",
-        boxShadow: "0 4px 16px rgba(0,0,0,0.22)",
+        background: "rgba(255,255,255,0.94)",
+        border: "1px solid rgba(0,0,0,0.08)",
+        backdropFilter: "blur(12px)",
+        boxShadow: "0 10px 32px rgba(0,0,0,0.18)",
       }}
     >
-      <span style={{ padding: "0 8px", color: "#fff", fontSize: 12, fontWeight: 600, whiteSpace: "nowrap" }}>
-        {count === 0 ? "绘制标记" : `${count} 条标记`}
-      </span>
-      <button onClick={onUndo} disabled={disabled} title="撤销" style={drawToolBtnStyle(disabled)}>
-        <Undo2 size={14} />
+      <button onClick={onClose} title="退出 Draw" style={drawIconBtnStyle(false, "light")}>
+        <X size={15} />
       </button>
-      <button onClick={onClear} disabled={disabled} title="清空" style={drawToolBtnStyle(disabled)}>
-        <Trash2 size={14} />
+      <button onClick={onUndo} disabled={disabled} title="撤销" style={drawIconBtnStyle(disabled, "light")}>
+        <Undo2 size={15} />
+      </button>
+      <div style={{ display: "flex", padding: 3, borderRadius: 12, background: "#f0efeb", gap: 3 }}>
+        <DrawModeButton
+          active={mode === "draw"}
+          icon={<PenLine size={15} />}
+          label="Draw"
+          onClick={() => onModeChange("draw")}
+        />
+        <DrawModeButton
+          active={mode === "note"}
+          icon={<MousePointer2 size={15} />}
+          label="Click"
+          onClick={() => onModeChange("note")}
+        />
+      </div>
+      <span style={{ padding: "0 8px", color: "#6a6a6a", fontSize: 13, fontWeight: 500, whiteSpace: "nowrap" }}>
+        {mode === "note" ? "点击任意位置添加 note" : "拖拽画出修改区域"}
+      </span>
+      <span style={{ padding: "0 2px 0 8px", color: "#4a4a4a", fontSize: 13, fontWeight: 700, whiteSpace: "nowrap" }}>
+        Queue {count}
+      </span>
+      <button onClick={onClear} disabled={disabled} title="清空队列" style={drawIconBtnStyle(disabled, "light")}>
+        <Trash2 size={15} />
       </button>
       <button
         onClick={onSend}
         disabled={disabled}
-        title="发送绘制标记"
+        title="发送 Draw 标记"
         style={{
-          ...drawToolBtnStyle(disabled),
+          ...drawIconBtnStyle(disabled, "accent"),
           width: "auto",
-          padding: "0 12px",
-          gap: 5,
-          background: disabled ? "rgba(255,255,255,0.1)" : "#cc785c",
-          color: disabled ? "rgba(255,255,255,0.45)" : "#fff",
+          padding: "0 14px",
+          gap: 6,
         }}
       >
         <SendHorizontal size={14} />
-        发送
+        Send
       </button>
     </div>
   )
 }
 
-function drawToolBtnStyle(disabled: boolean): React.CSSProperties {
+function DrawModeButton({ active, icon, label, onClick }: {
+  active: boolean
+  icon: React.ReactNode
+  label: string
+  onClick: () => void
+}) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        height: 34,
+        minWidth: 92,
+        padding: "0 14px",
+        border: active ? "1px solid rgba(0,0,0,0.08)" : "1px solid transparent",
+        borderRadius: 10,
+        background: active ? "#ffffff" : "transparent",
+        color: active ? "#1a1a1a" : "#6a6a6a",
+        boxShadow: active ? "0 2px 8px rgba(0,0,0,0.08)" : "none",
+        cursor: "pointer",
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 7,
+        fontSize: 13,
+        fontWeight: 700,
+        fontFamily: "inherit",
+      }}
+    >
+      {icon}
+      {label}
+    </button>
+  )
+}
+
+function drawIconBtnStyle(disabled: boolean, tone: "light" | "accent"): React.CSSProperties {
+  const accent = tone === "accent"
   return {
-    height: 28,
-    width: 28,
+    height: 34,
+    width: 34,
     border: "none",
-    borderRadius: 999,
+    borderRadius: 10,
     display: "inline-flex",
     alignItems: "center",
     justifyContent: "center",
-    background: "rgba(255,255,255,0.12)",
-    color: disabled ? "rgba(255,255,255,0.45)" : "#fff",
+    background: accent
+      ? (disabled ? "#e0ded8" : "#cc785c")
+      : "transparent",
+    color: accent
+      ? (disabled ? "#aaa" : "#fff")
+      : (disabled ? "#b0b0b0" : "#5f5f5f"),
     cursor: disabled ? "default" : "pointer",
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: 700,
     fontFamily: "inherit",
   }
+}
+
+function DrawNoteBadge({ x, y, text }: { x: number; y: number; text: string }) {
+  return (
+    <div
+      style={{
+        position: "absolute",
+        left: x,
+        top: y,
+        transform: "translate(-10px, -100%)",
+        maxWidth: 180,
+        padding: "8px 10px",
+        borderRadius: 8,
+        background: "#fff3a3",
+        border: "1px solid #e1c84f",
+        boxShadow: "0 4px 12px rgba(0,0,0,0.18)",
+        color: "#1a1a1a",
+        fontSize: 13,
+        lineHeight: 1.35,
+        fontWeight: 600,
+        pointerEvents: "none",
+        whiteSpace: "pre-wrap",
+      }}
+    >
+      {text}
+    </div>
+  )
+}
+
+function DrawNoteDraft({
+  x,
+  y,
+  onSubmit,
+  onCancel,
+}: {
+  x: number
+  y: number
+  onSubmit: (text: string) => void
+  onCancel: () => void
+}) {
+  const [text, setText] = useState("")
+  const inputRef = useRef<HTMLTextAreaElement>(null)
+
+  useEffect(() => { inputRef.current?.focus() }, [])
+
+  return (
+    <div
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={(e) => e.stopPropagation()}
+      style={{
+        position: "absolute",
+        left: x,
+        top: y,
+        transform: "translate(-10px, -100%)",
+        width: 190,
+        padding: 10,
+        borderRadius: 10,
+        background: "#fff3a3",
+        border: "1px solid #e1c84f",
+        boxShadow: "0 8px 24px rgba(0,0,0,0.22)",
+        pointerEvents: "auto",
+      }}
+    >
+      <textarea
+        ref={inputRef}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault()
+            onSubmit(text)
+          }
+          if (e.key === "Escape") {
+            e.preventDefault()
+            onCancel()
+          }
+        }}
+        placeholder="添加 note..."
+        rows={3}
+        style={{
+          width: "100%",
+          border: "none",
+          outline: "none",
+          resize: "none",
+          background: "transparent",
+          color: "#1a1a1a",
+          fontSize: 14,
+          lineHeight: 1.4,
+          fontFamily: "inherit",
+          boxSizing: "border-box",
+        }}
+      />
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 8 }}>
+        <button
+          onClick={onCancel}
+          style={{
+            padding: "5px 8px",
+            border: "none",
+            borderRadius: 7,
+            background: "rgba(0,0,0,0.08)",
+            color: "#4a4a4a",
+            cursor: "pointer",
+            fontSize: 12,
+            fontWeight: 700,
+            fontFamily: "inherit",
+          }}
+        >
+          取消
+        </button>
+        <button
+          onClick={() => onSubmit(text)}
+          disabled={!text.trim()}
+          style={{
+            padding: "5px 10px",
+            border: "none",
+            borderRadius: 7,
+            background: text.trim() ? "#cc785c" : "rgba(0,0,0,0.12)",
+            color: text.trim() ? "#fff" : "#8a8a8a",
+            cursor: text.trim() ? "pointer" : "default",
+            fontSize: 12,
+            fontWeight: 700,
+            fontFamily: "inherit",
+          }}
+        >
+          添加
+        </button>
+      </div>
+    </div>
+  )
 }
 
 // ─────────────────────────────────────────────────────────
