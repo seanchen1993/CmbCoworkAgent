@@ -1017,7 +1017,13 @@ export function registerGitHandlers(): void {
       // without emitting any adoption event.
       let stagedCapture: StagedCapture | null = null
       if (isCommitCommand(command)) {
+        console.log("[Git] commit detected — capturing staged snapshots for adoption")
         stagedCapture = await captureStagedSnapshotsForCommand(command)
+        if (stagedCapture) {
+          console.log(
+            `[Git] staged capture done: snapshots=${stagedCapture.snapshots.length} workingDir=${stagedCapture.workingDir}`
+          )
+        }
       }
 
       // 这里最终会走 executeGitCommand -> runGitArgs -> 队列限流。
@@ -1028,10 +1034,15 @@ export function registerGitHandlers(): void {
       if (stagedCapture && stagedCapture.snapshots.length > 0) {
         try {
           const sha = extractCommitSha(result, stagedCapture.workingDir) ?? undefined
+          console.log(`[Git] triggering post-commit measurement: commitSha=${sha ?? "unknown"} snapshots=${stagedCapture.snapshots.length}`)
           measureForCommit(stagedCapture.snapshots, sha)
         } catch (e) {
           console.warn("[Git] adoption post-commit measurement skipped:", e)
         }
+      } else if (isCommitCommand(command)) {
+        console.log(
+          `[Git] post-commit measurement skipped: stagedCapture=${stagedCapture ? "present" : "null"} snapshots=${stagedCapture?.snapshots.length ?? 0}`
+        )
       }
 
       return result
