@@ -2524,7 +2524,7 @@ ${noteLines || "无"}${variantNote}`
     const { prompt } = buildDrawPrompt(state, userInstruction)
     const cleanMsg = userInstruction
       ? `✏️ ${userInstruction.slice(0, 60)}`
-      : `✏️ 发送 ${annotationCount} 条 Draw 标记`
+      : `✏️ 发送 ${annotationCount} 条绘制标记`
 
     updateTs(tabId, (prev) => ({
       inputValue: "",
@@ -5512,7 +5512,7 @@ function DrawActionBar({
       <button
         onClick={onSend}
         disabled={disabled}
-        title="发送 Draw 标记"
+        title="发送绘制标记"
         style={{
           ...drawIconBtnStyle(disabled, "accent"),
           width: "auto",
