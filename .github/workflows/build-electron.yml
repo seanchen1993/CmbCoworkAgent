@@ -338,7 +338,19 @@ jobs:
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: npm ci --include=optional
+        run: |
+          # Windows EPERM/EEXIST workaround: cache stale files + file locks
+          npm cache clean --force
+          try {
+            npm ci --include=optional
+          } catch {
+            Write-Host "npm ci failed, retrying after cache clean & node_modules removal..."
+            npm cache clean --force
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue node_modules
+            Remove-Item -Force -ErrorAction SilentlyContinue package-lock.json
+            git checkout -- package-lock.json 2>$null
+            npm ci --include=optional
+          }
 
       # Linux 加 --ignore-scripts:跳过 package.json 的 postinstall (electron-rebuild
       # -f -w node-pty),因为那条会在 ubuntu 24.04 宿主 (glibc 2.39) 上编一份坏的
