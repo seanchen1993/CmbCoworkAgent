@@ -709,10 +709,7 @@ const api = {
     read: (skillPath: string): Promise<{ success: boolean; content?: string; error?: string }> => {
       return ipcRenderer.invoke("skills:read", skillPath)
     },
-    write: (
-      skillPath: string,
-      content: string
-    ): Promise<{ success: boolean; error?: string }> => {
+    write: (skillPath: string, content: string): Promise<{ success: boolean; error?: string }> => {
       return ipcRenderer.invoke("skills:write", { skillPath, content })
     },
     readBinary: (
@@ -1148,6 +1145,15 @@ const api = {
       ipcRenderer.invoke("plugins:installFromDir") as Promise<{
         success: boolean
         pluginName?: string
+        error?: string
+      }>,
+    exportForMarket: (
+      id: string
+    ): Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }> =>
+      ipcRenderer.invoke("plugins:exportForMarket", id) as Promise<{
+        success: boolean
+        fileName?: string
+        buffer?: ArrayBuffer
         error?: string
       }>,
     delete: (id: string): Promise<{ success: boolean; error?: string }> =>

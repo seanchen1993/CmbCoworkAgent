@@ -18,7 +18,8 @@ import {
   FileText,
   Lightbulb,
   ArrowLeft,
-  BarChart3
+  BarChart3,
+  X
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -86,6 +87,10 @@ function getPrimaryCategory(category?: string): string {
   return parts[0]
 }
 
+function getCategoryFilterName(category?: string): string {
+  return getSecondaryCategory(category) || "未分类"
+}
+
 interface UploadedItemRecord {
   name: string
   type: MarketItemType
@@ -118,7 +123,7 @@ interface UserInfoLite {
   ystId?: string
 }
 
-type UploadFilterMode = "all" | "mine"
+type UploadFilterMode = "all" | "mine" | "installed" | "featured"
 
 function getSkillStatsRange(): { from: string; to: string } {
   // 和 Dashboard 的默认月维度保持一致，避免前后口径不一致。
@@ -189,20 +194,20 @@ interface MarketItemCardProps {
 }
 
 function MarketItemCard({
-                          item,
-                          onOpenDetail,
-                          onDelete,
-                          onUpdate,
-                          onDownload,
-                          onUpdateInstall,
-                          onUninstall,
-                          isDownloading = false,
-                          isInstalled = false,
-                          isUpdating = false,
-                          skillCallCount = null,
-                          skillUserCount = null,
-                          uploaderProfile = null
-                        }: MarketItemCardProps) {
+  item,
+  onOpenDetail,
+  onDelete,
+  onUpdate,
+  onDownload,
+  onUpdateInstall,
+  onUninstall,
+  isDownloading = false,
+  isInstalled = false,
+  isUpdating = false,
+  skillCallCount = null,
+  skillUserCount = null,
+  uploaderProfile = null
+}: MarketItemCardProps) {
   const formatMetricValue = (value: number | null): string => {
     if (value === null) return "0"
     if (value >= 100000000) return `${(value / 100000000).toFixed(1)}亿`
@@ -225,6 +230,7 @@ function MarketItemCard({
 
   const ip = localStorage.getItem("localIp")
   const isFeatured = item.featured === "精品"
+  const itemTag = item.tag?.trim()
   const isSkillCard = skillCallCount !== null || skillUserCount !== null
   const uploaderSapId = uploaderProfile?.sapId || item.user_id || ""
   const uploaderUserName = uploaderProfile?.userName || ""
@@ -253,6 +259,11 @@ function MarketItemCard({
                 精品
               </span>
             )}
+            {itemTag && (
+              <span className="inline-flex items-center gap-1 text-[11px] font-medium bg-[#edf4ff] text-[#3766a6] border border-[#ccdcf5] px-2 py-0.5 rounded-full shrink-0">
+                {itemTag}
+              </span>
+            )}
             {item.category && (
               <span className="inline-flex items-center gap-1 text-[11px] text-[#5e5d59] bg-[#f5f4ed] border border-[#e8e6dc] px-2 py-0.5 rounded-full shrink-0">
                 <Tag className="size-3 text-[#87867f] shrink-0" />
@@ -277,7 +288,7 @@ function MarketItemCard({
             {skillCallCount !== null && (
               <div className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg border border-[#d7e2f5] bg-[linear-gradient(135deg,#f4f8ff_0%,#ebf2ff_100%)] text-[#365d97] shadow-[rgba(54,93,151,0.06)_0px_2px_6px]">
                 <BarChart3 className="size-3 shrink-0" />
-                <span className="text-[11px] text-[#6a7fa5]">调用</span>
+                <span className="text-[11px] text-[#6a7fa5]">本月调用</span>
                 <span className="text-[12px] font-semibold tabular-nums">
                   {formatMetricValue(skillCallCount)}
                 </span>
@@ -286,7 +297,7 @@ function MarketItemCard({
             {skillUserCount !== null && (
               <div className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg border border-[#cfe4d9] bg-[linear-gradient(135deg,#f2faf5_0%,#e9f7ef_100%)] text-[#2f7a55] shadow-[rgba(47,122,85,0.06)_0px_2px_6px]">
                 <User className="size-3 shrink-0" />
-                <span className="text-[11px] text-[#4c8669]">用户</span>
+                <span className="text-[11px] text-[#4c8669]">本月用户</span>
                 <span className="text-[12px] font-semibold tabular-nums">
                   {formatMetricValue(skillUserCount)}
                 </span>
@@ -450,7 +461,9 @@ export function MarketPanel(): React.JSX.Element {
     marketInitialSkillCategory,
     setMarketInitialSkillCategory,
     marketInitialSkillSearchQuery,
-    setMarketInitialSkillSearchQuery
+    setMarketInitialSkillSearchQuery,
+    marketInitialSkillDetailName,
+    setMarketInitialSkillDetailName
   } = useAppStore()
   const [activeTab, setActiveTab] = useState<MarketItemType>("skill")
   const [searchQuery, setSearchQuery] = useState("")
@@ -480,6 +493,7 @@ export function MarketPanel(): React.JSX.Element {
   const [skillSortMode, setSkillSortMode] = useState<SkillSortMode>("calls_desc")
   const [selectedItemKey, setSelectedItemKey] = useState<string | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
+  const [detailError, setDetailError] = useState<string | null>(null)
   const [skillDetailSkill, setSkillDetailSkill] = useState<SkillMetadata | null>(null)
   const [skillDetailSelectedFile, setSkillDetailSelectedFile] = useState<string | null>(null)
   const [skillDetailContent, setSkillDetailContent] = useState<string | null>(null)
@@ -500,6 +514,7 @@ export function MarketPanel(): React.JSX.Element {
   const installedSkillsRef = useRef<string[]>([])
   const installedMcpsRef = useRef<string[]>([])
   const installedPluginsRef = useRef<string[]>([])
+  const openItemDetailRef = useRef<(item: MarketItem) => Promise<void>>(async () => {})
   const currentUserCandidateSet = useMemo(
     () => new Set(currentUserUploadCandidates),
     [currentUserUploadCandidates]
@@ -508,8 +523,28 @@ export function MarketPanel(): React.JSX.Element {
   const getItemKey = (item: MarketItem) => item.id || item.name
   const getMarketTypeLabel = (type: MarketItemType) =>
     type === "skill" ? "技能" : type === "mcp" ? "MCP连接器" : "插件"
+  const getMarketTypePluralLabel = (type: MarketItemType) =>
+    type === "skill" ? "Skills" : type === "mcp" ? "MCPs" : "Plugins"
+  const tabIntros: Record<MarketItemType, { title: string; description: string }> = {
+    skill: {
+      title: "Skills 是可直接调用的专项能力",
+      description:
+        "安装后可以在对话中选择或自动调用，用来完成写作、检索、分析、生成文件等具体任务。"
+    },
+    mcp: {
+      title: "MCPs 是连接外部工具和数据源的通道",
+      description:
+        "安装后可让 Agent 访问数据库、系统服务、业务 API 或远程工具，扩展它能读取和操作的范围。"
+    },
+    plugin: {
+      title: "Plugins 是打包好的功能扩展",
+      description: "安装后可一次性提供技能、MCP 连接器、钩子或界面能力，适合成套分发完整工作流。"
+    }
+  }
+  const activeTabIntro = tabIntros[activeTab]
 
   const resetDetailState = () => {
+    setDetailError(null)
     setSkillDetailSkill(null)
     setSkillDetailSelectedFile(null)
     setSkillDetailContent(null)
@@ -614,7 +649,7 @@ export function MarketPanel(): React.JSX.Element {
         setCurrentUserUploadCandidates([])
         return
       }
-      const userInfo = await window.api.models.getUserInfo() as UserInfoLite | null
+      const userInfo = (await window.api.models.getUserInfo()) as UserInfoLite | null
       const normalizedIds = [userInfo?.sapId, userInfo?.ystId]
         .map((value) => String(value || "").trim())
         .filter(Boolean)
@@ -756,22 +791,28 @@ export function MarketPanel(): React.JSX.Element {
   useEffect(() => {
     const hasInitialCategory = !!marketInitialSkillCategory
     const hasInitialSearch = !!marketInitialSkillSearchQuery?.trim()
-    if (!hasInitialCategory && !hasInitialSearch) return
+    const hasInitialDetail = !!marketInitialSkillDetailName?.trim()
+    if (!hasInitialCategory && !hasInitialSearch && !hasInitialDetail) return
 
     setActiveTab("skill")
     setDetailMode("list")
     setSelectedItemKey(null)
-    if (hasInitialCategory) {
+    if (hasInitialDetail) {
+      setCategoryFilter(null)
+    } else if (hasInitialCategory) {
       setCategoryFilter(marketInitialSkillCategory)
     } else {
       // 按名称跳转搜索时，避免历史分类筛选把结果“过滤没了”。
       setCategoryFilter(null)
     }
-    setSearchQuery(marketInitialSkillSearchQuery?.trim() || "")
+    setSearchQuery(
+      marketInitialSkillDetailName?.trim() || marketInitialSkillSearchQuery?.trim() || ""
+    )
     setMarketInitialSkillCategory(null)
     setMarketInitialSkillSearchQuery(null)
   }, [
     marketInitialSkillCategory,
+    marketInitialSkillDetailName,
     marketInitialSkillSearchQuery,
     setMarketInitialSkillCategory,
     setMarketInitialSkillSearchQuery
@@ -1040,13 +1081,8 @@ export function MarketPanel(): React.JSX.Element {
     setDetailMode("list")
     setSelectedItemKey(null)
     resetDetailState()
+    setCategoryFilter(null)
   }, [activeTab])
-
-  useEffect(() => {
-    if (activeTab !== "skill" && categoryFilter !== null) {
-      setCategoryFilter(null)
-    }
-  }, [activeTab, categoryFilter])
 
   const getCurrentData = () => {
     switch (activeTab) {
@@ -1210,7 +1246,7 @@ export function MarketPanel(): React.JSX.Element {
       }
     } catch (detailError) {
       console.error("Failed to load detail data:", detailError)
-      setError(detailError instanceof Error ? detailError.message : "加载详情失败")
+      setDetailError(detailError instanceof Error ? detailError.message : "加载详情失败")
     } finally {
       setDetailLoading(false)
     }
@@ -1225,30 +1261,45 @@ export function MarketPanel(): React.JSX.Element {
     [activeTab, currentUserCandidateSet]
   )
 
-  const filteredData = currentData.filter((item) => {
-    const query = searchQuery.toLowerCase()
-    const matchesSearch =
-      item.chinese_name?.toLowerCase().includes(query) ||
-      item.name.toLowerCase().includes(query) ||
-      item.description.toLowerCase().includes(query)
-    if (!matchesSearch) return false
-    if (uploadFilterMode === "mine" && !isMineUploadedItem(item)) return false
+  const filteredData = useMemo(
+    () =>
+      currentData.filter((item) => {
+        const query = searchQuery.toLowerCase()
+        const matchesSearch =
+          item.chinese_name?.toLowerCase().includes(query) ||
+          item.name.toLowerCase().includes(query) ||
+          item.description.toLowerCase().includes(query)
+        if (!matchesSearch) return false
+        if (uploadFilterMode === "mine" && !isMineUploadedItem(item)) return false
+        if (uploadFilterMode === "installed" && !item.installed) return false
+        if (uploadFilterMode === "featured" && item.featured !== "精品") return false
 
-    if (activeTab !== "skill" || !categoryFilter) return true
-    return getSecondaryCategory(item.category) === categoryFilter
-  })
+        if (!categoryFilter) return true
+        return getCategoryFilterName(item.category) === categoryFilter
+      }),
+    [categoryFilter, currentData, isMineUploadedItem, searchQuery, uploadFilterMode]
+  )
 
   const sortedSkillData = useMemo(() => {
     if (activeTab !== "skill") return filteredData
+    if (filteredData.length === 0) return []
     return sortSkillItemsByUsage(filteredData, skillUsageSummary, skillSortMode)
   }, [activeTab, filteredData, skillSortMode, skillUsageSummary])
+  const visibleMarketData = activeTab === "skill" ? sortedSkillData : filteredData
+  const emptyResultMessage = searchQuery
+    ? "未找到匹配的项目"
+    : uploadFilterMode === "mine"
+      ? "未找到你上传的项目"
+      : uploadFilterMode === "installed"
+        ? "未找到你安装的项目"
+        : uploadFilterMode === "featured"
+          ? "未找到精品项目"
+          : "暂无可用项目"
 
-  const skillCategoryStats = useMemo(() => {
-    if (activeTab !== "skill") return []
-
+  const marketCategoryStats = useMemo(() => {
     const categoryCounter = new Map<string, { primary: string; count: number }>()
-    for (const item of skillsData) {
-      const categoryName = getSecondaryCategory(item.category) || "未分类"
+    for (const item of currentData) {
+      const categoryName = getCategoryFilterName(item.category)
       const primaryName = getPrimaryCategory(item.category) || "未分类"
       const existing = categoryCounter.get(categoryName)
       if (!existing) {
@@ -1268,7 +1319,7 @@ export function MarketPanel(): React.JSX.Element {
         if (a.primary !== b.primary) return a.primary.localeCompare(b.primary, "zh-CN")
         return a.name.localeCompare(b.name, "zh-CN")
       })
-  }, [activeTab, skillsData])
+  }, [currentData])
 
   const openItemDetail = async (item: MarketItem) => {
     setSelectedItemKey(getItemKey(item))
@@ -1290,6 +1341,26 @@ export function MarketPanel(): React.JSX.Element {
     detailTasks.push(loadDetailDataForItem(item))
     await Promise.all(detailTasks)
   }
+  openItemDetailRef.current = openItemDetail
+
+  useEffect(() => {
+    const detailName = marketInitialSkillDetailName?.trim()
+    if (!detailName || activeTab !== "skill" || loading) return
+    const targetItem = skillsData.find((item) => item.name === detailName)
+    if (!targetItem) {
+      if (skillsData.length > 0) setMarketInitialSkillDetailName(null)
+      return
+    }
+
+    setMarketInitialSkillDetailName(null)
+    void openItemDetailRef.current(targetItem)
+  }, [
+    activeTab,
+    loading,
+    marketInitialSkillDetailName,
+    setMarketInitialSkillDetailName,
+    skillsData
+  ])
 
   const backToList = () => {
     setDetailMode("list")
@@ -1437,9 +1508,7 @@ export function MarketPanel(): React.JSX.Element {
   }
 
   const handleUploadSuccess = () => {
-    toast.success(
-      `${getMarketTypeLabel(activeTab)}已上传到 Market，请新开一个会话试试效果。`
-    )
+    toast.success(`${getMarketTypeLabel(activeTab)}已上传到 Market，请新开一个会话试试效果。`)
     // Reload the current tab data
     triggerReload()
   }
@@ -1539,9 +1608,7 @@ export function MarketPanel(): React.JSX.Element {
   }
 
   const handleUpdateSuccess = () => {
-    toast.success(
-      `${getMarketTypeLabel(activeTab)}已更新到 Market，请新开一个会话试试效果。`
-    )
+    toast.success(`${getMarketTypeLabel(activeTab)}已更新到 Market，请新开一个会话试试效果。`)
     setUpdateDialog({ open: false, item: null })
     // Reload the current tab data
     triggerReload()
@@ -1551,6 +1618,14 @@ export function MarketPanel(): React.JSX.Element {
     if (!selectedItem) return null
     if (detailLoading) {
       return <div className="text-sm text-muted-foreground py-6">文件详情加载中...</div>
+    }
+
+    if (detailError) {
+      return (
+        <div className="rounded-lg border border-[#fad4d4] bg-[#fdf2f2] px-4 py-3 text-sm text-[#b53333]">
+          {detailError}
+        </div>
+      )
     }
 
     if (activeTab === "skill") {
@@ -1641,7 +1716,7 @@ export function MarketPanel(): React.JSX.Element {
               <h2 className="font-medium text-[15px] leading-tight text-[#141413]">
                 {detailMode === "detail" && selectedItem
                   ? selectedItem.chinese_name || selectedItem.name
-                  : "公共市场"}
+                  : "应用市场"}
               </h2>
               {detailMode === "list" && (
                 <p className="text-[11px] text-[#87867f] leading-tight mt-0.5">
@@ -1680,19 +1755,31 @@ export function MarketPanel(): React.JSX.Element {
                   placeholder="搜索技能、连接器、插件…"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  className="pl-9 h-9 text-sm bg-white border-[#e8e6dc] text-[#141413] placeholder:text-[#b0aea5] rounded-xl focus-visible:ring-[#3898ec] focus-visible:border-[#3898ec]"
+                  className="pl-9 pr-9 h-9 text-sm bg-white border-[#e8e6dc] text-[#141413] placeholder:text-[#b0aea5] rounded-xl focus-visible:ring-[#3898ec] focus-visible:border-[#3898ec]"
                 />
+                {searchQuery && (
+                  <button
+                    type="button"
+                    aria-label="清空搜索"
+                    onClick={() => setSearchQuery("")}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 size-5 inline-flex items-center justify-center rounded-md text-[#87867f] hover:text-[#5e5d59] hover:bg-[#f5f4ed] transition-colors cursor-pointer"
+                  >
+                    <X className="size-3.5" />
+                  </button>
+                )}
               </div>
               <Select
                 value={uploadFilterMode}
                 onValueChange={(value) => setUploadFilterMode(value as UploadFilterMode)}
               >
-                <SelectTrigger className="h-9 w-[124px] rounded-xl border-[#e8e6dc] bg-white text-xs text-[#5e5d59]">
+                <SelectTrigger className="h-9 w-[132px] rounded-xl border-[#e8e6dc] bg-white text-xs text-[#5e5d59]">
                   <SelectValue placeholder="上传筛选" />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">全部项目</SelectItem>
                   <SelectItem value="mine">我上传的</SelectItem>
+                  <SelectItem value="installed">我安装的</SelectItem>
+                  <SelectItem value="featured">精品</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -1860,7 +1947,7 @@ export function MarketPanel(): React.JSX.Element {
                 {activeTab === "skill" && canViewSkillUserDetail && (
                   <div className="rounded-2xl border border-[#e8e6dc] bg-[#faf9f5] p-4 space-y-3 shadow-[rgba(0,0,0,0.03)_0px_2px_10px]">
                     <div className="flex items-center justify-between">
-                      <h4 className="text-[13px] font-medium text-[#141413]">使用用户明细</h4>
+                      <h4 className="text-[13px] font-medium text-[#141413]">使用用户明细（本月）</h4>
                       <div className="flex items-center gap-1.5">
                         <span className="inline-flex items-center gap-1 rounded-full border border-[#d7e2f5] bg-[#eef4ff] px-2 py-0.5 text-[11px] text-[#365d97]">
                           <BarChart3 className="size-3" />
@@ -1967,6 +2054,25 @@ export function MarketPanel(): React.JSX.Element {
                 Plugins
               </TabsTrigger>
             </TabsList>
+            <div className="mt-3 mb-3 rounded-xl border border-[#e8e6dc] bg-white/65 px-3.5 py-3">
+              <div className="flex items-start gap-2.5">
+                {activeTab === "skill" ? (
+                  <Sparkles className="mt-0.5 size-4 shrink-0 text-[#c4956a]" />
+                ) : activeTab === "mcp" ? (
+                  <Plug className="mt-0.5 size-4 shrink-0 text-[#6f8f75]" />
+                ) : (
+                  <Puzzle className="mt-0.5 size-4 shrink-0 text-[#8b7bb8]" />
+                )}
+                <div className="min-w-0">
+                  <p className="text-sm font-medium leading-snug text-[#141413]">
+                    {activeTabIntro.title}
+                  </p>
+                  <p className="mt-1 text-xs leading-relaxed text-[#5e5d59]">
+                    {activeTabIntro.description}
+                  </p>
+                </div>
+              </div>
+            </div>
           </div>
 
           <div className="flex-1 overflow-hidden">
@@ -1996,20 +2102,7 @@ export function MarketPanel(): React.JSX.Element {
                         重试
                       </Button>
                     </div>
-                  ) : filteredData.length === 0 ? (
-                    <div className="flex flex-col items-center justify-center py-16 text-[#87867f]">
-                      <div className="size-10 rounded-2xl bg-[#f5f4ed] border border-[#e8e6dc] flex items-center justify-center mb-3">
-                        <ShoppingBag className="size-5 text-[#b0aea5]" />
-                      </div>
-                      <p className="text-sm">
-                        {uploadFilterMode === "mine"
-                          ? "未找到你上传的项目"
-                          : searchQuery
-                            ? "未找到匹配的项目"
-                            : "暂无可用项目"}
-                      </p>
-                    </div>
-                  ) : activeTab === "skill" ? (
+                  ) : (
                     <div className="grid grid-cols-1 xl:grid-cols-[240px_minmax(0,1fr)] gap-4 items-start">
                       <aside className="rounded-2xl border border-[#e8e6dc] bg-[#faf9f5] p-3 xl:sticky xl:top-4">
                         <div className="flex items-center justify-between mb-2 px-1">
@@ -2025,10 +2118,10 @@ export function MarketPanel(): React.JSX.Element {
                           )}
                         </div>
                         <div className="space-y-1.5 max-h-[60vh] overflow-y-auto pr-1">
-                          {skillCategoryStats.length === 0 ? (
+                          {marketCategoryStats.length === 0 ? (
                             <p className="text-xs text-[#87867f] px-2 py-1.5">暂无分类</p>
                           ) : (
-                            skillCategoryStats.map((category) => {
+                            marketCategoryStats.map((category) => {
                               const isActive = categoryFilter === category.name
                               return (
                                 <button
@@ -2064,14 +2157,22 @@ export function MarketPanel(): React.JSX.Element {
                         </div>
                       </aside>
 
-                        <div className="space-y-3 min-w-0">
-                          <div className="flex items-center justify-between text-xs text-[#87867f] px-1">
-                            <span>
-                              {categoryFilter ? `当前分类：${categoryFilter}` : "全部 Skills"}
-                              {` · 筛选结果 ${filteredData.length} 个`}
-                            </span>
+                      <div
+                        key={
+                          filteredData.length === 0 ? "market-results-empty" : "market-results-list"
+                        }
+                        className="space-y-3 min-w-0"
+                      >
+                        <div className="flex items-center justify-between text-xs text-[#87867f] px-1">
+                          <span>
+                            {categoryFilter
+                              ? `当前分类：${categoryFilter}`
+                              : `全部 ${getMarketTypePluralLabel(activeTab)}`}
+                            {` · 筛选结果 ${filteredData.length} 个`}
+                          </span>
+                          {activeTab === "skill" && (
                             <div className="flex items-center gap-2">
-                              <div className={'inline-block w-10'}>排序</div>
+                              <div className="inline-block w-10">排序</div>
                               <Select
                                 value={skillSortMode}
                                 onValueChange={(value) => setSkillSortMode(value as SkillSortMode)}
@@ -2088,9 +2189,24 @@ export function MarketPanel(): React.JSX.Element {
                                 </SelectContent>
                               </Select>
                             </div>
+                          )}
+                        </div>
+                        {filteredData.length === 0 ? (
+                          <div
+                            key="market-empty-results"
+                            className="flex flex-col items-center justify-center py-16 text-[#87867f]"
+                          >
+                            <div className="size-10 rounded-2xl bg-[#f5f4ed] border border-[#e8e6dc] flex items-center justify-center mb-3">
+                              <ShoppingBag className="size-5 text-[#b0aea5]" />
+                            </div>
+                            <p className="text-sm">{emptyResultMessage}</p>
                           </div>
-                          <div className="grid grid-cols-1 2xl:grid-cols-2 gap-3">
-                            {sortedSkillData.map((item) => (
+                        ) : (
+                          <div
+                            key="market-card-results"
+                            className="grid grid-cols-1 2xl:grid-cols-2 gap-3"
+                          >
+                            {visibleMarketData.map((item) => (
                               <MarketItemCard
                                 key={getItemKey(item)}
                                 item={item}
@@ -2103,35 +2219,30 @@ export function MarketPanel(): React.JSX.Element {
                                 isDownloading={downloadingItems.has(item.id || item.name)}
                                 isInstalled={item.installed}
                                 isUpdating={updatingItems.has(item.id || item.name)}
-                                skillCallCount={getSkillMetricByName(skillUsageSummary, item.name)?.calls ?? 0}
-                                skillUserCount={getSkillMetricByName(skillUsageSummary, item.name)?.users ?? 0}
-                                uploaderProfile={item.user_id ? uploaderProfiles[item.user_id] ?? null : null}
+                                skillCallCount={
+                                  activeTab === "skill"
+                                    ? (getSkillMetricByName(skillUsageSummary, item.name)?.calls ??
+                                      0)
+                                    : null
+                                }
+                                skillUserCount={
+                                  activeTab === "skill"
+                                    ? (getSkillMetricByName(skillUsageSummary, item.name)?.users ??
+                                      0)
+                                    : null
+                                }
+                                uploaderProfile={
+                                  activeTab === "skill" && item.user_id
+                                    ? (uploaderProfiles[item.user_id] ?? null)
+                                    : null
+                                }
                               />
                             ))}
                           </div>
-                        </div>
+                        )}
                       </div>
-                    ) : (
-                      filteredData.map((item) => (
-                        <MarketItemCard
-                          key={getItemKey(item)}
-                          item={item}
-                          onOpenDetail={openItemDetail}
-                          onDelete={handleDelete}
-                          onUpdate={handleUpdate}
-                          onDownload={handleDownload}
-                          onUpdateInstall={handleUpdateInstall}
-                          onUninstall={handleUninstall}
-                          isDownloading={downloadingItems.has(item.id || item.name)}
-                          isInstalled={item.installed}
-                          isUpdating={updatingItems.has(item.id || item.name)}
-                          skillCallCount={null}
-                          skillUserCount={null}
-                          uploaderProfile={null}
-                        />
-                      ))
-                    )
-                  }
+                    </div>
+                  )}
                 </div>
               </ScrollArea>
             </TabsContent>

@@ -46,6 +46,31 @@ function sanitizePluginName(name: string): string {
   )
 }
 
+function makeSafeZipFileName(rawName: string): string {
+  const sanitized = rawName
+    .replace(/[\\/:*?"<>|]/g, "-")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+  return `${sanitized || "plugin"}.zip`
+}
+
+async function addDirToZip(zip: AdmZip, dirPath: string, rootDir: string): Promise<void> {
+  const entries = await fs.readdir(dirPath, { withFileTypes: true })
+  for (const entry of entries) {
+    const fullPath = path.join(dirPath, entry.name)
+    if (entry.isDirectory()) {
+      await addDirToZip(zip, fullPath, rootDir)
+      continue
+    }
+    if (!entry.isFile()) continue
+
+    const relativePath = path.relative(rootDir, fullPath).replace(/\\/g, "/")
+    if (!relativePath || relativePath.startsWith("..")) continue
+    zip.addFile(relativePath, await fs.readFile(fullPath))
+  }
+}
+
 /** Validate and parse a raw JSON object as PluginManifest. Returns null if invalid. */
 function validatePluginManifest(raw: unknown): PluginManifest | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null
@@ -156,7 +181,11 @@ async function parsePluginDir(dirPath: string): Promise<ParsedPlugin> {
         for (const matchers of Object.values(settingsObj)) {
           if (!Array.isArray(matchers)) continue
           for (const matcher of matchers) {
-            if (matcher && typeof matcher === "object" && Array.isArray((matcher as Record<string, unknown>).hooks)) {
+            if (
+              matcher &&
+              typeof matcher === "object" &&
+              Array.isArray((matcher as Record<string, unknown>).hooks)
+            ) {
               hookCount += ((matcher as Record<string, unknown>).hooks as unknown[]).length
             }
           }
@@ -386,6 +415,43 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
   ipcMain.handle("plugins:list", async (): Promise<PluginMetadata[]> => {
     return getPlugins()
   })
+
+  ipcMain.handle(
+    "plugins:exportForMarket",
+    async (
+      _event,
+      id: string
+    ): Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }> => {
+      if (!id || typeof id !== "string") {
+        return { success: false, error: "无效的 Plugin ID" }
+      }
+
+      try {
+        const plugin = getPlugins().find((item) => item.id === id)
+        if (!plugin) {
+          return { success: false, error: "Plugin 不存在" }
+        }
+        if (!existsSync(plugin.path)) {
+          return { success: false, error: "Plugin 目录不存在" }
+        }
+
+        const zip = new AdmZip()
+        await addDirToZip(zip, plugin.path, plugin.path)
+        const zipBuffer = zip.toBuffer()
+
+        return {
+          success: true,
+          fileName: makeSafeZipFileName(plugin.name),
+          buffer: zipBuffer.buffer.slice(
+            zipBuffer.byteOffset,
+            zipBuffer.byteOffset + zipBuffer.byteLength
+          )
+        }
+      } catch (e) {
+        return { success: false, error: e instanceof Error ? e.message : "导出 Plugin 失败" }
+      }
+    }
+  )
 
   ipcMain.handle(
     "plugins:install",
