@@ -379,8 +379,8 @@ export function SkillsByCategorySection({
                                         key={tag}
                                         className={
                                           tag === "精品"
-                                            ? "rounded-sm border border-amber-200 bg-amber-50 px-0.5 text-[9px] leading-3 text-amber-700"
-                                            : "rounded-sm border border-emerald-200 bg-emerald-50 px-0.5 text-[9px] leading-3 text-emerald-700"
+                                            ? "relative rounded-sm border border-amber-200 bg-amber-50 px-0.5 text-[9px] leading-3 text-amber-700 hover:z-10 hover:after:absolute hover:after:left-full hover:after:top-1/2 hover:after:ml-1.5 hover:after:-translate-y-1/2 hover:after:whitespace-nowrap hover:after:rounded-md hover:after:border hover:after:border-slate-200 hover:after:bg-popover hover:after:px-2 hover:after:py-1 hover:after:text-[11px] hover:after:leading-none hover:after:text-popover-foreground hover:after:shadow-md hover:after:content-['团队级']"
+                                            : "relative rounded-sm border border-emerald-200 bg-emerald-50 px-0.5 text-[9px] leading-3 text-emerald-700 hover:z-10 hover:after:absolute hover:after:left-full hover:after:top-1/2 hover:after:ml-1.5 hover:after:-translate-y-1/2 hover:after:whitespace-nowrap hover:after:rounded-md hover:after:border hover:after:border-slate-200 hover:after:bg-popover hover:after:px-2 hover:after:py-1 hover:after:text-[11px] hover:after:leading-none hover:after:text-popover-foreground hover:after:shadow-md hover:after:content-['室组级']"
                                         }
                                       >
                                         {tag}

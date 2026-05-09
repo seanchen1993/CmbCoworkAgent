@@ -22,6 +22,14 @@ import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { UpdateActionButton } from "@/components/update/UpdateActionButton"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle
+} from "@/components/ui/dialog"
 import { useAppStore } from "@/lib/store"
 import {
   useAllStreamLoadingStates,
@@ -330,6 +338,7 @@ export function ThreadSidebar(): React.JSX.Element {
   })
   const [hoveredProjectKey, setHoveredProjectKey] = useState<string | null>(null)
   const [selectingProjectFolder, setSelectingProjectFolder] = useState(false)
+  const [threadToDelete, setThreadToDelete] = useState<Thread | null>(null)
 
   const persistUnread = useCallback((ids: Set<string>) => {
     localStorage.setItem("threads:unreadIds", JSON.stringify([...ids]))
@@ -526,6 +535,14 @@ export function ThreadSidebar(): React.JSX.Element {
       setCreatingRobot(false)
     }
   }
+
+  const confirmDeleteThread = useCallback(() => {
+    if (!threadToDelete) return
+    cleanupThread(threadToDelete.thread_id)
+    deleteThread(threadToDelete.thread_id)
+    markRead(threadToDelete.thread_id)
+    setThreadToDelete(null)
+  }, [cleanupThread, deleteThread, markRead, threadToDelete])
 
   const [version, setVersion] = useState("")
 
@@ -785,11 +802,7 @@ export function ThreadSidebar(): React.JSX.Element {
                             markRead(thread.thread_id)
                           }}
                           onRunFinished={() => handleRunFinished(thread.thread_id)}
-                          onDelete={() => {
-                            cleanupThread(thread.thread_id)
-                            deleteThread(thread.thread_id)
-                            markRead(thread.thread_id)
-                          }}
+                          onDelete={() => setThreadToDelete(thread)}
                           onStartEditing={() => startEditing(thread.thread_id, thread.title || "")}
                           onSaveTitle={saveTitle}
                           onCancelEditing={cancelEditing}
@@ -853,6 +866,24 @@ export function ThreadSidebar(): React.JSX.Element {
           <UpdateActionButton variant="tag" hideWhenCurrent className="ml-1" />
         </div>
       </div>
+      <Dialog open={!!threadToDelete} onOpenChange={(open) => !open && setThreadToDelete(null)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>确认删除会话</DialogTitle>
+            <DialogDescription>
+              {`确定要删除「${threadToDelete ? getDisplayThreadTitle(threadToDelete) : ""}」吗？删除后不可恢复。`}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setThreadToDelete(null)}>
+              取消
+            </Button>
+            <Button variant="destructive" onClick={confirmDeleteThread}>
+              删除
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </aside>
   )
 }
