@@ -19,6 +19,7 @@ import {
   createRetryingFetch,
   type ModelRetryHooks
 } from "../agent/runtime"
+import { isRetryableApiError } from "../agent/failover"
 import { SkillUsageDetector } from "../agent/skill-evolution/usage-detector"
 
 // ─────────────────────────────────────────────────────────
@@ -1446,10 +1447,11 @@ export function registerDesignHandlers(): void {
               })
             : new HumanMessage(promptWithArtifact)
 
-        const stream = await agent.stream(
+        let stream = await agent.stream(
           { messages: [humanMessage] },
           streamConfig
         )
+        let midStreamRetriesLeft = 2
 
         let streamedText = ""
         let finalMessageText = ""
@@ -1548,6 +1550,14 @@ export function registerDesignHandlers(): void {
           emitSkillResult(toolCallId, isError)
         }
 
+        // Mid-stream retry loop — mirrors chat module (ipc/agent.ts) behavior so
+        // that transient stream interruptions (e.g. `terminated` from a corporate
+        // proxy idle timeout, or any error matched by isRetryableApiError) do not
+        // surface as a hard error. On retry we call agent.stream(null, ...) which
+        // resumes from the LangGraph checkpoint without re-running completed nodes.
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+        try {
         for await (const rawChunk of stream) {
           if (controller.signal.aborted) break
 
@@ -1689,14 +1699,32 @@ export function registerDesignHandlers(): void {
             finalMessageText = token
           }
         }
+        break  // stream consumed successfully — exit retry loop
+        } catch (midStreamErr) {
+          if (controller.signal.aborted) throw midStreamErr
+          if (!isRetryableApiError(midStreamErr) || midStreamRetriesLeft <= 0) {
+            throw midStreamErr
+          }
+          midStreamRetriesLeft--
+          const errMsg = midStreamErr instanceof Error ? midStreamErr.message : String(midStreamErr)
+          console.warn(
+            `[Design:Agent] Mid-stream error "${errMsg}", resuming from checkpoint (${midStreamRetriesLeft} retries left)`
+          )
+          await new Promise((resolve) => setTimeout(resolve, 500))
+          // null input = resume from LangGraph checkpoint, do not re-send the human message
+          stream = await agent.stream(null, streamConfig)
+        }
+        }  // end while
 
         if (controller.signal.aborted) {
           send({ type: "cancelled" })
           return
         }
 
-        // Extract HTML from the agent's complete text output
-        const fullText = streamedText || finalMessageText
+        // Prefer the complete AIMessage captured from LangGraph values. During
+        // mid-stream resume, streamedText may contain partial tokens from a
+        // failed attempt plus tokens from the resumed attempt.
+        const fullText = finalMessageText || streamedText
         const html = extractHtml(fullText)
         if (html && (html.includes("<!DOCTYPE") || html.includes("<html"))) {
           // Store for potential future reference (storeHtml protocol)

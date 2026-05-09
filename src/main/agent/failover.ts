@@ -17,6 +17,8 @@ const RETRYABLE_NETWORK_CODES = new Set([
 const RETRYABLE_MESSAGE_PATTERNS = [
   "timeout",
   "fetch failed",
+  "terminated",
+  "disconnected",
   "rate limit",
   "network error",
   "socket hang up",

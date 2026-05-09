@@ -1,5 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect } from "react"
 import { v4 as uuid } from "uuid"
+import { PenLine, SendHorizontal, Trash2, Undo2 } from "lucide-react"
 import type { FileAttachment } from "@/types"
 import { getToolLabel } from "@/lib/tool-labels"
 import { inlineHtmlSiblingAssets } from "@/lib/html-srcdoc"
@@ -65,6 +66,24 @@ interface CommentItem {
   text: string
   elementDesc: string
   createdAt: number
+}
+
+interface DrawPoint {
+  x: number
+  y: number
+}
+
+interface DrawStroke {
+  id: string
+  points: DrawPoint[]
+  color: string
+  width: number
+  createdAt: number
+}
+
+interface DrawElementHint {
+  strokeId: string
+  elements: string[]
 }
 
 // Computed styles of a selected element in Edit mode — gathered from the iframe via postMessage
@@ -212,6 +231,9 @@ interface TabState {
   // draftComment uses pageX/pageY (document coords) same as CommentItem
   draftComment: { pageX: number; pageY: number; elementDesc: string } | null
   activeCommentId: string | null
+  // Per-tab draw annotations. Coordinates are iframe document pixels.
+  drawStrokes: DrawStroke[]
+  drawElementHints: DrawElementHint[]
   // Iframe scroll position — updated continuously via __iframe_scroll postMessage
   iframeScrollX: number
   iframeScrollY: number
@@ -262,6 +284,8 @@ function makeTabState(): TabState {
     comments: [],
     draftComment: null,
     activeCommentId: null,
+    drawStrokes: [],
+    drawElementHints: [],
     iframeScrollX: 0,
     iframeScrollY: 0,
     editModeAvailable: false,
@@ -554,6 +578,8 @@ type PersistedTabState = {
   tweaksOn: boolean
   zoom: number
   comments: CommentItem[]
+  drawStrokes?: DrawStroke[]
+  drawElementHints?: DrawElementHint[]
   codeContext: Array<{ filename: string; content: string }> | null
   designLink: string | null
   rightTab: RightPanelTab
@@ -578,6 +604,8 @@ function serializeTs(ts: TabState): PersistedTabState {
     tweaksOn:          ts.tweaksOn,
     zoom:              ts.zoom,
     comments:          ts.comments,
+    drawStrokes:       ts.drawStrokes,
+    drawElementHints:  ts.drawElementHints,
     codeContext:       ts.codeContext,
     designLink:        ts.designLink,
     rightTab:          ts.rightTab,
@@ -591,6 +619,8 @@ function deserializeTs(p: PersistedTabState): TabState {
     ...makeTabState(),
     ...p,
     sourceInfo:      p.sourceInfo ?? null,
+    drawStrokes:     p.drawStrokes ?? [],
+    drawElementHints:p.drawElementHints ?? [],
     apiHistory:      p.apiHistory ?? [],
     artifactPath:    p.artifactPath ?? null,
     generationState: "idle",  // always reset — never restore mid-stream
@@ -1347,6 +1377,8 @@ export function DesignView(): React.JSX.Element {
       comments: [],
       draftComment: null,
       activeCommentId: null,
+      drawStrokes: [],
+      drawElementHints: [],
       iframeScrollX: 0,
       iframeScrollY: 0,
       editModeAvailable: false,
@@ -1596,6 +1628,9 @@ export function DesignView(): React.JSX.Element {
     } else if (activeMode === "edit") {
       injectIntoIframe(iframeRef.current, COMMENT_CLEANUP)
       injectIntoIframe(iframeRef.current, EDIT_SELECT_INJECT)
+    } else if (activeMode === "draw") {
+      injectIntoIframe(iframeRef.current, COMMENT_CLEANUP)
+      injectIntoIframe(iframeRef.current, EDIT_SELECT_CLEANUP)
     } else {
       injectIntoIframe(iframeRef.current, COMMENT_CLEANUP)
       injectIntoIframe(iframeRef.current, EDIT_SELECT_CLEANUP)
@@ -2298,6 +2333,115 @@ ${commentLines}${variantNote}`
 
     startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined, cleanMsg, undefined, undefined, state.artifactPath)
   }, [activeTabId, tabStates, updateTs, startGeneration, buildCommentPrompt])
+
+  const collectDrawElementHint = useCallback((stroke: DrawStroke): DrawElementHint => {
+    const doc = iframeRef.current?.contentDocument
+    const win = iframeRef.current?.contentWindow
+    if (!doc || !win || stroke.points.length === 0) return { strokeId: stroke.id, elements: [] }
+
+    const sampleCount = Math.min(6, stroke.points.length)
+    const step = Math.max(1, Math.floor(stroke.points.length / sampleCount))
+    const points = stroke.points.filter((_, index) => index % step === 0).slice(0, sampleCount)
+    const seen = new Set<string>()
+    points.forEach((point) => {
+      const element = doc.elementFromPoint(
+        Math.round(point.x - win.scrollX),
+        Math.round(point.y - win.scrollY)
+      )
+      const label = getDrawElementLabel(element)
+      if (label) seen.add(label)
+    })
+    return { strokeId: stroke.id, elements: Array.from(seen).slice(0, 8) }
+  }, [])
+
+  const handleDrawStrokeComplete = useCallback((stroke: DrawStroke) => {
+    const hint = collectDrawElementHint(stroke)
+    updateTs(activeTabId, (prev) => ({
+      drawStrokes: [...prev.drawStrokes, stroke],
+      drawElementHints: [
+        ...prev.drawElementHints.filter((item) => item.strokeId !== stroke.id),
+        hint,
+      ],
+    }))
+  }, [activeTabId, updateTs, collectDrawElementHint])
+
+  const handleUndoDrawStroke = useCallback(() => {
+    updateTs(activeTabId, (prev) => {
+      const removed = prev.drawStrokes[prev.drawStrokes.length - 1]
+      return {
+        drawStrokes: prev.drawStrokes.slice(0, -1),
+        drawElementHints: removed
+          ? prev.drawElementHints.filter((hint) => hint.strokeId !== removed.id)
+          : prev.drawElementHints,
+      }
+    })
+  }, [activeTabId, updateTs])
+
+  const handleClearDrawStrokes = useCallback(() => {
+    updateTs(activeTabId, { drawStrokes: [], drawElementHints: [] })
+  }, [activeTabId, updateTs])
+
+  const handleDrawWheel = useCallback((deltaX: number, deltaY: number) => {
+    const scale = Math.max((tabStatesRef.current[activeTabIdRef.current]?.zoom ?? 100) / 100, 0.25)
+    iframeRef.current?.contentWindow?.scrollBy({
+      left: deltaX / scale,
+      top: deltaY / scale,
+      behavior: "auto",
+    })
+  }, [])
+
+  const buildDrawPrompt = useCallback((state: TabState, userInstruction = ""): { prompt: string } => {
+    const activeVarId = state.activeVariationId
+    const variantNote = activeVarId ? `\n[正在迭代变体 ${activeVarId.toUpperCase()}。]` : ""
+    const hintsByStroke = new Map(state.drawElementHints.map((hint) => [hint.strokeId, hint.elements]))
+    const instruction = userInstruction.trim()
+    const instructionLine = instruction
+      ? `\n用户补充说明：${instruction}\n`
+      : "\n用户没有补充文字时，请把绘制区域理解为需要重点优化或修正的 UI 区域。\n"
+    const strokeLines = state.drawStrokes.filter((stroke) => stroke.points.length > 0).map((stroke, index) => {
+      const xs = stroke.points.map((point) => point.x)
+      const ys = stroke.points.map((point) => point.y)
+      const minX = Math.round(Math.min(...xs))
+      const maxX = Math.round(Math.max(...xs))
+      const minY = Math.round(Math.min(...ys))
+      const maxY = Math.round(Math.max(...ys))
+      const elements = hintsByStroke.get(stroke.id)?.filter(Boolean) ?? []
+      const elementText = elements.length > 0 ? `；覆盖/接近元素：${elements.join(", ")}` : ""
+      return `[${index + 1}] ${stroke.color} 画笔，粗细 ${stroke.width}px，区域 x:${minX}-${maxX}, y:${minY}-${maxY}，${stroke.points.length} 个点${elementText}`
+    }).join("\n")
+
+    const prompt = `用户通过 Draw 模式直接在设计预览上画了标记。请把这些画线理解为视觉指向和编辑意图：线条圈出的、划过的或指向的区域是需要重点调整的区域；不要把画线本身画进最终页面。请根据线条位置对当前设计做有针对性的视觉优化，保持未标记区域尽量不变。
+${instructionLine}
+
+绘制标记：
+${strokeLines}${variantNote}`
+
+    return { prompt }
+  }, [])
+
+  const handleSendDrawStrokes = useCallback(() => {
+    const tabId = activeTabId
+    const state = tabStates[tabId]
+    if (!state || state.drawStrokes.length === 0) return
+
+    const userInstruction = state.inputValue.trim()
+    const { prompt } = buildDrawPrompt(state, userInstruction)
+    const cleanMsg = userInstruction
+      ? `✏️ ${userInstruction.slice(0, 60)}`
+      : `✏️ 发送 ${state.drawStrokes.length} 条绘制标记`
+
+    updateTs(tabId, (prev) => ({
+      inputValue: "",
+      drawStrokes: [],
+      drawElementHints: [],
+      messages: [
+        ...prev.messages,
+        { role: "user" as const, content: cleanMsg },
+      ],
+    }))
+
+    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined, cleanMsg, undefined, undefined, state.artifactPath)
+  }, [activeTabId, tabStates, updateTs, startGeneration, buildDrawPrompt])
 
   // ── Send message ──────────────────────────────────────────
 
@@ -3111,6 +3255,7 @@ ${commentLines}${variantNote}`
                     <div style={S.tweaksDivider} />
                     <TweaksBtn label="注释" icon={<CommentIcon active={activeMode === "comment"} />} active={activeMode === "comment"} onClick={() => setActiveMode(activeMode === "comment" ? null : "comment")} />
                     <TweaksBtn label="编辑" icon={<EditIcon    active={activeMode === "edit"}    />} active={activeMode === "edit"}    onClick={() => setActiveMode(activeMode === "edit"    ? null : "edit")}    />
+                    <TweaksBtn label="绘制" icon={<DrawIcon active={activeMode === "draw"} />} active={activeMode === "draw"} onClick={() => setActiveMode(activeMode === "draw" ? null : "draw")} />
                   </>
                 )}
 
@@ -3236,6 +3381,27 @@ ${commentLines}${variantNote}`
                         }}
                       />
                     </div>
+                    {(activeMode === "draw" || ts.drawStrokes.length > 0) && (
+                      <DrawLayer
+                        key={activeMode === "draw" ? "draw-active" : "draw-idle"}
+                        active={activeMode === "draw"}
+                        strokes={ts.drawStrokes}
+                        zoom={zoom}
+                        scrollX={ts.iframeScrollX}
+                        scrollY={ts.iframeScrollY}
+                        onStrokeComplete={handleDrawStrokeComplete}
+                        onWheelScroll={handleDrawWheel}
+                      />
+                    )}
+
+                    {activeMode === "draw" && (
+                      <DrawActionBar
+                        count={ts.drawStrokes.length}
+                        onUndo={handleUndoDrawStroke}
+                        onClear={handleClearDrawStrokes}
+                        onSend={handleSendDrawStrokes}
+                      />
+                    )}
                     {/* ── Comment layer ── */}
                     {/* No click overlay needed — iframe script handles clicks via postMessage */}
 
@@ -4954,6 +5120,264 @@ function EditIcon({ active }: { active: boolean }) {
         stroke={active ? "#3b82f6" : "#6a6a6a"} strokeWidth="1.5" fill={active ? "rgba(59,130,246,0.12)" : "none"} strokeLinejoin="round" strokeLinecap="round" />
     </svg>
   )
+}
+
+function DrawIcon({ active }: { active: boolean }) {
+  return (
+    <PenLine
+      size={13}
+      strokeWidth={1.8}
+      color={active ? "#cc785c" : "#6a6a6a"}
+    />
+  )
+}
+
+function getPointerDrawPoint(
+  e: React.PointerEvent<HTMLDivElement>,
+  scrollX: number,
+  scrollY: number,
+  zoom: number
+): DrawPoint {
+  const rect = e.currentTarget.getBoundingClientRect()
+  const scale = Math.max(zoom, 1) / 100
+  return {
+    x: Math.max(0, (e.clientX - rect.left) / scale + scrollX),
+    y: Math.max(0, (e.clientY - rect.top) / scale + scrollY),
+  }
+}
+
+function pointsToSvgPath(points: DrawPoint[]): string {
+  if (points.length === 0) return ""
+  if (points.length === 1) return `M ${points[0].x} ${points[0].y}`
+  const [first, ...rest] = points
+  return rest.reduce((path, point) => `${path} L ${point.x} ${point.y}`, `M ${first.x} ${first.y}`)
+}
+
+function toScreenDrawPoints(points: DrawPoint[], scrollX: number, scrollY: number, scale: number): DrawPoint[] {
+  return points.map((point) => ({
+    x: (point.x - scrollX) * scale,
+    y: (point.y - scrollY) * scale,
+  }))
+}
+
+function getDrawElementLabel(element: Element | null): string {
+  if (!element) return ""
+  if (element === element.ownerDocument?.documentElement || element === element.ownerDocument?.body) return "page"
+
+  const tag = element.tagName.toLowerCase()
+  const id = element.id ? `#${element.id}` : ""
+  const classes = Array.from(element.classList ?? [])
+    .filter((className) => !className.startsWith("__"))
+    .slice(0, 2)
+    .map((className) => `.${className}`)
+    .join("")
+  const label = element.getAttribute("aria-label") || element.getAttribute("alt") || ""
+  const text = (label || element.textContent || "").trim().replace(/\s+/g, " ").slice(0, 32)
+  return `${tag}${id}${classes}${text ? ` '${text}'` : ""}`
+}
+
+function DrawLayer({
+  active,
+  strokes,
+  zoom,
+  scrollX,
+  scrollY,
+  onStrokeComplete,
+  onWheelScroll,
+}: {
+  active: boolean
+  strokes: DrawStroke[]
+  zoom: number
+  scrollX: number
+  scrollY: number
+  onStrokeComplete: (stroke: DrawStroke) => void
+  onWheelScroll: (deltaX: number, deltaY: number) => void
+}) {
+  const [draft, setDraft] = useState<DrawPoint[]>([])
+  const draftRef = useRef<DrawPoint[]>([])
+  const drawingRef = useRef(false)
+  const pointerIdRef = useRef<number | null>(null)
+  const scale = zoom / 100
+
+  const finishStroke = useCallback(() => {
+    if (!drawingRef.current) return
+    drawingRef.current = false
+    pointerIdRef.current = null
+    const points = draftRef.current
+    if (points.length >= 2) {
+      onStrokeComplete({
+        id: uuid(),
+        points,
+        color: "#cc785c",
+        width: 5,
+        createdAt: Date.now(),
+      })
+    }
+    draftRef.current = []
+    setDraft([])
+  }, [onStrokeComplete])
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!active || e.button !== 0) return
+    e.preventDefault()
+    e.stopPropagation()
+    drawingRef.current = true
+    pointerIdRef.current = e.pointerId
+    e.currentTarget.setPointerCapture(e.pointerId)
+    const points = [getPointerDrawPoint(e, scrollX, scrollY, zoom)]
+    draftRef.current = points
+    setDraft(points)
+  }
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!active || !drawingRef.current || pointerIdRef.current !== e.pointerId) return
+    e.preventDefault()
+    const next = getPointerDrawPoint(e, scrollX, scrollY, zoom)
+    const last = draftRef.current[draftRef.current.length - 1]
+    if (last && Math.hypot(next.x - last.x, next.y - last.y) < 3) return
+    const points = [...draftRef.current, next]
+    draftRef.current = points
+    setDraft(points)
+  }
+
+  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (pointerIdRef.current === e.pointerId) {
+      e.preventDefault()
+      finishStroke()
+    }
+  }
+
+  const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
+    if (!active) return
+    e.preventDefault()
+    e.stopPropagation()
+    onWheelScroll(e.deltaX, e.deltaY)
+  }
+
+  return (
+    <div
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerUp}
+      onWheel={handleWheel}
+      style={{
+        position: "absolute",
+        inset: 0,
+        zIndex: active ? 18 : 6,
+        pointerEvents: active ? "auto" : "none",
+        cursor: active ? "crosshair" : "default",
+        touchAction: "none",
+      }}
+    >
+      <svg
+        width="100%"
+        height="100%"
+        style={{ display: "block", overflow: "visible" }}
+      >
+        {strokes.map((stroke) => (
+          <path
+            key={stroke.id}
+            d={pointsToSvgPath(toScreenDrawPoints(stroke.points, scrollX, scrollY, scale))}
+            fill="none"
+            stroke={stroke.color}
+            strokeWidth={Math.max(2, stroke.width * scale)}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            opacity={0.9}
+          />
+        ))}
+        {draft.length > 0 && (
+          <path
+            d={pointsToSvgPath(toScreenDrawPoints(draft, scrollX, scrollY, scale))}
+            fill="none"
+            stroke="#cc785c"
+            strokeWidth={Math.max(2, 5 * scale)}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            opacity={0.92}
+          />
+        )}
+      </svg>
+    </div>
+  )
+}
+
+function DrawActionBar({
+  count,
+  onUndo,
+  onClear,
+  onSend,
+}: {
+  count: number
+  onUndo: () => void
+  onClear: () => void
+  onSend: () => void
+}) {
+  const disabled = count === 0
+  return (
+    <div
+      style={{
+        position: "absolute",
+        bottom: 20,
+        left: "50%",
+        transform: "translateX(-50%)",
+        zIndex: 28,
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        padding: "6px",
+        borderRadius: 999,
+        background: "rgba(26,26,26,0.84)",
+        backdropFilter: "blur(8px)",
+        boxShadow: "0 4px 16px rgba(0,0,0,0.22)",
+      }}
+    >
+      <span style={{ padding: "0 8px", color: "#fff", fontSize: 12, fontWeight: 600, whiteSpace: "nowrap" }}>
+        {count === 0 ? "绘制标记" : `${count} 条标记`}
+      </span>
+      <button onClick={onUndo} disabled={disabled} title="撤销" style={drawToolBtnStyle(disabled)}>
+        <Undo2 size={14} />
+      </button>
+      <button onClick={onClear} disabled={disabled} title="清空" style={drawToolBtnStyle(disabled)}>
+        <Trash2 size={14} />
+      </button>
+      <button
+        onClick={onSend}
+        disabled={disabled}
+        title="发送绘制标记"
+        style={{
+          ...drawToolBtnStyle(disabled),
+          width: "auto",
+          padding: "0 12px",
+          gap: 5,
+          background: disabled ? "rgba(255,255,255,0.1)" : "#cc785c",
+          color: disabled ? "rgba(255,255,255,0.45)" : "#fff",
+        }}
+      >
+        <SendHorizontal size={14} />
+        发送
+      </button>
+    </div>
+  )
+}
+
+function drawToolBtnStyle(disabled: boolean): React.CSSProperties {
+  return {
+    height: 28,
+    width: 28,
+    border: "none",
+    borderRadius: 999,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    background: "rgba(255,255,255,0.12)",
+    color: disabled ? "rgba(255,255,255,0.45)" : "#fff",
+    cursor: disabled ? "default" : "pointer",
+    fontSize: 12,
+    fontWeight: 700,
+    fontFamily: "inherit",
+  }
 }
 
 // ─────────────────────────────────────────────────────────
