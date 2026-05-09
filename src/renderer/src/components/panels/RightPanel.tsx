@@ -233,11 +233,18 @@ export function RightPanel({
   useEffect(() => {
     async function load(): Promise<void> {
       try {
-        const [loaded, disabled] = await Promise.all([
+        const [loaded, pluginLoaded, disabled] = await Promise.all([
           window.api.skills.list(),
+          window.api.skills.listPlugins(),
           window.api.skills.getDisabled()
         ])
-        setSkills(loaded)
+        // Plugin skills carry the same SkillMetadata shape but with pluginId/pluginName set;
+        // merge them in so the right panel reflects the full set the agent can use, and
+        // de-dup by id (custom/built-in wins on collision — same precedence as other UIs).
+        const byId = new Map<string, SkillMetadata>()
+        for (const s of pluginLoaded) byId.set(normalizeSkillId(s.id || s.name), s)
+        for (const s of loaded) byId.set(normalizeSkillId(s.id || s.name), s)
+        setSkills(Array.from(byId.values()))
         setDisabledSkills(new Set(disabled.map(normalizeSkillId)))
       } catch (e) {
         console.error("[RightPanel] Failed to load skills:", e)
@@ -2445,6 +2452,15 @@ function SkillsContent({
                     >
                       {node.skill.name}
                     </span>
+                    {node.skill.pluginName && (
+                      <Badge
+                        variant="outline"
+                        className="text-[10px] h-4 px-1.5 shrink-0 border-violet-300/70 bg-violet-500/10 text-violet-700 dark:border-violet-500/30 dark:text-violet-300"
+                        title={`来自插件：${node.skill.pluginName}`}
+                      >
+                        插件 · {node.skill.pluginName}
+                      </Badge>
+                    )}
                     {childCount > 0 && (
                       <Badge variant="outline" className="text-[10px] h-4 px-1.5 shrink-0 gap-1">
                         <Folder className="mr-1 size-2.5" />
@@ -2751,8 +2767,17 @@ function HooksContent({
     const isGlobalHook = hook.source === "global"
     const isPluginHook = hook.source === "plugin"
     const isSkillHook = hook.source === "skill"
+    // A plugin-owned skill hook: source="skill" but with pluginName / pluginId set.
+    // Show its origin (plugin → skill) so users can tell it apart from a stand-alone skill hook.
+    const isPluginSkillHook = isSkillHook && Boolean(hook.pluginName || hook.pluginId)
     const summary = isPrompt ? (hook.prompt ?? "") : (hook.command ?? "")
-    const ownerLabel = isPluginHook ? hook.pluginName : isSkillHook ? hook.skillName : undefined
+    const ownerLabel = isPluginHook
+      ? hook.pluginName
+      : isPluginSkillHook && hook.skillName
+        ? `${hook.pluginName ?? hook.pluginId} · ${hook.skillName}`
+        : isSkillHook
+          ? hook.skillName
+          : undefined
     const readonlyTitle = isWorkspaceHook
       ? "工作区 Hook 由工作区配置管理"
       : isPluginHook
@@ -2791,6 +2816,14 @@ function HooksContent({
             )}
             {isPluginHook && (
               <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-violet-500/15 text-violet-600 dark:text-violet-400">
+                插件
+              </span>
+            )}
+            {isPluginSkillHook && (
+              <span
+                className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-violet-500/15 text-violet-600 dark:text-violet-400"
+                title={`插件 ${hook.pluginName ?? hook.pluginId} 中的技能`}
+              >
                 插件
               </span>
             )}
@@ -2860,17 +2893,15 @@ function HooksContent({
     <div className="p-3 space-y-2">
       {enabled.length > 0 && enabled.map(renderHookCard)}
       {disabled.length > 0 && (
-        <div className="space-y-2 pt-1">
-          <div className="flex items-center justify-between px-1">
-            <span className="text-[11px] text-muted-foreground tracking-wider font-medium">
-              已禁用
-            </span>
+        <details className="rounded-sm border border-border/70 bg-muted/20 px-2 py-2">
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-[11px] font-medium text-muted-foreground">
+            <span>已禁用</span>
             <Badge variant="outline" className="text-[10px] h-5">
               {disabled.length}
             </Badge>
-          </div>
-          {disabled.map(renderHookCard)}
-        </div>
+          </summary>
+          <div className="space-y-2 pt-2">{disabled.map(renderHookCard)}</div>
+        </details>
       )}
     </div>
   )
