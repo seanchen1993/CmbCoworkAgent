@@ -1740,6 +1740,16 @@ const api = {
         filePath?: string
         error?: string
       }>,
+    importFromUrl: (
+      url: string
+    ): Promise<{ success: boolean; html?: string; finalUrl?: string; title?: string; error?: string }> =>
+      ipcRenderer.invoke("design:import-url", { url }) as Promise<{
+        success: boolean
+        html?: string
+        finalUrl?: string
+        title?: string
+        error?: string
+      }>,
     readArtifact: (
       tabId: string,
       workspacePath?: string
@@ -1769,6 +1779,7 @@ const api = {
       workspacePath?: string,
       artifactId?: string,
       sourceArtifactPath?: string,
+      designSessionId?: string,
     ): (() => void) => {
       const channel = `design:stream:${sessionId}`
       const handler = (_: unknown, data: { type: string; token?: string; html?: string; error?: string; event?: unknown; artifactPath?: string }): void => {
@@ -1778,7 +1789,7 @@ const api = {
         }
       }
       ipcRenderer.on(channel, handler)
-      ipcRenderer.send("design:agent-generate", { sessionId, prompt, modelId, tabId, imageData, mimeType, currentHtml, skill, workspacePath, artifactId, sourceArtifactPath })
+      ipcRenderer.send("design:agent-generate", { sessionId, prompt, modelId, tabId, imageData, mimeType, currentHtml, skill, workspacePath, artifactId, sourceArtifactPath, designSessionId })
       return () => ipcRenderer.removeListener(channel, handler)
     },
     askQuestions: (

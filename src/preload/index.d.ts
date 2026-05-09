@@ -637,6 +637,9 @@ interface CustomAPI {
       html: string,
       workspacePath?: string
     ) => Promise<{ success: boolean; filePath?: string; error?: string }>
+    importFromUrl: (
+      url: string
+    ) => Promise<{ success: boolean; html?: string; finalUrl?: string; title?: string; error?: string }>
     readArtifact: (
       tabId: string,
       workspacePath?: string
@@ -653,7 +656,8 @@ interface CustomAPI {
       skill?: { name: string; path: string },
       workspacePath?: string,
       artifactId?: string,
-      sourceArtifactPath?: string
+      sourceArtifactPath?: string,
+      designSessionId?: string
     ) => () => void
     askQuestions: (
       sessionId: string,

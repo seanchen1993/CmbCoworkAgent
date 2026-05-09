@@ -9,7 +9,7 @@
 
 import fs from "fs"
 import path from "path"
-import { ipcMain, BrowserWindow, app } from "electron"
+import { ipcMain, BrowserWindow, app, net } from "electron"
 import Store from "electron-store"
 import { ChatOpenAI } from "@langchain/openai"
 import { HumanMessage, SystemMessage, AIMessage } from "@langchain/core/messages"
@@ -348,11 +348,14 @@ const activeDesignAgents = new Map<string, AbortController>()
 // Persistent store for reading workspace path (same key used by main settings)
 const designAgentStore = new Store({ name: "settings", cwd: getOpenworkDir() })
 
-function makeDesignAgentThreadId(tabId: string): string {
+function makeDesignAgentThreadId(designSessionId: string | undefined, tabId: string): string {
+  const safeSessionId = String(designSessionId || "session")
+    .replace(/[^a-zA-Z0-9_-]/g, "_")
+    .replace(/^_+|_+$/g, "") || "session"
   const safeTabId = String(tabId || "tab")
     .replace(/[^a-zA-Z0-9_-]/g, "_")
     .replace(/^_+|_+$/g, "") || "tab"
-  return `design_${safeTabId}`.slice(0, 120)
+  return `design_${safeSessionId}_${safeTabId}`.slice(0, 120)
 }
 
 function serializeStreamData(data: unknown): unknown {
@@ -417,6 +420,10 @@ interface DesignArtifactFileReadResult {
   filePath?: string
   html?: string
   error?: string
+}
+
+interface DesignImportUrlParams {
+  url: string
 }
 
 const DESIGN_ARTIFACTS_DIR = ".cmb-design"
@@ -550,6 +557,74 @@ function prepareDesignArtifact(tabId: string, workspacePath?: string): { filePat
   }
 }
 
+function stripContentSecurityPolicyMeta(html: string): string {
+  return html.replace(
+    /<meta\b[^>]*http-equiv\s*=\s*["']content-security-policy["'][^>]*>/gi,
+    ""
+  )
+}
+
+function ensureImportedHtmlDocument(html: string): string {
+  const trimmed = html.trim()
+  if (!trimmed) return ""
+  if (/<html[\s>]/i.test(trimmed)) return trimmed
+  if (/<head[\s>]/i.test(trimmed) || /<body[\s>]/i.test(trimmed)) {
+    return `<!DOCTYPE html>\n<html>\n${trimmed}\n</html>`
+  }
+  return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body>
+${trimmed}
+</body>
+</html>`
+}
+
+function injectBaseHref(html: string, baseHref: string): string {
+  if (!baseHref.trim()) return html
+  if (/<base\b/i.test(html)) return html
+  const safeHref = baseHref.replace(/"/g, "&quot;")
+  const baseTag = `<base href="${safeHref}">`
+
+  if (/<head[\s>]/i.test(html)) {
+    return html.replace(/<head([^>]*)>/i, `<head$1>\n${baseTag}`)
+  }
+  if (/<html[\s>]/i.test(html)) {
+    return html.replace(
+      /<html([^>]*)>/i,
+      `<html$1>\n<head>\n${baseTag}\n<meta charset="UTF-8">\n<meta name="viewport" content="width=device-width, initial-scale=1.0">\n</head>`
+    )
+  }
+  return `<!DOCTYPE html>
+<html>
+<head>
+${baseTag}
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body>
+${html}
+</body>
+</html>`
+}
+
+function prepareImportedRemoteHtml(html: string, finalUrl: string): string {
+  const normalized = ensureImportedHtmlDocument(stripContentSecurityPolicyMeta(html))
+  return injectBaseHref(normalized, finalUrl)
+}
+
+function extractHtmlTitle(html: string): string | undefined {
+  const match = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)
+  const rawTitle = match?.[1]
+    ?.replace(/\s+/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .trim()
+  return rawTitle || undefined
+}
+
 function buildDesignArtifactInstruction(filePath: string, exists: boolean, sourceFilePath?: string): string {
   return `\n\n---\nDESIGN ARTIFACT FILE\n` +
     (sourceFilePath
@@ -646,6 +721,78 @@ function buildDesignModelRetryHooks(send: (data: object) => void): ModelRetryHoo
 // ─────────────────────────────────────────────────────────
 
 export function registerDesignHandlers(): void {
+  ipcMain.handle(
+    "design:import-url",
+    async (_event, { url }: DesignImportUrlParams): Promise<{
+      success: boolean
+      html?: string
+      finalUrl?: string
+      title?: string
+      error?: string
+    }> => {
+      const rawUrl = typeof url === "string" ? url.trim() : ""
+      if (!rawUrl) {
+        return { success: false, error: "URL 不能为空" }
+      }
+
+      let parsedUrl: URL
+      try {
+        parsedUrl = new URL(rawUrl)
+      } catch {
+        return { success: false, error: "URL 格式无效" }
+      }
+
+      if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+        return { success: false, error: "仅支持 http:// 或 https:// 链接" }
+      }
+
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), 20_000)
+
+      try {
+        const response = await net.fetch(parsedUrl.toString(), {
+          signal: controller.signal,
+          headers: {
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+          }
+        })
+
+        if (!response.ok) {
+          return { success: false, error: `抓取页面失败：HTTP ${response.status}` }
+        }
+
+        const contentLength = response.headers.get("content-length")
+        const parsedLength = contentLength ? Number.parseInt(contentLength, 10) : NaN
+        if (Number.isFinite(parsedLength) && parsedLength > 5 * 1024 * 1024) {
+          return { success: false, error: "页面内容超过 5MB 限制" }
+        }
+
+        const contentType = response.headers.get("content-type")?.toLowerCase() ?? ""
+        if (contentType && !contentType.includes("html") && !contentType.includes("xml") && !contentType.startsWith("text/")) {
+          return { success: false, error: `链接返回的不是可导入的 HTML 页面：${contentType}` }
+        }
+
+        const rawHtml = await response.text()
+        if (!rawHtml.trim()) {
+          return { success: false, error: "页面内容为空" }
+        }
+
+        const finalUrl = response.url || parsedUrl.toString()
+        return {
+          success: true,
+          html: prepareImportedRemoteHtml(rawHtml, finalUrl),
+          finalUrl,
+          title: extractHtmlTitle(rawHtml),
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        return { success: false, error: message || "抓取页面失败" }
+      } finally {
+        clearTimeout(timeout)
+      }
+    }
+  )
+
   // design:ask-questions — stream questions JSON from model
   ipcMain.on(
     "design:ask-questions",
@@ -992,7 +1139,7 @@ export function registerDesignHandlers(): void {
   ipcMain.on(
     "design:agent-generate",
     async (event, {
-      sessionId, prompt, modelId, tabId, imageData, mimeType, currentHtml, skill, workspacePath: requestedWorkspacePath, artifactId, sourceArtifactPath,
+      sessionId, prompt, modelId, tabId, imageData, mimeType, currentHtml, skill, workspacePath: requestedWorkspacePath, artifactId, sourceArtifactPath, designSessionId,
     }: {
       sessionId: string
       prompt: string
@@ -1005,6 +1152,7 @@ export function registerDesignHandlers(): void {
       workspacePath?: string
       artifactId?: string
       sourceArtifactPath?: string
+      designSessionId?: string
     }) => {
       const channel = `design:stream:${sessionId}`
       const win = BrowserWindow.fromWebContents(event.sender)
@@ -1045,9 +1193,10 @@ export function registerDesignHandlers(): void {
         return
       }
 
-      // Each Design tab gets its own LangGraph thread — native multi-turn persistence.
+      // Each design session gets its own LangGraph thread so imported/new designs
+      // keep isolated model context while still preserving follow-up edits.
       // Checkpoint paths only allow [a-zA-Z0-9_-], so keep this in sync with renderer approval listeners.
-      const threadId = makeDesignAgentThreadId(tabId)
+      const threadId = makeDesignAgentThreadId(designSessionId, tabId)
 
       try {
         send({ type: "start" })
@@ -1106,6 +1255,7 @@ export function registerDesignHandlers(): void {
         }
 
         const resolvedArtifactId = artifactId || tabId
+        const htmlStoreKey = resolvedArtifactId
         const preparedArtifact = tabId ? prepareDesignArtifact(resolvedArtifactId, workspacePath) : null
         if (preparedArtifact?.error || !preparedArtifact?.filePath) {
           send({
@@ -1153,7 +1303,7 @@ export function registerDesignHandlers(): void {
             prompt.includes("User follow-up instruction:") ||
             prompt.includes("用户通过 Comment 模式")
           )
-        const storedHtml = tabId && shouldUseStoredHtmlFallback ? htmlStore.get(tabId) : undefined
+        const storedHtml = shouldUseStoredHtmlFallback ? htmlStore.get(htmlStoreKey) : undefined
         const htmlForIteration =
           !hasExistingArtifactHtml && typeof currentHtml === "string" && currentHtml.trim()
             ? currentHtml
@@ -1163,7 +1313,7 @@ export function registerDesignHandlers(): void {
           : prompt
         const promptWithSkill = skillContext ? `${promptWithCurrentHtml}${skillContext}` : promptWithCurrentHtml
         const promptWithArtifact = `${promptWithSkill}${artifactInstruction}`
-        if (tabId && htmlForIteration) htmlStore.set(tabId, htmlForIteration)
+        if (htmlForIteration) htmlStore.set(htmlStoreKey, htmlForIteration)
 
         const humanMessage =
           imageData && mimeType
@@ -1432,13 +1582,13 @@ export function registerDesignHandlers(): void {
         const html = extractHtml(fullText)
         if (html && (html.includes("<!DOCTYPE") || html.includes("<html"))) {
           // Store for potential future reference (storeHtml protocol)
-          if (tabId) htmlStore.set(tabId, html)
+          htmlStore.set(htmlStoreKey, html)
           const saved = tabId ? saveDesignArtifact(resolvedArtifactId, html, workspacePath) : null
           send({ type: "done", html, ...(saved?.filePath ? { artifactPath: saved.filePath } : {}) })
         } else {
           const artifact = tabId ? readDesignArtifact(resolvedArtifactId, workspacePath) : null
           if (artifact?.success && artifact.html && (artifact.html.includes("<!DOCTYPE") || artifact.html.includes("<html"))) {
-            htmlStore.set(tabId, artifact.html)
+            htmlStore.set(htmlStoreKey, artifact.html)
             send({ type: "done", html: artifact.html, artifactPath: artifact.filePath })
             return
           }
@@ -1501,7 +1651,7 @@ export function registerDesignHandlers(): void {
 
 function extractHtml(text: string): string {
   // 1. 过滤 <think>...</think> 内容（支持多段、换行）
-  let cleaned = text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim()
+  const cleaned = text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim()
 
   // 2. 去掉 ```html ... ``` 代码块标记
   const fenced = cleaned.match(/```html\s*([\s\S]*?)```/)

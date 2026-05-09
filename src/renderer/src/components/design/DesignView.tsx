@@ -2,6 +2,7 @@ import React, { useState, useRef, useCallback, useEffect } from "react"
 import { v4 as uuid } from "uuid"
 import type { FileAttachment } from "@/types"
 import { getToolLabel } from "@/lib/tool-labels"
+import { inlineHtmlSiblingAssets } from "@/lib/html-srcdoc"
 
 // ─────────────────────────────────────────────────────────
 // Types
@@ -45,6 +46,7 @@ interface QuestionDef {
 
 type RightPanelTab = "design" | "questions"
 type GenerationState = "idle" | "asking" | "questions_ready" | "generating" | "done" | "error"
+type DesignSessionKind = "prompt" | "import_url" | "import_html"
 
 type AnswerValue = string | string[]
 
@@ -107,9 +109,37 @@ interface DesignSkillReference {
   path: string
 }
 
+interface DesignSourceInfo {
+  kind: Exclude<DesignSessionKind, "prompt">
+  label: string
+  detail?: string
+}
+
 function getPathName(filePath: string | null): string {
   if (!filePath) return ""
   return filePath.split(/[\\/]/).filter(Boolean).pop() ?? filePath
+}
+
+function getSessionKindLabel(kind: DesignSessionKind | DesignSourceInfo["kind"] | undefined): string {
+  switch (kind) {
+    case "import_url":
+      return "链接还原"
+    case "import_html":
+      return "HTML 导入"
+    default:
+      return "新设计"
+  }
+}
+
+function makeFileHref(filePath: string): string {
+  const normalized = filePath.replace(/\\/g, "/")
+  if (/^[a-zA-Z]:\//.test(normalized)) {
+    return `file:///${encodeURI(normalized)}`
+  }
+  if (normalized.startsWith("//")) {
+    return `file:${encodeURI(normalized)}`
+  }
+  return `file://${encodeURI(normalized)}`
 }
 
 type DesignApprovalDecision = "approve" | "approve_session" | "approve_permanent" | "reject"
@@ -155,6 +185,7 @@ interface DesignApprovalRequest {
 interface TabState {
   messages: Message[]
   html: string
+  sourceInfo: DesignSourceInfo | null
   generationState: GenerationState
   questions: QuestionDef[]
   answers: Record<string, AnswerValue>
@@ -209,6 +240,7 @@ function makeTabState(): TabState {
   return {
     messages: [],
     html: "",
+    sourceInfo: null,
     generationState: "idle",
     questions: [],
     answers: {},
@@ -244,11 +276,14 @@ function makeTabState(): TabState {
   }
 }
 
-function makeDesignAgentThreadId(tabId: string): string {
+function makeDesignAgentThreadId(designSessionId: string | null, tabId: string): string {
+  const safeSessionId = String(designSessionId || "session")
+    .replace(/[^a-zA-Z0-9_-]/g, "_")
+    .replace(/^_+|_+$/g, "") || "session"
   const safeTabId = String(tabId || "tab")
     .replace(/[^a-zA-Z0-9_-]/g, "_")
     .replace(/^_+|_+$/g, "") || "tab"
-  return `design_${safeTabId}`.slice(0, 120)
+  return `design_${safeSessionId}_${safeTabId}`.slice(0, 120)
 }
 
 function getCurrentDesignHtml(state: TabState | undefined): string {
@@ -318,7 +353,7 @@ function saveDesignArtifactForTab(
         result = await window.api.design.saveArtifact(artifactId, html, workspacePath ?? undefined)
       }
       if (result.success && result.filePath) {
-        window.api.design.storeHtml(tabId, html).catch(() => {})
+        window.api.design.storeHtml(artifactId, html).catch(() => {})
         updateTs(tabId, { artifactPath: result.filePath })
       }
     })
@@ -327,7 +362,7 @@ function saveDesignArtifactForTab(
         window.api.design.saveArtifact(artifactId, html, workspacePath ?? undefined)
           .then((result) => {
             if (result.success && result.filePath) {
-              window.api.design.storeHtml(tabId, html).catch(() => {})
+              window.api.design.storeHtml(artifactId, html).catch(() => {})
               updateTs(tabId, { artifactPath: result.filePath })
             }
           })
@@ -505,6 +540,7 @@ const MAX_HTML_BYTES = 200_000 // 200 KB cap per HTML blob to keep storage reaso
 type PersistedTabState = {
   messages: Message[]
   html: string
+  sourceInfo?: DesignSourceInfo | null
   variations: Array<{ id: string; label: string; html: string }>
   activeVariationId: string | null
   selectedModelId: string | null
@@ -528,6 +564,7 @@ function serializeTs(ts: TabState): PersistedTabState {
   return {
     messages:          ts.messages,
     html:              ts.html.slice(0, MAX_HTML_BYTES),
+    sourceInfo:        ts.sourceInfo,
     variations:        ts.variations.map((v) => ({ id: v.id, label: v.label, html: v.html.slice(0, MAX_HTML_BYTES) })),
     activeVariationId: ts.activeVariationId,
     selectedModelId:   ts.selectedModelId,
@@ -546,6 +583,7 @@ function deserializeTs(p: PersistedTabState): TabState {
   return {
     ...makeTabState(),
     ...p,
+    sourceInfo:      p.sourceInfo ?? null,
     apiHistory:      p.apiHistory ?? [],
     artifactPath:    p.artifactPath ?? null,
     generationState: "idle",  // always reset — never restore mid-stream
@@ -589,6 +627,8 @@ interface SessionMeta {
   title: string
   createdAt: number
   updatedAt: number
+  kind?: DesignSessionKind
+  sourceLabel?: string
 }
 
 function parsePersistedSession(raw: string): ReturnType<typeof defaultSession> {
@@ -613,7 +653,9 @@ function loadSessionById(id: string): ReturnType<typeof defaultSession> {
     const raw = localStorage.getItem(sessionDataKey(id))
     if (!raw) return defaultSession()
     return parsePersistedSession(raw)
-  } catch { return defaultSession() }
+  } catch {
+    return defaultSession()
+  }
 }
 
 function loadIndex(): SessionMeta[] {
@@ -636,11 +678,17 @@ function loadIndex(): SessionMeta[] {
     const meta: SessionMeta = { id, title, createdAt: Date.now(), updatedAt: Date.now() }
     localStorage.setItem(SESSION_INDEX_KEY, JSON.stringify([meta]))
     return [meta]
-  } catch { return [] }
+  } catch {
+    return []
+  }
 }
 
 function saveIndex(index: SessionMeta[]) {
-  try { localStorage.setItem(SESSION_INDEX_KEY, JSON.stringify(index)) } catch {}
+  try {
+    localStorage.setItem(SESSION_INDEX_KEY, JSON.stringify(index))
+  } catch {
+    // Ignore storage write failures for the gallery index.
+  }
 }
 
 function updateIndexMeta(id: string, patch: Partial<SessionMeta>) {
@@ -651,7 +699,9 @@ function updateIndexMeta(id: string, patch: Partial<SessionMeta>) {
       index[i] = { ...index[i], ...patch }
       saveIndex(index)
     }
-  } catch {}
+  } catch {
+    // Ignore metadata update failures and keep the current index.
+  }
 }
 
 const VARIATION_COLORS: Record<string, string> = {
@@ -984,6 +1034,34 @@ function mergeEditModeKeys(html: string, edits: Record<string, unknown>): string
   )
 }
 
+function injectBaseHref(html: string, baseHref: string): string {
+  if (!baseHref.trim()) return html
+  if (/<base\b/i.test(html)) return html
+  const safeHref = baseHref.replace(/"/g, "&quot;")
+  const baseTag = `<base href="${safeHref}">`
+
+  if (/<head[\s>]/i.test(html)) {
+    return html.replace(/<head([^>]*)>/i, `<head$1>\n${baseTag}`)
+  }
+  if (/<html[\s>]/i.test(html)) {
+    return html.replace(
+      /<html([^>]*)>/i,
+      `<html$1>\n<head>\n${baseTag}\n<meta charset="UTF-8">\n<meta name="viewport" content="width=device-width, initial-scale=1.0">\n</head>`
+    )
+  }
+  return `<!DOCTYPE html>
+<html>
+<head>
+${baseTag}
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body>
+${html}
+</body>
+</html>`
+}
+
 // Send a postMessage into the iframe
 function sendToIframe(iframe: HTMLIFrameElement | null, msg: object) {
   iframe?.contentWindow?.postMessage(msg, "*")
@@ -1025,9 +1103,12 @@ export function DesignView(): React.JSX.Element {
   const [workspacePath, setWorkspacePath] = useState<string | null>(null)
   const [workspaceLoading, setWorkspaceLoading] = useState(false)
   // Code & link modal state
+  const [createModalOpen, setCreateModalOpen] = useState(false)
   const [codeModalOpen, setCodeModalOpen] = useState(false)
   const [linkModalOpen, setLinkModalOpen] = useState(false)
+  const [linkModalMode, setLinkModalMode] = useState<"reference" | "import">("reference")
   const [linkModalText, setLinkModalText] = useState("")
+  const [importingSource, setImportingSource] = useState<null | "url" | "html">(null)
   // Toast notifications
   const [toast, setToast] = useState<{ msg: string; id: number } | null>(null)
   const showToast = useCallback((msg: string) => {
@@ -1121,6 +1202,278 @@ export function DesignView(): React.JSX.Element {
   const currentSessionIdRef = useRef<string | null>(currentSessionId)
   useEffect(() => { currentSessionIdRef.current = currentSessionId }, [currentSessionId])
 
+  const createSession = useCallback((metaPatch?: Partial<SessionMeta>): string => {
+    const id = `ds_${uuid().slice(0, 8)}`
+    const session = defaultSession()
+    setTabStates(session.tabStates)
+    setCurrentSessionId(id)
+    localStorage.setItem(SESSION_LAST_KEY, id)
+    const meta: SessionMeta = {
+      id,
+      title: metaPatch?.title ?? "新设计",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      kind: metaPatch?.kind ?? "prompt",
+      sourceLabel: metaPatch?.sourceLabel,
+    }
+    setSessionIndex((prev) => {
+      const next = [meta, ...prev]
+      saveIndex(next)
+      return next
+    })
+    return id
+  }, [])
+
+  const newSession = useCallback(() => {
+    createSession()
+  }, [createSession])
+
+  const ensureWorkspaceSelected = useCallback(async (reason: string): Promise<boolean> => {
+    if (workspacePath) return true
+    setWorkspaceLoading(true)
+    try {
+      const selectedPath = await window.api.workspace.select()
+      if (!selectedPath) {
+        showToast(`${reason}前请先选择工作目录。`)
+        return false
+      }
+      setWorkspacePath(selectedPath)
+      showToast(`工作目录已切换：${getPathName(selectedPath)}`)
+      return true
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "选择工作目录失败")
+      return false
+    } finally {
+      setWorkspaceLoading(false)
+    }
+  }, [workspacePath, showToast])
+
+  const readDependencyTextFile = useCallback(async (resolvedPath: string): Promise<string | null> => {
+    const result = await window.api.file.readText(resolvedPath)
+    return result.success ? (result.content ?? null) : null
+  }, [])
+
+  const applyImportedDesign = useCallback((options: {
+    sessionId: string
+    html: string
+    sourceInfo: DesignSourceInfo
+    userMessage: string
+  }) => {
+    const tabId = SINGLE_DESIGN_TAB_ID
+    const storeKey = makeDesignArtifactId(options.sessionId, tabId)
+    const importedHtml = ensureEditMode(options.html)
+    const variations = parseVariations(importedHtml)
+
+    window.api.design.storeHtml(storeKey, importedHtml).catch(() => {})
+    saveDesignArtifactForTab(
+      storeKey,
+      importedHtml,
+      workspacePath,
+      tabId,
+      updateTs
+    )
+
+    updateTs(tabId, (prev) => ({
+      messages: [
+        { role: "user" as const, content: options.userMessage },
+        { role: "assistant" as const, content: "✓ 页面已还原，可直接用 Tweaks 编辑，后续追问会基于当前 HTML 继续迭代。" },
+      ],
+      html: importedHtml,
+      sourceInfo: options.sourceInfo,
+      generationState: "done",
+      questions: [],
+      answers: {},
+      originalPrompt: options.userMessage,
+      rightTab: "design",
+      variations,
+      activeVariationId: variations[0]?.id ?? null,
+      tweaksOn: true,
+      activeMode: "edit",
+      zoom: prev.zoom,
+      inputValue: "",
+      comments: [],
+      draftComment: null,
+      activeCommentId: null,
+      iframeScrollX: 0,
+      iframeScrollY: 0,
+      editModeAvailable: false,
+      selectedElement: null,
+      attachedImage: null,
+      reloadKey: prev.reloadKey + 1,
+      selectedSkill: null,
+      codeContext: null,
+      designLink: null,
+      attachedFiles: null,
+      retryPrompt: null,
+      retryIsIteration: false,
+      retryCleanMsg: null,
+      retrySkill: null,
+      artifactPath: null,
+      apiHistory: [
+        { role: "user" as const, content: options.userMessage },
+        { role: "assistant" as const, content: "页面已还原，可继续编辑" },
+      ],
+      pendingApproval: null,
+    }))
+
+    updateIndexMeta(options.sessionId, {
+      title: options.sourceInfo.label,
+      kind: options.sourceInfo.kind,
+      sourceLabel: options.sourceInfo.label,
+      updatedAt: Date.now(),
+    })
+    setSessionIndex(loadIndex())
+  }, [workspacePath, updateTs])
+
+  const loadImportedHtmlFromFile = useCallback(async (filePath: string): Promise<{
+    html: string
+    label: string
+    detail: string
+  }> => {
+    const readResult = await window.api.file.readText(filePath)
+    if (!readResult.success || !readResult.content) {
+      throw new Error(readResult.error || "读取 HTML 文件失败")
+    }
+
+    const inlinedHtml = await inlineHtmlSiblingAssets({
+      html: readResult.content,
+      htmlPath: filePath,
+      readTextFile: readDependencyTextFile,
+    })
+    const htmlWithBase = injectBaseHref(inlinedHtml, makeFileHref(filePath))
+
+    return {
+      html: htmlWithBase,
+      label: readResult.filename || getPathName(filePath) || "HTML 页面",
+      detail: filePath,
+    }
+  }, [readDependencyTextFile])
+
+  const loadImportedHtmlFromUrl = useCallback(async (url: string): Promise<{
+    html: string
+    label: string
+    detail: string
+  }> => {
+    const result = await window.api.design.importFromUrl(url)
+    if (!result.success || !result.html) {
+      throw new Error(result.error || "抓取页面失败")
+    }
+
+    const displayUrl = result.finalUrl || url
+    let label = result.title?.trim() || ""
+    if (!label) {
+      try {
+        label = new URL(displayUrl).hostname
+      } catch {
+        label = displayUrl
+      }
+    }
+
+    return {
+      html: result.html,
+      label,
+      detail: displayUrl,
+    }
+  }, [])
+
+  const openReferenceLinkModal = useCallback(() => {
+    setLinkModalMode("reference")
+    setLinkModalText(ts.designLink ?? "")
+    setLinkModalOpen(true)
+  }, [ts.designLink])
+
+  const openImportUrlModal = useCallback(async () => {
+    const ready = await ensureWorkspaceSelected("导入链接页面")
+    if (!ready) return
+    setCreateModalOpen(false)
+    setLinkModalMode("import")
+    setLinkModalText("")
+    setLinkModalOpen(true)
+  }, [ensureWorkspaceSelected])
+
+  const handleImportHtmlFile = useCallback(async (source: "gallery" | "session") => {
+    const ready = await ensureWorkspaceSelected("导入 HTML 页面")
+    if (!ready) return
+
+    setImportingSource("html")
+    try {
+      const picked = await window.api.file.selectCode()
+      if (picked.canceled || picked.filePaths.length === 0) return
+
+      const htmlPath = picked.filePaths.find((filePath) => /\.html?$/i.test(filePath))
+      if (!htmlPath) {
+        showToast("请选择 .html 或 .htm 文件")
+        return
+      }
+
+      const imported = await loadImportedHtmlFromFile(htmlPath)
+      const sessionId = source === "gallery"
+        ? createSession({
+            title: imported.label,
+            kind: "import_html",
+            sourceLabel: imported.label,
+          })
+        : (currentSessionId ?? createSession({
+            title: imported.label,
+            kind: "import_html",
+            sourceLabel: imported.label,
+          }))
+
+      applyImportedDesign({
+        sessionId,
+        html: imported.html,
+        sourceInfo: { kind: "import_html", label: imported.label, detail: imported.detail },
+        userMessage: `导入 HTML 文件：${imported.label}`,
+      })
+      setCreateModalOpen(false)
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "导入 HTML 页面失败")
+    } finally {
+      setImportingSource(null)
+    }
+  }, [ensureWorkspaceSelected, showToast, loadImportedHtmlFromFile, createSession, currentSessionId, applyImportedDesign])
+
+  const handleImportUrl = useCallback(async (rawUrl: string, source: "gallery" | "session") => {
+    const ready = await ensureWorkspaceSelected("导入链接页面")
+    if (!ready) return false
+
+    const url = rawUrl.trim()
+    if (!url) {
+      showToast("请输入有效的页面链接")
+      return false
+    }
+
+    setImportingSource("url")
+    try {
+      const imported = await loadImportedHtmlFromUrl(url)
+      const sessionId = source === "gallery"
+        ? createSession({
+            title: imported.label,
+            kind: "import_url",
+            sourceLabel: imported.label,
+          })
+        : (currentSessionId ?? createSession({
+            title: imported.label,
+            kind: "import_url",
+            sourceLabel: imported.label,
+          }))
+
+      applyImportedDesign({
+        sessionId,
+        html: imported.html,
+        sourceInfo: { kind: "import_url", label: imported.label, detail: imported.detail },
+        userMessage: `通过链接还原页面：${imported.detail}`,
+      })
+      setCreateModalOpen(false)
+      return true
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "导入链接页面失败")
+      return false
+    } finally {
+      setImportingSource(null)
+    }
+  }, [ensureWorkspaceSelected, showToast, loadImportedHtmlFromUrl, createSession, currentSessionId, applyImportedDesign])
+
   // ── Persist session to localStorage (debounced 1.5s, skip during streaming) ──
   const _persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
@@ -1143,10 +1496,18 @@ export function DesignView(): React.JSX.Element {
         // Update index metadata (title from first message, updatedAt)
         const firstState = tabStates[SINGLE_DESIGN_TAB_ID]
         const firstUserMsg = firstState?.messages?.find((m) => m.role === "user")
-        const autoTitle = firstUserMsg ? (firstUserMsg.content as string).slice(0, 24) : "新设计"
-        updateIndexMeta(currentSessionId, { updatedAt: Date.now(), title: autoTitle })
+        const autoTitle = firstState?.sourceInfo?.label
+          || (firstUserMsg ? (firstUserMsg.content as string).slice(0, 24) : "新设计")
+        updateIndexMeta(currentSessionId, {
+          updatedAt: Date.now(),
+          title: autoTitle,
+          kind: firstState?.sourceInfo?.kind ?? "prompt",
+          sourceLabel: firstState?.sourceInfo?.label,
+        })
         setSessionIndex(loadIndex())
-      } catch {}
+      } catch {
+        // Ignore persistence errors and keep the current in-memory session.
+      }
     }, 1500)
     return () => { if (_persistTimerRef.current) clearTimeout(_persistTimerRef.current) }
   }, [activeTabId, tabStates, currentSessionId])
@@ -1157,20 +1518,6 @@ export function DesignView(): React.JSX.Element {
     setTabStates(session.tabStates)
     setCurrentSessionId(id)
     localStorage.setItem(SESSION_LAST_KEY, id)
-  }, [])
-
-  const newSession = useCallback(() => {
-    const id = `ds_${uuid().slice(0, 8)}`
-    const session = defaultSession()
-    setTabStates(session.tabStates)
-    setCurrentSessionId(id)
-    localStorage.setItem(SESSION_LAST_KEY, id)
-    const meta: SessionMeta = { id, title: "新设计", createdAt: Date.now(), updatedAt: Date.now() }
-    setSessionIndex((prev) => {
-      const next = [meta, ...prev]
-      saveIndex(next)
-      return next
-    })
   }, [])
 
   const backToGallery = useCallback(() => {
@@ -1427,8 +1774,9 @@ export function DesignView(): React.JSX.Element {
     if (existing) { existing.cleanup(); window.api.design.cancel(existing.sessionId).catch(() => {}) }
 
     // Route through the full Agent Runtime: Skills, MCP tools, Hooks, Approvals,
-    // context summarisation. tabId = LangGraph thread ID → native multi-turn.
-    const agentThreadId = makeDesignAgentThreadId(tabId)
+    // context summarisation. Each design session gets an isolated thread.
+    const designSessionId = currentSessionIdRef.current
+    const agentThreadId = makeDesignAgentThreadId(designSessionId, tabId)
     const cleanupApprovalRequest = window.api.sandbox.onApprovalRequest(agentThreadId, (request) => {
       updateTs(tabId, { pendingApproval: asDesignApprovalRequest(request) })
     })
@@ -1449,6 +1797,11 @@ export function DesignView(): React.JSX.Element {
       cleanupApprovalTimeout()
       updateTs(tabId, { pendingApproval: null })
     }
+
+    // Stable artifact ID: based on the design session + tab, NOT the streaming session UUID.
+    // Using the streaming sessionId (which changes per-call) would create a new artifact
+    // directory every generation, making the filesystem-based context chain useless.
+    const stableArtifactId = makeDesignArtifactId(currentSessionIdRef.current, tabId)
 
     const onEvent = (event: {
       type: string
@@ -1508,11 +1861,11 @@ export function DesignView(): React.JSX.Element {
         const variations = parseVariations(patchedHtml)
 
         // Keep htmlStore in sync (used as fallback / reference)
-        window.api.design.storeHtml(tabId, patchedHtml).catch(() => {})
+        window.api.design.storeHtml(stableArtifactId, patchedHtml).catch(() => {})
         if (event.artifactPath) {
           updateTs(tabId, { artifactPath: event.artifactPath })
         } else {
-          saveDesignArtifactForTab(`${sessionId}_${tabId}`, patchedHtml, workspacePath, tabId, updateTs)
+          saveDesignArtifactForTab(stableArtifactId, patchedHtml, workspacePath, tabId, updateTs)
         }
 
         updateTs(tabId, (prev) => {
@@ -1573,10 +1926,6 @@ export function DesignView(): React.JSX.Element {
       }
     }
 
-    // Stable artifact ID: based on the design session + tab, NOT the streaming session UUID.
-    // Using the streaming sessionId (which changes per-call) would create a new artifact
-    // directory every generation, making the filesystem-based context chain useless.
-    const stableArtifactId = makeDesignArtifactId(currentSessionIdRef.current, tabId)
     cleanupStream = window.api.design.agentGenerate(
       sessionId,
       prompt,
@@ -1589,7 +1938,8 @@ export function DesignView(): React.JSX.Element {
       skill ?? undefined,
       workspacePath ?? undefined,
       stableArtifactId,
-      sourceArtifactPath ?? undefined
+      sourceArtifactPath ?? undefined,
+      designSessionId ?? undefined
     )
     tabSessionsRef.current.set(tabId, { cleanup, sessionId })
   }, [tabStates, updateTs, workspacePath])
@@ -1636,8 +1986,9 @@ export function DesignView(): React.JSX.Element {
       if (event.type === "done" && event.html) {
         const patchedHtml = ensureEditMode(event.html)
         // Store full HTML in main process so subsequent text iterations can reference it
-        window.api.design.storeHtml(tabId, patchedHtml).catch(() => {})
-        saveDesignArtifactForTab(makeDesignArtifactId(currentSessionId, tabId), patchedHtml, workspacePath, tabId, updateTs)
+        const storeKey = makeDesignArtifactId(currentSessionIdRef.current, tabId)
+        window.api.design.storeHtml(storeKey, patchedHtml).catch(() => {})
+        saveDesignArtifactForTab(storeKey, patchedHtml, workspacePath, tabId, updateTs)
         updateTs(tabId, (prev) => {
           const msgs = [...prev.messages]
           const last = msgs.length - 1
@@ -2174,22 +2525,90 @@ ${commentLines}${variantNote}`
   const isAsking     = ts.generationState === "asking"
   const isBlocked    = isGenerating || isAsking || ts.generationState === "questions_ready"
 
+  const handleLinkModalConfirm = useCallback(async () => {
+    if (linkModalMode === "reference") {
+      updateTs(activeTabId, { designLink: linkModalText.trim() })
+      setLinkModalOpen(false)
+      return
+    }
+
+    const imported = await handleImportUrl(linkModalText, currentSessionId === null ? "gallery" : "session")
+    if (imported) {
+      setLinkModalOpen(false)
+      setLinkModalText("")
+    }
+  }, [linkModalMode, updateTs, activeTabId, linkModalText, handleImportUrl, currentSessionId])
+
   // ── Render ─────────────────────────────────────────────────
 
   // Show gallery when no session is active
   if (currentSessionId === null) {
     return (
-      <DesignGallery
-        sessionIndex={sessionIndex}
-        onOpen={openSession}
-        onNew={newSession}
-        onDelete={deleteSession}
-      />
+      <>
+        <DesignGallery
+          sessionIndex={sessionIndex}
+          onOpen={openSession}
+          onNew={() => setCreateModalOpen(true)}
+          onDelete={deleteSession}
+          workspacePath={workspacePath}
+          workspaceLoading={workspaceLoading}
+          onSelectWorkspace={() => { void handleSelectWorkspace() }}
+        />
+        <CreateDesignModal
+          open={createModalOpen}
+          loadingKind={importingSource}
+          workspacePath={workspacePath}
+          workspaceLoading={workspaceLoading}
+          onSelectWorkspace={() => { void handleSelectWorkspace() }}
+          onCreateBlank={() => {
+            createSession()
+            setCreateModalOpen(false)
+          }}
+          onImportUrl={() => { void openImportUrlModal() }}
+          onImportHtml={() => { void handleImportHtmlFile("gallery") }}
+          onClose={() => setCreateModalOpen(false)}
+        />
+        <LinkModal
+          open={linkModalOpen}
+          mode={linkModalMode}
+          url={linkModalText}
+          loading={importingSource === "url"}
+          onUrlChange={setLinkModalText}
+          onConfirm={() => { void handleLinkModalConfirm() }}
+          onClose={() => setLinkModalOpen(false)}
+        />
+        {toast && (
+          <div style={{
+            position: "fixed", bottom: 120, left: "50%", transform: "translateX(-50%)",
+            background: "rgba(30,30,30,0.92)", color: "#fff", fontSize: 13, fontWeight: 500,
+            padding: "9px 18px", borderRadius: 20, zIndex: 99999,
+            pointerEvents: "none", whiteSpace: "nowrap",
+            boxShadow: "0 4px 20px rgba(0,0,0,0.3)",
+            border: "1px solid rgba(255,255,255,0.08)",
+          }}>
+            {toast.msg}
+          </div>
+        )}
+      </>
     )
   }
 
   return (
     <div style={S.root}>
+      <CreateDesignModal
+        open={createModalOpen}
+        loadingKind={importingSource}
+        workspacePath={workspacePath}
+        workspaceLoading={workspaceLoading}
+        onSelectWorkspace={() => { void handleSelectWorkspace() }}
+        onCreateBlank={() => {
+          newSession()
+          setCreateModalOpen(false)
+        }}
+        onImportUrl={() => { void openImportUrlModal() }}
+        onImportHtml={() => { void handleImportHtmlFile("session") }}
+        onClose={() => setCreateModalOpen(false)}
+      />
       {/* Code & Link modals — rendered at root so they overlay everything */}
       <CodeModal
         open={codeModalOpen}
@@ -2202,12 +2621,11 @@ ${commentLines}${variantNote}`
       />
       <LinkModal
         open={linkModalOpen}
+        mode={linkModalMode}
         url={linkModalText}
+        loading={importingSource === "url"}
         onUrlChange={setLinkModalText}
-        onConfirm={() => {
-          updateTs(activeTabId, { designLink: linkModalText.trim() })
-          setLinkModalOpen(false)
-        }}
+        onConfirm={() => { void handleLinkModalConfirm() }}
         onClose={() => setLinkModalOpen(false)}
       />
 
@@ -2244,6 +2662,21 @@ ${commentLines}${variantNote}`
           </button>
           <div style={S.logo}>✦</div>
           <span style={S.titleText}>design</span>
+          {ts.sourceInfo && (
+            <span style={{
+              display: "inline-flex",
+              alignItems: "center",
+              padding: "3px 8px",
+              borderRadius: 999,
+              fontSize: 11,
+              fontWeight: 700,
+              color: "#7a4300",
+              background: "#fff2df",
+              border: "1px solid #f0d3a6",
+            }}>
+              {getSessionKindLabel(ts.sourceInfo.kind)}
+            </span>
+          )}
         </div>
         <div style={S.titleActions}>
           <button
@@ -2281,7 +2714,9 @@ ${commentLines}${variantNote}`
               <EmptyState
                 onUploadScreenshot={() => fileInputRef.current?.click()}
                 onAttachCode={() => setCodeModalOpen(true)}
-                onAttachLink={() => { setLinkModalText(""); setLinkModalOpen(true) }}
+                onAttachLink={openReferenceLinkModal}
+                onImportUrl={openImportUrlModal}
+                onImportHtml={() => { void handleImportHtmlFile("session") }}
               />
             ) : (
               <div style={S.messageList}>
@@ -2405,7 +2840,7 @@ ${commentLines}${variantNote}`
                       icon="🔗" label={(() => { try { return new URL(ts.designLink).hostname } catch { return ts.designLink.slice(0, 30) } })()}
                       color={{ bg: "#fff8f0", border: "#e8d0b0", text: "#5a3a00", dot: "#c07820" }}
                       onRemove={() => updateTs(activeTabId, { designLink: null })}
-                      onClick={() => { setLinkModalText(ts.designLink!); setLinkModalOpen(true) }}
+                      onClick={openReferenceLinkModal}
                     />
                   )}
                   {ts.attachedFiles && ts.attachedFiles.map((f, idx) => (
@@ -3433,16 +3868,20 @@ function QuestionsPanel({
 // Sub-components
 // ─────────────────────────────────────────────────────────
 
-function EmptyState({ onUploadScreenshot, onAttachCode, onAttachLink }: {
+function EmptyState({ onUploadScreenshot, onAttachCode, onAttachLink, onImportUrl, onImportHtml }: {
   onUploadScreenshot: () => void
   onAttachCode: () => void
   onAttachLink: () => void
+  onImportUrl: () => void
+  onImportHtml: () => void
 }) {
   return (
     <div style={S.emptyState}>
       <h2 style={S.emptyTitle}>从上下文开始</h2>
-      <p style={S.emptySubtitle}>提供的背景越充分，设计结果越精准。</p>
+      <p style={S.emptySubtitle}>可以先导入现有页面，也可以仅附加参考上下文后重新生成。</p>
       <div style={S.contextCards}>
+        <ContextCard icon="🌐" label="通过链接还原页面"  onClick={onImportUrl} />
+        <ContextCard icon="📄" label="导入 HTML 文件"   onClick={onImportHtml} />
         <ContextCard icon="🖼️" label="上传截图"         onClick={onUploadScreenshot} />
         <ContextCard icon="🗂️" label="关联代码"         onClick={onAttachCode} />
         <ContextCard icon="🔗" label="通过链接关联设计图" onClick={onAttachLink} />
@@ -3852,15 +4291,166 @@ function CodeModal({ open, initialFiles, onConfirm, onClose }: {
 }
 
 // ─────────────────────────────────────────────────────────
-// LinkModal — enter a design reference URL
+// Create / Import modals
 // ─────────────────────────────────────────────────────────
-function LinkModal({ open, url, onUrlChange, onConfirm, onClose }: {
-  open: boolean; url: string
-  onUrlChange: (v: string) => void
-  onConfirm: () => void; onClose: () => void
+function CreateDesignModal({
+  open,
+  loadingKind,
+  workspacePath,
+  workspaceLoading,
+  onSelectWorkspace,
+  onCreateBlank,
+  onImportUrl,
+  onImportHtml,
+  onClose,
+}: {
+  open: boolean
+  loadingKind: "url" | "html" | null
+  workspacePath: string | null
+  workspaceLoading: boolean
+  onSelectWorkspace: () => void
+  onCreateBlank: () => void
+  onImportUrl: () => void
+  onImportHtml: () => void
+  onClose: () => void
 }) {
   if (!open) return null
-  const isValid = (() => { try { return !!new URL(url) } catch { return false } })()
+  return (
+    <div style={{
+      position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)",
+      display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000,
+    }} onClick={onClose}>
+      <div style={{
+        background: "#fff", borderRadius: 16, padding: 24, width: 520,
+        display: "flex", flexDirection: "column", gap: 14,
+        boxShadow: "0 8px 40px rgba(0,0,0,0.18)",
+      }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <h3 style={{ margin: 0, fontSize: 16, fontWeight: 600, color: "#1a1a1a" }}>选择新建设计方式</h3>
+          <button onClick={onClose} style={{ background: "none", border: "none", fontSize: 18, cursor: "pointer", color: "#8a8a8a", lineHeight: 1 }}>×</button>
+        </div>
+        <p style={{ margin: 0, fontSize: 13, color: "#6a6a6a", lineHeight: 1.7 }}>
+          新会话可以从空白需求开始，也可以直接导入已有页面。导入后会立即进入 design 的 Tweaks 编辑链路，并复用设计产物文件系统。
+        </p>
+        <div style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 12,
+          padding: "10px 12px",
+          borderRadius: 12,
+          background: workspacePath ? "#f8faf8" : "#fff7e6",
+          border: `1px solid ${workspacePath ? "#d6e6d6" : "#e7bf7a"}`,
+        }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#1a1a1a", marginBottom: 2 }}>工作目录</div>
+            <div style={{
+              fontSize: 12,
+              color: workspacePath ? "#4f5f4f" : "#9a5b00",
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              maxWidth: 300,
+            }}>
+              {workspaceLoading
+                ? "选择中..."
+                : workspacePath
+                  ? workspacePath
+                  : "导入链接 / HTML 前需要先选择工作目录"}
+            </div>
+          </div>
+          <button
+            onClick={onSelectWorkspace}
+            disabled={workspaceLoading}
+            style={{
+              padding: "7px 12px",
+              borderRadius: 8,
+              border: "none",
+              background: "#1a1a1a",
+              color: "#fff",
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: workspaceLoading ? "default" : "pointer",
+              fontFamily: "inherit",
+              flexShrink: 0,
+              opacity: workspaceLoading ? 0.6 : 1,
+            }}
+          >
+            {workspacePath ? "切换目录" : "选择目录"}
+          </button>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12 }}>
+          <button
+            onClick={onCreateBlank}
+            style={{
+              display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 8,
+              padding: "16px 14px", borderRadius: 14, border: "1px solid #e0ded8",
+              background: "#faf9f6", cursor: "pointer", textAlign: "left", fontFamily: "inherit",
+            }}
+          >
+            <span style={{ fontSize: 20 }}>✦</span>
+            <span style={{ fontSize: 14, fontWeight: 700, color: "#1a1a1a" }}>从描述开始</span>
+            <span style={{ fontSize: 12, color: "#8a8a8a", lineHeight: 1.6 }}>标准的新建设计流程，会先收集问题再生成。</span>
+          </button>
+          <button
+            onClick={onImportUrl}
+            disabled={loadingKind !== null}
+            style={{
+              display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 8,
+              padding: "16px 14px", borderRadius: 14, border: "1px solid #e0ded8",
+              background: "#fff8ee", cursor: loadingKind ? "default" : "pointer", textAlign: "left", fontFamily: "inherit",
+              opacity: loadingKind && loadingKind !== "url" ? 0.6 : 1,
+            }}
+          >
+            <span style={{ fontSize: 20 }}>{loadingKind === "url" ? "⏳" : "🌐"}</span>
+            <span style={{ fontSize: 14, fontWeight: 700, color: "#1a1a1a" }}>通过链接还原</span>
+            <span style={{ fontSize: 12, color: "#8a8a8a", lineHeight: 1.6 }}>抓取页面 HTML，直接变成当前 design 的可编辑画布。</span>
+          </button>
+          <button
+            onClick={onImportHtml}
+            disabled={loadingKind !== null}
+            style={{
+              display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 8,
+              padding: "16px 14px", borderRadius: 14, border: "1px solid #e0ded8",
+              background: "#f3f7ff", cursor: loadingKind ? "default" : "pointer", textAlign: "left", fontFamily: "inherit",
+              opacity: loadingKind && loadingKind !== "html" ? 0.6 : 1,
+            }}
+          >
+            <span style={{ fontSize: 20 }}>{loadingKind === "html" ? "⏳" : "📄"}</span>
+            <span style={{ fontSize: 14, fontWeight: 700, color: "#1a1a1a" }}>导入 HTML</span>
+            <span style={{ fontSize: 12, color: "#8a8a8a", lineHeight: 1.6 }}>读取本地 HTML，并尽量保留同级依赖与资源引用。</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function LinkModal({ open, mode, url, loading, onUrlChange, onConfirm, onClose }: {
+  open: boolean
+  mode: "reference" | "import"
+  url: string
+  loading?: boolean
+  onUrlChange: (v: string) => void
+  onConfirm: () => void
+  onClose: () => void
+}) {
+  if (!open) return null
+  const isValid = (() => {
+    try {
+      const parsed = new URL(url)
+      return parsed.protocol === "http:" || parsed.protocol === "https:"
+    } catch {
+      return false
+    }
+  })()
+  const title = mode === "import" ? "🌐 通过链接还原页面" : "🔗 通过链接关联设计图"
+  const description = mode === "import"
+    ? "输入网页链接后，design 会先抓取页面 HTML，还原成当前会话里的可编辑设计。"
+    : "输入 Figma、Sketch、设计图或参考页面的链接，模型将把它作为视觉参考。"
+  const confirmLabel = mode === "import"
+    ? (loading ? "导入中..." : "开始还原")
+    : "确认关联"
   return (
     <div style={{
       position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)",
@@ -3872,16 +4462,16 @@ function LinkModal({ open, url, onUrlChange, onConfirm, onClose }: {
         boxShadow: "0 8px 40px rgba(0,0,0,0.18)",
       }} onClick={(e) => e.stopPropagation()}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <h3 style={{ margin: 0, fontSize: 16, fontWeight: 600, color: "#1a1a1a" }}>🔗 通过链接关联设计图</h3>
+          <h3 style={{ margin: 0, fontSize: 16, fontWeight: 600, color: "#1a1a1a" }}>{title}</h3>
           <button onClick={onClose} style={{ background: "none", border: "none", fontSize: 18, cursor: "pointer", color: "#8a8a8a", lineHeight: 1 }}>×</button>
         </div>
-        <p style={{ margin: 0, fontSize: 13, color: "#6a6a6a" }}>输入 Figma、Sketch、设计图或参考页面的链接，模型将把它作为视觉参考。</p>
+        <p style={{ margin: 0, fontSize: 13, color: "#6a6a6a" }}>{description}</p>
         <input
           value={url}
           onChange={(e) => onUrlChange(e.target.value)}
-          placeholder="https://www.figma.com/…  或其他参考链接"
+          placeholder={mode === "import" ? "https://example.com/page" : "https://www.figma.com/…  或其他参考链接"}
           autoFocus
-          onKeyDown={(e) => { if (e.key === "Enter" && isValid) onConfirm() }}
+          onKeyDown={(e) => { if (e.key === "Enter" && isValid && !loading) onConfirm() }}
           style={{
             border: `1px solid ${isValid || !url ? "#e0ded8" : "#e8a0a0"}`, borderRadius: 8,
             padding: "10px 12px", fontSize: 13, fontFamily: "inherit", outline: "none",
@@ -3892,9 +4482,9 @@ function LinkModal({ open, url, onUrlChange, onConfirm, onClose }: {
           <button onClick={onClose} style={{ padding: "8px 18px", borderRadius: 8, border: "1px solid #e0ded8", background: "#fff", fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>取消</button>
           <button
             onClick={onConfirm}
-            disabled={!isValid}
-            style={{ padding: "8px 18px", borderRadius: 8, border: "none", background: isValid ? "#1a1a1a" : "#ccc", color: "#fff", fontSize: 13, cursor: isValid ? "pointer" : "default", fontFamily: "inherit", fontWeight: 500 }}
-          >确认关联</button>
+            disabled={!isValid || loading}
+            style={{ padding: "8px 18px", borderRadius: 8, border: "none", background: isValid && !loading ? "#1a1a1a" : "#ccc", color: "#fff", fontSize: 13, cursor: isValid && !loading ? "pointer" : "default", fontFamily: "inherit", fontWeight: 500 }}
+          >{confirmLabel}</button>
         </div>
       </div>
     </div>
@@ -4572,11 +5162,17 @@ function DesignGallery({
   onOpen,
   onNew,
   onDelete,
+  workspacePath,
+  workspaceLoading,
+  onSelectWorkspace,
 }: {
   sessionIndex: SessionMeta[]
   onOpen: (id: string) => void
   onNew: () => void
   onDelete: (id: string) => void
+  workspacePath: string | null
+  workspaceLoading: boolean
+  onSelectWorkspace: () => void
 }) {
   const [hoveredId, setHoveredId] = useState<string | null>(null)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
@@ -4619,19 +5215,42 @@ function DesignGallery({
             }}>{sessionIndex.length}</span>
           )}
         </div>
-        <button
-          onClick={onNew}
-          style={{
-            display: "flex", alignItems: "center", gap: 7,
-            padding: "8px 20px", fontSize: 14, fontWeight: 600,
-            background: "#1a1a1a", color: "#fff",
-            border: "none", borderRadius: 10, cursor: "pointer",
-            fontFamily: "inherit",
-          }}
-        >
-          <span style={{ fontSize: 16, lineHeight: 1 }}>+</span>
-          新建设计
-        </button>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <button
+            onClick={onSelectWorkspace}
+            disabled={workspaceLoading}
+            style={{
+              display: "flex", alignItems: "center", gap: 6,
+              maxWidth: 260,
+              padding: "7px 12px",
+              fontSize: 12, fontWeight: 600,
+              background: workspacePath ? "#ffffff" : "#fff7e6",
+              color: workspacePath ? "#1a1a1a" : "#9a5b00",
+              border: `1px solid ${workspacePath ? "#d4d2cc" : "#e7bf7a"}`,
+              borderRadius: 10, cursor: workspaceLoading ? "default" : "pointer",
+              fontFamily: "inherit", opacity: workspaceLoading ? 0.7 : 1,
+            }}
+            title={workspacePath ? workspacePath : "选择工作目录"}
+          >
+            <span style={{ fontSize: 12 }}>📁</span>
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {workspaceLoading ? "选择中..." : workspacePath ? getPathName(workspacePath) : "选择工作目录"}
+            </span>
+          </button>
+          <button
+            onClick={onNew}
+            style={{
+              display: "flex", alignItems: "center", gap: 7,
+              padding: "8px 20px", fontSize: 14, fontWeight: 600,
+              background: "#1a1a1a", color: "#fff",
+              border: "none", borderRadius: 10, cursor: "pointer",
+              fontFamily: "inherit",
+            }}
+          >
+            <span style={{ fontSize: 16, lineHeight: 1 }}>+</span>
+            新建设计
+          </button>
+        </div>
       </div>
 
       {/* Card grid */}
@@ -4739,6 +5358,23 @@ function DesignGallery({
                   borderTop: "1px solid #f0eee8",
                   background: "#ffffff",
                 }}>
+                  {meta.kind && meta.kind !== "prompt" && (
+                    <div style={{ marginBottom: 6 }}>
+                      <span style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        padding: "2px 8px",
+                        borderRadius: 999,
+                        fontSize: 10,
+                        fontWeight: 700,
+                        color: meta.kind === "import_url" ? "#7a4300" : "#1d4f91",
+                        background: meta.kind === "import_url" ? "#fff2df" : "#edf4ff",
+                        border: `1px solid ${meta.kind === "import_url" ? "#f0d3a6" : "#cfe0ff"}`,
+                      }}>
+                        {getSessionKindLabel(meta.kind)}
+                      </span>
+                    </div>
+                  )}
                   <div style={{
                     fontSize: 13, fontWeight: 600, color: "#1a1a1a",
                     overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
