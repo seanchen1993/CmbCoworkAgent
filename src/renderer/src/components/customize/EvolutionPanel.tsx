@@ -35,6 +35,7 @@ import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
+import { buildBundleUnifiedDiff, extractTextBundleFromZip } from "@/lib/skill-bundle-diff"
 import type { SkillMetadata } from "@/types"
 import { SkillEvolutionReviewPanel } from "./SkillEvolutionReviewPanel"
 
@@ -946,26 +947,60 @@ function CloudEvolutionUpdateCard({
 }): React.JSX.Element {
   const [expanded, setExpanded] = useState(false)
   const [diff, setDiff] = useState("")
+  const [diffSource, setDiffSource] = useState<"local" | "backend" | "error" | null>(null)
   const [diffLoading, setDiffLoading] = useState(false)
 
   useEffect(() => {
-    if (!expanded || diff) return
+    setDiff("")
+    setDiffSource(null)
+    setDiffLoading(false)
+  }, [candidate.candidate_id])
+
+  useEffect(() => {
+    if (!expanded || diffSource) return
     let cancelled = false
     setDiffLoading(true)
-    evolutionApi.getDiff(candidate.candidate_id)
-      .then((value) => {
-        if (!cancelled) setDiff(value)
-      })
-      .catch((error) => {
-        if (!cancelled) setDiff(error instanceof Error ? error.message : String(error))
-      })
-      .finally(() => {
+    const loadDiff = async (): Promise<void> => {
+      try {
+        const installedSkills = await window.api.skills.list()
+        const existing = installedSkills.find((skill: SkillMetadata) => skill.name === candidate.skill_name)
+        if (!existing) throw new Error(`本地未安装同名 Skill：${candidate.skill_name}`)
+
+        const localBundle = await window.api.skills.readTextBundle(existing.path)
+        if (!localBundle.success || !localBundle.files) {
+          throw new Error(localBundle.error || "读取本地 Skill 文件失败")
+        }
+
+        const remoteBundle = await evolutionApi.downloadCandidateBundle(candidate.candidate_id)
+        const remoteFiles = await extractTextBundleFromZip(await remoteBundle.blob.arrayBuffer())
+        const localDiff = buildBundleUnifiedDiff(localBundle.files, remoteFiles)
+        if (!cancelled) {
+          setDiff(localDiff)
+          setDiffSource("local")
+        }
+      } catch (localDiffError) {
+        console.warn("[Evolution] failed to build local candidate diff, falling back to backend diff:", localDiffError)
+        try {
+          const backendDiff = await evolutionApi.getDiff(candidate.candidate_id)
+          if (!cancelled) {
+            setDiff(backendDiff)
+            setDiffSource("backend")
+          }
+        } catch (backendDiffError) {
+          if (!cancelled) {
+            setDiff(backendDiffError instanceof Error ? backendDiffError.message : String(backendDiffError))
+            setDiffSource("error")
+          }
+        }
+      } finally {
         if (!cancelled) setDiffLoading(false)
-      })
+      }
+    }
+    void loadDiff()
     return () => {
       cancelled = true
     }
-  }, [candidate.candidate_id, diff, expanded])
+  }, [candidate.candidate_id, candidate.skill_name, diffSource, expanded])
   const toggleExpanded = (): void => setExpanded((v) => !v)
 
   return (
@@ -1059,8 +1094,18 @@ function CloudEvolutionUpdateCard({
         <div className="border-t border-blue-200/70 bg-background/60 px-4 pb-4 pt-3 space-y-3 dark:border-blue-900">
           <div>
             <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider mb-1">
-              云端候选 Diff
+              {diffSource === "local" ? "本地安装版本 vs 云端自进化版本" : "云端候选 Diff"}
             </p>
+            {diffSource === "backend" && (
+              <p className="mb-2 text-[11px] text-amber-600 dark:text-amber-400">
+                未能完成本地对比，已回退展示 Trace Evolver 后端 diff。
+              </p>
+            )}
+            {diffSource === "error" && (
+              <p className="mb-2 text-[11px] text-destructive">
+                diff 加载失败，请检查 Trace Evolver 服务或候选 bundle。
+              </p>
+            )}
             <div className="rounded border border-border bg-background max-h-96 overflow-y-auto">
               {diffLoading ? (
                 <div className="flex items-center gap-2 px-3 py-4 text-xs text-muted-foreground">

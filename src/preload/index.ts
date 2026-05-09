@@ -725,6 +725,16 @@ const api = {
     ): Promise<{ success: boolean; files?: string[]; error?: string }> => {
       return ipcRenderer.invoke("skills:listFiles", skillPath)
     },
+    readTextBundle: (
+      skillPath: string
+    ): Promise<{
+      success: boolean
+      files?: Array<{ path: string; content: string }>
+      skipped?: Array<{ path: string; reason: string }>
+      error?: string
+    }> => {
+      return ipcRenderer.invoke("skills:readTextBundle", skillPath)
+    },
     getDisabled: (): Promise<string[]> => {
       return ipcRenderer.invoke("skills:getDisabled")
     },

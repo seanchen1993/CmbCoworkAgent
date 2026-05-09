@@ -452,6 +452,14 @@ interface CustomAPI {
     listFiles: (
       skillPath: string
     ) => Promise<{ success: boolean; files?: string[]; error?: string }>
+    readTextBundle: (
+      skillPath: string
+    ) => Promise<{
+      success: boolean
+      files?: Array<{ path: string; content: string }>
+      skipped?: Array<{ path: string; reason: string }>
+      error?: string
+    }>
     getDisabled: () => Promise<string[]>
     setDisabled: (skillNames: string[]) => Promise<void>
     upload: (

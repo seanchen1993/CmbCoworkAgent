@@ -76,6 +76,35 @@ function getMimeTypeByPath(filePath: string): string {
   }
 }
 
+const TEXT_BUNDLE_FILE_EXTENSIONS = new Set([
+  ".md",
+  ".markdown",
+  ".txt",
+  ".json",
+  ".jsonl",
+  ".yaml",
+  ".yml",
+  ".toml",
+  ".xml",
+  ".html",
+  ".htm",
+  ".css",
+  ".scss",
+  ".less",
+  ".js",
+  ".jsx",
+  ".ts",
+  ".tsx",
+  ".vue",
+  ".py",
+  ".sh",
+  ".bash",
+  ".zsh",
+  ".sql"
+])
+const MAX_TEXT_BUNDLE_FILE_BYTES = 512 * 1024
+const MAX_TEXT_BUNDLE_TOTAL_BYTES = 2 * 1024 * 1024
+
 const CHARDET_CONFIDENCE_THRESHOLD = 0.6
 
 function isValidUtf8(buf: Buffer): boolean {
@@ -314,6 +343,16 @@ function makeSafeZipFileName(rawName: string): string {
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "")
   return `${sanitized || "skill"}.zip`
+}
+
+function toBundleRelativePath(skillDirPath: string, filePath: string): string {
+  return path.relative(skillDirPath, filePath).split(path.sep).join("/")
+}
+
+function isTextBundleFile(filePath: string): boolean {
+  const baseName = path.basename(filePath)
+  if (baseName.startsWith(".")) return false
+  return TEXT_BUNDLE_FILE_EXTENSIONS.has(path.extname(filePath).toLowerCase())
 }
 
 async function loadSkills(
@@ -591,6 +630,53 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
         files = [resolvedSkillFilePath]
       }
       return { success: true, files }
+    } catch (e) {
+      return { success: false, error: e instanceof Error ? e.message : "Unknown error" }
+    }
+  })
+
+  ipcMain.handle("skills:readTextBundle", async (_event, skillPath: string) => {
+    try {
+      const resolvedSkillFilePath = path.resolve(skillPath)
+      const skillDirPath = path.dirname(resolvedSkillFilePath)
+      if (!isPathUnderAllowedDirs(skillDirPath)) {
+        return { success: false, error: "Access denied: skill path outside skills directory" }
+      }
+
+      await repairMojibakeNamesInSkillDir(skillDirPath)
+
+      const files = await listSkillFiles(skillDirPath)
+      const result: Array<{ path: string; content: string }> = []
+      const skipped: Array<{ path: string; reason: string }> = []
+      let totalBytes = 0
+
+      for (const filePath of files) {
+        const relativePath = toBundleRelativePath(skillDirPath, filePath)
+        if (!isTextBundleFile(filePath)) {
+          skipped.push({ path: relativePath, reason: "non_text" })
+          continue
+        }
+
+        const stat = await fs.stat(filePath)
+        if (stat.size > MAX_TEXT_BUNDLE_FILE_BYTES) {
+          skipped.push({ path: relativePath, reason: "file_too_large" })
+          continue
+        }
+        if (totalBytes + stat.size > MAX_TEXT_BUNDLE_TOTAL_BYTES) {
+          skipped.push({ path: relativePath, reason: "bundle_too_large" })
+          continue
+        }
+
+        const content = await fs.readFile(filePath, "utf-8")
+        if (content.includes("\u0000")) {
+          skipped.push({ path: relativePath, reason: "binary_like" })
+          continue
+        }
+        result.push({ path: relativePath, content })
+        totalBytes += stat.size
+      }
+
+      return { success: true, files: result, skipped }
     } catch (e) {
       return { success: false, error: e instanceof Error ? e.message : "Unknown error" }
     }

@@ -213,14 +213,19 @@ async function devCandidateZip(candidateId: string): Promise<{ blob: Blob; filen
   }
 }
 
-function normalizeVersion(version?: string | null): string {
-  const raw = String(version || "").trim()
+function normalizeVersion(version?: string | null): string | null {
+  const raw = String(version ?? "").trim()
+  if (!raw) return null
   return raw.startsWith("v") ? raw.slice(1) : raw
 }
 
 export function compareEvolutionVersions(left?: string | null, right?: string | null): number {
-  const l = normalizeVersion(left).split(".").map((part) => Number(part) || 0)
-  const r = normalizeVersion(right).split(".").map((part) => Number(part) || 0)
+  const lv = normalizeVersion(left)
+  const rv = normalizeVersion(right)
+  // If either side is missing, no reliable comparison — suppress the update.
+  if (lv === null || rv === null) return 0
+  const l = lv.split(".").map((part) => Number(part) || 0)
+  const r = rv.split(".").map((part) => Number(part) || 0)
   for (let i = 0; i < 3; i++) {
     const diff = (l[i] || 0) - (r[i] || 0)
     if (diff !== 0) return diff
