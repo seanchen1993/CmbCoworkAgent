@@ -49,6 +49,7 @@ import { homedir } from "node:os"
 import type { HookConfig, HookEvent, HookResult } from "../hooks/types"
 import type { HookContext, HookResultCallback } from "../hooks/runner"
 import { runHooksEnriched } from "../hooks/required-skill"
+import { isHookHaltError, throwIfHookHalt } from "../hooks/halt"
 import type { HookScopeController } from "../hooks/scope"
 import type { SkillLifecycleMatch, SkillLifecycleRegistry } from "./skill-lifecycle/registry"
 import { getSkillActivationKey } from "./skill-lifecycle/activation"
@@ -290,6 +291,7 @@ export class LocalSandbox
     T extends { error?: string; path?: string; metadata?: Record<string, unknown> }
   >(result: T, postResult: HookResult | null, fileOpLabel: string): T {
     if (!postResult) return result
+    throwIfHookHalt("PostToolUse", postResult, `${fileOpLabel} was stopped by a PostToolUse hook`)
     const notes: string[] = []
     if (postResult.stdout) notes.push(`[Hook output]\n${postResult.stdout}`)
     if (postResult.additionalContext) notes.push(`[Hook context] ${postResult.additionalContext}`)
@@ -297,16 +299,10 @@ export class LocalSandbox
     if (postResult.decision === "block" && postResult.reason) {
       notes.push(`[Hook requested review] ${postResult.reason}`)
     }
-    if (postResult.continue === false) {
-      const reason =
-        postResult.stopReason || postResult.reason || "PostToolUse hook stopped the turn"
-      notes.push(`[Hook stopped turn] ${reason}`)
-    }
     if (notes.length === 0) return result
 
     const originallyFailed = !!result.error
-    const shouldSurfaceAsError =
-      originallyFailed || postResult.decision === "block" || postResult.continue === false
+    const shouldSurfaceAsError = originallyFailed || postResult.decision === "block"
     if (!shouldSurfaceAsError) {
       return {
         ...result,
@@ -333,6 +329,7 @@ export class LocalSandbox
     postResult: HookResult | null
   ): ExecuteResponse {
     if (!postResult) return result
+    throwIfHookHalt("PostToolUse", postResult, "execute was stopped by a PostToolUse hook")
     const parts: string[] = []
     if (postResult.stdout) parts.push(`[Hook output]\n${postResult.stdout}`)
     if (postResult.additionalContext) parts.push(`[Hook context]\n${postResult.additionalContext}`)
@@ -342,6 +339,18 @@ export class LocalSandbox
     }
     if (parts.length === 0) return result
     return { ...result, output: result.output + "\n\n" + parts.join("\n\n") }
+  }
+
+  private static formatPostHookTextFeedback(postResult: HookResult | null): string | null {
+    if (!postResult) return null
+    const parts: string[] = []
+    if (postResult.stdout) parts.push(`[Hook output]\n${postResult.stdout}`)
+    if (postResult.additionalContext) parts.push(`[Hook context]\n${postResult.additionalContext}`)
+    if (postResult.systemMessage) parts.push(`[Hook notice]\n${postResult.systemMessage}`)
+    if (postResult.decision === "block" && postResult.reason) {
+      parts.push(`[Hook requested review] ${postResult.reason}`)
+    }
+    return parts.length > 0 ? parts.join("\n\n") : null
   }
 
   private static getElevatedSandboxUserProfileRoot(networkEnabled: boolean): string {
@@ -999,6 +1008,39 @@ export class LocalSandbox
     return runHooksEnriched(this.resolveHooks(event, context), event, context, this._onHookResult)
   }
 
+  async runPreToolUseHookForTool(
+    toolName: string,
+    toolArgs: Record<string, unknown>
+  ): Promise<void> {
+    const preResult = await this.runHooks("PreToolUse", {
+      toolName,
+      toolArgs,
+      workspacePath: this.workingDir,
+      sessionId: this.runId
+    })
+    throwIfHookHalt("PreToolUse", preResult, `${toolName} was stopped by a PreToolUse hook`)
+    if (preResult?.blocked || preResult?.decision === "block") {
+      throw new Error(preResult.stdout || preResult.reason || `${toolName} was blocked by a hook`)
+    }
+  }
+
+  async applyPostToolUseHookToText(
+    toolName: string,
+    toolArgs: Record<string, unknown>,
+    toolResult: string
+  ): Promise<string> {
+    const postResult = await this.runHooks("PostToolUse", {
+      toolName,
+      toolArgs,
+      toolResult,
+      workspacePath: this.workingDir,
+      sessionId: this.runId
+    })
+    throwIfHookHalt("PostToolUse", postResult, `${toolName} was stopped by a PostToolUse hook`)
+    const feedback = LocalSandbox.formatPostHookTextFeedback(postResult)
+    return feedback ? `${toolResult}\n\n${feedback}` : toolResult
+  }
+
   private getSkillHookKey(skill: SkillLifecycleMatch): string {
     return getSkillActivationKey(skill)
   }
@@ -1469,11 +1511,12 @@ export class LocalSandbox
             skillTriggerToolName: "read_file"
           }
           const preResult = await this.runHooks("PreSkillUse", preContext)
-          if (
-            preResult?.blocked ||
-            preResult?.continue === false ||
-            preResult?.decision === "block"
-          ) {
+          throwIfHookHalt(
+            "PreSkillUse",
+            preResult,
+            `Skill ${skillMatch.name} was stopped by a hook`
+          )
+          if (preResult?.blocked || preResult?.decision === "block") {
             const reason =
               preResult.reason ||
               preResult.stopReason ||
@@ -1490,6 +1533,7 @@ export class LocalSandbox
           this._skillHooksFired.add(skillHookKey)
         }
       } catch (hookError) {
+        if (isHookHaltError(hookError)) throw hookError
         console.warn("[Hooks] PreSkillUse error:", hookError)
       }
 
@@ -1542,6 +1586,7 @@ export class LocalSandbox
 
       return result
     } catch (e: unknown) {
+      if (isHookHaltError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)
       return `Error reading file '${filePath}': ${msg}`
     }
@@ -1718,6 +1763,7 @@ export class LocalSandbox
       workspacePath: this.workingDir,
       sessionId: this.runId
     })
+    throwIfHookHalt("PreToolUse", preResult, "write_file was stopped by a PreToolUse hook")
     if (preResult?.blocked) {
       return { error: `[Hook blocked] ${preResult.stdout || "write_file was blocked by a hook"}` }
     }
@@ -1764,6 +1810,7 @@ export class LocalSandbox
       })
       return LocalSandbox.applyPostHookContext(result, postResult, "write_file")
     } catch (e) {
+      if (isHookHaltError(e)) throw e
       console.warn("[Hooks] PostToolUse write error:", e)
       return result
     }
@@ -1850,6 +1897,7 @@ export class LocalSandbox
       workspacePath: this.workingDir,
       sessionId: this.runId
     })
+    throwIfHookHalt("PreToolUse", preResult, "edit_file was stopped by a PreToolUse hook")
     if (preResult?.blocked) {
       return { error: `[Hook blocked] ${preResult.stdout || "edit_file was blocked by a hook"}` }
     }
@@ -1914,10 +1962,12 @@ export class LocalSandbox
         })
         return LocalSandbox.applyPostHookContext(result, postResult, "edit_file")
       } catch (e) {
+        if (isHookHaltError(e)) throw e
         console.warn("[Hooks] PostToolUse edit error:", e)
         return result
       }
     } catch (e: unknown) {
+      if (isHookHaltError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)
       return { error: `Error editing file '${filePath}': ${msg}` }
     }
@@ -2599,11 +2649,14 @@ export class LocalSandbox
   >()
 
   /**
-   * Execute a command in the background — returns immediately with a task ID.
+   * Execute a command in the background — returns immediately with the task-output prompt.
    * The command runs asynchronously with a long timeout.
    * Use `getTaskOutput(taskId)` to retrieve the result or check progress.
    */
   async executeBackground(command: string): Promise<string> {
+    const toolArgs = { command, run_in_background: true }
+    await this.runPreToolUseHookForTool("execute", toolArgs)
+
     const taskId = randomUUID().slice(0, 8)
     const taskAbortController = new AbortController()
     const task = {
@@ -2665,7 +2718,21 @@ export class LocalSandbox
         )
       })
 
-    return taskId
+    const startedMessage = `Background task started (id: ${taskId}). Use task_output tool with this id to check results later.`
+    try {
+      return await this.applyPostToolUseHookToText("execute", toolArgs, startedMessage)
+    } catch (error) {
+      if (isHookHaltError(error)) {
+        taskAbortController.abort()
+        task.completed = true
+        task.result = {
+          output: `Background task ${taskId} cancelled because PostToolUse halted the turn.`,
+          exitCode: 130,
+          truncated: false
+        }
+      }
+      throw error
+    }
   }
 
   /**
@@ -2759,6 +2826,7 @@ export class LocalSandbox
       workspacePath: this.workingDir,
       sessionId: this.runId
     })
+    throwIfHookHalt("PreToolUse", preResult, "execute was stopped by a PreToolUse hook")
     if (preResult?.blocked) {
       return {
         output: `[Hook blocked] ${preResult.stdout || "execute was blocked by a hook"}`,

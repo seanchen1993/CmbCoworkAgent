@@ -87,6 +87,7 @@ import { runHooks } from "../hooks/runner"
 import type { HookContext } from "../hooks/runner"
 import type { HookEvent, HookResult } from "../hooks/types"
 import { runHooksEnriched } from "../hooks/required-skill"
+import { isHookHaltError, throwIfHookHalt } from "../hooks/halt"
 import {
   createHookScope,
   extractPluginIdFromProviderKey,
@@ -269,7 +270,12 @@ function createScopedMcpCapabilityService(
         hookContext,
         onHookResult
       )
-      if (preResult?.blocked || preResult?.continue === false || preResult?.decision === "block") {
+      throwIfHookHalt(
+        "PreToolUse",
+        preResult,
+        `MCP tool ${tool.toolId} was stopped by a PreToolUse hook`
+      )
+      if (preResult?.blocked || preResult?.decision === "block") {
         throw new Error(
           preResult.reason ||
             preResult.stopReason ||
@@ -291,6 +297,11 @@ function createScopedMcpCapabilityService(
         "PostToolUse",
         postContext,
         onHookResult
+      )
+      throwIfHookHalt(
+        "PostToolUse",
+        postResult,
+        `MCP tool ${tool.toolId} was stopped by a PostToolUse hook`
       )
       const hookFeedback = formatPostHookFeedback(postResult)
       const isError =
@@ -503,10 +514,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
       const customExecute = lcTool(
         async (input: { command: string; run_in_background?: boolean }) => {
           if (input.run_in_background) {
-            const taskId = await (filesystemBackend as LocalSandbox).executeBackground(
-              input.command
-            )
-            return `Background task started (id: ${taskId}). Use task_output tool with this id to check results later.`
+            return (filesystemBackend as LocalSandbox).executeBackground(input.command)
           }
           // Delegate to original execute handler for foreground execution
           return (oldExecute as any).invoke(input)
@@ -538,53 +546,61 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     const taskOutputTool = lcTool(
       async (input: { task_id: string; block?: boolean; timeout?: number }) => {
         const sandbox = filesystemBackend as LocalSandbox
-        const block = input.block !== false // default true
-        const timeout = input.timeout ?? 30_000 // default 30s, max 600s
+        const toolArgs: Record<string, unknown> = { ...input }
+        await sandbox.runPreToolUseHookForTool("task_output", toolArgs)
 
-        // Non-blocking: return immediately
-        if (!block) {
-          const result = sandbox.getTaskOutput(input.task_id)
-          if (!result) return `Error: No background task found with id "${input.task_id}".`
-          if (!result.completed) {
-            return JSON.stringify({
-              retrieval_status: "not_ready",
-              elapsed: result.elapsedSeconds,
-              command: result.command
-            })
-          }
-          const status = result.exitCode === 0 ? "succeeded" : "failed"
-          return `${result.output ?? "<no output>"}\n[Command ${status} with exit code ${result.exitCode}, elapsed: ${result.elapsedSeconds}s]`
-        }
+        const readTaskOutputText = async (): Promise<string> => {
+          const block = input.block !== false // default true
+          const timeout = input.timeout ?? 30_000 // default 30s, max 600s
 
-        // Blocking: poll with progressive interval until completed, timeout, or abort.
-        // First 2s at 100ms for snappy response, then 500ms to reduce CPU spin.
-        const start = Date.now()
-        while (Date.now() - start < timeout) {
-          if (sandbox.isAborted) {
-            return "Task polling aborted: conversation was cancelled by user."
-          }
-          const result = sandbox.getTaskOutput(input.task_id)
-          if (!result) return `Error: No background task found with id "${input.task_id}".`
-          if (result.completed) {
+          // Non-blocking: return immediately
+          if (!block) {
+            const result = sandbox.getTaskOutput(input.task_id)
+            if (!result) return `Error: No background task found with id "${input.task_id}".`
+            if (!result.completed) {
+              return JSON.stringify({
+                retrieval_status: "not_ready",
+                elapsed: result.elapsedSeconds,
+                command: result.command
+              })
+            }
             const status = result.exitCode === 0 ? "succeeded" : "failed"
             return `${result.output ?? "<no output>"}\n[Command ${status} with exit code ${result.exitCode}, elapsed: ${result.elapsedSeconds}s]`
           }
-          const elapsed = Date.now() - start
-          await new Promise<void>((r) => setTimeout(r, elapsed < 2000 ? 100 : 500))
+
+          // Blocking: poll with progressive interval until completed, timeout, or abort.
+          // First 2s at 100ms for snappy response, then 500ms to reduce CPU spin.
+          const start = Date.now()
+          while (Date.now() - start < timeout) {
+            if (sandbox.isAborted) {
+              return "Task polling aborted: conversation was cancelled by user."
+            }
+            const result = sandbox.getTaskOutput(input.task_id)
+            if (!result) return `Error: No background task found with id "${input.task_id}".`
+            if (result.completed) {
+              const status = result.exitCode === 0 ? "succeeded" : "failed"
+              return `${result.output ?? "<no output>"}\n[Command ${status} with exit code ${result.exitCode}, elapsed: ${result.elapsedSeconds}s]`
+            }
+            const elapsed = Date.now() - start
+            await new Promise<void>((r) => setTimeout(r, elapsed < 2000 ? 100 : 500))
+          }
+
+          // Timeout — return current status so the LLM can decide to call again
+          const final = sandbox.getTaskOutput(input.task_id)
+          if (!final) return `Error: No background task found with id "${input.task_id}".`
+          if (final.completed) {
+            const status = final.exitCode === 0 ? "succeeded" : "failed"
+            return `${final.output ?? "<no output>"}\n[Command ${status} with exit code ${final.exitCode}, elapsed: ${final.elapsedSeconds}s]`
+          }
+          return JSON.stringify({
+            retrieval_status: "timeout",
+            elapsed: final.elapsedSeconds,
+            command: final.command
+          })
         }
 
-        // Timeout — return current status so the LLM can decide to call again
-        const final = sandbox.getTaskOutput(input.task_id)
-        if (!final) return `Error: No background task found with id "${input.task_id}".`
-        if (final.completed) {
-          const status = final.exitCode === 0 ? "succeeded" : "failed"
-          return `${final.output ?? "<no output>"}\n[Command ${status} with exit code ${final.exitCode}, elapsed: ${final.elapsedSeconds}s]`
-        }
-        return JSON.stringify({
-          retrieval_status: "timeout",
-          elapsed: final.elapsedSeconds,
-          command: final.command
-        })
+        const resultText = await readTaskOutputText()
+        return sandbox.applyPostToolUseHookToText("task_output", toolArgs, resultText)
       },
       {
         name: "task_output",
@@ -658,6 +674,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     toolName: string | undefined
   ): { kind: "schema" | "runtime"; message: string } | null => {
     if (isGraphBubbleUp(error) || isAbortError(error)) return null
+    if (isHookHaltError(error)) return null
     if (isProgrammerError(error)) return null
     if (MiddlewareError.isInstance(error)) return null
 

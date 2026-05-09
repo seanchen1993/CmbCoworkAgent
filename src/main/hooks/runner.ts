@@ -742,7 +742,9 @@ async function executeHook(
  * - PreToolUse/PreSkillUse/UserPromptSubmit: exit code 2 or decision=block stops the turn.
  * - PostToolUse: collects hook output so callers can decide how to surface it.
  * - PostSkillUse: logs every hook result, but only blocking results are returned for revision.
- * - Stop/SubagentStop/Notification/SessionStart/SessionEnd: fire-and-forget.
+ * - Stop: awaited — can request revision or halt the turn.
+ * - SubagentStop: awaited for halt semantics; non-halting output is only logged.
+ * - Notification/SessionStart/SessionEnd: fire-and-forget.
  */
 export type HookResultCallback = (event: HookEvent, hook: HookConfig, result: HookResult) => void
 
@@ -1105,7 +1107,56 @@ export async function runHooks(
     return null
   }
 
-  // SubagentStop / Notification / SessionStart / SessionEnd: fire-and-forget
+  // SubagentStop: awaited so `continue:false` can halt the parent turn after a task finishes.
+  if (event === "SubagentStop") {
+    const stopReasons: string[] = []
+    let additionalContext: string | undefined
+    let systemMessage: string | undefined
+    for (const hook of matched) {
+      const hookContext = enrichContextFromHook(hook, context)
+      const result = applyForcedOutcome(
+        await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event),
+        hook
+      )
+      console.log(
+        `[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}, continue=${result.continue}`
+      )
+      onHookResult?.(event, hook, result)
+      markOnceHookIfNeeded(hook, event, hookContext, result)
+      if (result.continue === false) {
+        stopReasons.push(
+          result.stopReason ||
+            result.reason ||
+            result.stdout ||
+            result.stderr ||
+            "SubagentStop hook stopped the turn"
+        )
+      }
+      if (result.additionalContext) {
+        additionalContext = joinHookText(additionalContext, result.additionalContext)
+      }
+      if (result.systemMessage) {
+        systemMessage = joinHookText(systemMessage, result.systemMessage)
+      }
+      if (result.stderr) {
+        console.warn(`[Hooks] ${event} hook stderr:`, result.stderr)
+      }
+    }
+
+    if (stopReasons.length === 0) return null
+    return {
+      exitCode: 0,
+      stdout: stopReasons.join("\n"),
+      stderr: "",
+      blocked: false,
+      continue: false,
+      stopReason: stopReasons.join("\n"),
+      additionalContext,
+      systemMessage
+    }
+  }
+
+  // Notification / SessionStart / SessionEnd: fire-and-forget
   for (const hook of matched) {
     const hookContext = enrichContextFromHook(hook, context)
     executeHook(hook, buildHookEnv(event, hookContext), hookContext, event)

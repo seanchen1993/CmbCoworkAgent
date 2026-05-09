@@ -404,6 +404,33 @@ async function testForcedOutcomeAlwaysReviseAppliesToFireAndForget(): Promise<vo
   )
 }
 
+async function testSubagentStopContinueFalseReturnsHalt(): Promise<void> {
+  let observed: HookResult | undefined
+  const hook = makeHook({
+    id: "subagent-halt",
+    event: "SubagentStop",
+    matcher: "*",
+    command: nodeCommand("console.log(JSON.stringify({continue:false, stopReason:'task stop'}))")
+  })
+
+  const result = await runHooks(
+    [hook],
+    "SubagentStop",
+    { sessionId: "session-1", subagent: { id: "task-1", status: "completed" } },
+    (_event, _hook, hookResult) => {
+      observed = hookResult
+    }
+  )
+
+  assert(observed?.continue === false, "SubagentStop callback should see continue:false")
+  assert(result?.continue === false, "SubagentStop should return a halt result")
+  assert(result.blocked === false, "SubagentStop halt should not become revision/block feedback")
+  assert(
+    typeof result.stopReason === "string" && result.stopReason.includes("task stop"),
+    `SubagentStop should preserve stopReason, got ${result.stopReason}`
+  )
+}
+
 async function testOnceHookRunsOnlyOncePerSession(): Promise<void> {
   resetHookOnceStateForTests()
   await withTempDir("hook-once", async (dir) => {
@@ -976,6 +1003,8 @@ async function run(): Promise<void> {
   console.log("PASS B7h forcedOutcome=always-halt applies to fire-and-forget hooks")
   await testForcedOutcomeAlwaysReviseAppliesToFireAndForget()
   console.log("PASS B7i forcedOutcome=always-revise applies to fire-and-forget hooks")
+  await testSubagentStopContinueFalseReturnsHalt()
+  console.log("PASS B7i2 SubagentStop continue:false returns halt to caller")
   await testOnceHookRunsOnlyOncePerSession()
   console.log("PASS B7j once hook runs only once per session")
   await testOnceHookFailureDoesNotConsume()

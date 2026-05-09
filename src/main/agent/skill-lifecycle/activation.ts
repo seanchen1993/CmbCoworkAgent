@@ -1,6 +1,7 @@
 import { runHooksEnriched } from "../../hooks/required-skill"
 import type { HookContext, HookResultCallback } from "../../hooks/runner"
 import type { HookConfig, HookEvent, HookResult } from "../../hooks/types"
+import { throwIfHookHalt } from "../../hooks/halt"
 import type { HookScopeController } from "../../hooks/scope"
 import type { SkillLifecycleMatch } from "./registry"
 import { getSkillUseKey, type SkillActivationTrigger, type SkillUseTracker } from "./tracker"
@@ -95,6 +96,7 @@ export async function activateSkillLifecycle(
     options.onHookResult
   )
   notes.push(...collectHookNotes(preResult))
+  throwIfHookHalt("PreSkillUse", preResult, `Skill ${options.skill.name} was stopped by a hook`)
 
   const blockReason = getBlockReason(preResult, options.skill.name)
   if (blockReason) {

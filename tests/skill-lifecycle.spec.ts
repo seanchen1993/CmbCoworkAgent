@@ -16,6 +16,7 @@ import { parseSkillUseBlock } from "../src/main/agent/skill-lifecycle/marker.ts"
 import { SkillLifecycleRegistry } from "../src/main/agent/skill-lifecycle/registry.ts"
 import { createSkillUseTracker } from "../src/main/agent/skill-lifecycle/tracker.ts"
 import { createHookScope, mergeHookScopeSnapshot } from "../src/main/hooks/scope.ts"
+import { isHookHaltError } from "../src/main/hooks/halt.ts"
 import {
   discoverSkillsSync,
   expandSkillMiddlewareSourceDirs
@@ -726,6 +727,138 @@ async function testPreSkillBlockStopsRead(): Promise<void> {
   })
 }
 
+async function testPreToolContinueFalseThrowsHookHalt(): Promise<void> {
+  await withTempDir("hook-pretool-halt", async (base) => {
+    const targetPath = join(base, "blocked.txt")
+    const sandbox = new LocalSandbox({
+      rootDir: base,
+      hooks: [
+        makeHook({
+          event: "PreToolUse",
+          matcher: "write_file",
+          command: nodeCommand(
+            "console.log(JSON.stringify({continue:false, stopReason:'pre stopped'}))"
+          )
+        })
+      ]
+    })
+
+    let caught: unknown
+    try {
+      await sandbox.write(targetPath, "should not write")
+    } catch (error) {
+      caught = error
+    }
+
+    if (!isHookHaltError(caught)) {
+      throw new Error("PreToolUse continue:false should throw HookHaltError")
+    }
+    assert(
+      caught.reason.includes("pre stopped"),
+      `HookHaltError should preserve stop reason, got ${caught.reason}`
+    )
+    assert(!existsSync(targetPath), "write_file should not run after PreToolUse halt")
+  })
+}
+
+async function testPostToolContinueFalseThrowsHookHalt(): Promise<void> {
+  await withTempDir("hook-posttool-halt", async (base) => {
+    const targetPath = join(base, "written-before-post-halt.txt")
+    const sandbox = new LocalSandbox({
+      rootDir: base,
+      hooks: [
+        makeHook({
+          event: "PostToolUse",
+          matcher: "write_file",
+          command: nodeCommand(
+            "console.log(JSON.stringify({continue:false, stopReason:'post stopped'}))"
+          )
+        })
+      ]
+    })
+
+    let caught: unknown
+    try {
+      await sandbox.write(targetPath, "ok")
+    } catch (error) {
+      caught = error
+    }
+
+    if (!isHookHaltError(caught)) {
+      throw new Error("PostToolUse continue:false should throw HookHaltError")
+    }
+    assert(
+      caught.reason.includes("post stopped"),
+      `HookHaltError should preserve stop reason, got ${caught.reason}`
+    )
+    assert(existsSync(targetPath), "PostToolUse halt happens after the tool result is produced")
+  })
+}
+
+async function testBackgroundExecutePreToolContinueFalseThrowsHookHalt(): Promise<void> {
+  await withTempDir("hook-background-pretool-halt", async (base) => {
+    const sandbox = new LocalSandbox({
+      rootDir: base,
+      hooks: [
+        makeHook({
+          event: "PreToolUse",
+          matcher: "execute",
+          command: nodeCommand(
+            "console.log(JSON.stringify({continue:false, stopReason:'background pre stopped'}))"
+          )
+        })
+      ]
+    })
+
+    let caught: unknown
+    try {
+      await sandbox.executeBackground("echo should-not-start")
+    } catch (error) {
+      caught = error
+    }
+
+    if (!isHookHaltError(caught)) {
+      throw new Error("background execute PreToolUse continue:false should throw HookHaltError")
+    }
+    assert(
+      caught.reason.includes("background pre stopped"),
+      `HookHaltError should preserve background stop reason, got ${caught.reason}`
+    )
+  })
+}
+
+async function testTextToolPostContinueFalseThrowsHookHalt(): Promise<void> {
+  await withTempDir("hook-texttool-post-halt", async (base) => {
+    const sandbox = new LocalSandbox({
+      rootDir: base,
+      hooks: [
+        makeHook({
+          event: "PostToolUse",
+          matcher: "task_output",
+          command: nodeCommand(
+            "console.log(JSON.stringify({continue:false, stopReason:'task output stopped'}))"
+          )
+        })
+      ]
+    })
+
+    let caught: unknown
+    try {
+      await sandbox.applyPostToolUseHookToText("task_output", { task_id: "abc123" }, "done")
+    } catch (error) {
+      caught = error
+    }
+
+    if (!isHookHaltError(caught)) {
+      throw new Error("text tool PostToolUse continue:false should throw HookHaltError")
+    }
+    assert(
+      caught.reason.includes("task output stopped"),
+      `HookHaltError should preserve task_output stop reason, got ${caught.reason}`
+    )
+  })
+}
+
 async function testSameSkillReadFiresOnce(): Promise<void> {
   await withTempDir("skill-read-once", async (base) => {
     const source = join(base, "skills")
@@ -983,6 +1116,14 @@ async function run(): Promise<void> {
   console.log("PASS D1 PostSkillUse is deferred until turn completion")
   await testPreSkillBlockStopsRead()
   console.log("PASS D2 PreSkillUse block stops skill read")
+  await testPreToolContinueFalseThrowsHookHalt()
+  console.log("PASS D2b PreToolUse continue:false throws HookHaltError")
+  await testPostToolContinueFalseThrowsHookHalt()
+  console.log("PASS D2c PostToolUse continue:false throws HookHaltError")
+  await testBackgroundExecutePreToolContinueFalseThrowsHookHalt()
+  console.log("PASS D2d background execute PreToolUse continue:false throws HookHaltError")
+  await testTextToolPostContinueFalseThrowsHookHalt()
+  console.log("PASS D2e text tool PostToolUse continue:false throws HookHaltError")
   await testSameSkillReadFiresOnce()
   console.log("PASS D3 same skill read fires hooks once")
   await testSameNameDifferentSkillsFireSeparately()

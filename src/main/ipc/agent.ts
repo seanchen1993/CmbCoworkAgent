@@ -70,7 +70,7 @@ import {
   type WorthinessResult
 } from "../agent/skill-evolution/skill-proposal-logic"
 import { isRetryableApiError, buildOrderedChain, type FailoverAttempt } from "../agent/failover"
-import { runHooks, type HookContext, type HookResultCallback } from "../hooks/runner"
+import { type HookContext, type HookResultCallback } from "../hooks/runner"
 import {
   createHookScope,
   normalizePathKey,
@@ -82,6 +82,7 @@ import {
 import type { HookConfig, HookEvent, HookResult } from "../hooks/types"
 import { fireSessionStartOnce } from "../hooks/session-lifecycle"
 import { runHooksEnriched } from "../hooks/required-skill"
+import { isHookHaltError, throwIfHookHalt, type HookHaltError } from "../hooks/halt"
 import { activateSkillLifecycle, formatSkillHookContext } from "../agent/skill-lifecycle/activation"
 import { parseSkillUseBlock, type ParsedSkillUseBlock } from "../agent/skill-lifecycle/marker"
 import { SkillLifecycleRegistry, type SkillLifecycleMatch } from "../agent/skill-lifecycle/registry"
@@ -115,6 +116,20 @@ const STOP_HOOK_REVISION_PROMPT_PREFIX = "[[CMBDEVCLAW_STOP_HOOK_REVISION]]"
 
 // Track active runs for cancellation
 const activeRuns = new Map<string, AbortController>()
+
+function sendHookHalt(window: BrowserWindow, channel: string, error: HookHaltError): void {
+  window.webContents.send(channel, {
+    type: "custom",
+    data: {
+      type: "hook_blocked",
+      hookEvent: error.hookEvent,
+      action: "halt",
+      reason: error.reason,
+      systemMessage: error.systemMessage
+    }
+  })
+  window.webContents.send(channel, { type: "done" })
+}
 
 /**
  * Thread-scoped hook state shared across IPC handler boundaries. A new
@@ -199,6 +214,53 @@ function getAllEnabledHooksForInterrupt(workspacePath: string | undefined): Hook
     ...getEnabledPluginHookMetadata(),
     ...getEnabledSkillHookMetadata()
   ]
+}
+
+async function maybeRunSubagentStopHooksFromStreamPayload(params: {
+  payload: unknown
+  workspacePath?: string
+  threadId: string
+  hookScope: HookScopeController
+  firedToolCallIds: Set<string>
+  onHookResult?: HookResultCallback
+}): Promise<void> {
+  const [msgChunk] = params.payload as [
+    { id?: unknown; kwargs?: Record<string, unknown>; content?: unknown } | undefined
+  ]
+  if (!msgChunk) return
+
+  const kwargs = (msgChunk.kwargs || {}) as Record<string, unknown>
+  const classId: string[] = Array.isArray(msgChunk.id) ? msgChunk.id : []
+  const className = classId[classId.length - 1] || ""
+  const isTool = className.includes("Tool") || kwargs.type === "tool"
+  const toolCallId = typeof kwargs.tool_call_id === "string" ? kwargs.tool_call_id : ""
+  if (!isTool || kwargs.name !== "task" || !toolCallId) return
+  if (params.firedToolCallIds.has(toolCallId)) return
+  params.firedToolCallIds.add(toolCallId)
+
+  const additionalKwargs = kwargs.additional_kwargs as Record<string, unknown> | undefined
+  const isErr =
+    kwargs.status === "error" || kwargs.is_error === true || additionalKwargs?.is_error === true
+  const subagentStopContext: HookContext = {
+    workspacePath: params.workspacePath,
+    sessionId: params.threadId,
+    subagent: {
+      id: toolCallId,
+      status: isErr ? "failed" : "completed"
+    }
+  }
+  const result = await runHooksEnriched(
+    resolveEnabledHooksForRun(
+      params.workspacePath,
+      "SubagentStop",
+      subagentStopContext,
+      params.hookScope
+    ),
+    "SubagentStop",
+    subagentStopContext,
+    params.onHookResult
+  )
+  throwIfHookHalt("SubagentStop", result, "SubagentStop hook stopped the turn")
 }
 
 /**
@@ -1790,7 +1852,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         })
       }
 
-      const processMessagesSideEffects = (payload: unknown): void => {
+      const processMessagesSideEffects = async (payload: unknown): Promise<void> => {
         try {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const [msgChunk] = payload as [any]
@@ -1800,41 +1862,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const classId: string[] = Array.isArray(msgChunk.id) ? msgChunk.id : []
           const className = classId[classId.length - 1] || ""
           const isAI = className.includes("AI")
-          const isTool = className.includes("Tool")
-
-          // SubagentStop — a "task" tool message signals subagent completion
-          if (isTool && kwargs.name === "task" && kwargs.tool_call_id) {
-            const toolCallId = kwargs.tool_call_id as string
-            if (!_subagentStopFired.has(toolCallId)) {
-              _subagentStopFired.add(toolCallId)
-              const additionalKwargs = kwargs.additional_kwargs as
-                | Record<string, unknown>
-                | undefined
-              const isErr =
-                kwargs.status === "error" ||
-                kwargs.is_error === true ||
-                additionalKwargs?.is_error === true
-              const subagentStopContext: HookContext = {
-                workspacePath: sessionWorkspacePath,
-                sessionId: threadId,
-                subagent: {
-                  id: toolCallId,
-                  status: isErr ? "failed" : "completed"
-                }
-              }
-              runHooks(
-                resolveEnabledHooksForRun(
-                  sessionWorkspacePath,
-                  "SubagentStop",
-                  subagentStopContext,
-                  hookScope
-                ),
-                "SubagentStop",
-                subagentStopContext,
-                onHookResult
-              ).catch((e) => console.warn("[Hooks] SubagentStop hook error:", e))
-            }
-          }
+          await maybeRunSubagentStopHooksFromStreamPayload({
+            payload,
+            workspacePath: sessionWorkspacePath,
+            threadId,
+            hookScope,
+            firedToolCallIds: _subagentStopFired,
+            onHookResult
+          })
 
           if (!isAI) return
 
@@ -1886,11 +1921,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
           tracer.endStep(visibleText)
         } catch (e) {
+          if (isHookHaltError(e)) throw e
           console.error("[Agent] Tool-call extraction error:", e)
         }
       }
 
-      const processValuesSideEffects = (payload: unknown): void => {
+      const processValuesSideEffects = async (payload: unknown): Promise<void> => {
         try {
           const state = payload as {
             skillsMetadata?: Array<{ name?: string; path?: string; version?: string }>
@@ -2073,6 +2109,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             }
 
             if (isToolMessage) {
+              await maybeRunSubagentStopHooksFromStreamPayload({
+                payload: [msg],
+                workspacePath: sessionWorkspacePath,
+                threadId,
+                hookScope,
+                firedToolCallIds: _subagentStopFired,
+                onHookResult
+              })
               const toolMsgId =
                 typeof kwargs.id === "string"
                   ? kwargs.id
@@ -2119,17 +2163,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             if (text) lastFinalText = text
           }
         } catch (e) {
+          if (isHookHaltError(e)) throw e
           console.error("[Agent] Values side-effect processing error:", e)
         }
       }
 
-      const processChunkSideEffects = (mode: string, payload: unknown): void => {
+      const processChunkSideEffects = async (mode: string, payload: unknown): Promise<void> => {
         if (mode === "messages") {
-          processMessagesSideEffects(payload)
+          await processMessagesSideEffects(payload)
           return
         }
         if (mode === "values") {
-          processValuesSideEffects(payload)
+          await processValuesSideEffects(payload)
         }
       }
 
@@ -2155,10 +2200,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // class array ["langchain_core","messages","AIMessageChunk"] only after
           // toJSON() / JSON.stringify; on the live object, .id is the msg-id string).
           const serialized = serializeStreamData(data)
-          // UI forwarding is the primary path. Trace / metrics / skill-evolution
-          // processing below are side effects and must never block streaming.
+          // UI forwarding is the primary path. Most processing below is best-effort;
+          // SubagentStop hooks are awaited so `continue:false` can halt the parent turn.
           forwardStreamChunk(mode, serialized)
-          processChunkSideEffects(mode, serialized)
+          await processChunkSideEffects(mode, serialized)
           stopContextCollector.processStreamChunk(mode, serialized)
         }
       }
@@ -2358,6 +2403,24 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
       }
     } catch (error) {
+      if (isHookHaltError(error)) {
+        console.warn("[Agent] Hook halted turn:", error.reason)
+        sendHookHalt(window, channel, error)
+        tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+        tracer.finish("cancelled", error.reason).catch(() => {})
+        if (invokeRoutingResult) {
+          rememberRoutingFeedback(threadId, {
+            resolvedTier: invokeRoutingResult.resolvedTier,
+            resolvedModelId: usedModelId ?? invokeRoutingResult.resolvedModelId,
+            outcome: "cancelled",
+            toolCallCount: toolCallCounter.getCount(),
+            toolErrorCount,
+            lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
+          })
+        }
+        turnStateShouldDispose = true
+        return
+      }
       // Ignore abort-related errors (expected when stream is cancelled)
       const isAbortError =
         error instanceof Error &&
@@ -2625,6 +2688,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           : resumeOrderedChain.length
       )
       let activeResumeStream: AsyncIterable<unknown> = resumeStream
+      const resumeSubagentStopFired = new Set<string>()
 
       const consumeResumeStream = async (source: AsyncIterable<unknown>): Promise<void> => {
         for await (const chunk of source) {
@@ -2636,6 +2700,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             mode,
             data: serialized
           })
+          if (mode === "messages") {
+            await maybeRunSubagentStopHooksFromStreamPayload({
+              payload: serialized,
+              workspacePath,
+              threadId,
+              hookScope,
+              firedToolCallIds: resumeSubagentStopFired,
+              onHookResult
+            })
+          }
           stopContextCollector.processStreamChunk(mode, serialized)
         }
       }
@@ -2726,6 +2800,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         window.webContents.send(channel, { type: "done" })
       }
     } catch (error) {
+      if (isHookHaltError(error)) {
+        console.warn("[Agent] Resume hook halted turn:", error.reason)
+        sendHookHalt(window, channel, error)
+        turnStateShouldDispose = true
+        return
+      }
       const isAbortError =
         error instanceof Error &&
         (error.name === "AbortError" ||
@@ -2941,6 +3021,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           intUsedModelId ? intOrderedChain.indexOf(intUsedModelId) + 1 : intOrderedChain.length
         )
         let activeIntStream: AsyncIterable<unknown> = intStream
+        const interruptSubagentStopFired = new Set<string>()
 
         const consumeInterruptStream = async (source: AsyncIterable<unknown>): Promise<void> => {
           for await (const chunk of source) {
@@ -2952,6 +3033,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               mode,
               data: serialized
             })
+            if (mode === "messages") {
+              await maybeRunSubagentStopHooksFromStreamPayload({
+                payload: serialized,
+                workspacePath,
+                threadId,
+                hookScope,
+                firedToolCallIds: interruptSubagentStopFired,
+                onHookResult
+              })
+            }
             stopContextCollector.processStreamChunk(mode, serialized)
           }
         }
@@ -3046,6 +3137,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
       // edit case handled similarly to approve with modified args
     } catch (error) {
+      if (isHookHaltError(error)) {
+        console.warn("[Agent] Interrupt hook halted turn:", error.reason)
+        sendHookHalt(window, channel, error)
+        turnStateShouldDispose = true
+        return
+      }
       const isAbortError =
         error instanceof Error &&
         (error.name === "AbortError" ||
