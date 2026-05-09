@@ -14,7 +14,11 @@ import Store from "electron-store"
 import { ChatOpenAI } from "@langchain/openai"
 import { HumanMessage, SystemMessage, AIMessage } from "@langchain/core/messages"
 import { getCustomModelConfigs, getOpenworkDir } from "../storage"
-import { createAgentRuntime } from "../agent/runtime"
+import {
+  createAgentRuntime,
+  createRetryingFetch,
+  type ModelRetryHooks
+} from "../agent/runtime"
 import { SkillUsageDetector } from "../agent/skill-evolution/usage-detector"
 
 // ─────────────────────────────────────────────────────────
@@ -298,7 +302,7 @@ Your response must end with: </html>
 // Model factory (same pattern as optimizer.ts)
 // ─────────────────────────────────────────────────────────
 
-function getModel(modelId?: string): ChatOpenAI | null {
+function getModel(modelId?: string, retryHooks?: ModelRetryHooks): ChatOpenAI | null {
   const configs = getCustomModelConfigs()
   const config = modelId
     ? (configs.find((c) => c.id === modelId) ?? configs[0])
@@ -307,7 +311,11 @@ function getModel(modelId?: string): ChatOpenAI | null {
   return new ChatOpenAI({
     model: config.model,
     apiKey: config.apiKey,
-    configuration: { baseURL: config.baseUrl },
+    configuration: {
+      baseURL: config.baseUrl,
+      fetch: retryHooks ? createRetryingFetch(retryHooks, 6) : undefined,
+    },
+    maxRetries: 0,
     maxTokens: 8192,
     temperature: 0.7,
     streaming: true,
@@ -616,6 +624,23 @@ function readDesignSkillContent(skillPath: string): { content?: string; error?: 
   }
 }
 
+function buildDesignModelRetryHooks(send: (data: object) => void): ModelRetryHooks {
+  return {
+    onRetry: (info) => {
+      send({
+        type: "model_retry",
+        attempt: info.attempt,
+        maxRetries: info.maxRetries,
+        reason: info.reason,
+        delayMs: info.delayMs
+      })
+    },
+    onRetrySuccess: () => {
+      send({ type: "model_retry_clear" })
+    }
+  }
+}
+
 // ─────────────────────────────────────────────────────────
 // IPC Registration
 // ─────────────────────────────────────────────────────────
@@ -640,7 +665,7 @@ export function registerDesignHandlers(): void {
       const controller = new AbortController()
       activeSessions.set(sessionId, controller)
 
-      const model = getModel(modelId)
+      const model = getModel(modelId, buildDesignModelRetryHooks(send))
       if (!model) {
         send({ type: "error", error: "No model configured. Please set up a model in Settings." })
         return
@@ -709,7 +734,7 @@ export function registerDesignHandlers(): void {
       const controller = new AbortController()
       activeSessions.set(sessionId, controller)
 
-      const model = getModel(modelId)
+      const model = getModel(modelId, buildDesignModelRetryHooks(send))
       if (!model) {
         send({ type: "error", error: "No model configured. Please set up a model in Settings." })
         return
@@ -812,7 +837,7 @@ export function registerDesignHandlers(): void {
 
       console.log(`[Design:Image] Handler fired — sessionId=${sessionId} mimeType=${mimeType} imageDataLen=${imageData?.length ?? 0} prompt="${prompt?.slice(0, 80)}"`)
 
-      const model = getModel(modelId)
+      const model = getModel(modelId, buildDesignModelRetryHooks(send))
       if (!model) {
         console.error("[Design:Image] No model configured")
         send({ type: "error", error: "No model configured. Please set up a model in Settings." })
@@ -1111,6 +1136,8 @@ export function registerDesignHandlers(): void {
           noSkillEvolutionTool: true,
           enableAgentsPrompt: false,   // skip AGENTS.md — design persona is self-contained
           abortSignal: controller.signal,
+          retryHooks: buildDesignModelRetryHooks(send),
+          maxRetryAttempts: 6,
         })
 
         const streamConfig = {

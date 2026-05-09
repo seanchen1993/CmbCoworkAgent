@@ -12,6 +12,9 @@ interface ChatTab {
   label: string
 }
 
+const SINGLE_DESIGN_TAB_ID = "design-main"
+const SINGLE_DESIGN_TAB_LABEL = "Design"
+
 interface MessageAttachment {
   filename: string
   kind: "code" | "doc"     // code = from codeContext/🗂️, doc = from attachedFiles/📎
@@ -28,6 +31,7 @@ interface Message {
   isIteration?: boolean     // true = follow-up iteration, false = first generation
   imageUrl?: string         // data URL for screenshot attached to this message
   executionEvents?: DesignExecutionEvent[]
+  modelRetry?: DesignModelRetryState | null
 }
 
 interface QuestionDef {
@@ -110,6 +114,13 @@ function getPathName(filePath: string | null): string {
 
 type DesignApprovalDecision = "approve" | "approve_session" | "approve_permanent" | "reject"
 type DesignExecutionStatus = "running" | "success" | "error"
+
+interface DesignModelRetryState {
+  attempt: number
+  maxRetries: number
+  reason: string
+  delayMs: number
+}
 
 interface DesignExecutionEvent {
   kind: "tool_call" | "tool_result" | "used_skill"
@@ -249,6 +260,45 @@ function getCurrentDesignHtml(state: TabState | undefined): string {
   return state.html?.trim() ?? ""
 }
 
+function promptLooksLikeFileOperation(prompt: string): boolean {
+  const text = prompt.trim().toLowerCase()
+  if (!text) return false
+  const patterns = [
+    "write_file",
+    "edit_file",
+    "read_file",
+    "apply_patch",
+    "保存到文件",
+    "写入文件",
+    "修改文件",
+    "编辑文件",
+    "更新文件",
+    "读取文件",
+    "生成代码文件",
+    "写到项目里",
+    "落到代码里",
+    "save to file",
+    "write to file",
+    "edit file",
+    "modify file",
+    "update file",
+    "read file",
+    "apply patch",
+  ]
+  return patterns.some((pattern) => text.includes(pattern))
+}
+
+function getWorkspaceRequirementReason(options: {
+  selectedSkill: SkillInfo | null
+  codeContext: Array<{ filename: string; content: string }> | null
+  prompt: string
+}): string | null {
+  if (options.selectedSkill) return "当前请求使用了 skill"
+  if (options.codeContext && options.codeContext.length > 0) return "当前请求附带了代码上下文"
+  if (promptLooksLikeFileOperation(options.prompt)) return "当前请求涉及文件操作"
+  return null
+}
+
 function saveDesignArtifactForTab(
   artifactId: string,
   html: string,
@@ -258,6 +308,7 @@ function saveDesignArtifactForTab(
   existingArtifactPath?: string | null
 ): void {
   if (!html.trim()) return
+  if (!workspacePath) return
   const savePromise = existingArtifactPath
     ? window.api.design.saveArtifactFile(existingArtifactPath, html, workspacePath ?? undefined)
     : window.api.design.saveArtifact(artifactId, html, workspacePath ?? undefined)
@@ -323,6 +374,29 @@ function asDesignExecutionEvent(event: unknown): DesignExecutionEvent | null {
         : "running",
     timestamp: typeof raw.timestamp === "number" ? raw.timestamp : Date.now(),
   }
+}
+
+function asDesignModelRetryState(event: unknown): DesignModelRetryState | null {
+  if (!event || typeof event !== "object") return null
+  const raw = event as Partial<DesignModelRetryState>
+  if (typeof raw.attempt !== "number" || typeof raw.maxRetries !== "number") return null
+  return {
+    attempt: raw.attempt,
+    maxRetries: raw.maxRetries,
+    reason: typeof raw.reason === "string" ? raw.reason : "模型暂时不可用",
+    delayMs: typeof raw.delayMs === "number" ? raw.delayMs : 0,
+  }
+}
+
+function patchLastAssistantMessage(
+  messages: Message[],
+  patch: Partial<Message>
+): Message[] {
+  const next = [...messages]
+  const last = next.length - 1
+  if (next[last]?.role !== "assistant") return messages
+  next[last] = { ...next[last], ...patch }
+  return next
 }
 
 function appendDesignExecutionEvent(events: DesignExecutionEvent[], event: DesignExecutionEvent): DesignExecutionEvent[] {
@@ -413,8 +487,6 @@ ${stubs}
   }
 }
 
-let tabCounter = 1
-
 // File attachment limits — mirrors ChatContainer
 const DESIGN_MAX_ATTACHMENTS_DISPLAY = 3
 
@@ -485,9 +557,25 @@ function deserializeTs(p: PersistedTabState): TabState {
 
 function defaultSession() {
   return {
-    chatTabs: [{ id: "chat-1", label: "Chat" }] as ChatTab[],
-    activeTabId: "chat-1",
-    tabStates: { "chat-1": makeTabState() } as Record<string, TabState>,
+    chatTabs: [{ id: SINGLE_DESIGN_TAB_ID, label: SINGLE_DESIGN_TAB_LABEL }] as ChatTab[],
+    activeTabId: SINGLE_DESIGN_TAB_ID,
+    tabStates: { [SINGLE_DESIGN_TAB_ID]: makeTabState() } as Record<string, TabState>,
+  }
+}
+
+function normalizeSingleTabSession(
+  session: ReturnType<typeof defaultSession>
+): ReturnType<typeof defaultSession> {
+  const preferredId =
+    (session.activeTabId && session.tabStates[session.activeTabId] && session.activeTabId) ||
+    session.chatTabs[0]?.id ||
+    Object.keys(session.tabStates)[0] ||
+    SINGLE_DESIGN_TAB_ID
+  const preferredState = session.tabStates[preferredId] ?? makeTabState()
+  return {
+    chatTabs: [{ id: SINGLE_DESIGN_TAB_ID, label: SINGLE_DESIGN_TAB_LABEL }],
+    activeTabId: SINGLE_DESIGN_TAB_ID,
+    tabStates: { [SINGLE_DESIGN_TAB_ID]: preferredState },
   }
 }
 
@@ -506,10 +594,6 @@ interface SessionMeta {
 function parsePersistedSession(raw: string): ReturnType<typeof defaultSession> {
   const data: PersistedSession = JSON.parse(raw)
   if (!Array.isArray(data.chatTabs) || !data.chatTabs.length || !data.activeTabId) return defaultSession()
-  data.chatTabs.forEach((t) => {
-    const m = t.id.match(/^chat-(\d+)$/)
-    if (m) tabCounter = Math.max(tabCounter, parseInt(m[1]))
-  })
   const restoredStates: Record<string, TabState> = {}
   for (const [id, st] of Object.entries(data.tabStates ?? {})) {
     restoredStates[id] = deserializeTs(st)
@@ -517,7 +601,11 @@ function parsePersistedSession(raw: string): ReturnType<typeof defaultSession> {
   data.chatTabs.forEach((t) => {
     if (!restoredStates[t.id]) restoredStates[t.id] = makeTabState()
   })
-  return { chatTabs: data.chatTabs, activeTabId: data.activeTabId, tabStates: restoredStates }
+  return normalizeSingleTabSession({
+    chatTabs: data.chatTabs,
+    activeTabId: data.activeTabId,
+    tabStates: restoredStates,
+  })
 }
 
 function loadSessionById(id: string): ReturnType<typeof defaultSession> {
@@ -931,8 +1019,6 @@ export function DesignView(): React.JSX.Element {
   }
   const _init = _initRef.current
 
-  const [chatTabs, setChatTabs]       = useState<ChatTab[]>(_init.chatTabs)
-  const [activeTabId, setActiveTabId] = useState<string>(_init.activeTabId)
   const [tabStates, setTabStates]     = useState<Record<string, TabState>>(_init.tabStates)
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([])
   const [allSkills, setAllSkills] = useState<SkillInfo[]>([])
@@ -957,6 +1043,7 @@ export function DesignView(): React.JSX.Element {
   // Canvas refs
   const iframeRef         = useRef<HTMLIFrameElement>(null)
   const canvasContainerRef = useRef<HTMLDivElement>(null)
+  const activeTabId = SINGLE_DESIGN_TAB_ID
   const activeTabIdRef    = useRef(activeTabId)
   const tabStatesRef      = useRef(tabStates)
   const fileInputRef      = useRef<HTMLInputElement>(null)   // images only (screenshot / 📷)
@@ -1026,9 +1113,13 @@ export function DesignView(): React.JSX.Element {
     }
   }, [showToast])
 
-  // ── Keep activeTabIdRef in sync ───────────────────────────
+  // ── Keep refs in sync ────────────────────────────────────
   useEffect(() => { activeTabIdRef.current = activeTabId }, [activeTabId])
   useEffect(() => { tabStatesRef.current = tabStates }, [tabStates])
+  // currentSessionId ref — needed inside startGeneration (which is a stable useCallback)
+  // to produce a stable artifact ID without capturing a stale closure value.
+  const currentSessionIdRef = useRef<string | null>(currentSessionId)
+  useEffect(() => { currentSessionIdRef.current = currentSessionId }, [currentSessionId])
 
   // ── Persist session to localStorage (debounced 1.5s, skip during streaming) ──
   const _persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -1042,7 +1133,7 @@ export function DesignView(): React.JSX.Element {
       if (isStreaming) return
       try {
         const payload: PersistedSession = {
-          chatTabs,
+          chatTabs: [{ id: SINGLE_DESIGN_TAB_ID, label: SINGLE_DESIGN_TAB_LABEL }],
           activeTabId,
           tabStates: Object.fromEntries(
             Object.entries(tabStates).map(([id, s]) => [id, serializeTs(s)])
@@ -1050,8 +1141,7 @@ export function DesignView(): React.JSX.Element {
         }
         localStorage.setItem(sessionDataKey(currentSessionId), JSON.stringify(payload))
         // Update index metadata (title from first message, updatedAt)
-        const firstTab = chatTabs[0]
-        const firstState = tabStates[firstTab?.id]
+        const firstState = tabStates[SINGLE_DESIGN_TAB_ID]
         const firstUserMsg = firstState?.messages?.find((m) => m.role === "user")
         const autoTitle = firstUserMsg ? (firstUserMsg.content as string).slice(0, 24) : "新设计"
         updateIndexMeta(currentSessionId, { updatedAt: Date.now(), title: autoTitle })
@@ -1059,13 +1149,11 @@ export function DesignView(): React.JSX.Element {
       } catch {}
     }, 1500)
     return () => { if (_persistTimerRef.current) clearTimeout(_persistTimerRef.current) }
-  }, [chatTabs, activeTabId, tabStates, currentSessionId])
+  }, [activeTabId, tabStates, currentSessionId])
 
   // ── Session navigation ─────────────────────────────────────
   const openSession = useCallback((id: string) => {
-    const session = loadSessionById(id)
-    setChatTabs(session.chatTabs)
-    setActiveTabId(session.activeTabId)
+    const session = normalizeSingleTabSession(loadSessionById(id))
     setTabStates(session.tabStates)
     setCurrentSessionId(id)
     localStorage.setItem(SESSION_LAST_KEY, id)
@@ -1074,8 +1162,6 @@ export function DesignView(): React.JSX.Element {
   const newSession = useCallback(() => {
     const id = `ds_${uuid().slice(0, 8)}`
     const session = defaultSession()
-    setChatTabs(session.chatTabs)
-    setActiveTabId(session.activeTabId)
     setTabStates(session.tabStates)
     setCurrentSessionId(id)
     localStorage.setItem(SESSION_LAST_KEY, id)
@@ -1177,7 +1263,7 @@ export function DesignView(): React.JSX.Element {
         const state = tabStatesRef.current[tabId]
         const patchedHtml = ensureEditMode(html)
         saveDesignArtifactForTab(
-          makeDesignArtifactId(currentSessionId, tabId),
+          makeDesignArtifactId(currentSessionIdRef.current, tabId),
           patchedHtml,
           workspacePath,
           tabId,
@@ -1214,7 +1300,7 @@ export function DesignView(): React.JSX.Element {
           : state.html
         const updated = mergeEditModeKeys(targetHtml, edits)
         saveDesignArtifactForTab(
-          makeDesignArtifactId(currentSessionId, tabId),
+          makeDesignArtifactId(currentSessionIdRef.current, tabId),
           updated,
           workspacePath,
           tabId,
@@ -1246,37 +1332,6 @@ export function DesignView(): React.JSX.Element {
     return () => window.removeEventListener("message", handler)
   }, [updateTs])
 
-  // ── Tab management ────────────────────────────────────────
-
-  function addTab() {
-    tabCounter += 1
-    const id = `chat-${tabCounter}`
-    setChatTabs((prev) => [...prev, { id, label: "Chat" }])
-    setTabStates((prev) => ({ ...prev, [id]: makeTabState() }))
-    setActiveTabId(id)
-  }
-
-  function closeTab(id: string) {
-    // Cancel any running session for the closed tab
-    const entry = tabSessionsRef.current.get(id)
-    if (entry) {
-      entry.cleanup()
-      window.api.design.cancel(entry.sessionId).catch(() => {})
-      tabSessionsRef.current.delete(id)
-    }
-    setChatTabs((prev) => {
-      const next = prev.filter((t) => t.id !== id)
-      if (activeTabId === id && next.length > 0) setActiveTabId(next[next.length - 1].id)
-      return next
-    })
-    setTabStates((prev) => { const n = { ...prev }; delete n[id]; return n })
-  }
-
-  function switchTab(id: string) {
-    // Each tab runs independently — do NOT cancel the previous tab's session
-    setActiveTabId(id)
-  }
-
   // ── Ask Questions ─────────────────────────────────────────
 
   const startAskQuestions = useCallback((prompt: string, tabId: string, modelId?: string) => {
@@ -1288,6 +1343,25 @@ export function DesignView(): React.JSX.Element {
     if (existing) { existing.cleanup(); window.api.design.cancel(existing.sessionId).catch(() => {}) }
 
     const cleanup = window.api.design.askQuestions(sessionId, prompt, (event) => {
+      if (event.type === "model_retry") {
+        const retry = asDesignModelRetryState(event)
+        if (!retry) return
+        updateTs(tabId, (prev) => ({
+          messages: [
+            ...prev.messages,
+            { role: "assistant" as const, content: "", isStreaming: true, modelRetry: retry },
+          ],
+        }))
+        return
+      }
+
+      if (event.type === "model_retry_clear") {
+        updateTs(tabId, (prev) => ({
+          messages: patchLastAssistantMessage(prev.messages, { modelRetry: null }),
+        }))
+        return
+      }
+
       if (event.type === "done") {
         const qs = Array.isArray(event.questions) ? (event.questions as QuestionDef[]) : []
         updateTs(tabId, (prev) => ({
@@ -1295,7 +1369,7 @@ export function DesignView(): React.JSX.Element {
           questions: qs,
           rightTab: "questions",   // re-assert — guards against any interleaved update
           messages: [
-            ...prev.messages,
+            ...prev.messages.filter((msg) => !(msg.role === "assistant" && msg.isStreaming && msg.modelRetry)),
             { role: "questions-prompt" as const, content: "请补充相关问题 →" },
           ],
         }))
@@ -1304,7 +1378,7 @@ export function DesignView(): React.JSX.Element {
         updateTs(tabId, (prev) => ({
           generationState: "error",
           messages: [
-            ...prev.messages,
+            ...prev.messages.filter((msg) => !(msg.role === "assistant" && msg.isStreaming && msg.modelRetry)),
             { role: "assistant" as const, content: `❌ ${event.error ?? "Failed to generate questions"}` },
           ],
         }))
@@ -1382,8 +1456,36 @@ export function DesignView(): React.JSX.Element {
       html?: string
       error?: string
       event?: unknown
+      attempt?: number
+      maxRetries?: number
+      reason?: string
+      delayMs?: number
       artifactPath?: string
     }) => {
+      if (event.type === "model_retry") {
+        const retry = asDesignModelRetryState(event)
+        if (!retry) return
+        updateTs(tabId, (prev) => {
+          const msgs = [...prev.messages]
+          const last = msgs.length - 1
+          if (msgs[last]?.role !== "assistant") return {}
+          msgs[last] = { ...msgs[last], modelRetry: retry }
+          return { messages: msgs }
+        })
+        return
+      }
+
+      if (event.type === "model_retry_clear") {
+        updateTs(tabId, (prev) => {
+          const msgs = [...prev.messages]
+          const last = msgs.length - 1
+          if (msgs[last]?.role !== "assistant" || !msgs[last].modelRetry) return {}
+          msgs[last] = { ...msgs[last], modelRetry: null }
+          return { messages: msgs }
+        })
+        return
+      }
+
       if (event.type === "execution") {
         const executionEvent = asDesignExecutionEvent(event.event)
         if (!executionEvent) return
@@ -1420,7 +1522,7 @@ export function DesignView(): React.JSX.Element {
             ? `✓ ${isIteration ? "Design updated" : "Design generated"} — ${variations.length} variations`
             : isIteration ? "✓ Design updated" : "✓ Design generated"
           if (msgs[last]?.role === "assistant") {
-            msgs[last] = { ...msgs[last], content: doneLabel, isStreaming: false }
+            msgs[last] = { ...msgs[last], content: doneLabel, isStreaming: false, modelRetry: null }
           }
 
           // Keep apiHistory in sync for display / session backup
@@ -1453,7 +1555,7 @@ export function DesignView(): React.JSX.Element {
           const msgs = [...prev.messages]
           const last = msgs.length - 1
           if (msgs[last]?.role === "assistant") {
-            msgs[last] = { ...msgs[last], content: `❌ ${event.error ?? "Unknown error"}`, isStreaming: false }
+            msgs[last] = { ...msgs[last], content: `❌ ${event.error ?? "Unknown error"}`, isStreaming: false, modelRetry: null }
           }
           return { generationState: "error", messages: msgs }
         })
@@ -1463,7 +1565,7 @@ export function DesignView(): React.JSX.Element {
         updateTs(tabId, (prev) => {
           const msgs = [...prev.messages]
           const last = msgs.length - 1
-          if (msgs[last]?.isStreaming) msgs[last] = { ...msgs[last], isStreaming: false }
+          if (msgs[last]?.isStreaming) msgs[last] = { ...msgs[last], isStreaming: false, modelRetry: null }
           return { generationState: "idle", messages: msgs }
         })
         cleanup()
@@ -1471,6 +1573,10 @@ export function DesignView(): React.JSX.Element {
       }
     }
 
+    // Stable artifact ID: based on the design session + tab, NOT the streaming session UUID.
+    // Using the streaming sessionId (which changes per-call) would create a new artifact
+    // directory every generation, making the filesystem-based context chain useless.
+    const stableArtifactId = makeDesignArtifactId(currentSessionIdRef.current, tabId)
     cleanupStream = window.api.design.agentGenerate(
       sessionId,
       prompt,
@@ -1482,7 +1588,7 @@ export function DesignView(): React.JSX.Element {
       isIteration ? getCurrentDesignHtml(tabStates[tabId]) : undefined,
       skill ?? undefined,
       workspacePath ?? undefined,
-      `${sessionId}_${tabId}`,
+      stableArtifactId,
       sourceArtifactPath ?? undefined
     )
     tabSessionsRef.current.set(tabId, { cleanup, sessionId })
@@ -1511,6 +1617,22 @@ export function DesignView(): React.JSX.Element {
     console.log("[Design:Image] Calling window.api.design.generateFromImage…")
     const cleanup = window.api.design.generateFromImage(sessionId, prompt, imageBase64, mimeType, (event) => {
       console.log(`[Design:Image] Renderer received event: type=${event.type}${event.error ? " error=" + event.error : ""}`)
+      if (event.type === "model_retry") {
+        const retry = asDesignModelRetryState(event)
+        if (!retry) return
+        updateTs(tabId, (prev) => ({
+          messages: patchLastAssistantMessage(prev.messages, { modelRetry: retry }),
+        }))
+        return
+      }
+
+      if (event.type === "model_retry_clear") {
+        updateTs(tabId, (prev) => ({
+          messages: patchLastAssistantMessage(prev.messages, { modelRetry: null }),
+        }))
+        return
+      }
+
       if (event.type === "done" && event.html) {
         const patchedHtml = ensureEditMode(event.html)
         // Store full HTML in main process so subsequent text iterations can reference it
@@ -1520,7 +1642,7 @@ export function DesignView(): React.JSX.Element {
           const msgs = [...prev.messages]
           const last = msgs.length - 1
           if (msgs[last]?.role === "assistant") {
-            msgs[last] = { ...msgs[last], content: "✓ 设计已生成", isStreaming: false }
+            msgs[last] = { ...msgs[last], content: "✓ 设计已生成", isStreaming: false, modelRetry: null }
           }
           return {
             generationState: "done",
@@ -1542,7 +1664,7 @@ export function DesignView(): React.JSX.Element {
           const msgs = [...prev.messages]
           const last = msgs.length - 1
           if (msgs[last]?.role === "assistant") {
-            msgs[last] = { ...msgs[last], content: `❌ ${event.error ?? "Unknown error"}`, isStreaming: false }
+            msgs[last] = { ...msgs[last], content: `❌ ${event.error ?? "Unknown error"}`, isStreaming: false, modelRetry: null }
           }
           return { generationState: "error", messages: msgs }
         })
@@ -1551,7 +1673,7 @@ export function DesignView(): React.JSX.Element {
         updateTs(tabId, (prev) => {
           const msgs = [...prev.messages]
           const last = msgs.length - 1
-          if (msgs[last]?.isStreaming) msgs[last] = { ...msgs[last], isStreaming: false }
+          if (msgs[last]?.isStreaming) msgs[last] = { ...msgs[last], isStreaming: false, modelRetry: null }
           return { generationState: "idle", messages: msgs }
         })
         tabSessionsRef.current.delete(tabId)
@@ -1786,6 +1908,17 @@ ${commentLines}${variantNote}`
     if (!prompt && !attachedImage) return
     const state = tabStates[activeTabId]?.generationState ?? "idle"
     if (state === "asking" || state === "generating") return
+
+    const workspaceRequirementReason = getWorkspaceRequirementReason({
+      selectedSkill,
+      codeContext,
+      prompt,
+    })
+    if (!workspacePath && workspaceRequirementReason) {
+      showToast(`${workspaceRequirementReason}，请先选择工作目录。`)
+      return
+    }
+
     // Build the list of file pills to show in the message record before clearing state
     const messageAttachments: MessageAttachment[] = [
       ...(codeContext ?? []).map((f): MessageAttachment => ({
@@ -1884,12 +2017,6 @@ ${commentLines}${variantNote}`
       ],
     }))
 
-    // Auto-label tab from its first prompt (for history readability)
-    if (existing.length === 0) {
-      const label = prompt.trim().slice(0, 24) + (prompt.length > 24 ? "…" : "")
-      setChatTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, label } : t))
-    }
-
     // First message with an explicit skill → run the skill workflow directly.
     // Skill-authored flows should not be interrupted by Design's clarifying-question step;
     // startGeneration still patches the output with EDITMODE so Tweaks remains available.
@@ -1928,7 +2055,7 @@ ${commentLines}${variantNote}`
         artifactPath ?? null
       )
     }
-  }, [activeTabId, tabStates, updateTs, startAskQuestions, startGeneration, startGenerationFromImage])
+  }, [activeTabId, tabStates, updateTs, startAskQuestions, startGeneration, startGenerationFromImage, workspacePath, showToast])
 
   // ── Continue (submit answers) ─────────────────────────────
 
@@ -2130,9 +2257,9 @@ ${commentLines}${variantNote}`
               borderColor: workspacePath ? "#d4d2cc" : "#e7bf7a",
               background: workspacePath ? "#ffffff" : "#fff7e6",
             }}
-            title={workspacePath ?? "选择工作目录"}
+            title={workspacePath ? `工作目录: ${workspacePath}（点击切换）` : "选择工作目录（用于保存设计产物）"}
           >
-            <span style={S.workspaceIcon}>▣</span>
+            <span style={S.workspaceIcon}>📁</span>
             <span style={S.workspaceText}>
               {workspaceLoading
                 ? "选择中..."
@@ -2148,21 +2275,6 @@ ${commentLines}${variantNote}`
       <div style={S.mainContent}>
         {/* ── Left Chat Panel ── */}
         <div style={S.leftPanel}>
-          {/* Tab Bar */}
-          <div style={S.tabBar}>
-            {chatTabs.map((tab) => (
-              <TabButton
-                key={tab.id}
-                label={tab.label}
-                active={activeTabId === tab.id}
-                closable={chatTabs.length > 1}
-                onClick={() => switchTab(tab.id)}
-                onClose={() => closeTab(tab.id)}
-              />
-            ))}
-            <button onClick={addTab} style={S.addTabBtn} title="New chat">+</button>
-          </div>
-
           {/* Chat Body */}
           <div style={S.chatBody}>
             {ts.messages.length === 0 ? (
@@ -3339,29 +3451,6 @@ function EmptyState({ onUploadScreenshot, onAttachCode, onAttachLink }: {
   )
 }
 
-function TabButton({
-  label, active, closable, onClick, onClose,
-}: {
-  label: string; active: boolean; closable?: boolean; onClick: () => void; onClose?: () => void
-}) {
-  return (
-    <div style={{ display: "flex", alignItems: "center", height: 44, borderBottom: active ? "2px solid #1a1a1a" : "2px solid transparent", flexShrink: 0 }}>
-      <button
-        onClick={onClick}
-        style={{ display: "flex", alignItems: "center", padding: closable ? "0 4px 0 12px" : "0 12px", height: "100%", fontSize: 13, fontWeight: active ? 600 : 400, color: active ? "#1a1a1a" : "#8a8a8a", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}
-      >
-        {label}
-      </button>
-      {closable && (
-        <button
-          onClick={(e) => { e.stopPropagation(); onClose?.() }}
-          style={{ width: 18, height: 18, display: "flex", alignItems: "center", justifyContent: "center", background: "none", border: "none", cursor: "pointer", fontSize: 13, color: "#aaa", borderRadius: 3, marginRight: 6, padding: 0 }}
-        >×</button>
-      )}
-    </div>
-  )
-}
-
 function DesignApprovalBar({
   approval,
   onDecision,
@@ -3953,6 +4042,39 @@ function DesignExecutionPanel({ events }: { events?: DesignExecutionEvent[] }) {
   )
 }
 
+function DesignModelRetryNotice({ retry }: { retry: DesignModelRetryState }) {
+  return (
+    <div style={{
+      display: "flex",
+      alignItems: "flex-start",
+      gap: 8,
+      marginBottom: 8,
+      padding: "7px 9px",
+      borderRadius: 9,
+      background: "#fff7ed",
+      border: "1px solid #fed7aa",
+      color: "#9a3412",
+      fontSize: 12,
+      lineHeight: 1.45,
+    }}>
+      <span style={{
+        width: 12,
+        height: 12,
+        marginTop: 3,
+        borderRadius: "50%",
+        border: "2px solid #f97316",
+        borderTopColor: "transparent",
+        flexShrink: 0,
+        animation: "spin 0.8s linear infinite",
+      }} />
+      <span>
+        模型暂时不可用（{retry.reason}），正在重试 {retry.attempt}/{retry.maxRetries}
+        {retry.delayMs > 0 ? `（等待 ${Math.round(retry.delayMs / 100) / 10}s）` : ""}…
+      </span>
+    </div>
+  )
+}
+
 function MessageBubble({ message }: { message: Message }) {
   const isUser = message.role === "user"
   const isQPrompt = message.role === "questions-prompt"
@@ -4004,6 +4126,9 @@ function MessageBubble({ message }: { message: Message }) {
                 </div>
               ))}
             </div>
+          )}
+          {!isUser && message.modelRetry && (
+            <DesignModelRetryNotice retry={message.modelRetry} />
           )}
           {message.content || (message.isStreaming
             ? <span style={{ opacity: 0.4 }}>{message.isIteration ? "Updating design…" : "Generating…"}</span>
@@ -4718,8 +4843,6 @@ const S: Record<string, React.CSSProperties> = {
 
   // Left panel
   leftPanel:         { width: 420, flexShrink: 0, display: "flex", flexDirection: "column", background: "#ffffff", borderRight: "1px solid #e8e6e0" },
-  tabBar:            { display: "flex", alignItems: "center", padding: "0 8px 0 16px", borderBottom: "1px solid #e8e6e0", height: 44, overflowX: "auto" },
-  addTabBtn:         { width: 28, height: 28, border: "none", background: "none", cursor: "pointer", fontSize: 18, color: "#8a8a8a", display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 4, flexShrink: 0, marginLeft: 4 },
   chatBody:          { flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" },
   emptyState:        { display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "32px 24px", flex: 1 },
   emptyTitle:        { fontSize: 22, fontWeight: 600, color: "#1a1a1a", margin: "0 0 8px" },

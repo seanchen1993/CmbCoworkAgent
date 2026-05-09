@@ -861,7 +861,7 @@ export interface ModelRetryHooks {
  * does not poison the next one (avoids the "stuck signal" pitfall that
  * happens when SDK-level timeout aborts the shared signal).
  */
-function createRetryingFetch(
+export function createRetryingFetch(
   hooks?: ModelRetryHooks,
   maxAttempts: number = DEFAULT_RETRY_MAX_ATTEMPTS
 ): typeof fetch {

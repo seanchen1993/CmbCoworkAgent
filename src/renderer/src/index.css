@@ -9,6 +9,10 @@
   50% { opacity: 0.4; transform: scale(0.85); }
 }
 
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
