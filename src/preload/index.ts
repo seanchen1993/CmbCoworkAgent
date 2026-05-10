@@ -1777,6 +1777,16 @@ const api = {
         html?: string
         error?: string
       }>,
+    readArtifactFile: (
+      filePath: string,
+      workspacePath?: string
+    ): Promise<{ success: boolean; filePath?: string; html?: string; error?: string }> =>
+      ipcRenderer.invoke("design:read-artifact-file", { filePath, workspacePath }) as Promise<{
+        success: boolean
+        filePath?: string
+        html?: string
+        error?: string
+      }>,
     /**
      * Full Agent Runtime path — gives Design access to Skills, MCP tools,
      * Hooks, Approvals and context summarisation.

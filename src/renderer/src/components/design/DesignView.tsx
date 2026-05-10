@@ -360,6 +360,20 @@ function hasExistingDesignArtifact(state: TabState | undefined): boolean {
   return getCurrentDesignHtml(state).length > 0
 }
 
+function hydrateTabStateHtml(state: TabState, html: string): TabState {
+  const patchedHtml = ensureEditMode(html)
+  const variations = parseVariations(patchedHtml)
+  return {
+    ...state,
+    html: patchedHtml,
+    variations,
+    activeVariationId: state.activeVariationId && variations.some((v) => v.id === state.activeVariationId)
+      ? state.activeVariationId
+      : variations[0]?.id ?? null,
+    reloadKey: state.reloadKey + 1,
+  }
+}
+
 function promptLooksLikeFileOperation(prompt: string): boolean {
   const text = prompt.trim().toLowerCase()
   if (!text) return false
@@ -726,6 +740,39 @@ function parsePersistedSession(raw: string): ReturnType<typeof defaultSession> {
     activeTabId: data.activeTabId,
     tabStates: restoredStates,
   })
+}
+
+async function hydrateSessionArtifacts(
+  sessionId: string,
+  session: ReturnType<typeof defaultSession>,
+  workspacePath: string | null
+): Promise<ReturnType<typeof defaultSession>> {
+  const entries = await Promise.all(
+    Object.entries(session.tabStates).map(async ([tabId, state]) => {
+      const artifactId = makeDesignArtifactId(sessionId, tabId)
+      let result: { success: boolean; filePath?: string; html?: string; error?: string }
+      if (state.artifactPath) {
+        result = await window.api.design.readArtifactFile(state.artifactPath, workspacePath ?? undefined)
+      } else {
+        result = await window.api.design.readArtifact(artifactId, workspacePath ?? undefined)
+      }
+      if (!result.success || !result.html?.trim()) return [tabId, state] as const
+
+      window.api.design.storeHtml(artifactId, result.html).catch(() => {})
+      return [
+        tabId,
+        {
+          ...hydrateTabStateHtml(state, result.html),
+          artifactPath: result.filePath ?? state.artifactPath,
+        },
+      ] as const
+    })
+  )
+
+  return {
+    ...session,
+    tabStates: Object.fromEntries(entries),
+  }
 }
 
 function loadSessionById(id: string): ReturnType<typeof defaultSession> {
@@ -1284,6 +1331,28 @@ export function DesignView(): React.JSX.Element {
   // to produce a stable artifact ID without capturing a stale closure value.
   const currentSessionIdRef = useRef<string | null>(currentSessionId)
   useEffect(() => { currentSessionIdRef.current = currentSessionId }, [currentSessionId])
+  useEffect(() => {
+    if (!currentSessionId) return
+    const session = normalizeSingleTabSession({
+      chatTabs: [{ id: SINGLE_DESIGN_TAB_ID, label: SINGLE_DESIGN_TAB_LABEL }],
+      activeTabId,
+      tabStates,
+    })
+    hydrateSessionArtifacts(currentSessionId, session, workspacePath)
+      .then((hydrated) => {
+        if (currentSessionIdRef.current !== currentSessionId) return
+        const hydratedState = hydrated.tabStates[SINGLE_DESIGN_TAB_ID]
+        const currentState = tabStatesRef.current[SINGLE_DESIGN_TAB_ID]
+        const snapshotState = session.tabStates[SINGLE_DESIGN_TAB_ID]
+        if (!hydratedState || !currentState) return
+        if (snapshotState && currentState.html !== snapshotState.html) return
+        if (hydratedState.html === currentState.html) return
+        setTabStates(hydrated.tabStates)
+      })
+      .catch(() => {})
+    // Hydrate once per session/workspace; tabStates is only the initial snapshot.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentSessionId, workspacePath])
 
   const createSession = useCallback((metaPatch?: Partial<SessionMeta>): string => {
     const id = `ds_${uuid().slice(0, 8)}`
@@ -1650,12 +1719,24 @@ export function DesignView(): React.JSX.Element {
   const openSession = useCallback((id: string) => {
     const session = normalizeSingleTabSession(loadSessionById(id))
     setTabStates(session.tabStates)
+    tabStatesRef.current = session.tabStates
     setCurrentSessionId(id)
+    currentSessionIdRef.current = id
     localStorage.setItem(SESSION_LAST_KEY, id)
-  }, [])
+    hydrateSessionArtifacts(id, session, workspacePath)
+      .then((hydrated) => {
+        if (currentSessionIdRef.current !== id) return
+        const currentState = tabStatesRef.current[SINGLE_DESIGN_TAB_ID]
+        const snapshotState = session.tabStates[SINGLE_DESIGN_TAB_ID]
+        if (snapshotState && currentState?.html !== snapshotState.html) return
+        setTabStates(hydrated.tabStates)
+      })
+      .catch(() => {})
+  }, [workspacePath])
 
   const backToGallery = useCallback(() => {
     setCurrentSessionId(null)
+    currentSessionIdRef.current = null
     localStorage.removeItem(SESSION_LAST_KEY)
     setSessionIndex(loadIndex())
   }, [])
@@ -2788,7 +2869,9 @@ ${noteLines || "无"}${variantNote}`
       .filter(Boolean)
       .join("\n")
 
-    const enrichedPrompt = `${originalPrompt}\n\n---\nUser's answers to clarifying questions:\n${answerLines}\n\nRemember: Generate exactly 2 variations (A / B) within one HTML file.`
+    const enrichedPrompt = answerLines
+      ? `${originalPrompt}\n\n---\nUser's answers to clarifying questions:\n${answerLines}\n\nRemember: Generate exactly 2 variations (A / B) within one HTML file.`
+      : `${originalPrompt}\n\n---\nNo clarifying answers were provided. Generate exactly 2 variations (A / B) within one HTML file.`
 
     // Build pill tags for the user message update
     const tags = questions
@@ -3395,6 +3478,7 @@ ${noteLines || "无"}${variantNote}`
                 isLoading={ts.generationState === "asking"}
                 onAnswer={setAnswer}
                 onContinue={handleContinue}
+                onSkip={handleContinue}
               />
             ) : (
               /* ── Design Preview ── */
@@ -4230,12 +4314,14 @@ function QuestionsPanel({
   isLoading,
   onAnswer,
   onContinue,
+  onSkip,
 }: {
   questions: QuestionDef[]
   answers: Record<string, AnswerValue>
   isLoading: boolean
   onAnswer: (id: string, value: AnswerValue) => void
   onContinue: () => void
+  onSkip: () => void
 }) {
   // Check if a question has been answered
   function isAnswered(q: QuestionDef): boolean {
@@ -4277,8 +4363,14 @@ function QuestionsPanel({
 
   if (questions.length === 0) {
     return (
-      <div style={S.canvasEmpty}>
-        <span style={{ fontSize: 14, color: "#8a8a8a" }}>No questions generated yet</span>
+      <div style={{ ...S.canvasEmpty, flexDirection: "column", gap: 12 }}>
+        <span style={{ fontSize: 14, color: "#8a8a8a" }}>没有生成可用的问题，可以跳过并直接生成。</span>
+        <button
+          onClick={onSkip}
+          style={{ ...S.continueBtn, background: "#1a1a1a", color: "#ffffff" }}
+        >
+          Skip and generate
+        </button>
       </div>
     )
   }

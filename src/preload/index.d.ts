@@ -655,6 +655,10 @@ interface CustomAPI {
       tabId: string,
       workspacePath?: string
     ) => Promise<{ success: boolean; filePath?: string; html?: string; error?: string }>
+    readArtifactFile: (
+      filePath: string,
+      workspacePath?: string
+    ) => Promise<{ success: boolean; filePath?: string; html?: string; error?: string }>
     agentGenerate: (
       sessionId: string,
       prompt: string,

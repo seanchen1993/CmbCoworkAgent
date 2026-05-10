@@ -335,7 +335,72 @@ const activeSessions = new Map<string, AbortController>()
 // having to send it over IPC on every round trip.
 // ─────────────────────────────────────────────────────────
 
-const htmlStore = new Map<string, string>()  // tabId → latest HTML
+                                                                                                                                                                                     const htmlStore = new Map<string, string>()  // artifact id → latest HTML
+let htmlStoreBytes = 0
+const MAX_HTML_STORE_ENTRIES = 32
+const MAX_HTML_STORE_BYTES = 24 * 1024 * 1024
+const MAX_SAVED_VARIANTS = 80
+
+function htmlSize(html: string): number {
+  return Buffer.byteLength(html, "utf-8")
+}
+
+function trimHtmlStore(): void {
+  while (
+    htmlStore.size > MAX_HTML_STORE_ENTRIES ||
+    htmlStoreBytes > MAX_HTML_STORE_BYTES
+  ) {
+    const oldestKey = htmlStore.keys().next().value as string | undefined
+    if (!oldestKey) break
+    const oldestHtml = htmlStore.get(oldestKey)
+    if (oldestHtml) htmlStoreBytes -= htmlSize(oldestHtml)
+    htmlStore.delete(oldestKey)
+  }
+}
+
+function storeDesignHtml(key: string | undefined, html: string | undefined): void {
+  if (!key || !html) return
+  const existing = htmlStore.get(key)
+  if (existing) {
+    htmlStoreBytes -= htmlSize(existing)
+    htmlStore.delete(key)
+  }
+  htmlStore.set(key, html)
+  htmlStoreBytes += htmlSize(html)
+  trimHtmlStore()
+}
+
+function getStoredDesignHtml(key: string | undefined): string | undefined {
+  if (!key) return undefined
+  const html = htmlStore.get(key)
+  if (!html) return undefined
+  htmlStore.delete(key)
+  htmlStore.set(key, html)
+  return html
+}
+
+function cleanupSavedVariants(dir: string): void {
+  try {
+    const files = fs.readdirSync(dir, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && /^variant-.+\.html$/i.test(entry.name))
+      .map((entry) => {
+        const filePath = path.join(dir, entry.name)
+        const stat = fs.statSync(filePath)
+        return { filePath, mtimeMs: stat.mtimeMs }
+      })
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
+
+    files.slice(MAX_SAVED_VARIANTS).forEach((entry) => {
+      try {
+        fs.unlinkSync(entry.filePath)
+      } catch {
+        // Best-effort cleanup only.
+      }
+    })
+  } catch {
+    // Best-effort cleanup only.
+  }
+}
 
 // Max turns kept in history to avoid blowing up context.
 // Each "turn" = one user message + one assistant message = 2 entries.
@@ -413,6 +478,11 @@ interface DesignArtifactReadParams {
 interface DesignArtifactFileSaveParams {
   filePath: string
   html: string
+  workspacePath?: string
+}
+
+interface DesignArtifactFileReadParams {
+  filePath: string
   workspacePath?: string
 }
 
@@ -529,6 +599,23 @@ function readDesignArtifact(tabId: string, workspacePath?: string): { success: b
 
   try {
     if (!fs.existsSync(resolved.filePath)) {
+      return { success: false, filePath: resolved.filePath, error: `Design artifact not found: ${resolved.filePath}` }
+    }
+    return { success: true, filePath: resolved.filePath, html: fs.readFileSync(resolved.filePath, "utf-8") }
+  } catch (err) {
+    return { success: false, filePath: resolved.filePath, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+function readSavedDesignArtifactFile(filePath: string | undefined, workspacePath?: string): DesignArtifactFileReadResult {
+  if (typeof filePath !== "string" || !filePath.trim()) {
+    return { success: false, error: "Design artifact path is empty" }
+  }
+  const resolved = resolveDesignArtifactFilePath(filePath, workspacePath)
+  if (!resolved.filePath) return { success: false, error: resolved.error ?? "Failed to resolve design artifact file" }
+
+  try {
+    if (!fs.existsSync(resolved.filePath) || !fs.statSync(resolved.filePath).isFile()) {
       return { success: false, filePath: resolved.filePath, error: `Design artifact not found: ${resolved.filePath}` }
     }
     return { success: true, filePath: resolved.filePath, html: fs.readFileSync(resolved.filePath, "utf-8") }
@@ -874,6 +961,9 @@ export function registerDesignHandlers(): void {
         }
 
         const rawHtml = await response.text()
+        if (Buffer.byteLength(rawHtml, "utf-8") > 5 * 1024 * 1024) {
+          return { success: false, error: "页面内容超过 5MB 限制" }
+        }
         if (!rawHtml.trim()) {
           return { success: false, error: "页面内容为空" }
         }
@@ -1012,7 +1102,7 @@ export function registerDesignHandlers(): void {
       // If we have prior history + a stored HTML for this tab,
       // build a multi-turn conversation so the model sees previous
       // instructions and the full current design without truncation.
-      const storedHtml = tabId ? htmlStore.get(tabId) : undefined
+      const storedHtml = getStoredDesignHtml(tabId)
       const trimmedHistory = history && history.length > 0
         ? history.slice(-MAX_HISTORY_ENTRIES)
         : undefined
@@ -1209,7 +1299,7 @@ export function registerDesignHandlers(): void {
   // process has the latest full HTML for the tab, used by multi-turn iteration.
   ipcMain.handle("design:store-html", (_event, tabId: string, html: string) => {
     if (tabId && html) {
-      htmlStore.set(tabId, html)
+      storeDesignHtml(tabId, html)
       console.log(`[Design] Stored HTML for tabId=${tabId} (${html.length} chars)`)
     }
     return { ok: true }
@@ -1223,7 +1313,7 @@ export function registerDesignHandlers(): void {
       }
       const result = saveDesignArtifact(tabId, html, workspacePath)
       if (result.success && result.filePath) {
-        htmlStore.set(tabId, html)
+        storeDesignHtml(tabId, html)
         console.log(`[Design] Saved artifact for tabId=${tabId} -> ${result.filePath}`)
       }
       return result
@@ -1238,6 +1328,7 @@ export function registerDesignHandlers(): void {
       }
       const result = saveDesignArtifactFile(filePath, html, workspacePath)
       if (result.success && result.filePath) {
+        storeDesignHtml(result.filePath, html)
         console.log(`[Design] Saved artifact file -> ${result.filePath}`)
       }
       return result
@@ -1248,6 +1339,12 @@ export function registerDesignHandlers(): void {
     "design:read-artifact",
     (_event, { tabId, workspacePath }: DesignArtifactReadParams) =>
       readDesignArtifact(tabId, workspacePath)
+  )
+
+  ipcMain.handle(
+    "design:read-artifact-file",
+    (_event, { filePath, workspacePath }: DesignArtifactFileReadParams) =>
+      readSavedDesignArtifactFile(filePath, workspacePath)
   )
 
   // ─────────────────────────────────────────────────────────
@@ -1422,7 +1519,7 @@ export function registerDesignHandlers(): void {
             prompt.includes("User follow-up instruction:") ||
             prompt.includes("用户通过 Comment 模式")
           )
-        const storedHtml = shouldUseStoredHtmlFallback ? htmlStore.get(htmlStoreKey) : undefined
+        const storedHtml = shouldUseStoredHtmlFallback ? getStoredDesignHtml(htmlStoreKey) : undefined
         const htmlForIteration =
           !hasExistingArtifactHtml && typeof currentHtml === "string" && currentHtml.trim()
             ? currentHtml
@@ -1432,7 +1529,7 @@ export function registerDesignHandlers(): void {
           : prompt
         const promptWithSkill = skillContext ? `${promptWithCurrentHtml}${skillContext}` : promptWithCurrentHtml
         const promptWithArtifact = `${promptWithSkill}${artifactInstruction}`
-        if (htmlForIteration) htmlStore.set(htmlStoreKey, htmlForIteration)
+        if (htmlForIteration) storeDesignHtml(htmlStoreKey, htmlForIteration)
 
         const humanMessage =
           imageData && mimeType
@@ -1728,13 +1825,13 @@ export function registerDesignHandlers(): void {
         const html = extractHtml(fullText)
         if (html && (html.includes("<!DOCTYPE") || html.includes("<html"))) {
           // Store for potential future reference (storeHtml protocol)
-          htmlStore.set(htmlStoreKey, html)
+          storeDesignHtml(htmlStoreKey, html)
           const saved = tabId ? saveDesignArtifact(resolvedArtifactId, html, workspacePath) : null
           send({ type: "done", html, ...(saved?.filePath ? { artifactPath: saved.filePath } : {}) })
         } else {
           const artifact = tabId ? readDesignArtifact(resolvedArtifactId, workspacePath) : null
           if (artifact?.success && artifact.html && (artifact.html.includes("<!DOCTYPE") || artifact.html.includes("<html"))) {
-            htmlStore.set(htmlStoreKey, artifact.html)
+            storeDesignHtml(htmlStoreKey, artifact.html)
             send({ type: "done", html: artifact.html, artifactPath: artifact.filePath })
             return
           }
@@ -1785,6 +1882,7 @@ export function registerDesignHandlers(): void {
       const filename = `variant-${variantId}-${ts}.html`
       const filePath = path.join(dir, filename)
       fs.writeFileSync(filePath, html, "utf-8")
+      cleanupSavedVariants(dir)
       console.log(`[Design] Saved variant ${variantId} → ${filePath}`)
       return { filePath }
     }
