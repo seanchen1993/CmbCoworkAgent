@@ -180,6 +180,59 @@ async function testPreSkillBlocksOnJsonDecision(): Promise<void> {
   )
 }
 
+async function testPreToolUpdatedInputDeepMergesAcrossHooks(): Promise<void> {
+  const first = makeHook({
+    id: "updated-input-a",
+    event: "PreToolUse",
+    matcher: "demo_tool",
+    command: nodeCommand(
+      "console.log(JSON.stringify({updatedInput:{request:{headers:{a:'1'}, body:{page:1}}, keep:true}}))"
+    )
+  })
+  const second = makeHook({
+    id: "updated-input-b",
+    event: "PreToolUse",
+    matcher: "demo_tool",
+    command: nodeCommand(
+      "console.log(JSON.stringify({updatedInput:{request:{headers:{b:'2'}, body:{limit:10}}, keep:false}}))"
+    )
+  })
+
+  const result = await runHooks([first, second], "PreToolUse", { toolName: "demo_tool" })
+  const updated = result?.updatedInput as Record<string, unknown> | undefined
+  const request = updated?.request as Record<string, unknown> | undefined
+  const headers = request?.headers as Record<string, unknown> | undefined
+  const body = request?.body as Record<string, unknown> | undefined
+
+  assert(headers?.a === "1", "deep merge should preserve first nested header")
+  assert(headers?.b === "2", "deep merge should add second nested header")
+  assert(body?.page === 1, "deep merge should preserve first nested body field")
+  assert(body?.limit === 10, "deep merge should add second nested body field")
+  assert(updated?.keep === false, "later scalar updatedInput should still override")
+}
+
+async function testPostToolSuppressOutputDropsHookStdout(): Promise<void> {
+  const hook = makeHook({
+    id: "suppress-output",
+    event: "PostToolUse",
+    matcher: "demo_tool",
+    command: nodeCommand(
+      "console.log(JSON.stringify({suppressOutput:true, additionalContext:'kept context'}))"
+    )
+  })
+
+  const result = await runHooks([hook], "PostToolUse", {
+    toolName: "demo_tool",
+    toolResult: "tool output"
+  })
+
+  assert(result?.stdout === "", `suppressOutput should hide hook stdout, got ${result?.stdout}`)
+  assert(
+    result?.additionalContext === "kept context",
+    `suppressOutput should not hide additionalContext, got ${result?.additionalContext}`
+  )
+}
+
 async function testPostSkillNonBlockingOutputIsObservableOnly(): Promise<void> {
   const command = nodeCommand(
     "console.log(JSON.stringify({additionalContext:'extra hint', systemMessage:'notice'}))"
@@ -985,6 +1038,10 @@ async function run(): Promise<void> {
   console.log("PASS B5 PreSkillUse blocks on exit 2")
   await testPreSkillBlocksOnJsonDecision()
   console.log("PASS B6 PreSkillUse blocks on decision=block")
+  await testPreToolUpdatedInputDeepMergesAcrossHooks()
+  console.log("PASS B6b PreToolUse updatedInput deep merges across hooks")
+  await testPostToolSuppressOutputDropsHookStdout()
+  console.log("PASS B6c PostToolUse suppressOutput hides hook stdout")
   await testPostSkillNonBlockingOutputIsObservableOnly()
   console.log("PASS B7a non-blocking PostSkillUse output is observable-only")
   await testPostSkillOnlyBlockingOutputFeedsRevision()

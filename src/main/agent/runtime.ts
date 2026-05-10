@@ -75,6 +75,7 @@ import { getThread } from "../db/index"
 import { createPlaywrightTool } from "./tools/playwright-tool"
 import { createToolSearchTools } from "./tools/tool-search-tool"
 import { createCodeExecTool } from "./tools/code-exec-tool"
+import { createToolHookMiddleware } from "./tool-hooks"
 import { listSavedCodeExecTools } from "../code-exec/saved-tool-store"
 import {
   getWindowsSandboxMode,
@@ -88,6 +89,7 @@ import type { HookContext } from "../hooks/runner"
 import type { HookEvent, HookResult } from "../hooks/types"
 import { runHooksEnriched } from "../hooks/required-skill"
 import { isHookHaltError, throwIfHookHalt } from "../hooks/halt"
+import { mergeUpdatedInput } from "../hooks/updated-input"
 import {
   createHookScope,
   extractPluginIdFromProviderKey,
@@ -235,7 +237,9 @@ function createScopedMcpCapabilityService(
   const formatPostHookFeedback = (postResult: HookResult | null): string | null => {
     if (!postResult) return null
     const parts = [
-      postResult.stdout ? `[Hook output]\n${postResult.stdout}` : undefined,
+      !postResult.suppressOutput && postResult.stdout
+        ? `[Hook output]\n${postResult.stdout}`
+        : undefined,
       postResult.additionalContext ? `[Hook context]\n${postResult.additionalContext}` : undefined,
       postResult.systemMessage ? `[Hook notice]\n${postResult.systemMessage}` : undefined,
       postResult.decision === "block" && postResult.reason
@@ -254,7 +258,7 @@ function createScopedMcpCapabilityService(
     invoke: async (idOrAlias, args) => {
       const tool = await service.getTool(idOrAlias)
       const pluginId = extractPluginIdFromProviderKey(tool?.providerKey)
-      if (!pluginId || !tool) return service.invoke(idOrAlias, args)
+      if (!tool) return service.invoke(idOrAlias, args)
 
       const hookContext: HookContext = {
         toolName: tool.toolId,
@@ -262,14 +266,18 @@ function createScopedMcpCapabilityService(
         workspacePath: baseContext.workspacePath,
         sessionId: baseContext.threadId,
         pluginId,
-        pluginName: getPluginName(pluginId)
+        pluginName: pluginId ? getPluginName(pluginId) : undefined
       }
+      const preHooks = resolveHooksForContext("PreToolUse", hookContext)
       const preResult = await runHooksEnriched(
-        resolveHooksForContext("PreToolUse", hookContext),
+        preHooks,
         "PreToolUse",
         hookContext,
         onHookResult
       )
+      if (preResult) {
+        hookScope.activatePersistentHooks(preHooks)
+      }
       throwIfHookHalt(
         "PreToolUse",
         preResult,
@@ -285,19 +293,25 @@ function createScopedMcpCapabilityService(
         )
       }
 
-      hookScope.activatePlugin(pluginId)
-      hookScope.activatePersistentHooks(resolveHooksForContext("PreToolUse", hookContext))
-      const result = await service.invoke(idOrAlias, args)
+      const effectiveArgs = mergeUpdatedInput(args, preResult?.updatedInput)
+
+      if (pluginId) hookScope.activatePlugin(pluginId)
+      const result = await service.invoke(idOrAlias, effectiveArgs)
       const postContext: HookContext = {
         ...hookContext,
+        toolArgs: effectiveArgs,
         toolResult: result.text
       }
+      const postHooks = resolveHooksForContext("PostToolUse", postContext)
       const postResult = await runHooksEnriched(
-        resolveHooksForContext("PostToolUse", postContext),
+        postHooks,
         "PostToolUse",
         postContext,
         onHookResult
       )
+      if (postResult) {
+        hookScope.activatePersistentHooks(postHooks)
+      }
       throwIfHookHalt(
         "PostToolUse",
         postResult,
@@ -417,7 +431,8 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     trimTokensToSummarize,
     summarizationSummaryPrompt,
     summarizationTruncateArgsSettings,
-    subagentExtraSystemPrompt
+    subagentExtraSystemPrompt,
+    toolHookMiddleware
   } = params
 
   // --- systemPrompt handling (identical to original) ---
@@ -547,16 +562,30 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
       async (input: { task_id: string; block?: boolean; timeout?: number }) => {
         const sandbox = filesystemBackend as LocalSandbox
         const toolArgs: Record<string, unknown> = { ...input }
-        await sandbox.runPreToolUseHookForTool("task_output", toolArgs)
+        const preResult = await sandbox.runPreToolUseHookForTool("task_output", toolArgs)
+        if (preResult?.blocked || preResult?.decision === "block") {
+          return `[Hook blocked] ${preResult.stdout || preResult.reason || "task_output was blocked by a hook"}`
+        }
+        const effectiveArgs = mergeUpdatedInput(toolArgs, preResult?.updatedInput)
+        const taskId =
+          typeof effectiveArgs.task_id === "string" && effectiveArgs.task_id.trim()
+            ? effectiveArgs.task_id
+            : input.task_id
+        if (!taskId || typeof taskId !== "string") {
+          return 'Error: Invalid task id.'
+        }
+        const block =
+          typeof effectiveArgs.block === "boolean" ? effectiveArgs.block : input.block !== false
+        const timeout =
+          typeof effectiveArgs.timeout === "number" && Number.isFinite(effectiveArgs.timeout)
+            ? Math.max(0, effectiveArgs.timeout)
+            : input.timeout ?? 30_000
 
         const readTaskOutputText = async (): Promise<string> => {
-          const block = input.block !== false // default true
-          const timeout = input.timeout ?? 30_000 // default 30s, max 600s
-
           // Non-blocking: return immediately
           if (!block) {
-            const result = sandbox.getTaskOutput(input.task_id)
-            if (!result) return `Error: No background task found with id "${input.task_id}".`
+            const result = sandbox.getTaskOutput(taskId)
+            if (!result) return `Error: No background task found with id "${taskId}".`
             if (!result.completed) {
               return JSON.stringify({
                 retrieval_status: "not_ready",
@@ -575,8 +604,8 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
             if (sandbox.isAborted) {
               return "Task polling aborted: conversation was cancelled by user."
             }
-            const result = sandbox.getTaskOutput(input.task_id)
-            if (!result) return `Error: No background task found with id "${input.task_id}".`
+            const result = sandbox.getTaskOutput(taskId)
+            if (!result) return `Error: No background task found with id "${taskId}".`
             if (result.completed) {
               const status = result.exitCode === 0 ? "succeeded" : "failed"
               return `${result.output ?? "<no output>"}\n[Command ${status} with exit code ${result.exitCode}, elapsed: ${result.elapsedSeconds}s]`
@@ -586,8 +615,8 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
           }
 
           // Timeout — return current status so the LLM can decide to call again
-          const final = sandbox.getTaskOutput(input.task_id)
-          if (!final) return `Error: No background task found with id "${input.task_id}".`
+          const final = sandbox.getTaskOutput(taskId)
+          if (!final) return `Error: No background task found with id "${taskId}".`
           if (final.completed) {
             const status = final.exitCode === 0 ? "succeeded" : "failed"
             return `${final.output ?? "<no output>"}\n[Command ${status} with exit code ${final.exitCode}, elapsed: ${final.elapsedSeconds}s]`
@@ -600,7 +629,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
         }
 
         const resultText = await readTaskOutputText()
-        return sandbox.applyPostToolUseHookToText("task_output", toolArgs, resultText)
+        return sandbox.applyPostToolUseHookToText("task_output", effectiveArgs, resultText)
       },
       {
         name: "task_output",
@@ -749,6 +778,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     todoListMiddleware(),
     createFsMiddleware(),
     createSkillHookContextMiddleware(filesystemBackend),
+    ...(toolHookMiddleware ? [toolHookMiddleware] : []),
     toolErrorMiddleware,
     createSummarizationMiddleware(summarizationOptions),
     anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
@@ -776,6 +806,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
       todoListMiddleware(),
       createFsMiddleware(),
       createSkillHookContextMiddleware(filesystemBackend),
+      ...(toolHookMiddleware ? [toolHookMiddleware] : []),
       toolErrorMiddleware,
       createSubAgentMiddleware({
         defaultModel: model,
@@ -1670,6 +1701,7 @@ The workspace root is: ${workspacePath}`
           try {
             return await originalFunc.apply(t, args)
           } catch (e: unknown) {
+            if (isHookHaltError(e)) throw e
             const msg = e instanceof Error ? e.message : String(e)
             const level = e instanceof TypeError || e instanceof ReferenceError ? "error" : "warn"
             console[level](`[Runtime] Tool "${t.name}" error (non-fatal):`, msg)
@@ -1699,6 +1731,29 @@ The workspace root is: ${workspacePath}`
       })
     )
   }
+
+  const toolHookExclusions = new Set<string>([
+    "ls",
+    "read_file",
+    "write_file",
+    "edit_file",
+    "glob",
+    "grep",
+    "execute",
+    "task_output",
+    "search_tool",
+    "inspect_tool",
+    "invoke_deferred_tool",
+    ...eagerMcpMetadata.map((tool) => tool.toolId)
+  ])
+  const toolHookMiddleware = createToolHookMiddleware({
+    workspacePath,
+    threadId: options.threadId,
+    hookScope,
+    resolveHooksForContext,
+    onHookResult,
+    skipToolNames: toolHookExclusions
+  })
 
   const deferredToolIds = [
     ...lazyMcpMetadata.map((tool) => tool.toolId),
@@ -1788,7 +1843,8 @@ The workspace root is: ${workspacePath}`
       trigger: { type: "tokens", value: triggerTokens },
       keep: { type: "tokens", value: keepTokens },
       maxLength: 2000
-    }
+    },
+    toolHookMiddleware
   })
 
   console.log(

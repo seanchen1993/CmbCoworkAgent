@@ -96,6 +96,9 @@ export async function activateSkillLifecycle(
     options.onHookResult
   )
   notes.push(...collectHookNotes(preResult))
+  if (preResult) {
+    options.hookScope?.activatePersistentHooks(options.resolveHooks("PreSkillUse", preContext))
+  }
   throwIfHookHalt("PreSkillUse", preResult, `Skill ${options.skill.name} was stopped by a hook`)
 
   const blockReason = getBlockReason(preResult, options.skill.name)

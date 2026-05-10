@@ -6,6 +6,7 @@ import * as iconv from "iconv-lite"
 import type { HookConfig, HookEvent, HookResult } from "./types"
 import type { PluginHookMetadata, SkillHookMetadata } from "../types"
 import { joinHookText } from "./text"
+import { mergeUpdatedInput } from "./updated-input"
 import { getCustomModelConfigs } from "../storage"
 
 const DEFAULT_TIMEOUT = 10_000
@@ -865,6 +866,7 @@ export async function runHooks(
     let mergedUpdatedInput: Record<string, unknown> | undefined
     let mergedAdditionalContext: string | undefined
     let mergedSystemMessage: string | undefined
+    let mergedSuppressOutput = false
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
@@ -910,13 +912,16 @@ export async function runHooks(
         )
       }
       if (result.updatedInput) {
-        mergedUpdatedInput = { ...(mergedUpdatedInput ?? {}), ...result.updatedInput }
+        mergedUpdatedInput = mergeUpdatedInput(mergedUpdatedInput ?? {}, result.updatedInput)
       }
       if (result.additionalContext) {
         mergedAdditionalContext = joinHookText(mergedAdditionalContext, result.additionalContext)
       }
       if (result.systemMessage) {
         mergedSystemMessage = joinHookText(mergedSystemMessage, result.systemMessage)
+      }
+      if (result.suppressOutput === true) {
+        mergedSuppressOutput = true
       }
     }
     return {
@@ -926,7 +931,8 @@ export async function runHooks(
       blocked: false,
       updatedInput: mergedUpdatedInput,
       additionalContext: mergedAdditionalContext,
-      systemMessage: mergedSystemMessage
+      systemMessage: mergedSystemMessage,
+      suppressOutput: mergedSuppressOutput || undefined
     }
   }
 
@@ -956,7 +962,7 @@ export async function runHooks(
       if (result.decision === "block" && result.reason) {
         blockReasons.push(result.reason)
       }
-      if (result.stdout) outputs.push(result.stdout)
+      if (result.stdout && result.suppressOutput !== true) outputs.push(result.stdout)
       if (result.additionalContext) contexts.push(result.additionalContext)
       if (result.systemMessage) messages.push(result.systemMessage)
     }

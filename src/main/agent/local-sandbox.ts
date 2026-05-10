@@ -50,6 +50,7 @@ import type { HookConfig, HookEvent, HookResult } from "../hooks/types"
 import type { HookContext, HookResultCallback } from "../hooks/runner"
 import { runHooksEnriched } from "../hooks/required-skill"
 import { isHookHaltError, throwIfHookHalt } from "../hooks/halt"
+import { mergeUpdatedInput } from "../hooks/updated-input"
 import type { HookScopeController } from "../hooks/scope"
 import type { SkillLifecycleMatch, SkillLifecycleRegistry } from "./skill-lifecycle/registry"
 import { getSkillActivationKey } from "./skill-lifecycle/activation"
@@ -293,7 +294,9 @@ export class LocalSandbox
     if (!postResult) return result
     throwIfHookHalt("PostToolUse", postResult, `${fileOpLabel} was stopped by a PostToolUse hook`)
     const notes: string[] = []
-    if (postResult.stdout) notes.push(`[Hook output]\n${postResult.stdout}`)
+    if (!postResult.suppressOutput && postResult.stdout) {
+      notes.push(`[Hook output]\n${postResult.stdout}`)
+    }
     if (postResult.additionalContext) notes.push(`[Hook context] ${postResult.additionalContext}`)
     if (postResult.systemMessage) notes.push(`[Hook notice] ${postResult.systemMessage}`)
     if (postResult.decision === "block" && postResult.reason) {
@@ -331,7 +334,9 @@ export class LocalSandbox
     if (!postResult) return result
     throwIfHookHalt("PostToolUse", postResult, "execute was stopped by a PostToolUse hook")
     const parts: string[] = []
-    if (postResult.stdout) parts.push(`[Hook output]\n${postResult.stdout}`)
+    if (!postResult.suppressOutput && postResult.stdout) {
+      parts.push(`[Hook output]\n${postResult.stdout}`)
+    }
     if (postResult.additionalContext) parts.push(`[Hook context]\n${postResult.additionalContext}`)
     if (postResult.systemMessage) parts.push(`[Hook notice]\n${postResult.systemMessage}`)
     if (postResult.decision === "block" && postResult.reason) {
@@ -344,7 +349,9 @@ export class LocalSandbox
   private static formatPostHookTextFeedback(postResult: HookResult | null): string | null {
     if (!postResult) return null
     const parts: string[] = []
-    if (postResult.stdout) parts.push(`[Hook output]\n${postResult.stdout}`)
+    if (!postResult.suppressOutput && postResult.stdout) {
+      parts.push(`[Hook output]\n${postResult.stdout}`)
+    }
     if (postResult.additionalContext) parts.push(`[Hook context]\n${postResult.additionalContext}`)
     if (postResult.systemMessage) parts.push(`[Hook notice]\n${postResult.systemMessage}`)
     if (postResult.decision === "block" && postResult.reason) {
@@ -1004,24 +1011,42 @@ export class LocalSandbox
     return false
   }
 
-  private runHooks(event: HookEvent, context: HookContext): Promise<HookResult | null> {
-    return runHooksEnriched(this.resolveHooks(event, context), event, context, this._onHookResult)
+  private async runHooks(event: HookEvent, context: HookContext): Promise<HookResult | null> {
+    const hooks = this.resolveHooks(event, context)
+    const result = await runHooksEnriched(hooks, event, context, this._onHookResult)
+    if (result) {
+      this._hookScope?.activatePersistentHooks(hooks)
+    }
+    return result
+  }
+
+  private static mergeUpdatedInput<T extends Record<string, unknown>>(
+    base: T,
+    updatedInput?: Record<string, unknown>
+  ): T {
+    return mergeUpdatedInput(base, updatedInput)
+  }
+
+  private async runPreToolUseHook(
+    toolName: string,
+    toolArgs: Record<string, unknown>
+  ): Promise<HookResult | null> {
+    const context: HookContext = {
+      toolName,
+      toolArgs,
+      workspacePath: this.workingDir,
+      sessionId: this.runId
+    }
+    const preResult = await this.runHooks("PreToolUse", context)
+    throwIfHookHalt("PreToolUse", preResult, `${toolName} was stopped by a PreToolUse hook`)
+    return preResult
   }
 
   async runPreToolUseHookForTool(
     toolName: string,
     toolArgs: Record<string, unknown>
-  ): Promise<void> {
-    const preResult = await this.runHooks("PreToolUse", {
-      toolName,
-      toolArgs,
-      workspacePath: this.workingDir,
-      sessionId: this.runId
-    })
-    throwIfHookHalt("PreToolUse", preResult, `${toolName} was stopped by a PreToolUse hook`)
-    if (preResult?.blocked || preResult?.decision === "block") {
-      throw new Error(preResult.stdout || preResult.reason || `${toolName} was blocked by a hook`)
-    }
+  ): Promise<HookResult | null> {
+    return this.runPreToolUseHook(toolName, toolArgs)
   }
 
   async applyPostToolUseHookToText(
@@ -1116,16 +1141,42 @@ export class LocalSandbox
     glob?: string | null
   ): Promise<GrepMatch[] | string> {
     const resolved = dirPath ?? "/"
+    let effectivePattern = pattern
+    let effectivePath = resolved
+    let effectiveGlob = glob
 
     // Block grep on sensitive directories
     if (this.isBlockedBySandbox(resolved)) {
+      return []
+    }
+    const preResult = await this.runPreToolUseHook("grep", { pattern, path: resolved, glob })
+    if (preResult?.blocked || preResult?.decision === "block") {
+      return `[Hook blocked] ${
+        preResult.stdout || preResult.reason || "grep was blocked by a hook"
+      }`
+    }
+    const updatedArgs = LocalSandbox.mergeUpdatedInput(
+      { pattern, path: resolved, glob: glob ?? undefined },
+      preResult?.updatedInput
+    )
+    if (typeof updatedArgs.pattern === "string" && updatedArgs.pattern) {
+      effectivePattern = updatedArgs.pattern
+    }
+    if (typeof updatedArgs.path === "string" && updatedArgs.path) {
+      effectivePath = updatedArgs.path
+    }
+    if (typeof updatedArgs.glob === "string" || updatedArgs.glob === null) {
+      effectiveGlob = updatedArgs.glob as string | null
+    }
+
+    if (this.isBlockedBySandbox(effectivePath)) {
       return []
     }
 
     // Resolve the base path once for reuse
     let baseFull: string
     try {
-      baseFull = this._resolvePath(resolved === "/" ? "." : resolved || ".")
+      baseFull = this._resolvePath(effectivePath === "/" ? "." : effectivePath || ".")
     } catch {
       return []
     }
@@ -1152,7 +1203,7 @@ export class LocalSandbox
     let rgResult: Record<string, Array<[number, string]>> | null | undefined
     if (typeof ripgrepSearch === "function") {
       try {
-        rgResult = await ripgrepSearch.call(this, pattern, baseFull, glob ?? null)
+        rgResult = await ripgrepSearch.call(this, effectivePattern, baseFull, effectiveGlob ?? null)
       } catch (error) {
         console.warn("[LocalSandbox] ripgrepSearch failed, falling back:", error)
         rgResult = undefined
@@ -1174,7 +1225,7 @@ export class LocalSandbox
 
     // When path points to a specific file, filter results to only include
     // matches from the intended file (ripgrep may return broader results).
-    if (results.length > 0 && resolved !== "/" && isFile) {
+    if (results.length > 0 && effectivePath !== "/" && isFile) {
       let expectedPath: string
       if (this._virtualMode) {
         const relative = path.relative(this._cwd, baseFull)
@@ -1194,7 +1245,7 @@ export class LocalSandbox
     // For directory-level searches, empty ripgrep results are normal — skip fallback.
     if (!rgAvailable || (results.length === 0 && isFile)) {
       const t1 = Date.now()
-      const rawResults = await this.encodingAwareLiteralSearch(pattern, baseFull, glob ?? null)
+      const rawResults = await this.encodingAwareLiteralSearch(effectivePattern, baseFull, effectiveGlob ?? null)
       const fallbackMs = Date.now() - t1
       for (const [fpath, items] of Object.entries(rawResults)) {
         for (const [lineNum, lineText] of items) {
@@ -1203,20 +1254,17 @@ export class LocalSandbox
       }
       if (results.length > 0) source = "encoding-aware-fallback"
       console.log(
-        `[LocalSandbox] grepRaw fallback: pattern="${pattern}", results=${results.length}, fallbackMs=${fallbackMs}`
+        `[LocalSandbox] grepRaw fallback: pattern="${effectivePattern}", results=${results.length}, fallbackMs=${fallbackMs}`
       )
     }
 
     console.log(
-      `[LocalSandbox] grepRaw: source=${source}, pattern="${pattern}", results=${results.length}, rgMs=${rgMs}`
+      `[LocalSandbox] grepRaw: source=${source}, pattern="${effectivePattern}", results=${results.length}, rgMs=${rgMs}`
     )
-
-    if (results.length === 0) return results
 
     // Filter out matches inside disabled skills so their content cannot leak via grep.
     if (this._hiddenSkillDirKeys.size > 0) {
       results = results.filter((m) => !this.isHiddenSkillPath(m.path))
-      if (results.length === 0) return results
     }
 
     // Filter out any results from sensitive directories
@@ -1225,11 +1273,10 @@ export class LocalSandbox
         try {
           const resolved = this._resolvePath(m.path)
           return !isSensitivePath(resolved)
-        } catch {
+      } catch {
           return !isSensitivePath(m.path)
         }
       })
-      if (results.length === 0) return results
     }
 
     const capped: GrepMatch[] = []
@@ -1260,6 +1307,23 @@ export class LocalSandbox
       })
     }
 
+    const postResult = await this.runHooks("PostToolUse", {
+      toolName: "grep",
+      toolArgs: { pattern: effectivePattern, path: effectivePath, glob: effectiveGlob },
+      toolResult: JSON.stringify(capped),
+      workspacePath: this.workingDir,
+      sessionId: this.runId
+    })
+    throwIfHookHalt("PostToolUse", postResult, "grep was stopped by a PostToolUse hook")
+    const postFeedback = LocalSandbox.formatPostHookTextFeedback(postResult)
+    if (postFeedback) {
+      capped.push({
+        path: `[Hook feedback] ${postFeedback}`,
+        line: 0,
+        text: ""
+      })
+    }
+
     return capped
   }
 
@@ -1274,7 +1338,30 @@ export class LocalSandbox
     if (this.isHiddenSkillPath(path)) {
       return []
     }
-    let infos = await super.globInfo(pattern, path)
+    let effectivePattern = pattern
+    let effectivePath = path
+    const preResult = await this.runPreToolUseHook("glob", { pattern, path })
+    if (preResult?.blocked || preResult?.decision === "block") {
+      const reason = preResult.stdout || preResult.reason || "glob was blocked by a hook"
+      return [{ path: `[Hook blocked] ${reason}`, is_dir: false } as FileInfo]
+    }
+    const updatedArgs = LocalSandbox.mergeUpdatedInput(
+      { pattern, path },
+      preResult?.updatedInput
+    )
+    if (typeof updatedArgs.pattern === "string" && updatedArgs.pattern) {
+      effectivePattern = updatedArgs.pattern
+    }
+    if (typeof updatedArgs.path === "string" && updatedArgs.path) {
+      effectivePath = updatedArgs.path
+    }
+    if (this.isHiddenSkillPath(effectivePath)) {
+      return []
+    }
+    if (this.isBlockedBySandbox(effectivePath)) {
+      return []
+    }
+    let infos = await super.globInfo(effectivePattern, effectivePath)
     // Hide files that fall inside any disabled skill so the agent cannot list them.
     if (this._hiddenSkillDirKeys.size > 0) {
       infos = infos.filter((f) => !this.isHiddenSkillPath(f.path))
@@ -1290,20 +1377,38 @@ export class LocalSandbox
         }
       })
     }
-    if (infos.length <= LocalSandbox.MAX_GLOB_ENTRIES) return infos
+    let finalInfos = infos
+    if (finalInfos.length > LocalSandbox.MAX_GLOB_ENTRIES) {
+      const capped = finalInfos.slice(0, LocalSandbox.MAX_GLOB_ENTRIES)
+      const omitted = finalInfos.length - capped.length
+      console.log(
+        "[LocalSandbox] globInfo capped results:",
+        `${capped.length}/${finalInfos.length}`,
+        `for pattern=${effectivePattern}`
+      )
+      capped.push({
+        path: `(truncated) Found ${finalInfos.length} total, showing first ${capped.length}. ${omitted} omitted — use a more specific glob pattern or path.`,
+        is_dir: false
+      } as FileInfo)
+      finalInfos = capped
+    }
 
-    const capped = infos.slice(0, LocalSandbox.MAX_GLOB_ENTRIES)
-    const omitted = infos.length - capped.length
-    console.log(
-      "[LocalSandbox] globInfo capped results:",
-      `${capped.length}/${infos.length}`,
-      `for pattern=${pattern}`
-    )
-    capped.push({
-      path: `(truncated) Found ${infos.length} total, showing first ${capped.length}. ${omitted} omitted — use a more specific glob pattern or path.`,
-      is_dir: false
-    } as FileInfo)
-    return capped
+    const postResult = await this.runHooks("PostToolUse", {
+      toolName: "glob",
+      toolArgs: { pattern: effectivePattern, path: effectivePath },
+      toolResult: JSON.stringify(finalInfos),
+      workspacePath: this.workingDir,
+      sessionId: this.runId
+    })
+    throwIfHookHalt("PostToolUse", postResult, "glob was stopped by a PostToolUse hook")
+    const postFeedback = LocalSandbox.formatPostHookTextFeedback(postResult)
+    if (postFeedback) {
+      finalInfos = [
+        ...finalInfos,
+        { path: `[Hook feedback] ${postFeedback}`, is_dir: false } as FileInfo
+      ]
+    }
+    return finalInfos
   }
 
   /**
@@ -1326,7 +1431,33 @@ export class LocalSandbox
         } as FileInfo
       ]
     }
-    let infos = await super.lsInfo(path)
+    let effectivePath = path
+    const preResult = await this.runPreToolUseHook("ls", { path })
+    if (preResult?.blocked || preResult?.decision === "block") {
+      const reason = preResult.stdout || preResult.reason || "ls was blocked by a hook"
+      return [{ path: `[Hook blocked] ${reason}`, is_dir: false } as FileInfo]
+    }
+    const updatedArgs = LocalSandbox.mergeUpdatedInput({ path }, preResult?.updatedInput)
+    if (typeof updatedArgs.path === "string" && updatedArgs.path) {
+      effectivePath = updatedArgs.path
+    }
+    if (this.isHiddenSkillPath(effectivePath)) {
+      return [
+        {
+          path: `Error listing '${effectivePath}': skill is disabled`,
+          is_dir: false
+        } as FileInfo
+      ]
+    }
+    if (this.isBlockedBySandbox(effectivePath)) {
+      return [
+        {
+          path: "Error: Access denied — this directory is restricted by sandbox policy.",
+          is_dir: false
+        } as FileInfo
+      ]
+    }
+    let infos = await super.lsInfo(effectivePath)
     infos = infos.filter((f) => !this.isHiddenSkillPath(f.path))
     // Filter out any results that fall within sensitive directories
     if (this.windowsSandbox === "elevated") {
@@ -1339,20 +1470,35 @@ export class LocalSandbox
         }
       })
     }
-    if (infos.length <= LocalSandbox.MAX_LS_ENTRIES) return infos
+    let finalInfos = infos
+    if (finalInfos.length > LocalSandbox.MAX_LS_ENTRIES) {
+      const capped = finalInfos.slice(0, LocalSandbox.MAX_LS_ENTRIES)
+      const omitted = finalInfos.length - capped.length
+      console.log(
+        "[LocalSandbox] lsInfo capped results:",
+        `${capped.length}/${finalInfos.length}`,
+        `for path=${effectivePath}`
+      )
+      capped.push({
+        path: `(truncated) Found ${finalInfos.length} total, showing first ${capped.length}. ${omitted} omitted — use a more specific path.`,
+        is_dir: false
+      } as FileInfo)
+      finalInfos = capped
+    }
 
-    const capped = infos.slice(0, LocalSandbox.MAX_LS_ENTRIES)
-    const omitted = infos.length - capped.length
-    console.log(
-      "[LocalSandbox] lsInfo capped results:",
-      `${capped.length}/${infos.length}`,
-      `for path=${path}`
-    )
-    capped.push({
-      path: `(truncated) Found ${infos.length} total, showing first ${capped.length}. ${omitted} omitted — use a more specific path.`,
-      is_dir: false
-    } as FileInfo)
-    return capped
+    const postResult = await this.runHooks("PostToolUse", {
+      toolName: "ls",
+      toolArgs: { path: effectivePath },
+      toolResult: JSON.stringify(finalInfos),
+      workspacePath: this.workingDir,
+      sessionId: this.runId
+    })
+    throwIfHookHalt("PostToolUse", postResult, "ls was stopped by a PostToolUse hook")
+    const postFeedback = LocalSandbox.formatPostHookTextFeedback(postResult)
+    if (postFeedback) {
+      finalInfos = [...finalInfos, { path: `[Hook feedback] ${postFeedback}`, is_dir: false } as FileInfo]
+    }
+    return finalInfos
   }
 
   private static readonly LINE_NUMBER_WIDTH = 6
@@ -1487,19 +1633,55 @@ export class LocalSandbox
     if (this.isBlockedBySandbox(filePath)) {
       return `Error: Access denied — '${filePath}' is restricted by sandbox policy.`
     }
+    let effectiveFilePath = filePath
+    let effectiveOffset = offset
+    let effectiveLimit = limit
+    try {
+      const preResult = await this.runPreToolUseHook("read_file", { filePath, offset, limit })
+      if (preResult?.blocked || preResult?.decision === "block") {
+        const reason = preResult.stdout || preResult.reason || "read_file was blocked by a hook"
+        return `Error reading file '${filePath}': [Hook blocked] ${reason}`
+      }
+      const updatedArgs = LocalSandbox.mergeUpdatedInput(
+        { filePath, offset, limit },
+        preResult?.updatedInput
+      )
+      effectiveFilePath =
+        typeof updatedArgs.filePath === "string" && updatedArgs.filePath
+          ? updatedArgs.filePath
+          : filePath
+      effectiveOffset =
+        typeof updatedArgs.offset === "number" && Number.isFinite(updatedArgs.offset)
+          ? updatedArgs.offset
+          : offset
+      effectiveLimit =
+        typeof updatedArgs.limit === "number" && Number.isFinite(updatedArgs.limit)
+          ? updatedArgs.limit
+          : limit
+    } catch (error) {
+      if (isHookHaltError(error)) throw error
+      throw error
+    }
+    if (this.isHiddenSkillPath(effectiveFilePath)) {
+      return `Error reading file '${effectiveFilePath}': skill is disabled`
+    }
+    if (this.isBlockedBySandbox(effectiveFilePath)) {
+      return `Error: Access denied — '${effectiveFilePath}' is restricted by sandbox policy.`
+    }
     let skillMatch: SkillLifecycleMatch | null = null
     let fireSkillHooks = false
     const skillHookNotes: string[] = []
     try {
       try {
-        const resolvedForSkill = this._resolvePath(filePath)
-        skillMatch = this._skillLifecycleRegistry?.resolveRead(filePath, resolvedForSkill) ?? null
+        const resolvedForSkill = this._resolvePath(effectiveFilePath)
+        skillMatch =
+          this._skillLifecycleRegistry?.resolveRead(effectiveFilePath, resolvedForSkill) ?? null
         const skillHookKey = skillMatch ? this.getSkillHookKey(skillMatch) : ""
         if (skillMatch && !this._skillHooksFired.has(skillHookKey)) {
           fireSkillHooks = true
           const preContext: HookContext = {
             toolName: "read_file",
-            toolArgs: { filePath, offset, limit },
+            toolArgs: { filePath: effectiveFilePath, offset: effectiveOffset, limit: effectiveLimit },
             workspacePath: this.workingDir,
             sessionId: this.runId,
             skillName: skillMatch.name,
@@ -1526,9 +1708,11 @@ export class LocalSandbox
             return `Error reading skill '${skillMatch.name}': [Hook blocked] ${reason}`
           }
           skillHookNotes.push(
-            ...[preResult?.stdout, preResult?.additionalContext, preResult?.systemMessage].filter(
-              (item): item is string => Boolean(item)
-            )
+            ...[
+              preResult?.suppressOutput === true ? undefined : preResult?.stdout,
+              preResult?.additionalContext,
+              preResult?.systemMessage
+            ].filter((item): item is string => Boolean(item))
           )
           this._skillHooksFired.add(skillHookKey)
         }
@@ -1537,27 +1721,37 @@ export class LocalSandbox
         console.warn("[Hooks] PreSkillUse error:", hookError)
       }
 
-      const { buffer, resolvedPath } = await this.readFileBuffer(filePath)
+      const { buffer, resolvedPath } = await this.readFileBuffer(effectiveFilePath)
 
       const ext = path.extname(resolvedPath).toLowerCase()
       const encoding = this.detectEncoding(buffer, ext)
       const content = iconv.decode(buffer, encoding)
       await this.recordReadTime(resolvedPath)
 
-      if (!content || content.trim() === "")
-        return "System reminder: File exists but has empty contents"
+      if (!content || content.trim() === "") {
+        return await this.applyPostToolUseHookToText(
+          "read_file",
+          { filePath: effectiveFilePath, offset: effectiveOffset, limit: effectiveLimit },
+          "System reminder: File exists but has empty contents"
+        )
+      }
 
       const lines = content.split("\n")
-      if (offset >= lines.length) {
-        return `Error: Line offset ${offset} exceeds file length (${lines.length} lines)`
+      if (effectiveOffset >= lines.length) {
+        return await this.applyPostToolUseHookToText(
+          "read_file",
+          { filePath: effectiveFilePath, offset: effectiveOffset, limit: effectiveLimit },
+          `Error: Line offset ${effectiveOffset} exceeds file length (${lines.length} lines)`
+        )
       }
 
       const total = lines.length
-      const hasMore = offset + limit < total
-      const end = Math.min(offset + (hasMore ? limit - 1 : limit), total)
-      const formatted = this.formatLines(lines.slice(offset, end), offset + 1)
+      const hasMore = effectiveOffset + effectiveLimit < total
+      const end = Math.min(effectiveOffset + (hasMore ? effectiveLimit - 1 : effectiveLimit), total)
+      const formatted = this.formatLines(lines.slice(effectiveOffset, end), effectiveOffset + 1)
       const result = hasMore
-        ? `[Lines ${offset + 1}-${end} of ${total}. Use offset=${end} to read more.]\n` + formatted
+        ? `[Lines ${effectiveOffset + 1}-${end} of ${total}. Use offset=${end} to read more.]\n` +
+          formatted
         : formatted
 
       if (fireSkillHooks && skillMatch) {
@@ -1565,7 +1759,11 @@ export class LocalSandbox
         this._hookScope?.activatePersistentHooks(
           this.resolveHooks("PreToolUse", {
             toolName: "read_file",
-            toolArgs: { filePath, offset, limit },
+            toolArgs: {
+              filePath: effectiveFilePath,
+              offset: effectiveOffset,
+              limit: effectiveLimit
+            },
             workspacePath: this.workingDir,
             sessionId: this.runId,
             skillName: skillMatch.name,
@@ -1584,11 +1782,19 @@ export class LocalSandbox
         this.enqueueSkillHookContext(skillMatch, skillHookNotes)
       }
 
-      return result
+      return await this.applyPostToolUseHookToText(
+        "read_file",
+        { filePath: effectiveFilePath, offset: effectiveOffset, limit: effectiveLimit },
+        result
+      )
     } catch (e: unknown) {
       if (isHookHaltError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)
-      return `Error reading file '${filePath}': ${msg}`
+      return await this.applyPostToolUseHookToText(
+        "read_file",
+        { filePath: effectiveFilePath, offset: effectiveOffset, limit: effectiveLimit },
+        `Error reading file '${effectiveFilePath}': ${msg}`
+      )
     }
   }
 
@@ -1745,29 +1951,41 @@ export class LocalSandbox
     if (this.isWriteBlocked(filePath)) {
       return { error: this.readonlyBlockedError(filePath, "写入") }
     }
+    // PreToolUse hook
+    const preResult = await this.runPreToolUseHook("write_file", {
+      filePath,
+      content
+    })
+    if (preResult?.blocked || preResult?.decision === "block") {
+      return { error: `[Hook blocked] ${preResult.stdout || "write_file was blocked by a hook"}` }
+    }
+    const updatedArgs = LocalSandbox.mergeUpdatedInput({ filePath, content }, preResult?.updatedInput)
+    const effectiveFilePath =
+      typeof updatedArgs.filePath === "string" && updatedArgs.filePath
+        ? updatedArgs.filePath
+        : filePath
+    const effectiveContent =
+      typeof updatedArgs.content === "string" ? updatedArgs.content : content
+    if (this.isBlockedBySandbox(effectiveFilePath)) {
+      return {
+        error: `Access denied — '${effectiveFilePath}' is restricted by sandbox policy.`
+      }
+    }
+    if (this.isWriteBlocked(effectiveFilePath)) {
+      return { error: this.readonlyBlockedError(effectiveFilePath, "写入") }
+    }
     // Approval gate (skipped when no orchestrator = YOLO mode)
     if (this.orchestrator) {
       const approved = await this.orchestrator.approveFileOp(
         "write_file",
-        filePath,
+        effectiveFilePath,
         this.workingDir
       )
       if (!approved) {
         return { error: "文件写入被用户拒绝。" }
       }
     }
-    // PreToolUse hook
-    const preResult = await this.runHooks("PreToolUse", {
-      toolName: "write_file",
-      toolArgs: { filePath, content },
-      workspacePath: this.workingDir,
-      sessionId: this.runId
-    })
-    throwIfHookHalt("PreToolUse", preResult, "write_file was stopped by a PreToolUse hook")
-    if (preResult?.blocked) {
-      return { error: `[Hook blocked] ${preResult.stdout || "write_file was blocked by a hook"}` }
-    }
-    const resolvedPath = this._resolvePath(filePath)
+    const resolvedPath = this._resolvePath(effectiveFilePath)
     // deepagents' FilesystemBackend.write() refuses to overwrite: if the
     // target exists it returns an "already exists" error and does NOT touch
     // the file. Therefore every successful super.write() is a brand-new
@@ -1775,21 +1993,21 @@ export class LocalSandbox
     // old pre-read entirely (it was wasted I/O on success and would also
     // bypass isCodeFile / size guards on failure).
     const result = await this.withFileLock(resolvedPath, async () => {
-      const r = await super.write(filePath, content)
+      const r = await super.write(effectiveFilePath, effectiveContent)
       if (!r.error) {
         await this.recordReadTime(resolvedPath)
       }
       return r
     })
     if (!result.error) {
-      this._onFileMutation?.(filePath, "write")
+      this._onFileMutation?.(effectiveFilePath, "write")
       // Adoption tracking (side-effect only, never throws)
       try {
         recordAdoptionGen({
           threadId: this.runId,
           tool: "write_file",
-          filePath,
-          generatedContent: content,
+          filePath: effectiveFilePath,
+          generatedContent: effectiveContent,
           workspacePath: this.workingDir,
           // write_file only succeeds when creating a new file (see above) —
           // no prior lines could have been deleted.
@@ -1803,7 +2021,7 @@ export class LocalSandbox
     try {
       const postResult = await this.runHooks("PostToolUse", {
         toolName: "write_file",
-        toolArgs: { filePath, content },
+        toolArgs: { filePath: effectiveFilePath, content: effectiveContent },
         toolResult: JSON.stringify(result),
         workspacePath: this.workingDir,
         sessionId: this.runId
@@ -1883,28 +2101,53 @@ export class LocalSandbox
     if (this.isWriteBlocked(filePath)) {
       return { error: this.readonlyBlockedError(filePath, "编辑") }
     }
+    // PreToolUse hook
+    const preResult = await this.runPreToolUseHook("edit_file", {
+      filePath,
+      oldString,
+      newString,
+      replaceAll
+    })
+    if (preResult?.blocked || preResult?.decision === "block") {
+      return { error: `[Hook blocked] ${preResult.stdout || "edit_file was blocked by a hook"}` }
+    }
+    const updatedArgs = LocalSandbox.mergeUpdatedInput(
+      { filePath, oldString, newString, replaceAll },
+      preResult?.updatedInput
+    )
+    const effectiveFilePath =
+      typeof updatedArgs.filePath === "string" && updatedArgs.filePath
+        ? updatedArgs.filePath
+        : filePath
+    const effectiveOldString =
+      typeof updatedArgs.oldString === "string" ? updatedArgs.oldString : oldString
+    const effectiveNewString =
+      typeof updatedArgs.newString === "string" ? updatedArgs.newString : newString
+    const effectiveReplaceAll =
+      typeof updatedArgs.replaceAll === "boolean" ? updatedArgs.replaceAll : replaceAll
+    if (this.isBlockedBySandbox(effectiveFilePath)) {
+      return {
+        error: `Access denied — '${effectiveFilePath}' is restricted by sandbox policy.`
+      }
+    }
+    if (this.isWriteBlocked(effectiveFilePath)) {
+      return { error: this.readonlyBlockedError(effectiveFilePath, "编辑") }
+    }
     // Approval gate (skipped when no orchestrator = YOLO mode)
     if (this.orchestrator) {
-      const approved = await this.orchestrator.approveFileOp("edit_file", filePath, this.workingDir)
+      const approved = await this.orchestrator.approveFileOp(
+        "edit_file",
+        effectiveFilePath,
+        this.workingDir
+      )
       if (!approved) {
         return { error: "文件编辑被用户拒绝。" }
       }
     }
-    // PreToolUse hook
-    const preResult = await this.runHooks("PreToolUse", {
-      toolName: "edit_file",
-      toolArgs: { filePath, oldString, newString, replaceAll },
-      workspacePath: this.workingDir,
-      sessionId: this.runId
-    })
-    throwIfHookHalt("PreToolUse", preResult, "edit_file was stopped by a PreToolUse hook")
-    if (preResult?.blocked) {
-      return { error: `[Hook blocked] ${preResult.stdout || "edit_file was blocked by a hook"}` }
-    }
     try {
-      const resolvedPath = this._resolvePath(filePath)
+      const resolvedPath = this._resolvePath(effectiveFilePath)
       const result = await this.withFileLock(resolvedPath, async () => {
-        const { buffer } = await this.readFileBuffer(filePath)
+        const { buffer } = await this.readFileBuffer(effectiveFilePath)
         const ext = path.extname(resolvedPath).toLowerCase()
         const encoding = this.detectEncoding(buffer, ext)
         const content = iconv.decode(buffer, encoding)
@@ -1915,37 +2158,37 @@ export class LocalSandbox
         let expectedContent: string
         let occurrences: number
 
-        if (content === "" && oldString === "") {
-          expectedContent = newString
+        if (content === "" && effectiveOldString === "") {
+          expectedContent = effectiveNewString
           occurrences = 0
         } else {
-          const r = replace(content, oldString, newString, replaceAll)
+          const r = replace(content, effectiveOldString, effectiveNewString, effectiveReplaceAll)
           expectedContent = r.newContent
           occurrences = r.occurrences
         }
 
         await this.writeFileEncoded(resolvedPath, expectedContent, encoding)
         await this.recordReadTime(resolvedPath)
-        return { path: filePath, filesUpdate: null, occurrences }
+        return { path: effectiveFilePath, filesUpdate: null, occurrences }
       })
-      this._onFileMutation?.(filePath, "edit")
+      this._onFileMutation?.(effectiveFilePath, "edit")
       // Adoption tracking (side-effect only, never throws).
       // At this point withFileLock resolved successfully — the edit was applied.
       try {
         recordAdoptionGen({
           threadId: this.runId,
           tool: "edit_file",
-          filePath,
+          filePath: effectiveFilePath,
           // For edits, the local generated fragment is new_string; the tracker
           // expands its line hashes by occurrences for replaceAll.
-          generatedContent: newString,
+          generatedContent: effectiveNewString,
           workspacePath: this.workingDir,
           // Pass the edit fragments only — no full-file references. Tracker
           // derives deletedLineCount in a microtask via
           // max(0, countNonBlankLines(oldString) - countNonBlankLines(newString)) * occurrences,
           // avoiding any full-file scan or retention of editor buffers.
-          oldString,
-          newString,
+          oldString: effectiveOldString,
+          newString: effectiveNewString,
           occurrences: result.occurrences
         })
       } catch {
@@ -1955,7 +2198,12 @@ export class LocalSandbox
       try {
         const postResult = await this.runHooks("PostToolUse", {
           toolName: "edit_file",
-          toolArgs: { filePath, oldString, newString, replaceAll },
+          toolArgs: {
+            filePath: effectiveFilePath,
+            oldString: effectiveOldString,
+            newString: effectiveNewString,
+            replaceAll: effectiveReplaceAll
+          },
           toolResult: JSON.stringify(result),
           workspacePath: this.workingDir,
           sessionId: this.runId
@@ -1969,7 +2217,7 @@ export class LocalSandbox
     } catch (e: unknown) {
       if (isHookHaltError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)
-      return { error: `Error editing file '${filePath}': ${msg}` }
+      return { error: `Error editing file '${effectiveFilePath}': ${msg}` }
     }
   }
 
@@ -2655,14 +2903,30 @@ export class LocalSandbox
    */
   async executeBackground(command: string): Promise<string> {
     const toolArgs = { command, run_in_background: true }
-    await this.runPreToolUseHookForTool("execute", toolArgs)
+    const preResult = await this.runPreToolUseHookForTool("execute", toolArgs)
+    if (preResult?.blocked || preResult?.decision === "block") {
+      return `[Hook blocked] ${preResult.stdout || preResult.reason || "execute was blocked by a hook"}`
+    }
+    const updatedArgs = LocalSandbox.mergeUpdatedInput(toolArgs, preResult?.updatedInput)
+    const effectiveCommand =
+      typeof updatedArgs.command === "string" && updatedArgs.command.trim()
+        ? updatedArgs.command
+        : command
+    const safety = assessCommandSafety(effectiveCommand, this.workingDir, {
+      windowsShell:
+        process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown",
+      enforceGitWorkflowCommitOnly: this.enforceGitWorkflowCommitOnly
+    })
+    if (safety.level === "forbidden") {
+      return `Command forbidden: ${safety.reason}`
+    }
 
     const taskId = randomUUID().slice(0, 8)
     const taskAbortController = new AbortController()
     const task = {
       id: taskId,
       threadId: this.runId,
-      command,
+      command: effectiveCommand,
       startedAt: Date.now(),
       completed: false as boolean,
       outputChunks: [] as string[],
@@ -2675,7 +2939,7 @@ export class LocalSandbox
     // Background tasks use their own AbortController (not the conversation's abortSignal)
     // so they survive conversation switches but can still be cancelled explicitly.
     this.executeRaw(
-      command,
+      effectiveCommand,
       undefined,
       LocalSandbox.BACKGROUND_TIMEOUT_MS,
       taskAbortController.signal
@@ -2720,7 +2984,11 @@ export class LocalSandbox
 
     const startedMessage = `Background task started (id: ${taskId}). Use task_output tool with this id to check results later.`
     try {
-      return await this.applyPostToolUseHookToText("execute", toolArgs, startedMessage)
+      return await this.applyPostToolUseHookToText(
+        "execute",
+        { command: effectiveCommand, run_in_background: true },
+        startedMessage
+      )
     } catch (error) {
       if (isHookHaltError(error)) {
         taskAbortController.abort()
@@ -2804,8 +3072,23 @@ export class LocalSandbox
       `[LocalSandbox] execute: hasOrchestrator=${!!this.orchestrator} sandbox=${this.windowsSandbox}`
     )
 
+    // PreToolUse hook
+    const preResult = await this.runPreToolUseHook("execute", { command })
+    if (preResult?.blocked || preResult?.decision === "block") {
+      return {
+        output: `[Hook blocked] ${preResult.stdout || "execute was blocked by a hook"}`,
+        exitCode: 1,
+        truncated: false
+      }
+    }
+    const updatedArgs = LocalSandbox.mergeUpdatedInput({ command }, preResult?.updatedInput)
+    const effectiveCommand =
+      typeof updatedArgs.command === "string" && updatedArgs.command.trim()
+        ? updatedArgs.command
+        : command
+
     // Always check forbidden commands, even without orchestrator (YOLO mode safety net)
-    const safety = assessCommandSafety(command, this.workingDir, {
+    const safety = assessCommandSafety(effectiveCommand, this.workingDir, {
       windowsShell:
         process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown",
       enforceGitWorkflowCommitOnly: this.enforceGitWorkflowCommitOnly
@@ -2819,30 +3102,18 @@ export class LocalSandbox
       }
     }
 
-    // PreToolUse hook
-    const preResult = await this.runHooks("PreToolUse", {
-      toolName: "execute",
-      toolArgs: { command },
-      workspacePath: this.workingDir,
-      sessionId: this.runId
-    })
-    throwIfHookHalt("PreToolUse", preResult, "execute was stopped by a PreToolUse hook")
-    if (preResult?.blocked) {
-      return {
-        output: `[Hook blocked] ${preResult.stdout || "execute was blocked by a hook"}`,
-        exitCode: 1,
-        truncated: false
-      }
-    }
-
     // If an orchestrator is configured, delegate to it for approval + sandbox retry.
     // The orchestrator calls back into executeRaw() for actual execution.
     if (this.orchestrator) {
-      const result = await this.orchestrator.execute(command, this.workingDir, this.windowsSandbox)
+      const result = await this.orchestrator.execute(
+        effectiveCommand,
+        this.workingDir,
+        this.windowsSandbox
+      )
       // PostToolUse hook
       const postResult = await this.runHooks("PostToolUse", {
         toolName: "execute",
-        toolArgs: { command },
+        toolArgs: { command: effectiveCommand },
         toolResult: result.output,
         workspacePath: this.workingDir,
         sessionId: this.runId
@@ -2850,11 +3121,11 @@ export class LocalSandbox
       return LocalSandbox.applyPostHookToExecResult(result, postResult)
     }
 
-    const result = await this.executeRaw(command)
+    const result = await this.executeRaw(effectiveCommand)
     // PostToolUse hook
     const postResult = await this.runHooks("PostToolUse", {
       toolName: "execute",
-      toolArgs: { command },
+      toolArgs: { command: effectiveCommand },
       toolResult: result.output,
       workspacePath: this.workingDir,
       sessionId: this.runId

@@ -533,6 +533,91 @@ async function testNestedSkillActivatesOnlyMatchedScopedHooks(): Promise<void> {
   })
 }
 
+async function testSkillPreToolHooksCoverReadGlobGrepLsAndExecute(): Promise<void> {
+  await withTempDir("skill-pretool-coverage", async (base) => {
+    const source = join(base, "skills")
+    const skillPath = await writeSkillDoc(source, "cover/SKILL.md", {
+      raw: "---\nname: cover\n---\nbody\n"
+    })
+    const readTarget = join(base, "read-target.txt")
+    const globDir = join(base, "glob-zone")
+    const globTarget = join(globDir, "match.txt")
+    const grepTarget = join(base, "grep-target.txt")
+    const lsDir = join(base, "ls-zone")
+    const readMarker = join(base, "read-hit.txt")
+    const globMarker = join(base, "glob-hit.txt")
+    const grepMarker = join(base, "grep-hit.txt")
+    const lsMarker = join(base, "ls-hit.txt")
+    const executeMarker = join(base, "execute-hit.txt")
+    await writeFile(readTarget, "read me", "utf8")
+    await mkdir(globDir, { recursive: true })
+    await writeFile(globTarget, "glob me", "utf8")
+    await writeFile(grepTarget, "needle here", "utf8")
+    await mkdir(lsDir, { recursive: true })
+
+    const hookScope = createHookScope()
+    const skillRootKey = join(source, "cover").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase()
+    const hooks: HookConfig[] = [
+      makeHook({
+        event: "PreToolUse",
+        matcher: "read_file",
+        persistAfterInterrupt: true,
+        command: nodeCommand(`require('fs').writeFileSync(${JSON.stringify(readMarker)}, 'read')`)
+      }),
+      makeHook({
+        event: "PreToolUse",
+        matcher: "glob",
+        persistAfterInterrupt: true,
+        command: nodeCommand(`require('fs').writeFileSync(${JSON.stringify(globMarker)}, 'glob')`)
+      }),
+      makeHook({
+        event: "PreToolUse",
+        matcher: "grep",
+        persistAfterInterrupt: true,
+        command: nodeCommand(`require('fs').writeFileSync(${JSON.stringify(grepMarker)}, 'grep')`)
+      }),
+      makeHook({
+        event: "PreToolUse",
+        matcher: "ls",
+        persistAfterInterrupt: true,
+        command: nodeCommand(`require('fs').writeFileSync(${JSON.stringify(lsMarker)}, 'ls')`)
+      }),
+      makeHook({
+        event: "PreToolUse",
+        matcher: "execute",
+        persistAfterInterrupt: true,
+        command: nodeCommand(
+          `require('fs').writeFileSync(${JSON.stringify(executeMarker)}, 'execute')`
+        )
+      })
+    ]
+    const sandbox = new LocalSandbox({
+      rootDir: base,
+      skillLifecycleRegistry: new SkillLifecycleRegistry([source]),
+      hookScope: hookScope,
+      hookResolver: () => (hookScope.activeSkillPaths.has(skillRootKey) ? hooks : [])
+    })
+
+    await sandbox.read(skillPath)
+    assert(
+      hookScope.activeSkillPaths.has(skillRootKey),
+      "reading the skill should activate its scoped hooks"
+    )
+
+    await sandbox.read(readTarget)
+    await sandbox.globInfo("**/*.txt", base)
+    await sandbox.grepRaw("needle here", base)
+    await sandbox.lsInfo(lsDir)
+    await sandbox.execute("echo hook-check")
+
+    assert(existsSync(readMarker), "read_file hook should fire after skill activation")
+    assert(existsSync(globMarker), "glob hook should fire after skill activation")
+    assert(existsSync(grepMarker), "grep hook should fire after skill activation")
+    assert(existsSync(lsMarker), "ls hook should fire after skill activation")
+    assert(existsSync(executeMarker), "execute hook should fire after skill activation")
+  })
+}
+
 async function testExplicitActivationFiresLifecycleOnceAndSuppressesReadDuplicate(): Promise<void> {
   await withTempDir("skill-explicit-once", async (base) => {
     const source = join(base, "skills")
@@ -859,6 +944,30 @@ async function testTextToolPostContinueFalseThrowsHookHalt(): Promise<void> {
   })
 }
 
+async function testPostToolSuppressOutputDoesNotLeakHookStdoutToRead(): Promise<void> {
+  await withTempDir("hook-suppress-output-read", async (base) => {
+    const targetPath = join(base, "note.txt")
+    await writeFile(targetPath, "visible file output\n", "utf8")
+    const sandbox = new LocalSandbox({
+      rootDir: base,
+      hooks: [
+        makeHook({
+          event: "PostToolUse",
+          matcher: "read_file",
+          command: nodeCommand(
+            "console.log(JSON.stringify({suppressOutput:true, additionalContext:'kept context'}))"
+          )
+        })
+      ]
+    })
+
+    const result = await sandbox.read(targetPath)
+    assert(result.includes("visible file output"), "read_file output should still be returned")
+    assert(!result.includes("suppressOutput"), "suppressOutput should hide raw hook stdout JSON")
+    assert(result.includes("kept context"), "additionalContext should still be surfaced")
+  })
+}
+
 async function testSameSkillReadFiresOnce(): Promise<void> {
   await withTempDir("skill-read-once", async (base) => {
     const source = join(base, "skills")
@@ -1108,6 +1217,8 @@ async function run(): Promise<void> {
   console.log("PASS A13 plugin skill activates scoped hooks")
   await testNestedSkillActivatesOnlyMatchedScopedHooks()
   console.log("PASS A14 nested skill activates only the matched scoped hook")
+  await testSkillPreToolHooksCoverReadGlobGrepLsAndExecute()
+  console.log("PASS A14a skill PreToolUse hooks cover read/glob/grep/ls/execute")
   await testExplicitActivationFiresLifecycleOnceAndSuppressesReadDuplicate()
   console.log("PASS A14b explicit selection fires lifecycle once and shares read de-dupe")
   await testPluginSkillHookDoesNotMatchStandaloneSkillByName()
@@ -1124,6 +1235,8 @@ async function run(): Promise<void> {
   console.log("PASS D2d background execute PreToolUse continue:false throws HookHaltError")
   await testTextToolPostContinueFalseThrowsHookHalt()
   console.log("PASS D2e text tool PostToolUse continue:false throws HookHaltError")
+  await testPostToolSuppressOutputDoesNotLeakHookStdoutToRead()
+  console.log("PASS D2f PostToolUse suppressOutput hides hook stdout in read_file feedback")
   await testSameSkillReadFiresOnce()
   console.log("PASS D3 same skill read fires hooks once")
   await testSameNameDifferentSkillsFireSeparately()

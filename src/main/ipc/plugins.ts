@@ -256,6 +256,11 @@ function getZipFallbackName(fileName?: string): string | undefined {
   return base || undefined
 }
 
+function looksLikeTempPluginRootName(name: string): boolean {
+  const normalized = name.trim().toLowerCase()
+  return /^_?temp(?:[-_\s]|\d|$)/.test(normalized) || /^tmp(?:[-_\s]|\d|$)/.test(normalized)
+}
+
 async function selectExtractedPluginRoot(tempDir: string): Promise<string> {
   let childDirs: string[] = []
   try {
@@ -383,8 +388,12 @@ async function installPluginFromZip(
       }
 
       const pluginRoot = await selectExtractedPluginRoot(tempDir)
+      const rootName = path.basename(pluginRoot)
+      const zipFallbackName = getZipFallbackName(fileName)
       const fallbackName =
-        pluginRoot === tempDir ? getZipFallbackName(fileName) : path.basename(pluginRoot)
+        pluginRoot === tempDir || looksLikeTempPluginRootName(rootName)
+          ? zipFallbackName ?? rootName
+          : rootName
 
       // Parse and install
       const result = await installPluginFromDir(pluginRoot, fallbackName)

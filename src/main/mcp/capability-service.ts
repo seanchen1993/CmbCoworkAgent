@@ -129,6 +129,31 @@ function buildFingerprint(sources: CapabilitySource[]): string {
   return createHash("sha256").update(payload).digest("hex")
 }
 
+function shouldRetryMcpInvocationError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return (
+    message.includes("terminated") ||
+    message.includes("disconnected") ||
+    message.includes("ECONN")
+  )
+}
+
+async function invokeToolWithRetry(
+  callTool: (request: { name: string; arguments: Record<string, unknown> }) => Promise<unknown>,
+  request: { name: string; arguments: Record<string, unknown> },
+  retries = 1
+): Promise<unknown> {
+  try {
+    return await callTool(request)
+  } catch (error) {
+    if (retries <= 0 || !shouldRetryMcpInvocationError(error)) {
+      throw error
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    return invokeToolWithRetry(callTool, request, retries - 1)
+  }
+}
+
 async function listServerTools(
   client: MultiServerMCPClient,
   providerKey: string
@@ -185,14 +210,17 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
       throw new Error(`MCP client is unavailable for provider ${tool.providerDisplayName}`)
     }
 
-    const raw = await (serverClient as {
-      callTool(
-        request: { name: string; arguments: Record<string, unknown> }
-      ): Promise<unknown>
-    }).callTool({
-      name: tool.toolName,
-      arguments: args
-    })
+    const raw = await invokeToolWithRetry(
+      (serverClient as {
+        callTool(
+          request: { name: string; arguments: Record<string, unknown> }
+        ): Promise<unknown>
+      }).callTool.bind(serverClient),
+      {
+        name: tool.toolName,
+        arguments: args
+      }
+    )
 
     const result = normalizeMcpInvocationResult(tool.capabilityId, raw)
 
