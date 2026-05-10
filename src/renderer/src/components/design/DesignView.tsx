@@ -1,6 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect } from "react"
 import { v4 as uuid } from "uuid"
-import { MousePointer2, PenLine, SendHorizontal, Trash2, Undo2, X } from "lucide-react"
+import { GripVertical, MousePointer2, PenLine, SendHorizontal, Trash2, Undo2, X } from "lucide-react"
 import type { FileAttachment } from "@/types"
 import { getToolLabel } from "@/lib/tool-labels"
 import { inlineHtmlSiblingAssets } from "@/lib/html-srcdoc"
@@ -145,6 +145,11 @@ interface DesignSkillReference {
   path: string
 }
 
+interface FloatingPanelPosition {
+  x: number
+  y: number
+}
+
 interface DesignSourceInfo {
   kind: Exclude<DesignSessionKind, "prompt">
   label: string
@@ -279,6 +284,7 @@ interface TabState {
   retryCleanMsg: string | null
   retrySkill: DesignSkillReference | null
   artifactPath: string | null
+  variationPanelPosition: FloatingPanelPosition | null
   // Multi-turn conversation history for the API (user+assistant pairs, sans HTML)
   // Source of truth for multi-turn is LangGraph checkpoint; this is for display / session backup.
   apiHistory: Array<{ role: "user" | "assistant"; content: string }>
@@ -325,6 +331,7 @@ function makeTabState(): TabState {
     retryCleanMsg: null,
     retrySkill: null,
     artifactPath: null,
+    variationPanelPosition: null,
     apiHistory: [],
     pendingApproval: null,
   }
@@ -347,6 +354,10 @@ function getCurrentDesignHtml(state: TabState | undefined): string {
     if (variationHtml?.trim()) return variationHtml
   }
   return state.html?.trim() ?? ""
+}
+
+function hasExistingDesignArtifact(state: TabState | undefined): boolean {
+  return getCurrentDesignHtml(state).length > 0
 }
 
 function promptLooksLikeFileOperation(prompt: string): boolean {
@@ -610,6 +621,7 @@ type PersistedTabState = {
   rightTab: RightPanelTab
   apiHistory?: Array<{ role: "user" | "assistant"; content: string }>
   artifactPath?: string | null
+  variationPanelPosition?: FloatingPanelPosition | null
 }
 
 interface PersistedSession {
@@ -638,6 +650,7 @@ function serializeTs(ts: TabState): PersistedTabState {
     rightTab:          ts.rightTab,
     apiHistory:        ts.apiHistory,
     artifactPath:      ts.artifactPath,
+    variationPanelPosition: ts.variationPanelPosition,
   }
 }
 
@@ -652,6 +665,7 @@ function deserializeTs(p: PersistedTabState): TabState {
     drawToolMode:    p.drawToolMode ?? "draw",
     apiHistory:      p.apiHistory ?? [],
     artifactPath:    p.artifactPath ?? null,
+    variationPanelPosition: p.variationPanelPosition ?? null,
     generationState: "idle",  // always reset — never restore mid-stream
     activeMode: null,
     inputValue: "",
@@ -2591,7 +2605,8 @@ ${noteLines || "无"}${variantNote}`
     updateTs(activeTabId, { inputValue: "", selectedSkill: null, attachedFiles: null, codeContext: null })
 
     const tabId = activeTabId
-    const existing = tabStates[tabId]?.messages ?? []
+    const stateBeforeSend = tabStates[tabId]
+    const hasExistingDesign = hasExistingDesignArtifact(stateBeforeSend)
 
     // Build context suffixes — included in generation prompt but not displayed in chat
     const designOutputConstraint =
@@ -2713,10 +2728,10 @@ ${noteLines || "无"}${variantNote}`
       ],
     }))
 
-    // First message with an explicit skill → run the skill workflow directly.
-    // Skill-authored flows should not be interrupted by Design's clarifying-question step;
-    // startGeneration still patches the output with EDITMODE so Tweaks remains available.
-    if (existing.length === 0) {
+    // New design requests should use the clarifying-question flow unless a skill
+    // is explicitly selected. Chat history alone is not enough to count as an
+    // iteration because failed or question-only runs may leave messages without HTML.
+    if (!hasExistingDesign) {
       if (selectedSkill) {
         startGeneration(prompt + contextSuffix, tabId, false, selectedModelId, prompt, undefined, skillReference)
       } else {
@@ -3624,6 +3639,8 @@ ${noteLines || "无"}${variantNote}`
                       <TweaksFloatingPanel
                         variations={ts.variations}
                         activeId={ts.activeVariationId}
+                        position={ts.variationPanelPosition}
+                        onPositionChange={(position) => updateTs(activeTabId, { variationPanelPosition: position })}
                         onSelect={(id) => updateTs(activeTabId, { activeVariationId: id, rightTab: "design" })}
                       />
                     )}
@@ -3976,26 +3993,124 @@ function ElementPropsPanel({
 function TweaksFloatingPanel({
   variations,
   activeId,
+  position,
+  onPositionChange,
   onSelect,
 }: {
   variations: VariationItem[]
   activeId: string | null
+  position: FloatingPanelPosition | null
+  onPositionChange: (position: FloatingPanelPosition) => void
   onSelect: (id: string) => void
 }) {
   const [collapsed, setCollapsed] = useState(false)
+  const panelRef = useRef<HTMLDivElement>(null)
+  const dragRef = useRef<{
+    pointerId: number
+    startX: number
+    startY: number
+    originX: number
+    originY: number
+  } | null>(null)
+  const didDragRef = useRef(false)
+
+  const clampPosition = useCallback((x: number, y: number): FloatingPanelPosition => {
+    const panel = panelRef.current
+    const parent = panel?.parentElement
+    if (!panel || !parent) return { x: Math.max(12, x), y: Math.max(12, y) }
+
+    const maxX = Math.max(12, parent.clientWidth - panel.offsetWidth - 12)
+    const maxY = Math.max(12, parent.clientHeight - panel.offsetHeight - 12)
+    return {
+      x: Math.min(Math.max(12, x), maxX),
+      y: Math.min(Math.max(12, y), maxY),
+    }
+  }, [])
+
+  useEffect(() => {
+    if (position) return
+    const panel = panelRef.current
+    const parent = panel?.parentElement
+    if (!panel || !parent) return
+
+    onPositionChange(clampPosition(
+      parent.clientWidth - panel.offsetWidth - 28,
+      parent.clientHeight - panel.offsetHeight - 28,
+    ))
+  }, [clampPosition, collapsed, onPositionChange, position, variations.length])
+
+  useEffect(() => {
+    if (!position) return
+    const clamped = clampPosition(position.x, position.y)
+    if (clamped.x !== position.x || clamped.y !== position.y) {
+      onPositionChange(clamped)
+    }
+  }, [clampPosition, onPositionChange, position])
+
+  const beginDrag = useCallback((event: React.PointerEvent) => {
+    if (event.button !== 0) return
+    const current = position ?? clampPosition(28, 28)
+    dragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: current.x,
+      originY: current.y,
+    }
+    didDragRef.current = false
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }, [clampPosition, position])
+
+  const moveDrag = useCallback((event: React.PointerEvent) => {
+    const drag = dragRef.current
+    if (!drag || drag.pointerId !== event.pointerId) return
+    if (Math.abs(event.clientX - drag.startX) > 3 || Math.abs(event.clientY - drag.startY) > 3) {
+      didDragRef.current = true
+    }
+    onPositionChange(clampPosition(
+      drag.originX + event.clientX - drag.startX,
+      drag.originY + event.clientY - drag.startY,
+    ))
+  }, [clampPosition, onPositionChange])
+
+  const endDrag = useCallback((event: React.PointerEvent) => {
+    const drag = dragRef.current
+    if (!drag || drag.pointerId !== event.pointerId) return
+    dragRef.current = null
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+  }, [])
+
+  const panelPosition = position ?? { x: 28, y: 28 }
 
   return (
-    <div style={{
-      position: "absolute",
-      bottom: 28,
-      right: 28,
-      zIndex: 30,
-      userSelect: "none",
-    }}>
+    <div
+      ref={panelRef}
+      style={{
+        position: "absolute",
+        left: panelPosition.x,
+        top: panelPosition.y,
+        zIndex: 30,
+        userSelect: "none",
+        touchAction: "none",
+      }}
+    >
       {collapsed ? (
         /* Collapsed pill */
         <button
-          onClick={() => setCollapsed(false)}
+          onClick={(event) => {
+            if (didDragRef.current) {
+              event.preventDefault()
+              didDragRef.current = false
+              return
+            }
+            setCollapsed(false)
+          }}
+          onPointerDown={beginDrag}
+          onPointerMove={moveDrag}
+          onPointerUp={endDrag}
+          onPointerCancel={endDrag}
           style={{
             display: "flex", alignItems: "center", gap: 8,
             padding: "8px 16px",
@@ -4006,6 +4121,7 @@ function TweaksFloatingPanel({
             color: "#ffffff", fontSize: 12, fontWeight: 700,
             letterSpacing: "0.06em",
             fontFamily: "inherit",
+            touchAction: "none",
           }}
         >
           <span style={{ fontSize: 10 }}>◈</span>
@@ -4021,12 +4137,29 @@ function TweaksFloatingPanel({
           minWidth: 200,
         }}>
           {/* Header */}
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 18 }}>
-            <span style={{ fontSize: 12, fontWeight: 700, letterSpacing: "0.1em", color: "#1a1a1a", textTransform: "uppercase" }}>
+          <div
+            onPointerDown={beginDrag}
+            onPointerMove={moveDrag}
+            onPointerUp={endDrag}
+            onPointerCancel={endDrag}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 12,
+              margin: "-6px -4px 18px",
+              padding: "6px 4px",
+              cursor: "grab",
+              touchAction: "none",
+            }}
+          >
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, letterSpacing: "0.1em", color: "#1a1a1a", textTransform: "uppercase" }}>
+              <GripVertical size={14} strokeWidth={2} style={{ color: "#a0a0a0", flexShrink: 0 }} />
               Tweaks
             </span>
             <button
-              onClick={() => setCollapsed(true)}
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => { e.stopPropagation(); setCollapsed(true) }}
               style={{ background: "none", border: "none", cursor: "pointer", padding: "0 0 0 8px", fontSize: 16, color: "#8a8a8a", lineHeight: 1, fontFamily: "inherit" }}
             >
               ×
