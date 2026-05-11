@@ -23,6 +23,8 @@ import {
 import { isRetryableApiError } from "../agent/failover"
 import { SkillUsageDetector } from "../agent/skill-evolution/usage-detector"
 
+const DESIGN_MODEL_MAX_RETRY_ATTEMPTS = 11 // 1 initial request + 10 retries
+
 // ─────────────────────────────────────────────────────────
 // System Prompt — Dynamic Questions Generation
 // ─────────────────────────────────────────────────────────
@@ -315,7 +317,7 @@ function getModel(modelId?: string, retryHooks?: ModelRetryHooks): ChatOpenAI | 
     apiKey: config.apiKey,
     configuration: {
       baseURL: config.baseUrl,
-      fetch: retryHooks ? createRetryingFetch(retryHooks, 6) : undefined,
+      fetch: retryHooks ? createRetryingFetch(retryHooks, DESIGN_MODEL_MAX_RETRY_ATTEMPTS) : undefined,
     },
     maxRetries: 0,
     maxTokens: 8192,
@@ -1538,7 +1540,7 @@ export function registerDesignHandlers(): void {
           enableAgentsPrompt: false,   // skip AGENTS.md — design persona is self-contained
           abortSignal: controller.signal,
           retryHooks: buildDesignModelRetryHooks(send),
-          maxRetryAttempts: 6,
+          maxRetryAttempts: DESIGN_MODEL_MAX_RETRY_ATTEMPTS,
         })
 
         let agent = await createDesignAgentRuntime()
@@ -1581,10 +1583,34 @@ export function registerDesignHandlers(): void {
               })
             : new HumanMessage(promptWithArtifact)
 
-        let stream = await agent.stream(
-          { messages: [humanMessage] },
-          streamConfig
-        )
+        const createInitialDesignStream = async (): Promise<AsyncIterable<unknown>> => {
+          let initialStreamRetriesLeft = 2
+          // eslint-disable-next-line no-constant-condition
+          while (true) {
+            try {
+              return await agent.stream({ messages: [humanMessage] }, streamConfig)
+            } catch (initialStreamErr) {
+              if (controller.signal.aborted) throw initialStreamErr
+              if (!isRetryableApiError(initialStreamErr) || initialStreamRetriesLeft <= 0) {
+                throw initialStreamErr
+              }
+              initialStreamRetriesLeft--
+              const errMsg = initialStreamErr instanceof Error ? initialStreamErr.message : String(initialStreamErr)
+              const resetCheckpoint = shouldResetDesignCheckpointForRetry(initialStreamErr)
+              console.warn(
+                `[Design:Agent] Initial stream error "${errMsg}", ${resetCheckpoint ? "restarting with fresh checkpoint" : "retrying initial stream"} (${initialStreamRetriesLeft} retries left)`
+              )
+              await new Promise((resolve) => setTimeout(resolve, 500))
+              if (resetCheckpoint) {
+                await closeCheckpointer(threadId)
+                deleteThreadCheckpoint(threadId)
+              }
+              agent = await createDesignAgentRuntime()
+            }
+          }
+        }
+
+        let stream = await createInitialDesignStream()
         let midStreamRetriesLeft = 2
 
         let streamedText = ""
