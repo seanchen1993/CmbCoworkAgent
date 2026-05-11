@@ -1,7 +1,12 @@
 import { existsSync } from "node:fs"
-import { readdir, readFile } from "node:fs/promises"
-import path from "node:path"
-import { getEnabledSkillsSources } from "../storage"
+import { readFile } from "node:fs/promises"
+import { getDisabledSkills, getEnabledSkillsSources } from "../storage"
+import { discoverSkills } from "../skills/discovery"
+import {
+  getDiscoveredSkillAliases,
+  isDiscoveredSkillDisabled,
+  normalizeSkillId
+} from "../skills/ids"
 import { runHooks } from "./runner"
 import { joinHookText } from "./text"
 import type { HookResult } from "./types"
@@ -36,39 +41,29 @@ function trimSkillContent(content: string): string {
 }
 
 async function resolveSkillGuidance(requiredSkill: string): Promise<ResolvedSkillGuidance | null> {
-  const normalized = requiredSkill.trim().toLowerCase()
+  const normalized = normalizeSkillId(requiredSkill)
   if (!normalized) return null
 
   const sourceDirs = await getEnabledSkillsSources()
+  const disabled = new Set(getDisabledSkills().map((name) => name.trim().toLowerCase()))
   for (const sourceDir of sourceDirs) {
     if (!existsSync(sourceDir)) continue
 
-    let entries
-    try {
-      entries = await readdir(sourceDir, { withFileTypes: true, encoding: "utf8" })
-    } catch {
-      continue
-    }
-
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue
-
-      const skillMdPath = path.join(sourceDir, entry.name, "SKILL.md")
-      if (!existsSync(skillMdPath)) continue
-
+    for (const skill of await discoverSkills(sourceDir)) {
+      if (isDiscoveredSkillDisabled(skill, disabled)) continue
       try {
-        const content = await readFile(skillMdPath, "utf-8")
+        const content = await readFile(skill.skillMdPath, "utf-8")
         const frontmatter = parseYamlFrontmatter(content)
-        const skillName = (frontmatter.name || entry.name).trim()
+        const skillName = (frontmatter.name || skill.name).trim()
         const candidates = new Set([
-          entry.name.trim().toLowerCase(),
-          skillName.toLowerCase()
+          ...getDiscoveredSkillAliases(skill),
+          normalizeSkillId(skillName)
         ])
         if (!candidates.has(normalized)) continue
 
         return {
           name: skillName,
-          path: skillMdPath,
+          path: skill.skillMdPath,
           content: trimSkillContent(content)
         }
       } catch {
@@ -112,22 +107,14 @@ export async function enrichHookResultWithRequiredSkill(
   }
 
   const shouldSurfaceInPrimaryMessage =
-    result.blocked ||
-    result.decision === "block" ||
-    result.continue === false
+    result.blocked || result.decision === "block" || result.continue === false
 
   if (!shouldSurfaceInPrimaryMessage) return next
 
-  const surfacedReason = joinHookText(
-    result.reason ?? result.stopReason ?? result.stdout,
-    guidance,
-    "\n\n"
-  ) ?? guidance
-  const surfacedStopReason = joinHookText(
-    result.stopReason ?? result.reason ?? result.stdout,
-    guidance,
-    "\n\n"
-  ) ?? guidance
+  const surfacedReason =
+    joinHookText(result.reason ?? result.stopReason ?? result.stdout, guidance, "\n\n") ?? guidance
+  const surfacedStopReason =
+    joinHookText(result.stopReason ?? result.reason ?? result.stdout, guidance, "\n\n") ?? guidance
 
   return {
     ...next,

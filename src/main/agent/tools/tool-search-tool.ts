@@ -17,7 +17,7 @@ import {
   parseCodeExecOutputValue,
   type SavedCodeExecTool
 } from "../../code-exec/saved-tool-store"
-import type { McpCapabilityService, McpInvocationResult, McpCapabilityTool } from "../../mcp/capability-types"
+import type { McpCapabilityService, McpCapabilityTool } from "../../mcp/capability-types"
 import { getMcpErrorMessage, getUsefulMcpResultData } from "../../mcp/result-utils"
 import { renderToolHints } from "../../mcp/type-hints"
 import { getStoredToolExample } from "../../mcp/tool-example-store"
@@ -30,28 +30,7 @@ import {
   type ToolSearchDoc,
   type ToolSearchCaller
 } from "./tool-search/search-strategy"
-
-async function invokeWithRetry(
-  service: McpCapabilityService,
-  idOrAlias: string,
-  args: Record<string, unknown>,
-  retries = 1
-): Promise<McpInvocationResult> {
-  try {
-    return await service.invoke(idOrAlias, args)
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    const shouldRetry = retries > 0 && (
-      message.includes("terminated") ||
-      message.includes("disconnected") ||
-      message.includes("ECONN")
-    )
-
-    if (!shouldRetry) throw error
-    await new Promise((resolve) => setTimeout(resolve, 500))
-    return invokeWithRetry(service, idOrAlias, args, retries - 1)
-  }
-}
+import { isHookHaltError } from "../../hooks/halt"
 
 const invokeDeferredToolSchema = z.object({
   tool_id: z
@@ -508,7 +487,7 @@ export function createInvokeDeferredTool(
       }
 
       try {
-        const result = await invokeWithRetry(service, input.tool_id, input.tool_args ?? {})
+        const result = await service.invoke(input.tool_id, input.tool_args ?? {})
 
         if (result.isError) {
           return JSON.stringify({
@@ -522,6 +501,7 @@ export function createInvokeDeferredTool(
           data: getUsefulMcpResultData(result)
         }, null, 2)
       } catch (error) {
+        if (isHookHaltError(error)) throw error
         const message = error instanceof Error ? error.message : String(error)
         return JSON.stringify({
           ok: false,

@@ -1,5 +1,13 @@
 import type { HookConfig } from "./hooks/types"
 
+export type {
+  AgentAutoCommitMessageStrategy,
+  AgentAutoCommitMode,
+  AgentAutoCommitResult,
+  AgentAutoCommitSettings,
+  AgentAutoCommitStatus
+} from "../shared/auto-commit-types"
+
 // Thread types matching langgraph-api
 export type ThreadStatus = "idle" | "busy" | "interrupted" | "error"
 
@@ -332,6 +340,7 @@ export interface PluginMetadata {
 export interface PluginHookMetadata extends HookConfig {
   pluginId: string
   pluginName: string
+  pluginRoot: string
   pluginEnabled: boolean
   hookPath: string
 }
@@ -339,7 +348,11 @@ export interface PluginHookMetadata extends HookConfig {
 export interface SkillHookMetadata extends HookConfig {
   skillName: string
   skillPath: string
+  skillRoot: string
   hookPath: string
+  pluginId?: string
+  pluginName?: string
+  pluginRoot?: string
 }
 
 export interface PluginMcpServerConfig {
@@ -543,10 +556,14 @@ export interface ChatXConfig {
 
 // Skills types
 export interface SkillMetadata {
+  id?: string
   name: string
   description: string
   path: string
   source: "user" | "project"
+  relativePath?: string
+  pluginId?: string
+  pluginName?: string
   /** Skill version from SKILL.md frontmatter, defaults to "v1.0.0" */
   version: string
   license?: string | null

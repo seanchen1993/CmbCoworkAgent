@@ -2661,6 +2661,9 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           } catch { /* best-effort */ }
           const remoteInfo = parseGitRemoteInfo(remoteUrl)
           const pushedCommitShas = pushedCommits.map((commit) => commit.hash)
+          console.log(
+            `[GitPush] scheduling code adoption push marking: commitCount=${pushedCommitShas.length} shas=${pushedCommitShas.join(",")} branch=${branch}`
+          )
           scheduleMarkCodeAdoptionCommitsPushed({
             commitShas: pushedCommitShas,
             repoPath: worktreePath,

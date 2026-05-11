@@ -19,13 +19,14 @@
 
 import { ChatOpenAI } from "@langchain/openai"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
-import { join } from "path"
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "fs"
+import { existsSync, readFileSync, writeFileSync } from "fs"
 import { v4 as uuid } from "uuid"
 import { getCustomSkillsDir, getOptimizerCandidatesPath } from "../../storage"
 import { readRecentTraces, readThreadTraces } from "../trace/collector"
 import type { AgentTrace } from "../trace/types"
 import { stripLLMFormatting } from "../skill-evolution/skill-proposal-logic"
+import { discoverSkillsSync } from "../../skills/discovery"
+import { getDiscoveredSkillAliases, getDiscoveredSkillId, normalizeSkillId } from "../../skills/ids"
 
 // ─────────────────────────────────────────────────────────
 // Types
@@ -42,7 +43,7 @@ export interface SkillOptimizationCandidate {
   candidateId: string
   /** Whether to create a new skill or patch an existing one */
   action: CandidateAction
-  /** Skill file name / directory (snake_case) */
+  /** Skill relative path id, e.g. "my-skill" or "office/pdf" */
   skillId: string
   /** Human-readable skill name */
   name: string
@@ -106,7 +107,7 @@ Your job:
 Output ONLY a JSON array of skill proposals. Each proposal must have:
 {
   "action": "create" | "patch",
-  "skillId": "snake_case_identifier",
+  "skillId": "relative_path_identifier",
   "name": "Human Readable Name",
   "description": "When should this skill be loaded? Describe the user intent that should trigger it. Be specific.",
   "rationale": "Why does this skill help? What problem does it solve?",
@@ -139,7 +140,7 @@ Rules:
 - Maximum 3 proposals per analysis.
 - Skills should be specific and actionable, not generic advice.
 - The description field (trigger) is the MOST important — make it precise.
-- If the analyzed traces already used an existing skill and the improvement belongs in that skill, return action="patch" for that exact skillId.
+- If the analyzed traces already used an existing skill and the improvement belongs in that skill, return action="patch" for that exact skillId. Nested skills use slash-separated relative ids such as "office/pdf".
 - Only return action="create" when a new skill is genuinely needed and no used skill should be updated.`
 
 // ─────────────────────────────────────────────────────────
@@ -190,17 +191,18 @@ ${stepSummaries}`
 function readCustomSkillRecords(filterIds?: string[]): CustomSkillRecord[] {
   const dir = getCustomSkillsDir()
   if (!existsSync(dir)) return []
-  const filter = filterIds ? new Set(filterIds) : null
+  const filter = filterIds ? new Set(filterIds.map(normalizeSkillId).filter(Boolean)) : null
   try {
-    return readdirSync(dir, { withFileTypes: true })
-      .filter((d) => d.isDirectory())
-      .filter((d) => !filter || filter.has(d.name))
-      .map((d) => {
-        const mdPath = join(dir, d.name, "SKILL.md")
-        if (!existsSync(mdPath)) return null
+    return discoverSkillsSync(dir)
+      .filter(
+        (skill) =>
+          !filter || getDiscoveredSkillAliases(skill).some((alias) => filter.has(alias))
+      )
+      .map((skill) => {
+        const skillId = getDiscoveredSkillId(skill)
         return {
-          skillId: d.name,
-          content: readFileSync(mdPath, "utf-8")
+          skillId,
+          content: readFileSync(skill.skillMdPath, "utf-8")
         } satisfies CustomSkillRecord
       })
       .filter((skill): skill is CustomSkillRecord => !!skill)

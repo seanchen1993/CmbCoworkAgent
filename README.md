@@ -18,6 +18,7 @@
 | 技能系统 | 内置与自定义技能加载、启停、上传（`.md/.zip`）、删除；在线技能提案与确认 |
 | MCP 扩展 | MCP 连接器管理、连通性测试、懒加载工具检索 |
 | 插件系统 | 插件安装（ZIP/目录）、启停、卸载；插件内 `skills` 与 `.mcp.json` 自动注册 |
+| Hook 系统 | 全局、工作区、插件、技能 Hook；支持 Claude Code hooks settings、`SKILL.md` frontmatter、`once`、`onBlock` 与强制修订/停止 |
 | 自优化 | Trace 收集与回放、候选技能生成、审批后写回技能目录 |
 | 定时任务 | 按频率自动触发 Agent 执行（once/manual/hourly/daily/weekdays/weekly/interval） |
 | Heartbeat | 固定线程心跳巡检、`HEARTBEAT.md` 驱动、静默 ACK 过滤与通知 |

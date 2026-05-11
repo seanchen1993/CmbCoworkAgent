@@ -153,14 +153,24 @@ export function buildCodeAdoptionPushedUpdateBody(args: MarkCodeAdoptionPushedAr
 
 export function scheduleMarkCodeAdoptionCommitsPushed(args: MarkCodeAdoptionPushedArgs): void {
   const commitShas = normalizeCommitShas(args.commitShas)
-  if (commitShas.length === 0) return
+  if (commitShas.length === 0) {
+    console.log("[CodeAdoptionPushUpdater] no commit SHAs to mark as pushed")
+    return
+  }
+
+  console.log(
+    `[CodeAdoptionPushUpdater] scheduling push marking: commits=${commitShas.length} shas=${commitShas.join(",")} retryDelays=[${RETRY_DELAYS_MS.join(",")}]`
+  )
 
   for (const delayMs of RETRY_DELAYS_MS) {
     const timeout = setTimeout(() => {
+      console.log(
+        `[CodeAdoptionPushUpdater] attempting push marking (delay=${delayMs}ms): commits=${commitShas.length}`
+      )
       void markCodeAdoptionCommitsPushed({ ...args, commitShas })
         .then((result) => {
           console.log(
-            `[CodeAdoptionPushUpdater] marked pushed commit telemetry docs: ` +
+            `[CodeAdoptionPushUpdater] push marking OK: ` +
             `updated=${result.updated ?? 0}, total=${result.total ?? 0}, commits=${commitShas.length}`
           )
           if (Array.isArray(result.failures) && result.failures.length > 0) {
@@ -168,7 +178,7 @@ export function scheduleMarkCodeAdoptionCommitsPushed(args: MarkCodeAdoptionPush
           }
         })
         .catch((e) => {
-          console.warn("[CodeAdoptionPushUpdater] failed to mark pushed commit telemetry docs:", e)
+          console.warn("[CodeAdoptionPushUpdater] push marking failed:", e)
         })
     }, delayMs)
     timeout.unref?.()

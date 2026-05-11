@@ -75,13 +75,16 @@ Based on the user interview, fill in these components:
 ```
 skill-name/
 ├── SKILL.md (required)
-│   ├── YAML frontmatter (name, description required)
+│   ├── YAML frontmatter (name, description required; optional hooks supported in CMBDevClaw)
 │   └── Markdown instructions
 └── Bundled Resources (optional)
     ├── scripts/    - Executable code for deterministic/repetitive tasks
     ├── references/ - Docs loaded into context as needed
+    ├── hooks/      - Optional CMBDevClaw hook configs/scripts (`hooks/hooks.json`)
     └── assets/     - Files used in output (templates, icons, fonts)
 ```
+
+In CMBDevClaw, skill hooks can also live directly in `SKILL.md` YAML frontmatter under `hooks` using Claude Code hooks settings syntax. The frontmatter parser also supports CMBDevClaw extensions: `once`, `timeoutMs`, `forcedOutcome`, `forcedReason`, `onBlock`, and `modelId`. Keep hook commands relative to the skill directory when bundling scripts with the skill.
 
 #### Progressive Disclosure
 

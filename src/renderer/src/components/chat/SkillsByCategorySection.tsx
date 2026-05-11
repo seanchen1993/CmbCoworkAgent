@@ -202,32 +202,34 @@ export function SkillsByCategorySection({
 
     const commonGroups = groups.get(COMMON_CATEGORY) ?? new Map<string, SkillsByCategoryItem[]>()
     const commonPrimaryItems = commonGroups.get("") ?? []
-    const pinnedNames = new Set(COMMON_PINNED_SKILLS.map((skill) => skill.name))
-    const pinnedItems = COMMON_PINNED_SKILLS.map(({ name, label, description }) => {
-      const skill = allSkillMap.get(name) ?? {
-        name,
-        description,
-        path: `skills/${name}`,
-        source: "project" as const
-      }
-
-      return {
-        skill,
-        label,
-        marketItem: {
+    const pinnedNames = new Set<string>(COMMON_PINNED_SKILLS.map((skill) => skill.name))
+    const pinnedItems: SkillsByCategoryItem[] = COMMON_PINNED_SKILLS.map(
+      ({ name, label, description }) => {
+        const skill = allSkillMap.get(name) ?? {
           name,
-          chinese_name: label,
           description,
-          filename: skill.path,
-          category: COMMON_CATEGORY,
-          created_at: ""
-        },
-        isInstalled: true,
-        isFeatured: false,
-        isCertified: false,
-        calls: 0
+          path: `skills/${name}`,
+          source: "project" as const
+        }
+
+        return {
+          skill,
+          label,
+          marketItem: {
+            name,
+            chinese_name: label,
+            description,
+            filename: skill.path,
+            category: COMMON_CATEGORY,
+            created_at: ""
+          },
+          isInstalled: true,
+          isFeatured: false,
+          isCertified: false,
+          calls: 0
+        }
       }
-    })
+    )
     commonGroups.set(
       "",
       pinnedItems.concat(

@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { Shield, ShieldOff, ShieldCheck, ShieldPlus, Zap, Info, Loader2 } from "lucide-react"
+import {
+  Shield,
+  ShieldOff,
+  ShieldCheck,
+  ShieldPlus,
+  Zap,
+  Info,
+  Loader2
+} from "lucide-react"
 import { cn } from "@/lib/utils"
 
 type SandboxMode = "none" | "unelevated" | "readonly" | "elevated"

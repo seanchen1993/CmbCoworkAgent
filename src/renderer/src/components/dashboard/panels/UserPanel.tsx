@@ -1,16 +1,21 @@
 import { useState, type ReactNode } from "react"
-import {
-  PieChart, Pie, Cell, Tooltip, ResponsiveContainer
-} from "recharts"
+import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from "recharts"
 import { ChevronLeft } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import type { UserStatsData } from "../use-dashboard"
 
 const COLORS = [
-  "#3b82f6", "#8b5cf6", "#ec4899", "#f59e0b", "#10b981",
-  "#06b6d4", "#f97316", "#6366f1", "#14b8a6", "#e11d48"
+  "#3b82f6",
+  "#8b5cf6",
+  "#ec4899",
+  "#f59e0b",
+  "#10b981",
+  "#06b6d4",
+  "#f97316",
+  "#6366f1",
+  "#14b8a6",
+  "#e11d48"
 ]
-
 
 function PiePanel({
   title,
@@ -34,7 +39,9 @@ function PiePanel({
       <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
           <h3 className="text-xs font-medium text-muted-foreground">{title}</h3>
-          {helperText ? <p className="mt-1 text-[11px] text-muted-foreground/80">{helperText}</p> : null}
+          {helperText ? (
+            <p className="mt-1 text-[11px] text-muted-foreground/80">{helperText}</p>
+          ) : null}
         </div>
         {action ? <div className="shrink-0">{action}</div> : null}
       </div>
@@ -53,7 +60,11 @@ function PiePanel({
               }
               labelLine={false}
               fontSize={9}
-              onClick={onSliceClick ? (entry) => onSliceClick(entry as unknown as Record<string, unknown>) : undefined}
+              onClick={
+                onSliceClick
+                  ? (entry) => onSliceClick(entry as unknown as Record<string, unknown>)
+                  : undefined
+              }
               style={onSliceClick ? { cursor: "pointer" } : undefined}
             >
               {data.map((_, i) => (
@@ -118,7 +129,10 @@ export function UserPanel({
             </thead>
             <tbody>
               {data.topUsers.map((u, i) => (
-                <tr key={u.sapId} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
+                <tr
+                  key={u.sapId}
+                  className="border-b border-border/50 hover:bg-muted/30 transition-colors"
+                >
                   <td className="py-1.5 px-2 text-muted-foreground">{i + 1}</td>
                   <td className="py-1.5 px-2 text-foreground">
                     {u.userName}
@@ -147,7 +161,7 @@ export function UserPanel({
         dataKey="count"
         nameKey="org"
         helperText={`当前为 ${orgMetric.toUpperCase()} 视角，按${orgUnit}统计。${!isDrilledDown ? "点击可查看下级组织使用情况" : ""}`}
-        action={(
+        action={
           <div className="flex items-center gap-2">
             <div className="flex h-7 items-center rounded-full bg-muted px-1 text-[11px] font-medium text-muted-foreground">
               {(["pv", "uv"] as const).map((metric) => (
@@ -166,17 +180,26 @@ export function UserPanel({
               ))}
             </div>
             {isDrilledDown ? (
-              <Button variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs" onClick={onResetOrgDrilldown}>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 gap-1 px-2 text-xs"
+                onClick={onResetOrgDrilldown}
+              >
                 <ChevronLeft className="size-3.5" />
                 返回上级
               </Button>
             ) : null}
           </div>
-        )}
-        onSliceClick={!isDrilledDown ? (entry) => {
-          const key = typeof entry.key === "string" ? entry.key : ""
-          onDrillDownOrg(key)
-        } : undefined}
+        }
+        onSliceClick={
+          !isDrilledDown
+            ? (entry) => {
+                const key = typeof entry.key === "string" ? entry.key : ""
+                onDrillDownOrg(key)
+              }
+            : undefined
+        }
       />
 
       {/* Version distribution */}

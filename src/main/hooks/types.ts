@@ -1,6 +1,8 @@
 export type HookEvent =
   | "PreToolUse"
   | "PostToolUse"
+  | "PreSkillUse"
+  | "PostSkillUse"
   | "PostToolUseFailure"
   | "Stop"
   | "StopFailure"
@@ -22,6 +24,8 @@ export type HookEvent =
 export const SUPPORTED_HOOK_EVENTS = [
   "PreToolUse",
   "PostToolUse",
+  "PreSkillUse",
+  "PostSkillUse",
   "Stop",
   "Notification",
   "UserPromptSubmit",
@@ -44,6 +48,8 @@ export function isSupportedHookEvent(value: unknown): value is SupportedHookEven
  */
 export type HookType = "command" | "prompt"
 
+export type HookSourceType = "global" | "workspace" | "plugin" | "skill"
+
 /** What the LLM should do when a prompt-hook times out or returns invalid JSON */
 export type PromptHookFallback = "allow" | "block"
 
@@ -58,10 +64,22 @@ export interface HookOnBlockConfig {
   requiredSkill?: string
 }
 
+/**
+ * Static override for the hook's runtime decision. Undefined = follow whatever
+ * the hook script outputs (default behaviour). Otherwise the runner rewrites
+ * the hook result before any aggregator sees it:
+ *
+ * - "always-revise" → force `decision="block"` (re-feed reason to agent for
+ *   revision; for Pre* hooks this denies the operation)
+ * - "always-halt"   → force `continue=false` (Stop/PostSkillUse halt the turn;
+ *   Pre hooks deny the operation; Post tool / fire-and-forget events ignore halt)
+ */
+export type HookForcedOutcome = "always-revise" | "always-halt"
+
 export interface HookConfig {
   id: string
   event: HookEvent
-  matcher?: string // Tool name match, e.g. "execute", "write_file", "*"
+  matcher?: string // Tool name or skill name match, e.g. "execute", "imagegen", "*"
   type?: HookType // Default: "command"
   // ── command hook ──────────────────────────────────────────────────────────
   command?: string // Shell command to run (required when type=="command")
@@ -71,10 +89,34 @@ export interface HookConfig {
   fallback?: PromptHookFallback // Behaviour on timeout / parse failure; default "allow"
   // ── shared ────────────────────────────────────────────────────────────────
   onBlock?: HookOnBlockConfig // static block-time remediation metadata
+  /** Static override of the hook's outcome. Undefined = follow stdout. */
+  forcedOutcome?: HookForcedOutcome
+  /** Reason / stopReason used when forcedOutcome is set. */
+  forcedReason?: string
+  /** Claude Code compatible one-shot hook: consumed in memory after a successful run. */
+  once?: boolean
+  /**
+   * If true, this skill / plugin hook stays active for the rest of the thread
+   * session after its owning skill / plugin is triggered once. Default false:
+   * scoped hooks only run while the owning skill / plugin is active this turn.
+   *
+   * Persistence is per hook identity, not per whole skill/plugin scope, so a
+   * persistent hook does not make sibling non-persistent hooks fire later.
+   *
+   * No-op for hooks that aren't skill / plugin scoped (workspace / global hooks
+   * are always in scope by definition).
+   */
+  persistAfterInterrupt?: boolean
   timeout?: number // Timeout in ms, default 10000
   enabled: boolean
   createdAt: string
   updatedAt: string
+  /** Runtime-only source metadata used to choose command cwd. Not persisted for global hooks. */
+  hookSourceType?: HookSourceType
+  hookSourceRoot?: string
+  hookSourcePath?: string
+  /** Plugin root when this hook or skill comes from a plugin. */
+  pluginRoot?: string
 }
 
 export interface HookResult {
@@ -83,7 +125,7 @@ export interface HookResult {
   stderr: string
   blocked: boolean // exit code 2 = intentional block (PreToolUse / UserPromptSubmit)
   /** Structured fields parsed from JSON stdout (exit 0 only) */
-  additionalContext?: string // injected into agent context (invisible to user)
+  additionalContext?: string // event-specific context; some hook types keep this as log-only
   systemMessage?: string // visible warning to user
   /** Optional skill to load as remediation guidance when the hook fires. */
   requiredSkill?: string
@@ -102,9 +144,18 @@ export interface HookResult {
 /** Environment variables passed to the hook command */
 export interface HookEnv {
   HOOK_EVENT: HookEvent
+  HOOK_SOURCE_TYPE?: HookSourceType
+  HOOK_SOURCE_ROOT?: string
+  HOOK_SOURCE_PATH?: string
   TOOL_NAME?: string
   TOOL_ARGS?: string // JSON, best-effort only for compact payloads; stdin remains canonical
   TOOL_RESULT?: string // PostToolUse only, best-effort only for compact payloads
+  PLUGIN_ID?: string
+  PLUGIN_NAME?: string
+  PLUGIN_ROOT?: string
+  SKILL_NAME?: string
+  SKILL_PATH?: string
+  SKILL_ROOT?: string
   WORKSPACE_PATH?: string
   CLAUDE_PROJECT_DIR?: string // Claude Code compatibility: alias for WORKSPACE_PATH
   USER_PROMPT?: string // UserPromptSubmit event
@@ -120,6 +171,10 @@ export interface HookUpsert {
   modelId?: string
   fallback?: PromptHookFallback
   onBlock?: HookOnBlockConfig
+  forcedOutcome?: HookForcedOutcome
+  forcedReason?: string
+  once?: boolean
+  persistAfterInterrupt?: boolean
   timeout?: number
   enabled?: boolean
 }

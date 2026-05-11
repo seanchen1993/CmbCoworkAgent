@@ -75,8 +75,14 @@ import type {
   LspCallHierarchyItem,
   LspCallHierarchyIncomingCall,
   LspCallHierarchyOutgoingCall,
-  LspStatus
+  LspStatus,
 } from "../../main/types"
+import type {
+  AgentAutoCommitMessageStrategy,
+  AgentAutoCommitMode,
+  AgentAutoCommitResult,
+  AgentAutoCommitSettings
+} from "../../shared/auto-commit-types"
 import type {
   ManagedSavedCodeExecTool,
   SavedCodeExecPreviewResult,
@@ -105,7 +111,11 @@ export type {
   LspCallHierarchyItem,
   LspCallHierarchyIncomingCall,
   LspCallHierarchyOutgoingCall,
-  LspStatus
+  LspStatus,
+  AgentAutoCommitMode,
+  AgentAutoCommitMessageStrategy,
+  AgentAutoCommitSettings,
+  AgentAutoCommitResult
 }
 
 export type {
@@ -196,10 +206,14 @@ export interface GrepMatch {
 }
 
 export interface SkillMetadata {
+  id?: string
   name: string
   description: string
   path: string
   source: "user" | "project"
+  relativePath?: string
+  pluginId?: string
+  pluginName?: string
   license?: string | null
   compatibility?: string | null
   metadata?: Record<string, string>
