@@ -240,7 +240,7 @@ function ThreadListItem({
               <Button
                 variant="ghost"
                 size="icon-sm"
-                className="size-6"
+                className="cursor-pointer size-6 hover:bg-accent/20"
                 onClick={(e) => {
                   e.stopPropagation()
                   onStartEditing()
@@ -251,7 +251,7 @@ function ThreadListItem({
               <Button
                 variant="ghost"
                 size="icon-sm"
-                className={cn("size-6", isRunning && "cursor-not-allowed !opacity-30")}
+                className={cn("cursor-pointer size-6 hover:bg-accent/20", isRunning && "cursor-not-allowed !opacity-30")}
                 disabled={isRunning}
                 onClick={(e) => {
                   e.stopPropagation()
@@ -672,7 +672,7 @@ export function ThreadSidebar(): React.JSX.Element {
         <Button
           variant="ghost"
           size="icon-sm"
-          className="size-6 shrink-0"
+          className="cursor-pointer size-6 shrink-0"
           title={allProjectsCollapsed ? "全部展开工作区" : "全部收起工作区"}
           onClick={toggleAllProjects}
           disabled={threadProjects.length === 0}
@@ -686,7 +686,7 @@ export function ThreadSidebar(): React.JSX.Element {
         <Button
           variant="ghost"
           size="icon-sm"
-          className="size-6 shrink-0"
+          className="  cursor-pointer size-6 shrink-0 "
           title="新增工作区"
           onClick={handleAddProject}
           disabled={selectingProjectFolder}
@@ -755,7 +755,7 @@ export function ThreadSidebar(): React.JSX.Element {
                       <Button
                         variant="ghost"
                         size="icon-sm"
-                        className="size-6 shrink-0 opacity-70 hover:opacity-100"
+                        className="cursor-pointer size-6 shrink-0 opacity-70 hover:bg-accent/20"
                         title="新增任务"
                         onClick={() => handleNewProjectThread(project)}
                       >
