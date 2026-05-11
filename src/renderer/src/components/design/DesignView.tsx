@@ -1743,6 +1743,7 @@ export function DesignView(): React.JSX.Element {
     image?: { base64: string; mimeType: string },
     skill?: DesignSkillReference | null,
     sourceArtifactPath?: string | null,
+    freshAgentThread = false,
   ) => {
     const sessionId = uuid()
     updateTs(tabId, (prev) => ({
@@ -1772,7 +1773,10 @@ export function DesignView(): React.JSX.Element {
     // Route through the full Agent Runtime: Skills, MCP tools, Hooks, Approvals,
     // context summarisation. Each design session gets an isolated thread.
     const designSessionId = currentSessionIdRef.current
-    const agentThreadId = makeDesignAgentThreadId(designSessionId, tabId)
+    const agentRuntimeSessionId = freshAgentThread
+      ? `retry_${sessionId}_${designSessionId ?? "session"}`
+      : designSessionId
+    const agentThreadId = makeDesignAgentThreadId(agentRuntimeSessionId, tabId)
     const cleanupApprovalRequest = window.api.sandbox.onApprovalRequest(agentThreadId, (request) => {
       updateTs(tabId, { pendingApproval: asDesignApprovalRequest(request) })
     })
@@ -1935,7 +1939,7 @@ export function DesignView(): React.JSX.Element {
       workspacePath ?? undefined,
       stableArtifactId,
       sourceArtifactPath ?? undefined,
-      designSessionId ?? undefined
+      agentRuntimeSessionId ?? undefined
     )
     tabSessionsRef.current.set(tabId, { cleanup, sessionId })
   }, [tabStates, updateTs, workspacePath])
@@ -2124,6 +2128,7 @@ export function DesignView(): React.JSX.Element {
       undefined,
       state.retrySkill ?? undefined,
       state.artifactPath,
+      true,
     )
   }, [activeTabId, tabStates, updateTs, startGeneration])
 

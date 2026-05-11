@@ -13,8 +13,9 @@ import { ipcMain, BrowserWindow, app, net } from "electron"
 import Store from "electron-store"
 import { ChatOpenAI } from "@langchain/openai"
 import { HumanMessage, SystemMessage, AIMessage } from "@langchain/core/messages"
-import { getCustomModelConfigs, getOpenworkDir } from "../storage"
+import { deleteThreadCheckpoint, getCustomModelConfigs, getOpenworkDir } from "../storage"
 import {
+  closeCheckpointer,
   createAgentRuntime,
   createRetryingFetch,
   type ModelRetryHooks
@@ -857,6 +858,31 @@ function getReadFilePath(args: Record<string, unknown> | undefined): string {
   )
 }
 
+const DESIGN_CHECKPOINT_RESET_STATUS_CODES = new Set([432, 433, 485])
+const HTTP_STATUS_IN_MESSAGE_RE = /\b(4\d{2}|5\d{2})\b/
+
+function getModelHttpStatusCode(error: unknown): number | null {
+  if (error && typeof error === "object") {
+    const status = (error as { status?: unknown }).status
+    if (typeof status === "number") return status
+
+    const response = (error as { response?: unknown }).response
+    if (response && typeof response === "object") {
+      const responseStatus = (response as { status?: unknown }).status
+      if (typeof responseStatus === "number") return responseStatus
+    }
+  }
+
+  const message = error instanceof Error ? error.message : String(error ?? "")
+  const match = HTTP_STATUS_IN_MESSAGE_RE.exec(message)
+  return match ? Number.parseInt(match[1], 10) : null
+}
+
+function shouldResetDesignCheckpointForRetry(error: unknown): boolean {
+  const status = getModelHttpStatusCode(error)
+  return status !== null && DESIGN_CHECKPOINT_RESET_STATUS_CODES.has(status)
+}
+
 function isToolMessageError(kwargs: Record<string, unknown>): boolean {
   return (
     kwargs.status === "error" ||
@@ -1654,6 +1680,8 @@ export function registerDesignHandlers(): void {
         // proxy idle timeout, or any error matched by isRetryableApiError) do not
         // surface as a hard error. On retry we rebuild the runtime, then resume
         // from the LangGraph checkpoint without re-sending the human message.
+        // Provider "temporarily unavailable" statuses can leave a bad partial
+        // checkpoint, so those restart the same request on a clean checkpoint.
         // eslint-disable-next-line no-constant-condition
         while (true) {
         try {
@@ -1806,13 +1834,23 @@ export function registerDesignHandlers(): void {
           }
           midStreamRetriesLeft--
           const errMsg = midStreamErr instanceof Error ? midStreamErr.message : String(midStreamErr)
+          const resetCheckpoint = shouldResetDesignCheckpointForRetry(midStreamErr)
           console.warn(
-            `[Design:Agent] Mid-stream error "${errMsg}", resuming from checkpoint (${midStreamRetriesLeft} retries left)`
+            `[Design:Agent] Mid-stream error "${errMsg}", ${resetCheckpoint ? "restarting with fresh checkpoint" : "resuming from checkpoint"} (${midStreamRetriesLeft} retries left)`
           )
           await new Promise((resolve) => setTimeout(resolve, 500))
-          // null input = resume from LangGraph checkpoint, do not re-send the human message
-          agent = await createDesignAgentRuntime()
-          stream = await agent.stream(null, streamConfig)
+          if (resetCheckpoint) {
+            await closeCheckpointer(threadId)
+            deleteThreadCheckpoint(threadId)
+            agent = await createDesignAgentRuntime()
+            streamedText = ""
+            finalMessageText = ""
+            stream = await agent.stream({ messages: [humanMessage] }, streamConfig)
+          } else {
+            // null input = resume from LangGraph checkpoint, do not re-send the human message
+            agent = await createDesignAgentRuntime()
+            stream = await agent.stream(null, streamConfig)
+          }
         }
         }  // end while
 
