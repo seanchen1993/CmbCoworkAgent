@@ -251,7 +251,7 @@ export function GitPanelView({
         return
       }
 
-      const finalMessage = `${cardNumber.trim()} #comment fix:${commitMessage.trim()} #CMBDevClaw`
+      const finalMessage = `${cardNumber.trim()} #comment ${commitType}:${commitMessage.trim()} #CMBDevClaw`
 
       setRunning(action)
       setError(null)
@@ -281,7 +281,7 @@ export function GitPanelView({
         setRunning(null)
       }
     },
-    [threadId, cardNumber, commitMessage, diffState?.hasPendingDiff, refresh, showToast]
+    [threadId, cardNumber, commitType, commitMessage, diffState?.hasPendingDiff, refresh, showToast]
   )
 
   const handleRevertFile = useCallback(

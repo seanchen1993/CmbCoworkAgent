@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { Plug, Power, Trash2, Database } from "lucide-react"
+import { Plug, Power, Trash2, Database, Store } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
@@ -19,6 +19,8 @@ export function MCPConnectorDetail(props: {
   onToggleLazyLoad: (id: string, lazyLoad: boolean) => void
   onDelete: (connector: McpConnectorConfig) => void
   onEdit: (connector: McpConnectorConfig) => void
+  onPublish?: (connector: McpConnectorConfig) => void
+  publishLabel?: string
   hideActions?: boolean
   testByUrlOnly?: boolean
 }): React.JSX.Element {
@@ -28,6 +30,8 @@ export function MCPConnectorDetail(props: {
     onToggleLazyLoad,
     onDelete,
     onEdit,
+    onPublish,
+    publishLabel = "发布到市场",
     hideActions = false,
     testByUrlOnly = false
   } = props
@@ -143,10 +147,23 @@ export function MCPConnectorDetail(props: {
       <div className="p-4 border-b border-border flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           <h2 className="text-base font-semibold truncate">{connector.name}</h2>
-          <p className="text-xs text-muted-foreground mt-0.5 truncate">{getConnectorSummary(connector)}</p>
+          <p className="text-xs text-muted-foreground mt-0.5 truncate">
+            {getConnectorSummary(connector)}
+          </p>
         </div>
         {!hideActions && (
           <div className="flex items-center gap-1.5 shrink-0">
+            {onPublish && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 gap-1.5 text-xs"
+                onClick={() => onPublish(connector)}
+              >
+                <Store className="size-3" />
+                {publishLabel}
+              </Button>
+            )}
             <Button
               variant="ghost"
               size="sm"
