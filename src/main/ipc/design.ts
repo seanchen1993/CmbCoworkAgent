@@ -900,17 +900,25 @@ function normalizeDesignSkillReference(raw: unknown): { name: string; path: stri
   return { name, path: skillPath }
 }
 
-function readDesignSkillContent(skillPath: string): { content?: string; error?: string } {
+function validateDesignSkillFile(skillPath: string): { resolvedPath?: string; sizeBytes?: number; error?: string } {
   try {
     const resolvedPath = path.resolve(skillPath)
     if (!fs.existsSync(resolvedPath)) return { error: `Skill file not found: ${skillPath}` }
     const stat = fs.statSync(resolvedPath)
     if (!stat.isFile()) return { error: `Skill path is not a file: ${skillPath}` }
     if (path.basename(resolvedPath) !== "SKILL.md") return { error: `Skill path must point to SKILL.md: ${skillPath}` }
-    return { content: fs.readFileSync(resolvedPath, "utf-8") }
+    return { resolvedPath, sizeBytes: stat.size }
   } catch (err) {
     return { error: err instanceof Error ? err.message : String(err) }
   }
+}
+
+function buildSelectedDesignSkillContext(skillName: string, skillPath: string): string {
+  return `\n\n---\n[Selected Design Skill: ${skillName}]\n` +
+    `The user explicitly selected this skill for the current design request. ` +
+    `Do not embed the full SKILL.md in this prompt; use the runtime Skills section and read the full instructions only if needed.\n` +
+    `Selected skill path: ${skillPath}\n` +
+    `If exact workflow details are needed, read this SKILL.md with read_file, then follow it while still obeying the Design artifact rules above.`
 }
 
 function buildDesignModelRetryHooks(send: (data: object) => void): ModelRetryHooks {
@@ -1459,13 +1467,14 @@ export function registerDesignHandlers(): void {
             } satisfies DesignExecutionEvent,
           })
 
-          const result = readDesignSkillContent(selectedSkill.path)
-          if (result.content) {
-            skillContext =
-              `\n\n---\n[Selected Design Skill: ${selectedSkill.name}]\n` +
-              `The user explicitly selected this skill for the current design request. ` +
-              `Follow the skill instructions below as authoritative guidance for this turn, while still obeying the Design system prompt's requirement to output complete standalone HTML.\n\n` +
-              `${result.content}`
+          const result = validateDesignSkillFile(selectedSkill.path)
+          if (result.resolvedPath) {
+            skillContext = buildSelectedDesignSkillContext(selectedSkill.name, result.resolvedPath)
+            console.log("[Design:Skill] Selected skill referenced without inline content:", {
+              name: selectedSkill.name,
+              path: result.resolvedPath,
+              sizeBytes: result.sizeBytes ?? 0
+            })
             send({
               type: "execution",
               event: {
