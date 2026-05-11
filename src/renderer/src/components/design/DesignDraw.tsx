@@ -224,7 +224,7 @@ export function DrawActionBar({
         boxShadow: "0 10px 32px rgba(0,0,0,0.18)",
       }}
     >
-      <button onClick={onClose} title="退出 Draw" style={drawIconBtnStyle(false, "light")}>
+      <button onClick={onClose} title="退出绘制" style={drawIconBtnStyle(false, "light")}>
         <X size={15} />
       </button>
       <button onClick={onUndo} disabled={disabled} title="撤销" style={drawIconBtnStyle(disabled, "light")}>
@@ -234,21 +234,21 @@ export function DrawActionBar({
         <DrawModeButton
           active={mode === "draw"}
           icon={<PenLine size={15} />}
-          label="Draw"
+          label="绘制"
           onClick={() => onModeChange("draw")}
         />
         <DrawModeButton
           active={mode === "note"}
           icon={<MousePointer2 size={15} />}
-          label="Click"
+          label="点击"
           onClick={() => onModeChange("note")}
         />
       </div>
       <span style={{ padding: "0 8px", color: "#6a6a6a", fontSize: 13, fontWeight: 500, whiteSpace: "nowrap" }}>
-        {mode === "note" ? "点击任意位置添加 note" : "拖拽画出修改区域"}
+        {mode === "note" ? "点击任意位置添加备注" : "拖拽画出修改区域"}
       </span>
       <span style={{ padding: "0 2px 0 8px", color: "#4a4a4a", fontSize: 13, fontWeight: 700, whiteSpace: "nowrap" }}>
-        Queue {count}
+        队列 {count}
       </span>
       <button onClick={onClear} disabled={disabled} title="清空队列" style={drawIconBtnStyle(disabled, "light")}>
         <Trash2 size={15} />
@@ -260,12 +260,15 @@ export function DrawActionBar({
         style={{
           ...drawIconBtnStyle(disabled, "accent"),
           width: "auto",
-          padding: "0 14px",
+          minWidth: 74,
+          padding: "0 16px",
           gap: 6,
+          whiteSpace: "nowrap",
+          flexShrink: 0,
         }}
       >
         <SendHorizontal size={14} />
-        Send
+        发送
       </button>
     </div>
   )
@@ -399,7 +402,7 @@ function DrawNoteDraft({
             onCancel()
           }
         }}
-        placeholder="添加 note..."
+        placeholder="添加备注..."
         rows={3}
         style={{ width: "100%", border: "none", outline: "none", resize: "none", background: "transparent", color: "#1a1a1a", fontSize: 14, lineHeight: 1.4, fontFamily: "inherit", boxSizing: "border-box" }}
       />
