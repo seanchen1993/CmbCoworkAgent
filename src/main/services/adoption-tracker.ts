@@ -854,7 +854,12 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
     // Dedup concurrent measurements for the same file. Even without the
     // timer/commit race, a single commit batch can pass the same file twice
     // (rare but cheap to guard against).
-    if (inFlightFileMeasurements.has(absPath)) return
+    if (inFlightFileMeasurements.has(absPath)) {
+      console.log(
+        `[AdoptionTracker] doMeasureFile dedup skip: absPath=${absPath} (already in-flight)`
+      )
+      return
+    }
     inFlightFileMeasurements.add(absPath)
 
     let currentHashCounts: Map<number, number> | null = null
