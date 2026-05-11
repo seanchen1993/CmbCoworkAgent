@@ -824,14 +824,7 @@ export function ChatContainer({
     }
   }, [])
 
-  const {
-    threads,
-    models,
-    generateTitleForFirstMessage,
-    setShowCustomizeView,
-    setMarketInitialSkillCategory,
-    setMarketInitialSkillDetailName
-  } = useAppStore()
+  const { threads, models, generateTitleForFirstMessage, setShowCustomizeView } = useAppStore()
 
   const allSkillsRef = useRef<MarketItem[]>([])
   const [marketSkillsData, setMarketSkillsData] = useState<MarketItem[]>([])
@@ -2536,18 +2529,28 @@ export function ChatContainer({
 
   const handleOpenMarketBySecondaryCategory = useCallback(
     (secondaryCategory: string): void => {
-      setMarketInitialSkillCategory(secondaryCategory)
+      useAppStore.setState({
+        marketInitialSkillCategory: secondaryCategory,
+        marketInitialSkillFilters: ["featured", "certified"],
+        marketInitialSkillSearchQuery: null,
+        marketInitialSkillDetailName: null
+      })
       setShowCustomizeView(true, "market")
     },
-    [setMarketInitialSkillCategory, setShowCustomizeView]
+    [setShowCustomizeView]
   )
 
   const handleOpenMarketBySkill = useCallback(
     (skillName: string): void => {
-      setMarketInitialSkillDetailName(skillName)
+      useAppStore.setState({
+        marketInitialSkillCategory: null,
+        marketInitialSkillFilters: null,
+        marketInitialSkillSearchQuery: null,
+        marketInitialSkillDetailName: skillName
+      })
       setShowCustomizeView(true, "market")
     },
-    [setMarketInitialSkillDetailName, setShowCustomizeView]
+    [setShowCustomizeView]
   )
 
   const programmingSkillCards = useMemo(() => {

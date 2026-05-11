@@ -141,6 +141,10 @@ const uploadFilterOptions: Array<{ value: UploadFilterMode; label: string }> = [
   { value: "certified", label: "认证" }
 ]
 
+const uploadFilterValues = new Set<UploadFilterMode>(
+  uploadFilterOptions.map((option) => option.value)
+)
+
 function getSkillStatsRange(): { from: string; to: string } {
   // 和 Dashboard 的默认月维度保持一致，避免前后口径不一致。
   return getDefaultRange("month")
@@ -507,16 +511,18 @@ function isAllowedDetailFile(type: MarketItemType, filename: string): boolean {
 export function MarketPanel(): React.JSX.Element {
   const {
     marketInitialSkillCategory,
-    setMarketInitialSkillCategory,
     marketInitialSkillSearchQuery,
-    setMarketInitialSkillSearchQuery,
     marketInitialSkillDetailName,
-    setMarketInitialSkillDetailName
+    setMarketInitialSkillDetailName,
+    marketInitialSkillFilters
   } = useAppStore()
   const [activeTab, setActiveTab] = useState<MarketItemType>("skill")
   const [searchQuery, setSearchQuery] = useState("")
   const [uploadFilterModes, setUploadFilterModes] = useState<UploadFilterMode[]>([])
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null)
+  const [pendingInitialCategoryFilter, setPendingInitialCategoryFilter] = useState<string | null>(
+    null
+  )
   const [skillsData, setSkillsData] = useState<MarketItem[]>([])
   const [mcpsData, setMcpsData] = useState<MarketItem[]>([])
   const [pluginsData, setPluginsData] = useState<MarketItem[]>([])
@@ -841,30 +847,40 @@ export function MarketPanel(): React.JSX.Element {
     const hasInitialCategory = !!marketInitialSkillCategory
     const hasInitialSearch = !!marketInitialSkillSearchQuery?.trim()
     const hasInitialDetail = !!marketInitialSkillDetailName?.trim()
-    if (!hasInitialCategory && !hasInitialSearch && !hasInitialDetail) return
+    const hasInitialFilters = marketInitialSkillFilters !== null
+    if (!hasInitialCategory && !hasInitialSearch && !hasInitialDetail && !hasInitialFilters) return
 
     setActiveTab("skill")
     setDetailMode("list")
     setSelectedItemKey(null)
+    setUploadFilterModes(
+      (marketInitialSkillFilters ?? []).filter((filter): filter is UploadFilterMode =>
+        uploadFilterValues.has(filter as UploadFilterMode)
+      )
+    )
     if (hasInitialDetail) {
+      setPendingInitialCategoryFilter(null)
       setCategoryFilter(null)
     } else if (hasInitialCategory) {
-      setCategoryFilter(marketInitialSkillCategory)
+      setPendingInitialCategoryFilter(marketInitialSkillCategory)
     } else {
       // 按名称跳转搜索时，避免历史分类筛选把结果“过滤没了”。
+      setPendingInitialCategoryFilter(null)
       setCategoryFilter(null)
     }
     setSearchQuery(
       marketInitialSkillDetailName?.trim() || marketInitialSkillSearchQuery?.trim() || ""
     )
-    setMarketInitialSkillCategory(null)
-    setMarketInitialSkillSearchQuery(null)
+    useAppStore.setState({
+      marketInitialSkillCategory: null,
+      marketInitialSkillSearchQuery: null,
+      marketInitialSkillFilters: null
+    })
   }, [
     marketInitialSkillCategory,
     marketInitialSkillDetailName,
-    marketInitialSkillSearchQuery,
-    setMarketInitialSkillCategory,
-    setMarketInitialSkillSearchQuery
+    marketInitialSkillFilters,
+    marketInitialSkillSearchQuery
   ])
 
   // 同步已安装状态，不触发额外的 market 接口请求
@@ -1358,10 +1374,18 @@ export function MarketPanel(): React.JSX.Element {
           item.name.toLowerCase().includes(query) ||
           item.description.toLowerCase().includes(query)
         if (!matchesSearch) return false
-        if (uploadFilterModes.includes("mine") && !isMineUploadedItem(item)) return false
-        if (uploadFilterModes.includes("installed") && !item.installed) return false
-        if (uploadFilterModes.includes("featured") && item.featured !== "精品") return false
-        if (uploadFilterModes.includes("certified") && item.tag?.trim() !== "认证") return false
+        if (
+          uploadFilterModes.length > 0 &&
+          !uploadFilterModes.some((mode) => {
+            if (mode === "mine") return isMineUploadedItem(item)
+            if (mode === "installed") return item.installed
+            if (mode === "featured") return item.featured === "精品"
+            if (mode === "certified") return item.tag?.trim() === "认证"
+            return false
+          })
+        ) {
+          return false
+        }
 
         if (!categoryFilter) return true
         return getCategoryFilterName(item.category) === categoryFilter
@@ -1413,6 +1437,18 @@ export function MarketPanel(): React.JSX.Element {
         return a.name.localeCompare(b.name, "zh-CN")
       })
   }, [currentData])
+
+  useEffect(() => {
+    if (!pendingInitialCategoryFilter) return
+    if (activeTab !== "skill") return
+    if (loading) return
+
+    const matchedCategory =
+      marketCategoryStats.find((category) => category.name === pendingInitialCategoryFilter)
+        ?.name ?? pendingInitialCategoryFilter
+    setCategoryFilter(matchedCategory)
+    setPendingInitialCategoryFilter(null)
+  }, [activeTab, loading, marketCategoryStats, pendingInitialCategoryFilter])
 
   const openItemDetail = async (item: MarketItem) => {
     setSelectedItemKey(getItemKey(item))
