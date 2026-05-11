@@ -341,8 +341,8 @@ function sendCoordinatorWorkerStream(
   })
   let data: unknown
   try {
-    const sanitized = sanitizeStreamDataForRenderer(stream.mode, stream.data)
-    data = serializeStreamData(sanitized)
+    const serialized = serializeStreamData(stream.data)
+    data = sanitizeStreamDataForRenderer(stream.mode, serialized)
   } catch (error) {
     console.warn("[Agent] Failed to serialize coordinator worker stream event:", error)
     return
@@ -3967,11 +3967,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         for (const notificationId of Object.keys(peekedNotificationSelectedSkills)) {
           trackedResumeCoordinatorNotificationIds.add(notificationId)
         }
-        if (!resumeCoordinatorSelectedSkill) {
-          resumeCoordinatorSelectedSkill = deriveSharedCoordinatorSelectedSkill(
-            resumeCoordinatorNotificationSelectedSkills
-          )
-        }
+        // Resume only peeks queued notifications for explicit consumed_notification_ids
+        // routing; do not promote peeked notification skills into the ambient
+        // selectedSkill of the resumed tool flow.
         const workers = coordinatorWorkerManager
           .readWorkers(threadId)
           .filter(
@@ -4540,11 +4538,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       for (const notificationId of Object.keys(peekedNotificationSelectedSkills)) {
         trackedInterruptCoordinatorNotificationIds.add(notificationId)
       }
-      if (!interruptCoordinatorSelectedSkill) {
-        interruptCoordinatorSelectedSkill = deriveSharedCoordinatorSelectedSkill(
-          interruptCoordinatorNotificationSelectedSkills
-        )
-      }
+      // Like resume, interrupt approval only peeks queued notifications for
+      // deterministic consumed_notification_ids routing. Pending notification
+      // skills must not leak into the ambient selectedSkill of this HITL turn.
       const workers = coordinatorWorkerManager
         .readWorkers(threadId)
         .filter(
@@ -4930,7 +4926,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         ? coordinatorWorkerManager.cancelWorkersForThread(
             threadId,
             "User cancelled coordinator workers.",
-            { suppressNotificationAutoRun: true }
+            {
+              suppressNotificationAutoRun: true,
+              dismissNotificationOnTerminalPersist: true
+            }
           )
         : []
       const window = BrowserWindow.fromWebContents(event.sender)

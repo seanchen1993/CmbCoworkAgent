@@ -439,6 +439,16 @@ async function testWorkerToolFlowPreservesToolErrorStatus(): Promise<void> {
   )
   assertIncludes(
     workerStreamPanel,
+    "const MAX_WORKER_HISTORY_MESSAGES = 500",
+    "worker stream panel bounds checkpoint history restore to a recent message window"
+  )
+  assertIncludes(
+    workerStreamPanel,
+    "rawMessages.slice(startIndex)",
+    "worker stream panel restores only the recent checkpoint message slice when history is large"
+  )
+  assertIncludes(
+    workerStreamPanel,
     'is_error: message.is_error === true || message.status === "error"',
     "worker stream panel derives tool result errors from either explicit flags or error status"
   )

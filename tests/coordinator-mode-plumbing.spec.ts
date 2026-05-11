@@ -886,6 +886,16 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "peekedNotificationSelectedSkills",
     "agent resume and interrupt build selected-skill routing for peeked HITL notifications"
   )
+  assertNotIncludes(
+    agentIpc,
+    "resumeCoordinatorSelectedSkill = deriveSharedCoordinatorSelectedSkill(\n            resumeCoordinatorNotificationSelectedSkills",
+    "agent resume does not promote peeked notification skills into the ambient selected skill"
+  )
+  assertNotIncludes(
+    agentIpc,
+    "interruptCoordinatorSelectedSkill = deriveSharedCoordinatorSelectedSkill(\n          interruptCoordinatorNotificationSelectedSkills",
+    "agent interrupt does not promote peeked notification skills into the ambient selected skill"
+  )
   assertIncludes(
     agentIpc,
     "onCoordinatorNotificationAction",
@@ -958,7 +968,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "{ suppressNotificationAutoRun: true }",
+    "suppressNotificationAutoRun: true,\n              dismissNotificationOnTerminalPersist: true",
     "agent cancel marks user-requested background worker cancellation notifications as non-resuming UI updates"
   )
   assertIncludes(
@@ -1120,6 +1130,17 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "data: sanitizeStreamDataForRenderer(mode, serialized)",
     2,
     "resume and interrupt streams sanitize renderer payloads"
+  )
+  assertSourceOrder(
+    agentIpc,
+    "const serialized = serializeStreamData(stream.data)",
+    "data = sanitizeStreamDataForRenderer(stream.mode, serialized)",
+    "focused worker stream serializes LangChain values before renderer sanitization"
+  )
+  assertNotIncludes(
+    agentIpc,
+    "sanitizeStreamDataForRenderer(stream.mode, stream.data)",
+    "focused worker stream must not sanitize raw LangChain values before serialization"
   )
   assertIncludes(
     agentIpc,
@@ -1526,6 +1547,11 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
+    "dismissNotificationOnTerminalPersist: true",
+    "agent IPC marks explicit background worker stops as dismissed terminal notifications"
+  )
+  assertIncludes(
+    agentIpc,
     "Failed to wait for coordinator worker cancellation",
     "agent IPC logs background worker cancellation persistence failures"
   )
@@ -1830,7 +1856,12 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   assertIncludes(
     runtime,
     "const returnedWorkers = input.workerId",
-    "runtime scopes cancel_worker notification acknowledgement to returned workers"
+    "runtime still returns the cancelled worker subset after coordinator cancellation"
+  )
+  assertIncludes(
+    runtime,
+    "suppressNotificationAutoRun: true,\n                    dismissNotificationOnTerminalPersist: true",
+    "runtime marks cancel_worker notifications as dismissed terminal work instead of separately re-acking them"
   )
   assertIncludes(
     runtime,

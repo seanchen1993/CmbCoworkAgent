@@ -160,6 +160,7 @@ interface CoordinatorWorkerRecord {
   lastProgressUpdateAt?: number
   runVersion: number
   suppressNotificationAutoRun?: boolean
+  dismissNotificationOnTerminalPersist?: boolean
 }
 
 interface NotificationRef {
@@ -246,7 +247,10 @@ const MAX_RESULT_READ_CHARS = 80_000
 const MAX_WORKER_RAW_TEXT_CHARS = 200_000
 export const MAX_COORDINATOR_WORKERS_IN_MEMORY = 80
 export const MAX_COORDINATOR_PRUNED_SNAPSHOTS_IN_MEMORY = 16
-const PROGRESS_UPDATE_THROTTLE_MS = 500
+// Stream-only workers can emit frequent text/value chunks without new tool calls.
+// A 2s throttle keeps the right-panel activity timestamp reasonably fresh
+// while reducing steady-state state.json writes for long-running workers.
+const PROGRESS_UPDATE_THROTTLE_MS = 2_000
 const ACTIVE_RESTORE_STATUS_SCAN_CHARS = 4_096
 const RECENT_RESTORE_TERMINAL_LIMIT = 40
 const DEFAULT_WORKER_UPDATE_CALLBACK_KEY = "default"
@@ -466,6 +470,22 @@ function normalizeWorkerArtifactPath(
   if (normalizedPath.startsWith(coordinatorReportsPrefix)) return normalizedPath
   if (normalizedPath.startsWith("reports/")) return normalizedPath
   return undefined
+}
+
+function resolveWorkerResultReadRelativePath(
+  parentThreadId: string,
+  relativePath: string
+): string {
+  const normalizedParentThreadId = normalizeThreadId(parentThreadId)
+  const slashNormalized = relativePath.trim().replace(/\\/g, "/")
+  if (slashNormalized.startsWith(".cmbdevclaw/")) return slashNormalized
+  // Historical/sanitized result_path values may still use bare reports/... paths.
+  // Keep read semantics aligned with the renderer preview path resolver by
+  // treating those as coordinator report artifacts scoped to this thread.
+  if (slashNormalized.startsWith("reports/") || slashNormalized === "state.json") {
+    return `${COORDINATOR_BASE_DIR}/${normalizedParentThreadId}/${slashNormalized}`
+  }
+  return slashNormalized
 }
 
 async function writeFileAtomic(target: string, content: string): Promise<void> {
@@ -1097,7 +1117,11 @@ export class CoordinatorWorkerManager {
       relativePath: string | undefined
     ): Promise<ReturnType<typeof truncateReadText> | undefined> => {
       if (!relativePath) return undefined
-      const target = path.resolve(workspaceRoot, relativePath)
+      const resolvedRelativePath = resolveWorkerResultReadRelativePath(
+        record.parentThreadId,
+        relativePath
+      )
+      const target = path.resolve(workspaceRoot, resolvedRelativePath)
       if (target !== workspaceRoot && !target.startsWith(`${workspaceRoot}${path.sep}`)) {
         throw new Error(`Worker output path escapes workspace: ${relativePath}`)
       }
@@ -1321,13 +1345,21 @@ export class CoordinatorWorkerManager {
   cancelWorkersForThread(
     parentThreadId: string,
     reason = "Parent run cancelled.",
-    options?: { suppressNotificationAutoRun?: boolean }
+    options?: {
+      suppressNotificationAutoRun?: boolean
+      dismissNotificationOnTerminalPersist?: boolean
+    }
   ): CoordinatorWorkerSnapshot[] {
     const records = Array.from(this.getParentMap(parentThreadId)?.values() ?? []).filter(
       (record) => record.status === "running"
     )
     for (const record of records) {
-      this.cancelRecord(record, reason, options?.suppressNotificationAutoRun)
+      this.cancelRecord(
+        record,
+        reason,
+        options?.suppressNotificationAutoRun,
+        options?.dismissNotificationOnTerminalPersist
+      )
     }
     return records.map(toSnapshot)
   }
@@ -1335,13 +1367,22 @@ export class CoordinatorWorkerManager {
   async cancelWorker(
     parentThreadId: string,
     workerId: string,
-    reason = "Worker cancelled."
+    reason = "Worker cancelled.",
+    options?: {
+      suppressNotificationAutoRun?: boolean
+      dismissNotificationOnTerminalPersist?: boolean
+    }
   ): Promise<CoordinatorWorkerSnapshot> {
     const record = await this.getWorkerForOperation(parentThreadId, workerId)
     if (!record) {
       throw new Error(`Unknown coordinator worker: ${workerId}`)
     }
-    this.cancelRecord(record, reason)
+    this.cancelRecord(
+      record,
+      reason,
+      options?.suppressNotificationAutoRun,
+      options?.dismissNotificationOnTerminalPersist
+    )
     return toSnapshot(record)
   }
 
@@ -1763,7 +1804,10 @@ export class CoordinatorWorkerManager {
 
     const normalizedWorkerId = normalizeWorkerId(workerId)
     const normalizedParentThreadId = normalizeThreadId(parentThreadId)
-    if (!workerThreadId.startsWith(`${normalizedParentThreadId}${WORKER_THREAD_DELIMITER}`)) {
+    if (
+      workerThreadId !==
+      `${normalizedParentThreadId}${WORKER_THREAD_DELIMITER}${normalizedWorkerId}`
+    ) {
       return undefined
     }
     const normalizedRole = normalizeWorkerRole(role)
@@ -1925,7 +1969,8 @@ export class CoordinatorWorkerManager {
   private cancelRecord(
     record: CoordinatorWorkerRecord,
     reason: string,
-    suppressNotificationAutoRun = false
+    suppressNotificationAutoRun = false,
+    dismissNotificationOnTerminalPersist = false
   ): void {
     if (record.status !== "running") return
     record.abortController?.abort(new DOMException(reason, "AbortError"))
@@ -1938,6 +1983,7 @@ export class CoordinatorWorkerManager {
     record.error = reason
     record.lastEvent = reason
     record.lastActivityAt = timestamp
+    record.dismissNotificationOnTerminalPersist = dismissNotificationOnTerminalPersist
     void this.persistTerminalAndNotify(record)
   }
 
@@ -2088,6 +2134,30 @@ export class CoordinatorWorkerManager {
           )
         }
       }
+      if (record.dismissNotificationOnTerminalPersist && terminalStatus(record.status)) {
+        // Explicit background-worker stop is a user dismissal signal, not normal
+        // notification-first coordinator work. Persist the terminal worker state,
+        // then settle the notification immediately so the thread is not left in a
+        // suppressed-but-unacknowledged coordinator limbo.
+        record.dismissNotificationOnTerminalPersist = false
+        record.notificationAcknowledged = true
+        record.notificationEnqueued = true
+        record.suppressNotificationAutoRun = false
+        this.removeQueuedNotificationsForWorker(record.parentThreadId, {
+          workerId: record.workerId,
+          turn: record.turns
+        })
+        try {
+          await this.persistWorkerState(record)
+        } catch (statePersistError) {
+          console.warn(
+            "[CoordinatorWorker] Failed to persist dismissed terminal notification state:",
+            statePersistError
+          )
+        }
+        this.emitUpdate(record)
+        return
+      }
       this.emitUpdate(record, this.enqueueNotification(record))
     })().finally(() => {
       if (record.terminalPersistPromise === persistPromise) {
@@ -2104,7 +2174,11 @@ export class CoordinatorWorkerManager {
   ): void {
     if (record.discarded || record.status !== "running") return
     if (event.type === "stream") {
+      const timestamp = nowIso()
+      record.updatedAt = timestamp
+      record.lastActivityAt = timestamp
       this.emitUpdate(record, undefined, event.stream)
+      this.scheduleProgressUpdate(record)
       return
     }
     if (event.type === "usage") {

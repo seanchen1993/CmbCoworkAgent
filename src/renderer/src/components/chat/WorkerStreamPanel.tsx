@@ -5,10 +5,12 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { useThreadState } from "@/lib/thread-context"
 import { useAppStore } from "@/lib/store"
+import { getWorkerToolResultKey } from "@/lib/worker-tool-result-key"
 import type { Message } from "@/types"
 import { cn } from "@/lib/utils"
 
 const MAX_WORKER_SIGNATURE_CHARS = 512
+const MAX_WORKER_HISTORY_MESSAGES = 500
 
 type SerializedCheckpointMessage = {
   id?: string | string[]
@@ -290,7 +292,9 @@ function buildToolResults(
   const results = new Map<string, { content: string | unknown; is_error?: boolean }>()
   for (const message of messages) {
     if (message.role === "tool" && message.tool_call_id) {
-      results.set(message.tool_call_id, {
+      const resultKey = getWorkerToolResultKey(message.id, message.tool_call_id)
+      if (!resultKey) continue
+      results.set(resultKey, {
         content: message.content,
         is_error: message.is_error === true || message.status === "error"
       })
@@ -409,6 +413,7 @@ export function WorkerStreamPanel(): React.JSX.Element {
   const workerFocusMessages = useAppStore((state) => state.workerFocusMessages)
   const closeWorkerFocusView = useAppStore((state) => state.closeWorkerFocusView)
   const [historyMessages, setHistoryMessages] = useState<Message[]>([])
+  const [truncatedHistoryCount, setTruncatedHistoryCount] = useState(0)
   const [loadingHistory, setLoadingHistory] = useState(false)
   const [thinkingMessageIndex, setThinkingMessageIndex] = useState(0)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -416,6 +421,10 @@ export function WorkerStreamPanel(): React.JSX.Element {
   const wasRunningRef = useRef(false)
   const runningMessageCountRef = useRef(0)
   const isAtBottomRef = useRef(true)
+  const previousHistoryLoadRef = useRef<{
+    workerThreadId: string
+    turns?: number
+  } | null>(null)
   const threadState = useThreadState(workerFocusView?.threadId ?? null)
   const currentWorker = threadState?.coordinatorWorkers.find(
     (worker) => worker.worker_id === workerFocusView?.workerId
@@ -423,33 +432,50 @@ export function WorkerStreamPanel(): React.JSX.Element {
   const isRunning = currentWorker?.status === "running"
 
   useEffect(() => {
-    if (!workerFocusView?.workerThreadId) return
+    const workerThreadId = workerFocusView?.workerThreadId
+    if (!workerThreadId) return
 
     let cancelled = false
-    setHistoryMessages([])
+    const turns = currentWorker?.turns
+    const previousLoad = previousHistoryLoadRef.current
+    const shouldResetHistory =
+      previousLoad?.workerThreadId !== workerThreadId || previousLoad?.turns !== turns
+    previousHistoryLoadRef.current = { workerThreadId, turns }
+    if (shouldResetHistory) {
+      setHistoryMessages([])
+      setTruncatedHistoryCount(0)
+    }
     setLoadingHistory(true)
     void (async () => {
       try {
-        const latestCheckpoint = (await window.api.threads.getLatestCheckpoint(
-          workerFocusView.workerThreadId
-        )) as ThreadHistoryEntry | null
+        const latestCheckpoint =
+          (await window.api.threads.getLatestCheckpoint(workerThreadId)) as ThreadHistoryEntry | null
         if (cancelled) return
         const rawMessages = latestCheckpoint?.checkpoint?.channel_values?.messages
         if (!Array.isArray(rawMessages)) {
           setHistoryMessages([])
+          setTruncatedHistoryCount(0)
           return
         }
 
+        const startIndex = Math.max(0, rawMessages.length - MAX_WORKER_HISTORY_MESSAGES)
+        const recentRawMessages =
+          startIndex > 0 ? rawMessages.slice(startIndex) : rawMessages
+
+        setTruncatedHistoryCount(startIndex)
         setHistoryMessages(
-          rawMessages
+          recentRawMessages
             .map((message, index) =>
-              messageFromCheckpoint(message as SerializedCheckpointMessage, index)
+              messageFromCheckpoint(message as SerializedCheckpointMessage, startIndex + index)
             )
             .filter((message): message is Message => message !== null)
         )
       } catch (error) {
         console.error("[WorkerStreamPanel] Failed to load worker checkpoint:", error)
-        if (!cancelled) setHistoryMessages([])
+        if (!cancelled) {
+          setHistoryMessages([])
+          setTruncatedHistoryCount(0)
+        }
       } finally {
         if (!cancelled) setLoadingHistory(false)
       }
@@ -458,7 +484,7 @@ export function WorkerStreamPanel(): React.JSX.Element {
     return () => {
       cancelled = true
     }
-  }, [currentWorker?.turns, workerFocusView?.workerThreadId])
+  }, [currentWorker?.status, currentWorker?.turns, workerFocusView?.workerThreadId])
 
   const messages = useMemo(
     () => mergeMessages(historyMessages, workerFocusMessages),
@@ -642,6 +668,12 @@ export function WorkerStreamPanel(): React.JSX.Element {
             {!loadingHistory && messages.length === 0 && (
               <div className="rounded-xl border border-dashed border-border/70 bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
                 暂无可展示的 worker 消息。运行中的后续工具流会实时显示在这里。
+              </div>
+            )}
+            {truncatedHistoryCount > 0 && (
+              <div className="rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                为控制性能，这里仅恢复最近 {MAX_WORKER_HISTORY_MESSAGES} 条 worker
+                checkpoint 消息；更早的 {truncatedHistoryCount} 条历史未在面板加载。
               </div>
             )}
             {messages.map((message, index) => {

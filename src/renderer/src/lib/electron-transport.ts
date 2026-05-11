@@ -643,11 +643,15 @@ export class ElectronIPCTransport implements UseStreamTransport {
         : []
       const snapshotIndex = getWorkerSnapshotFallbackIndex(message, index)
       const snapshotFallbackId = createWorkerSnapshotFallbackMessageId(snapshotIndex)
+      const providerMessageId =
+        typeof kwargs.id === "string"
+          ? this.createFocusedWorkerTurnScopedMessageId(workerThreadId, kwargs.id)
+          : undefined
       const liveAssistantId =
         this.isSerializedAIMessage(message) && index === latestAiIndex
           ? this.workerCurrentMessageIds.get(workerThreadId)
           : undefined
-      const rawId = kwargs.id || liveAssistantId || snapshotFallbackId
+      const rawId = providerMessageId || liveAssistantId || snapshotFallbackId
       if (this.isSerializedHumanMessage(message)) {
         converted.push({
           id: rawId,
@@ -1133,7 +1137,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
     const events: StreamEvent[] = []
     const kwargs = input.kwargs || {}
     const isHumanMessage =
-      input.className.includes("HumanMessage") || kwargs.type === "human"
+      input.className.includes("HumanMessage") ||
+      kwargs.type === "human" ||
+      kwargs.type === "user"
     const isToolMessage = input.className.includes("ToolMessage") && !!kwargs.tool_call_id
     const isAIMessage = input.className.includes("AI") || input.className.includes("AIMessageChunk")
 
@@ -1141,9 +1147,13 @@ export class ElectronIPCTransport implements UseStreamTransport {
       this.resetWorkerCurrentAssistant(focused.workerThreadId)
       const content = this.extractContent(kwargs.content)
       if (content) {
+        const msgId =
+          (typeof kwargs.id === "string"
+            ? this.createFocusedWorkerTurnScopedMessageId(focused.workerThreadId, kwargs.id)
+            : undefined) || this.createWorkerLiveFallbackMessageId(focused.workerThreadId)
         events.push(
           this.createCoordinatorWorkerStreamMessageEvent(focused.workerThreadId, {
-            id: kwargs.id || this.createWorkerLiveFallbackMessageId(focused.workerThreadId),
+            id: msgId,
             role: "user",
             content,
             created_at: new Date()
@@ -1156,8 +1166,12 @@ export class ElectronIPCTransport implements UseStreamTransport {
     if (isAIMessage) {
       const isChunk = input.className.includes("Chunk")
       const extractedContent = this.extractContent(kwargs.content)
+      const providerMessageId =
+        typeof kwargs.id === "string"
+          ? this.createFocusedWorkerTurnScopedMessageId(focused.workerThreadId, kwargs.id)
+          : undefined
       const msgId =
-        kwargs.id ||
+        providerMessageId ||
         this.workerCurrentMessageIds.get(focused.workerThreadId) ||
         this.createWorkerLiveFallbackMessageId(focused.workerThreadId)
       this.workerCurrentMessageIds.set(focused.workerThreadId, msgId)
@@ -1218,13 +1232,18 @@ export class ElectronIPCTransport implements UseStreamTransport {
       const content = this.extractContent(kwargs.content)
       const isError = this.isToolMessageError(kwargs)
       const msgId =
-        kwargs.id ||
-        this.createStableFallbackMessageId({
-          type: "tool",
-          content,
-          toolCallId: kwargs.tool_call_id,
-          toolName: kwargs.name
-        })
+        (typeof kwargs.id === "string"
+          ? this.createFocusedWorkerTurnScopedMessageId(focused.workerThreadId, kwargs.id)
+          : undefined) ||
+        this.createFocusedWorkerTurnScopedMessageId(
+          focused.workerThreadId,
+          this.createStableFallbackMessageId({
+            type: "tool",
+            content,
+            toolCallId: kwargs.tool_call_id,
+            toolName: kwargs.name
+          })
+        )
 
       events.push(
         this.createCoordinatorWorkerStreamMessageEvent(focused.workerThreadId, {
@@ -1261,7 +1280,20 @@ export class ElectronIPCTransport implements UseStreamTransport {
   private createWorkerLiveFallbackMessageId(workerThreadId: string): string {
     const next = (this.workerLiveMessageSequenceByThread.get(workerThreadId) ?? 0) + 1
     this.workerLiveMessageSequenceByThread.set(workerThreadId, next)
-    return `worker-live-${workerThreadId}-${next}`
+    return this.createFocusedWorkerTurnScopedMessageId(
+      workerThreadId,
+      `worker-live-${workerThreadId}-${next}`
+    )
+  }
+
+  private createFocusedWorkerTurnScopedMessageId(workerThreadId: string, rawId: string): string {
+    const workerTurn = this.workerCurrentTurnByThread.get(workerThreadId)
+    if (typeof workerTurn !== "number" || !Number.isFinite(workerTurn)) {
+      return rawId
+    }
+
+    const prefix = `worker-turn-${workerThreadId}-${workerTurn}::`
+    return rawId.startsWith(prefix) ? rawId : `${prefix}${rawId}`
   }
 
   private syncWorkerTurnBoundary(workerThreadId: string, workerTurn?: number): void {
@@ -1270,6 +1302,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     if (previousTurn === workerTurn) return
     this.workerCurrentTurnByThread.set(workerThreadId, workerTurn)
     this.resetWorkerCurrentAssistant(workerThreadId)
+    this.resetFocusedWorkerTurnToolState()
   }
 
   private resetWorkerCurrentAssistant(workerThreadId: string): void {
@@ -1278,6 +1311,12 @@ export class ElectronIPCTransport implements UseStreamTransport {
     if (messageId) {
       this.workerAssistantTextByMessageId.delete(messageId)
     }
+  }
+
+  private resetFocusedWorkerTurnToolState(): void {
+    this.accumulatedToolCalls.clear()
+    this.lastToolCallChunkArgsById.clear()
+    this.completedToolCallsByMessageId.clear()
   }
 
   private mergeWorkerAssistantTextChunk(existing: string, nextChunk: string): string {

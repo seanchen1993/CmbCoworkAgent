@@ -16,6 +16,7 @@ import {
   isCoordinatorWorkerToolName,
   normalizeCoordinatorWorkerToolArgsForDisplay
 } from "@/lib/coordinator-worker-tool-args"
+import { getWorkerToolResultKey, getWorkerToolUiKey } from "@/lib/worker-tool-result-key"
 
 /**
  * Strip the trailing `<CMBDEVCLAW-SKILL-USE-V1>…</…>` block when present.
@@ -437,8 +438,8 @@ export function MessageBubble({
         {hasToolCalls && (
           <div className="space-y-2 overflow-hidden">
             {displayToolCalls!.map((toolCall, index) => {
-              const toolId = toolCall.id || `${message.id}-${index}`;
-              const result = toolResults?.get(toolCall.id);
+              const toolId = getWorkerToolUiKey(message.id, toolCall.id, index);
+              const result = toolResults?.get(getWorkerToolResultKey(message.id, toolCall.id) ?? "");
               const pendingIds = pendingApproval?.pendingToolCallIds;
               const needsApproval = Boolean(
                 pendingIds?.length
@@ -456,7 +457,7 @@ export function MessageBubble({
                 const isBatch = (pendingApproval?.pendingCount ?? 1) > 1;
                 return (
                   <ToolCallRenderer
-                    key={`${toolCall.id || `tc-${index}`}-${needsApproval ? "pending" : "done"}`}
+                    key={`${toolId}-${needsApproval ? "pending" : "done"}`}
                     toolCall={toolCall}
                     result={result?.content}
                     isError={result?.is_error}

@@ -11,6 +11,10 @@
 
 import { ElectronIPCTransport } from "../src/renderer/src/lib/electron-transport.ts"
 import { useAppStore, type WorkerFocusView } from "../src/renderer/src/lib/store.ts"
+import {
+  getWorkerToolResultKey,
+  getWorkerToolUiKey
+} from "../src/renderer/src/lib/worker-tool-result-key.ts"
 
 interface SdkEvent {
   event: string
@@ -121,11 +125,11 @@ function toolMessage(input: {
   }
 }
 
-function humanMessage(content: string): unknown {
+function humanMessage(content: string, input?: { id?: string }): unknown {
   return {
     id: ["langchain_core", "messages", "HumanMessage"],
     kwargs: {
-      id: `human-${content}`,
+      id: input?.id ?? `human-${content}`,
       content
     }
   }
@@ -136,6 +140,16 @@ function plainHumanMessage(content: string): unknown {
     kwargs: {
       id: `plain-human-${content}`,
       type: "human",
+      content
+    }
+  }
+}
+
+function plainUserMessage(content: string): unknown {
+  return {
+    kwargs: {
+      id: `plain-user-${content}`,
+      type: "user",
       content
     }
   }
@@ -517,6 +531,64 @@ async function testFocusedAsyncWorkerStreamsToWorkerPanel(): Promise<void> {
       "worker side-channel should display live human continuation prompts"
     )
 
+    const directPlainUserSideChannelMessages = transport.convertFocusedCoordinatorWorkerIPCEvent(
+      streamMessageEvent(plainUserMessage("User-shaped live worker prompt"), {}) as never,
+      "thread-123"
+    )
+    assert(
+      directPlainUserSideChannelMessages.some(
+        (message) =>
+          message.role === "user" && message.content === "User-shaped live worker prompt"
+      ),
+      "worker side-channel should recognize live plain user-shaped messages"
+    )
+
+    const repeatedHumanIdAcrossTurnsTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "worker-1",
+      workerThreadId: "thread-123__worker__worker-1"
+    })
+    const firstTurnHumanPrompt =
+      repeatedHumanIdAcrossTurnsTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            humanMessage("turn one prompt", { id: "reused-human-message-id" }),
+            {}
+          ) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages("thread-123__worker__worker-1", firstTurnHumanPrompt)
+    const secondTurnHumanPrompt =
+      repeatedHumanIdAcrossTurnsTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            humanMessage("turn two prompt", { id: "reused-human-message-id" }),
+            {}
+          ) as object),
+          workerTurn: 2
+        } as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages("thread-123__worker__worker-1", secondTurnHumanPrompt)
+    const repeatedHumanPrompts = useAppStore
+      .getState()
+      .workerFocusMessages.filter((message) => message.role === "user")
+    assert(
+      repeatedHumanPrompts.length === 2 &&
+        repeatedHumanPrompts[0]?.content === "turn one prompt" &&
+        repeatedHumanPrompts[1]?.content === "turn two prompt" &&
+        repeatedHumanPrompts[0]?.id !== repeatedHumanPrompts[1]?.id,
+      "focused worker store should preserve previous-turn human prompts when provider ids are reused"
+    )
+
     const directFailedToolMessages = transport.convertFocusedCoordinatorWorkerIPCEvent(
       streamMessageEvent(
         toolMessage({
@@ -715,25 +787,54 @@ async function testFocusedAsyncWorkerStreamsToWorkerPanel(): Promise<void> {
       workerThreadId: "thread-123__worker__worker-1"
     })
     const liveAiMessages = liveThenValuesTransport.convertFocusedCoordinatorWorkerIPCEvent(
-      streamMessageEvent(aiMessage({ content: "same assistant before tool" }), {}) as never,
+      {
+        ...(streamMessageEvent(
+          aiMessage({
+            content: "same assistant before tool",
+            toolCalls: [{ id: "id-less-live-tool-call", name: "read_file", args: {} }]
+          }),
+          {}
+        ) as object),
+        workerTurn: 1
+      } as never,
       "thread-123"
     )
     const liveAiId = liveAiMessages.find((message) => message.role === "assistant")?.id
     assert(
-      typeof liveAiId === "string" && liveAiId.startsWith("worker-live-"),
-      "id-less live worker assistant messages should receive a stable live fallback id"
+      typeof liveAiId === "string" &&
+        liveAiId.includes("worker-live-thread-123__worker__worker-1-1") &&
+        liveAiId.startsWith("worker-turn-thread-123__worker__worker-1-"),
+      "id-less live worker assistant messages should receive a turn-scoped live fallback id"
     )
     useAppStore.getState().appendWorkerFocusMessages("thread-123__worker__worker-1", liveAiMessages)
-    liveThenValuesTransport.convertFocusedCoordinatorWorkerIPCEvent(
-      streamMessageEvent(
-        toolMessage({
-          name: "read_file",
-          toolCallId: "id-less-live-tool-call",
-          content: "tool completed after live assistant"
-        }),
-        {}
-      ) as never,
+    const liveToolResultMessages = liveThenValuesTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      {
+        ...(streamMessageEvent(
+          toolMessage({
+            name: "read_file",
+            toolCallId: "id-less-live-tool-call",
+            content: "tool completed after live assistant"
+          }),
+          {}
+        ) as object),
+        workerTurn: 1
+      } as never,
       "thread-123"
+    )
+    const liveToolResultId = liveToolResultMessages.find((message) => message.role === "tool")?.id
+    const idLessLiveToolResultKey = getWorkerToolResultKey(
+      liveAiId ?? "",
+      liveAiMessages.find((message) => message.role === "assistant")?.tool_calls?.[0]?.id ??
+        "id-less-live-tool-call"
+    )
+    const idLessLiveToolMessageKey = getWorkerToolResultKey(
+      liveToolResultId ?? "",
+      liveToolResultMessages.find((message) => message.role === "tool")?.tool_call_id
+    )
+    assert(
+      typeof idLessLiveToolResultKey === "string" &&
+        idLessLiveToolResultKey === idLessLiveToolMessageKey,
+      "id-less live worker tool results should resolve against the same turn-scoped lookup key"
     )
     const valuesAfterTool = liveThenValuesTransport.convertFocusedCoordinatorWorkerIPCEvent(
       streamValuesEvent([
@@ -741,7 +842,10 @@ async function testFocusedAsyncWorkerStreamsToWorkerPanel(): Promise<void> {
           id: ["langchain_core", "messages", "HumanMessage"],
           kwargs: { content: "prompt before live assistant" }
         },
-        aiMessage({ content: "same assistant before tool" }),
+        aiMessage({
+          content: "same assistant before tool",
+          toolCalls: [{ id: "id-less-live-tool-call", name: "read_file", args: {} }]
+        }),
         toolMessage({
           name: "read_file",
           toolCallId: "id-less-live-tool-call",
@@ -793,6 +897,223 @@ async function testFocusedAsyncWorkerStreamsToWorkerPanel(): Promise<void> {
         typeof secondTurnId === "string" &&
         firstTurnId !== secondTurnId,
       "focused worker assistant-only turns should not reuse the previous live assistant id"
+    )
+
+    const turnBoundaryToolHydrationTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "worker-1",
+      workerThreadId: "thread-123__worker__worker-1"
+    })
+    turnBoundaryToolHydrationTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      {
+        ...(streamMessageEvent(
+          aiMessageChunk({
+            id: "reused-worker-message",
+            toolCallChunks: [
+              {
+                id: "reused-worker-tool",
+                name: "read_file",
+                args: '{"file_path":"README.md"}'
+              }
+            ]
+          }),
+          {}
+        ) as object),
+        workerTurn: 1
+      } as never,
+      "thread-123"
+    )
+    const secondTurnToolHydration =
+      turnBoundaryToolHydrationTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            aiMessage({
+              id: "reused-worker-message",
+              toolCalls: [{ id: "reused-worker-tool", name: "read_file" }]
+            }),
+            {}
+          ) as object),
+          workerTurn: 2
+        } as never,
+        "thread-123"
+      )
+    const secondTurnToolCalls = secondTurnToolHydration.find(
+      (message) => message.role === "assistant"
+    )?.tool_calls
+    assert(
+      secondTurnToolCalls?.[0]?.args === undefined,
+      "focused worker tool hydration should not leak previous-turn tool args when ids are reused"
+    )
+
+    const repeatedToolIdAcrossTurnsTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "worker-1",
+      workerThreadId: "thread-123__worker__worker-1"
+    })
+    const firstTurnRepeatedToolId = repeatedToolIdAcrossTurnsTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      {
+        ...(streamMessageEvent(
+          aiMessage({
+            id: "reused-tool-call-message",
+            toolCalls: [{ id: "reused-tool-call-id", name: "read_file" }]
+          }),
+          {}
+        ) as object),
+        workerTurn: 1
+      } as never,
+      "thread-123"
+    )
+    const secondTurnRepeatedToolId =
+      repeatedToolIdAcrossTurnsTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            aiMessage({
+              id: "reused-tool-call-message",
+              toolCalls: [{ id: "reused-tool-call-id", name: "read_file" }]
+            }),
+            {}
+          ) as object),
+          workerTurn: 2
+        } as never,
+        "thread-123"
+      )
+    const firstTurnAssistantMessage = firstTurnRepeatedToolId.find(
+      (message) => message.role === "assistant"
+    )
+    const secondTurnAssistantMessage = secondTurnRepeatedToolId.find(
+      (message) => message.role === "assistant"
+    )
+    const firstTurnRepeatedToolResult = repeatedToolIdAcrossTurnsTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      {
+        ...(streamMessageEvent(
+          toolMessage({
+            id: "reused-tool-result-message",
+            name: "read_file",
+            toolCallId: "reused-tool-call-id",
+            content: "turn one result"
+          }),
+          {}
+        ) as object),
+        workerTurn: 1
+      } as never,
+      "thread-123"
+    )
+    const secondTurnRepeatedToolResult =
+      repeatedToolIdAcrossTurnsTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            toolMessage({
+              id: "reused-tool-result-message",
+              name: "read_file",
+              toolCallId: "reused-tool-call-id",
+              content: "turn two result",
+              status: "error"
+            }),
+            {}
+          ) as object),
+          workerTurn: 2
+        } as never,
+        "thread-123"
+      )
+    const firstTurnToolMessage = firstTurnRepeatedToolResult.find((message) => message.role === "tool")
+    const secondTurnToolResultId = secondTurnRepeatedToolResult.find(
+      (message) => message.role === "tool"
+    )
+    const firstTurnToolResultKey = getWorkerToolResultKey(
+      firstTurnAssistantMessage?.id ?? "",
+      firstTurnAssistantMessage?.tool_calls?.[0]?.id
+    )
+    const secondTurnToolResultKey = getWorkerToolResultKey(
+      secondTurnAssistantMessage?.id ?? "",
+      secondTurnAssistantMessage?.tool_calls?.[0]?.id
+    )
+    const firstTurnToolMessageResultKey = getWorkerToolResultKey(
+      firstTurnToolMessage?.id ?? "",
+      firstTurnToolMessage?.tool_call_id
+    )
+    const secondTurnToolMessageResultKey = getWorkerToolResultKey(
+      secondTurnToolResultId?.id ?? "",
+      secondTurnToolResultId?.tool_call_id
+    )
+    const firstTurnToolUiKey = getWorkerToolUiKey(
+      firstTurnAssistantMessage?.id ?? "",
+      firstTurnAssistantMessage?.tool_calls?.[0]?.id,
+      0
+    )
+    const secondTurnToolUiKey = getWorkerToolUiKey(
+      secondTurnAssistantMessage?.id ?? "",
+      secondTurnAssistantMessage?.tool_calls?.[0]?.id,
+      0
+    )
+    assert(
+      typeof firstTurnToolResultKey === "string" &&
+        typeof secondTurnToolResultKey === "string" &&
+        typeof firstTurnToolMessageResultKey === "string" &&
+        typeof secondTurnToolMessageResultKey === "string" &&
+        firstTurnToolResultKey === firstTurnToolMessageResultKey &&
+        secondTurnToolResultKey === secondTurnToolMessageResultKey &&
+        firstTurnToolResultKey !== secondTurnToolResultKey,
+      "focused worker tool results should use turn-scoped lookup keys when raw tool ids are reused"
+    )
+    assert(
+      firstTurnToolUiKey !== secondTurnToolUiKey,
+      "focused worker tool UI keys should not reuse the same raw tool call id across turns"
+    )
+
+    const repeatedMessageIdAcrossTurnsTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "worker-1",
+      workerThreadId: "thread-123__worker__worker-1"
+    })
+    const firstTurnRepeatedId =
+      repeatedMessageIdAcrossTurnsTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            aiMessage({
+              id: "reused-cross-turn-message-id",
+              content: "turn one content"
+            }),
+            {}
+          ) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages("thread-123__worker__worker-1", firstTurnRepeatedId)
+    const secondTurnRepeatedId =
+      repeatedMessageIdAcrossTurnsTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            aiMessage({
+              id: "reused-cross-turn-message-id",
+              content: "turn two content"
+            }),
+            {}
+          ) as object),
+          workerTurn: 2
+        } as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages("thread-123__worker__worker-1", secondTurnRepeatedId)
+    const repeatedIdAssistants = useAppStore
+      .getState()
+      .workerFocusMessages.filter((message) => message.role === "assistant")
+    assert(
+      repeatedIdAssistants.length === 2 &&
+        repeatedIdAssistants[0]?.content === "turn one content" &&
+        repeatedIdAssistants[1]?.content === "turn two content" &&
+        repeatedIdAssistants[0]?.id !== repeatedIdAssistants[1]?.id,
+      "focused worker store should preserve previous-turn assistant messages when provider ids are reused"
     )
 
     resetWorkerFocusStore()

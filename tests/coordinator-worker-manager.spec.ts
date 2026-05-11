@@ -1235,6 +1235,71 @@ async function testDuplicateUsageProgressDoesNotEmitRepeatedUpdates(): Promise<v
   })
 }
 
+async function testStreamProgressRefreshesLastActivityAt(): Promise<void> {
+  await withTempDir("coordinator-worker-manager-stream-activity", async (workspace) => {
+    const manager = new CoordinatorWorkerManager()
+    const run = deferred<CoordinatorWorkerRunResult>()
+    let capturedInput: CoordinatorWorkerRunInput | null = null
+    let nonStreamUpdates = 0
+    const started = manager.startWorker({
+      parentThreadId: "thread-stream-activity",
+      workspacePath: workspace,
+      role: "implementer",
+      description: "Refresh stream activity timestamps",
+      prompt: "work",
+      runner: async (input) => {
+        capturedInput = input
+        return run.promise
+      }
+    })
+
+    await waitFor(() => capturedInput !== null, "stream activity worker start")
+    manager.bindWorkerUpdates(
+      "thread-stream-activity",
+      (event) => {
+        if (!event.stream) {
+          nonStreamUpdates += 1
+        }
+      },
+      "window:stream-activity"
+    )
+    const initialSnapshot = manager.readWorkers("thread-stream-activity", started.worker_id)[0]
+    const initialUpdatedAt = initialSnapshot.updated_at
+    const initialLastActivityAt = initialSnapshot.last_activity_at
+
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    capturedInput?.onProgress({
+      type: "stream",
+      stream: { mode: "messages", data: ["ignored", {}] }
+    })
+
+    await waitFor(() => {
+      const worker = manager.readWorkers("thread-stream-activity", started.worker_id)[0]
+      return worker.updated_at !== initialUpdatedAt && typeof worker.last_activity_at === "string"
+    }, "stream activity timestamp refresh")
+
+    const refreshedSnapshot = manager.readWorkers("thread-stream-activity", started.worker_id)[0]
+    assert(
+      refreshedSnapshot.updated_at !== initialUpdatedAt,
+      "stream progress should refresh updated_at"
+    )
+    assert(
+      typeof refreshedSnapshot.last_activity_at === "string" &&
+        refreshedSnapshot.last_activity_at !== initialLastActivityAt,
+      "stream progress should advance last_activity_at"
+    )
+    await waitFor(() => nonStreamUpdates >= 1, "stream progress regular worker update")
+    assert(nonStreamUpdates >= 1, "stream progress should trigger a regular worker update")
+
+    run.resolve({ summary: "done" })
+    await manager.waitForWorkers("thread-stream-activity", {
+      workerId: started.worker_id,
+      timeoutMs: 1_000,
+      pollIntervalMs: 10
+    })
+  })
+}
+
 async function testProgressUpdatesAreThrottled(): Promise<void> {
   await withTempDir("coordinator-worker-manager", async (workspace) => {
     const manager = new CoordinatorWorkerManager()
@@ -2744,6 +2809,86 @@ async function testRestoreCompletedWorkerAndContinue(): Promise<void> {
   })
 }
 
+async function testReadWorkerResultTreatsBareReportsAsCoordinatorArtifacts(): Promise<void> {
+  await withTempDir("coordinator-worker-manager", async (workspace) => {
+    const manager = new CoordinatorWorkerManager()
+    const threadId = "thread-bare-result-path"
+    const workerId = "implementer-bare-result"
+    const workerThreadId = `${threadId}__worker__${workerId}`
+
+    await mkdir(join(workspace, ".cmbdevclaw", "coordinator", threadId, "workers"), {
+      recursive: true
+    })
+    await mkdir(
+      join(workspace, ".cmbdevclaw", "coordinator", threadId, "reports", "workers"),
+      {
+        recursive: true
+      }
+    )
+    await mkdir(join(workspace, "reports", "workers"), { recursive: true })
+
+    await writeFile(
+      join(
+        workspace,
+        ".cmbdevclaw",
+        "coordinator",
+        threadId,
+        "reports",
+        "workers",
+        `${workerId}.json`
+      ),
+      JSON.stringify({ raw_text: "coordinator result body" }),
+      "utf8"
+    )
+    await writeFile(
+      join(workspace, "reports", "workers", `${workerId}.json`),
+      JSON.stringify({ raw_text: "workspace result body" }),
+      "utf8"
+    )
+    await writeFile(
+      workerStatePath(workspace, threadId, workerId),
+      JSON.stringify(
+        {
+          worker_id: workerId,
+          worker_thread_id: workerThreadId,
+          parent_thread_id: threadId,
+          role: "implementer",
+          description: "Restored completed worker with bare reports result path",
+          status: "completed",
+          turns: 1,
+          created_at: "2026-04-29T00:00:00.000Z",
+          updated_at: "2026-04-29T00:01:00.000Z",
+          last_started_at: "2026-04-29T00:00:00.000Z",
+          last_activity_at: "2026-04-29T00:01:00.000Z",
+          finished_at: "2026-04-29T00:01:00.000Z",
+          summary: "already done",
+          result_path: `reports/workers/${workerId}.json`,
+          tool_call_count: 1,
+          last_tool_name: "read_file",
+          last_event: "Worker completed."
+        },
+        null,
+        2
+      ),
+      "utf8"
+    )
+
+    await manager.restoreWorkersForThread({
+      parentThreadId: threadId,
+      workspacePath: workspace
+    })
+    const result = await manager.readWorkerResult(threadId, workerId)
+    assert(
+      result.result_text?.includes("coordinator result body"),
+      "readWorkerResult should interpret bare reports/ result paths as coordinator artifact paths"
+    )
+    assert(
+      !result.result_text?.includes("workspace result body"),
+      "readWorkerResult should not incorrectly read a same-named workspace reports file"
+    )
+  })
+}
+
 async function testRestoreRunningWorkerAsRecoverableStaleFailure(): Promise<void> {
   await withTempDir("coordinator-worker-manager", async (workspace) => {
     const manager = new CoordinatorWorkerManager()
@@ -2852,6 +2997,23 @@ async function testRestoreSkipsInvalidWorkerStateFiles(): Promise<void> {
         parent_thread_id: "other-thread",
         role: "implementer",
         description: "Wrong parent",
+        status: "completed",
+        turns: 1,
+        created_at: "2026-04-29T00:00:00.000Z",
+        updated_at: "2026-04-29T00:01:00.000Z",
+        last_event: "Worker completed.",
+        tool_call_count: 0
+      }),
+      "utf8"
+    )
+    await writeFile(
+      join(workersDir, "implementer-1000-2.json"),
+      JSON.stringify({
+        worker_id: "implementer-1000-2",
+        worker_thread_id: `${threadId}__worker__implementer-9999-9`,
+        parent_thread_id: threadId,
+        role: "implementer",
+        description: "Mismatched worker identity",
         status: "completed",
         turns: 1,
         created_at: "2026-04-29T00:00:00.000Z",
@@ -3581,6 +3743,103 @@ async function testCancelledWorkerSuppressAutoRunPersistsAcrossRestore(): Promis
     )
 
     running.resolve({ summary: "late verifier result" })
+  })
+}
+
+async function testCancelledWorkerDismissesNotificationAfterTerminalPersist(): Promise<void> {
+  await withTempDir("coordinator-worker-manager", async (workspace) => {
+    const threadId = "thread-cancel-dismiss"
+    const manager = new CoordinatorWorkerManager()
+    const running = deferred<CoordinatorWorkerRunResult>()
+    let started = false
+
+    const active = manager.startWorker({
+      parentThreadId: threadId,
+      workspacePath: workspace,
+      role: "implementer",
+      description: "Dismissed worker",
+      prompt: "work",
+      runner: async () => {
+        started = true
+        return running.promise
+      }
+    })
+    await waitFor(() => started, "cancel dismiss worker start")
+
+    const cancelled = manager.cancelWorkersForThread(
+      threadId,
+      "User cancelled coordinator workers.",
+      {
+        suppressNotificationAutoRun: true,
+        dismissNotificationOnTerminalPersist: true
+      }
+    )
+    assert(cancelled.length === 1, "dismiss cancel should return the cancelled worker snapshot")
+
+    running.resolve({ summary: "late result" })
+    await manager.waitForWorkerCleanup(threadId, [active.worker_id], 1_000)
+
+    const persisted = await readJson(workerStatePath(workspace, threadId, active.worker_id))
+    assert(
+      persisted.notification_acknowledged === true,
+      "dismissed cancelled worker should auto-ack its terminal notification after persistence"
+    )
+    assert(
+      persisted.suppress_notification_auto_run === false,
+      "dismissed cancelled worker should clear auto-run suppression once its notification is settled"
+    )
+    assert(
+      !manager.hasNotifications(threadId),
+      "dismissed cancelled worker should not leave a queued coordinator notification behind"
+    )
+  })
+}
+
+async function testSingleCancelledWorkerCanDismissNotificationAfterTerminalPersist(): Promise<void> {
+  await withTempDir("coordinator-worker-manager", async (workspace) => {
+    const threadId = "thread-cancel-dismiss-single"
+    const manager = new CoordinatorWorkerManager()
+    const running = deferred<CoordinatorWorkerRunResult>()
+    let started = false
+
+    const active = manager.startWorker({
+      parentThreadId: threadId,
+      workspacePath: workspace,
+      role: "implementer",
+      description: "Dismissed single worker",
+      prompt: "work",
+      runner: async () => {
+        started = true
+        return running.promise
+      }
+    })
+    await waitFor(() => started, "cancel single dismiss worker start")
+
+    const cancelled = await manager.cancelWorker(threadId, active.worker_id, "cancel one", {
+      suppressNotificationAutoRun: true,
+      dismissNotificationOnTerminalPersist: true
+    })
+    assert(
+      cancelled.status === "cancelled",
+      "single dismiss cancel should return the cancelled worker snapshot"
+    )
+
+    running.resolve({ summary: "late single-worker result" })
+    await manager.waitForWorkerCleanup(threadId, [active.worker_id], 1_000)
+
+    const persisted = await readJson(workerStatePath(workspace, threadId, active.worker_id))
+    assert(
+      persisted.notification_acknowledged === true,
+      "single dismissed cancelled worker should auto-ack its terminal notification after persistence"
+    )
+    assert(
+      persisted.suppress_notification_auto_run === false,
+      "single dismissed cancelled worker should clear auto-run suppression once its notification is settled"
+    )
+    assert(
+      !manager.hasNotifications(threadId),
+      "single dismissed cancelled worker should not leave a queued coordinator notification behind"
+    )
   })
 }
 
@@ -4479,6 +4738,8 @@ async function run(): Promise<void> {
   console.log("PASS coordinator worker usage preserves last event")
   await testDuplicateUsageProgressDoesNotEmitRepeatedUpdates()
   console.log("PASS coordinator worker duplicate usage suppression")
+  await testStreamProgressRefreshesLastActivityAt()
+  console.log("PASS coordinator worker stream activity timestamps")
   await testProgressUpdatesAreThrottled()
   console.log("PASS coordinator worker progress throttling")
   await testStaleProgressFromInterruptedRunIsIgnored()
@@ -4521,6 +4782,8 @@ async function run(): Promise<void> {
   console.log("PASS coordinator worker cancel during interrupted restart")
   await testRestoreCompletedWorkerAndContinue()
   console.log("PASS coordinator worker restore completed")
+  await testReadWorkerResultTreatsBareReportsAsCoordinatorArtifacts()
+  console.log("PASS coordinator worker bare reports result path")
   await testRestoreRunningWorkerAsRecoverableStaleFailure()
   console.log("PASS coordinator worker restore stale running")
   await testRestoreSkipsInvalidWorkerStateFiles()
@@ -4551,6 +4814,10 @@ async function run(): Promise<void> {
   console.log("PASS coordinator worker cancel all preserves completed notifications")
   await testCancelledWorkerSuppressAutoRunPersistsAcrossRestore()
   console.log("PASS coordinator worker cancelled auto-run suppression restore")
+  await testCancelledWorkerDismissesNotificationAfterTerminalPersist()
+  console.log("PASS coordinator worker cancelled notification dismissal")
+  await testSingleCancelledWorkerCanDismissNotificationAfterTerminalPersist()
+  console.log("PASS coordinator worker single cancelled notification dismissal")
   await testWaitForWorkerCleanupWaitsForCurrentRun()
   console.log("PASS coordinator worker cleanup wait")
   await testWaitForWorkerCleanupDoesNotFalseTimeoutAtBoundary()

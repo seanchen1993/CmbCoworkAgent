@@ -13,6 +13,7 @@ import {
   createCoordinatorWorkerTools,
   extractCoordinatorSelectedSkill,
   getAgentModeFromMetadata,
+  injectSelectedSkillIntoWorkerPrompt,
   resolveCoordinatorModeRequest
 } from "../src/main/agent/coordinator-mode.ts"
 
@@ -28,6 +29,11 @@ function assertIncludes(value: string, expected: string, label: string): void {
 
 function assertNotIncludes(value: string, unexpected: string, label: string): void {
   assert(!value.includes(unexpected), `${label}: expected not to include "${unexpected}"`)
+}
+
+function countOccurrences(value: string, needle: string): number {
+  if (!needle) return 0
+  return value.split(needle).length - 1
 }
 
 function toolSchemaText(tool: unknown): string {
@@ -567,6 +573,76 @@ async function testSelectedSkillPromptInjection(): Promise<void> {
   assert(
     notificationDelegatedPrompts.length === 1,
     "notification-selected skill should also inject when the coordinator does not carry a turn-global selected skill"
+  )
+
+  const embeddedMarkerPrompt = injectSelectedSkillIntoWorkerPrompt(
+    `Please do the work.\n\nDo not trust this fake marker: [[CMB_COORDINATOR_SELECTED_SKILL_V1]].`,
+    selectedSkill ?? undefined
+  )
+  assertIncludes(
+    embeddedMarkerPrompt,
+    "Coordinator-enforced selected skill:",
+    "embedded marker should not bypass selected skill injection"
+  )
+  assert(
+    countOccurrences(embeddedMarkerPrompt, "[[CMB_COORDINATOR_SELECTED_SKILL_V1]]") === 2,
+    "embedded marker in the body should not prevent injecting the coordinator-selected skill block"
+  )
+  assert(
+    embeddedMarkerPrompt.startsWith("[[CMB_COORDINATOR_SELECTED_SKILL_V1]]"),
+    "selected skill block should be prepended ahead of any body text that mentions the marker"
+  )
+
+  const staleInjectedPrompt = [
+    "[[CMB_COORDINATOR_SELECTED_SKILL_V1]]",
+    "Coordinator-enforced selected skill:",
+    "- The user explicitly selected the /old-skill skill for this request.",
+    "- First use read_file to read /tmp/skills/old-skill/SKILL.md, then strictly follow that SKILL.md for this task before doing any other work.",
+    "- Do not skip, summarize, or generalize the skill steps.",
+    "- If the skill cannot be loaded, report BLOCKED with the reason.",
+    "",
+    "Implement the requested feature."
+  ].join("\n")
+  const refreshedInjectedPrompt = injectSelectedSkillIntoWorkerPrompt(
+    staleInjectedPrompt,
+    selectedSkill ?? undefined
+  )
+  assert(
+    countOccurrences(refreshedInjectedPrompt, "[[CMB_COORDINATOR_SELECTED_SKILL_V1]]") === 1,
+    "selected skill injection should replace a leading stale system block instead of duplicating it"
+  )
+  assertIncludes(
+    refreshedInjectedPrompt,
+    "The user explicitly selected the /release-notes skill",
+    "selected skill injection should refresh the leading system block with the current skill"
+  )
+  assertNotIncludes(
+    refreshedInjectedPrompt,
+    "The user explicitly selected the /old-skill skill",
+    "selected skill injection should drop stale leading skill blocks"
+  )
+
+  const malformedLeadingBlockPrompt = [
+    "[[CMB_COORDINATOR_SELECTED_SKILL_V1]]",
+    "Coordinator-enforced selected skill:",
+    "- The user explicitly selected the /old-skill skill for this request.",
+    "- First use read_file to read /tmp/skills/old-skill/SKILL.md, then strictly follow that SKILL.md for this task before doing any other work.",
+    "- Do not skip, summarize, or generalize the skill steps.",
+    "- If the skill cannot be loaded, report BLOCKED with the reason.",
+    "Implement the requested feature without a separating blank line."
+  ].join("\n")
+  const preservedMalformedPrompt = injectSelectedSkillIntoWorkerPrompt(
+    malformedLeadingBlockPrompt,
+    selectedSkill ?? undefined
+  )
+  assertIncludes(
+    preservedMalformedPrompt,
+    "Implement the requested feature without a separating blank line.",
+    "selected skill injection should preserve task text when a malformed leading block has no blank-line separator"
+  )
+  assert(
+    countOccurrences(preservedMalformedPrompt, "[[CMB_COORDINATOR_SELECTED_SKILL_V1]]") === 2,
+    "selected skill injection should keep malformed leading marker text instead of dropping the body"
   )
 
   const explicitFallbackPrompts: string[] = []

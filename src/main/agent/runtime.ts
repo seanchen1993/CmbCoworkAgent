@@ -2378,10 +2378,24 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
         },
         cancelWorker: async (input: { workerId?: string; reason?: string }) => {
           const cancelledWorkers = input.workerId
-            ? [await coordinatorWorkerManager.cancelWorker(threadId, input.workerId, input.reason)]
+            ? [
+                await coordinatorWorkerManager.cancelWorker(
+                  threadId,
+                  input.workerId,
+                  input.reason,
+                  {
+                    suppressNotificationAutoRun: true,
+                    dismissNotificationOnTerminalPersist: true
+                  }
+                )
+              ]
             : coordinatorWorkerManager.cancelWorkersForThread(
                 threadId,
-                input.reason ?? "Coordinator requested worker cancellation."
+                input.reason ?? "Coordinator requested worker cancellation.",
+                {
+                  suppressNotificationAutoRun: true,
+                  dismissNotificationOnTerminalPersist: true
+                }
               )
           await Promise.allSettled(
             cancelledWorkers.map((worker) =>
@@ -2397,12 +2411,6 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
           const returnedWorkers = input.workerId
             ? workers.filter((worker) => worker.worker_id === input.workerId)
             : workers
-          await coordinatorWorkerManager.acknowledgeNotifications(
-            threadId,
-            cancelledWorkers
-              .filter((worker) => worker.status === "cancelled")
-              .map((worker) => worker.worker_id)
-          )
           if (onCoordinatorWorkerEvent) {
             const worker = input.workerId
               ? workers.find((item) => item.worker_id === input.workerId)

@@ -16,6 +16,7 @@ const THREAD_ID_PATTERN = /^[A-Za-z0-9_-]+$/
 const WORKER_THREAD_DELIMITER = "__worker__"
 const SKILL_USE_TAG_NAME = "CMBDEVCLAW-SKILL-USE-V1"
 const SELECTED_SKILL_PROMPT_MARKER = "[[CMB_COORDINATOR_SELECTED_SKILL_V1]]"
+const SELECTED_SKILL_PROMPT_HEADER = "Coordinator-enforced selected skill:"
 const coordinatorWorkerSubagentSchema = z.enum(["worker"])
 const workerRoleSchema = z.enum(["implementer", "verifier"])
 const workerWorkloadSchema = z.enum(["read_only", "verify", "write"])
@@ -288,13 +289,15 @@ export function injectSelectedSkillIntoWorkerPrompt(
 ): string {
   if (!selectedSkill) return prompt
   const trimmedPrompt = prompt.trim()
-  if (trimmedPrompt.includes(SELECTED_SKILL_PROMPT_MARKER)) {
-    return prompt
-  }
+  const promptWithoutInjectedBlock = stripLeadingSelectedSkillPromptBlock(trimmedPrompt)
+  const selectedSkillBlock = buildSelectedSkillPromptBlock(selectedSkill)
+  return [selectedSkillBlock, promptWithoutInjectedBlock].filter(Boolean).join("\n\n")
+}
 
-  const selectedSkillBlock = [
+function buildSelectedSkillPromptBlock(selectedSkill: CoordinatorSelectedSkill): string {
+  return [
     SELECTED_SKILL_PROMPT_MARKER,
-    "Coordinator-enforced selected skill:",
+    SELECTED_SKILL_PROMPT_HEADER,
     `- The user explicitly selected the /${selectedSkill.skillName} skill for this request.`,
     selectedSkill.description ? `- Description: ${selectedSkill.description}` : "",
     selectedSkill.whenToUse ? `- When to use: ${selectedSkill.whenToUse}` : "",
@@ -307,8 +310,39 @@ export function injectSelectedSkillIntoWorkerPrompt(
   ]
     .filter(Boolean)
     .join("\n")
+}
 
-  return [selectedSkillBlock, trimmedPrompt].filter(Boolean).join("\n\n")
+function stripLeadingSelectedSkillPromptBlock(prompt: string): string {
+  if (!prompt.startsWith(SELECTED_SKILL_PROMPT_MARKER)) {
+    return prompt
+  }
+
+  const separatorIndex = prompt.indexOf("\n\n")
+  if (separatorIndex < 0) {
+    return prompt
+  }
+
+  const candidateBlock = prompt.slice(0, separatorIndex)
+  if (!isSelectedSkillPromptBlock(candidateBlock)) {
+    return prompt
+  }
+
+  const remainder = prompt.slice(separatorIndex + 2)
+  return remainder.trimStart()
+}
+
+function isSelectedSkillPromptBlock(block: string): boolean {
+  const lines = block.split("\n")
+  if (lines.length < 5) return false
+  if (lines[0] !== SELECTED_SKILL_PROMPT_MARKER) return false
+  if (lines[1] !== SELECTED_SKILL_PROMPT_HEADER) return false
+
+  return (
+    lines.some((line) => line.startsWith("- The user explicitly selected the /")) &&
+    lines.some((line) => line.startsWith("- First use read_file to read ")) &&
+    lines.includes("- Do not skip, summarize, or generalize the skill steps.") &&
+    lines.includes("- If the skill cannot be loaded, report BLOCKED with the reason.")
+  )
 }
 
 export function getAgentModeFromMetadata(metadata: Record<string, unknown>): AgentMode {
