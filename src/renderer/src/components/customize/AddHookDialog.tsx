@@ -2397,13 +2397,13 @@ export function AddHookDialog(props: {
                     markdown。
                   </p>
                   <pre className="rounded bg-muted/40 p-2 font-mono text-[11px] leading-relaxed">{`# 直接终止本轮
-node -e "process.stdout.write(JSON.stringify({continue:false,stopReason:'已满足终止条件'}))"
+echo {"continue":false,"stopReason":"已满足终止条件"}
 
 # 要求 Agent 修订
-node -e "process.stdout.write(JSON.stringify({decision:'block',reason:'请补充测试再结束'}))"
+echo {"decision":"block","reason":"请补充测试再结束"}
 
 # 携带额外整改上下文
-node -e "process.stdout.write(JSON.stringify({decision:'block',reason:'…',additionalContext:'提示：先跑 pytest'}))"`}</pre>
+echo {"decision":"block","reason":"…","additionalContext":"提示：先跑 pytest"}`}</pre>
                   <p>
                     优先级：<code>continue=false</code> {">"} <code>decision=block</code>。
                     若同时设置上面的“处理方式”选项，则配置项覆盖 stdout 输出。
