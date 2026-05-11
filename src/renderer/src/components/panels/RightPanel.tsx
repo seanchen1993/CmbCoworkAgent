@@ -42,15 +42,20 @@ import { getFileType } from "@/lib/file-types"
 import { Badge } from "@/components/ui/badge"
 import { onOpenResourcePreview } from "@/lib/resource-preview-events"
 import type { Todo, SkillMetadata, PluginMetadata, LspConfig, LspStatus } from "@/types"
+import { isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
 import { SubagentCard } from "@/components/panels/SubagentPanel"
 import { LspPanel } from "@/components/customize/LspPanel"
 
 type HookConfig = Awaited<ReturnType<typeof window.api.hooks.list>>[number]
 type PluginHookMetadata = Awaited<ReturnType<typeof window.api.plugins.listHooks>>[number]
+type SkillHookMetadata = Awaited<ReturnType<typeof window.api.hooks.skills.list>>[number]
 type DisplayHook = HookConfig & {
-  source: "global" | "workspace" | "plugin"
+  source: "global" | "workspace" | "plugin" | "skill"
   pluginId?: string
   pluginName?: string
+  skillName?: string
+  skillPath?: string
+  hookPath?: string
 }
 
 const FileViewer = lazy(() =>
@@ -228,12 +233,19 @@ export function RightPanel({
   useEffect(() => {
     async function load(): Promise<void> {
       try {
-        const [loaded, disabled] = await Promise.all([
+        const [loaded, pluginLoaded, disabled] = await Promise.all([
           window.api.skills.list(),
+          window.api.skills.listPlugins(),
           window.api.skills.getDisabled()
         ])
-        setSkills(loaded)
-        setDisabledSkills(new Set(disabled))
+        // Plugin skills carry the same SkillMetadata shape but with pluginId/pluginName set;
+        // merge them in so the right panel reflects the full set the agent can use, and
+        // de-dup by id (custom/built-in wins on collision — same precedence as other UIs).
+        const byId = new Map<string, SkillMetadata>()
+        for (const s of pluginLoaded) byId.set(normalizeSkillId(s.id || s.name), s)
+        for (const s of loaded) byId.set(normalizeSkillId(s.id || s.name), s)
+        setSkills(Array.from(byId.values()))
+        setDisabledSkills(new Set(disabled.map(normalizeSkillId)))
       } catch (e) {
         console.error("[RightPanel] Failed to load skills:", e)
       }
@@ -328,20 +340,31 @@ export function RightPanel({
   const loadHooks = useCallback(async (): Promise<void> => {
     try {
       const workspacePath = threadState?.workspacePath ?? null
-      const [globalHooks, workspaceHooks, pluginHooks] = await Promise.all([
+      const [globalHooks, workspaceHooks, pluginHooks, skillHooks] = await Promise.all([
         window.api.hooks.list(),
         workspacePath ? window.api.hooks.workspace.list(workspacePath) : Promise.resolve([]),
-        window.api.plugins.listHooks()
+        window.api.plugins.listHooks(),
+        window.api.hooks.skills.list()
       ])
       setHooks([
         ...globalHooks.map((hook): DisplayHook => ({ ...hook, source: "global" })),
         ...workspaceHooks.map((hook): DisplayHook => ({ ...hook, source: "workspace" })),
+        ...skillHooks.map(
+          (hook: SkillHookMetadata): DisplayHook => ({
+            ...hook,
+            source: "skill",
+            skillName: hook.skillName,
+            skillPath: hook.skillPath,
+            hookPath: hook.hookPath
+          })
+        ),
         ...pluginHooks.map(
           (hook: PluginHookMetadata): DisplayHook => ({
             ...hook,
             source: "plugin",
             pluginId: hook.pluginId,
-            pluginName: hook.pluginName
+            pluginName: hook.pluginName,
+            hookPath: hook.hookPath
           })
         )
       ])
@@ -353,6 +376,12 @@ export function RightPanel({
   useEffect(() => {
     void loadHooks()
   }, [loadHooks, pluginVersion])
+
+  useEffect(() => {
+    return window.api.hooks.onChanged(() => {
+      void loadHooks()
+    })
+  }, [loadHooks])
 
   useEffect(() => {
     if (!currentThreadId) return
@@ -1141,7 +1170,9 @@ export function RightPanel({
             <SectionHeader
               title="技能"
               icon={Sparkles}
-              badge={skills.length}
+              badge={
+                splitRightPanelSkillsByEnabled(skills, disabledSkills).enabled.length
+              }
               isOpen={skillsOpen}
               onToggle={() => setSkillsOpen((prev) => !prev)}
             />
@@ -2257,6 +2288,87 @@ function AgentsContent(): React.JSX.Element {
   )
 }
 
+type RightPanelSkillTreeNode = {
+  key: string
+  label: string
+  skill?: SkillMetadata
+  children: RightPanelSkillTreeNode[]
+}
+
+function getRightPanelSkillPath(skill: SkillMetadata): string {
+  const id = skill.id?.startsWith("plugin:") ? skill.id.split("/").slice(1).join("/") : skill.id
+  return String(skill.relativePath || id || skill.name || "")
+    .replace(/\\/g, "/")
+    .replace(/^\/+|\/+$/g, "")
+}
+
+function buildRightPanelSkillTree(skills: SkillMetadata[]): RightPanelSkillTreeNode[] {
+  const root: RightPanelSkillTreeNode = { key: "root", label: "root", children: [] }
+  const indexByNode = new WeakMap<RightPanelSkillTreeNode, Map<string, RightPanelSkillTreeNode>>()
+
+  const getIndex = (node: RightPanelSkillTreeNode): Map<string, RightPanelSkillTreeNode> => {
+    let index = indexByNode.get(node)
+    if (!index) {
+      index = new Map(node.children.map((child) => [normalizeSkillId(child.label), child]))
+      indexByNode.set(node, index)
+    }
+    return index
+  }
+
+  for (const skill of skills) {
+    const segments = getRightPanelSkillPath(skill).split("/").filter(Boolean)
+    const fallbackSegments = segments.length > 0 ? segments : [skill.name]
+    let current = root
+
+    for (const segment of fallbackSegments) {
+      const normalized = normalizeSkillId(segment)
+      const childIndex = getIndex(current)
+      let child = childIndex.get(normalized)
+      if (!child) {
+        child = { key: `${current.key}/${normalized}`, label: segment, children: [] }
+        current.children.push(child)
+        childIndex.set(normalized, child)
+      }
+      current = child
+    }
+
+    current.skill = skill
+  }
+
+  const sortNodes = (nodes: RightPanelSkillTreeNode[]): RightPanelSkillTreeNode[] =>
+    [...nodes]
+      .sort((a, b) => {
+        const labelA = a.skill?.name || a.label
+        const labelB = b.skill?.name || b.label
+        return labelA.localeCompare(labelB, "zh-CN")
+      })
+      .map((node) => ({ ...node, children: sortNodes(node.children) }))
+
+  return sortNodes(root.children)
+}
+
+function countRightPanelTreeSkills(node: RightPanelSkillTreeNode): number {
+  return (
+    (node.skill ? 1 : 0) +
+    node.children.reduce((sum, child) => sum + countRightPanelTreeSkills(child), 0)
+  )
+}
+
+function splitRightPanelSkillsByEnabled(
+  skills: SkillMetadata[],
+  disabledSkills: ReadonlySet<string>
+): { enabled: SkillMetadata[]; disabled: SkillMetadata[] } {
+  const enabled: SkillMetadata[] = []
+  const disabled: SkillMetadata[] = []
+
+  for (const skill of skills) {
+    if (isSkillDisabled(skill, disabledSkills)) disabled.push(skill)
+    else enabled.push(skill)
+  }
+
+  return { enabled, disabled }
+}
+
 function SkillsContent({
   skills,
   disabledSkills
@@ -2264,6 +2376,16 @@ function SkillsContent({
   skills: SkillMetadata[]
   disabledSkills: Set<string>
 }): React.JSX.Element {
+  const [expandedTreeNodes, setExpandedTreeNodes] = useState<Set<string>>(new Set())
+  const toggleTreeNode = useCallback((nodeKey: string) => {
+    setExpandedTreeNodes((prev) => {
+      const next = new Set(prev)
+      if (next.has(nodeKey)) next.delete(nodeKey)
+      else next.add(nodeKey)
+      return next
+    })
+  }, [])
+
   if (skills.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center text-center text-sm text-muted-foreground py-8 px-4">
@@ -2292,68 +2414,202 @@ function SkillsContent({
     return programmingSkillIds.has(skill.name.trim().toLowerCase())
   }
 
-  const programmingSkills = skills.filter(isProgrammingSkill)
-  const generalSkills = skills.filter((skill) => !isProgrammingSkill(skill))
+  const { enabled, disabled } = splitRightPanelSkillsByEnabled(skills, disabledSkills)
+  const enabledProgrammingSkills = enabled.filter(isProgrammingSkill)
+  const enabledGeneralSkills = enabled.filter((skill) => !isProgrammingSkill(skill))
+  const disabledProgrammingSkills = disabled.filter(isProgrammingSkill)
+  const disabledGeneralSkills = disabled.filter((skill) => !isProgrammingSkill(skill))
 
-  const renderSkillCard = (skill: SkillMetadata): React.JSX.Element => {
-    const disabled = disabledSkills.has(skill.name)
+  const renderSkillTree = (
+    treeSkills: SkillMetadata[],
+    disabled: boolean
+  ): React.JSX.Element | null => {
+    if (treeSkills.length === 0) return null
+    const tree = buildRightPanelSkillTree(treeSkills)
+
+    const renderNodes = (nodes: RightPanelSkillTreeNode[]): React.JSX.Element => (
+      <div className="space-y-2">
+        {nodes.map((node) => {
+          const childCount = node.children.reduce(
+            (sum, child) => sum + countRightPanelTreeSkills(child),
+            0
+          )
+          const childrenExpanded = expandedTreeNodes.has(node.key)
+          return (
+            <div key={node.key} className="space-y-2">
+              {node.skill ? (
+                <div className={cn("p-3 rounded-sm border border-border", disabled && "opacity-60")}>
+                  <div className="flex min-w-0 items-center gap-2 text-sm font-medium">
+                    <Sparkles
+                      className={cn(
+                        "size-3.5 shrink-0",
+                        disabled ? "text-muted-foreground" : "text-amber-500"
+                      )}
+                    />
+                    <span
+                      className={cn(
+                        "min-w-0 flex-1 truncate",
+                        disabled && "text-muted-foreground line-through"
+                      )}
+                    >
+                      {node.skill.name}
+                    </span>
+                    {childCount > 0 && (
+                      <Badge variant="outline" className="text-[10px] h-4 px-1.5 shrink-0 gap-1">
+                        <Folder className="mr-1 size-2.5" />
+                        {childCount}
+                      </Badge>
+                    )}
+                    {disabled && (
+                      <Badge variant="outline" className="text-[10px] h-4 px-1.5 shrink-0">
+                        已禁用
+                      </Badge>
+                    )}
+                  </div>
+                  {node.skill.pluginName && (
+                    <div className="mt-1 flex min-w-0 items-center gap-1">
+                      <Badge
+                        variant="outline"
+                        className="min-w-0 max-w-full text-[10px] h-4 px-1.5 border-violet-300/70 bg-violet-500/10 text-violet-700 dark:border-violet-500/30 dark:text-violet-300"
+                        title={`来自插件：${node.skill.pluginName}`}
+                      >
+                        <span className="truncate">插件 · {node.skill.pluginName}</span>
+                      </Badge>
+                    </div>
+                  )}
+                  {node.skill.description && (
+                    <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
+                      {node.skill.description}
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <button
+                  className="flex min-h-9 w-full items-center gap-2 rounded-sm border border-dashed border-border/70 bg-muted/20 px-3 py-2 text-left text-xs text-muted-foreground hover:bg-muted/35"
+                  onClick={() => toggleTreeNode(node.key)}
+                >
+                  {childrenExpanded ? (
+                    <ChevronDown className="size-3 shrink-0" />
+                  ) : (
+                    <ChevronRight className="size-3 shrink-0" />
+                  )}
+                  <Folder className="size-3.5 shrink-0" />
+                  <span className="min-w-0 flex-1 truncate">{node.label}</span>
+                  <Badge variant="outline" className="text-[10px] h-4 px-1.5 shrink-0">
+                    {countRightPanelTreeSkills(node)}
+                  </Badge>
+                </button>
+              )}
+
+              {node.skill && node.children.length > 0 && (
+                <button
+                  className="ml-3 flex min-h-7 w-[calc(100%-0.75rem)] items-center gap-2 rounded-sm border border-dashed border-border/60 bg-muted/15 px-2 py-1 text-left text-[11px] text-muted-foreground hover:bg-muted/30"
+                  onClick={() => toggleTreeNode(node.key)}
+                >
+                  {childrenExpanded ? (
+                    <ChevronDown className="size-3 shrink-0" />
+                  ) : (
+                    <ChevronRight className="size-3 shrink-0" />
+                  )}
+                  <Folder className="size-3 shrink-0" />
+                  <span className="min-w-0 flex-1 truncate">子技能</span>
+                  <Badge variant="outline" className="text-[10px] h-4 px-1.5 shrink-0">
+                    {childCount}
+                  </Badge>
+                </button>
+              )}
+
+              {node.children.length > 0 && childrenExpanded && (
+                <div className="ml-3 border-l border-border/60 pl-2">
+                  {renderNodes(node.children)}
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    )
+
+    return renderNodes(tree)
+  }
+
+  const renderSceneGroup = (
+    title: string,
+    groupSkills: SkillMetadata[],
+    isDisabledGroup: boolean
+  ): React.JSX.Element | null => {
+    if (groupSkills.length === 0) return null
     return (
-      <div
-        key={skill.name}
-        className={cn("p-3 rounded-sm border border-border", disabled && "opacity-60")}
-      >
-        <div className="flex items-center gap-2 text-sm font-medium">
-          <Sparkles
-            className={cn(
-              "size-3.5 shrink-0",
-              disabled ? "text-muted-foreground" : "text-amber-500"
-            )}
-          />
-          <span className={cn("flex-1 truncate", disabled && "text-muted-foreground line-through")}>
-            {skill.name}
+      <div className="space-y-2">
+        <div className="flex items-center justify-between px-1">
+          <span className="text-[11px] text-muted-foreground tracking-wider font-medium">
+            {title}
           </span>
-          {disabled && (
-            <Badge variant="outline" className="text-[10px] h-4 px-1.5 shrink-0">
-              已禁用
-            </Badge>
-          )}
+          <Badge variant="outline" className="text-[10px] h-5">
+            {groupSkills.length}
+          </Badge>
         </div>
-        {skill.description && (
-          <p className="text-xs text-muted-foreground mt-1 line-clamp-2">{skill.description}</p>
+        {renderSkillTree(groupSkills, isDisabledGroup)}
+      </div>
+    )
+  }
+
+  const renderStatusSection = (
+    title: string,
+    sectionSkills: SkillMetadata[],
+    isDisabledGroup: boolean,
+    defaultOpen: boolean
+  ): React.JSX.Element | null => {
+    if (sectionSkills.length === 0) return null
+    const content = (
+      <div className="space-y-3 pt-2">
+        {renderSceneGroup(
+          "通用场景",
+          isDisabledGroup ? disabledGeneralSkills : enabledGeneralSkills,
+          isDisabledGroup
         )}
+        {renderSceneGroup(
+          "编程场景",
+          isDisabledGroup ? disabledProgrammingSkills : enabledProgrammingSkills,
+          isDisabledGroup
+        )}
+      </div>
+    )
+
+    if (isDisabledGroup) {
+      return (
+        <details
+          className="rounded-sm border border-border/70 bg-muted/20 px-2 py-2"
+          open={defaultOpen}
+        >
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-[11px] font-medium text-muted-foreground">
+            <span>{title}</span>
+            <Badge variant="outline" className="text-[10px] h-5">
+              {sectionSkills.length}
+            </Badge>
+          </summary>
+          {content}
+        </details>
+      )
+    }
+
+    return (
+      <div className="rounded-sm border border-emerald-200/70 bg-emerald-50/35 px-2 py-2 dark:border-emerald-900/40 dark:bg-emerald-950/10">
+        <div className="flex items-center justify-between gap-2 text-[11px] font-medium text-emerald-800 dark:text-emerald-200">
+          <span>{title}</span>
+          <Badge variant="outline" className="text-[10px] h-5">
+            {sectionSkills.length}
+          </Badge>
+        </div>
+        {content}
       </div>
     )
   }
 
   return (
     <div className="p-3 space-y-2">
-      {generalSkills.length > 0 && (
-        <div className="space-y-2">
-          <div className="flex items-center justify-between px-1">
-            <span className="text-[11px] text-muted-foreground tracking-wider font-medium">
-              通用场景
-            </span>
-            <Badge variant="outline" className="text-[10px] h-5">
-              {generalSkills.length}
-            </Badge>
-          </div>
-          {generalSkills.map(renderSkillCard)}
-        </div>
-      )}
-
-      {programmingSkills.length > 0 && (
-        <div className="space-y-2 pt-1">
-          <div className="flex items-center justify-between px-1">
-            <span className="text-[11px] text-muted-foreground tracking-wider font-medium">
-              编程场景
-            </span>
-            <Badge variant="outline" className="text-[10px] h-5">
-              {programmingSkills.length}
-            </Badge>
-          </div>
-          {programmingSkills.map(renderSkillCard)}
-        </div>
-      )}
+      {renderStatusSection("已启用技能", enabled, false, true)}
+      {renderStatusSection("已禁用技能", disabled, true, false)}
     </div>
   )
 }
@@ -2440,9 +2696,13 @@ function PluginsContent({ plugins }: { plugins: PluginMetadata[] }): React.JSX.E
   )
 }
 
+// Only the events the runtime actually emits (SUPPORTED_HOOK_EVENTS in src/main/hooks/types.ts).
+// Adding rows here for unsupported events is dead UI and misleads readers.
 const EVENT_BADGE_COLORS: Record<string, string> = {
   PreToolUse: "bg-blue-500/15 text-blue-600 dark:text-blue-400",
   PostToolUse: "bg-green-500/15 text-green-600 dark:text-green-400",
+  PreSkillUse: "bg-blue-500/15 text-blue-600 dark:text-blue-400",
+  PostSkillUse: "bg-green-500/15 text-green-600 dark:text-green-400",
   UserPromptSubmit: "bg-cyan-500/15 text-cyan-600 dark:text-cyan-400",
   SessionStart: "bg-teal-500/15 text-teal-600 dark:text-teal-400",
   SessionEnd: "bg-rose-500/15 text-rose-600 dark:text-rose-400",
@@ -2454,10 +2714,12 @@ const EVENT_BADGE_COLORS: Record<string, string> = {
 const EVENT_LABEL: Record<string, string> = {
   PreToolUse: "调用前",
   PostToolUse: "调用后",
+  PreSkillUse: "技能前",
+  PostSkillUse: "技能后",
   UserPromptSubmit: "提交",
   SessionStart: "会话始",
   SessionEnd: "会话终",
-  Stop: "停止时",
+  Stop: "停止",
   Notification: "通知",
   SubagentStop: "子停止"
 }
@@ -2485,7 +2747,7 @@ function HooksContent({
       <div className="flex flex-col items-center justify-center text-center text-sm text-muted-foreground py-8 px-4">
         <Webhook className="size-8 mb-2 opacity-50" />
         <span>暂无钩子</span>
-        <span className="text-xs mt-1">在自定义面板、插件或工作区中添加钩子</span>
+        <span className="text-xs mt-1">在自定义面板、插件、技能或工作区中添加钩子</span>
       </div>
     )
   }
@@ -2495,21 +2757,8 @@ function HooksContent({
 
   const handleToggle = async (hook: DisplayHook): Promise<void> => {
     try {
-      if (hook.source === "plugin") {
-        if (!hook.pluginId) {
-          throw new Error("缺少插件 ID")
-        }
-        const result = await window.api.plugins.setHookEnabled(
-          hook.pluginId,
-          hook.id,
-          !hook.enabled
-        )
-        if (!result.success) {
-          throw new Error(result.error || "插件 Hook 切换失败")
-        }
-      } else {
-        await window.api.hooks.setEnabled(hook.id, !hook.enabled)
-      }
+      if (hook.source !== "global") return
+      await window.api.hooks.setEnabled(hook.id, !hook.enabled)
       onChange()
     } catch (e) {
       console.error("[HooksContent] Failed to toggle hook:", e)
@@ -2521,56 +2770,104 @@ function HooksContent({
     const isWorkspaceHook = hook.source === "workspace"
     const isGlobalHook = hook.source === "global"
     const isPluginHook = hook.source === "plugin"
+    const isSkillHook = hook.source === "skill"
+    // A plugin-owned skill hook: source="skill" but with pluginName / pluginId set.
+    // Show its origin (plugin → skill) so users can tell it apart from a stand-alone skill hook.
+    const isPluginSkillHook = isSkillHook && Boolean(hook.pluginName || hook.pluginId)
     const summary = isPrompt ? (hook.prompt ?? "") : (hook.command ?? "")
+    const ownerLabel = isPluginHook
+      ? hook.pluginName
+      : isPluginSkillHook && hook.skillName
+        ? `${hook.pluginName ?? hook.pluginId} · ${hook.skillName}`
+        : isSkillHook
+          ? hook.skillName
+          : undefined
+    const readonlyTitle = isWorkspaceHook
+      ? "工作区 Hook 由工作区配置管理"
+      : isPluginHook
+        ? "插件 Hook 请在插件详情页管理"
+        : isSkillHook
+          ? "技能 Hook 请在技能目录或技能管理页管理"
+          : ""
     return (
       <div
         key={hook.id}
-        className={cn("p-3 rounded-sm border border-border", !hook.enabled && "opacity-60")}
+        className={cn(
+          "min-w-0 overflow-hidden p-3 rounded-sm border border-border",
+          !hook.enabled && "opacity-60"
+        )}
       >
-        <div className="flex items-center gap-2 text-sm">
-          <span
-            className={cn(
-              "text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0",
-              EVENT_BADGE_COLORS[hook.event] ?? "bg-muted text-muted-foreground"
+        <div className="flex min-w-0 items-start gap-2 text-sm">
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+            <span
+              className={cn(
+                "max-w-full truncate text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0",
+                EVENT_BADGE_COLORS[hook.event] ?? "bg-muted text-muted-foreground"
+              )}
+              title={hook.event}
+            >
+              {EVENT_LABEL[hook.event] ?? hook.event}
+            </span>
+            {isGlobalHook && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-sky-500/15 text-sky-600 dark:text-sky-400">
+                全局
+              </span>
             )}
-          >
-            {EVENT_LABEL[hook.event] ?? hook.event}
-          </span>
-          {isGlobalHook && (
-            <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-sky-500/15 text-sky-600 dark:text-sky-400">
-              全局
+            {isWorkspaceHook && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
+                工作区
+              </span>
+            )}
+            {isPluginHook && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-violet-500/15 text-violet-600 dark:text-violet-400">
+                插件
+              </span>
+            )}
+            {isPluginSkillHook && (
+              <span
+                className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-violet-500/15 text-violet-600 dark:text-violet-400"
+                title={`插件 ${hook.pluginName ?? hook.pluginId} 中的技能`}
+              >
+                插件
+              </span>
+            )}
+            {isSkillHook && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
+                技能
+              </span>
+            )}
+            {isPrompt && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-violet-500/15 text-violet-600 dark:text-violet-400">
+                策略
+              </span>
+            )}
+            {ownerLabel && (
+              <span
+                className="min-w-0 max-w-[120px] truncate text-[10px] text-muted-foreground"
+                title={ownerLabel}
+              >
+                {ownerLabel}
+              </span>
+            )}
+            {hook.matcher && hook.matcher !== "*" && (
+              <span
+                className="min-w-0 max-w-[140px] truncate text-[10px] text-muted-foreground font-mono"
+                title={hook.matcher}
+              >
+                {TOOL_LABEL[hook.matcher] ?? hook.matcher}
+              </span>
+            )}
+          </div>
+          {!isGlobalHook ? (
+            <span
+              className="text-[10px] text-muted-foreground shrink-0 leading-5"
+              title={readonlyTitle}
+            >
+              只读
             </span>
-          )}
-          {isWorkspaceHook && (
-            <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
-              工作区
-            </span>
-          )}
-          {isPluginHook && (
-            <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-violet-500/15 text-violet-600 dark:text-violet-400">
-              插件
-            </span>
-          )}
-          {isPrompt && (
-            <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-violet-500/15 text-violet-600 dark:text-violet-400">
-              策略
-            </span>
-          )}
-          {isPluginHook && hook.pluginName && (
-            <span className="text-[10px] text-muted-foreground shrink-0 truncate max-w-[120px]">
-              {hook.pluginName}
-            </span>
-          )}
-          {hook.matcher && hook.matcher !== "*" && (
-            <span className="text-[10px] text-muted-foreground shrink-0 font-mono">
-              {TOOL_LABEL[hook.matcher] ?? hook.matcher}
-            </span>
-          )}
-          {isWorkspaceHook ? (
-            <span className="ml-auto text-[10px] text-muted-foreground shrink-0">只读</span>
           ) : (
             <button
-              className="ml-auto shrink-0"
+              className="shrink-0 leading-5"
               onClick={() => handleToggle(hook)}
               title={hook.enabled ? "点击禁用" : "点击启用"}
             >
@@ -2585,9 +2882,10 @@ function HooksContent({
         </div>
         <p
           className={cn(
-            "text-xs text-muted-foreground mt-1.5 break-all line-clamp-2",
+            "min-w-0 overflow-hidden text-xs text-muted-foreground mt-1.5 break-words line-clamp-2",
             isPrompt ? "italic" : "font-mono"
           )}
+          title={summary}
         >
           {summary}
         </p>
@@ -2599,17 +2897,15 @@ function HooksContent({
     <div className="p-3 space-y-2">
       {enabled.length > 0 && enabled.map(renderHookCard)}
       {disabled.length > 0 && (
-        <div className="space-y-2 pt-1">
-          <div className="flex items-center justify-between px-1">
-            <span className="text-[11px] text-muted-foreground tracking-wider font-medium">
-              已禁用
-            </span>
+        <details className="rounded-sm border border-border/70 bg-muted/20 px-2 py-2">
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-[11px] font-medium text-muted-foreground">
+            <span>已禁用</span>
             <Badge variant="outline" className="text-[10px] h-5">
               {disabled.length}
             </Badge>
-          </div>
-          {disabled.map(renderHookCard)}
-        </div>
+          </summary>
+          <div className="space-y-2 pt-2">{disabled.map(renderHookCard)}</div>
+        </details>
       )}
     </div>
   )

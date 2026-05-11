@@ -11,6 +11,8 @@ import {
 } from "../storage"
 import type { UntrustedWorkspaceHook } from "../storage"
 import type { SkillHookMetadata } from "../types"
+import { notifyHooksChanged } from "../hooks/notifications"
+import { clearOnceStateForHook } from "../hooks/runner"
 import {
   isSupportedHookEvent,
   SUPPORTED_HOOK_EVENTS,
@@ -80,6 +82,20 @@ function validateHookConfig(config: HookUpsert): void {
   }
 
   validateOnBlockConfig(config.onBlock)
+
+  if (
+    config.forcedOutcome !== undefined &&
+    config.forcedOutcome !== "always-revise" &&
+    config.forcedOutcome !== "always-halt"
+  ) {
+    throw new Error("forcedOutcome 必须为 always-revise 或 always-halt")
+  }
+  if (config.forcedReason !== undefined && typeof config.forcedReason !== "string") {
+    throw new Error("forcedReason 必须为字符串")
+  }
+  if (config.persistAfterInterrupt !== undefined && typeof config.persistAfterInterrupt !== "boolean") {
+    throw new Error("persistAfterInterrupt 必须为布尔值")
+  }
 }
 
 export function registerHooksHandlers(ipcMain: IpcMain): void {
@@ -96,6 +112,9 @@ export function registerHooksHandlers(ipcMain: IpcMain): void {
   ipcMain.handle("hooks:create", async (_event, config: HookUpsert): Promise<{ id: string }> => {
     validateHookConfig(config)
     const id = upsertHook(config)
+    // Fresh hook id, no prior state to clear, but stay symmetric for clarity.
+    clearOnceStateForHook(id)
+    notifyHooksChanged("global-hook-created")
     return { id }
   })
 
@@ -107,18 +126,28 @@ export function registerHooksHandlers(ipcMain: IpcMain): void {
       }
       validateHookConfig(config)
       const id = upsertHook(config)
+      // Hook content may have changed (command, matcher, once flag, …) — drop
+      // stale once-fired entries so the next match runs the new definition.
+      clearOnceStateForHook(id)
+      notifyHooksChanged("global-hook-updated")
       return { id }
     }
   )
 
   ipcMain.handle("hooks:delete", async (_event, id: string): Promise<void> => {
     deleteHook(id)
+    clearOnceStateForHook(id)
+    notifyHooksChanged("global-hook-deleted")
   })
 
   ipcMain.handle(
     "hooks:setEnabled",
     async (_event, { id, enabled }: { id: string; enabled: boolean }): Promise<void> => {
       setHookEnabled(id, enabled)
+      // Toggle is treated as "fresh start" — disable→enable resets once. Aligns
+      // with CC's register/unregister semantics (where enable = re-register).
+      clearOnceStateForHook(id)
+      notifyHooksChanged("global-hook-enabled-changed")
     }
   )
 
