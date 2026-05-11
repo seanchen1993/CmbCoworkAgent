@@ -114,12 +114,16 @@ if os.name == "nt" and os.environ.get("CMB_SANDBOX_FIX_PYTHON_TEMP_ACL") == "1":
                 return True
         return False
 
-    def _mkdir_inherit_acl(path, mode=0o777, *args, **kwargs):
-        if mode in (0o600, 0o700) and _under_temp(path):
-            mode = 0o777
-        return _orig_mkdir(path, mode, *args, **kwargs)
+    class _MkdirInheritAcl:
+        def __init__(self, wrapped):
+            self._wrapped = wrapped
 
-    os.mkdir = _mkdir_inherit_acl
+        def __call__(self, path, mode=0o777, *args, **kwargs):
+            if mode in (0o600, 0o700) and _under_temp(path):
+                mode = 0o777
+            return self._wrapped(path, mode, *args, **kwargs)
+
+    os.mkdir = _MkdirInheritAcl(_orig_mkdir)
 `
 
 /**

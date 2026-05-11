@@ -70,6 +70,35 @@ test("workspace switch preparation still supports explicit setup/UAC for hard fa
   )
 })
 
+test("python temp ACL sitecustomize uses a callable wrapper so pathlib.mkdir stays compatible", () => {
+  const siteCustomizeSection = sectionBetween(
+    localSandboxSource,
+    "const PYTHON_TEMP_ACL_SITE_CUSTOMIZE = `",
+    "/*"
+  )
+
+  assert.match(
+    siteCustomizeSection,
+    /class _MkdirInheritAcl:/,
+    "sitecustomize should use a callable wrapper object instead of rebinding os.mkdir to a plain Python function"
+  )
+  assert.match(
+    siteCustomizeSection,
+    /def __call__\(self, path, mode=0o777, \*args, \*\*kwargs\):/,
+    "the wrapper should implement __call__ so pathlib's accessor binding does not inject an extra self argument"
+  )
+  assert.match(
+    siteCustomizeSection,
+    /os\.mkdir = _MkdirInheritAcl\(_orig_mkdir\)/,
+    "sitecustomize should install the callable wrapper instance"
+  )
+  assert.doesNotMatch(
+    siteCustomizeSection,
+    /def _mkdir_inherit_acl\(/,
+    "the old plain-function wrapper should not come back"
+  )
+})
+
 test("elevated workspace root validation is shared before ACL/setup work", () => {
   const prewarmSection = sectionBetween(
     localSandboxSource,
