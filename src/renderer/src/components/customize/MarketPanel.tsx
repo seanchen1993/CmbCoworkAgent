@@ -19,11 +19,14 @@ import {
   Lightbulb,
   ArrowLeft,
   BarChart3,
-  X
+  X,
+  Check,
+  ChevronDown
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import {
   Select,
   SelectContent,
@@ -129,7 +132,14 @@ interface UserInfoLite {
   ystId?: string
 }
 
-type UploadFilterMode = "all" | "mine" | "installed" | "featured"
+type UploadFilterMode = "mine" | "installed" | "featured" | "certified"
+
+const uploadFilterOptions: Array<{ value: UploadFilterMode; label: string }> = [
+  { value: "mine", label: "我上传的" },
+  { value: "installed", label: "我安装的" },
+  { value: "featured", label: "精品" },
+  { value: "certified", label: "认证" }
+]
 
 function getSkillStatsRange(): { from: string; to: string } {
   // 和 Dashboard 的默认月维度保持一致，避免前后口径不一致。
@@ -505,7 +515,7 @@ export function MarketPanel(): React.JSX.Element {
   } = useAppStore()
   const [activeTab, setActiveTab] = useState<MarketItemType>("skill")
   const [searchQuery, setSearchQuery] = useState("")
-  const [uploadFilterMode, setUploadFilterMode] = useState<UploadFilterMode>("all")
+  const [uploadFilterModes, setUploadFilterModes] = useState<UploadFilterMode[]>([])
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null)
   const [skillsData, setSkillsData] = useState<MarketItem[]>([])
   const [mcpsData, setMcpsData] = useState<MarketItem[]>([])
@@ -1325,6 +1335,20 @@ export function MarketPanel(): React.JSX.Element {
     [activeTab, currentUserCandidateSet]
   )
 
+  const toggleUploadFilterMode = useCallback((mode: UploadFilterMode) => {
+    setUploadFilterModes((prev) =>
+      prev.includes(mode) ? prev.filter((item) => item !== mode) : [...prev, mode]
+    )
+  }, [])
+
+  const uploadFilterLabel = useMemo(() => {
+    if (uploadFilterModes.length === 0) return "全部项目"
+    if (uploadFilterModes.length === 1) {
+      return uploadFilterOptions.find((option) => option.value === uploadFilterModes[0])?.label
+    }
+    return `已选 ${uploadFilterModes.length} 项`
+  }, [uploadFilterModes])
+
   const filteredData = useMemo(
     () =>
       currentData.filter((item) => {
@@ -1334,14 +1358,15 @@ export function MarketPanel(): React.JSX.Element {
           item.name.toLowerCase().includes(query) ||
           item.description.toLowerCase().includes(query)
         if (!matchesSearch) return false
-        if (uploadFilterMode === "mine" && !isMineUploadedItem(item)) return false
-        if (uploadFilterMode === "installed" && !item.installed) return false
-        if (uploadFilterMode === "featured" && item.featured !== "精品") return false
+        if (uploadFilterModes.includes("mine") && !isMineUploadedItem(item)) return false
+        if (uploadFilterModes.includes("installed") && !item.installed) return false
+        if (uploadFilterModes.includes("featured") && item.featured !== "精品") return false
+        if (uploadFilterModes.includes("certified") && item.tag?.trim() !== "认证") return false
 
         if (!categoryFilter) return true
         return getCategoryFilterName(item.category) === categoryFilter
       }),
-    [categoryFilter, currentData, isMineUploadedItem, searchQuery, uploadFilterMode]
+    [categoryFilter, currentData, isMineUploadedItem, searchQuery, uploadFilterModes]
   )
 
   const sortedSkillData = useMemo(() => {
@@ -1352,13 +1377,17 @@ export function MarketPanel(): React.JSX.Element {
   const visibleMarketData = activeTab === "skill" ? sortedSkillData : filteredData
   const emptyResultMessage = searchQuery
     ? "未找到匹配的项目"
-    : uploadFilterMode === "mine"
-      ? "未找到你上传的项目"
-      : uploadFilterMode === "installed"
-        ? "未找到你安装的项目"
-        : uploadFilterMode === "featured"
-          ? "未找到精品项目"
-          : "暂无可用项目"
+    : uploadFilterModes.length > 1
+      ? "未找到符合筛选的项目"
+      : uploadFilterModes[0] === "mine"
+        ? "未找到你上传的项目"
+        : uploadFilterModes[0] === "installed"
+          ? "未找到你安装的项目"
+          : uploadFilterModes[0] === "featured"
+            ? "未找到精品项目"
+            : uploadFilterModes[0] === "certified"
+              ? "未找到认证项目"
+              : "暂无可用项目"
 
   const marketCategoryStats = useMemo(() => {
     const categoryCounter = new Map<string, { primary: string; count: number }>()
@@ -1836,20 +1865,53 @@ export function MarketPanel(): React.JSX.Element {
                   </button>
                 )}
               </div>
-              <Select
-                value={uploadFilterMode}
-                onValueChange={(value) => setUploadFilterMode(value as UploadFilterMode)}
-              >
-                <SelectTrigger className="h-9 w-[132px] rounded-xl border-[#e8e6dc] bg-white text-xs text-[#5e5d59]">
-                  <SelectValue placeholder="上传筛选" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">全部项目</SelectItem>
-                  <SelectItem value="mine">我上传的</SelectItem>
-                  <SelectItem value="installed">我安装的</SelectItem>
-                  <SelectItem value="featured">精品</SelectItem>
-                </SelectContent>
-              </Select>
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Button
+                    variant="outline"
+                    className="h-9 w-[132px] justify-between rounded-xl border-[#e8e6dc] bg-white px-3 text-xs font-normal text-[#5e5d59] hover:bg-white hover:text-[#141413]"
+                  >
+                    <span className="truncate">{uploadFilterLabel}</span>
+                    <ChevronDown className="size-3.5 text-[#87867f]" />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent
+                  align="end"
+                  className="w-[164px] rounded-xl border-[#e8e6dc] bg-white p-1.5"
+                >
+                  <button
+                    type="button"
+                    onClick={() => setUploadFilterModes([])}
+                    className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left text-xs transition-colors cursor-pointer ${
+                      uploadFilterModes.length === 0
+                        ? "bg-[#fdf3e7] text-[#8b623d]"
+                        : "text-[#5e5d59] hover:bg-[#f5f4ed]"
+                    }`}
+                  >
+                    <span>全部项目</span>
+                    {uploadFilterModes.length === 0 && <Check className="size-3.5" />}
+                  </button>
+                  <div className="my-1 h-px bg-[#f0eee6]" />
+                  {uploadFilterOptions.map((option) => {
+                    const checked = uploadFilterModes.includes(option.value)
+                    return (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => toggleUploadFilterMode(option.value)}
+                        className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left text-xs transition-colors cursor-pointer ${
+                          checked
+                            ? "bg-[#fdf3e7] text-[#8b623d]"
+                            : "text-[#5e5d59] hover:bg-[#f5f4ed]"
+                        }`}
+                      >
+                        <span>{option.label}</span>
+                        {checked && <Check className="size-3.5" />}
+                      </button>
+                    )
+                  })}
+                </PopoverContent>
+              </Popover>
             </div>
           </div>
         )}
