@@ -1454,8 +1454,8 @@ function SkillsGuide(): React.JSX.Element {
             >
               <div className="space-y-2 text-sm text-muted-foreground">
                 <p>
-                  命令 Hook 的调试日志建议写到 stderr；如果 stdout 输出 JSON，会被当成 Hook
-                  返回值解析。
+                  命令 Hook 的调试日志建议写到 stderr；stdout 必须输出纯 JSON 才会被当成
+                  Hook 返回值解析，不要额外包单引号、markdown 或混入调试日志。
                 </p>
                 <p>
                   常用返回包括

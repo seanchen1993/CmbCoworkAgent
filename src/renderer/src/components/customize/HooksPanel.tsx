@@ -1175,7 +1175,7 @@ function HookDetail(props: {
             </details>
             <DetailRow
               label="日志查看"
-              value="运行后回到聊天区，展开“Hook 执行记录”；调试日志建议输出到 stderr，如果 stdout 输出 JSON，会被当成 Hook 返回值解析。想确认某个事件的原始 payload，也可以先把 payload 整体打印到 stderr。"
+              value="运行后回到聊天区，展开“Hook 执行记录”；调试日志建议输出到 stderr。stdout 只有输出纯 JSON 时才会被当成 Hook 返回值解析，不要额外包单引号或混入日志。想确认某个事件的原始 payload，也可以先把 payload 整体打印到 stderr。"
             />
           </>
         )}
@@ -2009,7 +2009,10 @@ function HooksGuide(): React.JSX.Element {
         summary="怎么查看 Hook 日志、stdout / stderr 的分工，以及大 payload 时该看哪。"
       >
         <div className="space-y-2 text-sm text-muted-foreground">
-          <p>如果 stdout 输出的是 JSON，就会被当成 Hook 返回值解析；调试日志请尽量写到 stderr。</p>
+          <p>
+            stdout 必须输出纯 JSON 才会被当成 Hook 返回值解析；不要额外包单引号、markdown
+            或混入调试日志。调试日志请尽量写到 stderr。
+          </p>
           <p>
             想确认某次触发时到底传了什么，可以临时把读到的 payload 原样打印到
             stderr，然后去聊天区的“Hook 执行记录”查看。
