@@ -205,6 +205,39 @@
   animation: tactical-pulse 2s ease-in-out infinite;
 }
 
+@keyframes history-loading-icon {
+  0% {
+    transform: rotate(0deg) scale(1);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--primary) 22%, transparent);
+  }
+  50% {
+    transform: rotate(180deg) scale(1.06);
+    box-shadow: 0 0 0 8px color-mix(in srgb, var(--primary) 0%, transparent);
+  }
+  100% {
+    transform: rotate(360deg) scale(1);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--primary) 0%, transparent);
+  }
+}
+
+.history-loading-icon {
+  display: flex;
+  width: 2.75rem;
+  height: 2.75rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 11%, transparent);
+  animation: history-loading-icon 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .history-loading-icon {
+    animation: none;
+  }
+}
+
 /* Scrollbar styling */
 ::-webkit-scrollbar {
   width: 6px;

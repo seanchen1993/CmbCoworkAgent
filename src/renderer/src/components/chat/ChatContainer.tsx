@@ -964,6 +964,7 @@ export function ChatContainer({
     draftInput: input,
     draftSkill: selectedSkill,
     scheduledTaskLoading,
+    historyLoading,
     scheduledTaskId,
     modelRetry,
     setTodos,
@@ -1011,6 +1012,7 @@ export function ChatContainer({
     setSavedToolDescriptionInput("")
   }, [pendingApproval])
   const isLoading = streamData.isLoading || scheduledTaskLoading
+  const inputDisabled = isLoading || historyLoading
 
   useEffect(() => {
     let cancelled = false
@@ -1869,7 +1871,7 @@ export function ChatContainer({
     // future invoker (hotkey, programmatic call) can't accidentally ship the
     // literal "/xxx" text as a message.
     if (slash.mode.kind === "skill") return
-    if ((!input.trim() && attachments.length === 0 && !selectedSkill) || isLoading || !stream)
+    if ((!input.trim() && attachments.length === 0 && !selectedSkill) || inputDisabled || !stream)
       return
 
     if (!currentModel) {
@@ -2100,7 +2102,7 @@ export function ChatContainer({
   }
 
   const handleInsertNewline = useCallback((): void => {
-    if (isLoading) return
+    if (inputDisabled) return
 
     const textarea = inputRef.current
     const selectionStart = textarea?.selectionStart ?? input.length
@@ -2115,7 +2117,7 @@ export function ChatContainer({
       target.focus()
       target.setSelectionRange(nextCursor, nextCursor)
     })
-  }, [input, isLoading, setInput])
+  }, [input, inputDisabled, setInput])
 
   // Auto-resize textarea based on content
   const adjustTextareaHeight = (): void => {
@@ -2851,7 +2853,24 @@ export function ChatContainer({
       <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
         <div className="p-4">
           <div className="max-w-3xl mx-auto space-y-4">
-            {displayMessages.length === 0 && !isLoading && (
+            {historyLoading && displayMessages.length === 0 && (
+              <div
+                className="flex min-h-[42vh] items-center justify-center px-4"
+                aria-live="polite"
+                aria-busy="true"
+              >
+                <div className="flex flex-col items-center gap-3 text-center">
+                  <div className="history-loading-icon">
+                    <Clock className="size-5" />
+                  </div>
+                  <div className="space-y-1">
+                    <div className="text-sm font-medium text-foreground">正在加载会话历史</div>
+                    <div className="text-xs text-muted-foreground">内容较多时可能需要几秒钟...</div>
+                  </div>
+                </div>
+              </div>
+            )}
+            {displayMessages.length === 0 && !isLoading && !historyLoading && (
               <div className="pt-6 pb-8">
                 <RotatingHeadline />
                 {skillsLoading ? (
@@ -3577,7 +3596,7 @@ export function ChatContainer({
                       ? "输入消息或直接发送文件..."
                       : "向 CMBDevClaw 提问，/ 输入命令；Shift + Enter 换行"
                   }
-                  disabled={isLoading}
+                  disabled={inputDisabled}
                   className={cn(
                     "relative z-[1] w-full resize-none bg-transparent overflow-y-auto",
                     "p-4 text-sm placeholder:text-muted-foreground",
@@ -3593,7 +3612,7 @@ export function ChatContainer({
                     <button
                       type="button"
                       disabled={
-                        isLoading ||
+                        inputDisabled ||
                         attachmentLoading ||
                         attachments.length >= MAX_ATTACHMENTS ||
                         totalAttachmentChars >= MAX_TOTAL_CHARS
@@ -3618,7 +3637,7 @@ export function ChatContainer({
                         <TooltipTrigger asChild>
                           <button
                             type="button"
-                            disabled={isLoading}
+                            disabled={inputDisabled}
                             onClick={handleInsertNewline}
                             aria-label="换行"
                             className="cursor-pointer flex items-center justify-center size-7 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
@@ -3644,6 +3663,7 @@ export function ChatContainer({
                       <button
                         type="submit"
                         disabled={
+                          inputDisabled ||
                           (!input.trim() && attachments.length === 0 && !selectedSkill) ||
                           slash.mode.kind === "skill"
                         }

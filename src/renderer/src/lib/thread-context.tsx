@@ -157,6 +157,7 @@ export interface ThreadState {
    */
   draftSkill: SkillMetadata | null
   scheduledTaskLoading: boolean
+  historyLoading: boolean
   scheduledTaskId: string | null
   routingResult: RoutingResultState | null
   modelRetry: ModelRetryState | null
@@ -231,6 +232,7 @@ const createDefaultThreadState = (): ThreadState => ({
   draftInput: "",
   draftSkill: null,
   scheduledTaskLoading: false,
+  historyLoading: false,
   scheduledTaskId: null,
   routingResult: null,
   modelRetry: null
@@ -867,6 +869,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       const actions = getThreadActions(threadId)
       let persistedMessageTimes: MessageTimeMap = {}
       let persistedMessageTimeOrder: MessageTimeEntry[] = []
+      updateThreadState(threadId, () => ({ historyLoading: true }))
 
       // Load workspace path and thread metadata
       try {
@@ -1062,6 +1065,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       } catch (error) {
         console.error("[ThreadContext] Failed to load thread history:", error)
       }
+
+      updateThreadState(threadId, () => ({ historyLoading: false }))
     },
     [getThreadActions, updateThreadState]
   )
@@ -1250,7 +1255,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
       setThreadStates((prev) => {
         if (prev[threadId]) return prev
-        return { ...prev, [threadId]: createDefaultThreadState() }
+        return { ...prev, [threadId]: { ...createDefaultThreadState(), historyLoading: true } }
       })
 
       loadThreadHistory(threadId)
