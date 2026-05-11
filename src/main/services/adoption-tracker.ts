@@ -1054,6 +1054,22 @@ export interface StagedSnapshot {
  */
 export function captureStagedSnapshotsForCommit(workingDir: string): StagedSnapshot[] {
   try {
+    // Resolve the git root — git diff --cached returns paths relative to the
+    // top-level working tree, NOT the -C directory. When the -C directory is a
+    // subfolder of the repo (common in worktree setups), resolvePath(workingDir,
+    // relPath) would duplicate path segments and fail to match gen events later.
+    let gitRoot = workingDir
+    try {
+      gitRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+        encoding: "utf-8",
+        cwd: workingDir,
+        timeout: 5000,
+        maxBuffer: 1024 * 1024
+      }).trim()
+    } catch {
+      // Fallback to workingDir — best-effort
+    }
+
     const raw = execFileSync("git", ["diff", "--cached", "--name-status", "-z"], {
       encoding: "utf-8",
       cwd: workingDir,
@@ -1088,7 +1104,7 @@ export function captureStagedSnapshotsForCommit(workingDir: string): StagedSnaps
       if (!relPath) continue
 
       totalStaged++
-      const absPath = resolvePath(workingDir, relPath)
+      const absPath = resolvePath(gitRoot, relPath)
       if (status === "D") {
         snapshots.push({ absPath, stagedContent: null })
         capturedCode++
@@ -1112,7 +1128,7 @@ export function captureStagedSnapshotsForCommit(workingDir: string): StagedSnaps
       }
     }
     console.log(
-      `[AdoptionTracker] pre-commit capture: totalStaged=${totalStaged} codeFiles=${capturedCode} skippedNonCode=${skippedNonCode} workingDir=${workingDir}`
+      `[AdoptionTracker] pre-commit capture: totalStaged=${totalStaged} codeFiles=${capturedCode} skippedNonCode=${skippedNonCode} gitRoot=${gitRoot}`
     )
     return snapshots
   } catch (e) {
