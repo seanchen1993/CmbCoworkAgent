@@ -594,6 +594,8 @@ export interface CustomModelConfig {
   model: string
   apiKey?: string
   maxTokens?: number
+  maxOutputTokens?: number
+  temperature?: number
   interleavedThinking?: boolean
   tier?: "premium" | "economy"
 }
@@ -615,6 +617,12 @@ export interface UserInfoConfig {
 export const DEFAULT_MAX_TOKENS = 128_000
 export const MIN_MAX_TOKENS = 32_000
 export const MAX_MAX_TOKENS = 1_000_000
+export const DEFAULT_MAX_OUTPUT_TOKENS = 8_192
+export const MIN_MAX_OUTPUT_TOKENS = 1
+export const MAX_MAX_OUTPUT_TOKENS = 100_000
+export const DEFAULT_TEMPERATURE = 0.1
+export const MIN_TEMPERATURE = 0
+export const MAX_TEMPERATURE = 2
 
 export interface CustomModelPublicConfig {
   id: string
@@ -623,6 +631,8 @@ export interface CustomModelPublicConfig {
   model: string
   hasApiKey: boolean
   maxTokens: number
+  maxOutputTokens: number
+  temperature: number
   interleavedThinking?: boolean
   tier?: "premium" | "economy"
 }
@@ -633,6 +643,8 @@ interface StoredCustomModelRecord {
   baseUrl: string
   model: string
   maxTokens?: number
+  maxOutputTokens?: number
+  temperature?: number
   interleavedThinking?: boolean
   tier?: "premium" | "economy"
 }
@@ -647,6 +659,23 @@ function normalizeMaxTokens(value: unknown): number {
   }
 
   return Math.min(MAX_MAX_TOKENS, Math.max(MIN_MAX_TOKENS, Math.floor(value)))
+}
+
+function normalizeMaxOutputTokens(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return DEFAULT_MAX_OUTPUT_TOKENS
+  }
+
+  return Math.min(MAX_MAX_OUTPUT_TOKENS, Math.max(MIN_MAX_OUTPUT_TOKENS, Math.floor(value)))
+}
+
+function normalizeTemperature(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return DEFAULT_TEMPERATURE
+  }
+
+  if (value <= MIN_TEMPERATURE) return DEFAULT_TEMPERATURE
+  return Math.min(MAX_TEMPERATURE, value)
 }
 
 function defaultInterleavedThinkingForModel(model: string): boolean {
@@ -715,6 +744,39 @@ function assertValidMaxTokens(value: unknown): number {
   }
 
   return parsed
+}
+
+function assertValidMaxOutputTokens(value: unknown): number {
+  if (value === undefined || value === null) {
+    return DEFAULT_MAX_OUTPUT_TOKENS
+  }
+
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`maxOutputTokens 必须是数字，范围为 ${MIN_MAX_OUTPUT_TOKENS} 到 ${MAX_MAX_OUTPUT_TOKENS}`)
+  }
+
+  const parsed = Math.floor(value)
+  if (parsed < MIN_MAX_OUTPUT_TOKENS || parsed > MAX_MAX_OUTPUT_TOKENS) {
+    throw new Error(`maxOutputTokens 超出范围，必须在 ${MIN_MAX_OUTPUT_TOKENS} 到 ${MAX_MAX_OUTPUT_TOKENS} 之间`)
+  }
+
+  return parsed
+}
+
+function assertValidTemperature(value: unknown): number {
+  if (value === undefined || value === null) {
+    return DEFAULT_TEMPERATURE
+  }
+
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`temperature 必须是数字，范围为 (${MIN_TEMPERATURE}, ${MAX_TEMPERATURE}]`)
+  }
+
+  if (value <= MIN_TEMPERATURE || value > MAX_TEMPERATURE) {
+    throw new Error(`temperature 超出范围，必须在 (${MIN_TEMPERATURE}, ${MAX_TEMPERATURE}] 之间`)
+  }
+
+  return value
 }
 
 function assertValidBaseUrl(value: string): string {
@@ -802,7 +864,9 @@ function migrateLegacyCustomModel(): void {
       name: legacy.model,
       baseUrl: legacy.baseUrl,
       model: legacy.model,
-      maxTokens: normalizeMaxTokens(legacy.maxTokens)
+      maxTokens: normalizeMaxTokens(legacy.maxTokens),
+      maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
+      temperature: DEFAULT_TEMPERATURE
     }
     writeCustomModelsRaw([migrated])
   } catch {
@@ -821,6 +885,8 @@ function toPublicConfig(
     model: config.model,
     hasApiKey: !!getCustomModelApiKey(config.id, env),
     maxTokens: normalizeMaxTokens(config.maxTokens),
+    maxOutputTokens: normalizeMaxOutputTokens(config.maxOutputTokens),
+    temperature: normalizeTemperature(config.temperature),
     interleavedThinking: resolveInterleavedThinkingSetting(
       config.model,
       config.interleavedThinking
@@ -839,6 +905,8 @@ export function getCustomModelConfigs(): CustomModelConfig[] {
     model: item.model,
     apiKey: getCustomModelApiKey(item.id, env),
     maxTokens: normalizeMaxTokens(item.maxTokens),
+    maxOutputTokens: normalizeMaxOutputTokens(item.maxOutputTokens),
+    temperature: normalizeTemperature(item.temperature),
     interleavedThinking: resolveInterleavedThinkingSetting(item.model, item.interleavedThinking),
     ...(item.tier !== undefined && { tier: item.tier })
   }))
@@ -855,6 +923,8 @@ export function getCustomModelConfigById(id: string): CustomModelConfig | null {
     model: record.model,
     apiKey: getCustomModelApiKey(record.id),
     maxTokens: normalizeMaxTokens(record.maxTokens),
+    maxOutputTokens: normalizeMaxOutputTokens(record.maxOutputTokens),
+    temperature: normalizeTemperature(record.temperature),
     interleavedThinking: resolveInterleavedThinkingSetting(
       record.model,
       record.interleavedThinking
@@ -877,6 +947,8 @@ export function upsertCustomModelConfig(
   migrateLegacyCustomModel()
 
   const validatedMaxTokens = assertValidMaxTokens(config.maxTokens)
+  const validatedMaxOutputTokens = assertValidMaxOutputTokens(config.maxOutputTokens)
+  const validatedTemperature = assertValidTemperature(config.temperature)
   const validatedBaseUrl = assertValidBaseUrl(config.baseUrl)
   const normalizedName = config.name.trim()
   const normalizedModel = config.model.trim()
@@ -912,6 +984,8 @@ export function upsertCustomModelConfig(
     baseUrl: validatedBaseUrl,
     model: normalizedModel,
     maxTokens: validatedMaxTokens,
+    maxOutputTokens: validatedMaxOutputTokens,
+    temperature: validatedTemperature,
     interleavedThinking: resolveInterleavedThinkingSetting(
       normalizedModel,
       config.interleavedThinking

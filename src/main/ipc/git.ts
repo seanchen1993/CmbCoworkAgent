@@ -1,9 +1,14 @@
 import { ipcMain } from "electron"
-import { execFile } from "child_process"
+import { execSync, execFile } from "child_process"
 import { platform } from "os"
 import type { Dirent } from "fs"
 import { readdir, rm, stat } from "fs/promises"
 import path from "path"
+import {
+  captureStagedSnapshotsForCommit as captureAdoptionStagedSnapshots,
+  measureForCommit,
+  type StagedSnapshot
+} from "../services/adoption-tracker"
 import { promisify } from "util"
 
 /**
@@ -56,6 +61,47 @@ const ALLOWED_GIT_SUBCOMMANDS = new Set([
 type WorkingDirectoryCacheEntry = {
   value: string
   expiresAt: number
+}
+
+function isCommitCommand(command: string): boolean {
+  return /^git(\s+-C\s+"[^"]*")?\s+commit(\s|$)/.test(command.trim())
+}
+
+interface StagedCapture {
+  workingDir: string
+  snapshots: StagedSnapshot[]
+}
+
+function captureStagedSnapshotsForCommand(command: string): StagedCapture | null {
+  try {
+    const workingDir = getCommandWorkingDir(command, getCurrentWorkingDirectory())
+    return { workingDir, snapshots: captureAdoptionStagedSnapshots(workingDir) }
+  } catch (e) {
+    console.warn("[Git] adoption pre-commit capture skipped:", e)
+    return null
+  }
+}
+
+/**
+ * Extract a commit SHA from a successful `git commit` stdout. Best-effort:
+ * git prints e.g. "[main abc1234] subject" on success. Returns null when the
+ * pattern is absent so callers can still emit the adoption event with no SHA.
+ */
+function extractCommitSha(commitOutput: string, workingDir: string): string | null {
+  const match = commitOutput.match(/\[[^\s\]]+\s+([0-9a-f]{7,40})\]/i)
+  if (match) return match[1]
+  // Fallback: ask git for HEAD's SHA.
+  try {
+    const sha = execSync("git rev-parse HEAD", {
+      encoding: "utf-8",
+      cwd: workingDir,
+      timeout: 5000,
+      shell: platform() === "win32" ? "cmd.exe" : "/bin/bash"
+    }).trim()
+    return sha || null
+  } catch {
+    return null
+  }
 }
 
 type PorcelainStatusEntry = {
@@ -965,9 +1011,27 @@ export function registerGitHandlers(): void {
         throw new Error(`不允许执行的 git 子命令: ${parsed.subcommand}`)
       }
 
+      // Capture staged blob snapshots BEFORE commit — the index is wiped once
+      // the commit runs. If the commit then fails, we simply discard the capture
+      // without emitting any adoption event.
+      let stagedCapture: StagedCapture | null = null
+      if (isCommitCommand(command)) {
+        stagedCapture = captureStagedSnapshotsForCommand(command)
+      }
+
       // 这里最终会走 executeGitCommand -> runGitArgs -> 队列限流。
       const result = await executeGitCommand(command)
       console.log("[IPC] Git命令执行成功:", command, "结果:", result)
+
+      // Only emit adoption measurement once the commit actually succeeded.
+      if (stagedCapture && stagedCapture.snapshots.length > 0) {
+        try {
+          const sha = extractCommitSha(result, stagedCapture.workingDir) ?? undefined
+          measureForCommit(stagedCapture.snapshots, sha)
+        } catch (e) {
+          console.warn("[Git] adoption post-commit measurement skipped:", e)
+        }
+      }
 
       return result
     } catch (error) {

@@ -12,19 +12,21 @@
 export function generateTitle(message: string): string {
   // Clean up the message
   const cleaned = message.trim().replace(/\s+/g, " ")
+  const maxLength = 50
 
   // If already short enough, use as-is
-  if (cleaned.length <= 50) {
+  if (cleaned.length <= maxLength) {
     return cleaned
   }
 
   // Try to extract first sentence/question
-  const sentenceMatch = cleaned.match(/^[^.!?]+[.!?]/)
+  const sentenceMatch = cleaned.match(/^[^。！？.!?]+[。！？.!?]/)
   if (sentenceMatch && sentenceMatch[0].length <= 60) {
     return sentenceMatch[0].trim()
   }
 
-  // Extract first N words
+  // Extract first N words. Languages such as Chinese often have no spaces, so
+  // fall back to a character slice when the first token alone is too long.
   const words = cleaned.split(/\s+/)
   let title = ""
 
@@ -33,6 +35,10 @@ export function generateTitle(message: string): string {
       break
     }
     title = title ? title + " " + word : word
+  }
+
+  if (!title) {
+    return cleaned.slice(0, maxLength)
   }
 
   // Add ellipsis if we truncated

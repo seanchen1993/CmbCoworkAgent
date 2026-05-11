@@ -9,8 +9,8 @@ import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import {
   useDashboard,
-  type DashboardCommitDetail,
-  type DashboardTraceDetail,
+  type DashboardCommitDetailsData,
+  type DashboardSkillDetail,
   type Granularity,
   type TimeRange
 } from "./use-dashboard"
@@ -196,6 +196,32 @@ function formatDuration(ms: number): string {
   return `${Math.floor(s / 60)}m${Math.round(s % 60)}s`
 }
 
+function formatPercent(value: number | null): string {
+  if (value === null) return "—"
+  return `${(value * 100).toFixed(2)}%`
+}
+
+const EMPTY_SKILL_DETAIL: DashboardSkillDetail = {
+  stats: {
+    generatedLines: 0,
+    deletedLines: 0,
+    effectiveGeneratedLines: 0,
+    measuredGeneratedLines: 0,
+    unmeasuredGeneratedLines: 0,
+    inclusiveEffectiveGeneratedLines: 0,
+    adoptedLines: 0,
+    pushedMeasuredGeneratedLines: 0,
+    pushedEffectiveGeneratedLines: 0,
+    pushedAdoptedLines: 0,
+    pushedCommitCount: 0,
+    measuredAdoptionRate: null,
+    inclusiveAdoptionRate: null,
+    pushedAdoptionRate: null,
+    adoptionRate: null
+  },
+  traces: []
+}
+
 export function DashboardView(): React.JSX.Element {
   const {
     granularity,
@@ -220,25 +246,26 @@ export function DashboardView(): React.JSX.Element {
   const [exporting, setExporting] = useState(false)
   const [skillDialogOpen, setSkillDialogOpen] = useState(false)
   const [selectedSkill, setSelectedSkill] = useState<string | null>(null)
-  const [skillTraces, setSkillTraces] = useState<DashboardTraceDetail[]>([])
+  const [skillDetail, setSkillDetail] = useState<DashboardSkillDetail | null>(null)
   const [skillTracesLoading, setSkillTracesLoading] = useState(false)
   const [skillTracesError, setSkillTracesError] = useState<string | null>(null)
   const [commitDialogOpen, setCommitDialogOpen] = useState(false)
   const [commitScopeLabel, setCommitScopeLabel] = useState("当前范围")
-  const [commitDetails, setCommitDetails] = useState<{ total: number; items: DashboardCommitDetail[] } | null>(null)
+  const [commitDetailsRange, setCommitDetailsRange] = useState<TimeRange | null>(null)
+  const [commitDetails, setCommitDetails] = useState<DashboardCommitDetailsData | null>(null)
   const [commitDetailsLoading, setCommitDetailsLoading] = useState(false)
   const [commitDetailsError, setCommitDetailsError] = useState<string | null>(null)
 
   const handleSkillClick = useCallback(async (skill: string) => {
     setSelectedSkill(skill)
     setSkillDialogOpen(true)
-    setSkillTraces([])
+    setSkillDetail(null)
     setSkillTracesError(null)
     setSkillTracesLoading(true)
     try {
-      const result = await window.api.dashboard.skillRecentTraces(skill, range, 10)
-      if (!result.success) throw new Error(result.error ?? "获取 Skill 会话历史失败")
-      setSkillTraces(result.data ?? [])
+      const result = await window.api.dashboard.skillDetail(skill, range, 3)
+      if (!result.success) throw new Error(result.error ?? "获取 Skill 详情失败")
+      setSkillDetail(result.data ?? EMPTY_SKILL_DETAIL)
     } catch (e) {
       setSkillTracesError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -246,21 +273,41 @@ export function DashboardView(): React.JSX.Element {
     }
   }, [range])
 
-  const loadCommitDetails = useCallback(async (targetRange: TimeRange, scopeLabel: string) => {
+  const loadCommitDetails = useCallback(async (
+    targetRange: TimeRange,
+    scopeLabel: string,
+    page = 1,
+    pushedOnly = false
+  ) => {
     setCommitScopeLabel(scopeLabel)
+    setCommitDetailsRange(targetRange)
     setCommitDialogOpen(true)
     setCommitDetails(null)
     setCommitDetailsError(null)
     setCommitDetailsLoading(true)
     try {
-      const result = await window.api.dashboard.commitDetails(targetRange, 50)
+      const result = await window.api.dashboard.commitDetails(targetRange, {
+        page,
+        pageSize: 20,
+        pushedOnly
+      })
       if (!result.success) throw new Error(result.error ?? "获取 Commit 明细失败")
-      setCommitDetails(result.data ?? { total: 0, items: [] })
+      setCommitDetails(result.data ?? { total: 0, page, pageSize: 20, pushedOnly, items: [] })
     } catch (e) {
       setCommitDetailsError(e instanceof Error ? e.message : String(e))
     } finally {
       setCommitDetailsLoading(false)
     }
+  }, [])
+
+  const reloadCommitDetails = useCallback((page: number, pushedOnly: boolean) => {
+    if (!commitDetailsRange) return
+    void loadCommitDetails(commitDetailsRange, commitScopeLabel, page, pushedOnly)
+  }, [commitDetailsRange, commitScopeLabel, loadCommitDetails])
+
+  const handleCommitExternalOpen = useCallback((url: string) => {
+    if (!url) return
+    void window.electron.openExternal(url)
   }, [])
 
   const handleCommitTotalClick = useCallback(() => {
@@ -291,6 +338,20 @@ export function DashboardView(): React.JSX.Element {
             ["平均耗时", formatDuration(overview.avgDurationMs)],
             ["输入 Token", overview.inputTokens],
             ["输出 Token", overview.outputTokens],
+            ["代码生成行数", overview.codeGeneratedLines],
+            ["代码已测量原始生成行数", overview.codeMeasuredGeneratedLines],
+            ["代码已测量有效生成行数", overview.codeEffectiveGeneratedLines],
+            ["代码未提交生成行数", overview.codeUnmeasuredGeneratedLines],
+            ["代码含未提交分母行数", overview.codeInclusiveEffectiveGeneratedLines],
+            ["代码删除行数", overview.codeDeletedLines],
+            ["代码采纳行数", overview.codeAdoptedLines],
+            ["代码采纳率（含未提交）", formatPercent(overview.codeInclusiveAdoptionRate)],
+            ["代码采纳率（已测量）", formatPercent(overview.codeMeasuredAdoptionRate)],
+            ["代码已 Push 原始生成行数", overview.codePushedMeasuredGeneratedLines],
+            ["代码已 Push 有效生成行数", overview.codePushedEffectiveGeneratedLines],
+            ["代码已 Push 采纳行数", overview.codePushedAdoptedLines],
+            ["代码已 Push Commit 数", overview.codePushedCommitCount],
+            ["代码采纳率（已 Push）", formatPercent(overview.codePushedAdoptionRate)],
             ["Skill 种类数", overview.totalSkills],
             ["Skill 调用次数", overview.totalSkillCalls],
             ["Tool 种类数", overview.totalTools],
@@ -307,8 +368,9 @@ export function DashboardView(): React.JSX.Element {
           })
         }
 
-        // Skill Top
-        if (overview.bySkill.length > 0) {
+        // Skill ranking
+        const exportSkills = overview.bySkillAll.length > 0 ? overview.bySkillAll : overview.bySkill
+        if (exportSkills.length > 0) {
           sheets.push({
             name: "Skill使用排行",
             header: ["排名", "Skill", "调用次数"],
@@ -316,13 +378,14 @@ export function DashboardView(): React.JSX.Element {
               ["Skill 种类数", overview.totalSkills, ""],
               ["Skill 调用次数", overview.totalSkillCalls, ""],
               ["", "", ""],
-              ...overview.bySkill.map((s, i) => [i + 1, s.skill, s.count])
+              ...exportSkills.map((s, i) => [i + 1, s.skill, s.count])
             ]
           })
         }
 
-        // Tool Top (filtered)
-        if (overview.byTool.length > 0) {
+        // Tool ranking (filtered)
+        const exportFilteredTools = overview.byToolFilteredAll.length > 0 ? overview.byToolFilteredAll : overview.byTool
+        if (exportFilteredTools.length > 0) {
           sheets.push({
             name: "Tool使用排行(已过滤)",
             header: ["排名", "Tool", "调用次数"],
@@ -330,13 +393,14 @@ export function DashboardView(): React.JSX.Element {
               ["Tool 种类数", overview.totalTools, ""],
               ["Tool 调用次数", overview.totalToolCalls, ""],
               ["", "", ""],
-              ...overview.byTool.map((t, i) => [i + 1, t.tool, t.count])
+              ...exportFilteredTools.map((t, i) => [i + 1, t.tool, t.count])
             ]
           })
         }
 
-        // Tool Top (all)
-        if (overview.byToolAll.length > 0) {
+        // Tool ranking (all)
+        const exportAllTools = overview.byToolAllFull.length > 0 ? overview.byToolAllFull : overview.byToolAll
+        if (exportAllTools.length > 0) {
           sheets.push({
             name: "Tool使用排行(全部)",
             header: ["排名", "Tool", "调用次数"],
@@ -344,7 +408,7 @@ export function DashboardView(): React.JSX.Element {
               ["Tool 种类数", overview.totalTools, ""],
               ["Tool 调用次数", overview.totalToolCalls, ""],
               ["", "", ""],
-              ...overview.byToolAll.map((t, i) => [i + 1, t.tool, t.count])
+              ...exportAllTools.map((t, i) => [i + 1, t.tool, t.count])
             ]
           })
         }
@@ -508,7 +572,8 @@ export function DashboardView(): React.JSX.Element {
         open={skillDialogOpen}
         onOpenChange={setSkillDialogOpen}
         skill={selectedSkill}
-        traces={skillTraces}
+        traces={skillDetail?.traces ?? []}
+        codeStats={skillDetail?.stats ?? null}
         loading={skillTracesLoading}
         error={skillTracesError}
       />
@@ -519,6 +584,9 @@ export function DashboardView(): React.JSX.Element {
         data={commitDetails}
         loading={commitDetailsLoading}
         error={commitDetailsError}
+        onPageChange={(page) => reloadCommitDetails(page, commitDetails?.pushedOnly ?? false)}
+        onPushedOnlyChange={(pushedOnly) => reloadCommitDetails(1, pushedOnly)}
+        onOpenExternal={handleCommitExternalOpen}
       />
     </div>
   )

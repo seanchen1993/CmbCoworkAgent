@@ -158,7 +158,11 @@ function matchesGitignoreRule(relativePath: string, rule: GitignoreRule): boolea
 }
 
 // 按 Git 规则顺序求值：后匹配覆盖前匹配，支持 ! 反选
-function isIgnoredByGitignore(threadId: string, workspacePath: string, relativePath: string): boolean {
+function isIgnoredByGitignore(
+  threadId: string,
+  workspacePath: string,
+  relativePath: string
+): boolean {
   const rules = loadGitignoreRules(threadId, workspacePath)
   if (rules.length === 0) return false
 
@@ -193,7 +197,11 @@ export function startWatching(threadId: string, workspacePath: string): void {
   try {
     // Use recursive watching (supported on macOS and Windows)
     const watcher = fs.watch(workspacePath, { recursive: true }, (eventType, filename) => {
-      const relativePath = filename ? normalizeRelativePath(String(filename)) : ""
+      const relativePath = filename
+        ? normalizeRelativePath(
+            typeof filename === "string" ? filename : filename.toString("utf-8")
+          )
+        : ""
 
       if (relativePath && isWorkspaceHookPath(relativePath)) {
         console.log(`[WorkspaceWatcher] workspace hook ${eventType}: ${filename} in thread ${threadId}`)

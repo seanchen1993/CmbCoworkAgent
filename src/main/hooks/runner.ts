@@ -383,6 +383,8 @@ function getPromptHookModel(modelId: string | undefined, timeout: number): ChatO
     apiKey: config.apiKey,
     maxRetries: 0,
     timeout,
+    maxTokens: config.maxOutputTokens,
+    temperature: config.temperature,
     configuration: { baseURL: config.baseUrl }
   })
 }

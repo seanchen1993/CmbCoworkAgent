@@ -55,6 +55,7 @@ interface AppState {
   customizeInitialTab: string | null
   marketInitialSkillCategory: string | null
   marketInitialSkillSearchQuery: string | null
+  marketInitialSkillDetailName: string | null
 
   // Thread actions
   loadThreads: () => Promise<void>
@@ -91,7 +92,8 @@ interface AppState {
   setShowCustomizeView: (show: boolean, tab?: string) => void
   setMarketInitialSkillCategory: (category: string | null) => void
   setMarketInitialSkillSearchQuery: (query: string | null) => void
-  setMainView: (view: "thread" | "customize" | "evolution" | "kanban" | "claudecode" | "dashboard"  | "design") => void
+  setMarketInitialSkillDetailName: (name: string | null) => void
+  setMainView: (view: "thread" | "customize" | "evolution" | "kanban" | "claudecode" | "dashboard" | "design") => void
 
   // Plugin state sync — increment to trigger RightPanel refresh
   pluginVersion: number
@@ -178,6 +180,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   customizeInitialTab: null,
   marketInitialSkillCategory: null,
   marketInitialSkillSearchQuery: null,
+  marketInitialSkillDetailName: null,
   pluginVersion: 0,
   evolutionTab: "candidates",
   evolutionRunning: false,
@@ -441,6 +444,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setMarketInitialSkillSearchQuery: (query) => {
     set({ marketInitialSkillSearchQuery: query })
+  },
+
+  setMarketInitialSkillDetailName: (name) => {
+    set({ marketInitialSkillDetailName: name })
   },
 
   setMainView: (view) => {
