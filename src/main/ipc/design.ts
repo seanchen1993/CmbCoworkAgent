@@ -841,6 +841,9 @@ function buildDesignArtifactInstruction(filePath: string, exists: boolean, sourc
     `${exists ? "The output artifact already exists. Before editing it, read it with read_file using offset=0 and limit=1000. If more lines are available, continue from the returned offset until the relevant HTML structure is understood." : "The output artifact does not exist yet. Create it with write_file."}\n` +
     `If a source artifact path is provided, use it only as input/reference and write the updated complete HTML to the output file path above. ` +
     `Use write_file for a new output artifact, or edit_file only if the output file already exists. ` +
+    `When calling filesystem tools, use the exact argument names required by the tools: ` +
+    `read_file({ file_path, offset, limit }), write_file({ file_path, content }), and edit_file({ file_path, old_string, new_string, replace_all }). ` +
+    `Do not use path or filePath as tool argument names. ` +
     `Do not paste the full HTML into the final chat response. After the file is updated, respond with only a brief summary of what changed. ` +
     `The host application will read and render the HTML from this file.`
 }
@@ -1435,6 +1438,12 @@ export function registerDesignHandlers(): void {
       const controller = new AbortController()
       activeDesignAgents.set(sessionId, controller)
 
+      const abortAgentSession = () => {
+        if (!controller.signal.aborted) {
+          controller.abort()
+        }
+      }
+
       // workspacePath: required by agent runtime for hooks & tools.
       // Prefer the Design renderer's explicit selection, then fall back to the
       // same global setting used by the Chat workspace picker.
@@ -1933,6 +1942,7 @@ export function registerDesignHandlers(): void {
               ? `模型返回了文本但未找到有效的 HTML。请检查模型配置或重试。\n\n模型输出片段：${fullText.slice(0, 300)}`
               : "生成未返回任何内容，请重试。",
           })
+          abortAgentSession()
         }
       } catch (err) {
         if (controller.signal.aborted) {
@@ -1940,6 +1950,7 @@ export function registerDesignHandlers(): void {
         } else {
           const msg = err instanceof Error ? err.message : String(err)
           console.error("[Design:Agent] Generation error:", msg)
+          abortAgentSession()
           send({ type: "error", error: msg })
         }
       } finally {

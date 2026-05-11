@@ -494,6 +494,136 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     return { kind: "runtime", message: describeToolError(error) }
   }
 
+  const FILE_PATH_TOOLS = new Set(["read_file", "write_file", "edit_file"])
+  const FILE_WRITE_TOOLS = new Set(["write_file", "edit_file"])
+  const FILE_TOOL_HISTORY_ARG_MAX_LENGTH = 2000
+  const FILE_TOOL_HISTORY_ARG_TRUNCATION =
+    "...(argument truncated; full value was already passed to the tool)"
+
+  const isPlainRecord = (value: unknown): value is Record<string, unknown> => {
+    return Boolean(value) && typeof value === "object" && !Array.isArray(value)
+  }
+
+  const normalizeFileToolArgs = (
+    toolName: string | undefined,
+    args: unknown,
+    options: { truncateHistoryArgs?: boolean } = {}
+  ): { args: unknown; changed: boolean } => {
+    if (!toolName || !FILE_PATH_TOOLS.has(toolName) || !isPlainRecord(args)) {
+      return { args, changed: false }
+    }
+
+    const next: Record<string, unknown> = { ...args }
+    let changed = false
+
+    const copyAlias = (canonical: string, aliases: string[]) => {
+      if (typeof next[canonical] === "string" && next[canonical]) return
+      for (const alias of aliases) {
+        if (typeof next[alias] === "string" && next[alias]) {
+          next[canonical] = next[alias]
+          changed = true
+          return
+        }
+      }
+    }
+
+    copyAlias("file_path", ["filePath", "path"])
+
+    if (toolName === "edit_file") {
+      copyAlias("old_string", ["oldString"])
+      copyAlias("new_string", ["newString"])
+      if (typeof next.replace_all !== "boolean" && typeof next.replaceAll === "boolean") {
+        next.replace_all = next.replaceAll
+        changed = true
+      }
+    }
+
+    if (options.truncateHistoryArgs && FILE_WRITE_TOOLS.has(toolName)) {
+      for (const key of ["content", "old_string", "new_string"]) {
+        const value = next[key]
+        if (typeof value === "string" && value.length > FILE_TOOL_HISTORY_ARG_MAX_LENGTH) {
+          next[key] = value.slice(0, 200) + FILE_TOOL_HISTORY_ARG_TRUNCATION
+          changed = true
+        }
+      }
+    }
+
+    return { args: changed ? next : args, changed }
+  }
+
+  const normalizeToolCallForExecution = (toolCall: unknown): unknown => {
+    if (!isPlainRecord(toolCall)) return toolCall
+    const toolName = typeof toolCall.name === "string" ? toolCall.name : undefined
+    const normalized = normalizeFileToolArgs(toolName, toolCall.args)
+    if (!normalized.changed) return toolCall
+    return { ...toolCall, args: normalized.args }
+  }
+
+  const normalizeToolCallForHistory = (toolCall: unknown): unknown => {
+    if (!isPlainRecord(toolCall)) return toolCall
+    const toolName = typeof toolCall.name === "string" ? toolCall.name : undefined
+    const normalized = normalizeFileToolArgs(toolName, toolCall.args, { truncateHistoryArgs: true })
+    if (!normalized.changed) return toolCall
+    return { ...toolCall, args: normalized.args }
+  }
+
+  const normalizeRawOpenAIToolCallForHistory = (toolCall: unknown): unknown => {
+    if (!isPlainRecord(toolCall) || !isPlainRecord(toolCall.function)) return toolCall
+    const toolName = typeof toolCall.function.name === "string" ? toolCall.function.name : undefined
+    const rawArgs = toolCall.function.arguments
+    let parsedArgs: unknown = rawArgs
+    let wasJsonString = false
+    if (typeof rawArgs === "string") {
+      try {
+        parsedArgs = JSON.parse(rawArgs)
+        wasJsonString = true
+      } catch {
+        return toolCall
+      }
+    }
+    const normalized = normalizeFileToolArgs(toolName, parsedArgs, { truncateHistoryArgs: true })
+    if (!normalized.changed) return toolCall
+    return {
+      ...toolCall,
+      function: {
+        ...toolCall.function,
+        arguments: wasJsonString ? JSON.stringify(normalized.args) : normalized.args
+      }
+    }
+  }
+
+  const normalizeFileToolCallsInMessages = (messages: unknown): void => {
+    if (!Array.isArray(messages)) return
+    for (const msg of messages) {
+      if (!isPlainRecord(msg)) continue
+
+      if (Array.isArray(msg.tool_calls)) {
+        msg.tool_calls = msg.tool_calls.map(normalizeToolCallForHistory)
+      }
+
+      const additionalKwargs = msg.additional_kwargs
+      if (isPlainRecord(additionalKwargs) && Array.isArray(additionalKwargs.tool_calls)) {
+        additionalKwargs.tool_calls = additionalKwargs.tool_calls.map(normalizeRawOpenAIToolCallForHistory)
+      }
+    }
+  }
+
+  const fileToolArgsMiddleware = createMiddleware({
+    name: "fileToolArgsNormalize",
+    beforeAgent: async (state) => {
+      normalizeFileToolCallsInMessages((state as { messages?: unknown }).messages)
+    },
+    wrapModelCall: async (request, handler) => {
+      normalizeFileToolCallsInMessages(request.messages)
+      return handler(request)
+    },
+    wrapToolCall: async (request, handler) => {
+      const normalizedToolCall = normalizeToolCallForExecution(request.toolCall) as typeof request.toolCall
+      if (normalizedToolCall === request.toolCall) return handler(request)
+      return handler({ ...request, toolCall: normalizedToolCall })
+    }
+  })
+
   const toolErrorMiddleware = createMiddleware({
     name: "toolErrorCatch",
     wrapToolCall: async (request, handler) => {
@@ -540,6 +670,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
   const subagentMiddleware: any[] = [
     todoListMiddleware(),
     createFsMiddleware(),
+    fileToolArgsMiddleware,
     toolErrorMiddleware,
     createSummarizationMiddleware(summarizationOptions),
     anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
@@ -566,6 +697,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     middleware: [
       todoListMiddleware(),
       createFsMiddleware(),
+      fileToolArgsMiddleware,
       toolErrorMiddleware,
       createSubAgentMiddleware({
         defaultModel: model,

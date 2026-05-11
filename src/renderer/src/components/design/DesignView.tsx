@@ -440,9 +440,24 @@ interface PersistedSession {
   tabStates: Record<string, PersistedTabState>
 }
 
+function sanitizePersistedMessages(messages: Message[]): Message[] {
+  return messages
+    .filter((message) => {
+      return !(message.role === "assistant" && message.isStreaming && !message.content.trim())
+    })
+    .map((message) => {
+      if (message.role !== "assistant") return message
+      return {
+        ...message,
+        isStreaming: false,
+        modelRetry: null,
+      }
+    })
+}
+
 function serializeTs(ts: TabState): PersistedTabState {
   return {
-    messages:          ts.messages,
+    messages:          sanitizePersistedMessages(ts.messages),
     html:              ts.html.slice(0, MAX_HTML_BYTES),
     sourceInfo:        ts.sourceInfo,
     variations:        ts.variations.map((v) => ({ id: v.id, label: v.label, html: v.html.slice(0, MAX_HTML_BYTES) })),
@@ -468,6 +483,7 @@ function deserializeTs(p: PersistedTabState): TabState {
   return {
     ...makeTabState(),
     ...p,
+    messages:        sanitizePersistedMessages(p.messages ?? []),
     sourceInfo:      p.sourceInfo ?? null,
     drawStrokes:     p.drawStrokes ?? [],
     drawElementHints:p.drawElementHints ?? [],
@@ -1119,6 +1135,30 @@ export function DesignView(): React.JSX.Element {
   // to produce a stable artifact ID without capturing a stale closure value.
   const currentSessionIdRef = useRef<string | null>(currentSessionId)
   useEffect(() => { currentSessionIdRef.current = currentSessionId }, [currentSessionId])
+
+  const cancelDesignRunForTab = useCallback((tabId: string) => {
+    const entry = tabSessionsRef.current.get(tabId)
+    if (!entry) return
+    entry.cleanup()
+    window.api.design.cancel(entry.sessionId).catch(() => {})
+    tabSessionsRef.current.delete(tabId)
+  }, [])
+
+  const isCurrentDesignRun = useCallback((
+    tabId: string,
+    runSessionId: string,
+    designSessionId: string | null
+  ): boolean => {
+    const entry = tabSessionsRef.current.get(tabId)
+    return currentSessionIdRef.current === designSessionId && entry?.sessionId === runSessionId
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      cancelDesignRunForTab(SINGLE_DESIGN_TAB_ID)
+    }
+  }, [cancelDesignRunForTab])
+
   useEffect(() => {
     if (!currentSessionId) return
     const session = normalizeSingleTabSession({
@@ -1143,10 +1183,12 @@ export function DesignView(): React.JSX.Element {
   }, [currentSessionId, workspacePath])
 
   const createSession = useCallback((metaPatch?: Partial<SessionMeta>): string => {
+    cancelDesignRunForTab(SINGLE_DESIGN_TAB_ID)
     const id = `ds_${uuid().slice(0, 8)}`
     const session = defaultSession()
     setTabStates(session.tabStates)
     setCurrentSessionId(id)
+    currentSessionIdRef.current = id
     localStorage.setItem(SESSION_LAST_KEY, id)
     const meta: SessionMeta = {
       id,
@@ -1162,7 +1204,7 @@ export function DesignView(): React.JSX.Element {
       return next
     })
     return id
-  }, [])
+  }, [cancelDesignRunForTab])
 
   const newSession = useCallback(() => {
     createSession()
@@ -1505,6 +1547,7 @@ export function DesignView(): React.JSX.Element {
 
   // ── Session navigation ─────────────────────────────────────
   const openSession = useCallback((id: string) => {
+    cancelDesignRunForTab(SINGLE_DESIGN_TAB_ID)
     const session = normalizeSingleTabSession(loadSessionById(id))
     setTabStates(session.tabStates)
     tabStatesRef.current = session.tabStates
@@ -1520,23 +1563,27 @@ export function DesignView(): React.JSX.Element {
         setTabStates(hydrated.tabStates)
       })
       .catch(() => {})
-  }, [workspacePath])
+  }, [cancelDesignRunForTab, workspacePath])
 
   const backToGallery = useCallback(() => {
+    cancelDesignRunForTab(SINGLE_DESIGN_TAB_ID)
     setCurrentSessionId(null)
     currentSessionIdRef.current = null
     localStorage.removeItem(SESSION_LAST_KEY)
     setSessionIndex(loadIndex())
-  }, [])
+  }, [cancelDesignRunForTab])
 
   const deleteSession = useCallback((id: string) => {
+    if (currentSessionIdRef.current === id) {
+      cancelDesignRunForTab(SINGLE_DESIGN_TAB_ID)
+    }
     localStorage.removeItem(sessionDataKey(id))
     setSessionIndex((prev) => {
       const next = prev.filter((m) => m.id !== id)
       saveIndex(next)
       return next
     })
-  }, [])
+  }, [cancelDesignRunForTab])
 
   // ── Inject / remove mode scripts when activeMode changes ─
   useEffect(() => {
@@ -1689,22 +1736,34 @@ export function DesignView(): React.JSX.Element {
 
   const startAskQuestions = useCallback((prompt: string, tabId: string, modelId?: string) => {
     const sessionId = uuid()
+    const designSessionId = currentSessionIdRef.current
     updateTs(tabId, { generationState: "asking", originalPrompt: prompt, rightTab: "questions", questions: [] })
 
     // Cancel any existing session for this tab before starting a new one
-    const existing = tabSessionsRef.current.get(tabId)
-    if (existing) { existing.cleanup(); window.api.design.cancel(existing.sessionId).catch(() => {}) }
+    cancelDesignRunForTab(tabId)
+    tabSessionsRef.current.set(tabId, { cleanup: () => {}, sessionId })
 
     const cleanup = window.api.design.askQuestions(sessionId, prompt, (event) => {
+      if (!isCurrentDesignRun(tabId, sessionId, designSessionId)) return
+
       if (event.type === "model_retry") {
         const retry = asDesignModelRetryState(event)
         if (!retry) return
-        updateTs(tabId, (prev) => ({
-          messages: [
-            ...prev.messages,
-            { role: "assistant" as const, content: "", isStreaming: true, modelRetry: retry },
-          ],
-        }))
+        updateTs(tabId, (prev) => {
+          const msgs = [...prev.messages]
+          const last = msgs.length - 1
+          const lastMessage = msgs[last]
+          if (lastMessage?.role === "assistant" && lastMessage.isStreaming && lastMessage.modelRetry) {
+            msgs[last] = { ...lastMessage, modelRetry: retry }
+            return { messages: msgs }
+          }
+          return {
+            messages: [
+              ...prev.messages,
+              { role: "assistant" as const, content: "", isStreaming: true, modelRetry: retry },
+            ],
+          }
+        })
         return
       }
 
@@ -1739,7 +1798,7 @@ export function DesignView(): React.JSX.Element {
       }
     }, modelId)
     tabSessionsRef.current.set(tabId, { cleanup, sessionId })
-  }, [updateTs])
+  }, [cancelDesignRunForTab, isCurrentDesignRun, updateTs])
 
   // ── Generate Design ───────────────────────────────────────
 
@@ -1776,9 +1835,9 @@ export function DesignView(): React.JSX.Element {
       ],
     }))
 
-    // Cancel any existing session for this tab before starting a new one
-    const existing = tabSessionsRef.current.get(tabId)
-    if (existing) { existing.cleanup(); window.api.design.cancel(existing.sessionId).catch(() => {}) }
+    // Cancel any existing session for this tab before starting a new one.
+    cancelDesignRunForTab(tabId)
+    tabSessionsRef.current.set(tabId, { cleanup: () => {}, sessionId })
 
     // Route through the full Agent Runtime: Skills, MCP tools, Hooks, Approvals,
     // context summarisation. Each design session gets an isolated thread.
@@ -1788,9 +1847,11 @@ export function DesignView(): React.JSX.Element {
       : designSessionId
     const agentThreadId = makeDesignAgentThreadId(agentRuntimeSessionId, tabId)
     const cleanupApprovalRequest = window.api.sandbox.onApprovalRequest(agentThreadId, (request) => {
+      if (!isCurrentDesignRun(tabId, sessionId, designSessionId)) return
       updateTs(tabId, { pendingApproval: asDesignApprovalRequest(request) })
     })
     const cleanupApprovalTimeout = window.api.sandbox.onApprovalTimeout(agentThreadId, (data) => {
+      if (!isCurrentDesignRun(tabId, sessionId, designSessionId)) return
       updateTs(tabId, (prev) => {
         if (prev.pendingApproval?._orchestratorRequestId !== data.requestId) return {}
         return { pendingApproval: null }
@@ -1805,7 +1866,6 @@ export function DesignView(): React.JSX.Element {
       cleanupStream?.()
       cleanupApprovalRequest()
       cleanupApprovalTimeout()
-      updateTs(tabId, { pendingApproval: null })
     }
 
     // Stable artifact ID: based on the design session + tab, NOT the streaming session UUID.
@@ -1825,6 +1885,8 @@ export function DesignView(): React.JSX.Element {
       delayMs?: number
       artifactPath?: string
     }) => {
+      if (!isCurrentDesignRun(tabId, sessionId, designSessionId)) return
+
       if (event.type === "model_retry") {
         const retry = asDesignModelRetryState(event)
         if (!retry) return
@@ -1905,6 +1967,7 @@ export function DesignView(): React.JSX.Element {
             variations,
             activeVariationId: variations[0]?.id ?? null,
             apiHistory: newHistory,
+            pendingApproval: null,
           }
         })
 
@@ -1920,7 +1983,7 @@ export function DesignView(): React.JSX.Element {
           if (msgs[last]?.role === "assistant") {
             msgs[last] = { ...msgs[last], content: `❌ ${event.error ?? "Unknown error"}`, isStreaming: false, modelRetry: null }
           }
-          return { generationState: "error", messages: msgs }
+          return { generationState: "error", messages: msgs, pendingApproval: null }
         })
         cleanup()
         tabSessionsRef.current.delete(tabId)
@@ -1929,7 +1992,7 @@ export function DesignView(): React.JSX.Element {
           const msgs = [...prev.messages]
           const last = msgs.length - 1
           if (msgs[last]?.isStreaming) msgs[last] = { ...msgs[last], isStreaming: false, modelRetry: null }
-          return { generationState: "idle", messages: msgs }
+          return { generationState: "idle", messages: msgs, pendingApproval: null }
         })
         cleanup()
         tabSessionsRef.current.delete(tabId)
@@ -1952,7 +2015,7 @@ export function DesignView(): React.JSX.Element {
       agentRuntimeSessionId ?? undefined
     )
     tabSessionsRef.current.set(tabId, { cleanup, sessionId })
-  }, [tabStates, updateTs, workspacePath])
+  }, [cancelDesignRunForTab, isCurrentDesignRun, tabStates, updateTs, workspacePath])
 
   // ── Generate Design from Screenshot ──────────────────────
 
@@ -1960,6 +2023,7 @@ export function DesignView(): React.JSX.Element {
     prompt: string, imageBase64: string, mimeType: string, tabId: string, modelId?: string
   ) => {
     const sessionId = uuid()
+    const designSessionId = currentSessionIdRef.current
     console.log(`[Design:Image] startGenerationFromImage — sessionId=${sessionId} mimeType=${mimeType} base64Len=${imageBase64.length} prompt="${prompt.slice(0, 80)}"`)
     updateTs(tabId, (prev) => ({
       generationState: "generating",
@@ -1971,11 +2035,13 @@ export function DesignView(): React.JSX.Element {
       ],
     }))
 
-    const existing = tabSessionsRef.current.get(tabId)
-    if (existing) { existing.cleanup(); window.api.design.cancel(existing.sessionId).catch(() => {}) }
+    cancelDesignRunForTab(tabId)
+    tabSessionsRef.current.set(tabId, { cleanup: () => {}, sessionId })
 
     console.log("[Design:Image] Calling window.api.design.generateFromImage…")
     const cleanup = window.api.design.generateFromImage(sessionId, prompt, imageBase64, mimeType, (event) => {
+      if (!isCurrentDesignRun(tabId, sessionId, designSessionId)) return
+
       console.log(`[Design:Image] Renderer received event: type=${event.type}${event.error ? " error=" + event.error : ""}`)
       if (event.type === "model_retry") {
         const retry = asDesignModelRetryState(event)
@@ -2041,7 +2107,7 @@ export function DesignView(): React.JSX.Element {
       }
     }, modelId)
     tabSessionsRef.current.set(tabId, { cleanup, sessionId })
-  }, [currentSessionId, updateTs, workspacePath])
+  }, [cancelDesignRunForTab, isCurrentDesignRun, updateTs, workspacePath])
 
   // ── Handle file input selection (screenshot upload) ───────
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -2689,14 +2755,9 @@ ${noteLines || "无"}${variantNote}`
   }, [activeTabId, tabStates, updateTs, startGeneration])
 
   const handleCancel = useCallback(() => {
-    const entry = tabSessionsRef.current.get(activeTabId)
-    if (entry) {
-      entry.cleanup()
-      window.api.design.cancel(entry.sessionId).catch(() => {})
-      tabSessionsRef.current.delete(activeTabId)
-    }
+    cancelDesignRunForTab(activeTabId)
     updateTs(activeTabId, { generationState: "idle", pendingApproval: null })
-  }, [activeTabId, updateTs])
+  }, [activeTabId, cancelDesignRunForTab, updateTs])
 
   const handleDesignApprovalDecision = useCallback((decision: DesignApprovalDecision) => {
     const pendingApproval = tabStates[activeTabId]?.pendingApproval
