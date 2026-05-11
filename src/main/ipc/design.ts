@@ -916,9 +916,9 @@ function validateDesignSkillFile(skillPath: string): { resolvedPath?: string; si
 function buildSelectedDesignSkillContext(skillName: string, skillPath: string): string {
   return `\n\n---\n[Selected Design Skill: ${skillName}]\n` +
     `The user explicitly selected this skill for the current design request. ` +
-    `Do not embed the full SKILL.md in this prompt; use the runtime Skills section and read the full instructions only if needed.\n` +
+    `Before doing any design or file-writing work, you MUST first read this SKILL.md with read_file and follow its instructions.\n` +
     `Selected skill path: ${skillPath}\n` +
-    `If exact workflow details are needed, read this SKILL.md with read_file, then follow it while still obeying the Design artifact rules above.`
+    `If the SKILL.md references supporting files, read only the files needed for this request. Still obey the Design artifact rules above.`
 }
 
 function buildDesignModelRetryHooks(send: (data: object) => void): ModelRetryHooks {
