@@ -1,0 +1,1767 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Harness 工程看板 Demo</title>
+  <style>
+    :root {
+      --bg: #f7f6f2;
+      --panel: #fffdfa;
+      --panel-soft: #fbf7f0;
+      --line: #e5ded2;
+      --line-strong: #d4c8b9;
+      --ink: #24201b;
+      --muted: #807669;
+      --faint: #b2a89b;
+      --green: #0c9b51;
+      --green-soft: #e8f6ee;
+      --amber: #d77a16;
+      --amber-soft: #fff0dc;
+      --red: #c83d3d;
+      --red-soft: #fff0ef;
+      --blue: #276ad6;
+      --blue-soft: #edf3ff;
+      --brown: #8a5b2f;
+      --shadow: 0 1px 0 rgba(40, 31, 20, .05), 0 8px 28px rgba(62, 48, 30, .08);
+      --mono: "SFMono-Regular", "Cascadia Code", "Menlo", monospace;
+      --sans: "Avenir Next", "Gill Sans", "Trebuchet MS", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        linear-gradient(90deg, rgba(45, 33, 21, .035) 1px, transparent 1px) 0 0 / 64px 64px,
+        linear-gradient(rgba(45, 33, 21, .025) 1px, transparent 1px) 0 0 / 64px 64px,
+        var(--bg);
+      color: var(--ink);
+      font-family: var(--sans);
+      letter-spacing: 0;
+    }
+
+    button {
+      font: inherit;
+    }
+
+    [hidden] {
+      display: none !important;
+    }
+
+    .overview-shell {
+      min-height: 100vh;
+      padding: 20px 24px 28px;
+    }
+
+    .overview-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 18px;
+      margin-bottom: 16px;
+    }
+
+    .overview-kicker {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .overview-header h1 {
+      margin-top: 3px;
+      font-size: 22px;
+    }
+
+    .overview-subtitle {
+      margin-top: 7px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .overview-actions {
+      display: flex;
+      gap: 8px;
+      white-space: nowrap;
+    }
+
+    .action-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: rgba(255, 253, 250, .94);
+      padding: 0 13px;
+      color: var(--ink);
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: 0 1px 0 rgba(35, 24, 12, .04);
+    }
+
+    .action-btn.primary {
+      border-color: #b37c4a;
+      background: #bd8451;
+      color: #fffdfa;
+    }
+
+    .overview-toolbar {
+      display: grid;
+      grid-template-columns: minmax(260px, 1fr) repeat(3, auto);
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 16px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: rgba(255, 253, 250, .76);
+      padding: 10px 12px;
+      box-shadow: 0 1px 0 rgba(40, 31, 20, .04);
+    }
+
+    .search-field {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 32px;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      background: #fffdfa;
+      padding: 0 10px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .filter-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 32px;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      background: #f3eee6;
+      padding: 0 10px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .filter-chip strong {
+      color: var(--ink);
+      font-weight: 700;
+    }
+
+    .project-board {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+      gap: 14px;
+      align-items: start;
+    }
+
+    .overview-project {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-top: 3px solid var(--amber);
+      border-radius: 7px;
+      background: rgba(255, 253, 250, .96);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .overview-project.dev {
+      border-top-color: var(--blue);
+    }
+
+    .overview-project.ops {
+      border-top-color: var(--green);
+    }
+
+    .project-summary {
+      padding: 13px 14px 12px;
+    }
+
+    .project-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .project-name-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .project-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 15px;
+      font-weight: 800;
+    }
+
+    .project-code {
+      margin-top: 7px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 10px;
+    }
+
+    .project-metrics {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .project-metric {
+      min-width: 0;
+      border-top: 1px solid var(--line);
+      padding-top: 9px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .project-metric strong {
+      display: block;
+      margin-top: 4px;
+      color: var(--ink);
+      font-size: 13px;
+    }
+
+    .project-controls {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      border-top: 1px solid var(--line);
+    }
+
+    .project-controls button {
+      min-height: 38px;
+      border: 0;
+      background: transparent;
+      color: var(--ink);
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .project-controls button + button {
+      border-left: 1px solid var(--line);
+    }
+
+    .project-controls button:disabled {
+      color: var(--faint);
+      cursor: default;
+    }
+
+    .project-controls .primary-control {
+      background: #c99665;
+      color: #fffdfa;
+    }
+
+    .feature-drawer {
+      display: grid;
+      gap: 8px;
+      border-top: 1px solid var(--line);
+      background: #fbf7f0;
+      padding: 10px;
+    }
+
+    .feature-card {
+      display: grid;
+      gap: 8px;
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fffdfa;
+      padding: 10px;
+      color: inherit;
+      text-align: left;
+      cursor: pointer;
+      transition: border-color .16s ease, transform .16s ease, box-shadow .16s ease;
+    }
+
+    .feature-card:hover,
+    .feature-card:focus-visible {
+      border-color: #bd8451;
+      box-shadow: 0 8px 22px rgba(62, 48, 30, .09);
+      outline: 0;
+      transform: translateY(-1px);
+    }
+
+    .feature-top,
+    .feature-bottom {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .feature-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .feature-summary {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
+    .feature-progress {
+      height: 4px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: #eee7dc;
+    }
+
+    .feature-progress span {
+      display: block;
+      height: 100%;
+      background: var(--blue);
+    }
+
+    .feature-bottom {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 10px;
+    }
+
+    .detail-nav {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .back-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 28px;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      background: #fffdfa;
+      padding: 0 9px;
+      color: var(--muted);
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .empty-features {
+      border: 1px dashed var(--line-strong);
+      border-radius: 6px;
+      background: #fffdfa;
+      padding: 12px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 20;
+      display: grid;
+      place-items: center;
+      background: rgba(36, 32, 27, .28);
+      padding: 24px;
+    }
+
+    .project-modal {
+      width: min(920px, 100%);
+      max-height: min(86vh, 900px);
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fffdfa;
+      box-shadow: 0 24px 80px rgba(62, 48, 30, .22);
+    }
+
+    .modal-head {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 18px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255, 253, 250, .94);
+      padding: 15px 18px;
+      backdrop-filter: blur(12px);
+    }
+
+    .modal-title {
+      font-size: 16px;
+      font-weight: 800;
+    }
+
+    .modal-subtitle {
+      margin-top: 5px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .modal-close {
+      display: grid;
+      place-items: center;
+      width: 30px;
+      height: 30px;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      background: #fffdfa;
+      color: var(--muted);
+      cursor: pointer;
+    }
+
+    .project-form {
+      display: grid;
+      gap: 14px;
+      padding: 16px 18px 18px;
+    }
+
+    .form-section {
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--panel-soft);
+      padding: 13px;
+    }
+
+    .form-section h2 {
+      margin: 0 0 10px;
+      font-size: 13px;
+    }
+
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .form-grid.three {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .form-field {
+      display: grid;
+      gap: 5px;
+      min-width: 0;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .form-field.wide {
+      grid-column: 1 / -1;
+    }
+
+    .form-field input,
+    .form-field select,
+    .form-field textarea {
+      width: 100%;
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      background: #fffdfa;
+      padding: 7px 9px;
+      color: var(--ink);
+      font: 12px/1.4 var(--sans);
+      letter-spacing: 0;
+    }
+
+    .form-field textarea {
+      min-height: 68px;
+      resize: vertical;
+    }
+
+    .form-foot {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      border-top: 1px solid var(--line);
+      padding-top: 12px;
+    }
+
+    .form-hint {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .form-actions {
+      display: flex;
+      gap: 8px;
+    }
+
+    .app {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 298px;
+      grid-template-rows: auto 1fr auto;
+      min-height: 100vh;
+    }
+
+    .topbar {
+      grid-column: 1 / 3;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      min-height: 74px;
+      padding: 14px 24px 12px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255, 253, 250, .86);
+      backdrop-filter: blur(14px);
+    }
+
+    .crumbs {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      color: var(--muted);
+      font-size: 13px;
+      white-space: nowrap;
+    }
+
+    .project-title {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-top: 5px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 20px;
+      line-height: 1.1;
+      font-weight: 700;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 20px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 2px 7px;
+      background: #f3eee6;
+      color: var(--brown);
+      font-family: var(--mono);
+      font-size: 11px;
+    }
+
+    .meta {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 14px;
+      margin-top: 17px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .meta-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .status-strip {
+      display: grid;
+      grid-template-columns: repeat(3, auto);
+      gap: 22px;
+      text-align: right;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .status-strip strong {
+      display: block;
+      margin-top: 4px;
+      color: var(--ink);
+      font-size: 13px;
+    }
+
+    .status-strip .blue {
+      color: #0e55d8;
+      font-family: var(--mono);
+    }
+
+    .status-strip .green {
+      color: var(--green);
+    }
+
+    .main {
+      grid-column: 1;
+      grid-row: 2;
+      min-width: 0;
+      padding: 14px 18px 16px;
+    }
+
+    .sidebar {
+      grid-column: 2;
+      grid-row: 2 / 4;
+      border-left: 1px solid var(--line);
+      background: rgba(255, 253, 250, .78);
+      padding: 16px 14px;
+      overflow: auto;
+    }
+
+    .stage-row {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(150px, 1fr));
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+
+    .stage-card {
+      min-height: 76px;
+      border: 1px solid var(--line);
+      border-top-width: 2px;
+      border-radius: 5px;
+      background: rgba(255, 253, 250, .92);
+      padding: 11px 13px;
+      box-shadow: 0 1px 0 rgba(35, 24, 12, .04);
+    }
+
+    .stage-card.done {
+      border-top-color: var(--green);
+    }
+
+    .stage-card.active {
+      border-color: #e1c5a2;
+      border-top-color: var(--amber);
+      background: #fffaf3;
+    }
+
+    .stage-card.waiting {
+      border-top-color: #c6bdb0;
+      color: var(--faint);
+    }
+
+    .stage-kicker {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .stage-card.done .stage-kicker {
+      color: var(--green);
+    }
+
+    .stage-card.active .stage-kicker {
+      color: var(--amber);
+    }
+
+    .stage-name {
+      margin-top: 5px;
+      font-size: 15px;
+      font-weight: 800;
+      letter-spacing: 0;
+    }
+
+    .stage-state {
+      margin-top: 5px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 14px;
+    }
+
+    .panel {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: rgba(255, 253, 250, .94);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 38px;
+      padding: 9px 14px;
+      border-bottom: 1px solid var(--line);
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .panel-head .link {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 500;
+      text-decoration: none;
+    }
+
+    .panel-body {
+      padding: 13px 14px 15px;
+    }
+
+    .artifact-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 10px;
+    }
+
+    .artifact {
+      display: grid;
+      grid-template-columns: 30px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 10px;
+      min-height: 42px;
+      padding: 7px 8px;
+      border-radius: 5px;
+      background: var(--panel-soft);
+    }
+
+    .file-icon {
+      display: grid;
+      place-items: center;
+      width: 30px;
+      height: 30px;
+      border-radius: 7px;
+      background: #f4ebe0;
+      color: var(--brown);
+    }
+
+    .file-icon.ok {
+      background: var(--green-soft);
+      color: var(--green);
+    }
+
+    .artifact-title {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .artifact-sub {
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 11px;
+      font-family: var(--mono);
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 52px;
+      min-height: 22px;
+      border-radius: 4px;
+      padding: 2px 7px;
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .pill.ok {
+      background: var(--green-soft);
+      color: var(--green);
+    }
+
+    .pill.warn {
+      background: var(--amber-soft);
+      color: var(--amber);
+    }
+
+    .pill.idle {
+      background: #f0ede8;
+      color: var(--muted);
+    }
+
+    .event-list {
+      position: relative;
+      display: grid;
+      gap: 14px;
+      margin-top: 14px;
+      padding-left: 12px;
+    }
+
+    .event-list::before {
+      content: "";
+      position: absolute;
+      top: 2px;
+      bottom: 6px;
+      left: 3px;
+      width: 1px;
+      background: var(--line);
+    }
+
+    .event {
+      position: relative;
+      display: grid;
+      gap: 3px;
+      font-size: 12px;
+    }
+
+    .event::before {
+      content: "";
+      position: absolute;
+      left: -12px;
+      top: 4px;
+      width: 7px;
+      height: 7px;
+      border: 2px solid #fffdfa;
+      border-radius: 999px;
+      background: var(--amber);
+      box-shadow: 0 0 0 1px var(--amber);
+    }
+
+    .event.ok::before {
+      background: var(--green);
+      box-shadow: 0 0 0 1px var(--green);
+    }
+
+    .event-time {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 10px;
+    }
+
+    .event-title {
+      font-weight: 800;
+    }
+
+    .event-msg {
+      color: var(--muted);
+      line-height: 1.45;
+    }
+
+    .side-card {
+      margin-bottom: 14px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fffdfa;
+      overflow: hidden;
+    }
+
+    .side-card h2 {
+      margin: 0;
+      padding: 11px 12px;
+      border-bottom: 1px solid var(--line);
+      font-size: 13px;
+    }
+
+    .side-inner {
+      padding: 12px;
+    }
+
+    .bottom {
+      grid-column: 1;
+      grid-row: 3;
+      border-top: 1px solid var(--line);
+      background: rgba(255, 253, 250, .95);
+      padding: 10px 18px 14px;
+    }
+
+    .sessions-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+
+    .sessions-title {
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .session-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 10px;
+      align-items: stretch;
+    }
+
+    .session-card {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel);
+      padding: 10px;
+      min-height: 110px;
+      min-width: 0;
+    }
+
+    .session-card.active {
+      border-color: #e0bd95;
+      background: #fff8ee;
+    }
+
+    .session-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .session-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .session-meta {
+      margin-top: 7px;
+      color: var(--muted);
+      font-size: 11px;
+      font-family: var(--mono);
+    }
+
+    .session-msg {
+      display: -webkit-box;
+      margin-top: 9px;
+      overflow: hidden;
+      color: #4c4238;
+      font-size: 12px;
+      line-height: 1.45;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+    }
+
+    .chatbar {
+      display: grid;
+      grid-template-columns: 34px minmax(0, 1fr) 42px;
+      align-items: center;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .icon-btn,
+    .send-btn {
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      background: #fffdfa;
+      color: var(--muted);
+      cursor: pointer;
+    }
+
+    .icon-btn {
+      width: 34px;
+      height: 32px;
+    }
+
+    .send-btn {
+      height: 32px;
+      background: #b77b48;
+      color: #fff;
+    }
+
+    .chat-input {
+      height: 32px;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      background: #fffdfa;
+      padding: 0 10px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    svg {
+      display: block;
+      width: 15px;
+      height: 15px;
+      stroke: currentColor;
+      stroke-width: 1.8;
+      fill: none;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    @media (max-width: 1180px) {
+      .app {
+        grid-template-columns: 1fr;
+      }
+
+      .topbar,
+      .main,
+      .bottom,
+      .sidebar {
+        grid-column: 1;
+      }
+
+      .sidebar {
+        grid-row: auto;
+        border-left: 0;
+        border-top: 1px solid var(--line);
+      }
+    }
+
+    @media (max-width: 860px) {
+      .overview-shell {
+        padding: 16px;
+      }
+
+      .overview-header,
+      .topbar,
+      .project-title,
+      .meta,
+      .sessions-head {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .overview-actions {
+        width: 100%;
+        flex-wrap: wrap;
+      }
+
+      .overview-toolbar,
+      .project-board,
+      .form-grid,
+      .form-grid.three,
+      .status-strip,
+      .stage-row,
+      .grid {
+        grid-template-columns: 1fr;
+      }
+
+      .modal-backdrop {
+        padding: 12px;
+      }
+
+      .form-foot {
+        align-items: stretch;
+        flex-direction: column;
+      }
+
+      .project-metrics,
+      .project-controls {
+        grid-template-columns: 1fr;
+      }
+
+      .project-controls button + button {
+        border-top: 1px solid var(--line);
+        border-left: 0;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="overview-shell" id="projectOverview">
+    <header class="overview-header">
+      <div>
+        <div class="overview-kicker">Harness Board</div>
+        <h1>项目视图</h1>
+        <div class="overview-subtitle">按项目聚合 skill run，展开后查看归属 feature、checkpoint、产物和关联会话入口。</div>
+      </div>
+      <div class="overview-actions">
+        <button class="action-btn primary" type="button" data-open-create-project>
+          <svg viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+          新建项目
+        </button>
+      </div>
+    </header>
+
+    <section class="overview-toolbar" aria-label="项目筛选">
+      <div class="search-field">
+        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m16 16 4 4"/></svg>
+        按名称、ID、产品 ID 搜索...
+      </div>
+      <span class="filter-chip">阶段: <strong>全部阶段</strong></span>
+      <span class="filter-chip">状态: <strong>全部状态</strong></span>
+    </section>
+
+    <main class="project-board" aria-label="项目列表">
+      <article class="overview-project" data-project-card>
+        <div class="project-summary">
+          <div class="project-head">
+            <div>
+              <div class="project-name-row">
+                <div class="project-name">Project Mercury-Checkout</div>
+                <span class="tag">BIZ</span>
+              </div>
+              <div class="project-code">ID: HB-0427 · PID: PRD-CHECKOUT</div>
+            </div>
+          </div>
+
+          <div class="project-metrics">
+            <div class="project-metric">feature 数<strong>3</strong></div>
+            <div class="project-metric">当前 checkpoint<strong>code_in_progress</strong></div>
+            <div class="project-metric">最近同步<strong>2 分钟前</strong></div>
+          </div>
+        </div>
+        <div class="project-controls">
+          <button class="primary-control" type="button" data-toggle-project aria-expanded="true">
+            <span class="fold-label">折叠 features</span>
+          </button>
+        </div>
+        <div class="feature-drawer" data-feature-drawer>
+          <button class="feature-card" type="button" data-open-feature data-project-title="Project Mercury-Checkout" data-feature-slug="checkout-refactor" data-checkpoint="code_in_progress">
+            <div class="feature-top">
+              <span class="feature-name">checkout-refactor</span>
+              <span class="pill warn">CODE</span>
+            </div>
+            <div class="feature-summary">PLAN.md 6 项任务，4 项完成；当前等待库存锁定异常映射确认。</div>
+            <div class="feature-progress"><span style="width: 68%"></span></div>
+            <div class="feature-bottom">
+              <span>3 sessions</span>
+              <span>hooks passed 8/8</span>
+            </div>
+          </button>
+          <button class="feature-card" type="button" data-open-feature data-project-title="Project Mercury-Checkout" data-feature-slug="coupon-gateway" data-checkpoint="plan_done">
+            <div class="feature-top">
+              <span class="feature-name">coupon-gateway</span>
+              <span class="pill ok">PLAN</span>
+            </div>
+            <div class="feature-summary">API_CONTRACT.openapi.yaml 已生成，等待进入编码实现节点。</div>
+            <div class="feature-progress"><span style="width: 46%"></span></div>
+            <div class="feature-bottom">
+              <span>2 sessions</span>
+              <span>last inspect 18:55</span>
+            </div>
+          </button>
+          <button class="feature-card" type="button" data-open-feature data-project-title="Project Mercury-Checkout" data-feature-slug="inventory-fallback" data-checkpoint="prd_done">
+            <div class="feature-top">
+              <span class="feature-name">inventory-fallback</span>
+              <span class="pill idle">PRD</span>
+            </div>
+            <div class="feature-summary">PRD 已冻结，缺少 SQL_DESIGN.md 与 PLAN.md 产物。</div>
+            <div class="feature-progress"><span style="width: 28%"></span></div>
+            <div class="feature-bottom">
+              <span>1 session</span>
+              <span>needs plan</span>
+            </div>
+          </button>
+        </div>
+      </article>
+
+      <article class="overview-project dev collapsed" data-project-card>
+        <div class="project-summary">
+          <div class="project-head">
+            <div>
+              <div class="project-name-row">
+                <div class="project-name">Harness-Kit-V3</div>
+                <span class="tag">DEV</span>
+              </div>
+              <div class="project-code">ID: HK-4122 · PID: ASM-X-12</div>
+            </div>
+          </div>
+          <div class="project-metrics">
+            <div class="project-metric">feature 数<strong>2</strong></div>
+            <div class="project-metric">流水线状态<strong>预发 / 成功</strong></div>
+            <div class="project-metric">最近同步<strong>14 分钟前</strong></div>
+          </div>
+        </div>
+        <div class="project-controls">
+          <button class="primary-control" type="button" data-toggle-project aria-expanded="false">
+            <span class="fold-label">展开 features</span>
+          </button>
+        </div>
+        <div class="feature-drawer" data-feature-drawer hidden>
+          <button class="feature-card" type="button" data-open-feature data-project-title="Harness-Kit-V3" data-feature-slug="inspect-protocol" data-checkpoint="review_in_progress">
+            <div class="feature-top">
+              <span class="feature-name">inspect-protocol</span>
+              <span class="pill warn">REVIEW</span>
+            </div>
+            <div class="feature-summary">completion-proposal.json 已生成，等待 REQUIREMENTS_EVAL.md 复核。</div>
+            <div class="feature-progress"><span style="width: 74%"></span></div>
+            <div class="feature-bottom">
+              <span>4 sessions</span>
+              <span>tail hooks.log</span>
+            </div>
+          </button>
+          <button class="feature-card" type="button" data-open-feature data-project-title="Harness-Kit-V3" data-feature-slug="board-ipc-refresh" data-checkpoint="dev_plan_in_progress">
+            <div class="feature-top">
+              <span class="feature-name">board-ipc-refresh</span>
+              <span class="pill idle">DEV</span>
+            </div>
+            <div class="feature-summary">定义 snapshot 与增量刷新事件，尚未进入 hook runner 接入。</div>
+            <div class="feature-progress"><span style="width: 38%"></span></div>
+            <div class="feature-bottom">
+              <span>2 sessions</span>
+              <span>1 warning</span>
+            </div>
+          </button>
+        </div>
+      </article>
+
+      <article class="overview-project ops collapsed" data-project-card>
+        <div class="project-summary">
+          <div class="project-head">
+            <div>
+              <div class="project-name-row">
+                <div class="project-name">Edge-Compute-Node</div>
+                <span class="tag">OPS</span>
+              </div>
+              <div class="project-code">ID: EC-9011 · PID: ARC-E-05</div>
+            </div>
+          </div>
+          <div class="project-metrics">
+            <div class="project-metric">feature 数<strong>2</strong></div>
+            <div class="project-metric">资源利用率<strong>92% 严重</strong></div>
+            <div class="project-metric">最近同步<strong>1 小时前</strong></div>
+          </div>
+        </div>
+        <div class="project-controls">
+          <button class="primary-control" type="button" data-toggle-project aria-expanded="false">
+            <span class="fold-label">展开 features</span>
+          </button>
+        </div>
+        <div class="feature-drawer" data-feature-drawer hidden>
+          <button class="feature-card" type="button" data-open-feature data-project-title="Edge-Compute-Node" data-feature-slug="resource-guardrail" data-checkpoint="ops_blocked">
+            <div class="feature-top">
+              <span class="feature-name">resource-guardrail</span>
+              <span class="pill warn">OPS</span>
+            </div>
+            <div class="feature-summary">CICD_CHECKLIST.md 中资源告警未关闭，阻塞归档节点。</div>
+            <div class="feature-progress"><span style="width: 82%"></span></div>
+            <div class="feature-bottom">
+              <span>2 sessions</span>
+              <span>exitCode 1</span>
+            </div>
+          </button>
+          <button class="feature-card" type="button" data-open-feature data-project-title="Edge-Compute-Node" data-feature-slug="deploy-observer" data-checkpoint="verify_done">
+            <div class="feature-top">
+              <span class="feature-name">deploy-observer</span>
+              <span class="pill ok">VERIFY</span>
+            </div>
+            <div class="feature-summary">VERIFY_REPORT.md 通过，等待生成 PR_BODY.md。</div>
+            <div class="feature-progress"><span style="width: 88%"></span></div>
+            <div class="feature-bottom">
+              <span>1 session</span>
+              <span>ready for cicd</span>
+            </div>
+          </button>
+        </div>
+      </article>
+    </main>
+  </div>
+
+  <div class="modal-backdrop" id="createProjectModal" hidden>
+    <section class="project-modal" role="dialog" aria-modal="true" aria-labelledby="createProjectTitle">
+      <div class="modal-head">
+        <div>
+          <div class="modal-title" id="createProjectTitle">新建项目</div>
+          <div class="modal-subtitle">填写框架侧项目元数据；feature 文件夹仍由 skill 初始化后出现在看板中。</div>
+        </div>
+        <button class="modal-close" type="button" aria-label="关闭" data-close-create-project>
+          <svg viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+        </button>
+      </div>
+
+      <form class="project-form" id="createProjectForm">
+        <section class="form-section">
+          <h2>项目</h2>
+          <div class="form-grid">
+            <label class="form-field">
+              projectId
+              <input name="projectId" required>
+            </label>
+            <label class="form-field">
+              name
+              <input name="name" required value="评论能力改造">
+            </label>
+            <label class="form-field wide">
+              description
+              <textarea name="description">支持评论创建、列表刷新和权限校验</textarea>
+            </label>
+          </div>
+        </section>
+
+        <section class="form-section">
+          <h2>产品</h2>
+          <div class="form-grid three">
+            <label class="form-field">
+              product.id
+              <input name="productId" required value="LA01">
+            </label>
+            <label class="form-field">
+              product.name
+              <input name="productName" required value="产品名称">
+            </label>
+            <label class="form-field">
+              product.systemCode
+              <input name="systemCode" value="optional-system-code">
+            </label>
+          </div>
+        </section>
+
+        <section class="form-section">
+          <h2>工作区</h2>
+          <div class="form-grid">
+            <label class="form-field wide">
+              workspace.path
+              <input name="workspacePath" required value="/Users/sixinjian/CmbCoworkAgent">
+            </label>
+            <label class="form-field">
+              workspace.label
+              <input name="workspaceLabel" required value="CmbCoworkAgent">
+            </label>
+            <label class="form-field">
+              workspace.type
+              <select name="workspaceType">
+                <option value="folder">folder</option>
+                <option value="git">git</option>
+              </select>
+            </label>
+            <label class="form-field">
+              workspace.gitRoot
+              <input name="gitRoot" value="/Users/sixinjian/CmbCoworkAgent">
+            </label>
+            <label class="form-field">
+              workspace.defaultBranch
+              <input name="defaultBranch" value="main">
+            </label>
+          </div>
+        </section>
+
+        <section class="form-section">
+          <h2>Skill</h2>
+          <div class="form-grid">
+            <label class="form-field">
+              skill.id
+              <input name="skillId" required value="autobizdevops">
+            </label>
+            <label class="form-field">
+              skill.name
+              <input name="skillName" required value="AutoBizDevOps">
+            </label>
+            <label class="form-field">
+              skill.version
+              <input name="skillVersion" required value="1.1.0">
+            </label>
+            <label class="form-field">
+              skill.configPath
+              <input name="configPath" value="AUTOBIZDEVOPS_SKILL/config.json">
+            </label>
+            <label class="form-field wide">
+              skill.inspectorPath
+              <input name="inspectorPath" value="AUTOBIZDEVOPS_SKILL/inspect_state.py">
+            </label>
+          </div>
+        </section>
+
+        <section class="form-section">
+          <h2>协作与生命周期</h2>
+          <div class="form-grid">
+            <label class="form-field">
+              owner.id
+              <input name="ownerId" value="optional-user-id">
+            </label>
+            <label class="form-field">
+              owner.name
+              <input name="ownerName" value="张三">
+            </label>
+            <label class="form-field">
+              lifecycle.status
+              <select name="lifecycleStatus">
+                <option value="active">active</option>
+                <option value="paused">paused</option>
+                <option value="archived">archived</option>
+              </select>
+            </label>
+            <label class="form-field">
+              tags
+              <input name="tags" value="需求, 后端, LA01">
+            </label>
+          </div>
+        </section>
+
+        <div class="form-foot">
+          <div class="form-hint">提交后生成 project metadata，featureBind 默认 `{}`，不写入 checkpoint 或产物派生状态。</div>
+          <div class="form-actions">
+            <button class="action-btn" type="button" data-close-create-project>取消</button>
+            <button class="action-btn primary" type="submit">完成新建</button>
+          </div>
+        </div>
+      </form>
+    </section>
+  </div>
+
+  <div class="app feature-detail" id="featureDetail" hidden>
+    <header class="topbar">
+      <div>
+        <div class="detail-nav">
+          <button class="back-link" type="button" data-back-overview>
+            <svg viewBox="0 0 24 24"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>
+            项目总览
+          </button>
+          <div class="crumbs">
+            <span>项目</span>
+            <span>›</span>
+            <strong>Harness 工程看板</strong>
+          </div>
+        </div>
+        <div class="project-title">
+          <h1 id="detailProjectTitle">Project Mercury-Checkout</h1>
+          <span class="tag">ID: HB-0427</span>
+          <span class="tag" id="detailFeatureTag">Feature: checkout-refactor</span>
+        </div>
+        <div class="meta">
+          <span class="meta-item">
+            <svg viewBox="0 0 24 24"><path d="M4 12h16"/><path d="m8 8-4 4 4 4"/><path d="m16 8 4 4-4 4"/></svg>
+            Harness: autobizdevops v1.1.0
+          </span>
+          <span class="meta-item">
+            <svg viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M5 6v14h14V6"/><path d="M9 10h6"/></svg>
+            /Users/dev/mercury-checkout
+          </span>
+          <span class="meta-item">
+            <svg viewBox="0 0 24 24"><path d="M12 8v5l3 2"/><circle cx="12" cy="12" r="9"/></svg>
+            last inspect: 19:42:18
+          </span>
+        </div>
+      </div>
+      <div class="status-strip">
+        <span>checkpoint <strong class="blue" id="detailCheckpoint">code_in_progress</strong></span>
+        <span>route <strong>$autodev -> $autodev-code</strong></span>
+        <span>关联会话 <strong>4 个</strong></span>
+      </div>
+    </header>
+
+    <main class="main">
+      <section class="stage-row" aria-label="生命周期阶段">
+        <article class="stage-card done">
+          <div class="stage-kicker">业务</div>
+          <div class="stage-name">PRD</div>
+          <div class="stage-state">完成 · 13h</div>
+        </article>
+        <article class="stage-card done">
+          <div class="stage-kicker">研发</div>
+          <div class="stage-name">PLAN</div>
+          <div class="stage-state">完成 · 5h</div>
+        </article>
+        <article class="stage-card active">
+          <div class="stage-kicker">研发</div>
+          <div class="stage-name">CODE</div>
+          <div class="stage-state">进行中 · 2 个任务待完成</div>
+        </article>
+        <article class="stage-card waiting">
+          <div class="stage-kicker">验收</div>
+          <div class="stage-name">VERIFY</div>
+          <div class="stage-state">等待 CODE 结束</div>
+        </article>
+      </section>
+
+      <section class="grid">
+        <article class="panel">
+          <div class="panel-head">
+            <span>阶段产物</span>
+            <a class="link" href="#">查看全部 →</a>
+          </div>
+          <div class="panel-body">
+            <div class="artifact-list">
+              <div class="artifact">
+                <span class="file-icon ok"><svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="m9 15 2 2 4-5"/></svg></span>
+                <div>
+                  <div class="artifact-title">PRD.md</div>
+                  <div class="artifact-sub" data-feature-path>.autobizdevops/features/checkout-refactor/PRD.md</div>
+                </div>
+                <span class="pill ok">有效</span>
+              </div>
+              <div class="artifact">
+                <span class="file-icon ok"><svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h5"/></svg></span>
+                <div>
+                  <div class="artifact-title">PLAN.md</div>
+                  <div class="artifact-sub">任务 6 项 · 完成 4 项 · 失败 0 项</div>
+                </div>
+                <span class="pill warn">执行中</span>
+              </div>
+              <div class="artifact">
+                <span class="file-icon"><svg viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/></svg></span>
+                <div>
+                  <div class="artifact-title">API_CONTRACT.openapi.yaml</div>
+                  <div class="artifact-sub">openapi 3.0 · 2 paths · 4 operations</div>
+                </div>
+                <span class="pill ok">有效</span>
+              </div>
+              <div class="artifact">
+                <span class="file-icon"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg></span>
+                <div>
+                  <div class="artifact-title">SQL_DESIGN.md</div>
+                  <div class="artifact-sub">schema_review: passed</div>
+                </div>
+                <span class="pill ok">有效</span>
+              </div>
+            </div>
+
+          </div>
+        </article>
+
+      </section>
+    </main>
+
+    <aside class="sidebar">
+      <section class="side-card">
+        <h2>最近 hook 执行日志</h2>
+        <div class="side-inner">
+          <div class="event-list">
+            <div class="event ok">
+              <span class="event-time">19:42</span>
+              <span class="event-title">init_validate.py precheck · PASS</span>
+              <span class="event-msg">PROJECT.md 与 STATE.md 可读取，workspace 已初始化。</span>
+            </div>
+            <div class="event ok">
+              <span class="event-time">19:41</span>
+              <span class="event-title">autodev-code precheck · PASS</span>
+              <span class="event-msg">feature=checkout-refactor，checkpoint=code_in_progress。</span>
+            </div>
+            <div class="event ok">
+              <span class="event-time">18:55</span>
+              <span class="event-title">autodev-plan postcheck · PASS</span>
+              <span class="event-msg">PLAN.md、API_CONTRACT.openapi.yaml、SQL_DESIGN.md 均有效。</span>
+            </div>
+            <div class="event ok">
+              <span class="event-time">16:12</span>
+              <span class="event-title">biz_validate.py prd · PASS</span>
+              <span class="event-msg">PRD.md 校验通过，STATE.md checkpoint 与产物同步。</span>
+            </div>
+          </div>
+        </div>
+      </section>
+    </aside>
+
+    <footer class="bottom">
+      <div class="sessions-head">
+        <div>
+          <div class="sessions-title">关联会话</div>
+        </div>
+        <span class="tag">board.project.json · 4 threads</span>
+      </div>
+
+      <div class="session-grid">
+        <article class="session-card">
+          <div class="session-top">
+            <span class="session-name">需求讨论与 PRD 定稿</span>
+            <span class="pill ok">idle</span>
+          </div>
+          <div class="session-meta">thread: 0d9f · updated 16:12</div>
+          <div class="session-msg">完成 PRD_DISCUSS.md 到 PRD.md 的收敛，验收标准已冻结。</div>
+        </article>
+        <article class="session-card">
+          <div class="session-top">
+            <span class="session-name">PLAN 设计与任务拆解</span>
+            <span class="pill ok">idle</span>
+          </div>
+          <div class="session-meta">thread: 7a31 · updated 18:55</div>
+          <div class="session-msg">生成 PLAN.md、API_CONTRACT.openapi.yaml 与 SQL_DESIGN.md。</div>
+        </article>
+        <article class="session-card active">
+          <div class="session-top">
+            <span class="session-name">CODE 断点继续</span>
+            <span class="pill warn">active</span>
+          </div>
+          <div class="session-meta">thread: b824 · updated 19:38</div>
+          <div class="session-msg">正在处理库存锁定异常映射，需要确认降级策略后继续。</div>
+        </article>
+        <article class="session-card">
+          <div class="session-top">
+            <span class="session-name">方案复盘与问题记录</span>
+            <span class="pill idle">idle</span>
+          </div>
+          <div class="session-meta">thread: 91ce · updated 昨天</div>
+          <div class="session-msg">记录边界规则、数据兼容性风险和后续验收关注点。</div>
+        </article>
+      </div>
+
+      <div class="chatbar">
+        <button class="icon-btn" aria-label="新增会话">
+          <svg viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+        </button>
+        <div class="chat-input">对当前选中会话继续提问，例如：确认库存锁定失败的业务边界后继续 Task 03 ...</div>
+        <button class="send-btn" aria-label="发送">
+          <svg viewBox="0 0 24 24"><path d="m5 12 14-7-7 14-2-5z"/></svg>
+        </button>
+      </div>
+    </footer>
+  </div>
+  <script>
+    const overview = document.getElementById("projectOverview");
+    const featureDetail = document.getElementById("featureDetail");
+    const projectBoard = document.querySelector(".project-board");
+    const createProjectModal = document.getElementById("createProjectModal");
+    const createProjectForm = document.getElementById("createProjectForm");
+    const detailProjectTitle = document.getElementById("detailProjectTitle");
+    const detailFeatureTag = document.getElementById("detailFeatureTag");
+    const detailCheckpoint = document.getElementById("detailCheckpoint");
+    const featurePath = document.querySelector("[data-feature-path]");
+
+    const escapeHtml = (value) => String(value)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
+
+    const makeProjectId = () => {
+      const suffix = Math.random().toString(16).slice(2, 8).toUpperCase();
+      return `HB-${suffix}`;
+    };
+
+    const openCreateProject = () => {
+      createProjectForm.elements.projectId.value = makeProjectId();
+      createProjectModal.hidden = false;
+      createProjectForm.elements.name.focus();
+    };
+
+    const closeCreateProject = () => {
+      createProjectModal.hidden = true;
+    };
+
+    const buildProjectMetadata = (form) => {
+      const data = new FormData(form);
+      const now = new Date().toISOString();
+
+      return {
+        projectId: data.get("projectId").trim(),
+        name: data.get("name").trim(),
+        description: data.get("description").trim(),
+        product: {
+          id: data.get("productId").trim(),
+          name: data.get("productName").trim(),
+          systemCode: data.get("systemCode").trim()
+        },
+        workspace: {
+          path: data.get("workspacePath").trim(),
+          label: data.get("workspaceLabel").trim(),
+          type: data.get("workspaceType"),
+          gitRoot: data.get("gitRoot").trim(),
+          defaultBranch: data.get("defaultBranch").trim()
+        },
+        skill: {
+          id: data.get("skillId").trim(),
+          name: data.get("skillName").trim(),
+          version: data.get("skillVersion").trim(),
+          configPath: data.get("configPath").trim(),
+          inspectorPath: data.get("inspectorPath").trim()
+        },
+        owner: {
+          id: data.get("ownerId").trim(),
+          name: data.get("ownerName").trim()
+        },
+        tags: data.get("tags").split(",").map((tag) => tag.trim()).filter(Boolean),
+        lifecycle: {
+          status: data.get("lifecycleStatus"),
+          createdAt: now,
+          updatedAt: now,
+          archivedAt: null
+        },
+        featureBind: {}
+      };
+    };
+
+    const appendProjectCard = (project) => {
+      const productTag = project.product.id || "PROJECT";
+      const card = document.createElement("article");
+      card.className = "overview-project collapsed";
+      card.dataset.projectCard = "";
+      card.dataset.projectMetadata = JSON.stringify({ project });
+      card.innerHTML = `
+        <div class="project-summary">
+          <div class="project-head">
+            <div>
+              <div class="project-name-row">
+                <div class="project-name">${escapeHtml(project.name)}</div>
+                <span class="tag">${escapeHtml(productTag)}</span>
+              </div>
+              <div class="project-code">ID: ${escapeHtml(project.projectId)} · PID: ${escapeHtml(project.product.id || "-")}</div>
+            </div>
+          </div>
+
+          <div class="project-metrics">
+            <div class="project-metric">feature 数<strong>0</strong></div>
+            <div class="project-metric">skill<strong>${escapeHtml(project.skill.id)} v${escapeHtml(project.skill.version)}</strong></div>
+            <div class="project-metric">工作区<strong>${escapeHtml(project.workspace.label)}</strong></div>
+          </div>
+        </div>
+        <div class="project-controls">
+          <button class="primary-control" type="button" data-toggle-project aria-expanded="false">
+            <span class="fold-label">展开 features</span>
+          </button>
+        </div>
+        <div class="feature-drawer" data-feature-drawer hidden>
+          <div class="empty-features">
+            当前项目还没有 feature 文件夹。skill 创建 `.autobizdevops/features/{slug}` 后，看板会按 inspector 输出展示 feature 卡片。
+          </div>
+        </div>
+      `;
+
+      projectBoard.prepend(card);
+      card.scrollIntoView({ behavior: "smooth", block: "start" });
+    };
+
+    document.addEventListener("click", (event) => {
+      const openCreateTrigger = event.target.closest("[data-open-create-project]");
+      if (openCreateTrigger) {
+        openCreateProject();
+        return;
+      }
+
+      const closeCreateTrigger = event.target.closest("[data-close-create-project]");
+      if (closeCreateTrigger || event.target === createProjectModal) {
+        closeCreateProject();
+        return;
+      }
+
+      const toggleButton = event.target.closest("[data-toggle-project]");
+      if (toggleButton) {
+        const card = toggleButton.closest("[data-project-card]");
+        const drawer = card.querySelector("[data-feature-drawer]");
+        const nextExpanded = toggleButton.getAttribute("aria-expanded") !== "true";
+
+        toggleButton.setAttribute("aria-expanded", String(nextExpanded));
+        card.classList.toggle("collapsed", !nextExpanded);
+        drawer.hidden = !nextExpanded;
+        toggleButton.querySelector(".fold-label").textContent = nextExpanded ? "折叠 features" : "展开 features";
+        return;
+      }
+
+      const featureTrigger = event.target.closest("[data-open-feature]");
+      if (featureTrigger) {
+        const projectTitle = featureTrigger.dataset.projectTitle || "Project Mercury-Checkout";
+        const featureSlug = featureTrigger.dataset.featureSlug || "checkout-refactor";
+        const checkpoint = featureTrigger.dataset.checkpoint || "code_in_progress";
+
+        detailProjectTitle.textContent = projectTitle;
+        detailFeatureTag.textContent = `Feature: ${featureSlug}`;
+        detailCheckpoint.textContent = checkpoint;
+        featurePath.textContent = `.autobizdevops/features/${featureSlug}/PRD.md`;
+
+        overview.hidden = true;
+        featureDetail.hidden = false;
+        window.scrollTo({ top: 0, behavior: "smooth" });
+        return;
+      }
+
+      const backTrigger = event.target.closest("[data-back-overview]");
+      if (backTrigger) {
+        featureDetail.hidden = true;
+        overview.hidden = false;
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      }
+    });
+
+    createProjectForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const project = buildProjectMetadata(createProjectForm);
+      appendProjectCard(project);
+      closeCreateProject();
+    });
+  </script>
+</body>
+</html>
