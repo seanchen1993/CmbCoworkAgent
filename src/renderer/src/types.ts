@@ -136,6 +136,8 @@ export interface Message {
   // For tool messages - the name of the tool
   name?: string
   created_at: Date
+  start_at?: Date
+  end_at?: Date
 }
 
 export interface ContentBlock {

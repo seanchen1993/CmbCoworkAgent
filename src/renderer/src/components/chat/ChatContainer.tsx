@@ -241,6 +241,95 @@ const ROTATING_WORDS = [
   "部署上线"
 ]
 
+const MESSAGE_TIMES_THREAD_VALUE_KEY = "messageTimes"
+const MESSAGE_TIME_ORDER_THREAD_VALUE_KEY = "messageTimeOrder"
+
+// 单条消息的起止时间，统一存为 ISO 字符串，方便写入 thread_values 并在重启后恢复。
+//
+// 这里刻意不保存 duration 字段：
+// 1. duration 是展示层派生值，后续计算规则变化时不需要迁移历史数据。
+// 2. 每条消息都有 start_at/end_at 后，可以按“一个 user 到下一个 user 之前最后一条消息”
+//    的规则实时计算该轮 assistant 总耗时。
+// 3. tool、assistant 多段回复都会自然落在同一个 user 分组内，不需要额外字段标记轮次。
+type MessageTimeValue = {
+  start_at?: string
+  end_at?: string
+}
+
+type MessageTimeMap = Record<string, MessageTimeValue>
+type MessageTimeEntry = MessageTimeValue & { id: string }
+
+const isMessageTimeMap = (value: unknown): value is MessageTimeMap => {
+  return !!value && typeof value === "object" && !Array.isArray(value)
+}
+
+const isMessageTimeEntryArray = (value: unknown): value is MessageTimeEntry[] => {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (entry) =>
+        !!entry && typeof entry === "object" && typeof (entry as { id?: unknown }).id === "string"
+    )
+  )
+}
+
+const getMessageTimeMap = (threadValues?: Record<string, unknown>): MessageTimeMap => {
+  const value = threadValues?.[MESSAGE_TIMES_THREAD_VALUE_KEY]
+  return isMessageTimeMap(value) ? value : {}
+}
+
+const getMessageTimeOrder = (threadValues?: Record<string, unknown>): MessageTimeEntry[] => {
+  const value = threadValues?.[MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]
+  if (isMessageTimeEntryArray(value)) return value
+  // 兼容旧数据：早期只保存了 messageTimes map，没有保存顺序数组。
+  // JS 对普通对象会保留字符串 key 的插入顺序；虽然这不如显式数组可靠，但对旧数据可以
+  // 最大程度恢复出当时写入的消息顺序，避免老会话重启后完全看不到耗时。
+  return Object.entries(getMessageTimeMap(threadValues)).map(([id, time]) => ({ id, ...time }))
+}
+
+// messageTimes 用 id 做精确匹配；messageTimeOrder 用顺序做兜底，解决重启后 checkpoint
+// 重新生成 message id 时，历史耗时无法按 id 命中的问题。
+//
+// 保存两份结构的原因：
+// - messageTimes: 当前会话里 id 稳定，按 id 查找最快也最准确。
+// - messageTimeOrder: app 重启后历史消息来自 LangGraph checkpoint，某些消息 id 可能变化；
+//   此时仍可用“消息展示顺序”和“时间写入顺序”对齐，恢复 start_at/end_at。
+//
+// merge 时不重排已有数组，只更新同 id 的时间并把新 id 追加到末尾，保证顺序数组能持续
+// 表达整条会话的消息时间线。
+const mergeMessageTimeOrder = (
+  existingOrder: MessageTimeEntry[],
+  updates: MessageTimeMap
+): MessageTimeEntry[] => {
+  const nextOrder = [...existingOrder]
+  const indexes = new Map(nextOrder.map((entry, index) => [entry.id, index]))
+
+  for (const [id, time] of Object.entries(updates)) {
+    const nextEntry = { id, ...time }
+    const existingIndex = indexes.get(id)
+    if (existingIndex === undefined) {
+      indexes.set(id, nextOrder.length)
+      nextOrder.push(nextEntry)
+    } else {
+      nextOrder[existingIndex] = { ...nextOrder[existingIndex], ...nextEntry }
+    }
+  }
+
+  return nextOrder
+}
+
+const toDate = (value: Date | string | undefined): Date | undefined => {
+  if (!value) return undefined
+  if (value instanceof Date) return Number.isFinite(value.getTime()) ? value : undefined
+  const parsed = new Date(value)
+  return Number.isFinite(parsed.getTime()) ? parsed : undefined
+}
+
+const toTime = (value: Date | string | undefined): number | null => {
+  const date = toDate(value)
+  return date ? date.getTime() : null
+}
+
 const getMessageText = (content: Message["content"]): string => {
   if (typeof content === "string") return content
   if (!Array.isArray(content)) return ""
@@ -364,6 +453,10 @@ export function ChatContainer({
   const wasLoadingRef = useRef(false)
   const loadingMessageCountRef = useRef(0)
   const [modelContextLimit, setModelContextLimit] = useState<number | undefined>(undefined)
+  const streamMessageTimesRef = useRef<Record<string, { start_at: Date; end_at?: Date }>>({})
+  const streamMessageBaselineIdsRef = useRef<Set<string>>(new Set())
+  const [messageTimes, setMessageTimes] = useState<MessageTimeMap>({})
+  const threadMessageIdsRef = useRef<Set<string>>(new Set())
 
   useEffect(() => {
     const { ipcRenderer } = window.electron
@@ -423,7 +516,6 @@ export function ChatContainer({
   const {
     threads,
     models,
-    loadThreads,
     generateTitleForFirstMessage,
     setShowCustomizeView,
     setMarketInitialSkillCategory,
@@ -568,6 +660,10 @@ export function ChatContainer({
     setDraftSkill: setSelectedSkill
   } = useCurrentThread(threadId)
 
+  useEffect(() => {
+    threadMessageIdsRef.current = new Set(threadMessages.map((message) => message.id))
+  }, [threadMessages])
+
   // Hook logs live in an external store so updates don't re-render the full provider tree
   const threadContext = useThreadContext()
   const hookLogs = useSyncExternalStore(
@@ -599,6 +695,20 @@ export function ChatContainer({
     setSavedToolDescriptionInput("")
   }, [pendingApproval])
   const isLoading = streamData.isLoading || scheduledTaskLoading
+
+  useEffect(() => {
+    let cancelled = false
+    setMessageTimes({})
+    window.api.threads
+      .get(threadId)
+      .then((thread) => {
+        if (!cancelled) setMessageTimes(getMessageTimeMap(thread?.thread_values))
+      })
+      .catch((error) => console.warn("[ChatContainer] Failed to load message times:", error))
+    return () => {
+      cancelled = true
+    }
+  }, [threadId])
 
   // ── File attachments state ──
   const [attachments, setAttachments] = useState<FileAttachment[]>([])
@@ -972,38 +1082,130 @@ export function ChatContainer({
 
   const prevLoadingRef = useRef(false)
   useEffect(() => {
-    if (prevLoadingRef.current && !isLoading) {
+    if (!prevLoadingRef.current && isLoading) {
+      // 本轮开始时记录已有 stream 消息，避免把历史回放消息当成本轮新消息计时。
+      //
+      // useStream 的 messages 里会同时包含历史消息和本轮新增消息。如果不先记 baseline，
+      // loading 期间遍历 streamData.messages 时就会把历史 assistant/tool 重新打时间戳，
+      // 导致历史耗时被当前时间污染。
+      streamMessageTimesRef.current = {}
+      streamMessageBaselineIdsRef.current = new Set(
+        ((streamData.messages || []) as StreamMessage[])
+          .map((msg) => msg.id)
+          .filter((id): id is string => !!id)
+      )
+    }
+
+    if (isLoading) {
       for (const rawMsg of streamData.messages) {
         const msg = rawMsg as StreamMessage
-        if (msg.id) {
-          const streamMsg = msg as StreamMessage & { id: string }
-
-          let role: Message["role"] = "assistant"
-          if (streamMsg.type === "human") role = "user"
-          else if (streamMsg.type === "tool")
-            role = "tool" // ✅ 修复: tool 不应映射为 assistant
-          else if (streamMsg.type === "ai") role = "assistant"
-
-          const storeMsg: Message = {
-            id: streamMsg.id,
-            role,
-            content: typeof streamMsg.content === "string" ? streamMsg.content : "",
-            tool_calls: streamMsg.tool_calls,
-            ...(role === "tool" &&
-              streamMsg.tool_call_id && { tool_call_id: streamMsg.tool_call_id }),
-            ...(role === "tool" && streamMsg.name && { name: streamMsg.name }),
-            created_at: new Date()
-          }
-          appendMessage(storeMsg)
+        // 只给本轮新增、且还未落入 threadMessages 的消息打 start_at。
+        //
+        // threadMessages 是当前前端已经 append 到会话状态里的消息；如果消息已经存在，
+        // 说明它已经完成过一次采集或恢复，不能重复覆盖 start_at。
+        if (
+          msg.id &&
+          !streamMessageBaselineIdsRef.current.has(msg.id) &&
+          !threadMessageIdsRef.current.has(msg.id) &&
+          !streamMessageTimesRef.current[msg.id]
+        ) {
+          const startedAt = new Date()
+          streamMessageTimesRef.current[msg.id] = { start_at: startedAt, end_at: startedAt }
         }
       }
     }
+
+    if (prevLoadingRef.current && !isLoading) {
+      const completedAt = new Date()
+      const nextMessageTimes: MessageTimeMap = {}
+      // 只处理本轮流式期间被记录过 start_at 的消息，避免重复 append 历史消息。
+      //
+      // 当前轮可能包含多条 assistant 消息和多条 tool 消息。这里不直接用全部 streamData.messages，
+      // 而是只取 streamMessageTimesRef 中出现过的 id，保证每条要落库的消息都拥有本轮采集到的
+      // start_at/end_at。
+      const currentTurnMessages = ((streamData.messages || []) as StreamMessage[]).filter(
+        (msg): msg is StreamMessage & { id: string } =>
+          !!msg.id && !!streamMessageTimesRef.current[msg.id]
+      )
+
+      currentTurnMessages.forEach((streamMsg, index) => {
+        const trackedTime = streamMessageTimesRef.current[streamMsg.id]
+        const nextStreamMsg = currentTurnMessages[index + 1]
+        const nextStartAt = nextStreamMsg
+          ? streamMessageTimesRef.current[nextStreamMsg.id]?.start_at
+          : undefined
+
+        // 当前消息的 end_at 取下一条消息的 start_at；本轮最后一条消息取停止 loading 的时间。
+        //
+        // 这样每条消息时间段首尾相接：
+        // assistant.start_at -> tool.start_at -> assistant.start_at -> completedAt。
+        // 展示总耗时时，再从 user.start_at 减到“下一个 user 之前最后一条消息”的 end_at，
+        // 就能覆盖中间所有 assistant/tool 的耗时。
+        trackedTime.end_at = nextStartAt ?? completedAt
+
+        let role: Message["role"] = "assistant"
+        if (streamMsg.type === "human") role = "user"
+        else if (streamMsg.type === "tool")
+          role = "tool" // ✅ 修复: tool 不应映射为 assistant
+        else if (streamMsg.type === "ai") role = "assistant"
+
+        nextMessageTimes[streamMsg.id] = {
+          start_at: trackedTime.start_at.toISOString(),
+          end_at: trackedTime.end_at.toISOString()
+        }
+
+        const storeMsg: Message = {
+          id: streamMsg.id,
+          role,
+          content: typeof streamMsg.content === "string" ? streamMsg.content : "",
+          tool_calls: streamMsg.tool_calls,
+          ...(role === "tool" &&
+            streamMsg.tool_call_id && { tool_call_id: streamMsg.tool_call_id }),
+          ...(role === "tool" && streamMsg.name && { name: streamMsg.name }),
+          created_at: new Date(),
+          start_at: trackedTime.start_at,
+          end_at: trackedTime.end_at
+        }
+        appendMessage(storeMsg)
+      })
+
+      if (Object.keys(nextMessageTimes).length > 0) {
+        setMessageTimes((prev) => ({ ...prev, ...nextMessageTimes }))
+        window.api.threads
+          .get(threadId)
+          .then((thread) => {
+            if (!thread) return
+            const existingTimes = getMessageTimeMap(thread.thread_values)
+            return window.api.threads.update(threadId, {
+              thread_values: {
+                ...(thread.thread_values ?? {}),
+                // id map 用于当前会话和 id 稳定时的精确恢复。
+                //
+                // 例如用户还没有关闭 app，只是在同一个运行时切换线程或重新渲染，
+                // message id 仍然可靠，此时直接按 id 取 start_at/end_at。
+                [MESSAGE_TIMES_THREAD_VALUE_KEY]: {
+                  ...existingTimes,
+                  ...nextMessageTimes
+                },
+                // 顺序数组用于 app 重启后，checkpoint 恢复出的 message id 不一致时兜底匹配。
+                //
+                // 它不是用来计算 duration 的新字段，只是保存每条消息时间的展示顺序；
+                // duration 仍由 user.start_at 和分组内最后一条消息 end_at 动态计算。
+                [MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]: mergeMessageTimeOrder(
+                  getMessageTimeOrder(thread.thread_values),
+                  nextMessageTimes
+                )
+              }
+            })
+          })
+          .catch((error) => console.warn("[ChatContainer] Failed to save message times:", error))
+      }
+    }
     prevLoadingRef.current = isLoading
-  }, [isLoading, streamData.messages, loadThreads, appendMessage])
+  }, [isLoading, streamData.messages, threadId, appendMessage])
 
   const displayMessages = useMemo(() => {
     const threadMessageIds = new Set(threadMessages.map((m) => m.id))
-
     const streamingMsgs: Message[] = ((streamData.messages || []) as StreamMessage[])
       .filter((m): m is StreamMessage & { id: string } => !!m.id && !threadMessageIds.has(m.id))
       .map((streamMsg) => {
@@ -1020,12 +1222,33 @@ export function ChatContainer({
           ...(role === "tool" &&
             streamMsg.tool_call_id && { tool_call_id: streamMsg.tool_call_id }),
           ...(role === "tool" && streamMsg.name && { name: streamMsg.name }),
-          created_at: new Date()
+          created_at: new Date(),
+          ...(streamMessageTimesRef.current[streamMsg.id]?.start_at && {
+            start_at: streamMessageTimesRef.current[streamMsg.id].start_at
+          }),
+          ...(streamMessageTimesRef.current[streamMsg.id]?.end_at && {
+            end_at: streamMessageTimesRef.current[streamMsg.id].end_at
+          }),
+          ...(toDate(messageTimes[streamMsg.id]?.start_at) && {
+            start_at: toDate(messageTimes[streamMsg.id]?.start_at)
+          }),
+          ...(toDate(messageTimes[streamMsg.id]?.end_at) && {
+            end_at: toDate(messageTimes[streamMsg.id]?.end_at)
+          })
         }
       })
 
     // Clean up attachment XML tags in user messages for display
-    const allMessages = [...threadMessages, ...streamingMsgs]
+    const allMessages = [...threadMessages, ...streamingMsgs].map((msg) => {
+      const storedTime = messageTimes[msg.id]
+      const startAt = toDate(storedTime?.start_at) ?? msg.start_at ?? msg.created_at
+      const endAt = toDate(storedTime?.end_at) ?? msg.end_at ?? startAt
+      return {
+        ...msg,
+        start_at: startAt,
+        end_at: endAt
+      }
+    })
     return allMessages.map((msg) => {
       if (
         msg.role !== "user" ||
@@ -1053,7 +1276,28 @@ export function ChatContainer({
         fileNames.length > 0 ? `${fileNames.join("\n")}\n\n${textOnly}`.trim() : textOnly
       return { ...msg, content: cleaned }
     })
-  }, [threadMessages, streamData.messages])
+  }, [threadMessages, streamData.messages, messageTimes])
+
+  const assistantDurationsByMessageId = useMemo(() => {
+    const durations = new Map<string, number>()
+    for (let index = 0; index < displayMessages.length; index++) {
+      const currentUser = displayMessages[index]
+      if (currentUser.role !== "user") continue
+
+      const group = displayMessages.slice(index + 1)
+      const nextUserIndex = group.findIndex((message) => message.role === "user")
+      const responseMessages = nextUserIndex >= 0 ? group.slice(0, nextUserIndex) : group
+      const firstAssistant = responseMessages.find((message) => message.role === "assistant")
+      const lastMessageWithEnd = [...responseMessages].reverse().find((message) => message.end_at)
+
+      if (!firstAssistant || !lastMessageWithEnd) continue
+      const startedAt = toTime(currentUser.start_at)
+      const endedAt = toTime(lastMessageWithEnd.end_at)
+      if (startedAt === null || endedAt === null || endedAt <= startedAt) continue
+      durations.set(firstAssistant.id, endedAt - startedAt)
+    }
+    return durations
+  }, [displayMessages])
 
   const userMessageIds = useMemo(
     () => displayMessages.filter((message) => message.role === "user").map((message) => message.id),
@@ -1398,13 +1642,60 @@ export function ChatContainer({
     }
     displayContent = [displayContent, skillBlock].filter(Boolean).join("\n\n")
 
+    // 用户消息本身不消耗 assistant 响应时间，start_at/end_at 都取发送时刻。
+    //
+    // 但 user.start_at 是本轮耗时计算的起点：展示 CMBDevClaw 后面的 duration 时，会找到
+    // 当前 user 后面的第一条 assistant，再减到下一个 user 之前最后一条消息的 end_at。
+    // 所以 user 也必须持久化 start_at/end_at，否则重启后无法还原该轮起点。
+    const userStartAt = new Date()
     const userMessage: Message = {
       id: crypto.randomUUID(),
       role: "user",
       content: displayContent,
-      created_at: new Date()
+      created_at: new Date(),
+      start_at: userStartAt,
+      end_at: userStartAt
     }
     appendMessage(userMessage)
+    // 用户消息也需要持久化起止时间，后续 duration 用 user.start_at 作为起点。
+    //
+    // 这里先立即写入 thread_values，是为了尽量保证即使 assistant 回复还没结束，
+    // 当前 user 的起点也已经保存下来；assistant/tool 的结束时间会在 loading 结束后补齐。
+    const userMessageTime: MessageTimeMap = {
+      [userMessage.id]: {
+        start_at: userStartAt.toISOString(),
+        end_at: userStartAt.toISOString()
+      }
+    }
+    setMessageTimes((prev) => ({ ...prev, ...userMessageTime }))
+    try {
+      const thread = await window.api.threads.get(threadId)
+      if (thread) {
+        await window.api.threads.update(threadId, {
+          thread_values: {
+            ...(thread.thread_values ?? {}),
+            // 保留 id map，优先支持按 message id 精确恢复。
+            //
+            // user message 在前端先 append，checkpoint 恢复时 id 可能不一定完全一致；
+            // 因此仍需要下面的顺序数组作为兜底。
+            [MESSAGE_TIMES_THREAD_VALUE_KEY]: {
+              ...getMessageTimeMap(thread.thread_values),
+              ...userMessageTime
+            },
+            // 同步维护顺序数组，支持 app 重启后按消息顺序恢复历史耗时。
+            //
+            // 这条 user 时间会成为顺序数组中的一个节点，后续 assistant/tool 时间会继续 append，
+            // 最终形成完整的 user -> assistant/tool... 时间线。
+            [MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]: mergeMessageTimeOrder(
+              getMessageTimeOrder(thread.thread_values),
+              userMessageTime
+            )
+          }
+        })
+      }
+    } catch (error) {
+      console.warn("[ChatContainer] Failed to save user message time:", error)
+    }
 
     if (isFirstMessage) {
       const currentThread = threads.find((t) => t.thread_id === threadId)
@@ -2412,6 +2703,7 @@ export function ChatContainer({
                     onEditUserMessage={handleEditUserMessage}
                     threadId={threadId}
                     isLoading={isLoading}
+                    assistantDurationMs={assistantDurationsByMessageId.get(message.id)}
                   />
                 </div>
               )

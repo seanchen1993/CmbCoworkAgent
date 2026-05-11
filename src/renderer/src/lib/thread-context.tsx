@@ -18,6 +18,53 @@ import { useAppStore } from "@/lib/store"
 import type { DeepAgent } from "../../../main/agent/types"
 import { toast } from "sonner"
 
+const MESSAGE_TIMES_THREAD_VALUE_KEY = "messageTimes"
+const MESSAGE_TIME_ORDER_THREAD_VALUE_KEY = "messageTimeOrder"
+
+// 历史消息耗时不单独存 duration，而是存每条消息的 start_at/end_at。
+//
+// ChatContainer 展示时会根据消息分组实时计算：
+// 当前 user.start_at -> 下一个 user 之前最后一条消息.end_at。
+// 因此这里恢复历史消息时，只要把每条消息的 start_at/end_at 补回 Message，
+// 展示层就能用同一套逻辑显示历史耗时。
+type MessageTimeMap = Record<string, { start_at?: string; end_at?: string }>
+type MessageTimeEntry = MessageTimeMap[string] & { id: string }
+
+const isMessageTimeMap = (value: unknown): value is MessageTimeMap => {
+  return !!value && typeof value === "object" && !Array.isArray(value)
+}
+
+const isMessageTimeEntryArray = (value: unknown): value is MessageTimeEntry[] => {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (entry) =>
+        !!entry && typeof entry === "object" && typeof (entry as { id?: unknown }).id === "string"
+    )
+  )
+}
+
+const getMessageTimeMap = (threadValues?: Record<string, unknown>): MessageTimeMap => {
+  const value = threadValues?.[MESSAGE_TIMES_THREAD_VALUE_KEY]
+  return isMessageTimeMap(value) ? value : {}
+}
+
+const getMessageTimeOrder = (threadValues?: Record<string, unknown>): MessageTimeEntry[] => {
+  const value = threadValues?.[MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]
+  if (isMessageTimeEntryArray(value)) return value
+  // 兼容旧数据：如果没有顺序数组，就尽量按 messageTimes map 的插入顺序恢复。
+  //
+  // 旧数据无法做到百分百保证 id 与 checkpoint 消息一致，但按插入顺序恢复可以覆盖大多数
+  // “当时按会话顺序写入 messageTimes”的历史会话。
+  return Object.entries(getMessageTimeMap(threadValues)).map(([id, time]) => ({ id, ...time }))
+}
+
+const toDate = (value: string | undefined): Date | undefined => {
+  if (!value) return undefined
+  const parsed = new Date(value)
+  return Number.isFinite(parsed.getTime()) ? parsed : undefined
+}
+
 // Open file tab type
 export interface OpenFile {
   path: string
@@ -729,11 +776,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const loadThreadHistory = useCallback(
     async (threadId: string) => {
       const actions = getThreadActions(threadId)
+      let persistedMessageTimes: MessageTimeMap = {}
+      let persistedMessageTimeOrder: MessageTimeEntry[] = []
 
       // Load workspace path and thread metadata
       try {
         const thread = await window.api.threads.get(threadId)
         if (thread) {
+          persistedMessageTimes = getMessageTimeMap(thread.thread_values)
+          persistedMessageTimeOrder = getMessageTimeOrder(thread.thread_values)
           const metadata = thread.metadata || {}
           if (metadata.workspacePath) {
             actions.setWorkspacePath(metadata.workspacePath as string)
@@ -845,14 +896,28 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               if (typeof msg.content === "string") content = msg.content
               else if (Array.isArray(msg.content)) content = msg.content as Message["content"]
 
+              const messageId = msg.id || `msg-${index}`
+              const fallbackTime = new Date()
+              // 优先按 id 恢复；如果重启后 checkpoint 中的 id 变化，则按消息顺序兜底恢复。
+              //
+              // 这里不直接用 created_at 作为历史耗时依据，因为 created_at 的原有逻辑不能改；
+              // checkpoint 重新加载时 created_at 可能是当前时间。start_at/end_at 才是本功能
+              // 专门用于跨重启恢复耗时的时间字段。
+              const persistedTime =
+                persistedMessageTimes[messageId] ?? persistedMessageTimeOrder[index]
+              const startAt = toDate(persistedTime?.start_at) ?? fallbackTime
+              const endAt = toDate(persistedTime?.end_at) ?? startAt
+
               return {
-                id: msg.id || `msg-${index}`,
+                id: messageId,
                 role,
                 content,
                 tool_calls: msg.tool_calls as Message["tool_calls"],
                 ...(role === "tool" && msg.tool_call_id && { tool_call_id: msg.tool_call_id }),
                 ...(role === "tool" && msg.name && { name: msg.name }),
-                created_at: new Date()
+                created_at: new Date(),
+                start_at: startAt,
+                end_at: endAt
               }
             })
             actions.setMessages(messages)
@@ -972,7 +1037,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             name?: string
           }>
           updateThreadState(threadId, () => ({
-            messages: msgs.map((m) => ({ ...m, created_at: new Date() }) as Message)
+            messages: msgs.map((m) => {
+              const now = new Date()
+              return { ...m, created_at: now, start_at: now, end_at: now } as Message
+            })
           }))
           break
         }
@@ -1024,10 +1092,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               updated[idx] = {
                 ...updated[idx],
                 content: finalContent,
-                ...(toolCalls?.length && { tool_calls: toolCalls })
+                ...(toolCalls?.length && { tool_calls: toolCalls }),
+                end_at: new Date()
               }
               return { ...clearRetry, messages: updated }
             }
+            const now = new Date()
             return {
               ...clearRetry,
               messages: [
@@ -1037,7 +1107,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   role: "assistant" as const,
                   content: finalContent,
                   ...(toolCalls?.length && { tool_calls: toolCalls }),
-                  created_at: new Date()
+                  created_at: now,
+                  start_at: now,
+                  end_at: now
                 }
               ]
             }
@@ -1051,6 +1123,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           const content = event.content as string
           const toolCallId = event.toolCallId as string
           const name = event.name as string | undefined
+          const now = new Date()
           updateThreadState(threadId, (prev) => {
             if (prev.messages.some((m) => m.id === id)) return {}
             return {
@@ -1062,7 +1135,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   content,
                   tool_call_id: toolCallId,
                   name,
-                  created_at: new Date()
+                  created_at: now,
+                  start_at: now,
+                  end_at: now
                 }
               ]
             }
