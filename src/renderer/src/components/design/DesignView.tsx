@@ -1005,6 +1005,7 @@ export function DesignView(): React.JSX.Element {
   const [tabStates, setTabStates]     = useState<Record<string, TabState>>(_init.tabStates)
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([])
   const [allSkills, setAllSkills] = useState<SkillInfo[]>([])
+  const [activeSkillIndex, setActiveSkillIndex] = useState(0)
   const [workspacePath, setWorkspacePath] = useState<string | null>(null)
   const [workspaceLoading, setWorkspaceLoading] = useState(false)
   // Code & link modal state
@@ -1033,6 +1034,7 @@ export function DesignView(): React.JSX.Element {
   const activeTabIdRef    = useRef(activeTabId)
   const tabStatesRef      = useRef(tabStates)
   const fileInputRef      = useRef<HTMLInputElement>(null)   // images only (screenshot / 📷)
+  const skillOptionRefs   = useRef<Array<HTMLDivElement | null>>([])
 
   const ts = tabStates[activeTabId] ?? makeTabState()
 
@@ -2712,6 +2714,23 @@ ${noteLines || "无"}${variantNote}`
     ? allSkills.filter((s) => !slashQuery || s.name.toLowerCase().includes(slashQuery))
     : []
 
+  useEffect(() => {
+    if (isSlashMode) setActiveSkillIndex(0)
+  }, [isSlashMode, slashQuery])
+
+  useEffect(() => {
+    if (!isSlashMode || filteredSkills.length === 0) {
+      setActiveSkillIndex(0)
+      return
+    }
+    setActiveSkillIndex((index) => Math.min(index, filteredSkills.length - 1))
+  }, [isSlashMode, filteredSkills.length])
+
+  useEffect(() => {
+    if (!isSlashMode) return
+    skillOptionRefs.current[activeSkillIndex]?.scrollIntoView({ block: "nearest" })
+  }, [activeSkillIndex, filteredSkills.length, isSlashMode])
+
   const handleSkillSelect = useCallback(async (skill: SkillInfo) => {
     setInputValue("")  // clear "/" from input
     // Optimistically set skill without content first
@@ -2733,9 +2752,19 @@ ${noteLines || "无"}${variantNote}`
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (isSlashMode) {
       if (e.key === "Escape") { e.preventDefault(); setInputValue(""); return }
+      if (e.key === "ArrowDown" && filteredSkills.length > 0) {
+        e.preventDefault()
+        setActiveSkillIndex((index) => (index + 1) % filteredSkills.length)
+        return
+      }
+      if (e.key === "ArrowUp" && filteredSkills.length > 0) {
+        e.preventDefault()
+        setActiveSkillIndex((index) => (index - 1 + filteredSkills.length) % filteredSkills.length)
+        return
+      }
       if (e.key === "Enter" && filteredSkills.length > 0) {
         e.preventDefault()
-        handleSkillSelect(filteredSkills[0])
+        handleSkillSelect(filteredSkills[activeSkillIndex] ?? filteredSkills[0])
         return
       }
       return  // let other keys type the filter query
@@ -2980,30 +3009,33 @@ ${noteLines || "无"}${variantNote}`
                 maxHeight: 220, overflowY: "auto", zIndex: 200,
               }}>
                 <div style={{ padding: "6px 8px 4px", fontSize: 11, color: "#a0a0a0", fontWeight: 500, borderBottom: "1px solid #f0eee8" }}>
-                  ⚡ 技能 — 按 ↵ 选第一个，Esc 取消
+                  ⚡ 技能 — ↑↓ 选择，↵ 确认，Esc 取消
                 </div>
-                {filteredSkills.map((skill, i) => (
-                  <div
-                    key={skill.name}
-                    onClick={() => handleSkillSelect(skill)}
-                    style={{
-                      padding: "8px 12px", cursor: "pointer",
-                      background: i === 0 ? "#f8f7f4" : "transparent",
-                      borderBottom: i < filteredSkills.length - 1 ? "1px solid #f4f3f0" : "none",
-                      transition: "background 0.1s",
-                    }}
-                    onMouseEnter={(e) => (e.currentTarget.style.background = "#f3f2ee")}
-                    onMouseLeave={(e) => (e.currentTarget.style.background = i === 0 ? "#f8f7f4" : "transparent")}
-                  >
-                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                      <span style={{ fontSize: 14 }}>⚡</span>
-                      <span style={{ fontSize: 13, fontWeight: 600, color: "#1a1a1a" }}>{skill.name}</span>
+                {filteredSkills.map((skill, i) => {
+                  const isActive = i === activeSkillIndex
+                  return (
+                    <div
+                      key={skill.name}
+                      ref={(node) => { skillOptionRefs.current[i] = node }}
+                      onClick={() => handleSkillSelect(skill)}
+                      onMouseEnter={() => setActiveSkillIndex(i)}
+                      style={{
+                        padding: "8px 12px", cursor: "pointer",
+                        background: isActive ? "#f3f2ee" : "transparent",
+                        borderBottom: i < filteredSkills.length - 1 ? "1px solid #f4f3f0" : "none",
+                        transition: "background 0.1s",
+                      }}
+                    >
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ fontSize: 14 }}>⚡</span>
+                        <span style={{ fontSize: 13, fontWeight: 600, color: "#1a1a1a" }}>{skill.name}</span>
+                      </div>
+                      <div style={{ fontSize: 11, color: "#8a8a8a", marginTop: 2, marginLeft: 20, lineHeight: 1.4 }}>
+                        {skill.description.slice(0, 80)}{skill.description.length > 80 ? "…" : ""}
+                      </div>
                     </div>
-                    <div style={{ fontSize: 11, color: "#8a8a8a", marginTop: 2, marginLeft: 20, lineHeight: 1.4 }}>
-                      {skill.description.slice(0, 80)}{skill.description.length > 80 ? "…" : ""}
-                    </div>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             )}
             {isSlashMode && filteredSkills.length === 0 && slashQuery && (
