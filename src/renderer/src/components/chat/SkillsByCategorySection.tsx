@@ -1,8 +1,6 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react"
+import React, { useEffect, useMemo, useState } from "react"
 import {
   Building2,
-  ChevronDown,
-  ChevronRight,
   Code2,
   Layers3,
   Loader2,
@@ -38,13 +36,6 @@ export interface SkillsByCategoryItem {
 
 export type SkillsByCategoryMap = Map<string, Map<string, SkillsByCategoryItem[]>>
 
-type SceneSkillTreeNode = {
-  key: string
-  label: string
-  item?: SkillsByCategoryItem
-  children: SceneSkillTreeNode[]
-}
-
 interface SkillsByCategorySectionProps {
   skills: SkillMetadata[]
   previewLimit: number
@@ -66,89 +57,6 @@ function splitCategory(category?: string): { primary: string; secondary: string 
 
 function getCategoryKey(primary: string, secondary: string): string {
   return secondary ? `${primary}/${secondary}` : primary
-}
-
-function normalizeSceneSkillPathPart(value?: string): string {
-  return String(value || "")
-    .trim()
-    .replace(/\\/g, "/")
-    .replace(/^\/+|\/+$/g, "")
-    .toLowerCase()
-}
-
-function getSceneSkillTreePath(skill: SkillMetadata): string {
-  const id = skill.id?.startsWith("plugin:") ? skill.id.split("/").slice(1).join("/") : skill.id
-  return String(skill.relativePath || id || skill.name || "")
-    .replace(/\\/g, "/")
-    .replace(/^\/+|\/+$/g, "")
-}
-
-function buildSceneSkillTree(items: SkillsByCategoryItem[]): SceneSkillTreeNode[] {
-  const root: SceneSkillTreeNode = { key: "root", label: "root", children: [] }
-  const indexByNode = new WeakMap<SceneSkillTreeNode, Map<string, SceneSkillTreeNode>>()
-
-  const getIndex = (node: SceneSkillTreeNode): Map<string, SceneSkillTreeNode> => {
-    let index = indexByNode.get(node)
-    if (!index) {
-      index = new Map(node.children.map((child) => [normalizeSceneSkillPathPart(child.label), child]))
-      indexByNode.set(node, index)
-    }
-    return index
-  }
-
-  for (const item of items) {
-    const segments = getSceneSkillTreePath(item.skill).split("/").filter(Boolean)
-    const fallbackSegments = segments.length > 0 ? segments : [item.skill.name]
-    let current = root
-
-    for (const segment of fallbackSegments) {
-      const normalized = normalizeSceneSkillPathPart(segment)
-      const childIndex = getIndex(current)
-      let child = childIndex.get(normalized)
-      if (!child) {
-        child = { key: `${current.key}/${normalized}`, label: segment, children: [] }
-        current.children.push(child)
-        childIndex.set(normalized, child)
-      }
-      current = child
-    }
-
-    current.item = item
-  }
-
-  const sortNodes = (nodes: SceneSkillTreeNode[]): SceneSkillTreeNode[] =>
-    [...nodes]
-      .sort((a, b) => {
-        const itemA = a.item
-        const itemB = b.item
-        if (itemA && itemB && itemA.isFeatured !== itemB.isFeatured) {
-          return itemA.isFeatured ? -1 : 1
-        }
-        if (itemA && itemB && !itemA.isFeatured && !itemB.isFeatured && itemA.calls !== itemB.calls) {
-          return itemB.calls - itemA.calls
-        }
-        const labelA = itemA?.label || a.label
-        const labelB = itemB?.label || b.label
-        return labelA.localeCompare(labelB, "zh-CN")
-      })
-      .map((node) => ({ ...node, children: sortNodes(node.children) }))
-
-  return sortNodes(root.children)
-}
-
-function limitSceneSkillTreeTopLevel(
-  nodes: SceneSkillTreeNode[],
-  previewLimit: number
-): SceneSkillTreeNode[] {
-  if (previewLimit <= 0) return []
-  return nodes.slice(0, previewLimit)
-}
-
-function countSceneSkillTreeItems(node: SceneSkillTreeNode): number {
-  return (
-    (node.item ? 1 : 0) +
-    node.children.reduce((sum, child) => sum + countSceneSkillTreeItems(child), 0)
-  )
 }
 
 const ORGANIZATION_CATEGORY = "组织级技能"
@@ -212,188 +120,6 @@ async function loadMarketSkillsOnce(): Promise<SkillWithUsage[]> {
   })()
 
   return marketSkillsRequestPromise
-}
-
-function SceneSkillButton({
-  item,
-  onUseSkillPrompt,
-  onRequestInstall
-}: {
-  item: SkillsByCategoryItem
-  onUseSkillPrompt: (skill: SkillMetadata, label?: string) => void
-  onRequestInstall?: (item: SkillsByCategoryItem) => void
-}): React.JSX.Element {
-  const { skill, label, marketItem, isFeatured, isInstalled } = item
-
-  return (
-    <Tooltip key={marketItem.name}>
-      <TooltipTrigger asChild>
-        <button
-          type="button"
-          onClick={() => {
-            if (!isInstalled && onRequestInstall) {
-              onRequestInstall(item)
-              return
-            }
-            onUseSkillPrompt(skill, label)
-          }}
-          className={
-            isFeatured
-              ? "group w-full rounded-xl border border-amber-200/70 bg-amber-50/60 px-3 py-2 text-left hover:bg-amber-100/70 hover:border-amber-300 transition-colors"
-              : "group w-full rounded-xl border border-slate-300/90 dark:border-slate-600/85 bg-slate-50/70 dark:bg-slate-900/35 px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:bg-slate-100/95 dark:hover:bg-slate-800/55 hover:border-slate-400/95 dark:hover:border-slate-500/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
-          }
-        >
-          <div className="flex items-center gap-2 min-w-0">
-            {isFeatured ? (
-              <div className="rounded-md border border-amber-200/80 p-1.5 text-amber-500 group-hover:text-amber-600 transition-colors">
-                <Zap className="size-4" />
-              </div>
-            ) : (
-              <div className="rounded-md border border-slate-300/90 dark:border-slate-600/80 bg-white/80 dark:bg-slate-900/45 p-1.5 text-slate-500 dark:text-slate-300 group-hover:text-slate-700 dark:group-hover:text-slate-100 transition-colors">
-                <Wrench className="size-4" />
-              </div>
-            )}
-            <div className="min-w-0 flex-1">
-              <div className="text-xs text-foreground leading-5 truncate whitespace-nowrap">
-                {label}
-              </div>
-            </div>
-          </div>
-        </button>
-      </TooltipTrigger>
-      <TooltipContent side="top" sideOffset={6}>
-        <p className="max-w-xs break-words">{label}</p>
-      </TooltipContent>
-    </Tooltip>
-  )
-}
-
-function SceneSkillTreeGrid({
-  items,
-  previewLimit,
-  onUseSkillPrompt,
-  onRequestInstall
-}: {
-  items: SkillsByCategoryItem[]
-  previewLimit: number
-  onUseSkillPrompt: (skill: SkillMetadata, label?: string) => void
-  onRequestInstall?: (item: SkillsByCategoryItem) => void
-}): React.JSX.Element {
-  const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
-  const tree = useMemo(
-    () => limitSceneSkillTreeTopLevel(buildSceneSkillTree(items), previewLimit),
-    [items, previewLimit]
-  )
-  const toggleNode = useCallback((nodeKey: string) => {
-    setExpandedNodes((prev) => {
-      const next = new Set(prev)
-      if (next.has(nodeKey)) next.delete(nodeKey)
-      else next.add(nodeKey)
-      return next
-    })
-  }, [])
-
-  return (
-    <SceneSkillTreeList
-      nodes={tree}
-      nested={false}
-      expandedNodes={expandedNodes}
-      onToggleNode={toggleNode}
-      onUseSkillPrompt={onUseSkillPrompt}
-      onRequestInstall={onRequestInstall}
-    />
-  )
-}
-
-function SceneSkillTreeList({
-  nodes,
-  nested,
-  expandedNodes,
-  onToggleNode,
-  onUseSkillPrompt,
-  onRequestInstall
-}: {
-  nodes: SceneSkillTreeNode[]
-  nested: boolean
-  expandedNodes: Set<string>
-  onToggleNode: (nodeKey: string) => void
-  onUseSkillPrompt: (skill: SkillMetadata, label?: string) => void
-  onRequestInstall?: (item: SkillsByCategoryItem) => void
-}): React.JSX.Element {
-  return (
-    <div className={nested ? "grid grid-cols-1 gap-1.5" : "grid grid-cols-4 gap-2"}>
-      {nodes.map((node) => {
-        const childrenExpanded = expandedNodes.has(node.key)
-        const childCount = node.children.reduce(
-          (sum, child) => sum + countSceneSkillTreeItems(child),
-          0
-        )
-
-        return (
-          <div key={node.key} className="min-w-0 space-y-1.5">
-            {node.item ? (
-              <SceneSkillButton
-                item={node.item}
-                onUseSkillPrompt={onUseSkillPrompt}
-                onRequestInstall={onRequestInstall}
-              />
-            ) : (
-              <button
-                type="button"
-                onClick={() => onToggleNode(node.key)}
-                className="w-full rounded-xl border border-dashed border-border/70 bg-muted/20 px-3 py-2 text-left hover:bg-muted/35"
-              >
-                <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                  <span className="flex min-w-0 items-center gap-1.5">
-                    {childrenExpanded ? (
-                      <ChevronDown className="size-3 shrink-0" />
-                    ) : (
-                      <ChevronRight className="size-3 shrink-0" />
-                    )}
-                    <span className="truncate">{node.label}</span>
-                  </span>
-                  <span className="rounded border border-border/70 px-1.5 text-[10px]">
-                    {childCount}
-                  </span>
-                </div>
-              </button>
-            )}
-
-            {node.children.length > 0 && (
-              <button
-                type="button"
-                onClick={() => onToggleNode(node.key)}
-                className="flex min-h-7 w-full items-center gap-2 rounded-lg border border-dashed border-border/60 bg-muted/15 px-2 py-1 text-left text-[11px] text-muted-foreground hover:bg-muted/30"
-              >
-                {childrenExpanded ? (
-                  <ChevronDown className="size-3 shrink-0" />
-                ) : (
-                  <ChevronRight className="size-3 shrink-0" />
-                )}
-                <span className="min-w-0 flex-1 truncate">子技能</span>
-                <span className="rounded border border-border/70 px-1.5 text-[10px]">
-                  {childCount}
-                </span>
-              </button>
-            )}
-
-            {node.children.length > 0 && childrenExpanded && (
-              <div className="border-l border-border/60 pl-2">
-                <SceneSkillTreeList
-                  nodes={node.children}
-                  nested
-                  expandedNodes={expandedNodes}
-                  onToggleNode={onToggleNode}
-                  onUseSkillPrompt={onUseSkillPrompt}
-                  onRequestInstall={onRequestInstall}
-                />
-              </div>
-            )}
-          </div>
-        )
-      })}
-    </div>
-  )
 }
 
 export function SkillsByCategorySection({
@@ -477,31 +203,33 @@ export function SkillsByCategorySection({
     const commonGroups = groups.get(COMMON_CATEGORY) ?? new Map<string, SkillsByCategoryItem[]>()
     const commonPrimaryItems = commonGroups.get("") ?? []
     const pinnedNames = new Set<string>(COMMON_PINNED_SKILLS.map((skill) => skill.name))
-    const pinnedItems: SkillsByCategoryItem[] = COMMON_PINNED_SKILLS.map(({ name, label, description }) => {
-      const skill = allSkillMap.get(name) ?? {
-        name,
-        description,
-        path: `skills/${name}`,
-        source: "project" as const
-      }
-
-      return {
-        skill,
-        label,
-        marketItem: {
+    const pinnedItems: SkillsByCategoryItem[] = COMMON_PINNED_SKILLS.map(
+      ({ name, label, description }) => {
+        const skill = allSkillMap.get(name) ?? {
           name,
-          chinese_name: label,
           description,
-          filename: skill.path,
-          category: COMMON_CATEGORY,
-          created_at: ""
-        },
-        isInstalled: true,
-        isFeatured: false,
-        isCertified: false,
-        calls: 0
+          path: `skills/${name}`,
+          source: "project" as const
+        }
+
+        return {
+          skill,
+          label,
+          marketItem: {
+            name,
+            chinese_name: label,
+            description,
+            filename: skill.path,
+            category: COMMON_CATEGORY,
+            created_at: ""
+          },
+          isInstalled: true,
+          isFeatured: false,
+          isCertified: false,
+          calls: 0
+        }
       }
-    })
+    )
     commonGroups.set(
       "",
       pinnedItems.concat(
@@ -595,6 +323,7 @@ export function SkillsByCategorySection({
               {Array.from(secondaryGroups.entries()).map(([secondaryCategory, items]) => {
                 const hideSecondaryHeader = onlyPrimaryLevel && !secondaryCategory
                 const showAllItems = primaryCategory === ORGANIZATION_CATEGORY
+                const visibleItems = showAllItems ? items : items.slice(0, previewLimit)
                 return (
                   <div
                     key={`${primaryCategory}/${secondaryCategory || "__no_secondary__"}`}
@@ -623,12 +352,65 @@ export function SkillsByCategorySection({
                         </button>
                       </div>
                     )}
-                    <SceneSkillTreeGrid
-                      items={items}
-                      previewLimit={previewLimit}
-                      onUseSkillPrompt={onUseSkillPrompt}
-                      onRequestInstall={setInstallPromptItem}
-                    />
+                    <div className="grid grid-cols-4 gap-2">
+                      {visibleItems.map((item) => {
+                        const { skill, label, marketItem, isInstalled, isFeatured, isCertified } =
+                          item
+                        const tags = [isFeatured ? "精品" : "", isCertified ? "认证" : ""].filter(
+                          Boolean
+                        )
+                        const displayLabel = label
+                        return (
+                          <Tooltip key={marketItem.name}>
+                            <TooltipTrigger asChild>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (!isInstalled) {
+                                    setInstallPromptItem(item)
+                                    return
+                                  }
+                                  onUseSkillPrompt(skill, label)
+                                }}
+                                className="group relative w-full rounded-xl border border-slate-300/90 dark:border-slate-600/85 bg-slate-50/70 dark:bg-slate-900/35 px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:bg-slate-100/95 dark:hover:bg-slate-800/55 hover:border-slate-400/95 dark:hover:border-slate-500/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
+                              >
+                                {tags.length > 0 && (
+                                  <div className="absolute right-1 top-1 flex flex-col items-end gap-0.5">
+                                    {tags.map((tag) => (
+                                      <span
+                                        key={tag}
+                                        className={
+                                          tag === "精品"
+                                            ? "relative rounded-sm border border-amber-200 bg-amber-50 px-0.5 text-[9px] leading-3 text-amber-700 hover:z-10 hover:after:absolute hover:after:left-full hover:after:top-1/2 hover:after:ml-1.5 hover:after:-translate-y-1/2 hover:after:whitespace-nowrap hover:after:rounded-md hover:after:border hover:after:border-slate-200 hover:after:bg-popover hover:after:px-2 hover:after:py-1 hover:after:text-[11px] hover:after:leading-none hover:after:text-popover-foreground hover:after:shadow-md hover:after:content-['团队级']"
+                                            : "relative rounded-sm border border-emerald-200 bg-emerald-50 px-0.5 text-[9px] leading-3 text-emerald-700 hover:z-10 hover:after:absolute hover:after:left-full hover:after:top-1/2 hover:after:ml-1.5 hover:after:-translate-y-1/2 hover:after:whitespace-nowrap hover:after:rounded-md hover:after:border hover:after:border-slate-200 hover:after:bg-popover hover:after:px-2 hover:after:py-1 hover:after:text-[11px] hover:after:leading-none hover:after:text-popover-foreground hover:after:shadow-md hover:after:content-['室组级']"
+                                        }
+                                      >
+                                        {tag}
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+                                <div
+                                  className={`flex items-center gap-2 min-w-0 ${tags.length > 0 ? "pr-8" : ""}`}
+                                >
+                                  <div className="rounded-md border border-slate-300/90 dark:border-slate-600/80 bg-white/80 dark:bg-slate-900/45 p-1.5 text-slate-500 dark:text-slate-300 group-hover:text-slate-700 dark:group-hover:text-slate-100 transition-colors">
+                                    <Wrench className="size-4" />
+                                  </div>
+                                  <div className="min-w-0 flex-1">
+                                    <div className="text-xs text-foreground leading-5 truncate whitespace-nowrap">
+                                      {displayLabel}
+                                    </div>
+                                  </div>
+                                </div>
+                              </button>
+                            </TooltipTrigger>
+                            <TooltipContent side="top" sideOffset={6}>
+                              <p className="max-w-xs break-words">{displayLabel}</p>
+                            </TooltipContent>
+                          </Tooltip>
+                        )
+                      })}
+                    </div>
                   </div>
                 )
               })}
