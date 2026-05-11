@@ -200,6 +200,22 @@ function applyTweaks(edits) {
 applyTweaks({}); // apply defaults on load
 \`\`\`
 
+## Reading and writing design files
+
+Use file reads deliberately for HTML and design source files:
+- For Design HTML work, these rules override generic codebase-exploration guidance that suggests an initial 100-line scan.
+- \`read_file\` defaults to 100 lines. For HTML artifacts, uploaded HTML/context files, selected \`SKILL.md\` files, or files you must understand before editing, do not rely on the default.
+- Start with \`read_file\` using \`offset=0\` and \`limit=1000\`. If the tool result indicates there are more lines, continue from the returned offset until you understand the relevant structure.
+- For very large HTML, use focused search and targeted reads to locate \`<!DOCTYPE\`, \`<head>\`, \`<style>\`, \`<body>\`, variation containers, \`EDITMODE-BEGIN\`/\`EDITMODE-END\`, scripts, postMessage handlers, and the exact sections the user asked about. Do not repeatedly reread only the first 100 lines.
+- When iterating on an existing artifact, preserve IDs, variation wrappers, tweak keys, EDITMODE markers, scripts, postMessage listeners, data attributes, and unrelated content unless the user explicitly asks to change them.
+- Read only the uploaded/context/resource files needed for the request. Do not copy unrelated assets or bulk-import resource folders.
+
+When writing:
+- Write exactly one complete standalone HTML artifact to the provided artifact path. Do not split the final deliverable into external support files.
+- Keep the artifact compact and maintainable: avoid unnecessary generated bulk, duplicated CSS, huge embedded data, and copied assets that are not used.
+- Use \`write_file\` for a new output artifact. If updating an existing artifact, use \`edit_file\` only when the replacement is small and reliable; otherwise write the complete final HTML artifact.
+- After writing the file, respond only with a brief summary.
+
 ## Context from user's session
 
 The user's prompt will include their clarifying answers (output type, fidelity, style direction, reference context). Use those answers to shape which medium you pick, how polished you go, and what aesthetic direction to take.
@@ -819,10 +835,10 @@ function extractHtmlTitle(html: string): string | undefined {
 function buildDesignArtifactInstruction(filePath: string, exists: boolean, sourceFilePath?: string): string {
   return `\n\n---\nDESIGN ARTIFACT FILE\n` +
     (sourceFilePath
-      ? `Read the current design source artifact first:\n${sourceFilePath}\n\n`
+      ? `Read the current design source artifact first with read_file using offset=0 and limit=1000. If more lines are available, continue from the returned offset until the relevant HTML structure is understood:\n${sourceFilePath}\n\n`
       : "") +
     `Write the new complete standalone HTML artifact to this exact absolute output file path:\n${filePath}\n\n` +
-    `${exists ? "The output artifact already exists. Read it with read_file before editing." : "The output artifact does not exist yet. Create it with write_file."}\n` +
+    `${exists ? "The output artifact already exists. Before editing it, read it with read_file using offset=0 and limit=1000. If more lines are available, continue from the returned offset until the relevant HTML structure is understood." : "The output artifact does not exist yet. Create it with write_file."}\n` +
     `If a source artifact path is provided, use it only as input/reference and write the updated complete HTML to the output file path above. ` +
     `Use write_file for a new output artifact, or edit_file only if the output file already exists. ` +
     `Do not paste the full HTML into the final chat response. After the file is updated, respond with only a brief summary of what changed. ` +
@@ -918,7 +934,7 @@ function validateDesignSkillFile(skillPath: string): { resolvedPath?: string; si
 function buildSelectedDesignSkillContext(skillName: string, skillPath: string): string {
   return `\n\n---\n[Selected Design Skill: ${skillName}]\n` +
     `The user explicitly selected this skill for the current design request. ` +
-    `Before doing any design or file-writing work, you MUST first read this SKILL.md with read_file and follow its instructions.\n` +
+    `Before doing any design or file-writing work, you MUST first read this SKILL.md with read_file using offset=0 and limit=1000, then follow its instructions.\n` +
     `Selected skill path: ${skillPath}\n` +
     `If the SKILL.md references supporting files, read only the files needed for this request. Still obey the Design artifact rules above.`
 }

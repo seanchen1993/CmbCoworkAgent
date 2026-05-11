@@ -1,6 +1,8 @@
 import { getToolLabel } from "@/lib/tool-labels"
 import type { DesignExecutionEvent, DesignModelRetryState, Message } from "./types"
 
+const MAX_VISIBLE_TOOL_CALLS = 30
+
 function getDesignToolLabel(name: string): string {
   return getToolLabel(name, { showToolName: false })
 }
@@ -25,6 +27,10 @@ function DesignExecutionPanel({ events }: { events?: DesignExecutionEvent[] }) {
 
   const skills = events.filter((event) => event.kind === "used_skill" && event.name)
   const calls = events.filter((event) => event.kind === "tool_call")
+  const visibleCalls = calls.length > MAX_VISIBLE_TOOL_CALLS
+    ? calls.slice(-MAX_VISIBLE_TOOL_CALLS)
+    : calls
+  const hiddenCallCount = calls.length - visibleCalls.length
   const resultsByToolCallId = new Map<string, DesignExecutionEvent>()
   for (const event of events) {
     if (event.kind === "tool_result" && event.toolCallId) {
@@ -50,6 +56,11 @@ function DesignExecutionPanel({ events }: { events?: DesignExecutionEvent[] }) {
       }}>
         <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#cc785c", flexShrink: 0 }} />
         <span style={{ fontSize: 12, fontWeight: 700, color: "#2f3437" }}>技能执行</span>
+        {calls.length > 0 && (
+          <span style={{ fontSize: 11, color: "#8a8a8a", flexShrink: 0 }}>
+            {calls.length} 步
+          </span>
+        )}
         {skills.length > 0 && (
           <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
             {skills.map((skill) => (
@@ -69,8 +80,21 @@ function DesignExecutionPanel({ events }: { events?: DesignExecutionEvent[] }) {
         )}
       </div>
       {calls.length > 0 && (
-        <div style={{ padding: "6px 8px", display: "flex", flexDirection: "column", gap: 5 }}>
-          {calls.map((call) => {
+        <div style={{ padding: "6px 8px", display: "flex", flexDirection: "column", gap: 5, maxHeight: 280, overflowY: "auto" }}>
+          {hiddenCallCount > 0 && (
+            <div style={{
+              padding: "5px 8px",
+              borderRadius: 7,
+              background: "#f4f3ef",
+              color: "#8a8a8a",
+              fontSize: 11,
+              fontWeight: 600,
+              textAlign: "center",
+            }}>
+              已折叠前 {hiddenCallCount} 步，显示最近 {visibleCalls.length} 步
+            </div>
+          )}
+          {visibleCalls.map((call) => {
             const key = call.toolCallId || call.id || `${call.name}-${call.timestamp}`
             const result = call.toolCallId ? resultsByToolCallId.get(call.toolCallId) : undefined
             const status = result?.isError || call.status === "error"

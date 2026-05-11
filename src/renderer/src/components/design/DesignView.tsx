@@ -1034,6 +1034,7 @@ export function DesignView(): React.JSX.Element {
   const activeTabIdRef    = useRef(activeTabId)
   const tabStatesRef      = useRef(tabStates)
   const fileInputRef      = useRef<HTMLInputElement>(null)   // images only (screenshot / 📷)
+  const messageListRef    = useRef<HTMLDivElement>(null)
   const skillOptionRefs   = useRef<Array<HTMLDivElement | null>>([])
 
   const ts = tabStates[activeTabId] ?? makeTabState()
@@ -1107,6 +1108,13 @@ export function DesignView(): React.JSX.Element {
   // ── Keep refs in sync ────────────────────────────────────
   useEffect(() => { activeTabIdRef.current = activeTabId }, [activeTabId])
   useEffect(() => { tabStatesRef.current = tabStates }, [tabStates])
+  useEffect(() => {
+    const messageList = messageListRef.current
+    if (!messageList) return
+    window.requestAnimationFrame(() => {
+      messageList.scrollTop = messageList.scrollHeight
+    })
+  }, [ts.messages, ts.generationState])
   // currentSessionId ref — needed inside startGeneration (which is a stable useCallback)
   // to produce a stable artifact ID without capturing a stale closure value.
   const currentSessionIdRef = useRef<string | null>(currentSessionId)
@@ -2975,7 +2983,7 @@ ${noteLines || "无"}${variantNote}`
                 onImportHtml={() => { void handleImportHtmlFile("session") }}
               />
             ) : (
-              <div style={S.messageList}>
+              <div ref={messageListRef} style={S.messageList}>
                 {ts.messages.map((msg, i) => (
                   <MessageBubble key={i} message={msg} />
                 ))}
