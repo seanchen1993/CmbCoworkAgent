@@ -1747,6 +1747,9 @@ const api = {
       const handler = (_: unknown, data: { type: string; token?: string; html?: string; error?: string; event?: unknown; artifactPath?: string }): void => {
         onEvent(data)
         if (data.type === "done" || data.type === "error" || data.type === "cancelled") {
+          if (data.type === "error") {
+            ipcRenderer.invoke("design:cancel", sessionId).catch(() => undefined)
+          }
           ipcRenderer.removeListener(channel, handler)
         }
       }
@@ -1848,6 +1851,9 @@ const api = {
       const handler = (_: unknown, data: { type: string; token?: string; html?: string; error?: string; event?: unknown; artifactPath?: string }): void => {
         onEvent(data)
         if (data.type === "done" || data.type === "error" || data.type === "cancelled") {
+          if (data.type === "error") {
+            ipcRenderer.invoke("design:cancel", sessionId).catch(() => undefined)
+          }
           ipcRenderer.removeListener(channel, handler)
         }
       }
@@ -1865,6 +1871,9 @@ const api = {
       const handler = (_: unknown, data: { type: string; questions?: unknown[]; error?: string }): void => {
         onEvent(data)
         if (data.type === "done" || data.type === "error" || data.type === "cancelled") {
+          if (data.type === "error") {
+            ipcRenderer.invoke("design:cancel", sessionId).catch(() => undefined)
+          }
           ipcRenderer.removeListener(channel, handler)
         }
       }
@@ -1884,6 +1893,9 @@ const api = {
       const handler = (_: unknown, data: { type: string; token?: string; html?: string; error?: string }): void => {
         onEvent(data)
         if (data.type === "done" || data.type === "error" || data.type === "cancelled") {
+          if (data.type === "error") {
+            ipcRenderer.invoke("design:cancel", sessionId).catch(() => undefined)
+          }
           ipcRenderer.removeListener(channel, handler)
         }
       }

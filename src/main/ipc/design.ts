@@ -959,6 +959,34 @@ function buildDesignModelRetryHooks(send: (data: object) => void): ModelRetryHoo
   }
 }
 
+function createDesignAbortError(): Error {
+  const error = new Error("Aborted")
+  error.name = "AbortError"
+  return error
+}
+
+function sleepDesignRetryDelay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(createDesignAbortError())
+      return
+    }
+
+    let timeout: ReturnType<typeof setTimeout>
+    const onAbort = (): void => {
+      clearTimeout(timeout)
+      reject(createDesignAbortError())
+    }
+
+    timeout = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort)
+      resolve()
+    }, ms)
+
+    signal.addEventListener("abort", onAbort, { once: true })
+  })
+}
+
 // ─────────────────────────────────────────────────────────
 // IPC Registration
 // ─────────────────────────────────────────────────────────
@@ -1625,7 +1653,7 @@ export function registerDesignHandlers(): void {
               console.warn(
                 `[Design:Agent] Initial stream error "${errMsg}", ${resetCheckpoint ? "restarting with fresh checkpoint" : "retrying initial stream"} (${initialStreamRetriesLeft} retries left)`
               )
-              await new Promise((resolve) => setTimeout(resolve, 500))
+              await sleepDesignRetryDelay(500, controller.signal)
               if (resetCheckpoint) {
                 await closeCheckpointer(threadId)
                 deleteThreadCheckpoint(threadId)
@@ -1898,7 +1926,7 @@ export function registerDesignHandlers(): void {
           console.warn(
             `[Design:Agent] Mid-stream error "${errMsg}", ${resetCheckpoint ? "restarting with fresh checkpoint" : "resuming from checkpoint"} (${midStreamRetriesLeft} retries left)`
           )
-          await new Promise((resolve) => setTimeout(resolve, 500))
+          await sleepDesignRetryDelay(500, controller.signal)
           if (resetCheckpoint) {
             await closeCheckpointer(threadId)
             deleteThreadCheckpoint(threadId)
