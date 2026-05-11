@@ -675,6 +675,21 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
         : new Uint32Array(0)
     const fingerprint = generationFingerprint(input.generatedContent, generationOccurrences)
 
+    // Pre-compute net-new line count for edit_file by consuming oldString hashes
+    // from newString hashes (same one-to-one hash consumption as commit-time
+    // supersession). write_file has no oldString → keeps raw hashes.length.
+    let reportedLineCount = hashes.length
+    if (oldLineHashes.length > 0) {
+      const oldCounts = buildLineHashCounts(oldLineHashes)
+      for (let i = 0; i < hashes.length; i++) {
+        const c = oldCounts.get(hashes[i])
+        if (c && c > 0) {
+          oldCounts.set(hashes[i], c - 1)
+          reportedLineCount--
+        }
+      }
+    }
+
     // ── JSONL record ────────────────────────────────────
     // Derive net-deletion count here (in the microtask), NOT at the tool
     // call site — this keeps edit_file's hot path free of any O(N) scan for
@@ -691,7 +706,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       threadId: input.threadId,
       traceId: ctx.traceId,
       filePath: absPath,
-      lineCount: hashes.length,
+      lineCount: reportedLineCount,
       deletedLineCount,
       fingerprint,
       createdAt
@@ -730,7 +745,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       stepIndex: input.stepIndex,
       tool: input.tool,
       language: extname(absPath).slice(1).toLowerCase() || null,
-      lineCount: hashes.length,
+      lineCount: reportedLineCount,
       deletedLineCount,
       usedSkills,
       modelId: ctx.modelId ?? null,
@@ -740,7 +755,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       relativeHint: relPath.split("/").slice(-1)[0] // leaf filename only, not a full path
     })
     console.log(
-      `[AdoptionTracker] recordGen OK: eventId=${eventId} file=${relPath} lineCount=${hashes.length} deletedLineCount=${deletedLineCount} threadId=${input.threadId} traceId=${ctx.traceId ?? "none"}`
+      `[AdoptionTracker] recordGen OK: eventId=${eventId} file=${relPath} lineCount=${reportedLineCount} rawHashes=${hashes.length} deletedLineCount=${deletedLineCount} threadId=${input.threadId} traceId=${ctx.traceId ?? "none"}`
     )
   } catch (e) {
     console.warn("[AdoptionTracker] doRecordGen failed:", e)
