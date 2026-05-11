@@ -1493,7 +1493,7 @@ export function registerDesignHandlers(): void {
           sourceArtifact.success ? sourceArtifact.filePath : undefined
         )
 
-        const agent = await createAgentRuntime({
+        const createDesignAgentRuntime = () => createAgentRuntime({
           threadId,
           workspacePath,
           modelId,
@@ -1505,6 +1505,8 @@ export function registerDesignHandlers(): void {
           retryHooks: buildDesignModelRetryHooks(send),
           maxRetryAttempts: 6,
         })
+
+        let agent = await createDesignAgentRuntime()
 
         const streamConfig = {
           configurable: { thread_id: threadId },
@@ -1650,8 +1652,8 @@ export function registerDesignHandlers(): void {
         // Mid-stream retry loop — mirrors chat module (ipc/agent.ts) behavior so
         // that transient stream interruptions (e.g. `terminated` from a corporate
         // proxy idle timeout, or any error matched by isRetryableApiError) do not
-        // surface as a hard error. On retry we call agent.stream(null, ...) which
-        // resumes from the LangGraph checkpoint without re-running completed nodes.
+        // surface as a hard error. On retry we rebuild the runtime, then resume
+        // from the LangGraph checkpoint without re-sending the human message.
         // eslint-disable-next-line no-constant-condition
         while (true) {
         try {
@@ -1809,6 +1811,7 @@ export function registerDesignHandlers(): void {
           )
           await new Promise((resolve) => setTimeout(resolve, 500))
           // null input = resume from LangGraph checkpoint, do not re-send the human message
+          agent = await createDesignAgentRuntime()
           stream = await agent.stream(null, streamConfig)
         }
         }  // end while
