@@ -829,7 +829,10 @@ interface MeasureOpts {
  * being the dominant I/O spike source with marginal value over L1 + L3.
  */
 function measureFile(filePath: string, opts?: MeasureOpts): void {
-  if (!initialized) return
+  if (!initialized) {
+    console.warn("[AdoptionTracker] measureFile skipped — tracker not initialized")
+    return
+  }
   queueMicrotask(() => {
     doMeasureFile(filePath, opts).catch((e) => {
       console.warn("[AdoptionTracker] measureFile unexpected error:", e)
@@ -843,17 +846,21 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
     absPath = resolvePath(filePath)
     const minCreated = Date.now() - GEN_ATTRIBUTION_WINDOW_MS
     const pendingRows = findPendingGensForFile(absPath, minCreated)
+    console.log(
+      `[AdoptionTracker] doMeasureFile: absPath=${absPath} pendingGens=${pendingRows.length} commitSha=${opts?.commitSha ?? "none"} stagedDeleted=${opts?.stagedDeleted ?? false}`
+    )
     if (pendingRows.length === 0) return
 
     // Dedup concurrent measurements for the same file. Even without the
     // timer/commit race, a single commit batch can pass the same file twice
     // (rare but cheap to guard against).
-    if (inFlightFileMeasurements.has(absPath)) return
+    if (inFlightFileMeasurements.has(absPath)) {
+      console.log(
+        `[AdoptionTracker] doMeasureFile dedup skip: absPath=${absPath} (already in-flight)`
+      )
+      return
+    }
     inFlightFileMeasurements.add(absPath)
-
-    console.log(
-      `[AdoptionTracker] doMeasureFile: absPath=${absPath} pendingGens=${pendingRows.length} commitSha=${opts?.commitSha ?? "none"} stagedDeleted=${opts?.stagedDeleted ?? false}`
-    )
 
     let currentHashCounts: Map<number, number> | null = null
     let missingCurrentContent = false
