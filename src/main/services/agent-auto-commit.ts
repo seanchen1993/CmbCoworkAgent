@@ -588,21 +588,24 @@ export async function maybeAutoCommitAfterAgentRun({
     const startDirty = new Set(snapshot.dirtyFiles)
     const touched = touchedFilesByThread.get(threadId) ?? new Set<string>()
     const trackedByGitPanel = new Set(await getThreadLlmModifiedFiles(threadId, workspacePath))
-    const agentOwned = new Set([...touched, ...trackedByGitPanel])
+    const agentReported = new Set([...touched, ...trackedByGitPanel])
 
+    // Any pre-existing dirty file whose content changed during the run is a candidate.
+    // We no longer require the file to be in `agentReported`: shell-tool side effects
+    // (npm install, prettier --write, git mv, code-gen, etc.) never reach _onFileMutation,
+    // so filtering by it caused legitimate agent changes to be skipped.
     const changedStartDirty = new Set<string>()
     await Promise.all(
       snapshot.dirtyFiles.map(async (file) => {
-        if (!endDirty.has(file) || !agentOwned.has(file)) return
+        if (!endDirty.has(file)) return
         const current = await getFileFingerprint(workspacePath, file)
         if (current !== snapshot.dirtyFingerprints[file]) changedStartDirty.add(file)
       })
     )
 
     const newDirtyFiles = Array.from(endDirty).filter((file) => !startDirty.has(file))
-    const agentNewDirtyFiles = newDirtyFiles.filter((file) => agentOwned.has(file))
     const candidate = new Set<string>()
-    for (const file of agentNewDirtyFiles) {
+    for (const file of newDirtyFiles) {
       candidate.add(file)
     }
     for (const file of changedStartDirty) {
@@ -617,23 +620,33 @@ export async function maybeAutoCommitAfterAgentRun({
     const preexistingIncluded = candidateFiles.filter((file) => startDirty.has(file))
     if (preexistingIncluded.length > 0) {
       warnings.push(
-        `本次自动提交包含 ${preexistingIncluded.length} 个 Agent 开始前已有未提交改动、且本轮又被修改或触达的文件`
+        `本次自动提交包含 ${preexistingIncluded.length} 个 Agent 开始前已有未提交改动、且本轮被修改的文件`
       )
     }
-    if (agentNewDirtyFiles.length > 0) {
-      warnings.push(`本次自动提交包含 ${agentNewDirtyFiles.length} 个执行期间新增的 Agent 文件`)
+    if (newDirtyFiles.length > 0) {
+      warnings.push(`本次自动提交包含 ${newDirtyFiles.length} 个本轮新增的脏文件`)
     }
-    if (skippedFiles.length > 0) {
-      warnings.push(`还有 ${skippedFiles.length} 个未记录为本轮 Agent 改动的脏文件，未纳入自动提交`)
+    const unreportedCandidates = candidateFiles.filter((file) => !agentReported.has(file))
+    if (unreportedCandidates.length > 0) {
+      warnings.push(
+        `其中 ${unreportedCandidates.length} 个文件未被 Agent 工具主动报告（可能来自 shell 命令或外部修改），如非预期请人工核对`
+      )
     }
 
+    // Foreign-staged gate: any `git add` performed during the run must be against a
+    // file the agent itself reported via _onFileMutation / Git panel tracking. A user
+    // who stages something manually is signaling intent the auto-commit must not
+    // override — even if that file would otherwise qualify as a candidate (e.g. a
+    // newly created file). Gating on `agentReported` (not on the broader `candidate`
+    // set) preserves this protection after we relaxed candidate selection to also
+    // capture unreported shell-tool side effects.
     const stagedEnd = new Set(getStagedFiles(entries))
-    const nonCandidateStaged = Array.from(stagedEnd).filter((file) => !candidate.has(file))
-    if (nonCandidateStaged.length > 0) {
+    const foreignStaged = Array.from(stagedEnd).filter((file) => !agentReported.has(file))
+    if (foreignStaged.length > 0) {
       return {
         status: "skipped",
         reasons: ["检测到非本轮 Agent 改动已暂存，为避免误提交，已跳过自动提交"],
-        skippedFiles: nonCandidateStaged,
+        skippedFiles: foreignStaged,
         warnings
       }
     }
@@ -658,9 +671,12 @@ export async function maybeAutoCommitAfterAgentRun({
     }
     const commitMessage = commitMessageResult.message
 
+    const previewMessage = settings.push
+      ? `准备自动提交并推送 ${candidateFiles.length} 个文件`
+      : `准备自动提交 ${candidateFiles.length} 个文件`
     const preview: AgentAutoCommitResult = {
       status: "needs_confirmation",
-      message: `准备自动提交 ${candidateFiles.length} 个文件`,
+      message: previewMessage,
       commitMessage,
       committedFiles: candidateFiles,
       skippedFiles,
@@ -684,14 +700,36 @@ export async function maybeAutoCommitAfterAgentRun({
       await clearLlmModifiedMetadata(threadId)
       notifyWorkspaceFilesChanged(threadId, workspacePath)
       trackAutoCommit(threadId, workspacePath, candidateFiles)
+
+      let pushed: boolean | undefined
+      let pushError: string | undefined
+      if (settings.push) {
+        try {
+          await runGit(workspacePath, ["push"])
+          pushed = true
+        } catch (error) {
+          // Commit already succeeded — don't roll it back. Report push failure as
+          // a partial outcome so the user can retry manually.
+          pushed = false
+          pushError = getExecErrorText(error) || "推送失败"
+        }
+      }
+
+      const successMessage = pushed
+        ? `自动提交并推送成功：${candidateFiles.length} 个文件`
+        : settings.push
+          ? `自动提交成功（推送失败）：${candidateFiles.length} 个文件`
+          : `自动提交成功：${candidateFiles.length} 个文件`
       return {
         status: "committed",
-        message: `自动提交成功：${candidateFiles.length} 个文件`,
+        message: successMessage,
         commitMessage,
         commitHash: commitHash ?? undefined,
         committedFiles: candidateFiles,
         skippedFiles,
-        warnings
+        warnings,
+        ...(pushed !== undefined ? { pushed } : {}),
+        ...(pushError ? { pushError } : {})
       }
     } catch (error) {
       return {

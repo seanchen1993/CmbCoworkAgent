@@ -3,7 +3,7 @@ export type AgentAutoCommitMessageStrategy = "template" | "prompt" | "diff"
 
 export interface AgentAutoCommitSettings {
   mode: AgentAutoCommitMode
-  push: false
+  push: boolean
   messageStrategy: AgentAutoCommitMessageStrategy
   cardNumber?: string
   template?: string
@@ -25,4 +25,8 @@ export interface AgentAutoCommitResult {
   skippedFiles?: string[]
   warnings?: string[]
   reasons?: string[]
+  /** Whether the post-commit push was attempted and succeeded. */
+  pushed?: boolean
+  /** Error message from the push attempt, if it failed. Commit still succeeded. */
+  pushError?: string
 }
