@@ -48,7 +48,7 @@ export function QuestionsPanel({
     return (
       <div style={{ ...S.canvasEmpty, flexDirection: "column", gap: 12 }}>
         <PulsingDot />
-        <span style={{ fontSize: 14, color: "#8a8a8a" }}>Generating questions...</span>
+        <span style={{ fontSize: 14, color: "#8a8a8a" }}>正在生成问题...</span>
       </div>
     )
   }
@@ -61,7 +61,7 @@ export function QuestionsPanel({
           onClick={onSkip}
           style={{ ...S.continueBtn, background: "#1a1a1a", color: "#ffffff" }}
         >
-          Skip and generate
+          跳过并生成
         </button>
       </div>
     )
@@ -136,8 +136,8 @@ export function QuestionsPanel({
       <div style={S.questionsFooter}>
         <span style={{ fontSize: 13, color: "#8a8a8a" }}>
           {allAnswered
-            ? "Ready to generate"
-            : `${answeredCount} / ${questions.length} answered`}
+            ? "可以生成"
+            : `已回答 ${answeredCount} / ${questions.length}`}
         </span>
         <button
           onClick={onContinue}
@@ -148,7 +148,7 @@ export function QuestionsPanel({
             cursor: allAnswered ? "pointer" : "default",
           }}
         >
-          Continue →
+          继续 →
         </button>
       </div>
     </div>

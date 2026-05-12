@@ -2129,8 +2129,8 @@ export function DesignView(): React.JSX.Element {
           const msgs = [...prev.messages]
           const last = msgs.length - 1
           const doneLabel = variations.length > 0
-            ? `✓ ${isIteration ? "Design updated" : "Design generated"} — ${variations.length} variations`
-            : isIteration ? "✓ Design updated" : "✓ Design generated"
+            ? `✓ ${isIteration ? "设计已更新" : "设计已生成"} - ${variations.length} 个方案`
+            : isIteration ? "✓ 设计已更新" : "✓ 设计已生成"
           if (msgs[last]?.role === "assistant") {
             msgs[last] = { ...msgs[last], content: doneLabel, isStreaming: false, modelRetry: null }
           }
@@ -2742,7 +2742,8 @@ ${noteLines || "无"}${variantNote}`
       `and do NOT present alternative versions. ` +
       `The file must include the EDITMODE Tweaks system as required by the system prompt ` +
       `(TWEAK_DEFAULTS with /*EDITMODE-BEGIN*/…/*EDITMODE-END*/ markers, postMessage listener, applyTweaks with CSS variables). ` +
-      `Apply the skill's design tokens and patterns inside that HTML file.`
+      `Apply the skill's design tokens and patterns inside that HTML file. ` +
+      `始终使用中文回答。`
     const skillContext = selectedSkill ? `\n\n---\n${designOutputConstraint}` : ""
     const inlineCodeSuffix = codeContext && codeContext.length > 0
       ? "\n\n---\n[Code context — " + codeContext.length + " file(s)]\n" +
@@ -2877,7 +2878,7 @@ ${noteLines || "无"}${variantNote}`
         ? `\n[Iterating on Variation ${activeVarId.toUpperCase()} specifically.]`
         : ""
 
-      const iterationPrompt = `User follow-up instruction: ${prompt}${variantNote}`
+      const iterationPrompt = `User follow-up instruction: ${prompt}${variantNote}\n\n始终使用中文回答。`
       const artifactPath = currentState?.artifactPath
 
       startGeneration(
@@ -2914,8 +2915,8 @@ ${noteLines || "无"}${variantNote}`
       .join("\n")
 
     const enrichedPrompt = answerLines
-      ? `${originalPrompt}\n\n---\nUser's answers to clarifying questions:\n${answerLines}\n\nRemember: Generate exactly 2 variations (A / B) within one HTML file.`
-      : `${originalPrompt}\n\n---\nNo clarifying answers were provided. Generate exactly 2 variations (A / B) within one HTML file.`
+      ? `${originalPrompt}\n\n---\nUser's answers to clarifying questions:\n${answerLines}\n\nRemember: Generate exactly 2 variations (A / B) within one HTML file.\n\n始终使用中文回答。`
+      : `${originalPrompt}\n\n---\nNo clarifying answers were provided. Generate exactly 2 variations (A / B) within one HTML file.\n\n始终使用中文回答。`
 
     // Build pill tags for the user message update
     const tags = questions
@@ -3241,7 +3242,7 @@ ${noteLines || "无"}${variantNote}`
                 {isAsking && (
                   <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0", color: "#8a8a8a", fontSize: 13 }}>
                     <PulsingDot />
-                    <span>Generating questions…</span>
+                    <span>正在生成问题…</span>
                   </div>
                 )}
               </div>
@@ -3428,7 +3429,7 @@ ${noteLines || "无"}${variantNote}`
                   )}
                 </div>
                 {isGenerating ? (
-                  <button onClick={handleCancel} style={S.cancelBtn}>■ Stop</button>
+                  <button onClick={handleCancel} style={S.cancelBtn}>■ 停止</button>
                 ) : ts.generationState === "error" && ts.retryPrompt ? (
                   <div style={{ display: "flex", gap: 6 }}>
                     <button
@@ -3443,7 +3444,7 @@ ${noteLines || "无"}${variantNote}`
                         background: inputValue.trim() || ts.attachedImage ? "#cc785c" : "#e8b9a8",
                         cursor: inputValue.trim() || ts.attachedImage ? "pointer" : "default",
                       }}
-                    >▶ Send</button>
+                    >▶ 发送</button>
                   </div>
                 ) : (
                   <button
@@ -3455,7 +3456,7 @@ ${noteLines || "无"}${variantNote}`
                       cursor: (inputValue.trim() || ts.attachedImage) && !isBlocked ? "pointer" : "default",
                     }}
                   >
-                    ▶ Send
+                    ▶ 发送
                   </button>
                 )}
               </div>
@@ -3516,11 +3517,11 @@ ${noteLines || "无"}${variantNote}`
               <div style={S.tweaksBar}>
                 {/* Tweaks toggle */}
                 <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-                  <span style={{ fontSize: 13, fontWeight: 500, color: tweaksOn ? "#1a1a1a" : "#8a8a8a" }}>Tweaks</span>
+                  <span style={{ fontSize: 13, fontWeight: 500, color: tweaksOn ? "#1a1a1a" : "#8a8a8a" }}>微调</span>
                   <button
                     onClick={() => { setTweaksOn((v) => !v); setActiveMode(null) }}
                     style={{ ...S.toggleTrack, background: tweaksOn ? "#1a1a1a" : "#d4d2cc" }}
-                    title={tweaksOn ? "Disable Tweaks" : "Enable Tweaks"}
+                    title={tweaksOn ? "关闭微调" : "开启微调"}
                   >
                     <span style={{ ...S.toggleThumb, transform: tweaksOn ? "translateX(14px)" : "translateX(0)" }} />
                   </button>
@@ -3567,7 +3568,7 @@ ${noteLines || "无"}${variantNote}`
                   <div style={S.canvasEmpty}>
                     <div style={S.generatingRow}>
                       <PulsingDot />
-                      <span style={{ fontSize: 14, color: "#8a8a8a" }}>Generating variations…</span>
+                      <span style={{ fontSize: 14, color: "#8a8a8a" }}>正在生成方案…</span>
                     </div>
                   </div>
                 ) : ts.html ? (
@@ -3601,14 +3602,14 @@ ${noteLines || "无"}${variantNote}`
                         color: "#ffffff", fontSize: 13, fontWeight: 500,
                       }}>
                         <PulsingDot />
-                        <span>Updating design… previous version shown below</span>
+                        <span>正在更新设计…下方显示上一版</span>
                         <button
                           onClick={handleCancel}
                           style={{ marginLeft: "auto", padding: "3px 12px", fontSize: 12, fontWeight: 600,
                             background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.25)",
                             borderRadius: 6, color: "#fff", cursor: "pointer" }}
                         >
-                          Stop
+                          停止
                         </button>
                       </div>
                     )}

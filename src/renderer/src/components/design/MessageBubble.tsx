@@ -474,7 +474,7 @@ export function MessageBubble({ message }: { message: Message }) {
             <DesignModelRetryNotice retry={message.modelRetry} />
           )}
           {message.content || (message.isStreaming
-            ? <span style={{ opacity: 0.4 }}>{message.isIteration ? "Updating design..." : "Generating..."}</span>
+            ? <span style={{ opacity: 0.4 }}>{message.isIteration ? "正在更新设计..." : "正在生成..."}</span>
             : "")}
         </div>
       </div>

@@ -24,6 +24,7 @@ import { isRetryableApiError } from "../agent/failover"
 import { SkillUsageDetector } from "../agent/skill-evolution/usage-detector"
 
 const DESIGN_MODEL_MAX_RETRY_ATTEMPTS = 11 // 1 initial request + 10 retries
+const DESIGN_CHINESE_RESPONSE_INSTRUCTION = `\n\n## Response language\n\n- 始终使用中文回答。`
 
 // ─────────────────────────────────────────────────────────
 // System Prompt — Dynamic Questions Generation
@@ -242,7 +243,7 @@ Default direct-output mode:
 Artifact-file mode:
 - If the user prompt includes "DESIGN ARTIFACT FILE", create or update that exact file path with the complete standalone HTML artifact using write_file or edit_file.
 - In artifact-file mode, the final assistant response must be only a brief summary of what changed. Do NOT include the full HTML in the final response. The host application will read the HTML from the artifact file.
-`
+` + DESIGN_CHINESE_RESPONSE_INSTRUCTION
 
 // ─────────────────────────────────────────────────────────
 // System Prompt — Screenshot / Image reference generation
