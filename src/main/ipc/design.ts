@@ -324,8 +324,12 @@ Your response must end with: </html>
 
 function getModel(modelId?: string, retryHooks?: ModelRetryHooks): ChatOpenAI | null {
   const configs = getCustomModelConfigs()
-  const config = modelId
-    ? (configs.find((c) => c.id === modelId) ?? configs[0])
+  const requestedModelId = modelId?.trim()
+  const selectedModelId = requestedModelId?.startsWith("custom:")
+    ? requestedModelId.slice("custom:".length)
+    : requestedModelId
+  const config = selectedModelId
+    ? (configs.find((c) => c.id === selectedModelId) ?? configs[0])
     : configs[0]
   if (!config || !config.apiKey) return null
   return new ChatOpenAI({

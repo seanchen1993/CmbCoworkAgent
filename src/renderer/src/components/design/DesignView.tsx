@@ -402,8 +402,13 @@ const DESIGN_MAX_ATTACHMENTS_DISPLAY = 3
 
 // Last-used model persistence
 const DESIGN_LAST_MODEL_KEY = "design_last_model_id"
+function normalizeDesignModelId(modelId: string | null | undefined): string | null {
+  const trimmed = modelId?.trim()
+  if (!trimmed) return null
+  return trimmed.startsWith("custom:") ? trimmed : `custom:${trimmed}`
+}
 function getLastModelId(): string | null {
-  try { return localStorage.getItem(DESIGN_LAST_MODEL_KEY) } catch { return null }
+  try { return normalizeDesignModelId(localStorage.getItem(DESIGN_LAST_MODEL_KEY)) } catch { return null }
 }
 
 // ─────────────────────────────────────────────────────────
@@ -483,6 +488,7 @@ function deserializeTs(p: PersistedTabState): TabState {
   return {
     ...makeTabState(),
     ...p,
+    selectedModelId: normalizeDesignModelId(p.selectedModelId),
     messages:        sanitizePersistedMessages(p.messages ?? []),
     sourceInfo:      p.sourceInfo ?? null,
     drawStrokes:     p.drawStrokes ?? [],
@@ -1085,7 +1091,7 @@ export function DesignView(): React.JSX.Element {
   // ── Fetch available model configs on mount ────────────────
   useEffect(() => {
     window.api.models.getCustomConfigs().then((configs) => {
-      setAvailableModels(configs.map((c) => ({ id: c.id, name: c.name, model: c.model })))
+      setAvailableModels(configs.map((c) => ({ id: `custom:${c.id}`, name: c.name, model: c.model })))
     }).catch(() => {})
   }, [])
 
@@ -3226,9 +3232,10 @@ ${noteLines || "无"}${variantNote}`
                       models={availableModels}
                       selectedId={ts.selectedModelId}
                       onChange={(id) => {
-                        updateTs(activeTabId, { selectedModelId: id })
+                        const modelId = normalizeDesignModelId(id)
+                        updateTs(activeTabId, { selectedModelId: modelId })
                         try {
-                          localStorage.setItem(DESIGN_LAST_MODEL_KEY, id)
+                          if (modelId) localStorage.setItem(DESIGN_LAST_MODEL_KEY, modelId)
                         } catch {
                           // Ignore storage errors; the selection still applies to this session.
                         }
