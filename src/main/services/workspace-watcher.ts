@@ -158,7 +158,11 @@ function matchesGitignoreRule(relativePath: string, rule: GitignoreRule): boolea
 }
 
 // 按 Git 规则顺序求值：后匹配覆盖前匹配，支持 ! 反选
-function isIgnoredByGitignore(threadId: string, workspacePath: string, relativePath: string): boolean {
+function isIgnoredByGitignore(
+  threadId: string,
+  workspacePath: string,
+  relativePath: string
+): boolean {
   const rules = loadGitignoreRules(threadId, workspacePath)
   if (rules.length === 0) return false
 

@@ -496,8 +496,8 @@ async function generateSavedToolRewrite(
     model: config.model,
     apiKey: config.apiKey,
     configuration: { baseURL: config.baseUrl },
-    maxTokens: 16384,
-    temperature: 0.1,
+    maxTokens: config.maxOutputTokens,
+    temperature: config.temperature,
     streaming: false
   })
 

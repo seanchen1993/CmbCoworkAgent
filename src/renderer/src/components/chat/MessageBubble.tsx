@@ -205,7 +205,7 @@ export function MessageBubble({
         const skillParsed = parseSkillUseBlock(message.content)
         const visibleText = skillParsed ? skillParsed.rest : message.content
         return (
-          <div className="whitespace-pre-wrap text-[15px] leading-7 text-foreground/95">
+          <div className="whitespace-pre-wrap text-[15px] leading-7 text-foreground/95 break-all">
             {skillParsed && (
               <SkillChip label={skillParsed.skillName} compact className="mr-2" />
             )}
@@ -227,7 +227,7 @@ export function MessageBubble({
             return (
               <div
                 key={index}
-                className="whitespace-pre-wrap text-[15px] leading-7 text-foreground/95"
+                className="whitespace-pre-wrap text-[15px] leading-7 text-foreground/95  break-all"
               >
                 {skillParsed && (
                   <SkillChip label={skillParsed.skillName} compact className="mr-2" />

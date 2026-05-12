@@ -3,6 +3,7 @@ import { ToolMessage } from "@langchain/core/messages"
 import { CallbackManager, parseCallbackConfigArg } from "@langchain/core/callbacks/manager"
 import type { McpCapabilityService, McpCapabilityTool } from "./capability-types"
 import { toEagerToolResponse } from "./result-utils"
+import { isHookHaltError } from "../hooks/halt"
 
 function getRequiredMcpArgs(schema?: Record<string, unknown>): string[] {
   if (!schema || typeof schema !== "object") return []
@@ -110,6 +111,7 @@ class NonValidatingMcpTool extends DynamicStructuredTool {
     try {
       result = await this._call(input as never, runManager, config as never)
     } catch (error) {
+      if (isHookHaltError(error)) throw error
       await runManager?.handleToolError(error)
       throw error
     }
@@ -154,6 +156,7 @@ export function createEagerMcpTool(
         const result = await capabilityService.invoke(tool.capabilityId, args ?? {})
         return toEagerToolResponse(result)
       } catch (error) {
+        if (isHookHaltError(error)) throw error
         const message = error instanceof Error ? error.message : String(error)
         console.warn(`[Runtime] MCP tool "${tool.toolName}" error (non-fatal):`, message)
         return [`MCP tool error: ${message}`, []]
