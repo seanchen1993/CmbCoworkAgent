@@ -8,6 +8,7 @@ import { RefreshCw, Loader2, AlertCircle, ChevronLeft, ChevronRight, Download } 
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import {
+  formatTopUserOrgName,
   useDashboard,
   type DashboardCommitDetailsData,
   type DashboardSkillDetail,
@@ -47,6 +48,11 @@ type SkillUploaderExportInfo = {
   orgName: string
 }
 
+type SkillUploaderProfile = UploaderProfileInfo & {
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+}
+
 function formatRangeLabel(from: string, to: string, granularity: Granularity): string {
   const f = new Date(from)
   const pad = (n: number): string => String(n).padStart(2, "0")
@@ -64,7 +70,7 @@ function formatRangeLabel(from: string, to: string, granularity: Granularity): s
 
 function resolveSkillUploaderExportInfo(
   item: MarketItem | null,
-  uploaderProfiles: Record<string, UploaderProfileInfo>
+  uploaderProfiles: Record<string, SkillUploaderProfile>
 ): SkillUploaderExportInfo {
   if (!item?.user_id) return { sapId: "", userName: "", orgName: "" }
 
@@ -84,7 +90,11 @@ function resolveSkillUploaderExportInfo(
     userName:
       normalizeUploaderProfileField(profile?.userName) || normalizeUploaderProfileField(parsed?.userName),
     orgName:
-      normalizeUploaderProfileField(profile?.orgName) || normalizeUploaderProfileField(parsed?.orgName)
+      formatTopUserOrgName(
+        normalizeUploaderProfileField(profile?.orgName),
+        normalizeUploaderProfileField(profile?.upperOrgLv1),
+        normalizeUploaderProfileField(profile?.upperOrgLv0)
+      ) || normalizeUploaderProfileField(parsed?.orgName)
   }
 }
 
@@ -297,7 +307,7 @@ export function DashboardView(): React.JSX.Element {
   const [commitDetailsError, setCommitDetailsError] = useState<string | null>(null)
   const [marketSkillKeys, setMarketSkillKeys] = useState<Set<string>>(new Set())
   const [marketSkillMap, setMarketSkillMap] = useState<Map<string, MarketItem>>(new Map())
-  const [skillUploaderProfiles, setSkillUploaderProfiles] = useState<Record<string, UploaderProfileInfo>>({})
+  const [skillUploaderProfiles, setSkillUploaderProfiles] = useState<Record<string, SkillUploaderProfile>>({})
 
   useEffect(() => {
     let cancelled = false
@@ -346,25 +356,40 @@ export function DashboardView(): React.JSX.Element {
                     key?: string
                     user_name?: { buckets?: Array<{ key?: string }> }
                     org_name?: { buckets?: Array<{ key?: string }> }
+                    latest_user_info?: {
+                      hits?: {
+                        hits?: Array<{
+                          _source?: {
+                            userName?: string
+                            orgName?: string
+                            upperOrgLv0?: string
+                            upperOrgLv1?: string
+                          }
+                        }>
+                      }
+                    }
                   }>
                 }
               }
             }
           ).aggregations?.by_sap?.buckets ?? []
 
-        const profileBySapId: Record<string, UploaderProfileInfo> = {}
+        const profileBySapId: Record<string, SkillUploaderProfile> = {}
         for (const bucket of buckets) {
           const sapId = bucket.key?.trim()
           if (!sapId) continue
+          const latestUserInfo = bucket.latest_user_info?.hits?.hits?.[0]?._source
           profileBySapId[sapId] = {
             sapId,
-            userName: bucket.user_name?.buckets?.[0]?.key ?? "",
-            orgName: bucket.org_name?.buckets?.[0]?.key ?? ""
+            userName: latestUserInfo?.userName ?? bucket.user_name?.buckets?.[0]?.key ?? "",
+            orgName: latestUserInfo?.orgName ?? bucket.org_name?.buckets?.[0]?.key ?? "",
+            upperOrgLv0: latestUserInfo?.upperOrgLv0 ?? "",
+            upperOrgLv1: latestUserInfo?.upperOrgLv1 ?? ""
           }
         }
 
         const profileEntries = Object.entries(profileBySapId)
-        const nextMap: Record<string, UploaderProfileInfo> = {}
+        const nextMap: Record<string, SkillUploaderProfile> = {}
         for (const rawId of uploaderIds) {
           nextMap[rawId] =
             profileBySapId[rawId] ||
