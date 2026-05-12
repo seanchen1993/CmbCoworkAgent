@@ -1214,6 +1214,38 @@ export function DesignView(): React.JSX.Element {
     })
   }, [])
 
+  const loadAvailableSkills = useCallback(async (): Promise<void> => {
+    try {
+      const pluginSkillsPromise = typeof window.api.skills.listPlugins === "function"
+        ? window.api.skills.listPlugins().catch(() => [])
+        : Promise.resolve([])
+
+      const [skills, pluginSkills, disabledList] = await Promise.all([
+        window.api.skills.list(),
+        pluginSkillsPromise,
+        window.api.skills.getDisabled(),
+      ])
+      const disabledSet = new Set(disabledList.map((name) => name.trim().toLowerCase()))
+      const enabledSkills = skills.filter(
+        (skill) =>
+          (skill.source === "project" || skill.source === "user") &&
+          !disabledSet.has(skill.name.trim().toLowerCase())
+      )
+      const seen = new Set(enabledSkills.map((skill) => skill.name))
+      const merged = [
+        ...enabledSkills,
+        ...pluginSkills.filter((skill) => !seen.has(skill.name)),
+      ]
+      setAllSkills(
+        merged
+          .map((skill) => ({ name: skill.name, description: skill.description, path: skill.path }))
+          .sort((a, b) => a.name.localeCompare(b.name, "zh-CN"))
+      )
+    } catch {
+      setAllSkills([])
+    }
+  }, [])
+
   // ── Fetch available model configs on mount ────────────────
   useEffect(() => {
     window.api.models.getCustomConfigs().then((configs) => {
@@ -1223,10 +1255,8 @@ export function DesignView(): React.JSX.Element {
 
   // ── Fetch available skills on mount ───────────────────────
   useEffect(() => {
-    window.api.skills.list().then((skills) => {
-      setAllSkills(skills.map((s) => ({ name: s.name, description: s.description, path: s.path })))
-    }).catch(() => {})
-  }, [])
+    void loadAvailableSkills()
+  }, [loadAvailableSkills])
 
   useEffect(() => {
     let cancelled = false
@@ -2941,6 +2971,11 @@ ${noteLines || "无"}${variantNote}`
   useEffect(() => {
     if (isSlashMode) setActiveSkillIndex(0)
   }, [isSlashMode, slashQuery])
+
+  useEffect(() => {
+    if (!isSlashMode) return
+    void loadAvailableSkills()
+  }, [isSlashMode, loadAvailableSkills])
 
   useEffect(() => {
     if (!isSlashMode || filteredSkills.length === 0) {
