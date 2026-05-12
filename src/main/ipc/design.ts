@@ -848,9 +848,12 @@ function buildDesignArtifactInstruction(filePath: string, exists: boolean, sourc
     `Use write_file for a new output artifact, or edit_file only if the output file already exists. ` +
     `When calling filesystem tools, use the exact argument names required by the tools: ` +
     `read_file({ file_path, offset, limit }), write_file({ file_path, content }), and edit_file({ file_path, old_string, new_string, replace_all }). ` +
-    `Do not use path or filePath as tool argument names. ` +
+    `Do not use path, filePath, targetPath, input, params, arguments, oldString, newString, oldText, newText, replace, or replacement as tool argument names. ` +
+    `Do not wrap tool arguments inside another object. The top-level tool arguments must exactly match the tool schema. ` +
     `Do not assume write_file has a content-size limit, and do not claim the file is being truncated unless the write_file tool result explicitly reports that exact error. ` +
-    `Prefer writing the complete artifact in one write_file call when practical. If the artifact is too large to produce safely in one tool call, use a chunked file-writing strategy: create a compact HTML skeleton with unique insertion markers via write_file, insert content chunks with repeated edit_file calls by replacing those markers, then remove all temporary markers before finishing. ` +
+    `Prefer writing the complete artifact in one write_file call when practical. If the artifact is too large to produce safely in one tool call, use a chunked file-writing strategy: first call write_file with BOTH required fields exactly as write_file({ file_path: "${filePath}", content: "<!DOCTYPE html>...unique insertion markers...</html>" }), then call edit_file repeatedly with ALL required fields exactly as edit_file({ file_path: "${filePath}", old_string: "UNIQUE_MARKER", new_string: "HTML chunk plus next marker", replace_all: false }), then remove every temporary marker before finishing. ` +
+    `Every write_file call MUST include a non-empty string file_path and content. Every edit_file call MUST include non-empty string file_path, old_string, and new_string. ` +
+    `If a tool call fails with "Invalid tool arguments", retry the same filesystem operation using the exact schema above; do not switch to execute/bash/shell/Python. ` +
     `Do not use execute/bash/shell/Python commands to create, overwrite, append, encode, decode, redirect, copy, or move the final design artifact. ` +
     `Do not paste the full HTML into the final chat response. After the file is updated, respond with only a brief summary of what changed. ` +
     `The host application will read and render the HTML from this file.`
