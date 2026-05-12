@@ -939,6 +939,14 @@ const RETRY_BASE_DELAY_MS = 1000 // exponential: 1s, 2s, 4s, 8s
  *  (cases where TCP stays up but no bytes flow). Each attempt gets its own
  *  AbortController so a timeout on attempt N doesn't poison attempt N+1. */
 const PER_ATTEMPT_TIMEOUT_MS = 60_000
+const ERROR_RESPONSE_BODY_LOG_LIMIT = 4000
+const ERROR_RESPONSE_BODY_READ_TIMEOUT_MS = 2000
+const REDACTED_RESPONSE_HEADERS = new Set([
+  "authorization",
+  "proxy-authenticate",
+  "set-cookie",
+  "www-authenticate"
+])
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -959,6 +967,102 @@ function computeBackoffDelay(attempt: number): number {
   // attempt is 1-based (1 = before first retry). 1s,2s,4s,8s with jitter 1x-2x.
   const base = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1)
   return Math.round(base * (1 + Math.random()))
+}
+
+function getFetchUrl(input: RequestInfo | URL): string {
+  if (typeof input === "string") return input
+  if (input instanceof URL) return input.toString()
+  return input.url
+}
+
+function getFetchMethod(input: RequestInfo | URL, init?: RequestInit): string {
+  if (init?.method) return init.method
+  if (typeof input === "object" && !(input instanceof URL) && "method" in input) {
+    return input.method
+  }
+  return "POST"
+}
+
+function responseHeadersForLog(headers: Headers): Record<string, string> {
+  const result: Record<string, string> = {}
+  headers.forEach((value, key) => {
+    result[key] = REDACTED_RESPONSE_HEADERS.has(key.toLowerCase()) ? "[redacted]" : value
+  })
+  return result
+}
+
+function summarizeRequestBodyForLog(body: BodyInit | null | undefined): Record<string, unknown> {
+  if (typeof body !== "string") {
+    return { bodyType: body ? Object.prototype.toString.call(body) : "none" }
+  }
+
+  const summary: Record<string, unknown> = { bodyChars: body.length }
+  try {
+    const parsed = JSON.parse(body) as Record<string, unknown>
+    if (typeof parsed.model === "string") summary.model = parsed.model
+    if (typeof parsed.max_tokens === "number") summary.max_tokens = parsed.max_tokens
+    if (typeof parsed.temperature === "number") summary.temperature = parsed.temperature
+    if (typeof parsed.stream === "boolean") summary.stream = parsed.stream
+    if (Array.isArray(parsed.messages)) {
+      summary.messages = parsed.messages.length
+      summary.messageRoles = parsed.messages.map((message) => {
+        if (!message || typeof message !== "object") return "unknown"
+        const role = (message as { role?: unknown }).role
+        return typeof role === "string" ? role : "unknown"
+      })
+    }
+    if (Array.isArray(parsed.tools)) summary.tools = parsed.tools.length
+  } catch {
+    summary.bodyPreview = body.slice(0, 300)
+  }
+  return summary
+}
+
+async function readResponseBodyForLog(res: Response): Promise<Record<string, unknown>> {
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  const timeoutValue = Symbol("timeout")
+  try {
+    const read = res.clone().text()
+    const timed = new Promise<typeof timeoutValue>((resolve) => {
+      timeout = setTimeout(() => resolve(timeoutValue), ERROR_RESPONSE_BODY_READ_TIMEOUT_MS)
+    })
+    const result = await Promise.race([read, timed])
+    if (timeout) clearTimeout(timeout)
+    if (result === timeoutValue) {
+      return { bodyReadTimedOutMs: ERROR_RESPONSE_BODY_READ_TIMEOUT_MS }
+    }
+    return {
+      bodyChars: result.length,
+      bodyPreview: result.slice(0, ERROR_RESPONSE_BODY_LOG_LIMIT) || "[empty]"
+    }
+  } catch (error) {
+    if (timeout) clearTimeout(timeout)
+    return {
+      bodyReadError: error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+    }
+  }
+}
+
+async function logModelHttpErrorResponse(
+  res: Response,
+  input: RequestInfo | URL,
+  init: RequestInit | undefined,
+  attempt: number,
+  totalAttempts: number
+): Promise<void> {
+  const bodyInfo = await readResponseBodyForLog(res)
+  console.warn("[Runtime] Model HTTP error response detail:", {
+    status: res.status,
+    statusText: res.statusText,
+    attempt,
+    totalAttempts,
+    method: getFetchMethod(input, init),
+    url: getFetchUrl(input),
+    retryableByFetch: isRetryableStatus(res.status),
+    headers: responseHeadersForLog(res.headers),
+    request: summarizeRequestBodyForLog(init?.body ?? null),
+    response: bodyInfo
+  })
 }
 
 /** Info emitted to the UI before each retry wait. */
@@ -1035,6 +1139,10 @@ export function createRetryingFetch(
         // because downstream (SDK / LangChain) owns the stream lifetime from
         // here and should not be interrupted mid-stream by our timer.
         cleanup()
+
+        if (res.status >= 400) {
+          await logModelHttpErrorResponse(res, input, init, attempt, totalAttempts)
+        }
 
         // Success or non-retryable error — return as-is.
         if (!isRetryableStatus(res.status)) {
