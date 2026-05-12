@@ -688,17 +688,10 @@ function writeDesignArtifactSourceSnapshot(outputFilePath: string, html: string)
   }
 }
 
-function clearDesignArtifactOutput(filePath: string): { success: boolean; error?: string } {
-  try {
-    if (!fs.existsSync(filePath)) return { success: true }
-    if (!fs.statSync(filePath).isFile()) {
-      return { success: false, error: `Design artifact output is not a file: ${filePath}` }
-    }
-    fs.unlinkSync(filePath)
-    return { success: true }
-  } catch (err) {
-    return { success: false, error: err instanceof Error ? err.message : String(err) }
-  }
+function makeDesignArtifactDraftPath(outputFilePath: string): string {
+  const dir = path.dirname(outputFilePath)
+  const unique = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  return path.join(dir, `.draft-${unique}.html`)
 }
 
 function prepareDesignArtifact(tabId: string, workspacePath?: string): { filePath?: string; error?: string } {
@@ -1720,11 +1713,13 @@ export function registerDesignHandlers(): void {
         const currentHtmlSource = typeof currentHtml === "string" && currentHtml.trim()
           ? currentHtml
           : ""
-        const sourcePathIsOutput = sameResolvedFilePath(sourceArtifact.filePath, preparedArtifact.filePath)
+        const outputArtifactPath = preparedArtifact.filePath
+        const draftArtifactPath = makeDesignArtifactDraftPath(outputArtifactPath)
+        const sourcePathIsOutput = sameResolvedFilePath(sourceArtifact.filePath, outputArtifactPath)
         let sourceFilePathForPrompt: string | undefined
 
         if (currentHtmlSource) {
-          const snapshot = writeDesignArtifactSourceSnapshot(preparedArtifact.filePath, currentHtmlSource)
+          const snapshot = writeDesignArtifactSourceSnapshot(outputArtifactPath, currentHtmlSource)
           if (!snapshot.success || !snapshot.filePath) {
             send({ type: "error", error: snapshot.error ?? "Failed to snapshot current design HTML" })
             return
@@ -1733,25 +1728,19 @@ export function registerDesignHandlers(): void {
         } else if (sourceArtifact.success && sourceArtifact.filePath && !sourcePathIsOutput) {
           sourceFilePathForPrompt = sourceArtifact.filePath
         } else if (sourceArtifact.success && sourcePathIsOutput && sourceArtifact.html?.trim()) {
-          const snapshot = writeDesignArtifactSourceSnapshot(preparedArtifact.filePath, sourceArtifact.html)
+          const snapshot = writeDesignArtifactSourceSnapshot(outputArtifactPath, sourceArtifact.html)
           if (!snapshot.success || !snapshot.filePath) {
             send({ type: "error", error: snapshot.error ?? "Failed to snapshot source design artifact" })
             return
           }
           sourceFilePathForPrompt = snapshot.filePath
         } else if (sourceArtifactPath && existingOutputArtifact.success && existingOutputArtifact.html?.trim()) {
-          const snapshot = writeDesignArtifactSourceSnapshot(preparedArtifact.filePath, existingOutputArtifact.html)
+          const snapshot = writeDesignArtifactSourceSnapshot(outputArtifactPath, existingOutputArtifact.html)
           if (!snapshot.success || !snapshot.filePath) {
             send({ type: "error", error: snapshot.error ?? "Failed to snapshot existing design artifact" })
             return
           }
           sourceFilePathForPrompt = snapshot.filePath
-        }
-
-        const clearedOutput = clearDesignArtifactOutput(preparedArtifact.filePath)
-        if (!clearedOutput.success) {
-          send({ type: "error", error: clearedOutput.error ?? "Failed to clear design artifact output" })
-          return
         }
 
         const hasExistingArtifactHtml = Boolean(
@@ -1764,7 +1753,7 @@ export function registerDesignHandlers(): void {
           existingOutputArtifact.success && existingOutputArtifact.html?.trim() && sourceArtifactPath
         )
         const artifactInstruction = buildDesignArtifactInstruction(
-          preparedArtifact.filePath,
+          draftArtifactPath,
           false,
           sourceFilePathForPrompt
         )
@@ -2182,10 +2171,20 @@ export function registerDesignHandlers(): void {
           const saved = tabId ? saveDesignArtifact(resolvedArtifactId, html, workspacePath) : null
           send({ type: "done", html, ...(saved?.filePath ? { artifactPath: saved.filePath } : {}) })
         } else {
+          const draftArtifact = readDesignArtifactFile(draftArtifactPath, workspacePath)
+          if (draftArtifact.success && draftArtifact.html && isCompleteHtmlDocument(draftArtifact.html)) {
+            storeDesignHtml(htmlStoreKey, draftArtifact.html)
+            const saved = tabId ? saveDesignArtifact(resolvedArtifactId, draftArtifact.html, workspacePath) : null
+            send({ type: "done", html: draftArtifact.html, ...(saved?.filePath ? { artifactPath: saved.filePath } : {}) })
+            return
+          }
           const artifact = tabId ? readDesignArtifact(resolvedArtifactId, workspacePath) : null
           if (artifact?.success && artifact.html && isCompleteHtmlDocument(artifact.html)) {
             storeDesignHtml(htmlStoreKey, artifact.html)
-            send({ type: "done", html: artifact.html, artifactPath: artifact.filePath })
+            send({
+              type: "error",
+              error: "本次生成没有写出完整的新 HTML，已保留上一版设计。请重试或缩小页面规模。",
+            })
             return
           }
           send({
