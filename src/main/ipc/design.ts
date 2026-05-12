@@ -670,6 +670,37 @@ function readDesignArtifactFile(filePath: string | undefined, workspacePath: str
   }
 }
 
+function sameResolvedFilePath(left: string | undefined, right: string | undefined): boolean {
+  if (!left || !right) return false
+  return path.resolve(left).toLowerCase() === path.resolve(right).toLowerCase()
+}
+
+function writeDesignArtifactSourceSnapshot(outputFilePath: string, html: string): DesignArtifactFileReadResult {
+  try {
+    if (!html.trim()) return { success: false, error: "Design source snapshot content is empty" }
+    const dir = path.dirname(outputFilePath)
+    fs.mkdirSync(dir, { recursive: true })
+    const snapshotPath = path.join(dir, `.source-${Date.now()}.html`)
+    fs.writeFileSync(snapshotPath, html, "utf-8")
+    return { success: true, filePath: snapshotPath, html }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+function clearDesignArtifactOutput(filePath: string): { success: boolean; error?: string } {
+  try {
+    if (!fs.existsSync(filePath)) return { success: true }
+    if (!fs.statSync(filePath).isFile()) {
+      return { success: false, error: `Design artifact output is not a file: ${filePath}` }
+    }
+    fs.unlinkSync(filePath)
+    return { success: true }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
 function prepareDesignArtifact(tabId: string, workspacePath?: string): { filePath?: string; error?: string } {
   const resolved = resolveDesignArtifactPath(tabId, workspacePath)
   if (!resolved.filePath) return { error: resolved.error ?? "Failed to resolve design artifact path" }
@@ -848,12 +879,15 @@ function buildDesignArtifactInstruction(filePath: string, exists: boolean, sourc
     `Use write_file for a new output artifact, or edit_file only if the output file already exists. ` +
     `When calling filesystem tools, use the exact argument names required by the tools: ` +
     `read_file({ file_path, offset, limit }), write_file({ file_path, content }), and edit_file({ file_path, old_string, new_string, replace_all }). ` +
+    `Every read_file call MUST include a non-empty string file_path. For HTML artifacts, uploaded HTML/context files, selected SKILL.md files, or any file you must understand before editing, read_file MUST also include numeric offset and limit. ` +
     `Do not use path, filePath, targetPath, input, params, arguments, oldString, newString, oldText, newText, replace, or replacement as tool argument names. ` +
     `Do not wrap tool arguments inside another object. The top-level tool arguments must exactly match the tool schema. ` +
     `Do not assume write_file has a content-size limit, and do not claim the file is being truncated unless the write_file tool result explicitly reports that exact error. ` +
     `Prefer writing the complete artifact in one write_file call when practical. If the artifact is too large to produce safely in one tool call, use a chunked file-writing strategy: first call write_file with BOTH required fields exactly as write_file({ file_path: "${filePath}", content: "<!DOCTYPE html>...unique insertion markers...</html>" }), then call edit_file repeatedly with ALL required fields exactly as edit_file({ file_path: "${filePath}", old_string: "UNIQUE_MARKER", new_string: "HTML chunk plus next marker", replace_all: false }), then remove every temporary marker before finishing. ` +
     `Every write_file call MUST include a non-empty string file_path and content. Every edit_file call MUST include non-empty string file_path, old_string, and new_string. ` +
+    `To verify the artifact after writing, use read_file({ file_path: "${filePath}", offset: 0, limit: 1000 }) and continue with later offsets if needed; do not use shell commands for verification. ` +
     `If a tool call fails with "Invalid tool arguments", retry the same filesystem operation using the exact schema above; do not switch to execute/bash/shell/Python. ` +
+    `You may use subagents only for reading or analyzing reference materials. Do not delegate final artifact writing, chunk insertion, artifact verification, or filesystem recovery to a subagent; the main Design agent must perform those steps directly with read_file/write_file/edit_file. ` +
     `Do not use execute/bash/shell/Python commands to create, overwrite, append, encode, decode, redirect, copy, or move the final design artifact. ` +
     `Do not paste the full HTML into the final chat response. After the file is updated, respond with only a brief summary of what changed. ` +
     `The host application will read and render the HTML from this file.`
@@ -1683,15 +1717,56 @@ export function registerDesignHandlers(): void {
         }
         const existingOutputArtifact = readDesignArtifact(resolvedArtifactId, workspacePath)
         const sourceArtifact = readDesignArtifactFile(sourceArtifactPath, workspacePath)
+        const currentHtmlSource = typeof currentHtml === "string" && currentHtml.trim()
+          ? currentHtml
+          : ""
+        const sourcePathIsOutput = sameResolvedFilePath(sourceArtifact.filePath, preparedArtifact.filePath)
+        let sourceFilePathForPrompt: string | undefined
+
+        if (currentHtmlSource) {
+          const snapshot = writeDesignArtifactSourceSnapshot(preparedArtifact.filePath, currentHtmlSource)
+          if (!snapshot.success || !snapshot.filePath) {
+            send({ type: "error", error: snapshot.error ?? "Failed to snapshot current design HTML" })
+            return
+          }
+          sourceFilePathForPrompt = snapshot.filePath
+        } else if (sourceArtifact.success && sourceArtifact.filePath && !sourcePathIsOutput) {
+          sourceFilePathForPrompt = sourceArtifact.filePath
+        } else if (sourceArtifact.success && sourcePathIsOutput && sourceArtifact.html?.trim()) {
+          const snapshot = writeDesignArtifactSourceSnapshot(preparedArtifact.filePath, sourceArtifact.html)
+          if (!snapshot.success || !snapshot.filePath) {
+            send({ type: "error", error: snapshot.error ?? "Failed to snapshot source design artifact" })
+            return
+          }
+          sourceFilePathForPrompt = snapshot.filePath
+        } else if (sourceArtifactPath && existingOutputArtifact.success && existingOutputArtifact.html?.trim()) {
+          const snapshot = writeDesignArtifactSourceSnapshot(preparedArtifact.filePath, existingOutputArtifact.html)
+          if (!snapshot.success || !snapshot.filePath) {
+            send({ type: "error", error: snapshot.error ?? "Failed to snapshot existing design artifact" })
+            return
+          }
+          sourceFilePathForPrompt = snapshot.filePath
+        }
+
+        const clearedOutput = clearDesignArtifactOutput(preparedArtifact.filePath)
+        if (!clearedOutput.success) {
+          send({ type: "error", error: clearedOutput.error ?? "Failed to clear design artifact output" })
+          return
+        }
+
         const hasExistingArtifactHtml = Boolean(
-          existingOutputArtifact.success && existingOutputArtifact.html?.trim()
+          currentHtmlSource
         ) || Boolean(
-          sourceArtifact.success && sourceArtifact.html?.trim()
+          sourceFilePathForPrompt
+        ) || Boolean(
+          sourceArtifact.success && sourceArtifact.html?.trim() && !sourcePathIsOutput
+        ) || Boolean(
+          existingOutputArtifact.success && existingOutputArtifact.html?.trim() && sourceArtifactPath
         )
         const artifactInstruction = buildDesignArtifactInstruction(
           preparedArtifact.filePath,
-          Boolean(existingOutputArtifact.success && existingOutputArtifact.html?.trim()),
-          sourceArtifact.success ? sourceArtifact.filePath : undefined
+          false,
+          sourceFilePathForPrompt
         )
 
         const createDesignAgentRuntime = () => createAgentRuntime({
