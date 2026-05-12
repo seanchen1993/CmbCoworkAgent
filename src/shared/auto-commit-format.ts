@@ -11,6 +11,8 @@ export function formatAutoCommitLines(result: AgentAutoCommitResult): string[] {
   if (result.skippedFiles?.length) {
     lines.push(`未纳入文件：${result.skippedFiles.join("，")}`)
   }
+  if (result.pushed === true) lines.push("已推送至远端")
+  if (result.pushError) lines.push(`推送失败：${result.pushError}`)
   if (result.warnings?.length) lines.push(...result.warnings)
   if (result.reasons?.length) lines.push(...result.reasons)
   return lines
