@@ -24,7 +24,7 @@ import { isRetryableApiError } from "../agent/failover"
 import { SkillUsageDetector } from "../agent/skill-evolution/usage-detector"
 
 const DESIGN_MODEL_MAX_RETRY_ATTEMPTS = 11 // 1 initial request + 10 retries
-const DESIGN_CHINESE_RESPONSE_INSTRUCTION = `\n\n## Response language\n\n- 始终使用中文回答。`
+const DESIGN_CHINESE_RESPONSE_INSTRUCTION = `\n\n## Response language\n\n- 始终使用中文输出所有面向用户可见的文本，包括执行过程说明、技能使用说明、工具前后的简短说明、错误解释和最终摘要。\n- 即使读取到的 Skill、参考文件或系统上下文是英文，也要把面向用户展示的过程和总结翻译成中文。\n- 代码、HTML/CSS/JS 标识符、文件路径、工具名和必须保持原样的业务文案不需要翻译。`
 
 // ─────────────────────────────────────────────────────────
 // System Prompt — Dynamic Questions Generation
@@ -849,8 +849,9 @@ function buildDesignArtifactInstruction(filePath: string, exists: boolean, sourc
     `When calling filesystem tools, use the exact argument names required by the tools: ` +
     `read_file({ file_path, offset, limit }), write_file({ file_path, content }), and edit_file({ file_path, old_string, new_string, replace_all }). ` +
     `Do not use path or filePath as tool argument names. ` +
-    `Do not use execute/bash/shell commands to create, overwrite, append, encode, decode, redirect, copy, or move the final design artifact. ` +
-    `If the HTML is too large for one reliable write_file/edit_file call, first create a compact skeleton with unique insertion markers, then use multiple edit_file calls to insert chunks at those markers, and remove all markers at the end. ` +
+    `Do not assume write_file has a content-size limit, and do not claim the file is being truncated unless the write_file tool result explicitly reports that exact error. ` +
+    `Prefer writing the complete artifact in one write_file call when practical. If the artifact is too large to produce safely in one tool call, use a chunked file-writing strategy: create a compact HTML skeleton with unique insertion markers via write_file, insert content chunks with repeated edit_file calls by replacing those markers, then remove all temporary markers before finishing. ` +
+    `Do not use execute/bash/shell/Python commands to create, overwrite, append, encode, decode, redirect, copy, or move the final design artifact. ` +
     `Do not paste the full HTML into the final chat response. After the file is updated, respond with only a brief summary of what changed. ` +
     `The host application will read and render the HTML from this file.`
 }
@@ -1045,7 +1046,8 @@ function buildSelectedDesignSkillContext(skillName: string, skillPath: string): 
     `The user explicitly selected this skill for the current design request. ` +
     `Before doing any design or file-writing work, you MUST first read this SKILL.md with read_file using offset=0 and limit=1000, then follow its instructions.\n` +
     `Selected skill path: ${skillPath}\n` +
-    `If the SKILL.md references supporting files, read only the files needed for this request. Still obey the Design artifact rules above.`
+    `If the SKILL.md references supporting files, read only the files needed for this request. Still obey the Design artifact rules above.\n` +
+    `Any user-visible progress notes or summaries you emit while using this skill must be written in Chinese.`
 }
 
 function buildDesignModelRetryHooks(send: (data: object) => void): ModelRetryHooks {
