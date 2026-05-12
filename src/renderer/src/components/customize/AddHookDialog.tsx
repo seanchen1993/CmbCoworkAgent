@@ -1648,9 +1648,9 @@ export function AddHookDialog(props: {
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="sm:max-w-lg max-h-[85vh] flex flex-col gap-0 p-0">
         <DialogHeader className="shrink-0 px-6 pt-6 pb-4 border-b border-border/60">
-          <DialogTitle>{editHook ? "编辑 Hook" : "添加 Hook"}</DialogTitle>
+          <DialogTitle>{editHook ? "编辑全局 Hook" : "添加全局 Hook"}</DialogTitle>
           <DialogDescription>
-            配置在特定事件发生时自动执行的 Shell 命令，或用自然语言描述合规策略由模型判决。
+            配置全局生效的 Hook。技能、插件和工作区 Hook 仍由各自的目录配置管理。
           </DialogDescription>
         </DialogHeader>
 
@@ -2422,7 +2422,7 @@ echo {"decision":"block","reason":"…","additionalContext":"提示：先跑 pyt
               取消
             </Button>
             <Button onClick={handleSubmit} disabled={submitting}>
-              {submitting ? "处理中…" : editHook ? "保存" : "添加"}
+              {submitting ? "处理中…" : editHook ? "保存" : "添加全局 Hook"}
             </Button>
           </DialogFooter>
         </div>
