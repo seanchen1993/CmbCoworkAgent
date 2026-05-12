@@ -849,6 +849,8 @@ function buildDesignArtifactInstruction(filePath: string, exists: boolean, sourc
     `When calling filesystem tools, use the exact argument names required by the tools: ` +
     `read_file({ file_path, offset, limit }), write_file({ file_path, content }), and edit_file({ file_path, old_string, new_string, replace_all }). ` +
     `Do not use path or filePath as tool argument names. ` +
+    `Do not use execute/bash/shell commands to create, overwrite, append, encode, decode, redirect, copy, or move the final design artifact. ` +
+    `If the HTML is too large for one reliable write_file/edit_file call, first create a compact skeleton with unique insertion markers, then use multiple edit_file calls to insert chunks at those markers, and remove all markers at the end. ` +
     `Do not paste the full HTML into the final chat response. After the file is updated, respond with only a brief summary of what changed. ` +
     `The host application will read and render the HTML from this file.`
 }
@@ -2094,23 +2096,25 @@ export function registerDesignHandlers(): void {
         // failed attempt plus tokens from the resumed attempt.
         const fullText = finalMessageText || streamedText
         const html = extractHtml(fullText)
-        if (html && (html.includes("<!DOCTYPE") || html.includes("<html"))) {
+        if (html && isCompleteHtmlDocument(html)) {
           // Store for potential future reference (storeHtml protocol)
           storeDesignHtml(htmlStoreKey, html)
           const saved = tabId ? saveDesignArtifact(resolvedArtifactId, html, workspacePath) : null
           send({ type: "done", html, ...(saved?.filePath ? { artifactPath: saved.filePath } : {}) })
         } else {
           const artifact = tabId ? readDesignArtifact(resolvedArtifactId, workspacePath) : null
-          if (artifact?.success && artifact.html && (artifact.html.includes("<!DOCTYPE") || artifact.html.includes("<html"))) {
+          if (artifact?.success && artifact.html && isCompleteHtmlDocument(artifact.html)) {
             storeDesignHtml(htmlStoreKey, artifact.html)
             send({ type: "done", html: artifact.html, artifactPath: artifact.filePath })
             return
           }
           send({
             type: "error",
-            error: fullText.trim()
-              ? `模型返回了文本但未找到有效的 HTML。请检查模型配置或重试。\n\n模型输出片段：${fullText.slice(0, 300)}`
-              : "生成未返回任何内容，请重试。",
+            error: html && (html.includes("<!DOCTYPE") || /<html[\s>]/i.test(html))
+              ? "模型返回的 HTML 不完整，疑似被输出长度限制截断。请调大该模型配置的 max_tokens（最大 Tokens）后重试，或简化页面规模。"
+              : fullText.trim()
+                ? `模型返回了文本但未找到有效的 HTML。请检查模型配置或重试。\n\n模型输出片段：${fullText.slice(0, 300)}`
+                : "生成未返回任何内容，请重试。",
           })
           abortAgentSession()
         }
@@ -2185,6 +2189,13 @@ function extractHtml(text: string): string {
   if (htmlIndex >= 0) return cleaned.slice(htmlIndex).trim()
 
   return cleaned
+}
+
+function isCompleteHtmlDocument(html: string): boolean {
+  return (
+    (html.includes("<!DOCTYPE") || /<html[\s>]/i.test(html)) &&
+    /<\/html>\s*$/i.test(html.trim())
+  )
 }
 
 function parseQuestionsJson(text: string): unknown[] {
