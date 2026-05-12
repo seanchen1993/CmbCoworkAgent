@@ -52,11 +52,8 @@ const STRATEGIES: Array<{
 ]
 
 function normalizeSettings(settings: AgentAutoCommitSettings | null): AgentAutoCommitSettings {
-  return {
-    ...DEFAULT_AUTO_COMMIT_SETTINGS,
-    ...(settings ?? {}),
-    push: false
-  }
+  const merged = { ...DEFAULT_AUTO_COMMIT_SETTINGS, ...(settings ?? {}) }
+  return { ...merged, push: merged.push === true }
 }
 
 type AutoCommitControlVariant = "compact" | "panel"
@@ -104,8 +101,7 @@ export function AutoCommitControl({
       const saved = await window.api.autoCommit.saveSettings({
         ...next,
         cardNumber: next.cardNumber?.trim() || undefined,
-        template: next.template?.trim() || undefined,
-        push: false
+        template: next.template?.trim() || undefined
       })
       if (!mountedRef.current) return
       const normalized = normalizeSettings(saved)
@@ -135,7 +131,7 @@ export function AutoCommitControl({
     (value: string) => {
       const mode = value as AgentAutoCommitMode
       if (mode === "off") {
-        void saveSettings({ ...settings, mode: "off", push: false })
+        void saveSettings({ ...settings, mode: "off" })
         return
       }
       openDetails(mode)
@@ -145,7 +141,7 @@ export function AutoCommitControl({
 
   const updateDraft = useCallback((updates: Partial<AgentAutoCommitSettings>) => {
     setError(null)
-    setDraft((current) => ({ ...current, ...updates, push: false }))
+    setDraft((current) => ({ ...current, ...updates }))
   }, [])
 
   const handleSaveDraft = useCallback(() => {
@@ -157,8 +153,7 @@ export function AutoCommitControl({
     void saveSettings({
       ...draft,
       cardNumber,
-      template: draft.template?.trim() || undefined,
-      push: false
+      template: draft.template?.trim() || undefined
     })
   }, [draft, saveSettings])
 
@@ -182,6 +177,22 @@ export function AutoCommitControl({
             <SelectItem value="always">自动提交：任务结束后直接提交</SelectItem>
           </SelectContent>
         </Select>
+      </label>
+
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={draft.push}
+          onChange={(e) => updateDraft({ push: e.target.checked })}
+          disabled={draft.mode === "off" || loading || pending}
+          className="mt-0.5 size-4 shrink-0 cursor-pointer rounded border-border disabled:cursor-not-allowed disabled:opacity-60"
+        />
+        <span>
+          <span className="font-medium">提交后自动推送</span>
+          <span className="ml-2 text-xs text-muted-foreground">
+            勾选后会在 commit 成功后执行 git push；推送失败不会回滚 commit。
+          </span>
+        </span>
       </label>
 
       <label className="flex flex-col gap-1.5 text-sm">
@@ -263,8 +274,8 @@ export function AutoCommitControl({
           <div>
             <h3 className="text-base font-semibold">自动提交</h3>
             <p className="mt-1 text-sm leading-6 text-muted-foreground">
-              提交信息固定为：卡片编号 #comment fix:摘要 #CMBDevClaw。这里只会执行 git
-              commit，不会自动 push。
+              提交信息固定为：卡片编号 #comment fix:摘要 #CMBDevClaw。默认只执行 git
+              commit；如需推送请勾选下方"提交后自动推送"。
             </p>
           </div>
           <GitCommit className="mt-1 size-5 shrink-0 text-muted-foreground" />
@@ -324,8 +335,7 @@ export function AutoCommitControl({
           <DialogHeader>
             <DialogTitle>自动提交设置</DialogTitle>
             <DialogDescription>
-              提交信息固定为：卡片编号 #comment fix:摘要 #CMBDevClaw。这里配置摘要来源；只会执行 git
-              commit，不会自动 push。
+              提交信息固定为：卡片编号 #comment fix:摘要 #CMBDevClaw。这里配置摘要来源与是否自动 push。
             </DialogDescription>
           </DialogHeader>
 
