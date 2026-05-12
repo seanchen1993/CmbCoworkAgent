@@ -163,7 +163,7 @@ export interface DesignModelRetryState {
 }
 
 export interface DesignExecutionEvent {
-  kind: "tool_call" | "tool_result" | "used_skill"
+  kind: "tool_call" | "tool_result" | "used_skill" | "assistant_text"
   id?: string
   toolCallId?: string
   name?: string

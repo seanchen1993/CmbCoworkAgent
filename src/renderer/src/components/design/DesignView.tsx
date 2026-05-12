@@ -87,6 +87,84 @@ function makeFileHref(filePath: string): string {
   return `file://${encodeURI(normalized)}`
 }
 
+const MAX_DESIGN_PROGRESS_TEXT_CHARS = 1200
+const DESIGN_HTML_PROGRESS_TEXT = "正在生成 HTML 设计稿..."
+const DESIGN_HTML_PROGRESS_PATTERN = /```html|<!doctype|<html[\s>]|<head[\s>]|<body[\s>]|<style[\s>]|<script[\s>]/i
+const THINK_OPEN_PATTERN = /<think\b[^>]*>?/i
+const THINK_CLOSE_PATTERN = /<\/think>/i
+const THINK_PARTIAL_OPEN_PATTERN = /<t(?:h(?:i(?:n(?:k(?:\b[^>]*)?)?)?)?)?$/i
+const THINK_PARTIAL_CLOSE_PATTERN = /<\/t(?:h(?:i(?:n(?:k)?)?)?)?$/i
+
+function clampDesignProgressText(content: string): string {
+  if (content.length <= MAX_DESIGN_PROGRESS_TEXT_CHARS) return content
+  return `...${content.slice(-MAX_DESIGN_PROGRESS_TEXT_CHARS)}`
+}
+
+function createDesignProgressNormalizer(): (token: string) => string {
+  let insideThinkBlock = false
+  let insideHtmlArtifact = false
+  let htmlProgressEmitted = false
+  let pendingThinkTagFragment = ""
+
+  return (token: string): string => {
+    if (!token || insideHtmlArtifact) return ""
+
+    let visible = ""
+    let remaining = `${pendingThinkTagFragment}${token}`
+    pendingThinkTagFragment = ""
+
+    while (remaining) {
+      if (insideThinkBlock) {
+        const close = remaining.match(THINK_CLOSE_PATTERN)
+        if (!close || close.index === undefined) {
+          const partialClose = remaining.match(THINK_PARTIAL_CLOSE_PATTERN)
+          if (partialClose?.index !== undefined) {
+            pendingThinkTagFragment = partialClose[0]
+          }
+          return visible
+        }
+        remaining = remaining.slice(close.index + close[0].length)
+        insideThinkBlock = false
+        continue
+      }
+
+      const open = remaining.match(THINK_OPEN_PATTERN)
+      if (!open || open.index === undefined) {
+        const partialOpen = remaining.match(THINK_PARTIAL_OPEN_PATTERN)
+        if (partialOpen?.index !== undefined) {
+          visible += remaining.slice(0, partialOpen.index)
+          pendingThinkTagFragment = partialOpen[0]
+          break
+        }
+        visible += remaining
+        break
+      }
+
+      visible += remaining.slice(0, open.index)
+      remaining = remaining.slice(open.index + open[0].length)
+
+      const close = remaining.match(THINK_CLOSE_PATTERN)
+      if (!close || close.index === undefined) {
+        insideThinkBlock = true
+        break
+      }
+      remaining = remaining.slice(close.index + close[0].length)
+    }
+
+    visible = visible.replace(THINK_CLOSE_PATTERN, "")
+    if (!visible.trim()) return ""
+
+    if (DESIGN_HTML_PROGRESS_PATTERN.test(visible)) {
+      insideHtmlArtifact = true
+      if (htmlProgressEmitted) return ""
+      htmlProgressEmitted = true
+      return DESIGN_HTML_PROGRESS_TEXT
+    }
+
+    return visible
+  }
+}
+
 function makeTabState(): TabState {
   return {
     messages: [],
@@ -266,7 +344,12 @@ function asDesignApprovalRequest(request: unknown): DesignApprovalRequest {
 function asDesignExecutionEvent(event: unknown): DesignExecutionEvent | null {
   if (!event || typeof event !== "object") return null
   const raw = event as Partial<DesignExecutionEvent>
-  if (raw.kind !== "tool_call" && raw.kind !== "tool_result" && raw.kind !== "used_skill") return null
+  if (
+    raw.kind !== "tool_call" &&
+    raw.kind !== "tool_result" &&
+    raw.kind !== "used_skill" &&
+    raw.kind !== "assistant_text"
+  ) return null
   return {
     kind: raw.kind,
     id: typeof raw.id === "string" ? raw.id : undefined,
@@ -310,6 +393,37 @@ function patchLastAssistantMessage(
 }
 
 function appendDesignExecutionEvent(events: DesignExecutionEvent[], event: DesignExecutionEvent): DesignExecutionEvent[] {
+  if (event.kind === "assistant_text") {
+    if (!event.content?.trim()) return events
+    const content = clampDesignProgressText(event.content)
+    const eventId = event.id
+    if (eventId && eventId !== "assistant-progress") {
+      const index = events.findIndex((item) => item.kind === "assistant_text" && item.id === eventId)
+      if (index >= 0) {
+        const next = [...events]
+        const current = next[index]
+        next[index] = {
+          ...current,
+          ...event,
+          content: clampDesignProgressText(eventId === "assistant-progress" ? `${current.content ?? ""}${content}` : content),
+          timestamp: current.timestamp,
+        }
+        return next
+      }
+    }
+    const last = events[events.length - 1]
+    if (last?.kind === "assistant_text" && (!eventId || last.id === eventId)) {
+      const next = [...events]
+      next[next.length - 1] = {
+        ...last,
+        content: clampDesignProgressText(`${last.content ?? ""}${content}`),
+        timestamp: event.timestamp,
+      }
+      return next
+    }
+    return [...events, { ...event, content }]
+  }
+
   if (event.kind === "used_skill") {
     if (!event.name) {
       return events
@@ -330,8 +444,20 @@ function appendDesignExecutionEvent(events: DesignExecutionEvent[], event: Desig
 
   if (event.kind === "tool_call") {
     const toolCallId = event.toolCallId || event.id
-    if (toolCallId && events.some((item) => item.kind === "tool_call" && (item.toolCallId || item.id) === toolCallId)) {
-      return events
+    const index = toolCallId
+      ? events.findIndex((item) => item.kind === "tool_call" && (item.toolCallId || item.id) === toolCallId)
+      : -1
+    if (index >= 0) {
+      const next = [...events]
+      const current = next[index]
+      next[index] = {
+        ...current,
+        ...event,
+        args: event.args && Object.keys(event.args).length > 0 ? event.args : current.args,
+        name: event.name || current.name,
+        timestamp: current.timestamp,
+      }
+      return next
     }
     return [...events, event]
   }
@@ -1878,6 +2004,7 @@ export function DesignView(): React.JSX.Element {
     // Using the streaming sessionId (which changes per-call) would create a new artifact
     // directory every generation, making the filesystem-based context chain useless.
     const stableArtifactId = makeDesignArtifactId(currentSessionIdRef.current, tabId)
+    const normalizeProgressToken = createDesignProgressNormalizer()
 
     const onEvent = (event: {
       type: string
@@ -1927,6 +2054,28 @@ export function DesignView(): React.JSX.Element {
           msgs[last] = {
             ...msgs[last],
             executionEvents: appendDesignExecutionEvent(msgs[last].executionEvents ?? [], executionEvent),
+          }
+          return { messages: msgs }
+        })
+        return
+      }
+
+      if (event.type === "token" && event.token) {
+        const progressText = normalizeProgressToken(event.token)
+        if (!progressText) return
+        updateTs(tabId, (prev) => {
+          const msgs = [...prev.messages]
+          const last = msgs.length - 1
+          if (msgs[last]?.role !== "assistant") return {}
+          msgs[last] = {
+            ...msgs[last],
+            executionEvents: appendDesignExecutionEvent(msgs[last].executionEvents ?? [], {
+              kind: "assistant_text",
+              id: "assistant-progress",
+              content: progressText,
+              status: "running",
+              timestamp: Date.now(),
+            }),
           }
           return { messages: msgs }
         })

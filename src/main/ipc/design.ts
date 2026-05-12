@@ -471,7 +471,7 @@ function extractTextContent(content: unknown): string {
 type DesignExecutionStatus = "running" | "success" | "error"
 
 interface DesignExecutionEvent {
-  kind: "tool_call" | "tool_result" | "used_skill"
+  kind: "tool_call" | "tool_result" | "used_skill" | "assistant_text"
   id?: string
   toolCallId?: string
   name?: string
@@ -857,21 +857,120 @@ function getSerializedClassName(msg: Record<string, unknown>): string {
   return classId[classId.length - 1] ?? ""
 }
 
-function normalizeToolCalls(raw: unknown): Array<{ id?: string; name?: string; args?: Record<string, unknown> }> {
+interface AccumulatedDesignToolCall {
+  id: string
+  name: string
+  argsText: string
+}
+
+type NormalizedDesignToolCall = { id?: string; name?: string; args?: Record<string, unknown> }
+
+function truncateDesignToolString(value: string, limit = 500): string {
+  return value.length > limit ? `${value.slice(0, limit)}... [truncated ${value.length - limit} chars]` : value
+}
+
+function sanitizeDesignToolArgs(args: Record<string, unknown>): Record<string, unknown> {
+  const sanitized: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(args)) {
+    if (typeof value === "string") {
+      const isLargeTextArg = key === "content" || key === "old_string" || key === "new_string"
+      sanitized[key] = isLargeTextArg
+        ? `[${value.length} chars]`
+        : truncateDesignToolString(value)
+      continue
+    }
+    sanitized[key] = value
+  }
+  return sanitized
+}
+
+function parseDesignToolArgs(raw: unknown): Record<string, unknown> {
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    return sanitizeDesignToolArgs(raw as Record<string, unknown>)
+  }
+  if (typeof raw !== "string" || !raw.trim()) return {}
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return sanitizeDesignToolArgs(parsed as Record<string, unknown>)
+    }
+  } catch {
+    // Streaming tool-call args are often incomplete JSON until the final chunk.
+  }
+  return {}
+}
+
+function normalizeToolCalls(raw: unknown): NormalizedDesignToolCall[] {
   if (!Array.isArray(raw)) return []
-  const normalized: Array<{ id?: string; name?: string; args?: Record<string, unknown> }> = []
+  const normalized: NormalizedDesignToolCall[] = []
   for (const toolCall of raw) {
     if (!toolCall || typeof toolCall !== "object") continue
-    const item = toolCall as { id?: unknown; name?: unknown; args?: unknown }
+    const item = toolCall as {
+      id?: unknown
+      name?: unknown
+      args?: unknown
+      function?: { name?: unknown; arguments?: unknown }
+    }
+    const rawArgs = item.args ?? item.function?.arguments
     normalized.push({
       id: typeof item.id === "string" ? item.id : undefined,
-      name: typeof item.name === "string" ? item.name : undefined,
-      args: item.args && typeof item.args === "object" && !Array.isArray(item.args)
-        ? item.args as Record<string, unknown>
-        : {},
+      name: typeof item.name === "string"
+        ? item.name
+        : typeof item.function?.name === "string"
+          ? item.function.name
+          : undefined,
+      args: parseDesignToolArgs(rawArgs),
     })
   }
   return normalized
+}
+
+function normalizeToolCallChunks(
+  raw: unknown,
+  accumulatedById: Map<string, AccumulatedDesignToolCall>,
+  scope = "stream"
+): NormalizedDesignToolCall[] {
+  if (!Array.isArray(raw)) return []
+  const normalized: NormalizedDesignToolCall[] = []
+
+  for (let index = 0; index < raw.length; index++) {
+    const chunk = raw[index]
+    if (!chunk || typeof chunk !== "object") continue
+    const item = chunk as { id?: unknown; name?: unknown; args?: unknown; index?: unknown }
+    const toolCallId = typeof item.id === "string" && item.id
+      ? item.id
+      : `streaming-tool-call:${scope}:${typeof item.index === "number" ? item.index : index}`
+
+    let accumulated = accumulatedById.get(toolCallId)
+    if (!accumulated) {
+      accumulated = { id: toolCallId, name: "", argsText: "" }
+      accumulatedById.set(toolCallId, accumulated)
+    }
+
+    if (typeof item.name === "string" && item.name) {
+      accumulated.name = item.name
+    }
+    if (typeof item.args === "string") {
+      accumulated.argsText += item.args
+    } else if (item.args && typeof item.args === "object" && !Array.isArray(item.args)) {
+      accumulated.argsText = JSON.stringify(item.args)
+    }
+
+    if (!accumulated.name) continue
+    normalized.push({
+      id: accumulated.id,
+      name: accumulated.name,
+      args: parseDesignToolArgs(accumulated.argsText)
+    })
+  }
+
+  return normalized
+}
+
+function getAdditionalKwargsToolCalls(kwargs: Record<string, unknown>): unknown {
+  const additionalKwargs = kwargs.additional_kwargs
+  if (!additionalKwargs || typeof additionalKwargs !== "object" || Array.isArray(additionalKwargs)) return undefined
+  return (additionalKwargs as Record<string, unknown>).tool_calls
 }
 
 function getReadFilePath(args: Record<string, unknown> | undefined): string {
@@ -1678,8 +1777,9 @@ export function registerDesignHandlers(): void {
         const pendingSkillResultsByToolCallId = new Map<string, boolean>()
         const emittedSkillStartToolCallIds = new Set<string>()
         const emittedSkillResultToolCallIds = new Set<string>()
-        const emittedToolCallIds = new Set<string>()
         const emittedToolResultIds = new Set<string>()
+        const emittedAssistantTextIds = new Set<string>()
+        const accumulatedToolCallChunks = new Map<string, AccumulatedDesignToolCall>()
 
         const getSkillNameForReadPath = (rawPath: string): string => {
           return skillUsageDetector.getSkillNameForReadFilePath(rawPath)
@@ -1767,6 +1867,21 @@ export function registerDesignHandlers(): void {
           emitSkillResult(toolCallId, isError)
         }
 
+        const emitAssistantText = (id: string, content: string) => {
+          if (!content.trim() || emittedAssistantTextIds.has(id)) return
+          emittedAssistantTextIds.add(id)
+          send({
+            type: "execution",
+            event: {
+              kind: "assistant_text",
+              id,
+              content,
+              status: "running",
+              timestamp: Date.now(),
+            } satisfies DesignExecutionEvent,
+          })
+        }
+
         // Mid-stream retry loop — mirrors chat module (ipc/agent.ts) behavior so
         // that transient stream interruptions (e.g. `terminated` from a corporate
         // proxy idle timeout, or any error matched by isRetryableApiError) do not
@@ -1806,11 +1921,9 @@ export function registerDesignHandlers(): void {
                 const kwargs = (msg.kwargs ?? {}) as Record<string, unknown>
                 const className = getSerializedClassName(msg)
                 if (className.includes("AI")) {
-                  for (const toolCall of normalizeToolCalls(kwargs.tool_calls)) {
-                    if (!toolCall.id) continue
+                  const emitToolCall = (toolCall: NormalizedDesignToolCall) => {
+                    if (!toolCall.id) return
                     maybeEmitSkillStart(toolCall)
-                    if (emittedToolCallIds.has(toolCall.id)) continue
-                    emittedToolCallIds.add(toolCall.id)
                     send({
                       type: "execution",
                       event: {
@@ -1823,6 +1936,21 @@ export function registerDesignHandlers(): void {
                         timestamp: Date.now(),
                       } satisfies DesignExecutionEvent,
                     })
+                  }
+
+                  const assistantText = extractTextContent(kwargs.content ?? msg.content)
+                  if (assistantText && !className.includes("Chunk")) {
+                    emitAssistantText(`assistant:${String(kwargs.id || msg.id || Date.now())}`, assistantText)
+                  }
+                  const scope = String(kwargs.id || msg.id || "values")
+                  for (const toolCall of normalizeToolCallChunks(kwargs.tool_call_chunks, accumulatedToolCallChunks, scope)) {
+                    emitToolCall(toolCall)
+                  }
+                  for (const toolCall of normalizeToolCalls(kwargs.tool_calls)) {
+                    emitToolCall(toolCall)
+                  }
+                  for (const toolCall of normalizeToolCalls(getAdditionalKwargsToolCalls(kwargs))) {
+                    emitToolCall(toolCall)
                   }
                 }
                 if (className.includes("Tool")) {
@@ -1860,11 +1988,9 @@ export function registerDesignHandlers(): void {
           const className = getSerializedClassName(msgChunk)
 
           if (className.includes("AI")) {
-            for (const toolCall of normalizeToolCalls(kwargs.tool_calls)) {
-              if (!toolCall.id) continue
+            const emitToolCall = (toolCall: NormalizedDesignToolCall) => {
+              if (!toolCall.id) return
               maybeEmitSkillStart(toolCall)
-              if (emittedToolCallIds.has(toolCall.id)) continue
-              emittedToolCallIds.add(toolCall.id)
               send({
                 type: "execution",
                 event: {
@@ -1877,6 +2003,17 @@ export function registerDesignHandlers(): void {
                   timestamp: Date.now(),
                 } satisfies DesignExecutionEvent,
               })
+            }
+
+            const scope = String(kwargs.id || "messages")
+            for (const toolCall of normalizeToolCallChunks(kwargs.tool_call_chunks, accumulatedToolCallChunks, scope)) {
+              emitToolCall(toolCall)
+            }
+            for (const toolCall of normalizeToolCalls(kwargs.tool_calls)) {
+              emitToolCall(toolCall)
+            }
+            for (const toolCall of normalizeToolCalls(getAdditionalKwargsToolCalls(kwargs))) {
+              emitToolCall(toolCall)
             }
           }
 
