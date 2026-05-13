@@ -94,12 +94,14 @@ export function UserPanel({
   data,
   loading,
   onDrillDownOrg,
-  onResetOrgDrilldown
+  onResetOrgDrilldown,
+  onUserClick
 }: {
   data: UserStatsData | null
   loading: boolean
   onDrillDownOrg: (orgLv1: string) => void
   onResetOrgDrilldown: () => void
+  onUserClick?: (sapId: string) => void
 }) {
   const [orgMetric, setOrgMetric] = useState<"pv" | "uv">("pv")
 
@@ -131,7 +133,10 @@ export function UserPanel({
               {data.topUsers.map((u, i) => (
                 <tr
                   key={u.sapId}
-                  className="border-b border-border/50 hover:bg-muted/30 transition-colors"
+                  className={`border-b border-border/50 transition-colors ${
+                    onUserClick ? "cursor-pointer hover:bg-muted/30" : "hover:bg-muted/30"
+                  }`}
+                  onClick={() => onUserClick?.(u.sapId)}
                 >
                   <td className="py-1.5 px-2 text-muted-foreground">{i + 1}</td>
                   <td className="py-1.5 px-2 text-foreground">

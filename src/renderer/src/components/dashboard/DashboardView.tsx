@@ -3,14 +3,17 @@
  *
  * 5 panels: Overview · Feedback · Model Analysis · User Analysis · Productivity
  */
-import { useState, useCallback } from "react"
-import { RefreshCw, Loader2, AlertCircle, ChevronLeft, ChevronRight, Download } from "lucide-react"
+import { useState, useCallback, useEffect } from "react"
+import { RefreshCw, Loader2, AlertCircle, ChevronLeft, ChevronRight, Download, User, Users } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import {
   useDashboard,
   type DashboardCommitDetailsData,
   type DashboardSkillDetail,
+  type DashboardUserDetail,
+  type DashboardUserListData,
+  type DashboardUserListItem,
   type Granularity,
   type TimeRange
 } from "./use-dashboard"
@@ -19,7 +22,7 @@ import { ModelPanel } from "./panels/ModelPanel"
 import { UserPanel } from "./panels/UserPanel"
 import { ProductivityPanel } from "./panels/ProductivityPanel"
 import { FeedbackPanel } from "./panels/FeedbackPanel"
-import { TraceHistoryDialog } from "./TraceHistoryDialog"
+import { TraceExplorer, TraceHistoryDialog } from "./TraceHistoryDialog"
 import { CommitDetailsDialog } from "./CommitDetailsDialog"
 
 // ─────────────────────────────────────────────────────────
@@ -222,6 +225,288 @@ const EMPTY_SKILL_DETAIL: DashboardSkillDetail = {
   traces: []
 }
 
+const USER_LIST_PAGE_SIZE = 20
+
+type DashboardSubPage =
+  | { kind: "main" }
+  | { kind: "user-list" }
+  | { kind: "user-detail"; sapId: string; backTo: "main" | "user-list" }
+
+function formatNumber(value: number): string {
+  return Math.round(value).toLocaleString("zh-CN")
+}
+
+function formatCompactTokens(tokens: number): string {
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`
+  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}K`
+  return String(Math.round(tokens))
+}
+
+function formatDateTime(iso?: string): string {
+  if (!iso) return "—"
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return iso
+  return date.toLocaleString("zh-CN")
+}
+
+function outcomeLabel(outcome: string): string {
+  if (outcome === "success") return "成功"
+  if (outcome === "error") return "错误"
+  if (outcome === "cancelled") return "取消"
+  return outcome || "未知"
+}
+
+function UserMetricCard({
+  label,
+  value,
+  sub
+}: {
+  label: string
+  value: string
+  sub?: string
+}): React.JSX.Element {
+  return (
+    <div className="rounded-xl border border-border bg-card px-4 py-3">
+      <div className="text-[11px] text-muted-foreground">{label}</div>
+      <div className="mt-1 text-lg font-bold leading-tight text-foreground">{value}</div>
+      {sub ? <div className="mt-1 text-[10px] text-muted-foreground">{sub}</div> : null}
+    </div>
+  )
+}
+
+function UserListPage({
+  data,
+  loading,
+  error,
+  canGoPrevious,
+  canGoNext,
+  onBack,
+  onRefresh,
+  onPrevious,
+  onNext,
+  onUserClick
+}: {
+  data: DashboardUserListData | null
+  loading: boolean
+  error: string | null
+  canGoPrevious: boolean
+  canGoNext: boolean
+  onBack: () => void
+  onRefresh: () => void
+  onPrevious: () => void
+  onNext: () => void
+  onUserClick: (user: DashboardUserListItem) => void
+}): React.JSX.Element {
+  return (
+    <div className="p-6">
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <Button variant="ghost" size="sm" className="gap-1.5" onClick={onBack}>
+            <ChevronLeft className="size-4" />
+            返回面板
+          </Button>
+          <div>
+            <h2 className="text-sm font-semibold text-foreground">活跃用户列表</h2>
+            <p className="text-xs text-muted-foreground">
+              共 {formatNumber(data?.totalActiveUsers ?? 0)} 位活跃用户
+            </p>
+          </div>
+        </div>
+        <Button variant="outline" size="sm" className="gap-1.5" onClick={onRefresh} disabled={loading}>
+          {loading ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
+          刷新
+        </Button>
+      </div>
+
+      <div className="rounded-xl border border-border bg-card">
+        <div className="flex items-center justify-between border-b border-border px-4 py-3">
+          <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+            <Users className="size-4" />
+            用户明细
+          </div>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" onClick={onPrevious} disabled={!canGoPrevious || loading}>
+              上一页
+            </Button>
+            <Button variant="outline" size="sm" className="gap-1" onClick={onNext} disabled={!canGoNext || loading}>
+              下一页
+              <ChevronRight className="size-3.5" />
+            </Button>
+          </div>
+        </div>
+
+        {loading && !data ? (
+          <div className="flex h-64 items-center justify-center">
+            <Loader2 className="size-6 animate-spin text-muted-foreground" />
+          </div>
+        ) : error ? (
+          <div className="flex h-64 items-center justify-center px-6 text-sm text-destructive">{error}</div>
+        ) : (
+          <div className="overflow-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-border bg-muted/30 text-muted-foreground">
+                  <th className="px-3 py-2 text-left font-medium">用户</th>
+                  <th className="px-3 py-2 text-left font-medium">部门</th>
+                  <th className="px-3 py-2 text-right font-medium">调用次数</th>
+                  <th className="px-3 py-2 text-right font-medium">工具调用</th>
+                  <th className="px-3 py-2 text-right font-medium">Token</th>
+                  <th className="px-3 py-2 text-left font-medium">最近活跃</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(data?.items ?? []).map((user) => (
+                  <tr
+                    key={user.sapId}
+                    className="cursor-pointer border-b border-border/50 transition-colors hover:bg-muted/30"
+                    onClick={() => onUserClick(user)}
+                  >
+                    <td className="px-3 py-2">
+                      <div className="font-medium text-foreground">{user.userName || user.sapId}</div>
+                      <div className="font-mono text-[10px] text-muted-foreground">{user.sapId}</div>
+                    </td>
+                    <td className="px-3 py-2 text-muted-foreground">
+                      {user.upperOrgLv1 && user.upperOrgLv0
+                        ? `${user.upperOrgLv1}/${user.upperOrgLv0}`
+                        : user.orgName || "—"}
+                    </td>
+                    <td className="px-3 py-2 text-right font-medium">{formatNumber(user.count)}</td>
+                    <td className="px-3 py-2 text-right">{formatNumber(user.totalToolCalls)}</td>
+                    <td className="px-3 py-2 text-right">{formatCompactTokens(user.totalTokens)}</td>
+                    <td className="px-3 py-2 text-muted-foreground">{formatDateTime(user.lastActiveAt)}</td>
+                  </tr>
+                ))}
+                {(data?.items ?? []).length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="px-3 py-10 text-center text-muted-foreground">
+                      当前时间范围内暂无活跃用户
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function UserDetailPage({
+  data,
+  loading,
+  error,
+  onBack
+}: {
+  data: DashboardUserDetail | null
+  loading: boolean
+  error: string | null
+  onBack: () => void
+}): React.JSX.Element {
+  return (
+    <div className="p-6">
+      <div className="mb-4 flex items-center gap-3">
+        <Button variant="ghost" size="sm" className="gap-1.5" onClick={onBack}>
+          <ChevronLeft className="size-4" />
+          返回
+        </Button>
+        <div>
+          <h2 className="text-sm font-semibold text-foreground">用户 Trace 分析</h2>
+          <p className="text-xs text-muted-foreground">
+            {data ? `${data.userName || data.sapId} · ${data.sapId}` : "加载用户信息中"}
+          </p>
+        </div>
+      </div>
+
+      {loading && !data ? (
+        <div className="flex h-64 items-center justify-center">
+          <Loader2 className="size-6 animate-spin text-muted-foreground" />
+        </div>
+      ) : error ? (
+        <div className="rounded-xl border border-destructive/50 bg-destructive/5 px-4 py-3 text-sm text-destructive">
+          {error}
+        </div>
+      ) : data ? (
+        <div className="space-y-4">
+          <div className="rounded-xl border border-border bg-card p-4">
+            <div className="flex items-start gap-3">
+              <div className="flex size-10 items-center justify-center rounded-lg bg-violet-500">
+                <User className="size-5 text-white" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-sm font-semibold text-foreground">{data.userName || data.sapId}</div>
+                <div className="mt-1 text-xs text-muted-foreground">
+                  {data.sapId}
+                  {data.ystId ? ` · ${data.ystId}` : ""}
+                  {data.upperOrgLv1 || data.upperOrgLv0 || data.orgName
+                    ? ` · ${data.upperOrgLv1 && data.upperOrgLv0 ? `${data.upperOrgLv1}/${data.upperOrgLv0}` : data.orgName}`
+                    : ""}
+                </div>
+              </div>
+            </div>
+            <div className="mt-4 grid grid-cols-5 gap-3">
+              <UserMetricCard label="调用次数" value={formatNumber(data.totalCalls)} />
+              <UserMetricCard label="平均耗时" value={formatDuration(data.avgDurationMs)} />
+              <UserMetricCard label="工具调用" value={formatNumber(data.totalToolCalls)} />
+              <UserMetricCard label="输入 Token" value={formatCompactTokens(data.totalInputTokens)} />
+              <UserMetricCard label="输出 Token" value={formatCompactTokens(data.totalOutputTokens)} />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-3 gap-4">
+            <div className="rounded-xl border border-border bg-card p-4">
+              <h3 className="mb-3 text-xs font-medium text-muted-foreground">常用 Skill</h3>
+              <div className="space-y-2">
+                {data.bySkill.map((item) => (
+                  <div key={item.skill} className="flex items-center justify-between gap-3 text-xs">
+                    <span className="truncate text-foreground">{item.skill}</span>
+                    <span className="font-medium">{formatNumber(item.count)}</span>
+                  </div>
+                ))}
+                {data.bySkill.length === 0 && <div className="text-xs text-muted-foreground">暂无数据</div>}
+              </div>
+            </div>
+            <div className="rounded-xl border border-border bg-card p-4">
+              <h3 className="mb-3 text-xs font-medium text-muted-foreground">常用模型</h3>
+              <div className="space-y-2">
+                {data.byModel.map((item) => (
+                  <div key={item.model} className="flex items-center justify-between gap-3 text-xs">
+                    <span className="truncate text-foreground">{item.model}</span>
+                    <span className="font-medium">{formatNumber(item.count)}</span>
+                  </div>
+                ))}
+                {data.byModel.length === 0 && <div className="text-xs text-muted-foreground">暂无数据</div>}
+              </div>
+            </div>
+            <div className="rounded-xl border border-border bg-card p-4">
+              <h3 className="mb-3 text-xs font-medium text-muted-foreground">执行结果</h3>
+              <div className="space-y-2">
+                {data.byOutcome.map((item) => (
+                  <div key={item.outcome} className="flex items-center justify-between gap-3 text-xs">
+                    <span className="truncate text-foreground">{outcomeLabel(item.outcome)}</span>
+                    <span className="font-medium">{formatNumber(item.count)}</span>
+                  </div>
+                ))}
+                {data.byOutcome.length === 0 && <div className="text-xs text-muted-foreground">暂无数据</div>}
+              </div>
+            </div>
+          </div>
+
+          <div className="overflow-hidden rounded-xl border border-border bg-card">
+            <TraceExplorer
+              traces={data.traces}
+              title="最近 10 条 Trace 记录"
+              emptyText="当前时间范围内没有该用户的 trace"
+              showCodeStats={false}
+              className="h-[560px]"
+            />
+          </div>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 export function DashboardView(): React.JSX.Element {
   const {
     granularity,
@@ -255,6 +540,15 @@ export function DashboardView(): React.JSX.Element {
   const [commitDetails, setCommitDetails] = useState<DashboardCommitDetailsData | null>(null)
   const [commitDetailsLoading, setCommitDetailsLoading] = useState(false)
   const [commitDetailsError, setCommitDetailsError] = useState<string | null>(null)
+  const [subPage, setSubPage] = useState<DashboardSubPage>({ kind: "main" })
+  const [userList, setUserList] = useState<DashboardUserListData | null>(null)
+  const [userListLoading, setUserListLoading] = useState(false)
+  const [userListError, setUserListError] = useState<string | null>(null)
+  const [userListAfterKey, setUserListAfterKey] = useState<Record<string, string | number> | undefined>()
+  const [userListBackStack, setUserListBackStack] = useState<Array<Record<string, string | number> | undefined>>([])
+  const [userDetail, setUserDetail] = useState<DashboardUserDetail | null>(null)
+  const [userDetailLoading, setUserDetailLoading] = useState(false)
+  const [userDetailError, setUserDetailError] = useState<string | null>(null)
 
   const handleSkillClick = useCallback(async (skill: string) => {
     setSelectedSkill(skill)
@@ -263,7 +557,7 @@ export function DashboardView(): React.JSX.Element {
     setSkillTracesError(null)
     setSkillTracesLoading(true)
     try {
-      const result = await window.api.dashboard.skillDetail(skill, range, 3)
+      const result = await window.api.dashboard.skillDetail(skill, range, 10)
       if (!result.success) throw new Error(result.error ?? "获取 Skill 详情失败")
       setSkillDetail(result.data ?? EMPTY_SKILL_DETAIL)
     } catch (e) {
@@ -272,6 +566,85 @@ export function DashboardView(): React.JSX.Element {
       setSkillTracesLoading(false)
     }
   }, [range])
+
+  const loadUserList = useCallback(async (
+    afterKey?: Record<string, string | number>,
+    backStack: Array<Record<string, string | number> | undefined> = []
+  ) => {
+    setUserListLoading(true)
+    setUserListError(null)
+    try {
+      const result = await window.api.dashboard.userList(range, {
+        pageSize: USER_LIST_PAGE_SIZE,
+        afterKey: afterKey ?? null
+      })
+      if (!result.success) throw new Error(result.error ?? "获取用户列表失败")
+      setUserList(result.data ?? { items: [], pageSize: USER_LIST_PAGE_SIZE, totalActiveUsers: 0 })
+      setUserListAfterKey(afterKey)
+      setUserListBackStack(backStack)
+    } catch (e) {
+      setUserListError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setUserListLoading(false)
+    }
+  }, [range])
+
+  const loadUserDetail = useCallback(async (sapId: string) => {
+    setUserDetailLoading(true)
+    setUserDetailError(null)
+    try {
+      const result = await window.api.dashboard.userDetail(sapId, range, { traceLimit: 10 })
+      if (!result.success) throw new Error(result.error ?? "获取用户详情失败")
+      setUserDetail(result.data ?? null)
+    } catch (e) {
+      setUserDetailError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setUserDetailLoading(false)
+    }
+  }, [range])
+
+  const openUserList = useCallback(() => {
+    setSubPage({ kind: "user-list" })
+    setUserList(null)
+  }, [])
+
+  const openUserDetail = useCallback((sapId: string, backTo?: "main" | "user-list") => {
+    const normalizedSapId = sapId.trim()
+    if (!normalizedSapId) return
+    const fallbackBackTo = subPage.kind === "user-list" ? "user-list" : "main"
+    setSubPage({ kind: "user-detail", sapId: normalizedSapId, backTo: backTo ?? fallbackBackTo })
+    setUserDetail(null)
+  }, [subPage.kind])
+
+  const handleUserListNext = useCallback(() => {
+    if (!userList?.nextAfterKey) return
+    void loadUserList(userList.nextAfterKey, [...userListBackStack, userListAfterKey])
+  }, [loadUserList, userList?.nextAfterKey, userListAfterKey, userListBackStack])
+
+  const handleUserListPrevious = useCallback(() => {
+    if (userListBackStack.length === 0) return
+    const nextStack = userListBackStack.slice(0, -1)
+    const previousAfterKey = userListBackStack[userListBackStack.length - 1]
+    void loadUserList(previousAfterKey, nextStack)
+  }, [loadUserList, userListBackStack])
+
+  const handleUserDetailBack = useCallback(() => {
+    if (subPage.kind === "user-detail" && subPage.backTo === "user-list") {
+      setSubPage({ kind: "user-list" })
+      return
+    }
+    setSubPage({ kind: "main" })
+  }, [subPage])
+
+  const subPageDetailSapId = subPage.kind === "user-detail" ? subPage.sapId : null
+
+  useEffect(() => {
+    if (subPage.kind === "user-list") {
+      void loadUserList(undefined, [])
+    } else if (subPageDetailSapId) {
+      void loadUserDetail(subPageDetailSapId)
+    }
+  }, [range, subPage.kind, subPageDetailSapId, loadUserList, loadUserDetail])
 
   const loadCommitDetails = useCallback(async (
     targetRange: TimeRange,
@@ -525,49 +898,81 @@ export function DashboardView(): React.JSX.Element {
         </div>
       )}
 
-      <ScrollArea className="flex-1">
-        <div className="p-6 space-y-6">
-          {/* Overview */}
-          <section>
-            <h2 className="text-sm font-semibold text-foreground mb-3">使用概览</h2>
-            <OverviewPanel data={overview} loading={loading} onSkillClick={handleSkillClick} />
-          </section>
+      {subPage.kind === "user-list" ? (
+        <ScrollArea className="flex-1">
+          <UserListPage
+            data={userList}
+            loading={userListLoading}
+            error={userListError}
+            canGoPrevious={userListBackStack.length > 0}
+            canGoNext={Boolean(userList?.nextAfterKey)}
+            onBack={() => setSubPage({ kind: "main" })}
+            onRefresh={() => loadUserList(userListAfterKey, userListBackStack)}
+            onPrevious={handleUserListPrevious}
+            onNext={handleUserListNext}
+            onUserClick={(user) => openUserDetail(user.sapId, "user-list")}
+          />
+        </ScrollArea>
+      ) : subPage.kind === "user-detail" ? (
+        <ScrollArea className="flex-1">
+          <UserDetailPage
+            data={userDetail}
+            loading={userDetailLoading}
+            error={userDetailError}
+            onBack={handleUserDetailBack}
+          />
+        </ScrollArea>
+      ) : (
+        <ScrollArea className="flex-1">
+          <div className="p-6 space-y-6">
+            {/* Overview */}
+            <section>
+              <h2 className="text-sm font-semibold text-foreground mb-3">使用概览</h2>
+              <OverviewPanel
+                data={overview}
+                loading={loading}
+                onSkillClick={handleSkillClick}
+                onActiveUsersClick={openUserList}
+              />
+            </section>
 
-          {/* Productivity */}
-          <section>
-            <h2 className="text-sm font-semibold text-foreground mb-3">生产力指标</h2>
-            <ProductivityPanel
-              data={productivity}
-              loading={loading}
-              onCommitTotalClick={handleCommitTotalClick}
-              onCommitBucketClick={handleCommitBucketClick}
-            />
-          </section>
+            {/* Productivity */}
+            <section>
+              <h2 className="text-sm font-semibold text-foreground mb-3">生产力指标</h2>
+              <ProductivityPanel
+                data={productivity}
+                loading={loading}
+                onCommitTotalClick={handleCommitTotalClick}
+                onCommitBucketClick={handleCommitBucketClick}
+              />
+            </section>
 
-          {/* User Analysis */}
-          <section>
-            <h2 className="text-sm font-semibold text-foreground mb-3">用户分析</h2>
-            <UserPanel
-              data={userStats}
-              loading={loading || userStatsLoading}
-              onDrillDownOrg={drillDownUserOrg}
-              onResetOrgDrilldown={resetUserOrgDrilldown}
-            />
-          </section>
+            {/* User Analysis */}
+            <section>
+              <h2 className="text-sm font-semibold text-foreground mb-3">用户分析</h2>
+              <UserPanel
+                data={userStats}
+                loading={loading || userStatsLoading}
+                onDrillDownOrg={drillDownUserOrg}
+                onResetOrgDrilldown={resetUserOrgDrilldown}
+                onUserClick={(sapId) => openUserDetail(sapId, "main")}
+              />
+            </section>
 
-          {/* Model Analysis */}
-          <section>
-            <h2 className="text-sm font-semibold text-foreground mb-3">模型分析</h2>
-            <ModelPanel data={modelStats} loading={loading} />
-          </section>
+            {/* Model Analysis */}
+            <section>
+              <h2 className="text-sm font-semibold text-foreground mb-3">模型分析</h2>
+              <ModelPanel data={modelStats} loading={loading} />
+            </section>
 
-          {/* Feedback */}
-          <section>
-            <h2 className="text-sm font-semibold text-foreground mb-3">点赞 / 点踩反馈</h2>
-            <FeedbackPanel data={feedback} loading={loading} />
-          </section>
-        </div>
-      </ScrollArea>
+            {/* Feedback */}
+            <section>
+              <h2 className="text-sm font-semibold text-foreground mb-3">点赞 / 点踩反馈</h2>
+              <FeedbackPanel data={feedback} loading={loading} />
+            </section>
+          </div>
+        </ScrollArea>
+      )}
       <TraceHistoryDialog
         open={skillDialogOpen}
         onOpenChange={setSkillDialogOpen}

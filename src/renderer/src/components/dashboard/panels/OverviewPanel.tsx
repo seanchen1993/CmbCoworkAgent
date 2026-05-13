@@ -22,7 +22,8 @@ function StatCard({
   value,
   sub,
   color,
-  tooltipContent
+  tooltipContent,
+  onClick
 }: {
   icon: React.ElementType
   label: string
@@ -30,11 +31,13 @@ function StatCard({
   sub?: string
   color: string
   tooltipContent?: React.ReactNode
+  onClick?: () => void
 }) {
-  const card = (
-    <div
-      className={`flex items-center gap-3 rounded-xl border border-border bg-card px-4 py-3 ${tooltipContent ? "cursor-help" : ""}`}
-    >
+  const className = `flex w-full items-center gap-3 rounded-xl border border-border bg-card px-4 py-3 text-left ${
+    onClick ? "cursor-pointer transition-colors hover:bg-muted/30" : tooltipContent ? "cursor-help" : ""
+  }`
+  const content = (
+    <>
       <div className={`flex size-9 items-center justify-center rounded-lg ${color}`}>
         <Icon className="size-4 text-white" />
       </div>
@@ -43,7 +46,14 @@ function StatCard({
         <div className="text-lg font-bold text-foreground leading-tight">{value}</div>
         {sub && <div className="text-[10px] text-muted-foreground">{sub}</div>}
       </div>
-    </div>
+    </>
+  )
+  const card = onClick ? (
+    <button type="button" className={className} onClick={onClick}>
+      {content}
+    </button>
+  ) : (
+    <div className={className}>{content}</div>
   )
 
   if (!tooltipContent) return card
@@ -692,11 +702,13 @@ function ToolRankingPanel({ data }: { data: OverviewData }) {
 export function OverviewPanel({
   data,
   loading,
-  onSkillClick
+  onSkillClick,
+  onActiveUsersClick
 }: {
   data: OverviewData | null
   loading: boolean
   onSkillClick?: (skill: string) => void
+  onActiveUsersClick?: () => void
 }) {
   if (loading && !data) {
     return <div className="text-sm text-muted-foreground py-8 text-center">加载中...</div>
@@ -720,6 +732,7 @@ export function OverviewPanel({
           label="活跃用户数"
           value={String(data.activeUsers)}
           color="bg-violet-500"
+          onClick={onActiveUsersClick}
         />
         <StatCard
           icon={Clock}

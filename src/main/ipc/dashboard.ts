@@ -119,6 +119,11 @@ interface DashboardTraceDetail {
   endedAt?: string
   durationMs: number
   userMessage: string
+  sapId?: string
+  ystId?: string
+  userName?: string
+  orgName?: string
+  userIp?: string
   modelId?: string
   modelName?: string
   outcome: string
@@ -163,6 +168,48 @@ interface DashboardSkillDetail {
   traces: DashboardTraceDetail[]
 }
 
+interface DashboardUserListItem {
+  sapId: string
+  ystId?: string
+  userName: string
+  orgName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+  count: number
+  lastActiveAt?: string
+  avgDurationMs: number
+  totalToolCalls: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalTokens: number
+}
+
+interface DashboardUserListData {
+  items: DashboardUserListItem[]
+  pageSize: number
+  nextAfterKey?: Record<string, string | number>
+  totalActiveUsers: number
+}
+
+interface DashboardUserDetail {
+  sapId: string
+  ystId?: string
+  userName: string
+  orgName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+  totalCalls: number
+  avgDurationMs: number
+  totalToolCalls: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalTokens: number
+  bySkill: Array<{ skill: string; count: number }>
+  byModel: Array<{ model: string; count: number }>
+  byOutcome: Array<{ outcome: string; count: number }>
+  traces: DashboardTraceDetail[]
+}
+
 interface EsSearchHit {
   _id?: string
   _source?: Record<string, unknown>
@@ -177,6 +224,15 @@ interface EsSearchResponse {
 
 interface UserStatsOptions {
   upperOrgLv1?: string | null
+}
+
+interface UserListOptions {
+  pageSize?: number
+  afterKey?: Record<string, string | number> | null
+}
+
+interface UserDetailOptions {
+  traceLimit?: number
 }
 
 interface CommitDetailsOptions {
@@ -238,6 +294,15 @@ function buildEmptyYstIdFilter(): Record<string, unknown> {
     bool: {
       should: [{ term: { ystId: "" } }, { bool: { must_not: [{ exists: { field: "ystId" } }] } }],
       minimum_should_match: 1
+    }
+  }
+}
+
+function buildNonEmptySapIdFilter(): Record<string, unknown> {
+  return {
+    bool: {
+      must: [{ exists: { field: "sapId" } }],
+      must_not: [{ term: { sapId: "" } }]
     }
   }
 }
@@ -305,6 +370,25 @@ function normalizeCommitDetailsOptions(value?: number | CommitDetailsOptions): R
     page,
     pageSize,
     pushedOnly: value?.pushedOnly === true
+  }
+}
+
+function normalizeUserListOptions(value?: UserListOptions): Required<Omit<UserListOptions, "afterKey">> & {
+  afterKey?: Record<string, string | number>
+} {
+  const pageSize = clampLimit(value?.pageSize, 20, 100)
+  const rawAfterKey = value?.afterKey
+  const afterKey =
+    rawAfterKey && typeof rawAfterKey === "object" && !Array.isArray(rawAfterKey)
+      ? Object.fromEntries(
+          Object.entries(rawAfterKey).filter(([, item]) => (
+            typeof item === "string" || typeof item === "number"
+          ))
+        )
+      : undefined
+  return {
+    pageSize,
+    ...(afterKey && Object.keys(afterKey).length > 0 ? { afterKey } : {})
   }
 }
 
@@ -445,6 +529,11 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
       endedAt: trace.endedAt || asOptionalString(source.endedAt),
       durationMs: asNumber(trace.durationMs, asNumber(source.durationMs)),
       userMessage: trace.userMessage || asString(source.userMessage),
+      sapId: asOptionalString(source.sapId),
+      ystId: asOptionalString(source.ystId),
+      userName: asOptionalString(source.userName),
+      orgName: asOptionalString(source.orgName),
+      userIp: asOptionalString(source.userIp),
       modelId: trace.modelId || asOptionalString(source.modelId),
       modelName: trace.modelName || asOptionalString(source.modelName),
       outcome: trace.outcome || asString(source.outcome, "unknown"),
@@ -468,6 +557,11 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
     endedAt: asOptionalString(source.endedAt),
     durationMs: asNumber(source.durationMs),
     userMessage: asString(source.userMessage),
+    sapId: asOptionalString(source.sapId),
+    ystId: asOptionalString(source.ystId),
+    userName: asOptionalString(source.userName),
+    orgName: asOptionalString(source.orgName),
+    userIp: asOptionalString(source.userIp),
     modelId: asOptionalString(source.modelId),
     modelName: asOptionalString(source.modelName),
     outcome: asString(source.outcome, "unknown"),
@@ -799,6 +893,208 @@ async function fetchUserStats(range: TimeRange, granularity: Granularity, opts?:
   return esQuery(getEsIndex("trace"), body)
 }
 
+function getLatestHitSource(bucket: Record<string, unknown>, aggName: string): Record<string, unknown> {
+  const agg = asRecord(bucket[aggName])
+  const hitsWrapper = asRecord(agg.hits)
+  const hits = hitsWrapper.hits
+  if (!Array.isArray(hits) || hits.length === 0) return {}
+  return asRecord(asRecord(hits[0])._source)
+}
+
+function normalizeUserListBucket(bucket: Record<string, unknown>): DashboardUserListItem {
+  const source = getLatestHitSource(bucket, "latest_user_info")
+  const key = asRecord(bucket.key)
+  const sapId = asString(key.sap_id, asString(source.sapId))
+  const totalInputTokens = asNumber(asRecord(bucket.total_input_tokens).value)
+  const totalOutputTokens = asNumber(asRecord(bucket.total_output_tokens).value)
+  const totalTokens = asNumber(
+    asRecord(bucket.total_tokens).value,
+    totalInputTokens + totalOutputTokens
+  )
+  return {
+    sapId,
+    ystId: asOptionalString(source.ystId),
+    userName: asString(source.userName, sapId || "unknown"),
+    orgName: asOptionalString(source.orgName),
+    upperOrgLv0: asOptionalString(source.upperOrgLv0),
+    upperOrgLv1: asOptionalString(source.upperOrgLv1),
+    count: asNumber(bucket.doc_count),
+    lastActiveAt: asOptionalString(source.startedAt),
+    avgDurationMs: asNumber(asRecord(bucket.avg_duration).value),
+    totalToolCalls: asNumber(asRecord(bucket.total_tool_calls).value),
+    totalInputTokens,
+    totalOutputTokens,
+    totalTokens
+  }
+}
+
+async function fetchUserList(range: TimeRange, options?: UserListOptions): Promise<DashboardUserListData> {
+  const { pageSize, afterKey } = normalizeUserListOptions(options)
+  const composite: Record<string, unknown> = {
+    size: pageSize,
+    sources: [{ sap_id: { terms: { field: "sapId" } } }]
+  }
+  if (afterKey) composite.after = afterKey
+
+  const body = {
+    size: 0,
+    query: {
+      bool: {
+        filter: [timeRangeFilter("startedAt", range), buildNonEmptySapIdFilter()]
+      }
+    },
+    aggs: {
+      total_active_users: { cardinality: { field: "sapId" } },
+      users: {
+        composite,
+        aggs: {
+          latest_user_info: {
+            top_hits: {
+              size: 1,
+              sort: [{ startedAt: { order: "desc" } }],
+              _source: {
+                includes: [
+                  "startedAt",
+                  "sapId",
+                  "ystId",
+                  "userName",
+                  "orgName",
+                  "upperOrgLv0",
+                  "upperOrgLv1"
+                ]
+              }
+            }
+          },
+          avg_duration: { avg: { field: "durationMs" } },
+          total_tool_calls: { sum: { field: "totalToolCalls" } },
+          total_input_tokens: { sum: { field: "totalInputTokens" } },
+          total_output_tokens: { sum: { field: "totalOutputTokens" } },
+          total_tokens: { sum: { field: "totalTokens" } }
+        }
+      }
+    }
+  }
+
+  const raw = asRecord(await esQuery(getEsIndex("trace"), body))
+  const aggs = asRecord(raw.aggregations)
+  const usersAgg = asRecord(aggs.users)
+  const buckets = Array.isArray(usersAgg.buckets) ? usersAgg.buckets : []
+  const nextAfterKey = asRecord(usersAgg.after_key)
+  return {
+    items: buckets.map((bucket) => normalizeUserListBucket(asRecord(bucket))).filter((item) => item.sapId),
+    pageSize,
+    ...(Object.keys(nextAfterKey).length > 0 ? { nextAfterKey: nextAfterKey as Record<string, string | number> } : {}),
+    totalActiveUsers: asNumber(asRecord(aggs.total_active_users).value)
+  }
+}
+
+function normalizeTermsBucketList(
+  rawBuckets: unknown,
+  keyName: "skill" | "model" | "outcome"
+): Array<Record<typeof keyName, string> & { count: number }> {
+  if (!Array.isArray(rawBuckets)) return []
+  return rawBuckets.map((bucket) => {
+    const record = asRecord(bucket)
+    return {
+      [keyName]: asString(record.key, "unknown"),
+      count: asNumber(record.doc_count)
+    } as Record<typeof keyName, string> & { count: number }
+  })
+}
+
+async function fetchUserDetail(
+  sapId: string,
+  range: TimeRange,
+  options?: UserDetailOptions
+): Promise<DashboardUserDetail> {
+  const normalizedSapId = sapId.trim()
+  if (!normalizedSapId) throw new Error("sapId is required")
+  const traceLimit = clampLimit(options?.traceLimit, 10, 50)
+  const body = {
+    track_total_hits: true,
+    size: traceLimit,
+    sort: [{ startedAt: { order: "desc" } }],
+    query: {
+      bool: {
+        filter: [
+          timeRangeFilter("startedAt", range),
+          { term: { sapId: normalizedSapId } }
+        ]
+      }
+    },
+    aggs: {
+      latest_user_info: {
+        top_hits: {
+          size: 1,
+          sort: [{ startedAt: { order: "desc" } }],
+          _source: {
+            includes: ["sapId", "ystId", "userName", "orgName", "upperOrgLv0", "upperOrgLv1"]
+          }
+        }
+      },
+      avg_duration: { avg: { field: "durationMs" } },
+      total_tool_calls: { sum: { field: "totalToolCalls" } },
+      total_input_tokens: { sum: { field: "totalInputTokens" } },
+      total_output_tokens: { sum: { field: "totalOutputTokens" } },
+      total_tokens: { sum: { field: "totalTokens" } },
+      by_skill: { terms: { field: "usedSkills", size: 10 } },
+      by_model: { terms: { field: "modelName", size: 10 } },
+      by_outcome: { terms: { field: "outcome", size: 10 } }
+    },
+    _source: {
+      includes: [
+        "_raw",
+        "traceId",
+        "threadId",
+        "startedAt",
+        "endedAt",
+        "durationMs",
+        "userMessage",
+        "sapId",
+        "ystId",
+        "userName",
+        "orgName",
+        "userIp",
+        "modelId",
+        "modelName",
+        "outcome",
+        "totalToolCalls",
+        "totalInputTokens",
+        "totalOutputTokens",
+        "totalTokens",
+        "usedSkills"
+      ]
+    }
+  }
+
+  const raw = await esQuery(getEsIndex("trace"), body) as EsSearchResponse
+  const rawRecord = asRecord(raw)
+  const aggs = asRecord(rawRecord.aggregations)
+  const userInfo = getLatestHitSource(aggs, "latest_user_info")
+  const totalInputTokens = asNumber(asRecord(aggs.total_input_tokens).value)
+  const totalOutputTokens = asNumber(asRecord(aggs.total_output_tokens).value)
+  const totalTokens = asNumber(asRecord(aggs.total_tokens).value, totalInputTokens + totalOutputTokens)
+
+  return {
+    sapId: asString(userInfo.sapId, normalizedSapId),
+    ystId: asOptionalString(userInfo.ystId),
+    userName: asString(userInfo.userName, normalizedSapId),
+    orgName: asOptionalString(userInfo.orgName),
+    upperOrgLv0: asOptionalString(userInfo.upperOrgLv0),
+    upperOrgLv1: asOptionalString(userInfo.upperOrgLv1),
+    totalCalls: getTotalHits(raw, raw.hits?.hits?.length ?? 0),
+    avgDurationMs: asNumber(asRecord(aggs.avg_duration).value),
+    totalToolCalls: asNumber(asRecord(aggs.total_tool_calls).value),
+    totalInputTokens,
+    totalOutputTokens,
+    totalTokens,
+    bySkill: normalizeTermsBucketList(asRecord(aggs.by_skill).buckets, "skill") as DashboardUserDetail["bySkill"],
+    byModel: normalizeTermsBucketList(asRecord(aggs.by_model).buckets, "model") as DashboardUserDetail["byModel"],
+    byOutcome: normalizeTermsBucketList(asRecord(aggs.by_outcome).buckets, "outcome") as DashboardUserDetail["byOutcome"],
+    traces: (raw.hits?.hits ?? []).map(normalizeTraceDetail)
+  }
+}
+
 async function fetchSkillUsageSummary(
   range: TimeRange,
   granularity: Granularity,
@@ -1102,7 +1398,6 @@ async function fetchSkillRecentTraces(
   limit = 10
 ): Promise<DashboardTraceDetail[]> {
   const size = clampLimit(limit, 10, 10)
-  const skillTerms = getSkillIdentifierLookupTerms(skill)
   const body = {
     size,
     sort: [{ startedAt: { order: "desc" } }],
@@ -1110,7 +1405,7 @@ async function fetchSkillRecentTraces(
       bool: {
         filter: [
           timeRangeFilter("startedAt", range),
-          { terms: { usedSkills: skillTerms } }
+          buildSkillUsageWildcardFilter(skill)
         ]
       }
     },
@@ -1123,6 +1418,11 @@ async function fetchSkillRecentTraces(
         "endedAt",
         "durationMs",
         "userMessage",
+        "sapId",
+        "ystId",
+        "userName",
+        "orgName",
+        "userIp",
         "modelId",
         "modelName",
         "outcome",
@@ -1194,7 +1494,7 @@ async function fetchSkillCodeStats(skill: string, range: TimeRange): Promise<Das
   return normalizeCodeStatsFromAggs(raw)
 }
 
-async function fetchSkillDetail(skill: string, range: TimeRange, limit = 3): Promise<DashboardSkillDetail> {
+async function fetchSkillDetail(skill: string, range: TimeRange, limit = 10): Promise<DashboardSkillDetail> {
   const [stats, traces] = await Promise.all([
     fetchSkillCodeStats(skill, range),
     fetchSkillRecentTraces(skill, range, limit)
@@ -1783,6 +2083,95 @@ function makeMockUserProfilesBySapIds(sapIds: string[]): unknown {
   }
 }
 
+function makeMockDashboardUser(index: number): DashboardUserListItem {
+  const names = ["张三", "李四", "王五", "赵六", "钱七", "孙八", "周九", "吴十"]
+  const orgs = [
+    { orgName: "测试 1 组", upperOrgLv1: "测试 1 部", upperOrgLv0: "测试 1 组" },
+    { orgName: "测试 2 组", upperOrgLv1: "测试 1 部", upperOrgLv0: "测试 2 组" },
+    { orgName: "开发三组", upperOrgLv1: "开发二部", upperOrgLv0: "开发三组" },
+    { orgName: "平台一组", upperOrgLv1: "平台三部", upperOrgLv0: "平台一组" }
+  ]
+  const org = orgs[index % orgs.length]
+  const count = Math.max(3, 150 - index * 3)
+  const totalInputTokens = count * (820 + (index % 7) * 120)
+  const totalOutputTokens = count * (240 + (index % 5) * 80)
+  return {
+    sapId: `10010${String(index + 1).padStart(3, "0")}`,
+    ystId: `2743${String(index + 1).padStart(3, "0")}`,
+    userName: names[index % names.length],
+    ...org,
+    count,
+    lastActiveAt: new Date(Date.now() - index * 42 * 60 * 1000).toISOString(),
+    avgDurationMs: 4200 + (index % 9) * 650,
+    totalToolCalls: count * (2 + (index % 4)),
+    totalInputTokens,
+    totalOutputTokens,
+    totalTokens: totalInputTokens + totalOutputTokens
+  }
+}
+
+function makeMockUserList(_range: TimeRange, options?: UserListOptions): DashboardUserListData {
+  const { pageSize, afterKey } = normalizeUserListOptions(options)
+  const allUsers = Array.from({ length: 64 }, (_, index) => makeMockDashboardUser(index))
+  const afterSapId = typeof afterKey?.sap_id === "string" ? afterKey.sap_id : ""
+  const startIndex = afterSapId
+    ? Math.max(0, allUsers.findIndex((item) => item.sapId === afterSapId) + 1)
+    : 0
+  const items = allUsers.slice(startIndex, startIndex + pageSize)
+  const nextItem = allUsers[startIndex + pageSize - 1]
+  const hasNext = startIndex + pageSize < allUsers.length
+  return {
+    items,
+    pageSize,
+    ...(hasNext && nextItem ? { nextAfterKey: { sap_id: nextItem.sapId } } : {}),
+    totalActiveUsers: allUsers.length
+  }
+}
+
+function makeMockUserDetail(sapId: string, range: TimeRange, options?: UserDetailOptions): DashboardUserDetail {
+  const index = Math.max(0, Number(sapId.slice(-3)) - 1)
+  const user = makeMockDashboardUser(Number.isFinite(index) ? index : 0)
+  const traceLimit = clampLimit(options?.traceLimit, 10, 50)
+  const traces = makeMockSkillRecentTraces("代码审查", range, traceLimit).map((trace, traceIndex) => ({
+    ...trace,
+    sapId,
+    ystId: user.ystId,
+    userName: user.userName,
+    orgName: user.orgName,
+    userIp: `10.0.1.${20 + traceIndex}`
+  }))
+  return {
+    sapId,
+    ystId: user.ystId,
+    userName: user.userName,
+    orgName: user.orgName,
+    upperOrgLv0: user.upperOrgLv0,
+    upperOrgLv1: user.upperOrgLv1,
+    totalCalls: user.count,
+    avgDurationMs: user.avgDurationMs,
+    totalToolCalls: user.totalToolCalls,
+    totalInputTokens: user.totalInputTokens,
+    totalOutputTokens: user.totalOutputTokens,
+    totalTokens: user.totalTokens,
+    bySkill: [
+      { skill: "代码审查", count: Math.floor(user.count * 0.34) },
+      { skill: "单元测试", count: Math.floor(user.count * 0.22) },
+      { skill: "SQL优化", count: Math.floor(user.count * 0.15) }
+    ],
+    byModel: [
+      { model: "GPT-5.4", count: Math.floor(user.count * 0.6) },
+      { model: "Claude Sonnet", count: Math.floor(user.count * 0.28) },
+      { model: "Gemini Pro", count: Math.floor(user.count * 0.12) }
+    ],
+    byOutcome: [
+      { outcome: "success", count: Math.floor(user.count * 0.86) },
+      { outcome: "error", count: Math.floor(user.count * 0.1) },
+      { outcome: "cancelled", count: Math.max(0, user.count - Math.floor(user.count * 0.96)) }
+    ],
+    traces
+  }
+}
+
 function makeMockProductivity(range: TimeRange): unknown {
   const from = new Date(range.from)
   const to = new Date(range.to)
@@ -2017,6 +2406,11 @@ function makeMockSkillRecentTraces(skill: string, range: TimeRange, limit = 10):
       endedAt: trace.endedAt,
       durationMs: trace.durationMs,
       userMessage: trace.userMessage,
+      sapId: `100100${String(index + 1).padStart(2, "0")}`,
+      ystId: `2743${String(50 + index).padStart(2, "0")}`,
+      userName: ["张三", "李四", "王五"][index % 3],
+      orgName: ["测试 1 组", "测试 2 组", "开发三组"][index % 3],
+      userIp: `10.0.0.${20 + index}`,
       modelId: trace.modelId,
       modelName: trace.modelName,
       outcome: trace.outcome,
@@ -2047,7 +2441,7 @@ function makeMockSkillCodeStats(skill: string): DashboardCodeStats {
   })
 }
 
-function makeMockSkillDetail(skill: string, range: TimeRange, limit = 3): DashboardSkillDetail {
+function makeMockSkillDetail(skill: string, range: TimeRange, limit = 10): DashboardSkillDetail {
   return {
     stats: makeMockSkillCodeStats(skill),
     traces: makeMockSkillRecentTraces(skill, range, limit)
@@ -2154,6 +2548,36 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   )
 
   _ipcMain.handle(
+    "dashboard:userList",
+    async (_, range: TimeRange, options?: UserListOptions) => {
+      if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
+      if (import.meta.env.DEV) return { success: true, data: makeMockUserList(range, options) }
+      try {
+        return { success: true, data: await fetchUserList(range, options) }
+      } catch (e) {
+        console.error("[Dashboard] userList error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:userDetail",
+    async (_, sapId: string, range: TimeRange, options?: UserDetailOptions) => {
+      if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
+      const normalizedSapId = sapId?.trim?.() ?? ""
+      if (!normalizedSapId) return { success: false, error: "sapId is required" }
+      if (import.meta.env.DEV) return { success: true, data: makeMockUserDetail(normalizedSapId, range, options) }
+      try {
+        return { success: true, data: await fetchUserDetail(normalizedSapId, range, options) }
+      } catch (e) {
+        console.error("[Dashboard] userDetail error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
     "dashboard:skillUsageSummary",
     async (_, range: TimeRange, granularity: Granularity, skillNames?: string[]) => {
       // `skillNames` 为可选参数：传入后走更精确的 filters 聚合。
@@ -2245,6 +2669,21 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data: await fetchSkillRecentTraces(skill, range, limit) }
       } catch (e) {
         console.error("[Dashboard] skillRecentTraces error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:marketSkillRecentTraces",
+    async (_, skill: string, range: TimeRange, limit?: number) => {
+      const trimmedSkill = skill?.trim?.() ?? ""
+      if (!trimmedSkill) return { success: false, error: "skill is required" }
+      if (import.meta.env.DEV) return { success: true, data: makeMockSkillRecentTraces(trimmedSkill, range, limit) }
+      try {
+        return { success: true, data: await fetchSkillRecentTraces(trimmedSkill, range, limit) }
+      } catch (e) {
+        console.error("[Dashboard] marketSkillRecentTraces error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }
