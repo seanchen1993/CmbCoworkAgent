@@ -2,6 +2,8 @@
  * Base system prompt for the CmbCoworkAgent.
  *
  * Adapted from deepagents-cli default_agent_prompt.md
+ *
+ * @see https://github.com/deepagents-ai/deepagents
  */
 export const BASE_SYSTEM_PROMPT = `You are an AI assistant that helps users with various tasks including coding, research, and analysis.
 

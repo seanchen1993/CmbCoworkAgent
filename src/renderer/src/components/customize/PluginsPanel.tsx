@@ -37,6 +37,7 @@ import { toast } from "sonner"
 type PluginHookMetadata = Awaited<ReturnType<typeof window.api.plugins.listHooks>>[number]
 const PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL =
   import.meta.env.VITE_PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL?.trim()
+const LOCAL_UPLOADED_PLUGIN_NAMES_KEY = "plugins_panel_uploaded_plugin_names"
 
 interface PluginDetail {
   skills: string[]
@@ -44,6 +45,45 @@ interface PluginDetail {
   hookCount: number
   hooks: PluginHookMetadata[]
   manifest: PluginManifest | null
+}
+
+function normalizePluginNameKey(name: string): string {
+  return String(name || "").trim().toLowerCase()
+}
+
+function readLocalUploadedPluginNamesFromStorage(): Set<string> {
+  try {
+    const raw = localStorage.getItem(LOCAL_UPLOADED_PLUGIN_NAMES_KEY)
+    const parsed: string[] = raw ? JSON.parse(raw) : []
+    if (!Array.isArray(parsed)) return new Set()
+    return new Set(parsed.map(normalizePluginNameKey).filter(Boolean))
+  } catch (error) {
+    console.warn("[PluginsPanel] Failed to read local uploaded plugin names:", error)
+    return new Set()
+  }
+}
+
+function markLocalUploadedPluginNameInStorage(pluginName: string): void {
+  try {
+    const key = normalizePluginNameKey(pluginName)
+    if (!key) return
+    const next = readLocalUploadedPluginNamesFromStorage()
+    next.add(key)
+    localStorage.setItem(LOCAL_UPLOADED_PLUGIN_NAMES_KEY, JSON.stringify([...next]))
+  } catch (error) {
+    console.warn("[PluginsPanel] Failed to mark local uploaded plugin name:", error)
+  }
+}
+
+function removeLocalUploadedPluginNameFromStorage(pluginName: string): void {
+  try {
+    const key = normalizePluginNameKey(pluginName)
+    if (!key) return
+    const next = [...readLocalUploadedPluginNamesFromStorage()].filter((item) => item !== key)
+    localStorage.setItem(LOCAL_UPLOADED_PLUGIN_NAMES_KEY, JSON.stringify(next))
+  } catch (error) {
+    console.warn("[PluginsPanel] Failed to remove local uploaded plugin name:", error)
+  }
 }
 
 function ConfirmDeleteDialog(props: {
@@ -109,7 +149,7 @@ function ErrorDialog(props: {
 function UploadPluginDialog(props: {
   open: boolean
   onOpenChange: (open: boolean) => void
-  onSuccess: () => void
+  onSuccess: (pluginName?: string) => void
 }): React.JSX.Element {
   const { open, onOpenChange, onSuccess } = props
   const [dragOver, setDragOver] = useState(false)
@@ -129,7 +169,7 @@ function UploadPluginDialog(props: {
         const buffer = await file.arrayBuffer()
         const res = await window.api.plugins.install(buffer, file.name)
         if (res.success) {
-          onSuccess()
+          onSuccess(res.pluginName)
           onOpenChange(false)
         } else {
           setError(res.error || "安装失败")
@@ -149,7 +189,7 @@ function UploadPluginDialog(props: {
     try {
       const res = await window.api.plugins.installFromDir()
       if (res.success) {
-        onSuccess()
+        onSuccess(res.pluginName)
         onOpenChange(false)
       } else if (res.error !== "已取消") {
         setError(res.error || "安装失败")
@@ -270,14 +310,31 @@ export function PluginsPanel(): React.JSX.Element {
   const [publishTarget, setPublishTarget] = useState<MarketPublishTarget | null>(null)
   const [publishMode, setPublishMode] = useState<"upload" | "update">("upload")
   const [marketPluginMap, setMarketPluginMap] = useState<Record<string, MarketItem>>({})
+  const [marketPluginsLoaded, setMarketPluginsLoaded] = useState(false)
   const [uploadedPluginNames, setUploadedPluginNames] = useState<Set<string>>(() =>
     readUploadedItemNamesFromStorage("plugin")
+  )
+  const [localUploadedPluginNames, setLocalUploadedPluginNames] = useState<Set<string>>(() =>
+    readLocalUploadedPluginNamesFromStorage()
   )
   const [searchQuery, setSearchQuery] = useState("")
   const [debouncedQuery, setDebouncedQuery] = useState("")
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const [deleteTarget, setDeleteTarget] = useState<PluginMetadata | null>(null)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
+
+  const shouldHidePluginDetails = useCallback(
+    (plugin: PluginMetadata | null): boolean => {
+      if (!plugin) return false
+      const key = normalizePluginNameKey(plugin.name)
+      if (!key) return false
+      const isSelfOwned = uploadedPluginNames.has(key) || localUploadedPluginNames.has(key)
+      if (isSelfOwned) return false
+      if (!marketPluginsLoaded) return true
+      return Boolean(marketPluginMap[key])
+    },
+    [localUploadedPluginNames, marketPluginMap, marketPluginsLoaded, uploadedPluginNames]
+  )
 
   // Clean up debounce timer on unmount
   useEffect(() => {
@@ -304,13 +361,19 @@ export function PluginsPanel(): React.JSX.Element {
         if (key) next[key] = item
       }
       setMarketPluginMap(next)
+      setMarketPluginsLoaded(true)
     } catch (e) {
       console.warn("[PluginsPanel] Failed to load market plugins:", e)
+      setMarketPluginsLoaded(true)
     }
   }, [])
 
   // After install/update, refresh the selected plugin's detail if it was affected
-  const handleInstallSuccess = useCallback(() => {
+  const handleInstallSuccess = useCallback((pluginName?: string) => {
+    if (pluginName) {
+      markLocalUploadedPluginNameInStorage(pluginName)
+      setLocalUploadedPluginNames(readLocalUploadedPluginNamesFromStorage())
+    }
     window.api.plugins
       .list()
       .then((list) => {
@@ -322,17 +385,23 @@ export function PluginsPanel(): React.JSX.Element {
           )
           if (updated) {
             setSelectedPlugin(updated)
-            window.api.plugins
-              .getDetail(updated.id)
-              .then(setDetail)
-              .catch(() => {
-                setDetail({ skills: [], mcpServers: [], hookCount: 0, hooks: [], manifest: null })
-              })
+            if (shouldHidePluginDetails(updated)) {
+              setDetail(null)
+            } else {
+              window.api.plugins
+                .getDetail(updated.id)
+                .then(setDetail)
+                .catch(() => {
+                  setDetail({ skills: [], mcpServers: [], hookCount: 0, hooks: [], manifest: null })
+                })
+            }
           }
         }
       })
       .catch(console.error)
-  }, [bumpPluginVersion, selectedPlugin])
+  }, [bumpPluginVersion, selectedPlugin, shouldHidePluginDetails])
+
+  const shouldHideSelectedPluginDetails = shouldHidePluginDetails(selectedPlugin)
 
   useEffect(() => {
     refreshPlugins()
@@ -345,16 +414,25 @@ export function PluginsPanel(): React.JSX.Element {
     return () => clearTimeout(timer)
   }, [loadMarketPlugins])
 
-  const loadDetail = useCallback(async (plugin: PluginMetadata) => {
-    setSelectedPlugin(plugin)
-    setDetail(null)
-    try {
-      const d = await window.api.plugins.getDetail(plugin.id)
-      setDetail(d)
-    } catch {
-      setDetail({ skills: [], mcpServers: [], hookCount: 0, hooks: [], manifest: null })
-    }
-  }, [])
+  const loadDetail = useCallback(
+    async (plugin: PluginMetadata) => {
+      setSelectedPlugin(plugin)
+      setDetail(null)
+      if (shouldHidePluginDetails(plugin)) return
+      try {
+        const d = await window.api.plugins.getDetail(plugin.id)
+        setDetail(d)
+      } catch {
+        setDetail({ skills: [], mcpServers: [], hookCount: 0, hooks: [], manifest: null })
+      }
+    },
+    [shouldHidePluginDetails]
+  )
+
+  useEffect(() => {
+    if (!marketPluginsLoaded || !selectedPlugin || detail || shouldHideSelectedPluginDetails) return
+    void loadDetail(selectedPlugin)
+  }, [detail, loadDetail, marketPluginsLoaded, selectedPlugin, shouldHideSelectedPluginDetails])
 
   const handleSelectPlugin = useCallback(
     (plugin: PluginMetadata) => {
@@ -409,6 +487,8 @@ export function PluginsPanel(): React.JSX.Element {
     try {
       const res = await window.api.plugins.delete(plugin.id)
       if (res.success) {
+        removeLocalUploadedPluginNameFromStorage(plugin.name)
+        setLocalUploadedPluginNames(readLocalUploadedPluginNamesFromStorage())
         if (selectedPlugin?.id === plugin.id) {
           setSelectedPlugin(null)
           setDetail(null)
@@ -603,12 +683,17 @@ export function PluginsPanel(): React.JSX.Element {
         onToggleEnabled={handleToggleEnabled}
         onToggleHookEnabled={handleToggleHookEnabled}
         onDelete={handleDeleteRequest}
-        onPublish={selectedPlugin ? () => openPublishDialog(selectedPlugin) : undefined}
+        onPublish={
+          selectedPlugin && !shouldHideSelectedPluginDetails
+            ? () => openPublishDialog(selectedPlugin)
+            : undefined
+        }
         publishLabel={
           selectedPlugin && uploadedPluginNames.has(selectedPlugin.name.trim().toLowerCase())
             ? "更新到市场"
             : "发布到市场"
         }
+        hideComponentDetails={shouldHideSelectedPluginDetails}
       />
 
       <UploadPluginDialog
@@ -666,6 +751,7 @@ export function PluginDetailPanel(props: {
   onPublish?: (plugin: PluginMetadata) => void
   publishLabel?: string
   hideActions?: boolean
+  hideComponentDetails?: boolean
 }): React.JSX.Element {
   const {
     plugin,
@@ -675,7 +761,8 @@ export function PluginDetailPanel(props: {
     onDelete,
     onPublish,
     publishLabel = "发布到市场",
-    hideActions = false
+    hideActions = false,
+    hideComponentDetails = false
   } = props
 
   if (!plugin) {
@@ -887,7 +974,13 @@ export function PluginDetailPanel(props: {
             </div>
           </div>
 
-          {detail && detail.hooks.length > 0 && (
+          {hideComponentDetails && (
+            <div className="rounded-lg border border-border/60 bg-muted/20 px-3 py-3 text-xs text-muted-foreground leading-relaxed">
+              从市场安装的 Plugin 仅展示组件数量，具体 Hooks、Skills、MCP 配置详情已隐藏。
+            </div>
+          )}
+
+          {!hideComponentDetails && detail && detail.hooks.length > 0 && (
             <div className="space-y-2">
               <div className="flex items-center justify-between gap-3">
                 <h3 className="text-sm font-medium">Hooks</h3>
@@ -961,7 +1054,7 @@ export function PluginDetailPanel(props: {
           )}
 
           {/* Skills list */}
-          {detail && detail.skills.length > 0 && (
+          {!hideComponentDetails && detail && detail.skills.length > 0 && (
             <div className="space-y-2">
               <h3 className="text-sm font-medium">Skills</h3>
               <div className="space-y-1">
@@ -979,7 +1072,7 @@ export function PluginDetailPanel(props: {
           )}
 
           {/* MCP Servers list */}
-          {detail && detail.mcpServers.length > 0 && (
+          {!hideComponentDetails && detail && detail.mcpServers.length > 0 && (
             <div className="space-y-2">
               <h3 className="text-sm font-medium">MCP Servers</h3>
               <div className="space-y-1">
@@ -997,14 +1090,18 @@ export function PluginDetailPanel(props: {
           )}
 
           {/* Loading state */}
-          {!detail && <p className="text-xs text-muted-foreground">加载中...</p>}
+          {!hideComponentDetails && !detail && (
+            <p className="text-xs text-muted-foreground">加载中...</p>
+          )}
 
           {/* Plugin path */}
-          <div className="pt-2 border-t border-border">
-            <p className="text-[10px] text-muted-foreground/60 break-all">
-              {plugin.path.replace(/\\/g, "/")}
-            </p>
-          </div>
+          {!hideComponentDetails && (
+            <div className="pt-2 border-t border-border">
+              <p className="text-[10px] text-muted-foreground/60 break-all">
+                {plugin.path.replace(/\\/g, "/")}
+              </p>
+            </div>
+          )}
         </div>
       </ScrollArea>
     </div>

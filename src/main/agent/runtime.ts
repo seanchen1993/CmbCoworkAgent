@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
+// Runtime: agent lifecycle and middleware orchestration
 import {
   createFilesystemMiddleware,
   createSubAgentMiddleware,

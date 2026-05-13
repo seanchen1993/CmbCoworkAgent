@@ -662,6 +662,8 @@ export function HooksPanel(): React.JSX.Element {
                 variant="ghost"
                 size="sm"
                 className="h-7 w-7 p-0 shrink-0"
+                title="添加全局 Hook"
+                aria-label="添加全局 Hook"
                 onClick={() => {
                   setEditHook(null)
                   setDialogOpen(true)
@@ -676,7 +678,7 @@ export function HooksPanel(): React.JSX.Element {
           <div className="p-2 space-y-2">
             {filteredHooks.length === 0 ? (
               <p className="text-xs text-muted-foreground px-1 py-2">
-                {hooks.length === 0 ? "暂无钩子，点击 + 添加" : "没有匹配的钩子"}
+                {hooks.length === 0 ? "暂无钩子，点击 + 添加全局 Hook" : "没有匹配的钩子"}
               </p>
             ) : (
               filteredHooks.map((hook) => {
