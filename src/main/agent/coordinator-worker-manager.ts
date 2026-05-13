@@ -104,6 +104,8 @@ export interface CoordinatorWorkerSnapshot {
   notification_acknowledged?: boolean
   suppress_notification_auto_run?: boolean
   selected_skill?: CoordinatorSelectedSkill
+  notification_raw_text?: string
+  notification_message?: string
 }
 
 export interface CoordinatorWorkerResultRead {
@@ -161,6 +163,7 @@ interface CoordinatorWorkerRecord {
   runVersion: number
   suppressNotificationAutoRun?: boolean
   dismissNotificationOnTerminalPersist?: boolean
+  notificationMessage?: string
 }
 
 interface NotificationRef {
@@ -171,6 +174,10 @@ interface NotificationRef {
 interface WorkerRestoreOptions {
   cache?: boolean
   preserveWorkerId?: string
+}
+
+interface TerminalPersistFailureMetadata {
+  persistedResultPath?: string
 }
 
 function waitOrAbort(ms: number, signal?: AbortSignal): Promise<void> {
@@ -185,6 +192,34 @@ function waitOrAbort(ms: number, signal?: AbortSignal): Promise<void> {
     const timeout = setTimeout(cleanup, ms)
     signal?.addEventListener("abort", onAbort, { once: true })
   })
+}
+
+async function settleInBatches<T>(
+  items: readonly T[],
+  concurrency: number,
+  fn: (item: T) => Promise<unknown>
+): Promise<void> {
+  const batchSize = Math.max(1, concurrency)
+  for (let index = 0; index < items.length; index += batchSize) {
+    await Promise.allSettled(items.slice(index, index + batchSize).map((item) => fn(item)))
+  }
+}
+
+function withPersistedResultPath(error: unknown, resultPath: string): unknown {
+  if (!resultPath) return error
+  if (error && typeof error === "object") {
+    ;(error as TerminalPersistFailureMetadata).persistedResultPath = resultPath
+    return error
+  }
+  return Object.assign(new Error(describeError(error)), {
+    persistedResultPath: resultPath
+  } satisfies TerminalPersistFailureMetadata)
+}
+
+function persistedResultPathFromError(error: unknown): string | undefined {
+  return typeof error === "object" && error
+    ? (error as TerminalPersistFailureMetadata).persistedResultPath
+    : undefined
 }
 
 interface StartWorkerOptions {
@@ -245,6 +280,21 @@ const MAX_NOTIFICATION_XML_CHARS = 120_000
 const DEFAULT_RESULT_READ_CHARS = 20_000
 const MAX_RESULT_READ_CHARS = 80_000
 const MAX_WORKER_RAW_TEXT_CHARS = 200_000
+const WORKER_RESULT_PERSISTENCE_FAILED_PREFIX = "Worker result persistence failed:"
+const PERSISTED_NOTIFICATION_TOP_LEVEL_TAGS = new Set([
+  "task-id",
+  "worker-thread-id",
+  "worker-role",
+  "turn",
+  "status",
+  "summary",
+  "result",
+  "result-truncated",
+  "report-path",
+  "output-file",
+  "result-path",
+  "usage"
+])
 export const MAX_COORDINATOR_WORKERS_IN_MEMORY = 80
 export const MAX_COORDINATOR_PRUNED_SNAPSHOTS_IN_MEMORY = 16
 // Stream-only workers can emit frequent text/value chunks without new tool calls.
@@ -253,6 +303,7 @@ export const MAX_COORDINATOR_PRUNED_SNAPSHOTS_IN_MEMORY = 16
 const PROGRESS_UPDATE_THROTTLE_MS = 2_000
 const ACTIVE_RESTORE_STATUS_SCAN_CHARS = 4_096
 const RECENT_RESTORE_TERMINAL_LIMIT = 40
+const RESTORED_RAW_TEXT_HYDRATE_CONCURRENCY = 4
 const DEFAULT_WORKER_UPDATE_CALLBACK_KEY = "default"
 const WORKER_STATE_FILENAME_PATTERN =
   /^(implementer|verifier)-(?<timestamp>\d+)-(?<sequence>\d+)\.json$/i
@@ -438,10 +489,7 @@ function relativeWorkerResultPath(record: CoordinatorWorkerRecord): string {
   return `${COORDINATOR_BASE_DIR}/${normalizeThreadId(record.parentThreadId)}/reports/workers/${normalizeWorkerId(record.workerId)}/turn-${Math.max(1, record.turns)}.json`
 }
 
-function normalizeWorkerArtifactPath(
-  value: unknown,
-  parentThreadId: string
-): string | undefined {
+function normalizeWorkerArtifactPath(value: unknown, parentThreadId: string): string | undefined {
   const rawPath = optionalString(value)
   if (!rawPath) return undefined
 
@@ -472,10 +520,7 @@ function normalizeWorkerArtifactPath(
   return undefined
 }
 
-function resolveWorkerResultReadRelativePath(
-  parentThreadId: string,
-  relativePath: string
-): string {
+function resolveWorkerResultReadRelativePath(parentThreadId: string, relativePath: string): string {
   const normalizedParentThreadId = normalizeThreadId(parentThreadId)
   const slashNormalized = relativePath.trim().replace(/\\/g, "/")
   if (slashNormalized.startsWith(".cmbdevclaw/")) return slashNormalized
@@ -559,14 +604,264 @@ function truncateNotificationSummary(value: string): string {
   return `${trimmed.slice(0, MAX_NOTIFICATION_SUMMARY_CHARS)}\n...(truncated; continue the worker for a concise handoff if more detail is needed)`
 }
 
-function truncateNotificationResult(value: string | undefined): {
+function compactNotificationDescription(value: string, maxChars = 160): string {
+  const compacted = value.replace(/\s+/g, " ").trim()
+  if (compacted.length <= maxChars) return compacted
+  return `${compacted.slice(0, maxChars)}...`
+}
+
+function formatWorkerResultPersistenceFailure(message: string): string {
+  return `${WORKER_RESULT_PERSISTENCE_FAILED_PREFIX} ${message}`
+}
+
+function isWorkerResultPersistenceFailureEvent(value: string | undefined): boolean {
+  return value?.startsWith(WORKER_RESULT_PERSISTENCE_FAILED_PREFIX) ?? false
+}
+
+function pickNonEmptyNotificationDetail(...values: Array<string | undefined>): string {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value
+  }
+  return ""
+}
+
+function buildNotificationDetailedSummary(snapshot: CoordinatorWorkerSnapshot): string {
+  return pickNonEmptyNotificationDetail(
+    snapshot.summary,
+    snapshot.error,
+    snapshot.status === "completed"
+      ? "Worker completed."
+      : snapshot.status === "cancelled"
+        ? "Worker was stopped."
+        : snapshot.last_event,
+    snapshot.last_event
+  )
+}
+
+function buildNotificationResultContext(
+  snapshot: CoordinatorWorkerSnapshot,
+  hasRawText: boolean
+): string {
+  if (!hasRawText) return buildNotificationDetailedSummary(snapshot)
+  return pickNonEmptyNotificationDetail(
+    snapshot.summary,
+    snapshot.error,
+    snapshot.status === "completed" ? undefined : snapshot.last_event
+  )
+}
+
+function prioritizePersistenceFailureDetail(detail: string, persistenceFailure: string): string {
+  const trimmedDetail = detail.trim()
+  const trimmedFailure = persistenceFailure.trim()
+  if (!trimmedFailure) return trimmedDetail
+  if (!trimmedDetail) return trimmedFailure
+  if (trimmedDetail.startsWith(trimmedFailure)) return trimmedDetail
+  const remainder = trimmedDetail.replace(trimmedFailure, "").trim()
+  return remainder ? `${trimmedFailure}\n\n${remainder}` : trimmedFailure
+}
+
+function buildNotificationSummary(
+  snapshot: CoordinatorWorkerSnapshot,
+  status: "completed" | "failed" | "killed",
+  detailedSummary: string
+): string {
+  const description = compactNotificationDescription(snapshot.description) || snapshot.worker_id
+  if (status === "failed") {
+    const detail = (() => {
+      const baseDetail = pickNonEmptyNotificationDetail(snapshot.error, detailedSummary)
+      if (!isWorkerResultPersistenceFailureEvent(snapshot.last_event)) return baseDetail.trim()
+      return prioritizePersistenceFailureDetail(baseDetail, snapshot.last_event)
+    })()
+    return detail ? `Worker "${description}" failed: ${detail}` : `Worker "${description}" failed.`
+  }
+  if (status === "killed") {
+    return `Worker "${description}" was stopped.`
+  }
+  return `Worker "${description}" completed.`
+}
+
+function normalizeNotificationStatus(
+  status: CoordinatorWorkerSnapshot["status"]
+): "completed" | "failed" | "killed" {
+  switch (status) {
+    case "completed":
+      return "completed"
+    case "failed":
+      return "failed"
+    case "cancelled":
+      return "killed"
+    case "running":
+      // Notification formatting is only expected for terminal workers.
+      // Fallback to failed semantics so unexpected states never read as completed.
+      return "failed"
+  }
+}
+
+type NotificationResultSource = {
+  text: string
+  truncated?: boolean
+}
+
+function prependContextToRawText(
+  context: string,
+  rawText: string,
+  truncated = false
+): NotificationResultSource {
+  const trimmedContext = context.trim()
+  const trimmedRawText = rawText.trim()
+  if (!trimmedContext) return { text: trimmedRawText, truncated }
+  if (!trimmedRawText) return { text: trimmedContext, truncated }
+  const combined = `${trimmedContext}\n\n${trimmedRawText}`
+  if (combined.length <= MAX_NOTIFICATION_RESULT_CHARS) {
+    return { text: combined, truncated }
+  }
+  if (trimmedContext.length >= MAX_NOTIFICATION_RESULT_CHARS) {
+    return {
+      text: trimmedContext.slice(0, MAX_NOTIFICATION_RESULT_CHARS).trimEnd(),
+      truncated: true
+    }
+  }
+  const rawBudget = Math.max(0, MAX_NOTIFICATION_RESULT_CHARS - trimmedContext.length - 2)
+  if (rawBudget === 0) return { text: trimmedContext, truncated: true }
+  return {
+    text: `${trimmedContext}\n\n${trimmedRawText.slice(-rawBudget)}`,
+    truncated: true
+  }
+}
+
+function buildTerminalPersistenceFailureResultSource(
+  detailedSummary: string,
+  rawText?: string
+): NotificationResultSource {
+  const trimmedSummary = detailedSummary.trim()
+  const trimmedRawText = rawText?.trim() ?? ""
+  const summaryTruncationMarker = "\n...(summary truncated)"
+  if (!trimmedSummary) return { text: trimmedRawText }
+  if (!trimmedRawText) {
+    if (trimmedSummary.length <= MAX_NOTIFICATION_RESULT_CHARS) return { text: trimmedSummary }
+    const failureIndex = trimmedSummary.lastIndexOf(WORKER_RESULT_PERSISTENCE_FAILED_PREFIX)
+    const failureSuffix = failureIndex >= 0 ? trimmedSummary.slice(failureIndex).trim() : ""
+    if (!failureSuffix) return { text: trimmedSummary }
+    if (failureSuffix.length >= MAX_NOTIFICATION_RESULT_CHARS) {
+      return {
+        text: `${failureSuffix.slice(0, MAX_NOTIFICATION_RESULT_CHARS).trimEnd()}\n...(summary truncated)`,
+        truncated: true
+      }
+    }
+    const headBudget = Math.max(0, MAX_NOTIFICATION_RESULT_CHARS - failureSuffix.length - 2)
+    const summaryPrefix = trimmedSummary.slice(0, headBudget).trimEnd()
+    return {
+      text: summaryPrefix ? `${summaryPrefix}\n\n${failureSuffix}` : failureSuffix,
+      truncated: true
+    }
+  }
+  const failureIndex = trimmedSummary.lastIndexOf(WORKER_RESULT_PERSISTENCE_FAILED_PREFIX)
+  const failureSuffix = failureIndex >= 0 ? trimmedSummary.slice(failureIndex).trim() : ""
+  const summaryPrefix = failureIndex >= 0 ? trimmedSummary.slice(0, failureIndex).trimEnd() : ""
+  const contextBudget = MAX_NOTIFICATION_RESULT_CHARS - trimmedRawText.length - 2
+  if (
+    failureSuffix &&
+    summaryPrefix &&
+    rawTextContainsNotificationSummary(summaryPrefix, trimmedRawText)
+  ) {
+    if (failureSuffix.length <= contextBudget) {
+      return { text: `${failureSuffix}\n\n${trimmedRawText}` }
+    }
+    if (contextBudget <= summaryTruncationMarker.length) {
+      return prependContextToRawText(failureSuffix, trimmedRawText, true)
+    }
+    const sliceBudget = Math.max(0, contextBudget - summaryTruncationMarker.length)
+    const boundedFailure = `${failureSuffix.slice(0, sliceBudget).trimEnd()}${summaryTruncationMarker}`
+    return prependContextToRawText(boundedFailure, trimmedRawText, true)
+  }
+  if (trimmedRawText && rawTextContainsNotificationSummary(trimmedSummary, trimmedRawText)) {
+    return { text: trimmedRawText }
+  }
+  if (trimmedSummary.length <= contextBudget) {
+    return { text: trimmedRawText ? `${trimmedSummary}\n\n${trimmedRawText}` : trimmedSummary }
+  }
+  if (contextBudget <= 0) {
+    if (failureSuffix) {
+      return prependContextToRawText(failureSuffix, trimmedRawText, true)
+    }
+    return { text: trimmedRawText, truncated: true }
+  }
+  if (!failureSuffix) {
+    if (contextBudget <= summaryTruncationMarker.length)
+      return { text: trimmedRawText, truncated: true }
+    const sliceBudget = Math.max(0, contextBudget - summaryTruncationMarker.length)
+    const boundedSummary = `${trimmedSummary.slice(0, sliceBudget).trimEnd()}${summaryTruncationMarker}`
+    return {
+      text: trimmedRawText ? `${boundedSummary}\n\n${trimmedRawText}` : boundedSummary,
+      truncated: true
+    }
+  }
+  if (failureSuffix.length >= contextBudget) {
+    if (contextBudget <= summaryTruncationMarker.length) {
+      return prependContextToRawText(failureSuffix, trimmedRawText, true)
+    }
+    const sliceBudget = Math.max(0, contextBudget - summaryTruncationMarker.length)
+    const boundedFailure = `${failureSuffix.slice(0, sliceBudget).trimEnd()}${summaryTruncationMarker}`
+    return prependContextToRawText(boundedFailure, trimmedRawText, true)
+  }
+  const headBudget = Math.max(0, contextBudget - failureSuffix.length - 2)
+  const boundedSummaryPrefix = trimmedSummary.slice(0, headBudget).trimEnd()
+  const boundedSummary = boundedSummaryPrefix
+    ? `${boundedSummaryPrefix}\n\n${failureSuffix}`
+    : failureSuffix
+  return {
+    text: trimmedRawText ? `${boundedSummary}\n\n${trimmedRawText}` : boundedSummary,
+    truncated: true
+  }
+}
+
+function rawTextContainsNotificationSummary(summary: string, rawText: string): boolean {
+  const trimmedSummary = summary.trim()
+  const trimmedRawText = rawText.trim()
+  if (!trimmedSummary || !trimmedRawText) return false
+  if (trimmedRawText === trimmedSummary) return true
+  const truncatedMarker = "\n...(truncated)"
+  if (trimmedSummary.endsWith(truncatedMarker)) {
+    const summaryPrefix = trimmedSummary.slice(0, -truncatedMarker.length).trimEnd()
+    return Boolean(summaryPrefix) && trimmedRawText.startsWith(summaryPrefix)
+  }
+  if (!trimmedRawText.startsWith(trimmedSummary)) return false
+  const nextChar = trimmedRawText.charAt(trimmedSummary.length)
+  return !nextChar || /[\s\p{P}\p{S}]/u.test(nextChar)
+}
+
+function buildNotificationResultSource(
+  detailedSummary: string,
+  rawText: string
+): NotificationResultSource {
+  const trimmedSummary = detailedSummary.trim()
+  const summaryTruncationMarker = "\n...(summary truncated)"
+  if (!trimmedSummary || rawTextContainsNotificationSummary(trimmedSummary, rawText)) {
+    return { text: rawText }
+  }
+  const contextBudget = MAX_NOTIFICATION_RESULT_CHARS - rawText.length - 2
+  if (trimmedSummary.length <= contextBudget) {
+    return { text: `${trimmedSummary}\n\n${rawText}` }
+  }
+  if (contextBudget <= summaryTruncationMarker.length) return { text: rawText, truncated: true }
+  const sliceBudget = Math.max(0, contextBudget - summaryTruncationMarker.length)
+  return {
+    text: `${trimmedSummary.slice(0, sliceBudget).trimEnd()}${summaryTruncationMarker}\n\n${rawText}`,
+    truncated: true
+  }
+}
+
+function truncateNotificationResult(
+  value: string | undefined,
+  forceTruncated = false
+): {
   text: string
   truncated: boolean
 } {
   const trimmed = value?.trim()
-  if (!trimmed) return { text: "", truncated: false }
+  if (!trimmed) return { text: "", truncated: forceTruncated }
   if (trimmed.length <= MAX_NOTIFICATION_RESULT_CHARS) {
-    return { text: trimmed, truncated: false }
+    return { text: trimmed, truncated: forceTruncated }
   }
   return {
     text: `${trimmed.slice(0, MAX_NOTIFICATION_RESULT_CHARS)}\n...(result truncated; coordinator should continue this worker for a concise handoff if more detail is needed; output-file is archived for UI/debug)`,
@@ -663,6 +958,15 @@ function normalizeWorkload(value: unknown): CoordinatorWorkerWorkload | undefine
 
 function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined
+}
+
+function decodeNotificationXmlText(value: string): string {
+  return value
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&")
 }
 
 function parseWorkerStateFilenameRecencyKey(
@@ -839,13 +1143,23 @@ function toSnapshot(record: CoordinatorWorkerRecord): CoordinatorWorkerSnapshot 
 function toPersistedWorkerState(record: CoordinatorWorkerRecord): CoordinatorWorkerSnapshot {
   const snapshot = toSnapshot(record)
   const { status, notification_acknowledged: notificationAcknowledged, ...rest } = snapshot
+  const notificationRawText =
+    terminalStatus(record.status) && notificationAcknowledged === false
+      ? truncateWorkerRawText(record.rawText)
+      : undefined
+  const notificationMessage =
+    terminalStatus(record.status) && notificationAcknowledged === false
+      ? record.notificationMessage
+      : undefined
 
   // Active restore only needs these two fields to skip acknowledged terminal history.
   // Keep them at the front so long descriptions or owned_files never force a full JSON parse.
   return {
     status,
     notification_acknowledged: notificationAcknowledged,
-    ...rest
+    ...rest,
+    notification_raw_text: notificationRawText,
+    notification_message: notificationMessage
   }
 }
 
@@ -944,7 +1258,11 @@ export class CoordinatorWorkerManager {
     if (record.status === "cancelled") {
       throw new Error(`Worker ${record.workerId} was cancelled and cannot be continued.`)
     }
-    if (record.status !== "running" && record.terminalPersistPromise) {
+    if (
+      record.status !== "running" &&
+      record.terminalPersistPromise &&
+      !record.notificationEnqueued
+    ) {
       throw new Error(
         `Worker ${record.workerId} is still finalizing its previous result. Wait for its task-notification before continuing.`
       )
@@ -1017,6 +1335,7 @@ export class CoordinatorWorkerManager {
       ? "Worker interrupted and continued with a new instruction."
       : "Worker continued with a new instruction."
     record.notificationEnqueued = false
+    record.notificationMessage = undefined
     this.removeQueuedNotificationsForWorker(record.parentThreadId, {
       workerId: record.workerId
     })
@@ -1122,7 +1441,7 @@ export class CoordinatorWorkerManager {
         relativePath
       )
       const target = path.resolve(workspaceRoot, resolvedRelativePath)
-      if (target !== workspaceRoot && !target.startsWith(`${workspaceRoot}${path.sep}`)) {
+      if (!isCoordinatorPathWithin(target, workspaceRoot)) {
         throw new Error(`Worker output path escapes workspace: ${relativePath}`)
       }
       return truncateReadText(await readFile(target, "utf8"), maxChars)
@@ -1238,36 +1557,90 @@ export class CoordinatorWorkerManager {
   restoreNotifications(parentThreadId: string, notifications: string[]): void {
     if (notifications.length === 0) return
     const normalized = normalizeThreadId(parentThreadId)
-    const existing = this.notificationsByParent.get(normalized) ?? []
-    const restored = notifications.filter(
-      (notification) =>
-        !existing.includes(notification) && this.shouldRestoreNotification(normalized, notification)
-    )
-    if (restored.length === 0) return
-    this.notificationsByParent.set(normalized, [...existing, ...restored])
+    const merged = [...(this.notificationsByParent.get(normalized) ?? [])]
+    let changed = false
+    for (const notification of notifications) {
+      if (!this.shouldRestoreNotification(normalized, notification)) continue
+      const workerId = this.extractNotificationWorkerId(notification)
+      const turn = this.extractNotificationWorkerTurn(notification)
+      if (workerId && turn !== undefined) {
+        const existingIndex = merged.findIndex(
+          (candidate) =>
+            this.extractNotificationWorkerId(candidate) === workerId &&
+            this.extractNotificationWorkerTurn(candidate) === turn
+        )
+        if (existingIndex >= 0) {
+          if (merged[existingIndex] !== notification) {
+            merged[existingIndex] = notification
+            changed = true
+          }
+          continue
+        }
+      } else if (merged.includes(notification)) {
+        continue
+      }
+      merged.push(notification)
+      changed = true
+    }
+    if (!changed) return
+    this.notificationsByParent.set(normalized, merged)
   }
 
-  async restoreNotificationMessages(parentThreadId: string, notifications: string[]): Promise<void> {
+  async restoreNotificationMessages(
+    parentThreadId: string,
+    notifications: string[]
+  ): Promise<void> {
     if (notifications.length === 0) return
     const normalized = normalizeThreadId(parentThreadId)
-    this.restoreNotifications(normalized, notifications)
+    const validNotifications: string[] = []
     const refs = notifications
       .map((notification): NotificationRef | undefined => {
-        const workerId = this.extractNotificationWorkerId(notification)
+        const routingFields = this.extractXmlDirectFields(notification, "task-notification")
+        const workerId = routingFields?.get("task-id")
         if (!workerId) return undefined
-        return { workerId, turn: this.extractNotificationWorkerTurn(notification) }
+        const turnValue = routingFields?.get("turn")
+        const turn = turnValue ? Number(turnValue) : undefined
+        return {
+          workerId,
+          turn: Number.isFinite(turn) ? turn : undefined,
+          notification
+        } as NotificationRef & { notification: string }
       })
-      .filter((ref): ref is NotificationRef => Boolean(ref))
+      .filter((ref): ref is NotificationRef & { notification: string } => Boolean(ref))
     const persistPromises: Promise<void>[] = []
     for (const ref of refs) {
       const normalizedWorkerId = normalizeWorkerId(ref.workerId)
       const record = this.getWorker(normalized, normalizedWorkerId)
       if (!record || !terminalStatus(record.status)) continue
-      if (ref.turn !== undefined && record.turns !== ref.turn) continue
+      const persistedNotification = this.validatePersistedNotificationMessage(
+        record,
+        ref.notification
+      )
+      const canFallbackToCurrentTurn =
+        ref.turn !== undefined &&
+        ref.turn === record.turns &&
+        record.notificationAcknowledged === false
+      const notificationToRestore = (() => {
+        if (persistedNotification) return persistedNotification
+        if (!canFallbackToCurrentTurn) {
+          console.warn(
+            `[CoordinatorWorker] Ignoring invalid restored notification for ${record.workerId} because it does not match the current unacknowledged worker turn.`
+          )
+          return undefined
+        }
+        console.warn(
+          `[CoordinatorWorker] Restoring notification for ${record.workerId} by rebuilding from current worker state because the persisted notification payload did not validate.`
+        )
+        return this.formatNotification(record)
+      })()
+      if (!notificationToRestore) continue
       record.notificationAcknowledged = false
       record.notificationEnqueued = true
+      record.notificationMessage = notificationToRestore
+      validNotifications.push(notificationToRestore)
       persistPromises.push(this.queuePersistWorkerState(record))
     }
+    this.restoreNotifications(normalized, validNotifications)
     const results = await Promise.allSettled(persistPromises)
     for (const result of results) {
       if (result.status === "rejected") {
@@ -1288,6 +1661,7 @@ export class CoordinatorWorkerManager {
       record.notificationAcknowledged = true
       record.suppressNotificationAutoRun = false
       record.notificationEnqueued = true
+      record.notificationMessage = undefined
       persistPromises.push(this.queuePersistWorkerState(record))
     }
     const results = await Promise.allSettled(persistPromises)
@@ -1306,28 +1680,29 @@ export class CoordinatorWorkerManager {
     parentThreadId: string,
     notifications: string[]
   ): Promise<void> {
-    const refs = notifications
-      .map((notification): NotificationRef | undefined => {
-        const workerId = this.extractNotificationWorkerId(notification)
-        if (!workerId) return undefined
-        return { workerId, turn: this.extractNotificationWorkerTurn(notification) }
-      })
-      .filter((ref): ref is NotificationRef => Boolean(ref))
-    if (refs.length === 0) return
     const normalized = normalizeThreadId(parentThreadId)
     const persistPromises: Promise<void>[] = []
-    for (const ref of refs) {
-      const normalizedWorkerId = normalizeWorkerId(ref.workerId)
+    for (const notification of notifications) {
+      const workerId = this.extractNotificationWorkerId(notification)
+      if (!workerId) continue
+      const normalizedWorkerId = normalizeWorkerId(workerId)
       const record = this.getWorker(normalized, normalizedWorkerId)
       if (!record || !terminalStatus(record.status)) continue
-      if (ref.turn !== undefined && record.turns !== ref.turn) continue
+      const acknowledgedNotification = this.validatePersistedNotificationMessage(
+        record,
+        notification
+      )
+      if (!acknowledgedNotification) continue
+      const turn = this.extractNotificationWorkerTurn(acknowledgedNotification)
+      if (turn === undefined) continue
       this.removeQueuedNotificationsForWorker(normalized, {
         workerId: normalizedWorkerId,
-        turn: ref.turn
+        turn
       })
       record.notificationAcknowledged = true
       record.suppressNotificationAutoRun = false
       record.notificationEnqueued = true
+      record.notificationMessage = undefined
       persistPromises.push(this.queuePersistWorkerState(record))
     }
     const results = await Promise.allSettled(persistPromises)
@@ -1487,6 +1862,7 @@ export class CoordinatorWorkerManager {
     const recentRestore = restoreMode === "recent"
     const sortedFiles = recentRestore ? [...files].sort(compareWorkerStateFilesByRecency) : files
     let restoredRecentTerminalCount = 0
+    const pendingTerminalNotifications: CoordinatorWorkerRecord[] = []
     for (const file of sortedFiles) {
       if (!file.endsWith(".json")) continue
       const workerIdFromFile = file.slice(0, -".json".length)
@@ -1540,13 +1916,28 @@ export class CoordinatorWorkerManager {
           record.summary = record.error
           record.rawText = record.error
           await this.persistTerminalRecord(record)
-          this.emitUpdate(record, this.enqueueNotification(record))
+          this.emitUpdate(record, await this.enqueueNotification(record))
         } else if (terminalStatus(record.status) && !record.notificationAcknowledged) {
-          this.emitUpdate(record, this.enqueueNotification(record))
+          pendingTerminalNotifications.push(record)
         }
       } catch (error) {
         console.warn("[CoordinatorWorker] Failed to restore worker state:", error)
       }
+    }
+
+    if (pendingTerminalNotifications.length > 0) {
+      await settleInBatches(
+        pendingTerminalNotifications,
+        RESTORED_RAW_TEXT_HYDRATE_CONCURRENCY,
+        (record) => this.hydrateRestoredRawText(record)
+      )
+      await settleInBatches(
+        pendingTerminalNotifications,
+        RESTORED_RAW_TEXT_HYDRATE_CONCURRENCY,
+        async (record) => {
+          this.emitUpdate(record, await this.enqueueNotification(record))
+        }
+      )
     }
 
     this.activeRestoreHydratedWorkspaceByParent.set(parentThreadId, workspacePath)
@@ -1699,6 +2090,30 @@ export class CoordinatorWorkerManager {
     }
   }
 
+  private async hydrateRestoredRawText(record: CoordinatorWorkerRecord): Promise<void> {
+    if (record.rawText?.trim() || !record.resultPath || !terminalStatus(record.status)) return
+    const workspaceRoot = path.resolve(record.workspacePath)
+    try {
+      const resolvedRelativePath = resolveWorkerResultReadRelativePath(
+        record.parentThreadId,
+        record.resultPath
+      )
+      const target = path.resolve(workspaceRoot, resolvedRelativePath)
+      if (!isCoordinatorPathWithin(target, workspaceRoot)) return
+      const persisted = JSON.parse(await readFile(target, "utf8")) as { raw_text?: unknown }
+      const rawText = optionalString(persisted.raw_text)
+      if (rawText) {
+        record.rawText = truncateWorkerRawText(rawText)
+        if (record.notificationAcknowledged === false) {
+          await this.queuePersistWorkerState(record)
+        }
+      }
+    } catch {
+      // Best-effort restore only. If archived raw handoff content is unavailable, notification
+      // rebuilding still falls back to summary/error.
+    }
+  }
+
   private async getWorkerForOperation(
     parentThreadId: string,
     workerId: string,
@@ -1843,11 +2258,17 @@ export class CoordinatorWorkerManager {
       toolCallCount: numericValue(snapshot.tool_call_count, 0),
       lastToolName: optionalString(snapshot.last_tool_name),
       lastEvent,
+      rawText: truncateWorkerRawText(optionalString(snapshot.notification_raw_text)),
+      notificationMessage: undefined,
       notificationEnqueued: terminalStatus(status) && notificationAcknowledged,
       notificationAcknowledged,
       suppressNotificationAutoRun,
       runVersion: 0
     }
+    record.notificationMessage = this.validatePersistedNotificationMessage(
+      record,
+      optionalString(snapshot.notification_message)
+    )
     this.setUpdateCallback(record, onUpdate, onUpdateKey)
     return record
   }
@@ -2110,20 +2531,26 @@ export class CoordinatorWorkerManager {
       } catch (persistError) {
         const timestamp = nowIso()
         const message = describeError(persistError)
+        const persistenceFailure = formatWorkerResultPersistenceFailure(message)
+        const persistedResultPath = persistedResultPathFromError(persistError)
         if (record.status === "completed") {
           record.status = "failed"
           if (record.summary) {
-            record.summary = `${record.summary}\n\nWorker result persistence failed: ${message}`
+            record.summary = `${record.summary}\n\n${persistenceFailure}`
           }
-          record.error = `Worker result persistence failed: ${message}`
-        } else if (!record.error) {
-          record.error = message
+          record.error = persistenceFailure
+        } else if (record.error) {
+          if (!record.error.includes(persistenceFailure)) {
+            record.error = `${record.error}\n\n${persistenceFailure}`
+          }
+        } else {
+          record.error = persistenceFailure
         }
-        record.resultPath = undefined
+        record.resultPath = persistedResultPath
         record.updatedAt = timestamp
         record.finishedAt = record.finishedAt ?? timestamp
         record.lastActivityAt = timestamp
-        record.lastEvent = `Worker result persistence failed: ${message}`
+        record.lastEvent = persistenceFailure
         console.warn("[CoordinatorWorker] Failed to persist terminal state:", persistError)
         try {
           await this.persistWorkerState(record)
@@ -2143,6 +2570,7 @@ export class CoordinatorWorkerManager {
         record.notificationAcknowledged = true
         record.notificationEnqueued = true
         record.suppressNotificationAutoRun = false
+        record.notificationMessage = undefined
         this.removeQueuedNotificationsForWorker(record.parentThreadId, {
           workerId: record.workerId,
           turn: record.turns
@@ -2158,7 +2586,13 @@ export class CoordinatorWorkerManager {
         this.emitUpdate(record)
         return
       }
-      this.emitUpdate(record, this.enqueueNotification(record))
+      const notificationTurn = record.turns
+      const notificationStatus = record.status
+      const notification = await this.enqueueNotification(record)
+      if (record.turns !== notificationTurn || record.status !== notificationStatus) {
+        return
+      }
+      this.emitUpdate(record, notification)
     })().finally(() => {
       if (record.terminalPersistPromise === persistPromise) {
         record.terminalPersistPromise = undefined
@@ -2267,14 +2701,22 @@ export class CoordinatorWorkerManager {
     }
   }
 
-  private enqueueNotification(record: CoordinatorWorkerRecord): string | undefined {
+  private async enqueueNotification(record: CoordinatorWorkerRecord): Promise<string | undefined> {
     if (record.notificationEnqueued) return undefined
     record.notificationEnqueued = true
     record.notificationAcknowledged = false
-    const notification = this.formatNotification(record)
+    const notification =
+      this.validatePersistedNotificationMessage(record, record.notificationMessage) ??
+      this.formatNotification(record)
+    record.notificationMessage = notification
     const notifications = this.notificationsByParent.get(record.parentThreadId) ?? []
     notifications.push(notification)
     this.notificationsByParent.set(record.parentThreadId, notifications)
+    try {
+      await this.queuePersistWorkerState(record)
+    } catch (error) {
+      console.warn("[CoordinatorWorker] Failed to persist queued notification state:", error)
+    }
     return notification
   }
 
@@ -2307,39 +2749,197 @@ export class CoordinatorWorkerManager {
     return record.status !== "running"
   }
 
+  private validatePersistedNotificationMessage(
+    record: CoordinatorWorkerRecord,
+    notification: string | undefined
+  ): string | undefined {
+    const normalized = notification?.trim()
+    if (!normalized) return undefined
+    if (normalized.length > MAX_NOTIFICATION_XML_CHARS) return undefined
+    const fields = this.extractNotificationTopLevelFields(normalized)
+    if (!fields || !fields.has("status") || !fields.has("summary")) return undefined
+    const workerId = fields.get("task-id")
+    const turnValue = fields.get("turn")
+    const turn = turnValue ? Number(turnValue) : undefined
+    const status = fields.get("status")
+    const role = fields.get("worker-role")
+    const workerThreadId = fields.get("worker-thread-id")
+    if (workerId !== record.workerId) return undefined
+    if (!Number.isFinite(turn) || turn !== record.turns) return undefined
+    if (status !== normalizeNotificationStatus(record.status)) return undefined
+    if (role !== record.role) return undefined
+    if (workerThreadId !== record.workerThreadId) return undefined
+    return this.serializeValidatedPersistedNotification(record, fields)
+  }
+
   private extractNotificationWorkerId(notification: string): string | undefined {
-    const match = notification.match(/<task-id>([^<]+)<\/task-id>/)
-    if (!match) return undefined
-    return match[1]
-      .replace(/&lt;/g, "<")
-      .replace(/&gt;/g, ">")
-      .replace(/&quot;/g, '"')
-      .replace(/&apos;/g, "'")
-      .replace(/&amp;/g, "&")
+    return this.extractNotificationTagValue(notification, "task-id")
   }
 
   private extractNotificationWorkerTurn(notification: string): number | undefined {
-    const match = notification.match(/<turn>(\d+)<\/turn>/)
-    if (!match) return undefined
-    const turn = Number(match[1])
+    const value = this.extractNotificationTagValue(notification, "turn")
+    if (!value) return undefined
+    const turn = Number(value)
     return Number.isFinite(turn) ? turn : undefined
   }
 
-  private formatNotification(record: CoordinatorWorkerRecord): string {
+  private extractNotificationTagValue(notification: string, tag: string): string | undefined {
+    return this.extractNotificationTopLevelFields(notification)?.get(tag)
+  }
+
+  private extractNotificationTopLevelFields(notification: string): Map<string, string> | undefined {
+    return this.extractXmlDirectFields(
+      notification,
+      "task-notification",
+      PERSISTED_NOTIFICATION_TOP_LEVEL_TAGS
+    )
+  }
+
+  private extractXmlDirectFields(
+    xml: string,
+    rootTag: string,
+    allowedTags?: ReadonlySet<string>
+  ): Map<string, string> | undefined {
+    const normalized = xml.trim()
+    const rootOpen = `<${rootTag}>`
+    const rootClose = `</${rootTag}>`
+    if (!normalized.startsWith(rootOpen) || !normalized.endsWith(rootClose)) {
+      return undefined
+    }
+
+    const inner = normalized.slice(rootOpen.length, -rootClose.length)
+    const fields = new Map<string, string>()
+    let index = 0
+
+    while (index < inner.length) {
+      while (index < inner.length && /\s/u.test(inner[index])) index += 1
+      if (index >= inner.length) break
+
+      const opening = /^<([A-Za-z0-9_-]+)>/.exec(inner.slice(index))
+      if (!opening) return undefined
+      const tag = opening[1]
+      if (allowedTags && !allowedTags.has(tag)) return undefined
+      index += opening[0].length
+      const valueStart = index
+      let depth = 1
+
+      while (index < inner.length) {
+        const nextLt = inner.indexOf("<", index)
+        if (nextLt === -1) return undefined
+
+        const sameOpen = `<${tag}>`
+        const sameClose = `</${tag}>`
+        if (inner.startsWith(sameOpen, nextLt)) {
+          depth += 1
+          index = nextLt + sameOpen.length
+          continue
+        }
+        if (inner.startsWith(sameClose, nextLt)) {
+          depth -= 1
+          if (depth === 0) {
+            if (fields.has(tag)) return undefined
+            fields.set(tag, decodeNotificationXmlText(inner.slice(valueStart, nextLt)))
+            index = nextLt + sameClose.length
+            break
+          }
+          index = nextLt + sameClose.length
+          continue
+        }
+        index = nextLt + 1
+      }
+
+      if (depth !== 0) return undefined
+    }
+
+    return fields
+  }
+
+  private serializeValidatedPersistedNotification(
+    record: CoordinatorWorkerRecord,
+    fields: Map<string, string>
+  ): string | undefined {
+    const workerId = fields.get("task-id")
+    const workerThreadId = fields.get("worker-thread-id")
+    const workerRole = fields.get("worker-role")
+    const turn = fields.get("turn")
+    const status = fields.get("status")
+    const summary = fields.get("summary")
+    if (!workerId || !workerThreadId || !workerRole || !turn || !status || summary === undefined) {
+      return undefined
+    }
+
+    const result = fields.get("result")
+    const resultTruncated = fields.get("result-truncated")
+    if (
+      resultTruncated !== undefined &&
+      resultTruncated !== "true" &&
+      resultTruncated !== "false"
+    ) {
+      return undefined
+    }
+    const persistedResult = truncateNotificationResult(result, resultTruncated === "true")
+    const summaryText = truncateNotificationSummary(summary)
+
     const snapshot = toSnapshot(record)
-    const status = snapshot.status === "cancelled" ? "killed" : snapshot.status
-    const summary =
-      snapshot.summary ??
-      snapshot.error ??
-      (snapshot.status === "completed" ? "Worker completed." : snapshot.last_event)
     const reportPath = snapshot.report_path
       ? `\n<report-path>${escapeXml(snapshot.report_path)}</report-path>`
       : ""
     const resultPath = snapshot.result_path
       ? `\n<output-file>${escapeXml(snapshot.result_path)}</output-file>\n<result-path>${escapeXml(snapshot.result_path)}</result-path>`
       : ""
-    const resultSource = record.rawText?.trim() ? record.rawText : summary
-    const result = truncateNotificationResult(resultSource)
+    const usage = `
+<usage>
+  <tool_uses>${snapshot.tool_call_count}</tool_uses>
+  <duration_ms>${snapshot.duration_ms ?? 0}</duration_ms>
+  <input_tokens>${snapshot.token_usage?.input_tokens ?? 0}</input_tokens>
+  <output_tokens>${snapshot.token_usage?.output_tokens ?? 0}</output_tokens>
+  <total_tokens>${snapshot.token_usage?.total_tokens ?? 0}</total_tokens>
+</usage>`
+
+    const notification = `<task-notification>
+<task-id>${escapeXml(workerId)}</task-id>
+<worker-thread-id>${escapeXml(workerThreadId)}</worker-thread-id>
+<worker-role>${escapeXml(workerRole)}</worker-role>
+<turn>${escapeXml(turn)}</turn>
+<status>${escapeXml(status)}</status>
+<summary>${escapeXml(summaryText)}</summary>${
+      persistedResult.text
+        ? `\n<result>${escapeXml(persistedResult.text)}</result>\n<result-truncated>${String(persistedResult.truncated)}</result-truncated>`
+        : resultTruncated !== undefined
+          ? `\n<result-truncated>${String(persistedResult.truncated)}</result-truncated>`
+          : ""
+    }${reportPath}${resultPath}${usage}
+</task-notification>`
+    return notification.length <= MAX_NOTIFICATION_XML_CHARS ? notification : undefined
+  }
+
+  private formatNotification(record: CoordinatorWorkerRecord): string {
+    const snapshot = toSnapshot(record)
+    const status = normalizeNotificationStatus(snapshot.status)
+    const rawText = record.rawText?.trim()
+    const detailedSummary = buildNotificationDetailedSummary(snapshot)
+    const resultContext = buildNotificationResultContext(snapshot, Boolean(rawText))
+    const notificationSummary = buildNotificationSummary(snapshot, status, detailedSummary)
+    const reportPath = snapshot.report_path
+      ? `\n<report-path>${escapeXml(snapshot.report_path)}</report-path>`
+      : ""
+    const resultPath = snapshot.result_path
+      ? `\n<output-file>${escapeXml(snapshot.result_path)}</output-file>\n<result-path>${escapeXml(snapshot.result_path)}</result-path>`
+      : ""
+    const isTerminalPersistenceFailure =
+      status === "failed" && isWorkerResultPersistenceFailureEvent(snapshot.last_event)
+    const terminalPersistenceFailureResult = isTerminalPersistenceFailure
+      ? buildTerminalPersistenceFailureResultSource(resultContext, rawText)
+      : undefined
+    const notificationResult = terminalPersistenceFailureResult
+      ? terminalPersistenceFailureResult
+      : rawText
+        ? buildNotificationResultSource(resultContext, rawText)
+        : { text: detailedSummary }
+    const result = truncateNotificationResult(
+      notificationResult.text,
+      notificationResult.truncated ?? false
+    )
     const renderNotification = (
       resultText: string,
       resultTruncated: boolean,
@@ -2365,7 +2965,7 @@ export class CoordinatorWorkerManager {
 <worker-role>${escapeXml(snapshot.role)}</worker-role>
 <turn>${snapshot.turns}</turn>
 <status>${escapeXml(status)}</status>
-<summary>${escapeXml(truncateNotificationSummary(summary))}</summary>${resultBlock}${debugPaths}${usage}
+<summary>${escapeXml(truncateNotificationSummary(notificationSummary))}</summary>${resultBlock}${debugPaths}${usage}
 </task-notification>`
     }
     return truncateNotificationXml(
@@ -2430,7 +3030,11 @@ export class CoordinatorWorkerManager {
       )
     )
     record.resultPath = resultPath
-    await this.persistWorkerState(record)
+    try {
+      await this.persistWorkerState(record)
+    } catch (error) {
+      throw withPersistedResultPath(error, resultPath)
+    }
   }
 
   private emitUpdate(
