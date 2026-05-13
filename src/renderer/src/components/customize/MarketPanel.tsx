@@ -130,6 +130,7 @@ interface UploaderProfile {
 interface UserInfoLite {
   sapId?: string
   ystId?: string
+  pathName?: string
 }
 
 type UploadFilterMode = "mine" | "installed" | "featured" | "certified"

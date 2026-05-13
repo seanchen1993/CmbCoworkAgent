@@ -63,6 +63,12 @@ import { SkillsByCategorySection } from "./SkillsByCategorySection"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
 import { uploadChatData, ChatReportPayload } from "@/api"
 import { marketApi, MarketItem } from "../../api/market"
+import {
+  buildMarketInstalledFlags,
+  isMarketVersionDifferent,
+  marketInstalledVersionStorage,
+  MarketUpdateBadge
+} from "@/components/customize/MarketUpdateBadge"
 import { insertLog, updateMMJUserInfo } from "../../../js/mmjUtils"
 import { toast } from "sonner"
 import { SlashCommandPopover } from "@/features/slash-commands/SlashCommandPopover"
@@ -77,6 +83,9 @@ type WelcomeSkillCard = {
   skill: SkillMetadata
   label: string
   icon: React.JSX.Element
+  installedVersion?: string | null
+  currentVersion?: string | null
+  updateAvailable?: boolean
 }
 
 type WelcomeSkillSceneGroup = {
@@ -206,13 +215,24 @@ function WelcomeSkillButton(props: {
           {card.icon}
         </div>
         <div className="min-w-0 flex-1">
-          <div
-            className={cn(
-              "text-xs leading-5 truncate whitespace-nowrap",
-              disabled ? "text-muted-foreground line-through" : "text-foreground"
+          <div className="flex min-w-0 items-center gap-1.5">
+            <div
+              className={cn(
+                "min-w-0 flex-1 text-xs leading-5 truncate whitespace-nowrap",
+                disabled ? "text-muted-foreground line-through" : "text-foreground"
+              )}
+            >
+              {label}
+            </div>
+            {/* 仅当市场版本与本地安装版本不一致时展示更新标识；具体版本差异在 tooltip 中展示。 */}
+            {card.updateAvailable && (
+              <MarketUpdateBadge
+                typeLabel="技能"
+                installedVersion={card.installedVersion}
+                currentVersion={card.currentVersion}
+                className="text-[10px] px-1.5 py-0"
+              />
             )}
-          >
-            {label}
           </div>
         </div>
       </div>
@@ -912,11 +932,27 @@ export function ChatContainer({
 
         console.log(`Installing skill: ${skillName}`)
 
-        // 删除已存在的技能（如果有的话）
         try {
           const skillsMetadata = await window.api.skills.list()
           const existingSkill = skillsMetadata.find((s) => s.name === skillName)
 
+          // 精品技能会在欢迎页初始化时自动补齐。为了避免每次进入会话都重复下载：
+          // 1. 本地没有这个技能：需要安装；
+          // 2. 本地有技能但没有安装版本记录：无法判断是否最新，按用户要求默认重新安装；
+          // 3. 本地安装版本和市场版本不一致：需要删除旧技能后重新安装；
+          // 4. 本地安装版本和市场版本一致：跳过安装，保留现有技能目录。
+          const installedVersion = marketInstalledVersionStorage.getVersion(skillName, "skill")
+          const shouldInstall =
+            !existingSkill ||
+            !installedVersion ||
+            isMarketVersionDifferent(installedVersion, skill.version)
+
+          if (!shouldInstall) {
+            console.log(`Skill ${skillName} is already up to date, skipping install.`)
+            continue
+          }
+
+          // 更新安装时先删除同名技能，避免旧文件残留影响新版本行为。
           if (existingSkill) {
             console.log(`Deleting existing skill: ${existingSkill.path}`)
             await window.api.skills.delete(existingSkill.path)
@@ -932,6 +968,8 @@ export function ChatContainer({
         const response = await marketApi.downloadItem(skillName, "skill", false)
 
         if (response.success) {
+          // 安装成功后记录市场版本，下一次自动安装精品技能时据此判断是否需要重装。
+          marketInstalledVersionStorage.setVersion(skillName, "skill", skill.version)
           console.log(`Successfully installed skill: ${skillName}`)
         } else {
           console.error(`Failed to install skill ${skillName}:`, response.error)
@@ -2572,6 +2610,48 @@ export function ChatContainer({
     return map
   }, [marketSkillsData])
 
+  const marketSkillUpdateByName = useMemo(() => {
+    // 把市场技能列表转换成“技能名 -> 更新信息”的索引，供“我安装的技能”tab 快速匹配。
+    // 同时写入英文名和中文名两种 key，是因为本地技能元数据和市场展示数据可能使用不同名称。
+    const map = new Map<
+      string,
+      {
+        installedVersion?: string
+        currentVersion?: string | null
+        updateAvailable: boolean
+        displayName: string
+      }
+    >()
+
+    for (const item of marketSkillsData) {
+      // 这里复用 MarketPanel 的版本比较规则：
+      // 只有本地已记录安装版本、市场也返回版本，并且两者不一致时才显示“有更新”。
+      const flags = buildMarketInstalledFlags(item, "skill", true)
+      const updateInfo = {
+        installedVersion: flags.installedVersion,
+        currentVersion: item.version,
+        updateAvailable: flags.updateAvailable,
+        displayName: item.chinese_name || item.name
+      }
+      map.set(item.name, updateInfo)
+      if (item.chinese_name) map.set(item.chinese_name, updateInfo)
+    }
+
+    return map
+  }, [marketSkillsData])
+
+  const getSkillMarketUpdateInfo = useCallback(
+    (skill: SkillMetadata) => {
+      // 优先按本地技能名匹配市场条目；少数技能名来自目录路径时，再用 relativePath 兜底。
+      return (
+        marketSkillUpdateByName.get(skill.name) ||
+        (skill.relativePath ? marketSkillUpdateByName.get(skill.relativePath) : undefined) ||
+        null
+      )
+    },
+    [marketSkillUpdateByName]
+  )
+
   const getSkillSceneCategory = useCallback(
     (skill: SkillMetadata): string => {
       const category =
@@ -2592,7 +2672,9 @@ export function ChatContainer({
         cards.push({
           skill,
           label: getSkillSummary(skill),
-          icon: getSkillIcon(skill)
+          icon: getSkillIcon(skill),
+          // 将市场版本信息挂到技能卡片上，树形渲染时即可决定是否展示“有更新”标识。
+          ...getSkillMarketUpdateInfo(skill)
         })
         groups.set(category, cards)
       }
@@ -2608,7 +2690,7 @@ export function ChatContainer({
         })
         .map(([category, cards]) => ({ category, cards }))
     },
-    [getSkillIcon, getSkillSceneCategory, getSkillSummary]
+    [getSkillIcon, getSkillMarketUpdateInfo, getSkillSceneCategory, getSkillSummary]
   )
 
   const enabledCustomSkillGroups = useMemo(() => {
@@ -2622,6 +2704,19 @@ export function ChatContainer({
     () => buildWelcomeSkillGroups(disabledLocalSkills),
     [buildWelcomeSkillGroups, disabledLocalSkills]
   )
+  const customSkillUpdates = useMemo(
+    () =>
+      // 统计已启用和已禁用的用户技能中有哪些存在市场新版本，用于 tab 上显示更新数量；
+      // 这里只计算数量和卡片标识，不弹 toast，避免进入会话时打扰用户。
+      [...enabledCustomSkills, ...disabledLocalSkills]
+        .map((skill) => ({
+          skill,
+          updateInfo: getSkillMarketUpdateInfo(skill)
+        }))
+        .filter((entry) => entry.updateInfo?.updateAvailable),
+    [disabledLocalSkills, enabledCustomSkills, getSkillMarketUpdateInfo]
+  )
+  const customSkillUpdateCount = customSkillUpdates.length
 
   const helpSceneSkillIds = useMemo(() => new Set(["scheduler-assistant", "skill-creator"]), [])
   const helpSceneSkillCards = useMemo(() => {
@@ -2930,8 +3025,13 @@ export function ChatContainer({
                         <TabsTrigger value="skills-by-category" className="text-xs">
                           场景技能
                         </TabsTrigger>
-                        <TabsTrigger value="installed-skills" className="text-xs">
+                        <TabsTrigger value="installed-skills" className="text-xs gap-1.5">
                           我安装的技能
+                          {customSkillUpdateCount > 0 && (
+                            <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-teal-100 px-1 text-[10px] font-semibold leading-none text-teal-700 dark:bg-teal-900/40 dark:text-teal-200">
+                              {customSkillUpdateCount}
+                            </span>
+                          )}
                         </TabsTrigger>
                         <TabsTrigger value="help" className="text-xs">
                           帮助
