@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { CheckCircle2, Loader2, RefreshCcw, Rocket, ShieldCheck, XCircle } from "lucide-react"
+import { CheckCircle2, Loader2, RefreshCcw, Rocket, ShieldCheck, Trash2, XCircle } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -77,7 +77,10 @@ export function SkillEvolutionReviewPanel(): React.JSX.Element {
 
   const reviewer = localStorage.getItem("userName") || localStorage.getItem("ystId") || "admin"
 
-  async function runAction(action: "approve" | "reject" | "publish", candidate: EvolutionCandidate): Promise<void> {
+  async function runAction(action: "approve" | "reject" | "publish" | "delete", candidate: EvolutionCandidate): Promise<void> {
+    if (action === "delete") {
+      if (!confirm(`确定要删除候选 ${candidate.skill_name} (${candidate.candidate_id}) 吗？此操作不可撤销。`)) return
+    }
     setActionLoading(`${action}:${candidate.candidate_id}`)
     try {
       if (action === "approve") {
@@ -86,6 +89,9 @@ export function SkillEvolutionReviewPanel(): React.JSX.Element {
       } else if (action === "reject") {
         await evolutionApi.reject(candidate.candidate_id, reviewer)
         toast.success("候选已拒绝")
+      } else if (action === "delete") {
+        await evolutionApi.deleteCandidate(candidate.candidate_id)
+        toast.success("候选已删除")
       } else {
         await evolutionApi.publish(candidate.candidate_id, reviewer)
         toast.success("候选已发布到自进化更新通道")
@@ -182,6 +188,13 @@ export function SkillEvolutionReviewPanel(): React.JSX.Element {
                     onClick={() => void runAction("publish", selected)}
                   >
                     <Rocket className="mr-1.5 size-4" />发布
+                  </Button>
+                  <Button
+                    variant="outline"
+                    disabled={Boolean(actionLoading)}
+                    onClick={() => void runAction("delete", selected)}
+                  >
+                    <Trash2 className="mr-1.5 size-4" />删除
                   </Button>
                 </div>
               </div>

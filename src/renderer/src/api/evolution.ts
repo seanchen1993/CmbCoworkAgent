@@ -377,6 +377,16 @@ export const evolutionApi = {
     }
   },
 
+  async deleteCandidate(candidateId: string): Promise<{ detail: string }> {
+    try {
+      return await requestJson(`/evolution/candidates/${encodeURIComponent(candidateId)}`, {
+        method: "DELETE"
+      })
+    } catch (error) {
+      throw error
+    }
+  },
+
   async publish(candidateId: string, reviewer?: string): Promise<EvolutionCandidate> {
     try {
       return await requestJson(`/evolution/candidates/${encodeURIComponent(candidateId)}/publish`, {
