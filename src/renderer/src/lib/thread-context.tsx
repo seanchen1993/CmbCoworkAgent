@@ -337,6 +337,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   // Stream data store (not React state - we use subscriptions)
   const streamDataRef = useRef<Record<string, StreamData>>({})
   const streamSubscribersRef = useRef<Record<string, Set<() => void>>>({})
+  const allStreamSubscribersRef = useRef<Set<() => void>>(new Set())
 
   // Hook logs store (not React state — avoids re-rendering chat on every hook fire)
   const hookLogsRef = useRef<Record<string, HookLogEntry[]>>({})
@@ -366,6 +367,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     if (subscribers) {
       subscribers.forEach((callback) => callback())
     }
+    allStreamSubscribersRef.current.forEach((callback) => callback())
   }, [])
 
   // Handle stream updates from ThreadStreamHolder
@@ -433,8 +435,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     return loadingStates
   }, [loadingStates])
 
-  const subscribeToAllStreams = useCallback(() => {
-    return () => {}
+  const subscribeToAllStreams = useCallback((callback: () => void) => {
+    allStreamSubscribersRef.current.add(callback)
+    return () => {
+      allStreamSubscribersRef.current.delete(callback)
+    }
   }, [])
 
   const updateThreadState = useCallback(
@@ -1372,5 +1377,9 @@ export function useAllThreadStates(): Record<string, ThreadState> {
 // Hook to get all stream loading states with reactivity
 export function useAllStreamLoadingStates(): Record<string, boolean> {
   const context = useThreadContext()
-  return context.getAllStreamLoadingStates()
+  return useSyncExternalStore(
+    context.subscribeToAllStreams,
+    context.getAllStreamLoadingStates,
+    context.getAllStreamLoadingStates
+  )
 }

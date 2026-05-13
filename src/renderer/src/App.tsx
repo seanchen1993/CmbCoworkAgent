@@ -25,6 +25,7 @@ const DashboardView = lazy(() =>
   import("@/components/dashboard/DashboardView").then((m) => ({ default: m.DashboardView }))
 )
 import { ResizeHandle } from "@/components/ui/resizable"
+import { PetStateBridge } from "@/components/pet/PetStateBridge"
 import { useAppStore } from "@/lib/store"
 import { ThreadProvider } from "@/lib/thread-context"
 import { initMMJ } from "../js/mmjUtils"
@@ -646,6 +647,7 @@ function App(): React.JSX.Element {
           </div>
         )}
       </div>
+      <PetStateBridge />
       <Toaster position="top-center" richColors duration={2200} />
     </ThreadProvider>
   )

@@ -47,6 +47,34 @@ interface LspDownloadState {
   progress: LspDownloadProgress | null
 }
 
+interface PetManifest {
+  // 宠物资源清单，来自 pets/<directoryId>/pet.json。
+  id: string
+  directoryId: string
+  name?: string
+  displayName?: string
+  description?: string
+  spritesheetPath: string
+  frameWidth?: number
+  frameHeight?: number
+  columns?: number
+  rows?: number
+  states?: Record<string, { y: number; frames: number; fps?: number }>
+}
+
+type PetState =
+  // 与主进程 PetState 保持一致，renderer 只能通过 preload 发送这些状态。
+  | "idle"
+  | "busy"
+  | "waiting"
+  | "done"
+  | "error"
+  | "crying"
+  | "prompt"
+  | "running"
+  | "interaction"
+  | "hover"
+
 // Simple electron API - replaces @electron-toolkit/preload
 const electronAPI = {
   openExternal: (url: string) => shell.openExternal(url),
@@ -670,6 +698,25 @@ const api = {
       return () => {
         ipcRenderer.removeListener("workspace:files-changed", handler)
       }
+    }
+  },
+  pet: {
+    // 列出本地 pets/ 下可用宠物，目前主进程只取第一个展示。
+    list: (): Promise<PetManifest[]> => {
+      return ipcRenderer.invoke("pet:list") as Promise<PetManifest[]>
+    },
+    getSpriteDataUrl: (
+      directoryId: string
+    ): Promise<{ success: boolean; dataUrl?: string; error?: string }> => {
+      return ipcRenderer.invoke("pet:getSpriteDataUrl", directoryId) as Promise<{
+        success: boolean
+        dataUrl?: string
+        error?: string
+      }>
+    },
+    // 将业务状态同步到独立宠物窗口；动画渲染不在 renderer 主 UI 中执行。
+    setState: (state: PetState): void => {
+      ipcRenderer.send("pet:setState", state)
     }
   },
   file: {

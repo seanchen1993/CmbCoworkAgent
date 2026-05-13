@@ -1,6 +1,6 @@
 {
   "name": "cmbdevclaw",
-  "version": "1.3.8",
+  "version": "1.3.9",
   "description": "CMBDevClaw description",
   "author": {
     "name": "CMBDevClaw",
@@ -11,6 +11,7 @@
     "out/",
     "bin/",
     "resources/",
+    "pets/",
     "skills/",
     "LICENSE",
     "README.md"
@@ -100,6 +101,10 @@
       {
         "from": "resources/bin",
         "to": "bin"
+      },
+      {
+        "from": "pets",
+        "to": "pets"
       }
     ],
     "electronVersion": "39.8.0"
