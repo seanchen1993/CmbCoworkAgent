@@ -170,41 +170,6 @@ export function GitBranchSwitcher({ workspacePath }: GitBranchSwitcherProps): Re
           />
         </div>
 
-        {/* 创建分支 */}
-        {/*<div className="px-2 py-1.5 border-b border-border space-y-1.5">*/}
-        {/*  <div className="flex items-center gap-1.5">*/}
-        {/*    <input*/}
-        {/*      type="text"*/}
-        {/*      value={createBranchName}*/}
-        {/*      onChange={(e) => setCreateBranchName(e.target.value)}*/}
-        {/*      onKeyDown={handleCreateBranchKeyDown}*/}
-        {/*      placeholder="新分支名，例如 feat/demo"*/}
-        {/*      className={cn(*/}
-        {/*        "w-full text-xs px-2 py-1 rounded-sm bg-muted/50 border border-transparent",*/}
-        {/*        "focus:outline-none focus:border-ring focus:bg-background transition-colors",*/}
-        {/*        "placeholder:text-muted-foreground"*/}
-        {/*      )}*/}
-        {/*    />*/}
-        {/*    <button*/}
-        {/*      type="button"*/}
-        {/*      onClick={() => {*/}
-        {/*        void handleCreateBranch()*/}
-        {/*      }}*/}
-        {/*      disabled={!canCreate}*/}
-        {/*      className={cn(*/}
-        {/*        "shrink-0 h-6 px-2 rounded-sm border text-[11px] inline-flex items-center gap-1 transition-colors",*/}
-        {/*        canCreate*/}
-        {/*          ? "border-border hover:bg-muted/50 text-foreground"*/}
-        {/*          : "border-border/60 text-muted-foreground cursor-not-allowed opacity-60"*/}
-        {/*      )}*/}
-        {/*      title={createActionLabel}*/}
-        {/*    >*/}
-        {/*      {creatingBranch ? <Loader2 className="size-3 animate-spin" /> : <Plus className="size-3" />}*/}
-        {/*    </button>*/}
-        {/*  </div>*/}
-        {/*  <div className="text-[10px] text-muted-foreground">{createActionLabel}</div>*/}
-        {/*</div>*/}
-
         {/* 错误提示 */}
         {switchError && (
           <div className="flex items-start gap-1.5 px-3 py-2 bg-destructive/10 text-destructive text-[11px] border-b border-border">

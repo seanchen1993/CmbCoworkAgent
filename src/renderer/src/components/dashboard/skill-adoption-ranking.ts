@@ -27,7 +27,7 @@ export interface SkillAdoptionRankingItem {
 export const DEFAULT_SKILL_ADOPTION_SORT: SkillAdoptionSortKey = "measuredAdoptionRate"
 
 export const SKILL_ADOPTION_SORT_LABELS: Record<SkillAdoptionSortKey, string> = {
-  measuredAdoptionRate: "已测量采纳率",
+  measuredAdoptionRate: "已Commit采纳率",
   inclusiveAdoptionRate: "含未提交采纳率",
   pushedAdoptionRate: "已 Push 采纳率",
   adoptedLines: "采纳代码行数",

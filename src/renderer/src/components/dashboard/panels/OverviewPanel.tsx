@@ -115,7 +115,7 @@ function InclusiveAdoptionTooltip({ data }: { data: OverviewData }) {
 function MeasuredAdoptionTooltip({ data }: { data: OverviewData }) {
   return (
     <div className="space-y-1.5">
-      <div className="text-[11px] font-medium text-foreground">已测量采纳率</div>
+      <div className="text-[11px] font-medium text-foreground">已Commit采纳率</div>
       <div className="space-y-1 text-[11px]">
         <div className="flex items-center justify-between gap-4">
           <span className="text-muted-foreground">采纳行数</span>
@@ -544,7 +544,7 @@ function SkillAdoptionRankingPanel({
                       </span>
                     </div>
                     <div className="mb-1 truncate text-[10px] text-muted-foreground">
-                      已测量 {formatNullablePercent(item.measuredAdoptionRate)}
+                      已Commit {formatNullablePercent(item.measuredAdoptionRate)}
                       <span className="mx-1 text-border">|</span>
                       含未提交 {formatNullablePercent(item.inclusiveAdoptionRate)}
                       <span className="mx-1 text-border">|</span>
@@ -758,19 +758,19 @@ export function OverviewPanel({
         />
         <StatCard
           icon={Gauge}
-          label="含未提交采纳率"
-          value={formatPercent(data.codeInclusiveAdoptionRate)}
+          label="已 Push 采纳率"
+          value={formatPercent(data.codePushedAdoptionRate)}
           sub={
-            data.codeInclusiveAdoptionRate === null
-              ? "暂无代码生成数据"
-              : `${formatNumber(data.codeAdoptedLines)} / ${formatNumber(data.codeInclusiveEffectiveGeneratedLines)} 行`
+            data.codePushedAdoptionRate === null
+              ? "暂无已 Push 数据"
+              : `${formatNumber(data.codePushedAdoptedLines)} / ${formatNumber(data.codePushedEffectiveGeneratedLines)} 行`
           }
-          color="bg-cyan-500"
-          tooltipContent={<InclusiveAdoptionTooltip data={data} />}
+          color="bg-indigo-500"
+          tooltipContent={<PushedAdoptionTooltip data={data} />}
         />
         <StatCard
           icon={Gauge}
-          label="已测量采纳率"
+          label="已Commit采纳率"
           value={formatPercent(data.codeMeasuredAdoptionRate)}
           sub={
             data.codeMeasuredAdoptionRate === null
@@ -782,15 +782,15 @@ export function OverviewPanel({
         />
         <StatCard
           icon={Gauge}
-          label="已 Push 采纳率"
-          value={formatPercent(data.codePushedAdoptionRate)}
+          label="含未提交采纳率"
+          value={formatPercent(data.codeInclusiveAdoptionRate)}
           sub={
-            data.codePushedAdoptionRate === null
-              ? "暂无已 Push 数据"
-              : `${formatNumber(data.codePushedAdoptedLines)} / ${formatNumber(data.codePushedEffectiveGeneratedLines)} 行`
+            data.codeInclusiveAdoptionRate === null
+              ? "暂无代码生成数据"
+              : `${formatNumber(data.codeAdoptedLines)} / ${formatNumber(data.codeInclusiveEffectiveGeneratedLines)} 行`
           }
-          color="bg-indigo-500"
-          tooltipContent={<PushedAdoptionTooltip data={data} />}
+          color="bg-cyan-500"
+          tooltipContent={<InclusiveAdoptionTooltip data={data} />}
         />
       </div>
 

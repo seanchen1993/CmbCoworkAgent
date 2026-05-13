@@ -21,6 +21,7 @@ import {
   LayoutTemplate,
   Settings2,
   ChevronDown,
+  ChevronRight,
   ChevronUp,
   ShieldCheck,
   Info,
@@ -34,11 +35,14 @@ import {
   CircleAlert,
   FilePenLine,
   Plus,
-  Loader2
+  Loader2,
+  CornerDownLeft
 } from "lucide-react"
 import type { FileAttachment } from "@/types"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Badge } from "@/components/ui/badge"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { useAppStore } from "@/lib/store"
 import { cn } from "@/lib/utils"
 import { useShallow } from "zustand/react/shallow"
@@ -55,23 +59,297 @@ import { ContextUsageIndicator } from "./ContextUsageIndicator"
 import type { Message, SkillMetadata } from "@/types"
 import { MessageBubble } from "./MessageBubble"
 import { ChatScrollNavigator, type ChatScrollQuestion } from "./ChatScrollNavigator"
-import { UpdateStatusCard } from "./UpdateStatusCard"
 import { SkillsByCategorySection } from "./SkillsByCategorySection"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
 import { uploadChatData, ChatReportPayload } from "@/api"
 import { marketApi, MarketItem } from "../../api/market"
 import { insertLog, updateMMJUserInfo } from "../../../js/mmjUtils"
-import { UpdateDialog } from "../update/UpdateDialog"
 import { toast } from "sonner"
 import { SlashCommandPopover } from "@/features/slash-commands/SlashCommandPopover"
 import { useSlashCommands } from "@/features/slash-commands/useSlashCommands"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
 import { formatSkillUseBlock, parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
+import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
+import { DEFAULT_SCENE_CATEGORY, SCENE_CATEGORY_OPTIONS } from "@/lib/skill-data-service"
+import { groupWelcomeSkills } from "./skill-grouping"
+
+type WelcomeSkillCard = {
+  skill: SkillMetadata
+  label: string
+  icon: React.JSX.Element
+}
+
+type WelcomeSkillSceneGroup = {
+  category: string
+  cards: WelcomeSkillCard[]
+}
+
+type WelcomeSkillTreeNode = {
+  key: string
+  label: string
+  card?: WelcomeSkillCard
+  children: WelcomeSkillTreeNode[]
+}
+
+function getWelcomeSkillTreePath(skill: SkillMetadata): string {
+  const id = skill.id?.startsWith("plugin:") ? skill.id.split("/").slice(1).join("/") : skill.id
+  return String(skill.relativePath || id || skill.name || "")
+    .replace(/\\/g, "/")
+    .replace(/^\/+|\/+$/g, "")
+}
+
+function buildWelcomeSkillTree(cards: WelcomeSkillCard[]): WelcomeSkillTreeNode[] {
+  const root: WelcomeSkillTreeNode = { key: "root", label: "root", children: [] }
+  const indexByNode = new WeakMap<WelcomeSkillTreeNode, Map<string, WelcomeSkillTreeNode>>()
+
+  const getIndex = (node: WelcomeSkillTreeNode): Map<string, WelcomeSkillTreeNode> => {
+    let index = indexByNode.get(node)
+    if (!index) {
+      index = new Map(node.children.map((child) => [normalizeSkillId(child.label), child]))
+      indexByNode.set(node, index)
+    }
+    return index
+  }
+
+  for (const card of cards) {
+    const segments = getWelcomeSkillTreePath(card.skill).split("/").filter(Boolean)
+    const fallbackSegments = segments.length > 0 ? segments : [card.skill.name]
+    let current = root
+
+    for (const segment of fallbackSegments) {
+      const normalized = normalizeSkillId(segment)
+      const childIndex = getIndex(current)
+      let child = childIndex.get(normalized)
+      if (!child) {
+        child = { key: `${current.key}/${normalized}`, label: segment, children: [] }
+        current.children.push(child)
+        childIndex.set(normalized, child)
+      }
+      current = child
+    }
+
+    current.card = card
+  }
+
+  const sortNodes = (nodes: WelcomeSkillTreeNode[]): WelcomeSkillTreeNode[] =>
+    [...nodes]
+      .sort((a, b) => {
+        const labelA = a.card?.label || a.label
+        const labelB = b.card?.label || b.label
+        return labelA.localeCompare(labelB, "zh-CN")
+      })
+      .map((node) => ({ ...node, children: sortNodes(node.children) }))
+
+  return sortNodes(root.children)
+}
+
+function countWelcomeSkillTreeCards(node: WelcomeSkillTreeNode): number {
+  return (
+    (node.card ? 1 : 0) +
+    node.children.reduce((sum, child) => sum + countWelcomeSkillTreeCards(child), 0)
+  )
+}
+
+function getWelcomeSkillTopLevelKey(skill: SkillMetadata): string {
+  return normalizeSkillId(
+    getWelcomeSkillTreePath(skill).split("/").filter(Boolean)[0] || skill.name
+  )
+}
+
+function limitWelcomeSkillsByTopLevel(
+  skills: SkillMetadata[],
+  previewLimit: number
+): SkillMetadata[] {
+  if (previewLimit <= 0) return []
+  const selectedRoots = new Set<string>()
+
+  for (const skill of skills) {
+    selectedRoots.add(getWelcomeSkillTopLevelKey(skill))
+    if (selectedRoots.size >= previewLimit) break
+  }
+
+  return skills.filter((skill) => selectedRoots.has(getWelcomeSkillTopLevelKey(skill)))
+}
+
+function WelcomeSkillButton(props: {
+  card: WelcomeSkillCard
+  disabled?: boolean
+  onUseSkill: (skill: SkillMetadata, label?: string) => void
+  getSkillShowLabel: (name: string) => string
+}): React.JSX.Element {
+  const { card, disabled = false, onUseSkill, getSkillShowLabel } = props
+  const label = getSkillShowLabel(card.label)
+
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={() => {
+        if (!disabled) onUseSkill(card.skill, card.label)
+      }}
+      className={cn(
+        "group w-full rounded-xl border px-3 py-2 text-left transition-all",
+        disabled
+          ? "cursor-not-allowed border-border/70 bg-background/60 opacity-65"
+          : "border-slate-300/90 bg-slate-50/70 shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:border-slate-400/95 hover:bg-slate-100/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] dark:border-slate-600/85 dark:bg-slate-900/35 dark:hover:border-slate-500/95 dark:hover:bg-slate-800/55"
+      )}
+    >
+      <div className="flex items-center gap-2 min-w-0">
+        <div
+          className={cn(
+            "rounded-md border p-1.5 transition-colors",
+            disabled
+              ? "border-border/70 bg-background/70 text-muted-foreground"
+              : "border-slate-300/90 bg-white/80 text-slate-500 group-hover:text-slate-700 dark:border-slate-600/80 dark:bg-slate-900/45 dark:text-slate-300 dark:group-hover:text-slate-100"
+          )}
+        >
+          {card.icon}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div
+            className={cn(
+              "text-xs leading-5 truncate whitespace-nowrap",
+              disabled ? "text-muted-foreground line-through" : "text-foreground"
+            )}
+          >
+            {label}
+          </div>
+        </div>
+      </div>
+    </button>
+  )
+}
+
+function WelcomeSkillTree(props: {
+  cards: WelcomeSkillCard[]
+  disabled?: boolean
+  onUseSkill: (skill: SkillMetadata, label?: string) => void
+  getSkillShowLabel: (name: string) => string
+}): React.JSX.Element {
+  const { cards, disabled = false, onUseSkill, getSkillShowLabel } = props
+  const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
+  const tree = useMemo(() => buildWelcomeSkillTree(cards), [cards])
+  const toggleNode = useCallback((nodeKey: string) => {
+    setExpandedNodes((prev) => {
+      const next = new Set(prev)
+      if (next.has(nodeKey)) next.delete(nodeKey)
+      else next.add(nodeKey)
+      return next
+    })
+  }, [])
+
+  return (
+    <WelcomeSkillTreeList
+      nodes={tree}
+      disabled={disabled}
+      nested={false}
+      expandedNodes={expandedNodes}
+      onToggleNode={toggleNode}
+      onUseSkill={onUseSkill}
+      getSkillShowLabel={getSkillShowLabel}
+    />
+  )
+}
+
+function WelcomeSkillTreeList(props: {
+  nodes: WelcomeSkillTreeNode[]
+  disabled: boolean
+  nested: boolean
+  expandedNodes: Set<string>
+  onToggleNode: (nodeKey: string) => void
+  onUseSkill: (skill: SkillMetadata, label?: string) => void
+  getSkillShowLabel: (name: string) => string
+}): React.JSX.Element {
+  const { nodes, disabled, nested, expandedNodes, onToggleNode, onUseSkill, getSkillShowLabel } =
+    props
+
+  return (
+    <div className={nested ? "grid grid-cols-1 gap-1.5" : "grid grid-cols-2 md:grid-cols-4 gap-2"}>
+      {nodes.map((node) => {
+        const childrenExpanded = expandedNodes.has(node.key)
+        const childCount = node.children.reduce(
+          (sum, child) => sum + countWelcomeSkillTreeCards(child),
+          0
+        )
+
+        return (
+          <div key={node.key} className="min-w-0 space-y-1.5">
+            {node.card ? (
+              <WelcomeSkillButton
+                card={node.card}
+                disabled={disabled}
+                onUseSkill={onUseSkill}
+                getSkillShowLabel={getSkillShowLabel}
+              />
+            ) : (
+              <button
+                type="button"
+                onClick={() => onToggleNode(node.key)}
+                className="w-full rounded-xl border border-dashed border-border/70 bg-muted/20 px-3 py-2 text-left hover:bg-muted/35"
+              >
+                <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    {childrenExpanded ? (
+                      <ChevronDown className="size-3 shrink-0" />
+                    ) : (
+                      <ChevronRight className="size-3 shrink-0" />
+                    )}
+                    <span className="truncate">{node.label}</span>
+                  </span>
+                  <Badge variant="outline" className="h-4 px-1.5 text-[10px]">
+                    {childCount}
+                  </Badge>
+                </div>
+              </button>
+            )}
+
+            {node.children.length > 0 && (
+              <button
+                type="button"
+                onClick={() => onToggleNode(node.key)}
+                className="flex min-h-7 w-full items-center gap-2 rounded-lg border border-dashed border-border/60 bg-muted/15 px-2 py-1 text-left text-[11px] text-muted-foreground hover:bg-muted/30"
+              >
+                {expandedNodes.has(node.key) ? (
+                  <ChevronDown className="size-3 shrink-0" />
+                ) : (
+                  <ChevronRight className="size-3 shrink-0" />
+                )}
+                <span className="min-w-0 flex-1 truncate">子技能</span>
+                <Badge variant="outline" className="h-4 px-1.5 text-[10px]">
+                  {childCount}
+                </Badge>
+              </button>
+            )}
+
+            {expandedNodes.has(node.key) && (
+              <div className="border-l border-border/60 pl-2">
+                <WelcomeSkillTreeList
+                  nodes={node.children}
+                  disabled={disabled}
+                  nested
+                  expandedNodes={expandedNodes}
+                  onToggleNode={onToggleNode}
+                  onUseSkill={onUseSkill}
+                  getSkillShowLabel={getSkillShowLabel}
+                />
+              </div>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
 
 function HookLogsPanel({ logs }: { logs: HookLogEntry[] }): React.JSX.Element {
   const [expanded, setExpanded] = React.useState(false)
   const hasIssue = logs.some(
-    (l) => l.blocked || l.exitCode === null || (l.exitCode !== 0 && l.exitCode !== 2)
+    (l) =>
+      l.blocked ||
+      l.continue === false ||
+      l.decision === "block" ||
+      l.exitCode === null ||
+      (l.exitCode !== 0 && l.exitCode !== 2)
   )
   return (
     <div
@@ -92,21 +370,30 @@ function HookLogsPanel({ logs }: { logs: HookLogEntry[] }): React.JSX.Element {
           <div className="px-3 py-2 text-[11px] text-muted-foreground">
             调试日志建议写到 <span className="font-mono text-foreground/80">stderr</span>。 如果{" "}
             <span className="font-mono text-foreground/80">stdout</span> 输出的是 JSON，它会被当成
-            Hook 返回值解析。
+            Hook 返回值解析，结构化的 additionalContext 也会在这里显示。
           </div>
           {logs.map((log) => {
-            const ok = !log.blocked && log.exitCode === 0
+            const ok =
+              !log.blocked &&
+              log.continue !== false &&
+              log.decision !== "block" &&
+              log.exitCode === 0
+            const statusText = ok
+              ? "✓"
+              : log.continue === false
+                ? "终止"
+                : log.decision === "block"
+                  ? "修订"
+                  : log.blocked
+                    ? "✗ 拦截"
+                    : log.exitCode === null
+                      ? "✗ 超时"
+                      : `✗ exit=${log.exitCode}`
             return (
               <div key={log.id} className="px-3 py-2 space-y-0.5">
                 <div className="flex items-center gap-2">
                   <span className={ok ? "text-green-600 dark:text-green-400" : "text-red-500"}>
-                    {ok
-                      ? "✓"
-                      : log.blocked
-                        ? "✗ 拦截"
-                        : log.exitCode === null
-                          ? "✗ 超时"
-                          : `✗ exit=${log.exitCode}`}
+                    {statusText}
                   </span>
                   <span className="text-foreground/80 font-semibold">
                     [{log.event}
@@ -120,10 +407,23 @@ function HookLogsPanel({ logs }: { logs: HookLogEntry[] }): React.JSX.Element {
                       {log.decision}
                     </span>
                   )}
+                  {log.continue === false && (
+                    <span className="text-xs text-red-600 dark:text-red-400">continue=false</span>
+                  )}
                   <span className="ml-auto text-[10px] text-muted-foreground/70">
                     {log.timestamp.toLocaleTimeString()}
                   </span>
                 </div>
+                {(log.reason || log.stopReason) && (
+                  <div className="pl-4 space-y-1">
+                    <div className="text-[10px] uppercase tracking-wide text-amber-600/80 dark:text-amber-400/80">
+                      {log.stopReason ? "stopReason" : "reason"}
+                    </div>
+                    <div className="max-h-40 overflow-auto rounded-md border border-amber-300/40 bg-amber-50/40 px-2 py-1 text-amber-700/90 whitespace-pre-wrap break-all dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300/90">
+                      {log.stopReason || log.reason}
+                    </div>
+                  </div>
+                )}
                 {log.stdout && (
                   <div className="pl-4 space-y-1">
                     <div className="text-[10px] uppercase tracking-wide text-muted-foreground/70">
@@ -141,6 +441,16 @@ function HookLogsPanel({ logs }: { logs: HookLogEntry[] }): React.JSX.Element {
                     </div>
                     <div className="max-h-48 overflow-auto rounded-md border border-red-300/40 bg-red-50/40 px-2 py-1 text-red-500/80 whitespace-pre-wrap break-all dark:border-red-500/30 dark:bg-red-500/10">
                       {log.stderr}
+                    </div>
+                  </div>
+                )}
+                {log.additionalContext && (
+                  <div className="pl-4 space-y-1">
+                    <div className="text-[10px] uppercase tracking-wide text-blue-500/70">
+                      additionalContext
+                    </div>
+                    <div className="max-h-40 overflow-auto rounded-md border border-blue-300/40 bg-blue-50/40 px-2 py-1 text-blue-600/90 whitespace-pre-wrap break-all dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300/90">
+                      {log.additionalContext}
                     </div>
                   </div>
                 )}
@@ -324,6 +634,7 @@ export function ChatContainer({
   const requestedUserQuestionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const isComposingRef = useRef(false)
   const [skills, setSkills] = useState<SkillMetadata[]>([])
+  const [disabledSkillIds, setDisabledSkillIds] = useState<Set<string>>(new Set())
   const [skillsLoading, setSkillsLoading] = useState(true)
   const [showAllProgrammingSkills, setShowAllProgrammingSkills] = useState(false)
   const [showAllCustomSkills, setShowAllCustomSkills] = useState(false)
@@ -363,9 +674,7 @@ export function ChatContainer({
   const thinkingCycleRef = useRef(-1)
   const wasLoadingRef = useRef(false)
   const loadingMessageCountRef = useRef(0)
-  const [needUpdateVersion, setNeedUpdateVersion] = useState(false)
   const [modelContextLimit, setModelContextLimit] = useState<number | undefined>(undefined)
-  const [updateDialogOpen, setUpdateDialogOpen] = useState(false)
 
   useEffect(() => {
     const { ipcRenderer } = window.electron
@@ -428,10 +737,12 @@ export function ChatContainer({
     loadThreads,
     generateTitleForFirstMessage,
     setShowCustomizeView,
-    setMarketInitialSkillCategory
+    setMarketInitialSkillCategory,
+    setMarketInitialSkillDetailName
   } = useAppStore()
 
   const allSkillsRef = useRef<MarketItem[]>([])
+  const [marketSkillsData, setMarketSkillsData] = useState<MarketItem[]>([])
   const [goodSkillsData, setGoodSkillsData] = useState<MarketItem[]>([])
 
   // Define loadSkills function at component level so it can be accessed everywhere
@@ -454,9 +765,10 @@ export function ChatContainer({
         pluginSkillsPromise,
         window.api.skills.getDisabled()
       ])
-      const disabledSet = new Set(disabledList)
+      const disabledSet = new Set(disabledList.map(normalizeSkillId))
+      setDisabledSkillIds(disabledSet)
       const availableSkills = loadedSkills.filter(
-        (s) => (s.source === "project" || s.source === "user") && !disabledSet.has(s.name)
+        (s) => s.source === "project" || s.source === "user"
       )
       // Built-in/custom names win over plugin names: plugins are third-party
       // and shouldn't shadow first-party skills the user expects to see.
@@ -477,6 +789,7 @@ export function ChatContainer({
       const allSkills = res?.data || []
       const goodSkills = res?.data?.filter((it) => it.featured === "精品")
       allSkillsRef.current = allSkills
+      setMarketSkillsData(allSkills)
       setGoodSkillsData(goodSkills || [])
 
       // 自动安装所有精品技能
@@ -552,6 +865,7 @@ export function ChatContainer({
     pendingApproval,
     todos,
     error: threadError,
+    hookInterruption,
     workspacePath,
     tokenUsage,
     currentModel,
@@ -565,6 +879,7 @@ export function ChatContainer({
     appendMessage,
     setError,
     clearError,
+    clearHookInterruption,
     setDraftInput: setInput,
     setDraftSkill: setSelectedSkill
   } = useCurrentThread(threadId)
@@ -773,43 +1088,6 @@ export function ChatContainer({
       ignore = true
     }
   }, [currentModel])
-
-  const syncNeedUpdateVersion = useCallback(async () => {
-    try {
-      const status = await window.api.update.getStatus()
-      setNeedUpdateVersion(Boolean(status.update) && status.status !== "idle")
-    } catch (error) {
-      console.warn("[ChatContainer] Failed to sync update status:", error)
-      setNeedUpdateVersion(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    const updateApi = window.api.update
-    void syncNeedUpdateVersion()
-
-    const removeAvailable = updateApi.onAvailable(() => {
-      setNeedUpdateVersion(true)
-    })
-    const removeDownloaded = updateApi.onDownloaded(() => {
-      setNeedUpdateVersion(true)
-    })
-    const removeError = updateApi.onError(() => {
-      void syncNeedUpdateVersion()
-    })
-
-    return () => {
-      removeAvailable()
-      removeDownloaded()
-      removeError()
-    }
-  }, [syncNeedUpdateVersion])
-
-  useEffect(() => {
-    if (!updateDialogOpen) {
-      void syncNeedUpdateVersion()
-    }
-  }, [updateDialogOpen, syncNeedUpdateVersion])
 
   useEffect(() => {
     queryRemoteSkills()
@@ -1257,6 +1535,11 @@ export function ChatContainer({
   // Auto-scroll on new messages only if already at bottom
   useEffect(() => {
     const viewport = getViewport()
+    if (viewport && displayMessages.length === 0) {
+      viewport.scrollTop = 0
+      isAtBottomRef.current = true
+      return
+    }
     if (viewport && isAtBottomRef.current) {
       viewport.scrollTop = viewport.scrollHeight
     }
@@ -1276,10 +1559,15 @@ export function ChatContainer({
   useEffect(() => {
     const viewport = getViewport()
     if (viewport) {
+      if (displayMessages.length === 0) {
+        viewport.scrollTop = 0
+        isAtBottomRef.current = true
+        return
+      }
       viewport.scrollTop = viewport.scrollHeight
       isAtBottomRef.current = true
     }
-  }, [threadId, getViewport])
+  }, [displayMessages.length, threadId, getViewport])
 
   // Focus input on mount
   useEffect(() => {
@@ -1290,9 +1578,19 @@ export function ChatContainer({
     clearError()
   }
 
+  const isLocalSkillDisabled = useCallback(
+    (skill: SkillMetadata): boolean => !skill.pluginId && isSkillDisabled(skill, disabledSkillIds),
+    [disabledSkillIds]
+  )
+
+  const enabledSkillsForSlash = useMemo(
+    () => skills.filter((skill) => !isLocalSkillDisabled(skill)),
+    [skills, isLocalSkillDisabled]
+  )
+
   const slash = useSlashCommands({
     input,
-    skills,
+    skills: enabledSkillsForSlash,
     skillSelected: selectedSkill !== null
   })
 
@@ -1510,6 +1808,24 @@ export function ChatContainer({
     }
   }
 
+  const handleInsertNewline = useCallback((): void => {
+    if (isLoading) return
+
+    const textarea = inputRef.current
+    const selectionStart = textarea?.selectionStart ?? input.length
+    const selectionEnd = textarea?.selectionEnd ?? input.length
+    const nextInput = `${input.slice(0, selectionStart)}\n${input.slice(selectionEnd)}`
+    const nextCursor = selectionStart + 1
+
+    setInput(nextInput)
+    requestAnimationFrame(() => {
+      const target = inputRef.current
+      if (!target) return
+      target.focus()
+      target.setSelectionRange(nextCursor, nextCursor)
+    })
+  }, [input, isLoading, setInput])
+
   // Auto-resize textarea based on content
   const adjustTextareaHeight = (): void => {
     const textarea = inputRef.current
@@ -1637,8 +1953,10 @@ export function ChatContainer({
   // ────────────────────────────────────────────────────────
 
   const getSkillId = useCallback((skill: SkillMetadata): string => {
-    const fromPath = skill?.path?.split("/").slice(-2, -1)[0]
-    return (fromPath || skill.name || "").toLowerCase()
+    const idSegments = getSkillMetadataId(skill).split("/").filter(Boolean)
+    const fromId = idSegments.length > 0 ? idSegments[idSegments.length - 1] : undefined
+    const fromPath = skill?.path?.replace(/\\/g, "/").split("/").slice(-2, -1)[0]
+    return (fromId || fromPath || skill.name || "").toLowerCase()
   }, [])
 
   const buildSkillPrompt = useCallback(
@@ -1918,26 +2236,10 @@ export function ChatContainer({
     [getSkillId, programmingSkillIds]
   )
 
-  const { generalSkills, programmingSkills, customSkills } = useMemo(() => {
-    const builtInSkills = skills.filter((skill) => skill.source === "project")
-    const userSkills = skills.filter((skill) => skill.source === "user")
-
-    const general = builtInSkills.filter((skill) => !isProgrammingSkill(skill))
-    const programming = builtInSkills.filter(isProgrammingSkill)
-
-    // 精品技能名称集合，从「我安装的技能」中剔除
-    const goodSkillNames = new Set(goodSkillsData.map((g) => g.name))
-    const pureCustomSkills = userSkills.filter(
-      (s) => !goodSkillNames.has(s.name) && s.name !== "encrypt-password"
-    )
-    // todo  s.name !== 'encrypt-password' 这个逻辑在代码暂时写死，后面排查
-
-    return {
-      generalSkills: general,
-      programmingSkills: programming,
-      customSkills: pureCustomSkills
-    }
-  }, [skills, isProgrammingSkill, goodSkillsData])
+  const { generalSkills, programmingSkills, enabledCustomSkills, disabledLocalSkills } =
+    useMemo(() => {
+      return groupWelcomeSkills(skills, goodSkillsData, isLocalSkillDisabled, isProgrammingSkill)
+    }, [skills, isLocalSkillDisabled, isProgrammingSkill, goodSkillsData])
 
   const handleOpenMarketBySecondaryCategory = useCallback(
     (secondaryCategory: string): void => {
@@ -1945,6 +2247,14 @@ export function ChatContainer({
       setShowCustomizeView(true, "market")
     },
     [setMarketInitialSkillCategory, setShowCustomizeView]
+  )
+
+  const handleOpenMarketBySkill = useCallback(
+    (skillName: string): void => {
+      setMarketInitialSkillDetailName(skillName)
+      setShowCustomizeView(true, "market")
+    },
+    [setMarketInitialSkillDetailName, setShowCustomizeView]
   )
 
   const programmingSkillCards = useMemo(() => {
@@ -1956,14 +2266,66 @@ export function ChatContainer({
     }))
   }, [showAllProgrammingSkills, programmingSkills, getSkillSummary, getSkillIcon])
 
-  const customSkillCards = useMemo(() => {
-    const source = showAllCustomSkills ? customSkills : customSkills.slice(0, 8)
-    return source.map((skill) => ({
-      skill,
-      label: getSkillSummary(skill),
-      icon: getSkillIcon(skill)
-    }))
-  }, [showAllCustomSkills, customSkills, getSkillSummary, getSkillIcon])
+  const marketSkillCategoryByName = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const item of marketSkillsData) {
+      if (!item.category) continue
+      map.set(item.name, item.category)
+      if (item.chinese_name) map.set(item.chinese_name, item.category)
+    }
+    return map
+  }, [marketSkillsData])
+
+  const getSkillSceneCategory = useCallback(
+    (skill: SkillMetadata): string => {
+      const category =
+        skill.metadata?.category ||
+        marketSkillCategoryByName.get(skill.name) ||
+        DEFAULT_SCENE_CATEGORY
+      return category.trim() || DEFAULT_SCENE_CATEGORY
+    },
+    [marketSkillCategoryByName]
+  )
+
+  const buildWelcomeSkillGroups = useCallback(
+    (sourceSkills: SkillMetadata[]): WelcomeSkillSceneGroup[] => {
+      const groups = new Map<string, WelcomeSkillCard[]>()
+      for (const skill of sourceSkills) {
+        const category = getSkillSceneCategory(skill)
+        const cards = groups.get(category) ?? []
+        cards.push({
+          skill,
+          label: getSkillSummary(skill),
+          icon: getSkillIcon(skill)
+        })
+        groups.set(category, cards)
+      }
+
+      const categoryOrder = new Map<string, number>(
+        SCENE_CATEGORY_OPTIONS.map((category, index) => [category, index])
+      )
+      return [...groups.entries()]
+        .sort(([a], [b]) => {
+          const rankA = categoryOrder.get(a) ?? Number.MAX_SAFE_INTEGER
+          const rankB = categoryOrder.get(b) ?? Number.MAX_SAFE_INTEGER
+          return rankA === rankB ? a.localeCompare(b, "zh-CN") : rankA - rankB
+        })
+        .map(([category, cards]) => ({ category, cards }))
+    },
+    [getSkillIcon, getSkillSceneCategory, getSkillSummary]
+  )
+
+  const enabledCustomSkillGroups = useMemo(() => {
+    const source = showAllCustomSkills
+      ? enabledCustomSkills
+      : limitWelcomeSkillsByTopLevel(enabledCustomSkills, 8)
+    return buildWelcomeSkillGroups(source)
+  }, [buildWelcomeSkillGroups, enabledCustomSkills, showAllCustomSkills])
+
+  const disabledCustomSkillGroups = useMemo(
+    () => buildWelcomeSkillGroups(disabledLocalSkills),
+    [buildWelcomeSkillGroups, disabledLocalSkills]
+  )
 
   const helpSceneSkillIds = useMemo(() => new Set(["scheduler-assistant", "skill-creator"]), [])
   const helpSceneSkillCards = useMemo(() => {
@@ -2266,54 +2628,60 @@ export function ChatContainer({
                       <TabsContent value="skills-by-category" className="mt-0">
                         {/* 市场技能：内部使用 getAllSkills 取数并按分类展示 */}
                         <SkillsByCategorySection
-                          skills={skills}
+                          skills={enabledSkillsForSlash}
                           previewLimit={GOOD_SKILLS_PREVIEW_LIMIT}
                           onOpenMarketByCategory={handleOpenMarketBySecondaryCategory}
+                          onOpenMarketBySkill={handleOpenMarketBySkill}
                           onUseSkillPrompt={handleUseSkillPrompt}
                         />
                       </TabsContent>
 
-                      <TabsContent value="installed-skills" className="mt-0 space-y-2">
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                          {customSkillCards?.length ? (
-                            customSkillCards.map(({ skill, label }) => (
-                              <button
-                                key={label + skill.path}
-                                type="button"
-                                onClick={() => handleUseSkillPrompt(skill, label)}
-                                className="group w-full rounded-xl border border-slate-300/90 dark:border-slate-600/85 bg-slate-50/70 dark:bg-slate-900/35 px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:bg-slate-100/95 dark:hover:bg-slate-800/55 hover:border-slate-400/95 dark:hover:border-slate-500/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
+                      <TabsContent value="installed-skills" className="mt-0 space-y-3">
+                        {enabledCustomSkillGroups.length > 0 ? (
+                          <div className="rounded-lg border border-emerald-200/70 bg-emerald-50/35 px-2 py-2 dark:border-emerald-900/40 dark:bg-emerald-950/10">
+                            <div className="mb-2 flex items-center justify-between gap-2 text-xs font-medium text-emerald-800 dark:text-emerald-200">
+                              <span>已启用技能</span>
+                              <Badge
+                                variant="outline"
+                                className="h-5 min-w-6 justify-center px-1.5 text-[10px]"
                               >
-                                <div className="flex items-center gap-2 min-w-0">
-                                  <div className="rounded-md border border-slate-300/90 dark:border-slate-600/80 bg-white/80 dark:bg-slate-900/45 p-1.5 text-slate-500 dark:text-slate-300 group-hover:text-slate-700 dark:group-hover:text-slate-100 transition-colors">
-                                    <Wrench className={"size-4"} />
+                                {enabledCustomSkills.length}
+                              </Badge>
+                            </div>
+                            <div className="space-y-3">
+                              {enabledCustomSkillGroups.map((group) => (
+                                <div key={group.category} className="space-y-2">
+                                  <div className="text-xs text-muted-foreground font-medium tracking-wider">
+                                    {group.category}
                                   </div>
-                                  <div className="min-w-0 flex-1">
-                                    <div className="text-xs text-foreground leading-5 truncate whitespace-nowrap">
-                                      {getSkillShowLabel(label)}
-                                    </div>
-                                  </div>
+                                  <WelcomeSkillTree
+                                    cards={group.cards}
+                                    onUseSkill={handleUseSkillPrompt}
+                                    getSkillShowLabel={getSkillShowLabel}
+                                  />
                                 </div>
-                              </button>
-                            ))
-                          ) : (
-                            <button
-                              type="button"
-                              className="group w-full rounded-xl border border-slate-300/90 dark:border-slate-600/85 bg-slate-50/70 dark:bg-slate-900/35 px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:bg-slate-100/95 dark:hover:bg-slate-800/55 hover:border-slate-400/95 dark:hover:border-slate-500/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
-                            >
-                              <div className="flex items-center gap-2 min-w-0">
-                                <div className="rounded-md border border-slate-300/90 dark:border-slate-600/80 bg-white/80 dark:bg-slate-900/45 p-1.5 text-slate-500 dark:text-slate-300 group-hover:text-slate-700 dark:group-hover:text-slate-100 transition-colors">
-                                  <CircleAlert className={"size-4"} />
-                                </div>
-                                <div className="min-w-0 flex-1">
-                                  <div className="text-xs text-foreground leading-5 truncate whitespace-nowrap">
-                                    暂无
-                                  </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            className="group w-full rounded-xl border border-slate-300/90 dark:border-slate-600/85 bg-slate-50/70 dark:bg-slate-900/35 px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:bg-slate-100/95 dark:hover:bg-slate-800/55 hover:border-slate-400/95 dark:hover:border-slate-500/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
+                          >
+                            <div className="flex items-center gap-2 min-w-0">
+                              <div className="rounded-md border border-slate-300/90 dark:border-slate-600/80 bg-white/80 dark:bg-slate-900/45 p-1.5 text-slate-500 dark:text-slate-300 group-hover:text-slate-700 dark:group-hover:text-slate-100 transition-colors">
+                                <CircleAlert className={"size-4"} />
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <div className="text-xs text-foreground leading-5 truncate whitespace-nowrap">
+                                  暂无
                                 </div>
                               </div>
-                            </button>
-                          )}
-                        </div>
-                        {customSkills.length > 8 && (
+                            </div>
+                          </button>
+                        )}
+
+                        {enabledCustomSkills.length > 8 && (
                           <button
                             type="button"
                             onClick={() => setShowAllCustomSkills((prev) => !prev)}
@@ -2327,10 +2695,39 @@ export function ChatContainer({
                             ) : (
                               <>
                                 <ChevronDown className="size-3.5" />
-                                <span>展开更多（+{customSkills.length - 8}）</span>
+                                <span>展开更多（+{enabledCustomSkills.length - 8}）</span>
                               </>
                             )}
                           </button>
+                        )}
+
+                        {disabledLocalSkills.length > 0 && (
+                          <details className="rounded-lg border border-border/70 bg-muted/20 px-2 py-2">
+                            <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-xs font-medium text-muted-foreground">
+                              <span>已禁用技能</span>
+                              <Badge
+                                variant="outline"
+                                className="h-5 min-w-6 justify-center px-1.5 text-[10px]"
+                              >
+                                {disabledLocalSkills.length}
+                              </Badge>
+                            </summary>
+                            <div className="mt-2 space-y-2">
+                              {disabledCustomSkillGroups.map((group) => (
+                                <div key={group.category} className="space-y-2">
+                                  <div className="text-xs text-muted-foreground/80 font-medium tracking-wider">
+                                    {group.category}
+                                  </div>
+                                  <WelcomeSkillTree
+                                    cards={group.cards}
+                                    disabled
+                                    onUseSkill={handleUseSkillPrompt}
+                                    getSkillShowLabel={getSkillShowLabel}
+                                  />
+                                </div>
+                              ))}
+                            </div>
+                          </details>
                         )}
                       </TabsContent>
 
@@ -2378,13 +2775,7 @@ export function ChatContainer({
                               <div className="text-xs text-foreground leading-5">操作说明文档</div>
                             </div>
                           </button>
-
-                          <UpdateStatusCard
-                            hasUpdate={needUpdateVersion}
-                            onClick={() => {
-                              setUpdateDialogOpen(true)
-                            }}
-                          />
+                          {/*<UpdateActionButton />*/}
                         </div>
                       </TabsContent>
                     </Tabs>
@@ -2460,6 +2851,40 @@ export function ChatContainer({
                   </span>
                 </div>
                 {todos.length > 0 && <ChatTodos todos={todos} />}
+              </div>
+            )}
+            {hookInterruption && !isLoading && (
+              <div className="flex items-start gap-3 rounded-md border border-amber-400/60 bg-amber-50/50 p-4 dark:border-amber-500/40 dark:bg-amber-500/10">
+                <ShieldCheck className="size-5 text-amber-600 shrink-0 mt-0.5 dark:text-amber-300" />
+                <div className="flex-1 min-w-0">
+                  <div className="font-medium text-amber-800 text-sm dark:text-amber-200">
+                    {hookInterruption.action === "halt" ? "Hook 已停止本轮" : "Hook 已阻断本轮"}
+                  </div>
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-amber-700/80 dark:text-amber-200/80">
+                    <span className="rounded border border-amber-400/50 px-1.5 py-0.5 font-mono">
+                      {hookInterruption.event}
+                    </span>
+                    <span>{hookInterruption.timestamp.toLocaleTimeString()}</span>
+                  </div>
+                  <div className="text-sm text-amber-900/90 mt-2 break-words dark:text-amber-100/90">
+                    {hookInterruption.reason}
+                  </div>
+                  {hookInterruption.systemMessage && (
+                    <div className="text-xs text-amber-700/80 mt-2 break-words dark:text-amber-200/80">
+                      {hookInterruption.systemMessage}
+                    </div>
+                  )}
+                  <div className="text-xs text-muted-foreground mt-2">
+                    这是 Hook 策略结果，不是 Agent 运行错误。你可以发送新消息继续对话。
+                  </div>
+                </div>
+                <button
+                  onClick={clearHookInterruption}
+                  className="shrink-0 rounded p-1 hover:bg-amber-500/20 transition-colors"
+                  aria-label="Dismiss hook notice"
+                >
+                  <X className="size-4 text-muted-foreground" />
+                </button>
               </div>
             )}
             {/* Error state */}
@@ -2858,7 +3283,7 @@ export function ChatContainer({
                   placeholder={
                     attachments.length > 0
                       ? "输入消息或直接发送文件..."
-                      : "向 CMBDevClaw 提问，/ 输入命令"
+                      : "向 CMBDevClaw 提问，/ 输入命令；Shift + Enter 换行"
                   }
                   disabled={isLoading}
                   className={cn(
@@ -2896,6 +3321,24 @@ export function ChatContainer({
                     />
                   </div>
                   <div className="flex items-center gap-2">
+                    <TooltipProvider delayDuration={180}>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            type="button"
+                            disabled={isLoading}
+                            onClick={handleInsertNewline}
+                            aria-label="换行"
+                            className="cursor-pointer flex items-center justify-center size-7 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            <CornerDownLeft className="size-3.5" />
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent side="top" sideOffset={6}>
+                          Shift + Enter 换行
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
                     {isLoading ? (
                       <button
                         type="button"
@@ -2949,7 +3392,6 @@ export function ChatContainer({
           </div>
         </form>
       </div>
-      <UpdateDialog open={updateDialogOpen} onOpenChange={setUpdateDialogOpen} />
     </div>
   )
 }

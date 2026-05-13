@@ -1,8 +1,8 @@
 /**
- * Marks code_adopt telemetry as pushed after a successful Git push.
+ * Marks commit-related telemetry as pushed after a successful Git push.
  *
  * The dashboard can then query `properties.pushed = true` directly instead of
- * doing a runtime commitSha join between code adoption and push events.
+ * doing a runtime commitSha join between commit/adoption and push events.
  */
 
 const UPDATE_TIMEOUT_MS = 10_000
@@ -109,14 +109,7 @@ export function buildCodeAdoptionPushedUpdateBody(args: MarkCodeAdoptionPushedAr
         }
         ctx._source.properties.pushed = true;
         ctx._source.properties.pushedAt = params.pushedAt;
-        ctx._source.properties.pushRepoPath = params.repoPath;
-        ctx._source.properties.pushBranch = params.branch;
-        ctx._source.properties.pushRemoteUrl = params.remoteUrl;
-        ctx._source.properties.pushRepositoryName = params.repositoryName;
-        ctx._source.properties.pushRepositoryFullName = params.repositoryFullName;
-        ctx._source.properties.pushRepositoryHost = params.repositoryHost;
-        ctx._source.properties.pushRepositoryWebUrl = params.repositoryWebUrl;
-        ctx._source.properties.pushCommitUrlTemplate = params.commitUrlTemplate;
+        ctx._source.properties.remoteUrl = params.remoteUrl;
         ctx._source.properties.repositoryName = params.repositoryName;
         ctx._source.properties.repositoryFullName = params.repositoryFullName;
         ctx._source.properties.repositoryHost = params.repositoryHost;
@@ -130,7 +123,6 @@ export function buildCodeAdoptionPushedUpdateBody(args: MarkCodeAdoptionPushedAr
           commitUrl = commitUrl.replace('{repositoryFullName}', params.repositoryFullName);
           commitUrl = commitUrl.replace('{sha}', ctx._source.properties.commitSha);
           commitUrl = commitUrl.replace('{commitSha}', ctx._source.properties.commitSha);
-          ctx._source.properties.pushCommitUrl = commitUrl;
           ctx._source.properties.commitUrl = commitUrl;
         }
         ctx._source.properties.pushOperationId = params.pushOperationId;
@@ -151,7 +143,7 @@ export function buildCodeAdoptionPushedUpdateBody(args: MarkCodeAdoptionPushedAr
     query: {
       bool: {
         filter: [
-          { term: { eventName: "code_adopt" } },
+          { terms: { eventName: ["code_adopt", "git.commit.created"] } },
           { terms: { "properties.commitSha": commitShas } }
         ]
       }
@@ -161,14 +153,24 @@ export function buildCodeAdoptionPushedUpdateBody(args: MarkCodeAdoptionPushedAr
 
 export function scheduleMarkCodeAdoptionCommitsPushed(args: MarkCodeAdoptionPushedArgs): void {
   const commitShas = normalizeCommitShas(args.commitShas)
-  if (commitShas.length === 0) return
+  if (commitShas.length === 0) {
+    console.log("[CodeAdoptionPushUpdater] no commit SHAs to mark as pushed")
+    return
+  }
+
+  console.log(
+    `[CodeAdoptionPushUpdater] scheduling push marking: commits=${commitShas.length} shas=${commitShas.join(",")} retryDelays=[${RETRY_DELAYS_MS.join(",")}]`
+  )
 
   for (const delayMs of RETRY_DELAYS_MS) {
     const timeout = setTimeout(() => {
+      console.log(
+        `[CodeAdoptionPushUpdater] attempting push marking (delay=${delayMs}ms): commits=${commitShas.length}`
+      )
       void markCodeAdoptionCommitsPushed({ ...args, commitShas })
         .then((result) => {
           console.log(
-            `[CodeAdoptionPushUpdater] marked pushed code_adopt docs: ` +
+            `[CodeAdoptionPushUpdater] push marking OK: ` +
             `updated=${result.updated ?? 0}, total=${result.total ?? 0}, commits=${commitShas.length}`
           )
           if (Array.isArray(result.failures) && result.failures.length > 0) {
@@ -176,7 +178,7 @@ export function scheduleMarkCodeAdoptionCommitsPushed(args: MarkCodeAdoptionPush
           }
         })
         .catch((e) => {
-          console.warn("[CodeAdoptionPushUpdater] failed to mark pushed code_adopt docs:", e)
+          console.warn("[CodeAdoptionPushUpdater] push marking failed:", e)
         })
     }, delayMs)
     timeout.unref?.()

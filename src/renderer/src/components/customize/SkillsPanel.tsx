@@ -31,6 +31,7 @@ import {
 import { cn } from "@/lib/utils"
 import type { SkillMetadata } from "@/types"
 import { useAppStore } from "@/lib/store"
+import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
 import { marketApi, type MarketItem } from "../../api/market"
 import { DEFAULT_SCENE_CATEGORY, SCENE_CATEGORY_OPTIONS } from "../../lib/skill-data-service"
 import { SkillFileEditor } from "./SkillFileEditor"
@@ -43,6 +44,12 @@ type FileTreeNode = {
   path: string
   isDir: boolean
   children: FileTreeNode[]
+}
+type SkillTreeNode = {
+  key: string
+  label: string
+  skill?: SkillMetadata
+  children: SkillTreeNode[]
 }
 
 type SkillMarketInfo = Pick<
@@ -120,20 +127,25 @@ const EDITED_SKILL_PATHS_KEY = "skills_panel_edited_skill_paths"
  * - 比较统一转小写（Windows 大小写不敏感场景更稳妥）
  */
 function normalizeSkillPathKey(skillPath: string): string {
-  return String(skillPath || "").replace(/\\/g, "/").trim().toLowerCase()
+  return String(skillPath || "")
+    .replace(/\\/g, "/")
+    .trim()
+    .toLowerCase()
 }
 
 /**
  * 统一目录名 Key，用于把 upload 返回的目录名与 skills.list() 结果做匹配。
  */
 function normalizeDirNameKey(dirName: string): string {
-  return String(dirName || "")
-    .replace(/\\/g, "/")
-    .split("/")
-    .filter(Boolean)
-    .pop()
-    ?.trim()
-    .toLowerCase() || ""
+  return (
+    String(dirName || "")
+      .replace(/\\/g, "/")
+      .split("/")
+      .filter(Boolean)
+      .pop()
+      ?.trim()
+      .toLowerCase() || ""
+  )
 }
 
 /**
@@ -288,7 +300,9 @@ function removeEditedSkillPathFromStorage(skillPath: string): void {
 }
 
 function normalizeSkillName(value?: string): string {
-  return String(value || "").trim().toLowerCase()
+  return String(value || "")
+    .trim()
+    .toLowerCase()
 }
 
 function buildUserIdFromUserInfo(userInfo: UserInfoLite | null): string | undefined {
@@ -300,7 +314,10 @@ function buildUserIdFromUserInfo(userInfo: UserInfoLite | null): string | undefi
   return segments.length > 0 ? segments.join(" / ") : undefined
 }
 
-function getSkillChineseName(skill: SkillMetadata, marketInfo: SkillMarketInfo | undefined): string {
+function getSkillChineseName(
+  skill: SkillMetadata,
+  marketInfo: SkillMarketInfo | undefined
+): string {
   const marketChinese = marketInfo?.chinese_name?.trim()
   if (marketChinese) return marketChinese
   const metadataChinese = skill.metadata?.chinese_name?.trim()
@@ -345,6 +362,19 @@ function mergeMarkdownFrontmatter(protectedPrefix: string, editableContent: stri
   return `${protectedPrefix}\n${editableContent}`
 }
 
+function buildNestedNameConflictConfirmMessage(
+  conflicts: Array<{ name: string; relativePath: string }>
+): string {
+  const preview =
+    conflicts.length <= 5
+      ? conflicts.map((item) => `${item.name}（${item.relativePath}）`).join("、")
+      : `${conflicts
+          .slice(0, 5)
+          .map((item) => `${item.name}（${item.relativePath}）`)
+          .join("、")} 等`
+  return `导入会引入 ${conflicts.length} 个与现有 skill 同名的子技能：${preview}，是否继续？\n\n继续后面板中可能出现同名技能，可通过目录层级区分。`
+}
+
 function UploadSkillDialog(props: {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -370,7 +400,19 @@ function UploadSkillDialog(props: {
       setUploading(true)
       try {
         const buffer = await file.arrayBuffer()
-        const res = await window.api.skills.upload(buffer, file.name)
+        let res = await window.api.skills.upload(buffer, file.name)
+        if (!res.success && res.nestedNameConflicts?.length) {
+          const shouldContinue = window.confirm(
+            buildNestedNameConflictConfirmMessage(res.nestedNameConflicts)
+          )
+          if (!shouldContinue) {
+            setError("已取消导入")
+            return
+          }
+          res = await window.api.skills.upload(buffer, file.name, {
+            allowNestedNameDuplicates: true
+          })
+        }
         if (res.success) {
           onSuccess(res.skillName)
           onOpenChange(false)
@@ -418,7 +460,8 @@ function UploadSkillDialog(props: {
         <DialogHeader>
           <DialogTitle>上传技能</DialogTitle>
           <DialogDescription>
-            .md 文件需包含 YAML frontmatter 中的 name 字段；.zip 文件需包含 SKILL.md
+            .md 文件需包含 YAML frontmatter 中的 name 字段；.zip 文件需包含
+            SKILL.md，可包含嵌套子技能
           </DialogDescription>
         </DialogHeader>
         <div
@@ -501,7 +544,8 @@ function PublishSkillDialog(props: {
     setError(null)
     setUploading(true)
     try {
-      const exported = await window.api.skills.exportForMarket(skill.path)
+      const includeNestedSkills = await resolveNestedSkillExportChoice(skill)
+      const exported = await window.api.skills.exportForMarket(skill.path, { includeNestedSkills })
       if (!exported.success || !exported.buffer) {
         setError(exported.error || "导出技能失败")
         return
@@ -565,7 +609,8 @@ function PublishSkillDialog(props: {
         <DialogHeader>
           <DialogTitle>{mode === "update" ? "更新市场技能" : "发布到公共市场"}</DialogTitle>
           <DialogDescription>
-            会自动打包当前技能目录为 zip 并提交到 Market。名称将使用技能英文名且不可修改。
+            会自动打包当前技能目录为 zip 并提交到
+            Market。若包含嵌套子技能，发布前会询问是否一并上传。
           </DialogDescription>
         </DialogHeader>
 
@@ -650,7 +695,13 @@ function PublishSkillDialog(props: {
             取消
           </Button>
           <Button onClick={handlePublish} disabled={!skill || uploading}>
-            {uploading ? (mode === "update" ? "更新中..." : "发布中...") : mode === "update" ? "更新发布" : "一键发布"}
+            {uploading
+              ? mode === "update"
+                ? "更新中..."
+                : "发布中..."
+              : mode === "update"
+                ? "更新发布"
+                : "一键发布"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -671,6 +722,35 @@ function getRelativeFileName(skillPath: string, filePath: string): string {
     return normalizedFile.slice(skillDir.length + 1)
   }
   return normalizedFile
+}
+
+function getNestedChildSkillRoots(skillPath: string, files: string[]): string[] {
+  const roots = new Set<string>()
+  for (const filePath of files) {
+    const relative = getRelativeFileName(skillPath, filePath).replace(/\\/g, "/")
+    if (!/(^|\/)SKILL\.md$/i.test(relative)) continue
+    if (relative.toUpperCase() === "SKILL.MD") continue
+    const root = relative.replace(/\/SKILL\.md$/i, "")
+    if (root) roots.add(root)
+  }
+  return [...roots].sort((a, b) => a.localeCompare(b))
+}
+
+async function resolveNestedSkillExportChoice(skill: SkillMetadata): Promise<boolean> {
+  const res = await window.api.skills.listFiles(skill.path)
+  if (!res.success) {
+    throw new Error(res.error || "检测子技能失败")
+  }
+  const nestedSkillRoots = getNestedChildSkillRoots(skill.path, res.files || [])
+  if (nestedSkillRoots.length === 0) return true
+
+  const preview =
+    nestedSkillRoots.length <= 5
+      ? nestedSkillRoots.join("、")
+      : `${nestedSkillRoots.slice(0, 5).join("、")} 等`
+  return window.confirm(
+    `这个 skill 下包含 ${nestedSkillRoots.length} 个子技能（${preview}），是否一并上传？\n\n点击“确定”一并上传，点击“取消”仅上传当前 skill。`
+  )
 }
 
 function createDirNode(id: string, name: string, path: string): FileTreeNode {
@@ -746,6 +826,79 @@ function buildFileTree(skillPath: string, files: string[]): FileTreeNode[] {
   return sortTreeNodes(root.children, true)
 }
 
+function getSkillTreePath(skill: SkillMetadata): string {
+  const id = skill.id?.startsWith("plugin:") ? skill.id.split("/").slice(1).join("/") : skill.id
+  return String(skill.relativePath || id || skill.name || "")
+    .replace(/\\/g, "/")
+    .replace(/^\/+|\/+$/g, "")
+}
+
+function buildSkillTree(skills: SkillMetadata[]): SkillTreeNode[] {
+  const root: SkillTreeNode = { key: "root", label: "root", children: [] }
+  const indexByNode = new WeakMap<SkillTreeNode, Map<string, SkillTreeNode>>()
+
+  const getIndex = (node: SkillTreeNode): Map<string, SkillTreeNode> => {
+    let index = indexByNode.get(node)
+    if (!index) {
+      index = new Map(node.children.map((child) => [normalizeSkillId(child.label), child]))
+      indexByNode.set(node, index)
+    }
+    return index
+  }
+
+  for (const skill of skills) {
+    const segments = getSkillTreePath(skill).split("/").filter(Boolean)
+    const fallbackSegments = segments.length > 0 ? segments : [skill.name]
+    let current = root
+
+    for (const segment of fallbackSegments) {
+      const key = `${current.key}/${normalizeSkillId(segment)}`
+      const childIndex = getIndex(current)
+      let child = childIndex.get(normalizeSkillId(segment))
+      if (!child) {
+        child = { key, label: segment, children: [] }
+        current.children.push(child)
+        childIndex.set(normalizeSkillId(segment), child)
+      }
+      current = child
+    }
+
+    current.skill = skill
+  }
+
+  const sortNodes = (nodes: SkillTreeNode[]): SkillTreeNode[] =>
+    [...nodes]
+      .sort((a, b) => a.label.localeCompare(b.label, "zh-CN"))
+      .map((node) => ({ ...node, children: sortNodes(node.children) }))
+
+  return sortNodes(root.children)
+}
+
+function countSkillTreeSkills(node: SkillTreeNode): number {
+  return (
+    (node.skill ? 1 : 0) +
+    node.children.reduce((sum, child) => sum + countSkillTreeSkills(child), 0)
+  )
+}
+
+function splitSkillsByEnabled(
+  skills: SkillMetadata[],
+  disabledSkillIds: ReadonlySet<string>
+): { enabled: SkillMetadata[]; disabled: SkillMetadata[] } {
+  const enabled: SkillMetadata[] = []
+  const disabled: SkillMetadata[] = []
+
+  for (const skill of skills) {
+    if (isSkillDisabled(skill, disabledSkillIds)) {
+      disabled.push(skill)
+    } else {
+      enabled.push(skill)
+    }
+  }
+
+  return { enabled, disabled }
+}
+
 function defaultSkillFile(files: string[]): string | null {
   if (files.length === 0) return null
   const skillMd = files.find((f) => /(^|\/)SKILL\.md$/i.test(f))
@@ -754,23 +907,124 @@ function defaultSkillFile(files: string[]): string | null {
 
 const SKILL_HOOK_TREE_EXAMPLE = `~/.cmbcoworkagent/skills/<skill-name>/
   SKILL.md
-  hooks.json
   hooks/
+    hooks.json
     pre-write-check.py`
+
+const SKILL_NESTED_TREE_EXAMPLE = `~/.cmbcoworkagent/skills/office/
+  SKILL.md
+  hooks/
+    hooks.json
+  pdf/
+    SKILL.md
+    hooks/
+      hooks.json
+  sheets/
+    SKILL.md`
 
 const SKILL_HOOK_JSON_EXAMPLE = `[
   {
     "event": "PreToolUse",
     "matcher": "write_file|edit_file",
     "type": "command",
-    "command": "python C:/absolute/path/to/pre_write_guard.py",
+    "command": "python hooks/pre_write_guard.py",
     "timeout": 10000,
+    "persistAfterInterrupt": true,
     "onBlock": {
       "systemMessage": "请先按技能要求整改，再重试",
       "requiredSkill": "<skill-name>"
     }
+  },
+  {
+    "event": "PostSkillUse",
+    "matcher": "<skill-name>",
+    "type": "command",
+    "command": "python hooks/post_skill_audit.py",
+    "forcedOutcome": "always-halt",
+    "forcedReason": "技能使用结果命中策略，直接终止本轮"
   }
 ]`
+
+// Claude Code 嵌套格式：按事件名分组，每组多个 matcher，每个 matcher 又可挂多个 hook。
+// timeout 单位是秒（运行时自动 ×1000 转毫秒）。
+const SKILL_HOOK_CC_EXAMPLE = `{
+  "PreToolUse": [
+    {
+      "matcher": "write_file|edit_file",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python hooks/pre_write_guard.py",
+          "timeout": 10,
+          "persistAfterInterrupt": true
+        }
+      ]
+    }
+  ],
+  "PostSkillUse": [
+    {
+      "matcher": "<skill-name>",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python hooks/post_skill_audit.py",
+          "forcedOutcome": "always-halt",
+          "forcedReason": "技能使用结果命中策略，直接终止本轮"
+        }
+      ]
+    }
+  ]
+}`
+
+const SKILL_HOOK_FRONTMATTER_EXAMPLE = `---
+name: secret-policy
+description: 处理敏感信息前必须使用。用户提到密钥、凭据、脱敏、审计或 secret 时使用。
+hooks:
+  PreToolUse:
+    - matcher: write_file|edit_file
+      hooks:
+        - id: pre-write-check
+          type: command
+          command: python hooks/pre-write-check.py
+          timeout: 10
+          timeoutMs: 12000
+          once: true
+          persistAfterInterrupt: true
+          onBlock:
+            reason: 高风险写入，请先按技能流程处理
+            requiredSkill: secret-policy
+  PostSkillUse:
+    - hooks:
+        - id: post-skill-audit
+          type: command
+          command: python hooks/post-skill-audit.py
+          forcedOutcome: always-revise
+          forcedReason: 技能使用后需要补充审计结论
+---
+
+# Secret Policy
+
+按敏感信息处理流程完成任务。`
+
+const SKILL_HOOK_ENV_EXAMPLE = `const workspace = process.env.WORKSPACE_PATH
+const skillRoot = process.env.SKILL_ROOT
+const hookRoot = process.env.HOOK_SOURCE_ROOT
+const toolArgs = process.env.TOOL_ARGS
+  ? JSON.parse(process.env.TOOL_ARGS)
+  : null`
+
+const SKILL_HOOK_WINDOWS_ARG_EXAMPLE = `"command": "python hooks/check.py \\"%WORKSPACE_PATH%\\""`
+
+const SKILL_HOOK_STDIN_EXAMPLE = `{
+  "hook_event_name": "PreToolUse",
+  "cwd": "~/.cmbcoworkagent/skills/<skill-name>",
+  "tool_name": "write_file",
+  "tool_input": { "path": "src/demo.ts" },
+  "skill_name": "<skill-name>",
+  "hook_source_type": "skill",
+  "hook_source_root": "~/.cmbcoworkagent/skills/<skill-name>",
+  "skill_root": "~/.cmbcoworkagent/skills/<skill-name>"
+}`
 
 function SkillGuideSection(props: {
   title: string
@@ -835,12 +1089,12 @@ function SkillsGuide(): React.JSX.Element {
 
         <SkillGuideSection
           title="技能基础"
-          summary="技能目录结构、上传方式，以及启用 / 禁用的基本行为。"
+          summary="技能目录结构、嵌套子技能、上传方式，以及启用 / 禁用的基本行为。"
         >
           <div className="space-y-3">
             <SkillGuideSubSection
               title="技能目录长什么样"
-              summary="每个技能本质上是一个目录，核心文件是 SKILL.md。"
+              summary="每个技能本质上是一个目录，核心文件是 SKILL.md；目录下也可以继续放子技能。"
             >
               <div className="space-y-2 text-sm text-muted-foreground">
                 <p>
@@ -849,14 +1103,62 @@ function SkillsGuide(): React.JSX.Element {
                   ，用来定义任务目标、执行步骤、输出要求等。
                 </p>
                 <p>
-                  应用里会区分内置技能和自定义技能；内置技能不可删除，自定义技能可以上传、禁用和删除。
+                  <code className="mx-1 font-mono text-foreground/85">SKILL.md</code>
+                  顶部可以带 YAML frontmatter；技能模块会从这里读取
+                  <code className="mx-1 font-mono text-foreground/85">name</code>、
+                  <code className="mx-1 font-mono text-foreground/85">description</code>
+                  等元信息，也会加载
+                  <code className="mx-1 font-mono text-foreground/85">hooks</code>
+                  字段里的配套 Skill Hook。frontmatter 后面的正文仍是技能说明，会按正常技能内容读取。
+                </p>
+                <p>
+                  如果某个 Skill Hook 需要在技能触发后于本会话持续生效，可以在该 Hook 上加
+                  <code className="mx-1 font-mono text-foreground/85">persistAfterInterrupt: true</code>
+                  ；这个字段只对技能 / 插件 Hook 有意义，并且按 Hook 自己的身份持久化。
+                </p>
+                <p>
+                  一个技能目录下如果还有子目录包含
+                  <code className="mx-1 font-mono text-foreground/85">SKILL.md</code>
+                  ，会被识别为独立的子技能；系统按目录路径区分父子技能和同名技能。
+                </p>
+                <p>
+                  应用里会区分内置技能和自定义技能；内置技能不可删除，自定义技能可以上传、禁用、编辑和删除。
+                </p>
+              </div>
+            </SkillGuideSubSection>
+
+            <SkillGuideSubSection
+              title="嵌套子技能"
+              summary="适合把一个主题下的多个细分能力打包在同一个父目录里。"
+            >
+              <div className="space-y-2 text-sm text-muted-foreground">
+                <pre className="rounded-md border border-border/40 bg-background p-2 text-xs leading-5 text-foreground">
+                  {SKILL_NESTED_TREE_EXAMPLE}
+                </pre>
+                <p>
+                  例如
+                  <code className="mx-1 font-mono text-foreground/85">office</code>
+                  可以作为父技能，下面的
+                  <code className="mx-1 font-mono text-foreground/85">office/pdf</code>和
+                  <code className="mx-1 font-mono text-foreground/85">office/sheets</code>
+                  会作为独立子技能展示和匹配。
+                </p>
+                <p>
+                  子技能可以拥有自己的
+                  <code className="mx-1 font-mono text-foreground/85">hooks/hooks.json</code>
+                  ；触发子技能时只激活它自己目录下的 Skill Hook，不会串到同名的其他技能。
+                </p>
+                <p>
+                  父技能和子技能都支持
+                  <code className="mx-1 font-mono text-foreground/85">persistAfterInterrupt</code>
+                  ，是否在会话后续轮次继续命中由各自 Hook 自己决定。
                 </p>
               </div>
             </SkillGuideSubSection>
 
             <SkillGuideSubSection
               title="如何添加和使用"
-              summary="支持上传 .md 或 .zip，上传后可直接在右侧预览。"
+              summary="支持上传 .md 或 .zip；zip 可以带父目录和嵌套子技能。"
             >
               <div className="space-y-2 text-sm text-muted-foreground">
                 <p>
@@ -864,8 +1166,27 @@ function SkillsGuide(): React.JSX.Element {
                   <code className="mx-1 font-mono text-foreground/85">+</code>
                   可上传技能。
                 </p>
+                <p>
+                  导入 zip 时会选择最外层的
+                  <code className="mx-1 font-mono text-foreground/85">SKILL.md</code>
+                  作为主技能；如果包含子技能且子技能名称与已有技能重复，会先提示确认。
+                </p>
                 <p>上传后可以在左侧展开目录、右侧预览文件内容，也可以随时切换技能启用状态。</p>
                 <p>禁用技能后，该技能本体和它附带的 Skill Hook 会一起失效。</p>
+              </div>
+            </SkillGuideSubSection>
+
+            <SkillGuideSubSection
+              title="发布到市场"
+              summary="发布时会保留技能原始相对路径信息，并处理嵌套子技能。"
+            >
+              <div className="space-y-2 text-sm text-muted-foreground">
+                <p>
+                  发布前如果检测到子技能，会询问是否一起上传；选择只上传当前技能时，子技能目录不会进入导出包。
+                </p>
+                <p>
+                  导出包会附带市场元数据，记录当前技能和子技能的相对路径；重新导入时这些元数据只用于识别，不会写入用户技能目录。
+                </p>
               </div>
             </SkillGuideSubSection>
           </div>
@@ -873,7 +1194,7 @@ function SkillsGuide(): React.JSX.Element {
 
         <SkillGuideSection
           title="Skill Hook 配置说明"
-          summary="把 hooks.json 放进技能目录后，技能启用时会自动加载对应 Hook。"
+          summary="把 hooks/hooks.json 放进技能目录，或写进 SKILL.md frontmatter，技能启用时会自动加载对应 Hook。"
         >
           <div className="space-y-3">
             <SkillGuideSubSection
@@ -895,7 +1216,7 @@ function SkillsGuide(): React.JSX.Element {
 
             <SkillGuideSubSection
               title="目录与加载规则"
-              summary="在技能目录下新建 hooks.json；脚本本体建议放到 hooks/ 子目录。"
+              summary="推荐在技能目录下新建 hooks/hooks.json；父技能和子技能都可以有自己的 Hook。"
             >
               <div className="space-y-2 text-sm text-muted-foreground">
                 <pre className="rounded-md border border-border/40 bg-background p-2 text-xs leading-5 text-foreground">
@@ -903,26 +1224,106 @@ function SkillsGuide(): React.JSX.Element {
                 </pre>
                 <p>
                   只要目录里存在
+                  <code className="mx-1 font-mono text-foreground/85">hooks/hooks.json</code>
+                  ，启用对应技能时就会自动加载；根目录
                   <code className="mx-1 font-mono text-foreground/85">hooks.json</code>
-                  ，启用技能时就会自动加载。
+                  仍兼容旧包；也可以直接写在
+                  <code className="mx-1 font-mono text-foreground/85">SKILL.md</code>
+                  顶部 YAML frontmatter 的
+                  <code className="mx-1 font-mono text-foreground/85">hooks</code>
+                  字段里。嵌套子技能的 Hook 放在子技能自己的目录或子技能自己的
+                  <code className="mx-1 font-mono text-foreground/85">SKILL.md</code>
+                  里。
                 </p>
                 <p>
-                  当前 Hook 命令实际按工作区
+                  Skill Hook 命令默认按技能所在目录作为
                   <code className="mx-1 font-mono text-foreground/85">cwd</code>
-                  执行；如果脚本放在技能目录里，推荐在
+                  执行；脚本放在技能目录时，可以在
                   <code className="mx-1 font-mono text-foreground/85">command</code>
-                  里写绝对路径，避免随工作区变化找不到脚本。
+                  里直接写相对路径，也可以继续用
+                  <code className="mx-1 font-mono text-foreground/85">HOOK_SOURCE_ROOT</code>或
+                  <code className="mx-1 font-mono text-foreground/85">SKILL_ROOT</code>
+                  环境变量定位。
+                </p>
+                <p>
+                  Hook 写在
+                  <code className="mx-1 font-mono text-foreground/85">SKILL.md frontmatter</code>
+                  里时，配置来源会显示为
+                  <code className="mx-1 font-mono text-foreground/85">SKILL.md</code>
+                  ；命令默认执行目录仍是该技能目录，和
+                  <code className="mx-1 font-mono text-foreground/85">hooks/hooks.json</code>
+                  保持一致。
                 </p>
               </div>
             </SkillGuideSubSection>
 
             <SkillGuideSubSection
-              title="最小配置示例"
-              summary="下面是一个最小的 skill-level PreToolUse command hook。"
+              title="触发与作用域规则"
+              summary="斜杠命令、技能卡片和模型自动读取技能都会激活该技能的 Hook。"
             >
               <div className="space-y-2 text-sm text-muted-foreground">
+                <p>
+                  通过斜杠命令选择技能、在技能卡片里选择技能，或模型自动读取某个
+                  <code className="mx-1 font-mono text-foreground/85">SKILL.md</code>
+                  ，都会视为该技能被激活。
+                  <code className="mx-1 font-mono text-foreground/85">PreSkillUse</code>和
+                  <code className="mx-1 font-mono text-foreground/85">PostSkillUse</code>
+                  会围绕这次激活触发；前者在使用前，后者在本轮结束阶段。
+                </p>
+                <p>
+                  技能激活后，本轮运行里它自己的
+                  <code className="mx-1 font-mono text-foreground/85">PreToolUse</code>、
+                  <code className="mx-1 font-mono text-foreground/85">PostToolUse</code>等工具 Hook
+                  会继续生效；同一个技能同一轮只会做一次激活记录，避免重复读取时反复触发激活 Hook。
+                </p>
+                <p>
+                  父技能和子技能互相独立：只选子技能时只触发子技能目录下的 Hook，不会自动触发父技能 Hook；只选父技能时也不会自动触发子技能
+                  Hook。
+                </p>
+                <p>禁用某个技能后，该技能本体和它目录下的 Skill Hook 会一起失效。</p>
+              </div>
+            </SkillGuideSubSection>
+
+            <SkillGuideSubSection
+              title="最小配置示例"
+              summary="支持 SKILL.md frontmatter、扁平数组和 Claude Code 嵌套格式；运行时自动识别。"
+            >
+              <div className="space-y-3 text-sm text-muted-foreground">
+                <p className="font-medium text-foreground/85">
+                  SKILL.md frontmatter（技能说明和配套 Hook 放在同一个文件）
+                </p>
+                <pre className="overflow-x-auto rounded-md border border-border/40 bg-background p-3 text-xs leading-5 text-foreground">
+                  <code>{SKILL_HOOK_FRONTMATTER_EXAMPLE}</code>
+                </pre>
+                <p>
+                frontmatter 使用 YAML，字段无需加引号；内部
+                <code className="mx-1 font-mono text-foreground/85">hooks</code>
+                结构与 Claude Code hooks settings 一致，并支持
+                <code className="mx-1 font-mono text-foreground/85">once</code>、
+                <code className="mx-1 font-mono text-foreground/85">persistAfterInterrupt</code>、
+                <code className="mx-1 font-mono text-foreground/85">timeoutMs</code>、
+                <code className="mx-1 font-mono text-foreground/85">forcedOutcome</code>、
+                <code className="mx-1 font-mono text-foreground/85">forcedReason</code>、
+                <code className="mx-1 font-mono text-foreground/85">onBlock</code>和
+                <code className="mx-1 font-mono text-foreground/85">modelId</code>。
+                </p>
+                <p>
+                  对
+                  <code className="mx-1 font-mono text-foreground/85">PreSkillUse</code>/
+                  <code className="mx-1 font-mono text-foreground/85">PostSkillUse</code>
+                  ，如果 frontmatter 里的
+                  <code className="mx-1 font-mono text-foreground/85">matcher</code>
+                  省略，默认匹配当前技能名；只选中子技能时，只会激活子技能自己的 Hook。
+                </p>
+                <p className="font-medium text-foreground/85">扁平数组（推荐）</p>
                 <pre className="overflow-x-auto rounded-md border border-border/40 bg-background p-3 text-xs leading-5 text-foreground">
                   <code>{SKILL_HOOK_JSON_EXAMPLE}</code>
+                </pre>
+                <p className="font-medium text-foreground/85">
+                  Claude Code 嵌套格式（兼容 CC 写法）
+                </p>
+                <pre className="overflow-x-auto rounded-md border border-border/40 bg-background p-3 text-xs leading-5 text-foreground">
+                  <code>{SKILL_HOOK_CC_EXAMPLE}</code>
                 </pre>
                 <p>
                   如果要用自然语言策略 Hook，可以把
@@ -933,6 +1334,117 @@ function SkillsGuide(): React.JSX.Element {
                   <code className="mx-1 font-mono text-foreground/85">prompt</code>
                   字段。
                 </p>
+                <p>
+                  <code className="mx-1 font-mono text-foreground/85">forcedOutcome</code>
+                  取值：
+                  <code className="mx-1 font-mono text-foreground/85">"always-revise"</code>
+                  （强制走修订）/
+                  <code className="mx-1 font-mono text-foreground/85">"always-halt"</code>
+                  （强制终止本轮）；不写则跟随 hook stdout 输出。可选
+                  <code className="mx-1 font-mono text-foreground/85">forcedReason</code>
+                  作为静态原因。
+                </p>
+              </div>
+            </SkillGuideSubSection>
+
+            <SkillGuideSubSection
+              title="命令能拿到哪些上下文"
+              summary="工作区、技能目录、事件、工具参数会通过环境变量和 stdin JSON 传给 command hook。"
+            >
+              <div className="space-y-3 text-sm text-muted-foreground">
+                <p>
+                  Skill Hook 的命令默认在技能目录执行，
+                  <code className="mx-1 font-mono text-foreground/85">cwd</code>
+                  不是当前项目工作区。Skill Hook 里
+                  <code className="mx-1 font-mono text-foreground/85">HOOK_SOURCE_ROOT</code>
+                  与
+                  <code className="mx-1 font-mono text-foreground/85">SKILL_ROOT</code>
+                  通常相同；要访问用户当前工作区，请优先读取
+                  <code className="mx-1 font-mono text-foreground/85">WORKSPACE_PATH</code>
+                  ；兼容 Claude Code 写法时也可以读取
+                  <code className="mx-1 font-mono text-foreground/85">CLAUDE_PROJECT_DIR</code>。
+                </p>
+                <div className="space-y-1">
+                  <p className="font-medium text-foreground/85">常用环境变量：</p>
+                  <ul className="list-disc space-y-1 pl-5">
+                    <li>
+                      <code className="font-mono text-foreground/85">WORKSPACE_PATH</code> /
+                      <code className="ml-1 font-mono text-foreground/85">CLAUDE_PROJECT_DIR</code>
+                      ：当前会话的工作区路径。
+                    </li>
+                    <li>
+                      <code className="font-mono text-foreground/85">HOOK_SOURCE_ROOT</code>、
+                      <code className="font-mono text-foreground/85">HOOK_SOURCE_TYPE</code>、
+                      <code className="font-mono text-foreground/85">HOOK_SOURCE_PATH</code>
+                      ：当前这条 Hook 的来源目录、来源类型和配置文件路径；command 的
+                      <code className="mx-1 font-mono text-foreground/85">cwd</code>
+                      默认就是来源目录。
+                    </li>
+                    <li>
+                      <code className="font-mono text-foreground/85">SKILL_ROOT</code>、
+                      <code className="font-mono text-foreground/85">SKILL_PATH</code>、
+                      <code className="font-mono text-foreground/85">SKILL_NAME</code>
+                      ：事件关联的技能目录、技能文件路径和技能名；它们不决定非 Skill Hook
+                      的执行目录。
+                    </li>
+                    <li>
+                      <code className="font-mono text-foreground/85">HOOK_EVENT</code>、
+                      <code className="font-mono text-foreground/85">TOOL_NAME</code>、
+                      <code className="font-mono text-foreground/85">SESSION_ID</code>、
+                      <code className="font-mono text-foreground/85">USER_PROMPT</code>
+                      ：事件名、工具名、会话 ID 和用户提示。
+                    </li>
+                    <li>
+                      <code className="font-mono text-foreground/85">TOOL_ARGS</code>、
+                      <code className="font-mono text-foreground/85">TOOL_RESULT</code>
+                      ：小体积 JSON 辅助字段；内容较大时请从 stdin JSON 读取。
+                    </li>
+                    <li>
+                      <code className="font-mono text-foreground/85">PLUGIN_ID</code>、
+                      <code className="font-mono text-foreground/85">PLUGIN_NAME</code>、
+                      <code className="font-mono text-foreground/85">PLUGIN_ROOT</code>
+                      ：由插件带来的 Hook 会附带插件来源信息。
+                    </li>
+                  </ul>
+                </div>
+                <div className="space-y-2">
+                  <p>推荐在脚本里读环境变量，而不是把路径写死在 command 里：</p>
+                  <pre className="overflow-x-auto rounded-md border border-border/40 bg-background p-3 text-xs leading-5 text-foreground">
+                    <code>{SKILL_HOOK_ENV_EXAMPLE}</code>
+                  </pre>
+                </div>
+                <div className="space-y-2">
+                  <p>
+                    如果确实要把工作区路径作为命令参数传入，Windows 下可以这样写；跨平台脚本仍建议读取环境变量：
+                  </p>
+                  <pre className="overflow-x-auto rounded-md border border-border/40 bg-background p-3 text-xs leading-5 text-foreground">
+                    <code>{SKILL_HOOK_WINDOWS_ARG_EXAMPLE}</code>
+                  </pre>
+                </div>
+                <div className="space-y-2">
+                  <p>
+                    command hook 还会从 stdin 收到完整 JSON。这里的
+                    <code className="mx-1 font-mono text-foreground/85">cwd</code>
+                    表示命令实际执行目录，也就是
+                    <code className="mx-1 font-mono text-foreground/85">hook_source_root</code>
+                    ；在 Skill Hook 里通常是技能目录，工作区路径仍以
+                    <code className="mx-1 font-mono text-foreground/85">WORKSPACE_PATH</code>
+                    为准。
+                  </p>
+                  <pre className="overflow-x-auto rounded-md border border-border/40 bg-background p-3 text-xs leading-5 text-foreground">
+                    <code>{SKILL_HOOK_STDIN_EXAMPLE}</code>
+                  </pre>
+                  <p>
+                    不同事件还会补充
+                    <code className="mx-1 font-mono text-foreground/85">prompt</code>、
+                    <code className="mx-1 font-mono text-foreground/85">tool_response</code>、
+                    <code className="mx-1 font-mono text-foreground/85">skill_trigger_tool_name</code>、
+                    <code className="mx-1 font-mono text-foreground/85">subagent</code>
+                    和
+                    <code className="mx-1 font-mono text-foreground/85">stop_context</code>
+                    等字段；完整字段以“自定义 &gt; 钩子”的事件协议说明为准。
+                  </p>
+                </div>
               </div>
             </SkillGuideSubSection>
 
@@ -942,8 +1454,37 @@ function SkillsGuide(): React.JSX.Element {
             >
               <div className="space-y-2 text-sm text-muted-foreground">
                 <p>
-                  命令 Hook 的调试日志建议写到 stderr；如果 stdout 输出 JSON，会被当成 Hook
-                  返回值解析。
+                  命令 Hook 的调试日志建议写到 stderr；stdout 必须输出纯 JSON 才会被当成
+                  Hook 返回值解析，不要额外包单引号、markdown 或混入调试日志。
+                </p>
+                <p>
+                  常用返回包括
+                  <code className="mx-1 font-mono text-foreground/85">decision="block"</code>、
+                  <code className="mx-1 font-mono text-foreground/85">reason</code>、
+                  <code className="mx-1 font-mono text-foreground/85">systemMessage</code>、
+                  <code className="mx-1 font-mono text-foreground/85">additionalContext</code>
+                  和
+                  <code className="mx-1 font-mono text-foreground/85">requiredSkill</code>
+                  ；命令返回
+                  <code className="mx-1 font-mono text-foreground/85">exit=2</code>
+                  也会按阻断处理。
+                </p>
+                <p>
+                  所有事件都支持
+                  <code className="mx-1 font-mono text-foreground/85">continue=false</code>
+                  +
+                  <code className="mx-1 font-mono text-foreground/85">stopReason</code>
+                  ，优先级高于
+                  <code className="mx-1 font-mono text-foreground/85">decision=block</code>
+                  ：Stop / PostSkillUse 上是真的终止整轮；Pre / Post 工具事件上等同强制阻断该次操作。
+                </p>
+                <p>
+                  如果不想让脚本动态决定，可以在 Hook 配置里直接锁定行为：
+                  <code className="mx-1 font-mono text-foreground/85">{`"forcedOutcome": "always-revise"`}</code>
+                  / <code className="mx-1 font-mono text-foreground/85">{`"always-halt"`}</code>
+                  ，可选搭配
+                  <code className="mx-1 font-mono text-foreground/85">forcedReason</code>
+                  作为静态原因；hook 的 stdout 输出会被覆盖。
                 </p>
                 <p>
                   技能 Hook 生效后，可以在聊天区的“Hook 执行记录”里看执行结果，也可以到“自定义 &gt;
@@ -963,11 +1504,8 @@ function SkillsGuide(): React.JSX.Element {
 }
 
 export function SkillsPanel(): React.JSX.Element {
-  const {
-    setShowCustomizeView,
-    setMarketInitialSkillCategory,
-    setMarketInitialSkillSearchQuery
-  } = useAppStore()
+  const { setShowCustomizeView, setMarketInitialSkillCategory, setMarketInitialSkillSearchQuery } =
+    useAppStore()
   const [skills, setSkills] = useState<SkillMetadata[]>([])
   const [expandedSkills, setExpandedSkills] = useState<Set<string>>(new Set())
   const [expandedDirNodes, setExpandedDirNodes] = useState<Set<string>>(new Set())
@@ -1055,7 +1593,7 @@ export function SkillsPanel(): React.JSX.Element {
   useEffect(() => {
     window.api.skills
       .getDisabled()
-      .then((list) => setDisabledSkills(new Set(list)))
+      .then((list) => setDisabledSkills(new Set(list.map(normalizeSkillId))))
       .catch(console.error)
   }, [])
 
@@ -1111,16 +1649,17 @@ export function SkillsPanel(): React.JSX.Element {
   }, [])
 
   const ensureSkillFiles = useCallback(async (skill: SkillMetadata): Promise<string[]> => {
-    const cachedFiles = skillFilesMapRef.current[skill.name]
+    const skillId = getSkillMetadataId(skill)
+    const cachedFiles = skillFilesMapRef.current[skillId]
     if (cachedFiles && cachedFiles.length > 0) return cachedFiles
     const res = await window.api.skills.listFiles(skill.path)
     const fallbackFiles = [skill.path]
     if (!res.success || !res.files || res.files.length === 0) {
-      setSkillFilesMap((prev) => ({ ...prev, [skill.name]: fallbackFiles }))
+      setSkillFilesMap((prev) => ({ ...prev, [skillId]: fallbackFiles }))
       return fallbackFiles
     }
     const files = res.files
-    setSkillFilesMap((prev) => ({ ...prev, [skill.name]: files }))
+    setSkillFilesMap((prev) => ({ ...prev, [skillId]: files }))
     return files
   }, [])
 
@@ -1137,9 +1676,10 @@ export function SkillsPanel(): React.JSX.Element {
 
   const onToggleSkill = useCallback(
     async (skill: SkillMetadata) => {
-      const wasExpanded = expandedSkillsRef.current.has(skill.name)
+      const skillId = getSkillMetadataId(skill)
+      const wasExpanded = expandedSkillsRef.current.has(skillId)
       const next = new Set<string>()
-      if (!wasExpanded) next.add(skill.name)
+      if (!wasExpanded) next.add(skillId)
       setExpandedSkills(next)
 
       if (!wasExpanded) {
@@ -1189,44 +1729,49 @@ export function SkillsPanel(): React.JSX.Element {
     })
   }, [])
 
-  const toggleSkillEnabled = useCallback((skillName: string) => {
+  const toggleSkillEnabled = useCallback((skill: SkillMetadata) => {
     setDisabledSkills((prev) => {
       const next = new Set(prev)
-      if (next.has(skillName)) next.delete(skillName)
-      else next.add(skillName)
+      const skillId = getSkillMetadataId(skill)
+      if (isSkillDisabled(skill, next)) {
+        next.delete(skillId)
+      } else {
+        next.add(skillId)
+      }
       window.api.skills.setDisabled([...next]).catch(console.error)
       return next
     })
   }, [])
 
-  const handleDeleteSkill = useCallback(async (skill: SkillMetadata) => {
-    if (!window.api?.skills?.delete) return
-    if (!confirm(`确定要删除技能「${skill.name}」吗？`)) return
-    const res = await window.api.skills.delete(skill.path)
-    if (res.success) {
-      removeLocalUploadedSkillPathFromStorage(skill.path)
-      removeEditedSkillPathFromStorage(skill.path)
-      reloadLocalUploadedSkillPaths()
-      reloadEditedSkillPaths()
-      setSelectedSkill(null)
-      setSelectedFilePath(null)
-      setSelectedFileContent(null)
-      setSkillFilesMap((prev) => {
-        const next = { ...prev }
-        delete next[skill.name]
-        return next
-      })
-      setDisabledSkills((prev) => {
-        const next = new Set(prev)
-        next.delete(skill.name)
-        window.api.skills.setDisabled([...next]).catch(console.error)
-        return next
-      })
-      window.api.skills.list().then(setSkills).catch(console.error)
-    } else {
-      alert(res.error || "删除失败")
-    }
-  }, [reloadEditedSkillPaths, reloadLocalUploadedSkillPaths])
+  const handleDeleteSkill = useCallback(
+    async (skill: SkillMetadata) => {
+      if (!window.api?.skills?.delete) return
+      if (!confirm(`确定要删除技能「${skill.name}」吗？`)) return
+      const res = await window.api.skills.delete(skill.path)
+      if (res.success) {
+        removeLocalUploadedSkillPathFromStorage(skill.path)
+        removeEditedSkillPathFromStorage(skill.path)
+        reloadLocalUploadedSkillPaths()
+        reloadEditedSkillPaths()
+        setSelectedSkill(null)
+        setSelectedFilePath(null)
+        setSelectedFileContent(null)
+        setSkillFilesMap((prev) => {
+          const next = { ...prev }
+          delete next[getSkillMetadataId(skill)]
+          return next
+        })
+        window.api.skills.list().then(setSkills).catch(console.error)
+        window.api.skills
+          .getDisabled()
+          .then((list) => setDisabledSkills(new Set(list.map(normalizeSkillId))))
+          .catch(console.error)
+      } else {
+        alert(res.error || "删除失败")
+      }
+    },
+    [reloadEditedSkillPaths, reloadLocalUploadedSkillPaths]
+  )
 
   const builtinSkills = useMemo(() => skills.filter((s) => s.source === "project"), [skills])
   const customSkills = useMemo(() => skills.filter((s) => s.source === "user"), [skills])
@@ -1348,7 +1893,7 @@ export function SkillsPanel(): React.JSX.Element {
             const nextSelected = nextSkills.find((item) => item.path === filePath) || null
             setSelectedSkill(nextSelected)
             if (nextSelected) {
-              setExpandedSkills(new Set([nextSelected.name]))
+              setExpandedSkills(new Set([getSkillMetadataId(nextSelected)]))
             }
           })
           .catch(console.error)
@@ -1552,9 +2097,9 @@ export function SkillsPanel(): React.JSX.Element {
         previewKind={selectedFilePreviewKind}
         binaryBase64={selectedBinaryBase64}
         binaryMimeType={selectedBinaryMimeType}
-        isDisabled={selectedSkill ? disabledSkills.has(selectedSkill.name) : false}
+        isDisabled={selectedSkill ? isSkillDisabled(selectedSkill, disabledSkills) : false}
         onToggleEnabled={() => {
-          if (selectedSkill) toggleSkillEnabled(selectedSkill.name)
+          if (selectedSkill) toggleSkillEnabled(selectedSkill)
         }}
         onShowGuide={() => {
           setSelectedSkill(null)
@@ -1668,6 +2213,12 @@ function SkillSection(props: {
     onSelectFile
   } = props
   const [collapsed, setCollapsed] = useState(false)
+  const [disabledCollapsed, setDisabledCollapsed] = useState(true)
+  const [expandedSkillTreeNodes, setExpandedSkillTreeNodes] = useState<Set<string>>(new Set())
+  const { enabled: enabledSkills, disabled: disabledSectionSkills } = useMemo(
+    () => splitSkillsByEnabled(skills, disabledSkills),
+    [disabledSkills, skills]
+  )
   const sectionStyle = useMemo(() => {
     if (title.includes("内置")) {
       return {
@@ -1704,6 +2255,14 @@ function SkillSection(props: {
         "border-border/70 bg-background text-muted-foreground dark:border-border/60 dark:bg-background/70"
     }
   }, [title])
+  const toggleSkillTreeNode = useCallback((nodeKey: string) => {
+    setExpandedSkillTreeNodes((prev) => {
+      const next = new Set(prev)
+      if (next.has(nodeKey)) next.delete(nodeKey)
+      else next.add(nodeKey)
+      return next
+    })
+  }, [])
 
   return (
     <div className="rounded-xl border border-border/60 bg-background/40 p-1.5">
@@ -1721,9 +2280,7 @@ function SkillSection(props: {
             <ChevronDown className="size-3 text-muted-foreground" />
           )}
           <span className={cn("size-1.5 rounded-full shrink-0", sectionStyle.dot)} />
-          <span className="text-xs font-semibold tracking-wide truncate">
-            {title}
-          </span>
+          <span className="text-xs font-semibold tracking-wide truncate">{title}</span>
         </div>
         <Badge
           variant="outline"
@@ -1742,41 +2299,328 @@ function SkillSection(props: {
               没有匹配的技能
             </p>
           ) : (
-            skills.map((skill) => {
-              const expanded = expandedSkills.has(skill.name)
-              const files = skillFilesMap[skill.name] || []
-              const selected = selectedSkill?.name === skill.name
-              const disabled = disabledSkills.has(skill.name)
-              const marketInfo =
-                skill.source === "user" ? marketSkillMap[normalizeSkillName(skill.name)] : undefined
-              const hasMarketEntry =
-                !!marketInfo || uploadedSkillNames.has(normalizeSkillName(skill.name))
-              const isEdited = editedSkillPaths.has(normalizeSkillPathKey(skill.path))
-              const hideFileTree = hideFeaturedMarketFiles && isFeaturedSkill(marketInfo)
-
-              return (
-                <SkillItem
-                  key={skill.name}
-                  skill={skill}
-                  marketInfo={marketInfo}
-                  hasMarketEntry={hasMarketEntry}
-                  hideMarketTag={hideMarketTag}
-                  isEdited={isEdited}
-                  expanded={expanded}
-                  selected={selected}
-                  disabled={disabled}
-                  hideFileTree={hideFileTree}
-                  files={files}
-                  expandedDirNodes={expandedDirNodes}
-                  onToggleSkill={onToggleSkill}
-                  onToggleDirNode={onToggleDirNode}
-                  onSelectFile={onSelectFile}
-                />
-              )
-            })
+            <>
+              <SkillStatusGroup
+                title="已启用"
+                skills={enabledSkills}
+                initiallyCollapsed={false}
+                disabledSkills={disabledSkills}
+                marketSkillMap={marketSkillMap}
+                uploadedSkillNames={uploadedSkillNames}
+                editedSkillPaths={editedSkillPaths}
+                expandedSkills={expandedSkills}
+                skillFilesMap={skillFilesMap}
+                selectedSkill={selectedSkill}
+                expandedDirNodes={expandedDirNodes}
+                expandedSkillTreeNodes={expandedSkillTreeNodes}
+                hideFeaturedMarketFiles={hideFeaturedMarketFiles}
+                hideMarketTag={hideMarketTag}
+                onToggleSkill={onToggleSkill}
+                onToggleSkillTreeNode={toggleSkillTreeNode}
+                onToggleDirNode={onToggleDirNode}
+                onSelectFile={onSelectFile}
+              />
+              <SkillStatusGroup
+                title="已禁用"
+                skills={disabledSectionSkills}
+                collapsed={disabledCollapsed}
+                onCollapsedChange={setDisabledCollapsed}
+                initiallyCollapsed
+                disabledSkills={disabledSkills}
+                marketSkillMap={marketSkillMap}
+                uploadedSkillNames={uploadedSkillNames}
+                editedSkillPaths={editedSkillPaths}
+                expandedSkills={expandedSkills}
+                skillFilesMap={skillFilesMap}
+                selectedSkill={selectedSkill}
+                expandedDirNodes={expandedDirNodes}
+                expandedSkillTreeNodes={expandedSkillTreeNodes}
+                hideFeaturedMarketFiles={hideFeaturedMarketFiles}
+                hideMarketTag={hideMarketTag}
+                onToggleSkill={onToggleSkill}
+                onToggleSkillTreeNode={toggleSkillTreeNode}
+                onToggleDirNode={onToggleDirNode}
+                onSelectFile={onSelectFile}
+              />
+            </>
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+function SkillStatusGroup(props: {
+  title: string
+  skills: SkillMetadata[]
+  initiallyCollapsed?: boolean
+  collapsed?: boolean
+  onCollapsedChange?: (collapsed: boolean) => void
+  marketSkillMap: Record<string, SkillMarketInfo>
+  uploadedSkillNames: Set<string>
+  editedSkillPaths: Set<string>
+  expandedSkills: Set<string>
+  skillFilesMap: Record<string, string[]>
+  selectedSkill: SkillMetadata | null
+  expandedDirNodes: Set<string>
+  expandedSkillTreeNodes: Set<string>
+  disabledSkills: Set<string>
+  hideFeaturedMarketFiles: boolean
+  hideMarketTag: boolean
+  onToggleSkill: (skill: SkillMetadata) => void
+  onToggleSkillTreeNode: (nodeKey: string) => void
+  onToggleDirNode: (nodeId: string) => void
+  onSelectFile: (skill: SkillMetadata, filePath: string) => void
+}): React.JSX.Element {
+  const {
+    title,
+    skills,
+    initiallyCollapsed = false,
+    collapsed,
+    onCollapsedChange,
+    marketSkillMap,
+    uploadedSkillNames,
+    editedSkillPaths,
+    expandedSkills,
+    skillFilesMap,
+    selectedSkill,
+    expandedDirNodes,
+    expandedSkillTreeNodes,
+    disabledSkills,
+    hideFeaturedMarketFiles,
+    hideMarketTag,
+    onToggleSkill,
+    onToggleSkillTreeNode,
+    onToggleDirNode,
+    onSelectFile
+  } = props
+  const [localCollapsed, setLocalCollapsed] = useState(initiallyCollapsed)
+  const isCollapsed = collapsed ?? localCollapsed
+  const skillTree = useMemo(() => buildSkillTree(skills), [skills])
+  const isDisabledGroup = title.includes("禁用")
+
+  const setCollapsed = useCallback(
+    (next: boolean) => {
+      if (onCollapsedChange) onCollapsedChange(next)
+      else setLocalCollapsed(next)
+    },
+    [onCollapsedChange]
+  )
+
+  if (skills.length === 0) return <></>
+
+  return (
+    <div
+      className={cn(
+        "rounded-lg border p-1",
+        isDisabledGroup
+          ? "border-border/60 bg-muted/20"
+          : "border-emerald-200/60 bg-emerald-50/30 dark:border-emerald-900/40 dark:bg-emerald-950/10"
+      )}
+    >
+      <button
+        className="flex min-h-7 w-full items-center justify-between gap-2 rounded-md px-2 py-1 text-left text-xs transition-colors hover:bg-background/70"
+        onClick={() => setCollapsed(!isCollapsed)}
+      >
+        <span className="flex min-w-0 items-center gap-1.5">
+          {isCollapsed ? (
+            <ChevronRight className="size-3 text-muted-foreground" />
+          ) : (
+            <ChevronDown className="size-3 text-muted-foreground" />
+          )}
+          <span
+            className={cn(
+              "size-1.5 rounded-full",
+              isDisabledGroup ? "bg-muted-foreground" : "bg-emerald-500"
+            )}
+          />
+          <span className="font-medium truncate">{title}</span>
+        </span>
+        <Badge variant="outline" className="h-4 min-w-5 justify-center px-1 text-[10px]">
+          {skills.length}
+        </Badge>
+      </button>
+      {!isCollapsed && (
+        <div className="space-y-2 pt-1.5">
+          <SkillTreeList
+            nodes={skillTree}
+            level={0}
+            marketSkillMap={marketSkillMap}
+            uploadedSkillNames={uploadedSkillNames}
+            editedSkillPaths={editedSkillPaths}
+            expandedSkills={expandedSkills}
+            skillFilesMap={skillFilesMap}
+            selectedSkill={selectedSkill}
+            expandedDirNodes={expandedDirNodes}
+            expandedSkillTreeNodes={expandedSkillTreeNodes}
+            disabledSkills={disabledSkills}
+            hideFeaturedMarketFiles={hideFeaturedMarketFiles}
+            hideMarketTag={hideMarketTag}
+            onToggleSkill={onToggleSkill}
+            onToggleSkillTreeNode={onToggleSkillTreeNode}
+            onToggleDirNode={onToggleDirNode}
+            onSelectFile={onSelectFile}
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SkillTreeList(props: {
+  nodes: SkillTreeNode[]
+  level: number
+  marketSkillMap: Record<string, SkillMarketInfo>
+  uploadedSkillNames: Set<string>
+  editedSkillPaths: Set<string>
+  expandedSkills: Set<string>
+  skillFilesMap: Record<string, string[]>
+  selectedSkill: SkillMetadata | null
+  expandedDirNodes: Set<string>
+  expandedSkillTreeNodes: Set<string>
+  disabledSkills: Set<string>
+  hideFeaturedMarketFiles: boolean
+  hideMarketTag: boolean
+  onToggleSkill: (skill: SkillMetadata) => void
+  onToggleSkillTreeNode: (nodeKey: string) => void
+  onToggleDirNode: (nodeId: string) => void
+  onSelectFile: (skill: SkillMetadata, filePath: string) => void
+}): React.JSX.Element {
+  const {
+    nodes,
+    level,
+    marketSkillMap,
+    uploadedSkillNames,
+    editedSkillPaths,
+    expandedSkills,
+    skillFilesMap,
+    selectedSkill,
+    expandedDirNodes,
+    expandedSkillTreeNodes,
+    disabledSkills,
+    hideFeaturedMarketFiles,
+    hideMarketTag,
+    onToggleSkill,
+    onToggleSkillTreeNode,
+    onToggleDirNode,
+    onSelectFile
+  } = props
+
+  return (
+    <div className="space-y-2">
+      {nodes.map((node) => {
+          const childCount = node.children.reduce(
+            (sum, child) => sum + countSkillTreeSkills(child),
+            0
+          )
+          const childrenExpanded = expandedSkillTreeNodes.has(node.key)
+
+          return (
+            <div key={node.key} className="space-y-1.5">
+            {node.skill ? (
+              (() => {
+                const skill = node.skill
+                const skillId = getSkillMetadataId(skill)
+                const expanded = expandedSkills.has(skillId)
+                const files = skillFilesMap[skillId] || []
+                const selected = selectedSkill
+                  ? getSkillMetadataId(selectedSkill) === skillId
+                  : false
+                const disabled = isSkillDisabled(skill, disabledSkills)
+                const marketInfo =
+                  skill.source === "user"
+                    ? marketSkillMap[normalizeSkillName(skill.name)]
+                    : undefined
+                const hasMarketEntry =
+                  !!marketInfo || uploadedSkillNames.has(normalizeSkillName(skill.name))
+                const isEdited = editedSkillPaths.has(normalizeSkillPathKey(skill.path))
+                const hideFileTree = hideFeaturedMarketFiles && isFeaturedSkill(marketInfo)
+
+                return (
+                  <SkillItem
+                    key={skillId || skill.path}
+                    skill={skill}
+                    marketInfo={marketInfo}
+                    hasMarketEntry={hasMarketEntry}
+                    hideMarketTag={hideMarketTag}
+                    isEdited={isEdited}
+                    expanded={expanded}
+                    selected={selected}
+                    disabled={disabled}
+                    hideFileTree={hideFileTree}
+                    files={files}
+                    expandedDirNodes={expandedDirNodes}
+                    nestingLevel={level}
+                    childCount={childCount}
+                    onToggleSkill={onToggleSkill}
+                    onToggleDirNode={onToggleDirNode}
+                    onSelectFile={onSelectFile}
+                  />
+                )
+              })()
+            ) : (
+              <button
+                className="flex min-h-8 w-full items-center gap-2 rounded-md border border-dashed border-border/60 bg-muted/20 px-2 py-1.5 text-left text-xs text-muted-foreground hover:bg-muted/35"
+                style={{ marginLeft: `${level * 14}px` }}
+                onClick={() => onToggleSkillTreeNode(node.key)}
+              >
+                {childrenExpanded ? (
+                  <ChevronDown className="size-3 shrink-0" />
+                ) : (
+                  <ChevronRight className="size-3 shrink-0" />
+                )}
+                <Folder className="size-3.5 shrink-0" />
+                <span className="min-w-0 flex-1 truncate">{node.label}</span>
+                <Badge variant="outline" className="h-4 px-1.5 text-[10px]">
+                  {childCount}
+                </Badge>
+              </button>
+            )}
+
+            {node.skill && node.children.length > 0 && (
+              <button
+                className="ml-3 flex min-h-7 w-[calc(100%-0.75rem)] items-center gap-2 rounded-md border border-dashed border-border/60 bg-muted/15 px-2 py-1 text-left text-[11px] text-muted-foreground hover:bg-muted/30"
+                onClick={() => onToggleSkillTreeNode(node.key)}
+              >
+                {childrenExpanded ? (
+                  <ChevronDown className="size-3 shrink-0" />
+                ) : (
+                  <ChevronRight className="size-3 shrink-0" />
+                )}
+                <Folder className="size-3 shrink-0" />
+                <span className="min-w-0 flex-1 truncate">子技能</span>
+                <Badge variant="outline" className="h-4 px-1.5 text-[10px]">
+                  {childCount}
+                </Badge>
+              </button>
+            )}
+
+            {node.children.length > 0 && childrenExpanded && (
+              <div className="ml-3 border-l border-border/60 pl-2">
+                <SkillTreeList
+                  nodes={node.children}
+                  level={level + 1}
+                  marketSkillMap={marketSkillMap}
+                  uploadedSkillNames={uploadedSkillNames}
+                  editedSkillPaths={editedSkillPaths}
+                  expandedSkills={expandedSkills}
+                  skillFilesMap={skillFilesMap}
+                  selectedSkill={selectedSkill}
+                  expandedDirNodes={expandedDirNodes}
+                  expandedSkillTreeNodes={expandedSkillTreeNodes}
+                  disabledSkills={disabledSkills}
+                  hideFeaturedMarketFiles={hideFeaturedMarketFiles}
+                  hideMarketTag={hideMarketTag}
+                  onToggleSkill={onToggleSkill}
+                  onToggleSkillTreeNode={onToggleSkillTreeNode}
+                  onToggleDirNode={onToggleDirNode}
+                  onSelectFile={onSelectFile}
+                />
+              </div>
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -1793,6 +2637,8 @@ function SkillItem(props: {
   hideFileTree?: boolean
   files: string[]
   expandedDirNodes: Set<string>
+  nestingLevel?: number
+  childCount?: number
   onToggleSkill: (skill: SkillMetadata) => void
   onToggleDirNode: (nodeId: string) => void
   onSelectFile: (skill: SkillMetadata, filePath: string) => void
@@ -1809,6 +2655,8 @@ function SkillItem(props: {
     hideFileTree = false,
     files,
     expandedDirNodes,
+    nestingLevel = 0,
+    childCount = 0,
     onToggleSkill,
     onToggleDirNode,
     onSelectFile
@@ -1836,6 +2684,7 @@ function SkillItem(props: {
           "w-full flex items-center gap-2 px-2.5 py-2 text-left transition-colors",
           selected ? "bg-primary/10" : "hover:bg-muted/50"
         )}
+        style={{ paddingLeft: `${10 + nestingLevel * 14}px` }}
         onClick={() => onToggleSkill(skill)}
       >
         {expanded ? (
@@ -1844,16 +2693,20 @@ function SkillItem(props: {
           <ChevronRight className="size-3.5 text-muted-foreground shrink-0" />
         )}
         <div className="min-w-0 flex-1 space-y-1">
-          <p
-            className={cn(
-              "text-sm truncate",
-              disabled && "text-muted-foreground line-through"
-            )}
-          >
+          <p className={cn("text-sm truncate", disabled && "text-muted-foreground line-through")}>
             {displayName}
           </p>
         </div>
-        <span>
+        <span className="flex shrink-0 items-center gap-1">
+          {childCount > 0 && (
+            <Badge
+              variant="outline"
+              className="h-4 gap-1 px-1.5 text-[10px] border-slate-200 text-slate-600 bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:bg-slate-900/40"
+            >
+              <Folder className="size-2.5 shrink-0" />
+              {childCount}
+            </Badge>
+          )}
           {isFeatured && (
             <Badge
               variant="outline"

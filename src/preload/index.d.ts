@@ -23,7 +23,8 @@ import type {
   PluginHookMetadata,
   PluginMetadata,
   PluginManifest,
-  SkillHookMetadata
+  SkillHookMetadata,
+  AgentAutoCommitSettings
 } from "../main/types"
 import { UserInfoConfig } from "../main/storage"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
@@ -35,7 +36,7 @@ import type {
 } from "../main/ipc/code-exec-tools"
 
 interface ElectronAPI {
-  openExternal: Promise
+  openExternal: (url: string) => Promise<void>
   openLoginWindow: () => void
   closeLoginWindow: () => void
   openLoginPage: () => void
@@ -95,6 +96,13 @@ interface DashboardCommitDetail {
   orgName?: string
   userIp?: string
   repoPath?: string
+  repositoryName?: string
+  repositoryFullName?: string
+  repositoryWebUrl?: string
+  commitSha?: string
+  commitUrl?: string
+  pushed: boolean
+  pushedAt?: string
   branch?: string
   filesChanged: number
   insertions: number
@@ -103,6 +111,12 @@ interface DashboardCommitDetail {
   threadId?: string
   usedSkills: string[]
   skillCount: number
+}
+
+interface DashboardCommitDetailsOptions {
+  page?: number
+  pageSize?: number
+  pushedOnly?: boolean
 }
 
 interface DashboardCodeStats {
@@ -464,14 +478,21 @@ interface CustomAPI {
     setDisabled: (skillNames: string[]) => Promise<void>
     upload: (
       buffer: ArrayBuffer,
-      fileName: string
-    ) => Promise<{ success: boolean; skillName?: string; error?: string }>
+      fileName: string,
+      options?: { allowNestedNameDuplicates?: boolean }
+    ) => Promise<{
+      success: boolean
+      skillName?: string
+      error?: string
+      nestedNameConflicts?: Array<{ name: string; relativePath: string }>
+    }>
     extractMarkdownFromZip: (
       buffer: ArrayBuffer,
       fileName?: string
     ) => Promise<{ success: boolean; filePath?: string; content?: string; error?: string }>
     exportForMarket: (
-      skillPath: string
+      skillPath: string,
+      options?: { includeNestedSkills?: boolean }
     ) => Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }>
     delete: (skillPath: string) => Promise<{ success: boolean; error?: string }>
   }
@@ -501,6 +522,12 @@ interface CustomAPI {
       enabled: boolean
     }>
     onChanged: (callback: () => void) => () => void
+  }
+  autoCommit: {
+    getSettings: () => Promise<AgentAutoCommitSettings>
+    saveSettings: (
+      updates: Partial<AgentAutoCommitSettings>
+    ) => Promise<AgentAutoCommitSettings>
   }
   lsp: {
     getConfig: () => Promise<LspConfig>
@@ -635,6 +662,9 @@ interface CustomAPI {
       fileName: string
     ) => Promise<{ success: boolean; pluginName?: string; error?: string }>
     installFromDir: () => Promise<{ success: boolean; pluginName?: string; error?: string }>
+    exportForMarket: (
+      id: string
+    ) => Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }>
     delete: (id: string) => Promise<{ success: boolean; error?: string }>
     setEnabled: (id: string, enabled: boolean) => Promise<void>
     getDetail: (id: string) => Promise<{
@@ -882,6 +912,7 @@ interface CustomAPI {
     skills: {
       list: () => Promise<SkillHookMetadata[]>
     }
+    onChanged: (callback: (data: { reason?: string; at: string }) => void) => () => void
     create: (config: HookUpsert) => Promise<{ id: string }>
     update: (config: HookUpsert & { id: string }) => Promise<{ id: string }>
     delete: (id: string) => Promise<void>
@@ -964,10 +995,10 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; data?: DashboardSkillDetail; error?: string }>
     commitDetails: (
       range: { from: string; to: string },
-      limit?: number
+      options?: DashboardCommitDetailsOptions
     ) => Promise<{
       success: boolean
-      data?: { total: number; items: DashboardCommitDetail[] }
+      data?: { total: number; page: number; pageSize: number; pushedOnly: boolean; items: DashboardCommitDetail[] }
       error?: string
     }>
     exportExcel: (

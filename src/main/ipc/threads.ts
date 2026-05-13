@@ -14,6 +14,7 @@ import { deleteThreadCheckpoint, getOpenworkDir } from "../storage"
 import { generateTitle } from "../services/title-generator"
 import { fireSessionEnd } from "../hooks/session-lifecycle"
 import { makeHookResultCallback } from "../hooks/result-callback"
+import { disposeAgentThreadState } from "./agent"
 import type { Thread, ThreadUpdateParams } from "../types"
 
 // 复用主进程 settings 存储，用于读取“最近一次选择的工作区”。
@@ -140,6 +141,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       workspacePath,
       window ? makeHookResultCallback(window, hookChannel) : undefined
     )
+    disposeAgentThreadState(threadId)
 
     // Delete from our metadata store
     dbDeleteThread(threadId)

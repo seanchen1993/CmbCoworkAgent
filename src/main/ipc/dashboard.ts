@@ -141,6 +141,13 @@ interface DashboardCommitDetail {
   orgName?: string
   userIp?: string
   repoPath?: string
+  repositoryName?: string
+  repositoryFullName?: string
+  repositoryWebUrl?: string
+  commitSha?: string
+  commitUrl?: string
+  pushed: boolean
+  pushedAt?: string
   branch?: string
   filesChanged: number
   insertions: number
@@ -170,6 +177,12 @@ interface EsSearchResponse {
 
 interface UserStatsOptions {
   upperOrgLv1?: string | null
+}
+
+interface CommitDetailsOptions {
+  page?: number
+  pageSize?: number
+  pushedOnly?: boolean
 }
 
 const DISLIKE_TYPE_OPTIONS = [
@@ -275,6 +288,24 @@ function isDashboardAllowed(): boolean {
 function clampLimit(limit: number | undefined, fallback: number, max: number): number {
   if (!Number.isFinite(limit)) return fallback
   return Math.max(1, Math.min(max, Math.floor(Number(limit))))
+}
+
+function normalizeCommitDetailsOptions(value?: number | CommitDetailsOptions): Required<CommitDetailsOptions> {
+  if (typeof value === "number") {
+    return {
+      page: 1,
+      pageSize: clampLimit(value, 20, 500),
+      pushedOnly: false
+    }
+  }
+
+  const page = clampLimit(value?.page, 1, 10_000)
+  const pageSize = clampLimit(value?.pageSize, 20, 100)
+  return {
+    page,
+    pageSize,
+    pushedOnly: value?.pushedOnly === true
+  }
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -463,6 +494,13 @@ function normalizeCommitDetail(hit: EsSearchHit): DashboardCommitDetail {
     orgName: asOptionalString(source.orgName),
     userIp: asOptionalString(source.userIp),
     repoPath: asOptionalString(properties.repoPath),
+    repositoryName: asOptionalString(properties.repositoryName),
+    repositoryFullName: asOptionalString(properties.repositoryFullName),
+    repositoryWebUrl: asOptionalString(properties.repositoryWebUrl),
+    commitSha: asOptionalString(properties.commitSha),
+    commitUrl: asOptionalString(properties.commitUrl),
+    pushed: properties.pushed === true,
+    pushedAt: asOptionalString(properties.pushedAt),
     branch: asOptionalString(properties.branch),
     filesChanged: asNumber(properties.filesChanged),
     insertions: asNumber(properties.insertions),
@@ -681,26 +719,29 @@ async function fetchModelStats(range: TimeRange, granularity: Granularity): Prom
 }
 
 function buildUpperOrgLv1Filter(upperOrgLv1: string): Record<string, unknown> {
-  if (upperOrgLv1 === "") {
-    return {
-      bool: {
-        should: [
-          { term: { upperOrgLv1: "" } },
-          { bool: { must_not: [{ exists: { field: "upperOrgLv1" } }] } }
-        ],
-        minimum_should_match: 1
-      }
+  return { term: { upperOrgLv1 } }
+}
+
+function normalizeUpperOrgLv1Option(upperOrgLv1?: string | null): string | null {
+  if (typeof upperOrgLv1 !== "string") return null
+  const normalized = upperOrgLv1.trim()
+  return normalized ? normalized : null
+}
+
+function buildNonEmptyOrgLevelFilter(field: "upperOrgLv0" | "upperOrgLv1"): Record<string, unknown> {
+  return {
+    bool: {
+      must: [{ exists: { field } }],
+      must_not: [{ term: { [field]: "" } }]
     }
   }
-
-  return { term: { upperOrgLv1 } }
 }
 
 function buildOrgDistributionAgg(
   selectedUpperOrgLv1: string | null,
   metric: "pv" | "uv"
 ): Record<string, unknown> {
-  const field = selectedUpperOrgLv1 !== null ? "orgName" : "upperOrgLv1"
+  const field = selectedUpperOrgLv1 !== null ? "upperOrgLv0" : "upperOrgLv1"
   const terms: Record<string, unknown> = { field, size: 30, missing: "" }
   const aggs = metric === "uv" ? { unique_users: { cardinality: { field: "sapId" } } } : undefined
 
@@ -709,27 +750,41 @@ function buildOrgDistributionAgg(
   }
 
   const items = aggs ? { terms, aggs } : { terms }
-  if (selectedUpperOrgLv1 === null) return items
+  const filters = [buildNonEmptyOrgLevelFilter(field)]
+  if (selectedUpperOrgLv1 !== null) {
+    filters.push(buildUpperOrgLv1Filter(selectedUpperOrgLv1))
+  }
 
   return {
-    filter: buildUpperOrgLv1Filter(selectedUpperOrgLv1),
+    filter: { bool: { filter: filters } },
     aggs: { items }
   }
 }
 
 async function fetchUserStats(range: TimeRange, granularity: Granularity, opts?: UserStatsOptions): Promise<unknown> {
   void granularity
-  const selectedUpperOrgLv1 = opts?.upperOrgLv1 ?? null
+  const selectedUpperOrgLv1 = normalizeUpperOrgLv1Option(opts?.upperOrgLv1)
+  const queryFilters = [timeRangeFilter("startedAt", range)]
+  if (selectedUpperOrgLv1 !== null) {
+    queryFilters.push(buildUpperOrgLv1Filter(selectedUpperOrgLv1))
+  }
+
   const body = {
     size: 0,
-    query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
+    query: { bool: { filter: queryFilters } },
     aggs: {
       top_users: {
         terms: { field: "sapId", size: 50 },
         aggs: {
-          user_name: { terms: { field: "userName",  size: 1 } },
-          org_name:  { terms: { field: "orgName",   size: 1 } },
-          upper_org_lv1: { terms: { field: "upperOrgLv1", size: 1, missing: "" } }
+          latest_user_info: {
+            top_hits: {
+              size: 1,
+              sort: [{ startedAt: { order: "desc" } }],
+              _source: {
+                includes: ["userName", "orgName", "upperOrgLv0", "upperOrgLv1"]
+              }
+            }
+          }
         }
       },
       by_org: buildOrgDistributionAgg(selectedUpperOrgLv1, "pv"),
@@ -1149,19 +1204,24 @@ async function fetchSkillDetail(skill: string, range: TimeRange, limit = 3): Pro
 
 async function fetchCommitDetails(
   range: TimeRange,
-  limit = 50
-): Promise<{ total: number; items: DashboardCommitDetail[] }> {
-  const size = clampLimit(limit, 50, 500)
+  options?: number | CommitDetailsOptions
+): Promise<{ total: number; page: number; pageSize: number; pushedOnly: boolean; items: DashboardCommitDetail[] }> {
+  const { page, pageSize, pushedOnly } = normalizeCommitDetailsOptions(options)
+  const filters: Record<string, unknown>[] = [
+    timeRangeFilter("eventTime", range),
+    { term: { eventName: "git.commit.created" } }
+  ]
+  if (pushedOnly) {
+    filters.push({ term: { "properties.pushed": true } })
+  }
   const body = {
     track_total_hits: true,
-    size,
+    from: (page - 1) * pageSize,
+    size: pageSize,
     sort: [{ eventTime: { order: "desc" } }],
     query: {
       bool: {
-        filter: [
-          timeRangeFilter("eventTime", range),
-          { term: { eventName: "git.commit.created" } }
-        ]
+        filter: filters
       }
     },
     _source: {
@@ -1175,6 +1235,13 @@ async function fetchCommitDetails(
         "ystId",
         "orgName",
         "properties.repoPath",
+        "properties.repositoryName",
+        "properties.repositoryFullName",
+        "properties.repositoryWebUrl",
+        "properties.commitSha",
+        "properties.commitUrl",
+        "properties.pushed",
+        "properties.pushedAt",
         "properties.branch",
         "properties.filesChanged",
         "properties.insertions",
@@ -1190,6 +1257,9 @@ async function fetchCommitDetails(
   const hits = raw.hits?.hits ?? []
   return {
     total: getTotalHits(raw, hits.length),
+    page,
+    pageSize,
+    pushedOnly,
     items: hits.map(normalizeCommitDetail)
   }
 }
@@ -1527,7 +1597,7 @@ function makeMockUserStats(range: TimeRange, opts?: UserStatsOptions): unknown {
   const to = new Date(range.to)
   const diffMs = to.getTime() - from.getTime()
   const diffDays = diffMs / (1000 * 60 * 60 * 24)
-  const selectedUpperOrgLv1 = opts?.upperOrgLv1 ?? null
+  const selectedUpperOrgLv1 = normalizeUpperOrgLv1Option(opts?.upperOrgLv1)
 
   const trendBuckets: Date[] = []
   if (diffDays <= 1) {
@@ -1547,65 +1617,67 @@ function makeMockUserStats(range: TimeRange, opts?: UserStatsOptions): unknown {
 
   const byOrgBuckets = selectedUpperOrgLv1 === null
     ? [
-        { key: "零售金融", doc_count: 748, unique_users: { value: 60 } },
-        { key: "公司金融", doc_count: 245, unique_users: { value: 20 } },
-        { key: "风险管理", doc_count: 189, unique_users: { value: 15 } },
-        { key: "科技管理", doc_count: 65, unique_users: { value: 5 } }
+        { key: "测试 1 部", doc_count: 748, unique_users: { value: 60 } },
+        { key: "开发二部", doc_count: 245, unique_users: { value: 20 } },
+        { key: "平台三部", doc_count: 189, unique_users: { value: 15 } }
       ]
-    : selectedUpperOrgLv1 === "零售金融"
+    : selectedUpperOrgLv1 === "测试 1 部"
       ? [
-          { key: "零售一部", doc_count: 430, unique_users: { value: 36 } },
-          { key: "零售二部", doc_count: 318, unique_users: { value: 24 } }
+          { key: "测试 1 组", doc_count: 430, unique_users: { value: 36 } },
+          { key: "测试 2 组", doc_count: 318, unique_users: { value: 24 } }
         ]
-      : selectedUpperOrgLv1 === "公司金融"
+      : selectedUpperOrgLv1 === "开发二部"
         ? [
-            { key: "企业金融部", doc_count: 245, unique_users: { value: 20 } }
+            { key: "开发三组", doc_count: 245, unique_users: { value: 20 } }
           ]
-        : selectedUpperOrgLv1 === "风险管理"
+        : selectedUpperOrgLv1 === "平台三部"
           ? [
-              { key: "风险管理部", doc_count: 189, unique_users: { value: 15 } }
+              { key: "平台一组", doc_count: 189, unique_users: { value: 15 } }
             ]
-          : selectedUpperOrgLv1 === "科技管理"
-            ? [
-                { key: "科技部", doc_count: 65, unique_users: { value: 5 } }
-              ]
-            : []
-  const byOrgPv = selectedUpperOrgLv1 === null
-    ? { buckets: byOrgBuckets }
-    : {
-        doc_count: byOrgBuckets.reduce((sum, bucket) => sum + bucket.doc_count, 0),
-        items: { buckets: byOrgBuckets }
-      }
-  const byOrgUv = selectedUpperOrgLv1 === null
-    ? { buckets: byOrgBuckets }
-    : {
-        doc_count: byOrgBuckets.reduce((sum, bucket) => sum + bucket.doc_count, 0),
-        items: { buckets: byOrgBuckets }
-      }
+          : []
+
+  const makeOrgAgg = (buckets: typeof byOrgBuckets): Record<string, unknown> => {
+    const docCount = buckets.reduce((sum, bucket) => sum + bucket.doc_count, 0)
+    return { doc_count: docCount, items: { buckets } }
+  }
+  const byOrgPv = makeOrgAgg(byOrgBuckets)
+  const byOrgUv = makeOrgAgg(byOrgBuckets)
+
+  const allTopUserBuckets = [
+    { key: "10010001", doc_count: 142, latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "张三", orgName: "测试 1 组", upperOrgLv1: "测试 1 部", upperOrgLv0: "测试 1 组" } }] } } },
+    { key: "10010002", doc_count: 118, latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "李四", orgName: "测试 2 组", upperOrgLv1: "测试 1 部", upperOrgLv0: "测试 2 组" } }] } } },
+    { key: "10010003", doc_count: 97,  latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "王五", orgName: "开发三组", upperOrgLv1: "开发二部", upperOrgLv0: "开发三组" } }] } } },
+    { key: "10010004", doc_count: 85,  latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "赵六", orgName: "测试 1 组", upperOrgLv1: "测试 1 部", upperOrgLv0: "测试 1 组" } }] } } },
+    { key: "10010005", doc_count: 73,  latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "钱七", orgName: "平台一组", upperOrgLv1: "平台三部", upperOrgLv0: "平台一组" } }] } } },
+    { key: "10010006", doc_count: 61,  latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "孙八", orgName: "开发三组", upperOrgLv1: "开发二部", upperOrgLv0: "开发三组" } }] } } }
+  ]
+  const topUserBuckets = selectedUpperOrgLv1 === null
+    ? allTopUserBuckets
+    : allTopUserBuckets.filter((bucket) => bucket.latest_user_info.hits.hits[0]._source.upperOrgLv1 === selectedUpperOrgLv1)
+
+  const byVersionBuckets = selectedUpperOrgLv1 === null
+    ? [
+        { key: "1.3.0", doc_count: 512, unique_users: { value: 98 } },
+        { key: "1.2.5", doc_count: 298, unique_users: { value: 62 } },
+        { key: "1.2.0", doc_count: 187, unique_users: { value: 41 } },
+        { key: "1.1.x", doc_count: 143, unique_users: { value: 28 } },
+        { key: "1.0.x", doc_count: 107, unique_users: { value: 19 } }
+      ]
+    : [
+        { key: "1.3.0", doc_count: Math.max(12, byOrgBuckets[0]?.doc_count ?? 0), unique_users: { value: Math.max(3, topUserBuckets.length) } },
+        { key: "1.2.5", doc_count: Math.max(6, Math.floor((byOrgBuckets[1]?.doc_count ?? byOrgBuckets[0]?.doc_count ?? 0) * 0.4)), unique_users: { value: Math.max(1, Math.ceil(topUserBuckets.length / 2)) } }
+      ]
 
   return {
     aggregations: {
       top_users: {
-        buckets: [
-          { key: "10010001", doc_count: 142, user_name: { buckets: [{ key: "张三", doc_count: 142 }] }, org_name: { buckets: [{ key: "零售一部", doc_count: 142 }] }, upper_org_lv1: { buckets: [{ key: "零售金融", doc_count: 142 }] }, success_count: { doc_count: 130 } },
-          { key: "10010002", doc_count: 118, user_name: { buckets: [{ key: "李四", doc_count: 118 }] }, org_name: { buckets: [{ key: "零售二部", doc_count: 118 }] }, upper_org_lv1: { buckets: [{ key: "零售金融", doc_count: 118 }] }, success_count: { doc_count: 110 } },
-          { key: "10010003", doc_count: 97,  user_name: { buckets: [{ key: "王五", doc_count: 97  }] }, org_name: { buckets: [{ key: "企业金融部", doc_count: 97  }] }, upper_org_lv1: { buckets: [{ key: "公司金融", doc_count: 97 }] }, success_count: { doc_count: 89  } },
-          { key: "10010004", doc_count: 85,  user_name: { buckets: [{ key: "赵六", doc_count: 85  }] }, org_name: { buckets: [{ key: "零售一部", doc_count: 85  }] }, upper_org_lv1: { buckets: [{ key: "零售金融", doc_count: 85 }] }, success_count: { doc_count: 72  } },
-          { key: "10010005", doc_count: 73,  user_name: { buckets: [{ key: "钱七", doc_count: 73  }] }, org_name: { buckets: [{ key: "风险管理部", doc_count: 73  }] }, upper_org_lv1: { buckets: [{ key: "风险管理", doc_count: 73 }] }, success_count: { doc_count: 68  } },
-          { key: "10010006", doc_count: 61,  user_name: { buckets: [{ key: "孙八", doc_count: 61  }] }, org_name: { buckets: [{ key: "科技部",    doc_count: 61  }] }, upper_org_lv1: { buckets: [{ key: "科技管理", doc_count: 61 }] }, success_count: { doc_count: 55  } }
-        ]
+        buckets: topUserBuckets
       },
       by_org: byOrgPv,
       by_org_pv: byOrgPv,
       by_org_uv: byOrgUv,
       by_version: {
-        buckets: [
-          { key: "1.3.0", doc_count: 512, unique_users: { value: 98 } },
-          { key: "1.2.5", doc_count: 298, unique_users: { value: 62 } },
-          { key: "1.2.0", doc_count: 187, unique_users: { value: 41 } },
-          { key: "1.1.x", doc_count: 143, unique_users: { value: 28 } },
-          { key: "1.0.x", doc_count: 107, unique_users: { value: 19 } }
-        ]
+        buckets: byVersionBuckets
       },
       user_trend: { buckets: trend }
     }
@@ -1982,13 +2054,19 @@ function makeMockSkillDetail(skill: string, range: TimeRange, limit = 3): Dashbo
   }
 }
 
-function makeMockCommitDetails(range: TimeRange, limit = 200): { total: number; items: DashboardCommitDetail[] } {
+function makeMockCommitDetails(
+  range: TimeRange,
+  options?: number | CommitDetailsOptions
+): { total: number; page: number; pageSize: number; pushedOnly: boolean; items: DashboardCommitDetail[] } {
+  const { page, pageSize, pushedOnly } = normalizeCommitDetailsOptions(options)
   const from = new Date(range.from)
   const to = new Date(range.to)
   const spanMs = Math.max(60_000, to.getTime() - from.getTime())
-  const count = Math.min(clampLimit(limit, 200, 500), 18)
-  const items = Array.from({ length: count }, (_, index): DashboardCommitDetail => {
+  const allItems = Array.from({ length: 240 }, (_, index): DashboardCommitDetail => {
     const eventTime = new Date(to.getTime() - Math.min(spanMs - 1, index * 42 * 60 * 1000))
+    const pushed = index % 3 !== 1
+    const repoName = `cmb-${index % 3}`
+    const commitSha = `mock${String(index + 1).padStart(36, "0")}`
     return {
       eventId: `mock-commit-event-${index + 1}`,
       eventTime: eventTime.toISOString(),
@@ -1997,7 +2075,14 @@ function makeMockCommitDetails(range: TimeRange, limit = 200): { total: number; 
       ystId: `2743${String(50 + index).padStart(2, "0")}`,
       orgName: ["科技部", "零售一部", "风险管理部"][index % 3],
       userIp: `10.0.0.${20 + index}`,
-      repoPath: `/Users/demo/projects/cmb-${index % 3}`,
+      repoPath: `/Users/demo/projects/${repoName}`,
+      repositoryName: repoName,
+      repositoryFullName: `demo/${repoName}`,
+      repositoryWebUrl: `https://git.example.internal/demo/${repoName}`,
+      commitSha,
+      commitUrl: pushed ? `https://git.example.internal/demo/${repoName}/commit/${commitSha}` : undefined,
+      pushed,
+      pushedAt: pushed ? new Date(eventTime.getTime() + 30 * 60 * 1000).toISOString() : undefined,
       branch: index % 2 === 0 ? "feature/smart-model-routing" : "fix/dashboard-detail",
       filesChanged: 2 + (index % 6),
       insertions: 18 + index * 7,
@@ -2008,7 +2093,15 @@ function makeMockCommitDetails(range: TimeRange, limit = 200): { total: number; 
       skillCount: index % 2 === 0 ? 1 : 2
     }
   })
-  return { total: 240, items }
+  const filteredItems = pushedOnly ? allItems.filter((item) => item.pushed) : allItems
+  const start = (page - 1) * pageSize
+  return {
+    total: filteredItems.length,
+    page,
+    pageSize,
+    pushedOnly,
+    items: filteredItems.slice(start, start + pageSize)
+  }
 }
 
 // ─────────────────────────────────────────────────────────
@@ -2173,11 +2266,11 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   _ipcMain.handle(
     "dashboard:commitDetails",
-    async (_, range: TimeRange, limit?: number) => {
+    async (_, range: TimeRange, options?: number | CommitDetailsOptions) => {
       if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
-      if (import.meta.env.DEV) return { success: true, data: makeMockCommitDetails(range, limit) }
+      if (import.meta.env.DEV) return { success: true, data: makeMockCommitDetails(range, options) }
       try {
-        return { success: true, data: await fetchCommitDetails(range, limit) }
+        return { success: true, data: await fetchCommitDetails(range, options) }
       } catch (e) {
         console.error("[Dashboard] commitDetails error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }

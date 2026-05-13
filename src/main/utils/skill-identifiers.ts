@@ -33,6 +33,33 @@ export function ensureVersionedSkillIdentifier(
   return `${parsed.name}-${parsed.version ?? normalizeSkillVersion(version)}`
 }
 
+/**
+ * Strip enclosing single- or double-quotes from a YAML scalar value.
+ * Handles values like `"hello"` → `hello` or `'world'` → `world`.
+ */
+export function stripYamlQuotes(value: string): string {
+  return value.replace(/^['"]|['"]$/g, "")
+}
+
+/**
+ * Minimal YAML frontmatter parser (only key: value pairs).
+ * Does not handle nested structures or YAML syntax beyond simple scalars.
+ */
+export function parseYamlFrontmatter(content: string): Record<string, string> {
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/)
+  if (!match) return {}
+
+  const result: Record<string, string> = {}
+  for (const line of match[1].split("\n")) {
+    const colonIdx = line.indexOf(":")
+    if (colonIdx <= 0) continue
+    const key = line.slice(0, colonIdx).trim()
+    const value = stripYamlQuotes(line.slice(colonIdx + 1).trim())
+    if (key) result[key] = value
+  }
+  return result
+}
+
 export function getSkillIdentifierLookupTerms(skill: string): string[] {
   const parsed = parseSkillIdentifier(skill)
   if (!parsed.name) return []

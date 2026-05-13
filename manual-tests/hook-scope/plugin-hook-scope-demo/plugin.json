@@ -1,0 +1,9 @@
+{
+  "name": "Hook Scope Demo",
+  "version": "1.0.0",
+  "description": "Manual fixture for scoped plugin, skill, and MCP hooks.",
+  "author": "CmbCoworkAgent Test",
+  "hooks": "hooks/hooks.json",
+  "mcpServers": ".mcp.json",
+  "skills": "skills"
+}

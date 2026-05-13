@@ -24,7 +24,8 @@ import {
   existsSync,
   unlinkSync,
   rmdirSync,
-  writeFileSync
+  writeFileSync,
+  statSync
 } from "fs"
 import { v4 as uuid } from "uuid"
 import type {
@@ -45,6 +46,7 @@ import { getUserInfo } from "../../storage"
 import { listAllSkills } from "../../ipc/skills"
 import { nowIsoLocal } from "../../util/local-time"
 import {
+  DEFAULT_SKILL_VERSION,
   ensureVersionedSkillIdentifier,
   parseSkillIdentifier
 } from "../../utils/skill-identifiers"
@@ -52,7 +54,7 @@ import {
   setAdoptionContext,
   clearAdoptionContext
 } from "../../services/adoption-tracker"
-import { sanitizeTraceForStorage } from "./sanitizer"
+import { sanitizeTraceForCloudUpload } from "./sanitizer"
 
 // ─────────────────────────────────────────────────────────
 // Global reporter registry
@@ -85,6 +87,8 @@ function getThreadTracesDir(threadId: string): string {
   return join(getTracesRootDir(), threadId)
 }
 
+const MAX_TRACES_PER_THREAD = 50
+
 function writeTraceFile(trace: AgentTrace): void {
   try {
     const dir = getThreadTracesDir(trace.threadId)
@@ -92,8 +96,47 @@ function writeTraceFile(trace: AgentTrace): void {
     const filePath = join(dir, `${trace.traceId}.jsonl`)
     appendFileSync(filePath, JSON.stringify(trace) + "\n", "utf-8")
     console.log(`[Tracer] Written trace ${trace.traceId} to ${filePath}`)
+    // Prune oldest traces if over the per-thread limit.
+    pruneOldTraces(trace.threadId)
   } catch (e) {
     console.warn("[Tracer] Failed to write trace file:", e)
+  }
+}
+
+/** Delete the oldest trace files in a thread directory, keeping at most MAX_TRACES_PER_THREAD. */
+function pruneOldTraces(threadId: string): void {
+  try {
+    const dir = getThreadTracesDir(threadId)
+    if (!existsSync(dir)) return
+
+    const files = readdirSync(dir)
+      .filter((f) => f.endsWith(".jsonl"))
+      .map((name) => {
+        const filePath = join(dir, name)
+        try {
+          return { name, filePath, mtimeMs: statSync(filePath).mtimeMs }
+        } catch {
+          return null
+        }
+      })
+      .filter((e): e is { name: string; filePath: string; mtimeMs: number } => e !== null)
+
+    if (files.length <= MAX_TRACES_PER_THREAD) return
+
+    // Sort newest first, delete the tail.
+    files.sort((a, b) => b.mtimeMs - a.mtimeMs)
+    const toDelete = files.slice(MAX_TRACES_PER_THREAD)
+
+    for (const entry of toDelete) {
+      try {
+        unlinkSync(entry.filePath)
+        console.log(`[Tracer] Pruned old trace: ${entry.name} (thread ${threadId})`)
+      } catch (e) {
+        console.warn(`[Tracer] Failed to prune trace ${entry.name}:`, e)
+      }
+    }
+  } catch (e) {
+    console.warn("[Tracer] Failed to prune old traces:", e)
   }
 }
 
@@ -104,15 +147,35 @@ function normalizeTrace(parsed: AgentTrace): AgentTrace {
   }
 }
 
-function deriveUpperOrgLevels(pathName?: string): Pick<AgentTrace, "upperOrgLv1" | "upperOrgLv2" | "upperOrgLv3"> {
+function deriveUpperOrgLevels(pathName?: string): Pick<AgentTrace, "upperOrgLv0" | "upperOrgLv1" | "upperOrgLv2" | "upperOrgLv3"> {
+  const emptyLevels = {
+    upperOrgLv0: "",
+    upperOrgLv1: "",
+    upperOrgLv2: "",
+    upperOrgLv3: ""
+  }
   const parts = typeof pathName === "string"
     ? pathName.split("/").map((part) => part.trim()).filter(Boolean)
     : []
+  const itDeptIndex = parts.findIndex((part) => part.includes("信息技术部"))
+  if (itDeptIndex < 0) return emptyLevels
+
+  const lowerParts = parts.slice(itDeptIndex + 1)
+  const startsWithTeam = lowerParts[0]?.includes("团队") ?? false
+  if (startsWithTeam) {
+    return {
+      upperOrgLv0: lowerParts[2] ?? "",
+      upperOrgLv1: lowerParts[1] ?? "",
+      upperOrgLv2: lowerParts[0] ?? "",
+      upperOrgLv3: "本部团队"
+    }
+  }
 
   return {
-    upperOrgLv1: parts.length >= 2 ? parts[parts.length - 2] : "",
-    upperOrgLv2: parts.length >= 3 ? parts[parts.length - 3] : "",
-    upperOrgLv3: parts.length >= 4 ? parts[parts.length - 4] : ""
+    upperOrgLv0: lowerParts[3] ?? "",
+    upperOrgLv1: lowerParts[2] ?? "",
+    upperOrgLv2: lowerParts[1] ?? "",
+    upperOrgLv3: lowerParts[0] ?? ""
   }
 }
 
@@ -450,9 +513,14 @@ export class TraceCollector {
             this.usedSkills
               .map((skill) => {
                 const parsed = parseSkillIdentifier(skill)
+                const listedVersion = skillVersionMap.get(parsed.name)
+                const resolvedVersion =
+                  parsed.version && parsed.version !== DEFAULT_SKILL_VERSION
+                    ? parsed.version
+                    : listedVersion ?? parsed.version
                 return ensureVersionedSkillIdentifier(
                   parsed.name,
-                  parsed.version ?? skillVersionMap.get(parsed.name)
+                  resolvedVersion
                 )
               })
               .filter(Boolean)
@@ -489,13 +557,14 @@ export class TraceCollector {
       orgName: userInfo?.orgName,
       pathName: userInfo?.pathName,
       pathId: userInfo?.originPathId,
+      upperOrgLv0: upperOrgLevels.upperOrgLv0,
       upperOrgLv1: upperOrgLevels.upperOrgLv1,
       upperOrgLv2: upperOrgLevels.upperOrgLv2,
       upperOrgLv3: upperOrgLevels.upperOrgLv3,
       appVersion: getAppVersionForTrace(),
       steps: this.steps,
       modelCalls: this.modelCalls,
-      nodes: this.finalizeNodes(outcome, endedAt, errorMessage),
+      nodes: this.finalizeNodes(outcome, endedAt, usedSkillsWithVersions, errorMessage),
       totalToolCalls,
       outcome,
       ...(errorMessage ? { errorMessage } : {}),
@@ -503,14 +572,12 @@ export class TraceCollector {
       ...(this.routingTrace ? { metadata: { routingTrace: this.routingTrace } } : {})
     }
 
-    const sanitizedTrace = sanitizeTraceForStorage(trace)
-
-    writeTraceFile(sanitizedTrace)
+    writeTraceFile(trace)
 
     // Fire-and-forget: trace upload is a side-channel operation and must
     // never block the main agent flow. Errors are logged and swallowed.
     void Promise.resolve()
-      .then(() => _reporter.report(sanitizedTrace))
+      .then(() => _reporter.report(sanitizeTraceForCloudUpload(trace)))
       .catch((e) => {
         console.warn("[Tracer] Reporter.report() threw:", e)
       })
@@ -523,10 +590,10 @@ export class TraceCollector {
       // ignore
     }
 
-    return sanitizedTrace
+    return trace
   }
 
-  private finalizeNodes(outcome: TraceOutcome, endedAt: string, errorMessage?: string): TraceNode[] {
+  private finalizeNodes(outcome: TraceOutcome, endedAt: string, resolvedUsedSkills: string[], errorMessage?: string): TraceNode[] {
     for (const node of this.nodes) {
       if (node.type === "llm" || node.type === "tool") {
         if (node.status === "running") {
@@ -575,7 +642,7 @@ export class TraceCollector {
       }
       root.metadata = {
         ...(root.metadata ?? {}),
-        usedSkills: [...this.usedSkills]
+        usedSkills: [...resolvedUsedSkills]
       }
     }
 

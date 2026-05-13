@@ -1,0 +1,63 @@
+测试用例规划表
+📋 Unit Tests
+A. SkillLifecycleRegistry（registry.ts）
+#	用例	验证点
+A1	单一 SKILL.md 在 source 根	注册一个 skill，name 取自 frontmatter
+A2	子目录布局（source/skill-a/SKILL.md、source/skill-b/SKILL.md）	各注册一条
+A3	SKILL.md 无 frontmatter	name 退化为目录 basename
+A4	frontmatter 有 name: 但是 CRLF / 大小写混排	仍能解析出 name
+A5	resolveRead(skillPath) 用绝对 doc 路径	命中
+A6	resolveRead(rootDir)	命中
+A7	resolveRead(<rootDir>/script.py)	命中（前缀匹配）
+A8	resolveRead(rawPath) 相对路径	命中
+A9	resolveRead(unrelated)	返回 null
+A10	多 source 重复（同一 skill 出现两次）	只注册一次
+A11	空 source / 不存在的 source	跳过不报错
+B. Hook Runner — Skill 事件分发（runner.ts）
+#	用例	验证点
+B1	matcher * + PreSkillUse	任意 skillName 都匹配
+B2	matcher = "imagegen" + skillName "imagegen"	命中
+B3	matcher = "imagegen" + skillName "other"	不命中
+B4	matcher = 正则 ^image- + skillName "image-edit"	命中（regex 路径）
+B5	PreSkillUse exit 2	result.blocked === true
+B6	PreSkillUse stdout {"decision":"block","reason":"r"}	result.blocked, result.reason="r"
+B7	PostSkillUse additionalContext JSON	additionalContext 透传到结果
+B8	env vars: SKILL_NAME / SKILL_PATH / SKILL_ROOT 注入	hook 进程能读到
+B9	stdin payload 含 skill_name / skill_path / skill_root / skill_trigger_tool_name	hook 能 parse
+B10	matcher 同一字符串，event=PreToolUse 时按 toolName 匹配，event=PreSkillUse 时按 skillName 匹配	两个频道分开
+C. Auto-commit — 隔离逻辑（agent-auto-commit.ts）
+#	用例	验证点
+C1	mode: "off"	status: "disabled"
+C2	非 git 工作区	skipped, reason="不是 Git 仓库"
+C3	snapshot 时干净，agent 写入新文件	committed，commit 含该文件
+C4	用户 pre-existing dirty a.ts，agent 写入新文件 b.ts	commit 只含 b.ts，a.ts 留 dirty
+C5	用户 pre-existing dirty a.ts，agent 写 a.ts 改了内容（fingerprint 变）	commit 含 a.ts，warning 提示重叠
+C6	用户 pre-existing dirty a.ts，agent 触达但 fingerprint 没变	commit 不含 a.ts
+C7	agent 跑期间用户手动 commit（HEAD 变化）	skipped, reason="HEAD 发生变化"
+C8	工作区有 unmerged 冲突	skipped, skippedFiles 列出冲突
+C9	agent 跑期间用户 git add 了非 candidate 文件	skipped, reason="非本轮改动已暂存"
+C10	启用自动提交但无 cardNumber	skipped, reason="缺少卡片编号"
+C11	messageStrategy: prompt	提交信息满足业务格式：cardNumber #comment fix:<摘要> #CMBDevClaw
+C12	messageStrategy: template + {summary}/{fileCount}	占位符只替换中间摘要，整体仍满足业务格式
+C13	messageStrategy: diff 单文件	摘要 = update <basename>，整体仍满足业务格式
+C14	messageStrategy: diff 多文件	摘要 = update N files in <topDir>，整体仍满足业务格式
+C15	mode: "ask" + confirm=false	skipped, reason="用户取消"
+C16	mode: "ask" + confirm=true	committed
+C17	commit 成功后 metadata.llmModifiedFiles 被清空	thread DB 状态正确
+C18	candidate 列表只包含 LLM 真改动（不含外部新建）	避免误带（review 里的 concern）
+📋 Integration Tests
+D. LocalSandbox.read + Skill Hook 集成
+#	用例	验证点
+D1	read SKILL.md，PreSkillUse 通过 → 返回纯净文件内容（不含 hook notes）	文件内容不被污染
+D2	read SKILL.md，PreSkillUse blocked → 返回 Error reading skill ...	不实际读文件
+D3	read 同一 SKILL.md 两次 → PreSkillUse 只触发一次	_skillHooksFired 去重
+D4	PreSkillUse 输出入队 → drainSkillHookContexts() 返回带 Skill: <name>\nSkill path: <path> 头部	队列结构正确
+D5	drain 后队列清空；PostSkillUse 延迟到本轮结束阶段，不在 read 后入队	splice(0) 语义与新生命周期语义
+D6	read 非 SKILL.md 文件	不触发 skill hooks
+E. Middleware 注入（runtime.ts createSkillHookContextMiddleware）
+#	用例	验证点
+E1	队列空 → handler(request) 原样调用，不修改 systemMessage	零开销
+E2	队列有 contexts → systemMessage 含 ## Skill Hook Context 标题	注入正确
+E3	修复后：原 systemPrompt 与注入文本之间有 \n\n 分隔	不粘连（你刚要修的 bug）
+E4	drain 异常时 fallback 到原 handler	异常吞掉不破坏链路
+E5	filesystemBackend 没有 drainSkillHookContexts 方法 → no-op	兼容非 LocalSandbox

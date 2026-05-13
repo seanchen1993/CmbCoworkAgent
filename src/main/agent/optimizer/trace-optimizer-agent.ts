@@ -1,11 +1,12 @@
 import { ChatOpenAI } from "@langchain/openai"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
-import { existsSync, readdirSync, readFileSync } from "fs"
-import { join } from "path"
+import { existsSync, readFileSync } from "fs"
 import { v4 as uuid } from "uuid"
 import type { AgentTrace } from "../trace/types"
 import { getCustomSkillsDir } from "../../storage"
 import type { SkillOptimizationCandidate } from "./skill-optimizer"
+import { discoverSkillsSync } from "../../skills/discovery"
+import { getDiscoveredSkillId } from "../../skills/ids"
 
 export type TraceRunStatus = "pending" | "running" | "completed" | "failed"
 
@@ -42,7 +43,7 @@ Your task:
 JSON schema:
 [
   {
-    "skillId": "snake_case_identifier",
+    "skillId": "relative_path_identifier",
     "name": "Human Readable Name",
     "description": "When this skill should be loaded.",
     "rationale": "Why this skill helps for this trace.",
@@ -61,15 +62,10 @@ function readExistingCustomSkills(): string {
   const dir = getCustomSkillsDir()
   if (!existsSync(dir)) return "(no custom skills yet)"
   try {
-    const skills = readdirSync(dir, { withFileTypes: true })
-      .filter((d) => d.isDirectory())
-      .map((d) => {
-        const mdPath = join(dir, d.name, "SKILL.md")
-        if (!existsSync(mdPath)) return null
-        const content = readFileSync(mdPath, "utf-8").slice(0, 400)
-        return `--- ${d.name} ---\n${content}`
-      })
-      .filter(Boolean)
+    const skills = discoverSkillsSync(dir).map((skill) => {
+      const content = readFileSync(skill.skillMdPath, "utf-8").slice(0, 400)
+      return `--- ${getDiscoveredSkillId(skill)} ---\n${content}`
+    })
     return skills.length ? skills.join("\n\n") : "(no custom skills yet)"
   } catch {
     return "(error reading skills)"

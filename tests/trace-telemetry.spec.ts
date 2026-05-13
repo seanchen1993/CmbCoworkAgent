@@ -5,7 +5,7 @@
  *   npx tsx tests/trace-telemetry.spec.ts
  */
 
-import { mkdtemp, readFile, rm } from "fs/promises"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "fs/promises"
 import { tmpdir } from "os"
 import { join } from "path"
 import { SkillUsageDetector } from "../src/main/agent/skill-evolution/usage-detector.ts"
@@ -50,17 +50,75 @@ function testSkillUsageDetectorNormalizesVersions(): void {
   const detector = new SkillUsageDetector()
   detector.onSkillsMetadata([
     { name: "代码审查", path: "/repo/skills/code-review/SKILL.md" },
-    { name: "接口设计", version: "2.3.4", path: "/repo/skills/api-design/SKILL.md" }
+    { name: "接口设计", version: "2.3.4", path: "/repo/skills/api-design/SKILL.md" },
+    {
+      name: "斜杠技能",
+      version: "3.1.4",
+      path: "C:\\Users\\demo\\.cmbcoworkagent\\enabled-skills-custom\\slash-skill\\SKILL.md"
+    }
   ])
 
   assert(detector.onReadFilePath("/repo/skills/code-review/SKILL.md"), "exact SKILL.md read should add a skill")
   assert(detector.onReadFilePath("/repo/skills/api-design/references/spec.md"), "root child read should add a skill")
+  assert(
+    detector.onReadFilePath("C:\\Users\\demo\\.cmbcoworkagent\\skills\\slash-skill\\SKILL.md"),
+    "slash command original skill path should alias to enabled custom skill metadata"
+  )
   assert(!detector.onReadFilePath("/repo/skills/code-review/SKILL.md"), "duplicate reads should not add again")
   assertArrayEqual(
     detector.getUsedSkillNames(),
-    ["代码审查-v1.0.0", "接口设计-v2.3.4"],
+    ["代码审查-v1.0.0", "接口设计-v2.3.4", "斜杠技能-v3.1.4"],
     "Skill detector should emit versioned identifiers with default version fallback"
   )
+}
+
+async function testSkillUsageDetectorReadsSkillMetadataDirectly(): Promise<void> {
+  const rootDir = await mkdtemp(join(tmpdir(), "slash-skill-direct-"))
+  const skillDir = join(rootDir, ".cmbcoworkagent", "skills", "elementui-page")
+  const skillMdPath = join(skillDir, "SKILL.md")
+
+  try {
+    await mkdir(skillDir, { recursive: true })
+    await writeFile(
+      skillMdPath,
+      [
+        "---",
+        "name: elementui-page",
+        "description: Element UI page generator",
+        "version: v1.0.3",
+        "---",
+        "",
+        "Use Element UI components."
+      ].join("\n"),
+      "utf8"
+    )
+
+    const detector = new SkillUsageDetector()
+    detector.onSkillsMetadata([{ name: "elementui-page", path: skillMdPath }])
+    assert(
+      detector.onReadFilePath(skillMdPath),
+      "SKILL.md read should resolve name/version even when preloaded metadata has no version"
+    )
+    assertArrayEqual(
+      detector.getUsedSkillNames(),
+      ["elementui-page-v1.0.3"],
+      "direct slash command skill detection should preserve the SKILL.md version"
+    )
+    assert(!detector.onReadFilePath(skillMdPath), "duplicate skill reads should not add again")
+
+    const directDetector = new SkillUsageDetector()
+    assert(
+      directDetector.onReadFilePath(join(skillDir, "references", "usage.md")),
+      "slash command child file reads should resolve name/version without preloaded metadata"
+    )
+    assertArrayEqual(
+      directDetector.getUsedSkillNames(),
+      ["elementui-page-v1.0.3"],
+      "direct slash command skill detection should preserve the SKILL.md version"
+    )
+  } finally {
+    await rm(rootDir, { recursive: true, force: true })
+  }
 }
 
 async function testTraceCollectorReportsVersionedSkills(): Promise<void> {
@@ -187,42 +245,53 @@ async function testTraceCollectorSanitizesLargeFields(): Promise<void> {
     const trace = await tracer.finish("error", makeLongText("ERROR_HEAD_", "e", "_ERROR_TAIL", 4000))
     await waitFor(() => reportedTrace !== undefined)
 
-    assert(trace.userMessage.includes("USER_HEAD_"), "sanitized user message should keep head")
-    assert(trace.userMessage.includes("_USER_TAIL"), "sanitized user message should keep tail")
-    assert(trace.userMessage.includes("trace truncated"), "sanitized user message should mark truncation")
-    assert(trace.modelCalls?.[0]?.inputMessages.length === 12, "sanitizer should keep all LLM input messages")
+    assert(trace.userMessage === userMessage, "local trace returned from finish should keep full user message")
+    assert(!trace.userMessage.includes("trace truncated"), "local trace returned from finish should not be sanitized")
+    assert(trace.modelCalls?.[0]?.inputMessages.length === 12, "local trace should keep all LLM input messages")
     assert(
       trace.modelCalls?.[0]?.inputMessages[11]?.content.includes("_MSG_11_TAIL"),
-      "sanitizer should preserve tails for retained input messages"
+      "local trace should preserve full retained input messages"
     )
     assert(
       trace.steps[0]?.toolCalls[0]?.result?.includes("_RESULT_TAIL"),
-      "tool result should keep tail"
+      "local tool result should keep tail"
     )
     assert(
       JSON.stringify(trace.steps[0]?.toolCalls[0]?.args).includes("ARGS_HEAD_"),
-      "tool args should keep head"
+      "local tool args should keep head"
     )
     assert(
       trace.errorMessage?.includes("_ERROR_TAIL"),
-      "error message should keep tail"
+      "local error message should keep tail"
     )
     assert(
-      trace.metadata?.traceTruncation &&
-        typeof trace.metadata.traceTruncation === "object" &&
-        (trace.metadata.traceTruncation as { truncated?: boolean }).truncated === true,
-      "trace metadata should record truncation"
+      reportedTrace?.userMessage.includes("trace truncated"),
+      "cloud reporter should receive sanitized user message"
     )
-
+    assert(
+      reportedTrace?.metadata?.traceTruncation &&
+        typeof reportedTrace.metadata.traceTruncation === "object" &&
+        (reportedTrace.metadata.traceTruncation as { truncated?: boolean }).truncated === true,
+      "reported trace metadata should record truncation"
+    )
+    assert(
+      JSON.stringify(reportedTrace).length < 96 * 1024,
+      "reported trace should fit hard limit"
+    )
+    assert(
+      !trace.metadata?.traceTruncation,
+      "local trace should not include cloud truncation metadata"
+    )
     const file = join(tracesDir, trace.threadId, `${trace.traceId}.jsonl`)
     const persistedRaw = (await readFile(file, "utf-8")).trim()
     const persisted = JSON.parse(persistedRaw) as AgentTrace
-    assert(persistedRaw.length < 96 * 1024, "persisted trace should fit hard limit")
-    assert(persisted.modelCalls?.[0]?.inputMessages.length === 12, "persisted trace should keep all input messages")
+    assert(persisted.userMessage === userMessage, "persisted local trace should keep full user message")
+    assert(!persistedRaw.includes("trace truncated"), "persisted local trace should not be sanitized")
+    assert(persisted.modelCalls?.[0]?.inputMessages.length === 12, "persisted local trace should keep all input messages")
     assertArrayEqual(
       reportedTrace?.modelCalls?.[0]?.inputMessages.map((message) => message.role) ?? [],
       persisted.modelCalls?.[0]?.inputMessages.map((message) => message.role) ?? [],
-      "reporter should receive the same sanitized message sequence as persisted trace"
+      "reporter should retain the same message sequence as persisted trace"
     )
   } finally {
     setTraceReporter({
@@ -238,6 +307,8 @@ async function testTraceCollectorSanitizesLargeFields(): Promise<void> {
 async function run(): Promise<void> {
   testSkillUsageDetectorNormalizesVersions()
   console.log("PASS Skill usage detector version normalization")
+  await testSkillUsageDetectorReadsSkillMetadataDirectly()
+  console.log("PASS Skill usage detector direct SKILL.md metadata lookup")
   await testTraceCollectorReportsVersionedSkills()
   console.log("PASS trace collector telemetry usedSkills normalization")
   await testTraceCollectorSanitizesLargeFields()

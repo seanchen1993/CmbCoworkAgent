@@ -39,8 +39,13 @@ function testUpdateBodyIncludesOriginRepositoryFields(): void {
 
   const scriptSource = getNested(body, ["script", "source"])
   const scriptParams = getNested(body, ["script", "params"]) as Record<string, unknown>
+  const eventTerms = getNested(body, ["query", "bool", "filter", 0, "terms", "eventName"])
   const commitTerms = getNested(body, ["query", "bool", "filter", 1, "terms", "properties.commitSha"])
 
+  assert(
+    JSON.stringify(eventTerms) === JSON.stringify(["code_adopt", "git.commit.created"]),
+    "update should mark both code_adopt and git.commit.created events"
+  )
   assert(Array.isArray(commitTerms), "commitSha terms should be an array")
   assert(JSON.stringify(commitTerms) === JSON.stringify(["abc123", "def456"]), "commit shas should be trimmed and deduped")
   assert(scriptParams.repositoryName === "project", "repositoryName should come from parsed origin URL")
@@ -51,18 +56,26 @@ function testUpdateBodyIncludesOriginRepositoryFields(): void {
     "code_adopt update should write repositoryName"
   )
   assert(
+    typeof scriptSource === "string" && scriptSource.includes("ctx._source.properties.remoteUrl = params.remoteUrl;"),
+    "code_adopt update should write canonical remoteUrl"
+  )
+  assert(
     typeof scriptSource === "string" && scriptSource.includes("ctx._source.properties.commitUrl = commitUrl;"),
     "code_adopt update should write commitUrl"
   )
   assert(
-    typeof scriptSource === "string" && scriptSource.includes("ctx._source.properties.pushRepositoryName = params.repositoryName;"),
-    "code_adopt update should retain pushRepositoryName audit field"
+    typeof scriptSource === "string" && !scriptSource.includes("pushRepositoryName"),
+    "code_adopt update should not duplicate repository fields under pushRepositoryName"
+  )
+  assert(
+    typeof scriptSource === "string" && !scriptSource.includes("pushCommitUrl"),
+    "code_adopt update should not duplicate commitUrl under pushCommitUrl"
   )
 }
 
 function run(): void {
   testUpdateBodyIncludesOriginRepositoryFields()
-  console.log("PASS code_adopt pushed update repository fields")
+  console.log("PASS pushed telemetry update repository fields")
 }
 
 run()

@@ -1,5 +1,22 @@
 import { useEffect, useState } from "react"
-import { ArrowLeft, Brain, Clock, Code2, GitBranch, HeartPulse, Plug, Puzzle, Sparkles, ShoppingBag, Shield, Cpu, CircleUser, Webhook, Wrench } from "lucide-react"
+import {
+  ArrowLeft,
+  Brain,
+  Clock,
+  Code2,
+  GitBranch,
+  GitCommit,
+  HeartPulse,
+  Plug,
+  Puzzle,
+  Sparkles,
+  ShoppingBag,
+  Shield,
+  Cpu,
+  CircleUser,
+  Webhook,
+  Wrench
+} from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useAppStore } from "@/lib/store"
 import { cn } from "@/lib/utils"
@@ -17,6 +34,7 @@ import { UserInfoPanel } from "./UserInfoPanel"
 import { HooksPanel } from "./HooksPanel"
 import { LspPanel } from "./LspPanel"
 import { CodeExecToolsPanel } from "./CodeExecToolsPanel"
+import { CommitPolicyPanel } from "./CommitPolicyPanel"
 
 type CustomizeTab =
   | "skills"
@@ -33,6 +51,7 @@ type CustomizeTab =
   | "hooks"
   | "lsp"
   | "codeExecTools"
+  | "commitPolicy"
 
 export function CustomizeView(): React.JSX.Element {
   const {
@@ -169,7 +188,9 @@ export function CustomizeView(): React.JSX.Element {
           >
             <Code2 className="size-4 shrink-0" />
             Java LSP
-            <span className="ml-auto text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400">Beta</span>
+            <span className="ml-auto text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400">
+              Beta
+            </span>
           </button>
           <button
             className={cn(
@@ -184,7 +205,9 @@ export function CustomizeView(): React.JSX.Element {
             自优化
             <div className="ml-auto flex items-center gap-1.5 shrink-0">
               {pendingEvolution && <span className="size-2 rounded-full bg-orange-500 shrink-0" />}
-              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400">Beta</span>
+              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400">
+                Beta
+              </span>
             </div>
           </button>
           <button
@@ -198,7 +221,9 @@ export function CustomizeView(): React.JSX.Element {
           >
             <Shield className="size-4 shrink-0" />
             沙盒环境
-            <span className="ml-auto text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400">Beta</span>
+            <span className="ml-auto text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400">
+              Beta
+            </span>
           </button>
           <button
             className={cn(
@@ -247,7 +272,21 @@ export function CustomizeView(): React.JSX.Element {
           >
             <Wrench className="size-4 shrink-0" />
             <span className="min-w-0 flex-1 truncate whitespace-nowrap">编程式工具调用</span>
-            <span className="shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400">Beta</span>
+            <span className="shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400">
+              Beta
+            </span>
+          </button>
+          <button
+            className={cn(
+              "flex items-center gap-3 w-full rounded-md px-2.5 py-1.5 text-sm transition-colors",
+              activeTab === "commitPolicy"
+                ? "bg-muted font-medium"
+                : "text-muted-foreground hover:bg-muted/50"
+            )}
+            onClick={() => setActiveTab("commitPolicy")}
+          >
+            <GitCommit className="size-4 shrink-0" />
+            提交策略
           </button>
         </nav>
       </div>
@@ -284,6 +323,8 @@ export function CustomizeView(): React.JSX.Element {
         <div className="flex flex-1 overflow-hidden">
           <CodeExecToolsPanel />
         </div>
+      ) : activeTab === "commitPolicy" ? (
+        <CommitPolicyPanel />
       ) : null}
     </div>
   )

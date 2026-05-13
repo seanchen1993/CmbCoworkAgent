@@ -181,7 +181,7 @@ function InclusiveAdoptionTooltip({ stats }: { stats: DashboardCodeStats }): Rea
 function MeasuredAdoptionTooltip({ stats }: { stats: DashboardCodeStats }): React.JSX.Element {
   return (
     <div className="space-y-1.5">
-      <div className="text-[11px] font-medium text-foreground">已测量采纳率</div>
+      <div className="text-[11px] font-medium text-foreground">已Commit采纳率</div>
       <div className="space-y-1 text-[11px]">
         <div className="flex items-center justify-between gap-4">
           <span className="text-muted-foreground">采纳行数</span>
@@ -289,7 +289,7 @@ function SkillCodeStatsBar({ stats }: { stats: DashboardCodeStats | null }): Rea
         />
         <SkillCodeStat
           icon={Gauge}
-          label="已测量采纳率"
+          label="已Commit采纳率"
           value={fmtPercent(stats.measuredAdoptionRate)}
           sub={
             stats.measuredAdoptionRate === null

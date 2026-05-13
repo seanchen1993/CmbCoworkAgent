@@ -51,7 +51,7 @@ export interface TraceModelCall {
   messageId?: string
   /** ISO timestamp when this call was recorded */
   startedAt: string
-  /** Request-side context sent to the model. All messages are kept; large content is truncated before storage/reporting. */
+  /** Request-side context sent to the model. Local traces keep full content; cloud uploads may truncate large content. */
   inputMessages: TraceChatMessage[]
   /** Final model output message */
   outputMessage: TraceChatMessage
@@ -192,7 +192,8 @@ export interface AgentTrace {
   pathName?: string
   /** Organization path ID from UserInfo.originPathId */
   pathId?: string
-  /** Parent organization levels derived from pathName */
+  /** Organization levels derived from pathName under 信息技术部 */
+  upperOrgLv0?: string
   upperOrgLv1?: string
   upperOrgLv2?: string
   upperOrgLv3?: string

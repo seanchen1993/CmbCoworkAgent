@@ -1,5 +1,5 @@
 import { homedir } from "os"
-import { basename, join } from "path"
+import { basename, isAbsolute, join, relative, resolve } from "path"
 import { createHash } from "crypto"
 import { v4 as uuid } from "uuid"
 import {
@@ -15,9 +15,11 @@ import {
   isSupportedHookEvent,
   type HookConfig,
   type HookOnBlockConfig,
+  type HookSourceType,
   type HookUpsert
 } from "./hooks/types"
-import { readdir, readFile, rm, mkdir, stat as fsStat } from "fs/promises"
+import type { AgentAutoCommitSettings } from "./types"
+import { readdir, rm, mkdir } from "fs/promises"
 import { app } from "electron"
 import { resolveMcpConnectorKind } from "./mcp/connector-kind"
 import type {
@@ -27,6 +29,26 @@ import type {
   SkillHookMetadata
 } from "./types"
 import { copyDirRecursive } from "./utils/fs"
+import {
+  discoverSkills,
+  discoverSkillsSync,
+  expandSkillMiddlewareSourceDirs,
+  makeFlattenedSkillDirName,
+  type DiscoveredSkill
+} from "./skills/discovery"
+import { parseSkillFrontmatter } from "./skills/frontmatter"
+import {
+  getDiscoveredSkillId,
+  isDiscoveredSkillDisabled,
+  normalizeSkillId,
+  removeDisabledSkillEntriesForSkills,
+  resolveDisabledSkillIds
+} from "./skills/ids"
+import {
+  DEFAULT_PLUGIN_HOOKS_PATH,
+  getPluginSkillSearchSources,
+  readPluginManifest
+} from "./plugins/manifest"
 const OPENWORK_DIR = join(homedir(), ".cmbcoworkagent")
 const ENV_FILE = join(OPENWORK_DIR, ".env")
 
@@ -281,6 +303,73 @@ export function setMemoryEnabled(enabled: boolean): void {
   writeFileSync(MEMORY_SETTINGS_FILE, JSON.stringify({ enabled }, null, 2))
 }
 
+// ── Agent auto-commit settings ───────────────────────────────────────────────
+
+const AGENT_AUTO_COMMIT_SETTINGS_FILE = join(OPENWORK_DIR, "agent-auto-commit-settings.json")
+
+const DEFAULT_AGENT_AUTO_COMMIT_SETTINGS: AgentAutoCommitSettings = {
+  mode: "off",
+  push: false,
+  messageStrategy: "prompt"
+}
+
+function normalizeAgentAutoCommitSettings(input: unknown): AgentAutoCommitSettings {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return { ...DEFAULT_AGENT_AUTO_COMMIT_SETTINGS }
+  }
+  const raw = input as Record<string, unknown>
+  const mode = raw.mode === "ask" || raw.mode === "always" || raw.mode === "off" ? raw.mode : "off"
+  const messageStrategy =
+    raw.messageStrategy === "template" ||
+    raw.messageStrategy === "prompt" ||
+    raw.messageStrategy === "diff"
+      ? raw.messageStrategy
+      : raw.messageStrategy === "business"
+        ? "prompt"
+        : "prompt"
+  const cardNumber =
+    typeof raw.cardNumber === "string" && raw.cardNumber.trim() ? raw.cardNumber.trim() : undefined
+  const template =
+    typeof raw.template === "string" && raw.template.trim() ? raw.template.trim() : undefined
+
+  return {
+    mode,
+    push: raw.push === true,
+    messageStrategy,
+    ...(cardNumber ? { cardNumber } : {}),
+    ...(template ? { template } : {})
+  }
+}
+
+export function getAgentAutoCommitSettings(): AgentAutoCommitSettings {
+  getOpenworkDir()
+  if (!existsSync(AGENT_AUTO_COMMIT_SETTINGS_FILE)) {
+    return { ...DEFAULT_AGENT_AUTO_COMMIT_SETTINGS }
+  }
+  try {
+    return normalizeAgentAutoCommitSettings(
+      JSON.parse(readFileSync(AGENT_AUTO_COMMIT_SETTINGS_FILE, "utf-8"))
+    )
+  } catch {
+    return { ...DEFAULT_AGENT_AUTO_COMMIT_SETTINGS }
+  }
+}
+
+export function saveAgentAutoCommitSettings(
+  updates: Partial<AgentAutoCommitSettings>
+): AgentAutoCommitSettings {
+  getOpenworkDir()
+  const next = normalizeAgentAutoCommitSettings({
+    ...getAgentAutoCommitSettings(),
+    ...updates
+  })
+  if (next.mode !== "off" && !next.cardNumber?.trim()) {
+    throw new Error("开启自动提交前需要填写卡片编号")
+  }
+  writeFileSync(AGENT_AUTO_COMMIT_SETTINGS_FILE, JSON.stringify(next, null, 2))
+  return next
+}
+
 // ── Code exec settings ──
 
 const CODE_EXEC_SETTINGS_FILE = join(OPENWORK_DIR, "code-exec-settings.json")
@@ -311,7 +400,7 @@ export function setCodeExecEnabled(enabled: boolean): void {
 
 const DISABLED_SKILLS_FILE = join(OPENWORK_DIR, "disabled-skills.json")
 
-export function getDisabledSkills(): string[] {
+function readDisabledSkillEntries(): string[] {
   getOpenworkDir()
   if (!existsSync(DISABLED_SKILLS_FILE)) return []
   try {
@@ -323,207 +412,160 @@ export function getDisabledSkills(): string[] {
   }
 }
 
-export function setDisabledSkills(skillNames: string[]): void {
+function writeDisabledSkillEntries(disabledEntries: string[]): void {
   getOpenworkDir()
-  writeFileSync(DISABLED_SKILLS_FILE, JSON.stringify(skillNames, null, 2))
+  writeFileSync(DISABLED_SKILLS_FILE, JSON.stringify(disabledEntries, null, 2))
   invalidateEnabledSkillsCache()
 }
 
-function parseSkillNameFromFrontmatter(content: string): string | null {
-  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/)
-  if (!match) return null
-  for (const line of match[1].split("\n")) {
-    const colonIdx = line.indexOf(":")
-    if (colonIdx > 0 && line.slice(0, colonIdx).trim().toLowerCase() === "name") {
-      return line.slice(colonIdx + 1).trim()
+function resolveDisabledSkillEntries(
+  disabledEntries: string[],
+  sourceDirs = getSkillsSources()
+): string[] {
+  const skills = sourceDirs.flatMap((sourceDir) => {
+    try {
+      return discoverSkillsSync(sourceDir)
+    } catch {
+      return []
     }
-  }
-  return null
+  })
+  return resolveDisabledSkillIds(disabledEntries, skills)
 }
 
-const ENABLED_SKILLS_DIR = join(OPENWORK_DIR, "enabled-skills")
-const ENABLED_SKILLS_BUILTIN_DIR = join(OPENWORK_DIR, "enabled-skills-builtin")
-const ENABLED_SKILLS_CUSTOM_DIR = join(OPENWORK_DIR, "enabled-skills-custom")
-
-// Fingerprints for separate builtin and custom enabled skills
-let _enabledSkillsBuiltinFingerprint: string | null = null
-let _enabledSkillsCustomFingerprint: string | null = null
-
-async function computeEnabledSkillsFingerprint(
-  disabledList: string[],
-  sourceDirs: string[]
-): Promise<string> {
-  const parts = [disabledList.sort().join(","), sourceDirs.join("|")]
-  for (const dir of sourceDirs) {
-    if (!existsSync(dir)) continue
-    try {
-      const entries = await readdir(dir, { withFileTypes: true })
-      const dirNames: string[] = []
-      for (const e of entries) {
-        if (!e.isDirectory()) continue
-        dirNames.push(e.name)
-        const skillMdPath = join(dir, e.name, "SKILL.md")
-        try {
-          const st = await fsStat(skillMdPath)
-          dirNames.push(String(st.mtimeMs))
-        } catch {
-          /* no SKILL.md or unreadable */
-        }
-      }
-      parts.push(dirNames.sort().join(","))
-    } catch {
-      /* ignore */
-    }
-  }
-  return createHash("sha256").update(parts.join(":")).digest("hex").slice(0, 16)
+export function getDisabledSkills(): string[] {
+  return resolveDisabledSkillEntries(readDisabledSkillEntries())
 }
 
-async function copyEnabledSkillsFromSourceAsync(
-  sourceDir: string,
-  disabled: Set<string>,
-  destDir?: string
-): Promise<number> {
-  let count = 0
-  const entries = await readdir(sourceDir, { withFileTypes: true })
+let _disabledSkillDirsCache: string[] | null = null
 
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue
-    const skillMdPath = join(sourceDir, entry.name, "SKILL.md")
-    if (!existsSync(skillMdPath)) continue
+export function getDisabledSkillDirs(): string[] {
+  if (_disabledSkillDirsCache) return _disabledSkillDirsCache
+  const disabled = new Set(getDisabledSkills().map((name) => name.trim().toLowerCase()))
+  const result =
+    disabled.size === 0
+      ? []
+      : discoverSkillsFromSourcesSync()
+          .filter((skill) => isDiscoveredSkillDisabled(skill, disabled))
+          .map((skill) => skill.rootDir)
+  _disabledSkillDirsCache = result
+  return result
+}
 
+export function setDisabledSkills(skillIds: string[]): void {
+  writeDisabledSkillEntries(resolveDisabledSkillEntries(skillIds))
+}
+
+function normalizeSkillDirPath(input: string): string {
+  const normalized = resolve(input)
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized
+}
+
+function isSameOrChildPath(targetPath: string, parentPath: string): boolean {
+  const relPath = relative(normalizeSkillDirPath(parentPath), normalizeSkillDirPath(targetPath))
+  return relPath === "" || (!relPath.startsWith("..") && !isAbsolute(relPath))
+}
+
+function discoverSkillsFromSourcesSync(sourceDirs = getSkillsSources()): DiscoveredSkill[] {
+  return sourceDirs.flatMap((sourceDir) => {
     try {
-      const content = await readFile(skillMdPath, "utf-8")
-      const name = parseSkillNameFromFrontmatter(content) || entry.name
-      if (disabled.has(name.trim().toLowerCase())) continue
+      return discoverSkillsSync(sourceDir)
     } catch {
-      continue
+      return []
     }
+  })
+}
 
-    const srcSkillDir = join(sourceDir, entry.name)
-    const destPath = destDir ? join(destDir, entry.name) : join(ENABLED_SKILLS_DIR, entry.name)
-    try {
-      await copyDirRecursive(srcSkillDir, destPath)
-      count++
-    } catch (e) {
-      console.warn(`[Storage] Failed to copy skill ${entry.name}:`, e)
-      // Clean up partial directory so it doesn't look like a valid skill
+export function findExistingSkillById(skillId: string): DiscoveredSkill | null {
+  const normalized = normalizeSkillId(skillId)
+  if (!normalized) return null
+  return (
+    discoverSkillsFromSourcesSync().find((skill) => getDiscoveredSkillId(skill) === normalized) ??
+    null
+  )
+}
+
+function computeDisabledSkillEntriesWithoutSkillDir(skillDir: string): string[] | null {
+  const allSkills = discoverSkillsFromSourcesSync()
+  const skillsToRemove = allSkills.filter((skill) => isSameOrChildPath(skill.rootDir, skillDir))
+  if (skillsToRemove.length === 0) return null
+
+  const remainingSkills = allSkills.filter((skill) => !isSameOrChildPath(skill.rootDir, skillDir))
+  const currentEntries = readDisabledSkillEntries()
+  const nextEntries = removeDisabledSkillEntriesForSkills(
+    currentEntries,
+    skillsToRemove,
+    remainingSkills
+  )
+  const unchanged =
+    currentEntries.length === nextEntries.length &&
+    currentEntries.every((entry, index) => entry === nextEntries[index])
+  return unchanged ? null : nextEntries
+}
+
+export function clearDisabledSkillsForSkillDir(skillDir: string): void {
+  const nextEntries = computeDisabledSkillEntriesWithoutSkillDir(skillDir)
+  if (nextEntries) writeDisabledSkillEntries(nextEntries)
+}
+
+export function prepareDisabledSkillsCleanupForSkillDir(skillDir: string): () => void {
+  const nextEntries = computeDisabledSkillEntriesWithoutSkillDir(skillDir)
+  return () => {
+    if (nextEntries) writeDisabledSkillEntries(nextEntries)
+  }
+}
+
+const LEGACY_ENABLED_SKILLS_DIRS = [
+  join(OPENWORK_DIR, "enabled-skills"),
+  join(OPENWORK_DIR, "enabled-skills-builtin"),
+  join(OPENWORK_DIR, "enabled-skills-custom")
+]
+
+let _legacyEnabledSkillsCleanup: Promise<void> | null = null
+
+async function cleanupLegacyEnabledSkillsDirsAsync(): Promise<void> {
+  if (_legacyEnabledSkillsCleanup) return _legacyEnabledSkillsCleanup
+  _legacyEnabledSkillsCleanup = Promise.all(
+    LEGACY_ENABLED_SKILLS_DIRS.map(async (dir) => {
+      if (!existsSync(dir)) return
       try {
-        await rm(destPath, { recursive: true, force: true })
-      } catch {
-        /* ignore */
+        await rm(dir, { recursive: true, force: true })
+        console.log(`[Storage] Removed legacy enabled skills cache: ${dir}`)
+      } catch (e) {
+        console.warn(`[Storage] Failed to remove legacy enabled skills cache ${dir}:`, e)
       }
-    }
-  }
-  return count
-}
-
-let _enabledSkillsBuildLock: Promise<string[]> | null = null
-
-/**
- * Ensures separate enabled-skills directories exist for builtin and custom skills.
- * Uses async I/O to avoid blocking the main process event loop.
- * Skips rebuild if the disabled list and source dirs haven't changed.
- * Serialized via a Promise lock to prevent concurrent rm/mkdir/copyFile races.
- */
-async function ensureEnabledSkillsDirsAsync(): Promise<string[]> {
-  if (_enabledSkillsBuildLock) return _enabledSkillsBuildLock
-  _enabledSkillsBuildLock = _ensureEnabledSkillsDirsImpl()
-  try {
-    return await _enabledSkillsBuildLock
-  } finally {
-    _enabledSkillsBuildLock = null
-  }
-}
-
-async function _ensureEnabledSkillsDirsImpl(): Promise<string[]> {
-  getOpenworkDir()
-  const builtinDir = getSkillsDir()
-  const customDir = getCustomSkillsDir()
-  const disabled = getDisabledSkills()
-  const disabledSet = new Set(disabled.map((s) => s.trim().toLowerCase()))
-
-  const results: string[] = []
-
-  // Handle builtin skills
-  if (existsSync(builtinDir)) {
-    const builtinFingerprint = await computeEnabledSkillsFingerprint(disabled, [builtinDir])
-    if (
-      _enabledSkillsBuiltinFingerprint !== builtinFingerprint ||
-      !existsSync(ENABLED_SKILLS_BUILTIN_DIR)
-    ) {
-      if (existsSync(ENABLED_SKILLS_BUILTIN_DIR)) {
-        await rm(ENABLED_SKILLS_BUILTIN_DIR, { recursive: true })
-      }
-      await mkdir(ENABLED_SKILLS_BUILTIN_DIR, { recursive: true })
-
-      const count = await copyEnabledSkillsFromSourceAsync(
-        builtinDir,
-        disabledSet,
-        ENABLED_SKILLS_BUILTIN_DIR
-      )
-      console.log(
-        `[Storage] Copied ${count} enabled builtin skills to ${ENABLED_SKILLS_BUILTIN_DIR}`
-      )
-      _enabledSkillsBuiltinFingerprint = builtinFingerprint
-    }
-    if (existsSync(ENABLED_SKILLS_BUILTIN_DIR)) {
-      results.push(ENABLED_SKILLS_BUILTIN_DIR)
-    }
-  }
-
-  // Handle custom skills
-  if (existsSync(customDir)) {
-    const customFingerprint = await computeEnabledSkillsFingerprint(disabled, [customDir])
-    if (
-      _enabledSkillsCustomFingerprint !== customFingerprint ||
-      !existsSync(ENABLED_SKILLS_CUSTOM_DIR)
-    ) {
-      if (existsSync(ENABLED_SKILLS_CUSTOM_DIR)) {
-        await rm(ENABLED_SKILLS_CUSTOM_DIR, { recursive: true })
-      }
-      await mkdir(ENABLED_SKILLS_CUSTOM_DIR, { recursive: true })
-
-      const count = await copyEnabledSkillsFromSourceAsync(
-        customDir,
-        disabledSet,
-        ENABLED_SKILLS_CUSTOM_DIR
-      )
-      console.log(`[Storage] Copied ${count} enabled custom skills to ${ENABLED_SKILLS_CUSTOM_DIR}`)
-      _enabledSkillsCustomFingerprint = customFingerprint
-    }
-    if (existsSync(ENABLED_SKILLS_CUSTOM_DIR)) {
-      results.push(ENABLED_SKILLS_CUSTOM_DIR)
-    }
-  }
-
-  return results
+    })
+  ).then(() => undefined)
+  return _legacyEnabledSkillsCleanup
 }
 
 /**
- * Invalidate the enabled-skills cache so the next call rebuilds.
- * Should be called when disabled skills list changes.
+ * Invalidate skill-derived caches after skill enablement or plugin changes.
  */
 export function invalidateEnabledSkillsCache(): void {
-  _enabledSkillsBuiltinFingerprint = null
-  _enabledSkillsCustomFingerprint = null
   _pluginSkillsCache = null
+  _pluginSkillSourcesCache = null
   _pluginMcpCache = null
   _pluginHooksCache = null
   _skillHooksCache = null
   _skillHookMetadataCache = null
+  _disabledSkillDirsCache = null
 }
 
 /**
- * Returns skills sources for the agent: either the filtered enabled-skills dirs
- * or the full skills dirs if no skills are disabled.
+ * Returns original skills sources for the agent. Disabled skills are filtered
+ * by the runtime filesystem view instead of copying enabled-only directories.
  */
 export async function getEnabledSkillsSources(): Promise<string[]> {
-  const disabled = getDisabledSkills()
-  if (disabled.length === 0) return getSkillsSources()
+  await cleanupLegacyEnabledSkillsDirsAsync()
+  return getSkillsSources()
+}
 
-  // When skills are disabled, create separate filtered directories for builtin and custom skills
-  const enabledDirs = await ensureEnabledSkillsDirsAsync()
-  return enabledDirs.filter((dir) => existsSync(dir))
+/**
+ * Sources passed to deepagents SkillsMiddleware. The middleware discovers only
+ * one directory level, so include parent directories for nested skills too.
+ */
+export async function getEnabledSkillMiddlewareSources(): Promise<string[]> {
+  return expandSkillMiddlewareSourceDirs(await getEnabledSkillsSources())
 }
 
 const CMB_SKILL_PREFIX = "_cmb_"
@@ -559,22 +601,30 @@ export async function syncSkillsToClaudeDir(workDir: string): Promise<void> {
 
   // Copy enabled skills
   const sourceDirs = await getEnabledSkillsSources()
+  const disabled = new Set(getDisabledSkills().map((name) => name.trim().toLowerCase()))
   let count = 0
+  const usedDestNames = new Map<string, string>()
   for (const sourceDir of sourceDirs) {
     if (!existsSync(sourceDir)) continue
-    const entries = await readdir(sourceDir, { withFileTypes: true })
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue
-      const skillMdPath = join(sourceDir, entry.name, "SKILL.md")
-      if (!existsSync(skillMdPath)) continue
-      const dest = join(claudeSkillsDir, CMB_SKILL_PREFIX + entry.name)
+    const skills = await discoverSkills(sourceDir)
+    for (const skill of skills) {
+      if (isDiscoveredSkillDisabled(skill, disabled)) continue
+      const relativeName = skill.relativePath || basename(skill.rootDir)
+      let destName = CMB_SKILL_PREFIX + makeFlattenedSkillDirName(relativeName)
+      const existingRelativeName = usedDestNames.get(destName)
+      if (existingRelativeName && existingRelativeName !== relativeName) {
+        const hash = createHash("sha256").update(relativeName).digest("hex").slice(0, 8)
+        destName = `${destName}-${hash}`
+      }
+      usedDestNames.set(destName, relativeName)
+      const dest = join(claudeSkillsDir, destName)
       try {
         // Remove existing dest to avoid merge with prior copy (e.g. builtin vs custom same name)
         if (existsSync(dest)) await rm(dest, { recursive: true, force: true })
-        await copyDirRecursive(join(sourceDir, entry.name), dest)
+        await copyDirRecursive(skill.rootDir, dest)
         count++
       } catch (e) {
-        console.warn(`[Storage] Failed to sync skill ${entry.name} to Claude dir:`, e)
+        console.warn(`[Storage] Failed to sync skill ${skill.name} to Claude dir:`, e)
         try {
           await rm(dest, { recursive: true, force: true })
         } catch {
@@ -1650,9 +1700,11 @@ export function resetLspConfig(): import("./types").LspConfig {
 
 const PLUGINS_DIR = join(OPENWORK_DIR, "plugins")
 const PLUGINS_FILE = join(OPENWORK_DIR, "plugins.json")
-const DEFAULT_PLUGIN_HOOKS_PATH = "hooks/hooks.json"
 const SKILL_HOOKS_FILE = "hooks.json"
+const SKILL_HOOKS_FOLDER_FILE = "hooks/hooks.json"
+const SKILL_HOOKS_FILES = [SKILL_HOOKS_FILE, SKILL_HOOKS_FOLDER_FILE] as const
 let _pluginSkillsCache: string[] | null = null
+let _pluginSkillSourcesCache: PluginSkillSourceMetadata[] | null = null
 let _pluginMcpCache: Record<string, PluginMcpServerConfig> | null = null
 let _pluginHooksCache: PluginHookMetadata[] | null = null
 let _skillHooksCache: HookConfig[] | null = null
@@ -1722,20 +1774,45 @@ export function setPluginEnabled(id: string, enabled: boolean): void {
 
 export function getEnabledPluginSkillsSources(): string[] {
   if (_pluginSkillsCache) return _pluginSkillsCache
+  _pluginSkillsCache = getEnabledPluginSkillSourceMetadata().map((source) => source.sourceDir)
+  return _pluginSkillsCache
+}
+
+export async function getEnabledPluginSkillMiddlewareSources(): Promise<string[]> {
+  const rootOnlySources: string[] = []
+  const nestedSources: string[] = []
+  for (const source of getEnabledPluginSkillSourceMetadata()) {
+    if (source.maxDepth === 0) rootOnlySources.push(source.sourceDir)
+    else nestedSources.push(source.sourceDir)
+  }
+  return [...rootOnlySources, ...(await expandSkillMiddlewareSourceDirs(nestedSources))]
+}
+
+export interface PluginSkillSourceMetadata {
+  sourceDir: string
+  pluginId: string
+  pluginName: string
+  pluginRoot: string
+  maxDepth?: number
+}
+
+export function getEnabledPluginSkillSourceMetadata(): PluginSkillSourceMetadata[] {
+  if (_pluginSkillSourcesCache) return _pluginSkillSourcesCache
   const plugins = getPlugins().filter((p) => p.enabled && p.skillCount > 0)
-  const sources: string[] = []
+  const sources: PluginSkillSourceMetadata[] = []
   for (const plugin of plugins) {
-    const skillsDir = join(plugin.path, "skills")
-    if (existsSync(skillsDir)) {
-      sources.push(skillsDir)
-    } else {
-      const rootSkillMd = join(plugin.path, "SKILL.md")
-      if (existsSync(rootSkillMd)) {
-        sources.push(plugin.path)
-      }
+    const manifest = readPluginManifest(plugin.path)?.manifest ?? null
+    for (const source of getPluginSkillSearchSources(plugin.path, manifest)) {
+      sources.push({
+        sourceDir: source.sourceDir,
+        pluginId: plugin.id,
+        pluginName: plugin.name,
+        pluginRoot: plugin.path,
+        maxDepth: source.maxDepth
+      })
     }
   }
-  _pluginSkillsCache = sources
+  _pluginSkillSourcesCache = sources
   return sources
 }
 
@@ -1991,6 +2068,26 @@ function normalizeOptionalHookString(value: unknown): string | undefined {
   return trimmed ? trimmed : undefined
 }
 
+function parseForcedOutcome(value: unknown): "always-revise" | "always-halt" | undefined {
+  return value === "always-revise" || value === "always-halt" ? value : undefined
+}
+
+function parseOptionalHookBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined
+}
+
+function parseNativeHookTimeout(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined
+}
+
+function parseClaudeHookTimeoutMs(raw: Record<string, unknown>): number | undefined {
+  const timeoutMs = parseNativeHookTimeout(raw.timeoutMs)
+  if (timeoutMs !== undefined) return Math.round(timeoutMs)
+
+  const timeoutSeconds = parseNativeHookTimeout(raw.timeout)
+  return timeoutSeconds !== undefined ? Math.round(timeoutSeconds * 1000) : undefined
+}
+
 function parseHookOnBlock(raw: unknown): HookOnBlockConfig | undefined {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined
 
@@ -2014,6 +2111,20 @@ function parseHookOnBlock(raw: unknown): HookOnBlockConfig | undefined {
   return onBlock
 }
 
+function withHookSource<T extends HookConfig>(
+  hook: T,
+  hookSourceType: HookSourceType,
+  hookSourceRoot: string,
+  hookSourcePath: string
+): T {
+  return {
+    ...hook,
+    hookSourceType,
+    hookSourceRoot,
+    hookSourcePath
+  }
+}
+
 // ── Claude Code format compatibility ─────────────────────────────────────────
 // CC hooks.json uses a different structure from our flat array:
 //   Global/settings: { EventName: [{ matcher?, hooks: [...] }] }
@@ -2023,6 +2134,8 @@ function parseHookOnBlock(raw: unknown): HookOnBlockConfig | undefined {
 const CC_HOOK_EVENTS: ReadonlySet<string> = new Set([
   "PreToolUse",
   "PostToolUse",
+  "PreSkillUse",
+  "PostSkillUse",
   "PostToolUseFailure",
   "Stop",
   "StopFailure",
@@ -2077,10 +2190,15 @@ function ccCommandToHookConfig(
 ): HookConfig | null {
   // inherit per-hook enabled extension field if present
   const enabled = h.enabled !== false && meta.enabled
-  // CC timeout in seconds → ms
-  const timeout = typeof h.timeout === "number" ? Math.round(h.timeout * 1000) : undefined
+  const timeout = parseClaudeHookTimeoutMs(h)
+  const once = parseOptionalHookBoolean(h.once)
+  const persistAfterInterrupt = parseOptionalHookBoolean(h.persistAfterInterrupt)
+  const modelId =
+    typeof h.modelId === "string" ? h.modelId : typeof h.model === "string" ? h.model : undefined
+  const hookType =
+    typeof h.type === "string" ? h.type : typeof h.prompt === "string" ? "prompt" : "command"
 
-  if (h.type === "command") {
+  if (hookType === "command") {
     if (typeof h.command !== "string") return null
     return {
       id,
@@ -2089,13 +2207,17 @@ function ccCommandToHookConfig(
       type: "command",
       command: h.command,
       onBlock: parseHookOnBlock(h.onBlock),
+      forcedOutcome: parseForcedOutcome(h.forcedOutcome),
+      forcedReason: normalizeOptionalHookString(h.forcedReason),
+      once,
+      persistAfterInterrupt,
       timeout,
       enabled,
       createdAt: meta.createdAt,
       updatedAt: meta.updatedAt
     }
   }
-  if (h.type === "prompt") {
+  if (hookType === "prompt") {
     if (typeof h.prompt !== "string") return null
     return {
       id,
@@ -2103,15 +2225,14 @@ function ccCommandToHookConfig(
       matcher,
       type: "prompt",
       prompt: h.prompt,
-      // CC uses `model`, we use `modelId`
-      modelId:
-        typeof h.model === "string"
-          ? h.model
-          : typeof h.modelId === "string"
-            ? h.modelId
-            : undefined,
+      // CC uses `model`, we use `modelId`; both are accepted.
+      modelId,
       fallback: h.fallback === "block" ? "block" : "allow",
       onBlock: parseHookOnBlock(h.onBlock),
+      forcedOutcome: parseForcedOutcome(h.forcedOutcome),
+      forcedReason: normalizeOptionalHookString(h.forcedReason),
+      once,
+      persistAfterInterrupt,
       timeout,
       enabled,
       createdAt: meta.createdAt,
@@ -2129,7 +2250,8 @@ function ccCommandToHookConfig(
 function expandCcHooksSettings(
   obj: Record<string, unknown>,
   idPrefix: string,
-  meta: { enabled: boolean; createdAt: string; updatedAt: string }
+  meta: { enabled: boolean; createdAt: string; updatedAt: string },
+  defaultSkillMatcher?: string
 ): HookConfig[] {
   const result: HookConfig[] = []
   for (const [eventKey, matchersRaw] of Object.entries(obj)) {
@@ -2143,15 +2265,22 @@ function expandCcHooksSettings(
     matchersRaw.forEach((matcherEntry: unknown, mi: number) => {
       if (!matcherEntry || typeof matcherEntry !== "object" || Array.isArray(matcherEntry)) return
       const me = matcherEntry as Record<string, unknown>
-      const matcher = typeof me.matcher === "string" ? me.matcher : undefined
+      const matcher =
+        typeof me.matcher === "string"
+          ? me.matcher
+          : event === "PreSkillUse" || event === "PostSkillUse"
+            ? defaultSkillMatcher
+            : undefined
       const hooksArr = Array.isArray(me.hooks) ? me.hooks : []
       hooksArr.forEach((rawHook: unknown, hi: number) => {
         if (!rawHook || typeof rawHook !== "object" || Array.isArray(rawHook)) return
+        const rawHookObj = rawHook as Record<string, unknown>
+        const rawHookId = normalizeOptionalHookString(rawHookObj.id)
         const cfg = ccCommandToHookConfig(
           event,
           matcher,
-          rawHook as Record<string, unknown>,
-          `${idPrefix}/${event}:${mi}:${hi}`,
+          rawHookObj,
+          rawHookId ? `${idPrefix}/${event}:${rawHookId}` : `${idPrefix}/${event}:${mi}:${hi}`,
           meta
         )
         if (cfg) result.push(cfg)
@@ -2199,11 +2328,20 @@ export function getHooks(): HookConfig[] {
           type: (hookType === "prompt" ? "prompt" : "command") as HookConfig["type"],
           command: typeof h.command === "string" ? h.command : undefined,
           prompt: typeof h.prompt === "string" ? h.prompt : undefined,
-          modelId: typeof h.modelId === "string" ? h.modelId : undefined,
+          modelId:
+            typeof h.modelId === "string"
+              ? h.modelId
+              : typeof h.model === "string"
+                ? h.model
+                : undefined,
           fallback:
             hookType === "prompt" ? (h.fallback === "block" ? "block" : "allow") : undefined,
           onBlock: parseHookOnBlock(h.onBlock),
-          timeout: typeof h.timeout === "number" ? h.timeout : undefined,
+          forcedOutcome: parseForcedOutcome(h.forcedOutcome),
+          forcedReason: normalizeOptionalHookString(h.forcedReason),
+          once: parseOptionalHookBoolean(h.once),
+          persistAfterInterrupt: parseOptionalHookBoolean(h.persistAfterInterrupt),
+          timeout: parseNativeHookTimeout(h.timeoutMs) ?? parseNativeHookTimeout(h.timeout),
           enabled: h.enabled !== false,
           createdAt: typeof h.createdAt === "string" ? h.createdAt : now,
           updatedAt: typeof h.updatedAt === "string" ? h.updatedAt : now
@@ -2233,8 +2371,12 @@ function parsePluginHooks(plugin: PluginMetadata): PluginHookMetadata[] {
       ...c,
       pluginId: plugin.id,
       pluginName: plugin.name,
+      pluginRoot: plugin.path,
       pluginEnabled: plugin.enabled,
-      hookPath: hooksRelPath
+      hookPath: hooksRelPath,
+      hookSourceType: "plugin",
+      hookSourceRoot: plugin.path,
+      hookSourcePath: hooksFilePath
     })) as PluginHookMetadata[]
 
   try {
@@ -2279,10 +2421,19 @@ function parsePluginHooks(plugin: PluginMetadata): PluginHookMetadata[] {
             type: (hookType === "prompt" ? "prompt" : "command") as HookConfig["type"],
             command: typeof h.command === "string" ? h.command : undefined,
             prompt: typeof h.prompt === "string" ? h.prompt : undefined,
-            modelId: typeof h.modelId === "string" ? h.modelId : undefined,
+            modelId:
+              typeof h.modelId === "string"
+                ? h.modelId
+                : typeof h.model === "string"
+                  ? h.model
+                  : undefined,
             fallback: h.fallback === "block" ? "block" : "allow",
             onBlock: parseHookOnBlock(h.onBlock),
-            timeout: typeof h.timeout === "number" ? h.timeout : undefined,
+            forcedOutcome: parseForcedOutcome(h.forcedOutcome),
+            forcedReason: normalizeOptionalHookString(h.forcedReason),
+            once: parseOptionalHookBoolean(h.once),
+            persistAfterInterrupt: parseOptionalHookBoolean(h.persistAfterInterrupt),
+            timeout: parseNativeHookTimeout(h.timeoutMs) ?? parseNativeHookTimeout(h.timeout),
             enabled: h.enabled !== false,
             createdAt: plugin.createdAt,
             updatedAt: plugin.updatedAt
@@ -2321,56 +2472,82 @@ export function getPluginHooks(pluginId: string): PluginHookMetadata[] {
 
 // ── Skill Hooks ───────────────────────────────────────────────────────────────
 
-function buildSkillHookId(skillName: string, rawId: unknown, index: number): string {
-  return `skill:${skillName}/${typeof rawId === "string" ? rawId : String(index)}`
+function buildSkillHookId(
+  skillName: string,
+  hooksRelPath: string,
+  rawId: unknown,
+  index: number
+): string {
+  const hookId = typeof rawId === "string" ? rawId : String(index)
+  const filePrefix = hooksRelPath === SKILL_HOOKS_FILE ? "" : `${hooksRelPath}:`
+  return `skill:${skillName}/${filePrefix}${hookId}`
+}
+
+function readSkillFrontmatterHooksSettings(skillMdPath: string): Record<string, unknown> | null {
+  if (!existsSync(skillMdPath)) return null
+  try {
+    const { frontmatter } = parseSkillFrontmatter(readFileSync(skillMdPath, "utf-8"))
+    const hooksRaw = frontmatter.hooks
+    if (!hooksRaw || typeof hooksRaw !== "object" || Array.isArray(hooksRaw)) return null
+
+    const hooksObj = hooksRaw as Record<string, unknown>
+    const fmt = detectHooksFileFormat(hooksObj)
+    if (fmt === "cc_plugin") {
+      return hooksObj.hooks as Record<string, unknown>
+    }
+    if (fmt === "cc_settings") {
+      return hooksObj
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+export function parseSkillFrontmatterHooks(skillDir: string, skillName: string): HookConfig[] {
+  const skillMdPath = join(skillDir, "SKILL.md")
+  const settingsObj = readSkillFrontmatterHooksSettings(skillMdPath)
+  if (!settingsObj) return []
+
+  const now = new Date().toISOString()
+  return expandCcHooksSettings(
+    settingsObj,
+    `skill:${skillName}/SKILL.md`,
+    { enabled: true, createdAt: now, updatedAt: now },
+    skillName
+  )
 }
 
 interface SkillHookSource {
   skillDir: string
   skillName: string
-}
-
-function readSkillDisplayName(skillDir: string, fallbackName: string): string | null {
-  const skillMdPath = join(skillDir, "SKILL.md")
-  if (!existsSync(skillMdPath)) return null
-  try {
-    const content = readFileSync(skillMdPath, "utf-8")
-    return parseSkillNameFromFrontmatter(content) || fallbackName
-  } catch {
-    return fallbackName
-  }
+  pluginId?: string
+  pluginName?: string
+  pluginRoot?: string
 }
 
 function collectSkillHookSourcesFromDir(
   sourceDir: string,
   disabledSkills: Set<string>,
   respectDisabledList: boolean,
-  seenDirs: Set<string>
+  seenDirs: Set<string>,
+  pluginMeta?: { pluginId: string; pluginName: string; pluginRoot: string },
+  maxDepth?: number
 ): SkillHookSource[] {
   const result: SkillHookSource[] = []
   if (!existsSync(sourceDir)) return result
 
-  const pushSkill = (skillDir: string, skillName: string): void => {
-    const normalizedName = skillName.trim().toLowerCase()
-    if (respectDisabledList && disabledSkills.has(normalizedName)) return
+  const pushSkill = (skill: ReturnType<typeof discoverSkillsSync>[number]): void => {
+    if (respectDisabledList && isDiscoveredSkillDisabled(skill, disabledSkills)) return
+    const skillDir = skill.rootDir
     if (seenDirs.has(skillDir)) return
     seenDirs.add(skillDir)
-    result.push({ skillDir, skillName })
-  }
-
-  const rootSkillName = readSkillDisplayName(sourceDir, basename(sourceDir))
-  if (rootSkillName) {
-    pushSkill(sourceDir, rootSkillName)
-    return result
+    result.push({ skillDir, skillName: skill.name, ...pluginMeta })
   }
 
   try {
-    for (const entry of readdirSync(sourceDir, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue
-      const skillDir = join(sourceDir, entry.name)
-      const skillName = readSkillDisplayName(skillDir, entry.name)
-      if (!skillName) continue
-      pushSkill(skillDir, skillName)
+    for (const skill of discoverSkillsSync(sourceDir, maxDepth)) {
+      pushSkill(skill)
     }
   } catch {
     console.warn(`[Hooks] Failed to scan skill hooks in ${sourceDir}`)
@@ -2388,30 +2565,42 @@ function getEnabledSkillHookSources(): SkillHookSource[] {
     sources.push(...collectSkillHookSourcesFromDir(sourceDir, disabledSkills, true, seenDirs))
   }
 
-  for (const sourceDir of getEnabledPluginSkillsSources()) {
-    sources.push(...collectSkillHookSourcesFromDir(sourceDir, disabledSkills, false, seenDirs))
+  for (const source of getEnabledPluginSkillSourceMetadata()) {
+    sources.push(
+      ...collectSkillHookSourcesFromDir(
+        source.sourceDir,
+        disabledSkills,
+        false,
+        seenDirs,
+        { pluginId: source.pluginId, pluginName: source.pluginName, pluginRoot: source.pluginRoot },
+        source.maxDepth
+      )
+    )
   }
 
   return sources
 }
 
-function parseSkillHooks(skillDir: string, skillName: string): HookConfig[] {
-  const hooksFilePath = join(skillDir, SKILL_HOOKS_FILE)
+function parseSkillHooks(skillDir: string, skillName: string, hooksRelPath: string): HookConfig[] {
+  const hooksFilePath = join(skillDir, hooksRelPath)
   if (!existsSync(hooksFilePath)) return []
 
   try {
     const parsed = JSON.parse(readFileSync(hooksFilePath, "utf-8"))
     const now = new Date().toISOString()
     const meta = { enabled: true, createdAt: now, updatedAt: now }
-    const idPrefix = `skill:${skillName}`
+    const idPrefix =
+      hooksRelPath === SKILL_HOOKS_FILE
+        ? `skill:${skillName}`
+        : `skill:${skillName}/${hooksRelPath}`
     const fmt = detectHooksFileFormat(parsed)
 
     if (fmt === "cc_plugin") {
       const settingsObj = (parsed as Record<string, unknown>).hooks as Record<string, unknown>
-      return expandCcHooksSettings(settingsObj, idPrefix, meta)
+      return expandCcHooksSettings(settingsObj, idPrefix, meta, skillName)
     }
     if (fmt === "cc_settings") {
-      return expandCcHooksSettings(parsed as Record<string, unknown>, idPrefix, meta)
+      return expandCcHooksSettings(parsed as Record<string, unknown>, idPrefix, meta, skillName)
     }
     if (fmt !== "flat") return []
 
@@ -2425,16 +2614,30 @@ function parseSkillHooks(skillDir: string, skillName: string): HookConfig[] {
       if (hookType === "command" && typeof h.command !== "string") return []
       return [
         {
-          id: buildSkillHookId(skillName, h.id, index),
+          id: buildSkillHookId(skillName, hooksRelPath, h.id, index),
           event: h.event as HookConfig["event"],
-          matcher: typeof h.matcher === "string" ? h.matcher : undefined,
+          matcher:
+            typeof h.matcher === "string"
+              ? h.matcher
+              : h.event === "PreSkillUse" || h.event === "PostSkillUse"
+                ? skillName
+                : undefined,
           type: (hookType === "prompt" ? "prompt" : "command") as HookConfig["type"],
           command: typeof h.command === "string" ? h.command : undefined,
           prompt: typeof h.prompt === "string" ? h.prompt : undefined,
-          modelId: typeof h.modelId === "string" ? h.modelId : undefined,
+          modelId:
+            typeof h.modelId === "string"
+              ? h.modelId
+              : typeof h.model === "string"
+                ? h.model
+                : undefined,
           fallback: h.fallback === "block" ? "block" : "allow",
           onBlock: parseHookOnBlock(h.onBlock),
-          timeout: typeof h.timeout === "number" ? h.timeout : undefined,
+          forcedOutcome: parseForcedOutcome(h.forcedOutcome),
+          forcedReason: normalizeOptionalHookString(h.forcedReason),
+          once: parseOptionalHookBoolean(h.once),
+          persistAfterInterrupt: parseOptionalHookBoolean(h.persistAfterInterrupt),
+          timeout: parseNativeHookTimeout(h.timeoutMs) ?? parseNativeHookTimeout(h.timeout),
           enabled: h.enabled !== false,
           createdAt: now,
           updatedAt: now
@@ -2448,15 +2651,35 @@ function parseSkillHooks(skillDir: string, skillName: string): HookConfig[] {
 }
 
 function buildEnabledSkillHookMetadata(): SkillHookMetadata[] {
-  return getEnabledSkillHookSources().flatMap(({ skillDir, skillName }): SkillHookMetadata[] => {
-    const hookPath = join(skillDir, SKILL_HOOKS_FILE)
-    return parseSkillHooks(skillDir, skillName).map((hook) => ({
-      ...hook,
-      skillName,
-      skillPath: skillDir,
-      hookPath
-    }))
-  })
+  return getEnabledSkillHookSources().flatMap(
+    ({ skillDir, skillName, pluginId, pluginName, pluginRoot }): SkillHookMetadata[] => {
+      const skillMdPath = join(skillDir, "SKILL.md")
+      const addSkillMeta = (hookPath: string, hooks: HookConfig[]): SkillHookMetadata[] =>
+        hooks.map((hook) => ({
+          ...hook,
+          skillName,
+          skillPath: skillDir,
+          skillRoot: skillDir,
+          hookPath,
+          pluginId,
+          pluginName,
+          pluginRoot,
+          hookSourceType: "skill",
+          hookSourceRoot: skillDir,
+          hookSourcePath: hookPath
+        }))
+
+      const frontmatterHooks = addSkillMeta(
+        skillMdPath,
+        parseSkillFrontmatterHooks(skillDir, skillName)
+      )
+      const fileHooks = SKILL_HOOKS_FILES.flatMap((hooksRelPath): SkillHookMetadata[] => {
+        const hookPath = join(skillDir, hooksRelPath)
+        return addSkillMeta(hookPath, parseSkillHooks(skillDir, skillName, hooksRelPath))
+      })
+      return [...frontmatterHooks, ...fileHooks]
+    }
+  )
 }
 
 export function getEnabledSkillHookMetadata(): SkillHookMetadata[] {
@@ -2680,7 +2903,9 @@ export function getWorkspaceHooks(workspacePath: string): HookConfig[] {
             createdAt: now,
             updatedAt: now
           })
-          result.push(...hooks)
+          result.push(
+            ...hooks.map((hook) => withHookSource(hook, "workspace", workspacePath, filePath))
+          )
           continue
         }
 
@@ -2694,21 +2919,37 @@ export function getWorkspaceHooks(workspacePath: string): HookConfig[] {
         if (hookType === "prompt" && typeof raw.prompt !== "string") continue
         if (hookType === "command" && typeof raw.command !== "string") continue
         if (raw.enabled === false) continue
-        result.push({
-          id: `ws:${baseName}`,
-          event: raw.event as HookConfig["event"],
-          matcher: typeof raw.matcher === "string" ? raw.matcher : undefined,
-          type: (hookType === "prompt" ? "prompt" : "command") as HookConfig["type"],
-          command: typeof raw.command === "string" ? raw.command : undefined,
-          prompt: typeof raw.prompt === "string" ? raw.prompt : undefined,
-          modelId: typeof raw.modelId === "string" ? raw.modelId : undefined,
-          fallback: raw.fallback === "block" ? "block" : "allow",
-          onBlock: parseHookOnBlock(raw.onBlock),
-          timeout: typeof raw.timeout === "number" ? raw.timeout : undefined,
-          enabled: true,
-          createdAt: now,
-          updatedAt: now
-        })
+        result.push(
+          withHookSource(
+            {
+              id: `ws:${baseName}`,
+              event: raw.event as HookConfig["event"],
+              matcher: typeof raw.matcher === "string" ? raw.matcher : undefined,
+              type: (hookType === "prompt" ? "prompt" : "command") as HookConfig["type"],
+              command: typeof raw.command === "string" ? raw.command : undefined,
+              prompt: typeof raw.prompt === "string" ? raw.prompt : undefined,
+              modelId:
+                typeof raw.modelId === "string"
+                  ? raw.modelId
+                  : typeof raw.model === "string"
+                    ? raw.model
+                    : undefined,
+              fallback: raw.fallback === "block" ? "block" : "allow",
+              onBlock: parseHookOnBlock(raw.onBlock),
+              forcedOutcome: parseForcedOutcome(raw.forcedOutcome),
+              forcedReason: normalizeOptionalHookString(raw.forcedReason),
+              once: parseOptionalHookBoolean(raw.once),
+              persistAfterInterrupt: parseOptionalHookBoolean(raw.persistAfterInterrupt),
+              timeout: parseNativeHookTimeout(raw.timeoutMs) ?? parseNativeHookTimeout(raw.timeout),
+              enabled: true,
+              createdAt: now,
+              updatedAt: now
+            },
+            "workspace",
+            workspacePath,
+            filePath
+          )
+        )
       } catch {
         console.warn(`[Hooks] Failed to parse workspace hook file: ${file}`)
       }
@@ -2720,11 +2961,13 @@ export function getWorkspaceHooks(workspacePath: string): HookConfig[] {
 }
 
 export function getEnabledHooks(workspacePath?: string): HookConfig[] {
-  const globalHooks = getHooks().filter((h) => h.enabled)
-  const pluginHooks = getEnabledPluginHooks()
-  const skillHooks = getEnabledSkillHooks()
+  // Runtime base hooks only. Plugin/skill hooks are added by the run-scoped
+  // resolver after the corresponding plugin or skill is actually used.
+  const globalHooks = getHooks()
+    .filter((h) => h.enabled)
+    .map((hook) => withHookSource(hook, "global", getOpenworkDir(), HOOKS_FILE))
   const workspaceHooks = workspacePath ? getWorkspaceHooks(workspacePath) : []
-  return [...globalHooks, ...pluginHooks, ...skillHooks, ...workspaceHooks]
+  return [...globalHooks, ...workspaceHooks]
 }
 
 function writeHooksAtomic(items: HookConfig[]): void {
@@ -2750,6 +2993,10 @@ export function upsertHook(config: HookUpsert & { id?: string }): string {
     modelId: hookType === "prompt" ? config.modelId : undefined,
     fallback: hookType === "prompt" ? (config.fallback ?? "allow") : undefined,
     onBlock: parseHookOnBlock(config.onBlock),
+    forcedOutcome: parseForcedOutcome(config.forcedOutcome),
+    forcedReason: normalizeOptionalHookString(config.forcedReason),
+    once: config.once,
+    persistAfterInterrupt: config.persistAfterInterrupt,
     timeout: config.timeout,
     enabled: config.enabled ?? true,
     createdAt: existing?.createdAt ?? now,

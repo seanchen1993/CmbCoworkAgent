@@ -12,8 +12,13 @@ function readEnv(name: string): string {
   return String(metaEnv?.[name] ?? process.env[name] ?? "").trim()
 }
 
-function getSpecialHost(): string {
-  return readEnv("VITE_GIT_COMMIT_URL_MATCH_HOST")
+function getSpecialHosts(): Set<string> {
+  return new Set(
+    readEnv("VITE_GIT_COMMIT_URL_MATCH_HOST")
+      .split(",")
+      .map((item) => item.trim().toLowerCase())
+      .filter(Boolean)
+  )
 }
 
 function getSpecialRepositoryUrlTemplate(): string {
@@ -46,7 +51,8 @@ function buildInfo(remoteUrl: string, host: string, repoPath: string, webProtoco
   const parts = repositoryFullName.split("/").filter(Boolean)
   const repositoryName = parts[parts.length - 1] ?? repositoryFullName
   const repositoryHost = host.trim()
-  const isSpecialHost = Boolean(getSpecialHost()) && repositoryHost === getSpecialHost()
+  const specialHosts = getSpecialHosts()
+  const isSpecialHost = specialHosts.size > 0 && specialHosts.has(repositoryHost.toLowerCase())
   const specialRepositoryTemplate = isSpecialHost ? getSpecialRepositoryUrlTemplate() : ""
   const specialCommitTemplate = isSpecialHost ? getSpecialCommitUrlTemplate() : ""
   const genericRepositoryWebUrl = repositoryHost ? `${webProtocol}//${repositoryHost}/${repositoryFullName}` : ""

@@ -24,7 +24,8 @@ import type {
   PluginMetadata,
   PluginManifest,
   SkillHookMetadata,
-  ChatXConfig
+  ChatXConfig,
+  AgentAutoCommitSettings
 } from "../main/types"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
 import { UserInfoConfig } from "../main/storage"
@@ -709,10 +710,7 @@ const api = {
     read: (skillPath: string): Promise<{ success: boolean; content?: string; error?: string }> => {
       return ipcRenderer.invoke("skills:read", skillPath)
     },
-    write: (
-      skillPath: string,
-      content: string
-    ): Promise<{ success: boolean; error?: string }> => {
+    write: (skillPath: string, content: string): Promise<{ success: boolean; error?: string }> => {
       return ipcRenderer.invoke("skills:write", { skillPath, content })
     },
     readBinary: (
@@ -743,9 +741,15 @@ const api = {
     },
     upload: (
       buffer: ArrayBuffer,
-      fileName: string
-    ): Promise<{ success: boolean; skillName?: string; error?: string }> => {
-      return ipcRenderer.invoke("skills:upload", { buffer, fileName })
+      fileName: string,
+      options?: { allowNestedNameDuplicates?: boolean }
+    ): Promise<{
+      success: boolean
+      skillName?: string
+      error?: string
+      nestedNameConflicts?: Array<{ name: string; relativePath: string }>
+    }> => {
+      return ipcRenderer.invoke("skills:upload", { buffer, fileName, options })
     },
     extractMarkdownFromZip: (
       buffer: ArrayBuffer,
@@ -754,9 +758,10 @@ const api = {
       return ipcRenderer.invoke("skills:extractMarkdownFromZip", { buffer, fileName })
     },
     exportForMarket: (
-      skillPath: string
+      skillPath: string,
+      options?: { includeNestedSkills?: boolean }
     ): Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }> => {
-      return ipcRenderer.invoke("skills:exportForMarket", skillPath)
+      return ipcRenderer.invoke("skills:exportForMarket", skillPath, options)
     },
     delete: (skillPath: string): Promise<{ success: boolean; error?: string }> => {
       return ipcRenderer.invoke("skills:delete", skillPath)
@@ -1004,6 +1009,14 @@ const api = {
       }
     }
   },
+  autoCommit: {
+    getSettings: (): Promise<AgentAutoCommitSettings> =>
+      ipcRenderer.invoke("autoCommit:getSettings") as Promise<AgentAutoCommitSettings>,
+    saveSettings: (
+      updates: Partial<AgentAutoCommitSettings>
+    ): Promise<AgentAutoCommitSettings> =>
+      ipcRenderer.invoke("autoCommit:saveSettings", updates) as Promise<AgentAutoCommitSettings>
+  },
   heartbeat: {
     getConfig: (): Promise<HeartbeatConfig> =>
       ipcRenderer.invoke("heartbeat:getConfig") as Promise<HeartbeatConfig>,
@@ -1158,6 +1171,15 @@ const api = {
       ipcRenderer.invoke("plugins:installFromDir") as Promise<{
         success: boolean
         pluginName?: string
+        error?: string
+      }>,
+    exportForMarket: (
+      id: string
+    ): Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }> =>
+      ipcRenderer.invoke("plugins:exportForMarket", id) as Promise<{
+        success: boolean
+        fileName?: string
+        buffer?: ArrayBuffer
         error?: string
       }>,
     delete: (id: string): Promise<{ success: boolean; error?: string }> =>
@@ -1613,6 +1635,17 @@ const api = {
     skills: {
       list: (): Promise<SkillHookMetadata[]> => ipcRenderer.invoke("hooks:skills:list")
     },
+    onChanged: (
+      callback: (data: { reason?: string; at: string }) => void
+    ): (() => void) => {
+      const handler = (_: unknown, data: { reason?: string; at: string }): void => {
+        callback(data)
+      }
+      ipcRenderer.on("hooks:changed", handler)
+      return () => {
+        ipcRenderer.removeListener("hooks:changed", handler)
+      }
+    },
     create: (config: HookUpsert): Promise<{ id: string }> =>
       ipcRenderer.invoke("hooks:create", config),
     update: (config: HookUpsert & { id: string }): Promise<{ id: string }> =>
@@ -1726,9 +1759,9 @@ const api = {
       ipcRenderer.invoke("dashboard:skillDetail", skill, range, limit),
     commitDetails: (
       range: { from: string; to: string },
-      limit?: number
+      options?: { page?: number; pageSize?: number; pushedOnly?: boolean }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:commitDetails", range, limit),
+      ipcRenderer.invoke("dashboard:commitDetails", range, options),
     exportExcel: (
       sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>
     ): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> =>
