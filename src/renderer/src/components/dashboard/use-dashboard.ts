@@ -541,7 +541,7 @@ function getLatestUserMetric(bucket: any, field: string): string {
   return normalizeMetricValue(bucket.latest_user_info?.hits?.hits?.[0]?._source?.[field])
 }
 
-function formatTopUserOrgName(orgName: string, upperOrgLv1: string, upperOrgLv0: string): string {
+export function formatTopUserOrgName(orgName: string, upperOrgLv1: string, upperOrgLv0: string): string {
   const normalizedOrgName = orgName.trim()
   const normalizedUpperOrgLv1 = upperOrgLv1.trim()
   const normalizedUpperOrgLv0 = upperOrgLv0.trim()

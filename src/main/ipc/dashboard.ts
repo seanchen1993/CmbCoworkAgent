@@ -955,6 +955,15 @@ async function fetchUserProfilesBySapIds(sapIds: string[]): Promise<unknown> {
           size: Math.min(Math.max(sanitizedSapIds.length * 5, 100), 2000)
         },
         aggs: {
+          latest_user_info: {
+            top_hits: {
+              size: 1,
+              sort: [{ startedAt: { order: "desc" } }],
+              _source: {
+                includes: ["userName", "orgName", "upperOrgLv0", "upperOrgLv1"]
+              }
+            }
+          },
           user_name: { terms: { field: "userName", size: 1 } },
           org_name: { terms: { field: "orgName", size: 1 } }
         }
@@ -1744,6 +1753,18 @@ function makeMockUserProfilesBySapIds(sapIds: string[]): unknown {
           key: string
           user_name?: { buckets?: Array<{ key: string }> }
           org_name?: { buckets?: Array<{ key: string }> }
+          latest_user_info?: {
+            hits?: {
+              hits?: Array<{
+                _source?: {
+                  userName?: string
+                  orgName?: string
+                  upperOrgLv0?: string
+                  upperOrgLv1?: string
+                }
+              }>
+            }
+          }
         }>
       }
     }
@@ -1751,13 +1772,18 @@ function makeMockUserProfilesBySapIds(sapIds: string[]): unknown {
 
   const fallbackBuckets = userStats.aggregations?.top_users?.buckets ?? []
   const fallbackMap = new Map(
-    fallbackBuckets.map((bucket) => [
-      bucket.key,
-      {
-        userName: bucket.user_name?.buckets?.[0]?.key ?? bucket.key,
-        orgName: bucket.org_name?.buckets?.[0]?.key ?? ""
-      }
-    ])
+    fallbackBuckets.map((bucket) => {
+      const latestUserInfo = bucket.latest_user_info?.hits?.hits?.[0]?._source
+      return [
+        bucket.key,
+        {
+          userName: latestUserInfo?.userName ?? bucket.user_name?.buckets?.[0]?.key ?? bucket.key,
+          orgName: latestUserInfo?.orgName ?? bucket.org_name?.buckets?.[0]?.key ?? "",
+          upperOrgLv0: latestUserInfo?.upperOrgLv0 ?? "",
+          upperOrgLv1: latestUserInfo?.upperOrgLv1 ?? ""
+        }
+      ]
+    })
   )
 
   const buckets = Array.from(
@@ -1771,6 +1797,20 @@ function makeMockUserProfilesBySapIds(sapIds: string[]): unknown {
     return {
       key: sapId,
       doc_count: 1,
+      latest_user_info: {
+        hits: {
+          hits: [
+            {
+              _source: {
+                userName: fallback?.userName ?? `用户${sapId.slice(-4)}`,
+                orgName: fallback?.orgName ?? "未知部门",
+                upperOrgLv0: fallback?.upperOrgLv0 ?? "",
+                upperOrgLv1: fallback?.upperOrgLv1 ?? ""
+              }
+            }
+          ]
+        }
+      },
       user_name: { buckets: [{ key: fallback?.userName ?? `用户${sapId.slice(-4)}` }] },
       org_name: { buckets: [{ key: fallback?.orgName ?? "未知部门" }] }
     }

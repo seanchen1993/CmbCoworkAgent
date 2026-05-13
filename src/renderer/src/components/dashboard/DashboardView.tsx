@@ -3,11 +3,12 @@
  *
  * 5 panels: Overview · Feedback · Model Analysis · User Analysis · Productivity
  */
-import { useState, useCallback } from "react"
+import { useState, useCallback, useEffect } from "react"
 import { RefreshCw, Loader2, AlertCircle, ChevronLeft, ChevronRight, Download } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import {
+  formatTopUserOrgName,
   useDashboard,
   type DashboardCommitDetailsData,
   type DashboardSkillDetail,
@@ -21,6 +22,14 @@ import { ProductivityPanel } from "./panels/ProductivityPanel"
 import { FeedbackPanel } from "./panels/FeedbackPanel"
 import { TraceHistoryDialog } from "./TraceHistoryDialog"
 import { CommitDetailsDialog } from "./CommitDetailsDialog"
+import { marketApi, type MarketItem } from "../../api/market"
+import { buildMarketSkillKeySet, buildMarketSkillMap, getMarketSkillItem } from "./skill-market"
+import {
+  buildUploaderIdCandidates,
+  normalizeUploaderProfileField,
+  parseUploaderIdentity,
+  type UploaderProfileInfo
+} from "../../lib/skill-data-service"
 
 // ─────────────────────────────────────────────────────────
 // Time control bar
@@ -32,6 +41,17 @@ const GRANULARITY_OPTIONS: { value: Granularity; label: string }[] = [
   { value: "month", label: "月" },
   { value: "custom", label: "自定义" }
 ]
+
+type SkillUploaderExportInfo = {
+  sapId: string
+  userName: string
+  orgName: string
+}
+
+type SkillUploaderProfile = UploaderProfileInfo & {
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+}
 
 function formatRangeLabel(from: string, to: string, granularity: Granularity): string {
   const f = new Date(from)
@@ -46,6 +66,36 @@ function formatRangeLabel(from: string, to: string, granularity: Granularity): s
   }
   // month
   return `${f.getFullYear()}-${pad(f.getMonth() + 1)}`
+}
+
+function resolveSkillUploaderExportInfo(
+  item: MarketItem | null,
+  uploaderProfiles: Record<string, SkillUploaderProfile>
+): SkillUploaderExportInfo {
+  if (!item?.user_id) return { sapId: "", userName: "", orgName: "" }
+
+  const parsed = parseUploaderIdentity(item.user_id)
+  const profileCandidates = [
+    item.user_id.trim(),
+    parsed?.sapId,
+    ...buildUploaderIdCandidates(parsed?.sapId || item.user_id)
+  ].filter((value): value is string => Boolean(value))
+  const profile = profileCandidates.map((candidate) => uploaderProfiles[candidate]).find(Boolean)
+
+  return {
+    sapId:
+      normalizeUploaderProfileField(profile?.sapId) ||
+      normalizeUploaderProfileField(parsed?.sapId) ||
+      item.user_id.trim(),
+    userName:
+      normalizeUploaderProfileField(profile?.userName) || normalizeUploaderProfileField(parsed?.userName),
+    orgName:
+      formatTopUserOrgName(
+        normalizeUploaderProfileField(profile?.orgName),
+        normalizeUploaderProfileField(profile?.upperOrgLv1),
+        normalizeUploaderProfileField(profile?.upperOrgLv0)
+      ) || normalizeUploaderProfileField(parsed?.orgName)
+  }
 }
 
 function TimeControlBar({
@@ -255,6 +305,135 @@ export function DashboardView(): React.JSX.Element {
   const [commitDetails, setCommitDetails] = useState<DashboardCommitDetailsData | null>(null)
   const [commitDetailsLoading, setCommitDetailsLoading] = useState(false)
   const [commitDetailsError, setCommitDetailsError] = useState<string | null>(null)
+  const [marketSkillKeys, setMarketSkillKeys] = useState<Set<string>>(new Set())
+  const [marketSkillMap, setMarketSkillMap] = useState<Map<string, MarketItem>>(new Map())
+  const [skillUploaderProfiles, setSkillUploaderProfiles] = useState<Record<string, SkillUploaderProfile>>({})
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function loadUploaderProfiles(items: MarketItem[]): Promise<void> {
+      const uploaderIds = Array.from(
+        new Set(
+          items
+            .map((item) => {
+              const parsed = parseUploaderIdentity(item.user_id)
+              return parsed?.sapId || item.user_id?.trim() || ""
+            })
+            .filter(Boolean)
+            .flatMap((id) => buildUploaderIdCandidates(id))
+        )
+      )
+
+      if (uploaderIds.length === 0) {
+        if (!cancelled) setSkillUploaderProfiles({})
+        return
+      }
+
+      if (typeof window.api?.dashboard?.userProfiles !== "function") {
+        if (!cancelled) {
+          setSkillUploaderProfiles(
+            Object.fromEntries(
+              uploaderIds.map((sapId) => [sapId, { sapId, userName: "", orgName: "" }])
+            )
+          )
+        }
+        return
+      }
+
+      try {
+        const response = await window.api.dashboard.userProfiles(uploaderIds)
+        if (!response.success || !response.data) {
+          throw new Error(response.error || "获取上传用户信息失败")
+        }
+
+        const buckets =
+          (
+            response.data as {
+              aggregations?: {
+                by_sap?: {
+                  buckets?: Array<{
+                    key?: string
+                    user_name?: { buckets?: Array<{ key?: string }> }
+                    org_name?: { buckets?: Array<{ key?: string }> }
+                    latest_user_info?: {
+                      hits?: {
+                        hits?: Array<{
+                          _source?: {
+                            userName?: string
+                            orgName?: string
+                            upperOrgLv0?: string
+                            upperOrgLv1?: string
+                          }
+                        }>
+                      }
+                    }
+                  }>
+                }
+              }
+            }
+          ).aggregations?.by_sap?.buckets ?? []
+
+        const profileBySapId: Record<string, SkillUploaderProfile> = {}
+        for (const bucket of buckets) {
+          const sapId = bucket.key?.trim()
+          if (!sapId) continue
+          const latestUserInfo = bucket.latest_user_info?.hits?.hits?.[0]?._source
+          profileBySapId[sapId] = {
+            sapId,
+            userName: latestUserInfo?.userName ?? bucket.user_name?.buckets?.[0]?.key ?? "",
+            orgName: latestUserInfo?.orgName ?? bucket.org_name?.buckets?.[0]?.key ?? "",
+            upperOrgLv0: latestUserInfo?.upperOrgLv0 ?? "",
+            upperOrgLv1: latestUserInfo?.upperOrgLv1 ?? ""
+          }
+        }
+
+        const profileEntries = Object.entries(profileBySapId)
+        const nextMap: Record<string, SkillUploaderProfile> = {}
+        for (const rawId of uploaderIds) {
+          nextMap[rawId] =
+            profileBySapId[rawId] ||
+            profileEntries.find(([sapId]) => sapId.includes(rawId))?.[1] ||
+            { sapId: rawId, userName: "", orgName: "" }
+        }
+
+        if (!cancelled) setSkillUploaderProfiles(nextMap)
+      } catch (error) {
+        console.warn("[Dashboard] Failed to load marketplace skill uploader profiles:", error)
+        if (!cancelled) {
+          setSkillUploaderProfiles(
+            Object.fromEntries(
+              uploaderIds.map((sapId) => [sapId, { sapId, userName: "", orgName: "" }])
+            )
+          )
+        }
+      }
+    }
+
+    async function loadMarketSkills(): Promise<void> {
+      try {
+        const result = await marketApi.getSkills()
+        if (cancelled) return
+        if (result.success && result.data) {
+          setMarketSkillKeys(buildMarketSkillKeySet(result.data))
+          setMarketSkillMap(buildMarketSkillMap(result.data))
+          void loadUploaderProfiles(result.data)
+          return
+        }
+        console.warn("[Dashboard] Failed to load marketplace skills:", result.error)
+      } catch (error) {
+        if (!cancelled) {
+          console.warn("[Dashboard] Failed to load marketplace skills:", error)
+        }
+      }
+    }
+
+    void loadMarketSkills()
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const handleSkillClick = useCallback(async (skill: string) => {
     setSelectedSkill(skill)
@@ -373,12 +552,39 @@ export function DashboardView(): React.JSX.Element {
         if (exportSkills.length > 0) {
           sheets.push({
             name: "Skill使用排行",
-            header: ["排名", "Skill", "调用次数"],
+            header: [
+              "排名",
+              "Skill",
+              "调用次数",
+              "应用市场是否存在",
+              "Skill中文名称",
+              "上传用户ID",
+              "上传用户名称",
+              "上传用户完整机构",
+              "是否精品",
+              "是否认证"
+            ],
             rows: [
-              ["Skill 种类数", overview.totalSkills, ""],
-              ["Skill 调用次数", overview.totalSkillCalls, ""],
-              ["", "", ""],
-              ...exportSkills.map((s, i) => [i + 1, s.skill, s.count])
+              ["Skill 种类数", overview.totalSkills, "", "", "", "", "", "", "", ""],
+              ["Skill 调用次数", overview.totalSkillCalls, "", "", "", "", "", "", "", ""],
+              ["", "", "", "", "", "", "", "", "", ""],
+              ...exportSkills.map((s, i) => {
+                const marketItem = getMarketSkillItem(marketSkillMap, s.skill)
+                const uploaderInfo = resolveSkillUploaderExportInfo(marketItem, skillUploaderProfiles)
+                const existsInMarket = Boolean(marketItem)
+                return [
+                  i + 1,
+                  s.skill,
+                  s.count,
+                  existsInMarket ? "是" : "否",
+                  existsInMarket ? (marketItem?.chinese_name?.trim() || "") : "",
+                  uploaderInfo.sapId,
+                  uploaderInfo.userName,
+                  uploaderInfo.orgName,
+                  existsInMarket ? (marketItem?.featured === "精品" ? "是" : "否") : "",
+                  existsInMarket ? (marketItem?.tag === "认证" ? "是" : "否") : ""
+                ]
+              })
             ]
           })
         }
@@ -502,7 +708,7 @@ export function DashboardView(): React.JSX.Element {
     } finally {
       setExporting(false)
     }
-  }, [overview, modelStats, userStats, productivity])
+  }, [overview, modelStats, userStats, productivity, marketSkillMap, skillUploaderProfiles])
 
   return (
     <div className="flex flex-col h-full">
@@ -530,7 +736,12 @@ export function DashboardView(): React.JSX.Element {
           {/* Overview */}
           <section>
             <h2 className="text-sm font-semibold text-foreground mb-3">使用概览</h2>
-            <OverviewPanel data={overview} loading={loading} onSkillClick={handleSkillClick} />
+            <OverviewPanel
+              data={overview}
+              loading={loading}
+              onSkillClick={handleSkillClick}
+              marketSkillKeys={marketSkillKeys}
+            />
           </section>
 
           {/* Productivity */}
