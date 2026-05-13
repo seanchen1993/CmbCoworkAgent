@@ -251,7 +251,10 @@ function ThreadListItem({
               <Button
                 variant="ghost"
                 size="icon-sm"
-                className={cn("cursor-pointer size-6 hover:bg-accent/20", isRunning && "cursor-not-allowed !opacity-30")}
+                className={cn(
+                  "cursor-pointer size-6 hover:bg-accent/20",
+                  isRunning && "cursor-not-allowed !opacity-30"
+                )}
                 disabled={isRunning}
                 onClick={(e) => {
                   e.stopPropagation()
@@ -419,6 +422,19 @@ export function ThreadSidebar(): React.JSX.Element {
     [persistCollapsedProjects]
   )
 
+  const expandProject = useCallback(
+    (projectKey: string) => {
+      setCollapsedProjectKeys((prev) => {
+        if (!prev.has(projectKey)) return prev
+        const next = new Set(prev)
+        next.delete(projectKey)
+        persistCollapsedProjects(next)
+        return next
+      })
+    },
+    [persistCollapsedProjects]
+  )
+
   const allProjectsCollapsed =
     threadProjects.length > 0 &&
     threadProjects.every((project) => collapsedProjectKeys.has(project.key))
@@ -490,6 +506,7 @@ export function ThreadSidebar(): React.JSX.Element {
   }
 
   const handleNewProjectThread = async (project: ThreadProject): Promise<void> => {
+    expandProject(project.key)
     await createThread({
       title: `Thread ${new Date().toLocaleDateString()}`,
       workspacePath: project.path ?? null
