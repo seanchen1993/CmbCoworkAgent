@@ -1,6 +1,10 @@
-import { app, BrowserWindow, type IpcMain, screen } from "electron"
-import { existsSync, readdirSync, readFileSync, statSync } from "fs"
-import { join } from "path"
+import { app, BrowserWindow, dialog, type IpcMain, screen } from "electron"
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "fs"
+import { mkdir, rm } from "fs/promises"
+import { basename, join, relative } from "path"
+import { pathToFileURL } from "url"
+import { getOpenworkDir } from "./storage"
+import { copyDirRecursive } from "./utils/fs"
 
 type PetManifest = {
   id: string
@@ -18,6 +22,9 @@ type PetManifest = {
 type PetListItem = PetManifest & {
   directoryId: string
   spritesheetPath: string
+  source: PetSource
+  key: string
+  canDelete: boolean
 }
 
 // 宠物状态协议：系统态由 renderer 同步，交互态由宠物窗口自身或主进程临时覆盖。
@@ -36,6 +43,13 @@ type PetState =
 type PetWindowOptions = {
   onShowMainWindow: () => void
   applyMacDockIcon: () => void
+}
+
+type PetSource = "builtin" | "custom"
+
+type PetSettings = {
+  enabled: boolean
+  selectedPetKey: string | null
 }
 
 const PET_STATES: PetState[] = [
@@ -74,6 +88,12 @@ let petHoverPollTimer: NodeJS.Timeout | null = null
 let petHovering = false
 let petWindowOptions: PetWindowOptions | null = null
 
+const PET_SETTINGS_FILE = join(getOpenworkDir(), "pet-settings.json")
+const DEFAULT_PET_SETTINGS: PetSettings = {
+  enabled: true,
+  selectedPetKey: null
+}
+
 export function configurePetWindow(options: PetWindowOptions): void {
   petWindowOptions = options
 }
@@ -83,19 +103,40 @@ export function registerPetHandlers(ipcMain: IpcMain): void {
     return listPets()
   })
 
-  ipcMain.handle("pet:getSpriteDataUrl", async (_event, directoryId: string) => {
-    const pet = readPetManifest(directoryId)
-    if (!pet) {
-      return { success: false, error: "Pet not found" }
+  ipcMain.handle(
+    "pet:getSpriteDataUrl",
+    async (_event, directoryId: string, source?: PetSource) => {
+      const pet = readPetManifest(directoryId, source ?? "builtin")
+      if (!pet) {
+        return { success: false, error: "Pet not found" }
+      }
+      const dataUrl = readPetSpriteDataUrl(pet)
+      if (!dataUrl) return { success: false, error: "Failed to load pet sprite" }
+      return { success: true, dataUrl }
     }
-    const dataUrl = readPetSpriteDataUrl(pet)
-    if (!dataUrl) return { success: false, error: "Failed to load pet sprite" }
-    return { success: true, dataUrl }
-  })
+  )
 
   ipcMain.on("pet:setState", (_event, state: unknown) => {
     if (!isPetState(state)) return
     updatePetWindowState(state)
+  })
+
+  ipcMain.handle("pet:getSettings", async () => {
+    return readPetSettings()
+  })
+
+  ipcMain.handle("pet:updateSettings", async (_event, settings: Partial<PetSettings>) => {
+    const updated = writePetSettings(settings)
+    refreshPetWindowForSettings()
+    return updated
+  })
+
+  ipcMain.handle("pet:uploadCustomFolder", async () => {
+    return uploadCustomPetFolder()
+  })
+
+  ipcMain.handle("pet:deleteCustom", async (_event, directoryId: string) => {
+    return deleteCustomPet(directoryId)
   })
 }
 
@@ -107,7 +148,7 @@ function getFirstExistingPath(paths: string[]): string | undefined {
   return paths.find((path) => existsSync(path))
 }
 
-function getPetsRootPath(): string | undefined {
+function getBuiltinPetsRootPath(): string | undefined {
   // 开发态优先读仓库 pets/；打包后从 resourcesPath/pets 读取 extraResources。
   return getFirstExistingPath([
     join(process.cwd(), "pets"),
@@ -118,6 +159,19 @@ function getPetsRootPath(): string | undefined {
   ])
 }
 
+function getCustomPetsRootPath(): string {
+  return join(getOpenworkDir(), "pets")
+}
+
+function getPetsRootPath(source: PetSource): string | undefined {
+  if (source === "custom") return getCustomPetsRootPath()
+  return getBuiltinPetsRootPath()
+}
+
+function makePetKey(source: PetSource, directoryId: string): string {
+  return `${source}:${directoryId}`
+}
+
 function getMimeType(filePath: string): string {
   const lower = filePath.toLowerCase()
   if (lower.endsWith(".webp")) return "image/webp"
@@ -126,8 +180,38 @@ function getMimeType(filePath: string): string {
   return "image/png"
 }
 
-function readPetManifest(directoryId: string): PetListItem | null {
-  const petsRoot = getPetsRootPath()
+function readPetSettings(): PetSettings {
+  try {
+    if (!existsSync(PET_SETTINGS_FILE)) return { ...DEFAULT_PET_SETTINGS }
+    const parsed = JSON.parse(readFileSync(PET_SETTINGS_FILE, "utf8")) as Partial<PetSettings>
+    return {
+      enabled: typeof parsed.enabled === "boolean" ? parsed.enabled : DEFAULT_PET_SETTINGS.enabled,
+      selectedPetKey:
+        typeof parsed.selectedPetKey === "string" && parsed.selectedPetKey
+          ? parsed.selectedPetKey
+          : null
+    }
+  } catch (error) {
+    console.warn("[Pets] Failed to read pet settings:", error)
+    return { ...DEFAULT_PET_SETTINGS }
+  }
+}
+
+function writePetSettings(settings: Partial<PetSettings>): PetSettings {
+  const current = readPetSettings()
+  const next: PetSettings = {
+    enabled: typeof settings.enabled === "boolean" ? settings.enabled : current.enabled,
+    selectedPetKey:
+      settings.selectedPetKey === null || typeof settings.selectedPetKey === "string"
+        ? settings.selectedPetKey
+        : current.selectedPetKey
+  }
+  writeFileSync(PET_SETTINGS_FILE, JSON.stringify(next, null, 2), "utf8")
+  return next
+}
+
+function readPetManifest(directoryId: string, source: PetSource): PetListItem | null {
+  const petsRoot = getPetsRootPath(source)
   if (!petsRoot) return null
   const petDir = join(petsRoot, directoryId)
   const manifestPath = join(petDir, "pet.json")
@@ -142,7 +226,10 @@ function readPetManifest(directoryId: string): PetListItem | null {
       ...parsed,
       id: parsed.id || directoryId,
       directoryId,
-      spritesheetPath
+      spritesheetPath,
+      source,
+      key: makePetKey(source, directoryId),
+      canDelete: source === "custom"
     }
   } catch (error) {
     console.warn(`[Pets] Failed to read pet ${directoryId}:`, error)
@@ -150,32 +237,159 @@ function readPetManifest(directoryId: string): PetListItem | null {
   }
 }
 
-function listPets(): PetListItem[] {
-  const petsRoot = getPetsRootPath()
+function listPetsFromSource(source: PetSource): PetListItem[] {
+  const petsRoot = getPetsRootPath(source)
   if (!petsRoot) return []
+  if (!existsSync(petsRoot)) return []
   try {
     // 只展示第一个宠物；排序保证不同文件系统下“第一个”稳定。
     return readdirSync(petsRoot)
       .sort((a, b) => a.localeCompare(b))
-      .map((entry) => readPetManifest(entry))
+      .map((entry) => readPetManifest(entry, source))
       .filter((pet): pet is PetListItem => Boolean(pet))
   } catch (error) {
-    console.warn("[Pets] Failed to list pets:", error)
+    console.warn(`[Pets] Failed to list ${source} pets:`, error)
     return []
   }
 }
 
+function listPets(): PetListItem[] {
+  return [...listPetsFromSource("builtin"), ...listPetsFromSource("custom")]
+}
+
 function readPetSpriteDataUrl(pet: PetListItem): string | null {
-  const petsRoot = getPetsRootPath()
-  if (!petsRoot) return null
+  const spritePath = getPetSpritePath(pet)
+  if (!spritePath) return null
   try {
-    const spritePath = join(petsRoot, pet.directoryId, pet.spritesheetPath)
     const buffer = readFileSync(spritePath)
     // 宠物窗口使用 data URL 加载本地图片，避免在 sandbox 页面里暴露文件系统路径。
     return `data:${getMimeType(spritePath)};base64,${buffer.toString("base64")}`
   } catch (error) {
     console.warn(`[Pets] Failed to read sprite for ${pet.directoryId}:`, error)
     return null
+  }
+}
+
+function getPetSpritePath(pet: PetListItem): string | null {
+  const petsRoot = getPetsRootPath(pet.source)
+  if (!petsRoot) return null
+  return join(petsRoot, pet.directoryId, pet.spritesheetPath)
+}
+
+function getPetWindowHtmlPath(): string {
+  return join(app.getPath("temp"), "cmbcoworkagent-pet-window.html")
+}
+
+function getSelectedPet(): PetListItem | null {
+  const pets = listPets()
+  const settings = readPetSettings()
+  const selectedPet = settings.selectedPetKey
+    ? pets.find((pet) => pet.key === settings.selectedPetKey)
+    : null
+  return selectedPet ?? pets[0] ?? null
+}
+
+function closePetWindow(): void {
+  stopPetHoverPolling()
+  closePetGreeting()
+  if (petWindow && !petWindow.isDestroyed()) {
+    petWindow.close()
+  }
+  petWindowOptions?.applyMacDockIcon()
+  petWindow = null
+  petMoveLastX = null
+  petDragOffset = null
+  petHovering = false
+}
+
+function refreshPetWindowForSettings(): void {
+  closePetWindow()
+  if (readPetSettings().enabled) {
+    setImmediate(() => {
+      createPetWindow()
+      petWindowOptions?.applyMacDockIcon()
+    })
+  }
+}
+
+function getSafeCustomPetPath(directoryId: string): string | null {
+  if (!directoryId || directoryId.includes("/") || directoryId.includes("\\")) return null
+  const customRoot = getCustomPetsRootPath()
+  const petPath = join(customRoot, directoryId)
+  const rel = relative(customRoot, petPath)
+  if (rel.startsWith("..") || rel === "" || rel.includes("..")) return null
+  return petPath
+}
+
+function uniqueDirectoryId(root: string, preferredName: string): string {
+  const baseName = preferredName.replace(/[^\w.-]+/g, "-").replace(/^-+|-+$/g, "") || "pet"
+  let candidate = baseName
+  let index = 2
+  while (existsSync(join(root, candidate))) {
+    candidate = `${baseName}-${index}`
+    index += 1
+  }
+  return candidate
+}
+
+async function uploadCustomPetFolder(): Promise<{
+  success: boolean
+  pet?: PetListItem
+  error?: string
+}> {
+  const result = await dialog.showOpenDialog({
+    title: "选择宠物文件夹",
+    properties: ["openDirectory"]
+  })
+  if (result.canceled || result.filePaths.length === 0) {
+    return { success: false, error: "已取消选择" }
+  }
+
+  const sourceDir = result.filePaths[0]
+  const manifestPath = join(sourceDir, "pet.json")
+  if (!existsSync(manifestPath)) {
+    return { success: false, error: "所选文件夹中未找到 pet.json" }
+  }
+
+  const customRoot = getCustomPetsRootPath()
+  await mkdir(customRoot, { recursive: true })
+  const directoryId = uniqueDirectoryId(customRoot, basename(sourceDir))
+  const destination = join(customRoot, directoryId)
+
+  try {
+    await copyDirRecursive(sourceDir, destination)
+    const pet = readPetManifest(directoryId, "custom")
+    if (!pet) {
+      await rm(destination, { recursive: true, force: true })
+      return { success: false, error: "宠物资源不完整，请参考内置 pets 目录结构" }
+    }
+    return { success: true, pet }
+  } catch (error) {
+    await rm(destination, { recursive: true, force: true }).catch(() => undefined)
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "上传失败"
+    }
+  }
+}
+
+async function deleteCustomPet(directoryId: string): Promise<{ success: boolean; error?: string }> {
+  const petPath = getSafeCustomPetPath(directoryId)
+  if (!petPath) return { success: false, error: "Invalid pet directory" }
+
+  try {
+    await rm(petPath, { recursive: true, force: true })
+    const settings = readPetSettings()
+    if (settings.selectedPetKey === makePetKey("custom", directoryId)) {
+      writePetSettings({ selectedPetKey: null })
+      refreshPetWindowForSettings()
+    }
+    return { success: true }
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "删除失败"
+    }
   }
 }
 
@@ -189,17 +403,17 @@ function escapeHtml(value: string): string {
 }
 
 export function createPetWindow(): void {
+  if (!readPetSettings().enabled) return
   if (petWindow && !petWindow.isDestroyed()) return
 
-  // 当前需求只展示第一个宠物；后续如果恢复切换，可在这里接入选择逻辑。
-  const pet = listPets()[0]
+  const pet = getSelectedPet()
   if (!pet) {
     console.warn("[Pets] No pet manifest found; pet window disabled")
     return
   }
 
-  const spriteDataUrl = readPetSpriteDataUrl(pet)
-  if (!spriteDataUrl) return
+  const spritePath = getPetSpritePath(pet)
+  if (!spritePath) return
 
   // 宠物窗口只覆盖宠物本体大小，避免透明区域过大影响 hover/拖拽命中。
   const petWindowWidth = 112
@@ -222,8 +436,8 @@ export function createPetWindow(): void {
     resizable: false,
     movable: true,
     alwaysOnTop: true,
-    // macOS 下不要 skipTaskbar，否则开发态 Dock 图标可能被隐藏或重置。
-    skipTaskbar: process.platform !== "darwin",
+    // 宠物是辅助窗口，不参与任务栏/Dock；主应用 Dock 图标由 applyMacDockIcon 维护。
+    skipTaskbar: true,
     show: false,
     // 隐藏状态下也允许首帧绘制，等 pet-ready 后再显示，避免透明窗口初始闪屏。
     paintWhenInitiallyHidden: true,
@@ -291,7 +505,7 @@ export function createPetWindow(): void {
   <canvas id="pet"></canvas>
   <script>
     const pet = ${JSON.stringify(manifest)};
-    const spriteUrl = ${JSON.stringify(spriteDataUrl)};
+    const spriteUrl = ${JSON.stringify(pathToFileURL(spritePath).toString())};
     const canvas = document.getElementById("pet");
     const ctx = canvas.getContext("2d");
     const buffer = document.createElement("canvas");
@@ -519,12 +733,16 @@ export function createPetWindow(): void {
 </html>`
 
   const showPetWindow = (): void => {
-    if (petWindow && !petWindow.isDestroyed() && !petWindow.isVisible()) {
-      petWindow.showInactive()
+    if (currentWindow && !currentWindow.isDestroyed() && !currentWindow.isVisible()) {
+      currentWindow.showInactive()
     }
   }
-  petWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
-  petWindow.webContents.on("page-title-updated", (event, title) => {
+  const currentWindow = petWindow
+  const htmlPath = getPetWindowHtmlPath()
+  writeFileSync(htmlPath, html, "utf8")
+  currentWindow.loadFile(htmlPath)
+  currentWindow.webContents.on("page-title-updated", (event, title) => {
+    if (petWindow !== currentWindow) return
     event.preventDefault()
     // 宠物窗口启用 sandbox，不能直接访问 Electron API；统一通过 title 事件转发交互。
     if (title === "pet-ready") {
@@ -536,8 +754,8 @@ export function createPetWindow(): void {
       const [, rawX, rawY] = title.split(":")
       const pointerX = Number(rawX)
       const pointerY = Number(rawY)
-      if (petWindow && Number.isFinite(pointerX) && Number.isFinite(pointerY)) {
-        const bounds = petWindow.getBounds()
+      if (Number.isFinite(pointerX) && Number.isFinite(pointerY)) {
+        const bounds = currentWindow.getBounds()
         // 记录鼠标在宠物窗口内的偏移，后续拖拽时保持鼠标抓取点不跳动。
         petDragOffset = { x: pointerX - bounds.x, y: pointerY - bounds.y }
       }
@@ -545,8 +763,8 @@ export function createPetWindow(): void {
       const [, rawX, rawY] = title.split(":")
       const pointerX = Number(rawX)
       const pointerY = Number(rawY)
-      if (petWindow && petDragOffset && Number.isFinite(pointerX) && Number.isFinite(pointerY)) {
-        petWindow.setPosition(
+      if (petDragOffset && Number.isFinite(pointerX) && Number.isFinite(pointerY)) {
+        currentWindow.setPosition(
           Math.round(pointerX - petDragOffset.x),
           Math.round(pointerY - petDragOffset.y),
           false
@@ -556,26 +774,34 @@ export function createPetWindow(): void {
       petDragOffset = null
     }
   })
-  petWindow.on("move", () => {
-    if (!petWindow || petWindow.isDestroyed() || petWindow.webContents.isDestroyed()) return
-    const [x] = petWindow.getPosition()
+  currentWindow.on("move", () => {
+    if (
+      petWindow !== currentWindow ||
+      currentWindow.isDestroyed() ||
+      currentWindow.webContents.isDestroyed()
+    ) {
+      return
+    }
+    const [x] = currentWindow.getPosition()
     const direction = petMoveLastX === null || x >= petMoveLastX ? "right" : "left"
     petMoveLastX = x
     // 真实窗口移动时触发奔跑动画，覆盖系统原生/手动拖拽两种移动来源。
-    petWindow.webContents
+    currentWindow.webContents
       .executeJavaScript(
         `window.setPetTransientState("running", 350, ${JSON.stringify(direction)})`
       )
       .catch((error) => console.warn("[Pets] Failed to update drag state:", error))
   })
   startPetHoverPolling()
-  petWindow.on("closed", () => {
+  currentWindow.on("closed", () => {
+    if (petWindow !== currentWindow) return
     stopPetHoverPolling()
     closePetGreeting()
     petWindow = null
     petMoveLastX = null
     petDragOffset = null
     petHovering = false
+    petWindowOptions?.applyMacDockIcon()
   })
 }
 
@@ -583,7 +809,7 @@ function showPetGreeting(): void {
   closePetGreeting()
   if (!petWindow || petWindow.isDestroyed()) return
 
-  const pet = listPets()[0]
+  const pet = getSelectedPet()
   // 问候文案中的名称来自宠物配置，避免写死“皮皮”。
   const petName = escapeHtml(pet?.displayName || pet?.name || pet?.id || "皮皮")
   const petBounds = petWindow.getBounds()
@@ -605,7 +831,7 @@ function showPetGreeting(): void {
     focusable: false,
     alwaysOnTop: true,
     // 气泡是提示窗口，不应抢占焦点或出现在任务栏/Dock 中。
-    skipTaskbar: process.platform !== "darwin",
+    skipTaskbar: true,
     show: false,
     hasShadow: false,
     backgroundColor: "#00000000",

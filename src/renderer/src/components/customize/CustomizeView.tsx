@@ -16,6 +16,7 @@ import {
   Shield,
   Cpu,
   CircleUser,
+  PawPrint,
   Webhook,
   Wrench,
   type LucideIcon
@@ -38,6 +39,7 @@ import { HooksPanel } from "./HooksPanel"
 import { LspPanel } from "./LspPanel"
 import { CodeExecToolsPanel } from "./CodeExecToolsPanel"
 import { CommitPolicyPanel } from "./CommitPolicyPanel"
+import { PetPanel } from "./PetPanel"
 
 type CustomizeTab =
   | "skills"
@@ -51,6 +53,7 @@ type CustomizeTab =
   | "evolution"
   | "chatx"
   | "userinfo"
+  | "pet"
   | "hooks"
   | "lsp"
   | "codeExecTools"
@@ -102,7 +105,10 @@ const MENU_GROUPS: MenuGroup[] = [
   {
     id: "profile",
     label: "个人信息",
-    items: [{ tab: "userinfo", label: "个人信息", icon: CircleUser }]
+    items: [
+      { tab: "userinfo", label: "个人信息", icon: CircleUser },
+      { tab: "pet", label: "宠物", icon: PawPrint }
+    ]
   }
 ]
 
@@ -244,6 +250,8 @@ export function CustomizeView(): React.JSX.Element {
         <SandboxPanel />
       ) : activeTab === "userinfo" ? (
         <UserInfoPanel />
+      ) : activeTab === "pet" ? (
+        <PetPanel />
       ) : activeTab === "hooks" ? (
         <div className="flex flex-1 overflow-hidden">
           <HooksPanel />

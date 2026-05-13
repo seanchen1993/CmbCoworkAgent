@@ -58,6 +58,9 @@ interface PetManifest {
   // 宠物资源清单，来自 pets/<directoryId>/pet.json。
   id: string
   directoryId: string
+  source: "builtin" | "custom"
+  key: string
+  canDelete: boolean
   name?: string
   displayName?: string
   description?: string
@@ -67,6 +70,11 @@ interface PetManifest {
   columns?: number
   rows?: number
   states?: Record<string, { y: number; frames: number; fps?: number }>
+}
+
+interface PetSettings {
+  enabled: boolean
+  selectedPetKey: string | null
 }
 
 type PetState =
@@ -464,13 +472,18 @@ interface CustomAPI {
     ) => () => void
   }
   pet: {
-    // 列出本地 pets/ 下可用宠物，目前主进程只取第一个展示。
+    // 列出内置 pets/ 与 OPENWORK_DIR/pets 下可用宠物。
     list: () => Promise<PetManifest[]>
     getSpriteDataUrl: (
-      directoryId: string
+      directoryId: string,
+      source?: "builtin" | "custom"
     ) => Promise<{ success: boolean; dataUrl?: string; error?: string }>
     // 将业务状态同步到独立宠物窗口；动画渲染不在 renderer 主 UI 中执行。
     setState: (state: PetState) => void
+    getSettings: () => Promise<PetSettings>
+    updateSettings: (settings: Partial<PetSettings>) => Promise<PetSettings>
+    uploadCustomFolder: () => Promise<{ success: boolean; pet?: PetManifest; error?: string }>
+    deleteCustom: (directoryId: string) => Promise<{ success: boolean; error?: string }>
   }
   file: {
     parse: (
