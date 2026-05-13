@@ -123,6 +123,11 @@ function getVisibleTimelineEvents(events: DesignExecutionEvent[]): {
       continue
     }
 
+    if (event.kind === "validation") {
+      reversedVisible.push(event)
+      continue
+    }
+
     if (event.kind === "assistant_text" && assistantTextCount < MAX_VISIBLE_ASSISTANT_TEXT_EVENTS) {
       assistantTextCount += 1
       reversedVisible.push(event)
@@ -164,6 +169,10 @@ function DesignExecutionPanel({
       continue
     }
     if (event.kind === "assistant_text") {
+      timelineEvents.push(event)
+      continue
+    }
+    if (event.kind === "validation") {
       timelineEvents.push(event)
       continue
     }
@@ -239,6 +248,37 @@ function DesignExecutionPanel({
           )}
 
           {visibleEvents.map((event, index) => {
+            if (event.kind === "validation") {
+              const status = event.status === "error" || event.isError
+                ? "error"
+                : event.status === "success"
+                  ? "success"
+                  : "running"
+              return (
+                <div key={getEventKey(event, index)} style={{
+                  display: "flex",
+                  alignItems: "flex-start",
+                  gap: 8,
+                  padding: "7px 10px",
+                  borderRadius: 8,
+                  border: `1px solid ${
+                    status === "error" ? "#f2c7c7" : status === "success" ? "#cbe4d2" : "#ded8c8"
+                  }`,
+                  background: status === "error" ? "#fff1f1" : status === "success" ? "#f1fbf4" : "#fffaf0",
+                  color: status === "error" ? "#9b1c1c" : status === "success" ? "#236238" : "#7a5a12",
+                  fontSize: 12,
+                  lineHeight: 1.5,
+                }}>
+                  <span style={{ flexShrink: 0, fontWeight: 800 }}>
+                    {status === "error" ? "!" : status === "success" ? "✓" : "..."}
+                  </span>
+                  <span style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                    {event.content || (status === "running" ? "正在验证生成结果..." : "验证完成")}
+                  </span>
+                </div>
+              )
+            }
+
             if (event.kind === "assistant_text") {
               const text = sanitizeProgressText(event.content ?? "")
               if (!text) return null

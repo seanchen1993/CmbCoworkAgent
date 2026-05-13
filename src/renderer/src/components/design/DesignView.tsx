@@ -348,7 +348,8 @@ function asDesignExecutionEvent(event: unknown): DesignExecutionEvent | null {
     raw.kind !== "tool_call" &&
     raw.kind !== "tool_result" &&
     raw.kind !== "used_skill" &&
-    raw.kind !== "assistant_text"
+    raw.kind !== "assistant_text" &&
+    raw.kind !== "validation"
   ) return null
   return {
     kind: raw.kind,

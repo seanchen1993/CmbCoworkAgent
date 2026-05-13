@@ -203,6 +203,13 @@ applyTweaks({}); // apply defaults on load
 
 ## Reading and writing design files
 
+Filesystem tool schema is mandatory:
+- Use only these top-level argument names: \`read_file({ file_path, offset, limit })\`, \`write_file({ file_path, content })\`, and \`edit_file({ file_path, old_string, new_string, replace_all })\`.
+- Every \`read_file\` call must include a non-empty string \`file_path\`. For HTML artifacts, uploaded HTML/context files, selected \`SKILL.md\` files, or files you must understand before editing, also include numeric \`offset\` and \`limit\`.
+- Every \`write_file\` call must include non-empty string \`file_path\` and string \`content\`. Every \`edit_file\` call must include non-empty string \`file_path\`, \`old_string\`, and \`new_string\`; set \`replace_all\` explicitly when replacing more than one occurrence.
+- Do not use \`path\`, \`filePath\`, \`targetPath\`, \`input\`, \`params\`, \`arguments\`, \`oldString\`, \`newString\`, \`oldText\`, \`newText\`, \`replace\`, or \`replacement\` as tool argument names. Do not wrap tool arguments inside another object.
+- If a filesystem tool call fails with "Invalid tool arguments", retry the same filesystem operation using the exact schema above. Do not switch to execute/bash/shell/Python to write or verify the design artifact.
+
 Use file reads deliberately for HTML and design source files:
 - For Design HTML work, these rules override generic codebase-exploration guidance that suggests an initial 100-line scan.
 - \`read_file\` defaults to 100 lines. For HTML artifacts, uploaded HTML/context files, selected \`SKILL.md\` files, or files you must understand before editing, do not rely on the default.
@@ -215,6 +222,9 @@ When writing:
 - Write exactly one complete standalone HTML artifact to the provided artifact path. Do not split the final deliverable into external support files.
 - Keep the artifact compact and maintainable: avoid unnecessary generated bulk, duplicated CSS, huge embedded data, and copied assets that are not used.
 - Use \`write_file\` for a new output artifact. If updating an existing artifact, use \`edit_file\` only when the replacement is small and reliable; otherwise write the complete final HTML artifact.
+- Do not assume \`write_file\` has a content-size limit, and do not claim the file is being truncated unless the \`write_file\` tool result explicitly reports that exact error.
+- Prefer writing the complete artifact in one \`write_file\` call when practical. If the artifact is too large to produce safely in one tool call, use a chunked file-writing strategy: first write a complete HTML skeleton containing unique insertion markers, then call \`edit_file\` repeatedly to replace one marker with an HTML chunk plus the next marker, then remove every temporary marker before finishing.
+- After writing, verify the artifact with \`read_file({ file_path, offset: 0, limit: 1000 })\` and continue with later offsets if needed. Confirm the file contains one complete HTML document, required EditMode markers, and no leftover temporary insertion markers.
 - After writing the file, respond only with a brief summary.
 
 ## Context from user's session
@@ -472,7 +482,7 @@ function extractTextContent(content: unknown): string {
 type DesignExecutionStatus = "running" | "success" | "error"
 
 interface DesignExecutionEvent {
-  kind: "tool_call" | "tool_result" | "used_skill" | "assistant_text"
+  kind: "tool_call" | "tool_result" | "used_skill" | "assistant_text" | "validation"
   id?: string
   toolCallId?: string
   name?: string
@@ -668,6 +678,73 @@ function readDesignArtifactFile(filePath: string | undefined, workspacePath: str
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : String(err) }
   }
+}
+
+interface DesignArtifactValidationResult {
+  ok: boolean
+  errors: string[]
+  warnings: string[]
+}
+
+function validateDesignArtifactHtml(html: string): DesignArtifactValidationResult {
+  const errors: string[] = []
+  const warnings: string[] = []
+  const trimmed = html.trim()
+
+  if (!isCompleteHtmlDocument(trimmed)) {
+    errors.push("HTML 文档不完整，必须包含 <!DOCTYPE html> 或 <html>，并以 </html> 结束")
+  }
+  if (!/<head[\s>]/i.test(trimmed)) {
+    errors.push("缺少 <head> 标签")
+  }
+  if (!/<body[\s>]/i.test(trimmed)) {
+    errors.push("缺少 <body> 标签")
+  }
+  if (!/<style[\s>]/i.test(trimmed)) {
+    errors.push("缺少内联 <style>，设计稿需要自包含样式")
+  }
+  if (!/<script[\s>]/i.test(trimmed)) {
+    errors.push("缺少内联 <script>，无法注册 EditMode/Tweaks 逻辑")
+  }
+  const editModeBeginCount = (trimmed.match(/EDITMODE-BEGIN/g) ?? []).length
+  const editModeEndCount = (trimmed.match(/EDITMODE-END/g) ?? []).length
+  if (editModeBeginCount !== 1 || editModeEndCount !== 1) {
+    warnings.push("EDITMODE 标记数量不正确，前端会尝试自动补齐")
+  }
+  if (!/TWEAK_DEFAULTS\s*=/.test(trimmed)) {
+    warnings.push("缺少 TWEAK_DEFAULTS 定义，前端会尝试自动补齐")
+  }
+  if (!/__edit_mode_available/.test(trimmed)) {
+    warnings.push("缺少 __edit_mode_available 就绪通知，前端会尝试自动补齐")
+  }
+  if (!/__activate_edit_mode/.test(trimmed) || !/__deactivate_edit_mode/.test(trimmed)) {
+    warnings.push("缺少 EditMode 激活/停用消息处理，前端会尝试自动补齐")
+  }
+  if (!/__edit_mode_set_keys/.test(trimmed)) {
+    warnings.push("未检测到 __edit_mode_set_keys 持久化通知，编辑面板改动可能无法保存")
+  }
+  if (!/applyTweaks\s*\(/.test(trimmed)) {
+    warnings.push("缺少 applyTweaks 调用，前端会尝试自动补齐")
+  }
+  if (/<script\b[^>]*\bsrc\s*=/i.test(trimmed)) {
+    warnings.push("检测到外部 script，Design artifact 应优先自包含")
+  }
+  if (/<link\b[^>]*rel=["']stylesheet["']/i.test(trimmed)) {
+    warnings.push("检测到外部 stylesheet，Design artifact 应优先自包含")
+  }
+
+  return { ok: errors.length === 0, errors, warnings }
+}
+
+function formatDesignArtifactValidation(result: DesignArtifactValidationResult): string {
+  const parts: string[] = []
+  if (result.errors.length > 0) {
+    parts.push(`错误：${result.errors.join("；")}`)
+  }
+  if (result.warnings.length > 0) {
+    parts.push(`警告：${result.warnings.join("；")}`)
+  }
+  return parts.join("\n") || "HTML 结构和 EditMode 标记检查通过"
 }
 
 function sameResolvedFilePath(left: string | undefined, right: string | undefined): boolean {
@@ -2165,17 +2242,51 @@ export function registerDesignHandlers(): void {
         // failed attempt plus tokens from the resumed attempt.
         const fullText = finalMessageText || streamedText
         const html = extractHtml(fullText)
+        const sendValidationEvent = (
+          status: DesignExecutionStatus,
+          content: string,
+          isError = status === "error"
+        ) => {
+          send({
+            type: "execution",
+            event: {
+              kind: "validation",
+              id: `artifact-validation:${Date.now()}`,
+              name: "artifact-validation",
+              content,
+              status,
+              isError,
+              timestamp: Date.now(),
+            } satisfies DesignExecutionEvent,
+          })
+        }
+        const sendValidatedArtifact = (artifactHtml: string): boolean => {
+          sendValidationEvent("running", "正在验证 HTML 结构和 EditMode 标记...")
+          const validation = validateDesignArtifactHtml(artifactHtml)
+          const validationMessage = formatDesignArtifactValidation(validation)
+          if (!validation.ok) {
+            sendValidationEvent("error", validationMessage, true)
+            send({
+              type: "error",
+              error: `生成的 HTML 未通过结构验证，已阻止渲染。\n${validationMessage}`,
+            })
+            abortAgentSession()
+            return false
+          }
+
+          sendValidationEvent("success", validationMessage, false)
+          storeDesignHtml(htmlStoreKey, artifactHtml)
+          const saved = tabId ? saveDesignArtifact(resolvedArtifactId, artifactHtml, workspacePath) : null
+          send({ type: "done", html: artifactHtml, ...(saved?.filePath ? { artifactPath: saved.filePath } : {}) })
+          return true
+        }
+
         if (html && isCompleteHtmlDocument(html)) {
-          // Store for potential future reference (storeHtml protocol)
-          storeDesignHtml(htmlStoreKey, html)
-          const saved = tabId ? saveDesignArtifact(resolvedArtifactId, html, workspacePath) : null
-          send({ type: "done", html, ...(saved?.filePath ? { artifactPath: saved.filePath } : {}) })
+          sendValidatedArtifact(html)
         } else {
           const draftArtifact = readDesignArtifactFile(draftArtifactPath, workspacePath)
           if (draftArtifact.success && draftArtifact.html && isCompleteHtmlDocument(draftArtifact.html)) {
-            storeDesignHtml(htmlStoreKey, draftArtifact.html)
-            const saved = tabId ? saveDesignArtifact(resolvedArtifactId, draftArtifact.html, workspacePath) : null
-            send({ type: "done", html: draftArtifact.html, ...(saved?.filePath ? { artifactPath: saved.filePath } : {}) })
+            sendValidatedArtifact(draftArtifact.html)
             return
           }
           const artifact = tabId ? readDesignArtifact(resolvedArtifactId, workspacePath) : null
