@@ -142,7 +142,7 @@ export function UniversalUploadDialog({
   const getFileTypeDescription = () => {
     switch (resourceType) {
       case "skill":
-        return ".md 文件需包含 YAML frontmatter 中的 name 字段；.zip 文件需包含 SKILL.md。SKILL.md必须在根目录"
+        return ".md 文件需包含 YAML frontmatter 中的 name 字段；.zip 文件需包含 SKILL.md，可包含父目录和嵌套子技能"
       case "mcp":
         return "上传 .json 文件，包含 MCP 连接器配置，必须是utf-8"
       case "plugin":

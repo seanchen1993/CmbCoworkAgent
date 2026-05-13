@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/select"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
+import { isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
 import type {
   HookConfig,
   HookEvent,
@@ -56,6 +57,16 @@ const HOOK_EVENTS: { value: HookEvent; label: string; description: string }[] = 
     value: "PostToolUse",
     label: "工具调用后（PostToolUse）",
     description: "在工具执行后触发，stdout 会追加到 Agent 下一轮上下文，外部系统状态可参与 AI 推理"
+  },
+  {
+    value: "PreSkillUse",
+    label: "技能使用前（PreSkillUse）",
+    description: "在技能被选择、激活或首次读取前触发，可按技能名拦截或注入使用前上下文"
+  },
+  {
+    value: "PostSkillUse",
+    label: "技能使用后（PostSkillUse）",
+    description: "在本轮结束时，对本轮实际激活过的技能触发，可记录使用结果或要求 Agent 修订"
   },
   {
     value: "UserPromptSubmit",
@@ -143,6 +154,22 @@ export interface CommandHookReadableContextDoc {
   extraObjects: HookReadableObjectDoc[]
 }
 
+const COMMAND_HOOK_SOURCE_INPUT_FIELDS = [
+  "hook_source_type",
+  "hook_source_root",
+  "hook_source_path"
+]
+
+const COMMAND_HOOK_SOURCE_ENV_FIELDS = ["HOOK_SOURCE_TYPE", "HOOK_SOURCE_ROOT", "HOOK_SOURCE_PATH"]
+
+function mergeCommandHookFieldKeys(fields: string[], extra: string[]): string[] {
+  const result = [...fields]
+  for (const field of extra) {
+    if (!result.includes(field)) result.push(field)
+  }
+  return result
+}
+
 export const COMMAND_HOOK_EVENT_DOCS: Partial<Record<HookEvent, CommandHookEventDoc>> = {
   PreToolUse: {
     inputDescription: "当前事件发生在工具真正执行前，最常见的输入是工具名和工具参数。",
@@ -157,16 +184,25 @@ export const COMMAND_HOOK_EVENT_DOCS: Partial<Record<HookEvent, CommandHookEvent
     "command": "git push origin main"
   }
 }`,
-    outputDescription: "当前事件最常见的是阻断高风险调用，或改写工具入参后再继续执行。",
+    outputDescription:
+      "当前事件最常见的是阻断高风险调用，或改写工具入参后再继续执行；返回 continue=false 还可以直接终止本轮。",
     outputNotes: [
       "`exit = 2` 可直接阻断工具执行。",
-      "`stdout` 输出 JSON 时，可使用 `decision=block`、`reason`、`updatedInput`、`systemMessage` 等字段。"
+      "`stdout` 输出 JSON 时，可使用 `decision=block`、`reason`、`updatedInput`、`systemMessage` 等字段。",
+      "返回 `continue=false` + `stopReason` 可直接终止本轮（优先级高于 `decision=block`）；这里强制阻断该次工具调用。"
     ],
-    outputExample: `{
+    outputExample: `# 阻断该次工具调用（默认）
+{
   "decision": "block",
   "reason": "检测到直接推送主分支，请先创建分支并提交 PR",
   "systemMessage": "Hook 已阻断直接推送主分支",
   "requiredSkill": "workspace-hook-remediation"
+}
+
+# 直接终止本轮（continue=false；优先级高于 decision=block）
+{
+  "continue": false,
+  "stopReason": "触发安全策略，已停止后续操作"
 }`,
     pythonExample: `import json
 import sys
@@ -180,6 +216,15 @@ print(
     f"[hook] event={payload.get('hook_event_name')} tool={tool_name} command={command}",
     file=sys.stderr,
 )
+
+if tool_name == "execute" and "rm -rf /" in command.lower():
+    # 直接终止本轮：命中红线（continue=false 优先级高于 decision=block）
+    json.dump(
+        {"continue": False, "stopReason": "检测到极端高危命令，已停止本轮"},
+        sys.stdout,
+        ensure_ascii=False,
+    )
+    sys.exit(0)
 
 if tool_name == "execute" and "push origin main" in command.lower():
     json.dump(
@@ -209,6 +254,15 @@ if ($toolInput -and $toolInput.PSObject.Properties["command"]) {
 [Console]::Error.WriteLine(
     "[hook] event=$($payload.hook_event_name) tool=$toolName command=$command"
 )
+
+# 直接终止本轮：命中红线（continue=false 优先级高于 decision=block）
+if ($toolName -eq "execute" -and $command.ToLower().Contains("rm -rf /")) {
+    [pscustomobject]@{
+        continue = $false
+        stopReason = "检测到极端高危命令，已停止本轮"
+    } | ConvertTo-Json -Compress -Depth 5
+    exit 0
+}
 
 if ($toolName -eq "execute" -and $command.ToLower().Contains("push origin main")) {
     [pscustomobject]@{
@@ -255,12 +309,28 @@ exit 0
     "message": "文件已写入"
   }
 }`,
-    outputDescription: "当前事件通常用于做写后校验、状态同步，或把外部检查结果回灌给 Agent。",
+    outputDescription:
+      "当前事件通常用于做写后校验、状态同步，或把外部检查结果回灌给 Agent；也可以要求 Agent 修订或直接终止本轮。",
     outputNotes: [
       "普通文本 `stdout` 会追加到 Agent 下一轮上下文。",
-      "若要要求 Agent 重新审视本次结果，可返回 JSON，并设置 `decision=block` 与 `reason`。"
+      "若要要求 Agent 重新审视本次结果，可返回 JSON，并设置 `decision=block` 与 `reason`。",
+      "返回 `continue=false` + `stopReason` 可直接终止本轮（优先级高于 `decision=block`）。"
     ],
-    outputExample: `已完成写后校验：README.md 已更新，建议继续执行后续步骤。`,
+    outputExample: `# 普通 stdout 文本会追加到下一轮上下文
+已完成写后校验：README.md 已更新，建议继续执行后续步骤。
+
+# 要求 Agent 重新审视本次结果（JSON）
+{
+  "decision": "block",
+  "reason": "写后校验失败：缺少必要字段 endpoint",
+  "additionalContext": "请补全 endpoint 字段后重试"
+}
+
+# 直接终止本轮（continue=false；优先级高于 decision=block）
+{
+  "continue": false,
+  "stopReason": "写入了违禁配置，已停止本轮"
+}`,
     pythonExample: `import json
 import sys
 
@@ -275,6 +345,15 @@ print(
     f"[hook] event={payload.get('hook_event_name')} tool={tool_name} file={file_path}",
     file=sys.stderr,
 )
+
+if tool_name == "write_file" and "/etc/" in file_path:
+    # 直接终止本轮：写到了禁区
+    json.dump(
+        {"continue": False, "stopReason": f"禁止写入系统目录 {file_path}，已停止本轮"},
+        sys.stdout,
+        ensure_ascii=False,
+    )
+    sys.exit(0)
 
 if tool_name == "write_file" and not success:
     json.dump(
@@ -306,6 +385,15 @@ if ($toolInput -and $toolInput.PSObject.Properties["filePath"]) {
     "[hook] event=$($payload.hook_event_name) tool=$toolName file=$filePath"
 )
 
+# 直接终止本轮：写到了禁区
+if ($toolName -eq "write_file" -and $filePath.Contains("/etc/")) {
+    [pscustomobject]@{
+        continue = $false
+        stopReason = "禁止写入系统目录 $filePath，已停止本轮"
+    } | ConvertTo-Json -Compress -Depth 5
+    exit 0
+}
+
 if ($toolName -eq "write_file" -and -not $success) {
     [pscustomobject]@{
         decision = "block"
@@ -315,6 +403,253 @@ if ($toolName -eq "write_file" -and -not $success) {
 }
 
 Write-Output "已完成写后校验：$filePath 写入成功"
+exit 0
+`
+  },
+  PreSkillUse: {
+    inputDescription:
+      "当前事件发生在技能被选择、激活或首次读取前，重点字段是技能名、技能路径和触发技能的工具。",
+    inputFields: [
+      "hook_event_name",
+      "session_id",
+      "cwd",
+      "skill_name",
+      "skill_path",
+      "skill_root",
+      "tool_name",
+      "tool_input"
+    ],
+    envFields: [
+      "HOOK_EVENT",
+      "SESSION_ID",
+      "WORKSPACE_PATH",
+      "SKILL_NAME",
+      "SKILL_PATH",
+      "SKILL_ROOT",
+      "TOOL_NAME",
+      "TOOL_ARGS"
+    ],
+    stdinExample: `{
+  "hook_event_name": "PreSkillUse",
+  "session_id": "thread-123",
+  "cwd": "C:\\\\ai\\\\demo",
+  "skill_name": "code-review",
+  "skill_path": "C:\\\\Users\\\\me\\\\.codex\\\\skills\\\\code-review\\\\SKILL.md",
+  "skill_root": "C:\\\\Users\\\\me\\\\.codex\\\\skills\\\\code-review",
+  "tool_name": "read_file",
+  "tool_input": {
+    "filePath": "C:\\\\Users\\\\me\\\\.codex\\\\skills\\\\code-review\\\\SKILL.md"
+  }
+}`,
+    outputDescription:
+      "当前事件适合做技能准入、审计登记，或给 Agent 注入使用该技能前必须遵守的约束；命中策略时可以阻断技能读取或直接终止本轮。",
+    outputNotes: [
+      "`exit = 2` 或 `decision=block` 可阻止本次技能读取。",
+      "`additionalContext` / 普通 stdout 会追加到 Agent 上下文。",
+      "返回 `continue=false` + `stopReason` 可直接终止本轮（优先级高于 `decision=block`）。"
+    ],
+    outputExample: `# 注入使用前约束（默认）
+{
+  "additionalContext": "使用 code-review 技能时，请优先列出高风险问题并附文件行号。"
+}
+
+# 阻止本次技能读取（修订流程）
+{
+  "decision": "block",
+  "reason": "code-review 技能不适用于当前任务"
+}
+
+# 直接终止本轮（continue=false；优先级高于 decision=block）
+{
+  "continue": false,
+  "stopReason": "命中安全策略，禁止使用该技能"
+}`,
+    pythonExample: `import json
+import sys
+
+payload = json.load(sys.stdin)
+skill_name = str(payload.get("skill_name", ""))
+
+print(f"[hook] pre skill={skill_name}", file=sys.stderr)
+
+if skill_name == "absolutely-banned":
+    # 直接终止本轮
+    json.dump(
+        {"continue": False, "stopReason": "命中黑名单技能，已停止本轮"},
+        sys.stdout,
+        ensure_ascii=False,
+    )
+    sys.exit(0)
+
+if skill_name == "dangerous-skill":
+    json.dump(
+        {"decision": "block", "reason": "该技能当前不允许在此工作区使用"},
+        sys.stdout,
+        ensure_ascii=False,
+    )
+    sys.exit(0)
+
+print(f"即将使用技能：{skill_name}", end="")
+sys.exit(0)
+`,
+    shellExample: `$raw = [Console]::In.ReadToEnd()
+$payload = $raw | ConvertFrom-Json -Depth 20
+$skillName = [string]$payload.skill_name
+
+[Console]::Error.WriteLine("[hook] pre skill=$skillName")
+
+# 直接终止本轮
+if ($skillName -eq "absolutely-banned") {
+    [pscustomobject]@{
+        continue = $false
+        stopReason = "命中黑名单技能，已停止本轮"
+    } | ConvertTo-Json -Compress -Depth 5
+    exit 0
+}
+
+if ($skillName -eq "dangerous-skill") {
+    [pscustomobject]@{
+        decision = "block"
+        reason = "该技能当前不允许在此工作区使用"
+    } | ConvertTo-Json -Compress -Depth 5
+    exit 0
+}
+
+Write-Output "即将使用技能：$skillName"
+exit 0
+`
+  },
+  PostSkillUse: {
+    inputDescription:
+      "当前事件发生在本轮结束阶段；每个本轮实际激活过的技能触发一次，可读取技能信息、触发方式和 stop_context。",
+    inputFields: [
+      "hook_event_name",
+      "session_id",
+      "cwd",
+      "skill_name",
+      "skill_path",
+      "skill_root",
+      "tool_name",
+      "tool_input",
+      "stop_context"
+    ],
+    envFields: [
+      "HOOK_EVENT",
+      "SESSION_ID",
+      "WORKSPACE_PATH",
+      "SKILL_NAME",
+      "SKILL_PATH",
+      "SKILL_ROOT",
+      "TOOL_NAME",
+      "TOOL_ARGS"
+    ],
+    stdinExample: `{
+  "hook_event_name": "PostSkillUse",
+  "session_id": "thread-123",
+  "cwd": "C:\\\\ai\\\\demo",
+  "skill_name": "code-review",
+  "tool_name": "read_file",
+  "tool_input": {
+    "trigger": "read_file",
+    "skillName": "code-review",
+    "skillPath": "C:\\\\Users\\\\me\\\\.codex\\\\skills\\\\code-review\\\\SKILL.md"
+  },
+  "stop_context": {
+    "userMessage": "帮我审查这次修改",
+    "assistantResponse": "已完成审查...",
+    "toolCalls": ["read_file", "grep"],
+    "usedSkills": ["code-review"]
+  }
+}`,
+    outputDescription:
+      "当前事件适合做使用记录、指标上报，或在本轮结束前要求 Agent 根据技能要求修订结果，也可以直接终止本轮。",
+    outputNotes: [
+      "非阻塞 stdout / stderr / additionalContext / systemMessage 只保留在 Hook 执行记录里，不会注入模型上下文，也不会触发修订。",
+      "如需让 Agent 重新审视本轮结果，返回 `decision=block` 与 `reason`，会进入修订流程；blocking 的 `additionalContext` / `systemMessage` 会进入修订提示。",
+      "如需直接终止本轮（不修订、不报错），返回 `continue=false` 与 `stopReason`；优先级高于 `decision=block`，对齐 Claude Code 的 preventContinuation 语义。",
+      "PostSkillUse 的修订次数与 Stop Hook 分开计算，避免技能后检查抢占最终 Stop 验收额度。",
+      "如果用户中止本轮或运行异常导致未进入结束阶段，pending 的 PostSkillUse 不会补跑。"
+    ],
+    outputExample: `# 普通 stdout 文本进入 Hook 执行记录（不注入下一轮）
+已记录技能使用：code-review
+
+# 要求 Agent 在结束前修订（JSON）
+{
+  "decision": "block",
+  "reason": "技能要求补充测试记录后再结束",
+  "additionalContext": "请在最终回复里补充 pytest 通过的命令与输出"
+}
+
+# 直接终止本轮（continue=false；优先级高于 decision=block）
+{
+  "continue": false,
+  "stopReason": "技能使用结果不符合策略，已停止本轮"
+}`,
+    pythonExample: `import json
+import sys
+
+payload = json.load(sys.stdin)
+skill_name = str(payload.get("skill_name", ""))
+stop_context = payload.get("stop_context", {})
+assistant_response = str(stop_context.get("assistantResponse", ""))
+
+print(f"[hook] post skill={skill_name}", file=sys.stderr)
+
+# 直接终止本轮：技能使用后命中安全策略
+if skill_name == "secret-policy" and "secret" in assistant_response.lower():
+    json.dump(
+        {"continue": False, "stopReason": "技能使用结果命中策略，已停止本轮"},
+        sys.stdout,
+        ensure_ascii=False,
+    )
+    sys.exit(0)
+
+# 要求 Agent 修订：技能用了但缺少必要交付物
+if skill_name == "code-review" and "审查通过" not in assistant_response:
+    json.dump(
+        {
+            "decision": "block",
+            "reason": "code-review 技能使用后缺少明确的审查结论",
+            "additionalContext": "请补充：是否通过、待修复项、风险评级"
+        },
+        sys.stdout,
+        ensure_ascii=False,
+    )
+    sys.exit(0)
+
+print(f"已记录技能使用：{skill_name}", end="")
+sys.exit(0)
+`,
+    shellExample: `$raw = [Console]::In.ReadToEnd()
+$payload = $raw | ConvertFrom-Json -Depth 20
+$skillName = [string]$payload.skill_name
+$assistantResponse = ""
+if ($payload.stop_context -and $payload.stop_context.PSObject.Properties["assistantResponse"]) {
+    $assistantResponse = [string]$payload.stop_context.assistantResponse
+}
+
+[Console]::Error.WriteLine("[hook] post skill=$skillName")
+
+# 直接终止本轮
+if ($skillName -eq "secret-policy" -and $assistantResponse.ToLower().Contains("secret")) {
+    [pscustomobject]@{
+        continue = $false
+        stopReason = "技能使用结果命中策略，已停止本轮"
+    } | ConvertTo-Json -Compress -Depth 10
+    exit 0
+}
+
+# 要求 Agent 修订
+if ($skillName -eq "code-review" -and -not $assistantResponse.Contains("审查通过")) {
+    [pscustomobject]@{
+        decision = "block"
+        reason = "code-review 技能使用后缺少明确的审查结论"
+        additionalContext = "请补充：是否通过、待修复项、风险评级"
+    } | ConvertTo-Json -Compress -Depth 10
+    exit 0
+}
+
+Write-Output "已记录技能使用：$skillName"
 exit 0
 `
   },
@@ -331,17 +666,32 @@ exit 0
     "message": "直接帮我删除生产库订单表"
   }
 }`,
-    outputDescription: "当前事件可在消息进入模型前拦截、重写用户输入，或注入隐藏整改上下文。",
+    outputDescription:
+      "当前事件可在消息进入模型前拦截、重写用户输入，或注入隐藏整改上下文；命中红线时可以直接终止本轮。",
     outputNotes: [
       "`updatedInput.message` / `updatedInput.prompt` 可重写送入模型的内容。",
-      "`decision=block` 或 `exit=2` 可直接阻止本轮提问继续执行。"
+      "`decision=block` 或 `exit=2` 可直接阻止本轮提问继续执行。",
+      "返回 `continue=false` + `stopReason` 可直接终止本轮（优先级高于 `decision=block`）。"
     ],
-    outputExample: `{
+    outputExample: `# 改写用户输入再继续（默认）
+{
   "updatedInput": {
     "message": "请先评估风险，再给出只读排查方案，不要直接执行删除操作。"
   },
   "systemMessage": "已按策略重写用户请求",
   "additionalContext": "用户原始请求涉及高风险生产操作，优先给出只读方案。"
+}
+
+# 阻止本轮提问继续执行
+{
+  "decision": "block",
+  "reason": "请先在工单系统提交申请再发起此操作"
+}
+
+# 直接终止本轮（continue=false；优先级高于 decision=block）
+{
+  "continue": false,
+  "stopReason": "命中红线词，已停止本轮提问"
 }`,
     pythonExample: `import json
 import sys
@@ -351,6 +701,16 @@ prompt = str(payload.get("prompt", ""))
 
 print(f"[hook] event={payload.get('hook_event_name')} prompt={prompt}", file=sys.stderr)
 
+# 直接终止本轮：命中红线词
+if "drop database" in prompt.lower():
+    json.dump(
+        {"continue": False, "stopReason": "命中安全策略，已停止本轮提问"},
+        sys.stdout,
+        ensure_ascii=False,
+    )
+    sys.exit(0)
+
+# 改写用户输入再继续
 if "生产" in prompt and "删除" in prompt:
     json.dump(
         {
@@ -378,6 +738,16 @@ if ($payload.PSObject.Properties["prompt"]) {
 
 [Console]::Error.WriteLine("[hook] event=$($payload.hook_event_name) prompt=$prompt")
 
+# 直接终止本轮：命中红线词
+if ($prompt.ToLower().Contains("drop database")) {
+    [pscustomobject]@{
+        continue = $false
+        stopReason = "命中安全策略，已停止本轮提问"
+    } | ConvertTo-Json -Compress -Depth 10
+    exit 0
+}
+
+# 改写用户输入再继续
 if ($prompt.Contains("生产") -and $prompt.Contains("删除")) {
     [pscustomobject]@{
         updatedInput = @{
@@ -496,15 +866,24 @@ exit 0
     "usedSkills": ["bugfix-playbook"]
   }
 }`,
-    outputDescription: "当前事件适合做任务验收和结果复查，发现质量问题时可以要求 Agent 返工。",
+    outputDescription:
+      "当前事件适合做任务验收和结果复查，发现质量问题时可以要求 Agent 返工，或直接终止本轮。",
     outputNotes: [
-      "返回 `decision=block`、`continue=false` 或 `exit=2` 都可以阻止本轮结束。",
-      "`additionalContext` 可把整改建议带回下一轮。"
+      "返回 `decision=block` 或 `exit=2` → 触发修订流程，把 `reason` 与 `additionalContext` 喂回 Agent 让它重做（受最大修订次数限制）。",
+      "返回 `continue=false` 与 `stopReason` → 直接终止本轮，不修订、不报错；优先级高于 `decision=block`，对齐 Claude Code 的 preventContinuation 语义。",
+      "`additionalContext` 仅在 block 路径生效，会一起带进修订提示；halt 路径不会注入下一轮。"
     ],
-    outputExample: `{
+    outputExample: `# 要求 Agent 修订后再结束（默认）
+{
   "decision": "block",
   "reason": "本轮缺少测试结果与验收结论，请补充后再结束",
   "additionalContext": "请先运行相关测试，并在回复中明确说明验证结果。"
+}
+
+# 直接终止本轮（continue=false；优先级高于 decision=block）
+{
+  "continue": false,
+  "stopReason": "已达到本日操作上限，停止后续任务"
 }`,
     pythonExample: `import json
 import sys
@@ -516,6 +895,16 @@ assistant_response = str(stop_context.get("assistantResponse", ""))
 
 print(f"[hook] stop tool_calls={tool_calls}", file=sys.stderr)
 
+# 直接终止本轮：命中红线词时优先于修订
+if "rm -rf /" in assistant_response.lower():
+    json.dump(
+        {"continue": False, "stopReason": "命中安全策略，已停止本轮"},
+        sys.stdout,
+        ensure_ascii=False,
+    )
+    sys.exit(0)
+
+# 要求 Agent 修订：缺少测试就回头补
 if "pytest" not in " ".join(map(str, tool_calls)).lower():
     json.dump(
         {
@@ -543,6 +932,16 @@ if ($stopContext -and $stopContext.PSObject.Properties["assistantResponse"]) {
 
 [Console]::Error.WriteLine("[hook] stop tool_calls=$($toolCalls -join ', ')")
 
+# 直接终止本轮：命中红线词时优先于修订
+if ($assistantResponse.ToLower().Contains('rm -rf /')) {
+    [pscustomobject]@{
+        continue = $false
+        stopReason = "命中安全策略，已停止本轮"
+    } | ConvertTo-Json -Compress -Depth 10
+    exit 0
+}
+
+# 要求 Agent 修订：缺少测试就回头补
 if (-not (($toolCalls -join ' ').ToLower().Contains('pytest'))) {
     [pscustomobject]@{
         decision = "block"
@@ -710,9 +1109,19 @@ export const NOTIFICATION_TOOL_INPUT_DOC: ToolInputDoc = {
   fileHint: "如果这是文件相关审批，tool_input.filePath 可以直接拿到对应路径。"
 }
 
+export const SKILL_USE_TOOL_INPUT_DOC: ToolInputDoc = {
+  key: "skill-use",
+  label: "SkillUse",
+  fields: ["filePath", "offset", "limit"],
+  description:
+    "PreSkillUse 通常来自 read_file 或显式选择；PostSkillUse 还会包含本轮结束阶段的 stop_context。",
+  fileHint: "skill_path 指向被读取的 SKILL.md，skill_root 指向技能目录。"
+}
+
 export function getCommandHookToolInputDocs(event: HookEvent, matcher?: string): ToolInputDoc[] {
   if (event === "UserPromptSubmit") return [USER_PROMPT_TOOL_INPUT_DOC]
   if (event === "Notification") return [NOTIFICATION_TOOL_INPUT_DOC]
+  if (event === "PreSkillUse" || event === "PostSkillUse") return [SKILL_USE_TOOL_INPUT_DOC]
   if (event === "PreToolUse" || event === "PostToolUse") {
     const commonDocs = [
       TOOL_INPUT_DOCS.execute,
@@ -733,6 +1142,9 @@ export function getCommandHookToolInputSummary(event: HookEvent, matcher?: strin
   if (event === "Notification") {
     return "当前事件的 tool_input 来自审批请求，常见字段是 command、reason、filePath。"
   }
+  if (event === "PreSkillUse" || event === "PostSkillUse") {
+    return "当前 matcher 命中技能名；技能信息在 skill_name、skill_path、skill_root，触发方式在 tool_input。"
+  }
   if (event === "PreToolUse" || event === "PostToolUse") {
     if (!matcher || matcher === "*") {
       return "当前 matcher 会命中多个工具，tool_input 会随实际工具变化。下面是目前已接入的常见字段。"
@@ -752,7 +1164,24 @@ export function getCommandHookReadableContextDocs(event: HookEvent): CommandHook
       description: "当前 Hook 事件名，可用来区分 PreToolUse、Stop 等不同生命周期节点。"
     },
     { key: "session_id", description: "当前线程 / 会话 ID，适合关联日志、缓存或外部系统记录。" },
-    { key: "cwd", description: "当前工作目录；有工作区时通常就是当前工作区路径。" }
+    {
+      key: "cwd",
+      description:
+        "当前命令实际执行目录，等于 Hook 来源默认目录；全局 / 工作区 / 插件 / 技能 Hook 会分别指向各自来源根目录。"
+    },
+    {
+      key: "hook_source_type",
+      description: "当前 Hook 来源类型：global、workspace、plugin 或 skill。"
+    },
+    {
+      key: "hook_source_root",
+      description:
+        "当前 Hook 来源根目录，也是 command hook 默认 cwd。需要按 Hook 文件所在目录找脚本时优先读这个字段。"
+    },
+    {
+      key: "hook_source_path",
+      description: "当前 Hook 配置文件路径，方便日志定位这条规则来自哪个 hooks.json 或工作区文件。"
+    }
   ]
 
   const envFields: HookReadableFieldDoc[] = [
@@ -762,12 +1191,35 @@ export function getCommandHookReadableContextDocs(event: HookEvent): CommandHook
     {
       key: "CLAUDE_PROJECT_DIR",
       description: "WORKSPACE_PATH 的兼容别名，方便直接复用 Claude Code 社区脚本。"
+    },
+    {
+      key: "HOOK_SOURCE_TYPE",
+      description: "当前 Hook 来源类型，对应 stdin 里的 hook_source_type。"
+    },
+    {
+      key: "HOOK_SOURCE_ROOT",
+      description:
+        "当前 Hook 来源根目录，也是 command hook 默认执行目录；不要用 SKILL_ROOT 推断全局或工作区 Hook 的 cwd。"
+    },
+    {
+      key: "HOOK_SOURCE_PATH",
+      description: "当前 Hook 配置文件路径，对应 stdin 里的 hook_source_path。"
+    },
+    {
+      key: "PLUGIN_ROOT",
+      description: "插件 Hook 或插件技能 Hook 关联的插件根目录；非插件来源时可能不存在。"
     }
   ]
 
   const extraObjects: HookReadableObjectDoc[] = []
 
-  if (event === "PreToolUse" || event === "PostToolUse" || event === "Notification") {
+  if (
+    event === "PreToolUse" ||
+    event === "PostToolUse" ||
+    event === "PreSkillUse" ||
+    event === "PostSkillUse" ||
+    event === "Notification"
+  ) {
     stdinFields.push(
       {
         key: "tool_name",
@@ -789,6 +1241,41 @@ export function getCommandHookReadableContextDocs(event: HookEvent): CommandHook
     )
   }
 
+  if (event === "PreSkillUse" || event === "PostSkillUse") {
+    stdinFields.push(
+      {
+        key: "skill_name",
+        description: "当前被激活或使用完毕的技能名；matcher 对这个字段生效。"
+      },
+      {
+        key: "skill_path",
+        description: "当前技能的 SKILL.md 路径。"
+      },
+      {
+        key: "skill_root",
+        description: "当前事件关联的技能目录；它是 Skill 上下文，不决定非 Skill Hook 的执行目录。"
+      },
+      {
+        key: "skill_trigger_tool_name",
+        description: "触发技能读取的工具名，当前通常是 read_file。"
+      }
+    )
+    envFields.push(
+      { key: "SKILL_NAME", description: "当前技能名，对应 stdin 里的 skill_name。" },
+      { key: "SKILL_PATH", description: "当前 SKILL.md 路径，对应 stdin 里的 skill_path。" },
+      {
+        key: "SKILL_ROOT",
+        description:
+          "当前事件关联的技能目录，对应 stdin 里的 skill_root；非 Skill Hook 的 cwd 请看 HOOK_SOURCE_ROOT。"
+      }
+    )
+    extraObjects.push({
+      key: "skill",
+      fields: ["skill_name", "skill_path", "skill_root", "skill_trigger_tool_name"],
+      description: "描述当前技能，以及触发该技能的工具或显式选择动作。"
+    })
+  }
+
   if (event === "PostToolUse") {
     stdinFields.push({
       key: "tool_response",
@@ -804,6 +1291,19 @@ export function getCommandHookReadableContextDocs(event: HookEvent): CommandHook
       description:
         "结构随实际工具返回而变。比如写文件可能会有 success、message 等字段，其他工具则会带自己的返回结构。",
       note: "如果上游结果不是合法 JSON，stdin 里的 tool_response 会保留原始字符串。"
+    })
+  }
+
+  if (event === "PostSkillUse") {
+    stdinFields.push({
+      key: "stop_context",
+      description: "Agent 本轮结束前的摘要信息，用于判断该技能使用后的结果是否满足要求。"
+    })
+    extraObjects.push({
+      key: "stop_context",
+      fields: ["userMessage", "assistantResponse", "toolCalls", "usedSkills"],
+      description: "包含本轮用户目标、Agent 最终回复、调用过的工具，以及已使用的技能。",
+      note: "stop_context 目前只在 stdin JSON 中提供，没有对应的专用环境变量。"
     })
   }
 
@@ -866,7 +1366,7 @@ export function AddHookDialog(props: {
   const { open, onOpenChange, onSuccess, editHook } = props
   const { models, loadModels } = useAppStore()
   const [skills, setSkills] = useState<SkillMetadata[]>([])
-  const [disabledSkillNames, setDisabledSkillNames] = useState<Set<string>>(new Set())
+  const [disabledSkillIds, setDisabledSkillIds] = useState<Set<string>>(new Set())
 
   useEffect(() => {
     if (open && models.length === 0) loadModels()
@@ -880,13 +1380,13 @@ export function AddHookDialog(props: {
       .then(([availableSkills, disabled]) => {
         if (cancelled) return
         setSkills([...availableSkills].sort((a, b) => a.name.localeCompare(b.name, "zh-CN")))
-        setDisabledSkillNames(new Set(disabled.map((name) => name.trim().toLowerCase())))
+        setDisabledSkillIds(new Set(disabled.map(normalizeSkillId)))
       })
       .catch((error) => {
         console.error("[AddHookDialog] Failed to load skills:", error)
         if (cancelled) return
         setSkills([])
-        setDisabledSkillNames(new Set())
+        setDisabledSkillIds(new Set())
       })
 
     return () => {
@@ -922,6 +1422,14 @@ export function AddHookDialog(props: {
   const [onBlockAdditionalContext, setOnBlockAdditionalContext] = useState(
     editHook?.onBlock?.additionalContext ?? ""
   )
+  const [forcedOutcome, setForcedOutcome] = useState<"follow" | "always-revise" | "always-halt">(
+    editHook?.forcedOutcome ?? "follow"
+  )
+  const [forcedReason, setForcedReason] = useState(editHook?.forcedReason ?? "")
+  const [once, setOnce] = useState(editHook?.once === true)
+  const [persistAfterInterrupt, setPersistAfterInterrupt] = useState(
+    editHook?.persistAfterInterrupt === true
+  )
   const [commandExampleKind, setCommandExampleKind] = useState<CommandExampleKind>("python")
   // shared
   const [timeout, setTimeout_] = useState(String(editHook?.timeout ?? 10000))
@@ -933,7 +1441,7 @@ export function AddHookDialog(props: {
     const disabled: SkillMetadata[] = []
 
     for (const skill of skills) {
-      if (disabledSkillNames.has(skill.name.trim().toLowerCase())) {
+      if (isSkillDisabled(skill, disabledSkillIds)) {
         disabled.push(skill)
       } else {
         enabled.push(skill)
@@ -941,25 +1449,42 @@ export function AddHookDialog(props: {
     }
 
     return [...enabled, ...disabled]
-  }, [skills, disabledSkillNames])
+  }, [skills, disabledSkillIds])
   const matchedSkill = useMemo(() => {
     const normalized = onBlockRequiredSkill.trim().toLowerCase()
     if (!normalized) return null
     return skills.find((skill) => skill.name.trim().toLowerCase() === normalized) ?? null
   }, [skills, onBlockRequiredSkill])
   const matchedSkillDisabled = matchedSkill
-    ? disabledSkillNames.has(matchedSkill.name.trim().toLowerCase())
+    ? isSkillDisabled(matchedSkill, disabledSkillIds)
     : false
   const requiredSkillPickerValue = matchedSkill ? matchedSkill.name : MANUAL_SKILL_VALUE
   const currentEventMeta = useMemo(
     () => HOOK_EVENTS.find((item) => item.value === event) ?? HOOK_EVENTS[0],
     [event]
   )
+  const isSkillMatcherEvent = event === "PreSkillUse" || event === "PostSkillUse"
+  const showMatcher = event === "PreToolUse" || event === "PostToolUse" || isSkillMatcherEvent
+  const skillMatcherOptions = useMemo(
+    () => [
+      { value: "*", label: "所有技能（*）", description: "匹配任意技能读取" },
+      ...configuredSkills.map((skill) => ({
+        value: skill.name,
+        label: skill.name,
+        description: isSkillDisabled(skill, disabledSkillIds)
+          ? "当前技能未启用"
+          : "按技能名精确匹配"
+      })),
+      { value: CUSTOM_SENTINEL, label: "自定义…", description: "手动输入技能名称或正则表达式" }
+    ],
+    [configuredSkills, disabledSkillIds]
+  )
+  const matcherOptions = isSkillMatcherEvent ? skillMatcherOptions : COMMON_TOOLS
   const currentCommandHookDoc = useMemo(() => getCommandHookEventDoc(event), [event])
   const resolvedMatcherValue = useMemo(() => {
-    if (event !== "PreToolUse" && event !== "PostToolUse") return ""
+    if (!showMatcher) return ""
     return matcherMode === CUSTOM_SENTINEL ? matcher.trim() : matcherMode
-  }, [event, matcherMode, matcher])
+  }, [showMatcher, matcherMode, matcher])
   const currentToolInputDocs = useMemo<ToolInputDoc[]>(
     () => getCommandHookToolInputDocs(event, resolvedMatcherValue),
     [event, resolvedMatcherValue]
@@ -985,6 +1510,10 @@ export function AddHookDialog(props: {
       setOnBlockSystemMessage(h.onBlock?.systemMessage ?? "")
       setOnBlockRequiredSkill(h.onBlock?.requiredSkill ?? "")
       setOnBlockAdditionalContext(h.onBlock?.additionalContext ?? "")
+      setForcedOutcome(h.forcedOutcome ?? "follow")
+      setForcedReason(h.forcedReason ?? "")
+      setOnce(h.once === true)
+      setPersistAfterInterrupt(h.persistAfterInterrupt === true)
       setTimeout_(String(h.timeout ?? 10000))
     } else {
       setHookType("command")
@@ -999,6 +1528,10 @@ export function AddHookDialog(props: {
       setOnBlockSystemMessage("")
       setOnBlockRequiredSkill("")
       setOnBlockAdditionalContext("")
+      setForcedOutcome("follow")
+      setForcedReason("")
+      setOnce(false)
+      setPersistAfterInterrupt(false)
       setTimeout_("10000")
     }
     setError(null)
@@ -1015,8 +1548,6 @@ export function AddHookDialog(props: {
     },
     [onOpenChange, editHook, populateFromHook]
   )
-
-  const showMatcher = event === "PreToolUse" || event === "PostToolUse"
 
   const handleSubmit = useCallback(async () => {
     setError(null)
@@ -1069,6 +1600,14 @@ export function AddHookDialog(props: {
         config.onBlock = onBlock
       }
 
+      if (forcedOutcome === "always-revise" || forcedOutcome === "always-halt") {
+        config.forcedOutcome = forcedOutcome
+        const trimmed = forcedReason.trim()
+        if (trimmed) config.forcedReason = trimmed
+      }
+      if (once) config.once = true
+      if (persistAfterInterrupt) config.persistAfterInterrupt = true
+
       if (editHook) {
         await window.api.hooks.update({ ...config, id: editHook.id })
       } else {
@@ -1095,6 +1634,10 @@ export function AddHookDialog(props: {
     onBlockSystemMessage,
     onBlockRequiredSkill,
     onBlockAdditionalContext,
+    forcedOutcome,
+    forcedReason,
+    once,
+    persistAfterInterrupt,
     editHook,
     onSuccess,
     handleOpenChange,
@@ -1105,9 +1648,9 @@ export function AddHookDialog(props: {
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="sm:max-w-lg max-h-[85vh] flex flex-col gap-0 p-0">
         <DialogHeader className="shrink-0 px-6 pt-6 pb-4 border-b border-border/60">
-          <DialogTitle>{editHook ? "编辑 Hook" : "添加 Hook"}</DialogTitle>
+          <DialogTitle>{editHook ? "编辑全局 Hook" : "添加全局 Hook"}</DialogTitle>
           <DialogDescription>
-            配置在特定事件发生时自动执行的 Shell 命令，或用自然语言描述合规策略由模型判决。
+            配置全局生效的 Hook。技能、插件和工作区 Hook 仍由各自的目录配置管理。
           </DialogDescription>
         </DialogHeader>
 
@@ -1152,7 +1695,14 @@ export function AddHookDialog(props: {
             {/* Event */}
             <div className="space-y-2">
               <label className="text-sm font-medium">事件类型</label>
-              <Select value={event} onValueChange={(v) => setEvent(v as HookEvent)}>
+              <Select
+                value={event}
+                onValueChange={(v) => {
+                  setEvent(v as HookEvent)
+                  setMatcherMode("*")
+                  setMatcher("")
+                }}
+              >
                 <SelectTrigger className="h-9">
                   <SelectValue />
                 </SelectTrigger>
@@ -1172,7 +1722,9 @@ export function AddHookDialog(props: {
             {/* Matcher */}
             {showMatcher && (
               <div className="space-y-2">
-                <label className="text-sm font-medium">工具匹配</label>
+                <label className="text-sm font-medium">
+                  {isSkillMatcherEvent ? "技能匹配" : "工具匹配"}
+                </label>
                 <Select
                   value={matcherMode}
                   onValueChange={(v) => {
@@ -1184,7 +1736,7 @@ export function AddHookDialog(props: {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {COMMON_TOOLS.map((t) => (
+                    {matcherOptions.map((t) => (
                       <SelectItem key={t.value} value={t.value} className="py-2">
                         <div>
                           <span className="text-sm">{t.label}</span>
@@ -1197,21 +1749,34 @@ export function AddHookDialog(props: {
                 {matcherMode === CUSTOM_SENTINEL && (
                   <>
                     <Input
-                      placeholder="输入工具名称，如 execute 或 write_file|edit_file"
+                      placeholder={
+                        isSkillMatcherEvent
+                          ? "输入技能名称，如 code-review 或 imagegen|openai-docs"
+                          : "输入工具名称，如 execute 或 write_file|edit_file"
+                      }
                       value={matcher}
                       onChange={(e) => setMatcher(e.target.value)}
                       className="h-9 font-mono"
                       autoFocus
                     />
                     <p className="text-xs text-muted-foreground">
-                      精确匹配工具名（不区分大小写）。包含{" "}
+                      精确匹配{isSkillMatcherEvent ? "技能名" : "工具名"}（不区分大小写）。包含{" "}
                       <code className="font-mono">
                         | * + ? ^ $ ( ) [ ] {"{"} {"}"} \
                       </code>{" "}
                       时按
                       <strong>正则表达式</strong>解析（不是 glob）。例如{" "}
-                      <code className="font-mono">write_file|edit_file</code> 命中两个工具，
-                      <code className="font-mono">mcp__.*</code> 命中所有 mcp 工具。
+                      {isSkillMatcherEvent ? (
+                        <>
+                          <code className="font-mono">imagegen|openai-docs</code> 命中两个技能，
+                          <code className="font-mono">.*docs</code> 命中匹配的技能。
+                        </>
+                      ) : (
+                        <>
+                          <code className="font-mono">write_file|edit_file</code> 命中两个工具，
+                          <code className="font-mono">mcp__.*</code> 命中所有 mcp 工具。
+                        </>
+                      )}
                     </p>
                   </>
                 )}
@@ -1234,7 +1799,8 @@ export function AddHookDialog(props: {
                 <p className="text-xs text-muted-foreground">
                   脚本会收到一份 stdin JSON 和若干环境变量，其中 stdin 是完整权威输入； `TOOL_ARGS`
                   / `TOOL_RESULT` 这类大字段只会在 payload 较小时附带。想返回结构化结果时， `stdout`
-                  必须只输出最终文本或 JSON；调试日志请写到 `stderr`。
+                  必须只输出最终文本或 JSON；`cwd` 和 `HOOK_SOURCE_ROOT`
+                  表示命令实际执行目录，调试日志请写到 `stderr`。
                 </p>
                 <details className="rounded-md border border-border/60 bg-muted/20 px-3 py-2">
                   <summary className="cursor-pointer text-xs font-medium text-foreground">
@@ -1253,7 +1819,10 @@ export function AddHookDialog(props: {
                       </p>
                       <div className="space-y-1">
                         <div className="flex flex-wrap gap-1.5">
-                          {currentCommandHookDoc.inputFields.map((field) => (
+                          {mergeCommandHookFieldKeys(
+                            currentCommandHookDoc.inputFields,
+                            COMMAND_HOOK_SOURCE_INPUT_FIELDS
+                          ).map((field) => (
                             <span
                               key={field}
                               className="rounded-full border border-border/50 bg-background px-2 py-0.5 font-mono text-[10px] text-foreground/80"
@@ -1263,7 +1832,10 @@ export function AddHookDialog(props: {
                           ))}
                         </div>
                         <div className="flex flex-wrap gap-1.5">
-                          {currentCommandHookDoc.envFields.map((field) => (
+                          {mergeCommandHookFieldKeys(
+                            currentCommandHookDoc.envFields,
+                            COMMAND_HOOK_SOURCE_ENV_FIELDS
+                          ).map((field) => (
                             <span
                               key={field}
                               className="rounded-full border border-dashed border-border/50 bg-background px-2 py-0.5 font-mono text-[10px] text-muted-foreground"
@@ -1576,6 +2148,56 @@ export function AddHookDialog(props: {
               </p>
             </div>
 
+            <div className="rounded-md border border-border/60 bg-muted/20 p-3">
+              <div className="flex items-start gap-2">
+                <input
+                  type="checkbox"
+                  id="hook-once"
+                  checked={once}
+                  onChange={(e) => setOnce(e.target.checked)}
+                  className="mt-0.5 size-4"
+                />
+                <div className="space-y-1">
+                  <label htmlFor="hook-once" className="text-sm font-medium">
+                    本会话成功执行一次后跳过
+                  </label>
+                  <p className="text-xs text-muted-foreground">
+                    兼容 Claude Code 的
+                    <code className="mx-1 font-mono text-foreground/85">once: true</code>
+                    。同一会话里，同一条 Hook 第一次成功执行（exit=0）后不再重复执行；不同事件、来源或
+                    Hook ID 分别计算。脚本失败或超时（exit≠0）不会标记为已执行，下次匹配时仍会再试。
+                    会话结束、编辑、禁用再启用或删除该 Hook 都会立即清除"已执行"状态。
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    在 SubagentStop / Notification / SessionStart / SessionEnd 等
+                    fire-and-forget 事件下，并发触发可能仍执行多次（runner 不加同步锁）；如需严格只跑一次，请使用
+                    PreToolUse / PostToolUse / Stop 等同步事件。
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-md border border-border/60 bg-muted/20 p-3">
+              <div className="flex items-start gap-2">
+                <input
+                  type="checkbox"
+                  id="hook-persist-after-interrupt"
+                  checked={persistAfterInterrupt}
+                  onChange={(e) => setPersistAfterInterrupt(e.target.checked)}
+                  className="mt-0.5 size-4"
+                />
+                <div className="space-y-1">
+                  <label htmlFor="hook-persist-after-interrupt" className="text-sm font-medium">
+                    触发后本会话持续生效
+                  </label>
+                  <p className="text-xs text-muted-foreground">
+                    仅对插件和技能 Hook 生效。开启后，只要本会话里触发过该 Hook 所属的插件或技能，
+                    这条 Hook 后续轮次也会继续命中；同一技能下未开启的兄弟 Hook 不会被一起保留。
+                  </p>
+                </div>
+              </div>
+            </div>
+
             <div className="space-y-3 rounded-md border border-border/60 bg-muted/20 p-3">
               <div className="space-y-1">
                 <label className="text-sm font-medium">阻断后补充配置（onBlock）</label>
@@ -1630,7 +2252,7 @@ export function AddHookDialog(props: {
                   <SelectContent>
                     <SelectItem value={MANUAL_SKILL_VALUE}>手动输入或保留当前值</SelectItem>
                     {configuredSkills.map((skill) => {
-                      const skillDisabled = disabledSkillNames.has(skill.name.trim().toLowerCase())
+                      const skillDisabled = isSkillDisabled(skill, disabledSkillIds)
 
                       return (
                         <SelectItem key={skill.path} value={skill.name} className="py-2">
@@ -1698,6 +2320,97 @@ export function AddHookDialog(props: {
                 />
               </div>
             </div>
+
+            <div className="space-y-3 rounded-md border border-border/60 bg-muted/20 p-3">
+              <div className="space-y-1">
+                <label className="text-sm font-medium">触发后的处理方式</label>
+                <p className="text-xs text-muted-foreground">
+                  覆盖 hook 命令的运行时输出。默认让 hook 自己决定（输出 JSON 字段），
+                  也可以无条件强制走修订或终止本轮。所有事件都生效—— Stop / PostSkillUse
+                  的“终止”会结束整轮；Pre*/Post* 工具事件的“终止”等同强制阻断该次操作。
+                </p>
+              </div>
+              <Select
+                value={forcedOutcome}
+                onValueChange={(v) =>
+                  setForcedOutcome(v as "follow" | "always-revise" | "always-halt")
+                }
+              >
+                <SelectTrigger className="h-9">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="follow">
+                    跟随 hook stdout（默认；不写 forcedOutcome）
+                  </SelectItem>
+                  <SelectItem value="always-revise">
+                    总是要求 Agent 修订（forcedOutcome=&quot;always-revise&quot;）
+                  </SelectItem>
+                  <SelectItem value="always-halt">
+                    总是直接终止本轮（forcedOutcome=&quot;always-halt&quot;）
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                JSON 字段：
+                <code className="mx-1 font-mono text-foreground/85">forcedOutcome</code>
+                可选
+                <code className="mx-1 font-mono text-foreground/85">"always-revise"</code>/
+                <code className="mx-1 font-mono text-foreground/85">"always-halt"</code>
+                ，省略即跟随 stdout；
+                <code className="mx-1 font-mono text-foreground/85">forcedReason</code>
+                可选，用作静态原因。
+              </p>
+
+              {forcedOutcome !== "follow" && (
+                <div className="space-y-2">
+                  <label htmlFor="hook-forced-reason" className="text-sm font-medium">
+                    {forcedOutcome === "always-halt"
+                      ? "停止原因（stopReason）"
+                      : "修订原因（reason）"}
+                    （可选）
+                  </label>
+                  <Input
+                    id="hook-forced-reason"
+                    placeholder={
+                      forcedOutcome === "always-halt"
+                        ? "例如：触发安全策略，已停止本轮"
+                        : "例如：本轮缺少必要校验，请补充后重试"
+                    }
+                    value={forcedReason}
+                    onChange={(e) => setForcedReason(e.target.value)}
+                    className="h-9"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    若不填，会回退到 hook 自身输出的字段，再回退到默认提示。
+                  </p>
+                </div>
+              )}
+
+              <details className="text-xs text-muted-foreground">
+                <summary className="cursor-pointer select-none">
+                  想要 hook 自己动态决定？参考 stdout 输出示例
+                </summary>
+                <div className="mt-2 space-y-2">
+                  <p>
+                    把 hook 命令的 stdout 输出成纯 JSON；不要再额外包一层单引号、日志文本或
+                    markdown。
+                  </p>
+                  <pre className="rounded bg-muted/40 p-2 font-mono text-[11px] leading-relaxed">{`# 直接终止本轮
+echo {"continue":false,"stopReason":"已满足终止条件"}
+
+# 要求 Agent 修订
+echo {"decision":"block","reason":"请补充测试再结束"}
+
+# 携带额外整改上下文
+echo {"decision":"block","reason":"…","additionalContext":"提示：先跑 pytest"}`}</pre>
+                  <p>
+                    优先级：<code>continue=false</code> {">"} <code>decision=block</code>。
+                    若同时设置上面的“处理方式”选项，则配置项覆盖 stdout 输出。
+                  </p>
+                </div>
+              </details>
+            </div>
           </div>
         </div>
 
@@ -1709,7 +2422,7 @@ export function AddHookDialog(props: {
               取消
             </Button>
             <Button onClick={handleSubmit} disabled={submitting}>
-              {submitting ? "处理中…" : editHook ? "保存" : "添加"}
+              {submitting ? "处理中…" : editHook ? "保存" : "添加全局 Hook"}
             </Button>
           </DialogFooter>
         </div>

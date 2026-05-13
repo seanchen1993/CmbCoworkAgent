@@ -23,7 +23,8 @@ import type {
   PluginHookMetadata,
   PluginMetadata,
   PluginManifest,
-  SkillHookMetadata
+  SkillHookMetadata,
+  AgentAutoCommitSettings
 } from "../main/types"
 import { UserInfoConfig } from "../main/storage"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
@@ -473,14 +474,21 @@ interface CustomAPI {
     setDisabled: (skillNames: string[]) => Promise<void>
     upload: (
       buffer: ArrayBuffer,
-      fileName: string
-    ) => Promise<{ success: boolean; skillName?: string; error?: string }>
+      fileName: string,
+      options?: { allowNestedNameDuplicates?: boolean }
+    ) => Promise<{
+      success: boolean
+      skillName?: string
+      error?: string
+      nestedNameConflicts?: Array<{ name: string; relativePath: string }>
+    }>
     extractMarkdownFromZip: (
       buffer: ArrayBuffer,
       fileName?: string
     ) => Promise<{ success: boolean; filePath?: string; content?: string; error?: string }>
     exportForMarket: (
-      skillPath: string
+      skillPath: string,
+      options?: { includeNestedSkills?: boolean }
     ) => Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }>
     delete: (skillPath: string) => Promise<{ success: boolean; error?: string }>
   }
@@ -510,6 +518,12 @@ interface CustomAPI {
       enabled: boolean
     }>
     onChanged: (callback: () => void) => () => void
+  }
+  autoCommit: {
+    getSettings: () => Promise<AgentAutoCommitSettings>
+    saveSettings: (
+      updates: Partial<AgentAutoCommitSettings>
+    ) => Promise<AgentAutoCommitSettings>
   }
   lsp: {
     getConfig: () => Promise<LspConfig>
@@ -968,6 +982,7 @@ interface CustomAPI {
     skills: {
       list: () => Promise<SkillHookMetadata[]>
     }
+    onChanged: (callback: (data: { reason?: string; at: string }) => void) => () => void
     create: (config: HookUpsert) => Promise<{ id: string }>
     update: (config: HookUpsert & { id: string }) => Promise<{ id: string }>
     delete: (id: string) => Promise<void>

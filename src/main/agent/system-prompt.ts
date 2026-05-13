@@ -2,6 +2,8 @@
  * Base system prompt for the CmbCoworkAgent.
  *
  * Adapted from deepagents-cli default_agent_prompt.md
+ *
+ * @see https://github.com/deepagents-ai/deepagents
  */
 export const BASE_SYSTEM_PROMPT = `You are an AI assistant that helps users with various tasks including coding, research, and analysis.
 
@@ -162,7 +164,6 @@ function renderToolRoutingGatePrompt(options: {
     routeTools.push("code_exec")
   }
 
-  const toolList = routeTools.map((tool) => `\`${tool}\``).join(", ")
   const directRouteWarnings: string[] = []
   if (options.hasDeferredRoute) {
     directRouteWarnings.push("deferred tools")
@@ -173,7 +174,6 @@ function renderToolRoutingGatePrompt(options: {
 
   const lines = [
     TOOL_ROUTING_GATE_PROMPT_PREFIX.trim()
-    // `Before using ${toolList}, first choose exactly one route:`
   ]
   lines.push(
     "- **Direct-Tool Call:** Use this IF the required tool is already listed in your standard callable tools. Call it directly."

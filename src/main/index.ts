@@ -125,7 +125,7 @@ process.on("uncaughtException", (err: NodeJS.ErrnoException) => {
 process.on("unhandledRejection", (reason) => {
   console.error("[Main] Unhandled rejection:", reason)
 })
-import { registerAgentHandlers } from "./ipc/agent"
+import { disposeAllAgentThreadStates, registerAgentHandlers } from "./ipc/agent"
 import { registerThreadHandlers } from "./ipc/threads"
 import { registerModelHandlers } from "./ipc/models"
 import { registerSkillsHandlers } from "./ipc/skills"
@@ -145,6 +145,7 @@ import { registerRoutingHandlers } from "./ipc/routing"
 import { registerDashboardHandlers } from "./ipc/dashboard"
 import { registerDesignHandlers } from "./ipc/design"
 import { registerLspHandlers } from "./ipc/lsp"
+import { registerAutoCommitHandlers } from "./ipc/auto-commit"
 import { stopAllLsp } from "./lsp"
 import { setTraceReporter } from "./agent/trace/collector"
 import { CloudTraceReporter } from "./agent/trace/cloud-reporter"
@@ -154,6 +155,7 @@ import { initializeDatabase, flush } from "./db"
 import { startScheduler, stopScheduler } from "./services/scheduler"
 import { startHeartbeat, stopHeartbeat } from "./services/heartbeat"
 import { startChatX, stopChatX } from "./services/chatx"
+import { startHookConfigWatcher, stopHookConfigWatcher } from "./services/hook-config-watcher"
 import { LocalSandbox } from "./agent/local-sandbox"
 import { closeRuntime } from "./agent/runtime"
 import { makeBroadcastHookResultCallback } from "./hooks/result-callback"
@@ -397,6 +399,7 @@ if (!gotTheLock) {
     registerDesignHandlers()
     registerUpdaterHandlers()
     registerLspHandlers(ipcMain)
+    registerAutoCommitHandlers(ipcMain)
 
     ipcMain.on(MAIN_LOG_TOGGLE_CHANNEL, (_event, enabled: unknown) => {
       mainLogForwardingEnabled = Boolean(enabled)
@@ -513,6 +516,7 @@ if (!gotTheLock) {
     startScheduler()
     startHeartbeat()
     startChatX()
+    startHookConfigWatcher()
     startUpdateChecker()
 
     // ── Keep Awake ──
@@ -550,6 +554,7 @@ if (!gotTheLock) {
     event.preventDefault()
     fireSessionEndAll(5000, (threadId) => makeBroadcastHookResultCallback(`agent:stream:${threadId}`))
       .catch((e) => console.warn("[Main] SessionEnd hooks error:", e))
+      .finally(() => disposeAllAgentThreadStates())
       .finally(() => {
         sessionEndDone = true
         app.quit()
@@ -571,6 +576,7 @@ if (!gotTheLock) {
     stopScheduler()
     stopHeartbeat()
     stopChatX()
+    stopHookConfigWatcher()
     stopUpdateChecker()
     try {
       shutdownAdoptionTracker()

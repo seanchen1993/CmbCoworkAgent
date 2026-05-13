@@ -24,7 +24,8 @@ import type {
   PluginMetadata,
   PluginManifest,
   SkillHookMetadata,
-  ChatXConfig
+  ChatXConfig,
+  AgentAutoCommitSettings
 } from "../main/types"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
 import { UserInfoConfig } from "../main/storage"
@@ -734,9 +735,15 @@ const api = {
     },
     upload: (
       buffer: ArrayBuffer,
-      fileName: string
-    ): Promise<{ success: boolean; skillName?: string; error?: string }> => {
-      return ipcRenderer.invoke("skills:upload", { buffer, fileName })
+      fileName: string,
+      options?: { allowNestedNameDuplicates?: boolean }
+    ): Promise<{
+      success: boolean
+      skillName?: string
+      error?: string
+      nestedNameConflicts?: Array<{ name: string; relativePath: string }>
+    }> => {
+      return ipcRenderer.invoke("skills:upload", { buffer, fileName, options })
     },
     extractMarkdownFromZip: (
       buffer: ArrayBuffer,
@@ -745,9 +752,10 @@ const api = {
       return ipcRenderer.invoke("skills:extractMarkdownFromZip", { buffer, fileName })
     },
     exportForMarket: (
-      skillPath: string
+      skillPath: string,
+      options?: { includeNestedSkills?: boolean }
     ): Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }> => {
-      return ipcRenderer.invoke("skills:exportForMarket", skillPath)
+      return ipcRenderer.invoke("skills:exportForMarket", skillPath, options)
     },
     delete: (skillPath: string): Promise<{ success: boolean; error?: string }> => {
       return ipcRenderer.invoke("skills:delete", skillPath)
@@ -994,6 +1002,14 @@ const api = {
         ipcRenderer.removeListener("memory:changed", handler)
       }
     }
+  },
+  autoCommit: {
+    getSettings: (): Promise<AgentAutoCommitSettings> =>
+      ipcRenderer.invoke("autoCommit:getSettings") as Promise<AgentAutoCommitSettings>,
+    saveSettings: (
+      updates: Partial<AgentAutoCommitSettings>
+    ): Promise<AgentAutoCommitSettings> =>
+      ipcRenderer.invoke("autoCommit:saveSettings", updates) as Promise<AgentAutoCommitSettings>
   },
   heartbeat: {
     getConfig: (): Promise<HeartbeatConfig> =>
@@ -1612,6 +1628,17 @@ const api = {
     list: (): Promise<HookConfig[]> => ipcRenderer.invoke("hooks:list"),
     skills: {
       list: (): Promise<SkillHookMetadata[]> => ipcRenderer.invoke("hooks:skills:list")
+    },
+    onChanged: (
+      callback: (data: { reason?: string; at: string }) => void
+    ): (() => void) => {
+      const handler = (_: unknown, data: { reason?: string; at: string }): void => {
+        callback(data)
+      }
+      ipcRenderer.on("hooks:changed", handler)
+      return () => {
+        ipcRenderer.removeListener("hooks:changed", handler)
+      }
     },
     create: (config: HookUpsert): Promise<{ id: string }> =>
       ipcRenderer.invoke("hooks:create", config),

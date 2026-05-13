@@ -24,8 +24,15 @@ import type {
   PluginMcpServerConfig
 } from "../types"
 import { invalidateGlobalMcpCapabilityService } from "../mcp/capability-service"
-
-const DEFAULT_PLUGIN_HOOKS_PATH = "hooks/hooks.json"
+import { notifyHooksChanged } from "../hooks/notifications"
+import { discoverSkills } from "../skills/discovery"
+import { decodeArchiveEntryName } from "../skills/archive"
+import {
+  DEFAULT_PLUGIN_HOOKS_PATH,
+  getPluginSkillSearchSources,
+  normalizePluginRelativePath,
+  readPluginManifest
+} from "../plugins/manifest"
 
 interface ParsedPlugin {
   manifest: PluginManifest | null
@@ -71,90 +78,28 @@ async function addDirToZip(zip: AdmZip, dirPath: string, rootDir: string): Promi
   }
 }
 
-/** Validate and parse a raw JSON object as PluginManifest. Returns null if invalid. */
-function validatePluginManifest(raw: unknown): PluginManifest | null {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null
-  const obj = raw as Record<string, unknown>
-  if (typeof obj.name !== "string" || !obj.name.trim()) return null
-  return {
-    name: obj.name,
-    version: typeof obj.version === "string" ? obj.version : undefined,
-    description: typeof obj.description === "string" ? obj.description : undefined,
-    author:
-      typeof obj.author === "string"
-        ? obj.author
-        : obj.author && typeof obj.author === "object" && !Array.isArray(obj.author)
-          ? (obj.author as PluginManifest["author"])
-          : undefined,
-    license: typeof obj.license === "string" ? obj.license : undefined,
-    keywords: Array.isArray(obj.keywords)
-      ? obj.keywords.filter((k): k is string => typeof k === "string")
-      : undefined,
-    skills:
-      typeof obj.skills === "string"
-        ? obj.skills
-        : Array.isArray(obj.skills)
-          ? obj.skills.filter((s): s is string => typeof s === "string")
-          : undefined,
-    mcpServers: typeof obj.mcpServers === "string" ? obj.mcpServers : undefined,
-    hooks: typeof obj.hooks === "string" ? obj.hooks : undefined
-  }
-}
-
-async function parsePluginDir(dirPath: string): Promise<ParsedPlugin> {
+async function parsePluginDir(dirPath: string, fallbackName?: string): Promise<ParsedPlugin> {
   let manifest: PluginManifest | null = null
   const skillDirs: string[] = []
   let mcpConfigs: Record<string, PluginMcpServerConfig> = {}
-  let name = path.basename(dirPath)
+  let name = fallbackName?.trim() || path.basename(dirPath)
 
-  // Try reading .claude-plugin/plugin.json
-  const manifestPath = path.join(dirPath, ".claude-plugin", "plugin.json")
-  if (existsSync(manifestPath)) {
+  const manifestResult = readPluginManifest(dirPath)
+  manifest = manifestResult?.manifest ?? null
+  if (manifest?.name) name = manifest.name
+
+  const seenSkillDirs = new Set<string>()
+  for (const source of getPluginSkillSearchSources(dirPath, manifest)) {
     try {
-      const content = await fs.readFile(manifestPath, "utf-8")
-      manifest = validatePluginManifest(JSON.parse(content))
-      if (manifest?.name) name = manifest.name
-    } catch {
-      console.warn("[Plugins] Failed to parse plugin.json at", manifestPath)
-    }
-  }
-
-  // Also try plugin.json at root level
-  if (!manifest) {
-    const rootManifestPath = path.join(dirPath, "plugin.json")
-    if (existsSync(rootManifestPath)) {
-      try {
-        const content = await fs.readFile(rootManifestPath, "utf-8")
-        manifest = validatePluginManifest(JSON.parse(content))
-        if (manifest?.name) name = manifest.name
-      } catch {
-        console.warn("[Plugins] Failed to parse plugin.json at", rootManifestPath)
-      }
-    }
-  }
-
-  // Scan skills/ directory
-  const skillsDir = path.join(dirPath, "skills")
-  if (existsSync(skillsDir)) {
-    try {
-      const entries = await fs.readdir(skillsDir, { withFileTypes: true })
-      for (const entry of entries) {
-        if (!entry.isDirectory()) continue
-        const skillMdPath = path.join(skillsDir, entry.name, "SKILL.md")
-        if (existsSync(skillMdPath)) {
-          skillDirs.push(entry.name)
-        }
+      const skills = await discoverSkills(source.sourceDir, source.maxDepth)
+      for (const skill of skills) {
+        const key = skill.rootDir.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase()
+        if (seenSkillDirs.has(key)) continue
+        seenSkillDirs.add(key)
+        skillDirs.push(skill.relativePath || ".")
       }
     } catch {
-      console.warn("[Plugins] Failed to scan skills/ in", dirPath)
-    }
-  }
-
-  // Check for single SKILL.md at root (simple plugin structure)
-  if (skillDirs.length === 0) {
-    const rootSkillMd = path.join(dirPath, "SKILL.md")
-    if (existsSync(rootSkillMd)) {
-      skillDirs.push(".")
+      console.warn("[Plugins] Failed to scan skills in", source.sourceDir)
     }
   }
 
@@ -164,7 +109,7 @@ async function parsePluginDir(dirPath: string): Promise<ParsedPlugin> {
 
   // Count hooks — supports our flat array and CC formats
   let hookCount = 0
-  const hookPath = manifest?.hooks ?? DEFAULT_PLUGIN_HOOKS_PATH
+  const hookPath = normalizePluginRelativePath(manifest?.hooks) ?? DEFAULT_PLUGIN_HOOKS_PATH
   const hooksFilePath = path.join(dirPath, hookPath)
   if (existsSync(hooksFilePath)) {
     try {
@@ -206,10 +151,11 @@ function formatAuthor(author: PluginManifest["author"]): string {
 }
 
 async function installPluginFromDir(
-  dirPath: string
+  dirPath: string,
+  fallbackName?: string
 ): Promise<{ success: boolean; pluginName?: string; error?: string }> {
   try {
-    const parsed = await parsePluginDir(dirPath)
+    const parsed = await parsePluginDir(dirPath, fallbackName)
     if (
       parsed.skillDirs.length === 0 &&
       Object.keys(parsed.mcpConfigs).length === 0 &&
@@ -292,6 +238,7 @@ async function installPluginFromDir(
     upsertPlugin(meta)
     invalidateEnabledSkillsCache()
     await invalidateGlobalMcpCapabilityService("plugin:update")
+    notifyHooksChanged("plugin-installed")
 
     return { success: true, pluginName: parsed.name }
   } catch (e) {
@@ -302,12 +249,63 @@ async function installPluginFromDir(
 const MAX_EXTRACTED_SIZE = 50 * 1024 * 1024 // 50 MB
 const MAX_ENTRY_COUNT = 1000
 
+function getZipFallbackName(fileName?: string): string | undefined {
+  if (!fileName) return undefined
+  const ext = path.extname(fileName)
+  const base = path.basename(fileName, ext).trim()
+  return base || undefined
+}
+
+function looksLikeTempPluginRootName(name: string): boolean {
+  const normalized = name.trim().toLowerCase()
+  return /^_?temp(?:[-_\s]|\d|$)/.test(normalized) || /^tmp(?:[-_\s]|\d|$)/.test(normalized)
+}
+
+async function selectExtractedPluginRoot(tempDir: string): Promise<string> {
+  let childDirs: string[] = []
+  try {
+    const entries = await fs.readdir(tempDir, { withFileTypes: true })
+    childDirs = entries
+      .filter((entry) => entry.isDirectory() && entry.name !== "__MACOSX")
+      .map((entry) => path.join(tempDir, entry.name))
+      .sort((a, b) => a.localeCompare(b))
+  } catch {
+    return tempDir
+  }
+
+  const candidates = [tempDir, ...childDirs]
+
+  for (const candidate of candidates) {
+    if (readPluginManifest(candidate)) return candidate
+  }
+
+  const validCandidates: string[] = []
+  for (const candidate of candidates) {
+    const parsed = await parsePluginDir(candidate)
+    if (
+      parsed.skillDirs.length > 0 ||
+      Object.keys(parsed.mcpConfigs).length > 0 ||
+      parsed.hookCount > 0
+    ) {
+      validCandidates.push(candidate)
+    }
+  }
+
+  if (validCandidates.includes(tempDir)) return tempDir
+  return validCandidates[0] ?? tempDir
+}
+
 async function installPluginFromZip(
-  buffer: ArrayBuffer
+  buffer: ArrayBuffer,
+  fileName?: string
 ): Promise<{ success: boolean; pluginName?: string; error?: string }> {
   try {
     const zip = new AdmZip(Buffer.from(buffer))
     const entries = zip.getEntries()
+    const decodedEntries = entries.map((entry) => ({
+      entry,
+      decodedName: decodeArchiveEntryName(entry)
+    }))
 
     // Check total uncompressed size and entry count before extracting
     let totalSize = 0
@@ -347,14 +345,16 @@ async function installPluginFromZip(
 
     // Determine root prefix — the zip may have a single root directory
     let rootPrefix = ""
-    const firstEntry = entries.find((e) => !e.isDirectory)
+    const firstEntry = decodedEntries.find((item) => !item.entry.isDirectory)
     if (firstEntry) {
-      const parts = firstEntry.entryName.split("/")
+      const parts = firstEntry.decodedName.split("/")
       if (parts.length > 1) {
         // Check if all entries share the same root directory
         const candidate = parts[0] + "/"
-        const allMatch = entries.every(
-          (e) => e.entryName.startsWith(candidate) || e.entryName === candidate.slice(0, -1)
+        const allMatch = decodedEntries.every(
+          (item) =>
+            item.decodedName.startsWith(candidate) ||
+            item.decodedName === candidate.slice(0, -1)
         )
         if (allMatch) rootPrefix = candidate
       }
@@ -367,9 +367,9 @@ async function installPluginFromZip(
     mkdirSync(tempDir, { recursive: true })
 
     try {
-      for (const entry of entries) {
+      for (const { entry, decodedName } of decodedEntries) {
         if (entry.isDirectory) continue
-        let relativePath = entry.entryName
+        let relativePath = decodedName
         if (rootPrefix && relativePath.startsWith(rootPrefix)) {
           relativePath = relativePath.slice(rootPrefix.length)
         }
@@ -380,15 +380,23 @@ async function installPluginFromZip(
         const normalDest = path.normalize(destPath)
         const normalBase = path.normalize(path.resolve(tempDir))
         if (!normalDest.startsWith(normalBase + path.sep) && normalDest !== normalBase) {
-          throw new Error(`ZIP 包含路径穿越条目: ${entry.entryName}`)
+          throw new Error(`ZIP 包含路径穿越条目: ${decodedName || entry.entryName}`)
         }
         const destDirPath = path.dirname(destPath)
         mkdirSync(destDirPath, { recursive: true })
         await fs.writeFile(destPath, entry.getData())
       }
 
+      const pluginRoot = await selectExtractedPluginRoot(tempDir)
+      const rootName = path.basename(pluginRoot)
+      const zipFallbackName = getZipFallbackName(fileName)
+      const fallbackName =
+        pluginRoot === tempDir || looksLikeTempPluginRootName(rootName)
+          ? zipFallbackName ?? rootName
+          : rootName
+
       // Parse and install
-      const result = await installPluginFromDir(tempDir)
+      const result = await installPluginFromDir(pluginRoot, fallbackName)
 
       // Clean up temp directory (the real copy is at destDir)
       if (existsSync(tempDir)) {
@@ -465,7 +473,7 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
       }
       await pluginMutex.acquire()
       try {
-        return await installPluginFromZip(buffer)
+        return await installPluginFromZip(buffer, fileName)
       } finally {
         pluginMutex.release()
       }
@@ -511,6 +519,7 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
           deletePluginStorage(id)
           invalidateEnabledSkillsCache()
           await invalidateGlobalMcpCapabilityService("plugin:delete")
+          notifyHooksChanged("plugin-deleted")
           return { success: true }
         } catch (e) {
           return { success: false, error: e instanceof Error ? e.message : "删除失败" }
@@ -533,6 +542,7 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
         setPluginEnabled(id, enabled)
         invalidateEnabledSkillsCache()
         await invalidateGlobalMcpCapabilityService("plugin:setEnabled")
+        notifyHooksChanged("plugin-enabled-changed")
         return { success: true }
       } catch (e) {
         return { success: false, error: e instanceof Error ? e.message : "设置失败" }
@@ -583,6 +593,7 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
       await pluginMutex.acquire()
       try {
         setPluginHookEnabled(payload.pluginId, payload.hookId, payload.enabled)
+        notifyHooksChanged("plugin-hook-enabled-changed")
         return { success: true }
       } catch (e) {
         return { success: false, error: e instanceof Error ? e.message : "设置失败" }
