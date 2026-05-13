@@ -490,7 +490,7 @@ function createPetWindow(): void {
   // 宠物窗口只覆盖宠物本体大小，避免透明区域过大影响 hover/拖拽命中。
   const petWindowWidth = 112
   const petWindowHeight = 124
-  const petWindowMargin = 24
+  const petWindowMargin = 100
   const display = screen.getPrimaryDisplay()
   const workArea = display.workArea
   const initialX = Math.round(workArea.x + workArea.width - petWindowWidth - petWindowMargin)
@@ -959,7 +959,7 @@ function showPetGreeting(): void {
   </style>
 </head>
 <body>
-  <div id="bubble" class="bubble">我是你的CmbDevClaw宠物，我叫${petName}～</div>
+  <div id="bubble" class="bubble">Hi～我是你的Claw宠物，我叫${petName}～</div>
   <script>
     const bubble = document.getElementById("bubble");
     requestAnimationFrame(function show() {
