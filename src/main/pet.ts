@@ -418,7 +418,7 @@ export function createPetWindow(): void {
   // 宠物窗口只覆盖宠物本体大小，避免透明区域过大影响 hover/拖拽命中。
   const petWindowWidth = 112
   const petWindowHeight = 124
-  const petWindowMargin = 100
+  const petWindowMargin = 150
   const display = screen.getPrimaryDisplay()
   const workArea = display.workArea
   const initialX = Math.round(workArea.x + workArea.width - petWindowWidth - petWindowMargin)
