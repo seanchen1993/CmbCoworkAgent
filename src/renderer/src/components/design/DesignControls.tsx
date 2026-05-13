@@ -1,5 +1,6 @@
 import React from "react"
-import { PenLine } from "lucide-react"
+import { Check, ChevronDown, Key, PenLine, Plus } from "lucide-react"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { S } from "./styles"
 import type { DesignApprovalDecision, DesignApprovalRequest, ModelOption } from "./types"
 
@@ -242,41 +243,107 @@ export function ModelSelector({
   models,
   selectedId,
   onChange,
+  onEdit,
+  onAdd,
 }: {
   models: ModelOption[]
   selectedId: string | null
   onChange: (id: string) => void
+  onEdit: (id?: string) => void
+  onAdd: () => void
 }) {
+  const [open, setOpen] = React.useState(false)
+  const selected = models.find((model) => model.id === selectedId) ?? models[0]
+
   return (
-    <div style={{ position: "relative", display: "inline-block" }}>
-      <select
-        value={selectedId ?? models[0]?.id ?? ""}
-        onChange={(e) => onChange(e.target.value)}
-        style={{
-          appearance: "none",
-          WebkitAppearance: "none",
-          background: "#f4f3ef",
-          border: "1px solid #e0ded8",
-          borderRadius: 8,
-          padding: "4px 24px 4px 8px",
-          fontSize: 12,
-          fontWeight: 500,
-          color: "#4a4a4a",
-          cursor: "pointer",
-          fontFamily: "inherit",
-          outline: "none",
-          maxWidth: 130,
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-        }}
-      >
-        {models.map((m) => (
-          <option key={m.id} value={m.id}>{m.name || m.model}</option>
-        ))}
-      </select>
-      <span style={{ position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)", pointerEvents: "none", fontSize: 9, color: "#8a8a8a" }}>▾</span>
-    </div>
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          title={selected ? selected.name || selected.model : "选择模型"}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 5,
+            background: "#f4f3ef",
+            border: "1px solid #e0ded8",
+            borderRadius: 8,
+            padding: "4px 7px 4px 8px",
+            fontSize: 12,
+            fontWeight: 500,
+            color: "#4a4a4a",
+            cursor: "pointer",
+            fontFamily: "inherit",
+            outline: "none",
+            maxWidth: 170,
+          }}
+        >
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 130 }}>
+            {selected ? selected.name || selected.model : "选择模型"}
+          </span>
+          <ChevronDown size={12} />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="start" sideOffset={6} className="w-[260px] p-2">
+        <div className="max-h-56 space-y-0.5 overflow-y-auto">
+          {models.length > 0 ? (
+            models.map((model) => {
+              const active = selected?.id === model.id
+              const available = model.available !== false
+              return (
+                <button
+                  key={model.id}
+                  type="button"
+                  onClick={() => {
+                    if (!available) return
+                    onChange(model.id)
+                    setOpen(false)
+                  }}
+                  disabled={!available}
+                  title={available ? model.model : "请先在模型配置中填写 API 密钥"}
+                  className={`flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs font-mono transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                    active ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+                  }`}
+                >
+                  <Key className="size-3.5 shrink-0" />
+                  <span className="min-w-0 flex-1 truncate">
+                    {model.name || model.model}{!available ? "（未配置密钥）" : ""}
+                  </span>
+                  {active && <Check className="size-3.5 shrink-0" />}
+                </button>
+              )
+            })
+          ) : (
+            <div className="px-2 py-5 text-center text-xs text-muted-foreground">尚未配置模型</div>
+          )}
+        </div>
+        <div className="mt-2 border-t border-border pt-2">
+          <button
+            type="button"
+            onClick={() => {
+              setOpen(false)
+              onEdit(selected?.id)
+            }}
+            disabled={!selected}
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
+          >
+            <Key className="size-3.5" />
+            编辑当前模型
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setOpen(false)
+              onAdd()
+            }}
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
+          >
+            <Plus className="size-3.5" />
+            新增模型
+          </button>
+        </div>
+      </PopoverContent>
+    </Popover>
   )
 }
 

@@ -141,6 +141,7 @@ export interface ModelOption {
   id: string
   name: string
   model: string
+  available?: boolean
 }
 
 export interface SkillInfo {

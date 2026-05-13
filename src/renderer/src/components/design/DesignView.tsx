@@ -1,7 +1,9 @@
 import React, { useState, useRef, useCallback, useEffect } from "react"
 import { v4 as uuid } from "uuid"
 import { inlineHtmlSiblingAssets } from "@/lib/html-srcdoc"
+import { useAppStore } from "@/lib/store"
 import { CodeModal } from "./CodeModal"
+import { CustomModelDialog } from "../chat/CustomModelDialog"
 import {
   CommentIcon,
   ContextPill,
@@ -1350,6 +1352,8 @@ export function DesignView(): React.JSX.Element {
 
   const [tabStates, setTabStates]     = useState<Record<string, TabState>>(_init.tabStates)
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([])
+  const [modelDialogOpen, setModelDialogOpen] = useState(false)
+  const [modelDialogSelectedId, setModelDialogSelectedId] = useState<string | undefined>(undefined)
   const [allSkills, setAllSkills] = useState<SkillInfo[]>([])
   const [activeSkillIndex, setActiveSkillIndex] = useState(0)
   const [workspacePath, setWorkspacePath] = useState<string | null>(null)
@@ -1372,6 +1376,8 @@ export function DesignView(): React.JSX.Element {
   // Per-tab session tracking: tabId → { cleanup, sessionId }
   // Stored in a ref so it never triggers re-renders and isn't stale across tabs
   const tabSessionsRef = useRef<Map<string, { cleanup: () => void; sessionId: string }>>(new Map())
+
+  const { loadModels, loadProviders } = useAppStore()
 
   // Canvas refs
   const iframeRef         = useRef<HTMLIFrameElement>(null)
@@ -1457,12 +1463,24 @@ export function DesignView(): React.JSX.Element {
     }
   }, [])
 
+  const loadDesignModels = useCallback(async (): Promise<ModelOption[]> => {
+    const models = await window.api.models.list()
+    const options = models.map((model) => ({
+      id: model.id,
+      name: model.name,
+      model: model.model,
+      available: model.available,
+    }))
+    setAvailableModels(options)
+    return options
+  }, [])
+
   // ── Fetch available model configs on mount ────────────────
   useEffect(() => {
-    window.api.models.getCustomConfigs().then((configs) => {
-      setAvailableModels(configs.map((c) => ({ id: `custom:${c.id}`, name: c.name, model: c.model })))
-    }).catch(() => {})
-  }, [])
+    void loadDesignModels()
+    void loadModels()
+    void loadProviders()
+  }, [loadDesignModels, loadModels, loadProviders])
 
   // ── Fetch available skills on mount ───────────────────────
   useEffect(() => {
@@ -3414,6 +3432,29 @@ ${noteLines || "无"}${variantNote}`
         onConfirm={() => { void handleLinkModalConfirm() }}
         onClose={() => setLinkModalOpen(false)}
       />
+      <CustomModelDialog
+        open={modelDialogOpen}
+        selectedModelId={modelDialogSelectedId}
+        showRoutingTier={false}
+        onModelSaved={(modelId) => {
+          const normalized = normalizeDesignModelId(modelId)
+          updateTs(activeTabId, { selectedModelId: normalized })
+          try {
+            if (normalized) localStorage.setItem(DESIGN_LAST_MODEL_KEY, normalized)
+          } catch {
+            // Ignore storage errors; the selection still applies to this session.
+          }
+        }}
+        onOpenChange={(open) => {
+          setModelDialogOpen(open)
+          if (!open) {
+            setModelDialogSelectedId(undefined)
+            void loadDesignModels()
+            void loadModels()
+            void loadProviders()
+          }
+        }}
+      />
 
       {/* Toast notification */}
       {toast && (
@@ -3681,22 +3722,27 @@ ${noteLines || "无"}${variantNote}`
                     title="上传截图"
                     onClick={() => fileInputRef.current?.click()}
                   >📷</ToolbarIcon>
-                  {/* Model selector */}
-                  {availableModels.length > 0 && (
-                    <ModelSelector
-                      models={availableModels}
-                      selectedId={ts.selectedModelId}
-                      onChange={(id) => {
-                        const modelId = normalizeDesignModelId(id)
-                        updateTs(activeTabId, { selectedModelId: modelId })
-                        try {
-                          if (modelId) localStorage.setItem(DESIGN_LAST_MODEL_KEY, modelId)
-                        } catch {
-                          // Ignore storage errors; the selection still applies to this session.
-                        }
-                      }}
-                    />
-                  )}
+                  <ModelSelector
+                    models={availableModels}
+                    selectedId={ts.selectedModelId}
+                    onChange={(id) => {
+                      const modelId = normalizeDesignModelId(id)
+                      updateTs(activeTabId, { selectedModelId: modelId })
+                      try {
+                        if (modelId) localStorage.setItem(DESIGN_LAST_MODEL_KEY, modelId)
+                      } catch {
+                        // Ignore storage errors; the selection still applies to this session.
+                      }
+                    }}
+                    onEdit={(id) => {
+                      setModelDialogSelectedId(id ?? ts.selectedModelId ?? undefined)
+                      setModelDialogOpen(true)
+                    }}
+                    onAdd={() => {
+                      setModelDialogSelectedId(undefined)
+                      setModelDialogOpen(true)
+                    }}
+                  />
                 </div>
                 {isGenerating ? (
                   <button onClick={handleCancel} style={S.cancelBtn}>■ 停止</button>
