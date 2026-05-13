@@ -729,8 +729,14 @@ function validateDesignArtifactHtml(html: string): DesignArtifactValidationResul
   if (/<script\b[^>]*\bsrc\s*=/i.test(trimmed)) {
     warnings.push("检测到外部 script，Design artifact 应优先自包含")
   }
-  if (/<link\b[^>]*rel=["']stylesheet["']/i.test(trimmed)) {
-    warnings.push("检测到外部 stylesheet，Design artifact 应优先自包含")
+  const externalStylesheets = [...trimmed.matchAll(/<link\b[^>]*rel=["']stylesheet["'][^>]*>/gi)]
+  const nonFontStylesheets = externalStylesheets.filter((match) => {
+    const tag = match[0]
+    const href = tag.match(/\bhref=["']([^"']+)["']/i)?.[1] ?? ""
+    return !/fonts\.(?:googleapis|gstatic)\.com/i.test(href)
+  })
+  if (nonFontStylesheets.length > 0) {
+    warnings.push("检测到非字体外部 stylesheet，Design artifact 应优先自包含")
   }
 
   return { ok: errors.length === 0, errors, warnings }
