@@ -24,6 +24,9 @@ import { isRetryableApiError } from "../agent/failover"
 import { SkillUsageDetector } from "../agent/skill-evolution/usage-detector"
 
 const DESIGN_MODEL_MAX_RETRY_ATTEMPTS = 11 // 1 initial request + 10 retries
+const DESIGN_BROWSER_VALIDATION_TIMEOUT_MS = 8000
+const DESIGN_BROWSER_VALIDATION_SETTLE_MS = 800
+const DESIGN_BROWSER_AUTO_FIX_ATTEMPTS = 1
 const DESIGN_CHINESE_RESPONSE_INSTRUCTION = `\n\n## Response language\n\n- 始终使用中文输出所有面向用户可见的文本，包括执行过程说明、技能使用说明、工具前后的简短说明、错误解释和最终摘要。\n- 即使读取到的 Skill、参考文件或系统上下文是英文，也要把面向用户展示的过程和总结翻译成中文。\n- 代码、HTML/CSS/JS 标识符、文件路径、工具名和必须保持原样的业务文案不需要翻译。`
 
 // ─────────────────────────────────────────────────────────
@@ -458,6 +461,11 @@ function makeDesignAgentThreadId(designSessionId: string | undefined, tabId: str
   return `design_${safeSessionId}_${safeTabId}`.slice(0, 120)
 }
 
+function makeDesignAgentRepairThreadId(baseThreadId: string, attempt: number): string {
+  const suffix = `_repair_${attempt}`
+  return `${baseThreadId.slice(0, Math.max(1, 120 - suffix.length))}${suffix}`
+}
+
 function serializeStreamData(data: unknown): unknown {
   return JSON.parse(JSON.stringify(data))
 }
@@ -686,6 +694,18 @@ interface DesignArtifactValidationResult {
   warnings: string[]
 }
 
+interface DesignBrowserValidationIssue {
+  type: "console" | "load" | "crash" | "timeout"
+  message: string
+  source?: string
+  line?: number
+}
+
+interface DesignBrowserValidationResult {
+  ok: boolean
+  issues: DesignBrowserValidationIssue[]
+}
+
 function validateDesignArtifactHtml(html: string): DesignArtifactValidationResult {
   const errors: string[] = []
   const warnings: string[] = []
@@ -751,6 +771,140 @@ function formatDesignArtifactValidation(result: DesignArtifactValidationResult):
     parts.push(`警告：${result.warnings.join("；")}`)
   }
   return parts.join("\n") || "HTML 结构和 EditMode 标记检查通过"
+}
+
+function formatDesignBrowserValidation(result: DesignBrowserValidationResult): string {
+  if (result.issues.length === 0) return "浏览器运行校验通过"
+  return result.issues
+    .slice(0, 8)
+    .map((issue, index) => {
+      const location = issue.source
+        ? ` (${issue.source}${typeof issue.line === "number" ? `:${issue.line}` : ""})`
+        : ""
+      return `${index + 1}. [${issue.type}] ${issue.message}${location}`
+    })
+    .join("\n")
+}
+
+function injectDesignBrowserValidationProbe(html: string): string {
+  const probe = `<script>
+window.addEventListener('error', function(event) {
+  var message = event && event.message ? event.message : 'Unknown runtime error';
+  var source = event && event.filename ? event.filename : '';
+  var line = event && event.lineno ? ':' + event.lineno : '';
+  console.error('[DesignValidationError] ' + message + (source ? ' @ ' + source + line : ''));
+});
+window.addEventListener('unhandledrejection', function(event) {
+  var reason = event && event.reason;
+  var message = reason && reason.stack ? reason.stack : reason && reason.message ? reason.message : String(reason || 'Unhandled promise rejection');
+  console.error('[DesignValidationUnhandledRejection] ' + message);
+});
+</script>`
+
+  if (/<head[^>]*>/i.test(html)) return html.replace(/<head([^>]*)>/i, `<head$1>\n${probe}`)
+  if (/<html[^>]*>/i.test(html)) return html.replace(/<html([^>]*)>/i, `<html$1>\n<head>\n${probe}\n</head>`)
+  return `${probe}\n${html}`
+}
+
+function waitForDesignBrowserValidation(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(createDesignAbortError())
+      return
+    }
+
+    const timeout = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort)
+      resolve()
+    }, ms)
+    const onAbort = (): void => {
+      clearTimeout(timeout)
+      reject(createDesignAbortError())
+    }
+
+    signal.addEventListener("abort", onAbort, { once: true })
+  })
+}
+
+async function validateDesignArtifactInHiddenBrowser(
+  filePath: string,
+  signal: AbortSignal
+): Promise<DesignBrowserValidationResult> {
+  const issues: DesignBrowserValidationIssue[] = []
+  let validationWindow: BrowserWindow | null = null
+
+  try {
+    validationWindow = new BrowserWindow({
+      width: 1440,
+      height: 1000,
+      show: false,
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+      },
+    })
+
+    const webContents = validationWindow.webContents
+    webContents.on("console-message", (details, legacyLevel, legacyMessage, legacyLine, legacySourceId) => {
+      const eventDetails = details as unknown as {
+        level?: unknown
+        message?: unknown
+        lineNumber?: unknown
+        sourceId?: unknown
+      }
+      const level = typeof eventDetails.level === "string" ? eventDetails.level : legacyLevel === 3 ? "error" : ""
+      if (level !== "error") return
+      const message = typeof eventDetails.message === "string" ? eventDetails.message : legacyMessage
+      if (!message || /^Failed to load resource:/i.test(message)) return
+      issues.push({
+        type: "console",
+        message,
+        source: typeof eventDetails.sourceId === "string" ? eventDetails.sourceId : legacySourceId,
+        line: typeof eventDetails.lineNumber === "number" ? eventDetails.lineNumber : legacyLine,
+      })
+    })
+    webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+      if (isMainFrame === false) return
+      if (errorCode === -3) return
+      issues.push({
+        type: "load",
+        message: `${errorDescription || "页面加载失败"} (${errorCode})`,
+        source: validatedURL,
+      })
+    })
+    webContents.on("render-process-gone", (_event, details) => {
+      issues.push({
+        type: "crash",
+        message: `渲染进程退出：${details.reason}${details.exitCode !== undefined ? ` (${details.exitCode})` : ""}`,
+      })
+    })
+
+    const loadPromise = validationWindow.loadFile(filePath)
+    const timeoutPromise = new Promise<never>((_resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error("Browser validation timed out"))
+      }, DESIGN_BROWSER_VALIDATION_TIMEOUT_MS)
+      loadPromise.finally(() => clearTimeout(timeout)).catch(() => clearTimeout(timeout))
+    })
+
+    try {
+      await Promise.race([loadPromise, timeoutPromise])
+      await waitForDesignBrowserValidation(DESIGN_BROWSER_VALIDATION_SETTLE_MS, signal)
+    } catch (err) {
+      if (signal.aborted) throw err
+      issues.push({
+        type: err instanceof Error && err.message === "Browser validation timed out" ? "timeout" : "load",
+        message: err instanceof Error ? err.message : String(err),
+      })
+    }
+
+    return { ok: issues.length === 0, issues }
+  } finally {
+    if (validationWindow && !validationWindow.isDestroyed()) {
+      validationWindow.destroy()
+    }
+  }
 }
 
 function sameResolvedFilePath(left: string | undefined, right: string | undefined): boolean {
@@ -1193,16 +1347,14 @@ function sleepDesignRetryDelay(ms: number, signal: AbortSignal): Promise<void> {
       return
     }
 
-    let timeout: ReturnType<typeof setTimeout>
+    const timeout = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort)
+      resolve()
+    }, ms)
     const onAbort = (): void => {
       clearTimeout(timeout)
       reject(createDesignAbortError())
     }
-
-    timeout = setTimeout(() => {
-      signal.removeEventListener("abort", onAbort)
-      resolve()
-    }, ms)
 
     signal.addEventListener("abort", onAbort, { once: true })
   })
@@ -1841,27 +1993,12 @@ export function registerDesignHandlers(): void {
           sourceFilePathForPrompt
         )
 
-        const createDesignAgentRuntime = () => createAgentRuntime({
-          threadId,
-          workspacePath,
-          modelId,
-          systemPromptOverride: DESIGN_SYSTEM_PROMPT,
-          noSchedulerTool: true,
-          noSkillEvolutionTool: true,
-          enableAgentsPrompt: false,   // skip AGENTS.md — design persona is self-contained
-          abortSignal: controller.signal,
-          retryHooks: buildDesignModelRetryHooks(send),
-          maxRetryAttempts: DESIGN_MODEL_MAX_RETRY_ATTEMPTS,
-        })
-
-        let agent = await createDesignAgentRuntime()
-
-        const streamConfig = {
-          configurable: { thread_id: threadId },
+        const makeStreamConfig = (runtimeThreadId: string) => ({
+          configurable: { thread_id: runtimeThreadId },
           signal: controller.signal,
           streamMode: ["messages", "values"] as ("messages" | "values")[],
           recursionLimit: 200,
-        }
+        })
 
         const shouldUseStoredHtmlFallback =
           !hasExistingArtifactHtml && (
@@ -1881,7 +2018,7 @@ export function registerDesignHandlers(): void {
         const promptWithArtifact = `${promptWithSkill}${artifactInstruction}`
         if (htmlForIteration) storeDesignHtml(htmlStoreKey, htmlForIteration)
 
-        const humanMessage =
+        const makeHumanMessage = (messageText: string) =>
           imageData && mimeType
             ? new HumanMessage({
                 content: [
@@ -1889,43 +2026,24 @@ export function registerDesignHandlers(): void {
                     type: "image_url",
                     image_url: { url: `data:${mimeType};base64,${imageData}`, detail: "high" },
                   },
-                  { type: "text", text: promptWithArtifact },
+                  { type: "text", text: messageText },
                 ],
               })
-            : new HumanMessage(promptWithArtifact)
+            : new HumanMessage(messageText)
 
-        const createInitialDesignStream = async (): Promise<AsyncIterable<unknown>> => {
-          let initialStreamRetriesLeft = 2
-          // eslint-disable-next-line no-constant-condition
-          while (true) {
-            try {
-              return await agent.stream({ messages: [humanMessage] }, streamConfig)
-            } catch (initialStreamErr) {
-              if (controller.signal.aborted) throw initialStreamErr
-              if (!isRetryableApiError(initialStreamErr) || initialStreamRetriesLeft <= 0) {
-                throw initialStreamErr
-              }
-              initialStreamRetriesLeft--
-              const errMsg = initialStreamErr instanceof Error ? initialStreamErr.message : String(initialStreamErr)
-              const resetCheckpoint = shouldResetDesignCheckpointForRetry(initialStreamErr)
-              console.warn(
-                `[Design:Agent] Initial stream error "${errMsg}", ${resetCheckpoint ? "restarting with fresh checkpoint" : "retrying initial stream"} (${initialStreamRetriesLeft} retries left)`
-              )
-              await sleepDesignRetryDelay(500, controller.signal)
-              if (resetCheckpoint) {
-                await closeCheckpointer(threadId)
-                deleteThreadCheckpoint(threadId)
-              }
-              agent = await createDesignAgentRuntime()
-            }
-          }
-        }
+        const createDesignAgentRuntimeForThread = (runtimeThreadId: string) => createAgentRuntime({
+          threadId: runtimeThreadId,
+          workspacePath,
+          modelId,
+          systemPromptOverride: DESIGN_SYSTEM_PROMPT,
+          noSchedulerTool: true,
+          noSkillEvolutionTool: true,
+          enableAgentsPrompt: false,
+          abortSignal: controller.signal,
+          retryHooks: buildDesignModelRetryHooks(send),
+          maxRetryAttempts: DESIGN_MODEL_MAX_RETRY_ATTEMPTS,
+        })
 
-        let stream = await createInitialDesignStream()
-        let midStreamRetriesLeft = 2
-
-        let streamedText = ""
-        let finalMessageText = ""
         const skillUsageDetector = new SkillUsageDetector()
         const skillToolCallIds = new Map<string, string>()
         const pendingSkillReadPathsByToolCallId = new Map<string, string>()
@@ -2037,44 +2155,152 @@ export function registerDesignHandlers(): void {
           })
         }
 
-        // Mid-stream retry loop — mirrors chat module (ipc/agent.ts) behavior so
-        // that transient stream interruptions (e.g. `terminated` from a corporate
-        // proxy idle timeout, or any error matched by isRetryableApiError) do not
-        // surface as a hard error. On retry we rebuild the runtime, then resume
-        // from the LangGraph checkpoint without re-sending the human message.
-        // Provider "temporarily unavailable" statuses can leave a bad partial
-        // checkpoint, so those restart the same request on a clean checkpoint.
-        // eslint-disable-next-line no-constant-condition
-        while (true) {
-        try {
-        for await (const rawChunk of stream) {
-          if (controller.signal.aborted) break
-
-          const [mode, data] = rawChunk as [string, unknown]
-
-          // Serialize to get stable class path (same as forwardStreamChunk in agent.ts)
-          const serialized = serializeStreamData(data)
-          if (mode === "values") {
-            const state = serialized as {
-              skillsMetadata?: Array<{ name?: string; path?: string }>
-              messages?: Array<Record<string, unknown>>
-            }
-            if (Array.isArray(state.skillsMetadata)) {
-              rememberSkillMetadata(state.skillsMetadata)
-            }
-            if (Array.isArray(state.messages)) {
-              let startIndex = 0
-              for (let index = state.messages.length - 1; index >= 0; index--) {
-                const msg = state.messages[index]
-                if (getSerializedClassName(msg).includes("Human")) {
-                  startIndex = index + 1
-                  break
-                }
+        const createInitialDesignStream = async (
+          runtimeThreadId: string,
+          runtimeAgent: Awaited<ReturnType<typeof createDesignAgentRuntimeForThread>>,
+          humanMessage: HumanMessage
+        ): Promise<AsyncIterable<unknown>> => {
+          let initialStreamRetriesLeft = 2
+          let currentAgent = runtimeAgent
+          const runtimeStreamConfig = makeStreamConfig(runtimeThreadId)
+          // eslint-disable-next-line no-constant-condition
+          while (true) {
+            try {
+              return await currentAgent.stream({ messages: [humanMessage] }, runtimeStreamConfig)
+            } catch (initialStreamErr) {
+              if (controller.signal.aborted) throw initialStreamErr
+              if (!isRetryableApiError(initialStreamErr) || initialStreamRetriesLeft <= 0) {
+                throw initialStreamErr
               }
+              initialStreamRetriesLeft--
+              const errMsg = initialStreamErr instanceof Error ? initialStreamErr.message : String(initialStreamErr)
+              const resetCheckpoint = shouldResetDesignCheckpointForRetry(initialStreamErr)
+              console.warn(
+                `[Design:Agent] Initial stream error "${errMsg}", ${resetCheckpoint ? "restarting with fresh checkpoint" : "retrying initial stream"} (${initialStreamRetriesLeft} retries left)`
+              )
+              await sleepDesignRetryDelay(500, controller.signal)
+              if (resetCheckpoint) {
+                await closeCheckpointer(runtimeThreadId)
+                deleteThreadCheckpoint(runtimeThreadId)
+              }
+              currentAgent = await createDesignAgentRuntimeForThread(runtimeThreadId)
+            }
+          }
+        }
 
-              for (const msg of state.messages.slice(startIndex)) {
-                const kwargs = (msg.kwargs ?? {}) as Record<string, unknown>
-                const className = getSerializedClassName(msg)
+        const runDesignAgentOnce = async (
+          messageText: string,
+          runtimeThreadId: string
+        ): Promise<{ html?: string; fullText: string }> => {
+          let runtimeAgent = await createDesignAgentRuntimeForThread(runtimeThreadId)
+          const humanMessage = makeHumanMessage(messageText)
+          let stream = await createInitialDesignStream(runtimeThreadId, runtimeAgent, humanMessage)
+          const runtimeStreamConfig = makeStreamConfig(runtimeThreadId)
+          let midStreamRetriesLeft = 2
+          let streamedText = ""
+          let finalMessageText = ""
+
+          // Mid-stream retry loop mirrors chat module (ipc/agent.ts). Retryable
+          // stream interruptions rebuild the runtime and resume from checkpoint;
+          // provider unavailable statuses restart from a clean checkpoint.
+          // eslint-disable-next-line no-constant-condition
+          while (true) {
+            try {
+              for await (const rawChunk of stream) {
+                if (controller.signal.aborted) break
+
+                const [mode, data] = rawChunk as [string, unknown]
+
+                // Serialize to get stable class path (same as forwardStreamChunk in agent.ts)
+                const serialized = serializeStreamData(data)
+                if (mode === "values") {
+                  const state = serialized as {
+                    skillsMetadata?: Array<{ name?: string; path?: string }>
+                    messages?: Array<Record<string, unknown>>
+                  }
+                  if (Array.isArray(state.skillsMetadata)) {
+                    rememberSkillMetadata(state.skillsMetadata)
+                  }
+                  if (Array.isArray(state.messages)) {
+                    let startIndex = 0
+                    for (let index = state.messages.length - 1; index >= 0; index--) {
+                      const msg = state.messages[index]
+                      if (getSerializedClassName(msg).includes("Human")) {
+                        startIndex = index + 1
+                        break
+                      }
+                    }
+
+                    for (const msg of state.messages.slice(startIndex)) {
+                      const kwargs = (msg.kwargs ?? {}) as Record<string, unknown>
+                      const className = getSerializedClassName(msg)
+                      if (className.includes("AI")) {
+                        const emitToolCall = (toolCall: NormalizedDesignToolCall) => {
+                          if (!toolCall.id) return
+                          maybeEmitSkillStart(toolCall)
+                          send({
+                            type: "execution",
+                            event: {
+                              kind: "tool_call",
+                              id: toolCall.id,
+                              toolCallId: toolCall.id,
+                              name: toolCall.name,
+                              args: toolCall.args,
+                              status: "running",
+                              timestamp: Date.now(),
+                            } satisfies DesignExecutionEvent,
+                          })
+                        }
+
+                        const assistantText = extractTextContent(kwargs.content ?? msg.content)
+                        if (assistantText && !className.includes("Chunk")) {
+                          emitAssistantText(`assistant:${String(kwargs.id || msg.id || Date.now())}`, assistantText)
+                        }
+                        const scope = String(kwargs.id || msg.id || "values")
+                        for (const toolCall of normalizeToolCallChunks(kwargs.tool_call_chunks, accumulatedToolCallChunks, scope)) {
+                          emitToolCall(toolCall)
+                        }
+                        for (const toolCall of normalizeToolCalls(kwargs.tool_calls)) {
+                          emitToolCall(toolCall)
+                        }
+                        for (const toolCall of normalizeToolCalls(getAdditionalKwargsToolCalls(kwargs))) {
+                          emitToolCall(toolCall)
+                        }
+                      }
+                      if (className.includes("Tool")) {
+                        const toolCallId = typeof kwargs.tool_call_id === "string" ? kwargs.tool_call_id : ""
+                        const resultKey = `${toolCallId || "tool"}:${String(kwargs.id || "")}`
+                        if (!toolCallId || emittedToolResultIds.has(resultKey)) continue
+                        emittedToolResultIds.add(resultKey)
+                        const isError = isToolMessageError(kwargs)
+                        send({
+                          type: "execution",
+                          event: {
+                            kind: "tool_result",
+                            id: resultKey,
+                            toolCallId,
+                            name: typeof kwargs.name === "string" ? kwargs.name : undefined,
+                            content: extractTextContent(kwargs.content ?? msg.content),
+                            isError,
+                            status: isError ? "error" : "success",
+                            timestamp: Date.now(),
+                          } satisfies DesignExecutionEvent,
+                        })
+                        maybeEmitSkillResult(toolCallId, isError)
+                      }
+                    }
+                  }
+                  continue
+                }
+
+                if (mode !== "messages") continue
+
+                const [msgChunk] = (serialized as unknown[]) as [Record<string, unknown>]
+                if (!msgChunk) continue
+
+                const kwargs = (msgChunk.kwargs ?? {}) as Record<string, unknown>
+                const className = getSerializedClassName(msgChunk)
+
                 if (className.includes("AI")) {
                   const emitToolCall = (toolCall: NormalizedDesignToolCall) => {
                     if (!toolCall.id) return
@@ -2093,11 +2319,7 @@ export function registerDesignHandlers(): void {
                     })
                   }
 
-                  const assistantText = extractTextContent(kwargs.content ?? msg.content)
-                  if (assistantText && !className.includes("Chunk")) {
-                    emitAssistantText(`assistant:${String(kwargs.id || msg.id || Date.now())}`, assistantText)
-                  }
-                  const scope = String(kwargs.id || msg.id || "values")
+                  const scope = String(kwargs.id || "messages")
                   for (const toolCall of normalizeToolCallChunks(kwargs.tool_call_chunks, accumulatedToolCallChunks, scope)) {
                     emitToolCall(toolCall)
                   }
@@ -2108,146 +2330,89 @@ export function registerDesignHandlers(): void {
                     emitToolCall(toolCall)
                   }
                 }
+
                 if (className.includes("Tool")) {
                   const toolCallId = typeof kwargs.tool_call_id === "string" ? kwargs.tool_call_id : ""
                   const resultKey = `${toolCallId || "tool"}:${String(kwargs.id || "")}`
-                  if (!toolCallId || emittedToolResultIds.has(resultKey)) continue
-                  emittedToolResultIds.add(resultKey)
-                  const isError = isToolMessageError(kwargs)
-                  send({
-                    type: "execution",
-                    event: {
-                      kind: "tool_result",
-                      id: resultKey,
-                      toolCallId,
-                      name: typeof kwargs.name === "string" ? kwargs.name : undefined,
-                      content: extractTextContent(kwargs.content ?? msg.content),
-                      isError,
-                      status: isError ? "error" : "success",
-                      timestamp: Date.now(),
-                    } satisfies DesignExecutionEvent,
-                  })
-                  maybeEmitSkillResult(toolCallId, isError)
+                  if (toolCallId && !emittedToolResultIds.has(resultKey)) {
+                    emittedToolResultIds.add(resultKey)
+                    const isError = isToolMessageError(kwargs)
+                    send({
+                      type: "execution",
+                      event: {
+                        kind: "tool_result",
+                        id: resultKey,
+                        toolCallId,
+                        name: typeof kwargs.name === "string" ? kwargs.name : undefined,
+                        content: extractTextContent(kwargs.content ?? msgChunk.content),
+                        isError,
+                        status: isError ? "error" : "success",
+                        timestamp: Date.now(),
+                      } satisfies DesignExecutionEvent,
+                    })
+                    maybeEmitSkillResult(toolCallId, isError)
+                  }
+                  continue
+                }
+
+                // Only process AI messages (AIMessageChunk during streaming, AIMessage at end)
+                if (!className.includes("AI")) continue
+
+                // Extract text content, which can be a plain string or content blocks.
+                const token = extractTextContent(kwargs.content)
+                if (!token) continue
+
+                if (className.includes("Chunk")) {
+                  streamedText += token
+                  send({ type: "token", token })
+                } else {
+                  finalMessageText = token
                 }
               }
-            }
-            continue
-          }
-
-          if (mode !== "messages") continue
-
-          const [msgChunk] = (serialized as unknown[]) as [Record<string, unknown>]
-          if (!msgChunk) continue
-
-          const kwargs = (msgChunk.kwargs ?? {}) as Record<string, unknown>
-          const className = getSerializedClassName(msgChunk)
-
-          if (className.includes("AI")) {
-            const emitToolCall = (toolCall: NormalizedDesignToolCall) => {
-              if (!toolCall.id) return
-              maybeEmitSkillStart(toolCall)
-              send({
-                type: "execution",
-                event: {
-                  kind: "tool_call",
-                  id: toolCall.id,
-                  toolCallId: toolCall.id,
-                  name: toolCall.name,
-                  args: toolCall.args,
-                  status: "running",
-                  timestamp: Date.now(),
-                } satisfies DesignExecutionEvent,
-              })
-            }
-
-            const scope = String(kwargs.id || "messages")
-            for (const toolCall of normalizeToolCallChunks(kwargs.tool_call_chunks, accumulatedToolCallChunks, scope)) {
-              emitToolCall(toolCall)
-            }
-            for (const toolCall of normalizeToolCalls(kwargs.tool_calls)) {
-              emitToolCall(toolCall)
-            }
-            for (const toolCall of normalizeToolCalls(getAdditionalKwargsToolCalls(kwargs))) {
-              emitToolCall(toolCall)
+              break
+            } catch (midStreamErr) {
+              if (controller.signal.aborted) throw midStreamErr
+              if (!isRetryableApiError(midStreamErr) || midStreamRetriesLeft <= 0) {
+                throw midStreamErr
+              }
+              midStreamRetriesLeft--
+              const errMsg = midStreamErr instanceof Error ? midStreamErr.message : String(midStreamErr)
+              const resetCheckpoint = shouldResetDesignCheckpointForRetry(midStreamErr)
+              console.warn(
+                `[Design:Agent] Mid-stream error "${errMsg}", ${resetCheckpoint ? "restarting with fresh checkpoint" : "resuming from checkpoint"} (${midStreamRetriesLeft} retries left)`
+              )
+              await sleepDesignRetryDelay(500, controller.signal)
+              if (resetCheckpoint) {
+                await closeCheckpointer(runtimeThreadId)
+                deleteThreadCheckpoint(runtimeThreadId)
+                runtimeAgent = await createDesignAgentRuntimeForThread(runtimeThreadId)
+                streamedText = ""
+                finalMessageText = ""
+                stream = await runtimeAgent.stream({ messages: [humanMessage] }, runtimeStreamConfig)
+              } else {
+                // null input = resume from LangGraph checkpoint, do not re-send the human message
+                runtimeAgent = await createDesignAgentRuntimeForThread(runtimeThreadId)
+                stream = await runtimeAgent.stream(null, runtimeStreamConfig)
+              }
             }
           }
 
-          if (className.includes("Tool")) {
-            const toolCallId = typeof kwargs.tool_call_id === "string" ? kwargs.tool_call_id : ""
-            const resultKey = `${toolCallId || "tool"}:${String(kwargs.id || "")}`
-            if (toolCallId && !emittedToolResultIds.has(resultKey)) {
-              emittedToolResultIds.add(resultKey)
-              const isError = isToolMessageError(kwargs)
-              send({
-                type: "execution",
-                event: {
-                  kind: "tool_result",
-                  id: resultKey,
-                  toolCallId,
-                  name: typeof kwargs.name === "string" ? kwargs.name : undefined,
-                  content: extractTextContent(kwargs.content ?? msgChunk.content),
-                  isError,
-                  status: isError ? "error" : "success",
-                  timestamp: Date.now(),
-                } satisfies DesignExecutionEvent,
-              })
-              maybeEmitSkillResult(toolCallId, isError)
-            }
-            continue
+          if (controller.signal.aborted) {
+            throw createDesignAbortError()
           }
 
-          // Only process AI messages (AIMessageChunk during streaming, AIMessage at end)
-          if (!className.includes("AI")) continue
-
-          // Extract text content — can be a plain string or an array of content blocks
-          const token = extractTextContent(kwargs.content)
-          if (!token) continue
-
-          if (className.includes("Chunk")) {
-            streamedText += token
-            send({ type: "token", token })
-          } else {
-            finalMessageText = token
-          }
-        }
-        break  // stream consumed successfully — exit retry loop
-        } catch (midStreamErr) {
-          if (controller.signal.aborted) throw midStreamErr
-          if (!isRetryableApiError(midStreamErr) || midStreamRetriesLeft <= 0) {
-            throw midStreamErr
-          }
-          midStreamRetriesLeft--
-          const errMsg = midStreamErr instanceof Error ? midStreamErr.message : String(midStreamErr)
-          const resetCheckpoint = shouldResetDesignCheckpointForRetry(midStreamErr)
-          console.warn(
-            `[Design:Agent] Mid-stream error "${errMsg}", ${resetCheckpoint ? "restarting with fresh checkpoint" : "resuming from checkpoint"} (${midStreamRetriesLeft} retries left)`
-          )
-          await sleepDesignRetryDelay(500, controller.signal)
-          if (resetCheckpoint) {
-            await closeCheckpointer(threadId)
-            deleteThreadCheckpoint(threadId)
-            agent = await createDesignAgentRuntime()
-            streamedText = ""
-            finalMessageText = ""
-            stream = await agent.stream({ messages: [humanMessage] }, streamConfig)
-          } else {
-            // null input = resume from LangGraph checkpoint, do not re-send the human message
-            agent = await createDesignAgentRuntime()
-            stream = await agent.stream(null, streamConfig)
-          }
-        }
-        }  // end while
-
-        if (controller.signal.aborted) {
-          send({ type: "cancelled" })
-          return
+          // Prefer the complete AIMessage captured from LangGraph values. During
+          // mid-stream resume, streamedText may contain partial tokens from a
+          // failed attempt plus tokens from the resumed attempt.
+          const fullText = finalMessageText || streamedText
+          const html = extractHtml(fullText)
+          return { html: html && isCompleteHtmlDocument(html) ? html : undefined, fullText }
         }
 
-        // Prefer the complete AIMessage captured from LangGraph values. During
-        // mid-stream resume, streamedText may contain partial tokens from a
-        // failed attempt plus tokens from the resumed attempt.
-        const fullText = finalMessageText || streamedText
-        const html = extractHtml(fullText)
+        const initialResult = await runDesignAgentOnce(promptWithArtifact, threadId)
+        let html = initialResult.html
+        let fullText = initialResult.fullText
+        let candidateDraftPath = draftArtifactPath
         const sendValidationEvent = (
           status: DesignExecutionStatus,
           content: string,
@@ -2266,35 +2431,105 @@ export function registerDesignHandlers(): void {
             } satisfies DesignExecutionEvent,
           })
         }
-        const sendValidatedArtifact = (artifactHtml: string): boolean => {
-          sendValidationEvent("running", "正在验证 HTML 结构和 EditMode 标记...")
+        let lastValidationFailureMessage = ""
+        const sendValidatedArtifact = async (
+          artifactHtml: string,
+          showFailureResult: boolean
+        ): Promise<{ ok: true } | { ok: false; repairable: boolean; message: string }> => {
+          sendValidationEvent("running", "验证结构中...")
           const validation = validateDesignArtifactHtml(artifactHtml)
           const validationMessage = formatDesignArtifactValidation(validation)
           if (!validation.ok) {
-            sendValidationEvent("error", validationMessage, true)
-            send({
-              type: "error",
-              error: `生成的 HTML 未通过结构验证，已阻止渲染。\n${validationMessage}`,
-            })
-            abortAgentSession()
-            return false
+            if (showFailureResult) sendValidationEvent("error", validationMessage, true)
+            lastValidationFailureMessage = validationMessage
+            return { ok: false, repairable: true, message: validationMessage }
           }
 
-          sendValidationEvent("success", validationMessage, false)
+          const validationDraftPath = makeDesignArtifactDraftPath(outputArtifactPath)
+          const draftSave = saveDesignArtifactFile(
+            validationDraftPath,
+            injectDesignBrowserValidationProbe(artifactHtml),
+            workspacePath
+          )
+          if (!draftSave.success || !draftSave.filePath) {
+            sendValidationEvent(
+              "error",
+              `浏览器运行校验前写入临时文件失败：${draftSave.error ?? "未知错误"}`,
+              true
+            )
+            lastValidationFailureMessage = `浏览器运行校验前写入临时文件失败：${draftSave.error ?? "未知错误"}`
+            return { ok: false, repairable: false, message: lastValidationFailureMessage }
+          }
+
+          sendValidationEvent("running", "验证运行中...")
+          const browserValidation = await validateDesignArtifactInHiddenBrowser(draftSave.filePath, controller.signal)
+          const browserValidationMessage = formatDesignBrowserValidation(browserValidation)
+          lastValidationFailureMessage = browserValidationMessage
+          if (!browserValidation.ok) {
+            if (showFailureResult) sendValidationEvent("error", browserValidationMessage, true)
+            return { ok: false, repairable: true, message: browserValidationMessage }
+          }
+
+          sendValidationEvent("success", browserValidationMessage, false)
           storeDesignHtml(htmlStoreKey, artifactHtml)
           const saved = tabId ? saveDesignArtifact(resolvedArtifactId, artifactHtml, workspacePath) : null
           send({ type: "done", html: artifactHtml, ...(saved?.filePath ? { artifactPath: saved.filePath } : {}) })
-          return true
+          return { ok: true }
         }
 
-        if (html && isCompleteHtmlDocument(html)) {
-          sendValidatedArtifact(html)
-        } else {
-          const draftArtifact = readDesignArtifactFile(draftArtifactPath, workspacePath)
+        if (!html || !isCompleteHtmlDocument(html)) {
+          const draftArtifact = readDesignArtifactFile(candidateDraftPath, workspacePath)
           if (draftArtifact.success && draftArtifact.html && isCompleteHtmlDocument(draftArtifact.html)) {
-            sendValidatedArtifact(draftArtifact.html)
-            return
+            html = draftArtifact.html
           }
+        }
+
+        for (let repairAttempt = 0; repairAttempt <= DESIGN_BROWSER_AUTO_FIX_ATTEMPTS; repairAttempt++) {
+          if (html && isCompleteHtmlDocument(html)) {
+            const isFinalValidationAttempt = repairAttempt >= DESIGN_BROWSER_AUTO_FIX_ATTEMPTS
+            const validationOutcome = await sendValidatedArtifact(html, isFinalValidationAttempt)
+            if (validationOutcome.ok) return
+            if (!validationOutcome.repairable || repairAttempt >= DESIGN_BROWSER_AUTO_FIX_ATTEMPTS) {
+              send({
+                type: "error",
+                error: `生成的 HTML 未通过校验，已停止自动修复。\n${validationOutcome.message}`,
+              })
+              abortAgentSession()
+              return
+            }
+
+            const repairThreadId = makeDesignAgentRepairThreadId(threadId, repairAttempt + 1)
+            const repairArtifactPath = makeDesignArtifactDraftPath(outputArtifactPath)
+            candidateDraftPath = repairArtifactPath
+            const failedSnapshot = writeDesignArtifactSourceSnapshot(outputArtifactPath, html)
+            const repairSourcePath = failedSnapshot.success && failedSnapshot.filePath
+              ? failedSnapshot.filePath
+              : sourceFilePathForPrompt
+            const repairArtifactInstruction = buildDesignArtifactInstruction(
+              repairArtifactPath,
+              false,
+              repairSourcePath
+            )
+            const repairPrompt =
+              `${promptWithSkill}\n\n---\n[Design validation failed]\n` +
+              `生成的 HTML 没有通过宿主应用校验。请先读取失败的 HTML，再修复问题，并写出完整、可独立运行的 HTML artifact。\n\n` +
+              `校验错误：\n${lastValidationFailureMessage || "隐藏浏览器运行校验失败。"}\n\n` +
+              (repairSourcePath
+                ? `修复前必须先用 read_file 读取这个失败的 HTML 文件：\n${repairSourcePath}\n\n`
+                : `当前失败 HTML 片段：\n\`\`\`html\n${html.slice(0, 12000)}\n\`\`\`\n\n`) +
+              repairArtifactInstruction
+            const repairResult = await runDesignAgentOnce(repairPrompt, repairThreadId)
+            html = repairResult.html
+            fullText = repairResult.fullText
+            if (!html || !isCompleteHtmlDocument(html)) {
+              const repairDraftArtifact = readDesignArtifactFile(repairArtifactPath, workspacePath)
+              if (repairDraftArtifact.success && repairDraftArtifact.html && isCompleteHtmlDocument(repairDraftArtifact.html)) {
+                html = repairDraftArtifact.html
+              }
+            }
+            continue
+          }
+
           const artifact = tabId ? readDesignArtifact(resolvedArtifactId, workspacePath) : null
           if (artifact?.success && artifact.html && isCompleteHtmlDocument(artifact.html)) {
             storeDesignHtml(htmlStoreKey, artifact.html)
@@ -2313,6 +2548,7 @@ export function registerDesignHandlers(): void {
                 : "生成未返回任何内容，请重试。",
           })
           abortAgentSession()
+          return
         }
       } catch (err) {
         if (controller.signal.aborted) {

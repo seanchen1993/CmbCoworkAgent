@@ -463,6 +463,16 @@ function appendDesignExecutionEvent(events: DesignExecutionEvent[], event: Desig
     return [...events, event]
   }
 
+  if (event.kind === "validation") {
+    const index = events.findLastIndex((item) => item.kind === "validation")
+    if (index >= 0) {
+      const next = [...events]
+      next[index] = { ...next[index], ...event }
+      return next
+    }
+    return [...events, event]
+  }
+
   const resultKey = event.id || event.toolCallId
   if (resultKey && events.some((item) => item.kind === "tool_result" && (item.id || item.toolCallId) === resultKey)) {
     return events
