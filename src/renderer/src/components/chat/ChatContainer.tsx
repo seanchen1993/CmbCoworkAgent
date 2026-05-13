@@ -844,7 +844,13 @@ export function ChatContainer({
     }
   }, [])
 
-  const { threads, models, generateTitleForFirstMessage, setShowCustomizeView } = useAppStore()
+  const {
+    threads,
+    models,
+    generateTitleForFirstMessage,
+    setShowCustomizeView,
+    rightPanelCollapsed
+  } = useAppStore()
 
   const allSkillsRef = useRef<MarketItem[]>([])
   const [marketSkillsData, setMarketSkillsData] = useState<MarketItem[]>([])
@@ -2949,7 +2955,7 @@ export function ChatContainer({
       {nuxDialog}
 
       <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
-        <div className="p-4">
+        <div className={cn("p-4", userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20")}>
           <div className="max-w-3xl mx-auto space-y-4">
             {historyLoading && displayMessages.length === 0 && (
               <div
@@ -3582,7 +3588,7 @@ export function ChatContainer({
           </div>
         )}
       {/* Input */}
-      <div className="p-4">
+      <div className={cn("p-4", userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20")}>
         {showGitChangeNotice && (
           <div className="max-w-3xl mx-auto mb-2 flex items-center justify-between gap-3 rounded-xl border border-status-warning/40 bg-status-warning/10 px-3 py-2">
             <div className="min-w-0 flex items-center gap-2 text-[12px] text-foreground">
