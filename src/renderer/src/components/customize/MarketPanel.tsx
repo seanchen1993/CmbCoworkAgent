@@ -263,6 +263,8 @@ function MarketItemCard({
               <span className="inline-flex items-center gap-1 text-[11px] font-medium bg-[#eef5ff] text-[#3b68a8] border border-[#cdddf6] px-2 py-0.5 rounded-full shrink-0">
                 <Sparkles className="size-3" />
                 系统优化
+              </span>
+            )}
             {itemTag && (
               <span className="inline-flex items-center gap-1 text-[11px] font-medium bg-[#edf4ff] text-[#3766a6] border border-[#ccdcf5] px-2 py-0.5 rounded-full shrink-0">
                 {itemTag}

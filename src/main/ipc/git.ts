@@ -1017,7 +1017,6 @@ export function registerGitHandlers(): void {
       // without emitting any adoption event.
       let stagedCapture: StagedCapture | null = null
       if (isCommitCommand(command)) {
-        stagedCapture = await captureStagedSnapshotsForCommand(command)
         console.log("[Git] commit detected — capturing staged snapshots for adoption")
         stagedCapture = await captureStagedSnapshotsForCommand(command)
         if (stagedCapture) {

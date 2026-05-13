@@ -3,7 +3,6 @@ import { IpcMain } from "electron"
 import * as fs from "fs/promises"
 import * as path from "path"
 import { existsSync, mkdirSync, rmSync } from "fs"
-import type { Dirent } from "fs"
 import * as chardet from "jschardet"
 import * as iconv from "iconv-lite"
 import {
@@ -278,7 +277,6 @@ async function repairMojibakeNamesInSkillDir(skillDirPath: string): Promise<void
   const dirQueue: string[] = [skillDirPath]
   for (let i = 0; i < dirQueue.length; i++) {
     const currentDir = dirQueue[i]
-    let entries: Dirent<string>[]
     try {
       const entries = await fs.readdir(currentDir, { withFileTypes: true })
       for (const entry of entries) {
@@ -294,7 +292,6 @@ async function repairMojibakeNamesInSkillDir(skillDirPath: string): Promise<void
   dirQueue.sort((a, b) => b.length - a.length)
 
   for (const dirPath of dirQueue) {
-    let entries: Dirent<string>[]
     try {
       const entries = await fs.readdir(dirPath, { withFileTypes: true })
       for (const entry of entries) {

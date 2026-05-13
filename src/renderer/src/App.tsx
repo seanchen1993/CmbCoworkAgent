@@ -130,12 +130,13 @@ function App(): React.JSX.Element {
     window.api.models.getUserInfo().then(user => {
         const userInfo = user || {} as UserInfoConfig
         if (userInfo.sapId) {
+          const headers: Record<string, string> = {
+              ystRefreshToken: userInfo.ystRefreshToken || '',
+          }
+          if (userInfo.ystCode) headers.ystCode = userInfo.ystCode
           fetch(`https://archguardservice.paas.${import.meta.env.VITE_LOGIN_PT}.cn/cowork/login-info`, {
               method: 'GET',
-              headers: {
-                  ystCode: userInfo.ystCode || '',
-                  ystRefreshToken: userInfo.ystRefreshToken || '',
-              }
+              headers
           }).then(async res => {
               const result = await res.json()
               if (result.returnCode === 'SUC0000') {

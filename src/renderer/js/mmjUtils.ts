@@ -1,7 +1,7 @@
 import { UserInfoConfig } from "../../main/storage"
 
 interface MmjTracker {
-  setConfig?: (config: Record<string, string>) => void
+  setConfig?: (config: Record<string, string | boolean>) => void
   updateUserInfo?: (config: Record<string, string | null>) => void
   updateMMJDomClick?: (payload: { id: string; text: string }) => void
   sendLogToMMJ?: (text: string) => void
