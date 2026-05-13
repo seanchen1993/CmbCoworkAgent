@@ -3,6 +3,21 @@ import { v4 as uuid } from "uuid"
 import { MousePointer2, PenLine, SendHorizontal, Trash2, Undo2, X } from "lucide-react"
 import type { DrawNote, DrawPoint, DrawStroke, DrawToolMode, DraftDrawNote } from "./types"
 
+export interface ResolvedDrawStroke extends DrawStroke {
+  resolvedPoints?: DrawPoint[]
+  orphaned?: boolean
+}
+
+export interface ResolvedDrawNote extends DrawNote {
+  resolvedPoint?: DrawPoint
+  orphaned?: boolean
+}
+
+export interface ResolvedDraftDrawNote extends DraftDrawNote {
+  resolvedPoint?: DrawPoint
+  orphaned?: boolean
+}
+
 function getPointerDrawPoint(
   e: React.PointerEvent<HTMLDivElement>,
   scrollX: number,
@@ -48,9 +63,9 @@ export function DrawLayer({
 }: {
   active: boolean
   mode: DrawToolMode
-  strokes: DrawStroke[]
-  notes: DrawNote[]
-  draftNote: DraftDrawNote | null
+  strokes: ResolvedDrawStroke[]
+  notes: ResolvedDrawNote[]
+  draftNote: ResolvedDraftDrawNote | null
   zoom: number
   scrollX: number
   scrollY: number
@@ -146,13 +161,14 @@ export function DrawLayer({
         {strokes.map((stroke) => (
           <path
             key={stroke.id}
-            d={pointsToSvgPath(toScreenDrawPoints(stroke.points, scrollX, scrollY, scale))}
+            d={pointsToSvgPath(toScreenDrawPoints(stroke.resolvedPoints ?? stroke.points, scrollX, scrollY, scale))}
             fill="none"
             stroke={stroke.color}
             strokeWidth={Math.max(2, stroke.width * scale)}
             strokeLinecap="round"
             strokeLinejoin="round"
-            opacity={0.9}
+            opacity={stroke.orphaned ? 0.55 : 0.9}
+            strokeDasharray={stroke.orphaned ? "8 6" : undefined}
           />
         ))}
         {draft.length > 0 && (
@@ -170,15 +186,16 @@ export function DrawLayer({
       {notes.map((note) => (
         <DrawNoteBadge
           key={note.id}
-          x={(note.pageX - scrollX) * scale}
-          y={(note.pageY - scrollY) * scale}
+          x={((note.resolvedPoint?.x ?? note.pageX) - scrollX) * scale}
+          y={((note.resolvedPoint?.y ?? note.pageY) - scrollY) * scale}
           text={note.text}
+          orphaned={note.orphaned}
         />
       ))}
       {draftNote && (
         <DrawNoteDraft
-          x={(draftNote.pageX - scrollX) * scale}
-          y={(draftNote.pageY - scrollY) * scale}
+          x={((draftNote.resolvedPoint?.x ?? draftNote.pageX) - scrollX) * scale}
+          y={((draftNote.resolvedPoint?.y ?? draftNote.pageY) - scrollY) * scale}
           onSubmit={onNoteSubmit}
           onCancel={onNoteCancel}
         />
@@ -327,7 +344,7 @@ function drawIconBtnStyle(disabled: boolean, tone: "light" | "accent"): React.CS
   }
 }
 
-function DrawNoteBadge({ x, y, text }: { x: number; y: number; text: string }) {
+function DrawNoteBadge({ x, y, text, orphaned }: { x: number; y: number; text: string; orphaned?: boolean }) {
   return (
     <div
       style={{
@@ -338,10 +355,10 @@ function DrawNoteBadge({ x, y, text }: { x: number; y: number; text: string }) {
         maxWidth: 180,
         padding: "8px 10px",
         borderRadius: 8,
-        background: "#fff3a3",
-        border: "1px solid #e1c84f",
+        background: orphaned ? "#f3f4f6" : "#fff3a3",
+        border: orphaned ? "1px dashed #9ca3af" : "1px solid #e1c84f",
         boxShadow: "0 4px 12px rgba(0,0,0,0.18)",
-        color: "#1a1a1a",
+        color: orphaned ? "#4b5563" : "#1a1a1a",
         fontSize: 13,
         lineHeight: 1.35,
         fontWeight: 600,

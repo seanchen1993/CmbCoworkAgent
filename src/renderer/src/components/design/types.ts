@@ -49,12 +49,29 @@ export interface VariationItem {
   html: string
 }
 
+export interface DesignElementAnchor {
+  selector: string
+  tagName: string
+  label?: string
+  role?: string
+  text?: string
+  screenLabel?: string
+  offsetXRatio: number
+  offsetYRatio: number
+}
+
+export interface AnchoredDrawPoint {
+  xRatio: number
+  yRatio: number
+}
+
 export interface CommentItem {
   id: string
   pageX: number
   pageY: number
   text: string
   elementDesc: string
+  anchor?: DesignElementAnchor
   createdAt: number
 }
 
@@ -66,6 +83,8 @@ export interface DrawPoint {
 export interface DrawStroke {
   id: string
   points: DrawPoint[]
+  anchor?: DesignElementAnchor
+  anchoredPoints?: AnchoredDrawPoint[]
   color: string
   width: number
   createdAt: number
@@ -82,6 +101,7 @@ export interface DrawNote {
   id: string
   pageX: number
   pageY: number
+  anchor?: DesignElementAnchor
   text: string
   elements: string[]
   createdAt: number
@@ -90,6 +110,7 @@ export interface DrawNote {
 export interface DraftDrawNote {
   pageX: number
   pageY: number
+  anchor?: DesignElementAnchor
   elements: string[]
 }
 
@@ -209,7 +230,7 @@ export interface TabState {
   zoom: number
   inputValue: string
   comments: CommentItem[]
-  draftComment: { pageX: number; pageY: number; elementDesc: string } | null
+  draftComment: { pageX: number; pageY: number; elementDesc: string; anchor?: DesignElementAnchor } | null
   activeCommentId: string | null
   drawStrokes: DrawStroke[]
   drawElementHints: DrawElementHint[]

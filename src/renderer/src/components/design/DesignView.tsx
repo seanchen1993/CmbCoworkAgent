@@ -15,7 +15,7 @@ import {
   TweaksBtn,
 } from "./DesignControls"
 import { CommentDraftInput, CommentPin } from "./DesignComments"
-import { DrawActionBar, DrawLayer } from "./DesignDraw"
+import { DrawActionBar, DrawLayer, type ResolvedDraftDrawNote, type ResolvedDrawNote, type ResolvedDrawStroke } from "./DesignDraw"
 import { DesignGallery } from "./DesignGallery"
 import { CreateDesignModal, LinkModal } from "./DesignModals"
 import { ElementPropsPanel } from "./ElementPropsPanel"
@@ -32,6 +32,7 @@ import type {
   DesignApprovalDecision,
   DesignApprovalRequest,
   DesignContextSyncResult,
+  DesignElementAnchor,
   DesignExecutionEvent,
   DesignModelRetryState,
   DesignSessionKind,
@@ -42,6 +43,7 @@ import type {
   DrawPoint,
   DrawStroke,
   DrawToolMode,
+  AnchoredDrawPoint,
   ElementStyles,
   FileAttachment,
   FloatingPanelPosition,
@@ -532,6 +534,191 @@ ${stubs}
   } catch {
     return []
   }
+}
+
+function escapeCssIdent(value: string): string {
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+    return CSS.escape(value)
+  }
+  return value.replace(/[^a-zA-Z0-9_-]/g, "\\$&")
+}
+
+function getElementTextSignature(element: Element): string {
+  return (element.getAttribute("aria-label") || element.getAttribute("alt") || element.textContent || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .slice(0, 48)
+}
+
+function getScreenLabelForElement(element: Element): string | undefined {
+  const screen = element.closest("[data-screen-label],[data-design-anchor],[data-dm-screen]")
+  return screen?.getAttribute("data-screen-label")
+    || screen?.getAttribute("data-design-anchor")
+    || screen?.getAttribute("data-dm-screen")
+    || undefined
+}
+
+function attrSelector(element: Element, attr: string, value: string): string {
+  return `${element.tagName.toLowerCase()}[${attr}="${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"]`
+}
+
+function buildElementSelector(element: Element): string {
+  const preferredAttrs = ["data-design-anchor", "data-screen-label", "data-dm-ref", "data-cc-id", "aria-label", "role"]
+  for (const attr of preferredAttrs) {
+    const value = element.getAttribute(attr)
+    if (value) {
+      const selector = attrSelector(element, attr, value)
+      if (element.ownerDocument.querySelectorAll(selector).length === 1) return selector
+    }
+  }
+
+  if (element.id) {
+    const selector = `#${escapeCssIdent(element.id)}`
+    if (element.ownerDocument.querySelectorAll(selector).length === 1) return selector
+  }
+
+  const parts: string[] = []
+  let current: Element | null = element
+  while (current && current !== current.ownerDocument.documentElement && current !== current.ownerDocument.body) {
+    let part = current.tagName.toLowerCase()
+    const anchorAttr = ["data-design-anchor", "data-screen-label", "data-dm-ref", "data-cc-id"]
+      .map((attr) => ({ attr, value: current?.getAttribute(attr) || "" }))
+      .find((item) => item.value)
+    if (anchorAttr && current) {
+      parts.unshift(attrSelector(current, anchorAttr.attr, anchorAttr.value))
+      break
+    }
+    if (current.id) {
+      part += `#${escapeCssIdent(current.id)}`
+      parts.unshift(part)
+      break
+    }
+    const className = Array.from(current.classList)
+      .filter((value) => value && !value.startsWith("__"))
+      .slice(0, 2)
+      .map((value) => `.${escapeCssIdent(value)}`)
+      .join("")
+    part += className
+    const parent = current.parentElement
+    if (parent) {
+      const siblings = Array.from(parent.children).filter((child): child is Element => {
+        return child instanceof Element && child.tagName === current?.tagName
+      })
+      if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(current) + 1})`
+    }
+    parts.unshift(part)
+    current = parent
+    if (parts.length >= 5) break
+  }
+  return parts.join(" > ")
+}
+
+function getPointAnchor(doc: Document | null, point: DrawPoint): DesignElementAnchor | undefined {
+  if (!doc) return undefined
+  const win = doc.defaultView
+  if (!win) return undefined
+  const element = doc.elementFromPoint(
+    Math.round(point.x - win.scrollX),
+    Math.round(point.y - win.scrollY)
+  )
+  if (!element || element === doc.documentElement || element === doc.body) return undefined
+  const rect = element.getBoundingClientRect()
+  if (rect.width <= 0 || rect.height <= 0) return undefined
+  return {
+    selector: buildElementSelector(element),
+    tagName: element.tagName.toLowerCase(),
+    label: getDrawElementLabel(element),
+    role: element.getAttribute("role") || undefined,
+    text: getElementTextSignature(element) || undefined,
+    screenLabel: getScreenLabelForElement(element),
+    offsetXRatio: Math.min(1, Math.max(0, (point.x - win.scrollX - rect.left) / rect.width)),
+    offsetYRatio: Math.min(1, Math.max(0, (point.y - win.scrollY - rect.top) / rect.height)),
+  }
+}
+
+function getDominantPointAnchor(doc: Document | null, points: DrawPoint[]): DesignElementAnchor | undefined {
+  if (!doc || points.length === 0) return undefined
+  const sampleCount = Math.min(8, points.length)
+  const step = Math.max(1, Math.floor(points.length / sampleCount))
+  const anchors = points
+    .filter((_, index) => index % step === 0)
+    .slice(0, sampleCount)
+    .map((point) => getPointAnchor(doc, point))
+    .filter((anchor): anchor is DesignElementAnchor => Boolean(anchor))
+  if (anchors.length === 0) return undefined
+
+  const counts = new Map<string, { anchor: DesignElementAnchor; count: number }>()
+  for (const anchor of anchors) {
+    const key = anchor.selector || anchor.label || `${anchor.tagName}:${anchor.text ?? ""}`
+    const current = counts.get(key)
+    counts.set(key, { anchor, count: (current?.count ?? 0) + 1 })
+  }
+
+  return Array.from(counts.values()).sort((left, right) => right.count - left.count)[0]?.anchor
+}
+
+function resolveAnchorElement(doc: Document | null, anchor: DesignElementAnchor | undefined): Element | null {
+  if (!doc || !anchor?.selector) return null
+  try {
+    const direct = doc.querySelector(anchor.selector)
+    if (direct) return direct
+  } catch {
+    // Fall through to softer matching below.
+  }
+  const candidates = Array.from(doc.querySelectorAll(anchor.tagName || "*"))
+  const byLabel = anchor.label
+    ? candidates.find((element) => getDrawElementLabel(element) === anchor.label)
+    : null
+  if (byLabel) return byLabel
+  const byText = anchor.text
+    ? candidates.find((element) => getElementTextSignature(element) === anchor.text)
+    : null
+  return byText ?? null
+}
+
+function resolveAnchorPagePoint(doc: Document | null, anchor: DesignElementAnchor | undefined): DrawPoint | null {
+  const element = resolveAnchorElement(doc, anchor)
+  const win = doc?.defaultView
+  if (!element || !win || !anchor) return null
+  const rect = element.getBoundingClientRect()
+  if (rect.width <= 0 || rect.height <= 0) return null
+  return {
+    x: win.scrollX + rect.left + rect.width * anchor.offsetXRatio,
+    y: win.scrollY + rect.top + rect.height * anchor.offsetYRatio,
+  }
+}
+
+function anchorPointsForStroke(doc: Document | null, stroke: DrawStroke): AnchoredDrawPoint[] | undefined {
+  const element = resolveAnchorElement(doc, stroke.anchor)
+  const win = doc?.defaultView
+  if (!element || !win) return undefined
+  const rect = element.getBoundingClientRect()
+  if (rect.width <= 0 || rect.height <= 0) return undefined
+  return stroke.points.map((point) => ({
+    xRatio: (point.x - win.scrollX - rect.left) / rect.width,
+    yRatio: (point.y - win.scrollY - rect.top) / rect.height,
+  }))
+}
+
+function resolveAnchoredStrokePoints(doc: Document | null, stroke: DrawStroke): DrawPoint[] {
+  const element = resolveAnchorElement(doc, stroke.anchor)
+  const win = doc?.defaultView
+  if (!element || !win || !stroke.anchoredPoints?.length) return stroke.points
+  const rect = element.getBoundingClientRect()
+  if (rect.width <= 0 || rect.height <= 0) return stroke.points
+  return stroke.anchoredPoints.map((point) => ({
+    x: win.scrollX + rect.left + rect.width * point.xRatio,
+    y: win.scrollY + rect.top + rect.height * point.yRatio,
+  }))
+}
+
+function getAnchoredElementSummary(anchor: DesignElementAnchor | undefined): string {
+  if (!anchor) return ""
+  return [
+    anchor.label,
+    anchor.screenLabel ? `screen:${anchor.screenLabel}` : "",
+    anchor.selector ? `selector:${anchor.selector}` : "",
+  ].filter(Boolean).join("；")
 }
 
 // File attachment limits — mirrors ChatContainer
@@ -1189,6 +1376,7 @@ export function DesignView(): React.JSX.Element {
   // Canvas refs
   const iframeRef         = useRef<HTMLIFrameElement>(null)
   const canvasContainerRef = useRef<HTMLDivElement>(null)
+  const previewScrollRef  = useRef<HTMLDivElement>(null)
   const activeTabId = SINGLE_DESIGN_TAB_ID
   const activeTabIdRef    = useRef(activeTabId)
   const tabStatesRef      = useRef(tabStates)
@@ -1224,6 +1412,18 @@ export function DesignView(): React.JSX.Element {
       return { ...prev, [tabId]: { ...current, ...updates } }
     })
   }, [])
+
+  const updatePreviewScrollState = useCallback((iframeX?: number, iframeY?: number) => {
+    const state = tabStatesRef.current[activeTabIdRef.current]
+    const scale = Math.max((state?.zoom ?? 100) / 100, 0.25)
+    const wrapperX = (previewScrollRef.current?.scrollLeft ?? 0) / scale
+    const wrapperY = (previewScrollRef.current?.scrollTop ?? 0) / scale
+    const win = iframeRef.current?.contentWindow
+    updateTs(activeTabIdRef.current, {
+      iframeScrollX: wrapperX + (iframeX ?? win?.scrollX ?? 0),
+      iframeScrollY: wrapperY + (iframeY ?? win?.scrollY ?? 0),
+    })
+  }, [updateTs])
 
   const loadAvailableSkills = useCallback(async (): Promise<void> => {
     try {
@@ -1788,7 +1988,7 @@ export function DesignView(): React.JSX.Element {
       // ── Iframe scroll position update ─────────────────────
       if (msg.type === "__iframe_scroll") {
         const { x, y } = msg as { x: number; y: number }
-        updateTs(activeTabIdRef.current, { iframeScrollX: x, iframeScrollY: y })
+        updatePreviewScrollState(x, y)
         return
       }
 
@@ -1797,8 +1997,9 @@ export function DesignView(): React.JSX.Element {
         const { pageX, pageY, elementDesc } = msg as {
           pageX: number; pageY: number; elementDesc: string
         }
+        const anchor = getPointAnchor(iframeRef.current?.contentDocument ?? null, { x: pageX, y: pageY })
         updateTs(activeTabIdRef.current, {
-          draftComment: { pageX, pageY, elementDesc: elementDesc || "元素" },
+          draftComment: { pageX, pageY, elementDesc: anchor?.label || elementDesc || "元素", anchor },
           activeCommentId: null,
         })
         return
@@ -1903,7 +2104,7 @@ export function DesignView(): React.JSX.Element {
     }
     window.addEventListener("message", handler)
     return () => window.removeEventListener("message", handler)
-  }, [updateTs])
+  }, [updatePreviewScrollState, updateTs, workspacePath])
 
   // ── Ask Questions ─────────────────────────────────────────
 
@@ -2408,13 +2609,19 @@ export function DesignView(): React.JSX.Element {
   // Returns both the instruction prompt (no HTML — main process injects via htmlStore)
   // and the current HTML so the caller can push it to the store.
   const buildCommentPrompt = useCallback((
-    comments: { elementDesc: string; text: string }[],
+    comments: { elementDesc: string; text: string; pageX?: number; pageY?: number; anchor?: DesignElementAnchor }[],
     state: TabState
   ): { prompt: string } => {
     const activeVarId = state.activeVariationId
     const variantNote = activeVarId ? `\n[正在迭代变体 ${activeVarId.toUpperCase()}。]` : ""
     const commentLines = comments
-      .map((c, i) => `[${i + 1}] 元素 (${c.elementDesc}): ${c.text}`)
+      .map((c, i) => {
+        const anchorText = getAnchoredElementSummary(c.anchor)
+        const coordText = typeof c.pageX === "number" && typeof c.pageY === "number"
+          ? `；坐标 x:${Math.round(c.pageX)}, y:${Math.round(c.pageY)}`
+          : ""
+        return `[${i + 1}] 元素 (${c.elementDesc}${anchorText ? `；${anchorText}` : ""}${coordText}): ${c.text}`
+      })
       .join("\n")
 
     const prompt = `用户通过 Comment 模式在设计上标注了以下修改意见。请严格按照每条批注对对应元素进行修改，其他部分完全保持不变：
@@ -2430,7 +2637,14 @@ ${commentLines}${variantNote}`
     const state = tabStates[tabId]
     if (!state || !text.trim()) return
 
-    const { prompt } = buildCommentPrompt([{ elementDesc, text }], state)
+    const draft = state.draftComment
+    const { prompt } = buildCommentPrompt([{
+      elementDesc,
+      text,
+      pageX: draft?.pageX,
+      pageY: draft?.pageY,
+      anchor: draft?.anchor,
+    }], state)
     const cleanMsg = `📝 ${text.trim().slice(0, 60)}`
 
     updateTs(tabId, (prev) => ({
@@ -2454,7 +2668,13 @@ ${commentLines}${variantNote}`
     if (!comment) return
 
     const text = overrideText ?? comment.text
-    const { prompt } = buildCommentPrompt([{ elementDesc: comment.elementDesc, text }], state)
+    const { prompt } = buildCommentPrompt([{
+      elementDesc: comment.elementDesc,
+      text,
+      pageX: comment.pageX,
+      pageY: comment.pageY,
+      anchor: comment.anchor,
+    }], state)
     const cleanMsg = `📝 ${text.trim().slice(0, 60)}`
 
     updateTs(tabId, (prev) => ({
@@ -2501,7 +2721,13 @@ ${commentLines}${variantNote}`
     if (pending.length === 0) return
 
     const { prompt } = buildCommentPrompt(
-      pending.map((c) => ({ elementDesc: c.elementDesc, text: c.text })),
+      pending.map((c) => ({
+        elementDesc: c.elementDesc,
+        text: c.text,
+        pageX: c.pageX,
+        pageY: c.pageY,
+        anchor: c.anchor,
+      })),
       state
     )
     const cleanMsg = `📝 发送 ${pending.length} 条批注`
@@ -2544,11 +2770,13 @@ ${commentLines}${variantNote}`
   }, [collectDrawElementLabels])
 
   const handleDrawNoteDraft = useCallback((point: DrawPoint) => {
+    const anchor = getPointAnchor(iframeRef.current?.contentDocument ?? null, point)
     updateTs(activeTabId, {
       draftDrawNote: {
         pageX: point.x,
         pageY: point.y,
-        elements: collectDrawElementLabels([point]),
+        anchor,
+        elements: anchor?.label ? [anchor.label] : collectDrawElementLabels([point]),
       },
     })
   }, [activeTabId, updateTs, collectDrawElementLabels])
@@ -2565,6 +2793,7 @@ ${commentLines}${variantNote}`
         id: uuid(),
         pageX: prev.draftDrawNote.pageX,
         pageY: prev.draftDrawNote.pageY,
+        anchor: prev.draftDrawNote.anchor,
         text: value,
         elements: prev.draftDrawNote.elements,
         createdAt: Date.now(),
@@ -2585,11 +2814,18 @@ ${commentLines}${variantNote}`
   }, [activeTabId, updateTs])
 
   const handleDrawStrokeComplete = useCallback((stroke: DrawStroke) => {
-    const hint = collectDrawElementHint(stroke)
+    const doc = iframeRef.current?.contentDocument ?? null
+    const anchor = getDominantPointAnchor(doc, stroke.points)
+    const anchoredStroke: DrawStroke = {
+      ...stroke,
+      anchor,
+      anchoredPoints: anchor ? anchorPointsForStroke(doc, { ...stroke, anchor }) : undefined,
+    }
+    const hint = collectDrawElementHint(anchoredStroke)
     updateTs(activeTabId, (prev) => ({
-      drawStrokes: [...prev.drawStrokes, stroke],
+      drawStrokes: [...prev.drawStrokes, anchoredStroke],
       drawElementHints: [
-        ...prev.drawElementHints.filter((item) => item.strokeId !== stroke.id),
+        ...prev.drawElementHints.filter((item) => item.strokeId !== anchoredStroke.id),
         hint,
       ],
     }))
@@ -2620,36 +2856,59 @@ ${commentLines}${variantNote}`
   }, [activeTabId, updateTs])
 
   const handleDrawWheel = useCallback((deltaX: number, deltaY: number) => {
-    const scale = Math.max((tabStatesRef.current[activeTabIdRef.current]?.zoom ?? 100) / 100, 0.25)
-    iframeRef.current?.contentWindow?.scrollBy({
-      left: deltaX / scale,
-      top: deltaY / scale,
-      behavior: "auto",
-    })
-  }, [])
+    const wrapper = previewScrollRef.current
+    const beforeLeft = wrapper?.scrollLeft ?? 0
+    const beforeTop = wrapper?.scrollTop ?? 0
+    wrapper?.scrollBy({ left: deltaX, top: deltaY, behavior: "auto" })
+
+    const usedX = wrapper ? wrapper.scrollLeft - beforeLeft : 0
+    const usedY = wrapper ? wrapper.scrollTop - beforeTop : 0
+    const state = tabStatesRef.current[activeTabIdRef.current]
+    const scale = Math.max((state?.zoom ?? 100) / 100, 0.25)
+    const remainingX = deltaX - usedX
+    const remainingY = deltaY - usedY
+    if (Math.abs(remainingX) > 0.5 || Math.abs(remainingY) > 0.5) {
+      iframeRef.current?.contentWindow?.scrollBy({
+        left: remainingX / scale,
+        top: remainingY / scale,
+        behavior: "auto",
+      })
+    } else {
+      updatePreviewScrollState()
+    }
+  }, [updatePreviewScrollState])
 
   const buildDrawPrompt = useCallback((state: TabState, userInstruction = ""): { prompt: string } => {
     const activeVarId = state.activeVariationId
     const variantNote = activeVarId ? `\n[正在迭代变体 ${activeVarId.toUpperCase()}。]` : ""
     const hintsByStroke = new Map(state.drawElementHints.map((hint) => [hint.strokeId, hint.elements]))
+    const doc = iframeRef.current?.contentDocument ?? null
     const instruction = userInstruction.trim()
     const instructionLine = instruction
       ? `\n用户补充说明：${instruction}\n`
       : "\n用户没有补充文字时，请优先遵循黄色 note 的文本，并把红色绘制区域理解为需要重点优化或修正的 UI 区域。\n"
     const strokeLines = state.drawStrokes.filter((stroke) => stroke.points.length > 0).map((stroke, index) => {
-      const xs = stroke.points.map((point) => point.x)
-      const ys = stroke.points.map((point) => point.y)
+      const resolvedPoints = resolveAnchoredStrokePoints(doc, stroke)
+      const xs = resolvedPoints.map((point) => point.x)
+      const ys = resolvedPoints.map((point) => point.y)
       const minX = Math.round(Math.min(...xs))
       const maxX = Math.round(Math.max(...xs))
       const minY = Math.round(Math.min(...ys))
       const maxY = Math.round(Math.max(...ys))
       const elements = hintsByStroke.get(stroke.id)?.filter(Boolean) ?? []
       const elementText = elements.length > 0 ? `；覆盖/接近元素：${elements.join(", ")}` : ""
-      return `[${index + 1}] ${stroke.color} 画笔，粗细 ${stroke.width}px，区域 x:${minX}-${maxX}, y:${minY}-${maxY}，${stroke.points.length} 个点${elementText}`
+      const anchorText = getAnchoredElementSummary(stroke.anchor)
+      const orphanText = stroke.anchor && resolvedPoints === stroke.points ? "；anchor 未找到，已退回旧坐标" : ""
+      return `[${index + 1}] ${stroke.color} 画笔，粗细 ${stroke.width}px，区域 x:${minX}-${maxX}, y:${minY}-${maxY}，${resolvedPoints.length} 个点${elementText}${anchorText ? `；锚点：${anchorText}` : ""}${orphanText}`
     }).join("\n")
     const noteLines = state.drawNotes.map((note, index) => {
       const elementText = note.elements.length > 0 ? `；接近元素：${note.elements.join(", ")}` : ""
-      return `[${index + 1}] note 坐标 x:${Math.round(note.pageX)}, y:${Math.round(note.pageY)}${elementText}\n内容：${note.text}`
+      const resolvedPoint = resolveAnchorPagePoint(doc, note.anchor)
+      const pageX = resolvedPoint?.x ?? note.pageX
+      const pageY = resolvedPoint?.y ?? note.pageY
+      const anchorText = getAnchoredElementSummary(note.anchor)
+      const orphanText = note.anchor && !resolvedPoint ? "；anchor 未找到，已退回旧坐标" : ""
+      return `[${index + 1}] note 坐标 x:${Math.round(pageX)}, y:${Math.round(pageY)}${elementText}${anchorText ? `；锚点：${anchorText}` : ""}${orphanText}\n内容：${note.text}`
     }).join("\n")
 
     const prompt = `用户通过 Draw 模式直接在设计预览上做了标记。请把红色画线理解为视觉指向和编辑意图：线条圈出的、划过的或指向的区域是需要重点调整的区域。黄色 note 是用户在页面任意位置添加的明确文本指令，优先按 note 内容执行。不要把画线或 note 本身渲染进最终页面。请根据标记位置对当前设计做有针对性的视觉优化，保持未标记区域尽量不变。
@@ -3592,6 +3851,31 @@ ${noteLines || "无"}${variantNote}`
                     const varColor  = ts.activeVariationId === "a" ? "#3b82f6"
                       : ts.activeVariationId === "b" ? "#8b5cf6"
                       : ts.activeVariationId === "c" ? "#f59e0b" : undefined
+                    const iframeDoc = iframeRef.current?.contentDocument ?? null
+                    const resolvedDrawStrokes: ResolvedDrawStroke[] = ts.drawStrokes.map((stroke) => {
+                      const resolvedPoints = resolveAnchoredStrokePoints(iframeDoc, stroke)
+                      return {
+                        ...stroke,
+                        resolvedPoints,
+                        orphaned: Boolean(stroke.anchor && resolvedPoints === stroke.points),
+                      }
+                    })
+                    const resolvedDrawNotes: ResolvedDrawNote[] = ts.drawNotes.map((note) => {
+                      const resolvedPoint = resolveAnchorPagePoint(iframeDoc, note.anchor) ?? undefined
+                      return {
+                        ...note,
+                        resolvedPoint,
+                        orphaned: Boolean(note.anchor && !resolvedPoint),
+                      }
+                    })
+                    const draftDrawPoint = resolveAnchorPagePoint(iframeDoc, ts.draftDrawNote?.anchor)
+                    const resolvedDraftDrawNote: ResolvedDraftDrawNote | null = ts.draftDrawNote
+                      ? {
+                          ...ts.draftDrawNote,
+                          resolvedPoint: draftDrawPoint ?? undefined,
+                          orphaned: Boolean(ts.draftDrawNote.anchor && !draftDrawPoint),
+                        }
+                      : null
 
                     return (
                   <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "row" }}>
@@ -3639,7 +3923,11 @@ ${noteLines || "无"}${variantNote}`
                     {/* Scroll wrapper — overflow lives here so the iframe's height: 100% resolves
                         against canvasContainerRef (which has explicit height: "100%") rather than
                         an overflow:auto ancestor (which breaks CSS % height resolution in Chromium). */}
-                    <div style={{ position: "absolute", inset: 0, overflow: "auto" }}>
+                    <div
+                      ref={previewScrollRef}
+                      style={{ position: "absolute", inset: 0, overflow: "auto" }}
+                      onScroll={() => updatePreviewScrollState()}
+                    >
                       <iframe
                         ref={iframeRef}
                         key={`${ts.activeVariationId ?? "all"}-${ts.reloadKey}`}
@@ -3664,6 +3952,10 @@ ${noteLines || "无"}${variantNote}`
                           injectIntoIframe(iframeRef.current, SCROLL_INJECT)
                           // Reset scroll state — new iframe always starts at (0, 0)
                           updateTs(activeTabId, { iframeScrollX: 0, iframeScrollY: 0, selectedElement: null })
+                          if (previewScrollRef.current) {
+                            previewScrollRef.current.scrollLeft = 0
+                            previewScrollRef.current.scrollTop = 0
+                          }
                           // Re-inject mode scripts after iframe reloads (variation switch, etc.)
                           if (activeMode === "comment") injectIntoIframe(iframeRef.current, COMMENT_INJECT)
                           if (activeMode === "edit") injectIntoIframe(iframeRef.current, EDIT_SELECT_INJECT)
@@ -3675,9 +3967,9 @@ ${noteLines || "无"}${variantNote}`
                         key={activeMode === "draw" ? "draw-active" : "draw-idle"}
                         active={activeMode === "draw"}
                         mode={ts.drawToolMode}
-                        strokes={ts.drawStrokes}
-                        notes={ts.drawNotes}
-                        draftNote={ts.draftDrawNote}
+                        strokes={resolvedDrawStrokes}
+                        notes={resolvedDrawNotes}
+                        draftNote={resolvedDraftDrawNote}
                         zoom={zoom}
                         scrollX={ts.iframeScrollX}
                         scrollY={ts.iframeScrollY}
@@ -3709,9 +4001,12 @@ ${noteLines || "无"}${variantNote}`
                       const cw = canvasContainerRef.current?.clientWidth || 800
                       const ch = canvasContainerRef.current?.clientHeight || 600
                       return ts.comments.map((c, i) => {
+                        const anchoredPoint = resolveAnchorPagePoint(iframeDoc, c.anchor)
+                        const pageX = anchoredPoint?.x ?? c.pageX
+                        const pageY = anchoredPoint?.y ?? c.pageY
                         // Convert document-absolute coords to current canvas-relative % via scroll offset
-                        const pinLeft = ((c.pageX - ts.iframeScrollX) * zf / cw) * 100
-                        const pinTop  = ((c.pageY - ts.iframeScrollY) * zf / ch) * 100
+                        const pinLeft = ((pageX - ts.iframeScrollX) * zf / cw) * 100
+                        const pinTop  = ((pageY - ts.iframeScrollY) * zf / ch) * 100
                         // Hide pins that have scrolled out of the visible canvas area
                         const inView = pinLeft > -6 && pinLeft < 106 && pinTop > -6 && pinTop < 106
                         if (!inView) return null
@@ -3739,11 +4034,14 @@ ${noteLines || "无"}${variantNote}`
                       const zf = zoom / 100
                       const cw = canvasContainerRef.current?.clientWidth || 800
                       const ch = canvasContainerRef.current?.clientHeight || 600
+                      const anchoredPoint = resolveAnchorPagePoint(iframeDoc, ts.draftComment.anchor)
+                      const pageX = anchoredPoint?.x ?? ts.draftComment.pageX
+                      const pageY = anchoredPoint?.y ?? ts.draftComment.pageY
                       const draftLeft = Math.min(95, Math.max(2,
-                        ((ts.draftComment.pageX - ts.iframeScrollX) * zf / cw) * 100
+                        ((pageX - ts.iframeScrollX) * zf / cw) * 100
                       ))
                       const draftTop = Math.min(95, Math.max(2,
-                        ((ts.draftComment.pageY - ts.iframeScrollY) * zf / ch) * 100
+                        ((pageY - ts.iframeScrollY) * zf / ch) * 100
                       ))
                       return (
                         <CommentDraftInput
@@ -3758,6 +4056,7 @@ ${noteLines || "无"}${variantNote}`
                               pageY: ts.draftComment!.pageY,
                               text: text.trim(),
                               elementDesc: ts.draftComment!.elementDesc,
+                              anchor: ts.draftComment!.anchor,
                               createdAt: Date.now(),
                             }
                             updateTs(activeTabId, (prev) => ({
