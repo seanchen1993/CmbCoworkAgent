@@ -93,6 +93,25 @@ let suppressPetClickUntil = 0
 
 const PET_SETTINGS_FILE = join(getOpenworkDir(), "pet-settings.json")
 const PET_BUBBLE_AUTO_HIDE_MS = 4200
+const PET_HOVER_MESSAGES = [
+  "我会永远陪着你",
+  "主人敲代码的样子会发光！",
+  "今天也要和 bug 温柔过招～",
+  "你负责创造世界，我负责给你加油！",
+  "编译慢慢来，主人已经很棒啦",
+  "灵感在路上，我先抱住它！",
+  "主人一出手，需求都乖乖排队～",
+  "你的每一行代码都有魔法",
+  "累了就摸摸我，能量补满！",
+  "我在旁边守着你的终端哦",
+  "小小宠物，大大偏爱主人",
+  "主人的脑袋瓜今天也超会想！",
+  "别怕报错，我陪你一起看",
+  "代码会跑起来，星星也会亮起来",
+  "主人是最可靠的 developer！",
+  "我把好运都蹭到你的分支上啦",
+  "饿龙咆哮～"
+]
 const DEFAULT_PET_SETTINGS: PetSettings = {
   enabled: true,
   selectedPetKey: null
@@ -1013,8 +1032,8 @@ function showPetBubble(message: string, autoHideMs = PET_BUBBLE_AUTO_HIDE_MS): v
   cancelPetBubbleHide()
   if (!petWindow || petWindow.isDestroyed()) return
   const escapedMessage = escapeHtml(message)
-  const bubbleWidth = 286
-  const bubbleHeight = 68
+  const bubbleWidth = 250
+  const bubbleHeight = 60
   const bounds = getBubbleBounds(bubbleWidth, bubbleHeight)
   if (!bounds) return
 
@@ -1082,24 +1101,24 @@ function showPetBubble(message: string, autoHideMs = PET_BUBBLE_AUTO_HIDE_MS): v
     }
     body {
       box-sizing: border-box;
-      padding: 6px 8px 12px;
+      padding: 5px 7px 10px;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
     .wrap {
       position: relative;
-      width: 270px;
+      width: 236px;
     }
     .bubble {
       position: relative;
       box-sizing: border-box;
-      width: 270px;
-      min-height: 46px;
-      padding: 8px 12px 7px;
+      width: 200px;
+      min-height: 40px;
+      padding: 7px 10px 6px;
       border: 1px solid rgba(196, 149, 106, 0.5);
       border-radius: 8px;
       background: rgba(255, 255, 255, 0.97);
       color: #292524;
-      box-shadow: 0 10px 24px rgba(41, 37, 36, 0.16);
+      /*box-shadow: 0 10px 24px rgba(41, 37, 36, 0.16);*/
     }
     .bubble::after {
       content: "";
@@ -1168,6 +1187,17 @@ function showPetTaskBubble(): void {
 }
 
 /**
+ * 展示 hover 时的随机宠物语。
+ *
+ * 只在当前没有气泡时展示，避免覆盖问候、任务完成等更明确的消息。
+ */
+function showPetHoverBubbleIfIdle(): void {
+  if (petBubbleWindow && !petBubbleWindow.isDestroyed()) return
+  const message = PET_HOVER_MESSAGES[Math.floor(Math.random() * PET_HOVER_MESSAGES.length)]
+  showPetBubble(message)
+}
+
+/**
  * 关闭当前统一宠物气泡窗口。
  */
 function closePetBubble(): void {
@@ -1193,6 +1223,9 @@ function startPetHoverPolling(): void {
 
     if (isHovering === petHovering) return
     petHovering = isHovering
+    if (isHovering) {
+      showPetHoverBubbleIfIdle()
+    }
     const script = isHovering
       ? 'window.setPetTransientState("hover", 0)'
       : 'window.clearPetTransientState("hover")'
