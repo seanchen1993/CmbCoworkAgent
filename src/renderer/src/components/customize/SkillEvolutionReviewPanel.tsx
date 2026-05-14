@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { CheckCircle2, Loader2, RefreshCcw, Rocket, ShieldCheck, Trash2, XCircle } from "lucide-react"
+import { CheckCircle2, Loader2, RefreshCcw, Rocket, RotateCcw, ShieldCheck, Trash2, XCircle } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -77,9 +77,11 @@ export function SkillEvolutionReviewPanel(): React.JSX.Element {
 
   const reviewer = localStorage.getItem("userName") || localStorage.getItem("ystId") || "admin"
 
-  async function runAction(action: "approve" | "reject" | "publish" | "delete", candidate: EvolutionCandidate): Promise<void> {
+  async function runAction(action: "approve" | "reject" | "publish" | "unpublish" | "delete", candidate: EvolutionCandidate): Promise<void> {
     if (action === "delete") {
       if (!confirm(`确定要删除候选 ${candidate.skill_name} (${candidate.candidate_id}) 吗？此操作不可撤销。`)) return
+    } else if (action === "unpublish") {
+      if (!confirm(`确定要撤回发布 ${candidate.skill_name} (${candidate.candidate_id}) 吗？撤回后该候选会回到已通过状态，可重新发布。`)) return
     }
     setActionLoading(`${action}:${candidate.candidate_id}`)
     try {
@@ -92,6 +94,9 @@ export function SkillEvolutionReviewPanel(): React.JSX.Element {
       } else if (action === "delete") {
         await evolutionApi.deleteCandidate(candidate.candidate_id)
         toast.success("候选已删除")
+      } else if (action === "unpublish") {
+        await evolutionApi.unpublish(candidate.candidate_id)
+        toast.success("已撤回发布")
       } else {
         await evolutionApi.publish(candidate.candidate_id, reviewer)
         toast.success("候选已发布到自进化更新通道")
@@ -188,6 +193,13 @@ export function SkillEvolutionReviewPanel(): React.JSX.Element {
                     onClick={() => void runAction("publish", selected)}
                   >
                     <Rocket className="mr-1.5 size-4" />发布
+                  </Button>
+                  <Button
+                    variant="outline"
+                    disabled={Boolean(actionLoading) || selected.evolution_status !== "published"}
+                    onClick={() => void runAction("unpublish", selected)}
+                  >
+                    <RotateCcw className="mr-1.5 size-4" />撤回发布
                   </Button>
                   <Button
                     variant="outline"

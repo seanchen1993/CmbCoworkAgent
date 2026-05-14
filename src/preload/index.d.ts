@@ -453,6 +453,7 @@ interface CustomAPI {
     }>
     getFilePath: (file: File) => string
     select: () => Promise<{ canceled: boolean; filePaths: string[] }>
+    selectDirectory: (options?: { title?: string }) => Promise<{ canceled: boolean; filePaths: string[] }>
     supportedExtensions: () => Promise<string[]>
   }
   skills: {
@@ -476,6 +477,20 @@ interface CustomAPI {
     }>
     getDisabled: () => Promise<string[]>
     setDisabled: (skillNames: string[]) => Promise<void>
+    backupForCloudEvolution: (payload: {
+      skillPath: string
+      candidateId: string
+      skillName: string
+      sourceVersion?: string | null
+      targetVersion?: string | null
+    }) => Promise<{ success: boolean; backupId?: string; backupPath?: string; error?: string }>
+    restoreCloudEvolutionBackup: (
+      backupId: string
+    ) => Promise<{ success: boolean; skillName?: string; error?: string }>
+    exportCloudEvolutionBackup: (
+      backupId: string,
+      targetDir: string
+    ) => Promise<{ success: boolean; exportedPath?: string; error?: string }>
     upload: (
       buffer: ArrayBuffer,
       fileName: string,

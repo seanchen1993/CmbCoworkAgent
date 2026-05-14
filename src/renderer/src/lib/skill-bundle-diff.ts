@@ -33,7 +33,7 @@ const MAX_ZIP_TEXT_FILE_BYTES = 512 * 1024
 const MAX_ZIP_TEXT_TOTAL_BYTES = 2 * 1024 * 1024
 
 function normalizeBundlePath(input: string): string {
-  return input.replace(/\\/g, "/").replace(/^\/+/, "")
+  return input.normalize("NFC").replace(/\\/g, "/").replace(/^\/+/, "")
 }
 
 function isUnsafeBundlePath(input: string): boolean {
@@ -51,6 +51,51 @@ function isTextBundlePath(filePath: string): boolean {
   const baseName = filePath.split("/").pop() || filePath
   if (baseName.startsWith(".")) return false
   return TEXT_BUNDLE_FILE_EXTENSIONS.has(extensionOf(filePath))
+}
+
+function containsCjk(text: string): boolean {
+  return /[\u3400-\u9fff]/.test(text)
+}
+
+function scoreDecodedName(name: string): number {
+  let score = 0
+  for (const ch of name) {
+    if (/[\u3400-\u9fff]/.test(ch)) score += 4
+    else if (/[A-Za-z0-9._\- ()[\]]/.test(ch)) score += 1
+    else if (/[\u2500-\u259f]/.test(ch)) score -= 3
+    else if (ch === "\uFFFD") score -= 4
+  }
+  return score
+}
+
+function filenameBytes(input: Uint8Array | string[]): Uint8Array {
+  if (input instanceof Uint8Array) return input
+  return Uint8Array.from(input.map((part) => part.charCodeAt(0) & 0xff))
+}
+
+function decodeZipFileName(input: Uint8Array | string[]): string {
+  const bytes = filenameBytes(input)
+  const decoders = [
+    new TextDecoder("utf-8"),
+    new TextDecoder("gb18030")
+  ]
+  const candidates = decoders
+    .map((decoder) => {
+      try {
+        return normalizeBundlePath(decoder.decode(bytes))
+      } catch {
+        return ""
+      }
+    })
+    .filter(Boolean)
+
+  if (candidates.length === 0) return ""
+  return candidates.reduce((best, candidate) => {
+    const candidateScore = scoreDecodedName(candidate)
+    const bestScore = scoreDecodedName(best)
+    if (containsCjk(candidate) && !containsCjk(best)) return candidate
+    return candidateScore > bestScore ? candidate : best
+  }, candidates[0])
 }
 
 function splitLines(content: string): string[] {
@@ -160,7 +205,7 @@ export function buildBundleUnifiedDiff(oldFiles: TextBundleFile[], newFiles: Tex
 
 export async function extractTextBundleFromZip(buffer: ArrayBuffer): Promise<TextBundleFile[]> {
   const { default: JSZip } = await import("jszip")
-  const zip = await JSZip.loadAsync(buffer)
+  const zip = await JSZip.loadAsync(buffer, { decodeFileName: decodeZipFileName })
   const entries = Object.values(zip.files)
   const skillEntry = entries.find((entry) => !entry.dir && /(^|\/)SKILL\.md$/i.test(normalizeBundlePath(entry.name)))
   const basePrefix = skillEntry ? normalizeBundlePath(skillEntry.name).replace(/SKILL\.md$/i, "") : ""

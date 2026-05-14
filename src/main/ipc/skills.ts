@@ -9,6 +9,7 @@ import {
   getCustomSkillsDir,
   getDisabledSkills,
   getEnabledPluginSkillSourceMetadata,
+  getOpenworkDir,
   getSkillsDir,
   clearDisabledSkillsForSkillDir,
   invalidateEnabledSkillsCache,
@@ -48,6 +49,17 @@ interface DecodedZipEntry {
   decodedName: string
 }
 
+interface SkillCloudBackupMetadata {
+  backupId: string
+  candidateId: string
+  skillName: string
+  sourceVersion?: string | null
+  targetVersion?: string | null
+  originalSkillPath: string
+  originalDirName: string
+  createdAt: string
+}
+
 function sanitizeSkillName(name: string): string {
   return (
     name
@@ -80,6 +92,16 @@ function isPathUnderDir(targetPath: string, dirPath: string): boolean {
 
 function isPathUnderAllowedDirs(filePath: string): boolean {
   return isPathUnderDir(filePath, getSkillsDir()) || isPathUnderDir(filePath, getCustomSkillsDir())
+}
+
+function getCloudEvolutionSkillBackupsDir(): string {
+  const dir = path.join(getOpenworkDir(), "skill-backups", "cloud-evolution")
+  mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+function sanitizeBackupIdPart(value: string): string {
+  return sanitizeSkillName(value).slice(0, 80) || "backup"
 }
 
 function getMimeTypeByPath(filePath: string): string {
@@ -660,6 +682,155 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
         return { success: true }
       } catch (e) {
         return { success: false, error: e instanceof Error ? e.message : "删除失败" }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    "skills:backupForCloudEvolution",
+    async (
+      _event,
+      payload: {
+        skillPath: string
+        candidateId: string
+        skillName: string
+        sourceVersion?: string | null
+        targetVersion?: string | null
+      }
+    ): Promise<{ success: boolean; backupId?: string; backupPath?: string; error?: string }> => {
+      const { skillPath, candidateId, skillName, sourceVersion, targetVersion } = payload || {}
+      if (!skillPath || typeof skillPath !== "string") {
+        return { success: false, error: "无效的技能路径" }
+      }
+      if (!candidateId || typeof candidateId !== "string") {
+        return { success: false, error: "无效的候选 ID" }
+      }
+
+      try {
+        const resolvedSkillPath = path.resolve(skillPath)
+        const skillDir = path.dirname(resolvedSkillPath)
+        if (!isPathUnderAllowedDirs(skillDir)) {
+          return { success: false, error: "Access denied: skill path outside skills directory" }
+        }
+        if (!existsSync(skillDir)) {
+          return { success: false, error: "技能目录不存在" }
+        }
+
+        const backupId = `${sanitizeBackupIdPart(candidateId)}-${Date.now()}`
+        const backupRoot = path.join(getCloudEvolutionSkillBackupsDir(), backupId)
+        const backupSkillDir = path.join(backupRoot, "skill")
+        const metadata: SkillCloudBackupMetadata = {
+          backupId,
+          candidateId,
+          skillName: typeof skillName === "string" && skillName.trim() ? skillName.trim() : path.basename(skillDir),
+          sourceVersion: sourceVersion || null,
+          targetVersion: targetVersion || null,
+          originalSkillPath: resolvedSkillPath,
+          originalDirName: path.basename(skillDir),
+          createdAt: new Date().toISOString()
+        }
+
+        await fs.mkdir(backupRoot, { recursive: true })
+        await fs.cp(skillDir, backupSkillDir, { recursive: true })
+        await fs.writeFile(path.join(backupRoot, "metadata.json"), JSON.stringify(metadata, null, 2), "utf-8")
+        return { success: true, backupId, backupPath: backupRoot }
+      } catch (e) {
+        return { success: false, error: e instanceof Error ? e.message : "备份旧版 Skill 失败" }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    "skills:restoreCloudEvolutionBackup",
+    async (_event, backupId: string): Promise<{ success: boolean; skillName?: string; error?: string }> => {
+      if (!backupId || typeof backupId !== "string") {
+        return { success: false, error: "无效的备份 ID" }
+      }
+
+      try {
+        const backupsDir = getCloudEvolutionSkillBackupsDir()
+        const backupRoot = path.resolve(backupsDir, backupId)
+        if (!isPathUnderDir(backupRoot, backupsDir)) {
+          return { success: false, error: "无效的备份路径" }
+        }
+        const backupSkillDir = path.join(backupRoot, "skill")
+        const metadataPath = path.join(backupRoot, "metadata.json")
+        if (!existsSync(backupSkillDir) || !existsSync(metadataPath)) {
+          return { success: false, error: "备份不存在" }
+        }
+
+        const metadata = JSON.parse(await fs.readFile(metadataPath, "utf-8")) as SkillCloudBackupMetadata
+        const backupSkillMdPath = path.join(backupSkillDir, "SKILL.md")
+        const backupFrontmatter = parseYamlFrontmatter(await fs.readFile(backupSkillMdPath, "utf-8"))
+        const skillName = backupFrontmatter.name?.trim() || metadata.skillName
+        const installed = (await listAllSkills()).find((skill) => skill.name === skillName)
+        if (installed) {
+          if (installed.source !== "user") {
+            return { success: false, error: "只能回滚自定义技能，当前同名技能不是用户安装技能" }
+          }
+          const installedDir = path.dirname(path.resolve(installed.path))
+          if (isPathUnderDir(installedDir, getCustomSkillsDir()) && existsSync(installedDir)) {
+            rmSync(installedDir, { recursive: true, force: true })
+          }
+        }
+
+        const targetDirName = sanitizeSkillName(metadata.originalDirName || skillName)
+        const targetDir = path.join(getCustomSkillsDir(), targetDirName)
+        if (existsSync(targetDir)) {
+          return { success: false, error: `目标目录已存在：${targetDirName}` }
+        }
+        await fs.cp(backupSkillDir, targetDir, { recursive: true })
+        clearDisabledSkillsForSkillDir(targetDir)
+        invalidateEnabledSkillsCache()
+        notifyHooksChanged("skill-restored")
+        return { success: true, skillName }
+      } catch (e) {
+        return { success: false, error: e instanceof Error ? e.message : "回滚旧版 Skill 失败" }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    "skills:exportCloudEvolutionBackup",
+    async (
+      _event,
+      payload: { backupId: string; targetDir: string }
+    ): Promise<{ success: boolean; exportedPath?: string; error?: string }> => {
+      const { backupId, targetDir } = payload || {}
+      if (!backupId || typeof backupId !== "string") {
+        return { success: false, error: "无效的备份 ID" }
+      }
+      if (!targetDir || typeof targetDir !== "string") {
+        return { success: false, error: "无效的目标目录" }
+      }
+
+      try {
+        const backupsDir = getCloudEvolutionSkillBackupsDir()
+        const backupRoot = path.resolve(backupsDir, backupId)
+        if (!isPathUnderDir(backupRoot, backupsDir)) {
+          return { success: false, error: "无效的备份路径" }
+        }
+        const backupSkillDir = path.join(backupRoot, "skill")
+        const metadataPath = path.join(backupRoot, "metadata.json")
+        if (!existsSync(backupSkillDir) || !existsSync(metadataPath)) {
+          return { success: false, error: "备份不存在" }
+        }
+
+        const metadata = JSON.parse(await fs.readFile(metadataPath, "utf-8")) as SkillCloudBackupMetadata
+        const resolvedTargetDir = path.resolve(targetDir)
+        await fs.mkdir(resolvedTargetDir, { recursive: true })
+        const versionPart = metadata.sourceVersion ? `-${sanitizeBackupIdPart(metadata.sourceVersion)}` : ""
+        const exportDirName = `${sanitizeSkillName(metadata.skillName || metadata.originalDirName)}${versionPart}`
+        let exportPath = path.join(resolvedTargetDir, exportDirName)
+        let suffix = 1
+        while (existsSync(exportPath)) {
+          exportPath = path.join(resolvedTargetDir, `${exportDirName}-${suffix}`)
+          suffix += 1
+        }
+        await fs.cp(backupSkillDir, exportPath, { recursive: true })
+        return { success: true, exportedPath: exportPath }
+      } catch (e) {
+        return { success: false, error: e instanceof Error ? e.message : "导出旧版 Skill 失败" }
       }
     }
   )

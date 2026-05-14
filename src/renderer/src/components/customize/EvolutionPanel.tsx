@@ -17,6 +17,7 @@ import {
   Info,
   Loader2,
   MessageSquare,
+  Download,
   Settings2,
   Sparkles,
   Terminal,
@@ -935,12 +936,16 @@ function CandidateCard({
 function CloudEvolutionUpdateCard({
   candidate,
   onInstall,
+  onRollback,
+  onExportBackup,
   onIgnore,
   onDelete,
   installing
 }: {
   candidate: EvolutionCandidate
   onInstall: (candidate: EvolutionCandidate) => Promise<void>
+  onRollback: (candidate: EvolutionCandidate) => Promise<void>
+  onExportBackup: (candidate: EvolutionCandidate) => Promise<void>
   onIgnore: (candidateId: string) => void
   onDelete: (candidateId: string) => void
   installing: boolean
@@ -1002,11 +1007,20 @@ function CloudEvolutionUpdateCard({
     }
   }, [candidate.candidate_id, candidate.skill_name, diffSource, expanded])
   const toggleExpanded = (): void => setExpanded((v) => !v)
+  const adopted = candidate.local_adoption_status === "adopted"
 
   return (
-    <div className="rounded-lg border border-blue-200 bg-blue-50/45 overflow-hidden dark:border-blue-900 dark:bg-blue-950/20">
+    <div className={cn(
+      "rounded-lg border overflow-hidden",
+      adopted
+        ? "border-emerald-200 bg-emerald-50/45 dark:border-emerald-900 dark:bg-emerald-950/20"
+        : "border-blue-200 bg-blue-50/45 dark:border-blue-900 dark:bg-blue-950/20"
+    )}>
       <div
-        className="flex cursor-pointer items-start gap-3 p-3 transition-colors hover:bg-blue-100/45 dark:hover:bg-blue-950/35"
+        className={cn(
+          "flex cursor-pointer items-start gap-3 p-3 transition-colors",
+          adopted ? "hover:bg-emerald-100/45 dark:hover:bg-emerald-950/35" : "hover:bg-blue-100/45 dark:hover:bg-blue-950/35"
+        )}
         role="button"
         tabIndex={0}
         onClick={toggleExpanded}
@@ -1033,16 +1047,29 @@ function CloudEvolutionUpdateCard({
               <Sparkles className="size-3" />
               云端自进化
             </Badge>
+            {adopted && (
+              <Badge className="bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/20 gap-1 text-xs">
+                <CheckCircle2 className="size-3" />
+                已采纳
+              </Badge>
+            )}
             <Badge variant="outline" className="text-[10px] font-mono px-1.5 py-0">
               {candidate.source_version || "unknown"} → {candidate.target_version || "unknown"}
             </Badge>
           </div>
           <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
-            CMBDevClaw Trace Evolver 已发布新的优化版本，可一键更新本地同名 Skill。
+            {adopted
+              ? "已安装该云端自进化版本，旧版 Skill 已在本地备份，可随时回滚。"
+              : "CMBDevClaw Trace Evolver 已发布新的优化版本，可一键更新本地同名 Skill。"}
           </p>
           <p className="text-[10px] text-muted-foreground/60 mt-1">
             基于 {candidate.source_trace_ids.length} 条 trace · score {candidate.evaluation_score || "—"} · {candidate.published_at ? new Date(candidate.published_at).toLocaleString() : "已发布"}
           </p>
+          {adopted && (
+            <p className="mt-1 text-[10px] text-muted-foreground/60">
+              采纳于 {candidate.local_adopted_at ? new Date(candidate.local_adopted_at).toLocaleString() : "本地"}{candidate.local_backup_path ? ` · 备份：${candidate.local_backup_path}` : ""}
+            </p>
+          )}
         </div>
         <div
           className="flex gap-1.5 shrink-0"
@@ -1052,7 +1079,7 @@ function CloudEvolutionUpdateCard({
           <Button
             size="sm"
             variant="outline"
-            disabled={installing}
+            disabled={installing || adopted}
             className="h-7 px-2.5 text-xs border-blue-500/40 text-blue-600 hover:bg-blue-500/10 hover:text-blue-600"
             onClick={(event) => {
               event.stopPropagation()
@@ -1060,8 +1087,38 @@ function CloudEvolutionUpdateCard({
             }}
           >
             {installing ? <Loader2 className="size-3 animate-spin" /> : <CheckCircle2 className="size-3 mr-1" />}
-            更新安装
+            {adopted ? "已采纳" : "更新安装"}
           </Button>
+          {adopted && (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={installing || !candidate.local_backup_id}
+              className="h-7 px-2.5 text-xs border-emerald-500/40 text-emerald-700 hover:bg-emerald-500/10 hover:text-emerald-700"
+              onClick={(event) => {
+                event.stopPropagation()
+                void onRollback(candidate)
+              }}
+            >
+              <RotateCcw className="size-3 mr-1" />
+              回滚旧版
+            </Button>
+          )}
+          {adopted && (
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={installing || !candidate.local_backup_id}
+              className="h-7 px-2.5 text-xs text-muted-foreground"
+              onClick={(event) => {
+                event.stopPropagation()
+                void onExportBackup(candidate)
+              }}
+            >
+              <Download className="size-3 mr-1" />
+              导出旧版
+            </Button>
+          )}
           <Button
             size="sm"
             variant="ghost"
@@ -1176,7 +1233,9 @@ export function EvolutionPanel(): React.JSX.Element {
   } = useAppStore()
 
   const localPendingCandidateCount = candidates.filter((c) => c.status === "pending").length
-  const pendingCount = localPendingCandidateCount + cloudEvolutionUpdates.length
+  const cloudPendingUpdateCount = cloudEvolutionUpdates.filter((candidate) => candidate.local_adoption_status !== "adopted").length
+  const cloudAdoptedUpdateCount = cloudEvolutionUpdates.length - cloudPendingUpdateCount
+  const pendingCount = localPendingCandidateCount + cloudPendingUpdateCount
   const showEvolutionReview = import.meta.env.DEV || canReviewEvolution(reviewUserInfo)
 
   const loadTraces = useCallback(async () => {
@@ -1200,12 +1259,10 @@ export function EvolutionPanel(): React.JSX.Element {
   const refreshCloudEvolutionUpdates = useCallback(async () => {
     setCloudUpdateLoading(true)
     try {
-      const installedSkills = await window.api.skills.list()
-      const updates = await evolutionApi.listAvailableUpdates(installedSkills)
-      setCloudEvolutionUpdates(updates)
-      if (updates.length > 0) {
-        setPendingEvolution(true)
-      }
+	      const installedSkills = await window.api.skills.list()
+	      const updates = await evolutionApi.listAvailableUpdates(installedSkills)
+	      setCloudEvolutionUpdates(updates)
+	      setPendingEvolution(updates.some((candidate) => candidate.local_adoption_status !== "adopted"))
     } catch (error) {
       console.warn("[Evolution] failed to refresh cloud evolution updates:", error)
     } finally {
@@ -1385,7 +1442,7 @@ export function EvolutionPanel(): React.JSX.Element {
   const removeCloudUpdate = useCallback((candidateId: string) => {
     const next = cloudEvolutionUpdates.filter((candidate) => candidate.candidate_id !== candidateId)
     setCloudEvolutionUpdates(next)
-    if (next.length === 0) {
+    if (!next.some((candidate) => candidate.local_adoption_status !== "adopted")) {
       setPendingEvolution(false)
     }
   }, [cloudEvolutionUpdates, setCloudEvolutionUpdates, setPendingEvolution])
@@ -1402,6 +1459,7 @@ export function EvolutionPanel(): React.JSX.Element {
 
   const handleInstallCloudUpdate = useCallback(async (candidate: EvolutionCandidate) => {
     setInstallingCloudCandidateId(candidate.candidate_id)
+    let backupId: string | undefined
     try {
       const installedSkills = await window.api.skills.list()
       const existing = installedSkills.find((skill: SkillMetadata) => skill.name === candidate.skill_name)
@@ -1411,6 +1469,18 @@ export function EvolutionPanel(): React.JSX.Element {
 
       const bundle = await evolutionApi.downloadCandidateBundle(candidate.candidate_id)
       const buffer = await bundle.blob.arrayBuffer()
+      const backupResult = await window.api.skills.backupForCloudEvolution({
+        skillPath: existing.path,
+        candidateId: candidate.candidate_id,
+        skillName: candidate.skill_name,
+        sourceVersion: existing.version || candidate.source_version || null,
+        targetVersion: candidate.target_version || null
+      })
+      if (!backupResult.success || !backupResult.backupId) {
+        throw new Error(backupResult.error || `备份旧版 Skill 失败：${candidate.skill_name}`)
+      }
+      backupId = backupResult.backupId
+
       const deleteResult = await window.api.skills.delete(existing.path)
       if (!deleteResult.success) {
         throw new Error(deleteResult.error || `删除旧版 Skill 失败：${candidate.skill_name}`)
@@ -1418,17 +1488,87 @@ export function EvolutionPanel(): React.JSX.Element {
 
       const uploadResult = await window.api.skills.upload(buffer, bundle.filename)
       if (!uploadResult.success) {
+        await window.api.skills.restoreCloudEvolutionBackup(backupId).catch(console.warn)
         throw new Error(uploadResult.error || `安装云端自进化 Skill 失败：${candidate.skill_name}`)
       }
 
-      removeCloudUpdate(candidate.candidate_id)
+      const adoption = {
+        candidate_id: candidate.candidate_id,
+        skill_name: candidate.skill_name,
+        source_version: existing.version || candidate.source_version || null,
+        target_version: candidate.target_version || null,
+        adopted_at: new Date().toISOString(),
+        backup_id: backupResult.backupId,
+        backup_path: backupResult.backupPath,
+        candidate
+      }
+      evolutionApi.markCandidateAdopted(adoption)
+      const nextUpdates = (cloudEvolutionUpdates || []).map((item) => (
+        item.candidate_id === candidate.candidate_id ? evolutionApi.applyLocalAdoption(item) : item
+      ))
+      setCloudEvolutionUpdates(nextUpdates)
+      if (!nextUpdates.some((item) => item.local_adoption_status !== "adopted")) {
+        setPendingEvolution(false)
+      }
       toast.success(`已更新「${candidate.skill_name}」到 ${candidate.target_version || "新版本"}，请新开一个会话试试效果。`)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "安装云端自进化 Skill 失败")
     } finally {
       setInstallingCloudCandidateId(null)
     }
-  }, [removeCloudUpdate])
+  }, [cloudEvolutionUpdates, setCloudEvolutionUpdates, setPendingEvolution])
+
+  const handleRollbackCloudUpdate = useCallback(async (candidate: EvolutionCandidate) => {
+    if (!candidate.local_backup_id) {
+      toast.error("未找到旧版备份，无法回滚")
+      return
+    }
+    if (!confirm(`确定要将「${candidate.skill_name}」回滚到采纳前的旧版本吗？`)) return
+    setInstallingCloudCandidateId(candidate.candidate_id)
+    try {
+      const result = await window.api.skills.restoreCloudEvolutionBackup(candidate.local_backup_id)
+      if (!result.success) {
+        throw new Error(result.error || `回滚旧版 Skill 失败：${candidate.skill_name}`)
+      }
+      evolutionApi.clearCandidateAdoption(candidate.candidate_id)
+      const nextUpdates = (cloudEvolutionUpdates || []).map((item) => (
+        item.candidate_id === candidate.candidate_id
+          ? {
+              ...item,
+              local_adoption_status: undefined,
+              local_adopted_at: undefined,
+              local_backup_id: undefined,
+              local_backup_path: undefined
+            }
+          : item
+      ))
+      setCloudEvolutionUpdates(nextUpdates)
+      setPendingEvolution(true)
+      toast.success(`已回滚「${candidate.skill_name}」到旧版本`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "回滚旧版 Skill 失败")
+    } finally {
+      setInstallingCloudCandidateId(null)
+    }
+  }, [cloudEvolutionUpdates, setCloudEvolutionUpdates, setPendingEvolution])
+
+  const handleExportCloudBackup = useCallback(async (candidate: EvolutionCandidate) => {
+    if (!candidate.local_backup_id) {
+      toast.error("未找到旧版备份，无法导出")
+      return
+    }
+    try {
+      const selected = await window.api.file.selectDirectory({ title: "选择旧版 Skill 导出目录" })
+      if (selected.canceled || selected.filePaths.length === 0) return
+      const result = await window.api.skills.exportCloudEvolutionBackup(candidate.local_backup_id, selected.filePaths[0])
+      if (!result.success) {
+        throw new Error(result.error || "导出旧版 Skill 失败")
+      }
+      toast.success(`旧版 Skill 已导出到：${result.exportedPath}`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "导出旧版 Skill 失败")
+    }
+  }, [])
 
   const handleClear = useCallback(async () => {
     await window.api.optimizer.clear()
@@ -1802,13 +1942,18 @@ export function EvolutionPanel(): React.JSX.Element {
       {tab === "candidates" && (
         <div className="shrink-0 px-4 py-2 border-b border-border flex items-center gap-2 bg-muted/10">
           <span className="text-xs text-muted-foreground flex-1">
-            候选 {candidates.length + cloudEvolutionUpdates.length} 条
-            {cloudEvolutionUpdates.length > 0 && (
-              <span className="ml-1 text-blue-600 dark:text-blue-400">
-                · 已发布可更新 {cloudEvolutionUpdates.length} 条
-              </span>
-            )}
-          </span>
+	            候选 {candidates.length + cloudEvolutionUpdates.length} 条
+	            {cloudPendingUpdateCount > 0 && (
+	              <span className="ml-1 text-blue-600 dark:text-blue-400">
+	                · 已发布可更新 {cloudPendingUpdateCount} 条
+	              </span>
+	            )}
+	            {cloudAdoptedUpdateCount > 0 && (
+	              <span className="ml-1 text-emerald-600 dark:text-emerald-400">
+	                · 已采纳 {cloudAdoptedUpdateCount} 条
+	              </span>
+	            )}
+	          </span>
           <Button
             size="sm"
             variant="outline"
@@ -1893,10 +2038,12 @@ export function EvolutionPanel(): React.JSX.Element {
                     <CloudEvolutionUpdateCard
                       key={candidate.candidate_id}
                       candidate={candidate}
-                      installing={installingCloudCandidateId === candidate.candidate_id}
-                      onInstall={handleInstallCloudUpdate}
-                      onIgnore={handleIgnoreCloudUpdate}
-                      onDelete={handleDeleteCloudUpdate}
+	                      installing={installingCloudCandidateId === candidate.candidate_id}
+	                      onInstall={handleInstallCloudUpdate}
+	                      onRollback={handleRollbackCloudUpdate}
+	                      onExportBackup={handleExportCloudBackup}
+	                      onIgnore={handleIgnoreCloudUpdate}
+	                      onDelete={handleDeleteCloudUpdate}
                     />
                   ))}
                   {[...candidates]

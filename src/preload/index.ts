@@ -696,6 +696,9 @@ const api = {
     select: (): Promise<{ canceled: boolean; filePaths: string[] }> => {
       return ipcRenderer.invoke("file:select")
     },
+    selectDirectory: (options?: { title?: string }): Promise<{ canceled: boolean; filePaths: string[] }> => {
+      return ipcRenderer.invoke("file:selectDirectory", options)
+    },
     supportedExtensions: (): Promise<string[]> => {
       return ipcRenderer.invoke("file:supportedExtensions")
     }
@@ -738,6 +741,26 @@ const api = {
     },
     setDisabled: (skillNames: string[]): Promise<void> => {
       return ipcRenderer.invoke("skills:setDisabled", skillNames)
+    },
+    backupForCloudEvolution: (payload: {
+      skillPath: string
+      candidateId: string
+      skillName: string
+      sourceVersion?: string | null
+      targetVersion?: string | null
+    }): Promise<{ success: boolean; backupId?: string; backupPath?: string; error?: string }> => {
+      return ipcRenderer.invoke("skills:backupForCloudEvolution", payload)
+    },
+    restoreCloudEvolutionBackup: (
+      backupId: string
+    ): Promise<{ success: boolean; skillName?: string; error?: string }> => {
+      return ipcRenderer.invoke("skills:restoreCloudEvolutionBackup", backupId)
+    },
+    exportCloudEvolutionBackup: (
+      backupId: string,
+      targetDir: string
+    ): Promise<{ success: boolean; exportedPath?: string; error?: string }> => {
+      return ipcRenderer.invoke("skills:exportCloudEvolutionBackup", { backupId, targetDir })
     },
     upload: (
       buffer: ArrayBuffer,

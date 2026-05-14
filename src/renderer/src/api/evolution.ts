@@ -9,6 +9,7 @@ const USE_DEV_MOCK =
   import.meta.env.DEV &&
   String(import.meta.env.VITE_TRACE_EVOLVER_MOCK ?? "true").trim().toLowerCase() !== "false"
 const IGNORED_EVOLUTION_UPDATES_KEY = "trace-evolver-ignored-update-candidates"
+const ADOPTED_EVOLUTION_UPDATES_KEY = "trace-evolver-adopted-update-candidates"
 
 export interface InstalledSkillLike {
   name: string
@@ -39,6 +40,21 @@ export interface EvolutionCandidate {
   published_at?: string | null
   published_s3_path?: string | null
   notes?: string | null
+  local_adoption_status?: "adopted"
+  local_adopted_at?: string
+  local_backup_id?: string
+  local_backup_path?: string
+}
+
+export interface EvolutionAdoptionRecord {
+  candidate_id: string
+  skill_name: string
+  source_version?: string | null
+  target_version?: string | null
+  adopted_at: string
+  backup_id: string
+  backup_path?: string
+  candidate?: EvolutionCandidate
 }
 
 export interface EvolutionRunRequest {
@@ -238,6 +254,7 @@ function filterAvailableUpdates(
   installedSkills: InstalledSkillLike[]
 ): EvolutionCandidate[] {
   const ignored = getIgnoredEvolutionCandidateIds()
+  const adopted = getAdoptedEvolutionCandidates()
   const available = candidates
     .filter((candidate) => !ignored.has(candidate.candidate_id))
     .filter((candidate) => candidate.auto_optimized !== false)
@@ -255,7 +272,16 @@ function filterAvailableUpdates(
     }
   }
 
-  return [...latestBySkill.values()].sort((a, b) => a.skill_name.localeCompare(b.skill_name))
+  for (const record of adopted.values()) {
+    if (ignored.has(record.candidate_id)) continue
+    latestBySkill.set(record.skill_name, candidateFromAdoptionRecord(record))
+  }
+
+  return [...latestBySkill.values()].sort((a, b) => {
+    const statusDelta = Number(Boolean(a.local_adoption_status)) - Number(Boolean(b.local_adoption_status))
+    if (statusDelta !== 0) return statusDelta
+    return a.skill_name.localeCompare(b.skill_name)
+  })
 }
 
 function getIgnoredEvolutionCandidateIds(): Set<string> {
@@ -265,6 +291,75 @@ function getIgnoredEvolutionCandidateIds(): Set<string> {
   } catch {
     return new Set()
   }
+}
+
+function getAdoptedEvolutionCandidates(): Map<string, EvolutionAdoptionRecord> {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(ADOPTED_EVOLUTION_UPDATES_KEY) || "[]") as unknown
+    const records = Array.isArray(parsed) ? parsed.filter(isEvolutionAdoptionRecord) : []
+    return new Map(records.map((record) => [record.candidate_id, record]))
+  } catch {
+    return new Map()
+  }
+}
+
+function isEvolutionAdoptionRecord(value: unknown): value is EvolutionAdoptionRecord {
+  if (!value || typeof value !== "object") return false
+  const candidate = value as Partial<EvolutionAdoptionRecord>
+  return (
+    typeof candidate.candidate_id === "string" &&
+    typeof candidate.skill_name === "string" &&
+    typeof candidate.adopted_at === "string" &&
+    typeof candidate.backup_id === "string"
+  )
+}
+
+function setAdoptedEvolutionCandidate(record: EvolutionAdoptionRecord): void {
+  const adopted = getAdoptedEvolutionCandidates()
+  adopted.set(record.candidate_id, record)
+  localStorage.setItem(ADOPTED_EVOLUTION_UPDATES_KEY, JSON.stringify([...adopted.values()]))
+}
+
+function clearAdoptedEvolutionCandidate(candidateId: string): void {
+  const adopted = getAdoptedEvolutionCandidates()
+  adopted.delete(candidateId)
+  localStorage.setItem(ADOPTED_EVOLUTION_UPDATES_KEY, JSON.stringify([...adopted.values()]))
+}
+
+function withAdoptionRecord(candidate: EvolutionCandidate, record: EvolutionAdoptionRecord): EvolutionCandidate {
+  return {
+    ...candidate,
+    local_adoption_status: "adopted",
+    local_adopted_at: record.adopted_at,
+    local_backup_id: record.backup_id,
+    local_backup_path: record.backup_path
+  }
+}
+
+function candidateFromAdoptionRecord(record: EvolutionAdoptionRecord): EvolutionCandidate {
+  const candidate = record.candidate
+  if (candidate) return withAdoptionRecord(candidate, record)
+  return withAdoptionRecord({
+    candidate_id: record.candidate_id,
+    run_id: "",
+    status: "published",
+    recommendation: null,
+    base_skill_id: record.skill_name,
+    full_bundle_path: "",
+    files_changed: [],
+    source_trace_ids: [],
+    source_thread_ids: [],
+    skill_name: record.skill_name,
+    evolution_status: "published",
+    source_version: record.source_version || null,
+    target_version: record.target_version || null,
+    source_bundle_hash: null,
+    auto_optimized: true,
+    evaluation_score: null,
+    published_at: null,
+    published_s3_path: null,
+    notes: "本地已采纳记录"
+  }, record)
 }
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -305,14 +400,33 @@ export const evolutionApi = {
   },
 
   async listAvailableUpdates(installedSkills: InstalledSkillLike[]): Promise<EvolutionCandidate[]> {
-    const published = await this.listCandidates("published")
-    return filterAvailableUpdates(published, installedSkills)
+    try {
+      const published = await this.listCandidates("published")
+      return filterAvailableUpdates(published, installedSkills)
+    } catch (error) {
+      const adopted = [...getAdoptedEvolutionCandidates().values()].map(candidateFromAdoptionRecord)
+      if (adopted.length > 0) return adopted.sort((a, b) => a.skill_name.localeCompare(b.skill_name))
+      throw error
+    }
   },
 
   ignoreCandidateUpdate(candidateId: string): void {
     const ignored = getIgnoredEvolutionCandidateIds()
     ignored.add(candidateId)
     localStorage.setItem(IGNORED_EVOLUTION_UPDATES_KEY, JSON.stringify([...ignored]))
+  },
+
+  markCandidateAdopted(record: EvolutionAdoptionRecord): void {
+    setAdoptedEvolutionCandidate(record)
+  },
+
+  clearCandidateAdoption(candidateId: string): void {
+    clearAdoptedEvolutionCandidate(candidateId)
+  },
+
+  applyLocalAdoption(candidate: EvolutionCandidate): EvolutionCandidate {
+    const record = getAdoptedEvolutionCandidates().get(candidate.candidate_id)
+    return record ? withAdoptionRecord(candidate, record) : candidate
   },
 
   async getCandidate(candidateId: string): Promise<EvolutionCandidate> {
@@ -396,6 +510,23 @@ export const evolutionApi = {
     } catch (error) {
       if (!USE_DEV_MOCK || !isNetworkError(error)) throw error
       return { ...devCandidate(candidateId), status: "published", evolution_status: "published", approved_by: reviewer || "trace-evolver-dev" }
+    }
+  },
+
+  async unpublish(candidateId: string): Promise<EvolutionCandidate> {
+    try {
+      return await requestJson(`/evolution/candidates/${encodeURIComponent(candidateId)}/unpublish`, {
+        method: "POST"
+      })
+    } catch (error) {
+      if (!USE_DEV_MOCK || !isNetworkError(error)) throw error
+      return {
+        ...devCandidate(candidateId),
+        status: "approved",
+        evolution_status: "approved",
+        published_at: null,
+        published_s3_path: null
+      }
     }
   }
 }

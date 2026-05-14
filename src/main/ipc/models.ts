@@ -3027,6 +3027,19 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     return { canceled: false, filePaths: result.filePaths }
   })
 
+  ipcMain.handle("file:selectDirectory", async (event, options?: { title?: string }) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) return { canceled: true, filePaths: [] }
+    const result = await dialog.showOpenDialog(win, {
+      properties: ["openDirectory", "createDirectory"],
+      title: options?.title || "选择目录"
+    })
+    if (result.canceled || result.filePaths.length === 0) {
+      return { canceled: true, filePaths: [] }
+    }
+    return { canceled: false, filePaths: result.filePaths }
+  })
+
   // Get supported file extensions
   ipcMain.handle("file:supportedExtensions", async () => {
     const { getSupportedExtensions } = await import("../file-parser")
