@@ -27,7 +27,9 @@ const DESIGN_MODEL_MAX_RETRY_ATTEMPTS = 11 // 1 initial request + 10 retries
 const DESIGN_BROWSER_VALIDATION_TIMEOUT_MS = 8000
 const DESIGN_BROWSER_VALIDATION_SETTLE_MS = 800
 const DESIGN_BROWSER_AUTO_FIX_ATTEMPTS = 1
-const DESIGN_ARTIFACT_WRITE_RECOVERY_ATTEMPTS = 1
+const DESIGN_ARTIFACT_CONTINUATION_MAX_ATTEMPTS = 30
+const DESIGN_ARTIFACT_CONTINUATION_STALL_ATTEMPTS = 2
+const DESIGN_ARTIFACT_WRITE_RECOVERY_ATTEMPTS = 2
 const DESIGN_CHINESE_RESPONSE_INSTRUCTION = `\n\n## Response language\n\n- 始终使用中文输出所有面向用户可见的文本，包括执行过程说明、技能使用说明、工具前后的简短说明、错误解释和最终摘要。\n- 即使读取到的 Skill、参考文件或系统上下文是英文，也要把面向用户展示的过程和总结翻译成中文。\n- 代码、HTML/CSS/JS 标识符、文件路径、工具名和必须保持原样的业务文案不需要翻译。`
 
 // ─────────────────────────────────────────────────────────
@@ -1048,6 +1050,7 @@ function buildDesignArtifactInstruction(filePath: string, exists: boolean, sourc
     `When calling filesystem tools, use the exact argument names required by the tools: ` +
     `read_file({ file_path, offset, limit }), write_file({ file_path, content }), and edit_file({ file_path, old_string, new_string, replace_all }). ` +
     `Every read_file call MUST include a non-empty string file_path. For HTML artifacts, uploaded HTML/context files, selected SKILL.md files, or any file you must understand before editing, read_file MUST also include numeric offset and limit. ` +
+    `If you do not have an exact file path, skip that optional read; never call read_file with an omitted, undefined, empty, placeholder, or guessed file_path. ` +
     `Never use placeholder paths such as TD_PATH, TBD_PATH, OUTPUT_PATH, FILE_PATH, <path>, or [path]. Use only the exact absolute paths printed in this instruction or paths returned by tools. ` +
     `Do not use path, filePath, targetPath, input, params, arguments, oldString, newString, oldText, newText, replace, or replacement as tool argument names. ` +
     `Do not wrap tool arguments inside another object. The top-level tool arguments must exactly match the tool schema. ` +
@@ -2026,6 +2029,7 @@ export function registerDesignHandlers(): void {
         const pendingSkillResultsByToolCallId = new Map<string, boolean>()
         const emittedSkillStartToolCallIds = new Set<string>()
         const emittedSkillResultToolCallIds = new Set<string>()
+        const emittedToolCallIds = new Set<string>()
         const emittedToolResultIds = new Set<string>()
         const emittedAssistantTextIds = new Set<string>()
         const accumulatedToolCallChunks = new Map<string, AccumulatedDesignToolCall>()
@@ -2213,6 +2217,7 @@ export function registerDesignHandlers(): void {
                       if (className.includes("AI")) {
                         const emitToolCall = (toolCall: NormalizedDesignToolCall) => {
                           if (!toolCall.id) return
+                          emittedToolCallIds.add(toolCall.id)
                           maybeEmitSkillStart(toolCall)
                           const placeholderPath = isPlaceholderDesignFileToolCall(toolCall)
                           send({
@@ -2285,6 +2290,7 @@ export function registerDesignHandlers(): void {
                 if (className.includes("AI")) {
                   const emitToolCall = (toolCall: NormalizedDesignToolCall) => {
                     if (!toolCall.id) return
+                    emittedToolCallIds.add(toolCall.id)
                     maybeEmitSkillStart(toolCall)
                     const placeholderPath = isPlaceholderDesignFileToolCall(toolCall)
                     send({
@@ -2467,6 +2473,53 @@ export function registerDesignHandlers(): void {
           }
         }
 
+        let continuationAttempt = 0
+        let stalledContinuationAttempts = 0
+        while (
+          (!html || !isCompleteHtmlDocument(html)) &&
+          continuationAttempt < DESIGN_ARTIFACT_CONTINUATION_MAX_ATTEMPTS &&
+          stalledContinuationAttempts < DESIGN_ARTIFACT_CONTINUATION_STALL_ATTEMPTS
+        ) {
+          continuationAttempt++
+          wroteCandidateDraft = false
+          const continuationArtifactPath = candidateDraftPath
+          const beforeToolCallCount = emittedToolCallIds.size
+          const beforeToolResultCount = emittedToolResultIds.size
+          const beforeAssistantTextCount = emittedAssistantTextIds.size
+          const beforeFullText = fullText.trim()
+          const continuationInstruction = buildDesignArtifactInstruction(
+            continuationArtifactPath,
+            fs.existsSync(continuationArtifactPath),
+            sourceFilePathForPrompt
+          )
+          const continuationPrompt =
+            `继续上一轮 Design 生成流程。上一轮还停留在读取、分析或计划阶段，尚未写出完整 HTML artifact；不要把这当成失败，也不要从头重做已完成的读取和分析。\n\n` +
+            `你现在必须基于当前线程里已经读取/提取到的 PRD、技能和上下文继续执行。若还缺少必要信息，可以继续调用 read_file 等工具；但如果没有明确的绝对路径，跳过该读取，绝不能调用 file_path 为空或 undefined 的 read_file。\n\n` +
+            `本轮结束前必须把完整、可独立运行的 HTML artifact 写入指定文件。不要只说明下一步计划。\n\n` +
+            continuationInstruction
+          sendValidationEvent("running", "继续生成 artifact...", false)
+          const continuationResult = await runDesignAgentOnce(continuationPrompt, threadId)
+          html = continuationResult.html
+          if (continuationResult.fullText && !isLikelyDesignProgressOnlyText(continuationResult.fullText)) {
+            fullText = continuationResult.fullText
+          }
+          if (!html || !isCompleteHtmlDocument(html) || wroteCandidateDraft) {
+            const continuationDraftArtifact = readDesignArtifactFile(continuationArtifactPath, workspacePath)
+            if (continuationDraftArtifact.success && continuationDraftArtifact.html && isCompleteHtmlDocument(continuationDraftArtifact.html)) {
+              html = continuationDraftArtifact.html
+            }
+          }
+          const hasCompleteArtifact = Boolean(html && isCompleteHtmlDocument(html))
+          const madeProgress =
+            hasCompleteArtifact ||
+            wroteCandidateDraft ||
+            emittedToolCallIds.size > beforeToolCallCount ||
+            emittedToolResultIds.size > beforeToolResultCount ||
+            emittedAssistantTextIds.size > beforeAssistantTextCount ||
+            Boolean(continuationResult.fullText.trim() && continuationResult.fullText.trim() !== beforeFullText)
+          stalledContinuationAttempts = madeProgress ? 0 : stalledContinuationAttempts + 1
+        }
+
         for (let recoveryAttempt = 1; (!html || !isCompleteHtmlDocument(html)) && recoveryAttempt <= DESIGN_ARTIFACT_WRITE_RECOVERY_ATTEMPTS; recoveryAttempt++) {
           const recoveryArtifactPath = makeDesignArtifactDraftPath(outputArtifactPath)
           candidateDraftPath = recoveryArtifactPath
@@ -2488,7 +2541,9 @@ export function registerDesignHandlers(): void {
             `2. 中间过程可以使用简短中文说明、read_file、write_file、edit_file；不要把中间过程当作最终结果。\n` +
             `3. 最终 artifact 文件内容必须从 <!DOCTYPE html> 开始，并以 </html> 结束。\n` +
             `4. 不要使用 TD_PATH、TBD_PATH、OUTPUT_PATH、FILE_PATH、<path> 或任何占位符路径。\n` +
-            `5. read_file 的分页提示不是截断。若需要更多内容，按提示 offset 继续读取。\n\n` +
+            `5. read_file 的分页提示不是截断。若需要更多内容，按提示 offset 继续读取。\n` +
+            `6. 如果没有明确的绝对 file_path，跳过该读取；绝不能调用 file_path 为空、undefined 或占位符的 read_file。\n` +
+            `7. 不要只回复“我将继续/让我读取/现在生成”；本轮必须实际写入完整 artifact。\n\n` +
             recoveryInstruction
           const recoveryResult = await runDesignAgentOnce(recoveryPrompt, recoveryThreadId)
           html = recoveryResult.html
