@@ -1146,6 +1146,8 @@ type NormalizedDesignToolCall = { id?: string; name?: string; args?: Record<stri
 
 const DESIGN_PLACEHOLDER_FILE_PATH_RE =
   /^(?:TD_PATH|TBD_PATH|TODO_PATH|OUTPUT_PATH|ARTIFACT_PATH|FILE_PATH|PATH|<[^>]+>|\[[^\]]+\])$/i
+const DESIGN_PROGRESS_ONLY_TEXT_RE =
+  /^(?:我(?:先|来)?|让我|现在|接下来).{0,80}(?:读取|分析|查看|理解|检查|构建|生成|还原|开始)/u
 
 function truncateDesignToolString(value: string, limit = 500): string {
   return value.length > limit ? `${value.slice(0, limit)}... [truncated ${value.length - limit} chars]` : value
@@ -1153,6 +1155,13 @@ function truncateDesignToolString(value: string, limit = 500): string {
 
 function isPlaceholderDesignFilePath(rawPath: string): boolean {
   return DESIGN_PLACEHOLDER_FILE_PATH_RE.test(rawPath.trim())
+}
+
+function isLikelyDesignProgressOnlyText(rawText: string): boolean {
+  const text = rawText.trim()
+  if (!text) return false
+  if (text.includes("<!DOCTYPE") || /<html[\s>]/i.test(text)) return false
+  return text.length <= 500 && DESIGN_PROGRESS_ONLY_TEXT_RE.test(text)
 }
 
 function sanitizeDesignToolArgs(args: Record<string, unknown>): Record<string, unknown> {
@@ -2044,6 +2053,7 @@ export function registerDesignHandlers(): void {
 
         let candidateDraftPath = draftArtifactPath
         let wroteCandidateDraft = false
+        const shouldResetInitialCheckpoint = !hasExistingArtifactHtml && !htmlForIteration
 
         const makeHumanMessage = (messageText: string) =>
           imageData && mimeType
@@ -2451,9 +2461,15 @@ export function registerDesignHandlers(): void {
           return { html: html && isCompleteHtmlDocument(html) ? html : undefined, fullText }
         }
 
+        if (shouldResetInitialCheckpoint) {
+          await closeCheckpointer(threadId)
+          deleteThreadCheckpoint(threadId)
+        }
+
         const initialResult = await runDesignAgentOnce(promptWithArtifact, threadId)
         let html = initialResult.html
         let fullText = initialResult.fullText
+        const firstFailureText = initialResult.fullText
         const sendValidationEvent = (
           status: DesignExecutionStatus,
           content: string,
@@ -2530,6 +2546,8 @@ export function registerDesignHandlers(): void {
           candidateDraftPath = recoveryArtifactPath
           wroteCandidateDraft = false
           const recoveryThreadId = makeDesignAgentArtifactRecoveryThreadId(threadId, recoveryAttempt)
+          await closeCheckpointer(recoveryThreadId)
+          deleteThreadCheckpoint(recoveryThreadId)
           const recoveryInstruction = buildDesignArtifactInstruction(
             recoveryArtifactPath,
             false,
@@ -2548,7 +2566,9 @@ export function registerDesignHandlers(): void {
             recoveryInstruction
           const recoveryResult = await runDesignAgentOnce(recoveryPrompt, recoveryThreadId)
           html = recoveryResult.html
-          fullText = recoveryResult.fullText
+          if (recoveryResult.fullText && !isLikelyDesignProgressOnlyText(recoveryResult.fullText)) {
+            fullText = recoveryResult.fullText
+          }
           if (!html || !isCompleteHtmlDocument(html) || wroteCandidateDraft) {
             const recoveryDraftArtifact = readDesignArtifactFile(recoveryArtifactPath, workspacePath)
             if (recoveryDraftArtifact.success && recoveryDraftArtifact.html && isCompleteHtmlDocument(recoveryDraftArtifact.html)) {
@@ -2574,6 +2594,8 @@ export function registerDesignHandlers(): void {
             const repairThreadId = makeDesignAgentRepairThreadId(threadId, repairAttempt + 1)
             const repairArtifactPath = makeDesignArtifactDraftPath(outputArtifactPath)
             candidateDraftPath = repairArtifactPath
+            await closeCheckpointer(repairThreadId)
+            deleteThreadCheckpoint(repairThreadId)
             const failedSnapshot = writeDesignArtifactSourceSnapshot(outputArtifactPath, html)
             const repairSourcePath = failedSnapshot.success && failedSnapshot.filePath
               ? failedSnapshot.filePath
@@ -2593,7 +2615,9 @@ export function registerDesignHandlers(): void {
               repairArtifactInstruction
             const repairResult = await runDesignAgentOnce(repairPrompt, repairThreadId)
             html = repairResult.html
-            fullText = repairResult.fullText
+            if (repairResult.fullText && !isLikelyDesignProgressOnlyText(repairResult.fullText)) {
+              fullText = repairResult.fullText
+            }
             if (!html || !isCompleteHtmlDocument(html)) {
               const repairDraftArtifact = readDesignArtifactFile(repairArtifactPath, workspacePath)
               if (repairDraftArtifact.success && repairDraftArtifact.html && isCompleteHtmlDocument(repairDraftArtifact.html)) {
@@ -2612,12 +2636,15 @@ export function registerDesignHandlers(): void {
             })
             return
           }
+          const errorText = !fullText.trim() || isLikelyDesignProgressOnlyText(fullText)
+            ? firstFailureText
+            : fullText
           send({
             type: "error",
             error: html && (html.includes("<!DOCTYPE") || /<html[\s>]/i.test(html))
               ? "模型返回的 HTML 不完整，疑似被输出长度限制截断。请调大该模型配置的 max_tokens（最大 Tokens）后重试，或简化页面规模。"
-              : fullText.trim()
-                ? `模型返回了文本但未找到有效的 HTML。请检查模型配置或重试。\n\n模型输出片段：${fullText.slice(0, 300)}`
+              : errorText.trim()
+                ? `模型本轮没有写出完整 HTML artifact。中间过程说明会继续显示，但只有流程结束后仍未生成文件时才会报错。\n\n模型输出片段：${errorText.slice(0, 300)}`
                 : "生成未返回任何内容，请重试。",
           })
           abortAgentSession()
