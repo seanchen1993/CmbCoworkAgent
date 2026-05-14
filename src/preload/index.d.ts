@@ -480,6 +480,8 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; dataUrl?: string; error?: string }>
     // 将业务状态同步到独立宠物窗口；动画渲染不在 renderer 主 UI 中执行。
     setState: (state: PetState) => void
+    // 告知主进程主应用已打开/获得焦点，用于清空宠物完成任务提醒队列。
+    clearCompletedTasks: () => void
     getSettings: () => Promise<PetSettings>
     updateSettings: (settings: Partial<PetSettings>) => Promise<PetSettings>
     uploadCustomFolder: () => Promise<{ success: boolean; pet?: PetManifest; error?: string }>

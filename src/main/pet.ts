@@ -41,7 +41,7 @@ type PetState =
   | "hover"
 
 type PetWindowOptions = {
-  onShowMainWindow: () => void
+  ensureMainWindowVisible: () => BrowserWindow | null
   applyMacDockIcon: () => void
 }
 
@@ -80,15 +80,19 @@ const DEFAULT_PET_STATES: Record<PetState, { y: number; frames: number; fps: num
 }
 
 let petWindow: BrowserWindow | null = null
-let petGreetingWindow: BrowserWindow | null = null
+let petBubbleWindow: BrowserWindow | null = null
 let currentPetState: PetState = "idle"
 let petMoveLastX: number | null = null
 let petDragOffset: { x: number; y: number } | null = null
 let petHoverPollTimer: NodeJS.Timeout | null = null
 let petHovering = false
 let petWindowOptions: PetWindowOptions | null = null
+const completedTaskNotices: Array<{ id: string; threadId: string; title: string }> = []
+let petBubbleHideTimer: NodeJS.Timeout | null = null
+let suppressPetClickUntil = 0
 
 const PET_SETTINGS_FILE = join(getOpenworkDir(), "pet-settings.json")
+const PET_BUBBLE_AUTO_HIDE_MS = 4200
 const DEFAULT_PET_SETTINGS: PetSettings = {
   enabled: true,
   selectedPetKey: null
@@ -96,6 +100,17 @@ const DEFAULT_PET_SETTINGS: PetSettings = {
 
 export function configurePetWindow(options: PetWindowOptions): void {
   petWindowOptions = options
+}
+
+/**
+ * 通过宠物交互唤起主窗口。
+ *
+ * 具体的窗口创建/恢复能力由主进程入口传入，宠物模块只负责在需要时触发该能力。
+ */
+function showMainWindowFromPet(): BrowserWindow | null {
+  const mainWindow = petWindowOptions?.ensureMainWindowVisible() ?? null
+  clearPetCompletedTaskNotices()
+  return mainWindow
 }
 
 export function registerPetHandlers(ipcMain: IpcMain): void {
@@ -119,6 +134,10 @@ export function registerPetHandlers(ipcMain: IpcMain): void {
   ipcMain.on("pet:setState", (_event, state: unknown) => {
     if (!isPetState(state)) return
     updatePetWindowState(state)
+  })
+
+  ipcMain.on("pet:clearCompletedTasks", () => {
+    clearPetCompletedTaskNotices()
   })
 
   ipcMain.handle("pet:getSettings", async () => {
@@ -291,7 +310,7 @@ function getSelectedPet(): PetListItem | null {
 
 function closePetWindow(): void {
   stopPetHoverPolling()
-  closePetGreeting()
+  closePetBubble()
   if (petWindow && !petWindow.isDestroyed()) {
     petWindow.close()
   }
@@ -402,6 +421,63 @@ function escapeHtml(value: string): string {
     .replaceAll("'", "&#39;")
 }
 
+/**
+ * 规范化完成任务气泡中的任务标题。
+ *
+ * 气泡空间有限，这里会去掉多余空白，并把过长标题截断，避免桌面悬浮窗文本溢出。
+ */
+function trimTaskTitle(title: string): string {
+  const text = title.replace(/\s+/g, " ").trim()
+  if (!text) return "任务"
+  return text.length > 18 ? `${text.slice(0, 18)}...` : text
+}
+
+/**
+ * 将待处理任务数量同步到宠物窗口右上角数字 tag。
+ *
+ * tag 在宠物窗口内部渲染，任务数为 0 时隐藏，避免额外创建独立悬浮窗。
+ */
+function updatePetTaskTag(): void {
+  if (!petWindow || petWindow.isDestroyed() || petWindow.webContents.isDestroyed()) return
+  petWindow.webContents
+    .executeJavaScript(`window.setPetTaskCount(${completedTaskNotices.length})`)
+    .catch((error) => console.warn("[Pets] Failed to update task tag:", error))
+}
+
+/**
+ * 清空所有已完成任务提醒。
+ *
+ * 用户打开主应用后，不再逐个按线程扣减，而是直接认为完成提醒已被查看并清空气泡队列。
+ */
+function clearPetCompletedTaskNotices(): void {
+  if (completedTaskNotices.length === 0) return
+  completedTaskNotices.splice(0, completedTaskNotices.length)
+  updatePetTaskTag()
+  closePetBubble()
+}
+
+/**
+ * 记录一个后台完成的任务，并让宠物右上角展示完成数量 tag。
+ *
+ * 仅在应用窗口不处于焦点、且宠物窗口已经存在时生效；不会为了完成提醒主动创建宠物窗口。
+ */
+export function showPetCompletedTaskNotice(threadId: string, title: string): void {
+  const focusedWindow = BrowserWindow.getFocusedWindow()
+  if (focusedWindow?.isFocused()) return
+  if (!petWindow || petWindow.isDestroyed()) return
+  if (!readPetSettings().enabled) return
+
+  const taskTitle = trimTaskTitle(title)
+  completedTaskNotices.push({
+    id: `${threadId}:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+    threadId,
+    title: taskTitle
+  })
+
+  updatePetTaskTag()
+  showPetTaskBubble()
+}
+
 export function createPetWindow(): void {
   if (!readPetSettings().enabled) return
   if (petWindow && !petWindow.isDestroyed()) return
@@ -487,6 +563,7 @@ export function createPetWindow(): void {
       display: grid;
       place-items: center;
       box-sizing: border-box;
+      position: relative;
     }
     canvas {
       width: 96px;
@@ -499,14 +576,38 @@ export function createPetWindow(): void {
       transform: scaleX(var(--pet-facing, 1)) translateZ(0);
       backface-visibility: hidden;
     }
+    #taskTag {
+      position: absolute;
+      right: 8px;
+      top: 6px;
+      z-index: 2;
+      display: none;
+      min-width: 20px;
+      height: 20px;
+      box-sizing: border-box;
+      padding: 0 6px;
+      border: 1px solid rgba(239, 68, 68, 0.28);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.96);
+      color: #dc2626;
+      font: 700 12px/18px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      text-align: center;
+      cursor: pointer;
+      box-shadow: 0 5px 12px rgba(41, 37, 36, 0.18);
+    }
+    #taskTag.show {
+      display: block;
+    }
   </style>
 </head>
 <body>
+  <div id="taskTag"></div>
   <canvas id="pet"></canvas>
   <script>
     const pet = ${JSON.stringify(manifest)};
     const spriteUrl = ${JSON.stringify(pathToFileURL(spritePath).toString())};
     const canvas = document.getElementById("pet");
+    const taskTag = document.getElementById("taskTag");
     const ctx = canvas.getContext("2d");
     const buffer = document.createElement("canvas");
     const bufferCtx = buffer.getContext("2d");
@@ -545,6 +646,27 @@ export function createPetWindow(): void {
     window.clearPetTransientState = function clearPetTransientState(state) {
       clearTransientState(state);
     };
+
+    window.setPetTaskCount = function setPetTaskCount(count) {
+      const safeCount = Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0;
+      taskTag.textContent = String(safeCount);
+      taskTag.classList.toggle("show", safeCount > 0);
+    };
+
+    taskTag.addEventListener("pointerenter", function onTaskTagEnter(event) {
+      event.stopPropagation();
+      document.title = "pet-task-tag-enter:" + Date.now();
+    });
+    taskTag.addEventListener("pointerleave", function onTaskTagLeave(event) {
+      event.stopPropagation();
+      document.title = "pet-task-tag-leave:" + Date.now();
+    });
+    taskTag.addEventListener("pointerdown", function onTaskTagPointerDown(event) {
+      event.stopPropagation();
+    });
+    taskTag.addEventListener("pointerup", function onTaskTagPointerUp(event) {
+      event.stopPropagation();
+    });
 
     function setFacing(direction) {
       if (direction === "left") {
@@ -747,9 +869,16 @@ export function createPetWindow(): void {
     // 宠物窗口启用 sandbox，不能直接访问 Electron API；统一通过 title 事件转发交互。
     if (title === "pet-ready") {
       showPetWindow()
-      showPetGreeting()
+      updatePetTaskTag()
+      showPetGreetingBubble()
     } else if (title.startsWith("pet-click:")) {
-      petWindowOptions?.onShowMainWindow()
+      if (Date.now() < suppressPetClickUntil) return
+      showMainWindowFromPet()
+    } else if (title.startsWith("pet-task-tag-enter:")) {
+      suppressPetClick()
+      showPetTaskBubble()
+    } else if (title.startsWith("pet-task-tag-leave:")) {
+      schedulePetBubbleHide()
     } else if (title.startsWith("pet-pointer-down:")) {
       const [, rawX, rawY] = title.split(":")
       const pointerX = Number(rawX)
@@ -769,6 +898,7 @@ export function createPetWindow(): void {
           Math.round(pointerY - petDragOffset.y),
           false
         )
+        updatePetBubblePosition()
       }
     } else if (title.startsWith("pet-pointer-up:")) {
       petDragOffset = null
@@ -791,12 +921,13 @@ export function createPetWindow(): void {
         `window.setPetTransientState("running", 350, ${JSON.stringify(direction)})`
       )
       .catch((error) => console.warn("[Pets] Failed to update drag state:", error))
+    updatePetBubblePosition()
   })
   startPetHoverPolling()
   currentWindow.on("closed", () => {
     if (petWindow !== currentWindow) return
     stopPetHoverPolling()
-    closePetGreeting()
+    closePetBubble()
     petWindow = null
     petMoveLastX = null
     petDragOffset = null
@@ -805,47 +936,135 @@ export function createPetWindow(): void {
   })
 }
 
-function showPetGreeting(): void {
-  closePetGreeting()
-  if (!petWindow || petWindow.isDestroyed()) return
-
-  const pet = getSelectedPet()
-  // 问候文案中的名称来自宠物配置，避免写死“皮皮”。
-  const petName = escapeHtml(pet?.displayName || pet?.name || pet?.id || "皮皮")
+/**
+ * 根据宠物当前位置计算气泡窗口的位置。
+ *
+ * 气泡优先显示在宠物上方，同时会被限制在当前屏幕工作区内，避免被屏幕边缘裁掉。
+ */
+function getBubbleBounds(width: number, height: number): Electron.Rectangle | null {
+  if (!petWindow || petWindow.isDestroyed()) return null
   const petBounds = petWindow.getBounds()
-  const greetingWidth = 238
-  const greetingHeight = 72
-  const gap = 10
-  const x = Math.max(0, petBounds.x - greetingWidth + 10)
-  const y = Math.max(0, petBounds.y + 16)
+  const display = screen.getDisplayMatching(petBounds)
+  const workArea = display.workArea
+  const preferredX = petBounds.x + Math.round((petBounds.width - width) / 2)
+  const x = Math.min(Math.max(workArea.x, preferredX), workArea.x + workArea.width - width)
+  const preferredY = petBounds.y - height - 8
+  const fallbackY = petBounds.y + petBounds.height + 8
+  const y =
+    preferredY >= workArea.y
+      ? preferredY
+      : Math.min(Math.max(workArea.y, fallbackY), workArea.y + workArea.height - height)
+  return { x: Math.round(x), y: Math.round(y), width, height }
+}
 
-  petGreetingWindow = new BrowserWindow({
-    x,
-    y,
-    width: greetingWidth,
-    height: greetingHeight,
-    transparent: true,
-    frame: false,
-    resizable: false,
-    movable: false,
-    focusable: false,
-    alwaysOnTop: true,
-    // 气泡是提示窗口，不应抢占焦点或出现在任务栏/Dock 中。
-    skipTaskbar: true,
-    show: false,
-    hasShadow: false,
-    backgroundColor: "#00000000",
-    webPreferences: {
-      sandbox: true,
-      contextIsolation: true,
-      nodeIntegration: false
-    }
-  })
-  // 问候气泡不参与交互，鼠标事件继续落到宠物窗口或桌面。
-  petGreetingWindow.setIgnoreMouseEvents(true)
-  petGreetingWindow.setBackgroundColor("#00000000")
-  petGreetingWindow.setAlwaysOnTop(true, "floating")
-  petGreetingWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+/**
+ * 取消气泡的延迟隐藏。
+ *
+ * 鼠标从数字 tag 移向气泡窗口时会短暂离开 tag，这里用于保留气泡，避免闪烁。
+ */
+function cancelPetBubbleHide(): void {
+  if (!petBubbleHideTimer) return
+  clearTimeout(petBubbleHideTimer)
+  petBubbleHideTimer = null
+}
+
+/**
+ * 延迟隐藏气泡。
+ *
+ * 给鼠标从 tag 移动到气泡窗口留出缓冲时间，提升 hover 交互的稳定性。
+ */
+function schedulePetBubbleHide(): void {
+  cancelPetBubbleHide()
+  petBubbleHideTimer = setTimeout(() => {
+    petBubbleHideTimer = null
+    closePetBubble()
+  }, 260)
+}
+
+/**
+ * 临时屏蔽宠物本体点击。
+ *
+ * 任务气泡是独立透明窗口，部分平台在气泡关闭或失焦时可能把鼠标释放事件传给后面的宠物窗口；
+ * 这里用短时间窗口防止这类穿透点击误打开主应用。
+ */
+function suppressPetClick(durationMs = 700): void {
+  suppressPetClickUntil = Date.now() + durationMs
+}
+
+/**
+ * 宠物拖动或移动时，同步更新气泡的位置。
+ *
+ * 气泡是独立 BrowserWindow，因此需要在主进程里跟随宠物窗口手动重定位。
+ */
+function updatePetBubblePosition(): void {
+  if (!petBubbleWindow || petBubbleWindow.isDestroyed()) return
+  const bounds = petBubbleWindow.getBounds()
+  const nextBounds = getBubbleBounds(bounds.width, bounds.height)
+  if (!nextBounds) return
+  petBubbleWindow.setBounds(nextBounds, false)
+}
+
+/**
+ * 展示统一宠物气泡。
+ *
+ * pet ready 的问候和任务完成提醒都复用这一个顶部气泡窗口。
+ */
+function showPetBubble(message: string, autoHideMs = PET_BUBBLE_AUTO_HIDE_MS): void {
+  cancelPetBubbleHide()
+  if (!petWindow || petWindow.isDestroyed()) return
+  const escapedMessage = escapeHtml(message)
+  const bubbleWidth = 286
+  const bubbleHeight = 68
+  const bounds = getBubbleBounds(bubbleWidth, bubbleHeight)
+  if (!bounds) return
+
+  if (!petBubbleWindow || petBubbleWindow.isDestroyed()) {
+    petBubbleWindow = new BrowserWindow({
+      ...bounds,
+      transparent: true,
+      frame: false,
+      resizable: false,
+      movable: false,
+      focusable: false,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      show: false,
+      hasShadow: false,
+      backgroundColor: "#00000000",
+      webPreferences: {
+        sandbox: true,
+        contextIsolation: true,
+        nodeIntegration: false,
+        backgroundThrottling: false
+      }
+    })
+    petBubbleWindow.setBackgroundColor("#00000000")
+    petBubbleWindow.setAlwaysOnTop(true, "floating")
+    petBubbleWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+    petWindowOptions?.applyMacDockIcon()
+    petBubbleWindow.webContents.on("page-title-updated", (event, title) => {
+      event.preventDefault()
+      if (title.startsWith("pet-bubble-enter:")) {
+        suppressPetClick()
+        cancelPetBubbleHide()
+        return
+      }
+      if (title.startsWith("pet-bubble-leave:")) {
+        if (autoHideMs === 0) schedulePetBubbleHide()
+        return
+      }
+      if (title.startsWith("pet-bubble-done:")) {
+        closePetBubble()
+        return
+      }
+    })
+    petBubbleWindow.on("closed", () => {
+      petBubbleWindow = null
+      petWindowOptions?.applyMacDockIcon()
+    })
+  } else {
+    petBubbleWindow.setBounds(bounds, false)
+  }
 
   const html = `<!doctype html>
 <html>
@@ -859,82 +1078,104 @@ function showPetGreeting(): void {
       overflow: hidden;
       background: rgba(0, 0, 0, 0);
       user-select: none;
+      cursor: default;
     }
     body {
       box-sizing: border-box;
-      padding: 8px ${gap}px 8px 8px;
+      padding: 6px 8px 12px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .wrap {
+      position: relative;
+      width: 270px;
     }
     .bubble {
       position: relative;
       box-sizing: border-box;
-      display: inline-block;
-      max-width: 210px;
-      padding: 8px 10px;
-      border: 1px solid rgba(196, 149, 106, 0.45);
+      width: 270px;
+      min-height: 46px;
+      padding: 8px 12px 7px;
+      border: 1px solid rgba(196, 149, 106, 0.5);
       border-radius: 8px;
-      background: rgba(255, 255, 255, 0.96);
+      background: rgba(255, 255, 255, 0.97);
       color: #292524;
-      font: 500 12px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      box-shadow: 0 10px 24px rgba(41, 37, 36, 0.15);
-      opacity: 0;
-      transform: translateY(4px) scale(0.98);
-      transition: opacity 220ms ease, transform 220ms ease;
+      box-shadow: 0 10px 24px rgba(41, 37, 36, 0.16);
     }
     .bubble::after {
       content: "";
       position: absolute;
-      right: -6px;
-      bottom: 12px;
+      left: 50%;
+      bottom: -5px;
       width: 10px;
       height: 10px;
-      border-right: 1px solid rgba(196, 149, 106, 0.45);
-      border-bottom: 1px solid rgba(196, 149, 106, 0.45);
-      background: rgba(255, 255, 255, 0.96);
-      transform: rotate(-45deg);
+      border-bottom: 1px solid rgba(196, 149, 106, 0.5);
+      border-right: 1px solid rgba(196, 149, 106, 0.5);
+      background: rgba(255, 255, 255, 0.97);
+      transform: translateX(-50%) rotate(45deg);
     }
-    .bubble.show {
-      opacity: 1;
-      transform: translateY(0) scale(1);
+    .content {
+      margin: 0;
+      font: 600 12px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      word-break: break-word;
     }
   </style>
 </head>
 <body>
-  <div id="bubble" class="bubble">Hi～我是你的Claw宠物，我叫${petName}～</div>
+  <div class="wrap">
+    <div class="bubble">
+      <div class="content">${escapedMessage}</div>
+    </div>
+  </div>
   <script>
-    const bubble = document.getElementById("bubble");
-    requestAnimationFrame(function show() {
-      bubble.classList.add("show");
-      window.setTimeout(function hide() {
-        bubble.classList.remove("show");
-        window.setTimeout(function closeBubble() {
-          // 通知主进程关闭独立气泡窗口。
-          document.title = "greeting-done";
-        }, 260);
-      }, 4200);
+    document.body.addEventListener("pointerenter", function onEnter() {
+      document.title = "pet-bubble-enter:" + Date.now();
     });
+    document.body.addEventListener("pointerleave", function onLeave() {
+      document.title = "pet-bubble-leave:" + Date.now();
+    });
+    ${autoHideMs > 0 ? `window.setTimeout(function done() { document.title = "pet-bubble-done:" + Date.now(); }, ${autoHideMs});` : ""}
   </script>
 </body>
 </html>`
 
-  petGreetingWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
-  petGreetingWindow.once("ready-to-show", () => {
-    petGreetingWindow?.showInactive()
-  })
-  petGreetingWindow.webContents.on("page-title-updated", (event, title) => {
-    event.preventDefault()
-    if (title === "greeting-done") closePetGreeting()
-  })
-  petGreetingWindow.on("closed", () => {
-    petGreetingWindow = null
+  petBubbleWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
+  petBubbleWindow.once("ready-to-show", () => {
+    petBubbleWindow?.showInactive()
+    petWindowOptions?.applyMacDockIcon()
   })
 }
 
-function closePetGreeting(): void {
-  // 统一关闭入口：宠物销毁、气泡结束、重新显示问候前都会走这里。
-  if (petGreetingWindow && !petGreetingWindow.isDestroyed()) {
-    petGreetingWindow.close()
+/**
+ * 展示 pet ready 后的问候气泡。
+ */
+function showPetGreetingBubble(): void {
+  const pet = getSelectedPet()
+  const petName = pet?.displayName || pet?.name || pet?.id || "皮皮"
+  showPetBubble(`Hi～我是你的Claw宠物，我叫${petName}～`)
+}
+
+/**
+ * 展示后台任务完成气泡。
+ *
+ * 任务完成时只展示数量汇总，不再展示具体任务内容。
+ */
+function showPetTaskBubble(): void {
+  if (completedTaskNotices.length === 0) {
+    closePetBubble()
+    return
   }
-  petGreetingWindow = null
+  showPetBubble(`主人，有 ${completedTaskNotices.length} 个任务已完成～`)
+}
+
+/**
+ * 关闭当前统一宠物气泡窗口。
+ */
+function closePetBubble(): void {
+  cancelPetBubbleHide()
+  if (petBubbleWindow && !petBubbleWindow.isDestroyed()) {
+    petBubbleWindow.close()
+  }
+  petBubbleWindow = null
 }
 
 function startPetHoverPolling(): void {

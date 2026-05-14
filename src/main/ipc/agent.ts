@@ -32,6 +32,7 @@ import {
 } from "../storage"
 import { resolveModel, rememberRoutingDecision, rememberRoutingFeedback } from "../routing"
 import { notifyIfBackground, stripThink } from "../services/notify"
+import { showPetCompletedTaskNotice } from "../pet"
 import { trackEvent } from "../services/event-reporter"
 import { trySendChatXReply } from "../services/chatx"
 import { setAdoptionContext } from "../services/adoption-tracker"
@@ -844,6 +845,19 @@ function emitSkillGenerating(
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send("skill:generating", { threadId, phase, text })
   }
+}
+
+/**
+ * 生成宠物完成气泡中展示的任务名称。
+ *
+ * 优先使用用户显式命名过的线程标题；如果仍是默认线程名，则退回到本轮用户消息摘要。
+ */
+function getCompletedTaskTitle(threadTitle: string | undefined, message: string): string {
+  const title = threadTitle?.trim()
+  if (title && !/^Thread\s+\d{1,2}\/\d{1,2}\/\d{4}$/i.test(title)) return title
+  const prompt = stripThink(message).replace(/\s+/g, " ").trim()
+  if (!prompt) return "任务"
+  return prompt.length > 18 ? `${prompt.slice(0, 18)}...` : prompt
 }
 
 /**
@@ -2304,6 +2318,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         turnStateShouldDispose = true
         window.webContents.send(channel, { type: "done" })
         notifyIfBackground("✅ 任务完成", lastFinalText || assistantText.trim() || "对话已完成")
+        showPetCompletedTaskNotice(
+          threadId,
+          getCompletedTaskTitle(thread?.title ?? undefined, message)
+        )
 
         // Finish trace
         tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())

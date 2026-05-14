@@ -727,6 +727,10 @@ const api = {
     setState: (state: PetState): void => {
       ipcRenderer.send("pet:setState", state)
     },
+    // 告知主进程主应用已打开/获得焦点，用于清空宠物完成任务提醒队列。
+    clearCompletedTasks: (): void => {
+      ipcRenderer.send("pet:clearCompletedTasks")
+    },
     getSettings: (): Promise<PetSettings> => {
       return ipcRenderer.invoke("pet:getSettings") as Promise<PetSettings>
     },

@@ -336,11 +336,15 @@ function createWindow(): void {
   })
 }
 
-function showMainWindowFromPet(): void {
-  // 点击宠物时唤起主窗口：覆盖最小化、隐藏和主窗口被销毁后重建三种情况。
+/**
+ * 确保主窗口可见并获得焦点。
+ *
+ * 供单实例唤起、宠物窗口交互等入口复用，覆盖主窗口被销毁、最小化和隐藏三种情况。
+ */
+function ensureMainWindowVisible(): BrowserWindow | null {
   if (!mainWindow || mainWindow.isDestroyed()) {
     createWindow()
-    return
+    return mainWindow
   }
   if (mainWindow.isMinimized()) {
     mainWindow.restore()
@@ -349,6 +353,7 @@ function showMainWindowFromPet(): void {
     mainWindow.show()
   }
   mainWindow.focus()
+  return mainWindow
 }
 
 // Ensure only a single instance is running (prevents duplicate schedulers on Windows)
@@ -357,10 +362,7 @@ if (!gotTheLock) {
   app.quit()
 } else {
   app.on("second-instance", () => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore()
-      mainWindow.focus()
-    }
+    ensureMainWindowVisible()
   })
 
   app.whenReady().then(async () => {
@@ -372,7 +374,7 @@ if (!gotTheLock) {
     // Set dock icon on macOS
     applyMacDockIcon()
     configurePetWindow({
-      onShowMainWindow: showMainWindowFromPet,
+      ensureMainWindowVisible,
       applyMacDockIcon
     })
 
