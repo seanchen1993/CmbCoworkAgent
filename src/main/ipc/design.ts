@@ -27,6 +27,7 @@ const DESIGN_MODEL_MAX_RETRY_ATTEMPTS = 11 // 1 initial request + 10 retries
 const DESIGN_BROWSER_VALIDATION_TIMEOUT_MS = 8000
 const DESIGN_BROWSER_VALIDATION_SETTLE_MS = 800
 const DESIGN_BROWSER_AUTO_FIX_ATTEMPTS = 1
+const DESIGN_ARTIFACT_WRITE_RECOVERY_ATTEMPTS = 1
 const DESIGN_CHINESE_RESPONSE_INSTRUCTION = `\n\n## Response language\n\n- 始终使用中文输出所有面向用户可见的文本，包括执行过程说明、技能使用说明、工具前后的简短说明、错误解释和最终摘要。\n- 即使读取到的 Skill、参考文件或系统上下文是英文，也要把面向用户展示的过程和总结翻译成中文。\n- 代码、HTML/CSS/JS 标识符、文件路径、工具名和必须保持原样的业务文案不需要翻译。`
 
 // ─────────────────────────────────────────────────────────
@@ -215,9 +216,9 @@ Filesystem tool schema is mandatory:
 
 Use file reads deliberately for HTML and design source files:
 - For Design HTML work, these rules override generic codebase-exploration guidance that suggests an initial 100-line scan.
-- \`read_file\` defaults to 100 lines. For HTML artifacts, uploaded HTML/context files, selected \`SKILL.md\` files, or files you must understand before editing, do not rely on the default.
+- \`read_file\` defaults to 500 lines. For HTML artifacts, uploaded HTML/context files, selected \`SKILL.md\` files, or files you must understand before editing, do not rely on the default.
 - Start with \`read_file\` using \`offset=0\` and \`limit=1000\`. If the tool result indicates there are more lines, continue from the returned offset until you understand the relevant structure.
-- For very large HTML, use focused search and targeted reads to locate \`<!DOCTYPE\`, \`<head>\`, \`<style>\`, \`<body>\`, variation containers, \`EDITMODE-BEGIN\`/\`EDITMODE-END\`, scripts, postMessage handlers, and the exact sections the user asked about. Do not repeatedly reread only the first 100 lines.
+- For very large HTML, use focused search and targeted reads to locate \`<!DOCTYPE\`, \`<head>\`, \`<style>\`, \`<body>\`, variation containers, \`EDITMODE-BEGIN\`/\`EDITMODE-END\`, scripts, postMessage handlers, and the exact sections the user asked about. Do not repeatedly reread only the first page.
 - When iterating on an existing artifact, preserve IDs, variation wrappers, tweak keys, EDITMODE markers, scripts, postMessage listeners, data attributes, and unrelated content unless the user explicitly asks to change them.
 - Read only the uploaded/context/resource files needed for the request. Do not copy unrelated assets or bulk-import resource folders.
 
@@ -463,6 +464,11 @@ function makeDesignAgentThreadId(designSessionId: string | undefined, tabId: str
 
 function makeDesignAgentRepairThreadId(baseThreadId: string, attempt: number): string {
   const suffix = `_repair_${attempt}`
+  return `${baseThreadId.slice(0, Math.max(1, 120 - suffix.length))}${suffix}`
+}
+
+function makeDesignAgentArtifactRecoveryThreadId(baseThreadId: string, attempt: number): string {
+  const suffix = `_artifact_recovery_${attempt}`
   return `${baseThreadId.slice(0, Math.max(1, 120 - suffix.length))}${suffix}`
 }
 
@@ -1110,9 +1116,11 @@ function buildDesignArtifactInstruction(filePath: string, exists: boolean, sourc
     `When calling filesystem tools, use the exact argument names required by the tools: ` +
     `read_file({ file_path, offset, limit }), write_file({ file_path, content }), and edit_file({ file_path, old_string, new_string, replace_all }). ` +
     `Every read_file call MUST include a non-empty string file_path. For HTML artifacts, uploaded HTML/context files, selected SKILL.md files, or any file you must understand before editing, read_file MUST also include numeric offset and limit. ` +
+    `Never use placeholder paths such as TD_PATH, TBD_PATH, OUTPUT_PATH, FILE_PATH, <path>, or [path]. Use only the exact absolute paths printed in this instruction or paths returned by tools. ` +
     `Do not use path, filePath, targetPath, input, params, arguments, oldString, newString, oldText, newText, replace, or replacement as tool argument names. ` +
     `Do not wrap tool arguments inside another object. The top-level tool arguments must exactly match the tool schema. ` +
     `Do not assume write_file has a content-size limit, and do not claim the file is being truncated unless the write_file tool result explicitly reports that exact error. ` +
+    `A read_file result like "[Lines 1-145 of 300. Use offset=145 to read more.]" means pagination, not truncation. Continue with the instructed offset when more context is needed; do not delete or rebuild a file just because read_file returned a page of lines. ` +
     `Prefer writing the complete artifact in one write_file call when practical. If the artifact is too large to produce safely in one tool call, use a chunked file-writing strategy: first call write_file with BOTH required fields exactly as write_file({ file_path: "${filePath}", content: "<!DOCTYPE html>...unique insertion markers...</html>" }), then call edit_file repeatedly with ALL required fields exactly as edit_file({ file_path: "${filePath}", old_string: "UNIQUE_MARKER", new_string: "HTML chunk plus next marker", replace_all: false }), then remove every temporary marker before finishing. ` +
     `Every write_file call MUST include a non-empty string file_path and content. Every edit_file call MUST include non-empty string file_path, old_string, and new_string. ` +
     `To verify the artifact after writing, use read_file({ file_path: "${filePath}", offset: 0, limit: 1000 }) and continue with later offsets if needed; do not use shell commands for verification. ` +
@@ -1136,8 +1144,15 @@ interface AccumulatedDesignToolCall {
 
 type NormalizedDesignToolCall = { id?: string; name?: string; args?: Record<string, unknown> }
 
+const DESIGN_PLACEHOLDER_FILE_PATH_RE =
+  /^(?:TD_PATH|TBD_PATH|TODO_PATH|OUTPUT_PATH|ARTIFACT_PATH|FILE_PATH|PATH|<[^>]+>|\[[^\]]+\])$/i
+
 function truncateDesignToolString(value: string, limit = 500): string {
   return value.length > limit ? `${value.slice(0, limit)}... [truncated ${value.length - limit} chars]` : value
+}
+
+function isPlaceholderDesignFilePath(rawPath: string): boolean {
+  return DESIGN_PLACEHOLDER_FILE_PATH_RE.test(rawPath.trim())
 }
 
 function sanitizeDesignToolArgs(args: Record<string, unknown>): Record<string, unknown> {
@@ -1279,11 +1294,20 @@ function shouldResetDesignCheckpointForRetry(error: unknown): boolean {
 }
 
 function isToolMessageError(kwargs: Record<string, unknown>): boolean {
+  const content = extractTextContent(kwargs.content)
   return (
     kwargs.status === "error" ||
     kwargs.is_error === true ||
-    (kwargs.additional_kwargs as Record<string, unknown> | undefined)?.is_error === true
+    (kwargs.additional_kwargs as Record<string, unknown> | undefined)?.is_error === true ||
+    /^Error (?:reading|writing|editing) file\b/i.test(content.trim()) ||
+    /\bInvalid tool arguments\b/i.test(content)
   )
+}
+
+function isPlaceholderDesignFileToolCall(toolCall: { name?: string; args?: Record<string, unknown> }): boolean {
+  if (toolCall.name !== "read_file" && toolCall.name !== "write_file" && toolCall.name !== "edit_file") return false
+  const rawPath = toolCall.args?.file_path ?? toolCall.args?.path
+  return typeof rawPath === "string" && isPlaceholderDesignFilePath(rawPath)
 }
 
 function normalizeDesignSkillReference(raw: unknown): { name: string; path: string } | null {
@@ -2018,6 +2042,9 @@ export function registerDesignHandlers(): void {
         const promptWithArtifact = `${promptWithSkill}${artifactInstruction}`
         if (htmlForIteration) storeDesignHtml(htmlStoreKey, htmlForIteration)
 
+        let candidateDraftPath = draftArtifactPath
+        let wroteCandidateDraft = false
+
         const makeHumanMessage = (messageText: string) =>
           imageData && mimeType
             ? new HumanMessage({
@@ -2042,6 +2069,11 @@ export function registerDesignHandlers(): void {
           abortSignal: controller.signal,
           retryHooks: buildDesignModelRetryHooks(send),
           maxRetryAttempts: DESIGN_MODEL_MAX_RETRY_ATTEMPTS,
+          onFileMutation: (filePath) => {
+            if (sameResolvedFilePath(filePath, candidateDraftPath)) {
+              wroteCandidateDraft = true
+            }
+          },
         })
 
         const skillUsageDetector = new SkillUsageDetector()
@@ -2238,6 +2270,7 @@ export function registerDesignHandlers(): void {
                         const emitToolCall = (toolCall: NormalizedDesignToolCall) => {
                           if (!toolCall.id) return
                           maybeEmitSkillStart(toolCall)
+                          const placeholderPath = isPlaceholderDesignFileToolCall(toolCall)
                           send({
                             type: "execution",
                             event: {
@@ -2246,7 +2279,11 @@ export function registerDesignHandlers(): void {
                               toolCallId: toolCall.id,
                               name: toolCall.name,
                               args: toolCall.args,
-                              status: "running",
+                              status: placeholderPath ? "error" : "running",
+                              isError: placeholderPath,
+                              content: placeholderPath
+                                ? "文件工具调用使用了占位符路径，请改用指令里的绝对路径。"
+                                : undefined,
                               timestamp: Date.now(),
                             } satisfies DesignExecutionEvent,
                           })
@@ -2305,6 +2342,7 @@ export function registerDesignHandlers(): void {
                   const emitToolCall = (toolCall: NormalizedDesignToolCall) => {
                     if (!toolCall.id) return
                     maybeEmitSkillStart(toolCall)
+                    const placeholderPath = isPlaceholderDesignFileToolCall(toolCall)
                     send({
                       type: "execution",
                       event: {
@@ -2313,7 +2351,11 @@ export function registerDesignHandlers(): void {
                         toolCallId: toolCall.id,
                         name: toolCall.name,
                         args: toolCall.args,
-                        status: "running",
+                        status: placeholderPath ? "error" : "running",
+                        isError: placeholderPath,
+                        content: placeholderPath
+                          ? "文件工具调用使用了占位符路径，请改用指令里的绝对路径。"
+                          : undefined,
                         timestamp: Date.now(),
                       } satisfies DesignExecutionEvent,
                     })
@@ -2412,7 +2454,6 @@ export function registerDesignHandlers(): void {
         const initialResult = await runDesignAgentOnce(promptWithArtifact, threadId)
         let html = initialResult.html
         let fullText = initialResult.fullText
-        let candidateDraftPath = draftArtifactPath
         const sendValidationEvent = (
           status: DesignExecutionStatus,
           content: string,
@@ -2481,6 +2522,37 @@ export function registerDesignHandlers(): void {
           const draftArtifact = readDesignArtifactFile(candidateDraftPath, workspacePath)
           if (draftArtifact.success && draftArtifact.html && isCompleteHtmlDocument(draftArtifact.html)) {
             html = draftArtifact.html
+          }
+        }
+
+        for (let recoveryAttempt = 1; (!html || !isCompleteHtmlDocument(html)) && recoveryAttempt <= DESIGN_ARTIFACT_WRITE_RECOVERY_ATTEMPTS; recoveryAttempt++) {
+          const recoveryArtifactPath = makeDesignArtifactDraftPath(outputArtifactPath)
+          candidateDraftPath = recoveryArtifactPath
+          wroteCandidateDraft = false
+          const recoveryThreadId = makeDesignAgentArtifactRecoveryThreadId(threadId, recoveryAttempt)
+          const recoveryInstruction = buildDesignArtifactInstruction(
+            recoveryArtifactPath,
+            false,
+            sourceFilePathForPrompt
+          )
+          const recoveryPrompt =
+            `${promptWithSkill}\n\n---\n[Artifact write recovery]\n` +
+            `上一轮没有写出完整 HTML artifact。你必须现在直接调用 write_file 写入完整、可独立运行的 HTML 文件。\n\n` +
+            `严格要求：\n` +
+            `1. 只能把最终 artifact 写到这个绝对路径：${recoveryArtifactPath}\n` +
+            `2. 不要输出分析、计划、解释或完整 HTML 到聊天文本；必须使用 write_file。\n` +
+            `3. write_file.content 必须从 <!DOCTYPE html> 开始，并以 </html> 结束。\n` +
+            `4. 不要使用 TD_PATH、TBD_PATH、OUTPUT_PATH、FILE_PATH、<path> 或任何占位符路径。\n` +
+            `5. read_file 的分页提示不是截断。若需要更多内容，按提示 offset 继续读取。\n\n` +
+            recoveryInstruction
+          const recoveryResult = await runDesignAgentOnce(recoveryPrompt, recoveryThreadId)
+          html = recoveryResult.html
+          fullText = recoveryResult.fullText
+          if (!html || !isCompleteHtmlDocument(html) || wroteCandidateDraft) {
+            const recoveryDraftArtifact = readDesignArtifactFile(recoveryArtifactPath, workspacePath)
+            if (recoveryDraftArtifact.success && recoveryDraftArtifact.html && isCompleteHtmlDocument(recoveryDraftArtifact.html)) {
+              html = recoveryDraftArtifact.html
+            }
           }
         }
 

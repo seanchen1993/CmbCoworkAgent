@@ -50,6 +50,11 @@ function hasUsefulArgs(args?: Record<string, unknown>): boolean {
   return Boolean(args && Object.keys(args).length > 0)
 }
 
+function isDesignToolErrorContent(content?: string): boolean {
+  const text = (content ?? "").trim()
+  return /^Error (?:reading|writing|editing) file\b/i.test(text) || /\bInvalid tool arguments\b/i.test(text)
+}
+
 function getToolProgressText(
   call: DesignExecutionEvent,
   status: "running" | "success" | "error",
@@ -67,6 +72,8 @@ function getToolProgressText(
 
   if (status === "error") {
     if (call.name === "read_file") return `读取${target}失败，正在等待模型处理...`
+    if (call.name === "write_file") return `写入${target}失败，正在等待模型处理...`
+    if (call.name === "edit_file") return `修改${target}失败，正在等待模型处理...`
     return `${label}执行失败，正在等待模型处理...`
   }
 
@@ -299,7 +306,8 @@ function DesignExecutionPanel({
             const call = event
             const key = call.toolCallId || call.id || `${call.name}-${call.timestamp}`
             const result = call.toolCallId ? resultsByToolCallId.get(call.toolCallId) : undefined
-            const status = result?.isError || call.status === "error"
+            const hasToolErrorContent = isDesignToolErrorContent(result?.content ?? call.content)
+            const status = result?.isError || call.isError || hasToolErrorContent || call.status === "error"
               ? "error"
               : result || call.status === "success"
                 ? "success"
