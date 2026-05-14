@@ -2,6 +2,8 @@ import { useEffect, useState } from "react"
 import {
   ArrowLeft,
   Brain,
+  ChevronDown,
+  ChevronRight,
   Clock,
   Code2,
   GitBranch,
@@ -15,7 +17,8 @@ import {
   Cpu,
   CircleUser,
   Webhook,
-  Wrench
+  Wrench,
+  type LucideIcon
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useAppStore } from "@/lib/store"
@@ -53,6 +56,56 @@ type CustomizeTab =
   | "codeExecTools"
   | "commitPolicy"
 
+type MenuGroupId = "basic" | "advanced" | "profile"
+
+type MenuItem = {
+  tab: CustomizeTab
+  label: string
+  icon: LucideIcon
+  beta?: boolean
+  truncate?: boolean
+}
+
+type MenuGroup = {
+  id: MenuGroupId
+  label: string
+  items: MenuItem[]
+}
+
+const MENU_GROUPS: MenuGroup[] = [
+  {
+    id: "basic",
+    label: "基础功能",
+    items: [
+      { tab: "skills", label: "技能", icon: Sparkles },
+      { tab: "connectors", label: "MCP 连接器", icon: Plug },
+      { tab: "plugins", label: "插件", icon: Puzzle },
+      { tab: "scheduled", label: "定时任务", icon: Clock },
+      { tab: "market", label: "应用市场", icon: ShoppingBag },
+      { tab: "sandbox", label: "沙盒环境", icon: Shield, beta: true }
+    ]
+  },
+  {
+    id: "advanced",
+    label: "高级特性",
+    items: [
+      { tab: "heartbeat", label: "心跳监控", icon: HeartPulse },
+      { tab: "memory", label: "记忆管理", icon: Brain },
+      { tab: "lsp", label: "Java LSP", icon: Code2, beta: true },
+      { tab: "evolution", label: "自优化", icon: GitBranch, beta: true },
+      { tab: "chatx", label: "机器人管理", icon: Cpu },
+      { tab: "hooks", label: "钩子", icon: Webhook },
+      { tab: "codeExecTools", label: "编程式工具调用", icon: Wrench, beta: true, truncate: true },
+      { tab: "commitPolicy", label: "提交策略", icon: GitCommit }
+    ]
+  },
+  {
+    id: "profile",
+    label: "个人信息",
+    items: [{ tab: "userinfo", label: "个人信息", icon: CircleUser }]
+  }
+]
+
 export function CustomizeView(): React.JSX.Element {
   const {
     setShowCustomizeView,
@@ -64,6 +117,11 @@ export function CustomizeView(): React.JSX.Element {
   const [activeTab, setActiveTab] = useState<CustomizeTab>(
     (customizeInitialTab as CustomizeTab) || "skills"
   )
+  const [expandedGroups, setExpandedGroups] = useState<Record<MenuGroupId, boolean>>({
+    basic: true,
+    advanced: true,
+    profile: true
+  })
 
   useEffect(() => {
     if (customizeInitialTab) {
@@ -76,6 +134,43 @@ export function CustomizeView(): React.JSX.Element {
       setPendingEvolution(false)
     }
   }, [activeTab, pendingEvolution, setPendingEvolution])
+
+  const toggleGroup = (groupId: MenuGroupId): void => {
+    setExpandedGroups((groups) => ({ ...groups, [groupId]: !groups[groupId] }))
+  }
+
+  const renderMenuItem = (item: MenuItem): React.JSX.Element => {
+    const Icon = item.icon
+    const isActive = activeTab === item.tab
+
+    return (
+      <button
+        key={item.tab}
+        className={cn(
+          "cursor-pointer flex items-center gap-3 w-full rounded-md px-2.5 py-1.5 text-sm transition-colors",
+          isActive ? "bg-muted font-medium" : "text-muted-foreground hover:bg-muted/50"
+        )}
+        onClick={() => setActiveTab(item.tab)}
+      >
+        <Icon className="size-3 shrink-0" />
+        <span className="min-w-0 flex-1 truncate whitespace-nowrap text-left">{item.label}</span>
+        {item.tab === "evolution" ? (
+          <div className="ml-auto flex items-center gap-1.5 shrink-0">
+            {pendingEvolution && <span className="size-2 rounded-full bg-orange-500 shrink-0" />}
+            {item.beta && (
+              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400">
+                Beta
+              </span>
+            )}
+          </div>
+        ) : item.beta ? (
+          <span className="ml-auto shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400">
+            Beta
+          </span>
+        ) : null}
+      </button>
+    )
+  }
 
   return (
     <div className="flex h-full overflow-hidden bg-background">
@@ -91,202 +186,37 @@ export function CustomizeView(): React.JSX.Element {
           </Button>
           <span className="text-base font-bold">自定义</span>
         </div>
-        <nav className="px-3 space-y-0.5">
-          <button
-            className={cn(
-              "flex items-center gap-3 w-full rounded-md px-2.5 py-1.5 text-sm transition-colors",
-              activeTab === "skills"
-                ? "bg-muted font-medium"
-                : "text-muted-foreground hover:bg-muted/50"
-            )}
-            onClick={() => setActiveTab("skills")}
-          >
-            <Sparkles className="size-4 shrink-0" />
-            技能
-          </button>
-          <button
-            className={cn(
-              "flex items-center gap-3 w-full rounded-md px-2.5 py-1.5 text-sm transition-colors",
-              activeTab === "connectors"
-                ? "bg-muted font-medium"
-                : "text-muted-foreground hover:bg-muted/50"
-            )}
-            onClick={() => setActiveTab("connectors")}
-          >
-            <Plug className="size-4 shrink-0" />
-            MCP 连接器
-          </button>
-          <button
-            className={cn(
-              "flex items-center gap-3 w-full rounded-md px-2.5 py-1.5 text-sm transition-colors",
-              activeTab === "plugins"
-                ? "bg-muted font-medium"
-                : "text-muted-foreground hover:bg-muted/50"
-            )}
-            onClick={() => setActiveTab("plugins")}
-          >
-            <Puzzle className="size-4 shrink-0" />
-            插件
-          </button>
-          <button
-            className={cn(
-              "flex items-center gap-3 w-full rounded-md px-2.5 py-1.5 text-sm transition-colors",
-              activeTab === "scheduled"
-                ? "bg-muted font-medium"
-                : "text-muted-foreground hover:bg-muted/50"
-            )}
-            onClick={() => setActiveTab("scheduled")}
-          >
-            <Clock className="size-4 shrink-0" />
-            定时任务
-          </button>
-          <button
-            className={cn(
-              "flex items-center gap-3 w-full rounded-md px-2.5 py-1.5 text-sm transition-colors",
-              activeTab === "heartbeat"
-                ? "bg-muted font-medium"
-                : "text-muted-foreground hover:bg-muted/50"
-            )}
-            onClick={() => setActiveTab("heartbeat")}
-          >
-            <HeartPulse className="size-4 shrink-0" />
-            心跳监控
-          </button>
-          <button
-            className={cn(
-              "flex items-center gap-3 w-full rounded-md px-2.5 py-1.5 text-sm transition-colors",
-              activeTab === "memory"
-                ? "bg-muted font-medium"
-                : "text-muted-foreground hover:bg-muted/50"
-            )}
-            onClick={() => setActiveTab("memory")}
-          >
-            <Brain className="size-4 shrink-0" />
-            记忆管理
-          </button>
-          <button
-            className={cn(
-              "flex items-center gap-3 w-full rounded-md px-2.5 py-1.5 text-sm transition-colors",
-              activeTab === "market"
-                ? "bg-muted font-medium"
-                : "text-muted-foreground hover:bg-muted/50"
-            )}
-            onClick={() => setActiveTab("market")}
-          >
-            <ShoppingBag className="size-4 shrink-0" />
-            应用市场
-          </button>
-          <button
-            className={cn(
-              "flex items-center gap-3 w-full rounded-md px-2.5 py-1.5 text-sm transition-colors",
-              activeTab === "lsp"
-                ? "bg-muted font-medium"
-                : "text-muted-foreground hover:bg-muted/50"
-            )}
-            onClick={() => setActiveTab("lsp")}
-          >
-            <Code2 className="size-4 shrink-0" />
-            Java LSP
-            <span className="ml-auto text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400">
-              Beta
-            </span>
-          </button>
-          <button
-            className={cn(
-              "flex items-center gap-3 w-full rounded-md px-2.5 py-1.5 text-sm transition-colors",
-              activeTab === "evolution"
-                ? "bg-muted font-medium"
-                : "text-muted-foreground hover:bg-muted/50"
-            )}
-            onClick={() => setActiveTab("evolution")}
-          >
-            <GitBranch className="size-4 shrink-0" />
-            自优化
-            <div className="ml-auto flex items-center gap-1.5 shrink-0">
-              {pendingEvolution && <span className="size-2 rounded-full bg-orange-500 shrink-0" />}
-              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400">
-                Beta
-              </span>
-            </div>
-          </button>
-          <button
-            className={cn(
-              "flex items-center gap-3 w-full rounded-md px-2.5 py-1.5 text-sm transition-colors",
-              activeTab === "sandbox"
-                ? "bg-muted font-medium"
-                : "text-muted-foreground hover:bg-muted/50"
-            )}
-            onClick={() => setActiveTab("sandbox")}
-          >
-            <Shield className="size-4 shrink-0" />
-            沙盒环境
-            <span className="ml-auto text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400">
-              Beta
-            </span>
-          </button>
-          <button
-            className={cn(
-              "flex items-center gap-3 w-full rounded-md px-2.5 py-1.5 text-sm transition-colors",
-              activeTab === "chatx"
-                ? "bg-muted font-medium"
-                : "text-muted-foreground hover:bg-muted/50"
-            )}
-            onClick={() => setActiveTab("chatx")}
-          >
-            <Cpu className="size-4 shrink-0" />
-            机器人管理
-          </button>
-          <button
-            className={cn(
-              "flex items-center gap-3 w-full rounded-md px-2.5 py-1.5 text-sm transition-colors",
-              activeTab === "userinfo"
-                ? "bg-muted font-medium"
-                : "text-muted-foreground hover:bg-muted/50"
-            )}
-            onClick={() => setActiveTab("userinfo")}
-          >
-            <CircleUser className="size-4 shrink-0" />
-            个人信息
-          </button>
-          <button
-            className={cn(
-              "flex items-center gap-3 w-full rounded-md px-2.5 py-1.5 text-sm transition-colors",
-              activeTab === "hooks"
-                ? "bg-muted font-medium"
-                : "text-muted-foreground hover:bg-muted/50"
-            )}
-            onClick={() => setActiveTab("hooks")}
-          >
-            <Webhook className="size-4 shrink-0" />
-            钩子
-          </button>
-          <button
-            className={cn(
-              "flex items-center gap-3 w-full rounded-md px-2.5 py-1.5 text-sm transition-colors",
-              activeTab === "codeExecTools"
-                ? "bg-muted font-medium"
-                : "text-muted-foreground hover:bg-muted/50"
-            )}
-            onClick={() => setActiveTab("codeExecTools")}
-          >
-            <Wrench className="size-4 shrink-0" />
-            <span className="min-w-0 flex-1 truncate whitespace-nowrap">编程式工具调用</span>
-            <span className="shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400">
-              Beta
-            </span>
-          </button>
-          <button
-            className={cn(
-              "flex items-center gap-3 w-full rounded-md px-2.5 py-1.5 text-sm transition-colors",
-              activeTab === "commitPolicy"
-                ? "bg-muted font-medium"
-                : "text-muted-foreground hover:bg-muted/50"
-            )}
-            onClick={() => setActiveTab("commitPolicy")}
-          >
-            <GitCommit className="size-4 shrink-0" />
-            提交策略
-          </button>
+        <nav className="min-h-0 flex-1 px-3 pb-3 space-y-3 overflow-y-auto">
+          {MENU_GROUPS.map((group) => {
+            const expanded = expandedGroups[group.id]
+
+            return (
+              <div key={group.id} className="space-y-1">
+                <button
+                  className={cn(
+                    "flex h-8 w-full items-center gap-2 rounded-md px-2 text-sm font-semibold transition-colors",
+                    expanded
+                      ? "bg-muted/70 text-foreground"
+                      : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+                  )}
+                  aria-expanded={expanded}
+                  onClick={() => toggleGroup(group.id)}
+                >
+                  {expanded ? (
+                    <ChevronDown className="size-4 shrink-0" />
+                  ) : (
+                    <ChevronRight className="size-4 shrink-0" />
+                  )}
+                  <span className="min-w-0 flex-1 text-left">{group.label}</span>
+                </button>
+                {expanded && (
+                  <div className="space-y-0.5 pl-2 border-l border-border/60 ml-3">
+                    {group.items.map(renderMenuItem)}
+                  </div>
+                )}
+              </div>
+            )
+          })}
         </nav>
       </div>
 

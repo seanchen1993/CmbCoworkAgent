@@ -209,6 +209,62 @@ export function UserPanel({
         dataKey="count"
         nameKey="version"
       />
+
+      {/* User version usage */}
+      <div className="col-span-3 rounded-xl border border-border bg-card p-4">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <h3 className="text-xs font-medium text-muted-foreground">未使用最新版本的用户使用版本情况</h3>
+          {data.latestVersion ? (
+            <span className="rounded-full bg-muted px-2.5 py-1 text-[11px] text-muted-foreground">
+              最新版本 v{data.latestVersion}
+            </span>
+          ) : null}
+        </div>
+        <div className="max-h-[300px] overflow-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-border text-muted-foreground">
+                <th className="text-left py-2 px-2 font-medium">用户 ID</th>
+                <th className="text-left py-2 px-2 font-medium">用户名称</th>
+                <th className="text-left py-2 px-2 font-medium">用户部门</th>
+                <th className="text-left py-2 px-2 font-medium">最近使用版本</th>
+                <th className="text-left py-2 px-2 font-medium">是否最新版本</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.userVersionUsage.map((u) => (
+                <tr
+                  key={u.sapId}
+                  className="border-b border-border/50 hover:bg-muted/30 transition-colors"
+                >
+                  <td className="py-1.5 px-2 text-muted-foreground">{u.sapId}</td>
+                  <td className="py-1.5 px-2 text-foreground">{u.userName || "—"}</td>
+                  <td className="py-1.5 px-2 text-muted-foreground">{u.orgName || "—"}</td>
+                  <td className="py-1.5 px-2 font-medium text-foreground">{u.version || "未知"}</td>
+                  <td className="py-1.5 px-2">
+                    <span
+                      className={`rounded-full px-2 py-0.5 text-[11px] ${
+                        u.isLatestVersion
+                          ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                          : "bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                      }`}
+                    >
+                      {u.isLatestVersion ? "是" : "否"}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+              {data.userVersionUsage.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="py-6 text-center text-muted-foreground">
+                    暂无未使用最新版本的用户
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   )
 }

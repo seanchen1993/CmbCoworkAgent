@@ -63,6 +63,12 @@ import { SkillsByCategorySection } from "./SkillsByCategorySection"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
 import { uploadChatData, ChatReportPayload } from "@/api"
 import { marketApi, MarketItem } from "../../api/market"
+import {
+  buildMarketInstalledFlags,
+  isMarketVersionDifferent,
+  marketInstalledVersionStorage,
+  MarketUpdateBadge
+} from "@/components/customize/MarketUpdateBadge"
 import { insertLog, updateMMJUserInfo } from "../../../js/mmjUtils"
 import { toast } from "sonner"
 import { SlashCommandPopover } from "@/features/slash-commands/SlashCommandPopover"
@@ -77,6 +83,9 @@ type WelcomeSkillCard = {
   skill: SkillMetadata
   label: string
   icon: React.JSX.Element
+  installedVersion?: string | null
+  currentVersion?: string | null
+  updateAvailable?: boolean
 }
 
 type WelcomeSkillSceneGroup = {
@@ -206,13 +215,24 @@ function WelcomeSkillButton(props: {
           {card.icon}
         </div>
         <div className="min-w-0 flex-1">
-          <div
-            className={cn(
-              "text-xs leading-5 truncate whitespace-nowrap",
-              disabled ? "text-muted-foreground line-through" : "text-foreground"
+          <div className="flex min-w-0 items-center gap-1.5">
+            <div
+              className={cn(
+                "min-w-0 flex-1 text-xs leading-5 truncate whitespace-nowrap",
+                disabled ? "text-muted-foreground line-through" : "text-foreground"
+              )}
+            >
+              {label}
+            </div>
+            {/* 仅当市场版本与本地安装版本不一致时展示更新标识；具体版本差异在 tooltip 中展示。 */}
+            {card.updateAvailable && (
+              <MarketUpdateBadge
+                typeLabel="技能"
+                installedVersion={card.installedVersion}
+                currentVersion={card.currentVersion}
+                className="text-[10px] px-1.5 py-0"
+              />
             )}
-          >
-            {label}
           </div>
         </div>
       </div>
@@ -551,6 +571,95 @@ const ROTATING_WORDS = [
   "部署上线"
 ]
 
+const MESSAGE_TIMES_THREAD_VALUE_KEY = "messageTimes"
+const MESSAGE_TIME_ORDER_THREAD_VALUE_KEY = "messageTimeOrder"
+
+// 单条消息的起止时间，统一存为 ISO 字符串，方便写入 thread_values 并在重启后恢复。
+//
+// 这里刻意不保存 duration 字段：
+// 1. duration 是展示层派生值，后续计算规则变化时不需要迁移历史数据。
+// 2. 每条消息都有 start_at/end_at 后，可以按“一个 user 到下一个 user 之前最后一条消息”
+//    的规则实时计算该轮 assistant 总耗时。
+// 3. tool、assistant 多段回复都会自然落在同一个 user 分组内，不需要额外字段标记轮次。
+type MessageTimeValue = {
+  start_at?: string
+  end_at?: string
+}
+
+type MessageTimeMap = Record<string, MessageTimeValue>
+type MessageTimeEntry = MessageTimeValue & { id: string }
+
+const isMessageTimeMap = (value: unknown): value is MessageTimeMap => {
+  return !!value && typeof value === "object" && !Array.isArray(value)
+}
+
+const isMessageTimeEntryArray = (value: unknown): value is MessageTimeEntry[] => {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (entry) =>
+        !!entry && typeof entry === "object" && typeof (entry as { id?: unknown }).id === "string"
+    )
+  )
+}
+
+const getMessageTimeMap = (threadValues?: Record<string, unknown>): MessageTimeMap => {
+  const value = threadValues?.[MESSAGE_TIMES_THREAD_VALUE_KEY]
+  return isMessageTimeMap(value) ? value : {}
+}
+
+const getMessageTimeOrder = (threadValues?: Record<string, unknown>): MessageTimeEntry[] => {
+  const value = threadValues?.[MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]
+  if (isMessageTimeEntryArray(value)) return value
+  // 兼容旧数据：早期只保存了 messageTimes map，没有保存顺序数组。
+  // JS 对普通对象会保留字符串 key 的插入顺序；虽然这不如显式数组可靠，但对旧数据可以
+  // 最大程度恢复出当时写入的消息顺序，避免老会话重启后完全看不到耗时。
+  return Object.entries(getMessageTimeMap(threadValues)).map(([id, time]) => ({ id, ...time }))
+}
+
+// messageTimes 用 id 做精确匹配；messageTimeOrder 用顺序做兜底，解决重启后 checkpoint
+// 重新生成 message id 时，历史耗时无法按 id 命中的问题。
+//
+// 保存两份结构的原因：
+// - messageTimes: 当前会话里 id 稳定，按 id 查找最快也最准确。
+// - messageTimeOrder: app 重启后历史消息来自 LangGraph checkpoint，某些消息 id 可能变化；
+//   此时仍可用“消息展示顺序”和“时间写入顺序”对齐，恢复 start_at/end_at。
+//
+// merge 时不重排已有数组，只更新同 id 的时间并把新 id 追加到末尾，保证顺序数组能持续
+// 表达整条会话的消息时间线。
+const mergeMessageTimeOrder = (
+  existingOrder: MessageTimeEntry[],
+  updates: MessageTimeMap
+): MessageTimeEntry[] => {
+  const nextOrder = [...existingOrder]
+  const indexes = new Map(nextOrder.map((entry, index) => [entry.id, index]))
+
+  for (const [id, time] of Object.entries(updates)) {
+    const nextEntry = { id, ...time }
+    const existingIndex = indexes.get(id)
+    if (existingIndex === undefined) {
+      indexes.set(id, nextOrder.length)
+      nextOrder.push(nextEntry)
+    } else {
+      nextOrder[existingIndex] = { ...nextOrder[existingIndex], ...nextEntry }
+    }
+  }
+
+  return nextOrder
+}
+
+const toDate = (value: Date | string | undefined): Date | undefined => {
+  if (!value) return undefined
+  if (value instanceof Date) return Number.isFinite(value.getTime()) ? value : undefined
+  const parsed = new Date(value)
+  return Number.isFinite(parsed.getTime()) ? parsed : undefined
+}
+
+const toTime = (value: Date | string | undefined): number | null => {
+  const date = toDate(value)
+  return date ? date.getTime() : null
+}
+
 const getMessageText = (content: Message["content"]): string => {
   if (typeof content === "string") return content
   if (!Array.isArray(content)) return ""
@@ -675,6 +784,10 @@ export function ChatContainer({
   const wasLoadingRef = useRef(false)
   const loadingMessageCountRef = useRef(0)
   const [modelContextLimit, setModelContextLimit] = useState<number | undefined>(undefined)
+  const streamMessageTimesRef = useRef<Record<string, { start_at: Date; end_at?: Date }>>({})
+  const streamMessageBaselineIdsRef = useRef<Set<string>>(new Set())
+  const [messageTimes, setMessageTimes] = useState<MessageTimeMap>({})
+  const threadMessageIdsRef = useRef<Set<string>>(new Set())
 
   useEffect(() => {
     const { ipcRenderer } = window.electron
@@ -734,11 +847,9 @@ export function ChatContainer({
   const {
     threads,
     models,
-    loadThreads,
     generateTitleForFirstMessage,
     setShowCustomizeView,
-    setMarketInitialSkillCategory,
-    setMarketInitialSkillDetailName
+    rightPanelCollapsed
   } = useAppStore()
 
   const allSkillsRef = useRef<MarketItem[]>([])
@@ -827,11 +938,27 @@ export function ChatContainer({
 
         console.log(`Installing skill: ${skillName}`)
 
-        // 删除已存在的技能（如果有的话）
         try {
           const skillsMetadata = await window.api.skills.list()
           const existingSkill = skillsMetadata.find((s) => s.name === skillName)
 
+          // 精品技能会在欢迎页初始化时自动补齐。为了避免每次进入会话都重复下载：
+          // 1. 本地没有这个技能：需要安装；
+          // 2. 本地有技能但没有安装版本记录：无法判断是否最新，按用户要求默认重新安装；
+          // 3. 本地安装版本和市场版本不一致：需要删除旧技能后重新安装；
+          // 4. 本地安装版本和市场版本一致：跳过安装，保留现有技能目录。
+          const installedVersion = marketInstalledVersionStorage.getVersion(skillName, "skill")
+          const shouldInstall =
+            !existingSkill ||
+            !installedVersion ||
+            isMarketVersionDifferent(installedVersion, skill.version)
+
+          if (!shouldInstall) {
+            console.log(`Skill ${skillName} is already up to date, skipping install.`)
+            continue
+          }
+
+          // 更新安装时先删除同名技能，避免旧文件残留影响新版本行为。
           if (existingSkill) {
             console.log(`Deleting existing skill: ${existingSkill.path}`)
             await window.api.skills.delete(existingSkill.path)
@@ -847,6 +974,8 @@ export function ChatContainer({
         const response = await marketApi.downloadItem(skillName, "skill", false)
 
         if (response.success) {
+          // 安装成功后记录市场版本，下一次自动安装精品技能时据此判断是否需要重装。
+          marketInstalledVersionStorage.setVersion(skillName, "skill", skill.version)
           console.log(`Successfully installed skill: ${skillName}`)
         } else {
           console.error(`Failed to install skill ${skillName}:`, response.error)
@@ -872,6 +1001,7 @@ export function ChatContainer({
     draftInput: input,
     draftSkill: selectedSkill,
     scheduledTaskLoading,
+    historyLoading,
     scheduledTaskId,
     modelRetry,
     setTodos,
@@ -883,6 +1013,10 @@ export function ChatContainer({
     setDraftInput: setInput,
     setDraftSkill: setSelectedSkill
   } = useCurrentThread(threadId)
+
+  useEffect(() => {
+    threadMessageIdsRef.current = new Set(threadMessages.map((message) => message.id))
+  }, [threadMessages])
 
   // Hook logs live in an external store so updates don't re-render the full provider tree
   const threadContext = useThreadContext()
@@ -915,6 +1049,21 @@ export function ChatContainer({
     setSavedToolDescriptionInput("")
   }, [pendingApproval])
   const isLoading = streamData.isLoading || scheduledTaskLoading
+  const inputDisabled = isLoading || historyLoading
+
+  useEffect(() => {
+    let cancelled = false
+    setMessageTimes({})
+    window.api.threads
+      .get(threadId)
+      .then((thread) => {
+        if (!cancelled) setMessageTimes(getMessageTimeMap(thread?.thread_values))
+      })
+      .catch((error) => console.warn("[ChatContainer] Failed to load message times:", error))
+    return () => {
+      cancelled = true
+    }
+  }, [threadId])
 
   // ── File attachments state ──
   const [attachments, setAttachments] = useState<FileAttachment[]>([])
@@ -1288,38 +1437,130 @@ export function ChatContainer({
 
   const prevLoadingRef = useRef(false)
   useEffect(() => {
-    if (prevLoadingRef.current && !isLoading) {
+    if (!prevLoadingRef.current && isLoading) {
+      // 本轮开始时记录已有 stream 消息，避免把历史回放消息当成本轮新消息计时。
+      //
+      // useStream 的 messages 里会同时包含历史消息和本轮新增消息。如果不先记 baseline，
+      // loading 期间遍历 streamData.messages 时就会把历史 assistant/tool 重新打时间戳，
+      // 导致历史耗时被当前时间污染。
+      streamMessageTimesRef.current = {}
+      streamMessageBaselineIdsRef.current = new Set(
+        ((streamData.messages || []) as StreamMessage[])
+          .map((msg) => msg.id)
+          .filter((id): id is string => !!id)
+      )
+    }
+
+    if (isLoading) {
       for (const rawMsg of streamData.messages) {
         const msg = rawMsg as StreamMessage
-        if (msg.id) {
-          const streamMsg = msg as StreamMessage & { id: string }
-
-          let role: Message["role"] = "assistant"
-          if (streamMsg.type === "human") role = "user"
-          else if (streamMsg.type === "tool")
-            role = "tool" // ✅ 修复: tool 不应映射为 assistant
-          else if (streamMsg.type === "ai") role = "assistant"
-
-          const storeMsg: Message = {
-            id: streamMsg.id,
-            role,
-            content: typeof streamMsg.content === "string" ? streamMsg.content : "",
-            tool_calls: streamMsg.tool_calls,
-            ...(role === "tool" &&
-              streamMsg.tool_call_id && { tool_call_id: streamMsg.tool_call_id }),
-            ...(role === "tool" && streamMsg.name && { name: streamMsg.name }),
-            created_at: new Date()
-          }
-          appendMessage(storeMsg)
+        // 只给本轮新增、且还未落入 threadMessages 的消息打 start_at。
+        //
+        // threadMessages 是当前前端已经 append 到会话状态里的消息；如果消息已经存在，
+        // 说明它已经完成过一次采集或恢复，不能重复覆盖 start_at。
+        if (
+          msg.id &&
+          !streamMessageBaselineIdsRef.current.has(msg.id) &&
+          !threadMessageIdsRef.current.has(msg.id) &&
+          !streamMessageTimesRef.current[msg.id]
+        ) {
+          const startedAt = new Date()
+          streamMessageTimesRef.current[msg.id] = { start_at: startedAt, end_at: startedAt }
         }
       }
     }
+
+    if (prevLoadingRef.current && !isLoading) {
+      const completedAt = new Date()
+      const nextMessageTimes: MessageTimeMap = {}
+      // 只处理本轮流式期间被记录过 start_at 的消息，避免重复 append 历史消息。
+      //
+      // 当前轮可能包含多条 assistant 消息和多条 tool 消息。这里不直接用全部 streamData.messages，
+      // 而是只取 streamMessageTimesRef 中出现过的 id，保证每条要落库的消息都拥有本轮采集到的
+      // start_at/end_at。
+      const currentTurnMessages = ((streamData.messages || []) as StreamMessage[]).filter(
+        (msg): msg is StreamMessage & { id: string } =>
+          !!msg.id && !!streamMessageTimesRef.current[msg.id]
+      )
+
+      currentTurnMessages.forEach((streamMsg, index) => {
+        const trackedTime = streamMessageTimesRef.current[streamMsg.id]
+        const nextStreamMsg = currentTurnMessages[index + 1]
+        const nextStartAt = nextStreamMsg
+          ? streamMessageTimesRef.current[nextStreamMsg.id]?.start_at
+          : undefined
+
+        // 当前消息的 end_at 取下一条消息的 start_at；本轮最后一条消息取停止 loading 的时间。
+        //
+        // 这样每条消息时间段首尾相接：
+        // assistant.start_at -> tool.start_at -> assistant.start_at -> completedAt。
+        // 展示总耗时时，再从 user.start_at 减到“下一个 user 之前最后一条消息”的 end_at，
+        // 就能覆盖中间所有 assistant/tool 的耗时。
+        trackedTime.end_at = nextStartAt ?? completedAt
+
+        let role: Message["role"] = "assistant"
+        if (streamMsg.type === "human") role = "user"
+        else if (streamMsg.type === "tool")
+          role = "tool" // ✅ 修复: tool 不应映射为 assistant
+        else if (streamMsg.type === "ai") role = "assistant"
+
+        nextMessageTimes[streamMsg.id] = {
+          start_at: trackedTime.start_at.toISOString(),
+          end_at: trackedTime.end_at.toISOString()
+        }
+
+        const storeMsg: Message = {
+          id: streamMsg.id,
+          role,
+          content: typeof streamMsg.content === "string" ? streamMsg.content : "",
+          tool_calls: streamMsg.tool_calls,
+          ...(role === "tool" &&
+            streamMsg.tool_call_id && { tool_call_id: streamMsg.tool_call_id }),
+          ...(role === "tool" && streamMsg.name && { name: streamMsg.name }),
+          created_at: new Date(),
+          start_at: trackedTime.start_at,
+          end_at: trackedTime.end_at
+        }
+        appendMessage(storeMsg)
+      })
+
+      if (Object.keys(nextMessageTimes).length > 0) {
+        setMessageTimes((prev) => ({ ...prev, ...nextMessageTimes }))
+        window.api.threads
+          .get(threadId)
+          .then((thread) => {
+            if (!thread) return
+            const existingTimes = getMessageTimeMap(thread.thread_values)
+            return window.api.threads.update(threadId, {
+              thread_values: {
+                ...(thread.thread_values ?? {}),
+                // id map 用于当前会话和 id 稳定时的精确恢复。
+                //
+                // 例如用户还没有关闭 app，只是在同一个运行时切换线程或重新渲染，
+                // message id 仍然可靠，此时直接按 id 取 start_at/end_at。
+                [MESSAGE_TIMES_THREAD_VALUE_KEY]: {
+                  ...existingTimes,
+                  ...nextMessageTimes
+                },
+                // 顺序数组用于 app 重启后，checkpoint 恢复出的 message id 不一致时兜底匹配。
+                //
+                // 它不是用来计算 duration 的新字段，只是保存每条消息时间的展示顺序；
+                // duration 仍由 user.start_at 和分组内最后一条消息 end_at 动态计算。
+                [MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]: mergeMessageTimeOrder(
+                  getMessageTimeOrder(thread.thread_values),
+                  nextMessageTimes
+                )
+              }
+            })
+          })
+          .catch((error) => console.warn("[ChatContainer] Failed to save message times:", error))
+      }
+    }
     prevLoadingRef.current = isLoading
-  }, [isLoading, streamData.messages, loadThreads, appendMessage])
+  }, [isLoading, streamData.messages, threadId, appendMessage])
 
   const displayMessages = useMemo(() => {
     const threadMessageIds = new Set(threadMessages.map((m) => m.id))
-
     const streamingMsgs: Message[] = ((streamData.messages || []) as StreamMessage[])
       .filter((m): m is StreamMessage & { id: string } => !!m.id && !threadMessageIds.has(m.id))
       .map((streamMsg) => {
@@ -1336,12 +1577,33 @@ export function ChatContainer({
           ...(role === "tool" &&
             streamMsg.tool_call_id && { tool_call_id: streamMsg.tool_call_id }),
           ...(role === "tool" && streamMsg.name && { name: streamMsg.name }),
-          created_at: new Date()
+          created_at: new Date(),
+          ...(streamMessageTimesRef.current[streamMsg.id]?.start_at && {
+            start_at: streamMessageTimesRef.current[streamMsg.id].start_at
+          }),
+          ...(streamMessageTimesRef.current[streamMsg.id]?.end_at && {
+            end_at: streamMessageTimesRef.current[streamMsg.id].end_at
+          }),
+          ...(toDate(messageTimes[streamMsg.id]?.start_at) && {
+            start_at: toDate(messageTimes[streamMsg.id]?.start_at)
+          }),
+          ...(toDate(messageTimes[streamMsg.id]?.end_at) && {
+            end_at: toDate(messageTimes[streamMsg.id]?.end_at)
+          })
         }
       })
 
     // Clean up attachment XML tags in user messages for display
-    const allMessages = [...threadMessages, ...streamingMsgs]
+    const allMessages = [...threadMessages, ...streamingMsgs].map((msg) => {
+      const storedTime = messageTimes[msg.id]
+      const startAt = toDate(storedTime?.start_at) ?? msg.start_at ?? msg.created_at
+      const endAt = toDate(storedTime?.end_at) ?? msg.end_at ?? startAt
+      return {
+        ...msg,
+        start_at: startAt,
+        end_at: endAt
+      }
+    })
     return allMessages.map((msg) => {
       if (
         msg.role !== "user" ||
@@ -1369,7 +1631,28 @@ export function ChatContainer({
         fileNames.length > 0 ? `${fileNames.join("\n")}\n\n${textOnly}`.trim() : textOnly
       return { ...msg, content: cleaned }
     })
-  }, [threadMessages, streamData.messages])
+  }, [threadMessages, streamData.messages, messageTimes])
+
+  const assistantDurationsByMessageId = useMemo(() => {
+    const durations = new Map<string, number>()
+    for (let index = 0; index < displayMessages.length; index++) {
+      const currentUser = displayMessages[index]
+      if (currentUser.role !== "user") continue
+
+      const group = displayMessages.slice(index + 1)
+      const nextUserIndex = group.findIndex((message) => message.role === "user")
+      const responseMessages = nextUserIndex >= 0 ? group.slice(0, nextUserIndex) : group
+      const firstAssistant = responseMessages.find((message) => message.role === "assistant")
+      const lastMessageWithEnd = [...responseMessages].reverse().find((message) => message.end_at)
+
+      if (!firstAssistant || !lastMessageWithEnd) continue
+      const startedAt = toTime(currentUser.start_at)
+      const endedAt = toTime(lastMessageWithEnd.end_at)
+      if (startedAt === null || endedAt === null || endedAt <= startedAt) continue
+      durations.set(firstAssistant.id, endedAt - startedAt)
+    }
+    return durations
+  }, [displayMessages])
 
   const userMessageIds = useMemo(
     () => displayMessages.filter((message) => message.role === "user").map((message) => message.id),
@@ -1625,7 +1908,7 @@ export function ChatContainer({
     // future invoker (hotkey, programmatic call) can't accidentally ship the
     // literal "/xxx" text as a message.
     if (slash.mode.kind === "skill") return
-    if ((!input.trim() && attachments.length === 0 && !selectedSkill) || isLoading || !stream)
+    if ((!input.trim() && attachments.length === 0 && !selectedSkill) || inputDisabled || !stream)
       return
 
     if (!currentModel) {
@@ -1724,13 +2007,60 @@ export function ChatContainer({
     }
     displayContent = [displayContent, skillBlock].filter(Boolean).join("\n\n")
 
+    // 用户消息本身不消耗 assistant 响应时间，start_at/end_at 都取发送时刻。
+    //
+    // 但 user.start_at 是本轮耗时计算的起点：展示 CMBDevClaw 后面的 duration 时，会找到
+    // 当前 user 后面的第一条 assistant，再减到下一个 user 之前最后一条消息的 end_at。
+    // 所以 user 也必须持久化 start_at/end_at，否则重启后无法还原该轮起点。
+    const userStartAt = new Date()
     const userMessage: Message = {
       id: crypto.randomUUID(),
       role: "user",
       content: displayContent,
-      created_at: new Date()
+      created_at: new Date(),
+      start_at: userStartAt,
+      end_at: userStartAt
     }
     appendMessage(userMessage)
+    // 用户消息也需要持久化起止时间，后续 duration 用 user.start_at 作为起点。
+    //
+    // 这里先立即写入 thread_values，是为了尽量保证即使 assistant 回复还没结束，
+    // 当前 user 的起点也已经保存下来；assistant/tool 的结束时间会在 loading 结束后补齐。
+    const userMessageTime: MessageTimeMap = {
+      [userMessage.id]: {
+        start_at: userStartAt.toISOString(),
+        end_at: userStartAt.toISOString()
+      }
+    }
+    setMessageTimes((prev) => ({ ...prev, ...userMessageTime }))
+    try {
+      const thread = await window.api.threads.get(threadId)
+      if (thread) {
+        await window.api.threads.update(threadId, {
+          thread_values: {
+            ...(thread.thread_values ?? {}),
+            // 保留 id map，优先支持按 message id 精确恢复。
+            //
+            // user message 在前端先 append，checkpoint 恢复时 id 可能不一定完全一致；
+            // 因此仍需要下面的顺序数组作为兜底。
+            [MESSAGE_TIMES_THREAD_VALUE_KEY]: {
+              ...getMessageTimeMap(thread.thread_values),
+              ...userMessageTime
+            },
+            // 同步维护顺序数组，支持 app 重启后按消息顺序恢复历史耗时。
+            //
+            // 这条 user 时间会成为顺序数组中的一个节点，后续 assistant/tool 时间会继续 append，
+            // 最终形成完整的 user -> assistant/tool... 时间线。
+            [MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]: mergeMessageTimeOrder(
+              getMessageTimeOrder(thread.thread_values),
+              userMessageTime
+            )
+          }
+        })
+      }
+    } catch (error) {
+      console.warn("[ChatContainer] Failed to save user message time:", error)
+    }
 
     if (isFirstMessage) {
       const currentThread = threads.find((t) => t.thread_id === threadId)
@@ -1809,7 +2139,7 @@ export function ChatContainer({
   }
 
   const handleInsertNewline = useCallback((): void => {
-    if (isLoading) return
+    if (inputDisabled) return
 
     const textarea = inputRef.current
     const selectionStart = textarea?.selectionStart ?? input.length
@@ -1824,7 +2154,7 @@ export function ChatContainer({
       target.focus()
       target.setSelectionRange(nextCursor, nextCursor)
     })
-  }, [input, isLoading, setInput])
+  }, [input, inputDisabled, setInput])
 
   // Auto-resize textarea based on content
   const adjustTextareaHeight = (): void => {
@@ -2243,18 +2573,28 @@ export function ChatContainer({
 
   const handleOpenMarketBySecondaryCategory = useCallback(
     (secondaryCategory: string): void => {
-      setMarketInitialSkillCategory(secondaryCategory)
+      useAppStore.setState({
+        marketInitialSkillCategory: secondaryCategory,
+        marketInitialSkillFilters: ["featured", "certified"],
+        marketInitialSkillSearchQuery: null,
+        marketInitialSkillDetailName: null
+      })
       setShowCustomizeView(true, "market")
     },
-    [setMarketInitialSkillCategory, setShowCustomizeView]
+    [setShowCustomizeView]
   )
 
   const handleOpenMarketBySkill = useCallback(
     (skillName: string): void => {
-      setMarketInitialSkillDetailName(skillName)
+      useAppStore.setState({
+        marketInitialSkillCategory: null,
+        marketInitialSkillFilters: null,
+        marketInitialSkillSearchQuery: null,
+        marketInitialSkillDetailName: skillName
+      })
       setShowCustomizeView(true, "market")
     },
-    [setMarketInitialSkillDetailName, setShowCustomizeView]
+    [setShowCustomizeView]
   )
 
   const programmingSkillCards = useMemo(() => {
@@ -2276,6 +2616,48 @@ export function ChatContainer({
     return map
   }, [marketSkillsData])
 
+  const marketSkillUpdateByName = useMemo(() => {
+    // 把市场技能列表转换成“技能名 -> 更新信息”的索引，供“我安装的技能”tab 快速匹配。
+    // 同时写入英文名和中文名两种 key，是因为本地技能元数据和市场展示数据可能使用不同名称。
+    const map = new Map<
+      string,
+      {
+        installedVersion?: string
+        currentVersion?: string | null
+        updateAvailable: boolean
+        displayName: string
+      }
+    >()
+
+    for (const item of marketSkillsData) {
+      // 这里复用 MarketPanel 的版本比较规则：
+      // 只有本地已记录安装版本、市场也返回版本，并且两者不一致时才显示“有更新”。
+      const flags = buildMarketInstalledFlags(item, "skill", true)
+      const updateInfo = {
+        installedVersion: flags.installedVersion,
+        currentVersion: item.version,
+        updateAvailable: flags.updateAvailable,
+        displayName: item.chinese_name || item.name
+      }
+      map.set(item.name, updateInfo)
+      if (item.chinese_name) map.set(item.chinese_name, updateInfo)
+    }
+
+    return map
+  }, [marketSkillsData])
+
+  const getSkillMarketUpdateInfo = useCallback(
+    (skill: SkillMetadata) => {
+      // 优先按本地技能名匹配市场条目；少数技能名来自目录路径时，再用 relativePath 兜底。
+      return (
+        marketSkillUpdateByName.get(skill.name) ||
+        (skill.relativePath ? marketSkillUpdateByName.get(skill.relativePath) : undefined) ||
+        null
+      )
+    },
+    [marketSkillUpdateByName]
+  )
+
   const getSkillSceneCategory = useCallback(
     (skill: SkillMetadata): string => {
       const category =
@@ -2296,7 +2678,9 @@ export function ChatContainer({
         cards.push({
           skill,
           label: getSkillSummary(skill),
-          icon: getSkillIcon(skill)
+          icon: getSkillIcon(skill),
+          // 将市场版本信息挂到技能卡片上，树形渲染时即可决定是否展示“有更新”标识。
+          ...getSkillMarketUpdateInfo(skill)
         })
         groups.set(category, cards)
       }
@@ -2312,7 +2696,7 @@ export function ChatContainer({
         })
         .map(([category, cards]) => ({ category, cards }))
     },
-    [getSkillIcon, getSkillSceneCategory, getSkillSummary]
+    [getSkillIcon, getSkillMarketUpdateInfo, getSkillSceneCategory, getSkillSummary]
   )
 
   const enabledCustomSkillGroups = useMemo(() => {
@@ -2326,6 +2710,19 @@ export function ChatContainer({
     () => buildWelcomeSkillGroups(disabledLocalSkills),
     [buildWelcomeSkillGroups, disabledLocalSkills]
   )
+  const customSkillUpdates = useMemo(
+    () =>
+      // 统计已启用和已禁用的用户技能中有哪些存在市场新版本，用于 tab 上显示更新数量；
+      // 这里只计算数量和卡片标识，不弹 toast，避免进入会话时打扰用户。
+      [...enabledCustomSkills, ...disabledLocalSkills]
+        .map((skill) => ({
+          skill,
+          updateInfo: getSkillMarketUpdateInfo(skill)
+        }))
+        .filter((entry) => entry.updateInfo?.updateAvailable),
+    [disabledLocalSkills, enabledCustomSkills, getSkillMarketUpdateInfo]
+  )
+  const customSkillUpdateCount = customSkillUpdates.length
 
   const helpSceneSkillIds = useMemo(() => new Set(["scheduler-assistant", "skill-creator"]), [])
   const helpSceneSkillCards = useMemo(() => {
@@ -2558,9 +2955,26 @@ export function ChatContainer({
       {nuxDialog}
 
       <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
-        <div className="p-4">
+        <div className={cn("p-4", userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20")}>
           <div className="max-w-3xl mx-auto space-y-4">
-            {displayMessages.length === 0 && !isLoading && (
+            {historyLoading && displayMessages.length === 0 && (
+              <div
+                className="flex min-h-[42vh] items-center justify-center px-4"
+                aria-live="polite"
+                aria-busy="true"
+              >
+                <div className="flex flex-col items-center gap-3 text-center">
+                  <div className="history-loading-icon">
+                    <Clock className="size-5" />
+                  </div>
+                  <div className="space-y-1">
+                    <div className="text-sm font-medium text-foreground">正在加载会话历史</div>
+                    <div className="text-xs text-muted-foreground">内容较多时可能需要几秒钟...</div>
+                  </div>
+                </div>
+              </div>
+            )}
+            {displayMessages.length === 0 && !isLoading && !historyLoading && (
               <div className="pt-6 pb-8">
                 <RotatingHeadline />
                 {skillsLoading ? (
@@ -2617,8 +3031,13 @@ export function ChatContainer({
                         <TabsTrigger value="skills-by-category" className="text-xs">
                           场景技能
                         </TabsTrigger>
-                        <TabsTrigger value="installed-skills" className="text-xs">
+                        <TabsTrigger value="installed-skills" className="text-xs gap-1.5">
                           我安装的技能
+                          {customSkillUpdateCount > 0 && (
+                            <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-teal-100 px-1 text-[10px] font-semibold leading-none text-teal-700 dark:bg-teal-900/40 dark:text-teal-200">
+                              {customSkillUpdateCount}
+                            </span>
+                          )}
                         </TabsTrigger>
                         <TabsTrigger value="help" className="text-xs">
                           帮助
@@ -2810,6 +3229,7 @@ export function ChatContainer({
                     onEditUserMessage={handleEditUserMessage}
                     threadId={threadId}
                     isLoading={isLoading}
+                    assistantDurationMs={assistantDurationsByMessageId.get(message.id)}
                   />
                 </div>
               )
@@ -3168,7 +3588,7 @@ export function ChatContainer({
           </div>
         )}
       {/* Input */}
-      <div className="p-4">
+      <div className={cn("p-4", userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20")}>
         {showGitChangeNotice && (
           <div className="max-w-3xl mx-auto mb-2 flex items-center justify-between gap-3 rounded-xl border border-status-warning/40 bg-status-warning/10 px-3 py-2">
             <div className="min-w-0 flex items-center gap-2 text-[12px] text-foreground">
@@ -3285,7 +3705,7 @@ export function ChatContainer({
                       ? "输入消息或直接发送文件..."
                       : "向 CMBDevClaw 提问，/ 输入命令；Shift + Enter 换行"
                   }
-                  disabled={isLoading}
+                  disabled={inputDisabled}
                   className={cn(
                     "relative z-[1] w-full resize-none bg-transparent overflow-y-auto",
                     "p-4 text-sm placeholder:text-muted-foreground",
@@ -3301,7 +3721,7 @@ export function ChatContainer({
                     <button
                       type="button"
                       disabled={
-                        isLoading ||
+                        inputDisabled ||
                         attachmentLoading ||
                         attachments.length >= MAX_ATTACHMENTS ||
                         totalAttachmentChars >= MAX_TOTAL_CHARS
@@ -3326,7 +3746,7 @@ export function ChatContainer({
                         <TooltipTrigger asChild>
                           <button
                             type="button"
-                            disabled={isLoading}
+                            disabled={inputDisabled}
                             onClick={handleInsertNewline}
                             aria-label="换行"
                             className="cursor-pointer flex items-center justify-center size-7 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
@@ -3352,6 +3772,7 @@ export function ChatContainer({
                       <button
                         type="submit"
                         disabled={
+                          inputDisabled ||
                           (!input.trim() && attachments.length === 0 && !selectedSkill) ||
                           slash.mode.kind === "skill"
                         }
