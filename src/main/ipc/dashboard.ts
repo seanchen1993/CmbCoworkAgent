@@ -606,6 +606,53 @@ function normalizeCommitDetail(hit: EsSearchHit): DashboardCommitDetail {
   }
 }
 
+function normalizeSkillList(skills: string[]): string[] {
+  return Array.from(new Set(skills.map((skill) => skill.trim()).filter(Boolean)))
+}
+
+async function fetchCommitAdoptedSkillMap(commitShas: string[]): Promise<Map<string, string[]>> {
+  const normalizedCommitShas = normalizeSkillList(commitShas).slice(0, 100)
+  if (normalizedCommitShas.length === 0) return new Map()
+
+  const body = {
+    size: 0,
+    query: {
+      bool: {
+        filter: [
+          { term: { eventName: "code_adopt" } },
+          { terms: { "properties.commitSha": normalizedCommitShas } }
+        ]
+      }
+    },
+    aggs: {
+      by_commit: {
+        terms: { field: "properties.commitSha", size: normalizedCommitShas.length },
+        aggs: {
+          by_skill: { terms: { field: "properties.usedSkills", size: 50 } }
+        }
+      }
+    }
+  }
+
+  const raw = asRecord(await esQuery(getEsIndex("event"), body))
+  const buckets = asRecord(asRecord(raw.aggregations).by_commit).buckets
+  if (!Array.isArray(buckets)) return new Map()
+
+  const result = new Map<string, string[]>()
+  for (const bucket of buckets) {
+    const record = asRecord(bucket)
+    const commitSha = asString(record.key)
+    if (!commitSha) continue
+
+    const skillBuckets = asRecord(record.by_skill).buckets
+    const skills = Array.isArray(skillBuckets)
+      ? normalizeSkillList(skillBuckets.map((skillBucket) => asString(asRecord(skillBucket).key)))
+      : []
+    if (skills.length > 0) result.set(commitSha, skills)
+  }
+  return result
+}
+
 // ─────────────────────────────────────────────────────────
 // Dashboard data fetchers
 // ─────────────────────────────────────────────────────────
@@ -1555,12 +1602,23 @@ async function fetchCommitDetails(
   }
   const raw = await esQuery(getEsIndex("event"), body) as EsSearchResponse
   const hits = raw.hits?.hits ?? []
+  const items = hits.map(normalizeCommitDetail)
+  const adoptedSkillMap = await fetchCommitAdoptedSkillMap(
+    items.map((item) => item.commitSha ?? "").filter(Boolean)
+  )
   return {
     total: getTotalHits(raw, hits.length),
     page,
     pageSize,
     pushedOnly,
-    items: hits.map(normalizeCommitDetail)
+    items: items.map((item) => {
+      const adoptedSkills = item.commitSha ? adoptedSkillMap.get(item.commitSha) ?? [] : []
+      return {
+        ...item,
+        usedSkills: adoptedSkills,
+        skillCount: adoptedSkills.length
+      }
+    })
   }
 }
 
