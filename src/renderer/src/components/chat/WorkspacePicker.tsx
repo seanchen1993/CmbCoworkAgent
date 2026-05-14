@@ -25,6 +25,10 @@ interface WorkspacePickerProps {
 type WorkspaceMode = "local" | "worktree"
 type WorktreeItem = { path: string; branch: string; isMain: boolean; createdAt?: Date }
 
+function getFolderName(path: string | null | undefined): string | undefined {
+  return path?.split(/[\\/]/).filter(Boolean).pop()
+}
+
 function PathRow({ label, path, highlight = false }: { label: string; path: string; highlight?: boolean }): React.JSX.Element {
   const [copied, setCopied] = useState(false)
   const [hovered, setHovered] = useState(false)
@@ -38,37 +42,44 @@ function PathRow({ label, path, highlight = false }: { label: string; path: stri
 
   return (
     <div
-      className="flex items-center gap-1.5 group"
+      className="flex flex-col gap-1 group"
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
-      <span className="shrink-0 text-[10px] text-muted-foreground">{label}</span>
-      <div className="relative flex-1 min-w-0">
-        <span
-          className={cn(
-            "block text-[11px] font-mono truncate leading-snug",
-            highlight ? "text-foreground" : "text-muted-foreground"
-          )}
-        >
-          {path}
-        </span>
-        {/* Full path shown on hover */}
-        {hovered && (
-          <div className="absolute bottom-full left-0 mb-1 z-50 max-w-[340px] break-all rounded-md bg-popover border border-border shadow-md px-2.5 py-1.5 text-[11px] font-mono text-foreground leading-relaxed pointer-events-none">
+      <span className="text-[10px] text-muted-foreground">{label}</span>
+      <div className="flex items-start gap-1.5">
+        <div className="relative flex-1 min-w-0">
+          <span
+            className={cn(
+              "block text-[11px] font-mono break-all leading-snug overflow-hidden",
+              highlight ? "text-foreground" : "text-muted-foreground"
+            )}
+            style={{
+              display: "-webkit-box",
+              WebkitBoxOrient: "vertical",
+              WebkitLineClamp: 2
+            }}
+          >
             {path}
-          </div>
-        )}
+          </span>
+          {/* Full path shown on hover */}
+          {hovered && (
+            <div className="absolute bottom-full left-0 mb-1 z-50 max-w-[340px] break-all rounded-md bg-popover border border-border shadow-md px-2.5 py-1.5 text-[11px] font-mono text-foreground leading-relaxed pointer-events-none">
+              {path}
+            </div>
+          )}
+        </div>
+        <button
+          onClick={handleCopy}
+          className="shrink-0 p-0.5 rounded hover:bg-muted"
+          title="复制路径"
+        >
+          {copied
+            ? <CheckCheck className="size-3 text-status-nominal" />
+            : <Copy className="size-3 text-muted-foreground" />
+          }
+        </button>
       </div>
-      <button
-        onClick={handleCopy}
-        className="shrink-0 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded hover:bg-muted"
-        title="复制路径"
-      >
-        {copied
-          ? <CheckCheck className="size-3 text-status-nominal" />
-          : <Copy className="size-3 text-muted-foreground" />
-        }
-      </button>
     </div>
   )
 }
@@ -257,7 +268,7 @@ export function WorkspacePicker({ threadId, onGitStatusChange }: WorkspacePicker
     }
   }
 
-  const folderName = workspacePath?.split("/").pop()
+  const folderName = getFolderName(workspacePath)
 
   return (
     <Popover open={open} onOpenChange={(v) => {
@@ -302,7 +313,7 @@ export function WorkspacePicker({ threadId, onGitStatusChange }: WorkspacePicker
           {workspacePath ? (
             <div className="space-y-3">
               <div className="flex items-center gap-2 p-2 rounded-md bg-background-secondary border border-border">
-                <Check className="size-3.5 text-status-nominal shrink-0" />
+                <Folder className="size-3.5 " />
                 <span className="text-sm truncate flex-1" title={workspacePath}>
                   {isWorktree && worktreeBranch ? worktreeBranch : folderName}
                 </span>
@@ -321,7 +332,7 @@ export function WorkspacePicker({ threadId, onGitStatusChange }: WorkspacePicker
                     <PathRow label="Worktree" path={workspacePath} highlight />
                   </>
                 ) : (
-                  <PathRow label="路径" path={workspacePath} />
+                  <PathRow label="完整路径" path={workspacePath} />
                 )}
               </div>
 
