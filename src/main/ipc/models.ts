@@ -1895,8 +1895,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
     const result = await dialog.showOpenDialog({
       properties: ["openDirectory", "createDirectory"],
-      title: "Select Workspace Folder",
-      message: "Choose a folder for the agent to work in",
+      title: "选择工作区文件夹",
+      message: "请选择代理要工作的文件夹",
       defaultPath
     })
 
