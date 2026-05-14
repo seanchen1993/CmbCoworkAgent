@@ -201,6 +201,14 @@ function DesignExecutionPanel({
   if (selectedSkills.length === 0 && timelineEvents.length === 0) return null
 
   const { visibleEvents, hiddenEventCount } = getVisibleTimelineEvents(timelineEvents)
+  const hasRunningWork = timelineEvents.some((event) => {
+    if (event.kind === "validation") return event.status === "running"
+    if (event.kind !== "tool_call") return false
+    const result = event.toolCallId ? resultsByToolCallId.get(event.toolCallId) : undefined
+    const hasToolErrorContent = isDesignToolErrorContent(result?.content ?? event.content)
+    if (result?.isError || event.isError || hasToolErrorContent || event.status === "error") return false
+    return !result && event.status !== "success"
+  })
 
   const toggleExpanded = (id: string) => {
     setExpanded((prev) => {
@@ -428,11 +436,36 @@ function DesignExecutionPanel({
                 </div>
               </div>
             )
-          })}
+              })}
+              {isStreaming && !hasRunningWork && (
+                <div style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  padding: "7px 10px",
+                  borderRadius: 8,
+                  border: "1px solid #ded8c8",
+                  background: "#fffaf0",
+                  color: "#7a5a12",
+                  fontSize: 12,
+                  lineHeight: 1.5,
+                }}>
+                  <span style={{
+                    width: 12,
+                    height: 12,
+                    borderRadius: "50%",
+                    border: "2px solid #d99a29",
+                    borderTopColor: "transparent",
+                    flexShrink: 0,
+                    animation: "spin 0.8s linear infinite",
+                  }} />
+                  <span>正在生成文件内容...</span>
+                </div>
+              )}
+            </div>
+          )}
         </div>
-      )}
-    </div>
-  )
+      )
 }
 
 function DesignModelRetryNotice({ retry }: { retry: DesignModelRetryState }) {
@@ -471,6 +504,15 @@ function DesignModelRetryNotice({ retry }: { retry: DesignModelRetryState }) {
 export function MessageBubble({ message }: { message: Message }) {
   const isUser = message.role === "user"
   const isQPrompt = message.role === "questions-prompt"
+  const hasAssistantExecutionEvents = !isUser && Boolean(message.executionEvents?.length)
+  const fallbackContent = message.isStreaming
+    ? <span style={{ opacity: 0.4 }}>{message.isIteration ? "正在更新设计..." : "正在生成..."}</span>
+    : ""
+  const shouldRenderBubble =
+    isUser ||
+    Boolean(message.content) ||
+    Boolean(message.modelRetry) ||
+    Boolean(!hasAssistantExecutionEvents && fallbackContent)
 
   if (isQPrompt) {
     return (
@@ -495,8 +537,9 @@ export function MessageBubble({ message }: { message: Message }) {
         </div>
       )}
       {!isUser && <DesignExecutionPanel events={message.executionEvents} isStreaming={message.isStreaming} />}
-      <div style={{ display: "flex", justifyContent: isUser ? "flex-end" : "flex-start" }}>
-        <div style={{ maxWidth: "85%", padding: "9px 13px", borderRadius: isUser ? "16px 16px 4px 16px" : "16px 16px 16px 4px", background: isUser ? "#1a1a1a" : "#f4f3ef", color: isUser ? "#fff" : "#1a1a1a", fontSize: 13, lineHeight: 1.6, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+      {shouldRenderBubble && (
+        <div style={{ display: "flex", justifyContent: isUser ? "flex-end" : "flex-start" }}>
+          <div style={{ maxWidth: "85%", padding: "9px 13px", borderRadius: isUser ? "16px 16px 4px 16px" : "16px 16px 16px 4px", background: isUser ? "#1a1a1a" : "#f4f3ef", color: isUser ? "#fff" : "#1a1a1a", fontSize: 13, lineHeight: 1.6, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
           {isUser && message.attachments && message.attachments.length > 0 && (
             <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: message.content ? 8 : 0 }}>
               {message.attachments.map((att, i) => (
@@ -521,11 +564,10 @@ export function MessageBubble({ message }: { message: Message }) {
           {!isUser && message.modelRetry && (
             <DesignModelRetryNotice retry={message.modelRetry} />
           )}
-          {message.content || (message.isStreaming
-            ? <span style={{ opacity: 0.4 }}>{message.isIteration ? "正在更新设计..." : "正在生成..."}</span>
-            : "")}
+          {message.content || fallbackContent}
+          </div>
         </div>
-      </div>
+      )}
       {isUser && message.skillName && (
         <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 5 }}>
           <span style={{
