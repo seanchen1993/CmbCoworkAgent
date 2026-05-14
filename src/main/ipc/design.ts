@@ -694,12 +694,6 @@ function readDesignArtifactFile(filePath: string | undefined, workspacePath: str
   }
 }
 
-interface DesignArtifactValidationResult {
-  ok: boolean
-  errors: string[]
-  warnings: string[]
-}
-
 interface DesignBrowserValidationIssue {
   type: "console" | "load" | "crash" | "timeout"
   message: string
@@ -712,72 +706,8 @@ interface DesignBrowserValidationResult {
   issues: DesignBrowserValidationIssue[]
 }
 
-function validateDesignArtifactHtml(html: string): DesignArtifactValidationResult {
-  const errors: string[] = []
-  const warnings: string[] = []
-  const trimmed = html.trim()
-
-  if (!isCompleteHtmlDocument(trimmed)) {
-    errors.push("HTML 文档不完整，必须包含 <!DOCTYPE html> 或 <html>，并以 </html> 结束")
-  }
-  if (!/<head[\s>]/i.test(trimmed)) {
-    errors.push("缺少 <head> 标签")
-  }
-  if (!/<body[\s>]/i.test(trimmed)) {
-    errors.push("缺少 <body> 标签")
-  }
-  if (!/<style[\s>]/i.test(trimmed)) {
-    errors.push("缺少内联 <style>，设计稿需要自包含样式")
-  }
-  if (!/<script[\s>]/i.test(trimmed)) {
-    errors.push("缺少内联 <script>，无法注册 EditMode/Tweaks 逻辑")
-  }
-  const editModeBeginCount = (trimmed.match(/EDITMODE-BEGIN/g) ?? []).length
-  const editModeEndCount = (trimmed.match(/EDITMODE-END/g) ?? []).length
-  if (editModeBeginCount !== 1 || editModeEndCount !== 1) {
-    warnings.push("EDITMODE 标记数量不正确，前端会尝试自动补齐")
-  }
-  if (!/TWEAK_DEFAULTS\s*=/.test(trimmed)) {
-    warnings.push("缺少 TWEAK_DEFAULTS 定义，前端会尝试自动补齐")
-  }
-  if (!/__edit_mode_available/.test(trimmed)) {
-    warnings.push("缺少 __edit_mode_available 就绪通知，前端会尝试自动补齐")
-  }
-  if (!/__activate_edit_mode/.test(trimmed) || !/__deactivate_edit_mode/.test(trimmed)) {
-    warnings.push("缺少 EditMode 激活/停用消息处理，前端会尝试自动补齐")
-  }
-  if (!/__edit_mode_set_keys/.test(trimmed)) {
-    warnings.push("未检测到 __edit_mode_set_keys 持久化通知，编辑面板改动可能无法保存")
-  }
-  if (!/applyTweaks\s*\(/.test(trimmed)) {
-    warnings.push("缺少 applyTweaks 调用，前端会尝试自动补齐")
-  }
-  if (/<script\b[^>]*\bsrc\s*=/i.test(trimmed)) {
-    warnings.push("检测到外部 script，Design artifact 应优先自包含")
-  }
-  const externalStylesheets = [...trimmed.matchAll(/<link\b[^>]*rel=["']stylesheet["'][^>]*>/gi)]
-  const nonFontStylesheets = externalStylesheets.filter((match) => {
-    const tag = match[0]
-    const href = tag.match(/\bhref=["']([^"']+)["']/i)?.[1] ?? ""
-    return !/fonts\.(?:googleapis|gstatic)\.com/i.test(href)
-  })
-  if (nonFontStylesheets.length > 0) {
-    warnings.push("检测到非字体外部 stylesheet，Design artifact 应优先自包含")
-  }
-
-  return { ok: errors.length === 0, errors, warnings }
-}
-
-function formatDesignArtifactValidation(result: DesignArtifactValidationResult): string {
-  const parts: string[] = []
-  if (result.errors.length > 0) {
-    parts.push(`错误：${result.errors.join("；")}`)
-  }
-  if (result.warnings.length > 0) {
-    parts.push(`警告：${result.warnings.join("；")}`)
-  }
-  return parts.join("\n") || "HTML 结构和 EditMode 标记检查通过"
-}
+const DESIGN_BROWSER_RUNTIME_ERROR_RE =
+  /^\[DesignValidation(?:Error|UnhandledRejection)\]\s*(.*)$/i
 
 function formatDesignBrowserValidation(result: DesignBrowserValidationResult): string {
   if (result.issues.length === 0) return "浏览器运行校验通过"
@@ -862,10 +792,12 @@ async function validateDesignArtifactInHiddenBrowser(
       const level = typeof eventDetails.level === "string" ? eventDetails.level : legacyLevel === 3 ? "error" : ""
       if (level !== "error") return
       const message = typeof eventDetails.message === "string" ? eventDetails.message : legacyMessage
-      if (!message || /^Failed to load resource:/i.test(message)) return
+      if (!message) return
+      const runtimeError = message.match(DESIGN_BROWSER_RUNTIME_ERROR_RE)
+      if (!runtimeError) return
       issues.push({
         type: "console",
-        message,
+        message: runtimeError[1]?.trim() || message,
         source: typeof eventDetails.sourceId === "string" ? eventDetails.sourceId : legacySourceId,
         line: typeof eventDetails.lineNumber === "number" ? eventDetails.lineNumber : legacyLine,
       })
@@ -1121,6 +1053,7 @@ function buildDesignArtifactInstruction(filePath: string, exists: boolean, sourc
     `Do not wrap tool arguments inside another object. The top-level tool arguments must exactly match the tool schema. ` +
     `Do not assume write_file has a content-size limit, and do not claim the file is being truncated unless the write_file tool result explicitly reports that exact error. ` +
     `A read_file result like "[Lines 1-145 of 300. Use offset=145 to read more.]" means pagination, not truncation. Continue with the instructed offset when more context is needed; do not delete or rebuild a file just because read_file returned a page of lines. ` +
+    `Use write_file only for the first creation of a non-existent output artifact. After any successful write_file to the output path, all later changes to that same path must use edit_file. If write_file reports that the file already exists, do not retry write_file and do not claim the file was deleted; read_file the existing output path, then use edit_file to replace the current content or temporary markers. ` +
     `Prefer writing the complete artifact in one write_file call when practical. If the artifact is too large to produce safely in one tool call, use a chunked file-writing strategy: first call write_file with BOTH required fields exactly as write_file({ file_path: "${filePath}", content: "<!DOCTYPE html>...unique insertion markers...</html>" }), then call edit_file repeatedly with ALL required fields exactly as edit_file({ file_path: "${filePath}", old_string: "UNIQUE_MARKER", new_string: "HTML chunk plus next marker", replace_all: false }), then remove every temporary marker before finishing. ` +
     `Every write_file call MUST include a non-empty string file_path and content. Every edit_file call MUST include non-empty string file_path, old_string, and new_string. ` +
     `To verify the artifact after writing, use read_file({ file_path: "${filePath}", offset: 0, limit: 1000 }) and continue with later offsets if needed; do not use shell commands for verification. ` +
@@ -1148,6 +1081,8 @@ const DESIGN_PLACEHOLDER_FILE_PATH_RE =
   /^(?:TD_PATH|TBD_PATH|TODO_PATH|OUTPUT_PATH|ARTIFACT_PATH|FILE_PATH|PATH|<[^>]+>|\[[^\]]+\])$/i
 const DESIGN_PROGRESS_ONLY_TEXT_RE =
   /^(?:我(?:先|来)?|让我|现在|接下来).{0,80}(?:读取|分析|查看|理解|检查|构建|生成|还原|开始)/u
+const DESIGN_TOOL_MESSAGE_ERROR_RE =
+  /(?:^|\n)\s*(?:Error\b|Cannot\b|Failed\b|Invalid\b|String not found\b|Multiple occurrences found\b|\[Hook blocked\])/i
 
 function truncateDesignToolString(value: string, limit = 500): string {
   return value.length > limit ? `${value.slice(0, limit)}... [truncated ${value.length - limit} chars]` : value
@@ -1308,8 +1243,7 @@ function isToolMessageError(kwargs: Record<string, unknown>): boolean {
     kwargs.status === "error" ||
     kwargs.is_error === true ||
     (kwargs.additional_kwargs as Record<string, unknown> | undefined)?.is_error === true ||
-    /^Error (?:reading|writing|editing) file\b/i.test(content.trim()) ||
-    /\bInvalid tool arguments\b/i.test(content)
+    DESIGN_TOOL_MESSAGE_ERROR_RE.test(content)
   )
 }
 
@@ -2493,15 +2427,6 @@ export function registerDesignHandlers(): void {
           artifactHtml: string,
           showFailureResult: boolean
         ): Promise<{ ok: true } | { ok: false; repairable: boolean; message: string }> => {
-          sendValidationEvent("running", "验证结构中...")
-          const validation = validateDesignArtifactHtml(artifactHtml)
-          const validationMessage = formatDesignArtifactValidation(validation)
-          if (!validation.ok) {
-            if (showFailureResult) sendValidationEvent("error", validationMessage, true)
-            lastValidationFailureMessage = validationMessage
-            return { ok: false, repairable: true, message: validationMessage }
-          }
-
           const validationDraftPath = makeDesignArtifactDraftPath(outputArtifactPath)
           const draftSave = saveDesignArtifactFile(
             validationDraftPath,
@@ -2518,12 +2443,13 @@ export function registerDesignHandlers(): void {
             return { ok: false, repairable: false, message: lastValidationFailureMessage }
           }
 
-          sendValidationEvent("running", "验证运行中...")
+          sendValidationEvent("running", "浏览器校验中...")
           const browserValidation = await validateDesignArtifactInHiddenBrowser(draftSave.filePath, controller.signal)
           const browserValidationMessage = formatDesignBrowserValidation(browserValidation)
           lastValidationFailureMessage = browserValidationMessage
           if (!browserValidation.ok) {
             if (showFailureResult) sendValidationEvent("error", browserValidationMessage, true)
+            else sendValidationEvent("running", "浏览器校验未通过，正在自动修复...")
             return { ok: false, repairable: true, message: browserValidationMessage }
           }
 
@@ -2642,9 +2568,9 @@ export function registerDesignHandlers(): void {
           send({
             type: "error",
             error: html && (html.includes("<!DOCTYPE") || /<html[\s>]/i.test(html))
-              ? "模型返回的 HTML 不完整，疑似被输出长度限制截断。请调大该模型配置的 max_tokens（最大 Tokens）后重试，或简化页面规模。"
+              ? "模型本轮没有写出完整 HTML artifact。分块写入可能未完成，请重试或缩小页面规模。"
               : errorText.trim()
-                ? `模型本轮没有写出完整 HTML artifact。中间过程说明会继续显示，但只有流程结束后仍未生成文件时才会报错。\n\n模型输出片段：${errorText.slice(0, 300)}`
+                ? "模型本轮没有写出完整 HTML artifact。已停止本次生成，请重试或缩小页面规模。"
                 : "生成未返回任何内容，请重试。",
           })
           abortAgentSession()

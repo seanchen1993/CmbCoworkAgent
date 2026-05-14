@@ -94,6 +94,9 @@ function makeFileHref(filePath: string): string {
 const MAX_DESIGN_PROGRESS_TEXT_CHARS = 1200
 const DESIGN_HTML_PROGRESS_TEXT = "正在生成 HTML 设计稿..."
 const DESIGN_HTML_PROGRESS_PATTERN = /```html|<!doctype|<html[\s>]|<head[\s>]|<body[\s>]|<style[\s>]|<script[\s>]/i
+const DESIGN_TOOL_MARKUP_PROGRESS_PATTERN =
+  /(?:[<＜]\s*[|｜]?DSML[|｜]?\s*[>＞]|tool Calls|invoke name=|parameter name=|<\/\s*[|｜]?DSML[|｜]?\s*>)/i
+const DESIGN_TOOL_PROGRESS_LINE_PATTERN = /^\s*(?:读取文件|写入文件|修改文件|编辑文件):/i
 const THINK_OPEN_PATTERN = /<think\b[^>]*>?/i
 const THINK_CLOSE_PATTERN = /<\/think>/i
 const THINK_PARTIAL_OPEN_PATTERN = /<t(?:h(?:i(?:n(?:k(?:\b[^>]*)?)?)?)?)?$/i
@@ -157,6 +160,8 @@ function createDesignProgressNormalizer(): (token: string) => string {
 
     visible = visible.replace(THINK_CLOSE_PATTERN, "")
     if (!visible.trim()) return ""
+    if (DESIGN_TOOL_MARKUP_PROGRESS_PATTERN.test(visible)) return ""
+    if (DESIGN_TOOL_PROGRESS_LINE_PATTERN.test(visible) || /^OK$/i.test(visible.trim())) return ""
 
     if (DESIGN_HTML_PROGRESS_PATTERN.test(visible)) {
       insideHtmlArtifact = true

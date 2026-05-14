@@ -5,6 +5,10 @@ import type { DesignExecutionEvent, DesignModelRetryState, Message } from "./typ
 
 const MAX_VISIBLE_TOOL_CALLS = 60
 const MAX_VISIBLE_ASSISTANT_TEXT_EVENTS = 80
+const DESIGN_TOOL_ERROR_CONTENT_RE =
+  /(?:^|\n)\s*(?:Error\b|Cannot\b|Failed\b|Invalid\b|String not found\b|Multiple occurrences found\b|\[Hook blocked\])/i
+const DESIGN_TOOL_MARKUP_TEXT_RE =
+  /(?:[<＜]\s*[|｜]?DSML[|｜]?\s*[>＞]|tool Calls|invoke name=|parameter name=|<\/\s*[|｜]?DSML[|｜]?\s*>)/i
 
 function getDesignToolLabel(name: string): string {
   return getToolLabel(name, { showToolName: false })
@@ -52,7 +56,7 @@ function hasUsefulArgs(args?: Record<string, unknown>): boolean {
 
 function isDesignToolErrorContent(content?: string): boolean {
   const text = (content ?? "").trim()
-  return /^Error (?:reading|writing|editing) file\b/i.test(text) || /\bInvalid tool arguments\b/i.test(text)
+  return DESIGN_TOOL_ERROR_CONTENT_RE.test(text)
 }
 
 function getToolProgressText(
@@ -89,9 +93,13 @@ function getToolProgressText(
 function sanitizeProgressText(content: string): string {
   const text = content.replace(/<think>[\s\S]*?<\/think>/gi, "").trim()
   if (!text) return ""
+  if (DESIGN_TOOL_MARKUP_TEXT_RE.test(text)) return ""
+  if (/^(?:读取文件|写入文件|修改文件|编辑文件):/i.test(text)) return ""
+  if (/^OK$/i.test(text)) return ""
   if (/<!doctype|<html|<head|<body|<style|<script/i.test(text)) {
     return "正在生成 HTML 设计稿..."
   }
+  if (text === "正在生成 HTML 设计稿...") return text
   if (text.length > 360) return `${text.slice(0, 360)}...`
   return text
 }
