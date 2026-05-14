@@ -506,7 +506,8 @@ export function PluginsPanel(): React.JSX.Element {
   const openPublishDialog = useCallback(
     (plugin: PluginMetadata) => {
       const key = plugin.name.trim().toLowerCase()
-      setPublishMode(uploadedPluginNames.has(key) ? "update" : "upload")
+      const hasMarketRecord = Boolean(marketPluginMap[key])
+      setPublishMode(uploadedPluginNames.has(key) && hasMarketRecord ? "update" : "upload")
       setPublishTarget({
         type: "plugin",
         name: plugin.name,
@@ -689,7 +690,9 @@ export function PluginsPanel(): React.JSX.Element {
             : undefined
         }
         publishLabel={
-          selectedPlugin && uploadedPluginNames.has(selectedPlugin.name.trim().toLowerCase())
+          selectedPlugin &&
+          uploadedPluginNames.has(selectedPlugin.name.trim().toLowerCase()) &&
+          marketPluginMap[selectedPlugin.name.trim().toLowerCase()]
             ? "更新到市场"
             : "发布到市场"
         }
