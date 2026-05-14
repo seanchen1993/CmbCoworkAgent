@@ -781,7 +781,7 @@ async function fetchUserStats(range: TimeRange, granularity: Granularity, opts?:
               size: 1,
               sort: [{ startedAt: { order: "desc" } }],
               _source: {
-                includes: ["userName", "orgName", "upperOrgLv0", "upperOrgLv1", "appVersion"]
+                includes: ["userName", "orgName", "upperOrgLv0", "upperOrgLv1", "appVersion", "startedAt"]
               }
             }
           }
@@ -792,7 +792,30 @@ async function fetchUserStats(range: TimeRange, granularity: Granularity, opts?:
       by_org_uv: buildOrgDistributionAgg(selectedUpperOrgLv1, "uv"),
       by_version: {
         terms: { field: "appVersion", size: 20 },
-        aggs: { unique_users: { cardinality: { field: "sapId" } } }
+        aggs: {
+          unique_users: { cardinality: { field: "sapId" } },
+          users: {
+            terms: { field: "sapId", size: 200 },
+            aggs: {
+              latest_user_info: {
+                top_hits: {
+                  size: 1,
+                  sort: [{ startedAt: { order: "desc" } }],
+                  _source: {
+                    includes: [
+                      "userName",
+                      "orgName",
+                      "upperOrgLv0",
+                      "upperOrgLv1",
+                      "appVersion",
+                      "startedAt"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     }
   }
