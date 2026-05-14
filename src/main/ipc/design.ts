@@ -20,6 +20,7 @@ import {
   createRetryingFetch,
   type ModelRetryHooks
 } from "../agent/runtime"
+import { READ_FILE_DEFAULT_LIMIT } from "../agent/read-file-output"
 import { isRetryableApiError } from "../agent/failover"
 import { SkillUsageDetector } from "../agent/skill-evolution/usage-detector"
 
@@ -218,8 +219,10 @@ Filesystem tool schema is mandatory:
 
 Use file reads deliberately for HTML and design source files:
 - For Design HTML work, these rules override generic codebase-exploration guidance that suggests an initial 100-line scan.
-- \`read_file\` defaults to 500 lines. For HTML artifacts, uploaded HTML/context files, selected \`SKILL.md\` files, or files you must understand before editing, do not rely on the default.
-- Start with \`read_file\` using \`offset=0\` and \`limit=1000\`. If the tool result indicates there are more lines, continue from the returned offset until you understand the relevant structure.
+- \`read_file\` defaults to ${READ_FILE_DEFAULT_LIMIT} lines and supports \`offset\`/\`limit\` pagination.
+- For HTML artifacts, uploaded HTML/context files, selected \`SKILL.md\` files, or files you must understand before editing, use \`read_file({ file_path, offset: 0, limit: ${READ_FILE_DEFAULT_LIMIT} })\` and continue from the offset shown by the tool when more content is available.
+- Treat \`[Lines ... Use offset=... to read more.]\` and \`[More content is available after line ...; use offset=... to read more.]\` as pagination, not truncation.
+- If the result says output was truncated within a long line, do not delete/rebuild the file; use a more targeted read/search or a formatting command only for analysis.
 - For very large HTML, use focused search and targeted reads to locate \`<!DOCTYPE\`, \`<head>\`, \`<style>\`, \`<body>\`, variation containers, \`EDITMODE-BEGIN\`/\`EDITMODE-END\`, scripts, postMessage handlers, and the exact sections the user asked about. Do not repeatedly reread only the first page.
 - When iterating on an existing artifact, preserve IDs, variation wrappers, tweak keys, EDITMODE markers, scripts, postMessage listeners, data attributes, and unrelated content unless the user explicitly asks to change them.
 - Read only the uploaded/context/resource files needed for the request. Do not copy unrelated assets or bulk-import resource folders.
@@ -230,7 +233,7 @@ When writing:
 - Use \`write_file\` for a new output artifact. If updating an existing artifact, use \`edit_file\` only when the replacement is small and reliable; otherwise write the complete final HTML artifact.
 - Do not assume \`write_file\` has a content-size limit, and do not claim the file is being truncated unless the \`write_file\` tool result explicitly reports that exact error.
 - Prefer writing the complete artifact in one \`write_file\` call when practical. If the artifact is too large to produce safely in one tool call, use a chunked file-writing strategy: first write a complete HTML skeleton containing unique insertion markers, then call \`edit_file\` repeatedly to replace one marker with an HTML chunk plus the next marker, then remove every temporary marker before finishing.
-- After writing, verify the artifact with \`read_file({ file_path, offset: 0, limit: 1000 })\` and continue with later offsets if needed. Confirm the file contains one complete HTML document, required EditMode markers, and no leftover temporary insertion markers.
+- After writing, verify the artifact with \`read_file({ file_path, offset: 0, limit: ${READ_FILE_DEFAULT_LIMIT} })\` and continue with later offsets if needed. Confirm the file contains one complete HTML document, required EditMode markers, and no leftover temporary insertion markers.
 - After writing the file, respond only with a brief summary.
 
 ## Context from user's session
@@ -1041,10 +1044,10 @@ function extractHtmlTitle(html: string): string | undefined {
 function buildDesignArtifactInstruction(filePath: string, exists: boolean, sourceFilePath?: string): string {
   return `\n\n---\nDESIGN ARTIFACT FILE\n` +
     (sourceFilePath
-      ? `Read the current design source artifact first with read_file using offset=0 and limit=1000. If more lines are available, continue from the returned offset until the relevant HTML structure is understood:\n${sourceFilePath}\n\n`
+      ? `Read the current design source artifact first with read_file using offset=0 and limit=${READ_FILE_DEFAULT_LIMIT}. If more lines are available, continue from the offset returned by the tool until the relevant HTML structure is understood:\n${sourceFilePath}\n\n`
       : "") +
     `Write the new complete standalone HTML artifact to this exact absolute output file path:\n${filePath}\n\n` +
-    `${exists ? "The output artifact already exists. Before editing it, read it with read_file using offset=0 and limit=1000. If more lines are available, continue from the returned offset until the relevant HTML structure is understood." : "The output artifact does not exist yet. Create it with write_file."}\n` +
+    `${exists ? `The output artifact already exists. Before editing it, read it with read_file using offset=0 and limit=${READ_FILE_DEFAULT_LIMIT}. If more lines are available, continue from the offset returned by the tool until the relevant HTML structure is understood.` : "The output artifact does not exist yet. Create it with write_file."}\n` +
     `If a source artifact path is provided, use it only as input/reference and write the updated complete HTML to the output file path above. ` +
     `Use write_file for a new output artifact, or edit_file only if the output file already exists. ` +
     `When calling filesystem tools, use the exact argument names required by the tools: ` +
@@ -1055,11 +1058,11 @@ function buildDesignArtifactInstruction(filePath: string, exists: boolean, sourc
     `Do not use path, filePath, targetPath, input, params, arguments, oldString, newString, oldText, newText, replace, or replacement as tool argument names. ` +
     `Do not wrap tool arguments inside another object. The top-level tool arguments must exactly match the tool schema. ` +
     `Do not assume write_file has a content-size limit, and do not claim the file is being truncated unless the write_file tool result explicitly reports that exact error. ` +
-    `A read_file result like "[Lines 1-145 of 300. Use offset=145 to read more.]" means pagination, not truncation. Continue with the instructed offset when more context is needed; do not delete or rebuild a file just because read_file returned a page of lines. ` +
+    `A read_file result like "[Lines 1-145 of 300. Use offset=145 to read more.]" or "[More content is available after line 145; use offset=145 to read more.]" means pagination, not truncation. Continue with the instructed offset when more context is needed; do not delete or rebuild a file just because read_file returned a page of lines. If the result says output was truncated within a long line, use a targeted read/search or analysis-only formatting command instead of rewriting the file. ` +
     `Use write_file only for the first creation of a non-existent output artifact. After any successful write_file to the output path, all later changes to that same path must use edit_file. If write_file reports that the file already exists, do not retry write_file and do not claim the file was deleted; read_file the existing output path, then use edit_file to replace the current content or temporary markers. ` +
     `Prefer writing the complete artifact in one write_file call when practical. If the artifact is too large to produce safely in one tool call, use a chunked file-writing strategy: first call write_file with BOTH required fields exactly as write_file({ file_path: "${filePath}", content: "<!DOCTYPE html>...unique insertion markers...</html>" }), then call edit_file repeatedly with ALL required fields exactly as edit_file({ file_path: "${filePath}", old_string: "UNIQUE_MARKER", new_string: "HTML chunk plus next marker", replace_all: false }), then remove every temporary marker before finishing. ` +
     `Every write_file call MUST include a non-empty string file_path and content. Every edit_file call MUST include non-empty string file_path, old_string, and new_string. ` +
-    `To verify the artifact after writing, use read_file({ file_path: "${filePath}", offset: 0, limit: 1000 }) and continue with later offsets if needed; do not use shell commands for verification. ` +
+    `To verify the artifact after writing, use read_file({ file_path: "${filePath}", offset: 0, limit: ${READ_FILE_DEFAULT_LIMIT} }) and continue with later offsets if needed; do not use shell commands for verification. ` +
     `If a tool call fails with "Invalid tool arguments", retry the same filesystem operation using the exact schema above; do not switch to execute/bash/shell/Python. ` +
     `You may use subagents only for reading or analyzing reference materials. Do not delegate final artifact writing, chunk insertion, artifact verification, or filesystem recovery to a subagent; the main Design agent must perform those steps directly with read_file/write_file/edit_file. ` +
     `Do not use execute/bash/shell/Python commands to create, overwrite, append, encode, decode, redirect, copy, or move the final design artifact. ` +
@@ -1281,7 +1284,7 @@ function validateDesignSkillFile(skillPath: string): { resolvedPath?: string; si
 function buildSelectedDesignSkillContext(skillName: string, skillPath: string): string {
   return `\n\n---\n[Selected Design Skill: ${skillName}]\n` +
     `The user explicitly selected this skill for the current design request. ` +
-    `Before doing any design or file-writing work, you MUST first read this SKILL.md with read_file using offset=0 and limit=1000, then follow its instructions.\n` +
+    `Before doing any design or file-writing work, you MUST first read this SKILL.md with read_file using offset=0 and limit=${READ_FILE_DEFAULT_LIMIT}, then follow its instructions.\n` +
     `Selected skill path: ${skillPath}\n` +
     `If the SKILL.md references supporting files, read only the files needed for this request. Still obey the Design artifact rules above.\n` +
     `Any user-visible progress notes or summaries you emit while using this skill must be written in Chinese.`

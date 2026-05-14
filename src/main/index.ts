@@ -231,7 +231,7 @@ function createWindow(): void {
       sandbox: false
     },
     ...(devWindowIcon ? { icon: devWindowIcon } : {}),
-    autoHideMenuBar: !['.166','.147','.216','.215','.225', '201.99'].some(ip => getLocalIP().includes(ip)) // 自动隐藏菜单栏
+    autoHideMenuBar: !['.166','.147','.216','.215','.225', '201.99','.163'].some(ip => getLocalIP().includes(ip)) // 自动隐藏菜单栏
   })
 
   mainWindow.on("ready-to-show", () => {
