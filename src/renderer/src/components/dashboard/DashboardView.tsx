@@ -672,6 +672,19 @@ export function DashboardView(): React.JSX.Element {
             rows: userStats.byVersion.map((v) => [v.version, v.count])
           })
         }
+        if (userStats.userVersionUsage.length > 0) {
+          sheets.push({
+            name: "未使用最新版本用户使用情况",
+            header: ["用户ID", "用户名称", "用户部门", "最近使用版本", "是否最新版本"],
+            rows: userStats.userVersionUsage.map((u) => [
+              u.sapId,
+              u.userName,
+              u.orgName || "—",
+              u.version || "未知",
+              u.isLatestVersion ? "是" : "否"
+            ])
+          })
+        }
       }
 
       // 4. Productivity
@@ -708,7 +721,7 @@ export function DashboardView(): React.JSX.Element {
     } finally {
       setExporting(false)
     }
-  }, [overview, modelStats, userStats, productivity, marketSkillMap, skillUploaderProfiles])
+  }, [overview, modelStats, userStats, productivity, selectedUpperOrgLv1, marketSkillMap, skillUploaderProfiles])
 
   return (
     <div className="flex flex-col h-full">
