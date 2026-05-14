@@ -29,6 +29,7 @@ export function SkillEvolutionReviewPanel(): React.JSX.Element {
   const [diff, setDiff] = useState("")
   const [loading, setLoading] = useState(false)
   const [actionLoading, setActionLoading] = useState<string | null>(null)
+  const [useLocalDebugEndpoint, setUseLocalDebugEndpoint] = useState(() => evolutionApi.isLocalDebugEndpointEnabled())
   const selected = useMemo(
     () => items.find((item) => item.candidate_id === selectedId) || items[0] || null,
     [items, selectedId]
@@ -77,6 +78,16 @@ export function SkillEvolutionReviewPanel(): React.JSX.Element {
 
   const reviewer = localStorage.getItem("userName") || localStorage.getItem("ystId") || "admin"
 
+  const toggleLocalDebugEndpoint = useCallback(() => {
+    const next = !useLocalDebugEndpoint
+    evolutionApi.setLocalDebugEndpointEnabled(next)
+    setUseLocalDebugEndpoint(next)
+    setItems([])
+    setSelectedId(null)
+    setDiff("")
+    void load()
+  }, [load, useLocalDebugEndpoint])
+
   async function runAction(action: "approve" | "reject" | "publish" | "unpublish" | "delete", candidate: EvolutionCandidate): Promise<void> {
     if (action === "delete") {
       if (!confirm(`确定要删除候选 ${candidate.skill_name} (${candidate.candidate_id}) 吗？此操作不可撤销。`)) return
@@ -113,10 +124,31 @@ export function SkillEvolutionReviewPanel(): React.JSX.Element {
     <div className="flex flex-1 overflow-hidden bg-[#faf9f5]">
       <div className="w-[360px] border-r border-[#ebe8dd] flex flex-col">
         <div className="p-5 border-b border-[#ebe8dd]">
-          <div className="flex items-center justify-between">
-            <div>
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
               <h2 className="text-lg font-semibold text-[#181713]">技能进化审批</h2>
               <p className="mt-1 text-sm text-[#7b7970]">审阅 Trace Evolver 生成的候选补丁。</p>
+              <div className="mt-3 flex min-w-0 items-center gap-2 text-xs text-[#7b7970]">
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={useLocalDebugEndpoint}
+                  onClick={toggleLocalDebugEndpoint}
+                  className={cn(
+                    "relative h-5 w-9 shrink-0 rounded-full border transition-colors",
+                    useLocalDebugEndpoint ? "border-[#3b68a8] bg-[#3b68a8]" : "border-[#d8d3c2] bg-[#eeeae0]"
+                  )}
+                  title="开启后所有 Trace Evolver 请求走本地 8017"
+                >
+                  <span
+                    className={cn(
+                      "absolute top-0.5 size-4 rounded-full bg-white shadow transition-transform",
+                      useLocalDebugEndpoint ? "translate-x-4" : "translate-x-0.5"
+                    )}
+                  />
+                </button>
+                <span className="min-w-0 text-left">连接本地Trace Evolver服务(开发者调试使用)</span>
+              </div>
             </div>
             <Button variant="ghost" size="sm" onClick={() => void load()} disabled={loading}>
               {loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCcw className="size-4" />}

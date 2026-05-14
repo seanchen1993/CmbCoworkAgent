@@ -1,13 +1,17 @@
 function normalizeBaseUrl(value: string | undefined): string {
-  return value?.trim().replace(/\/+$/, "") || ""
+  const raw = value?.trim().replace(/\/+$/, "") || ""
+  if (!raw) return ""
+  return /^https?:\/\//i.test(raw) ? raw : `http://${raw}`
 }
 
-const TRACE_EVOLVER_BASE_URL =
+const TRACE_EVOLVER_LOCAL_DEBUG_URL = "http://127.0.0.1:8017"
+const TRACE_EVOLVER_CONFIGURED_BASE_URL =
   normalizeBaseUrl(import.meta.env.VITE_TRACE_EVOLVER_ENDPOINT as string | undefined) ||
-  "http://127.0.0.1:8017"
+  TRACE_EVOLVER_LOCAL_DEBUG_URL
 const USE_DEV_MOCK =
   import.meta.env.DEV &&
   String(import.meta.env.VITE_TRACE_EVOLVER_MOCK ?? "true").trim().toLowerCase() !== "false"
+const LOCAL_DEBUG_ENDPOINT_KEY = "trace-evolver-use-local-debug-endpoint"
 const IGNORED_EVOLUTION_UPDATES_KEY = "trace-evolver-ignored-update-candidates"
 const ADOPTED_EVOLUTION_UPDATES_KEY = "trace-evolver-adopted-update-candidates"
 
@@ -68,6 +72,30 @@ export interface EvolutionRunRequest {
 
 function isNetworkError(error: unknown): boolean {
   return error instanceof TypeError
+}
+
+function isLocalDebugEndpointEnabled(): boolean {
+  try {
+    return localStorage.getItem(LOCAL_DEBUG_ENDPOINT_KEY) === "true"
+  } catch {
+    return false
+  }
+}
+
+function setLocalDebugEndpointEnabled(enabled: boolean): void {
+  try {
+    localStorage.setItem(LOCAL_DEBUG_ENDPOINT_KEY, String(enabled))
+  } catch {
+    // ignore storage failures; the current call site state still updates.
+  }
+}
+
+function traceEvolverBaseUrl(): string {
+  return isLocalDebugEndpointEnabled() ? TRACE_EVOLVER_LOCAL_DEBUG_URL : TRACE_EVOLVER_CONFIGURED_BASE_URL
+}
+
+function shouldUseDevMock(error: unknown): boolean {
+  return USE_DEV_MOCK && !isLocalDebugEndpointEnabled() && isNetworkError(error)
 }
 
 function nowIso(offsetMs = 0): string {
@@ -363,7 +391,7 @@ function candidateFromAdoptionRecord(record: EvolutionAdoptionRecord): Evolution
 }
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${TRACE_EVOLVER_BASE_URL}${path}`, {
+  const response = await fetch(`${traceEvolverBaseUrl()}${path}`, {
     ...init,
     headers: {
       "Content-Type": "application/json",
@@ -378,6 +406,26 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const evolutionApi = {
+  getEndpoint(): string {
+    return traceEvolverBaseUrl()
+  },
+
+  getConfiguredEndpoint(): string {
+    return TRACE_EVOLVER_CONFIGURED_BASE_URL
+  },
+
+  getLocalDebugEndpoint(): string {
+    return TRACE_EVOLVER_LOCAL_DEBUG_URL
+  },
+
+  isLocalDebugEndpointEnabled(): boolean {
+    return isLocalDebugEndpointEnabled()
+  },
+
+  setLocalDebugEndpointEnabled(enabled: boolean): void {
+    setLocalDebugEndpointEnabled(enabled)
+  },
+
   async createRun(payload: EvolutionRunRequest): Promise<{ run_id: string; status: string }> {
     try {
       return await requestJson("/evolution/runs", {
@@ -385,7 +433,7 @@ export const evolutionApi = {
         body: JSON.stringify(payload)
       })
     } catch (error) {
-      if (!USE_DEV_MOCK || !isNetworkError(error)) throw error
+      if (!shouldUseDevMock(error)) throw error
       return { run_id: `run-dev-${payload.skill_name}-${Date.now()}`, status: "exported" }
     }
   },
@@ -394,7 +442,7 @@ export const evolutionApi = {
     try {
       return await requestJson(`/evolution/candidates?status=${encodeURIComponent(status)}&limit=${limit}`)
     } catch (error) {
-      if (!USE_DEV_MOCK || !isNetworkError(error)) throw error
+      if (!shouldUseDevMock(error)) throw error
       return devListCandidates(status).slice(0, limit)
     }
   },
@@ -433,27 +481,27 @@ export const evolutionApi = {
     try {
       return await requestJson(`/evolution/candidates/${encodeURIComponent(candidateId)}`)
     } catch (error) {
-      if (!USE_DEV_MOCK || !isNetworkError(error)) throw error
+      if (!shouldUseDevMock(error)) throw error
       return devCandidate(candidateId)
     }
   },
 
   async getDiff(candidateId: string): Promise<string> {
     try {
-      const response = await fetch(`${TRACE_EVOLVER_BASE_URL}/evolution/candidates/${encodeURIComponent(candidateId)}/diff`)
+      const response = await fetch(`${traceEvolverBaseUrl()}/evolution/candidates/${encodeURIComponent(candidateId)}/diff`)
       if (!response.ok) {
         throw new Error(`Failed to load diff: ${response.status}`)
       }
       return response.text()
     } catch (error) {
-      if (!USE_DEV_MOCK || !isNetworkError(error)) throw error
+      if (!shouldUseDevMock(error)) throw error
       return devDiff(candidateId)
     }
   },
 
   async downloadCandidateBundle(candidateId: string): Promise<{ blob: Blob; filename: string }> {
     try {
-      const response = await fetch(`${TRACE_EVOLVER_BASE_URL}/evolution/candidates/${encodeURIComponent(candidateId)}/bundle.zip`)
+      const response = await fetch(`${traceEvolverBaseUrl()}/evolution/candidates/${encodeURIComponent(candidateId)}/bundle.zip`)
       if (!response.ok) {
         throw new Error(`Failed to download candidate bundle: ${response.status}`)
       }
@@ -462,7 +510,7 @@ export const evolutionApi = {
       const filename = contentDisposition?.match(/filename="?([^"]+)"?/)?.[1] || `${candidateId}.zip`
       return { blob, filename }
     } catch (error) {
-      if (!USE_DEV_MOCK || !isNetworkError(error)) throw error
+      if (!shouldUseDevMock(error)) throw error
       return devCandidateZip(candidateId)
     }
   },
@@ -474,7 +522,7 @@ export const evolutionApi = {
         body: JSON.stringify({ reviewer, notes })
       })
     } catch (error) {
-      if (!USE_DEV_MOCK || !isNetworkError(error)) throw error
+      if (!shouldUseDevMock(error)) throw error
       return { ...devCandidate(candidateId), status: "approved", evolution_status: "approved", approved_by: reviewer || "trace-evolver-dev", notes }
     }
   },
@@ -486,7 +534,7 @@ export const evolutionApi = {
         body: JSON.stringify({ reviewer, notes })
       })
     } catch (error) {
-      if (!USE_DEV_MOCK || !isNetworkError(error)) throw error
+      if (!shouldUseDevMock(error)) throw error
       return { ...devCandidate(candidateId), status: "rejected", evolution_status: "rejected", rejected_by: reviewer || "trace-evolver-dev", notes }
     }
   },
@@ -508,7 +556,7 @@ export const evolutionApi = {
         body: JSON.stringify({ reviewer })
       })
     } catch (error) {
-      if (!USE_DEV_MOCK || !isNetworkError(error)) throw error
+      if (!shouldUseDevMock(error)) throw error
       return { ...devCandidate(candidateId), status: "published", evolution_status: "published", approved_by: reviewer || "trace-evolver-dev" }
     }
   },
@@ -519,7 +567,7 @@ export const evolutionApi = {
         method: "POST"
       })
     } catch (error) {
-      if (!USE_DEV_MOCK || !isNetworkError(error)) throw error
+      if (!shouldUseDevMock(error)) throw error
       return {
         ...devCandidate(candidateId),
         status: "approved",
