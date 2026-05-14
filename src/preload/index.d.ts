@@ -34,6 +34,18 @@ import type {
   SavedCodeExecPreviewResult,
   SavedCodeExecToolUpdatePayload
 } from "../main/ipc/code-exec-tools"
+import type {
+  HarnessProjectCreateInput,
+  HarnessProjectDetailViewModel,
+  HarnessProjectListItem,
+  HarnessProjectMetadata,
+  HarnessProjectMetadataUpdateInput,
+  HarnessRunDetailViewModel,
+  HarnessSessionBinding,
+  HarnessSessionBindingUpsertInput,
+  HarnessSkillRegistryItem,
+  HarnessWatchRefChangedEvent
+} from "../shared/harness-board-types"
 
 interface ElectronAPI {
   openExternal: (url: string) => Promise<void>
@@ -996,6 +1008,20 @@ interface CustomAPI {
     exportExcel: (
       sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>
     ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
+  }
+  harnessBoard: {
+    registry: () => Promise<HarnessSkillRegistryItem[]>
+    listProjects: () => Promise<HarnessProjectListItem[]>
+    createProject: (input: HarnessProjectCreateInput) => Promise<HarnessProjectMetadata>
+    updateProject: (
+      projectId: string,
+      input: HarnessProjectMetadataUpdateInput
+    ) => Promise<HarnessProjectMetadata>
+    archiveProject: (projectId: string) => Promise<HarnessProjectMetadata>
+    getProjectDetail: (projectId: string) => Promise<HarnessProjectDetailViewModel>
+    getRunDetail: (projectId: string, slug: string) => Promise<HarnessRunDetailViewModel>
+    linkSession: (input: HarnessSessionBindingUpsertInput) => Promise<HarnessSessionBinding>
+    onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void) => () => void
   }
   update: {
     check: () => Promise<

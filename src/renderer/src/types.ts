@@ -88,6 +88,24 @@ import type {
   SavedCodeExecPreviewResult,
   SavedCodeExecToolUpdatePayload
 } from "../../main/ipc/code-exec-tools"
+import type {
+  HarnessArtifact,
+  HarnessHookLogView,
+  HarnessProjectCreateInput,
+  HarnessProjectDetailViewModel,
+  HarnessProjectListItem,
+  HarnessProjectMetadata,
+  HarnessProjectMetadataUpdateInput,
+  HarnessRunDetailViewModel,
+  HarnessRunNode,
+  HarnessFeatureSummary,
+  HarnessSessionBinding,
+  HarnessSessionBindingUpsertInput,
+  HarnessSkillRegistryItem,
+  HarnessStatus,
+  HarnessWatchRefChangedEvent,
+  HarnessWorkflow
+} from "../../shared/harness-board-types"
 
 export type {
   McpConnectorAdvanced,
@@ -122,6 +140,25 @@ export type {
   ManagedSavedCodeExecTool,
   SavedCodeExecPreviewResult,
   SavedCodeExecToolUpdatePayload
+}
+
+export type {
+  HarnessArtifact,
+  HarnessHookLogView,
+  HarnessProjectCreateInput,
+  HarnessProjectDetailViewModel,
+  HarnessProjectListItem,
+  HarnessProjectMetadata,
+  HarnessProjectMetadataUpdateInput,
+  HarnessRunDetailViewModel,
+  HarnessRunNode,
+  HarnessFeatureSummary,
+  HarnessSessionBinding,
+  HarnessSessionBindingUpsertInput,
+  HarnessSkillRegistryItem,
+  HarnessStatus,
+  HarnessWatchRefChangedEvent,
+  HarnessWorkflow
 }
 
 export type StreamEvent =

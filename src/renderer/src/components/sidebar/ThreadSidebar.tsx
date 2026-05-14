@@ -7,6 +7,7 @@ import {
   AlertCircle,
   Briefcase,
   LayoutDashboard,
+  Workflow,
   Cpu,
   Terminal,
   BarChart3,
@@ -293,6 +294,8 @@ export function ThreadSidebar(): React.JSX.Element {
     setShowCustomizeView,
     showKanbanView,
     setShowKanbanView,
+    showHarnessBoardView,
+    setShowHarnessBoardView,
     showClaudeCodeView,
     setShowClaudeCodeView,
     showDashboardView,
@@ -605,6 +608,20 @@ export function ThreadSidebar(): React.JSX.Element {
             <LayoutDashboard className="size-3" />
           </div>
           <span className="text-muted-foreground">看板视图</span>
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className={cn(
+            "w-full justify-start gap-2 text-sm font-semibold",
+            showHarnessBoardView && "bg-muted"
+          )}
+          onClick={() => setShowHarnessBoardView(!showHarnessBoardView)}
+        >
+          <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
+            <Workflow className="size-3" />
+          </div>
+          <span className="text-muted-foreground">项目看板</span>
         </Button>
         <Button
           variant="ghost"

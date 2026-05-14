@@ -35,6 +35,18 @@ import type {
   SavedCodeExecPreviewResult,
   SavedCodeExecToolUpdatePayload
 } from "../main/ipc/code-exec-tools"
+import type {
+  HarnessProjectCreateInput,
+  HarnessProjectDetailViewModel,
+  HarnessProjectListItem,
+  HarnessProjectMetadata,
+  HarnessProjectMetadataUpdateInput,
+  HarnessRunDetailViewModel,
+  HarnessSessionBinding,
+  HarnessSessionBindingUpsertInput,
+  HarnessSkillRegistryItem,
+  HarnessWatchRefChangedEvent
+} from "../shared/harness-board-types"
 
 interface LspDownloadProgress {
   percent: number
@@ -1756,6 +1768,32 @@ const api = {
       sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>
     ): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> =>
       ipcRenderer.invoke("dashboard:exportExcel", sheets)
+  },
+  harnessBoard: {
+    registry: (): Promise<HarnessSkillRegistryItem[]> =>
+      ipcRenderer.invoke("harnessBoard:registry") as Promise<HarnessSkillRegistryItem[]>,
+    listProjects: (): Promise<HarnessProjectListItem[]> =>
+      ipcRenderer.invoke("harnessBoard:listProjects") as Promise<HarnessProjectListItem[]>,
+    createProject: (input: HarnessProjectCreateInput): Promise<HarnessProjectMetadata> =>
+      ipcRenderer.invoke("harnessBoard:createProject", input) as Promise<HarnessProjectMetadata>,
+    updateProject: (
+      projectId: string,
+      input: HarnessProjectMetadataUpdateInput
+    ): Promise<HarnessProjectMetadata> =>
+      ipcRenderer.invoke("harnessBoard:updateProject", { projectId, input }) as Promise<HarnessProjectMetadata>,
+    archiveProject: (projectId: string): Promise<HarnessProjectMetadata> =>
+      ipcRenderer.invoke("harnessBoard:archiveProject", projectId) as Promise<HarnessProjectMetadata>,
+    getProjectDetail: (projectId: string): Promise<HarnessProjectDetailViewModel> =>
+      ipcRenderer.invoke("harnessBoard:getProjectDetail", projectId) as Promise<HarnessProjectDetailViewModel>,
+    getRunDetail: (projectId: string, slug: string): Promise<HarnessRunDetailViewModel> =>
+      ipcRenderer.invoke("harnessBoard:getRunDetail", { projectId, slug }) as Promise<HarnessRunDetailViewModel>,
+    linkSession: (input: HarnessSessionBindingUpsertInput): Promise<HarnessSessionBinding> =>
+      ipcRenderer.invoke("harnessBoard:linkSession", input) as Promise<HarnessSessionBinding>,
+    onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void): (() => void) => {
+      const handler = (_event: unknown, payload: HarnessWatchRefChangedEvent): void => callback(payload)
+      ipcRenderer.on("harnessBoard:watchRefsChanged", handler)
+      return () => ipcRenderer.removeListener("harnessBoard:watchRefsChanged", handler)
+    }
   },
   update: {
     check: (): Promise<

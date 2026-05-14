@@ -2,6 +2,14 @@ import { create } from "zustand"
 import type { Thread, ModelConfig, Provider } from "@/types"
 
 type EvolutionTab = "candidates" | "traces"
+type MainView =
+  | "thread"
+  | "customize"
+  | "evolution"
+  | "kanban"
+  | "harness"
+  | "claudecode"
+  | "dashboard"
 
 interface EvolutionRunProgress {
   runId: string
@@ -15,7 +23,7 @@ interface EvolutionRunProgress {
 
 interface AppState {
   // Main content view routing
-  mainView: "thread" | "customize" | "evolution" | "kanban" | "claudecode" | "dashboard"
+  mainView: MainView
 
   // Threads
   threads: Thread[]
@@ -38,6 +46,9 @@ interface AppState {
   // Kanban view state
   showKanbanView: boolean
   showSubagentsInKanban: boolean
+
+  // Harness board view state
+  showHarnessBoardView: boolean
 
   // Claude Code view state
   showClaudeCodeView: boolean
@@ -85,12 +96,15 @@ interface AppState {
   setShowKanbanView: (show: boolean) => void
   setShowSubagentsInKanban: (show: boolean) => void
 
+  // Harness board actions
+  setShowHarnessBoardView: (show: boolean) => void
+
   // Customize actions
   setShowCustomizeView: (show: boolean, tab?: string) => void
   setMarketInitialSkillCategory: (category: string | null) => void
   setMarketInitialSkillSearchQuery: (query: string | null) => void
   setMarketInitialSkillDetailName: (name: string | null) => void
-  setMainView: (view: "thread" | "customize" | "evolution" | "kanban" | "claudecode" | "dashboard") => void
+  setMainView: (view: MainView) => void
 
   // Plugin state sync — increment to trigger RightPanel refresh
   pluginVersion: number
@@ -153,6 +167,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   mainView: "thread",
   showKanbanView: false,
   showSubagentsInKanban: true,
+  showHarnessBoardView: false,
   showClaudeCodeView: false,
   showDashboardView: false,
   dashboardAllowed: null,
@@ -190,6 +205,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       threads: [thread, ...state.threads],
       currentThreadId: thread.thread_id,
       showKanbanView: false,
+      showHarnessBoardView: false,
       showCustomizeView: false,
       showClaudeCodeView: false,
       showDashboardView: false,
@@ -205,6 +221,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({
       currentThreadId: threadId,
       showKanbanView: false,
+      showHarnessBoardView: false,
       showCustomizeView: false,
       showClaudeCodeView: false,
       showDashboardView: false,
@@ -302,6 +319,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({
         showClaudeCodeView: true,
         showKanbanView: false,
+        showHarnessBoardView: false,
         showCustomizeView: false,
         showDashboardView: false,
         mainView: "claudecode",
@@ -332,6 +350,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         showDashboardView: true,
         showClaudeCodeView: false,
         showKanbanView: false,
+        showHarnessBoardView: false,
         showCustomizeView: false,
         mainView: "dashboard",
         previousThreadId: prev,
@@ -354,6 +373,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       const prev = get().previousThreadId || get().currentThreadId
       set({
         showKanbanView: true,
+        showHarnessBoardView: false,
         showCustomizeView: false,
         showClaudeCodeView: false,
         showDashboardView: false,
@@ -371,11 +391,36 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ showSubagentsInKanban: show })
   },
 
+  // Harness board actions
+  setShowHarnessBoardView: (show: boolean) => {
+    if (show) {
+      const prev = get().previousThreadId || get().currentThreadId
+      set({
+        showHarnessBoardView: true,
+        showKanbanView: false,
+        showCustomizeView: false,
+        showClaudeCodeView: false,
+        showDashboardView: false,
+        mainView: "harness",
+        currentThreadId: null,
+        previousThreadId: prev
+      })
+    } else {
+      const restored = get().previousThreadId
+      set({
+        showHarnessBoardView: false,
+        mainView: "thread",
+        ...(restored ? { currentThreadId: restored, previousThreadId: null } : {})
+      })
+    }
+  },
+
   setShowCustomizeView: (show: boolean, tab?: string) => {
     if (show) {
       set({
         showCustomizeView: true,
         showKanbanView: false,
+        showHarnessBoardView: false,
         showClaudeCodeView: false,
         showDashboardView: false,
         customizeInitialTab: tab ?? null,
@@ -409,6 +454,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({
         mainView: "kanban",
         showKanbanView: true,
+        showHarnessBoardView: false,
         showCustomizeView: false,
         showClaudeCodeView: false,
         currentThreadId: null
@@ -421,6 +467,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         mainView: "customize",
         showCustomizeView: true,
         showKanbanView: false,
+        showHarnessBoardView: false,
         showClaudeCodeView: false
       })
       return
@@ -431,6 +478,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         mainView: "customize",
         showCustomizeView: true,
         showKanbanView: false,
+        showHarnessBoardView: false,
         showClaudeCodeView: false,
         customizeInitialTab: "evolution"
       })
@@ -444,6 +492,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         showDashboardView: true,
         showCustomizeView: false,
         showKanbanView: false,
+        showHarnessBoardView: false,
         showClaudeCodeView: false,
         previousThreadId: prev,
         currentThreadId: null
@@ -458,6 +507,22 @@ export const useAppStore = create<AppState>((set, get) => ({
         showClaudeCodeView: true,
         showCustomizeView: false,
         showKanbanView: false,
+        showHarnessBoardView: false,
+        previousThreadId: prev,
+        currentThreadId: null
+      })
+      return
+    }
+
+    if (view === "harness") {
+      const prev = get().previousThreadId || get().currentThreadId
+      set({
+        mainView: "harness",
+        showHarnessBoardView: true,
+        showCustomizeView: false,
+        showKanbanView: false,
+        showClaudeCodeView: false,
+        showDashboardView: false,
         previousThreadId: prev,
         currentThreadId: null
       })
@@ -469,6 +534,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       mainView: "thread",
       showCustomizeView: false,
       showKanbanView: false,
+      showHarnessBoardView: false,
       showClaudeCodeView: false,
       ...(restored ? { currentThreadId: restored, previousThreadId: null } : {})
     })
