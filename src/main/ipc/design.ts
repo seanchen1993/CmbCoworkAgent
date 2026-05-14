@@ -2537,11 +2537,12 @@ export function registerDesignHandlers(): void {
           )
           const recoveryPrompt =
             `${promptWithSkill}\n\n---\n[Artifact write recovery]\n` +
-            `上一轮没有写出完整 HTML artifact。你必须现在直接调用 write_file 写入完整、可独立运行的 HTML 文件。\n\n` +
+            `上一轮结束时没有写出完整 HTML artifact。你可以继续按正常流程读取需要的技能/参考/上下文文件，` +
+            `但本轮结束前必须写出完整、可独立运行的 HTML artifact。\n\n` +
             `严格要求：\n` +
             `1. 只能把最终 artifact 写到这个绝对路径：${recoveryArtifactPath}\n` +
-            `2. 不要输出分析、计划、解释或完整 HTML 到聊天文本；必须使用 write_file。\n` +
-            `3. write_file.content 必须从 <!DOCTYPE html> 开始，并以 </html> 结束。\n` +
+            `2. 中间过程可以使用简短中文说明、read_file、write_file、edit_file；不要把中间过程当作最终结果。\n` +
+            `3. 最终 artifact 文件内容必须从 <!DOCTYPE html> 开始，并以 </html> 结束。\n` +
             `4. 不要使用 TD_PATH、TBD_PATH、OUTPUT_PATH、FILE_PATH、<path> 或任何占位符路径。\n` +
             `5. read_file 的分页提示不是截断。若需要更多内容，按提示 offset 继续读取。\n\n` +
             recoveryInstruction
