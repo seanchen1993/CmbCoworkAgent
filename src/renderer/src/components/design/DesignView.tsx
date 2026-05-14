@@ -19,7 +19,7 @@ import {
 import { CommentDraftInput, CommentPin } from "./DesignComments"
 import { DrawActionBar, DrawLayer, type ResolvedDraftDrawNote, type ResolvedDrawNote, type ResolvedDrawStroke } from "./DesignDraw"
 import { DesignGallery } from "./DesignGallery"
-import { CreateDesignModal, LinkModal } from "./DesignModals"
+import { CreateDesignModal, ExportDesignModal, LinkModal } from "./DesignModals"
 import { ElementPropsPanel } from "./ElementPropsPanel"
 import { getDrawElementLabel } from "./drawUtils"
 import { PulsingDot } from "./common"
@@ -1388,6 +1388,8 @@ export function DesignView(): React.JSX.Element {
   const [linkModalMode, setLinkModalMode] = useState<"reference" | "import">("reference")
   const [linkModalText, setLinkModalText] = useState("")
   const [importingSource, setImportingSource] = useState<null | "url" | "html">(null)
+  const [exportChoice, setExportChoice] = useState<{ html: string; artifactPath: string; relatedFileCount: number } | null>(null)
+  const [exportingPackage, setExportingPackage] = useState(false)
   // Toast notifications
   const [toast, setToast] = useState<{ msg: string; id: number } | null>(null)
   const showToast = useCallback((msg: string) => {
@@ -3365,6 +3367,55 @@ ${noteLines || "无"}${variantNote}`
     }
   }, [linkModalMode, updateTs, activeTabId, linkModalText, handleImportUrl, currentSessionId])
 
+  const downloadCurrentDesignHtml = useCallback((html: string) => {
+    downloadHtml(html)
+    setExportChoice(null)
+  }, [])
+
+  const downloadCurrentDesignPackage = useCallback(async (artifactPath: string) => {
+    if (exportingPackage) return
+    setExportingPackage(true)
+    try {
+      const result = await window.api.design.exportArtifactPackage(artifactPath, workspacePath ?? undefined)
+      if (!result.success || !result.buffer) {
+        showToast(result.error || "导出项目包失败")
+        return
+      }
+      downloadBlob(result.buffer, result.fileName || "design.zip", "application/zip")
+      setExportChoice(null)
+      showToast("项目包已导出")
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "导出项目包失败")
+    } finally {
+      setExportingPackage(false)
+    }
+  }, [exportingPackage, showToast, workspacePath])
+
+  const handleExportDesign = useCallback(async (state: TabState) => {
+    const html = getCurrentDesignHtml(state)
+    if (!html.trim()) return
+
+    if (!state.artifactPath) {
+      downloadCurrentDesignHtml(html)
+      return
+    }
+
+    try {
+      const info = await window.api.design.getArtifactPackageInfo(state.artifactPath, workspacePath ?? undefined)
+      if (!info.success || !info.relatedFileCount || info.relatedFileCount <= 0) {
+        downloadCurrentDesignHtml(html)
+        return
+      }
+      setExportChoice({
+        html,
+        artifactPath: info.filePath ?? state.artifactPath,
+        relatedFileCount: info.relatedFileCount,
+      })
+    } catch {
+      downloadCurrentDesignHtml(html)
+    }
+  }, [downloadCurrentDesignHtml, workspacePath])
+
   // ── Render ─────────────────────────────────────────────────
 
   // Show gallery when no session is active
@@ -3454,6 +3505,20 @@ ${noteLines || "无"}${variantNote}`
         onUrlChange={setLinkModalText}
         onConfirm={() => { void handleLinkModalConfirm() }}
         onClose={() => setLinkModalOpen(false)}
+      />
+      <ExportDesignModal
+        open={Boolean(exportChoice)}
+        relatedFileCount={exportChoice?.relatedFileCount ?? 0}
+        exportingPackage={exportingPackage}
+        onExportHtml={() => {
+          if (exportChoice) downloadCurrentDesignHtml(exportChoice.html)
+        }}
+        onExportPackage={() => {
+          if (exportChoice) void downloadCurrentDesignPackage(exportChoice.artifactPath)
+        }}
+        onClose={() => {
+          if (!exportingPackage) setExportChoice(null)
+        }}
       />
       <CustomModelDialog
         open={modelDialogOpen}
@@ -3883,7 +3948,7 @@ ${noteLines || "无"}${variantNote}`
                   <button onClick={() => setZoom((z) => Math.min(200, z + 25))} style={S.zoomBtn}>+</button>
                 </div>
                 <div style={S.tweaksDivider} />
-                <button style={S.canvasActionBtn} onClick={() => downloadHtml(ts.html)}>⬇ 导出</button>
+                <button style={S.canvasActionBtn} onClick={() => { void handleExportDesign(ts) }}>⬇ 导出</button>
               </div>
             )}
           </div>
@@ -4225,9 +4290,14 @@ ${noteLines || "无"}${variantNote}`
 
 function downloadHtml(html: string) {
   const blob = new Blob([html], { type: "text/html" })
+  downloadBlob(blob, "design.html", "text/html")
+}
+
+function downloadBlob(data: BlobPart, filename: string, type: string) {
+  const blob = data instanceof Blob ? data : new Blob([data], { type })
   const url  = URL.createObjectURL(blob)
   const a    = document.createElement("a")
-  a.href = url; a.download = "design.html"; a.click()
+  a.href = url; a.download = filename; a.click()
   URL.revokeObjectURL(url)
 }
 

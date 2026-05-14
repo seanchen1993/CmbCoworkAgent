@@ -725,6 +725,14 @@ interface CustomAPI {
       filePath: string,
       workspacePath?: string
     ) => Promise<{ success: boolean; filePath?: string; html?: string; error?: string }>
+    getArtifactPackageInfo: (
+      filePath: string,
+      workspacePath?: string
+    ) => Promise<{ success: boolean; filePath?: string; dirPath?: string; relatedFileCount?: number; error?: string }>
+    exportArtifactPackage: (
+      filePath: string,
+      workspacePath?: string
+    ) => Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; relatedFileCount?: number; error?: string }>
     agentGenerate: (
       sessionId: string,
       prompt: string,

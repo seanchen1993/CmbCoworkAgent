@@ -191,3 +191,59 @@ export function LinkModal({
     </div>
   )
 }
+
+export function ExportDesignModal({
+  open,
+  relatedFileCount,
+  exportingPackage,
+  onExportHtml,
+  onExportPackage,
+  onClose,
+}: {
+  open: boolean
+  relatedFileCount: number
+  exportingPackage: boolean
+  onExportHtml: () => void
+  onExportPackage: () => void
+  onClose: () => void
+}) {
+  if (!open) return null
+  return (
+    <div
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}
+      onClick={onClose}
+    >
+      <div
+        style={{ background: "#fff", borderRadius: 14, padding: 22, width: 440, display: "flex", flexDirection: "column", gap: 14, boxShadow: "0 8px 40px rgba(0,0,0,0.18)" }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <h3 style={{ margin: 0, fontSize: 16, fontWeight: 600, color: "#1a1a1a" }}>选择导出方式</h3>
+          <button onClick={onClose} style={{ background: "none", border: "none", fontSize: 18, cursor: "pointer", color: "#8a8a8a", lineHeight: 1 }}>×</button>
+        </div>
+        <p style={{ margin: 0, fontSize: 13, color: "#6a6a6a", lineHeight: 1.7 }}>
+          当前页面包含 {relatedFileCount} 个关联资源。可以导出单个 HTML，也可以打包原始项目目录。
+        </p>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 12 }}>
+          <button
+            onClick={onExportHtml}
+            style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 8, padding: "14px 13px", borderRadius: 12, border: "1px solid #e0ded8", background: "#faf9f6", cursor: "pointer", textAlign: "left", fontFamily: "inherit" }}
+          >
+            <span style={{ fontSize: 18 }}>HTML</span>
+            <span style={{ fontSize: 13, fontWeight: 700, color: "#1a1a1a" }}>导出 HTML</span>
+            <span style={{ fontSize: 12, color: "#8a8a8a", lineHeight: 1.6 }}>下载当前可预览的单文件 HTML。</span>
+          </button>
+          <button
+            onClick={onExportPackage}
+            disabled={exportingPackage}
+            style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 8, padding: "14px 13px", borderRadius: 12, border: "1px solid #d4dfef", background: "#f3f7ff", cursor: exportingPackage ? "default" : "pointer", textAlign: "left", fontFamily: "inherit", opacity: exportingPackage ? 0.7 : 1 }}
+          >
+            <span style={{ fontSize: 18 }}>{exportingPackage ? "打包中" : "ZIP"}</span>
+            <span style={{ fontSize: 13, fontWeight: 700, color: "#1a1a1a" }}>导出项目包</span>
+            <span style={{ fontSize: 12, color: "#8a8a8a", lineHeight: 1.6 }}>下载 index.html 和关联资源目录。</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}

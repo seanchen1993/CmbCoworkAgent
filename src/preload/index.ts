@@ -1853,6 +1853,28 @@ const api = {
         html?: string
         error?: string
       }>,
+    getArtifactPackageInfo: (
+      filePath: string,
+      workspacePath?: string
+    ): Promise<{ success: boolean; filePath?: string; dirPath?: string; relatedFileCount?: number; error?: string }> =>
+      ipcRenderer.invoke("design:get-artifact-package-info", { filePath, workspacePath }) as Promise<{
+        success: boolean
+        filePath?: string
+        dirPath?: string
+        relatedFileCount?: number
+        error?: string
+      }>,
+    exportArtifactPackage: (
+      filePath: string,
+      workspacePath?: string
+    ): Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; relatedFileCount?: number; error?: string }> =>
+      ipcRenderer.invoke("design:export-artifact-package", { filePath, workspacePath }) as Promise<{
+        success: boolean
+        fileName?: string
+        buffer?: ArrayBuffer
+        relatedFileCount?: number
+        error?: string
+      }>,
     /**
      * Full Agent Runtime path — gives Design access to Skills, MCP tools,
      * Hooks, Approvals and context summarisation.

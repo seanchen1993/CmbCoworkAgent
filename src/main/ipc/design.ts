@@ -11,6 +11,7 @@ import fs from "fs"
 import path from "path"
 import { ipcMain, BrowserWindow, app, net } from "electron"
 import Store from "electron-store"
+import AdmZip from "adm-zip"
 import { ChatOpenAI } from "@langchain/openai"
 import { HumanMessage, SystemMessage, AIMessage } from "@langchain/core/messages"
 import { deleteThreadCheckpoint, getCustomModelConfigs, getOpenworkDir } from "../storage"
@@ -539,6 +540,11 @@ interface DesignArtifactFileReadParams {
   workspacePath?: string
 }
 
+interface DesignArtifactPackageParams {
+  filePath: string
+  workspacePath?: string
+}
+
 interface DesignArtifactFileReadResult {
   success: boolean
   filePath?: string
@@ -694,6 +700,144 @@ function readDesignArtifactFile(filePath: string | undefined, workspacePath: str
       return { success: false, filePath: resolvedFile, error: `Design source artifact not found: ${resolvedFile}` }
     }
     return { success: true, filePath: resolvedFile, html: fs.readFileSync(resolvedFile, "utf-8") }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+function isSkippableDesignPackageEntry(relativePath: string): boolean {
+  const name = path.basename(relativePath)
+  return name.startsWith(".draft-") || name.startsWith(".source-")
+}
+
+function stripAssetQueryAndHash(value: string): string {
+  const hashIndex = value.indexOf("#")
+  const beforeHash = hashIndex >= 0 ? value.slice(0, hashIndex) : value
+  const queryIndex = beforeHash.indexOf("?")
+  return queryIndex >= 0 ? beforeHash.slice(0, queryIndex) : beforeHash
+}
+
+function hasAssetProtocol(value: string): boolean {
+  return /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(value) || value.startsWith("//")
+}
+
+function resolveLocalDesignAssetReference(rootDir: string, rawValue: string): string | null {
+  const stripped = stripAssetQueryAndHash(String(rawValue || "").trim()).replace(/\\/g, "/")
+  if (!stripped || stripped.startsWith("#") || stripped.startsWith("/") || hasAssetProtocol(stripped)) {
+    return null
+  }
+
+  const withoutDotPrefix = stripped.replace(/^\.\/+/, "")
+  if (!withoutDotPrefix || withoutDotPrefix.startsWith("../")) return null
+
+  let decoded = withoutDotPrefix
+  try {
+    decoded = decodeURIComponent(withoutDotPrefix)
+  } catch {
+    // Keep the raw path if it is not valid percent-encoding.
+  }
+  decoded = decoded.replace(/\\/g, "/")
+  if (!decoded || decoded.startsWith("/") || decoded.startsWith("../")) return null
+  if (decoded.split("/").some((segment) => !segment || segment === "." || segment === "..")) return null
+
+  const resolved = path.resolve(rootDir, decoded)
+  const normalizedRoot = path.resolve(rootDir).toLowerCase()
+  const normalizedResolved = resolved.toLowerCase()
+  if (normalizedResolved !== normalizedRoot && !normalizedResolved.startsWith(normalizedRoot + path.sep)) {
+    return null
+  }
+  return resolved
+}
+
+function getReferencedDesignLocalAssets(html: string, rootDir: string): Set<string> {
+  const assets = new Set<string>()
+  const addReference = (rawValue: string | undefined) => {
+    if (!rawValue) return
+    const resolved = resolveLocalDesignAssetReference(rootDir, rawValue)
+    if (resolved && fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
+      assets.add(resolved)
+    }
+  }
+
+  for (const match of html.matchAll(/\b(?:src|href|poster)\s*=\s*(["'])([\s\S]*?)\1/gi)) {
+    addReference(match[2])
+  }
+  for (const match of html.matchAll(/url\(\s*(["']?)([^"')]+)\1\s*\)/gi)) {
+    addReference(match[2])
+  }
+
+  return assets
+}
+
+function listDesignArtifactPackageFiles(rootDir: string): Array<{ filePath: string; relativePath: string }> {
+  const files: Array<{ filePath: string; relativePath: string }> = []
+  const visit = (dirPath: string) => {
+    for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
+      const fullPath = path.join(dirPath, entry.name)
+      const relativePath = path.relative(rootDir, fullPath).replace(/\\/g, "/")
+      if (!relativePath || relativePath.startsWith("..") || isSkippableDesignPackageEntry(relativePath)) {
+        continue
+      }
+      if (entry.isDirectory()) {
+        visit(fullPath)
+      } else if (entry.isFile()) {
+        files.push({ filePath: fullPath, relativePath })
+      }
+    }
+  }
+  visit(rootDir)
+  return files
+}
+
+function getDesignArtifactPackageInfo(
+  filePath: string | undefined,
+  workspacePath?: string
+): { success: boolean; filePath?: string; dirPath?: string; relatedFileCount?: number; error?: string } {
+  const artifact = readSavedDesignArtifactFile(filePath, workspacePath)
+  if (!artifact.success || !artifact.filePath || !artifact.html) {
+    return { success: false, error: artifact.error ?? "Design artifact not found" }
+  }
+  const dirPath = path.dirname(artifact.filePath)
+  try {
+    const relatedFileCount = getReferencedDesignLocalAssets(artifact.html, dirPath).size
+    return { success: true, filePath: artifact.filePath, dirPath, relatedFileCount }
+  } catch (err) {
+    return {
+      success: false,
+      filePath: artifact.filePath,
+      dirPath,
+      error: err instanceof Error ? err.message : String(err)
+    }
+  }
+}
+
+function exportDesignArtifactPackage(
+  filePath: string | undefined,
+  workspacePath?: string
+): { success: boolean; fileName?: string; buffer?: ArrayBuffer; relatedFileCount?: number; error?: string } {
+  const info = getDesignArtifactPackageInfo(filePath, workspacePath)
+  if (!info.success || !info.filePath || !info.dirPath) {
+    return { success: false, error: info.error ?? "Design artifact not found" }
+  }
+  try {
+    const files = listDesignArtifactPackageFiles(info.dirPath)
+    if (files.length === 0) return { success: false, error: "Design artifact package is empty" }
+
+    const zip = new AdmZip()
+    for (const file of files) {
+      zip.addFile(file.relativePath, fs.readFileSync(file.filePath))
+    }
+    const zipBuffer = zip.toBuffer()
+    const baseName = path.basename(info.dirPath).replace(/[^a-zA-Z0-9._-]/g, "_") || "design"
+    return {
+      success: true,
+      fileName: `${baseName}.zip`,
+      relatedFileCount: info.relatedFileCount ?? Math.max(0, files.length - 1),
+      buffer: zipBuffer.buffer.slice(
+        zipBuffer.byteOffset,
+        zipBuffer.byteOffset + zipBuffer.byteLength
+      )
+    }
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : String(err) }
   }
@@ -1774,6 +1918,18 @@ export function registerDesignHandlers(): void {
     "design:read-artifact-file",
     (_event, { filePath, workspacePath }: DesignArtifactFileReadParams) =>
       readSavedDesignArtifactFile(filePath, workspacePath)
+  )
+
+  ipcMain.handle(
+    "design:get-artifact-package-info",
+    (_event, { filePath, workspacePath }: DesignArtifactPackageParams) =>
+      getDesignArtifactPackageInfo(filePath, workspacePath)
+  )
+
+  ipcMain.handle(
+    "design:export-artifact-package",
+    (_event, { filePath, workspacePath }: DesignArtifactPackageParams) =>
+      exportDesignArtifactPackage(filePath, workspacePath)
   )
 
   // ─────────────────────────────────────────────────────────
