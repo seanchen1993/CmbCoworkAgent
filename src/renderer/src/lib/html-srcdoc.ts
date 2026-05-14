@@ -107,27 +107,27 @@ function hasProtocol(value: string): boolean {
 }
 
 /**
- * 判断一个资源引用是否满足“同级相对路径”条件。
+ * 判断一个资源引用是否满足“HTML 所在目录下的相对资源”条件。
  * 允许示例：
  * - `a.css`
  * - `./app.js`
+ * - `assets/app.js`
  *
  * 不允许示例：
  * - `/assets/a.css`（根路径）
  * - `../a.css`（上级目录）
- * - `dir/a.css`（子目录）
  * - `https://...`、`//...`（协议路径）
  * - `#anchor`（锚点）
  *
  * 设计目的：
- * - 严格收敛读取范围到 HTML 所在目录，降低越界读取风险。
- * - 符合“仅内联同级依赖”的产品约束，避免过度解析路径规则。
+ * - 严格收敛读取范围到 HTML 所在目录及其子目录，降低越界读取风险。
+ * - 覆盖技能生成 `index.html + assets/*.js` 的多文件预览场景。
  *
  * @param value 资源引用字符串
- * @returns 是否为可内联的同级相对路径
+ * @returns 是否为可内联的本地相对资源路径
  */
-function isSameLevelRelativePath(value: string): boolean {
-  // 只内联“同级相对路径”依赖：例如 ./a.css 或 a.js
+function isLocalRelativeAssetPath(value: string): boolean {
+  // 只内联 HTML 所在目录下的相对依赖：例如 ./a.css、a.js、assets/app.js。
   // 主动跳过绝对路径、协议路径、锚点、上级目录，避免越界读取与意外行为。
   const normalized = normalizeSlashes(stripQueryAndHash(value.trim()))
   if (!normalized) return false
@@ -139,25 +139,29 @@ function isSameLevelRelativePath(value: string): boolean {
   if (!withoutDotPrefix) return false
   if (withoutDotPrefix.startsWith("../")) return false
 
-  return !withoutDotPrefix.includes("/")
+  const decoded = normalizeSlashes(safeDecodeUri(withoutDotPrefix))
+  if (!decoded || decoded.startsWith("/") || decoded.startsWith("../")) return false
+
+  const segments = decoded.split("/")
+  return segments.every((segment) => segment.length > 0 && segment !== "." && segment !== "..")
 }
 
 /**
- * 将 HTML 文件路径与依赖引用拼出“同级依赖”的绝对（或工作区内规范）路径。
+ * 将 HTML 文件路径与依赖引用拼出本地相对依赖的绝对（或工作区内规范）路径。
  * 处理流程：
- * 1. 先校验依赖是否为同级相对路径，不符合则直接返回 `null`。
+ * 1. 先校验依赖是否为本地相对资源路径，不符合则直接返回 `null`。
  * 2. 提取 HTML 所在目录。
  * 3. 将目录与依赖文件名拼接。
  *
  * 注意：
- * - 该函数不会处理 `../`、子目录、远程 URL 等复杂路径；这些在前置校验中已被拒绝。
+ * - 该函数不会处理 `../`、根路径、远程 URL 等越界路径；这些在前置校验中已被拒绝。
  *
  * @param htmlPath 当前 HTML 文件路径
  * @param dependencyPath HTML 中引用的 `href/src`
  * @returns 可读取的依赖路径；若不满足规则则返回 `null`
  */
-function resolveSiblingPath(htmlPath: string, dependencyPath: string): string | null {
-  if (!isSameLevelRelativePath(dependencyPath)) return null
+function resolveLocalAssetPath(htmlPath: string, dependencyPath: string): string | null {
+  if (!isLocalRelativeAssetPath(dependencyPath)) return null
 
   const normalizedHtmlPath = normalizeSlashes(
     stripQueryAndHash(normalizeHtmlPathInput(htmlPath))
@@ -166,11 +170,11 @@ function resolveSiblingPath(htmlPath: string, dependencyPath: string): string | 
     /^\.\/+/,
     ""
   )
-  if (!normalizedDependencyPath || normalizedDependencyPath.includes("/")) return null
+  if (!normalizedDependencyPath) return null
 
   // 再做一次“解码后校验”，防止 `%2F`、`%5C` 等编码在解码后引入路径层级。
   const decodedDependencyPath = normalizeSlashes(safeDecodeUri(normalizedDependencyPath))
-  if (!decodedDependencyPath || decodedDependencyPath.includes("/")) return null
+  if (!isLocalRelativeAssetPath(decodedDependencyPath)) return null
 
   const slashIndex = normalizedHtmlPath.lastIndexOf("/")
   if (slashIndex < 0) return decodedDependencyPath
@@ -209,14 +213,14 @@ function serializeDocument(doc: Document): string {
 }
 
 /**
- * 将 HTML 中“同级外链 css/js 依赖”内联成 `style/script`，返回可直接渲染的 srcDoc。
+ * 将 HTML 中“本地相对 css/js 依赖”内联成 `style/script`，返回可直接渲染的 srcDoc。
  *
  * 目标：
  * - 在 Electron 预览中彻底绕开 `file://` 外链限制。
  * - 仍然保持 HTML 主体结构不变，尽可能只替换依赖标签本身。
  *
  * 行为约束：
- * - 仅处理同级相对路径依赖（由 `isSameLevelRelativePath` 定义）。
+ * - 仅处理 HTML 所在目录下的相对路径依赖（由 `isLocalRelativeAssetPath` 定义）。
  * - 读取失败时静默跳过该依赖，不中断整体预览。
  * - 通过缓存避免同一依赖重复读取，降低 IPC/磁盘开销。
  *
@@ -265,7 +269,7 @@ export async function inlineHtmlSiblingAssets({
       const href = link.getAttribute("href")
       if (!href) return
 
-      const resolvedPath = resolveSiblingPath(htmlPath, href)
+      const resolvedPath = resolveLocalAssetPath(htmlPath, href)
       if (!resolvedPath) return
 
       const cssContent = await readWithCache(resolvedPath)
@@ -280,7 +284,7 @@ export async function inlineHtmlSiblingAssets({
       const src = script.getAttribute("src")
       if (!src) return
 
-      const resolvedPath = resolveSiblingPath(htmlPath, src)
+      const resolvedPath = resolveLocalAssetPath(htmlPath, src)
       if (!resolvedPath) return
 
       const jsContent = await readWithCache(resolvedPath)

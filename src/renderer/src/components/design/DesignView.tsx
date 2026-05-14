@@ -860,6 +860,23 @@ function normalizeSingleTabSession(
   }
 }
 
+async function readPreviewDependencyTextFile(resolvedPath: string): Promise<string | null> {
+  const result = await window.api.file.readText(resolvedPath)
+  return result.success ? (result.content ?? null) : null
+}
+
+async function prepareHtmlForSrcDoc(html: string, htmlPath?: string | null): Promise<string> {
+  const inlinedHtml = htmlPath
+    ? await inlineHtmlSiblingAssets({
+        html,
+        htmlPath,
+        readTextFile: readPreviewDependencyTextFile,
+      })
+    : html
+  const htmlWithBase = htmlPath ? injectBaseHref(inlinedHtml, makeFileHref(htmlPath)) : inlinedHtml
+  return ensureEditMode(htmlWithBase)
+}
+
 // ── Per-session storage ───────────────────────────────────
 const SESSION_INDEX_KEY  = "design_index_v1"
 const SESSION_LAST_KEY   = "design_last_session"
@@ -898,11 +915,12 @@ async function hydrateSessionArtifacts(
       }
       if (!result.success || !result.html?.trim()) return [tabId, state] as const
 
-      window.api.design.storeHtml(artifactId, result.html).catch(() => {})
+      const previewHtml = await prepareHtmlForSrcDoc(result.html, result.filePath ?? state.artifactPath)
+      window.api.design.storeHtml(artifactId, previewHtml).catch(() => {})
       return [
         tabId,
         {
-          ...hydrateTabStateHtml(state, result.html),
+          ...hydrateTabStateHtml(state, previewHtml),
           artifactPath: result.filePath ?? state.artifactPath,
         },
       ] as const
@@ -2271,7 +2289,7 @@ export function DesignView(): React.JSX.Element {
     const stableArtifactId = makeDesignArtifactId(currentSessionIdRef.current, tabId)
     const normalizeProgressToken = createDesignProgressNormalizer()
 
-    const onEvent = (event: {
+    const onEvent = async (event: {
       type: string
       token?: string
       html?: string
@@ -2349,7 +2367,7 @@ export function DesignView(): React.JSX.Element {
 
       if (event.type === "done" && event.html) {
         // Guarantee every generated design has a working EDITMODE block
-        const patchedHtml = ensureEditMode(event.html)
+        const patchedHtml = await prepareHtmlForSrcDoc(event.html, event.artifactPath ?? null)
         const variations = parseVariations(patchedHtml)
 
         // Keep htmlStore in sync (used as fallback / reference)
