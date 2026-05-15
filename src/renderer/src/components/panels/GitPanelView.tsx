@@ -20,6 +20,8 @@ import { toast } from "sonner"
 import { GitSubmitDialog } from "./GitSubmitDialog"
 import { insertLog } from "../../../js/mmjUtils"
 
+const GIT_BRANCH_REFRESH_EVENT = "cmb:git-branch-switched"
+
 type GitPanelMetaState = {
   success: boolean
   isWorktree: boolean
@@ -172,6 +174,19 @@ export function GitPanelView({
   useEffect(() => {
     void refresh({ meta: true, diff: true })
   }, [refresh])
+
+  useEffect(() => {
+    const handleBranchSwitched = (event: Event): void => {
+      const detail = (event as CustomEvent<{ workspacePath?: string | null }>).detail
+      if (detail?.workspacePath && workspacePath && detail.workspacePath !== workspacePath) return
+      void refresh({ meta: true, diff: true })
+    }
+
+    window.addEventListener(GIT_BRANCH_REFRESH_EVENT, handleBranchSwitched)
+    return () => {
+      window.removeEventListener(GIT_BRANCH_REFRESH_EVENT, handleBranchSwitched)
+    }
+  }, [refresh, workspacePath])
 
   useEffect(() => {
     const files = diffState?.files ?? []
