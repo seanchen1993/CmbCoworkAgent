@@ -458,6 +458,9 @@ interface CustomAPI {
     readText: (
       filePath: string
     ) => Promise<{ success: boolean; filename?: string; content?: string; error?: string }>
+    readDataUrl: (
+      filePath: string
+    ) => Promise<{ success: boolean; filename?: string; dataUrl?: string; size?: number; error?: string }>
   }
   skills: {
     list: () => Promise<SkillMetadata[]>

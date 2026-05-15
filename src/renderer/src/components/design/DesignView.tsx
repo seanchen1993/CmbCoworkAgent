@@ -865,12 +865,18 @@ async function readPreviewDependencyTextFile(resolvedPath: string): Promise<stri
   return result.success ? (result.content ?? null) : null
 }
 
+async function readPreviewDependencyDataUrlFile(resolvedPath: string): Promise<string | null> {
+  const result = await window.api.file.readDataUrl(resolvedPath)
+  return result.success ? (result.dataUrl ?? null) : null
+}
+
 async function prepareHtmlForSrcDoc(html: string, htmlPath?: string | null): Promise<string> {
   const inlinedHtml = htmlPath
     ? await inlineHtmlSiblingAssets({
         html,
         htmlPath,
         readTextFile: readPreviewDependencyTextFile,
+        readDataUrlFile: readPreviewDependencyDataUrlFile,
       })
     : html
   const htmlWithBase = htmlPath ? injectBaseHref(inlinedHtml, makeFileHref(htmlPath)) : inlinedHtml
@@ -1788,6 +1794,7 @@ export function DesignView(): React.JSX.Element {
       html: readResult.content,
       htmlPath: filePath,
       readTextFile: readDependencyTextFile,
+      readDataUrlFile: readPreviewDependencyDataUrlFile,
     })
     const htmlWithBase = injectBaseHref(inlinedHtml, makeFileHref(filePath))
 

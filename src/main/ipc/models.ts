@@ -25,6 +25,53 @@ import { parseGitRemoteInfo } from "../utils/git-remote"
 const execFileAsync = promisify(execFile)
 
 const MAX_WORKTREES = 10
+const MAX_INLINE_DATA_URL_FILE_SIZE = 2 * 1024 * 1024
+
+function getDataUrlMimeType(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase()
+  switch (ext) {
+    case ".apng":
+      return "image/apng"
+    case ".avif":
+      return "image/avif"
+    case ".bmp":
+      return "image/bmp"
+    case ".gif":
+      return "image/gif"
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg"
+    case ".png":
+      return "image/png"
+    case ".svg":
+    case ".svgz":
+      return "image/svg+xml"
+    case ".webp":
+      return "image/webp"
+    case ".ico":
+      return "image/x-icon"
+    case ".woff":
+      return "font/woff"
+    case ".woff2":
+      return "font/woff2"
+    case ".ttf":
+      return "font/ttf"
+    case ".otf":
+      return "font/otf"
+    case ".eot":
+      return "application/vnd.ms-fontobject"
+    case ".json":
+      return "application/json"
+    case ".txt":
+      return "text/plain"
+    case ".csv":
+      return "text/csv"
+    case ".xml":
+      return "application/xml"
+    default:
+      return "application/octet-stream"
+  }
+}
 
 export interface WorktreeInfo {
   path: string
@@ -3059,6 +3106,36 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         const content = await fs.readFile(filePath, "utf-8")
         const filename = path.basename(filePath)
         return { success: true, filename, content }
+      } catch (e) {
+        return { success: false, error: e instanceof Error ? e.message : "读取文件失败" }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    "file:read-data-url",
+    async (_event, filePath: string): Promise<{ success: boolean; filename?: string; dataUrl?: string; size?: number; error?: string }> => {
+      try {
+        const fullPath = path.resolve(filePath)
+        const stat = await fs.stat(fullPath)
+        if (!stat.isFile()) {
+          return { success: false, error: "只能读取普通文件" }
+        }
+        if (stat.size > MAX_INLINE_DATA_URL_FILE_SIZE) {
+          return {
+            success: false,
+            error: `文件超过 ${(MAX_INLINE_DATA_URL_FILE_SIZE / 1024 / 1024).toFixed(0)} MB 内联限制`
+          }
+        }
+
+        const buffer = await fs.readFile(fullPath)
+        const mimeType = getDataUrlMimeType(fullPath)
+        return {
+          success: true,
+          filename: path.basename(fullPath),
+          dataUrl: `data:${mimeType};base64,${buffer.toString("base64")}`,
+          size: stat.size,
+        }
       } catch (e) {
         return { success: false, error: e instanceof Error ? e.message : "读取文件失败" }
       }

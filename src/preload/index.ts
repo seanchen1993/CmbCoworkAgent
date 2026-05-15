@@ -703,6 +703,8 @@ const api = {
       ipcRenderer.invoke("file:select-code"),
     readText: (filePath: string): Promise<{ success: boolean; filename?: string; content?: string; error?: string }> =>
       ipcRenderer.invoke("file:read-text", filePath),
+    readDataUrl: (filePath: string): Promise<{ success: boolean; filename?: string; dataUrl?: string; size?: number; error?: string }> =>
+      ipcRenderer.invoke("file:read-data-url", filePath),
   },
   skills: {
     list: (): Promise<SkillMetadata[]> => {
