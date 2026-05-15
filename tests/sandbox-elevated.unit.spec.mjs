@@ -250,7 +250,7 @@ test("prepared elevated roots are persisted after async startup load", () => {
   )
 })
 
-test("sandbox cache roots canonicalize workspace symlinks without sync fs calls", () => {
+test("sandbox cache roots canonicalize workspace symlinks asynchronously", () => {
   const buildCacheRootSection = sectionBetween(
     localSandboxSource,
     "private static async buildSandboxCacheRoot(",
@@ -278,9 +278,9 @@ test("sandbox cache roots canonicalize workspace symlinks without sync fs calls"
     "sandbox cache root hashing should canonicalize symlinked workspaces asynchronously"
   )
   assert.doesNotMatch(
-    localSandboxSource,
+    buildCacheRootSection,
     /\brealpathSync\b/,
-    "sandbox cache root canonicalization should not reintroduce synchronous realpath calls"
+    "async sandbox cache root canonicalization should not use synchronous realpath calls"
   )
   assert.match(
     constructorSection,
@@ -870,8 +870,8 @@ test("sandbox execute helpers do not create visible console windows", () => {
   )
   assert.match(
     executeOnceSection,
-    /spawn\(shell, \[\], \{[\s\S]*windowsHide: true[\s\S]*spawn\(command, \{[\s\S]*windowsHide: true/,
-    "raw shell execution should hide both bash-like and shell=true child windows"
+    /spawn\(shell, \[\], \{[\s\S]*windowsHide: !allowInteractiveGitAuth[\s\S]*spawn\(command, \{[\s\S]*windowsHide: !allowInteractiveGitAuth/,
+    "raw shell execution should hide child windows except for interactive Git auth commands"
   )
   assert.match(
     aclSection,
@@ -902,6 +902,35 @@ test("sandbox execute helpers do not create visible console windows", () => {
     codeExecSpawnSection,
     /windowsHide: true/,
     "code_exec helper should also hide its wrapper process on Windows"
+  )
+})
+
+test("unsandboxed git network commands allow Git Credential Manager UI prompts", () => {
+  const executeOnceSection = sectionBetween(
+    localSandboxSource,
+    "private executeOnce(",
+    "  private formatOutput"
+  )
+
+  assert.match(
+    localSandboxSource,
+    /private static isGitInteractiveAuthCommand\(command: string\): boolean \{[\s\S]*git[\s\S]*pull\|fetch\|push\|clone\|submodule\|lfs/,
+    "Git network commands should be recognized as credential-interactive commands"
+  )
+  assert.match(
+    localSandboxSource,
+    /private static buildInteractiveGitEnv\(env: NodeJS\.ProcessEnv\): NodeJS\.ProcessEnv \{[\s\S]*GCM_INTERACTIVE: "auto"[\s\S]*GCM_GUI_PROMPT: "1"[\s\S]*GIT_TERMINAL_PROMPT: "1"/,
+    "unsandboxed Git auth should explicitly permit GCM GUI/interactive prompts"
+  )
+  assert.match(
+    executeOnceSection,
+    /const allowInteractiveGitAuth =[\s\S]*isWindows && LocalSandbox\.isGitInteractiveAuthCommand\(command\)[\s\S]*const spawnEnv = allowInteractiveGitAuth[\s\S]*LocalSandbox\.buildInteractiveGitEnv\(this\.env\)/,
+    "executeOnce should opt Git network commands into the interactive credential environment"
+  )
+  assert.match(
+    executeOnceSection,
+    /windowsHide: !allowInteractiveGitAuth/,
+    "Windows should not hide the shell process when Git Credential Manager may need to show UI"
   )
 })
 
@@ -959,8 +988,8 @@ test("sandbox execute safety checks do not synchronously spawn helper processes"
 
   assert.match(
     executeSection,
-    /assessCommandSafety\(command/,
-    "execute should keep using the central safety policy"
+    /assessCommandSafety\(effectiveCommand/,
+    "execute should keep using the central safety policy after PreToolUse command rewrites"
   )
   assert.match(
     policySection,

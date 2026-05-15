@@ -15,10 +15,8 @@ import {
   constants as fsConstants,
   existsSync,
   lstatSync,
-  mkdirSync,
   realpathSync,
-  type ReadStream,
-  writeFileSync
+  type ReadStream
 } from "node:fs"
 import fs from "node:fs/promises"
 import path from "node:path"
@@ -4760,6 +4758,24 @@ export class LocalSandbox
       || (timeoutMs === LocalSandbox.BACKGROUND_TIMEOUT_MS && overrideAbortSignal !== undefined)
   }
 
+  /**
+   * Git network operations may invoke Git Credential Manager. In the unsandboxed
+   * retry path this must be allowed to show its GUI prompt; otherwise a stale or
+   * missing credential can fail without giving the user a chance to re-authenticate.
+   */
+  private static isGitInteractiveAuthCommand(command: string): boolean {
+    return /\bgit(?:\.exe|\.cmd|\.bat)?\s+(?:pull|fetch|push|clone|submodule|lfs)\b/i.test(command)
+  }
+
+  private static buildInteractiveGitEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+    return {
+      ...env,
+      GCM_INTERACTIVE: "auto",
+      GCM_GUI_PROMPT: "1",
+      GIT_TERMINAL_PROMPT: "1"
+    }
+  }
+
   private async executeRawUnserialized(
     command: string,
     sandboxModeOverride?: string,
@@ -5386,22 +5402,27 @@ export class LocalSandbox
 
       const shellBase = path.basename(shell).replace(/\.exe$/i, "")
       const isBashOnWin = isWindows && ["bash", "sh", "zsh"].includes(shellBase)
+      const allowInteractiveGitAuth =
+        isWindows && LocalSandbox.isGitInteractiveAuthCommand(command)
+      const spawnEnv = allowInteractiveGitAuth
+        ? LocalSandbox.buildInteractiveGitEnv(this.env)
+        : this.env
 
       const proc = isBashOnWin
         ? spawn(shell, [], {
             cwd: this.workingDir,
-            env: this.env,
+            env: spawnEnv,
             stdio: ["pipe", "pipe", "pipe"],
             detached: false,
-            windowsHide: true
+            windowsHide: !allowInteractiveGitAuth
           })
         : spawn(command, {
             shell,
             cwd: this.workingDir,
-            env: this.env,
+            env: spawnEnv,
             stdio: ["ignore", "pipe", "pipe"],
             detached: !isWindows,
-            windowsHide: true
+            windowsHide: !allowInteractiveGitAuth
           })
 
       if (isBashOnWin && proc.stdin) {
