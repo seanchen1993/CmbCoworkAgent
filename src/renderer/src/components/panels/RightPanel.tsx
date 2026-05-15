@@ -1084,6 +1084,7 @@ export function RightPanel({
                 key={currentThreadId ?? "git-panel-empty-thread"}
                 threadId={currentThreadId ?? ""}
                 workspacePath={threadState?.workspacePath ?? null}
+                initialGitContext={threadState?.gitContext ?? null}
                 onOpenFileFolder={async (filePath) => {
                   try {
                     const resolved = resolvePreviewPaths(
@@ -1170,9 +1171,7 @@ export function RightPanel({
             <SectionHeader
               title="技能"
               icon={Sparkles}
-              badge={
-                splitRightPanelSkillsByEnabled(skills, disabledSkills).enabled.length
-              }
+              badge={splitRightPanelSkillsByEnabled(skills, disabledSkills).enabled.length}
               isOpen={skillsOpen}
               onToggle={() => setSkillsOpen((prev) => !prev)}
             />
@@ -2438,7 +2437,9 @@ function SkillsContent({
           return (
             <div key={node.key} className="space-y-2">
               {node.skill ? (
-                <div className={cn("p-3 rounded-sm border border-border", disabled && "opacity-60")}>
+                <div
+                  className={cn("p-3 rounded-sm border border-border", disabled && "opacity-60")}
+                >
                   <div className="flex min-w-0 items-center gap-2 text-sm font-medium">
                     <Sparkles
                       className={cn(
