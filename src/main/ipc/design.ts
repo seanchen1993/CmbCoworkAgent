@@ -32,6 +32,7 @@ const DESIGN_BROWSER_AUTO_FIX_ATTEMPTS = 1
 const DESIGN_ARTIFACT_CONTINUATION_MAX_ATTEMPTS = 30
 const DESIGN_ARTIFACT_CONTINUATION_STALL_ATTEMPTS = 2
 const DESIGN_ARTIFACT_WRITE_RECOVERY_ATTEMPTS = 2
+const DESIGN_DRAFT_FRESHNESS_SKEW_MS = 5000
 const DESIGN_CHINESE_RESPONSE_INSTRUCTION = `\n\n## Response language\n\n- 始终使用中文输出所有面向用户可见的文本，包括执行过程说明、技能使用说明、工具前后的简短说明、错误解释和最终摘要。\n- 即使读取到的 Skill、参考文件或系统上下文是英文，也要把面向用户展示的过程和总结翻译成中文。\n- 代码、HTML/CSS/JS 标识符、文件路径、工具名和必须保持原样的业务文案不需要翻译。`
 
 // ─────────────────────────────────────────────────────────
@@ -705,6 +706,46 @@ function readDesignArtifactFile(filePath: string | undefined, workspacePath: str
   }
 }
 
+function readFreshDesignArtifactDraftFile(
+  filePath: string | undefined,
+  workspacePath: string,
+  startedAtMs: number,
+  wroteDraftInRun: boolean,
+  requireTrackedWrite = false
+): DesignArtifactFileReadResult {
+  if (!filePath) return { success: false, error: "Design draft artifact path is empty" }
+
+  const resolvedFile = path.resolve(filePath)
+  if (requireTrackedWrite && !wroteDraftInRun) {
+    const error = `Ignoring design draft without a tracked write in this edit run: ${resolvedFile}`
+    console.warn(`[Design] ${error}`)
+    return {
+      success: false,
+      filePath: resolvedFile,
+      error,
+    }
+  }
+
+  if (!wroteDraftInRun) {
+    try {
+      const stat = fs.statSync(resolvedFile)
+      if (stat.mtimeMs < startedAtMs - DESIGN_DRAFT_FRESHNESS_SKEW_MS) {
+        const error = `Ignoring stale design draft artifact: ${resolvedFile}`
+        console.warn(`[Design] ${error}`)
+        return {
+          success: false,
+          filePath: resolvedFile,
+          error,
+        }
+      }
+    } catch {
+      // Let the normal artifact reader return the concrete not-found/access error.
+    }
+  }
+
+  return readDesignArtifactFile(resolvedFile, workspacePath)
+}
+
 function isSkippableDesignPackageEntry(relativePath: string): boolean {
   const name = path.basename(relativePath)
   return name.startsWith(".draft-") || name.startsWith(".source-")
@@ -1247,6 +1288,19 @@ function isLikelyDesignProgressOnlyText(rawText: string): boolean {
   if (!text) return false
   if (text.includes("<!DOCTYPE") || /<html[\s>]/i.test(text)) return false
   return text.length <= 500 && DESIGN_PROGRESS_ONLY_TEXT_RE.test(text)
+}
+
+function normalizeDesignHtmlForChangeCheck(html: string): string {
+  return html
+    .replace(/<base\b[^>]*>\s*/gi, "")
+    .replace(/\sdata-inline-from=(["'])[^"']*\1/gi, "")
+    .replace(/>\s+</g, "><")
+    .trim()
+}
+
+function isSameDesignHtml(left: string | undefined, right: string | undefined): boolean {
+  if (!left?.trim() || !right?.trim()) return false
+  return normalizeDesignHtmlForChangeCheck(left) === normalizeDesignHtmlForChangeCheck(right)
 }
 
 function sanitizeDesignToolArgs(args: Record<string, unknown>): Record<string, unknown> {
@@ -2565,10 +2619,12 @@ export function registerDesignHandlers(): void {
           deleteThreadCheckpoint(threadId)
         }
 
+        const generationStartedAtMs = Date.now()
         const initialResult = await runDesignAgentOnce(promptWithArtifact, threadId)
         let html = initialResult.html
         let fullText = initialResult.fullText
         const firstFailureText = initialResult.fullText
+        const requiresFreshEditArtifact = Boolean(currentHtmlSource.trim() || sourceFilePathForPrompt)
         const sendValidationEvent = (
           status: DesignExecutionStatus,
           content: string,
@@ -2592,6 +2648,14 @@ export function registerDesignHandlers(): void {
           artifactHtml: string,
           showFailureResult: boolean
         ): Promise<{ ok: true } | { ok: false; repairable: boolean; message: string }> => {
+          if (requiresFreshEditArtifact && isSameDesignHtml(artifactHtml, currentHtmlSource)) {
+            const message = "本次编辑没有产生有效 HTML 变更，请根据用户的批注或绘制标记修改当前设计后重新写入完整 artifact。"
+            if (showFailureResult) sendValidationEvent("error", message, true)
+            else sendValidationEvent("running", "本次编辑未产生页面变更，正在自动修复...")
+            lastValidationFailureMessage = message
+            return { ok: false, repairable: true, message }
+          }
+
           const validationDraftPath = makeDesignArtifactDraftPath(outputArtifactPath)
           const draftSave = saveDesignArtifactFile(
             validationDraftPath,
@@ -2626,7 +2690,13 @@ export function registerDesignHandlers(): void {
         }
 
         if (!html || !isCompleteHtmlDocument(html)) {
-          const draftArtifact = readDesignArtifactFile(candidateDraftPath, workspacePath)
+          const draftArtifact = readFreshDesignArtifactDraftFile(
+            candidateDraftPath,
+            workspacePath,
+            generationStartedAtMs,
+            wroteCandidateDraft,
+            requiresFreshEditArtifact
+          )
           if (draftArtifact.success && draftArtifact.html && isCompleteHtmlDocument(draftArtifact.html)) {
             html = draftArtifact.html
           }
@@ -2663,7 +2733,13 @@ export function registerDesignHandlers(): void {
             fullText = continuationResult.fullText
           }
           if (!html || !isCompleteHtmlDocument(html) || wroteCandidateDraft) {
-            const continuationDraftArtifact = readDesignArtifactFile(continuationArtifactPath, workspacePath)
+            const continuationDraftArtifact = readFreshDesignArtifactDraftFile(
+              continuationArtifactPath,
+              workspacePath,
+              generationStartedAtMs,
+              wroteCandidateDraft,
+              requiresFreshEditArtifact
+            )
             if (continuationDraftArtifact.success && continuationDraftArtifact.html && isCompleteHtmlDocument(continuationDraftArtifact.html)) {
               html = continuationDraftArtifact.html
             }
@@ -2710,7 +2786,13 @@ export function registerDesignHandlers(): void {
             fullText = recoveryResult.fullText
           }
           if (!html || !isCompleteHtmlDocument(html) || wroteCandidateDraft) {
-            const recoveryDraftArtifact = readDesignArtifactFile(recoveryArtifactPath, workspacePath)
+            const recoveryDraftArtifact = readFreshDesignArtifactDraftFile(
+              recoveryArtifactPath,
+              workspacePath,
+              generationStartedAtMs,
+              wroteCandidateDraft,
+              requiresFreshEditArtifact
+            )
             if (recoveryDraftArtifact.success && recoveryDraftArtifact.html && isCompleteHtmlDocument(recoveryDraftArtifact.html)) {
               html = recoveryDraftArtifact.html
             }
@@ -2734,6 +2816,7 @@ export function registerDesignHandlers(): void {
             const repairThreadId = makeDesignAgentRepairThreadId(threadId, repairAttempt + 1)
             const repairArtifactPath = makeDesignArtifactDraftPath(outputArtifactPath)
             candidateDraftPath = repairArtifactPath
+            wroteCandidateDraft = false
             await closeCheckpointer(repairThreadId)
             deleteThreadCheckpoint(repairThreadId)
             const failedSnapshot = writeDesignArtifactSourceSnapshot(outputArtifactPath, html)
@@ -2759,7 +2842,13 @@ export function registerDesignHandlers(): void {
               fullText = repairResult.fullText
             }
             if (!html || !isCompleteHtmlDocument(html)) {
-              const repairDraftArtifact = readDesignArtifactFile(repairArtifactPath, workspacePath)
+              const repairDraftArtifact = readFreshDesignArtifactDraftFile(
+                repairArtifactPath,
+                workspacePath,
+                generationStartedAtMs,
+                wroteCandidateDraft,
+                requiresFreshEditArtifact
+              )
               if (repairDraftArtifact.success && repairDraftArtifact.html && isCompleteHtmlDocument(repairDraftArtifact.html)) {
                 html = repairDraftArtifact.html
               }

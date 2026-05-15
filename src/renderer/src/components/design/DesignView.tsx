@@ -243,6 +243,61 @@ function hasExistingDesignArtifact(state: TabState | undefined): boolean {
   return getCurrentDesignHtml(state).length > 0
 }
 
+type DesignIterationRollbackSnapshot = {
+  html: string
+  variations: VariationItem[]
+  activeVariationId: string | null
+  comments: CommentItem[]
+  draftComment: TabState["draftComment"]
+  activeCommentId: string | null
+  drawStrokes: DrawStroke[]
+  drawElementHints: DrawElementHint[]
+  drawNotes: DrawNote[]
+  draftDrawNote: TabState["draftDrawNote"]
+  inputValue: string
+  apiHistory: Array<{ role: "user" | "assistant"; content: string }>
+}
+
+function makeIterationRollbackSnapshot(state: TabState | undefined): DesignIterationRollbackSnapshot | null {
+  if (!state) return null
+  // Keep this in sync when adding user-editable TabState fields that must survive failed iterations.
+  return {
+    html: state.html,
+    variations: state.variations,
+    activeVariationId: state.activeVariationId,
+    comments: state.comments,
+    draftComment: state.draftComment,
+    activeCommentId: state.activeCommentId,
+    drawStrokes: state.drawStrokes,
+    drawElementHints: state.drawElementHints,
+    drawNotes: state.drawNotes,
+    draftDrawNote: state.draftDrawNote,
+    inputValue: state.inputValue,
+    apiHistory: state.apiHistory ?? [],
+  }
+}
+
+function restoreIterationRollbackSnapshot(
+  snapshot: DesignIterationRollbackSnapshot,
+  prev: TabState
+): Partial<TabState> {
+  return {
+    html: snapshot.html,
+    variations: snapshot.variations,
+    activeVariationId: snapshot.activeVariationId,
+    comments: snapshot.comments,
+    draftComment: snapshot.draftComment,
+    activeCommentId: snapshot.activeCommentId,
+    drawStrokes: snapshot.drawStrokes,
+    drawElementHints: snapshot.drawElementHints,
+    drawNotes: snapshot.drawNotes,
+    draftDrawNote: snapshot.draftDrawNote,
+    inputValue: snapshot.inputValue,
+    apiHistory: snapshot.apiHistory,
+    reloadKey: prev.reloadKey + 1,
+  }
+}
+
 function hydrateTabStateHtml(state: TabState, html: string): TabState {
   const patchedHtml = ensureEditMode(html)
   const variations = parseVariations(patchedHtml)
@@ -2237,6 +2292,7 @@ export function DesignView(): React.JSX.Element {
     skill?: DesignSkillReference | null,
     sourceArtifactPath?: string | null,
     freshAgentThread = false,
+    rollbackSnapshot?: DesignIterationRollbackSnapshot | null,
   ) => {
     const sessionId = uuid()
     updateTs(tabId, (prev) => ({
@@ -2428,9 +2484,15 @@ export function DesignView(): React.JSX.Element {
           const msgs = [...prev.messages]
           const last = msgs.length - 1
           if (msgs[last]?.role === "assistant") {
-            msgs[last] = { ...msgs[last], content: `❌ ${event.error ?? "Unknown error"}`, isStreaming: false, modelRetry: null }
+            const prefix = rollbackSnapshot ? "❌ 修改失败，已回滚到修改前版本。" : "❌"
+            msgs[last] = { ...msgs[last], content: `${prefix} ${event.error ?? "Unknown error"}`, isStreaming: false, modelRetry: null }
           }
-          return { generationState: "error", messages: msgs, pendingApproval: null }
+          return {
+            ...(rollbackSnapshot ? restoreIterationRollbackSnapshot(rollbackSnapshot, prev) : {}),
+            generationState: "error",
+            messages: msgs,
+            pendingApproval: null,
+          }
         })
         cleanup()
         tabSessionsRef.current.delete(tabId)
@@ -2439,7 +2501,12 @@ export function DesignView(): React.JSX.Element {
           const msgs = [...prev.messages]
           const last = msgs.length - 1
           if (msgs[last]?.isStreaming) msgs[last] = { ...msgs[last], isStreaming: false, modelRetry: null }
-          return { generationState: "idle", messages: msgs, pendingApproval: null }
+          return {
+            ...(rollbackSnapshot ? restoreIterationRollbackSnapshot(rollbackSnapshot, prev) : {}),
+            generationState: "idle",
+            messages: msgs,
+            pendingApproval: null,
+          }
         })
         cleanup()
         tabSessionsRef.current.delete(tabId)
@@ -2652,6 +2719,7 @@ export function DesignView(): React.JSX.Element {
       state.retrySkill ?? undefined,
       state.artifactPath,
       true,
+      state.retryIsIteration ? makeIterationRollbackSnapshot(state) : null,
     )
   }, [activeTabId, tabStates, updateTs, startGeneration])
 
@@ -2696,6 +2764,23 @@ ${commentLines}${variantNote}`
       anchor: draft?.anchor,
     }], state)
     const cleanMsg = `📝 ${text.trim().slice(0, 60)}`
+    const rollbackSnapshot = makeIterationRollbackSnapshot(state)
+    if (rollbackSnapshot && draft) {
+      rollbackSnapshot.comments = [
+        ...rollbackSnapshot.comments,
+        {
+          id: uuid(),
+          pageX: draft.pageX,
+          pageY: draft.pageY,
+          text: text.trim(),
+          elementDesc,
+          anchor: draft.anchor,
+          createdAt: Date.now(),
+        },
+      ]
+      rollbackSnapshot.draftComment = null
+      rollbackSnapshot.activeCommentId = null
+    }
 
     updateTs(tabId, (prev) => ({
       draftComment: null,
@@ -2705,7 +2790,7 @@ ${commentLines}${variantNote}`
         { role: "user" as const, content: cleanMsg },
       ],
     }))
-    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined, cleanMsg, undefined, undefined, state.artifactPath)
+    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined, cleanMsg, undefined, undefined, state.artifactPath, false, rollbackSnapshot)
   }, [activeTabId, tabStates, updateTs, startGeneration, buildCommentPrompt])
 
   // ── Send a saved comment pin → model ─────────────────────
@@ -2726,6 +2811,7 @@ ${commentLines}${variantNote}`
       anchor: comment.anchor,
     }], state)
     const cleanMsg = `📝 ${text.trim().slice(0, 60)}`
+    const rollbackSnapshot = makeIterationRollbackSnapshot(state)
 
     updateTs(tabId, (prev) => ({
       comments: prev.comments.filter((c) => c.id !== commentId),
@@ -2736,7 +2822,7 @@ ${commentLines}${variantNote}`
         { role: "user" as const, content: cleanMsg },
       ],
     }))
-    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined, cleanMsg, undefined, undefined, state.artifactPath)
+    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined, cleanMsg, undefined, undefined, state.artifactPath, false, rollbackSnapshot)
   }, [activeTabId, tabStates, updateTs, startGeneration, buildCommentPrompt])
 
   // ── Edit a saved comment's text ───────────────────────────
@@ -2781,6 +2867,7 @@ ${commentLines}${variantNote}`
       state
     )
     const cleanMsg = `📝 发送 ${pending.length} 条批注`
+    const rollbackSnapshot = makeIterationRollbackSnapshot(state)
 
     updateTs(tabId, (prev) => ({
       comments: [],
@@ -2792,7 +2879,7 @@ ${commentLines}${variantNote}`
       ],
     }))
 
-    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined, cleanMsg, undefined, undefined, state.artifactPath)
+    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined, cleanMsg, undefined, undefined, state.artifactPath, false, rollbackSnapshot)
   }, [activeTabId, tabStates, updateTs, startGeneration, buildCommentPrompt])
 
   const collectDrawElementLabels = useCallback((points: DrawPoint[]): string[] => {
@@ -2984,6 +3071,7 @@ ${noteLines || "无"}${variantNote}`
     const cleanMsg = userInstruction
       ? `✏️ ${userInstruction.slice(0, 60)}`
       : `✏️ 发送 ${annotationCount} 条绘制标记`
+    const rollbackSnapshot = makeIterationRollbackSnapshot(state)
 
     updateTs(tabId, (prev) => ({
       inputValue: "",
@@ -2997,7 +3085,7 @@ ${noteLines || "无"}${variantNote}`
       ],
     }))
 
-    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined, cleanMsg, undefined, undefined, state.artifactPath)
+    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined, cleanMsg, undefined, undefined, state.artifactPath, false, rollbackSnapshot)
   }, [activeTabId, tabStates, updateTs, startGeneration, buildDrawPrompt])
 
   // ── Send message ──────────────────────────────────────────
@@ -3200,6 +3288,7 @@ ${noteLines || "无"}${variantNote}`
 
       const iterationPrompt = `User follow-up instruction: ${prompt}${variantNote}\n\n始终使用中文回答。`
       const artifactPath = currentState?.artifactPath
+      const rollbackSnapshot = makeIterationRollbackSnapshot(currentState)
 
       startGeneration(
         iterationPrompt + contextSuffix,
@@ -3209,7 +3298,9 @@ ${noteLines || "无"}${variantNote}`
         prompt,   // clean user message for apiHistory recording
         undefined,
         skillReference,
-        artifactPath ?? null
+        artifactPath ?? null,
+        false,
+        rollbackSnapshot
       )
     }
   }, [activeTabId, tabStates, updateTs, startAskQuestions, startGeneration, startGenerationFromImage, workspacePath, showToast, syncContextFilesToWorkspace])
