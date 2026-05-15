@@ -14,8 +14,10 @@ import { createHash, randomUUID } from "node:crypto"
 import {
   constants as fsConstants,
   existsSync,
+  lstatSync,
   mkdirSync,
   realpathSync,
+  type ReadStream,
   writeFileSync
 } from "node:fs"
 import fs from "node:fs/promises"
@@ -57,6 +59,11 @@ import { getSkillActivationKey } from "./skill-lifecycle/activation"
 import type { SkillUseTracker } from "./skill-lifecycle/tracker"
 import type { AgentFileMutationKind } from "../services/agent-auto-commit"
 import { recordGen as recordAdoptionGen } from "../services/adoption-tracker"
+import {
+  READ_FILE_DEFAULT_LIMIT,
+  READ_FILE_MAX_LIMIT,
+  trimReadFileOutputLines
+} from "./read-file-output"
 
 /**
  * Sensitive directories under user profile that sandbox tools should not access.
@@ -88,6 +95,39 @@ export interface SkillHookContextProvider {
 }
 
 export type LocalSandboxHookResolver = (event: HookEvent, context: HookContext) => HookConfig[]
+
+export interface LocalSandboxReadFileOptions {
+  maxFormattedContentChars?: number
+  // Internal lookahead used to build accurate pagination/truncation hints,
+  // especially for long-line continuation chunks and output-line budget edges.
+  // Any lookahead content is trimmed before returning output or running PostToolUse hooks.
+  includeLookahead?: boolean
+}
+
+interface FormattedReadLineState {
+  lines: string[]
+  charLength: number
+  truncatedByOutputBudget: boolean
+  truncatedWithinLine: number | null
+  truncatedBeforeLine: number | null
+  lastVisibleSourceLine: number | null
+}
+
+interface ReadRangeFormatResult {
+  formattedLines: string[]
+  totalLines: number
+  hasNonWhitespace: boolean
+  resolvedPath: string
+  truncatedByOutputBudget: boolean
+  truncatedWithinLine: number | null
+  truncatedBeforeLine: number | null
+  lastVisibleSourceLine: number | null
+}
+
+interface EncodingAwareLiteralSearchResult {
+  results: Record<string, Array<[number, string]>>
+  stoppedEarly: boolean
+}
 
 // Python's tempfile uses private 0o700 directories on Windows. Under Codex's
 // WRITE_RESTRICTED token those DACLs omit the capability SID, so pip cannot
@@ -957,13 +997,91 @@ export class LocalSandbox
    * Check if a path is blocked by sandbox policy.
    * When sandbox is elevated, sensitive directories (e.g. .ssh, .aws) are blocked.
    */
-  private isBlockedBySandbox(filePath: string): boolean {
+  private isBlockedBySandbox(
+    filePath: string,
+    realpathCache: Map<string, string | null> = new Map()
+  ): boolean {
     if (this.windowsSandbox !== "elevated") return false
+    const candidates = new Set<string>([filePath])
     try {
       const resolved = this._resolvePath(filePath)
-      return isSensitivePath(resolved)
+      candidates.add(resolved)
+      const realResolved = this.realpathDeepestExistingCached(resolved, realpathCache)
+      if (realResolved) candidates.add(realResolved)
     } catch {
-      return isSensitivePath(filePath)
+      const realInput = this.realpathDeepestExistingCached(filePath, realpathCache)
+      if (realInput) candidates.add(realInput)
+    }
+    return Array.from(candidates).some((candidate) => isSensitivePath(candidate))
+  }
+
+  private isSensitiveSandboxPath(
+    filePath: string,
+    realpathCache: Map<string, string | null> = new Map()
+  ): boolean {
+    return this.windowsSandbox === "elevated" && this.isBlockedBySandbox(filePath, realpathCache)
+  }
+
+  private realpathDeepestExistingCached(
+    filePath: string,
+    realpathCache: Map<string, string | null>
+  ): string | null {
+    const resolved = path.resolve(filePath)
+    if (realpathCache.has(resolved)) {
+      return realpathCache.get(resolved) ?? null
+    }
+
+    const result = this.realpathDeepestExisting(resolved, realpathCache)
+    realpathCache.set(resolved, result)
+    return result
+  }
+
+  private realpathExistingCached(
+    existingPath: string,
+    realpathCache: Map<string, string | null>
+  ): string | null {
+    const resolved = path.resolve(existingPath)
+    if (realpathCache.has(resolved)) {
+      return realpathCache.get(resolved) ?? null
+    }
+
+    try {
+      const realPath = realpathSync(resolved)
+      realpathCache.set(resolved, realPath)
+      return realPath
+    } catch {
+      realpathCache.set(resolved, null)
+      return null
+    }
+  }
+
+  private realpathDeepestExisting(
+    filePath: string,
+    realpathCache: Map<string, string | null>
+  ): string | null {
+    const missingSegments: string[] = []
+    let current = path.resolve(filePath)
+
+    while (!existsSync(current)) {
+      const parent = path.dirname(current)
+      if (parent === current) return null
+      missingSegments.unshift(path.basename(current))
+      current = parent
+    }
+
+    try {
+      const stat = lstatSync(current)
+      if (stat.isDirectory() || stat.isSymbolicLink()) {
+        const realPath = this.realpathExistingCached(current, realpathCache)
+        return realPath ? path.join(realPath, ...missingSegments) : null
+      }
+
+      const parentRealPath = this.realpathExistingCached(path.dirname(current), realpathCache)
+      return parentRealPath
+        ? path.join(parentRealPath, path.basename(current), ...missingSegments)
+        : null
+    } catch {
+      return null
     }
   }
 
@@ -983,9 +1101,14 @@ export class LocalSandbox
 
   setHiddenSkillDirs(skillDirs: string[]): void {
     this._hiddenSkillDirKeys.clear()
+    const realpathCache = new Map<string, string | null>()
     for (const dir of skillDirs) {
       const key = this.normalizeResolvedPathKey(dir)
       if (key) this._hiddenSkillDirKeys.add(key)
+      const realKey = this.normalizeResolvedPathKey(
+        this.realpathDeepestExistingCached(dir, realpathCache)
+      )
+      if (realKey) this._hiddenSkillDirKeys.add(realKey)
     }
   }
 
@@ -995,18 +1118,28 @@ export class LocalSandbox
     return process.platform === "win32" ? normalized.toLowerCase() : normalized
   }
 
-  private isHiddenSkillPath(filePath: string): boolean {
+  private isHiddenSkillPath(
+    filePath: string,
+    realpathCache: Map<string, string | null> = new Map()
+  ): boolean {
     if (this._hiddenSkillDirKeys.size === 0) return false
+    const candidates = new Set<string>()
     let resolved: string
     try {
       resolved = this._resolvePath(filePath)
     } catch {
       resolved = filePath
     }
-    const key = this.normalizeResolvedPathKey(resolved)
-    if (!key) return false
-    for (const hidden of this._hiddenSkillDirKeys) {
-      if (key === hidden || key.startsWith(`${hidden}/`)) return true
+    candidates.add(resolved)
+    const realResolved = this.realpathDeepestExistingCached(resolved, realpathCache)
+    if (realResolved) candidates.add(realResolved)
+
+    for (const candidate of candidates) {
+      const key = this.normalizeResolvedPathKey(candidate)
+      if (!key) continue
+      for (const hidden of this._hiddenSkillDirKeys) {
+        if (key === hidden || key.startsWith(`${hidden}/`)) return true
+      }
     }
     return false
   }
@@ -1025,6 +1158,30 @@ export class LocalSandbox
     updatedInput?: Record<string, unknown>
   ): T {
     return mergeUpdatedInput(base, updatedInput)
+  }
+
+  private static readFileHookArgs(
+    filePath: string,
+    offset: number,
+    limit: number
+  ): Record<string, unknown> {
+    return { file_path: filePath, filePath, offset, limit }
+  }
+
+  private static readFilePathFromHookArgs(
+    args: Record<string, unknown>,
+    updatedInput: Record<string, unknown> | undefined,
+    fallback: string
+  ): string {
+    if (typeof updatedInput?.file_path === "string" && updatedInput.file_path) {
+      return updatedInput.file_path
+    }
+    if (typeof updatedInput?.filePath === "string" && updatedInput.filePath) {
+      return updatedInput.filePath
+    }
+    if (typeof args.file_path === "string" && args.file_path) return args.file_path
+    if (typeof args.filePath === "string" && args.filePath) return args.filePath
+    return fallback
   }
 
   private async runPreToolUseHook(
@@ -1120,8 +1277,19 @@ export class LocalSandbox
 
   private static readonly MAX_GREP_MATCHES = 200
   private static readonly MAX_GREP_CHARS = 24_000
+  private static readonly MAX_GREP_LINE_CHARS = 1_000
+  private static readonly GREP_LINE_TRUNCATION_SUFFIX = "...(truncated)"
+  private static readonly MAX_GREP_FALLBACK_SCANNED_FILES = 1_000
   private static readonly MAX_GLOB_ENTRIES = 400
   private static readonly MAX_LS_ENTRIES = 300
+
+  private static truncateGrepLine(lineText: string): string {
+    if (lineText.length <= LocalSandbox.MAX_GREP_LINE_CHARS) return lineText
+    return (
+      lineText.slice(0, LocalSandbox.MAX_GREP_LINE_CHARS) +
+      LocalSandbox.GREP_LINE_TRUNCATION_SUFFIX
+    )
+  }
 
   /**
    * Override grepRaw to:
@@ -1140,13 +1308,14 @@ export class LocalSandbox
     dirPath?: string,
     glob?: string | null
   ): Promise<GrepMatch[] | string> {
+    const realpathCache = new Map<string, string | null>()
     const resolved = dirPath ?? "/"
     let effectivePattern = pattern
     let effectivePath = resolved
     let effectiveGlob = glob
 
     // Block grep on sensitive directories
-    if (this.isBlockedBySandbox(resolved)) {
+    if (this.isBlockedBySandbox(resolved, realpathCache)) {
       return []
     }
     const preResult = await this.runPreToolUseHook("grep", { pattern, path: resolved, glob })
@@ -1169,7 +1338,10 @@ export class LocalSandbox
       effectiveGlob = updatedArgs.glob as string | null
     }
 
-    if (this.isBlockedBySandbox(effectivePath)) {
+    if (this.isBlockedBySandbox(effectivePath, realpathCache)) {
+      return []
+    }
+    if (this.isHiddenSkillPath(effectivePath, realpathCache)) {
       return []
     }
 
@@ -1181,10 +1353,14 @@ export class LocalSandbox
       return []
     }
     // Early exit if path doesn't exist; cache stat for reuse below
-    let baseStat: Awaited<ReturnType<typeof fs.stat>>
+    let baseStat: Awaited<ReturnType<typeof fs.lstat>>
     try {
-      baseStat = await fs.stat(baseFull)
+      baseStat = await fs.lstat(baseFull)
     } catch {
+      return []
+    }
+    if (baseStat.isSymbolicLink()) return []
+    if (this.isHiddenSkillPath(baseFull, realpathCache)) {
       return []
     }
     const isFile = baseStat.isFile()
@@ -1242,12 +1418,20 @@ export class LocalSandbox
     // - ripgrep is unavailable (null/undefined), OR
     // - ripgrep returned empty for a single file (may be non-UTF-8 / binary-detected,
     //   e.g. GBK/Shift-JIS files that ripgrep skips as "binary")
-    // For directory-level searches, empty ripgrep results are normal — skip fallback.
+    // For directory-level searches, empty ripgrep results are normal — skip fallback
+    // to keep grep performance aligned with rg-first tools like Claude Code.
+    let fallbackStoppedEarly = false
     if (!rgAvailable || (results.length === 0 && isFile)) {
       const t1 = Date.now()
-      const rawResults = await this.encodingAwareLiteralSearch(effectivePattern, baseFull, effectiveGlob ?? null)
+      const fallbackResult = await this.encodingAwareLiteralSearch(
+        effectivePattern,
+        baseFull,
+        effectiveGlob ?? null,
+        realpathCache
+      )
+      fallbackStoppedEarly = fallbackResult.stoppedEarly
       const fallbackMs = Date.now() - t1
-      for (const [fpath, items] of Object.entries(rawResults)) {
+      for (const [fpath, items] of Object.entries(fallbackResult.results)) {
         for (const [lineNum, lineText] of items) {
           results.push({ path: fpath, line: lineNum, text: lineText })
         }
@@ -1264,18 +1448,13 @@ export class LocalSandbox
 
     // Filter out matches inside disabled skills so their content cannot leak via grep.
     if (this._hiddenSkillDirKeys.size > 0) {
-      results = results.filter((m) => !this.isHiddenSkillPath(m.path))
+      results = results.filter((m) => !this.isHiddenSkillPath(m.path, realpathCache))
     }
 
     // Filter out any results from sensitive directories
     if (this.windowsSandbox === "elevated") {
       results = results.filter((m) => {
-        try {
-          const resolved = this._resolvePath(m.path)
-          return !isSensitivePath(resolved)
-      } catch {
-          return !isSensitivePath(m.path)
-        }
+        return !this.isSensitiveSandboxPath(m.path, realpathCache)
       })
     }
 
@@ -1285,8 +1464,7 @@ export class LocalSandbox
     for (const match of results) {
       if (capped.length >= LocalSandbox.MAX_GREP_MATCHES) break
       // Truncate overly long lines (e.g. minified JS) to avoid blowing the char budget
-      const text =
-        match.text.length > 1000 ? match.text.slice(0, 1000) + "...(truncated)" : match.text
+      const text = LocalSandbox.truncateGrepLine(match.text)
       const estChars = match.path.length + text.length + 16
       if (charCount + estChars > LocalSandbox.MAX_GREP_CHARS) break
       capped.push(text !== match.text ? { ...match, text } : match)
@@ -1304,6 +1482,12 @@ export class LocalSandbox
         path: "(truncated)",
         line: 0,
         text: `Found ${results.length} total matches, showing first ${capped.length}. ${omitted} omitted — refine pattern/path/glob.`
+      })
+    } else if (fallbackStoppedEarly) {
+      capped.push({
+        path: "(truncated)",
+        line: 0,
+        text: `Fallback search stopped after reaching scan/output limits. Showing first ${capped.length} matches — refine pattern/path/glob.`
       })
     }
 
@@ -1332,10 +1516,11 @@ export class LocalSandbox
    * of files and consume context on small windows.
    */
   async globInfo(pattern: string, path = "/"): Promise<FileInfo[]> {
-    if (this.isBlockedBySandbox(path)) {
+    const realpathCache = new Map<string, string | null>()
+    if (this.isBlockedBySandbox(path, realpathCache)) {
       return []
     }
-    if (this.isHiddenSkillPath(path)) {
+    if (this.isHiddenSkillPath(path, realpathCache)) {
       return []
     }
     let effectivePattern = pattern
@@ -1345,36 +1530,28 @@ export class LocalSandbox
       const reason = preResult.stdout || preResult.reason || "glob was blocked by a hook"
       return [{ path: `[Hook blocked] ${reason}`, is_dir: false } as FileInfo]
     }
-    const updatedArgs = LocalSandbox.mergeUpdatedInput(
-      { pattern, path },
-      preResult?.updatedInput
-    )
+    const updatedArgs = LocalSandbox.mergeUpdatedInput({ pattern, path }, preResult?.updatedInput)
     if (typeof updatedArgs.pattern === "string" && updatedArgs.pattern) {
       effectivePattern = updatedArgs.pattern
     }
     if (typeof updatedArgs.path === "string" && updatedArgs.path) {
       effectivePath = updatedArgs.path
     }
-    if (this.isHiddenSkillPath(effectivePath)) {
+    if (this.isHiddenSkillPath(effectivePath, realpathCache)) {
       return []
     }
-    if (this.isBlockedBySandbox(effectivePath)) {
+    if (this.isBlockedBySandbox(effectivePath, realpathCache)) {
       return []
     }
     let infos = await super.globInfo(effectivePattern, effectivePath)
     // Hide files that fall inside any disabled skill so the agent cannot list them.
     if (this._hiddenSkillDirKeys.size > 0) {
-      infos = infos.filter((f) => !this.isHiddenSkillPath(f.path))
+      infos = infos.filter((f) => !this.isHiddenSkillPath(f.path, realpathCache))
     }
     // Filter out any results that fall within sensitive directories
     if (this.windowsSandbox === "elevated") {
       infos = infos.filter((f) => {
-        try {
-          const resolved = this._resolvePath(f.path)
-          return !isSensitivePath(resolved)
-        } catch {
-          return true
-        }
+        return !this.isSensitiveSandboxPath(f.path, realpathCache)
       })
     }
     let finalInfos = infos
@@ -1415,7 +1592,8 @@ export class LocalSandbox
    * Light cap for ls to avoid pathological large directory listings.
    */
   async lsInfo(path: string): Promise<FileInfo[]> {
-    if (this.isHiddenSkillPath(path)) {
+    const realpathCache = new Map<string, string | null>()
+    if (this.isHiddenSkillPath(path, realpathCache)) {
       return [
         {
           path: `Error listing '${path}': skill is disabled`,
@@ -1423,7 +1601,7 @@ export class LocalSandbox
         } as FileInfo
       ]
     }
-    if (this.isBlockedBySandbox(path)) {
+    if (this.isBlockedBySandbox(path, realpathCache)) {
       return [
         {
           path: "Error: Access denied — this directory is restricted by sandbox policy.",
@@ -1441,7 +1619,7 @@ export class LocalSandbox
     if (typeof updatedArgs.path === "string" && updatedArgs.path) {
       effectivePath = updatedArgs.path
     }
-    if (this.isHiddenSkillPath(effectivePath)) {
+    if (this.isHiddenSkillPath(effectivePath, realpathCache)) {
       return [
         {
           path: `Error listing '${effectivePath}': skill is disabled`,
@@ -1449,7 +1627,7 @@ export class LocalSandbox
         } as FileInfo
       ]
     }
-    if (this.isBlockedBySandbox(effectivePath)) {
+    if (this.isBlockedBySandbox(effectivePath, realpathCache)) {
       return [
         {
           path: "Error: Access denied — this directory is restricted by sandbox policy.",
@@ -1458,16 +1636,11 @@ export class LocalSandbox
       ]
     }
     let infos = await super.lsInfo(effectivePath)
-    infos = infos.filter((f) => !this.isHiddenSkillPath(f.path))
+    infos = infos.filter((f) => !this.isHiddenSkillPath(f.path, realpathCache))
     // Filter out any results that fall within sensitive directories
     if (this.windowsSandbox === "elevated") {
       infos = infos.filter((f) => {
-        try {
-          const resolved = this._resolvePath(f.path)
-          return !isSensitivePath(resolved)
-        } catch {
-          return true
-        }
+        return !this.isSensitiveSandboxPath(f.path, realpathCache)
       })
     }
     let finalInfos = infos
@@ -1503,6 +1676,11 @@ export class LocalSandbox
 
   private static readonly LINE_NUMBER_WIDTH = 6
   private static readonly MAX_LINE_LENGTH = 10_000
+  private static readonly MAX_READ_LIMIT = READ_FILE_MAX_LIMIT
+  private static readonly READ_FAST_PATH_MAX_SIZE = 10 * 1024 * 1024
+  private static readonly READ_ENCODING_SAMPLE_BYTES = 8192
+  private static readonly READ_ENCODING_SAMPLE_SEGMENTS = 3
+  private static readonly READ_TARGET_ENCODING_SAMPLE_BYTES = 64 * 1024
 
   private static readonly SUPPORTS_NOFOLLOW = typeof fsConstants.O_NOFOLLOW === "number"
 
@@ -1554,8 +1732,8 @@ export class LocalSandbox
    * use the detected encoding to write back, so we upgrade ASCII → UTF-8 to
    * avoid replacing non-ASCII chars with '?').
    * 0. Fast reject known binary extensions before any I/O-heavy detection
-   * 1. Try jschardet — if it returns a valid encoding, use it (ASCII → utf-8)
-   * 2. If detection fails, check for binary via null-byte sampling
+   * 1. Check for binary via null/control-byte sampling before accepting text guesses
+   * 2. Try jschardet — if it returns a valid encoding, use it (ASCII → utf-8)
    * 3. Fallback to utf-8 for plain text
    */
   private detectEncoding(buffer: Buffer, ext?: string): string {
@@ -1564,51 +1742,468 @@ export class LocalSandbox
     }
 
     const detected = chardet.detect(buffer)
-    if (detected && detected.encoding && iconv.encodingExists(detected.encoding)) {
-      // ASCII is a strict subset of UTF-8; upgrade so non-ASCII chars
-      // written by the agent (e.g. CJK) are not replaced with '?'.
-      if (detected.encoding.toLowerCase() === "ascii") return "utf-8"
-      return detected.encoding
+    const detectedEncoding =
+      detected && detected.encoding && iconv.encodingExists(detected.encoding)
+        ? detected.encoding
+        : null
+    if (
+      LocalSandbox.hasBinaryControlBytes(buffer) &&
+      !LocalSandbox.isKnownTextEncodingWithNullBytes(detectedEncoding)
+    ) {
+      throw new Error(`Cannot read text for file type: ${ext || "unknown"}`)
     }
 
-    // jschardet could not determine encoding — check if it's binary
-    const sampleLen = Math.min(8192, buffer.length)
+    if (detectedEncoding) {
+      // ASCII is a strict subset of UTF-8; upgrade so non-ASCII chars
+      // written by the agent (e.g. CJK) are not replaced with '?'.
+      if (detectedEncoding.toLowerCase() === "ascii") return "utf-8"
+      return detectedEncoding
+    }
+
+    return "utf-8"
+  }
+
+  private static hasBinaryControlBytes(buffer: Buffer): boolean {
+    const sampleLen = buffer.length
+    if (sampleLen === 0) return false
+
+    let nonPrintableCount = 0
     for (let i = 0; i < sampleLen; i++) {
-      if (buffer[i] === 0) {
-        throw new Error(`Cannot read text for file type: ${ext || "unknown"}`)
+      const byte = buffer[i]
+      if (byte === 0) return true
+      if (byte < 9 || (byte > 13 && byte < 32)) {
+        nonPrintableCount++
       }
     }
-    return "utf-8"
+    return nonPrintableCount / sampleLen > 0.3
+  }
+
+  private static isKnownTextEncodingWithNullBytes(encoding: string | null): boolean {
+    if (!encoding) return false
+    const normalized = LocalSandbox.normalizeEncodingName(encoding)
+    return normalized.startsWith("utf16") || normalized.startsWith("utf32")
+  }
+
+  private async readEncodingSample(resolvedPath: string, fileSize: number): Promise<Buffer> {
+    const sampleSize = Math.min(LocalSandbox.READ_ENCODING_SAMPLE_BYTES, fileSize)
+    if (sampleSize <= 0) return Buffer.alloc(0)
+
+    const maxOffset = Math.max(0, fileSize - sampleSize)
+    const segmentCount: number = LocalSandbox.READ_ENCODING_SAMPLE_SEGMENTS
+    const offsets = Array.from(
+      new Set(
+        Array.from({ length: segmentCount }, (_, index) => {
+          return Math.round((maxOffset * index) / Math.max(1, segmentCount - 1))
+        })
+      )
+    ).sort((a, b) => a - b)
+
+    const openFlags = LocalSandbox.SUPPORTS_NOFOLLOW
+      ? fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW
+      : fsConstants.O_RDONLY
+    const fd = await fs.open(resolvedPath, openFlags)
+    const samples: Buffer[] = []
+    try {
+      for (const offset of offsets) {
+        const sampleBuffer = Buffer.alloc(sampleSize)
+        const { bytesRead } = await fd.read(sampleBuffer, 0, sampleSize, offset)
+        if (bytesRead > 0) samples.push(sampleBuffer.subarray(0, bytesRead))
+      }
+    } finally {
+      await fd.close()
+    }
+    return Buffer.concat(samples)
+  }
+
+  private async readTargetEncodingSample(
+    resolvedPath: string,
+    offset: number,
+    limit: number
+  ): Promise<Buffer> {
+    const samples: Buffer[] = []
+    const endLine = offset + limit
+    let sampledBytes = 0
+    let lineIndex = 0
+    let stream: ReadStream | null = null
+
+    const appendSample = (chunk: Buffer): void => {
+      if (sampledBytes >= LocalSandbox.READ_TARGET_ENCODING_SAMPLE_BYTES) return
+      const remaining = LocalSandbox.READ_TARGET_ENCODING_SAMPLE_BYTES - sampledBytes
+      const sample = chunk.subarray(0, Math.min(remaining, chunk.length))
+      if (sample.length > 0) {
+        samples.push(sample)
+        sampledBytes += sample.length
+      }
+    }
+
+    const openFlags = LocalSandbox.SUPPORTS_NOFOLLOW
+      ? fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW
+      : fsConstants.O_RDONLY
+    const fd = await fs.open(resolvedPath, openFlags)
+    try {
+      stream = fd.createReadStream({ start: 0, autoClose: false })
+      for await (const chunk of stream as AsyncIterable<Buffer>) {
+        let start = 0
+        let newline = chunk.indexOf(0x0a, start)
+        while (newline !== -1) {
+          if (lineIndex >= offset && lineIndex < endLine) {
+            appendSample(chunk.subarray(start, newline))
+          }
+          lineIndex++
+          if (lineIndex >= endLine && sampledBytes > 0) {
+            stream.destroy()
+            return Buffer.concat(samples)
+          }
+          start = newline + 1
+          newline = chunk.indexOf(0x0a, start)
+        }
+
+        if (start < chunk.length && lineIndex >= offset && lineIndex < endLine) {
+          appendSample(chunk.subarray(start))
+          if (sampledBytes >= LocalSandbox.READ_TARGET_ENCODING_SAMPLE_BYTES) {
+            stream.destroy()
+            return Buffer.concat(samples)
+          }
+        }
+      }
+    } finally {
+      stream?.destroy()
+      await fd.close()
+    }
+
+    return Buffer.concat(samples)
+  }
+
+  private static containsReplacementCharacter(lines: string[]): boolean {
+    return lines.some((line) => line.includes("\uFFFD"))
+  }
+
+  private static normalizeEncodingName(encoding: string): string {
+    return encoding.toLowerCase().replace(/[-_\s]/g, "")
+  }
+
+  private createFormattedReadLineState(): FormattedReadLineState {
+    return {
+      lines: [],
+      charLength: 0,
+      truncatedByOutputBudget: false,
+      truncatedWithinLine: null,
+      truncatedBeforeLine: null,
+      lastVisibleSourceLine: null
+    }
+  }
+
+  private markReadLineBudgetExceeded(
+    state: FormattedReadLineState,
+    lineNum: number,
+    chunkIdx: number
+  ): void {
+    state.truncatedByOutputBudget = true
+    if (state.lastVisibleSourceLine === lineNum || chunkIdx > 0) {
+      state.truncatedWithinLine = lineNum
+    } else {
+      state.truncatedBeforeLine = lineNum
+    }
+  }
+
+  private appendFormattedReadLine(
+    state: FormattedReadLineState,
+    lineNum: number,
+    chunkIdx: number,
+    text: string,
+    maxOutputLines: number,
+    maxOutputChars?: number
+  ): boolean {
+    const w = LocalSandbox.LINE_NUMBER_WIDTH
+    const label =
+      chunkIdx === 0 ? lineNum.toString().padStart(w) : `${lineNum}.${chunkIdx}`.padStart(w)
+    const formattedLine = `${label}\t${text}`
+
+    if (state.lines.length >= maxOutputLines) {
+      this.markReadLineBudgetExceeded(state, lineNum, chunkIdx)
+      return false
+    }
+    if (maxOutputChars != null) {
+      const nextLength = state.charLength + (state.lines.length > 0 ? 1 : 0) + formattedLine.length
+      if (nextLength > maxOutputChars) {
+        this.markReadLineBudgetExceeded(state, lineNum, chunkIdx)
+        return false
+      }
+      state.charLength = nextLength
+    } else {
+      state.charLength += (state.lines.length > 0 ? 1 : 0) + formattedLine.length
+    }
+
+    state.lines.push(formattedLine)
+    state.lastVisibleSourceLine = lineNum
+    return true
   }
 
   /**
    * Format lines with line numbers (compatible with deepagents' format).
    * Long lines are chunked with continuation markers (e.g. 5.1, 5.2).
    */
-  private formatLines(lines: string[], startLine: number): string {
-    const result: string[] = []
-    const w = LocalSandbox.LINE_NUMBER_WIDTH
+  private formatLines(
+    lines: string[],
+    startLine: number,
+    maxOutputLines: number,
+    maxOutputChars?: number
+  ): FormattedReadLineState {
+    const state = this.createFormattedReadLineState()
     const maxLen = LocalSandbox.MAX_LINE_LENGTH
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i]
       const lineNum = i + startLine
       if (line.length <= maxLen) {
-        result.push(`${lineNum.toString().padStart(w)}\t${line}`)
+        if (
+          !this.appendFormattedReadLine(state, lineNum, 0, line, maxOutputLines, maxOutputChars)
+        ) {
+          break
+        }
       } else {
         const numChunks = Math.ceil(line.length / maxLen)
         for (let chunkIdx = 0; chunkIdx < numChunks; chunkIdx++) {
           const start = chunkIdx * maxLen
           const chunk = line.slice(start, start + maxLen)
-          if (chunkIdx === 0) {
-            result.push(`${lineNum.toString().padStart(w)}\t${chunk}`)
-          } else {
-            result.push(`${`${lineNum}.${chunkIdx}`.padStart(w)}\t${chunk}`)
+          if (
+            !this.appendFormattedReadLine(
+              state,
+              lineNum,
+              chunkIdx,
+              chunk,
+              maxOutputLines,
+              maxOutputChars
+            )
+          ) {
+            break
           }
         }
       }
+
+      if (state.truncatedByOutputBudget) break
     }
-    return result.join("\n")
+
+    return state
+  }
+
+  private static validateReadRange(offset: number, limit: number): string | null {
+    if (!Number.isInteger(offset) || offset < 0) {
+      return "Error: offset must be a non-negative integer"
+    }
+    if (!Number.isInteger(limit) || limit <= 0) {
+      return "Error: limit must be a positive integer"
+    }
+    if (limit > LocalSandbox.MAX_READ_LIMIT) {
+      return `Error: limit must be less than or equal to ${LocalSandbox.MAX_READ_LIMIT}`
+    }
+    return null
+  }
+
+  private formatReadRangeFromContent(
+    content: string,
+    offset: number,
+    limit: number,
+    resolvedPath: string,
+    options: LocalSandboxReadFileOptions
+  ): ReadRangeFormatResult {
+    const lines = LocalSandbox.splitFileLines(content)
+    const end = Math.min(offset + limit, lines.length)
+    const selected = lines.slice(offset, end)
+    const maxOutputLines = options.includeLookahead === true ? limit + 1 : limit
+    const formatted = this.formatLines(
+      selected,
+      offset + 1,
+      maxOutputLines,
+      options.maxFormattedContentChars
+    )
+    return {
+      formattedLines: formatted.lines,
+      totalLines: lines.length,
+      hasNonWhitespace: content.trim() !== "",
+      resolvedPath,
+      truncatedByOutputBudget: formatted.truncatedByOutputBudget,
+      truncatedWithinLine: formatted.truncatedWithinLine,
+      truncatedBeforeLine: formatted.truncatedBeforeLine,
+      lastVisibleSourceLine: formatted.lastVisibleSourceLine
+    }
+  }
+
+  private static splitFileLines(content: string): string[] {
+    const lines = content.split("\n")
+    if (lines.length > 0 && lines[lines.length - 1] === "") return lines.slice(0, -1)
+    return lines
+  }
+
+  private async formatReadRangeFromStream(
+    resolvedPath: string,
+    encoding: string,
+    offset: number,
+    limit: number,
+    options: LocalSandboxReadFileOptions
+  ): Promise<ReadRangeFormatResult> {
+    const formatted = this.createFormattedReadLineState()
+    const endLine = offset + limit
+    const maxOutputLines = options.includeLookahead === true ? limit + 1 : limit
+    const maxLen = LocalSandbox.MAX_LINE_LENGTH
+    let lineIndex = 0
+    let currentChunk = ""
+    let currentChunkIdx = 0
+    let hasNonWhitespace = false
+    let endedAfterNewline = false
+
+    const isSelectedLine = () => lineIndex >= offset && lineIndex < endLine
+
+    const appendSegment = (segment: string): void => {
+      if (segment.trim() !== "") hasNonWhitespace = true
+      if (formatted.truncatedByOutputBudget) return
+      if (!isSelectedLine()) return
+      if (formatted.lines.length >= maxOutputLines) {
+        this.markReadLineBudgetExceeded(formatted, lineIndex + 1, currentChunkIdx)
+        return
+      }
+
+      let remaining = segment
+      while (remaining.length > 0 && formatted.lines.length < maxOutputLines) {
+        const available = maxLen - currentChunk.length
+        currentChunk += remaining.slice(0, available)
+        remaining = remaining.slice(available)
+        if (currentChunk.length === maxLen) {
+          const appended = this.appendFormattedReadLine(
+            formatted,
+            lineIndex + 1,
+            currentChunkIdx,
+            currentChunk,
+            maxOutputLines,
+            options.maxFormattedContentChars
+          )
+          if (!appended) return
+          currentChunk = ""
+          currentChunkIdx++
+        }
+      }
+      if (remaining.length > 0) {
+        this.markReadLineBudgetExceeded(formatted, lineIndex + 1, currentChunkIdx)
+      }
+    }
+
+    const finishLine = (): void => {
+      if (isSelectedLine() && !formatted.truncatedByOutputBudget) {
+        if (currentChunk.endsWith("\r")) currentChunk = currentChunk.slice(0, -1)
+        if (currentChunk.length > 0 || currentChunkIdx === 0) {
+          this.appendFormattedReadLine(
+            formatted,
+            lineIndex + 1,
+            currentChunkIdx,
+            currentChunk,
+            maxOutputLines,
+            options.maxFormattedContentChars
+          )
+        }
+      }
+      lineIndex++
+      currentChunk = ""
+      currentChunkIdx = 0
+      endedAfterNewline = true
+    }
+
+    const openFlags = LocalSandbox.SUPPORTS_NOFOLLOW
+      ? fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW
+      : fsConstants.O_RDONLY
+    const fd = await fs.open(resolvedPath, openFlags)
+    try {
+      const stream = fd.createReadStream({ start: 0, autoClose: false })
+      const decoded = stream.pipe(iconv.decodeStream(encoding)) as unknown as AsyncIterable<string>
+      for await (const chunk of decoded) {
+        let start = 0
+        let newline = chunk.indexOf("\n", start)
+        while (newline !== -1) {
+          appendSegment(chunk.slice(start, newline))
+          finishLine()
+          start = newline + 1
+          newline = chunk.indexOf("\n", start)
+        }
+        if (start < chunk.length) {
+          endedAfterNewline = false
+          appendSegment(chunk.slice(start))
+        }
+      }
+      if (!endedAfterNewline || currentChunk.length > 0 || currentChunkIdx > 0) {
+        finishLine()
+      }
+    } finally {
+      await fd.close()
+    }
+
+    return {
+      formattedLines: formatted.lines,
+      totalLines: lineIndex,
+      hasNonWhitespace,
+      resolvedPath,
+      truncatedByOutputBudget: formatted.truncatedByOutputBudget,
+      truncatedWithinLine: formatted.truncatedWithinLine,
+      truncatedBeforeLine: formatted.truncatedBeforeLine,
+      lastVisibleSourceLine: formatted.lastVisibleSourceLine
+    }
+  }
+
+  private async formatReadRange(
+    filePath: string,
+    offset: number,
+    limit: number,
+    options: LocalSandboxReadFileOptions
+  ): Promise<ReadRangeFormatResult> {
+    const resolvedPath = this._resolvePath(filePath)
+    const stat = await fs.lstat(resolvedPath)
+    if (stat.isSymbolicLink()) throw new Error(`Symlinks are not allowed: ${filePath}`)
+    if (!stat.isFile()) throw new Error(`File '${filePath}' not found`)
+
+    const ext = path.extname(resolvedPath).toLowerCase()
+    if (LocalSandbox.KNOWN_BINARY_EXTENSIONS.has(ext)) {
+      throw new Error(`Cannot read binary file type: ${ext}`)
+    }
+
+    if (stat.size < LocalSandbox.READ_FAST_PATH_MAX_SIZE) {
+      const { buffer, resolvedPath: fastPathResolved } = await this.readFileBuffer(
+        filePath,
+        LocalSandbox.READ_FAST_PATH_MAX_SIZE
+      )
+      const encoding = this.detectEncoding(buffer, path.extname(fastPathResolved).toLowerCase())
+      const content = iconv.decode(buffer, encoding)
+      return this.formatReadRangeFromContent(content, offset, limit, fastPathResolved, options)
+    }
+
+    const sample = await this.readEncodingSample(resolvedPath, stat.size)
+    const encoding = this.detectEncoding(sample, ext)
+    const result = await this.formatReadRangeFromStream(
+      resolvedPath,
+      encoding,
+      offset,
+      limit,
+      options
+    )
+    if (!LocalSandbox.containsReplacementCharacter(result.formattedLines)) {
+      return result
+    }
+
+    const targetSample = await this.readTargetEncodingSample(resolvedPath, offset, limit)
+    if (targetSample.length === 0) return result
+
+    const targetEncoding = this.detectEncoding(targetSample, ext)
+    if (
+      LocalSandbox.normalizeEncodingName(targetEncoding) ===
+      LocalSandbox.normalizeEncodingName(encoding)
+    ) {
+      return result
+    }
+
+    return await this.formatReadRangeFromStream(
+      resolvedPath,
+      targetEncoding,
+      offset,
+      limit,
+      options
+    )
   }
 
   /**
@@ -1626,7 +2221,12 @@ export class LocalSandbox
    *  - Multi-encoding decoding via iconv-lite
    *  - Binary file detection as fallback when jschardet fails
    */
-  async read(filePath: string, offset = 0, limit = 500): Promise<string> {
+  async read(
+    filePath: string,
+    offset = 0,
+    limit = READ_FILE_DEFAULT_LIMIT,
+    options: LocalSandboxReadFileOptions = {}
+  ): Promise<string> {
     if (this.isHiddenSkillPath(filePath)) {
       return `Error reading file '${filePath}': skill is disabled`
     }
@@ -1637,19 +2237,18 @@ export class LocalSandbox
     let effectiveOffset = offset
     let effectiveLimit = limit
     try {
-      const preResult = await this.runPreToolUseHook("read_file", { filePath, offset, limit })
+      const preHookArgs = LocalSandbox.readFileHookArgs(filePath, offset, limit)
+      const preResult = await this.runPreToolUseHook("read_file", preHookArgs)
       if (preResult?.blocked || preResult?.decision === "block") {
         const reason = preResult.stdout || preResult.reason || "read_file was blocked by a hook"
         return `Error reading file '${filePath}': [Hook blocked] ${reason}`
       }
-      const updatedArgs = LocalSandbox.mergeUpdatedInput(
-        { filePath, offset, limit },
-        preResult?.updatedInput
+      const updatedArgs = LocalSandbox.mergeUpdatedInput(preHookArgs, preResult?.updatedInput)
+      effectiveFilePath = LocalSandbox.readFilePathFromHookArgs(
+        updatedArgs,
+        preResult?.updatedInput,
+        filePath
       )
-      effectiveFilePath =
-        typeof updatedArgs.filePath === "string" && updatedArgs.filePath
-          ? updatedArgs.filePath
-          : filePath
       effectiveOffset =
         typeof updatedArgs.offset === "number" && Number.isFinite(updatedArgs.offset)
           ? updatedArgs.offset
@@ -1668,6 +2267,14 @@ export class LocalSandbox
     if (this.isBlockedBySandbox(effectiveFilePath)) {
       return `Error: Access denied — '${effectiveFilePath}' is restricted by sandbox policy.`
     }
+    const rangeError = LocalSandbox.validateReadRange(effectiveOffset, effectiveLimit)
+    if (rangeError) {
+      return await this.applyPostToolUseHookToText(
+        "read_file",
+        LocalSandbox.readFileHookArgs(effectiveFilePath, effectiveOffset, effectiveLimit),
+        rangeError
+      )
+    }
     let skillMatch: SkillLifecycleMatch | null = null
     let fireSkillHooks = false
     const skillHookNotes: string[] = []
@@ -1681,7 +2288,11 @@ export class LocalSandbox
           fireSkillHooks = true
           const preContext: HookContext = {
             toolName: "read_file",
-            toolArgs: { filePath: effectiveFilePath, offset: effectiveOffset, limit: effectiveLimit },
+            toolArgs: LocalSandbox.readFileHookArgs(
+              effectiveFilePath,
+              effectiveOffset,
+              effectiveLimit
+            ),
             workspacePath: this.workingDir,
             sessionId: this.runId,
             skillName: skillMatch.name,
@@ -1721,49 +2332,66 @@ export class LocalSandbox
         console.warn("[Hooks] PreSkillUse error:", hookError)
       }
 
-      const { buffer, resolvedPath } = await this.readFileBuffer(effectiveFilePath)
-
-      const ext = path.extname(resolvedPath).toLowerCase()
-      const encoding = this.detectEncoding(buffer, ext)
-      const content = iconv.decode(buffer, encoding)
+      const {
+        formattedLines,
+        totalLines,
+        hasNonWhitespace,
+        resolvedPath,
+        truncatedByOutputBudget,
+        truncatedWithinLine,
+        truncatedBeforeLine,
+        lastVisibleSourceLine
+      } = await this.formatReadRange(effectiveFilePath, effectiveOffset, effectiveLimit, options)
       await this.recordReadTime(resolvedPath)
 
-      if (!content || content.trim() === "") {
+      if (!hasNonWhitespace) {
         return await this.applyPostToolUseHookToText(
           "read_file",
-          { filePath: effectiveFilePath, offset: effectiveOffset, limit: effectiveLimit },
+          LocalSandbox.readFileHookArgs(effectiveFilePath, effectiveOffset, effectiveLimit),
           "System reminder: File exists but has empty contents"
         )
       }
 
-      const lines = content.split("\n")
-      if (effectiveOffset >= lines.length) {
+      if (effectiveOffset >= totalLines) {
         return await this.applyPostToolUseHookToText(
           "read_file",
-          { filePath: effectiveFilePath, offset: effectiveOffset, limit: effectiveLimit },
-          `Error: Line offset ${effectiveOffset} exceeds file length (${lines.length} lines)`
+          LocalSandbox.readFileHookArgs(effectiveFilePath, effectiveOffset, effectiveLimit),
+          `Error: Line offset ${effectiveOffset} exceeds file length (${totalLines} lines)`
         )
       }
 
-      const total = lines.length
+      const total = totalLines
       const hasMore = effectiveOffset + effectiveLimit < total
-      const end = Math.min(effectiveOffset + (hasMore ? effectiveLimit - 1 : effectiveLimit), total)
-      const formatted = this.formatLines(lines.slice(effectiveOffset, end), effectiveOffset + 1)
-      const result = hasMore
-        ? `[Lines ${effectiveOffset + 1}-${end} of ${total}. Use offset=${end} to read more.]\n` +
+      const end = Math.min(effectiveOffset + effectiveLimit, total)
+      const formatted = formattedLines.join("\n")
+      let result = formatted
+      if (truncatedByOutputBudget) {
+        const visibleEnd = lastVisibleSourceLine ?? end
+        const header =
+          truncatedWithinLine != null
+            ? `[Lines ${effectiveOffset + 1}-${visibleEnd} of ${total}. Output was truncated within line ${truncatedWithinLine}; reformat long lines or use a more specific command before continuing.]`
+            : truncatedBeforeLine != null && lastVisibleSourceLine != null
+              ? `[Lines ${effectiveOffset + 1}-${visibleEnd} of ${total}. Output was truncated before line ${truncatedBeforeLine}; use offset=${visibleEnd} to read more.]`
+              : lastVisibleSourceLine != null
+                ? `[Lines ${effectiveOffset + 1}-${visibleEnd} of ${total}. Use offset=${visibleEnd} to read more.]`
+                : `[Lines ${effectiveOffset + 1}-${end} of ${total}. Output was truncated before file content; retry with a smaller limit.]`
+        result = formatted ? `${header}\n${formatted}` : header
+      } else if (hasMore) {
+        result =
+          `[Lines ${effectiveOffset + 1}-${end} of ${total}. Use offset=${end} to read more.]\n` +
           formatted
-        : formatted
+      }
 
       if (fireSkillHooks && skillMatch) {
         this._hookScope?.activateSkill(skillMatch.name, skillMatch.pluginId, skillMatch.rootDir)
         this._hookScope?.activatePersistentHooks(
           this.resolveHooks("PreToolUse", {
             toolName: "read_file",
-            toolArgs: {
-              filePath: effectiveFilePath,
-              offset: effectiveOffset,
-              limit: effectiveLimit
-            },
+            toolArgs: LocalSandbox.readFileHookArgs(
+              effectiveFilePath,
+              effectiveOffset,
+              effectiveLimit
+            ),
             workspacePath: this.workingDir,
             sessionId: this.runId,
             skillName: skillMatch.name,
@@ -1782,17 +2410,21 @@ export class LocalSandbox
         this.enqueueSkillHookContext(skillMatch, skillHookNotes)
       }
 
+      const hookVisibleResult =
+        options.includeLookahead === true
+          ? trimReadFileOutputLines(result, effectiveLimit)
+          : result
       return await this.applyPostToolUseHookToText(
         "read_file",
-        { filePath: effectiveFilePath, offset: effectiveOffset, limit: effectiveLimit },
-        result
+        LocalSandbox.readFileHookArgs(effectiveFilePath, effectiveOffset, effectiveLimit),
+        hookVisibleResult
       )
     } catch (e: unknown) {
       if (isHookHaltError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)
       return await this.applyPostToolUseHookToText(
         "read_file",
-        { filePath: effectiveFilePath, offset: effectiveOffset, limit: effectiveLimit },
+        LocalSandbox.readFileHookArgs(effectiveFilePath, effectiveOffset, effectiveLimit),
         `Error reading file '${effectiveFilePath}': ${msg}`
       )
     }
@@ -1803,29 +2435,78 @@ export class LocalSandbox
    * Shared helper for read(), edit(), and other encoding-aware operations.
    */
   private async readFileBuffer(
-    filePath: string
+    filePath: string,
+    maxBytes?: number
   ): Promise<{ buffer: Buffer; resolvedPath: string }> {
     const resolvedPath: string = this._resolvePath(filePath)
+    return await this.readResolvedFileBuffer(resolvedPath, filePath, maxBytes)
+  }
+
+  private async readResolvedFileBuffer(
+    resolvedPath: string,
+    displayPath: string,
+    maxBytes?: number
+  ): Promise<{ buffer: Buffer; resolvedPath: string }> {
+    const assertReadableRegularFile = (stat: { isFile(): boolean; size: number }): void => {
+      if (!stat.isFile()) {
+        throw new Error(`File '${displayPath}' not found`)
+      }
+      if (maxBytes !== undefined && stat.size > maxBytes) {
+        throw new Error(`File '${displayPath}' exceeds maximum readable size`)
+      }
+    }
 
     let buffer: Buffer
     if (LocalSandbox.SUPPORTS_NOFOLLOW) {
-      if (!(await fs.lstat(resolvedPath)).isFile()) {
-        throw new Error(`File '${filePath}' not found`)
-      }
+      assertReadableRegularFile(await fs.lstat(resolvedPath))
       const fd = await fs.open(resolvedPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
       try {
-        buffer = await fd.readFile()
+        assertReadableRegularFile(await fd.stat())
+        buffer = await LocalSandbox.readFileHandleBuffer(fd, displayPath, maxBytes)
       } finally {
         await fd.close()
       }
     } else {
       const stat = await fs.lstat(resolvedPath)
-      if (stat.isSymbolicLink()) throw new Error(`Symlinks are not allowed: ${filePath}`)
-      if (!stat.isFile()) throw new Error(`File '${filePath}' not found`)
-      buffer = await fs.readFile(resolvedPath)
+      if (stat.isSymbolicLink()) throw new Error(`Symlinks are not allowed: ${displayPath}`)
+      assertReadableRegularFile(stat)
+      const fd = await fs.open(resolvedPath, fsConstants.O_RDONLY)
+      try {
+        assertReadableRegularFile(await fd.stat())
+        buffer = await LocalSandbox.readFileHandleBuffer(fd, displayPath, maxBytes)
+      } finally {
+        await fd.close()
+      }
     }
 
     return { buffer, resolvedPath }
+  }
+
+  private static async readFileHandleBuffer(
+    fd: Awaited<ReturnType<typeof fs.open>>,
+    filePath: string,
+    maxBytes?: number
+  ): Promise<Buffer> {
+    if (maxBytes === undefined) {
+      return await fd.readFile()
+    }
+
+    const chunks: Buffer[] = []
+    let total = 0
+    const stream = fd.createReadStream({ start: 0, end: maxBytes, autoClose: false })
+    try {
+      for await (const chunk of stream) {
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+        total += buffer.length
+        if (total > maxBytes) {
+          throw new Error(`File '${filePath}' exceeds maximum readable size`)
+        }
+        chunks.push(buffer)
+      }
+    } finally {
+      stream.destroy()
+    }
+    return Buffer.concat(chunks, total)
   }
 
   // ── File safety helpers ──────────────────────────────────────────────────────
@@ -1959,13 +2640,15 @@ export class LocalSandbox
     if (preResult?.blocked || preResult?.decision === "block") {
       return { error: `[Hook blocked] ${preResult.stdout || "write_file was blocked by a hook"}` }
     }
-    const updatedArgs = LocalSandbox.mergeUpdatedInput({ filePath, content }, preResult?.updatedInput)
+    const updatedArgs = LocalSandbox.mergeUpdatedInput(
+      { filePath, content },
+      preResult?.updatedInput
+    )
     const effectiveFilePath =
       typeof updatedArgs.filePath === "string" && updatedArgs.filePath
         ? updatedArgs.filePath
         : filePath
-    const effectiveContent =
-      typeof updatedArgs.content === "string" ? updatedArgs.content : content
+    const effectiveContent = typeof updatedArgs.content === "string" ? updatedArgs.content : content
     if (this.isBlockedBySandbox(effectiveFilePath)) {
       return {
         error: `Access denied — '${effectiveFilePath}' is restricted by sandbox policy.`
@@ -2283,44 +2966,82 @@ export class LocalSandbox
   private async encodingAwareLiteralSearch(
     pattern: string,
     baseFull: string,
-    includeGlob: string | null
-  ): Promise<Record<string, Array<[number, string]>>> {
+    includeGlob: string | null,
+    realpathCache: Map<string, string | null>
+  ): Promise<EncodingAwareLiteralSearchResult> {
     const results: Record<string, Array<[number, string]>> = {}
     let stat: Awaited<ReturnType<typeof fs.stat>>
     try {
       stat = await fs.stat(baseFull)
     } catch {
-      return results // path does not exist — return empty
+      return { results, stoppedEarly: false } // path does not exist — return empty
     }
     const isFile = stat.isFile()
     const cwd = isFile ? path.dirname(baseFull) : baseFull
-    // If baseFull points to a single file, only search that file
-    const files = isFile
+    // If baseFull points to a single file, only search that file.
+    const files: AsyncIterable<string | Buffer> | string[] = isFile
       ? [baseFull]
-      : await fg("**/*", {
+      : (fg.stream("**/*", {
           cwd,
           absolute: true,
           onlyFiles: true,
           dot: true,
+          followSymbolicLinks: false,
           ignore: LocalSandbox.SEARCH_IGNORE
-        })
+        }) as AsyncIterable<string | Buffer>)
     const maxBytes = this._maxFileSizeBytes
     const cwdDir = this._virtualMode ? this._cwd : ""
+    let matchCount = 0
+    let charCount = 0
+    let scannedFiles = 0
+    let stoppedEarly = false
 
-    for (const fp of files) {
+    const tryAppendMatch = (virtPath: string, lineNum: number, lineText: string): boolean => {
+      const text = LocalSandbox.truncateGrepLine(lineText)
+      const estChars = virtPath.length + text.length + 16
+      if (
+        matchCount >= LocalSandbox.MAX_GREP_MATCHES ||
+        charCount + estChars > LocalSandbox.MAX_GREP_CHARS
+      ) {
+        stoppedEarly = true
+        return false
+      }
+      if (!results[virtPath]) results[virtPath] = []
+      results[virtPath].push([lineNum, text])
+      matchCount++
+      charCount += estChars
+      return true
+    }
+
+    searchFiles: for await (const fileEntry of files) {
+      const fp = String(fileEntry)
       try {
-        // Single-file mode: skip glob filter — caller already specified the target file
         // matchBase: when glob has no slashes (e.g. "*.ts"), match against
-        // basename only — consistent with ripgrep's --glob behavior.
+        // basename only — consistent with our grep glob filtering behavior.
+        const includeGlobUsesPath = includeGlob?.includes("/") || includeGlob?.includes("\\")
+        const globPath = (isFile ? path.relative(this._cwd, fp) : path.relative(cwd, fp))
+          .split(path.sep)
+          .join("/")
         if (
-          !isFile &&
           includeGlob &&
-          !micromatch.isMatch(path.relative(cwd, fp), includeGlob, { matchBase: true })
+          !micromatch.isMatch(globPath, includeGlob, { matchBase: !includeGlobUsesPath })
         )
           continue
-        if ((await fs.stat(fp)).size > maxBytes) continue
+        if (this._hiddenSkillDirKeys.size > 0 && this.isHiddenSkillPath(fp, realpathCache)) {
+          continue
+        }
+        if (this.windowsSandbox === "elevated" && this.isSensitiveSandboxPath(fp, realpathCache)) {
+          continue
+        }
+        const fpStat = await fs.lstat(fp)
+        if (fpStat.isSymbolicLink() || !fpStat.isFile() || fpStat.size > maxBytes) continue
+        if (!isFile && scannedFiles >= LocalSandbox.MAX_GREP_FALLBACK_SCANNED_FILES) {
+          stoppedEarly = true
+          break searchFiles
+        }
+        scannedFiles++
 
-        const buf = await fs.readFile(fp)
+        const { buffer: buf } = await this.readResolvedFileBuffer(fp, fp, maxBytes)
         const ext = path.extname(fp).toLowerCase()
 
         let encoding: string
@@ -2348,14 +3069,15 @@ export class LocalSandbox
 
         for (let i = 0; i < lines.length; i++) {
           if (!lines[i].includes(pattern)) continue
-          if (!results[virtPath!]) results[virtPath!] = []
-          results[virtPath!].push([i + 1, lines[i]])
+          if (!tryAppendMatch(virtPath!, i + 1, lines[i])) {
+            break searchFiles
+          }
         }
       } catch {
         continue
       }
     }
-    return results
+    return { results, stoppedEarly }
   }
 
   private static readonly SHELL_BLACKLIST = new Set(["fish", "nu"])
