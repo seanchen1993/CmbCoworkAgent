@@ -1,6 +1,6 @@
 import { app } from "electron"
 import { existsSync, readFileSync, rmSync, unlinkSync } from "fs"
-import { dirname, join } from "path"
+import { basename, dirname, join, resolve } from "path"
 import {
   getBackupPath,
   getMarkerPath,
@@ -38,6 +38,7 @@ export async function runStartupSelfCheck(): Promise<StartupCheckResult> {
   const markerPath = getMarkerPath()
 
   if (!existsSync(markerPath)) {
+    cleanupStaleFullBackup()
     return {} // Not a post-update boot, nothing to do
   }
 
@@ -58,7 +59,9 @@ export async function runStartupSelfCheck(): Promise<StartupCheckResult> {
   const currentVersion = app.getVersion()
 
   if (currentVersion === marker.toVersion) {
-    console.log(`[Updater] Self-check passed: version ${currentVersion} matches expected ${marker.toVersion}`)
+    console.log(
+      `[Updater] Self-check passed: version ${currentVersion} matches expected ${marker.toVersion}`
+    )
     unlinkSync(markerPath)
 
     // Clean up backup files after successful update
@@ -86,30 +89,189 @@ export async function runStartupSelfCheck(): Promise<StartupCheckResult> {
 /**
  * Clean up backup files/directories after a successful update.
  * Called when self-check confirms the new version is running correctly.
+ *
+ * On Windows the full-update .bak directory can contain binaries/native modules
+ * that stay locked while the restarted app is running. In that case in-process
+ * rmSync will keep failing with EBUSY/EPERM. We hand the cleanup to a detached
+ * PowerShell script: it retries briefly, then waits for DevClaw to exit and
+ * removes the backup automatically.
  */
 function cleanupBackups(): void {
-  // ASAR backup: app.asar.bak
   const asarBackup = getBackupPath()
-  if (existsSync(asarBackup)) {
-    try {
-      rmSync(asarBackup, { force: true })
-      console.log("[Updater] Cleaned up ASAR backup:", asarBackup)
-    } catch (e) {
-      console.warn("[Updater] Failed to clean up ASAR backup:", e)
-    }
-  }
-
-  // Full update backup: appDir.bak directory
   const exePath = getExePath()
   const appDir = dirname(exePath)
   const fullBackupDir = `${appDir}.bak`
-  if (existsSync(fullBackupDir)) {
+
+  cleanupBackupPaths({
+    appDir,
+    asarBackup,
+    fullBackupDir,
+    includeAsarBackup: true
+  })
+}
+
+/**
+ * If a previous Windows cleanup was interrupted after update-marker.json was
+ * already removed, retry full-backup cleanup on the next normal startup.
+ */
+function cleanupStaleFullBackup(): void {
+  const exePath = getExePath()
+  const appDir = dirname(exePath)
+  const fullBackupDir = `${appDir}.bak`
+
+  if (!existsSync(fullBackupDir)) {
+    return
+  }
+
+  cleanupBackupPaths({
+    appDir,
+    asarBackup: getBackupPath(),
+    fullBackupDir,
+    includeAsarBackup: false
+  })
+}
+
+function cleanupBackupPaths(args: {
+  appDir: string
+  asarBackup: string
+  fullBackupDir: string
+  includeAsarBackup: boolean
+}): void {
+  const { appDir, asarBackup, fullBackupDir, includeAsarBackup } = args
+
+  if (!isExpectedFullBackupDir(appDir, fullBackupDir)) {
+    console.warn("[Updater] Refusing to clean unexpected full backup path:", fullBackupDir)
+    return
+  }
+
+  if (isWindows) {
+    scheduleWindowsBackupCleanup(appDir, asarBackup, fullBackupDir, includeAsarBackup)
+    return
+  }
+
+  if (includeAsarBackup) {
+    removePathNow(asarBackup, false, "ASAR backup")
+  }
+  removePathNow(fullBackupDir, true, "full update backup dir")
+}
+
+function removePathNow(path: string, recursive: boolean, label: string): void {
+  if (!existsSync(path)) {
+    return
+  }
+
+  try {
+    rmSync(path, {
+      recursive,
+      force: true,
+      maxRetries: 10,
+      retryDelay: 500
+    })
+    console.log(`[Updater] Cleaned up ${label}:`, path)
+  } catch (e) {
+    console.warn(`[Updater] Failed to clean up ${label}:`, e)
+  }
+}
+
+function isExpectedFullBackupDir(appDir: string, fullBackupDir: string): boolean {
+  const normalizeForCompare = (path: string): string => {
+    const normalized = resolve(path)
+    return isWindows ? normalized.toLowerCase() : normalized
+  }
+
+  return normalizeForCompare(fullBackupDir) === `${normalizeForCompare(appDir)}.bak`
+}
+
+function escapePowerShellLiteral(value: string): string {
+  return value.replace(/'/g, "''")
+}
+
+function toPsString(value: string): string {
+  return `'${escapePowerShellLiteral(value)}'`
+}
+
+function generateCleanupBackupsPs1(
+  appDir: string,
+  asarBackup: string,
+  fullBackupDir: string,
+  includeAsarBackup: boolean
+): string {
+  const exeBaseName = basename(getExePath()).replace(/\.exe$/i, "")
+
+  return `
+$appDir        = ${toPsString(appDir)}
+$asarBackup    = ${toPsString(includeAsarBackup ? asarBackup : "")}
+$fullBackupDir = ${toPsString(fullBackupDir)}
+$exeBaseName   = ${toPsString(exeBaseName)}
+
+function Remove-BackupPath {
+  param(
+    [string] $Target,
+    [bool] $Recurse,
+    [int] $Attempts,
+    [int] $DelaySeconds
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Target)) { return $true }
+  if (-not (Test-Path -LiteralPath $Target)) { return $true }
+
+  for ($i = 1; $i -le $Attempts; $i++) {
     try {
-      rmSync(fullBackupDir, { recursive: true, force: true })
-      console.log("[Updater] Cleaned up full update backup dir:", fullBackupDir)
-    } catch (e) {
-      console.warn("[Updater] Failed to clean up full update backup dir:", e)
+      if ($Recurse) {
+        Remove-Item -LiteralPath $Target -Recurse -Force -ErrorAction Stop
+      } else {
+        Remove-Item -LiteralPath $Target -Force -ErrorAction Stop
+      }
+      Write-Host ("[UpdaterCleanup] Removed {0}" -f $Target)
+      return $true
+    } catch {
+      Write-Host ("[UpdaterCleanup] Attempt {0}/{1} failed for {2}: {3}" -f $i, $Attempts, $Target, $_.Exception.Message)
+      Start-Sleep -Seconds $DelaySeconds
     }
+  }
+
+  return $false
+}
+
+$expectedBackupDir = [System.IO.Path]::GetFullPath($appDir + ".bak")
+$actualBackupDir = [System.IO.Path]::GetFullPath($fullBackupDir)
+if ($actualBackupDir -ine $expectedBackupDir) {
+  Write-Host ("[UpdaterCleanup] Refusing unexpected backup path {0}, expected {1}" -f $actualBackupDir, $expectedBackupDir)
+  exit 1
+}
+
+Remove-BackupPath -Target $asarBackup -Recurse $false -Attempts 20 -DelaySeconds 2 | Out-Null
+
+$removedFullBackup = Remove-BackupPath -Target $fullBackupDir -Recurse $true -Attempts 30 -DelaySeconds 2
+if (-not $removedFullBackup -and (Test-Path -LiteralPath $fullBackupDir)) {
+  Write-Host ("[UpdaterCleanup] Backup is still locked; waiting for {0}.exe to exit" -f $exeBaseName)
+  while (Get-Process -Name $exeBaseName -ErrorAction SilentlyContinue) {
+    Start-Sleep -Seconds 5
+  }
+  Remove-BackupPath -Target $fullBackupDir -Recurse $true -Attempts 120 -DelaySeconds 2 | Out-Null
+}
+`
+}
+
+function scheduleWindowsBackupCleanup(
+  appDir: string,
+  asarBackup: string,
+  fullBackupDir: string,
+  includeAsarBackup: boolean
+): void {
+  try {
+    const ps1Content = generateCleanupBackupsPs1(
+      appDir,
+      asarBackup,
+      fullBackupDir,
+      includeAsarBackup
+    )
+    const ps1Path = join(getUpdatesDir(), "cleanup-backups.ps1")
+    writePowerShellScript(ps1Path, ps1Content)
+    launchDetachedPowerShellScript(ps1Path)
+    console.log("[Updater] Scheduled backup cleanup script:", ps1Path)
+  } catch (e) {
+    console.warn("[Updater] Failed to schedule backup cleanup:", e)
   }
 }
 
