@@ -240,7 +240,7 @@ function ThreadListItem({
               <Button
                 variant="ghost"
                 size="icon-sm"
-                className="size-6"
+                className="cursor-pointer size-6 hover:bg-accent/20"
                 onClick={(e) => {
                   e.stopPropagation()
                   onStartEditing()
@@ -251,7 +251,10 @@ function ThreadListItem({
               <Button
                 variant="ghost"
                 size="icon-sm"
-                className={cn("size-6", isRunning && "cursor-not-allowed !opacity-30")}
+                className={cn(
+                  "cursor-pointer size-6 hover:bg-accent/20",
+                  isRunning && "cursor-not-allowed !opacity-30"
+                )}
                 disabled={isRunning}
                 onClick={(e) => {
                   e.stopPropagation()
@@ -339,6 +342,7 @@ export function ThreadSidebar(): React.JSX.Element {
   const [hoveredProjectKey, setHoveredProjectKey] = useState<string | null>(null)
   const [selectingProjectFolder, setSelectingProjectFolder] = useState(false)
   const [threadToDelete, setThreadToDelete] = useState<Thread | null>(null)
+  const [projectToDelete, setProjectToDelete] = useState<ThreadProject | null>(null)
 
   const persistUnread = useCallback((ids: Set<string>) => {
     localStorage.setItem("threads:unreadIds", JSON.stringify([...ids]))
@@ -419,6 +423,19 @@ export function ThreadSidebar(): React.JSX.Element {
     [persistCollapsedProjects]
   )
 
+  const expandProject = useCallback(
+    (projectKey: string) => {
+      setCollapsedProjectKeys((prev) => {
+        if (!prev.has(projectKey)) return prev
+        const next = new Set(prev)
+        next.delete(projectKey)
+        persistCollapsedProjects(next)
+        return next
+      })
+    },
+    [persistCollapsedProjects]
+  )
+
   const allProjectsCollapsed =
     threadProjects.length > 0 &&
     threadProjects.every((project) => collapsedProjectKeys.has(project.key))
@@ -490,6 +507,7 @@ export function ThreadSidebar(): React.JSX.Element {
   }
 
   const handleNewProjectThread = async (project: ThreadProject): Promise<void> => {
+    expandProject(project.key)
     await createThread({
       title: `Thread ${new Date().toLocaleDateString()}`,
       workspacePath: project.path ?? null
@@ -543,6 +561,26 @@ export function ThreadSidebar(): React.JSX.Element {
     markRead(threadToDelete.thread_id)
     setThreadToDelete(null)
   }, [cleanupThread, deleteThread, markRead, threadToDelete])
+
+  const confirmDeleteProject = useCallback(async () => {
+    if (!projectToDelete) return
+
+    for (const thread of projectToDelete.threads) {
+      cleanupThread(thread.thread_id)
+      await deleteThread(thread.thread_id)
+      markRead(thread.thread_id)
+    }
+
+    setCollapsedProjectKeys((prev) => {
+      if (!prev.has(projectToDelete.key)) return prev
+      const next = new Set(prev)
+      next.delete(projectToDelete.key)
+      persistCollapsedProjects(next)
+      return next
+    })
+    setProjectToDelete(null)
+    setHoveredProjectKey(null)
+  }, [cleanupThread, deleteThread, markRead, persistCollapsedProjects, projectToDelete])
 
   const [version, setVersion] = useState("")
 
@@ -672,7 +710,7 @@ export function ThreadSidebar(): React.JSX.Element {
         <Button
           variant="ghost"
           size="icon-sm"
-          className="size-6 shrink-0"
+          className="cursor-pointer size-6 shrink-0"
           title={allProjectsCollapsed ? "全部展开工作区" : "全部收起工作区"}
           onClick={toggleAllProjects}
           disabled={threadProjects.length === 0}
@@ -686,7 +724,7 @@ export function ThreadSidebar(): React.JSX.Element {
         <Button
           variant="ghost"
           size="icon-sm"
-          className="size-6 shrink-0"
+          className="  cursor-pointer size-6 shrink-0 "
           title="新增工作区"
           onClick={handleAddProject}
           disabled={selectingProjectFolder}
@@ -710,6 +748,13 @@ export function ThreadSidebar(): React.JSX.Element {
             const unreadCount = project.threads.filter((thread) =>
               unreadIds.has(thread.thread_id)
             ).length
+            const hasRunningThread = project.threads.some((thread) => {
+              const threadState = allThreadStates[thread.thread_id]
+              return (
+                (allStreamLoadingStates[thread.thread_id] ?? false) ||
+                Boolean(threadState?.scheduledTaskLoading)
+              )
+            })
 
             return (
               <div key={project.key} className="space-y-1">
@@ -749,18 +794,42 @@ export function ThreadSidebar(): React.JSX.Element {
                       {unreadCount > 0 && (
                         <span className="size-2 rounded-full bg-blue-500 shrink-0" />
                       )}
-                      {/*<span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">*/}
-                      {/*  {project.threads.length}*/}
-                      {/*</span>*/}
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        className="size-6 shrink-0 opacity-70 hover:opacity-100"
-                        title="新增任务"
-                        onClick={() => handleNewProjectThread(project)}
-                      >
-                        <Plus className="size-3" />
-                      </Button>
+                      <span className="relative ml-auto flex h-6 w-14 shrink-0 items-center justify-end overflow-hidden">
+                        <span className="absolute right-1 text-[10px] tabular-nums text-muted-foreground transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
+                          {project.threads.length}
+                        </span>
+                        <span className="pointer-events-none absolute right-0 flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            className="cursor-pointer size-6 shrink-0 opacity-70 hover:bg-accent/20"
+                            title="新增任务"
+                            onClick={() => handleNewProjectThread(project)}
+                          >
+                            <Plus className="size-3" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            className={cn(
+                              "cursor-pointer size-6 shrink-0 opacity-70 hover:bg-destructive/10 hover:text-destructive",
+                              hasRunningThread && "cursor-not-allowed !opacity-30"
+                            )}
+                            title={
+                              hasRunningThread
+                                ? "工作区内有运行中的任务，无法删除"
+                                : "删除工作区会话"
+                            }
+                            disabled={hasRunningThread}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setProjectToDelete(project)
+                            }}
+                          >
+                            <Trash2 className="size-3" />
+                          </Button>
+                        </span>
+                      </span>
                     </div>
                   </PopoverTrigger>
                   <PopoverContent
@@ -880,6 +949,26 @@ export function ThreadSidebar(): React.JSX.Element {
             </Button>
             <Button variant="destructive" onClick={confirmDeleteThread}>
               删除
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={!!projectToDelete} onOpenChange={(open) => !open && setProjectToDelete(null)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>确认删除工作区会话</DialogTitle>
+            <DialogDescription>
+              {projectToDelete
+                ? `确定要删除「${projectToDelete.name}」工作区下的全部 ${projectToDelete.threads.length} 个会话吗？删除后不可恢复。`
+                : ""}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setProjectToDelete(null)}>
+              取消
+            </Button>
+            <Button variant="destructive" onClick={confirmDeleteProject}>
+              删除全部
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -13,6 +13,26 @@ import {
 import { SkillChip } from "@/features/slash-commands/skill-chip"
 import { parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
 
+function formatResponseDuration(ms?: number): string | null {
+  if (typeof ms !== "number" || !Number.isFinite(ms) || ms <= 0) return null
+  if (ms < 1000) return `${Math.round(ms)}ms`
+  const seconds = ms / 1000
+  if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 1 : 0)}s`
+  const minutes = Math.floor(seconds / 60)
+  const remainingSeconds = Math.round(seconds % 60)
+  return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`
+}
+
+function AssistantResponseDuration({
+  durationMs
+}: {
+  durationMs?: number
+}): React.JSX.Element | null {
+  const label = formatResponseDuration(durationMs)
+  if (!label) return null
+  return <span className="text-xs text-muted-foreground/70">耗时 {label}</span>
+}
+
 /**
  * Strip the trailing `<CMBDEVCLAW-SKILL-USE-V1>…</…>` block when present.
  * Only applied to user-authored content — assistant replies that happen to
@@ -131,6 +151,7 @@ interface MessageBubbleProps {
   onEditUserMessage?: (message: Message) => void
   threadId: string
   isLoading: boolean
+  assistantDurationMs?: number
 }
 
 export function MessageBubble({
@@ -144,7 +165,8 @@ export function MessageBubble({
   onApprovalDecision,
   onEditUserMessage,
   threadId,
-  isLoading
+  isLoading,
+  assistantDurationMs
 }: MessageBubbleProps): React.JSX.Element | null {
   const [collapsedTools, setCollapsedTools] = useState<Set<string>>(new Set())
   const [collapsedHtmlTools, setCollapsedHtmlTools] = useState<Set<string>>(new Set())
@@ -391,6 +413,7 @@ export function MessageBubble({
             <circle cx="76" cy="34" r="2.5" fill="#00e5cc" />
           </svg>
           <span className="text-xs font-medium text-muted-foreground">CMBDevClaw</span>
+          <AssistantResponseDuration durationMs={assistantDurationMs} />
         </div>
       )}
       <div className="flex-1 min-w-0 space-y-2 overflow-hidden pl-7">

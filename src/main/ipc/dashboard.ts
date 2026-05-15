@@ -781,7 +781,7 @@ async function fetchUserStats(range: TimeRange, granularity: Granularity, opts?:
               size: 1,
               sort: [{ startedAt: { order: "desc" } }],
               _source: {
-                includes: ["userName", "orgName", "upperOrgLv0", "upperOrgLv1"]
+                includes: ["userName", "orgName", "upperOrgLv0", "upperOrgLv1", "appVersion"]
               }
             }
           }
@@ -955,6 +955,15 @@ async function fetchUserProfilesBySapIds(sapIds: string[]): Promise<unknown> {
           size: Math.min(Math.max(sanitizedSapIds.length * 5, 100), 2000)
         },
         aggs: {
+          latest_user_info: {
+            top_hits: {
+              size: 1,
+              sort: [{ startedAt: { order: "desc" } }],
+              _source: {
+                includes: ["userName", "orgName", "upperOrgLv0", "upperOrgLv1"]
+              }
+            }
+          },
           user_name: { terms: { field: "userName", size: 1 } },
           org_name: { terms: { field: "orgName", size: 1 } }
         }
@@ -1644,12 +1653,12 @@ function makeMockUserStats(range: TimeRange, opts?: UserStatsOptions): unknown {
   const byOrgUv = makeOrgAgg(byOrgBuckets)
 
   const allTopUserBuckets = [
-    { key: "10010001", doc_count: 142, latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "张三", orgName: "测试 1 组", upperOrgLv1: "测试 1 部", upperOrgLv0: "测试 1 组" } }] } } },
-    { key: "10010002", doc_count: 118, latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "李四", orgName: "测试 2 组", upperOrgLv1: "测试 1 部", upperOrgLv0: "测试 2 组" } }] } } },
-    { key: "10010003", doc_count: 97,  latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "王五", orgName: "开发三组", upperOrgLv1: "开发二部", upperOrgLv0: "开发三组" } }] } } },
-    { key: "10010004", doc_count: 85,  latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "赵六", orgName: "测试 1 组", upperOrgLv1: "测试 1 部", upperOrgLv0: "测试 1 组" } }] } } },
-    { key: "10010005", doc_count: 73,  latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "钱七", orgName: "平台一组", upperOrgLv1: "平台三部", upperOrgLv0: "平台一组" } }] } } },
-    { key: "10010006", doc_count: 61,  latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "孙八", orgName: "开发三组", upperOrgLv1: "开发二部", upperOrgLv0: "开发三组" } }] } } }
+    { key: "10010001", doc_count: 142, latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "张三", orgName: "测试 1 组", upperOrgLv1: "测试 1 部", upperOrgLv0: "测试 1 组", appVersion: "1.3.0" } }] } } },
+    { key: "10010002", doc_count: 118, latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "李四", orgName: "测试 2 组", upperOrgLv1: "测试 1 部", upperOrgLv0: "测试 2 组", appVersion: "1.2.5" } }] } } },
+    { key: "10010003", doc_count: 97,  latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "王五", orgName: "开发三组", upperOrgLv1: "开发二部", upperOrgLv0: "开发三组", appVersion: "1.3.0" } }] } } },
+    { key: "10010004", doc_count: 85,  latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "赵六", orgName: "测试 1 组", upperOrgLv1: "测试 1 部", upperOrgLv0: "测试 1 组", appVersion: "1.2.0" } }] } } },
+    { key: "10010005", doc_count: 73,  latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "钱七", orgName: "平台一组", upperOrgLv1: "平台三部", upperOrgLv0: "平台一组", appVersion: "1.3.0" } }] } } },
+    { key: "10010006", doc_count: 61,  latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "孙八", orgName: "开发三组", upperOrgLv1: "开发二部", upperOrgLv0: "开发三组", appVersion: "1.1.8" } }] } } }
   ]
   const topUserBuckets = selectedUpperOrgLv1 === null
     ? allTopUserBuckets
@@ -1744,6 +1753,18 @@ function makeMockUserProfilesBySapIds(sapIds: string[]): unknown {
           key: string
           user_name?: { buckets?: Array<{ key: string }> }
           org_name?: { buckets?: Array<{ key: string }> }
+          latest_user_info?: {
+            hits?: {
+              hits?: Array<{
+                _source?: {
+                  userName?: string
+                  orgName?: string
+                  upperOrgLv0?: string
+                  upperOrgLv1?: string
+                }
+              }>
+            }
+          }
         }>
       }
     }
@@ -1751,13 +1772,18 @@ function makeMockUserProfilesBySapIds(sapIds: string[]): unknown {
 
   const fallbackBuckets = userStats.aggregations?.top_users?.buckets ?? []
   const fallbackMap = new Map(
-    fallbackBuckets.map((bucket) => [
-      bucket.key,
-      {
-        userName: bucket.user_name?.buckets?.[0]?.key ?? bucket.key,
-        orgName: bucket.org_name?.buckets?.[0]?.key ?? ""
-      }
-    ])
+    fallbackBuckets.map((bucket) => {
+      const latestUserInfo = bucket.latest_user_info?.hits?.hits?.[0]?._source
+      return [
+        bucket.key,
+        {
+          userName: latestUserInfo?.userName ?? bucket.user_name?.buckets?.[0]?.key ?? bucket.key,
+          orgName: latestUserInfo?.orgName ?? bucket.org_name?.buckets?.[0]?.key ?? "",
+          upperOrgLv0: latestUserInfo?.upperOrgLv0 ?? "",
+          upperOrgLv1: latestUserInfo?.upperOrgLv1 ?? ""
+        }
+      ]
+    })
   )
 
   const buckets = Array.from(
@@ -1771,6 +1797,20 @@ function makeMockUserProfilesBySapIds(sapIds: string[]): unknown {
     return {
       key: sapId,
       doc_count: 1,
+      latest_user_info: {
+        hits: {
+          hits: [
+            {
+              _source: {
+                userName: fallback?.userName ?? `用户${sapId.slice(-4)}`,
+                orgName: fallback?.orgName ?? "未知部门",
+                upperOrgLv0: fallback?.upperOrgLv0 ?? "",
+                upperOrgLv1: fallback?.upperOrgLv1 ?? ""
+              }
+            }
+          ]
+        }
+      },
       user_name: { buckets: [{ key: fallback?.userName ?? `用户${sapId.slice(-4)}` }] },
       org_name: { buckets: [{ key: fallback?.orgName ?? "未知部门" }] }
     }

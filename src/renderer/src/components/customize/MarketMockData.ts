@@ -5,6 +5,48 @@ const MOCK_CREATED_AT = "2026-01-01T00:00:00.000Z"
 export const MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
   skill: [
     {
+      "name": "代码审查",
+      "chinese_name": "代码审查",
+      "category": "研发类场景/应用类研发",
+      "tag": "认证",
+      "featured": "精品",
+      "version": "1.0.0",
+      "user_id": "800001 / 张三 / 总行信息技术部 / 研发效能中心",
+      "guidance": "用于 mock Dashboard Skill 使用排行中的市场命中展示。",
+      "ip": "127.0.0.1",
+      "description": "代码质量、规范和风险审查技能。",
+      "filename": "代码审查.zip",
+      "created_at": MOCK_CREATED_AT
+    },
+    {
+      "name": "需求分析",
+      "chinese_name": "需求分析",
+      "category": "研发类场景/应用类研发",
+      "tag": "认证",
+      "featured": "",
+      "version": "1.0.0",
+      "user_id": "800002 / 李四 / 总行信息技术部 / 需求交付中心",
+      "guidance": "用于 mock Dashboard Skill 使用排行中的市场命中展示。",
+      "ip": "127.0.0.1",
+      "description": "需求理解、拆解和验收点整理技能。",
+      "filename": "需求分析.zip",
+      "created_at": MOCK_CREATED_AT
+    },
+    {
+      "name": "接口设计",
+      "chinese_name": "接口设计",
+      "category": "研发类场景/应用类研发",
+      "tag": "",
+      "featured": "",
+      "version": "1.0.0",
+      "user_id": "800003 / 王五 / 总行信息技术部 / 平台工程部",
+      "guidance": "用于 mock Dashboard 代码采纳排行中的市场命中展示。",
+      "ip": "127.0.0.1",
+      "description": "接口字段、契约和联调方案设计技能。",
+      "filename": "接口设计-v1.0.0.zip",
+      "created_at": MOCK_CREATED_AT
+    },
+    {
       "name": "pinchtab",
       "chinese_name": "数***复",
       "category": "治理类场景/云应用架构转型治理",

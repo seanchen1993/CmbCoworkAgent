@@ -44,11 +44,13 @@ import {
   ToolInvocationError,
   todoListMiddleware,
   anthropicPromptCachingMiddleware,
-  humanInTheLoopMiddleware
+  humanInTheLoopMiddleware,
+  tool as lcTool
 } from "langchain"
 import { ToolMessage } from "@langchain/core/messages"
 import { Runnable } from "@langchain/core/runnables"
 import { isGraphBubbleUp } from "@langchain/langgraph"
+import { z } from "zod"
 
 import type * as _lcTypes from "langchain"
 import type * as _lcMessages from "@langchain/core/messages"
@@ -115,6 +117,7 @@ import {
   DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
   loadAgentsPromptForWorkspace
 } from "./agents-md"
+import { patchRuntimeReadFileTool } from "./read-file-tool"
 
 /** Decompress codex.exe.gz → codex.exe if needed (re-extract if .gz is newer than .exe). */
 async function ensureCodexExe(exePath: string): Promise<void> {
@@ -713,8 +716,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     })
   }
 
-  // Create filesystem middleware and fix grep tool's misleading "Regex pattern" param description
-  // (upstream bug: description says "Regex" but implementation uses literal -F matching)
+  // Create filesystem middleware and patch upstream tool defaults/descriptions.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const createFsMiddleware = (): any => {
     const mw = createFilesystemMiddleware({
@@ -722,6 +724,8 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
       ...(filesystemSystemPrompt && { systemPrompt: filesystemSystemPrompt }),
       ...(toolTokenLimitBeforeEvict != null && { toolTokenLimitBeforeEvict })
     })
+    patchRuntimeReadFileTool({ middleware: mw, filesystemBackend, toolTokenLimitBeforeEvict })
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const grepTool = mw.tools?.find((t: any) => t.name === "grep") as any
     if (grepTool?.schema?.shape?.pattern) {
@@ -741,9 +745,6 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     // Replace the default execute tool with a version that supports run_in_background.
     // Long-running commands (builds, dependency downloads) can be started in background
     // and their output retrieved later via task_output tool.
-    const { tool: lcTool } = require("langchain") as typeof import("langchain")
-    const { z } = require("zod") as typeof import("zod")
-
     const executeIdx = mw.tools?.findIndex((t: any) => t.name === "execute") ?? -1
     if (executeIdx >= 0) {
       const oldExecute = mw.tools![executeIdx]

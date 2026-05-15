@@ -72,6 +72,14 @@ export interface UserStatsData {
   byOrgPv: Array<{ key: string; org: string; count: number }>
   byOrgUv: Array<{ key: string; org: string; count: number }>
   byVersion: Array<{ version: string; count: number }>
+  latestVersion: string
+  userVersionUsage: Array<{
+    sapId: string
+    userName: string
+    orgName: string
+    version: string
+    isLatestVersion: boolean
+  }>
   userTrend: Array<{ time: string; users: number }>
   selectedUpperOrgLv1: string | null
 }
@@ -541,7 +549,26 @@ function getLatestUserMetric(bucket: any, field: string): string {
   return normalizeMetricValue(bucket.latest_user_info?.hits?.hits?.[0]?._source?.[field])
 }
 
-function formatTopUserOrgName(orgName: string, upperOrgLv1: string, upperOrgLv0: string): string {
+function compareVersionLike(a: string, b: string): number {
+  const aParts = a.match(/\d+|[a-zA-Z]+/g) ?? []
+  const bParts = b.match(/\d+|[a-zA-Z]+/g) ?? []
+  const len = Math.max(aParts.length, bParts.length)
+  for (let i = 0; i < len; i++) {
+    const aPart = aParts[i] ?? "0"
+    const bPart = bParts[i] ?? "0"
+    const aNum = /^\d+$/.test(aPart) ? Number(aPart) : null
+    const bNum = /^\d+$/.test(bPart) ? Number(bPart) : null
+    if (aNum !== null && bNum !== null) {
+      if (aNum !== bNum) return aNum - bNum
+      continue
+    }
+    const compared = aPart.localeCompare(bPart)
+    if (compared !== 0) return compared
+  }
+  return 0
+}
+
+export function formatTopUserOrgName(orgName: string, upperOrgLv1: string, upperOrgLv0: string): string {
   const normalizedOrgName = orgName.trim()
   const normalizedUpperOrgLv1 = upperOrgLv1.trim()
   const normalizedUpperOrgLv0 = upperOrgLv0.trim()
@@ -586,13 +613,39 @@ function parseUserStats(raw: any, selectedUpperOrgLv1: string | null): UserStats
     version: b.key || "未知",
     count: b.unique_users?.value ?? b.doc_count
   }))
+  const latestVersion = byVersion
+    .map((item) => item.version)
+    .filter((version) => version && version !== "未知")
+    .sort(compareVersionLike)
+    .at(-1) ?? ""
+  const userVersionUsage: UserStatsData["userVersionUsage"] = topUsers.map((user) => {
+    const bucket = (aggs.top_users?.buckets ?? []).find((item: any) => item.key === user.sapId)
+    const version = getLatestUserMetric(bucket, "appVersion") || "未知"
+    return {
+      sapId: user.sapId,
+      userName: user.userName,
+      orgName: user.orgName,
+      version,
+      isLatestVersion: Boolean(latestVersion && version === latestVersion)
+    }
+  }).filter((user) => !user.isLatestVersion)
 
   const userTrend: UserStatsData["userTrend"] = (aggs.user_trend?.buckets ?? []).map((b: any) => ({
     time: b.key_as_string ?? new Date(b.key).toISOString(),
     users: b.users?.value ?? 0
   }))
 
-  return { topUsers, byOrg, byOrgPv, byOrgUv, byVersion, userTrend, selectedUpperOrgLv1 }
+  return {
+    topUsers,
+    byOrg,
+    byOrgPv,
+    byOrgUv,
+    byVersion,
+    latestVersion,
+    userVersionUsage,
+    userTrend,
+    selectedUpperOrgLv1
+  }
 }
 
 export function parseTopUsersFromAgg(raw: any): ParsedTopUser[] {

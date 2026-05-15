@@ -78,6 +78,7 @@ interface UserInfoLite {
   ystId?: string
   userName?: string
   orgName?: string
+  pathName?: string
 }
 
 const KNOWN_TEXT_EXTS = new Set([
@@ -309,9 +310,17 @@ function buildUserIdFromUserInfo(userInfo: UserInfoLite | null): string | undefi
   if (!userInfo) return undefined
   const rawId = (userInfo.sapId || userInfo.ystId || "").trim()
   const rawName = (userInfo.userName || "").trim()
-  const rawOrgName = (userInfo.orgName || "").trim()
-  const segments = [rawId, rawName, rawOrgName].filter(Boolean)
+  const rawPathName = getDisplayPathName(userInfo.pathName)
+  const segments = [rawId, rawName, rawPathName].filter(Boolean)
   return segments.length > 0 ? segments.join(" / ") : undefined
+}
+
+function getDisplayPathName(pathName?: string): string {
+  const parts = String(pathName || "")
+    .split("/")
+    .map((part) => part.trim())
+    .filter(Boolean)
+  return parts.find((part) => part.includes("室")) || parts[parts.length - 1] || ""
 }
 
 function getSkillChineseName(
