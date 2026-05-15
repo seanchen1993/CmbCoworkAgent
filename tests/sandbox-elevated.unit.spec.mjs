@@ -934,6 +934,60 @@ test("unsandboxed git network commands allow Git Credential Manager UI prompts",
   )
 })
 
+test("Windows command execution uses shell-compatible sandbox arguments and UTF-8 preambles", () => {
+  const executeRawSection = sectionBetween(
+    localSandboxSource,
+    "private async executeRawUnserialized(",
+    "  async executeRaw("
+  )
+  const sandboxArgsSection = sectionBetween(
+    localSandboxSource,
+    "    let sandboxArgs: string[]",
+    "    // Elevated sandbox manages its own ACLs internally"
+  )
+
+  assert.match(
+    executeRawSection,
+    /LocalSandbox\.withWindowsShellUtf8Preamble\(command, shellBase\)/,
+    "raw Windows execution should share the shell-compatible UTF-8 preamble helper"
+  )
+  assert.match(
+    localSandboxSource,
+    /private static withWindowsShellUtf8Preamble\(command: string, shellBase: string\): string \{[\s\S]*shellBase === "cmd"[\s\S]*chcp 65001 >nul & \$\{command\}/,
+    "raw cmd.exe execution should keep using cmd-compatible UTF-8 setup"
+  )
+  assert.match(
+    localSandboxSource,
+    /private static windowsPowerShellUtf8Preamble\(\): string \{[\s\S]*chcp 65001 >\$null[\s\S]*\$ErrorActionPreference='Continue'[\s\S]*\$global:LASTEXITCODE=0/,
+    "PowerShell UTF-8 setup should preserve native stderr without masking native exit codes"
+  )
+  assert.match(
+    localSandboxSource,
+    /private static windowsPowerShellExitCodePostamble\(\): string \{[\s\S]*\$__cmbLastSuccess=\$\?[\s\S]*\$__cmbLastExitCode=\$LASTEXITCODE[\s\S]*exit \$__cmbLastExitCode/,
+    "PowerShell execution should propagate the native command's exit code when the final command fails"
+  )
+  assert.match(
+    localSandboxSource,
+    /shellBase === "pwsh" \|\| shellBase === "powershell"[\s\S]*LocalSandbox\.windowsPowerShellUtf8Preamble\(\)[\s\S]*LocalSandbox\.windowsPowerShellExitCodePostamble\(\)/,
+    "raw PowerShell execution must use PowerShell-compatible UTF-8 setup"
+  )
+  assert.doesNotMatch(
+    executeRawSection,
+    /isWindows && !isBashLikeShell \? `chcp 65001 >nul &/,
+    "raw PowerShell execution must not reuse cmd.exe's >nul & syntax"
+  )
+  assert.doesNotMatch(
+    sandboxArgsSection,
+    /"--full-auto"/,
+    "Node-spawned packaged codex.exe rejects --full-auto in this argument layout; explicit sandbox config should be used instead"
+  )
+  assert.match(
+    sandboxArgsSection,
+    /windows\.sandbox="elevated"[\s\S]*sandbox_workspace_write\.network_access=true[\s\S]*windows\.sandbox="unelevated"/,
+    "Windows sandbox args should still configure elevated/unelevated sandbox modes explicitly"
+  )
+})
+
 test("PowerShell safe-command parsing stays conservative without helper processes", () => {
   const parserSection = sectionBetween(
     windowsSafeCommandsSource,

@@ -4776,6 +4776,34 @@ export class LocalSandbox
     }
   }
 
+  private static windowsPowerShellUtf8Preamble(): string {
+    return [
+      "chcp 65001 >$null",
+      "[Console]::OutputEncoding=[Console]::InputEncoding=[System.Text.Encoding]::UTF8",
+      "$OutputEncoding=[System.Text.Encoding]::UTF8",
+      // Prevent PowerShell from treating native stderr as an error record that
+      // can mask the native process exit code.
+      "$ErrorActionPreference='Continue'",
+      "$global:LASTEXITCODE=0"
+    ].join("; ")
+  }
+
+  private static windowsPowerShellExitCodePostamble(): string {
+    return [
+      "$__cmbLastSuccess=$?",
+      "$__cmbLastExitCode=$LASTEXITCODE",
+      "if (-not $__cmbLastSuccess) { if ($__cmbLastExitCode -is [int] -and $__cmbLastExitCode -ne 0) { exit $__cmbLastExitCode }; exit 1 }"
+    ].join("; ")
+  }
+
+  private static withWindowsShellUtf8Preamble(command: string, shellBase: string): string {
+    if (shellBase === "cmd") return `chcp 65001 >nul & ${command}`
+    if (shellBase === "pwsh" || shellBase === "powershell") {
+      return `${LocalSandbox.windowsPowerShellUtf8Preamble()}; ${command}; ${LocalSandbox.windowsPowerShellExitCodePostamble()}`
+    }
+    return command
+  }
+
   private async executeRawUnserialized(
     command: string,
     sandboxModeOverride?: string,
@@ -4799,13 +4827,14 @@ export class LocalSandbox
 
     const isWindows = process.platform === "win32"
     const shell = await LocalSandbox.resolveShell()
-    const shellBase = path.basename(shell).replace(/\.exe$/i, "")
+    const shellBase = path.basename(shell).replace(/\.exe$/i, "").toLowerCase()
     const isBashLikeShell = ["bash", "sh", "zsh"].includes(shellBase)
 
-    // On Windows with cmd.exe, force UTF-8 code page so CJK output isn't garbled.
-    // For Git Bash, encoding detection handles the conversion instead (see collectAndResolve).
-    const effectiveCommand =
-      isWindows && !isBashLikeShell ? `chcp 65001 >nul & ${command}` : command
+    // On Windows, force UTF-8 output using syntax that matches the selected shell.
+    // Git Bash output is decoded by collectAndResolve, so leave its command untouched.
+    const effectiveCommand = !isWindows || isBashLikeShell
+      ? command
+      : LocalSandbox.withWindowsShellUtf8Preamble(command, shellBase)
 
     // On Windows, spawn can transiently fail with EPERM (antivirus file lock, handle
     // contention). Retry up to SPAWN_RETRY_COUNT times with a short delay.
@@ -4957,21 +4986,7 @@ export class LocalSandbox
       .basename(shell)
       .replace(/\.exe$/i, "")
       .toLowerCase()
-    const psUtf8Preamble = [
-      "chcp 65001 >$null",
-      "[Console]::OutputEncoding=[Console]::InputEncoding=[System.Text.Encoding]::UTF8",
-      "$OutputEncoding=[System.Text.Encoding]::UTF8",
-      // Prevent PowerShell from treating native command stderr output as terminating errors.
-      // Java/Python/etc. commonly write logs to stderr, which PowerShell wraps as NativeCommandError
-      // and may override the real exit code with 1.
-      "$ErrorActionPreference='Continue'"
-    ].join("; ")
-    const effectiveCommand =
-      shellBase === "cmd"
-        ? `chcp 65001 >nul & ${command}`
-        : shellBase === "pwsh" || shellBase === "powershell"
-          ? `${psUtf8Preamble}; ${command}`
-          : command
+    const effectiveCommand = LocalSandbox.withWindowsShellUtf8Preamble(command, shellBase)
     // Unelevated sandbox: codex.exe may inject HTTP_PROXY=127.0.0.1:9 via apply_no_network_to_env
     // when the policy's network_access is false (default). Clear proxy vars in the command preamble
     // so the sandboxed process can access the network normally.
@@ -5007,7 +5022,10 @@ export class LocalSandbox
     // elevated: dedicated sandbox user, codex.exe handles the isolation internally
     // readonly + admin: grant full read + cwd write so admin can work in workspace
     // readonly + non-admin: read only, all writes blocked
-    // unelevated: workdir writable via --full-auto + ACL
+    // unelevated/elevated: workdir/cache writes are controlled by explicit
+    // windows.sandbox + sandbox_workspace_write config and ACLs. Do not pass
+    // --full-auto here: Node spawn resolves the packaged codex.exe directly,
+    // where that alias is rejected in this argument layout on Windows.
     let sandboxArgs: string[]
     if (isElevatedSandbox) {
       // -c is a global flag and must come before the "sandbox" subcommand
@@ -5019,7 +5037,6 @@ export class LocalSandbox
         ...(sandboxCacheWritableRootsOverride ? ["-c", sandboxCacheWritableRootsOverride] : []),
         "sandbox",
         "windows",
-        "--full-auto",
         "--",
         shell,
         ...shellFlags,
@@ -5060,7 +5077,6 @@ export class LocalSandbox
         ...(sandboxCacheWritableRootsOverride ? ["-c", sandboxCacheWritableRootsOverride] : []),
         "sandbox",
         "windows",
-        "--full-auto",
         "--",
         shell,
         ...shellFlags,
