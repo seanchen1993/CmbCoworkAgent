@@ -56,11 +56,15 @@ import { ModelSwitcher } from "./ModelSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
 import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
-import type { Message, SkillMetadata } from "@/types"
+import type { Message, SkillMetadata, UserInputResponse } from "@/types"
 import { MessageBubble } from "./MessageBubble"
 import { ChatScrollNavigator, type ChatScrollQuestion } from "./ChatScrollNavigator"
 import { SkillsByCategorySection } from "./SkillsByCategorySection"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
+import {
+  UserInputRequestDialog,
+  type UserInputRequestDialogLayout
+} from "./UserInputRequestDialog"
 import { uploadChatData, ChatReportPayload } from "@/api"
 import { marketApi, MarketItem } from "../../api/market"
 import {
@@ -738,6 +742,7 @@ export function ChatContainer({
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const userMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
+  const contentMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const isAtBottomRef = useRef(true)
   const requestedUserQuestionIndexRef = useRef<number | null>(null)
   const requestedUserQuestionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -749,6 +754,8 @@ export function ChatContainer({
   const [showAllCustomSkills, setShowAllCustomSkills] = useState(false)
   const [thinkingMessageIndex, setThinkingMessageIndex] = useState(0)
   const [activeUserQuestionIndex, setActiveUserQuestionIndex] = useState(-1)
+  const [userInputDialogLayout, setUserInputDialogLayout] =
+    useState<UserInputRequestDialogLayout | null>(null)
   // Skill creation human-confirmation state
   const [skillConfirmRequest, setSkillConfirmRequest] = useState<SkillConfirmRequest | null>(null)
   // Skill intent banner state ("Want to save as a skill?")
@@ -992,6 +999,7 @@ export function ChatContainer({
   const {
     messages: threadMessages,
     pendingApproval,
+    pendingUserInput,
     todos,
     error: threadError,
     hookInterruption,
@@ -1006,6 +1014,7 @@ export function ChatContainer({
     modelRetry,
     setTodos,
     setPendingApproval,
+    setPendingUserInput,
     appendMessage,
     setError,
     clearError,
@@ -1050,6 +1059,33 @@ export function ChatContainer({
   }, [pendingApproval])
   const isLoading = streamData.isLoading || scheduledTaskLoading
   const inputDisabled = isLoading || historyLoading
+  const userInputScrollPadding = pendingUserInput
+    ? Math.ceil((userInputDialogLayout?.height ?? 320) + 24)
+    : undefined
+
+  const handleUserInputDialogLayoutChange = useCallback(
+    (layout: UserInputRequestDialogLayout | null): void => {
+      setUserInputDialogLayout((prev) => {
+        if (!layout) return prev === null ? prev : null
+
+        const next = {
+          height: Math.ceil(layout.height),
+          top: Math.round(layout.top),
+          bottom: Math.round(layout.bottom)
+        }
+        if (
+          prev &&
+          prev.height === next.height &&
+          prev.top === next.top &&
+          prev.bottom === next.bottom
+        ) {
+          return prev
+        }
+        return next
+      })
+    },
+    []
+  )
 
   useEffect(() => {
     let cancelled = false
@@ -1406,6 +1442,15 @@ export function ChatContainer({
     ]
   )
 
+  const handleUserInputSubmit = useCallback(
+    (response: UserInputResponse): void => {
+      window.api.userInput.sendResponse(response)
+      setPendingUserInput(null)
+      setUserInputDialogLayout(null)
+    },
+    [setPendingUserInput]
+  )
+
   const agentValues = stream?.values as AgentStreamValues | undefined
 
   // Approval listeners are now registered globally in ThreadProvider for ALL active threads,
@@ -1659,6 +1704,14 @@ export function ChatContainer({
     [displayMessages]
   )
 
+  const lastContentMessageId = useMemo(() => {
+    for (let index = displayMessages.length - 1; index >= 0; index -= 1) {
+      const message = displayMessages[index]
+      if (message.role !== "tool") return message.id
+    }
+    return null
+  }, [displayMessages])
+
   const userQuestions = useMemo<ChatScrollQuestion[]>(
     () =>
       displayMessages
@@ -1670,14 +1723,20 @@ export function ChatContainer({
     [displayMessages]
   )
 
-  const setUserMessageRef = useCallback(
-    (messageId: string) =>
+  const setMessageRef = useCallback(
+    (messageId: string, role: Message["role"]) =>
       (node: HTMLDivElement | null): void => {
-        if (node) {
+        if (node && role === "user") {
           userMessageRefs.current.set(messageId, node)
+        } else {
+          userMessageRefs.current.delete(messageId)
+        }
+
+        if (node && role !== "tool") {
+          contentMessageRefs.current.set(messageId, node)
           return
         }
-        userMessageRefs.current.delete(messageId)
+        contentMessageRefs.current.delete(messageId)
       },
     []
   )
@@ -1837,6 +1896,39 @@ export function ChatContainer({
       isAtBottomRef.current = true
     }
   }, [pendingApproval, getViewport])
+
+  useEffect(() => {
+    if (!pendingUserInput || !userInputDialogLayout) return
+    const viewport = getViewport()
+    if (!viewport) return
+
+    const frame = requestAnimationFrame(() => {
+      const targetElement = lastContentMessageId
+        ? contentMessageRefs.current.get(lastContentMessageId)
+        : null
+      const viewportRect = viewport.getBoundingClientRect()
+      const targetBottom = Math.max(viewportRect.top + 24, userInputDialogLayout.top - 12)
+
+      if (targetElement) {
+        const targetRect = targetElement.getBoundingClientRect()
+        const scrollDelta = targetRect.bottom - targetBottom
+        if (Math.abs(scrollDelta) > 1) {
+          viewport.scrollTop = Math.max(0, viewport.scrollTop + scrollDelta)
+        }
+      } else {
+        viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+      }
+      isAtBottomRef.current = false
+    })
+
+    return () => cancelAnimationFrame(frame)
+  }, [
+    getViewport,
+    lastContentMessageId,
+    pendingUserInput,
+    userInputDialogLayout?.height,
+    userInputDialogLayout?.top
+  ])
 
   // Always scroll to bottom when switching threads
   useEffect(() => {
@@ -2955,7 +3047,15 @@ export function ChatContainer({
       {nuxDialog}
 
       <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
-        <div className={cn("p-4", userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20")}>
+        <div
+          className={cn(
+            "p-4",
+            userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20"
+          )}
+          style={
+            userInputScrollPadding ? { paddingBottom: `${userInputScrollPadding}px` } : undefined
+          }
+        >
           <div className="max-w-3xl mx-auto space-y-4">
             {historyLoading && displayMessages.length === 0 && (
               <div
@@ -3215,7 +3315,7 @@ export function ChatContainer({
               return (
                 <div
                   key={message.id}
-                  ref={message.role === "user" ? setUserMessageRef(message.id) : undefined}
+                  ref={setMessageRef(message.id, message.role)}
                   data-message-role={message.role}
                 >
                   <MessageBubble
@@ -3619,7 +3719,11 @@ export function ChatContainer({
                 ref={dropZoneRef}
                 className={cn(
                   "relative flex-1 min-w-0 flex flex-col rounded-3xl border border-border  transition-colors duration-300",
-                  glowVisible ? "bg-white/80" : "bg-white",
+                  pendingUserInput
+                    ? "border-primary/25 bg-background"
+                    : glowVisible
+                      ? "bg-white/80"
+                      : "bg-white",
                   dragOver && "border-primary"
                 )}
                 onDrop={handleDrop}
@@ -3632,7 +3736,7 @@ export function ChatContainer({
                     <SkillChip label={selectedSkill.name} onRemove={() => setSelectedSkill(null)} />
                   </div>
                 )}
-                {glowVisible && (
+                {glowVisible && !pendingUserInput && (
                   <div
                     className={cn("siri-bg-glow rounded-xl", !isLoading && "siri-bg-glow-out")}
                     onAnimationEnd={(e) => {
@@ -3783,6 +3887,11 @@ export function ChatContainer({
                     )}
                   </div>
                 </div>
+                <UserInputRequestDialog
+                  request={pendingUserInput}
+                  onSubmit={handleUserInputSubmit}
+                  onLayoutChange={handleUserInputDialogLayoutChange}
+                />
               </div>
             </div>
             {/*chat container bottom panel — moved inside input box above */}

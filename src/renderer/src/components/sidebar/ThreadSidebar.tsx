@@ -128,6 +128,7 @@ function ThreadListItem({
   thread,
   isLoading,
   hasPendingApproval,
+  hasPendingUserInput,
   scheduledTaskLoading,
   isSelected,
   isEditing,
@@ -144,6 +145,7 @@ function ThreadListItem({
   thread: Thread
   isLoading: boolean
   hasPendingApproval: boolean
+  hasPendingUserInput: boolean
   scheduledTaskLoading: boolean
   isSelected: boolean
   isEditing: boolean
@@ -173,6 +175,11 @@ function ThreadListItem({
   }, [isRunning])
 
   const displayTitle = getDisplayThreadTitle(thread)
+  const pendingUserInputBadge = hasPendingUserInput ? (
+    <span className="ml-1 shrink-0 rounded-sm border border-status-warning/45 bg-status-warning/10 px-1.5 py-0.5 text-[10px] leading-none text-status-warning">
+      等待用户回复
+    </span>
+  ) : null
 
   return (
     <ContextMenu>
@@ -221,9 +228,13 @@ function ThreadListItem({
                       定时
                     </span>
                     <span className="min-w-0 flex-1 truncate">{displayTitle}</span>
+                    {pendingUserInputBadge}
                   </>
                 ) : (
-                  <span className="min-w-0 flex-1 truncate">{displayTitle}</span>
+                  <>
+                    <span className="min-w-0 flex-1 truncate">{displayTitle}</span>
+                    {pendingUserInputBadge}
+                  </>
                 )}
               </div>
             )}
@@ -854,6 +865,7 @@ export function ThreadSidebar(): React.JSX.Element {
                       const isLoading = allStreamLoadingStates[thread.thread_id] ?? false
                       const scheduledTaskLoading = Boolean(threadState?.scheduledTaskLoading)
                       const hasPendingApproval = Boolean(threadState?.pendingApproval)
+                      const hasPendingUserInput = Boolean(threadState?.pendingUserInput)
 
                       return (
                         <ThreadListItem
@@ -861,6 +873,7 @@ export function ThreadSidebar(): React.JSX.Element {
                           thread={thread}
                           isLoading={isLoading}
                           hasPendingApproval={hasPendingApproval}
+                          hasPendingUserInput={hasPendingUserInput}
                           scheduledTaskLoading={scheduledTaskLoading}
                           isSelected={currentThreadId === thread.thread_id}
                           isEditing={editingThreadId === thread.thread_id}

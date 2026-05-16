@@ -20,7 +20,8 @@ import type {
   Subagent,
   HITLRequest,
   SkillMetadata,
-  AgentAutoCommitResult
+  AgentAutoCommitResult,
+  UserInputRequest
 } from "@/types"
 import { useAppStore } from "@/lib/store"
 import type { DeepAgent } from "../../../main/agent/types"
@@ -142,6 +143,7 @@ export interface ThreadState {
   workspacePath: string | null
   subagents: Subagent[]
   pendingApproval: HITLRequest | null
+  pendingUserInput: UserInputRequest | null
   error: string | null
   hookInterruption: HookInterruptionState | null
   currentModel: string
@@ -182,6 +184,7 @@ export interface ThreadActions {
   setWorkspacePath: (path: string | null) => void
   setSubagents: (subagents: Subagent[]) => void
   setPendingApproval: (request: HITLRequest | null) => void
+  setPendingUserInput: (request: UserInputRequest | null) => void
   setError: (error: string | null) => void
   clearError: () => void
   clearHookInterruption: () => void
@@ -222,6 +225,7 @@ const createDefaultThreadState = (): ThreadState => ({
   workspacePath: null,
   subagents: [],
   pendingApproval: null,
+  pendingUserInput: null,
   error: null,
   hookInterruption: null,
   currentModel: "",
@@ -794,6 +798,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         setPendingApproval: (request: HITLRequest | null) => {
           updateThreadState(threadId, () => ({ pendingApproval: request }))
         },
+        setPendingUserInput: (request: UserInputRequest | null) => {
+          updateThreadState(threadId, () => ({ pendingUserInput: request }))
+        },
         setError: (error: string | null) => {
           updateThreadState(threadId, () => ({ error }))
         },
@@ -1076,6 +1083,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const heartbeatListenerCleanups = useRef<Record<string, () => void>>({})
   // Track approval listeners per thread (registered globally, not per-component)
   const approvalListenerCleanups = useRef<Record<string, Array<() => void>>>({})
+  // Track request_user_input listeners per thread.
+  const userInputListenerCleanups = useRef<Record<string, Array<() => void>>>({})
 
   // Track streaming AI message state per thread (for token-by-token accumulation)
   const schedulerStreamingRef = useRef<
@@ -1316,6 +1325,24 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         updateThreadState(threadId, () => ({ pendingApproval: null }))
       })
       approvalListenerCleanups.current[threadId] = [cleanupApproval, cleanupTimeout]
+
+      const cleanupUserInput = window.api.userInput.onRequest(threadId, (request) => {
+        console.log(`[ThreadProvider] User input request for thread ${threadId}:`, request)
+        updateThreadState(threadId, () => ({ pendingUserInput: request }))
+      })
+      const cleanupUserInputCancel = window.api.userInput.onCancel(threadId, (data) => {
+        console.log(
+          `[ThreadProvider] User input cancelled for thread ${threadId}: requestId=${data.requestId}`
+        )
+        updateThreadState(threadId, (state) => {
+          if (state.pendingUserInput?.requestId !== data.requestId) return {}
+          return { pendingUserInput: null }
+        })
+      })
+      userInputListenerCleanups.current[threadId] = [
+        cleanupUserInput,
+        cleanupUserInputCancel
+      ]
     },
     [loadThreadHistory, processSchedulerEvent, updateThreadState]
   )
@@ -1327,6 +1354,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     delete heartbeatListenerCleanups.current[threadId]
     approvalListenerCleanups.current[threadId]?.forEach((c) => c())
     delete approvalListenerCleanups.current[threadId]
+    userInputListenerCleanups.current[threadId]?.forEach((c) => c())
+    delete userInputListenerCleanups.current[threadId]
     delete schedulerStreamingRef.current[threadId]
 
     initializedThreadsRef.current.delete(threadId)

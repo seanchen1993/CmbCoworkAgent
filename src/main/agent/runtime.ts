@@ -76,6 +76,7 @@ import { createSchedulerTool } from "./tools/scheduler-tool"
 import { createSkillEvolutionTool } from "./tools/skill-evolution-tool"
 import { getThread } from "../db/index"
 import { createPlaywrightTool } from "./tools/playwright-tool"
+import { createRequestUserInputTool } from "./tools/user-input-tool"
 import { createToolSearchTools } from "./tools/tool-search-tool"
 import { createCodeExecTool } from "./tools/code-exec-tool"
 import { createToolHookMiddleware } from "./tool-hooks"
@@ -1654,6 +1655,12 @@ The workspace root is: ${workspacePath}`
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const extraTools: any[] = []
+  extraTools.push(
+    createRequestUserInputTool({
+      threadId: options.threadId,
+      abortSignal: options.abortSignal
+    })
+  )
   if (!options.noSchedulerTool) {
     let chatxRobotChatId: string | null = null
     if (options.threadId) {
