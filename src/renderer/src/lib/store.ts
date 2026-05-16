@@ -11,6 +11,10 @@ type MainView =
   | "claudecode"
   | "dashboard"
 
+interface ThreadNavigationOptions {
+  preserveView?: boolean
+}
+
 interface EvolutionRunProgress {
   runId: string
   traceId: string
@@ -70,8 +74,8 @@ interface AppState {
 
   // Thread actions
   loadThreads: () => Promise<void>
-  createThread: (metadata?: Record<string, unknown>) => Promise<Thread>
-  selectThread: (threadId: string) => Promise<void>
+  createThread: (metadata?: Record<string, unknown>, options?: ThreadNavigationOptions) => Promise<Thread>
+  selectThread: (threadId: string, options?: ThreadNavigationOptions) => Promise<void>
   deleteThread: (threadId: string) => Promise<void>
   updateThread: (threadId: string, updates: Partial<Thread>) => Promise<void>
   generateTitleForFirstMessage: (threadId: string, content: string) => Promise<void>
@@ -199,34 +203,42 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  createThread: async (metadata?: Record<string, unknown>) => {
+  createThread: async (metadata?: Record<string, unknown>, options?: ThreadNavigationOptions) => {
     const thread = await window.api.threads.create(metadata)
     set((state) => ({
       threads: [thread, ...state.threads],
       currentThreadId: thread.thread_id,
-      showKanbanView: false,
-      showHarnessBoardView: false,
-      showCustomizeView: false,
-      showClaudeCodeView: false,
-      showDashboardView: false,
-      previousThreadId: null,
-      mainView: "thread"
+      ...(options?.preserveView
+        ? {}
+        : {
+          showKanbanView: false,
+          showHarnessBoardView: false,
+          showCustomizeView: false,
+          showClaudeCodeView: false,
+          showDashboardView: false,
+          previousThreadId: null,
+          mainView: "thread" as const
+        })
       // skillGenerationByThread is NOT reset here: new threads start with no entry
       // in the map, so the card is naturally absent without discarding other threads' state.
     }))
     return thread
   },
 
-  selectThread: async (threadId: string) => {
+  selectThread: async (threadId: string, options?: ThreadNavigationOptions) => {
     set({
       currentThreadId: threadId,
-      showKanbanView: false,
-      showHarnessBoardView: false,
-      showCustomizeView: false,
-      showClaudeCodeView: false,
-      showDashboardView: false,
-      previousThreadId: null,
-      mainView: "thread"
+      ...(options?.preserveView
+        ? {}
+        : {
+          showKanbanView: false,
+          showHarnessBoardView: false,
+          showCustomizeView: false,
+          showClaudeCodeView: false,
+          showDashboardView: false,
+          previousThreadId: null,
+          mainView: "thread" as const
+        })
       // skillGenerationByThread is NOT cleared here: each thread retains its own card
       // state so switching back to a thread shows the card exactly as it was left.
     })

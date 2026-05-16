@@ -44,7 +44,7 @@ import type {
   HarnessRunDetailViewModel,
   HarnessSessionBinding,
   HarnessSessionBindingUpsertInput,
-  HarnessSkillRegistryItem,
+  HarnessAdapterRegistryItem,
   HarnessWatchRefChangedEvent
 } from "../shared/harness-board-types"
 
@@ -1770,8 +1770,8 @@ const api = {
       ipcRenderer.invoke("dashboard:exportExcel", sheets)
   },
   harnessBoard: {
-    registry: (): Promise<HarnessSkillRegistryItem[]> =>
-      ipcRenderer.invoke("harnessBoard:registry") as Promise<HarnessSkillRegistryItem[]>,
+    registry: (): Promise<HarnessAdapterRegistryItem[]> =>
+      ipcRenderer.invoke("harnessBoard:registry") as Promise<HarnessAdapterRegistryItem[]>,
     listProjects: (): Promise<HarnessProjectListItem[]> =>
       ipcRenderer.invoke("harnessBoard:listProjects") as Promise<HarnessProjectListItem[]>,
     createProject: (input: HarnessProjectCreateInput): Promise<HarnessProjectMetadata> =>

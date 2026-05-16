@@ -101,7 +101,7 @@ import type {
   HarnessFeatureSummary,
   HarnessSessionBinding,
   HarnessSessionBindingUpsertInput,
-  HarnessSkillRegistryItem,
+  HarnessAdapterRegistryItem,
   HarnessStatus,
   HarnessWatchRefChangedEvent,
   HarnessWorkflow
@@ -155,7 +155,7 @@ export type {
   HarnessFeatureSummary,
   HarnessSessionBinding,
   HarnessSessionBindingUpsertInput,
-  HarnessSkillRegistryItem,
+  HarnessAdapterRegistryItem,
   HarnessStatus,
   HarnessWatchRefChangedEvent,
   HarnessWorkflow

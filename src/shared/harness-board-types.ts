@@ -17,21 +17,17 @@ export interface HarnessStatus {
   isCurrent?: boolean
 }
 
-export interface HarnessSkillAdapter {
-  command: string
-  args: string[]
-}
+export type HarnessAdapterType = "plugin"
 
-export interface HarnessSkillSnapshot {
+export interface HarnessAdapterSnapshot {
   id: string
   name: string
   version: string
-  adapter: HarnessSkillAdapter
+  type: HarnessAdapterType
 }
 
-export interface HarnessSkillRegistryItem extends HarnessSkillSnapshot {
+export interface HarnessAdapterRegistryItem extends HarnessAdapterSnapshot {
   description: string
-  supportedSchemaVersions: string[]
 }
 
 export interface HarnessProjectMetadata {
@@ -46,7 +42,7 @@ export interface HarnessProjectMetadata {
   workspace: {
     path: string
   }
-  skill: HarnessSkillSnapshot
+  "harness-adapter": HarnessAdapterSnapshot
   owner?: {
     id?: string
     name?: string
@@ -65,7 +61,8 @@ export interface HarnessProjectMetadata {
 }
 
 export interface HarnessProjectCreateInput {
-  skillId: string
+  adapterId: string
+  adapterType: HarnessAdapterType
   name: string
   projectCode: string
   description: string
@@ -79,6 +76,8 @@ export interface HarnessProjectCreateInput {
 }
 
 export interface HarnessProjectMetadataUpdateInput {
+  adapterId: string
+  adapterType: HarnessAdapterType
   name: string
   projectCode: string
   description: string
@@ -99,9 +98,10 @@ export interface HarnessProjectListItem {
   productCode: string
   productName: string
   workspacePath: string
-  skill: {
+  harnessAdapter: {
     id: string
     name: string
+    type: HarnessAdapterType
   }
   lifecycle: {
     status: "active" | "archived"
@@ -172,7 +172,7 @@ export interface HarnessProjectDetailViewModel {
     workspacePath: string
   }
   adapterSnapshot: {
-    schemaVersion: "skill.inspect.v1"
+    schemaVersion: "harness.adapter.inspect.v1"
     mode: "project"
     generatedAt: string
     mock: boolean
@@ -279,7 +279,7 @@ export interface HarnessRunDetailViewModel {
     workspacePath: string
   }
   adapterSnapshot: {
-    schemaVersion: "skill.inspect.v1"
+    schemaVersion: "harness.adapter.inspect.v1"
     mode: "run"
     generatedAt: string
     mock: boolean

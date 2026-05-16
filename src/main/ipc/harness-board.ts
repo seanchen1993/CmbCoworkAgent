@@ -4,7 +4,7 @@ import {
   createHarnessProject,
   getHarnessProjectDetail,
   getHarnessRunDetail,
-  HARNESS_SKILL_REGISTRY,
+  listHarnessAdapters,
   listHarnessProjects,
   updateHarnessProjectMetadata,
   upsertHarnessSessionBinding
@@ -21,7 +21,7 @@ import type {
   HarnessRunDetailViewModel,
   HarnessSessionBinding,
   HarnessSessionBindingUpsertInput,
-  HarnessSkillRegistryItem
+  HarnessAdapterRegistryItem
 } from "../../shared/harness-board-types"
 
 function getThreadWorkspacePath(threadId: string): string | null {
@@ -49,8 +49,8 @@ function startSessionWorkspaceWatchers(detail: HarnessRunDetailViewModel): void 
 export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   console.log("[HarnessBoard] Registering harness board handlers...")
 
-  ipcMain.handle("harnessBoard:registry", async (): Promise<HarnessSkillRegistryItem[]> => {
-    return HARNESS_SKILL_REGISTRY
+  ipcMain.handle("harnessBoard:registry", async (): Promise<HarnessAdapterRegistryItem[]> => {
+    return listHarnessAdapters()
   })
 
   ipcMain.handle("harnessBoard:listProjects", async (): Promise<HarnessProjectListItem[]> => {

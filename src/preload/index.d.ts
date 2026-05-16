@@ -43,7 +43,7 @@ import type {
   HarnessRunDetailViewModel,
   HarnessSessionBinding,
   HarnessSessionBindingUpsertInput,
-  HarnessSkillRegistryItem,
+  HarnessAdapterRegistryItem,
   HarnessWatchRefChangedEvent
 } from "../shared/harness-board-types"
 
@@ -1010,7 +1010,7 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
   }
   harnessBoard: {
-    registry: () => Promise<HarnessSkillRegistryItem[]>
+    registry: () => Promise<HarnessAdapterRegistryItem[]>
     listProjects: () => Promise<HarnessProjectListItem[]>
     createProject: (input: HarnessProjectCreateInput) => Promise<HarnessProjectMetadata>
     updateProject: (

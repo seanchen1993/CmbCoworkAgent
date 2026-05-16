@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo, useRef } from "react"
+import { useState, useCallback, useEffect, useMemo, useRef, type ReactNode } from "react"
 import {
   Plus,
   Trash2,
@@ -280,7 +280,11 @@ function ThreadListItem({
   )
 }
 
-export function ThreadSidebar(): React.JSX.Element {
+export function ThreadSidebar({
+  workspaceSlot
+}: {
+  workspaceSlot?: ReactNode
+}): React.JSX.Element {
   const {
     threads,
     currentThreadId,
@@ -684,7 +688,9 @@ export function ThreadSidebar(): React.JSX.Element {
         )}
       </div>
 
-      <div className="flex items-center gap-2 px-4 py-1.5 text-xs font-medium text-muted-foreground">
+      {workspaceSlot ?? (
+        <>
+          <div className="flex items-center gap-2 px-4 py-1.5 text-xs font-medium text-muted-foreground">
         <span className="min-w-0 flex-1 truncate">工作区 {threadProjects.length}</span>
         <Button
           variant="ghost"
@@ -837,7 +843,9 @@ export function ThreadSidebar(): React.JSX.Element {
             <div className="px-3 py-8 text-center text-sm text-muted-foreground">暂无任务</div>
           )}
         </div>
-      </ScrollArea>
+          </ScrollArea>
+        </>
+      )}
 
       <div className="px-3 py-2.5 flex items-center justify-center gap-1.5 select-none">
         <svg className="size-5 shrink-0" viewBox="0 0 120 120" fill="none">

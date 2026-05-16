@@ -1,9 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import {
   AlertCircle,
   Archive,
   ArrowLeft,
-  ArrowUpRight,
   ChevronDown,
   ChevronRight,
   CheckCircle2,
@@ -41,6 +40,7 @@ import {
   SelectValue
 } from "@/components/ui/select"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { TabbedPanel } from "@/components/tabs"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
 import type {
@@ -54,12 +54,14 @@ import type {
   HarnessRunDetailViewModel,
   HarnessRunNode,
   HarnessSessionBinding,
-  HarnessSkillRegistryItem,
+  HarnessAdapterRegistryItem,
   HarnessStatus,
   Thread
 } from "@/types"
 
 const emptyProjectMetadataForm: HarnessProjectMetadataUpdateInput = {
+  adapterId: "",
+  adapterType: "plugin",
   name: "",
   projectCode: "",
   description: "",
@@ -73,7 +75,6 @@ const emptyProjectMetadataForm: HarnessProjectMetadataUpdateInput = {
 }
 
 const emptyProjectForm: HarnessProjectCreateInput = {
-  skillId: "",
   ...emptyProjectMetadataForm
 }
 
@@ -133,6 +134,8 @@ function getThreadWorkspacePath(thread: Thread | null | undefined): string | nul
 
 function metadataRequiredMissing(form: HarnessProjectMetadataUpdateInput): boolean {
   return [
+    form.adapterId,
+    form.adapterType,
     form.name,
     form.projectCode,
     form.description,
@@ -143,11 +146,13 @@ function metadataRequiredMissing(form: HarnessProjectMetadataUpdateInput): boole
 }
 
 function createRequiredMissing(form: HarnessProjectCreateInput): boolean {
-  return !form.skillId.trim() || metadataRequiredMissing(form)
+  return metadataRequiredMissing(form)
 }
 
 function toProjectMetadataForm(project: HarnessProjectListItem): HarnessProjectMetadataUpdateInput {
   return {
+    adapterId: project.harnessAdapter.id,
+    adapterType: project.harnessAdapter.type,
     name: project.name,
     projectCode: project.projectCode,
     description: project.description,
@@ -242,7 +247,7 @@ function ProjectFormDialog({
   open: boolean
   creating: boolean
   form: HarnessProjectCreateInput
-  registry: HarnessSkillRegistryItem[]
+  registry: HarnessAdapterRegistryItem[]
   error: string | null
   onOpenChange: (open: boolean) => void
   onChange: (form: HarnessProjectCreateInput) => void
@@ -257,20 +262,20 @@ function ProjectFormDialog({
         </DialogHeader>
         <div className="grid gap-4 py-1">
           <section className="rounded-md border border-border bg-muted/30 p-3">
-            <div className="mb-3 text-sm font-semibold">Skill 绑定</div>
+            <div className="mb-3 text-sm font-semibold">Plugin 绑定</div>
             <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-              Skill / Plugin *
+              Plugin *
               <Select
-                value={form.skillId}
-                onValueChange={(skillId) => onChange({ ...form, skillId })}
+                value={form.adapterId}
+                onValueChange={(adapterId) => onChange({ ...form, adapterId, adapterType: "plugin" })}
               >
                 <SelectTrigger className="bg-background">
-                  <SelectValue placeholder="选择 skill / plugin" />
+                  <SelectValue placeholder="选择已安装 plugin" />
                 </SelectTrigger>
                 <SelectContent>
-                  {registry.map((skill) => (
-                    <SelectItem key={skill.id} value={skill.id}>
-                      {skill.name} · {skill.version}
+                  {registry.map((adapter) => (
+                    <SelectItem key={adapter.id} value={adapter.id}>
+                      {adapter.name} · {adapter.version}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -337,7 +342,7 @@ function ProjectFormDialog({
                 />
               </label>
               <div className="col-span-2 grid gap-1.5 text-xs font-medium text-muted-foreground">
-                技能工作区 *
+                项目管理工作区 *
                 <div className="flex min-w-0 gap-2">
                   <Input
                     value={form.workspace.path}
@@ -386,6 +391,7 @@ function ProjectEditDialog({
   saving,
   project,
   form,
+  registry,
   error,
   onOpenChange,
   onChange,
@@ -396,6 +402,7 @@ function ProjectEditDialog({
   saving: boolean
   project: HarnessProjectListItem | null
   form: HarnessProjectMetadataUpdateInput
+  registry: HarnessAdapterRegistryItem[]
   error: string | null
   onOpenChange: (open: boolean) => void
   onChange: (form: HarnessProjectMetadataUpdateInput) => void
@@ -410,15 +417,29 @@ function ProjectEditDialog({
         </DialogHeader>
         <div className="grid gap-4 py-1">
           <section className="rounded-md border border-border bg-muted/30 p-3">
-            <div className="mb-3 text-sm font-semibold">不可修改</div>
+            <div className="mb-3 text-sm font-semibold">项目设置</div>
             <div className="grid grid-cols-2 gap-3">
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                 项目 ID
                 <Input value={project?.projectId ?? ""} disabled className="bg-background" />
               </label>
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                Skill / Plugin
-                <Input value={project?.skill.name ?? ""} disabled className="bg-background" />
+                Plugin *
+                <Select
+                  value={form.adapterId}
+                  onValueChange={(adapterId) => onChange({ ...form, adapterId, adapterType: "plugin" })}
+                >
+                  <SelectTrigger className="bg-background">
+                    <SelectValue placeholder="选择已安装 plugin" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {registry.map((adapter) => (
+                      <SelectItem key={adapter.id} value={adapter.id}>
+                        {adapter.name} · {adapter.version}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </label>
             </div>
           </section>
@@ -482,7 +503,7 @@ function ProjectEditDialog({
                 />
               </label>
               <div className="col-span-2 grid gap-1.5 text-xs font-medium text-muted-foreground">
-                技能工作区 *
+                项目管理工作区 *
                 <div className="flex min-w-0 gap-2">
                   <Input
                     value={form.workspace.path}
@@ -604,7 +625,7 @@ function FeatureCard({
   return (
     <button
       type="button"
-      className="grid w-full gap-2 rounded-md border border-border bg-background px-3 py-3 text-left transition-all hover:-translate-y-px hover:border-primary/50 hover:shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      className="grid h-[144px] w-full grid-rows-[auto_minmax(0,1fr)_auto_auto] gap-2 rounded-md border border-border bg-background px-3 py-3 text-left transition-all hover:border-primary/50 hover:shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
       onClick={onOpen}
     >
       <div className="flex min-w-0 items-start justify-between gap-3">
@@ -614,7 +635,9 @@ function FeatureCard({
         </div>
         <StatusPill status={run.overallStatus} />
       </div>
-      <div className="text-xs leading-5 text-muted-foreground">{run.summary.text}</div>
+      <div className="line-clamp-2 text-xs leading-5 text-muted-foreground" title={run.summary.text}>
+        {run.summary.text}
+      </div>
       <div className="h-1.5 overflow-hidden rounded-full bg-muted">
         <div className="h-full rounded-full bg-status-info" style={{ width: `${progressPercent(run)}%` }} />
       </div>
@@ -650,6 +673,7 @@ function ProjectCard({
   onOpenFeature: (projectId: string, slug: string) => void
 }): React.JSX.Element {
   const runs = detail?.runs ?? []
+  const detailError = detail?.error
   const activeCount = runs.filter((run) => run.overallStatus.uiKind === "active").length
   const archived = project.lifecycle.status === "archived"
   const featureButtonLabel = expanded
@@ -685,7 +709,7 @@ function ProjectCard({
           </div>
           <div className="flex shrink-0 items-center gap-1">
             <span className="rounded border border-border bg-muted px-2 py-1 text-[11px] text-muted-foreground">
-              {project.skill.name}
+              {project.harnessAdapter.name}
             </span>
             <ProjectActionMenu
               project={project}
@@ -737,18 +761,31 @@ function ProjectCard({
               <Loader2 className="size-4 animate-spin" />
               读取 feature 列表
             </div>
+          ) : detailError ? (
+            <div
+              className="flex h-[144px] items-start gap-2 rounded-md border border-status-warning/30 bg-status-warning/10 px-3 py-3 text-sm text-status-warning"
+              title={detailError}
+            >
+              <AlertCircle className="mt-0.5 size-4 shrink-0" />
+              <div className="min-w-0">
+                <div className="font-medium">无法读取 feature 列表</div>
+                <div className="mt-1 line-clamp-3 break-words text-xs leading-5">{detailError}</div>
+              </div>
+            </div>
           ) : runs.length === 0 ? (
             <div className="rounded-md border border-dashed border-border bg-background px-3 py-5 text-sm text-muted-foreground">
-              当前项目还没有 feature。skill 创建 feature 后会出现在这里。
+              当前项目还没有 feature。plugin 创建 feature 后会出现在这里。
             </div>
           ) : (
-            runs.map((run) => (
-              <FeatureCard
-                key={run.slug}
-                run={run}
-                onOpen={() => onOpenFeature(project.projectId, run.slug)}
-              />
-            ))
+            <div className="grid max-h-[296px] gap-2 overflow-y-auto pr-1">
+              {runs.map((run) => (
+                <FeatureCard
+                  key={run.slug}
+                  run={run}
+                  onOpen={() => onOpenFeature(project.projectId, run.slug)}
+                />
+              ))}
+            </div>
           )}
         </div>
       )}
@@ -809,25 +846,39 @@ function SystemSection({
 }
 
 function ArtifactLine({ artifact }: { artifact: HarnessArtifact }): React.JSX.Element {
+  const artifactPath = artifact.path ?? artifact.kind
+  const artifactSummary = artifact.summary ?? "-"
   return (
-    <div className="grid grid-cols-[18px_minmax(140px,1fr)_90px_minmax(160px,1.5fr)] items-start gap-3 border-t border-border px-3 py-3 text-sm">
-      <FileText className="mt-0.5 size-4 text-muted-foreground" />
+    <div className="grid grid-cols-[18px_minmax(140px,1fr)_90px_minmax(160px,1.5fr)] items-start gap-x-3 gap-y-2 border-t border-border px-3 py-3 text-sm">
+      <FileText className="row-span-2 mt-0.5 size-4 text-muted-foreground" />
       <div className="min-w-0">
-        <div className="truncate font-medium">{artifact.label}</div>
-        <div className="mt-1 truncate text-xs text-muted-foreground">
-          {artifact.path ?? artifact.kind}
-        </div>
+        <div className="truncate font-medium" title={artifact.label}>{artifact.label}</div>
       </div>
       <StatusPill status={artifact.status} />
       <div className="min-w-0 text-xs leading-5 text-muted-foreground">
-        <div className="truncate">{artifact.summary ?? "-"}</div>
-        {artifact.validation && <div className="truncate">{artifact.validation.message}</div>}
+        <div className="truncate" title={artifactSummary}>{artifactSummary}</div>
+        {artifact.validation && (
+          <div className="truncate" title={artifact.validation.message}>{artifact.validation.message}</div>
+        )}
+      </div>
+      <div
+        className="col-span-3 min-w-0 break-all rounded border border-border/70 bg-muted/30 px-2 py-1.5 font-mono text-[11px] leading-5 text-muted-foreground"
+        title={artifactPath}
+      >
+        {artifactPath}
       </div>
     </div>
   )
 }
 
 function HookLine({ hook }: { hook: HarnessHookLogView }): React.JSX.Element {
+  const metaItems = [
+    hook.ts,
+    hook.event,
+    hook.decision ? `decision: ${hook.decision}` : "",
+    typeof hook.exitCode === "number" ? `exit ${hook.exitCode}` : ""
+  ].filter((item): item is string => Boolean(item))
+
   return (
     <div className="grid min-w-0 grid-cols-[18px_minmax(0,1fr)] gap-2 border-t border-border px-3 py-3 text-sm">
       {statusIcon(hook.status)}
@@ -843,7 +894,13 @@ function HookLine({ hook }: { hook: HarnessHookLogView }): React.JSX.Element {
         </div>
         <div className="mt-2 min-w-0 text-xs leading-5 text-muted-foreground">
           <div className="break-words">{hook.summary}</div>
-          {hook.event && <div className="truncate">{hook.event}</div>}
+          {metaItems.length > 0 && (
+            <div className="mt-1 flex min-w-0 flex-wrap gap-x-2 gap-y-1">
+              {metaItems.map((item) => (
+                <span key={item} className="truncate font-mono text-[11px]" title={item}>{item}</span>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -852,7 +909,7 @@ function HookLine({ hook }: { hook: HarnessHookLogView }): React.JSX.Element {
 
 function StageArtifactPanel({ node }: { node: HarnessRunNode }): React.JSX.Element {
   return (
-    <section className="rounded-md border border-border bg-background">
+    <section className="shrink-0 rounded-md border border-border bg-background">
       <div className="flex min-w-0 items-center gap-2 border-b border-border px-3 py-3">
         <div className="flex min-w-0 items-center gap-2">
           <FileText className="size-4 text-muted-foreground" />
@@ -874,88 +931,142 @@ function StageArtifactPanel({ node }: { node: HarnessRunNode }): React.JSX.Eleme
   )
 }
 
-function FeatureSessionsPanel({
+function FeatureWorkspaceSidebar({
+  detail,
+  loading,
   sessions,
   threadsById,
+  activeTab,
+  activeThreadId,
   busy,
   error,
   onCreateSession,
-  onOpenSession
+  onSelectFeature,
+  onSelectSession
 }: {
+  detail: HarnessRunDetailViewModel | null
+  loading: boolean
   sessions: HarnessSessionBinding[]
   threadsById: Map<string, Thread>
+  activeTab: "feature" | "session"
+  activeThreadId: string | null
   busy: "create" | null
   error: string | null
   onCreateSession: () => void
-  onOpenSession: (threadId: string) => void
+  onSelectFeature: () => void
+  onSelectSession: (threadId: string) => void
 }): React.JSX.Element {
   return (
-    <section className="rounded-md border border-border bg-background">
-      <div className="flex min-w-0 items-center justify-between gap-3 border-b border-border px-3 py-3">
-        <div className="flex min-w-0 items-center gap-2">
-          <MessageSquare className="size-4 text-muted-foreground" />
-          <div className="min-w-0">
-            <div className="truncate text-sm font-semibold">关联会话</div>
-          </div>
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <Button
-            type="button"
-            size="sm"
-            className="gap-2"
-            onClick={onCreateSession}
-            disabled={busy !== null}
-          >
-            {busy === "create" ? (
-              <Loader2 className="size-4 animate-spin" />
-            ) : (
-              <MessageSquarePlus className="size-4" />
-            )}
-            发起新会话
-          </Button>
-        </div>
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex items-center gap-2 px-4 py-1.5 text-xs font-medium text-muted-foreground">
+        <span className="min-w-0 flex-1 truncate">Feature 工作区</span>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          className="size-6 shrink-0"
+          title="发起新会话"
+          onClick={onCreateSession}
+          disabled={busy !== null || !detail}
+        >
+          {busy === "create" ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : (
+            <MessageSquarePlus className="size-3.5" />
+          )}
+        </Button>
       </div>
 
       {error && (
-        <div className="border-b border-border bg-status-critical/10 px-3 py-2 text-sm text-status-critical">
+        <div className="mx-2 mb-2 rounded-md border border-status-critical/25 bg-status-critical/10 px-2 py-1.5 text-xs text-status-critical">
           {error}
         </div>
       )}
 
-      {sessions.length === 0 ? (
-        <div className="px-3 py-6 text-sm text-muted-foreground">
-          当前 feature 还没有关联会话。
+      <ScrollArea className="min-h-0 flex-1">
+        <div className="space-y-1 px-2 pb-2">
+          <button
+            type="button"
+            aria-pressed={activeTab === "feature"}
+            onClick={onSelectFeature}
+            className={cn(
+              "flex w-full min-w-0 items-center gap-2 rounded-sm px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+              activeTab === "feature"
+                ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                : "hover:bg-sidebar-accent/50"
+            )}
+          >
+            <Workflow className="size-4 shrink-0 text-status-info" />
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-sm font-medium">Feature 详情</div>
+              <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                {detail ? detail.run.slug : loading ? "读取中" : "未选择 feature"}
+              </div>
+            </div>
+          </button>
+
+          {loading ? (
+            <div className="flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground">
+              <Loader2 className="size-3.5 animate-spin" />
+              读取关联会话
+            </div>
+          ) : sessions.length === 0 ? (
+            <div className="px-3 py-3 text-xs text-muted-foreground">
+              暂无关联会话
+            </div>
+          ) : (
+            sessions.map((session) => {
+              const thread = threadsById.get(session.threadId) ?? null
+              const workspacePath = getThreadWorkspacePath(thread)
+              const selected = activeTab === "session" && session.threadId === activeThreadId
+              const label = thread?.title || session.threadId
+              return (
+                <button
+                  key={session.threadId}
+                  type="button"
+                  aria-pressed={selected}
+                  onClick={() => onSelectSession(session.threadId)}
+                  className={cn(
+                    "flex w-full min-w-0 items-start gap-2 rounded-sm px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                    selected
+                      ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                      : "hover:bg-sidebar-accent/50"
+                  )}
+                >
+                  <MessageSquare className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-medium" title={label}>
+                      {label}
+                    </div>
+                    <div className="mt-0.5 flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
+                      <span className="truncate">{workspacePath ? getWorkspaceName(workspacePath) : session.threadId}</span>
+                      <span className="shrink-0">{formatSessionTime(session.lastActiveAt)}</span>
+                    </div>
+                  </div>
+                </button>
+              )
+            })
+          )}
+        </div>
+      </ScrollArea>
+    </div>
+  )
+}
+
+function FeatureConversationPanel({
+  threadId
+}: {
+  threadId: string | null
+}): React.JSX.Element {
+  return (
+    <section className="flex min-h-0 flex-1 overflow-hidden rounded-md border border-border bg-background">
+      {threadId ? (
+        <div className="flex min-h-0 flex-1">
+          <TabbedPanel threadId={threadId} showTabBar={false} />
         </div>
       ) : (
-        <div className="max-h-64 divide-y divide-border overflow-y-auto">
-          {sessions.map((session) => {
-            const thread = threadsById.get(session.threadId) ?? null
-            const workspacePath = getThreadWorkspacePath(thread)
-            return (
-              <div key={session.threadId} className="grid grid-cols-[minmax(0,1fr)_auto] gap-3 px-3 py-3">
-                <div className="min-w-0">
-                  <div className="truncate text-sm font-medium">{thread?.title || session.threadId}</div>
-                  <div className="mt-1 flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
-                    <span className="truncate">{session.threadId}</span>
-                    <span className="shrink-0">更新 {formatSessionTime(session.lastActiveAt)}</span>
-                  </div>
-                  <div className="mt-1 truncate text-xs text-muted-foreground">
-                    {workspacePath ? getWorkspaceName(workspacePath) : "未配置工作区"}
-                  </div>
-                </div>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  className="gap-2"
-                  onClick={() => onOpenSession(session.threadId)}
-                >
-                  打开
-                  <ArrowUpRight className="size-4" />
-                </Button>
-              </div>
-            )
-          })}
+        <div className="flex min-h-0 flex-1 items-center justify-center px-6 text-center text-sm text-muted-foreground">
+          从左侧 Feature 工作区选择会话，或发起新会话。
         </div>
       )}
     </section>
@@ -1205,30 +1316,42 @@ function FeatureWorkspaceChangesPanel({
 function FeatureDetailPage({
   detail,
   loading,
-  onBack
+  onBack,
+  onSessionLinked,
+  onFeatureWorkspaceChange
 }: {
   detail: HarnessRunDetailViewModel | null
   loading: boolean
   onBack: () => void
+  onSessionLinked: () => Promise<void>
+  onFeatureWorkspaceChange?: (workspace: ReactNode | null) => void
 }): React.JSX.Element {
   const defaultNodeId = useMemo(() => {
     if (!detail) return null
+    const currentNodeId = detail.run.position.currentNodeId
+    if (currentNodeId && detail.run.nodes.some((node) => node.id === currentNodeId)) {
+      return currentNodeId
+    }
     return detail.run.nodes.find((node) => node.status.isCurrent)?.id ?? detail.run.nodes[0]?.id ?? null
   }, [detail])
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(defaultNodeId)
+  const detailKey = detail ? `${detail.project.projectId}:${detail.run.slug}` : ""
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
+  const nodeButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({})
 
   useEffect(() => {
-    if (!detail) {
-      setSelectedNodeId(null)
-      return
-    }
-    setSelectedNodeId((current) => {
-      if (current && detail.run.nodes.some((node) => node.id === current)) {
-        return current
-      }
-      return defaultNodeId
-    })
+    setSelectedNodeId(defaultNodeId)
   }, [defaultNodeId, detail])
+
+  useEffect(() => {
+    if (!selectedNodeId) return
+    const frame = window.requestAnimationFrame(() => {
+      nodeButtonRefs.current[selectedNodeId]?.scrollIntoView({
+        block: "nearest",
+        inline: "center"
+      })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [selectedNodeId])
 
   const effectiveSelectedNodeId = selectedNodeId ?? defaultNodeId
   const selectedNode =
@@ -1237,8 +1360,47 @@ function FeatureDetailPage({
   const threadsById = useMemo(() => new Map(threads.map((thread) => [thread.thread_id, thread])), [threads])
   const [sessionBusy, setSessionBusy] = useState<"create" | null>(null)
   const [sessionError, setSessionError] = useState<string | null>(null)
+  const [selectedSessionState, setSelectedSessionState] = useState<{
+    detailKey: string
+    threadId: string | null
+  }>({ detailKey: "", threadId: null })
+  const [activeDetailTab, setActiveDetailTab] = useState<"feature" | "session">("feature")
 
-  const handleCreateSession = async (): Promise<void> => {
+  useEffect(() => {
+    if (!detail) {
+      setSelectedSessionState({ detailKey: "", threadId: null })
+      return
+    }
+
+    const firstThreadId = detail.sessions[0]?.threadId ?? null
+    setSelectedSessionState((current) => {
+      if (current.detailKey !== detailKey) {
+        return { detailKey, threadId: firstThreadId }
+      }
+      if (
+        current.threadId &&
+        detail.sessions.some((session) => session.threadId === current.threadId)
+      ) {
+        return current
+      }
+      return { detailKey, threadId: firstThreadId }
+    })
+  }, [detail, detailKey])
+
+  useEffect(() => {
+    setActiveDetailTab("feature")
+  }, [detailKey])
+
+  const selectedSessionThreadId =
+    selectedSessionState.detailKey === detailKey ? selectedSessionState.threadId : null
+
+  useEffect(() => {
+    if (activeDetailTab !== "session") return
+    if (!selectedSessionThreadId) return
+    void selectThread(selectedSessionThreadId, { preserveView: true })
+  }, [activeDetailTab, selectThread, selectedSessionThreadId])
+
+  const handleCreateSession = useCallback(async (): Promise<void> => {
     if (!detail || sessionBusy) return
     setSessionBusy("create")
     setSessionError(null)
@@ -1251,17 +1413,107 @@ function FeatureDetailPage({
           projectId: detail.project.projectId,
           slug: detail.run.slug
         }
-      })
+      }, { preserveView: true })
       await window.api.harnessBoard.linkSession({
         projectId: detail.project.projectId,
         slug: detail.run.slug,
         threadId: thread.thread_id
       })
+      setSelectedSessionState({ detailKey, threadId: thread.thread_id })
+      await onSessionLinked()
+      setActiveDetailTab("session")
     } catch (error) {
       setSessionError(error instanceof Error ? error.message : String(error))
     } finally {
       setSessionBusy(null)
     }
+  }, [createThread, detail, detailKey, onSessionLinked, sessionBusy])
+
+  const handleSelectSession = useCallback((threadId: string): void => {
+    setSelectedSessionState({ detailKey, threadId })
+    setActiveDetailTab("session")
+    void selectThread(threadId, { preserveView: true })
+  }, [detailKey, selectThread])
+
+  const handleSelectFeature = useCallback((): void => {
+    setActiveDetailTab("feature")
+  }, [])
+
+  const featureWorkspaceSidebar = useMemo(() => (
+    <FeatureWorkspaceSidebar
+      detail={detail}
+      loading={loading}
+      sessions={detail?.sessions ?? []}
+      threadsById={threadsById}
+      activeTab={activeDetailTab}
+      activeThreadId={selectedSessionThreadId}
+      busy={sessionBusy}
+      error={sessionError}
+      onCreateSession={() => void handleCreateSession()}
+      onSelectFeature={handleSelectFeature}
+      onSelectSession={handleSelectSession}
+    />
+  ), [
+    activeDetailTab,
+    detail,
+    handleCreateSession,
+    handleSelectFeature,
+    handleSelectSession,
+    loading,
+    selectedSessionThreadId,
+    sessionBusy,
+    sessionError,
+    threadsById
+  ])
+
+  useEffect(() => {
+    if (!onFeatureWorkspaceChange) return
+    onFeatureWorkspaceChange(featureWorkspaceSidebar)
+  }, [featureWorkspaceSidebar, onFeatureWorkspaceChange])
+
+  useEffect(() => {
+    return () => onFeatureWorkspaceChange?.(null)
+  }, [onFeatureWorkspaceChange])
+
+  const renderStageNodeStrip = (): React.JSX.Element | null => {
+    if (!detail) return null
+    return (
+      <div className="-mx-1 overflow-x-auto pb-2">
+        <div className="flex w-max gap-3 px-1">
+          {detail.run.nodes.map((node) => {
+            const selected = effectiveSelectedNodeId === node.id
+            return (
+              <button
+                key={node.id}
+                ref={(element) => {
+                  nodeButtonRefs.current[node.id] = element
+                }}
+                type="button"
+                onClick={() => {
+                  setSelectedNodeId(node.id)
+                }}
+                aria-pressed={selected}
+                title={node.label}
+                className={cn(
+                  "w-[220px] flex-none rounded-md border px-3 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                  selected
+                    ? "border-status-info bg-status-info/10 shadow-sm"
+                    : node.status.isCurrent
+                      ? "border-status-info/45 bg-status-info/5 hover:border-status-info"
+                      : "border-border bg-background hover:border-primary/45"
+                )}
+              >
+                <div className="flex min-w-0 items-center gap-1.5">
+                  {statusIcon(node.status)}
+                  <span className="truncate text-sm font-medium">{node.label}</span>
+                </div>
+                <div className="mt-1 truncate text-xs text-muted-foreground">{node.group}</div>
+              </button>
+            )
+          })}
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -1297,89 +1549,63 @@ function FeatureDetailPage({
           读取 feature 详情
         </div>
       ) : (
-        <ScrollArea className="min-h-0 flex-1">
-          <div className="mx-auto grid max-w-7xl grid-cols-[minmax(0,1fr)_340px] gap-5 p-6">
-            <div className="min-w-0 space-y-4">
-              <div className="-mx-1 overflow-x-auto pb-2">
-                <div className="flex w-max gap-3 px-1">
-                  {detail.run.nodes.map((node) => {
-                    const selected = effectiveSelectedNodeId === node.id
-                    return (
-                      <button
-                        key={node.id}
-                        type="button"
-                        onClick={() => setSelectedNodeId(node.id)}
-                        aria-pressed={selected}
-                        title={node.label}
-                        className={cn(
-                          "w-[220px] flex-none rounded-md border px-3 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-                          selected
-                            ? "border-status-info bg-status-info/10 shadow-sm"
-                            : node.status.isCurrent
-                              ? "border-status-info/45 bg-status-info/5 hover:border-status-info"
-                              : "border-border bg-background hover:border-primary/45"
-                        )}
-                      >
-                        <div className="flex min-w-0 items-center gap-1.5">
-                          {statusIcon(node.status)}
-                          <span className="truncate text-sm font-medium">{node.label}</span>
-                        </div>
-                        <div className="mt-1 truncate text-xs text-muted-foreground">{node.group}</div>
-                      </button>
-                    )
-                  })}
+        <div className="mx-auto flex min-h-0 w-full max-w-7xl flex-1 flex-col overflow-hidden p-6">
+          {activeDetailTab === "feature" ? (
+            <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+              <div className="grid grid-cols-[minmax(0,1fr)_340px] gap-5">
+                <div className="min-w-0 space-y-4">
+                  {renderStageNodeStrip()}
+
+                  {selectedNode ? (
+                    <StageArtifactPanel node={selectedNode} />
+                  ) : (
+                    <section className="rounded-md border border-dashed border-border bg-background px-3 py-8 text-center text-sm text-muted-foreground">
+                      暂无阶段数据。
+                    </section>
+                  )}
                 </div>
+
+                <aside className="min-w-0 space-y-4">
+                  <FeatureWorkspaceChangesPanel sessions={detail.sessions} threadsById={threadsById} />
+
+                  <section className="rounded-md border border-border bg-background">
+                    <div className="border-b border-border px-3 py-3 text-sm font-semibold">Hook 事件</div>
+                    {selectedNode && selectedNode.hooks.length > 0 ? (
+                      <div className="max-h-64 overflow-y-auto">
+                        {selectedNode.hooks.map((hook, index) => (
+                          <HookLine key={`${hook.ts ?? "hook"}-${hook.hookId}-${index}`} hook={hook} />
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="px-3 py-6 text-sm text-muted-foreground">
+                        当前阶段暂无 Hook 事件。
+                      </div>
+                    )}
+                  </section>
+                </aside>
               </div>
-
-              {selectedNode ? (
-                <StageArtifactPanel node={selectedNode} />
-              ) : (
-                <section className="rounded-md border border-dashed border-border bg-background px-3 py-8 text-center text-sm text-muted-foreground">
-                  暂无阶段数据。
-                </section>
-              )}
-
-              <FeatureSessionsPanel
-                sessions={detail.sessions}
-                threadsById={threadsById}
-                busy={sessionBusy}
-                error={sessionError}
-                onCreateSession={() => void handleCreateSession()}
-                onOpenSession={(threadId) => void selectThread(threadId)}
-              />
             </div>
-
-            <aside className="min-w-0 space-y-4">
-              <FeatureWorkspaceChangesPanel sessions={detail.sessions} threadsById={threadsById} />
-
-              <section className="rounded-md border border-border bg-background">
-                <div className="border-b border-border px-3 py-3 text-sm font-semibold">Hook 事件</div>
-                {selectedNode && selectedNode.hooks.length > 0 ? (
-                  <div className="max-h-64 overflow-y-auto">
-                    {selectedNode.hooks.map((hook) => <HookLine key={hook.hookId} hook={hook} />)}
-                  </div>
-                ) : (
-                  <div className="px-3 py-6 text-sm text-muted-foreground">
-                    当前阶段暂无 Hook 事件。
-                  </div>
-                )}
-              </section>
-            </aside>
-          </div>
-        </ScrollArea>
+          ) : (
+            <FeatureConversationPanel threadId={selectedSessionThreadId} />
+          )}
+        </div>
       )}
     </div>
   )
 }
 
-export function HarnessBoardView(): React.JSX.Element {
+export function HarnessBoardView({
+  onFeatureWorkspaceChange
+}: {
+  onFeatureWorkspaceChange?: (workspace: ReactNode | null) => void
+}): React.JSX.Element {
   const [projects, setProjects] = useState<HarnessProjectListItem[]>([])
   const [detailsByProjectId, setDetailsByProjectId] = useState<Record<string, HarnessProjectDetailViewModel>>({})
   const [loadingDetailIds, setLoadingDetailIds] = useState<Set<string>>(new Set())
   const [expandedProjectIds, setExpandedProjectIds] = useState<Set<string>>(new Set())
   const [selectedFeature, setSelectedFeature] = useState<SelectedFeature | null>(null)
   const [runDetail, setRunDetail] = useState<HarnessRunDetailViewModel | null>(null)
-  const [skillRegistry, setSkillRegistry] = useState<HarnessSkillRegistryItem[]>([])
+  const [adapterRegistry, setAdapterRegistry] = useState<HarnessAdapterRegistryItem[]>([])
   const [query, setQuery] = useState("")
   const [loadingProjects, setLoadingProjects] = useState(true)
   const [loadingRun, setLoadingRun] = useState(false)
@@ -1396,6 +1622,7 @@ export function HarnessBoardView(): React.JSX.Element {
 
   const loadProjectDetail = useCallback(async (projectId: string) => {
     setLoadingDetailIds((current) => new Set(current).add(projectId))
+    setLoadError(null)
     try {
       const detail = await window.api.harnessBoard.getProjectDetail(projectId)
       setDetailsByProjectId((current) => ({ ...current, [projectId]: detail }))
@@ -1419,17 +1646,28 @@ export function HarnessBoardView(): React.JSX.Element {
         window.api.harnessBoard.registry()
       ])
       setProjects(items)
-      setSkillRegistry(registry)
+      setAdapterRegistry(registry)
+      setExpandedProjectIds((current) => {
+        const next = new Set(current)
+        for (const item of items) {
+          next.add(item.projectId)
+        }
+        return next
+      })
       setForm((current) => ({
         ...current,
-        skillId: current.skillId || registry[0]?.id || ""
+        adapterId: current.adapterId || registry[0]?.id || "",
+        adapterType: "plugin"
       }))
+      for (const item of items) {
+        void loadProjectDetail(item.projectId)
+      }
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : String(error))
     } finally {
       setLoadingProjects(false)
     }
-  }, [])
+  }, [loadProjectDetail])
 
   useEffect(() => {
     void loadProjects()
@@ -1465,6 +1703,15 @@ export function HarnessBoardView(): React.JSX.Element {
     })
   }, [expandedProjectIds, loadProjectDetail, selectedFeature])
 
+  const refreshSelectedRunDetail = useCallback(async (): Promise<void> => {
+    if (!selectedFeature) return
+    const detail = await window.api.harnessBoard.getRunDetail(
+      selectedFeature.projectId,
+      selectedFeature.slug
+    )
+    setRunDetail(detail)
+  }, [selectedFeature])
+
   const { activeSystemGroups, archivedSystemGroups } = useMemo<{
     activeSystemGroups: SystemGroup[]
     archivedSystemGroups: SystemGroup[]
@@ -1482,7 +1729,7 @@ export function HarnessBoardView(): React.JSX.Element {
           project.projectCode,
           project.productCode,
           project.productName,
-          project.skill.name,
+          project.harnessAdapter.name,
           ...(detail?.runs.map((run) => `${run.title} ${run.slug} ${run.summary.text}`) ?? [])
         ]
           .join(" ")
@@ -1557,7 +1804,7 @@ export function HarnessBoardView(): React.JSX.Element {
     try {
       await window.api.harnessBoard.createProject(form)
       setDialogOpen(false)
-      setForm({ ...emptyProjectForm, skillId: skillRegistry[0]?.id || "" })
+      setForm({ ...emptyProjectForm, adapterId: adapterRegistry[0]?.id || "", adapterType: "plugin" })
       await loadProjects()
     } catch (error) {
       setFormError(error instanceof Error ? error.message : String(error))
@@ -1632,6 +1879,8 @@ export function HarnessBoardView(): React.JSX.Element {
         detail={runDetail}
         loading={loadingRun}
         onBack={() => setSelectedFeature(null)}
+        onSessionLinked={refreshSelectedRunDetail}
+        onFeatureWorkspaceChange={onFeatureWorkspaceChange}
       />
     )
   }
@@ -1663,7 +1912,7 @@ export function HarnessBoardView(): React.JSX.Element {
           <Input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="搜索项目、产品、skill 或已加载 feature"
+            placeholder="搜索项目、产品、plugin 或已加载 feature"
             className="h-8 border-0 bg-transparent px-0 shadow-none focus-visible:ring-0"
           />
         </div>
@@ -1762,7 +2011,7 @@ export function HarnessBoardView(): React.JSX.Element {
         open={dialogOpen}
         creating={creating}
         form={form}
-        registry={skillRegistry}
+        registry={adapterRegistry}
         error={formError}
         onOpenChange={setDialogOpen}
         onChange={setForm}
@@ -1774,6 +2023,7 @@ export function HarnessBoardView(): React.JSX.Element {
         saving={savingEdit}
         project={editingProject}
         form={editForm}
+        registry={adapterRegistry}
         error={editError}
         onOpenChange={(open) => {
           if (!open && !savingEdit) {
