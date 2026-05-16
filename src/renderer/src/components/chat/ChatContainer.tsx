@@ -793,6 +793,7 @@ export function ChatContainer({
   const [modelContextLimit, setModelContextLimit] = useState<number | undefined>(undefined)
   const streamMessageTimesRef = useRef<Record<string, { start_at: Date; end_at?: Date }>>({})
   const streamMessageBaselineIdsRef = useRef<Set<string>>(new Set())
+  const streamMessageCapturePreparedRef = useRef(false)
   const [messageTimes, setMessageTimes] = useState<MessageTimeMap>({})
   const threadMessageIdsRef = useRef<Set<string>>(new Set())
 
@@ -1086,6 +1087,16 @@ export function ChatContainer({
     },
     []
   )
+
+  const prepareStreamMessageCapture = useCallback((): void => {
+    streamMessageTimesRef.current = {}
+    streamMessageBaselineIdsRef.current = new Set(
+      ((streamData.messages || []) as StreamMessage[])
+        .map((msg) => msg.id)
+        .filter((id): id is string => !!id)
+    )
+    streamMessageCapturePreparedRef.current = true
+  }, [streamData.messages])
 
   useEffect(() => {
     let cancelled = false
@@ -1421,6 +1432,7 @@ export function ChatContainer({
       try {
         const legacyDecision =
           decision === "approve_session" || decision === "approve_permanent" ? "approve" : decision
+        prepareStreamMessageCapture()
         await stream.submit(null, {
           command: {
             resume: { decision: legacyDecision, pendingCount: pendingApproval.pendingCount }
@@ -1436,6 +1448,7 @@ export function ChatContainer({
       pendingApproval,
       savedToolDescriptionInput,
       savedToolNameInput,
+      prepareStreamMessageCapture,
       setPendingApproval,
       stream,
       threadId
@@ -1483,17 +1496,16 @@ export function ChatContainer({
   const prevLoadingRef = useRef(false)
   useEffect(() => {
     if (!prevLoadingRef.current && isLoading) {
-      // 本轮开始时记录已有 stream 消息，避免把历史回放消息当成本轮新消息计时。
+      // 本轮开始前应由 stream.submit 调用方采样 baseline。这里仅做兜底：
+      // 如果运行不是从 ChatContainer 的 submit 路径启动，就退回到已落库消息集合。
       //
-      // useStream 的 messages 里会同时包含历史消息和本轮新增消息。如果不先记 baseline，
-      // loading 期间遍历 streamData.messages 时就会把历史 assistant/tool 重新打时间戳，
-      // 导致历史耗时被当前时间污染。
-      streamMessageTimesRef.current = {}
-      streamMessageBaselineIdsRef.current = new Set(
-        ((streamData.messages || []) as StreamMessage[])
-          .map((msg) => msg.id)
-          .filter((id): id is string => !!id)
-      )
+      // 不能在 loading 已经变成 true 后再用当前 streamData.messages 采样；
+      // 第一条本轮 assistant/tool-call 可能已经到达，会被误判为历史消息而漏落库。
+      if (!streamMessageCapturePreparedRef.current) {
+        streamMessageTimesRef.current = {}
+        streamMessageBaselineIdsRef.current = new Set(threadMessageIdsRef.current)
+      }
+      streamMessageCapturePreparedRef.current = false
     }
 
     if (isLoading) {
@@ -2167,6 +2179,7 @@ export function ChatContainer({
       }
     }
 
+    prepareStreamMessageCapture()
     await stream.submit(
       {
         messages: [{ type: "human", content: fullMessage }]
