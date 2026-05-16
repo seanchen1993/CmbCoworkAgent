@@ -71,6 +71,7 @@ interface AppState {
   marketInitialSkillCategory: string | null
   marketInitialSkillSearchQuery: string | null
   marketInitialSkillDetailName: string | null
+  marketInitialSkillFilters: string[] | null
 
   // Thread actions
   loadThreads: () => Promise<void>
@@ -109,6 +110,7 @@ interface AppState {
   setMarketInitialSkillSearchQuery: (query: string | null) => void
   setMarketInitialSkillDetailName: (name: string | null) => void
   setMainView: (view: MainView) => void
+  setMarketInitialSkillFilters: (filters: string[] | null) => void
 
   // Plugin state sync — increment to trigger RightPanel refresh
   pluginVersion: number
@@ -181,6 +183,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   marketInitialSkillCategory: null,
   marketInitialSkillSearchQuery: null,
   marketInitialSkillDetailName: null,
+  marketInitialSkillFilters: null,
   pluginVersion: 0,
   evolutionTab: "candidates",
   evolutionRunning: false,
@@ -459,6 +462,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setMarketInitialSkillDetailName: (name) => {
     set({ marketInitialSkillDetailName: name })
+  },
+
+  setMarketInitialSkillFilters: (filters) => {
+    set({ marketInitialSkillFilters: filters })
   },
 
   setMainView: (view) => {

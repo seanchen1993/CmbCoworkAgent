@@ -334,7 +334,7 @@ function normalizeAgentAutoCommitSettings(input: unknown): AgentAutoCommitSettin
 
   return {
     mode,
-    push: false,
+    push: raw.push === true,
     messageStrategy,
     ...(cardNumber ? { cardNumber } : {}),
     ...(template ? { template } : {})
@@ -361,8 +361,7 @@ export function saveAgentAutoCommitSettings(
   getOpenworkDir()
   const next = normalizeAgentAutoCommitSettings({
     ...getAgentAutoCommitSettings(),
-    ...updates,
-    push: false
+    ...updates
   })
   if (next.mode !== "off" && !next.cardNumber?.trim()) {
     throw new Error("开启自动提交前需要填写卡片编号")

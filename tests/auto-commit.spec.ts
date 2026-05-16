@@ -363,6 +363,42 @@ async function testForeignStagedAborts(): Promise<void> {
   })
 }
 
+async function testForeignStagedNewFileAborts(): Promise<void> {
+  // Regression guard: under the broadened candidate selection, a user-created file
+  // that gets `git add`-ed during the run is in `candidate` (it's a new dirty file)
+  // — so a gate keyed on `stagedEnd \ candidate` would let it through. The actual
+  // gate keys on `stagedEnd \ agentReported`, which must abort here because the
+  // agent never reported user-new.ts via recordAgentTouchedFile.
+  await withTempDir("ac-foreign-stage-new", async (workspace) => {
+    await initRepo(workspace)
+    await setSettings(enabledSettings())
+    const { startAgentGitSnapshot, recordAgentTouchedFile, maybeAutoCommitAfterAgentRun } =
+      await importAutoCommit()
+    const snap = await startAgentGitSnapshot("t-c10b", workspace)
+
+    await writeFile(join(workspace, "agent.ts"), "agent\n")
+    recordAgentTouchedFile("t-c10b", workspace, "agent.ts")
+
+    await writeFile(join(workspace, "user-new.ts"), "user new file\n")
+    await git(workspace, ["add", "user-new.ts"])
+
+    const result = await maybeAutoCommitAfterAgentRun({
+      threadId: "t-c10b",
+      workspacePath: workspace,
+      snapshot: snap
+    })
+    assert(result.status === "skipped", `expected skipped, got ${result.status}`)
+    assert(
+      result.reasons?.some((r) => r.includes("非本轮 Agent 改动已暂存")) ?? false,
+      `expected foreign-staged reason, got ${JSON.stringify(result.reasons)}`
+    )
+    assert(
+      result.skippedFiles?.includes("user-new.ts") ?? false,
+      `expected user-new.ts in skippedFiles, got ${JSON.stringify(result.skippedFiles)}`
+    )
+  })
+}
+
 async function testMissingCardNumberSkipped(): Promise<void> {
   await withTempDir("ac-no-card", async (workspace) => {
     await initRepo(workspace)
@@ -594,15 +630,25 @@ async function testLlmModifiedMetadataClearedAfterCommit(): Promise<void> {
   })
 }
 
-async function testExternalNewFileNotCommitted(): Promise<void> {
-  await withTempDir("ac-external-new", async (workspace) => {
+async function testNewDirtyFilesAllCommitted(): Promise<void> {
+  // Under the broadened detection policy, all dirty files that appeared during the
+  // run are candidates regardless of whether the agent reported them via tool
+  // callbacks. This fixes the prior bug where shell-tool side effects (npm install
+  // lockfile updates, prettier --write, code generators, git mv) were silently
+  // dropped. Unstaged manual edits during the run are folded in as well — that is
+  // an accepted trade-off. Manual `git add` during the run is NOT folded in: the
+  // foreign-staged gate keys off agentReported, so any staging the agent did not
+  // perform aborts the commit (see testForeignStagedNewFileAborts).
+  await withTempDir("ac-new-all", async (workspace) => {
     await initRepo(workspace)
     await setSettings(enabledSettings("diff"))
     const { startAgentGitSnapshot, recordAgentTouchedFile, maybeAutoCommitAfterAgentRun } =
       await importAutoCommit()
     const snap = await startAgentGitSnapshot("t-c19", workspace)
 
-    await writeFile(join(workspace, "external.ts"), "external user file\n")
+    // unreported.ts simulates a file created by a shell command (npm install, etc.)
+    // — never passed through recordAgentTouchedFile.
+    await writeFile(join(workspace, "unreported.ts"), "shell-tool produced this\n")
     await writeFile(join(workspace, "agent.ts"), "agent file\n")
     recordAgentTouchedFile("t-c19", workspace, "agent.ts")
 
@@ -614,15 +660,74 @@ async function testExternalNewFileNotCommitted(): Promise<void> {
     assert(result.status === "committed", `expected committed, got ${result.status}`)
     assert(result.committedFiles?.includes("agent.ts") ?? false, "agent.ts should be committed")
     assert(
-      !(result.committedFiles?.includes("external.ts") ?? false),
-      `external.ts must not be committed, got ${JSON.stringify(result.committedFiles)}`
+      result.committedFiles?.includes("unreported.ts") ?? false,
+      `unreported.ts should now be committed, got ${JSON.stringify(result.committedFiles)}`
     )
     assert(
-      result.skippedFiles?.includes("external.ts") ?? false,
-      `external.ts should be listed as skipped, got ${JSON.stringify(result.skippedFiles)}`
+      result.warnings?.some((w) => w.includes("未被 Agent 工具主动报告")) ?? false,
+      `expected unreported-files warning, got ${JSON.stringify(result.warnings)}`
     )
-    const status = await git(workspace, ["status", "--porcelain"])
-    assert(status.includes("external.ts"), "external.ts should remain dirty")
+  })
+}
+
+async function testPushSuccessAgainstBareRemote(): Promise<void> {
+  await withTempDir("ac-push-ok", async (workspace) => {
+    const bare = await mkdtemp(join(tmpdir(), "ac-push-ok-bare-"))
+    try {
+      await git(bare, ["init", "--bare", "-q"])
+      await initRepo(workspace)
+      await git(workspace, ["remote", "add", "origin", bare])
+      await git(workspace, ["push", "-q", "-u", "origin", "main"])
+
+      await setSettings(enabledSettings("diff", { push: true }))
+      const { startAgentGitSnapshot, recordAgentTouchedFile, maybeAutoCommitAfterAgentRun } =
+        await importAutoCommit()
+      const snap = await startAgentGitSnapshot("t-c20", workspace)
+      await writeFile(join(workspace, "feat.ts"), "feat\n")
+      recordAgentTouchedFile("t-c20", workspace, "feat.ts")
+
+      const result = await maybeAutoCommitAfterAgentRun({
+        threadId: "t-c20",
+        workspacePath: workspace,
+        snapshot: snap
+      })
+      assert(result.status === "committed", `expected committed, got ${result.status}`)
+      assert(result.pushed === true, `expected pushed=true, got ${result.pushed}`)
+      assert(!result.pushError, `expected no pushError, got ${result.pushError}`)
+
+      const remoteLog = await git(bare, ["log", "--all", "--oneline"])
+      assert(
+        remoteLog.includes(CARD_NUMBER),
+        `expected commit message in bare remote, got ${remoteLog}`
+      )
+    } finally {
+      await removeTempDir(bare)
+    }
+  })
+}
+
+async function testPushFailureReportedButCommitKept(): Promise<void> {
+  await withTempDir("ac-push-fail", async (workspace) => {
+    // No remote configured — `git push` should fail. The commit must remain locally.
+    await initRepo(workspace)
+    await setSettings(enabledSettings("diff", { push: true }))
+    const { startAgentGitSnapshot, recordAgentTouchedFile, maybeAutoCommitAfterAgentRun } =
+      await importAutoCommit()
+    const snap = await startAgentGitSnapshot("t-c21", workspace)
+    await writeFile(join(workspace, "feat.ts"), "feat\n")
+    recordAgentTouchedFile("t-c21", workspace, "feat.ts")
+
+    const headBefore = (await git(workspace, ["rev-parse", "HEAD"])).trim()
+    const result = await maybeAutoCommitAfterAgentRun({
+      threadId: "t-c21",
+      workspacePath: workspace,
+      snapshot: snap
+    })
+    assert(result.status === "committed", `expected committed, got ${result.status}`)
+    assert(result.pushed === false, `expected pushed=false, got ${result.pushed}`)
+    assert(typeof result.pushError === "string", `expected pushError, got ${result.pushError}`)
+    const headAfter = (await git(workspace, ["rev-parse", "HEAD"])).trim()
+    assert(headAfter !== headBefore, "HEAD must advance — commit must not be rolled back on push failure")
   })
 }
 
@@ -649,6 +754,8 @@ async function run(): Promise<void> {
     console.log("PASS C9 unmerged conflict skipped")
     await testForeignStagedAborts()
     console.log("PASS C10 foreign staged aborts")
+    await testForeignStagedNewFileAborts()
+    console.log("PASS C10b foreign staged new file aborts")
     await testMissingCardNumberSkipped()
     console.log("PASS C11 missing card number skipped")
     await testPromptStrategyBusinessFormat()
@@ -665,8 +772,12 @@ async function run(): Promise<void> {
     console.log("PASS C17 ask mode confirm")
     await testLlmModifiedMetadataClearedAfterCommit()
     console.log("PASS C18 llmModifiedFiles metadata cleared")
-    await testExternalNewFileNotCommitted()
-    console.log("PASS C19 external new file not committed")
+    await testNewDirtyFilesAllCommitted()
+    console.log("PASS C19 all new dirty files included (incl. unreported)")
+    await testPushSuccessAgainstBareRemote()
+    console.log("PASS C20 push: true with bare remote -> pushed=true")
+    await testPushFailureReportedButCommitKept()
+    console.log("PASS C21 push fails -> commit kept, pushError reported")
   } finally {
     await restoreSettings()
   }

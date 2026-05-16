@@ -6,6 +6,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import type { OverviewData } from "../use-dashboard"
+import { hasMarketSkill } from "../skill-market"
 import {
   DEFAULT_SKILL_ADOPTION_SORT,
   SKILL_ADOPTION_SORT_LABELS,
@@ -303,7 +304,8 @@ function SearchableRankingPanel({
   labelClassName,
   onItemClick,
   headerActions,
-  titleTooltipContent
+  titleTooltipContent,
+  renderNameAddon
 }: {
   title: string
   totalKinds: number
@@ -318,6 +320,7 @@ function SearchableRankingPanel({
   onItemClick?: (name: string) => void
   headerActions?: React.ReactNode
   titleTooltipContent?: React.ReactNode
+  renderNameAddon?: (name: string) => React.ReactNode
 }) {
   const [query, setQuery] = useState("")
   const trimmedQuery = query.trim()
@@ -388,12 +391,15 @@ function SearchableRankingPanel({
                   <span className="w-7 shrink-0 text-right text-[10px] text-muted-foreground">{rank}</span>
                   <div className="min-w-0 flex-1">
                     <div className="mb-0.5 flex items-center justify-between gap-2">
-                      <span
-                        title={item.name}
-                        className={`min-w-0 truncate text-xs text-foreground ${labelClassName ?? ""}`}
-                      >
-                        {highlightRankingName(item.name, trimmedQuery)}
-                      </span>
+                      <div className="flex min-w-0 items-center gap-1.5">
+                        <span
+                          title={item.name}
+                          className={`min-w-0 truncate text-xs text-foreground ${labelClassName ?? ""}`}
+                        >
+                          {highlightRankingName(item.name, trimmedQuery)}
+                        </span>
+                        {renderNameAddon?.(item.name)}
+                      </div>
                       <span className="shrink-0 text-[11px] text-muted-foreground">{item.count}</span>
                     </div>
                     <div className="h-1 overflow-hidden rounded-full bg-muted">
@@ -449,12 +455,14 @@ function SkillAdoptionRankingPanel({
   data,
   activeTab,
   onTabChange,
-  onSkillClick
+  onSkillClick,
+  marketSkillKeys
 }: {
   data: OverviewData
   activeTab: SkillRankingTab
   onTabChange: (tab: SkillRankingTab) => void
   onSkillClick?: (skill: string) => void
+  marketSkillKeys: Set<string>
 }) {
   const [query, setQuery] = useState("")
   const [sortKey, setSortKey] = useState<SkillAdoptionSortKey>(DEFAULT_SKILL_ADOPTION_SORT)
@@ -536,9 +544,12 @@ function SkillAdoptionRankingPanel({
                   <span className="w-7 shrink-0 text-right text-[10px] text-muted-foreground">{rank}</span>
                   <div className="min-w-0 flex-1">
                     <div className="mb-0.5 flex items-center justify-between gap-2">
-                      <span title={item.skill} className="min-w-0 truncate text-xs text-foreground">
-                        {highlightRankingName(item.skill, trimmedQuery)}
-                      </span>
+                      <div className="flex min-w-0 items-center gap-1.5">
+                        <span title={item.skill} className="min-w-0 truncate text-xs text-foreground">
+                          {highlightRankingName(item.skill, trimmedQuery)}
+                        </span>
+                        {hasMarketSkill(marketSkillKeys, item.skill) ? <MarketSkillTag /> : null}
+                      </div>
                       <span className="shrink-0 text-[11px] font-medium text-foreground">
                         {formatSkillAdoptionSortValue(item, sortKey)}
                       </span>
@@ -591,10 +602,12 @@ function SkillAdoptionRankingPanel({
 
 function SkillRankingPanel({
   data,
-  onSkillClick
+  onSkillClick,
+  marketSkillKeys
 }: {
   data: OverviewData
   onSkillClick?: (skill: string) => void
+  marketSkillKeys: Set<string>
 }) {
   const [activeTab, setActiveTab] = useState<SkillRankingTab>("usage")
   if (activeTab === "adoption") {
@@ -604,6 +617,7 @@ function SkillRankingPanel({
         activeTab={activeTab}
         onTabChange={setActiveTab}
         onSkillClick={onSkillClick}
+        marketSkillKeys={marketSkillKeys}
       />
     )
   }
@@ -630,7 +644,16 @@ function SkillRankingPanel({
       onItemClick={onSkillClick}
       headerActions={<SkillRankingTabs activeTab={activeTab} onTabChange={setActiveTab} />}
       titleTooltipContent={<SkillUsageTooltip />}
+      renderNameAddon={(name) => hasMarketSkill(marketSkillKeys, name) ? <MarketSkillTag /> : null}
     />
+  )
+}
+
+function MarketSkillTag(): React.JSX.Element {
+  return (
+    <span className="shrink-0 rounded-sm border border-emerald-200 bg-emerald-50 px-1 py-px text-[9px] font-medium leading-3 text-emerald-700">
+      市场
+    </span>
   )
 }
 
@@ -692,11 +715,13 @@ function ToolRankingPanel({ data }: { data: OverviewData }) {
 export function OverviewPanel({
   data,
   loading,
-  onSkillClick
+  onSkillClick,
+  marketSkillKeys = new Set()
 }: {
   data: OverviewData | null
   loading: boolean
   onSkillClick?: (skill: string) => void
+  marketSkillKeys?: Set<string>
 }) {
   if (loading && !data) {
     return <div className="text-sm text-muted-foreground py-8 text-center">加载中...</div>
@@ -796,7 +821,7 @@ export function OverviewPanel({
 
       {/* Skill & Tool Top rankings */}
       <div className="grid grid-cols-2 gap-3">
-        <SkillRankingPanel data={data} onSkillClick={onSkillClick} />
+        <SkillRankingPanel data={data} onSkillClick={onSkillClick} marketSkillKeys={marketSkillKeys} />
         <ToolRankingPanel data={data} />
       </div>
 
