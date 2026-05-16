@@ -39,7 +39,8 @@ export function UserInputRequestDialog({
     onSubmit({
       requestId: request.requestId,
       answers: {},
-      submittedAt: new Date().toISOString()
+      submittedAt: new Date().toISOString(),
+      ignored: true
     })
   }, [onSubmit, request])
 

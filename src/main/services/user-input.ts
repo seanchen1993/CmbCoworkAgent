@@ -8,6 +8,7 @@ interface PendingUserInput {
   reject: (error: Error) => void
   abortSignal?: AbortSignal
   abortHandler?: () => void
+  ackTimeout?: ReturnType<typeof setTimeout>
 }
 
 interface RequestUserInputParams {
@@ -17,6 +18,18 @@ interface RequestUserInputParams {
 }
 
 const pendingUserInputs = new Map<string, PendingUserInput>()
+const pendingUserInputThreads = new Map<string, string>()
+const USER_INPUT_ACK_TIMEOUT_MS = 5_000
+
+export class UserInputRequestRejectedError extends Error {
+  readonly code: string
+
+  constructor(code: string, message: string) {
+    super(message)
+    this.name = "UserInputRequestRejectedError"
+    this.code = code
+  }
+}
 
 function getLiveWindows(): BrowserWindow[] {
   return BrowserWindow.getAllWindows().filter(
@@ -35,8 +48,14 @@ function cleanupPending(requestId: string): PendingUserInput | undefined {
   const pending = pendingUserInputs.get(requestId)
   if (!pending) return undefined
   pendingUserInputs.delete(requestId)
+  if (pendingUserInputThreads.get(pending.request.threadId) === requestId) {
+    pendingUserInputThreads.delete(pending.request.threadId)
+  }
   if (pending.abortSignal && pending.abortHandler) {
     pending.abortSignal.removeEventListener("abort", pending.abortHandler)
+  }
+  if (pending.ackTimeout) {
+    clearTimeout(pending.ackTimeout)
   }
   return pending
 }
@@ -49,7 +68,22 @@ export function requestUserInput(params: RequestUserInputParams): Promise<UserIn
 
   const windows = getLiveWindows()
   if (windows.length === 0) {
-    return Promise.reject(new Error("No renderer window is available for user input."))
+    return Promise.reject(
+      new UserInputRequestRejectedError(
+        "no_renderer_window",
+        "No renderer window is available for user input."
+      )
+    )
+  }
+
+  const existingRequestId = pendingUserInputThreads.get(threadId)
+  if (existingRequestId) {
+    return Promise.reject(
+      new UserInputRequestRejectedError(
+        "request_already_pending",
+        "A user input request is already pending for this thread. Wait for the user's response before asking another question."
+      )
+    )
   }
 
   const request: UserInputRequest = {
@@ -70,17 +104,44 @@ export function requestUserInput(params: RequestUserInputParams): Promise<UserIn
       reject(new Error("User input request was cancelled."))
     }
 
+    const ackTimeout = setTimeout(() => {
+      const pending = cleanupPending(request.requestId)
+      if (!pending) return
+      sendToThread(threadId, "cancel", {
+        requestId: request.requestId,
+        reason: "No renderer acknowledged this user input request."
+      })
+      pending.reject(
+        new UserInputRequestRejectedError(
+          "request_not_acknowledged",
+          "No renderer acknowledged this user input request. The user may not have this thread open."
+        )
+      )
+    }, USER_INPUT_ACK_TIMEOUT_MS)
+
     pendingUserInputs.set(request.requestId, {
       request,
       resolve,
       reject,
       abortSignal,
-      abortHandler
+      abortHandler,
+      ackTimeout
     })
+    pendingUserInputThreads.set(threadId, request.requestId)
 
     abortSignal?.addEventListener("abort", abortHandler, { once: true })
     sendToThread(threadId, "request", request)
   })
+}
+
+export function acknowledgeUserInputRequest(requestId: string, threadId: string): boolean {
+  const pending = pendingUserInputs.get(requestId)
+  if (!pending || pending.request.threadId !== threadId) return false
+  if (pending.ackTimeout) {
+    clearTimeout(pending.ackTimeout)
+    delete pending.ackTimeout
+  }
+  return true
 }
 
 export function submitUserInputResponse(response: UserInputResponse): boolean {

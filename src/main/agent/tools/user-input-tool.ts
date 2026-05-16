@@ -1,6 +1,6 @@
 import { tool } from "langchain"
 import { z } from "zod"
-import { requestUserInput } from "../../services/user-input"
+import { requestUserInput, UserInputRequestRejectedError } from "../../services/user-input"
 
 const optionSchema = z.object({
   label: z.string().min(1).max(80).describe("User-facing label, 1-5 words."),
@@ -56,6 +56,16 @@ export function createRequestUserInputTool(context: RequestUserInputToolContext)
           questions: input.questions,
           abortSignal: context.abortSignal
         })
+        if (response.ignored) {
+          return JSON.stringify({
+            status: "ignored",
+            requestId: response.requestId,
+            submittedAt: response.submittedAt,
+            answers: {},
+            message:
+              "The user ignored this request and did not provide answers. Do not infer or assume any option selections."
+          }, null, 2)
+        }
         return JSON.stringify({
           status: "submitted",
           requestId: response.requestId,
@@ -63,6 +73,13 @@ export function createRequestUserInputTool(context: RequestUserInputToolContext)
           answers: response.answers
         }, null, 2)
       } catch (error) {
+        if (error instanceof UserInputRequestRejectedError) {
+          return JSON.stringify({
+            status: "rejected",
+            code: error.code,
+            reason: error.message
+          }, null, 2)
+        }
         return JSON.stringify({
           status: "cancelled",
           error: error instanceof Error ? error.message : String(error)
@@ -72,7 +89,7 @@ export function createRequestUserInputTool(context: RequestUserInputToolContext)
     {
       name: "request_user_input",
       description:
-        "Request user input for one to ten short questions and wait indefinitely for the response. The UI shows each question with 2-5 choices and adds a free-form Other option automatically. Returns JSON keyed by each question id.",
+        "Request user input for one to ten short questions and wait for the response. Only one request can be pending per thread; if one is already pending or the UI cannot receive the request, this tool returns status 'rejected'. The UI shows each question with 2-5 choices and adds a free-form Other option automatically. Returns JSON keyed by each question id.",
       schema: requestUserInputSchema
     }
   )

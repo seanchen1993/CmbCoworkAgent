@@ -1305,6 +1305,8 @@ export interface CreateAgentRuntimeOptions {
   noSchedulerTool?: boolean
   /** Skip the manage_skill tool (disable skill evolution for scheduled/heartbeat agents) */
   noSkillEvolutionTool?: boolean
+  /** Enable the interactive user-input tool. Only foreground, user-invoked runs should set this. */
+  enableRequestUserInput?: boolean
   /** Load workspace AGENTS.md hierarchy into the main system prompt. */
   enableAgentsPrompt?: boolean
   /** AbortSignal — when signalled, any running child process is killed immediately. */
@@ -1655,12 +1657,14 @@ The workspace root is: ${workspacePath}`
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const extraTools: any[] = []
-  extraTools.push(
-    createRequestUserInputTool({
-      threadId: options.threadId,
-      abortSignal: options.abortSignal
-    })
-  )
+  if (options.enableRequestUserInput) {
+    extraTools.push(
+      createRequestUserInputTool({
+        threadId: options.threadId,
+        abortSignal: options.abortSignal
+      })
+    )
+  }
   if (!options.noSchedulerTool) {
     let chatxRobotChatId: string | null = null
     if (options.threadId) {

@@ -1301,6 +1301,10 @@ const api = {
     ): (() => void) => {
       const channel = `userInput:request:${threadId}`
       const handler = (_: unknown, request: UserInputRequest): void => {
+        ipcRenderer.send("userInput:ack", {
+          requestId: request.requestId,
+          threadId: request.threadId
+        })
         callback(request)
       }
       ipcRenderer.on(channel, handler)

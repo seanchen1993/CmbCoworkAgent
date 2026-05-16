@@ -572,6 +572,7 @@ export interface UserInputResponse {
   requestId: string
   answers: Record<string, UserInputAnswer>
   submittedAt?: string
+  ignored?: boolean
 }
 
 // ChatX types
