@@ -701,6 +701,8 @@ const api = {
     },
     selectCode: (): Promise<{ canceled: boolean; filePaths: string[] }> =>
       ipcRenderer.invoke("file:select-code"),
+    selectPrototypeZip: (): Promise<{ canceled: boolean; filePaths: string[] }> =>
+      ipcRenderer.invoke("file:select-prototype-zip"),
     readText: (filePath: string): Promise<{ success: boolean; filename?: string; content?: string; error?: string }> =>
       ipcRenderer.invoke("file:read-text", filePath),
     readDataUrl: (filePath: string): Promise<{ success: boolean; filename?: string; dataUrl?: string; size?: number; error?: string }> =>
@@ -1816,6 +1818,17 @@ const api = {
         html?: string
         finalUrl?: string
         title?: string
+        error?: string
+      }>,
+    importPrototypeZip: (
+      filePath: string
+    ): Promise<{ success: boolean; html?: string; title?: string; imageCount?: number; metadataCount?: number; error?: string }> =>
+      ipcRenderer.invoke("design:import-prototype-zip", { filePath }) as Promise<{
+        success: boolean
+        html?: string
+        title?: string
+        imageCount?: number
+        metadataCount?: number
         error?: string
       }>,
     syncContextFiles: (params: {

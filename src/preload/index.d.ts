@@ -455,6 +455,7 @@ interface CustomAPI {
     select: () => Promise<{ canceled: boolean; filePaths: string[] }>
     supportedExtensions: () => Promise<string[]>
     selectCode: () => Promise<{ canceled: boolean; filePaths: string[] }>
+    selectPrototypeZip: () => Promise<{ canceled: boolean; filePaths: string[] }>
     readText: (
       filePath: string
     ) => Promise<{ success: boolean; filename?: string; content?: string; error?: string }>
@@ -709,6 +710,9 @@ interface CustomAPI {
     importFromUrl: (
       url: string
     ) => Promise<{ success: boolean; html?: string; finalUrl?: string; title?: string; error?: string }>
+    importPrototypeZip: (
+      filePath: string
+    ) => Promise<{ success: boolean; html?: string; title?: string; imageCount?: number; metadataCount?: number; error?: string }>
     syncContextFiles: (params: {
       workspacePath?: string
       designSessionId?: string

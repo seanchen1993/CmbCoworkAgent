@@ -40,7 +40,7 @@ export interface QuestionDef {
 
 export type RightPanelTab = "design" | "questions"
 export type GenerationState = "idle" | "asking" | "questions_ready" | "generating" | "done" | "error"
-export type DesignSessionKind = "prompt" | "import_url" | "import_html"
+export type DesignSessionKind = "prompt" | "import_url" | "import_html" | "prototype_zip"
 export type AnswerValue = string | string[]
 
 export interface VariationItem {

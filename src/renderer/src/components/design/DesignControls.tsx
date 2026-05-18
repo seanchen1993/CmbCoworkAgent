@@ -10,12 +10,14 @@ export function EmptyState({
   onAttachLink,
   onImportUrl,
   onImportHtml,
+  onImportPrototypeZip,
 }: {
   onUploadScreenshot: () => void
   onAttachCode: () => void
   onAttachLink: () => void
   onImportUrl: () => void
   onImportHtml: () => void
+  onImportPrototypeZip: () => void
 }) {
   return (
     <div style={S.emptyState}>
@@ -24,6 +26,7 @@ export function EmptyState({
       <div style={S.contextCards}>
         <ContextCard icon="🌐" label="通过链接还原页面" onClick={onImportUrl} />
         <ContextCard icon="📄" label="导入 HTML 文件" onClick={onImportHtml} />
+        <ContextCard icon="📦" label="上传原型图压缩包" onClick={onImportPrototypeZip} />
         <ContextCard icon="🖼️" label="上传截图" onClick={onUploadScreenshot} />
         <ContextCard icon="🗂️" label="关联代码" onClick={onAttachCode} />
         <ContextCard icon="🔗" label="通过链接关联设计图" onClick={onAttachLink} />

@@ -75,6 +75,8 @@ function getSessionKindLabel(kind: DesignSessionKind | DesignSourceInfo["kind"] 
       return "链接还原"
     case "import_html":
       return "HTML 导入"
+    case "prototype_zip":
+      return "原型导入"
     default:
       return "新设计"
   }
@@ -1448,7 +1450,7 @@ export function DesignView(): React.JSX.Element {
   const [linkModalOpen, setLinkModalOpen] = useState(false)
   const [linkModalMode, setLinkModalMode] = useState<"reference" | "import">("reference")
   const [linkModalText, setLinkModalText] = useState("")
-  const [importingSource, setImportingSource] = useState<null | "url" | "html">(null)
+  const [importingSource, setImportingSource] = useState<null | "url" | "html" | "prototype_zip">(null)
   const [exportChoice, setExportChoice] = useState<{ html: string; artifactPath: string; relatedFileCount: number } | null>(null)
   const [exportingPackage, setExportingPackage] = useState(false)
   // Toast notifications
@@ -1943,6 +1945,58 @@ export function DesignView(): React.JSX.Element {
       setImportingSource(null)
     }
   }, [ensureWorkspaceSelected, showToast, loadImportedHtmlFromFile, createSession, currentSessionId, applyImportedDesign])
+
+  const handleImportPrototypeZip = useCallback(async (source: "gallery" | "session") => {
+    const ready = await ensureWorkspaceSelected("导入原型图压缩包")
+    if (!ready) return
+
+    setImportingSource("prototype_zip")
+    try {
+      const picked = await window.api.file.selectPrototypeZip()
+      if (picked.canceled || picked.filePaths.length === 0) return
+
+      const zipPath = picked.filePaths.find((filePath) => /\.zip$/i.test(filePath))
+      if (!zipPath) {
+        showToast("请选择 .zip 压缩包")
+        return
+      }
+
+      const imported = await window.api.design.importPrototypeZip(zipPath)
+      if (!imported.success || !imported.html) {
+        throw new Error(imported.error || "解析原型图压缩包失败")
+      }
+
+      const label = imported.title || getPathName(zipPath) || "Pixso 原型"
+      const sessionId = source === "gallery"
+        ? createSession({
+            title: label,
+            kind: "prototype_zip",
+            sourceLabel: label,
+          })
+        : (currentSessionId ?? createSession({
+            title: label,
+            kind: "prototype_zip",
+            sourceLabel: label,
+          }))
+
+      applyImportedDesign({
+        sessionId,
+        html: imported.html,
+        sourceInfo: {
+          kind: "prototype_zip",
+          label,
+          detail: `${zipPath}${imported.imageCount ? ` · ${imported.imageCount} 张图片` : ""}`,
+        },
+        userMessage: `导入 Pixso 原型图压缩包：${label}`,
+      })
+      setCreateModalOpen(false)
+      showToast(`已生成原型 HTML：${imported.imageCount ?? 0} 张图片`)
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "导入原型图压缩包失败")
+    } finally {
+      setImportingSource(null)
+    }
+  }, [ensureWorkspaceSelected, showToast, createSession, currentSessionId, applyImportedDesign])
 
   const handleImportUrl = useCallback(async (rawUrl: string, source: "gallery" | "session") => {
     const ready = await ensureWorkspaceSelected("导入链接页面")
@@ -3541,6 +3595,7 @@ ${noteLines || "无"}${variantNote}`
           }}
           onImportUrl={() => { void openImportUrlModal() }}
           onImportHtml={() => { void handleImportHtmlFile("gallery") }}
+          onImportPrototypeZip={() => { void handleImportPrototypeZip("gallery") }}
           onClose={() => setCreateModalOpen(false)}
         />
         <LinkModal
@@ -3582,6 +3637,7 @@ ${noteLines || "无"}${variantNote}`
         }}
         onImportUrl={() => { void openImportUrlModal() }}
         onImportHtml={() => { void handleImportHtmlFile("session") }}
+        onImportPrototypeZip={() => { void handleImportPrototypeZip("session") }}
         onClose={() => setCreateModalOpen(false)}
       />
       {/* Code & Link modals — rendered at root so they overlay everything */}
@@ -3730,6 +3786,7 @@ ${noteLines || "无"}${variantNote}`
                 onAttachLink={openReferenceLinkModal}
                 onImportUrl={openImportUrlModal}
                 onImportHtml={() => { void handleImportHtmlFile("session") }}
+                onImportPrototypeZip={() => { void handleImportPrototypeZip("session") }}
               />
             ) : (
               <div ref={messageListRef} style={S.messageList}>

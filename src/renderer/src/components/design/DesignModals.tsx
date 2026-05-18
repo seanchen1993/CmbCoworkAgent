@@ -7,16 +7,18 @@ export function CreateDesignModal({
   onCreateBlank,
   onImportUrl,
   onImportHtml,
+  onImportPrototypeZip,
   onClose,
 }: {
   open: boolean
-  loadingKind: "url" | "html" | null
+  loadingKind: "url" | "html" | "prototype_zip" | null
   workspacePath: string | null
   workspaceLoading: boolean
   onSelectWorkspace: () => void
   onCreateBlank: () => void
   onImportUrl: () => void
   onImportHtml: () => void
+  onImportPrototypeZip: () => void
   onClose: () => void
 }) {
   if (!open) return null
@@ -26,7 +28,7 @@ export function CreateDesignModal({
       onClick={onClose}
     >
       <div
-        style={{ background: "#fff", borderRadius: 16, padding: 24, width: 520, display: "flex", flexDirection: "column", gap: 14, boxShadow: "0 8px 40px rgba(0,0,0,0.18)" }}
+        style={{ background: "#fff", borderRadius: 16, padding: 24, width: 640, maxWidth: "calc(100vw - 40px)", display: "flex", flexDirection: "column", gap: 14, boxShadow: "0 8px 40px rgba(0,0,0,0.18)" }}
         onClick={(e) => e.stopPropagation()}
       >
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -64,7 +66,7 @@ export function CreateDesignModal({
                 ? "选择中..."
                 : workspacePath
                   ? workspacePath
-                  : "导入链接 / HTML 前需要先选择工作目录"}
+                  : "导入链接 / HTML / 原型压缩包前需要先选择工作目录"}
             </div>
           </div>
           <button
@@ -87,7 +89,7 @@ export function CreateDesignModal({
             {workspacePath ? "切换目录" : "选择目录"}
           </button>
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 12 }}>
           <button
             onClick={onCreateBlank}
             style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 8, padding: "16px 14px", borderRadius: 14, border: "1px solid #e0ded8", background: "#faf9f6", cursor: "pointer", textAlign: "left", fontFamily: "inherit" }}
@@ -113,6 +115,15 @@ export function CreateDesignModal({
             <span style={{ fontSize: 20 }}>{loadingKind === "html" ? "⏳" : "📄"}</span>
             <span style={{ fontSize: 14, fontWeight: 700, color: "#1a1a1a" }}>导入 HTML</span>
             <span style={{ fontSize: 12, color: "#8a8a8a", lineHeight: 1.6 }}>读取本地 HTML，并尽量保留同级依赖与资源引用。</span>
+          </button>
+          <button
+            onClick={onImportPrototypeZip}
+            disabled={loadingKind !== null}
+            style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 8, padding: "16px 14px", borderRadius: 14, border: "1px solid #e0ded8", background: "#f3fbf6", cursor: loadingKind ? "default" : "pointer", textAlign: "left", fontFamily: "inherit", opacity: loadingKind && loadingKind !== "prototype_zip" ? 0.6 : 1 }}
+          >
+            <span style={{ fontSize: 20 }}>{loadingKind === "prototype_zip" ? "⏳" : "📦"}</span>
+            <span style={{ fontSize: 14, fontWeight: 700, color: "#1a1a1a" }}>原型压缩包</span>
+            <span style={{ fontSize: 12, color: "#8a8a8a", lineHeight: 1.6 }}>解析 Pixso 导出的图片与跳转信息，生成可预览 HTML。</span>
           </button>
         </div>
       </div>

@@ -3092,6 +3092,23 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     return { canceled: false, filePaths: result.filePaths }
   })
 
+  ipcMain.handle("file:select-prototype-zip", async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) return { canceled: true, filePaths: [] }
+    const result = await dialog.showOpenDialog(win, {
+      properties: ["openFile"],
+      title: "选择 Pixso 原型图压缩包",
+      filters: [
+        { name: "ZIP 压缩包", extensions: ["zip"] },
+        { name: "所有文件", extensions: ["*"] },
+      ]
+    })
+    if (result.canceled || result.filePaths.length === 0) {
+      return { canceled: true, filePaths: [] }
+    }
+    return { canceled: false, filePaths: result.filePaths }
+  })
+
   // Read any file as plain UTF-8 text (for code context)
   ipcMain.handle(
     "file:read-text",
