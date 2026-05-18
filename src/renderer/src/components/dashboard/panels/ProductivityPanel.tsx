@@ -157,7 +157,7 @@ export function ProductivityPanel({
                 fill="#3b82f6"
                 radius={[4, 4, 0, 0]}
                 cursor={onCommitBucketClick ? "pointer" : undefined}
-                activeBar={onCommitBucketClick ? { fill: "#2563eb", radius: [4, 4, 0, 0] } : false}
+                activeBar={onCommitBucketClick ? { fill: "#2563eb" } : false}
                 onClick={(entry: unknown) => {
                   const bucket = getCommitBucketPayload(entry)
                   if (!bucket) return

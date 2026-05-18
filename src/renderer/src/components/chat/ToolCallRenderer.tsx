@@ -20,7 +20,7 @@ import { useState } from "react"
 import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
 import { getToolLabel } from "@/lib/tool-labels"
-import type { ToolCall, Todo } from "@/types"
+import type { ToolCall, Todo, ToolCallStatus } from "@/types"
 import { ToolCallErrorBoundary, RenderProbe } from "./ToolCallErrorBoundary"
 
 // Module-level sentinel so identity is stable across renders. Returned by
@@ -46,6 +46,7 @@ interface ToolCallRendererProps {
   toolCall: ToolCall
   result?: string | unknown
   isError?: boolean
+  status?: ToolCallStatus
   needsApproval?: boolean
   showApprovalButtons?: boolean
   onApprovalDecision?: (
@@ -76,6 +77,32 @@ const TOOL_ICONS: Record<string, React.ComponentType<{ className?: string }>> = 
 
 // Tools whose results are shown in the UI panels and don't need verbose display
 const PANEL_SYNCED_TOOLS = new Set(["write_todos"])
+
+function getStatusBadge(
+  status: ToolCallStatus
+): {
+  variant: "outline" | "warning" | "critical" | "nominal"
+  label: string
+  className?: string
+} {
+  switch (status) {
+    case "completed":
+      return { variant: "nominal", label: "OK" }
+    case "failed":
+      return { variant: "critical", label: "ERROR" }
+    case "queued":
+      return { variant: "outline", label: "QUEUED" }
+    case "running":
+      return { variant: "outline", label: "RUNNING", className: "animate-pulse" }
+    case "rejected":
+      return { variant: "warning", label: "REJECTED" }
+    case "interrupted":
+      return { variant: "warning", label: "INTERRUPTED" }
+    case "awaiting_approval":
+    default:
+      return { variant: "warning", label: "APPROVAL" }
+  }
+}
 
 function safeStringify(value: unknown): string {
   const seen = new WeakSet<object>()
@@ -359,6 +386,7 @@ export function ToolCallRenderer({
   toolCall,
   result,
   isError,
+  status,
   needsApproval,
   showApprovalButtons = true,
   onApprovalDecision,
@@ -381,6 +409,16 @@ export function ToolCallRenderer({
   const Icon = TOOL_ICONS[toolCall.name] || Terminal
   const label = getToolLabel(toolCall.name)
   const isPanelSynced = PANEL_SYNCED_TOOLS.has(toolCall.name)
+  const effectiveStatus: ToolCallStatus =
+    status ||
+    (needsApproval
+      ? "awaiting_approval"
+      : result !== undefined
+        ? (isError ? "failed" : "completed")
+        : isStreaming
+          ? "running"
+          : "interrupted")
+  const statusBadge = getStatusBadge(effectiveStatus)
 
   const handleReject = (e: React.MouseEvent): void => {
     e.stopPropagation()
@@ -796,21 +834,12 @@ export function ToolCallRenderer({
           </Badge>
         )}
 
-        {!needsApproval && result === undefined && isStreaming && (
-          <Badge variant="outline" className="ml-auto shrink-0 animate-pulse">
-            RUNNING
-          </Badge>
-        )}
-
-        {!needsApproval && result === undefined && !isStreaming && (
-          <Badge variant="warning" className="ml-auto shrink-0">
-            INTERRUPTED
-          </Badge>
-        )}
-
-        {result !== undefined && !needsApproval && (
-          <Badge variant={isError ? "critical" : "nominal"} className="ml-auto shrink-0">
-            {isError ? "ERROR" : "OK"}
+        {!needsApproval && (
+          <Badge
+            variant={statusBadge.variant}
+            className={cn("ml-auto shrink-0", statusBadge.className)}
+          >
+            {statusBadge.label}
           </Badge>
         )}
 

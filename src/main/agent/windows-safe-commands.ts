@@ -1,215 +1,6 @@
-import { spawnSync } from "node:child_process"
-import { existsSync } from "node:fs"
 import path from "node:path"
 
 export type WindowsShellKind = "powershell" | "cmd" | "bash" | "unknown"
-
-const POWERSHELL_PARSER_SCRIPT = String.raw`$ErrorActionPreference = 'Stop'
-
-$payload = $env:CODEX_POWERSHELL_PAYLOAD
-if ([string]::IsNullOrEmpty($payload)) {
-    Write-Output '{"status":"parse_failed"}'
-    exit 0
-}
-
-try {
-    $source =
-        [System.Text.Encoding]::Unicode.GetString(
-            [System.Convert]::FromBase64String($payload)
-        )
-} catch {
-    Write-Output '{"status":"parse_failed"}'
-    exit 0
-}
-
-$tokens = $null
-$errors = $null
-
-$ast = $null
-try {
-    $ast = [System.Management.Automation.Language.Parser]::ParseInput(
-        $source,
-        [ref]$tokens,
-        [ref]$errors
-    )
-} catch {
-    Write-Output '{"status":"parse_failed"}'
-    exit 0
-}
-
-if ($errors.Count -gt 0) {
-    Write-Output '{"status":"parse_errors"}'
-    exit 0
-}
-
-function Convert-CommandElement {
-    param($element)
-
-    if ($element -is [System.Management.Automation.Language.StringConstantExpressionAst]) {
-        return @($element.Value)
-    }
-
-    if ($element -is [System.Management.Automation.Language.ExpandableStringExpressionAst]) {
-        if ($element.NestedExpressions.Count -gt 0) {
-            return $null
-        }
-        return @($element.Value)
-    }
-
-    if ($element -is [System.Management.Automation.Language.ConstantExpressionAst]) {
-        return @($element.Value.ToString())
-    }
-
-    if ($element -is [System.Management.Automation.Language.CommandParameterAst]) {
-        if ($element.Argument -eq $null) {
-            return @('-' + $element.ParameterName)
-        }
-
-        if ($element.Argument -is [System.Management.Automation.Language.StringConstantExpressionAst]) {
-            return @('-' + $element.ParameterName, $element.Argument.Value)
-        }
-
-        if ($element.Argument -is [System.Management.Automation.Language.ConstantExpressionAst]) {
-            return @('-' + $element.ParameterName, $element.Argument.Value.ToString())
-        }
-
-        return $null
-    }
-
-    return $null
-}
-
-function Convert-PipelineElement {
-    param($element)
-
-    if ($element -is [System.Management.Automation.Language.CommandAst]) {
-        foreach ($redir in $element.Redirections) {
-            if ($redir -isnot [System.Management.Automation.Language.MergingRedirectionAst]) {
-                return $null
-            }
-        }
-
-        if (
-            $element.InvocationOperator -ne $null -and
-            $element.InvocationOperator -ne [System.Management.Automation.Language.TokenKind]::Unknown
-        ) {
-            return $null
-        }
-
-        $parts = @()
-        foreach ($commandElement in $element.CommandElements) {
-            $converted = Convert-CommandElement $commandElement
-            if ($converted -eq $null) {
-                return $null
-            }
-            $parts += $converted
-        }
-        return $parts
-    }
-
-    if ($element -is [System.Management.Automation.Language.CommandExpressionAst]) {
-        foreach ($redir in $element.Redirections) {
-            if ($redir -isnot [System.Management.Automation.Language.MergingRedirectionAst]) {
-                return $null
-            }
-        }
-
-        if ($element.Expression -is [System.Management.Automation.Language.ParenExpressionAst]) {
-            $innerPipeline = $element.Expression.Pipeline
-            if ($innerPipeline -and $innerPipeline.PipelineElements.Count -eq 1) {
-                return Convert-PipelineElement $innerPipeline.PipelineElements[0]
-            }
-        }
-
-        return $null
-    }
-
-    return $null
-}
-
-function Add-CommandsFromPipelineAst {
-    param($pipeline, $commands)
-
-    if ($pipeline.PipelineElements.Count -eq 0) {
-        return $false
-    }
-
-    foreach ($element in $pipeline.PipelineElements) {
-        $words = Convert-PipelineElement $element
-        if ($words -eq $null -or $words.Count -eq 0) {
-            return $false
-        }
-        $null = $commands.Add($words)
-    }
-
-    return $true
-}
-
-function Add-CommandsFromPipelineChain {
-    param($chain, $commands)
-
-    if (-not (Add-CommandsFromPipelineBase $chain.LhsPipelineChain $commands)) {
-        return $false
-    }
-
-    if (-not (Add-CommandsFromPipelineAst $chain.RhsPipeline $commands)) {
-        return $false
-    }
-
-    return $true
-}
-
-function Add-CommandsFromPipelineBase {
-    param($pipeline, $commands)
-
-    if ($pipeline -is [System.Management.Automation.Language.PipelineAst]) {
-        return Add-CommandsFromPipelineAst $pipeline $commands
-    }
-
-    if ($pipeline -is [System.Management.Automation.Language.PipelineChainAst]) {
-        return Add-CommandsFromPipelineChain $pipeline $commands
-    }
-
-    return $false
-}
-
-$commands = [System.Collections.ArrayList]::new()
-
-foreach ($statement in $ast.EndBlock.Statements) {
-    if (-not (Add-CommandsFromPipelineBase $statement $commands)) {
-        $commands = $null
-        break
-    }
-}
-
-if ($commands -ne $null) {
-    $normalized = [System.Collections.ArrayList]::new()
-    foreach ($cmd in $commands) {
-        if ($cmd -is [string]) {
-            $null = $normalized.Add(@($cmd))
-            continue
-        }
-
-        if ($cmd -is [System.Array] -or $cmd -is [System.Collections.IEnumerable]) {
-            $null = $normalized.Add(@($cmd))
-            continue
-        }
-
-        $normalized = $null
-        break
-    }
-
-    $commands = $normalized
-}
-
-$result = if ($commands -eq $null) {
-    @{ status = 'unsupported' }
-} else {
-    @{ status = 'ok'; commands = $commands }
-}
-
-,$result | ConvertTo-Json -Depth 3
-`
 
 const SAFE_GIT_SUBCOMMANDS = new Set(["status", "log", "show", "diff", "cat-file", "branch"])
 const SAFE_POWERSHELL_COMMANDS = new Set([
@@ -257,9 +48,17 @@ const UNSAFE_GIT_FLAGS = new Set(["--output", "--ext-diff", "--textconv", "--exe
 const GIT_GLOBAL_OPTIONS_WITH_VALUE = new Set([
   "-c", "--config-env", "--exec-path", "--git-dir", "--namespace", "--super-prefix", "--work-tree"
 ])
-
-let cachedParserScriptBase64: string | null = null
-let cachedPowerShellExecutable: string | null | undefined
+const SAFE_POWERSHELL_VARIABLES = new Set([
+  "$null",
+  "$true",
+  "$false",
+  "$_",
+  "$psitem",
+  "$pwd",
+  "$home",
+  "$psscriptroot",
+  "$lastexitcode"
+])
 
 export function isKnownSafeWindowsCommand(command: string, shellKind: WindowsShellKind): boolean {
   if (process.platform !== "win32") return false
@@ -268,12 +67,9 @@ export function isKnownSafeWindowsCommand(command: string, shellKind: WindowsShe
   if (!trimmed) return false
 
   if (shellKind === "powershell") {
-    const systemPowerShell = findPowerShellExecutable()
-    if (systemPowerShell) {
-      const commands = parsePowerShellScript(systemPowerShell, trimmed)
-      if (commands && commands.every((cmd) => isSafePowerShellCommand(cmd))) {
-        return true
-      }
+    const commands = parsePowerShellScript(trimmed)
+    if (commands && commands.every((cmd) => isSafePowerShellCommand(cmd))) {
+      return true
     }
   }
 
@@ -289,10 +85,10 @@ export function isKnownSafeWindowsCommand(command: string, shellKind: WindowsShe
 function tryParsePowerShellCommandSequence(command: string[]): string[][] | null {
   const [exe, ...rest] = command
   if (!isPowerShellExecutable(exe)) return null
-  return parsePowerShellInvocation(exe, rest)
+  return parsePowerShellInvocation(rest)
 }
 
-function parsePowerShellInvocation(executable: string, args: string[]): string[][] | null {
+function parsePowerShellInvocation(args: string[]): string[][] | null {
   if (args.length === 0) return null
 
   let index = 0
@@ -306,13 +102,13 @@ function parsePowerShellInvocation(executable: string, args: string[]): string[]
       case lower === "-c": {
         const script = args[index + 1]
         if (!script || index + 2 !== args.length) return null
-        return parsePowerShellScript(executable, script)
+        return parsePowerShellScript(script)
       }
       case lower.startsWith("-command:"):
       case lower.startsWith("/command:"): {
         if (index + 1 !== args.length) return null
         const script = arg.split(/:(.*)/s)[1]
-        return script ? parsePowerShellScript(executable, script) : null
+        return script ? parsePowerShellScript(script) : null
       }
       case lower === "-nologo":
       case lower === "-noprofile":
@@ -331,53 +127,15 @@ function parsePowerShellInvocation(executable: string, args: string[]): string[]
         return null
       default:
         if (lower.startsWith("-")) return null
-        return parsePowerShellScript(executable, joinArgumentsAsScript(args.slice(index)))
+        return parsePowerShellScript(joinArgumentsAsScript(args.slice(index)))
     }
   }
 
   return null
 }
 
-function parsePowerShellScript(executable: string, script: string): string[][] | null {
-  const parserExecutable = isPowerShellExecutable(executable) ? executable : findPowerShellExecutable()
-  if (!parserExecutable) return parsePowerShellScriptConservatively(script)
-
-  const encodedParserScript = getEncodedParserScript()
-  const encodedPayload = encodePowerShellBase64(script)
-  const output = spawnSync(
-    parserExecutable,
-    ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encodedParserScript],
-    {
-      encoding: "utf8",
-      windowsHide: true,
-      env: { ...process.env, CODEX_POWERSHELL_PAYLOAD: encodedPayload }
-    }
-  )
-
-  if (output.error || output.status !== 0 || !output.stdout) {
-    return parsePowerShellScriptConservatively(script)
-  }
-
-  try {
-    const parsed = JSON.parse(output.stdout.trim()) as {
-      status?: string
-      commands?: unknown
-    }
-    if (parsed.status !== "ok" || !Array.isArray(parsed.commands) || parsed.commands.length === 0) {
-      return parsePowerShellScriptConservatively(script)
-    }
-
-    const commands: string[][] = []
-    for (const command of parsed.commands) {
-      if (!Array.isArray(command) || command.length === 0 || command.some((word) => typeof word !== "string" || !word)) {
-        return parsePowerShellScriptConservatively(script)
-      }
-      commands.push(command as string[])
-    }
-    return commands
-  } catch {
-    return parsePowerShellScriptConservatively(script)
-  }
+function parsePowerShellScript(script: string): string[][] | null {
+  return parsePowerShellScriptConservatively(script)
 }
 
 function isSafePowerShellCommand(words: string[]): boolean {
@@ -619,51 +377,6 @@ function isPowerShellExecutable(executable: string): boolean {
   return ["powershell", "powershell.exe", "pwsh", "pwsh.exe"].includes(executableName)
 }
 
-function findPowerShellExecutable(): string | null {
-  if (cachedPowerShellExecutable !== undefined) {
-    return cachedPowerShellExecutable
-  }
-
-  for (const executable of ["pwsh", "powershell"]) {
-    const resolved = whichSync(executable)
-    if (resolved) {
-      cachedPowerShellExecutable = resolved
-      return resolved
-    }
-  }
-
-  cachedPowerShellExecutable = null
-  return null
-}
-
-function whichSync(name: string): string | null {
-  const pathEnv = process.env.PATH || ""
-  const pathExt = (process.env.PATHEXT || ".COM;.EXE;.BAT;.CMD").split(";")
-
-  for (const dir of pathEnv.split(";")) {
-    if (!dir) continue
-    for (const ext of ["", ...pathExt]) {
-      const candidate = path.join(dir, ext ? `${name}${ext}` : name)
-      if (existsSync(candidate)) {
-        return candidate
-      }
-    }
-  }
-
-  return null
-}
-
-function getEncodedParserScript(): string {
-  if (!cachedParserScriptBase64) {
-    cachedParserScriptBase64 = encodePowerShellBase64(POWERSHELL_PARSER_SCRIPT)
-  }
-  return cachedParserScriptBase64
-}
-
-function encodePowerShellBase64(script: string): string {
-  return Buffer.from(script, "utf16le").toString("base64")
-}
-
 function joinArgumentsAsScript(args: string[]): string {
   return args.map((arg, index) => {
     if (index === 0) return arg
@@ -678,12 +391,15 @@ function quoteArgument(arg: string): string {
 }
 
 function parsePowerShellScriptConservatively(script: string): string[][] | null {
-  if (!script.trim()) return null
-  if (script.includes("$(") || script.includes("${") || script.includes("@(") || script.includes("`")) {
+  const normalizedScript = stripPowerShellDiscardRedirects(
+    normalizePowerShellLineContinuations(script)
+  )
+  if (!normalizedScript.trim()) return null
+  if (normalizedScript.includes("$(") || normalizedScript.includes("${") || normalizedScript.includes("@(") || normalizedScript.includes("`")) {
     return null
   }
 
-  const segments = splitPowerShellScript(script)
+  const segments = splitPowerShellScript(normalizedScript)
   if (!segments || segments.length === 0) return null
 
   const commands: string[][] = []
@@ -693,7 +409,7 @@ function parsePowerShellScriptConservatively(script: string): string[][] | null 
 
     const tokens = tokenizeCommand(normalizedSegment)
     if (!tokens || tokens.length === 0) return null
-    if (tokens.some((token) => token.includes("$") || token.includes("`") || token.includes("@(") || token.includes("$("))) {
+    if (tokens.some((token) => !isAllowedPowerShellToken(token))) {
       return null
     }
 
@@ -701,6 +417,27 @@ function parsePowerShellScriptConservatively(script: string): string[][] | null 
   }
 
   return commands
+}
+
+function normalizePowerShellLineContinuations(script: string): string {
+  return script.replace(/`\r?\n/g, " ")
+}
+
+function stripPowerShellDiscardRedirects(script: string): string {
+  return script.replace(/(^|[\s;|&])(?:\d+|\*)?>\s*\$null\b/gi, "$1")
+}
+
+function isAllowedPowerShellToken(token: string): boolean {
+  if (token.includes("`") || token.includes("@(") || token.includes("$(") || token.includes("${")) {
+    return false
+  }
+  const variableMatches = token.match(/\$[A-Za-z_][A-Za-z0-9_]*|\$_/g) ?? []
+  for (const match of variableMatches) {
+    if (!SAFE_POWERSHELL_VARIABLES.has(match.toLowerCase())) {
+      return false
+    }
+  }
+  return true
 }
 
 function splitPowerShellScript(script: string): string[] | null {
@@ -745,10 +482,10 @@ function splitPowerShellScript(script: string): string[] | null {
       // Allow stream-merge redirections like 2>&1; reject file redirections
       if (char === ">") {
         const prev = index > 0 ? script[index - 1] : ""
-        if (/\d/.test(prev) && next === "&") {
+        if ((/\d/.test(prev) || prev === "*") && next === "&") {
           const afterAmp = script[index + 2] ?? ""
           if (/\d/.test(afterAmp)) {
-            // N>&M pattern (e.g. 2>&1) — safe stream merge, skip it
+            // N>&M / *>&M pattern (e.g. 2>&1 or *>&1) — safe stream merge, skip it
             current += char + next + afterAmp
             index += 2
             continue

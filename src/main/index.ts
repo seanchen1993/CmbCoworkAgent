@@ -150,7 +150,7 @@ import { setTraceReporter } from "./agent/trace/collector"
 import { CloudTraceReporter } from "./agent/trace/cloud-reporter"
 import { setEventReporter, HttpEventReporter } from "./services/event-reporter"
 import { initializeAdoptionTracker, shutdownAdoptionTracker } from "./services/adoption-tracker"
-import { initializeDatabase, flush } from "./db"
+import { getAllThreads, initializeDatabase, flush } from "./db"
 import { startScheduler, stopScheduler } from "./services/scheduler"
 import { startHeartbeat, stopHeartbeat } from "./services/heartbeat"
 import { startChatX, stopChatX } from "./services/chatx"
@@ -168,6 +168,7 @@ import { configurePetWindow, createPetWindow, registerPetHandlers } from "./pet"
 
 let mainWindow: BrowserWindow | null = null
 let loginWindow: BrowserWindow | null = null
+const STARTUP_SANDBOX_PREWARM_WORKSPACE_LIMIT = 5
 
 // ── Keep Awake ──
 let keepAwakeBlockerId: number | null = null
@@ -356,6 +357,36 @@ function ensureMainWindowVisible(): BrowserWindow | null {
   return mainWindow
 }
 
+function collectRecentWorkspacePathsForSandboxPrewarm(): string[] {
+  const workspaces: string[] = []
+  const seen = new Set<string>()
+
+  for (const thread of getAllThreads().slice(0, STARTUP_SANDBOX_PREWARM_WORKSPACE_LIMIT)) {
+    if (!thread.metadata) continue
+    try {
+      const metadata = JSON.parse(thread.metadata)
+      const workspacePath = typeof metadata.workspacePath === "string" ? metadata.workspacePath.trim() : ""
+      if (!workspacePath) continue
+      const key = workspacePath.toLowerCase()
+      if (seen.has(key)) continue
+      seen.add(key)
+      workspaces.push(workspacePath)
+    } catch {
+      // Ignore malformed metadata and keep scanning recent threads.
+    }
+  }
+
+  return workspaces
+}
+
+function prewarmRecentSandboxWorkspaces(): void {
+  if (process.platform !== "win32") return
+  const workspaces = collectRecentWorkspacePathsForSandboxPrewarm()
+  if (workspaces.length === 0) return
+  console.log(`[Main] Prewarming sandbox for ${workspaces.length} recent workspace(s)`)
+  LocalSandbox.prewarmForWorkspaces(workspaces)
+}
+
 // Ensure only a single instance is running (prevents duplicate schedulers on Windows)
 const gotTheLock = app.requestSingleInstanceLock()
 if (!gotTheLock) {
@@ -432,6 +463,7 @@ if (!gotTheLock) {
     registerDashboardHandlers(ipcMain)
     registerUpdaterHandlers()
     registerLspHandlers(ipcMain)
+    prewarmRecentSandboxWorkspaces()
     registerAutoCommitHandlers(ipcMain)
     registerPetHandlers(ipcMain)
 
