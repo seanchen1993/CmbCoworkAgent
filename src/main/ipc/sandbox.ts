@@ -22,6 +22,10 @@ const SETUP_MARKER_PATH = join(CODEX_HOME, ".sandbox", "setup_marker.json")
 const SANDBOX_USERS_PATH = join(CODEX_HOME, ".sandbox-secrets", "sandbox_users.json")
 const ELEVATED_WORKSPACES_PATH = join(CODEX_HOME, ".sandbox", "elevated_workspaces.json")
 const SETUP_VERSION = 5
+// SAM 本地用户名上限 20 字符；保持远低于该上限。
+// 不要修改 native helper 内部使用的 CodexSandboxUsers 组名 / mutex / 二进制名等契约。
+export const SANDBOX_OFFLINE_USERNAME = "DevclawSbxOffline"
+export const SANDBOX_ONLINE_USERNAME = "DevclawSbxOnline"
 const execFileP = promisify(execFile)
 
 async function pathExists(filePath: string): Promise<boolean> {
@@ -252,6 +256,15 @@ async function loadElevatedPreparedRoots(): Promise<void> {
     const data = JSON.parse(await fs.readFile(ELEVATED_WORKSPACES_PATH, "utf-8"))
     const version = typeof data.version === "number" ? data.version : SETUP_VERSION
     if (version !== SETUP_VERSION) return
+    // 缓存绑定具体沙箱身份；用户名不匹配（含旧 CodexSandbox*）→ 视为身份过期，丢弃缓存并删除磁盘文件，
+    // 触发后续 elevated 命令对新用户重新 grant ACL。
+    if (
+      data.offline_username !== SANDBOX_OFFLINE_USERNAME ||
+      data.online_username !== SANDBOX_ONLINE_USERNAME
+    ) {
+      await fs.unlink(ELEVATED_WORKSPACES_PATH).catch(() => {})
+      return
+    }
     const rawRoots: unknown[] = Array.isArray(data.roots)
       ? data.roots
       : Array.isArray(data.paths)
@@ -286,7 +299,12 @@ function saveElevatedPreparedRoots(): void {
     .catch(() => { /* previous failure already logged */ })
     .then(async () => {
       await elevatedPreparedRootsLoadPromise
-      const snapshot = JSON.stringify({ version: SETUP_VERSION, roots: [...elevatedPreparedRoots] }, null, 2)
+      const snapshot = JSON.stringify({
+        version: SETUP_VERSION,
+        offline_username: SANDBOX_OFFLINE_USERNAME,
+        online_username: SANDBOX_ONLINE_USERNAME,
+        roots: [...elevatedPreparedRoots]
+      }, null, 2)
       const sbxDir = join(CODEX_HOME, ".sandbox")
       await fs.mkdir(sbxDir, { recursive: true })
       await fs.writeFile(ELEVATED_WORKSPACES_PATH, snapshot)
@@ -352,12 +370,13 @@ export async function isElevatedSetupComplete(): Promise<boolean> {
     ])
     const marker = JSON.parse(markerRaw)
     const users = JSON.parse(usersRaw)
+    // 严格校验用户名等于当前期望值。旧 CodexSandbox* 安装会被判定为未完成 → 触发完整 UAC setup。
     return marker.version === SETUP_VERSION
       && users.version === SETUP_VERSION
-      && typeof marker.offline_username === "string"
-      && typeof marker.online_username === "string"
-      && typeof users.offline?.username === "string"
-      && typeof users.online?.username === "string"
+      && marker.offline_username === SANDBOX_OFFLINE_USERNAME
+      && marker.online_username === SANDBOX_ONLINE_USERNAME
+      && users.offline?.username === SANDBOX_OFFLINE_USERNAME
+      && users.online?.username === SANDBOX_ONLINE_USERNAME
   } catch {
     return false
   }
@@ -521,8 +540,8 @@ export async function runElevatedSetupForPaths(
 
   const payload = {
     version: SETUP_VERSION,
-    offline_username: "CodexSandboxOffline",
-    online_username: "CodexSandboxOnline",
+    offline_username: SANDBOX_OFFLINE_USERNAME,
+    online_username: SANDBOX_ONLINE_USERNAME,
     codex_home: CODEX_HOME,
     command_cwd: validatedWorkspacePaths[0] || home,
     read_roots: readRoots,

@@ -500,7 +500,7 @@ test("error 1385 from CreateProcessWithLogonW gets a specific 'switch to uneleva
   )
   assert.match(
     localSandboxSource,
-    /CodexSandboxOnline[\s\S]*1385[\s\S]*SeInteractiveLogonRight/,
+    /DevclawSbxOnline[\s\S]*1385[\s\S]*SeInteractiveLogonRight/,
     "the 1385 guidance text should name the sandbox user, the error code, and the underlying logon-right"
   )
   assert.match(

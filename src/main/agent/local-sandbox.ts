@@ -46,7 +46,9 @@ import {
   runElevatedSetupForPaths,
   normalizeDirKey,
   getElevatedSystemSensitivePathError,
-  validateElevatedWorkspaceRoot
+  validateElevatedWorkspaceRoot,
+  SANDBOX_OFFLINE_USERNAME,
+  SANDBOX_ONLINE_USERNAME
 } from "../ipc/sandbox"
 import { getWindowsSandboxMode } from "../storage"
 import { homedir } from "node:os"
@@ -112,8 +114,8 @@ const SENSITIVE_DIR_NAMES = new Set([
   ".terraform.d"
 ])
 
-const WINDOWS_SANDBOX_OFFLINE_USERNAME = "CodexSandboxOffline"
-const WINDOWS_SANDBOX_ONLINE_USERNAME = "CodexSandboxOnline"
+const WINDOWS_SANDBOX_OFFLINE_USERNAME = SANDBOX_OFFLINE_USERNAME
+const WINDOWS_SANDBOX_ONLINE_USERNAME = SANDBOX_ONLINE_USERNAME
 
 interface PendingSkillHookContext {
   skill: SkillLifecycleMatch
@@ -1052,7 +1054,7 @@ export class LocalSandbox
     const toolDirs = LocalSandbox.getSandboxToolCacheDirs(cacheRoot, sharedCacheRoot)
     const pathPrefix = Array.from(new Set(toolEnv.pathEntries)).join(";")
     // Redirect standard Windows profile env vars to the sandbox user's persistent profile.
-    // The sandbox user (CodexSandboxOnline) has full control over its own profile, so all
+    // The sandbox user (DevclawSbxOnline) has full control over its own profile, so all
     // non-overridden tools can read/write their default cache locations under
     // USERPROFILE/APPDATA/LOCALAPPDATA. Tool installs/caches that need to survive across
     // elevated/unelevated commands are redirected to the app-owned persistent cache root,
@@ -1096,14 +1098,14 @@ export class LocalSandbox
     // Inject git config for the sandbox user via GIT_CONFIG_COUNT/KEY/VALUE (git ≥ 2.31):
     //   * http.sslBackend=openssl — sandbox user lacks access to the Windows LSA so SChannel
     //     credential init fails; OpenSSL works under restricted tokens.
-    //   * safe.directory=*       — the elevated sandbox runs as CodexSandboxOnline but the
+    //   * safe.directory=*       — the elevated sandbox runs as DevclawSbxOnline but the
     //     repo is owned by the host user, which trips git's "dubious ownership" check on every
     //     command. Trusting all paths inside the sandbox shell is safe — Codex's sandbox token
     //     already restricts what the user can read/write at the OS level.
     const gitSslCmd = 'set "GIT_CONFIG_COUNT=2" & set "GIT_CONFIG_KEY_0=http.sslBackend" & set "GIT_CONFIG_VALUE_0=openssl" & set "GIT_CONFIG_KEY_1=safe.directory" & set "GIT_CONFIG_VALUE_1=*"'
     const gitSslPs  = "$env:GIT_CONFIG_COUNT='2'; $env:GIT_CONFIG_KEY_0='http.sslBackend'; $env:GIT_CONFIG_VALUE_0='openssl'; $env:GIT_CONFIG_KEY_1='safe.directory'; $env:GIT_CONFIG_VALUE_1='*'"
 
-    // The elevated sandbox runs as CodexSandboxOnline whose registry PATH only has System32.
+    // The elevated sandbox runs as DevclawSbxOnline whose registry PATH only has System32.
     // codex.exe's CreateProcessAsUser loads that minimal PATH — the main-process PATH (with
     // Maven, Gradle, custom tools, etc.) is NOT inherited. Inject the host PATH here so the
     // command shell sees the full toolchain.  Strip MSYS2 usr/bin paths first — those binaries
@@ -1299,7 +1301,7 @@ export class LocalSandbox
     ) {
       return [
         "Elevated 沙箱无法在这台电脑上启动子进程。",
-        "原因：Windows 域/本地安全策略不允许沙箱用户（CodexSandboxOnline）进行本地登录（错误 1385 / SeInteractiveLogonRight 缺失）。",
+        `原因：Windows 域/本地安全策略不允许沙箱用户（${WINDOWS_SANDBOX_ONLINE_USERNAME}）进行本地登录（错误 1385 / SeInteractiveLogonRight 缺失）。`,
         "建议：到「设置 → 沙箱模式」切换为 Unelevated；或先允许这次在沙箱外运行该命令（之后每条命令都会再问，不便建议直接换模式）。"
       ].join("\n")
     }
@@ -1320,7 +1322,7 @@ export class LocalSandbox
    * True when the resolved Python install lives under the real user's profile
    * (e.g. per-user install at %LOCALAPPDATA%\Programs\Python\... or the MS Store
    * alias under %LOCALAPPDATA%\Microsoft\WindowsApps). The elevated sandbox user
-   * (CodexSandboxOnline) cannot read the real user's profile, so PATH lookups for
+   * (DevclawSbxOnline) cannot read the real user's profile, so PATH lookups for
    * python/py resolve to unreadable paths and fail with CommandNotFoundException.
    * Bare python/py invocations must route to unelevated mode to keep real-user identity.
    */
@@ -4088,7 +4090,7 @@ export class LocalSandbox
   }
 
   /** Sandbox user names used by elevated mode. */
-  private static readonly ELEVATED_SANDBOX_USERS = ["CodexSandboxOnline", "CodexSandboxOffline"]
+  private static readonly ELEVATED_SANDBOX_USERS = [WINDOWS_SANDBOX_ONLINE_USERNAME, WINDOWS_SANDBOX_OFFLINE_USERNAME]
 
   /**
    * Grant elevated sandbox users read+write ACL on a workspace directory via icacls.
