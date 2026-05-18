@@ -3,11 +3,10 @@ import {
   Check,
   ChevronDown,
   Folder,
+  FolderOpen,
   GitBranch,
   Loader2,
   AlertCircle,
-  Copy,
-  CheckCheck,
   Trash2
 } from "lucide-react"
 import { useState, useEffect } from "react"
@@ -30,14 +29,16 @@ function getFolderName(path: string | null | undefined): string | undefined {
 }
 
 function PathRow({ label, path, highlight = false }: { label: string; path: string; highlight?: boolean }): React.JSX.Element {
-  const [copied, setCopied] = useState(false)
   const [hovered, setHovered] = useState(false)
 
-  function handleCopy(): void {
-    navigator.clipboard.writeText(path).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    })
+  async function handleOpenFolder(): Promise<void> {
+    try {
+      const platform = await window.electron.ipcRenderer.invoke("get-platform")
+      const folderPath = platform === "win32" ? path.replace(/\//g, "\\") : path
+      await window.electron.ipcRenderer.invoke("open-folder", folderPath)
+    } catch (error) {
+      console.error("[WorkspacePicker] Failed to open folder:", error)
+    }
   }
 
   return (
@@ -70,14 +71,12 @@ function PathRow({ label, path, highlight = false }: { label: string; path: stri
           )}
         </div>
         <button
-          onClick={handleCopy}
+          onClick={handleOpenFolder}
           className="shrink-0 p-0.5 rounded hover:bg-muted"
-          title="复制路径"
+          title="打开文件夹"
+          aria-label="打开文件夹"
         >
-          {copied
-            ? <CheckCheck className="size-3 text-status-nominal" />
-            : <Copy className="size-3 text-muted-foreground" />
-          }
+          <FolderOpen className="size-3 text-muted-foreground" />
         </button>
       </div>
     </div>
