@@ -124,6 +124,73 @@
   }
 }
 
+@layer components {
+  .liquid-glass-notice {
+    --liquid-tint: 59 130 246;
+    position: relative;
+    overflow: hidden;
+    max-width: min(68%, 720px);
+    padding: 12px 16px;
+    border-radius: 10px;
+    border: 0;
+    color: var(--foreground);
+    background: var(--background-interactive);
+    box-shadow: 0 8px 24px rgb(41 37 36 / 8%), 0 1px 2px rgb(41 37 36 / 6%);
+  }
+
+  .liquid-glass-notice__icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 22px;
+    height: 22px;
+    margin-top: 3px;
+    border-radius: 999px;
+    color: rgb(var(--liquid-tint));
+    background: var(--background-elevated);
+  }
+
+  .liquid-glass-notice__body {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  .liquid-glass-notice__body :where(p, li, code, pre, span, a) {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  .liquid-glass-notice__icon svg {
+    width: 14px;
+    height: 14px;
+  }
+
+  .liquid-glass-notice--success {
+    --liquid-tint: 16 185 129;
+  }
+
+  .liquid-glass-notice--warning {
+    --liquid-tint: 245 158 11;
+  }
+
+  .liquid-glass-notice--info {
+    --liquid-tint: 59 130 246;
+  }
+
+  .dark .liquid-glass-notice {
+    color: var(--foreground);
+    background: rgb(39 39 42 / 42%);
+    box-shadow: 0 8px 24px rgb(0 0 0 / 18%), 0 1px 2px rgb(0 0 0 / 18%);
+  }
+
+  .dark .liquid-glass-notice__icon {
+    color: rgb(var(--liquid-tint));
+    background: rgb(255 255 255 / 8%);
+  }
+}
+
 /* Tactical typography utilities */
 .text-section-header {
   @apply text-[11px] font-semibold uppercase tracking-[0.1em] text-muted-foreground;

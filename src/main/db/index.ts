@@ -10,7 +10,7 @@ let dirty = false
 /**
  * Save database to disk (debounced)
  */
-function saveToDisk(): void {
+export function saveToDisk(): void {
   if (!db) return
 
   dirty = true
@@ -107,9 +107,40 @@ export async function initializeDatabase(): Promise<SqlJsDatabase> {
     )
   `)
 
+  db.run(`
+    CREATE TABLE IF NOT EXISTS thread_goals (
+      thread_id TEXT PRIMARY KEY,
+      goal_id TEXT NOT NULL,
+      objective TEXT NOT NULL,
+      completion_condition TEXT,
+      status TEXT NOT NULL CHECK(status IN ('active', 'paused', 'complete', 'budget_limited')),
+      turns_used INTEGER NOT NULL DEFAULT 0,
+      max_turns INTEGER NOT NULL DEFAULT 15,
+      last_verdict TEXT,
+      last_reason TEXT,
+      paused_reason TEXT,
+      consecutive_parse_failures INTEGER NOT NULL DEFAULT 0,
+      ledger_json TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )
+  `)
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS thread_goal_events (
+      event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      thread_id TEXT NOT NULL,
+      goal_id TEXT,
+      message TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )
+  `)
+
   db.run(`CREATE INDEX IF NOT EXISTS idx_threads_updated_at ON threads(updated_at)`)
   db.run(`CREATE INDEX IF NOT EXISTS idx_runs_thread_id ON runs(thread_id)`)
   db.run(`CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status)`)
+  db.run(`CREATE INDEX IF NOT EXISTS idx_thread_goals_status ON thread_goals(status)`)
+  db.run(`CREATE INDEX IF NOT EXISTS idx_thread_goal_events_thread_id ON thread_goal_events(thread_id)`)
 
   saveToDisk()
 
@@ -239,6 +270,71 @@ export function updateThread(
 
 export function deleteThread(threadId: string): void {
   const database = getDb()
+  database.run("DELETE FROM thread_goal_events WHERE thread_id = ?", [threadId])
+  database.run("DELETE FROM thread_goals WHERE thread_id = ?", [threadId])
   database.run("DELETE FROM threads WHERE thread_id = ?", [threadId])
   saveToDisk()
+}
+
+export interface ThreadGoalEventRow {
+  event_id: number
+  thread_id: string
+  goal_id: string | null
+  message: string
+  created_at: number
+}
+
+export function addThreadGoalEvent(
+  threadId: string,
+  message: string,
+  goalId?: string | null,
+  createdAt = Date.now()
+): ThreadGoalEventRow {
+  const trimmed = message.trim()
+  if (!trimmed) throw new Error("Goal event message cannot be empty.")
+  const database = getDb()
+  database.run(
+    "INSERT INTO thread_goal_events (thread_id, goal_id, message, created_at) VALUES (?, ?, ?, ?)",
+    [threadId, goalId ?? null, trimmed, createdAt]
+  )
+  saveToDisk()
+
+  const stmt = database.prepare("SELECT last_insert_rowid() AS event_id")
+  try {
+    stmt.step()
+    const row = stmt.getAsObject() as { event_id?: number }
+    return {
+      event_id: Number(row.event_id),
+      thread_id: threadId,
+      goal_id: goalId ?? null,
+      message: trimmed,
+      created_at: createdAt
+    }
+  } finally {
+    stmt.free()
+  }
+}
+
+export function getThreadGoalEvents(threadId: string): ThreadGoalEventRow[] {
+  const database = getDb()
+  const stmt = database.prepare(
+    "SELECT * FROM thread_goal_events WHERE thread_id = ? ORDER BY created_at ASC, event_id ASC"
+  )
+  stmt.bind([threadId])
+  const events: ThreadGoalEventRow[] = []
+  try {
+    while (stmt.step()) {
+      const row = stmt.getAsObject() as unknown as ThreadGoalEventRow
+      events.push({
+        event_id: Number(row.event_id),
+        thread_id: row.thread_id,
+        goal_id: row.goal_id,
+        message: row.message,
+        created_at: Number(row.created_at)
+      })
+    }
+  } finally {
+    stmt.free()
+  }
+  return events
 }

@@ -44,5 +44,9 @@ export class ToolCallCounter {
   getNames(): string[] {
     return [...this.names]
   }
-}
 
+  getNamesSince(startIndex: number): string[] {
+    const index = Math.max(0, Math.min(this.names.length, Math.floor(startIndex)))
+    return this.names.slice(index)
+  }
+}

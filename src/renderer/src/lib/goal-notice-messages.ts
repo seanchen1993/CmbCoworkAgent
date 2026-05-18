@@ -1,0 +1,390 @@
+import type { Message } from "@/types"
+import { GOAL_USER_MESSAGE_EVENT_PREFIX } from "../../../shared/goal-events"
+
+export interface GoalNoticeEvent {
+  event_id: number
+  message: string
+  created_at: Date | string | number
+}
+
+function toDate(value: Date | string | number): Date {
+  if (value instanceof Date) return value
+  const parsed = new Date(value)
+  return Number.isFinite(parsed.getTime()) ? parsed : new Date()
+}
+
+function nextNoticeId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID()
+  }
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
+export function createGoalNoticeMessage(
+  message: string,
+  options: { id?: string; createdAt?: Date } = {}
+): Message {
+  const createdAt = options.createdAt ?? new Date()
+  return {
+    id: options.id ?? `goal-notice-${Date.now()}-${nextNoticeId()}`,
+    role: "system",
+    content: message.trim(),
+    created_at: createdAt,
+    start_at: createdAt,
+    end_at: createdAt
+  }
+}
+
+function createGoalUserMessage(content: string, options: { id: string; createdAt: Date }): Message {
+  return {
+    id: options.id,
+    role: "user",
+    content: content.trim(),
+    created_at: options.createdAt,
+    start_at: options.createdAt,
+    end_at: options.createdAt
+  }
+}
+
+export function goalEventToSystemMessage(event: GoalNoticeEvent): Message {
+  const createdAt = toDate(event.created_at)
+  return createGoalNoticeMessage(event.message, {
+    id: `goal-event-${event.event_id}`,
+    createdAt
+  })
+}
+
+function isGoalUserEvent(message: string): boolean {
+  return message.startsWith(GOAL_USER_MESSAGE_EVENT_PREFIX)
+}
+
+function commandFromLegacyNotice(message: string): string | null {
+  if (message.startsWith("当前没有 active goal。用 /goal ")) return "/goal"
+  if (message.startsWith("Goal 已清除。")) return "/goal clear"
+  if (message.startsWith("Goal 已继续：")) return "/goal resume"
+  if (
+    (message.startsWith("● Goal 进行中") ||
+      message.startsWith("Ⅱ Goal 已暂停") ||
+      message.startsWith("✓ Goal 已完成")) &&
+    message.includes("\n目标：")
+  ) {
+    return "/goal"
+  }
+  return null
+}
+
+export function goalEventToDisplayMessages(event: GoalNoticeEvent): Message[] {
+  const createdAt = toDate(event.created_at)
+  if (isGoalUserEvent(event.message)) {
+    return [
+      createGoalUserMessage(event.message.slice(GOAL_USER_MESSAGE_EVENT_PREFIX.length), {
+        id: `goal-user-event-${event.event_id}`,
+        createdAt
+      })
+    ]
+  }
+
+  const notice = goalEventToSystemMessage(event)
+  const legacyCommand = commandFromLegacyNotice(event.message)
+  if (!legacyCommand) return [notice]
+
+  return [
+    createGoalUserMessage(legacyCommand, {
+      id: `goal-legacy-command-${event.event_id}`,
+      createdAt
+    }),
+    notice
+  ]
+}
+
+export function isInternalGoalPromptMessage(message: Pick<Message, "role" | "content">): boolean {
+  if (message.role !== "user" || typeof message.content !== "string") return false
+  const content = message.content.trimStart()
+  return (
+    content.startsWith("[Starting active goal]") || content.startsWith("[Continuing active goal]")
+  )
+}
+
+function unescapeXmlText(text: string): string {
+  return text.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&")
+}
+
+function extractXmlBlock(content: string, tag: string): string | null {
+  const match = new RegExp(`<${tag}>\\s*([\\s\\S]*?)\\s*</${tag}>`).exec(content)
+  return match ? unescapeXmlText(match[1].trim()) : null
+}
+
+export function normalizeRestoredGoalPromptMessage(message: Message): Message | null {
+  if (!isInternalGoalPromptMessage(message) || typeof message.content !== "string") return message
+  const content = message.content.trimStart()
+  if (content.startsWith("[Continuing active goal]")) return null
+
+  const objective = extractXmlBlock(content, "untrusted_objective")
+  return createGoalUserMessage(objective ? `/goal ${objective}` : "/goal", {
+    id: `goal-start-prompt-${message.id}`,
+    createdAt: message.start_at ?? message.created_at
+  })
+}
+
+function getMessageTime(message: Message): number {
+  const value = message.start_at ?? message.created_at ?? message.end_at
+  const time = value instanceof Date ? value.getTime() : new Date(value).getTime()
+  return Number.isFinite(time) ? time : Number.MAX_SAFE_INTEGER
+}
+
+function hasReliableMessageTime(message: Message): boolean {
+  return getMessageTime(message) !== Number.MAX_SAFE_INTEGER
+}
+
+function isRestoredGoalUserMessage(message: Message): boolean {
+  return (
+    message.role === "user" &&
+    (message.id.startsWith("goal-user-event-") ||
+      message.id.startsWith("goal-start-prompt-") ||
+      message.id.startsWith("goal-legacy-command-"))
+  )
+}
+
+function isLegacyRestoredGoalUserMessage(message: Message): boolean {
+  return message.role === "user" && message.id.startsWith("goal-legacy-command-")
+}
+
+function isPersistedRestoredGoalUserMessage(message: Message): boolean {
+  return message.role === "user" && message.id.startsWith("goal-user-event-")
+}
+
+function isPromptRestoredGoalUserMessage(message: Message): boolean {
+  return message.role === "user" && message.id.startsWith("goal-start-prompt-")
+}
+
+function goalCommandContent(message: Message): string | null {
+  if (message.role !== "user" || typeof message.content !== "string") return null
+  const content = message.content.trim()
+  return content.startsWith("/goal") ? content : null
+}
+
+function addCommandTime(commands: Map<string, number[]>, key: string, time: number): void {
+  const times = commands.get(key) ?? []
+  times.push(time)
+  commands.set(key, times)
+}
+
+function consumeNearbyCommand(
+  commands: Map<string, number[]>,
+  key: string,
+  time: number,
+  windowMs = 10_000
+): boolean {
+  const times = commands.get(key)
+  if (!times || times.length === 0) return false
+  const index = times.findIndex((existingTime) => Math.abs(existingTime - time) <= windowMs)
+  if (index < 0) return false
+  times.splice(index, 1)
+  if (times.length === 0) commands.delete(key)
+  return true
+}
+
+function dedupeRestoredGoalUserMessages(messages: Message[]): Message[] {
+  const visibleGoalCommands = new Map<string, number[]>()
+  const persistedGoalCommands = new Map<string, number[]>()
+  const anyNonPromptGoalCommands = new Set<string>()
+
+  for (const message of messages) {
+    const content = goalCommandContent(message)
+    if (!content) continue
+    if (!isPromptRestoredGoalUserMessage(message)) {
+      anyNonPromptGoalCommands.add(content)
+    }
+    if (isPersistedRestoredGoalUserMessage(message)) {
+      addCommandTime(persistedGoalCommands, content, getMessageTime(message))
+    } else if (!isRestoredGoalUserMessage(message)) {
+      addCommandTime(visibleGoalCommands, content, getMessageTime(message))
+    }
+  }
+
+  const deduped: Message[] = []
+  for (const message of messages) {
+    const content = goalCommandContent(message)
+    if (content && isRestoredGoalUserMessage(message)) {
+      const messageTime = getMessageTime(message)
+      if (isPromptRestoredGoalUserMessage(message) && anyNonPromptGoalCommands.has(content)) {
+        continue
+      }
+
+      if (consumeNearbyCommand(visibleGoalCommands, content, messageTime)) {
+        continue
+      }
+
+      if (
+        (isPromptRestoredGoalUserMessage(message) || isLegacyRestoredGoalUserMessage(message)) &&
+        consumeNearbyCommand(persistedGoalCommands, content, messageTime)
+      ) {
+        continue
+      }
+
+      const duplicateIndex = deduped.findIndex(
+        (existing) =>
+          isRestoredGoalUserMessage(existing) &&
+          goalCommandContent(existing) === content &&
+          Math.abs(getMessageTime(existing) - getMessageTime(message)) <= 5_000
+      )
+      if (duplicateIndex >= 0) {
+        if (
+          isLegacyRestoredGoalUserMessage(deduped[duplicateIndex]) &&
+          !isLegacyRestoredGoalUserMessage(message)
+        ) {
+          deduped[duplicateIndex] = message
+        }
+        continue
+      }
+    }
+    deduped.push(message)
+  }
+  return deduped
+}
+
+function messageTimelinePriority(message: Message): number {
+  if (message.role === "user") return 0
+  if (isTerminalGoalNotice(message)) return 4
+  if (isGoalCommandNotice(message)) return 1
+  if (message.role === "tool" || message.role === "assistant") return 2
+  return 2
+}
+
+function orderMessagesByTimeline(messages: Message[]): Message[] {
+  if (messages.length <= 1 || !messages.some((message) => message.role === "system")) {
+    return messages
+  }
+
+  return messages
+    .map((message, index) => ({ message, index }))
+    .sort((left, right) => {
+      const leftTime = getMessageTime(left.message)
+      const rightTime = getMessageTime(right.message)
+      if (leftTime !== rightTime) return leftTime - rightTime
+
+      const leftHasTime = hasReliableMessageTime(left.message)
+      const rightHasTime = hasReliableMessageTime(right.message)
+      if (leftHasTime !== rightHasTime) return leftHasTime ? -1 : 1
+
+      const priorityDelta =
+        messageTimelinePriority(left.message) - messageTimelinePriority(right.message)
+      if (priorityDelta !== 0) return priorityDelta
+
+      return left.index - right.index
+    })
+    .map((entry) => entry.message)
+}
+
+export function mergeGoalNoticeMessagesForRestore(
+  messages: Message[],
+  goalMessages: Message[]
+): Message[] {
+  if (goalMessages.length === 0) return messages
+  if (messages.length === 0) {
+    return orderCommandNoticesAfterCommands(
+      orderMessagesByTimeline(dedupeRestoredGoalUserMessages(goalMessages))
+    )
+  }
+  return orderCommandNoticesAfterCommands(
+    orderMessagesByTimeline(dedupeRestoredGoalUserMessages([...messages, ...goalMessages]))
+  )
+}
+
+function isTerminalGoalNotice(message: Message): boolean {
+  if (message.role !== "system" || typeof message.content !== "string") return false
+  return (
+    message.content.startsWith("✓ Goal 已完成") ||
+    message.content.startsWith("Goal 等待补充信息") ||
+    message.content.startsWith("Goal 已暂停") ||
+    message.content.startsWith("Ⅱ Goal 已暂停")
+  )
+}
+
+function isGoalCommandNotice(message: Message): boolean {
+  if (message.role !== "system" || typeof message.content !== "string") return false
+  return (
+    message.content.startsWith("当前没有 active goal。") ||
+    message.content.startsWith("Goal 已设置") ||
+    message.content.startsWith("Goal 已清除") ||
+    message.content.startsWith("Goal 已继续") ||
+    message.content.startsWith("Goal 当前状态") ||
+    message.content.startsWith("没有可继续的 goal。")
+  )
+}
+
+function isResponseMessage(message: Message): boolean {
+  return message.role === "assistant" || message.role === "tool"
+}
+
+function orderCommandNoticesAfterCommands(messages: Message[]): Message[] {
+  const ordered: Message[] = []
+
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index]
+    const nextMessage = messages[index + 1]
+    if (
+      isGoalCommandNotice(message) &&
+      nextMessage &&
+      goalCommandContent(nextMessage) &&
+      Math.abs(getMessageTime(message) - getMessageTime(nextMessage)) <= 10_000
+    ) {
+      ordered.push(nextMessage, message)
+      index += 1
+      continue
+    }
+    ordered.push(message)
+  }
+
+  return ordered
+}
+
+function dedupeAdjacentGoalCommandNotices(messages: Message[]): Message[] {
+  const deduped: Message[] = []
+  for (const message of messages) {
+    const previous = deduped[deduped.length - 1]
+    if (
+      previous &&
+      isGoalCommandNotice(previous) &&
+      isGoalCommandNotice(message) &&
+      previous.content === message.content
+    ) {
+      continue
+    }
+    deduped.push(message)
+  }
+  return deduped
+}
+
+export function orderGoalNoticeMessagesForDisplay(messages: Message[]): Message[] {
+  const ordered: Message[] = []
+  const commandOrderedMessages = orderCommandNoticesAfterCommands(orderMessagesByTimeline(messages))
+
+  for (let index = 0; index < commandOrderedMessages.length; index += 1) {
+    const message = commandOrderedMessages[index]
+    if (!isTerminalGoalNotice(message)) {
+      ordered.push(message)
+      continue
+    }
+
+    const followingResponseMessages: Message[] = []
+    let nextIndex = index + 1
+    while (
+      nextIndex < commandOrderedMessages.length &&
+      isResponseMessage(commandOrderedMessages[nextIndex])
+    ) {
+      followingResponseMessages.push(commandOrderedMessages[nextIndex])
+      nextIndex += 1
+    }
+
+    if (followingResponseMessages.length === 0) {
+      ordered.push(message)
+      continue
+    }
+
+    ordered.push(...followingResponseMessages, message)
+    index = nextIndex - 1
+  }
+
+  return dedupeAdjacentGoalCommandNotices(ordered)
+}

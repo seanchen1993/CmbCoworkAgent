@@ -4,7 +4,21 @@ import { StreamingMarkdown } from "./StreamingMarkdown"
 import { getToolLabel } from "@/lib/tool-labels"
 import { emitOpenResourcePreview } from "@/lib/resource-preview-events"
 import { useState } from "react"
-import { ChevronDown, ChevronRight, Eye, Wrench, Copy, Check, PencilLine, ThumbsUp, ThumbsDown, Smile, Frown } from "lucide-react"
+import {
+  ChevronDown,
+  ChevronRight,
+  Eye,
+  Wrench,
+  Copy,
+  Check,
+  PencilLine,
+  ThumbsUp,
+  ThumbsDown,
+  Smile,
+  Frown,
+  Info,
+  AlertCircle
+} from "lucide-react"
 import { toast } from "sonner"
 import {
   MessageFeedbackDialog,
@@ -100,6 +114,38 @@ function getToolPreviewPath(toolCall: { name: string; args?: Record<string, unkn
   return path
 }
 
+function getSystemNoticePresentation(text: string): {
+  icon: React.JSX.Element
+  text: string
+  tone: "success" | "warning" | "info"
+} {
+  if (text.startsWith("✓ Goal 已完成")) {
+    return {
+      icon: <Check className="size-4" />,
+      text: text.replace(/^✓\s*/, ""),
+      tone: "success"
+    }
+  }
+
+  if (
+    text.startsWith("Goal 已暂停") ||
+    text.startsWith("Ⅱ Goal 已暂停") ||
+    text.startsWith("Goal 等待补充信息")
+  ) {
+    return {
+      icon: <AlertCircle className="size-4" />,
+      text: text.replace(/^Ⅱ\s*/, ""),
+      tone: "warning"
+    }
+  }
+
+  return {
+    icon: <Info className="size-4" />,
+    text,
+    tone: "info"
+  }
+}
+
 interface ToolResultInfo {
   content: string | unknown
   is_error?: boolean
@@ -141,9 +187,13 @@ export function MessageBubble({
   const [feedbackSubmitting, setFeedbackSubmitting] = useState(false)
   const isUser = message.role === "user"
   const isTool = message.role === "tool"
+  const isSystem = message.role === "system"
 
   // 判断是否显示 MessageHead：如果当前不是用户消息，且是第一条非用户消息
-  const shouldShowMessageHead = !isUser && (!previousMessage || previousMessage.role === "user")
+  const shouldShowMessageHead =
+    !isUser &&
+    !isSystem &&
+    (!previousMessage || previousMessage.role === "user" || previousMessage.role === "system")
 
   // 切换工具调用详情的展开状态
   const toggleToolExpansion = (toolId: string, defaultExpanded = false) => {
@@ -174,6 +224,26 @@ export function MessageBubble({
   // Hide tool result messages - they're shown inline with tool calls
   if (isTool) {
     return null
+  }
+
+  if (isSystem) {
+    const text = extractMessagePlainText(message.content).trim()
+    if (!text) return null
+    const notice = getSystemNoticePresentation(text)
+    return (
+      <div className="my-3 flex justify-center">
+        <div className={`liquid-glass-notice liquid-glass-notice--${notice.tone}`}>
+          <div className="relative z-[1] flex items-start gap-3">
+            <span className="liquid-glass-notice__icon" aria-hidden="true">
+              {notice.icon}
+            </span>
+            <div className="liquid-glass-notice__body min-w-0 text-[15px] leading-7 [&_p]:my-0 [&_strong]:font-semibold">
+              <StreamingMarkdown isStreaming={false}>{notice.text}</StreamingMarkdown>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
   }
 
   const renderContent = (): React.ReactNode => {

@@ -5,6 +5,7 @@ import { v4 as uuid } from "uuid"
 import {
   getAllThreads,
   getThread,
+  getThreadGoalEvents,
   createThread as dbCreateThread,
   updateThread as dbUpdateThread,
   deleteThread as dbDeleteThread
@@ -181,6 +182,13 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       console.warn("Failed to get thread history:", e)
       return []
     }
+  })
+
+  ipcMain.handle("threads:goalEvents", async (_event, threadId: string) => {
+    return getThreadGoalEvents(threadId).map((event) => ({
+      ...event,
+      created_at: new Date(event.created_at)
+    }))
   })
 
   // Generate a title from a message

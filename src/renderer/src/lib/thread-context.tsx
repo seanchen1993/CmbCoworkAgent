@@ -26,6 +26,12 @@ import { useAppStore } from "@/lib/store"
 import type { DeepAgent } from "../../../main/agent/types"
 import { toast } from "sonner"
 import { formatAutoCommitText } from "../../../shared/auto-commit-format"
+import {
+  createGoalNoticeMessage,
+  goalEventToDisplayMessages,
+  mergeGoalNoticeMessagesForRestore,
+  normalizeRestoredGoalPromptMessage
+} from "./goal-notice-messages"
 
 const MESSAGE_TIMES_THREAD_VALUE_KEY = "messageTimes"
 const MESSAGE_TIME_ORDER_THREAD_VALUE_KEY = "messageTimeOrder"
@@ -72,6 +78,83 @@ const toDate = (value: string | undefined): Date | undefined => {
   if (!value) return undefined
   const parsed = new Date(value)
   return Number.isFinite(parsed.getTime()) ? parsed : undefined
+}
+
+const offsetDate = (date: Date, offsetMs: number): Date => new Date(date.getTime() + offsetMs)
+
+const restoreVisibleMessageTimes = (
+  messages: Message[],
+  persistedMessageTimes: MessageTimeMap,
+  persistedMessageTimeOrder: MessageTimeEntry[]
+): Message[] => {
+  const idRestored = messages.map((message, index) => {
+    const persistedTime = persistedMessageTimes[message.id]
+    const startAt = toDate(persistedTime?.start_at)
+    const endAt = toDate(persistedTime?.end_at) ?? startAt
+    return {
+      index,
+      message,
+      startAt,
+      endAt
+    }
+  })
+
+  const hasAnyIdMatch = idRestored.some((entry) => entry.startAt)
+
+  return idRestored.map((entry) => {
+    if (entry.startAt) {
+      return {
+        ...entry.message,
+        created_at: entry.startAt,
+        start_at: entry.startAt,
+        end_at: entry.endAt ?? entry.startAt
+      }
+    }
+
+    let previousKnown: (typeof idRestored)[number] | undefined
+    for (let i = entry.index - 1; i >= 0; i -= 1) {
+      if (idRestored[i].startAt) {
+        previousKnown = idRestored[i]
+        break
+      }
+    }
+
+    let nextKnown: (typeof idRestored)[number] | undefined
+    for (let i = entry.index + 1; i < idRestored.length; i += 1) {
+      if (idRestored[i].startAt) {
+        nextKnown = idRestored[i]
+        break
+      }
+    }
+
+    // User ids can change between LangGraph checkpoint serialization and the
+    // UI-side message time store. A plain index fallback is unsafe here because
+    // /goal status events are persisted in the UI transcript but are not present
+    // in the LangGraph checkpoint, shifting every later index. For unmatched
+    // users, anchor them just before their next known response instead.
+    let startAt: Date | undefined
+    if (entry.message.role === "user" && nextKnown?.startAt) {
+      startAt = offsetDate(nextKnown.startAt, -1000)
+    } else if (previousKnown?.startAt) {
+      startAt = offsetDate(previousKnown.startAt, (entry.index - previousKnown.index) * 1000)
+    } else if (nextKnown?.startAt) {
+      startAt = offsetDate(nextKnown.startAt, -(nextKnown.index - entry.index) * 1000)
+    }
+
+    if (!startAt && !hasAnyIdMatch) {
+      const orderTime = persistedMessageTimeOrder[entry.index]
+      startAt = toDate(orderTime?.start_at)
+    }
+
+    startAt = startAt ?? entry.message.start_at ?? entry.message.created_at
+    const endAt = entry.message.end_at && entry.message.end_at > startAt ? entry.message.end_at : startAt
+    return {
+      ...entry.message,
+      created_at: startAt,
+      start_at: startAt,
+      end_at: endAt
+    }
+  })
 }
 
 // Open file tab type
@@ -646,6 +729,14 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             toast.info(data.message)
           }
           break
+        case "goal_notice":
+          if (typeof data.message === "string" && data.message.trim()) {
+            const message = data.message
+            updateThreadState(threadId, (state) => ({
+              messages: [...state.messages, createGoalNoticeMessage(message)]
+            }))
+          }
+          break
         case "hook_blocked": {
           const reason =
             (typeof data.reason === "string" && data.reason.trim()) ||
@@ -869,6 +960,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       const actions = getThreadActions(threadId)
       let persistedMessageTimes: MessageTimeMap = {}
       let persistedMessageTimeOrder: MessageTimeEntry[] = []
+      let restoredMessages: Message[] = []
       updateThreadState(threadId, () => ({ historyLoading: true }))
 
       // Load workspace path and thread metadata
@@ -942,13 +1034,20 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             checkpoint?: {
               channel_values?: {
                 messages?: Array<{
-                  id?: string
+                  id?: string | string[]
                   _getType?: () => string
                   type?: string
                   content?: string | unknown[]
                   tool_calls?: unknown[]
                   tool_call_id?: string
                   name?: string
+                  kwargs?: {
+                    id?: string
+                    content?: string | unknown[]
+                    tool_calls?: unknown[]
+                    tool_call_id?: string
+                    name?: string
+                  }
                 }>
                 todos?: Array<{ id?: string; content?: string; status?: string }>
                 __interrupt__?: Array<{
@@ -971,50 +1070,73 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           const channelValues = latestCheckpoint.checkpoint?.channel_values
 
           if (channelValues?.messages && Array.isArray(channelValues.messages)) {
-            const messages: Message[] = channelValues.messages.map((msg, index) => {
-              let role: "user" | "assistant" | "system" | "tool" = "assistant"
-              if (typeof msg._getType === "function") {
-                const type = msg._getType()
-                if (type === "human") role = "user"
-                else if (type === "ai") role = "assistant"
-                else if (type === "system") role = "system"
-                else if (type === "tool") role = "tool"
-              } else if (msg.type) {
-                if (msg.type === "human") role = "user"
-                else if (msg.type === "ai") role = "assistant"
-                else if (msg.type === "system") role = "system"
-                else if (msg.type === "tool") role = "tool"
-              }
+            const rawRestoredMessages = channelValues.messages.map((msg, index) => {
+                let role: "user" | "assistant" | "system" | "tool" = "assistant"
+                if (typeof msg._getType === "function") {
+                  const type = msg._getType()
+                  if (type === "human") role = "user"
+                  else if (type === "ai") role = "assistant"
+                  else if (type === "system") role = "system"
+                  else if (type === "tool") role = "tool"
+                } else if (Array.isArray(msg.id)) {
+                  const constructorName = msg.id[msg.id.length - 1]
+                  if (constructorName === "HumanMessage") role = "user"
+                  else if (constructorName === "SystemMessage") role = "system"
+                  else if (constructorName === "ToolMessage") role = "tool"
+                  else if (
+                    constructorName === "AIMessage" ||
+                    constructorName === "AIMessageChunk"
+                  )
+                    role = "assistant"
+                } else if (msg.type) {
+                  if (msg.type === "human") role = "user"
+                  else if (msg.type === "ai") role = "assistant"
+                  else if (msg.type === "system") role = "system"
+                  else if (msg.type === "tool") role = "tool"
+                }
 
-              let content: Message["content"] = ""
-              if (typeof msg.content === "string") content = msg.content
-              else if (Array.isArray(msg.content)) content = msg.content as Message["content"]
+                let content: Message["content"] = ""
+                if (typeof msg.content === "string") content = msg.content
+                else if (Array.isArray(msg.content)) content = msg.content as Message["content"]
+                else if (typeof msg.kwargs?.content === "string") content = msg.kwargs.content
+                else if (Array.isArray(msg.kwargs?.content))
+                  content = msg.kwargs.content as Message["content"]
 
-              const messageId = msg.id || `msg-${index}`
-              const fallbackTime = new Date()
-              // 优先按 id 恢复；如果重启后 checkpoint 中的 id 变化，则按消息顺序兜底恢复。
-              //
-              // 这里不直接用 created_at 作为历史耗时依据，因为 created_at 的原有逻辑不能改；
-              // checkpoint 重新加载时 created_at 可能是当前时间。start_at/end_at 才是本功能
-              // 专门用于跨重启恢复耗时的时间字段。
-              const persistedTime =
-                persistedMessageTimes[messageId] ?? persistedMessageTimeOrder[index]
-              const startAt = toDate(persistedTime?.start_at) ?? fallbackTime
-              const endAt = toDate(persistedTime?.end_at) ?? startAt
+                const messageId =
+                  typeof msg.id === "string" ? msg.id : msg.kwargs?.id || `msg-${index}`
+                const fallbackTime = new Date()
+                // 这里只按 id 恢复。顺序兜底必须在内部 goal prompt 过滤/归一化之后再套用，
+                // 否则 checkpoint 里不可见的 [Starting/Continuing active goal] 会挤占
+                // messageTimeOrder 的下标，导致重启后可见消息和 goal 状态卡片错位。
+                const persistedTime = persistedMessageTimes[messageId]
+                const startAt = toDate(persistedTime?.start_at) ?? fallbackTime
+                const endAt = toDate(persistedTime?.end_at) ?? startAt
 
-              return {
-                id: messageId,
-                role,
-                content,
-                tool_calls: msg.tool_calls as Message["tool_calls"],
-                ...(role === "tool" && msg.tool_call_id && { tool_call_id: msg.tool_call_id }),
-                ...(role === "tool" && msg.name && { name: msg.name }),
-                created_at: new Date(),
-                start_at: startAt,
-                end_at: endAt
-              }
-            })
-            actions.setMessages(messages)
+                return {
+                  id: messageId,
+                  role,
+                  content,
+                  tool_calls: (msg.tool_calls ?? msg.kwargs?.tool_calls) as Message["tool_calls"],
+                  ...(role === "tool" &&
+                    (msg.tool_call_id || msg.kwargs?.tool_call_id) && {
+                      tool_call_id: msg.tool_call_id || msg.kwargs?.tool_call_id
+                    }),
+                  ...(role === "tool" &&
+                    (msg.name || msg.kwargs?.name) && { name: msg.name || msg.kwargs?.name }),
+                  created_at: startAt,
+                  start_at: startAt,
+                  end_at: endAt
+                }
+              })
+
+            const visibleRestoredMessages = rawRestoredMessages
+              .map(normalizeRestoredGoalPromptMessage)
+              .filter((message): message is Message => Boolean(message))
+            restoredMessages = restoreVisibleMessageTimes(
+              visibleRestoredMessages,
+              persistedMessageTimes,
+              persistedMessageTimeOrder
+            )
           }
 
           if (channelValues?.todos && Array.isArray(channelValues.todos)) {
@@ -1064,6 +1186,20 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         }
       } catch (error) {
         console.error("[ThreadContext] Failed to load thread history:", error)
+      }
+
+      try {
+        const goalEvents = await window.api.threads.getGoalEvents(threadId)
+        const goalMessages: Message[] = goalEvents.flatMap(goalEventToDisplayMessages)
+        if (goalMessages.length > 0) {
+          restoredMessages = mergeGoalNoticeMessagesForRestore(restoredMessages, goalMessages)
+        }
+      } catch (error) {
+        console.error("[ThreadContext] Failed to load goal events:", error)
+      }
+
+      if (restoredMessages.length > 0) {
+        actions.setMessages(restoredMessages)
       }
 
       updateThreadState(threadId, () => ({ historyLoading: false }))
@@ -1300,7 +1436,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             _orchestratorRequestId: req.id,
             _retryReason: req.retry_reason,
             _approvalTypes: req.allowed_approval_types
-          } as any
+          } as unknown as HITLRequest
         }))
         // Auto-switch to this thread so the approval UI is visible
         const currentId = useAppStore.getState().currentThreadId

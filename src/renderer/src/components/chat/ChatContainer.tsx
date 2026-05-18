@@ -72,11 +72,15 @@ import {
 import { insertLog, updateMMJUserInfo } from "../../../js/mmjUtils"
 import { toast } from "sonner"
 import { SlashCommandPopover } from "@/features/slash-commands/SlashCommandPopover"
-import { useSlashCommands } from "@/features/slash-commands/useSlashCommands"
+import { useSlashCommands, type SlashCommandItem } from "@/features/slash-commands/useSlashCommands"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
 import { formatSkillUseBlock, parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
 import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
 import { DEFAULT_SCENE_CATEGORY, SCENE_CATEGORY_OPTIONS } from "@/lib/skill-data-service"
+import {
+  isInternalGoalPromptMessage,
+  orderGoalNoticeMessagesForDisplay
+} from "@/lib/goal-notice-messages"
 import { groupWelcomeSkills } from "./skill-grouping"
 
 type WelcomeSkillCard = {
@@ -1504,11 +1508,6 @@ export function ChatContainer({
           role = "tool" // ✅ 修复: tool 不应映射为 assistant
         else if (streamMsg.type === "ai") role = "assistant"
 
-        nextMessageTimes[streamMsg.id] = {
-          start_at: trackedTime.start_at.toISOString(),
-          end_at: trackedTime.end_at.toISOString()
-        }
-
         const storeMsg: Message = {
           id: streamMsg.id,
           role,
@@ -1520,6 +1519,12 @@ export function ChatContainer({
           created_at: new Date(),
           start_at: trackedTime.start_at,
           end_at: trackedTime.end_at
+        }
+        if (isInternalGoalPromptMessage(storeMsg)) return
+
+        nextMessageTimes[streamMsg.id] = {
+          start_at: trackedTime.start_at.toISOString(),
+          end_at: trackedTime.end_at.toISOString()
         }
         appendMessage(storeMsg)
       })
@@ -1594,17 +1599,19 @@ export function ChatContainer({
       })
 
     // Clean up attachment XML tags in user messages for display
-    const allMessages = [...threadMessages, ...streamingMsgs].map((msg) => {
-      const storedTime = messageTimes[msg.id]
-      const startAt = toDate(storedTime?.start_at) ?? msg.start_at ?? msg.created_at
-      const endAt = toDate(storedTime?.end_at) ?? msg.end_at ?? startAt
-      return {
-        ...msg,
-        start_at: startAt,
-        end_at: endAt
-      }
-    })
-    return allMessages.map((msg) => {
+    const allMessages = [...threadMessages, ...streamingMsgs]
+      .filter((msg) => !isInternalGoalPromptMessage(msg))
+      .map((msg) => {
+        const storedTime = messageTimes[msg.id]
+        const startAt = toDate(storedTime?.start_at) ?? msg.start_at ?? msg.created_at
+        const endAt = toDate(storedTime?.end_at) ?? msg.end_at ?? startAt
+        return {
+          ...msg,
+          start_at: startAt,
+          end_at: endAt
+        }
+      })
+    const cleanedMessages = allMessages.map((msg) => {
       if (
         msg.role !== "user" ||
         typeof msg.content !== "string" ||
@@ -1631,6 +1638,7 @@ export function ChatContainer({
         fileNames.length > 0 ? `${fileNames.join("\n")}\n\n${textOnly}`.trim() : textOnly
       return { ...msg, content: cleaned }
     })
+    return orderGoalNoticeMessagesForDisplay(cleanedMessages)
   }, [threadMessages, streamData.messages, messageTimes])
 
   const assistantDurationsByMessageId = useMemo(() => {
@@ -1881,7 +1889,7 @@ export function ChatContainer({
   // enable/disable changes reflect without an app restart.
   const slashPopoverKind = slash.mode.kind
   useEffect(() => {
-    if (slashPopoverKind === "skill") {
+    if (slashPopoverKind === "slash") {
       void loadSkills()
     }
   }, [slashPopoverKind, loadSkills])
@@ -1900,6 +1908,22 @@ export function ChatContainer({
     [setInput, slashResetSelection, setSelectedSkill]
   )
 
+  const applySlashCommand = useCallback(
+    (command: SlashCommandItem) => {
+      const nextInput = command.insertText
+      setInput(nextInput)
+      slashResetSelection()
+      requestAnimationFrame(() => {
+        const textarea = inputRef.current
+        if (!textarea) return
+        textarea.focus()
+        const cursor = nextInput.length
+        textarea.setSelectionRange(cursor, cursor)
+      })
+    },
+    [setInput, slashResetSelection]
+  )
+
   const handleSubmit = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault()
     // Defense-in-depth: every current trigger already short-circuits while the
@@ -1907,7 +1931,7 @@ export function ChatContainer({
     // popover branch returns before reaching handleSubmit. Kept here so any
     // future invoker (hotkey, programmatic call) can't accidentally ship the
     // literal "/xxx" text as a message.
-    if (slash.mode.kind === "skill") return
+    if (slash.mode.kind === "slash") return
     if ((!input.trim() && attachments.length === 0 && !selectedSkill) || inputDisabled || !stream)
       return
 
@@ -2092,8 +2116,8 @@ export function ChatContainer({
     const isComposing = e.nativeEvent.isComposing || isComposingRef.current
     if (isComposing) return
 
-    // Skill popover nav takes over keys while open.
-    if (slash.mode.kind === "skill") {
+    // Slash popover nav takes over keys while open.
+    if (slash.mode.kind === "slash") {
       if (e.key === "ArrowDown") {
         e.preventDefault()
         slash.moveSelection(1)
@@ -2110,7 +2134,15 @@ export function ChatContainer({
         return
       }
       if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") {
-        const s = slash.mode.skills[slash.selectedIdx]
+        const command = slash.mode.commands[slash.selectedIdx]
+        if (command) {
+          e.preventDefault()
+          applySlashCommand(command)
+          return
+        }
+
+        const skillIdx = slash.selectedIdx - slash.mode.commands.length
+        const s = slash.mode.skills[skillIdx]
         if (s) {
           e.preventDefault()
           applySkillSelection(s)
@@ -3610,6 +3642,7 @@ export function ChatContainer({
             mode={slash.mode}
             selectedIdx={slash.selectedIdx}
             onHoverIdx={slash.setSelectedIdx}
+            onSelectCommand={applySlashCommand}
             onSelectSkill={applySkillSelection}
             skillsLoading={skillsLoading}
           />
@@ -3774,7 +3807,7 @@ export function ChatContainer({
                         disabled={
                           inputDisabled ||
                           (!input.trim() && attachments.length === 0 && !selectedSkill) ||
-                          slash.mode.kind === "skill"
+                          slash.mode.kind === "slash"
                         }
                         className="flex items-center justify-center size-7 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                       >

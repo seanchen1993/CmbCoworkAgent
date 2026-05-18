@@ -171,6 +171,13 @@ interface CustomAPI {
     update: (threadId: string, updates: Partial<Thread>) => Promise<Thread>
     delete: (threadId: string) => Promise<void>
     getHistory: (threadId: string) => Promise<unknown[]>
+    getGoalEvents: (threadId: string) => Promise<Array<{
+      event_id: number
+      thread_id: string
+      goal_id: string | null
+      message: string
+      created_at: Date
+    }>>
     generateTitle: (message: string) => Promise<string>
     onThreadsChanged: (callback: () => void) => () => void
   }
@@ -179,6 +186,8 @@ interface CustomAPI {
     listProviders: () => Promise<Provider[]>
     getDefault: () => Promise<string>
     setDefault: (modelId: string) => Promise<void>
+    getGoalSettings: () => Promise<{ evaluatorModelId?: string }>
+    setGoalSettings: (settings: { evaluatorModelId?: string }) => Promise<void>
     getTokenLimits: () => Promise<{
       defaultMaxTokens: number
       minMaxTokens: number

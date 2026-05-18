@@ -176,6 +176,27 @@ const api = {
     getHistory: (threadId: string): Promise<unknown[]> => {
       return ipcRenderer.invoke("threads:history", threadId)
     },
+    getGoalEvents: (
+      threadId: string
+    ): Promise<
+      Array<{
+        event_id: number
+        thread_id: string
+        goal_id: string | null
+        message: string
+        created_at: Date
+      }>
+    > => {
+      return ipcRenderer.invoke("threads:goalEvents", threadId) as Promise<
+        Array<{
+          event_id: number
+          thread_id: string
+          goal_id: string | null
+          message: string
+          created_at: Date
+        }>
+      >
+    },
     generateTitle: (message: string): Promise<string> => {
       return ipcRenderer.invoke("threads:generateTitle", message)
     },
@@ -201,6 +222,12 @@ const api = {
     },
     setDefault: (modelId: string): Promise<void> => {
       return ipcRenderer.invoke("models:setDefault", modelId)
+    },
+    getGoalSettings: (): Promise<{ evaluatorModelId?: string }> => {
+      return ipcRenderer.invoke("models:getGoalSettings") as Promise<{ evaluatorModelId?: string }>
+    },
+    setGoalSettings: (settings: { evaluatorModelId?: string }): Promise<void> => {
+      return ipcRenderer.invoke("models:setGoalSettings", settings) as Promise<void>
     },
     getTokenLimits: (): Promise<{
       defaultMaxTokens: number

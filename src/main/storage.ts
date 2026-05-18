@@ -702,6 +702,39 @@ interface StoredCustomModelRecord {
 const CUSTOM_MODEL_FILE = join(OPENWORK_DIR, "custom-model.json")
 const CUSTOM_MODELS_FILE = join(OPENWORK_DIR, "custom-models.json")
 const USERINFO_MODELS_FILE = join(OPENWORK_DIR, "userinfo-models.json")
+const GOAL_SETTINGS_FILE = join(OPENWORK_DIR, "goal-settings.json")
+
+export interface GoalSettings {
+  /**
+   * Optional model used by the goal evaluator.
+   * Empty / undefined means "use the current effective chat model".
+   */
+  evaluatorModelId?: string
+}
+
+export function getGoalSettings(): GoalSettings {
+  getOpenworkDir()
+  if (!existsSync(GOAL_SETTINGS_FILE)) return {}
+  try {
+    const parsed = JSON.parse(readFileSync(GOAL_SETTINGS_FILE, "utf-8")) as unknown
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {}
+    const evaluatorModelId = (parsed as { evaluatorModelId?: unknown }).evaluatorModelId
+    return typeof evaluatorModelId === "string" && evaluatorModelId.trim()
+      ? { evaluatorModelId: evaluatorModelId.trim() }
+      : {}
+  } catch {
+    return {}
+  }
+}
+
+export function setGoalSettings(settings: GoalSettings): void {
+  getOpenworkDir()
+  const evaluatorModelId = settings.evaluatorModelId?.trim()
+  writeFileSync(
+    GOAL_SETTINGS_FILE,
+    JSON.stringify(evaluatorModelId ? { evaluatorModelId } : {}, null, 2)
+  )
+}
 
 function normalizeMaxTokens(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
