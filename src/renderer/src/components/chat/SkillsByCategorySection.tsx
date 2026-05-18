@@ -41,7 +41,7 @@ interface SkillsByCategorySectionProps {
   skills: SkillMetadata[]
   previewLimit: number
   onOpenMarketByCategory: (category: string) => void
-  onOpenOrganizationSkillMarket: () => void
+  onOpenOrganizationSkillMarket: (skillName?: string) => void
   onOpenMarketBySkill: (skillName: string) => void
   onUseSkillPrompt: (skill: SkillMetadata, label?: string) => void
 }
@@ -495,10 +495,15 @@ export function SkillsByCategorySection({
             </Button>
             <Button
               onClick={() => {
-                const skillName = installPromptItem?.marketItem.name
+                const marketItem = installPromptItem?.marketItem
+                const skillName = marketItem?.name
                 if (!skillName) return
                 setInstallPromptItem(null)
-                onOpenMarketBySkill(skillName)
+                if (marketItem?.type === "orgSkill") {
+                  onOpenOrganizationSkillMarket(skillName)
+                } else {
+                  onOpenMarketBySkill(skillName)
+                }
               }}
             >
               <ShoppingBag className="mr-2 size-4" />

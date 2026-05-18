@@ -556,6 +556,7 @@ export function MarketPanel(): React.JSX.Element {
   const [skillSortMode, setSkillSortMode] = useState<SkillSortMode>("calls_desc")
   const [selectedItemKey, setSelectedItemKey] = useState<string | null>(null)
   const [selectedItemSnapshot, setSelectedItemSnapshot] = useState<MarketItem | null>(null)
+  const [pendingOrgSkillDetailName, setPendingOrgSkillDetailName] = useState<string | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState<string | null>(null)
   const [skillDetailSkill, setSkillDetailSkill] = useState<SkillMetadata | null>(null)
@@ -580,6 +581,7 @@ export function MarketPanel(): React.JSX.Element {
   const installedPluginsRef = useRef<string[]>([])
   const updateNoticeShownRef = useRef<Set<string>>(new Set())
   const openItemDetailRef = useRef<(item: MarketItem) => Promise<void>>(async () => {})
+  const previousActiveTabRef = useRef<MarketItemType>(activeTab)
   const currentUserCandidateSet = useMemo(
     () => new Set(currentUserUploadCandidates),
     [currentUserUploadCandidates]
@@ -868,15 +870,23 @@ export function MarketPanel(): React.JSX.Element {
 
   useEffect(() => {
     if (marketInitialTab) {
+      const detailName = marketInitialSkillDetailName?.trim() || null
       setActiveTab(marketInitialTab as MarketItemType)
       setDetailMode("list")
       setSelectedItemKey(null)
       setSelectedItemSnapshot(null)
+      setPendingOrgSkillDetailName(marketInitialTab === "orgSkill" ? detailName : null)
       resetDetailState()
       setCategoryFilter(null)
       setPendingInitialCategoryFilter(null)
-      setSearchQuery("")
-      useAppStore.setState({ marketInitialTab: null })
+      setSearchQuery(detailName || "")
+      useAppStore.setState({
+        marketInitialTab: null,
+        marketInitialSkillDetailName: null,
+        marketInitialSkillCategory: null,
+        marketInitialSkillSearchQuery: null,
+        marketInitialSkillFilters: null
+      })
       return
     }
 
@@ -1190,9 +1200,14 @@ export function MarketPanel(): React.JSX.Element {
   }, [activeTab, reloadToken])
 
   useEffect(() => {
+    const previousActiveTab = previousActiveTabRef.current
+    previousActiveTabRef.current = activeTab
     setDetailMode("list")
     setSelectedItemKey(null)
     setSelectedItemSnapshot(null)
+    if (previousActiveTab === "orgSkill" && activeTab !== "orgSkill") {
+      setPendingOrgSkillDetailName(null)
+    }
     resetDetailState()
     setCategoryFilter(null)
   }, [activeTab])
@@ -2349,6 +2364,12 @@ export function MarketPanel(): React.JSX.Element {
                       downloadingItems={downloadingItems}
                       onOpenDetail={openItemDetail}
                       onDownload={handleDownload}
+                      initialDetailName={pendingOrgSkillDetailName}
+                      onInitialDetailReady={(item) => {
+                        console.log(item ,'hehe...')
+                        void openItemDetailRef.current(item)
+                      }}
+                      onInitialDetailConsumed={() => setPendingOrgSkillDetailName(null)}
                     />
                   ) : loading ? (
                     <div className="flex flex-col items-center justify-center py-16 text-[#87867f]">

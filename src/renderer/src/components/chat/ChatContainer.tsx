@@ -2725,16 +2725,19 @@ export function ChatContainer({
     [setShowCustomizeView]
   )
 
-  const handleOpenOrganizationSkillMarket = useCallback((): void => {
-    useAppStore.setState({
-      marketInitialTab: "orgSkill",
-      marketInitialSkillCategory: null,
-      marketInitialSkillFilters: null,
-      marketInitialSkillSearchQuery: null,
-      marketInitialSkillDetailName: null
-    })
-    setShowCustomizeView(true, "market")
-  }, [setShowCustomizeView])
+  const handleOpenOrganizationSkillMarket = useCallback(
+    (skillName?: string): void => {
+      useAppStore.setState({
+        marketInitialTab: "orgSkill",
+        marketInitialSkillCategory: null,
+        marketInitialSkillFilters: null,
+        marketInitialSkillSearchQuery: null,
+        marketInitialSkillDetailName: skillName || null
+      })
+      setShowCustomizeView(true, "market")
+    },
+    [setShowCustomizeView]
+  )
 
   const programmingSkillCards = useMemo(() => {
     const source = showAllProgrammingSkills ? programmingSkills : programmingSkills.slice(0, 8)
