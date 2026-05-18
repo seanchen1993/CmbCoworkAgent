@@ -1946,17 +1946,17 @@ type SandboxMode = "none" | "unelevated" | "readonly" | "elevated"
 
 function readSandboxSettings(): { mode: SandboxMode; yolo: boolean; nuxCompleted: boolean } {
   if (!existsSync(SANDBOX_SETTINGS_FILE))
-    return { mode: "unelevated", yolo: false, nuxCompleted: false }
+    return { mode: "none", yolo: false, nuxCompleted: true }
   try {
     const parsed = JSON.parse(readFileSync(SANDBOX_SETTINGS_FILE, "utf-8"))
     return {
-      mode: SANDBOX_MODES.has(parsed.mode) ? parsed.mode : "unelevated",
+      mode: SANDBOX_MODES.has(parsed.mode) ? parsed.mode : "none",
       yolo: parsed.yolo === true,
-      nuxCompleted: parsed.nuxCompleted === true
+      nuxCompleted: parsed.nuxCompleted !== false
     }
   } catch (err) {
     console.warn("[Storage] Failed to load sandbox settings:", err)
-    return { mode: "unelevated", yolo: false, nuxCompleted: false }
+    return { mode: "none", yolo: false, nuxCompleted: true }
   }
 }
 
