@@ -173,6 +173,11 @@ const api = {
     delete: (threadId: string): Promise<void> => {
       return ipcRenderer.invoke("threads:delete", threadId)
     },
+    exportSession: (
+      threadId: string
+    ): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> => {
+      return ipcRenderer.invoke("threads:exportSession", threadId)
+    },
     getHistory: (threadId: string): Promise<unknown[]> => {
       return ipcRenderer.invoke("threads:history", threadId)
     },

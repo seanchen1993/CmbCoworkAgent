@@ -226,6 +226,9 @@ interface CustomAPI {
     create: (metadata?: Record<string, unknown>) => Promise<Thread>
     update: (threadId: string, updates: Partial<Thread>) => Promise<Thread>
     delete: (threadId: string) => Promise<void>
+    exportSession: (
+      threadId: string
+    ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
     getHistory: (threadId: string) => Promise<unknown[]>
     generateTitle: (message: string) => Promise<string>
     onThreadsChanged: (callback: () => void) => () => void
