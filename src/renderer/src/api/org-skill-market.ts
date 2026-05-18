@@ -255,7 +255,7 @@ function mapOrgSkillItem(item: OrgSkillApiItem): MarketItem {
     tag: item.sourceOriginName || item.sourceOrigin || undefined,
     featured: "",
     version: normalizeOrgSkillVersionName(latestVersion?.name),
-    user_id: managerParts.join(" / "),
+    user_id: managerParts.join("-"),
     guidance: item.description || "",
     orgSkillId: latestVersion?.skillId ?? item.id,
     orgSkillVersionId: latestVersion?.id,
