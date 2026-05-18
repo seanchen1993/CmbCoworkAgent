@@ -14,7 +14,7 @@ interface UseGitDetectorOptions {
 }
 
 export function useGitDetector({
-  autoDetect = true,
+  autoDetect = false,
   checkInterval = 5000,
   onChangesDetected
 }: UseGitDetectorOptions = {}) {

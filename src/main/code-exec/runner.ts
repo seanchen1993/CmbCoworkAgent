@@ -1,14 +1,24 @@
 import { spawn } from "node:child_process"
-import { existsSync } from "fs"
+import fs from "node:fs/promises"
 import { join } from "path"
 import { app } from "electron"
 import type { McpCapabilityService } from "../mcp/capability-types"
+import { CODE_EXEC_DEFAULT_TIMEOUT_MS } from "./constants"
 import { CodeExecBridge } from "./bridge"
 import type { CodeExecHelperRequest, CodeExecResult, CodeExecRunner, CodeExecSession } from "./types"
 
-const DEFAULT_TIMEOUT_MS = 20_000
+const DEFAULT_TIMEOUT_MS = CODE_EXEC_DEFAULT_TIMEOUT_MS
 
-function resolveHelperEntryPath(): string {
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function resolveHelperEntryPath(): Promise<string> {
   const candidates = [
     join(__dirname, "code-exec-helper.js"),
     join(__dirname, "../code-exec-helper.js"),
@@ -18,7 +28,10 @@ function resolveHelperEntryPath(): string {
     join(process.resourcesPath, "app.asar.unpacked", "out/main/code-exec-helper.js")
   ]
 
-  const match = candidates.find((candidate) => existsSync(candidate))
+  const matches = await Promise.all(candidates.map(async (candidate) => (
+    await pathExists(candidate) ? candidate : null
+  )))
+  const match = matches.find((candidate): candidate is string => Boolean(candidate))
   if (!match) {
     throw new Error("Unable to locate bundled code_exec helper entry")
   }
@@ -34,7 +47,7 @@ export class LocalProcessRunner implements CodeExecRunner {
     const timeoutMs = Math.max(1_000, session.request.timeoutMs ?? DEFAULT_TIMEOUT_MS)
 
     try {
-      const helperPath = resolveHelperEntryPath()
+      const helperPath = await resolveHelperEntryPath()
       const bridgePayload = await bridge.start()
       const helperRequest: CodeExecHelperRequest = {
         ...bridgePayload,
@@ -48,7 +61,8 @@ export class LocalProcessRunner implements CodeExecRunner {
           ...process.env,
           ELECTRON_RUN_AS_NODE: "1"
         },
-        stdio: ["pipe", "pipe", "pipe"]
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true
       })
 
       child.stdin.end(JSON.stringify(helperRequest))

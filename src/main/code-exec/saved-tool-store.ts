@@ -2,34 +2,24 @@ import { createHash } from "crypto"
 import { existsSync, readFileSync, writeFileSync } from "fs"
 import { join } from "path"
 import { getOpenworkDir } from "../storage"
+import { CODE_EXEC_DEFAULT_TIMEOUT_MS } from "./constants"
 
 const SAVED_CODE_EXEC_TOOLS_VERSION = 1
 const SAVED_TOOL_PREFIX = "saved__"
-const DEFAULT_TIMEOUT_MS = 20_000
+const DEFAULT_TIMEOUT_MS = CODE_EXEC_DEFAULT_TIMEOUT_MS
 const SAVED_TOOL_NAME_PATTERN = /^[A-Za-z0-9_-]+$/
-
-const MAX_STRING_LENGTH = 32
-const MAX_ARRAY_ITEMS = 2
-const MAX_OBJECT_KEYS = 12
-const MAX_DEPTH = 4
-
-const OMITTED_BASE64 = "<base64 omitted>"
-const OMITTED_BLOB = "<blob omitted>"
-const OMITTED_FILE_TEXT = "<file text omitted>"
 
 export interface SavedCodeExecTool {
   toolId: string
   enabled: boolean
   description: string
   inputSchema: Record<string, unknown>
-  outputSchema?: Record<string, unknown>
   code: string
   timeoutMs: number
   createdAt: string
   updatedAt: string
   codeHash: string
   dependencies: string[]
-  resultExample?: unknown
   lastPreviewParams?: Record<string, unknown>
 }
 
@@ -37,12 +27,10 @@ export interface SavedCodeExecToolDraft {
   toolId: string
   description: string
   inputSchema: Record<string, unknown>
-  outputSchema?: Record<string, unknown>
   code: string
   timeoutMs: number
   codeHash: string
   dependencies: string[]
-  resultExample?: unknown
   lastPreviewParams?: Record<string, unknown>
 }
 
@@ -100,12 +88,31 @@ function loadStore(): SavedCodeExecToolsFile {
           .filter((entry) => {
             return Boolean(entry && typeof entry === "object" && typeof entry.toolId === "string")
           })
-          .map((entry) => ({
-            ...entry,
-            enabled: entry.enabled !== false,
-            lastPreviewParams: isRecord(entry.lastPreviewParams) ? entry.lastPreviewParams : undefined
-          }))
+          .map((entry) => {
+            const timeoutMs = Number.isInteger(entry.timeoutMs) ? entry.timeoutMs : DEFAULT_TIMEOUT_MS
+            const code = typeof entry.code === "string" ? entry.code : ""
+
+            return {
+              toolId: entry.toolId,
+              enabled: entry.enabled !== false,
+              description: typeof entry.description === "string" ? entry.description : "",
+              inputSchema: isRecord(entry.inputSchema) ? entry.inputSchema : {},
+              code,
+              timeoutMs,
+              createdAt: typeof entry.createdAt === "string" ? entry.createdAt : "",
+              updatedAt: typeof entry.updatedAt === "string" ? entry.updatedAt : "",
+              codeHash:
+                typeof entry.codeHash === "string"
+                  ? entry.codeHash
+                  : computeSavedCodeExecToolHash(code, timeoutMs),
+              dependencies: Array.isArray(entry.dependencies)
+                ? entry.dependencies.filter((dependency): dependency is string => typeof dependency === "string")
+                : [],
+              lastPreviewParams: isRecord(entry.lastPreviewParams) ? entry.lastPreviewParams : undefined
+            }
+          })
       }
+
       return storeCache
     }
   } catch (error) {
@@ -155,86 +162,8 @@ function toSnakeCase(value: string, fallback: string): string {
   return ensureIdentifier(tokens.map((part) => part.toLowerCase()).join("_"), fallback)
 }
 
-function looksLikeBase64(value: string): boolean {
-  if (value.length < 128 || value.length % 4 !== 0) return false
-  return /^[A-Za-z0-9+/=\s]+$/.test(value)
-}
-
-function truncateString(value: string): string {
-  if (value.length <= MAX_STRING_LENGTH) return value
-  return `${value.slice(0, MAX_STRING_LENGTH)}...(${value.length} chars)`
-}
-
-function sanitizeString(value: string, key?: string, parentType?: string): string {
-  const normalizedKey = key?.toLowerCase()
-
-  if (normalizedKey === "blob") return OMITTED_BLOB
-  if (normalizedKey === "data" && looksLikeBase64(value)) return OMITTED_BASE64
-  if (normalizedKey === "text" && (parentType === "resource" || parentType === "file")) {
-    return OMITTED_FILE_TEXT
-  }
-  if (looksLikeBase64(value)) return OMITTED_BASE64
-
-  return truncateString(value)
-}
-
-function sanitizeValue(
-  value: unknown,
-  context: {
-    depth: number
-    key?: string
-    parentType?: string
-  }
-): unknown {
-  if (value == null || typeof value === "boolean" || typeof value === "number") {
-    return value
-  }
-
-  if (typeof value === "string") {
-    return sanitizeString(value, context.key, context.parentType)
-  }
-
-  if (context.depth >= MAX_DEPTH) {
-    return Array.isArray(value)
-      ? `<array truncated at depth ${MAX_DEPTH}>`
-      : `<object truncated at depth ${MAX_DEPTH}>`
-  }
-
-  if (Array.isArray(value)) {
-    const items = value
-      .slice(0, MAX_ARRAY_ITEMS)
-      .map((item) => sanitizeValue(item, { depth: context.depth + 1, parentType: context.parentType }))
-
-    if (value.length > MAX_ARRAY_ITEMS) {
-      items.push(`<${value.length - MAX_ARRAY_ITEMS} more items>`)
-    }
-
-    return items
-  }
-
-  if (typeof value === "object") {
-    const record = value as Record<string, unknown>
-    const parentType = typeof record.type === "string" ? record.type : context.parentType
-    const keys = Object.keys(record)
-    const entries = keys
-      .slice(0, MAX_OBJECT_KEYS)
-      .map((key) => [
-        key,
-        sanitizeValue(record[key], { depth: context.depth + 1, key, parentType })
-      ] as const)
-
-    if (keys.length > MAX_OBJECT_KEYS) {
-      entries.push(["__truncated_keys__", `<${keys.length - MAX_OBJECT_KEYS} more keys>`])
-    }
-
-    return Object.fromEntries(entries)
-  }
-
-  return String(value)
-}
-
 function inferSchema(value: unknown, depth = 0): Record<string, unknown> {
-  if (depth >= MAX_DEPTH) {
+  if (depth >= 4) {
     return {}
   }
 
@@ -357,13 +286,6 @@ export function parseCodeExecOutputValue(output: string): unknown {
   }
 }
 
-export function buildSavedCodeExecResultExample(data: unknown): unknown {
-  return {
-    ok: true,
-    data: sanitizeValue(data, { depth: 0, key: "data" })
-  }
-}
-
 function buildSavedCodeExecToolId(
   store: SavedCodeExecToolsFile,
   input: SavedCodeExecToolIdOptions
@@ -382,11 +304,9 @@ export function buildSavedCodeExecToolDraft(input: {
   toolName: string
   description: string
   inputSchema: Record<string, unknown>
-  outputSchema?: Record<string, unknown>
   code: string
   timeoutMs?: number
   dependencies: string[]
-  resultExample?: unknown
   lastPreviewParams?: Record<string, unknown>
 }): SavedCodeExecToolDraft {
   const store = loadStore()
@@ -399,12 +319,10 @@ export function buildSavedCodeExecToolDraft(input: {
     }),
     description: input.description,
     inputSchema: input.inputSchema,
-    outputSchema: input.outputSchema,
     code: input.code,
     timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     codeHash,
     dependencies: input.dependencies,
-    resultExample: input.resultExample,
     lastPreviewParams: input.lastPreviewParams
   }
 }
@@ -422,14 +340,12 @@ export function persistSavedCodeExecTool(draft: SavedCodeExecToolDraft): SavedCo
     enabled: false,
     description: draft.description,
     inputSchema: draft.inputSchema,
-    outputSchema: draft.outputSchema,
     code: draft.code,
     timeoutMs: draft.timeoutMs,
     createdAt: now,
     updatedAt: now,
     codeHash: draft.codeHash,
     dependencies: draft.dependencies,
-    resultExample: draft.resultExample,
     lastPreviewParams: draft.lastPreviewParams
   }
 

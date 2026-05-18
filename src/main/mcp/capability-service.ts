@@ -5,6 +5,7 @@ import { buildMcpServerConfig } from "../ipc/mcp"
 import { getEnabledMcpConnectors, getPlugins, getUserInfo, parseMcpJsonFile } from "../storage"
 import type { PluginMcpServerConfig } from "../types"
 import { buildAliasMaps, buildCapabilityAliases, type McpCapabilitySeed } from "./aliasing"
+import { resolveMcpConnectorKind } from "./connector-kind"
 import type {
   McpCapabilityAliasMaps,
   McpCapabilityService,
@@ -55,14 +56,17 @@ function toPluginSources(): CapabilitySource[] {
 
 function buildPluginServerConfig(config: PluginMcpServerConfig): Record<string, unknown> {
   if (config.command) {
-    return {
+    return buildMcpServerConfig({
+      kind: "stdio",
       command: config.command,
-      args: config.args ?? []
-    }
+      args: config.args,
+      env: config.env
+    })
   }
 
   if (config.url) {
     return buildMcpServerConfig({
+      kind: "remote",
       url: config.url,
       advanced: {
         headers: config.headers,
@@ -77,24 +81,36 @@ function buildPluginServerConfig(config: PluginMcpServerConfig): Record<string, 
 function toConnectorSources(): CapabilitySource[] {
   const userInfo = getUserInfo()
 
-  return getEnabledMcpConnectors().map((connector) => ({
-    kind: "connector" as const,
-    providerKey: connector.id,
-    providerDisplayName: connector.name || connector.id,
-    visibility: connector.lazyLoad ? "lazy" : "eager",
-    serverConfig: buildMcpServerConfig({
-      url: connector.url,
-      advanced: {
-        ...connector.advanced,
-        headers: {
-          ...connector.advanced?.headers,
-          yst_id_token: userInfo?.ystIdToken || "",
-          sap_id: userInfo?.sapId || "",
-          name: encodeURIComponent(userInfo?.userName || "")
-        }
-      }
-    })
-  }))
+  return getEnabledMcpConnectors().map((connector) => {
+    const isStdio = resolveMcpConnectorKind(connector) === "stdio"
+
+    return {
+      kind: "connector" as const,
+      providerKey: connector.id,
+      providerDisplayName: connector.name || connector.id,
+      visibility: connector.lazyLoad ? "lazy" : "eager",
+      serverConfig: isStdio
+        ? buildMcpServerConfig({
+            kind: "stdio",
+            command: connector.command,
+            args: connector.args,
+            env: connector.env
+          })
+        : buildMcpServerConfig({
+            kind: "remote",
+            url: connector.url,
+            advanced: {
+              ...connector.advanced,
+              headers: {
+                ...connector.advanced?.headers,
+                yst_id_token: userInfo?.ystIdToken || "",
+                sap_id: userInfo?.sapId || "",
+                name: encodeURIComponent(userInfo?.userName || "")
+              }
+            }
+          })
+    }
+  })
 }
 
 function buildFingerprint(sources: CapabilitySource[]): string {
@@ -111,6 +127,31 @@ function buildFingerprint(sources: CapabilitySource[]): string {
   )
 
   return createHash("sha256").update(payload).digest("hex")
+}
+
+function shouldRetryMcpInvocationError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return (
+    message.includes("terminated") ||
+    message.includes("disconnected") ||
+    message.includes("ECONN")
+  )
+}
+
+async function invokeToolWithRetry(
+  callTool: (request: { name: string; arguments: Record<string, unknown> }) => Promise<unknown>,
+  request: { name: string; arguments: Record<string, unknown> },
+  retries = 1
+): Promise<unknown> {
+  try {
+    return await callTool(request)
+  } catch (error) {
+    if (retries <= 0 || !shouldRetryMcpInvocationError(error)) {
+      throw error
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    return invokeToolWithRetry(callTool, request, retries - 1)
+  }
 }
 
 async function listServerTools(
@@ -169,14 +210,17 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
       throw new Error(`MCP client is unavailable for provider ${tool.providerDisplayName}`)
     }
 
-    const raw = await (serverClient as {
-      callTool(
-        request: { name: string; arguments: Record<string, unknown> }
-      ): Promise<unknown>
-    }).callTool({
-      name: tool.toolName,
-      arguments: args
-    })
+    const raw = await invokeToolWithRetry(
+      (serverClient as {
+        callTool(
+          request: { name: string; arguments: Record<string, unknown> }
+        ): Promise<unknown>
+      }).callTool.bind(serverClient),
+      {
+        name: tool.toolName,
+        arguments: args
+      }
+    )
 
     const result = normalizeMcpInvocationResult(tool.capabilityId, raw)
 

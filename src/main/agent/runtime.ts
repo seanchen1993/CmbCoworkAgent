@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
+// Runtime: agent lifecycle and middleware orchestration
 import {
   createFilesystemMiddleware,
   createSubAgentMiddleware,
@@ -6,32 +7,50 @@ import {
   createSkillsMiddleware,
   createMemoryMiddleware,
   createSummarizationMiddleware,
+  GENERAL_PURPOSE_SUBAGENT,
   StateBackend
 } from "deepagents"
 import {
   getThreadCheckpointPath,
   getEnabledSkillsSources,
+  getEnabledSkillMiddlewareSources,
   getCustomModelConfigs,
   getUserInfo,
   isMemoryEnabled,
   getSkillEvolutionThreshold as getStoredSkillEvolutionThreshold,
   DEFAULT_MAX_TOKENS,
-  getEnabledPluginSkillsSources
+  DEFAULT_MAX_OUTPUT_TOKENS,
+  DEFAULT_TEMPERATURE,
+  getEnabledPluginSkillSourceMetadata,
+  getEnabledPluginSkillMiddlewareSources,
+  getPlugins,
+  getDisabledSkillDirs
 } from "../storage"
 
 import { ChatOpenAI } from "@langchain/openai"
-import { DynamicStructuredTool } from "@langchain/core/tools"
+import { DynamicStructuredTool, ToolInputParsingException } from "@langchain/core/tools"
 import { SqlJsSaver } from "../checkpointer/sqljs-saver"
-import { LocalSandbox } from "./local-sandbox"
+import { LocalSandbox, type SkillHookContextProvider } from "./local-sandbox"
+import { SkillLifecycleRegistry } from "./skill-lifecycle/registry"
+import type { SkillUseTracker } from "./skill-lifecycle/tracker"
+import type { AgentFileMutationKind } from "../services/agent-auto-commit"
+import type { HookResultCallback } from "../hooks/runner"
 import {
   createAgent,
+  createMiddleware,
+  MiddlewareError,
   ReactAgent,
   SystemMessage,
+  ToolInvocationError,
   todoListMiddleware,
   anthropicPromptCachingMiddleware,
-  humanInTheLoopMiddleware
+  humanInTheLoopMiddleware,
+  tool as lcTool
 } from "langchain"
+import { ToolMessage } from "@langchain/core/messages"
 import { Runnable } from "@langchain/core/runnables"
+import { isGraphBubbleUp } from "@langchain/langgraph"
+import { z } from "zod"
 
 import type * as _lcTypes from "langchain"
 import type * as _lcMessages from "@langchain/core/messages"
@@ -40,8 +59,8 @@ import type * as _lcZodTypes from "@langchain/core/utils/types"
 
 import path from "path"
 import { join, resolve, delimiter } from "path"
-import { existsSync, createWriteStream, statSync, unlinkSync } from "fs"
-import { createReadStream } from "fs"
+import { createWriteStream, createReadStream } from "fs"
+import fs from "fs/promises"
 import { createGunzip } from "zlib"
 import { pipeline } from "stream/promises"
 import { app, BrowserWindow } from "electron"
@@ -59,10 +78,30 @@ import { getThread } from "../db/index"
 import { createPlaywrightTool } from "./tools/playwright-tool"
 import { createToolSearchTools } from "./tools/tool-search-tool"
 import { createCodeExecTool } from "./tools/code-exec-tool"
+import { createToolHookMiddleware } from "./tool-hooks"
 import { listSavedCodeExecTools } from "../code-exec/saved-tool-store"
-import { getWindowsSandboxMode, getYoloMode, getEnabledHooks, isCodeExecEnabled } from "../storage"
+import {
+  getWindowsSandboxMode,
+  getYoloMode,
+  getEnabledHooks,
+  isCodeExecEnabled,
+  getLspConfig
+} from "../storage"
+import { runHooks } from "../hooks/runner"
+import type { HookContext } from "../hooks/runner"
+import type { HookEvent, HookResult } from "../hooks/types"
+import { runHooksEnriched } from "../hooks/required-skill"
+import { isHookHaltError, throwIfHookHalt } from "../hooks/halt"
+import { mergeUpdatedInput } from "../hooks/updated-input"
+import {
+  createHookScope,
+  extractPluginIdFromProviderKey,
+  resolveEnabledHooksForRun,
+  type HookScopeController
+} from "../hooks/scope"
 import { ApprovalStore } from "./approval-store"
 import { ToolOrchestrator } from "./tool-orchestrator"
+import { classifyCommandConcurrency } from "./exec-policy"
 import type { ApprovalRequest, ApprovalDecision } from "../types"
 import type { McpCapabilityService, McpCapabilityTool } from "../mcp/capability-types"
 import {
@@ -71,16 +110,26 @@ import {
 } from "../mcp/capability-service"
 import { createEagerMcpTool } from "../mcp/langchain-tool"
 import { InterleavedThinkingChatOpenAICompletions } from "./interleaved-thinking-completions"
+import { createLspTool } from "./tools/lsp-tool"
+import { detectJavaProject } from "../lsp"
+import {
+  DEFAULT_AGENTS_MAX_BYTES,
+  DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
+  loadAgentsPromptForWorkspace
+} from "./agents-md"
+import { patchRuntimeReadFileTool } from "./read-file-tool"
 
 /** Decompress codex.exe.gz → codex.exe if needed (re-extract if .gz is newer than .exe). */
 async function ensureCodexExe(exePath: string): Promise<void> {
   const gzPath = exePath + ".gz"
-  if (!existsSync(gzPath)) return
-  if (existsSync(exePath)) {
+  const gzStat = await fs.stat(gzPath).catch(() => null)
+  if (!gzStat) return
+  const exeStat = await fs.stat(exePath).catch(() => null)
+  if (exeStat) {
     // Skip if exe is up-to-date (gz not newer)
-    if (statSync(exePath).mtimeMs >= statSync(gzPath).mtimeMs) return
+    if (exeStat.mtimeMs >= gzStat.mtimeMs) return
     // gz is newer — remove stale exe before re-extracting
-    try { unlinkSync(exePath) } catch { /* ignore */ }
+    await fs.unlink(exePath).catch(() => {})
   }
   try {
     await pipeline(createReadStream(gzPath), createGunzip(), createWriteStream(exePath))
@@ -90,14 +139,237 @@ async function ensureCodexExe(exePath: string): Promise<void> {
   }
 }
 
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath)
+    return true
+  } catch {
+    return false
+  }
+}
+
 // ── Pending Approvals (shared between orchestrator and IPC) ──
 
 /** Map of pending approval promises keyed by request ID. */
-export const pendingApprovals = new Map<string, {
-  resolve: (decision: ApprovalDecision) => void
-  request: ApprovalRequest
-  targetWebContentsIds: number[]
-}>()
+export const pendingApprovals = new Map<
+  string,
+  {
+    resolve: (decision: ApprovalDecision) => void
+    request: ApprovalRequest
+    targetWebContentsIds: number[]
+  }
+>()
+
+// ─── Tool concurrency: AsyncRWLock (writer-preferring) ──────────────────────
+//
+// Mirrors Codex's `ToolCallRuntime` model (codex-rs/core/src/tools/parallel.rs):
+//   - shared (read lock): tools that are safe to run concurrently (reads)
+//   - exclusive (write lock): side-effecting tools that must run alone
+//   - bypass: tools we have no classification for — pass through without locking
+//
+// Approval events are NOT serialized by this lock — they fire immediately from
+// each tool task. The renderer's pendingApprovals[] queue owns UI ordering.
+// Execution is what this lock gates.
+
+type ToolConcurrencyTier = "exclusive" | "shared" | "bypass"
+
+/**
+ * Tools that mutate cross-tool shared state (tool registry, scheduler, skill
+ * files, subagent slots). These must run one-at-a-time across the entire
+ * thread — write lock.
+ *
+ * Note: mutating shell / file I/O tools are also exclusive. Only commands that
+ * are provably read-only are allowed to overlap with other read-only work.
+ */
+const EXCLUSIVE_TOOL_NAMES = new Set([
+  "code_exec",
+  "prepare_save_code_exec_tool",
+  "save_code_exec_tool",
+  "browser_playwright",
+  "manage_scheduler",
+  "manage_skill",
+  "task",
+  "invoke_deferred_tool",
+  "write_file",
+  "edit_file"
+])
+
+/**
+ * Tools that hold the read lock. This includes:
+ *   - True read-only tools (read_file, grep, glob, …)
+ *   - `execute` only when its command is classified as read-only. Other
+ *     commands are exclusive so writes/builds/package managers do not overlap.
+ */
+const SHARED_TOOL_NAMES = new Set([
+  // True read-only
+  "read_file",
+  "ls",
+  "glob",
+  "grep",
+  "search_tool",
+  "inspect_tool",
+  "task_output",
+  "view_image"
+])
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+}
+
+function executeCommandFromToolArgs(args: unknown): string | null {
+  if (isRecord(args) && typeof args.command === "string") {
+    return args.command
+  }
+  if (typeof args === "string") {
+    try {
+      const parsed = JSON.parse(args) as unknown
+      if (isRecord(parsed) && typeof parsed.command === "string") {
+        return parsed.command
+      }
+    } catch {
+      return null
+    }
+  }
+  return null
+}
+
+function classifyToolConcurrency(
+  toolCall: { name?: string; args?: unknown } | undefined
+): ToolConcurrencyTier {
+  const toolName = toolCall?.name
+  if (!toolName) return "exclusive" // safety default: unknown → write lock
+
+  if (EXCLUSIVE_TOOL_NAMES.has(toolName)) return "exclusive"
+  if (toolName === "execute") {
+    const command = executeCommandFromToolArgs(toolCall?.args)
+    return command && classifyCommandConcurrency(command) === "parallel_safe"
+      ? "shared"
+      : "exclusive"
+  }
+  if (SHARED_TOOL_NAMES.has(toolName)) return "shared"
+  // Unknown tools (eager MCP tools registered with runtime toolId names,
+  // dynamic plugin tools, custom extras) default to EXCLUSIVE. This matches
+  // Codex's `configured_tool_supports_parallel` default (false). Opting in
+  // to `shared` requires explicit whitelisting — unknown = unsafe.
+  return "exclusive"
+}
+
+/**
+ * Writer-preferring async read-write lock.
+ *
+ * - `read()`: multiple holders allowed. Blocks if a writer is active or waiting.
+ * - `write()`: exclusive. Blocks until all readers drain and no other writer held.
+ *
+ * Writer preference prevents writer starvation when reads are frequent.
+ */
+class AsyncRWLock {
+  private readers = 0
+  private writerHeld = false
+  private writerQueue: Array<() => void> = []
+  private readerQueue: Array<() => void> = []
+
+  async read<T>(task: () => Promise<T>): Promise<T> {
+    await this.acquireRead()
+    try {
+      return await task()
+    } finally {
+      this.releaseRead()
+    }
+  }
+
+  async write<T>(task: () => Promise<T>): Promise<T> {
+    await this.acquireWrite()
+    try {
+      return await task()
+    } finally {
+      this.releaseWrite()
+    }
+  }
+
+  private acquireRead(): Promise<void> {
+    if (!this.writerHeld && this.writerQueue.length === 0) {
+      this.readers++
+      return Promise.resolve()
+    }
+    return new Promise<void>((resolve) => {
+      this.readerQueue.push(() => {
+        this.readers++
+        resolve()
+      })
+    })
+  }
+
+  private acquireWrite(): Promise<void> {
+    if (!this.writerHeld && this.readers === 0) {
+      this.writerHeld = true
+      return Promise.resolve()
+    }
+    return new Promise<void>((resolve) => {
+      this.writerQueue.push(() => {
+        this.writerHeld = true
+        resolve()
+      })
+    })
+  }
+
+  private releaseRead(): void {
+    this.readers--
+    if (this.readers === 0 && this.writerQueue.length > 0) {
+      const next = this.writerQueue.shift()!
+      next()
+    }
+  }
+
+  private releaseWrite(): void {
+    this.writerHeld = false
+    if (this.writerQueue.length > 0) {
+      const next = this.writerQueue.shift()!
+      next()
+    } else if (this.readerQueue.length > 0) {
+      const pending = this.readerQueue.splice(0)
+      for (const wake of pending) wake()
+    }
+  }
+}
+
+const toolConcurrencyLocks = new Map<string, AsyncRWLock>()
+
+function getToolConcurrencyLock(queueId: string): AsyncRWLock {
+  let lock = toolConcurrencyLocks.get(queueId)
+  if (!lock) {
+    lock = new AsyncRWLock()
+    toolConcurrencyLocks.set(queueId, lock)
+  }
+  return lock
+}
+
+function createGradedToolConcurrencyMiddleware(queueId: string) {
+  const lock = getToolConcurrencyLock(queueId)
+  return createMiddleware({
+    name: "gradedToolConcurrency",
+    wrapToolCall: async (request, handler) => {
+      const toolCall = request.toolCall as { id?: string; name?: string; args?: unknown } | undefined
+      const tier = classifyToolConcurrency(toolCall)
+      if (tier === "bypass") {
+        return handler(request)
+      }
+      const label = `${toolCall?.name ?? "unknown"}:${toolCall?.id ?? "no-id"}`
+      const waitStart = Date.now()
+      if (tier === "shared") {
+        return lock.read(async () => {
+          const waited = Date.now() - waitStart
+          if (waited > 50) console.log(`[Runtime] shared-lock acquired ${label} after ${waited}ms`)
+          return handler(request)
+        })
+      }
+      return lock.write(async () => {
+        const waited = Date.now() - waitStart
+        if (waited > 50) console.log(`[Runtime] exclusive-lock acquired ${label} after ${waited}ms`)
+        return handler(request)
+      })
+    }
+  })
+}
 
 /** Per-thread approval store cache. */
 const approvalStores = new Map<string, ApprovalStore>()
@@ -115,11 +387,175 @@ export function getOrCreateApprovalStore(threadId: string): ApprovalStore {
 const BASE_PROMPT =
   "In order to complete the objective that the user asks of you, you have access to a number of standard tools."
 
+const SUMMARY_KEEP_RATIO = 0.1
+const SUMMARY_INPUT_RATIO = 0.65
+const SUMMARY_INPUT_TOKEN_CAP = 700_000
+
+const CMB_COWORK_SUMMARY_PROMPT = `Your task is to create a detailed continuation summary for an ongoing CmbCowork coding-agent conversation.
+
+The next model call will use your summary to continue the work. Write a dense, practical engineering handoff that preserves details that would be hard or costly to recover. Do not include private reasoning or analysis scratchpad.
+
+Cover these sections:
+
+1. Primary Request and Intent
+   - Capture the user's explicit requests, corrections, decisions, and current expectations.
+   - Preserve exact dates, branch names, commit hashes, model names, file paths, config values, and quoted user wording when they matter.
+
+2. Current Work State
+   - Describe what was being worked on immediately before compaction.
+   - Separate completed work, in-progress work, and remaining work.
+   - Include whether changes are committed, pushed, only in the worktree, or not yet made.
+
+3. Files and Code Sections
+   - List files inspected, modified, or created.
+   - For each important file, include the relevant symbols, constants, functions, or code paths and why they matter.
+   - Include short code snippets only when exact behavior would otherwise be ambiguous.
+
+4. Commands, Tests, and Outputs
+   - Record meaningful commands run and their results.
+   - Include test/typecheck failures, known unrelated failures, and any verification already completed.
+
+5. Technical Decisions and Constraints
+   - Capture assumptions, tradeoffs, rejected approaches, provider/model limitations, routing/summary/token-budget reasoning, and compatibility constraints.
+
+6. Errors, Fixes, and Warnings
+   - Record bugs encountered, root causes, fixes or mitigations, and anything the next model should avoid repeating.
+
+7. Pending Next Step
+   - List concrete next actions only if they directly follow from the latest user request.
+   - If the latest user request was already completed, say so and do not invent unrelated next steps.
+
+Prefer concise bullet points with high information density. Be thorough about technical state, but avoid generic narrative. If the user used Chinese, preserve Chinese wording for user-facing details and reply-context details.
+
+Conversation to summarize:
+{conversation}
+
+Summary:`
+
 function createEagerMcpTools(
   capabilityService: McpCapabilityService,
   tools: McpCapabilityTool[]
 ): DynamicStructuredTool[] {
   return tools.map((tool) => createEagerMcpTool(capabilityService, tool))
+}
+
+function createScopedMcpCapabilityService(
+  service: McpCapabilityService,
+  hookScope: HookScopeController,
+  resolveHooksForContext: (
+    event: HookEvent,
+    context: HookContext
+  ) => ReturnType<typeof resolveEnabledHooksForRun>,
+  onHookResult: HookResultCallback | undefined,
+  baseContext: { workspacePath: string; threadId: string }
+): McpCapabilityService {
+  const getPluginName = (pluginId: string): string | undefined => {
+    try {
+      return getPlugins().find((plugin) => plugin.id === pluginId)?.name
+    } catch {
+      return undefined
+    }
+  }
+
+  const formatPostHookFeedback = (postResult: HookResult | null): string | null => {
+    if (!postResult) return null
+    const parts = [
+      !postResult.suppressOutput && postResult.stdout
+        ? `[Hook output]\n${postResult.stdout}`
+        : undefined,
+      postResult.additionalContext ? `[Hook context]\n${postResult.additionalContext}` : undefined,
+      postResult.systemMessage ? `[Hook notice]\n${postResult.systemMessage}` : undefined,
+      postResult.decision === "block" && postResult.reason
+        ? `[Hook requested review] ${postResult.reason}`
+        : undefined,
+      postResult.continue === false
+        ? `[Hook stopped turn] ${postResult.stopReason || postResult.reason || "PostToolUse hook stopped the turn"}`
+        : undefined
+    ].filter((item): item is string => Boolean(item))
+    return parts.length > 0 ? parts.join("\n\n") : null
+  }
+
+  return {
+    listTools: () => service.listTools(),
+    getTool: (idOrAlias) => service.getTool(idOrAlias),
+    invoke: async (idOrAlias, args) => {
+      const tool = await service.getTool(idOrAlias)
+      const pluginId = extractPluginIdFromProviderKey(tool?.providerKey)
+      if (!tool) return service.invoke(idOrAlias, args)
+
+      const hookContext: HookContext = {
+        toolName: tool.toolId,
+        toolArgs: args,
+        workspacePath: baseContext.workspacePath,
+        sessionId: baseContext.threadId,
+        pluginId,
+        pluginName: pluginId ? getPluginName(pluginId) : undefined
+      }
+      const preHooks = resolveHooksForContext("PreToolUse", hookContext)
+      const preResult = await runHooksEnriched(
+        preHooks,
+        "PreToolUse",
+        hookContext,
+        onHookResult
+      )
+      if (preResult) {
+        hookScope.activatePersistentHooks(preHooks)
+      }
+      throwIfHookHalt(
+        "PreToolUse",
+        preResult,
+        `MCP tool ${tool.toolId} was stopped by a PreToolUse hook`
+      )
+      if (preResult?.blocked || preResult?.decision === "block") {
+        throw new Error(
+          preResult.reason ||
+            preResult.stopReason ||
+            preResult.stdout ||
+            preResult.stderr ||
+            `MCP tool ${tool.toolId} was blocked by a hook`
+        )
+      }
+
+      const effectiveArgs = mergeUpdatedInput(args, preResult?.updatedInput)
+
+      if (pluginId) hookScope.activatePlugin(pluginId)
+      const result = await service.invoke(idOrAlias, effectiveArgs)
+      const postContext: HookContext = {
+        ...hookContext,
+        toolArgs: effectiveArgs,
+        toolResult: result.text
+      }
+      const postHooks = resolveHooksForContext("PostToolUse", postContext)
+      const postResult = await runHooksEnriched(
+        postHooks,
+        "PostToolUse",
+        postContext,
+        onHookResult
+      )
+      if (postResult) {
+        hookScope.activatePersistentHooks(postHooks)
+      }
+      throwIfHookHalt(
+        "PostToolUse",
+        postResult,
+        `MCP tool ${tool.toolId} was stopped by a PostToolUse hook`
+      )
+      const hookFeedback = formatPostHookFeedback(postResult)
+      const isError =
+        result.isError || postResult?.decision === "block" || postResult?.continue === false
+      return {
+        ...result,
+        isError,
+        text: hookFeedback ? `${result.text}\n\n${hookFeedback}` : result.text,
+        contentBlocks:
+          hookFeedback && result.contentBlocks
+            ? [...result.contentBlocks, { type: "text", text: hookFeedback }]
+            : result.contentBlocks
+      }
+    },
+    invalidate: (reason) => service.invalidate(reason),
+    close: () => service.close()
+  }
 }
 
 const SEQUENTIAL_TASK_PROMPT = `## \`task\` (subagent spawner)
@@ -149,12 +585,50 @@ When NOT to use the task tool:
 - Remember to use the \`task\` tool to silo independent tasks within a multi-part objective.
 - You should use the \`task\` tool whenever you have a complex task that will take multiple steps, and is independent from other tasks that the agent needs to complete. These agents are highly competent and efficient.`
 
+// Skill lifecycle hooks can return guidance for the model, but that guidance
+// must not be appended to the SKILL.md file content returned by read_file.
+// Drain it into an independent system-message section on the next model call.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function createSkillHookContextMiddleware(
+  filesystemBackend: Partial<SkillHookContextProvider>
+): any {
+  return createMiddleware({
+    name: "skillHookContext",
+    wrapModelCall: (request, handler) => {
+      if (typeof filesystemBackend.drainSkillHookContexts !== "function") return handler(request)
+
+      let contexts: string[] = []
+      try {
+        contexts = filesystemBackend.drainSkillHookContexts()
+      } catch (error) {
+        console.warn("[Runtime] Failed to drain skill hook context:", error)
+      }
+      if (contexts.length === 0) return handler(request)
+
+      const injectedContext = [
+        "",
+        "## Skill Hook Context",
+        "The following guidance was produced by skill lifecycle hooks. It is not part of any SKILL.md file content.",
+        ...contexts
+      ].join("\n\n")
+
+      return handler({
+        ...request,
+        systemMessage: request.systemMessage.concat(injectedContext)
+      })
+    }
+  })
+}
+
 /**
  * Custom version of deepagents' createDeepAgent.
  *
  * Aligned with official 1.8.1 except:
  *   - Accepts `summarizationTrigger` / `summarizationKeep` for explicit overrides
  *     (useful for custom models without a profile).
+ *   - Accepts a custom summarization prompt tuned for coding-agent handoffs.
+ *   - Accepts custom argument-truncation thresholds so large-context models
+ *     don't trim old edit/write tool args after a fixed 20 messages.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
@@ -177,7 +651,12 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     summarizationTrigger,
     summarizationKeep,
     toolTokenLimitBeforeEvict,
-    trimTokensToSummarize
+    trimTokensToSummarize,
+    summarizationSummaryPrompt,
+    summarizationTruncateArgsSettings,
+    subagentExtraSystemPrompt,
+    toolConcurrencyQueueId = "default",
+    toolHookMiddleware
   } = params
 
   // --- systemPrompt handling (identical to original) ---
@@ -228,18 +707,16 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     model,
     backend: filesystemBackend,
     historyPathPrefix: ".cmbdevclaw/conversation_history",
+    ...(summarizationSummaryPrompt && { summaryPrompt: summarizationSummaryPrompt }),
     ...(trimTokensToSummarize != null && { trimTokensToSummarize }),
     ...(summarizationTrigger != null && { trigger: summarizationTrigger }),
     ...(summarizationKeep != null && { keep: summarizationKeep }),
-    truncateArgsSettings: {
-      trigger: { type: "messages" as const, value: 20 },
-      keep: { type: "messages" as const, value: 20 },
-      maxLength: 1000
-    }
+    ...(summarizationTruncateArgsSettings && {
+      truncateArgsSettings: summarizationTruncateArgsSettings
+    })
   }
 
-  // Create filesystem middleware and fix grep tool's misleading "Regex pattern" param description
-  // (upstream bug: description says "Regex" but implementation uses literal -F matching)
+  // Create filesystem middleware and patch upstream tool defaults/descriptions.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const createFsMiddleware = (): any => {
     const mw = createFilesystemMiddleware({
@@ -247,14 +724,20 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
       ...(filesystemSystemPrompt && { systemPrompt: filesystemSystemPrompt }),
       ...(toolTokenLimitBeforeEvict != null && { toolTokenLimitBeforeEvict })
     })
+    patchRuntimeReadFileTool({ middleware: mw, filesystemBackend, toolTokenLimitBeforeEvict })
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const grepTool = mw.tools?.find((t: any) => t.name === "grep") as any
     if (grepTool?.schema?.shape?.pattern) {
       const oldDesc = grepTool.schema.shape.pattern.description ?? "(unknown)"
       grepTool.schema = grepTool.schema.extend({
-        pattern: grepTool.schema.shape.pattern.describe("Text pattern to search for (literal, not regex)")
+        pattern: grepTool.schema.shape.pattern.describe(
+          "Text pattern to search for (literal, not regex)"
+        )
       })
-      console.log(`[Runtime] grep schema patched: "${oldDesc}" → "${grepTool.schema.shape.pattern.description}"`)
+      console.log(
+        `[Runtime] grep schema patched: "${oldDesc}" → "${grepTool.schema.shape.pattern.description}"`
+      )
     } else {
       console.warn("[Runtime] grep tool schema patch skipped: tool or pattern field not found")
     }
@@ -262,31 +745,33 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     // Replace the default execute tool with a version that supports run_in_background.
     // Long-running commands (builds, dependency downloads) can be started in background
     // and their output retrieved later via task_output tool.
-    const { tool: lcTool } = require("langchain") as typeof import("langchain")
-    const { z } = require("zod") as typeof import("zod")
-
     const executeIdx = mw.tools?.findIndex((t: any) => t.name === "execute") ?? -1
     if (executeIdx >= 0) {
       const oldExecute = mw.tools![executeIdx]
-      const customExecute = lcTool(async (input: { command: string; run_in_background?: boolean }) => {
-        if (input.run_in_background) {
-          const taskId = await (filesystemBackend as LocalSandbox).executeBackground(input.command)
-          return `Background task started (id: ${taskId}). Use task_output tool with this id to check results later.`
+      const customExecute = lcTool(
+        async (input: { command: string; run_in_background?: boolean }) => {
+          if (input.run_in_background) {
+            return (filesystemBackend as LocalSandbox).executeBackground(input.command)
+          }
+          // Delegate to original execute handler for foreground execution
+          return (oldExecute as any).invoke(input)
+        },
+        {
+          name: "execute",
+          description: (oldExecute as any).description,
+          schema: z.object({
+            command: z.string().describe("The shell command to execute"),
+            run_in_background: z
+              .boolean()
+              .optional()
+              .describe(
+                "Set to true to run the command in the background. Returns a task ID immediately. " +
+                  "Use this for long-running commands like builds, dependency downloads, or test suites. " +
+                  "Retrieve the result later with the task_output tool."
+              )
+          })
         }
-        // Delegate to original execute handler for foreground execution
-        return (oldExecute as any).invoke(input)
-      }, {
-        name: "execute",
-        description: (oldExecute as any).description,
-        schema: z.object({
-          command: z.string().describe("The shell command to execute"),
-          run_in_background: z.boolean().optional().describe(
-            "Set to true to run the command in the background. Returns a task ID immediately. " +
-            "Use this for long-running commands like builds, dependency downloads, or test suites. " +
-            "Retrieve the result later with the task_output tool."
-          )
-        })
-      })
+      )
       mw.tools![executeIdx] = customExecute
       console.log("[Runtime] execute tool patched: added run_in_background support")
     }
@@ -295,61 +780,101 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     // Mirrors Claude Code's TaskOutput: blocks internally (100ms poll loop)
     // until the task completes or the timeout expires, so the LLM only needs
     // one tool call per check instead of burning tokens on repeated polls.
-    const taskOutputTool = lcTool(async (input: { task_id: string; block?: boolean; timeout?: number }) => {
-      const sandbox = filesystemBackend as LocalSandbox
-      const block = input.block !== false  // default true
-      const timeout = input.timeout ?? 30_000 // default 30s, max 600s
-
-      // Non-blocking: return immediately
-      if (!block) {
-        const result = sandbox.getTaskOutput(input.task_id)
-        if (!result) return `Error: No background task found with id "${input.task_id}".`
-        if (!result.completed) {
-          return JSON.stringify({ retrieval_status: "not_ready", elapsed: result.elapsedSeconds, command: result.command })
+    const taskOutputTool = lcTool(
+      async (input: { task_id: string; block?: boolean; timeout?: number }) => {
+        const sandbox = filesystemBackend as LocalSandbox
+        const toolArgs: Record<string, unknown> = { ...input }
+        const preResult = await sandbox.runPreToolUseHookForTool("task_output", toolArgs)
+        if (preResult?.blocked || preResult?.decision === "block") {
+          return `[Hook blocked] ${preResult.stdout || preResult.reason || "task_output was blocked by a hook"}`
         }
-        const status = result.exitCode === 0 ? "succeeded" : "failed"
-        return `${result.output ?? "<no output>"}\n[Command ${status} with exit code ${result.exitCode}, elapsed: ${result.elapsedSeconds}s]`
-      }
-
-      // Blocking: poll with progressive interval until completed, timeout, or abort.
-      // First 2s at 100ms for snappy response, then 500ms to reduce CPU spin.
-      const start = Date.now()
-      while (Date.now() - start < timeout) {
-        if (sandbox.isAborted) {
-          return "Task polling aborted: conversation was cancelled by user."
+        const effectiveArgs = mergeUpdatedInput(toolArgs, preResult?.updatedInput)
+        const taskId =
+          typeof effectiveArgs.task_id === "string" && effectiveArgs.task_id.trim()
+            ? effectiveArgs.task_id
+            : input.task_id
+        if (!taskId || typeof taskId !== "string") {
+          return 'Error: Invalid task id.'
         }
-        const result = sandbox.getTaskOutput(input.task_id)
-        if (!result) return `Error: No background task found with id "${input.task_id}".`
-        if (result.completed) {
-          const status = result.exitCode === 0 ? "succeeded" : "failed"
-          return `${result.output ?? "<no output>"}\n[Command ${status} with exit code ${result.exitCode}, elapsed: ${result.elapsedSeconds}s]`
-        }
-        const elapsed = Date.now() - start
-        await new Promise<void>(r => setTimeout(r, elapsed < 2000 ? 100 : 500))
-      }
+        const block =
+          typeof effectiveArgs.block === "boolean" ? effectiveArgs.block : input.block !== false
+        const timeout =
+          typeof effectiveArgs.timeout === "number" && Number.isFinite(effectiveArgs.timeout)
+            ? Math.max(0, effectiveArgs.timeout)
+            : input.timeout ?? 30_000
 
-      // Timeout — return current status so the LLM can decide to call again
-      const final = sandbox.getTaskOutput(input.task_id)
-      if (!final) return `Error: No background task found with id "${input.task_id}".`
-      if (final.completed) {
-        const status = final.exitCode === 0 ? "succeeded" : "failed"
-        return `${final.output ?? "<no output>"}\n[Command ${status} with exit code ${final.exitCode}, elapsed: ${final.elapsedSeconds}s]`
+        const readTaskOutputText = async (): Promise<string> => {
+          // Non-blocking: return immediately
+          if (!block) {
+            const result = sandbox.getTaskOutput(taskId)
+            if (!result) return `Error: No background task found with id "${taskId}".`
+            if (!result.completed) {
+              return JSON.stringify({
+                retrieval_status: "not_ready",
+                elapsed: result.elapsedSeconds,
+                command: result.command
+              })
+            }
+            const status = result.exitCode === 0 ? "succeeded" : "failed"
+            return `${result.output ?? "<no output>"}\n[Command ${status} with exit code ${result.exitCode}, elapsed: ${result.elapsedSeconds}s]`
+          }
+
+          // Blocking: poll with progressive interval until completed, timeout, or abort.
+          // First 2s at 100ms for snappy response, then 500ms to reduce CPU spin.
+          const start = Date.now()
+          while (Date.now() - start < timeout) {
+            if (sandbox.isAborted) {
+              return "Task polling aborted: conversation was cancelled by user."
+            }
+            const result = sandbox.getTaskOutput(taskId)
+            if (!result) return `Error: No background task found with id "${taskId}".`
+            if (result.completed) {
+              const status = result.exitCode === 0 ? "succeeded" : "failed"
+              return `${result.output ?? "<no output>"}\n[Command ${status} with exit code ${result.exitCode}, elapsed: ${result.elapsedSeconds}s]`
+            }
+            const elapsed = Date.now() - start
+            await new Promise<void>((r) => setTimeout(r, elapsed < 2000 ? 100 : 500))
+          }
+
+          // Timeout — return current status so the LLM can decide to call again
+          const final = sandbox.getTaskOutput(taskId)
+          if (!final) return `Error: No background task found with id "${taskId}".`
+          if (final.completed) {
+            const status = final.exitCode === 0 ? "succeeded" : "failed"
+            return `${final.output ?? "<no output>"}\n[Command ${status} with exit code ${final.exitCode}, elapsed: ${final.elapsedSeconds}s]`
+          }
+          return JSON.stringify({
+            retrieval_status: "timeout",
+            elapsed: final.elapsedSeconds,
+            command: final.command
+          })
+        }
+
+        const resultText = await readTaskOutputText()
+        return sandbox.applyPostToolUseHookToText("task_output", effectiveArgs, resultText)
+      },
+      {
+        name: "task_output",
+        description:
+          "Retrieve the output of a background task started with execute(run_in_background=true). " +
+          "By default blocks up to 30 seconds waiting for the task to complete. " +
+          "If the task finishes within the timeout, returns the full output. " +
+          "If it times out, returns current status — call again to continue waiting. " +
+          "Set block=false for a non-blocking status check.",
+        schema: z.object({
+          task_id: z
+            .string()
+            .describe("The task ID returned by execute when run_in_background was true"),
+          block: z.boolean().optional().describe("Whether to wait for completion (default: true)"),
+          timeout: z
+            .number()
+            .min(0)
+            .max(600_000)
+            .optional()
+            .describe("Max wait time in ms (default: 30000)")
+        })
       }
-      return JSON.stringify({ retrieval_status: "timeout", elapsed: final.elapsedSeconds, command: final.command })
-    }, {
-      name: "task_output",
-      description:
-        "Retrieve the output of a background task started with execute(run_in_background=true). " +
-        "By default blocks up to 30 seconds waiting for the task to complete. " +
-        "If the task finishes within the timeout, returns the full output. " +
-        "If it times out, returns current status — call again to continue waiting. " +
-        "Set block=false for a non-blocking status check.",
-      schema: z.object({
-        task_id: z.string().describe("The task ID returned by execute when run_in_background was true"),
-        block: z.boolean().optional().describe("Whether to wait for completion (default: true)"),
-        timeout: z.number().min(0).max(600_000).optional().describe("Max wait time in ms (default: 30000)")
-      })
-    })
+    )
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     mw.tools = [...(mw.tools || []), taskOutputTool] as any
     console.log("[Runtime] task_output tool added")
@@ -357,15 +882,147 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     return mw
   }
 
+  // Once any wrapToolCall middleware is attached, ToolNode's
+  // defaultHandleToolErrors stops catching tool-body throws. So this
+  // middleware must convert any recoverable tool error into a ToolMessage,
+  // otherwise runs that used to just show a failed tool crash outright.
+  //
+  // Re-throw (let the run stop) only for:
+  //   - GraphBubbleUp: HITL / subgraph control flow
+  //   - AbortError: user cancellation
+  //   - programmer errors (TypeError / ReferenceError): code bugs we
+  //     want surfaced instead of silently retrying
+  //   - MiddlewareError: a sibling wrapToolCall middleware threw — its
+  //     own bug, not a tool failure
+  //
+  // Note: `task` / `task_output` errors are treated as recoverable too.
+  // deepagents throws a plain Error when the model picks an unknown
+  // subagent_type, and we want the model to see that error and retry with
+  // a valid name. A real subagent crash will also be surfaced as a
+  // ToolMessage — the model can decide whether to retry or abandon.
+  const NON_RECOVERABLE_TOOL_NAMES = new Set<string>()
+
+  const isAbortError = (error: unknown): boolean => {
+    if (!(error instanceof Error)) return false
+    return error.name === "AbortError" || (error as { code?: unknown }).code === "ABORT_ERR"
+  }
+
+  const isProgrammerError = (error: unknown): boolean =>
+    error instanceof TypeError || error instanceof ReferenceError
+
+  const describeToolError = (error: unknown): string => {
+    if (error instanceof Error) return error.message || error.name || "Error"
+    if (typeof error === "string" && error) return error
+    try {
+      return JSON.stringify(error) ?? String(error)
+    } catch {
+      return String(error)
+    }
+  }
+
+  const unwrapToolFailure = (
+    error: unknown,
+    toolName: string | undefined
+  ): { kind: "schema" | "runtime"; message: string } | null => {
+    if (isGraphBubbleUp(error) || isAbortError(error)) return null
+    if (isHookHaltError(error)) return null
+    if (isProgrammerError(error)) return null
+    if (MiddlewareError.isInstance(error)) return null
+
+    // ToolNode wraps schema parsing failures in ToolInvocationError.
+    // Schema errors are always recoverable — even for task/task_output,
+    // since a bad-schema call never actually runs the subagent.
+    if (error instanceof ToolInvocationError) {
+      if (error.toolError instanceof ToolInputParsingException) {
+        return { kind: "schema", message: error.toolError.message }
+      }
+      return unwrapToolFailure(error.toolError, toolName)
+    }
+
+    // Reserved: tool names that should bypass runtime-error recovery even
+    // when NON_RECOVERABLE_TOOL_NAMES is non-empty. Currently no tool is
+    // listed — task/task_output recover too, matching Claude Code's
+    // behaviour of letting the model decide whether to retry after a
+    // subagent failure.
+    if (toolName && NON_RECOVERABLE_TOOL_NAMES.has(toolName)) return null
+
+    // Any other throw from the tool body is recoverable. Including non-
+    // standard throws (plain objects, numbers) — describeToolError will
+    // serialise them — because leaving any path un-caught means ToolNode
+    // bubbles the throw and kills the run.
+    return { kind: "runtime", message: describeToolError(error) }
+  }
+
+  const toolErrorMiddleware = createMiddleware({
+    name: "toolErrorCatch",
+    wrapToolCall: async (request, handler) => {
+      try {
+        return await handler(request)
+      } catch (error) {
+        const toolName = request.toolCall?.name
+        const toolCallId = request.toolCall?.id
+
+        if ((request.runtime as { signal?: AbortSignal } | undefined)?.signal?.aborted) {
+          throw error
+        }
+
+        const recovered = unwrapToolFailure(error, toolName)
+        if (!recovered) throw error
+
+        // Without a tool_call_id we can't emit a usable ToolMessage —
+        // deepagents' patch middleware treats any ToolMessage whose id
+        // doesn't match a corresponding AIMessage.tool_calls[].id as an
+        // orphan and drops it silently, so the model would never see the
+        // error. Surfacing the original throw is the lesser evil: it
+        // crashes visibly instead of swallowing the failure.
+        if (!toolCallId) throw error
+
+        console.warn(
+          `[Runtime] Recoverable ${recovered.kind} error from tool "${toolName}" handed back to model:`,
+          recovered.message
+        )
+        return new ToolMessage({
+          content:
+            recovered.kind === "schema"
+              ? `Invalid tool arguments: ${recovered.message}\nPlease fix the arguments and try again.`
+              : `Tool execution failed: ${recovered.message}\nPlease adjust your approach and try again if appropriate.`,
+          tool_call_id: toolCallId,
+          name: toolName,
+          status: "error"
+        })
+      }
+    }
+  })
+
   // Base middleware for custom subagents (no skills — custom subagents must define their own)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const gradedToolConcurrencyMiddleware = createGradedToolConcurrencyMiddleware(toolConcurrencyQueueId)
+  const subagentToolConcurrencyMiddleware = createGradedToolConcurrencyMiddleware(`${toolConcurrencyQueueId}:subagent`)
+
   const subagentMiddleware: any[] = [
     todoListMiddleware(),
     createFsMiddleware(),
+    createSkillHookContextMiddleware(filesystemBackend),
+    subagentToolConcurrencyMiddleware,
+    ...(toolHookMiddleware ? [toolHookMiddleware] : []),
+    toolErrorMiddleware,
     createSummarizationMiddleware(summarizationOptions),
     anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
     createPatchToolCallsMiddleware()
   ]
+
+  // Manual general-purpose subagent so AGENTS.md can be injected into its
+  // systemPrompt. deepagents' built-in generalPurposeAgent path offers no
+  // hook for project instructions. Spread GENERAL_PURPOSE_SUBAGENT to inherit
+  // the canonical name/description/default prompt, so future upstream tweaks
+  // propagate automatically.
+  const generalPurposeSubagent = {
+    ...GENERAL_PURPOSE_SUBAGENT,
+    systemPrompt: subagentExtraSystemPrompt
+      ? `${GENERAL_PURPOSE_SUBAGENT.systemPrompt}\n\n## Project Instructions\n\n${subagentExtraSystemPrompt}`
+      : GENERAL_PURPOSE_SUBAGENT.systemPrompt,
+    middleware: skillsMiddlewareArray
+  }
 
   return createAgent({
     model,
@@ -374,14 +1031,17 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     middleware: [
       todoListMiddleware(),
       createFsMiddleware(),
+      createSkillHookContextMiddleware(filesystemBackend),
+      gradedToolConcurrencyMiddleware,
+      ...(toolHookMiddleware ? [toolHookMiddleware] : []),
+      toolErrorMiddleware,
       createSubAgentMiddleware({
         defaultModel: model,
         defaultTools: tools,
         defaultMiddleware: subagentMiddleware,
-        generalPurposeMiddleware: [...subagentMiddleware, ...skillsMiddlewareArray],
         defaultInterruptOn: null,
-        subagents: processedSubagents,
-        generalPurposeAgent: true,
+        subagents: [generalPurposeSubagent, ...processedSubagents],
+        generalPurposeAgent: false,
         systemPrompt: SEQUENTIAL_TASK_PROMPT
       } as Parameters<typeof createSubAgentMiddleware>[0]),
       createSummarizationMiddleware(summarizationOptions),
@@ -409,12 +1069,23 @@ export type DeepAgent = ReactAgent<any>
  * @param workspacePath - The workspace path the agent is operating in
  * @returns The complete system prompt
  */
-function getShellInfo(windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated"): { name: string; isBashLike: boolean; isPowerShell: boolean } {
-  const isSandboxed = process.platform === "win32" && (windowsSandbox === "unelevated" || windowsSandbox === "readonly" || windowsSandbox === "elevated")
+function getShellInfo(windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated"): {
+  name: string
+  isBashLike: boolean
+  isPowerShell: boolean
+} {
+  const isSandboxed =
+    process.platform === "win32" &&
+    (windowsSandbox === "unelevated" ||
+      windowsSandbox === "readonly" ||
+      windowsSandbox === "elevated")
   const resolved = isSandboxed
     ? LocalSandbox.resolvedWindowsSandboxShell()
     : LocalSandbox.resolvedShell()
-  const base = path.basename(resolved).replace(/\.exe$/i, "").toLowerCase()
+  const base = path
+    .basename(resolved)
+    .replace(/\.exe$/i, "")
+    .toLowerCase()
   const isBashLike = ["bash", "sh", "zsh"].includes(base)
   const isPowerShell = ["pwsh", "powershell"].includes(base)
   return { name: base, isBashLike, isPowerShell }
@@ -424,8 +1095,12 @@ function getShellInfo(windowsSandbox?: "none" | "unelevated" | "readonly" | "ele
 function formatLocalISO(date: Date, timeZone: string): string {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone,
-    year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", second: "2-digit",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
     hour12: false
   }).formatToParts(date)
   const get = (type: string): string => parts.find((p) => p.type === type)?.value ?? ""
@@ -441,7 +1116,10 @@ function formatLocalISO(date: Date, timeZone: string): string {
   return `${local}${sign}${oh}:${om}`
 }
 
-function getSystemPrompt(workspacePath: string, windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated"): string {
+function getSystemPrompt(
+  workspacePath: string,
+  windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated"
+): string {
   const isWindows = process.platform === "win32"
   const platform = isWindows ? "Windows" : process.platform === "darwin" ? "macOS" : "Linux"
   const { name: shell, isBashLike, isPowerShell } = getShellInfo(windowsSandbox)
@@ -502,8 +1180,9 @@ ${shellGuidance}
 **切勿**对编译、安装依赖等命令使用前台执行，否则会因超时被终止。
 `
 
-  const sandboxSection = windowsSandbox === "readonly"
-    ? `
+  const sandboxSection =
+    windowsSandbox === "readonly"
+      ? `
 ### 只读沙箱模式
 
 **重要提示：** 你正在只读沙箱环境中运行。
@@ -512,8 +1191,8 @@ ${shellGuidance}
 - 此模式适用于安全审查、代码分析等只读场景。
 - 除非用户明确要求，否则避免执行写入操作，应以建议修改替代直接写入。
 `
-    : windowsSandbox === "elevated"
-    ? `
+      : windowsSandbox === "elevated"
+        ? `
 ### Elevated 沙箱模式
 
 **重要提示：** 你正在 Elevated 沙箱环境中运行。
@@ -522,10 +1201,12 @@ ${shellGuidance}
 - 你可以读写工作目录内的文件，但无法访问用户的个人目录（如 .ssh、.aws）。
 - 如果命令因权限不足失败，不要反复重试，向用户说明限制即可。
 `
-    : ""
+        : ""
 
   const memorySection = isMemoryEnabled() ? MEMORY_SYSTEM_PROMPT : ""
-  return workingDirSection + backgroundExecSection + sandboxSection + BASE_SYSTEM_PROMPT + memorySection
+  return (
+    workingDirSection + backgroundExecSection + sandboxSection + BASE_SYSTEM_PROMPT + memorySection
+  )
 }
 
 // Per-thread checkpointer cache
@@ -649,13 +1330,12 @@ export interface ModelRetryInfo {
   delayMs: number
 }
 
-/** Hooks invoked by the retrying fetch wrapper so the UI can display status.
- *  Note: there is intentionally no "resolved" hook — the renderer clears the
- *  retry indicator via stream-level signals (message-delta arrival, stream
- *  end, or explicit error), which covers every termination path with one
- *  unified mechanism. */
+/** Hooks invoked by the retrying fetch wrapper so the UI can display/clear status. */
 export interface ModelRetryHooks {
   onRetry?: (info: ModelRetryInfo) => void
+  /** Called when a retry attempt succeeds (fetch returns a non-retryable response).
+   *  The UI should clear the retry indicator immediately on this callback. */
+  onRetrySuccess?: () => void
 }
 
 /**
@@ -715,6 +1395,9 @@ function createRetryingFetch(
 
         // Success or non-retryable error — return as-is.
         if (!isRetryableStatus(res.status)) {
+          // If this is a successful retry (not the first attempt), notify the UI
+          // so the retry indicator can be cleared immediately.
+          if (attempt > 1) hooks?.onRetrySuccess?.()
           return res
         }
 
@@ -784,6 +1467,8 @@ function getModelInstance(
     model: string
     baseUrl: string
     apiKey?: string
+    maxOutputTokens?: number
+    temperature?: number
     interleavedThinking?: boolean
   },
   retryHooks?: ModelRetryHooks,
@@ -799,15 +1484,22 @@ function getModelInstance(
     throw new Error("Custom model name is empty. Please configure a valid model name in Settings.")
   }
   console.log("[Runtime] Custom model:", resolvedModel, "baseUrl:", customConfig.baseUrl)
+  const maxOutputTokens = customConfig.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
+  const temperature = customConfig.temperature ?? DEFAULT_TEMPERATURE
 
   const baseFields = {
     model: resolvedModel,
     apiKey,
+    maxTokens: maxOutputTokens,
+    temperature,
     // SDK-level retry AND timeout disabled — unified retry + per-attempt
     // timeout live in retryingFetch below. Setting SDK timeout here would
     // create a shared AbortSignal that, once fired, permanently blocks all
     // subsequent retry attempts at the fetch layer.
     maxRetries: 0,
+    modelKwargs: {
+      parallel_tool_calls: true
+    },
     configuration: {
       baseURL: customConfig.baseUrl,
       fetch:
@@ -840,6 +1532,8 @@ export interface CreateAgentRuntimeOptions {
   noSchedulerTool?: boolean
   /** Skip the manage_skill tool (disable skill evolution for scheduled/heartbeat agents) */
   noSkillEvolutionTool?: boolean
+  /** Load workspace AGENTS.md hierarchy into the main system prompt. */
+  enableAgentsPrompt?: boolean
   /** AbortSignal — when signalled, any running child process is killed immediately. */
   abortSignal?: AbortSignal
   /** Optional hooks invoked when the model fetch layer retries / resolves. */
@@ -848,14 +1542,36 @@ export interface CreateAgentRuntimeOptions {
    *  on routing mode — pinned mode benefits from more retries since there is
    *  no failover fallback, while auto-routing can retry less and failover more. */
   maxRetryAttempts?: number
+  /** Callback invoked after each hook executes — used to emit results to the renderer. */
+  onHookResult?: HookResultCallback
+  /** Run-scoped plugin/skill activation state for hook resolution. */
+  hookScope?: HookScopeController
+  /** Shared run-scoped set used to avoid firing skill lifecycle hooks twice. */
+  skillHookKeys?: Set<string>
+  /** Run-scoped tracker for skills used this turn. */
+  skillUseTracker?: SkillUseTracker
+  /** Callback invoked after successful write/edit/upload filesystem operations. */
+  onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
 }
 
 // Create agent runtime with configured model and checkpointer
 export type AgentRuntime = ReturnType<typeof createAgent>
 
 export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Promise<DeepAgent> {
-  const { threadId, workspacePath, modelId, extraSystemPrompt, retryHooks, maxRetryAttempts } =
-    options
+  const {
+    threadId,
+    workspacePath,
+    modelId,
+    extraSystemPrompt,
+    retryHooks,
+    maxRetryAttempts,
+    enableAgentsPrompt = true,
+    onHookResult,
+    hookScope: providedHookScope,
+    skillHookKeys,
+    skillUseTracker,
+    onFileMutation
+  } = options
 
   if (!threadId) {
     throw new Error("Thread ID is required for checkpointing.")
@@ -870,14 +1586,19 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   console.log("[Runtime] Creating agent runtime...")
   console.log("[Runtime] Thread ID:", threadId)
   console.log("[Runtime] Workspace path:", workspacePath)
+  const hookScope = providedHookScope ?? createHookScope()
+  const resolveHooksForContext = (event: HookEvent, context: HookContext) =>
+    resolveEnabledHooksForRun(workspacePath, event, context, hookScope)
 
-  const selectedModelId = modelId?.startsWith("custom:") ? modelId.slice("custom:".length) : undefined
+  const selectedModelId = modelId?.startsWith("custom:")
+    ? modelId.slice("custom:".length)
+    : undefined
 
   const allCustomConfigs = getCustomModelConfigs()
   const customConfig = selectedModelId
-    ? (allCustomConfigs.find((item) => item.id === selectedModelId) ||
+    ? allCustomConfigs.find((item) => item.id === selectedModelId) ||
       allCustomConfigs.find((item) => item.model === selectedModelId) ||
-      null)
+      null
     : (allCustomConfigs[0] ?? null)
   if (!customConfig) {
     throw new Error("Custom model not configured. Please configure a model in Settings.")
@@ -903,13 +1624,16 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     const candidates = [
       resolve(__dirname, "../../resources"),
       join(app.getAppPath(), "resources"),
-      join(app.getAppPath(), "..", "resources"),
+      join(app.getAppPath(), "..", "resources")
     ]
-    resourceBase = candidates.find(c => existsSync(join(c, "bin"))) ?? resolve(__dirname, "../../resources")
+    const matches = await Promise.all(candidates.map(async (candidate) => (
+      await pathExists(join(candidate, "bin")) ? candidate : null
+    )))
+    resourceBase = matches.find((candidate): candidate is string => Boolean(candidate)) ?? resolve(__dirname, "../../resources")
   }
   const rgDir = join(resourceBase, "bin", process.platform)
   const rgBin = join(rgDir, process.platform === "win32" ? "rg.exe" : "rg")
-  const rgExists = existsSync(rgBin)
+  const rgExists = await pathExists(rgBin)
   // Mutate process.env.PATH so deepagents' internal ripgrepSearch
   // (spawns "rg" without custom env, inherits process.env) can find it.
   const paths = (process.env.PATH ?? "").split(delimiter)
@@ -921,12 +1645,14 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // Codex Windows sandbox (unelevated): reuse rgDir which already points to resources/bin/win32
   const codexExePath = join(rgDir, "codex.exe")
   if (process.platform === "win32") await ensureCodexExe(codexExePath)
-  const codexExists = process.platform === "win32" && existsSync(codexExePath)
+  const codexExists = process.platform === "win32" && await pathExists(codexExePath)
   const windowsSandbox = process.platform === "win32" ? getWindowsSandboxMode() : "none"
-  console.log(`[Runtime] codex.exe: ${codexExePath}, exists: ${codexExists}, sandboxMode: ${windowsSandbox}`)
+  console.log(
+    `[Runtime] codex.exe: ${codexExePath}, exists: ${codexExists}, sandboxMode: ${windowsSandbox}`
+  )
 
-  const enabledHooks = getEnabledHooks()
-  console.log(`[Runtime] Loaded ${enabledHooks.length} enabled hooks`)
+  const baseHooks = getEnabledHooks(workspacePath)
+  console.log(`[Runtime] Loaded ${baseHooks.length} base enabled hooks`)
 
   const backend = new LocalSandbox({
     rootDir: workspacePath,
@@ -935,63 +1661,110 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     maxOutputBytes,
     windowsSandbox,
     codexExePath: codexExists ? codexExePath : undefined,
-    // Pass a getter so hooks are always read fresh from storage at call time
-    hooks: getEnabledHooks,
+    hookResolver: resolveHooksForContext,
+    hookScope,
+    onHookResult,
+    onFileMutation,
     abortSignal: options.abortSignal,
-    runId: threadId
+    runId: threadId,
+    skillHookKeys,
+    skillUseTracker
   })
 
   // ── Wire up the approval orchestrator ──
   const yoloMode = getYoloMode()
   let approvalStore: ApprovalStore | undefined
   let requestApproval: ((req: ApprovalRequest) => Promise<ApprovalDecision>) | undefined
-  if (!yoloMode) {
-    approvalStore = getOrCreateApprovalStore(threadId)
-
-    // The approval requester sends requests to the renderer via BrowserWindow IPC.
-    // It returns a Promise that is resolved when the renderer sends back a decision.
-    // P3 fix: auto-reject after 5 minutes to prevent indefinite hangs.
-    const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000
-
-    requestApproval = (req: ApprovalRequest): Promise<ApprovalDecision> => {
-      return new Promise<ApprovalDecision>((resolve) => {
-        const timeoutId = setTimeout(() => {
-          if (pendingApprovals.has(req.id)) {
-            pendingApprovals.delete(req.id)
-            console.warn(`[Orchestrator] approval request timed out after ${APPROVAL_TIMEOUT_MS / 1000}s: reqId=${req.id}`)
-            // P2 fix: notify renderer that approval timed out so it can clear the UI
-            for (const win of BrowserWindow.getAllWindows()) {
-              win.webContents.send(`approval:timeout:${threadId}`, { requestId: req.id })
-            }
-            resolve({ type: "reject", tool_call_id: req.tool_call?.id ?? req.id })
+  // Keep approval IPC available even in YOLO mode. YOLO skips the initial shell/file
+  // approval, but escaping the sandbox after a sandbox denial still needs explicit
+  // one-shot user approval, matching Codex's retry-without-sandbox flow.
+  const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000
+  requestApproval = (req: ApprovalRequest): Promise<ApprovalDecision> => {
+    // IPC fires immediately; the renderer owns the queue (pendingApprovals[]).
+    // Multiple concurrent tool calls each register their own resolver here —
+    // the renderer shows them one at a time, but the events are not serialized
+    // back-end side. This matches how Codex surfaces ExecApprovalRequest events.
+    return new Promise<ApprovalDecision>((resolve) => {
+      const timeoutId = setTimeout(() => {
+        if (pendingApprovals.has(req.id)) {
+          pendingApprovals.delete(req.id)
+          console.warn(
+            `[Orchestrator] approval request timed out after ${APPROVAL_TIMEOUT_MS / 1000}s: reqId=${req.id}`
+          )
+          for (const win of BrowserWindow.getAllWindows()) {
+            win.webContents.send(`approval:timeout:${threadId}`, { requestId: req.id })
           }
-        }, APPROVAL_TIMEOUT_MS)
-
-        pendingApprovals.set(req.id, {
-          resolve: (decision: ApprovalDecision) => {
-            clearTimeout(timeoutId)
-            resolve(decision)
-          },
-          request: req,
-          targetWebContentsIds: BrowserWindow.getAllWindows().map(w => w.webContents.id)
-        })
-        console.log(`[Orchestrator] sending approval request on channel: approval:request:${threadId}, reqId=${req.id}, command=${req.command}`)
-        // Broadcast to all windows — the active one will display the approval UI
-        for (const win of BrowserWindow.getAllWindows()) {
-          win.webContents.send(`approval:request:${threadId}`, req)
+          resolve({ type: "reject", tool_call_id: req.tool_call?.id ?? req.id })
         }
+      }, APPROVAL_TIMEOUT_MS)
+
+      pendingApprovals.set(req.id, {
+        resolve: (decision: ApprovalDecision) => {
+          clearTimeout(timeoutId)
+          resolve(decision)
+        },
+        request: req,
+        targetWebContentsIds: BrowserWindow.getAllWindows().map((w) => w.webContents.id)
       })
-    }
-
-    const rawExecute = (command: string, sandboxMode?: string): Promise<import("deepagents").ExecuteResponse> => {
-      return backend.executeRaw(command, sandboxMode)
-    }
-
-    const orchestrator = new ToolOrchestrator(approvalStore, rawExecute, requestApproval, false)
-    backend.setOrchestrator(orchestrator)
+      console.log(
+        `[Orchestrator] sending approval request on channel: approval:request:${threadId}, reqId=${req.id}, command=${req.command}`
+      )
+      // Fire Notification hook — agent is now waiting on user input.
+      // Fire-and-forget so it doesn't delay the UI prompt.
+      const notificationContext: HookContext = {
+        toolName: req.tool_call?.name,
+        toolArgs: { command: req.command, reason: req.reason, filePath: req.filePath },
+        workspacePath,
+        sessionId: threadId
+      }
+      runHooks(
+        resolveHooksForContext("Notification", notificationContext),
+        "Notification",
+        notificationContext,
+        onHookResult
+      ).catch((e) => console.warn("[Hooks] Notification hook error:", e))
+      for (const win of BrowserWindow.getAllWindows()) {
+        win.webContents.send(`approval:request:${threadId}`, req)
+      }
+    })
   }
 
+  approvalStore = getOrCreateApprovalStore(threadId)
+
+  const rawExecute = (command: string, sandboxMode?: string): Promise<import("deepagents").ExecuteResponse> => {
+    return backend.executeRaw(command, sandboxMode)
+  }
+
+  const orchestrator = new ToolOrchestrator(approvalStore, rawExecute, requestApproval, yoloMode)
+  backend.setOrchestrator(orchestrator)
+
   let systemPrompt = getSystemPrompt(workspacePath, windowsSandbox)
+  let agentsPrompt: Awaited<ReturnType<typeof loadAgentsPromptForWorkspace>> = {
+    prompt: null,
+    projectRoot: workspacePath,
+    loadedPaths: [],
+    truncated: false
+  }
+  if (enableAgentsPrompt) {
+    agentsPrompt = await loadAgentsPromptForWorkspace(workspacePath, {
+      globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
+      projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
+    })
+    if (agentsPrompt.prompt) {
+      systemPrompt += "\n\n" + agentsPrompt.prompt
+      console.log("[Runtime] Loaded AGENTS.md files:", agentsPrompt.loadedPaths)
+      if (agentsPrompt.truncated) {
+        console.warn("[Runtime] AGENTS.md content exceeded prompt budget and was truncated:", {
+          globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
+          projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
+        })
+      }
+    } else {
+      console.log("[Runtime] No AGENTS.md files discovered for workspace:", workspacePath)
+    }
+  } else {
+    console.log("[Runtime] AGENTS.md prompt injection disabled for this runtime")
+  }
   if (extraSystemPrompt) {
     systemPrompt += "\n\n" + extraSystemPrompt
   }
@@ -1030,20 +1803,33 @@ ${subagentShellGuidance}
 - grep: search for literal text within files (NOT regex). Do NOT use "|", ".*" or other regex syntax — call grep once per term instead.
 - Browser strategy: for browser tasks, first follow any matching enabled skill; only if no relevant skill is available, use browser_playwright.
 - browser_playwright: built-in browser automation and page interaction tool powered by project-local Playwright (fallback when no matching browser skill exists).
-
 The workspace root is: ${workspacePath}`
 
-  const skillsSources = await getEnabledSkillsSources()
-  console.log("[Runtime] Raw skills sources from getEnabledSkillsSources():", skillsSources)
-  console.log("[Runtime] Raw skills sources count:", skillsSources.length)
-  console.log("[Runtime] Raw skills sources content:", JSON.stringify(skillsSources, null, 2))
+  const skillLifecycleRootSources = await getEnabledSkillsSources()
+  const skillsSources = await getEnabledSkillMiddlewareSources()
+  console.log(
+    "[Runtime] Raw skills sources from getEnabledSkillsSources():",
+    skillLifecycleRootSources
+  )
+  console.log("[Runtime] Raw skills sources count:", skillLifecycleRootSources.length)
+  console.log(
+    "[Runtime] Raw skills sources content:",
+    JSON.stringify(skillLifecycleRootSources, null, 2)
+  )
+  console.log("[Runtime] Skill middleware sources:", skillsSources)
 
   // Merge plugin skills sources
-  const pluginSkillsSources = getEnabledPluginSkillsSources()
+  const pluginSkillSourceMetadata = getEnabledPluginSkillSourceMetadata()
+  const pluginSkillsSources = await getEnabledPluginSkillMiddlewareSources()
   console.log("[Runtime] Plugin skills sources:", pluginSkillsSources)
   console.log("[Runtime] Plugin skills sources count:", pluginSkillsSources.length)
 
   const allSkillsSources = [...skillsSources, ...pluginSkillsSources]
+  const skillLifecycleSources = [...skillLifecycleRootSources, ...pluginSkillSourceMetadata]
+  backend.setHiddenSkillDirs(getDisabledSkillDirs())
+  backend.setSkillLifecycleRegistry(
+    skillLifecycleSources.length > 0 ? new SkillLifecycleRegistry(skillLifecycleSources) : undefined
+  )
   console.log("[Runtime] All skills sources combined:", allSkillsSources)
   console.log("[Runtime] All skills sources count:", allSkillsSources.length)
   console.log("[Runtime] Skills sources:", skillsSources, "Plugin skills:", pluginSkillsSources)
@@ -1054,17 +1840,20 @@ The workspace root is: ${workspacePath}`
   if (isMemoryEnabled()) {
     const memoryStore = await getMemoryStore()
     const memoryDir = memoryStore.getMemoryDir()
-    memoryTools = [
-      createMemorySearchTool(memoryStore),
-      createMemoryGetTool(memoryStore)
-    ]
+    memoryTools = [createMemorySearchTool(memoryStore), createMemoryGetTool(memoryStore)]
     memorySources = [join(memoryDir, "MEMORY.md")]
     console.log("[Runtime] Memory initialized, dir:", memoryDir)
   } else {
     console.log("[Runtime] Memory disabled by user setting")
   }
 
-  const capabilityService = getGlobalMcpCapabilityService()
+  const capabilityService = createScopedMcpCapabilityService(
+    getGlobalMcpCapabilityService(),
+    hookScope,
+    resolveHooksForContext,
+    onHookResult,
+    { workspacePath, threadId }
+  )
   const codeExecEnabled = isCodeExecEnabled()
   const allMcpTools = await capabilityService.listTools()
   const codeExecRouteEnabled = codeExecEnabled && allMcpTools.length > 0
@@ -1072,16 +1861,22 @@ The workspace root is: ${workspacePath}`
   const lazyMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "lazy")
   const deferredSavedTools = codeExecEnabled ? listSavedCodeExecTools() : []
   const mcpTools = createEagerMcpTools(capabilityService, eagerMcpMetadata)
-  const toolSearchTools = await createToolSearchTools(capabilityService,
-    {workspacePath,
-    threadId: options.threadId},
+  const toolSearchTools = await createToolSearchTools(
+    capabilityService,
+    { workspacePath, threadId: options.threadId },
     {
       codeExecRouteEnabled,
       savedToolsEnabled: codeExecEnabled
-    })
+    }
+  )
 
   if (allMcpTools.length > 0) {
-    console.log("[Runtime] MCP tools loaded, eager:", eagerMcpMetadata.length, "lazy:", lazyMcpMetadata.length)
+    console.log(
+      "[Runtime] MCP tools loaded, eager:",
+      eagerMcpMetadata.length,
+      "lazy:",
+      lazyMcpMetadata.length
+    )
   } else {
     console.log("[Runtime] No MCP tools available in capability service")
   }
@@ -1097,20 +1892,35 @@ The workspace root is: ${workspacePath}`
           const meta = JSON.parse(threadRow.metadata)
           chatxRobotChatId = (meta.chatxRobotChatId as string) || null
         }
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     }
-    extraTools.push(createSchedulerTool({
-      workspacePath,
-      modelId: options.modelId,
-      threadId: options.threadId,
-      chatxRobotChatId
-    }))
+    extraTools.push(
+      createSchedulerTool({
+        workspacePath,
+        modelId: options.modelId,
+        threadId: options.threadId,
+        chatxRobotChatId
+      })
+    )
   }
   if (!options.noSkillEvolutionTool) {
     extraTools.push(createSkillEvolutionTool({ threadId: options.threadId }))
   }
 
   extraTools.push(createPlaywrightTool(workspacePath))
+
+  // Conditionally inject Java LSP tool
+  try {
+    const lspConfig = getLspConfig()
+    if (lspConfig.enabled && detectJavaProject(workspacePath)) {
+      extraTools.push(createLspTool({ workspacePath }))
+      console.log("[Runtime] Java LSP tool injected for:", workspacePath)
+    }
+  } catch (e) {
+    console.warn("[Runtime] Failed to check LSP config:", e)
+  }
 
   // Wrap extra tools so that errors are returned as strings instead of throwing
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1122,6 +1932,7 @@ The workspace root is: ${workspacePath}`
           try {
             return await originalFunc.apply(t, args)
           } catch (e: unknown) {
+            if (isHookHaltError(e)) throw e
             const msg = e instanceof Error ? e.message : String(e)
             const level = e instanceof TypeError || e instanceof ReferenceError ? "error" : "warn"
             console[level](`[Runtime] Tool "${t.name}" error (non-fatal):`, msg)
@@ -1139,16 +1950,41 @@ The workspace root is: ${workspacePath}`
   }
 
   if (codeExecRouteEnabled) {
-    extraTools.push(createCodeExecTool({
-      workspacePath,
-      threadId: options.threadId,
-      modelId: options.modelId,
-      yoloMode,
-      capabilityService,
-      approvalStore,
-      requestApproval
-    }))
+    extraTools.push(
+      createCodeExecTool({
+        workspacePath,
+        threadId: options.threadId,
+        modelId: options.modelId,
+        yoloMode,
+        capabilityService,
+        approvalStore,
+        requestApproval
+      })
+    )
   }
+
+  const toolHookExclusions = new Set<string>([
+    "ls",
+    "read_file",
+    "write_file",
+    "edit_file",
+    "glob",
+    "grep",
+    "execute",
+    "task_output",
+    "search_tool",
+    "inspect_tool",
+    "invoke_deferred_tool",
+    ...eagerMcpMetadata.map((tool) => tool.toolId)
+  ])
+  const toolHookMiddleware = createToolHookMiddleware({
+    workspacePath,
+    threadId: options.threadId,
+    hookScope,
+    resolveHooksForContext,
+    onHookResult,
+    skipToolNames: toolHookExclusions
+  })
 
   const deferredToolIds = [
     ...lazyMcpMetadata.map((tool) => tool.toolId),
@@ -1180,15 +2016,40 @@ The workspace root is: ${workspacePath}`
     hasCodeExecTool
   })
   systemPrompt += renderAvailableDeferredToolsPrompt(deferredToolIds)
-  console.log("[System prompts", systemPrompt)
+  console.log("[Runtime] System prompt summary:", {
+    chars: systemPrompt.length,
+    hasAgentsPrompt: Boolean(agentsPrompt.prompt),
+    agentsFilesLoaded: agentsPrompt.loadedPaths.length,
+    hasExtraSystemPrompt: Boolean(extraSystemPrompt),
+    deferredToolIds: deferredToolIds.length
+  })
   const triggerTokens = Math.floor(maxTokens * 0.75)
-  const keepTokens = Math.max(Math.floor(maxTokens * 0.08), 4_000)
-  const toolEvictLimit = Math.min(6_000, Math.max(Math.floor(maxTokens * 0.05), 3_000))
-  const trimForSummary = Math.min(12_000, Math.floor(maxTokens * 0.25))
-  console.log("[Runtime] Context window:", maxTokens, "→ summarization trigger:", triggerTokens, "→ keep:", keepTokens, "→ tool evict limit:", toolEvictLimit, "→ trim for summary:", trimForSummary, "→ max output bytes:", maxOutputBytes)
+  const keepTokens = Math.max(Math.floor(maxTokens * SUMMARY_KEEP_RATIO), 4_000)
+  const toolEvictLimit = Math.min(20_000, Math.max(Math.floor(maxTokens * 0.08), 6_000))
+  const trimForSummary = Math.min(
+    SUMMARY_INPUT_TOKEN_CAP,
+    Math.floor(maxTokens * SUMMARY_INPUT_RATIO)
+  )
+  console.log(
+    "[Runtime] Context window:",
+    maxTokens,
+    "→ summarization trigger:",
+    triggerTokens,
+    "→ keep:",
+    keepTokens,
+    "→ tool evict limit:",
+    toolEvictLimit,
+    "→ trim for summary:",
+    trimForSummary,
+    "→ max output bytes:",
+    maxOutputBytes
+  )
 
   backend.setGitWorkflowCommitOnly(false)
-  console.log("[Runtime] Final tool list:", finalTools.map((t) => (t as { name?: string }).name ?? "(unnamed)"))
+  console.log(
+    "[Runtime] Final tool list:",
+    finalTools.map((t) => (t as { name?: string }).name ?? "(unnamed)")
+  )
 
   const agent = createDeepAgent({
     model,
@@ -1197,20 +2058,34 @@ The workspace root is: ${workspacePath}`
     backend,
     systemPrompt,
     filesystemSystemPrompt,
+    subagentExtraSystemPrompt: agentsPrompt.prompt ?? undefined,
     skills: allSkillsSources.length > 0 ? allSkillsSources : undefined,
     memory: memorySources?.length ? memorySources : undefined,
-    // When the orchestrator is active (non-YOLO), it handles execute approval
-    // internally via IPC — no need for the HITL middleware to intercept execute.
-    // HITL middleware is still used in YOLO=false mode for non-execute tools if needed.
+    // The orchestrator handles execute/file approval internally via IPC. In YOLO
+    // mode it skips initial approvals but still prompts before sandbox escape.
     interruptOn: undefined,
     summarizationTrigger: { type: "tokens", value: triggerTokens },
     summarizationKeep: { type: "tokens", value: keepTokens },
     toolTokenLimitBeforeEvict: toolEvictLimit,
-    trimTokensToSummarize: trimForSummary
+    trimTokensToSummarize: trimForSummary,
+    summarizationSummaryPrompt: CMB_COWORK_SUMMARY_PROMPT,
+    summarizationTruncateArgsSettings: {
+      trigger: { type: "tokens", value: triggerTokens },
+      keep: { type: "tokens", value: keepTokens },
+      maxLength: 2000
+    },
+    toolConcurrencyQueueId: options.threadId ?? workspacePath,
+    toolHookMiddleware
   })
 
-  console.log("[Runtime] Agent created with skills parameter:", allSkillsSources.length > 0 ? allSkillsSources : undefined)
-  console.log("[Runtime] Final skills passed to createDeepAgent:", JSON.stringify(allSkillsSources.length > 0 ? allSkillsSources : undefined, null, 2))
+  console.log(
+    "[Runtime] Agent created with skills parameter:",
+    allSkillsSources.length > 0 ? allSkillsSources : undefined
+  )
+  console.log(
+    "[Runtime] Final skills passed to createDeepAgent:",
+    JSON.stringify(allSkillsSources.length > 0 ? allSkillsSources : undefined, null, 2)
+  )
   console.log("[Runtime] Agent created with LocalSandbox at:", workspacePath)
   return agent
 }

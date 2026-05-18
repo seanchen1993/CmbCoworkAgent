@@ -63,7 +63,9 @@ export function initMMJ(): void {
         appName: "CMBDevClaw",
         productCode: "LA64.06",
         userId: ip || "游客",
-        positionId: localStorage.getItem("version") || ""
+        positionId: localStorage.getItem("version") || "",
+        openWs: "true",
+        errorCode:'MMJ0001'
       })
 
       updateMMJUserInfo()

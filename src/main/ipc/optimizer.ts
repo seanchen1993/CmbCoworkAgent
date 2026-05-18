@@ -35,6 +35,8 @@ import type { AgentTrace } from "../agent/trace/types"
 import {
   getCustomModelConfigs,
   getCustomSkillsDir,
+  clearDisabledSkillsForSkillDir,
+  findExistingSkillById,
   invalidateEnabledSkillsCache,
   isOnlineSkillEvolutionEnabled,
   setOnlineSkillEvolutionEnabled,
@@ -43,6 +45,7 @@ import {
   getSkillEvolutionThreshold,
   setSkillEvolutionThreshold
 } from "../storage"
+import { trackEvent } from "../services/event-reporter"
 
 function notifyRenderer(channel: string, payload?: unknown): void {
   for (const win of BrowserWindow.getAllWindows()) {
@@ -85,8 +88,8 @@ function getDefaultModel(): ChatOpenAI | null {
     model: config.model,
     apiKey: config.apiKey,
     configuration: { baseURL: config.baseUrl },
-    maxTokens: 4096,
-    temperature: 0.3,
+    maxTokens: config.maxOutputTokens,
+    temperature: config.temperature,
     streaming: true
   })
 }
@@ -113,11 +116,25 @@ function mergePendingCandidates(newCandidates: OptimizationRunResult["candidates
   return merged
 }
 
-function applyCandidate(skillId: string, content: string): { success: boolean; error?: string } {
+function applyCandidate(
+  action: OptimizationRunResult["candidates"][number]["action"],
+  skillId: string,
+  content: string
+): { success: boolean; error?: string } {
   try {
     const skillDir = join(getCustomSkillsDir(), skillId)
+    if (action === "create") {
+      const existingSkill = findExistingSkillById(skillId)
+      if (existingSkill) {
+        return {
+          success: false,
+          error: `skillId already exists in another source: ${skillId} (${existingSkill.rootDir})`
+        }
+      }
+    }
     mkdirSync(skillDir, { recursive: true })
     writeFileSync(join(skillDir, "SKILL.md"), content, "utf-8")
+    if (action === "create") clearDisabledSkillsForSkillDir(skillDir)
     invalidateEnabledSkillsCache()
     notifyRenderer("skills:changed")
     return { success: true }
@@ -199,11 +216,23 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
         }
 
         notifyRenderer("optimizer:streamEnd", { success: true })
+        const selectedMerged = mergePendingCandidates(runResult.candidates)
+        if (runResult.candidates.length > 0) {
+          try {
+            trackEvent("skill.evolution.created", "skill", {
+              candidatesCount: runResult.candidates.length,
+              tracesAnalyzed: runResult.tracesAnalyzed,
+              mode: runMode
+            })
+          } catch (e) {
+            console.warn("[event] failed to emit skill.evolution.created:", e)
+          }
+        }
         return {
           startedAt: runResult.startedAt,
           endedAt: runResult.endedAt,
           tracesAnalyzed: runResult.tracesAnalyzed,
-          candidates: mergePendingCandidates(runResult.candidates),
+          candidates: selectedMerged,
           summary: runResult.summary
         }
       }
@@ -231,6 +260,17 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
 
       notifyRenderer("optimizer:streamEnd", { success: true })
       result.candidates = mergePendingCandidates(result.candidates)
+      if (result.candidates.length > 0) {
+        try {
+          trackEvent("skill.evolution.created", "skill", {
+            candidatesCount: result.candidates.length,
+            tracesAnalyzed: result.tracesAnalyzed,
+            mode: runMode
+          })
+        } catch (e) {
+          console.warn("[event] failed to emit skill.evolution.created:", e)
+        }
+      }
       console.log(`[Optimizer] Run complete: ${result.summary}`)
       return result
     }
@@ -251,12 +291,22 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
         return { success: false, error: `Candidate ${candidateId} not found` }
       }
 
-      const result = applyCandidate(candidate.skillId, candidate.proposedContent)
+      const result = applyCandidate(candidate.action, candidate.skillId, candidate.proposedContent)
       if (!result.success) {
         updateCandidateStatus(candidateId, "rejected")
         return { success: false, skillId: candidate.skillId, error: result.error }
       }
 
+      try {
+        trackEvent("skill.evolution.accepted", "skill", {
+          candidateId,
+          skillId: candidate.skillId,
+          skillName: candidate.name,
+          action: candidate.action
+        })
+      } catch (e) {
+        console.warn("[event] failed to emit skill.evolution.accepted:", e)
+      }
       console.log(`[Optimizer] Approved and applied skill: ${candidate.skillId}`)
       return { success: true, skillId: candidate.skillId }
     }

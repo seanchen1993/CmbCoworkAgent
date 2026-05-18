@@ -1,8 +1,4 @@
-import {
-  buildSavedCodeExecResultExample,
-  inferSavedCodeExecSchema,
-  parseCodeExecOutputValue
-} from "./saved-tool-store"
+import { inferSavedCodeExecSchema } from "./saved-tool-store"
 
 const IDENTIFIER_RE = /^[A-Za-z_$][A-Za-z0-9_$]*$/
 
@@ -28,8 +24,6 @@ export interface SavedToolPromotionReady {
   status: "ready"
   dependencies: string[]
   inputSchema: Record<string, unknown>
-  outputSchema: Record<string, unknown>
-  resultExample: unknown
 }
 
 export interface SavedToolPromotionBlocked {
@@ -596,7 +590,6 @@ function collectParamUsageFromCode(code: string): Map<string, ParamUsageState> {
 export function analyzeCodeExecForSavedToolPromotion(input: {
   code: string
   params?: Record<string, unknown>
-  output: string
 }): SavedToolPromotionResult {
   const env = parseTopLevelAssignments(input.code)
   const calls = scanMcpCalls(input.code, env)
@@ -610,13 +603,9 @@ export function analyzeCodeExecForSavedToolPromotion(input: {
     }
   }
 
-  const outputValue = parseCodeExecOutputValue(input.output)
-
   return {
     status: "ready",
     dependencies,
-    inputSchema: buildInputSchema(input.params, paramUsage),
-    outputSchema: inferSavedCodeExecSchema(outputValue),
-    resultExample: buildSavedCodeExecResultExample(outputValue)
+    inputSchema: buildInputSchema(input.params, paramUsage)
   }
 }

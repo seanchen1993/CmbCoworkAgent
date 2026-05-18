@@ -1,0 +1,1 @@
+export const CODE_EXEC_DEFAULT_TIMEOUT_MS = 30_000
