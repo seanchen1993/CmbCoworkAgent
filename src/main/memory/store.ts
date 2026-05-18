@@ -35,9 +35,9 @@ export interface RecallStats {
   lastRecalledAt: number | null
 }
 
-function chunkMarkdown(content: string, filePath: string): Omit<MemoryChunk, "id" | "createdAt">[] {
+function chunkMarkdown(content: string, filePath: string): Omit<MemoryChunk, "id" | "createdAt" | "recallCount" | "lastRecalledAt">[] {
   const lines = content.split("\n")
-  const chunks: Omit<MemoryChunk, "id" | "createdAt">[] = []
+  const chunks: Omit<MemoryChunk, "id" | "createdAt" | "recallCount" | "lastRecalledAt">[] = []
   let currentText = ""
   let startLine = 1
 

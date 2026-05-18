@@ -16,15 +16,7 @@
 
 import { ChatOpenAI } from "@langchain/openai"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  writeFileSync,
-  readdirSync,
-  statSync
-} from "fs"
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "fs"
 import { basename, join } from "path"
 import { getMemoryStore } from "./store"
 import { notifyMemoryChanged } from "./events"
@@ -60,8 +52,6 @@ const DREAM_MIN_SESSIONS = 5
  * purely as a guard for the LLM-validation step.
  */
 const ARCHIVE_MIN_AGE_DAYS = 180
-/** Facts created more recently than this are never archived regardless. */
-const ARCHIVE_MIN_CREATED_DAYS = 30
 
 // ─── Content budget sent to LLM ────────────────────────────────────────────
 const MAX_BODY_CHARS_PER_FILE = 800
