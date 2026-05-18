@@ -159,7 +159,6 @@ export interface HarnessFeatureSummary {
     text: string
     updatedAt: string
   }
-  sourceHealth?: HarnessStatus
 }
 
 export interface HarnessProjectDetailViewModel {
@@ -188,7 +187,7 @@ export interface HarnessProjectDetailViewModel {
 export interface HarnessWorkflowNodeDefinition {
   id: string
   label: string
-  group: string
+  group?: string
   order: number
   description?: string
   states?: HarnessStatus[]
@@ -263,7 +262,7 @@ export interface HarnessHookLogView {
 export interface HarnessRunNode {
   id: string
   label: string
-  group: string
+  group?: string
   order: number
   status: HarnessStatus
   artifacts: HarnessArtifact[]
@@ -295,7 +294,6 @@ export interface HarnessRunDetailViewModel {
       label: string
       summary: string
     }
-    sourceHealth?: HarnessStatus
     hookLogRefs: Array<{
       id: string
       path: string

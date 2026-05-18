@@ -233,6 +233,47 @@ function progressPercent(run: HarnessFeatureSummary): number {
   return Math.min(100, Math.round((run.position.progressIndex / run.position.totalNodes) * 100))
 }
 
+interface StageNodeGroup {
+  key: string
+  label: string
+  nodes: HarnessRunNode[]
+}
+
+function stageNodeGroupLabel(node: HarnessRunNode): string {
+  return (node.group ?? "").trim()
+}
+
+function groupStageNodes(nodes: HarnessRunNode[]): StageNodeGroup[] {
+  const groups: StageNodeGroup[] = []
+  const groupsByKey = new Map<string, StageNodeGroup>()
+  const ungroupedNodes: HarnessRunNode[] = []
+
+  for (const node of nodes) {
+    const label = stageNodeGroupLabel(node)
+    if (!label) {
+      ungroupedNodes.push(node)
+      continue
+    }
+
+    const key = `group:${label}`
+    const existing = groupsByKey.get(key)
+    if (existing) {
+      existing.nodes.push(node)
+      continue
+    }
+
+    const group = { key, label, nodes: [node] }
+    groupsByKey.set(key, group)
+    groups.push(group)
+  }
+
+  if (groups.length > 0 && ungroupedNodes.length > 0) {
+    groups.push({ key: "ungrouped", label: "未分组", nodes: ungroupedNodes })
+  }
+
+  return groups
+}
+
 function ProjectFormDialog({
   open,
   creating,
@@ -625,7 +666,7 @@ function FeatureCard({
   return (
     <button
       type="button"
-      className="grid h-[144px] w-full grid-rows-[auto_minmax(0,1fr)_auto_auto] gap-2 rounded-md border border-border bg-background px-3 py-3 text-left transition-all hover:border-primary/50 hover:shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      className="flex h-[112px] w-full flex-col gap-2 rounded-md border border-border bg-background px-3 py-3 text-left transition-all hover:border-primary/50 hover:shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
       onClick={onOpen}
     >
       <div className="flex min-w-0 items-start justify-between gap-3">
@@ -635,10 +676,7 @@ function FeatureCard({
         </div>
         <StatusPill status={run.overallStatus} />
       </div>
-      <div className="line-clamp-2 text-xs leading-5 text-muted-foreground" title={run.summary.text}>
-        {run.summary.text}
-      </div>
-      <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+      <div className="mt-auto h-1.5 overflow-hidden rounded-full bg-muted">
         <div className="h-full rounded-full bg-status-info" style={{ width: `${progressPercent(run)}%` }} />
       </div>
       <div className="flex items-center justify-between gap-3 text-[11px] text-muted-foreground">
@@ -956,6 +994,14 @@ function FeatureWorkspaceSidebar({
   onSelectFeature: () => void
   onSelectSession: (threadId: string) => void
 }): React.JSX.Element {
+  const detailKey = detail ? `${detail.project.projectId}:${detail.run.slug}` : ""
+  const [sessionsCollapsed, setSessionsCollapsed] = useState(false)
+  const hasSelectedSession = activeTab === "session"
+
+  useEffect(() => {
+    setSessionsCollapsed(false)
+  }, [detailKey])
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex items-center gap-2 px-4 py-1.5 text-xs font-medium text-muted-foreground">
@@ -990,62 +1036,92 @@ function FeatureWorkspaceSidebar({
             aria-pressed={activeTab === "feature"}
             onClick={onSelectFeature}
             className={cn(
-              "flex w-full min-w-0 items-center gap-2 rounded-sm px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+              "group flex min-h-[52px] w-full min-w-0 items-center gap-1.5 rounded-sm px-2 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
               activeTab === "feature"
                 ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                : "hover:bg-sidebar-accent/50"
+                : hasSelectedSession
+                  ? "bg-sidebar-accent/70 text-sidebar-accent-foreground"
+                  : "hover:bg-sidebar-accent/40"
             )}
           >
-            <Workflow className="size-4 shrink-0 text-status-info" />
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-sm font-medium">Feature 详情</div>
-              <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
+            <span
+              aria-expanded={!sessionsCollapsed}
+              role="button"
+              tabIndex={-1}
+              onClick={(event) => {
+                event.stopPropagation()
+                setSessionsCollapsed((current) => !current)
+              }}
+              className="flex size-4 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-sidebar-accent/50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              title={sessionsCollapsed ? "展开会话" : "收起会话"}
+            >
+              {sessionsCollapsed ? (
+                <ChevronRight className="size-3.5" />
+              ) : (
+                <ChevronDown className="size-3.5" />
+              )}
+            </span>
+            <span className="flex min-w-0 flex-1 items-center gap-1.5">
+              <Workflow className="size-4 shrink-0 text-status-info" />
+              <span className="min-w-0 flex-1 truncate text-xs font-medium" title={detail?.run.slug}>
                 {detail ? detail.run.slug : loading ? "读取中" : "未选择 feature"}
-              </div>
-            </div>
+              </span>
+            </span>
+            {hasSelectedSession && (
+              <span className="shrink-0 rounded-sm px-1 text-[10px] text-muted-foreground transition-colors group-hover:text-foreground">
+                返回详情
+              </span>
+            )}
+            <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
+              {loading ? "-" : sessions.length}
+            </span>
           </button>
 
-          {loading ? (
-            <div className="flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground">
-              <Loader2 className="size-3.5 animate-spin" />
-              读取关联会话
+          {!sessionsCollapsed && (
+            <div className="ml-4 space-y-1 border-l border-border/70 pl-2">
+              {loading ? (
+                <div className="flex items-center gap-2 px-2 py-1.5 text-xs text-muted-foreground">
+                  <Loader2 className="size-3.5 animate-spin" />
+                  读取关联会话
+                </div>
+              ) : sessions.length === 0 ? (
+                <div className="px-2 py-2 text-xs text-muted-foreground">
+                  暂无关联会话
+                </div>
+              ) : (
+                sessions.map((session) => {
+                  const thread = threadsById.get(session.threadId) ?? null
+                  const workspacePath = getThreadWorkspacePath(thread)
+                  const selected = activeTab === "session" && session.threadId === activeThreadId
+                  const label = thread?.title || session.threadId
+                  return (
+                    <button
+                      key={session.threadId}
+                      type="button"
+                      aria-pressed={selected}
+                      onClick={() => onSelectSession(session.threadId)}
+                      className={cn(
+                        "flex w-full min-w-0 items-start gap-2 rounded-sm px-2 py-1.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                        selected
+                          ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                          : "hover:bg-sidebar-accent/50"
+                      )}
+                    >
+                      <MessageSquare className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-sm font-medium" title={label}>
+                          {label}
+                        </div>
+                        <div className="mt-0.5 flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
+                          <span className="truncate">{workspacePath ? getWorkspaceName(workspacePath) : session.threadId}</span>
+                          <span className="shrink-0">{formatSessionTime(session.lastActiveAt)}</span>
+                        </div>
+                      </div>
+                    </button>
+                  )
+                })
+              )}
             </div>
-          ) : sessions.length === 0 ? (
-            <div className="px-3 py-3 text-xs text-muted-foreground">
-              暂无关联会话
-            </div>
-          ) : (
-            sessions.map((session) => {
-              const thread = threadsById.get(session.threadId) ?? null
-              const workspacePath = getThreadWorkspacePath(thread)
-              const selected = activeTab === "session" && session.threadId === activeThreadId
-              const label = thread?.title || session.threadId
-              return (
-                <button
-                  key={session.threadId}
-                  type="button"
-                  aria-pressed={selected}
-                  onClick={() => onSelectSession(session.threadId)}
-                  className={cn(
-                    "flex w-full min-w-0 items-start gap-2 rounded-sm px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-                    selected
-                      ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                      : "hover:bg-sidebar-accent/50"
-                  )}
-                >
-                  <MessageSquare className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-medium" title={label}>
-                      {label}
-                    </div>
-                    <div className="mt-0.5 flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
-                      <span className="truncate">{workspacePath ? getWorkspaceName(workspacePath) : session.threadId}</span>
-                      <span className="shrink-0">{formatSessionTime(session.lastActiveAt)}</span>
-                    </div>
-                  </div>
-                </button>
-              )
-            })
           )}
         </div>
       </ScrollArea>
@@ -1062,7 +1138,7 @@ function FeatureConversationPanel({
     <section className="flex min-h-0 flex-1 overflow-hidden rounded-md border border-border bg-background">
       {threadId ? (
         <div className="flex min-h-0 flex-1">
-          <TabbedPanel threadId={threadId} showTabBar={false} />
+          <TabbedPanel threadId={threadId} showTabBar={false} hideWelcomeSkillTabs />
         </div>
       ) : (
         <div className="flex min-h-0 flex-1 items-center justify-center px-6 text-center text-sm text-muted-foreground">
@@ -1336,26 +1412,34 @@ function FeatureDetailPage({
   }, [detail])
   const detailKey = detail ? `${detail.project.projectId}:${detail.run.slug}` : ""
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
-  const nodeButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({})
+  const groupButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({})
 
   useEffect(() => {
     setSelectedNodeId(defaultNodeId)
   }, [defaultNodeId, detail])
 
+  const effectiveSelectedNodeId = selectedNodeId ?? defaultNodeId
+  const selectedNode =
+    detail?.run.nodes.find((node) => node.id === effectiveSelectedNodeId) ?? detail?.run.nodes[0] ?? null
+  const nodeGroups = useMemo(() => groupStageNodes(detail?.run.nodes ?? []), [detail])
+  const selectedGroup = nodeGroups.length > 0
+    ? nodeGroups.find((group) => selectedNode && group.nodes.some((node) => node.id === selectedNode.id)) ??
+      nodeGroups.find((group) => group.nodes.some((node) => node.id === defaultNodeId)) ??
+      nodeGroups[0]
+    : null
+  const selectedGroupKey = selectedGroup?.key ?? null
+
   useEffect(() => {
-    if (!selectedNodeId) return
+    if (!selectedGroupKey) return
     const frame = window.requestAnimationFrame(() => {
-      nodeButtonRefs.current[selectedNodeId]?.scrollIntoView({
+      groupButtonRefs.current[selectedGroupKey]?.scrollIntoView({
         block: "nearest",
         inline: "center"
       })
     })
     return () => window.cancelAnimationFrame(frame)
-  }, [selectedNodeId])
+  }, [selectedGroupKey])
 
-  const effectiveSelectedNodeId = selectedNodeId ?? defaultNodeId
-  const selectedNode =
-    detail?.run.nodes.find((node) => node.id === effectiveSelectedNodeId) ?? detail?.run.nodes[0] ?? null
   const { createThread, selectThread, threads } = useAppStore()
   const threadsById = useMemo(() => new Map(threads.map((thread) => [thread.thread_id, thread])), [threads])
   const [sessionBusy, setSessionBusy] = useState<"create" | null>(null)
@@ -1477,41 +1561,96 @@ function FeatureDetailPage({
 
   const renderStageNodeStrip = (): React.JSX.Element | null => {
     if (!detail) return null
-    return (
-      <div className="-mx-1 overflow-x-auto pb-2">
-        <div className="flex w-max gap-3 px-1">
-          {detail.run.nodes.map((node) => {
-            const selected = effectiveSelectedNodeId === node.id
-            return (
-              <button
-                key={node.id}
-                ref={(element) => {
-                  nodeButtonRefs.current[node.id] = element
-                }}
-                type="button"
-                onClick={() => {
-                  setSelectedNodeId(node.id)
-                }}
-                aria-pressed={selected}
-                title={node.label}
-                className={cn(
-                  "w-[220px] flex-none rounded-md border px-3 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-                  selected
-                    ? "border-status-info bg-status-info/10 shadow-sm"
-                    : node.status.isCurrent
-                      ? "border-status-info/45 bg-status-info/5 hover:border-status-info"
-                      : "border-border bg-background hover:border-primary/45"
-                )}
-              >
-                <div className="flex min-w-0 items-center gap-1.5">
-                  {statusIcon(node.status)}
-                  <span className="truncate text-sm font-medium">{node.label}</span>
-                </div>
-                <div className="mt-1 truncate text-xs text-muted-foreground">{node.group}</div>
-              </button>
-            )
-          })}
+    if (detail.run.nodes.length === 0) return null
+
+    const renderStageNodeButton = (node: HarnessRunNode): React.JSX.Element => {
+      const selected = effectiveSelectedNodeId === node.id
+      return (
+        <button
+          key={node.id}
+          type="button"
+          onClick={() => {
+            setSelectedNodeId(node.id)
+          }}
+          aria-pressed={selected}
+          title={node.label}
+          className={cn(
+            "w-[210px] rounded-md border px-3 py-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+            selected
+              ? "border-status-info bg-status-info/10 shadow-sm"
+              : node.status.isCurrent
+                ? "border-status-info/45 bg-status-info/5 hover:border-status-info"
+                : "border-border bg-background hover:border-primary/45"
+          )}
+        >
+          <div className="flex min-w-0 items-center gap-1.5">
+            {statusIcon(node.status)}
+            <span className="truncate text-sm font-medium">{node.label}</span>
+          </div>
+        </button>
+      )
+    }
+
+    if (nodeGroups.length > 0 && selectedGroup) {
+      return (
+        <div className="space-y-3">
+          <div className="-mx-1 overflow-x-auto pb-2">
+            <div className="flex w-max gap-3 px-1">
+              {nodeGroups.map((group) => {
+                const selected = selectedGroup.key === group.key
+                const currentNode =
+                  group.nodes.find((node) => node.id === defaultNodeId) ??
+                  group.nodes.find((node) => node.status.isCurrent) ??
+                  group.nodes[0]
+                const current = group.nodes.some((node) => node.id === defaultNodeId || node.status.isCurrent)
+
+                return (
+                  <button
+                    key={group.key}
+                    ref={(element) => {
+                      groupButtonRefs.current[group.key] = element
+                    }}
+                    type="button"
+                    onClick={() => {
+                      if (currentNode) setSelectedNodeId(currentNode.id)
+                    }}
+                    aria-pressed={selected}
+                    title={group.label}
+                    className={cn(
+                      "w-[190px] flex-none rounded-md border px-3 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                      selected
+                        ? "border-status-info bg-status-info/10 shadow-sm"
+                        : current
+                          ? "border-status-info/45 bg-status-info/5 hover:border-status-info"
+                          : "border-border bg-background hover:border-primary/45"
+                    )}
+                  >
+                    <div className="flex min-w-0 items-center gap-1.5">
+                      {currentNode ? statusIcon(currentNode.status) : <Circle className="size-4 text-muted-foreground" />}
+                      <span className="truncate text-sm font-medium">{group.label}</span>
+                    </div>
+                    <div className="mt-1 text-xs text-muted-foreground">{group.nodes.length} 个节点</div>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+
+          <section className="rounded-md border border-border bg-muted/30 p-3">
+            <div className="flex min-w-0 items-center justify-between gap-3">
+              <div className="truncate text-sm font-semibold">{selectedGroup.label}</div>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {selectedGroup.nodes.map((node) => renderStageNodeButton(node))}
+            </div>
+          </section>
         </div>
+      )
+    }
+
+    return (
+      <div className="flex flex-wrap gap-2">
+        {detail.run.nodes.map((node) => renderStageNodeButton(node))}
       </div>
     )
   }
@@ -1541,6 +1680,21 @@ function FeatureDetailPage({
             </div>
           </div>
         </div>
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          className="shrink-0 gap-2"
+          onClick={() => void handleCreateSession()}
+          disabled={loading || !detail || sessionBusy !== null}
+        >
+          {sessionBusy === "create" ? (
+            <Loader2 className="size-4 animate-spin" />
+          ) : (
+            <MessageSquarePlus className="size-4" />
+          )}
+          {sessionBusy === "create" ? "创建中" : "新增会话"}
+        </Button>
       </div>
 
       {loading || !detail ? (

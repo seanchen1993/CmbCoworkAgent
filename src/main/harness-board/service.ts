@@ -54,19 +54,6 @@ const DEFAULT_CACHE = {
 const HARNESS_ADAPTER_TIMEOUT_MS = 15_000
 const HARNESS_ADAPTER_MAX_BUFFER = 10 * 1024 * 1024
 
-const AUTOBIZDEVOPS_WORKFLOW_NODES = [
-  { id: "biz.discuss", label: "需求澄清" },
-  { id: "biz.prd", label: "PRD 生成" },
-  { id: "dev.plan", label: "计划生成" },
-  { id: "dev.code", label: "代码实现" },
-  { id: "dev.review", label: "需求实现评审" },
-  { id: "dev.utest", label: "单元测试" },
-  { id: "dev.e2e", label: "E2E 测试" },
-  { id: "dev.verify", label: "验收汇总" },
-  { id: "ops.cicd", label: "CI/CD" },
-  { id: "ops.archive", label: "归档" }
-]
-
 const HARNESS_UI_KINDS = new Set<HarnessStatus["uiKind"]>([
   "pending",
   "active",
@@ -387,24 +374,18 @@ function normalizeWatchRefs(
   return normalized.length > 0 ? normalized : fallback
 }
 
-function workflowNodeInfo(nodeId: string): { label: string; progressIndex: number } | null {
-  const index = AUTOBIZDEVOPS_WORKFLOW_NODES.findIndex((node) => node.id === nodeId)
-  if (index === -1) return null
-  return {
-    label: AUTOBIZDEVOPS_WORKFLOW_NODES[index].label,
-    progressIndex: index + 1
-  }
-}
-
 function normalizeProjectRun(value: unknown, generatedAt: string): HarnessFeatureSummary | null {
   if (!isObject(value)) return null
   const slug = normalizeText(value.featureId) || normalizeText(value.featureName)
   if (!slug) return null
 
-  const currentNodeId = normalizeText(value.currentNodeId)
-  const nodeInfo = workflowNodeInfo(currentNodeId)
-  const status = normalizeStatus(value.status, currentNodeId ? "in_progress" : "unknown")
-  const currentNodeLabel = nodeInfo?.label ?? currentNodeId
+  const position = isObject(value.position) ? value.position : {}
+  const summary = isObject(value.summary) ? value.summary : {}
+  const status = normalizeStatus(value.overallStatus, "unknown")
+  const currentNodeId = normalizeText(position.currentNodeId) || "unknown"
+  const currentNodeLabel = normalizeText(position.currentNodeLabel) || currentNodeId
+  const summaryText = normalizeText(summary.text) ||
+    (currentNodeLabel ? `${currentNodeLabel} · ${status.label}` : status.label)
 
   return {
     id: slug,
@@ -414,17 +395,16 @@ function normalizeProjectRun(value: unknown, generatedAt: string): HarnessFeatur
     location: status.uiKind === "archived" ? "archived" : "active",
     overallStatus: status,
     position: {
-      currentNodeId: currentNodeId || "unknown",
+      currentNodeId,
       currentNodeLabel,
-      currentNodeState: status.id,
-      progressIndex: nodeInfo?.progressIndex ?? 0,
-      totalNodes: AUTOBIZDEVOPS_WORKFLOW_NODES.length
+      currentNodeState: normalizeText(position.currentNodeState) || status.id,
+      progressIndex: typeof position.progressIndex === "number" ? position.progressIndex : 0,
+      totalNodes: typeof position.totalNodes === "number" ? position.totalNodes : 0
     },
     summary: {
-      text: currentNodeLabel ? `${currentNodeLabel} · ${status.label}` : status.label,
-      updatedAt: generatedAt
-    },
-    sourceHealth: okStatus("adapter_loaded", "Inspect 已加载")
+      text: summaryText,
+      updatedAt: normalizeText(summary.updatedAt) || generatedAt
+    }
   }
 }
 
@@ -439,11 +419,12 @@ function normalizeWorkflowNodeDefinition(value: unknown): HarnessWorkflow["nodes
   if (!isObject(value)) return null
   const id = normalizeText(value.id)
   if (!id) return null
+  const group = normalizeText(value.group)
 
   return {
     id,
     label: normalizeText(value.label) || id,
-    group: normalizeText(value.group) || "Default",
+    ...(group ? { group } : {}),
     order: typeof value.order === "number" ? value.order : 0,
     description: normalizeText(value.description) || undefined,
     states: Array.isArray(value.states) ? value.states.map((state) => normalizeStatus(state)) : undefined,
@@ -691,10 +672,11 @@ function normalizeRunNodes(
       const id = normalizeText(node.id)
       if (!id) return null
       const definitions = artifactDefinitions.get(id)
+      const group = normalizeText(node.group)
       return {
         id,
         label: normalizeText(node.label) || id,
-        group: normalizeText(node.group) || "Default",
+        ...(group ? { group } : {}),
         order: typeof node.order === "number" ? node.order : 0,
         status: normalizeStatus(node.status),
         artifacts: Array.isArray(node.artifacts)
@@ -713,17 +695,6 @@ function normalizeRunNodes(
       }
     })
     .filter((node): node is HarnessRunNode => node !== null)
-}
-
-function normalizeSourceHealth(value: unknown): HarnessStatus | undefined {
-  if (!isObject(value)) return undefined
-  const stateFound = value.stateFound === true
-  const featureDirExists = value.featureDirExists === true
-  const hasErrors = Array.isArray(value.stateErrors) && value.stateErrors.length > 0
-  if (stateFound && featureDirExists && !hasErrors) {
-    return okStatus("ok", "状态正常")
-  }
-  return { id: "source_warning", label: "状态异常", uiKind: "warning" }
 }
 
 function normalizeProject(value: unknown): HarnessProjectMetadata | null {
@@ -1192,7 +1163,6 @@ export function getHarnessRunDetail(projectId: string, slug: string): HarnessRun
         label: project["harness-adapter"].name,
         summary: isObject(run.summary) ? normalizeText(run.summary.text) : overallStatus.label
       },
-      sourceHealth: normalizeSourceHealth(run.sourceHealth),
       hookLogRefs,
       watchRefs: normalizeWatchRefs(project, run.watchRefs, makeWatchRefs(project.projectCode, featureSlug)),
       overallStatus,

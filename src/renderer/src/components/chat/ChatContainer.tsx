@@ -502,6 +502,7 @@ interface StreamMessage {
 interface ChatContainerProps {
   threadId: string
   showGitChangeNotice?: boolean
+  hideWelcomeSkillTabs?: boolean
   onOpenGitPanel?: () => void
   onThreadGitStatusChange?: (threadId: string, isGit: boolean) => void
 }
@@ -732,6 +733,7 @@ function RotatingHeadline() {
 export function ChatContainer({
   threadId,
   showGitChangeNotice = false,
+  hideWelcomeSkillTabs = false,
   onOpenGitPanel,
   onThreadGitStatusChange
 }: ChatContainerProps): React.JSX.Element {
@@ -3026,178 +3028,180 @@ export function ChatContainer({
                         )}
                       </div>
                     )}
-                    <Tabs defaultValue="skills-by-category" className="space-y-3">
-                      <TabsList className="grid h-9 w-full grid-cols-3">
-                        <TabsTrigger value="skills-by-category" className="text-xs">
-                          场景技能
-                        </TabsTrigger>
-                        <TabsTrigger value="installed-skills" className="text-xs gap-1.5">
-                          我安装的技能
-                          {customSkillUpdateCount > 0 && (
-                            <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-teal-100 px-1 text-[10px] font-semibold leading-none text-teal-700 dark:bg-teal-900/40 dark:text-teal-200">
-                              {customSkillUpdateCount}
-                            </span>
-                          )}
-                        </TabsTrigger>
-                        <TabsTrigger value="help" className="text-xs">
-                          帮助
-                        </TabsTrigger>
-                      </TabsList>
-
-                      <TabsContent value="skills-by-category" className="mt-0">
-                        {/* 市场技能：内部使用 getAllSkills 取数并按分类展示 */}
-                        <SkillsByCategorySection
-                          skills={enabledSkillsForSlash}
-                          previewLimit={GOOD_SKILLS_PREVIEW_LIMIT}
-                          onOpenMarketByCategory={handleOpenMarketBySecondaryCategory}
-                          onOpenMarketBySkill={handleOpenMarketBySkill}
-                          onUseSkillPrompt={handleUseSkillPrompt}
-                        />
-                      </TabsContent>
-
-                      <TabsContent value="installed-skills" className="mt-0 space-y-3">
-                        {enabledCustomSkillGroups.length > 0 ? (
-                          <div className="rounded-lg border border-emerald-200/70 bg-emerald-50/35 px-2 py-2 dark:border-emerald-900/40 dark:bg-emerald-950/10">
-                            <div className="mb-2 flex items-center justify-between gap-2 text-xs font-medium text-emerald-800 dark:text-emerald-200">
-                              <span>已启用技能</span>
-                              <Badge
-                                variant="outline"
-                                className="h-5 min-w-6 justify-center px-1.5 text-[10px]"
-                              >
-                                {enabledCustomSkills.length}
-                              </Badge>
-                            </div>
-                            <div className="space-y-3">
-                              {enabledCustomSkillGroups.map((group) => (
-                                <div key={group.category} className="space-y-2">
-                                  <div className="text-xs text-muted-foreground font-medium tracking-wider">
-                                    {group.category}
-                                  </div>
-                                  <WelcomeSkillTree
-                                    cards={group.cards}
-                                    onUseSkill={handleUseSkillPrompt}
-                                    getSkillShowLabel={getSkillShowLabel}
-                                  />
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        ) : (
-                          <button
-                            type="button"
-                            className="group w-full rounded-xl border border-slate-300/90 dark:border-slate-600/85 bg-slate-50/70 dark:bg-slate-900/35 px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:bg-slate-100/95 dark:hover:bg-slate-800/55 hover:border-slate-400/95 dark:hover:border-slate-500/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
-                          >
-                            <div className="flex items-center gap-2 min-w-0">
-                              <div className="rounded-md border border-slate-300/90 dark:border-slate-600/80 bg-white/80 dark:bg-slate-900/45 p-1.5 text-slate-500 dark:text-slate-300 group-hover:text-slate-700 dark:group-hover:text-slate-100 transition-colors">
-                                <CircleAlert className={"size-4"} />
-                              </div>
-                              <div className="min-w-0 flex-1">
-                                <div className="text-xs text-foreground leading-5 truncate whitespace-nowrap">
-                                  暂无
-                                </div>
-                              </div>
-                            </div>
-                          </button>
-                        )}
-
-                        {enabledCustomSkills.length > 8 && (
-                          <button
-                            type="button"
-                            onClick={() => setShowAllCustomSkills((prev) => !prev)}
-                            className="mx-auto flex items-center gap-1 rounded-full border border-border/70 bg-background px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/30 transition-colors"
-                          >
-                            {showAllCustomSkills ? (
-                              <>
-                                <ChevronUp className="size-3.5" />
-                                <span>收起</span>
-                              </>
-                            ) : (
-                              <>
-                                <ChevronDown className="size-3.5" />
-                                <span>展开更多（+{enabledCustomSkills.length - 8}）</span>
-                              </>
+                    {!hideWelcomeSkillTabs && (
+                      <Tabs defaultValue="skills-by-category" className="space-y-3">
+                        <TabsList className="grid h-9 w-full grid-cols-3">
+                          <TabsTrigger value="skills-by-category" className="text-xs">
+                            场景技能
+                          </TabsTrigger>
+                          <TabsTrigger value="installed-skills" className="text-xs gap-1.5">
+                            我安装的技能
+                            {customSkillUpdateCount > 0 && (
+                              <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-teal-100 px-1 text-[10px] font-semibold leading-none text-teal-700 dark:bg-teal-900/40 dark:text-teal-200">
+                                {customSkillUpdateCount}
+                              </span>
                             )}
-                          </button>
-                        )}
+                          </TabsTrigger>
+                          <TabsTrigger value="help" className="text-xs">
+                            帮助
+                          </TabsTrigger>
+                        </TabsList>
 
-                        {disabledLocalSkills.length > 0 && (
-                          <details className="rounded-lg border border-border/70 bg-muted/20 px-2 py-2">
-                            <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-xs font-medium text-muted-foreground">
-                              <span>已禁用技能</span>
-                              <Badge
-                                variant="outline"
-                                className="h-5 min-w-6 justify-center px-1.5 text-[10px]"
-                              >
-                                {disabledLocalSkills.length}
-                              </Badge>
-                            </summary>
-                            <div className="mt-2 space-y-2">
-                              {disabledCustomSkillGroups.map((group) => (
-                                <div key={group.category} className="space-y-2">
-                                  <div className="text-xs text-muted-foreground/80 font-medium tracking-wider">
-                                    {group.category}
-                                  </div>
-                                  <WelcomeSkillTree
-                                    cards={group.cards}
-                                    disabled
-                                    onUseSkill={handleUseSkillPrompt}
-                                    getSkillShowLabel={getSkillShowLabel}
-                                  />
-                                </div>
-                              ))}
-                            </div>
-                          </details>
-                        )}
-                      </TabsContent>
+                        <TabsContent value="skills-by-category" className="mt-0">
+                          {/* 市场技能：内部使用 getAllSkills 取数并按分类展示 */}
+                          <SkillsByCategorySection
+                            skills={enabledSkillsForSlash}
+                            previewLimit={GOOD_SKILLS_PREVIEW_LIMIT}
+                            onOpenMarketByCategory={handleOpenMarketBySecondaryCategory}
+                            onOpenMarketBySkill={handleOpenMarketBySkill}
+                            onUseSkillPrompt={handleUseSkillPrompt}
+                          />
+                        </TabsContent>
 
-                      <TabsContent value="help" className="mt-0 space-y-2">
-                        {helpSceneSkillCards.length > 0 && (
-                          <div className="space-y-2">
-                            <div className="text-xs text-muted-foreground font-medium tracking-wider">
-                              通用场景
-                            </div>
-                            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                              {helpSceneSkillCards.map(({ skill, label, icon }) => (
-                                <button
-                                  key={label + skill.path}
-                                  type="button"
-                                  onClick={() => handleUseSkillPrompt(skill)}
-                                  className="group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
+                        <TabsContent value="installed-skills" className="mt-0 space-y-3">
+                          {enabledCustomSkillGroups.length > 0 ? (
+                            <div className="rounded-lg border border-emerald-200/70 bg-emerald-50/35 px-2 py-2 dark:border-emerald-900/40 dark:bg-emerald-950/10">
+                              <div className="mb-2 flex items-center justify-between gap-2 text-xs font-medium text-emerald-800 dark:text-emerald-200">
+                                <span>已启用技能</span>
+                                <Badge
+                                  variant="outline"
+                                  className="h-5 min-w-6 justify-center px-1.5 text-[10px]"
                                 >
-                                  <div className="flex items-center gap-3">
-                                    <div className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
-                                      {icon}
-                                    </div>
-                                    <div className="text-xs text-foreground leading-5">{label}</div>
-                                  </div>
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                        <div className="text-xs text-muted-foreground font-medium tracking-wider">
-                          帮助
-                        </div>
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                          <button
-                            onClick={async () => {
-                              const instructionUrl = import.meta.env.VITE_INTRUCTION_URL
-                              handleCopyToClipboard(instructionUrl)
-                            }}
-                            type="button"
-                            className="group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
-                          >
-                            <div className="flex items-center gap-3">
-                              <div className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
-                                <Notebook size={14} />
+                                  {enabledCustomSkills.length}
+                                </Badge>
                               </div>
-                              <div className="text-xs text-foreground leading-5">操作说明文档</div>
+                              <div className="space-y-3">
+                                {enabledCustomSkillGroups.map((group) => (
+                                  <div key={group.category} className="space-y-2">
+                                    <div className="text-xs text-muted-foreground font-medium tracking-wider">
+                                      {group.category}
+                                    </div>
+                                    <WelcomeSkillTree
+                                      cards={group.cards}
+                                      onUseSkill={handleUseSkillPrompt}
+                                      getSkillShowLabel={getSkillShowLabel}
+                                    />
+                                  </div>
+                                ))}
+                              </div>
                             </div>
-                          </button>
-                          {/*<UpdateActionButton />*/}
-                        </div>
-                      </TabsContent>
-                    </Tabs>
+                          ) : (
+                            <button
+                              type="button"
+                              className="group w-full rounded-xl border border-slate-300/90 dark:border-slate-600/85 bg-slate-50/70 dark:bg-slate-900/35 px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:bg-slate-100/95 dark:hover:bg-slate-800/55 hover:border-slate-400/95 dark:hover:border-slate-500/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
+                            >
+                              <div className="flex items-center gap-2 min-w-0">
+                                <div className="rounded-md border border-slate-300/90 dark:border-slate-600/80 bg-white/80 dark:bg-slate-900/45 p-1.5 text-slate-500 dark:text-slate-300 group-hover:text-slate-700 dark:group-hover:text-slate-100 transition-colors">
+                                  <CircleAlert className={"size-4"} />
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <div className="text-xs text-foreground leading-5 truncate whitespace-nowrap">
+                                    暂无
+                                  </div>
+                                </div>
+                              </div>
+                            </button>
+                          )}
+
+                          {enabledCustomSkills.length > 8 && (
+                            <button
+                              type="button"
+                              onClick={() => setShowAllCustomSkills((prev) => !prev)}
+                              className="mx-auto flex items-center gap-1 rounded-full border border-border/70 bg-background px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/30 transition-colors"
+                            >
+                              {showAllCustomSkills ? (
+                                <>
+                                  <ChevronUp className="size-3.5" />
+                                  <span>收起</span>
+                                </>
+                              ) : (
+                                <>
+                                  <ChevronDown className="size-3.5" />
+                                  <span>展开更多（+{enabledCustomSkills.length - 8}）</span>
+                                </>
+                              )}
+                            </button>
+                          )}
+
+                          {disabledLocalSkills.length > 0 && (
+                            <details className="rounded-lg border border-border/70 bg-muted/20 px-2 py-2">
+                              <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-xs font-medium text-muted-foreground">
+                                <span>已禁用技能</span>
+                                <Badge
+                                  variant="outline"
+                                  className="h-5 min-w-6 justify-center px-1.5 text-[10px]"
+                                >
+                                  {disabledLocalSkills.length}
+                                </Badge>
+                              </summary>
+                              <div className="mt-2 space-y-2">
+                                {disabledCustomSkillGroups.map((group) => (
+                                  <div key={group.category} className="space-y-2">
+                                    <div className="text-xs text-muted-foreground/80 font-medium tracking-wider">
+                                      {group.category}
+                                    </div>
+                                    <WelcomeSkillTree
+                                      cards={group.cards}
+                                      disabled
+                                      onUseSkill={handleUseSkillPrompt}
+                                      getSkillShowLabel={getSkillShowLabel}
+                                    />
+                                  </div>
+                                ))}
+                              </div>
+                            </details>
+                          )}
+                        </TabsContent>
+
+                        <TabsContent value="help" className="mt-0 space-y-2">
+                          {helpSceneSkillCards.length > 0 && (
+                            <div className="space-y-2">
+                              <div className="text-xs text-muted-foreground font-medium tracking-wider">
+                                通用场景
+                              </div>
+                              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                                {helpSceneSkillCards.map(({ skill, label, icon }) => (
+                                  <button
+                                    key={label + skill.path}
+                                    type="button"
+                                    onClick={() => handleUseSkillPrompt(skill)}
+                                    className="group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
+                                  >
+                                    <div className="flex items-center gap-3">
+                                      <div className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
+                                        {icon}
+                                      </div>
+                                      <div className="text-xs text-foreground leading-5">{label}</div>
+                                    </div>
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          <div className="text-xs text-muted-foreground font-medium tracking-wider">
+                            帮助
+                          </div>
+                          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                            <button
+                              onClick={async () => {
+                                const instructionUrl = import.meta.env.VITE_INTRUCTION_URL
+                                handleCopyToClipboard(instructionUrl)
+                              }}
+                              type="button"
+                              className="group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
+                            >
+                              <div className="flex items-center gap-3">
+                                <div className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
+                                  <Notebook size={14} />
+                                </div>
+                                <div className="text-xs text-foreground leading-5">操作说明文档</div>
+                              </div>
+                            </button>
+                            {/*<UpdateActionButton />*/}
+                          </div>
+                        </TabsContent>
+                      </Tabs>
+                    )}
                   </div>
                 )}
               </div>
