@@ -59,23 +59,25 @@ import type {
   Thread
 } from "@/types"
 
-const emptyProjectMetadataForm: HarnessProjectMetadataUpdateInput = {
-  adapterId: "",
-  adapterType: "plugin",
-  name: "",
-  projectCode: "",
-  description: "",
-  product: {
-    code: "",
-    name: ""
-  },
-  workspace: {
-    path: ""
+function createEmptyProjectMetadataForm(adapterId = ""): HarnessProjectMetadataUpdateInput {
+  return {
+    adapterId,
+    adapterType: "plugin",
+    name: "",
+    projectCode: "",
+    description: "",
+    product: {
+      code: "",
+      name: ""
+    },
+    workspace: {
+      path: ""
+    }
   }
 }
 
-const emptyProjectForm: HarnessProjectCreateInput = {
-  ...emptyProjectMetadataForm
+function createEmptyProjectForm(adapterId = ""): HarnessProjectCreateInput {
+  return createEmptyProjectMetadataForm(adapterId)
 }
 
 interface SystemGroup {
@@ -1765,10 +1767,12 @@ export function HarnessBoardView({
   const [loadingRun, setLoadingRun] = useState(false)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [creating, setCreating] = useState(false)
-  const [form, setForm] = useState<HarnessProjectCreateInput>(emptyProjectForm)
+  const [form, setForm] = useState<HarnessProjectCreateInput>(() => createEmptyProjectForm())
   const [formError, setFormError] = useState<string | null>(null)
   const [editingProject, setEditingProject] = useState<HarnessProjectListItem | null>(null)
-  const [editForm, setEditForm] = useState<HarnessProjectMetadataUpdateInput>(emptyProjectMetadataForm)
+  const [editForm, setEditForm] = useState<HarnessProjectMetadataUpdateInput>(() =>
+    createEmptyProjectMetadataForm()
+  )
   const [savingEdit, setSavingEdit] = useState(false)
   const [editError, setEditError] = useState<string | null>(null)
   const [archivingProjectId, setArchivingProjectId] = useState<string | null>(null)
@@ -1910,6 +1914,31 @@ export function HarnessBoardView({
     }
   }, [detailsByProjectId, projects, query])
 
+  const resetCreateForm = useCallback(() => {
+    setForm(createEmptyProjectForm(adapterRegistry[0]?.id || ""))
+    setFormError(null)
+  }, [adapterRegistry])
+
+  const openCreateDialog = useCallback(() => {
+    setForm(createEmptyProjectForm(adapterRegistry[0]?.id || ""))
+    setFormError(null)
+    setDialogOpen(true)
+  }, [adapterRegistry])
+
+  const handleCreateDialogOpenChange = useCallback(
+    (open: boolean) => {
+      if (open) {
+        openCreateDialog()
+        return
+      }
+      if (!creating) {
+        setDialogOpen(false)
+        resetCreateForm()
+      }
+    },
+    [creating, openCreateDialog, resetCreateForm]
+  )
+
   const handlePickWorkspace = async (): Promise<void> => {
     const workspacePath = await window.api.workspace.select()
     if (workspacePath) {
@@ -1958,7 +1987,7 @@ export function HarnessBoardView({
     try {
       await window.api.harnessBoard.createProject(form)
       setDialogOpen(false)
-      setForm({ ...emptyProjectForm, adapterId: adapterRegistry[0]?.id || "", adapterType: "plugin" })
+      resetCreateForm()
       await loadProjects()
     } catch (error) {
       setFormError(error instanceof Error ? error.message : String(error))
@@ -2054,7 +2083,7 @@ export function HarnessBoardView({
               {loadingProjects ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
               刷新
             </Button>
-            <Button size="sm" className="gap-2" onClick={() => setDialogOpen(true)}>
+            <Button size="sm" className="gap-2" onClick={openCreateDialog}>
               <Plus className="size-4" />
               新建项目
             </Button>
@@ -2092,7 +2121,7 @@ export function HarnessBoardView({
                   <Workflow className="size-5" />
                 </div>
                 <div className="mt-3 text-sm font-semibold">暂无项目</div>
-                <Button className="mt-4 gap-2" onClick={() => setDialogOpen(true)}>
+                <Button className="mt-4 gap-2" onClick={openCreateDialog}>
                   <Plus className="size-4" />
                   新建项目
                 </Button>
@@ -2167,7 +2196,7 @@ export function HarnessBoardView({
         form={form}
         registry={adapterRegistry}
         error={formError}
-        onOpenChange={setDialogOpen}
+        onOpenChange={handleCreateDialogOpenChange}
         onChange={setForm}
         onPickWorkspace={() => void handlePickWorkspace()}
         onSubmit={() => void handleSubmit()}

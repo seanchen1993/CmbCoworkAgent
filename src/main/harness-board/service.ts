@@ -1,6 +1,8 @@
 import { execFileSync } from "child_process"
 import { existsSync, readFileSync, writeFileSync } from "fs"
 import { basename, isAbsolute, join, relative, resolve } from "path"
+import * as chardet from "jschardet"
+import * as iconv from "iconv-lite"
 import { v4 as uuid } from "uuid"
 import { getOpenworkDir, getPlugins } from "../storage"
 import type { PluginMetadata } from "../types"
@@ -53,6 +55,8 @@ const DEFAULT_CACHE = {
 
 const HARNESS_ADAPTER_TIMEOUT_MS = 15_000
 const HARNESS_ADAPTER_MAX_BUFFER = 10 * 1024 * 1024
+const CHARDET_CONFIDENCE_THRESHOLD = 0.8
+const CHARDET_SAMPLE_BYTES = 8_192
 
 const HARNESS_UI_KINDS = new Set<HarnessStatus["uiKind"]>([
   "pending",
@@ -159,8 +163,46 @@ function adapterPluginDir(project: HarnessProjectMetadata): string {
 }
 
 function toTrimmedOutput(value: unknown): string {
-  if (Buffer.isBuffer(value)) return value.toString("utf-8").trim()
+  if (Buffer.isBuffer(value)) return decodeAdapterBuffer(value).trim()
   return typeof value === "string" ? value.trim() : ""
+}
+
+function isValidUtf8Buffer(buffer: Buffer): boolean {
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(buffer)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function detectAdapterOutputEncoding(buffer: Buffer): string {
+  if (buffer.length === 0) return "utf-8"
+  if (isValidUtf8Buffer(buffer)) return "utf-8"
+
+  const detected = chardet.detect(buffer.subarray(0, CHARDET_SAMPLE_BYTES))
+  const encoding = typeof detected === "string" ? detected : detected?.encoding
+  const confidence = typeof detected === "object" ? detected.confidence : 1
+  if (
+    encoding &&
+    encoding.toLowerCase() !== "ascii" &&
+    iconv.encodingExists(encoding) &&
+    confidence >= CHARDET_CONFIDENCE_THRESHOLD
+  ) {
+    return encoding
+  }
+
+  return process.platform === "win32" ? "gb18030" : "utf-8"
+}
+
+function decodeAdapterBuffer(buffer: Buffer): string {
+  if (buffer.length === 0) return ""
+  const encoding = detectAdapterOutputEncoding(buffer)
+  try {
+    return iconv.decode(buffer, encoding)
+  } catch {
+    return buffer.toString("utf-8")
+  }
 }
 
 function formatAdapterError(error: unknown): string {
@@ -181,6 +223,150 @@ function formatAdapterError(error: unknown): string {
         ? `signal ${maybeError.signal}`
         : "failed"
   return `Inspect adapter ${exitInfo}: ${suffix}`
+}
+
+function tokenizeInspectCommand(command: string): string[] {
+  const tokens: string[] = []
+  let current = ""
+  let quote: '"' | "'" | null = null
+
+  for (let i = 0; i < command.length; i += 1) {
+    const ch = command[i]
+    if (!ch) continue
+
+    if (!quote) {
+      if (ch === "\\") {
+        const next = command[i + 1]
+        if (next && (/\s/.test(next) || next === '"' || next === "'" || next === "\\")) {
+          current += next
+          i += 1
+          continue
+        }
+        current += ch
+        continue
+      }
+      if (ch === '"' || ch === "'") {
+        quote = ch
+        continue
+      }
+      if (/\s/.test(ch)) {
+        if (current) {
+          tokens.push(current)
+          current = ""
+        }
+        continue
+      }
+      current += ch
+      continue
+    }
+
+    if (quote === '"' && ch === "\\") {
+      const next = command[i + 1]
+      if (next === '"' || next === "\\") {
+        current += next
+        i += 1
+        continue
+      }
+    }
+
+    if (ch === quote) {
+      quote = null
+      continue
+    }
+
+    current += ch
+  }
+
+  if (quote) {
+    throw new Error("Inspect adapter command parse failed: quote is not closed")
+  }
+  if (current) {
+    tokens.push(current)
+  }
+  return tokens
+}
+
+function replaceInspectCommandPlaceholders(
+  token: string,
+  project: HarnessProjectMetadata,
+  mode: "project" | "run",
+  cwd: string,
+  scriptPath: string,
+  feature?: string
+): string {
+  const replacements: Record<string, string> = {
+    workspace: project.workspace.path,
+    project: project.projectCode,
+    projectCode: project.projectCode,
+    feature: feature ?? "",
+    pluginPath: cwd,
+    script: scriptPath,
+    mode
+  }
+  return token.replace(/\$\{(workspace|project|projectCode|feature|pluginPath|script|mode)\}/g, (_, key: string) => {
+    return replacements[key] ?? ""
+  })
+}
+
+function parseInspectCommand(
+  command: string,
+  project: HarnessProjectMetadata,
+  mode: "project" | "run",
+  cwd: string,
+  scriptPath: string,
+  feature?: string
+): { executable: string; args: string[] } {
+  const tokens = tokenizeInspectCommand(command.trim()).map((token) =>
+    replaceInspectCommandPlaceholders(token, project, mode, cwd, scriptPath, feature)
+  )
+  const [executable, ...args] = tokens
+  if (!executable) {
+    throw new Error("Inspect adapter command is empty")
+  }
+  return { executable, args }
+}
+
+function readBoardConfigInspectCommand(cwd: string, mode: "project" | "run"): string | null {
+  const configPath = join(cwd, "board_core", "board_config.json")
+  if (!existsSync(configPath)) return null
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(readFileSync(configPath, "utf-8")) as unknown
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    throw new Error(`Invalid board_config.json: ${message}`)
+  }
+
+  if (!isObject(parsed) || !isObject(parsed.inspectCommands)) return null
+  const platformCommands = parsed.inspectCommands[process.platform]
+  if (!isObject(platformCommands)) return null
+
+  const command = normalizeText(platformCommands[mode]).trim()
+  return command || null
+}
+
+function defaultInspectCommand(
+  project: HarnessProjectMetadata,
+  mode: "project" | "run",
+  feature?: string
+): { executable: string; args: string[] } {
+  const args = [
+    "inspect_state.py",
+    "--mode",
+    mode,
+    "--workspace",
+    project.workspace.path,
+    "--project",
+    project.projectCode
+  ]
+  if (mode === "run") {
+    args.push("--feature", feature ?? "")
+  }
+  return {
+    executable: process.platform === "win32" ? "python" : "python3",
+    args
+  }
 }
 
 function projectDirectoryPath(project: HarnessProjectMetadata): string {
@@ -233,24 +419,21 @@ function runInspectAdapter(
     throw new Error(`Inspect adapter not found: ${scriptPath}`)
   }
 
-  const args = [
-    "inspect_state.py",
-    "--mode",
-    mode,
-    "--workspace",
-    project.workspace.path,
-    "--project",
-    project.projectCode
-  ]
-  if (mode === "run") {
-    args.push("--feature", feature ?? "")
-  }
+  const configuredCommand = readBoardConfigInspectCommand(cwd, mode)
+  const invocation = configuredCommand
+    ? parseInspectCommand(configuredCommand, project, mode, cwd, scriptPath, feature)
+    : defaultInspectCommand(project, mode, feature)
 
-  let stdout = ""
+  let stdoutBuffer: Buffer
   try {
-    stdout = execFileSync("python3", args, {
+    stdoutBuffer = execFileSync(invocation.executable, invocation.args, {
       cwd,
-      encoding: "utf-8",
+      encoding: "buffer",
+      env: {
+        ...process.env,
+        PYTHONIOENCODING: "utf-8",
+        PYTHONUTF8: "1"
+      },
       maxBuffer: HARNESS_ADAPTER_MAX_BUFFER,
       timeout: HARNESS_ADAPTER_TIMEOUT_MS
     })
@@ -258,7 +441,7 @@ function runInspectAdapter(
     throw new Error(formatAdapterError(error))
   }
 
-  const raw = stdout.trim()
+  const raw = decodeAdapterBuffer(stdoutBuffer).trim()
   if (!raw) {
     throw new Error("Inspect adapter returned empty output")
   }
