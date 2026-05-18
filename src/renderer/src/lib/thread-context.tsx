@@ -135,12 +135,19 @@ export interface HookInterruptionState {
   timestamp: Date
 }
 
+export interface ThreadGitContext {
+  isGitRepo?: boolean
+  isWorktree?: boolean
+  branch?: string | null
+}
+
 // Per-thread state (persisted/restored from checkpoints)
 export interface ThreadState {
   messages: Message[]
   todos: Todo[]
   workspaceFiles: FileInfo[]
   workspacePath: string | null
+  gitContext: ThreadGitContext | null
   subagents: Subagent[]
   toolCallStates: Record<string, ToolCallState>
   pendingApprovals: HITLRequest[]
@@ -183,6 +190,7 @@ export interface ThreadActions {
   setTodos: (todos: Todo[]) => void
   setWorkspaceFiles: (files: FileInfo[] | ((prev: FileInfo[]) => FileInfo[])) => void
   setWorkspacePath: (path: string | null) => void
+  setGitContext: (context: ThreadGitContext | null) => void
   setSubagents: (subagents: Subagent[]) => void
   setToolCallState: (toolCallId: string, updates: Partial<ToolCallState>) => void
   setPendingApproval: (request: HITLRequest | null) => void
@@ -226,6 +234,7 @@ const createDefaultThreadState = (): ThreadState => ({
   todos: [],
   workspaceFiles: [],
   workspacePath: null,
+  gitContext: null,
   subagents: [],
   toolCallStates: {},
   pendingApprovals: [],
@@ -245,6 +254,82 @@ const createDefaultThreadState = (): ThreadState => ({
   routingResult: null,
   modelRetry: null
 })
+
+/**
+ * 从持久化的 thread metadata 中提取 renderer 可直接消费的 Git context。
+ *
+ * metadata 是数据库里的存储格式，里面既可能有新版 `gitContext` 对象，也可能有旧版
+ * `cached*` 顶层字段。ThreadState 则是 UI 运行时状态，只需要知道：
+ * - 是否是 Git 仓库；
+ * - 是否是 worktree；
+ * - 当前 worktree 分支名。
+ *
+ * 这个函数负责把存储格式归一化成 `ThreadGitContext`，让 GitPanel 首屏可以先展示已有
+ * repo/worktree/branch 信息，而不必等一次 GitPanel meta IPC 返回。
+ */
+function getGitContextFromMetadata(metadata: Record<string, unknown>): ThreadGitContext | null {
+  const workspacePath = typeof metadata.workspacePath === "string" ? metadata.workspacePath : null
+  // 新版结构：Git 探测结果统一收敛在 metadata.gitContext。
+  const gitContext =
+    metadata.gitContext &&
+    typeof metadata.gitContext === "object" &&
+    !Array.isArray(metadata.gitContext)
+      ? (metadata.gitContext as Record<string, unknown>)
+      : null
+  const contextMatchesWorkspace = Boolean(
+    workspacePath &&
+    typeof gitContext?.workspacePath === "string" &&
+    gitContext.workspacePath === workspacePath
+  )
+  const metadataMarkedWorktree = Boolean(metadata.isWorktree)
+
+  if (contextMatchesWorkspace && gitContext) {
+    // 如果 isGitRepo 缺失，但 gitRoot 存在，也可以推断当前 workspace 是 Git 仓库。
+    const isGitRepo =
+      typeof gitContext.isGitRepo === "boolean"
+        ? gitContext.isGitRepo
+        : typeof gitContext.gitRoot === "string" && gitContext.gitRoot
+          ? true
+          : metadataMarkedWorktree
+            ? true
+            : undefined
+    const isWorktree =
+      metadataMarkedWorktree ||
+      (typeof gitContext.isWorktreePath === "boolean" ? gitContext.isWorktreePath : undefined)
+    const branch = typeof metadata.worktreeBranch === "string" ? metadata.worktreeBranch : null
+
+    if (isGitRepo === undefined && isWorktree === undefined && !branch) return null
+    return { isGitRepo, isWorktree, branch }
+  }
+
+  // 兼容旧 metadata：新写入都会使用 metadata.gitContext 对象。
+  const cachedWorkspacePath =
+    typeof metadata.cachedGitContextWorkspacePath === "string"
+      ? metadata.cachedGitContextWorkspacePath
+      : null
+  const cachedMatchesWorkspace = Boolean(
+    workspacePath && cachedWorkspacePath && cachedWorkspacePath === workspacePath
+  )
+  const cachedIsGitRepo =
+    cachedMatchesWorkspace && typeof metadata.cachedIsGitRepo === "boolean"
+      ? metadata.cachedIsGitRepo
+      : undefined
+  const cachedIsWorktree =
+    cachedMatchesWorkspace && typeof metadata.cachedIsWorktreePath === "boolean"
+      ? metadata.cachedIsWorktreePath
+      : undefined
+  const cachedGitRoot =
+    cachedMatchesWorkspace && typeof metadata.cachedGitRoot === "string" && metadata.cachedGitRoot
+      ? metadata.cachedGitRoot
+      : null
+  const branch = typeof metadata.worktreeBranch === "string" ? metadata.worktreeBranch : null
+  const isGitRepo =
+    cachedIsGitRepo ?? (cachedGitRoot ? true : metadataMarkedWorktree ? true : undefined)
+  const isWorktree = metadataMarkedWorktree || cachedIsWorktree
+
+  if (isGitRepo === undefined && isWorktree === undefined && !branch) return null
+  return { isGitRepo, isWorktree, branch }
+}
 
 const defaultStreamData: StreamData = {
   messages: [],
@@ -965,6 +1050,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         setWorkspacePath: (path: string | null) => {
           updateThreadState(threadId, () => ({ workspacePath: path }))
         },
+        setGitContext: (context: ThreadGitContext | null) => {
+          updateThreadState(threadId, () => ({ gitContext: context }))
+        },
         setSubagents: (subagents: Subagent[]) => {
           updateThreadState(threadId, () => ({ subagents }))
         },
@@ -1079,6 +1167,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           persistedMessageTimes = getMessageTimeMap(thread.thread_values)
           persistedMessageTimeOrder = getMessageTimeOrder(thread.thread_values)
           const metadata = thread.metadata || {}
+          actions.setGitContext(getGitContextFromMetadata(metadata))
           if (metadata.workspacePath) {
             actions.setWorkspacePath(metadata.workspacePath as string)
             const diskResult = await window.api.workspace.loadFromDisk(threadId)

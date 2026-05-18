@@ -78,6 +78,7 @@ import { formatSkillUseBlock, parseSkillUseBlock } from "@/features/slash-comman
 import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
 import { DEFAULT_SCENE_CATEGORY, SCENE_CATEGORY_OPTIONS } from "@/lib/skill-data-service"
 import { groupWelcomeSkills } from "./skill-grouping"
+import { GitBranchSwitcher } from "./GitBranchSwitcher"
 
 type WelcomeSkillCard = {
   skill: SkillMetadata
@@ -3939,7 +3940,7 @@ export function ChatContainer({
                 )}
               </div>
               {/*  GitBranch */}
-              {/*<GitBranchSwitcher workspacePath={workspacePath} />*/}
+              <GitBranchSwitcher workspacePath={workspacePath} />
             </div>
           </div>
         </form>
