@@ -89,7 +89,7 @@ export function createRequestUserInputTool(context: RequestUserInputToolContext)
     {
       name: "request_user_input",
       description:
-        "Request user input for one to ten short questions and wait for the response. Only one request can be pending per thread; if one is already pending or the UI cannot receive the request, this tool returns status 'rejected'. The UI shows each question with 2-5 choices and adds a free-form Other option automatically. Returns JSON keyed by each question id.",
+        "Request user input for one to ten short questions and wait for the response.",
       schema: requestUserInputSchema
     }
   )
