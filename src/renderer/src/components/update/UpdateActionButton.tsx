@@ -77,7 +77,9 @@ export function UpdateActionButton({
         ? "下载中"
         : status === "error"
           ? "更新失败"
-          : "可更新"
+          : hasUpdate
+            ? "可更新"
+            : "检查"
 
   if (variant === "tag") {
     return (
@@ -85,10 +87,13 @@ export function UpdateActionButton({
         <button
           type="button"
           className={cn(
-            "cursor-pointer rounded-full bg-status-warning/15 px-1.5 py-0.5 text-[9px] font-medium text-status-warning hover:bg-status-warning/25",
+            "cursor-pointer rounded-full px-1.5 py-0.5 text-[9px] font-medium transition-colors",
+            hasUpdate
+              ? "bg-status-warning/15 text-status-warning hover:bg-status-warning/25"
+              : "bg-muted text-muted-foreground hover:bg-muted/80 hover:text-foreground",
             className
           )}
-          title={version ? `发现新版本 v${version}` : "发现新版本"}
+          title={version ? `发现新版本 v${version}` : "检查是否有新版本"}
           onClick={() => setDialogOpen(true)}
         >
           {tagText}

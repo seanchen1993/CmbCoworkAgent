@@ -56,6 +56,42 @@ interface ElectronAPI {
   }
 }
 
+interface PetManifest {
+  // 宠物资源清单，来自 pets/<directoryId>/pet.json。
+  id: string
+  directoryId: string
+  source: "builtin" | "custom"
+  key: string
+  canDelete: boolean
+  name?: string
+  displayName?: string
+  description?: string
+  spritesheetPath: string
+  frameWidth?: number
+  frameHeight?: number
+  columns?: number
+  rows?: number
+  states?: Record<string, { y: number; frames: number; fps?: number }>
+}
+
+interface PetSettings {
+  enabled: boolean
+  selectedPetKey: string | null
+}
+
+type PetState =
+  // 与主进程 PetState 保持一致，renderer 只能通过 preload 发送这些状态。
+  | "idle"
+  | "busy"
+  | "waiting"
+  | "done"
+  | "error"
+  | "crying"
+  | "prompt"
+  | "running"
+  | "interaction"
+  | "hover"
+
 interface DashboardTraceNode {
   id: string
   type: "trace" | "llm" | "tool" | "tool_result" | "message" | "error" | "cancel"
@@ -76,6 +112,11 @@ interface DashboardTraceDetail {
   endedAt?: string
   durationMs: number
   userMessage: string
+  sapId?: string
+  ystId?: string
+  userName?: string
+  orgName?: string
+  userIp?: string
   modelId?: string
   modelName?: string
   outcome: string
@@ -144,6 +185,57 @@ interface DashboardSkillDetail {
   traces: DashboardTraceDetail[]
 }
 
+interface DashboardUserListItem {
+  sapId: string
+  ystId?: string
+  userName: string
+  orgName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+  count: number
+  lastActiveAt?: string
+  avgDurationMs: number
+  totalToolCalls: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalTokens: number
+}
+
+interface DashboardUserListData {
+  items: DashboardUserListItem[]
+  pageSize: number
+  nextAfterKey?: Record<string, string | number>
+  totalActiveUsers: number
+}
+
+interface DashboardUserDetail {
+  sapId: string
+  ystId?: string
+  userName: string
+  orgName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+  totalCalls: number
+  avgDurationMs: number
+  totalToolCalls: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalTokens: number
+  bySkill: Array<{ skill: string; count: number }>
+  byModel: Array<{ model: string; count: number }>
+  byOutcome: Array<{ outcome: string; count: number }>
+  traces: DashboardTraceDetail[]
+}
+
+interface DashboardUserListOptions {
+  pageSize?: number
+  afterKey?: Record<string, string | number> | null
+}
+
+interface DashboardUserDetailOptions {
+  traceLimit?: number
+}
+
 interface CustomAPI {
   agent: {
     invoke: (
@@ -172,6 +264,9 @@ interface CustomAPI {
     create: (metadata?: Record<string, unknown>) => Promise<Thread>
     update: (threadId: string, updates: Partial<Thread>) => Promise<Thread>
     delete: (threadId: string) => Promise<void>
+    exportSession: (
+      threadId: string
+    ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
     getHistory: (threadId: string) => Promise<unknown[]>
     generateTitle: (message: string) => Promise<string>
     onThreadsChanged: (callback: () => void) => () => void
@@ -436,6 +531,22 @@ interface CustomAPI {
     onFilesChanged: (
       callback: (data: { threadId: string; workspacePath: string }) => void
     ) => () => void
+  }
+  pet: {
+    // 列出内置 pets/ 与 OPENWORK_DIR/pets 下可用宠物。
+    list: () => Promise<PetManifest[]>
+    getSpriteDataUrl: (
+      directoryId: string,
+      source?: "builtin" | "custom"
+    ) => Promise<{ success: boolean; dataUrl?: string; error?: string }>
+    // 将业务状态同步到独立宠物窗口；动画渲染不在 renderer 主 UI 中执行。
+    setState: (state: PetState) => void
+    // 告知主进程主应用已打开/获得焦点，用于清空宠物完成任务提醒队列。
+    clearCompletedTasks: () => void
+    getSettings: () => Promise<PetSettings>
+    updateSettings: (settings: Partial<PetSettings>) => Promise<PetSettings>
+    uploadCustomFolder: () => Promise<{ success: boolean; pet?: PetManifest; error?: string }>
+    deleteCustom: (directoryId: string) => Promise<{ success: boolean; error?: string }>
   }
   file: {
     parse: (
@@ -963,6 +1074,15 @@ interface CustomAPI {
       granularity: "day" | "week" | "month" | "custom",
       opts?: { upperOrgLv1?: string | null }
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    userList: (
+      range: { from: string; to: string },
+      options?: DashboardUserListOptions
+    ) => Promise<{ success: boolean; data?: DashboardUserListData; error?: string }>
+    userDetail: (
+      sapId: string,
+      range: { from: string; to: string },
+      options?: DashboardUserDetailOptions
+    ) => Promise<{ success: boolean; data?: DashboardUserDetail; error?: string }>
     skillUsageSummary: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
@@ -986,6 +1106,11 @@ interface CustomAPI {
       granularity: "day" | "week" | "month" | "custom"
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     skillRecentTraces: (
+      skill: string,
+      range: { from: string; to: string },
+      limit?: number
+    ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
+    marketSkillRecentTraces: (
       skill: string,
       range: { from: string; to: string },
       limit?: number

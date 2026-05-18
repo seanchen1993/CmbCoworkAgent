@@ -15,6 +15,8 @@ export interface SafetyAssessment {
   reason?: string
 }
 
+export type CommandConcurrencyClassification = "parallel_safe" | "exclusive"
+
 const APPROVAL_PREFIX_RULE_PREFIX = "prefix:"
 
 const SAFE_EXECUTABLES = new Set([
@@ -26,6 +28,20 @@ const SAFE_EXECUTABLES = new Set([
   // Windows diagnostic commands (read-only)
   "ipconfig", "netstat", "netsh", "systeminfo", "tasklist", "findstr", "nslookup",
   "ping", "tracert", "pathping", "route", "arp", "getmac", "ver"
+])
+
+const PARALLEL_SAFE_EXECUTABLES = new Set([
+  "cat", "comm", "cut", "df", "diff", "dir", "du", "echo", "expr",
+  "false", "file", "findstr", "getmac", "grep", "head", "id", "ls",
+  "netstat", "nl", "paste", "pathping", "ping", "printenv", "printf",
+  "pwd", "rev", "seq", "stat", "systeminfo", "tail", "tasklist", "tr",
+  "tracert", "tree", "true", "type", "uname", "uniq", "ver", "wc",
+  "where", "which", "whoami",
+  // Common read-only PowerShell cmdlets and aliases.
+  "compare-object", "fl", "format-list", "format-table", "ft", "gc", "gci",
+  "get-childitem", "get-command", "get-content", "get-date", "get-item",
+  "get-location", "get-process", "get-service", "gl", "gps", "measure-object",
+  "select-string", "sort-object", "where-object"
 ])
 
 const UNSAFE_FIND_OPTIONS = new Set([
@@ -261,6 +277,60 @@ export function assessCommandSafety(
     level: "needs_approval",
     reason: hasShellMetacharacters ? "complex shell expression — requires review" : "unknown command — requires review"
   }
+}
+
+export function classifyCommandConcurrency(command: string): CommandConcurrencyClassification {
+  const trimmed = command.trim()
+  if (!trimmed) {
+    return "parallel_safe"
+  }
+
+  if (FORBIDDEN_PATTERNS.some(({ pattern }) => pattern.test(trimmed))) {
+    return "exclusive"
+  }
+  if (DANGEROUS_INDICATORS.some(({ pattern }) => pattern.test(trimmed))) {
+    return "exclusive"
+  }
+
+  // Only single, parseable read-only commands are allowed to overlap. Shell
+  // composition and redirection make resource usage too hard to reason about.
+  if (/&&|\|\||[|;&`<>]|\$\(|\n/.test(trimmed)) {
+    return "exclusive"
+  }
+
+  const tokens = tokenizeCommand(trimmed)
+  if (!tokens || tokens.length === 0) {
+    return "exclusive"
+  }
+
+  if (tokens.some((token) => token.includes("$(") || token.includes("${") || token.includes("@("))) {
+    return "exclusive"
+  }
+
+  for (const token of tokens) {
+    const normalized = token
+      .trim()
+      .replace(/^[('"]+|[)'"]+$/g, "")
+      .replace(/^-+/, "")
+      .toLowerCase()
+    if (SIDE_EFFECTING_POWERSHELL_CMDLETS.has(normalized)) {
+      return "exclusive"
+    }
+  }
+
+  const executable = normalizeExecutable(tokens[0])
+  if (!executable) {
+    return "exclusive"
+  }
+
+  if (PARALLEL_SAFE_EXECUTABLES.has(executable)) return "parallel_safe"
+  if (isSafeBase64(tokens)) return "parallel_safe"
+  if (isSafeFind(tokens)) return "parallel_safe"
+  if (isSafeRipgrep(tokens)) return "parallel_safe"
+  if (isSafeGit(tokens)) return "parallel_safe"
+  if (isSafeSed(tokens)) return "parallel_safe"
+
+  return "exclusive"
 }
 
 function containsDirectGitSubmitCommand(command: string): boolean {
