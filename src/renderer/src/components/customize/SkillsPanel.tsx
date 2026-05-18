@@ -36,6 +36,8 @@ import { DEFAULT_SCENE_CATEGORY } from "../../lib/skill-data-service"
 import { SkillFileEditor } from "./SkillFileEditor"
 import { UniversalUploadDialog } from "./UniversalUploadDialog"
 import { toast } from "sonner"
+import { marketInstalledVersionStorage } from "./MarketUpdateBadge"
+import { marketInstalledSourceStorage } from "./market-installed-source-storage"
 
 type FilePreviewKind = "text" | "html" | "image" | "pdf"
 type FileTreeNode = {
@@ -180,6 +182,23 @@ function markUploadedSkillInStorage(skillName: string): void {
   } catch (storageError) {
     console.warn("[SkillsPanel] Failed to mark uploaded skill in localStorage:", storageError)
   }
+}
+
+function readOrgInstalledSkillNamesFromStorage(): Set<string> {
+  const names = new Set<string>()
+
+  for (const name of marketInstalledSourceStorage.getNames("orgSkill")) {
+    const normalized = normalizeSkillName(name)
+    if (normalized) names.add(normalized)
+  }
+
+  const versionRecords = marketInstalledVersionStorage.getRecords().orgSkill || {}
+  for (const name of Object.keys(versionRecords)) {
+    const normalized = normalizeSkillName(name)
+    if (normalized) names.add(normalized)
+  }
+
+  return names
 }
 
 /**
@@ -1388,6 +1407,9 @@ export function SkillsPanel(): React.JSX.Element {
   const [localUploadedSkillPaths, setLocalUploadedSkillPaths] = useState<Set<string>>(() =>
     readLocalUploadedSkillPathSetFromStorage()
   )
+  const [orgInstalledSkillNames, setOrgInstalledSkillNames] = useState<Set<string>>(() =>
+    readOrgInstalledSkillNamesFromStorage()
+  )
   const [editedSkillPaths, setEditedSkillPaths] = useState<Set<string>>(() =>
     readEditedSkillPathSetFromStorage()
   )
@@ -1415,6 +1437,10 @@ export function SkillsPanel(): React.JSX.Element {
 
   const reloadLocalUploadedSkillPaths = useCallback(() => {
     setLocalUploadedSkillPaths(readLocalUploadedSkillPathSetFromStorage())
+  }, [])
+
+  const reloadOrgInstalledSkillNames = useCallback(() => {
+    setOrgInstalledSkillNames(readOrgInstalledSkillNamesFromStorage())
   }, [])
 
   const reloadEditedSkillPaths = useCallback(() => {
@@ -1611,7 +1637,10 @@ export function SkillsPanel(): React.JSX.Element {
       if (res.success) {
         removeLocalUploadedSkillPathFromStorage(skill.path)
         removeEditedSkillPathFromStorage(skill.path)
+        marketInstalledSourceStorage.removeName(skill.name, "orgSkill")
+        marketInstalledVersionStorage.removeVersion(skill.name, "orgSkill")
         reloadLocalUploadedSkillPaths()
+        reloadOrgInstalledSkillNames()
         reloadEditedSkillPaths()
         setSelectedSkill(null)
         setSelectedFilePath(null)
@@ -1630,7 +1659,7 @@ export function SkillsPanel(): React.JSX.Element {
         alert(res.error || "删除失败")
       }
     },
-    [reloadEditedSkillPaths, reloadLocalUploadedSkillPaths]
+    [reloadEditedSkillPaths, reloadLocalUploadedSkillPaths, reloadOrgInstalledSkillNames]
   )
 
   const builtinSkills = useMemo(() => skills.filter((s) => s.source === "project"), [skills])
@@ -1647,13 +1676,14 @@ export function SkillsPanel(): React.JSX.Element {
   const isSkillUploadedInPanel = useCallback(
     (skill: SkillMetadata | null | undefined): boolean => {
       if (!skill || skill.source !== "user") return false
+      if (orgInstalledSkillNames.has(normalizeSkillName(skill.name))) return false
       const localMarked = localUploadedSkillPaths.has(normalizeSkillPathKey(skill.path))
       if (localMarked) return true
       if (uploadedSkillNames.has(normalizeSkillName(skill.name))) return true
       // 历史兜底：无市场同名记录时，仍按“本地上传”处理。
       return !resolveMarketInfo(skill)
     },
-    [localUploadedSkillPaths, resolveMarketInfo, uploadedSkillNames]
+    [localUploadedSkillPaths, orgInstalledSkillNames, resolveMarketInfo, uploadedSkillNames]
   )
 
   const selectedSkillMarketInfo = useMemo(
@@ -1800,9 +1830,23 @@ export function SkillsPanel(): React.JSX.Element {
     () => customSkills.filter((skill) => isSkillUploadedInPanel(skill)),
     [customSkills, isSkillUploadedInPanel]
   )
+  const orgInstalledCustomSkills = useMemo(
+    () =>
+      customSkills.filter(
+        (skill) =>
+          !isSkillUploadedInPanel(skill) &&
+          orgInstalledSkillNames.has(normalizeSkillName(skill.name))
+      ),
+    [customSkills, isSkillUploadedInPanel, orgInstalledSkillNames]
+  )
   const marketInstalledCustomSkills = useMemo(
-    () => customSkills.filter((skill) => !isSkillUploadedInPanel(skill)),
-    [customSkills, isSkillUploadedInPanel]
+    () =>
+      customSkills.filter(
+        (skill) =>
+          !isSkillUploadedInPanel(skill) &&
+          !orgInstalledSkillNames.has(normalizeSkillName(skill.name))
+      ),
+    [customSkills, isSkillUploadedInPanel, orgInstalledSkillNames]
   )
 
   const filteredBuiltin = useMemo(
@@ -1816,6 +1860,10 @@ export function SkillsPanel(): React.JSX.Element {
   const filteredMarketInstalledCustom = useMemo(
     () => filterSkillsBySearch(marketInstalledCustomSkills),
     [filterSkillsBySearch, marketInstalledCustomSkills]
+  )
+  const filteredOrgInstalledCustom = useMemo(
+    () => filterSkillsBySearch(orgInstalledCustomSkills),
+    [filterSkillsBySearch, orgInstalledCustomSkills]
   )
 
   const openMarketWithSkillSearch = useCallback(
@@ -1942,6 +1990,24 @@ export function SkillsPanel(): React.JSX.Element {
                 onToggleDirNode={toggleDirNode}
                 onSelectFile={onSelectFile}
                 hideFeaturedMarketFiles
+                hideMarketTag
+              />
+            )}
+            {orgInstalledCustomSkills.length > 0 && (
+              <SkillSection
+                title="我安装的组织级技能"
+                skills={filteredOrgInstalledCustom}
+                marketSkillMap={marketSkillMap}
+                uploadedSkillNames={uploadedSkillNames}
+                editedSkillPaths={editedSkillPaths}
+                expandedSkills={expandedSkills}
+                skillFilesMap={skillFilesMap}
+                selectedSkill={selectedSkill}
+                expandedDirNodes={expandedDirNodes}
+                disabledSkills={disabledSkills}
+                onToggleSkill={onToggleSkill}
+                onToggleDirNode={toggleDirNode}
+                onSelectFile={onSelectFile}
                 hideMarketTag
               />
             )}
@@ -2105,6 +2171,15 @@ function SkillSection(props: {
         dot: "bg-emerald-500",
         count:
           "border-emerald-200/80 bg-white/85 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-200"
+      }
+    }
+    if (title.includes("组织级")) {
+      return {
+        header:
+          "border-violet-200/70 bg-violet-50/80 text-violet-900 hover:bg-violet-50 dark:border-violet-900/50 dark:bg-violet-950/30 dark:text-violet-100",
+        dot: "bg-violet-500",
+        count:
+          "border-violet-200/80 bg-white/85 text-violet-700 dark:border-violet-800 dark:bg-violet-950/50 dark:text-violet-200"
       }
     }
     return {

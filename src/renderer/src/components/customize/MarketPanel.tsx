@@ -55,6 +55,7 @@ import {
   MarketUpdateBadge,
   UpdateVersionTooltip
 } from "./MarketUpdateBadge"
+import { marketInstalledSourceStorage } from "./market-installed-source-storage"
 import { marketApi, MarketApiResponse, MarketItem, MarketItemType } from "../../api/market"
 import { getMarketMockResponse } from "./MarketMockData"
 import { getDefaultRange, parseTopUsersFromAgg } from "../dashboard/use-dashboard"
@@ -1055,6 +1056,10 @@ export function MarketPanel(): React.JSX.Element {
 
       if (response.success) {
         console.log(`Successfully updated and installed ${item.name}`)
+        if (activeTab === "orgSkill") {
+          marketInstalledSourceStorage.addName(itemName, activeTab)
+          marketInstalledSourceStorage.addName(item.chinese_name || "", activeTab)
+        }
         marketInstalledVersionStorage.setVersion(itemName, activeTab, item.version)
         toast.success(
           `已为您更新并安装「${item.name}」到${getMarketTypeLabel(activeTab)}，请新开一个会话试试效果。`
@@ -1678,6 +1683,10 @@ export function MarketPanel(): React.JSX.Element {
         if (downloadToLocal) {
           toast.success(`「${item.name}」已保存到本地。`)
         } else {
+          if (activeTab === "orgSkill") {
+            marketInstalledSourceStorage.addName(itemName, activeTab)
+            marketInstalledSourceStorage.addName(item.chinese_name || "", activeTab)
+          }
           marketInstalledVersionStorage.setVersion(itemName, activeTab, item.version)
           toast.success(
             `「${item.name}」已安装到${getMarketTypeLabel(activeTab)}，请新开一个会话试试效果。`
