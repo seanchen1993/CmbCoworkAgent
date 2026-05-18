@@ -294,8 +294,6 @@ export function OrgSkillMarketContent({
   useEffect(() => {
     const detailName = initialDetailName?.trim()
     if (!detailName || loading || items.length === 0) return
-    console.log('11111111111111111111111111111111111111111111111', detailName)
-
     const normalizedDetailName = detailName.toLowerCase()
     const target = items.find(
       (item) =>
@@ -357,7 +355,7 @@ export function OrgSkillMarketContent({
           </p>
         </div>
       ) : (
-        <div className="grid grid-cols-[repeat(auto-fit,minmax(320px,1fr))] gap-3">
+        <div className="grid grid-cols-1 2xl:grid-cols-2 gap-3">
           {visibleItems.map((item) => (
             <OrgSkillCard
               key={getOrgSkillItemKey(item)}
