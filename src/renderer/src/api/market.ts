@@ -1,7 +1,8 @@
 import { MOCK_MARKET_DATA } from "../components/customize/MarketMockData"
 import { toast } from "sonner"
+import { getMockOrgSkillMarketResponse, orgSkillMarketApi } from "./org-skill-market"
 
-export type MarketItemType = "skill" | "mcp" | "plugin"
+export type MarketItemType = "skill" | "orgSkill" | "mcp" | "plugin"
 
 export interface MarketListResponse {
   type: string
@@ -23,6 +24,12 @@ export interface MarketApiResponse {
   success: boolean
   data?: MarketItem[]
   error?: string
+  pageNum?: number
+  pageSize?: number
+  total?: number
+  pages?: number
+  hasNextPage?: boolean
+  hasPreviousPage?: boolean
 }
 
 export interface DownloadResponse {
@@ -56,6 +63,11 @@ export interface MarketItem {
   installed?: boolean // 新增已安装状态字段
   installedVersion?: string
   updateAvailable?: boolean
+  orgSkillId?: number
+  orgSkillVersionId?: number
+  sourceOriginName?: string
+  managerName?: string
+  subscriptionCount?: number
 }
 
 export interface MarketUpdateResponse {
@@ -168,6 +180,10 @@ const setCachedData = (key: string, data: MarketApiResponse): void => {
 // Updated API functions with caching
 export const marketApi = {
   async fetchInstallFile(name: string, type: MarketItemType): Promise<DownloadedItemFile> {
+    if (type === "orgSkill") {
+      throw new Error("组织级技能下载需要 skillId 和 versionId")
+    }
+
     console.log(`Fetching install file for ${type} item: ${name}`)
     const response = await fetch(ENDPOINTS.download(type, name), {
       method: "GET",
@@ -186,6 +202,10 @@ export const marketApi = {
     const filename = contentDisposition?.match(/filename="([^"]+)"/)?.[1] || `${name}.${defaultExt}`
 
     return { blob, filename }
+  },
+
+  async fetchOrgSkillInstallFile(item: MarketItem): Promise<DownloadedItemFile> {
+    return orgSkillMarketApi.fetchInstallFile(item)
   },
 
   async downloadLspVsix(): Promise<DownloadResponse> {
@@ -368,6 +388,24 @@ export const marketApi = {
     }
   },
 
+  async getOrgSkills(pageNum = 1, pageSize = 10): Promise<MarketApiResponse> {
+    console.log("Fetching organization skills from API...")
+    try {
+      return await orgSkillMarketApi.getOrgSkills(pageNum, pageSize)
+    } catch (error) {
+      console.error("Error fetching organization skills:", error)
+      if (USE_MARKET_MOCK_ON_ERROR) {
+        const reason = error instanceof Error ? error.message : String(error ?? "unknown error")
+        console.warn(`[marketApi] orgSkill request failed, fallback to mock data. reason=${reason}`)
+        return getMockOrgSkillMarketResponse(pageNum, pageSize)
+      }
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : "Unknown error"
+      }
+    }
+  },
+
   async deleteItem(name: string, type: MarketItemType): Promise<MarketDeleteResponse> {
     console.log(`Deleting ${type} item: ${name}`)
     const response = await fetch(ENDPOINTS.delete(type, name), {
@@ -389,11 +427,15 @@ export const marketApi = {
     name: string,
     type: MarketItemType,
     downloadToLocal = false,
-    _isFeatured = false
+    _isFeatured = false,
+    item?: MarketItem
   ): Promise<DownloadResponse> {
     void _isFeatured
     console.log(`Downloading ${type} item: ${name}`)
-    const { blob, filename } = await this.fetchInstallFile(name, type)
+    const { blob, filename } =
+      type === "orgSkill" && item
+        ? await this.fetchOrgSkillInstallFile(item)
+        : await this.fetchInstallFile(name, type)
 
     // If user wants to download to local file system
     if (downloadToLocal) {
@@ -402,7 +444,7 @@ export const marketApi = {
     }
 
     // For skills, we need to handle the downloaded file
-    if (type === "skill") {
+    if (type === "skill" || type === "orgSkill") {
       try {
         const arrayBuffer = await blob.arrayBuffer()
         if (typeof window.api?.skills?.upload === "function") {
@@ -687,6 +729,8 @@ export const marketApi = {
         return this.getMcps()
       case "plugin":
         return this.getPlugins()
+      case "orgSkill":
+        return this.getOrgSkills()
       default:
         throw new Error(`Unknown resource type: ${resourceType}`)
     }
