@@ -152,7 +152,7 @@ const ORG_SKILL_ENDPOINTS = {
   page: (pageNum: number, pageSize: number) =>
     `${ORG_SKILL_GATEWAY_URL}/gw/mgr/open-api/skill/page?pageNum=${pageNum}&pageSize=${pageSize}`,
   download: (skillId: number, versionId: number) =>
-    `${ORG_SKILL_GATEWAY_URL}/mgr/open-api/skill/document/download?skillId=${skillId}&versionId=${versionId}`
+    `${ORG_SKILL_GATEWAY_URL}/gw/mgr/open-api/skill/document/download?skillId=${skillId}&versionId=${versionId}`
 }
 
 function normalizeOrgSkillVersionName(version?: string): string {
