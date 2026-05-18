@@ -10,6 +10,7 @@ import {
   DialogTitle,
   DialogFooter
 } from "@/components/ui/dialog"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { cn } from "@/lib/utils"
 import { DEFAULT_SCENE_CATEGORY, SCENE_CATEGORY_OPTIONS } from "@/lib/skill-data-service"
 
@@ -101,6 +102,7 @@ export function UniversalUploadDialog({
   const [chineseName, setChineseName] = useState("")
   const [userId, setUserId] = useState<string | undefined>(undefined)
   const [nameFromFile, setNameFromFile] = useState(false) // name 是否来自文件解析（锁定）
+  const [submitReasonOpen, setSubmitReasonOpen] = useState(false)
 
   const loadCurrentUserId = React.useCallback(async () => {
     try {
@@ -380,6 +382,19 @@ export function UniversalUploadDialog({
     !!category.trim() &&
     !!guidance.trim()
 
+  const getSubmitDisabledReason = () => {
+    if (uploading) return submittingLabel || (isUpdate ? "更新中..." : "上传中...")
+    if (!isUpdate && !file && !generatedFile) return "请选择文件"
+    if (!name.trim()) return "请填写英文名称"
+    if (!chineseName.trim()) return "请填写中文名称"
+    if (!description.trim()) return "请填写描述"
+    if (!category.trim()) return "请选择场景"
+    if (!guidance.trim()) return "请填写使用指引"
+    return undefined
+  }
+
+  const submitDisabledReason = getSubmitDisabledReason()
+
   const handleCopyJsonTemplate = () => {
     const template = `{
   "mcpServers": {
@@ -583,7 +598,7 @@ export function UniversalUploadDialog({
             </label>
             <textarea
               id="guidance"
-              placeholder="帮助其他用户了解如何使用这个资源。案例，你可以告诉大模型：使用mmjtrack-updater技能给我的项目升级埋埋机到最新版本"
+              placeholder="帮助其他用户了解如何使用这个资源。案例，你可以告诉大模型：使用xx技能给我干xx事情"
               value={guidance}
               onChange={(e) => setGuidance(e.target.value)}
               disabled={uploading}
@@ -664,11 +679,26 @@ export function UniversalUploadDialog({
           <Button variant="outline" onClick={() => handleDialogClose(false)} disabled={uploading}>
             取消
           </Button>
-          <Button onClick={handleUpload} disabled={uploading || !canSubmit}>
-            {uploading
-              ? submittingLabel || (isUpdate ? "更新中..." : "上传中...")
-              : submitLabel || (isUpdate ? "更新" : "上传")}
-          </Button>
+          <Popover open={!!submitDisabledReason && submitReasonOpen}>
+            <PopoverTrigger asChild>
+              <span
+                className="inline-flex"
+                onMouseEnter={() => setSubmitReasonOpen(true)}
+                onMouseLeave={() => setSubmitReasonOpen(false)}
+                onFocus={() => setSubmitReasonOpen(true)}
+                onBlur={() => setSubmitReasonOpen(false)}
+              >
+                <Button onClick={handleUpload} disabled={uploading || !canSubmit}>
+                  {uploading
+                    ? submittingLabel || (isUpdate ? "更新中..." : "上传中...")
+                    : submitLabel || (isUpdate ? "更新" : "上传")}
+                </Button>
+              </span>
+            </PopoverTrigger>
+            <PopoverContent className="w-auto max-w-56 px-3 py-2 text-xs" align="end" side="top">
+              {submitDisabledReason}
+            </PopoverContent>
+          </Popover>
         </DialogFooter>
       </DialogContent>
     </Dialog>
