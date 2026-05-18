@@ -29,7 +29,7 @@ type PetSettings = {
 }
 
 const DEFAULT_SETTINGS: PetSettings = {
-  enabled: true,
+  enabled: false,
   selectedPetKey: null
 }
 

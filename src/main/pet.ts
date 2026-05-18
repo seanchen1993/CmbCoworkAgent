@@ -113,7 +113,7 @@ const PET_HOVER_MESSAGES = [
   "饿龙咆哮～"
 ]
 const DEFAULT_PET_SETTINGS: PetSettings = {
-  enabled: true,
+  enabled: false,
   selectedPetKey: null
 }
 
