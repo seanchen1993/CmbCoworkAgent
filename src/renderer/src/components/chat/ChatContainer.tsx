@@ -702,6 +702,26 @@ const toTime = (value: Date | string | undefined): number | null => {
   return date ? date.getTime() : null
 }
 
+const getMessageDisplayTime = (message: Message): number | null => {
+  return toTime(message.start_at) ?? toTime(message.created_at) ?? toTime(message.end_at)
+}
+
+const sortMessagesForDisplay = (messages: Message[]): Message[] => {
+  return messages
+    .map((message, index) => ({
+      message,
+      index,
+      time: getMessageDisplayTime(message)
+    }))
+    .sort((a, b) => {
+      if (a.time !== null && b.time !== null && a.time !== b.time) {
+        return a.time - b.time
+      }
+      return a.index - b.index
+    })
+    .map((entry) => entry.message)
+}
+
 const getMessageText = (content: Message["content"]): string => {
   if (typeof content === "string") return content
   if (!Array.isArray(content)) return ""
@@ -1721,7 +1741,7 @@ export function ChatContainer({
         end_at: endAt
       }
     })
-    return allMessages.map((msg) => {
+    return sortMessagesForDisplay(allMessages).map((msg) => {
       if (
         msg.role !== "user" ||
         typeof msg.content !== "string" ||
