@@ -47,6 +47,42 @@ interface LspDownloadState {
   progress: LspDownloadProgress | null
 }
 
+interface PetManifest {
+  // 宠物资源清单，来自 pets/<directoryId>/pet.json。
+  id: string
+  directoryId: string
+  source: "builtin" | "custom"
+  key: string
+  canDelete: boolean
+  name?: string
+  displayName?: string
+  description?: string
+  spritesheetPath: string
+  frameWidth?: number
+  frameHeight?: number
+  columns?: number
+  rows?: number
+  states?: Record<string, { y: number; frames: number; fps?: number }>
+}
+
+interface PetSettings {
+  enabled: boolean
+  selectedPetKey: string | null
+}
+
+type PetState =
+  // 与主进程 PetState 保持一致，renderer 只能通过 preload 发送这些状态。
+  | "idle"
+  | "busy"
+  | "waiting"
+  | "done"
+  | "error"
+  | "crying"
+  | "prompt"
+  | "running"
+  | "interaction"
+  | "hover"
+
 // Simple electron API - replaces @electron-toolkit/preload
 const electronAPI = {
   openExternal: (url: string) => shell.openExternal(url),
@@ -172,6 +208,11 @@ const api = {
     },
     delete: (threadId: string): Promise<void> => {
       return ipcRenderer.invoke("threads:delete", threadId)
+    },
+    exportSession: (
+      threadId: string
+    ): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> => {
+      return ipcRenderer.invoke("threads:exportSession", threadId)
     },
     getHistory: (threadId: string): Promise<unknown[]> => {
       return ipcRenderer.invoke("threads:history", threadId)
@@ -670,6 +711,49 @@ const api = {
       return () => {
         ipcRenderer.removeListener("workspace:files-changed", handler)
       }
+    }
+  },
+  pet: {
+    // 列出内置 pets/ 与 OPENWORK_DIR/pets 下可用宠物。
+    list: (): Promise<PetManifest[]> => {
+      return ipcRenderer.invoke("pet:list") as Promise<PetManifest[]>
+    },
+    getSpriteDataUrl: (
+      directoryId: string,
+      source?: "builtin" | "custom"
+    ): Promise<{ success: boolean; dataUrl?: string; error?: string }> => {
+      return ipcRenderer.invoke("pet:getSpriteDataUrl", directoryId, source) as Promise<{
+        success: boolean
+        dataUrl?: string
+        error?: string
+      }>
+    },
+    // 将业务状态同步到独立宠物窗口；动画渲染不在 renderer 主 UI 中执行。
+    setState: (state: PetState): void => {
+      ipcRenderer.send("pet:setState", state)
+    },
+    // 告知主进程主应用已打开/获得焦点，用于清空宠物完成任务提醒队列。
+    clearCompletedTasks: (): void => {
+      ipcRenderer.send("pet:clearCompletedTasks")
+    },
+    getSettings: (): Promise<PetSettings> => {
+      return ipcRenderer.invoke("pet:getSettings") as Promise<PetSettings>
+    },
+    updateSettings: (settings: Partial<PetSettings>): Promise<PetSettings> => {
+      return ipcRenderer.invoke("pet:updateSettings", settings) as Promise<PetSettings>
+    },
+    uploadCustomFolder: (): Promise<{ success: boolean; pet?: PetManifest; error?: string }> => {
+      return ipcRenderer.invoke("pet:uploadCustomFolder") as Promise<{
+        success: boolean
+        pet?: PetManifest
+        error?: string
+      }>
+    },
+    deleteCustom: (directoryId: string): Promise<{ success: boolean; error?: string }> => {
+      return ipcRenderer.invoke("pet:deleteCustom", directoryId) as Promise<{
+        success: boolean
+        error?: string
+      }>
     }
   },
   file: {
@@ -1708,6 +1792,17 @@ const api = {
       opts?: { upperOrgLv1?: string | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:userStats", range, granularity, opts),
+    userList: (
+      range: { from: string; to: string },
+      options?: { pageSize?: number; afterKey?: Record<string, string | number> | null }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:userList", range, options),
+    userDetail: (
+      sapId: string,
+      range: { from: string; to: string },
+      options?: { traceLimit?: number }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:userDetail", sapId, range, options),
     skillUsageSummary: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
@@ -1741,6 +1836,12 @@ const api = {
       limit?: number
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:skillRecentTraces", skill, range, limit),
+    marketSkillRecentTraces: (
+      skill: string,
+      range: { from: string; to: string },
+      limit?: number
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:marketSkillRecentTraces", skill, range, limit),
     skillDetail: (
       skill: string,
       range: { from: string; to: string },
