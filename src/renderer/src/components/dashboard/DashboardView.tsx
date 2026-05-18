@@ -4,10 +4,20 @@
  * 5 panels: Overview · Feedback · Model Analysis · User Analysis · Productivity
  */
 import { useState, useCallback, useEffect } from "react"
-import { RefreshCw, Loader2, AlertCircle, ChevronLeft, ChevronRight, Download, User, Users } from "lucide-react"
+import {
+  RefreshCw,
+  Loader2,
+  AlertCircle,
+  ChevronLeft,
+  ChevronRight,
+  Download,
+  User,
+  Users
+} from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import {
+  formatTopUserOrgName,
   useDashboard,
   type DashboardCommitDetailsData,
   type DashboardSkillDetail,
@@ -24,6 +34,14 @@ import { ProductivityPanel } from "./panels/ProductivityPanel"
 import { FeedbackPanel } from "./panels/FeedbackPanel"
 import { TraceExplorer, TraceHistoryDialog } from "./TraceHistoryDialog"
 import { CommitDetailsDialog } from "./CommitDetailsDialog"
+import { marketApi, type MarketItem } from "../../api/market"
+import { buildMarketSkillKeySet, buildMarketSkillMap, getMarketSkillItem } from "./skill-market"
+import {
+  buildUploaderIdCandidates,
+  normalizeUploaderProfileField,
+  parseUploaderIdentity,
+  type UploaderProfileInfo
+} from "../../lib/skill-data-service"
 
 // ─────────────────────────────────────────────────────────
 // Time control bar
@@ -36,10 +54,22 @@ const GRANULARITY_OPTIONS: { value: Granularity; label: string }[] = [
   { value: "custom", label: "自定义" }
 ]
 
+type SkillUploaderExportInfo = {
+  sapId: string
+  userName: string
+  orgName: string
+}
+
+type SkillUploaderProfile = UploaderProfileInfo & {
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+}
+
 function formatRangeLabel(from: string, to: string, granularity: Granularity): string {
   const f = new Date(from)
   const pad = (n: number): string => String(n).padStart(2, "0")
-  const fmtDate = (d: Date): string => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+  const fmtDate = (d: Date): string =>
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 
   if (granularity === "day") return fmtDate(f)
   if (granularity === "custom") return `${fmtDate(f)} ~ ${fmtDate(new Date(to))}`
@@ -49,6 +79,37 @@ function formatRangeLabel(from: string, to: string, granularity: Granularity): s
   }
   // month
   return `${f.getFullYear()}-${pad(f.getMonth() + 1)}`
+}
+
+function resolveSkillUploaderExportInfo(
+  item: MarketItem | null,
+  uploaderProfiles: Record<string, SkillUploaderProfile>
+): SkillUploaderExportInfo {
+  if (!item?.user_id) return { sapId: "", userName: "", orgName: "" }
+
+  const parsed = parseUploaderIdentity(item.user_id)
+  const profileCandidates = [
+    item.user_id.trim(),
+    parsed?.sapId,
+    ...buildUploaderIdCandidates(parsed?.sapId || item.user_id)
+  ].filter((value): value is string => Boolean(value))
+  const profile = profileCandidates.map((candidate) => uploaderProfiles[candidate]).find(Boolean)
+
+  return {
+    sapId:
+      normalizeUploaderProfileField(profile?.sapId) ||
+      normalizeUploaderProfileField(parsed?.sapId) ||
+      item.user_id.trim(),
+    userName:
+      normalizeUploaderProfileField(profile?.userName) ||
+      normalizeUploaderProfileField(parsed?.userName),
+    orgName:
+      formatTopUserOrgName(
+        normalizeUploaderProfileField(profile?.orgName),
+        normalizeUploaderProfileField(profile?.upperOrgLv1),
+        normalizeUploaderProfileField(profile?.upperOrgLv0)
+      ) || normalizeUploaderProfileField(parsed?.orgName)
+  }
 }
 
 function TimeControlBar({
@@ -153,10 +214,7 @@ function TimeControlBar({
       {granularity === "custom" && !showDatePicker && (
         <span className="text-xs text-foreground font-medium">
           {formatRangeLabel(range.from, range.to, granularity)}
-          <button
-            className="ml-2 text-primary underline"
-            onClick={() => setShowDatePicker(true)}
-          >
+          <button className="ml-2 text-primary underline" onClick={() => setShowDatePicker(true)}>
             修改
           </button>
         </span>
@@ -171,7 +229,11 @@ function TimeControlBar({
         onClick={onExport}
         disabled={exporting || loading}
       >
-        {exporting ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
+        {exporting ? (
+          <Loader2 className="size-3.5 animate-spin" />
+        ) : (
+          <Download className="size-3.5" />
+        )}
         导出Excel
       </Button>
       <Button
@@ -181,7 +243,11 @@ function TimeControlBar({
         onClick={onRefresh}
         disabled={loading}
       >
-        {loading ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
+        {loading ? (
+          <Loader2 className="size-3.5 animate-spin" />
+        ) : (
+          <RefreshCw className="size-3.5" />
+        )}
         刷新
       </Button>
     </div>
@@ -312,8 +378,18 @@ function UserListPage({
             </p>
           </div>
         </div>
-        <Button variant="outline" size="sm" className="gap-1.5" onClick={onRefresh} disabled={loading}>
-          {loading ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
+        <Button
+          variant="outline"
+          size="sm"
+          className="gap-1.5"
+          onClick={onRefresh}
+          disabled={loading}
+        >
+          {loading ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : (
+            <RefreshCw className="size-3.5" />
+          )}
           刷新
         </Button>
       </div>
@@ -325,10 +401,21 @@ function UserListPage({
             用户明细
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" onClick={onPrevious} disabled={!canGoPrevious || loading}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onPrevious}
+              disabled={!canGoPrevious || loading}
+            >
               上一页
             </Button>
-            <Button variant="outline" size="sm" className="gap-1" onClick={onNext} disabled={!canGoNext || loading}>
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1"
+              onClick={onNext}
+              disabled={!canGoNext || loading}
+            >
               下一页
               <ChevronRight className="size-3.5" />
             </Button>
@@ -340,7 +427,9 @@ function UserListPage({
             <Loader2 className="size-6 animate-spin text-muted-foreground" />
           </div>
         ) : error ? (
-          <div className="flex h-64 items-center justify-center px-6 text-sm text-destructive">{error}</div>
+          <div className="flex h-64 items-center justify-center px-6 text-sm text-destructive">
+            {error}
+          </div>
         ) : (
           <div className="overflow-auto">
             <table className="w-full text-xs">
@@ -362,8 +451,12 @@ function UserListPage({
                     onClick={() => onUserClick(user)}
                   >
                     <td className="px-3 py-2">
-                      <div className="font-medium text-foreground">{user.userName || user.sapId}</div>
-                      <div className="font-mono text-[10px] text-muted-foreground">{user.sapId}</div>
+                      <div className="font-medium text-foreground">
+                        {user.userName || user.sapId}
+                      </div>
+                      <div className="font-mono text-[10px] text-muted-foreground">
+                        {user.sapId}
+                      </div>
                     </td>
                     <td className="px-3 py-2 text-muted-foreground">
                       {user.upperOrgLv1 && user.upperOrgLv0
@@ -372,8 +465,12 @@ function UserListPage({
                     </td>
                     <td className="px-3 py-2 text-right font-medium">{formatNumber(user.count)}</td>
                     <td className="px-3 py-2 text-right">{formatNumber(user.totalToolCalls)}</td>
-                    <td className="px-3 py-2 text-right">{formatCompactTokens(user.totalTokens)}</td>
-                    <td className="px-3 py-2 text-muted-foreground">{formatDateTime(user.lastActiveAt)}</td>
+                    <td className="px-3 py-2 text-right">
+                      {formatCompactTokens(user.totalTokens)}
+                    </td>
+                    <td className="px-3 py-2 text-muted-foreground">
+                      {formatDateTime(user.lastActiveAt)}
+                    </td>
                   </tr>
                 ))}
                 {(data?.items ?? []).length === 0 && (
@@ -434,7 +531,9 @@ function UserDetailPage({
                 <User className="size-5 text-white" />
               </div>
               <div className="min-w-0">
-                <div className="text-sm font-semibold text-foreground">{data.userName || data.sapId}</div>
+                <div className="text-sm font-semibold text-foreground">
+                  {data.userName || data.sapId}
+                </div>
                 <div className="mt-1 text-xs text-muted-foreground">
                   {data.sapId}
                   {data.ystId ? ` · ${data.ystId}` : ""}
@@ -448,8 +547,14 @@ function UserDetailPage({
               <UserMetricCard label="调用次数" value={formatNumber(data.totalCalls)} />
               <UserMetricCard label="平均耗时" value={formatDuration(data.avgDurationMs)} />
               <UserMetricCard label="工具调用" value={formatNumber(data.totalToolCalls)} />
-              <UserMetricCard label="输入 Token" value={formatCompactTokens(data.totalInputTokens)} />
-              <UserMetricCard label="输出 Token" value={formatCompactTokens(data.totalOutputTokens)} />
+              <UserMetricCard
+                label="输入 Token"
+                value={formatCompactTokens(data.totalInputTokens)}
+              />
+              <UserMetricCard
+                label="输出 Token"
+                value={formatCompactTokens(data.totalOutputTokens)}
+              />
             </div>
           </div>
 
@@ -463,7 +568,9 @@ function UserDetailPage({
                     <span className="font-medium">{formatNumber(item.count)}</span>
                   </div>
                 ))}
-                {data.bySkill.length === 0 && <div className="text-xs text-muted-foreground">暂无数据</div>}
+                {data.bySkill.length === 0 && (
+                  <div className="text-xs text-muted-foreground">暂无数据</div>
+                )}
               </div>
             </div>
             <div className="rounded-xl border border-border bg-card p-4">
@@ -475,19 +582,26 @@ function UserDetailPage({
                     <span className="font-medium">{formatNumber(item.count)}</span>
                   </div>
                 ))}
-                {data.byModel.length === 0 && <div className="text-xs text-muted-foreground">暂无数据</div>}
+                {data.byModel.length === 0 && (
+                  <div className="text-xs text-muted-foreground">暂无数据</div>
+                )}
               </div>
             </div>
             <div className="rounded-xl border border-border bg-card p-4">
               <h3 className="mb-3 text-xs font-medium text-muted-foreground">执行结果</h3>
               <div className="space-y-2">
                 {data.byOutcome.map((item) => (
-                  <div key={item.outcome} className="flex items-center justify-between gap-3 text-xs">
+                  <div
+                    key={item.outcome}
+                    className="flex items-center justify-between gap-3 text-xs"
+                  >
                     <span className="truncate text-foreground">{outcomeLabel(item.outcome)}</span>
                     <span className="font-medium">{formatNumber(item.count)}</span>
                   </div>
                 ))}
-                {data.byOutcome.length === 0 && <div className="text-xs text-muted-foreground">暂无数据</div>}
+                {data.byOutcome.length === 0 && (
+                  <div className="text-xs text-muted-foreground">暂无数据</div>
+                )}
               </div>
             </div>
           </div>
@@ -544,77 +658,228 @@ export function DashboardView(): React.JSX.Element {
   const [userList, setUserList] = useState<DashboardUserListData | null>(null)
   const [userListLoading, setUserListLoading] = useState(false)
   const [userListError, setUserListError] = useState<string | null>(null)
-  const [userListAfterKey, setUserListAfterKey] = useState<Record<string, string | number> | undefined>()
-  const [userListBackStack, setUserListBackStack] = useState<Array<Record<string, string | number> | undefined>>([])
+  const [userListAfterKey, setUserListAfterKey] = useState<
+    Record<string, string | number> | undefined
+  >()
+  const [userListBackStack, setUserListBackStack] = useState<
+    Array<Record<string, string | number> | undefined>
+  >([])
   const [userDetail, setUserDetail] = useState<DashboardUserDetail | null>(null)
   const [userDetailLoading, setUserDetailLoading] = useState(false)
   const [userDetailError, setUserDetailError] = useState<string | null>(null)
+  const [marketSkillKeys, setMarketSkillKeys] = useState<Set<string>>(new Set())
+  const [marketSkillMap, setMarketSkillMap] = useState<Map<string, MarketItem>>(new Map())
+  const [skillUploaderProfiles, setSkillUploaderProfiles] = useState<
+    Record<string, SkillUploaderProfile>
+  >({})
 
-  const handleSkillClick = useCallback(async (skill: string) => {
-    setSelectedSkill(skill)
-    setSkillDialogOpen(true)
-    setSkillDetail(null)
-    setSkillTracesError(null)
-    setSkillTracesLoading(true)
-    try {
-      const result = await window.api.dashboard.skillDetail(skill, range, 10)
-      if (!result.success) throw new Error(result.error ?? "获取 Skill 详情失败")
-      setSkillDetail(result.data ?? EMPTY_SKILL_DETAIL)
-    } catch (e) {
-      setSkillTracesError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setSkillTracesLoading(false)
-    }
-  }, [range])
+  useEffect(() => {
+    let cancelled = false
 
-  const loadUserList = useCallback(async (
-    afterKey?: Record<string, string | number>,
-    backStack: Array<Record<string, string | number> | undefined> = []
-  ) => {
-    setUserListLoading(true)
-    setUserListError(null)
-    try {
-      const result = await window.api.dashboard.userList(range, {
-        pageSize: USER_LIST_PAGE_SIZE,
-        afterKey: afterKey ?? null
-      })
-      if (!result.success) throw new Error(result.error ?? "获取用户列表失败")
-      setUserList(result.data ?? { items: [], pageSize: USER_LIST_PAGE_SIZE, totalActiveUsers: 0 })
-      setUserListAfterKey(afterKey)
-      setUserListBackStack(backStack)
-    } catch (e) {
-      setUserListError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setUserListLoading(false)
-    }
-  }, [range])
+    async function loadUploaderProfiles(items: MarketItem[]): Promise<void> {
+      const uploaderIds = Array.from(
+        new Set(
+          items
+            .map((item) => {
+              const parsed = parseUploaderIdentity(item.user_id)
+              return parsed?.sapId || item.user_id?.trim() || ""
+            })
+            .filter(Boolean)
+            .flatMap((id) => buildUploaderIdCandidates(id))
+        )
+      )
 
-  const loadUserDetail = useCallback(async (sapId: string) => {
-    setUserDetailLoading(true)
-    setUserDetailError(null)
-    try {
-      const result = await window.api.dashboard.userDetail(sapId, range, { traceLimit: 10 })
-      if (!result.success) throw new Error(result.error ?? "获取用户详情失败")
-      setUserDetail(result.data ?? null)
-    } catch (e) {
-      setUserDetailError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setUserDetailLoading(false)
+      if (uploaderIds.length === 0) {
+        if (!cancelled) setSkillUploaderProfiles({})
+        return
+      }
+
+      if (typeof window.api?.dashboard?.userProfiles !== "function") {
+        if (!cancelled) {
+          setSkillUploaderProfiles(
+            Object.fromEntries(
+              uploaderIds.map((sapId) => [sapId, { sapId, userName: "", orgName: "" }])
+            )
+          )
+        }
+        return
+      }
+
+      try {
+        const response = await window.api.dashboard.userProfiles(uploaderIds)
+        if (!response.success || !response.data) {
+          throw new Error(response.error || "获取上传用户信息失败")
+        }
+
+        const buckets =
+          (
+            response.data as {
+              aggregations?: {
+                by_sap?: {
+                  buckets?: Array<{
+                    key?: string
+                    user_name?: { buckets?: Array<{ key?: string }> }
+                    org_name?: { buckets?: Array<{ key?: string }> }
+                    latest_user_info?: {
+                      hits?: {
+                        hits?: Array<{
+                          _source?: {
+                            userName?: string
+                            orgName?: string
+                            upperOrgLv0?: string
+                            upperOrgLv1?: string
+                          }
+                        }>
+                      }
+                    }
+                  }>
+                }
+              }
+            }
+          ).aggregations?.by_sap?.buckets ?? []
+
+        const profileBySapId: Record<string, SkillUploaderProfile> = {}
+        for (const bucket of buckets) {
+          const sapId = bucket.key?.trim()
+          if (!sapId) continue
+          const latestUserInfo = bucket.latest_user_info?.hits?.hits?.[0]?._source
+          profileBySapId[sapId] = {
+            sapId,
+            userName: latestUserInfo?.userName ?? bucket.user_name?.buckets?.[0]?.key ?? "",
+            orgName: latestUserInfo?.orgName ?? bucket.org_name?.buckets?.[0]?.key ?? "",
+            upperOrgLv0: latestUserInfo?.upperOrgLv0 ?? "",
+            upperOrgLv1: latestUserInfo?.upperOrgLv1 ?? ""
+          }
+        }
+
+        const profileEntries = Object.entries(profileBySapId)
+        const nextMap: Record<string, SkillUploaderProfile> = {}
+        for (const rawId of uploaderIds) {
+          nextMap[rawId] = profileBySapId[rawId] ||
+            profileEntries.find(([sapId]) => sapId.includes(rawId))?.[1] || {
+              sapId: rawId,
+              userName: "",
+              orgName: ""
+            }
+        }
+
+        if (!cancelled) setSkillUploaderProfiles(nextMap)
+      } catch (error) {
+        console.warn("[Dashboard] Failed to load marketplace skill uploader profiles:", error)
+        if (!cancelled) {
+          setSkillUploaderProfiles(
+            Object.fromEntries(
+              uploaderIds.map((sapId) => [sapId, { sapId, userName: "", orgName: "" }])
+            )
+          )
+        }
+      }
     }
-  }, [range])
+
+    async function loadMarketSkills(): Promise<void> {
+      try {
+        const result = await marketApi.getSkills()
+        if (cancelled) return
+        if (result.success && result.data) {
+          setMarketSkillKeys(buildMarketSkillKeySet(result.data))
+          setMarketSkillMap(buildMarketSkillMap(result.data))
+          void loadUploaderProfiles(result.data)
+          return
+        }
+        console.warn("[Dashboard] Failed to load marketplace skills:", result.error)
+      } catch (error) {
+        if (!cancelled) {
+          console.warn("[Dashboard] Failed to load marketplace skills:", error)
+        }
+      }
+    }
+
+    void loadMarketSkills()
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const handleSkillClick = useCallback(
+    async (skill: string) => {
+      setSelectedSkill(skill)
+      setSkillDialogOpen(true)
+      setSkillDetail(null)
+      setSkillTracesError(null)
+      setSkillTracesLoading(true)
+      try {
+        const result = await window.api.dashboard.skillDetail(skill, range, 10)
+        if (!result.success) throw new Error(result.error ?? "获取 Skill 详情失败")
+        setSkillDetail(result.data ?? EMPTY_SKILL_DETAIL)
+      } catch (e) {
+        setSkillTracesError(e instanceof Error ? e.message : String(e))
+      } finally {
+        setSkillTracesLoading(false)
+      }
+    },
+    [range]
+  )
+
+  const loadUserList = useCallback(
+    async (
+      afterKey?: Record<string, string | number>,
+      backStack: Array<Record<string, string | number> | undefined> = []
+    ) => {
+      setUserListLoading(true)
+      setUserListError(null)
+      try {
+        const result = await window.api.dashboard.userList(range, {
+          pageSize: USER_LIST_PAGE_SIZE,
+          afterKey: afterKey ?? null
+        })
+        if (!result.success) throw new Error(result.error ?? "获取用户列表失败")
+        setUserList(
+          result.data ?? { items: [], pageSize: USER_LIST_PAGE_SIZE, totalActiveUsers: 0 }
+        )
+        setUserListAfterKey(afterKey)
+        setUserListBackStack(backStack)
+      } catch (e) {
+        setUserListError(e instanceof Error ? e.message : String(e))
+      } finally {
+        setUserListLoading(false)
+      }
+    },
+    [range]
+  )
+
+  const loadUserDetail = useCallback(
+    async (sapId: string) => {
+      setUserDetailLoading(true)
+      setUserDetailError(null)
+      try {
+        const result = await window.api.dashboard.userDetail(sapId, range, { traceLimit: 10 })
+        if (!result.success) throw new Error(result.error ?? "获取用户详情失败")
+        setUserDetail(result.data ?? null)
+      } catch (e) {
+        setUserDetailError(e instanceof Error ? e.message : String(e))
+      } finally {
+        setUserDetailLoading(false)
+      }
+    },
+    [range]
+  )
 
   const openUserList = useCallback(() => {
     setSubPage({ kind: "user-list" })
     setUserList(null)
   }, [])
 
-  const openUserDetail = useCallback((sapId: string, backTo?: "main" | "user-list") => {
-    const normalizedSapId = sapId.trim()
-    if (!normalizedSapId) return
-    const fallbackBackTo = subPage.kind === "user-list" ? "user-list" : "main"
-    setSubPage({ kind: "user-detail", sapId: normalizedSapId, backTo: backTo ?? fallbackBackTo })
-    setUserDetail(null)
-  }, [subPage.kind])
+  const openUserDetail = useCallback(
+    (sapId: string, backTo?: "main" | "user-list") => {
+      const normalizedSapId = sapId.trim()
+      if (!normalizedSapId) return
+      const fallbackBackTo = subPage.kind === "user-list" ? "user-list" : "main"
+      setSubPage({ kind: "user-detail", sapId: normalizedSapId, backTo: backTo ?? fallbackBackTo })
+      setUserDetail(null)
+    },
+    [subPage.kind]
+  )
 
   const handleUserListNext = useCallback(() => {
     if (!userList?.nextAfterKey) return
@@ -646,37 +911,38 @@ export function DashboardView(): React.JSX.Element {
     }
   }, [range, subPage.kind, subPageDetailSapId, loadUserList, loadUserDetail])
 
-  const loadCommitDetails = useCallback(async (
-    targetRange: TimeRange,
-    scopeLabel: string,
-    page = 1,
-    pushedOnly = false
-  ) => {
-    setCommitScopeLabel(scopeLabel)
-    setCommitDetailsRange(targetRange)
-    setCommitDialogOpen(true)
-    setCommitDetails(null)
-    setCommitDetailsError(null)
-    setCommitDetailsLoading(true)
-    try {
-      const result = await window.api.dashboard.commitDetails(targetRange, {
-        page,
-        pageSize: 20,
-        pushedOnly
-      })
-      if (!result.success) throw new Error(result.error ?? "获取 Commit 明细失败")
-      setCommitDetails(result.data ?? { total: 0, page, pageSize: 20, pushedOnly, items: [] })
-    } catch (e) {
-      setCommitDetailsError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setCommitDetailsLoading(false)
-    }
-  }, [])
+  const loadCommitDetails = useCallback(
+    async (targetRange: TimeRange, scopeLabel: string, page = 1, pushedOnly = false) => {
+      setCommitScopeLabel(scopeLabel)
+      setCommitDetailsRange(targetRange)
+      setCommitDialogOpen(true)
+      setCommitDetails(null)
+      setCommitDetailsError(null)
+      setCommitDetailsLoading(true)
+      try {
+        const result = await window.api.dashboard.commitDetails(targetRange, {
+          page,
+          pageSize: 20,
+          pushedOnly
+        })
+        if (!result.success) throw new Error(result.error ?? "获取 Commit 明细失败")
+        setCommitDetails(result.data ?? { total: 0, page, pageSize: 20, pushedOnly, items: [] })
+      } catch (e) {
+        setCommitDetailsError(e instanceof Error ? e.message : String(e))
+      } finally {
+        setCommitDetailsLoading(false)
+      }
+    },
+    []
+  )
 
-  const reloadCommitDetails = useCallback((page: number, pushedOnly: boolean) => {
-    if (!commitDetailsRange) return
-    void loadCommitDetails(commitDetailsRange, commitScopeLabel, page, pushedOnly)
-  }, [commitDetailsRange, commitScopeLabel, loadCommitDetails])
+  const reloadCommitDetails = useCallback(
+    (page: number, pushedOnly: boolean) => {
+      if (!commitDetailsRange) return
+      void loadCommitDetails(commitDetailsRange, commitScopeLabel, page, pushedOnly)
+    },
+    [commitDetailsRange, commitScopeLabel, loadCommitDetails]
+  )
 
   const handleCommitExternalOpen = useCallback((url: string) => {
     if (!url) return
@@ -684,15 +950,18 @@ export function DashboardView(): React.JSX.Element {
   }, [])
 
   const handleCommitTotalClick = useCallback(() => {
-    void loadCommitDetails(range, `当前范围 · ${formatRangeLabel(range.from, range.to, granularity)}`)
+    void loadCommitDetails(
+      range,
+      `当前范围 · ${formatRangeLabel(range.from, range.to, granularity)}`
+    )
   }, [loadCommitDetails, range, granularity])
 
-  const handleCommitBucketClick = useCallback((bucket: { from: string; to: string; label: string }) => {
-    void loadCommitDetails(
-      { from: bucket.from, to: bucket.to },
-      `时间桶 · ${bucket.label}`
-    )
-  }, [loadCommitDetails])
+  const handleCommitBucketClick = useCallback(
+    (bucket: { from: string; to: string; label: string }) => {
+      void loadCommitDetails({ from: bucket.from, to: bucket.to }, `时间桶 · ${bucket.label}`)
+    },
+    [loadCommitDetails]
+  )
 
   const handleExport = useCallback(async () => {
     if (!overview && !modelStats && !userStats && !productivity) return
@@ -746,18 +1015,49 @@ export function DashboardView(): React.JSX.Element {
         if (exportSkills.length > 0) {
           sheets.push({
             name: "Skill使用排行",
-            header: ["排名", "Skill", "调用次数"],
+            header: [
+              "排名",
+              "Skill",
+              "调用次数",
+              "应用市场是否存在",
+              "Skill中文名称",
+              "上传用户ID",
+              "上传用户名称",
+              "上传用户完整机构",
+              "是否精品",
+              "是否认证"
+            ],
             rows: [
-              ["Skill 种类数", overview.totalSkills, ""],
-              ["Skill 调用次数", overview.totalSkillCalls, ""],
-              ["", "", ""],
-              ...exportSkills.map((s, i) => [i + 1, s.skill, s.count])
+              ["Skill 种类数", overview.totalSkills, "", "", "", "", "", "", "", ""],
+              ["Skill 调用次数", overview.totalSkillCalls, "", "", "", "", "", "", "", ""],
+              ["", "", "", "", "", "", "", "", "", ""],
+              ...exportSkills.map((s, i) => {
+                const marketItem = getMarketSkillItem(marketSkillMap, s.skill)
+                const uploaderInfo = resolveSkillUploaderExportInfo(
+                  marketItem,
+                  skillUploaderProfiles
+                )
+                const existsInMarket = Boolean(marketItem)
+                return [
+                  i + 1,
+                  s.skill,
+                  s.count,
+                  existsInMarket ? "是" : "否",
+                  existsInMarket ? marketItem?.chinese_name?.trim() || "" : "",
+                  uploaderInfo.sapId,
+                  uploaderInfo.userName,
+                  uploaderInfo.orgName,
+                  existsInMarket ? (marketItem?.featured === "精品" ? "是" : "否") : "",
+                  existsInMarket ? (marketItem?.tag === "认证" ? "是" : "否") : ""
+                ]
+              })
             ]
           })
         }
 
         // Tool ranking (filtered)
-        const exportFilteredTools = overview.byToolFilteredAll.length > 0 ? overview.byToolFilteredAll : overview.byTool
+        const exportFilteredTools =
+          overview.byToolFilteredAll.length > 0 ? overview.byToolFilteredAll : overview.byTool
         if (exportFilteredTools.length > 0) {
           sheets.push({
             name: "Tool使用排行(已过滤)",
@@ -772,7 +1072,8 @@ export function DashboardView(): React.JSX.Element {
         }
 
         // Tool ranking (all)
-        const exportAllTools = overview.byToolAllFull.length > 0 ? overview.byToolAllFull : overview.byToolAll
+        const exportAllTools =
+          overview.byToolAllFull.length > 0 ? overview.byToolAllFull : overview.byToolAll
         if (exportAllTools.length > 0) {
           sheets.push({
             name: "Tool使用排行(全部)",
@@ -794,7 +1095,11 @@ export function DashboardView(): React.JSX.Element {
             name: "模型使用统计",
             header: ["模型", "调用次数", "输入Token", "输出Token", "总Token"],
             rows: modelStats.byModel.map((m) => [
-              m.model, m.count, m.inputTokens, m.outputTokens, m.inputTokens + m.outputTokens
+              m.model,
+              m.count,
+              m.inputTokens,
+              m.outputTokens,
+              m.inputTokens + m.outputTokens
             ])
           })
         }
@@ -821,13 +1126,20 @@ export function DashboardView(): React.JSX.Element {
             name: "用户使用排行",
             header: ["排名", "SAP ID", "用户名", "部门", "调用次数"],
             rows: userStats.topUsers.map((u, i) => [
-              i + 1, u.sapId, u.userName, u.orgName || "—", u.count
+              i + 1,
+              u.sapId,
+              u.userName,
+              u.orgName || "—",
+              u.count
             ])
           })
         }
         if (userStats.byOrg.length > 0) {
           sheets.push({
-            name: selectedUpperOrgLv1 === null ? "一级部门分布" : `${selectedUpperOrgLv1 || "未知"}下级部门分布`,
+            name:
+              selectedUpperOrgLv1 === null
+                ? "一级部门分布"
+                : `${selectedUpperOrgLv1 || "未知"}下级部门分布`,
             header: ["部门", "调用次数"],
             rows: userStats.byOrg.map((o) => [o.org, o.count])
           })
@@ -875,7 +1187,15 @@ export function DashboardView(): React.JSX.Element {
     } finally {
       setExporting(false)
     }
-  }, [overview, modelStats, userStats, productivity])
+  }, [
+    overview,
+    modelStats,
+    userStats,
+    productivity,
+    selectedUpperOrgLv1,
+    marketSkillMap,
+    skillUploaderProfiles
+  ])
 
   return (
     <div className="flex flex-col h-full">
@@ -933,6 +1253,7 @@ export function DashboardView(): React.JSX.Element {
                 loading={loading}
                 onSkillClick={handleSkillClick}
                 onActiveUsersClick={openUserList}
+                marketSkillKeys={marketSkillKeys}
               />
             </section>
 

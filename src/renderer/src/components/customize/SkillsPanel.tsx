@@ -24,7 +24,6 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
-  DialogFooter,
   DialogHeader,
   DialogTitle
 } from "@/components/ui/dialog"
@@ -33,8 +32,9 @@ import type { SkillMetadata } from "@/types"
 import { useAppStore } from "@/lib/store"
 import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
 import { marketApi, type MarketItem } from "../../api/market"
-import { DEFAULT_SCENE_CATEGORY, SCENE_CATEGORY_OPTIONS } from "../../lib/skill-data-service"
+import { DEFAULT_SCENE_CATEGORY } from "../../lib/skill-data-service"
 import { SkillFileEditor } from "./SkillFileEditor"
+import { UniversalUploadDialog } from "./UniversalUploadDialog"
 import { toast } from "sonner"
 
 type FilePreviewKind = "text" | "html" | "image" | "pdf"
@@ -54,7 +54,7 @@ type SkillTreeNode = {
 
 type SkillMarketInfo = Pick<
   MarketItem,
-  "name" | "chinese_name" | "category" | "description" | "featured"
+  "name" | "chinese_name" | "category" | "description" | "featured" | "guidance" | "user_id"
 >
 type SaveSkillFileResult = { success: boolean; error?: string }
 type PublishMode = "upload" | "update"
@@ -71,13 +71,6 @@ type LocalUploadedSkillPathRecord = {
 type EditedSkillPathRecord = {
   path: string
   editedAt?: string
-}
-
-interface UserInfoLite {
-  sapId?: string
-  ystId?: string
-  userName?: string
-  orgName?: string
 }
 
 const KNOWN_TEXT_EXTS = new Set([
@@ -305,15 +298,6 @@ function normalizeSkillName(value?: string): string {
     .toLowerCase()
 }
 
-function buildUserIdFromUserInfo(userInfo: UserInfoLite | null): string | undefined {
-  if (!userInfo) return undefined
-  const rawId = (userInfo.sapId || userInfo.ystId || "").trim()
-  const rawName = (userInfo.userName || "").trim()
-  const rawOrgName = (userInfo.orgName || "").trim()
-  const segments = [rawId, rawName, rawOrgName].filter(Boolean)
-  return segments.length > 0 ? segments.join(" / ") : undefined
-}
-
 function getSkillChineseName(
   skill: SkillMetadata,
   marketInfo: SkillMarketInfo | undefined
@@ -509,203 +493,79 @@ function PublishSkillDialog(props: {
   onSuccess: (payload: PublishSuccessPayload) => void
 }): React.JSX.Element {
   const { open, skill, mode, marketInfo, onOpenChange, onSuccess } = props
-  const [uploading, setUploading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [description, setDescription] = useState("")
-  const [category, setCategory] = useState<string>(DEFAULT_SCENE_CATEGORY)
-  const [guidance, setGuidance] = useState("")
-  const [chineseName, setChineseName] = useState("")
-  const [userId, setUserId] = useState<string | undefined>(undefined)
+  if (!skill) return <></>
 
-  const loadCurrentUserId = useCallback(async () => {
-    try {
-      const userInfo = await window.api.models.getUserInfo()
-      setUserId(buildUserIdFromUserInfo(userInfo as UserInfoLite | null))
-    } catch (e) {
-      console.error("[SkillsPanel] Failed to load user info:", e)
-      setUserId(undefined)
-    }
-  }, [])
-
-  useEffect(() => {
-    if (!open || !skill) return
-    setError(null)
-    setDescription(skill.description || marketInfo?.description || "")
-    setGuidance(skill.metadata?.guidance || "")
-    setChineseName(getSkillChineseName(skill, marketInfo))
-    const initialCategory = getSkillCategory(skill, marketInfo) || DEFAULT_SCENE_CATEGORY
-    setCategory(initialCategory)
-    void loadCurrentUserId()
-  }, [loadCurrentUserId, marketInfo, open, skill])
-
-  const handlePublish = useCallback(async () => {
-    if (!skill || uploading) return
-
-    setError(null)
-    setUploading(true)
+  const buildMarketFile = async (): Promise<{ success: boolean; file?: File; error?: string }> => {
     try {
       const includeNestedSkills = await resolveNestedSkillExportChoice(skill)
       const exported = await window.api.skills.exportForMarket(skill.path, { includeNestedSkills })
       if (!exported.success || !exported.buffer) {
-        setError(exported.error || "导出技能失败")
-        return
+        return { success: false, error: exported.error || "导出技能失败" }
       }
 
       const fileName = exported.fileName || `${skill.name}.zip`
-      const file = new File([exported.buffer], fileName, { type: "application/zip" })
-      const result =
-        mode === "update"
-          ? await marketApi.updateItem(
-              file,
-              "skill",
-              skill.name,
-              description.trim(),
-              category,
-              guidance.trim() || undefined,
-              chineseName.trim() || undefined,
-              userId?.trim() || undefined
-            )
-          : await marketApi.uploadFile(
-              file,
-              "skill",
-              skill.name,
-              description.trim(),
-              category,
-              guidance.trim() || undefined,
-              chineseName.trim() || undefined,
-              userId?.trim() || undefined
-            )
-
-      if (!result.success) {
-        setError(result.error || (mode === "update" ? "更新失败" : "发布失败"))
-        return
+      return {
+        success: true,
+        file: new File([exported.buffer], fileName, { type: "application/zip" })
       }
-
-      markUploadedSkillInStorage(skill.name)
-
-      onSuccess({ skillName: skill.name, mode })
-      onOpenChange(false)
     } catch (e) {
-      setError(e instanceof Error ? e.message : mode === "update" ? "更新失败" : "发布失败")
-    } finally {
-      setUploading(false)
+      return { success: false, error: e instanceof Error ? e.message : "导出技能失败" }
     }
-  }, [
-    category,
-    chineseName,
-    description,
-    guidance,
-    mode,
-    onOpenChange,
-    onSuccess,
-    skill,
-    uploading,
-    userId
-  ])
+  }
 
   return (
-    <Dialog open={open} onOpenChange={(next) => !uploading && onOpenChange(next)}>
-      <DialogContent className="sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle>{mode === "update" ? "更新市场技能" : "发布到公共市场"}</DialogTitle>
-          <DialogDescription>
-            会自动打包当前技能目录为 zip 并提交到
-            Market。若包含嵌套子技能，发布前会询问是否一并上传。
-          </DialogDescription>
-        </DialogHeader>
-
-        {!skill ? (
-          <p className="text-sm text-muted-foreground">未选择技能</p>
-        ) : (
-          <div className="space-y-3">
-            {mode === "upload" && marketInfo && (
-              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
-                市场中已存在同名技能，继续发布可能会被后端拒绝，请按提示处理。
-              </p>
-            )}
-            {mode === "update" && (
-              <p className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-md px-3 py-2">
-                将覆盖更新你已发布到市场的同名技能，并自动递增版本号。
-              </p>
-            )}
-
-            <div className="space-y-1">
-              <p className="text-xs text-muted-foreground">英文名称</p>
-              <Input value={skill.name} disabled />
-            </div>
-
-            <div className="space-y-1">
-              <p className="text-xs text-muted-foreground">中文名称</p>
-              <Input
-                value={chineseName}
-                onChange={(e) => setChineseName(e.target.value)}
-                disabled={uploading}
-                placeholder="可选"
-              />
-            </div>
-
-            <div className="space-y-1">
-              <p className="text-xs text-muted-foreground">描述</p>
-              <textarea
-                className="w-full min-h-[82px] rounded-md border border-input bg-background px-3 py-2 text-sm"
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                disabled={uploading}
-                placeholder="可选"
-              />
-            </div>
-
-            <div className="space-y-1">
-              <p className="text-xs text-muted-foreground">场景分类</p>
-              <select
-                value={category}
-                onChange={(e) => setCategory(e.target.value)}
-                disabled={uploading}
-                className="w-full h-9 rounded-md border border-input bg-background px-3 text-sm"
-              >
-                {category &&
-                  !SCENE_CATEGORY_OPTIONS.includes(
-                    category as (typeof SCENE_CATEGORY_OPTIONS)[number]
-                  ) && <option value={category}>{category}</option>}
-                {SCENE_CATEGORY_OPTIONS.map((option) => (
-                  <option key={option} value={option}>
-                    {option}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="space-y-1">
-              <p className="text-xs text-muted-foreground">使用指引</p>
-              <textarea
-                className="w-full min-h-[82px] rounded-md border border-input bg-background px-3 py-2 text-sm"
-                value={guidance}
-                onChange={(e) => setGuidance(e.target.value)}
-                disabled={uploading}
-                placeholder="可选"
-              />
-            </div>
-
-            {error && <p className="text-sm text-destructive">{error}</p>}
-          </div>
-        )}
-
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={uploading}>
-            取消
-          </Button>
-          <Button onClick={handlePublish} disabled={!skill || uploading}>
-            {uploading
-              ? mode === "update"
-                ? "更新中..."
-                : "发布中..."
-              : mode === "update"
-                ? "更新发布"
-                : "一键发布"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <UniversalUploadDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      onSuccess={() => {
+        markUploadedSkillInStorage(skill.name)
+        onSuccess({ skillName: skill.name, mode })
+      }}
+      resourceType="skill"
+      isUpdate={mode === "update"}
+      existingItem={{
+        name: skill.name,
+        description: skill.description || marketInfo?.description || "",
+        category: getSkillCategory(skill, marketInfo) || DEFAULT_SCENE_CATEGORY,
+        guidance: skill.metadata?.guidance || marketInfo?.guidance || "",
+        chinese_name: getSkillChineseName(skill, marketInfo),
+        user_id: marketInfo?.user_id
+      }}
+      generatedFile={{
+        label: "将自动打包当前技能目录为 zip 并上传",
+        build: buildMarketFile
+      }}
+      lockName
+      titleOverride={mode === "update" ? "更新市场技能" : "发布到公共市场"}
+      descriptionOverride="会自动打包当前技能目录为 zip 并提交到 Market。若包含嵌套子技能，发布前会询问是否一并上传。"
+      submitLabel={mode === "update" ? "更新发布" : "一键发布"}
+      submittingLabel={mode === "update" ? "更新中..." : "发布中..."}
+      onUpload={(file, name, description, category, guidance, chineseName, userId) => {
+        if (mode === "update") {
+          return marketApi.updateItem(
+            file,
+            "skill",
+            name,
+            description,
+            category,
+            guidance || undefined,
+            chineseName || undefined,
+            userId || undefined
+          )
+        }
+        if (!file) return Promise.resolve({ success: false, error: "导出技能失败" })
+        return marketApi.uploadFile(
+          file,
+          "skill",
+          name,
+          description,
+          category,
+          guidance || undefined,
+          chineseName || undefined,
+          userId || undefined
+        )
+      }}
+    />
   )
 }
 

@@ -44,11 +44,13 @@ import {
   ToolInvocationError,
   todoListMiddleware,
   anthropicPromptCachingMiddleware,
-  humanInTheLoopMiddleware
+  humanInTheLoopMiddleware,
+  tool as lcTool
 } from "langchain"
 import { ToolMessage } from "@langchain/core/messages"
 import { Runnable } from "@langchain/core/runnables"
 import { isGraphBubbleUp } from "@langchain/langgraph"
+import { z } from "zod"
 
 import type * as _lcTypes from "langchain"
 import type * as _lcMessages from "@langchain/core/messages"
@@ -57,8 +59,8 @@ import type * as _lcZodTypes from "@langchain/core/utils/types"
 
 import path from "path"
 import { join, resolve, delimiter } from "path"
-import { existsSync, createWriteStream, statSync, unlinkSync } from "fs"
-import { createReadStream } from "fs"
+import { createWriteStream, createReadStream } from "fs"
+import fs from "fs/promises"
 import { createGunzip } from "zlib"
 import { pipeline } from "stream/promises"
 import { app, BrowserWindow } from "electron"
@@ -99,6 +101,7 @@ import {
 } from "../hooks/scope"
 import { ApprovalStore } from "./approval-store"
 import { ToolOrchestrator } from "./tool-orchestrator"
+import { classifyCommandConcurrency } from "./exec-policy"
 import type { ApprovalRequest, ApprovalDecision } from "../types"
 import type { McpCapabilityService, McpCapabilityTool } from "../mcp/capability-types"
 import {
@@ -114,26 +117,34 @@ import {
   DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
   loadAgentsPromptForWorkspace
 } from "./agents-md"
+import { patchRuntimeReadFileTool } from "./read-file-tool"
 
 /** Decompress codex.exe.gz → codex.exe if needed (re-extract if .gz is newer than .exe). */
 async function ensureCodexExe(exePath: string): Promise<void> {
   const gzPath = exePath + ".gz"
-  if (!existsSync(gzPath)) return
-  if (existsSync(exePath)) {
+  const gzStat = await fs.stat(gzPath).catch(() => null)
+  if (!gzStat) return
+  const exeStat = await fs.stat(exePath).catch(() => null)
+  if (exeStat) {
     // Skip if exe is up-to-date (gz not newer)
-    if (statSync(exePath).mtimeMs >= statSync(gzPath).mtimeMs) return
+    if (exeStat.mtimeMs >= gzStat.mtimeMs) return
     // gz is newer — remove stale exe before re-extracting
-    try {
-      unlinkSync(exePath)
-    } catch {
-      /* ignore */
-    }
+    await fs.unlink(exePath).catch(() => {})
   }
   try {
     await pipeline(createReadStream(gzPath), createGunzip(), createWriteStream(exePath))
     console.log("[Runtime] codex.exe extracted from .gz")
   } catch (e) {
     console.error("[Runtime] Failed to extract codex.exe:", e)
+  }
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath)
+    return true
+  } catch {
+    return false
   }
 }
 
@@ -148,6 +159,217 @@ export const pendingApprovals = new Map<
     targetWebContentsIds: number[]
   }
 >()
+
+// ─── Tool concurrency: AsyncRWLock (writer-preferring) ──────────────────────
+//
+// Mirrors Codex's `ToolCallRuntime` model (codex-rs/core/src/tools/parallel.rs):
+//   - shared (read lock): tools that are safe to run concurrently (reads)
+//   - exclusive (write lock): side-effecting tools that must run alone
+//   - bypass: tools we have no classification for — pass through without locking
+//
+// Approval events are NOT serialized by this lock — they fire immediately from
+// each tool task. The renderer's pendingApprovals[] queue owns UI ordering.
+// Execution is what this lock gates.
+
+type ToolConcurrencyTier = "exclusive" | "shared" | "bypass"
+
+/**
+ * Tools that mutate cross-tool shared state (tool registry, scheduler, skill
+ * files, subagent slots). These must run one-at-a-time across the entire
+ * thread — write lock.
+ *
+ * Note: mutating shell / file I/O tools are also exclusive. Only commands that
+ * are provably read-only are allowed to overlap with other read-only work.
+ */
+const EXCLUSIVE_TOOL_NAMES = new Set([
+  "code_exec",
+  "prepare_save_code_exec_tool",
+  "save_code_exec_tool",
+  "browser_playwright",
+  "manage_scheduler",
+  "manage_skill",
+  "task",
+  "invoke_deferred_tool",
+  "write_file",
+  "edit_file"
+])
+
+/**
+ * Tools that hold the read lock. This includes:
+ *   - True read-only tools (read_file, grep, glob, …)
+ *   - `execute` only when its command is classified as read-only. Other
+ *     commands are exclusive so writes/builds/package managers do not overlap.
+ */
+const SHARED_TOOL_NAMES = new Set([
+  // True read-only
+  "read_file",
+  "ls",
+  "glob",
+  "grep",
+  "search_tool",
+  "inspect_tool",
+  "task_output",
+  "view_image"
+])
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+}
+
+function executeCommandFromToolArgs(args: unknown): string | null {
+  if (isRecord(args) && typeof args.command === "string") {
+    return args.command
+  }
+  if (typeof args === "string") {
+    try {
+      const parsed = JSON.parse(args) as unknown
+      if (isRecord(parsed) && typeof parsed.command === "string") {
+        return parsed.command
+      }
+    } catch {
+      return null
+    }
+  }
+  return null
+}
+
+function classifyToolConcurrency(
+  toolCall: { name?: string; args?: unknown } | undefined
+): ToolConcurrencyTier {
+  const toolName = toolCall?.name
+  if (!toolName) return "exclusive" // safety default: unknown → write lock
+
+  if (EXCLUSIVE_TOOL_NAMES.has(toolName)) return "exclusive"
+  if (toolName === "execute") {
+    const command = executeCommandFromToolArgs(toolCall?.args)
+    return command && classifyCommandConcurrency(command) === "parallel_safe"
+      ? "shared"
+      : "exclusive"
+  }
+  if (SHARED_TOOL_NAMES.has(toolName)) return "shared"
+  // Unknown tools (eager MCP tools registered with runtime toolId names,
+  // dynamic plugin tools, custom extras) default to EXCLUSIVE. This matches
+  // Codex's `configured_tool_supports_parallel` default (false). Opting in
+  // to `shared` requires explicit whitelisting — unknown = unsafe.
+  return "exclusive"
+}
+
+/**
+ * Writer-preferring async read-write lock.
+ *
+ * - `read()`: multiple holders allowed. Blocks if a writer is active or waiting.
+ * - `write()`: exclusive. Blocks until all readers drain and no other writer held.
+ *
+ * Writer preference prevents writer starvation when reads are frequent.
+ */
+class AsyncRWLock {
+  private readers = 0
+  private writerHeld = false
+  private writerQueue: Array<() => void> = []
+  private readerQueue: Array<() => void> = []
+
+  async read<T>(task: () => Promise<T>): Promise<T> {
+    await this.acquireRead()
+    try {
+      return await task()
+    } finally {
+      this.releaseRead()
+    }
+  }
+
+  async write<T>(task: () => Promise<T>): Promise<T> {
+    await this.acquireWrite()
+    try {
+      return await task()
+    } finally {
+      this.releaseWrite()
+    }
+  }
+
+  private acquireRead(): Promise<void> {
+    if (!this.writerHeld && this.writerQueue.length === 0) {
+      this.readers++
+      return Promise.resolve()
+    }
+    return new Promise<void>((resolve) => {
+      this.readerQueue.push(() => {
+        this.readers++
+        resolve()
+      })
+    })
+  }
+
+  private acquireWrite(): Promise<void> {
+    if (!this.writerHeld && this.readers === 0) {
+      this.writerHeld = true
+      return Promise.resolve()
+    }
+    return new Promise<void>((resolve) => {
+      this.writerQueue.push(() => {
+        this.writerHeld = true
+        resolve()
+      })
+    })
+  }
+
+  private releaseRead(): void {
+    this.readers--
+    if (this.readers === 0 && this.writerQueue.length > 0) {
+      const next = this.writerQueue.shift()!
+      next()
+    }
+  }
+
+  private releaseWrite(): void {
+    this.writerHeld = false
+    if (this.writerQueue.length > 0) {
+      const next = this.writerQueue.shift()!
+      next()
+    } else if (this.readerQueue.length > 0) {
+      const pending = this.readerQueue.splice(0)
+      for (const wake of pending) wake()
+    }
+  }
+}
+
+const toolConcurrencyLocks = new Map<string, AsyncRWLock>()
+
+function getToolConcurrencyLock(queueId: string): AsyncRWLock {
+  let lock = toolConcurrencyLocks.get(queueId)
+  if (!lock) {
+    lock = new AsyncRWLock()
+    toolConcurrencyLocks.set(queueId, lock)
+  }
+  return lock
+}
+
+function createGradedToolConcurrencyMiddleware(queueId: string) {
+  const lock = getToolConcurrencyLock(queueId)
+  return createMiddleware({
+    name: "gradedToolConcurrency",
+    wrapToolCall: async (request, handler) => {
+      const toolCall = request.toolCall as { id?: string; name?: string; args?: unknown } | undefined
+      const tier = classifyToolConcurrency(toolCall)
+      if (tier === "bypass") {
+        return handler(request)
+      }
+      const label = `${toolCall?.name ?? "unknown"}:${toolCall?.id ?? "no-id"}`
+      const waitStart = Date.now()
+      if (tier === "shared") {
+        return lock.read(async () => {
+          const waited = Date.now() - waitStart
+          if (waited > 50) console.log(`[Runtime] shared-lock acquired ${label} after ${waited}ms`)
+          return handler(request)
+        })
+      }
+      return lock.write(async () => {
+        const waited = Date.now() - waitStart
+        if (waited > 50) console.log(`[Runtime] exclusive-lock acquired ${label} after ${waited}ms`)
+        return handler(request)
+      })
+    }
+  })
+}
 
 /** Per-thread approval store cache. */
 const approvalStores = new Map<string, ApprovalStore>()
@@ -433,6 +655,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     summarizationSummaryPrompt,
     summarizationTruncateArgsSettings,
     subagentExtraSystemPrompt,
+    toolConcurrencyQueueId = "default",
     toolHookMiddleware
   } = params
 
@@ -493,8 +716,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     })
   }
 
-  // Create filesystem middleware and fix grep tool's misleading "Regex pattern" param description
-  // (upstream bug: description says "Regex" but implementation uses literal -F matching)
+  // Create filesystem middleware and patch upstream tool defaults/descriptions.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const createFsMiddleware = (): any => {
     const mw = createFilesystemMiddleware({
@@ -502,6 +724,8 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
       ...(filesystemSystemPrompt && { systemPrompt: filesystemSystemPrompt }),
       ...(toolTokenLimitBeforeEvict != null && { toolTokenLimitBeforeEvict })
     })
+    patchRuntimeReadFileTool({ middleware: mw, filesystemBackend, toolTokenLimitBeforeEvict })
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const grepTool = mw.tools?.find((t: any) => t.name === "grep") as any
     if (grepTool?.schema?.shape?.pattern) {
@@ -521,9 +745,6 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     // Replace the default execute tool with a version that supports run_in_background.
     // Long-running commands (builds, dependency downloads) can be started in background
     // and their output retrieved later via task_output tool.
-    const { tool: lcTool } = require("langchain") as typeof import("langchain")
-    const { z } = require("zod") as typeof import("zod")
-
     const executeIdx = mw.tools?.findIndex((t: any) => t.name === "execute") ?? -1
     if (executeIdx >= 0) {
       const oldExecute = mw.tools![executeIdx]
@@ -775,10 +996,14 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
 
   // Base middleware for custom subagents (no skills — custom subagents must define their own)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const gradedToolConcurrencyMiddleware = createGradedToolConcurrencyMiddleware(toolConcurrencyQueueId)
+  const subagentToolConcurrencyMiddleware = createGradedToolConcurrencyMiddleware(`${toolConcurrencyQueueId}:subagent`)
+
   const subagentMiddleware: any[] = [
     todoListMiddleware(),
     createFsMiddleware(),
     createSkillHookContextMiddleware(filesystemBackend),
+    subagentToolConcurrencyMiddleware,
     ...(toolHookMiddleware ? [toolHookMiddleware] : []),
     toolErrorMiddleware,
     createSummarizationMiddleware(summarizationOptions),
@@ -807,6 +1032,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
       todoListMiddleware(),
       createFsMiddleware(),
       createSkillHookContextMiddleware(filesystemBackend),
+      gradedToolConcurrencyMiddleware,
       ...(toolHookMiddleware ? [toolHookMiddleware] : []),
       toolErrorMiddleware,
       createSubAgentMiddleware({
@@ -1271,6 +1497,9 @@ function getModelInstance(
     // create a shared AbortSignal that, once fired, permanently blocks all
     // subsequent retry attempts at the fetch layer.
     maxRetries: 0,
+    modelKwargs: {
+      parallel_tool_calls: true
+    },
     configuration: {
       baseURL: customConfig.baseUrl,
       fetch:
@@ -1397,12 +1626,14 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       join(app.getAppPath(), "resources"),
       join(app.getAppPath(), "..", "resources")
     ]
-    resourceBase =
-      candidates.find((c) => existsSync(join(c, "bin"))) ?? resolve(__dirname, "../../resources")
+    const matches = await Promise.all(candidates.map(async (candidate) => (
+      await pathExists(join(candidate, "bin")) ? candidate : null
+    )))
+    resourceBase = matches.find((candidate): candidate is string => Boolean(candidate)) ?? resolve(__dirname, "../../resources")
   }
   const rgDir = join(resourceBase, "bin", process.platform)
   const rgBin = join(rgDir, process.platform === "win32" ? "rg.exe" : "rg")
-  const rgExists = existsSync(rgBin)
+  const rgExists = await pathExists(rgBin)
   // Mutate process.env.PATH so deepagents' internal ripgrepSearch
   // (spawns "rg" without custom env, inherits process.env) can find it.
   const paths = (process.env.PATH ?? "").split(delimiter)
@@ -1414,7 +1645,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // Codex Windows sandbox (unelevated): reuse rgDir which already points to resources/bin/win32
   const codexExePath = join(rgDir, "codex.exe")
   if (process.platform === "win32") await ensureCodexExe(codexExePath)
-  const codexExists = process.platform === "win32" && existsSync(codexExePath)
+  const codexExists = process.platform === "win32" && await pathExists(codexExePath)
   const windowsSandbox = process.platform === "win32" ? getWindowsSandboxMode() : "none"
   console.log(
     `[Runtime] codex.exe: ${codexExePath}, exists: ${codexExists}, sandboxMode: ${windowsSandbox}`
@@ -1444,11 +1675,15 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const yoloMode = getYoloMode()
   let approvalStore: ApprovalStore | undefined
   let requestApproval: ((req: ApprovalRequest) => Promise<ApprovalDecision>) | undefined
-  // Keep the generic approval IPC available even in YOLO mode so code_exec can still
-  // ask for post-run tool promotion confirmation. Shell/file approvals remain gated by
-  // whether the orchestrator is mounted below.
+  // Keep approval IPC available even in YOLO mode. YOLO skips the initial shell/file
+  // approval, but escaping the sandbox after a sandbox denial still needs explicit
+  // one-shot user approval, matching Codex's retry-without-sandbox flow.
   const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000
   requestApproval = (req: ApprovalRequest): Promise<ApprovalDecision> => {
+    // IPC fires immediately; the renderer owns the queue (pendingApprovals[]).
+    // Multiple concurrent tool calls each register their own resolver here —
+    // the renderer shows them one at a time, but the events are not serialized
+    // back-end side. This matches how Codex surfaces ExecApprovalRequest events.
     return new Promise<ApprovalDecision>((resolve) => {
       const timeoutId = setTimeout(() => {
         if (pendingApprovals.has(req.id)) {
@@ -1494,19 +1729,14 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     })
   }
 
-  if (!yoloMode) {
-    approvalStore = getOrCreateApprovalStore(threadId)
+  approvalStore = getOrCreateApprovalStore(threadId)
 
-    const rawExecute = (
-      command: string,
-      sandboxMode?: string
-    ): Promise<import("deepagents").ExecuteResponse> => {
-      return backend.executeRaw(command, sandboxMode)
-    }
-
-    const orchestrator = new ToolOrchestrator(approvalStore, rawExecute, requestApproval, false)
-    backend.setOrchestrator(orchestrator)
+  const rawExecute = (command: string, sandboxMode?: string): Promise<import("deepagents").ExecuteResponse> => {
+    return backend.executeRaw(command, sandboxMode)
   }
+
+  const orchestrator = new ToolOrchestrator(approvalStore, rawExecute, requestApproval, yoloMode)
+  backend.setOrchestrator(orchestrator)
 
   let systemPrompt = getSystemPrompt(workspacePath, windowsSandbox)
   let agentsPrompt: Awaited<ReturnType<typeof loadAgentsPromptForWorkspace>> = {
@@ -1831,9 +2061,8 @@ The workspace root is: ${workspacePath}`
     subagentExtraSystemPrompt: agentsPrompt.prompt ?? undefined,
     skills: allSkillsSources.length > 0 ? allSkillsSources : undefined,
     memory: memorySources?.length ? memorySources : undefined,
-    // When the orchestrator is active (non-YOLO), it handles execute approval
-    // internally via IPC — no need for the HITL middleware to intercept execute.
-    // HITL middleware is still used in YOLO=false mode for non-execute tools if needed.
+    // The orchestrator handles execute/file approval internally via IPC. In YOLO
+    // mode it skips initial approvals but still prompts before sandbox escape.
     interruptOn: undefined,
     summarizationTrigger: { type: "tokens", value: triggerTokens },
     summarizationKeep: { type: "tokens", value: keepTokens },
@@ -1845,6 +2074,7 @@ The workspace root is: ${workspacePath}`
       keep: { type: "tokens", value: keepTokens },
       maxLength: 2000
     },
+    toolConcurrencyQueueId: options.threadId ?? workspacePath,
     toolHookMiddleware
   })
 

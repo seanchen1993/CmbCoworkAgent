@@ -64,7 +64,7 @@ export function initMMJ(): void {
         productCode: "LA64.06",
         userId: ip || "游客",
         positionId: localStorage.getItem("version") || "",
-        openWs: true,
+        openWs: "true",
         errorCode:'MMJ0001'
       })
 

@@ -54,6 +54,42 @@ interface ElectronAPI {
   }
 }
 
+interface PetManifest {
+  // 宠物资源清单，来自 pets/<directoryId>/pet.json。
+  id: string
+  directoryId: string
+  source: "builtin" | "custom"
+  key: string
+  canDelete: boolean
+  name?: string
+  displayName?: string
+  description?: string
+  spritesheetPath: string
+  frameWidth?: number
+  frameHeight?: number
+  columns?: number
+  rows?: number
+  states?: Record<string, { y: number; frames: number; fps?: number }>
+}
+
+interface PetSettings {
+  enabled: boolean
+  selectedPetKey: string | null
+}
+
+type PetState =
+  // 与主进程 PetState 保持一致，renderer 只能通过 preload 发送这些状态。
+  | "idle"
+  | "busy"
+  | "waiting"
+  | "done"
+  | "error"
+  | "crying"
+  | "prompt"
+  | "running"
+  | "interaction"
+  | "hover"
+
 interface DashboardTraceNode {
   id: string
   type: "trace" | "llm" | "tool" | "tool_result" | "message" | "error" | "cancel"
@@ -493,6 +529,22 @@ interface CustomAPI {
     onFilesChanged: (
       callback: (data: { threadId: string; workspacePath: string }) => void
     ) => () => void
+  }
+  pet: {
+    // 列出内置 pets/ 与 OPENWORK_DIR/pets 下可用宠物。
+    list: () => Promise<PetManifest[]>
+    getSpriteDataUrl: (
+      directoryId: string,
+      source?: "builtin" | "custom"
+    ) => Promise<{ success: boolean; dataUrl?: string; error?: string }>
+    // 将业务状态同步到独立宠物窗口；动画渲染不在 renderer 主 UI 中执行。
+    setState: (state: PetState) => void
+    // 告知主进程主应用已打开/获得焦点，用于清空宠物完成任务提醒队列。
+    clearCompletedTasks: () => void
+    getSettings: () => Promise<PetSettings>
+    updateSettings: (settings: Partial<PetSettings>) => Promise<PetSettings>
+    uploadCustomFolder: () => Promise<{ success: boolean; pet?: PetManifest; error?: string }>
+    deleteCustom: (directoryId: string) => Promise<{ success: boolean; error?: string }>
   }
   file: {
     parse: (

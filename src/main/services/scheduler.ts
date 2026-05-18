@@ -9,6 +9,7 @@ import { createAgentRuntime, closeCheckpointer } from "../agent/runtime"
 import { createThread as dbCreateThread, deleteThread as dbDeleteThread } from "../db"
 import { StreamConverter } from "../agent/stream-converter"
 import { notifyAlways, stripThink } from "./notify"
+import { showPetCompletedTaskNotice } from "../pet"
 
 const TICK_INTERVAL_MS = 60_000
 const ONCE_EXPIRE_MS = 30 * 60_000 // once tasks older than 30 min are auto-disabled instead of executed
@@ -268,6 +269,7 @@ async function executeTask(taskId: string): Promise<void> {
         console.log(`[Scheduler] Once task auto-disabled: ${task.name}`)
       }
       showTaskNotification(task.name, "ok", lastAssistantText)
+      showPetCompletedTaskNotice(threadId, task.name)
       // If task is linked to a ChatX robot, send reply via HTTP
       if (task.chatxRobotChatId && lastAssistantText) {
         trySendChatXReply(task.chatxRobotChatId, lastAssistantText)

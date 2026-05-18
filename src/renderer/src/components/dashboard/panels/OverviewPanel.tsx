@@ -1,11 +1,32 @@
 import { useState } from "react"
-import { Activity, Users, Clock, ArrowDownToLine, ArrowUpFromLine, Code2, Trash2, Gauge, Search, X, Info } from "lucide-react"
 import {
-  ComposedChart, Line, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, Legend
+  Activity,
+  Users,
+  Clock,
+  ArrowDownToLine,
+  ArrowUpFromLine,
+  Code2,
+  Trash2,
+  Gauge,
+  Search,
+  X,
+  Info
+} from "lucide-react"
+import {
+  ComposedChart,
+  Line,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip as RechartsTooltip,
+  ResponsiveContainer,
+  Legend
 } from "recharts"
 import { Input } from "@/components/ui/input"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import type { OverviewData } from "../use-dashboard"
+import { hasMarketSkill } from "../skill-market"
 import {
   DEFAULT_SKILL_ADOPTION_SORT,
   SKILL_ADOPTION_SORT_LABELS,
@@ -34,7 +55,11 @@ function StatCard({
   onClick?: () => void
 }) {
   const className = `flex w-full items-center gap-3 rounded-xl border border-border bg-card px-4 py-3 text-left ${
-    onClick ? "cursor-pointer transition-colors hover:bg-muted/30" : tooltipContent ? "cursor-help" : ""
+    onClick
+      ? "cursor-pointer transition-colors hover:bg-muted/30"
+      : tooltipContent
+        ? "cursor-help"
+        : ""
   }`
   const content = (
     <>
@@ -97,15 +122,21 @@ function InclusiveAdoptionTooltip({ data }: { data: OverviewData }) {
       <div className="space-y-1 text-[11px]">
         <div className="flex items-center justify-between gap-4">
           <span className="text-muted-foreground">采纳行数</span>
-          <span className="font-medium text-foreground">{formatExactNumber(data.codeAdoptedLines)} 行</span>
+          <span className="font-medium text-foreground">
+            {formatExactNumber(data.codeAdoptedLines)} 行
+          </span>
         </div>
         <div className="flex items-center justify-between gap-4">
           <span className="text-muted-foreground">已测量有效生成行数</span>
-          <span className="font-medium text-foreground">{formatExactNumber(data.codeEffectiveGeneratedLines)} 行</span>
+          <span className="font-medium text-foreground">
+            {formatExactNumber(data.codeEffectiveGeneratedLines)} 行
+          </span>
         </div>
         <div className="flex items-center justify-between gap-4">
           <span className="text-muted-foreground">未提交生成行数</span>
-          <span className="font-medium text-foreground">{formatExactNumber(data.codeUnmeasuredGeneratedLines)} 行</span>
+          <span className="font-medium text-foreground">
+            {formatExactNumber(data.codeUnmeasuredGeneratedLines)} 行
+          </span>
         </div>
         <div className="flex items-center justify-between gap-4">
           <span className="text-muted-foreground">含未提交分母</span>
@@ -129,15 +160,21 @@ function MeasuredAdoptionTooltip({ data }: { data: OverviewData }) {
       <div className="space-y-1 text-[11px]">
         <div className="flex items-center justify-between gap-4">
           <span className="text-muted-foreground">采纳行数</span>
-          <span className="font-medium text-foreground">{formatExactNumber(data.codeAdoptedLines)} 行</span>
+          <span className="font-medium text-foreground">
+            {formatExactNumber(data.codeAdoptedLines)} 行
+          </span>
         </div>
         <div className="flex items-center justify-between gap-4">
           <span className="text-muted-foreground">已测量有效生成行数</span>
-          <span className="font-medium text-foreground">{formatExactNumber(data.codeEffectiveGeneratedLines)} 行</span>
+          <span className="font-medium text-foreground">
+            {formatExactNumber(data.codeEffectiveGeneratedLines)} 行
+          </span>
         </div>
         <div className="flex items-center justify-between gap-4">
           <span className="text-muted-foreground">已测量原始生成行数</span>
-          <span className="font-medium text-foreground">{formatExactNumber(data.codeMeasuredGeneratedLines)} 行</span>
+          <span className="font-medium text-foreground">
+            {formatExactNumber(data.codeMeasuredGeneratedLines)} 行
+          </span>
         </div>
       </div>
       <div className="space-y-0.5 text-[10px] text-muted-foreground">
@@ -155,19 +192,27 @@ function PushedAdoptionTooltip({ data }: { data: OverviewData }) {
       <div className="space-y-1 text-[11px]">
         <div className="flex items-center justify-between gap-4">
           <span className="text-muted-foreground">已 Push 采纳行数</span>
-          <span className="font-medium text-foreground">{formatExactNumber(data.codePushedAdoptedLines)} 行</span>
+          <span className="font-medium text-foreground">
+            {formatExactNumber(data.codePushedAdoptedLines)} 行
+          </span>
         </div>
         <div className="flex items-center justify-between gap-4">
           <span className="text-muted-foreground">已 Push 有效生成行数</span>
-          <span className="font-medium text-foreground">{formatExactNumber(data.codePushedEffectiveGeneratedLines)} 行</span>
+          <span className="font-medium text-foreground">
+            {formatExactNumber(data.codePushedEffectiveGeneratedLines)} 行
+          </span>
         </div>
         <div className="flex items-center justify-between gap-4">
           <span className="text-muted-foreground">已 Push 原始生成行数</span>
-          <span className="font-medium text-foreground">{formatExactNumber(data.codePushedMeasuredGeneratedLines)} 行</span>
+          <span className="font-medium text-foreground">
+            {formatExactNumber(data.codePushedMeasuredGeneratedLines)} 行
+          </span>
         </div>
         <div className="flex items-center justify-between gap-4">
           <span className="text-muted-foreground">已 Push Commit 数</span>
-          <span className="font-medium text-foreground">{formatExactNumber(data.codePushedCommitCount)} 次</span>
+          <span className="font-medium text-foreground">
+            {formatExactNumber(data.codePushedCommitCount)} 次
+          </span>
         </div>
       </div>
       <div className="space-y-0.5 text-[10px] text-muted-foreground">
@@ -184,7 +229,9 @@ function GeneratedLinesTooltip(): React.JSX.Element {
       <div className="font-medium text-foreground">代码生成行数说明</div>
       <div className="text-muted-foreground">当前按 agent 写入或编辑的非空行统计。</div>
       <div className="text-muted-foreground">空行和仅包含空白字符的行不会计入。</div>
-      <div className="text-muted-foreground">该指标表示原始生成量，包含后续被 agent 自己改写的中间稿。</div>
+      <div className="text-muted-foreground">
+        该指标表示原始生成量，包含后续被 agent 自己改写的中间稿。
+      </div>
     </div>
   )
 }
@@ -193,9 +240,13 @@ function SkillUsageTooltip(): React.JSX.Element {
   return (
     <div className="space-y-1 text-[11px]">
       <div className="font-medium text-foreground">Skill 使用统计说明</div>
-      <div className="text-muted-foreground">当一次运行中读取到某个 Skill 的文件或目录时，会记为使用了该 Skill。</div>
+      <div className="text-muted-foreground">
+        当一次运行中读取到某个 Skill 的文件或目录时，会记为使用了该 Skill。
+      </div>
       <div className="text-muted-foreground">若一条 trace 使用多个 Skill，会分别计入各自次数。</div>
-      <div className="text-muted-foreground">展示名称会带 Skill 版本；若版本解析失败，默认显示为 v1.0.0。</div>
+      <div className="text-muted-foreground">
+        展示名称会带 Skill 版本；若版本解析失败，默认显示为 v1.0.0。
+      </div>
     </div>
   )
 }
@@ -225,11 +276,7 @@ type RankingItem = {
 }
 
 function normalizeRankingLookup(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[_-]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
+  return value.toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim()
 }
 
 function matchesRankingQuery(name: string, query: string): boolean {
@@ -238,7 +285,9 @@ function matchesRankingQuery(name: string, query: string): boolean {
 
   const rawQuery = trimmed.toLowerCase()
   const normalizedQuery = normalizeRankingLookup(trimmed)
-  return name.toLowerCase().includes(rawQuery) || normalizeRankingLookup(name).includes(normalizedQuery)
+  return (
+    name.toLowerCase().includes(rawQuery) || normalizeRankingLookup(name).includes(normalizedQuery)
+  )
 }
 
 function highlightRankingName(name: string, query: string): React.ReactNode {
@@ -253,7 +302,9 @@ function highlightRankingName(name: string, query: string): React.ReactNode {
   return (
     <>
       {name.slice(0, matchIndex)}
-      <mark className="rounded bg-primary/15 px-0.5 text-foreground">{name.slice(matchIndex, matchIndex + trimmed.length)}</mark>
+      <mark className="rounded bg-primary/15 px-0.5 text-foreground">
+        {name.slice(matchIndex, matchIndex + trimmed.length)}
+      </mark>
       {name.slice(matchIndex + trimmed.length)}
     </>
   )
@@ -313,7 +364,8 @@ function SearchableRankingPanel({
   labelClassName,
   onItemClick,
   headerActions,
-  titleTooltipContent
+  titleTooltipContent,
+  renderNameAddon
 }: {
   title: string
   totalKinds: number
@@ -328,6 +380,7 @@ function SearchableRankingPanel({
   onItemClick?: (name: string) => void
   headerActions?: React.ReactNode
   titleTooltipContent?: React.ReactNode
+  renderNameAddon?: (name: string) => React.ReactNode
 }) {
   const [query, setQuery] = useState("")
   const trimmedQuery = query.trim()
@@ -353,9 +406,14 @@ function SearchableRankingPanel({
             </span>
           </div>
           <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-            <span><span className="font-semibold text-foreground">{totalKinds}</span> 种</span>
+            <span>
+              <span className="font-semibold text-foreground">{totalKinds}</span> 种
+            </span>
             <span className="text-border">|</span>
-            <span>共 <span className="font-semibold text-foreground">{formatNumber(totalCalls)}</span> 次调用</span>
+            <span>
+              共 <span className="font-semibold text-foreground">{formatNumber(totalCalls)}</span>{" "}
+              次调用
+            </span>
           </div>
         </div>
         {headerActions}
@@ -384,30 +442,46 @@ function SearchableRankingPanel({
       </div>
 
       {searchItems.length === 0 ? (
-        <div className="flex flex-1 items-center justify-center py-4 text-center text-xs text-muted-foreground">{emptyLabel}</div>
+        <div className="flex flex-1 items-center justify-center py-4 text-center text-xs text-muted-foreground">
+          {emptyLabel}
+        </div>
       ) : visibleItems.length === 0 ? (
-        <div className="flex flex-1 items-center justify-center py-4 text-center text-xs text-muted-foreground">{emptySearchLabel}</div>
+        <div className="flex flex-1 items-center justify-center py-4 text-center text-xs text-muted-foreground">
+          {emptySearchLabel}
+        </div>
       ) : (
         <div className="min-h-0 flex-1 overflow-y-auto pr-1">
           <div className="space-y-1.5">
             {visibleItems.map((item, i) => {
               const pct = maxCount > 0 ? (item.count / maxCount) * 100 : 0
-              const rank = trimmedQuery ? searchItems.findIndex((candidate) => candidate.name === item.name) + 1 : i + 1
+              const rank = trimmedQuery
+                ? searchItems.findIndex((candidate) => candidate.name === item.name) + 1
+                : i + 1
               const content = (
                 <>
-                  <span className="w-7 shrink-0 text-right text-[10px] text-muted-foreground">{rank}</span>
+                  <span className="w-7 shrink-0 text-right text-[10px] text-muted-foreground">
+                    {rank}
+                  </span>
                   <div className="min-w-0 flex-1">
                     <div className="mb-0.5 flex items-center justify-between gap-2">
-                      <span
-                        title={item.name}
-                        className={`min-w-0 truncate text-xs text-foreground ${labelClassName ?? ""}`}
-                      >
-                        {highlightRankingName(item.name, trimmedQuery)}
+                      <div className="flex min-w-0 items-center gap-1.5">
+                        <span
+                          title={item.name}
+                          className={`min-w-0 truncate text-xs text-foreground ${labelClassName ?? ""}`}
+                        >
+                          {highlightRankingName(item.name, trimmedQuery)}
+                        </span>
+                        {renderNameAddon?.(item.name)}
+                      </div>
+                      <span className="shrink-0 text-[11px] text-muted-foreground">
+                        {item.count}
                       </span>
-                      <span className="shrink-0 text-[11px] text-muted-foreground">{item.count}</span>
                     </div>
                     <div className="h-1 overflow-hidden rounded-full bg-muted">
-                      <div className={`h-full rounded-full ${barColorClassName}`} style={{ width: `${pct}%` }} />
+                      <div
+                        className={`h-full rounded-full ${barColorClassName}`}
+                        style={{ width: `${pct}%` }}
+                      />
                     </div>
                   </div>
                 </>
@@ -443,15 +517,20 @@ function formatNullablePercent(value: number | null): string {
   return value === null ? "—" : formatPercent(value)
 }
 
-function formatSkillAdoptionSortValue(item: SkillAdoptionRankingItem, sortKey: SkillAdoptionSortKey): string {
+function formatSkillAdoptionSortValue(
+  item: SkillAdoptionRankingItem,
+  sortKey: SkillAdoptionSortKey
+): string {
   const value = getSkillAdoptionSortValue(item, sortKey)
   if (value === null) return "—"
   if (
     sortKey === "measuredAdoptionRate" ||
     sortKey === "inclusiveAdoptionRate" ||
     sortKey === "pushedAdoptionRate"
-  ) return formatPercent(value)
-  if (sortKey === "commitCount" || sortKey === "pushedCommitCount") return `${formatNumber(value)} 次`
+  )
+    return formatPercent(value)
+  if (sortKey === "commitCount" || sortKey === "pushedCommitCount")
+    return `${formatNumber(value)} 次`
   return `${formatNumber(value)} 行`
 }
 
@@ -459,12 +538,14 @@ function SkillAdoptionRankingPanel({
   data,
   activeTab,
   onTabChange,
-  onSkillClick
+  onSkillClick,
+  marketSkillKeys
 }: {
   data: OverviewData
   activeTab: SkillRankingTab
   onTabChange: (tab: SkillRankingTab) => void
   onSkillClick?: (skill: string) => void
+  marketSkillKeys: Set<string>
 }) {
   const [query, setQuery] = useState("")
   const [sortKey, setSortKey] = useState<SkillAdoptionSortKey>(DEFAULT_SKILL_ADOPTION_SORT)
@@ -475,8 +556,13 @@ function SkillAdoptionRankingPanel({
     const value = getSkillAdoptionSortValue(item, sortKey) ?? 0
     return Math.max(max, value)
   }, 0)
-  const totalAdoptedLines = data.bySkillAdoption.reduce((total, item) => total + item.adoptedLines, 0)
-  const statusLabel = trimmedQuery ? `匹配 ${visibleItems.length} 项` : `按 ${SKILL_ADOPTION_SORT_LABELS[sortKey]}`
+  const totalAdoptedLines = data.bySkillAdoption.reduce(
+    (total, item) => total + item.adoptedLines,
+    0
+  )
+  const statusLabel = trimmedQuery
+    ? `匹配 ${visibleItems.length} 项`
+    : `按 ${SKILL_ADOPTION_SORT_LABELS[sortKey]}`
 
   return (
     <div className="flex h-[340px] flex-col rounded-xl border border-border bg-card p-4">
@@ -490,9 +576,18 @@ function SkillAdoptionRankingPanel({
             </span>
           </div>
           <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-            <span><span className="font-semibold text-foreground">{data.bySkillAdoption.length}</span> 种</span>
+            <span>
+              <span className="font-semibold text-foreground">{data.bySkillAdoption.length}</span>{" "}
+              种
+            </span>
             <span className="text-border">|</span>
-            <span>共 <span className="font-semibold text-foreground">{formatNumber(totalAdoptedLines)}</span> 行采纳</span>
+            <span>
+              共{" "}
+              <span className="font-semibold text-foreground">
+                {formatNumber(totalAdoptedLines)}
+              </span>{" "}
+              行采纳
+            </span>
           </div>
         </div>
         <SkillRankingTabs activeTab={activeTab} onTabChange={onTabChange} />
@@ -525,15 +620,21 @@ function SkillAdoptionRankingPanel({
           aria-label="选择 Skill 代码采纳排序"
         >
           {(Object.keys(SKILL_ADOPTION_SORT_LABELS) as SkillAdoptionSortKey[]).map((key) => (
-            <option key={key} value={key}>{SKILL_ADOPTION_SORT_LABELS[key]}</option>
+            <option key={key} value={key}>
+              {SKILL_ADOPTION_SORT_LABELS[key]}
+            </option>
           ))}
         </select>
       </div>
 
       {data.bySkillAdoption.length === 0 ? (
-        <div className="flex flex-1 items-center justify-center py-4 text-center text-xs text-muted-foreground">暂无 Skill 代码采纳数据</div>
+        <div className="flex flex-1 items-center justify-center py-4 text-center text-xs text-muted-foreground">
+          暂无 Skill 代码采纳数据
+        </div>
       ) : visibleItems.length === 0 ? (
-        <div className="flex flex-1 items-center justify-center py-4 text-center text-xs text-muted-foreground">未找到匹配的 Skill</div>
+        <div className="flex flex-1 items-center justify-center py-4 text-center text-xs text-muted-foreground">
+          未找到匹配的 Skill
+        </div>
       ) : (
         <div className="min-h-0 flex-1 overflow-y-auto pr-1">
           <div className="space-y-1.5">
@@ -543,12 +644,20 @@ function SkillAdoptionRankingPanel({
               const rank = sortedItems.findIndex((candidate) => candidate.skill === item.skill) + 1
               const content = (
                 <>
-                  <span className="w-7 shrink-0 text-right text-[10px] text-muted-foreground">{rank}</span>
+                  <span className="w-7 shrink-0 text-right text-[10px] text-muted-foreground">
+                    {rank}
+                  </span>
                   <div className="min-w-0 flex-1">
                     <div className="mb-0.5 flex items-center justify-between gap-2">
-                      <span title={item.skill} className="min-w-0 truncate text-xs text-foreground">
-                        {highlightRankingName(item.skill, trimmedQuery)}
-                      </span>
+                      <div className="flex min-w-0 items-center gap-1.5">
+                        <span
+                          title={item.skill}
+                          className="min-w-0 truncate text-xs text-foreground"
+                        >
+                          {highlightRankingName(item.skill, trimmedQuery)}
+                        </span>
+                        {hasMarketSkill(marketSkillKeys, item.skill) ? <MarketSkillTag /> : null}
+                      </div>
                       <span className="shrink-0 text-[11px] font-medium text-foreground">
                         {formatSkillAdoptionSortValue(item, sortKey)}
                       </span>
@@ -557,8 +666,8 @@ function SkillAdoptionRankingPanel({
                       已Commit {formatNullablePercent(item.measuredAdoptionRate)}
                       <span className="mx-1 text-border">|</span>
                       含未提交 {formatNullablePercent(item.inclusiveAdoptionRate)}
-                      <span className="mx-1 text-border">|</span>
-                      已 Push {formatNullablePercent(item.pushedAdoptionRate)}
+                      <span className="mx-1 text-border">|</span>已 Push{" "}
+                      {formatNullablePercent(item.pushedAdoptionRate)}
                       <span className="mx-1 text-border">|</span>
                       采纳 {formatNumber(item.adoptedLines)} 行
                       <span className="mx-1 text-border">|</span>
@@ -567,7 +676,10 @@ function SkillAdoptionRankingPanel({
                       Push {formatNumber(item.pushedCommitCount)} 次
                     </div>
                     <div className="h-1 overflow-hidden rounded-full bg-muted">
-                      <div className="h-full rounded-full bg-cyan-500" style={{ width: `${pct}%` }} />
+                      <div
+                        className="h-full rounded-full bg-cyan-500"
+                        style={{ width: `${pct}%` }}
+                      />
                     </div>
                   </div>
                 </>
@@ -601,10 +713,12 @@ function SkillAdoptionRankingPanel({
 
 function SkillRankingPanel({
   data,
-  onSkillClick
+  onSkillClick,
+  marketSkillKeys
 }: {
   data: OverviewData
   onSkillClick?: (skill: string) => void
+  marketSkillKeys: Set<string>
 }) {
   const [activeTab, setActiveTab] = useState<SkillRankingTab>("usage")
   if (activeTab === "adoption") {
@@ -614,12 +728,18 @@ function SkillRankingPanel({
         activeTab={activeTab}
         onTabChange={setActiveTab}
         onSkillClick={onSkillClick}
+        marketSkillKeys={marketSkillKeys}
       />
     )
   }
 
-  const defaultItems: RankingItem[] = data.bySkill.map((item) => ({ name: item.skill, count: item.count }))
-  const searchItems: RankingItem[] = (data.bySkillAll.length > 0 ? data.bySkillAll : data.bySkill).map((item) => ({
+  const defaultItems: RankingItem[] = data.bySkill.map((item) => ({
+    name: item.skill,
+    count: item.count
+  }))
+  const searchItems: RankingItem[] = (
+    data.bySkillAll.length > 0 ? data.bySkillAll : data.bySkill
+  ).map((item) => ({
     name: item.skill,
     count: item.count
   }))
@@ -640,19 +760,35 @@ function SkillRankingPanel({
       onItemClick={onSkillClick}
       headerActions={<SkillRankingTabs activeTab={activeTab} onTabChange={setActiveTab} />}
       titleTooltipContent={<SkillUsageTooltip />}
+      renderNameAddon={(name) =>
+        hasMarketSkill(marketSkillKeys, name) ? <MarketSkillTag /> : null
+      }
     />
+  )
+}
+
+function MarketSkillTag(): React.JSX.Element {
+  return (
+    <span className="shrink-0 rounded-sm border border-emerald-200 bg-emerald-50 px-1 py-px text-[9px] font-medium leading-3 text-emerald-700">
+      市场
+    </span>
   )
 }
 
 function ToolRankingPanel({ data }: { data: OverviewData }) {
   const [showAll, setShowAll] = useState(false)
-  const defaultItems: RankingItem[] = (
-    showAll ? data.byToolAll : data.byTool
-  ).map((item) => ({ name: item.tool, count: item.count }))
+  const defaultItems: RankingItem[] = (showAll ? data.byToolAll : data.byTool).map((item) => ({
+    name: item.tool,
+    count: item.count
+  }))
   const searchItems: RankingItem[] = (
     showAll
-      ? (data.byToolAllFull.length > 0 ? data.byToolAllFull : data.byToolAll)
-      : (data.byToolFilteredAll.length > 0 ? data.byToolFilteredAll : data.byTool)
+      ? data.byToolAllFull.length > 0
+        ? data.byToolAllFull
+        : data.byToolAll
+      : data.byToolFilteredAll.length > 0
+        ? data.byToolFilteredAll
+        : data.byTool
   ).map((item) => ({ name: item.tool, count: item.count }))
   const totalKinds = searchItems.length > 0 ? searchItems.length : data.totalTools
   const totalCalls = searchItems.length > 0 ? sumRankingCounts(searchItems) : data.totalToolCalls
@@ -703,12 +839,14 @@ export function OverviewPanel({
   data,
   loading,
   onSkillClick,
-  onActiveUsersClick
+  onActiveUsersClick,
+  marketSkillKeys = new Set()
 }: {
   data: OverviewData | null
   loading: boolean
   onSkillClick?: (skill: string) => void
   onActiveUsersClick?: () => void
+  marketSkillKeys?: Set<string>
 }) {
   if (loading && !data) {
     return <div className="text-sm text-muted-foreground py-8 text-center">加载中...</div>
@@ -809,7 +947,11 @@ export function OverviewPanel({
 
       {/* Skill & Tool Top rankings */}
       <div className="grid grid-cols-2 gap-3">
-        <SkillRankingPanel data={data} onSkillClick={onSkillClick} />
+        <SkillRankingPanel
+          data={data}
+          onSkillClick={onSkillClick}
+          marketSkillKeys={marketSkillKeys}
+        />
         <ToolRankingPanel data={data} />
       </div>
 
