@@ -3,11 +3,10 @@ import {
   Check,
   ChevronDown,
   Folder,
+  FolderOpen,
   GitBranch,
   Loader2,
   AlertCircle,
-  Copy,
-  CheckCheck,
   Trash2
 } from "lucide-react"
 import { useState, useEffect } from "react"
@@ -19,60 +18,72 @@ import { Input } from "@/components/ui/input"
 
 interface WorkspacePickerProps {
   threadId: string
+  onGitStatusChange?: (threadId: string, isGit: boolean) => void
 }
 
 type WorkspaceMode = "local" | "worktree"
 type WorktreeItem = { path: string; branch: string; isMain: boolean; createdAt?: Date }
 
+function getFolderName(path: string | null | undefined): string | undefined {
+  return path?.split(/[\\/]/).filter(Boolean).pop()
+}
+
 function PathRow({ label, path, highlight = false }: { label: string; path: string; highlight?: boolean }): React.JSX.Element {
-  const [copied, setCopied] = useState(false)
   const [hovered, setHovered] = useState(false)
 
-  function handleCopy(): void {
-    navigator.clipboard.writeText(path).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    })
+  async function handleOpenFolder(): Promise<void> {
+    try {
+      const platform = await window.electron.ipcRenderer.invoke("get-platform")
+      const folderPath = platform === "win32" ? path.replace(/\//g, "\\") : path
+      await window.electron.ipcRenderer.invoke("open-folder", folderPath)
+    } catch (error) {
+      console.error("[WorkspacePicker] Failed to open folder:", error)
+    }
   }
 
   return (
     <div
-      className="flex items-center gap-1.5 group"
+      className="flex flex-col gap-1 group"
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
-      <span className="shrink-0 text-[10px] text-muted-foreground">{label}</span>
-      <div className="relative flex-1 min-w-0">
-        <span
-          className={cn(
-            "block text-[11px] font-mono truncate leading-snug",
-            highlight ? "text-foreground" : "text-muted-foreground"
-          )}
-        >
-          {path}
-        </span>
-        {/* Full path shown on hover */}
-        {hovered && (
-          <div className="absolute bottom-full left-0 mb-1 z-50 max-w-[340px] break-all rounded-md bg-popover border border-border shadow-md px-2.5 py-1.5 text-[11px] font-mono text-foreground leading-relaxed pointer-events-none">
+      <span className="text-[10px] text-muted-foreground">{label}</span>
+      <div className="flex items-start gap-1.5">
+        <div className="relative flex-1 min-w-0">
+          <span
+            className={cn(
+              "block text-[11px] font-mono break-all leading-snug overflow-hidden",
+              highlight ? "text-foreground" : "text-muted-foreground"
+            )}
+            style={{
+              display: "-webkit-box",
+              WebkitBoxOrient: "vertical",
+              WebkitLineClamp: 2
+            }}
+          >
             {path}
-          </div>
-        )}
+          </span>
+          {/* Full path shown on hover */}
+          {hovered && (
+            <div className="absolute bottom-full left-0 mb-1 z-50 max-w-[340px] break-all rounded-md bg-popover border border-border shadow-md px-2.5 py-1.5 text-[11px] font-mono text-foreground leading-relaxed pointer-events-none">
+              {path}
+            </div>
+          )}
+        </div>
+        <button
+          onClick={handleOpenFolder}
+          className="shrink-0 p-0.5 rounded hover:bg-muted"
+          title="打开文件夹"
+          aria-label="打开文件夹"
+        >
+          <FolderOpen className="size-3 text-muted-foreground" />
+        </button>
       </div>
-      <button
-        onClick={handleCopy}
-        className="shrink-0 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded hover:bg-muted"
-        title="复制路径"
-      >
-        {copied
-          ? <CheckCheck className="size-3 text-status-nominal" />
-          : <Copy className="size-3 text-muted-foreground" />
-        }
-      </button>
     </div>
   )
 }
 
-export function WorkspacePicker({ threadId }: WorkspacePickerProps): React.JSX.Element {
+export function WorkspacePicker({ threadId, onGitStatusChange }: WorkspacePickerProps): React.JSX.Element {
   const { workspacePath, setWorkspacePath, setWorkspaceFiles, messages } = useCurrentThread(threadId)
   const canChangeWorkspace = messages.length === 0
   const [open, setOpen] = useState(false)
@@ -125,6 +136,7 @@ export function WorkspacePicker({ threadId }: WorkspacePickerProps): React.JSX.E
       setWorktreeBaseBranch(null)
       setCreatingWorktree(false)
       setWorktreeError(null)
+      setWorktreeList([])
 
       const p = await window.api.workspace.get(threadId)
       if (cancelled) return
@@ -134,16 +146,12 @@ export function WorkspacePicker({ threadId }: WorkspacePickerProps): React.JSX.E
         if (cancelled) return
         if (result.success && result.files) setWorkspaceFiles(result.files)
 
-        const gitInfo = await window.api.workspace.isGit(p)
+        const gitInfo = await window.api.workspace.isGit(p, { includeWorktrees: false, threadId })
         if (cancelled) return
         setIsGit(gitInfo.isGit)
         setGitRoot(gitInfo.isGit ? gitInfo.gitRoot : null)
         setIsWorktreePath(gitInfo.isWorktreePath)
-        if (gitInfo.isGit && gitInfo.gitRoot) {
-          await refreshWorktreeList(gitInfo.gitRoot)
-        } else {
-          setWorktreeList([])
-        }
+        onGitStatusChange?.(threadId, gitInfo.isGit)
 
         // Load worktree context from thread metadata
         const thread = await window.api.threads.get(threadId)
@@ -156,6 +164,8 @@ export function WorkspacePicker({ threadId }: WorkspacePickerProps): React.JSX.E
           setWorktreeBaseBranch((meta.worktreeBaseBranch as string) ?? null)
           setMode("worktree")
         }
+      } else {
+        onGitStatusChange?.(threadId, false)
       }
     }
     loadWorkspace()
@@ -164,19 +174,21 @@ export function WorkspacePicker({ threadId }: WorkspacePickerProps): React.JSX.E
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId])
 
+  useEffect(() => {
+    if (!open || !isGit || !gitRoot) return
+    void refreshWorktreeList(gitRoot)
+  }, [open, isGit, gitRoot])
+
   async function handleSelectFolder(): Promise<void> {
     await selectWorkspaceFolder(threadId, setWorkspacePath, setWorkspaceFiles, setLoading, setOpen)
     const newPath = await window.api.workspace.get(threadId)
     if (newPath) {
-      const gitInfo = await window.api.workspace.isGit(newPath)
+      const gitInfo = await window.api.workspace.isGit(newPath, { includeWorktrees: false, threadId })
       setIsGit(gitInfo.isGit)
       setGitRoot(gitInfo.isGit ? gitInfo.gitRoot : null)
       setIsWorktreePath(gitInfo.isWorktreePath)
-      if (gitInfo.isGit && gitInfo.gitRoot) {
-        await refreshWorktreeList(gitInfo.gitRoot)
-      } else {
-        setWorktreeList([])
-      }
+      onGitStatusChange?.(threadId, gitInfo.isGit)
+      setWorktreeList([])
       setMode("local")
       setIsWorktree(false)
       setWorktreeBranch(null)
@@ -255,7 +267,7 @@ export function WorkspacePicker({ threadId }: WorkspacePickerProps): React.JSX.E
     }
   }
 
-  const folderName = workspacePath?.split("/").pop()
+  const folderName = getFolderName(workspacePath)
 
   return (
     <Popover open={open} onOpenChange={(v) => {
@@ -300,7 +312,7 @@ export function WorkspacePicker({ threadId }: WorkspacePickerProps): React.JSX.E
           {workspacePath ? (
             <div className="space-y-3">
               <div className="flex items-center gap-2 p-2 rounded-md bg-background-secondary border border-border">
-                <Check className="size-3.5 text-status-nominal shrink-0" />
+                <Folder className="size-3.5 " />
                 <span className="text-sm truncate flex-1" title={workspacePath}>
                   {isWorktree && worktreeBranch ? worktreeBranch : folderName}
                 </span>
@@ -319,7 +331,7 @@ export function WorkspacePicker({ threadId }: WorkspacePickerProps): React.JSX.E
                     <PathRow label="Worktree" path={workspacePath} highlight />
                   </>
                 ) : (
-                  <PathRow label="路径" path={workspacePath} />
+                  <PathRow label="完整路径" path={workspacePath} />
                 )}
               </div>
 
@@ -372,7 +384,7 @@ export function WorkspacePicker({ threadId }: WorkspacePickerProps): React.JSX.E
                   {worktreeError && (
                     <div className="flex items-start gap-1.5 text-[11px] text-destructive">
                       <AlertCircle className="size-3 mt-0.5 shrink-0" />
-                      <span>{worktreeError}</span>
+                      <span className="min-w-0 break-all">{worktreeError}</span>
                     </div>
                   )}
                   <Button

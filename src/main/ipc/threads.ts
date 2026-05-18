@@ -1,4 +1,7 @@
-import { IpcMain } from "electron"
+import { IpcMain, BrowserWindow, dialog } from "electron"
+import { existsSync } from "fs"
+import Store from "electron-store"
+import AdmZip from "adm-zip"
 import { v4 as uuid } from "uuid"
 import {
   getAllThreads,
@@ -8,9 +11,331 @@ import {
   deleteThread as dbDeleteThread
 } from "../db"
 import { getCheckpointer, closeCheckpointer } from "../agent/runtime"
-import { deleteThreadCheckpoint } from "../storage"
+import { deleteThreadCheckpoint, getOpenworkDir } from "../storage"
 import { generateTitle } from "../services/title-generator"
+import { fireSessionEnd } from "../hooks/session-lifecycle"
+import { makeHookResultCallback } from "../hooks/result-callback"
+import { disposeAgentThreadState } from "./agent"
 import type { Thread, ThreadUpdateParams } from "../types"
+
+type ExportMessageRole = "user" | "assistant" | "system" | "tool"
+
+interface ExportAttachment {
+  filename: string
+}
+
+interface ExportToolCall {
+  id?: string
+  name: string
+  args: string
+  truncated: boolean
+}
+
+interface ExportMessage {
+  id: string
+  role: ExportMessageRole
+  content: string
+  truncated?: boolean
+  attachments: ExportAttachment[]
+  toolCalls?: ExportToolCall[]
+  toolCallNames?: string[]
+  toolCallId?: string
+  name?: string
+  createdAt?: string
+}
+
+interface ExportPayload {
+  version: 1
+  exportedAt: string
+  thread: {
+    threadId: string
+    title: string
+    createdAt: string
+    updatedAt: string
+    workspacePath: string | null
+  }
+  messages: ExportMessage[]
+}
+
+interface CheckpointMessage {
+  id?: string
+  _getType?: () => string
+  type?: string
+  content?: string | Array<unknown>
+  tool_calls?: Array<{ id?: string; name?: string; args?: unknown }>
+  tool_call_id?: string
+  name?: string
+}
+
+interface ThreadCheckpoint {
+  checkpoint?: {
+    channel_values?: {
+      messages?: CheckpointMessage[]
+    }
+  }
+}
+
+// 复用主进程 settings 存储，用于读取“最近一次选择的工作区”。
+// 这里不存敏感信息，只读写路径类配置。
+const settingsStore = new Store({
+  name: "settings",
+  cwd: getOpenworkDir()
+})
+
+const TOOL_CALL_ARGS_LIMIT = 1200
+const TOOL_RESULT_CONTENT_LIMIT = 4000
+
+function parseJsonObject(raw: string | null | undefined): Record<string, unknown> | undefined {
+  if (!raw) return undefined
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function toIsoString(value: number | Date): string {
+  return new Date(value).toISOString()
+}
+
+function getMessageRole(msg: CheckpointMessage): ExportMessageRole | null {
+  let type = msg.type
+  if (!type && typeof msg._getType === "function") {
+    type = msg._getType()
+  }
+
+  if (type === "human") return "user"
+  if (type === "ai") return "assistant"
+  if (type === "system") return "system"
+  if (type === "tool") return "tool"
+  return null
+}
+
+function stringifyContent(content: CheckpointMessage["content"]): string {
+  if (typeof content === "string") return content
+  if (!Array.isArray(content)) return ""
+
+  return content
+    .map((block) => {
+      if (typeof block === "string") return block
+      if (!block || typeof block !== "object") return ""
+      const record = block as Record<string, unknown>
+      if (typeof record.text === "string") return record.text
+      if (typeof record.content === "string") return record.content
+      return ""
+    })
+    .filter(Boolean)
+    .join("\n")
+}
+
+function decodeXmlAttribute(value: string): string {
+  return value
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+}
+
+function sanitizeAttachmentContent(content: string): {
+  content: string
+  attachments: ExportAttachment[]
+} {
+  const attachments: ExportAttachment[] = []
+  const cleaned = content
+    .replace(
+      /<attachment\s+filename="([^"]*)"[^>]*>[\s\S]*?<\/attachment>/g,
+      (_match, encodedName: string) => {
+        attachments.push({ filename: decodeXmlAttribute(encodedName) })
+        return ""
+      }
+    )
+    .trim()
+
+  return { content: cleaned, attachments }
+}
+
+function safeFileName(value: string): string {
+  const cleaned = value
+    .trim()
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "-")
+    .replace(/\s+/g, " ")
+    .replace(/-+/g, "-")
+    .slice(0, 80)
+    .trim()
+
+  return cleaned || "chat-session"
+}
+
+function escapeMarkdown(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/`/g, "\\`")
+}
+
+function stringifyToolArgs(args: unknown): string {
+  if (args === undefined) return ""
+  if (typeof args === "string") return args
+
+  const seen = new WeakSet<object>()
+  try {
+    return JSON.stringify(
+      args,
+      (_key, value) => {
+        if (typeof value === "bigint") return value.toString()
+        if (typeof value === "function") return `[Function ${value.name || "anonymous"}]`
+        if (typeof value === "symbol") return value.toString()
+        if (value && typeof value === "object") {
+          if (seen.has(value)) return "[Circular]"
+          seen.add(value)
+        }
+        return value
+      },
+      2
+    )
+  } catch {
+    return String(args)
+  }
+}
+
+function truncateValue(value: string, limit: number): { value: string; truncated: boolean } {
+  if (value.length <= limit) return { value, truncated: false }
+  return { value: `${value.slice(0, limit)}\n...[truncated]`, truncated: true }
+}
+
+function buildExportToolCalls(toolCalls: CheckpointMessage["tool_calls"]): ExportToolCall[] {
+  if (!Array.isArray(toolCalls)) return []
+
+  return toolCalls.flatMap((toolCall): ExportToolCall[] => {
+    const name = typeof toolCall?.name === "string" ? toolCall.name.trim() : ""
+    if (!name) return []
+
+    const serializedArgs = stringifyToolArgs(toolCall.args)
+    const truncated = truncateValue(serializedArgs, TOOL_CALL_ARGS_LIMIT)
+
+    return [
+      {
+        ...(typeof toolCall.id === "string" && toolCall.id ? { id: toolCall.id } : {}),
+        name,
+        args: truncated.value,
+        truncated: truncated.truncated
+      }
+    ]
+  })
+}
+
+function formatMarkdown(payload: ExportPayload): string {
+  const lines: string[] = [
+    `# ${escapeMarkdown(payload.thread.title)}`,
+    "",
+    `- Thread ID: \`${payload.thread.threadId}\``,
+    `- Workspace: ${payload.thread.workspacePath ? escapeMarkdown(payload.thread.workspacePath) : "未关联工作区"}`,
+    `- Created: ${payload.thread.createdAt}`,
+    `- Updated: ${payload.thread.updatedAt}`,
+    `- Exported: ${payload.exportedAt}`,
+    ""
+  ]
+
+  const roleLabel: Record<ExportMessageRole, string> = {
+    user: "User",
+    assistant: "Assistant",
+    system: "System",
+    tool: "Tool Result"
+  }
+
+  for (const message of payload.messages) {
+    if (
+      !message.content.trim() &&
+      message.attachments.length === 0 &&
+      (!message.toolCalls || message.toolCalls.length === 0)
+    ) {
+      continue
+    }
+
+    lines.push(`## ${roleLabel[message.role]}`, "")
+    if (message.role === "tool") {
+      const toolMeta = [
+        message.name ? `name: \`${escapeMarkdown(message.name)}\`` : null,
+        message.toolCallId ? `tool_call_id: \`${escapeMarkdown(message.toolCallId)}\`` : null,
+        message.truncated ? "content truncated" : null
+      ].filter(Boolean)
+      if (toolMeta.length > 0) {
+        lines.push(`_${toolMeta.join(", ")}_`, "")
+      }
+    }
+    if (message.attachments.length > 0) {
+      lines.push(
+        ...message.attachments.map(
+          (attachment) => `- Attachment: ${escapeMarkdown(attachment.filename)}`
+        ),
+        ""
+      )
+    }
+    if (message.content.trim()) {
+      lines.push(message.content.trim(), "")
+    }
+    if (message.toolCalls && message.toolCalls.length > 0) {
+      lines.push("### Tool Calls", "")
+      for (const toolCall of message.toolCalls) {
+        lines.push(
+          `- ${escapeMarkdown(toolCall.name)}${toolCall.truncated ? " (args truncated)" : ""}`
+        )
+        if (toolCall.args.trim()) {
+          lines.push("", "```json", toolCall.args, "```", "")
+        }
+      }
+    }
+  }
+
+  return `${lines.join("\n").trimEnd()}\n`
+}
+
+async function getLatestCheckpoint(threadId: string): Promise<ThreadCheckpoint | null> {
+  const checkpointer = await getCheckpointer(threadId)
+  const config = { configurable: { thread_id: threadId } }
+
+  for await (const checkpoint of checkpointer.list(config, { limit: 1 })) {
+    return checkpoint as ThreadCheckpoint
+  }
+
+  return null
+}
+
+function buildExportMessages(messages: CheckpointMessage[] | undefined): ExportMessage[] {
+  if (!Array.isArray(messages)) return []
+
+  return messages.flatMap((msg, index): ExportMessage[] => {
+    const role = getMessageRole(msg)
+    if (!role) return []
+
+    const rawContent = stringifyContent(msg.content)
+    const { content, attachments } = sanitizeAttachmentContent(rawContent)
+    const exportedContent =
+      role === "tool"
+        ? truncateValue(content, TOOL_RESULT_CONTENT_LIMIT)
+        : { value: content, truncated: false }
+    const toolCalls = buildExportToolCalls(msg.tool_calls)
+    const toolCallNames = toolCalls.map((toolCall) => toolCall.name)
+
+    if (!exportedContent.value.trim() && attachments.length === 0 && toolCalls.length === 0) {
+      return []
+    }
+
+    return [
+      {
+        id: msg.id || `msg-${index}`,
+        role,
+        content: exportedContent.value,
+        ...(exportedContent.truncated ? { truncated: true } : {}),
+        attachments,
+        ...(toolCalls.length > 0 ? { toolCalls, toolCallNames } : {}),
+        ...(role === "tool" && msg.tool_call_id ? { toolCallId: msg.tool_call_id } : {}),
+        ...(role === "tool" && msg.name ? { name: msg.name } : {})
+      }
+    ]
+  })
+}
 
 export function registerThreadHandlers(ipcMain: IpcMain): void {
   // List all threads
@@ -45,9 +370,31 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
   // Create a new thread
   ipcMain.handle("threads:create", async (_event, metadata?: Record<string, unknown>) => {
     const threadId = uuid()
-    const title = (metadata?.title as string) || `Thread ${new Date().toLocaleDateString()}`
+    // 先拷贝一份，避免直接修改调用方传入的 metadata 对象。
+    const nextMetadata: Record<string, unknown> = { ...(metadata ?? {}) }
 
-    const thread = dbCreateThread(threadId, { ...metadata, title })
+    // 仅当调用方没有显式传 workspacePath 时，才自动继承最近工作区。
+    // 这样可以兼容两种场景：
+    // 1) 用户手动点“新任务” -> 自动带上最近目录；
+    // 2) 业务方显式指定 workspacePath -> 保持调用方优先。
+    const hasWorkspacePath = Object.prototype.hasOwnProperty.call(nextMetadata, "workspacePath")
+    if (!hasWorkspacePath) {
+      const lastWorkspacePath = settingsStore.get("workspacePath", null)
+      // 仅在路径存在时回填，避免写入无效目录导致后续报错。
+      if (
+        typeof lastWorkspacePath === "string" &&
+        lastWorkspacePath &&
+        existsSync(lastWorkspacePath)
+      ) {
+        nextMetadata.workspacePath = lastWorkspacePath
+      }
+    }
+
+    // title 仍保持原有规则：优先使用调用方传入，否则使用日期默认值。
+    const title = (nextMetadata.title as string) || `Thread ${new Date().toLocaleDateString()}`
+    nextMetadata.title = title
+
+    const thread = dbCreateThread(threadId, nextMetadata)
 
     return {
       thread_id: thread.thread_id,
@@ -85,8 +432,29 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
   })
 
   // Delete a thread
-  ipcMain.handle("threads:delete", async (_event, threadId: string) => {
+  ipcMain.handle("threads:delete", async (event, threadId: string) => {
     console.log("[Threads] Deleting thread:", threadId)
+
+    // Fire SessionEnd before teardown so hooks can observe a valid thread record.
+    // No-op if SessionStart never fired for this thread.
+    const existingThread = getThread(threadId)
+    let workspacePath: string | undefined
+    if (existingThread?.metadata) {
+      try {
+        const metadata = JSON.parse(existingThread.metadata) as Record<string, unknown>
+        workspacePath = typeof metadata.workspacePath === "string" ? metadata.workspacePath : undefined
+      } catch {
+        workspacePath = undefined
+      }
+    }
+    const window = BrowserWindow.fromWebContents(event.sender)
+    const hookChannel = `agent:stream:${threadId}`
+    await fireSessionEnd(
+      threadId,
+      workspacePath,
+      window ? makeHookResultCallback(window, hookChannel) : undefined
+    )
+    disposeAgentThreadState(threadId)
 
     // Delete from our metadata store
     dbDeleteThread(threadId)
@@ -125,6 +493,63 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     } catch (e) {
       console.warn("Failed to get thread history:", e)
       return []
+    }
+  })
+
+  ipcMain.handle("threads:exportSession", async (event, threadId: string) => {
+    try {
+      const row = getThread(threadId)
+      if (!row) return { success: false, error: "Thread not found" }
+
+      const latestCheckpoint = await getLatestCheckpoint(threadId)
+      const messages = buildExportMessages(latestCheckpoint?.checkpoint?.channel_values?.messages)
+
+      if (messages.length === 0) {
+        return { success: false, error: "暂无可导出的消息" }
+      }
+
+      const metadata = parseJsonObject(row.metadata)
+      const workspacePath =
+        typeof metadata?.workspacePath === "string" && metadata.workspacePath.trim()
+          ? metadata.workspacePath
+          : null
+      const title =
+        row.title || (typeof metadata?.title === "string" ? metadata.title : "") || row.thread_id
+      const exportedAt = new Date().toISOString()
+      const payload: ExportPayload = {
+        version: 1,
+        exportedAt,
+        thread: {
+          threadId,
+          title,
+          createdAt: toIsoString(row.created_at),
+          updatedAt: toIsoString(row.updated_at),
+          workspacePath
+        },
+        messages
+      }
+
+      const win = BrowserWindow.fromWebContents(event.sender) ?? BrowserWindow.getFocusedWindow()
+      const date = exportedAt.slice(0, 10)
+      const result = await dialog.showSaveDialog(win ?? BrowserWindow.getAllWindows()[0], {
+        title: "导出会话",
+        defaultPath: `${safeFileName(title)}-session-${date}.zip`,
+        filters: [{ name: "Zip Archive", extensions: ["zip"] }]
+      })
+
+      if (result.canceled || !result.filePath) {
+        return { success: false, canceled: true }
+      }
+
+      const zip = new AdmZip()
+      zip.addFile("session.md", Buffer.from(formatMarkdown(payload), "utf-8"))
+      zip.addFile("session.json", Buffer.from(`${JSON.stringify(payload, null, 2)}\n`, "utf-8"))
+      zip.writeZip(result.filePath)
+
+      return { success: true, filePath: result.filePath }
+    } catch (e) {
+      console.error("[Threads] exportSession error:", e)
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
   })
 

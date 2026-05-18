@@ -7,6 +7,7 @@ import { createAgentRuntime, closeCheckpointer } from "../agent/runtime"
 import { createThread as dbCreateThread, deleteThread as dbDeleteThread, getAllThreads, getThread } from "../db/index"
 import { StreamConverter } from "../agent/stream-converter"
 import { notifyAlways, stripThink } from "./notify"
+import { showPetCompletedTaskNotice } from "../pet"
 import type { ChatXRobotConfig } from "../types"
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -233,6 +234,7 @@ async function handleInbound(msg: ChatXInboundMessage): Promise<void> {
       threadId,
       workspacePath,
       modelId: robot.modelId || undefined,
+      enableAgentsPrompt: false,
       abortSignal: abortController.signal
     })
 
@@ -275,6 +277,7 @@ async function handleInbound(msg: ChatXInboundMessage): Promise<void> {
         await sendChatXReply(robot, lastAssistantText)
       }
       notifyAlways(`🤖 ${msg.fromId} 回复完成`, lastAssistantText || "处理完成")
+      showPetCompletedTaskNotice(threadId, `${msg.fromId} 回复`)
       console.log(`[ChatX] Message processed: ${msg.msgId}`)
     } else {
       broadcastToChannel(channel, { type: "done" })

@@ -16,6 +16,8 @@ interface Session {
   running: boolean
   workDir: string
   claudeModelId?: string
+  syncSkills: boolean
+  syncMemory: boolean
   hasContent: boolean
   ownsCreatingState: boolean // 只有 createSessionWithDir 创建的才为 true，表示该 session 持有 creating 锁
   restarting: boolean
@@ -91,6 +93,12 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
   const [selectedModelId, setSelectedModelId] = useState<string>("")
   const [creating, setCreating] = useState(false)
   const [mountError, setMountError] = useState<string | null>(null)
+  const [syncSkills, setSyncSkills] = useState(false)
+  const [syncMemory, setSyncMemory] = useState(false)
+  const syncSkillsRef = useRef(syncSkills)
+  const syncMemoryRef = useRef(syncMemory)
+  syncSkillsRef.current = syncSkills
+  syncMemoryRef.current = syncMemory
 
   // 加载模型列表（仅打包环境）
   const refreshModels = useCallback((resetSelection = false) => {
@@ -305,7 +313,9 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
         args: ["--allow-dangerously-skip-permissions"],
         cols: session.xterm.cols,
         rows: session.xterm.rows,
-        claudeModelId: session.claudeModelId
+        claudeModelId: session.claudeModelId,
+        syncSkills: session.syncSkills,
+        syncMemory: session.syncMemory
       })
     } finally {
       clearTimeout(slowStartTimer)
@@ -457,7 +467,7 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
 
       session = {
         id, termId: null, xterm, fitAddon, container,
-        running: false, workDir: dir, claudeModelId: resolvedModelId || undefined, hasContent: false, ownsCreatingState: true, restarting: false, slowStarting: false, domCleanups: [], ptyCleanups: []
+        running: false, workDir: dir, claudeModelId: resolvedModelId || undefined, syncSkills: syncSkillsRef.current, syncMemory: syncMemoryRef.current, hasContent: false, ownsCreatingState: true, restarting: false, slowStarting: false, domCleanups: [], ptyCleanups: []
       }
     } catch (err) {
       console.error("[ClaudeCode] Failed to create session:", err)
@@ -696,32 +706,65 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
                   <span>Windows 用户必须安装 Git Bash 和 Node.js (≥ 18)</span>
                 </div>
               )}
-            </div>
-          </div>
-          {isPackaged && models.length > 0 && (
-            <div className="flex items-center gap-2.5">
-              <span className="text-sm text-muted-foreground/70">模型配置</span>
-              <div className="relative inline-flex items-center">
-                <select
-                  value={selectedModelId}
-                  onChange={(e) => setSelectedModelId(e.target.value)}
-                  className="appearance-none h-10 pl-4 pr-9 rounded-xl border border-border/40 bg-muted/30 text-sm text-foreground/80 shadow-[0_1px_3px_rgba(0,0,0,0.04)] backdrop-blur-sm hover:bg-muted/50 hover:border-border/60 hover:shadow-[0_2px_8px_rgba(0,0,0,0.06)] active:scale-[0.97] focus:outline-none focus:ring-2 focus:ring-ring/20 focus:border-border/60 transition-all duration-200 ease-out cursor-pointer"
-                >
-                  {models.map((m) => (
-                    <option key={m.id} value={m.id}>{m.name}{m.model !== m.name ? `  ·  ${m.model}` : ""}</option>
-                  ))}
-                </select>
-                <ChevronDown className="pointer-events-none absolute right-3 size-3.5 text-muted-foreground/50" />
+              <div className="flex items-center gap-2 px-4 py-2">
+                <TriangleAlert className="size-3.5 shrink-0 text-amber-400" />
+                <span>按 {window.electron.process.platform === "win32" ? "Alt+M" : "Shift+Tab"} 切换到 bypass permissions 模式可跳过确认弹窗</span>
               </div>
             </div>
-          )}
-          <Button onClick={() => { setMountError(null); createSessionWithDir() }} className="gap-2" disabled={creating}>
-            {creating ? <Loader2 className="size-4 animate-spin" /> : <FolderOpen className="size-4" />}
-            {creating ? "正在启动..." : "选择工作目录并启动"}
-          </Button>
-          {mountError && (
-            <p className="text-xs text-destructive">{mountError}</p>
-          )}
+          </div>
+          <div className="flex flex-col items-center gap-3 w-full max-w-md">
+            {/* 液态玻璃配置面板 */}
+            <div className="w-full rounded-2xl border border-[rgba(0,0,0,0.06)] bg-[rgba(255,255,255,0.5)] backdrop-blur-xl shadow-[0_2px_12px_rgba(0,0,0,0.04),inset_0_1px_0_rgba(255,255,255,0.8)] overflow-hidden">
+              {/* 模型选择行 */}
+              {isPackaged && models.length > 0 && (
+                <div className="flex items-center justify-between px-4 py-2.5 border-b border-[rgba(0,0,0,0.04)]">
+                  <span className="text-xs text-muted-foreground/60">模型</span>
+                  <div className="relative inline-flex items-center">
+                    <select
+                      value={selectedModelId}
+                      onChange={(e) => setSelectedModelId(e.target.value)}
+                      className="appearance-none h-7 pl-3 pr-7 rounded-lg border-none bg-transparent text-xs text-foreground/70 focus:outline-none cursor-pointer hover:text-foreground/90 transition-colors"
+                    >
+                      {models.map((m) => (
+                        <option key={m.id} value={m.id}>{m.name}{m.model !== m.name ? ` · ${m.model}` : ""}</option>
+                      ))}
+                    </select>
+                    <ChevronDown className="pointer-events-none absolute right-1.5 size-3 text-muted-foreground/40" />
+                  </div>
+                </div>
+              )}
+              {/* 开关行 */}
+              {[
+                { label: "注入 CMBDevClaw 技能", checked: syncSkills, onChange: setSyncSkills },
+                { label: "注入 CMBDevClaw 记忆", checked: syncMemory, onChange: setSyncMemory }
+              ].map(({ label, checked, onChange }, i, arr) => (
+                <div key={label} className={cn("flex items-center justify-between px-4 py-2.5", i < arr.length - 1 && "border-b border-[rgba(0,0,0,0.04)]")}>
+                  <span className="text-xs text-muted-foreground/60">{label}</span>
+                  <button
+                    type="button"
+                    onClick={() => onChange(!checked)}
+                    className={cn(
+                      "relative w-[38px] h-[22px] rounded-full transition-all duration-300 ease-out cursor-pointer",
+                      checked ? "bg-[#34C759]" : "bg-[#e9e9ea]"
+                    )}
+                  >
+                    <span className={cn(
+                      "absolute top-[2px] size-[18px] rounded-full bg-white shadow-[0_2px_4px_rgba(0,0,0,0.15),0_1px_1px_rgba(0,0,0,0.06)] transition-all duration-300 ease-out",
+                      checked ? "left-[18px]" : "left-[2px]"
+                    )} />
+                  </button>
+                </div>
+              ))}
+            </div>
+            {/* 启动按钮 */}
+            <Button onClick={() => { setMountError(null); createSessionWithDir() }} className="gap-2 w-full max-w-xs" disabled={creating}>
+              {creating ? <Loader2 className="size-4 animate-spin" /> : <FolderOpen className="size-4" />}
+              {creating ? "正在启动..." : "选择工作目录并启动"}
+            </Button>
+            {mountError && (
+              <p className="text-xs text-destructive">{mountError}</p>
+            )}
+          </div>
         </div>
       )}
       {/* 顶部工具栏 */}

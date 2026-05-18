@@ -1,4 +1,4 @@
-import { CheckCircle2, Loader2, Upload } from "lucide-react"
+import { CheckCircle2, GitCommit, Loader2, Upload } from "lucide-react"
 import { Dialog, DialogContent } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -37,6 +37,7 @@ interface GitSubmitDialogProps {
   cardNumber: string
   commitType: CommitType
   commitMessage: string
+  pendingCommits?: Array<{ hash: string; message: string; date: string }>
   onOpenChange: (open: boolean) => void
   onCardNumberChange: (value: string) => void
   onCommitTypeChange: (value: CommitType) => void
@@ -56,6 +57,7 @@ export function GitSubmitDialog({
   cardNumber,
   commitType,
   commitMessage,
+  pendingCommits,
   onOpenChange,
   onCardNumberChange,
   onCommitTypeChange,
@@ -196,8 +198,30 @@ export function GitSubmitDialog({
               )}
             </>
           ) : (
-            <div className="rounded-lg border border-border/70 bg-muted/20 p-2.5 text-sm text-muted-foreground">
-              当前没有文件改动，将直接推送已有提交。
+            <div className="space-y-3">
+              <div className="rounded-lg border border-border/70 bg-muted/20 p-2.5 text-sm text-muted-foreground">
+                当前没有文件改动，将直接推送已有提交。
+              </div>
+              {pendingCommits && pendingCommits.length > 0 && (
+                <div className="space-y-1.5">
+                  <div className="flex items-center gap-1.5 text-xs font-medium text-foreground">
+                    <GitCommit className="size-3.5" />
+                    待推送的 {pendingCommits.length} 个提交
+                  </div>
+                  <div className="rounded-lg border border-border/70 bg-muted/10 divide-y divide-border/50 max-h-[180px] overflow-y-auto">
+                    {pendingCommits.map((commit) => (
+                      <div key={commit.hash} className="px-2.5 py-2 flex items-start gap-2">
+                        <code className="shrink-0 text-[10px] font-mono text-muted-foreground mt-0.5">
+                          {commit.hash.slice(0, 7)}
+                        </code>
+                        <span className="text-xs text-foreground break-all leading-5">
+                          {commit.message}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </form>
@@ -206,7 +230,7 @@ export function GitSubmitDialog({
           {requiresCommitMetadata ? (
             <>
               <Button
-                id={'git-commit-button'}
+                id={"git-commit-button"}
                 type="button"
                 className="w-full h-9"
                 variant={action === "push" ? "outline" : "default"}
@@ -227,7 +251,7 @@ export function GitSubmitDialog({
               </Button>
 
               <Button
-                id={'git-commit-push-button'}
+                id={"git-commit-push-button"}
                 type="button"
                 className="w-full h-9"
                 variant={action === "push" ? "default" : "outline"}
@@ -237,7 +261,7 @@ export function GitSubmitDialog({
                 {pushRunning ? (
                   <>
                     <Loader2 className="size-4 animate-spin" />
-                    推送中...
+                    推送中，可能稍慢，请耐心等待...
                   </>
                 ) : (
                   <>
@@ -249,7 +273,7 @@ export function GitSubmitDialog({
             </>
           ) : (
             <Button
-              id={'git-push-button'}
+              id={"git-push-button"}
               type="button"
               className="w-full h-9"
               disabled={anyRunning}
@@ -258,7 +282,7 @@ export function GitSubmitDialog({
               {pushRunning ? (
                 <>
                   <Loader2 className="size-4 animate-spin" />
-                  推送中...
+                  推送中，可能稍慢，请耐心等待...
                 </>
               ) : (
                 <>
@@ -270,7 +294,7 @@ export function GitSubmitDialog({
           )}
 
           <Button
-            id={'git-cancel-button'}
+            id={"git-cancel-button"}
             type="button"
             variant="ghost"
             className="w-full h-9"

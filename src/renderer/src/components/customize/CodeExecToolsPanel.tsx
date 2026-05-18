@@ -347,7 +347,6 @@ export function CodeExecToolsPanel(): React.JSX.Element {
     try {
       await window.api.codeExecTools.delete(selectedTool.toolId)
       await loadTools()
-      setActionMessage("工具已删除")
     } catch (error) {
       setActionError(error instanceof Error ? error.message : "删除失败")
     } finally {
@@ -665,7 +664,7 @@ export function CodeExecToolsPanel(): React.JSX.Element {
 
               <Separator />
 
-              <div className="grid gap-6 xl:grid-cols-2 2xl:grid-cols-4">
+              <div className="grid gap-6 xl:grid-cols-2">
                 <section className="space-y-4 rounded-sm border border-border p-4">
                   <h4 className="text-sm font-semibold">详情</h4>
                   <DetailRow label="tool_id" value={selectedTool.toolId} mono />
@@ -679,8 +678,6 @@ export function CodeExecToolsPanel(): React.JSX.Element {
                 </section>
 
                 <JsonBlock title="input_schema" value={selectedTool.inputSchema} />
-                <JsonBlock title="output_schema" value={selectedTool.outputSchema ?? null} />
-                <JsonBlock title="result_example" value={selectedTool.resultExample ?? null} />
               </div>
             </div>
           </div>

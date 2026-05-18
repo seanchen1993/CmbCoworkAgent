@@ -10,6 +10,10 @@ import { existsSync } from "fs"
 import { join } from "path"
 import { writeMainLog, writeRendererLog } from "./logging"
 
+const MAIN_LOG_EVENT_CHANNEL = "debug:main-console-log"
+const MAIN_LOG_TOGGLE_CHANNEL = "debug:set-main-console-forwarding"
+let mainLogForwardingEnabled = false
+
 function getConsoleLevelName(level: number): string {
   switch (level) {
     case 0:
@@ -22,6 +26,59 @@ function getConsoleLevelName(level: number): string {
       return "DEBUG"
     default:
       return "LOG"
+  }
+}
+
+function safeFormatLogValue(value: unknown, seen = new WeakSet<object>()): string {
+  if (value instanceof Error) return value.stack || `${value.name}: ${value.message}`
+  if (typeof value === "string") return value
+  if (typeof value === "bigint") return `${value.toString()}n`
+  if (
+    value === null ||
+    value === undefined ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  ) {
+    return String(value)
+  }
+  if (typeof value === "symbol") return value.toString()
+  if (typeof value === "function") return `[Function ${value.name || "anonymous"}]`
+  if (typeof value !== "object") return String(value)
+
+  try {
+    return JSON.stringify(
+      value,
+      (_key, nestedValue) => {
+        if (typeof nestedValue === "bigint") return `${nestedValue.toString()}n`
+        if (nestedValue instanceof Error) {
+          return {
+            name: nestedValue.name,
+            message: nestedValue.message,
+            stack: nestedValue.stack
+          }
+        }
+        if (typeof nestedValue === "symbol") return nestedValue.toString()
+        if (typeof nestedValue === "function") return `[Function ${nestedValue.name || "anonymous"}]`
+        if (nestedValue && typeof nestedValue === "object") {
+          if (seen.has(nestedValue)) return "[Circular]"
+          seen.add(nestedValue)
+        }
+        return nestedValue
+      },
+      2
+    )
+  } catch {
+    return Object.prototype.toString.call(value)
+  }
+}
+
+function forwardMainLogToRenderer(level: string, args: unknown[]): void {
+  if (!mainLogForwardingEnabled) return
+  const message = args.map((arg) => safeFormatLogValue(arg)).join(" ")
+  const windows = BrowserWindow.getAllWindows()
+  for (const window of windows) {
+    if (window.isDestroyed() || window.webContents.isDestroyed()) continue
+    window.webContents.send(MAIN_LOG_EVENT_CHANNEL, { level, message })
   }
 }
 
@@ -39,6 +96,7 @@ function withEpipeGuard<T extends (...args: unknown[]) => void>(fn: T): T {
 function withMainFileLogging<T extends (...args: unknown[]) => void>(level: string, fn: T): T {
   return ((...args: Parameters<T>) => {
     writeMainLog(level, args)
+    forwardMainLogToRenderer(level, args)
     fn(...args)
   }) as T
 }
@@ -67,7 +125,7 @@ process.on("uncaughtException", (err: NodeJS.ErrnoException) => {
 process.on("unhandledRejection", (reason) => {
   console.error("[Main] Unhandled rejection:", reason)
 })
-import { registerAgentHandlers } from "./ipc/agent"
+import { disposeAllAgentThreadStates, registerAgentHandlers } from "./ipc/agent"
 import { registerThreadHandlers } from "./ipc/threads"
 import { registerModelHandlers } from "./ipc/models"
 import { registerSkillsHandlers } from "./ipc/skills"
@@ -84,22 +142,33 @@ import { registerHooksHandlers } from "./ipc/hooks"
 import { registerTerminalHandlers, disposeAllTerminals } from "./ipc/terminal"
 import { registerCodeExecToolsHandlers } from "./ipc/code-exec-tools"
 import { registerRoutingHandlers } from "./ipc/routing"
+import { registerDashboardHandlers } from "./ipc/dashboard"
+import { registerLspHandlers } from "./ipc/lsp"
+import { registerAutoCommitHandlers } from "./ipc/auto-commit"
+import { stopAllLsp } from "./lsp"
 import { setTraceReporter } from "./agent/trace/collector"
 import { CloudTraceReporter } from "./agent/trace/cloud-reporter"
 import { setEventReporter, HttpEventReporter } from "./services/event-reporter"
-import { initializeDatabase, flush } from "./db"
+import { initializeAdoptionTracker, shutdownAdoptionTracker } from "./services/adoption-tracker"
+import { getAllThreads, initializeDatabase, flush } from "./db"
 import { startScheduler, stopScheduler } from "./services/scheduler"
 import { startHeartbeat, stopHeartbeat } from "./services/heartbeat"
 import { startChatX, stopChatX } from "./services/chatx"
+import { startHookConfigWatcher, stopHookConfigWatcher } from "./services/hook-config-watcher"
 import { LocalSandbox } from "./agent/local-sandbox"
 import { closeRuntime } from "./agent/runtime"
+import { makeBroadcastHookResultCallback } from "./hooks/result-callback"
+import { fireSessionEndAll, hasActiveSessions } from "./hooks/session-lifecycle"
 import { registerUpdaterHandlers, startUpdateChecker, stopUpdateChecker } from "./updater"
 import { runStartupSelfCheck } from "./updater/rollback"
 import { isKeepAwakeEnabled, setKeepAwakeEnabled } from "./storage"
 import { getLocalIP } from "./net-utils"
+import { trackEvent } from "./services/event-reporter"
+import { configurePetWindow, createPetWindow, registerPetHandlers } from "./pet"
 
 let mainWindow: BrowserWindow | null = null
 let loginWindow: BrowserWindow | null = null
+const STARTUP_SANDBOX_PREWARM_WORKSPACE_LIMIT = 5
 
 // ── Keep Awake ──
 let keepAwakeBlockerId: number | null = null
@@ -144,6 +213,41 @@ function getDevMacDockIconPath(): string | undefined {
   return getBuildIconPath("icon.png") ?? getBuildIconPath("icon.ico")
 }
 
+function applyMacDockIcon(): void {
+  if (process.platform !== "darwin" || !app.dock) return
+
+  // 宠物透明窗口会额外创建 BrowserWindow；macOS 下重复应用 Dock 图标可避免开发态图标被重置。
+  app.dock.show()
+  const iconPath = getFirstExistingPath([
+    ...(isDev ? [getDevMacDockIconPath()] : []),
+    join(__dirname, "../../resources/icon.png"),
+    join(app.getAppPath(), "resources/icon.png"),
+    join(__dirname, "../resources/icon.png"),
+    join(app.getAppPath(), "build/icon.png"),
+    join(process.cwd(), "build/icon.png")
+  ].filter((path): path is string => Boolean(path)))
+
+  if (isDev) {
+    console.log(`[icon] mac dock icon path: ${iconPath ?? "not found"}`)
+  }
+
+  try {
+    const icon = iconPath ? nativeImage.createFromPath(iconPath) : null
+    if (icon && !icon.isEmpty()) {
+      app.dock.setIcon(icon)
+      if (isDev) {
+        console.log("[icon] mac dock icon applied")
+      }
+    } else if (isDev) {
+      console.log("[icon] mac dock icon is empty")
+    }
+  } catch {
+    if (isDev) {
+      console.log("[icon] mac dock icon apply failed")
+    }
+  }
+}
+
 // getLocalIP moved to ./net-utils — imported above
 
 function createWindow(): void {
@@ -168,6 +272,7 @@ function createWindow(): void {
 
   mainWindow.on("ready-to-show", () => {
     mainWindow?.show()
+    applyMacDockIcon()
   })
 
   mainWindow.on("unresponsive", () => {
@@ -226,7 +331,60 @@ function createWindow(): void {
 
   mainWindow.on("closed", () => {
     mainWindow = null
+    if (process.platform !== "darwin") {
+      app.quit()
+    }
   })
+}
+
+/**
+ * 确保主窗口可见并获得焦点。
+ *
+ * 供单实例唤起、宠物窗口交互等入口复用，覆盖主窗口被销毁、最小化和隐藏三种情况。
+ */
+function ensureMainWindowVisible(): BrowserWindow | null {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow()
+    return mainWindow
+  }
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore()
+  }
+  if (!mainWindow.isVisible()) {
+    mainWindow.show()
+  }
+  mainWindow.focus()
+  return mainWindow
+}
+
+function collectRecentWorkspacePathsForSandboxPrewarm(): string[] {
+  const workspaces: string[] = []
+  const seen = new Set<string>()
+
+  for (const thread of getAllThreads().slice(0, STARTUP_SANDBOX_PREWARM_WORKSPACE_LIMIT)) {
+    if (!thread.metadata) continue
+    try {
+      const metadata = JSON.parse(thread.metadata)
+      const workspacePath = typeof metadata.workspacePath === "string" ? metadata.workspacePath.trim() : ""
+      if (!workspacePath) continue
+      const key = workspacePath.toLowerCase()
+      if (seen.has(key)) continue
+      seen.add(key)
+      workspaces.push(workspacePath)
+    } catch {
+      // Ignore malformed metadata and keep scanning recent threads.
+    }
+  }
+
+  return workspaces
+}
+
+function prewarmRecentSandboxWorkspaces(): void {
+  if (process.platform !== "win32") return
+  const workspaces = collectRecentWorkspacePathsForSandboxPrewarm()
+  if (workspaces.length === 0) return
+  console.log(`[Main] Prewarming sandbox for ${workspaces.length} recent workspace(s)`)
+  LocalSandbox.prewarmForWorkspaces(workspaces)
 }
 
 // Ensure only a single instance is running (prevents duplicate schedulers on Windows)
@@ -235,10 +393,7 @@ if (!gotTheLock) {
   app.quit()
 } else {
   app.on("second-instance", () => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore()
-      mainWindow.focus()
-    }
+    ensureMainWindowVisible()
   })
 
   app.whenReady().then(async () => {
@@ -248,33 +403,11 @@ if (!gotTheLock) {
     }
 
     // Set dock icon on macOS
-    if (process.platform === "darwin" && app.dock) {
-      const iconPath = getFirstExistingPath([
-        ...(isDev ? [getDevMacDockIconPath()] : []),
-        join(__dirname, "../../resources/icon.png"),
-        join(app.getAppPath(), "resources/icon.png"),
-        join(__dirname, "../resources/icon.png")
-      ].filter((path): path is string => Boolean(path)))
-      if (isDev) {
-        console.log(`[icon] mac dock icon path: ${iconPath ?? "not found"}`)
-      }
-      try {
-        const icon = iconPath ? nativeImage.createFromPath(iconPath) : null
-        if (icon && !icon.isEmpty()) {
-          app.dock.setIcon(icon)
-          if (isDev) {
-            console.log("[icon] mac dock icon applied")
-          }
-        } else if (isDev) {
-          console.log("[icon] mac dock icon is empty")
-        }
-      } catch {
-        if (isDev) {
-          console.log("[icon] mac dock icon apply failed")
-        }
-        // Icon not found, use default
-      }
-    }
+    applyMacDockIcon()
+    configurePetWindow({
+      ensureMainWindowVisible,
+      applyMacDockIcon
+    })
 
     // Default open or close DevTools by F12 in development
     if (isDev) {
@@ -302,6 +435,13 @@ if (!gotTheLock) {
     // Initialize database
     await initializeDatabase()
 
+    // Initialize adoption tracker (side-effect only; never blocks startup)
+    try {
+      await initializeAdoptionTracker()
+    } catch (err) {
+      console.warn("[Main] AdoptionTracker init failed (disabled):", err)
+    }
+
     // Register IPC handlers
     registerAgentHandlers(ipcMain)
     registerThreadHandlers(ipcMain)
@@ -320,7 +460,28 @@ if (!gotTheLock) {
     registerTerminalHandlers(ipcMain)
     registerCodeExecToolsHandlers(ipcMain)
     registerRoutingHandlers(ipcMain)
+    registerDashboardHandlers(ipcMain)
     registerUpdaterHandlers()
+    registerLspHandlers(ipcMain)
+    prewarmRecentSandboxWorkspaces()
+    registerAutoCommitHandlers(ipcMain)
+    registerPetHandlers(ipcMain)
+
+    ipcMain.on(MAIN_LOG_TOGGLE_CHANNEL, (_event, enabled: unknown) => {
+      mainLogForwardingEnabled = Boolean(enabled)
+    })
+
+    // Track event handler for client-side telemetry
+    ipcMain.handle("track-event", async (_event, payload: any) => {
+      try {
+        const { eventName, eventCategory, properties } = payload
+        trackEvent(eventName, eventCategory, properties)
+        return { success: true }
+      } catch (error) {
+        console.error("[IPC] Failed to track event:", error)
+        return { success: false }
+      }
+    })
 
     // Register file system handlers
     ipcMain.handle("get-platform", async () => {
@@ -410,6 +571,7 @@ if (!gotTheLock) {
     })
 
     createWindow()
+    createPetWindow()
 
     // Run post-update self-check before anything else
     const selfCheckResult = await runStartupSelfCheck()
@@ -421,6 +583,7 @@ if (!gotTheLock) {
     startScheduler()
     startHeartbeat()
     startChatX()
+    startHookConfigWatcher()
     startUpdateChecker()
 
     // ── Keep Awake ──
@@ -433,9 +596,10 @@ if (!gotTheLock) {
     })
 
     app.on("activate", () => {
-      if (BrowserWindow.getAllWindows().length === 0) {
+      if (!mainWindow || mainWindow.isDestroyed()) {
         createWindow()
       }
+      createPetWindow()
     })
   })
 
@@ -445,15 +609,72 @@ if (!gotTheLock) {
     }
   })
 
-  app.on("will-quit", () => {
+  // Use before-quit (not will-quit) so we can preventDefault, await SessionEnd hooks,
+  // then re-issue app.quit(). will-quit fires during teardown — async hook spawns
+  // queued there have no guarantee of completing before the process exits.
+  let sessionEndDone = false
+  app.on("before-quit", (event) => {
+    if (sessionEndDone) return
+    if (!hasActiveSessions()) {
+      sessionEndDone = true
+      return
+    }
+    event.preventDefault()
+    fireSessionEndAll(5000, (threadId) => makeBroadcastHookResultCallback(`agent:stream:${threadId}`))
+      .catch((e) => console.warn("[Main] SessionEnd hooks error:", e))
+      .finally(() => disposeAllAgentThreadStates())
+      .finally(() => {
+        sessionEndDone = true
+        app.quit()
+      })
+  })
+
+  let quitting = false
+  app.on("will-quit", (e) => {
+    if (quitting) {
+      // Re-entry: user pressed Cmd+Q again while cleanup is running. Just block.
+      e.preventDefault()
+      return
+    }
+    quitting = true
+    e.preventDefault()
     applyKeepAwake(false)
     disposeAllTerminals()
     LocalSandbox.killAll()
     stopScheduler()
     stopHeartbeat()
     stopChatX()
+    stopHookConfigWatcher()
     stopUpdateChecker()
-    closeRuntime().catch((e) => console.warn("[Main] closeRuntime error:", e))
-    flush()
+    try {
+      shutdownAdoptionTracker()
+    } catch (err) {
+      console.warn("[Main] shutdownAdoptionTracker error:", err)
+    }
+
+    const cleanup = Promise.all([
+      stopAllLsp().catch((err) => console.warn("[Main] stopAllLsp error:", err)),
+      closeRuntime().catch((err) => console.warn("[Main] closeRuntime error:", err))
+    ])
+
+    // Single-fire exit guard so timeout + finally don't both call app.exit
+    let exited = false
+    const doExit = (): void => {
+      if (exited) return
+      exited = true
+      flush()
+      app.exit(0)
+    }
+
+    // Give async cleanup up to 10s, then force quit
+    const forceTimer = setTimeout(() => {
+      console.warn("[Main] Cleanup timeout, force quitting")
+      doExit()
+    }, 10_000)
+
+    cleanup.finally(() => {
+      clearTimeout(forceTimer)
+      doExit()
+    })
   })
 }

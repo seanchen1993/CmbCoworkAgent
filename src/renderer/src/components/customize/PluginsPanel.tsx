@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
+  ExternalLink,
   FolderOpen,
   Plug,
   Plus,
@@ -7,8 +8,10 @@ import {
   Puzzle,
   Search,
   Sparkles,
+  Store,
   Trash2,
   Upload,
+  Webhook,
   X
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -26,11 +29,61 @@ import {
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
 import type { PluginMetadata, PluginManifest } from "@/types"
+import { marketApi, type MarketItem } from "../../api/market"
+import { MarketPublishDialog, type MarketPublishTarget } from "./MarketPublishDialog"
+import { readUploadedItemNamesFromStorage } from "./marketPublishStorage"
+import { toast } from "sonner"
+
+type PluginHookMetadata = Awaited<ReturnType<typeof window.api.plugins.listHooks>>[number]
+const PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL =
+  import.meta.env.VITE_PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL?.trim()
+const LOCAL_UPLOADED_PLUGIN_NAMES_KEY = "plugins_panel_uploaded_plugin_names"
 
 interface PluginDetail {
   skills: string[]
   mcpServers: string[]
+  hookCount: number
+  hooks: PluginHookMetadata[]
   manifest: PluginManifest | null
+}
+
+function normalizePluginNameKey(name: string): string {
+  return String(name || "").trim().toLowerCase()
+}
+
+function readLocalUploadedPluginNamesFromStorage(): Set<string> {
+  try {
+    const raw = localStorage.getItem(LOCAL_UPLOADED_PLUGIN_NAMES_KEY)
+    const parsed: string[] = raw ? JSON.parse(raw) : []
+    if (!Array.isArray(parsed)) return new Set()
+    return new Set(parsed.map(normalizePluginNameKey).filter(Boolean))
+  } catch (error) {
+    console.warn("[PluginsPanel] Failed to read local uploaded plugin names:", error)
+    return new Set()
+  }
+}
+
+function markLocalUploadedPluginNameInStorage(pluginName: string): void {
+  try {
+    const key = normalizePluginNameKey(pluginName)
+    if (!key) return
+    const next = readLocalUploadedPluginNamesFromStorage()
+    next.add(key)
+    localStorage.setItem(LOCAL_UPLOADED_PLUGIN_NAMES_KEY, JSON.stringify([...next]))
+  } catch (error) {
+    console.warn("[PluginsPanel] Failed to mark local uploaded plugin name:", error)
+  }
+}
+
+function removeLocalUploadedPluginNameFromStorage(pluginName: string): void {
+  try {
+    const key = normalizePluginNameKey(pluginName)
+    if (!key) return
+    const next = [...readLocalUploadedPluginNamesFromStorage()].filter((item) => item !== key)
+    localStorage.setItem(LOCAL_UPLOADED_PLUGIN_NAMES_KEY, JSON.stringify(next))
+  } catch (error) {
+    console.warn("[PluginsPanel] Failed to remove local uploaded plugin name:", error)
+  }
 }
 
 function ConfirmDeleteDialog(props: {
@@ -96,7 +149,7 @@ function ErrorDialog(props: {
 function UploadPluginDialog(props: {
   open: boolean
   onOpenChange: (open: boolean) => void
-  onSuccess: () => void
+  onSuccess: (pluginName?: string) => void
 }): React.JSX.Element {
   const { open, onOpenChange, onSuccess } = props
   const [dragOver, setDragOver] = useState(false)
@@ -116,7 +169,7 @@ function UploadPluginDialog(props: {
         const buffer = await file.arrayBuffer()
         const res = await window.api.plugins.install(buffer, file.name)
         if (res.success) {
-          onSuccess()
+          onSuccess(res.pluginName)
           onOpenChange(false)
         } else {
           setError(res.error || "安装失败")
@@ -136,7 +189,7 @@ function UploadPluginDialog(props: {
     try {
       const res = await window.api.plugins.installFromDir()
       if (res.success) {
-        onSuccess()
+        onSuccess(res.pluginName)
         onOpenChange(false)
       } else if (res.error !== "已取消") {
         setError(res.error || "安装失败")
@@ -180,9 +233,24 @@ function UploadPluginDialog(props: {
         <DialogHeader>
           <DialogTitle>安装 Plugin</DialogTitle>
           <DialogDescription>
-            上传 .zip 文件或选择本地 Plugin 文件夹。Plugin 需包含 skills/ 目录或 .mcp.json 配置。
+            上传 .zip 文件或选择本地 Plugin 文件夹。Plugin 可包含 skills/、.mcp.json，或
+            hooks/hooks.json。
           </DialogDescription>
         </DialogHeader>
+        {PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL && (
+          <div className="mt-4 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
+            <span>需要创建插件？可以先下载插件模板文件，按模板结构修改后再上传。</span>
+            <a
+              href={PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="ml-1 inline-flex items-center gap-1 font-medium text-blue-700 underline-offset-2 hover:underline"
+            >
+              下载插件模板
+              <ExternalLink className="size-3.5" />
+            </a>
+          </div>
+        )}
         <div
           className={cn(
             "mt-4 border-2 border-dashed rounded-lg p-8 text-center transition-colors cursor-pointer",
@@ -233,15 +301,40 @@ function UploadPluginDialog(props: {
 
 export function PluginsPanel(): React.JSX.Element {
   const bumpPluginVersion = useAppStore((s) => s.bumpPluginVersion)
+  const setShowCustomizeView = useAppStore((s) => s.setShowCustomizeView)
   const [plugins, setPlugins] = useState<PluginMetadata[]>([])
   const [selectedPlugin, setSelectedPlugin] = useState<PluginMetadata | null>(null)
   const [detail, setDetail] = useState<PluginDetail | null>(null)
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false)
+  const [publishDialogOpen, setPublishDialogOpen] = useState(false)
+  const [publishTarget, setPublishTarget] = useState<MarketPublishTarget | null>(null)
+  const [publishMode, setPublishMode] = useState<"upload" | "update">("upload")
+  const [marketPluginMap, setMarketPluginMap] = useState<Record<string, MarketItem>>({})
+  const [marketPluginsLoaded, setMarketPluginsLoaded] = useState(false)
+  const [uploadedPluginNames, setUploadedPluginNames] = useState<Set<string>>(() =>
+    readUploadedItemNamesFromStorage("plugin")
+  )
+  const [localUploadedPluginNames, setLocalUploadedPluginNames] = useState<Set<string>>(() =>
+    readLocalUploadedPluginNamesFromStorage()
+  )
   const [searchQuery, setSearchQuery] = useState("")
   const [debouncedQuery, setDebouncedQuery] = useState("")
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const [deleteTarget, setDeleteTarget] = useState<PluginMetadata | null>(null)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
+
+  const shouldHidePluginDetails = useCallback(
+    (plugin: PluginMetadata | null): boolean => {
+      if (!plugin) return false
+      const key = normalizePluginNameKey(plugin.name)
+      if (!key) return false
+      const isSelfOwned = uploadedPluginNames.has(key) || localUploadedPluginNames.has(key)
+      if (isSelfOwned) return false
+      if (!marketPluginsLoaded) return true
+      return Boolean(marketPluginMap[key])
+    },
+    [localUploadedPluginNames, marketPluginMap, marketPluginsLoaded, uploadedPluginNames]
+  )
 
   // Clean up debounce timer on unmount
   useEffect(() => {
@@ -258,8 +351,29 @@ export function PluginsPanel(): React.JSX.Element {
     window.api.plugins.list().then(setPlugins).catch(console.error)
   }, [])
 
+  const loadMarketPlugins = useCallback(async () => {
+    try {
+      const res = await marketApi.getPlugins()
+      if (!res.success || !res.data) return
+      const next: Record<string, MarketItem> = {}
+      for (const item of res.data) {
+        const key = item.name.trim().toLowerCase()
+        if (key) next[key] = item
+      }
+      setMarketPluginMap(next)
+      setMarketPluginsLoaded(true)
+    } catch (e) {
+      console.warn("[PluginsPanel] Failed to load market plugins:", e)
+      setMarketPluginsLoaded(true)
+    }
+  }, [])
+
   // After install/update, refresh the selected plugin's detail if it was affected
-  const handleInstallSuccess = useCallback(() => {
+  const handleInstallSuccess = useCallback((pluginName?: string) => {
+    if (pluginName) {
+      markLocalUploadedPluginNameInStorage(pluginName)
+      setLocalUploadedPluginNames(readLocalUploadedPluginNamesFromStorage())
+    }
     window.api.plugins
       .list()
       .then((list) => {
@@ -271,32 +385,54 @@ export function PluginsPanel(): React.JSX.Element {
           )
           if (updated) {
             setSelectedPlugin(updated)
-            window.api.plugins
-              .getDetail(updated.id)
-              .then(setDetail)
-              .catch(() => {
-                setDetail({ skills: [], mcpServers: [], manifest: null })
-              })
+            if (shouldHidePluginDetails(updated)) {
+              setDetail(null)
+            } else {
+              window.api.plugins
+                .getDetail(updated.id)
+                .then(setDetail)
+                .catch(() => {
+                  setDetail({ skills: [], mcpServers: [], hookCount: 0, hooks: [], manifest: null })
+                })
+            }
           }
         }
       })
       .catch(console.error)
-  }, [selectedPlugin])
+  }, [bumpPluginVersion, selectedPlugin, shouldHidePluginDetails])
+
+  const shouldHideSelectedPluginDetails = shouldHidePluginDetails(selectedPlugin)
 
   useEffect(() => {
     refreshPlugins()
   }, [refreshPlugins])
 
-  const loadDetail = useCallback(async (plugin: PluginMetadata) => {
-    setSelectedPlugin(plugin)
-    setDetail(null)
-    try {
-      const d = await window.api.plugins.getDetail(plugin.id)
-      setDetail(d)
-    } catch {
-      setDetail({ skills: [], mcpServers: [], manifest: null })
-    }
-  }, [])
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      void loadMarketPlugins()
+    }, 0)
+    return () => clearTimeout(timer)
+  }, [loadMarketPlugins])
+
+  const loadDetail = useCallback(
+    async (plugin: PluginMetadata) => {
+      setSelectedPlugin(plugin)
+      setDetail(null)
+      if (shouldHidePluginDetails(plugin)) return
+      try {
+        const d = await window.api.plugins.getDetail(plugin.id)
+        setDetail(d)
+      } catch {
+        setDetail({ skills: [], mcpServers: [], hookCount: 0, hooks: [], manifest: null })
+      }
+    },
+    [shouldHidePluginDetails]
+  )
+
+  useEffect(() => {
+    if (!marketPluginsLoaded || !selectedPlugin || detail || shouldHideSelectedPluginDetails) return
+    void loadDetail(selectedPlugin)
+  }, [detail, loadDetail, marketPluginsLoaded, selectedPlugin, shouldHideSelectedPluginDetails])
 
   const handleSelectPlugin = useCallback(
     (plugin: PluginMetadata) => {
@@ -320,7 +456,24 @@ export function PluginsPanel(): React.JSX.Element {
         setErrorMsg(e instanceof Error ? e.message : "启用/禁用插件失败")
       }
     },
-    [selectedPlugin, refreshPlugins]
+    [bumpPluginVersion, selectedPlugin, refreshPlugins]
+  )
+
+  const handleToggleHookEnabled = useCallback(
+    async (plugin: PluginMetadata, hook: PluginHookMetadata) => {
+      try {
+        const result = await window.api.plugins.setHookEnabled(plugin.id, hook.id, !hook.enabled)
+        if (!result.success) {
+          setErrorMsg(result.error || "启用/禁用插件 Hook 失败")
+          return
+        }
+        bumpPluginVersion()
+        await loadDetail(plugin)
+      } catch (e) {
+        setErrorMsg(e instanceof Error ? e.message : "启用/禁用插件 Hook 失败")
+      }
+    },
+    [bumpPluginVersion, loadDetail]
   )
 
   const handleDeleteRequest = useCallback((plugin: PluginMetadata) => {
@@ -334,6 +487,8 @@ export function PluginsPanel(): React.JSX.Element {
     try {
       const res = await window.api.plugins.delete(plugin.id)
       if (res.success) {
+        removeLocalUploadedPluginNameFromStorage(plugin.name)
+        setLocalUploadedPluginNames(readLocalUploadedPluginNamesFromStorage())
         if (selectedPlugin?.id === plugin.id) {
           setSelectedPlugin(null)
           setDetail(null)
@@ -346,7 +501,40 @@ export function PluginsPanel(): React.JSX.Element {
     } catch (e) {
       setErrorMsg(e instanceof Error ? e.message : "卸载插件失败")
     }
-  }, [deleteTarget, selectedPlugin, refreshPlugins])
+  }, [bumpPluginVersion, deleteTarget, selectedPlugin, refreshPlugins])
+
+  const openPublishDialog = useCallback(
+    (plugin: PluginMetadata) => {
+      const key = plugin.name.trim().toLowerCase()
+      setPublishMode(uploadedPluginNames.has(key) ? "update" : "upload")
+      setPublishTarget({
+        type: "plugin",
+        name: plugin.name,
+        description: plugin.description,
+        category: marketPluginMap[key]?.category,
+        chineseName: marketPluginMap[key]?.chinese_name
+      })
+      setPublishDialogOpen(true)
+    },
+    [marketPluginMap, uploadedPluginNames]
+  )
+
+  const buildPluginMarketFile = useCallback(
+    async (target: MarketPublishTarget) => {
+      const plugin = plugins.find((item) => item.name === target.name)
+      if (!plugin) return { success: false, error: "Plugin 不存在" }
+      const exported = await window.api.plugins.exportForMarket(plugin.id)
+      if (!exported.success || !exported.buffer) {
+        return { success: false, error: exported.error || "导出 Plugin 失败" }
+      }
+      const fileName = exported.fileName || `${plugin.name}.zip`
+      return {
+        success: true,
+        file: new File([exported.buffer], fileName, { type: "application/zip" })
+      }
+    },
+    [plugins]
+  )
 
   const filteredPlugins = useMemo(() => {
     const q = debouncedQuery.trim().toLowerCase()
@@ -474,6 +662,12 @@ export function PluginsPanel(): React.JSX.Element {
                         {plugin.mcpServerCount} MCPs
                       </span>
                     )}
+                    {(plugin.hookCount ?? 0) > 0 && (
+                      <span className="text-[10px] text-muted-foreground flex items-center gap-1">
+                        <Webhook className="size-3" />
+                        {plugin.hookCount ?? 0} Hooks
+                      </span>
+                    )}
                   </div>
                 </button>
               ))
@@ -487,7 +681,19 @@ export function PluginsPanel(): React.JSX.Element {
         plugin={selectedPlugin}
         detail={detail}
         onToggleEnabled={handleToggleEnabled}
+        onToggleHookEnabled={handleToggleHookEnabled}
         onDelete={handleDeleteRequest}
+        onPublish={
+          selectedPlugin && !shouldHideSelectedPluginDetails
+            ? () => openPublishDialog(selectedPlugin)
+            : undefined
+        }
+        publishLabel={
+          selectedPlugin && uploadedPluginNames.has(selectedPlugin.name.trim().toLowerCase())
+            ? "更新到市场"
+            : "发布到市场"
+        }
+        hideComponentDetails={shouldHideSelectedPluginDetails}
       />
 
       <UploadPluginDialog
@@ -508,6 +714,30 @@ export function PluginsPanel(): React.JSX.Element {
         message={errorMsg ?? ""}
         onClose={() => setErrorMsg(null)}
       />
+
+      <MarketPublishDialog
+        open={publishDialogOpen}
+        mode={publishMode}
+        target={publishTarget}
+        marketInfo={
+          publishTarget ? marketPluginMap[publishTarget.name.trim().toLowerCase()] : undefined
+        }
+        buildFile={buildPluginMarketFile}
+        onOpenChange={(open) => {
+          setPublishDialogOpen(open)
+          if (!open) setPublishTarget(null)
+        }}
+        onSuccess={({ name, mode }) => {
+          setUploadedPluginNames(readUploadedItemNamesFromStorage("plugin"))
+          void loadMarketPlugins()
+          toast.success(
+            mode === "update"
+              ? `Plugin「${name}」更新发布成功，已跳转到应用市场。`
+              : `Plugin「${name}」发布成功，已跳转到应用市场。`
+          )
+          setShowCustomizeView(true, "market")
+        }}
+      />
     </>
   )
 }
@@ -516,10 +746,24 @@ export function PluginDetailPanel(props: {
   plugin: PluginMetadata | null
   detail: PluginDetail | null
   onToggleEnabled: (plugin: PluginMetadata) => void
+  onToggleHookEnabled?: (plugin: PluginMetadata, hook: PluginHookMetadata) => void
   onDelete: (plugin: PluginMetadata) => void
+  onPublish?: (plugin: PluginMetadata) => void
+  publishLabel?: string
   hideActions?: boolean
+  hideComponentDetails?: boolean
 }): React.JSX.Element {
-  const { plugin, detail, onToggleEnabled, onDelete, hideActions = false } = props
+  const {
+    plugin,
+    detail,
+    onToggleEnabled,
+    onToggleHookEnabled,
+    onDelete,
+    onPublish,
+    publishLabel = "发布到市场",
+    hideActions = false,
+    hideComponentDetails = false
+  } = props
 
   if (!plugin) {
     return (
@@ -531,8 +775,8 @@ export function PluginDetailPanel(props: {
             </div>
             <h3 className="text-lg font-semibold text-foreground/80">Plugins 插件</h3>
             <p className="text-sm text-muted-foreground leading-relaxed">
-              插件是打包好的功能扩展包，一个插件可以同时包含 Skills 技能和 MCP
-              服务器。相比单独添加技能或 MCP，插件提供了更便捷的「一键安装、整体管理」的体验。
+              插件是打包好的功能扩展包，一个插件可以同时包含 Skills、MCP 服务器和 Hooks。
+              相比单独添加技能或 MCP，插件提供了更便捷的「一键安装、整体管理」的体验。
             </p>
           </div>
 
@@ -543,9 +787,13 @@ export function PluginDetailPanel(props: {
                 一个插件可以包含以下组件的任意组合：
                 <span className="font-medium text-foreground/60">Skills</span>（位于{" "}
                 <span className="font-mono text-xs bg-muted px-1.5 py-0.5 rounded">skills/</span>{" "}
-                目录）和 <span className="font-medium text-foreground/60">MCP 服务器</span>（通过{" "}
+                目录）、<span className="font-medium text-foreground/60">MCP 服务器</span>（通过{" "}
                 <span className="font-mono text-xs bg-muted px-1.5 py-0.5 rounded">.mcp.json</span>{" "}
-                配置）。安装后，包含的技能和 MCP 会自动注册，可以在插件详情页查看具体内容。
+                配置），以及 <span className="font-medium text-foreground/60">Hooks</span>（默认读取{" "}
+                <span className="font-mono text-xs bg-muted px-1.5 py-0.5 rounded">
+                  hooks/hooks.json
+                </span>
+                ）。 安装后，包含的技能、MCP 和 Hooks 都可以在插件详情页查看和管理。
               </p>
             </div>
 
@@ -579,8 +827,8 @@ export function PluginDetailPanel(props: {
               <p className="text-[13px] text-muted-foreground leading-relaxed">
                 如果你只需要一个技能，直接在 Skills
                 页面上传即可。如果你只需要连接一个远程工具服务，在 MCPs
-                页面添加即可。但当你需要「一组关联的技能 + MCP
-                配置」打包分发时，插件是更好的选择——安装一次，全部就位。
+                页面添加即可。但当你需要「一组关联的技能 + MCP 配置 + Hook
+                规则」打包分发时，插件是更好的选择——安装一次，全部就位。
               </p>
             </div>
           </div>
@@ -595,6 +843,28 @@ export function PluginDetailPanel(props: {
       ? manifest.author
       : manifest.author.name || ""
     : plugin.author
+  const hookCount = detail?.hookCount ?? plugin.hookCount ?? detail?.hooks.length ?? 0
+  const canManageHooks = !hideActions && typeof onToggleHookEnabled === "function"
+  const eventLabel: Partial<Record<PluginHookMetadata["event"], string>> = {
+    PreToolUse: "调用前",
+    PostToolUse: "调用后",
+    PostToolUseFailure: "调用失败",
+    Stop: "停止",
+    StopFailure: "停止失败",
+    Notification: "通知",
+    UserPromptSubmit: "提交",
+    SessionStart: "会话始",
+    SessionEnd: "会话终",
+    SubagentStart: "子开始",
+    SubagentStop: "子停止",
+    PreCompact: "压缩前",
+    PostCompact: "压缩后",
+    PermissionRequest: "权限申请",
+    PermissionDenied: "权限拒绝",
+    Setup: "初始化",
+    CwdChanged: "目录变更",
+    FileChanged: "文件变更"
+  }
 
   return (
     <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
@@ -613,6 +883,17 @@ export function PluginDetailPanel(props: {
         </div>
         {!hideActions && (
           <div className="flex items-center gap-1.5 shrink-0">
+            {onPublish && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 gap-1.5 text-xs"
+                onClick={() => onPublish(plugin)}
+              >
+                <Store className="size-3" />
+                {publishLabel}
+              </Button>
+            )}
             <Button
               variant="ghost"
               size="sm"
@@ -677,7 +958,7 @@ export function PluginDetailPanel(props: {
           {/* Components summary */}
           <div className="space-y-2">
             <h3 className="text-sm font-medium">组件摘要</h3>
-            <div className="flex items-center gap-4 text-xs">
+            <div className="flex flex-wrap items-center gap-4 text-xs">
               <div className="flex items-center gap-1.5">
                 <Sparkles className="size-3.5 text-amber-500" />
                 <span>{plugin.skillCount} 个 Skills</span>
@@ -686,11 +967,94 @@ export function PluginDetailPanel(props: {
                 <Plug className="size-3.5 text-blue-500" />
                 <span>{plugin.mcpServerCount} 个 MCP Servers</span>
               </div>
+              <div className="flex items-center gap-1.5">
+                <Webhook className="size-3.5 text-violet-500" />
+                <span>{hookCount} 个 Hooks</span>
+              </div>
             </div>
           </div>
 
+          {hideComponentDetails && (
+            <div className="rounded-lg border border-border/60 bg-muted/20 px-3 py-3 text-xs text-muted-foreground leading-relaxed">
+              从市场安装的 Plugin 仅展示组件数量，具体 Hooks、Skills、MCP 配置详情已隐藏。
+            </div>
+          )}
+
+          {!hideComponentDetails && detail && detail.hooks.length > 0 && (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-sm font-medium">Hooks</h3>
+                <span className="text-[11px] text-muted-foreground">
+                  配置文件：{detail.hooks[0]?.hookPath ?? "hooks/hooks.json"}
+                </span>
+              </div>
+              {!plugin.enabled && (
+                <div className="rounded-md border border-amber-300/50 bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">
+                  插件当前已禁用，下面这些 Hook 不会参与执行；你仍然可以提前调整它们的启停状态。
+                </div>
+              )}
+              <div className="space-y-2">
+                {detail.hooks.map((hook) => {
+                  const isPrompt = hook.type === "prompt"
+                  const summary = isPrompt ? (hook.prompt ?? "") : (hook.command ?? "")
+                  return (
+                    <div
+                      key={hook.id}
+                      className={cn(
+                        "rounded-md border border-border/60 bg-muted/20 px-3 py-2 space-y-2",
+                        !hook.enabled && "opacity-60"
+                      )}
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-muted text-muted-foreground">
+                          {eventLabel[hook.event] ?? hook.event}
+                        </span>
+                        {isPrompt && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 bg-violet-500/15 text-violet-600 dark:text-violet-400">
+                            策略
+                          </span>
+                        )}
+                        {hook.matcher && hook.matcher !== "*" && (
+                          <span className="text-[10px] text-muted-foreground shrink-0 font-mono">
+                            {hook.matcher}
+                          </span>
+                        )}
+                        {canManageHooks ? (
+                          <button
+                            className="ml-auto shrink-0"
+                            onClick={() => onToggleHookEnabled?.(plugin, hook)}
+                            title={hook.enabled ? "点击禁用" : "点击启用"}
+                          >
+                            <Power
+                              className={cn(
+                                "size-3.5",
+                                hook.enabled ? "text-status-nominal" : "text-muted-foreground"
+                              )}
+                            />
+                          </button>
+                        ) : (
+                          <span className="ml-auto text-[10px] text-muted-foreground">
+                            {hook.enabled ? "已启用" : "已禁用"}
+                          </span>
+                        )}
+                      </div>
+                      <p
+                        className={cn(
+                          "text-xs text-muted-foreground break-all",
+                          isPrompt ? "italic" : "font-mono"
+                        )}
+                      >
+                        {summary}
+                      </p>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
           {/* Skills list */}
-          {detail && detail.skills.length > 0 && (
+          {!hideComponentDetails && detail && detail.skills.length > 0 && (
             <div className="space-y-2">
               <h3 className="text-sm font-medium">Skills</h3>
               <div className="space-y-1">
@@ -708,7 +1072,7 @@ export function PluginDetailPanel(props: {
           )}
 
           {/* MCP Servers list */}
-          {detail && detail.mcpServers.length > 0 && (
+          {!hideComponentDetails && detail && detail.mcpServers.length > 0 && (
             <div className="space-y-2">
               <h3 className="text-sm font-medium">MCP Servers</h3>
               <div className="space-y-1">
@@ -726,14 +1090,18 @@ export function PluginDetailPanel(props: {
           )}
 
           {/* Loading state */}
-          {!detail && <p className="text-xs text-muted-foreground">加载中...</p>}
+          {!hideComponentDetails && !detail && (
+            <p className="text-xs text-muted-foreground">加载中...</p>
+          )}
 
           {/* Plugin path */}
-          <div className="pt-2 border-t border-border">
-            <p className="text-[10px] text-muted-foreground/60 break-all">
-              {plugin.path.replace(/\\/g, "/")}
-            </p>
-          </div>
+          {!hideComponentDetails && (
+            <div className="pt-2 border-t border-border">
+              <p className="text-[10px] text-muted-foreground/60 break-all">
+                {plugin.path.replace(/\\/g, "/")}
+              </p>
+            </div>
+          )}
         </div>
       </ScrollArea>
     </div>

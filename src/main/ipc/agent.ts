@@ -1,4 +1,4 @@
-import { IpcMain, BrowserWindow } from "electron"
+import { IpcMain, BrowserWindow, dialog } from "electron"
 import { nowIsoLocal } from "../util/local-time"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
 import { Command } from "@langchain/langgraph"
@@ -20,11 +20,23 @@ import {
   invalidateEnabledSkillsCache,
   isOnlineSkillEvolutionEnabled,
   isSkillAutoProposeEnabled,
-  getGlobalRoutingMode
+  getGlobalRoutingMode,
+  getEnabledHooks,
+  getEnabledPluginHookMetadata,
+  getEnabledSkillHookMetadata,
+  getHooks,
+  getWorkspaceHooks,
+  getEnabledPluginHooks,
+  getEnabledSkillHooks,
+  getEnabledSkillsSources,
+  getEnabledPluginSkillSourceMetadata,
+  getDisabledSkillDirs
 } from "../storage"
 import { resolveModel, rememberRoutingDecision, rememberRoutingFeedback } from "../routing"
 import { notifyIfBackground, stripThink } from "../services/notify"
+import { trackEvent } from "../services/event-reporter"
 import { trySendChatXReply } from "../services/chatx"
+import { setAdoptionContext } from "../services/adoption-tracker"
 import { TraceCollector } from "../agent/trace/collector"
 import {
   requestSkillIntent,
@@ -32,7 +44,7 @@ import {
   sanitizeSkillId
 } from "../agent/tools/skill-evolution-tool"
 import { mkdirSync, writeFileSync } from "fs"
-import { join } from "path"
+import { join, resolve } from "path"
 import { v4 as uuid } from "uuid"
 import { LocalSandbox } from "../agent/local-sandbox"
 import { SkillUsageDetector } from "../agent/skill-evolution/usage-detector"
@@ -59,11 +71,39 @@ import {
   type SkillProposal,
   type WorthinessResult
 } from "../agent/skill-evolution/skill-proposal-logic"
+import { isRetryableApiError, buildOrderedChain, type FailoverAttempt } from "../agent/failover"
+import { type HookContext, type HookResultCallback } from "../hooks/runner"
 import {
-  isRetryableApiError,
-  buildOrderedChain,
-  type FailoverAttempt
-} from "../agent/failover"
+  createHookScope,
+  normalizePathKey,
+  normalizePluginId,
+  normalizeSkillName,
+  resolveEnabledHooksForRun,
+  type HookScopeController
+} from "../hooks/scope"
+import type { HookConfig, HookEvent, HookResult } from "../hooks/types"
+import { fireSessionStartOnce } from "../hooks/session-lifecycle"
+import { runHooksEnriched } from "../hooks/required-skill"
+import { isHookHaltError, throwIfHookHalt, type HookHaltError } from "../hooks/halt"
+import { activateSkillLifecycle, formatSkillHookContext } from "../agent/skill-lifecycle/activation"
+import { parseSkillUseBlock, type ParsedSkillUseBlock } from "../agent/skill-lifecycle/marker"
+import { SkillLifecycleRegistry, type SkillLifecycleMatch } from "../agent/skill-lifecycle/registry"
+import { createSkillUseTracker, type SkillUseTracker } from "../agent/skill-lifecycle/tracker"
+import {
+  runCompletionHooksWithRevision,
+  type StopHookContext
+} from "../agent/skill-lifecycle/completion-hooks"
+import {
+  discardAgentAutoCommitTracking,
+  maybeAutoCommitAfterAgentRun,
+  recordAgentTouchedFile,
+  startAgentGitSnapshot,
+  type AgentGitSnapshot
+} from "../services/agent-auto-commit"
+import type { AgentAutoCommitResult } from "../types"
+import { formatAutoCommitLines } from "../../shared/auto-commit-format"
+import { makeHookResultCallback } from "../hooks/result-callback"
+import { notifyHooksChanged } from "../hooks/notifications"
 import type {
   AgentInvokeParams,
   AgentResumeParams,
@@ -72,14 +112,670 @@ import type {
 } from "../types"
 
 const MIN_CHARS_FOR_MEMORY = 200
+const MAX_STOP_HOOK_REVISIONS = 2
+const MAX_STOP_CONTEXT_TEXT_CHARS = 40_000
+const STOP_HOOK_REVISION_PROMPT_PREFIX = "[[CMBDEVCLAW_STOP_HOOK_REVISION]]"
 
 // Track active runs for cancellation
 const activeRuns = new Map<string, AbortController>()
 
+function sendHookHalt(window: BrowserWindow, channel: string, error: HookHaltError): void {
+  window.webContents.send(channel, {
+    type: "custom",
+    data: {
+      type: "hook_blocked",
+      hookEvent: error.hookEvent,
+      action: "halt",
+      reason: error.reason,
+      systemMessage: error.systemMessage
+    }
+  })
+  window.webContents.send(channel, { type: "done" })
+}
+
+/**
+ * Thread-scoped hook state shared across IPC handler boundaries. A new
+ * `agent:invoke` starts a fresh turn, but keeps the session-level persistent
+ * hook keys that were activated by earlier skill / plugin use in this thread.
+ * `agent:resume` / `agent:interrupt` reuse the current turn state. Without
+ * this Map, every IPC handler entry would reset hookScope etc. and scoped
+ * hooks would stop firing after a HITL pause or later user message.
+ */
+interface TurnState {
+  hookScope: HookScopeController
+  skillUseTracker: SkillUseTracker
+  skillHookKeys: Set<string>
+  stopContextCollector: StopHookContextCollector
+  runToken: string
+}
+
+const turnStates = new Map<string, TurnState>()
+
+function createTurnState(initialUserMessage?: string): TurnState {
+  return {
+    hookScope: createHookScope(),
+    skillUseTracker: createSkillUseTracker(),
+    skillHookKeys: new Set<string>(),
+    stopContextCollector: new StopHookContextCollector(initialUserMessage),
+    runToken: uuid()
+  }
+}
+
+function resetTurnStateForNewInvoke(state: TurnState, initialUserMessage?: string): void {
+  const snapshot = state.hookScope.snapshot()
+  state.hookScope = createHookScope()
+  state.hookScope.activatePersistentHookKeys(snapshot.persistentHookKeys ?? [])
+  state.skillUseTracker = createSkillUseTracker()
+  state.skillHookKeys = new Set<string>()
+  state.stopContextCollector = new StopHookContextCollector(initialUserMessage)
+}
+
+function getOrCreateTurnState(threadId: string, initialUserMessage?: string): TurnState {
+  const existing = turnStates.get(threadId)
+  if (existing) return existing
+  const fresh = createTurnState(initialUserMessage)
+  turnStates.set(threadId, fresh)
+  return fresh
+}
+
+function disposeTurnState(threadId: string): void {
+  turnStates.delete(threadId)
+}
+
+export function disposeAgentThreadState(threadId: string): void {
+  disposeTurnState(threadId)
+}
+
+export function disposeAllAgentThreadStates(): void {
+  turnStates.clear()
+}
+
+function disposeTurnRuntimeState(state: TurnState): void {
+  state.skillUseTracker = createSkillUseTracker()
+  state.skillHookKeys = new Set<string>()
+  state.stopContextCollector = new StopHookContextCollector()
+}
+
+function startTurnStateRun(state: TurnState): string {
+  state.runToken = uuid()
+  return state.runToken
+}
+
+function shouldDisposeTurnState(threadId: string, runToken: string): boolean {
+  return turnStates.get(threadId)?.runToken === runToken
+}
+
+/**
+ * Snapshot every enabled hook (global + workspace + plugin + skill) so the
+ * prune step can search across all sources for `persistAfterInterrupt: true`.
+ * The lists are filtered for `enabled` already at the storage layer.
+ */
+function getAllEnabledHooksForInterrupt(workspacePath: string | undefined): HookConfig[] {
+  return [
+    ...getEnabledHooks(workspacePath),
+    ...getEnabledPluginHookMetadata(),
+    ...getEnabledSkillHookMetadata()
+  ]
+}
+
+async function maybeRunSubagentStopHooksFromStreamPayload(params: {
+  payload: unknown
+  workspacePath?: string
+  threadId: string
+  hookScope: HookScopeController
+  firedToolCallIds: Set<string>
+  onHookResult?: HookResultCallback
+}): Promise<void> {
+  const [msgChunk] = params.payload as [
+    { id?: unknown; kwargs?: Record<string, unknown>; content?: unknown } | undefined
+  ]
+  if (!msgChunk) return
+
+  const kwargs = (msgChunk.kwargs || {}) as Record<string, unknown>
+  const classId: string[] = Array.isArray(msgChunk.id) ? msgChunk.id : []
+  const className = classId[classId.length - 1] || ""
+  const isTool = className.includes("Tool") || kwargs.type === "tool"
+  const toolCallId = typeof kwargs.tool_call_id === "string" ? kwargs.tool_call_id : ""
+  if (!isTool || kwargs.name !== "task" || !toolCallId) return
+  if (params.firedToolCallIds.has(toolCallId)) return
+  params.firedToolCallIds.add(toolCallId)
+
+  const additionalKwargs = kwargs.additional_kwargs as Record<string, unknown> | undefined
+  const isErr =
+    kwargs.status === "error" || kwargs.is_error === true || additionalKwargs?.is_error === true
+  const subagentStopContext: HookContext = {
+    workspacePath: params.workspacePath,
+    sessionId: params.threadId,
+    subagent: {
+      id: toolCallId,
+      status: isErr ? "failed" : "completed"
+    }
+  }
+  const result = await runHooksEnriched(
+    resolveEnabledHooksForRun(
+      params.workspacePath,
+      "SubagentStop",
+      subagentStopContext,
+      params.hookScope
+    ),
+    "SubagentStop",
+    subagentStopContext,
+    params.onHookResult
+  )
+  throwIfHookHalt("SubagentStop", result, "SubagentStop hook stopped the turn")
+}
+
+/**
+ * At a HITL interrupt boundary (resume / interrupt entry), drop activations
+ * for skills / plugins that have no `persistAfterInterrupt: true` hook.
+ * Anything kept stays scoped for the next stream; anything pruned reverts to
+ * pre-interrupt fresh-state behaviour. `stopContextCollector` is intentionally
+ * not pruned — it tracks turn-wide history regardless of skill scope.
+ */
+function pruneTurnStateAtInterrupt(
+  state: TurnState,
+  allHooks: readonly HookConfig[]
+): void {
+  const keepPluginIds = new Set<string>()
+  const keepSkillPaths = new Set<string>()
+  const keepSkillNames = new Set<string>()
+  for (const hook of allHooks) {
+    if (hook.persistAfterInterrupt !== true) continue
+    const scoped = hook as HookConfig & {
+      pluginId?: string
+      skillName?: string
+      skillPath?: string
+      skillRoot?: string
+    }
+    if (typeof scoped.pluginId === "string" && scoped.pluginId.length > 0) {
+      keepPluginIds.add(normalizePluginId(scoped.pluginId))
+    }
+    const skillPath = scoped.skillPath ?? scoped.skillRoot ?? hook.hookSourceRoot
+    if (typeof skillPath === "string" && skillPath.length > 0) {
+      keepSkillPaths.add(normalizePathKey(skillPath))
+    }
+    if (typeof scoped.skillName === "string" && scoped.skillName.length > 0) {
+      keepSkillNames.add(normalizeSkillName(scoped.skillName))
+    }
+  }
+
+  state.hookScope.activatePersistentHooks(
+    allHooks.filter((hook) => {
+      if (hook.persistAfterInterrupt !== true) return false
+      const scoped = hook as HookConfig & {
+        pluginId?: string
+        skillName?: string
+        skillPath?: string
+        skillRoot?: string
+      }
+      const hookPluginId = normalizePluginId(scoped.pluginId)
+      const hookSkillPath = normalizePathKey(scoped.skillPath ?? scoped.skillRoot ?? hook.hookSourceRoot)
+      const hookSkillName = normalizeSkillName(scoped.skillName)
+      return (
+        (hookPluginId && state.hookScope.activePluginIds.has(hookPluginId)) ||
+        (hookSkillPath && state.hookScope.activeSkillPaths.has(hookSkillPath)) ||
+        (hookSkillName && state.hookScope.activeSkillNames.has(hookSkillName))
+      )
+    })
+  )
+
+  state.hookScope.pruneActivations({
+    keepPluginId: (id) => keepPluginIds.has(id),
+    keepSkillPath: (path) => keepSkillPaths.has(path),
+    keepSkillName: (name) => keepSkillNames.has(name)
+  })
+  state.skillUseTracker.pruneRecords((record) => {
+    return (
+      keepSkillPaths.has(normalizePathKey(record.rootDir)) ||
+      keepSkillNames.has(normalizeSkillName(record.name))
+    )
+  })
+  // skillHookKeys is keyed by the same normalized rootDir path the scope
+  // uses, so we can filter against keepSkillPaths directly.
+  for (const key of [...state.skillHookKeys]) {
+    if (!keepSkillPaths.has(key)) state.skillHookKeys.delete(key)
+  }
+}
+
+interface ExplicitSkillActivation {
+  parsed: ParsedSkillUseBlock
+  skill?: SkillLifecycleMatch
+  hookContext?: string
+  blocked: boolean
+  reason?: string
+}
+
+function normalizeSkillPathKey(input: string): string {
+  const normalized = resolve(input).replace(/\\/g, "/").replace(/\/+$/, "")
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized
+}
+
+function isSameOrChildSkillPath(targetPath: string, parentPath: string): boolean {
+  const target = normalizeSkillPathKey(targetPath)
+  const parent = normalizeSkillPathKey(parentPath)
+  return target === parent || target.startsWith(`${parent}/`)
+}
+
+function isDisabledSkillMatch(skill: SkillLifecycleMatch): boolean {
+  return getDisabledSkillDirs().some((dir) => isSameOrChildSkillPath(skill.rootDir, dir))
+}
+
+async function buildSkillLifecycleRegistryForHooks(): Promise<SkillLifecycleRegistry | null> {
+  const rootSources = await getEnabledSkillsSources()
+  const pluginSources = getEnabledPluginSkillSourceMetadata()
+  const sources = [...rootSources, ...pluginSources]
+  return sources.length > 0 ? new SkillLifecycleRegistry(sources) : null
+}
+
+async function activateExplicitSkillFromMessage({
+  message,
+  workspacePath,
+  sessionId,
+  hookScope,
+  firedSkillKeys,
+  skillUseTracker,
+  onHookResult
+}: {
+  message: string
+  workspacePath: string
+  sessionId: string
+  hookScope: HookScopeController
+  firedSkillKeys: Set<string>
+  skillUseTracker: SkillUseTracker
+  onHookResult?: HookResultCallback
+}): Promise<ExplicitSkillActivation | null> {
+  const parsed = parseSkillUseBlock(message)
+  if (!parsed) return null
+
+  const registry = await buildSkillLifecycleRegistryForHooks()
+  const skill = registry?.resolveExplicit({
+    skillName: parsed.skillName,
+    skillPath: parsed.skillPath
+  })
+
+  if (!skill || isDisabledSkillMatch(skill)) {
+    return {
+      parsed,
+      blocked: true,
+      reason: `显式选择的技能不存在或已禁用：${parsed.skillName}`
+    }
+  }
+
+  const result = await activateSkillLifecycle({
+    skill,
+    trigger: "explicit",
+    toolName: "skill_select",
+    toolArgs: {
+      skillName: parsed.skillName,
+      skillPath: parsed.skillPath
+    },
+    toolResult: JSON.stringify({
+      selected: true,
+      trigger: "explicit",
+      skillName: skill.name,
+      skillPath: skill.path
+    }),
+    workspacePath,
+    sessionId,
+    hookScope,
+    firedSkillKeys,
+    skillUseTracker,
+    resolveHooks: (event: HookEvent, context: HookContext): HookConfig[] =>
+      resolveEnabledHooksForRun(workspacePath, event, context, hookScope),
+    onHookResult
+  })
+
+  return {
+    parsed,
+    skill,
+    hookContext: formatSkillHookContext(skill, result.notes) ?? undefined,
+    blocked: result.blocked,
+    reason: result.reason
+  }
+}
+
+interface ActiveHookSummary {
+  global: number
+  plugin: number
+  skill: number
+  workspace: number
+  total: number
+}
+
+function getActiveHookSummary(workspacePath?: string): ActiveHookSummary {
+  const global = getHooks().filter((hook) => hook.enabled).length
+  const plugin = getEnabledPluginHooks().filter((hook) => hook.enabled).length
+  const skill = getEnabledSkillHooks().filter((hook) => hook.enabled).length
+  const workspace = workspacePath
+    ? getWorkspaceHooks(workspacePath).filter((hook) => hook.enabled).length
+    : 0
+  return {
+    global,
+    plugin,
+    skill,
+    workspace,
+    total: global + plugin + skill + workspace
+  }
+}
+
+function formatActiveHookNotice(summary: ActiveHookSummary): string | null {
+  // 全局 / 工作区 hook 进入本轮即生效；插件 / 技能 hook 走作用域化激活
+  // （只有当其所属插件/技能本轮被使用时才会触发），不能与前两类合并展示，
+  // 否则用户会以为所有 plugin/skill hook 都会跑。
+  const baseTotal = summary.global + summary.workspace
+  const scopedTotal = summary.plugin + summary.skill
+  if (baseTotal === 0 && scopedTotal === 0) return null
+
+  const segments: string[] = []
+  if (baseTotal > 0) {
+    const baseParts = [
+      summary.global > 0 ? `全局 ${summary.global}` : "",
+      summary.workspace > 0 ? `工作区 ${summary.workspace}` : ""
+    ].filter(Boolean)
+    segments.push(`本轮已启用 ${baseTotal} 个钩子（${baseParts.join("，")}）`)
+  }
+  if (scopedTotal > 0) {
+    const scopedParts = [
+      summary.plugin > 0 ? `插件 ${summary.plugin}` : "",
+      summary.skill > 0 ? `技能 ${summary.skill}` : ""
+    ].filter(Boolean)
+    segments.push(`按需触发：${scopedParts.join("，")}（仅在对应插件/技能本轮被使用时生效）`)
+  }
+  return segments.join("；")
+}
+
+function sendHookNotice(window: BrowserWindow, channel: string, message: string): void {
+  window.webContents.send(channel, {
+    type: "custom",
+    data: { type: "hook_notice", message }
+  })
+}
+
+function sendActiveHookNotice(
+  window: BrowserWindow,
+  channel: string,
+  workspacePath?: string
+): void {
+  const message = formatActiveHookNotice(getActiveHookSummary(workspacePath))
+  if (!message) return
+  sendHookNotice(window, channel, message)
+}
+
+function sendAutoCommitResult(
+  window: BrowserWindow,
+  channel: string,
+  result: AgentAutoCommitResult
+): void {
+  if (result.status === "disabled") return
+  window.webContents.send(channel, {
+    type: "custom",
+    data: { type: "auto_commit_result", result }
+  })
+}
+
+async function confirmAutoCommit(
+  window: BrowserWindow,
+  result: AgentAutoCommitResult
+): Promise<boolean> {
+  const lines = formatAutoCommitLines(result)
+  const response = await dialog.showMessageBox(window, {
+    type: "question",
+    buttons: ["提交", "取消"],
+    defaultId: 0,
+    cancelId: 1,
+    title: "确认自动提交",
+    message: result.message || "是否提交本轮 Agent 改动？",
+    detail: lines.join("\n")
+  })
+  return response.response === 0
+}
+
+async function finalizeAutoCommit({
+  threadId,
+  workspacePath,
+  userPrompt,
+  snapshot,
+  window,
+  channel
+}: {
+  threadId: string
+  workspacePath: string | undefined
+  userPrompt?: string
+  snapshot: AgentGitSnapshot | null
+  window: BrowserWindow
+  channel: string
+}): Promise<void> {
+  const result = await maybeAutoCommitAfterAgentRun({
+    threadId,
+    workspacePath,
+    userPrompt,
+    snapshot,
+    confirm: (preview) => confirmAutoCommit(window, preview)
+  })
+  sendAutoCommitResult(window, channel, result)
+}
+
+async function beginAutoCommitTracking(
+  threadId: string,
+  workspacePath: string | undefined
+): Promise<{
+  snapshot: AgentGitSnapshot | null
+  onFileMutation?: (filePath: string) => void
+}> {
+  let snapshot: AgentGitSnapshot | null = null
+  try {
+    snapshot = await startAgentGitSnapshot(threadId, workspacePath)
+  } catch (error) {
+    console.warn("[AutoCommit] failed to capture start snapshot:", error)
+  }
+  return {
+    snapshot,
+    onFileMutation: workspacePath
+      ? (filePath: string) => recordAgentTouchedFile(threadId, workspacePath, filePath)
+      : undefined
+  }
+}
+
+interface SerializedHookMessage {
+  id?: string[]
+  content?: unknown
+  kwargs?: {
+    id?: string
+    type?: string
+    content?: unknown
+    name?: string
+    tool_call_id?: string
+    tool_calls?: Array<{
+      id?: string
+      name?: string
+      args?: Record<string, unknown>
+    }>
+  }
+}
+
+function serializeStreamData(data: unknown): unknown {
+  return JSON.parse(JSON.stringify(data))
+}
+
+function trimStopContextText(text: string): string {
+  const trimmed = text.trim()
+  if (trimmed.length <= MAX_STOP_CONTEXT_TEXT_CHARS) return trimmed
+  return `${trimmed.slice(0, MAX_STOP_CONTEXT_TEXT_CHARS)}\n...(truncated)`
+}
+
+function extractStopContextText(raw: unknown): string {
+  if (typeof raw === "string") return raw
+  if (!Array.isArray(raw)) return ""
+  return raw
+    .map((block) => {
+      if (typeof block === "string") return block
+      if (!block || typeof block !== "object") return ""
+      const item = block as { type?: string; text?: string; content?: string }
+      if (typeof item.text === "string") return item.text
+      if (typeof item.content === "string") return item.content
+      return ""
+    })
+    .filter(Boolean)
+    .join("")
+}
+
+function isStopHookRevisionPrompt(text: string): boolean {
+  return text.trimStart().startsWith(STOP_HOOK_REVISION_PROMPT_PREFIX)
+}
+
+function stopContextRole(
+  className: string,
+  kwargs: SerializedHookMessage["kwargs"]
+): "user" | "assistant" | "tool" | "system" | "unknown" {
+  if (className.includes("Human")) return "user"
+  if (className.includes("AI")) return "assistant"
+  if (className.includes("Tool")) return "tool"
+  if (className.includes("System")) return "system"
+  if (kwargs?.type === "human") return "user"
+  if (kwargs?.type === "ai") return "assistant"
+  if (kwargs?.type === "tool") return "tool"
+  if (kwargs?.type === "system") return "system"
+  return "unknown"
+}
+
+class StopHookContextCollector {
+  private userMessage?: string
+  private readonly assistantChunks: string[] = []
+  private latestFinalAssistantResponse = ""
+  private readonly countedAiMessageIds = new Set<string>()
+  private readonly toolCallCounter = new ToolCallCounter()
+  private readonly skillUsageDetector = new SkillUsageDetector()
+
+  constructor(userMessage?: string) {
+    if (userMessage) this.userMessage = userMessage
+  }
+
+  processStreamChunk(mode: string, payload: unknown): void {
+    try {
+      if (mode === "messages") {
+        this.processMessagePayload(payload)
+        return
+      }
+      if (mode === "values") {
+        this.processValuesPayload(payload)
+      }
+    } catch (error) {
+      console.warn("[Hooks] Failed to collect Stop hook context:", error)
+    }
+  }
+
+  snapshot(overrides: StopHookContext = {}): StopHookContext {
+    const context: StopHookContext = {}
+    const userMessage = overrides.userMessage ?? this.userMessage
+    const assistantResponse =
+      overrides.assistantResponse ??
+      (this.latestFinalAssistantResponse || this.assistantChunks.join("").trim())
+    const toolCalls =
+      overrides.toolCalls && overrides.toolCalls.length > 0
+        ? overrides.toolCalls
+        : this.toolCallCounter.getNames()
+    const usedSkills =
+      overrides.usedSkills && overrides.usedSkills.length > 0
+        ? overrides.usedSkills
+        : this.skillUsageDetector.getUsedSkillNames()
+
+    if (userMessage) context.userMessage = trimStopContextText(userMessage)
+    if (assistantResponse) context.assistantResponse = trimStopContextText(assistantResponse)
+    if (toolCalls.length > 0) context.toolCalls = toolCalls
+    if (usedSkills.length > 0) context.usedSkills = usedSkills
+    return context
+  }
+
+  private processMessagePayload(payload: unknown): void {
+    const [msgChunk] = payload as [SerializedHookMessage]
+    if (!msgChunk) return
+    const kwargs = msgChunk.kwargs || {}
+    const classId = Array.isArray(msgChunk.id) ? msgChunk.id : []
+    const className = classId[classId.length - 1] || ""
+    const role = stopContextRole(className, kwargs)
+    const text = extractStopContextText(kwargs.content ?? msgChunk.content)
+
+    if (role === "user" && text.trim() && !isStopHookRevisionPrompt(text)) {
+      this.userMessage = text.trim()
+    }
+    if (role === "assistant") {
+      if (text) this.assistantChunks.push(text)
+      this.observeToolCalls(kwargs.tool_calls, kwargs.id ?? "")
+    }
+  }
+
+  private processValuesPayload(payload: unknown): void {
+    const state = payload as {
+      skillsMetadata?: Array<{ name?: string; path?: string }>
+      messages?: SerializedHookMessage[]
+    }
+    if (Array.isArray(state.skillsMetadata) && state.skillsMetadata.length > 0) {
+      this.skillUsageDetector.onSkillsMetadata(state.skillsMetadata)
+    }
+    if (!Array.isArray(state.messages)) return
+
+    let lastUserIndex = -1
+    for (let i = state.messages.length - 1; i >= 0; i--) {
+      const msg = state.messages[i]
+      const kwargs = msg?.kwargs || {}
+      const classId = Array.isArray(msg?.id) ? msg.id : []
+      const className = classId[classId.length - 1] || ""
+      if (stopContextRole(className, kwargs) !== "user") continue
+      const text = extractStopContextText(kwargs.content ?? msg.content).trim()
+      if (text && !isStopHookRevisionPrompt(text)) {
+        this.userMessage = text
+        lastUserIndex = i
+        break
+      }
+    }
+
+    const finalResponses: string[] = []
+    const startIndex = lastUserIndex >= 0 ? lastUserIndex + 1 : 0
+    for (let i = startIndex; i < state.messages.length; i++) {
+      const msg = state.messages[i]
+      const kwargs = msg?.kwargs || {}
+      const classId = Array.isArray(msg?.id) ? msg.id : []
+      const className = classId[classId.length - 1] || ""
+      const role = stopContextRole(className, kwargs)
+      if (role !== "assistant") continue
+
+      const aiMessageId = typeof kwargs.id === "string" ? kwargs.id : ""
+      this.observeToolCalls(kwargs.tool_calls, aiMessageId)
+      if (Array.isArray(kwargs.tool_calls) && kwargs.tool_calls.length > 0) continue
+
+      const text = extractStopContextText(kwargs.content ?? msg.content).trim()
+      if (text) finalResponses.push(text)
+    }
+
+    if (finalResponses.length > 0) {
+      this.latestFinalAssistantResponse = finalResponses[finalResponses.length - 1]
+    }
+  }
+
+  private observeToolCalls(
+    toolCalls: Array<{ id?: string; name?: string; args?: Record<string, unknown> }> | undefined,
+    aiMessageId: string
+  ): void {
+    if (!Array.isArray(toolCalls) || toolCalls.length === 0) return
+    if (aiMessageId && this.countedAiMessageIds.has(aiMessageId)) return
+    if (aiMessageId) this.countedAiMessageIds.add(aiMessageId)
+
+    for (let index = 0; index < toolCalls.length; index++) {
+      const toolCall = toolCalls[index]
+      this.toolCallCounter.register(toolCall, aiMessageId, index)
+      if (toolCall.name !== "read_file") continue
+      const readPathRaw =
+        (typeof toolCall.args?.path === "string" && toolCall.args.path) ||
+        (typeof toolCall.args?.file_path === "string" && toolCall.args.file_path) ||
+        ""
+      if (readPathRaw) this.skillUsageDetector.onReadFilePath(readPathRaw)
+    }
+  }
+}
+
 // ─────────────────────────────────────────────────────────
 // Auto skill proposal: generate a skill from conversation context
 // ─────────────────────────────────────────────────────────
-
 
 const SKILL_PROPOSAL_SYSTEM_PROMPT = `You are an expert at capturing reusable agent skills from conversation history.
 
@@ -178,10 +874,13 @@ function buildModelRetryHooks(window: BrowserWindow, channel: string): ModelRetr
           delayMs: info.delayMs
         }
       })
+    },
+    onRetrySuccess: () => {
+      safeSend({
+        type: "custom",
+        data: { type: "model_retry_clear" }
+      })
     }
-    // No onRetryResolved: the renderer clears the indicator via stream-end
-    // (handleStreamUpdate) and message-delta defensive clears, which together
-    // cover every termination path without needing an explicit clear event.
   }
 }
 
@@ -210,7 +909,9 @@ async function judgeSkillWorthiness(
   const configs = getCustomModelConfigs()
   const config = configs[0]
   if (!config?.apiKey) {
-    console.log(`[SkillEvolution][${threadId}] Worthiness LLM skipped: missing model config or API key`)
+    console.log(
+      `[SkillEvolution][${threadId}] Worthiness LLM skipped: missing model config or API key`
+    )
     return null
   }
 
@@ -218,8 +919,8 @@ async function judgeSkillWorthiness(
     model: config.model,
     apiKey: config.apiKey,
     configuration: { baseURL: config.baseUrl },
-    maxTokens: 1024,
-    temperature: 0
+    maxTokens: config.maxOutputTokens,
+    temperature: config.temperature
   })
 
   const userPrompt = `## Conversation window since last skill-evolution reset (${context.turnCount} turns)
@@ -231,30 +932,39 @@ ${context.toolCallSummary}
 Is this conversation worth saving as a reusable skill?`
 
   try {
-    console.log(`[SkillEvolution][${threadId}] Worthiness LLM invoke start ${JSON.stringify({
-      toolCallCount: context.toolCallCount,
-      threshold: getSkillEvolutionThreshold(),
-      turnCount: context.turnCount,
-      errorCount: context.errorCount,
-      toolCallSummary: context.toolCallSummary
-    })}`)
+    console.log(
+      `[SkillEvolution][${threadId}] Worthiness LLM invoke start ${JSON.stringify({
+        toolCallCount: context.toolCallCount,
+        threshold: getSkillEvolutionThreshold(),
+        turnCount: context.turnCount,
+        errorCount: context.errorCount,
+        toolCallSummary: context.toolCallSummary
+      })}`
+    )
     const response = await model.invoke([
       new SystemMessage(buildWorthinessPrompt(context.toolCallCount, getSkillEvolutionThreshold())),
       new HumanMessage(userPrompt)
     ])
     const raw = typeof response.content === "string" ? response.content : ""
-    console.log(`[SkillEvolution][${threadId}] Worthiness LLM raw ${JSON.stringify({
-      preview: raw.slice(0, 400)
-    })}`)
+    console.log(
+      `[SkillEvolution][${threadId}] Worthiness LLM raw ${JSON.stringify({
+        preview: raw.slice(0, 400)
+      })}`
+    )
     const result = parseWorthinessResponse(raw)
     if (!result) {
-      console.warn(`[SkillEvolution][${threadId}] Failed to parse worthiness response:`, raw.slice(0, 200))
+      console.warn(
+        `[SkillEvolution][${threadId}] Failed to parse worthiness response:`,
+        raw.slice(0, 200)
+      )
       return null
     }
-    console.log(`[SkillEvolution][${threadId}] Worthiness LLM invoke done ${JSON.stringify({
-      worthy: result.worthy,
-      reason: result.reason
-    })}`)
+    console.log(
+      `[SkillEvolution][${threadId}] Worthiness LLM invoke done ${JSON.stringify({
+        worthy: result.worthy,
+        reason: result.reason
+      })}`
+    )
     return result
   } catch (e) {
     console.warn(`[SkillEvolution][${threadId}] Failed to judge worthiness:`, e)
@@ -298,8 +1008,8 @@ Based on this conversation, generate a reusable skill. Output JSON only.`
       model: config.model,
       apiKey: config.apiKey,
       configuration: { baseURL: config.baseUrl },
-      maxTokens: 2048,
-      temperature: 0.3,
+      maxTokens: config.maxOutputTokens,
+      temperature: config.temperature,
       streaming: true
     })
 
@@ -339,7 +1049,9 @@ Based on this conversation, generate a reusable skill. Output JSON only.`
     } catch (streamErr) {
       clearTimeout(idleTimer)
       if (timedOut) {
-        throw new Error(`技能草稿生成超时（${TOKEN_IDLE_TIMEOUT_MS / 1000}s 内无新内容），请点击重试`)
+        throw new Error(
+          `技能草稿生成超时（${TOKEN_IDLE_TIMEOUT_MS / 1000}s 内无新内容），请点击重试`
+        )
       }
       throw streamErr
     }
@@ -374,6 +1086,7 @@ async function writeSkillToDisk(skillId: string, content: string, name: string):
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send("skills:changed")
   }
+  notifyHooksChanged("skill-written")
   console.log(`[Agent] Wrote skill "${name}" to ${skillDir}`)
 }
 
@@ -403,6 +1116,15 @@ async function confirmAndWriteSkillProposal(
     return
   }
 
+  try {
+    trackEvent("skill.proposal.accepted", "skill", {
+      threadId,
+      skillId,
+      skillName: proposal.name
+    })
+  } catch (e) {
+    console.warn("[event] failed to emit skill.proposal.accepted:", e)
+  }
   await writeSkillToDisk(skillId, proposal.content, proposal.name)
 }
 
@@ -419,7 +1141,8 @@ async function runSkillProposalFlow(
   intentMode: "mode_a_rule" | "mode_b_llm",
   recommendationReason?: string
 ): Promise<void> {
-  const latestUserMessage = context.turns[context.turns.length - 1]?.userMessage ?? context.transcript
+  const latestUserMessage =
+    context.turns[context.turns.length - 1]?.userMessage ?? context.transcript
 
   // Step 1 — Intent banner: ask user whether they want to save as a skill.
   // We include the proposal context so the renderer can cache it for manual retry.
@@ -478,13 +1201,15 @@ async function autoProposeSKill(
   const autoProposeEnabled = isSkillAutoProposeEnabled()
   const mode = getSkillProposalMode(autoProposeEnabled)
 
-  console.log(`[SkillEvolution][${threadId}] Decision start ${JSON.stringify({
-    mode,
-    toolCallCount: context.toolCallCount,
-    turnCount: context.turnCount,
-    errorCount: context.errorCount,
-    toolCallSummary: context.toolCallSummary
-  })}`)
+  console.log(
+    `[SkillEvolution][${threadId}] Decision start ${JSON.stringify({
+      mode,
+      toolCallCount: context.toolCallCount,
+      turnCount: context.turnCount,
+      errorCount: context.errorCount,
+      toolCallSummary: context.toolCallSummary
+    })}`
+  )
 
   let llmWorthy = false
   let worthinessReason: string | undefined
@@ -492,6 +1217,16 @@ async function autoProposeSKill(
     const worthiness = await judgeSkillWorthiness(threadId, context)
     llmWorthy = worthiness?.worthy ?? false
     worthinessReason = worthiness?.reason
+    try {
+      trackEvent("skill.proposal.judged", "skill", {
+        threadId,
+        toolCallCount: context.toolCallCount,
+        worthy: llmWorthy,
+        reason: worthinessReason
+      })
+    } catch (e) {
+      console.warn("[event] failed to emit skill.proposal.judged:", e)
+    }
   } else {
     console.log(`[SkillEvolution][${threadId}] Mode A selected, skipping worthiness LLM`)
   }
@@ -499,23 +1234,37 @@ async function autoProposeSKill(
   const shouldPropose = shouldProposeSkill(mode, llmWorthy)
 
   if (!shouldPropose) {
-    console.log(`[SkillEvolution][${threadId}] Decision skip ${JSON.stringify({
-      mode,
-      llmWorthy,
-      reason: "proposal_flow_not_triggered"
-    })}`)
+    console.log(
+      `[SkillEvolution][${threadId}] Decision skip ${JSON.stringify({
+        mode,
+        llmWorthy,
+        reason: "proposal_flow_not_triggered"
+      })}`
+    )
     return
   }
 
-  console.log(`[SkillEvolution][${threadId}] Decision enter proposal flow ${JSON.stringify({
-    mode,
-    llmWorthy,
-    toolCallCount: context.toolCallCount,
-    turnCount: context.turnCount
-  })}`)
+  console.log(
+    `[SkillEvolution][${threadId}] Decision enter proposal flow ${JSON.stringify({
+      mode,
+      llmWorthy,
+      toolCallCount: context.toolCallCount,
+      turnCount: context.turnCount
+    })}`
+  )
+  try {
+    trackEvent("skill.proposal.triggered", "skill", {
+      threadId,
+      toolCallCount: context.toolCallCount,
+      turnCount: context.turnCount,
+      mode,
+      llmWorthy
+    })
+  } catch (e) {
+    console.warn("[event] failed to emit skill.proposal.triggered:", e)
+  }
   await runSkillProposalFlow(threadId, context, mode, worthinessReason)
 }
-
 
 export function registerAgentHandlers(ipcMain: IpcMain): void {
   console.log("[Agent] Registering agent handlers...")
@@ -538,11 +1287,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         return
       }
 
-      console.log(`[SkillEvolution][${threadId}] Manual retry requested ${JSON.stringify({
-        intentMode,
-        toolCallCount: context.toolCallCount,
-        turnCount: context.turnCount
-      })}`)
+      console.log(
+        `[SkillEvolution][${threadId}] Manual retry requested ${JSON.stringify({
+          intentMode,
+          toolCallCount: context.toolCallCount,
+          turnCount: context.turnCount
+        })}`
+      )
 
       try {
         const proposal = await generateSkillProposal(threadId, context)
@@ -582,6 +1333,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
     const abortController = new AbortController()
     activeRuns.set(threadId, abortController)
+    const turnState = getOrCreateTurnState(threadId, message)
+    resetTurnStateForNewInvoke(turnState, message)
+    const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
+    const runToken = startTurnStateRun(turnState)
+    let turnStateShouldDispose = false
 
     // Abort the stream if the window is closed/destroyed
     const onWindowClosed = (): void => {
@@ -597,6 +1353,68 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     let assistantText = ""
     /** Paths written/edited by the agent during this turn (for memory-write detection) */
     const fileWritePaths: string[] = []
+    const recentCompletedTurns = snapshotSkillProposalWindow(threadId).slice(-2)
+
+    const computeCodeGenAttributionSkills = (currentRunSkills: string[]): string[] => {
+      const inheritedTurns =
+        currentRunSkills.length > 0 ? recentCompletedTurns.slice(-1) : recentCompletedTurns
+
+      return Array.from(
+        new Set([
+          ...currentRunSkills,
+          ...inheritedTurns.flatMap((turn) => turn.usedSkills)
+        ])
+      )
+    }
+
+    const syncUsedSkillsContext = (): void => {
+      const currentRunSkills = skillUsageDetector.getUsedSkillNames()
+      tracer.setUsedSkills(currentRunSkills)
+      setAdoptionContext(threadId, {
+        usedSkills: computeCodeGenAttributionSkills(currentRunSkills)
+      })
+    }
+
+    syncUsedSkillsContext()
+    // stopContextCollector lives in turnState (destructured above) so it survives HITL pauses.
+
+    const sendHookNotice = (notice: string): void => {
+      window.webContents.send(channel, {
+        type: "custom",
+        data: { type: "hook_notice", message: notice }
+      })
+    }
+
+    const sendStreamError = (error: string): void => {
+      window.webContents.send(channel, {
+        type: "error",
+        error
+      })
+    }
+
+    const sendHookBlocked = (
+      event: HookEvent,
+      result: HookResult,
+      fallbackReason: string
+    ): void => {
+      const reason =
+        result.stopReason || result.reason || result.stderr || result.stdout || fallbackReason
+      const action = result.continue === false ? "halt" : "block"
+      window.webContents.send(channel, {
+        type: "custom",
+        data: {
+          type: "hook_blocked",
+          hookEvent: event,
+          action,
+          reason,
+          systemMessage: result.systemMessage
+        }
+      })
+      turnStateShouldDispose = true
+      window.webContents.send(channel, { type: "done" })
+    }
+
+    const onHookResult = makeHookResultCallback(window, channel)
 
     const appendTurnToProposalWindow = (
       status: "success" | "error",
@@ -614,17 +1432,20 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       })
 
       const context = buildSkillProposalWindowContext(snapshotSkillProposalWindow(threadId))
-      console.log(`[SkillEvolution][${threadId}] Window append ${JSON.stringify({
-        status,
-        currentTurnToolCallCount: toolCallCounter.getCount(),
-        windowTurnCount: context.turnCount,
-        windowToolCallCount: context.toolCallCount,
-        usedSkills: context.usedSkills
-      })}`)
+      console.log(
+        `[SkillEvolution][${threadId}] Window append ${JSON.stringify({
+          status,
+          currentTurnToolCallCount: toolCallCounter.getCount(),
+          windowTurnCount: context.turnCount,
+          windowToolCallCount: context.toolCallCount,
+          usedSkills: context.usedSkills
+        })}`
+      )
       return context
     }
 
-    // Hoisted so catch block can access them for routing feedback
+    // Hoisted so catch/finally block can access them
+    let sessionWorkspacePath: string | undefined
     let invokeRoutingResult: Awaited<ReturnType<typeof resolveModel>> | null = null
     let toolErrorCount = 0
     // High-water mark of input tokens — hoisted for catch/finally access
@@ -646,6 +1467,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       console.log("[Agent] Thread metadata:", metadata)
 
       const workspacePath = metadata.workspacePath as string | undefined
+      sessionWorkspacePath = workspacePath ?? undefined
 
       if (!workspacePath) {
         window.webContents.send(channel, {
@@ -654,7 +1476,97 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           message: "Please select a workspace folder before sending messages."
         })
         await tracer.finish("error", "WORKSPACE_REQUIRED")
+        turnStateShouldDispose = true
         return
+      }
+
+      const explicitSkillActivation = await activateExplicitSkillFromMessage({
+        message,
+        workspacePath,
+        sessionId: threadId,
+        hookScope,
+        firedSkillKeys: skillHookKeys,
+        skillUseTracker,
+        onHookResult
+      })
+      if (explicitSkillActivation?.blocked) {
+        const reason = explicitSkillActivation.reason || "显式选择的技能被 Hook 拦截"
+        window.webContents.send(channel, {
+          type: "error",
+          error: reason
+        })
+        await tracer.finish("error", reason)
+        turnStateShouldDispose = true
+        return
+      }
+      if (explicitSkillActivation?.skill) {
+        skillUsageDetector.onSkillsMetadata([
+          {
+            name: explicitSkillActivation.skill.name,
+            path: explicitSkillActivation.skill.path
+          }
+        ])
+        skillUsageDetector.onReadFilePath(explicitSkillActivation.skill.path)
+        tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+      }
+
+      // Fire SessionStart once per thread lifetime (not per turn). SessionEnd fires when the
+      // thread is deleted (threads:delete) or the app is quitting.
+      fireSessionStartOnce(threadId, sessionWorkspacePath, onHookResult, hookScope)
+      sendActiveHookNotice(window, channel, workspacePath)
+
+      // Fire UserPromptSubmit hook — may block the message, halt the turn, rewrite the prompt,
+      // or inject additional context that the LLM should see alongside the user's message.
+      const promptSubmitContext: HookContext = {
+        toolArgs: { message },
+        userPrompt: message,
+        workspacePath: workspacePath ?? undefined,
+        sessionId: threadId
+      }
+      const promptSubmitResult = await runHooksEnriched(
+        resolveEnabledHooksForRun(
+          workspacePath ?? undefined,
+          "UserPromptSubmit",
+          promptSubmitContext,
+          hookScope
+        ),
+        "UserPromptSubmit",
+        promptSubmitContext,
+        onHookResult
+      )
+      if (promptSubmitResult?.blocked || promptSubmitResult?.continue === false) {
+        sendHookBlocked("UserPromptSubmit", promptSubmitResult, "消息被 Hook 策略拦截")
+        await tracer.finish("cancelled", "UserPromptSubmit hook stopped the turn")
+        turnStateShouldDispose = true
+        return
+      }
+      // Apply hook-supplied prompt rewrite / context injection. `message` remains the raw
+      // user input for tracing and proposal capture; `effectiveMessage` is what the LLM sees.
+      let effectiveMessage = message
+      const updatedMessage =
+        promptSubmitResult?.updatedInput?.message ??
+        promptSubmitResult?.updatedInput?.prompt ??
+        promptSubmitResult?.updatedInput?.userPrompt
+      if (typeof updatedMessage === "string" && updatedMessage.length > 0) {
+        effectiveMessage = updatedMessage
+      }
+      if (explicitSkillActivation?.parsed && !parseSkillUseBlock(effectiveMessage)) {
+        effectiveMessage = [effectiveMessage.trimEnd(), explicitSkillActivation.parsed.block]
+          .filter(Boolean)
+          .join("\n\n")
+      }
+      const promptContextBlocks = [
+        explicitSkillActivation?.hookContext,
+        promptSubmitResult?.additionalContext
+      ].filter((item): item is string => Boolean(item?.trim()))
+      if (promptContextBlocks.length > 0) {
+        effectiveMessage = `${promptContextBlocks.join("\n\n")}\n\n${effectiveMessage}`
+      }
+      if (promptSubmitResult?.systemMessage) {
+        window.webContents.send(channel, {
+          type: "custom",
+          data: { type: "hook_notice", message: promptSubmitResult.systemMessage }
+        })
       }
 
       // Sync FTS index with any memory files changed since last invocation
@@ -662,8 +1574,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         try {
           const memoryStore = await getMemoryStore()
           memoryStore.syncMemoryFiles()
-        } catch { /* non-critical */ }
+        } catch {
+          /* non-critical */
+        }
       }
+
+      const autoCommit = await beginAutoCommitTracking(threadId, workspacePath)
 
       const requestedModelId = modelId || (metadata.model as string | undefined)
       invokeRoutingResult = await resolveModel({
@@ -696,7 +1612,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         })
       }
 
-      const humanMessage = new HumanMessage(message)
+      const humanMessage = new HumanMessage(effectiveMessage)
       const streamConfig = {
         configurable: { thread_id: threadId },
         signal: abortController.signal,
@@ -728,7 +1644,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             abortSignal: abortController.signal,
             noSkillEvolutionTool: true,
             retryHooks: buildModelRetryHooks(window, channel),
-            maxRetryAttempts: getMaxRetryAttemptsForRoutingMode()
+            maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
+            onHookResult,
+            hookScope,
+            skillHookKeys,
+            skillUseTracker,
+            onFileMutation: autoCommit.onFileMutation
           })
           // First attempt sends the message; subsequent attempts resume from checkpoint
           const input = isFirstAttempt ? { messages: [humanMessage] } : null
@@ -762,7 +1683,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       // Notify frontend if failover happened — update model display + context window
       const notifyFailover = (): void => {
         if (failoverAttempts.length > 0 && usedModelId !== effectiveModelId) {
-          const usedCfgId = usedModelId?.startsWith("custom:") ? usedModelId.slice("custom:".length) : usedModelId
+          const usedCfgId = usedModelId?.startsWith("custom:")
+            ? usedModelId.slice("custom:".length)
+            : usedModelId
           const usedCfg = getCustomModelConfigs().find((c) => c.id === usedCfgId)
           window.webContents.send(channel, {
             type: "custom",
@@ -778,13 +1701,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             data: { type: "model_failover", attempts: failoverAttempts, activeModelId: usedModelId }
           })
           // P2: persist failover model + sticky in a single atomic write
-          rememberRoutingDecision(threadId, {
-            resolvedModelId: usedModelId!,
-            resolvedTier: usedCfg?.tier ?? "premium",
-            routeReason: `failover from ${failoverAttempts[0].modelId}`,
-            fallbackChain: [],
-            layer: "pinned"
-          }, usedModelId!)
+          rememberRoutingDecision(
+            threadId,
+            {
+              resolvedModelId: usedModelId!,
+              resolvedTier: usedCfg?.tier ?? "premium",
+              routeReason: `failover from ${failoverAttempts[0].modelId}`,
+              fallbackChain: [],
+              layer: "pinned"
+            },
+            usedModelId!
+          )
           // Update effectiveModelId for downstream trace/feedback
           effectiveModelId = usedModelId
         }
@@ -819,6 +1746,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const _countedAiMsgIds = new Set<string>()
       const _countedModelMsgIds = new Set<string>()
       const _countedToolResultMsgIds = new Set<string>()
+      // Track which subagent tool-call IDs we've already emitted SubagentStop for (dedupe)
+      const _subagentStopFired = new Set<string>()
       const _llmNodeByMessageId = new Map<string, string>()
       const _toolNodeByRef = new Map<string, string>()
       const MODEL_INPUT_WINDOW = 12
@@ -827,15 +1756,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const trimContent = (s: string): string =>
         s.length > MAX_TRACE_CONTENT ? `${s.slice(0, MAX_TRACE_CONTENT)}\n…(truncated)` : s
 
-      const normalizeMessageText = (s: string): string =>
-        s.replace(/\r\n/g, "\n").trim()
+      const normalizeMessageText = (s: string): string => s.replace(/\r\n/g, "\n").trim()
 
       // Providers may surface usage as top-level `usage_metadata` or under
       // `response_metadata.token_usage` / `response_metadata.usage`.
       // Normalize all variants so trace capture and UI stay aligned.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const getUsageMetadata = (kwargs: any): unknown =>
-        kwargs?.usage_metadata ?? kwargs?.response_metadata?.token_usage ?? kwargs?.response_metadata?.usage
+        kwargs?.usage_metadata ??
+        kwargs?.response_metadata?.token_usage ??
+        kwargs?.response_metadata?.usage
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const extractText = (raw: any): string => {
@@ -855,7 +1785,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const toRole = (className: string, kwargs: any): "system" | "user" | "assistant" | "tool" | "unknown" => {
+      const toRole = (
+        className: string,
+        kwargs: any
+      ): "system" | "user" | "assistant" | "tool" | "unknown" => {
         if (className.includes("Human")) return "user"
         if (className.includes("AI")) return "assistant"
         if (className.includes("System")) return "system"
@@ -868,34 +1801,43 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const normalizeTokenUsage = (usage: any): {
-        inputTokens?: number
-        outputTokens?: number
-        totalTokens?: number
-        cacheReadTokens?: number
-        cacheCreationTokens?: number
-      } | undefined => {
+      const normalizeTokenUsage = (
+        usage: any
+      ):
+        | {
+            inputTokens?: number
+            outputTokens?: number
+            totalTokens?: number
+            cacheReadTokens?: number
+            cacheCreationTokens?: number
+          }
+        | undefined => {
         if (!usage || typeof usage !== "object") return undefined
         const toNum = (v: unknown): number | undefined =>
           typeof v === "number" && Number.isFinite(v) ? v : undefined
         const inputTokens = toNum(usage.input_tokens ?? usage.inputTokens)
         const outputTokens = toNum(usage.output_tokens ?? usage.outputTokens)
         const totalTokens = toNum(usage.total_tokens ?? usage.totalTokens)
-        const cacheReadTokens = toNum(usage.cache_read_input_tokens ?? usage.cacheReadInputTokens ?? usage.cacheReadTokens)
-        const cacheCreationTokens = toNum(usage.cache_creation_input_tokens ?? usage.cacheCreationInputTokens ?? usage.cacheCreationTokens)
+        const cacheReadTokens = toNum(
+          usage.cache_read_input_tokens ?? usage.cacheReadInputTokens ?? usage.cacheReadTokens
+        )
+        const cacheCreationTokens = toNum(
+          usage.cache_creation_input_tokens ??
+            usage.cacheCreationInputTokens ??
+            usage.cacheCreationTokens
+        )
         if (
           inputTokens === undefined &&
           outputTokens === undefined &&
           totalTokens === undefined &&
           cacheReadTokens === undefined &&
           cacheCreationTokens === undefined
-        ) return undefined
+        )
+          return undefined
         return { inputTokens, outputTokens, totalTokens, cacheReadTokens, cacheCreationTokens }
       }
 
-      const extractTextBlocks = (
-        raw: unknown
-      ): string => {
+      const extractTextBlocks = (raw: unknown): string => {
         if (typeof raw === "string") return raw
         if (Array.isArray(raw)) {
           return (raw as Array<{ type?: string; text?: string }>)
@@ -914,7 +1856,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         })
       }
 
-      const processMessagesSideEffects = (payload: unknown): void => {
+      const processMessagesSideEffects = async (payload: unknown): Promise<void> => {
         try {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const [msgChunk] = payload as [any]
@@ -924,6 +1866,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const classId: string[] = Array.isArray(msgChunk.id) ? msgChunk.id : []
           const className = classId[classId.length - 1] || ""
           const isAI = className.includes("AI")
+          await maybeRunSubagentStopHooksFromStreamPayload({
+            payload,
+            workspacePath: sessionWorkspacePath,
+            threadId,
+            hookScope,
+            firedToolCallIds: _subagentStopFired,
+            onHookResult
+          })
+
           if (!isAI) return
 
           const rawContent = kwargs.content ?? msgChunk.content
@@ -931,9 +1882,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           if (visibleText) assistantText += visibleText
 
           // Tool-call extraction — deduped by message ID.
-          const toolCalls = kwargs.tool_calls as Array<{
-            id?: string; name?: string; args?: Record<string, unknown>
-          }> | undefined
+          const toolCalls = kwargs.tool_calls as
+            | Array<{
+                id?: string
+                name?: string
+                args?: Record<string, unknown>
+              }>
+            | undefined
           const msgId = (kwargs.id as string) || ""
           if (!toolCalls || toolCalls.length === 0) return
           if (msgId && _countedAiMsgIds.has(msgId)) return
@@ -952,7 +1907,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 (typeof tc.args?.file_path === "string" && tc.args.file_path) ||
                 ""
               if (readPathRaw) {
-                skillUsageDetector.onReadFilePath(readPathRaw)
+                const hit = skillUsageDetector.onReadFilePath(readPathRaw)
+                // Sync tracer + adoption context immediately when the hit set
+                // grows. Without this, a write_file/edit_file that follows in
+                // the *same* values batch would snapshot an empty usedSkills
+                // and the resulting code_gen would be missing skill attribution.
+                if (hit) {
+                  syncUsedSkillsContext()
+                }
               }
             }
 
@@ -974,14 +1936,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
           tracer.endStep(visibleText)
         } catch (e) {
+          if (isHookHaltError(e)) throw e
           console.error("[Agent] Tool-call extraction error:", e)
         }
       }
 
-      const processValuesSideEffects = (payload: unknown): void => {
+      const processValuesSideEffects = async (payload: unknown): Promise<void> => {
         try {
           const state = payload as {
-            skillsMetadata?: Array<{ name?: string; path?: string }>
+            skillsMetadata?: Array<{ name?: string; path?: string; version?: string }>
             messages?: Array<{
               id?: string[]
               kwargs?: {
@@ -991,7 +1954,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 name?: string
                 tool_call_id?: string
                 usage_metadata?: unknown
-                response_metadata?: { token_usage?: unknown; usage?: unknown; model_name?: string; model?: string }
+                response_metadata?: {
+                  token_usage?: unknown
+                  usage?: unknown
+                  model_name?: string
+                  model?: string
+                }
                 status?: string
                 is_error?: boolean
                 additional_kwargs?: Record<string, unknown>
@@ -1006,7 +1974,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const skillsMetadata = Array.isArray(state.skillsMetadata) ? state.skillsMetadata : []
           if (skillsMetadata.length > 0) {
             skillUsageDetector.onSkillsMetadata(skillsMetadata)
-            tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+            syncUsedSkillsContext()
           }
 
           if (!Array.isArray(state.messages)) return
@@ -1019,7 +1987,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             const className = classId[classId.length - 1] || ""
             const role = toRole(className, kwargs)
             if (role !== "user") continue
-            if (normalizeMessageText(extractText(kwargs.content)) === normalizeMessageText(message)) {
+            if (
+              normalizeMessageText(extractText(kwargs.content)) === normalizeMessageText(message)
+            ) {
               currentTurnStartIndex = i
               break
             }
@@ -1042,7 +2012,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
               // Extract the real model name from API response metadata (e.g. "MiniMax-M2.7")
               // This takes precedence over the user-configured model name (config.model)
-              const apiModelName = kwargs.response_metadata?.model_name ?? kwargs.response_metadata?.model
+              const apiModelName =
+                kwargs.response_metadata?.model_name ?? kwargs.response_metadata?.model
               if (typeof apiModelName === "string" && apiModelName) {
                 tracer.setModelName(apiModelName)
               }
@@ -1064,9 +2035,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
               const outputToolCalls = Array.isArray(tcs)
                 ? tcs.map((tc) => ({
-                  name: tc?.name ?? "unknown",
-                  args: tc?.args ?? {}
-                }))
+                    name: tc?.name ?? "unknown",
+                    args: tc?.args ?? {}
+                  }))
                 : []
 
               const llmNodeId = tracer.beginLlmNode({
@@ -1092,7 +2063,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 inputMessages: inputSlice,
                 outputMessage: {
                   role: "assistant",
-                  content: extractText(kwargs.content),
+                  content: extractText(kwargs.content)
                 },
                 toolCalls: outputToolCalls,
                 tokenUsage: usageForTrace
@@ -1112,7 +2083,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               for (let tcIndex = 0; tcIndex < tcs.length; tcIndex++) {
                 const tc = tcs[tcIndex]
                 const tcId = typeof tc?.id === "string" ? tc.id : ""
-                const toolRef = tcId || `${aiMsgId || "ai_unknown"}:${tcIndex}:${JSON.stringify(tc?.args ?? {})}`
+                const toolRef =
+                  tcId || `${aiMsgId || "ai_unknown"}:${tcIndex}:${JSON.stringify(tc?.args ?? {})}`
                 const counted = toolCallCounter.register(tc, aiMsgId, tcIndex)
                 if (!_toolNodeByRef.has(toolRef)) {
                   const parentId = aiMsgId ? _llmNodeByMessageId.get(aiMsgId) : undefined
@@ -1129,7 +2101,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
                 if (counted) {
                   const turnCount = toolCallCounter.getCount()
-                  console.log(`[Agent] Turn tool call #${turnCount} (${tc?.name ?? "unknown"}) in thread ${threadId} [values]`)
+                  console.log(
+                    `[Agent] Turn tool call #${turnCount} (${tc?.name ?? "unknown"}) in thread ${threadId} [values]`
+                  )
                 }
 
                 if (tc?.name !== "read_file") continue
@@ -1138,22 +2112,39 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   (typeof tc.args?.file_path === "string" && tc.args.file_path) ||
                   ""
                 if (readPathRaw) {
-                  skillUsageDetector.onReadFilePath(readPathRaw)
+                  const hit = skillUsageDetector.onReadFilePath(readPathRaw)
+                  // See the read_file branch in processMessagesSideEffects —
+                  // a following write/edit in this same messages loop would
+                  // otherwise see a stale usedSkills snapshot.
+                  if (hit) {
+                    syncUsedSkillsContext()
+                  }
                 }
               }
             }
 
             if (isToolMessage) {
-              const toolMsgId = typeof kwargs.id === "string"
-                ? kwargs.id
-                : `${kwargs.tool_call_id ?? "tool"}:${i}:${extractText(kwargs.content)}`
+              await maybeRunSubagentStopHooksFromStreamPayload({
+                payload: [msg],
+                workspacePath: sessionWorkspacePath,
+                threadId,
+                hookScope,
+                firedToolCallIds: _subagentStopFired,
+                onHookResult
+              })
+              const toolMsgId =
+                typeof kwargs.id === "string"
+                  ? kwargs.id
+                  : `${kwargs.tool_call_id ?? "tool"}:${i}:${extractText(kwargs.content)}`
               if (_countedToolResultMsgIds.has(toolMsgId)) continue
               const toolCallId = typeof kwargs.tool_call_id === "string" ? kwargs.tool_call_id : ""
               _countedToolResultMsgIds.add(toolMsgId)
               const parentId = toolCallId ? _toolNodeByRef.get(toolCallId) : undefined
               const toolOutput = extractText(kwargs.content)
               // Detect tool error: explicit status field, is_error flag, or error-prefix in output
-              const additionalKwargs = kwargs.additional_kwargs as Record<string, unknown> | undefined
+              const additionalKwargs = kwargs.additional_kwargs as
+                | Record<string, unknown>
+                | undefined
               const isToolError =
                 kwargs.status === "error" ||
                 kwargs.is_error === true ||
@@ -1175,7 +2166,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const finalMsgs = state.messages.filter((m) => {
             const cn = Array.isArray(m.id) ? m.id[m.id.length - 1] || "" : ""
             const kw = m.kwargs || {}
-            return cn.includes("AI") && (!kw.tool_calls || !Array.isArray(kw.tool_calls) || kw.tool_calls.length === 0)
+            return (
+              cn.includes("AI") &&
+              (!kw.tool_calls || !Array.isArray(kw.tool_calls) || kw.tool_calls.length === 0)
+            )
           })
           const last = finalMsgs[finalMsgs.length - 1]
           if (last) {
@@ -1184,21 +2178,22 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             if (text) lastFinalText = text
           }
         } catch (e) {
+          if (isHookHaltError(e)) throw e
           console.error("[Agent] Values side-effect processing error:", e)
         }
       }
 
-      const processChunkSideEffects = (mode: string, payload: unknown): void => {
+      const processChunkSideEffects = async (mode: string, payload: unknown): Promise<void> => {
         if (mode === "messages") {
-          processMessagesSideEffects(payload)
+          await processMessagesSideEffects(payload)
           return
         }
         if (mode === "values") {
-          processValuesSideEffects(payload)
+          await processValuesSideEffects(payload)
         }
       }
 
-      let lastFinalText = ""  // 最终回复（不含中间工具推理），用于 ChatX HTTP 回复
+      let lastFinalText = "" // 最终回复（不含中间工具推理），用于 ChatX HTTP 回复
 
       // P1: Mid-stream failover — if the stream fails with a retryable error,
       // try remaining models in the chain using resume semantics.
@@ -1207,24 +2202,31 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       )
       let activeStream: AsyncIterable<unknown> = stream
 
+      const consumeStreamWithSideEffects = async (
+        source: AsyncIterable<unknown>
+      ): Promise<void> => {
+        for await (const chunk of source) {
+          if (abortController.signal.aborted) break
+
+          const [mode, data] = chunk as unknown as [string, unknown]
+
+          // Serialize first — live BaseMessage objects must be serialized before
+          // we can inspect the LangChain class path (msgChunk.id becomes the
+          // class array ["langchain_core","messages","AIMessageChunk"] only after
+          // toJSON() / JSON.stringify; on the live object, .id is the msg-id string).
+          const serialized = serializeStreamData(data)
+          // UI forwarding is the primary path. Most processing below is best-effort;
+          // SubagentStop hooks are awaited so `continue:false` can halt the parent turn.
+          forwardStreamChunk(mode, serialized)
+          await processChunkSideEffects(mode, serialized)
+          stopContextCollector.processStreamChunk(mode, serialized)
+        }
+      }
+
       // eslint-disable-next-line no-constant-condition
       while (true) {
         try {
-          for await (const chunk of activeStream) {
-            if (abortController.signal.aborted) break
-
-            const [mode, data] = chunk as unknown as [string, unknown]
-
-            // Serialize first — live BaseMessage objects must be serialized before
-            // we can inspect the LangChain class path (msgChunk.id becomes the
-            // class array ["langchain_core","messages","AIMessageChunk"] only after
-            // toJSON() / JSON.stringify; on the live object, .id is the msg-id string).
-            const serialized = JSON.parse(JSON.stringify(data))
-            // UI forwarding is the primary path. Trace / metrics / skill-evolution
-            // processing below are side effects and must never block streaming.
-            forwardStreamChunk(mode, serialized)
-            processChunkSideEffects(mode, serialized)
-          }
+          await consumeStreamWithSideEffects(activeStream)
           break // Stream completed successfully
         } catch (midStreamErr) {
           if (!isRetryableApiError(midStreamErr) || remainingCandidates.length === 0) {
@@ -1233,8 +2235,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           if (abortController.signal.aborted) throw midStreamErr
 
           const failedModelId = usedModelId ?? "unknown"
-          failoverAttempts.push({ modelId: failedModelId, error: String(midStreamErr), timestamp: Date.now() })
-          console.warn(`[Agent][Failover] Mid-stream ${failedModelId} failed: ${midStreamErr}, trying next...`)
+          failoverAttempts.push({
+            modelId: failedModelId,
+            error: String(midStreamErr),
+            timestamp: Date.now()
+          })
+          console.warn(
+            `[Agent][Failover] Mid-stream ${failedModelId} failed: ${midStreamErr}, trying next...`
+          )
 
           if (!abortController.signal.aborted) {
             await new Promise((r) => setTimeout(r, 500))
@@ -1249,7 +2257,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             abortSignal: abortController.signal,
             noSkillEvolutionTool: true,
             retryHooks: buildModelRetryHooks(window, channel),
-            maxRetryAttempts: getMaxRetryAttemptsForRoutingMode()
+            maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
+            onHookResult,
+            hookScope,
+            skillHookKeys,
+            skillUseTracker,
+            onFileMutation: autoCommit.onFileMutation
           })
           activeStream = await agent.stream(null, streamConfig) // resume from checkpoint
           usedModelId = nextCandidate
@@ -1258,8 +2271,54 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
 
       if (!abortController.signal.aborted) {
+        const completionOutcome = await runCompletionHooksWithRevision({
+          threadId,
+          workspacePath: workspacePath ?? undefined,
+          abortSignal: abortController.signal,
+          getStopContext: () =>
+            stopContextCollector.snapshot({
+              userMessage: message,
+              assistantResponse: lastFinalText || assistantText.trim(),
+              toolCalls: toolCallCounter.getNames(),
+              usedSkills: skillUsageDetector.getUsedSkillNames()
+            }),
+          runRevision: async (revisionPrompt) => {
+            if (!agent)
+              throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
+            const revisionStream = await agent.stream(
+              { messages: [new HumanMessage(revisionPrompt)] },
+              streamConfig
+            )
+            await consumeStreamWithSideEffects(revisionStream)
+          },
+          sendNotice: sendHookNotice,
+          sendError: sendStreamError,
+          hookScope,
+          skillUseTracker,
+          maxRevisionAttempts: MAX_STOP_HOOK_REVISIONS,
+          revisionPromptPrefix: STOP_HOOK_REVISION_PROMPT_PREFIX,
+          onHookResult
+        })
+
+        if (completionOutcome === "failed") {
+          await tracer.finish("error", "Stop hook blocked completion")
+          turnStateShouldDispose = true
+          return
+        }
+        // "halted" falls through to the normal done path so the renderer stops
+        // its loading indicator. The hook already explained why via sendNotice.
+
+        await finalizeAutoCommit({
+          threadId,
+          workspacePath,
+          userPrompt: message,
+          snapshot: autoCommit.snapshot,
+          window,
+          channel
+        })
+        turnStateShouldDispose = true
         window.webContents.send(channel, { type: "done" })
-        notifyIfBackground("✅ 任务完成", assistantText.trim() || "对话已完成")
+        notifyIfBackground("✅ 任务完成", lastFinalText || assistantText.trim() || "对话已完成")
 
         // Finish trace
         tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
@@ -1285,23 +2344,27 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const threshold = getSkillEvolutionThreshold()
           if (shouldEvaluateSkillProposalWindow(sessionToolCallCount, threshold)) {
             const mode = getSkillProposalMode(isSkillAutoProposeEnabled())
-            console.log(`[SkillEvolution][${threadId}] Threshold reached ${JSON.stringify({
-              toolCallCount: sessionToolCallCount,
-              windowToolCallCount: proposalContext.toolCallCount,
-              threshold,
-              mode,
-              usedSkills: proposalContext.usedSkills,
-              turnCount: proposalContext.turnCount,
-              errorCount: proposalContext.errorCount,
-              toolCallSummary: proposalContext.toolCallSummary
-            })}`)
+            console.log(
+              `[SkillEvolution][${threadId}] Threshold reached ${JSON.stringify({
+                toolCallCount: sessionToolCallCount,
+                windowToolCallCount: proposalContext.toolCallCount,
+                threshold,
+                mode,
+                usedSkills: proposalContext.usedSkills,
+                turnCount: proposalContext.turnCount,
+                errorCount: proposalContext.errorCount,
+                toolCallSummary: proposalContext.toolCallSummary
+              })}`
+            )
             if (proposalContext.usedSkills.length > 0) {
               const names = ` [${proposalContext.usedSkills.join(", ")}]`
               console.log(
                 `[SkillEvolution][${threadId}] Threshold skip because used skills were detected${names}`
               )
             } else {
-              console.log(`[SkillEvolution][${threadId}] Threshold passed without used skills, evaluating proposal mode`)
+              console.log(
+                `[SkillEvolution][${threadId}] Threshold passed without used skills, evaluating proposal mode`
+              )
               await autoProposeSKill(threadId, proposalContext).catch((e) =>
                 console.warn("[Agent] autoProposeSKill failed:", e)
               )
@@ -1353,7 +2416,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             return new ChatOpenAI({
               model: config.model,
               apiKey: config.apiKey,
-              configuration: { baseURL: config.baseUrl }
+              configuration: { baseURL: config.baseUrl },
+              maxTokens: config.maxOutputTokens,
+              temperature: config.temperature
             })
           }
 
@@ -1397,6 +2462,24 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
       }
     } catch (error) {
+      if (isHookHaltError(error)) {
+        console.warn("[Agent] Hook halted turn:", error.reason)
+        sendHookHalt(window, channel, error)
+        tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
+        tracer.finish("cancelled", error.reason).catch(() => {})
+        if (invokeRoutingResult) {
+          rememberRoutingFeedback(threadId, {
+            resolvedTier: invokeRoutingResult.resolvedTier,
+            resolvedModelId: usedModelId ?? invokeRoutingResult.resolvedModelId,
+            outcome: "cancelled",
+            toolCallCount: toolCallCounter.getCount(),
+            toolErrorCount,
+            lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
+          })
+        }
+        turnStateShouldDispose = true
+        return
+      }
       // Ignore abort-related errors (expected when stream is cancelled)
       const isAbortError =
         error instanceof Error &&
@@ -1429,6 +2512,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
           })
         }
+        turnStateShouldDispose = true
       } else {
         tracer.setUsedSkills(skillUsageDetector.getUsedSkillNames())
         tracer.finish("cancelled").catch(() => {})
@@ -1442,15 +2526,24 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
           })
         }
+        turnStateShouldDispose = true
       }
     } finally {
-      activeRuns.delete(threadId)
+      if (activeRuns.get(threadId) === abortController) {
+        activeRuns.delete(threadId)
+      }
+      if (turnStateShouldDispose && shouldDisposeTurnState(threadId, runToken)) {
+        disposeTurnRuntimeState(turnState)
+      }
+      discardAgentAutoCommitTracking(threadId)
       // Clean up sandbox ACLs granted during this run (unelevated mode keeps them
       // across commands for performance, so we revoke them when the run ends).
       // Uses threadId to only release this run's ref-counts, not other concurrent runs'.
       LocalSandbox.revokeGrantedAclsForRun(threadId).catch((err) => {
         console.warn("[Agent] ACL cleanup error:", err)
       })
+      // SessionEnd is NOT fired here — it belongs to thread lifecycle (delete / app quit),
+      // not turn completion. See fireSessionEnd call in threads:delete handler.
     }
   })
 
@@ -1476,6 +2569,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         type: "error",
         error: "Workspace path is required"
       })
+      disposeTurnState(threadId)
       return
     }
 
@@ -1488,12 +2582,37 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
     const abortController = new AbortController()
     activeRuns.set(threadId, abortController)
+    // Resume = same logical turn as the original `agent:invoke`. Reuse the
+    // existing turn-state if it's still alive, then prune skill / plugin
+    // scopes that didn't opt in to `persistAfterInterrupt`. Falls back to a
+    // fresh state if the turn-state was disposed (e.g. process restart between
+    // invoke and resume).
+    const turnState = getOrCreateTurnState(threadId)
+    const runToken = startTurnStateRun(turnState)
+    pruneTurnStateAtInterrupt(turnState, getAllEnabledHooksForInterrupt(workspacePath))
+    const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
+    let turnStateShouldDispose = false
+    const sendHookNotice = (notice: string): void => {
+      window.webContents.send(channel, {
+        type: "custom",
+        data: { type: "hook_notice", message: notice }
+      })
+    }
+    const sendStreamError = (error: string): void => {
+      window.webContents.send(channel, {
+        type: "error",
+        error
+      })
+    }
+    const onHookResult = makeHookResultCallback(window, channel)
 
     const onWindowClosed = (): void => {
       console.log("[Agent] Window closed, aborting resume stream for thread:", threadId)
       abortController.abort()
     }
     window.once("closed", onWindowClosed)
+    sendActiveHookNotice(window, channel, workspacePath)
+    const autoCommit = await beginAutoCommitTracking(threadId, workspacePath)
 
     try {
       const requestedModelIdResume = modelId || (metadata.model as string | undefined)
@@ -1531,6 +2650,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const resumeFailoverAttempts: FailoverAttempt[] = []
       let resumeUsedModelId = effectiveResumeModelId
       let resumeStream: AsyncIterable<unknown> | null = null
+      let resumeAgentRuntime: Awaited<ReturnType<typeof createAgentRuntime>> | null = null
 
       for (const candidateId of resumeOrderedChain) {
         if (abortController.signal.aborted) break
@@ -1542,14 +2662,27 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             abortSignal: abortController.signal,
             noSkillEvolutionTool: true,
             retryHooks: buildModelRetryHooks(window, channel),
-            maxRetryAttempts: getMaxRetryAttemptsForRoutingMode()
+            maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
+            onHookResult,
+            hookScope,
+            skillHookKeys,
+            skillUseTracker,
+            onFileMutation: autoCommit.onFileMutation
           })
-          resumeStream = await resumeAgent.stream(new Command({ resume: resumeValue }), resumeStreamConfig)
+          resumeStream = await resumeAgent.stream(
+            new Command({ resume: resumeValue }),
+            resumeStreamConfig
+          )
+          resumeAgentRuntime = resumeAgent
           resumeUsedModelId = candidateId
           break
         } catch (err) {
           if (!isRetryableApiError(err)) throw err
-          resumeFailoverAttempts.push({ modelId: candidateId, error: String(err), timestamp: Date.now() })
+          resumeFailoverAttempts.push({
+            modelId: candidateId,
+            error: String(err),
+            timestamp: Date.now()
+          })
           console.warn(`[Agent][Failover][Resume] ${candidateId} failed: ${err}, trying next...`)
           if (!abortController.signal.aborted) {
             await new Promise((r) => setTimeout(r, 500))
@@ -1570,7 +2703,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       // Notify frontend + persist routing state if failover happened
       const notifyResumeFailover = (): void => {
         if (resumeFailoverAttempts.length > 0 && resumeUsedModelId !== effectiveResumeModelId) {
-          const usedCfgId = resumeUsedModelId?.startsWith("custom:") ? resumeUsedModelId.slice("custom:".length) : resumeUsedModelId
+          const usedCfgId = resumeUsedModelId?.startsWith("custom:")
+            ? resumeUsedModelId.slice("custom:".length)
+            : resumeUsedModelId
           const usedCfg = getCustomModelConfigs().find((c) => c.id === usedCfgId)
           window.webContents.send(channel, {
             type: "custom",
@@ -1583,64 +2718,153 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           })
           window.webContents.send(channel, {
             type: "custom",
-            data: { type: "model_failover", attempts: resumeFailoverAttempts, activeModelId: resumeUsedModelId }
+            data: {
+              type: "model_failover",
+              attempts: resumeFailoverAttempts,
+              activeModelId: resumeUsedModelId
+            }
           })
           // P2: persist failover model + sticky in a single atomic write
-          rememberRoutingDecision(threadId, {
-            resolvedModelId: resumeUsedModelId!,
-            resolvedTier: usedCfg?.tier ?? "premium",
-            routeReason: `failover from ${resumeFailoverAttempts[0].modelId}`,
-            fallbackChain: [],
-            layer: "pinned"
-          }, resumeUsedModelId!)
+          rememberRoutingDecision(
+            threadId,
+            {
+              resolvedModelId: resumeUsedModelId!,
+              resolvedTier: usedCfg?.tier ?? "premium",
+              routeReason: `failover from ${resumeFailoverAttempts[0].modelId}`,
+              fallbackChain: [],
+              layer: "pinned"
+            },
+            resumeUsedModelId!
+          )
         }
       }
       notifyResumeFailover()
 
       // P1: Mid-stream failover for resume
       const resumeRemainingCandidates = resumeOrderedChain.slice(
-        resumeUsedModelId ? resumeOrderedChain.indexOf(resumeUsedModelId) + 1 : resumeOrderedChain.length
+        resumeUsedModelId
+          ? resumeOrderedChain.indexOf(resumeUsedModelId) + 1
+          : resumeOrderedChain.length
       )
       let activeResumeStream: AsyncIterable<unknown> = resumeStream
+      const resumeSubagentStopFired = new Set<string>()
+
+      const consumeResumeStream = async (source: AsyncIterable<unknown>): Promise<void> => {
+        for await (const chunk of source) {
+          if (abortController.signal.aborted) break
+          const [mode, data] = chunk as unknown as [string, unknown]
+          const serialized = serializeStreamData(data)
+          window.webContents.send(channel, {
+            type: "stream",
+            mode,
+            data: serialized
+          })
+          if (mode === "messages") {
+            await maybeRunSubagentStopHooksFromStreamPayload({
+              payload: serialized,
+              workspacePath,
+              threadId,
+              hookScope,
+              firedToolCallIds: resumeSubagentStopFired,
+              onHookResult
+            })
+          }
+          stopContextCollector.processStreamChunk(mode, serialized)
+        }
+      }
 
       // eslint-disable-next-line no-constant-condition
       while (true) {
         try {
-          for await (const chunk of activeResumeStream) {
-            if (abortController.signal.aborted) break
-            const [mode, data] = chunk as unknown as [string, unknown]
-            window.webContents.send(channel, {
-              type: "stream",
-              mode,
-              data: JSON.parse(JSON.stringify(data))
-            })
-          }
+          await consumeResumeStream(activeResumeStream)
           break
         } catch (midErr) {
           if (!isRetryableApiError(midErr) || resumeRemainingCandidates.length === 0) throw midErr
           if (abortController.signal.aborted) throw midErr
 
-          resumeFailoverAttempts.push({ modelId: resumeUsedModelId ?? "unknown", error: String(midErr), timestamp: Date.now() })
-          console.warn(`[Agent][Failover][Resume] Mid-stream ${resumeUsedModelId} failed: ${midErr}, trying next...`)
+          resumeFailoverAttempts.push({
+            modelId: resumeUsedModelId ?? "unknown",
+            error: String(midErr),
+            timestamp: Date.now()
+          })
+          console.warn(
+            `[Agent][Failover][Resume] Mid-stream ${resumeUsedModelId} failed: ${midErr}, trying next...`
+          )
           if (!abortController.signal.aborted) await new Promise((r) => setTimeout(r, 500))
 
           const nextCandidate = resumeRemainingCandidates.shift()!
           const nextAgent = await createAgentRuntime({
-            threadId, workspacePath, modelId: nextCandidate,
-            abortSignal: abortController.signal, noSkillEvolutionTool: true,
+            threadId,
+            workspacePath,
+            modelId: nextCandidate,
+            abortSignal: abortController.signal,
+            noSkillEvolutionTool: true,
             retryHooks: buildModelRetryHooks(window, channel),
-            maxRetryAttempts: getMaxRetryAttemptsForRoutingMode()
+            maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
+            onHookResult,
+            hookScope,
+            skillHookKeys,
+            skillUseTracker,
+            onFileMutation: autoCommit.onFileMutation
           })
-          activeResumeStream = await nextAgent.stream(new Command({ resume: resumeValue }), resumeStreamConfig)
+          activeResumeStream = await nextAgent.stream(
+            new Command({ resume: resumeValue }),
+            resumeStreamConfig
+          )
+          resumeAgentRuntime = nextAgent
           resumeUsedModelId = nextCandidate
           notifyResumeFailover()
         }
       }
 
       if (!abortController.signal.aborted) {
+        const completionOutcome = await runCompletionHooksWithRevision({
+          threadId,
+          workspacePath: workspacePath ?? undefined,
+          abortSignal: abortController.signal,
+          getStopContext: () => stopContextCollector.snapshot(),
+          runRevision: async (revisionPrompt) => {
+            if (!resumeAgentRuntime)
+              throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
+            const revisionStream = await resumeAgentRuntime.stream(
+              { messages: [new HumanMessage(revisionPrompt)] },
+              resumeStreamConfig
+            )
+            await consumeResumeStream(revisionStream)
+          },
+          sendNotice: sendHookNotice,
+          sendError: sendStreamError,
+          hookScope,
+          skillUseTracker,
+          maxRevisionAttempts: MAX_STOP_HOOK_REVISIONS,
+          revisionPromptPrefix: STOP_HOOK_REVISION_PROMPT_PREFIX,
+          onHookResult
+        })
+
+        if (completionOutcome === "failed") {
+          turnStateShouldDispose = true
+          return
+        }
+        // "halted" falls through to the done path so the renderer stops loading.
+
+        await finalizeAutoCommit({
+          threadId,
+          workspacePath,
+          userPrompt: stopContextCollector.snapshot().userMessage ?? "continue agent task",
+          snapshot: autoCommit.snapshot,
+          window,
+          channel
+        })
+        turnStateShouldDispose = true
         window.webContents.send(channel, { type: "done" })
       }
     } catch (error) {
+      if (isHookHaltError(error)) {
+        console.warn("[Agent] Resume hook halted turn:", error.reason)
+        sendHookHalt(window, channel, error)
+        turnStateShouldDispose = true
+        return
+      }
       const isAbortError =
         error instanceof Error &&
         (error.name === "AbortError" ||
@@ -1654,8 +2878,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           error: error instanceof Error ? error.message : "Unknown error"
         })
       }
+      turnStateShouldDispose = true
     } finally {
-      activeRuns.delete(threadId)
+      if (activeRuns.get(threadId) === abortController) {
+        activeRuns.delete(threadId)
+      }
+      if (turnStateShouldDispose && shouldDisposeTurnState(threadId, runToken)) {
+        disposeTurnRuntimeState(turnState)
+      }
+      discardAgentAutoCommitTracking(threadId)
     }
   })
 
@@ -1683,6 +2914,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         type: "error",
         error: "Workspace path is required"
       })
+      disposeTurnState(threadId)
       return
     }
 
@@ -1695,12 +2927,34 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
     const abortController = new AbortController()
     activeRuns.set(threadId, abortController)
+    // Same-turn resume from a tool-call interrupt — reuse turn-state and
+    // prune non-persistent skills (mirrors `agent:resume`).
+    const turnState = getOrCreateTurnState(threadId)
+    const runToken = startTurnStateRun(turnState)
+    pruneTurnStateAtInterrupt(turnState, getAllEnabledHooksForInterrupt(workspacePath))
+    const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
+    let turnStateShouldDispose = false
+    const sendHookNotice = (notice: string): void => {
+      window.webContents.send(channel, {
+        type: "custom",
+        data: { type: "hook_notice", message: notice }
+      })
+    }
+    const sendStreamError = (error: string): void => {
+      window.webContents.send(channel, {
+        type: "error",
+        error
+      })
+    }
+    const onHookResult = makeHookResultCallback(window, channel)
 
     const onWindowClosed = (): void => {
       console.log("[Agent] Window closed, aborting interrupt stream for thread:", threadId)
       abortController.abort()
     }
     window.once("closed", onWindowClosed)
+    sendActiveHookNotice(window, channel, workspacePath)
+    const autoCommit = await beginAutoCommitTracking(threadId, workspacePath)
 
     try {
       const interruptRoutingResult = await resolveModel({
@@ -1710,7 +2964,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         requestedModelId: modelId ?? undefined,
         routingMode: getGlobalRoutingMode()
       }).catch(() => null)
-      const effectiveInterruptModelId = interruptRoutingResult?.resolvedModelId ?? modelId ?? undefined
+      const effectiveInterruptModelId =
+        interruptRoutingResult?.resolvedModelId ?? modelId ?? undefined
 
       const interruptStreamConfig = {
         configurable: { thread_id: threadId },
@@ -1731,6 +2986,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const intFailoverAttempts: FailoverAttempt[] = []
         let intUsedModelId = effectiveInterruptModelId
         let intStream: AsyncIterable<unknown> | null = null
+        let intAgentRuntime: Awaited<ReturnType<typeof createAgentRuntime>> | null = null
 
         for (const candidateId of intOrderedChain) {
           if (abortController.signal.aborted) break
@@ -1742,15 +2998,27 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               abortSignal: abortController.signal,
               noSkillEvolutionTool: true,
               retryHooks: buildModelRetryHooks(window, channel),
-            maxRetryAttempts: getMaxRetryAttemptsForRoutingMode()
+              maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
+              onHookResult,
+              hookScope,
+              skillHookKeys,
+              skillUseTracker,
+              onFileMutation: autoCommit.onFileMutation
             })
             intStream = await intAgent.stream(null, interruptStreamConfig)
+            intAgentRuntime = intAgent
             intUsedModelId = candidateId
             break
           } catch (err) {
             if (!isRetryableApiError(err)) throw err
-            intFailoverAttempts.push({ modelId: candidateId, error: String(err), timestamp: Date.now() })
-            console.warn(`[Agent][Failover][Interrupt] ${candidateId} failed: ${err}, trying next...`)
+            intFailoverAttempts.push({
+              modelId: candidateId,
+              error: String(err),
+              timestamp: Date.now()
+            })
+            console.warn(
+              `[Agent][Failover][Interrupt] ${candidateId} failed: ${err}, trying next...`
+            )
             if (!abortController.signal.aborted) {
               await new Promise((r) => setTimeout(r, 500))
             }
@@ -1770,7 +3038,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         // Notify frontend + persist routing state if failover happened
         const notifyIntFailover = (): void => {
           if (intFailoverAttempts.length > 0 && intUsedModelId !== effectiveInterruptModelId) {
-            const usedCfgId = intUsedModelId?.startsWith("custom:") ? intUsedModelId.slice("custom:".length) : intUsedModelId
+            const usedCfgId = intUsedModelId?.startsWith("custom:")
+              ? intUsedModelId.slice("custom:".length)
+              : intUsedModelId
             const usedCfg = getCustomModelConfigs().find((c) => c.id === usedCfgId)
             window.webContents.send(channel, {
               type: "custom",
@@ -1783,16 +3053,24 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             })
             window.webContents.send(channel, {
               type: "custom",
-              data: { type: "model_failover", attempts: intFailoverAttempts, activeModelId: intUsedModelId }
+              data: {
+                type: "model_failover",
+                attempts: intFailoverAttempts,
+                activeModelId: intUsedModelId
+              }
             })
             // P2: persist failover model + sticky in a single atomic write
-            rememberRoutingDecision(threadId, {
-              resolvedModelId: intUsedModelId!,
-              resolvedTier: usedCfg?.tier ?? "premium",
-              routeReason: `failover from ${intFailoverAttempts[0].modelId}`,
-              fallbackChain: [],
-              layer: "pinned"
-            }, intUsedModelId!)
+            rememberRoutingDecision(
+              threadId,
+              {
+                resolvedModelId: intUsedModelId!,
+                resolvedTier: usedCfg?.tier ?? "premium",
+                routeReason: `failover from ${intFailoverAttempts[0].modelId}`,
+                fallbackChain: [],
+                layer: "pinned"
+              },
+              intUsedModelId!
+            )
           }
         }
         notifyIntFailover()
@@ -1802,51 +3080,128 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           intUsedModelId ? intOrderedChain.indexOf(intUsedModelId) + 1 : intOrderedChain.length
         )
         let activeIntStream: AsyncIterable<unknown> = intStream
+        const interruptSubagentStopFired = new Set<string>()
+
+        const consumeInterruptStream = async (source: AsyncIterable<unknown>): Promise<void> => {
+          for await (const chunk of source) {
+            if (abortController.signal.aborted) break
+            const [mode, data] = chunk as unknown as [string, unknown]
+            const serialized = serializeStreamData(data)
+            window.webContents.send(channel, {
+              type: "stream",
+              mode,
+              data: serialized
+            })
+            if (mode === "messages") {
+              await maybeRunSubagentStopHooksFromStreamPayload({
+                payload: serialized,
+                workspacePath,
+                threadId,
+                hookScope,
+                firedToolCallIds: interruptSubagentStopFired,
+                onHookResult
+              })
+            }
+            stopContextCollector.processStreamChunk(mode, serialized)
+          }
+        }
 
         // eslint-disable-next-line no-constant-condition
         while (true) {
           try {
-            for await (const chunk of activeIntStream) {
-              if (abortController.signal.aborted) break
-              const [mode, data] = chunk as unknown as [string, unknown]
-              window.webContents.send(channel, {
-                type: "stream",
-                mode,
-                data: JSON.parse(JSON.stringify(data))
-              })
-            }
+            await consumeInterruptStream(activeIntStream)
             break
           } catch (midErr) {
             if (!isRetryableApiError(midErr) || intRemainingCandidates.length === 0) throw midErr
             if (abortController.signal.aborted) throw midErr
 
-            intFailoverAttempts.push({ modelId: intUsedModelId ?? "unknown", error: String(midErr), timestamp: Date.now() })
-            console.warn(`[Agent][Failover][Interrupt] Mid-stream ${intUsedModelId} failed: ${midErr}, trying next...`)
+            intFailoverAttempts.push({
+              modelId: intUsedModelId ?? "unknown",
+              error: String(midErr),
+              timestamp: Date.now()
+            })
+            console.warn(
+              `[Agent][Failover][Interrupt] Mid-stream ${intUsedModelId} failed: ${midErr}, trying next...`
+            )
             if (!abortController.signal.aborted) await new Promise((r) => setTimeout(r, 500))
 
             const nextCandidate = intRemainingCandidates.shift()!
             const nextAgent = await createAgentRuntime({
-              threadId, workspacePath, modelId: nextCandidate,
-              abortSignal: abortController.signal, noSkillEvolutionTool: true,
+              threadId,
+              workspacePath,
+              modelId: nextCandidate,
+              abortSignal: abortController.signal,
+              noSkillEvolutionTool: true,
               retryHooks: buildModelRetryHooks(window, channel),
-            maxRetryAttempts: getMaxRetryAttemptsForRoutingMode()
+              maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
+              onHookResult,
+              hookScope,
+              skillHookKeys,
+              skillUseTracker,
+              onFileMutation: autoCommit.onFileMutation
             })
             activeIntStream = await nextAgent.stream(null, interruptStreamConfig)
+            intAgentRuntime = nextAgent
             intUsedModelId = nextCandidate
             notifyIntFailover()
           }
         }
 
         if (!abortController.signal.aborted) {
+          const completionOutcome = await runCompletionHooksWithRevision({
+            threadId,
+            workspacePath: workspacePath ?? undefined,
+            abortSignal: abortController.signal,
+            getStopContext: () => stopContextCollector.snapshot(),
+            runRevision: async (revisionPrompt) => {
+              if (!intAgentRuntime)
+                throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
+              const revisionStream = await intAgentRuntime.stream(
+                { messages: [new HumanMessage(revisionPrompt)] },
+                interruptStreamConfig
+              )
+              await consumeInterruptStream(revisionStream)
+            },
+            sendNotice: sendHookNotice,
+            sendError: sendStreamError,
+            hookScope,
+            skillUseTracker,
+            maxRevisionAttempts: MAX_STOP_HOOK_REVISIONS,
+            revisionPromptPrefix: STOP_HOOK_REVISION_PROMPT_PREFIX,
+            onHookResult
+          })
+
+          if (completionOutcome === "failed") {
+            turnStateShouldDispose = true
+            return
+          }
+          // "halted" falls through to the done path so the renderer stops loading.
+
+          await finalizeAutoCommit({
+            threadId,
+            workspacePath,
+            userPrompt: stopContextCollector.snapshot().userMessage ?? "continue agent task",
+            snapshot: autoCommit.snapshot,
+            window,
+            channel
+          })
+          turnStateShouldDispose = true
           window.webContents.send(channel, { type: "done" })
         }
       } else if (decision.type === "reject") {
         // For reject, we need to send a Command with reject decision
         // For now, just send done - the agent will see no resumption happened
+        turnStateShouldDispose = true
         window.webContents.send(channel, { type: "done" })
       }
       // edit case handled similarly to approve with modified args
     } catch (error) {
+      if (isHookHaltError(error)) {
+        console.warn("[Agent] Interrupt hook halted turn:", error.reason)
+        sendHookHalt(window, channel, error)
+        turnStateShouldDispose = true
+        return
+      }
       const isAbortError =
         error instanceof Error &&
         (error.name === "AbortError" ||
@@ -1860,15 +3215,24 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           error: error instanceof Error ? error.message : "Unknown error"
         })
       }
+      turnStateShouldDispose = true
     } finally {
-      activeRuns.delete(threadId)
+      if (activeRuns.get(threadId) === abortController) {
+        activeRuns.delete(threadId)
+      }
+      if (turnStateShouldDispose && shouldDisposeTurnState(threadId, runToken)) {
+        disposeTurnRuntimeState(turnState)
+      }
+      discardAgentAutoCommitTracking(threadId)
     }
   })
 
   // Handle cancellation
   ipcMain.handle("agent:cancel", async (_event, { threadId }: AgentCancelParams) => {
     const controller = activeRuns.get(threadId)
-    console.log(`[Agent] cancel: threadId=${threadId}, hasController=${!!controller}, activeRuns=[${Array.from(activeRuns.keys()).join(", ")}]`)
+    console.log(
+      `[Agent] cancel: threadId=${threadId}, hasController=${!!controller}, activeRuns=[${Array.from(activeRuns.keys()).join(", ")}]`
+    )
     // Cancel any background tasks belonging to this thread (e.g. builds, tests)
     LocalSandbox.cancelBackgroundTasks(threadId)
     if (controller) {

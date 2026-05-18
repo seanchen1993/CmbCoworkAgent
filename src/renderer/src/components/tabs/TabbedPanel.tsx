@@ -1,15 +1,26 @@
+import { lazy, Suspense } from "react"
 import { useCurrentThread } from "@/lib/thread-context"
 import { TabBar } from "./TabBar"
-import { FileViewer } from "./FileViewer"
 import { ChatContainer } from "@/components/chat/ChatContainer"
-import { ArrowLeft } from "lucide-react"
+import { ArrowLeft, Loader2 } from "lucide-react"
+
+const FileViewer = lazy(() => import("./FileViewer").then((m) => ({ default: m.FileViewer })))
 
 interface TabbedPanelProps {
   threadId: string
   showTabBar?: boolean
+  hasPendingGitDiffNotice?: boolean
+  onRequestOpenGitPanel?: () => void
+  onThreadGitStatusChange?: (threadId: string, isGit: boolean) => void
 }
 
-export function TabbedPanel({ threadId, showTabBar = true }: TabbedPanelProps): React.JSX.Element {
+export function TabbedPanel({
+  threadId,
+  showTabBar = true,
+  hasPendingGitDiffNotice = false,
+  onRequestOpenGitPanel,
+  onThreadGitStatusChange
+}: TabbedPanelProps): React.JSX.Element {
   const { activeTab, openFiles, setActiveTab } = useCurrentThread(threadId)
 
   // Determine what to render based on active tab
@@ -27,7 +38,12 @@ export function TabbedPanel({ threadId, showTabBar = true }: TabbedPanelProps): 
       {/* Content Area */}
       <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
         {isAgentTab ? (
-          <ChatContainer threadId={threadId} />
+          <ChatContainer
+            threadId={threadId}
+            showGitChangeNotice={hasPendingGitDiffNotice}
+            onOpenGitPanel={onRequestOpenGitPanel}
+            onThreadGitStatusChange={onThreadGitStatusChange}
+          />
         ) : activeFile ? (
           <div className="flex flex-1 min-h-0 flex-col overflow-hidden">
             <div className="flex h-10 shrink-0 items-center border-b border-border/60 px-3">
@@ -41,7 +57,16 @@ export function TabbedPanel({ threadId, showTabBar = true }: TabbedPanelProps): 
               </button>
             </div>
             {/* Use key to force remount when file changes, ensuring fresh state */}
-            <FileViewer key={activeFile.path} filePath={activeFile.path} threadId={threadId} />
+            <Suspense
+              fallback={
+                <div className="flex flex-1 items-center justify-center text-muted-foreground">
+                  <Loader2 className="mr-2 size-4 animate-spin" />
+                  <span className="text-sm">加载文件中...</span>
+                </div>
+              }
+            >
+              <FileViewer key={activeFile.path} filePath={activeFile.path} threadId={threadId} />
+            </Suspense>
           </div>
         ) : (
           // Fallback - shouldn't happen but just in case

@@ -8,21 +8,29 @@ import { fork, type ChildProcess } from "node:child_process"
 import { accessSync } from "fs"
 import path from "path"
 import { app } from "electron"
-import { getCustomModelConfigById } from "../storage"
+import { getCustomModelConfigById, syncSkillsToClaudeDir } from "../storage"
+import { homedir } from "os"
+
+// TODO: 当 CmbCowork 记忆系统改为按项目隔离后，使用与 Claude Code 相同的算法按项目拼接路径：
+// 1. findCanonicalGitRoot(effectiveWorkDir) 获取 git 仓库根目录（worktree 解析到主仓库）
+// 2. sanitizePath() 将路径中非字母数字字符替换为 -
+// 3. 最终路径：~/.cmbcoworkagent/memory/{sanitizedPath}/
+// 参考 claude-code/src/memdir/paths.ts 的 getAutoMemPath() 实现。
+const MEMORY_DIR = path.join(homedir(), ".cmbcoworkagent", "memory")
 
 // 从 .env 读取代理地址，和项目其他地方一致用 import.meta.env
 function getClaudeCodeProxyBase(): string {
   return (import.meta.env.VITE_CLAUDE_CODE_PROXY_BASE as string) || ""
 }
 
-function buildClaudeEnv(modelId: string): Record<string, string> {
+function buildClaudeEnv(modelId: string, syncMemory: boolean): Record<string, string> {
   const config = getCustomModelConfigById(modelId)
   if (!config) throw new Error(`模型配置不存在: ${modelId}`)
   const proxyBase = getClaudeCodeProxyBase()
   if (!proxyBase) throw new Error("VITE_CLAUDE_CODE_PROXY_BASE 未配置")
   if (!config.apiKey) throw new Error(`模型 "${config.name}" 的 API Key 未设置`)
   const baseUrl = `${proxyBase.replace(/\/+$/, '')}/${config.model}`
-  return {
+  const env: Record<string, string> = {
     ANTHROPIC_AUTH_TOKEN: config.apiKey,
     ANTHROPIC_BASE_URL: baseUrl,
     ANTHROPIC_MODEL: config.model,
@@ -30,8 +38,13 @@ function buildClaudeEnv(modelId: string): Record<string, string> {
     ANTHROPIC_DEFAULT_SONNET_MODEL: config.model,
     ANTHROPIC_DEFAULT_HAIKU_MODEL: config.model,
     CLAUDE_CODE_SUBAGENT_MODEL: config.model,
-    CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(config.maxTokens || 128000)
+    CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(config.maxTokens || 128000),
+    CLAUDE_CODE_IS_COWORK: "1"
   }
+  if (syncMemory) {
+    env.CLAUDE_COWORK_MEMORY_PATH_OVERRIDE = MEMORY_DIR
+  }
+  return env
 }
 
 let ptyHost: ChildProcess | null = null
@@ -325,7 +338,7 @@ export function registerTerminalHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle(
     "terminal:create",
-    async (event, { workDir, args, cols: initCols, rows: initRows, claudeModelId }: { workDir?: string; args?: string[]; cols?: number; rows?: number; claudeModelId?: string }) => {
+    async (event, { workDir, args, cols: initCols, rows: initRows, claudeModelId, syncSkills = false, syncMemory = false }: { workDir?: string; args?: string[]; cols?: number; rows?: number; claudeModelId?: string; syncSkills?: boolean; syncMemory?: boolean }) => {
       const id = `term-${++idCounter}`
       const window = BrowserWindow.fromWebContents(event.sender)
       // ptyCreated 在 try/catch 两侧共享：createPromise resolve 后标记为 true。
@@ -364,6 +377,20 @@ export function registerTerminalHandlers(ipcMain: IpcMain): void {
         await ptyHostReadyPromise!
         ensureStillAlive("after ready")
 
+        const effectiveWorkDir = workDir || process.env.HOME || process.cwd()
+
+        // Sync CmbCowork skills to .claude/skills/ for Claude Code discovery
+        if (syncSkills) {
+          try {
+            await syncSkillsToClaudeDir(effectiveWorkDir)
+          } catch (e) {
+            console.warn("[Terminal] Failed to sync skills to Claude dir:", e)
+          }
+          ensureStillAlive("after skill sync")
+        }
+
+        const finalArgs = args || []
+
         // P1 fix: 等待子进程确认创建成功
         const createPromise = new Promise<void>((resolve, reject) => {
           // 超时 30 秒：覆盖 Windows 冷启动 fork pty-host + getShell/findNodeExe 全量查找的最坏情况
@@ -389,13 +416,15 @@ export function registerTerminalHandlers(ipcMain: IpcMain): void {
         sendToHost({
           type: "create",
           id,
-          workDir: workDir || process.env.HOME || process.cwd(),
+          workDir: effectiveWorkDir,
           cols: initCols || 120,
           rows: initRows || 30,
           claudePath,
-          args: args || [],
+          args: finalArgs,
           electronPath: process.execPath,
-          extraEnv: claudeModelId ? buildClaudeEnv(claudeModelId) : undefined
+          extraEnv: claudeModelId
+            ? buildClaudeEnv(claudeModelId, syncMemory)
+            : { CLAUDE_CODE_IS_COWORK: "1", ...(syncMemory ? { CLAUDE_COWORK_MEMORY_PATH_OVERRIDE: MEMORY_DIR } : {}) }
         }, true)
 
         await createPromise

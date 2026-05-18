@@ -1,5 +1,6 @@
 import { IpcMain } from "electron"
 import { MultiServerMCPClient } from "@langchain/mcp-adapters"
+import type { Connection } from "@langchain/mcp-adapters"
 import {
   getMcpConnectors,
   getEnabledMcpConnectors,
@@ -7,14 +8,29 @@ import {
   deleteMcpConnector,
   setMcpConnectorEnabled
 } from "../storage"
+import { resolveMcpConnectorKind } from "../mcp/connector-kind"
 import type { McpConnectorConfig, McpConnectorUpsert } from "../types"
 import { invalidateGlobalMcpCapabilityService } from "../mcp/capability-service"
 
 export function buildMcpServerConfig(config: {
-  url: string
+  kind?: McpConnectorConfig["kind"]
+  url?: string
   advanced?: McpConnectorConfig["advanced"]
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
 }): Record<string, unknown> {
-  const base: Record<string, unknown> = { url: config.url }
+  const kind = resolveMcpConnectorKind(config)
+  if (kind === "stdio") {
+    return {
+      transport: "stdio",
+      command: config.command?.trim(),
+      args: config.args ?? [],
+      ...(config.env && Object.keys(config.env).length > 0 ? { env: config.env } : {})
+    }
+  }
+
+  const base: Record<string, unknown> = { url: config.url?.trim() }
   if (config.advanced?.headers && Object.keys(config.advanced.headers).length > 0) {
     base.headers = config.advanced.headers
   }
@@ -31,10 +47,44 @@ export function buildMcpServerConfig(config: {
   return base
 }
 
+function toMcpConnectorUpsert(config: McpConnectorConfig): McpConnectorUpsert {
+  return {
+    name: config.name,
+    kind: resolveMcpConnectorKind(config),
+    url: config.url,
+    command: config.command,
+    args: config.args,
+    env: config.env,
+    enabled: config.enabled,
+    advanced: config.advanced,
+    lazyLoad: config.lazyLoad
+  }
+}
+
 function validateMcpConnectorInput(config: McpConnectorUpsert): void {
   if (!config.name || typeof config.name !== "string" || !config.name.trim()) {
     throw new Error("名称不能为空")
   }
+
+  const kind = resolveMcpConnectorKind(config)
+  if (kind === "stdio") {
+    if (!config.command || typeof config.command !== "string" || !config.command.trim()) {
+      throw new Error("命令不能为空")
+    }
+    if (config.args && (!Array.isArray(config.args) || config.args.some((arg) => typeof arg !== "string"))) {
+      throw new Error("命令参数格式无效")
+    }
+    if (
+      config.env &&
+      (typeof config.env !== "object" ||
+        Array.isArray(config.env) ||
+        Object.values(config.env).some((value) => typeof value !== "string"))
+    ) {
+      throw new Error("环境变量格式无效")
+    }
+    return
+  }
+
   if (!config.url || typeof config.url !== "string" || !config.url.trim()) {
     throw new Error("URL 不能为空")
   }
@@ -93,10 +143,9 @@ export function registerMcpHandlers(ipcMain: IpcMain): void {
     "mcp:testConnection",
     async (
       _event,
-      params: { id?: string; url?: string; advanced?: McpConnectorConfig["advanced"] }
+      params: { id?: string; config?: McpConnectorUpsert; url?: string; advanced?: McpConnectorConfig["advanced"] }
     ): Promise<{ success: boolean; tools?: string[]; error?: string }> => {
-      let url: string
-      let advanced: McpConnectorConfig["advanced"] | undefined
+      let config: McpConnectorUpsert
 
       if (params.id) {
         const connectors = getMcpConnectors()
@@ -104,28 +153,29 @@ export function registerMcpHandlers(ipcMain: IpcMain): void {
         if (!connector) {
           return { success: false, error: "连接器不存在" }
         }
-        url = connector.url
-        advanced = connector.advanced
+        config = toMcpConnectorUpsert(connector)
+      } else if (params.config) {
+        config = params.config
       } else if (params.url) {
-        url = params.url.trim()
-        advanced = params.advanced
+        config = {
+          name: "test",
+          url: params.url.trim(),
+          advanced: params.advanced
+        }
       } else {
-        return { success: false, error: "请提供连接器 ID 或 URL" }
-      }
-
-      if (!url) {
-        return { success: false, error: "URL 不能为空" }
+        return { success: false, error: "请提供连接器 ID 或配置" }
       }
 
       let client: MultiServerMCPClient | null = null
       try {
-        const serverConfig = buildMcpServerConfig({ url, advanced })
+        validateMcpConnectorInput(config)
+        const serverConfig = buildMcpServerConfig(config)
         client = new MultiServerMCPClient({
           throwOnLoadError: true,
           onConnectionError: "throw",
           useStandardContentBlocks: true,
           mcpServers: {
-            test: serverConfig as { url: string; headers?: Record<string, string>; transport?: "sse" | "http"; reconnect?: object }
+            test: serverConfig as Connection
           }
         })
 

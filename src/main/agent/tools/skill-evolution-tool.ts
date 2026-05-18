@@ -11,19 +11,26 @@
 
 import { tool } from "langchain"
 import { z } from "zod"
-import { join } from "path"
+import { isAbsolute, join, relative, resolve } from "path"
 import {
   existsSync,
   mkdirSync,
   writeFileSync,
   readFileSync,
-  readdirSync,
   rmSync
 } from "fs"
 import { BrowserWindow, ipcMain } from "electron"
-import { getCustomSkillsDir, invalidateEnabledSkillsCache } from "../../storage"
+import {
+  clearDisabledSkillsForSkillDir,
+  findExistingSkillById,
+  getCustomSkillsDir,
+  invalidateEnabledSkillsCache,
+  prepareDisabledSkillsCleanupForSkillDir
+} from "../../storage"
 import { v4 as uuid } from "uuid"
 import type { SkillProposalWindowContext } from "../skill-evolution/proposal-window"
+import { discoverSkillsSync } from "../../skills/discovery"
+import { getDiscoveredSkillId, normalizeSkillId } from "../../skills/ids"
 
 // ─────────────────────────────────────────────────────────
 // Helpers
@@ -174,6 +181,29 @@ export function sanitizeSkillId(name: string): string {
     .slice(0, 64)
 }
 
+function isSafeSkillPathSegment(segment: string): boolean {
+  if (!segment || segment === "." || segment === "..") return false
+  if (/[\\/:*?"<>|]/.test(segment)) return false
+  if (/[. ]$/.test(segment)) return false
+  return true
+}
+
+function resolveCustomSkillDir(skillId: string): { id: string; dir: string } | null {
+  const normalized = skillId.trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "")
+  const segments = normalized.split("/").filter(Boolean)
+  if (segments.length === 0 || !segments.every(isSafeSkillPathSegment)) return null
+
+  const customSkillsDir = resolve(getCustomSkillsDir())
+  const skillDir = resolve(customSkillsDir, ...segments)
+  const rel = relative(customSkillsDir, skillDir)
+  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return null
+
+  return {
+    id: segments.join("/"),
+    dir: skillDir
+  }
+}
+
 /** Parse the `name:` field from a SKILL.md frontmatter block */
 function parseSkillName(content: string): string | null {
   const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/)
@@ -213,17 +243,16 @@ function listCustomSkills(): SkillSummary[] {
   const dir = getCustomSkillsDir()
   if (!existsSync(dir)) return []
   const results: SkillSummary[] = []
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue
-    const skillMdPath = join(dir, entry.name, "SKILL.md")
-    if (!existsSync(skillMdPath)) continue
+  for (const skill of discoverSkillsSync(dir)) {
+    const skillMdPath = skill.skillMdPath
     const content = readFileSync(skillMdPath, "utf-8")
+    const id = getDiscoveredSkillId(skill)
     results.push({
-      id: entry.name,
-      name: parseSkillName(content) ?? entry.name,
+      id,
+      name: parseSkillName(content) ?? skill.name,
       description: parseSkillDescription(content) ?? "",
-      path: join(dir, entry.name),
-      createdAt: entry.name
+      path: skill.rootDir,
+      createdAt: id
     })
   }
   return results
@@ -241,7 +270,7 @@ const skillEvolveSchema = z.object({
     "create (write a new skill) | patch (update an existing skill) | delete (remove a skill)"
   ),
   skillId: z.string().optional().describe(
-    "Skill directory name (slug). Required for view/patch/delete. " +
+    "Skill relative path id, for example 'my-skill' or 'office/pdf'. Required for view/patch/delete. " +
     "For create, auto-derived from name if omitted."
   ),
   name: z.string().optional().describe(
@@ -301,13 +330,15 @@ export function createSkillEvolutionTool(context: SkillEvolutionToolContext = {}
         // ── view ──────────────────────────────────────────
         case "view": {
           if (!input.skillId) return "Error: skillId is required for view"
-          const skillDir = join(getCustomSkillsDir(), input.skillId)
+          const resolved = resolveCustomSkillDir(input.skillId)
+          if (!resolved) return `Error: invalid skillId: ${input.skillId}`
+          const skillDir = resolved.dir
           if (!existsSync(skillDir)) return `Error: skill not found: ${input.skillId}`
           const skillMdPath = join(skillDir, "SKILL.md")
           if (!existsSync(skillMdPath)) return `Error: SKILL.md not found for: ${input.skillId}`
           const content = readFileSync(skillMdPath, "utf-8")
           return JSON.stringify({
-            skillId: input.skillId,
+            skillId: resolved.id,
             path: skillMdPath,
             content
           })
@@ -319,14 +350,21 @@ export function createSkillEvolutionTool(context: SkillEvolutionToolContext = {}
           if (!input.description) return "Error: description is required for create"
           if (!input.content) return "Error: content is required for create"
 
-          const skillId = input.skillId || sanitizeSkillId(input.name)
+          const rawSkillId = input.skillId || sanitizeSkillId(input.name)
+          const resolved = resolveCustomSkillDir(rawSkillId)
+          const skillId = resolved?.id ?? normalizeSkillId(rawSkillId)
           if (!skillId) return "Error: could not derive a valid skill ID from name"
+          if (!resolved) return `Error: invalid skillId: ${rawSkillId}`
 
-          const customSkillsDir = getCustomSkillsDir()
-          const skillDir = join(customSkillsDir, skillId)
+          const skillDir = resolved.dir
 
           if (existsSync(skillDir)) {
             return `Error: skill already exists: ${skillId}. Use action='patch' to update it.`
+          }
+
+          const existingSkill = findExistingSkillById(skillId)
+          if (existingSkill) {
+            return `Error: skillId already exists in another source: ${skillId} (${existingSkill.rootDir}). Choose a different skillId.`
           }
 
           // ── Human confirmation gate ──────────────────────
@@ -354,6 +392,7 @@ export function createSkillEvolutionTool(context: SkillEvolutionToolContext = {}
 
           mkdirSync(skillDir, { recursive: true })
           writeFileSync(join(skillDir, "SKILL.md"), input.content, "utf-8")
+          clearDisabledSkillsForSkillDir(skillDir)
 
           // Invalidate skills cache so runtime picks up the new skill next invocation
           invalidateEnabledSkillsCache()
@@ -372,7 +411,9 @@ export function createSkillEvolutionTool(context: SkillEvolutionToolContext = {}
         // ── patch ─────────────────────────────────────────
         case "patch": {
           if (!input.skillId) return "Error: skillId is required for patch"
-          const skillDir = join(getCustomSkillsDir(), input.skillId)
+          const resolved = resolveCustomSkillDir(input.skillId)
+          if (!resolved) return `Error: invalid skillId: ${input.skillId}`
+          const skillDir = resolved.dir
           if (!existsSync(skillDir)) return `Error: skill not found: ${input.skillId}`
           const skillMdPath = join(skillDir, "SKILL.md")
 
@@ -384,9 +425,9 @@ export function createSkillEvolutionTool(context: SkillEvolutionToolContext = {}
             console.log(`[SkillEvolution] Patched (full replace) skill: ${input.skillId}`)
             return JSON.stringify({
               success: true,
-              skillId: input.skillId,
+              skillId: resolved.id,
               mode: "full_replace",
-              message: `Skill '${input.skillId}' updated.`
+              message: `Skill '${resolved.id}' updated.`
             })
           }
 
@@ -404,9 +445,9 @@ export function createSkillEvolutionTool(context: SkillEvolutionToolContext = {}
             console.log(`[SkillEvolution] Patched (string replace) skill: ${input.skillId}`)
             return JSON.stringify({
               success: true,
-              skillId: input.skillId,
+              skillId: resolved.id,
               mode: "string_replace",
-              message: `Skill '${input.skillId}' patched.`
+              message: `Skill '${resolved.id}' patched.`
             })
           }
 
@@ -416,18 +457,22 @@ export function createSkillEvolutionTool(context: SkillEvolutionToolContext = {}
         // ── delete ────────────────────────────────────────
         case "delete": {
           if (!input.skillId) return "Error: skillId is required for delete"
-          const skillDir = join(getCustomSkillsDir(), input.skillId)
+          const resolved = resolveCustomSkillDir(input.skillId)
+          if (!resolved) return `Error: invalid skillId: ${input.skillId}`
+          const skillDir = resolved.dir
           if (!existsSync(skillDir)) return `Error: skill not found: ${input.skillId}`
+          const cleanupDisabledSkills = prepareDisabledSkillsCleanupForSkillDir(skillDir)
 
           rmSync(skillDir, { recursive: true, force: true })
+          cleanupDisabledSkills()
           invalidateEnabledSkillsCache()
           notifyRenderer("skills:changed")
 
           console.log(`[SkillEvolution] Deleted skill: ${input.skillId}`)
           return JSON.stringify({
             success: true,
-            skillId: input.skillId,
-            message: `Skill '${input.skillId}' deleted.`
+            skillId: resolved.id,
+            message: `Skill '${resolved.id}' deleted.`
           })
         }
 
