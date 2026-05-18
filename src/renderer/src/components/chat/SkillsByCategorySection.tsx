@@ -23,6 +23,7 @@ import {
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { getAllSkills, SCENE_CATEGORY_OPTIONS, type SkillWithUsage } from "@/lib/skill-data-service"
 import type { MarketItem } from "../../api/market"
+import { getMockOrgSkillMarketResponse, orgSkillMarketApi } from "../../api/org-skill-market"
 
 export interface SkillsByCategoryItem {
   skill: SkillMetadata
@@ -40,6 +41,7 @@ interface SkillsByCategorySectionProps {
   skills: SkillMetadata[]
   previewLimit: number
   onOpenMarketByCategory: (category: string) => void
+  onOpenOrganizationSkillMarket: () => void
   onOpenMarketBySkill: (skillName: string) => void
   onUseSkillPrompt: (skill: SkillMetadata, label?: string) => void
 }
@@ -85,6 +87,8 @@ const primaryCategoryOrder = new Map<string, number>()
 const secondaryCategoryOrder = new Map<string, number>()
 let cachedMarketSkillsData: SkillWithUsage[] | null = null
 let marketSkillsRequestPromise: Promise<SkillWithUsage[]> | null = null
+let cachedOrganizationSkillsData: MarketItem[] | null = null
+let organizationSkillsRequestPromise: Promise<MarketItem[]> | null = null
 
 SCENE_CATEGORY_OPTIONS.forEach((category, index) => {
   const { primary, secondary } = splitCategory(category)
@@ -122,30 +126,56 @@ async function loadMarketSkillsOnce(): Promise<SkillWithUsage[]> {
   return marketSkillsRequestPromise
 }
 
+async function loadOrganizationSkillsOnce(): Promise<MarketItem[]> {
+  if (cachedOrganizationSkillsData) return cachedOrganizationSkillsData
+  if (organizationSkillsRequestPromise) return organizationSkillsRequestPromise
+
+  organizationSkillsRequestPromise = (async () => {
+    try {
+      const response = await orgSkillMarketApi.getOrgSkills(1, 4)
+      if (!response.success || !response.data) {
+        throw new Error(response.error || "组织级技能加载失败")
+      }
+      cachedOrganizationSkillsData = response.data.slice(0, 4)
+      return cachedOrganizationSkillsData
+    } catch (error) {
+      console.error("[SkillsByCategorySection] Failed to load organization skills:", error)
+      const mockResponse = getMockOrgSkillMarketResponse(1, 4)
+      cachedOrganizationSkillsData = mockResponse.data?.slice(0, 4) ?? []
+      return cachedOrganizationSkillsData
+    } finally {
+      organizationSkillsRequestPromise = null
+    }
+  })()
+
+  return organizationSkillsRequestPromise
+}
+
 export function SkillsByCategorySection({
   skills,
   previewLimit,
   onOpenMarketByCategory,
+  onOpenOrganizationSkillMarket,
   onOpenMarketBySkill,
   onUseSkillPrompt
 }: SkillsByCategorySectionProps): React.JSX.Element {
   const [marketSkillsLoading, setMarketSkillsLoading] = useState(true)
   const [marketSkillsData, setMarketSkillsData] = useState<SkillWithUsage[]>([])
+  const [organizationSkillsData, setOrganizationSkillsData] = useState<MarketItem[]>([])
   const [installPromptItem, setInstallPromptItem] = useState<SkillsByCategoryItem | null>(null)
 
   useEffect(() => {
     let canceled = false
 
     const loadMarketSkills = async (): Promise<void> => {
-      if (cachedMarketSkillsData) {
-        setMarketSkillsData(cachedMarketSkillsData)
-        setMarketSkillsLoading(false)
-        return
-      }
       setMarketSkillsLoading(true)
-      const data = await loadMarketSkillsOnce()
+      const [data, orgSkills] = await Promise.all([
+        loadMarketSkillsOnce(),
+        loadOrganizationSkillsOnce()
+      ])
       if (canceled) return
       setMarketSkillsData(data)
+      setOrganizationSkillsData(orgSkills)
       setMarketSkillsLoading(false)
     }
 
@@ -186,6 +216,30 @@ export function SkillsByCategorySection({
         isCertified: item.tag === "认证",
         calls: item.calls ?? 0
       })
+    }
+
+    const organizationGroups =
+      groups.get(ORGANIZATION_CATEGORY) ?? new Map<string, SkillsByCategoryItem[]>()
+    const organizationItems: SkillsByCategoryItem[] = organizationSkillsData.map((item) => {
+      const localSkill = localSkillMap.get(item.name)
+      return {
+        skill: localSkill ?? {
+          name: item.name,
+          description: item.description || "",
+          path: item.filename || item.name,
+          source: "user"
+        },
+        label: item.chinese_name || item.name,
+        marketItem: item,
+        isInstalled: !!localSkill,
+        isFeatured: false,
+        isCertified: false,
+        calls: 0
+      }
+    })
+    organizationGroups.set("", organizationItems)
+    if (organizationItems.length > 0) {
+      groups.set(ORGANIZATION_CATEGORY, organizationGroups)
     }
 
     groups.forEach((secondaryGroups) => {
@@ -264,7 +318,7 @@ export function SkillsByCategorySection({
         return [primary, new Map(orderedSecondaryEntries)]
       })
     )
-  }, [marketSkillsData, skills])
+  }, [marketSkillsData, organizationSkillsData, skills])
 
   if (marketSkillsLoading) {
     return (
@@ -310,7 +364,11 @@ export function SkillsByCategorySection({
                 {onlyPrimaryLevel && (
                   <button
                     type="button"
-                    onClick={() => onOpenMarketByCategory(primaryCategory)}
+                    onClick={() =>
+                      primaryCategory === ORGANIZATION_CATEGORY
+                        ? onOpenOrganizationSkillMarket()
+                        : onOpenMarketByCategory(primaryCategory)
+                    }
                     className="text-xs text-amber-600 hover:text-amber-700 transition-colors cursor-pointer"
                   >
                     更多
@@ -341,7 +399,9 @@ export function SkillsByCategorySection({
                         <button
                           type="button"
                           onClick={() =>
-                            onOpenMarketByCategory(secondaryCategory || primaryCategory)
+                            primaryCategory === ORGANIZATION_CATEGORY
+                              ? onOpenOrganizationSkillMarket()
+                              : onOpenMarketByCategory(secondaryCategory || primaryCategory)
                           }
                           className="text-xs text-amber-600 hover:text-amber-700 transition-colors cursor-pointer"
                         >

@@ -522,7 +522,8 @@ export function MarketPanel(): React.JSX.Element {
     marketInitialSkillSearchQuery,
     marketInitialSkillDetailName,
     setMarketInitialSkillDetailName,
-    marketInitialSkillFilters
+    marketInitialSkillFilters,
+    marketInitialTab
   } = useAppStore()
   const [activeTab, setActiveTab] = useState<MarketItemType>("skill")
   const [searchQuery, setSearchQuery] = useState("")
@@ -866,6 +867,19 @@ export function MarketPanel(): React.JSX.Element {
   }, [canViewSkillUserDetail])
 
   useEffect(() => {
+    if (marketInitialTab) {
+      setActiveTab(marketInitialTab as MarketItemType)
+      setDetailMode("list")
+      setSelectedItemKey(null)
+      setSelectedItemSnapshot(null)
+      resetDetailState()
+      setCategoryFilter(null)
+      setPendingInitialCategoryFilter(null)
+      setSearchQuery("")
+      useAppStore.setState({ marketInitialTab: null })
+      return
+    }
+
     const hasInitialCategory = !!marketInitialSkillCategory
     const hasInitialSearch = !!marketInitialSkillSearchQuery?.trim()
     const hasInitialDetail = !!marketInitialSkillDetailName?.trim()
@@ -902,7 +916,8 @@ export function MarketPanel(): React.JSX.Element {
     marketInitialSkillCategory,
     marketInitialSkillDetailName,
     marketInitialSkillFilters,
-    marketInitialSkillSearchQuery
+    marketInitialSkillSearchQuery,
+    marketInitialTab
   ])
 
   // 同步已安装状态，不触发额外的 market 接口请求
