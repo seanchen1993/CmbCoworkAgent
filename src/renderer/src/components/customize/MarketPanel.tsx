@@ -1578,13 +1578,22 @@ export function MarketPanel(): React.JSX.Element {
     if (!itemName) return
 
     try {
-      if (activeTab === "skill" && window.api?.skills?.delete) {
+      if ((activeTab === "skill" || activeTab === "orgSkill") && window.api?.skills?.delete) {
         const skillsMetadata = await window.api.skills.list()
-        const existingSkill = skillsMetadata.find((skill) => skill.name === itemName)
+        const itemNameCandidates = new Set([itemName, item.chinese_name].filter(Boolean))
+        const existingSkill = skillsMetadata.find(
+          (skill) =>
+            itemNameCandidates.has(skill.name) ||
+            (item.filename ? skill.path.includes(item.filename) : false)
+        )
         if (existingSkill) {
           await window.api.skills.delete(existingSkill.path)
         }
         marketInstalledVersionStorage.removeVersion(itemName, activeTab)
+        if (activeTab === "orgSkill") {
+          marketInstalledSourceStorage.removeName(itemName, activeTab)
+          marketInstalledSourceStorage.removeName(item.chinese_name || "", activeTab)
+        }
         await loadInstalledSkills()
       } else if (activeTab === "mcp" && window.api?.mcp?.delete) {
         const mcpsMetadata = await window.api.mcp.list()
@@ -1603,6 +1612,16 @@ export function MarketPanel(): React.JSX.Element {
         marketInstalledVersionStorage.removeVersion(itemName, activeTab)
         await loadInstalledPlugins()
       }
+      setSelectedItemSnapshot((prev) =>
+        prev && getItemKey(prev) === getItemKey(item)
+          ? {
+              ...prev,
+              installed: false,
+              updateAvailable: false,
+              installedVersion: undefined
+            }
+          : prev
+      )
     } catch (error) {
       console.error("Failed to uninstall item:", error)
       setError(error instanceof Error ? error.message : "卸载失败")
@@ -2133,7 +2152,7 @@ export function MarketPanel(): React.JSX.Element {
                   <div className="grid grid-cols-2 gap-2 pt-1">
                     {selectedItem.installed ? (
                       activeTab === "orgSkill" ? (
-                        <span className="col-span-2 text-xs bg-[#edf7f0] border border-[#c4e8d1] text-[#2e7d4f] px-3 py-2 rounded-lg inline-flex items-center gap-1.5">
+                        <span className="text-xs bg-[#edf7f0] border border-[#c4e8d1] text-[#2e7d4f] px-3 py-2 rounded-lg inline-flex items-center gap-1.5">
                           <CheckCircle className="size-3" />
                           已安装
                         </span>
@@ -2182,19 +2201,17 @@ export function MarketPanel(): React.JSX.Element {
                         安装
                       </Button>
                     )}
-                    {activeTab !== "orgSkill" &&
-                      selectedItem.installed &&
-                      selectedItem.featured !== "精品" && (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-8 gap-1.5 text-xs border-[#fad4d4] text-[#b53333] hover:text-[#b53333] hover:bg-[#fdf2f2] rounded-lg cursor-pointer"
-                          onClick={() => handleUninstall(selectedItem)}
-                        >
-                          <Trash2 className="size-3" />
-                          卸载
-                        </Button>
-                      )}
+                    {selectedItem.installed && selectedItem.featured !== "精品" && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-8 gap-1.5 text-xs border-[#fad4d4] text-[#b53333] hover:text-[#b53333] hover:bg-[#fdf2f2] rounded-lg cursor-pointer"
+                        onClick={() => handleUninstall(selectedItem)}
+                      >
+                        <Trash2 className="size-3" />
+                        卸载
+                      </Button>
+                    )}
                     {activeTab !== "orgSkill" &&
                       (selectedItem.canDelete ||
                         (selectedItem.ip &&
@@ -2372,9 +2389,10 @@ export function MarketPanel(): React.JSX.Element {
                       downloadingItems={downloadingItems}
                       onOpenDetail={openItemDetail}
                       onDownload={handleDownload}
+                      onUninstall={handleUninstall}
                       initialDetailName={pendingOrgSkillDetailName}
                       onInitialDetailReady={(item) => {
-                        console.log(item ,'hehe...')
+                        console.log(item, "hehe...")
                         void openItemDetailRef.current(item)
                       }}
                       onInitialDetailConsumed={() => setPendingOrgSkillDetailName(null)}

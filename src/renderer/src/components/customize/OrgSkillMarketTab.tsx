@@ -8,6 +8,7 @@ import {
   Search,
   Sparkles,
   Tag,
+  Trash2,
   User,
   Zap
 } from "lucide-react"
@@ -63,6 +64,7 @@ interface OrgSkillMarketContentProps {
   initialDetailName?: string | null
   onOpenDetail: (item: MarketItem) => void | Promise<void>
   onDownload: (item: MarketItem, downloadToLocal?: boolean) => void | Promise<void>
+  onUninstall: (item: MarketItem) => void | Promise<void>
   onInitialDetailReady?: (item: MarketItem) => void
   onInitialDetailConsumed?: () => void
 }
@@ -118,12 +120,14 @@ function OrgSkillCard({
   item,
   isDownloading,
   onOpenDetail,
-  onDownload
+  onDownload,
+  onUninstall
 }: {
   item: MarketItem
   isDownloading: boolean
   onOpenDetail: (item: MarketItem) => void | Promise<void>
   onDownload: (item: MarketItem, downloadToLocal?: boolean) => void | Promise<void>
+  onUninstall: (item: MarketItem) => void | Promise<void>
 }): React.JSX.Element {
   return (
     <div
@@ -197,7 +201,21 @@ function OrgSkillCard({
                 <FileText className="size-3" />
                 详情
               </Button>
-              {!item.installed && (
+              {item.installed ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 px-2.5 gap-1 text-xs border-[#fad4d4] text-[#b53333] hover:text-[#b53333] hover:bg-[#fdf2f2] rounded-lg"
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    void onUninstall(item)
+                  }}
+                  title="卸载"
+                >
+                  <Trash2 className="size-3" />
+                  卸载
+                </Button>
+              ) : (
                 <Button
                   size="sm"
                   className="h-7 px-3 gap-1 text-xs bg-[#c4956a] hover:bg-[#b85a3a] text-[#faf9f5] border-0 rounded-lg"
@@ -226,6 +244,7 @@ export function OrgSkillMarketContent({
   initialDetailName,
   onOpenDetail,
   onDownload,
+  onUninstall,
   onInitialDetailReady,
   onInitialDetailConsumed
 }: OrgSkillMarketContentProps): React.JSX.Element {
@@ -363,6 +382,7 @@ export function OrgSkillMarketContent({
               isDownloading={downloadingItems.has(getOrgSkillItemKey(item))}
               onOpenDetail={onOpenDetail}
               onDownload={onDownload}
+              onUninstall={onUninstall}
             />
           ))}
         </div>
