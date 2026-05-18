@@ -8,6 +8,7 @@ import {
   Search,
   Sparkles,
   Tag,
+  User,
   Zap
 } from "lucide-react"
 import { getMockOrgSkillMarketResponse, orgSkillMarketApi } from "../../api/org-skill-market"
@@ -130,13 +131,23 @@ function OrgSkillCard({
         <div className="min-w-0 flex-1">
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0">
-              <h3 className="text-[15px] font-medium text-[#141413] leading-snug truncate">
-                {item.chinese_name || item.name}
-              </h3>
-              <p className="mt-0.5 text-[12px] text-[#87867f] truncate">{item.name}</p>
+              <div className={'flex items-center space-x-2'}>
+                <h3 className="text-[15px] font-medium text-[#141413] leading-snug truncate">
+                  {item.chinese_name || item.name}
+                </h3>
+                <div
+                  className=" text-[12px] text-[#87867f] truncate">{item.name}</div>
+                {item.category && (
+                  <span className="inline-flex items-center gap-1 text-xs text-gray-500">
+                      <Tag className="size-3" />
+                    {getCategoryFilterName(item.category)}
+              </span>
+                )}
+              </div>
             </div>
             {item.installed && (
-              <span className="inline-flex items-center gap-1 rounded-full border border-[#c4e8d1] bg-[#edf7f0] px-2 py-0.5 text-[11px] font-medium text-[#2e7d4f] shrink-0">
+              <span
+                className="inline-flex items-center gap-1 rounded-full border border-[#c4e8d1] bg-[#edf7f0] px-2 py-0.5 text-[11px] font-medium text-[#2e7d4f] shrink-0">
                 <CheckCircle className="size-3" />
                 已安装
               </span>
@@ -147,70 +158,74 @@ function OrgSkillCard({
               {item.description}
             </p>
           )}
-          <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-[#87867f]">
-            {item.category && (
-              <span className="inline-flex items-center gap-1">
-                <Tag className="size-3" />
-                {getCategoryFilterName(item.category)}
-              </span>
-            )}
-            {item.version && (
-              <span className="inline-flex items-center gap-1">
-                <GitBranch className="size-3" />v{item.version}
-              </span>
-            )}
-            <span className="inline-flex items-center gap-1">
-              <Calendar className="size-3" />
-              {new Date(item.created_at).toLocaleDateString("zh-CN")}
-            </span>
-          </div>
         </div>
       </div>
-      <div className="mt-3 flex items-center justify-end gap-1.5 border-t border-[#f0eee6] pt-3">
-        {isDownloading ? (
-          <div className="size-4 border-2 border-[#c4956a] border-t-transparent rounded-full animate-spin" />
-        ) : (
-          <>
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-7 px-3 gap-1 text-xs text-[#5e5d59] border-[#e8e6dc] bg-[#f5f4ed] hover:bg-[#e8e6dc] rounded-lg"
-              onClick={(event) => {
-                event.stopPropagation()
-                void onOpenDetail(item)
-              }}
-            >
-              <FileText className="size-3" />
-              详情
-            </Button>
-            {!item.installed && (
+      {/*box bottom*/}
+      <div  className={'flex items-center justify-between  border-t border-[#f0eee6] pt-3 mt-2'}>
+        <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-[#87867f]">
+
+          {item.version && (
+            <span className="inline-flex items-center gap-1">
+                <GitBranch className="size-3" />v{item.version}
+              </span>
+          )}
+          <span className="inline-flex items-center gap-1">
+              <Calendar className="size-3" />
+            {new Date(item.created_at).toLocaleDateString("zh-CN")}
+            </span>
+          {item.user_id && (
+            <span className="inline-flex items-center gap-1">
+                <User className="size-3" />
+              {item.user_id}
+              </span>
+          )}
+        </div>
+        <div className="mt-3 flex items-center justify-end gap-1.5">
+          {isDownloading ? (
+            <div className="size-4 border-2 border-[#c4956a] border-t-transparent rounded-full animate-spin" />
+          ) : (
+            <>
               <Button
+                variant="outline"
                 size="sm"
-                className="h-7 px-3 gap-1 text-xs bg-[#c4956a] hover:bg-[#b85a3a] text-[#faf9f5] border-0 rounded-lg"
+                className="h-7 px-3 gap-1 text-xs text-[#5e5d59] border-[#e8e6dc] bg-[#f5f4ed] hover:bg-[#e8e6dc] rounded-lg"
                 onClick={(event) => {
                   event.stopPropagation()
-                  void onDownload(item, false)
+                  void onOpenDetail(item)
                 }}
               >
-                <Zap className="size-3" />
-                安装
+                <FileText className="size-3" />
+                详情
               </Button>
-            )}
-          </>
-        )}
+              {!item.installed && (
+                <Button
+                  size="sm"
+                  className="h-7 px-3 gap-1 text-xs bg-[#c4956a] hover:bg-[#b85a3a] text-[#faf9f5] border-0 rounded-lg"
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    void onDownload(item, false)
+                  }}
+                >
+                  <Zap className="size-3" />
+                  安装
+                </Button>
+              )}
+            </>
+          )}
+        </div>
       </div>
     </div>
   )
 }
 
 export function OrgSkillMarketContent({
-  searchQuery,
-  installedSkills,
-  reloadToken,
-  downloadingItems,
-  onOpenDetail,
-  onDownload
-}: OrgSkillMarketContentProps): React.JSX.Element {
+                                        searchQuery,
+                                        installedSkills,
+                                        reloadToken,
+                                        downloadingItems,
+                                        onOpenDetail,
+                                        onDownload
+                                      }: OrgSkillMarketContentProps): React.JSX.Element {
   const [pageNum, setPageNum] = useState(1)
   const [items, setItems] = useState<MarketItem[]>([])
   const [pagination, setPagination] = useState<OrgSkillPaginationState>({
@@ -305,7 +320,7 @@ export function OrgSkillMarketContent({
     <div className="space-y-3">
       <div className="flex items-center justify-between text-xs text-[#87867f] px-1">
         <span>
-          {searchQuery.trim() ? `当前页匹配 ${visibleItems.length} 个组织级技能` : "全部组织级技能"}
+          {searchQuery.trim() ? `当前页匹配 ${visibleItems.length} 个组织级技能` : "组织级技能"}
         </span>
       </div>
       {visibleItems.length === 0 ? (
@@ -318,7 +333,7 @@ export function OrgSkillMarketContent({
           </p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 2xl:grid-cols-2 gap-3">
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(320px,1fr))] gap-3">
           {visibleItems.map((item) => (
             <OrgSkillCard
               key={getOrgSkillItemKey(item)}
@@ -331,6 +346,7 @@ export function OrgSkillMarketContent({
         </div>
       )}
       <div className="flex items-center justify-end gap-2 border-t border-[#f0eee6] pt-3 text-xs text-[#87867f]">
+        <span className={'mr-2'}>共 {pagination.total} 条</span>
         <span className="mr-1 tabular-nums">
           第 {pagination.pageNum} / {pagination.pages} 页
         </span>
