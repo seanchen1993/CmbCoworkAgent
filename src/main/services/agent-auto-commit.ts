@@ -39,6 +39,7 @@ export interface AgentGitSnapshot {
   threadId: string
   workspacePath: string
   isGitRepo: boolean
+  gitRoot: string | null
   head: string | null
   branch: string | null
   dirtyFiles: string[]
@@ -118,10 +119,28 @@ function normalizeGitRelativePath(input: string): string {
     .replace(/\/$/, "")
 }
 
-function toWorktreeRelativePath(worktreePath: string, rawPath: string): string | null {
+function toWorktreeRelativePath(worktreePath: string, rawPath: string, gitRoot?: string | null): string | null {
   const trimmed = normalizeGitRelativePath(rawPath)
   if (!trimmed) return null
   const worktreeAbs = path.resolve(worktreePath)
+  const gitRootAbs = gitRoot ? path.resolve(gitRoot) : null
+
+  // Porcelain status paths are repo-root-relative even when `git -C` points at a
+  // subdirectory. Map those back to workspace-relative paths before they become
+  // pathspecs for later `git add -C <workspace>`.
+  if (gitRootAbs && gitRootAbs !== worktreeAbs && !path.isAbsolute(rawPath)) {
+    const workspaceFromGitRoot = normalizeGitRelativePath(path.relative(gitRootAbs, worktreeAbs))
+    const rawAsGitRelative = normalizeGitRelativePath(trimmed)
+    if (
+      workspaceFromGitRoot &&
+      rawAsGitRelative &&
+      rawAsGitRelative.startsWith(`${workspaceFromGitRoot}/`)
+    ) {
+      const mapped = rawAsGitRelative.slice(workspaceFromGitRoot.length).replace(/^\/+/, "")
+      return mapped ? normalizeGitRelativePath(mapped) : null
+    }
+  }
+
   const rawResolved = path.isAbsolute(rawPath)
     ? path.resolve(rawPath)
     : path.resolve(worktreePath, rawPath)
@@ -129,6 +148,7 @@ function toWorktreeRelativePath(worktreePath: string, rawPath: string): string |
   if (rel && !rel.startsWith("..") && !path.isAbsolute(rel)) {
     return normalizeGitRelativePath(rel)
   }
+  if (path.isAbsolute(rawPath)) return null
   return trimmed
 }
 
@@ -150,7 +170,9 @@ function parseStatusEntries(output: string): GitStatusEntry[] {
       const rawPath = entry.slice(3)
       if (!rawPath) continue
       if (isRenameOrCopyStatus(status) && i + 1 < entries.length) {
-        result.push({ status, path: normalizeGitRelativePath(entries[i + 1]) })
+        // Porcelain -z reverses rename/copy fields to "to\0from"; use the
+        // current path for pathspecs and skip the historical source path.
+        result.push({ status, path: normalizeGitRelativePath(rawPath) })
         i += 1
       } else {
         result.push({ status, path: normalizeGitRelativePath(rawPath) })
@@ -172,7 +194,20 @@ function parseStatusEntries(output: string): GitStatusEntry[] {
     })
 }
 
-async function runStatus(worktreePath: string): Promise<GitStatusEntry[]> {
+function remapStatusEntries(
+  entries: GitStatusEntry[],
+  worktreePath: string,
+  gitRoot?: string | null
+): GitStatusEntry[] {
+  return entries
+    .map((entry) => ({
+      ...entry,
+      path: toWorktreeRelativePath(worktreePath, entry.path, gitRoot) ?? ""
+    }))
+    .filter((entry) => entry.path)
+}
+
+async function runStatus(worktreePath: string, gitRoot?: string | null): Promise<GitStatusEntry[]> {
   try {
     const out = await runGit(
       worktreePath,
@@ -188,7 +223,7 @@ async function runStatus(worktreePath: string): Promise<GitStatusEntry[]> {
       ],
       { silent: true, timeoutMs: 15_000 }
     )
-    return parseStatusEntries(out)
+    return remapStatusEntries(parseStatusEntries(out), worktreePath, gitRoot)
   } catch {
     const out = await runGit(
       worktreePath,
@@ -203,7 +238,7 @@ async function runStatus(worktreePath: string): Promise<GitStatusEntry[]> {
       ],
       { silent: true, timeoutMs: 15_000 }
     )
-    return parseStatusEntries(out)
+    return remapStatusEntries(parseStatusEntries(out), worktreePath, gitRoot)
   }
 }
 
@@ -266,15 +301,15 @@ async function getHead(worktreePath: string): Promise<string | null> {
   }
 }
 
-async function isGitRepo(workspacePath: string): Promise<boolean> {
+async function getGitRoot(workspacePath: string): Promise<string | null> {
   try {
-    await runGit(workspacePath, ["rev-parse", "--show-toplevel"], {
+    const root = (await runGit(workspacePath, ["rev-parse", "--show-toplevel"], {
       silent: true,
       timeoutMs: GIT_CONTEXT_QUERY_TIMEOUT_MS
-    })
-    return true
+    })).trim()
+    return root || null
   } catch {
-    return false
+    return null
   }
 }
 
@@ -288,11 +323,13 @@ export async function startAgentGitSnapshot(
   const settings = getAgentAutoCommitSettings()
   if (settings.mode === "off") return null
 
-  if (!(await isGitRepo(workspacePath))) {
+  const gitRoot = await getGitRoot(workspacePath)
+  if (!gitRoot) {
     return {
       threadId,
       workspacePath,
       isGitRepo: false,
+      gitRoot: null,
       head: null,
       branch: null,
       dirtyFiles: [],
@@ -304,13 +341,14 @@ export async function startAgentGitSnapshot(
   const [head, branch, entries] = await Promise.all([
     getHead(workspacePath),
     getCurrentBranch(workspacePath),
-    runStatus(workspacePath)
+    runStatus(workspacePath, gitRoot)
   ])
   const dirtyFiles = Array.from(new Set(entries.map((entry) => entry.path)))
   return {
     threadId,
     workspacePath,
     isGitRepo: true,
+    gitRoot,
     head,
     branch,
     dirtyFiles,
@@ -456,7 +494,8 @@ async function clearLlmModifiedMetadata(threadId: string): Promise<void> {
 
 async function getThreadLlmModifiedFiles(
   threadId: string,
-  workspacePath: string
+  workspacePath: string,
+  gitRoot?: string | null
 ): Promise<string[]> {
   try {
     const { getThread } = await import("../db")
@@ -473,7 +512,7 @@ async function getThreadLlmModifiedFiles(
     const files = new Set<string>()
     for (const item of raw) {
       if (typeof item !== "string") continue
-      const rel = toWorktreeRelativePath(workspacePath, item)
+      const rel = toWorktreeRelativePath(workspacePath, item, gitRoot)
       if (rel) files.add(rel)
     }
     return Array.from(files)
@@ -563,6 +602,10 @@ export async function maybeAutoCommitAfterAgentRun({
     if (!existsSync(workspacePath)) {
       return { status: "skipped", reasons: ["工作区路径不存在，已跳过自动提交"] }
     }
+    const gitRoot = snapshot.gitRoot
+    if (!gitRoot) {
+      return { status: "skipped", reasons: ["当前工作区不是 Git 仓库，已跳过自动提交"] }
+    }
 
     const reasons: string[] = []
     const warnings: string[] = []
@@ -583,11 +626,11 @@ export async function maybeAutoCommitAfterAgentRun({
       }
     }
 
-    const entries = await runStatus(workspacePath)
+    const entries = await runStatus(workspacePath, gitRoot)
     const endDirty = new Set(entries.map((entry) => entry.path))
     const startDirty = new Set(snapshot.dirtyFiles)
     const touched = touchedFilesByThread.get(threadId) ?? new Set<string>()
-    const trackedByGitPanel = new Set(await getThreadLlmModifiedFiles(threadId, workspacePath))
+    const trackedByGitPanel = new Set(await getThreadLlmModifiedFiles(threadId, workspacePath, gitRoot))
     const agentReported = new Set([...touched, ...trackedByGitPanel])
 
     // Any pre-existing dirty file whose content changed during the run is a candidate.
