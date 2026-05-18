@@ -58,7 +58,8 @@ import {
 import { marketInstalledSourceStorage } from "./market-installed-source-storage"
 import { marketApi, MarketApiResponse, MarketItem, MarketItemType } from "../../api/market"
 import { getMarketMockResponse } from "./MarketMockData"
-import { getDefaultRange, parseTopUsersFromAgg } from "../dashboard/use-dashboard"
+import { getDefaultRange, parseTopUsersFromAgg, type DashboardTraceDetail } from "../dashboard/use-dashboard"
+import { TraceExplorer } from "../dashboard/TraceHistoryDialog"
 import { toast } from "sonner"
 import {
   buildUploaderIdCandidates,
@@ -573,6 +574,10 @@ export function MarketPanel(): React.JSX.Element {
   >({})
   const [selectedSkillUsage, setSelectedSkillUsage] = useState<SkillUsageDetail | null>(null)
   const [skillUsageLoading, setSkillUsageLoading] = useState(false)
+  const [selectedSkillTraces, setSelectedSkillTraces] = useState<DashboardTraceDetail[]>([])
+  const [skillTracesLoading, setSkillTracesLoading] = useState(false)
+  const [skillTracesError, setSkillTracesError] = useState<string | null>(null)
+  const [skillTraceDialogOpen, setSkillTraceDialogOpen] = useState(false)
   const [canViewSkillUserDetail, setCanViewSkillUserDetail] = useState(false)
   const [uploaderProfiles, setUploaderProfiles] = useState<Record<string, UploaderProfile>>({})
   const [currentUserUploadCandidates, setCurrentUserUploadCandidates] = useState<string[]>([])
@@ -635,6 +640,10 @@ export function MarketPanel(): React.JSX.Element {
     setPluginDetailPlugin(null)
     setPluginDetailData(null)
     setSelectedSkillUsage(null)
+    setSelectedSkillTraces([])
+    setSkillTracesLoading(false)
+    setSkillTracesError(null)
+    setSkillTraceDialogOpen(false)
   }
 
   const loadSkillPreviewFromInstallFile = async (filename: string, blob: Blob) => {
@@ -706,6 +715,35 @@ export function MarketPanel(): React.JSX.Element {
       setSelectedSkillUsage({ users: [] })
     } finally {
       setSkillUsageLoading(false)
+    }
+  }, [])
+
+  const loadSkillRecentTraces = useCallback(async (skillName: string) => {
+    if (!skillName?.trim()) {
+      setSelectedSkillTraces([])
+      return
+    }
+    if (typeof window.api?.dashboard?.marketSkillRecentTraces !== "function") {
+      setSelectedSkillTraces([])
+      setSkillTracesError("当前版本不支持 Skill Trace 查询")
+      return
+    }
+
+    setSkillTracesLoading(true)
+    setSkillTracesError(null)
+    try {
+      const range = getSkillStatsRange()
+      const response = await window.api.dashboard.marketSkillRecentTraces(skillName, range, 10)
+      if (!response.success || !response.data) {
+        throw new Error(response.error || "获取 Skill Trace 失败")
+      }
+      setSelectedSkillTraces(response.data)
+    } catch (err) {
+      console.warn(`[MarketPanel] Failed to load skill traces for ${skillName}:`, err)
+      setSelectedSkillTraces([])
+      setSkillTracesError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setSkillTracesLoading(false)
     }
   }, [])
 
@@ -1306,6 +1344,13 @@ export function MarketPanel(): React.JSX.Element {
     selectedSkillUsage,
     loadSkillUserStats
   ])
+
+  useEffect(() => {
+    if (activeTab !== "skill") return
+    if (detailMode !== "detail") return
+    if (!selectedItem?.name) return
+    void loadSkillRecentTraces(selectedItem.name)
+  }, [activeTab, detailMode, selectedItem?.name, loadSkillRecentTraces])
 
   const loadDetailDataForItem = async (item: MarketItem) => {
     setDetailLoading(true)
@@ -1932,6 +1977,39 @@ export function MarketPanel(): React.JSX.Element {
     )
   }
 
+  const renderSkillTraceEntry = () => {
+    if (activeTab !== "skill" || !selectedItem) return null
+    return (
+      <div className="rounded-2xl border border-[#e8e6dc] bg-[#faf9f5] p-4 space-y-3 shadow-[rgba(0,0,0,0.03)_0px_2px_10px]">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <h4 className="text-[13px] font-medium text-[#141413]">最近 10 条 Trace 记录（本月）</h4>
+            <p className="mt-1 text-[11px] text-[#87867f]">
+              {skillTracesLoading
+                ? "Trace 加载中…"
+                : skillTracesError
+                  ? skillTracesError
+                  : `已加载 ${selectedSkillTraces.length} 条记录`}
+            </p>
+          </div>
+          <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-[#d7e2f5] bg-[#eef4ff] px-2 py-0.5 text-[11px] text-[#365d97]">
+            <BarChart3 className="size-3" />
+            <span className="tabular-nums">{selectedSkillTraces.length}</span>
+          </span>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-8 w-full gap-1.5 text-xs text-[#5e5d59] border-[#e8e6dc] bg-white hover:bg-[#f5f4ed] rounded-lg cursor-pointer"
+          onClick={() => setSkillTraceDialogOpen(true)}
+        >
+          <FileText className="size-3" />
+          查看 Trace 详情
+        </Button>
+      </div>
+    )
+  }
+
   return (
     <div className="flex-1 flex flex-col overflow-hidden bg-[#f5f4ed]">
       {/* Header */}
@@ -2053,7 +2131,9 @@ export function MarketPanel(): React.JSX.Element {
         <ScrollArea className="flex-1">
           <div className="p-5 h-full">
             <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_380px] gap-5 items-start xl:h-full">
-              <div className="space-y-3 xl:order-1 order-2">{renderDetailFilePanel()}</div>
+              <div className="space-y-3 xl:order-1 order-2">
+                {renderDetailFilePanel()}
+              </div>
 
               <div className="xl:order-2 order-1 space-y-3 xl:sticky xl:top-4 w-full h-full overflow-y-auto pr-1">
                 {/* Info card */}
@@ -2307,6 +2387,8 @@ export function MarketPanel(): React.JSX.Element {
                     )}
                   </div>
                 )}
+
+                {renderSkillTraceEntry()}
 
                 {selectedItem.guidance && (
                   <div className="rounded-xl border border-[#f5d9c4] bg-[#fdf3e7] p-4 text-sm shadow-[rgba(0,0,0,0.03)_0px_2px_8px]">
@@ -2597,6 +2679,28 @@ export function MarketPanel(): React.JSX.Element {
               删除
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={skillTraceDialogOpen} onOpenChange={setSkillTraceDialogOpen}>
+        <DialogContent className="flex h-[80vh] max-w-[1080px] grid-rows-none flex-col gap-0 p-0">
+          <DialogHeader className="border-b border-border px-5 py-4">
+            <DialogTitle className="text-base">
+              Skill Trace 记录 · {selectedItem?.chinese_name || selectedItem?.name || "-"}
+            </DialogTitle>
+            <DialogDescription className="text-xs">
+              最近 10 条 Trace 记录（本月）
+            </DialogDescription>
+          </DialogHeader>
+          <TraceExplorer
+            traces={selectedSkillTraces}
+            loading={skillTracesLoading}
+            error={skillTracesError}
+            title="最近 10 条 Trace 记录（本月）"
+            emptyText="本月暂无该 Skill 的 trace 记录"
+            showCodeStats={false}
+            className="min-h-0 flex-1"
+          />
         </DialogContent>
       </Dialog>
 

@@ -209,6 +209,11 @@ const api = {
     delete: (threadId: string): Promise<void> => {
       return ipcRenderer.invoke("threads:delete", threadId)
     },
+    exportSession: (
+      threadId: string
+    ): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> => {
+      return ipcRenderer.invoke("threads:exportSession", threadId)
+    },
     getHistory: (threadId: string): Promise<unknown[]> => {
       return ipcRenderer.invoke("threads:history", threadId)
     },
@@ -1787,6 +1792,17 @@ const api = {
       opts?: { upperOrgLv1?: string | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:userStats", range, granularity, opts),
+    userList: (
+      range: { from: string; to: string },
+      options?: { pageSize?: number; afterKey?: Record<string, string | number> | null }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:userList", range, options),
+    userDetail: (
+      sapId: string,
+      range: { from: string; to: string },
+      options?: { traceLimit?: number }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:userDetail", sapId, range, options),
     skillUsageSummary: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
@@ -1820,6 +1836,12 @@ const api = {
       limit?: number
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:skillRecentTraces", skill, range, limit),
+    marketSkillRecentTraces: (
+      skill: string,
+      range: { from: string; to: string },
+      limit?: number
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:marketSkillRecentTraces", skill, range, limit),
     skillDetail: (
       skill: string,
       range: { from: string; to: string },

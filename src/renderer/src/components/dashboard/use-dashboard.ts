@@ -114,6 +114,11 @@ export interface DashboardTraceDetail {
   endedAt?: string
   durationMs: number
   userMessage: string
+  sapId?: string
+  ystId?: string
+  userName?: string
+  orgName?: string
+  userIp?: string
   modelId?: string
   modelName?: string
   outcome: string
@@ -181,6 +186,48 @@ export interface DashboardCodeStats {
 
 export interface DashboardSkillDetail {
   stats: DashboardCodeStats
+  traces: DashboardTraceDetail[]
+}
+
+export interface DashboardUserListItem {
+  sapId: string
+  ystId?: string
+  userName: string
+  orgName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+  count: number
+  lastActiveAt?: string
+  avgDurationMs: number
+  totalToolCalls: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalTokens: number
+}
+
+export interface DashboardUserListData {
+  items: DashboardUserListItem[]
+  pageSize: number
+  nextAfterKey?: Record<string, string | number>
+  totalActiveUsers: number
+}
+
+export interface DashboardUserDetail {
+  sapId: string
+  ystId?: string
+  userName: string
+  orgName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+  totalCalls: number
+  avgDurationMs: number
+  totalToolCalls: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalTokens: number
+  bySkill: Array<{ skill: string; count: number }>
+  byModel: Array<{ model: string; count: number }>
+  byOutcome: Array<{ outcome: string; count: number }>
   traces: DashboardTraceDetail[]
 }
 

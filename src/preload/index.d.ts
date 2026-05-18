@@ -110,6 +110,11 @@ interface DashboardTraceDetail {
   endedAt?: string
   durationMs: number
   userMessage: string
+  sapId?: string
+  ystId?: string
+  userName?: string
+  orgName?: string
+  userIp?: string
   modelId?: string
   modelName?: string
   outcome: string
@@ -178,6 +183,57 @@ interface DashboardSkillDetail {
   traces: DashboardTraceDetail[]
 }
 
+interface DashboardUserListItem {
+  sapId: string
+  ystId?: string
+  userName: string
+  orgName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+  count: number
+  lastActiveAt?: string
+  avgDurationMs: number
+  totalToolCalls: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalTokens: number
+}
+
+interface DashboardUserListData {
+  items: DashboardUserListItem[]
+  pageSize: number
+  nextAfterKey?: Record<string, string | number>
+  totalActiveUsers: number
+}
+
+interface DashboardUserDetail {
+  sapId: string
+  ystId?: string
+  userName: string
+  orgName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+  totalCalls: number
+  avgDurationMs: number
+  totalToolCalls: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalTokens: number
+  bySkill: Array<{ skill: string; count: number }>
+  byModel: Array<{ model: string; count: number }>
+  byOutcome: Array<{ outcome: string; count: number }>
+  traces: DashboardTraceDetail[]
+}
+
+interface DashboardUserListOptions {
+  pageSize?: number
+  afterKey?: Record<string, string | number> | null
+}
+
+interface DashboardUserDetailOptions {
+  traceLimit?: number
+}
+
 interface CustomAPI {
   agent: {
     invoke: (
@@ -206,6 +262,9 @@ interface CustomAPI {
     create: (metadata?: Record<string, unknown>) => Promise<Thread>
     update: (threadId: string, updates: Partial<Thread>) => Promise<Thread>
     delete: (threadId: string) => Promise<void>
+    exportSession: (
+      threadId: string
+    ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
     getHistory: (threadId: string) => Promise<unknown[]>
     generateTitle: (message: string) => Promise<string>
     onThreadsChanged: (callback: () => void) => () => void
@@ -1005,6 +1064,15 @@ interface CustomAPI {
       granularity: "day" | "week" | "month" | "custom",
       opts?: { upperOrgLv1?: string | null }
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    userList: (
+      range: { from: string; to: string },
+      options?: DashboardUserListOptions
+    ) => Promise<{ success: boolean; data?: DashboardUserListData; error?: string }>
+    userDetail: (
+      sapId: string,
+      range: { from: string; to: string },
+      options?: DashboardUserDetailOptions
+    ) => Promise<{ success: boolean; data?: DashboardUserDetail; error?: string }>
     skillUsageSummary: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
@@ -1028,6 +1096,11 @@ interface CustomAPI {
       granularity: "day" | "week" | "month" | "custom"
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     skillRecentTraces: (
+      skill: string,
+      range: { from: string; to: string },
+      limit?: number
+    ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
+    marketSkillRecentTraces: (
       skill: string,
       range: { from: string; to: string },
       limit?: number
