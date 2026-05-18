@@ -381,8 +381,7 @@ function MarketItemCard({
                 <User className="size-3 shrink-0" />
                 {isSkillCard ? (
                   <span>
-                    {uploaderSapId || "—"} / {uploaderUserName || "未知用户"} /{" "}
-                    {uploaderOrgName || "未知部门"}
+                    {uploaderSapId || "—"} / {uploaderUserName || ""} / {uploaderOrgName || ""}
                   </span>
                 ) : (
                   <span>用户 {item.user_id}</span>
@@ -2110,8 +2109,8 @@ export function MarketPanel(): React.JSX.Element {
                         <span className="inline-flex items-center gap-1 rounded-full bg-[#f5f4ed] border border-[#e8e6dc] text-[#5e5d59] px-2.5 py-1">
                           <User className="size-3" />
                           {selectedUploaderProfile?.sapId || selectedItem.user_id}/
-                          {selectedUploaderProfile?.userName || "未知用户"}/
-                          {selectedUploaderProfile?.orgName || "未知部门"}
+                          {selectedUploaderProfile?.userName || ""}/
+                          {selectedUploaderProfile?.orgName || ""}
                         </span>
                       )
                     ) : null}
