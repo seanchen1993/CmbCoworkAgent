@@ -932,7 +932,7 @@ export function ThreadSidebar(): React.JSX.Element {
           <span className="text-[9px] text-black ml-1 tabular-nums">
             {version || __APP_VERSION__}
           </span>
-          <UpdateActionButton variant="tag" hideWhenCurrent className="ml-1" />
+          <UpdateActionButton variant="tag" className="ml-1" />
         </div>
       </div>
       <Dialog open={!!threadToDelete} onOpenChange={(open) => !open && setThreadToDelete(null)}>

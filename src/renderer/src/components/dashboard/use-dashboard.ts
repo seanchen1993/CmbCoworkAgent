@@ -73,11 +73,19 @@ export interface UserStatsData {
   byOrgUv: Array<{ key: string; org: string; count: number }>
   byVersion: Array<{ version: string; count: number }>
   latestVersion: string
+  versionUsers: Array<{
+    sapId: string
+    userName: string
+    orgName: string
+    version: string
+    collectionTime: string
+  }>
   userVersionUsage: Array<{
     sapId: string
     userName: string
     orgName: string
     version: string
+    collectionTime: string
     isLatestVersion: boolean
   }>
   userTrend: Array<{ time: string; users: number }>
@@ -549,6 +557,11 @@ function getLatestUserMetric(bucket: any, field: string): string {
   return normalizeMetricValue(bucket.latest_user_info?.hits?.hits?.[0]?._source?.[field])
 }
 
+function getLatestUserCollectionTime(bucket: any): string {
+  const hit = bucket?.latest_user_info?.hits?.hits?.[0]
+  return normalizeMetricValue(hit?._source?.startedAt) || normalizeMetricValue(hit?.sort?.[0])
+}
+
 function compareVersionLike(a: string, b: string): number {
   const aParts = a.match(/\d+|[a-zA-Z]+/g) ?? []
   const bParts = b.match(/\d+|[a-zA-Z]+/g) ?? []
@@ -618,7 +631,26 @@ function parseUserStats(raw: any, selectedUpperOrgLv1: string | null): UserStats
     .filter((version) => version && version !== "未知")
     .sort(compareVersionLike)
     .at(-1) ?? ""
-  const userVersionUsage: UserStatsData["userVersionUsage"] = topUsers.map((user) => {
+  const versionUserBuckets: UserStatsData["versionUsers"] = (
+    aggs.by_version?.buckets ?? []
+  ).flatMap((versionBucket: any) =>
+    (versionBucket.users?.buckets ?? []).map((userBucket: any) => {
+      const userName = getLatestUserMetric(userBucket, "userName") || userBucket.key
+      const orgName = getLatestUserMetric(userBucket, "orgName")
+      const upperOrgLv1 = getLatestUserMetric(userBucket, "upperOrgLv1")
+      const upperOrgLv0 = getLatestUserMetric(userBucket, "upperOrgLv0")
+      const version = getLatestUserMetric(userBucket, "appVersion") || versionBucket.key || "未知"
+      return {
+        sapId: userBucket.key,
+        userName,
+        orgName: formatTopUserOrgName(orgName, upperOrgLv1, upperOrgLv0),
+        version,
+        collectionTime: getLatestUserCollectionTime(userBucket)
+      }
+    })
+  )
+
+  const fallbackVersionUsers: UserStatsData["versionUsers"] = topUsers.map((user) => {
     const bucket = (aggs.top_users?.buckets ?? []).find((item: any) => item.key === user.sapId)
     const version = getLatestUserMetric(bucket, "appVersion") || "未知"
     return {
@@ -626,9 +658,17 @@ function parseUserStats(raw: any, selectedUpperOrgLv1: string | null): UserStats
       userName: user.userName,
       orgName: user.orgName,
       version,
-      isLatestVersion: Boolean(latestVersion && version === latestVersion)
+      collectionTime: getLatestUserCollectionTime(bucket)
     }
-  }).filter((user) => !user.isLatestVersion)
+  })
+  const versionUsers = versionUserBuckets.length > 0 ? versionUserBuckets : fallbackVersionUsers
+
+  const userVersionUsage: UserStatsData["userVersionUsage"] = versionUsers
+    .map((user) => ({
+      ...user,
+      isLatestVersion: Boolean(latestVersion && user.version === latestVersion)
+    }))
+    .filter((user) => !user.isLatestVersion)
 
   const userTrend: UserStatsData["userTrend"] = (aggs.user_trend?.buckets ?? []).map((b: any) => ({
     time: b.key_as_string ?? new Date(b.key).toISOString(),
@@ -642,6 +682,7 @@ function parseUserStats(raw: any, selectedUpperOrgLv1: string | null): UserStats
     byOrgUv,
     byVersion,
     latestVersion,
+    versionUsers,
     userVersionUsage,
     userTrend,
     selectedUpperOrgLv1
