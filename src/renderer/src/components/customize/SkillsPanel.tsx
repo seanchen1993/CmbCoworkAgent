@@ -20,6 +20,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import {
   Dialog,
   DialogContent,
@@ -1746,6 +1747,9 @@ export function SkillsPanel(): React.JSX.Element {
     [selectedSkill, selectedSkillIsEdited, selectedSkillUploadedByMe, selectedSkillUploadedInPanel]
   )
   const selectedSkillPublishLabel = selectedSkillCanUpdate ? "更新到市场" : "发布到市场"
+  const selectedSkillDeleteDisabledReason = selectedSkillHideContent
+    ? "精品技能是内置技能，不允许删除。你可以点击按钮不启动这个技能。"
+    : undefined
 
   const saveSkillFileContent = useCallback(
     async (filePath: string, nextContent: string): Promise<SaveSkillFileResult> => {
@@ -2037,6 +2041,7 @@ export function SkillsPanel(): React.JSX.Element {
         onDelete={
           selectedSkill?.source === "user" ? () => handleDeleteSkill(selectedSkill) : undefined
         }
+        deleteDisabledReason={selectedSkillDeleteDisabledReason}
         onPublish={
           selectedSkill && (selectedSkillCanPublish || selectedSkillCanUpdate)
             ? () => openPublishDialog(selectedSkill)
@@ -2775,6 +2780,7 @@ export function SkillDetail(props: {
   onToggleEnabled: () => void
   onShowGuide?: () => void
   onDelete?: () => void
+  deleteDisabledReason?: string
   onPublish?: () => void
   publishLabel?: string
   canEdit?: boolean
@@ -2795,6 +2801,7 @@ export function SkillDetail(props: {
     isDisabled,
     onToggleEnabled,
     onDelete,
+    deleteDisabledReason,
     onPublish,
     publishLabel = "发布到市场",
     canEdit = false,
@@ -2993,15 +3000,41 @@ export function SkillDetail(props: {
               </>
             )}
             {onDelete && (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-7 gap-1.5 text-xs text-destructive hover:text-destructive hover:bg-destructive/10"
-                onClick={onDelete}
-              >
-                <Trash2 className="size-3" />
-                删除
-              </Button>
+              deleteDisabledReason ? (
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <span className="inline-flex cursor-not-allowed">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="pointer-events-none h-7 gap-1.5 text-xs text-muted-foreground opacity-55"
+                        disabled
+                        aria-disabled="true"
+                      >
+                        <Trash2 className="size-3" />
+                        删除
+                      </Button>
+                    </span>
+                  </PopoverTrigger>
+                  <PopoverContent
+                    className="w-auto max-w-56 px-3 py-2 text-xs"
+                    side="bottom"
+                    align="end"
+                  >
+                    {deleteDisabledReason}
+                  </PopoverContent>
+                </Popover>
+              ) : (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 gap-1.5 text-xs text-destructive hover:text-destructive hover:bg-destructive/10"
+                  onClick={onDelete}
+                >
+                  <Trash2 className="size-3" />
+                  删除
+                </Button>
+              )
             )}
             <Button
               variant={isDisabled ? "outline" : "default"}

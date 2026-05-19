@@ -891,6 +891,28 @@ export function MarketPanel(): React.JSX.Element {
     }
   }
 
+  const findInstalledPluginForMarketItem = (
+    pluginsMetadata: PluginMetadata[],
+    item: MarketItem
+  ): PluginMetadata | undefined => {
+    const candidates = new Set(
+      [item.name, item.id, item.chinese_name].map((value) => value?.trim()).filter(Boolean)
+    )
+    return pluginsMetadata.find(
+      (plugin) =>
+        candidates.has(plugin.name) ||
+        candidates.has(plugin.id) ||
+        (item.filename ? plugin.path.includes(item.filename) : false)
+    )
+  }
+
+  const deleteInstalledPlugin = async (plugin: PluginMetadata) => {
+    const result = await window.api.plugins.delete(plugin.id)
+    if (!result.success) {
+      throw new Error(result.error || "Plugin 卸载失败")
+    }
+  }
+
   // 在组件��载时获取已安装的skills、MCPs和Plugins列表
   useEffect(() => {
     loadInstalledSkills()
@@ -1067,15 +1089,14 @@ export function MarketPanel(): React.JSX.Element {
         } catch (deleteError) {
           console.warn("Failed to delete existing mcp, continuing with install:", deleteError)
         }
-      } else if (activeTab === "plugin" && window.api?.plugins?.delete) {
+      } else if (activeTab === "plugin") {
         try {
-          // 查找已安装的plugin路径
           const pluginsMetadata = await window.api.plugins.list()
-          const existingPlugin = pluginsMetadata.find((plugin) => plugin.name === itemName)
+          const existingPlugin = findInstalledPluginForMarketItem(pluginsMetadata, item)
 
           if (existingPlugin) {
-            console.log(`Deleting existing plugin: ${existingPlugin.path}`)
-            await window.api.plugins.delete(existingPlugin.path)
+            console.log(`Deleting existing plugin: ${existingPlugin.id}`)
+            await deleteInstalledPlugin(existingPlugin)
           }
         } catch (deleteError) {
           console.warn("Failed to delete existing plugin, continuing with install:", deleteError)
@@ -1648,11 +1669,11 @@ export function MarketPanel(): React.JSX.Element {
         }
         marketInstalledVersionStorage.removeVersion(itemName, activeTab)
         await loadInstalledMcps()
-      } else if (activeTab === "plugin" && window.api?.plugins?.delete) {
+      } else if (activeTab === "plugin") {
         const pluginsMetadata = await window.api.plugins.list()
-        const existingPlugin = pluginsMetadata.find((plugin) => plugin.name === itemName)
+        const existingPlugin = findInstalledPluginForMarketItem(pluginsMetadata, item)
         if (existingPlugin) {
-          await window.api.plugins.delete(existingPlugin.path)
+          await deleteInstalledPlugin(existingPlugin)
         }
         marketInstalledVersionStorage.removeVersion(itemName, activeTab)
         await loadInstalledPlugins()
