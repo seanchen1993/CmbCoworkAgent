@@ -1,4 +1,5 @@
 import type { DownloadedItemFile, MarketApiResponse, MarketItem } from "./market"
+import { toast } from "sonner"
 
 interface OrgSkillVersion {
   id: number
@@ -69,7 +70,7 @@ interface OrgSkillPageResponse {
     navigatepageNums: number[]
     navigateFirstPage: number
     navigateLastPage: number
-  }
+  } | null
 }
 
 const MOCK_ORG_SKILL_ITEMS: OrgSkillApiItem[] = [
@@ -167,7 +168,11 @@ function getLatestOrgSkillVersion(item: OrgSkillApiItem): OrgSkillVersion | unde
 
 function assertOrgSkillPageResponse(data: OrgSkillPageResponse): void {
   if (data.returnCode !== "SUC0000") {
-    throw new Error(data.errorMsg || "组织级技能列表加载失败")
+    const message = data.errorMsg || "组织级技能列表加载失败"
+    if (data.returnCode === "SCG1005") {
+      toast.error(message)
+    }
+    throw new Error(message)
   }
 
   if (!data.body || typeof data.body !== "object") {
@@ -182,7 +187,7 @@ function assertOrgSkillPageResponse(data: OrgSkillPageResponse): void {
 function toMarketResponse(data: OrgSkillPageResponse): MarketApiResponse {
   assertOrgSkillPageResponse(data)
 
-  const body = data.body
+  const body = data.body!
   const total = body.total
   const resolvedPageSize = body.pageSize
   const pages = body.pages || Math.max(1, Math.ceil(total / resolvedPageSize))
