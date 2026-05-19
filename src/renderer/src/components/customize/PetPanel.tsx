@@ -304,19 +304,52 @@ export function PetPanel(): React.JSX.Element {
           </div>
         </div>
 
-        <div className="flex items-center justify-between rounded-md border border-border px-4 py-3">
+        <div
+          className={cn(
+            "flex items-center justify-between gap-4 rounded-md border px-4 py-3 transition-colors",
+            settings.enabled ? "border-primary/30 bg-primary/5" : "border-border bg-muted/20"
+          )}
+        >
           <div>
             <div className="text-sm font-medium">显示桌面宠物</div>
-            <div className="text-xs text-muted-foreground">关闭后进入 App 也不会展示宠物窗口。</div>
+            <div className="text-xs text-muted-foreground">
+              点击右侧开关可开启或关闭；关闭后进入 App 也不会展示宠物窗口。
+            </div>
           </div>
-          <Button
-            size="sm"
-            variant={settings.enabled ? "default" : "outline"}
-            className="min-w-20"
+          <button
+            type="button"
+            role="switch"
+            aria-checked={settings.enabled}
+            aria-label={settings.enabled ? "关闭桌面宠物" : "开启桌面宠物"}
+            title={settings.enabled ? "点击关闭桌面宠物" : "点击开启桌面宠物"}
+            className={cn(
+              "group inline-flex shrink-0 cursor-pointer items-center gap-2 rounded-full border px-2.5 py-1.5 text-xs font-medium shadow-sm transition-all",
+              "hover:-translate-y-px hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+              settings.enabled
+                ? "border-primary/40 bg-primary text-primary-foreground"
+                : "border-border bg-background text-muted-foreground hover:border-primary/40 hover:text-foreground"
+            )}
             onClick={handleToggleEnabled}
           >
-            {settings.enabled ? "已开启" : "已关闭"}
-          </Button>
+            <span>{settings.enabled ? "已开启" : "已关闭"}</span>
+            <span
+              className={cn(
+                "relative inline-flex h-5 w-9 rounded-full border-2 border-transparent transition-colors",
+                settings.enabled ? "bg-primary-foreground/25" : "bg-muted-foreground/30"
+              )}
+              aria-hidden="true"
+            >
+              <span
+                className={cn(
+                  "inline-block size-4 rounded-full bg-white shadow-sm transition-transform",
+                  settings.enabled ? "translate-x-4" : "translate-x-0"
+                )}
+              />
+            </span>
+            <span className="text-[11px] opacity-85">
+              {settings.enabled ? "点击关闭" : "点击开启"}
+            </span>
+          </button>
         </div>
 
         <div className={cn("space-y-6", !settings.enabled && "opacity-60")}>
