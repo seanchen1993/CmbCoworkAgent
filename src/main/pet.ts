@@ -93,6 +93,7 @@ let suppressPetClickUntil = 0
 
 const PET_SETTINGS_FILE = join(getOpenworkDir(), "pet-settings.json")
 const PET_BUBBLE_AUTO_HIDE_MS = 4200
+const PET_ALWAYS_ON_TOP_LEVEL = "screen-saver"
 const PET_HOVER_MESSAGES = [
   "我会永远陪着你",
   "主人敲代码的样子会发光！",
@@ -122,6 +123,19 @@ export function configurePetWindow(options: PetWindowOptions): void {
 }
 
 /**
+ * 透明宠物窗口不在 renderer DOM 里，z-index 不参与排序；这里统一刷新原生窗口层级。
+ *
+ * macOS 上 hidden -> showInactive、主窗口重新 focus、气泡窗口重建时，floating 层级偶发会被后续窗口压住。
+ * screen-saver 是 Electron 暴露的更高层级，配合 moveTop() 可以把宠物稳定留在最上层。
+ */
+function keepPetWindowOnTop(window: BrowserWindow | null): void {
+  if (!window || window.isDestroyed()) return
+  window.setAlwaysOnTop(true, PET_ALWAYS_ON_TOP_LEVEL)
+  window.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+  window.moveTop()
+}
+
+/**
  * 通过宠物交互唤起主窗口。
  *
  * 具体的窗口创建/恢复能力由主进程入口传入，宠物模块只负责在需要时触发该能力。
@@ -129,6 +143,8 @@ export function configurePetWindow(options: PetWindowOptions): void {
 function showMainWindowFromPet(): BrowserWindow | null {
   const mainWindow = petWindowOptions?.ensureMainWindowVisible() ?? null
   clearPetCompletedTaskNotices()
+  keepPetWindowOnTop(petWindow)
+  keepPetWindowOnTop(petBubbleWindow)
   return mainWindow
 }
 
@@ -548,8 +564,7 @@ export function createPetWindow(): void {
   })
 
   petWindow.setBackgroundColor("#00000000")
-  petWindow.setAlwaysOnTop(true, "floating")
-  petWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+  keepPetWindowOnTop(petWindow)
   petWindowOptions?.applyMacDockIcon()
 
   const manifest = {
@@ -876,6 +891,8 @@ export function createPetWindow(): void {
   const showPetWindow = (): void => {
     if (currentWindow && !currentWindow.isDestroyed() && !currentWindow.isVisible()) {
       currentWindow.showInactive()
+      keepPetWindowOnTop(currentWindow)
+      keepPetWindowOnTop(petBubbleWindow)
     }
   }
   const currentWindow = petWindow
@@ -917,6 +934,8 @@ export function createPetWindow(): void {
           Math.round(pointerY - petDragOffset.y),
           false
         )
+        keepPetWindowOnTop(currentWindow)
+        keepPetWindowOnTop(petBubbleWindow)
         updatePetBubblePosition()
       }
     } else if (title.startsWith("pet-pointer-up:")) {
@@ -1058,8 +1077,7 @@ function showPetBubble(message: string, autoHideMs = PET_BUBBLE_AUTO_HIDE_MS): v
       }
     })
     petBubbleWindow.setBackgroundColor("#00000000")
-    petBubbleWindow.setAlwaysOnTop(true, "floating")
-    petBubbleWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+    keepPetWindowOnTop(petBubbleWindow)
     petWindowOptions?.applyMacDockIcon()
     petBubbleWindow.webContents.on("page-title-updated", (event, title) => {
       event.preventDefault()
@@ -1083,6 +1101,7 @@ function showPetBubble(message: string, autoHideMs = PET_BUBBLE_AUTO_HIDE_MS): v
     })
   } else {
     petBubbleWindow.setBounds(bounds, false)
+    keepPetWindowOnTop(petBubbleWindow)
   }
 
   const html = `<!doctype html>
@@ -1160,6 +1179,8 @@ function showPetBubble(message: string, autoHideMs = PET_BUBBLE_AUTO_HIDE_MS): v
   petBubbleWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
   petBubbleWindow.once("ready-to-show", () => {
     petBubbleWindow?.showInactive()
+    keepPetWindowOnTop(petWindow)
+    keepPetWindowOnTop(petBubbleWindow)
     petWindowOptions?.applyMacDockIcon()
   })
 }
