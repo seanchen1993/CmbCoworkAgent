@@ -125,13 +125,19 @@ export function configurePetWindow(options: PetWindowOptions): void {
 /**
  * 透明宠物窗口不在 renderer DOM 里，z-index 不参与排序；这里统一刷新原生窗口层级。
  *
- * macOS 上 hidden -> showInactive、主窗口重新 focus、气泡窗口重建时，floating 层级偶发会被后续窗口压住。
- * screen-saver 是 Electron 暴露的更高层级，配合 moveTop() 可以把宠物稳定留在最上层。
+ * macOS 上 hidden -> showInactive、主窗口重新 focus 时，floating 层级偶发会被后续窗口压住。
+ * screen-saver 是 Electron 暴露的更高层级；moveTop() 只在真正显示/交互时调用，避免 hover 气泡频繁重排窗口栈。
  */
-function keepPetWindowOnTop(window: BrowserWindow | null): void {
+function configurePetWindowLayer(window: BrowserWindow | null): void {
   if (!window || window.isDestroyed()) return
   window.setAlwaysOnTop(true, PET_ALWAYS_ON_TOP_LEVEL)
   window.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+}
+
+function keepPetWindowOnTop(window: BrowserWindow | null): void {
+  if (!window || window.isDestroyed()) return
+  configurePetWindowLayer(window)
+  if (!window.isVisible()) return
   window.moveTop()
 }
 
@@ -564,7 +570,7 @@ export function createPetWindow(): void {
   })
 
   petWindow.setBackgroundColor("#00000000")
-  keepPetWindowOnTop(petWindow)
+  configurePetWindowLayer(petWindow)
   petWindowOptions?.applyMacDockIcon()
 
   const manifest = {
@@ -1077,8 +1083,7 @@ function showPetBubble(message: string, autoHideMs = PET_BUBBLE_AUTO_HIDE_MS): v
       }
     })
     petBubbleWindow.setBackgroundColor("#00000000")
-    keepPetWindowOnTop(petBubbleWindow)
-    petWindowOptions?.applyMacDockIcon()
+    configurePetWindowLayer(petBubbleWindow)
     petBubbleWindow.webContents.on("page-title-updated", (event, title) => {
       event.preventDefault()
       if (title.startsWith("pet-bubble-enter:")) {
@@ -1097,11 +1102,10 @@ function showPetBubble(message: string, autoHideMs = PET_BUBBLE_AUTO_HIDE_MS): v
     })
     petBubbleWindow.on("closed", () => {
       petBubbleWindow = null
-      petWindowOptions?.applyMacDockIcon()
     })
   } else {
     petBubbleWindow.setBounds(bounds, false)
-    keepPetWindowOnTop(petBubbleWindow)
+    configurePetWindowLayer(petBubbleWindow)
   }
 
   const html = `<!doctype html>
@@ -1179,9 +1183,7 @@ function showPetBubble(message: string, autoHideMs = PET_BUBBLE_AUTO_HIDE_MS): v
   petBubbleWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
   petBubbleWindow.once("ready-to-show", () => {
     petBubbleWindow?.showInactive()
-    keepPetWindowOnTop(petWindow)
     keepPetWindowOnTop(petBubbleWindow)
-    petWindowOptions?.applyMacDockIcon()
   })
 }
 
