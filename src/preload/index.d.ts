@@ -162,6 +162,10 @@ interface CustomAPI {
       decision: HITLDecision,
       onEvent?: (event: StreamEvent) => void
     ) => () => void
+    goalControl: (
+      threadId: string,
+      message: string
+    ) => Promise<{ handled: boolean; terminatedCurrentRun: boolean }>
     cancel: (threadId: string) => Promise<void>
   }
   threads: {
@@ -176,7 +180,7 @@ interface CustomAPI {
       thread_id: string
       goal_id: string | null
       message: string
-      created_at: Date
+      created_at: Date | string | number
     }>>
     generateTitle: (message: string) => Promise<string>
     onThreadsChanged: (callback: () => void) => () => void

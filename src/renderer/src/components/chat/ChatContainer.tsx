@@ -72,7 +72,14 @@ import {
 import { insertLog, updateMMJUserInfo } from "../../../js/mmjUtils"
 import { toast } from "sonner"
 import { SlashCommandPopover } from "@/features/slash-commands/SlashCommandPopover"
-import { useSlashCommands, type SlashCommandItem } from "@/features/slash-commands/useSlashCommands"
+import {
+  isBareGoalSlashCommandInput,
+  isGoalSlashControlCommandInput,
+  isGoalTerminatingControlCommandInput,
+  resolveGoalRuntimeComposerState,
+  useSlashCommands,
+  type SlashCommandItem
+} from "@/features/slash-commands/useSlashCommands"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
 import { formatSkillUseBlock, parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
 import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
@@ -1053,7 +1060,6 @@ export function ChatContainer({
     setSavedToolDescriptionInput("")
   }, [pendingApproval])
   const isLoading = streamData.isLoading || scheduledTaskLoading
-  const inputDisabled = isLoading || historyLoading
 
   useEffect(() => {
     let cancelled = false
@@ -1884,10 +1890,25 @@ export function ChatContainer({
     skills: enabledSkillsForSlash,
     skillSelected: selectedSkill !== null
   })
+  const slashPopoverKind = slash.mode.kind
+  const hasPendingGoalTransportPayload = attachments.length > 0 || selectedSkill !== null
 
+  const {
+    inputDisabled,
+    composerControlsDisabled,
+    canSubmitGoalCommandWhileLoading,
+    allowSubmitWhileLoading,
+    goalSendButtonDisabledWhileLoading
+  } = resolveGoalRuntimeComposerState({
+    input,
+    isLoading,
+    historyLoading,
+    slashModeKind: slashPopoverKind,
+    hasPendingTransportPayload: hasPendingGoalTransportPayload,
+    goalControlAllowedWhileLoading: streamData.isLoading && !scheduledTaskLoading
+  })
   // Refresh skill list whenever the popover opens so customize-panel
   // enable/disable changes reflect without an app restart.
-  const slashPopoverKind = slash.mode.kind
   useEffect(() => {
     if (slashPopoverKind === "slash") {
       void loadSkills()
@@ -1926,34 +1947,88 @@ export function ChatContainer({
 
   const handleSubmit = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault()
+    const trimmedInput = input.trim()
     // Defense-in-depth: every current trigger already short-circuits while the
     // popover is open — the send button is disabled, and handleKeyDown's
     // popover branch returns before reaching handleSubmit. Kept here so any
     // future invoker (hotkey, programmatic call) can't accidentally ship the
     // literal "/xxx" text as a message.
-    if (slash.mode.kind === "slash") return
-    if ((!input.trim() && attachments.length === 0 && !selectedSkill) || inputDisabled || !stream)
+    if (slash.mode.kind === "slash" && !isBareGoalSlashCommandInput(trimmedInput)) return
+    if (
+      (!trimmedInput && attachments.length === 0 && !selectedSkill) ||
+      historyLoading ||
+      (isLoading && !allowSubmitWhileLoading) ||
+      !stream
+    )
       return
 
-    if (!currentModel) {
-      setError("请先在下方选择模型后再发送消息。")
+    const goalControlWithPendingTransport =
+      hasPendingGoalTransportPayload && isGoalSlashControlCommandInput(trimmedInput)
+    if (goalControlWithPendingTransport) {
+      setError(
+        "附件和显式技能不会用于 /goal 控制命令。请先移除附件/技能，或改成 /goal <目标/完成条件>。"
+      )
       return
     }
 
-    const selectedModel = models.find((m) => m.id === currentModel)
-    if (!selectedModel) {
-      setError("当前线程模型不存在，请重新选择模型。")
+    const bypassGoalControlValidation = isGoalSlashControlCommandInput(trimmedInput)
+
+    if (isLoading && bypassGoalControlValidation) {
+      if (threadError) {
+        clearError()
+      }
+      const userStartAt = new Date()
+      appendMessage({
+        id: crypto.randomUUID(),
+        role: "user",
+        content: trimmedInput,
+        created_at: userStartAt,
+        start_at: userStartAt,
+        end_at: userStartAt
+      })
+      setInput("")
+      insertLog("send: " + trimmedInput)
+      const goalControlResult = await window.api.agent.goalControl(threadId, trimmedInput)
+      if (
+        pendingApproval &&
+        isGoalTerminatingControlCommandInput(trimmedInput) &&
+        goalControlResult.terminatedCurrentRun
+      ) {
+        const approvalAny = pendingApproval as unknown as Record<string, unknown>
+        if (approvalAny._orchestratorRequestId) {
+          window.api.sandbox.sendApprovalDecision({
+            requestId: approvalAny._orchestratorRequestId as string,
+            type: "reject",
+            tool_call_id: pendingApproval.tool_call?.id || ""
+          })
+        }
+        setSaveToolMetadataLoading(false)
+        setPendingApproval(null)
+      }
       return
     }
 
-    if (!selectedModel.available) {
-      setError("当前模型不可用，请先在模型配置中设置 API 密钥。")
-      return
-    }
+    if (!bypassGoalControlValidation) {
+      if (!currentModel) {
+        setError("请先在下方选择模型后再发送消息。")
+        return
+      }
 
-    if (!workspacePath) {
-      setError("请先选择一个工作区文件夹再发送消息。")
-      return
+      const selectedModel = models.find((m) => m.id === currentModel)
+      if (!selectedModel) {
+        setError("当前线程模型不存在，请重新选择模型。")
+        return
+      }
+
+      if (!selectedModel.available) {
+        setError("当前模型不可用，请先在模型配置中设置 API 密钥。")
+        return
+      }
+
+      if (!workspacePath) {
+        setError("请先选择一个工作区文件夹再发送消息。")
+        return
+      }
     }
 
     if (threadError) {
@@ -1977,7 +2052,7 @@ export function ChatContainer({
     // Snapshot the skill selection before we clear it — synchronous path, no
     // async gap, so no token/stillOurs needed.
     const skill = selectedSkill
-    const rawMessage = input.trim()
+    const rawMessage = trimmedInput
     const currentAttachments = attachments.length > 0 ? [...attachments] : undefined
     // If user only uploaded files without text, add a default prompt.
     // skill-only sends (text empty, no attachments) still fall into this branch
@@ -2118,6 +2193,12 @@ export function ChatContainer({
 
     // Slash popover nav takes over keys while open.
     if (slash.mode.kind === "slash") {
+      if (e.key === "Enter" && !e.shiftKey && isBareGoalSlashCommandInput(input)) {
+        e.preventDefault()
+        const form = (e.currentTarget as HTMLTextAreaElement).form
+        form?.requestSubmit()
+        return
+      }
       if (e.key === "ArrowDown") {
         e.preventDefault()
         slash.moveSelection(1)
@@ -3734,7 +3815,11 @@ export function ChatContainer({
                   }}
                   onKeyDown={handleKeyDown}
                   placeholder={
-                    attachments.length > 0
+                    isLoading
+                      ? streamData.isLoading && !scheduledTaskLoading
+                        ? "运行中：可输入 /goal、/goal status、/goal pause、/goal clear"
+                        : "任务运行中，可使用取消按钮停止当前任务"
+                      : attachments.length > 0
                       ? "输入消息或直接发送文件..."
                       : "向 CMBDevClaw 提问，/ 输入命令；Shift + Enter 换行"
                   }
@@ -3754,7 +3839,7 @@ export function ChatContainer({
                     <button
                       type="button"
                       disabled={
-                        inputDisabled ||
+                        composerControlsDisabled ||
                         attachmentLoading ||
                         attachments.length >= MAX_ATTACHMENTS ||
                         totalAttachmentChars >= MAX_TOTAL_CHARS
@@ -3793,21 +3878,33 @@ export function ChatContainer({
                       </Tooltip>
                     </TooltipProvider>
                     {isLoading ? (
-                      <button
-                        type="button"
-                        onClick={handleCancel}
-                        aria-label="停止生成"
-                        className="flex items-center justify-center size-7 rounded-md bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
-                      >
-                        <Square className="size-3 fill-current" />
-                      </button>
+                      <>
+                        {canSubmitGoalCommandWhileLoading && (
+                          <button
+                            type="submit"
+                            disabled={goalSendButtonDisabledWhileLoading}
+                            aria-label="发送 goal 命令"
+                            className="flex items-center justify-center size-7 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            <Send className="size-3.5" />
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={handleCancel}
+                          aria-label="停止生成"
+                          className="flex items-center justify-center size-7 rounded-md bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
+                        >
+                          <Square className="size-3 fill-current" />
+                        </button>
+                      </>
                     ) : (
                       <button
                         type="submit"
                         disabled={
                           inputDisabled ||
                           (!input.trim() && attachments.length === 0 && !selectedSkill) ||
-                          slash.mode.kind === "slash"
+                          (slash.mode.kind === "slash" && !isBareGoalSlashCommandInput(input))
                         }
                         className="flex items-center justify-center size-7 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                       >

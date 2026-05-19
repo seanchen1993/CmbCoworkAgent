@@ -1,4 +1,4 @@
-export type GoalStatus = "active" | "paused" | "complete" | "budget_limited"
+export type GoalStatus = "active" | "paused" | "complete"
 
 export type GoalJudgeVerdict = "complete" | "continue" | "blocked"
 
@@ -8,11 +8,21 @@ export interface GoalLedger {
   blockers: string[]
 }
 
+export interface GoalExplicitSkillContext {
+  name: string
+  path: string
+}
+
+export interface GoalContext {
+  explicitSkill?: GoalExplicitSkillContext
+}
+
 export interface ThreadGoal {
   threadId: string
   goalId: string
   objective: string
   completionCondition: string
+  context: GoalContext
   status: GoalStatus
   turnsUsed: number
   maxTurns: number

@@ -9,15 +9,25 @@ import {
   buildGoalStartPrompt,
   displayGoalPausedReason,
   GoalManager,
+  isGoalBoundaryStillCurrent,
   isGoalWaitingForUserInput,
   MAX_GOAL_TEXT_CHARS,
   shouldAutoResumeGoalForUserMessage,
   validateGoalText
 } from "../src/main/agent/goals/goal-manager.ts"
+import {
+  applyPromptRewritePreservingGoalMarker,
+  buildGoalContinuationPromptFromHookContexts,
+  buildInternalGoalPromptFromHookResult,
+  GOAL_HOOK_ADDITIONAL_CONTEXT_HEADER,
+  getInternalGoalPromptMarker
+} from "../src/main/agent/goals/internal-prompt.ts"
 import { InMemoryGoalStore } from "../src/main/agent/goals/goal-store.ts"
 import {
   buildGoalJudgeUserPrompt,
+  getCurrentTurnAssistantResponse,
   parseGoalJudgeResult,
+  resolveGoalAssistantResponseBudgetChars,
   resolveGoalEvaluatorBudgetTokens,
   resolveGoalEvidenceBudgetChars,
   shouldPauseGoalForEmptyTurn
@@ -27,7 +37,10 @@ import {
   GoalEvidenceBuffer,
   summarizeGoalToolInput
 } from "../src/main/agent/goals/evidence.ts"
-import { parseGoalSlashCommand } from "../src/main/agent/goals/slash.ts"
+import {
+  extractGoalTransportPayload,
+  parseGoalSlashCommand
+} from "../src/main/agent/goals/slash.ts"
 import { ToolCallCounter } from "../src/main/agent/skill-evolution/tool-call-counter.ts"
 import type { GoalJudgeDecision } from "../src/main/agent/goals/types.ts"
 
@@ -64,9 +77,21 @@ async function testSlashParsing(): Promise<void> {
   assertEqual(parseGoalSlashCommand("/goal pause").type, "pause", "pause command")
   assertEqual(parseGoalSlashCommand("/goal resume").type, "resume", "resume command")
   assertEqual(parseGoalSlashCommand("/goal clear").type, "clear", "clear command")
-  for (const alias of ["stop", "done", "off", "reset", "none", "cancel"]) {
+  assertEqual(
+    parseGoalSlashCommand(
+      '/goal pause\n\n<attachment filename="notes.txt" type="text/plain" size="4">\ndata\n</attachment>'
+    ).type,
+    "invalid",
+    "goal control commands should not silently discard transport payloads"
+  )
+  for (const alias of ["stop", "off", "reset", "none", "cancel"]) {
     assertEqual(parseGoalSlashCommand(`/goal ${alias}`).type, "clear", `${alias} alias`)
   }
+  assertEqual(
+    parseGoalSlashCommand("/goal done").type,
+    "set",
+    "done should not clear goals because it sounds like a completion action"
+  )
   assertEqual(parseGoalSlashCommand("/goalish nope").type, "none", "prefix should not parse")
 
   const parsed = parseGoalSlashCommand("/goal fix tests until all pass")
@@ -78,22 +103,188 @@ async function testSlashParsing(): Promise<void> {
   const withAttachment = parseGoalSlashCommand(
     '/goal summarize README\n\n<attachment filename="notes.txt" type="text/plain" size="4">\ndata\n</attachment>'
   )
-  assertEqual(withAttachment.type, "set", "goal parser should ignore appended attachments")
+  assertEqual(withAttachment.type, "set", "goal parser should set with appended attachments")
   if (withAttachment.type === "set") {
+    assert(withAttachment.text.startsWith("summarize README"), "goal text should be preserved")
     assertEqual(
-      withAttachment.text,
+      withAttachment.displayText,
       "summarize README",
-      "attachment XML should not enter goal text"
+      "visible restored goal command should keep the user-authored text without transport summary"
+    )
+    assert(withAttachment.text.includes("notes.txt"), "attachment name should enter goal summary")
+    assert(
+      !withAttachment.text.includes("<attachment"),
+      "raw attachment XML should not enter goal text"
+    )
+  }
+
+  const withConditionAndAttachment = parseGoalSlashCommand(
+    '/goal 修复登录。\n完成条件：auth 测试通过\n\n<attachment filename="notes.txt" type="text/plain" size="4">\ndata\n</attachment>'
+  )
+  assertEqual(
+    withConditionAndAttachment.type,
+    "set",
+    "goal with completion condition and attachment should set"
+  )
+  if (withConditionAndAttachment.type === "set") {
+    const goal = makeManager().set("thread-condition-attachment", withConditionAndAttachment.text)
+    assertEqual(
+      goal.completionCondition,
+      "auth 测试通过",
+      "transport context summary should not become part of the completion condition"
+    )
+  }
+
+  const longGoalWithAttachment = parseGoalSlashCommand(
+    `/goal ${"x".repeat(700)}\n\n<attachment filename="notes.txt" type="text/plain" size="4">\ndata\n</attachment>`
+  )
+  assertEqual(
+    longGoalWithAttachment.type,
+    "set",
+    "long goal text with attachment should still set a goal"
+  )
+  if (longGoalWithAttachment.type === "set") {
+    assert(
+      longGoalWithAttachment.text.includes("启动上下文摘要"),
+      "long goal text should not truncate away the transport context summary"
+    )
+    assert(
+      longGoalWithAttachment.text.includes("notes.txt"),
+      "long goal text should keep attachment identity in the summary"
+    )
+    assert(
+      !longGoalWithAttachment.text.includes("<attachment"),
+      "long goal text should not persist raw attachment XML"
+    )
+  }
+
+  const tailConstraint = "STOP_IF_TAIL_CONSTRAINT_MUST_SURVIVE"
+  const nearLimitGoal = `${"x".repeat(MAX_GOAL_TEXT_CHARS - tailConstraint.length - 1)} ${tailConstraint}`
+  const nearLimitGoalWithAttachment = parseGoalSlashCommand(
+    `/goal ${nearLimitGoal}\n\n<attachment filename="notes.txt" type="text/plain" size="4">\ndata\n</attachment>`
+  )
+  assertEqual(
+    nearLimitGoalWithAttachment.type,
+    "set",
+    "near-limit goal text with attachment should still set a goal"
+  )
+  if (nearLimitGoalWithAttachment.type === "set") {
+    assertEqual(
+      nearLimitGoalWithAttachment.text.length,
+      MAX_GOAL_TEXT_CHARS,
+      "near-limit goal should preserve the original objective length"
+    )
+    assert(
+      nearLimitGoalWithAttachment.text.endsWith(tailConstraint),
+      "transport summary should not truncate away tail constraints from the objective"
+    )
+    assert(
+      !nearLimitGoalWithAttachment.text.includes("<attachment"),
+      "near-limit goal should not persist raw attachment XML"
     )
   }
 
   const withSkill = parseGoalSlashCommand(
     "/goal improve skill docs\n\n<CMBDEVCLAW-SKILL-USE-V1><name>docs</name><path>/tmp/SKILL.md</path></CMBDEVCLAW-SKILL-USE-V1>"
   )
-  assertEqual(withSkill.type, "set", "goal parser should ignore appended skill-use block")
+  assertEqual(withSkill.type, "set", "goal parser should set with appended skill-use block")
   if (withSkill.type === "set") {
-    assertEqual(withSkill.text, "improve skill docs", "skill-use block should not enter goal text")
+    assert(withSkill.text.startsWith("improve skill docs"), "goal text should be preserved")
+    assertEqual(
+      withSkill.displayText,
+      "improve skill docs",
+      "visible restored goal command should not include synthesized skill summary text"
+    )
+    assert(withSkill.text.includes("docs"), "skill name should enter goal summary")
+    assertEqual(
+      withSkill.context?.explicitSkill?.name,
+      "docs",
+      "explicit skill name should be persisted in goal context"
+    )
+    assertEqual(
+      withSkill.context?.explicitSkill?.path,
+      "/tmp/SKILL.md",
+      "explicit skill path should be persisted in goal context"
+    )
+    assert(
+      !withSkill.text.includes("<CMBDEVCLAW-SKILL-USE-V1>"),
+      "raw skill-use block should not enter goal text"
+    )
   }
+
+  const attachmentOnly = parseGoalSlashCommand(
+    '/goal\n\n<attachment filename="notes.txt" type="text/plain" size="4">\ndata\n</attachment>'
+  )
+  assertEqual(
+    attachmentOnly.type,
+    "invalid",
+    "/goal with only transport payload should ask for an explicit goal instead of setting a weak placeholder"
+  )
+  if (attachmentOnly.type === "invalid") {
+    assert(
+      attachmentOnly.reason.includes("/goal"),
+      "transport-only goal should explain how to provide an explicit goal"
+    )
+  }
+
+  const skillOnly = parseGoalSlashCommand(
+    "/goal\n\n<CMBDEVCLAW-SKILL-USE-V1><name>docs</name><path>/tmp/SKILL.md</path></CMBDEVCLAW-SKILL-USE-V1>"
+  )
+  assertEqual(
+    skillOnly.type,
+    "invalid",
+    "/goal with only a skill payload should ask for an explicit goal instead of setting a weak placeholder"
+  )
+  if (skillOnly.type === "invalid") {
+    assert(
+      skillOnly.reason.includes("显式技能"),
+      "skill-only goal should explain that skill context is not enough for a durable goal"
+    )
+  }
+
+  const longAttachmentName = "a".repeat(240)
+  const longAttachmentOnly = parseGoalSlashCommand(
+    [
+      "/goal",
+      "",
+      `<attachment filename="${longAttachmentName}-1.txt" type="text/plain" size="1">x</attachment>`,
+      "",
+      `<attachment filename="${longAttachmentName}-2.txt" type="text/plain" size="1">x</attachment>`,
+      "",
+      `<attachment filename="${longAttachmentName}-3.txt" type="text/plain" size="1">x</attachment>`
+    ].join("\n")
+  )
+  assertEqual(
+    longAttachmentOnly.type,
+    "invalid",
+    "long attachment-only /goal should still ask for an explicit goal"
+  )
+  if (longAttachmentOnly.type === "invalid") {
+    assert(
+      longAttachmentOnly.reason.includes("目标/完成条件"),
+      "long attachment-only goal should explain the required durable objective"
+    )
+  }
+
+  const transportPayload = extractGoalTransportPayload(
+    [
+      '/goal summarize README',
+      '',
+      '<attachment filename="notes.txt" type="text/plain" size="4">',
+      'data',
+      '</attachment>',
+      '',
+      '<CMBDEVCLAW-SKILL-USE-V1><name>docs</name><path>/tmp/SKILL.md</path></CMBDEVCLAW-SKILL-USE-V1>'
+    ].join("\n")
+  )
+  assert(
+    transportPayload.includes('<attachment filename="notes.txt"'),
+    "attachment payload should be available for the first goal turn"
+  )
+  assert(
+    transportPayload.includes("<CMBDEVCLAW-SKILL-USE-V1>"),
+    "skill-use payload should be available for the first goal turn"
+  )
 }
 
 async function testGoalLifecycle(): Promise<void> {
@@ -108,6 +299,15 @@ async function testGoalLifecycle(): Promise<void> {
     "condition should default to raw text"
   )
 
+  const skillGoal = manager.set("thread-skill-context", "use selected skill", {
+    context: { explicitSkill: { name: "docs", path: "/tmp/SKILL.md" } }
+  })
+  assertEqual(
+    skillGoal.context.explicitSkill?.path,
+    "/tmp/SKILL.md",
+    "goal context should preserve explicit skill path"
+  )
+
   const paused = manager.pause("thread-a", "user-paused")
   assertEqual(paused?.status, "paused", "pause should pause active goal")
   assertEqual(paused?.pausedReason, "user-paused", "pause reason")
@@ -117,6 +317,35 @@ async function testGoalLifecycle(): Promise<void> {
 
   manager.clear("thread-a")
   assert(manager.get("thread-a") === null, "clear should remove goal")
+}
+
+async function testDisplayGoalPausedReasonNormalizesInternalCodes(): Promise<void> {
+  assertEqual(displayGoalPausedReason("user-paused"), "已手动暂停。", "user-paused should be friendly")
+  assertEqual(
+    displayGoalPausedReason("user-cancelled"),
+    "你已取消当前运行。",
+    "user-cancelled should be friendly"
+  )
+  assertEqual(
+    displayGoalPausedReason("user message preempted active goal"),
+    "你发送了新消息，active goal 已暂停。需要继续时发送 /goal resume。",
+    "preemption reason should be friendly"
+  )
+  assertEqual(
+    displayGoalPausedReason("Turn budget exhausted (2/2)."),
+    "轮次预算已用尽（2/2）。",
+    "turn budget reason should be localized for display"
+  )
+  assertEqual(
+    displayGoalPausedReason("Evaluator returned invalid JSON 3 turns in a row."),
+    "评估器连续 3 轮输出格式无效。",
+    "parse failure reason should be localized for display"
+  )
+  assertEqual(
+    displayGoalPausedReason("WORKSPACE_REQUIRED"),
+    "需要先选择工作区。",
+    "workspace reason should be localized for display"
+  )
 }
 
 async function testGoalCompletionConditionExtraction(): Promise<void> {
@@ -174,18 +403,32 @@ async function testGoalCompletionConditionExtraction(): Promise<void> {
 
 async function testResumeResetsTurnWindow(): Promise<void> {
   const manager = makeManager(2)
-  manager.set("thread-resume-budget", "finish long task")
+  const originalNow = Date.now
+  let now = 1_000
+  Date.now = () => now
 
-  manager.recordJudgeDecision("thread-resume-budget", continueDecision("first missing item"))
-  manager.recordJudgeDecision("thread-resume-budget", continueDecision("budget exhausted"))
-  const paused = manager.get("thread-resume-budget")
-  assertEqual(paused?.status, "paused", "budget exhaustion should pause before resume")
-  assertEqual(paused?.turnsUsed, 2, "budget exhaustion should store used turns")
+  try {
+    manager.set("thread-resume-budget", "finish long task")
 
-  const resumed = manager.resume("thread-resume-budget")
-  assertEqual(resumed?.status, "active", "resume should reactivate the goal")
-  assertEqual(resumed?.turnsUsed, 0, "resume should reset the turn budget window")
-  assertEqual(resumed?.consecutiveParseFailures, 0, "resume should clear parse failure backoff")
+    now = 2_000
+    manager.recordJudgeDecision("thread-resume-budget", continueDecision("first missing item"))
+    now = 3_000
+    manager.recordJudgeDecision("thread-resume-budget", continueDecision("budget exhausted"))
+    const paused = manager.get("thread-resume-budget")
+    assertEqual(paused?.status, "paused", "budget exhaustion should pause before resume")
+    assertEqual(paused?.turnsUsed, 2, "budget exhaustion should store used turns")
+    assertEqual(paused?.createdAt, 1_000, "paused goal should keep its original baseline")
+
+    now = 5_000
+    const resumed = manager.resume("thread-resume-budget")
+    assertEqual(resumed?.status, "active", "resume should reactivate the goal")
+    assertEqual(resumed?.turnsUsed, 0, "resume should reset the turn budget window")
+    assertEqual(resumed?.consecutiveParseFailures, 0, "resume should clear parse failure backoff")
+    assertEqual(resumed?.createdAt, 5_000, "resume should reset the displayed time baseline")
+    assertEqual(resumed?.updatedAt, 5_000, "resume should refresh the updated timestamp")
+  } finally {
+    Date.now = originalNow
+  }
 }
 
 async function testResumeActiveGoalIsNoop(): Promise<void> {
@@ -202,6 +445,135 @@ async function testResumeActiveGoalIsNoop(): Promise<void> {
   assertEqual(afterTurn?.turnsUsed, 1, "test setup should use one turn")
   const noOp = manager.resume("thread-active-resume")
   assertEqual(noOp?.turnsUsed, 1, "active resume should not reset used turn count")
+
+  const reset = manager.resume("thread-active-resume", { resetActiveWindow: true })
+  assertEqual(reset?.turnsUsed, 0, "orphaned active resume should reset used turn count")
+  assertEqual(
+    reset?.consecutiveParseFailures,
+    0,
+    "orphaned active resume should clear parse failures"
+  )
+}
+
+async function testGoalBoundaryMatching(): Promise<void> {
+  assert(
+    isGoalBoundaryStillCurrent("goal-a", "goal-a"),
+    "same boundary goal should be eligible for boundary pause"
+  )
+  assert(
+    !isGoalBoundaryStillCurrent("goal-b", "goal-a"),
+    "newer goal should not be affected by an older boundary"
+  )
+  assert(
+    !isGoalBoundaryStillCurrent("goal-b", null),
+    "boundary that started without a goal should not pause a later goal"
+  )
+  assert(
+    !isGoalBoundaryStillCurrent(null, "goal-a"),
+    "missing current active goal should not match a boundary"
+  )
+}
+
+async function testGoalPromptRewritePreservesInternalMarker(): Promise<void> {
+  const original = [
+    "[Continuing active goal]",
+    "",
+    "Original continuation body.",
+    "",
+    "<untrusted_objective>",
+    "goal",
+    "</untrusted_objective>"
+  ].join("\n")
+
+  const assembled = buildInternalGoalPromptFromHookResult(original, {
+    updatedInput: {
+      message: "Rewrite the continuation with stronger verification steps."
+    },
+    additionalContexts: ["Use the repository lint rules first.", "Keep the response concise."]
+  })
+
+  assertEqual(
+    getInternalGoalPromptMarker(assembled),
+    "[Continuing active goal]",
+    "internal goal prompt should preserve the internal marker"
+  )
+  assert(
+    assembled.includes("Original continuation body."),
+    "internal goal prompt should preserve runtime-owned scaffold text"
+  )
+  assert(
+    assembled.includes("<untrusted_objective>\ngoal\n</untrusted_objective>"),
+    "internal goal prompt should preserve the goal objective block"
+  )
+  assert(
+    !assembled.includes("Rewrite the continuation with stronger verification steps."),
+    "internal goal prompt should ignore hook rewrites that would replace scaffold text"
+  )
+  assert(
+    assembled.includes(GOAL_HOOK_ADDITIONAL_CONTEXT_HEADER),
+    "internal goal prompt should append the hook context header"
+  )
+  assert(
+    assembled.includes("Use the repository lint rules first.\n\nKeep the response concise."),
+    "internal goal prompt should append hook contexts in order"
+  )
+}
+
+function testGoalContinuationPreservesExplicitSkillHookContext(): void {
+  const continuationPrompt = [
+    "[Continuing active goal]",
+    "",
+    "Continue the durable objective.",
+    "",
+    "<untrusted_objective>",
+    "use selected skill",
+    "</untrusted_objective>"
+  ].join("\n")
+
+  const assembled = buildGoalContinuationPromptFromHookContexts(continuationPrompt, {
+    updatedInput: {
+      message: "replace runtime prompt"
+    },
+    explicitSkillHookContext: [
+      "## Skill Hook Context",
+      "Skill: skill-creator",
+      "Always follow the skill capture-intent workflow."
+    ].join("\n"),
+    promptSubmitAdditionalContext: "Workspace policy context."
+  })
+
+  assert(
+    assembled.includes("Continue the durable objective."),
+    "continuation should preserve runtime-owned body"
+  )
+  assert(
+    assembled.includes("Skill: skill-creator"),
+    "continuation should keep explicit skill hook context"
+  )
+  assert(
+    assembled.includes("Always follow the skill capture-intent workflow."),
+    "continuation should keep explicit skill hook guidance"
+  )
+  assert(
+    assembled.includes("Workspace policy context."),
+    "continuation should keep prompt-submit additional context"
+  )
+  assert(
+    !assembled.includes("replace runtime prompt"),
+    "continuation should ignore prompt rewrites that would replace runtime scaffold"
+  )
+}
+
+async function testNonGoalPromptRewriteStillReplacesPromptDirectly(): Promise<void> {
+  const rewritten = applyPromptRewritePreservingGoalMarker(
+    "hello world",
+    "rewritten plain prompt"
+  )
+  assertEqual(
+    rewritten,
+    "rewritten plain prompt",
+    "non-goal prompts should keep the original updatedInput behavior"
+  )
 }
 
 async function testGoalTextLengthLimit(): Promise<void> {
@@ -233,8 +605,25 @@ async function testStatusLineIsActionable(): Promise<void> {
   manager.set("thread-status", "finish docs")
   const status = manager.statusLine("thread-status")
   assert(status.includes("Goal 进行中"), "status should show active title")
+  assert(!status.includes("●"), "status should not duplicate the notice icon with a text bullet")
   assert(status.includes("目标：finish docs"), "status should show objective")
   assert(status.includes("/goal pause"), "status should include useful commands")
+
+  manager.set("thread-status-summary", "finish docs\n启动上下文摘要：显式技能：docs")
+  const summaryStatus = manager.statusLine("thread-status-summary")
+  assert(
+    summaryStatus.includes("目标：finish docs"),
+    "status should show the user-authored objective without launch context summary"
+  )
+  assert(
+    !summaryStatus.includes("启动上下文摘要"),
+    "status should hide internal launch context summary"
+  )
+
+  manager.pause("thread-status", "user-paused")
+  const pausedStatus = manager.statusLine("thread-status")
+  assert(pausedStatus.includes("暂停原因：已手动暂停。"), "paused status should translate internal reasons")
+  manager.resume("thread-status")
 
   manager.recordJudgeDecision("thread-status", {
     verdict: "complete",
@@ -394,6 +783,39 @@ async function testEmptyTurnPauseGuard(): Promise<void> {
   )
 }
 
+function testCurrentTurnAssistantResponseDoesNotFallBackToPreviousTurn(): void {
+  const previous = "上一轮已经完成了验证。"
+  assertEqual(
+    getCurrentTurnAssistantResponse({
+      assistantText: previous,
+      currentTurnAssistantStart: previous.length,
+      lastFinalText: ""
+    }),
+    "",
+    "current-turn response extraction should not fall back to previous assistant text"
+  )
+
+  assertEqual(
+    getCurrentTurnAssistantResponse({
+      assistantText: `${previous}<think>hidden</think>\n本轮可见回复`,
+      currentTurnAssistantStart: previous.length,
+      lastFinalText: ""
+    }),
+    "本轮可见回复",
+    "current-turn response extraction should slice from the current turn boundary and strip thinking"
+  )
+
+  assertEqual(
+    getCurrentTurnAssistantResponse({
+      assistantText: previous,
+      currentTurnAssistantStart: previous.length,
+      lastFinalText: "最终回复优先"
+    }),
+    "最终回复优先",
+    "explicit current final response should still win when present"
+  )
+}
+
 async function testCompleteDecisionStopsGoal(): Promise<void> {
   const manager = makeManager()
   manager.set("thread-c", "docs are updated")
@@ -423,6 +845,50 @@ async function testBlockedDecisionPausesGoal(): Promise<void> {
   assertEqual(goal?.pausedReason, "Need staging credentials.", "blocked reason should persist")
 }
 
+async function testJudgeReasonIsCapped(): Promise<void> {
+  const manager = makeManager()
+  manager.set("thread-long-reason", "finish without bloating goal state")
+  const longReason = `Long evaluator explanation ${"x".repeat(5_000)} final sentence.`
+  const outcome = manager.recordJudgeDecision("thread-long-reason", {
+    verdict: "blocked",
+    reason: longReason
+  })
+
+  const goal = manager.get("thread-long-reason")
+  assertEqual(outcome?.shouldContinue, false, "blocked long reason should stop loop")
+  assert(goal?.lastReason && goal.lastReason.length < 1_400, "lastReason should be capped")
+  assert(goal?.pausedReason && goal.pausedReason.length < 1_400, "pausedReason should be capped")
+  assert(
+    goal?.lastReason?.includes("truncated"),
+    "capped evaluator reason should include a truncation marker"
+  )
+  assert(
+    outcome?.notice.length && outcome.notice.length < 1_500,
+    "notice should not contain the full raw evaluator reason"
+  )
+
+  manager.set("thread-long-continue-reason", "continue without bloating the next prompt")
+  const continueOutcome = manager.recordJudgeDecision("thread-long-continue-reason", {
+    verdict: "continue",
+    reason: longReason
+  })
+  const continuedGoal = manager.get("thread-long-continue-reason")
+  assert(continueOutcome?.shouldContinue, "long continue reason should still continue")
+  assert(
+    continuedGoal?.lastReason && continuedGoal.lastReason.length < 1_400,
+    "continue lastReason should be capped"
+  )
+  assert(
+    continueOutcome?.continuationPrompt &&
+      !continueOutcome.continuationPrompt.includes("x".repeat(1_500)),
+    "continuation prompt should not contain the raw oversized evaluator reason"
+  )
+  assert(
+    continueOutcome?.continuationPrompt?.includes("truncated"),
+    "continuation prompt should keep a truncation marker for oversized reason"
+  )
+}
+
 async function testNeedsUserInputBlockedDecisionWaitsForReply(): Promise<void> {
   const manager = makeManager()
   manager.set("thread-needs-input", "创建煮饭技能")
@@ -437,6 +903,14 @@ async function testNeedsUserInputBlockedDecisionWaitsForReply(): Promise<void> {
     outcome?.notice.startsWith("Goal 等待补充信息："),
     "waiting notice should have a distinct user-input prefix"
   )
+  assert(
+    outcome?.notice.includes("补充信息后请发送 /goal resume 继续处理"),
+    "waiting notice should require an explicit resume after the user replies"
+  )
+  assert(
+    outcome?.notice.includes("/goal clear"),
+    "waiting notice should still explain how to stop the goal"
+  )
 
   const goal = manager.get("thread-needs-input")
   assertEqual(goal?.status, "paused", "waiting for user input should persist as paused")
@@ -447,8 +921,46 @@ async function testNeedsUserInputBlockedDecisionWaitsForReply(): Promise<void> {
     "status display should hide the internal waiting marker"
   )
   assert(
-    shouldAutoResumeGoalForUserMessage(goal, "川菜，晚饭，分步骤详细指南"),
-    "normal user reply should auto-resume a waiting goal"
+    !shouldAutoResumeGoalForUserMessage(goal, "川菜，晚饭，分步骤详细指南"),
+    "short replies should no longer auto-resume a waiting goal"
+  )
+  assert(
+    !shouldAutoResumeGoalForUserMessage(
+      goal,
+      [
+        "请分析以下附件并新建一个煮饭技能。",
+        "",
+        '<attachment filename="plan.md" type="text/plain" size="4">',
+        "data",
+        "</attachment>"
+      ].join("\n")
+    ),
+    "attachment payloads should not hijack an old waiting goal"
+  )
+  assert(
+    !shouldAutoResumeGoalForUserMessage(
+      goal,
+      [
+        "继续，但顺便用一个技能。",
+        "",
+        "<CMBDEVCLAW-SKILL-USE-V1><name>skill-creator</name><path>/tmp/SKILL.md</path></CMBDEVCLAW-SKILL-USE-V1>"
+      ].join("\n")
+    ),
+    "skill transport payloads should not auto-resume a waiting goal"
+  )
+  assert(
+    !shouldAutoResumeGoalForUserMessage(
+      goal,
+      [
+        "这是一个新的复杂任务：",
+        "1. 帮我分析 firstDemo 的 controller 结构",
+        "2. 列出所有接口",
+        "3. 生成一份测试计划",
+        "4. 不要修改文件",
+        "5. 给出验证步骤"
+      ].join("\n")
+    ),
+    "large multi-line task-like messages should not silently revive a waiting goal"
   )
   assert(
     !shouldAutoResumeGoalForUserMessage(goal, "/goal status"),
@@ -458,6 +970,10 @@ async function testNeedsUserInputBlockedDecisionWaitsForReply(): Promise<void> {
   assert(
     !shouldAutoResumeGoalForUserMessage(manager.pause("thread-user-paused", "user-paused"), "继续"),
     "ordinary user-paused goals should not auto-resume"
+  )
+  assert(
+    !shouldAutoResumeGoalForUserMessage(goal, "帮我看下 README"),
+    "short unrelated follow-up requests should stay as new work, not revive the waiting goal"
   )
 }
 
@@ -490,6 +1006,11 @@ async function testParseFailureBackstop(): Promise<void> {
       parseFailed: true
     })
     assert(outcome?.shouldContinue, "first two parse failures should fail open")
+    assertEqual(
+      manager.get("thread-f")?.lastReason,
+      "评估器输出格式无效，本轮按未完成继续处理。",
+      "parse failures should not persist raw evaluator schema errors as advisory"
+    )
   }
 
   const third = manager.recordJudgeDecision("thread-f", {
@@ -519,6 +1040,11 @@ async function testJudgeParsing(): Promise<void> {
 
   const unknown = parseGoalJudgeResult('{"verdict":"maybe","reason":"unclear"}')
   assertEqual(unknown.verdict, "continue", "unknown verdict should continue")
+  assert(unknown.parseFailed, "unknown verdict should mark parse failure")
+
+  const missingVerdict = parseGoalJudgeResult('{"done":true,"reason":"legacy judge schema"}')
+  assertEqual(missingVerdict.verdict, "continue", "missing verdict should continue safely")
+  assert(missingVerdict.parseFailed, "missing verdict should mark parse failure")
 
   const needsInput = parseGoalJudgeResult(
     '{"verdict":"blocked","blocker_type":"needs_user_input","reason":"Agent is asking user clarifying questions."}'
@@ -537,8 +1063,14 @@ async function testJudgeParsing(): Promise<void> {
     "needs_user_input",
     "judge parser should infer clear user-input blockers when older judges omit blocker_type"
   )
-  assert(!unknown.parseFailed, "unknown verdict is valid JSON, not parse failure")
-
+  const selfActionBlocker = parseGoalJudgeResult(
+    '{"verdict":"blocked","reason":"需要确认 build 命令是否成功。"}'
+  )
+  assertEqual(
+    selfActionBlocker.blockerType,
+    "other",
+    "judge parser should not infer user-input blockers from generic confirmation wording"
+  )
   const invalid = parseGoalJudgeResult("not json")
   assertEqual(invalid.verdict, "continue", "invalid output should continue")
   assert(invalid.parseFailed, "invalid output should mark parse failure")
@@ -639,15 +1171,38 @@ async function testJudgePromptPreservesLegacyUnbudgetedEvidence(): Promise<void>
 }
 
 async function testGoalEvaluatorDynamicBudgets(): Promise<void> {
-  assertEqual(resolveGoalEvaluatorBudgetTokens(32_000), 12_000, "small context gets floor")
+  assertEqual(resolveGoalEvaluatorBudgetTokens(4_096), 1_024, "4k context scales down")
+  assertEqual(resolveGoalEvaluatorBudgetTokens(8_192), 2_048, "8k context scales down")
+  assertEqual(resolveGoalEvaluatorBudgetTokens(32_000), 8_000, "32k uses 25% budget")
   assertEqual(resolveGoalEvaluatorBudgetTokens(128_000), 32_000, "128k uses 25% budget")
   assertEqual(resolveGoalEvaluatorBudgetTokens(200_000), 50_000, "200k uses 25% budget")
   assertEqual(resolveGoalEvaluatorBudgetTokens(1_000_000), 80_000, "large context gets cap")
 
   assertEqual(
+    resolveGoalAssistantResponseBudgetChars(4_096),
+    819,
+    "4k context should keep assistant-response budget inside the judge window"
+  )
+  assertEqual(
+    resolveGoalAssistantResponseBudgetChars(32_000),
+    6_400,
+    "32k context should scale assistant-response budget"
+  )
+  assertEqual(
+    resolveGoalAssistantResponseBudgetChars(128_000),
+    12_000,
+    "128k context should cap assistant-response noise"
+  )
+
+  assertEqual(
+    resolveGoalEvidenceBudgetChars(4_096),
+    2_662,
+    "4k context should keep evidence budget inside the judge window"
+  )
+  assertEqual(
     resolveGoalEvidenceBudgetChars(32_000),
-    31_200,
-    "small context should keep a useful evidence window"
+    20_800,
+    "32k context should scale evaluator evidence"
   )
   assertEqual(
     resolveGoalEvidenceBudgetChars(128_000),
@@ -658,6 +1213,39 @@ async function testGoalEvaluatorDynamicBudgets(): Promise<void> {
     resolveGoalEvidenceBudgetChars(1_000_000),
     40_000,
     "large context should not make evaluator evidence unbounded"
+  )
+}
+
+async function testJudgePromptBudgetsLongAssistantResponse(): Promise<void> {
+  const manager = makeManager()
+  const goal = manager.set("thread-assistant-budget", "完成日志验证")
+  const longAssistantResponse = [
+    "verification summary head",
+    "x".repeat(20_000),
+    "verification summary tail"
+  ].join("\n")
+  const prompt = buildGoalJudgeUserPrompt(
+    {
+      goal,
+      assistantResponse: longAssistantResponse,
+      toolCalls: [],
+      toolEvidence: ["execute: BUILD SUCCESS"],
+      usedSkills: []
+    },
+    { maxAssistantResponseChars: 1_200 }
+  )
+
+  assert(
+    prompt.includes("verification summary head"),
+    "budgeted assistant response should preserve the head"
+  )
+  assert(
+    prompt.includes("verification summary tail"),
+    "budgeted assistant response should preserve the tail"
+  )
+  assert(
+    prompt.includes("middle truncated"),
+    "budgeted assistant response should disclose truncation"
   )
 }
 
@@ -822,6 +1410,65 @@ async function testGoalEvidenceBufferSupportsPerTurnWindows(): Promise<void> {
   )
 }
 
+async function testGoalEvidenceBufferWindowSurvivesTrimming(): Promise<void> {
+  const buffer = new GoalEvidenceBuffer(10)
+  for (let i = 0; i < 55; i++) {
+    buffer.appendToolResult({
+      toolCallId: `old-${i}`,
+      toolName: "execute",
+      output: `old-${i}`
+    })
+  }
+
+  const turnStart = buffer.getCount()
+  for (let i = 0; i < 10; i++) {
+    buffer.appendToolResult({
+      toolCallId: `new-${i}`,
+      toolName: "execute",
+      output: `new-${i}`
+    })
+  }
+
+  const currentTurn = buffer.getItemsSince(turnStart)
+  assertEqual(
+    currentTurn.length,
+    10,
+    "current-turn evidence should retain all new entries even after buffer trimming"
+  )
+  assert(
+    currentTurn.every((item, index) => item.includes(`new-${index}`)),
+    "current-turn evidence should not drop early new entries after trimming"
+  )
+}
+
+async function testGoalEvidenceBufferClearsAndCapsPendingInputSummaries(): Promise<void> {
+  const buffer = new GoalEvidenceBuffer(10, 2)
+  const internalBuffer = buffer as unknown as { inputByCallId: Map<string, string> }
+
+  buffer.rememberToolCall("call-1", { command: "echo 1" })
+  buffer.rememberToolCall("call-2", { command: "echo 2" })
+  buffer.rememberToolCall("call-3", { command: "echo 3" })
+  assertEqual(
+    internalBuffer.inputByCallId.size,
+    2,
+    "pending input summaries should be capped for long-running goals"
+  )
+  assert(
+    !internalBuffer.inputByCallId.has("call-1"),
+    "oldest pending input summary should be evicted first"
+  )
+
+  buffer.appendToolResult({
+    toolCallId: "call-2",
+    toolName: "execute",
+    output: "ok"
+  })
+  assert(
+    !internalBuffer.inputByCallId.has("call-2"),
+    "completed tool calls should release remembered input summaries"
+  )
+}
+
 async function testToolCallCounterSupportsPerTurnWindows(): Promise<void> {
   const counter = new ToolCallCounter()
   counter.register({ id: "old-call", name: "read_file", args: {} }, "ai-1", 0)
@@ -880,17 +1527,24 @@ async function main(): Promise<void> {
   const tests = [
     testSlashParsing,
     testGoalLifecycle,
+    testDisplayGoalPausedReasonNormalizesInternalCodes,
     testGoalCompletionConditionExtraction,
     testResumeResetsTurnWindow,
     testResumeActiveGoalIsNoop,
+    testGoalBoundaryMatching,
+    testGoalPromptRewritePreservesInternalMarker,
+    testGoalContinuationPreservesExplicitSkillHookContext,
+    testNonGoalPromptRewriteStillReplacesPromptDirectly,
     testGoalTextLengthLimit,
     testStatusLineIsActionable,
     testStartPromptDiscouragesEmptyResponse,
     testEmptyTurnPauseGuard,
+    testCurrentTurnAssistantResponseDoesNotFallBackToPreviousTurn,
     testContinueDecisionUpdatesLedgerAndPrompt,
     testStaleJudgeDecisionDoesNotMutateReplacedGoal,
     testCompleteDecisionStopsGoal,
     testBlockedDecisionPausesGoal,
+    testJudgeReasonIsCapped,
     testNeedsUserInputBlockedDecisionWaitsForReply,
     testTurnBudgetPausesGoal,
     testParseFailureBackstop,
@@ -898,11 +1552,14 @@ async function main(): Promise<void> {
     testJudgePromptIncludesToolEvidence,
     testJudgePromptPreservesLegacyUnbudgetedEvidence,
     testGoalEvaluatorDynamicBudgets,
+    testJudgePromptBudgetsLongAssistantResponse,
     testJudgePromptEvidenceBudgetKeepsImportantLines,
     testGoalToolEvidenceFormatting,
     testGoalToolEvidenceBoundaryCases,
     testGoalEvidenceBufferAssociatesToolInputAndOutput,
     testGoalEvidenceBufferSupportsPerTurnWindows,
+    testGoalEvidenceBufferWindowSurvivesTrimming,
+    testGoalEvidenceBufferClearsAndCapsPendingInputSummaries,
     testToolCallCounterSupportsPerTurnWindows,
     testLedgerPatchIsCappedAndFenced
   ]

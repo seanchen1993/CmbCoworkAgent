@@ -113,6 +113,7 @@ export async function initializeDatabase(): Promise<SqlJsDatabase> {
       goal_id TEXT NOT NULL,
       objective TEXT NOT NULL,
       completion_condition TEXT,
+      context_json TEXT,
       status TEXT NOT NULL CHECK(status IN ('active', 'paused', 'complete', 'budget_limited')),
       turns_used INTEGER NOT NULL DEFAULT 0,
       max_turns INTEGER NOT NULL DEFAULT 15,
@@ -124,6 +125,22 @@ export async function initializeDatabase(): Promise<SqlJsDatabase> {
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     )
+  `)
+
+  const goalColumns = db.exec("PRAGMA table_info(thread_goals)")?.[0]?.values ?? []
+  const hasGoalContextJson = goalColumns.some((row) => row[1] === "context_json")
+  if (!hasGoalContextJson) {
+    db.run("ALTER TABLE thread_goals ADD COLUMN context_json TEXT")
+  }
+
+  // Legacy compatibility: older builds exposed `budget_limited`, but runtime now
+  // treats exhausted budgets as a paused goal with an explicit paused reason.
+  db.run(`
+    UPDATE thread_goals
+    SET
+      status = 'paused',
+      paused_reason = COALESCE(NULLIF(paused_reason, ''), 'Turn budget exhausted.')
+    WHERE status = 'budget_limited'
   `)
 
   db.run(`

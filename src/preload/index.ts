@@ -153,6 +153,15 @@ const api = {
         ipcRenderer.removeListener(channel, handler)
       }
     },
+    goalControl: (
+      threadId: string,
+      message: string
+    ): Promise<{ handled: boolean; terminatedCurrentRun: boolean }> => {
+      return ipcRenderer.invoke("agent:goal-control", { threadId, message }) as Promise<{
+        handled: boolean
+        terminatedCurrentRun: boolean
+      }>
+    },
     cancel: (threadId: string): Promise<void> => {
       return ipcRenderer.invoke("agent:cancel", { threadId })
     }
@@ -184,7 +193,7 @@ const api = {
         thread_id: string
         goal_id: string | null
         message: string
-        created_at: Date
+        created_at: Date | string | number
       }>
     > => {
       return ipcRenderer.invoke("threads:goalEvents", threadId) as Promise<
@@ -193,7 +202,7 @@ const api = {
           thread_id: string
           goal_id: string | null
           message: string
-          created_at: Date
+          created_at: Date | string | number
         }>
       >
     },

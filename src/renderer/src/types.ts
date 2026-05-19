@@ -148,6 +148,7 @@ export interface Message {
   created_at: Date
   start_at?: Date
   end_at?: Date
+  goal_id?: string | null
 }
 
 export interface ContentBlock {

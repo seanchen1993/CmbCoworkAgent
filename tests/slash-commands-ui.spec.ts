@@ -5,7 +5,14 @@
  *   npx tsx tests/slash-commands-ui.spec.ts
  */
 
-import { buildSlashPopoverMode } from "../src/renderer/src/features/slash-commands/useSlashCommands.ts"
+import {
+  buildSlashPopoverMode,
+  isBareGoalSlashCommandInput,
+  isGoalSlashCommandInput,
+  isGoalSlashControlCommandInput,
+  isGoalTerminatingControlCommandInput,
+  resolveGoalRuntimeComposerState
+} from "../src/renderer/src/features/slash-commands/useSlashCommands.ts"
 import type { SkillMetadata } from "../src/renderer/src/types.ts"
 
 function assertEqual<T>(actual: T, expected: T, message: string): void {
@@ -123,6 +130,298 @@ function testSelectedSkillKeepsPopoverClosed(): void {
   assertEqual(mode.kind, "closed", "selected skill chip should keep popover closed")
 }
 
+function testGoalSlashInputDetectionForRuntimeControls(): void {
+  assertEqual(isGoalSlashCommandInput("/goal"), true, "bare /goal should be recognized")
+  assertEqual(
+    isGoalSlashCommandInput("  /goal pause  "),
+    true,
+    "/goal pause should be recognized"
+  )
+  assertEqual(
+    isGoalSlashCommandInput("/goal clear"),
+    true,
+    "/goal clear should be recognized"
+  )
+  assertEqual(isGoalSlashCommandInput("/go"), false, "partial command should not be recognized")
+  assertEqual(
+    isGoalSlashCommandInput("/goalish"),
+    false,
+    "prefixed non-goal slash should not be recognized"
+  )
+}
+
+function testGoalSlashControlCommandDetectionForValidationBypass(): void {
+  assertEqual(isBareGoalSlashCommandInput("/goal"), true, "bare /goal should be detected")
+  assertEqual(
+    isBareGoalSlashCommandInput("/goal status"),
+    false,
+    "/goal status should not be treated as the bare command"
+  )
+  assertEqual(
+    isGoalSlashControlCommandInput("/goal"),
+    true,
+    "bare /goal should bypass model/workspace validation"
+  )
+  assertEqual(
+    isGoalSlashControlCommandInput("/goal status"),
+    true,
+    "/goal status should bypass model/workspace validation"
+  )
+  assertEqual(
+    isGoalSlashControlCommandInput("/goal pause"),
+    true,
+    "/goal pause should bypass model/workspace validation"
+  )
+  assertEqual(
+    isGoalSlashControlCommandInput("/goal clear"),
+    true,
+    "/goal clear should bypass model/workspace validation"
+  )
+  assertEqual(
+    isGoalSlashControlCommandInput("/goal cancel"),
+    true,
+    "/goal cancel alias should bypass model/workspace validation"
+  )
+  assertEqual(
+    isGoalSlashControlCommandInput(
+      '/goal\n\n<attachment filename="notes.txt" type="text/plain" size="4">data</attachment>'
+    ),
+    false,
+    "bare /goal with transport payload sets a goal and should not bypass validation"
+  )
+  assertEqual(
+    isGoalSlashControlCommandInput(
+      '/goal pause\n\n<attachment filename="notes.txt" type="text/plain" size="4">data</attachment>'
+    ),
+    false,
+    "/goal control commands with transport payload should not bypass validation"
+  )
+  assertEqual(
+    isGoalSlashControlCommandInput("/goal resume"),
+    false,
+    "/goal resume still requires a runnable thread context"
+  )
+  assertEqual(
+    isGoalSlashControlCommandInput("/goal 检查 README"),
+    false,
+    "setting a new goal should not bypass model/workspace validation"
+  )
+
+  assertEqual(
+    isGoalTerminatingControlCommandInput("/goal pause"),
+    true,
+    "/goal pause should be treated as terminating the current run"
+  )
+  assertEqual(
+    isGoalTerminatingControlCommandInput("/goal clear"),
+    true,
+    "/goal clear should be treated as terminating the current run"
+  )
+  assertEqual(
+    isGoalTerminatingControlCommandInput("/goal cancel"),
+    true,
+    "/goal cancel alias should be treated as terminating the current run"
+  )
+  assertEqual(
+    isGoalTerminatingControlCommandInput(
+      '/goal clear\n\n<attachment filename="notes.txt" type="text/plain" size="4">data</attachment>'
+    ),
+    false,
+    "terminating goal controls with transport payload should not discard the payload"
+  )
+  assertEqual(
+    isGoalTerminatingControlCommandInput("/goal"),
+    false,
+    "status shorthand should not clear pending approval"
+  )
+  assertEqual(
+    isGoalTerminatingControlCommandInput("/goal status"),
+    false,
+    "status command should not clear pending approval"
+  )
+}
+
+function testRuntimeComposerStateBlocksPlainTextWhileLoading(): void {
+  const state = resolveGoalRuntimeComposerState({
+    input: "hello world",
+    isLoading: true,
+    historyLoading: false,
+    slashModeKind: "closed"
+  })
+
+  assertEqual(state.inputDisabled, false, "loading alone should not disable typing")
+  assertEqual(
+    state.composerControlsDisabled,
+    true,
+    "loading should still disable attachments and non-goal controls"
+  )
+  assertEqual(
+    state.canSubmitGoalCommandWhileLoading,
+    false,
+    "plain text should not be sendable while loading"
+  )
+  assertEqual(
+    state.showGoalSendButtonWhileLoading,
+    false,
+    "plain text should not show the extra goal send button"
+  )
+}
+
+function testRuntimeComposerStateAllowsGoalCommandsWhileLoading(): void {
+  const state = resolveGoalRuntimeComposerState({
+    input: "  /goal pause  ",
+    isLoading: true,
+    historyLoading: false,
+    slashModeKind: "closed"
+  })
+
+  assertEqual(state.inputDisabled, false, "goal commands should keep the textarea editable")
+  assertEqual(
+    state.canSubmitGoalCommandWhileLoading,
+    true,
+    "/goal control commands should be sendable while loading"
+  )
+  assertEqual(
+    state.showGoalSendButtonWhileLoading,
+    true,
+    "/goal control commands should surface the send button while loading"
+  )
+  assertEqual(
+    state.goalSendButtonDisabledWhileLoading,
+    false,
+    "goal send button should stay enabled when the slash popover is closed"
+  )
+}
+
+function testRuntimeComposerStateOnlyAllowsGoalControlCommandsWhileLoading(): void {
+  const resumeState = resolveGoalRuntimeComposerState({
+    input: "/goal resume",
+    isLoading: true,
+    historyLoading: false,
+    slashModeKind: "closed"
+  })
+  assertEqual(
+    resumeState.canSubmitGoalCommandWhileLoading,
+    false,
+    "/goal resume should not be submitted through the mid-run control side-channel"
+  )
+
+  const setState = resolveGoalRuntimeComposerState({
+    input: "/goal 检查 README",
+    isLoading: true,
+    historyLoading: false,
+    slashModeKind: "closed"
+  })
+  assertEqual(
+    setState.canSubmitGoalCommandWhileLoading,
+    false,
+    "setting a new goal should wait until the current run finishes"
+  )
+
+  const bareGoalWithTransportState = resolveGoalRuntimeComposerState({
+    input: "/goal",
+    isLoading: true,
+    historyLoading: false,
+    slashModeKind: "closed",
+    hasPendingTransportPayload: true
+  })
+  assertEqual(
+    bareGoalWithTransportState.canSubmitGoalCommandWhileLoading,
+    false,
+    "bare /goal with pending attachment or skill payload should not use the control side-channel"
+  )
+
+  const pauseWithTransportState = resolveGoalRuntimeComposerState({
+    input: "/goal pause",
+    isLoading: true,
+    historyLoading: false,
+    slashModeKind: "closed",
+    hasPendingTransportPayload: true
+  })
+  assertEqual(
+    pauseWithTransportState.canSubmitGoalCommandWhileLoading,
+    false,
+    "/goal pause with pending attachment or skill payload should not use the control side-channel"
+  )
+}
+
+function testRuntimeComposerStateBlocksGoalControlsForNonAgentLoading(): void {
+  const state = resolveGoalRuntimeComposerState({
+    input: "/goal pause",
+    isLoading: true,
+    historyLoading: false,
+    slashModeKind: "closed",
+    goalControlAllowedWhileLoading: false
+  })
+
+  assertEqual(
+    state.canSubmitGoalCommandWhileLoading,
+    false,
+    "scheduled/heartbeat/ChatX loading should not route /goal pause through agent goalControl"
+  )
+  assertEqual(
+    state.showGoalSendButtonWhileLoading,
+    false,
+    "scheduled/heartbeat/ChatX loading should keep goal send hidden"
+  )
+}
+
+function testRuntimeComposerStateDisablesGoalSendWhilePopoverOpen(): void {
+  const state = resolveGoalRuntimeComposerState({
+    input: "/go",
+    isLoading: true,
+    historyLoading: false,
+    slashModeKind: "slash"
+  })
+
+  assertEqual(
+    state.goalSendButtonDisabledWhileLoading,
+    true,
+    "open slash popover should still block accidental literal /xxx submission"
+  )
+  assertEqual(
+    state.canSubmitGoalCommandWhileLoading,
+    false,
+    "partial /go filter should not be treated as a runnable goal command"
+  )
+}
+
+function testRuntimeComposerStateAllowsBareGoalWhilePopoverOpen(): void {
+  const state = resolveGoalRuntimeComposerState({
+    input: "/goal",
+    isLoading: true,
+    historyLoading: false,
+    slashModeKind: "slash"
+  })
+
+  assertEqual(
+    state.canSubmitGoalCommandWhileLoading,
+    true,
+    "bare /goal should remain a runnable status command while loading"
+  )
+  assertEqual(
+    state.goalSendButtonDisabledWhileLoading,
+    false,
+    "bare /goal should not be disabled just because the slash popover is open"
+  )
+}
+
+function testRuntimeComposerStateKeepsHistoryLoadingLocked(): void {
+  const state = resolveGoalRuntimeComposerState({
+    input: "/goal status",
+    isLoading: true,
+    historyLoading: true,
+    slashModeKind: "closed"
+  })
+
+  assertEqual(state.inputDisabled, true, "history loading should still lock the textarea")
+  assertEqual(
+    state.composerControlsDisabled,
+    true,
+    "history loading should keep the composer controls disabled"
+  )
+}
+
 function main(): void {
   const tests = [
     testRootSlashShowsGoalAboveSkills,
@@ -133,7 +432,16 @@ function main(): void {
     testSkillFilteringIsCaseInsensitive,
     testWhitespaceClosesPopoverForCommandSubmission,
     testUnknownSlashKeepsOpenWithNoMatches,
-    testSelectedSkillKeepsPopoverClosed
+    testSelectedSkillKeepsPopoverClosed,
+    testGoalSlashInputDetectionForRuntimeControls,
+    testGoalSlashControlCommandDetectionForValidationBypass,
+    testRuntimeComposerStateBlocksPlainTextWhileLoading,
+    testRuntimeComposerStateAllowsGoalCommandsWhileLoading,
+    testRuntimeComposerStateOnlyAllowsGoalControlCommandsWhileLoading,
+    testRuntimeComposerStateBlocksGoalControlsForNonAgentLoading,
+    testRuntimeComposerStateDisablesGoalSendWhilePopoverOpen,
+    testRuntimeComposerStateAllowsBareGoalWhilePopoverOpen,
+    testRuntimeComposerStateKeepsHistoryLoadingLocked
   ]
 
   for (const test of tests) {

@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useState } from "react"
 import type { SkillMetadata } from "@/types"
+import { isGoalClearAlias, splitGoalTransportPayload } from "../../../../shared/goal-slash"
 
 export type SlashCommandItem = {
   id: string
@@ -31,6 +32,73 @@ const GENERAL_SLASH_COMMANDS: SlashCommandItem[] = [
     keywords: ["goal", "目标", "长期任务", "自动续跑", "完成条件"]
   }
 ]
+
+export function isGoalSlashCommandInput(input: string): boolean {
+  const trimmed = input.trim()
+  return /^\/goal(?:$|\s+)/i.test(trimmed)
+}
+
+export function isBareGoalSlashCommandInput(input: string): boolean {
+  return input.trim().toLowerCase() === "/goal"
+}
+
+export function isGoalSlashControlCommandInput(input: string): boolean {
+  const { commandText, payload } = splitGoalTransportPayload(input)
+  const trimmed = commandText.trim()
+  if (!/^\/goal(?:$|\s+)/i.test(trimmed)) return false
+  if (payload) return false
+
+  const arg = trimmed.slice("/goal".length).trim().toLowerCase()
+  return arg === "" || arg === "status" || arg === "pause" || isGoalClearAlias(arg)
+}
+
+export function isGoalTerminatingControlCommandInput(input: string): boolean {
+  const { commandText, payload } = splitGoalTransportPayload(input)
+  const trimmed = commandText.trim()
+  if (!/^\/goal(?:$|\s+)/i.test(trimmed)) return false
+  if (payload) return false
+
+  const arg = trimmed.slice("/goal".length).trim().toLowerCase()
+  return arg === "pause" || isGoalClearAlias(arg)
+}
+
+export function resolveGoalRuntimeComposerState(params: {
+  input: string
+  isLoading: boolean
+  historyLoading: boolean
+  slashModeKind: PopoverMode["kind"]
+  hasPendingTransportPayload?: boolean
+  goalControlAllowedWhileLoading?: boolean
+}) {
+  const {
+    input,
+    isLoading,
+    historyLoading,
+    slashModeKind,
+    hasPendingTransportPayload = false,
+    goalControlAllowedWhileLoading = true
+  } = params
+  const bareGoalWithPendingTransport =
+    hasPendingTransportPayload && isBareGoalSlashCommandInput(input)
+  const goalControlWithPendingTransport =
+    hasPendingTransportPayload && isGoalSlashControlCommandInput(input)
+  const canSubmitGoalCommandWhileLoading =
+    isLoading &&
+    goalControlAllowedWhileLoading &&
+    isGoalSlashControlCommandInput(input) &&
+    !bareGoalWithPendingTransport &&
+    !goalControlWithPendingTransport
+
+  return {
+    inputDisabled: historyLoading,
+    composerControlsDisabled: isLoading || historyLoading,
+    canSubmitGoalCommandWhileLoading,
+    allowSubmitWhileLoading: canSubmitGoalCommandWhileLoading,
+    showGoalSendButtonWhileLoading: canSubmitGoalCommandWhileLoading,
+    goalSendButtonDisabledWhileLoading:
+      slashModeKind === "slash" && !isBareGoalSlashCommandInput(input)
+  }
+}
 
 function commandMatchesFilter(command: SlashCommandItem, filter: string): boolean {
   if (!filter) return true

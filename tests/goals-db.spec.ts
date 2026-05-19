@@ -39,7 +39,9 @@ async function testSqlGoalStorePersistsAcrossDatabaseReopen(): Promise<void> {
   db.createThread("thread-db", { title: "Goal DB regression" })
 
   const manager = new GoalManager(new SqlGoalStore(), 4)
-  manager.set("thread-db", "finish persistent goal")
+  manager.set("thread-db", "finish persistent goal", {
+    context: { explicitSkill: { name: "docs", path: "/tmp/SKILL.md" } }
+  })
   const outcome = manager.recordJudgeDecision("thread-db", {
     verdict: "continue",
     reason: "Need one more verification step.",
@@ -58,6 +60,16 @@ async function testSqlGoalStorePersistsAcrossDatabaseReopen(): Promise<void> {
   assert(reloaded, "goal should reload after closing and reopening the database")
   assertEqual(reloaded?.objective, "finish persistent goal", "objective should persist")
   assertEqual(reloaded?.turnsUsed, 1, "turn count should persist")
+  assertEqual(
+    reloaded?.context.explicitSkill?.name,
+    "docs",
+    "explicit skill name should persist"
+  )
+  assertEqual(
+    reloaded?.context.explicitSkill?.path,
+    "/tmp/SKILL.md",
+    "explicit skill path should persist"
+  )
   assertEqual(
     reloaded?.ledger.progress[0],
     "implemented persistence path",
@@ -151,6 +163,138 @@ async function testReplacingSqlGoalRefreshesCreatedAt(): Promise<void> {
   db.closeDatabase()
 }
 
+async function testResumingSqlGoalRefreshesCreatedAtBaseline(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const { SqlGoalStore } = await import("../src/main/agent/goals/goal-store.ts")
+  const { GoalManager } = await import("../src/main/agent/goals/goal-manager.ts")
+
+  await db.initializeDatabase()
+  db.createThread("thread-resume-baseline", { title: "Resume baseline regression" })
+
+  const manager = new GoalManager(new SqlGoalStore(), 2)
+  const originalNow = Date.now
+  let now = 1_000
+  Date.now = () => now
+
+  try {
+    manager.set("thread-resume-baseline", "resume should refresh baseline")
+    now = 2_000
+    manager.pause("thread-resume-baseline", "user-paused")
+    now = 5_000
+    const resumed = manager.resume("thread-resume-baseline")
+    assertEqual(resumed?.status, "active", "resume should reactivate persisted goal")
+    assertEqual(resumed?.createdAt, 5_000, "resume should reset persisted created_at baseline")
+    assertEqual(resumed?.updatedAt, 5_000, "resume should persist updated_at baseline")
+  } finally {
+    Date.now = originalNow
+  }
+
+  await db.flush()
+  db.closeDatabase()
+
+  await db.initializeDatabase()
+  const reloaded = new SqlGoalStore().get("thread-resume-baseline")
+  assertEqual(reloaded?.status, "active", "reloaded resumed goal should stay active")
+  assertEqual(reloaded?.createdAt, 5_000, "reloaded goal should keep refreshed baseline")
+  assertEqual(reloaded?.updatedAt, 5_000, "reloaded goal should keep refreshed update time")
+
+  db.closeDatabase()
+}
+
+async function testResettingActiveSqlGoalRefreshesCreatedAtBaseline(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const { SqlGoalStore } = await import("../src/main/agent/goals/goal-store.ts")
+  const { GoalManager } = await import("../src/main/agent/goals/goal-manager.ts")
+
+  await db.initializeDatabase()
+  db.createThread("thread-active-resume-baseline", { title: "Active resume baseline regression" })
+
+  const manager = new GoalManager(new SqlGoalStore(), 2)
+  const originalNow = Date.now
+  let now = 1_000
+  Date.now = () => now
+
+  try {
+    manager.set("thread-active-resume-baseline", "orphaned active resume should refresh baseline")
+    now = 2_000
+    manager.recordJudgeDecision(
+      "thread-active-resume-baseline",
+      {
+        verdict: "continue",
+        reason: "first turn incomplete"
+      }
+    )
+    now = 5_000
+    const resumed = manager.resume("thread-active-resume-baseline", {
+      resetActiveWindow: true
+    })
+    assertEqual(resumed?.status, "active", "reset active resume should keep active status")
+    assertEqual(resumed?.turnsUsed, 0, "reset active resume should clear persisted turn usage")
+    assertEqual(resumed?.createdAt, 5_000, "reset active resume should refresh created_at")
+    assertEqual(resumed?.updatedAt, 5_000, "reset active resume should refresh updated_at")
+  } finally {
+    Date.now = originalNow
+  }
+
+  await db.flush()
+  db.closeDatabase()
+
+  await db.initializeDatabase()
+  const reloaded = new SqlGoalStore().get("thread-active-resume-baseline")
+  assertEqual(reloaded?.status, "active", "reloaded reset active goal should stay active")
+  assertEqual(reloaded?.turnsUsed, 0, "reloaded reset active goal should keep cleared turns")
+  assertEqual(reloaded?.createdAt, 5_000, "reloaded reset active goal should keep refreshed baseline")
+  assertEqual(reloaded?.updatedAt, 5_000, "reloaded reset active goal should keep refreshed update time")
+
+  db.closeDatabase()
+}
+
+async function testLegacyBudgetLimitedStatusNormalizesToPaused(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const { SqlGoalStore } = await import("../src/main/agent/goals/goal-store.ts")
+
+  await db.initializeDatabase()
+  db.createThread("thread-legacy-budget", { title: "Legacy budget status regression" })
+  db.getDb().run(
+    `
+      INSERT INTO thread_goals (
+        thread_id, goal_id, objective, completion_condition, status,
+        turns_used, max_turns, last_verdict, last_reason, paused_reason,
+        consecutive_parse_failures, ledger_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+    [
+      "thread-legacy-budget",
+      "legacy-goal-1",
+      "legacy goal",
+      "legacy goal",
+      "budget_limited",
+      15,
+      15,
+      "blocked",
+      "Turn budget exhausted.",
+      null,
+      0,
+      JSON.stringify({ progress: [], evidence: [], blockers: [] }),
+      1_000,
+      2_000
+    ]
+  )
+  await db.flush()
+  db.closeDatabase()
+
+  await db.initializeDatabase()
+  const reloaded = new SqlGoalStore().get("thread-legacy-budget")
+  assertEqual(reloaded?.status, "paused", "legacy budget_limited rows should normalize to paused")
+  assertEqual(
+    reloaded?.pausedReason,
+    "Turn budget exhausted.",
+    "legacy budget_limited rows should gain an explicit paused reason"
+  )
+
+  db.closeDatabase()
+}
+
 async function testGoalJudgeModelSettings(): Promise<void> {
   const storage = await import("../src/main/storage.ts")
   const evaluator = await import("../src/main/agent/goals/evaluator.ts")
@@ -226,6 +370,9 @@ async function main(): Promise<void> {
     testDeleteThreadDeletesGoal,
     testGoalEventsPersistAndDeleteWithThread,
     testReplacingSqlGoalRefreshesCreatedAt,
+    testResumingSqlGoalRefreshesCreatedAtBaseline,
+    testResettingActiveSqlGoalRefreshesCreatedAtBaseline,
+    testLegacyBudgetLimitedStatusNormalizesToPaused,
     testGoalJudgeModelSettings
   ]
   await withTempHome(async () => {

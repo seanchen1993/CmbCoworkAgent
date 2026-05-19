@@ -85,7 +85,11 @@ import { fireSessionStartOnce } from "../hooks/session-lifecycle"
 import { runHooksEnriched } from "../hooks/required-skill"
 import { isHookHaltError, throwIfHookHalt, type HookHaltError } from "../hooks/halt"
 import { activateSkillLifecycle, formatSkillHookContext } from "../agent/skill-lifecycle/activation"
-import { parseSkillUseBlock, type ParsedSkillUseBlock } from "../agent/skill-lifecycle/marker"
+import {
+  formatSkillUseBlock,
+  parseSkillUseBlock,
+  type ParsedSkillUseBlock
+} from "../agent/skill-lifecycle/marker"
 import { SkillLifecycleRegistry, type SkillLifecycleMatch } from "../agent/skill-lifecycle/registry"
 import { createSkillUseTracker, type SkillUseTracker } from "../agent/skill-lifecycle/tracker"
 import {
@@ -102,13 +106,24 @@ import {
 import {
   buildGoalContinuationPrompt,
   buildGoalStartPrompt,
+  displayGoalObjective,
+  displayGoalPausedReason,
   GoalManager,
-  shouldAutoResumeGoalForUserMessage,
+  isGoalBoundaryStillCurrent,
   validateGoalText
 } from "../agent/goals/goal-manager"
+import {
+  applyPromptRewritePreservingGoalMarker,
+  buildGoalContinuationPromptFromHookContexts,
+  buildInternalGoalPromptFromHookResult
+} from "../agent/goals/internal-prompt"
 import { SqlGoalStore } from "../agent/goals/goal-store"
-import { parseGoalSlashCommand } from "../agent/goals/slash"
-import { evaluateGoalWithModel, shouldPauseGoalForEmptyTurn } from "../agent/goals/evaluator"
+import { extractGoalTransportPayload, parseGoalSlashCommand } from "../agent/goals/slash"
+import {
+  evaluateGoalWithModel,
+  getCurrentTurnAssistantResponse,
+  shouldPauseGoalForEmptyTurn
+} from "../agent/goals/evaluator"
 import { GoalEvidenceBuffer } from "../agent/goals/evidence"
 import type { GoalJudgeDecision } from "../agent/goals/types"
 import type { AgentAutoCommitResult } from "../types"
@@ -130,6 +145,209 @@ const STOP_HOOK_REVISION_PROMPT_PREFIX = "[[CMBDEVCLAW_STOP_HOOK_REVISION]]"
 // Track active runs for cancellation
 const activeRuns = new Map<string, AbortController>()
 const goalManager = new GoalManager(new SqlGoalStore())
+
+type GoalControlResult = {
+  handled: boolean
+  terminatedCurrentRun: boolean
+}
+
+function abortActiveRun(threadId: string): void {
+  const existingController = activeRuns.get(threadId)
+  if (!existingController) return
+  console.log("[Agent] Aborting existing stream for thread:", threadId)
+  existingController.abort()
+  activeRuns.delete(threadId)
+}
+
+function persistGoalUserMessage(
+  threadId: string,
+  content: string,
+  goalId = goalManager.get(threadId)?.goalId ?? null
+): void {
+  try {
+    addThreadGoalEvent(threadId, `${GOAL_USER_MESSAGE_EVENT_PREFIX}${content}`, goalId)
+  } catch (error) {
+    console.warn("[Goal] failed to persist goal user message:", error)
+  }
+}
+
+function buildPersistedGoalSetUserMessage(
+  displayText: string,
+  transportPayload: string
+): string {
+  const command = `/goal ${displayText.trim()}`.trimEnd()
+  const skill = parseSkillUseBlock(transportPayload)
+  return skill ? [command, skill.block].filter(Boolean).join("\n\n") : command
+}
+
+function appendGoalStartTurnContext(prompt: string, payload: string): string {
+  const trimmed = payload.trim()
+  if (!trimmed) return prompt
+  return [
+    prompt,
+    "",
+    "One-time context from the original /goal message follows. It may include user-provided attachments and/or explicit skill-use transport payload. Use it for this first goal turn, but do not treat it as part of the persistent goal objective.",
+    "",
+    trimmed
+  ].join("\n")
+}
+
+function appendGoalExplicitSkillContext(prompt: string, goal: { context?: unknown }): string {
+  const explicitSkill = (goal.context as { explicitSkill?: { name?: unknown; path?: unknown } } | undefined)
+    ?.explicitSkill
+  const name = typeof explicitSkill?.name === "string" ? explicitSkill.name.trim() : ""
+  const path = typeof explicitSkill?.path === "string" ? explicitSkill.path.trim() : ""
+  if (!name || !path) return prompt
+  const block = formatSkillUseBlock({ name, path })
+  return parseSkillUseBlock(prompt) ? prompt : [prompt.trimEnd(), block].join("\n\n")
+}
+
+function emitGoalNotice(
+  window: BrowserWindow | null | undefined,
+  channel: string,
+  threadId: string,
+  notice: string,
+  goalId = goalManager.get(threadId)?.goalId ?? null
+): void {
+  try {
+    addThreadGoalEvent(threadId, notice, goalId)
+  } catch (error) {
+    console.warn("[Goal] failed to persist goal notice:", error)
+  }
+  if (window && !window.isDestroyed() && !window.webContents.isDestroyed()) {
+    window.webContents.send(channel, {
+      type: "custom",
+      data: { type: "goal_notice", message: notice }
+    })
+  }
+}
+
+function handleGoalNonStartingControlCommand(params: {
+  threadId: string
+  command: ReturnType<typeof parseGoalSlashCommand>
+  originalMessage?: string
+  window: BrowserWindow | null | undefined
+  channel: string
+  sendDone: boolean
+  sendDoneForTerminatingControl?: boolean
+}): GoalControlResult {
+  const {
+    threadId,
+    command,
+    originalMessage,
+    window,
+    channel,
+    sendDone,
+    sendDoneForTerminatingControl = false
+  } = params
+  const sendDoneEvent = (): void => {
+    if (window && !window.isDestroyed() && !window.webContents.isDestroyed()) {
+      window.webContents.send(channel, { type: "done" })
+    }
+  }
+  const done = (): void => {
+    if (sendDone) sendDoneEvent()
+  }
+  const doneAfterTerminatingControl = (): void => {
+    if (sendDone || sendDoneForTerminatingControl) sendDoneEvent()
+  }
+
+  if (command.type === "status") {
+    persistGoalUserMessage(threadId, "/goal")
+    emitGoalNotice(window, channel, threadId, goalManager.statusLine(threadId))
+    done()
+    return { handled: true, terminatedCurrentRun: false }
+  }
+
+  if (command.type === "invalid") {
+    persistGoalUserMessage(threadId, originalMessage?.trim() || "/goal")
+    emitGoalNotice(window, channel, threadId, command.reason)
+    done()
+    return { handled: true, terminatedCurrentRun: false }
+  }
+
+  if (command.type === "pause") {
+    persistGoalUserMessage(threadId, "/goal pause")
+    const previousGoal = goalManager.get(threadId)
+    if (!previousGoal) {
+      emitGoalNotice(window, channel, threadId, "当前没有 active goal。")
+      done()
+      return { handled: true, terminatedCurrentRun: false }
+    }
+    if (previousGoal.status === "complete") {
+      emitGoalNotice(window, channel, threadId, "Goal 已完成，不能暂停。可用 /goal clear 清除。")
+      done()
+      return { handled: true, terminatedCurrentRun: false }
+    }
+    if (previousGoal.status !== "active") {
+      emitGoalNotice(window, channel, threadId, "Goal 已经暂停。需要继续时发送 /goal resume。")
+      done()
+      return { handled: true, terminatedCurrentRun: false }
+    }
+
+    abortActiveRun(threadId)
+    LocalSandbox.cancelBackgroundTasks(threadId)
+    const goal = goalManager.pause(threadId, "user-paused")
+    const pausedReason = displayGoalPausedReason(goal?.pausedReason) || "已手动暂停。"
+    emitGoalNotice(
+      window,
+      channel,
+      threadId,
+      goal?.status === "paused" ? `Goal 已暂停：${pausedReason}` : "Goal 已经暂停。",
+      goal?.goalId ?? previousGoal.goalId
+    )
+    doneAfterTerminatingControl()
+    return { handled: true, terminatedCurrentRun: true }
+  }
+
+  if (command.type === "clear") {
+    persistGoalUserMessage(threadId, "/goal clear")
+    const existingGoal = goalManager.get(threadId)
+    if (!existingGoal) {
+      emitGoalNotice(window, channel, threadId, "当前没有 active goal。")
+      done()
+      return { handled: true, terminatedCurrentRun: false }
+    }
+
+    const terminatedCurrentRun = existingGoal.status === "active"
+    if (existingGoal.status === "active") {
+      abortActiveRun(threadId)
+      LocalSandbox.cancelBackgroundTasks(threadId)
+    }
+    goalManager.clear(threadId)
+    emitGoalNotice(window, channel, threadId, "Goal 已清除。", existingGoal.goalId)
+    if (existingGoal.status === "active") {
+      doneAfterTerminatingControl()
+    } else {
+      done()
+    }
+    return { handled: true, terminatedCurrentRun }
+  }
+
+  return { handled: false, terminatedCurrentRun: false }
+}
+
+function pauseActiveGoalAfterBoundary(
+  threadId: string,
+  window: BrowserWindow | null | undefined,
+  channel: string,
+  reason: string,
+  expectedGoalId?: string | null
+): void {
+  const activeGoal = goalManager.getActive(threadId)
+  if (!activeGoal) return
+  if (!isGoalBoundaryStillCurrent(activeGoal.goalId, expectedGoalId)) return
+  const paused = goalManager.pause(threadId, reason)
+  if (paused?.status !== "paused") return
+  LocalSandbox.cancelBackgroundTasks(threadId)
+  emitGoalNotice(
+    window,
+    channel,
+    threadId,
+    `Goal 已暂停：${displayGoalPausedReason(paused.pausedReason) || reason}`,
+    paused.goalId
+  )
+}
 
 function sendHookHalt(window: BrowserWindow, channel: string, error: HookHaltError): void {
   window.webContents.send(channel, {
@@ -1317,6 +1535,31 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     }
   )
 
+  ipcMain.handle(
+    "agent:goal-control",
+    async (event, { threadId, message }: { threadId: string; message: string }) => {
+      const window = BrowserWindow.fromWebContents(event.sender)
+      const channel = `agent:stream:${threadId}`
+      const goalCommand = parseGoalSlashCommand(message)
+      const result = handleGoalNonStartingControlCommand({
+        threadId,
+        command: goalCommand,
+        originalMessage: message,
+        window,
+        channel,
+        sendDone: false,
+        sendDoneForTerminatingControl: true
+      })
+      if (!result.handled) {
+        if (goalCommand.type !== "none") {
+          persistGoalUserMessage(threadId, message.trim())
+        }
+        emitGoalNotice(window, channel, threadId, "该 /goal 命令需要在当前运行结束后发送。")
+      }
+      return result
+    }
+  )
+
   // Handle agent invocation with streaming
   ipcMain.on("agent:invoke", async (event, params: AgentInvokeParams) => {
     const { threadId, modelId } = params
@@ -1353,18 +1596,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
     }
 
-    const persistGoalUserMessage = (content: string): void => {
-      try {
-        addThreadGoalEvent(
-          threadId,
-          `${GOAL_USER_MESSAGE_EVENT_PREFIX}${content}`,
-          goalManager.get(threadId)?.goalId ?? null
-        )
-      } catch (error) {
-        console.warn("[Goal] failed to persist goal user message:", error)
-      }
-    }
-
     const cancelGoalBackgroundTasks = (): void => {
       LocalSandbox.cancelBackgroundTasks(threadId)
     }
@@ -1380,80 +1611,90 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       if (!activeGoal) return
       if (!runGoalId || activeGoal.goalId !== runGoalId) return
       const paused = goalManager.pause(threadId, reason)
-      if (paused?.status === "paused") sendGoalNotice(`Goal 已暂停：${reason}`)
-    }
-
-    const abortExistingRun = (): void => {
-      const existingController = activeRuns.get(threadId)
-      if (!existingController) return
-      console.log("[Agent] Aborting existing stream for thread:", threadId)
-      existingController.abort()
-      activeRuns.delete(threadId)
+      if (paused?.status === "paused") {
+        cancelGoalBackgroundTasks()
+        sendGoalNotice(`Goal 已暂停：${displayGoalPausedReason(paused.pausedReason) || reason}`)
+      }
     }
 
     const goalCommand = parseGoalSlashCommand(message)
     if (goalCommand.type !== "none") {
       try {
-        if (goalCommand.type === "status") {
-          persistGoalUserMessage("/goal")
-          sendGoalNotice(goalManager.statusLine(threadId))
-          window.webContents.send(channel, { type: "done" })
-          return
-        }
-        if (goalCommand.type === "pause") {
-          persistGoalUserMessage("/goal pause")
-          abortExistingRun()
-          cancelGoalBackgroundTasks()
-          const goal = goalManager.pause(threadId, "user-paused")
-          sendGoalNotice(goal ? `Goal 已暂停：${goal.objective}` : "当前没有 active goal。")
-          window.webContents.send(channel, { type: "done" })
-          return
-        }
-        if (goalCommand.type === "clear") {
-          persistGoalUserMessage("/goal clear")
-          abortExistingRun()
-          cancelGoalBackgroundTasks()
-          const hadGoal = Boolean(goalManager.get(threadId))
-          goalManager.clear(threadId)
-          sendGoalNotice(hadGoal ? "Goal 已清除。" : "当前没有 active goal。")
-          window.webContents.send(channel, { type: "done" })
+        const controlResult = handleGoalNonStartingControlCommand({
+          threadId,
+          command: goalCommand,
+          originalMessage: message,
+          window,
+          channel,
+          sendDone: true
+        })
+        if (controlResult.handled) {
           return
         }
         if (goalCommand.type === "resume") {
-          persistGoalUserMessage("/goal resume")
+          persistGoalUserMessage(threadId, "/goal resume")
           const currentGoal = goalManager.get(threadId)
           if (currentGoal?.status === "active" && activeRuns.has(threadId)) {
             sendGoalNotice("Goal 正在进行中，无需 resume。")
             window.webContents.send(channel, { type: "done" })
             return
           }
-          abortExistingRun()
-          const goal = goalManager.resume(threadId)
+          if (!currentGoal) {
+            sendGoalNotice("没有可继续的 goal。")
+            window.webContents.send(channel, { type: "done" })
+            return
+          }
+          if (currentGoal.status === "complete") {
+            sendGoalNotice("Goal 已完成，不能 resume。可用 /goal clear 清除。")
+            window.webContents.send(channel, { type: "done" })
+            return
+          }
+          if (currentGoal.status === "active") {
+            // Active but no current run: let resume rebuild a continuation turn.
+          } else if (activeRuns.has(threadId)) {
+            sendGoalNotice("当前线程正在运行，稍后发送 /goal resume 继续。")
+            window.webContents.send(channel, { type: "done" })
+            return
+          }
+          const goal = goalManager.resume(threadId, {
+            resetActiveWindow: currentGoal.status === "active"
+          })
           if (!goal || goal.status !== "active") {
             sendGoalNotice(goal ? `Goal 当前状态：${goal.status}。` : "没有可继续的 goal。")
             window.webContents.send(channel, { type: "done" })
             return
           }
-          sendGoalNotice(`Goal 已继续：${goal.objective}`)
+          sendGoalNotice(`Goal 已继续：${displayGoalObjective(goal.objective) || goal.objective}`)
           rootUserPrompt = goal.objective
           routingMessage = goal.objective
-          modelInputMessage = buildGoalContinuationPrompt(goal, {
-            verdict: "continue",
-            reason: goal.lastReason || "Goal resumed by user."
-          })
+          modelInputMessage = appendGoalExplicitSkillContext(
+            buildGoalContinuationPrompt(goal, {
+              verdict: "continue",
+              reason: goal.lastReason || "Goal resumed by user."
+            }),
+            goal
+          )
         }
         if (goalCommand.type === "set") {
           const validatedGoalText = validateGoalText(goalCommand.text)
-          abortExistingRun()
+          const transportPayload = extractGoalTransportPayload(message)
+          abortActiveRun(threadId)
           cancelGoalBackgroundTasks()
-          const goal = goalManager.set(threadId, validatedGoalText)
-          persistGoalUserMessage(`/goal ${validatedGoalText}`)
+          const goal = goalManager.set(threadId, validatedGoalText, { context: goalCommand.context })
+          persistGoalUserMessage(
+            threadId,
+            buildPersistedGoalSetUserMessage(goalCommand.displayText, transportPayload),
+            goal.goalId
+          )
           sendGoalNotice(
             `Goal 已设置（最多 ${goal.maxTurns} 轮）。完成前会自动继续；可用 /goal 查看状态，/goal pause 暂停，/goal clear 清除。`
           )
           rootUserPrompt = goal.objective
           routingMessage = goal.objective
-          modelInputMessage = buildGoalStartPrompt(goal)
+          modelInputMessage = appendGoalStartTurnContext(
+            buildGoalStartPrompt(goal),
+            transportPayload
+          )
         }
       } catch (error) {
         window.webContents.send(channel, {
@@ -1464,14 +1705,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
     } else {
       const currentGoal = goalManager.get(threadId)
-      if (shouldAutoResumeGoalForUserMessage(currentGoal, message)) {
-        const resumed = goalManager.resume(threadId)
-        if (resumed?.status === "active") {
-          sendGoalNotice("Goal 已收到补充信息，将继续处理。")
-          routingMessage = resumed.objective
-          runGoalId = resumed.goalId
-        }
-      } else if (currentGoal?.status === "active") {
+      if (currentGoal?.status === "active") {
         goalManager.pause(threadId, "user message preempted active goal")
         cancelGoalBackgroundTasks()
         sendGoalNotice("你发送了新消息，active goal 已暂停。需要继续时发送 /goal resume。")
@@ -1480,7 +1714,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
     // Abort any existing stream for this thread before starting a new one
     // This prevents concurrent streams which can cause checkpoint corruption
-    abortExistingRun()
+    abortActiveRun(threadId)
 
     const abortController = new AbortController()
     activeRuns.set(threadId, abortController)
@@ -1628,8 +1862,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         return
       }
 
+      const explicitSkillActivationMessage = parseSkillUseBlock(message) ? message : modelInputMessage
       const explicitSkillActivation = await activateExplicitSkillFromMessage({
-        message,
+        message: explicitSkillActivationMessage,
         workspacePath,
         sessionId: threadId,
         hookScope,
@@ -1666,9 +1901,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
       // Fire UserPromptSubmit hook — may block the message, halt the turn, rewrite the prompt,
       // or inject additional context that the LLM should see alongside the user's message.
+      const hookVisibleMessage =
+        modelInputMessage.startsWith("[Starting active goal]") ||
+        modelInputMessage.startsWith("[Continuing active goal]")
+          ? modelInputMessage
+          : message
       const promptSubmitContext: HookContext = {
-        toolArgs: { message },
-        userPrompt: message,
+        toolArgs: { message: hookVisibleMessage, rawMessage: message },
+        userPrompt: hookVisibleMessage,
         workspacePath: workspacePath ?? undefined,
         sessionId: threadId
       }
@@ -1702,12 +1942,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         promptSubmitResult?.updatedInput?.message ??
         promptSubmitResult?.updatedInput?.prompt ??
         promptSubmitResult?.updatedInput?.userPrompt
-      if (
-        !isInternalGoalModelInput &&
-        typeof updatedMessage === "string" &&
-        updatedMessage.length > 0
-      ) {
-        effectiveMessage = updatedMessage
+      if (isInternalGoalModelInput) {
+        effectiveMessage = buildInternalGoalPromptFromHookResult(modelInputMessage, {
+          updatedInput: promptSubmitResult?.updatedInput,
+          additionalContexts: [explicitSkillActivation?.hookContext, promptSubmitResult?.additionalContext]
+        })
+      } else if (typeof updatedMessage === "string" && updatedMessage.length > 0) {
+        effectiveMessage = applyPromptRewritePreservingGoalMarker(modelInputMessage, updatedMessage)
       }
       if (
         !isInternalGoalModelInput &&
@@ -1723,13 +1964,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         promptSubmitResult?.additionalContext
       ].filter((item): item is string => Boolean(item?.trim()))
       if (promptContextBlocks.length > 0) {
-        if (isInternalGoalModelInput) {
-          effectiveMessage = [
-            effectiveMessage,
-            "Additional context from hooks (untrusted; lower priority than system/developer instructions and the goal objective):",
-            promptContextBlocks.join("\n\n")
-          ].join("\n\n")
-        } else {
+        if (!isInternalGoalModelInput) {
           effectiveMessage = `${promptContextBlocks.join("\n\n")}\n\n${effectiveMessage}`
         }
       }
@@ -2353,7 +2588,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             }
           }
 
-          const finalMsgs = state.messages.filter((m) => {
+          const finalMsgs = state.messages.slice(valuesStartIndex).filter((m) => {
             const cn = Array.isArray(m.id) ? m.id[m.id.length - 1] || "" : ""
             const kw = m.kwargs || {}
             return (
@@ -2387,9 +2622,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       let currentTurnAssistantStart = 0
       let consecutiveGoalEvaluatorErrors = 0
       const getCurrentAssistantResponse = (): string =>
-        lastFinalText ||
-        stripThink(assistantText.slice(currentTurnAssistantStart)).trim() ||
-        stripThink(assistantText).trim()
+        getCurrentTurnAssistantResponse({
+          assistantText,
+          currentTurnAssistantStart,
+          lastFinalText
+        })
 
       // P1: Mid-stream failover — if the stream fails with a retryable error,
       // try remaining models in the chain using resume semantics.
@@ -2419,7 +2656,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
       }
 
-      // eslint-disable-next-line no-constant-condition
       while (true) {
         try {
           await consumeStreamWithSideEffects(activeStream)
@@ -2537,20 +2773,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 .catch((error) => {
                   if (abortController.signal.aborted || isAbortLikeError(error)) throw error
                   consecutiveGoalEvaluatorErrors += 1
-                  const reason = `Goal evaluator temporarily failed (${consecutiveGoalEvaluatorErrors}/3): ${error instanceof Error ? error.message : String(error)}`
                   console.warn("[Goal] evaluator failed:", error)
                   if (consecutiveGoalEvaluatorErrors < 3) {
                     return {
                       verdict: "continue" as const,
-                      reason,
-                      ledgerPatch: {
-                        blockers: [reason]
-                      }
+                      reason: "评估器暂时不可用，本轮按未完成继续处理。"
                     }
                   }
                   return {
                     verdict: "blocked" as const,
-                    reason
+                    reason: "评估器连续不可用。请稍后使用 /goal resume 重试。"
                   }
                 })
 
@@ -2559,22 +2791,64 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           })
           if (!outcome) break
 
-          sendGoalNotice(outcome.notice)
-          if (!outcome.shouldContinue || !outcome.continuationPrompt) break
+          if (!outcome.shouldContinue || !outcome.continuationPrompt) {
+            sendGoalNotice(outcome.notice)
+            cancelGoalBackgroundTasks()
+            break
+          }
           const currentGoal = goalManager.getActive(threadId)
           if (!currentGoal || currentGoal.goalId !== outcome.goal.goalId) break
           if (!agent) throw new Error("Cannot continue goal: agent runtime is unavailable")
 
-          modelInputMessage = outcome.continuationPrompt
-          currentTurnUserMessageForEvidence = outcome.continuationPrompt
+          let continuationPrompt = outcome.continuationPrompt
+          const promptSubmitContext: HookContext = {
+            toolArgs: { message: continuationPrompt },
+            userPrompt: continuationPrompt,
+            workspacePath: workspacePath ?? undefined,
+            sessionId: threadId
+          }
+          const promptSubmitResult = await runHooksEnriched(
+            resolveEnabledHooksForRun(
+              workspacePath ?? undefined,
+              "UserPromptSubmit",
+              promptSubmitContext,
+              hookScope
+            ),
+            "UserPromptSubmit",
+            promptSubmitContext,
+            onHookResult
+          )
+          if (promptSubmitResult?.blocked || promptSubmitResult?.continue === false) {
+            pauseActiveGoalForRuntimeStop("UserPromptSubmit hook stopped goal continuation.")
+            sendHookBlocked("UserPromptSubmit", promptSubmitResult, "Goal 续跑被 Hook 策略拦截")
+            await tracer.finish("cancelled", "UserPromptSubmit hook stopped goal continuation")
+            turnStateShouldDispose = true
+            return
+          }
+          continuationPrompt = buildGoalContinuationPromptFromHookContexts(continuationPrompt, {
+            updatedInput: promptSubmitResult?.updatedInput,
+            explicitSkillHookContext: explicitSkillActivation?.hookContext,
+            promptSubmitAdditionalContext: promptSubmitResult?.additionalContext
+          })
+          if (promptSubmitResult?.systemMessage) {
+            window.webContents.send(channel, {
+              type: "custom",
+              data: { type: "hook_notice", message: promptSubmitResult.systemMessage }
+            })
+          }
+
+          const goalContinuationInput = appendGoalExplicitSkillContext(continuationPrompt, activeGoal)
+          modelInputMessage = goalContinuationInput
+          currentTurnUserMessageForEvidence = goalContinuationInput
           currentTurnAssistantStart = assistantText.length
           currentTurnToolCallStart = toolCallCounter.getCount()
           currentTurnEvidenceStart = goalEvidenceBuffer.getCount()
           lastFinalText = ""
           const goalStream = await agent.stream(
-            { messages: [new HumanMessage(outcome.continuationPrompt)] },
+            { messages: [new HumanMessage(goalContinuationInput)] },
             streamConfig
           )
+          sendGoalNotice(outcome.notice)
           await consumeStreamWithSideEffects(goalStream)
         }
 
@@ -2776,6 +3050,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
   ipcMain.on("agent:resume", async (event, { threadId, command, modelId }: AgentResumeParams) => {
     const channel = `agent:stream:${threadId}`
     const window = BrowserWindow.fromWebContents(event.sender)
+    const boundaryGoalId = goalManager.getActive(threadId)?.goalId ?? null
 
     console.log("[Agent] Received resume request:", { threadId, command, modelId })
 
@@ -2998,7 +3273,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
       }
 
-      // eslint-disable-next-line no-constant-condition
       while (true) {
         try {
           await consumeResumeStream(activeResumeStream)
@@ -3067,6 +3341,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         })
 
         if (completionOutcome === "failed") {
+          pauseActiveGoalAfterBoundary(
+            threadId,
+            window,
+            channel,
+            "恢复处理被 Stop hook 阻止。需要继续时发送 /goal resume。",
+            boundaryGoalId
+          )
           turnStateShouldDispose = true
           return
         }
@@ -3080,12 +3361,20 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           window,
           channel
         })
+        pauseActiveGoalAfterBoundary(
+          threadId,
+          window,
+          channel,
+          "恢复处理已结束。需要继续 goal 时发送 /goal resume。",
+          boundaryGoalId
+        )
         turnStateShouldDispose = true
         window.webContents.send(channel, { type: "done" })
       }
     } catch (error) {
       if (isHookHaltError(error)) {
         console.warn("[Agent] Resume hook halted turn:", error.reason)
+        pauseActiveGoalAfterBoundary(threadId, window, channel, error.reason, boundaryGoalId)
         sendHookHalt(window, channel, error)
         turnStateShouldDispose = true
         return
@@ -3098,6 +3387,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
       if (!isAbortError) {
         console.error("[Agent] Resume error:", error)
+        pauseActiveGoalAfterBoundary(
+          threadId,
+          window,
+          channel,
+          `恢复处理失败：${error instanceof Error ? error.message : "Unknown error"}`,
+          boundaryGoalId
+        )
         window.webContents.send(channel, {
           type: "error",
           error: error instanceof Error ? error.message : "Unknown error"
@@ -3122,6 +3418,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
   ipcMain.on("agent:interrupt", async (event, { threadId, decision }: AgentInterruptParams) => {
     const channel = `agent:stream:${threadId}`
     const window = BrowserWindow.fromWebContents(event.sender)
+    const boundaryGoalId = goalManager.getActive(threadId)?.goalId ?? null
 
     if (!window) {
       console.error("[Agent] No window found for interrupt response")
@@ -3331,7 +3628,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
         }
 
-        // eslint-disable-next-line no-constant-condition
         while (true) {
           try {
             await consumeInterruptStream(activeIntStream)
@@ -3397,6 +3693,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           })
 
           if (completionOutcome === "failed") {
+            pauseActiveGoalAfterBoundary(
+              threadId,
+              window,
+              channel,
+              "中断恢复被 Stop hook 阻止。需要继续时发送 /goal resume。",
+              boundaryGoalId
+            )
             turnStateShouldDispose = true
             return
           }
@@ -3410,12 +3713,26 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             window,
             channel
           })
+          pauseActiveGoalAfterBoundary(
+            threadId,
+            window,
+            channel,
+            "中断处理已结束。需要继续 goal 时发送 /goal resume。",
+            boundaryGoalId
+          )
           turnStateShouldDispose = true
           window.webContents.send(channel, { type: "done" })
         }
       } else if (decision.type === "reject") {
         // For reject, we need to send a Command with reject decision
         // For now, just send done - the agent will see no resumption happened
+        pauseActiveGoalAfterBoundary(
+          threadId,
+          window,
+          channel,
+          "中断请求已拒绝。需要继续 goal 时发送 /goal resume。",
+          boundaryGoalId
+        )
         turnStateShouldDispose = true
         window.webContents.send(channel, { type: "done" })
       }
@@ -3423,6 +3740,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     } catch (error) {
       if (isHookHaltError(error)) {
         console.warn("[Agent] Interrupt hook halted turn:", error.reason)
+        pauseActiveGoalAfterBoundary(threadId, window, channel, error.reason, boundaryGoalId)
         sendHookHalt(window, channel, error)
         turnStateShouldDispose = true
         return
@@ -3435,6 +3753,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
       if (!isAbortError) {
         console.error("[Agent] Interrupt error:", error)
+        pauseActiveGoalAfterBoundary(
+          threadId,
+          window,
+          channel,
+          `中断处理失败：${error instanceof Error ? error.message : "Unknown error"}`,
+          boundaryGoalId
+        )
         window.webContents.send(channel, {
           type: "error",
           error: error instanceof Error ? error.message : "Unknown error"
@@ -3462,9 +3787,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     )
     // Cancel any background tasks belonging to this thread (e.g. builds, tests)
     LocalSandbox.cancelBackgroundTasks(threadId)
-    const paused = goalManager.pause(threadId, "user-cancelled")
+    const goalBeforeCancel = goalManager.get(threadId)
+    const paused =
+      goalBeforeCancel?.status === "active" ? goalManager.pause(threadId, "user-cancelled") : null
     if (paused?.status === "paused") {
-      const notice = "Goal 已暂停：user-cancelled"
+      const pausedReason = displayGoalPausedReason(paused.pausedReason)
+      const notice = pausedReason ? `Goal 已暂停：${pausedReason}` : "Goal 已暂停。"
       try {
         addThreadGoalEvent(threadId, notice, paused.goalId)
       } catch (error) {

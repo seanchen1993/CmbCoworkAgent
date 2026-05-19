@@ -2,6 +2,7 @@ import { v4 as uuid } from "uuid"
 import { getDb, saveToDisk } from "../../db"
 import {
   EMPTY_GOAL_LEDGER,
+  type GoalContext,
   type GoalLedger,
   type GoalStatus,
   type GoalStore,
@@ -13,7 +14,8 @@ interface GoalRow {
   goal_id: string
   objective: string
   completion_condition: string | null
-  status: GoalStatus
+  context_json: string | null
+  status: string
   turns_used: number
   max_turns: number
   last_verdict: string | null
@@ -76,13 +78,36 @@ export function parseGoalLedger(raw: string | null | undefined): GoalLedger {
   }
 }
 
+function normalizeGoalContext(value: unknown): GoalContext {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {}
+  const record = value as Record<string, unknown>
+  const explicitSkill = record.explicitSkill
+  if (!explicitSkill || typeof explicitSkill !== "object" || Array.isArray(explicitSkill)) return {}
+  const skillRecord = explicitSkill as Record<string, unknown>
+  const name = typeof skillRecord.name === "string" ? skillRecord.name.trim() : ""
+  const path = typeof skillRecord.path === "string" ? skillRecord.path.trim() : ""
+  return name && path ? { explicitSkill: { name, path } } : {}
+}
+
+export function parseGoalContext(raw: string | null | undefined): GoalContext {
+  if (!raw) return {}
+  try {
+    return normalizeGoalContext(JSON.parse(raw))
+  } catch {
+    return {}
+  }
+}
+
 function rowToGoal(row: GoalRow): ThreadGoal {
+  const status: GoalStatus =
+    row.status === "active" || row.status === "complete" ? row.status : "paused"
   return {
     threadId: row.thread_id,
     goalId: row.goal_id,
     objective: row.objective,
     completionCondition: row.completion_condition || row.objective,
-    status: row.status,
+    context: parseGoalContext(row.context_json),
+    status,
     turnsUsed: Number(row.turns_used || 0),
     maxTurns: Number(row.max_turns || 15),
     lastVerdict: row.last_verdict,
@@ -113,14 +138,15 @@ export class SqlGoalStore implements GoalStore {
     db.run(
       `
         INSERT INTO thread_goals (
-          thread_id, goal_id, objective, completion_condition, status,
+          thread_id, goal_id, objective, completion_condition, context_json, status,
           turns_used, max_turns, last_verdict, last_reason, paused_reason,
           consecutive_parse_failures, ledger_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(thread_id) DO UPDATE SET
           goal_id = excluded.goal_id,
           objective = excluded.objective,
           completion_condition = excluded.completion_condition,
+          context_json = excluded.context_json,
           status = excluded.status,
           turns_used = excluded.turns_used,
           max_turns = excluded.max_turns,
@@ -131,6 +157,13 @@ export class SqlGoalStore implements GoalStore {
           ledger_json = excluded.ledger_json,
           created_at = CASE
             WHEN thread_goals.goal_id != excluded.goal_id THEN excluded.created_at
+            WHEN thread_goals.status != 'active'
+              AND excluded.status = 'active'
+              AND excluded.turns_used = 0 THEN excluded.created_at
+            WHEN thread_goals.status = 'active'
+              AND excluded.status = 'active'
+              AND excluded.turns_used = 0
+              AND excluded.updated_at > thread_goals.updated_at THEN excluded.created_at
             ELSE thread_goals.created_at
           END,
           updated_at = excluded.updated_at
@@ -140,6 +173,7 @@ export class SqlGoalStore implements GoalStore {
         goal.goalId,
         goal.objective,
         goal.completionCondition,
+        JSON.stringify(normalizeGoalContext(goal.context)),
         goal.status,
         goal.turnsUsed,
         goal.maxTurns,
@@ -171,7 +205,11 @@ export class InMemoryGoalStore implements GoalStore {
   }
 
   upsert(goal: ThreadGoal): ThreadGoal {
-    const normalized = { ...goal, ledger: normalizeGoalLedger(goal.ledger) }
+    const normalized = {
+      ...goal,
+      context: normalizeGoalContext(goal.context),
+      ledger: normalizeGoalLedger(goal.ledger)
+    }
     this.goals.set(goal.threadId, cloneGoal(normalized))
     return cloneGoal(normalized)
   }
@@ -184,6 +222,7 @@ export class InMemoryGoalStore implements GoalStore {
 export function cloneGoal(goal: ThreadGoal): ThreadGoal {
   return {
     ...goal,
+    context: normalizeGoalContext(goal.context),
     ledger: {
       progress: [...goal.ledger.progress],
       evidence: [...goal.ledger.evidence],
@@ -201,7 +240,7 @@ export function deriveCompletionCondition(text: string): string {
 
   const rest = trimmed.slice(match.index + match[0].length).trim()
   const boundary = rest.search(
-    /\n\s*(?:stop if|scope|constraints?|停止条件|停止|范围|约束)\s*[：:]/i
+    /\n\s*(?:stop if|scope|constraints?|停止条件|停止|范围|约束|启动上下文摘要)\s*[：:]/i
   )
   const condition = (boundary >= 0 ? rest.slice(0, boundary) : rest).trim()
   return condition || trimmed
@@ -211,6 +250,7 @@ export function createNewGoal(params: {
   threadId: string
   text: string
   maxTurns: number
+  context?: GoalContext
   now?: number
 }): ThreadGoal {
   const now = params.now ?? Date.now()
@@ -220,6 +260,7 @@ export function createNewGoal(params: {
     goalId: uuid(),
     objective: text,
     completionCondition: deriveCompletionCondition(text),
+    context: normalizeGoalContext(params.context),
     status: "active",
     turnsUsed: 0,
     maxTurns: params.maxTurns,

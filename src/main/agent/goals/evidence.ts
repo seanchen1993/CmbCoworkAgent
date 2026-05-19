@@ -57,8 +57,12 @@ export function buildGoalToolEvidenceEntry(params: {
 export class GoalEvidenceBuffer {
   private readonly inputByCallId = new Map<string, string>()
   private readonly evidence: string[] = []
+  private evidenceStartCount = 0
 
-  constructor(private readonly maxItems = 60) {}
+  constructor(
+    private readonly maxItems = 60,
+    private readonly maxPendingInputs = Math.max(120, maxItems * 4)
+  ) {}
 
   rememberToolCall(
     toolCallId: string | undefined,
@@ -66,19 +70,30 @@ export class GoalEvidenceBuffer {
   ): void {
     if (!toolCallId) return
     const summary = summarizeGoalToolInput(args)
-    if (summary) this.inputByCallId.set(toolCallId, summary)
+    if (summary) {
+      this.inputByCallId.set(toolCallId, summary)
+      while (this.inputByCallId.size > this.maxPendingInputs) {
+        const oldestKey = this.inputByCallId.keys().next().value
+        if (!oldestKey) break
+        this.inputByCallId.delete(oldestKey)
+      }
+    }
   }
 
   appendToolResult(params: { toolName: string; output: string; toolCallId?: string }): void {
+    const inputSummary = params.toolCallId ? this.inputByCallId.get(params.toolCallId) : undefined
+    if (params.toolCallId) this.inputByCallId.delete(params.toolCallId)
     const entry = buildGoalToolEvidenceEntry({
       toolName: params.toolName,
       output: params.output,
-      inputSummary: params.toolCallId ? this.inputByCallId.get(params.toolCallId) : undefined
+      inputSummary
     })
     if (!entry) return
     this.evidence.push(entry)
     if (this.evidence.length > this.maxItems) {
-      this.evidence.splice(0, this.evidence.length - this.maxItems)
+      const removed = this.evidence.length - this.maxItems
+      this.evidence.splice(0, removed)
+      this.evidenceStartCount += removed
     }
   }
 
@@ -87,11 +102,15 @@ export class GoalEvidenceBuffer {
   }
 
   getItemsSince(startIndex: number): string[] {
-    const index = Math.max(0, Math.min(this.evidence.length, Math.floor(startIndex)))
-    return this.evidence.slice(index)
+    const absoluteIndex = Math.max(0, Math.floor(startIndex))
+    if (absoluteIndex <= this.evidenceStartCount) {
+      return this.evidence.slice()
+    }
+    const relativeIndex = Math.min(this.evidence.length, absoluteIndex - this.evidenceStartCount)
+    return this.evidence.slice(relativeIndex)
   }
 
   getCount(): number {
-    return this.evidence.length
+    return this.evidenceStartCount + this.evidence.length
   }
 }

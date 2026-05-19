@@ -484,7 +484,7 @@ thread_id TEXT PRIMARY KEY
 goal_id TEXT
 objective TEXT
 completion_condition TEXT
-status active | paused | complete | budget_limited
+status active | paused | complete
 turns_used INTEGER
 max_turns INTEGER
 last_verdict TEXT
@@ -512,7 +512,6 @@ updated_at INTEGER
 /goal resume
 /goal clear
 /goal stop
-/goal done
 /goal off
 /goal reset
 /goal none
@@ -520,7 +519,7 @@ updated_at INTEGER
 /goal <condition>
 ```
 
-其中 `stop`、`done`、`off`、`reset`、`none`、`cancel` 都被当作 clear。
+其中 `stop`、`off`、`reset`、`none`、`cancel` 都被当作 clear。`done` 不作为 clear alias，避免和“标记完成”的语义混淆。
 
 `/goal resume` 的语义是恢复目标并开启新的 turn budget window：它会把当前 goal 重新置为 active，并重置本轮续跑计数。这一点更接近 Hermes 的个人开发者体验，表示“继续再给一段自动续跑额度”，而不是 Codex 式严格 token budget 终态。
 
