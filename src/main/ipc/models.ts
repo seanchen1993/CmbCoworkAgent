@@ -429,11 +429,14 @@ async function runStatusPorcelain(
   const silent = Boolean(options?.silent)
 
   try {
+    // Git 的 pathspec 默认支持 glob 语法，文件名中包含 []、*、? 等字符时会被当作模式匹配。
+    // Git 面板传入的是已经解析出的真实文件路径，因此这里必须按字面量处理 pathspec。
     return await runGit(
       worktreePath,
       [
         "-c",
         "core.quotepath=false",
+        "--literal-pathspecs",
         "status",
         "--porcelain",
         "--untracked-files=all",
@@ -444,13 +447,14 @@ async function runStatusPorcelain(
       { silent, timeoutMs: 15_000 }
     )
   } catch {
-    // Older Git may not support `-z` with this porcelain invocation.
-    // Fallback keeps compatibility, and parsePorcelainPaths handles quoted paths.
+    // 旧版 Git 可能不支持当前 porcelain 命令组合里的 -z。
+    // 回退到非 NUL 分隔输出以保持兼容，路径反引号/转义由 parsePorcelainPaths 统一处理。
     return runGit(
       worktreePath,
       [
         "-c",
         "core.quotepath=false",
+        "--literal-pathspecs",
         "status",
         "--porcelain",
         "--untracked-files=all",
@@ -841,6 +845,17 @@ async function runGit(
     if (!silent) console.log(`[GitPanel][exec][ok-after-retry] ${command}`)
     return stdout
   }
+}
+
+async function runGitWithLiteralPathspecs(
+  worktreePath: string,
+  args: string[],
+  pathspecs: string[],
+  options?: { silent?: boolean; timeoutMs?: number; maxBufferBytes?: number }
+): Promise<string> {
+  // 提交面板里的文件列表来自 git status / diff 结果，语义上是“文件名”而不是“匹配模式”。
+  // 使用 --literal-pathspecs 可以避免带方括号、星号或问号的真实文件名触发 pathspec 匹配失败。
+  return runGit(worktreePath, ["--literal-pathspecs", ...args, "--", ...pathspecs], options)
 }
 
 function isGitDirWorktree(gitDir: string): boolean {
@@ -2573,7 +2588,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         }
 
         logGitStep(threadId, "commit", `add 文件数：${changedFiles.length}`)
-        await runGit(worktreePath, ["add", "--", ...changedFiles])
+        // 必须按字面量 add：否则 Git 会把部分文件名当 glob pathspec，偶发报 did not match any files。
+        await runGitWithLiteralPathspecs(worktreePath, ["add"], changedFiles)
         const adoptionSnapshots = captureStagedSnapshotsForCommit(worktreePath)
         logGitStep(threadId, "commit", `commit message: ${message}`)
         await runGit(worktreePath, ["commit", "-m", message])
@@ -2674,7 +2690,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
             `chore(task:${threadId.slice(0, 8)}): auto commit before push`
           try {
             logGitStep(threadId, "push", `自动提交 message: ${commitMessage}`)
-            await runGit(worktreePath, ["add", "--", ...pendingChangedFiles])
+            // push 前自动提交同样走字面量 pathspec，保持与手动 commit 流程一致。
+            await runGitWithLiteralPathspecs(worktreePath, ["add"], pendingChangedFiles)
             const adoptionSnapshots = captureStagedSnapshotsForCommit(worktreePath)
             await runGit(worktreePath, ["commit", "-m", commitMessage])
             autoCommitted = true
