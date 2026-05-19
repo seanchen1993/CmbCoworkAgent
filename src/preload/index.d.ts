@@ -35,6 +35,59 @@ import type {
   SavedCodeExecToolUpdatePayload
 } from "../main/ipc/code-exec-tools"
 
+interface SkillEvalCheck {
+  name: string
+  label: string
+  ok: boolean
+  weight: number
+  detail?: Record<string, unknown>
+}
+
+interface SkillEvalRecord {
+  id: string
+  traceId: string
+  threadId: string
+  skillName: string
+  skillVersion?: string
+  rawSkillName: string
+  startedAt: string
+  endedAt: string
+  evaluatedAt: string
+  userMessage: string
+  modelId: string
+  modelName?: string
+  outcome: string
+  durationMs: number
+  totalToolCalls: number
+  errorCount: number
+  score: number
+  pass: boolean
+  checks: SkillEvalCheck[]
+  warnings: string[]
+}
+
+interface SkillEvalSummary {
+  generatedAt: string
+  totalRuns: number
+  totalSkills: number
+  passRate: number
+  averageScore: number
+  averageToolCalls: number
+  averageDurationMs: number
+  skills: Array<{
+    skillName: string
+    skillVersion?: string
+    runs: number
+    passRate: number
+    averageScore: number
+    averageToolCalls: number
+    averageDurationMs: number
+    failures: number
+    lastRunAt: string
+  }>
+  recent: SkillEvalRecord[]
+}
+
 interface ElectronAPI {
   openExternal: (url: string) => Promise<void>
   openLoginWindow: () => void
@@ -598,6 +651,18 @@ interface CustomAPI {
       options?: { includeNestedSkills?: boolean }
     ) => Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }>
     delete: (skillPath: string) => Promise<{ success: boolean; error?: string }>
+  }
+  skillEval: {
+    summary: (opts?: { limit?: number }) => Promise<SkillEvalSummary>
+    records: (opts?: {
+      limit?: number
+      skillName?: string
+      threadId?: string
+      pass?: boolean
+    }) => Promise<SkillEvalRecord[]>
+    clear: () => Promise<void>
+    filePath: () => Promise<string>
+    onUpdated: (callback: (payload: { traceId: string; recordCount: number }) => void) => () => void
   }
   mcp: {
     list: () => Promise<McpConnectorConfig[]>

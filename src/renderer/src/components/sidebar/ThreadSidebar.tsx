@@ -9,6 +9,7 @@ import {
   LayoutDashboard,
   Cpu,
   Terminal,
+  ActivitySquare,
   BarChart3,
   ChevronDown,
   ChevronRight,
@@ -314,6 +315,8 @@ export function ThreadSidebar(): React.JSX.Element {
     setShowClaudeCodeView,
     showDashboardView,
     setShowDashboardView,
+    showSkillEvalView,
+    setShowSkillEvalView,
     dashboardAllowed
   } = useAppStore()
 
@@ -693,6 +696,20 @@ export function ThreadSidebar(): React.JSX.Element {
             <Terminal className="size-3" />
           </div>
           <span className="text-muted-foreground">Code</span>
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className={cn(
+            "w-full justify-start gap-2 text-sm font-semibold",
+            showSkillEvalView && "bg-muted"
+          )}
+          onClick={() => setShowSkillEvalView(!showSkillEvalView)}
+        >
+          <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
+            <ActivitySquare className="size-3" />
+          </div>
+          <span className="text-muted-foreground">Skill 评估</span>
         </Button>
         {dashboardAllowed && (
           <Button

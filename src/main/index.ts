@@ -145,6 +145,7 @@ import { registerRoutingHandlers } from "./ipc/routing"
 import { registerDashboardHandlers } from "./ipc/dashboard"
 import { registerLspHandlers } from "./ipc/lsp"
 import { registerAutoCommitHandlers } from "./ipc/auto-commit"
+import { registerSkillEvalHandlers } from "./ipc/skill-eval"
 import { stopAllLsp } from "./lsp"
 import { setTraceReporter } from "./agent/trace/collector"
 import { CloudTraceReporter } from "./agent/trace/cloud-reporter"
@@ -463,6 +464,7 @@ if (!gotTheLock) {
     registerDashboardHandlers(ipcMain)
     registerUpdaterHandlers()
     registerLspHandlers(ipcMain)
+    registerSkillEvalHandlers(ipcMain)
     prewarmRecentSandboxWorkspaces()
     registerAutoCommitHandlers(ipcMain)
     registerPetHandlers(ipcMain)

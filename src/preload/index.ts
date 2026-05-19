@@ -841,6 +841,22 @@ const api = {
       return ipcRenderer.invoke("skills:delete", skillPath)
     }
   },
+  skillEval: {
+    summary: (opts?: { limit?: number }) => ipcRenderer.invoke("skillEval:summary", opts),
+    records: (opts?: { limit?: number; skillName?: string; threadId?: string; pass?: boolean }) =>
+      ipcRenderer.invoke("skillEval:records", opts),
+    clear: (): Promise<void> => ipcRenderer.invoke("skillEval:clear") as Promise<void>,
+    filePath: (): Promise<string> => ipcRenderer.invoke("skillEval:filePath") as Promise<string>,
+    onUpdated: (callback: (payload: { traceId: string; recordCount: number }) => void): (() => void) => {
+      const handler = (_: unknown, payload: { traceId: string; recordCount: number }): void => {
+        callback(payload)
+      }
+      ipcRenderer.on("skillEval:updated", handler)
+      return () => {
+        ipcRenderer.removeListener("skillEval:updated", handler)
+      }
+    }
+  },
   mcp: {
     list: (): Promise<McpConnectorConfig[]> => ipcRenderer.invoke("mcp:list"),
     create: (config: McpConnectorUpsert): Promise<{ id: string }> =>

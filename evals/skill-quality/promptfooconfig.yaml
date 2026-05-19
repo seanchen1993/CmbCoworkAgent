@@ -1,0 +1,15 @@
+description: CMBDevClaw skill quality evals
+
+prompts:
+  - "{{prompt}}"
+
+providers:
+  - id: file://providers/agent-trace-provider.cjs
+    label: cmb-agent-trace
+    config:
+      timeoutMs: 600000
+      outputRoot: .cmbdevclaw/evals/skill-quality/runs
+
+tests:
+  - file://cases/smoke.yaml
+  - file://cases/negative-examples.yaml

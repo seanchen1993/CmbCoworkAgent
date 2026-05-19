@@ -1,0 +1,16 @@
+- description: Trace grader accepts a scheduler skill trace
+  vars:
+    case_id: scheduler.trace.fixture
+    prompt: "5分钟后提醒我喝水"
+    expected_skill: scheduler-assistant
+    trace_fixture: evals/skill-quality/fixtures/traces/scheduler-success.jsonl
+    required_tools:
+      - read_file
+      - manage_scheduler
+    forbidden_commands:
+      - "git reset --hard"
+      - "rm -rf"
+    max_tool_calls: 10
+  assert:
+    - type: python
+      value: file://graders/trajectory.py

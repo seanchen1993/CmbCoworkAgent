@@ -1,0 +1,11 @@
+- description: Negative example - missing expected scheduler skill
+  vars:
+    case_id: scheduler.trace.negative
+    prompt: "5分钟后提醒我喝水"
+    expected_skill: scheduler-assistant
+    expect_pass: false
+    trace_fixture: evals/skill-quality/fixtures/traces/no-skill.jsonl
+    max_tool_calls: 10
+  assert:
+    - type: python
+      value: file://graders/trajectory.py
