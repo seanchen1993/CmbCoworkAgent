@@ -5,19 +5,23 @@ import {
   AlertCircle,
   Undo2,
   GitBranch,
+  GitCommit,
   ShieldCheck,
   TriangleAlert,
   FolderOpen,
   CheckCircle2,
   RefreshCw,
   ArrowDown,
-  Loader2
+  Loader2,
+  Upload
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { DiffDisplay } from "@/components/chat/DiffDisplay"
 import { Badge } from "@/components/ui/badge"
 import { toast } from "sonner"
-import { GitSubmitDialog } from "./GitSubmitDialog"
+import { GitCommitDialog } from "./GitCommitDialog"
+import type { CommitType } from "./GitCommitDialog"
+import { GitPushDialog } from "./GitPushDialog"
 import { insertLog } from "../../../js/mmjUtils"
 import type { ThreadGitContext } from "@/lib/thread-context"
 
@@ -103,11 +107,10 @@ export function GitPanelView({
   const [error, setError] = useState<string | null>(null)
   const [submitAction, setSubmitAction] = useState<"commit" | "push" | null>(null)
   const [cardNumber, setCardNumber] = useState("")
-  const [commitType, setCommitType] = useState<
-    "fix" | "feat" | "refactor" | "docs" | "style" | "test" | "chore"
-  >("fix")
+  const [commitType, setCommitType] = useState<CommitType>("fix")
   const [commitMessage, setCommitMessage] = useState("")
   const [expandedFilePaths, setExpandedFilePaths] = useState<Set<string>>(new Set())
+  const [selectedFilePaths, setSelectedFilePaths] = useState<Set<string>>(new Set())
   const [revertingFilePath, setRevertingFilePath] = useState<string | null>(null)
   const [pulling, setPulling] = useState(false)
   const initialMetaState = useMemo(
@@ -127,6 +130,7 @@ export function GitPanelView({
     setError(null)
     setSubmitAction(null)
     setExpandedFilePaths(new Set())
+    setSelectedFilePaths(new Set())
   }, [threadId, initialMetaState])
 
   const showToast = useCallback((text: string, variant: "success" | "error" = "success"): void => {
@@ -240,8 +244,33 @@ export function GitPanelView({
     })
   }, [diffState?.files])
 
+  useEffect(() => {
+    const files = diffState?.files ?? []
+    setSelectedFilePaths((prev) => {
+      if (files.length === 0) return new Set()
+      const filePaths = files.map((file) => file.path)
+      const next = new Set([...prev].filter((path) => filePaths.includes(path)))
+      if (prev.size === 0 || next.size === 0) {
+        return new Set(filePaths)
+      }
+      return next
+    })
+  }, [diffState?.files])
+
   const toggleFileExpanded = useCallback((filePath: string): void => {
     setExpandedFilePaths((prev) => {
+      const next = new Set(prev)
+      if (next.has(filePath)) {
+        next.delete(filePath)
+      } else {
+        next.add(filePath)
+      }
+      return next
+    })
+  }, [])
+
+  const toggleFileSelected = useCallback((filePath: string): void => {
+    setSelectedFilePaths((prev) => {
       const next = new Set(prev)
       if (next.has(filePath)) {
         next.delete(filePath)
@@ -296,30 +325,40 @@ export function GitPanelView({
         return
       }
 
-      if ((action === "commit" || hasPendingChanges) && !cardNumber.trim()) {
+      const selectedPaths = (diffState?.files ?? [])
+        .map((file) => file.path)
+        .filter((path) => selectedFilePaths.has(path))
+
+      if (action === "commit" && selectedPaths.length === 0) {
+        showToast("请至少选择 1 个文件", "error")
+        return
+      }
+
+      if (action === "commit" && !cardNumber.trim()) {
         showToast("cardNumber 不能为空", "error")
         return
       }
 
-      if ((action === "commit" || hasPendingChanges) && !commitMessage.trim()) {
+      if (action === "commit" && !commitMessage.trim()) {
         showToast("commitMessage 不能为空", "error")
         return
       }
 
-      const finalMessage = `${cardNumber.trim()} #comment ${commitType}:${commitMessage.trim()} #CMBDevClaw`
+      const finalMessage =
+        action === "commit"
+          ? `${cardNumber.trim()} #comment ${commitType}:${commitMessage.trim()} #CMBDevClaw`
+          : undefined
 
       setRunning(action)
       setError(null)
       try {
         if (action === "commit") {
-          const result = await window.api.workspace.commitWorktree(threadId, finalMessage)
+          const result = await window.api.workspace.commitWorktree(threadId, finalMessage ?? "", selectedPaths)
           if (!result.success) throw new Error(result.error || "提交失败")
           showToast("提交成功", "success")
           insertLog("commit成功")
         } else {
-          const result = hasPendingChanges
-            ? await window.api.workspace.pushWorktree(threadId, finalMessage)
-            : await window.api.workspace.pushWorktree(threadId)
+          const result = await window.api.workspace.pushWorktree(threadId)
           if (!result.success) throw new Error(result.error || "推送失败")
           showToast("推送成功", "success")
           insertLog("push成功")
@@ -336,7 +375,17 @@ export function GitPanelView({
         setRunning(null)
       }
     },
-    [threadId, cardNumber, commitType, commitMessage, diffState?.hasPendingDiff, refresh, showToast]
+    [
+      threadId,
+      cardNumber,
+      commitType,
+      commitMessage,
+      diffState?.hasPendingDiff,
+      diffState?.files,
+      selectedFilePaths,
+      refresh,
+      showToast
+    ]
   )
 
   const handleRevertFile = useCallback(
@@ -398,6 +447,24 @@ export function GitPanelView({
   const totalChangedFiles = diffState?.changedFilesTotal ?? metaState?.changedFilesTotal ?? 0
   const omittedFileCount = diffState?.omittedFileCount ?? 0
   const visibleFilesCount = diffState?.totals.fileCount ?? 0
+  const selectedFiles = useMemo(
+    () => (diffState?.files ?? []).filter((file) => selectedFilePaths.has(file.path)),
+    [diffState?.files, selectedFilePaths]
+  )
+  const selectedTotals = useMemo(
+    () =>
+      selectedFiles.reduce(
+        (acc, file) => {
+          acc.additions += file.additions
+          acc.deletions += file.deletions
+          return acc
+        },
+        { additions: 0, deletions: 0, fileCount: selectedFiles.length }
+      ),
+    [selectedFiles]
+  )
+  const allVisibleFilesSelected =
+    diffState?.files.length ? selectedFiles.length === diffState.files.length : false
 
   return (
     <div className="rounded-xl border border-border/70 overflow-hidden bg-background flex flex-col min-h-0 h-full">
@@ -489,18 +556,36 @@ export function GitPanelView({
                 <div className="mt-2 pt-2 border-t border-border/60 flex flex-wrap items-center gap-2 justify-between">
                   <div className={"flex space-x-2"}>
                     {canShowSubmit && (
-                      <button
-                        onClick={() => setSubmitAction(hasPending ? "commit" : "push")}
-                        disabled={running !== null || !isDiffReady}
-                        className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] disabled:opacity-50 disabled:cursor-not-allowed hover:bg-background-interactive transition-colors"
-                      >
-                        {isInitialDiffLoading ? (
-                          <Loader2 className="size-3.5 animate-spin" />
-                        ) : (
-                          <GitBranch className="size-3.5" />
-                        )}
-                        {isInitialDiffLoading ? "准备中..." : "Git提交"}
-                      </button>
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={() => setSubmitAction("commit")}
+                          disabled={running !== null || !isDiffReady || !hasPending}
+                          title={isInitialDiffLoading ? "准备中..." : "Commit 提交"}
+                          aria-label={isInitialDiffLoading ? "准备中" : "Commit 提交"}
+                          className="inline-flex h-7 items-center justify-center gap-1 rounded-md border border-border px-2 text-[11px] text-muted-foreground disabled:opacity-50 disabled:cursor-not-allowed hover:bg-background-interactive hover:text-foreground transition-colors"
+                        >
+                          {isInitialDiffLoading ? (
+                            <Loader2 className="size-3.5 animate-spin" />
+                          ) : (
+                            <GitCommit className="size-3.5" />
+                          )}
+                          <span>Commit</span>
+                        </button>
+                        <button
+                          onClick={() => setSubmitAction("push")}
+                          disabled={running !== null || !isDiffReady}
+                          title={isInitialDiffLoading ? "准备中..." : "Push 推送"}
+                          aria-label={isInitialDiffLoading ? "准备中" : "Push 推送"}
+                          className="inline-flex h-7 items-center justify-center gap-1 rounded-md border border-border px-2 text-[11px] text-muted-foreground disabled:opacity-50 disabled:cursor-not-allowed hover:bg-background-interactive hover:text-foreground transition-colors"
+                        >
+                          {isInitialDiffLoading ? (
+                            <Loader2 className="size-3.5 animate-spin" />
+                          ) : (
+                            <Upload className="size-3.5" />
+                          )}
+                          <span>Push</span>
+                        </button>
+                      </div>
                     )}
 
                     {hasPending && isDiffReady && (
@@ -662,9 +747,36 @@ export function GitPanelView({
               </div>
             ) : (
               <>
+                <div className="rounded-md border border-border/70 bg-background px-2.5 py-2 flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-xs text-muted-foreground">
+                    已选择{" "}
+                    <span className="font-semibold text-foreground">{selectedTotals.fileCount}</span>{" "}
+                    / {diffState.files.length} 个文件
+                    <span className="ml-2 text-emerald-600 dark:text-emerald-400">
+                      +{selectedTotals.additions}
+                    </span>
+                    <span className="ml-1 text-rose-600 dark:text-rose-400">
+                      -{selectedTotals.deletions}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className="inline-flex items-center rounded-md border border-border px-2 py-1 text-[11px] text-muted-foreground hover:bg-background-interactive hover:text-foreground"
+                    onClick={() => {
+                      setSelectedFilePaths(
+                        allVisibleFilesSelected
+                          ? new Set()
+                          : new Set(diffState.files.map((file) => file.path))
+                      )
+                    }}
+                  >
+                    {allVisibleFilesSelected ? "取消全选" : "全选文件"}
+                  </button>
+                </div>
                 {diffState.files.map((file) => {
                   const diff = file.diff
                   const isExpanded = expandedFilePaths.has(file.path)
+                  const isSelected = selectedFilePaths.has(file.path)
                   return (
                     <div
                       key={file.path}
@@ -676,6 +788,17 @@ export function GitPanelView({
                         className="w-full flex items-center justify-between gap-2 text-xs"
                       >
                         <span className="flex items-center gap-1.5 min-w-0">
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            aria-label={`选择文件 ${file.path}`}
+                            onChange={(e) => {
+                              e.stopPropagation()
+                              toggleFileSelected(file.path)
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                            className="size-3.5 shrink-0 accent-blue-600"
+                          />
                           {isExpanded ? (
                             <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
                           ) : (
@@ -769,27 +892,36 @@ export function GitPanelView({
         )}
       </div>
 
-      <GitSubmitDialog
-        open={submitAction !== null}
-        action={submitAction}
-        running={running === "commit" || running === "push" ? running : null}
+      <GitCommitDialog
+        open={submitAction === "commit"}
+        running={running === "commit"}
         branch={metaState?.worktreeBranch || "-"}
-        fileCount={diffState?.totals.fileCount ?? 0}
-        additions={diffState?.totals.additions ?? 0}
-        deletions={diffState?.totals.deletions ?? 0}
-        requiresCommitMetadata={hasPending}
+        fileCount={hasPending ? selectedTotals.fileCount : (diffState?.totals.fileCount ?? 0)}
+        additions={hasPending ? selectedTotals.additions : (diffState?.totals.additions ?? 0)}
+        deletions={hasPending ? selectedTotals.deletions : (diffState?.totals.deletions ?? 0)}
         cardNumber={cardNumber}
         commitType={commitType}
         commitMessage={commitMessage}
-        pendingCommits={metaState?.pendingCommits}
         onOpenChange={(open) => {
           if (!open) setSubmitAction(null)
         }}
         onCardNumberChange={setCardNumber}
         onCommitTypeChange={setCommitType}
         onCommitMessageChange={setCommitMessage}
-        onSubmit={(action) => {
-          void runSubmit(action)
+        onSubmit={() => {
+          void runSubmit("commit")
+        }}
+      />
+      <GitPushDialog
+        open={submitAction === "push"}
+        running={running === "push"}
+        branch={metaState?.worktreeBranch || "-"}
+        pendingCommits={metaState?.pendingCommits}
+        onOpenChange={(open) => {
+          if (!open) setSubmitAction(null)
+        }}
+        onSubmit={() => {
+          void runSubmit("push")
         }}
       />
     </div>

@@ -1058,41 +1058,6 @@ function isMissingRemoteBranchError(error: unknown): boolean {
     text.includes("couldn't find remote branch")
 }
 
-async function getUnmergedFiles(worktreePath: string): Promise<string[]> {
-  const out = await runGit(worktreePath, ["diff", "--name-only", "--diff-filter=U"]).catch(() => "")
-  return out
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-}
-
-async function getFilesWithConflictMarkers(
-  worktreePath: string,
-  files: string[]
-): Promise<string[]> {
-  const relSet = new Set<string>()
-  for (const file of files) {
-    for (const rel of toWorktreeRelativePath(worktreePath, file)) {
-      relSet.add(rel)
-    }
-  }
-  const relFiles = Array.from(relSet)
-  if (relFiles.length === 0) return []
-  const out = await runGit(
-    worktreePath,
-    ["grep", "-n", "-E", "^(<<<<<<<|=======|>>>>>>>)", "--", ...relFiles]
-  ).catch(() => "")
-  const matched = new Set<string>()
-  for (const line of out.split("\n")) {
-    const trimmed = line.trim()
-    if (!trimmed) continue
-    const idx = trimmed.indexOf(":")
-    if (idx <= 0) continue
-    matched.add(trimmed.slice(0, idx))
-  }
-  return Array.from(matched)
-}
-
 async function resolveThreadWorkspaceContext(threadId: string): Promise<{
   metadata: Record<string, unknown>
   workspacePath: string | null
@@ -1497,6 +1462,30 @@ async function getChangedFilesForGitOps(
   return collectChangedFilesFromStatus(worktreePath, statusOut, normalizedTrackedFiles, {
     filterByTracked
   })
+}
+
+function normalizeSelectedChangedFiles(
+  worktreePath: string,
+  changedFiles: string[],
+  selectedFilePaths?: string[]
+): string[] {
+  if (!Array.isArray(selectedFilePaths)) {
+    return changedFiles
+  }
+  if (selectedFilePaths.length === 0) return []
+
+  const changedSet = new Set(changedFiles.map(normalizeGitRelativePath))
+  const selectedSet = new Set<string>()
+  for (const selected of selectedFilePaths) {
+    if (typeof selected !== "string" || !selected.trim()) continue
+    for (const rel of toWorktreeRelativePath(worktreePath, selected)) {
+      const normalized = normalizeGitRelativePath(rel)
+      if (changedSet.has(normalized)) {
+        selectedSet.add(normalized)
+      }
+    }
+  }
+  return Array.from(selectedSet)
 }
 
 async function getHeadCommitStats(
@@ -2568,7 +2557,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     "workspace:commitWorktree",
     async (
       _event,
-      { threadId, message }: { threadId: string; message: string }
+      { threadId, message, filePaths }: { threadId: string; message: string; filePaths?: string[] }
     ) => {
       try {
         logGitStep(threadId, "commit", "开始提交")
@@ -2582,17 +2571,22 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         const changedFiles = await getChangedFilesForGitOps(worktreePath, tracked, {
           includeAllWhenNoTracked: true
         })
-        if (changedFiles.length === 0) {
+        const filesToCommit = normalizeSelectedChangedFiles(worktreePath, changedFiles, filePaths)
+        if (filesToCommit.length === 0) {
           logGitStep(threadId, "commit", "失败：没有需要提交的改动")
           return { success: false, error: "没有需要提交的改动" }
         }
 
-        logGitStep(threadId, "commit", `add 文件数：${changedFiles.length}`)
+        logGitStep(threadId, "commit", `add 文件数：${filesToCommit.length}`)
         // 必须按字面量 add：否则 Git 会把部分文件名当 glob pathspec，偶发报 did not match any files。
-        await runGitWithLiteralPathspecs(worktreePath, ["add"], changedFiles)
+        await runGitWithLiteralPathspecs(worktreePath, ["add"], filesToCommit)
         const adoptionSnapshots = captureStagedSnapshotsForCommit(worktreePath)
         logGitStep(threadId, "commit", `commit message: ${message}`)
-        await runGit(worktreePath, ["commit", "-m", message])
+        if (Array.isArray(filePaths) && filePaths.length > 0) {
+          await runGitWithLiteralPathspecs(worktreePath, ["commit", "-m", message], filesToCommit)
+        } else {
+          await runGit(worktreePath, ["commit", "-m", message])
+        }
         let commitSha: string | undefined
         try {
           commitSha = (await runGit(worktreePath, ["rev-parse", "HEAD"], { silent: true })).trim() || undefined
@@ -2628,7 +2622,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
             repoPath:     worktreePath,
             branch: branch || "",
             commitSha: commitSha ?? "",
-            filesChanged: commitStats.fileCount || changedFiles.length,
+            filesChanged: commitStats.fileCount || filesToCommit.length,
             insertions: commitStats.additions,
             deletions: commitStats.deletions,
             triggeredBy:  "manual"
@@ -2645,10 +2639,11 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle(
     "workspace:pushWorktree",
-    async (_event, { threadId, message }: { threadId: string; message?: string }) => {
+    async (
+      _event,
+      { threadId }: { threadId: string }
+    ) => {
       logGitStep(threadId, "push", "开始推送流程")
-      let autoCommitted = false
-      let autoCommitHead: string | null = null
       let pushedCommits: Array<{ hash: string; message: string; date: string }> = []
       const steps: PushStepResult[] = []
       try {
@@ -2660,110 +2655,14 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           return { success: false, error: "当前任务不在 Git 仓库中", steps }
         }
 
-        const rollbackAutoCommit = async (): Promise<void> => {
-          if (!autoCommitted || !autoCommitHead) return
-          try {
-            // 对比当前 HEAD 与自动提交产生的 commit，只有一致时才回滚，避免误回滚用户后续提交。
-            const currentHead = await getHeadCommitCached(worktreePath, {
-              silent: true,
-              forceRefresh: true
-            })
-            if (currentHead === autoCommitHead) {
-              await runGit(worktreePath, ["reset", "--mixed", "HEAD~1"])
-            }
-          } catch {
-            // ignore rollback failure; return original error to user
-          }
-        }
-
         const branch =
           context.worktreeBranch || (await getCurrentBranchCached(worktreePath, { silent: true })) || "HEAD"
 
-        // Step 1: Auto-commit pending workspace changes first.
-        const tracked = getTrackedLlmFiles(context.metadata)
-        // push 前走轻量 changed-files 快速路径，不构建完整 diff，减少等待。
-        const pendingChangedFiles = await getChangedFilesForGitOps(worktreePath, tracked, {
-          includeAllWhenNoTracked: true
-        })
-        if (pendingChangedFiles.length > 0) {
-          const commitMessage = (message || "").trim() ||
-            `chore(task:${threadId.slice(0, 8)}): auto commit before push`
-          try {
-            logGitStep(threadId, "push", `自动提交 message: ${commitMessage}`)
-            // push 前自动提交同样走字面量 pathspec，保持与手动 commit 流程一致。
-            await runGitWithLiteralPathspecs(worktreePath, ["add"], pendingChangedFiles)
-            const adoptionSnapshots = captureStagedSnapshotsForCommit(worktreePath)
-            await runGit(worktreePath, ["commit", "-m", commitMessage])
-            autoCommitted = true
-            autoCommitHead = await getHeadCommitCached(worktreePath, {
-              silent: true,
-              forceRefresh: true
-            })
-            if (!autoCommitHead) {
-              // 极端情况下缓存刷新失败，回退到直接 rev-parse，保证流程鲁棒性。
-              autoCommitHead = (await runGit(worktreePath, ["rev-parse", "HEAD"], { silent: true })).trim()
-            }
-            if (adoptionSnapshots.length > 0) {
-              measureForCommit(adoptionSnapshots, autoCommitHead || undefined)
-            }
-            steps.push({ step: "commit", status: "ok", detail: `自动提交成功：${commitMessage}` })
-
-            // Operational telemetry (fire-and-forget, never blocks push flow)
-            {
-              // 提交后直接读取 HEAD 统计，避免重复计算 pending diff totals。
-              const commitStats = await getHeadCommitStats(worktreePath, { silent: true })
-              trackGitEventWithSkills("git.commit.created", threadId, {
-                repoPath:     worktreePath,
-                branch,
-                commitSha: autoCommitHead || "",
-                filesChanged: commitStats.fileCount || pendingChangedFiles.length,
-                insertions: commitStats.additions,
-                deletions: commitStats.deletions,
-                triggeredBy:  "auto-push"
-              })
-            }
-          } catch (commitError) {
-            const detail = getExecErrorText(commitError)
-            steps.push({ step: "commit", status: "failed", detail: detail || "自动提交失败" })
-            steps.push({ step: "final", status: "failed", detail: "流程中断：commit 失败" })
-            return { success: false, error: detail || "自动提交失败", steps }
-          }
-        } else {
-          steps.push({ step: "commit", status: "skipped", detail: "无待提交改动，跳过自动提交" })
-        }
+        steps.push({ step: "commit", status: "skipped", detail: "Push 不执行提交，仅推送已有 commit" })
 
         // 快速路径：push 流程跳过 pull --rebase，减少端到端等待。
         // 若后续 push 失败，会把错误精确返回给用户处理（例如非 fast-forward）。
         steps.push({ step: "pull", status: "skipped", detail: "快速模式：跳过 pull --rebase" })
-
-        const unmerged = await getUnmergedFiles(worktreePath)
-        if (unmerged.length > 0) {
-          steps.push({
-            step: "final",
-            status: "failed",
-            detail: `检测到未解决冲突文件：${unmerged.slice(0, 3).join(", ")}${unmerged.length > 3 ? "..." : ""}`
-          })
-          steps.push({ step: "final", status: "failed", detail: "流程中断：存在未解决冲突" })
-          return {
-            success: false,
-            error: "存在未解决的 Git 冲突，请先解决后再 Push。",
-            steps
-          }
-        }
-
-        const markerFiles = await getFilesWithConflictMarkers(worktreePath, tracked)
-        if (markerFiles.length > 0) {
-          steps.push({
-            step: "final",
-            status: "failed",
-            detail: `检测到冲突标记（<<<<<<< / ======= / >>>>>>>）：${markerFiles.slice(0, 3).join(", ")}${markerFiles.length > 3 ? "..." : ""}`
-          })
-          return {
-            success: false,
-            error: "检测到代码中仍有 Git 冲突标记，请先处理后再 Push。",
-            steps
-          }
-        }
 
         const pushabilityBeforePush = await getPushabilitySnapshot(
           worktreePath,
@@ -2779,7 +2678,6 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           await runGit(worktreePath, ["push", "-u", "origin", branch])
           steps.push({ step: "push", status: "ok", detail: `push origin ${branch} 成功` })
         } catch (pushError) {
-          await rollbackAutoCommit()
           const detail = getExecErrorText(pushError)
           if (detail.toLowerCase().includes("detected dubious ownership")) {
             steps.push({ step: "push", status: "failed", detail: "Git safe.directory 校验失败" })
@@ -2795,20 +2693,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           return { success: false, error: detail || "推送失败", steps }
         }
 
-        if (autoCommitted) {
-          const { getThread, updateThread } = await import("../db")
-          const thread = getThread(threadId)
-          if (thread) {
-            let metadata: Record<string, unknown> = {}
-            try { metadata = thread.metadata ? JSON.parse(thread.metadata) : {} } catch { metadata = {} }
-            metadata.llmModifiedFiles = []
-            metadata.llmFileHistory = {}
-            metadata.llmRecentlyRevertedFiles = []
-            updateThread(threadId, { metadata: JSON.stringify(metadata) })
-          }
-        }
-
-        steps.push({ step: "final", status: "ok", detail: autoCommitted ? "自动提交并推送成功" : "推送成功" })
+        steps.push({ step: "final", status: "ok", detail: "推送成功" })
         notifyWorkspaceFilesChanged(threadId, worktreePath)
         logGitStep(threadId, "push", "推送流程成功")
 
@@ -2853,7 +2738,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           })
         }
 
-        return { success: true, autoCommitted, steps }
+        return { success: true, autoCommitted: false, steps }
       } catch (e) {
         const detail = getExecErrorText(e)
         logGitStep(threadId, "push", `异常：${detail || (e instanceof Error ? e.message : "推送失败")}`)

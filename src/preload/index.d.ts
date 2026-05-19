@@ -492,14 +492,14 @@ interface CustomAPI {
     }>
     commitWorktree: (
       threadId: string,
-      message: string
+      message: string,
+      filePaths?: string[]
     ) => Promise<{
       success: boolean
       error?: string
     }>
     pushWorktree: (
-      threadId: string,
-      message?: string
+      threadId: string
     ) => Promise<{
       success: boolean
       autoCommitted?: boolean

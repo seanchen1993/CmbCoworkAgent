@@ -644,16 +644,16 @@ const api = {
     },
     commitWorktree: (
       threadId: string,
-      message: string
+      message: string,
+      filePaths?: string[]
     ): Promise<{ success: boolean; error?: string }> => {
-      return ipcRenderer.invoke("workspace:commitWorktree", { threadId, message }) as Promise<{
+      return ipcRenderer.invoke("workspace:commitWorktree", { threadId, message, filePaths }) as Promise<{
         success: boolean
         error?: string
       }>
     },
     pushWorktree: (
-      threadId: string,
-      message?: string
+      threadId: string
     ): Promise<{
       success: boolean
       autoCommitted?: boolean
@@ -664,7 +664,7 @@ const api = {
         detail: string
       }>
     }> => {
-      return ipcRenderer.invoke("workspace:pushWorktree", { threadId, message }) as Promise<{
+      return ipcRenderer.invoke("workspace:pushWorktree", { threadId }) as Promise<{
         success: boolean
         autoCommitted?: boolean
         error?: string
