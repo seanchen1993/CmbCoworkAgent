@@ -338,6 +338,7 @@
 
 .streaming-markdown-inline-code {
   display: inline;
+  word-break: break-all;
   padding: 0.08em 0.35em;
   border: 1px solid #c9c6c6;
   border-radius: 4px;
