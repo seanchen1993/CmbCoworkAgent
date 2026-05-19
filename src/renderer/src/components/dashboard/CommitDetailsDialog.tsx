@@ -24,6 +24,15 @@ function repoName(item: DashboardCommitDetail): string {
   return parts[parts.length - 1] || repoPath
 }
 
+function formatPercent(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return "-"
+  return `${(value * 100).toFixed(1)}%`
+}
+
+function formatLines(value: number): string {
+  return Number.isFinite(value) ? Math.round(value).toLocaleString() : "0"
+}
+
 function SkillChips({ skills }: { skills: string[] }): React.JSX.Element {
   if (skills.length === 0) {
     return <span className="text-xs text-muted-foreground">-</span>
@@ -109,6 +118,14 @@ function CommitRow({
       </td>
       <td className="px-3 py-2">
         <SkillChips skills={item.usedSkills} />
+      </td>
+      <td className="whitespace-nowrap px-3 py-2 text-xs">
+        <div className="font-medium tabular-nums text-foreground">
+          {formatPercent(item.codeAdoptionRate)}
+        </div>
+        <div className="text-[10px] text-muted-foreground">
+          {formatLines(item.codeAdoptedLines)} / {formatLines(item.codeEffectiveGeneratedLines)} 行
+        </div>
       </td>
       <td className="whitespace-nowrap px-3 py-2 text-xs">
         <span className="text-muted-foreground">{item.filesChanged} 文件</span>
@@ -295,7 +312,7 @@ export function CommitDetailsDialog({
             />
             <ScrollArea className="min-h-0 flex-1">
               <div className="overflow-x-auto">
-                <table className="min-w-[980px] w-full text-left">
+                <table className="min-w-[1060px] w-full text-left">
                   <thead className="sticky top-0 z-10 bg-background">
                     <tr className="border-b border-border text-[11px] text-muted-foreground">
                       <th className="whitespace-nowrap px-3 py-2 font-medium">时间</th>
@@ -305,6 +322,7 @@ export function CommitDetailsDialog({
                       <th className="whitespace-nowrap px-3 py-2 font-medium">分支</th>
                       <th className="whitespace-nowrap px-3 py-2 font-medium">状态</th>
                       <th className="whitespace-nowrap px-3 py-2 font-medium">关联 Skill</th>
+                      <th className="whitespace-nowrap px-3 py-2 font-medium">采纳率</th>
                       <th className="whitespace-nowrap px-3 py-2 font-medium">变更</th>
                       <th className="whitespace-nowrap px-3 py-2 font-medium">Thread</th>
                     </tr>

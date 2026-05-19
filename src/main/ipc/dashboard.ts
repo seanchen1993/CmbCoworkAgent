@@ -161,6 +161,18 @@ interface DashboardCommitDetail {
   threadId?: string
   usedSkills: string[]
   skillCount: number
+  codeGeneratedLines: number
+  codeEffectiveGeneratedLines: number
+  codeAdoptedLines: number
+  codeAdoptionRate: number | null
+}
+
+interface CommitAdoptionSummary {
+  usedSkills: string[]
+  generatedLines: number
+  effectiveGeneratedLines: number
+  adoptedLines: number
+  adoptionRate: number | null
 }
 
 interface DashboardSkillDetail {
@@ -602,7 +614,11 @@ function normalizeCommitDetail(hit: EsSearchHit): DashboardCommitDetail {
     triggeredBy: asOptionalString(properties.triggeredBy),
     threadId: asOptionalString(properties.threadId),
     usedSkills,
-    skillCount: asNumber(properties.skillCount, usedSkills.length)
+    skillCount: asNumber(properties.skillCount, usedSkills.length),
+    codeGeneratedLines: 0,
+    codeEffectiveGeneratedLines: 0,
+    codeAdoptedLines: 0,
+    codeAdoptionRate: null
   }
 }
 
@@ -610,7 +626,7 @@ function normalizeSkillList(skills: string[]): string[] {
   return Array.from(new Set(skills.map((skill) => skill.trim()).filter(Boolean)))
 }
 
-async function fetchCommitAdoptedSkillMap(commitShas: string[]): Promise<Map<string, string[]>> {
+async function fetchCommitAdoptionMap(commitShas: string[]): Promise<Map<string, CommitAdoptionSummary>> {
   const normalizedCommitShas = normalizeSkillList(commitShas).slice(0, 100)
   if (normalizedCommitShas.length === 0) return new Map()
 
@@ -620,6 +636,9 @@ async function fetchCommitAdoptedSkillMap(commitShas: string[]): Promise<Map<str
       bool: {
         filter: [
           { term: { eventName: "code_adopt" } },
+          { exists: { field: "properties.adoptedLineCount" } },
+          { exists: { field: "properties.generatedLineCount" } },
+          { exists: { field: "properties.effectiveGeneratedLineCount" } },
           { terms: { "properties.commitSha": normalizedCommitShas } }
         ]
       }
@@ -628,7 +647,10 @@ async function fetchCommitAdoptedSkillMap(commitShas: string[]): Promise<Map<str
       by_commit: {
         terms: { field: "properties.commitSha", size: normalizedCommitShas.length },
         aggs: {
-          by_skill: { terms: { field: "properties.usedSkills", size: 50 } }
+          by_skill: { terms: { field: "properties.usedSkills", size: 50 } },
+          generated_lines: { sum: { field: "properties.generatedLineCount" } },
+          effective_generated_lines: effectiveGeneratedLinesSumAgg(),
+          adopted_lines: { sum: { field: "properties.adoptedLineCount" } }
         }
       }
     }
@@ -638,7 +660,7 @@ async function fetchCommitAdoptedSkillMap(commitShas: string[]): Promise<Map<str
   const buckets = asRecord(asRecord(raw.aggregations).by_commit).buckets
   if (!Array.isArray(buckets)) return new Map()
 
-  const result = new Map<string, string[]>()
+  const result = new Map<string, CommitAdoptionSummary>()
   for (const bucket of buckets) {
     const record = asRecord(bucket)
     const commitSha = asString(record.key)
@@ -648,7 +670,16 @@ async function fetchCommitAdoptedSkillMap(commitShas: string[]): Promise<Map<str
     const skills = Array.isArray(skillBuckets)
       ? normalizeSkillList(skillBuckets.map((skillBucket) => asString(asRecord(skillBucket).key)))
       : []
-    if (skills.length > 0) result.set(commitSha, skills)
+    const generatedLines = asNumber(asRecord(record.generated_lines).value)
+    const effectiveGeneratedLines = asNumber(asRecord(record.effective_generated_lines).value)
+    const adoptedLines = asNumber(asRecord(record.adopted_lines).value)
+    result.set(commitSha, {
+      usedSkills: skills,
+      generatedLines,
+      effectiveGeneratedLines,
+      adoptedLines,
+      adoptionRate: effectiveGeneratedLines > 0 ? adoptedLines / effectiveGeneratedLines : null
+    })
   }
   return result
 }
@@ -1635,7 +1666,7 @@ async function fetchCommitDetails(
   const raw = await esQuery(getEsIndex("event"), body) as EsSearchResponse
   const hits = raw.hits?.hits ?? []
   const items = hits.map(normalizeCommitDetail)
-  const adoptedSkillMap = await fetchCommitAdoptedSkillMap(
+  const adoptionMap = await fetchCommitAdoptionMap(
     items.map((item) => item.commitSha ?? "").filter(Boolean)
   )
   return {
@@ -1644,11 +1675,16 @@ async function fetchCommitDetails(
     pageSize,
     pushedOnly,
     items: items.map((item) => {
-      const adoptedSkills = item.commitSha ? adoptedSkillMap.get(item.commitSha) ?? [] : []
+      const adoption = item.commitSha ? adoptionMap.get(item.commitSha) : undefined
+      const adoptedSkills = adoption?.usedSkills ?? []
       return {
         ...item,
         usedSkills: adoptedSkills,
-        skillCount: adoptedSkills.length
+        skillCount: adoptedSkills.length,
+        codeGeneratedLines: adoption?.generatedLines ?? 0,
+        codeEffectiveGeneratedLines: adoption?.effectiveGeneratedLines ?? 0,
+        codeAdoptedLines: adoption?.adoptedLines ?? 0,
+        codeAdoptionRate: adoption?.adoptionRate ?? null
       }
     })
   }
@@ -2605,7 +2641,11 @@ function makeMockCommitDetails(
       triggeredBy: index % 4 === 0 ? "auto-push" : "manual",
       threadId: `mock-thread-${(index % 5) + 1}`,
       usedSkills: index % 2 === 0 ? ["代码审查-v1.0.0"] : ["需求分析-v1.0.0", "接口设计-v1.0.0"],
-      skillCount: index % 2 === 0 ? 1 : 2
+      skillCount: index % 2 === 0 ? 1 : 2,
+      codeGeneratedLines: 30 + index * 2,
+      codeEffectiveGeneratedLines: 24 + index,
+      codeAdoptedLines: 12 + (index % 18),
+      codeAdoptionRate: (12 + (index % 18)) / (24 + index)
     }
   })
   const filteredItems = pushedOnly ? allItems.filter((item) => item.pushed) : allItems
