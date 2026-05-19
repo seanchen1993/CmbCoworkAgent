@@ -562,7 +562,7 @@ export function GitPanelView({
                           disabled={running !== null || !isDiffReady || !hasPending}
                           title={isInitialDiffLoading ? "准备中..." : "Commit 提交"}
                           aria-label={isInitialDiffLoading ? "准备中" : "Commit 提交"}
-                          className="inline-flex h-7 items-center justify-center gap-1 rounded-md border border-border px-2 text-[11px] text-muted-foreground disabled:opacity-50 disabled:cursor-not-allowed hover:bg-background-interactive hover:text-foreground transition-colors"
+                          className="inline-flex h-7 items-center justify-center gap-1 rounded-md border border-border px-2 text-[11px]  cursor-pointer  disabled:opacity-50 disabled:cursor-not-allowed hover:bg-background-interactive hover:text-foreground transition-colors"
                         >
                           {isInitialDiffLoading ? (
                             <Loader2 className="size-3.5 animate-spin" />
@@ -576,7 +576,7 @@ export function GitPanelView({
                           disabled={running !== null || !isDiffReady}
                           title={isInitialDiffLoading ? "准备中..." : "Push 推送"}
                           aria-label={isInitialDiffLoading ? "准备中" : "Push 推送"}
-                          className="inline-flex h-7 items-center justify-center gap-1 rounded-md border border-border px-2 text-[11px] text-muted-foreground disabled:opacity-50 disabled:cursor-not-allowed hover:bg-background-interactive hover:text-foreground transition-colors"
+                          className=" inline-flex h-7 items-center justify-center gap-1 rounded-md border border-border px-2 text-[11px]  disabled:opacity-50 disabled:cursor-not-allowed hover:bg-background-interactive hover:text-foreground transition-colors cursor-pointer "
                         >
                           {isInitialDiffLoading ? (
                             <Loader2 className="size-3.5 animate-spin" />
@@ -614,7 +614,7 @@ export function GitPanelView({
                       aria-label="刷新"
                       className={cn(
                         "group inline-flex items-center gap-1.5 rounded-xl px-3 py-1 text-[11px] font-medium",
-                        "border border-border/80 bg-background/60 text-muted-foreground",
+                        "border border-border/80 bg-background/60  cursor-pointer ",
                         "active:scale-[0.97] transition-all duration-200",
                         loading &&
                           "border-blue-400/60 text-blue-600 dark:text-blue-400 bg-blue-50/50 dark:bg-blue-950/30",
@@ -639,7 +639,7 @@ export function GitPanelView({
                       aria-label="Pull 远端代码"
                       className={cn(
                         "group inline-flex items-center gap-1.5 rounded-xl px-3 py-1 text-[11px] font-medium",
-                        "border border-border/80 bg-background/60 text-muted-foreground",
+                        "border border-border/80 bg-background/60  cursor-pointer ",
                         "active:scale-[0.97] transition-all duration-200",
                         pulling &&
                           "border-blue-400/60 text-blue-600 dark:text-blue-400 bg-blue-50/50 dark:bg-blue-950/30",
