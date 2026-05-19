@@ -843,11 +843,18 @@ const api = {
   },
   skillEval: {
     summary: (opts?: { limit?: number }) => ipcRenderer.invoke("skillEval:summary", opts),
-    records: (opts?: { limit?: number; skillName?: string; threadId?: string; pass?: boolean }) =>
-      ipcRenderer.invoke("skillEval:records", opts),
+    records: (opts?: {
+      limit?: number
+      skillName?: string
+      skillVersion?: string
+      threadId?: string
+      pass?: boolean
+    }) => ipcRenderer.invoke("skillEval:records", opts),
     clear: (): Promise<void> => ipcRenderer.invoke("skillEval:clear") as Promise<void>,
     filePath: (): Promise<string> => ipcRenderer.invoke("skillEval:filePath") as Promise<string>,
-    onUpdated: (callback: (payload: { traceId: string; recordCount: number }) => void): (() => void) => {
+    onUpdated: (
+      callback: (payload: { traceId: string; recordCount: number }) => void
+    ): (() => void) => {
       const handler = (_: unknown, payload: { traceId: string; recordCount: number }): void => {
         callback(payload)
       }

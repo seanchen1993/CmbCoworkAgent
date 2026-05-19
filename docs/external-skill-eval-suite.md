@@ -95,7 +95,7 @@ Minimum stable subset:
 - `steps[].toolCalls`
 - `nodes[]`
 
-Additional useful fields currently include `modelName`, `errorMessage`, `appVersion`, `modelCalls` with token usage, and `metadata.routingTrace`. The complete schema lives in `src/main/agent/trace/types.ts`; external suites should treat that file as the source of truth for a pinned app version.
+Additional useful fields include `modelName`, `errorMessage`, `appVersion`, `modelCalls` with token usage, and `metadata.routingTrace`. The complete schema lives in `src/main/agent/trace/types.ts`; external suites should treat that file at their pinned app tag or commit as the source of truth.
 
 Schema compatibility policy:
 

@@ -605,6 +605,7 @@ interface CustomAPI {
     records: (opts?: {
       limit?: number
       skillName?: string
+      skillVersion?: string
       threadId?: string
       pass?: boolean
     }) => Promise<SkillEvalRecord[]>

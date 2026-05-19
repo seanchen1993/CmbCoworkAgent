@@ -5,7 +5,11 @@ import {
   getSkillEvalSummary,
   listSkillEvalRecords
 } from "../agent/skill-eval/store"
-import type { SkillEvalListOptions, SkillEvalRecord, SkillEvalSummary } from "../agent/skill-eval/types"
+import type {
+  SkillEvalListOptions,
+  SkillEvalRecord,
+  SkillEvalSummary
+} from "../../shared/skill-eval-types"
 
 export function registerSkillEvalHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
