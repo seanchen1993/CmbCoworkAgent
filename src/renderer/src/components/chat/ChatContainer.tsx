@@ -1315,9 +1315,8 @@ export function ChatContainer({
     [threadId]
   )
 
-  // Check if NUX (first-run sandbox setup) is needed, then auto-start elevated setup.
-  // If elevated setup fails (UAC cancelled, setup exe missing, etc.), the main process
-  // automatically falls back to unelevated mode — so the app is always usable.
+  // Check if sandbox NUX is needed. The main process currently defaults sandbox mode to
+  // "none", so this remains dormant unless the setup flow is re-enabled later.
   useEffect(() => {
     window.api.sandbox
       .isNuxNeeded()
@@ -2998,7 +2997,7 @@ export function ChatContainer({
 
         <div className="flex items-start gap-2.5 rounded-md border border-amber-500/30 bg-amber-500/8 p-3 text-sm text-amber-700 dark:text-amber-400">
           <Info className="size-4 shrink-0 mt-0.5" />
-          <span>公司安全限制，默认选择 elevated 沙箱模式，确有其他需要请联系管理员。</span>
+          <span>当前默认关闭沙箱。需要隔离执行时，可在设置中手动启用沙箱模式。</span>
         </div>
 
         {nuxLoading ? (
