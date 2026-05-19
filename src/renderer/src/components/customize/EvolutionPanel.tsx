@@ -1119,18 +1119,20 @@ function CloudEvolutionUpdateCard({
               导出旧版
             </Button>
           )}
-          <Button
-            size="sm"
-            variant="ghost"
-            disabled={installing}
-            className="h-7 px-2.5 text-xs text-muted-foreground"
-            onClick={(event) => {
-              event.stopPropagation()
-              onIgnore(candidate.candidate_id)
-            }}
-          >
-            忽略
-          </Button>
+          {!adopted && (
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={installing}
+              className="h-7 px-2.5 text-xs text-muted-foreground"
+              onClick={(event) => {
+                event.stopPropagation()
+                onIgnore(candidate.candidate_id)
+              }}
+            >
+              忽略
+            </Button>
+          )}
           <Button
             size="sm"
             variant="ghost"

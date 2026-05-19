@@ -128,22 +128,22 @@ export function SkillEvolutionReviewPanel(): React.JSX.Element {
             <div className="min-w-0">
               <h2 className="text-lg font-semibold text-[#181713]">技能进化审批</h2>
               <p className="mt-1 text-sm text-[#7b7970]">审阅 Trace Evolver 生成的候选补丁。</p>
-              <div className="mt-3 flex min-w-0 items-center gap-2 text-xs text-[#7b7970]">
+              <div className="mt-3 flex min-w-0 items-start gap-2 text-xs leading-5 text-[#7b7970]">
                 <button
                   type="button"
                   role="switch"
                   aria-checked={useLocalDebugEndpoint}
                   onClick={toggleLocalDebugEndpoint}
                   className={cn(
-                    "relative h-5 w-9 shrink-0 rounded-full border transition-colors",
+                    "relative mt-px h-5 w-9 shrink-0 rounded-full border transition-colors",
                     useLocalDebugEndpoint ? "border-[#3b68a8] bg-[#3b68a8]" : "border-[#d8d3c2] bg-[#eeeae0]"
                   )}
                   title="开启后所有 Trace Evolver 请求走本地 8017"
                 >
                   <span
                     className={cn(
-                      "absolute top-0.5 size-4 rounded-full bg-white shadow transition-transform",
-                      useLocalDebugEndpoint ? "translate-x-4" : "translate-x-0.5"
+                      "absolute left-0.5 top-0.5 size-4 rounded-full bg-white shadow transition-transform",
+                      useLocalDebugEndpoint ? "translate-x-4" : "translate-x-0"
                     )}
                   />
                 </button>
