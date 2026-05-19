@@ -32,6 +32,11 @@ const DEFAULT_SETTINGS: PetSettings = {
   enabled: false,
   selectedPetKey: null
 }
+const DEFAULT_PET_COLUMNS = 8
+const DEFAULT_PET_ROWS = 9
+// 设置页只画第一帧预览，仍需限制解码后像素与单帧尺寸，避免异常自定义资源撑爆 renderer。
+const MAX_PREVIEW_FRAME_SIZE = 1024
+const MAX_PREVIEW_SPRITE_PIXELS = 16 * 1024 * 1024
 
 function getPetName(pet: PetItem): string {
   return pet.displayName || pet.name || pet.id || pet.directoryId
@@ -41,18 +46,75 @@ function getPetDescription(pet: PetItem): string {
   return pet.description || "暂无详情"
 }
 
-function PetSpritePreview(props: { pet: PetItem; spriteUrl?: string }): React.JSX.Element {
-  const { pet, spriteUrl } = props
+function PetSpritePreview(props: {
+  pet: PetItem
+  spriteUrl?: string
+  onVisible: () => void
+}): React.JSX.Element {
+  const { pet, spriteUrl, onVisible } = props
+  const previewRef = useRef<HTMLDivElement | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const requestedRef = useRef(false)
+
+  useEffect(() => {
+    if (spriteUrl || requestedRef.current) return
+    const preview = previewRef.current
+    if (!preview) return
+
+    const requestSprite = (): void => {
+      if (requestedRef.current) return
+      requestedRef.current = true
+      onVisible()
+    }
+
+    if (typeof IntersectionObserver === "undefined") {
+      requestSprite()
+      return
+    }
+
+    // 预览图按进入视口懒加载，避免打开宠物页时一次性把所有 spritesheet 通过 IPC 拉进来。
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          requestSprite()
+          observer.disconnect()
+        }
+      },
+      { rootMargin: "160px" }
+    )
+    observer.observe(preview)
+
+    return () => observer.disconnect()
+  }, [onVisible, spriteUrl])
 
   useEffect(() => {
     if (!spriteUrl || !canvasRef.current) return
 
     const image = new Image()
     image.onload = (): void => {
-      const columns = pet.columns || 8
+      // 先检查整图解码后的像素数，再创建 canvas，防止小体积高分辨率图片造成内存尖峰。
+      if (
+        image.naturalWidth < 1 ||
+        image.naturalHeight < 1 ||
+        image.naturalWidth * image.naturalHeight > MAX_PREVIEW_SPRITE_PIXELS
+      ) {
+        return
+      }
+
+      const columns = pet.columns || DEFAULT_PET_COLUMNS
+      const rows = pet.rows || DEFAULT_PET_ROWS
       const frameWidth = pet.frameWidth || Math.floor(image.naturalWidth / columns)
-      const frameHeight = pet.frameHeight || Math.floor(image.naturalHeight / (pet.rows || 9))
+      const frameHeight = pet.frameHeight || Math.floor(image.naturalHeight / rows)
+      // 只需要缩略预览第一帧，异常帧尺寸直接跳过，保留占位图即可。
+      if (
+        frameWidth < 1 ||
+        frameHeight < 1 ||
+        frameWidth > MAX_PREVIEW_FRAME_SIZE ||
+        frameHeight > MAX_PREVIEW_FRAME_SIZE
+      ) {
+        return
+      }
+
       const canvas = canvasRef.current
       const context = canvas?.getContext("2d")
       if (!canvas || !context || !frameWidth || !frameHeight) return
@@ -67,7 +129,11 @@ function PetSpritePreview(props: { pet: PetItem; spriteUrl?: string }): React.JS
   }, [pet.columns, pet.frameHeight, pet.frameWidth, pet.rows, spriteUrl])
 
   if (!spriteUrl) {
-    return <ImageIcon className="size-6 text-muted-foreground" />
+    return (
+      <div ref={previewRef} className="flex size-full items-center justify-center">
+        <ImageIcon className="size-6 text-muted-foreground" />
+      </div>
+    )
   }
 
   return (
@@ -100,22 +166,26 @@ export function PetPanel(): React.JSX.Element {
       ])
       setPets(nextPets)
       setSettings(nextSettings)
-
-      const nextSpriteUrls: Record<string, string> = {}
-      await Promise.all(
-        nextPets.map(async (pet) => {
-          const result = await window.api.pet.getSpriteDataUrl(pet.directoryId, pet.source)
-          if (result.success && result.dataUrl) {
-            nextSpriteUrls[pet.key] = result.dataUrl
-          }
-        })
-      )
-      setSpriteUrls(nextSpriteUrls)
+      setSpriteUrls((prev) => {
+        const nextKeys = new Set(nextPets.map((pet) => pet.key))
+        return Object.fromEntries(Object.entries(prev).filter(([key]) => nextKeys.has(key)))
+      })
     } catch (error) {
       console.error("[PetPanel] Failed to load pets:", error)
       toast.error("宠物列表加载失败")
     } finally {
       setLoading(false)
+    }
+  }, [])
+
+  const loadSpriteUrl = useCallback(async (pet: PetItem) => {
+    try {
+      const result = await window.api.pet.getSpriteDataUrl(pet.directoryId, pet.source)
+      if (result.success && result.dataUrl) {
+        setSpriteUrls((prev) => (prev[pet.key] ? prev : { ...prev, [pet.key]: result.dataUrl! }))
+      }
+    } catch (error) {
+      console.warn("[PetPanel] Failed to load pet sprite:", error)
     }
   }, [])
 
@@ -199,7 +269,11 @@ export function PetPanel(): React.JSX.Element {
             onClick={() => handleSelectPet(pet)}
             aria-label={`选择${getPetName(pet)}`}
           >
-            <PetSpritePreview pet={pet} spriteUrl={spriteUrl} />
+            <PetSpritePreview
+              pet={pet}
+              spriteUrl={spriteUrl}
+              onVisible={() => void loadSpriteUrl(pet)}
+            />
           </button>
           <div className="min-w-0 flex-1">
             <div className="flex items-start gap-2">

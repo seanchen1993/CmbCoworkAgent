@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, type IpcMain, screen } from "electron"
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "fs"
-import { mkdir, rm } from "fs/promises"
+import { mkdir, readFile, rm } from "fs/promises"
 import { basename, join, relative } from "path"
 import { pathToFileURL } from "url"
 import { getOpenworkDir } from "./storage"
@@ -90,10 +90,26 @@ let petWindowOptions: PetWindowOptions | null = null
 const completedTaskNotices: Array<{ id: string; threadId: string; title: string }> = []
 let petBubbleHideTimer: NodeJS.Timeout | null = null
 let suppressPetClickUntil = 0
+// 拖动窗口会触发高频 move 事件，这个时间戳用于节流状态同步，避免主进程连续 executeJavaScript。
+let lastPetMoveStateAt = 0
+// settings/list/sprite 都是低频变更资源，缓存在主进程内，减少同步 IO 与重复 base64 编码。
+let cachedPetSettings: PetSettings | null = null
+let cachedPetList: PetListItem[] | null = null
+const petSpriteDataUrlCache = new Map<string, string>()
+let petSpriteDataUrlCacheBytes = 0
 
 const PET_SETTINGS_FILE = join(getOpenworkDir(), "pet-settings.json")
 const PET_BUBBLE_AUTO_HIDE_MS = 4200
 const PET_ALWAYS_ON_TOP_LEVEL = "screen-saver"
+// 设置页预览走 base64 + IPC，限制单图和总缓存，防止自定义超大资源把主进程/renderer 内存撑爆。
+const MAX_PREVIEW_SPRITE_BYTES = 8 * 1024 * 1024
+const MAX_RUNTIME_SPRITE_BYTES = 16 * 1024 * 1024
+const MAX_SPRITE_DATA_URL_CACHE_BYTES = 24 * 1024 * 1024
+const DEFAULT_PET_COLUMNS = 8
+const DEFAULT_PET_ROWS = 9
+// 运行时 canvas 直接按帧尺寸分配内存，必须限制异常 pet.json 或超大解码图。
+const MAX_PET_FRAME_SIZE = 1024
+const MAX_PET_SPRITE_PIXELS = 16 * 1024 * 1024
 const PET_HOVER_MESSAGES = [
   "我会永远陪着你",
   "主人敲代码的样子会发光！",
@@ -166,7 +182,7 @@ export function registerPetHandlers(ipcMain: IpcMain): void {
       if (!pet) {
         return { success: false, error: "Pet not found" }
       }
-      const dataUrl = readPetSpriteDataUrl(pet)
+      const dataUrl = await readPetSpriteDataUrl(pet)
       if (!dataUrl) return { success: false, error: "Failed to load pet sprite" }
       return { success: true, dataUrl }
     }
@@ -240,20 +256,105 @@ function getMimeType(filePath: string): string {
   return "image/png"
 }
 
-function readPetSettings(): PetSettings {
+function normalizePositiveInt(value: unknown, fallback: number, min: number, max: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback
+  return Math.min(max, Math.max(min, Math.floor(value)))
+}
+
+/**
+ * 归一化单个动画状态配置。
+ *
+ * 自定义 pet.json 可能写入 0、负数、超高 fps 或很大的帧数；这里统一夹到安全范围，
+ * 避免出现 0ms 定时器、过密动画循环或查找透明帧时扫描过多格子。
+ */
+function normalizeStateConfig(
+  state: { y?: number; frames?: number; fps?: number },
+  fallback: { y: number; frames: number; fps: number }
+): { y: number; frames: number; fps: number } {
+  return {
+    y: normalizePositiveInt(state.y, fallback.y, 0, 64),
+    frames: normalizePositiveInt(state.frames, fallback.frames, 1, 64),
+    fps: normalizePositiveInt(state.fps, fallback.fps, 1, 24)
+  }
+}
+
+/**
+ * 合并内置状态默认值与自定义状态，并对每个状态做安全归一化。
+ */
+function normalizePetStates(
+  states?: Record<string, { y: number; frames: number; fps?: number }>
+): Record<PetState, { y: number; frames: number; fps: number }> {
+  const normalized: Record<PetState, { y: number; frames: number; fps: number }> = {
+    ...DEFAULT_PET_STATES
+  }
+
+  for (const state of PET_STATES) {
+    normalized[state] = normalizeStateConfig(states?.[state] ?? {}, DEFAULT_PET_STATES[state])
+  }
+
+  return normalized
+}
+
+/**
+ * 生成注入宠物窗口的 manifest。
+ *
+ * 这里不直接信任磁盘上的 pet.json，所有会影响 canvas 分配、动画频率和帧扫描范围的字段
+ * 都先夹到可控区间，防止异常资源导致宠物窗口或整个 App 卡死。
+ */
+function normalizePetManifestForWindow(
+  pet: PetListItem
+): PetListItem & { states: Record<PetState, { y: number; frames: number; fps: number }> } {
+  return {
+    ...pet,
+    frameWidth:
+      pet.frameWidth === undefined
+        ? undefined
+        : normalizePositiveInt(pet.frameWidth, 1, 1, MAX_PET_FRAME_SIZE),
+    frameHeight:
+      pet.frameHeight === undefined
+        ? undefined
+        : normalizePositiveInt(pet.frameHeight, 1, 1, MAX_PET_FRAME_SIZE),
+    columns: normalizePositiveInt(pet.columns, DEFAULT_PET_COLUMNS, 1, 64),
+    rows: normalizePositiveInt(pet.rows, DEFAULT_PET_ROWS, 1, 64),
+    states: normalizePetStates(pet.states)
+  }
+}
+
+/**
+ * 检查 spritesheet 文件是否可用于当前场景。
+ *
+ * 预览和运行时使用不同上限：预览需要跨 IPC 传 base64，所以更严格；运行时直接 file URL 加载，
+ * 但仍要防止用户上传极大文件导致解码和绘制成本不可控。
+ */
+function isSpriteFileUsable(spritePath: string, maxBytes: number): boolean {
   try {
-    if (!existsSync(PET_SETTINGS_FILE)) return { ...DEFAULT_PET_SETTINGS }
+    const stats = statSync(spritePath)
+    return stats.isFile() && stats.size <= maxBytes
+  } catch {
+    return false
+  }
+}
+
+function readPetSettings(): PetSettings {
+  if (cachedPetSettings) return { ...cachedPetSettings }
+  try {
+    if (!existsSync(PET_SETTINGS_FILE)) {
+      cachedPetSettings = { ...DEFAULT_PET_SETTINGS }
+      return { ...cachedPetSettings }
+    }
     const parsed = JSON.parse(readFileSync(PET_SETTINGS_FILE, "utf8")) as Partial<PetSettings>
-    return {
+    cachedPetSettings = {
       enabled: typeof parsed.enabled === "boolean" ? parsed.enabled : DEFAULT_PET_SETTINGS.enabled,
       selectedPetKey:
         typeof parsed.selectedPetKey === "string" && parsed.selectedPetKey
           ? parsed.selectedPetKey
           : null
     }
+    return { ...cachedPetSettings }
   } catch (error) {
     console.warn("[Pets] Failed to read pet settings:", error)
-    return { ...DEFAULT_PET_SETTINGS }
+    cachedPetSettings = { ...DEFAULT_PET_SETTINGS }
+    return { ...cachedPetSettings }
   }
 }
 
@@ -267,7 +368,8 @@ function writePetSettings(settings: Partial<PetSettings>): PetSettings {
         : current.selectedPetKey
   }
   writeFileSync(PET_SETTINGS_FILE, JSON.stringify(next, null, 2), "utf8")
-  return next
+  cachedPetSettings = next
+  return { ...next }
 }
 
 function readPetManifest(directoryId: string, source: PetSource): PetListItem | null {
@@ -314,20 +416,68 @@ function listPetsFromSource(source: PetSource): PetListItem[] {
 }
 
 function listPets(): PetListItem[] {
-  return [...listPetsFromSource("builtin"), ...listPetsFromSource("custom")]
+  if (!cachedPetList) {
+    cachedPetList = [...listPetsFromSource("builtin"), ...listPetsFromSource("custom")]
+  }
+  return cachedPetList.map((pet) => ({ ...pet }))
 }
 
-function readPetSpriteDataUrl(pet: PetListItem): string | null {
+async function readPetSpriteDataUrl(pet: PetListItem): Promise<string | null> {
+  const cacheKey = pet.key
+  const cached = petSpriteDataUrlCache.get(cacheKey)
+  if (cached) return cached
+
   const spritePath = getPetSpritePath(pet)
   if (!spritePath) return null
   try {
-    const buffer = readFileSync(spritePath)
+    if (!isSpriteFileUsable(spritePath, MAX_PREVIEW_SPRITE_BYTES)) {
+      console.warn(`[Pets] Sprite preview skipped for ${pet.directoryId}: file is too large`)
+      return null
+    }
+    const buffer = await readFile(spritePath)
     // 宠物窗口使用 data URL 加载本地图片，避免在 sandbox 页面里暴露文件系统路径。
-    return `data:${getMimeType(spritePath)};base64,${buffer.toString("base64")}`
+    const dataUrl = `data:${getMimeType(spritePath)};base64,${buffer.toString("base64")}`
+    cachePetSpriteDataUrl(cacheKey, dataUrl)
+    return dataUrl
   } catch (error) {
     console.warn(`[Pets] Failed to read sprite for ${pet.directoryId}:`, error)
     return null
   }
+}
+
+/**
+ * 以插入顺序做一个简单 LRU 缓存。
+ *
+ * data URL 字符串比原始图片更大，且会跨进程复制；缓存命中能减少重复读盘/编码，
+ * 总量上限则避免用户打开多个大宠物预览后长期占住内存。
+ */
+function cachePetSpriteDataUrl(cacheKey: string, dataUrl: string): void {
+  const existing = petSpriteDataUrlCache.get(cacheKey)
+  if (existing) {
+    petSpriteDataUrlCacheBytes -= existing.length
+    petSpriteDataUrlCache.delete(cacheKey)
+  }
+
+  petSpriteDataUrlCache.set(cacheKey, dataUrl)
+  petSpriteDataUrlCacheBytes += dataUrl.length
+
+  while (
+    petSpriteDataUrlCacheBytes > MAX_SPRITE_DATA_URL_CACHE_BYTES &&
+    petSpriteDataUrlCache.size > 0
+  ) {
+    const oldestKey = petSpriteDataUrlCache.keys().next().value as string | undefined
+    if (!oldestKey) break
+    const oldestValue = petSpriteDataUrlCache.get(oldestKey)
+    if (oldestValue) petSpriteDataUrlCacheBytes -= oldestValue.length
+    petSpriteDataUrlCache.delete(oldestKey)
+  }
+}
+
+function invalidatePetResourceCache(): void {
+  // 上传/删除自定义宠物后，列表和预览缓存都可能过期，统一清掉以免展示旧资源。
+  cachedPetList = null
+  petSpriteDataUrlCache.clear()
+  petSpriteDataUrlCacheBytes = 0
 }
 
 function getPetSpritePath(pet: PetListItem): string | null {
@@ -360,6 +510,7 @@ function closePetWindow(): void {
   petMoveLastX = null
   petDragOffset = null
   petHovering = false
+  lastPetMoveStateAt = 0
 }
 
 function refreshPetWindowForSettings(): void {
@@ -423,6 +574,7 @@ async function uploadCustomPetFolder(): Promise<{
       await rm(destination, { recursive: true, force: true })
       return { success: false, error: "宠物资源不完整，请参考内置 pets 目录结构" }
     }
+    invalidatePetResourceCache()
     return { success: true, pet }
   } catch (error) {
     await rm(destination, { recursive: true, force: true }).catch(() => undefined)
@@ -439,6 +591,7 @@ async function deleteCustomPet(directoryId: string): Promise<{ success: boolean;
 
   try {
     await rm(petPath, { recursive: true, force: true })
+    invalidatePetResourceCache()
     const settings = readPetSettings()
     if (settings.selectedPetKey === makePetKey("custom", directoryId)) {
       writePetSettings({ selectedPetKey: null })
@@ -531,6 +684,10 @@ export function createPetWindow(): void {
 
   const spritePath = getPetSpritePath(pet)
   if (!spritePath) return
+  if (!isSpriteFileUsable(spritePath, MAX_RUNTIME_SPRITE_BYTES)) {
+    console.warn(`[Pets] Sprite skipped for ${pet.directoryId}: file is too large`)
+    return
+  }
 
   // 宠物窗口只覆盖宠物本体大小，避免透明区域过大影响 hover/拖拽命中。
   const petWindowWidth = 112
@@ -573,14 +730,7 @@ export function createPetWindow(): void {
   configurePetWindowLayer(petWindow)
   petWindowOptions?.applyMacDockIcon()
 
-  const manifest = {
-    ...pet,
-    states: {
-      // 资源 pet.json 可以覆盖默认帧配置；未声明的状态使用内置映射兜底。
-      ...DEFAULT_PET_STATES,
-      ...(pet.states ?? {})
-    }
-  }
+  const manifest = normalizePetManifestForWindow(pet)
   const html = `<!doctype html>
 <html>
 <head>
@@ -667,6 +817,9 @@ export function createPetWindow(): void {
     let pointerMoved = false;
     let dragStartX = 0;
     let dragStartY = 0;
+    let pendingDragX = 0;
+    let pendingDragY = 0;
+    let dragTitleFrame = 0;
     // 记录每个精灵帧是否有有效像素，用于跳过透明占位帧，避免动画中途消失。
     const visibleFrameCache = new Map();
 
@@ -777,13 +930,26 @@ export function createPetWindow(): void {
       const dy = event.screenY - dragStartY;
       if (Math.abs(dx) + Math.abs(dy) > 3) {
         pointerMoved = true;
-        document.title = "pet-drag:" + event.screenX + ":" + event.screenY + ":" + Date.now();
+        pendingDragX = event.screenX;
+        pendingDragY = event.screenY;
+        // pointermove 可能远高于屏幕刷新率；合并到下一帧再通过 title 通知主进程，
+        // 避免拖拽时短时间触发大量 setPosition。
+        if (!dragTitleFrame) {
+          dragTitleFrame = window.requestAnimationFrame(function flushDragTitle() {
+            dragTitleFrame = 0;
+            document.title = "pet-drag:" + pendingDragX + ":" + pendingDragY + ":" + Date.now();
+          });
+        }
       }
     });
     window.addEventListener("pointerup", function onPointerUp(event) {
       pointerDown = false;
       document.body.classList.remove("dragging");
       document.title = "pet-pointer-up:" + Date.now();
+      if (dragTitleFrame) {
+        window.cancelAnimationFrame(dragTitleFrame);
+        dragTitleFrame = 0;
+      }
       clearTransientState("running");
       if (!pointerMoved) {
         setTransientState("interaction", 900);
@@ -794,10 +960,29 @@ export function createPetWindow(): void {
     sprite.onload = function onSpriteLoad() {
       naturalWidth = sprite.naturalWidth;
       naturalHeight = sprite.naturalHeight;
-      const columns = pet.columns || 8;
-      const rows = pet.rows || 9;
+      const columns = pet.columns || ${DEFAULT_PET_COLUMNS};
+      const rows = pet.rows || ${DEFAULT_PET_ROWS};
+      // 图片压缩后文件可能不大，但解码后像素极多；这里在分配 canvas 前挡住异常资源。
+      if (
+        naturalWidth < 1 ||
+        naturalHeight < 1 ||
+        naturalWidth * naturalHeight > ${MAX_PET_SPRITE_PIXELS}
+      ) {
+        document.title = "pet-load-error:invalid-size";
+        return;
+      }
       frameWidth = pet.frameWidth || Math.floor(naturalWidth / columns);
       frameHeight = pet.frameHeight || Math.floor(naturalHeight / rows);
+      // 帧尺寸来自 pet.json 或整图推导，过大会让 canvas/getImageData 占用大量内存。
+      if (
+        frameWidth < 1 ||
+        frameHeight < 1 ||
+        frameWidth > ${MAX_PET_FRAME_SIZE} ||
+        frameHeight > ${MAX_PET_FRAME_SIZE}
+      ) {
+        document.title = "pet-load-error:invalid-frame";
+        return;
+      }
       canvas.width = frameWidth;
       canvas.height = frameHeight;
       buffer.width = frameWidth;
@@ -806,7 +991,7 @@ export function createPetWindow(): void {
       bufferCtx.imageSmoothingEnabled = false;
       frame = findVisibleFrame(pet.states[currentState] || pet.states.idle, 0);
       renderFrame();
-      requestAnimationFrame(draw);
+      scheduleNextFrame();
     };
     sprite.src = spriteUrl;
 
@@ -844,7 +1029,7 @@ export function createPetWindow(): void {
     }
 
     function findVisibleFrame(state, startFrame) {
-      const totalFrames = Math.max(1, Math.min(state.frames || 1, pet.columns || 8));
+      const totalFrames = Math.max(1, Math.min(state.frames || 1, pet.columns || ${DEFAULT_PET_COLUMNS}));
       for (let offset = 0; offset < totalFrames; offset += 1) {
         const candidate = (startFrame + offset) % totalFrames;
         if (frameHasPixels(state, candidate)) return candidate;
@@ -879,16 +1064,20 @@ export function createPetWindow(): void {
       }
     }
 
-    function draw(timestamp) {
+    function scheduleNextFrame() {
       const state = pet.states[currentState] || pet.states.idle;
       const fps = state.fps || 8;
       const frameDuration = 1000 / fps;
-      if (!lastFrameAt || timestamp - lastFrameAt >= frameDuration) {
-        renderFrame();
-        frame = findVisibleFrame(state, frame + 1);
-        lastFrameAt = timestamp;
-      }
-      requestAnimationFrame(draw);
+      // 按状态 fps 调度，避免 requestAnimationFrame 在 idle 状态下 60fps 空转。
+      window.setTimeout(draw, frameDuration);
+    }
+
+    function draw() {
+      const state = pet.states[currentState] || pet.states.idle;
+      renderFrame();
+      frame = findVisibleFrame(state, frame + 1);
+      lastFrameAt = performance.now();
+      scheduleNextFrame();
     }
   </script>
 </body>
@@ -909,10 +1098,13 @@ export function createPetWindow(): void {
     if (petWindow !== currentWindow) return
     event.preventDefault()
     // 宠物窗口启用 sandbox，不能直接访问 Electron API；统一通过 title 事件转发交互。
-    if (title === "pet-ready") {
-      showPetWindow()
-      updatePetTaskTag()
-      showPetGreetingBubble()
+      if (title === "pet-ready") {
+        showPetWindow()
+        updatePetTaskTag()
+        showPetGreetingBubble()
+    } else if (title.startsWith("pet-load-error:")) {
+      console.warn("[Pets] Pet window failed to load sprite:", title)
+      closePetWindow()
     } else if (title.startsWith("pet-click:")) {
       if (Date.now() < suppressPetClickUntil) return
       showMainWindowFromPet()
@@ -940,8 +1132,6 @@ export function createPetWindow(): void {
           Math.round(pointerY - petDragOffset.y),
           false
         )
-        keepPetWindowOnTop(currentWindow)
-        keepPetWindowOnTop(petBubbleWindow)
         updatePetBubblePosition()
       }
     } else if (title.startsWith("pet-pointer-up:")) {
@@ -959,6 +1149,13 @@ export function createPetWindow(): void {
     const [x] = currentWindow.getPosition()
     const direction = petMoveLastX === null || x >= petMoveLastX ? "right" : "left"
     petMoveLastX = x
+    const now = Date.now()
+    // move 事件在拖拽中非常密集；气泡位置需要实时跟随，但动画状态不需要每次都注入 JS。
+    if (now - lastPetMoveStateAt < 120) {
+      updatePetBubblePosition()
+      return
+    }
+    lastPetMoveStateAt = now
     // 真实窗口移动时触发奔跑动画，覆盖系统原生/手动拖拽两种移动来源。
     currentWindow.webContents
       .executeJavaScript(
@@ -976,6 +1173,7 @@ export function createPetWindow(): void {
     petMoveLastX = null
     petDragOffset = null
     petHovering = false
+    lastPetMoveStateAt = 0
     petWindowOptions?.applyMacDockIcon()
   })
 }
@@ -1233,6 +1431,8 @@ function closePetBubble(): void {
 
 function startPetHoverPolling(): void {
   stopPetHoverPolling()
+  // 透明窗口的 pointer 事件在部分平台上不稳定，保留轻量轮询兜底；250ms 足够感知 hover，
+  // 同时比高频轮询更省主进程工作量。
   petHoverPollTimer = setInterval(() => {
     if (!petWindow || petWindow.isDestroyed() || petWindow.webContents.isDestroyed()) return
     const point = screen.getCursorScreenPoint()
@@ -1255,7 +1455,7 @@ function startPetHoverPolling(): void {
     petWindow.webContents
       .executeJavaScript(script)
       .catch((error) => console.warn("[Pets] Failed to update hover state:", error))
-  }, 120)
+  }, 250)
 }
 
 function stopPetHoverPolling(): void {
