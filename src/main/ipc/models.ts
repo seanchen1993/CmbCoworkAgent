@@ -805,6 +805,11 @@ const GIT_BASE_ENV: NodeJS.ProcessEnv = {
   GIT_LFS_SKIP_SMUDGE: "1"
 }
 
+function isGitLfsVersionHookError(error: unknown): boolean {
+  const text = getExecErrorText(error).toLowerCase()
+  return text.includes("git version >= 1.8.2 is required for git lfs")
+}
+
 async function addSafeDirectory(worktreePath: string): Promise<void> {
   console.log(`[GitPanel][exec] git config --global --add safe.directory ${quoteArg(worktreePath)}`)
   await execFileAsync("git", ["config", "--global", "--add", "safe.directory", worktreePath])
@@ -813,7 +818,12 @@ async function addSafeDirectory(worktreePath: string): Promise<void> {
 async function runGit(
   worktreePath: string,
   args: string[],
-  options?: { silent?: boolean; timeoutMs?: number; maxBufferBytes?: number }
+  options?: {
+    silent?: boolean
+    timeoutMs?: number
+    maxBufferBytes?: number
+    env?: NodeJS.ProcessEnv
+  }
 ): Promise<string> {
   const silent = Boolean(options?.silent)
   const maxBufferBytes = options?.maxBufferBytes ?? GIT_EXEC_MAX_BUFFER_BYTES
@@ -822,7 +832,7 @@ async function runGit(
   if (!silent) console.log(`[GitPanel][exec] ${command}`)
   try {
     const { stdout } = await execFileAsync("git", baseArgs, {
-      env: GIT_BASE_ENV,
+      env: { ...GIT_BASE_ENV, ...options?.env },
       timeout: options?.timeoutMs,
       maxBuffer: maxBufferBytes
     })
@@ -838,12 +848,37 @@ async function runGit(
     // 保证正常用户路径能自愈，同时限制为“仅一次重试”避免无限循环。
     await addSafeDirectory(worktreePath)
     const { stdout } = await execFileAsync("git", baseArgs, {
-      env: GIT_BASE_ENV,
+      env: { ...GIT_BASE_ENV, ...options?.env },
       timeout: options?.timeoutMs,
       maxBuffer: maxBufferBytes
     })
     if (!silent) console.log(`[GitPanel][exec][ok-after-retry] ${command}`)
     return stdout
+  }
+}
+
+async function runGitPushWithLfsCompat(
+  threadId: string,
+  worktreePath: string,
+  args: string[]
+): Promise<string> {
+  try {
+    return await runGit(worktreePath, args)
+  } catch (error) {
+    if (!isGitLfsVersionHookError(error)) {
+      throw error
+    }
+
+    logGitStep(threadId, "push", "检测到 Git LFS pre-push 版本误报，跳过 LFS pre-push hook 后重试一次")
+    return runGit(worktreePath, args, {
+      env: {
+        // Enterprise Windows Git setups can occasionally make the Git LFS hook
+        // fail to read `git --version` and report an empty version string. The
+        // normal push already failed before updating refs, so retry once without
+        // the LFS pre-push hook to keep non-LFS pushes from being blocked.
+        GIT_LFS_SKIP_PUSH: "1"
+      }
+    })
   }
 }
 
@@ -2678,7 +2713,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         // Step 2: Push
         try {
           logGitStep(threadId, "push", `执行 push origin ${branch}`)
-          await runGit(worktreePath, ["push", "-u", "origin", branch])
+          await runGitPushWithLfsCompat(threadId, worktreePath, ["push", "-u", "origin", branch])
           steps.push({ step: "push", status: "ok", detail: `push origin ${branch} 成功` })
         } catch (pushError) {
           const detail = getExecErrorText(pushError)
