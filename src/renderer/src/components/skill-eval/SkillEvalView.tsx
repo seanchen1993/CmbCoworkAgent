@@ -4,10 +4,18 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn, formatRelativeTime, truncate } from "@/lib/utils"
-import type { SkillEvalRecord, SkillEvalSummary } from "../../../../shared/skill-eval-types"
+import type {
+  SkillEvalRecord,
+  SkillEvalSummary,
+  SkillResultEvalRecord
+} from "../../../../shared/skill-eval-types"
 
 function skillVersionKey(skillName: string, skillVersion?: string): string {
   return `${skillName}:${skillVersion ?? ""}`
+}
+
+function runSkillVersionKey(traceId: string, skillName: string, skillVersion?: string): string {
+  return `${traceId}:${skillVersionKey(skillName, skillVersion)}`
 }
 
 function skillVersionLabel(skillName: string, skillVersion?: string): string {
@@ -109,11 +117,20 @@ function SkillRow({
   )
 }
 
-function RunRow({ record }: { record: SkillEvalRecord }): React.JSX.Element {
+function RunRow({
+  record,
+  result
+}: {
+  record: SkillEvalRecord
+  result?: SkillResultEvalRecord
+}): React.JSX.Element {
   const warnings = record.warnings ?? []
   const outcomeWarnings = record.outcomeWarnings ?? []
   const checks = record.checks ?? []
   const outcomeChecks = record.outcomeChecks ?? []
+  const resultChecks = result?.checks ?? []
+  const resultWarnings = result?.warnings ?? []
+  const resultIssues = result?.issues ?? []
   const cacheTokens = num(record.cacheReadTokens) + num(record.cacheCreationTokens)
   const promptTokens = promptInputTokens(record)
 
@@ -159,10 +176,16 @@ function RunRow({ record }: { record: SkillEvalRecord }): React.JSX.Element {
               过程 {pct(num(record.processScore, record.score))}
             </Badge>
             <Badge
-              variant={record.outcomePass === false ? "warning" : "outline"}
+              variant={record.outcomePass === false ? "warning" : "nominal"}
               className="normal-case tracking-normal"
             >
-              成果 {pct(num(record.outcomeScore, record.score))}
+              结束 {pct(num(record.outcomeScore, record.score))}
+            </Badge>
+            <Badge
+              variant={result ? (result.pass ? "nominal" : "warning") : "outline"}
+              className="normal-case tracking-normal"
+            >
+              结果 {result ? pct(num(result.score)) : "待生成"}
             </Badge>
             <Badge variant="outline" className="normal-case tracking-normal">
               Token {formatTokens(num(record.totalTokens))}
@@ -178,6 +201,12 @@ function RunRow({ record }: { record: SkillEvalRecord }): React.JSX.Element {
             <div className="mt-2 flex items-center gap-1.5 text-[11px] text-status-warning">
               <AlertCircle className="size-3.5" />
               <span>{outcomeWarnings.slice(0, 2).join(" · ")}</span>
+            </div>
+          )}
+          {resultWarnings.length > 0 && (
+            <div className="mt-2 flex items-center gap-1.5 text-[11px] text-status-warning">
+              <AlertCircle className="size-3.5" />
+              <span>{resultWarnings.slice(0, 2).join(" · ")}</span>
             </div>
           )}
           <div className="mt-2 flex flex-wrap gap-1.5">
@@ -199,7 +228,57 @@ function RunRow({ record }: { record: SkillEvalRecord }): React.JSX.Element {
                 {check.label}
               </Badge>
             ))}
+            {resultChecks.map((check) => (
+              <Badge
+                key={`result:${check.name}`}
+                variant={check.ok ? "nominal" : "warning"}
+                className="normal-case tracking-normal"
+              >
+                结果: {check.label}
+              </Badge>
+            ))}
           </div>
+          {result && (
+            <div className="mt-2 flex flex-wrap gap-3 text-[11px] text-muted-foreground">
+              <span>最终响应 {result.evidence.finalResponseLength} 字</span>
+              <span>产物信号 {result.evidence.artifactSignals.length}</span>
+              <span>改动文件 {result.evidence.changedFiles.length}</span>
+              <span>验证动作 {result.evidence.validationCommands.length}</span>
+              {num(result.evidence.subagentRuns) > 0 && (
+                <>
+                  <span>子 agent {num(result.evidence.subagentRuns)}</span>
+                  <span>子结果 {num(result.evidence.subagentResultLength)} 字</span>
+                  <span>子失败 {num(result.evidence.subagentFailed)}</span>
+                </>
+              )}
+              <span>风险命令 {result.evidence.dangerousCommands?.length ?? 0}</span>
+              <span>结果错误 {num(result.evidence.toolResultErrors)}</span>
+            </div>
+          )}
+          {resultIssues.length > 0 && (
+            <div className="mt-2 text-[11px] text-status-critical">
+              {resultIssues.slice(0, 3).join(" · ")}
+            </div>
+          )}
+          {!result && (
+            <div className="mt-2 text-[11px] text-muted-foreground">
+              通用结果评估会在新运行结束后异步生成
+            </div>
+          )}
+          {result?.artifacts.length ? (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {result.artifacts.slice(0, 6).map((artifact, index) => (
+                <Badge
+                  key={`${artifact.type}:${artifact.path ?? artifact.url ?? index}`}
+                  variant="outline"
+                  className="normal-case tracking-normal"
+                  title={artifact.path ?? artifact.url ?? JSON.stringify(artifact.detail ?? {})}
+                >
+                  {artifact.label}
+                </Badge>
+              ))}
+            </div>
+          ) : null}
         </div>
       </div>
     </div>
@@ -208,6 +287,7 @@ function RunRow({ record }: { record: SkillEvalRecord }): React.JSX.Element {
 
 export function SkillEvalView(): React.JSX.Element {
   const [summary, setSummary] = useState<SkillEvalSummary | null>(null)
+  const [results, setResults] = useState<SkillResultEvalRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [query, setQuery] = useState("")
@@ -217,8 +297,12 @@ export function SkillEvalView(): React.JSX.Element {
     setLoading(true)
     setError(null)
     try {
-      const result = await window.api.skillEval.summary({ limit: 120 })
-      setSummary(result)
+      const [summaryResult, resultRecords] = await Promise.all([
+        window.api.skillEval.summary({ limit: 120 }),
+        window.api.skillEval.resultRecords({ limit: 500 })
+      ])
+      setSummary(summaryResult)
+      setResults(resultRecords)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -238,6 +322,26 @@ export function SkillEvalView(): React.JSX.Element {
       void load()
     })
   }, [load])
+
+  useEffect(() => {
+    return window.api.skillEval.onResultUpdated(() => {
+      void load()
+    })
+  }, [load])
+
+  const resultByRun = useMemo(() => {
+    const map = new Map<string, SkillResultEvalRecord>()
+    for (const result of results) {
+      map.set(runSkillVersionKey(result.traceId, result.skillName, result.skillVersion), result)
+    }
+    return map
+  }, [results])
+
+  const averageResultScore = useMemo(() => {
+    const completed = results.filter((result) => result.status === "completed")
+    if (completed.length === 0) return 0
+    return completed.reduce((sum, result) => sum + num(result.score), 0) / completed.length
+  }, [results])
 
   const filteredSkills = useMemo(() => {
     const text = query.trim().toLowerCase()
@@ -313,9 +417,11 @@ export function SkillEvalView(): React.JSX.Element {
                 value={pct(num(summary?.averageProcessScore ?? summary?.averageScore))}
               />
               <StatTile
-                label="成果分"
+                label="结束分"
                 value={pct(num(summary?.averageOutcomeScore ?? summary?.averageScore))}
               />
+              <StatTile label="结果分" value={pct(averageResultScore)} />
+              <StatTile label="结果记录" value={results.length} />
               <StatTile label="总 Token" value={formatTokens(num(summary?.totalTokens))} />
               <StatTile
                 label="平均峰值输入"
@@ -326,7 +432,7 @@ export function SkillEvalView(): React.JSX.Element {
               <span>技能</span>
               <span className="text-right">次数</span>
               <span className="text-right">通过率</span>
-              <span className="text-right">成果</span>
+              <span className="text-right">结束</span>
               <span className="text-right">分数</span>
               <span className="text-right">Token</span>
             </div>
@@ -384,7 +490,15 @@ export function SkillEvalView(): React.JSX.Element {
                   暂无评估记录
                 </div>
               ) : (
-                filteredRuns.map((record) => <RunRow key={record.id} record={record} />)
+                filteredRuns.map((record) => (
+                  <RunRow
+                    key={record.id}
+                    record={record}
+                    result={resultByRun.get(
+                      runSkillVersionKey(record.traceId, record.skillName, record.skillVersion)
+                    )}
+                  />
+                ))
               )}
             </ScrollArea>
           </main>

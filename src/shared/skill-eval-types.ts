@@ -97,3 +97,59 @@ export interface SkillEvalListOptions {
   threadId?: string
   pass?: boolean
 }
+
+export type SkillResultEvalStatus = "completed" | "failed"
+
+export interface SkillResultArtifact {
+  type: "response" | "file" | "command" | "screenshot" | "log" | "other"
+  label: string
+  path?: string
+  url?: string
+  detail?: Record<string, unknown>
+}
+
+export interface SkillResultEvidence {
+  finalResponseLength: number
+  changedFiles: string[]
+  validationCommands: string[]
+  artifactSignals: string[]
+  dangerousCommands: string[]
+  subagentRuns: number
+  subagentCompleted: number
+  subagentFailed: number
+  subagentResultLength: number
+  toolResultErrors: number
+  errorNodes: number
+  modelCallCount: number
+  toolCallCount: number
+}
+
+export interface SkillResultEvalRecord {
+  id: string
+  traceId: string
+  threadId: string
+  skillName: string
+  skillVersion?: string
+  rawSkillName: string
+  status: SkillResultEvalStatus
+  score: number
+  pass: boolean
+  checks: SkillEvalCheck[]
+  artifacts: SkillResultArtifact[]
+  evidence: SkillResultEvidence
+  issues: string[]
+  warnings: string[]
+  startedAt: string
+  endedAt: string
+  evaluatedAt: string
+}
+
+export interface SkillResultEvalListOptions {
+  limit?: number
+  skillName?: string
+  skillVersion?: string
+  threadId?: string
+  traceId?: string
+  pass?: boolean
+  status?: SkillResultEvalStatus
+}

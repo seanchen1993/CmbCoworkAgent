@@ -34,7 +34,12 @@ import type {
   SavedCodeExecPreviewResult,
   SavedCodeExecToolUpdatePayload
 } from "../main/ipc/code-exec-tools"
-import type { SkillEvalRecord, SkillEvalSummary } from "../shared/skill-eval-types"
+import type {
+  SkillEvalRecord,
+  SkillEvalSummary,
+  SkillResultEvalRecord,
+  SkillResultEvalStatus
+} from "../shared/skill-eval-types"
 
 interface ElectronAPI {
   openExternal: (url: string) => Promise<void>
@@ -609,9 +614,22 @@ interface CustomAPI {
       threadId?: string
       pass?: boolean
     }) => Promise<SkillEvalRecord[]>
+    resultRecords: (opts?: {
+      limit?: number
+      skillName?: string
+      skillVersion?: string
+      threadId?: string
+      traceId?: string
+      pass?: boolean
+      status?: SkillResultEvalStatus
+    }) => Promise<SkillResultEvalRecord[]>
     clear: () => Promise<void>
     filePath: () => Promise<string>
+    resultFilePath: () => Promise<string>
     onUpdated: (callback: (payload: { traceId: string; recordCount: number }) => void) => () => void
+    onResultUpdated: (
+      callback: (payload: { traceId: string; recordCount: number }) => void
+    ) => () => void
   }
   mcp: {
     list: () => Promise<McpConnectorConfig[]>

@@ -56,6 +56,7 @@ import {
 } from "../../services/adoption-tracker"
 import { sanitizeTraceForCloudUpload } from "./sanitizer"
 import { recordSkillEvalForTrace } from "../skill-eval/runtime"
+import { recordSkillResultEvalForTrace } from "../skill-eval/result-runtime"
 
 // ─────────────────────────────────────────────────────────
 // Global reporter registry
@@ -575,6 +576,7 @@ export class TraceCollector {
 
     writeTraceFile(trace)
     recordSkillEvalForTrace(trace)
+    recordSkillResultEvalForTrace(trace)
 
     // Fire-and-forget: trace upload is a side-channel operation and must
     // never block the main agent flow. Errors are logged and swallowed.

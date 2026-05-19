@@ -850,8 +850,19 @@ const api = {
       threadId?: string
       pass?: boolean
     }) => ipcRenderer.invoke("skillEval:records", opts),
+    resultRecords: (opts?: {
+      limit?: number
+      skillName?: string
+      skillVersion?: string
+      threadId?: string
+      traceId?: string
+      pass?: boolean
+      status?: "completed" | "failed"
+    }) => ipcRenderer.invoke("skillEval:resultRecords", opts),
     clear: (): Promise<void> => ipcRenderer.invoke("skillEval:clear") as Promise<void>,
     filePath: (): Promise<string> => ipcRenderer.invoke("skillEval:filePath") as Promise<string>,
+    resultFilePath: (): Promise<string> =>
+      ipcRenderer.invoke("skillEval:resultFilePath") as Promise<string>,
     onUpdated: (
       callback: (payload: { traceId: string; recordCount: number }) => void
     ): (() => void) => {
@@ -861,6 +872,17 @@ const api = {
       ipcRenderer.on("skillEval:updated", handler)
       return () => {
         ipcRenderer.removeListener("skillEval:updated", handler)
+      }
+    },
+    onResultUpdated: (
+      callback: (payload: { traceId: string; recordCount: number }) => void
+    ): (() => void) => {
+      const handler = (_: unknown, payload: { traceId: string; recordCount: number }): void => {
+        callback(payload)
+      }
+      ipcRenderer.on("skillEval:resultUpdated", handler)
+      return () => {
+        ipcRenderer.removeListener("skillEval:resultUpdated", handler)
       }
     }
   },
