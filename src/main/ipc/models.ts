@@ -2644,7 +2644,6 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       { threadId }: { threadId: string }
     ) => {
       logGitStep(threadId, "push", "开始推送流程")
-      let pushedCommits: Array<{ hash: string; message: string; date: string }> = []
       const steps: PushStepResult[] = []
       try {
         const context = await resolveThreadWorkspaceContext(threadId)
@@ -2664,13 +2663,17 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         // 若后续 push 失败，会把错误精确返回给用户处理（例如非 fast-forward）。
         steps.push({ step: "pull", status: "skipped", detail: "快速模式：跳过 pull --rebase" })
 
-        const pushabilityBeforePush = await getPushabilitySnapshot(
+        const pushedCommitsPromise = getPushabilitySnapshot(
           worktreePath,
           branch,
           context.worktreeBaseCommit,
           { silent: true }
         )
-        pushedCommits = pushabilityBeforePush.pendingCommits
+          .then((snapshot) => snapshot.pendingCommits)
+          .catch((e) => {
+            console.warn("[GitPush] failed to capture push telemetry commit snapshot:", e)
+            return [] as Array<{ hash: string; message: string; date: string }>
+          })
 
         // Step 2: Push
         try {
@@ -2697,8 +2700,10 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         notifyWorkspaceFilesChanged(threadId, worktreePath)
         logGitStep(threadId, "push", "推送流程成功")
 
-        // Operational telemetry (fire-and-forget, never blocks return)
-        {
+        // Operational telemetry and code-adoption marking run in the background so
+        // the user sees push success as soon as git push itself completes.
+        void (async () => {
+          const pushedCommits = await pushedCommitsPromise
           const pushOperationId = randomUUID()
           const pushedAt = nowIsoLocal()
           let remoteUrl = ""
@@ -2736,7 +2741,9 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
             pushedAt,
             pushOperationId
           })
-        }
+        })().catch((e) => {
+          console.warn("[GitPush] background telemetry failed:", e)
+        })
 
         return { success: true, autoCommitted: false, steps }
       } catch (e) {
