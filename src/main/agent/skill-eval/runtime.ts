@@ -5,6 +5,7 @@ import { appendSkillEvalRecords } from "./store"
 
 function notifySkillEvalUpdated(traceId: string, recordCount: number): void {
   for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed() || win.webContents.isDestroyed()) continue
     win.webContents.send("skillEval:updated", { traceId, recordCount })
   }
 }

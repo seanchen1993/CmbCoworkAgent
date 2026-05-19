@@ -1,5 +1,9 @@
 import type { AgentTrace, TraceNode } from "../trace/types"
-import type { SkillEvalCheck, SkillEvalRecord } from "./types"
+import {
+  DEFAULT_SKILL_EVAL_TOOL_BUDGET,
+  type SkillEvalCheck,
+  type SkillEvalRecord
+} from "./types"
 
 const PASS_THRESHOLD = 0.7
 
@@ -54,9 +58,9 @@ function buildChecks(trace: AgentTrace, errorCount: number, toolCalls: number): 
     {
       name: "tool_budget_reasonable",
       label: "工具调用预算合理",
-      ok: toolCalls <= 40,
+      ok: toolCalls <= DEFAULT_SKILL_EVAL_TOOL_BUDGET,
       weight: 1,
-      detail: { totalToolCalls: toolCalls, max: 40 }
+      detail: { totalToolCalls: toolCalls, max: DEFAULT_SKILL_EVAL_TOOL_BUDGET }
     }
   ]
 }
@@ -71,7 +75,9 @@ function buildWarnings(trace: AgentTrace, errorCount: number, toolCalls: number)
   const warnings: string[] = []
   if (trace.outcome !== "success") warnings.push(`任务结果为 ${trace.outcome}`)
   if (errorCount > 0) warnings.push(`检测到 ${errorCount} 个错误节点`)
-  if (toolCalls > 40) warnings.push(`工具调用 ${toolCalls} 次，超过默认预算 40`)
+  if (toolCalls > DEFAULT_SKILL_EVAL_TOOL_BUDGET) {
+    warnings.push(`工具调用 ${toolCalls} 次，超过默认预算 ${DEFAULT_SKILL_EVAL_TOOL_BUDGET}`)
+  }
   return warnings
 }
 

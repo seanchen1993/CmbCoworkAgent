@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs"
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs"
 import { join } from "path"
 import { homedir } from "os"
 import type {
@@ -7,6 +7,10 @@ import type {
   SkillEvalSkillSummary,
   SkillEvalSummary
 } from "./types"
+
+const MAX_SKILL_EVAL_RECORDS = 5000
+const RECORD_COMPACT_THRESHOLD = 5500
+const RECORD_COMPACT_CHECK_BYTES = 1024 * 1024
 
 function getOpenworkDir(): string {
   return process.env.CMB_COWORK_AGENT_HOME || join(homedir(), ".cmbcoworkagent")
@@ -48,12 +52,33 @@ function dedupeRecords(records: SkillEvalRecord[]): SkillEvalRecord[] {
   return [...byId.values()]
 }
 
+function compactEvalFileIfNeeded(): void {
+  const filePath = getEvalFilePath()
+  try {
+    if (statSync(filePath).size < RECORD_COMPACT_CHECK_BYTES) return
+  } catch {
+    return
+  }
+
+  const records = dedupeRecords(readAllRecords())
+  if (records.length <= RECORD_COMPACT_THRESHOLD) return
+
+  const retained = records
+    .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+    .slice(0, MAX_SKILL_EVAL_RECORDS)
+    .sort((a, b) => a.startedAt.localeCompare(b.startedAt))
+
+  const payload = retained.map((record) => JSON.stringify(record)).join("\n")
+  writeFileSync(getEvalFilePath(), payload ? `${payload}\n` : "", "utf-8")
+}
+
 export function appendSkillEvalRecords(records: SkillEvalRecord[]): void {
   if (records.length === 0) return
   try {
     ensureEvalDir()
     const payload = records.map((record) => JSON.stringify(record)).join("\n")
     appendFileSync(getEvalFilePath(), `${payload}\n`, "utf-8")
+    compactEvalFileIfNeeded()
   } catch (error) {
     console.warn("[SkillEval] Failed to append records:", error)
   }

@@ -4,46 +4,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn, formatRelativeTime, truncate } from "@/lib/utils"
-
-interface SkillEvalRecord {
-  id: string
-  traceId: string
-  threadId: string
-  skillName: string
-  skillVersion?: string
-  rawSkillName: string
-  startedAt: string
-  durationMs: number
-  totalToolCalls: number
-  errorCount: number
-  score: number
-  pass: boolean
-  userMessage: string
-  outcome: string
-  checks: Array<{ name: string; label: string; ok: boolean; weight: number; detail?: Record<string, unknown> }>
-  warnings: string[]
-}
-
-interface SkillEvalSummary {
-  totalRuns: number
-  totalSkills: number
-  passRate: number
-  averageScore: number
-  averageToolCalls: number
-  averageDurationMs: number
-  skills: Array<{
-    skillName: string
-    skillVersion?: string
-    runs: number
-    passRate: number
-    averageScore: number
-    averageToolCalls: number
-    averageDurationMs: number
-    failures: number
-    lastRunAt: string
-  }>
-  recent: SkillEvalRecord[]
-}
+import type { SkillEvalRecord, SkillEvalSummary } from "../../../../shared/skill-eval-types"
 
 function pct(value: number): string {
   return `${Math.round(value * 100)}%`
