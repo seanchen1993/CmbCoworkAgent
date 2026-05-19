@@ -12,7 +12,7 @@ import {
 const DEFAULT_TOOL_TOKEN_LIMIT_BEFORE_EVICT = 20_000
 
 export type ReadableFilesystemBackend = {
-  read(
+  readText(
     filePath: string,
     offset?: number,
     limit?: number,
@@ -104,7 +104,7 @@ export function patchRuntimeReadFileTool(params: {
             })
           : filesystemBackend
       const { file_path, offset = 0, limit = READ_FILE_DEFAULT_LIMIT } = input
-      let result = await resolvedBackend.read(file_path, offset, limit, {
+      let result = await resolvedBackend.readText(file_path, offset, limit, {
         maxFormattedContentChars: getReadFileOutputCharLimit(toolTokenLimitBeforeEvict),
         includeLookahead: true
       })

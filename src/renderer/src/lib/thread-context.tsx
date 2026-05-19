@@ -19,6 +19,7 @@ import type {
   FileInfo,
   Subagent,
   HITLRequest,
+  ToolCallState,
   SkillMetadata,
   AgentAutoCommitResult
 } from "@/types"
@@ -134,13 +135,22 @@ export interface HookInterruptionState {
   timestamp: Date
 }
 
+export interface ThreadGitContext {
+  isGitRepo?: boolean
+  isWorktree?: boolean
+  branch?: string | null
+}
+
 // Per-thread state (persisted/restored from checkpoints)
 export interface ThreadState {
   messages: Message[]
   todos: Todo[]
   workspaceFiles: FileInfo[]
   workspacePath: string | null
+  gitContext: ThreadGitContext | null
   subagents: Subagent[]
+  toolCallStates: Record<string, ToolCallState>
+  pendingApprovals: HITLRequest[]
   pendingApproval: HITLRequest | null
   error: string | null
   hookInterruption: HookInterruptionState | null
@@ -180,8 +190,12 @@ export interface ThreadActions {
   setTodos: (todos: Todo[]) => void
   setWorkspaceFiles: (files: FileInfo[] | ((prev: FileInfo[]) => FileInfo[])) => void
   setWorkspacePath: (path: string | null) => void
+  setGitContext: (context: ThreadGitContext | null) => void
   setSubagents: (subagents: Subagent[]) => void
+  setToolCallState: (toolCallId: string, updates: Partial<ToolCallState>) => void
   setPendingApproval: (request: HITLRequest | null) => void
+  enqueuePendingApproval: (request: HITLRequest) => void
+  removePendingApproval: (requestId?: string) => void
   setError: (error: string | null) => void
   clearError: () => void
   clearHookInterruption: () => void
@@ -220,7 +234,10 @@ const createDefaultThreadState = (): ThreadState => ({
   todos: [],
   workspaceFiles: [],
   workspacePath: null,
+  gitContext: null,
   subagents: [],
+  toolCallStates: {},
+  pendingApprovals: [],
   pendingApproval: null,
   error: null,
   hookInterruption: null,
@@ -238,12 +255,205 @@ const createDefaultThreadState = (): ThreadState => ({
   modelRetry: null
 })
 
+/**
+ * 从持久化的 thread metadata 中提取 renderer 可直接消费的 Git context。
+ *
+ * metadata 是数据库里的存储格式，里面既可能有新版 `gitContext` 对象，也可能有旧版
+ * `cached*` 顶层字段。ThreadState 则是 UI 运行时状态，只需要知道：
+ * - 是否是 Git 仓库；
+ * - 是否是 worktree；
+ * - 当前 worktree 分支名。
+ *
+ * 这个函数负责把存储格式归一化成 `ThreadGitContext`，让 GitPanel 首屏可以先展示已有
+ * repo/worktree/branch 信息，而不必等一次 GitPanel meta IPC 返回。
+ */
+function getGitContextFromMetadata(metadata: Record<string, unknown>): ThreadGitContext | null {
+  const workspacePath = typeof metadata.workspacePath === "string" ? metadata.workspacePath : null
+  // 新版结构：Git 探测结果统一收敛在 metadata.gitContext。
+  const gitContext =
+    metadata.gitContext &&
+    typeof metadata.gitContext === "object" &&
+    !Array.isArray(metadata.gitContext)
+      ? (metadata.gitContext as Record<string, unknown>)
+      : null
+  const contextMatchesWorkspace = Boolean(
+    workspacePath &&
+    typeof gitContext?.workspacePath === "string" &&
+    gitContext.workspacePath === workspacePath
+  )
+  const metadataMarkedWorktree = Boolean(metadata.isWorktree)
+
+  if (contextMatchesWorkspace && gitContext) {
+    // 如果 isGitRepo 缺失，但 gitRoot 存在，也可以推断当前 workspace 是 Git 仓库。
+    const isGitRepo =
+      typeof gitContext.isGitRepo === "boolean"
+        ? gitContext.isGitRepo
+        : typeof gitContext.gitRoot === "string" && gitContext.gitRoot
+          ? true
+          : metadataMarkedWorktree
+            ? true
+            : undefined
+    const isWorktree =
+      metadataMarkedWorktree ||
+      (typeof gitContext.isWorktreePath === "boolean" ? gitContext.isWorktreePath : undefined)
+    const branch = typeof metadata.worktreeBranch === "string" ? metadata.worktreeBranch : null
+
+    if (isGitRepo === undefined && isWorktree === undefined && !branch) return null
+    return { isGitRepo, isWorktree, branch }
+  }
+
+  // 兼容旧 metadata：新写入都会使用 metadata.gitContext 对象。
+  const cachedWorkspacePath =
+    typeof metadata.cachedGitContextWorkspacePath === "string"
+      ? metadata.cachedGitContextWorkspacePath
+      : null
+  const cachedMatchesWorkspace = Boolean(
+    workspacePath && cachedWorkspacePath && cachedWorkspacePath === workspacePath
+  )
+  const cachedIsGitRepo =
+    cachedMatchesWorkspace && typeof metadata.cachedIsGitRepo === "boolean"
+      ? metadata.cachedIsGitRepo
+      : undefined
+  const cachedIsWorktree =
+    cachedMatchesWorkspace && typeof metadata.cachedIsWorktreePath === "boolean"
+      ? metadata.cachedIsWorktreePath
+      : undefined
+  const cachedGitRoot =
+    cachedMatchesWorkspace && typeof metadata.cachedGitRoot === "string" && metadata.cachedGitRoot
+      ? metadata.cachedGitRoot
+      : null
+  const branch = typeof metadata.worktreeBranch === "string" ? metadata.worktreeBranch : null
+  const isGitRepo =
+    cachedIsGitRepo ?? (cachedGitRoot ? true : metadataMarkedWorktree ? true : undefined)
+  const isWorktree = metadataMarkedWorktree || cachedIsWorktree
+
+  if (isGitRepo === undefined && isWorktree === undefined && !branch) return null
+  return { isGitRepo, isWorktree, branch }
+}
+
 const defaultStreamData: StreamData = {
   messages: [],
   isLoading: false,
   stream: null
 }
 const EMPTY_HOOK_LOGS: HookLogEntry[] = []
+
+function getPendingApprovalId(request: HITLRequest): string {
+  const approval = request as unknown as Record<string, unknown>
+  const orchestratorRequestId = approval._orchestratorRequestId
+  if (typeof orchestratorRequestId === "string" && orchestratorRequestId.trim()) {
+    return orchestratorRequestId
+  }
+  return request.id
+}
+
+function buildPendingApprovalState(queue: HITLRequest[]): Pick<ThreadState, "pendingApprovals" | "pendingApproval"> {
+  return {
+    pendingApprovals: queue,
+    pendingApproval: queue[0] ?? null
+  }
+}
+
+function enqueuePendingApproval(queue: HITLRequest[], request: HITLRequest): HITLRequest[] {
+  const requestId = getPendingApprovalId(request)
+  const nextQueue = queue.filter((item) => getPendingApprovalId(item) !== requestId)
+  nextQueue.push(request)
+  return nextQueue
+}
+
+function removePendingApproval(queue: HITLRequest[], requestId?: string): HITLRequest[] {
+  if (queue.length === 0) return queue
+  if (!requestId) return queue.slice(1)
+  return queue.filter((item) => getPendingApprovalId(item) !== requestId)
+}
+
+function normalizeThreadState(state: ThreadState): ThreadState {
+  const pendingQueue = Array.isArray(state.pendingApprovals)
+    ? state.pendingApprovals
+    : (state.pendingApproval ? [state.pendingApproval] : [])
+  return {
+    ...state,
+    toolCallStates: state.toolCallStates || {},
+    ...buildPendingApprovalState(pendingQueue)
+  }
+}
+
+function mergeToolCallArgs(
+  existingArgs?: Record<string, unknown>,
+  incomingArgs?: Record<string, unknown>
+): Record<string, unknown> | undefined {
+  if (!existingArgs && !incomingArgs) return undefined
+  return {
+    ...(existingArgs || {}),
+    ...(incomingArgs || {})
+  }
+}
+
+function upsertToolCallState(
+  states: Record<string, ToolCallState>,
+  toolCallId: string | undefined,
+  updates: Partial<ToolCallState>
+): Record<string, ToolCallState> {
+  if (!toolCallId?.trim()) return states
+  const existing = states[toolCallId]
+  return {
+    ...states,
+    [toolCallId]: {
+      id: toolCallId,
+      status: updates.status || existing?.status || "queued",
+      name: updates.name ?? existing?.name,
+      args: mergeToolCallArgs(existing?.args, updates.args),
+      command: updates.command ?? existing?.command,
+      filePath: updates.filePath ?? existing?.filePath,
+      reason: updates.reason ?? existing?.reason,
+      operation: updates.operation ?? existing?.operation,
+      code: updates.code ?? existing?.code,
+      timeoutMs: updates.timeoutMs ?? existing?.timeoutMs,
+      updatedAt: new Date()
+    }
+  }
+}
+
+function upsertToolCallStateFromRequest(
+  states: Record<string, ToolCallState>,
+  request: HITLRequest & Record<string, unknown>,
+  status: ToolCallState["status"] = "awaiting_approval"
+): Record<string, ToolCallState> {
+  const toolCall = request.tool_call
+  if (!toolCall?.id) return states
+
+  const mergedArgs: Record<string, unknown> = {
+    ...(toolCall.args || {})
+  }
+  if (typeof request.command === "string" && !mergedArgs.command) {
+    mergedArgs.command = request.command
+  }
+  if (typeof request.filePath === "string") {
+    if (!mergedArgs.path) mergedArgs.path = request.filePath
+    if (!mergedArgs.file_path) mergedArgs.file_path = request.filePath
+  }
+  if (typeof request.code === "string" && mergedArgs.code === undefined) {
+    mergedArgs.code = request.code
+  }
+  if (request.params !== undefined && mergedArgs.params === undefined) {
+    mergedArgs.params = request.params
+  }
+  if (typeof request.timeoutMs === "number" && mergedArgs.timeoutMs === undefined) {
+    mergedArgs.timeoutMs = request.timeoutMs
+  }
+
+  return upsertToolCallState(states, toolCall.id, {
+    status,
+    name: toolCall.name,
+    args: mergedArgs,
+    command: typeof request.command === "string" ? request.command : undefined,
+    filePath: typeof request.filePath === "string" ? request.filePath : undefined,
+    reason: typeof request.reason === "string" ? request.reason : undefined,
+    operation: typeof request.operation === "string" ? request.operation : undefined,
+    code: typeof request.code === "string" ? request.code : undefined,
+    timeoutMs: typeof request.timeoutMs === "number" ? request.timeoutMs : undefined
+  })
+}
 
 const ThreadContext = createContext<ThreadContextValue | null>(null)
 
@@ -386,6 +596,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   // Stream data store (not React state - we use subscriptions)
   const streamDataRef = useRef<Record<string, StreamData>>({})
   const streamSubscribersRef = useRef<Record<string, Set<() => void>>>({})
+  const allStreamSubscribersRef = useRef<Set<() => void>>(new Set())
 
   // Hook logs store (not React state — avoids re-rendering chat on every hook fire)
   const hookLogsRef = useRef<Record<string, HookLogEntry[]>>({})
@@ -415,6 +626,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     if (subscribers) {
       subscribers.forEach((callback) => callback())
     }
+    allStreamSubscribersRef.current.forEach((callback) => callback())
   }, [])
 
   // Handle stream updates from ThreadStreamHolder
@@ -461,12 +673,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
   const getThreadState = useCallback(
     (threadId: string): ThreadState => {
-      const state = threadStates[threadId] || createDefaultThreadState()
-      if (state.pendingApproval) {
+      const state = normalizeThreadState(threadStates[threadId] || createDefaultThreadState())
+      if (state.pendingApprovals.length > 0) {
         console.log(
-          "[ThreadContext] getThreadState returning pendingApproval for:",
+          "[ThreadContext] getThreadState returning pending approvals for:",
           threadId,
-          state.pendingApproval
+          state.pendingApprovals.length
         )
       }
       return state
@@ -482,14 +694,17 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     return loadingStates
   }, [loadingStates])
 
-  const subscribeToAllStreams = useCallback(() => {
-    return () => {}
+  const subscribeToAllStreams = useCallback((callback: () => void) => {
+    allStreamSubscribersRef.current.add(callback)
+    return () => {
+      allStreamSubscribersRef.current.delete(callback)
+    }
   }, [])
 
   const updateThreadState = useCallback(
     (threadId: string, updater: (prev: ThreadState) => Partial<ThreadState>) => {
       setThreadStates((prev) => {
-        const currentState = prev[threadId] || createDefaultThreadState()
+        const currentState = normalizeThreadState(prev[threadId] || createDefaultThreadState())
         const updates = updater(currentState)
         return {
           ...prev,
@@ -575,7 +790,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               threadId,
               data.request
             )
-            updateThreadState(threadId, () => ({ pendingApproval: data.request }))
+            updateThreadState(threadId, (state) => ({
+              ...buildPendingApprovalState(
+                enqueuePendingApproval(state.pendingApprovals, data.request!)
+              ),
+              toolCallStates: upsertToolCallStateFromRequest(
+                state.toolCallStates,
+                data.request as HITLRequest & Record<string, unknown>
+              )
+            }))
           }
           break
         case "workspace":
@@ -762,20 +985,59 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           }
           updateThreadState(threadId, (state) => {
             const exists = state.messages.some((m) => m.id === message.id)
+            let nextToolCallStates = state.toolCallStates
+            if (Array.isArray(message.tool_calls)) {
+              for (const toolCall of message.tool_calls) {
+                nextToolCallStates = upsertToolCallState(nextToolCallStates, toolCall.id, {
+                  name: toolCall.name,
+                  args: toolCall.args,
+                  status: "queued"
+                })
+              }
+            }
+            if (message.role === "tool" && message.tool_call_id) {
+              nextToolCallStates = upsertToolCallState(nextToolCallStates, message.tool_call_id, {
+                name: message.name,
+                status: message.is_error ? "failed" : "completed"
+              })
+            }
             if (exists) {
               return {
                 messages: state.messages.map((m) => (m.id === message.id ? message : m)),
+                toolCallStates: nextToolCallStates,
                 hookInterruption: message.role === "user" ? null : state.hookInterruption
               }
             }
             return {
               messages: [...state.messages, message],
+              toolCallStates: nextToolCallStates,
               hookInterruption: message.role === "user" ? null : state.hookInterruption
             }
           })
         },
         setMessages: (messages: Message[]) => {
-          updateThreadState(threadId, () => ({ messages }))
+          updateThreadState(threadId, (state) => {
+            const nextToolCallStates = messages.reduce<Record<string, ToolCallState>>((acc, message) => {
+              if (Array.isArray(message.tool_calls)) {
+                for (const toolCall of message.tool_calls) {
+                  acc = upsertToolCallState(acc, toolCall.id, {
+                    name: toolCall.name,
+                    args: toolCall.args,
+                    status: "queued"
+                  })
+                }
+              }
+              if (message.role === "tool" && message.tool_call_id) {
+                acc = upsertToolCallState(acc, message.tool_call_id, {
+                  name: message.name,
+                  status: message.is_error ? "failed" : "completed"
+                })
+              }
+              return acc
+            }, state.toolCallStates)
+
+            return { messages, toolCallStates: nextToolCallStates }
+          })
         },
         setTodos: (todos: Todo[]) => {
           updateThreadState(threadId, () => ({ todos }))
@@ -788,11 +1050,38 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         setWorkspacePath: (path: string | null) => {
           updateThreadState(threadId, () => ({ workspacePath: path }))
         },
+        setGitContext: (context: ThreadGitContext | null) => {
+          updateThreadState(threadId, () => ({ gitContext: context }))
+        },
         setSubagents: (subagents: Subagent[]) => {
           updateThreadState(threadId, () => ({ subagents }))
         },
+        setToolCallState: (toolCallId: string, updates: Partial<ToolCallState>) => {
+          updateThreadState(threadId, (state) => ({
+            toolCallStates: upsertToolCallState(state.toolCallStates, toolCallId, updates)
+          }))
+        },
         setPendingApproval: (request: HITLRequest | null) => {
-          updateThreadState(threadId, () => ({ pendingApproval: request }))
+          updateThreadState(threadId, (state) => ({
+            ...buildPendingApprovalState(request ? [request] : []),
+            ...(request
+              ? { toolCallStates: upsertToolCallStateFromRequest(state.toolCallStates, request as HITLRequest & Record<string, unknown>) }
+              : {})
+          }))
+        },
+        enqueuePendingApproval: (request: HITLRequest) => {
+          updateThreadState(threadId, (state) => ({
+            ...buildPendingApprovalState(enqueuePendingApproval(state.pendingApprovals, request)),
+            toolCallStates: upsertToolCallStateFromRequest(
+              state.toolCallStates,
+              request as HITLRequest & Record<string, unknown>
+            )
+          }))
+        },
+        removePendingApproval: (requestId?: string) => {
+          updateThreadState(threadId, (state) =>
+            buildPendingApprovalState(removePendingApproval(state.pendingApprovals, requestId))
+          )
         },
         setError: (error: string | null) => {
           updateThreadState(threadId, () => ({ error }))
@@ -878,6 +1167,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           persistedMessageTimes = getMessageTimeMap(thread.thread_values)
           persistedMessageTimeOrder = getMessageTimeOrder(thread.thread_values)
           const metadata = thread.metadata || {}
+          actions.setGitContext(getGitContextFromMetadata(metadata))
           if (metadata.workspacePath) {
             actions.setWorkspacePath(metadata.workspacePath as string)
             const diskResult = await window.api.workspace.loadFromDisk(threadId)
@@ -1131,12 +1421,37 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             tool_calls?: unknown[]
             tool_call_id?: string
             name?: string
+            is_error?: boolean
           }>
+          const nextToolCallStates = msgs.reduce<Record<string, ToolCallState>>((acc, msg) => {
+            if (Array.isArray(msg.tool_calls)) {
+              for (const toolCall of msg.tool_calls as Array<{
+                id?: string
+                name?: string
+                args?: Record<string, unknown>
+              }>) {
+                if (!toolCall.id) continue
+                acc = upsertToolCallState(acc, toolCall.id, {
+                  name: toolCall.name,
+                  args: toolCall.args,
+                  status: "queued"
+                })
+              }
+            }
+            if (msg.role === "tool" && msg.tool_call_id) {
+              acc = upsertToolCallState(acc, msg.tool_call_id, {
+                name: msg.name,
+                status: msg.is_error ? "failed" : "completed"
+              })
+            }
+            return acc
+          }, {})
           updateThreadState(threadId, () => ({
             messages: msgs.map((m) => {
               const now = new Date()
               return { ...m, created_at: now, start_at: now, end_at: now } as Message
-            })
+            }),
+            toolCallStates: nextToolCallStates
           }))
           break
         }
@@ -1179,6 +1494,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           }
           const finalContent = tracker.accumulatedContent
           updateThreadState(threadId, (prev) => {
+            const nextToolCallStates = (toolCalls || []).reduce<Record<string, ToolCallState>>(
+              (acc, toolCall) =>
+                upsertToolCallState(acc, toolCall.id, {
+                  name: toolCall.name,
+                  args: toolCall.args,
+                  status: "queued"
+                }),
+              prev.toolCallStates
+            )
             const idx = prev.messages.findIndex((m) => m.id === id)
             // Defensive clear: any real assistant token means data is flowing
             // again, so a stale retry indicator must disappear.
@@ -1191,11 +1515,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 ...(toolCalls?.length && { tool_calls: toolCalls }),
                 end_at: new Date()
               }
-              return { ...clearRetry, messages: updated }
+              return { ...clearRetry, messages: updated, toolCallStates: nextToolCallStates }
             }
             const now = new Date()
             return {
               ...clearRetry,
+              toolCallStates: nextToolCallStates,
               messages: [
                 ...prev.messages,
                 {
@@ -1219,10 +1544,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           const content = event.content as string
           const toolCallId = event.toolCallId as string
           const name = event.name as string | undefined
+          const isError = event.isError as boolean | undefined
           const now = new Date()
           updateThreadState(threadId, (prev) => {
             if (prev.messages.some((m) => m.id === id)) return {}
             return {
+              toolCallStates: upsertToolCallState(prev.toolCallStates, toolCallId, {
+                name,
+                status: isError ? "failed" : "completed"
+              }),
               messages: [
                 ...prev.messages,
                 {
@@ -1231,6 +1561,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   content,
                   tool_call_id: toolCallId,
                   name,
+                  is_error: isError,
                   created_at: now,
                   start_at: now,
                   end_at: now
@@ -1277,14 +1608,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       const cleanupApproval = window.api.sandbox.onApprovalRequest(threadId, (request: unknown) => {
         console.log(`[ThreadProvider] Approval request for thread ${threadId}:`, request)
         const req = request as Record<string, unknown>
-        updateThreadState(threadId, () => ({
-          pendingApproval: {
+        updateThreadState(threadId, (state) => {
+          const approvalRequest = {
             id: (req.id as string) || "",
-            tool_call: (req.tool_call as {
-              id: string
-              name: string
-              args: Record<string, unknown>
-            }) || { id: "", name: "execute", args: {} },
+            tool_call:
+              (req.tool_call as { id: string; name: string; args: Record<string, unknown> }) || {
+                id: "",
+                name: "execute",
+                args: {}
+              },
             allowed_decisions: ["approve", "reject"],
             command: req.command,
             reason: req.reason,
@@ -1300,8 +1632,18 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             _orchestratorRequestId: req.id,
             _retryReason: req.retry_reason,
             _approvalTypes: req.allowed_approval_types
-          } as any
-        }))
+          } as HITLRequest & Record<string, unknown>
+
+          return {
+            ...buildPendingApprovalState(
+              enqueuePendingApproval(state.pendingApprovals, approvalRequest)
+            ),
+            toolCallStates: upsertToolCallStateFromRequest(
+              state.toolCallStates,
+              approvalRequest
+            )
+          }
+        })
         // Auto-switch to this thread so the approval UI is visible
         const currentId = useAppStore.getState().currentThreadId
         if (currentId !== threadId) {
@@ -1310,10 +1652,24 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         }
       })
       const cleanupTimeout = window.api.sandbox.onApprovalTimeout(threadId, (data) => {
-        console.warn(
-          `[ThreadProvider] Approval timed out for thread ${threadId}: requestId=${data.requestId}`
-        )
-        updateThreadState(threadId, () => ({ pendingApproval: null }))
+        console.warn(`[ThreadProvider] Approval timed out for thread ${threadId}: requestId=${data.requestId}`)
+        updateThreadState(threadId, (state) => {
+          const timedOutApproval = state.pendingApprovals.find(
+            (approval) => getPendingApprovalId(approval) === data.requestId
+          )
+          return {
+            ...buildPendingApprovalState(removePendingApproval(state.pendingApprovals, data.requestId)),
+            ...(timedOutApproval?.tool_call?.id
+              ? {
+                  toolCallStates: upsertToolCallState(
+                    state.toolCallStates,
+                    timedOutApproval.tool_call.id,
+                    { status: "interrupted" }
+                  )
+                }
+              : {})
+          }
+        })
       })
       approvalListenerCleanups.current[threadId] = [cleanupApproval, cleanupTimeout]
     },
@@ -1452,5 +1808,9 @@ export function useAllThreadStates(): Record<string, ThreadState> {
 // Hook to get all stream loading states with reactivity
 export function useAllStreamLoadingStates(): Record<string, boolean> {
   const context = useThreadContext()
-  return context.getAllStreamLoadingStates()
+  return useSyncExternalStore(
+    context.subscribeToAllStreams,
+    context.getAllStreamLoadingStates,
+    context.getAllStreamLoadingStates
+  )
 }

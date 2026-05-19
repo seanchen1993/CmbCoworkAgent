@@ -1,4 +1,4 @@
-import { IpcMain, dialog, app, BrowserWindow } from "electron"
+import { IpcMain, dialog, app, BrowserWindow, type MessageBoxOptions } from "electron"
 import Store from "electron-store"
 import { randomUUID } from "crypto"
 import * as fs from "fs/promises"
@@ -6,6 +6,7 @@ import { existsSync } from "fs"
 import * as path from "path"
 import { execFile } from "child_process"
 import { promisify } from "util"
+import { getWindowsSandboxMode } from "../storage"
 import type {
   ModelConfig,
   Provider,
@@ -13,6 +14,7 @@ import type {
   WorkspaceLoadParams,
   WorkspaceFileParams
 } from "../types"
+import { LocalSandbox } from "../agent/local-sandbox"
 import { startWatching, stopWatching } from "../services/workspace-watcher"
 import { trackEvent } from "../services/event-reporter"
 import { captureStagedSnapshotsForCommit, measureForCommit } from "../services/adoption-tracker"
@@ -124,6 +126,63 @@ interface FileHistorySnapshot {
   exists: boolean
   content: string | null
   ts: string
+}
+
+async function prepareWorkspaceSelectionSandbox(
+  workspacePath: string,
+  parentWindow?: BrowserWindow | null
+): Promise<boolean> {
+  if (!workspacePath || process.platform !== "win32") return true
+
+  LocalSandbox.prewarmForWorkspace(workspacePath)
+  try {
+    const result = await LocalSandbox.prepareWorkspaceForSelection(workspacePath)
+    if (result.ready || !result.error) return true
+    if (getWindowsSandboxMode() !== "elevated") return true
+
+    const isWorkspacePathRestricted =
+      result.reason === "system-sensitive-path" || result.reason === "invalid-workspace-path"
+    const messageBoxOptions: MessageBoxOptions = isWorkspacePathRestricted
+      ? {
+          type: "warning",
+          title: "Elevated 工作区受限",
+          message: "Elevated 模式可以读取系统目录，也可能执行不涉及写入的命令；但当前模式需要为工作区准备写入权限，不支持将系统敏感目录作为工作区。",
+          detail: result.error,
+          buttons: ["知道了"],
+          defaultId: 0
+        }
+      : {
+          type: "warning",
+          title: "Elevated 沙箱配置未完成",
+          message: "工作区尚未切换，因为 Elevated 沙箱配置未完成。",
+          detail: `${result.error}\n\n请在设置中手动完成 Elevated 配置，或切换到 unelevated / none 后重试。`,
+          buttons: ["知道了"],
+          defaultId: 0
+        }
+
+    if (parentWindow && !parentWindow.isDestroyed()) {
+      await dialog.showMessageBox(parentWindow, messageBoxOptions)
+    } else {
+      await dialog.showMessageBox(messageBoxOptions)
+    }
+    return false
+  } catch (err) {
+    console.warn("[Workspace] elevated sandbox workspace preparation failed:", err)
+    const messageBoxOptions: MessageBoxOptions = {
+      type: "warning",
+      title: "Elevated 沙箱配置未完成",
+      message: "工作区尚未切换，因为 Elevated 沙箱准备失败。",
+      detail: `${err instanceof Error ? err.message : String(err)}\n\n请在设置中手动完成 Elevated 配置，或切换到 unelevated / none 后重试。`,
+      buttons: ["知道了"],
+      defaultId: 0
+    }
+    if (parentWindow && !parentWindow.isDestroyed()) {
+      await dialog.showMessageBox(parentWindow, messageBoxOptions)
+    } else {
+      await dialog.showMessageBox(messageBoxOptions)
+    }
+    return false
+  }
 }
 
 type PushStepStatus = "ok" | "failed" | "skipped"
@@ -526,7 +585,15 @@ type ThreadGitContextCache = {
   gitRoot: string | null
 }
 
+/**
+ * 清理线程 metadata 中的 Git 探测缓存。
+ *
+ * 新版缓存统一放在 `metadata.gitContext` 对象里；旧版曾经把同一组信息拆成
+ * `cachedIsGitRepo` / `cachedIsWorktreePath` / `cachedGitRoot` 等多个顶层字段。
+ * 这里同时删除新旧字段，确保工作区切换、worktree context 清理等场景不会留下过期状态。
+ */
 function clearThreadGitContextCache(metadata: Record<string, unknown>): void {
+  delete metadata.gitContext
   delete metadata.cachedIsGitRepo
   delete metadata.cachedIsWorktreePath
   delete metadata.cachedGitRoot
@@ -534,26 +601,91 @@ function clearThreadGitContextCache(metadata: Record<string, unknown>): void {
   delete metadata.cachedGitContextAt
 }
 
+/**
+ * 写入线程级 Git context 缓存。
+ *
+ * 该缓存记录“某个 workspacePath 最近一次 Git 探测的结果”，包括：
+ * - 当前路径是否是 Git 仓库；
+ * - 当前路径是否是 worktree；
+ * - 对应的 git root。
+ *
+ * GitPanel、WorkspacePicker 等入口会频繁需要这些信息。把它们写入 metadata 后，进入同一
+ * thread 时可以先用缓存渲染 UI，再由后台刷新补齐实时状态。
+ */
 function writeThreadGitContextCache(
   metadata: Record<string, unknown>,
   payload: { workspacePath: string; isGitRepo: boolean; isWorktreePath: boolean; gitRoot: string | null }
 ): void {
-  metadata.cachedGitContextWorkspacePath = payload.workspacePath
-  metadata.cachedGitContextAt = new Date().toISOString()
-  metadata.cachedIsGitRepo = payload.isGitRepo
-  metadata.cachedIsWorktreePath = payload.isWorktreePath
-  if (payload.gitRoot) {
-    metadata.cachedGitRoot = payload.gitRoot
-  } else {
-    delete metadata.cachedGitRoot
+  // 写入前先清掉新旧缓存字段，避免 metadata 同时存在两套 Git context 表达。
+  clearThreadGitContextCache(metadata)
+  metadata.gitContext = {
+    workspacePath: payload.workspacePath,
+    checkedAt: new Date().toISOString(),
+    isGitRepo: payload.isGitRepo,
+    isWorktreePath: payload.isWorktreePath,
+    gitRoot: payload.gitRoot
   }
 }
 
+/**
+ * 读取线程级 Git context 缓存。
+ *
+ * 返回值只代表“可复用的探测结果”，因此会做三层校验：
+ * - 必须和当前 workspacePath 匹配；
+ * - 必须在 TTL 内，避免长期使用陈旧仓库状态；
+ * - 至少包含 isGitRepo / isWorktreePath / gitRoot 中的一项有效信息。
+ *
+ * 读取顺序是新版 `metadata.gitContext` 优先，旧版 `cached*` 顶层字段作为兼容 fallback。
+ */
 function readThreadGitContextCache(
   metadata: Record<string, unknown>,
   workspacePath: string | null
 ): ThreadGitContextCache | null {
   if (!workspacePath) return null
+  // 优先读取新版结构：所有 Git 探测结果都收敛在 metadata.gitContext 中。
+  const gitContext =
+    metadata.gitContext && typeof metadata.gitContext === "object" && !Array.isArray(metadata.gitContext)
+      ? (metadata.gitContext as Record<string, unknown>)
+      : null
+  if (gitContext) {
+    // 缓存必须属于当前 workspacePath。路径不一致说明线程后来切换过工作区，不能复用。
+    const contextWorkspacePath =
+      typeof gitContext.workspacePath === "string" ? gitContext.workspacePath : null
+    if (!contextWorkspacePath || contextWorkspacePath !== workspacePath) {
+      return null
+    }
+
+    // Git context 是探测结果缓存，只用于减少短时间内的重复 rev-parse/worktree 查询。
+    const checkedAtRaw =
+      typeof gitContext.checkedAt === "string" ? Date.parse(gitContext.checkedAt) : Number.NaN
+    if (!Number.isFinite(checkedAtRaw)) {
+      return null
+    }
+    if (Date.now() - checkedAtRaw > THREAD_GIT_CONTEXT_CACHE_TTL_MS) {
+      return null
+    }
+
+    // 字段级别做宽松读取：老数据或手工编辑 metadata 时，缺字段也不会抛错。
+    const isGitRepo = typeof gitContext.isGitRepo === "boolean" ? gitContext.isGitRepo : null
+    const isWorktreePath =
+      typeof gitContext.isWorktreePath === "boolean" ? gitContext.isWorktreePath : null
+    const gitRoot =
+      typeof gitContext.gitRoot === "string" && gitContext.gitRoot.trim()
+        ? gitContext.gitRoot
+        : null
+
+    if (isGitRepo === null && isWorktreePath === null && !gitRoot) {
+      return null
+    }
+
+    return {
+      isGitRepo: isGitRepo ?? Boolean(gitRoot),
+      isWorktreePath: isWorktreePath ?? false,
+      gitRoot
+    }
+  }
+
+  // 兼容旧 metadata：新写入都会使用 metadata.gitContext 对象。
   const cachedWorkspacePath =
     typeof metadata.cachedGitContextWorkspacePath === "string"
       ? metadata.cachedGitContextWorkspacePath
@@ -1876,10 +2008,13 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   // Set workspace path for a thread (stores in thread metadata)
   ipcMain.handle(
     "workspace:set",
-    async (_event, { threadId, path: newPath }: WorkspaceSetParams) => {
+    async (event, { threadId, path: newPath }: WorkspaceSetParams) => {
+      const parentWindow = BrowserWindow.fromWebContents(event.sender)
       if (!threadId) {
         // Fallback to global setting
         if (newPath) {
+          const ready = await prepareWorkspaceSelectionSandbox(newPath, parentWindow)
+          if (!ready) return null
           store.set("workspacePath", newPath)
         } else {
           store.delete("workspacePath")
@@ -1891,17 +2026,23 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       const thread = getThread(threadId)
       if (!thread) return null
 
-      const metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
-      metadata.workspacePath = newPath
-      clearThreadGitContextCache(metadata)
-      updateThread(threadId, { metadata: JSON.stringify(metadata) })
-
-      // Update file watcher
       if (newPath) {
+        const ready = await prepareWorkspaceSelectionSandbox(newPath, parentWindow)
+        if (!ready) return null
+
+        const metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
+        metadata.workspacePath = newPath
+        clearThreadGitContextCache(metadata)
+        updateThread(threadId, { metadata: JSON.stringify(metadata) })
+
         startWatching(threadId, newPath)
         // 同步刷新“最近工作区”，供新建线程默认复用。
         store.set("workspacePath", newPath)
       } else {
+        const metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
+        metadata.workspacePath = newPath
+        clearThreadGitContextCache(metadata)
+        updateThread(threadId, { metadata: JSON.stringify(metadata) })
         stopWatching(threadId)
       }
 
@@ -1910,7 +2051,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   )
 
   // Select workspace folder via dialog (for a specific thread)
-  ipcMain.handle("workspace:select", async (_event, threadId?: string) => {
+  ipcMain.handle("workspace:select", async (event, threadId?: string) => {
+    const parentWindow = BrowserWindow.fromWebContents(event.sender)
     // 选择器默认路径优先级：
     // 1) 当前线程已绑定的 workspacePath
     // 2) 全局记录的最近 workspacePath
@@ -1942,8 +2084,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
     const result = await dialog.showOpenDialog({
       properties: ["openDirectory", "createDirectory"],
-      title: "Select Workspace Folder",
-      message: "Choose a folder for the agent to work in",
+      title: "选择工作区文件夹",
+      message: "请选择代理要工作的文件夹",
       defaultPath
     })
 
@@ -1952,6 +2094,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     }
 
     const selectedPath = result.filePaths[0]
+    const ready = await prepareWorkspaceSelectionSandbox(selectedPath, parentWindow)
+    if (!ready) return null
 
     if (threadId) {
       const { getThread, updateThread } = await import("../db")

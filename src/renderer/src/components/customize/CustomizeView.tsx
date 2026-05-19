@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { lazy, Suspense, useEffect, useState } from "react"
 import {
   ArrowLeft,
   Brain,
@@ -9,6 +9,7 @@ import {
   GitBranch,
   GitCommit,
   HeartPulse,
+  Loader2,
   Plug,
   Puzzle,
   Sparkles,
@@ -16,6 +17,7 @@ import {
   Shield,
   Cpu,
   CircleUser,
+  PawPrint,
   Webhook,
   Wrench,
   type LucideIcon
@@ -23,21 +25,51 @@ import {
 import { Button } from "@/components/ui/button"
 import { useAppStore } from "@/lib/store"
 import { cn } from "@/lib/utils"
-import { SkillsPanel } from "./SkillsPanel"
-import { McpPanel } from "./McpPanel"
-import { ScheduledPanel } from "./ScheduledPanel"
-import { MemoryPanel } from "./MemoryPanel"
-import { HeartbeatPanel } from "./HeartbeatPanel"
-import { PluginsPanel } from "./PluginsPanel"
-import { MarketPanel } from "./MarketPanel"
-import { SandboxPanel } from "./SandboxPanel"
-import { EvolutionPanel } from "./EvolutionPanel"
-import { ChatXPanel } from "./ChatXPanel"
-import { UserInfoPanel } from "./UserInfoPanel"
-import { HooksPanel } from "./HooksPanel"
-import { LspPanel } from "./LspPanel"
-import { CodeExecToolsPanel } from "./CodeExecToolsPanel"
-import { CommitPolicyPanel } from "./CommitPolicyPanel"
+
+const SkillsPanel = lazy(() =>
+  import("./SkillsPanel").then((m) => ({ default: m.SkillsPanel }))
+)
+const McpPanel = lazy(() => import("./McpPanel").then((m) => ({ default: m.McpPanel })))
+const ScheduledPanel = lazy(() =>
+  import("./ScheduledPanel").then((m) => ({ default: m.ScheduledPanel }))
+)
+const MemoryPanel = lazy(() =>
+  import("./MemoryPanel").then((m) => ({ default: m.MemoryPanel }))
+)
+const HeartbeatPanel = lazy(() =>
+  import("./HeartbeatPanel").then((m) => ({ default: m.HeartbeatPanel }))
+)
+const PluginsPanel = lazy(() =>
+  import("./PluginsPanel").then((m) => ({ default: m.PluginsPanel }))
+)
+const MarketPanel = lazy(() =>
+  import("./MarketPanel").then((m) => ({ default: m.MarketPanel }))
+)
+const SandboxPanel = lazy(() =>
+  import("./SandboxPanel").then((m) => ({ default: m.SandboxPanel }))
+)
+const EvolutionPanel = lazy(() =>
+  import("./EvolutionPanel").then((m) => ({ default: m.EvolutionPanel }))
+)
+const ChatXPanel = lazy(() =>
+  import("./ChatXPanel").then((m) => ({ default: m.ChatXPanel }))
+)
+const UserInfoPanel = lazy(() =>
+  import("./UserInfoPanel").then((m) => ({ default: m.UserInfoPanel }))
+)
+const HooksPanel = lazy(() =>
+  import("./HooksPanel").then((m) => ({ default: m.HooksPanel }))
+)
+const LspPanel = lazy(() => import("./LspPanel").then((m) => ({ default: m.LspPanel })))
+const CodeExecToolsPanel = lazy(() =>
+  import("./CodeExecToolsPanel").then((m) => ({ default: m.CodeExecToolsPanel }))
+)
+const CommitPolicyPanel = lazy(() =>
+  import("./CommitPolicyPanel").then((m) => ({ default: m.CommitPolicyPanel }))
+)
+const PetPanel = lazy(() =>
+  import("./PetPanel").then((m) => ({ default: m.PetPanel }))
+)
 
 type CustomizeTab =
   | "skills"
@@ -51,6 +83,7 @@ type CustomizeTab =
   | "evolution"
   | "chatx"
   | "userinfo"
+  | "pet"
   | "hooks"
   | "lsp"
   | "codeExecTools"
@@ -102,9 +135,35 @@ const MENU_GROUPS: MenuGroup[] = [
   {
     id: "profile",
     label: "个人信息",
-    items: [{ tab: "userinfo", label: "个人信息", icon: CircleUser }]
+    items: [
+      { tab: "userinfo", label: "个人信息", icon: CircleUser },
+      { tab: "pet", label: "宠物", icon: PawPrint }
+    ]
   }
 ]
+
+function CustomizePanelFallback(): React.JSX.Element {
+  return (
+    <div className="flex flex-1 items-center justify-center p-8">
+      <div className="w-full max-w-sm space-y-4">
+        <div className="flex items-center gap-3">
+          <div className="flex size-9 items-center justify-center rounded-md border border-border bg-muted/40">
+            <Loader2 className="size-4 animate-spin text-primary" />
+          </div>
+          <div className="min-w-0 space-y-1">
+            <p className="text-sm font-medium text-foreground">正在加载配置面板</p>
+            <p className="text-xs text-muted-foreground">首次打开会稍等片刻</p>
+          </div>
+        </div>
+        <div className="space-y-2 rounded-lg border border-border/70 bg-background/70 p-3">
+          <div className="h-3 w-2/3 animate-pulse rounded bg-muted" />
+          <div className="h-3 w-full animate-pulse rounded bg-muted" />
+          <div className="h-3 w-5/6 animate-pulse rounded bg-muted" />
+        </div>
+      </div>
+    </div>
+  )
+}
 
 export function CustomizeView(): React.JSX.Element {
   const {
@@ -220,41 +279,45 @@ export function CustomizeView(): React.JSX.Element {
         </nav>
       </div>
 
-      {activeTab === "skills" ? (
-        <SkillsPanel />
-      ) : activeTab === "connectors" ? (
-        <McpPanel />
-      ) : activeTab === "plugins" ? (
-        <PluginsPanel />
-      ) : activeTab === "scheduled" ? (
-        <ScheduledPanel />
-      ) : activeTab === "heartbeat" ? (
-        <HeartbeatPanel />
-      ) : activeTab === "memory" ? (
-        <MemoryPanel />
-      ) : activeTab === "market" ? (
-        <MarketPanel />
-      ) : activeTab === "evolution" ? (
-        <EvolutionPanel />
-      ) : activeTab === "chatx" ? (
-        <ChatXPanel />
-      ) : activeTab === "lsp" ? (
-        <LspPanel threadId={currentThreadId} />
-      ) : activeTab === "sandbox" ? (
-        <SandboxPanel />
-      ) : activeTab === "userinfo" ? (
-        <UserInfoPanel />
-      ) : activeTab === "hooks" ? (
-        <div className="flex flex-1 overflow-hidden">
-          <HooksPanel />
-        </div>
-      ) : activeTab === "codeExecTools" ? (
-        <div className="flex flex-1 overflow-hidden">
-          <CodeExecToolsPanel />
-        </div>
-      ) : activeTab === "commitPolicy" ? (
-        <CommitPolicyPanel />
-      ) : null}
+      <Suspense fallback={<CustomizePanelFallback />}>
+        {activeTab === "skills" ? (
+          <SkillsPanel />
+        ) : activeTab === "connectors" ? (
+          <McpPanel />
+        ) : activeTab === "plugins" ? (
+          <PluginsPanel />
+        ) : activeTab === "scheduled" ? (
+          <ScheduledPanel />
+        ) : activeTab === "heartbeat" ? (
+          <HeartbeatPanel />
+        ) : activeTab === "memory" ? (
+          <MemoryPanel />
+        ) : activeTab === "market" ? (
+          <MarketPanel />
+        ) : activeTab === "evolution" ? (
+          <EvolutionPanel />
+        ) : activeTab === "chatx" ? (
+          <ChatXPanel />
+        ) : activeTab === "lsp" ? (
+          <LspPanel threadId={currentThreadId} />
+        ) : activeTab === "sandbox" ? (
+          <SandboxPanel />
+        ) : activeTab === "userinfo" ? (
+          <UserInfoPanel />
+        ) : activeTab === "hooks" ? (
+          <div className="flex flex-1 overflow-hidden">
+            <HooksPanel />
+          </div>
+        ) : activeTab === "codeExecTools" ? (
+          <div className="flex flex-1 overflow-hidden">
+            <CodeExecToolsPanel />
+          </div>
+        ) : activeTab === "commitPolicy" ? (
+          <CommitPolicyPanel />
+        )  : activeTab === "pet" ? (
+          <PetPanel />
+        ) : null}
+      </Suspense>
     </div>
   )
 }

@@ -1,16 +1,13 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from "react"
 import {
   Plus,
-  MessageSquare,
   Trash2,
   Pencil,
   Loader2,
   AlertCircle,
   Briefcase,
-  HeartPulse,
   LayoutDashboard,
   Cpu,
-  Radio,
   Terminal,
   BarChart3,
   Palette,
@@ -19,8 +16,10 @@ import {
   FolderOpen,
   Maximize2,
   Minimize2,
-  FolderPlus
+  FolderPlus,
+  Download
 } from "lucide-react"
+import { toast } from "sonner"
 import type { ChatXRobotConfig } from "@/types"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -139,22 +138,26 @@ function ThreadListItem({
   editingTitle,
   onSelect,
   onDelete,
+  onExport,
   onRunFinished,
   onStartEditing,
   onSaveTitle,
   onCancelEditing,
-  onEditingTitleChange
+  onEditingTitleChange,
+  isExporting
 }: {
   thread: Thread
   isLoading: boolean
   hasPendingApproval: boolean
   scheduledTaskLoading: boolean
+  isExporting: boolean
   isSelected: boolean
   isEditing: boolean
   isUnread: boolean
   editingTitle: string
   onSelect: () => void
   onDelete: () => void
+  onExport: () => void
   onRunFinished: () => void
   onStartEditing: () => void
   onSaveTitle: () => void
@@ -276,6 +279,14 @@ function ThreadListItem({
           <Pencil className="size-4 mr-2" />
           重命名
         </ContextMenuItem>
+        <ContextMenuItem onClick={onExport} disabled={isRunning || isExporting}>
+          {isExporting ? (
+            <Loader2 className="size-4 mr-2 animate-spin" />
+          ) : (
+            <Download className="size-4 mr-2" />
+          )}
+          {isRunning ? "运行中，无法导出" : isExporting ? "正在导出" : "导出会话"}
+        </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem variant="destructive" onClick={onDelete} disabled={isRunning}>
           <Trash2 className="size-4 mr-2" />
@@ -348,6 +359,7 @@ export function ThreadSidebar(): React.JSX.Element {
   const [hoveredProjectKey, setHoveredProjectKey] = useState<string | null>(null)
   const [selectingProjectFolder, setSelectingProjectFolder] = useState(false)
   const [threadToDelete, setThreadToDelete] = useState<Thread | null>(null)
+  const [exportingThreadId, setExportingThreadId] = useState<string | null>(null)
   const [projectToDelete, setProjectToDelete] = useState<ThreadProject | null>(null)
 
   const persistUnread = useCallback((ids: Set<string>) => {
@@ -567,6 +579,27 @@ export function ThreadSidebar(): React.JSX.Element {
     markRead(threadToDelete.thread_id)
     setThreadToDelete(null)
   }, [cleanupThread, deleteThread, markRead, threadToDelete])
+
+  const handleExportThread = useCallback(
+    async (thread: Thread): Promise<void> => {
+      if (exportingThreadId) return
+      setExportingThreadId(thread.thread_id)
+      try {
+        const result = await window.api.threads.exportSession(thread.thread_id)
+        if (result.canceled) return
+        if (result.success) {
+          toast.success("会话已导出")
+          return
+        }
+        toast.error(result.error || "导出会话失败")
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "导出会话失败")
+      } finally {
+        setExportingThreadId(null)
+      }
+    },
+    [exportingThreadId]
+  )
 
   const confirmDeleteProject = useCallback(async () => {
     if (!projectToDelete) return
@@ -883,6 +916,7 @@ export function ThreadSidebar(): React.JSX.Element {
                           isLoading={isLoading}
                           hasPendingApproval={hasPendingApproval}
                           scheduledTaskLoading={scheduledTaskLoading}
+                          isExporting={exportingThreadId === thread.thread_id}
                           isSelected={currentThreadId === thread.thread_id}
                           isEditing={editingThreadId === thread.thread_id}
                           isUnread={unreadIds.has(thread.thread_id)}
@@ -893,6 +927,7 @@ export function ThreadSidebar(): React.JSX.Element {
                           }}
                           onRunFinished={() => handleRunFinished(thread.thread_id)}
                           onDelete={() => setThreadToDelete(thread)}
+                          onExport={() => handleExportThread(thread)}
                           onStartEditing={() => startEditing(thread.thread_id, thread.title || "")}
                           onSaveTitle={saveTitle}
                           onCancelEditing={cancelEditing}
@@ -953,7 +988,7 @@ export function ThreadSidebar(): React.JSX.Element {
           <span className="text-[9px] text-foreground/25 ml-1 tabular-nums">
             {version || __APP_VERSION__}
           </span>
-          <UpdateActionButton variant="tag" hideWhenCurrent className="ml-1" />
+          <UpdateActionButton variant="tag" className="ml-1" />
         </div>
       </div>
       <Dialog open={!!threadToDelete} onOpenChange={(open) => !open && setThreadToDelete(null)}>
