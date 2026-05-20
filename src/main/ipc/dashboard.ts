@@ -626,7 +626,10 @@ function normalizeSkillList(skills: string[]): string[] {
   return Array.from(new Set(skills.map((skill) => skill.trim()).filter(Boolean)))
 }
 
-async function fetchCommitAdoptionMap(commitShas: string[]): Promise<Map<string, CommitAdoptionSummary>> {
+async function fetchCommitAdoptionMap(
+  commitShas: string[],
+  range: TimeRange
+): Promise<Map<string, CommitAdoptionSummary>> {
   const normalizedCommitShas = normalizeSkillList(commitShas).slice(0, 100)
   if (normalizedCommitShas.length === 0) return new Map()
 
@@ -639,6 +642,7 @@ async function fetchCommitAdoptionMap(commitShas: string[]): Promise<Map<string,
           { exists: { field: "properties.adoptedLineCount" } },
           { exists: { field: "properties.generatedLineCount" } },
           { exists: { field: "properties.effectiveGeneratedLineCount" } },
+          timeRangeFilter("properties.generatedAt", range),
           { terms: { "properties.commitSha": normalizedCommitShas } }
         ]
       }
@@ -1667,7 +1671,8 @@ async function fetchCommitDetails(
   const hits = raw.hits?.hits ?? []
   const items = hits.map(normalizeCommitDetail)
   const adoptionMap = await fetchCommitAdoptionMap(
-    items.map((item) => item.commitSha ?? "").filter(Boolean)
+    items.map((item) => item.commitSha ?? "").filter(Boolean),
+    range
   )
   return {
     total: getTotalHits(raw, hits.length),
