@@ -163,6 +163,8 @@ interface DashboardSkillEvalOptions {
   limit?: number
   recentPage?: number
   recentPageSize?: number
+  skillName?: string
+  skillVersion?: string
 }
 
 interface DashboardCodeStats {

@@ -405,6 +405,8 @@ export interface DashboardSkillEvalSummary {
 export interface DashboardSkillEvalOptions {
   recentPage?: number
   recentPageSize?: number
+  skillName?: string
+  skillVersion?: string
 }
 
 const SKILL_EVAL_RECENT_PAGE_SIZE = 10
@@ -1234,7 +1236,9 @@ async function loadSkillEvalSummarySafely(
     return await window.api.dashboard.skillEvalSummary(range, {
       limit: 500,
       recentPage: options.recentPage ?? 1,
-      recentPageSize: options.recentPageSize ?? SKILL_EVAL_RECENT_PAGE_SIZE
+      recentPageSize: options.recentPageSize ?? SKILL_EVAL_RECENT_PAGE_SIZE,
+      ...(options.skillName ? { skillName: options.skillName } : {}),
+      ...(options.skillVersion ? { skillVersion: options.skillVersion } : {})
     })
   } catch (error) {
     console.warn("[Dashboard] skillEvalSummary unavailable, using empty data:", error)
@@ -1332,7 +1336,10 @@ export function useDashboard() {
     }
   }, [])
 
-  const fetchSkillEvalPage = useCallback(async (page: number) => {
+  const fetchSkillEvalPage = useCallback(async (page: number, filter?: {
+    skillName?: string
+    skillVersion?: string
+  }) => {
     const id = ++skillEvalFetchIdRef.current
     setSkillEvalLoading(true)
     setError(null)
@@ -1340,7 +1347,9 @@ export function useDashboard() {
     try {
       const result = await loadSkillEvalSummarySafely(range, {
         recentPage: page,
-        recentPageSize: SKILL_EVAL_RECENT_PAGE_SIZE
+        recentPageSize: SKILL_EVAL_RECENT_PAGE_SIZE,
+        ...(filter?.skillName ? { skillName: filter.skillName } : {}),
+        ...(filter?.skillVersion ? { skillVersion: filter.skillVersion } : {})
       })
       if (id !== skillEvalFetchIdRef.current) return
       if (!result.success) throw new Error(result.error ?? "获取 Skill 评估数据失败")

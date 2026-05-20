@@ -1818,7 +1818,13 @@ const api = {
       ipcRenderer.invoke("dashboard:skillUserStats", range, granularity, skillName),
     skillEvalSummary: (
       range: { from: string; to: string },
-      options?: { limit?: number; recentPage?: number; recentPageSize?: number }
+      options?: {
+        limit?: number
+        recentPage?: number
+        recentPageSize?: number
+        skillName?: string
+        skillVersion?: string
+      }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:skillEvalSummary", range, options),
     userProfiles: (

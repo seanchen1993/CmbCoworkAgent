@@ -731,6 +731,19 @@ function getLatestSkillEvalKey(data: DashboardSkillEvalSummary | null): string |
   return latestRun ? skillEvalKey(latestRun.skillName, latestRun.skillVersion) : null
 }
 
+function skillEvalFilterForKey(
+  data: DashboardSkillEvalSummary | null,
+  key: string | null
+): { skillName?: string; skillVersion?: string } | undefined {
+  if (!data || !key) return undefined
+  const skill = data.skills.find((item) => skillEvalKey(item.skillName, item.skillVersion) === key)
+  if (!skill) return undefined
+  return {
+    skillName: skill.skillName,
+    ...(skill.skillVersion ? { skillVersion: skill.skillVersion } : {})
+  }
+}
+
 function SkillEvalSkillRow({
   skill,
   active,
@@ -1047,7 +1060,7 @@ function SkillEvalDashboardPanel({
   data: DashboardSkillEvalSummary | null
   loading: boolean
   range: TimeRange
-  onRecentPageChange: (page: number) => void
+  onRecentPageChange: (page: number, key: string | null) => void
   onOpenTrace: (run: DashboardSkillEvalRun) => void
   selectedSkillKey: string | null
   onSelectedSkillKeyChange: (key: string | null) => void
@@ -1065,9 +1078,7 @@ function SkillEvalDashboardPanel({
   const canGoNext = recentPage < recentTotalPages
   const selectedSkill =
     data.skills.find((skill) => skillEvalKey(skill.skillName, skill.skillVersion) === selectedSkillKey) ?? null
-  const filteredRuns = selectedSkillKey
-    ? data.recent.filter((run) => skillEvalKey(run.skillName, run.skillVersion) === selectedSkillKey)
-    : data.recent
+  const filteredRuns = data.recent
   const selectedRunTotal = selectedSkill?.runs ?? data.totalRuns
   const selectedTotalTokens = selectedSkill
     ? selectedSkill.averageTotalTokens * selectedSkill.runs
@@ -1117,7 +1128,10 @@ function SkillEvalDashboardPanel({
         <ScrollArea className="min-h-0 flex-1">
           <button
             type="button"
-            onClick={() => onSelectedSkillKeyChange(null)}
+            onClick={() => {
+              onSelectedSkillKeyChange(null)
+              onRecentPageChange(1, null)
+            }}
             className={`w-full border-b border-border px-4 py-2 text-left text-xs text-muted-foreground hover:bg-muted/35 ${
               selectedSkillKey === null ? "bg-muted/45 text-foreground" : ""
             }`}
@@ -1131,7 +1145,10 @@ function SkillEvalDashboardPanel({
                 key={key}
                 skill={skill}
                 active={selectedSkillKey === key}
-                onClick={() => onSelectedSkillKeyChange(key)}
+                onClick={() => {
+                  onSelectedSkillKeyChange(key)
+                  onRecentPageChange(1, key)
+                }}
               />
             )
           })}
@@ -1165,7 +1182,7 @@ function SkillEvalDashboardPanel({
                 variant="outline"
                 size="sm"
                 className="h-7 gap-1 px-2 text-xs"
-                onClick={() => onRecentPageChange(recentPage - 1)}
+                onClick={() => onRecentPageChange(recentPage - 1, selectedSkillKey)}
                 disabled={!canGoPrevious || loading}
               >
                 <ChevronLeft className="size-3.5" />
@@ -1175,7 +1192,7 @@ function SkillEvalDashboardPanel({
                 variant="outline"
                 size="sm"
                 className="h-7 gap-1 px-2 text-xs"
-                onClick={() => onRecentPageChange(recentPage + 1)}
+                onClick={() => onRecentPageChange(recentPage + 1, selectedSkillKey)}
                 disabled={!canGoNext || loading}
               >
                 下一页
@@ -1273,6 +1290,10 @@ export function DashboardView(): React.JSX.Element {
     skillEvalSelectedSkillKey === undefined ? getLatestSkillEvalKey(skillEval) : skillEvalSelectedSkillKey
 
   useEffect(() => {
+    setSkillEvalSelectedSkillKey(undefined)
+  }, [range.from, range.to])
+
+  useEffect(() => {
     if (skillEvalSelectedSkillKey === undefined || skillEvalSelectedSkillKey === null || !skillEval) return
     const selectedSkillStillExists = skillEval.skills.some(
       (skill) => skillEvalKey(skill.skillName, skill.skillVersion) === skillEvalSelectedSkillKey
@@ -1281,6 +1302,12 @@ export function DashboardView(): React.JSX.Element {
       setSkillEvalSelectedSkillKey(undefined)
     }
   }, [skillEval, skillEvalSelectedSkillKey])
+
+  useEffect(() => {
+    if (skillEvalSelectedSkillKey !== undefined || !effectiveSkillEvalSelectedSkillKey || !skillEval) return
+    setSkillEvalSelectedSkillKey(effectiveSkillEvalSelectedSkillKey)
+    void fetchSkillEvalPage(1, skillEvalFilterForKey(skillEval, effectiveSkillEvalSelectedSkillKey))
+  }, [effectiveSkillEvalSelectedSkillKey, fetchSkillEvalPage, skillEval, skillEvalSelectedSkillKey])
 
   useEffect(() => {
     let cancelled = false
@@ -1452,6 +1479,13 @@ export function DashboardView(): React.JSX.Element {
   const handleSkillEvalTraceOpen = useCallback((run: DashboardSkillEvalRun) => {
     setSkillEvalTraceRun(run)
   }, [])
+
+  const handleSkillEvalPageChange = useCallback(
+    (page: number, key: string | null) => {
+      void fetchSkillEvalPage(page, skillEvalFilterForKey(skillEval, key))
+    },
+    [fetchSkillEvalPage, skillEval]
+  )
 
   const loadUserList = useCallback(
     async (
@@ -1889,7 +1923,7 @@ export function DashboardView(): React.JSX.Element {
                 data={skillEval}
                 loading={loading || skillEvalLoading}
                 range={range}
-                onRecentPageChange={fetchSkillEvalPage}
+                onRecentPageChange={handleSkillEvalPageChange}
                 onOpenTrace={handleSkillEvalTraceOpen}
                 selectedSkillKey={effectiveSkillEvalSelectedSkillKey}
                 onSelectedSkillKeyChange={setSkillEvalSelectedSkillKey}
