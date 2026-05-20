@@ -37,9 +37,19 @@ export interface WorktreeInfo {
 
 interface GitPanelFileDiff {
   path: string
+  previousPath?: string
+  status: GitPanelFileStatus
   diff: string
   additions: number
   deletions: number
+}
+
+type GitPanelFileStatus = "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+
+interface GitPanelChangedFile {
+  path: string
+  previousPath?: string
+  status: GitPanelFileStatus
 }
 
 interface GitPanelMetaStatePayload {
@@ -307,6 +317,17 @@ function isRenameOrCopyStatus(status: string): boolean {
   return x === "R" || x === "C" || y === "R" || y === "C"
 }
 
+function getGitPanelFileStatus(status: string): GitPanelFileStatus {
+  const x = status[0] || " "
+  const y = status[1] || " "
+  if (x === "?" && y === "?") return "untracked"
+  if (x === "R" || y === "R") return "renamed"
+  if (x === "C" || y === "C") return "copied"
+  if (x === "D" || y === "D") return "deleted"
+  if (x === "A" || y === "A") return "added"
+  return "modified"
+}
+
 function decodeGitQuotedPath(rawPath: string): string {
   const quoted = rawPath.startsWith("\"") && rawPath.endsWith("\"")
   if (!quoted) return rawPath
@@ -378,26 +399,31 @@ function decodeGitQuotedPath(rawPath: string): string {
   return Buffer.from(bytes).toString("utf8")
 }
 
-function parsePorcelainPaths(output: string): string[] {
+function parsePorcelainPathEntries(output: string): GitPanelChangedFile[] {
   // Prefer NUL-delimited porcelain (`git status --porcelain -z`) to avoid
   // C-style quoted paths (e.g. "\\345\\220...") being misparsed as "345/220/...".
   if (output.includes("\0")) {
     const entries = output.split("\0").filter(Boolean)
-    const files: string[] = []
+    const files: GitPanelChangedFile[] = []
     for (let i = 0; i < entries.length; i++) {
       const entry = entries[i]
       if (entry.length < 4) continue
       const status = entry.slice(0, 2)
       const rawPath = entry.slice(3)
       if (!rawPath) continue
+      const fileStatus = getGitPanelFileStatus(status)
       if (isRenameOrCopyStatus(status) && i + 1 < entries.length) {
         // In `status -z`, rename/copy records use:
         //   "R  <new-path>\0<old-path>\0"
         // Keep the current path for git add/commit and skip the historical source path.
-        files.push(normalizeGitRelativePath(rawPath))
+        files.push({
+          path: normalizeGitRelativePath(rawPath),
+          previousPath: normalizeGitRelativePath(entries[i + 1] || ""),
+          status: fileStatus
+        })
         i += 1
       } else {
-        files.push(normalizeGitRelativePath(rawPath))
+        files.push({ path: normalizeGitRelativePath(rawPath), status: fileStatus })
       }
     }
     return files
@@ -405,17 +431,24 @@ function parsePorcelainPaths(output: string): string[] {
 
   // Fallback for newline-delimited porcelain output.
   const lines = output.split("\n").map((line) => line.trimEnd()).filter(Boolean)
-  const files: string[] = []
+  const files: GitPanelChangedFile[] = []
   for (const line of lines) {
     if (line.length < 4) continue
     const status = line.slice(0, 2)
     let rawPath = line.slice(3).trim()
     if (!rawPath) continue
+    let previousPath: string | undefined
     if (isRenameOrCopyStatus(status) && rawPath.includes(" -> ")) {
-      rawPath = rawPath.split(" -> ").pop() || rawPath
+      const parts = rawPath.split(" -> ")
+      previousPath = decodeGitQuotedPath(parts.slice(0, -1).join(" -> "))
+      rawPath = parts[parts.length - 1] || rawPath
     }
     rawPath = decodeGitQuotedPath(rawPath)
-    files.push(normalizeGitRelativePath(rawPath))
+    files.push({
+      path: normalizeGitRelativePath(rawPath),
+      previousPath: previousPath ? normalizeGitRelativePath(previousPath) : undefined,
+      status: getGitPanelFileStatus(status)
+    })
   }
   return files
 }
@@ -447,7 +480,7 @@ async function runStatusPorcelain(
     )
   } catch {
     // 旧版 Git 可能不支持当前 porcelain 命令组合里的 -z。
-    // 回退到非 NUL 分隔输出以保持兼容，路径反引号/转义由 parsePorcelainPaths 统一处理。
+    // 回退到非 NUL 分隔输出以保持兼容，路径反引号/转义由 parsePorcelainPathEntries 统一处理。
     return runGit(
       worktreePath,
       [
@@ -685,12 +718,12 @@ function readThreadGitContextCache(
   }
 }
 
-function collectChangedFilesFromStatus(
+function collectChangedFileEntriesFromStatus(
   worktreePath: string,
   statusOutput: string,
   trackedFiles: string[],
   options?: { filterByTracked?: boolean }
-): string[] {
+): GitPanelChangedFile[] {
   const trackedSet = new Set<string>()
   for (const tracked of trackedFiles) {
     for (const rel of toWorktreeRelativePath(worktreePath, tracked)) {
@@ -699,25 +732,115 @@ function collectChangedFilesFromStatus(
   }
 
   const filterByTracked = Boolean(options?.filterByTracked) && trackedSet.size > 0
-  const changedSet = new Set<string>()
+  const changedMap = new Map<string, GitPanelChangedFile>()
 
-  for (const raw of parsePorcelainPaths(statusOutput)) {
-    const candidates = toWorktreeRelativePath(worktreePath, raw)
+  for (const entry of parsePorcelainPathEntries(statusOutput)) {
+    const candidates = toWorktreeRelativePath(worktreePath, entry.path)
     if (candidates.length === 0) continue
 
     if (filterByTracked) {
       const matched = candidates.find((candidate) => trackedSet.has(candidate))
-      if (matched) changedSet.add(matched)
+      if (matched) changedMap.set(matched, { ...entry, path: matched })
       continue
     }
 
     const best = candidates.find((candidate) => candidate && !candidate.startsWith("../") && !path.isAbsolute(candidate))
     if (best) {
-      changedSet.add(best)
+      changedMap.set(best, { ...entry, path: best })
     }
   }
 
-  return Array.from(changedSet)
+  return Array.from(changedMap.values())
+}
+
+function collectChangedFilesFromStatus(
+  worktreePath: string,
+  statusOutput: string,
+  trackedFiles: string[],
+  options?: { filterByTracked?: boolean }
+): string[] {
+  return collectChangedFileEntriesFromStatus(worktreePath, statusOutput, trackedFiles, options).map(
+    (entry) => entry.path
+  )
+}
+
+async function getHeadBlobHash(worktreePath: string, relPath: string, options?: { silent?: boolean }): Promise<string | null> {
+  try {
+    const out = await runGitWithLiteralPathspecs(
+      worktreePath,
+      ["ls-files", "-s"],
+      [relPath],
+      { silent: Boolean(options?.silent), timeoutMs: 10_000 }
+    )
+    const match = out.match(/^\d+\s+([0-9a-f]{40,64})\s+\d+\t/)
+    return match?.[1] ?? null
+  } catch {
+    return null
+  }
+}
+
+async function getWorktreeBlobHash(worktreePath: string, relPath: string, options?: { silent?: boolean }): Promise<string | null> {
+  try {
+    const out = await runGitWithLiteralPathspecs(
+      worktreePath,
+      ["hash-object"],
+      [relPath],
+      { silent: Boolean(options?.silent), timeoutMs: 10_000 }
+    )
+    const hash = out.trim()
+    return /^[0-9a-f]{40,64}$/i.test(hash) ? hash : null
+  } catch {
+    return null
+  }
+}
+
+async function combineFilesystemMovesForDisplay(
+  worktreePath: string,
+  entries: GitPanelChangedFile[],
+  options?: { silent?: boolean }
+): Promise<GitPanelChangedFile[]> {
+  const deletedEntries = entries.filter((entry) => entry.status === "deleted" && !entry.previousPath)
+  const newEntries = entries.filter(
+    (entry) => (entry.status === "untracked" || entry.status === "added") && !entry.previousPath
+  )
+  if (deletedEntries.length === 0 || newEntries.length === 0) {
+    return entries
+  }
+
+  const deletedByHash = new Map<string, GitPanelChangedFile[]>()
+  await Promise.all(
+    deletedEntries.map(async (entry) => {
+      const hash = await getHeadBlobHash(worktreePath, entry.path, options)
+      if (!hash) return
+      const bucket = deletedByHash.get(hash) ?? []
+      bucket.push(entry)
+      deletedByHash.set(hash, bucket)
+    })
+  )
+
+  const matchedDeleted = new Set<string>()
+  const replacements = new Map<string, GitPanelChangedFile>()
+  for (const entry of newEntries) {
+    const hash = await getWorktreeBlobHash(worktreePath, entry.path, options)
+    if (!hash) continue
+    const candidates = deletedByHash.get(hash)
+    const previous = candidates?.find((candidate) => !matchedDeleted.has(candidate.path))
+    if (!previous) continue
+    matchedDeleted.add(previous.path)
+    replacements.set(entry.path, {
+      ...entry,
+      previousPath: previous.path,
+      status: "renamed"
+    })
+  }
+
+  if (matchedDeleted.size === 0) {
+    return entries
+  }
+
+  return entries
+    .filter((entry) => !matchedDeleted.has(entry.path))
+    .map((entry) => replacements.get(entry.path) ?? entry)
 }
 
 function parseNumstatTotals(output: string): { additions: number; deletions: number } {
@@ -1212,9 +1335,10 @@ function getRecentlyRevertedFiles(metadata: Record<string, unknown>): string[] {
 async function buildGitPanelFileDiff(
   worktreePath: string,
   relPath: string,
-  options?: { silent?: boolean }
+  options?: { silent?: boolean; status?: GitPanelFileStatus }
 ): Promise<GitPanelFileDiff | null> {
   const silent = Boolean(options?.silent)
+  const fileStatus = options?.status ?? "modified"
   const targetPath = normalizeGitRelativePath(relPath)
   if (!targetPath) {
     return null
@@ -1328,6 +1452,7 @@ async function buildGitPanelFileDiff(
 
   return {
     path: targetPath,
+    status: fileStatus,
     diff: diffText,
     additions,
     deletions
@@ -1380,9 +1505,15 @@ async function buildGitPanelState(
 
   const statusPathspecs = filterByTracked ? normalizedTrackedFiles : ["."]
   const statusOut = await runStatusPorcelain(worktreePath, statusPathspecs, { silent })
-  const changedFiles = collectChangedFilesFromStatus(worktreePath, statusOut, normalizedTrackedFiles, {
+  const rawChangedFileEntries = collectChangedFileEntriesFromStatus(worktreePath, statusOut, normalizedTrackedFiles, {
     filterByTracked
   })
+  const changedFileEntries = await combineFilesystemMovesForDisplay(
+    worktreePath,
+    rawChangedFileEntries,
+    { silent }
+  )
+  const changedFiles = changedFileEntries.map((entry) => entry.path)
 
   if (changedFiles.length === 0) {
     return {
@@ -1396,6 +1527,8 @@ async function buildGitPanelState(
 
   // 保留文件数量上限，避免超大仓库一次返回过多数据导致渲染阻塞。
   const visibleChangedFiles = changedFiles.slice(0, GIT_PANEL_MAX_VISIBLE_FILES)
+  const statusByPath = new Map(changedFileEntries.map((entry) => [entry.path, entry.status]))
+  const previousPathByPath = new Map(changedFileEntries.map((entry) => [entry.path, entry.previousPath]))
   const omittedFileCount = Math.max(0, changedFiles.length - visibleChangedFiles.length)
 
   let numstatMap = new Map<string, { additions: number; deletions: number }>()
@@ -1435,10 +1568,16 @@ async function buildGitPanelState(
     if (!normalizedPath) {
       continue
     }
-    const resolvedDiff = await buildGitPanelFileDiff(worktreePath, normalizedPath, { silent })
+    const fileStatus = statusByPath.get(normalizedPath) ?? "modified"
+    const resolvedDiff = await buildGitPanelFileDiff(worktreePath, normalizedPath, {
+      silent,
+      status: fileStatus
+    })
     const stats = numstatMap.get(normalizedPath) || { additions: 0, deletions: 0 }
     fileDiffs.push({
       path: normalizedPath,
+      previousPath: previousPathByPath.get(normalizedPath),
+      status: resolvedDiff?.status ?? fileStatus,
       diff: truncateGitPanelDiff(resolvedDiff?.diff || ""),
       additions: resolvedDiff?.additions ?? stats.additions,
       deletions: resolvedDiff?.deletions ?? stats.deletions

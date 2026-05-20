@@ -13,7 +13,8 @@ import {
   RefreshCw,
   ArrowDown,
   Loader2,
-  Upload
+  Upload,
+  GitCompareArrows
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { DiffDisplay } from "@/components/chat/DiffDisplay"
@@ -46,13 +47,63 @@ type GitPanelDiffState = {
   isWorktree: boolean
   isGitRepo?: boolean
   taskId: string
-  files: Array<{ path: string; diff: string; additions: number; deletions: number }>
+  files: Array<{
+    path: string
+    previousPath?: string
+    status?: GitPanelFileStatus
+    diff: string
+    additions: number
+    deletions: number
+  }>
   changedFilesTotal?: number
   omittedFileCount?: number
   totals: { additions: number; deletions: number; fileCount: number }
   hasPendingDiff: boolean
   suggestedCommitMessage?: string
   error?: string
+}
+
+type GitPanelFileStatus = "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+
+function getPathParentDir(filePath?: string): string {
+  const normalized = String(filePath || "").replace(/\\/g, "/")
+  const index = normalized.lastIndexOf("/")
+  return index >= 0 ? normalized.slice(0, index) : ""
+}
+
+function getFileStatusMeta(status?: GitPanelFileStatus, path?: string, previousPath?: string): {
+  label: string
+  className: string
+} {
+  switch (status) {
+    case "deleted":
+      return {
+        label: "删除",
+        className: "border-rose-500/35 bg-rose-500/10 text-rose-700 dark:text-rose-300"
+      }
+    case "added":
+    case "untracked":
+      return {
+        label: "新增",
+        className: "border-emerald-500/35 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+      }
+    case "renamed":
+      return {
+        label: getPathParentDir(path) === getPathParentDir(previousPath) ? "改名" : "移动",
+        className: "border-blue-500/35 bg-blue-500/10 text-blue-700 dark:text-blue-300"
+      }
+    case "copied":
+      return {
+        label: "复制",
+        className: "border-cyan-500/35 bg-cyan-500/10 text-cyan-700 dark:text-cyan-300"
+      }
+    case "modified":
+    default:
+      return {
+        label: "修改",
+        className: "border-border bg-muted/40 text-muted-foreground"
+      }
+  }
 }
 
 /**
@@ -325,9 +376,13 @@ export function GitPanelView({
         return
       }
 
-      const selectedPaths = (diffState?.files ?? [])
-        .map((file) => file.path)
-        .filter((path) => selectedFilePaths.has(path))
+      const selectedPaths = (diffState?.files ?? []).flatMap((file) => {
+        if (!selectedFilePaths.has(file.path)) return []
+        if (file.status === "renamed" && file.previousPath) {
+          return [file.previousPath, file.path]
+        }
+        return [file.path]
+      })
 
       if (action === "commit" && selectedPaths.length === 0) {
         showToast("请至少选择 1 个文件", "error")
@@ -777,6 +832,8 @@ export function GitPanelView({
                   const diff = file.diff
                   const isExpanded = expandedFilePaths.has(file.path)
                   const isSelected = selectedFilePaths.has(file.path)
+                  const statusMeta = getFileStatusMeta(file.status, file.path, file.previousPath)
+                  const showMovePath = file.status === "renamed" && Boolean(file.previousPath)
                   return (
                     <div
                       key={file.path}
@@ -804,6 +861,15 @@ export function GitPanelView({
                           ) : (
                             <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
                           )}
+                          <span
+                            className={cn(
+                              "inline-flex h-4 shrink-0 items-center rounded border px-1 text-[9px] font-medium leading-none",
+                              statusMeta.className
+                            )}
+                            title={`文件状态：${statusMeta.label}`}
+                          >
+                            {statusMeta.label}
+                          </span>
                           <span
                             className="font-mono font-semibold truncate text-left"
                             title={file.path}
@@ -874,6 +940,31 @@ export function GitPanelView({
                       </button>
                       {isExpanded && (
                         <div className="mt-2">
+                          {showMovePath && (
+                            <div className="mb-2 rounded-md border border-blue-500/20 bg-blue-500/5 px-3 py-2 text-xs">
+                              <div className="mb-1 flex items-center gap-1.5 font-medium text-blue-700 dark:text-blue-300">
+                                <GitCompareArrows className="size-3.5" />
+                                {statusMeta.label}信息
+                              </div>
+                              <div className="grid gap-1.5 font-mono">
+                                <div className="flex min-w-0 items-center gap-2">
+                                  <span className="shrink-0 text-muted-foreground">原路径</span>
+                                  <span
+                                    className="truncate text-muted-foreground line-through decoration-muted-foreground/50"
+                                    title={file.previousPath}
+                                  >
+                                    {file.previousPath}
+                                  </span>
+                                </div>
+                                <div className="flex min-w-0 items-center gap-2">
+                                  <span className="shrink-0 text-muted-foreground">现路径</span>
+                                  <span className="truncate font-semibold text-foreground" title={file.path}>
+                                    {file.path}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                          )}
                           {diff && diff.trim() !== "" ? (
                             <DiffDisplay diff={diff} />
                           ) : (
