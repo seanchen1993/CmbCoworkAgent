@@ -1,15 +1,59 @@
 import type { AgentTrace, TraceNode } from "../trace/types"
-import {
-  DEFAULT_SKILL_EVAL_TOOL_BUDGET,
-  type SkillEvalCheck,
-  type SkillEvalRecord
-} from "../../../shared/skill-eval-types"
+
+const DEFAULT_SKILL_EVAL_TOOL_BUDGET = 40
+
+export interface SkillEvalCheck {
+  name: string
+  label: string
+  ok: boolean
+  weight: number
+  detail?: Record<string, unknown>
+}
+
+export interface SkillEvalRecord {
+  id: string
+  traceId: string
+  threadId: string
+  skillName: string
+  skillVersion?: string
+  rawSkillName: string
+  startedAt: string
+  endedAt: string
+  evaluatedAt: string
+  userMessage: string
+  modelId: string
+  modelName?: string
+  outcome: string
+  durationMs: number
+  totalToolCalls: number
+  modelCallCount: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  promptInputTokens: number
+  totalTokens: number
+  cacheReadTokens: number
+  cacheCreationTokens: number
+  peakInputTokens: number
+  totalTokensIncludesCache: boolean | "mixed"
+  /** @deprecated use peakInputTokens */
+  maxContextTokens?: number
+  errorCount: number
+  processScore: number
+  outcomeScore: number
+  score: number
+  outcomePass: boolean
+  pass: boolean
+  checks: SkillEvalCheck[]
+  outcomeChecks: SkillEvalCheck[]
+  warnings: string[]
+  outcomeWarnings: string[]
+}
 
 const PASS_THRESHOLD = 0.7
 const PROCESS_SCORE_WEIGHT = 0.4
 const OUTCOME_SCORE_WEIGHT = 0.6
 const STEP_BUDGET = 12
-const TOOL_REPETITION_LIMIT = 3
+const MAX_CONSECUTIVE_SAME_CALL = 3
 const AVG_PROMPT_INPUT_TOKEN_BUDGET = 48_000
 
 function parseSkill(raw: string): { skillName: string; skillVersion?: string } {
@@ -48,10 +92,10 @@ function getToolSignature(call: { name: string; args: Record<string, unknown> })
 
 function countRepeatedToolCalls(trace: AgentTrace): number {
   let repeated = 0
-  let previous = ""
-  let runLength = 0
 
   for (const step of trace.steps ?? []) {
+    let previous = ""
+    let runLength = 0
     for (const call of step.toolCalls ?? []) {
       const signature = getToolSignature(call)
       if (signature === previous) {
@@ -60,26 +104,11 @@ function countRepeatedToolCalls(trace: AgentTrace): number {
         previous = signature
         runLength = 1
       }
-      if (runLength > TOOL_REPETITION_LIMIT) repeated += 1
+      if (runLength > MAX_CONSECUTIVE_SAME_CALL) repeated += 1
     }
   }
 
   return repeated
-}
-
-function getAveragePromptInputTokens(trace: AgentTrace): number {
-  const calls = Array.isArray(trace.modelCalls) ? trace.modelCalls : []
-  if (calls.length === 0) return 0
-  const total = calls.reduce((sum, call) => {
-    const usage = call.tokenUsage
-    return (
-      sum +
-      (usage?.inputTokens ?? 0) +
-      (usage?.cacheReadTokens ?? 0) +
-      (usage?.cacheCreationTokens ?? 0)
-    )
-  }, 0)
-  return total / calls.length
 }
 
 function getFinalAssistantText(trace: AgentTrace): string {
@@ -89,9 +118,14 @@ function getFinalAssistantText(trace: AgentTrace): string {
 
 function getTerminalMessageNode(trace: AgentTrace): TraceNode | null {
   const nodes = Array.isArray(trace.nodes) ? trace.nodes : []
-  const root = nodes.find((node) => node.parentId === null || node.type === "trace")
+  const root = nodes.find((node) => node.type === "trace")
   const terminalMessages = nodes.filter(
-    (node) => node.type === "message" && node.parentId === root?.id && node.name !== "User Message"
+    (node) =>
+      node.type === "message" &&
+      node.parentId === root?.id &&
+      (node.name === "Run Completed" ||
+        node.name === "Run Error" ||
+        node.name === "Run Cancelled")
   )
   if (terminalMessages.length === 0) return null
   return terminalMessages[terminalMessages.length - 1] ?? null
@@ -103,10 +137,13 @@ function outputLength(value: unknown): number {
   return JSON.stringify(value)?.length ?? 0
 }
 
-function buildChecks(trace: AgentTrace, toolCalls: number): SkillEvalCheck[] {
+function buildChecks(
+  trace: AgentTrace,
+  toolCalls: number,
+  averagePromptInputTokens: number
+): SkillEvalCheck[] {
   const stepCount = getStepCount(trace)
   const repeatedToolCalls = countRepeatedToolCalls(trace)
-  const averagePromptInputTokens = getAveragePromptInputTokens(trace)
 
   return [
     {
@@ -128,7 +165,7 @@ function buildChecks(trace: AgentTrace, toolCalls: number): SkillEvalCheck[] {
       label: "无重复无效调用",
       ok: repeatedToolCalls === 0,
       weight: 2,
-      detail: { repeatedToolCalls, maxConsecutiveSameCall: TOOL_REPETITION_LIMIT }
+      detail: { repeatedToolCalls, maxConsecutiveSameCall: MAX_CONSECUTIVE_SAME_CALL }
     },
     {
       name: "input_tokens_reasonable",
@@ -209,9 +246,11 @@ function summarizeTokenUsage(trace: AgentTrace): {
   cacheCreationTokens: number
   peakInputTokens: number
   maxContextTokens: number
+  averagePromptInputTokens: number
+  totalTokensIncludesCache: boolean | "mixed"
 } {
   const calls = Array.isArray(trace.modelCalls) ? trace.modelCalls : []
-  return calls.reduce(
+  const summary = calls.reduce(
     (acc, call) => {
       const usage = call.tokenUsage
       const input = usage?.inputTokens ?? 0
@@ -227,6 +266,8 @@ function summarizeTokenUsage(trace: AgentTrace): {
       // Some providers include cache tokens in totalTokens, others do not. Keep
       // provider-reported totals when present and only fall back to input+output.
       acc.totalTokens += total
+      if (usage?.totalTokens !== undefined) acc.reportedTotalCount += 1
+      else acc.fallbackTotalCount += 1
       acc.cacheReadTokens += cacheRead
       acc.cacheCreationTokens += cacheCreation
       acc.peakInputTokens = Math.max(acc.peakInputTokens, promptInput)
@@ -242,9 +283,33 @@ function summarizeTokenUsage(trace: AgentTrace): {
       cacheReadTokens: 0,
       cacheCreationTokens: 0,
       peakInputTokens: 0,
-      maxContextTokens: 0
+      maxContextTokens: 0,
+      reportedTotalCount: 0,
+      fallbackTotalCount: 0
     }
   )
+  const totalTokensIncludesCache =
+    summary.reportedTotalCount > 0 && summary.fallbackTotalCount > 0
+      ? "mixed"
+      : summary.reportedTotalCount > 0
+
+  return {
+    modelCallCount: summary.modelCallCount,
+    totalInputTokens: summary.totalInputTokens,
+    totalOutputTokens: summary.totalOutputTokens,
+    promptInputTokens: summary.promptInputTokens,
+    totalTokens: summary.totalTokens,
+    cacheReadTokens: summary.cacheReadTokens,
+    cacheCreationTokens: summary.cacheCreationTokens,
+    peakInputTokens: summary.peakInputTokens,
+    maxContextTokens: summary.maxContextTokens,
+    averagePromptInputTokens: averageValue(summary.promptInputTokens, summary.modelCallCount),
+    totalTokensIncludesCache
+  }
+}
+
+function averageValue(total: number, count: number): number {
+  return count > 0 ? total / count : 0
 }
 
 function buildWarnings(trace: AgentTrace, errorCount: number, toolCalls: number): string[] {
@@ -271,7 +336,12 @@ export function evaluateTraceSkills(trace: AgentTrace): SkillEvalRecord[] {
   const toolResultErrors = countToolResultErrors(trace)
   const toolCalls =
     typeof trace.totalToolCalls === "number" ? trace.totalToolCalls : countToolNodes(trace)
-  const checks = buildChecks(trace, toolCalls)
+  const tokenUsage = summarizeTokenUsage(trace)
+  const checks = buildChecks(
+    trace,
+    toolCalls,
+    tokenUsage.averagePromptInputTokens
+  )
   const outcomeChecks = buildOutcomeChecks(trace, toolResultErrors)
   const processScore = scoreChecks(checks)
   const outcomeScore = scoreChecks(outcomeChecks)
@@ -280,7 +350,6 @@ export function evaluateTraceSkills(trace: AgentTrace): SkillEvalRecord[] {
   const outcomePass = outcomeScore >= PASS_THRESHOLD
   const warnings = buildWarnings(trace, errorCount, toolCalls)
   const outcomeWarnings = buildOutcomeWarnings(trace, outcomeScore)
-  const tokenUsage = summarizeTokenUsage(trace)
   const evaluatedAt = new Date().toISOString()
 
   return trace.usedSkills.map((rawSkillName) => {

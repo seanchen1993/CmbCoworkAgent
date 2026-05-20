@@ -34,13 +34,6 @@ import type {
   SavedCodeExecPreviewResult,
   SavedCodeExecToolUpdatePayload
 } from "../main/ipc/code-exec-tools"
-import type {
-  SkillEvalRecord,
-  SkillEvalSummary,
-  SkillResultEvalRecord,
-  SkillResultEvalStatus
-} from "../shared/skill-eval-types"
-
 interface ElectronAPI {
   openExternal: (url: string) => Promise<void>
   openLoginWindow: () => void
@@ -166,6 +159,12 @@ interface DashboardCommitDetailsOptions {
   pushedOnly?: boolean
 }
 
+interface DashboardSkillEvalOptions {
+  limit?: number
+  recentPage?: number
+  recentPageSize?: number
+}
+
 interface DashboardCodeStats {
   generatedLines: number
   deletedLines: number
@@ -187,6 +186,9 @@ interface DashboardCodeStats {
 interface DashboardSkillDetail {
   stats: DashboardCodeStats
   traces: DashboardTraceDetail[]
+  total: number
+  page: number
+  pageSize: number
 }
 
 interface DashboardUserListItem {
@@ -604,32 +606,6 @@ interface CustomAPI {
       options?: { includeNestedSkills?: boolean }
     ) => Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }>
     delete: (skillPath: string) => Promise<{ success: boolean; error?: string }>
-  }
-  skillEval: {
-    summary: (opts?: { limit?: number }) => Promise<SkillEvalSummary>
-    records: (opts?: {
-      limit?: number
-      skillName?: string
-      skillVersion?: string
-      threadId?: string
-      pass?: boolean
-    }) => Promise<SkillEvalRecord[]>
-    resultRecords: (opts?: {
-      limit?: number
-      skillName?: string
-      skillVersion?: string
-      threadId?: string
-      traceId?: string
-      pass?: boolean
-      status?: SkillResultEvalStatus
-    }) => Promise<SkillResultEvalRecord[]>
-    clear: () => Promise<void>
-    filePath: () => Promise<string>
-    resultFilePath: () => Promise<string>
-    onUpdated: (callback: (payload: { traceId: string; recordCount: number }) => void) => () => void
-    onResultUpdated: (
-      callback: (payload: { traceId: string; recordCount: number }) => void
-    ) => () => void
   }
   mcp: {
     list: () => Promise<McpConnectorConfig[]>
@@ -1116,6 +1092,10 @@ interface CustomAPI {
       granularity: "day" | "week" | "month" | "custom",
       skillName: string
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    skillEvalSummary: (
+      range: { from: string; to: string },
+      options?: DashboardSkillEvalOptions
+    ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     userProfiles: (
       sapIds: string[]
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
@@ -1130,17 +1110,25 @@ interface CustomAPI {
     skillRecentTraces: (
       skill: string,
       range: { from: string; to: string },
-      limit?: number
-    ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
+      options?: number | { page?: number; pageSize?: number }
+    ) => Promise<{
+      success: boolean
+      data?: { total: number; page: number; pageSize: number; traces: DashboardTraceDetail[] }
+      error?: string
+    }>
     marketSkillRecentTraces: (
       skill: string,
       range: { from: string; to: string },
-      limit?: number
-    ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
+      options?: number | { page?: number; pageSize?: number }
+    ) => Promise<{
+      success: boolean
+      data?: { total: number; page: number; pageSize: number; traces: DashboardTraceDetail[] }
+      error?: string
+    }>
     skillDetail: (
       skill: string,
       range: { from: string; to: string },
-      limit?: number
+      options?: number | { page?: number; pageSize?: number }
     ) => Promise<{ success: boolean; data?: DashboardSkillDetail; error?: string }>
     commitDetails: (
       range: { from: string; to: string },

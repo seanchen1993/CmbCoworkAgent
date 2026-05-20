@@ -2,7 +2,7 @@ import { create } from "zustand"
 import type { Thread, ModelConfig, Provider } from "@/types"
 
 type EvolutionTab = "candidates" | "traces"
-type MainView = "thread" | "customize" | "evolution" | "kanban" | "claudecode" | "dashboard" | "skillEval"
+type MainView = "thread" | "customize" | "evolution" | "kanban" | "claudecode" | "dashboard"
 
 interface EvolutionRunProgress {
   runId: string
@@ -50,8 +50,6 @@ interface AppState {
   setShowDashboardView: (show: boolean) => void
   dashboardAllowed: boolean | null  // null = loading
   loadDashboardAllowed: () => Promise<void>
-  showSkillEvalView: boolean
-  setShowSkillEvalView: (show: boolean) => void
 
   // Customize view state
   showCustomizeView: boolean
@@ -160,7 +158,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   showSubagentsInKanban: true,
   showClaudeCodeView: false,
   showDashboardView: false,
-  showSkillEvalView: false,
   dashboardAllowed: null,
   previousThreadId: null,
   showCustomizeView: false,
@@ -200,7 +197,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       showCustomizeView: false,
       showClaudeCodeView: false,
       showDashboardView: false,
-      showSkillEvalView: false,
       previousThreadId: null,
       mainView: "thread"
       // skillGenerationByThread is NOT reset here: new threads start with no entry
@@ -216,7 +212,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       showCustomizeView: false,
       showClaudeCodeView: false,
       showDashboardView: false,
-      showSkillEvalView: false,
       previousThreadId: null,
       mainView: "thread"
       // skillGenerationByThread is NOT cleared here: each thread retains its own card
@@ -313,7 +308,6 @@ export const useAppStore = create<AppState>((set, get) => ({
         showKanbanView: false,
         showCustomizeView: false,
         showDashboardView: false,
-        showSkillEvalView: false,
         mainView: "claudecode",
         previousThreadId: prev,
         currentThreadId: null
@@ -322,7 +316,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       const restored = get().previousThreadId
       set({
         showClaudeCodeView: false,
-        showSkillEvalView: false,
         mainView: "thread",
         currentThreadId: restored,
         previousThreadId: null
@@ -344,7 +337,6 @@ export const useAppStore = create<AppState>((set, get) => ({
         showClaudeCodeView: false,
         showKanbanView: false,
         showCustomizeView: false,
-        showSkillEvalView: false,
         mainView: "dashboard",
         previousThreadId: prev,
         currentThreadId: null
@@ -353,30 +345,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       const restored = get().previousThreadId
       set({
         showDashboardView: false,
-        showSkillEvalView: false,
-        mainView: "thread",
-        ...(restored ? { currentThreadId: restored, previousThreadId: null } : {})
-      })
-    }
-  },
-
-  setShowSkillEvalView: (show: boolean) => {
-    if (show) {
-      const prev = get().previousThreadId || get().currentThreadId
-      set({
-        showSkillEvalView: true,
-        showDashboardView: false,
-        showClaudeCodeView: false,
-        showKanbanView: false,
-        showCustomizeView: false,
-        mainView: "skillEval",
-        previousThreadId: prev,
-        currentThreadId: null
-      })
-    } else {
-      const restored = get().previousThreadId
-      set({
-        showSkillEvalView: false,
         mainView: "thread",
         ...(restored ? { currentThreadId: restored, previousThreadId: null } : {})
       })
@@ -393,14 +361,13 @@ export const useAppStore = create<AppState>((set, get) => ({
         showCustomizeView: false,
         showClaudeCodeView: false,
         showDashboardView: false,
-        showSkillEvalView: false,
         mainView: "kanban",
         currentThreadId: null,
         previousThreadId: prev
       })
     } else {
       const restored = get().previousThreadId
-      set({ showKanbanView: false, showSkillEvalView: false, mainView: "thread", ...(restored ? { currentThreadId: restored, previousThreadId: null } : {}) })
+      set({ showKanbanView: false, mainView: "thread", ...(restored ? { currentThreadId: restored, previousThreadId: null } : {}) })
     }
   },
 
@@ -415,7 +382,6 @@ export const useAppStore = create<AppState>((set, get) => ({
         showKanbanView: false,
         showClaudeCodeView: false,
         showDashboardView: false,
-        showSkillEvalView: false,
         customizeInitialTab: tab ?? null,
         mainView: "customize"
       })
@@ -424,7 +390,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({
         showCustomizeView: false,
         customizeInitialTab: null,
-        showSkillEvalView: false,
         mainView: "thread",
         ...(restored ? { currentThreadId: restored, previousThreadId: null } : {})
       })
@@ -455,7 +420,6 @@ export const useAppStore = create<AppState>((set, get) => ({
         showCustomizeView: false,
         showClaudeCodeView: false,
         showDashboardView: false,
-        showSkillEvalView: false,
         currentThreadId: null
       })
       return
@@ -467,8 +431,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         showCustomizeView: true,
         showKanbanView: false,
         showClaudeCodeView: false,
-        showDashboardView: false,
-        showSkillEvalView: false
+        showDashboardView: false
       })
       return
     }
@@ -480,8 +443,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         showKanbanView: false,
         showClaudeCodeView: false,
         customizeInitialTab: "evolution",
-        showDashboardView: false,
-        showSkillEvalView: false
+        showDashboardView: false
       })
       return
     }
@@ -491,23 +453,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({
         mainView: "dashboard",
         showDashboardView: true,
-        showCustomizeView: false,
-        showKanbanView: false,
-        showClaudeCodeView: false,
-        showSkillEvalView: false,
-        previousThreadId: prev,
-        currentThreadId: null
-      })
-      return
-    }
-
-
-    if (view === "skillEval") {
-      const prev = get().previousThreadId || get().currentThreadId
-      set({
-        mainView: "skillEval",
-        showSkillEvalView: true,
-        showDashboardView: false,
         showCustomizeView: false,
         showKanbanView: false,
         showClaudeCodeView: false,
@@ -525,7 +470,6 @@ export const useAppStore = create<AppState>((set, get) => ({
         showCustomizeView: false,
         showKanbanView: false,
         showDashboardView: false,
-        showSkillEvalView: false,
         previousThreadId: prev,
         currentThreadId: null
       })
@@ -539,7 +483,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       showKanbanView: false,
       showClaudeCodeView: false,
       showDashboardView: false,
-      showSkillEvalView: false,
       ...(restored ? { currentThreadId: restored, previousThreadId: null } : {})
     })
   },

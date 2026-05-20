@@ -6,6 +6,7 @@ import {
   Bot,
   CheckCircle2,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   Clock,
   Code2,
@@ -20,6 +21,7 @@ import {
   Wrench
 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import {
   Dialog,
   DialogContent,
@@ -644,28 +646,68 @@ export function TraceHistoryDialog({
   skill,
   traces,
   codeStats,
+  total = traces.length,
+  page = 1,
+  pageSize = traces.length || 10,
   loading,
-  error
+  error,
+  onPageChange
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   skill: string | null
   traces: DashboardTraceDetail[]
   codeStats: DashboardCodeStats | null
+  total?: number
+  page?: number
+  pageSize?: number
   loading: boolean
   error: string | null
+  onPageChange?: (page: number) => void
 }): React.JSX.Element {
+  const totalPages = Math.max(1, Math.ceil(total / Math.max(1, pageSize)))
+  const canGoPrevious = page > 1 && !loading
+  const canGoNext = page < totalPages && !loading
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex h-[80vh] max-w-[1080px] grid-rows-none flex-col gap-0 p-0">
         <DialogHeader className="border-b border-border px-5 py-4">
-          <DialogTitle className="text-base">Skill 会话历史 · {skill ?? "-"}</DialogTitle>
+          <div className="flex items-center justify-between gap-4">
+            <div className="min-w-0">
+              <DialogTitle className="truncate text-base">Skill 会话历史 · {skill ?? "-"}</DialogTitle>
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                共 {total.toLocaleString("zh-CN")} 条 · 第 {page} / {totalPages} 页
+              </p>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={!canGoPrevious}
+                onClick={() => onPageChange?.(page - 1)}
+              >
+                <ChevronLeft className="size-3.5" />
+                上一页
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={!canGoNext}
+                onClick={() => onPageChange?.(page + 1)}
+              >
+                下一页
+                <ChevronRight className="size-3.5" />
+              </Button>
+            </div>
+          </div>
         </DialogHeader>
         <TraceExplorer
           traces={traces}
           codeStats={codeStats}
           loading={loading}
           error={error}
+          title={`第 ${page} 页 Trace 记录`}
           emptyText="当前时间范围内没有该 Skill 的会话历史"
         />
       </DialogContent>

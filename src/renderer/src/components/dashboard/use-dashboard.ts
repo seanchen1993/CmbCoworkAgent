@@ -187,6 +187,9 @@ export interface DashboardCodeStats {
 export interface DashboardSkillDetail {
   stats: DashboardCodeStats
   traces: DashboardTraceDetail[]
+  total: number
+  page: number
+  pageSize: number
 }
 
 export interface DashboardUserListItem {
@@ -266,6 +269,145 @@ export interface FeedbackData {
     text: string
   }>
 }
+
+export interface DashboardSkillEvalRun {
+  traceId: string
+  threadId: string
+  startedAt: string
+  endedAt: string
+  userMessage: string
+  skillName: string
+  skillVersion?: string
+  rawSkillName: string
+  outcome: string
+  processScore: number
+  outcomeScore: number
+  score: number
+  outcomePass: boolean
+  pass: boolean
+  resultScore: number
+  resultPass: boolean
+  totalToolCalls: number
+  modelCallCount: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  promptInputTokens: number
+  totalTokens: number
+  cacheReadTokens: number
+  cacheCreationTokens: number
+  peakInputTokens: number
+  errorCount: number
+  durationMs: number
+  checks: Array<{
+    name: string
+    label: string
+    ok: boolean
+    weight: number
+    detail?: Record<string, unknown>
+  }>
+  outcomeChecks: Array<{
+    name: string
+    label: string
+    ok: boolean
+    weight: number
+    detail?: Record<string, unknown>
+  }>
+  resultChecks: Array<{
+    name: string
+    label: string
+    ok: boolean
+    weight: number
+    detail?: Record<string, unknown>
+  }>
+  warnings: string[]
+  outcomeWarnings: string[]
+  resultWarnings: string[]
+  resultIssues: string[]
+  resultArtifacts: Array<{
+    type: string
+    label: string
+    path?: string
+    url?: string
+    detail?: Record<string, unknown>
+  }>
+  resultGenerated: boolean
+  traceDetail?: DashboardTraceDetail
+  evidence: {
+    finalResponseLength: number
+    changedFiles: number
+    validationCommands: number
+    artifactSignals: number
+    dangerousCommands: number
+    subagentRuns: number
+    subagentResultLength: number
+    subagentFailed: number
+    toolResultErrors: number
+  }
+}
+
+export interface DashboardSkillEvalSkillSummary {
+  skillName: string
+  skillVersion?: string
+  runs: number
+  passRate: number
+  resultPassRate: number
+  averageScore: number
+  averageProcessScore: number
+  averageOutcomeScore: number
+  averageResultScore: number
+  averageToolCalls: number
+  averageModelCalls: number
+  averageInputTokens: number
+  averageOutputTokens: number
+  averagePromptInputTokens: number
+  averageTotalTokens: number
+  averagePeakInputTokens: number
+  averageDurationMs: number
+  validationRate: number
+  outputSignalRate: number
+  dangerRate: number
+  failureCount: number
+  lastRunAt: string
+}
+
+export interface DashboardSkillEvalSummary {
+  generatedAt: string
+  totalTraceHits: number
+  evaluatedTraceCount: number
+  sampledTraceCount: number
+  recentTotal: number
+  recentPage: number
+  recentPageSize: number
+  totalRuns: number
+  totalSkills: number
+  passRate: number
+  resultPassRate: number
+  averageScore: number
+  averageProcessScore: number
+  averageOutcomeScore: number
+  averageResultScore: number
+  averageToolCalls: number
+  averageModelCalls: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalPromptInputTokens: number
+  totalTokens: number
+  averageInputTokens: number
+  averageOutputTokens: number
+  averagePromptInputTokens: number
+  averageTotalTokens: number
+  averagePeakInputTokens: number
+  averageDurationMs: number
+  skills: DashboardSkillEvalSkillSummary[]
+  recent: DashboardSkillEvalRun[]
+}
+
+export interface DashboardSkillEvalOptions {
+  recentPage?: number
+  recentPageSize?: number
+}
+
+const SKILL_EVAL_RECENT_PAGE_SIZE = 10
 
 // ─────────────────────────────────────────────────────────
 // Time helpers
@@ -846,7 +988,259 @@ function parseFeedback(raw: any, granularity: Granularity): FeedbackData {
   }
 }
 
+function numberValue(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return 0
+}
+
+function parseSkillEvalChecks(raw: any): DashboardSkillEvalRun["checks"] {
+  return Array.isArray(raw)
+    ? raw.map((item: any) => ({
+        name: String(item?.name ?? ""),
+        label: String(item?.label ?? ""),
+        ok: item?.ok === true,
+        weight: numberValue(item?.weight),
+        ...(item?.detail && typeof item.detail === "object" ? { detail: item.detail as Record<string, unknown> } : {})
+      }))
+    : []
+}
+
+function parseSkillEvalArtifacts(raw: any): DashboardSkillEvalRun["resultArtifacts"] {
+  return Array.isArray(raw)
+    ? raw.map((item: any) => ({
+        type: String(item?.type ?? "other"),
+        label: String(item?.label ?? "产物"),
+        ...(item?.path ? { path: String(item.path) } : {}),
+        ...(item?.url ? { url: String(item.url) } : {}),
+        ...(item?.detail && typeof item.detail === "object" ? { detail: item.detail as Record<string, unknown> } : {})
+      }))
+    : []
+}
+
+function parseDashboardTraceDetail(raw: any): DashboardTraceDetail | undefined {
+  if (!raw || typeof raw !== "object") return undefined
+  return {
+    traceId: String(raw.traceId ?? ""),
+    threadId: String(raw.threadId ?? ""),
+    startedAt: String(raw.startedAt ?? ""),
+    endedAt: raw.endedAt ? String(raw.endedAt) : undefined,
+    durationMs: numberValue(raw.durationMs),
+    userMessage: String(raw.userMessage ?? ""),
+    ...(raw.sapId ? { sapId: String(raw.sapId) } : {}),
+    ...(raw.ystId ? { ystId: String(raw.ystId) } : {}),
+    ...(raw.userName ? { userName: String(raw.userName) } : {}),
+    ...(raw.orgName ? { orgName: String(raw.orgName) } : {}),
+    ...(raw.userIp ? { userIp: String(raw.userIp) } : {}),
+    ...(raw.modelId ? { modelId: String(raw.modelId) } : {}),
+    ...(raw.modelName ? { modelName: String(raw.modelName) } : {}),
+    outcome: String(raw.outcome ?? "unknown"),
+    totalToolCalls: numberValue(raw.totalToolCalls),
+    totalInputTokens: numberValue(raw.totalInputTokens),
+    totalOutputTokens: numberValue(raw.totalOutputTokens),
+    totalTokens: numberValue(raw.totalTokens),
+    usedSkills: Array.isArray(raw.usedSkills) ? raw.usedSkills.map(String) : [],
+    nodes: Array.isArray(raw.nodes) ? raw.nodes : undefined,
+    rawAvailable: raw.rawAvailable === true,
+    ...(raw.rawError ? { rawError: String(raw.rawError) } : {})
+  }
+}
+
+function parseSkillEvalSummary(
+  raw: any,
+  options: DashboardSkillEvalOptions = {}
+): DashboardSkillEvalSummary {
+  const skills: DashboardSkillEvalSkillSummary[] = Array.isArray(raw?.skills)
+    ? raw.skills.map((item: any) => ({
+        skillName: String(item.skillName ?? "unknown"),
+        ...(item.skillVersion ? { skillVersion: String(item.skillVersion) } : {}),
+        runs: numberValue(item.runs),
+        passRate: numberValue(item.passRate),
+        resultPassRate: numberValue(item.resultPassRate),
+        averageScore: numberValue(item.averageScore),
+        averageProcessScore: numberValue(item.averageProcessScore),
+        averageOutcomeScore: numberValue(item.averageOutcomeScore),
+        averageResultScore: numberValue(item.averageResultScore),
+        averageToolCalls: numberValue(item.averageToolCalls),
+        averageModelCalls: numberValue(item.averageModelCalls),
+        averageInputTokens: numberValue(item.averageInputTokens),
+        averageOutputTokens: numberValue(item.averageOutputTokens),
+        averagePromptInputTokens: numberValue(item.averagePromptInputTokens),
+        averageTotalTokens: numberValue(item.averageTotalTokens),
+        averagePeakInputTokens: numberValue(item.averagePeakInputTokens),
+        averageDurationMs: numberValue(item.averageDurationMs),
+        validationRate: numberValue(item.validationRate),
+        outputSignalRate: numberValue(item.outputSignalRate),
+        dangerRate: numberValue(item.dangerRate),
+        failureCount: numberValue(item.failureCount),
+        lastRunAt: String(item.lastRunAt ?? "")
+      }))
+    : []
+
+  const allRecent: DashboardSkillEvalRun[] = Array.isArray(raw?.recent)
+    ? raw.recent.map((item: any) => ({
+        traceId: String(item.traceId ?? ""),
+        threadId: String(item.threadId ?? ""),
+        startedAt: String(item.startedAt ?? ""),
+        endedAt: String(item.endedAt ?? ""),
+        userMessage: String(item.userMessage ?? ""),
+        skillName: String(item.skillName ?? "unknown"),
+        ...(item.skillVersion ? { skillVersion: String(item.skillVersion) } : {}),
+        rawSkillName: String(item.rawSkillName ?? ""),
+        outcome: String(item.outcome ?? "unknown"),
+        processScore: numberValue(item.processScore),
+        outcomeScore: numberValue(item.outcomeScore),
+        score: numberValue(item.score),
+        outcomePass: item.outcomePass === true,
+        pass: item.pass === true,
+        resultScore: numberValue(item.resultScore),
+        resultPass: item.resultPass === true,
+        totalToolCalls: numberValue(item.totalToolCalls),
+        modelCallCount: numberValue(item.modelCallCount),
+        totalInputTokens: numberValue(item.totalInputTokens),
+        totalOutputTokens: numberValue(item.totalOutputTokens),
+        promptInputTokens: numberValue(item.promptInputTokens),
+        totalTokens: numberValue(item.totalTokens),
+        cacheReadTokens: numberValue(item.cacheReadTokens),
+        cacheCreationTokens: numberValue(item.cacheCreationTokens),
+        peakInputTokens: numberValue(item.peakInputTokens),
+        errorCount: numberValue(item.errorCount),
+        durationMs: numberValue(item.durationMs),
+        checks: parseSkillEvalChecks(item.checks),
+        outcomeChecks: parseSkillEvalChecks(item.outcomeChecks),
+        resultChecks: parseSkillEvalChecks(item.resultChecks),
+        warnings: Array.isArray(item.warnings) ? item.warnings.map(String) : [],
+        outcomeWarnings: Array.isArray(item.outcomeWarnings) ? item.outcomeWarnings.map(String) : [],
+        resultWarnings: Array.isArray(item.resultWarnings) ? item.resultWarnings.map(String) : [],
+        resultIssues: Array.isArray(item.resultIssues) ? item.resultIssues.map(String) : [],
+        resultArtifacts: parseSkillEvalArtifacts(item.resultArtifacts),
+        resultGenerated: item.resultGenerated === true,
+        traceDetail: parseDashboardTraceDetail(item.traceDetail),
+        evidence: {
+          finalResponseLength: numberValue(item.evidence?.finalResponseLength),
+          changedFiles: numberValue(item.evidence?.changedFiles),
+          validationCommands: numberValue(item.evidence?.validationCommands),
+          artifactSignals: numberValue(item.evidence?.artifactSignals),
+          dangerousCommands: numberValue(item.evidence?.dangerousCommands),
+          subagentRuns: numberValue(item.evidence?.subagentRuns),
+          subagentResultLength: numberValue(item.evidence?.subagentResultLength),
+          subagentFailed: numberValue(item.evidence?.subagentFailed),
+          toolResultErrors: numberValue(item.evidence?.toolResultErrors)
+        }
+      }))
+    : []
+  const hasBackendPagination =
+    raw?.recentTotal !== undefined || raw?.recentPage !== undefined || raw?.recentPageSize !== undefined
+  const requestedPage = Math.max(1, numberValue(options.recentPage) || 1)
+  const requestedPageSize = Math.max(
+    1,
+    numberValue(options.recentPageSize) || SKILL_EVAL_RECENT_PAGE_SIZE
+  )
+  const recentPageSize = hasBackendPagination
+    ? Math.max(1, numberValue(raw?.recentPageSize) || requestedPageSize)
+    : requestedPageSize
+  const recentTotal = hasBackendPagination
+    ? numberValue(raw?.recentTotal ?? allRecent.length)
+    : allRecent.length
+  const recentTotalPages = Math.max(1, Math.ceil(recentTotal / recentPageSize))
+  const recentPage = hasBackendPagination
+    ? Math.max(1, numberValue(raw?.recentPage) || requestedPage)
+    : Math.min(requestedPage, recentTotalPages)
+  const recentOffset = (recentPage - 1) * recentPageSize
+  const recent = hasBackendPagination
+    ? allRecent
+    : allRecent.slice(recentOffset, recentOffset + recentPageSize)
+
+  return {
+    generatedAt: String(raw?.generatedAt ?? ""),
+    totalTraceHits: numberValue(raw?.totalTraceHits),
+    evaluatedTraceCount: numberValue(raw?.evaluatedTraceCount),
+    sampledTraceCount: numberValue(raw?.sampledTraceCount),
+    recentTotal,
+    recentPage,
+    recentPageSize,
+    totalRuns: numberValue(raw?.totalRuns),
+    totalSkills: numberValue(raw?.totalSkills),
+    passRate: numberValue(raw?.passRate),
+    resultPassRate: numberValue(raw?.resultPassRate),
+    averageScore: numberValue(raw?.averageScore),
+    averageProcessScore: numberValue(raw?.averageProcessScore),
+    averageOutcomeScore: numberValue(raw?.averageOutcomeScore),
+    averageResultScore: numberValue(raw?.averageResultScore),
+    averageToolCalls: numberValue(raw?.averageToolCalls),
+    averageModelCalls: numberValue(raw?.averageModelCalls),
+    totalInputTokens: numberValue(raw?.totalInputTokens),
+    totalOutputTokens: numberValue(raw?.totalOutputTokens),
+    totalPromptInputTokens: numberValue(raw?.totalPromptInputTokens),
+    totalTokens: numberValue(raw?.totalTokens),
+    averageInputTokens: numberValue(raw?.averageInputTokens),
+    averageOutputTokens: numberValue(raw?.averageOutputTokens),
+    averagePromptInputTokens: numberValue(raw?.averagePromptInputTokens),
+    averageTotalTokens: numberValue(raw?.averageTotalTokens),
+    averagePeakInputTokens: numberValue(raw?.averagePeakInputTokens),
+    averageDurationMs: numberValue(raw?.averageDurationMs),
+    skills,
+    recent
+  }
+}
+
 /* eslint-enable @typescript-eslint/no-explicit-any */
+
+function emptySkillEvalSummary(): DashboardSkillEvalSummary {
+  return {
+    generatedAt: new Date().toISOString(),
+    totalTraceHits: 0,
+    evaluatedTraceCount: 0,
+    sampledTraceCount: 0,
+    recentTotal: 0,
+    recentPage: 1,
+    recentPageSize: SKILL_EVAL_RECENT_PAGE_SIZE,
+    totalRuns: 0,
+    totalSkills: 0,
+    passRate: 0,
+    resultPassRate: 0,
+    averageScore: 0,
+    averageProcessScore: 0,
+    averageOutcomeScore: 0,
+    averageResultScore: 0,
+    averageToolCalls: 0,
+    averageModelCalls: 0,
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
+    totalPromptInputTokens: 0,
+    totalTokens: 0,
+    averageInputTokens: 0,
+    averageOutputTokens: 0,
+    averagePromptInputTokens: 0,
+    averageTotalTokens: 0,
+    averagePeakInputTokens: 0,
+    averageDurationMs: 0,
+    skills: [],
+    recent: []
+  }
+}
+
+async function loadSkillEvalSummarySafely(
+  range: TimeRange,
+  options: DashboardSkillEvalOptions = {}
+): Promise<{ success: boolean; data?: unknown; error?: string }> {
+  try {
+    if (typeof window.api.dashboard.skillEvalSummary !== "function") {
+      return { success: true, data: emptySkillEvalSummary() }
+    }
+    return await window.api.dashboard.skillEvalSummary(range, {
+      limit: 500,
+      recentPage: options.recentPage ?? 1,
+      recentPageSize: options.recentPageSize ?? SKILL_EVAL_RECENT_PAGE_SIZE
+    })
+  } catch (error) {
+    console.warn("[Dashboard] skillEvalSummary unavailable, using empty data:", error)
+    return { success: true, data: emptySkillEvalSummary() }
+  }
+}
 
 // ─────────────────────────────────────────────────────────
 // Hook
@@ -858,6 +1252,7 @@ export function useDashboard() {
   const [selectedUpperOrgLv1, setSelectedUpperOrgLv1] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [userStatsLoading, setUserStatsLoading] = useState(false)
+  const [skillEvalLoading, setSkillEvalLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const [overview, setOverview] = useState<OverviewData | null>(null)
@@ -865,23 +1260,27 @@ export function useDashboard() {
   const [userStats, setUserStats] = useState<UserStatsData | null>(null)
   const [productivity, setProductivity] = useState<ProductivityData | null>(null)
   const [feedback, setFeedback] = useState<FeedbackData | null>(null)
+  const [skillEval, setSkillEval] = useState<DashboardSkillEvalSummary | null>(null)
 
   const fetchIdRef = useRef(0)
   const userStatsFetchIdRef = useRef(0)
+  const skillEvalFetchIdRef = useRef(0)
 
   const fetchAll = useCallback(async (r: TimeRange, g: Granularity, orgLv1: string | null) => {
     const id = ++fetchIdRef.current
     const userStatsId = ++userStatsFetchIdRef.current
+    const skillEvalId = ++skillEvalFetchIdRef.current
     setLoading(true)
     setError(null)
 
     try {
-      const [ovRes, msRes, usRes, prRes, fbRes] = await Promise.all([
+      const [ovRes, msRes, usRes, prRes, fbRes, seRes] = await Promise.all([
         window.api.dashboard.overview(r, g),
         window.api.dashboard.modelStats(r, g),
         window.api.dashboard.userStats(r, g, { upperOrgLv1: orgLv1 }),
         window.api.dashboard.productivity(r, g),
-        window.api.dashboard.feedback(r, g)
+        window.api.dashboard.feedback(r, g),
+        loadSkillEvalSummarySafely(r)
       ])
 
       // Stale check
@@ -892,6 +1291,7 @@ export function useDashboard() {
       if (!usRes.success) throw new Error(usRes.error ?? "获取用户数据失败")
       if (!prRes.success) throw new Error(prRes.error ?? "获取生产力数据失败")
       if (!fbRes.success) throw new Error(fbRes.error ?? "获取反馈数据失败")
+      if (!seRes.success) throw new Error(seRes.error ?? "获取 Skill 评估数据失败")
 
       setOverview(parseOverview(ovRes.data, g))
       setModelStats(parseModelStats(msRes.data))
@@ -900,6 +1300,12 @@ export function useDashboard() {
         setUserStats(parseUserStats(usRes.data, orgLv1))
       }
       setFeedback(parseFeedback(fbRes.data, g))
+      if (skillEvalId === skillEvalFetchIdRef.current) {
+      setSkillEval(parseSkillEvalSummary(seRes.data, {
+        recentPage: 1,
+        recentPageSize: SKILL_EVAL_RECENT_PAGE_SIZE
+      }))
+      }
     } catch (e) {
       if (id !== fetchIdRef.current) return
       setError(e instanceof Error ? e.message : String(e))
@@ -926,10 +1332,37 @@ export function useDashboard() {
     }
   }, [])
 
+  const fetchSkillEvalPage = useCallback(async (page: number) => {
+    const id = ++skillEvalFetchIdRef.current
+    setSkillEvalLoading(true)
+    setError(null)
+
+    try {
+      const result = await loadSkillEvalSummarySafely(range, {
+        recentPage: page,
+        recentPageSize: SKILL_EVAL_RECENT_PAGE_SIZE
+      })
+      if (id !== skillEvalFetchIdRef.current) return
+      if (!result.success) throw new Error(result.error ?? "获取 Skill 评估数据失败")
+      setSkillEval(parseSkillEvalSummary(result.data, {
+        recentPage: page,
+        recentPageSize: SKILL_EVAL_RECENT_PAGE_SIZE
+      }))
+    } catch (e) {
+      if (id !== skillEvalFetchIdRef.current) return
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      if (id === skillEvalFetchIdRef.current) setSkillEvalLoading(false)
+    }
+  }, [range])
+
   // Auto-fetch on range/granularity change
   useEffect(() => {
-    fetchAll(range, granularity, selectedUpperOrgLv1)
-  }, [range, granularity, fetchAll])
+    const timer = window.setTimeout(() => {
+      void fetchAll(range, granularity, selectedUpperOrgLv1)
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [range, granularity, selectedUpperOrgLv1, fetchAll])
 
   const changeGranularity = useCallback((g: Granularity) => {
     setGranularity(g)
@@ -978,17 +1411,20 @@ export function useDashboard() {
     selectedUpperOrgLv1,
     loading,
     userStatsLoading,
+    skillEvalLoading,
     error,
     overview,
     modelStats,
     userStats,
     productivity,
     feedback,
+    skillEval,
     changeGranularity,
     navigate,
     setCustomRange,
     setRange,
     refresh,
+    fetchSkillEvalPage,
     drillDownUserOrg,
     resetUserOrgDrilldown
   }

@@ -1,10 +1,51 @@
 import type { AgentTrace, TraceNode, TraceToolCall } from "../trace/types"
-import type {
-  SkillEvalCheck,
-  SkillResultArtifact,
-  SkillResultEvalRecord,
-  SkillResultEvidence
-} from "../../../shared/skill-eval-types"
+import type { SkillEvalCheck } from "./evaluator"
+
+export type SkillResultEvalStatus = "completed" | "failed"
+
+export interface SkillResultArtifact {
+  type: "response" | "file" | "command" | "screenshot" | "log" | "other"
+  label: string
+  path?: string
+  url?: string
+  detail?: Record<string, unknown>
+}
+
+export interface SkillResultEvidence {
+  finalResponseLength: number
+  changedFiles: string[]
+  validationCommands: string[]
+  artifactSignals: string[]
+  dangerousCommands: string[]
+  subagentRuns: number
+  subagentCompleted: number
+  subagentFailed: number
+  subagentResultLength: number
+  toolResultErrors: number
+  errorNodes: number
+  modelCallCount: number
+  toolCallCount: number
+}
+
+export interface SkillResultEvalRecord {
+  id: string
+  traceId: string
+  threadId: string
+  skillName: string
+  skillVersion?: string
+  rawSkillName: string
+  status: SkillResultEvalStatus
+  score: number
+  pass: boolean
+  checks: SkillEvalCheck[]
+  artifacts: SkillResultArtifact[]
+  evidence: SkillResultEvidence
+  issues: string[]
+  warnings: string[]
+  startedAt: string
+  endedAt: string
+  evaluatedAt: string
+}
 
 const PASS_THRESHOLD = 0.7
 const MIN_FINAL_RESPONSE_CHARS = 20
@@ -47,6 +88,13 @@ const ARTIFACT_TOOL_NAMES = new Set([
   "edit_file",
   "apply_patch",
   "browser_playwright",
+  "prepare_save_code_exec_tool",
+  "save_code_exec_tool"
+])
+const CHANGED_FILE_TOOL_NAMES = new Set([
+  "write_file",
+  "edit_file",
+  "apply_patch",
   "prepare_save_code_exec_tool",
   "save_code_exec_tool"
 ])
@@ -127,7 +175,12 @@ function getFinalAssistantText(trace: AgentTrace): string {
   const nodes = Array.isArray(trace.nodes) ? trace.nodes : []
   const root = nodes.find((node) => node.type === "trace")
   const terminalMessages = nodes.filter(
-    (node) => node.type === "message" && node.parentId === root?.id && node.name === "Run Completed"
+    (node) =>
+      node.type === "message" &&
+      node.parentId === root?.id &&
+      (node.name === "Run Completed" ||
+        node.name === "Run Error" ||
+        node.name === "Run Cancelled")
   )
   const terminal = terminalMessages[terminalMessages.length - 1]
   if (typeof terminal?.output === "string") return terminal.output.trim()
@@ -204,7 +257,7 @@ function collectEvidence(trace: AgentTrace): SkillResultEvidence {
     if (command && isDangerousCommand(command)) dangerousCommands.push(command)
 
     const pathSignal = getPathSignal(call)
-    if (pathSignal && /(?:write|edit|patch|save|create|screenshot|render)/i.test(name)) {
+    if (pathSignal && CHANGED_FILE_TOOL_NAMES.has(name)) {
       changedFiles.add(pathSignal)
     }
 

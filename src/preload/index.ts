@@ -841,51 +841,6 @@ const api = {
       return ipcRenderer.invoke("skills:delete", skillPath)
     }
   },
-  skillEval: {
-    summary: (opts?: { limit?: number }) => ipcRenderer.invoke("skillEval:summary", opts),
-    records: (opts?: {
-      limit?: number
-      skillName?: string
-      skillVersion?: string
-      threadId?: string
-      pass?: boolean
-    }) => ipcRenderer.invoke("skillEval:records", opts),
-    resultRecords: (opts?: {
-      limit?: number
-      skillName?: string
-      skillVersion?: string
-      threadId?: string
-      traceId?: string
-      pass?: boolean
-      status?: "completed" | "failed"
-    }) => ipcRenderer.invoke("skillEval:resultRecords", opts),
-    clear: (): Promise<void> => ipcRenderer.invoke("skillEval:clear") as Promise<void>,
-    filePath: (): Promise<string> => ipcRenderer.invoke("skillEval:filePath") as Promise<string>,
-    resultFilePath: (): Promise<string> =>
-      ipcRenderer.invoke("skillEval:resultFilePath") as Promise<string>,
-    onUpdated: (
-      callback: (payload: { traceId: string; recordCount: number }) => void
-    ): (() => void) => {
-      const handler = (_: unknown, payload: { traceId: string; recordCount: number }): void => {
-        callback(payload)
-      }
-      ipcRenderer.on("skillEval:updated", handler)
-      return () => {
-        ipcRenderer.removeListener("skillEval:updated", handler)
-      }
-    },
-    onResultUpdated: (
-      callback: (payload: { traceId: string; recordCount: number }) => void
-    ): (() => void) => {
-      const handler = (_: unknown, payload: { traceId: string; recordCount: number }): void => {
-        callback(payload)
-      }
-      ipcRenderer.on("skillEval:resultUpdated", handler)
-      return () => {
-        ipcRenderer.removeListener("skillEval:resultUpdated", handler)
-      }
-    }
-  },
   mcp: {
     list: (): Promise<McpConnectorConfig[]> => ipcRenderer.invoke("mcp:list"),
     create: (config: McpConnectorUpsert): Promise<{ id: string }> =>
@@ -1861,6 +1816,11 @@ const api = {
       skillName: string
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:skillUserStats", range, granularity, skillName),
+    skillEvalSummary: (
+      range: { from: string; to: string },
+      options?: { limit?: number; recentPage?: number; recentPageSize?: number }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:skillEvalSummary", range, options),
     userProfiles: (
       sapIds: string[]
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
@@ -1878,21 +1838,21 @@ const api = {
     skillRecentTraces: (
       skill: string,
       range: { from: string; to: string },
-      limit?: number
+      options?: number | { page?: number; pageSize?: number }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:skillRecentTraces", skill, range, limit),
+      ipcRenderer.invoke("dashboard:skillRecentTraces", skill, range, options),
     marketSkillRecentTraces: (
       skill: string,
       range: { from: string; to: string },
-      limit?: number
+      options?: number | { page?: number; pageSize?: number }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:marketSkillRecentTraces", skill, range, limit),
+      ipcRenderer.invoke("dashboard:marketSkillRecentTraces", skill, range, options),
     skillDetail: (
       skill: string,
       range: { from: string; to: string },
-      limit?: number
+      options?: number | { page?: number; pageSize?: number }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:skillDetail", skill, range, limit),
+      ipcRenderer.invoke("dashboard:skillDetail", skill, range, options),
     commitDetails: (
       range: { from: string; to: string },
       options?: { page?: number; pageSize?: number; pushedOnly?: boolean }

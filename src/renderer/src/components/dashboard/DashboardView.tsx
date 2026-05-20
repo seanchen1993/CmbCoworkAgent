@@ -8,6 +8,7 @@ import {
   RefreshCw,
   Loader2,
   AlertCircle,
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
   Download,
@@ -15,11 +16,21 @@ import {
   Users
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle
+} from "@/components/ui/dialog"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { formatRelativeTime, truncate } from "@/lib/utils"
 import {
   formatTopUserOrgName,
   useDashboard,
   type DashboardCommitDetailsData,
+  type DashboardSkillEvalRun,
+  type DashboardSkillEvalSummary,
   type DashboardSkillDetail,
   type DashboardUserDetail,
   type DashboardUserListData,
@@ -288,15 +299,21 @@ const EMPTY_SKILL_DETAIL: DashboardSkillDetail = {
     pushedAdoptionRate: null,
     adoptionRate: null
   },
-  traces: []
+  traces: [],
+  total: 0,
+  page: 1,
+  pageSize: 10
 }
 
 const USER_LIST_PAGE_SIZE = 20
+const SKILL_TRACE_PAGE_SIZE = 10
 
 type DashboardSubPage =
   | { kind: "main" }
   | { kind: "user-list" }
   | { kind: "user-detail"; sapId: string; backTo: "main" | "user-list" }
+
+type DashboardMainTab = "overview" | "skill-eval"
 
 function formatNumber(value: number): string {
   return Math.round(value).toLocaleString("zh-CN")
@@ -308,6 +325,17 @@ function formatCompactTokens(tokens: number): string {
   return String(Math.round(tokens))
 }
 
+function formatSkillEvalTokens(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0"
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
+  if (value >= 1000) return `${(value / 1000).toFixed(1)}K`
+  return `${Math.round(value)}`
+}
+
+function formatSkillEvalPercent(value: number): string {
+  return `${Math.round(value * 100)}%`
+}
+
 function formatDateTime(iso?: string): string {
   if (!iso) return "—"
   const date = new Date(iso)
@@ -315,10 +343,17 @@ function formatDateTime(iso?: string): string {
   return date.toLocaleString("zh-CN")
 }
 
+function formatDateOnly(iso?: string): string {
+  if (!iso) return "—"
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return iso
+  return date.toLocaleDateString("zh-CN")
+}
+
 function outcomeLabel(outcome: string): string {
   if (outcome === "success") return "成功"
-  if (outcome === "error") return "错误"
-  if (outcome === "cancelled") return "取消"
+  if (outcome === "error") return "失败"
+  if (outcome === "cancelled") return "已取消"
   return outcome || "未知"
 }
 
@@ -621,6 +656,559 @@ function UserDetailPage({
   )
 }
 
+function DashboardTabBar({
+  activeTab,
+  onChange
+}: {
+  activeTab: DashboardMainTab
+  onChange: (tab: DashboardMainTab) => void
+}): React.JSX.Element {
+  const tabs: Array<{ id: DashboardMainTab; label: string }> = [
+    { id: "overview", label: "经营概览" },
+    { id: "skill-eval", label: "Skill 评估" }
+  ]
+
+  return (
+    <div className="flex items-center gap-1 border-b border-border px-6 pt-4">
+      {tabs.map((tab) => (
+        <button
+          key={tab.id}
+          type="button"
+          onClick={() => onChange(tab.id)}
+          className={`border-b-2 px-3 py-2 text-sm font-medium transition-colors ${
+            activeTab === tab.id
+              ? "border-primary text-foreground"
+              : "border-transparent text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          {tab.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function SkillEvalStatTile({
+  label,
+  value
+}: {
+  label: string
+  value: string | number
+}): React.JSX.Element {
+  return (
+    <div className="border border-border bg-background px-4 py-3">
+      <div className="text-[11px] text-muted-foreground">{label}</div>
+      <div className="mt-1 text-xl font-semibold text-foreground tabular-nums">{value}</div>
+    </div>
+  )
+}
+
+function skillEvalVersionLabel(skillName: string, skillVersion?: string): string {
+  return skillVersion ? `${skillName} ${skillVersion}` : `${skillName} 未标版本`
+}
+
+function skillEvalKey(skillName: string, skillVersion?: string): string {
+  return `${skillName}:${skillVersion ?? ""}`
+}
+
+function skillEvalTimeValue(iso?: string): number {
+  if (!iso) return 0
+  const value = new Date(iso).getTime()
+  return Number.isNaN(value) ? 0 : value
+}
+
+function getLatestSkillEvalKey(data: DashboardSkillEvalSummary | null): string | null {
+  if (!data) return null
+
+  if (data.skills.length > 0) {
+    const latestSkill = data.skills.reduce((latest, current) =>
+      skillEvalTimeValue(current.lastRunAt) > skillEvalTimeValue(latest.lastRunAt) ? current : latest
+    )
+    return skillEvalKey(latestSkill.skillName, latestSkill.skillVersion)
+  }
+
+  const latestRun = data.recent[0]
+  return latestRun ? skillEvalKey(latestRun.skillName, latestRun.skillVersion) : null
+}
+
+function SkillEvalSkillRow({
+  skill,
+  active,
+  onClick
+}: {
+  skill: DashboardSkillEvalSummary["skills"][number]
+  active: boolean
+  onClick: () => void
+}): React.JSX.Element {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`grid w-full grid-cols-[minmax(0,1fr)_40px_48px_56px_50px_52px] items-center gap-2 border-b border-border px-4 py-3 text-left text-sm hover:bg-muted/35 ${
+        active ? "bg-muted/45" : ""
+      }`}
+    >
+      <div className="min-w-0">
+        <div className="truncate font-medium text-foreground">{skill.skillName}</div>
+        <div className="mt-0.5 text-[11px] text-muted-foreground">
+          {skill.skillVersion ?? "未标版本"} · {formatRelativeTime(skill.lastRunAt)}
+        </div>
+      </div>
+      <div className="text-right tabular-nums text-muted-foreground">{skill.runs}</div>
+      <div className="text-right tabular-nums text-muted-foreground">
+        {formatSkillEvalPercent(skill.passRate)}
+      </div>
+      <div className="text-right tabular-nums text-muted-foreground">
+        {formatSkillEvalPercent(skill.averageOutcomeScore || skill.averageScore)}
+      </div>
+      <div className="text-right tabular-nums text-foreground">
+        {formatSkillEvalPercent(skill.averageScore)}
+      </div>
+      <div className="text-right tabular-nums text-muted-foreground">
+        {formatSkillEvalTokens(skill.averageTotalTokens)}
+      </div>
+    </button>
+  )
+}
+
+function SkillEvalRunRow({
+  run,
+  onOpenTrace
+}: {
+  run: DashboardSkillEvalRun
+  onOpenTrace: (run: DashboardSkillEvalRun) => void
+}): React.JSX.Element {
+  const warnings = [...run.warnings, ...run.outcomeWarnings, ...run.resultWarnings].slice(0, 2)
+  const checks = [...run.checks, ...run.outcomeChecks]
+  const cacheTokens = run.cacheReadTokens + run.cacheCreationTokens
+
+  return (
+    <button
+      type="button"
+      onClick={() => onOpenTrace(run)}
+      className="w-full border-b border-border px-4 py-3 text-left transition-colors hover:bg-muted/35"
+    >
+      <div className="flex items-start gap-3">
+        {run.pass ? (
+          <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-status-nominal" />
+        ) : (
+          <AlertCircle className="mt-0.5 size-4 shrink-0 text-status-critical" />
+        )}
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-medium text-foreground">{run.skillName}</span>
+            {run.skillVersion && <Badge variant="outline">{run.skillVersion}</Badge>}
+            <Badge variant={run.pass ? "nominal" : "critical"}>
+              {formatSkillEvalPercent(run.score)}
+            </Badge>
+            <span className="text-[11px] text-muted-foreground">
+              {formatRelativeTime(run.startedAt)}
+            </span>
+          </div>
+          <div className="mt-1 truncate text-sm text-muted-foreground" title={run.userMessage}>
+            {truncate(run.userMessage, 140)}
+          </div>
+          <div className="mt-2 flex flex-wrap gap-3 text-[11px] text-muted-foreground">
+            <span>工具 {run.totalToolCalls}</span>
+            <span>模型调用 {run.modelCallCount}</span>
+            <span title="非缓存输入 Token">输入 {formatSkillEvalTokens(run.totalInputTokens)}</span>
+            {cacheTokens > 0 && (
+              <span title="缓存读取 + 缓存写入 Token">缓存输入 {formatSkillEvalTokens(cacheTokens)}</span>
+            )}
+            <span title="输入 + 缓存读取 + 缓存写入">
+              Prompt {formatSkillEvalTokens(run.promptInputTokens)}
+            </span>
+            <span>输出 {formatSkillEvalTokens(run.totalOutputTokens)}</span>
+            <span title="单次模型调用看到的最大输入 Token">
+              峰值输入 {formatSkillEvalTokens(run.peakInputTokens)}
+            </span>
+            <span>错误 {run.errorCount}</span>
+            <span>{formatDuration(run.durationMs)}</span>
+            <span>{outcomeLabel(run.outcome)}</span>
+            <span title={run.traceId}>链路 {run.traceId.slice(0, 8)}</span>
+          </div>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            <Badge variant="outline" className="normal-case tracking-normal">
+              过程 {formatSkillEvalPercent(run.processScore)}
+            </Badge>
+            <Badge
+              variant={run.outcomePass === false ? "warning" : "nominal"}
+              className="normal-case tracking-normal"
+            >
+              结束 {formatSkillEvalPercent(run.outcomeScore)}
+            </Badge>
+            <Badge
+              variant={run.resultGenerated ? (run.resultPass ? "nominal" : "warning") : "outline"}
+              className="normal-case tracking-normal"
+            >
+              结果 {run.resultGenerated ? formatSkillEvalPercent(run.resultScore) : "待生成"}
+            </Badge>
+            <Badge variant="outline" className="normal-case tracking-normal">
+              Token {formatSkillEvalTokens(run.totalTokens)}
+            </Badge>
+          </div>
+          {warnings.length > 0 && (
+            <div className="mt-2 flex items-center gap-1.5 text-[11px] text-status-warning">
+              <AlertCircle className="size-3.5" />
+              <span>{warnings.join(" · ")}</span>
+            </div>
+          )}
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {checks.map((check) => (
+              <Badge
+                key={check.name}
+                variant={check.ok ? "nominal" : "warning"}
+                className="normal-case tracking-normal"
+              >
+                {check.label}
+              </Badge>
+            ))}
+            {run.resultChecks.map((check) => (
+              <Badge
+                key={`result:${check.name}`}
+                variant={check.ok ? "nominal" : "warning"}
+                className="normal-case tracking-normal"
+              >
+                结果: {check.label}
+              </Badge>
+            ))}
+          </div>
+          {run.resultGenerated ? (
+            <div className="mt-2 flex flex-wrap gap-3 text-[11px] text-muted-foreground">
+              <span>最终响应 {run.evidence.finalResponseLength} 字</span>
+              <span>产物信号 {run.evidence.artifactSignals}</span>
+              <span>改动文件 {run.evidence.changedFiles}</span>
+              <span>验证动作 {run.evidence.validationCommands}</span>
+              {run.evidence.subagentRuns > 0 && (
+                <>
+                  <span>子 agent {run.evidence.subagentRuns}</span>
+                  <span>子结果 {run.evidence.subagentResultLength} 字</span>
+                  <span>子失败 {run.evidence.subagentFailed}</span>
+                </>
+              )}
+              <span>风险命令 {run.evidence.dangerousCommands}</span>
+              <span>结果错误 {run.evidence.toolResultErrors}</span>
+            </div>
+          ) : (
+            <div className="mt-2 text-[11px] text-muted-foreground">
+              通用结果评估会在新运行结束后异步生成
+            </div>
+          )}
+          {run.resultIssues.length > 0 && (
+            <div className="mt-2 text-[11px] text-status-critical">
+              {run.resultIssues.slice(0, 3).join(" · ")}
+            </div>
+          )}
+          {run.resultArtifacts.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {run.resultArtifacts.slice(0, 6).map((artifact, index) => (
+                <Badge
+                  key={`${artifact.type}:${artifact.path ?? artifact.url ?? index}`}
+                  variant="outline"
+                  className="normal-case tracking-normal"
+                  title={artifact.path ?? artifact.url ?? JSON.stringify(artifact.detail ?? {})}
+                >
+                  {artifact.label}
+                </Badge>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="shrink-0 text-right text-[11px] text-muted-foreground" title={run.traceId}>
+          详情
+        </div>
+      </div>
+    </button>
+  )
+}
+
+function SkillEvalRunSummary({ run }: { run: DashboardSkillEvalRun }): React.JSX.Element {
+  const warnings = [...run.warnings, ...run.outcomeWarnings, ...run.resultWarnings].slice(0, 3)
+  const checks = [...run.checks, ...run.outcomeChecks]
+  const cacheTokens = run.cacheReadTokens + run.cacheCreationTokens
+
+  return (
+    <div className="border-b border-border bg-background px-5 py-4">
+      <div className="flex items-start gap-3">
+        {run.pass ? (
+          <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-status-nominal" />
+        ) : (
+          <AlertCircle className="mt-0.5 size-4 shrink-0 text-status-critical" />
+        )}
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-medium text-foreground">{run.skillName}</span>
+            {run.skillVersion && <Badge variant="outline">{run.skillVersion}</Badge>}
+            <Badge variant={run.pass ? "nominal" : "critical"}>
+              {formatSkillEvalPercent(run.score)}
+            </Badge>
+            <span className="text-[11px] text-muted-foreground">{formatRelativeTime(run.startedAt)}</span>
+          </div>
+          <div className="mt-1 truncate text-sm text-muted-foreground" title={run.userMessage}>
+            {truncate(run.userMessage, 180)}
+          </div>
+          <div className="mt-2 flex flex-wrap gap-3 text-[11px] text-muted-foreground">
+            <span>工具 {run.totalToolCalls}</span>
+            <span>模型调用 {run.modelCallCount}</span>
+            <span title="非缓存输入 Token">输入 {formatSkillEvalTokens(run.totalInputTokens)}</span>
+            {cacheTokens > 0 && (
+              <span title="缓存读取 + 缓存写入 Token">缓存输入 {formatSkillEvalTokens(cacheTokens)}</span>
+            )}
+            <span title="输入 + 缓存读取 + 缓存写入">Prompt {formatSkillEvalTokens(run.promptInputTokens)}</span>
+            <span>输出 {formatSkillEvalTokens(run.totalOutputTokens)}</span>
+            <span title="单次模型调用看到的最大输入 Token">峰值输入 {formatSkillEvalTokens(run.peakInputTokens)}</span>
+            <span>错误 {run.errorCount}</span>
+            <span>{formatDuration(run.durationMs)}</span>
+            <span>{outcomeLabel(run.outcome)}</span>
+            <span title={run.traceId}>链路 {run.traceId.slice(0, 8)}</span>
+          </div>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            <Badge variant="outline" className="normal-case tracking-normal">
+              过程 {formatSkillEvalPercent(run.processScore)}
+            </Badge>
+            <Badge
+              variant={run.outcomePass === false ? "warning" : "nominal"}
+              className="normal-case tracking-normal"
+            >
+              结束 {formatSkillEvalPercent(run.outcomeScore)}
+            </Badge>
+            <Badge
+              variant={run.resultGenerated ? (run.resultPass ? "nominal" : "warning") : "outline"}
+              className="normal-case tracking-normal"
+            >
+              结果 {run.resultGenerated ? formatSkillEvalPercent(run.resultScore) : "待生成"}
+            </Badge>
+            <Badge variant="outline" className="normal-case tracking-normal">
+              Token {formatSkillEvalTokens(run.totalTokens)}
+            </Badge>
+          </div>
+          {warnings.length > 0 && (
+            <div className="mt-2 flex items-center gap-1.5 text-[11px] text-status-warning">
+              <AlertCircle className="size-3.5" />
+              <span>{warnings.join(" · ")}</span>
+            </div>
+          )}
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {checks.map((check) => (
+              <Badge
+                key={check.name}
+                variant={check.ok ? "nominal" : "warning"}
+                className="normal-case tracking-normal"
+              >
+                {check.label}
+              </Badge>
+            ))}
+            {run.resultChecks.map((check) => (
+              <Badge
+                key={`result:${check.name}`}
+                variant={check.ok ? "nominal" : "warning"}
+                className="normal-case tracking-normal"
+              >
+                结果: {check.label}
+              </Badge>
+            ))}
+          </div>
+          {run.resultGenerated ? (
+            <div className="mt-2 flex flex-wrap gap-3 text-[11px] text-muted-foreground">
+              <span>最终响应 {run.evidence.finalResponseLength} 字</span>
+              <span>产物信号 {run.evidence.artifactSignals}</span>
+              <span>改动文件 {run.evidence.changedFiles}</span>
+              <span>验证动作 {run.evidence.validationCommands}</span>
+              {run.evidence.subagentRuns > 0 && (
+                <>
+                  <span>子 agent {run.evidence.subagentRuns}</span>
+                  <span>子结果 {run.evidence.subagentResultLength} 字</span>
+                  <span>子失败 {run.evidence.subagentFailed}</span>
+                </>
+              )}
+              <span>风险命令 {run.evidence.dangerousCommands}</span>
+              <span>结果错误 {run.evidence.toolResultErrors}</span>
+            </div>
+          ) : (
+            <div className="mt-2 text-[11px] text-muted-foreground">
+              通用结果评估会在新运行结束后异步生成
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function SkillEvalDashboardPanel({
+  data,
+  loading,
+  range,
+  onRecentPageChange,
+  onOpenTrace,
+  selectedSkillKey,
+  onSelectedSkillKeyChange
+}: {
+  data: DashboardSkillEvalSummary | null
+  loading: boolean
+  range: TimeRange
+  onRecentPageChange: (page: number) => void
+  onOpenTrace: (run: DashboardSkillEvalRun) => void
+  selectedSkillKey: string | null
+  onSelectedSkillKeyChange: (key: string | null) => void
+}): React.JSX.Element {
+  if (loading && !data) {
+    return <div className="py-8 text-center text-sm text-muted-foreground">加载中...</div>
+  }
+  if (!data) return <div className="py-8 text-center text-sm text-muted-foreground">暂无评估数据</div>
+
+  const recentPage = Math.max(1, data.recentPage)
+  const recentPageSize = Math.max(1, data.recentPageSize)
+  const recentTotal = Math.max(0, data.recentTotal)
+  const recentTotalPages = Math.max(1, Math.ceil(recentTotal / recentPageSize))
+  const canGoPrevious = recentPage > 1
+  const canGoNext = recentPage < recentTotalPages
+  const selectedSkill =
+    data.skills.find((skill) => skillEvalKey(skill.skillName, skill.skillVersion) === selectedSkillKey) ?? null
+  const filteredRuns = selectedSkillKey
+    ? data.recent.filter((run) => skillEvalKey(run.skillName, run.skillVersion) === selectedSkillKey)
+    : data.recent
+  const selectedRunTotal = selectedSkill?.runs ?? data.totalRuns
+  const selectedTotalTokens = selectedSkill
+    ? selectedSkill.averageTotalTokens * selectedSkill.runs
+    : data.totalTokens
+  const selectedResultRecords = selectedSkill
+    ? selectedSkill.runs
+    : data.totalRuns
+  const selectedTotalLabel = selectedSkill
+    ? `采样 ${formatNumber(selectedRunTotal)} 条`
+    : `实际最近 ${formatNumber(recentTotal)} 条`
+  const selectedAverageToolCalls = selectedSkill?.averageToolCalls ?? data.averageToolCalls
+  const selectedAverageModelCalls = selectedSkill?.averageModelCalls ?? data.averageModelCalls
+  const selectedAverageTotalTokens = selectedSkill?.averageTotalTokens ?? data.averageTotalTokens
+  const selectedAverageDurationMs = selectedSkill?.averageDurationMs ?? data.averageDurationMs
+
+  return (
+    <div className="grid min-h-[720px] grid-cols-[minmax(420px,520px)_minmax(0,1fr)] overflow-hidden rounded-xl border border-border bg-card">
+      <aside className="flex min-h-0 flex-col border-r border-border">
+        <div className="grid grid-cols-2 gap-2 border-b border-border p-4">
+          <div className="col-span-2 rounded-md border border-border bg-muted/25 px-3 py-2">
+            <div className="text-[10px] text-muted-foreground">当前统计口径</div>
+            <div className="mt-0.5 truncate text-xs font-medium text-foreground">
+              {selectedSkill
+                ? `${skillEvalVersionLabel(selectedSkill.skillName, selectedSkill.skillVersion)} · 采样统计`
+                : "全部 Skill · 采样统计"}
+            </div>
+          </div>
+          <SkillEvalStatTile label="采样运行" value={selectedRunTotal} />
+          <SkillEvalStatTile label="采样 Skill" value={selectedSkill ? 1 : data.totalSkills} />
+          <SkillEvalStatTile label="通过率" value={formatSkillEvalPercent(selectedSkill?.passRate ?? data.passRate)} />
+          <SkillEvalStatTile label="平均分" value={formatSkillEvalPercent(selectedSkill?.averageScore ?? data.averageScore)} />
+          <SkillEvalStatTile label="过程分" value={formatSkillEvalPercent(selectedSkill?.averageProcessScore ?? data.averageProcessScore ?? data.averageScore)} />
+          <SkillEvalStatTile label="结束分" value={formatSkillEvalPercent(selectedSkill?.averageOutcomeScore ?? data.averageOutcomeScore ?? data.averageScore)} />
+          <SkillEvalStatTile label="结果分" value={formatSkillEvalPercent(selectedSkill?.averageResultScore ?? data.averageResultScore)} />
+          <SkillEvalStatTile label="结果记录" value={selectedResultRecords} />
+          <SkillEvalStatTile label="总 Token" value={formatSkillEvalTokens(selectedTotalTokens)} />
+          <SkillEvalStatTile label="平均峰值输入" value={formatSkillEvalTokens(selectedSkill?.averagePeakInputTokens ?? data.averagePeakInputTokens)} />
+        </div>
+        <div className="grid grid-cols-[minmax(0,1fr)_40px_48px_56px_50px_52px] gap-2 border-b border-border px-4 py-2 text-[11px] font-medium text-muted-foreground">
+          <span>技能</span>
+          <span className="text-right">次数</span>
+          <span className="text-right">通过率</span>
+          <span className="text-right">结束</span>
+          <span className="text-right">分数</span>
+          <span className="text-right">Token</span>
+        </div>
+        <ScrollArea className="min-h-0 flex-1">
+          <button
+            type="button"
+            onClick={() => onSelectedSkillKeyChange(null)}
+            className={`w-full border-b border-border px-4 py-2 text-left text-xs text-muted-foreground hover:bg-muted/35 ${
+              selectedSkillKey === null ? "bg-muted/45 text-foreground" : ""
+            }`}
+          >
+            全部运行
+          </button>
+          {data.skills.map((skill) => {
+            const key = skillEvalKey(skill.skillName, skill.skillVersion)
+            return (
+              <SkillEvalSkillRow
+                key={key}
+                skill={skill}
+                active={selectedSkillKey === key}
+                onClick={() => onSelectedSkillKeyChange(key)}
+              />
+            )
+          })}
+        </ScrollArea>
+      </aside>
+
+      <main className="flex min-h-0 flex-col">
+        <div className="flex items-center justify-between border-b border-border px-4 py-3">
+          <div>
+            <div className="text-sm font-medium text-foreground">
+              {selectedSkill
+                ? skillEvalVersionLabel(selectedSkill.skillName, selectedSkill.skillVersion)
+                : "最近运行"}
+            </div>
+            <div className="text-[11px] text-muted-foreground">
+              共 {selectedTotalLabel} · 当前页 {formatNumber(filteredRuns.length)} 条 · 第 {formatNumber(recentPage)} / {formatNumber(recentTotalPages)} 页
+            </div>
+            <div className="mt-0.5 text-[11px] text-muted-foreground">
+              查询范围：{formatDateOnly(range.from)} ~ {formatDateOnly(range.to)}
+            </div>
+          </div>
+          <div className="flex items-center gap-3">
+            <div className="flex gap-2 text-[11px] text-muted-foreground">
+              <span>平均工具 {selectedAverageToolCalls.toFixed(1)}</span>
+              <span>平均模型调用 {selectedAverageModelCalls.toFixed(1)}</span>
+              <span>平均 Token {formatSkillEvalTokens(selectedAverageTotalTokens)}</span>
+              <span>平均耗时 {formatDuration(selectedAverageDurationMs)}</span>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 gap-1 px-2 text-xs"
+                onClick={() => onRecentPageChange(recentPage - 1)}
+                disabled={!canGoPrevious || loading}
+              >
+                <ChevronLeft className="size-3.5" />
+                上一页
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 gap-1 px-2 text-xs"
+                onClick={() => onRecentPageChange(recentPage + 1)}
+                disabled={!canGoNext || loading}
+              >
+                下一页
+                <ChevronRight className="size-3.5" />
+              </Button>
+            </div>
+          </div>
+        </div>
+        <ScrollArea className="min-h-0 flex-1">
+          {loading ? (
+            <div className="flex h-48 items-center justify-center text-muted-foreground">
+              <Loader2 className="mr-2 size-4 animate-spin" />
+              加载中
+            </div>
+          ) : filteredRuns.length === 0 ? (
+            <div className="flex h-48 items-center justify-center text-sm text-muted-foreground">
+              暂无评估记录
+            </div>
+          ) : (
+            filteredRuns.map((run) => (
+              <SkillEvalRunRow
+                key={`${run.traceId}:${run.rawSkillName}`}
+                run={run}
+                onOpenTrace={onOpenTrace}
+              />
+            ))
+          )}
+        </ScrollArea>
+      </main>
+    </div>
+  )
+}
+
 export function DashboardView(): React.JSX.Element {
   const {
     granularity,
@@ -628,26 +1216,35 @@ export function DashboardView(): React.JSX.Element {
     selectedUpperOrgLv1,
     loading,
     userStatsLoading,
+    skillEvalLoading,
     error,
     overview,
     modelStats,
     userStats,
     productivity,
     feedback,
+    skillEval,
     changeGranularity,
     navigate,
     setCustomRange,
     refresh,
+    fetchSkillEvalPage,
     drillDownUserOrg,
     resetUserOrgDrilldown
   } = useDashboard()
 
   const [exporting, setExporting] = useState(false)
+  const [activeMainTab, setActiveMainTab] = useState<DashboardMainTab>("overview")
   const [skillDialogOpen, setSkillDialogOpen] = useState(false)
   const [selectedSkill, setSelectedSkill] = useState<string | null>(null)
   const [skillDetail, setSkillDetail] = useState<DashboardSkillDetail | null>(null)
+  const [skillTracePage, setSkillTracePage] = useState(1)
   const [skillTracesLoading, setSkillTracesLoading] = useState(false)
   const [skillTracesError, setSkillTracesError] = useState<string | null>(null)
+  const [skillEvalTraceRun, setSkillEvalTraceRun] = useState<DashboardSkillEvalRun | null>(null)
+  const [skillEvalSelectedSkillKey, setSkillEvalSelectedSkillKey] = useState<
+    string | null | undefined
+  >(undefined)
   const [commitDialogOpen, setCommitDialogOpen] = useState(false)
   const [commitScopeLabel, setCommitScopeLabel] = useState("当前范围")
   const [commitDetailsRange, setCommitDetailsRange] = useState<TimeRange | null>(null)
@@ -672,6 +1269,18 @@ export function DashboardView(): React.JSX.Element {
   const [skillUploaderProfiles, setSkillUploaderProfiles] = useState<
     Record<string, SkillUploaderProfile>
   >({})
+  const effectiveSkillEvalSelectedSkillKey =
+    skillEvalSelectedSkillKey === undefined ? getLatestSkillEvalKey(skillEval) : skillEvalSelectedSkillKey
+
+  useEffect(() => {
+    if (skillEvalSelectedSkillKey === undefined || skillEvalSelectedSkillKey === null || !skillEval) return
+    const selectedSkillStillExists = skillEval.skills.some(
+      (skill) => skillEvalKey(skill.skillName, skill.skillVersion) === skillEvalSelectedSkillKey
+    )
+    if (!selectedSkillStillExists) {
+      setSkillEvalSelectedSkillKey(undefined)
+    }
+  }, [skillEval, skillEvalSelectedSkillKey])
 
   useEffect(() => {
     let cancelled = false
@@ -801,15 +1410,18 @@ export function DashboardView(): React.JSX.Element {
     }
   }, [])
 
-  const handleSkillClick = useCallback(
-    async (skill: string) => {
+  const loadSkillDetailPage = useCallback(
+    async (skill: string, page: number) => {
       setSelectedSkill(skill)
       setSkillDialogOpen(true)
-      setSkillDetail(null)
+      setSkillTracePage(page)
       setSkillTracesError(null)
       setSkillTracesLoading(true)
       try {
-        const result = await window.api.dashboard.skillDetail(skill, range, 10)
+        const result = await window.api.dashboard.skillDetail(skill, range, {
+          page,
+          pageSize: SKILL_TRACE_PAGE_SIZE
+        })
         if (!result.success) throw new Error(result.error ?? "获取 Skill 详情失败")
         setSkillDetail(result.data ?? EMPTY_SKILL_DETAIL)
       } catch (e) {
@@ -820,6 +1432,26 @@ export function DashboardView(): React.JSX.Element {
     },
     [range]
   )
+
+  const handleSkillClick = useCallback(
+    async (skill: string) => {
+      setSkillDetail(null)
+      await loadSkillDetailPage(skill, 1)
+    },
+    [loadSkillDetailPage]
+  )
+
+  const handleSkillTracePageChange = useCallback(
+    (page: number) => {
+      if (!selectedSkill) return
+      void loadSkillDetailPage(selectedSkill, page)
+    },
+    [loadSkillDetailPage, selectedSkill]
+  )
+
+  const handleSkillEvalTraceOpen = useCallback((run: DashboardSkillEvalRun) => {
+    setSkillEvalTraceRun(run)
+  }, [])
 
   const loadUserList = useCallback(
     async (
@@ -881,17 +1513,17 @@ export function DashboardView(): React.JSX.Element {
     [subPage.kind]
   )
 
-  const handleUserListNext = useCallback(() => {
+  const handleUserListNext = (): void => {
     if (!userList?.nextAfterKey) return
     void loadUserList(userList.nextAfterKey, [...userListBackStack, userListAfterKey])
-  }, [loadUserList, userList?.nextAfterKey, userListAfterKey, userListBackStack])
+  }
 
-  const handleUserListPrevious = useCallback(() => {
+  const handleUserListPrevious = (): void => {
     if (userListBackStack.length === 0) return
     const nextStack = userListBackStack.slice(0, -1)
     const previousAfterKey = userListBackStack[userListBackStack.length - 1]
     void loadUserList(previousAfterKey, nextStack)
-  }, [loadUserList, userListBackStack])
+  }
 
   const handleUserDetailBack = useCallback(() => {
     if (subPage.kind === "user-detail" && subPage.backTo === "user-list") {
@@ -904,11 +1536,14 @@ export function DashboardView(): React.JSX.Element {
   const subPageDetailSapId = subPage.kind === "user-detail" ? subPage.sapId : null
 
   useEffect(() => {
-    if (subPage.kind === "user-list") {
-      void loadUserList(undefined, [])
-    } else if (subPageDetailSapId) {
-      void loadUserDetail(subPageDetailSapId)
-    }
+    const timer = window.setTimeout(() => {
+      if (subPage.kind === "user-list") {
+        void loadUserList(undefined, [])
+      } else if (subPageDetailSapId) {
+        void loadUserDetail(subPageDetailSapId)
+      }
+    }, 0)
+    return () => window.clearTimeout(timer)
   }, [range, subPage.kind, subPageDetailSapId, loadUserList, loadUserDetail])
 
   const loadCommitDetails = useCallback(
@@ -1218,6 +1853,10 @@ export function DashboardView(): React.JSX.Element {
         </div>
       )}
 
+      {subPage.kind === "main" && (
+        <DashboardTabBar activeTab={activeMainTab} onChange={setActiveMainTab} />
+      )}
+
       {subPage.kind === "user-list" ? (
         <ScrollArea className="flex-1">
           <UserListPage
@@ -1244,54 +1883,68 @@ export function DashboardView(): React.JSX.Element {
         </ScrollArea>
       ) : (
         <ScrollArea className="flex-1">
-          <div className="p-6 space-y-6">
-            {/* Overview */}
-            <section>
-              <h2 className="text-sm font-semibold text-foreground mb-3">使用概览</h2>
-              <OverviewPanel
-                data={overview}
-                loading={loading}
-                onSkillClick={handleSkillClick}
-                onActiveUsersClick={openUserList}
-                marketSkillKeys={marketSkillKeys}
+          {activeMainTab === "skill-eval" ? (
+            <div className="space-y-6 p-6">
+              <SkillEvalDashboardPanel
+                data={skillEval}
+                loading={loading || skillEvalLoading}
+                range={range}
+                onRecentPageChange={fetchSkillEvalPage}
+                onOpenTrace={handleSkillEvalTraceOpen}
+                selectedSkillKey={effectiveSkillEvalSelectedSkillKey}
+                onSelectedSkillKeyChange={setSkillEvalSelectedSkillKey}
               />
-            </section>
+            </div>
+          ) : (
+            <div className="space-y-6 p-6">
+              {/* Overview */}
+              <section>
+                <h2 className="mb-3 text-sm font-semibold text-foreground">使用概览</h2>
+                <OverviewPanel
+                  data={overview}
+                  loading={loading}
+                  onSkillClick={handleSkillClick}
+                  onActiveUsersClick={openUserList}
+                  marketSkillKeys={marketSkillKeys}
+                />
+              </section>
 
-            {/* Productivity */}
-            <section>
-              <h2 className="text-sm font-semibold text-foreground mb-3">生产力指标</h2>
-              <ProductivityPanel
-                data={productivity}
-                loading={loading}
-                onCommitTotalClick={handleCommitTotalClick}
-                onCommitBucketClick={handleCommitBucketClick}
-              />
-            </section>
+              {/* Productivity */}
+              <section>
+                <h2 className="mb-3 text-sm font-semibold text-foreground">生产力指标</h2>
+                <ProductivityPanel
+                  data={productivity}
+                  loading={loading}
+                  onCommitTotalClick={handleCommitTotalClick}
+                  onCommitBucketClick={handleCommitBucketClick}
+                />
+              </section>
 
-            {/* User Analysis */}
-            <section>
-              <h2 className="text-sm font-semibold text-foreground mb-3">用户分析</h2>
-              <UserPanel
-                data={userStats}
-                loading={loading || userStatsLoading}
-                onDrillDownOrg={drillDownUserOrg}
-                onResetOrgDrilldown={resetUserOrgDrilldown}
-                onUserClick={(sapId) => openUserDetail(sapId, "main")}
-              />
-            </section>
+              {/* User Analysis */}
+              <section>
+                <h2 className="mb-3 text-sm font-semibold text-foreground">用户分析</h2>
+                <UserPanel
+                  data={userStats}
+                  loading={loading || userStatsLoading}
+                  onDrillDownOrg={drillDownUserOrg}
+                  onResetOrgDrilldown={resetUserOrgDrilldown}
+                  onUserClick={(sapId) => openUserDetail(sapId, "main")}
+                />
+              </section>
 
-            {/* Model Analysis */}
-            <section>
-              <h2 className="text-sm font-semibold text-foreground mb-3">模型分析</h2>
-              <ModelPanel data={modelStats} loading={loading} />
-            </section>
+              {/* Model Analysis */}
+              <section>
+                <h2 className="mb-3 text-sm font-semibold text-foreground">模型分析</h2>
+                <ModelPanel data={modelStats} loading={loading} />
+              </section>
 
-            {/* Feedback */}
-            <section>
-              <h2 className="text-sm font-semibold text-foreground mb-3">点赞 / 点踩反馈</h2>
-              <FeedbackPanel data={feedback} loading={loading} />
-            </section>
-          </div>
+              {/* Feedback */}
+              <section>
+                <h2 className="mb-3 text-sm font-semibold text-foreground">点赞 / 点踩反馈</h2>
+                <FeedbackPanel data={feedback} loading={loading} />
+              </section>
+            </div>
+          )}
         </ScrollArea>
       )}
       <TraceHistoryDialog
@@ -1300,9 +1953,56 @@ export function DashboardView(): React.JSX.Element {
         skill={selectedSkill}
         traces={skillDetail?.traces ?? []}
         codeStats={skillDetail?.stats ?? null}
+        total={skillDetail?.total ?? 0}
+        page={skillDetail?.page ?? skillTracePage}
+        pageSize={skillDetail?.pageSize ?? SKILL_TRACE_PAGE_SIZE}
         loading={skillTracesLoading}
         error={skillTracesError}
+        onPageChange={handleSkillTracePageChange}
       />
+      <Dialog open={Boolean(skillEvalTraceRun)} onOpenChange={(open) => {
+        if (!open) setSkillEvalTraceRun(null)
+      }}>
+        <DialogContent className="flex h-[80vh] max-w-[1080px] grid-rows-none flex-col gap-0 p-0">
+          <DialogHeader className="border-b border-border px-5 py-4">
+            <DialogTitle className="truncate text-base">
+              Skill 评估详情 · {skillEvalTraceRun ? skillEvalVersionLabel(skillEvalTraceRun.skillName, skillEvalTraceRun.skillVersion) : "-"}
+            </DialogTitle>
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              {skillEvalTraceRun ? `${formatRelativeTime(skillEvalTraceRun.startedAt)} · 链路 ${skillEvalTraceRun.traceId}` : ""}
+            </p>
+          </DialogHeader>
+          {skillEvalTraceRun && <SkillEvalRunSummary run={skillEvalTraceRun} />}
+          <TraceExplorer
+            traces={
+              skillEvalTraceRun
+                ? [
+                    skillEvalTraceRun.traceDetail ?? {
+                      traceId: skillEvalTraceRun.traceId,
+                      threadId: skillEvalTraceRun.threadId,
+                      startedAt: skillEvalTraceRun.startedAt,
+                      endedAt: skillEvalTraceRun.endedAt,
+                      durationMs: skillEvalTraceRun.durationMs,
+                      userMessage: skillEvalTraceRun.userMessage,
+                      outcome: skillEvalTraceRun.outcome,
+                      totalToolCalls: skillEvalTraceRun.totalToolCalls,
+                      totalInputTokens: skillEvalTraceRun.totalInputTokens,
+                      totalOutputTokens: skillEvalTraceRun.totalOutputTokens,
+                      totalTokens: skillEvalTraceRun.totalTokens,
+                      usedSkills: [skillEvalTraceRun.rawSkillName],
+                      rawAvailable: false,
+                      rawError: "该评估记录缺少完整 trace 详情"
+                    }
+                  ]
+                : []
+            }
+            codeStats={null}
+            title="执行步骤详情"
+            emptyText="该评估记录没有可展示的 trace 步骤"
+            showCodeStats={false}
+          />
+        </DialogContent>
+      </Dialog>
       <CommitDetailsDialog
         open={commitDialogOpen}
         onOpenChange={setCommitDialogOpen}

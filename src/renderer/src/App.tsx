@@ -24,9 +24,6 @@ const CustomizeView = lazy(() =>
 const DashboardView = lazy(() =>
   import("@/components/dashboard/DashboardView").then((m) => ({ default: m.DashboardView }))
 )
-const SkillEvalView = lazy(() =>
-  import("@/components/skill-eval/SkillEvalView").then((m) => ({ default: m.SkillEvalView }))
-)
 import { ResizeHandle } from "@/components/ui/resizable"
 import { PetStateBridge } from "@/components/pet/PetStateBridge"
 import { useAppStore } from "@/lib/store"
@@ -559,7 +556,7 @@ function App(): React.JSX.Element {
               </Suspense>
             </main>
           </div>
-        ) : mainView !== "claudecode" && mainView !== "dashboard" && mainView !== "skillEval" ? (
+        ) : mainView !== "claudecode" && mainView !== "dashboard" ? (
           <div className="relative flex flex-1 overflow-hidden bg-grid-subtle">
             {/* Left Sidebar */}
             {!sidebarCollapsed && (
@@ -634,25 +631,6 @@ function App(): React.JSX.Element {
             <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
               <Suspense fallback={<div className="flex flex-1 items-center justify-center"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>}>
                 <DashboardView />
-              </Suspense>
-            </main>
-          </div>
-        )}
-
-        {/* Skill 评估面板 */}
-        {mainView === "skillEval" && (
-          <div className="relative flex flex-1 overflow-hidden bg-grid-subtle">
-            {!sidebarCollapsed && (
-              <>
-                <div style={{ width: leftWidth }} className="shrink-0">
-                  <ThreadSidebar />
-                </div>
-                <ResizeHandle onDrag={handleLeftResize} />
-              </>
-            )}
-            <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
-              <Suspense fallback={<div className="flex flex-1 items-center justify-center"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>}>
-                <SkillEvalView />
               </Suspense>
             </main>
           </div>

@@ -713,7 +713,7 @@ export function MarketPanel(): React.JSX.Element {
       if (!response.success || !response.data) {
         throw new Error(response.error || "获取 Skill Trace 失败")
       }
-      setSelectedSkillTraces(response.data)
+      setSelectedSkillTraces(Array.isArray(response.data) ? response.data : response.data.traces)
     } catch (err) {
       console.warn(`[MarketPanel] Failed to load skill traces for ${skillName}:`, err)
       setSelectedSkillTraces([])
