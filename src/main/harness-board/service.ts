@@ -1,5 +1,5 @@
 import { execFileSync } from "child_process"
-import { existsSync, readFileSync, writeFileSync } from "fs"
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs"
 import { basename, isAbsolute, join, relative, resolve } from "path"
 import * as chardet from "jschardet"
 import * as iconv from "iconv-lite"
@@ -38,6 +38,7 @@ interface HarnessSessionBindingStoreFile {
 }
 
 type HarnessHookLogRef = HarnessRunDetailViewModel["run"]["hookLogRefs"][number]
+type HarnessInspectCommandName = "project" | "run" | "createProject"
 
 interface HarnessHookLogEntry {
   nodeId: string
@@ -97,8 +98,8 @@ function pluginAdapterId(plugin: PluginMetadata): string {
   return basename(plugin.path) || normalizeText(plugin.name) || plugin.id
 }
 
-function pluginHasInspectAdapter(plugin: PluginMetadata): boolean {
-  return existsSync(join(plugin.path, "inspect_state.py"))
+function pluginHasBoardConfig(plugin: PluginMetadata): boolean {
+  return existsSync(join(plugin.path, "board_core", "board_config.json"))
 }
 
 function pluginMatchesAdapterId(plugin: PluginMetadata, adapterId: string): boolean {
@@ -123,7 +124,7 @@ function pluginToHarnessAdapter(plugin: PluginMetadata): HarnessAdapterRegistryI
 
 export function listHarnessAdapters(): HarnessAdapterRegistryItem[] {
   return getPlugins()
-    .filter(pluginHasInspectAdapter)
+    .filter(pluginHasBoardConfig)
     .map(pluginToHarnessAdapter)
     .sort((a, b) => a.name.localeCompare(b.name))
 }
@@ -133,10 +134,10 @@ function resolveHarnessAdapter(adapterId: string, adapterType: HarnessAdapterTyp
     throw new Error(`Unsupported harness adapter type: ${adapterType}`)
   }
   const plugin = getPlugins().find(
-    (item) => pluginHasInspectAdapter(item) && pluginMatchesAdapterId(item, adapterId)
+    (item) => pluginHasBoardConfig(item) && pluginMatchesAdapterId(item, adapterId)
   )
   if (!plugin) {
-    throw new Error("Selected plugin is not installed or does not provide inspect_state.py")
+    throw new Error("Selected plugin is not installed or does not provide board_core/board_config.json")
   }
   const adapter = pluginToHarnessAdapter(plugin)
   return {
@@ -154,7 +155,7 @@ function adapterPluginDir(project: HarnessProjectMetadata): string {
   }
 
   const plugin = getPlugins().find(
-    (item) => pluginHasInspectAdapter(item) && pluginMatchesAdapterId(item, adapter.id)
+    (item) => pluginHasBoardConfig(item) && pluginMatchesAdapterId(item, adapter.id)
   )
   if (!plugin) {
     throw new Error(`Harness adapter plugin not found: ${adapter.id}`)
@@ -205,7 +206,7 @@ function decodeAdapterBuffer(buffer: Buffer): string {
   }
 }
 
-function formatAdapterError(error: unknown): string {
+function formatAdapterError(error: unknown, label = "Harness adapter"): string {
   const maybeError = error as {
     message?: string
     status?: number
@@ -222,7 +223,7 @@ function formatAdapterError(error: unknown): string {
       : maybeError.signal
         ? `signal ${maybeError.signal}`
         : "failed"
-  return `Inspect adapter ${exitInfo}: ${suffix}`
+  return `${label} ${exitInfo}: ${suffix}`
 }
 
 function tokenizeInspectCommand(command: string): string[] {
@@ -289,9 +290,8 @@ function tokenizeInspectCommand(command: string): string[] {
 function replaceInspectCommandPlaceholders(
   token: string,
   project: HarnessProjectMetadata,
-  mode: "project" | "run",
+  mode: HarnessInspectCommandName,
   cwd: string,
-  scriptPath: string,
   feature?: string
 ): string {
   const replacements: Record<string, string> = {
@@ -300,10 +300,9 @@ function replaceInspectCommandPlaceholders(
     projectCode: project.projectCode,
     feature: feature ?? "",
     pluginPath: cwd,
-    script: scriptPath,
     mode
   }
-  return token.replace(/\$\{(workspace|project|projectCode|feature|pluginPath|script|mode)\}/g, (_, key: string) => {
+  return token.replace(/\$\{(workspace|project|projectCode|feature|pluginPath|mode)\}/g, (_, key: string) => {
     return replacements[key] ?? ""
   })
 }
@@ -311,13 +310,12 @@ function replaceInspectCommandPlaceholders(
 function parseInspectCommand(
   command: string,
   project: HarnessProjectMetadata,
-  mode: "project" | "run",
+  mode: HarnessInspectCommandName,
   cwd: string,
-  scriptPath: string,
   feature?: string
 ): { executable: string; args: string[] } {
   const tokens = tokenizeInspectCommand(command.trim()).map((token) =>
-    replaceInspectCommandPlaceholders(token, project, mode, cwd, scriptPath, feature)
+    replaceInspectCommandPlaceholders(token, project, mode, cwd, feature)
   )
   const [executable, ...args] = tokens
   if (!executable) {
@@ -326,7 +324,7 @@ function parseInspectCommand(
   return { executable, args }
 }
 
-function readBoardConfigInspectCommand(cwd: string, mode: "project" | "run"): string | null {
+function readBoardConfigInspectCommand(cwd: string, mode: HarnessInspectCommandName): string | null {
   const configPath = join(cwd, "board_core", "board_config.json")
   if (!existsSync(configPath)) return null
 
@@ -346,31 +344,13 @@ function readBoardConfigInspectCommand(cwd: string, mode: "project" | "run"): st
   return command || null
 }
 
-function defaultInspectCommand(
-  project: HarnessProjectMetadata,
-  mode: "project" | "run",
-  feature?: string
-): { executable: string; args: string[] } {
-  const args = [
-    "inspect_state.py",
-    "--mode",
-    mode,
-    "--workspace",
-    project.workspace.path,
-    "--project",
-    project.projectCode
-  ]
-  if (mode === "run") {
-    args.push("--feature", feature ?? "")
-  }
-  return {
-    executable: process.platform === "win32" ? "python" : "python3",
-    args
-  }
-}
-
 function projectDirectoryPath(project: HarnessProjectMetadata): string {
-  return join(project.workspace.path, project.projectCode)
+  const workspacePath = resolve(project.workspace.path)
+  const projectPath = resolve(workspacePath, project.projectCode)
+  if (projectPath === workspacePath || !isInsideDirectory(workspacePath, projectPath)) {
+    throw new Error(`Project code resolves outside workspace: ${project.projectCode}`)
+  }
+  return projectPath
 }
 
 function isInsideDirectory(basePath: string, targetPath: string): boolean {
@@ -408,25 +388,32 @@ function formatProjectDetailError(project: HarnessProjectMetadata, error: unknow
   return message.startsWith("读取项目状态失败") ? message : `读取项目状态失败：${message}`
 }
 
-function runInspectAdapter(
+function buildConfiguredHarnessInvocation(
   project: HarnessProjectMetadata,
-  mode: "project" | "run",
+  mode: HarnessInspectCommandName,
   feature?: string
-): Record<string, unknown> {
+): { cwd: string; invocation: { executable: string; args: string[] } } {
   const cwd = adapterPluginDir(project)
-  const scriptPath = join(cwd, "inspect_state.py")
-  if (!existsSync(scriptPath)) {
-    throw new Error(`Inspect adapter not found: ${scriptPath}`)
+  const configuredCommand = readBoardConfigInspectCommand(cwd, mode)
+  if (!configuredCommand) {
+    throw new Error(`Harness adapter command is not configured: inspectCommands.${process.platform}.${mode}`)
   }
 
-  const configuredCommand = readBoardConfigInspectCommand(cwd, mode)
-  const invocation = configuredCommand
-    ? parseInspectCommand(configuredCommand, project, mode, cwd, scriptPath, feature)
-    : defaultInspectCommand(project, mode, feature)
+  return {
+    cwd,
+    invocation: parseInspectCommand(configuredCommand, project, mode, cwd, feature)
+  }
+}
 
-  let stdoutBuffer: Buffer
+function runConfiguredHarnessCommand(
+  project: HarnessProjectMetadata,
+  mode: HarnessInspectCommandName,
+  feature?: string
+): Buffer {
+  const { cwd, invocation } = buildConfiguredHarnessInvocation(project, mode, feature)
+
   try {
-    stdoutBuffer = execFileSync(invocation.executable, invocation.args, {
+    return execFileSync(invocation.executable, invocation.args, {
       cwd,
       encoding: "buffer",
       env: {
@@ -440,6 +427,14 @@ function runInspectAdapter(
   } catch (error) {
     throw new Error(formatAdapterError(error))
   }
+}
+
+function runInspectAdapter(
+  project: HarnessProjectMetadata,
+  mode: "project" | "run",
+  feature?: string
+): Record<string, unknown> {
+  const stdoutBuffer = runConfiguredHarnessCommand(project, mode, feature)
 
   const raw = decodeAdapterBuffer(stdoutBuffer).trim()
   if (!raw) {
@@ -1140,6 +1135,17 @@ function makeProjectDetailViewModel(
   }
 }
 
+function initializeHarnessProject(project: HarnessProjectMetadata): void {
+  try {
+    buildConfiguredHarnessInvocation(project, "createProject")
+    mkdirSync(projectDirectoryPath(project), { recursive: true })
+    runConfiguredHarnessCommand(project, "createProject")
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    throw new Error(`创建项目失败：${message}`)
+  }
+}
+
 export function listHarnessProjects(): HarnessProjectListItem[] {
   return readProjectStore().projects.map(toListItem)
 }
@@ -1171,6 +1177,7 @@ export function createHarnessProject(input: HarnessProjectCreateInput): HarnessP
     cachedRunSummary: DEFAULT_CACHE
   }
 
+  initializeHarnessProject(project)
   store.projects.unshift(project)
   writeProjectStore(store)
   return project
