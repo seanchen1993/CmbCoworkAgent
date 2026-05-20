@@ -1054,7 +1054,10 @@ async function pathExistsForGitAdd(worktreePath: string, relPath: string): Promi
  *
  * 最后 commit 时仍带上用户勾选的 pathspec，保证只提交本次选择范围内的变更。
  */
-async function stageFilesForCommit(worktreePath: string, pathspecs: string[]): Promise<void> {
+async function stageFilesForCommit(
+  worktreePath: string,
+  pathspecs: string[]
+): Promise<{ existingPathspecs: string[]; removedPathspecs: string[] }> {
   const normalizedPathspecs = Array.from(new Set(pathspecs.map(normalizeGitRelativePath).filter(Boolean)))
   const existingPathspecs: string[] = []
   const removedPathspecs: string[] = []
@@ -1078,6 +1081,8 @@ async function stageFilesForCommit(worktreePath: string, pathspecs: string[]): P
     // 示例：git -C <repo> --literal-pathspecs update-index --remove -- fibonacci.js
     await runGitWithLiteralPathspecs(worktreePath, ["update-index", "--remove"], removedPathspecs)
   }
+
+  return { existingPathspecs, removedPathspecs }
 }
 
 function isGitDirWorktree(gitDir: string): boolean {
@@ -1681,11 +1686,11 @@ async function buildGitPanelState(
  * Unlike buildGitPanelState(), this only computes changed file paths from
  * porcelain status and does not calculate per-file diffs/numstat.
  */
-async function getChangedFilesForGitOps(
+async function getChangedFileEntriesForGitOps(
   worktreePath: string,
   trackedFiles: string[],
   options?: { silent?: boolean; includeAllWhenNoTracked?: boolean }
-): Promise<string[]> {
+): Promise<GitPanelChangedFile[]> {
   // commit/push 场景只需要“文件列表”即可，不做重型 diff 计算。
   // 该函数是 Git 提交流程的轻量快速路径。
   const silent = Boolean(options?.silent)
@@ -1704,29 +1709,48 @@ async function getChangedFilesForGitOps(
 
   const statusPathspecs = filterByTracked ? normalizedTrackedFiles : ["."]
   const statusOut = await runStatusPorcelain(worktreePath, statusPathspecs, { silent })
-  return collectChangedFilesFromStatus(worktreePath, statusOut, normalizedTrackedFiles, {
+  const rawEntries = collectChangedFileEntriesFromStatus(worktreePath, statusOut, normalizedTrackedFiles, {
     filterByTracked
   })
+  return combineFilesystemMovesForDisplay(worktreePath, rawEntries, { silent })
 }
 
-function normalizeSelectedChangedFiles(
+function normalizeSelectedChangedFileEntries(
   worktreePath: string,
-  changedFiles: string[],
+  changedEntries: GitPanelChangedFile[],
   selectedFilePaths?: string[]
 ): string[] {
+  const changedFiles = Array.from(
+    new Set(
+      changedEntries.flatMap((entry) => entry.previousPath ? [entry.previousPath, entry.path] : [entry.path])
+    )
+  )
   if (!Array.isArray(selectedFilePaths)) {
     return changedFiles
   }
   if (selectedFilePaths.length === 0) return []
 
   const changedSet = new Set(changedFiles.map(normalizeGitRelativePath))
+  const entryByPath = new Map<string, GitPanelChangedFile>()
+  for (const entry of changedEntries) {
+    entryByPath.set(normalizeGitRelativePath(entry.path), entry)
+    if (entry.previousPath) {
+      entryByPath.set(normalizeGitRelativePath(entry.previousPath), entry)
+    }
+  }
   const selectedSet = new Set<string>()
   for (const selected of selectedFilePaths) {
     if (typeof selected !== "string" || !selected.trim()) continue
     for (const rel of toWorktreeRelativePath(worktreePath, selected)) {
       const normalized = normalizeGitRelativePath(rel)
       if (changedSet.has(normalized)) {
-        selectedSet.add(normalized)
+        const entry = entryByPath.get(normalized)
+        if (entry?.previousPath) {
+          selectedSet.add(normalizeGitRelativePath(entry.previousPath))
+          selectedSet.add(normalizeGitRelativePath(entry.path))
+        } else {
+          selectedSet.add(normalized)
+        }
       }
     }
   }
@@ -2813,10 +2837,20 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           return { success: false, error: "当前任务不在 Git 仓库中" }
         }
         const tracked = getTrackedLlmFiles(context.metadata)
-        const changedFiles = await getChangedFilesForGitOps(worktreePath, tracked, {
+        const changedEntries = await getChangedFileEntriesForGitOps(worktreePath, tracked, {
           includeAllWhenNoTracked: true
         })
-        const filesToCommit = normalizeSelectedChangedFiles(worktreePath, changedFiles, filePaths)
+        const filesToCommit = normalizeSelectedChangedFileEntries(worktreePath, changedEntries, filePaths)
+        logGitStep(
+          threadId,
+          "commit",
+          `前端选择路径：${Array.isArray(filePaths) ? filePaths.join(", ") || "(空)" : "(未指定，提交全部)"}`
+        )
+        logGitStep(
+          threadId,
+          "commit",
+          `后端展开路径：${filesToCommit.join(", ") || "(空)"}`
+        )
         if (filesToCommit.length === 0) {
           logGitStep(threadId, "commit", "失败：没有需要提交的改动")
           return { success: false, error: "没有需要提交的改动" }
@@ -2827,7 +2861,12 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         // - 存在路径：git add -- <path>
         // - 删除路径：git update-index --remove -- <path>
         // 详见 stageFilesForCommit 上方注释中的 Windows 兼容说明和完整命令案例。
-        await stageFilesForCommit(worktreePath, filesToCommit)
+        const stagedPaths = await stageFilesForCommit(worktreePath, filesToCommit)
+        logGitStep(
+          threadId,
+          "commit",
+          `暂存分组：add=[${stagedPaths.existingPathspecs.join(", ")}] remove=[${stagedPaths.removedPathspecs.join(", ")}]`
+        )
         const adoptionSnapshots = captureStagedSnapshotsForCommit(worktreePath)
         logGitStep(threadId, "commit", `commit message: ${message}`)
         if (Array.isArray(filePaths) && filePaths.length > 0) {
