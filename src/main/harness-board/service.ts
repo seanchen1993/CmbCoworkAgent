@@ -393,7 +393,7 @@ function resolveAdapterFilePath(project: HarnessProjectMetadata, value: unknown)
 }
 
 function projectDirectoryMissingMessage(project: HarnessProjectMetadata): string {
-  return `请确认项目「${project.projectCode}」的工作区「${project.workspace.path}」下是否有对应 feature。`
+  return `请确认项目「${project.projectCode}」的工作区「${project.workspace.path}」下是否有对应特性。`
 }
 
 function isProjectMissingError(message: string): boolean {

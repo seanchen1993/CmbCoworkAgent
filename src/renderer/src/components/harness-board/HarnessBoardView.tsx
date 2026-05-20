@@ -59,6 +59,13 @@ import type {
   Thread
 } from "@/types"
 
+const harnessActionButtonClassName =
+  "cursor-pointer group relative overflow-hidden rounded-md shadow-sm transition-all duration-200 hover:-translate-y-px hover:shadow-md"
+const harnessActionOverlayClassName =
+  "pointer-events-none absolute inset-0 bg-gradient-to-r from-transparent via-primary-foreground/10 to-primary-foreground/25 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
+const harnessActionIconClassName =
+  "relative flex size-4 items-center justify-center rounded-full bg-primary-foreground/15 ring-1 ring-primary-foreground/25 transition-transform duration-200 group-hover:scale-105"
+
 function createEmptyProjectMetadataForm(adapterId = ""): HarnessProjectMetadataUpdateInput {
   return {
     adapterId,
@@ -230,9 +237,40 @@ function statusIcon(status: HarnessStatus): React.JSX.Element {
   return <Circle className="size-4 text-muted-foreground" />
 }
 
-function progressPercent(run: HarnessFeatureSummary): number {
-  if (run.position.totalNodes <= 0) return 0
-  return Math.min(100, Math.round((run.position.progressIndex / run.position.totalNodes) * 100))
+function progressPercentFromValues(progressIndex: number, totalNodes: number): number {
+  if (totalNodes <= 0) return 0
+  const normalizedProgress = Math.max(0, Math.min(progressIndex, totalNodes))
+  return Math.min(100, Math.round((normalizedProgress / totalNodes) * 100))
+}
+
+function ProgressBar({
+  progressIndex,
+  totalNodes
+}: {
+  progressIndex: number
+  totalNodes: number
+}): React.JSX.Element {
+  return (
+    <div className="mt-auto h-1.5 overflow-hidden rounded-full bg-muted">
+      <div
+        className="h-full rounded-full bg-status-info"
+        style={{ width: `${progressPercentFromValues(progressIndex, totalNodes)}%` }}
+      />
+    </div>
+  )
+}
+
+function groupProgressIndex(
+  group: StageNodeGroup,
+  nodes: HarnessRunNode[],
+  progressIndex: number,
+  totalNodes: number
+): number {
+  const coveredNodeCount = Math.max(0, Math.min(progressIndex, totalNodes, nodes.length))
+  const completedNodeIds = new Set(
+    nodes.slice(0, coveredNodeCount).map((node) => node.id)
+  )
+  return group.nodes.filter((node) => completedNodeIds.has(node.id)).length
 }
 
 interface StageNodeGroup {
@@ -305,15 +343,14 @@ function ProjectFormDialog({
         </DialogHeader>
         <div className="grid gap-4 py-1">
           <section className="rounded-md border border-border bg-muted/30 p-3">
-            <div className="mb-3 text-sm font-semibold">Plugin 绑定</div>
+            <div className="mb-3 text-sm font-semibold">选择 Plugin </div>
             <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-              Plugin *
               <Select
                 value={form.adapterId}
                 onValueChange={(adapterId) => onChange({ ...form, adapterId, adapterType: "plugin" })}
               >
                 <SelectTrigger className="bg-background">
-                  <SelectValue placeholder="选择已安装 plugin" />
+                  <SelectValue placeholder="请选择已安装的 AUTOBIZDEVOPS 插件" />
                 </SelectTrigger>
                 <SelectContent>
                   {registry.map((adapter) => (
@@ -334,7 +371,7 @@ function ProjectFormDialog({
                 <Input
                   value={form.name}
                   onChange={(event) => onChange({ ...form, name: event.target.value })}
-                  placeholder="评论能力改造"
+                  placeholder="请输入"
                   className="bg-background"
                 />
               </label>
@@ -343,7 +380,7 @@ function ProjectFormDialog({
                 <Input
                   value={form.projectCode}
                   onChange={(event) => onChange({ ...form, projectCode: event.target.value })}
-                  placeholder="TN5C24"
+                  placeholder="请输入"
                   className="bg-background"
                 />
               </label>
@@ -352,7 +389,7 @@ function ProjectFormDialog({
                 <Input
                   value={form.description}
                   onChange={(event) => onChange({ ...form, description: event.target.value })}
-                  placeholder="支持评论创建、列表刷新和权限校验"
+                  placeholder="请输入"
                   className="bg-background"
                 />
               </label>
@@ -369,7 +406,7 @@ function ProjectFormDialog({
                   onChange={(event) =>
                     onChange({ ...form, product: { ...form.product, code: event.target.value } })
                   }
-                  placeholder="LF39.18"
+                  placeholder="请输入"
                   className="bg-background"
                 />
               </label>
@@ -380,19 +417,17 @@ function ProjectFormDialog({
                   onChange={(event) =>
                     onChange({ ...form, product: { ...form.product, name: event.target.value } })
                   }
-                  placeholder="WE运营管理平台"
+                  placeholder="请输入"
                   className="bg-background"
                 />
               </label>
               <div className="col-span-2 grid gap-1.5 text-xs font-medium text-muted-foreground">
-                项目管理工作区 *
+                项目工作区 *
                 <div className="flex min-w-0 gap-2">
                   <Input
                     value={form.workspace.path}
-                    onChange={(event) =>
-                      onChange({ ...form, workspace: { path: event.target.value } })
-                    }
-                    placeholder="/Users/sixinjian/CmbCoworkAgent"
+                    readOnly
+                    placeholder="请选择 AUTOBIZDEVOPS 插件工作区路径"
                     className="bg-background"
                   />
                   <Button
@@ -432,7 +467,6 @@ function ProjectFormDialog({
 function ProjectEditDialog({
   open,
   saving,
-  project,
   form,
   registry,
   error,
@@ -443,7 +477,6 @@ function ProjectEditDialog({
 }: {
   open: boolean
   saving: boolean
-  project: HarnessProjectListItem | null
   form: HarnessProjectMetadataUpdateInput
   registry: HarnessAdapterRegistryItem[]
   error: string | null
@@ -460,31 +493,24 @@ function ProjectEditDialog({
         </DialogHeader>
         <div className="grid gap-4 py-1">
           <section className="rounded-md border border-border bg-muted/30 p-3">
-            <div className="mb-3 text-sm font-semibold">项目设置</div>
-            <div className="grid grid-cols-2 gap-3">
-              <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                项目 ID
-                <Input value={project?.projectId ?? ""} disabled className="bg-background" />
-              </label>
-              <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                Plugin *
-                <Select
-                  value={form.adapterId}
-                  onValueChange={(adapterId) => onChange({ ...form, adapterId, adapterType: "plugin" })}
-                >
-                  <SelectTrigger className="bg-background">
-                    <SelectValue placeholder="选择已安装 plugin" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {registry.map((adapter) => (
-                      <SelectItem key={adapter.id} value={adapter.id}>
-                        {adapter.name} · {adapter.version}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </label>
-            </div>
+            <div className="mb-3 text-sm font-semibold">选择 Plugin </div>
+            <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+              <Select
+                value={form.adapterId}
+                onValueChange={(adapterId) => onChange({ ...form, adapterId, adapterType: "plugin" })}
+              >
+                <SelectTrigger className="bg-background">
+                  <SelectValue placeholder="请选择已安装的 AUTOBIZDEVOPS 插件" />
+                </SelectTrigger>
+                <SelectContent>
+                  {registry.map((adapter) => (
+                    <SelectItem key={adapter.id} value={adapter.id}>
+                      {adapter.name} · {adapter.version}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </label>
           </section>
 
           <section className="rounded-md border border-border bg-muted/30 p-3">
@@ -495,7 +521,7 @@ function ProjectEditDialog({
                 <Input
                   value={form.name}
                   onChange={(event) => onChange({ ...form, name: event.target.value })}
-                  placeholder="评论能力改造"
+                  placeholder="请输入"
                   className="bg-background"
                 />
               </label>
@@ -504,7 +530,7 @@ function ProjectEditDialog({
                 <Input
                   value={form.projectCode}
                   onChange={(event) => onChange({ ...form, projectCode: event.target.value })}
-                  placeholder="TN5C24"
+                  placeholder="请输入"
                   className="bg-background"
                 />
               </label>
@@ -513,7 +539,7 @@ function ProjectEditDialog({
                 <Input
                   value={form.description}
                   onChange={(event) => onChange({ ...form, description: event.target.value })}
-                  placeholder="支持评论创建、列表刷新和权限校验"
+                  placeholder="请输入"
                   className="bg-background"
                 />
               </label>
@@ -530,7 +556,7 @@ function ProjectEditDialog({
                   onChange={(event) =>
                     onChange({ ...form, product: { ...form.product, code: event.target.value } })
                   }
-                  placeholder="LF39.18"
+                  placeholder="请输入"
                   className="bg-background"
                 />
               </label>
@@ -541,19 +567,17 @@ function ProjectEditDialog({
                   onChange={(event) =>
                     onChange({ ...form, product: { ...form.product, name: event.target.value } })
                   }
-                  placeholder="WE运营管理平台"
+                  placeholder="请输入"
                   className="bg-background"
                 />
               </label>
               <div className="col-span-2 grid gap-1.5 text-xs font-medium text-muted-foreground">
-                项目管理工作区 *
+                项目工作区 *
                 <div className="flex min-w-0 gap-2">
                   <Input
                     value={form.workspace.path}
-                    onChange={(event) =>
-                      onChange({ ...form, workspace: { path: event.target.value } })
-                    }
-                    placeholder="/Users/sixinjian/CmbCoworkAgent"
+                    readOnly
+                    placeholder="请选择 AUTOBIZDEVOPS 插件工作区路径"
                     className="bg-background"
                   />
                   <Button
@@ -678,9 +702,7 @@ function FeatureCard({
         </div>
         <StatusPill status={run.overallStatus} />
       </div>
-      <div className="mt-auto h-1.5 overflow-hidden rounded-full bg-muted">
-        <div className="h-full rounded-full bg-status-info" style={{ width: `${progressPercent(run)}%` }} />
-      </div>
+      <ProgressBar progressIndex={run.position.progressIndex} totalNodes={run.position.totalNodes} />
       <div className="flex items-center justify-between gap-3 text-[11px] text-muted-foreground">
         <span className="truncate">{run.position.currentNodeLabel ?? run.position.currentNodeId}</span>
         <span className="shrink-0">
@@ -717,10 +739,10 @@ function ProjectCard({
   const activeCount = runs.filter((run) => run.overallStatus.uiKind === "active").length
   const archived = project.lifecycle.status === "archived"
   const featureButtonLabel = expanded
-    ? "收起 feature"
+    ? "收起特性列表"
     : detail
-      ? "展开 feature"
-      : "加载 feature"
+      ? "展开特性列表"
+      : "加载特性"
 
   return (
     <article
@@ -762,7 +784,7 @@ function ProjectCard({
 
         <div className="mt-4 grid grid-cols-3 gap-3 border-t border-border pt-3">
           <div className="min-w-0 text-xs text-muted-foreground">
-            Feature 数
+             特性数
             <strong className="mt-1 block text-sm text-foreground">
               {loading || !detail ? "-" : runs.length}
             </strong>
@@ -775,7 +797,10 @@ function ProjectCard({
           </div>
           <div className="min-w-0 text-xs text-muted-foreground">
             工作区
-            <strong className="mt-1 block truncate text-sm text-foreground" title={project.workspacePath}>
+            <strong
+              className="mt-1 block truncate text-sm text-foreground"
+              title={project.workspacePath}
+            >
               {getWorkspaceName(project.workspacePath)}
             </strong>
           </div>
@@ -799,7 +824,7 @@ function ProjectCard({
           {loading ? (
             <div className="flex items-center justify-center gap-2 rounded-md border border-dashed border-border bg-background px-3 py-6 text-sm text-muted-foreground">
               <Loader2 className="size-4 animate-spin" />
-              读取 feature 列表
+              读取特性列表
             </div>
           ) : detailError ? (
             <div
@@ -808,13 +833,13 @@ function ProjectCard({
             >
               <AlertCircle className="mt-0.5 size-4 shrink-0" />
               <div className="min-w-0">
-                <div className="font-medium">无法读取 feature 列表</div>
+                <div className="font-medium">无法读取特性列表</div>
                 <div className="mt-1 line-clamp-3 break-words text-xs leading-5">{detailError}</div>
               </div>
             </div>
           ) : runs.length === 0 ? (
             <div className="rounded-md border border-dashed border-border bg-background px-3 py-5 text-sm text-muted-foreground">
-              当前项目还没有 feature。plugin 创建 feature 后会出现在这里。
+              当前项目还没有特性。
             </div>
           ) : (
             <div className="grid max-h-[296px] gap-2 overflow-y-auto pr-1">
@@ -1007,7 +1032,7 @@ function FeatureWorkspaceSidebar({
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex items-center gap-2 px-4 py-1.5 text-xs font-medium text-muted-foreground">
-        <span className="min-w-0 flex-1 truncate">Feature 工作区</span>
+        <span className="min-w-0 flex-1 truncate">特性工作区</span>
         <Button
           type="button"
           variant="ghost"
@@ -1144,7 +1169,7 @@ function FeatureConversationPanel({
         </div>
       ) : (
         <div className="flex min-h-0 flex-1 items-center justify-center px-6 text-center text-sm text-muted-foreground">
-          从左侧 Feature 工作区选择会话，或发起新会话。
+          从左侧特性工作区选择会话，或发起新会话。
         </div>
       )}
     </section>
@@ -1334,7 +1359,7 @@ function FeatureWorkspaceChangesPanel({
 
       {sessions.length === 0 ? (
         <div className="px-3 py-6 text-sm text-muted-foreground">
-          当前 feature 还没有关联会话，暂无代码变更。
+          当前特性还没有关联会话，暂无代码变更。
         </div>
       ) : (
         <div className="divide-y divide-border">
@@ -1491,10 +1516,10 @@ function FeatureDetailPage({
     setSessionBusy("create")
     setSessionError(null)
     try {
-      const title = `Feature: ${detail.run.title}`
+      const title = `特性: ${detail.run.title}`
       const thread = await createThread({
         title,
-        workspacePath: detail.project.workspacePath,
+        workspacePath: null,
         harnessFeature: {
           projectId: detail.project.projectId,
           slug: detail.run.slug
@@ -1604,7 +1629,12 @@ function FeatureDetailPage({
                   group.nodes.find((node) => node.id === defaultNodeId) ??
                   group.nodes.find((node) => node.status.isCurrent) ??
                   group.nodes[0]
-                const current = group.nodes.some((node) => node.id === defaultNodeId || node.status.isCurrent)
+                const groupProgress = groupProgressIndex(
+                  group,
+                  detail.run.nodes,
+                  detail.run.position.progressIndex,
+                  detail.run.position.totalNodes
+                )
 
                 return (
                   <button
@@ -1619,19 +1649,23 @@ function FeatureDetailPage({
                     aria-pressed={selected}
                     title={group.label}
                     className={cn(
-                      "w-[190px] flex-none rounded-md border px-3 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                      "flex h-[92px] w-[190px] flex-none flex-col gap-2 rounded-md border px-3 py-3 text-left transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
                       selected
                         ? "border-status-info bg-status-info/10 shadow-sm"
-                        : current
-                          ? "border-status-info/45 bg-status-info/5 hover:border-status-info"
-                          : "border-border bg-background hover:border-primary/45"
+                        : "border-border bg-background hover:border-primary/50 hover:shadow-sm"
                     )}
                   >
                     <div className="flex min-w-0 items-center gap-1.5">
                       {currentNode ? statusIcon(currentNode.status) : <Circle className="size-4 text-muted-foreground" />}
                       <span className="truncate text-sm font-medium">{group.label}</span>
                     </div>
-                    <div className="mt-1 text-xs text-muted-foreground">{group.nodes.length} 个节点</div>
+                    <ProgressBar progressIndex={groupProgress} totalNodes={group.nodes.length} />
+                    <div className="flex items-center justify-between gap-3 text-[11px] text-muted-foreground">
+                      <span className="truncate">进度</span>
+                      <span className="shrink-0">
+                        {groupProgress}/{group.nodes.length}
+                      </span>
+                    </div>
                   </button>
                 )
               })}
@@ -1669,7 +1703,7 @@ function FeatureDetailPage({
             <div className="flex min-w-0 items-center gap-2">
               <Workflow className="size-4 shrink-0 text-status-info" />
               <h1 className="truncate text-base font-semibold">
-                {detail?.run.title ?? "Feature 详情"}
+                {detail?.run.title ?? "特性详情"}
               </h1>
               {detail?.adapterSnapshot.mock && (
                 <span className="shrink-0 rounded border border-status-warning/30 bg-status-warning/10 px-2 py-0.5 text-[11px] text-status-warning">
@@ -1684,25 +1718,27 @@ function FeatureDetailPage({
         </div>
         <Button
           type="button"
-          variant="secondary"
           size="sm"
-          className="shrink-0 gap-2"
+          className={cn("shrink-0 gap-2", harnessActionButtonClassName)}
           onClick={() => void handleCreateSession()}
           disabled={loading || !detail || sessionBusy !== null}
         >
-          {sessionBusy === "create" ? (
-            <Loader2 className="size-4 animate-spin" />
-          ) : (
-            <MessageSquarePlus className="size-4" />
-          )}
-          {sessionBusy === "create" ? "创建中" : "新增会话"}
+          <span aria-hidden="true" className={harnessActionOverlayClassName} />
+          <span className={harnessActionIconClassName}>
+            {sessionBusy === "create" ? (
+              <Loader2 className="size-2.5 animate-spin" />
+            ) : (
+              <MessageSquarePlus className="size-2.5" />
+            )}
+          </span>
+          <span className="relative">{sessionBusy === "create" ? "创建中" : "新增会话"}</span>
         </Button>
       </div>
 
       {loading || !detail ? (
         <div className="flex flex-1 items-center justify-center text-muted-foreground">
           <Loader2 className="mr-2 size-5 animate-spin" />
-          读取 feature 详情
+          读取特性详情
         </div>
       ) : (
         <div className="mx-auto flex min-h-0 w-full max-w-7xl flex-1 flex-col overflow-hidden p-6">
@@ -1812,11 +1848,6 @@ export function HarnessBoardView({
         }
         return next
       })
-      setForm((current) => ({
-        ...current,
-        adapterId: current.adapterId || registry[0]?.id || "",
-        adapterType: "plugin"
-      }))
       for (const item of items) {
         void loadProjectDetail(item.projectId)
       }
@@ -1915,15 +1946,15 @@ export function HarnessBoardView({
   }, [detailsByProjectId, projects, query])
 
   const resetCreateForm = useCallback(() => {
-    setForm(createEmptyProjectForm(adapterRegistry[0]?.id || ""))
+    setForm(createEmptyProjectForm())
     setFormError(null)
-  }, [adapterRegistry])
+  }, [])
 
   const openCreateDialog = useCallback(() => {
-    setForm(createEmptyProjectForm(adapterRegistry[0]?.id || ""))
+    setForm(createEmptyProjectForm())
     setFormError(null)
     setDialogOpen(true)
-  }, [adapterRegistry])
+  }, [])
 
   const handleCreateDialogOpenChange = useCallback(
     (open: boolean) => {
@@ -2075,7 +2106,7 @@ export function HarnessBoardView({
           <div className="min-w-0">
             <div className="mt-1 flex items-center gap-2">
               <Workflow className="size-5 text-status-info" />
-              <h1 className="truncate text-xl font-semibold">项目看板</h1>
+              <h1 className="truncate text-xl font-semibold">AUTOBIZDEVOPS项目</h1>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -2083,9 +2114,16 @@ export function HarnessBoardView({
               {loadingProjects ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
               刷新
             </Button>
-            <Button size="sm" className="gap-2" onClick={openCreateDialog}>
-              <Plus className="size-4" />
-              新建项目
+            <Button
+              size="sm"
+              className={cn("gap-2", harnessActionButtonClassName)}
+              onClick={openCreateDialog}
+            >
+              <span aria-hidden="true" className={harnessActionOverlayClassName} />
+              <span className={harnessActionIconClassName}>
+                <Plus className="size-2.5" />
+              </span>
+              <span className="relative">新建项目</span>
             </Button>
           </div>
         </div>
@@ -2095,7 +2133,7 @@ export function HarnessBoardView({
           <Input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="搜索项目、产品、plugin 或已加载 feature"
+            placeholder="搜索项目、系统编号或特性"
             className="h-8 border-0 bg-transparent px-0 shadow-none focus-visible:ring-0"
           />
         </div>
@@ -2121,9 +2159,15 @@ export function HarnessBoardView({
                   <Workflow className="size-5" />
                 </div>
                 <div className="mt-3 text-sm font-semibold">暂无项目</div>
-                <Button className="mt-4 gap-2" onClick={openCreateDialog}>
-                  <Plus className="size-4" />
-                  新建项目
+                <Button
+                  className={cn("mt-4 gap-2", harnessActionButtonClassName)}
+                  onClick={openCreateDialog}
+                >
+                  <span aria-hidden="true" className={harnessActionOverlayClassName} />
+                  <span className={harnessActionIconClassName}>
+                    <Plus className="size-2.5" />
+                  </span>
+                  <span className="relative">新建项目</span>
                 </Button>
               </div>
             </div>
@@ -2204,7 +2248,6 @@ export function HarnessBoardView({
       <ProjectEditDialog
         open={editingProject !== null}
         saving={savingEdit}
-        project={editingProject}
         form={editForm}
         registry={adapterRegistry}
         error={editError}

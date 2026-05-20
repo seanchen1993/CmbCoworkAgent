@@ -699,7 +699,7 @@ export function ThreadSidebar({
           <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
             <Workflow className="size-3" />
           </div>
-          <span className="text-muted-foreground">项目看板</span>
+          <span className="text-muted-foreground">AUTOBIZDEVOPS项目</span>
         </Button>
         <Button
           variant="ghost"
