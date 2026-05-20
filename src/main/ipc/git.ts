@@ -225,7 +225,7 @@ function isRenameOrCopyStatus(x: string, y: string): boolean {
  * 设计意图：
  * - `getGitStatus` 走“一次 git 子进程 + 本地解析”模式，替代多次 diff/ls-files 调用。
  * - 优先解析 NUL 分隔（`-z`），避免路径中空格/特殊字符导致歧义。
- * - 对 rename/copy 的“额外 source token”做跳过，确保 path 集合只保留目标路径。
+ * - 对 rename/copy 的“额外 source token”做跳过，确保 path 集合只保留当前目标路径。
  */
 function parsePorcelainStatus(output: string): PorcelainStatusEntry[] {
   const entries: PorcelainStatusEntry[] = []
@@ -249,7 +249,8 @@ function parsePorcelainStatus(output: string): PorcelainStatusEntry[] {
       const y = status[1] || " "
       entries.push({ path: rawPath, x, y })
 
-      // In `status -z`, rename/copy records include one extra token for source path.
+      // In `status -z`, rename/copy records are `<new-path>\0<old-path>\0`.
+      // Keep `rawPath` above and skip the extra historical source path.
       if (isRenameOrCopyStatus(x, y) && i + 1 < chunks.length) {
         i += 1
       }

@@ -391,11 +391,10 @@ function parsePorcelainPaths(output: string): string[] {
       const rawPath = entry.slice(3)
       if (!rawPath) continue
       if (isRenameOrCopyStatus(status) && i + 1 < entries.length) {
-        // In -z mode rename/copy record layout is:
-        //   "R100 <old-path>\0<new-path>\0"
-        // We want the destination/current path.
-        const renamedTo = normalizeGitRelativePath(entries[i + 1] || "")
-        if (renamedTo) files.push(renamedTo)
+        // In `status -z`, rename/copy records use:
+        //   "R  <new-path>\0<old-path>\0"
+        // Keep the current path for git add/commit and skip the historical source path.
+        files.push(normalizeGitRelativePath(rawPath))
         i += 1
       } else {
         files.push(normalizeGitRelativePath(rawPath))
