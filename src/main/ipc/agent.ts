@@ -55,6 +55,7 @@ import {
 import {
   appendSkillProposalWindowTurn,
   buildSkillProposalWindowContext,
+  getRecentSkillUsageNames,
   snapshotSkillProposalWindow,
   isSkillProposalWindowContext,
   type SkillProposalWindowContext
@@ -2341,6 +2342,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
         if (isOnlineSkillEvolutionEnabled()) {
           const proposalContext = appendTurnToProposalWindow("success")
+          const recentUsedSkills = getRecentSkillUsageNames(threadId)
+          const blockingUsedSkills = Array.from(
+            new Set([...proposalContext.usedSkills, ...recentUsedSkills])
+          )
 
           // Check if this turn crossed the skill-evolution threshold.
           const sessionToolCallCount = proposalContext.toolCallCount
@@ -2354,13 +2359,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 threshold,
                 mode,
                 usedSkills: proposalContext.usedSkills,
+                recentUsedSkills,
                 turnCount: proposalContext.turnCount,
                 errorCount: proposalContext.errorCount,
                 toolCallSummary: proposalContext.toolCallSummary
               })}`
             )
-            if (proposalContext.usedSkills.length > 0) {
-              const names = ` [${proposalContext.usedSkills.join(", ")}]`
+            if (blockingUsedSkills.length > 0) {
+              const names = ` [${blockingUsedSkills.join(", ")}]`
               console.log(
                 `[SkillEvolution][${threadId}] Threshold skip because used skills were detected${names}`
               )
