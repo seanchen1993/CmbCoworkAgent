@@ -1578,9 +1578,16 @@ async function buildGitPanelState(
     rawChangedFileEntries,
     { silent }
   )
-  const changedFiles = changedFileEntries.map((entry) => entry.path)
+  const changedFiles = Array.from(
+    new Set(
+      changedFileEntries.flatMap((entry) =>
+        entry.previousPath ? [entry.previousPath, entry.path] : [entry.path]
+      )
+    )
+  )
+  const displayChangedFiles = changedFileEntries.map((entry) => entry.path)
 
-  if (changedFiles.length === 0) {
+  if (displayChangedFiles.length === 0) {
     return {
       files: [],
       changedFiles: [],
@@ -1591,10 +1598,10 @@ async function buildGitPanelState(
   }
 
   // 保留文件数量上限，避免超大仓库一次返回过多数据导致渲染阻塞。
-  const visibleChangedFiles = changedFiles.slice(0, GIT_PANEL_MAX_VISIBLE_FILES)
+  const visibleChangedFiles = displayChangedFiles.slice(0, GIT_PANEL_MAX_VISIBLE_FILES)
   const statusByPath = new Map(changedFileEntries.map((entry) => [entry.path, entry.status]))
   const previousPathByPath = new Map(changedFileEntries.map((entry) => [entry.path, entry.previousPath]))
-  const omittedFileCount = Math.max(0, changedFiles.length - visibleChangedFiles.length)
+  const omittedFileCount = Math.max(0, displayChangedFiles.length - visibleChangedFiles.length)
 
   let numstatMap = new Map<string, { additions: number; deletions: number }>()
   try {
@@ -1658,7 +1665,7 @@ async function buildGitPanelState(
   return {
     files: fileDiffs,
     changedFiles,
-    changedFilesTotal: changedFiles.length,
+    changedFilesTotal: displayChangedFiles.length,
     omittedFileCount,
     totals: {
       additions: totals.additions,
