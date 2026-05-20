@@ -2752,7 +2752,9 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
         logGitStep(threadId, "commit", `add 文件数：${filesToCommit.length}`)
         // 必须按字面量 add：否则 Git 会把部分文件名当 glob pathspec，偶发报 did not match any files。
-        await runGitWithLiteralPathspecs(worktreePath, ["add"], filesToCommit)
+        // 使用 --all 才能稳定暂存删除路径；普通文件系统 mv 会表现为 D + ??，
+        // 需要旧路径和新路径一起 add --all，否则只会提交新增侧或在 Windows 上报 missing pathspec。
+        await runGitWithLiteralPathspecs(worktreePath, ["add", "--all"], filesToCommit)
         const adoptionSnapshots = captureStagedSnapshotsForCommit(worktreePath)
         logGitStep(threadId, "commit", `commit message: ${message}`)
         if (Array.isArray(filePaths) && filePaths.length > 0) {
