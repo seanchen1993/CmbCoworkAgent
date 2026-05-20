@@ -28,6 +28,7 @@ import type {
   AgentAutoCommitSettings
 } from "../main/types"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
+import type { GitHookStatus } from "../main/services/git-hook-service"
 import { UserInfoConfig } from "../main/storage"
 import type {
   ManagedSavedCodeExecTool,
@@ -698,6 +699,15 @@ const api = {
         success: boolean
         error?: string
       }>
+    },
+    getGitHookStatus: (workspacePath: string): Promise<GitHookStatus> => {
+      return ipcRenderer.invoke("workspace:gitHookStatus", { workspacePath }) as Promise<GitHookStatus>
+    },
+    installGitHooks: (workspacePath: string): Promise<GitHookStatus> => {
+      return ipcRenderer.invoke("workspace:installGitHooks", { workspacePath }) as Promise<GitHookStatus>
+    },
+    uninstallGitHooks: (workspacePath: string): Promise<GitHookStatus> => {
+      return ipcRenderer.invoke("workspace:uninstallGitHooks", { workspacePath }) as Promise<GitHookStatus>
     },
     // Listen for file changes in the workspace
     onFilesChanged: (

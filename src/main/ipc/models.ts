@@ -19,6 +19,13 @@ import { startWatching, stopWatching } from "../services/workspace-watcher"
 import { trackEvent } from "../services/event-reporter"
 import { captureStagedSnapshotsForCommit, measureForCommit } from "../services/adoption-tracker"
 import { scheduleMarkCodeAdoptionCommitsPushed } from "../services/code-adoption-push-updater"
+import {
+  CMBDEVCLAW_INTERNAL_GIT_ENV,
+  getGitHookStatus,
+  installGitHooks,
+  scheduleGitHookEventSync,
+  uninstallGitHooks
+} from "../services/git-hook-service"
 import { getTracesDir } from "../agent/trace/collector"
 import type { AgentTrace } from "../agent/trace/types"
 import { nowIsoLocal } from "../util/local-time"
@@ -135,6 +142,54 @@ async function prepareWorkspaceSelectionSandbox(
       await dialog.showMessageBox(messageBoxOptions)
     }
     return false
+  }
+}
+
+async function maybePromptInstallGitHooks(
+  workspacePath: string,
+  parentWindow?: BrowserWindow | null
+): Promise<void> {
+  try {
+    const status = await getGitHookStatus(workspacePath)
+    if (status.state !== "not_installed" || !status.canInstall) return
+
+    const options: MessageBoxOptions = {
+      type: "info",
+      title: "安装 Git Hook",
+      message: "安装 Git Hook 后，DevClaw 外部提交也可以计算代码采纳率",
+      detail:
+        "安装后，通过 IDEA、命令行等 DevClaw 外部方式提交代码，也可以计算代码采纳率。\n\n不安装时，仅通过 DevClaw Git 面板提交才能计算代码采纳率。",
+      buttons: ["安装 Git Hook", "暂不安装"],
+      defaultId: 0,
+      cancelId: 1
+    }
+    const result =
+      parentWindow && !parentWindow.isDestroyed()
+        ? await dialog.showMessageBox(parentWindow, options)
+        : await dialog.showMessageBox(options)
+    if (result.response !== 0) return
+
+    const nextStatus = await installGitHooks(workspacePath)
+    if (nextStatus.state === "installed") {
+      scheduleGitHookEventSync(workspacePath, 100)
+      return
+    }
+
+    const errorOptions: MessageBoxOptions = {
+      type: "warning",
+      title: "Git Hook 安装未完成",
+      message: nextStatus.message || "Git Hook 安装失败",
+      detail: nextStatus.error || "请稍后在 Git 面板中重试安装或修复。",
+      buttons: ["知道了"],
+      defaultId: 0
+    }
+    if (parentWindow && !parentWindow.isDestroyed()) {
+      await dialog.showMessageBox(parentWindow, errorOptions)
+    } else {
+      await dialog.showMessageBox(errorOptions)
+    }
+  } catch (e) {
+    console.warn("[GitHook] workspace selection prompt failed:", e)
   }
 }
 
@@ -798,7 +853,9 @@ function formatGitCommand(worktreePath: string, args: string[]): string {
 const GIT_BASE_ENV: NodeJS.ProcessEnv = {
   ...process.env,
   // 禁用 LFS smudge，避免与面板状态/差异无关的网络或大文件拉取开销。
-  GIT_LFS_SKIP_SMUDGE: "1"
+  GIT_LFS_SKIP_SMUDGE: "1",
+  // DevClaw 自己发起的 Git 操作已有采纳统计链路，hook 只采集外部 IDEA/bash 等入口。
+  [CMBDEVCLAW_INTERNAL_GIT_ENV]: "1"
 }
 
 async function addSafeDirectory(worktreePath: string): Promise<void> {
@@ -1969,6 +2026,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           const ready = await prepareWorkspaceSelectionSandbox(newPath, parentWindow)
           if (!ready) return null
           store.set("workspacePath", newPath)
+          await maybePromptInstallGitHooks(newPath, parentWindow)
         } else {
           store.delete("workspacePath")
         }
@@ -1991,6 +2049,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         startWatching(threadId, newPath)
         // 同步刷新“最近工作区”，供新建线程默认复用。
         store.set("workspacePath", newPath)
+        await maybePromptInstallGitHooks(newPath, parentWindow)
       } else {
         const metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
         metadata.workspacePath = newPath
@@ -2067,9 +2126,37 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     // 无论是线程模式还是全局模式，都更新“最近工作区”。
     // 这样新建会话与下次打开选择框都能默认到这个目录。
     store.set("workspacePath", selectedPath)
+    await maybePromptInstallGitHooks(selectedPath, parentWindow)
 
     return selectedPath
   })
+
+  ipcMain.handle(
+    "workspace:gitHookStatus",
+    async (_event, { workspacePath }: { workspacePath: string }) => {
+      if (!workspacePath) return getGitHookStatus("")
+      scheduleGitHookEventSync(workspacePath, 100)
+      return getGitHookStatus(workspacePath)
+    }
+  )
+
+  ipcMain.handle(
+    "workspace:installGitHooks",
+    async (_event, { workspacePath }: { workspacePath: string }) => {
+      if (!workspacePath) return getGitHookStatus("")
+      const status = await installGitHooks(workspacePath)
+      scheduleGitHookEventSync(workspacePath, 100)
+      return status
+    }
+  )
+
+  ipcMain.handle(
+    "workspace:uninstallGitHooks",
+    async (_event, { workspacePath }: { workspacePath: string }) => {
+      if (!workspacePath) return getGitHookStatus("")
+      return uninstallGitHooks(workspacePath)
+    }
+  )
 
   // Load files from disk into the workspace view
   ipcMain.handle("workspace:loadFromDisk", async (_event, { threadId }: WorkspaceLoadParams) => {

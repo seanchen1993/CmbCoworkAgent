@@ -9,6 +9,7 @@ import {
   measureForCommit,
   type StagedSnapshot
 } from "../services/adoption-tracker"
+import { CMBDEVCLAW_INTERNAL_GIT_ENV } from "../services/git-hook-service"
 import { promisify } from "util"
 
 /**
@@ -686,7 +687,8 @@ async function executeGitCommand(command: string, cwd?: string): Promise<string>
     env: {
       ...process.env,
       // Disable Git LFS for operations that don't need it
-      GIT_LFS_SKIP_SMUDGE: "1"
+      GIT_LFS_SKIP_SMUDGE: "1",
+      [CMBDEVCLAW_INTERNAL_GIT_ENV]: "1"
     }
   }
 

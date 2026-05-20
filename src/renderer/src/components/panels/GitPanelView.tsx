@@ -11,7 +11,10 @@ import {
   CheckCircle2,
   RefreshCw,
   ArrowDown,
-  Loader2
+  Loader2,
+  Webhook,
+  Wrench,
+  Trash2
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { DiffDisplay } from "@/components/chat/DiffDisplay"
@@ -50,6 +53,8 @@ type GitPanelDiffState = {
   suggestedCommitMessage?: string
   error?: string
 }
+
+type GitHookStatus = Awaited<ReturnType<typeof window.api.workspace.getGitHookStatus>>
 
 /**
  * 根据 thread context 中已经恢复出的 Git 信息，构造 GitPanel 的首屏 meta 状态。
@@ -110,6 +115,9 @@ export function GitPanelView({
   const [expandedFilePaths, setExpandedFilePaths] = useState<Set<string>>(new Set())
   const [revertingFilePath, setRevertingFilePath] = useState<string | null>(null)
   const [pulling, setPulling] = useState(false)
+  const [hookStatus, setHookStatus] = useState<GitHookStatus | null>(null)
+  const [hookLoading, setHookLoading] = useState(false)
+  const [hookAction, setHookAction] = useState<"install" | "uninstall" | null>(null)
   const initialMetaState = useMemo(
     () => createInitialMetaState(threadId, initialGitContext),
     [threadId, initialGitContext]
@@ -136,6 +144,30 @@ export function GitPanelView({
     }
     toast.error(text)
   }, [])
+
+  const refreshHookStatus = useCallback(async (): Promise<void> => {
+    if (!workspacePath) {
+      setHookStatus(null)
+      return
+    }
+    setHookLoading(true)
+    try {
+      const status = await window.api.workspace.getGitHookStatus(workspacePath)
+      setHookStatus(status)
+    } catch (e) {
+      setHookStatus({
+        state: "error",
+        installed: false,
+        canInstall: false,
+        version: 0,
+        hooks: [],
+        message: "Git Hook 检测失败",
+        error: e instanceof Error ? e.message : "Git Hook 检测失败"
+      })
+    } finally {
+      setHookLoading(false)
+    }
+  }, [workspacePath])
 
   const refresh = useCallback(
     async (options?: { meta?: boolean; diff?: boolean }) => {
@@ -214,6 +246,10 @@ export function GitPanelView({
   useEffect(() => {
     void refresh({ meta: true, diff: true })
   }, [refresh])
+
+  useEffect(() => {
+    void refreshHookStatus()
+  }, [refreshHookStatus])
 
   useEffect(() => {
     const handleBranchSwitched = (event: Event): void => {
@@ -378,6 +414,39 @@ export function GitPanelView({
     }
   }, [threadId, refresh, showToast])
 
+  const installOrRepairGitHooks = useCallback(async () => {
+    if (!workspacePath) return
+    setHookAction("install")
+    try {
+      const status = await window.api.workspace.installGitHooks(workspacePath)
+      setHookStatus(status)
+      if (status.state !== "installed") {
+        throw new Error(status.error || status.message || "Git Hook 安装未完成")
+      }
+      showToast("Git Hook 已安装", "success")
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : "Git Hook 安装失败", "error")
+      void refreshHookStatus()
+    } finally {
+      setHookAction(null)
+    }
+  }, [workspacePath, refreshHookStatus, showToast])
+
+  const uninstallGitHooks = useCallback(async () => {
+    if (!workspacePath) return
+    setHookAction("uninstall")
+    try {
+      const status = await window.api.workspace.uninstallGitHooks(workspacePath)
+      setHookStatus(status)
+      showToast("Git Hook 已卸载", "success")
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : "Git Hook 卸载失败", "error")
+      void refreshHookStatus()
+    } finally {
+      setHookAction(null)
+    }
+  }, [workspacePath, refreshHookStatus, showToast])
+
   const loading = metaLoading || diffLoading
   const combinedError = error || metaState?.error || diffState?.error || null
   const hasPending = Boolean(diffState?.hasPendingDiff ?? metaState?.hasPendingDiff)
@@ -398,6 +467,25 @@ export function GitPanelView({
   const totalChangedFiles = diffState?.changedFilesTotal ?? metaState?.changedFilesTotal ?? 0
   const omittedFileCount = diffState?.omittedFileCount ?? 0
   const visibleFilesCount = diffState?.totals.fileCount ?? 0
+  const hookState = hookStatus?.state ?? "not_installed"
+  const hookLabel =
+    hookState === "installed"
+      ? "已安装"
+      : hookState === "outdated"
+        ? "需升级"
+        : hookState === "partial"
+          ? "未完整"
+          : hookState === "modified"
+            ? "需修复"
+            : hookState === "error"
+              ? "检测失败"
+              : "未安装"
+  const hookDescription =
+    hookState === "installed"
+      ? "IDEA、命令行等外部提交也会纳入代码采纳率。"
+      : "安装后，DevClaw 外部提交也可以计算代码采纳率。"
+  const canInstallHook = hookStatus?.canInstall !== false && hookState !== "not_git"
+  const hookNeedsInstall = hookState !== "installed"
 
   return (
     <div className="rounded-xl border border-border/70 overflow-hidden bg-background flex flex-col min-h-0 h-full">
@@ -420,7 +508,9 @@ export function GitPanelView({
           ) : (
             <>
               <div className="text-[11px] text-muted-foreground truncate flex items-center gap-1 flex-wrap">
-                <span className="font-semibold text-foreground">{workspaceName}</span>
+                <span className="font-semibold text-foreground" title={workspacePath || workspaceName}>
+                  {workspaceName}
+                </span>
                 <span>•</span>
                 {isInitialDiffLoading ? (
                   <>
@@ -485,6 +575,67 @@ export function GitPanelView({
                     : "当前目录是 Git 仓库主目录。建议切换到独立 worktree 后再执行任务，更安全。"}
                 </p>
               )}
+              {hasGitRepo && hookStatus && hookState !== "not_git" && (
+                <div className="mt-2 flex items-center justify-between gap-3 border-t border-border/60 pt-2">
+                  <div className="flex min-w-0 items-center gap-2 text-xs">
+                    <span className="inline-flex size-7 shrink-0 items-center justify-center rounded-md border border-border/70 bg-muted/30">
+                      <Webhook className="size-3.5 text-muted-foreground" />
+                    </span>
+                    <span className="shrink-0 font-medium text-foreground whitespace-nowrap">
+                      Git Hook
+                    </span>
+                    <Badge
+                      variant="outline"
+                      className={cn(
+                        "h-5 shrink-0 px-2 text-[10px] tracking-normal whitespace-nowrap",
+                        hookState === "installed"
+                          ? "border-emerald-500/40 text-emerald-700 dark:text-emerald-300"
+                          : "border-amber-500/45 text-amber-700 dark:text-amber-300"
+                      )}
+                    >
+                      {hookLoading ? "检测中" : hookLabel}
+                    </Badge>
+                    <span className="min-w-0 truncate text-muted-foreground" title={hookDescription}>
+                      {hookDescription}
+                    </span>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    {hookNeedsInstall ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void installOrRepairGitHooks()
+                        }}
+                        disabled={!canInstallHook || hookAction !== null || hookLoading}
+                        className="inline-flex h-7 items-center gap-1 rounded-md border border-border px-2.5 text-[11px] whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed hover:bg-background-interactive transition-colors"
+                      >
+                        {hookAction === "install" ? (
+                          <Loader2 className="size-3.5 animate-spin" />
+                        ) : (
+                          <Wrench className="size-3.5" />
+                        )}
+                        {hookState === "not_installed" ? "安装" : "修复"}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void uninstallGitHooks()
+                        }}
+                        disabled={hookAction !== null || hookLoading}
+                        className="inline-flex h-7 items-center gap-1 rounded-md border border-border px-2.5 text-[11px] text-muted-foreground whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed hover:bg-background-interactive transition-colors"
+                      >
+                        {hookAction === "uninstall" ? (
+                          <Loader2 className="size-3.5 animate-spin" />
+                        ) : (
+                          <Trash2 className="size-3.5" />
+                        )}
+                        卸载
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
               {hasGitRepo && (
                 <div className="mt-2 pt-2 border-t border-border/60 flex flex-wrap items-center gap-2 justify-between">
                   <div className={"flex space-x-2"}>
@@ -523,6 +674,7 @@ export function GitPanelView({
                       id="git-refresh-button"
                       onClick={() => {
                         void refresh()
+                        void refreshHookStatus()
                       }}
                       disabled={loading}
                       title="刷新"
