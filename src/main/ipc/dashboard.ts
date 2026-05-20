@@ -7,7 +7,6 @@
  */
 
 import { ipcMain, dialog, BrowserWindow } from "electron"
-import { getUserInfo } from "../storage"
 import * as fs from "fs"
 import { buildTraceTree } from "../agent/trace/tree-builder"
 import type { AgentTrace, TraceNode } from "../agent/trace/types"
@@ -40,19 +39,6 @@ function getEsAuth(): { username: string; password: string } | null {
 function getEsIndex(type: "trace" | "event"): string {
   if (type === "trace") return (import.meta.env.VITE_ES_INDEX_TRACE as string) || "devclaw_trace"
   return (import.meta.env.VITE_ES_INDEX_EVENT as string) || "devclaw_event"
-}
-
-const ALLOWED_YST_IDS_RAW = (import.meta.env.VITE_DASHBOARD_ALLOWED_YST_IDS as string) || ""
-const ALLOWED_YST_IDS = new Set(
-  ALLOWED_YST_IDS_RAW.split(",").map((s) => s.trim()).filter(Boolean)
-)
-
-function isDashboardAllowedForCurrentUser(): boolean {
-  if (import.meta.env.DEV) return true
-  const userInfo = getUserInfo()
-  const ystId = userInfo?.ystId?.trim()
-  if (!ystId) return false
-  return ALLOWED_YST_IDS.has(ystId)
 }
 
 // ─────────────────────────────────────────────────────────
@@ -340,14 +326,6 @@ function normalizeSkillQueryNames(skillNames?: string[]): string[] {
         .filter(Boolean)
     )
   ).slice(0, 1000)
-}
-
-function isDashboardAllowed(): boolean {
-  if (import.meta.env.DEV) return true
-  const userInfo = getUserInfo()
-  const ystId = userInfo?.ystId?.trim()
-  if (!ystId) return false
-  return ALLOWED_YST_IDS.has(ystId)
 }
 
 function clampLimit(limit: number | undefined, fallback: number, max: number): number {
@@ -2624,9 +2602,8 @@ function makeMockCommitDetails(
 // ─────────────────────────────────────────────────────────
 
 export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
-  // Check if current user is allowed to see the dashboard
   _ipcMain.handle("dashboard:isAllowed", async () => {
-    return isDashboardAllowed()
+    return true
   })
 
   _ipcMain.handle(
@@ -2671,7 +2648,6 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   _ipcMain.handle(
     "dashboard:userList",
     async (_, range: TimeRange, options?: UserListOptions) => {
-      if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
       if (import.meta.env.DEV) return { success: true, data: makeMockUserList(range, options) }
       try {
         return { success: true, data: await fetchUserList(range, options) }
@@ -2685,7 +2661,6 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   _ipcMain.handle(
     "dashboard:userDetail",
     async (_, sapId: string, range: TimeRange, options?: UserDetailOptions) => {
-      if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
       const normalizedSapId = sapId?.trim?.() ?? ""
       if (!normalizedSapId) return { success: false, error: "sapId is required" }
       if (import.meta.env.DEV) return { success: true, data: makeMockUserDetail(normalizedSapId, range, options) }
@@ -2718,9 +2693,6 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
       const trimmedSkillName = skillName?.trim?.() ?? ""
       if (!trimmedSkillName) {
         return { success: false, error: "skillName is required" }
-      }
-      if (!isDashboardAllowedForCurrentUser()) {
-        return { success: false, error: "当前用户无权限查看 Skill 用户明细" }
       }
       if (import.meta.env.DEV) {
         return { success: true, data: makeMockSkillUserStats(range, trimmedSkillName) }
@@ -2784,7 +2756,6 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   _ipcMain.handle(
     "dashboard:skillRecentTraces",
     async (_, skill: string, range: TimeRange, limit?: number) => {
-      if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
       if (import.meta.env.DEV) return { success: true, data: makeMockSkillRecentTraces(skill, range, limit) }
       try {
         return { success: true, data: await fetchSkillRecentTraces(skill, range, limit) }
@@ -2813,7 +2784,6 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   _ipcMain.handle(
     "dashboard:skillDetail",
     async (_, skill: string, range: TimeRange, limit?: number) => {
-      if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
       if (import.meta.env.DEV) return { success: true, data: makeMockSkillDetail(skill, range, limit) }
       try {
         return { success: true, data: await fetchSkillDetail(skill, range, limit) }
@@ -2827,7 +2797,6 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   _ipcMain.handle(
     "dashboard:commitDetails",
     async (_, range: TimeRange, options?: number | CommitDetailsOptions) => {
-      if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
       if (import.meta.env.DEV) return { success: true, data: makeMockCommitDetails(range, options) }
       try {
         return { success: true, data: await fetchCommitDetails(range, options) }
