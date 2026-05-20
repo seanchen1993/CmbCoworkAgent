@@ -529,10 +529,14 @@ function normalizeProjectRun(value: unknown, workflow: HarnessWorkflow): Harness
   const slug = normalizeText(value.featureId) || normalizeText(value.featureName)
   if (!slug) return null
 
-  const status = normalizeStatus(value.overallStatus)
   const currentNodeId = normalizeText(value.currentNodeId) || "unknown"
-  const currentNodeLabel =
-    workflow.nodes.find((node) => node.id === currentNodeId)?.label ?? currentNodeId
+  const currentNodeDefinition = workflow.nodes.find((node) => node.id === currentNodeId)
+  const status = statusFromWorkflowStateId(
+    workflow,
+    currentNodeDefinition,
+    normalizeText(value.currentStateId)
+  )
+  const currentNodeLabel = currentNodeDefinition?.label ?? currentNodeId
   const summaryText = currentNodeLabel ? `${currentNodeLabel} · ${status.label}` : status.label
 
   return {
@@ -595,8 +599,7 @@ function normalizeWorkflowNodeDefinition(value: unknown): HarnessWorkflow["nodes
             if (!artifactId) return null
             return {
               id: artifactId,
-              label: normalizeText(artifact.label) || normalizeText(artifact.name) || artifactId,
-              kind: normalizeArtifactKind(artifact.kind),
+              label: normalizeText(artifact.label) || artifactId,
               required: typeof artifact.required === "boolean" ? artifact.required : false
             }
           })
@@ -632,6 +635,11 @@ function normalizeWorkflow(value: unknown): HarnessWorkflow {
           mode: "ordered_nodes",
           groupBy: "group"
         },
+    states: Array.isArray(workflow.states)
+      ? workflow.states
+          .map((state) => normalizeWorkflowStateDefinition(state))
+          .filter((state): state is NonNullable<typeof state> => state !== null)
+      : undefined,
     nodes: Array.isArray(workflow.nodes)
       ? workflow.nodes
           .map((node) => normalizeWorkflowNodeDefinition(node))
@@ -648,7 +656,7 @@ function workflowArtifactDefinitions(workflow: HarnessWorkflow): Map<string, Map
       artifacts.set(artifact.id, {
         id: artifact.id,
         label: artifact.label,
-        kind: artifact.kind,
+        kind: "file",
         path: null,
         required: artifact.required,
         status: UNKNOWN_STATUS
@@ -660,10 +668,13 @@ function workflowArtifactDefinitions(workflow: HarnessWorkflow): Map<string, Map
 }
 
 function statusFromWorkflowStateId(
-  nodeDefinition: HarnessWorkflow["nodes"][number],
+  workflow: HarnessWorkflow,
+  nodeDefinition: HarnessWorkflow["nodes"][number] | undefined,
   stateId: string
 ): HarnessStatus {
-  const state = nodeDefinition.states?.find((item) => item.id === stateId)
+  const state =
+    nodeDefinition?.states?.find((item) => item.id === stateId) ??
+    workflow.states?.find((item) => item.id === stateId)
   return state ? { label: state.label, uiKind: state.uiKind } : UNKNOWN_STATUS
 }
 
@@ -675,15 +686,13 @@ function normalizeArtifact(
   if (!isObject(value)) return null
   const id = normalizeText(value.id)
   if (!id) return null
-  const exists = typeof value.exists === "boolean" ? value.exists : undefined
   return {
     id,
-    label: normalizeText(value.label) || normalizeText(value.name) || definition?.label || id,
-    kind: normalizeArtifactKind(value.kind || definition?.kind),
+    label: definition?.label || normalizeText(value.label) || id,
+    kind: normalizeArtifactKind(value.kind),
     path: normalizeAdapterPath(project, value.path),
     required: typeof value.required === "boolean" ? value.required : definition?.required ?? false,
     status: normalizeStatus(value.status),
-    ...(typeof exists === "boolean" ? { exists } : {}),
     ...(typeof value.nonEmpty === "boolean" ? { nonEmpty: value.nonEmpty } : {}),
     ...(typeof value.size === "number" ? { size: value.size } : {}),
     ...(typeof value.summary === "string" ? { summary: value.summary } : {}),
@@ -821,7 +830,7 @@ function normalizeRunNodes(
         id,
         label: nodeDefinition.label,
         ...(nodeDefinition.group ? { group: nodeDefinition.group } : {}),
-        status: statusFromWorkflowStateId(nodeDefinition, stateId),
+        status: statusFromWorkflowStateId(workflow, nodeDefinition, stateId),
         artifacts: Array.isArray(node?.artifacts)
           ? node.artifacts
               .map((artifact) => {

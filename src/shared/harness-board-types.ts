@@ -189,7 +189,6 @@ export interface HarnessWorkflowNodeDefinition {
   artifactDefinitions?: Array<{
     id: string
     label: string
-    kind: HarnessArtifactKind
     required: boolean
   }>
   hookDefinitions?: Array<{
@@ -205,6 +204,7 @@ export interface HarnessWorkflow {
     mode: "ordered_nodes" | string
     groupBy?: string
   }
+  states?: HarnessWorkflowStateDefinition[]
   nodes: HarnessWorkflowNodeDefinition[]
 }
 
