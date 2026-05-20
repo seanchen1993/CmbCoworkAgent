@@ -287,22 +287,22 @@ function tokenizeInspectCommand(command: string): string[] {
   return tokens
 }
 
-function replaceInspectCommandPlaceholders(
-  token: string,
+function replaceHarnessConfigPlaceholders(
+  value: string,
   project: HarnessProjectMetadata,
   mode: HarnessInspectCommandName,
   cwd: string,
   feature?: string
 ): string {
   const replacements: Record<string, string> = {
-    workspace: project.workspace.path,
+    pluginWorkspace: project.workspace.path,
     project: project.projectCode,
     projectCode: project.projectCode,
     feature: feature ?? "",
     pluginPath: cwd,
     mode
   }
-  return token.replace(/\$\{(workspace|project|projectCode|feature|pluginPath|mode)\}/g, (_, key: string) => {
+  return value.replace(/\$\{(pluginWorkspace|project|projectCode|feature|pluginPath|mode)\}/g, (_, key: string) => {
     return replacements[key] ?? ""
   })
 }
@@ -315,7 +315,7 @@ function parseInspectCommand(
   feature?: string
 ): { executable: string; args: string[] } {
   const tokens = tokenizeInspectCommand(command.trim()).map((token) =>
-    replaceInspectCommandPlaceholders(token, project, mode, cwd, feature)
+    replaceHarnessConfigPlaceholders(token, project, mode, cwd, feature)
   )
   const [executable, ...args] = tokens
   if (!executable) {
@@ -324,7 +324,7 @@ function parseInspectCommand(
   return { executable, args }
 }
 
-function readBoardConfigInspectCommand(cwd: string, mode: HarnessInspectCommandName): string | null {
+function readBoardConfig(cwd: string): Record<string, unknown> | null {
   const configPath = join(cwd, "board_core", "board_config.json")
   if (!existsSync(configPath)) return null
 
@@ -336,7 +336,12 @@ function readBoardConfigInspectCommand(cwd: string, mode: HarnessInspectCommandN
     throw new Error(`Invalid board_config.json: ${message}`)
   }
 
-  if (!isObject(parsed) || !isObject(parsed.inspectCommands)) return null
+  return isObject(parsed) ? parsed : null
+}
+
+function readBoardConfigInspectCommand(cwd: string, mode: HarnessInspectCommandName): string | null {
+  const parsed = readBoardConfig(cwd)
+  if (!parsed || !isObject(parsed.inspectCommands)) return null
   const platformCommands = parsed.inspectCommands[process.platform]
   if (!isObject(platformCommands)) return null
 
@@ -1144,6 +1149,26 @@ function initializeHarnessProject(project: HarnessProjectMetadata): void {
     const message = error instanceof Error ? error.message : String(error)
     throw new Error(`创建项目失败：${message}`)
   }
+}
+
+function readHarnessFeatureMetadata(metadata: unknown): { projectId: string; slug: string } | null {
+  if (!isObject(metadata) || !isObject(metadata.harnessFeature)) return null
+  const projectId = normalizeText(metadata.harnessFeature.projectId).trim()
+  const slug = normalizeText(metadata.harnessFeature.slug).trim()
+  return projectId && slug ? { projectId, slug } : null
+}
+
+export function buildHarnessFeaturePluginDirPrompt(metadata: unknown): string | null {
+  const feature = readHarnessFeatureMetadata(metadata)
+  if (!feature) return null
+
+  const project = requireProject(feature.projectId)
+  const cwd = adapterPluginDir(project)
+  const config = readBoardConfig(cwd)
+  const template = normalizeText(config?.plugin_dir_prompt).trim()
+  if (!template) return null
+
+  return replaceHarnessConfigPlaceholders(template, project, "run", cwd, feature.slug).trim() || null
 }
 
 export function listHarnessProjects(): HarnessProjectListItem[] {

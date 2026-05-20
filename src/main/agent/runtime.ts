@@ -1118,7 +1118,8 @@ function formatLocalISO(date: Date, timeZone: string): string {
 
 function getSystemPrompt(
   workspacePath: string,
-  windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated"
+  windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated",
+  workingDirPromptAppendix?: string
 ): string {
   const isWindows = process.platform === "win32"
   const platform = isWindows ? "Windows" : process.platform === "darwin" ? "macOS" : "Linux"
@@ -1204,8 +1205,11 @@ ${shellGuidance}
         : ""
 
   const memorySection = isMemoryEnabled() ? MEMORY_SYSTEM_PROMPT : ""
+  const workingDirAppendix = workingDirPromptAppendix?.trim()
+    ? `${workingDirPromptAppendix.trim()}\n`
+    : ""
   return (
-    workingDirSection + backgroundExecSection + sandboxSection + BASE_SYSTEM_PROMPT + memorySection
+    workingDirSection + workingDirAppendix + backgroundExecSection + sandboxSection + BASE_SYSTEM_PROMPT + memorySection
   )
 }
 
@@ -1528,6 +1532,8 @@ export interface CreateAgentRuntimeOptions {
   workspacePath: string
   /** Extra content appended to the system prompt (e.g. HEARTBEAT.md context) */
   extraSystemPrompt?: string
+  /** Extra content appended immediately after the working directory section. */
+  workingDirPromptAppendix?: string
   /** Skip the manage_scheduler tool (used by scheduled task / heartbeat execution to prevent recursive scheduling) */
   noSchedulerTool?: boolean
   /** Skip the manage_skill tool (disable skill evolution for scheduled/heartbeat agents) */
@@ -1563,6 +1569,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     workspacePath,
     modelId,
     extraSystemPrompt,
+    workingDirPromptAppendix,
     retryHooks,
     maxRetryAttempts,
     enableAgentsPrompt = true,
@@ -1738,7 +1745,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const orchestrator = new ToolOrchestrator(approvalStore, rawExecute, requestApproval, yoloMode)
   backend.setOrchestrator(orchestrator)
 
-  let systemPrompt = getSystemPrompt(workspacePath, windowsSandbox)
+  let systemPrompt = getSystemPrompt(workspacePath, windowsSandbox, workingDirPromptAppendix)
   let agentsPrompt: Awaited<ReturnType<typeof loadAgentsPromptForWorkspace>> = {
     prompt: null,
     projectRoot: workspacePath,
