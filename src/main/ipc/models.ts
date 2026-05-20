@@ -1015,6 +1015,71 @@ async function runGitWithLiteralPathspecs(
   return runGit(worktreePath, ["--literal-pathspecs", ...args, "--", ...pathspecs], options)
 }
 
+async function pathExistsForGitAdd(worktreePath: string, relPath: string): Promise<boolean> {
+  try {
+    await fs.stat(path.join(worktreePath, relPath))
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 暂存 GitPanel 中用户勾选的文件。
+ *
+ * 这里不能简单使用 `git add .`，因为 GitPanel 支持“只提交已勾选文件”；
+ * 也不能把所有 path 都直接交给 `git add -- <path>`，因为删除文件或移动文件的旧路径
+ * 在工作区中已经不存在，Windows Git/WebStorm 场景下可能报：
+ *
+ *   fatal: pathspec 'test/maxSubArray.js' did not match any files
+ *
+ * 因此按路径是否仍存在拆成两类：
+ *
+ * 1. 新增/修改/移动后的新路径：
+ *
+ *   git -C <repo> --literal-pathspecs add -- test/fibonacci.js
+ *
+ * 2. 删除文件或移动前的旧路径：
+ *
+ *   git -C <repo> --literal-pathspecs update-index --remove -- fibonacci.js
+ *
+ * 移动文件本质上是“删除旧路径 + 新增新路径”。例如：
+ *
+ *   fibonacci.js -> test/fibonacci.js
+ *
+ * 会分解为：
+ *
+ *   git -C <repo> --literal-pathspecs add -- test/fibonacci.js
+ *   git -C <repo> --literal-pathspecs update-index --remove -- fibonacci.js
+ *
+ * 最后 commit 时仍带上用户勾选的 pathspec，保证只提交本次选择范围内的变更。
+ */
+async function stageFilesForCommit(worktreePath: string, pathspecs: string[]): Promise<void> {
+  const normalizedPathspecs = Array.from(new Set(pathspecs.map(normalizeGitRelativePath).filter(Boolean)))
+  const existingPathspecs: string[] = []
+  const removedPathspecs: string[] = []
+
+  await Promise.all(
+    normalizedPathspecs.map(async (pathspec) => {
+      if (await pathExistsForGitAdd(worktreePath, pathspec)) {
+        existingPathspecs.push(pathspec)
+      } else {
+        removedPathspecs.push(pathspec)
+      }
+    })
+  )
+
+  if (existingPathspecs.length > 0) {
+    // 示例：git -C <repo> --literal-pathspecs add -- test/fibonacci.js
+    await runGitWithLiteralPathspecs(worktreePath, ["add"], existingPathspecs)
+  }
+
+  if (removedPathspecs.length > 0) {
+    // 示例：git -C <repo> --literal-pathspecs update-index --remove -- fibonacci.js
+    await runGitWithLiteralPathspecs(worktreePath, ["update-index", "--remove"], removedPathspecs)
+  }
+}
+
 function isGitDirWorktree(gitDir: string): boolean {
   const normalized = gitDir.trim().replace(/\\/g, "/")
   return /\/\.git\/worktrees\//.test(normalized)
@@ -2751,10 +2816,11 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         }
 
         logGitStep(threadId, "commit", `add 文件数：${filesToCommit.length}`)
-        // 必须按字面量 add：否则 Git 会把部分文件名当 glob pathspec，偶发报 did not match any files。
-        // 使用 --all 才能稳定暂存删除路径；普通文件系统 mv 会表现为 D + ??，
-        // 需要旧路径和新路径一起 add --all，否则只会提交新增侧或在 Windows 上报 missing pathspec。
-        await runGitWithLiteralPathspecs(worktreePath, ["add", "--all"], filesToCommit)
+        // 这里会按文件是否存在拆分暂存命令：
+        // - 存在路径：git add -- <path>
+        // - 删除路径：git update-index --remove -- <path>
+        // 详见 stageFilesForCommit 上方注释中的 Windows 兼容说明和完整命令案例。
+        await stageFilesForCommit(worktreePath, filesToCommit)
         const adoptionSnapshots = captureStagedSnapshotsForCommit(worktreePath)
         logGitStep(threadId, "commit", `commit message: ${message}`)
         if (Array.isArray(filePaths) && filePaths.length > 0) {
