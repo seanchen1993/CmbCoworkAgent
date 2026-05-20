@@ -458,50 +458,19 @@ function runInspectAdapter(
   }
 }
 
-function statusFromId(id: string): HarnessStatus {
-  switch (id) {
-    case "not_started":
-    case "pending":
-      return { label: "未开始", uiKind: "pending" }
-    case "in_progress":
-    case "active":
-      return { label: "进行中", uiKind: "active" }
-    case "done":
-      return { label: "已完成", uiKind: "done" }
-    case "blocked":
-    case "needs_fix":
-      return { label: "已阻断", uiKind: "blocked" }
-    case "warning":
-      return { label: "提示", uiKind: "warning" }
-    case "error":
-      return { label: "错误", uiKind: "error" }
-    case "archived":
-      return { label: "已归档", uiKind: "archived" }
-    case "passed":
-    case "present":
-    case "ok":
-      return { label: "正常", uiKind: "ok" }
-    case "missing":
-      return { label: "未生成", uiKind: "warning" }
-    case "skipped":
-      return { label: "跳过", uiKind: "skipped" }
-    default:
-      return { label: id || "未知", uiKind: "unknown" }
-  }
-}
+const UNKNOWN_STATUS: HarnessStatus = { label: "未知", uiKind: "unknown" }
 
-function normalizeStatus(value: unknown, fallbackId = "unknown"): HarnessStatus {
-  if (!isObject(value)) {
-    return statusFromId(normalizeText(value) || fallbackId)
+function normalizeStatus(value: unknown): HarnessStatus {
+  if (!isObject(value)) return UNKNOWN_STATUS
+
+  const label = normalizeText(value.label)
+  if (!label || !HARNESS_UI_KINDS.has(value.uiKind as HarnessStatus["uiKind"])) {
+    return UNKNOWN_STATUS
   }
 
-  const fallback = statusFromId(fallbackId)
-  const uiKind = HARNESS_UI_KINDS.has(value.uiKind as HarnessStatus["uiKind"])
-    ? (value.uiKind as HarnessStatus["uiKind"])
-    : fallback.uiKind
   return {
-    label: normalizeText(value.label) || fallback.label,
-    uiKind
+    label,
+    uiKind: value.uiKind as HarnessStatus["uiKind"]
   }
 }
 
@@ -560,7 +529,7 @@ function normalizeProjectRun(value: unknown, workflow: HarnessWorkflow): Harness
   const slug = normalizeText(value.featureId) || normalizeText(value.featureName)
   if (!slug) return null
 
-  const status = normalizeStatus(value.overallStatus, "unknown")
+  const status = normalizeStatus(value.overallStatus)
   const currentNodeId = normalizeText(value.currentNodeId) || "unknown"
   const currentNodeLabel =
     workflow.nodes.find((node) => node.id === currentNodeId)?.label ?? currentNodeId
@@ -594,7 +563,7 @@ function normalizeWorkflowStateDefinition(
   if (!isObject(value)) return null
   const id = normalizeText(value.id)
   if (!id) return null
-  const status = normalizeStatus(value, id)
+  const status = normalizeStatus(value)
   return {
     id,
     label: status.label,
@@ -682,7 +651,7 @@ function workflowArtifactDefinitions(workflow: HarnessWorkflow): Map<string, Map
         kind: artifact.kind,
         path: null,
         required: artifact.required,
-        status: statusFromId("unknown")
+        status: UNKNOWN_STATUS
       })
     }
     byNode.set(node.id, artifacts)
@@ -695,7 +664,7 @@ function statusFromWorkflowStateId(
   stateId: string
 ): HarnessStatus {
   const state = nodeDefinition.states?.find((item) => item.id === stateId)
-  return state ? { label: state.label, uiKind: state.uiKind } : statusFromId(stateId || "unknown")
+  return state ? { label: state.label, uiKind: state.uiKind } : UNKNOWN_STATUS
 }
 
 function normalizeArtifact(
@@ -713,7 +682,7 @@ function normalizeArtifact(
     kind: normalizeArtifactKind(value.kind || definition?.kind),
     path: normalizeAdapterPath(project, value.path),
     required: typeof value.required === "boolean" ? value.required : definition?.required ?? false,
-    status: normalizeStatus(value.status, exists === false ? "missing" : "present"),
+    status: normalizeStatus(value.status),
     ...(typeof exists === "boolean" ? { exists } : {}),
     ...(typeof value.nonEmpty === "boolean" ? { nonEmpty: value.nonEmpty } : {}),
     ...(typeof value.size === "number" ? { size: value.size } : {}),
@@ -742,7 +711,7 @@ function normalizeHook(value: unknown): HarnessRunNode["hooks"][number] | null {
     hookId,
     label: normalizeText(value.label) || hookId,
     event: normalizeText(value.event) || undefined,
-    status: normalizeStatus(value.status, "unknown"),
+    status: normalizeStatus(value.status),
     decision: normalizeText(value.decision) || undefined,
     exitCode: typeof value.exitCode === "number" ? value.exitCode : undefined,
     durationMs: typeof value.durationMs === "number" ? value.durationMs : undefined,
