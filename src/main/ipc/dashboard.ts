@@ -398,6 +398,8 @@ interface DashboardSkillEvalOptions {
   recentPageSize?: number
   skillName?: string
   skillVersion?: string
+  skillNames?: string[]
+  defaultRecentToLatestSkill?: boolean
 }
 
 const DISLIKE_TYPE_OPTIONS = [
@@ -554,15 +556,30 @@ function normalizeSkillEvalOptions(value?: DashboardSkillEvalOptions): {
   recentPageSize: number
   skillName?: string
   skillVersion: string | undefined
+  skillNames: string[]
+  skillNamesProvided: boolean
+  defaultRecentToLatestSkill: boolean
 } {
   const skillName = typeof value?.skillName === "string" ? value.skillName.trim() : ""
   const skillVersion = typeof value?.skillVersion === "string" ? value.skillVersion.trim() : ""
+  const rawSkillNames = Array.isArray(value?.skillNames) ? value.skillNames : []
+  const skillNames = Array.from(
+    new Set(
+      rawSkillNames
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim())
+        .filter(Boolean)
+    )
+  ).slice(0, 100)
   return {
     sampleLimit: clampLimit(value?.limit, 500, 2000),
     recentPage: clampLimit(value?.recentPage, 1, 10_000),
     recentPageSize: clampLimit(value?.recentPageSize, 10, 100),
     ...(skillName ? { skillName } : {}),
-    skillVersion: skillName ? skillVersion || undefined : undefined
+    skillVersion: skillName ? skillVersion || undefined : undefined,
+    skillNames,
+    skillNamesProvided: Array.isArray(value?.skillNames),
+    defaultRecentToLatestSkill: value?.defaultRecentToLatestSkill === true
   }
 }
 
@@ -588,14 +605,16 @@ function skillEvalTraceSourceIncludes(): string[] {
 
 function skillEvalTraceQuery(
   range: TimeRange,
-  skillFilter?: { skillName: string; skillVersion?: string }
+  skillFilter?: SkillEvalFilter
 ): Record<string, unknown> {
   const filter: Record<string, unknown>[] = [
     timeRangeFilter("startedAt", range),
     { exists: { field: "usedSkills" } }
   ]
-  if (skillFilter?.skillName) {
+  if (isSkillEvalExactFilter(skillFilter)) {
     filter.push(buildSkillEvalExactSkillFilter(skillFilter.skillName, skillFilter.skillVersion))
+  } else if (skillFilter?.skillNames && skillFilter.skillNames.length > 0) {
+    filter.push(buildSkillEvalSkillNamesFilter(skillFilter.skillNames))
   }
 
   return {
@@ -618,6 +637,34 @@ function buildSkillEvalExactSkillFilter(skillName: string, skillVersion?: string
       minimum_should_match: 1
     }
   }
+}
+
+function buildSkillEvalSkillNamesFilter(skillNames: string[]): Record<string, unknown> {
+  const should = skillNames.flatMap((skillName) => {
+    const escaped = escapeWildcard(skillName)
+    const pattern = `${escaped}*`
+    return [
+      { term: { usedSkills: skillName } },
+      { term: { "usedSkills.keyword": skillName } },
+      { wildcard: { usedSkills: pattern } },
+      { wildcard: { "usedSkills.keyword": pattern } }
+    ]
+  })
+  return {
+    bool: {
+      should,
+      minimum_should_match: 1
+    }
+  }
+}
+
+type SkillEvalExactFilter = { skillName: string; skillVersion: string | undefined }
+type SkillEvalNamesFilter = { skillNames: string[] }
+type SkillEvalFilter = SkillEvalExactFilter | SkillEvalNamesFilter
+
+function isSkillEvalExactFilter(filter?: SkillEvalFilter): filter is SkillEvalExactFilter {
+  if (!filter || !("skillName" in filter)) return false
+  return typeof filter.skillName === "string" && filter.skillName.length > 0
 }
 
 function normalizeUserListOptions(value?: UserListOptions): Required<Omit<UserListOptions, "afterKey">> & {
@@ -669,6 +716,23 @@ function asStringArray(value: unknown): string[] {
 
 function skillVersionKey(skillName: string, skillVersion?: string): string {
   return `${skillName}:${skillVersion ?? ""}`
+}
+
+function getLatestSkillFilterFromRuns(
+  runs: DashboardSkillEvalRun[]
+): { skillName: string; skillVersion: string | undefined } | undefined {
+  if (runs.length === 0) return undefined
+  const latest = runs.reduce((currentLatest, run) => (
+    new Date(run.startedAt).getTime() > new Date(currentLatest.startedAt).getTime() ? run : currentLatest
+  ), runs[0])
+  return {
+    skillName: latest.skillName,
+    skillVersion: latest.skillVersion
+  }
+}
+
+function hasAllowedSkillName(skillName: string, allowedSkillNames?: Set<string>): boolean {
+  return !allowedSkillNames || allowedSkillNames.has(skillName)
 }
 
 function averageValue(total: number, count: number): number {
@@ -1535,14 +1599,31 @@ async function fetchSkillEvalSummary(
   range: TimeRange,
   options?: DashboardSkillEvalOptions
 ): Promise<DashboardSkillEvalSummary> {
-  const { sampleLimit, recentPage, recentPageSize, skillName, skillVersion } =
-    normalizeSkillEvalOptions(options)
+  const {
+    sampleLimit,
+    recentPage,
+    recentPageSize,
+    skillName,
+    skillVersion,
+    skillNames,
+    skillNamesProvided,
+    defaultRecentToLatestSkill
+  } = normalizeSkillEvalOptions(options)
   const recentFrom = (recentPage - 1) * recentPageSize
-  const sampleQuery = skillEvalTraceQuery(range)
-  const recentQuery = skillEvalTraceQuery(
-    range,
-    skillName ? { skillName, skillVersion } : undefined
-  )
+  const skillNamesFilter: SkillEvalNamesFilter | undefined = skillNames.length > 0 ? { skillNames } : undefined
+  const allowedSkillNames = skillNames.length > 0 ? new Set(skillNames) : undefined
+  if (skillNamesProvided && skillNames.length === 0) {
+    return buildSkillEvalSummaryFromTraces({
+      traces: [],
+      totalTraceHits: 0,
+      sampledTraceCount: 0,
+      recentTotal: 0,
+      recentPage,
+      recentPageSize,
+      allowedSkillNames: new Set()
+    })
+  }
+  const sampleQuery = skillEvalTraceQuery(range, skillNamesFilter)
   const source = { includes: skillEvalTraceSourceIncludes() }
   const sampleBody = {
     track_total_hits: true,
@@ -1551,7 +1632,8 @@ async function fetchSkillEvalSummary(
     query: sampleQuery,
     _source: source
   }
-  const recentBody = {
+  const explicitRecentFilter: SkillEvalExactFilter | undefined = skillName ? { skillName, skillVersion } : undefined
+  const buildRecentBody = (recentQuery: Record<string, unknown>) => ({
     track_total_hits: true,
     from: recentFrom,
     size: recentPageSize,
@@ -1561,26 +1643,60 @@ async function fetchSkillEvalSummary(
     aggs: {
       skill_run_count: { value_count: { field: "usedSkills" } }
     }
+  })
+
+  let sampleRaw: EsSearchResponse
+  let recentRaw: EsSearchResponse
+  let recentSkillFilter = explicitRecentFilter ?? skillNamesFilter
+
+  if (!explicitRecentFilter && defaultRecentToLatestSkill) {
+    sampleRaw = await esQuery(getEsIndex("trace"), sampleBody) as EsSearchResponse
+    const defaultSampleTraces = parseSkillEvalTraceHits(sampleRaw)
+    const defaultSampleRuns = buildSkillEvalRuns(defaultSampleTraces, undefined, allowedSkillNames)
+    recentSkillFilter = getLatestSkillFilterFromRuns(defaultSampleRuns) ?? skillNamesFilter
+    recentRaw = await esQuery(
+      getEsIndex("trace"),
+      buildRecentBody(skillEvalTraceQuery(range, recentSkillFilter))
+    ) as EsSearchResponse
+    const totalTraceHits = getTotalHits(sampleRaw, sampleRaw.hits?.hits?.length ?? 0)
+    const recentTraceHits = getTotalHits(recentRaw, recentRaw.hits?.hits?.length ?? 0)
+    const recentTraces = parseSkillEvalTraceHits(recentRaw)
+    return buildSkillEvalSummaryFromTraces({
+      traces: defaultSampleTraces,
+      sampleRuns: defaultSampleRuns,
+      recentTraces,
+      totalTraceHits,
+      sampledTraceCount: sampleRaw.hits?.hits?.length ?? 0,
+      recentTotal: recentSkillFilter ? recentTraceHits : getSkillRunCount(recentRaw, recentTraceHits),
+      recentPage,
+      recentPageSize,
+      ...(isSkillEvalExactFilter(recentSkillFilter) ? { recentSkillFilter } : {}),
+      allowedSkillNames
+    })
   }
 
-  const [sampleRaw, recentRaw] = await Promise.all([
+  const recentQuery = skillEvalTraceQuery(range, recentSkillFilter)
+  ;[sampleRaw, recentRaw] = await Promise.all([
     esQuery(getEsIndex("trace"), sampleBody) as Promise<EsSearchResponse>,
-    esQuery(getEsIndex("trace"), recentBody) as Promise<EsSearchResponse>
+    esQuery(getEsIndex("trace"), buildRecentBody(recentQuery)) as Promise<EsSearchResponse>
   ])
   const totalTraceHits = getTotalHits(sampleRaw, sampleRaw.hits?.hits?.length ?? 0)
-  const recentTraceHits = getTotalHits(recentRaw, recentRaw.hits?.hits?.length ?? 0)
   const sampleTraces = parseSkillEvalTraceHits(sampleRaw)
+  const sampleRuns = buildSkillEvalRuns(sampleTraces, undefined, allowedSkillNames)
+  const recentTraceHits = getTotalHits(recentRaw, recentRaw.hits?.hits?.length ?? 0)
   const recentTraces = parseSkillEvalTraceHits(recentRaw)
 
   return buildSkillEvalSummaryFromTraces({
     traces: sampleTraces,
+    sampleRuns,
     recentTraces,
     totalTraceHits,
     sampledTraceCount: sampleRaw.hits?.hits?.length ?? 0,
-    recentTotal: skillName ? recentTraceHits : getSkillRunCount(recentRaw, recentTraceHits),
+    recentTotal: recentSkillFilter ? recentTraceHits : getSkillRunCount(recentRaw, recentTraceHits),
     recentPage,
     recentPageSize,
-    ...(skillName ? { recentSkillFilter: { skillName, skillVersion } } : {})
+    ...(isSkillEvalExactFilter(recentSkillFilter) ? { recentSkillFilter } : {}),
+    allowedSkillNames
   })
 }
 
@@ -1602,15 +1718,18 @@ function parseSkillEvalTraceHits(raw: EsSearchResponse): AgentTrace[] {
 
 function buildSkillEvalSummaryFromTraces({
   traces,
+  sampleRuns,
   recentTraces,
   totalTraceHits = traces.length,
   sampledTraceCount = traces.length,
   recentTotal = traces.length,
   recentPage = 1,
   recentPageSize = 10,
-  recentSkillFilter
+  recentSkillFilter,
+  allowedSkillNames
 }: {
   traces: AgentTrace[]
+  sampleRuns?: DashboardSkillEvalRun[]
   recentTraces?: AgentTrace[]
   totalTraceHits?: number
   sampledTraceCount?: number
@@ -1618,36 +1737,23 @@ function buildSkillEvalSummaryFromTraces({
   recentPage?: number
   recentPageSize?: number
   recentSkillFilter?: { skillName: string; skillVersion: string | undefined }
+  allowedSkillNames?: Set<string>
 }): DashboardSkillEvalSummary {
   const grouped = new Map<string, DashboardSkillEvalRun[]>()
   let evaluatedTraceCount = 0
 
-  for (const trace of traces) {
-    if (!trace || !Array.isArray(trace.usedSkills) || trace.usedSkills.length === 0) continue
-
-    const { evalRecords, resultRecords } = evaluateSkillTrace(trace)
-    if (evalRecords.length === 0) continue
-    evaluatedTraceCount += 1
-
-    const resultByKey = new Map(
-      resultRecords.map((record) => [
-        skillVersionKey(record.skillName, record.skillVersion),
-        record
-      ])
-    )
-
-    const traceDetail = traceToDashboardTraceDetail(trace)
-    for (const record of evalRecords) {
-      const result = resultByKey.get(skillVersionKey(record.skillName, record.skillVersion))
-      const run = skillEvalRecordToDashboardRun(record, result, traceDetail)
-      const key = skillVersionKey(run.skillName, run.skillVersion)
-      const bucket = grouped.get(key) ?? []
-      bucket.push(run)
-      grouped.set(key, bucket)
-    }
+  const sampledRuns = sampleRuns ?? buildSkillEvalRuns(traces)
+  const evaluatedTraceIds = new Set<string>()
+  for (const run of sampledRuns) {
+    const key = skillVersionKey(run.skillName, run.skillVersion)
+    const bucket = grouped.get(key) ?? []
+    bucket.push(run)
+    grouped.set(key, bucket)
+    if (run.traceId) evaluatedTraceIds.add(run.traceId)
   }
+  evaluatedTraceCount = evaluatedTraceIds.size
 
-  const recentRuns = buildSkillEvalRuns(recentTraces ?? traces, recentSkillFilter)
+  const recentRuns = buildSkillEvalRuns(recentTraces ?? traces, recentSkillFilter, allowedSkillNames)
     .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())
 
   const skills: DashboardSkillEvalSkillSummary[] = [...grouped.values()]
@@ -1808,7 +1914,8 @@ function buildSkillEvalSummaryFromTraces({
 
 function buildSkillEvalRuns(
   traces: AgentTrace[],
-  skillFilter?: { skillName: string; skillVersion: string | undefined }
+  skillFilter?: { skillName: string; skillVersion: string | undefined },
+  allowedSkillNames?: Set<string>
 ): DashboardSkillEvalRun[] {
   const runs: DashboardSkillEvalRun[] = []
   for (const trace of traces) {
@@ -1823,6 +1930,7 @@ function buildSkillEvalRuns(
     const traceDetail = traceToDashboardTraceDetail(trace)
     for (const record of evalRecords) {
       if (skillFilter && !isSameSkillVersion(record, skillFilter)) continue
+      if (!hasAllowedSkillName(record.skillName, allowedSkillNames)) continue
       const result = resultByKey.get(skillVersionKey(record.skillName, record.skillVersion))
       runs.push(skillEvalRecordToDashboardRun(record, result, traceDetail))
     }
@@ -2785,18 +2893,60 @@ function makeMockSkillEvalSummary(
   range: TimeRange,
   options?: DashboardSkillEvalOptions
 ): DashboardSkillEvalSummary {
-  const { recentPage, recentPageSize } = normalizeSkillEvalOptions(options)
+  const { recentPage, recentPageSize, skillName, skillVersion, skillNames, defaultRecentToLatestSkill } =
+    normalizeSkillEvalOptions(options)
   const skills = ["代码审查-v1.0.0", "单元测试-v1.1.0", "SQL优化-v2.0.0", "前端走查-v1.3.0"]
-  const traces = skills.flatMap((skill) =>
+  const filteredSkills = skillName
+    ? skills.filter((skill) => {
+        const parsed = parseMockSkillIdentifier(skill)
+        return parsed.skillName === skillName && (skillVersion ? parsed.skillVersion === skillVersion : true)
+      })
+    : skillNames.length > 0
+      ? skills.filter((skill) => skillNames.includes(parseMockSkillIdentifier(skill).skillName))
+      : Array.isArray(options?.skillNames)
+        ? []
+        : skills
+  const traces = filteredSkills.flatMap((skill) =>
     Array.from({ length: 8 }, (_, index) => makeMockAgentTrace(skill, range, index))
   )
+  const sampleRuns = buildSkillEvalRuns(
+    traces,
+    undefined,
+    skillNames.length > 0 ? new Set(skillNames) : undefined
+  )
+  const latestFilter = !skillName && defaultRecentToLatestSkill
+    ? getLatestSkillFilterFromRuns(sampleRuns)
+    : undefined
+  const recentFilter = skillName
+    ? { skillName, skillVersion }
+    : latestFilter
+  const recentTraces = recentFilter
+    ? traces.filter((trace) =>
+        trace.usedSkills.some((usedSkill) => {
+          const parsed = parseMockSkillIdentifier(usedSkill)
+          return parsed.skillName === recentFilter.skillName &&
+            (parsed.skillVersion ?? undefined) === recentFilter.skillVersion
+        })
+      )
+    : traces
   return buildSkillEvalSummaryFromTraces({
     traces,
+    sampleRuns,
+    recentTraces,
     totalTraceHits: traces.length,
     sampledTraceCount: traces.length,
+    recentTotal: recentTraces.length,
     recentPage,
-    recentPageSize
+    recentPageSize,
+    ...(recentFilter ? { recentSkillFilter: recentFilter } : {}),
+    ...(skillNames.length > 0 ? { allowedSkillNames: new Set(skillNames) } : {})
   })
+}
+
+function parseMockSkillIdentifier(skill: string): { skillName: string; skillVersion?: string } {
+  const match = skill.match(/^(.*?)-(v\d+(?:\.\d+){0,3})$/)
+  if (!match) return { skillName: skill }
+  return { skillName: match[1], skillVersion: match[2] }
 }
 
 function makeMockSkillUserStats(range: TimeRange, skillName: string): unknown {

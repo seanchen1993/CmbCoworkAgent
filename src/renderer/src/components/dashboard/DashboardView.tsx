@@ -1,9 +1,9 @@
 /**
  * Operations Dashboard
  *
- * 5 panels: Overview · Feedback · Model Analysis · User Analysis · Productivity
+ * Operations overview and skill evaluation dashboard.
  */
-import { useState, useCallback, useEffect } from "react"
+import { useState, useCallback, useEffect, useMemo } from "react"
 import {
   RefreshCw,
   Loader2,
@@ -49,10 +49,16 @@ import { marketApi, type MarketItem } from "../../api/market"
 import { buildMarketSkillKeySet, buildMarketSkillMap, getMarketSkillItem } from "./skill-market"
 import {
   buildUploaderIdCandidates,
+  getUploaderIdCandidates,
   normalizeUploaderProfileField,
   parseUploaderIdentity,
   type UploaderProfileInfo
 } from "../../lib/skill-data-service"
+
+type UserInfoLite = {
+  sapId?: string
+  ystId?: string
+}
 
 // ─────────────────────────────────────────────────────────
 // Time control bar
@@ -99,11 +105,7 @@ function resolveSkillUploaderExportInfo(
   if (!item?.user_id) return { sapId: "", userName: "", orgName: "" }
 
   const parsed = parseUploaderIdentity(item.user_id)
-  const profileCandidates = [
-    item.user_id.trim(),
-    parsed?.sapId,
-    ...buildUploaderIdCandidates(parsed?.sapId || item.user_id)
-  ].filter((value): value is string => Boolean(value))
+  const profileCandidates = getUploaderIdCandidates(item.user_id)
   const profile = profileCandidates.map((candidate) => uploaderProfiles[candidate]).find(Boolean)
 
   return {
@@ -121,6 +123,11 @@ function resolveSkillUploaderExportInfo(
         normalizeUploaderProfileField(profile?.upperOrgLv0)
       ) || normalizeUploaderProfileField(parsed?.orgName)
   }
+}
+
+function isUploadedByCurrentUser(item: MarketItem, currentUserCandidates: Set<string>): boolean {
+  if (!item.user_id || currentUserCandidates.size === 0) return false
+  return getUploaderIdCandidates(item.user_id).some((candidate) => currentUserCandidates.has(candidate))
 }
 
 function TimeControlBar({
@@ -665,7 +672,7 @@ function DashboardTabBar({
 }): React.JSX.Element {
   const tabs: Array<{ id: DashboardMainTab; label: string }> = [
     { id: "overview", label: "经营概览" },
-    { id: "skill-eval", label: "Skill 评估" }
+    { id: "skill-eval", label: "技能评估" }
   ]
 
   return (
@@ -1052,7 +1059,11 @@ function SkillEvalDashboardPanel({
   data,
   loading,
   range,
+  mineOnly,
+  mineSkillCount,
+  mineSkillsLoading,
   onRecentPageChange,
+  onMineOnlyChange,
   onOpenTrace,
   selectedSkillKey,
   onSelectedSkillKeyChange
@@ -1060,13 +1071,21 @@ function SkillEvalDashboardPanel({
   data: DashboardSkillEvalSummary | null
   loading: boolean
   range: TimeRange
+  mineOnly: boolean
+  mineSkillCount: number
+  mineSkillsLoading: boolean
   onRecentPageChange: (page: number, key: string | null) => void
+  onMineOnlyChange: (mineOnly: boolean) => void
   onOpenTrace: (run: DashboardSkillEvalRun) => void
   selectedSkillKey: string | null
   onSelectedSkillKeyChange: (key: string | null) => void
 }): React.JSX.Element {
-  if (loading && !data) {
-    return <div className="py-8 text-center text-sm text-muted-foreground">加载中...</div>
+  if ((loading || mineSkillsLoading) && !data) {
+    return (
+      <div className="py-8 text-center text-sm text-muted-foreground">
+        {mineSkillsLoading ? "正在加载我的技能列表..." : "加载中..."}
+      </div>
+    )
   }
   if (!data) return <div className="py-8 text-center text-sm text-muted-foreground">暂无评估数据</div>
 
@@ -1093,6 +1112,7 @@ function SkillEvalDashboardPanel({
   const selectedAverageModelCalls = selectedSkill?.averageModelCalls ?? data.averageModelCalls
   const selectedAverageTotalTokens = selectedSkill?.averageTotalTokens ?? data.averageTotalTokens
   const selectedAverageDurationMs = selectedSkill?.averageDurationMs ?? data.averageDurationMs
+  const scopeLabel = mineOnly ? "我的技能" : "全部技能"
 
   return (
     <div className="grid min-h-[720px] grid-cols-[minmax(420px,520px)_minmax(0,1fr)] overflow-hidden rounded-xl border border-border bg-card">
@@ -1102,12 +1122,12 @@ function SkillEvalDashboardPanel({
             <div className="text-[10px] text-muted-foreground">当前统计口径</div>
             <div className="mt-0.5 truncate text-xs font-medium text-foreground">
               {selectedSkill
-                ? `${skillEvalVersionLabel(selectedSkill.skillName, selectedSkill.skillVersion)} · 采样统计`
-                : "全部 Skill · 采样统计"}
+                ? `${skillEvalVersionLabel(selectedSkill.skillName, selectedSkill.skillVersion)} · ${scopeLabel} · 采样统计`
+                : `${scopeLabel} · 采样统计`}
             </div>
           </div>
           <SkillEvalStatTile label="采样运行" value={selectedRunTotal} />
-          <SkillEvalStatTile label="采样 Skill" value={selectedSkill ? 1 : data.totalSkills} />
+          <SkillEvalStatTile label="采样技能" value={selectedSkill ? 1 : data.totalSkills} />
           <SkillEvalStatTile label="通过率" value={formatSkillEvalPercent(selectedSkill?.passRate ?? data.passRate)} />
           <SkillEvalStatTile label="平均分" value={formatSkillEvalPercent(selectedSkill?.averageScore ?? data.averageScore)} />
           <SkillEvalStatTile label="过程分" value={formatSkillEvalPercent(selectedSkill?.averageProcessScore ?? data.averageProcessScore ?? data.averageScore)} />
@@ -1126,6 +1146,41 @@ function SkillEvalDashboardPanel({
           <span className="text-right">Token</span>
         </div>
         <ScrollArea className="min-h-0 flex-1">
+          <div className="border-b border-border p-2">
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => onMineOnlyChange(false)}
+                className={`rounded-md border px-3 py-2 text-xs transition-colors ${
+                  !mineOnly
+                    ? "border-primary bg-primary/10 text-foreground"
+                    : "border-border text-muted-foreground hover:bg-muted/35"
+                }`}
+              >
+                全部技能
+              </button>
+              <button
+                type="button"
+                onClick={() => onMineOnlyChange(true)}
+                className={`rounded-md border px-3 py-2 text-xs transition-colors ${
+                  mineOnly
+                    ? "border-primary bg-primary/10 text-foreground"
+                    : "border-border text-muted-foreground hover:bg-muted/35"
+                }`}
+              >
+                我的技能
+              </button>
+            </div>
+            {mineOnly ? (
+              <div className="mt-2 truncate text-[11px] text-muted-foreground">
+                {mineSkillsLoading
+                  ? "正在加载我的技能列表..."
+                  : mineSkillCount === 0
+                    ? "您还没有上传过技能"
+                    : `已按我上传的 ${formatNumber(mineSkillCount)} 个技能查询`}
+              </div>
+            ) : null}
+          </div>
           <button
             type="button"
             onClick={() => {
@@ -1202,10 +1257,10 @@ function SkillEvalDashboardPanel({
           </div>
         </div>
         <ScrollArea className="min-h-0 flex-1">
-          {loading ? (
+          {loading || mineSkillsLoading ? (
             <div className="flex h-48 items-center justify-center text-muted-foreground">
               <Loader2 className="mr-2 size-4 animate-spin" />
-              加载中
+              {mineSkillsLoading ? "正在加载我的技能列表" : "加载中"}
             </div>
           ) : filteredRuns.length === 0 ? (
             <div className="flex h-48 items-center justify-center text-sm text-muted-foreground">
@@ -1246,6 +1301,7 @@ export function DashboardView(): React.JSX.Element {
     setCustomRange,
     refresh,
     fetchSkillEvalPage,
+    clearSkillEval,
     drillDownUserOrg,
     resetUserOrgDrilldown
   } = useDashboard()
@@ -1286,12 +1342,36 @@ export function DashboardView(): React.JSX.Element {
   const [skillUploaderProfiles, setSkillUploaderProfiles] = useState<
     Record<string, SkillUploaderProfile>
   >({})
+  const [marketSkillsLoading, setMarketSkillsLoading] = useState(true)
+  const [currentUserUploadCandidatesLoading, setCurrentUserUploadCandidatesLoading] = useState(true)
+  const [currentUserUploadCandidates, setCurrentUserUploadCandidates] = useState<string[]>([])
+  const [skillEvalMineOnly, setSkillEvalMineOnly] = useState(false)
+  const currentUserUploadCandidateSet = useMemo(
+    () => new Set(currentUserUploadCandidates),
+    [currentUserUploadCandidates]
+  )
+  const myUploadedSkillNames = useMemo(
+    () =>
+      Array.from(marketSkillMap.values())
+        .filter((item) => isUploadedByCurrentUser(item, currentUserUploadCandidateSet))
+        .map((item) => item.name.trim())
+        .filter(Boolean),
+    [currentUserUploadCandidateSet, marketSkillMap]
+  )
+  const mineSkillsLoading = skillEvalMineOnly && (marketSkillsLoading || currentUserUploadCandidatesLoading)
   const effectiveSkillEvalSelectedSkillKey =
     skillEvalSelectedSkillKey === undefined ? getLatestSkillEvalKey(skillEval) : skillEvalSelectedSkillKey
 
   useEffect(() => {
     setSkillEvalSelectedSkillKey(undefined)
-  }, [range.from, range.to])
+    clearSkillEval()
+  }, [clearSkillEval, range.from, range.to, skillEvalMineOnly])
+
+  useEffect(() => {
+    if (!skillEvalMineOnly) return
+    setSkillEvalSelectedSkillKey(undefined)
+    clearSkillEval()
+  }, [clearSkillEval, myUploadedSkillNames, skillEvalMineOnly])
 
   useEffect(() => {
     if (skillEvalSelectedSkillKey === undefined || skillEvalSelectedSkillKey === null || !skillEval) return
@@ -1304,10 +1384,38 @@ export function DashboardView(): React.JSX.Element {
   }, [skillEval, skillEvalSelectedSkillKey])
 
   useEffect(() => {
-    if (skillEvalSelectedSkillKey !== undefined || !effectiveSkillEvalSelectedSkillKey || !skillEval) return
+    if (activeMainTab !== "skill-eval" || skillEval || loading || skillEvalLoading || mineSkillsLoading) return
+    void fetchSkillEvalPage(1, {
+      defaultRecentToLatestSkill: true,
+      ...(skillEvalMineOnly ? { skillNames: myUploadedSkillNames } : {})
+    })
+  }, [
+    activeMainTab,
+    fetchSkillEvalPage,
+    loading,
+    mineSkillsLoading,
+    myUploadedSkillNames,
+    skillEval,
+    skillEvalLoading,
+    skillEvalMineOnly
+  ])
+
+  useEffect(() => {
+    if (
+      activeMainTab !== "skill-eval" ||
+      skillEvalSelectedSkillKey !== undefined ||
+      !effectiveSkillEvalSelectedSkillKey ||
+      !skillEval
+    ) {
+      return
+    }
     setSkillEvalSelectedSkillKey(effectiveSkillEvalSelectedSkillKey)
-    void fetchSkillEvalPage(1, skillEvalFilterForKey(skillEval, effectiveSkillEvalSelectedSkillKey))
-  }, [effectiveSkillEvalSelectedSkillKey, fetchSkillEvalPage, skillEval, skillEvalSelectedSkillKey])
+  }, [
+    activeMainTab,
+    effectiveSkillEvalSelectedSkillKey,
+    skillEval,
+    skillEvalSelectedSkillKey
+  ])
 
   useEffect(() => {
     let cancelled = false
@@ -1413,6 +1521,7 @@ export function DashboardView(): React.JSX.Element {
     }
 
     async function loadMarketSkills(): Promise<void> {
+      if (!cancelled) setMarketSkillsLoading(true)
       try {
         const result = await marketApi.getSkills()
         if (cancelled) return
@@ -1427,6 +1536,8 @@ export function DashboardView(): React.JSX.Element {
         if (!cancelled) {
           console.warn("[Dashboard] Failed to load marketplace skills:", error)
         }
+      } finally {
+        if (!cancelled) setMarketSkillsLoading(false)
       }
     }
 
@@ -1480,12 +1591,70 @@ export function DashboardView(): React.JSX.Element {
     setSkillEvalTraceRun(run)
   }, [])
 
+  const getSkillEvalFilterForKey = useCallback(
+    (key: string | null) => {
+      const filter = skillEvalFilterForKey(skillEval, key) ?? {}
+      return {
+        ...filter,
+        ...(skillEvalMineOnly ? { skillNames: myUploadedSkillNames } : {})
+      }
+    },
+    [myUploadedSkillNames, skillEval, skillEvalMineOnly]
+  )
+
   const handleSkillEvalPageChange = useCallback(
     (page: number, key: string | null) => {
-      void fetchSkillEvalPage(page, skillEvalFilterForKey(skillEval, key))
+      void fetchSkillEvalPage(page, getSkillEvalFilterForKey(key))
     },
-    [fetchSkillEvalPage, skillEval]
+    [fetchSkillEvalPage, getSkillEvalFilterForKey]
   )
+
+  const handleSkillEvalMineOnlyChange = useCallback((mineOnly: boolean) => {
+    setSkillEvalMineOnly(mineOnly)
+  }, [])
+
+  const handleRefresh = useCallback(() => {
+    refresh()
+    if (activeMainTab === "skill-eval") {
+      setSkillEvalSelectedSkillKey(undefined)
+      clearSkillEval()
+    }
+  }, [activeMainTab, clearSkillEval, refresh])
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function loadCurrentUserUploadCandidates(): Promise<void> {
+      if (!cancelled) setCurrentUserUploadCandidatesLoading(true)
+      try {
+        if (typeof window.api?.models?.getUserInfo !== "function") {
+          if (!cancelled) setCurrentUserUploadCandidates([])
+          return
+        }
+        const userInfo = (await window.api.models.getUserInfo()) as UserInfoLite | null
+        const normalizedIds = [userInfo?.sapId, userInfo?.ystId]
+          .map((value) => String(value || "").trim())
+          .filter(Boolean)
+        const candidates = Array.from(new Set(normalizedIds.flatMap((id) => buildUploaderIdCandidates(id))))
+        if (!cancelled) setCurrentUserUploadCandidates(candidates)
+      } catch (error) {
+        console.warn("[Dashboard] Failed to load current user upload candidates:", error)
+        if (!cancelled) setCurrentUserUploadCandidates([])
+      } finally {
+        if (!cancelled) setCurrentUserUploadCandidatesLoading(false)
+      }
+    }
+
+    void loadCurrentUserUploadCandidates()
+    const unsubscribeLogin = window.electron?.ipcRenderer?.on?.("notify-login-msg", () => {
+      void loadCurrentUserUploadCandidates()
+    })
+
+    return () => {
+      cancelled = true
+      unsubscribeLogin?.()
+    }
+  }, [])
 
   const loadUserList = useCallback(
     async (
@@ -1874,7 +2043,7 @@ export function DashboardView(): React.JSX.Element {
         onGranularityChange={changeGranularity}
         onNavigate={navigate}
         onCustomRange={setCustomRange}
-        onRefresh={refresh}
+        onRefresh={handleRefresh}
         onExport={handleExport}
         loading={loading}
         exporting={exporting}
@@ -1923,7 +2092,11 @@ export function DashboardView(): React.JSX.Element {
                 data={skillEval}
                 loading={loading || skillEvalLoading}
                 range={range}
+                mineOnly={skillEvalMineOnly}
+                mineSkillCount={myUploadedSkillNames.length}
+                mineSkillsLoading={mineSkillsLoading}
                 onRecentPageChange={handleSkillEvalPageChange}
+                onMineOnlyChange={handleSkillEvalMineOnlyChange}
                 onOpenTrace={handleSkillEvalTraceOpen}
                 selectedSkillKey={effectiveSkillEvalSelectedSkillKey}
                 onSelectedSkillKeyChange={setSkillEvalSelectedSkillKey}
@@ -2000,7 +2173,7 @@ export function DashboardView(): React.JSX.Element {
         <DialogContent className="flex h-[80vh] max-w-[1080px] grid-rows-none flex-col gap-0 p-0">
           <DialogHeader className="border-b border-border px-5 py-4">
             <DialogTitle className="truncate text-base">
-              Skill 评估详情 · {skillEvalTraceRun ? skillEvalVersionLabel(skillEvalTraceRun.skillName, skillEvalTraceRun.skillVersion) : "-"}
+              技能评估详情 · {skillEvalTraceRun ? skillEvalVersionLabel(skillEvalTraceRun.skillName, skillEvalTraceRun.skillVersion) : "-"}
             </DialogTitle>
             <p className="mt-1 text-[11px] text-muted-foreground">
               {skillEvalTraceRun ? `${formatRelativeTime(skillEvalTraceRun.startedAt)} · 链路 ${skillEvalTraceRun.traceId}` : ""}

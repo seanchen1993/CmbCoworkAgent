@@ -1824,6 +1824,8 @@ const api = {
         recentPageSize?: number
         skillName?: string
         skillVersion?: string
+        skillNames?: string[]
+        defaultRecentToLatestSkill?: boolean
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:skillEvalSummary", range, options),

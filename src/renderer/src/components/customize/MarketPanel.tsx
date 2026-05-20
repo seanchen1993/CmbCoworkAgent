@@ -62,6 +62,7 @@ import { TraceExplorer } from "../dashboard/TraceHistoryDialog"
 import { toast } from "sonner"
 import {
   buildUploaderIdCandidates,
+  getUploaderIdCandidates,
   getAllSkills,
   getSkillMetricByName,
   sortSkillItemsByUsage,
@@ -1392,7 +1393,7 @@ export function MarketPanel(): React.JSX.Element {
     (item: MarketItem): boolean => {
       if (localStorageHelper.canDeleteItem(item.name, activeTab)) return true
       if (!item.user_id || currentUserCandidateSet.size === 0) return false
-      return buildUploaderIdCandidates(item.user_id).some((id) => currentUserCandidateSet.has(id))
+      return getUploaderIdCandidates(item.user_id).some((id) => currentUserCandidateSet.has(id))
     },
     [activeTab, currentUserCandidateSet]
   )

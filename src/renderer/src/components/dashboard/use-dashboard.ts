@@ -407,6 +407,8 @@ export interface DashboardSkillEvalOptions {
   recentPageSize?: number
   skillName?: string
   skillVersion?: string
+  skillNames?: string[]
+  defaultRecentToLatestSkill?: boolean
 }
 
 const SKILL_EVAL_RECENT_PAGE_SIZE = 10
@@ -1238,7 +1240,9 @@ async function loadSkillEvalSummarySafely(
       recentPage: options.recentPage ?? 1,
       recentPageSize: options.recentPageSize ?? SKILL_EVAL_RECENT_PAGE_SIZE,
       ...(options.skillName ? { skillName: options.skillName } : {}),
-      ...(options.skillVersion ? { skillVersion: options.skillVersion } : {})
+      ...(options.skillVersion ? { skillVersion: options.skillVersion } : {}),
+      ...(options.skillNames ? { skillNames: options.skillNames } : {}),
+      ...(options.defaultRecentToLatestSkill ? { defaultRecentToLatestSkill: true } : {})
     })
   } catch (error) {
     console.warn("[Dashboard] skillEvalSummary unavailable, using empty data:", error)
@@ -1273,18 +1277,16 @@ export function useDashboard() {
   const fetchAll = useCallback(async (r: TimeRange, g: Granularity, orgLv1: string | null) => {
     const id = ++fetchIdRef.current
     const userStatsId = ++userStatsFetchIdRef.current
-    const skillEvalId = ++skillEvalFetchIdRef.current
     setLoading(true)
     setError(null)
 
     try {
-      const [ovRes, msRes, usRes, prRes, fbRes, seRes] = await Promise.all([
+      const [ovRes, msRes, usRes, prRes, fbRes] = await Promise.all([
         window.api.dashboard.overview(r, g),
         window.api.dashboard.modelStats(r, g),
         window.api.dashboard.userStats(r, g, { upperOrgLv1: orgLv1 }),
         window.api.dashboard.productivity(r, g),
-        window.api.dashboard.feedback(r, g),
-        loadSkillEvalSummarySafely(r)
+        window.api.dashboard.feedback(r, g)
       ])
 
       // Stale check
@@ -1295,7 +1297,6 @@ export function useDashboard() {
       if (!usRes.success) throw new Error(usRes.error ?? "获取用户数据失败")
       if (!prRes.success) throw new Error(prRes.error ?? "获取生产力数据失败")
       if (!fbRes.success) throw new Error(fbRes.error ?? "获取反馈数据失败")
-      if (!seRes.success) throw new Error(seRes.error ?? "获取 Skill 评估数据失败")
 
       setOverview(parseOverview(ovRes.data, g))
       setModelStats(parseModelStats(msRes.data))
@@ -1304,12 +1305,6 @@ export function useDashboard() {
         setUserStats(parseUserStats(usRes.data, orgLv1))
       }
       setFeedback(parseFeedback(fbRes.data, g))
-      if (skillEvalId === skillEvalFetchIdRef.current) {
-      setSkillEval(parseSkillEvalSummary(seRes.data, {
-        recentPage: 1,
-        recentPageSize: SKILL_EVAL_RECENT_PAGE_SIZE
-      }))
-      }
     } catch (e) {
       if (id !== fetchIdRef.current) return
       setError(e instanceof Error ? e.message : String(e))
@@ -1339,6 +1334,8 @@ export function useDashboard() {
   const fetchSkillEvalPage = useCallback(async (page: number, filter?: {
     skillName?: string
     skillVersion?: string
+    skillNames?: string[]
+    defaultRecentToLatestSkill?: boolean
   }) => {
     const id = ++skillEvalFetchIdRef.current
     setSkillEvalLoading(true)
@@ -1349,10 +1346,12 @@ export function useDashboard() {
         recentPage: page,
         recentPageSize: SKILL_EVAL_RECENT_PAGE_SIZE,
         ...(filter?.skillName ? { skillName: filter.skillName } : {}),
-        ...(filter?.skillVersion ? { skillVersion: filter.skillVersion } : {})
+        ...(filter?.skillVersion ? { skillVersion: filter.skillVersion } : {}),
+        ...(filter?.skillNames ? { skillNames: filter.skillNames } : {}),
+        ...(filter?.defaultRecentToLatestSkill ? { defaultRecentToLatestSkill: true } : {})
       })
       if (id !== skillEvalFetchIdRef.current) return
-      if (!result.success) throw new Error(result.error ?? "获取 Skill 评估数据失败")
+      if (!result.success) throw new Error(result.error ?? "获取技能评估数据失败")
       setSkillEval(parseSkillEvalSummary(result.data, {
         recentPage: page,
         recentPageSize: SKILL_EVAL_RECENT_PAGE_SIZE
@@ -1402,6 +1401,12 @@ export function useDashboard() {
     fetchAll(range, granularity, selectedUpperOrgLv1)
   }, [fetchAll, range, granularity, selectedUpperOrgLv1])
 
+  const clearSkillEval = useCallback(() => {
+    ++skillEvalFetchIdRef.current
+    setSkillEval(null)
+    setSkillEvalLoading(false)
+  }, [])
+
   const drillDownUserOrg = useCallback((orgLv1: string) => {
     const normalizedOrgLv1 = orgLv1.trim()
     if (!normalizedOrgLv1) return
@@ -1434,6 +1439,7 @@ export function useDashboard() {
     setRange,
     refresh,
     fetchSkillEvalPage,
+    clearSkillEval,
     drillDownUserOrg,
     resetUserOrgDrilldown
   }
