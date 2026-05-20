@@ -58,6 +58,7 @@ import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
 import type { Message, SkillMetadata, ToolCallState, ToolCallStatus } from "@/types"
 import { MessageBubble } from "./MessageBubble"
+import { SkillResultCheckDialog } from "./SkillResultCheckDialog"
 import { ChatScrollNavigator, type ChatScrollQuestion } from "./ChatScrollNavigator"
 import { SkillsByCategorySection } from "./SkillsByCategorySection"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
@@ -88,6 +89,10 @@ type WelcomeSkillCard = {
   currentVersion?: string | null
   updateAvailable?: boolean
 }
+
+type LatestSkillResultTraceSummary = Awaited<
+  ReturnType<typeof window.api.skillResultChecks.getLatestTrace>
+>
 
 type WelcomeSkillSceneGroup = {
   category: string
@@ -723,6 +728,15 @@ const getQuestionPreview = (content: Message["content"]): string => {
   return text.length > 120 ? `${text.slice(0, 120)}...` : text
 }
 
+const compactSkillCheckMessage = (value: string): string => value.replace(/\s+/g, " ").trim()
+
+const stripSkillCheckNoise = (value: string): string =>
+  compactSkillCheckMessage(
+    value
+      .replace(/<attachment\s+filename="([^"]*)"[^>]*>[\s\S]*?<\/attachment>/g, " ")
+      .replace(/<CMBDEVCLAW-SKILL-USE-V1>[\s\S]*?<\/CMBDEVCLAW-SKILL-USE-V1>/g, " ")
+  )
+
 function RotatingHeadline() {
   const [wordIndex, setWordIndex] = useState(0)
   const [displayed, setDisplayed] = useState("")
@@ -822,6 +836,9 @@ export function ChatContainer({
   const wasLoadingRef = useRef(false)
   const loadingMessageCountRef = useRef(0)
   const [modelContextLimit, setModelContextLimit] = useState<number | undefined>(undefined)
+  const [latestSkillResultTrace, setLatestSkillResultTrace] =
+    useState<LatestSkillResultTraceSummary>(null)
+  const [skillResultCheckOpen, setSkillResultCheckOpen] = useState(false)
   const streamMessageTimesRef = useRef<Record<string, { start_at: Date; end_at?: Date }>>({})
   const streamMessageBaselineIdsRef = useRef<Set<string>>(new Set())
   const [messageTimes, setMessageTimes] = useState<MessageTimeMap>({})
@@ -1574,7 +1591,8 @@ export function ChatContainer({
           ...(role === "tool" &&
             streamMsg.tool_call_id && { tool_call_id: streamMsg.tool_call_id }),
           ...(role === "tool" && streamMsg.name && { name: streamMsg.name }),
-          ...(role === "tool" && streamMsg.is_error !== undefined && { is_error: streamMsg.is_error }),
+          ...(role === "tool" &&
+            streamMsg.is_error !== undefined && { is_error: streamMsg.is_error }),
           created_at: new Date(),
           start_at: trackedTime.start_at,
           end_at: trackedTime.end_at
@@ -1635,7 +1653,8 @@ export function ChatContainer({
           ...(role === "tool" &&
             streamMsg.tool_call_id && { tool_call_id: streamMsg.tool_call_id }),
           ...(role === "tool" && streamMsg.name && { name: streamMsg.name }),
-          ...(role === "tool" && streamMsg.is_error !== undefined && { is_error: streamMsg.is_error }),
+          ...(role === "tool" &&
+            streamMsg.is_error !== undefined && { is_error: streamMsg.is_error }),
           created_at: new Date(),
           ...(streamMessageTimesRef.current[streamMsg.id]?.start_at && {
             start_at: streamMessageTimesRef.current[streamMsg.id].start_at
@@ -1691,6 +1710,106 @@ export function ChatContainer({
       return { ...msg, content: cleaned }
     })
   }, [threadMessages, streamData.messages, messageTimes])
+
+  useEffect(() => {
+    let cancelled = false
+    const timers: Array<ReturnType<typeof setTimeout>> = []
+
+    if (isLoading || !threadId || displayMessages.length === 0) {
+      setLatestSkillResultTrace(null)
+      return () => {
+        cancelled = true
+      }
+    }
+
+    const loadLatestTrace = async (): Promise<void> => {
+      try {
+        const trace = await window.api.skillResultChecks.getLatestTrace(threadId)
+        if (!cancelled) {
+          setLatestSkillResultTrace(trace)
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setLatestSkillResultTrace(null)
+        }
+        console.warn("[ChatContainer] Failed to load latest skill result trace:", error)
+      }
+    }
+
+    void loadLatestTrace()
+    timers.push(setTimeout(loadLatestTrace, 700), setTimeout(loadLatestTrace, 1800))
+
+    return () => {
+      cancelled = true
+      timers.forEach((timer) => clearTimeout(timer))
+    }
+  }, [threadId, isLoading, displayMessages.length])
+
+  const lastAssistantTurnForCheck = useMemo(() => {
+    for (let index = displayMessages.length - 1; index >= 0; index -= 1) {
+      const message = displayMessages[index]
+      if (message.role !== "assistant") continue
+      if (!getMessageText(message.content).trim()) continue
+
+      const userMessage = [...displayMessages.slice(0, index)]
+        .reverse()
+        .find((candidate) => candidate.role === "user")
+
+      return {
+        assistantId: message.id,
+        userText: userMessage ? getMessageText(userMessage.content) : "",
+        userStartedAt: toTime(userMessage?.start_at),
+        assistantEndedAt: toTime(message.end_at)
+      }
+    }
+
+    return null
+  }, [displayMessages])
+
+  const latestTraceMatchesLastAssistant = useMemo(() => {
+    if (!latestSkillResultTrace || !lastAssistantTurnForCheck) return false
+
+    const rawTraceMessage = compactSkillCheckMessage(latestSkillResultTrace.userMessage)
+    const rawTurnMessage = compactSkillCheckMessage(lastAssistantTurnForCheck.userText)
+    if (rawTraceMessage && rawTurnMessage && rawTraceMessage === rawTurnMessage) return true
+
+    const strippedTraceMessage = stripSkillCheckNoise(latestSkillResultTrace.userMessage)
+    const strippedTurnMessage = stripSkillCheckNoise(lastAssistantTurnForCheck.userText)
+    if (
+      strippedTraceMessage &&
+      strippedTurnMessage &&
+      (strippedTraceMessage === strippedTurnMessage ||
+        strippedTraceMessage.includes(strippedTurnMessage) ||
+        strippedTurnMessage.includes(strippedTraceMessage))
+    ) {
+      return true
+    }
+
+    const traceStartedAt = new Date(latestSkillResultTrace.startedAt).getTime()
+    const traceEndedAt = new Date(latestSkillResultTrace.endedAt).getTime()
+    if (!Number.isFinite(traceStartedAt)) return false
+
+    const userStartedAt = lastAssistantTurnForCheck.userStartedAt
+    const assistantEndedAt = lastAssistantTurnForCheck.assistantEndedAt
+    if (
+      userStartedAt !== null &&
+      Number.isFinite(traceEndedAt) &&
+      traceEndedAt < userStartedAt - 1000
+    ) {
+      return false
+    }
+    if (userStartedAt !== null && traceStartedAt < userStartedAt - 5000) return false
+    if (assistantEndedAt !== null && traceStartedAt > assistantEndedAt + 5000) return false
+    return userStartedAt !== null || assistantEndedAt !== null
+  }, [lastAssistantTurnForCheck, latestSkillResultTrace])
+
+  const handleOpenSkillResultCheck = useCallback(() => {
+    if (!latestSkillResultTrace || !latestTraceMatchesLastAssistant) {
+      toast.info("当前最后一轮暂未发现可检查的 skill 生成结果")
+      return
+    }
+    setSkillResultCheckOpen(true)
+  }, [latestSkillResultTrace, latestTraceMatchesLastAssistant])
 
   const assistantDurationsByMessageId = useMemo(() => {
     const durations = new Map<string, number>()
@@ -3075,6 +3194,13 @@ export function ChatContainer({
         onApprove={handleSkillApprove}
         onReject={handleSkillReject}
       />
+      <SkillResultCheckDialog
+        open={skillResultCheckOpen}
+        trace={latestSkillResultTrace}
+        models={models}
+        onOpenChange={setSkillResultCheckOpen}
+        onStarted={() => setShowCustomizeView(true, "skillResultChecks")}
+      />
 
       {skillIntentBanner}
       {nuxDialog}
@@ -3353,6 +3479,13 @@ export function ChatContainer({
                     pendingApproval={pendingApproval}
                     onApprovalDecision={handleApprovalDecision}
                     onEditUserMessage={handleEditUserMessage}
+                    onCheckSkillResult={
+                      latestSkillResultTrace &&
+                      latestTraceMatchesLastAssistant &&
+                      message.id === lastAssistantTurnForCheck?.assistantId
+                        ? handleOpenSkillResultCheck
+                        : undefined
+                    }
                     threadId={threadId}
                     isLoading={isLoading}
                     assistantDurationMs={assistantDurationsByMessageId.get(message.id)}

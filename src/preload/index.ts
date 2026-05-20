@@ -1086,9 +1086,7 @@ const api = {
   autoCommit: {
     getSettings: (): Promise<AgentAutoCommitSettings> =>
       ipcRenderer.invoke("autoCommit:getSettings") as Promise<AgentAutoCommitSettings>,
-    saveSettings: (
-      updates: Partial<AgentAutoCommitSettings>
-    ): Promise<AgentAutoCommitSettings> =>
+    saveSettings: (updates: Partial<AgentAutoCommitSettings>): Promise<AgentAutoCommitSettings> =>
       ipcRenderer.invoke("autoCommit:saveSettings", updates) as Promise<AgentAutoCommitSettings>
   },
   heartbeat: {
@@ -1226,6 +1224,33 @@ const api = {
       ipcRenderer.on("skill:generating", handler)
       return () => {
         ipcRenderer.removeListener("skill:generating", handler)
+      }
+    }
+  },
+  skillResultChecks: {
+    getLatestTrace: (threadId: string): Promise<unknown> =>
+      ipcRenderer.invoke("skillResultChecks:getLatestTrace", threadId),
+    start: (params: { traceId: string; modelId: string }): Promise<unknown> =>
+      ipcRenderer.invoke("skillResultChecks:start", params),
+    list: (options?: {
+      threadId?: string
+      status?: "queued" | "running" | "completed" | "failed"
+      limit?: number
+    }): Promise<unknown> => ipcRenderer.invoke("skillResultChecks:list", options),
+    get: (checkId: string): Promise<unknown> =>
+      ipcRenderer.invoke("skillResultChecks:get", checkId),
+    onChanged: (
+      callback: (event: {
+        at: string
+        checkId?: string
+        threadId?: string
+        status?: "queued" | "running" | "completed" | "failed"
+      }) => void
+    ): (() => void) => {
+      const handler = (_: unknown, event: Parameters<typeof callback>[0]): void => callback(event)
+      ipcRenderer.on("skillResultChecks:changed", handler)
+      return () => {
+        ipcRenderer.removeListener("skillResultChecks:changed", handler)
       }
     }
   },
@@ -1709,9 +1734,7 @@ const api = {
     skills: {
       list: (): Promise<SkillHookMetadata[]> => ipcRenderer.invoke("hooks:skills:list")
     },
-    onChanged: (
-      callback: (data: { reason?: string; at: string }) => void
-    ): (() => void) => {
+    onChanged: (callback: (data: { reason?: string; at: string }) => void): (() => void) => {
       const handler = (_: unknown, data: { reason?: string; at: string }): void => {
         callback(data)
       }

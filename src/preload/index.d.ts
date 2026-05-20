@@ -169,6 +169,61 @@ interface DashboardSkillEvalOptions {
   defaultRecentToLatestSkill?: boolean
 }
 
+type SkillResultCheckStatus = "queued" | "running" | "completed" | "failed"
+
+interface SkillResultCheckIssue {
+  severity: "critical" | "major" | "minor"
+  title: string
+  detail?: string
+  evidence?: string
+}
+
+interface SkillResultConstraintCheck {
+  name: string
+  passed: boolean
+  detail?: string
+  evidence?: string
+}
+
+interface SkillResultCheckRecord {
+  id: string
+  sourceTraceId: string
+  traceId?: string
+  threadId: string
+  status: SkillResultCheckStatus
+  createdAt: string
+  startedAt?: string
+  completedAt?: string
+  durationMs?: number
+  userMessage: string
+  resultPreview: string
+  usedSkills: string[]
+  sourceModelId: string
+  sourceModelName?: string
+  checkModelId: string
+  checkModelName?: string
+  pass?: boolean
+  score?: number
+  summary?: string
+  constraintChecks?: SkillResultConstraintCheck[]
+  issues?: SkillResultCheckIssue[]
+  suggestions?: string[]
+  rawResponse?: string
+  error?: string
+}
+
+interface LatestSkillResultTraceSummary {
+  traceId: string
+  threadId: string
+  startedAt: string
+  endedAt: string
+  userMessage: string
+  result: string
+  usedSkills: string[]
+  modelId: string
+  modelName?: string
+}
+
 interface DashboardCodeStats {
   generatedLines: number
   deletedLines: number
@@ -296,18 +351,20 @@ interface CustomAPI {
       defaultTemperature: number
       maxTemperature: number
     }>
-    getCustomConfigs: () => Promise<Array<{
-      id: string
-      name: string
-      baseUrl: string
-      model: string
-      hasApiKey: boolean
-      maxTokens: number
-      maxOutputTokens: number
-      temperature: number
-      interleavedThinking?: boolean
-      tier?: "premium" | "economy"
-    }>>
+    getCustomConfigs: () => Promise<
+      Array<{
+        id: string
+        name: string
+        baseUrl: string
+        model: string
+        hasApiKey: boolean
+        maxTokens: number
+        maxOutputTokens: number
+        temperature: number
+        interleavedThinking?: boolean
+        tier?: "premium" | "economy"
+      }>
+    >
     getCustomConfig: (id?: string) => Promise<{
       id: string
       name: string
@@ -640,9 +697,7 @@ interface CustomAPI {
   }
   autoCommit: {
     getSettings: () => Promise<AgentAutoCommitSettings>
-    saveSettings: (
-      updates: Partial<AgentAutoCommitSettings>
-    ) => Promise<AgentAutoCommitSettings>
+    saveSettings: (updates: Partial<AgentAutoCommitSettings>) => Promise<AgentAutoCommitSettings>
   }
   lsp: {
     getConfig: () => Promise<LspConfig>
@@ -868,6 +923,30 @@ interface CustomAPI {
         threadId?: string
         phase: "start" | "token" | "done" | "error"
         text: string
+      }) => void
+    ) => () => void
+  }
+  skillResultChecks: {
+    getLatestTrace: (threadId: string) => Promise<LatestSkillResultTraceSummary | null>
+    start: (params: {
+      traceId: string
+      modelId: string
+    }) => Promise<
+      | { success: true; checkId: string; record: SkillResultCheckRecord }
+      | { success: false; error: string }
+    >
+    list: (options?: {
+      threadId?: string
+      status?: SkillResultCheckStatus
+      limit?: number
+    }) => Promise<SkillResultCheckRecord[]>
+    get: (checkId: string) => Promise<SkillResultCheckRecord | null>
+    onChanged: (
+      callback: (event: {
+        at: string
+        checkId?: string
+        threadId?: string
+        status?: SkillResultCheckStatus
       }) => void
     ) => () => void
   }
@@ -1139,7 +1218,13 @@ interface CustomAPI {
       options?: DashboardCommitDetailsOptions
     ) => Promise<{
       success: boolean
-      data?: { total: number; page: number; pageSize: number; pushedOnly: boolean; items: DashboardCommitDetail[] }
+      data?: {
+        total: number
+        page: number
+        pageSize: number
+        pushedOnly: boolean
+        items: DashboardCommitDetail[]
+      }
       error?: string
     }>
     exportExcel: (

@@ -7,9 +7,9 @@
  *
  * Inspired by GEPA (Gradient-free Evolution of Prompt Agents, ICLR 2026).
  *
- * NOTE: The actual trace *upload* / *reporting* path is intentionally left as
- * a stub — `TraceReporter` exposes the interface but the implementation is a
- * no-op.  Traces are written to local JSONL files only.
+ * NOTE: Local trace collection is independent from remote reporting. The
+ * default reporter is a no-op, while production can install a reporter that
+ * uploads this same AgentTrace schema.
  */
 
 // ─────────────────────────────────────────────────────────
@@ -123,7 +123,13 @@ export interface RoutingTrace {
   /** First 100 chars of the user message used for routing classification */
   messageSnippet: string
   /** Task source that triggered this routing call */
-  taskSource: "chat" | "heartbeat" | "scheduler_reminder" | "scheduler_action" | "memory_summarize" | "optimizer"
+  taskSource:
+    | "chat"
+    | "heartbeat"
+    | "scheduler_reminder"
+    | "scheduler_action"
+    | "memory_summarize"
+    | "optimizer"
   /** Whether this was a resume or interrupt continuation (undefined for fresh invocations) */
   continuation?: "resume" | "interrupt"
   /** Global routing mode at invocation time */
@@ -144,10 +150,10 @@ export interface RoutingTrace {
 
 /** How the agent's run ended. */
 export type TraceOutcome =
-  | "success"   // Agent completed the task and said so
-  | "error"     // Runtime / uncaught exception
+  | "success" // Agent completed the task and said so
+  | "error" // Runtime / uncaught exception
   | "cancelled" // User cancelled mid-run
-  | "unknown"   // Stream ended without a clear signal
+  | "unknown" // Stream ended without a clear signal
 
 // ─────────────────────────────────────────────────────────
 // The top-level Trace record
@@ -223,20 +229,18 @@ export interface AgentTrace {
 }
 
 // ─────────────────────────────────────────────────────────
-// Trace reporter interface (stub — not yet implemented)
+// Trace reporter interface
 // ─────────────────────────────────────────────────────────
 
 /**
  * Interface for remote trace reporting.
  *
  * The design intentionally separates local collection (always enabled)
- * from remote reporting (opt-in, not yet implemented).
- *
- * When implementing remote upload:
- *   1. Create a class that implements `ITraceReporter`
- *   2. Call `setTraceReporter(myReporter)` in app startup
- *   3. The collector will call `reporter.report(trace)` after each run
+ * from remote reporting (opt-in). Implementations upload AgentTrace-shaped
+ * payloads; auxiliary records must keep the same top-level trace schema and
+ * distinguish themselves by traceId/model/node names or metadata.
  */
+
 export interface ITraceReporter {
   /**
    * Report a completed trace to a remote endpoint.
@@ -251,6 +255,6 @@ export interface ITraceReporter {
  */
 export class NoopTraceReporter implements ITraceReporter {
   async report(): Promise<void> {
-    // Intentionally empty — remote reporting not yet implemented
+    // Intentionally empty.
   }
 }

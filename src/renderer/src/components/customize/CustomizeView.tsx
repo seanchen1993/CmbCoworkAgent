@@ -4,6 +4,7 @@ import {
   Brain,
   ChevronDown,
   ChevronRight,
+  ClipboardCheck,
   Clock,
   Code2,
   GitBranch,
@@ -26,40 +27,26 @@ import { Button } from "@/components/ui/button"
 import { useAppStore } from "@/lib/store"
 import { cn } from "@/lib/utils"
 
-const SkillsPanel = lazy(() =>
-  import("./SkillsPanel").then((m) => ({ default: m.SkillsPanel }))
-)
+const SkillsPanel = lazy(() => import("./SkillsPanel").then((m) => ({ default: m.SkillsPanel })))
 const McpPanel = lazy(() => import("./McpPanel").then((m) => ({ default: m.McpPanel })))
 const ScheduledPanel = lazy(() =>
   import("./ScheduledPanel").then((m) => ({ default: m.ScheduledPanel }))
 )
-const MemoryPanel = lazy(() =>
-  import("./MemoryPanel").then((m) => ({ default: m.MemoryPanel }))
-)
+const MemoryPanel = lazy(() => import("./MemoryPanel").then((m) => ({ default: m.MemoryPanel })))
 const HeartbeatPanel = lazy(() =>
   import("./HeartbeatPanel").then((m) => ({ default: m.HeartbeatPanel }))
 )
-const PluginsPanel = lazy(() =>
-  import("./PluginsPanel").then((m) => ({ default: m.PluginsPanel }))
-)
-const MarketPanel = lazy(() =>
-  import("./MarketPanel").then((m) => ({ default: m.MarketPanel }))
-)
-const SandboxPanel = lazy(() =>
-  import("./SandboxPanel").then((m) => ({ default: m.SandboxPanel }))
-)
+const PluginsPanel = lazy(() => import("./PluginsPanel").then((m) => ({ default: m.PluginsPanel })))
+const MarketPanel = lazy(() => import("./MarketPanel").then((m) => ({ default: m.MarketPanel })))
+const SandboxPanel = lazy(() => import("./SandboxPanel").then((m) => ({ default: m.SandboxPanel })))
 const EvolutionPanel = lazy(() =>
   import("./EvolutionPanel").then((m) => ({ default: m.EvolutionPanel }))
 )
-const ChatXPanel = lazy(() =>
-  import("./ChatXPanel").then((m) => ({ default: m.ChatXPanel }))
-)
+const ChatXPanel = lazy(() => import("./ChatXPanel").then((m) => ({ default: m.ChatXPanel })))
 const UserInfoPanel = lazy(() =>
   import("./UserInfoPanel").then((m) => ({ default: m.UserInfoPanel }))
 )
-const HooksPanel = lazy(() =>
-  import("./HooksPanel").then((m) => ({ default: m.HooksPanel }))
-)
+const HooksPanel = lazy(() => import("./HooksPanel").then((m) => ({ default: m.HooksPanel })))
 const LspPanel = lazy(() => import("./LspPanel").then((m) => ({ default: m.LspPanel })))
 const CodeExecToolsPanel = lazy(() =>
   import("./CodeExecToolsPanel").then((m) => ({ default: m.CodeExecToolsPanel }))
@@ -67,8 +54,9 @@ const CodeExecToolsPanel = lazy(() =>
 const CommitPolicyPanel = lazy(() =>
   import("./CommitPolicyPanel").then((m) => ({ default: m.CommitPolicyPanel }))
 )
-const PetPanel = lazy(() =>
-  import("./PetPanel").then((m) => ({ default: m.PetPanel }))
+const PetPanel = lazy(() => import("./PetPanel").then((m) => ({ default: m.PetPanel })))
+const SkillResultChecksPanel = lazy(() =>
+  import("./SkillResultChecksPanel").then((m) => ({ default: m.SkillResultChecksPanel }))
 )
 
 type CustomizeTab =
@@ -88,6 +76,7 @@ type CustomizeTab =
   | "lsp"
   | "codeExecTools"
   | "commitPolicy"
+  | "skillResultChecks"
 
 type MenuGroupId = "basic" | "advanced" | "profile"
 
@@ -129,7 +118,8 @@ const MENU_GROUPS: MenuGroup[] = [
       { tab: "chatx", label: "机器人管理", icon: Cpu },
       { tab: "hooks", label: "钩子", icon: Webhook },
       { tab: "codeExecTools", label: "编程式工具调用", icon: Wrench, beta: true, truncate: true },
-      { tab: "commitPolicy", label: "提交策略", icon: GitCommit }
+      { tab: "commitPolicy", label: "提交策略", icon: GitCommit },
+      { tab: "skillResultChecks", label: "结果检查", icon: ClipboardCheck }
     ]
   },
   {
@@ -314,7 +304,9 @@ export function CustomizeView(): React.JSX.Element {
           </div>
         ) : activeTab === "commitPolicy" ? (
           <CommitPolicyPanel />
-        )  : activeTab === "pet" ? (
+        ) : activeTab === "skillResultChecks" ? (
+          <SkillResultChecksPanel />
+        ) : activeTab === "pet" ? (
           <PetPanel />
         ) : null}
       </Suspense>

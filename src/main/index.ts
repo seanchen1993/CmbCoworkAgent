@@ -58,7 +58,8 @@ function safeFormatLogValue(value: unknown, seen = new WeakSet<object>()): strin
           }
         }
         if (typeof nestedValue === "symbol") return nestedValue.toString()
-        if (typeof nestedValue === "function") return `[Function ${nestedValue.name || "anonymous"}]`
+        if (typeof nestedValue === "function")
+          return `[Function ${nestedValue.name || "anonymous"}]`
         if (nestedValue && typeof nestedValue === "object") {
           if (seen.has(nestedValue)) return "[Circular]"
           seen.add(nestedValue)
@@ -145,6 +146,7 @@ import { registerRoutingHandlers } from "./ipc/routing"
 import { registerDashboardHandlers } from "./ipc/dashboard"
 import { registerLspHandlers } from "./ipc/lsp"
 import { registerAutoCommitHandlers } from "./ipc/auto-commit"
+import { registerSkillResultCheckHandlers } from "./ipc/skill-result-checks"
 import { stopAllLsp } from "./lsp"
 import { setTraceReporter } from "./agent/trace/collector"
 import { CloudTraceReporter } from "./agent/trace/cloud-reporter"
@@ -172,8 +174,8 @@ const STARTUP_SANDBOX_PREWARM_WORKSPACE_LIMIT = 5
 
 function cleanupLegacySkillEvalRecords(): void {
   const roots = new Set(
-    [getOpenworkDir(), process.env.CMB_COWORK_AGENT_HOME?.trim()].filter(
-      (value): value is string => Boolean(value)
+    [getOpenworkDir(), process.env.CMB_COWORK_AGENT_HOME?.trim()].filter((value): value is string =>
+      Boolean(value)
     )
   )
 
@@ -237,14 +239,16 @@ function applyMacDockIcon(): void {
 
   // 宠物透明窗口会额外创建 BrowserWindow；macOS 下重复应用 Dock 图标可避免开发态图标被重置。
   app.dock.show()
-  const iconPath = getFirstExistingPath([
-    ...(isDev ? [getDevMacDockIconPath()] : []),
-    join(__dirname, "../../resources/icon.png"),
-    join(app.getAppPath(), "resources/icon.png"),
-    join(__dirname, "../resources/icon.png"),
-    join(app.getAppPath(), "build/icon.png"),
-    join(process.cwd(), "build/icon.png")
-  ].filter((path): path is string => Boolean(path)))
+  const iconPath = getFirstExistingPath(
+    [
+      ...(isDev ? [getDevMacDockIconPath()] : []),
+      join(__dirname, "../../resources/icon.png"),
+      join(app.getAppPath(), "resources/icon.png"),
+      join(__dirname, "../resources/icon.png"),
+      join(app.getAppPath(), "build/icon.png"),
+      join(process.cwd(), "build/icon.png")
+    ].filter((path): path is string => Boolean(path))
+  )
 
   if (isDev) {
     console.log(`[icon] mac dock icon path: ${iconPath ?? "not found"}`)
@@ -286,7 +290,9 @@ function createWindow(): void {
       sandbox: false
     },
     ...(devWindowIcon ? { icon: devWindowIcon } : {}),
-    autoHideMenuBar: !['.166','.147','.216','.215','.225', '201.99'].some(ip => getLocalIP().includes(ip)) // 自动隐藏菜单栏
+    autoHideMenuBar: ![".166", ".147", ".216", ".215", ".225", "201.99"].some((ip) =>
+      getLocalIP().includes(ip)
+    ) // 自动隐藏菜单栏
   })
 
   mainWindow.on("ready-to-show", () => {
@@ -311,39 +317,42 @@ function createWindow(): void {
     writeRendererLog(getConsoleLevelName(level), message, { sourceId, line })
   })
 
-  mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
-    console.error("[Main] Renderer failed to load:", {
-      errorCode,
-      errorDescription,
-      validatedURL
-    })
-  })
+  mainWindow.webContents.on(
+    "did-fail-load",
+    (_event, errorCode, errorDescription, validatedURL) => {
+      console.error("[Main] Renderer failed to load:", {
+        errorCode,
+        errorDescription,
+        validatedURL
+      })
+    }
+  )
 
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
     console.error("[Main] Renderer process gone:", details)
   })
 
-  mainWindow.webContents.on('did-finish-load', () => {
+  mainWindow.webContents.on("did-finish-load", () => {
     const version = app.getVersion()
-    console.log('version---------------', version)
-    console.log('getLocalIP', getLocalIP())
+    console.log("version---------------", version)
+    console.log("getLocalIP", getLocalIP())
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('version', version)
-      mainWindow.webContents.send('ip', getLocalIP())
+      mainWindow.webContents.send("version", version)
+      mainWindow.webContents.send("ip", getLocalIP())
     }
   })
 
   // HMR for renderer based on electron-vite cli
   if (isDev && process.env["ELECTRON_RENDERER_URL"]) {
-    console.log('local render')
+    console.log("local render")
     mainWindow.loadURL(process.env["ELECTRON_RENDERER_URL"])
   } else {
-    console.log('url render')
+    console.log("url render")
     // mainWindow.loadFile(join(__dirname, "../renderer/index.html"))
     const renderUrl = import.meta.env.VITE_RENDER_URL
     if (!renderUrl) {
       mainWindow.loadFile(join(__dirname, "../renderer/index.html"))
-    }else{
+    } else {
       mainWindow.loadURL(renderUrl)
     }
   }
@@ -384,7 +393,8 @@ function collectRecentWorkspacePathsForSandboxPrewarm(): string[] {
     if (!thread.metadata) continue
     try {
       const metadata = JSON.parse(thread.metadata)
-      const workspacePath = typeof metadata.workspacePath === "string" ? metadata.workspacePath.trim() : ""
+      const workspacePath =
+        typeof metadata.workspacePath === "string" ? metadata.workspacePath.trim() : ""
       if (!workspacePath) continue
       const key = workspacePath.toLowerCase()
       if (seen.has(key)) continue
@@ -481,6 +491,7 @@ if (!gotTheLock) {
     registerCodeExecToolsHandlers(ipcMain)
     registerRoutingHandlers(ipcMain)
     registerDashboardHandlers(ipcMain)
+    registerSkillResultCheckHandlers(ipcMain)
     registerUpdaterHandlers()
     registerLspHandlers(ipcMain)
     prewarmRecentSandboxWorkspaces()
@@ -555,14 +566,19 @@ if (!gotTheLock) {
             contextIsolation: true,
             nodeIntegration: false,
             webviewTag: true,
-            preload: join(__dirname, "../preload/index.js"),
-          },
+            preload: join(__dirname, "../preload/index.js")
+          }
         })
       }
-      loginWindow.loadURL(`https://oa-auth.paas.${import.meta.env.VITE_LOGIN_PT}.com/auth/sso-login` +
-        "?client_id=5221ab160e0145d9b0736c2f8fb84229" +
-        "&redirect_uri=" + encodeURIComponent(`https://cmbdevclawweb.paas.${import.meta.env.VITE_LOGIN_PT}.cn/login.html`) +
-        "&response_type=code")
+      loginWindow.loadURL(
+        `https://oa-auth.paas.${import.meta.env.VITE_LOGIN_PT}.com/auth/sso-login` +
+          "?client_id=5221ab160e0145d9b0736c2f8fb84229" +
+          "&redirect_uri=" +
+          encodeURIComponent(
+            `https://cmbdevclawweb.paas.${import.meta.env.VITE_LOGIN_PT}.cn/login.html`
+          ) +
+          "&response_type=code"
+      )
     })
 
     ipcMain.handle("close-login-window", async () => {
@@ -570,22 +586,27 @@ if (!gotTheLock) {
         loginWindow.close()
         loginWindow = null
       }
-      if(mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send("notify-login-msg",'login')
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("notify-login-msg", "login")
       }
     })
 
     ipcMain.handle("open-login-page", async () => {
-      if(mainWindow && !mainWindow.isDestroyed() && !isDev) {
-        mainWindow.loadURL(`https://oa-auth.paas.${import.meta.env.VITE_LOGIN_PT}.com/auth/sso-login` +
-          "?client_id=5221ab160e0145d9b0736c2f8fb84229" +
-          "&redirect_uri=" + encodeURIComponent(`https://cmbdevclawweb.paas.${import.meta.env.VITE_LOGIN_PT}.cn/login.html`) +
-          "&response_type=code")
+      if (mainWindow && !mainWindow.isDestroyed() && !isDev) {
+        mainWindow.loadURL(
+          `https://oa-auth.paas.${import.meta.env.VITE_LOGIN_PT}.com/auth/sso-login` +
+            "?client_id=5221ab160e0145d9b0736c2f8fb84229" +
+            "&redirect_uri=" +
+            encodeURIComponent(
+              `https://cmbdevclawweb.paas.${import.meta.env.VITE_LOGIN_PT}.cn/login.html`
+            ) +
+            "&response_type=code"
+        )
       }
     })
 
     ipcMain.handle("close-login-page", async () => {
-      if(mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.loadFile(join(__dirname, "../renderer/index.html"))
       }
     })
@@ -640,7 +661,9 @@ if (!gotTheLock) {
       return
     }
     event.preventDefault()
-    fireSessionEndAll(5000, (threadId) => makeBroadcastHookResultCallback(`agent:stream:${threadId}`))
+    fireSessionEndAll(5000, (threadId) =>
+      makeBroadcastHookResultCallback(`agent:stream:${threadId}`)
+    )
       .catch((e) => console.warn("[Main] SessionEnd hooks error:", e))
       .finally(() => disposeAllAgentThreadStates())
       .finally(() => {

@@ -1,7 +1,7 @@
 import { create } from "zustand"
 import type { Thread, ModelConfig, Provider } from "@/types"
 
-type EvolutionTab = "candidates" | "traces"
+type EvolutionTab = "candidates" | "traces" | "checks"
 type MainView = "thread" | "customize" | "evolution" | "kanban" | "claudecode" | "dashboard"
 
 interface EvolutionRunProgress {
@@ -42,13 +42,13 @@ interface AppState {
 
   // Claude Code view state
   showClaudeCodeView: boolean
-  previousThreadId: string | null  // 切换到 Claude Code 前保存的线程 ID
+  previousThreadId: string | null // 切换到 Claude Code 前保存的线程 ID
   setShowClaudeCodeView: (show: boolean) => void
 
   // Dashboard view state
   showDashboardView: boolean
   setShowDashboardView: (show: boolean) => void
-  dashboardAllowed: boolean | null  // null = loading
+  dashboardAllowed: boolean | null // null = loading
   loadDashboardAllowed: () => Promise<void>
 
   // Customize view state
@@ -105,11 +105,14 @@ interface AppState {
 
   // Skill generation virtual subagent — shown in the right panel agents section.
   // State is stored per-thread so switching threads preserves each thread's card.
-  skillGenerationByThread: Map<string, {
-    phase: "generating" | "done" | "error" | null
-    streamedText: string
-    errorText: string
-  }>
+  skillGenerationByThread: Map<
+    string,
+    {
+      phase: "generating" | "done" | "error" | null
+      streamedText: string
+      errorText: string
+    }
+  >
   setSkillGenerationPhase: (phase: "generating" | "done" | "error" | null, text?: string) => void
   appendSkillGenerationToken: (token: string) => void
 
@@ -139,8 +142,20 @@ interface AppState {
   evolutionStreamError: string | null
   setEvolutionStreamError: (err: string | null) => void
   // Options used for the last optimizer run (for retry)
-  evolutionLastRunOpts: { mode?: "auto" | "selected"; traceIds?: string[]; threadId?: string; traceLimit?: number } | null
-  setEvolutionLastRunOpts: (opts: { mode?: "auto" | "selected"; traceIds?: string[]; threadId?: string; traceLimit?: number } | null) => void
+  evolutionLastRunOpts: {
+    mode?: "auto" | "selected"
+    traceIds?: string[]
+    threadId?: string
+    traceLimit?: number
+  } | null
+  setEvolutionLastRunOpts: (
+    opts: {
+      mode?: "auto" | "selected"
+      traceIds?: string[]
+      threadId?: string
+      traceLimit?: number
+    } | null
+  ) => void
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -367,7 +382,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       })
     } else {
       const restored = get().previousThreadId
-      set({ showKanbanView: false, mainView: "thread", ...(restored ? { currentThreadId: restored, previousThreadId: null } : {}) })
+      set({
+        showKanbanView: false,
+        mainView: "thread",
+        ...(restored ? { currentThreadId: restored, previousThreadId: null } : {})
+      })
     }
   },
 
@@ -536,8 +555,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((state) => {
       const threadId = state.currentThreadId
       if (!threadId) return {}
-      const current = state.skillGenerationByThread.get(threadId)
-        ?? { phase: "generating" as const, streamedText: "", errorText: "" }
+      const current = state.skillGenerationByThread.get(threadId) ?? {
+        phase: "generating" as const,
+        streamedText: "",
+        errorText: ""
+      }
       const next = new Map(state.skillGenerationByThread)
       next.set(threadId, { ...current, streamedText: current.streamedText + token })
       return { skillGenerationByThread: next }

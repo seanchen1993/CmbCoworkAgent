@@ -10,6 +10,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  ClipboardCheck,
   Clock,
   Coins,
   Cpu,
@@ -32,6 +33,7 @@ import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
+import { SkillResultChecksPanel } from "./SkillResultChecksPanel"
 
 interface SkillCandidate {
   candidateId: string
@@ -110,7 +112,7 @@ interface TraceDetail extends TraceEntry {
   nodes?: TraceNode[]
 }
 
-type Tab = "candidates" | "traces"
+type Tab = "candidates" | "traces" | "checks"
 
 function buildFallbackNodes(detail: TraceDetail): TraceNode[] {
   const rootId = `trace:${detail.traceId}`
@@ -120,7 +122,12 @@ function buildFallbackNodes(detail: TraceDetail): TraceNode[] {
       type: "trace",
       parentId: null,
       name: "Agent Trace",
-      status: detail.outcome === "error" ? "error" : detail.outcome === "cancelled" ? "cancelled" : "success",
+      status:
+        detail.outcome === "error"
+          ? "error"
+          : detail.outcome === "cancelled"
+            ? "cancelled"
+            : "success",
       startedAt: detail.startedAt,
       endedAt: detail.endedAt,
       input: { userMessage: detail.userMessage },
@@ -185,10 +192,21 @@ function buildFallbackNodes(detail: TraceDetail): TraceNode[] {
 
   nodes.push({
     id: `terminal:${detail.traceId}`,
-    type: detail.outcome === "error" ? "error" : detail.outcome === "cancelled" ? "cancel" : "message",
+    type:
+      detail.outcome === "error" ? "error" : detail.outcome === "cancelled" ? "cancel" : "message",
     parentId: rootId,
-    name: detail.outcome === "error" ? "Run Error" : detail.outcome === "cancelled" ? "Run Cancelled" : "Run Completed",
-    status: detail.outcome === "error" ? "error" : detail.outcome === "cancelled" ? "cancelled" : "success",
+    name:
+      detail.outcome === "error"
+        ? "Run Error"
+        : detail.outcome === "cancelled"
+          ? "Run Cancelled"
+          : "Run Completed",
+    status:
+      detail.outcome === "error"
+        ? "error"
+        : detail.outcome === "cancelled"
+          ? "cancelled"
+          : "success",
     startedAt: detail.endedAt,
     endedAt: detail.endedAt,
     output: detail.errorMessage ?? (detail.outcome === "success" ? "Completed" : detail.outcome)
@@ -231,11 +249,13 @@ function isSameIdSet(a: Set<string>, b: Set<string>): boolean {
 }
 
 function outcomeColor(outcome: string): string {
-  return {
-    success: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30",
-    error: "bg-red-500/15 text-red-700 dark:text-red-400 border-red-500/30",
-    cancelled: "bg-zinc-500/15 text-zinc-500 border-zinc-500/20"
-  }[outcome] ?? "bg-zinc-500/15 text-zinc-500 border-zinc-500/20"
+  return (
+    {
+      success: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30",
+      error: "bg-red-500/15 text-red-700 dark:text-red-400 border-red-500/30",
+      cancelled: "bg-zinc-500/15 text-zinc-500 border-zinc-500/20"
+    }[outcome] ?? "bg-zinc-500/15 text-zinc-500 border-zinc-500/20"
+  )
 }
 
 function nodeIcon(node: TraceNode): React.JSX.Element {
@@ -260,14 +280,21 @@ function JsonBlock({ value }: { value: unknown }): React.JSX.Element {
   const [expanded, setExpanded] = useState(false)
   const text = JSON.stringify(value, null, 2)
   if (text.length <= 180) {
-    return <pre className="text-[11px] font-mono whitespace-pre-wrap break-all text-foreground/70">{text}</pre>
+    return (
+      <pre className="text-[11px] font-mono whitespace-pre-wrap break-all text-foreground/70">
+        {text}
+      </pre>
+    )
   }
   return (
     <div className="space-y-1">
       <pre className="text-[11px] font-mono whitespace-pre-wrap break-all text-foreground/70">
         {expanded ? text : `${text.slice(0, 180)}...`}
       </pre>
-      <button className="text-[10px] text-blue-500 hover:underline" onClick={() => setExpanded((v) => !v)}>
+      <button
+        className="text-[10px] text-blue-500 hover:underline"
+        onClick={() => setExpanded((v) => !v)}
+      >
         {expanded ? "收起" : "展开"}
       </button>
     </div>
@@ -299,32 +326,45 @@ function TraceTreeNode({
           <span className="text-[12px] font-medium text-foreground/85">
             {node.name || node.type}
           </span>
-          <span className="text-[10px] text-muted-foreground/60">{new Date(node.startedAt).toLocaleTimeString()}</span>
+          <span className="text-[10px] text-muted-foreground/60">
+            {new Date(node.startedAt).toLocaleTimeString()}
+          </span>
           {node.status && (
             <Badge variant="outline" className="text-[10px] ml-auto">
               {node.status}
             </Badge>
           )}
-          {hasDetail && (open ? <ChevronDown className="size-3.5 text-muted-foreground" /> : <ChevronRight className="size-3.5 text-muted-foreground" />)}
+          {hasDetail &&
+            (open ? (
+              <ChevronDown className="size-3.5 text-muted-foreground" />
+            ) : (
+              <ChevronRight className="size-3.5 text-muted-foreground" />
+            ))}
         </button>
 
         {open && hasDetail && (
           <div className="border-t border-border/60 px-3 py-2 space-y-2 bg-background/60">
             {node.input !== undefined && (
               <div>
-                <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Input</p>
+                <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
+                  Input
+                </p>
                 <JsonBlock value={node.input} />
               </div>
             )}
             {node.output !== undefined && (
               <div>
-                <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Output</p>
+                <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
+                  Output
+                </p>
                 <JsonBlock value={node.output} />
               </div>
             )}
             {node.metadata && Object.keys(node.metadata).length > 0 && (
               <div>
-                <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Metadata</p>
+                <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
+                  Metadata
+                </p>
                 <JsonBlock value={node.metadata} />
               </div>
             )}
@@ -332,15 +372,27 @@ function TraceTreeNode({
         )}
       </div>
 
-      {open && children.map((child) => (
-        <TraceTreeNode key={child.id} node={child} childrenByParent={childrenByParent} depth={depth + 1} />
-      ))}
+      {open &&
+        children.map((child) => (
+          <TraceTreeNode
+            key={child.id}
+            node={child}
+            childrenByParent={childrenByParent}
+            depth={depth + 1}
+          />
+        ))}
     </div>
   )
 }
 
-function TraceDetailView({ detail, onClose }: { detail: TraceDetail; onClose: () => void }): React.JSX.Element {
-  const nodes = (detail.nodes && detail.nodes.length > 0) ? detail.nodes : buildFallbackNodes(detail)
+function TraceDetailView({
+  detail,
+  onClose
+}: {
+  detail: TraceDetail
+  onClose: () => void
+}): React.JSX.Element {
+  const nodes = detail.nodes && detail.nodes.length > 0 ? detail.nodes : buildFallbackNodes(detail)
   const root = nodes.find((n) => n.parentId === null) ?? nodes[0]
   const childrenByParent = useMemo(() => {
     const map = new Map<string, TraceNode[]>()
@@ -356,21 +408,39 @@ function TraceDetailView({ detail, onClose }: { detail: TraceDetail; onClose: ()
   return (
     <div className="flex flex-1 min-w-0 flex-col h-full overflow-hidden bg-background">
       <div className="shrink-0 flex items-center gap-2 px-4 py-2.5 border-b border-border">
-        <button className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground" onClick={onClose}>
+        <button
+          className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+          onClick={onClose}
+        >
           <ArrowLeft className="size-3.5" />
           Traces
         </button>
         <span className="text-muted-foreground/40">/</span>
-        <span className="text-xs font-mono text-muted-foreground">{detail.traceId.slice(0, 16)}</span>
-        <Badge className={cn("ml-auto border text-[10px]", outcomeColor(detail.outcome))}>{detail.outcome}</Badge>
+        <span className="text-xs font-mono text-muted-foreground">
+          {detail.traceId.slice(0, 16)}
+        </span>
+        <Badge className={cn("ml-auto border text-[10px]", outcomeColor(detail.outcome))}>
+          {detail.outcome}
+        </Badge>
       </div>
 
       <div className="shrink-0 border-b border-border grid grid-cols-4">
         <Stat icon={<Timer className="size-3.5" />} label="耗时" value={fmt(detail.durationMs)} />
-        <Stat icon={<Hash className="size-3.5" />} label="工具调用" value={String(detail.totalToolCalls)} />
-        <Stat icon={<Cpu className="size-3.5" />} label="模型" value={
-          detail.modelName ?? (detail.modelId.startsWith("custom:") ? detail.modelId.slice("custom:".length) : detail.modelId.split("/").pop() ?? detail.modelId)
-        } />
+        <Stat
+          icon={<Hash className="size-3.5" />}
+          label="工具调用"
+          value={String(detail.totalToolCalls)}
+        />
+        <Stat
+          icon={<Cpu className="size-3.5" />}
+          label="模型"
+          value={
+            detail.modelName ??
+            (detail.modelId.startsWith("custom:")
+              ? detail.modelId.slice("custom:".length)
+              : (detail.modelId.split("/").pop() ?? detail.modelId))
+          }
+        />
         <Stat
           icon={<Sparkles className="size-3.5" />}
           label="使用技能"
@@ -383,7 +453,9 @@ function TraceDetailView({ detail, onClose }: { detail: TraceDetail; onClose: ()
           {root ? (
             <TraceTreeNode node={root} childrenByParent={childrenByParent} depth={0} />
           ) : (
-            <div className="py-10 text-center text-sm text-muted-foreground">该 trace 暂无树结构数据</div>
+            <div className="py-10 text-center text-sm text-muted-foreground">
+              该 trace 暂无树结构数据
+            </div>
           )}
         </ScrollArea>
       </div>
@@ -391,13 +463,23 @@ function TraceDetailView({ detail, onClose }: { detail: TraceDetail; onClose: ()
   )
 }
 
-function Stat({ icon, label, value }: { icon: React.JSX.Element; label: string; value: string }): React.JSX.Element {
+function Stat({
+  icon,
+  label,
+  value
+}: {
+  icon: React.JSX.Element
+  label: string
+  value: string
+}): React.JSX.Element {
   return (
     <div className="flex items-center gap-2 px-4 py-2.5 border-r border-border last:border-r-0">
       <span className="text-muted-foreground/60 shrink-0">{icon}</span>
       <div className="min-w-0">
         <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wider">{label}</p>
-        <p className="text-[12px] font-semibold truncate" title={value}>{value}</p>
+        <p className="text-[12px] font-semibold truncate" title={value}>
+          {value}
+        </p>
       </div>
     </div>
   )
@@ -429,10 +511,16 @@ function TraceCard({
         }
       }}
     >
-      <div className={cn("h-0.5 w-full",
-        trace.outcome === "success" ? "bg-emerald-500/60" :
-          trace.outcome === "error" ? "bg-red-500/60" : "bg-zinc-500/30"
-      )} />
+      <div
+        className={cn(
+          "h-0.5 w-full",
+          trace.outcome === "success"
+            ? "bg-emerald-500/60"
+            : trace.outcome === "error"
+              ? "bg-red-500/60"
+              : "bg-zinc-500/30"
+        )}
+      />
       <div className="p-3 space-y-1.5">
         <div className="flex items-center gap-2">
           <input
@@ -442,10 +530,14 @@ function TraceCard({
             onClick={(e) => e.stopPropagation()}
             className="size-3.5"
           />
-          <Badge className={cn("border text-[10px] px-1.5 py-0 shrink-0", outcomeColor(trace.outcome))}>
+          <Badge
+            className={cn("border text-[10px] px-1.5 py-0 shrink-0", outcomeColor(trace.outcome))}
+          >
             {trace.outcome === "success" ? "成功" : trace.outcome === "error" ? "错误" : "取消"}
           </Badge>
-          <span className="text-[10px] font-mono text-muted-foreground/60">{trace.traceId.slice(0, 8)}</span>
+          <span className="text-[10px] font-mono text-muted-foreground/60">
+            {trace.traceId.slice(0, 8)}
+          </span>
           <button
             className="ml-auto text-muted-foreground/50 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
             onClick={(e) => {
@@ -457,11 +549,19 @@ function TraceCard({
             <Trash2 className="size-3.5" />
           </button>
         </div>
-        <p className="text-[12px] text-foreground/80 line-clamp-2 leading-snug">{trace.userMessage}</p>
+        <p className="text-[12px] text-foreground/80 line-clamp-2 leading-snug">
+          {trace.userMessage}
+        </p>
         <p className="text-[10px] text-muted-foreground/50 flex items-center gap-2">
           <span>{new Date(trace.startedAt).toLocaleString()}</span>
-          <span className="inline-flex items-center gap-0.5"><Timer className="size-3" />{fmt(trace.durationMs)}</span>
-          <span className="inline-flex items-center gap-0.5"><Wrench className="size-3" />{trace.totalToolCalls}</span>
+          <span className="inline-flex items-center gap-0.5">
+            <Timer className="size-3" />
+            {fmt(trace.durationMs)}
+          </span>
+          <span className="inline-flex items-center gap-0.5">
+            <Wrench className="size-3" />
+            {trace.totalToolCalls}
+          </span>
           {(trace.totalTokens ?? 0) > 0 ? (
             <span className="inline-flex items-center gap-1" title="输入 token / 输出 token">
               <Coins className="size-3" />
@@ -520,8 +620,14 @@ function TraceThreadGroupCard({
           </div>
           <p className="text-[11px] text-muted-foreground mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
             <span>最近运行：{new Date(group.latestStartedAt).toLocaleString()}</span>
-            <span className="inline-flex items-center gap-1"><Wrench className="size-3" />{group.totalToolCalls}</span>
-            <span className="inline-flex items-center gap-1"><Clock className="size-3" />总耗时 {fmtDuration(group.totalDurationMs)}</span>
+            <span className="inline-flex items-center gap-1">
+              <Wrench className="size-3" />
+              {group.totalToolCalls}
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <Clock className="size-3" />
+              总耗时 {fmtDuration(group.totalDurationMs)}
+            </span>
             {group.totalTokens > 0 ? (
               <span className="inline-flex items-center gap-1" title="输入 token / 输出 token">
                 <Coins className="size-3" />
@@ -530,9 +636,15 @@ function TraceThreadGroupCard({
                 <span>↓{fmtTokens(group.totalOutputTokens)}</span>
               </span>
             ) : null}
-            <span className="inline-flex items-center gap-1 text-emerald-600"><CheckCircle2 className="size-3" />{group.successCount}</span>
+            <span className="inline-flex items-center gap-1 text-emerald-600">
+              <CheckCircle2 className="size-3" />
+              {group.successCount}
+            </span>
             {group.errorCount > 0 ? (
-              <span className="inline-flex items-center gap-1 text-red-500"><AlertCircle className="size-3" />{group.errorCount}</span>
+              <span className="inline-flex items-center gap-1 text-red-500">
+                <AlertCircle className="size-3" />
+                {group.errorCount}
+              </span>
             ) : null}
             <span>已选 {selectedCount}</span>
           </p>
@@ -553,7 +665,8 @@ function TraceThreadGroupCard({
             className="h-7 text-xs"
             onClick={() => onDeleteThread(group.threadId)}
           >
-            <Trash2 className="size-3 mr-1" />删本会话
+            <Trash2 className="size-3 mr-1" />
+            删本会话
           </Button>
         </div>
       </div>
@@ -600,9 +713,7 @@ function OptimizeStreamCard({
       : "生成完成"
 
   return (
-    <div className={cn(
-      "shrink-0 border-b border-violet-500/20 bg-violet-500/10 px-4 py-2"
-    )}>
+    <div className={cn("shrink-0 border-b border-violet-500/20 bg-violet-500/10 px-4 py-2")}>
       <div className="flex items-center gap-2">
         {running && !streamError ? (
           <Loader2 className="size-3.5 text-violet-600 animate-spin shrink-0" />
@@ -611,10 +722,12 @@ function OptimizeStreamCard({
         ) : (
           <Sparkles className="size-3.5 text-violet-600 shrink-0" />
         )}
-        <span className={cn(
-          "text-xs flex-1",
-          streamError ? "text-destructive" : "text-violet-700 dark:text-violet-300"
-        )}>
+        <span
+          className={cn(
+            "text-xs flex-1",
+            streamError ? "text-destructive" : "text-violet-700 dark:text-violet-300"
+          )}
+        >
           {statusLabel}
         </span>
         <div className="flex items-center gap-2">
@@ -638,12 +751,12 @@ function OptimizeStreamCard({
           )}
         </div>
       </div>
-      {streamError && (
-        <p className="text-[11px] text-destructive mt-1 pl-5">{streamError}</p>
-      )}
+      {streamError && <p className="text-[11px] text-destructive mt-1 pl-5">{streamError}</p>}
       {expanded && hasContent && (
         <div className="mt-2 border border-violet-500/20 rounded px-2 py-1.5 max-h-48 overflow-y-auto bg-background/60">
-          <pre className="text-[10px] text-foreground/80 whitespace-pre-wrap break-all font-mono">{streamedText}</pre>
+          <pre className="text-[10px] text-foreground/80 whitespace-pre-wrap break-all font-mono">
+            {streamedText}
+          </pre>
         </div>
       )}
     </div>
@@ -662,7 +775,9 @@ function CandidateCard({
   const [expanded, setExpanded] = useState(false)
   const [loading, setLoading] = useState(false)
   const [oldContent, setOldContent] = useState<string | null>(null)
-  const [oldContentStatus, setOldContentStatus] = useState<"idle" | "loading" | "ready" | "failed">("idle")
+  const [oldContentStatus, setOldContentStatus] = useState<"idle" | "loading" | "ready" | "failed">(
+    "idle"
+  )
   // Use a ref to track load state inside the effect without adding it to the dependency array,
   // preventing the infinite loop caused by cleanup resetting state that re-triggers the effect.
   const loadInitiatedRef = useRef(false)
@@ -698,7 +813,9 @@ function CandidateCard({
     }
 
     void load()
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+    }
   }, [expanded, candidate.action, candidate.skillId])
 
   // Reset all load state when the candidate changes
@@ -720,23 +837,42 @@ function CandidateCard({
     setLoading(false)
   }
 
-  const statusEl = candidate.status === "approved"
-    ? <Badge className="bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 gap-1 text-xs"><CheckCircle2 className="size-3" />已采纳</Badge>
-    : candidate.status === "rejected"
-      ? <Badge className="bg-red-500/15 text-red-600 dark:text-red-400 border border-red-500/20 gap-1 text-xs"><XCircle className="size-3" />已拒绝</Badge>
-      : <Badge className="bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/20 gap-1 text-xs"><Clock className="size-3" />待审批</Badge>
+  const statusEl =
+    candidate.status === "approved" ? (
+      <Badge className="bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 gap-1 text-xs">
+        <CheckCircle2 className="size-3" />
+        已采纳
+      </Badge>
+    ) : candidate.status === "rejected" ? (
+      <Badge className="bg-red-500/15 text-red-600 dark:text-red-400 border border-red-500/20 gap-1 text-xs">
+        <XCircle className="size-3" />
+        已拒绝
+      </Badge>
+    ) : (
+      <Badge className="bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/20 gap-1 text-xs">
+        <Clock className="size-3" />
+        待审批
+      </Badge>
+    )
 
   return (
     <div className="rounded-lg border border-border bg-card overflow-hidden">
       <div className="flex items-start gap-3 p-3">
-        <button className="mt-0.5 shrink-0 text-muted-foreground hover:text-foreground" onClick={() => setExpanded((v) => !v)}>
+        <button
+          className="mt-0.5 shrink-0 text-muted-foreground hover:text-foreground"
+          onClick={() => setExpanded((v) => !v)}
+        >
           {expanded ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
         </button>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm font-semibold">{candidate.name}</span>
-            <Badge variant="outline" className="text-[10px] font-mono px-1.5 py-0">{candidate.skillId}</Badge>
-            <Badge variant="outline" className="text-[10px] px-1.5 py-0">{candidate.action === "create" ? "新建" : "更新"}</Badge>
+            <Badge variant="outline" className="text-[10px] font-mono px-1.5 py-0">
+              {candidate.skillId}
+            </Badge>
+            <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+              {candidate.action === "create" ? "新建" : "更新"}
+            </Badge>
             {statusEl}
           </div>
           <p className="text-xs text-muted-foreground mt-1 line-clamp-2">{candidate.description}</p>
@@ -746,7 +882,10 @@ function CandidateCard({
               <span className="ml-1 font-mono text-foreground/80">{candidate.skillId}</span>
             </p>
           )}
-          <p className="text-[10px] text-muted-foreground/50 mt-1">基于 {candidate.sourceTraceIds.length} 条 trace · {new Date(candidate.generatedAt).toLocaleString()}</p>
+          <p className="text-[10px] text-muted-foreground/50 mt-1">
+            基于 {candidate.sourceTraceIds.length} 条 trace ·{" "}
+            {new Date(candidate.generatedAt).toLocaleString()}
+          </p>
         </div>
         {candidate.status === "pending" && (
           <div className="flex gap-1.5 shrink-0">
@@ -757,7 +896,11 @@ function CandidateCard({
               className="h-7 px-2.5 text-xs border-emerald-500/40 text-emerald-600 hover:bg-emerald-500/10 hover:text-emerald-600"
               onClick={approve}
             >
-              {loading ? <Loader2 className="size-3 animate-spin" /> : <CheckCircle2 className="size-3 mr-1" />}
+              {loading ? (
+                <Loader2 className="size-3 animate-spin" />
+              ) : (
+                <CheckCircle2 className="size-3 mr-1" />
+              )}
               采纳
             </Button>
             <Button
@@ -767,7 +910,8 @@ function CandidateCard({
               className="h-7 px-2.5 text-xs text-muted-foreground hover:text-destructive"
               onClick={reject}
             >
-              <XCircle className="size-3 mr-1" />拒绝
+              <XCircle className="size-3 mr-1" />
+              拒绝
             </Button>
           </div>
         )}
@@ -777,7 +921,9 @@ function CandidateCard({
         <div className="border-t border-border bg-muted/30 px-4 pb-4 pt-3 space-y-3">
           {candidate.rationale && (
             <div>
-              <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider mb-1">优化理由</p>
+              <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider mb-1">
+                优化理由
+              </p>
               <p className="text-xs text-foreground/80">{candidate.rationale}</p>
             </div>
           )}
@@ -786,24 +932,32 @@ function CandidateCard({
               SKILL.md {candidate.action === "patch" ? "变更" : "预览"}
             </p>
             <div className="rounded border border-border bg-background max-h-80 overflow-y-auto">
-              {candidate.action === "patch" && (oldContentStatus === "idle" || oldContentStatus === "loading") && (
-                <div className="flex items-center gap-2 px-3 py-4 text-xs text-muted-foreground">
-                  <Loader2 className="size-3.5 animate-spin" />
-                  正在加载旧版内容…
-                </div>
-              )}
-              {candidate.action === "patch" && oldContentStatus === "ready" && oldContent !== null && (
-                <ReactDiffViewer
-                  oldValue={oldContent}
-                  newValue={candidate.proposedContent}
-                  splitView={false}
-                  compareMethod={DiffMethod.LINES}
-                  useDarkTheme={false}
-                  styles={{
-                    contentText: { fontSize: "12px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace", wordBreak: "break-all" }
-                  }}
-                />
-              )}
+              {candidate.action === "patch" &&
+                (oldContentStatus === "idle" || oldContentStatus === "loading") && (
+                  <div className="flex items-center gap-2 px-3 py-4 text-xs text-muted-foreground">
+                    <Loader2 className="size-3.5 animate-spin" />
+                    正在加载旧版内容…
+                  </div>
+                )}
+              {candidate.action === "patch" &&
+                oldContentStatus === "ready" &&
+                oldContent !== null && (
+                  <ReactDiffViewer
+                    oldValue={oldContent}
+                    newValue={candidate.proposedContent}
+                    splitView={false}
+                    compareMethod={DiffMethod.LINES}
+                    useDarkTheme={false}
+                    styles={{
+                      contentText: {
+                        fontSize: "12px",
+                        fontFamily:
+                          "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                        wordBreak: "break-all"
+                      }
+                    }}
+                  />
+                )}
               {candidate.action === "patch" && oldContentStatus === "failed" && (
                 <div className="px-3 pt-2 pb-1">
                   <p className="text-[11px] text-amber-600 dark:text-amber-400 mb-2 flex items-center gap-1">
@@ -834,7 +988,15 @@ function CandidateCard({
   )
 }
 
-function EmptyState({ icon, title, desc }: { icon: React.ReactNode; title: string; desc: string }): React.JSX.Element {
+function EmptyState({
+  icon,
+  title,
+  desc
+}: {
+  icon: React.ReactNode
+  title: string
+  desc: string
+}): React.JSX.Element {
   return (
     <div className="flex flex-col items-center justify-center py-16 text-center">
       {icon}
@@ -900,32 +1062,43 @@ export function EvolutionPanel(): React.JSX.Element {
     }
   }, [selectedTraceIds, setEvolutionSelectedTraceIds])
 
-  const runOptimizer = useCallback(async (
-    opts?: {
-      threadId?: string
-      mode?: "auto" | "selected"
-      traceIds?: string[]
+  const runOptimizer = useCallback(
+    async (
+      opts?: {
+        threadId?: string
+        mode?: "auto" | "selected"
+        traceIds?: string[]
+      },
+      pendingMessage = "正在分析选中内容，请稍候..."
+    ) => {
+      setEvolutionLastRunOpts(opts ?? null)
+      setEvolutionStreamedText("")
+      setEvolutionStreamError(null)
+      setRunning(true)
+      setRunningSummary(pendingMessage)
+      setSummary(null)
+      setEvolutionRunProgress({})
+      try {
+        const result = await window.api.optimizer.run(opts)
+        setSummary(result.summary)
+        setCandidates(await window.api.optimizer.getCandidates())
+      } catch (e) {
+        setSummary(`运行失败: ${e}`)
+      } finally {
+        setRunning(false)
+        setRunningSummary(null)
+      }
     },
-    pendingMessage = "正在分析选中内容，请稍候..."
-  ) => {
-    setEvolutionLastRunOpts(opts ?? null)
-    setEvolutionStreamedText("")
-    setEvolutionStreamError(null)
-    setRunning(true)
-    setRunningSummary(pendingMessage)
-    setSummary(null)
-    setEvolutionRunProgress({})
-    try {
-      const result = await window.api.optimizer.run(opts)
-      setSummary(result.summary)
-      setCandidates(await window.api.optimizer.getCandidates())
-    } catch (e) {
-      setSummary(`运行失败: ${e}`)
-    } finally {
-      setRunning(false)
-      setRunningSummary(null)
-    }
-  }, [setEvolutionLastRunOpts, setEvolutionRunProgress, setEvolutionStreamedText, setEvolutionStreamError, setRunning, setRunningSummary, setSummary])
+    [
+      setEvolutionLastRunOpts,
+      setEvolutionRunProgress,
+      setEvolutionStreamedText,
+      setEvolutionStreamError,
+      setRunning,
+      setRunningSummary,
+      setSummary
+    ]
+  )
 
   useEffect(() => {
     if (threads.length === 0) {
@@ -934,13 +1107,19 @@ export function EvolutionPanel(): React.JSX.Element {
   }, [threads.length, loadThreads])
 
   useEffect(() => {
-    window.api.optimizer.getOnlineSkillEvolutionEnabled().then(setOnlineSkillEvolutionEnabled).catch(console.warn)
+    window.api.optimizer
+      .getOnlineSkillEvolutionEnabled()
+      .then(setOnlineSkillEvolutionEnabled)
+      .catch(console.warn)
     window.api.optimizer.getAutoPropose().then(setAutoPropose).catch(console.warn)
     window.api.optimizer.getCandidates().then(setCandidates).catch(console.warn)
-    window.api.optimizer.getThreshold().then((v) => {
-      setThreshold(v)
-      setThresholdInput(String(v))
-    }).catch(console.warn)
+    window.api.optimizer
+      .getThreshold()
+      .then((v) => {
+        setThreshold(v)
+        setThresholdInput(String(v))
+      })
+      .catch(console.warn)
   }, [])
 
   useEffect(() => {
@@ -1013,17 +1192,21 @@ export function EvolutionPanel(): React.JSX.Element {
   const handleApprove = useCallback(async (candidateId: string) => {
     const result = await window.api.optimizer.approve(candidateId)
     if (result.success) {
-      setCandidates((prev) => prev.map((candidate) => (
-        candidate.candidateId === candidateId ? { ...candidate, status: "approved" } : candidate
-      )))
+      setCandidates((prev) =>
+        prev.map((candidate) =>
+          candidate.candidateId === candidateId ? { ...candidate, status: "approved" } : candidate
+        )
+      )
     }
   }, [])
 
   const handleReject = useCallback(async (candidateId: string) => {
     await window.api.optimizer.reject(candidateId)
-    setCandidates((prev) => prev.map((candidate) => (
-      candidate.candidateId === candidateId ? { ...candidate, status: "rejected" } : candidate
-    )))
+    setCandidates((prev) =>
+      prev.map((candidate) =>
+        candidate.candidateId === candidateId ? { ...candidate, status: "rejected" } : candidate
+      )
+    )
   }, [])
 
   const handleClear = useCallback(async () => {
@@ -1032,30 +1215,34 @@ export function EvolutionPanel(): React.JSX.Element {
     setSummary(null)
   }, [])
 
-  const toggleTraceChecked = useCallback((traceId: string, checked: boolean) => {
-    const next = new Set(selectedTraceIds)
-    if (checked) next.add(traceId)
-    else next.delete(traceId)
-    setEvolutionSelectedTraceIds(next)
-  }, [selectedTraceIds, setEvolutionSelectedTraceIds])
+  const toggleTraceChecked = useCallback(
+    (traceId: string, checked: boolean) => {
+      const next = new Set(selectedTraceIds)
+      if (checked) next.add(traceId)
+      else next.delete(traceId)
+      setEvolutionSelectedTraceIds(next)
+    },
+    [selectedTraceIds, setEvolutionSelectedTraceIds]
+  )
 
-  const handleDeleteTraces = useCallback(async (traceIds: string[]) => {
-    if (traceIds.length === 0) return
-    if (typeof window.api.optimizer.deleteTraces !== "function") {
-      console.error("[Evolution] deleteTraces API not available in preload")
-      setSummary("当前应用版本不支持 trace 删除，请重启应用后再试。")
-      window.alert("当前应用版本不支持 trace 删除，请重启应用后再试。")
-      return
-    }
+  const handleDeleteTraces = useCallback(
+    async (traceIds: string[]) => {
+      if (traceIds.length === 0) return
+      if (typeof window.api.optimizer.deleteTraces !== "function") {
+        console.error("[Evolution] deleteTraces API not available in preload")
+        setSummary("当前应用版本不支持 trace 删除，请重启应用后再试。")
+        window.alert("当前应用版本不支持 trace 删除，请重启应用后再试。")
+        return
+      }
 
-    const confirmed = window.confirm(
-      traceIds.length === 1
-        ? "确认删除这条 trace 吗？该操作不可恢复。"
-        : `确认删除选中的 ${traceIds.length} 条 trace 吗？该操作不可恢复。`
-    )
-    if (!confirmed) return
+      const confirmed = window.confirm(
+        traceIds.length === 1
+          ? "确认删除这条 trace 吗？该操作不可恢复。"
+          : `确认删除选中的 ${traceIds.length} 条 trace 吗？该操作不可恢复。`
+      )
+      if (!confirmed) return
 
-    const result = await window.api.optimizer.deleteTraces(traceIds)
+      const result = await window.api.optimizer.deleteTraces(traceIds)
       if (result.deletedIds.length > 0) {
         const deleted = new Set(result.deletedIds)
         setTraces((prev) => prev.filter((trace) => !deleted.has(trace.traceId)))
@@ -1068,14 +1255,16 @@ export function EvolutionPanel(): React.JSX.Element {
         }
       }
 
-    await loadTraces()
+      await loadTraces()
 
-    if (result.failed.length > 0) {
-      setSummary(`已删除 ${result.deletedIds.length} 条，失败 ${result.failed.length} 条`)
-    } else {
-      setSummary(`已删除 ${result.deletedIds.length} 条 trace`)
-    }
-  }, [loadTraces, selectedTrace, selectedTraceIds, setEvolutionSelectedTraceIds, setSummary])
+      if (result.failed.length > 0) {
+        setSummary(`已删除 ${result.deletedIds.length} 条，失败 ${result.failed.length} 条`)
+      } else {
+        setSummary(`已删除 ${result.deletedIds.length} 条 trace`)
+      }
+    },
+    [loadTraces, selectedTrace, selectedTraceIds, setEvolutionSelectedTraceIds, setSummary]
+  )
 
   const progressItems = Object.values(runProgress).sort((a, b) => a.index - b.index)
   const allTraceIds = useMemo(() => traces.map((trace) => trace.traceId), [traces])
@@ -1096,7 +1285,9 @@ export function EvolutionPanel(): React.JSX.Element {
 
     return Array.from(grouped.entries())
       .map(([threadId, threadTraces]) => {
-        const sortedTraces = [...threadTraces].sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+        const sortedTraces = [...threadTraces].sort((a, b) =>
+          b.startedAt.localeCompare(a.startedAt)
+        )
         const totals = threadTraces.reduce(
           (acc, t) => {
             acc.totalToolCalls += t.totalToolCalls
@@ -1106,7 +1297,13 @@ export function EvolutionPanel(): React.JSX.Element {
             acc.totalTokens += t.totalTokens ?? 0
             return acc
           },
-          { totalToolCalls: 0, totalDurationMs: 0, totalInputTokens: 0, totalOutputTokens: 0, totalTokens: 0 }
+          {
+            totalToolCalls: 0,
+            totalDurationMs: 0,
+            totalInputTokens: 0,
+            totalOutputTokens: 0,
+            totalTokens: 0
+          }
         )
         return {
           threadId,
@@ -1125,7 +1322,10 @@ export function EvolutionPanel(): React.JSX.Element {
       .sort((a, b) => b.latestStartedAt.localeCompare(a.latestStartedAt))
   }, [traces, threadTitleById])
   const selectedThreadCount = useMemo(
-    () => traceGroups.filter((group) => group.traces.some((trace) => selectedTraceIds.has(trace.traceId))).length,
+    () =>
+      traceGroups.filter((group) =>
+        group.traces.some((trace) => selectedTraceIds.has(trace.traceId))
+      ).length,
     [traceGroups, selectedTraceIds]
   )
   const allSelected = allTraceIds.length > 0 && allTraceIds.every((id) => selectedTraceIds.has(id))
@@ -1136,9 +1336,10 @@ export function EvolutionPanel(): React.JSX.Element {
       setSummary("请先选择会话或 trace")
       return
     }
-    const pendingMessage = selectedThreadCount > 0
-      ? `正在分析已选内容（${traceIds.length} 条 trace / ${selectedThreadCount} 个会话），请稍候...`
-      : `正在分析已选内容（${traceIds.length} 条 trace），请稍候...`
+    const pendingMessage =
+      selectedThreadCount > 0
+        ? `正在分析已选内容（${traceIds.length} 条 trace / ${selectedThreadCount} 个会话），请稍候...`
+        : `正在分析已选内容（${traceIds.length} 条 trace），请稍候...`
     await runOptimizer({ mode: "selected", traceIds }, pendingMessage)
     setTab("candidates")
   }, [runOptimizer, selectedTraceIds, selectedThreadCount])
@@ -1159,21 +1360,31 @@ export function EvolutionPanel(): React.JSX.Element {
     setEvolutionSelectedTraceIds(new Set(allTraceIds))
   }, [allTraceIds, selectedTraceIds, setEvolutionSelectedTraceIds])
 
-  const toggleThreadChecked = useCallback((threadId: string, checked: boolean) => {
-    const next = new Set(selectedTraceIds)
-    const traceIds = traces.filter((trace) => trace.threadId === threadId).map((trace) => trace.traceId)
-    for (const traceId of traceIds) {
-      if (checked) next.add(traceId)
-      else next.delete(traceId)
-    }
-    setEvolutionSelectedTraceIds(next)
-  }, [selectedTraceIds, setEvolutionSelectedTraceIds, traces])
+  const toggleThreadChecked = useCallback(
+    (threadId: string, checked: boolean) => {
+      const next = new Set(selectedTraceIds)
+      const traceIds = traces
+        .filter((trace) => trace.threadId === threadId)
+        .map((trace) => trace.traceId)
+      for (const traceId of traceIds) {
+        if (checked) next.add(traceId)
+        else next.delete(traceId)
+      }
+      setEvolutionSelectedTraceIds(next)
+    },
+    [selectedTraceIds, setEvolutionSelectedTraceIds, traces]
+  )
 
-  const handleDeleteThread = useCallback(async (threadId: string) => {
-    const traceIds = traces.filter((trace) => trace.threadId === threadId).map((trace) => trace.traceId)
-    if (traceIds.length === 0) return
-    await handleDeleteTraces(traceIds)
-  }, [handleDeleteTraces, traces])
+  const handleDeleteThread = useCallback(
+    async (threadId: string) => {
+      const traceIds = traces
+        .filter((trace) => trace.threadId === threadId)
+        .map((trace) => trace.traceId)
+      if (traceIds.length === 0) return
+      await handleDeleteTraces(traceIds)
+    },
+    [handleDeleteTraces, traces]
+  )
 
   if (detailLoading) {
     return (
@@ -1203,8 +1414,14 @@ export function EvolutionPanel(): React.JSX.Element {
             <div className="group relative shrink-0">
               <Info className="size-3.5 text-muted-foreground/40 hover:text-muted-foreground/70 cursor-default transition-colors" />
               <div className="pointer-events-none absolute top-full left-0 mt-2 w-80 rounded-md border border-border bg-popover px-3 py-2 text-[11px] leading-5 text-muted-foreground shadow-md opacity-0 group-hover:opacity-100 transition-opacity z-50">
-                <p><span className="font-medium text-foreground">开启：</span> 会在当前对话过程中自动触发技能沉淀流程。</p>
-                <p className="mt-1"><span className="font-medium text-foreground">关闭：</span> 不会自动沉淀技能，你仍可在下方基于 traces 手动做离线优化。</p>
+                <p>
+                  <span className="font-medium text-foreground">开启：</span>{" "}
+                  会在当前对话过程中自动触发技能沉淀流程。
+                </p>
+                <p className="mt-1">
+                  <span className="font-medium text-foreground">关闭：</span>{" "}
+                  不会自动沉淀技能，你仍可在下方基于 traces 手动做离线优化。
+                </p>
               </div>
             </div>
             <button
@@ -1214,10 +1431,12 @@ export function EvolutionPanel(): React.JSX.Element {
                 onlineSkillEvolutionEnabled ? "bg-violet-500" : "bg-muted-foreground/30"
               )}
             >
-              <span className={cn(
-                "inline-block size-3.5 rounded-full bg-white shadow-sm transition-transform",
-                onlineSkillEvolutionEnabled ? "translate-x-4" : "translate-x-0.5"
-              )} />
+              <span
+                className={cn(
+                  "inline-block size-3.5 rounded-full bg-white shadow-sm transition-transform",
+                  onlineSkillEvolutionEnabled ? "translate-x-4" : "translate-x-0.5"
+                )}
+              />
             </button>
           </div>
 
@@ -1263,8 +1482,14 @@ export function EvolutionPanel(): React.JSX.Element {
             <div className="group relative shrink-0">
               <Info className="size-3.5 text-muted-foreground/40 hover:text-muted-foreground/70 cursor-default transition-colors" />
               <div className="pointer-events-none absolute top-full left-0 mt-2 w-80 rounded-md border border-border bg-popover px-3 py-2 text-[11px] leading-5 text-muted-foreground shadow-md opacity-0 group-hover:opacity-100 transition-opacity z-50">
-                <p><span className="font-medium text-foreground">直接触发：</span> 达到工具调用阈值后，直接进入技能沉淀流程。</p>
-                <p className="mt-1"><span className="font-medium text-foreground">模型判断：</span> 达到工具调用阈值后，先由大模型判断是否值得沉淀，再决定是否进入技能沉淀流程。</p>
+                <p>
+                  <span className="font-medium text-foreground">直接触发：</span>{" "}
+                  达到工具调用阈值后，直接进入技能沉淀流程。
+                </p>
+                <p className="mt-1">
+                  <span className="font-medium text-foreground">模型判断：</span>{" "}
+                  达到工具调用阈值后，先由大模型判断是否值得沉淀，再决定是否进入技能沉淀流程。
+                </p>
               </div>
             </div>
 
@@ -1294,7 +1519,8 @@ export function EvolutionPanel(): React.JSX.Element {
             />
             {thresholdSaved ? (
               <span className="text-[11px] text-emerald-500 flex items-center gap-0.5">
-                <CheckCircle2 className="size-3" />已保存
+                <CheckCircle2 className="size-3" />
+                已保存
               </span>
             ) : thresholdInput !== String(threshold) ? (
               <button
@@ -1324,16 +1550,24 @@ export function EvolutionPanel(): React.JSX.Element {
 
       {progressItems.length > 0 && (
         <div className="shrink-0 border-b border-border px-4 py-2 bg-background/80">
-          <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider mb-1">优化进度（串行子任务）</p>
+          <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider mb-1">
+            优化进度（串行子任务）
+          </p>
           <div className="flex flex-wrap gap-1.5">
             {progressItems.map((item) => (
               <Badge key={item.traceId} variant="outline" className="text-[10px] gap-1">
-                <span className={cn(
-                  "size-1.5 rounded-full",
-                  item.status === "completed" ? "bg-emerald-500" :
-                    item.status === "failed" ? "bg-red-500" :
-                      item.status === "running" ? "bg-blue-500" : "bg-zinc-400"
-                )} />
+                <span
+                  className={cn(
+                    "size-1.5 rounded-full",
+                    item.status === "completed"
+                      ? "bg-emerald-500"
+                      : item.status === "failed"
+                        ? "bg-red-500"
+                        : item.status === "running"
+                          ? "bg-blue-500"
+                          : "bg-zinc-400"
+                  )}
+                />
                 {item.index}/{item.total} · {item.traceId.slice(0, 6)} · {item.status}
               </Badge>
             ))}
@@ -1352,12 +1586,14 @@ export function EvolutionPanel(): React.JSX.Element {
       )}
 
       <div className="shrink-0 flex border-b border-border px-4">
-        {(["candidates", "traces"] as Tab[]).map((item) => (
+        {(["candidates", "traces", "checks"] as Tab[]).map((item) => (
           <button
             key={item}
             className={cn(
               "flex items-center gap-1.5 text-xs py-2 px-1 border-b-2 mr-4 transition-colors",
-              tab === item ? "border-foreground text-foreground font-medium" : "border-transparent text-muted-foreground hover:text-foreground"
+              tab === item
+                ? "border-foreground text-foreground font-medium"
+                : "border-transparent text-muted-foreground hover:text-foreground"
             )}
             onClick={() => setTab(item)}
           >
@@ -1371,7 +1607,7 @@ export function EvolutionPanel(): React.JSX.Element {
                   </span>
                 )}
               </>
-            ) : (
+            ) : item === "traces" ? (
               <>
                 <Activity className="size-3.5" />
                 执行 Traces
@@ -1380,6 +1616,11 @@ export function EvolutionPanel(): React.JSX.Element {
                     ({traceGroups.length} 个会话 / {traces.length} 条)
                   </span>
                 )}
+              </>
+            ) : (
+              <>
+                <ClipboardCheck className="size-3.5" />
+                结果校验
               </>
             )}
           </button>
@@ -1396,7 +1637,8 @@ export function EvolutionPanel(): React.JSX.Element {
             onClick={handleClear}
             disabled={running || candidates.length === 0}
           >
-            <Trash2 className="size-3" />清除候选
+            <Trash2 className="size-3" />
+            清除候选
           </Button>
         </div>
       )}
@@ -1438,51 +1680,65 @@ export function EvolutionPanel(): React.JSX.Element {
             disabled={selectedTraceIds.size === 0}
             onClick={() => handleDeleteTraces([...selectedTraceIds])}
           >
-            <Trash2 className="size-3 mr-1" />删除
+            <Trash2 className="size-3 mr-1" />
+            删除
           </Button>
         </div>
       )}
 
-      <ScrollArea className="flex-1">
-        <div className="p-4 space-y-2">
-          {tab === "candidates" ? (
-            candidates.length === 0 ? (
+      {tab === "checks" ? (
+        <div className="min-h-0 flex-1 overflow-hidden">
+          <SkillResultChecksPanel compact />
+        </div>
+      ) : (
+        <ScrollArea className="flex-1">
+          <div className="p-4 space-y-2">
+            {tab === "candidates" ? (
+              candidates.length === 0 ? (
+                <EmptyState
+                  icon={<Sparkles className="size-8 text-muted-foreground/40 mb-3" />}
+                  title="暂无优化候选"
+                  desc="请先切换到「执行 Traces」，分析会话或选中的 trace"
+                />
+              ) : (
+                [...candidates]
+                  .sort((a, b) => b.generatedAt.localeCompare(a.generatedAt))
+                  .map((candidate) => (
+                    <CandidateCard
+                      key={candidate.candidateId}
+                      candidate={candidate}
+                      onApprove={handleApprove}
+                      onReject={handleReject}
+                    />
+                  ))
+              )
+            ) : tracesLoading ? (
+              <div className="flex justify-center py-16">
+                <Loader2 className="size-6 animate-spin text-muted-foreground" />
+              </div>
+            ) : traces.length === 0 ? (
               <EmptyState
-                icon={<Sparkles className="size-8 text-muted-foreground/40 mb-3" />}
-                title="暂无优化候选"
-                desc="请先切换到「执行 Traces」，分析会话或选中的 trace"
+                icon={<Activity className="size-8 text-muted-foreground/40 mb-3" />}
+                title="暂无执行记录"
+                desc="Traces 会按会话分组展示，每次 Agent 调用结束后自动记录到本地"
               />
             ) : (
-              [...candidates]
-                .sort((a, b) => b.generatedAt.localeCompare(a.generatedAt))
-                .map((candidate) => (
-                  <CandidateCard key={candidate.candidateId} candidate={candidate} onApprove={handleApprove} onReject={handleReject} />
-                ))
-            )
-          ) : tracesLoading ? (
-            <div className="flex justify-center py-16"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>
-          ) : traces.length === 0 ? (
-            <EmptyState
-              icon={<Activity className="size-8 text-muted-foreground/40 mb-3" />}
-              title="暂无执行记录"
-              desc="Traces 会按会话分组展示，每次 Agent 调用结束后自动记录到本地"
-            />
-          ) : (
-            traceGroups.map((group) => (
-              <TraceThreadGroupCard
-                key={group.threadId}
-                group={group}
-                selectedTraceIds={selectedTraceIds}
-                onToggleTrace={toggleTraceChecked}
-                onOpenTrace={handleExpandTrace}
-                onDeleteTrace={(traceId) => handleDeleteTraces([traceId]).catch(console.warn)}
-                onToggleThread={toggleThreadChecked}
-                onDeleteThread={(threadId) => handleDeleteThread(threadId).catch(console.warn)}
-              />
-            ))
-          )}
-        </div>
-      </ScrollArea>
+              traceGroups.map((group) => (
+                <TraceThreadGroupCard
+                  key={group.threadId}
+                  group={group}
+                  selectedTraceIds={selectedTraceIds}
+                  onToggleTrace={toggleTraceChecked}
+                  onOpenTrace={handleExpandTrace}
+                  onDeleteTrace={(traceId) => handleDeleteTraces([traceId]).catch(console.warn)}
+                  onToggleThread={toggleThreadChecked}
+                  onDeleteThread={(threadId) => handleDeleteThread(threadId).catch(console.warn)}
+                />
+              ))
+            )}
+          </div>
+        </ScrollArea>
+      )}
     </div>
   )
 }

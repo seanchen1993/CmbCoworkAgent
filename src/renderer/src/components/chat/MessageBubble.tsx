@@ -1,15 +1,25 @@
 import type { Message, HITLRequest, ToolCallState, ToolCallStatus } from "@/types"
-import { ToolCallRenderer } from "./ToolCallRenderer";
+import { ToolCallRenderer } from "./ToolCallRenderer"
 import { StreamingMarkdown } from "./StreamingMarkdown"
 import { getToolLabel } from "@/lib/tool-labels"
 import { emitOpenResourcePreview } from "@/lib/resource-preview-events"
 import { useState } from "react"
-import { ChevronDown, ChevronRight, Eye, Wrench, Copy, Check, PencilLine, ThumbsUp, ThumbsDown, Smile, Frown } from "lucide-react"
-import { toast } from "sonner"
 import {
-  MessageFeedbackDialog,
-  type DislikeFeedbackPayload
-} from "./MessageFeedbackDialog"
+  ChevronDown,
+  ChevronRight,
+  Eye,
+  Wrench,
+  Copy,
+  Check,
+  PencilLine,
+  ThumbsUp,
+  ThumbsDown,
+  Smile,
+  Frown,
+  ClipboardCheck
+} from "lucide-react"
+import { toast } from "sonner"
+import { MessageFeedbackDialog, type DislikeFeedbackPayload } from "./MessageFeedbackDialog"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
 import { parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
 
@@ -91,8 +101,15 @@ function isHtmlRenderToolCall(toolCall: { name: string; args?: Record<string, un
   return lowerPath.endsWith(".html") || lowerPath.endsWith(".htm")
 }
 
-function getToolPreviewPath(toolCall: { name: string; args?: Record<string, unknown> }): string | null {
-  if (toolCall.name !== "read_file" && toolCall.name !== "write_file" && toolCall.name !== "edit_file") {
+function getToolPreviewPath(toolCall: {
+  name: string
+  args?: Record<string, unknown>
+}): string | null {
+  if (
+    toolCall.name !== "read_file" &&
+    toolCall.name !== "write_file" &&
+    toolCall.name !== "edit_file"
+  ) {
     return null
   }
   const path = (toolCall.args?.path ?? toolCall.args?.file_path) as string | undefined
@@ -125,12 +142,21 @@ function getToolStatusMeta(status: ToolCallStatus): { label: string; className: 
     case "queued":
       return { label: "QUEUED", className: "bg-slate-100 text-slate-600 border border-slate-200" }
     case "running":
-      return { label: "RUNNING", className: "bg-gray-100 text-gray-600 border border-gray-200 animate-pulse" }
+      return {
+        label: "RUNNING",
+        className: "bg-gray-100 text-gray-600 border border-gray-200 animate-pulse"
+      }
     case "rejected":
-      return { label: "REJECTED", className: "bg-orange-100 text-orange-700 border border-orange-200" }
+      return {
+        label: "REJECTED",
+        className: "bg-orange-100 text-orange-700 border border-orange-200"
+      }
     case "interrupted":
     default:
-      return { label: "INTERRUPTED", className: "bg-amber-100 text-amber-700 border border-amber-200" }
+      return {
+        label: "INTERRUPTED",
+        className: "bg-amber-100 text-amber-700 border border-amber-200"
+      }
   }
 }
 
@@ -147,8 +173,11 @@ interface MessageBubbleProps {
   toolResults?: Map<string, ToolResultInfo>
   toolCallStates?: Map<string, ToolCallState>
   pendingApproval?: HITLRequest | null
-  onApprovalDecision?: (decision: "approve" | "approve_session" | "approve_permanent" | "reject" | "edit") => void
+  onApprovalDecision?: (
+    decision: "approve" | "approve_session" | "approve_permanent" | "reject" | "edit"
+  ) => void
   onEditUserMessage?: (message: Message) => void
+  onCheckSkillResult?: () => void
   threadId: string
   isLoading: boolean
   assistantDurationMs?: number
@@ -164,6 +193,7 @@ export function MessageBubble({
   pendingApproval,
   onApprovalDecision,
   onEditUserMessage,
+  onCheckSkillResult,
   threadId,
   isLoading,
   assistantDurationMs
@@ -228,9 +258,7 @@ export function MessageBubble({
         const visibleText = skillParsed ? skillParsed.rest : message.content
         return (
           <div className="whitespace-pre-wrap text-[15px] leading-7 text-foreground/95 break-all">
-            {skillParsed && (
-              <SkillChip label={skillParsed.skillName} compact className="mr-2" />
-            )}
+            {skillParsed && <SkillChip label={skillParsed.skillName} compact className="mr-2" />}
             {visibleText}
           </div>
         )
@@ -312,28 +340,32 @@ export function MessageBubble({
     try {
       // Track feedback event
       if (type === "like") {
-        window.electron?.ipcRenderer?.invoke("track-event", {
-          eventName: "message.feedback.like",
-          eventCategory: "chat",
-          properties: {
-            messageId: message.id,
-            threadId: threadId
-          }
-        }).catch((err) => console.error("Failed to track like event:", err))
+        window.electron?.ipcRenderer
+          ?.invoke("track-event", {
+            eventName: "message.feedback.like",
+            eventCategory: "chat",
+            properties: {
+              messageId: message.id,
+              threadId: threadId
+            }
+          })
+          .catch((err) => console.error("Failed to track like event:", err))
       } else {
-        window.electron?.ipcRenderer?.invoke("track-event", {
-          eventName: "message.feedback.dislike.submit",
-          eventCategory: "chat",
-          properties: {
-            feedbackId: payload?.feedbackId ?? "",
-            dislikeType: payload?.feedbackType ?? payload?.feedbackId ?? "",
-            dislikeTypeLabel: payload?.feedbackTypeLabel ?? "",
-            dislikeText: payload?.feedbackText ?? "",
-            feedbackText: payload?.feedbackText ?? "",
-            messageId: message.id,
-            threadId: threadId
-          }
-        }).catch((err) => console.error("Failed to track dislike feedback:", err))
+        window.electron?.ipcRenderer
+          ?.invoke("track-event", {
+            eventName: "message.feedback.dislike.submit",
+            eventCategory: "chat",
+            properties: {
+              feedbackId: payload?.feedbackId ?? "",
+              dislikeType: payload?.feedbackType ?? payload?.feedbackId ?? "",
+              dislikeTypeLabel: payload?.feedbackTypeLabel ?? "",
+              dislikeText: payload?.feedbackText ?? "",
+              feedbackText: payload?.feedbackText ?? "",
+              messageId: message.id,
+              threadId: threadId
+            }
+          })
+          .catch((err) => console.error("Failed to track dislike feedback:", err))
       }
     } catch (error) {
       console.error("反馈提交失败", error)
@@ -353,9 +385,7 @@ export function MessageBubble({
     return (
       <div className="group flex justify-end overflow-hidden py-4">
         <div className="flex max-w-[80%] flex-col items-end gap-1">
-          <div className="rounded-lg p-3 overflow-hidden bg-primary/10">
-            {content}
-          </div>
+          <div className="rounded-lg p-3 overflow-hidden bg-primary/10">{content}</div>
           <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
             {/*<span className="text-[11px] text-muted-foreground">{createdAtLabel}</span>*/}
             <button
@@ -365,7 +395,11 @@ export function MessageBubble({
               title="复制消息"
               aria-label="复制消息"
             >
-              {copySuccess ? <Check className="size-3 text-status-nominal" /> : <Copy className="size-3" />}
+              {copySuccess ? (
+                <Check className="size-3 text-status-nominal" />
+              ) : (
+                <Copy className="size-3" />
+              )}
             </button>
             <button
               type="button"
@@ -428,8 +462,23 @@ export function MessageBubble({
               title="复制消息"
               aria-label="复制消息"
             >
-              {copySuccess ? <Check className="size-3 text-status-nominal" /> : <Copy className="size-3" />}
+              {copySuccess ? (
+                <Check className="size-3 text-status-nominal" />
+              ) : (
+                <Copy className="size-3" />
+              )}
             </button>
+            {onCheckSkillResult && (
+              <button
+                type="button"
+                onClick={onCheckSkillResult}
+                className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
+                title="检查本次生成结果"
+                aria-label="检查本次生成结果"
+              >
+                <ClipboardCheck className="size-3" />
+              </button>
+            )}
             {/* 点赞按钮 */}
             <button
               type="button"
@@ -477,35 +526,39 @@ export function MessageBubble({
         {hasToolCalls && (
           <div className="space-y-2 overflow-hidden">
             {message.tool_calls!.map((toolCall, index) => {
-              const toolId = toolCall.id || `${message.id}-${index}`;
+              const toolId = toolCall.id || `${message.id}-${index}`
               const toolState = toolCallStates?.get(toolCall.id)
               const resolvedToolCall = hydrateToolCall(toolCall, toolState)
-              const result = toolResults?.get(toolCall.id);
-              const pendingIds = pendingApproval?.pendingToolCallIds;
+              const result = toolResults?.get(toolCall.id)
+              const pendingIds = pendingApproval?.pendingToolCallIds
               const needsApproval = Boolean(
                 pendingIds?.length
                   ? pendingIds.includes(toolCall.id)
                   : pendingApproval?.tool_call?.id && pendingApproval.tool_call.id === toolCall.id
-              );
+              )
               const inferredStatus: ToolCallStatus =
                 toolState?.status ||
                 (needsApproval
                   ? "awaiting_approval"
                   : result !== undefined
-                    ? (result.is_error ? "failed" : "completed")
+                    ? result.is_error
+                      ? "failed"
+                      : "completed"
                     : isStreaming
                       ? "running"
                       : "interrupted")
               const statusMeta = getToolStatusMeta(inferredStatus)
-              const isHtmlTool = isHtmlRenderToolCall(resolvedToolCall);
-              const isExpanded = isHtmlTool ? collapsedHtmlTools.has(toolId) : collapsedTools.has(toolId);
-              const summary = getToolCallSummary(resolvedToolCall);
-              const previewPath = getToolPreviewPath(resolvedToolCall);
+              const isHtmlTool = isHtmlRenderToolCall(resolvedToolCall)
+              const isExpanded = isHtmlTool
+                ? collapsedHtmlTools.has(toolId)
+                : collapsedTools.has(toolId)
+              const summary = getToolCallSummary(resolvedToolCall)
+              const previewPath = getToolPreviewPath(resolvedToolCall)
               const isOk = result !== undefined && !result.is_error
 
               // 如果工具需要审批，使用原来的ToolCallRenderer（批量时隐藏按钮）
               if (needsApproval) {
-                const isBatch = (pendingApproval?.pendingCount ?? 1) > 1;
+                const isBatch = (pendingApproval?.pendingCount ?? 1) > 1
                 return (
                   <ToolCallRenderer
                     key={`${toolCall.id || `tc-${index}`}-${needsApproval ? "pending" : "done"}`}
@@ -517,19 +570,29 @@ export function MessageBubble({
                     showApprovalButtons={!isBatch}
                     onApprovalDecision={onApprovalDecision}
                     approvalTypes={
-                      (pendingApproval as unknown as {
-                        _approvalTypes?: ("approve" | "approve_session" | "approve_permanent" | "reject")[]
-                      })?._approvalTypes
+                      (
+                        pendingApproval as unknown as {
+                          _approvalTypes?: (
+                            | "approve"
+                            | "approve_session"
+                            | "approve_permanent"
+                            | "reject"
+                          )[]
+                        }
+                      )?._approvalTypes
                     }
                     threadId={threadId}
                     isStreaming={isStreaming}
                   />
-                );
+                )
               }
 
               // 工具执行完成后，显示折叠的标题
               return (
-                <div key={toolId} className="rounded-sm border overflow-hidden border-border bg-background-elevated">
+                <div
+                  key={toolId}
+                  className="rounded-sm border overflow-hidden border-border bg-background-elevated"
+                >
                   {/* 可折叠的工具标题 */}
                   <button
                     onClick={() => toggleToolExpansion(toolId, isHtmlTool)}
@@ -563,14 +626,16 @@ export function MessageBubble({
                       )}
 
                       {/* 状态指示器 */}
-                      <div className={`shrink-0 px-2 py-0.5 text-[10px] font-medium rounded ${statusMeta.className}`}>
+                      <div
+                        className={`shrink-0 px-2 py-0.5 text-[10px] font-medium rounded ${statusMeta.className}`}
+                      >
                         {statusMeta.label}
                       </div>
                     </div>
                   </button>
 
                   {/* 展开的详细内容 */}
-                  {(isExpanded  ) && (
+                  {isExpanded && (
                     <div className="border-t border-border">
                       <ToolCallRenderer
                         toolCall={resolvedToolCall}
@@ -589,31 +654,45 @@ export function MessageBubble({
             })}
 
             {/* 批量审批栏 - 只在当前消息包含待审批工具调用时显示 */}
-            {pendingApproval && (pendingApproval.pendingCount ?? 1) > 1 && onApprovalDecision &&
-              message.tool_calls!.some(tc => pendingApproval.pendingToolCallIds?.includes(tc.id) || pendingApproval.tool_call?.id === tc.id) && (
-              <div className="rounded-sm border border-amber-500/50 bg-amber-500/5 px-3 py-2.5 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-amber-600 dark:text-amber-400 font-medium whitespace-nowrap">
-                    共 {pendingApproval.pendingCount} 个命令待审批
-                  </span>
-                  <span className="text-xs text-status-warning bg-status-warning/10 px-2 py-1 rounded-sm whitespace-nowrap">💡 启用 YOLO 模式可跳过审批</span>
+            {pendingApproval &&
+              (pendingApproval.pendingCount ?? 1) > 1 &&
+              onApprovalDecision &&
+              message.tool_calls!.some(
+                (tc) =>
+                  pendingApproval.pendingToolCallIds?.includes(tc.id) ||
+                  pendingApproval.tool_call?.id === tc.id
+              ) && (
+                <div className="rounded-sm border border-amber-500/50 bg-amber-500/5 px-3 py-2.5 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-amber-600 dark:text-amber-400 font-medium whitespace-nowrap">
+                      共 {pendingApproval.pendingCount} 个命令待审批
+                    </span>
+                    <span className="text-xs text-status-warning bg-status-warning/10 px-2 py-1 rounded-sm whitespace-nowrap">
+                      💡 启用 YOLO 模式可跳过审批
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      className="px-3 py-1.5 text-xs border border-border rounded-sm hover:bg-background-interactive transition-colors"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        onApprovalDecision("reject")
+                      }}
+                    >
+                      全部拒绝
+                    </button>
+                    <button
+                      className="px-3 py-1.5 text-xs bg-status-nominal text-background rounded-sm hover:bg-status-nominal/90 transition-colors"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        onApprovalDecision("approve")
+                      }}
+                    >
+                      全部批准并执行
+                    </button>
+                  </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    className="px-3 py-1.5 text-xs border border-border rounded-sm hover:bg-background-interactive transition-colors"
-                    onClick={(e) => { e.stopPropagation(); onApprovalDecision("reject") }}
-                  >
-                    全部拒绝
-                  </button>
-                  <button
-                    className="px-3 py-1.5 text-xs bg-status-nominal text-background rounded-sm hover:bg-status-nominal/90 transition-colors"
-                    onClick={(e) => { e.stopPropagation(); onApprovalDecision("approve") }}
-                  >
-                    全部批准并执行
-                  </button>
-                </div>
-              </div>
-            )}
+              )}
           </div>
         )}
       </div>
