@@ -39,6 +39,15 @@ interface HarnessSessionBindingStoreFile {
 
 type HarnessHookLogRef = HarnessRunDetailViewModel["run"]["hookLogRefs"][number]
 type HarnessInspectCommandName = "project" | "run" | "createProject"
+type HarnessPlatformConfigKey = HarnessInspectCommandName | "plugin_dir_prompt"
+
+interface ConfiguredHarnessInvocation {
+  cwd: string
+  invocation: {
+    executable: string
+    args: string[]
+  }
+}
 
 interface HarnessHookLogEntry {
   nodeId: string
@@ -339,14 +348,18 @@ function readBoardConfig(cwd: string): Record<string, unknown> | null {
   return isObject(parsed) ? parsed : null
 }
 
-function readBoardConfigInspectCommand(cwd: string, mode: HarnessInspectCommandName): string | null {
+function readBoardConfigPlatformText(cwd: string, key: HarnessPlatformConfigKey): string | null {
   const parsed = readBoardConfig(cwd)
   if (!parsed || !isObject(parsed.inspectCommands)) return null
   const platformCommands = parsed.inspectCommands[process.platform]
   if (!isObject(platformCommands)) return null
 
-  const command = normalizeText(platformCommands[mode]).trim()
+  const command = normalizeText(platformCommands[key]).trim()
   return command || null
+}
+
+function readBoardConfigInspectCommand(cwd: string, mode: HarnessInspectCommandName): string | null {
+  return readBoardConfigPlatformText(cwd, mode)
 }
 
 function projectDirectoryPath(project: HarnessProjectMetadata): string {
@@ -393,16 +406,14 @@ function formatProjectDetailError(project: HarnessProjectMetadata, error: unknow
   return message.startsWith("读取项目状态失败") ? message : `读取项目状态失败：${message}`
 }
 
-function buildConfiguredHarnessInvocation(
+function buildOptionalConfiguredHarnessInvocation(
   project: HarnessProjectMetadata,
   mode: HarnessInspectCommandName,
   feature?: string
-): { cwd: string; invocation: { executable: string; args: string[] } } {
+): ConfiguredHarnessInvocation | null {
   const cwd = adapterPluginDir(project)
   const configuredCommand = readBoardConfigInspectCommand(cwd, mode)
-  if (!configuredCommand) {
-    throw new Error(`Harness adapter command is not configured: inspectCommands.${process.platform}.${mode}`)
-  }
+  if (!configuredCommand) return null
 
   return {
     cwd,
@@ -410,13 +421,19 @@ function buildConfiguredHarnessInvocation(
   }
 }
 
-function runConfiguredHarnessCommand(
+function buildConfiguredHarnessInvocation(
   project: HarnessProjectMetadata,
   mode: HarnessInspectCommandName,
   feature?: string
-): Buffer {
-  const { cwd, invocation } = buildConfiguredHarnessInvocation(project, mode, feature)
+): ConfiguredHarnessInvocation {
+  const configured = buildOptionalConfiguredHarnessInvocation(project, mode, feature)
+  if (!configured) {
+    throw new Error(`Harness adapter command is not configured: inspectCommands.${process.platform}.${mode}`)
+  }
+  return configured
+}
 
+function runHarnessInvocation({ cwd, invocation }: ConfiguredHarnessInvocation): Buffer {
   try {
     return execFileSync(invocation.executable, invocation.args, {
       cwd,
@@ -432,6 +449,14 @@ function runConfiguredHarnessCommand(
   } catch (error) {
     throw new Error(formatAdapterError(error))
   }
+}
+
+function runConfiguredHarnessCommand(
+  project: HarnessProjectMetadata,
+  mode: HarnessInspectCommandName,
+  feature?: string
+): Buffer {
+  return runHarnessInvocation(buildConfiguredHarnessInvocation(project, mode, feature))
 }
 
 function runInspectAdapter(
@@ -1110,9 +1135,12 @@ function makeProjectDetailViewModel(
 
 function initializeHarnessProject(project: HarnessProjectMetadata): void {
   try {
-    buildConfiguredHarnessInvocation(project, "createProject")
-    mkdirSync(projectDirectoryPath(project), { recursive: true })
-    runConfiguredHarnessCommand(project, "createProject")
+    const projectPath = projectDirectoryPath(project)
+    const configured = buildOptionalConfiguredHarnessInvocation(project, "createProject")
+    if (!configured) return
+
+    mkdirSync(projectPath, { recursive: true })
+    runHarnessInvocation(configured)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     throw new Error(`创建项目失败：${message}`)
@@ -1132,8 +1160,7 @@ export function buildHarnessFeaturePluginDirPrompt(metadata: unknown): string | 
 
   const project = requireProject(feature.projectId)
   const cwd = adapterPluginDir(project)
-  const config = readBoardConfig(cwd)
-  const template = normalizeText(config?.plugin_dir_prompt).trim()
+  const template = readBoardConfigPlatformText(cwd, "plugin_dir_prompt")
   if (!template) return null
 
   return replaceHarnessConfigPlaceholders(template, project, "run", cwd, feature.slug).trim() || null
