@@ -57,18 +57,22 @@ export function GitBranchSwitcher({
   }, [workspacePath])
 
   // 加载所有分支
-  const loadBranches = useCallback(async () => {
+  const loadBranches = useCallback(async (refreshRemote = false) => {
     setLoadingBranches(true)
     setSwitchError(null)
     try {
-      const result = await window.api.git.listBranches(workspacePath ?? undefined)
-      if (result.success) {
+      const result = await window.api.git.listBranches(workspacePath ?? undefined, { refreshRemote })
+      if (result.branches.length > 0) {
         setBranches(result.branches)
       } else {
         setBranches([])
       }
+      if (!result.success) {
+        setSwitchError(result.error || "刷新分支列表失败")
+      }
     } catch {
       setBranches([])
+      setSwitchError("刷新分支列表失败")
     } finally {
       setLoadingBranches(false)
     }
@@ -221,7 +225,7 @@ export function GitBranchSwitcher({
           <span className="text-xs font-medium text-foreground">{headerTitle}</span>
           <button
             type="button"
-            onClick={loadBranches}
+            onClick={() => loadBranches(true)}
             disabled={loadingBranches || busy}
             className="flex items-center justify-center size-5 rounded hover:bg-muted/50 transition-colors text-muted-foreground hover:text-foreground"
             title="刷新分支列表"

@@ -1205,7 +1205,8 @@ interface CustomAPI {
       cwd?: string
     ) => Promise<{ isGitRepo: boolean; branch: string | null; isWorktree: boolean }>
     listBranches: (
-      cwd?: string
+      cwd?: string,
+      options?: { refreshRemote?: boolean }
     ) => Promise<{ success: boolean; branches: string[]; error?: string }>
     switchBranch: (branch: string, cwd?: string) => Promise<{ success: boolean; error?: string }>
     createBranch: (branch: string, cwd?: string) => Promise<{ success: boolean; error?: string }>

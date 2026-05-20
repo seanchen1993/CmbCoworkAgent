@@ -976,6 +976,14 @@ async function listBranches(cwd?: string): Promise<string[]> {
   }
 }
 
+async function fetchOriginBranches(cwd?: string): Promise<void> {
+  const workingDir = cwd || (await getCurrentWorkingDirectory())
+  await runGitArgs(["fetch", "--prune", "origin"], {
+    cwd: workingDir,
+    timeout: 2 * 60 * 1000
+  })
+}
+
 /**
  * 安全切换远端分支。
  *
@@ -1213,15 +1221,35 @@ export function registerGitHandlers(): void {
   // 列出所有本地分支和远端分支
   ipcMain.handle(
     "git:listBranches",
-    async (_, cwd?: string): Promise<{ success: boolean; branches: string[]; error?: string }> => {
+    async (
+      _,
+      input?: string | { cwd?: string; refreshRemote?: boolean }
+    ): Promise<{ success: boolean; branches: string[]; error?: string }> => {
+      const cwd = typeof input === "string" ? input : input?.cwd
+      const refreshRemote = typeof input === "object" ? Boolean(input.refreshRemote) : false
       try {
         if (!(await isGitRepo(cwd)))
           return { success: false, branches: [], error: "Not a git repository" }
+        if (refreshRemote) {
+          await fetchOriginBranches(cwd)
+        }
         const branches = await listBranches(cwd)
         return { success: true, branches }
       } catch (error) {
         console.error("[IPC] git:listBranches error:", error)
-        return { success: false, branches: [], error: String(error) }
+        let branches: string[] = []
+        try {
+          branches = await listBranches(cwd)
+        } catch {
+          branches = []
+        }
+        const err = error as ExecCommandError
+        const stderr = normalizeExecOutput(err.stderr).trim()
+        return {
+          success: false,
+          branches,
+          error: stderr || err.message || String(error)
+        }
       }
     }
   )

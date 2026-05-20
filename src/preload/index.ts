@@ -1966,9 +1966,13 @@ const api = {
         isWorktree: boolean
       }>,
     listBranches: (
-      cwd?: string
+      cwd?: string,
+      options?: { refreshRemote?: boolean }
     ): Promise<{ success: boolean; branches: string[]; error?: string }> =>
-      ipcRenderer.invoke("git:listBranches", cwd) as Promise<{
+      ipcRenderer.invoke("git:listBranches", {
+        cwd,
+        refreshRemote: Boolean(options?.refreshRemote)
+      }) as Promise<{
         success: boolean
         branches: string[]
         error?: string
