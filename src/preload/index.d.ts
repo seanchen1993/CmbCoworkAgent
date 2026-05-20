@@ -152,10 +152,6 @@ interface DashboardCommitDetail {
   threadId?: string
   usedSkills: string[]
   skillCount: number
-  codeGeneratedLines: number
-  codeEffectiveGeneratedLines: number
-  codeAdoptedLines: number
-  codeAdoptionRate: number | null
 }
 
 interface DashboardCommitDetailsOptions {
