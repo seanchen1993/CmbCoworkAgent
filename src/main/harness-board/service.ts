@@ -462,31 +462,31 @@ function statusFromId(id: string): HarnessStatus {
   switch (id) {
     case "not_started":
     case "pending":
-      return { id: id || "not_started", label: "未开始", uiKind: "pending" }
+      return { label: "未开始", uiKind: "pending" }
     case "in_progress":
     case "active":
-      return { id: "in_progress", label: "进行中", uiKind: "active" }
+      return { label: "进行中", uiKind: "active" }
     case "done":
-      return { id: "done", label: "已完成", uiKind: "done" }
+      return { label: "已完成", uiKind: "done" }
     case "blocked":
     case "needs_fix":
-      return { id: "blocked", label: "已阻断", uiKind: "blocked" }
+      return { label: "已阻断", uiKind: "blocked" }
     case "warning":
-      return { id: "warning", label: "提示", uiKind: "warning" }
+      return { label: "提示", uiKind: "warning" }
     case "error":
-      return { id: "error", label: "错误", uiKind: "error" }
+      return { label: "错误", uiKind: "error" }
     case "archived":
-      return { id: "archived", label: "已归档", uiKind: "archived" }
+      return { label: "已归档", uiKind: "archived" }
     case "passed":
     case "present":
     case "ok":
-      return { id: id || "ok", label: "正常", uiKind: "ok" }
+      return { label: "正常", uiKind: "ok" }
     case "missing":
-      return { id: "missing", label: "未生成", uiKind: "warning" }
+      return { label: "未生成", uiKind: "warning" }
     case "skipped":
-      return { id: "skipped", label: "跳过", uiKind: "skipped" }
+      return { label: "跳过", uiKind: "skipped" }
     default:
-      return { id: id || "unknown", label: id || "未知", uiKind: "unknown" }
+      return { label: id || "未知", uiKind: "unknown" }
   }
 }
 
@@ -495,15 +495,13 @@ function normalizeStatus(value: unknown, fallbackId = "unknown"): HarnessStatus 
     return statusFromId(normalizeText(value) || fallbackId)
   }
 
-  const fallback = statusFromId(normalizeText(value.id) || fallbackId)
+  const fallback = statusFromId(fallbackId)
   const uiKind = HARNESS_UI_KINDS.has(value.uiKind as HarnessStatus["uiKind"])
     ? (value.uiKind as HarnessStatus["uiKind"])
     : fallback.uiKind
   return {
-    id: normalizeText(value.id) || fallback.id,
     label: normalizeText(value.label) || fallback.label,
-    uiKind,
-    ...(typeof value.isCurrent === "boolean" ? { isCurrent: value.isCurrent } : {})
+    uiKind
   }
 }
 
@@ -557,18 +555,16 @@ function normalizeWatchRefs(
   return normalized.length > 0 ? normalized : fallback
 }
 
-function normalizeProjectRun(value: unknown, generatedAt: string): HarnessFeatureSummary | null {
+function normalizeProjectRun(value: unknown, workflow: HarnessWorkflow): HarnessFeatureSummary | null {
   if (!isObject(value)) return null
   const slug = normalizeText(value.featureId) || normalizeText(value.featureName)
   if (!slug) return null
 
-  const position = isObject(value.position) ? value.position : {}
-  const summary = isObject(value.summary) ? value.summary : {}
   const status = normalizeStatus(value.overallStatus, "unknown")
-  const currentNodeId = normalizeText(position.currentNodeId) || "unknown"
-  const currentNodeLabel = normalizeText(position.currentNodeLabel) || currentNodeId
-  const summaryText = normalizeText(summary.text) ||
-    (currentNodeLabel ? `${currentNodeLabel} · ${status.label}` : status.label)
+  const currentNodeId = normalizeText(value.currentNodeId) || "unknown"
+  const currentNodeLabel =
+    workflow.nodes.find((node) => node.id === currentNodeId)?.label ?? currentNodeId
+  const summaryText = currentNodeLabel ? `${currentNodeLabel} · ${status.label}` : status.label
 
   return {
     id: slug,
@@ -577,25 +573,33 @@ function normalizeProjectRun(value: unknown, generatedAt: string): HarnessFeatur
     title: normalizeText(value.featureName) || slug,
     location: status.uiKind === "archived" ? "archived" : "active",
     overallStatus: status,
-    position: {
-      currentNodeId,
-      currentNodeLabel,
-      currentNodeState: normalizeText(position.currentNodeState) || status.id,
-      progressIndex: typeof position.progressIndex === "number" ? position.progressIndex : 0,
-      totalNodes: typeof position.totalNodes === "number" ? position.totalNodes : 0
-    },
+    currentNodeId,
     summary: {
       text: summaryText,
-      updatedAt: normalizeText(summary.updatedAt) || generatedAt
+      updatedAt: ""
     }
   }
 }
 
-function normalizeProjectRuns(snapshot: Record<string, unknown>, generatedAt: string): HarnessFeatureSummary[] {
+function normalizeProjectRuns(snapshot: Record<string, unknown>, workflow: HarnessWorkflow): HarnessFeatureSummary[] {
   if (!Array.isArray(snapshot.runs)) return []
   return snapshot.runs
-    .map((run) => normalizeProjectRun(run, generatedAt))
+    .map((run) => normalizeProjectRun(run, workflow))
     .filter((run): run is HarnessFeatureSummary => run !== null)
+}
+
+function normalizeWorkflowStateDefinition(
+  value: unknown
+): NonNullable<HarnessWorkflow["nodes"][number]["states"]>[number] | null {
+  if (!isObject(value)) return null
+  const id = normalizeText(value.id)
+  if (!id) return null
+  const status = normalizeStatus(value, id)
+  return {
+    id,
+    label: status.label,
+    uiKind: status.uiKind
+  }
 }
 
 function normalizeWorkflowNodeDefinition(value: unknown): HarnessWorkflow["nodes"][number] | null {
@@ -608,9 +612,12 @@ function normalizeWorkflowNodeDefinition(value: unknown): HarnessWorkflow["nodes
     id,
     label: normalizeText(value.label) || id,
     ...(group ? { group } : {}),
-    order: typeof value.order === "number" ? value.order : 0,
     description: normalizeText(value.description) || undefined,
-    states: Array.isArray(value.states) ? value.states.map((state) => normalizeStatus(state)) : undefined,
+    states: Array.isArray(value.states)
+      ? value.states
+          .map((state) => normalizeWorkflowStateDefinition(state))
+          .filter((state): state is NonNullable<typeof state> => state !== null)
+      : undefined,
     artifactDefinitions: Array.isArray(value.artifactDefinitions)
       ? value.artifactDefinitions
           .map((artifact) => {
@@ -647,9 +654,6 @@ function normalizeWorkflowNodeDefinition(value: unknown): HarnessWorkflow["nodes
 function normalizeWorkflow(value: unknown): HarnessWorkflow {
   const workflow = isObject(value) ? value : {}
   return {
-    id: normalizeText(workflow.id) || "autobizdevops.default",
-    version: normalizeText(workflow.version) || "1.0.0",
-    kind: normalizeText(workflow.kind) || "graph",
     display: isObject(workflow.display)
       ? {
           mode: normalizeText(workflow.display.mode) || "ordered_nodes",
@@ -663,30 +667,6 @@ function normalizeWorkflow(value: unknown): HarnessWorkflow {
       ? workflow.nodes
           .map((node) => normalizeWorkflowNodeDefinition(node))
           .filter((node): node is HarnessWorkflow["nodes"][number] => node !== null)
-      : [],
-    transitions: Array.isArray(workflow.transitions)
-      ? workflow.transitions
-          .map((transition) => {
-            if (!isObject(transition) || !isObject(transition.from) || !isObject(transition.to)) {
-              return null
-            }
-            const id = normalizeText(transition.id)
-            const fromNodeId = normalizeText(transition.from.nodeId)
-            const toNodeId = normalizeText(transition.to.nodeId)
-            if (!id || !fromNodeId || !toNodeId) return null
-            return {
-              id,
-              from: {
-                nodeId: fromNodeId,
-                state: normalizeText(transition.from.state)
-              },
-              to: {
-                nodeId: toNodeId,
-                state: normalizeText(transition.to.state)
-              }
-            }
-          })
-          .filter((transition): transition is NonNullable<typeof transition> => transition !== null)
       : []
   }
 }
@@ -710,6 +690,14 @@ function workflowArtifactDefinitions(workflow: HarnessWorkflow): Map<string, Map
   return byNode
 }
 
+function statusFromWorkflowStateId(
+  nodeDefinition: HarnessWorkflow["nodes"][number],
+  stateId: string
+): HarnessStatus {
+  const state = nodeDefinition.states?.find((item) => item.id === stateId)
+  return state ? { label: state.label, uiKind: state.uiKind } : statusFromId(stateId || "unknown")
+}
+
 function normalizeArtifact(
   project: HarnessProjectMetadata,
   value: unknown,
@@ -729,7 +717,6 @@ function normalizeArtifact(
     ...(typeof exists === "boolean" ? { exists } : {}),
     ...(typeof value.nonEmpty === "boolean" ? { nonEmpty: value.nonEmpty } : {}),
     ...(typeof value.size === "number" ? { size: value.size } : {}),
-    ...(typeof value.updatedAt === "string" ? { updatedAt: value.updatedAt } : {}),
     ...(typeof value.summary === "string" ? { summary: value.summary } : {}),
     ...(isObject(value.validation)
       ? {
@@ -847,22 +834,26 @@ function normalizeRunNodes(
   nodes: unknown,
   workflow: HarnessWorkflow
 ): HarnessRunNode[] {
-  if (!Array.isArray(nodes)) return []
-  const artifactDefinitions = workflowArtifactDefinitions(workflow)
-  return nodes
-    .map((node): HarnessRunNode | null => {
-      if (!isObject(node)) return null
+  const runNodesById = new Map<string, Record<string, unknown>>()
+  if (Array.isArray(nodes)) {
+    for (const node of nodes) {
+      if (!isObject(node)) continue
       const id = normalizeText(node.id)
-      if (!id) return null
+      if (id) runNodesById.set(id, node)
+    }
+  }
+  const artifactDefinitions = workflowArtifactDefinitions(workflow)
+  return workflow.nodes.map((nodeDefinition): HarnessRunNode => {
+      const node = runNodesById.get(nodeDefinition.id)
+      const id = nodeDefinition.id
       const definitions = artifactDefinitions.get(id)
-      const group = normalizeText(node.group)
+      const stateId = normalizeText(node?.stateId)
       return {
         id,
-        label: normalizeText(node.label) || id,
-        ...(group ? { group } : {}),
-        order: typeof node.order === "number" ? node.order : 0,
-        status: normalizeStatus(node.status),
-        artifacts: Array.isArray(node.artifacts)
+        label: nodeDefinition.label,
+        ...(nodeDefinition.group ? { group: nodeDefinition.group } : {}),
+        status: statusFromWorkflowStateId(nodeDefinition, stateId),
+        artifacts: Array.isArray(node?.artifacts)
           ? node.artifacts
               .map((artifact) => {
                 const artifactId = isObject(artifact) ? normalizeText(artifact.id) : ""
@@ -870,14 +861,13 @@ function normalizeRunNodes(
               })
               .filter((artifact): artifact is HarnessArtifact => artifact !== null)
           : [],
-        hooks: Array.isArray(node.hooks)
+        hooks: Array.isArray(node?.hooks)
           ? node.hooks
               .map((hook) => normalizeHook(hook))
               .filter((hook): hook is HarnessRunNode["hooks"][number] => hook !== null)
           : []
       }
     })
-    .filter((node): node is HarnessRunNode => node !== null)
 }
 
 function normalizeProject(value: unknown): HarnessProjectMetadata | null {
@@ -1079,8 +1069,8 @@ function validateProjectMetadataInput(input: HarnessProjectMetadataUpdateInput):
   }
 }
 
-function okStatus(id: string, label: string): HarnessStatus {
-  return { id, label, uiKind: "ok" }
+function okStatus(_id: string, label: string): HarnessStatus {
+  return { label, uiKind: "ok" }
 }
 
 function makeWatchRefs(projectName: string, slug?: string): HarnessWatchRef[] {
@@ -1108,7 +1098,7 @@ function collectSessionsBySlug(projectId: string): Record<string, HarnessSession
 function makeProjectDetailViewModel(
   project: HarnessProjectMetadata,
   data: {
-    generatedAt: string
+    workflow: HarnessWorkflow
     runs: HarnessFeatureSummary[]
     sessionsBySlug: Record<string, HarnessSessionBinding[]>
     watchRefs: HarnessWatchRef[]
@@ -1128,10 +1118,10 @@ function makeProjectDetailViewModel(
     adapterSnapshot: {
       schemaVersion: "harness.adapter.inspect.v1",
       mode: "project",
-      generatedAt: data.generatedAt,
       mock: false
     },
     projectState: data.projectState,
+    workflow: data.workflow,
     runs: data.runs,
     sessionsBySlug: data.sessionsBySlug,
     watchRefs: data.watchRefs,
@@ -1302,21 +1292,21 @@ export function getHarnessProjectDetail(projectId: string): HarnessProjectDetail
 
   if (!existsSync(projectDirectoryPath(project))) {
     return makeProjectDetailViewModel(project, {
-      generatedAt: new Date().toISOString(),
+      workflow: normalizeWorkflow(null),
       runs: [],
       sessionsBySlug,
       watchRefs: fallbackWatchRefs,
-      projectState: { id: "project_directory_missing", label: "项目目录不存在", uiKind: "warning" },
+      projectState: { label: "项目目录不存在", uiKind: "warning" },
       error: projectDirectoryMissingMessage(project)
     })
   }
 
   try {
     const snapshot = runInspectAdapter(project, "project")
-    const generatedAt = normalizeText(snapshot.generatedAt) || new Date().toISOString()
-    const runs = normalizeProjectRuns(snapshot, generatedAt)
+    const workflow = normalizeWorkflow(snapshot.workflow)
+    const runs = normalizeProjectRuns(snapshot, workflow)
     return makeProjectDetailViewModel(project, {
-      generatedAt,
+      workflow,
       runs,
       sessionsBySlug,
       watchRefs: normalizeWatchRefs(project, snapshot.watchRefs, fallbackWatchRefs),
@@ -1325,11 +1315,11 @@ export function getHarnessProjectDetail(projectId: string): HarnessProjectDetail
     })
   } catch (error) {
     return makeProjectDetailViewModel(project, {
-      generatedAt: new Date().toISOString(),
+      workflow: normalizeWorkflow(null),
       runs: [],
       sessionsBySlug,
       watchRefs: fallbackWatchRefs,
-      projectState: { id: "inspect_failed", label: "Inspect 读取失败", uiKind: "warning" },
+      projectState: { label: "Inspect 读取失败", uiKind: "warning" },
       error: formatProjectDetailError(project, error)
     })
   }
@@ -1339,12 +1329,11 @@ export function getHarnessRunDetail(projectId: string, slug: string): HarnessRun
   const project = requireProject(projectId)
   const sessionStore = readSessionBindingStore()
   const snapshot = runInspectAdapter(project, "run", slug)
-  const generatedAt = normalizeText(snapshot.generatedAt) || new Date().toISOString()
   const workflow = normalizeWorkflow(snapshot.workflow)
   const run = isObject(snapshot.run) ? snapshot.run : {}
   const featureSlug = normalizeText(run.featureId) || normalizeText(run.featureName) || slug
   const title = normalizeText(run.featureName) || featureSlug
-  const overallStatus = normalizeStatus(run.overallStatus)
+  const currentNodeId = normalizeText(run.currentNodeId)
   const nodes = normalizeRunNodes(project, run.nodes, workflow)
   const hookLogRefs = normalizeHookLogRefs(project, run.hookLogRefs)
   const hookLogEntries = readHookLogRefs(project, hookLogRefs)
@@ -1364,7 +1353,6 @@ export function getHarnessRunDetail(projectId: string, slug: string): HarnessRun
     adapterSnapshot: {
       schemaVersion: "harness.adapter.inspect.v1",
       mode: "run",
-      generatedAt,
       mock: false
     },
     workflow,
@@ -1373,26 +1361,12 @@ export function getHarnessRunDetail(projectId: string, slug: string): HarnessRun
       kind: "feature",
       slug: featureSlug,
       title,
-      location: overallStatus.uiKind === "archived" ? "archived" : "active",
       source: {
-        label: project["harness-adapter"].name,
-        summary: isObject(run.summary) ? normalizeText(run.summary.text) : overallStatus.label
+        label: project["harness-adapter"].name
       },
       hookLogRefs,
       watchRefs: normalizeWatchRefs(project, run.watchRefs, makeWatchRefs(project.projectCode, featureSlug)),
-      overallStatus,
-      position: {
-        currentNodeId: isObject(run.position) ? normalizeText(run.position.currentNodeId) : "",
-        currentNodeState: isObject(run.position)
-          ? normalizeText(run.position.currentNodeState) || overallStatus.id
-          : overallStatus.id,
-        progressIndex: isObject(run.position) && typeof run.position.progressIndex === "number"
-          ? run.position.progressIndex
-          : 0,
-        totalNodes: isObject(run.position) && typeof run.position.totalNodes === "number"
-          ? run.position.totalNodes
-          : nodesWithHookLogs.length
-      },
+      currentNodeId,
       nodes: nodesWithHookLogs,
       unmatchedHooks
     },

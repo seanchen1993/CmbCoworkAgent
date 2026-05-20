@@ -243,6 +243,18 @@ function progressPercentFromValues(progressIndex: number, totalNodes: number): n
   return Math.min(100, Math.round((normalizedProgress / totalNodes) * 100))
 }
 
+function progressIndexFromCurrentNodeId(nodes: Array<{ id: string }>, currentNodeId: string): number {
+  const index = nodes.findIndex((node) => node.id === currentNodeId)
+  return index >= 0 ? index + 1 : 0
+}
+
+function currentNodeLabelFromNodes(
+  nodes: Array<{ id: string; label: string }>,
+  currentNodeId: string
+): string {
+  return (nodes.find((node) => node.id === currentNodeId)?.label ?? currentNodeId) || "未知"
+}
+
 function ProgressBar({
   progressIndex,
   totalNodes
@@ -262,13 +274,13 @@ function ProgressBar({
 
 function groupProgressIndex(
   group: StageNodeGroup,
-  nodes: HarnessRunNode[],
-  progressIndex: number,
-  totalNodes: number
+  workflowNodes: Array<{ id: string }>,
+  currentNodeId: string
 ): number {
-  const coveredNodeCount = Math.max(0, Math.min(progressIndex, totalNodes, nodes.length))
+  const progressIndex = progressIndexFromCurrentNodeId(workflowNodes, currentNodeId)
+  const coveredNodeCount = Math.max(0, Math.min(progressIndex, workflowNodes.length))
   const completedNodeIds = new Set(
-    nodes.slice(0, coveredNodeCount).map((node) => node.id)
+    workflowNodes.slice(0, coveredNodeCount).map((node) => node.id)
   )
   return group.nodes.filter((node) => completedNodeIds.has(node.id)).length
 }
@@ -684,11 +696,17 @@ function ProjectActionMenu({
 
 function FeatureCard({
   run,
+  workflowNodes,
   onOpen
 }: {
   run: HarnessFeatureSummary
+  workflowNodes: Array<{ id: string; label: string }>
   onOpen: () => void
 }): React.JSX.Element {
+  const progressIndex = progressIndexFromCurrentNodeId(workflowNodes, run.currentNodeId)
+  const totalNodes = workflowNodes.length
+  const currentNodeLabel = currentNodeLabelFromNodes(workflowNodes, run.currentNodeId)
+
   return (
     <button
       type="button"
@@ -702,11 +720,11 @@ function FeatureCard({
         </div>
         <StatusPill status={run.overallStatus} />
       </div>
-      <ProgressBar progressIndex={run.position.progressIndex} totalNodes={run.position.totalNodes} />
+      <ProgressBar progressIndex={progressIndex} totalNodes={totalNodes} />
       <div className="flex items-center justify-between gap-3 text-[11px] text-muted-foreground">
-        <span className="truncate">{run.position.currentNodeLabel ?? run.position.currentNodeId}</span>
+        <span className="truncate">{currentNodeLabel}</span>
         <span className="shrink-0">
-          {run.position.progressIndex}/{run.position.totalNodes}
+          {progressIndex}/{totalNodes}
         </span>
       </div>
     </button>
@@ -847,6 +865,7 @@ function ProjectCard({
                 <FeatureCard
                   key={run.slug}
                   run={run}
+                  workflowNodes={detail?.workflow.nodes ?? []}
                   onOpen={() => onOpenFeature(project.projectId, run.slug)}
                 />
               ))}
@@ -1431,11 +1450,11 @@ function FeatureDetailPage({
 }): React.JSX.Element {
   const defaultNodeId = useMemo(() => {
     if (!detail) return null
-    const currentNodeId = detail.run.position.currentNodeId
+    const currentNodeId = detail.run.currentNodeId
     if (currentNodeId && detail.run.nodes.some((node) => node.id === currentNodeId)) {
       return currentNodeId
     }
-    return detail.run.nodes.find((node) => node.status.isCurrent)?.id ?? detail.run.nodes[0]?.id ?? null
+    return detail.run.nodes[0]?.id ?? null
   }, [detail])
   const detailKey = detail ? `${detail.project.projectId}:${detail.run.slug}` : ""
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
@@ -1605,9 +1624,7 @@ function FeatureDetailPage({
             "w-[210px] rounded-md border px-3 py-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
             selected
               ? "border-status-info bg-status-info/10 shadow-sm"
-              : node.status.isCurrent
-                ? "border-status-info/45 bg-status-info/5 hover:border-status-info"
-                : "border-border bg-background hover:border-primary/45"
+              : "border-border bg-background hover:border-primary/45"
           )}
         >
           <div className="flex min-w-0 items-center gap-1.5">
@@ -1627,13 +1644,11 @@ function FeatureDetailPage({
                 const selected = selectedGroup.key === group.key
                 const currentNode =
                   group.nodes.find((node) => node.id === defaultNodeId) ??
-                  group.nodes.find((node) => node.status.isCurrent) ??
                   group.nodes[0]
                 const groupProgress = groupProgressIndex(
                   group,
-                  detail.run.nodes,
-                  detail.run.position.progressIndex,
-                  detail.run.position.totalNodes
+                  detail.workflow.nodes,
+                  detail.run.currentNodeId
                 )
 
                 return (

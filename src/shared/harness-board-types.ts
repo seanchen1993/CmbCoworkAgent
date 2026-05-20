@@ -11,10 +11,8 @@ export type HarnessUiKind =
   | "error"
 
 export interface HarnessStatus {
-  id: string
   label: string
   uiKind: HarnessUiKind
-  isCurrent?: boolean
 }
 
 export type HarnessAdapterType = "plugin"
@@ -148,13 +146,7 @@ export interface HarnessFeatureSummary {
   title: string
   location: "active" | "archived" | string
   overallStatus: HarnessStatus
-  position: {
-    currentNodeId: string
-    currentNodeLabel?: string
-    currentNodeState?: string
-    progressIndex: number
-    totalNodes: number
-  }
+  currentNodeId: string
   summary: {
     text: string
     updatedAt: string
@@ -173,10 +165,10 @@ export interface HarnessProjectDetailViewModel {
   adapterSnapshot: {
     schemaVersion: "harness.adapter.inspect.v1"
     mode: "project"
-    generatedAt: string
     mock: boolean
   }
   projectState?: HarnessStatus
+  workflow: HarnessWorkflow
   runs: HarnessFeatureSummary[]
   sessionsBySlug: Record<string, HarnessSessionBinding[]>
   watchRefs: HarnessWatchRef[]
@@ -184,13 +176,16 @@ export interface HarnessProjectDetailViewModel {
   error: string | null
 }
 
+export interface HarnessWorkflowStateDefinition extends HarnessStatus {
+  id: string
+}
+
 export interface HarnessWorkflowNodeDefinition {
   id: string
   label: string
   group?: string
-  order: number
   description?: string
-  states?: HarnessStatus[]
+  states?: HarnessWorkflowStateDefinition[]
   artifactDefinitions?: Array<{
     id: string
     label: string
@@ -206,25 +201,11 @@ export interface HarnessWorkflowNodeDefinition {
 }
 
 export interface HarnessWorkflow {
-  id: string
-  version: string
-  kind: "graph" | string
   display: {
     mode: "ordered_nodes" | string
     groupBy?: string
   }
   nodes: HarnessWorkflowNodeDefinition[]
-  transitions: Array<{
-    id: string
-    from: {
-      nodeId: string
-      state: string
-    }
-    to: {
-      nodeId: string
-      state: string
-    }
-  }>
 }
 
 export type HarnessArtifactKind = "file" | "directory" | "report" | "log" | "external" | "virtual"
@@ -239,7 +220,6 @@ export interface HarnessArtifact {
   exists?: boolean
   nonEmpty?: boolean
   size?: number
-  updatedAt?: string
   summary?: string
   validation?: {
     status: "valid" | "invalid" | "unknown"
@@ -263,7 +243,6 @@ export interface HarnessRunNode {
   id: string
   label: string
   group?: string
-  order: number
   status: HarnessStatus
   artifacts: HarnessArtifact[]
   hooks: HarnessHookLogView[]
@@ -280,7 +259,6 @@ export interface HarnessRunDetailViewModel {
   adapterSnapshot: {
     schemaVersion: "harness.adapter.inspect.v1"
     mode: "run"
-    generatedAt: string
     mock: boolean
   }
   workflow: HarnessWorkflow
@@ -289,10 +267,8 @@ export interface HarnessRunDetailViewModel {
     kind: "feature" | string
     slug: string
     title: string
-    location: "active" | "archived" | string
     source?: {
       label: string
-      summary: string
     }
     hookLogRefs: Array<{
       id: string
@@ -300,13 +276,7 @@ export interface HarnessRunDetailViewModel {
       format: "ndjson" | string
     }>
     watchRefs: HarnessWatchRef[]
-    overallStatus: HarnessStatus
-    position: {
-      currentNodeId: string
-      currentNodeState: string
-      progressIndex: number
-      totalNodes: number
-    }
+    currentNodeId: string
     nodes: HarnessRunNode[]
     unmatchedHooks: HarnessHookLogView[]
   }
