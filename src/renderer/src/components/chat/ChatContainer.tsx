@@ -1074,19 +1074,33 @@ export function ChatContainer({
   const [savedToolNameInput, setSavedToolNameInput] = useState("")
   const [savedToolDescriptionInput, setSavedToolDescriptionInput] = useState("")
   const [saveToolMetadataLoading, setSaveToolMetadataLoading] = useState(false)
+  const [saveToolMetadataLoadingThreadId, setSaveToolMetadataLoadingThreadId] = useState<string | null>(
+    null
+  )
   const queuedApprovalCount = Math.max(0, pendingApprovals.length - 1)
+  const showSaveToolMetadataLoading =
+    saveToolMetadataLoading && saveToolMetadataLoadingThreadId === threadId
 
   useEffect(() => {
     const approval = pendingApproval as unknown as Record<string, unknown> | null
     if (approval?.operation === "save_code_exec_tool") {
       setSaveToolMetadataLoading(false)
-      setSavedToolNameInput(String(approval.savedToolName || ""))
+      setSaveToolMetadataLoadingThreadId(null)
+      setSavedToolNameInput(
+        String(
+          approval.savedToolName ||
+            approval.savedToolId ||
+            pendingApproval?.tool_call?.args?.toolId ||
+            ""
+        )
+      )
       setSavedToolDescriptionInput(String(approval.savedToolDescription || ""))
       return
     }
 
-    if (!pendingApproval || approval?.operation !== "prepare_save_code_exec_tool") {
+    if (pendingApproval && approval?.operation !== "prepare_save_code_exec_tool") {
       setSaveToolMetadataLoading(false)
+      setSaveToolMetadataLoadingThreadId(null)
     }
 
     setSavedToolNameInput("")
@@ -1395,8 +1409,10 @@ export function ChatContainer({
         const operation = approvalAny.operation as string | undefined
         if (operation === "prepare_save_code_exec_tool" && decision === "approve") {
           setSaveToolMetadataLoading(true)
+          setSaveToolMetadataLoadingThreadId(threadId)
         } else {
           setSaveToolMetadataLoading(false)
+          setSaveToolMetadataLoadingThreadId(null)
         }
 
         // Send decision to main process via the orchestrator's IPC channel
@@ -1411,7 +1427,10 @@ export function ChatContainer({
             ? { savedToolDescription: savedToolDescriptionInput }
             : {})
         })
-        setSaveToolMetadataLoading(false)
+        if (!(operation === "prepare_save_code_exec_tool" && decision === "approve")) {
+          setSaveToolMetadataLoading(false)
+          setSaveToolMetadataLoadingThreadId(null)
+        }
         setToolCallState(pendingApproval.tool_call?.id || "", {
           status:
             decision === "approve" ||
@@ -3470,10 +3489,19 @@ export function ChatContainer({
         />
       )}
       {/* Orchestrator approval bar — placed outside ScrollArea so it's always visible */}
-      {pendingApproval &&
-        Boolean((pendingApproval as unknown as Record<string, unknown>)._orchestratorRequestId) && (
-          <div className="px-4 pb-2">
-            {(() => {
+      {(showSaveToolMetadataLoading ||
+        (pendingApproval &&
+          Boolean((pendingApproval as unknown as Record<string, unknown>)._orchestratorRequestId))) && (
+        <div className={cn("px-4 pb-2", userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20")}>
+          {showSaveToolMetadataLoading && (
+            <div className="max-w-3xl mx-auto mb-2 flex items-center gap-2 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs font-medium text-emerald-700 shadow-sm dark:text-emerald-300">
+              <Loader2 className="size-3.5 animate-spin" />
+              正在改写脚本并生成工具信息...
+            </div>
+          )}
+          {pendingApproval &&
+            Boolean((pendingApproval as unknown as Record<string, unknown>)._orchestratorRequestId) &&
+            (() => {
               const approval = pendingApproval as unknown as Record<string, unknown>
               const operation = approval.operation
               const isFileApproval = operation === "write_file" || operation === "edit_file"
@@ -3491,8 +3519,7 @@ export function ChatContainer({
                 Object.keys(approvalParams as Record<string, unknown>).length > 0
               const isSaveToolApprovalInvalid =
                 isSaveCodeExecToolApproval &&
-                (!savedToolDescriptionInput.trim() ||
-                  (isManualSaveCodeExecToolApproval && !savedToolNameInput.trim()))
+                (!savedToolNameInput.trim() || !savedToolDescriptionInput.trim())
               const approvalTypes = Array.isArray(approval._approvalTypes)
                 ? (approval._approvalTypes as Array<
                     "approve" | "approve_session" | "approve_permanent" | "reject"
@@ -3529,11 +3556,11 @@ export function ChatContainer({
                         : operation === "edit_file"
                           ? "编辑文件需要审批"
                           : isCodeExecApproval
-                            ? "执行 MCP 脚本需要审批"
+                            ? "编程式工具调用"
                             : isPrepareSaveCodeExecToolApproval
-                              ? "是否将脚本注册为工具，便于后续复用"
+                              ? "改写脚本以注册为工具，便于复用"
                               : isSaveCodeExecToolApproval
-                                ? "保存脚本工具需要确认"
+                                ? "注册工具需要确认"
                                 : "命令需要审批"}
                     </span>
                     {queuedApprovalCount > 0 && (
@@ -3550,75 +3577,42 @@ export function ChatContainer({
                         <div className="grid gap-2 md:grid-cols-2">
                           <div className="rounded-md bg-muted/30 px-3 py-2 text-xs overflow-auto">
                             <div className="mb-1 text-[11px] font-medium text-muted-foreground">
-                              {isManualSaveCodeExecToolApproval ? "tool_name" : "tool_id"}
+                              工具名称
                             </div>
-                            {isManualSaveCodeExecToolApproval ? (
-                              <>
-                                <input
-                                  className="w-full rounded border border-border bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-primary"
-                                  value={savedToolNameInput}
-                                  onChange={(event) => setSavedToolNameInput(event.target.value)}
-                                  placeholder="例如：list_github_issues"
-                                />
-                                <div className="mt-1 text-[11px] text-muted-foreground">
-                                  最终 tool_id 会基于 tool_name 规范化生成。
-                                </div>
-                              </>
-                            ) : (
-                              <div className="font-mono break-all">
-                                {String(
-                                  approval.savedToolId ||
-                                    pendingApproval.tool_call?.args?.toolId ||
-                                    ""
-                                )}
-                              </div>
-                            )}
+                            <div className="font-mono break-all">
+                              {savedToolNameInput || "-"}
+                            </div>
                           </div>
                           <div className="rounded-md bg-muted/30 px-3 py-2 text-xs overflow-auto">
                             <div className="mb-1 text-[11px] font-medium text-muted-foreground">
-                              description
+                              工具描述
                             </div>
                             <textarea
-                              className="min-h-20 w-full resize-y rounded border border-border bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-primary"
+                              className="min-h-12 w-full resize-y rounded border border-border bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-primary"
                               value={savedToolDescriptionInput}
                               onChange={(event) => setSavedToolDescriptionInput(event.target.value)}
                             />
                           </div>
                         </div>
                       )}
-                      {isManualSaveCodeExecToolApproval && (
-                        <div className="text-xs text-amber-600 dark:text-amber-400">
-                          {String(approval.savedToolMetadataError)}
+                      <div className="overflow-hidden rounded-md border border-border bg-background shadow-sm">
+                        <div className="border-b border-border bg-muted/60 px-3 py-1.5 text-[11px] font-medium text-muted-foreground">
+                          脚本内容
+                        </div>
+                        <div className="max-h-36 overflow-auto px-3 py-2 font-mono text-xs whitespace-pre-wrap break-all">
+                          {String(approval.code || pendingApproval.tool_call?.args?.code || "")}
+                        </div>
+                      </div>
+                      {hasApprovalParams && (
+                        <div className="rounded-md bg-muted/30 px-3 py-2 text-xs overflow-auto">
+                          <div className="mb-1 text-[11px] font-medium text-muted-foreground">
+                            params
+                          </div>
+                          <pre className="whitespace-pre-wrap break-all font-mono">
+                            {JSON.stringify(approvalParams, null, 2)}
+                          </pre>
                         </div>
                       )}
-                      <div className="rounded-md bg-muted/50 px-3 py-2 font-mono text-sm whitespace-pre-wrap break-all overflow-auto max-h-64">
-                        {String(approval.code || pendingApproval.tool_call?.args?.code || "")}
-                      </div>
-                      <div className="grid gap-2 md:grid-cols-2">
-                        {hasApprovalParams && (
-                          <div className="rounded-md bg-muted/30 px-3 py-2 text-xs overflow-auto">
-                            <div className="mb-1 text-[11px] font-medium text-muted-foreground">
-                              params
-                            </div>
-                            <pre className="whitespace-pre-wrap break-all font-mono">
-                              {JSON.stringify(approvalParams, null, 2)}
-                            </pre>
-                          </div>
-                        )}
-                        <div className="rounded-md bg-muted/30 px-3 py-2 text-xs">
-                          <div className="mb-1 text-[11px] font-medium text-muted-foreground">
-                            timeout
-                          </div>
-                          <div className="font-mono">
-                            {String(
-                              approval.timeoutMs ??
-                                pendingApproval.tool_call?.args?.timeoutMs ??
-                                "default"
-                            )}{" "}
-                            ms
-                          </div>
-                        </div>
-                      </div>
                     </>
                   ) : (
                     <pre className="rounded-md bg-muted/50 px-3 py-2 font-mono text-sm whitespace-pre-wrap break-words overflow-auto max-h-40">
@@ -3636,22 +3630,24 @@ export function ChatContainer({
                       {String(approval._retryReason)}
                     </div>
                   )}
-                  {Boolean(approval.reason) && (
+                  {(Boolean(approval.reason) || isManualSaveCodeExecToolApproval) && (
                     <div className="text-xs text-muted-foreground">
-                      原因：{String(approval.reason)}
+                      {isManualSaveCodeExecToolApproval
+                        ? `原因：工具注册失败（${String(approval.savedToolMetadataError)}）`
+                        : `原因：${String(approval.reason)}`}
                     </div>
                   )}
                   <div className="flex items-center gap-2">
                     {approval._retryReason ? (
                       <>
                         <button
-                          className="px-3 py-1.5 text-xs bg-amber-500 text-white rounded-md hover:bg-amber-600 transition-colors"
+                          className="rounded-md bg-amber-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-amber-700"
                           onClick={() => handleApprovalDecision("approve")}
                         >
                           无沙箱重试
                         </button>
                         <button
-                          className="px-3 py-1.5 text-xs border border-border rounded-md hover:bg-muted transition-colors"
+                          className="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm font-semibold text-destructive transition-colors hover:bg-destructive/15"
                           onClick={() => handleApprovalDecision("reject")}
                         >
                           拒绝
@@ -3659,7 +3655,7 @@ export function ChatContainer({
                       </>
                     ) : (
                       <>
-                        {isPrepareSaveCodeExecToolApproval && saveToolMetadataLoading ? (
+                        {isPrepareSaveCodeExecToolApproval && showSaveToolMetadataLoading ? (
                           <div className="flex items-center gap-2 text-xs text-muted-foreground">
                             <Loader2 className="size-4 animate-spin" />
                             正在生成工具信息，请稍候...
@@ -3669,7 +3665,7 @@ export function ChatContainer({
                             {approvalTypes.includes("approve") && (
                               <button
                                 className={cn(
-                                  "px-3 py-1.5 text-xs rounded-md transition-colors",
+                                  "rounded-md px-4 py-2 text-sm font-semibold shadow-sm transition-colors",
                                   isSaveToolApprovalInvalid
                                     ? "bg-primary/50 text-primary-foreground/80 cursor-not-allowed"
                                     : "bg-primary text-primary-foreground hover:bg-primary/90"
@@ -3682,15 +3678,15 @@ export function ChatContainer({
                                   : isCodeExecApproval
                                     ? "执行脚本"
                                     : isPrepareSaveCodeExecToolApproval
-                                      ? "允许注册为工具"
+                                      ? "允许"
                                       : isSaveCodeExecToolApproval
-                                        ? "保存为工具"
+                                        ? "保存"
                                         : "运行"}
                               </button>
                             )}
                             {approvalTypes.includes("approve_session") && (
                               <button
-                                className="px-3 py-1.5 text-xs bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
+                                className="rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-blue-700"
                                 onClick={() => handleApprovalDecision("approve_session")}
                               >
                                 本会话允许
@@ -3698,7 +3694,7 @@ export function ChatContainer({
                             )}
                             {approvalTypes.includes("approve_permanent") && (
                               <button
-                                className="px-3 py-1.5 text-xs bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors"
+                                className="rounded-md bg-green-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-green-700"
                                 onClick={() => handleApprovalDecision("approve_permanent")}
                               >
                                 始终允许
@@ -3706,7 +3702,7 @@ export function ChatContainer({
                             )}
                             {approvalTypes.includes("reject") && (
                               <button
-                                className="px-3 py-1.5 text-xs border border-border rounded-md hover:bg-muted transition-colors"
+                                className="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm font-semibold text-destructive transition-colors hover:bg-destructive/15"
                                 onClick={() => handleApprovalDecision("reject")}
                               >
                                 拒绝
@@ -3720,8 +3716,8 @@ export function ChatContainer({
                 </div>
               )
             })()}
-          </div>
-        )}
+        </div>
+      )}
       {/* Input */}
       <div className={cn("p-4", userQuestions.length > 0 && !rightPanelCollapsed && "md:pr-20")}>
         {showGitChangeNotice && (
