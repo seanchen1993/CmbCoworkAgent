@@ -164,7 +164,12 @@ import { runStartupSelfCheck } from "./updater/rollback"
 import { isKeepAwakeEnabled, setKeepAwakeEnabled } from "./storage"
 import { getLocalIP } from "./net-utils"
 import { trackEvent } from "./services/event-reporter"
-import { configurePetWindow, createPetWindow, registerPetHandlers } from "./pet"
+import {
+  configurePetWindow,
+  createPetWindow,
+  getPetWindowDebugInfo,
+  registerPetHandlers
+} from "./pet"
 
 let mainWindow: BrowserWindow | null = null
 let loginWindow: BrowserWindow | null = null
@@ -329,7 +334,17 @@ function createWindow(): void {
     }
   }
 
+  mainWindow.on("close", () => {
+    console.warn("[Main] Main window close requested", {
+      pet: getPetWindowDebugInfo()
+    })
+  })
+
   mainWindow.on("closed", () => {
+    console.warn("[Main] Main window closed", {
+      platform: process.platform,
+      pet: getPetWindowDebugInfo()
+    })
     mainWindow = null
     if (process.platform !== "darwin") {
       app.quit()
@@ -604,6 +619,10 @@ if (!gotTheLock) {
   })
 
   app.on("window-all-closed", () => {
+    console.warn("[Main] window-all-closed", {
+      platform: process.platform,
+      pet: getPetWindowDebugInfo()
+    })
     if (process.platform !== "darwin") {
       app.quit()
     }
@@ -614,6 +633,11 @@ if (!gotTheLock) {
   // queued there have no guarantee of completing before the process exits.
   let sessionEndDone = false
   app.on("before-quit", (event) => {
+    console.warn("[Main] before-quit", {
+      sessionEndDone,
+      hasActiveSessions: hasActiveSessions(),
+      pet: getPetWindowDebugInfo()
+    })
     if (sessionEndDone) return
     if (!hasActiveSessions()) {
       sessionEndDone = true
@@ -631,6 +655,10 @@ if (!gotTheLock) {
 
   let quitting = false
   app.on("will-quit", (e) => {
+    console.warn("[Main] will-quit", {
+      quitting,
+      pet: getPetWindowDebugInfo()
+    })
     if (quitting) {
       // Re-entry: user pressed Cmd+Q again while cleanup is running. Just block.
       e.preventDefault()

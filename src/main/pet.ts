@@ -89,6 +89,8 @@ let petHovering = false
 let petWindowOptions: PetWindowOptions | null = null
 const completedTaskNotices: Array<{ id: string; threadId: string; title: string }> = []
 let petBubbleHideTimer: NodeJS.Timeout | null = null
+let lastPetBubbleBounds: Electron.Rectangle | null = null
+let lastPetBubbleBoundsAt = 0
 let suppressPetClickUntil = 0
 // 拖动窗口会触发高频 move 事件，这个时间戳用于节流状态同步，避免主进程连续 executeJavaScript。
 let lastPetMoveStateAt = 0
@@ -511,6 +513,41 @@ function closePetWindow(): void {
   petDragOffset = null
   petHovering = false
   lastPetMoveStateAt = 0
+}
+
+export function getPetWindowDebugInfo(): Record<string, unknown> {
+  const cursor = screen.getCursorScreenPoint()
+  return {
+    cursor,
+    petWindow:
+      petWindow && !petWindow.isDestroyed()
+        ? { id: petWindow.id, visible: petWindow.isVisible(), bounds: petWindow.getBounds() }
+        : null,
+    petBubbleWindow:
+      petBubbleWindow && !petBubbleWindow.isDestroyed()
+        ? {
+            id: petBubbleWindow.id,
+            visible: petBubbleWindow.isVisible(),
+            focused: petBubbleWindow.isFocused(),
+            bounds: petBubbleWindow.getBounds()
+          }
+        : null,
+    lastPetBubbleBounds,
+    lastPetBubbleBoundsAgeMs: lastPetBubbleBoundsAt ? Date.now() - lastPetBubbleBoundsAt : null
+  }
+}
+
+function rememberPetBubbleBounds(bounds: Electron.Rectangle | null): void {
+  if (!bounds) return
+  lastPetBubbleBounds = { ...bounds }
+  lastPetBubbleBoundsAt = Date.now()
+}
+
+function logPetWindowDebug(message: string, extra?: Record<string, unknown>): void {
+  console.warn(message, {
+    ...extra,
+    pet: getPetWindowDebugInfo()
+  })
 }
 
 function refreshPetWindowForSettings(): void {
@@ -1244,6 +1281,7 @@ function updatePetBubblePosition(): void {
   const nextBounds = getBubbleBounds(bounds.width, bounds.height)
   if (!nextBounds) return
   petBubbleWindow.setBounds(nextBounds, false)
+  rememberPetBubbleBounds(nextBounds)
 }
 
 /**
@@ -1259,6 +1297,7 @@ function showPetBubble(message: string, autoHideMs = PET_BUBBLE_AUTO_HIDE_MS): v
   const bubbleHeight = 60
   const bounds = getBubbleBounds(bubbleWidth, bubbleHeight)
   if (!bounds) return
+  rememberPetBubbleBounds(bounds)
 
   let bubbleWindow = petBubbleWindow
   if (!bubbleWindow || bubbleWindow.isDestroyed()) {
@@ -1289,18 +1328,34 @@ function showPetBubble(message: string, autoHideMs = PET_BUBBLE_AUTO_HIDE_MS): v
       event.preventDefault()
       if (petBubbleWindow !== createdBubbleWindow || createdBubbleWindow.isDestroyed()) return
       if (title.startsWith("pet-bubble-done:")) {
+        logPetWindowDebug("[Pets] Bubble auto-hide timer fired", { title })
         closePetBubble()
+        return
+      }
+      if (title.startsWith("pet-bubble-pointer:")) {
+        const [, eventName, rawX, rawY] = title.split(":")
+        logPetWindowDebug("[Pets] Bubble pointer event", {
+          eventName,
+          pointerX: Number(rawX),
+          pointerY: Number(rawY),
+          title
+        })
         return
       }
     })
     createdBubbleWindow.on("closed", () => {
+      logPetWindowDebug("[Pets] Bubble window closed")
       if (petBubbleWindow === createdBubbleWindow) {
         petBubbleWindow = null
       }
     })
+    createdBubbleWindow.on("close", () => {
+      logPetWindowDebug("[Pets] Bubble window close requested")
+    })
   } else {
     bubbleWindow.setBounds(bounds, false)
     configurePetWindowLayer(bubbleWindow)
+    rememberPetBubbleBounds(bounds)
   }
   if (!bubbleWindow) return
 
@@ -1365,6 +1420,19 @@ function showPetBubble(message: string, autoHideMs = PET_BUBBLE_AUTO_HIDE_MS): v
     </div>
   </div>
   <script>
+    for (const eventName of ["pointerdown", "pointerup", "click", "dblclick", "contextmenu"]) {
+      document.body.addEventListener(eventName, function logBubblePointer(event) {
+        document.title =
+          "pet-bubble-pointer:" +
+          eventName +
+          ":" +
+          event.screenX +
+          ":" +
+          event.screenY +
+          ":" +
+          Date.now();
+      });
+    }
     ${autoHideMs > 0 ? `window.setTimeout(function done() { document.title = "pet-bubble-done:" + Date.now(); }, ${autoHideMs});` : ""}
   </script>
 </body>
@@ -1373,6 +1441,8 @@ function showPetBubble(message: string, autoHideMs = PET_BUBBLE_AUTO_HIDE_MS): v
   bubbleWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
   bubbleWindow.once("ready-to-show", () => {
     if (petBubbleWindow !== bubbleWindow || bubbleWindow.isDestroyed()) return
+    rememberPetBubbleBounds(bubbleWindow.getBounds())
+    logPetWindowDebug("[Pets] Bubble ready to show", { autoHideMs })
     bubbleWindow.showInactive()
     keepPetWindowOnTop(bubbleWindow)
   })
@@ -1417,6 +1487,9 @@ function showPetHoverBubbleIfIdle(): void {
 function closePetBubble(): void {
   cancelPetBubbleHide()
   const bubbleWindow = petBubbleWindow
+  if (bubbleWindow && !bubbleWindow.isDestroyed()) {
+    rememberPetBubbleBounds(bubbleWindow.getBounds())
+  }
   petBubbleWindow = null
   if (bubbleWindow && !bubbleWindow.isDestroyed()) {
     bubbleWindow.close()
