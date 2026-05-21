@@ -328,11 +328,33 @@ export interface PluginMetadata {
   author: string
   path: string
   enabled: boolean
+  /**
+   * Display-only. Counted once at install/update time by walking the plugin's
+   * skill sources. Never gate runtime behavior on this — actual skill
+   * discovery (slash popover, hook scope, etc.) re-walks the filesystem
+   * through `getEnabledPluginSkillSourceMetadata`, so a stale `skillCount`
+   * here cannot hide skills. Used for the "{n} skills" badge in PluginsPanel.
+   */
   skillCount: number
+  /**
+   * Display-only. Same contract as skillCount: counted at install time, never
+   * used for gating. getEnabledPluginMcpConfigs re-reads .mcp.json live.
+   */
   mcpServerCount: number
   hookCount?: number
   /** Cached hooks config path relative to plugin root, read from manifest at install/inspect time. */
   hookPath?: string
+  /**
+   * Where this plugin was installed from. Used by the UI to decide whether to
+   * expose component details. Older installs lack this field — when undefined,
+   * the renderer falls back to a legacy heuristic (name match against the
+   * current market list plus a localStorage-tracked "I uploaded this locally"
+   * set). The renderer also runs a one-time per-session migration that
+   * backfills a concrete value once the market list is successfully loaded,
+   * so legacy plugins are eventually pinned to "market" or "local" on disk
+   * and stop relying on the heuristic.
+   */
+  origin?: "market" | "local"
   createdAt: string
   updatedAt: string
 }

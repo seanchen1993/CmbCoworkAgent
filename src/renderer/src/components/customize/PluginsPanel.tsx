@@ -310,7 +310,13 @@ export function PluginsPanel(): React.JSX.Element {
   const [publishTarget, setPublishTarget] = useState<MarketPublishTarget | null>(null)
   const [publishMode, setPublishMode] = useState<"upload" | "update">("upload")
   const [marketPluginMap, setMarketPluginMap] = useState<Record<string, MarketItem>>({})
+  // marketPluginsLoaded becomes true once the load attempt finishes, regardless
+  // of outcome — so the UI doesn't sit in the "loading" defensive-hide state
+  // forever when the market endpoint is unreachable. marketPluginsLoadFailed
+  // tells the legacy fallback to default to "not market" (show details) in
+  // that case, so offline users still see their local plugins' internals.
   const [marketPluginsLoaded, setMarketPluginsLoaded] = useState(false)
+  const [marketPluginsLoadFailed, setMarketPluginsLoadFailed] = useState(false)
   const [uploadedPluginNames, setUploadedPluginNames] = useState<Set<string>>(() =>
     readUploadedItemNamesFromStorage("plugin")
   )
@@ -328,12 +334,43 @@ export function PluginsPanel(): React.JSX.Element {
       if (!plugin) return false
       const key = normalizePluginNameKey(plugin.name)
       if (!key) return false
-      const isSelfOwned = uploadedPluginNames.has(key) || localUploadedPluginNames.has(key)
-      if (isSelfOwned) return false
-      if (!marketPluginsLoaded) return true
+      // Self-published always wins, regardless of origin: even if the plugin
+      // also lives in the market, the author should see their own internals.
+      // This check is intentionally above the origin check.
+      if (uploadedPluginNames.has(key)) return false
+      // origin is the source of truth for plugins installed after this field
+      // was introduced. Pre-existing plugins have origin === undefined and
+      // fall through to the legacy name-match fallback below; a one-time
+      // migration backfills them once the market list is available.
+      if (plugin.origin === "market") return true
+      if (plugin.origin === "local") return false
+      // Legacy fallback (plugin.origin === undefined). Reached only on the
+      // first session after upgrade, before the migration runs. Once the
+      // migration writes a concrete origin to disk this branch is dead for
+      // that plugin.
+      //
+      // Note: localUploadedPluginNames is only consulted *here* — it has no
+      // effect once origin is set, because every new local-install path
+      // already writes origin: "local" directly. Treat it purely as a
+      // pre-origin breadcrumb for plugins that were dragged in before this
+      // mechanism existed.
+      if (localUploadedPluginNames.has(key)) return false
+      if (!marketPluginsLoaded) return true // still loading — defensive hide
+      // Loaded-but-failed: we have no reliable signal of market membership.
+      // Default to "not market" (show details) so offline users don't see all
+      // their legacy plugins' internals disappear. The one-time migration
+      // also skips this state, so plugins stay in the legacy path until a
+      // future session sees a successful market load.
+      if (marketPluginsLoadFailed) return false
       return Boolean(marketPluginMap[key])
     },
-    [localUploadedPluginNames, marketPluginMap, marketPluginsLoaded, uploadedPluginNames]
+    [
+      localUploadedPluginNames,
+      marketPluginMap,
+      marketPluginsLoadFailed,
+      marketPluginsLoaded,
+      uploadedPluginNames
+    ]
   )
 
   // Clean up debounce timer on unmount
@@ -354,7 +391,11 @@ export function PluginsPanel(): React.JSX.Element {
   const loadMarketPlugins = useCallback(async () => {
     try {
       const res = await marketApi.getPlugins()
-      if (!res.success || !res.data) return
+      if (!res.success || !res.data) {
+        setMarketPluginsLoaded(true)
+        setMarketPluginsLoadFailed(true)
+        return
+      }
       const next: Record<string, MarketItem> = {}
       for (const item of res.data) {
         const key = item.name.trim().toLowerCase()
@@ -362,9 +403,11 @@ export function PluginsPanel(): React.JSX.Element {
       }
       setMarketPluginMap(next)
       setMarketPluginsLoaded(true)
+      setMarketPluginsLoadFailed(false)
     } catch (e) {
       console.warn("[PluginsPanel] Failed to load market plugins:", e)
       setMarketPluginsLoaded(true)
+      setMarketPluginsLoadFailed(true)
     }
   }, [])
 
@@ -413,6 +456,85 @@ export function PluginsPanel(): React.JSX.Element {
     }, 0)
     return () => clearTimeout(timer)
   }, [loadMarketPlugins])
+
+  // One-time backfill for plugins installed before `origin` existed: any plugin
+  // whose name matches a current market entry is marked "market"; the rest are
+  // marked "local". Without this, the legacy fallback would keep relying on the
+  // flaky name-vs-market-list match every render.
+  //
+  // Two carve-outs that must NOT get flipped to "market":
+  //   - self-published (uploadedPluginNames): even if also in the market, the
+  //     author should see their own internals.
+  //   - locally uploaded (localUploadedPluginNames): the user explicitly
+  //     dragged the zip in. A name collision with a market entry is not
+  //     evidence the install came from the market.
+  // Both are written as explicit "local" so the legacy fallback path stops
+  // engaging on the next render.
+  //
+  // Writes are batched into a single IPC + a single plugins.json write — for
+  // users with many old plugins this avoids N round-trips through the mutex.
+  //
+  // Lifecycle:
+  //   - done ref is set only after a successful batch commit, so a failed
+  //     attempt (network blip, IPC error) can be retried on the next render.
+  //   - in-flight ref guards against the effect re-firing while the async
+  //     write is still pending (refreshPlugins → plugins state change →
+  //     effect re-runs).
+  //   - Migration is skipped while the market list is still loading or
+  //     failed to load: running against an empty map would mislabel every
+  //     market-sourced plugin as "local".
+  //   - Single-shot per session: once a batch succeeds, done ref latches and
+  //     the effect never re-runs. If the market list at migration time was
+  //     incomplete (server-side pagination, partial cache, transient
+  //     filtering) any legacy plugin missed by that snapshot stays pinned to
+  //     "local" until something else re-tags it (e.g. a re-install). Accepted
+  //     trade-off vs. unbounded retry pressure on the market endpoint.
+  const originMigrationDoneRef = useRef(false)
+  const originMigrationInFlightRef = useRef(false)
+  useEffect(() => {
+    if (originMigrationDoneRef.current || originMigrationInFlightRef.current) return
+    if (!marketPluginsLoaded || marketPluginsLoadFailed) return
+    if (plugins.length === 0) return
+    const candidates = plugins.filter((p) => p.origin !== "market" && p.origin !== "local")
+    if (candidates.length === 0) return
+
+    const updates: Array<{ id: string; origin: "market" | "local" }> = []
+    for (const plugin of candidates) {
+      const key = normalizePluginNameKey(plugin.name)
+      if (!key) continue
+      let nextOrigin: "market" | "local"
+      if (uploadedPluginNames.has(key) || localUploadedPluginNames.has(key)) {
+        nextOrigin = "local"
+      } else {
+        nextOrigin = marketPluginMap[key] ? "market" : "local"
+      }
+      updates.push({ id: plugin.id, origin: nextOrigin })
+    }
+    if (updates.length === 0) return
+
+    originMigrationInFlightRef.current = true
+    void (async () => {
+      try {
+        const res = await window.api.plugins.setOriginsBatch(updates)
+        if (res?.success) {
+          originMigrationDoneRef.current = true
+          refreshPlugins()
+        }
+      } catch (e) {
+        console.warn("[PluginsPanel] Failed to backfill plugin origin:", e)
+      } finally {
+        originMigrationInFlightRef.current = false
+      }
+    })()
+  }, [
+    localUploadedPluginNames,
+    marketPluginMap,
+    marketPluginsLoadFailed,
+    marketPluginsLoaded,
+    plugins,
+    refreshPlugins,
+    uploadedPluginNames
+  ])
 
   const loadDetail = useCallback(
     async (plugin: PluginMetadata) => {

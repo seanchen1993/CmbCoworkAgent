@@ -1150,9 +1150,10 @@ const api = {
       ipcRenderer.invoke("plugins:list") as Promise<PluginMetadata[]>,
     install: (
       buffer: ArrayBuffer,
-      fileName: string
+      fileName: string,
+      origin?: "market" | "local"
     ): Promise<{ success: boolean; pluginName?: string; error?: string }> =>
-      ipcRenderer.invoke("plugins:install", { buffer, fileName }) as Promise<{
+      ipcRenderer.invoke("plugins:install", { buffer, fileName, origin }) as Promise<{
         success: boolean
         pluginName?: string
         error?: string
@@ -1176,6 +1177,13 @@ const api = {
       ipcRenderer.invoke("plugins:delete", id) as Promise<{ success: boolean; error?: string }>,
     setEnabled: (id: string, enabled: boolean): Promise<void> =>
       ipcRenderer.invoke("plugins:setEnabled", { id, enabled }) as Promise<void>,
+    setOriginsBatch: (
+      updates: Array<{ id: string; origin: "market" | "local" }>
+    ): Promise<{ success: boolean; error?: string }> =>
+      ipcRenderer.invoke("plugins:setOriginsBatch", { updates }) as Promise<{
+        success: boolean
+        error?: string
+      }>,
     getDetail: (
       id: string
     ): Promise<{

@@ -651,7 +651,8 @@ interface CustomAPI {
     list: () => Promise<PluginMetadata[]>
     install: (
       buffer: ArrayBuffer,
-      fileName: string
+      fileName: string,
+      origin?: "market" | "local"
     ) => Promise<{ success: boolean; pluginName?: string; error?: string }>
     installFromDir: () => Promise<{ success: boolean; pluginName?: string; error?: string }>
     exportForMarket: (
@@ -659,6 +660,9 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }>
     delete: (id: string) => Promise<{ success: boolean; error?: string }>
     setEnabled: (id: string, enabled: boolean) => Promise<void>
+    setOriginsBatch: (
+      updates: Array<{ id: string; origin: "market" | "local" }>
+    ) => Promise<{ success: boolean; error?: string }>
     getDetail: (id: string) => Promise<{
       skills: string[]
       mcpServers: string[]
