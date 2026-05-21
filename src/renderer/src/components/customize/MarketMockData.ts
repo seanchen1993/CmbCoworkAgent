@@ -12,7 +12,7 @@ export const MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
       tag: "认证",
       featured: "精品",
       version: "1.0.0",
-      user_id: "800001 / 张三 / 总行信息技术部 / 研发效能中心",
+      user_id: "10010001 / 张三 / 总行信息技术部 / 研发效能中心",
       guidance: "用于 mock Dashboard Skill 使用排行中的市场命中展示。",
       ip: "127.0.0.1",
       description: "代码质量、规范和风险审查技能。",
@@ -26,7 +26,7 @@ export const MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
       tag: "认证",
       featured: "",
       version: "1.0.0",
-      user_id: "800002 / 李四 / 总行信息技术部 / 需求交付中心",
+      user_id: "10001 / 李四 / 总行信息技术部 / 需求交付中心",
       guidance: "用于 mock Dashboard Skill 使用排行中的市场命中展示。",
       ip: "127.0.0.1",
       description: "需求理解、拆解和验收点整理技能。",
@@ -40,7 +40,7 @@ export const MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
       tag: "",
       featured: "",
       version: "1.0.0",
-      user_id: "800003 / 王五 / 总行信息技术部 / 平台工程部",
+      user_id: "10001",
       guidance: "用于 mock Dashboard 代码采纳排行中的市场命中展示。",
       ip: "127.0.0.1",
       description: "接口字段、契约和联调方案设计技能。",
@@ -574,7 +574,8 @@ export const MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
       category: "连接器",
       tag: "认证",
       featured: "官方推荐",
-      version: "1.0.0"
+      version: "1.0.0",
+      user_id: "10010001 / 郑凯 / 数据平台部"
     },
     {
       name: "mock-jira-mcp",
@@ -610,7 +611,8 @@ export const MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
       category: "插件",
       tag: "认证",
       featured: "热门",
-      version: "1.0.0"
+      version: "1.0.0",
+      user_id: "10010001 / 郑凯 / 数据平台部"
     },
     {
       name: "mock-plugin-ci-helper",

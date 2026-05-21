@@ -58,7 +58,12 @@ import {
 import { marketInstalledSourceStorage } from "./market-installed-source-storage"
 import { marketApi, MarketApiResponse, MarketItem, MarketItemType } from "../../api/market"
 import { getMarketMockResponse } from "./MarketMockData"
-import { getDefaultRange, parseTopUsersFromAgg, type DashboardTraceDetail } from "../dashboard/use-dashboard"
+import {
+  formatTopUserOrgName,
+  getDefaultRange,
+  parseTopUsersFromAgg,
+  type DashboardTraceDetail
+} from "../dashboard/use-dashboard"
 import { TraceExplorer } from "../dashboard/TraceHistoryDialog"
 import { toast } from "sonner"
 import {
@@ -134,6 +139,26 @@ interface UploaderProfile {
   sapId: string
   userName: string
   orgName: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+}
+
+function renderUploaderProfile(profile: UploaderProfile | null, fallbackUserId?: string): React.ReactNode {
+  if (!profile) {
+    return <span className="truncate">{fallbackUserId || "—"}</span>
+  }
+  const target = profile
+  const userName = target.userName || "未知用户"
+  const sapId = target.sapId || "—"
+  const orgName = target.orgName || "—"
+
+  return (
+    <span className="inline-flex min-w-0 items-center gap-1">
+      <span className="truncate">{userName}</span>
+      <span className="text-[#a09f98] shrink-0">（{sapId}）</span>
+      <span className="text-[#a09f98] shrink-0">{orgName}</span>
+    </span>
+  )
 }
 
 interface UserInfoLite {
@@ -224,6 +249,7 @@ interface MarketItemCardProps {
   skillCallCount?: number | null
   skillUserCount?: number | null
   uploaderProfile?: UploaderProfile | null
+  showResolvedUploader?: boolean
 }
 
 function MarketItemCard({
@@ -242,7 +268,8 @@ function MarketItemCard({
   marketTypeLabel,
   skillCallCount = null,
   skillUserCount = null,
-  uploaderProfile = null
+  uploaderProfile = null,
+  showResolvedUploader = false
 }: MarketItemCardProps) {
   const formatMetricValue = (value: number | null): string => {
     if (value === null) return "0"
@@ -268,9 +295,6 @@ function MarketItemCard({
   const isFeatured = item.featured === "精品"
   const itemTag = item.tag?.trim()
   const isSkillCard = skillCallCount !== null || skillUserCount !== null
-  const uploaderSapId = uploaderProfile?.sapId || item.user_id || ""
-  const uploaderUserName = uploaderProfile?.userName || ""
-  const uploaderOrgName = uploaderProfile?.orgName || ""
 
   return (
     <div
@@ -375,20 +399,14 @@ function MarketItemCard({
             </div>
           )}
           {item.user_id ? (
-            item.user_id.includes(" / ") ? (
-              <span> {item.user_id}</span>
-            ) : (
-              <div className="flex items-center gap-1">
-                <User className="size-3 shrink-0" />
-                {isSkillCard ? (
-                  <span>
-                    {uploaderSapId || "—"} / {uploaderUserName || ""} / {uploaderOrgName || ""}
-                  </span>
-                ) : (
-                  <span>用户 {item.user_id}</span>
-                )}
-              </div>
-            )
+            <div className="flex items-center gap-1">
+              <User className="size-3 shrink-0" />
+              {showResolvedUploader ? (
+                renderUploaderProfile(uploaderProfile, item.user_id)
+              ) : (
+                <span>用户 {item.user_id}</span>
+              )}
+            </div>
           ) : null}
         </div>
 
@@ -782,73 +800,47 @@ export function MarketPanel(): React.JSX.Element {
   }, [])
 
   const loadUploaderProfiles = useCallback(async (sapIds: string[]) => {
-    const normalizedIds = Array.from(new Set(sapIds.map((id) => id.trim()).filter(Boolean)))
-    if (normalizedIds.length === 0) {
+    const rawUserIds = Array.from(new Set(sapIds.map((id) => id.trim()).filter(Boolean)))
+    if (rawUserIds.length === 0) {
       setUploaderProfiles({})
       return
     }
 
-    if (typeof window.api?.dashboard?.userProfiles !== "function") {
-      const fallback = Object.fromEntries(
-        normalizedIds.map((sapId) => [sapId, { sapId, userName: "", orgName: "" }])
-      )
-      setUploaderProfiles(fallback)
+    if (typeof window.api?.dashboard?.queryAllUser !== "function") {
+      setUploaderProfiles({})
       return
     }
 
     try {
-      const response = await window.api.dashboard.userProfiles(normalizedIds)
+      const response = await window.api.dashboard.queryAllUser()
       if (!response.success || !response.data) {
-        throw new Error(response.error || "获取上传用户信息失败")
-      }
-      const buckets =
-        (
-          response.data as {
-            aggregations?: {
-              by_sap?: {
-                buckets?: Array<{
-                  key?: string
-                  user_name?: { buckets?: Array<{ key?: string }> }
-                  org_name?: { buckets?: Array<{ key?: string }> }
-                }>
-              }
-            }
-          }
-        ).aggregations?.by_sap?.buckets ?? []
-
-      const profileBySapId: Record<string, UploaderProfile> = {}
-      for (const bucket of buckets) {
-        const sapId = bucket.key?.trim()
-        if (!sapId) continue
-        profileBySapId[sapId] = {
-          sapId,
-          userName: bucket.user_name?.buckets?.[0]?.key ?? "",
-          orgName: bucket.org_name?.buckets?.[0]?.key ?? ""
-        }
+        throw new Error(response.error || "获取全量用户信息失败")
       }
 
-      const profileEntries = Object.entries(profileBySapId)
+      const allUsers = response.data.filter((user) => user.sapId?.trim())
       const nextMap: Record<string, UploaderProfile> = {}
-      for (const rawId of normalizedIds) {
-        if (profileBySapId[rawId]) {
-          nextMap[rawId] = profileBySapId[rawId]
-          continue
-        }
-
-        const includeHit = profileEntries.find(([sapId]) => sapId.includes(rawId))?.[1]
-        if (includeHit) {
-          nextMap[rawId] = includeHit
-        } else {
-          nextMap[rawId] = { sapId: rawId, userName: "", orgName: "" }
+      for (const rawUserId of rawUserIds) {
+        const lookupIds = buildUploaderIdCandidates(rawUserId)
+        const target = allUsers.find((user) =>
+          lookupIds.some((lookupId) => user.sapId.includes(lookupId))
+        )
+        if (!target) continue
+        nextMap[rawUserId] = {
+          sapId: target.sapId,
+          userName: target.userName,
+          orgName: formatTopUserOrgName(
+            target.orgName || "",
+            target.upperOrgLv1 || "",
+            target.upperOrgLv0 || ""
+          ),
+          upperOrgLv0: target.upperOrgLv0,
+          upperOrgLv1: target.upperOrgLv1
         }
       }
       setUploaderProfiles(nextMap)
     } catch (err) {
       console.warn("[MarketPanel] Failed to load uploader profiles:", err)
-      const fallback = Object.fromEntries(
-        normalizedIds.map((sapId) => [sapId, { sapId, userName: "", orgName: "" }])
-      )
-      setUploaderProfiles(fallback)
+      setUploaderProfiles({})
     }
   }, [])
 
@@ -1011,13 +1003,15 @@ export function MarketPanel(): React.JSX.Element {
   }, [installedSkills])
 
   useEffect(() => {
-    if (activeTab !== "skill") {
+    if (activeTab === ORG_SKILL_MARKET_TYPE) {
       setUploaderProfiles({})
       return
     }
-    const sapIds = skillsData.map((item) => item.user_id?.trim() || "").filter(Boolean)
+    const sourceItems =
+      activeTab === "skill" ? skillsData : activeTab === "mcp" ? mcpsData : pluginsData
+    const sapIds = sourceItems.map((item) => item.user_id?.trim() || "").filter(Boolean)
     void loadUploaderProfiles(sapIds)
-  }, [activeTab, skillsData, loadUploaderProfiles, reloadToken])
+  }, [activeTab, skillsData, mcpsData, pluginsData, loadUploaderProfiles, reloadToken])
 
   useEffect(() => {
     setMcpsData((prev) =>
@@ -1328,8 +1322,9 @@ export function MarketPanel(): React.JSX.Element {
       ? // 详情视图优先用实时查询值；若未加载到则回退列表汇总值。
         (selectedSkillUsage?.uniqueUsersCount ?? selectedSkillMetrics?.users ?? 0)
       : null
+  const shouldResolveUploader = activeTab !== ORG_SKILL_MARKET_TYPE
   const selectedUploaderProfile =
-    activeTab === "skill" && selectedItem?.user_id
+    shouldResolveUploader && selectedItem?.user_id
       ? (uploaderProfiles[selectedItem.user_id] ?? null)
       : null
   const selectedSkillUsageRows = useMemo(() => {
@@ -2220,19 +2215,10 @@ export function MarketPanel(): React.JSX.Element {
                       </span>
                     )}
                     {selectedItem.user_id ? (
-                      selectedItem.user_id.includes(" / ") ? (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-[#f5f4ed] border border-[#e8e6dc] text-[#5e5d59] px-2.5 py-1">
-                          <User className="size-3" />
-                          {selectedItem.user_id}
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-[#f5f4ed] border border-[#e8e6dc] text-[#5e5d59] px-2.5 py-1">
-                          <User className="size-3" />
-                          {selectedUploaderProfile?.sapId || selectedItem.user_id}/
-                          {selectedUploaderProfile?.userName || ""}/
-                          {selectedUploaderProfile?.orgName || ""}
-                        </span>
-                      )
+                      <span className="inline-flex items-center gap-1 rounded-full bg-[#f5f4ed] border border-[#e8e6dc] text-[#5e5d59] px-2.5 py-1">
+                        <User className="size-3" />
+                        {renderUploaderProfile(selectedUploaderProfile, selectedItem.user_id)}
+                      </span>
                     ) : null}
                     {activeTab === "skill" && selectedSkillCallCount !== null && (
                       <span className="inline-flex items-center gap-1.5 rounded-full border border-[#d7e2f5] bg-[linear-gradient(135deg,#f4f8ff_0%,#e9f1ff_100%)] text-[#365d97] px-3 py-1">
@@ -2656,10 +2642,11 @@ export function MarketPanel(): React.JSX.Element {
                                     : null
                                 }
                                 uploaderProfile={
-                                  activeTab === "skill" && item.user_id
+                                  shouldResolveUploader && item.user_id
                                     ? (uploaderProfiles[item.user_id] ?? null)
                                     : null
                                 }
+                                showResolvedUploader={shouldResolveUploader}
                               />
                             ))}
                           </div>

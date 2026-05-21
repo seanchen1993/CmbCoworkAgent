@@ -230,6 +230,14 @@ interface DashboardUserListOptions {
   afterKey?: Record<string, string | number> | null
 }
 
+interface DashboardAllUserItem {
+  sapId: string
+  userName: string
+  orgName: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+}
+
 interface DashboardUserDetailOptions {
   traceLimit?: number
 }
@@ -1087,6 +1095,11 @@ interface CustomAPI {
     userProfiles: (
       sapIds: string[]
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    queryAllUser: () => Promise<{
+      success: boolean
+      data?: DashboardAllUserItem[]
+      error?: string
+    }>
     productivity: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom"

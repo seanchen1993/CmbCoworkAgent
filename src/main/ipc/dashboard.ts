@@ -112,6 +112,14 @@ interface TimeRange {
 
 type Granularity = "day" | "week" | "month" | "custom"
 
+interface DashboardAllUserItem {
+  sapId: string
+  userName: string
+  orgName: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+}
+
 interface DashboardTraceDetail {
   traceId: string
   threadId: string
@@ -1339,6 +1347,86 @@ async function fetchUserProfilesBySapIds(sapIds: string[]): Promise<unknown> {
   return esQuery(getEsIndex("trace"), body)
 }
 
+async function queryAllUser(): Promise<DashboardAllUserItem[]> {
+  const users: DashboardAllUserItem[] = []
+  let afterKey: Record<string, string> | undefined
+
+  do {
+    const body = {
+      size: 0,
+      query: {
+        bool: {
+          filter: [buildNonEmptySapIdFilter()]
+        }
+      },
+      aggs: {
+        by_sap: {
+          composite: {
+            size: 1000,
+            sources: [{ sapId: { terms: { field: "sapId" } } }],
+            ...(afterKey ? { after: afterKey } : {})
+          },
+          aggs: {
+            latest_user_info: {
+              top_hits: {
+                size: 1,
+                sort: [{ startedAt: { order: "desc" } }],
+                _source: {
+                  includes: ["userName", "orgName", "upperOrgLv0", "upperOrgLv1"]
+                }
+              }
+            },
+            user_name: { terms: { field: "userName", size: 1 } },
+            org_name: { terms: { field: "orgName", size: 1 } }
+          }
+        }
+      }
+    }
+
+    const response = (await esQuery(getEsIndex("trace"), body)) as {
+      aggregations?: {
+        by_sap?: {
+          after_key?: Record<string, string>
+          buckets?: Array<{
+            key?: { sapId?: string }
+            user_name?: { buckets?: Array<{ key?: string }> }
+            org_name?: { buckets?: Array<{ key?: string }> }
+            latest_user_info?: {
+              hits?: {
+                hits?: Array<{
+                  _source?: {
+                    userName?: string
+                    orgName?: string
+                    upperOrgLv0?: string
+                    upperOrgLv1?: string
+                  }
+                }>
+              }
+            }
+          }>
+        }
+      }
+    }
+
+    for (const bucket of response.aggregations?.by_sap?.buckets ?? []) {
+      const sapId = String(bucket.key?.sapId || "").trim()
+      if (!sapId) continue
+      const latestUserInfo = bucket.latest_user_info?.hits?.hits?.[0]?._source
+      users.push({
+        sapId,
+        userName: latestUserInfo?.userName ?? bucket.user_name?.buckets?.[0]?.key ?? "",
+        orgName: latestUserInfo?.orgName ?? bucket.org_name?.buckets?.[0]?.key ?? "",
+        upperOrgLv0: latestUserInfo?.upperOrgLv0 ?? "",
+        upperOrgLv1: latestUserInfo?.upperOrgLv1 ?? ""
+      })
+    }
+
+    afterKey = response.aggregations?.by_sap?.after_key
+  } while (afterKey)
+
+  return users
+}
+
 async function fetchProductivity(range: TimeRange, granularity: Granularity): Promise<unknown> {
   const interval = getCalendarInterval(granularity, range.from, range.to)
   const body = {
@@ -2204,6 +2292,19 @@ function makeMockUserProfilesBySapIds(sapIds: string[]): unknown {
   }
 }
 
+function makeMockAllUsers(): DashboardAllUserItem[] {
+  return Array.from({ length: 80 }, (_, index) => {
+    const user = makeMockDashboardUser(index)
+    return {
+      sapId: user.sapId,
+      userName: user.userName,
+      orgName: user.orgName || "",
+      upperOrgLv0: user.upperOrgLv0 || "",
+      upperOrgLv1: user.upperOrgLv1 || ""
+    }
+  })
+}
+
 function makeMockDashboardUser(index: number): DashboardUserListItem {
   const names = ["张三", "李四", "王五", "赵六", "钱七", "孙八", "周九", "吴十"]
   const orgs = [
@@ -2750,6 +2851,21 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data: await fetchUserProfilesBySapIds(sanitizedSapIds) }
       } catch (e) {
         console.error("[Dashboard] userProfiles error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:queryAllUser",
+    async () => {
+      if (import.meta.env.DEV) {
+        return { success: true, data: makeMockAllUsers() }
+      }
+      try {
+        return { success: true, data: await queryAllUser() }
+      } catch (e) {
+        console.error("[Dashboard] queryAllUser error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }
