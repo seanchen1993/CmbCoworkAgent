@@ -503,7 +503,7 @@ function getSelectedPet(): PetListItem | null {
 
 function closePetWindow(): void {
   stopPetHoverPolling()
-  closePetBubble("pet-window-close")
+  destroyPetBubble("pet-window-close")
   if (petWindow && !petWindow.isDestroyed()) {
     petWindow.close()
   }
@@ -684,7 +684,7 @@ function clearPetCompletedTaskNotices(): void {
   if (completedTaskNotices.length === 0) return
   completedTaskNotices.splice(0, completedTaskNotices.length)
   updatePetTaskTag()
-  closePetBubble("clear-completed-tasks")
+  destroyPetBubble("clear-completed-tasks")
 }
 
 /**
@@ -1205,7 +1205,7 @@ export function createPetWindow(): void {
   currentWindow.on("closed", () => {
     if (petWindow !== currentWindow) return
     stopPetHoverPolling()
-    closePetBubble("pet-window-closed")
+    destroyPetBubble("pet-window-closed")
     petWindow = null
     petMoveLastX = null
     petDragOffset = null
@@ -1256,7 +1256,7 @@ function schedulePetBubbleHide(): void {
   cancelPetBubbleHide()
   petBubbleHideTimer = setTimeout(() => {
     petBubbleHideTimer = null
-    closePetBubble("task-tag-leave-delay")
+    hidePetBubble("task-tag-leave-delay")
   }, 260)
 }
 
@@ -1329,7 +1329,7 @@ function showPetBubble(message: string, autoHideMs = PET_BUBBLE_AUTO_HIDE_MS): v
       if (petBubbleWindow !== createdBubbleWindow || createdBubbleWindow.isDestroyed()) return
       if (title.startsWith("pet-bubble-done:")) {
         logPetWindowDebug("[Pets] Bubble auto-hide timer fired", { title })
-        closePetBubble("bubble-auto-hide")
+        hidePetBubble("bubble-auto-hide")
         return
       }
       if (title.startsWith("pet-bubble-pointer:")) {
@@ -1481,7 +1481,7 @@ function showPetGreetingBubble(): void {
  */
 function showPetTaskBubble(): void {
   if (completedTaskNotices.length === 0) {
-    closePetBubble("task-bubble-empty")
+    hidePetBubble("task-bubble-empty")
     return
   }
   showPetBubble(`主人，有 ${completedTaskNotices.length} 个任务已完成～`)
@@ -1493,18 +1493,35 @@ function showPetTaskBubble(): void {
  * 只在当前没有气泡时展示，避免覆盖问候、任务完成等更明确的消息。
  */
 function showPetHoverBubbleIfIdle(): void {
-  if (petBubbleWindow && !petBubbleWindow.isDestroyed()) return
+  if (petBubbleWindow && !petBubbleWindow.isDestroyed() && petBubbleWindow.isVisible()) return
   const message = PET_HOVER_MESSAGES[Math.floor(Math.random() * PET_HOVER_MESSAGES.length)]
   showPetBubble(message)
 }
 
 /**
- * 关闭当前统一宠物气泡窗口。
+ * 临时隐藏当前统一宠物气泡窗口。
  */
-function closePetBubble(reason = "unknown"): void {
+function hidePetBubble(reason = "unknown"): void {
   cancelPetBubbleHide()
   const bubbleWindow = petBubbleWindow
-  logPetWindowDebug("[Pets] closePetBubble invoked", {
+  logPetWindowDebug("[Pets] hidePetBubble invoked", {
+    reason,
+    hasBubbleWindow: Boolean(bubbleWindow),
+    bubbleWindowDestroyed: bubbleWindow?.isDestroyed() ?? null
+  })
+  if (bubbleWindow && !bubbleWindow.isDestroyed()) {
+    rememberPetBubbleBounds(bubbleWindow.getBounds())
+    bubbleWindow.hide()
+  }
+}
+
+/**
+ * 销毁当前统一宠物气泡窗口。
+ */
+function destroyPetBubble(reason = "unknown"): void {
+  cancelPetBubbleHide()
+  const bubbleWindow = petBubbleWindow
+  logPetWindowDebug("[Pets] destroyPetBubble invoked", {
     reason,
     hasBubbleWindow: Boolean(bubbleWindow),
     bubbleWindowDestroyed: bubbleWindow?.isDestroyed() ?? null
