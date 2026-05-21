@@ -19,7 +19,6 @@ import type { ApprovalStore } from "../approval-store"
 import type { McpCapabilityService } from "../../mcp/capability-types"
 
 const DEFAULT_TIMEOUT_MS = CODE_EXEC_DEFAULT_TIMEOUT_MS
-const SAVE_TOOL_REWRITE_FAILED_NOTE = "工具化改写失败，请点拒绝关闭。"
 const SAVED_TOOL_REWRITE_SYSTEM_PROMPT = `
 # ROLE
 You are an expert Node.js developer. Your task is to refactor specific JavaScript async function bodies into highly reusable, generalized function bodies.
@@ -174,6 +173,11 @@ interface SavedToolRewrite {
   inputSchema: Record<string, unknown>
 }
 
+interface SavedToolRewriteResult {
+  rewrite: SavedToolRewrite | null
+  error?: string
+}
+
 function mapDecisionToReview(type: ApprovalDecision["type"]): "approved" | "approved_session" | "denied" {
   switch (type) {
     case "approve":
@@ -222,7 +226,7 @@ async function requestCodeExecApproval(
         code: input.code,
         timeoutMs: DEFAULT_TIMEOUT_MS,
         cwd: context.workspacePath,
-        reason: "执行 code_exec 脚本需要审批",
+        reason: "执行编程式工具调用脚本需要审批",
         allowed_decisions: ["approve", "reject"],
         allowed_approval_types: ["approve", "approve_session", "reject"]
       })
@@ -273,13 +277,14 @@ function maybePromoteCodeExecAsTool(
 
       if (prepareApproval?.type !== "approve") return
 
-      const rewrite = await generateSavedToolRewrite(context, {
+      const rewriteResult = await generateSavedToolRewrite(context, {
         code: input.code,
         mcpCalls: result.meta?.mcpCalls ?? []
       })
+      const rewrite = rewriteResult.rewrite
 
       const dependencies = Array.from(new Set((result.meta?.mcpCalls ?? []).map((call) => call.toolId).filter(Boolean)))
-      const metadataError = rewrite ? undefined : SAVE_TOOL_REWRITE_FAILED_NOTE
+      const metadataError = rewrite ? undefined : rewriteResult.error
       const draft = rewrite
         ? buildSavedCodeExecToolDraft({
           toolName: rewrite.toolName,
@@ -308,8 +313,8 @@ function maybePromoteCodeExecAsTool(
         savedToolMetadataError: metadataError,
         cwd: context.workspacePath,
         reason: metadataError
-          ? "工具化改写失败，点拒绝关闭"
-          : "工具信息已生成，确认后保存为可复用工具。可在自定义-编程式调用页面管理/启用",
+          ? ""
+          : "工具已生成，保存后可在自定义-编程式调用页面管理",
         allowed_decisions: metadataError ? ["reject"] : ["approve", "reject"],
         allowed_approval_types: metadataError ? ["reject"] : ["approve", "reject"]
       })
@@ -485,11 +490,11 @@ async function generateSavedToolRewrite(
     code: string
     mcpCalls: CodeExecMcpCall[]
   }
-): Promise<SavedToolRewrite | null> {
+): Promise<SavedToolRewriteResult> {
   const config = resolveSidecarModelConfig(context.modelId)
   if (!config?.apiKey) {
-    console.warn("[code_exec] skipped saved-tool rewrite generation: missing model config or API key")
-    return null
+    const error = "缺少可用于工具改写的模型配置或 API Key"
+    return { rewrite: null, error }
   }
 
   const model = new ChatOpenAI({
@@ -517,14 +522,20 @@ async function generateSavedToolRewrite(
     const raw = extractResponseText(response.content).trim()
     const rewrite = parseSavedToolRewrite(raw)
     if (!rewrite) {
-      console.warn("[code_exec] failed to parse saved-tool rewrite response:", raw.slice(0, 2000))
-      return null
+      console.warn("[code_exec] failed to parse saved-tool rewrite response:", raw.slice(0, 200))
+      return { rewrite: null, error: "工具信息无法解析" }
     }
-    return rewrite
+    return { rewrite }
   } catch (error) {
     console.warn("[code_exec] failed to generate saved-tool rewrite:", error)
-    return null
+    return { rewrite: null, error: getErrorMessage(error) || "LLM API请求失败" }
   }
+}
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message
+  if (typeof error === "string") return error
+  return ""
 }
 
 export function createCodeExecTool(context: CodeExecToolContext) {
