@@ -8,6 +8,7 @@
 
 import { ipcMain, dialog, BrowserWindow } from "electron"
 import * as fs from "fs"
+import AdmZip from "adm-zip"
 import { buildTraceTree } from "../agent/trace/tree-builder"
 import type { AgentTrace, TraceNode } from "../agent/trace/types"
 import { getSkillIdentifierLookupTerms } from "../utils/skill-identifiers"
@@ -236,6 +237,15 @@ interface TracePageOptions {
   limit?: number
 }
 
+interface DashboardTraceExportPayload {
+  skill: string
+  range: TimeRange
+  page: number
+  pageSize: number
+  totalTraces: number
+  traces: DashboardTraceDetail[]
+}
+
 interface CommitDetailsOptions {
   page?: number
   pageSize?: number
@@ -269,6 +279,136 @@ function timeRangeFilter(field: string, range: TimeRange): Record<string, unknow
 
 function escapeWildcard(value: string): string {
   return value.replace(/[\\*?]/g, "\\$&")
+}
+
+function safeExportFileName(value: string): string {
+  const cleaned = value
+    .trim()
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "-")
+    .replace(/\s+/g, " ")
+    .replace(/-+/g, "-")
+    .slice(0, 80)
+    .trim()
+
+  return cleaned || "skill-traces"
+}
+
+function escapeMarkdown(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/`/g, "\\`")
+}
+
+function stringifyExportValue(value: unknown): string {
+  if (value === undefined) return ""
+  if (typeof value === "string") return value
+
+  const seen = new WeakSet<object>()
+  try {
+    return JSON.stringify(
+      value,
+      (_key, item) => {
+        if (typeof item === "bigint") return item.toString()
+        if (typeof item === "function") return `[Function ${item.name || "anonymous"}]`
+        if (typeof item === "symbol") return item.toString()
+        if (item && typeof item === "object") {
+          if (seen.has(item)) return "[Circular]"
+          seen.add(item)
+        }
+        return item
+      },
+      2
+    )
+  } catch {
+    return String(value)
+  }
+}
+
+function formatTraceExportMarkdown(payload: DashboardTraceExportPayload, exportedAt: string): string {
+  const lines: string[] = [
+    `# Skill 会话历史 · ${escapeMarkdown(payload.skill || "-")}`,
+    "",
+    `- Skill: \`${escapeMarkdown(payload.skill || "-")}\``,
+    `- Range: ${payload.range.from} 至 ${payload.range.to}`,
+    `- Page: ${payload.page}`,
+    `- Page Size: ${payload.pageSize}`,
+    `- Total Traces: ${payload.totalTraces}`,
+    `- Exported: ${exportedAt}`,
+    ""
+  ]
+
+  for (const trace of payload.traces) {
+    lines.push(`## Trace ${escapeMarkdown(trace.traceId || "-")}`, "")
+    lines.push(`- Thread ID: \`${escapeMarkdown(trace.threadId || "-")}\``)
+    lines.push(`- Time: ${trace.startedAt || "-"}`)
+    lines.push(`- Outcome: ${trace.outcome || "-"}`)
+    lines.push(`- Duration: ${Math.round(trace.durationMs || 0)}ms`)
+    lines.push(`- Model: ${escapeMarkdown(trace.modelName || trace.modelId || "-")}`)
+    lines.push(`- Tool Calls: ${trace.totalToolCalls}`)
+    lines.push(`- Tokens: ${trace.totalTokens} (input ${trace.totalInputTokens}, output ${trace.totalOutputTokens})`)
+    if (trace.userName || trace.sapId || trace.ystId) {
+      lines.push(
+        `- User: ${escapeMarkdown(trace.userName || "-")} / ${escapeMarkdown(trace.sapId || "-")} / ${escapeMarkdown(trace.ystId || "-")}`
+      )
+    }
+    if (trace.usedSkills.length > 0) {
+      lines.push(`- Skills: ${trace.usedSkills.map((skill) => `\`${escapeMarkdown(skill)}\``).join(", ")}`)
+    }
+    lines.push("")
+
+    if (trace.userMessage.trim()) {
+      lines.push("### User Message", "", trace.userMessage.trim(), "")
+    }
+
+    if (trace.nodes && trace.nodes.length > 0) {
+      lines.push("### Trace Nodes", "")
+      for (const node of trace.nodes) {
+        lines.push(`#### ${escapeMarkdown(node.type)} · ${escapeMarkdown(node.name || node.id)}`, "")
+        const metadata = [
+          `id: \`${escapeMarkdown(node.id)}\``,
+          node.parentId ? `parent: \`${escapeMarkdown(node.parentId)}\`` : null,
+          node.status ? `status: \`${escapeMarkdown(node.status)}\`` : null,
+          `startedAt: ${node.startedAt}`,
+          node.endedAt ? `endedAt: ${node.endedAt}` : null
+        ].filter(Boolean)
+        lines.push(`_${metadata.join(", ")}_`, "")
+        if (node.input !== undefined) {
+          lines.push("INPUT", "", "```json", stringifyExportValue(node.input), "```", "")
+        }
+        if (node.output !== undefined) {
+          lines.push("OUTPUT", "", "```json", stringifyExportValue(node.output), "```", "")
+        }
+        if (node.metadata && Object.keys(node.metadata).length > 0) {
+          lines.push("METADATA", "", "```json", stringifyExportValue(node.metadata), "```", "")
+        }
+      }
+    } else {
+      lines.push("### Trace Summary", "", "```json", stringifyExportValue(trace), "```", "")
+    }
+  }
+
+  return `${lines.join("\n").trimEnd()}\n`
+}
+
+function normalizeTraceExportPayload(value: unknown): DashboardTraceExportPayload {
+  const payload = asRecord(value)
+  const skill = asString(payload.skill).trim()
+  const range = asRecord(payload.range)
+  const traces = Array.isArray(payload.traces)
+    ? payload.traces.map((trace) => trace as DashboardTraceDetail)
+    : []
+  const page = typeof payload.page === "number" ? payload.page : undefined
+  const pageSize = typeof payload.pageSize === "number" ? payload.pageSize : undefined
+
+  return {
+    skill,
+    range: {
+      from: asString(range.from),
+      to: asString(range.to)
+    },
+    page: clampLimit(page, 1, 1000),
+    pageSize: clampLimit(pageSize, 10, 50),
+    totalTraces: asNumber(payload.totalTraces, traces.length),
+    traces
+  }
 }
 
 /**
@@ -2935,6 +3075,40 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
       }
     }
   )
+
+  _ipcMain.handle("dashboard:exportSkillTraces", async (event, rawPayload: unknown) => {
+    try {
+      const payload = normalizeTraceExportPayload(rawPayload)
+      if (!payload.skill) return { success: false, error: "skill is required" }
+      if (payload.traces.length === 0) return { success: false, error: "暂无可导出的会话记录" }
+
+      const exportedAt = new Date().toISOString()
+      const date = exportedAt.slice(0, 10)
+      const win = BrowserWindow.fromWebContents(event.sender) ?? BrowserWindow.getFocusedWindow()
+      const result = await dialog.showSaveDialog(win ?? BrowserWindow.getAllWindows()[0], {
+        title: "导出 Skill 会话历史",
+        defaultPath: `${safeExportFileName(payload.skill)}-traces-page-${payload.page}-${date}.zip`,
+        filters: [{ name: "Zip Archive", extensions: ["zip"] }]
+      })
+
+      if (result.canceled || !result.filePath) {
+        return { success: false, canceled: true }
+      }
+
+      const zip = new AdmZip()
+      zip.addFile("traces.md", Buffer.from(formatTraceExportMarkdown(payload, exportedAt), "utf-8"))
+      zip.addFile(
+        "traces.json",
+        Buffer.from(`${stringifyExportValue({ version: 1, exportedAt, ...payload })}\n`, "utf-8")
+      )
+      zip.writeZip(result.filePath)
+
+      return { success: true, filePath: result.filePath }
+    } catch (e) {
+      console.error("[Dashboard] exportSkillTraces error:", e)
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
 
   _ipcMain.handle(
     "dashboard:exportExcel",

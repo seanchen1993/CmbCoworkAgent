@@ -10,6 +10,7 @@ import {
   Clock,
   Code2,
   Coins,
+  Download,
   Gauge,
   Hash,
   Info,
@@ -660,6 +661,8 @@ export function TraceHistoryDialog({
   totalTraces = traces.length,
   onTracePrevious,
   onTraceNext,
+  onExportPage,
+  exporting = false,
   loading,
   error
 }: {
@@ -673,6 +676,8 @@ export function TraceHistoryDialog({
   totalTraces?: number
   onTracePrevious?: () => void
   onTraceNext?: () => void
+  onExportPage?: () => void
+  exporting?: boolean
   loading: boolean
   error: string | null
 }): React.JSX.Element {
@@ -695,6 +700,17 @@ export function TraceHistoryDialog({
           subtitle={`共 ${displayTotalTraces.toLocaleString("zh-CN")} 条，选择记录查看完整执行树`}
           headerRight={
             <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="gap-1"
+                onClick={onExportPage}
+                disabled={exporting || loading || traces.length === 0}
+              >
+                {exporting ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
+                导出本页
+              </Button>
               <Button
                 type="button"
                 variant="outline"

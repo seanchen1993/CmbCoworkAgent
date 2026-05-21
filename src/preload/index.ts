@@ -1867,6 +1867,17 @@ const api = {
       options?: { page?: number; pageSize?: number; pushedOnly?: boolean }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:commitDetails", range, options),
+    exportSkillTraces: (
+      payload: {
+        skill: string
+        range: { from: string; to: string }
+        page: number
+        pageSize: number
+        totalTraces: number
+        traces: unknown[]
+      }
+    ): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> =>
+      ipcRenderer.invoke("dashboard:exportSkillTraces", payload),
     exportExcel: (
       sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>
     ): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> =>

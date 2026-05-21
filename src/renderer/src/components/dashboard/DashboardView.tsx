@@ -738,6 +738,7 @@ export function DashboardView(): React.JSX.Element {
   const [skillTracesLoading, setSkillTracesLoading] = useState(false)
   const [skillTracesError, setSkillTracesError] = useState<string | null>(null)
   const [skillTracePage, setSkillTracePage] = useState(1)
+  const [skillTraceExporting, setSkillTraceExporting] = useState(false)
   const [commitDialogOpen, setCommitDialogOpen] = useState(false)
   const [commitScopeLabel, setCommitScopeLabel] = useState("当前范围")
   const [commitDetailsRange, setCommitDetailsRange] = useState<TimeRange | null>(null)
@@ -930,6 +931,28 @@ export function DashboardView(): React.JSX.Element {
     if (skillTracePage * pageSize >= skillDetail.totalTraces) return
     void handleSkillClick(selectedSkill, skillTracePage + 1)
   }, [handleSkillClick, selectedSkill, skillDetail, skillTracePage])
+
+  const handleSkillTraceExport = useCallback(async () => {
+    if (!selectedSkill || !skillDetail || skillDetail.traces.length === 0) return
+    setSkillTraceExporting(true)
+    try {
+      const result = await window.api.dashboard.exportSkillTraces({
+        skill: selectedSkill,
+        range,
+        page: skillTracePage,
+        pageSize: skillDetail.tracePageSize || SKILL_TRACE_PAGE_SIZE,
+        totalTraces: skillDetail.totalTraces,
+        traces: skillDetail.traces
+      })
+      if (!result.success && !result.canceled) {
+        window.alert(result.error || "导出会话记录失败")
+      }
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : "导出会话记录失败")
+    } finally {
+      setSkillTraceExporting(false)
+    }
+  }, [range, selectedSkill, skillDetail, skillTracePage])
 
   const loadUserList = useCallback(
     async (
@@ -1498,6 +1521,8 @@ export function DashboardView(): React.JSX.Element {
         totalTraces={skillDetail?.totalTraces ?? skillDetail?.traces.length}
         onTracePrevious={handleSkillTracePrevious}
         onTraceNext={handleSkillTraceNext}
+        onExportPage={handleSkillTraceExport}
+        exporting={skillTraceExporting}
         loading={skillTracesLoading}
         error={skillTracesError}
       />

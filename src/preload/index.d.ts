@@ -1131,6 +1131,14 @@ interface CustomAPI {
       data?: { total: number; page: number; pageSize: number; pushedOnly: boolean; items: DashboardCommitDetail[] }
       error?: string
     }>
+    exportSkillTraces: (payload: {
+      skill: string
+      range: { from: string; to: string }
+      page: number
+      pageSize: number
+      totalTraces: number
+      traces: DashboardTraceDetail[]
+    }) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
     exportExcel: (
       sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>
     ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
