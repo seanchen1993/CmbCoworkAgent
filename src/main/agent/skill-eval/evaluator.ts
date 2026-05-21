@@ -1,4 +1,5 @@
 import type { AgentTrace, TraceNode } from "../trace/types"
+import { parseSkillNameVersionIdentifier } from "../../utils/skill-identifiers"
 
 const DEFAULT_SKILL_EVAL_TOOL_BUDGET = 40
 
@@ -55,16 +56,6 @@ const OUTCOME_SCORE_WEIGHT = 0.6
 const STEP_BUDGET = 12
 const MAX_CONSECUTIVE_SAME_CALL = 3
 const AVG_PROMPT_INPUT_TOKEN_BUDGET = 48_000
-
-function parseSkill(raw: string): { skillName: string; skillVersion?: string } {
-  const text = String(raw || "")
-    .trim()
-    .replace(/^\$/, "")
-    .replace(/\.(zip|tar\.gz|tgz|md)$/i, "")
-  const match = text.match(/^(.*?)-(v\d+(?:\.\d+){0,3})$/)
-  if (!match) return { skillName: text || "unknown" }
-  return { skillName: match[1] || text, skillVersion: match[2] }
-}
 
 function nodeHasError(node: TraceNode): boolean {
   return node.status === "error" || node.type === "error" || Boolean(node.metadata?.error)
@@ -356,7 +347,7 @@ export function evaluateTraceSkills(trace: AgentTrace): SkillEvalRecord[] {
   const evaluatedAt = new Date().toISOString()
 
   return trace.usedSkills.map((rawSkillName) => {
-    const { skillName, skillVersion } = parseSkill(rawSkillName)
+    const { skillName, skillVersion } = parseSkillNameVersionIdentifier(rawSkillName)
     return {
       id: `${trace.traceId}:${rawSkillName}`,
       traceId: trace.traceId,

@@ -1232,6 +1232,30 @@ function emptySkillEvalSummary(): DashboardSkillEvalSummary {
   }
 }
 
+function mergeSkillEvalRecentOnly(
+  current: DashboardSkillEvalSummary,
+  next: DashboardSkillEvalSummary
+): DashboardSkillEvalSummary {
+  const updatedSkillByKey = new Map(
+    next.skills.map((skill) => [dashboardSkillEvalKey(skill.skillName, skill.skillVersion), skill])
+  )
+
+  return {
+    ...current,
+    generatedAt: next.generatedAt,
+    totalTraceHits: next.totalTraceHits,
+    evaluatedTraceCount: next.evaluatedTraceCount,
+    sampledTraceCount: next.sampledTraceCount,
+    recentTotal: next.recentTotal,
+    recentPage: next.recentPage,
+    recentPageSize: next.recentPageSize,
+    recent: next.recent,
+    skills: current.skills.map((skill) =>
+      updatedSkillByKey.get(dashboardSkillEvalKey(skill.skillName, skill.skillVersion)) ?? skill
+    )
+  }
+}
+
 async function loadSkillEvalSummarySafely(
   range: TimeRange,
   options: DashboardSkillEvalOptions = {}
@@ -1366,24 +1390,7 @@ export function useDashboard() {
       })
       setSkillEval((current) => (
         filter?.recentOnly && current
-          ? {
-              ...current,
-              generatedAt: nextSkillEval.generatedAt,
-              totalTraceHits: nextSkillEval.totalTraceHits,
-              evaluatedTraceCount: nextSkillEval.evaluatedTraceCount,
-              sampledTraceCount: nextSkillEval.sampledTraceCount,
-              recentTotal: nextSkillEval.recentTotal,
-              recentPage: nextSkillEval.recentPage,
-              recentPageSize: nextSkillEval.recentPageSize,
-              recent: nextSkillEval.recent,
-              skills: current.skills.map((skill) => {
-                const updated = nextSkillEval.skills.find((item) =>
-                  dashboardSkillEvalKey(item.skillName, item.skillVersion) ===
-                    dashboardSkillEvalKey(skill.skillName, skill.skillVersion)
-                )
-                return updated ?? skill
-              })
-            }
+          ? mergeSkillEvalRecentOnly(current, nextSkillEval)
           : nextSkillEval
       ))
     } catch (e) {

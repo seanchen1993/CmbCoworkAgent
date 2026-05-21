@@ -3,7 +3,7 @@
  *
  * Operations overview and skill evaluation dashboard.
  */
-import { useState, useCallback, useEffect, useMemo } from "react"
+import { memo, useState, useCallback, useEffect, useMemo } from "react"
 import {
   RefreshCw,
   Loader2,
@@ -701,7 +701,7 @@ function DashboardTabBar({
   )
 }
 
-function SkillEvalStatTile({
+const SkillEvalStatTile = memo(function SkillEvalStatTile({
   label,
   value
 }: {
@@ -714,7 +714,7 @@ function SkillEvalStatTile({
       <div className="mt-1 text-xl font-semibold text-foreground tabular-nums">{value}</div>
     </div>
   )
-}
+})
 
 function skillEvalVersionLabel(skillName: string, skillVersion?: string): string {
   return skillVersion ? `${skillName} ${skillVersion}` : `${skillName} 未标版本`
@@ -745,11 +745,11 @@ function getLatestSkillEvalKey(data: DashboardSkillEvalSummary | null): string |
 }
 
 function skillEvalFilterForKey(
-  data: DashboardSkillEvalSummary | null,
+  skillByKey: Map<string, DashboardSkillEvalSummary["skills"][number]>,
   key: string | null
 ): { skillName?: string; skillVersion?: string } | undefined {
-  if (!data || !key) return undefined
-  const skill = data.skills.find((item) => skillEvalKey(item.skillName, item.skillVersion) === key)
+  if (!key) return undefined
+  const skill = skillByKey.get(key)
   if (!skill) return undefined
   return {
     skillName: skill.skillName,
@@ -757,20 +757,26 @@ function skillEvalFilterForKey(
   }
 }
 
-function SkillEvalSkillRow({
+const SkillEvalSkillRow = memo(function SkillEvalSkillRow({
   skill,
   active,
-  onClick
+  skillKey,
+  onSelect
 }: {
   skill: DashboardSkillEvalSummary["skills"][number]
   active: boolean
-  onClick: () => void
+  skillKey: string
+  onSelect: (key: string) => void
 }): React.JSX.Element {
+  const handleClick = useCallback(() => {
+    onSelect(skillKey)
+  }, [onSelect, skillKey])
+
   return (
     <button
       type="button"
-      onClick={onClick}
-      className={`grid w-full grid-cols-[minmax(0,1fr)_48px_72px] items-center gap-2 border-b border-border px-4 py-3 text-left text-sm hover:bg-muted/35 ${
+      onClick={handleClick}
+      className={`grid w-full grid-cols-[minmax(96px,1fr)_42px_50px_48px_48px_54px] items-center gap-2 border-b border-border px-4 py-3 text-left text-sm hover:bg-muted/35 ${
         active ? "bg-muted/45" : ""
       }`}
     >
@@ -780,29 +786,47 @@ function SkillEvalSkillRow({
           {skill.skillVersion ?? "未标版本"} · {formatRelativeTime(skill.lastRunAt)}
         </div>
       </div>
-      <div className="text-right tabular-nums text-muted-foreground">{skill.runs}</div>
-      <div className="text-right tabular-nums text-muted-foreground">
-        {formatRelativeTime(skill.lastRunAt)}
+      <div className="text-right text-xs tabular-nums text-muted-foreground">{formatNumber(skill.runs)}</div>
+      <div className="text-right text-xs tabular-nums text-muted-foreground">
+        {formatSkillEvalPercent(skill.passRate)}
+      </div>
+      <div className="text-right text-xs tabular-nums text-muted-foreground">
+        {formatSkillEvalPercent(skill.averageOutcomeScore)}
+      </div>
+      <div className="text-right text-xs tabular-nums text-muted-foreground">
+        {formatSkillEvalPercent(skill.averageScore)}
+      </div>
+      <div className="text-right text-xs tabular-nums text-muted-foreground">
+        {formatSkillEvalTokens(skill.averageTotalTokens)}
       </div>
     </button>
   )
-}
+})
 
-function SkillEvalRunRow({
+const SkillEvalRunRow = memo(function SkillEvalRunRow({
   run,
   onOpenTrace
 }: {
   run: DashboardSkillEvalRun
   onOpenTrace: (run: DashboardSkillEvalRun) => void
 }): React.JSX.Element {
-  const warnings = [...run.warnings, ...run.outcomeWarnings, ...run.resultWarnings].slice(0, 2)
-  const checks = [...run.checks, ...run.outcomeChecks]
+  const warnings = useMemo(
+    () => [...run.warnings, ...run.outcomeWarnings, ...run.resultWarnings].slice(0, 2),
+    [run.outcomeWarnings, run.resultWarnings, run.warnings]
+  )
+  const checks = useMemo(
+    () => [...run.checks, ...run.outcomeChecks],
+    [run.checks, run.outcomeChecks]
+  )
   const cacheTokens = run.cacheReadTokens + run.cacheCreationTokens
+  const handleClick = useCallback(() => {
+    onOpenTrace(run)
+  }, [onOpenTrace, run])
 
   return (
     <button
       type="button"
-      onClick={() => onOpenTrace(run)}
+      onClick={handleClick}
       className="w-full border-b border-border px-4 py-3 text-left transition-colors hover:bg-muted/35"
     >
       <div className="flex items-start gap-3">
@@ -937,11 +961,21 @@ function SkillEvalRunRow({
       </div>
     </button>
   )
-}
+})
 
-function SkillEvalRunSummary({ run }: { run: DashboardSkillEvalRun }): React.JSX.Element {
-  const warnings = [...run.warnings, ...run.outcomeWarnings, ...run.resultWarnings].slice(0, 3)
-  const checks = [...run.checks, ...run.outcomeChecks]
+const SkillEvalRunSummary = memo(function SkillEvalRunSummary({
+  run
+}: {
+  run: DashboardSkillEvalRun
+}): React.JSX.Element {
+  const warnings = useMemo(
+    () => [...run.warnings, ...run.outcomeWarnings, ...run.resultWarnings].slice(0, 3),
+    [run.outcomeWarnings, run.resultWarnings, run.warnings]
+  )
+  const checks = useMemo(
+    () => [...run.checks, ...run.outcomeChecks],
+    [run.checks, run.outcomeChecks]
+  )
   const cacheTokens = run.cacheReadTokens + run.cacheCreationTokens
 
   return (
@@ -1050,9 +1084,9 @@ function SkillEvalRunSummary({ run }: { run: DashboardSkillEvalRun }): React.JSX
       </div>
     </div>
   )
-}
+})
 
-function SkillEvalDashboardPanel({
+const SkillEvalDashboardPanel = memo(function SkillEvalDashboardPanel({
   data,
   loading,
   range,
@@ -1077,6 +1111,24 @@ function SkillEvalDashboardPanel({
   selectedSkillKey: string | null
   onSelectedSkillKeyChange: (key: string | null) => void
 }): React.JSX.Element {
+  const skillByKey = useMemo(
+    () => new Map((data?.skills ?? []).map((skill) => [
+      skillEvalKey(skill.skillName, skill.skillVersion),
+      skill
+    ])),
+    [data]
+  )
+
+  const handleAllRunsClick = useCallback(() => {
+    onSelectedSkillKeyChange(null)
+    onRecentPageChange(1, null)
+  }, [onRecentPageChange, onSelectedSkillKeyChange])
+
+  const handleSkillSelect = useCallback((key: string) => {
+    onSelectedSkillKeyChange(key)
+    onRecentPageChange(1, key)
+  }, [onRecentPageChange, onSelectedSkillKeyChange])
+
   if ((loading || mineSkillsLoading) && !data) {
     return (
       <div className="py-8 text-center text-sm text-muted-foreground">
@@ -1092,8 +1144,7 @@ function SkillEvalDashboardPanel({
   const recentTotalPages = Math.max(1, Math.ceil(recentTotal / recentPageSize))
   const canGoPrevious = recentPage > 1
   const canGoNext = recentPage < recentTotalPages
-  const selectedSkill =
-    data.skills.find((skill) => skillEvalKey(skill.skillName, skill.skillVersion) === selectedSkillKey) ?? null
+  const selectedSkill = selectedSkillKey ? skillByKey.get(selectedSkillKey) ?? null : null
   const filteredRuns = data.recent
   const selectedRunTotal = selectedSkill?.runs ?? data.totalRuns
   const selectedTotalTokens = selectedSkill
@@ -1134,10 +1185,13 @@ function SkillEvalDashboardPanel({
           <SkillEvalStatTile label="总 Token" value={formatSkillEvalTokens(selectedTotalTokens)} />
           <SkillEvalStatTile label="平均峰值输入" value={formatSkillEvalTokens(selectedSkill?.averagePeakInputTokens ?? data.averagePeakInputTokens)} />
         </div>
-        <div className="grid grid-cols-[minmax(0,1fr)_48px_72px] gap-2 border-b border-border px-4 py-2 text-[11px] font-medium text-muted-foreground">
+        <div className="grid grid-cols-[minmax(96px,1fr)_42px_50px_48px_48px_54px] gap-2 border-b border-border px-4 py-2 text-[11px] font-medium text-muted-foreground">
           <span>技能</span>
           <span className="text-right">次数</span>
-          <span className="text-right">最近</span>
+          <span className="text-right">通过率</span>
+          <span className="text-right">结束</span>
+          <span className="text-right">分数</span>
+          <span className="text-right">Token</span>
         </div>
         <ScrollArea className="min-h-0 flex-1">
           <div className="border-b border-border p-2">
@@ -1177,10 +1231,7 @@ function SkillEvalDashboardPanel({
           </div>
           <button
             type="button"
-            onClick={() => {
-              onSelectedSkillKeyChange(null)
-              onRecentPageChange(1, null)
-            }}
+            onClick={handleAllRunsClick}
             className={`w-full border-b border-border px-4 py-2 text-left text-xs text-muted-foreground hover:bg-muted/35 ${
               selectedSkillKey === null ? "bg-muted/45 text-foreground" : ""
             }`}
@@ -1194,10 +1245,8 @@ function SkillEvalDashboardPanel({
                 key={key}
                 skill={skill}
                 active={selectedSkillKey === key}
-                onClick={() => {
-                  onSelectedSkillKeyChange(key)
-                  onRecentPageChange(1, key)
-                }}
+                skillKey={key}
+                onSelect={handleSkillSelect}
               />
             )
           })}
@@ -1273,7 +1322,7 @@ function SkillEvalDashboardPanel({
       </main>
     </div>
   )
-}
+})
 
 export function DashboardView(): React.JSX.Element {
   const {
@@ -1344,51 +1393,68 @@ export function DashboardView(): React.JSX.Element {
     () => new Set(currentUserUploadCandidates),
     [currentUserUploadCandidates]
   )
-  const myUploadedSkillNames = useMemo(
-    () =>
-      Array.from(
-        new Set(
-          Array.from(marketSkillMap.values())
-            .filter((item) => isUploadedByCurrentUser(item, currentUserUploadCandidateSet))
-            .flatMap(getMarketSkillQueryNames)
-        )
-      ),
+  const myUploadedSkillEvalScope = useMemo(
+    () => {
+      const names = new Set<string>()
+      let count = 0
+
+      for (const item of marketSkillMap.values()) {
+        if (!isUploadedByCurrentUser(item, currentUserUploadCandidateSet)) continue
+        count += 1
+        for (const name of getMarketSkillQueryNames(item)) {
+          names.add(name)
+        }
+      }
+
+      return {
+        names: Array.from(names),
+        count
+      }
+    },
     [currentUserUploadCandidateSet, marketSkillMap]
   )
-  const myUploadedSkillCount = useMemo(
-    () =>
-      Array.from(marketSkillMap.values())
-        .filter((item) => isUploadedByCurrentUser(item, currentUserUploadCandidateSet))
-        .length,
-    [currentUserUploadCandidateSet, marketSkillMap]
+  const myUploadedSkillNames = myUploadedSkillEvalScope.names
+  const myUploadedSkillCount = myUploadedSkillEvalScope.count
+  const myUploadedSkillNamesKey = useMemo(
+    () => myUploadedSkillNames.join("\u0001"),
+    [myUploadedSkillNames]
+  )
+  const skillEvalSkillByKey = useMemo(
+    () => new Map((skillEval?.skills ?? []).map((skill) => [
+      skillEvalKey(skill.skillName, skill.skillVersion),
+      skill
+    ])),
+    [skillEval]
+  )
+  const latestSkillEvalKey = useMemo(
+    () => getLatestSkillEvalKey(skillEval),
+    [skillEval]
   )
   const mineSkillsLoading = skillEvalMineOnly && (marketSkillsLoading || currentUserUploadCandidatesLoading)
   const effectiveSkillEvalSelectedSkillKey =
-    skillEvalSelectedSkillKey === undefined ? getLatestSkillEvalKey(skillEval) : skillEvalSelectedSkillKey
+    skillEvalSelectedSkillKey === undefined ? latestSkillEvalKey : skillEvalSelectedSkillKey
 
   useEffect(() => {
     setSkillEvalSelectedSkillKey(undefined)
     clearSkillEval()
-  }, [clearSkillEval, range.from, range.to, skillEvalMineOnly])
+  }, [clearSkillEval, range.from, range.to])
 
   useEffect(() => {
     if (!skillEvalMineOnly) return
     setSkillEvalSelectedSkillKey(undefined)
     clearSkillEval()
-  }, [clearSkillEval, myUploadedSkillNames, skillEvalMineOnly])
+  }, [clearSkillEval, myUploadedSkillNamesKey, skillEvalMineOnly])
 
   useEffect(() => {
     if (skillEvalSelectedSkillKey === undefined || skillEvalSelectedSkillKey === null || !skillEval) return
-    const selectedSkillStillExists = skillEval.skills.some(
-      (skill) => skillEvalKey(skill.skillName, skill.skillVersion) === skillEvalSelectedSkillKey
-    )
+    const selectedSkillStillExists = skillEvalSkillByKey.has(skillEvalSelectedSkillKey)
     if (!selectedSkillStillExists) {
       setSkillEvalSelectedSkillKey(undefined)
     }
-  }, [skillEval, skillEvalSelectedSkillKey])
+  }, [skillEval, skillEvalSelectedSkillKey, skillEvalSkillByKey])
 
   useEffect(() => {
-    if (activeMainTab !== "skill-eval" || skillEval || loading || skillEvalLoading || mineSkillsLoading) return
+    if (activeMainTab !== "skill-eval" || skillEval || skillEvalLoading || mineSkillsLoading) return
     void fetchSkillEvalPage(1, {
       defaultRecentToLatestSkill: true,
       ...(skillEvalMineOnly ? { skillNames: myUploadedSkillNames } : {})
@@ -1396,9 +1462,8 @@ export function DashboardView(): React.JSX.Element {
   }, [
     activeMainTab,
     fetchSkillEvalPage,
-    loading,
     mineSkillsLoading,
-    myUploadedSkillNames,
+    myUploadedSkillNamesKey,
     skillEval,
     skillEvalLoading,
     skillEvalMineOnly
@@ -1595,27 +1660,48 @@ export function DashboardView(): React.JSX.Element {
     setSkillEvalTraceRun(run)
   }, [])
 
+  const skillEvalTraceExplorerTraces = useMemo<DashboardSkillDetail["traces"]>(() => {
+    if (!skillEvalTraceRun) return []
+    return [
+      skillEvalTraceRun.traceDetail ?? {
+        traceId: skillEvalTraceRun.traceId,
+        threadId: skillEvalTraceRun.threadId,
+        startedAt: skillEvalTraceRun.startedAt,
+        endedAt: skillEvalTraceRun.endedAt,
+        durationMs: skillEvalTraceRun.durationMs,
+        userMessage: skillEvalTraceRun.userMessage,
+        outcome: skillEvalTraceRun.outcome,
+        totalToolCalls: skillEvalTraceRun.totalToolCalls,
+        totalInputTokens: skillEvalTraceRun.totalInputTokens,
+        totalOutputTokens: skillEvalTraceRun.totalOutputTokens,
+        totalTokens: skillEvalTraceRun.totalTokens,
+        usedSkills: [skillEvalTraceRun.rawSkillName],
+        rawAvailable: false,
+        rawError: "该评估记录缺少完整 trace 详情"
+      }
+    ]
+  }, [skillEvalTraceRun])
+
   const getSkillEvalFilterForKey = useCallback(
     (key: string | null) => {
-      const filter = skillEvalFilterForKey(skillEval, key) ?? {}
+      const filter = skillEvalFilterForKey(skillEvalSkillByKey, key) ?? {}
       return {
         ...filter,
         ...(skillEvalMineOnly ? { skillNames: myUploadedSkillNames } : {})
       }
     },
-    [myUploadedSkillNames, skillEval, skillEvalMineOnly]
+    [myUploadedSkillNamesKey, skillEvalMineOnly, skillEvalSkillByKey]
   )
 
   const handleSkillEvalPageChange = useCallback(
     (page: number, key: string | null) => {
       const filter = getSkillEvalFilterForKey(key)
-      const isSameSelectedSkill = key !== null && key === effectiveSkillEvalSelectedSkillKey
       void fetchSkillEvalPage(page, {
         ...filter,
-        ...(filter.skillName && isSameSelectedSkill ? { recentOnly: true } : {})
+        ...(filter.skillName ? { recentOnly: true } : {})
       })
     },
-    [effectiveSkillEvalSelectedSkillKey, fetchSkillEvalPage, getSkillEvalFilterForKey]
+    [fetchSkillEvalPage, getSkillEvalFilterForKey]
   )
 
   const handleSkillEvalMineOnlyChange = useCallback((mineOnly: boolean) => {
@@ -2099,7 +2185,7 @@ export function DashboardView(): React.JSX.Element {
             <div className="space-y-6 p-6">
               <SkillEvalDashboardPanel
                 data={skillEval}
-                loading={loading || skillEvalLoading}
+                loading={skillEvalLoading}
                 range={range}
                 mineOnly={skillEvalMineOnly}
                 mineSkillCount={myUploadedSkillCount}
@@ -2190,28 +2276,7 @@ export function DashboardView(): React.JSX.Element {
           </DialogHeader>
           {skillEvalTraceRun && <SkillEvalRunSummary run={skillEvalTraceRun} />}
           <TraceExplorer
-            traces={
-              skillEvalTraceRun
-                ? [
-                    skillEvalTraceRun.traceDetail ?? {
-                      traceId: skillEvalTraceRun.traceId,
-                      threadId: skillEvalTraceRun.threadId,
-                      startedAt: skillEvalTraceRun.startedAt,
-                      endedAt: skillEvalTraceRun.endedAt,
-                      durationMs: skillEvalTraceRun.durationMs,
-                      userMessage: skillEvalTraceRun.userMessage,
-                      outcome: skillEvalTraceRun.outcome,
-                      totalToolCalls: skillEvalTraceRun.totalToolCalls,
-                      totalInputTokens: skillEvalTraceRun.totalInputTokens,
-                      totalOutputTokens: skillEvalTraceRun.totalOutputTokens,
-                      totalTokens: skillEvalTraceRun.totalTokens,
-                      usedSkills: [skillEvalTraceRun.rawSkillName],
-                      rawAvailable: false,
-                      rawError: "该评估记录缺少完整 trace 详情"
-                    }
-                  ]
-                : []
-            }
+            traces={skillEvalTraceExplorerTraces}
             codeStats={null}
             title="执行步骤详情"
             emptyText="该评估记录没有可展示的 trace 步骤"

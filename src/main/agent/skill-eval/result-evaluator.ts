@@ -1,5 +1,6 @@
 import type { AgentTrace, TraceNode, TraceToolCall } from "../trace/types"
 import type { SkillEvalCheck } from "./evaluator"
+import { parseSkillNameVersionIdentifier } from "../../utils/skill-identifiers"
 
 export type SkillResultEvalStatus = "completed" | "failed"
 
@@ -103,16 +104,6 @@ const SUBAGENT_TOOL_NAMES = new Set(["task"])
 type EvidenceToolCall = TraceToolCall & {
   source: "step" | "model" | "node"
   status?: TraceNode["status"]
-}
-
-function parseSkill(raw: string): { skillName: string; skillVersion?: string } {
-  const text = String(raw || "")
-    .trim()
-    .replace(/^\$/, "")
-    .replace(/\.(zip|tar\.gz|tgz|md)$/i, "")
-  const match = text.match(/^(.*?)-(v\d+(?:\.\d+){0,3})$/)
-  if (!match) return { skillName: text || "unknown" }
-  return { skillName: match[1] || text, skillVersion: match[2] }
 }
 
 function skillVersionKey(skillName: string, skillVersion?: string): string {
@@ -451,7 +442,7 @@ export function evaluateTraceResults(trace: AgentTrace): SkillResultEvalRecord[]
   const evaluatedAt = new Date().toISOString()
 
   return trace.usedSkills.map((rawSkillName) => {
-    const { skillName, skillVersion } = parseSkill(rawSkillName)
+    const { skillName, skillVersion } = parseSkillNameVersionIdentifier(rawSkillName)
     return {
       id: `${trace.traceId}:${skillVersionKey(skillName, skillVersion)}:result`,
       traceId: trace.traceId,

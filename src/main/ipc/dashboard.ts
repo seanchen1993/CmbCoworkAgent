@@ -16,7 +16,11 @@ import {
   evaluateTraceResults,
   type SkillResultEvalRecord
 } from "../agent/skill-eval/result-evaluator"
-import { getSkillIdentifierLookupTerms } from "../utils/skill-identifiers"
+import {
+  getSkillIdentifierLookupTerms,
+  normalizeSkillQueryName,
+  parseSkillNameVersionIdentifier
+} from "../utils/skill-identifiers"
 import {
   effectiveGeneratedLinesSumAgg,
   makeDashboardCodeStats,
@@ -355,12 +359,18 @@ interface EsSearchHit {
   _source?: Record<string, unknown>
 }
 
+interface EsAggregation {
+  value?: number
+  buckets?: unknown
+  [key: string]: unknown
+}
+
 interface EsSearchResponse {
   hits?: {
     total?: number | { value?: number }
     hits?: EsSearchHit[]
   }
-  aggregations?: Record<string, { value?: number } | undefined>
+  aggregations?: Record<string, EsAggregation | undefined>
 }
 
 interface SkillTraceEvaluation {
@@ -474,7 +484,7 @@ function buildNonEmptySapIdFilter(): Record<string, unknown> {
  * 使用 prefix 兼容 `技能名-v版本` 这一类上报格式，避免宽泛 wildcard 扫描。
  */
 function buildSkillUsageWildcardFilter(skillName: string): Record<string, unknown> {
-  const versionPrefix = `${skillName}-v`
+  const versionPrefix = buildVersionPrefix(skillName)
   return {
     bool: {
       should: [
@@ -499,8 +509,7 @@ function normalizeSkillQueryNames(skillNames?: string[]): string[] {
   return Array.from(
     new Set(
       skillNames
-        .map((name) => String(name || "").trim())
-        .map((name) => normalizeSkillQueryName(name))
+        .map((name) => normalizeSkillQueryName(String(name || "").trim()))
         .filter(Boolean)
     )
   ).slice(0, 1000)
@@ -637,7 +646,7 @@ function buildSkillEvalExactSkillFilter(skillName: string, skillVersion?: string
       }
     }
   }
-  const versionPrefix = `${skillName}-v`
+  const versionPrefix = buildVersionPrefix(skillName)
   return {
     bool: {
       should: [
@@ -653,7 +662,7 @@ function buildSkillEvalExactSkillFilter(skillName: string, skillVersion?: string
 
 function buildSkillEvalSkillNamesFilter(skillNames: string[]): Record<string, unknown> {
   const should = skillNames.flatMap((skillName) => {
-    const versionPrefix = `${skillName}-v`
+    const versionPrefix = buildVersionPrefix(skillName)
     return [
       { term: { usedSkills: skillName } },
       { term: { "usedSkills.keyword": skillName } },
@@ -667,6 +676,10 @@ function buildSkillEvalSkillNamesFilter(skillNames: string[]): Record<string, un
       minimum_should_match: 1
     }
   }
+}
+
+function buildVersionPrefix(skillName: string): string {
+  return `${skillName}-v`
 }
 
 type SkillEvalExactFilter = { skillName: string; skillVersion: string | undefined }
@@ -727,26 +740,6 @@ function asStringArray(value: unknown): string[] {
 
 function skillVersionKey(skillName: string, skillVersion?: string): string {
   return `${skillName}:${skillVersion ?? ""}`
-}
-
-function normalizeSkillIdentifierText(raw: string): string {
-  return String(raw || "")
-    .trim()
-    .replace(/^\$/, "")
-    .replace(/\.(zip|tar\.gz|tgz|md)$/i, "")
-}
-
-function normalizeSkillQueryName(raw: string): string {
-  return normalizeSkillIdentifierText(raw)
-    .replace(/-v?\d+(?:\.\d+){0,3}(?:[-+][0-9A-Za-z.-]+)?$/i, "")
-    .trim()
-}
-
-function parseSkillIdentifier(raw: string): { skillName: string; skillVersion?: string } {
-  const text = normalizeSkillIdentifierText(raw)
-  const match = text.match(/^(.*?)-(v\d+(?:\.\d+){0,3})$/)
-  if (!match) return { skillName: text || "unknown" }
-  return { skillName: match[1] || text, skillVersion: match[2] }
 }
 
 function getLatestSkillFilterFromRuns(
@@ -1846,7 +1839,7 @@ function parseSkillEvalSkillList(
     .map((bucket) => {
       const record = asRecord(bucket)
       const rawSkill = asString(record.key)
-      const { skillName, skillVersion } = parseSkillIdentifier(rawSkill)
+      const { skillName, skillVersion } = parseSkillNameVersionIdentifier(rawSkill)
       if (!hasAllowedSkillName(skillName, allowedSkillNames)) return null
       const latestSource = getLatestHitSource(record, "latest_trace")
       return emptySkillEvalSkillSummary(
