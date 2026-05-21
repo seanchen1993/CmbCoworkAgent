@@ -100,6 +100,11 @@ const CHANGED_FILE_TOOL_NAMES = new Set([
 ])
 const SUBAGENT_TOOL_NAMES = new Set(["task"])
 
+type EvidenceToolCall = TraceToolCall & {
+  source: "step" | "model" | "node"
+  status?: TraceNode["status"]
+}
+
 function parseSkill(raw: string): { skillName: string; skillVersion?: string } {
   const text = String(raw || "").trim()
   const match = text.match(/^(.*?)-(v\d+(?:\.\d+){0,3})$/)
@@ -187,10 +192,49 @@ function getFinalAssistantText(trace: AgentTrace): string {
   return ""
 }
 
-function getAllToolCalls(trace: AgentTrace): TraceToolCall[] {
-  const fromSteps = (trace.steps ?? []).flatMap((step) => step.toolCalls ?? [])
-  if (fromSteps.length > 0) return fromSteps
-  return (trace.modelCalls ?? []).flatMap((call) => call.toolCalls ?? [])
+function toRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {}
+}
+
+function toolCallKey(call: TraceToolCall): string {
+  try {
+    return `${call.name}:${JSON.stringify(call.args ?? {})}`
+  } catch {
+    return `${call.name}:unserializable`
+  }
+}
+
+function dedupeToolCalls(calls: EvidenceToolCall[]): EvidenceToolCall[] {
+  const seen = new Set<string>()
+  const result: EvidenceToolCall[] = []
+  for (const call of calls) {
+    const key = toolCallKey(call)
+    if (seen.has(key)) continue
+    seen.add(key)
+    result.push(call)
+  }
+  return result
+}
+
+function getAllToolCalls(trace: AgentTrace): EvidenceToolCall[] {
+  const fromSteps = (trace.steps ?? []).flatMap((step) =>
+    (step.toolCalls ?? []).map((call): EvidenceToolCall => ({ ...call, source: "step" }))
+  )
+  const fromModelCalls = (trace.modelCalls ?? []).flatMap((call) =>
+    (call.toolCalls ?? []).map((toolCall): EvidenceToolCall => ({ ...toolCall, source: "model" }))
+  )
+  const primaryCalls = fromSteps.length > 0 ? fromSteps : fromModelCalls
+  const fromNodes = (trace.nodes ?? [])
+    .filter((node) => node.type === "tool" && node.name)
+    .map((node): EvidenceToolCall => ({
+      name: node.name || "unknown",
+      args: toRecord(node.input),
+      source: "node",
+      status: node.status
+    }))
+  return dedupeToolCalls([...primaryCalls, ...fromNodes])
 }
 
 function stringifyArg(value: unknown): string {
@@ -263,6 +307,8 @@ function collectEvidence(trace: AgentTrace): SkillResultEvidence {
 
     if (pathSignal && ARTIFACT_TOOL_NAMES.has(name)) {
       artifactSignals.push(`${name}:${pathSignal}`)
+    } else if (ARTIFACT_TOOL_NAMES.has(name) && call.source === "node" && call.status !== "error") {
+      artifactSignals.push(name)
     }
   }
 

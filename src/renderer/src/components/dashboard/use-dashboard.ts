@@ -409,9 +409,14 @@ export interface DashboardSkillEvalOptions {
   skillVersion?: string
   skillNames?: string[]
   defaultRecentToLatestSkill?: boolean
+  recentOnly?: boolean
 }
 
 const SKILL_EVAL_RECENT_PAGE_SIZE = 10
+
+function dashboardSkillEvalKey(skillName?: string, skillVersion?: string): string {
+  return `${skillName ?? ""}:${skillVersion ?? ""}`
+}
 
 // ─────────────────────────────────────────────────────────
 // Time helpers
@@ -1242,7 +1247,8 @@ async function loadSkillEvalSummarySafely(
       ...(options.skillName ? { skillName: options.skillName } : {}),
       ...(options.skillVersion ? { skillVersion: options.skillVersion } : {}),
       ...(options.skillNames ? { skillNames: options.skillNames } : {}),
-      ...(options.defaultRecentToLatestSkill ? { defaultRecentToLatestSkill: true } : {})
+      ...(options.defaultRecentToLatestSkill ? { defaultRecentToLatestSkill: true } : {}),
+      ...(options.recentOnly ? { recentOnly: true } : {})
     })
   } catch (error) {
     console.warn("[Dashboard] skillEvalSummary unavailable, using empty data:", error)
@@ -1336,6 +1342,7 @@ export function useDashboard() {
     skillVersion?: string
     skillNames?: string[]
     defaultRecentToLatestSkill?: boolean
+    recentOnly?: boolean
   }) => {
     const id = ++skillEvalFetchIdRef.current
     setSkillEvalLoading(true)
@@ -1348,14 +1355,37 @@ export function useDashboard() {
         ...(filter?.skillName ? { skillName: filter.skillName } : {}),
         ...(filter?.skillVersion ? { skillVersion: filter.skillVersion } : {}),
         ...(filter?.skillNames ? { skillNames: filter.skillNames } : {}),
-        ...(filter?.defaultRecentToLatestSkill ? { defaultRecentToLatestSkill: true } : {})
+        ...(filter?.defaultRecentToLatestSkill ? { defaultRecentToLatestSkill: true } : {}),
+        ...(filter?.recentOnly ? { recentOnly: true } : {})
       })
       if (id !== skillEvalFetchIdRef.current) return
       if (!result.success) throw new Error(result.error ?? "获取技能评估数据失败")
-      setSkillEval(parseSkillEvalSummary(result.data, {
+      const nextSkillEval = parseSkillEvalSummary(result.data, {
         recentPage: page,
         recentPageSize: SKILL_EVAL_RECENT_PAGE_SIZE
-      }))
+      })
+      setSkillEval((current) => (
+        filter?.recentOnly && current
+          ? {
+              ...current,
+              generatedAt: nextSkillEval.generatedAt,
+              totalTraceHits: nextSkillEval.totalTraceHits,
+              evaluatedTraceCount: nextSkillEval.evaluatedTraceCount,
+              sampledTraceCount: nextSkillEval.sampledTraceCount,
+              recentTotal: nextSkillEval.recentTotal,
+              recentPage: nextSkillEval.recentPage,
+              recentPageSize: nextSkillEval.recentPageSize,
+              recent: nextSkillEval.recent,
+              skills: current.skills.map((skill) => {
+                const updated = nextSkillEval.skills.find((item) =>
+                  dashboardSkillEvalKey(item.skillName, item.skillVersion) ===
+                    dashboardSkillEvalKey(skill.skillName, skill.skillVersion)
+                )
+                return updated ?? skill
+              })
+            }
+          : nextSkillEval
+      ))
     } catch (e) {
       if (id !== skillEvalFetchIdRef.current) return
       setError(e instanceof Error ? e.message : String(e))

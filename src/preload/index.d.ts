@@ -167,6 +167,7 @@ interface DashboardSkillEvalOptions {
   skillVersion?: string
   skillNames?: string[]
   defaultRecentToLatestSkill?: boolean
+  recentOnly?: boolean
 }
 
 interface DashboardCodeStats {

@@ -764,7 +764,7 @@ function SkillEvalSkillRow({
     <button
       type="button"
       onClick={onClick}
-      className={`grid w-full grid-cols-[minmax(0,1fr)_40px_48px_56px_50px_52px] items-center gap-2 border-b border-border px-4 py-3 text-left text-sm hover:bg-muted/35 ${
+      className={`grid w-full grid-cols-[minmax(0,1fr)_48px_72px] items-center gap-2 border-b border-border px-4 py-3 text-left text-sm hover:bg-muted/35 ${
         active ? "bg-muted/45" : ""
       }`}
     >
@@ -776,16 +776,7 @@ function SkillEvalSkillRow({
       </div>
       <div className="text-right tabular-nums text-muted-foreground">{skill.runs}</div>
       <div className="text-right tabular-nums text-muted-foreground">
-        {formatSkillEvalPercent(skill.passRate)}
-      </div>
-      <div className="text-right tabular-nums text-muted-foreground">
-        {formatSkillEvalPercent(skill.averageOutcomeScore || skill.averageScore)}
-      </div>
-      <div className="text-right tabular-nums text-foreground">
-        {formatSkillEvalPercent(skill.averageScore)}
-      </div>
-      <div className="text-right tabular-nums text-muted-foreground">
-        {formatSkillEvalTokens(skill.averageTotalTokens)}
+        {formatRelativeTime(skill.lastRunAt)}
       </div>
     </button>
   )
@@ -1137,13 +1128,10 @@ function SkillEvalDashboardPanel({
           <SkillEvalStatTile label="总 Token" value={formatSkillEvalTokens(selectedTotalTokens)} />
           <SkillEvalStatTile label="平均峰值输入" value={formatSkillEvalTokens(selectedSkill?.averagePeakInputTokens ?? data.averagePeakInputTokens)} />
         </div>
-        <div className="grid grid-cols-[minmax(0,1fr)_40px_48px_56px_50px_52px] gap-2 border-b border-border px-4 py-2 text-[11px] font-medium text-muted-foreground">
+        <div className="grid grid-cols-[minmax(0,1fr)_48px_72px] gap-2 border-b border-border px-4 py-2 text-[11px] font-medium text-muted-foreground">
           <span>技能</span>
           <span className="text-right">次数</span>
-          <span className="text-right">通过率</span>
-          <span className="text-right">结束</span>
-          <span className="text-right">分数</span>
-          <span className="text-right">Token</span>
+          <span className="text-right">最近</span>
         </div>
         <ScrollArea className="min-h-0 flex-1">
           <div className="border-b border-border p-2">
@@ -1604,9 +1592,14 @@ export function DashboardView(): React.JSX.Element {
 
   const handleSkillEvalPageChange = useCallback(
     (page: number, key: string | null) => {
-      void fetchSkillEvalPage(page, getSkillEvalFilterForKey(key))
+      const filter = getSkillEvalFilterForKey(key)
+      const isSameSelectedSkill = key !== null && key === effectiveSkillEvalSelectedSkillKey
+      void fetchSkillEvalPage(page, {
+        ...filter,
+        ...(filter.skillName && isSameSelectedSkill ? { recentOnly: true } : {})
+      })
     },
-    [fetchSkillEvalPage, getSkillEvalFilterForKey]
+    [effectiveSkillEvalSelectedSkillKey, fetchSkillEvalPage, getSkillEvalFilterForKey]
   )
 
   const handleSkillEvalMineOnlyChange = useCallback((mineOnly: boolean) => {
