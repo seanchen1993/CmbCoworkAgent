@@ -60,7 +60,8 @@ const buildUserIdFromUserInfo = (userInfo: UserInfoLite | null): string | undefi
   if (!userInfo) return undefined
   const rawId = (userInfo.sapId || userInfo.ystId || "").trim()
   const rawName = (userInfo.userName || "").trim()
-  const rawPathName = getDisplayPathName(userInfo.pathName)
+  // const rawPathName = getDisplayPathName(userInfo.pathName)
+  const rawPathName = userInfo.pathName
   const segments = [rawId, rawName, rawPathName].filter(Boolean)
   return segments.length > 0 ? segments.join(" / ") : undefined
 }
