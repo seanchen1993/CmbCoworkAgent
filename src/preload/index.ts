@@ -1804,13 +1804,17 @@ const api = {
       ipcRenderer.invoke("dashboard:userStats", range, granularity, opts),
     userList: (
       range: { from: string; to: string },
-      options?: { pageSize?: number; afterKey?: Record<string, string | number> | null }
+      options?: {
+        pageSize?: number
+        afterKey?: Record<string, string | number> | null
+        keyword?: string | null
+      }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:userList", range, options),
     userDetail: (
       sapId: string,
       range: { from: string; to: string },
-      options?: { traceLimit?: number }
+      options?: { traceLimit?: number; tracePage?: number; tracePageSize?: number }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:userDetail", sapId, range, options),
     skillUsageSummary: (
@@ -1855,9 +1859,9 @@ const api = {
     skillDetail: (
       skill: string,
       range: { from: string; to: string },
-      limit?: number
+      options?: number | { page?: number; pageSize?: number; limit?: number }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:skillDetail", skill, range, limit),
+      ipcRenderer.invoke("dashboard:skillDetail", skill, range, options),
     commitDetails: (
       range: { from: string; to: string },
       options?: { page?: number; pageSize?: number; pushedOnly?: boolean }

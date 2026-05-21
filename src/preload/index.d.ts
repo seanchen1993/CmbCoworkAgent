@@ -182,6 +182,9 @@ interface DashboardCodeStats {
 interface DashboardSkillDetail {
   stats: DashboardCodeStats
   traces: DashboardTraceDetail[]
+  tracePage: number
+  tracePageSize: number
+  totalTraces: number
 }
 
 interface DashboardUserListItem {
@@ -224,15 +227,21 @@ interface DashboardUserDetail {
   byModel: Array<{ model: string; count: number }>
   byOutcome: Array<{ outcome: string; count: number }>
   traces: DashboardTraceDetail[]
+  tracePage: number
+  tracePageSize: number
+  totalTraces: number
 }
 
 interface DashboardUserListOptions {
   pageSize?: number
   afterKey?: Record<string, string | number> | null
+  keyword?: string | null
 }
 
 interface DashboardUserDetailOptions {
   traceLimit?: number
+  tracePage?: number
+  tracePageSize?: number
 }
 
 interface CustomAPI {
@@ -1112,7 +1121,7 @@ interface CustomAPI {
     skillDetail: (
       skill: string,
       range: { from: string; to: string },
-      limit?: number
+      options?: number | { page?: number; pageSize?: number; limit?: number }
     ) => Promise<{ success: boolean; data?: DashboardSkillDetail; error?: string }>
     commitDetails: (
       range: { from: string; to: string },

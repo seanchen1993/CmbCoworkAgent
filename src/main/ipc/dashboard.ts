@@ -152,6 +152,9 @@ interface DashboardCommitDetail {
 interface DashboardSkillDetail {
   stats: DashboardCodeStats
   traces: DashboardTraceDetail[]
+  tracePage: number
+  tracePageSize: number
+  totalTraces: number
 }
 
 interface DashboardUserListItem {
@@ -194,6 +197,9 @@ interface DashboardUserDetail {
   byModel: Array<{ model: string; count: number }>
   byOutcome: Array<{ outcome: string; count: number }>
   traces: DashboardTraceDetail[]
+  tracePage: number
+  tracePageSize: number
+  totalTraces: number
 }
 
 interface EsSearchHit {
@@ -215,10 +221,19 @@ interface UserStatsOptions {
 interface UserListOptions {
   pageSize?: number
   afterKey?: Record<string, string | number> | null
+  keyword?: string | null
 }
 
 interface UserDetailOptions {
   traceLimit?: number
+  tracePage?: number
+  tracePageSize?: number
+}
+
+interface TracePageOptions {
+  page?: number
+  pageSize?: number
+  limit?: number
 }
 
 interface CommitDetailsOptions {
@@ -293,6 +308,28 @@ function buildNonEmptySapIdFilter(): Record<string, unknown> {
   }
 }
 
+function buildUserListSearchFilter(keyword: string): Record<string, unknown> | null {
+  const normalizedKeyword = keyword.trim()
+  if (!normalizedKeyword) return null
+
+  const escaped = escapeWildcard(normalizedKeyword)
+  const wildcardPattern = `*${escaped}*`
+  const fields = ["userName", "username", "ystId"]
+  const should = fields.flatMap((field) => [
+    { term: { [field]: normalizedKeyword } },
+    { term: { [`${field}.keyword`]: normalizedKeyword } },
+    { wildcard: { [field]: wildcardPattern } },
+    { wildcard: { [`${field}.keyword`]: wildcardPattern } }
+  ])
+
+  return {
+    bool: {
+      should,
+      minimum_should_match: 1
+    }
+  }
+}
+
 /**
  * 统一构建技能命中条件：
  * 使用 wildcard 兼容 `技能名-版本` 这一类上报格式。
@@ -351,21 +388,26 @@ function normalizeCommitDetailsOptions(value?: number | CommitDetailsOptions): R
   }
 }
 
-function normalizeUserListOptions(value?: UserListOptions): Required<Omit<UserListOptions, "afterKey">> & {
+function normalizeUserListOptions(value?: UserListOptions): Required<
+  Omit<UserListOptions, "afterKey" | "keyword">
+> & {
   afterKey?: Record<string, string | number>
+  keyword: string
 } {
   const pageSize = clampLimit(value?.pageSize, 20, 100)
   const rawAfterKey = value?.afterKey
   const afterKey =
     rawAfterKey && typeof rawAfterKey === "object" && !Array.isArray(rawAfterKey)
       ? Object.fromEntries(
-          Object.entries(rawAfterKey).filter(([, item]) => (
-            typeof item === "string" || typeof item === "number"
-          ))
+          Object.entries(rawAfterKey).filter(
+            ([, item]) => typeof item === "string" || typeof item === "number"
+          )
         )
       : undefined
+  const keyword = typeof value?.keyword === "string" ? value.keyword.trim().slice(0, 100) : ""
   return {
     pageSize,
+    keyword,
     ...(afterKey && Object.keys(afterKey).length > 0 ? { afterKey } : {})
   }
 }
@@ -952,7 +994,7 @@ function getLatestHitSource(bucket: Record<string, unknown>, aggName: string): R
 function normalizeUserListBucket(bucket: Record<string, unknown>): DashboardUserListItem {
   const source = getLatestHitSource(bucket, "latest_user_info")
   const key = asRecord(bucket.key)
-  const sapId = asString(key.sap_id, asString(source.sapId))
+  const sapId = typeof bucket.key === "string" ? bucket.key : asString(key.sap_id, asString(source.sapId))
   const totalInputTokens = asNumber(asRecord(bucket.total_input_tokens).value)
   const totalOutputTokens = asNumber(asRecord(bucket.total_output_tokens).value)
   const totalTokens = asNumber(
@@ -977,24 +1019,31 @@ function normalizeUserListBucket(bucket: Record<string, unknown>): DashboardUser
 }
 
 async function fetchUserList(range: TimeRange, options?: UserListOptions): Promise<DashboardUserListData> {
-  const { pageSize, afterKey } = normalizeUserListOptions(options)
-  const composite: Record<string, unknown> = {
-    size: pageSize,
-    sources: [{ sap_id: { terms: { field: "sapId" } } }]
-  }
-  if (afterKey) composite.after = afterKey
+  const { pageSize, afterKey, keyword } = normalizeUserListOptions(options)
+  const offsetValue = Number(afterKey?.offset ?? 0)
+  const offset = Number.isFinite(offsetValue) && offsetValue > 0 ? Math.floor(offsetValue) : 0
+  const aggregationSize = Math.min(offset + pageSize, 10_000)
+  const shardSize = Math.min(Math.max(aggregationSize * 3, 100), 50_000)
+  const filters = [timeRangeFilter("startedAt", range), buildNonEmptySapIdFilter()]
+  const searchFilter = buildUserListSearchFilter(keyword)
+  if (searchFilter) filters.push(searchFilter)
 
   const body = {
     size: 0,
     query: {
       bool: {
-        filter: [timeRangeFilter("startedAt", range), buildNonEmptySapIdFilter()]
+        filter: filters
       }
     },
     aggs: {
       total_active_users: { cardinality: { field: "sapId" } },
       users: {
-        composite,
+        terms: {
+          field: "sapId",
+          size: aggregationSize,
+          shard_size: shardSize,
+          order: { _count: "desc" }
+        },
         aggs: {
           latest_user_info: {
             top_hits: {
@@ -1026,13 +1075,16 @@ async function fetchUserList(range: TimeRange, options?: UserListOptions): Promi
   const raw = asRecord(await esQuery(getEsIndex("trace"), body))
   const aggs = asRecord(raw.aggregations)
   const usersAgg = asRecord(aggs.users)
-  const buckets = Array.isArray(usersAgg.buckets) ? usersAgg.buckets : []
-  const nextAfterKey = asRecord(usersAgg.after_key)
+  const allBuckets = Array.isArray(usersAgg.buckets) ? usersAgg.buckets : []
+  const buckets = allBuckets.slice(offset, offset + pageSize)
+  const totalActiveUsers = asNumber(asRecord(aggs.total_active_users).value)
+  const nextOffset = offset + pageSize
+  const hasMoreBuckets = asNumber(usersAgg.sum_other_doc_count) > 0
   return {
     items: buckets.map((bucket) => normalizeUserListBucket(asRecord(bucket))).filter((item) => item.sapId),
     pageSize,
-    ...(Object.keys(nextAfterKey).length > 0 ? { nextAfterKey: nextAfterKey as Record<string, string | number> } : {}),
-    totalActiveUsers: asNumber(asRecord(aggs.total_active_users).value)
+    ...(hasMoreBuckets && nextOffset < 10_000 ? { nextAfterKey: { offset: nextOffset } } : {}),
+    totalActiveUsers
   }
 }
 
@@ -1057,10 +1109,12 @@ async function fetchUserDetail(
 ): Promise<DashboardUserDetail> {
   const normalizedSapId = sapId.trim()
   if (!normalizedSapId) throw new Error("sapId is required")
-  const traceLimit = clampLimit(options?.traceLimit, 10, 50)
+  const tracePageSize = clampLimit(options?.tracePageSize ?? options?.traceLimit, 10, 50)
+  const tracePage = clampLimit(options?.tracePage, 1, 1000)
   const body = {
     track_total_hits: true,
-    size: traceLimit,
+    from: (tracePage - 1) * tracePageSize,
+    size: tracePageSize,
     sort: [{ startedAt: { order: "desc" } }],
     query: {
       bool: {
@@ -1122,6 +1176,7 @@ async function fetchUserDetail(
   const totalInputTokens = asNumber(asRecord(aggs.total_input_tokens).value)
   const totalOutputTokens = asNumber(asRecord(aggs.total_output_tokens).value)
   const totalTokens = asNumber(asRecord(aggs.total_tokens).value, totalInputTokens + totalOutputTokens)
+  const totalTraces = getTotalHits(raw, raw.hits?.hits?.length ?? 0)
 
   return {
     sapId: asString(userInfo.sapId, normalizedSapId),
@@ -1130,7 +1185,7 @@ async function fetchUserDetail(
     orgName: asOptionalString(userInfo.orgName),
     upperOrgLv0: asOptionalString(userInfo.upperOrgLv0),
     upperOrgLv1: asOptionalString(userInfo.upperOrgLv1),
-    totalCalls: getTotalHits(raw, raw.hits?.hits?.length ?? 0),
+    totalCalls: totalTraces,
     avgDurationMs: asNumber(asRecord(aggs.avg_duration).value),
     totalToolCalls: asNumber(asRecord(aggs.total_tool_calls).value),
     totalInputTokens,
@@ -1139,7 +1194,10 @@ async function fetchUserDetail(
     bySkill: normalizeTermsBucketList(asRecord(aggs.by_skill).buckets, "skill") as DashboardUserDetail["bySkill"],
     byModel: normalizeTermsBucketList(asRecord(aggs.by_model).buckets, "model") as DashboardUserDetail["byModel"],
     byOutcome: normalizeTermsBucketList(asRecord(aggs.by_outcome).buckets, "outcome") as DashboardUserDetail["byOutcome"],
-    traces: (raw.hits?.hits ?? []).map(normalizeTraceDetail)
+    traces: (raw.hits?.hits ?? []).map(normalizeTraceDetail),
+    tracePage,
+    tracePageSize,
+    totalTraces
   }
 }
 
@@ -1452,10 +1510,14 @@ async function fetchFeedback(range: TimeRange, granularity: Granularity): Promis
 async function fetchSkillRecentTraces(
   skill: string,
   range: TimeRange,
-  limit = 10
-): Promise<DashboardTraceDetail[]> {
-  const size = clampLimit(limit, 10, 10)
+  limit = 10,
+  page = 1
+): Promise<{ traces: DashboardTraceDetail[]; total: number; page: number; pageSize: number }> {
+  const size = clampLimit(limit, 10, 50)
+  const currentPage = clampLimit(page, 1, 1000)
   const body = {
+    track_total_hits: true,
+    from: (currentPage - 1) * size,
     size,
     sort: [{ startedAt: { order: "desc" } }],
     query: {
@@ -1492,7 +1554,12 @@ async function fetchSkillRecentTraces(
     }
   }
   const raw = await esQuery(getEsIndex("trace"), body) as EsSearchResponse
-  return (raw.hits?.hits ?? []).map(normalizeTraceDetail)
+  return {
+    traces: (raw.hits?.hits ?? []).map(normalizeTraceDetail),
+    total: getTotalHits(raw, raw.hits?.hits?.length ?? 0),
+    page: currentPage,
+    pageSize: size
+  }
 }
 
 async function fetchSkillCodeStats(skill: string, range: TimeRange): Promise<DashboardCodeStats> {
@@ -1551,12 +1618,25 @@ async function fetchSkillCodeStats(skill: string, range: TimeRange): Promise<Das
   return normalizeCodeStatsFromAggs(raw)
 }
 
-async function fetchSkillDetail(skill: string, range: TimeRange, limit = 10): Promise<DashboardSkillDetail> {
-  const [stats, traces] = await Promise.all([
+async function fetchSkillDetail(
+  skill: string,
+  range: TimeRange,
+  options?: number | TracePageOptions
+): Promise<DashboardSkillDetail> {
+  const pageOptions = typeof options === "number" ? { limit: options } : options
+  const tracePageSize = clampLimit(pageOptions?.pageSize ?? pageOptions?.limit, 10, 50)
+  const tracePage = clampLimit(pageOptions?.page, 1, 1000)
+  const [stats, tracePageData] = await Promise.all([
     fetchSkillCodeStats(skill, range),
-    fetchSkillRecentTraces(skill, range, limit)
+    fetchSkillRecentTraces(skill, range, tracePageSize, tracePage)
   ])
-  return { stats, traces }
+  return {
+    stats,
+    traces: tracePageData.traces,
+    tracePage: tracePageData.page,
+    tracePageSize: tracePageData.pageSize,
+    totalTraces: tracePageData.total
+  }
 }
 
 async function fetchCommitDetails(
@@ -2210,19 +2290,27 @@ function makeMockDashboardUser(index: number): DashboardUserListItem {
 }
 
 function makeMockUserList(_range: TimeRange, options?: UserListOptions): DashboardUserListData {
-  const { pageSize, afterKey } = normalizeUserListOptions(options)
-  const allUsers = Array.from({ length: 64 }, (_, index) => makeMockDashboardUser(index))
+  const { pageSize, afterKey, keyword } = normalizeUserListOptions(options)
+  const normalizedKeyword = keyword.toLowerCase()
+  const allUsers = Array.from({ length: 64 }, (_, index) => makeMockDashboardUser(index)).filter((user) => {
+    if (!normalizedKeyword) return true
+    return [user.userName, user.ystId, user.sapId].some((value) =>
+      String(value || "").toLowerCase().includes(normalizedKeyword)
+    )
+  })
+  const afterOffset = Number(afterKey?.offset ?? 0)
   const afterSapId = typeof afterKey?.sap_id === "string" ? afterKey.sap_id : ""
-  const startIndex = afterSapId
+  const startIndex = Number.isFinite(afterOffset) && afterOffset > 0
+    ? Math.floor(afterOffset)
+    : afterSapId
     ? Math.max(0, allUsers.findIndex((item) => item.sapId === afterSapId) + 1)
     : 0
   const items = allUsers.slice(startIndex, startIndex + pageSize)
-  const nextItem = allUsers[startIndex + pageSize - 1]
   const hasNext = startIndex + pageSize < allUsers.length
   return {
     items,
     pageSize,
-    ...(hasNext && nextItem ? { nextAfterKey: { sap_id: nextItem.sapId } } : {}),
+    ...(hasNext ? { nextAfterKey: { offset: startIndex + pageSize } } : {}),
     totalActiveUsers: allUsers.length
   }
 }
@@ -2230,15 +2318,28 @@ function makeMockUserList(_range: TimeRange, options?: UserListOptions): Dashboa
 function makeMockUserDetail(sapId: string, range: TimeRange, options?: UserDetailOptions): DashboardUserDetail {
   const index = Math.max(0, Number(sapId.slice(-3)) - 1)
   const user = makeMockDashboardUser(Number.isFinite(index) ? index : 0)
-  const traceLimit = clampLimit(options?.traceLimit, 10, 50)
-  const traces = makeMockSkillRecentTraces("代码审查", range, traceLimit).map((trace, traceIndex) => ({
-    ...trace,
-    sapId,
-    ystId: user.ystId,
-    userName: user.userName,
-    orgName: user.orgName,
-    userIp: `10.0.1.${20 + traceIndex}`
-  }))
+  const tracePageSize = clampLimit(options?.tracePageSize ?? options?.traceLimit, 10, 50)
+  const tracePage = clampLimit(options?.tracePage, 1, 1000)
+  const totalTraces = user.count
+  const startIndex = (tracePage - 1) * tracePageSize
+  const baseTraces = makeMockSkillRecentTraces("代码审查", range, 10)
+  const traces = Array.from(
+    { length: Math.max(0, Math.min(tracePageSize, totalTraces - startIndex)) },
+    (_, traceIndex) => {
+      const trace = baseTraces[traceIndex % baseTraces.length]
+      const mockIndex = startIndex + traceIndex
+      return {
+        ...trace,
+        traceId: `${trace.traceId}-page-${tracePage}-${traceIndex}`,
+        sapId,
+        ystId: user.ystId,
+        userName: user.userName,
+        orgName: user.orgName,
+        userIp: `10.0.1.${20 + (mockIndex % 200)}`,
+        startedAt: new Date(new Date(range.to).getTime() - mockIndex * 35 * 60 * 1000).toISOString()
+      }
+    }
+  )
   return {
     sapId,
     ystId: user.ystId,
@@ -2267,7 +2368,10 @@ function makeMockUserDetail(sapId: string, range: TimeRange, options?: UserDetai
       { outcome: "error", count: Math.floor(user.count * 0.1) },
       { outcome: "cancelled", count: Math.max(0, user.count - Math.floor(user.count * 0.96)) }
     ],
-    traces
+    traces,
+    tracePage,
+    tracePageSize,
+    totalTraces
   }
 }
 
@@ -2540,10 +2644,35 @@ function makeMockSkillCodeStats(skill: string): DashboardCodeStats {
   })
 }
 
-function makeMockSkillDetail(skill: string, range: TimeRange, limit = 10): DashboardSkillDetail {
+function makeMockSkillDetail(
+  skill: string,
+  range: TimeRange,
+  options?: number | TracePageOptions
+): DashboardSkillDetail {
+  const pageOptions = typeof options === "number" ? { limit: options } : options
+  const tracePageSize = clampLimit(pageOptions?.pageSize ?? pageOptions?.limit, 10, 50)
+  const tracePage = clampLimit(pageOptions?.page, 1, 1000)
+  const totalTraces = 64
+  const startIndex = (tracePage - 1) * tracePageSize
+  const baseTraces = makeMockSkillRecentTraces(skill, range, 10)
+  const traces = Array.from(
+    { length: Math.max(0, Math.min(tracePageSize, totalTraces - startIndex)) },
+    (_, traceIndex) => {
+      const trace = baseTraces[traceIndex % baseTraces.length]
+      const mockIndex = startIndex + traceIndex
+      return {
+        ...trace,
+        traceId: `${trace.traceId}-skill-page-${tracePage}-${traceIndex}`,
+        startedAt: new Date(new Date(range.to).getTime() - mockIndex * 35 * 60 * 1000).toISOString()
+      }
+    }
+  )
   return {
     stats: makeMockSkillCodeStats(skill),
-    traces: makeMockSkillRecentTraces(skill, range, limit)
+    traces,
+    tracePage,
+    tracePageSize,
+    totalTraces
   }
 }
 
@@ -2758,7 +2887,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     async (_, skill: string, range: TimeRange, limit?: number) => {
       if (import.meta.env.DEV) return { success: true, data: makeMockSkillRecentTraces(skill, range, limit) }
       try {
-        return { success: true, data: await fetchSkillRecentTraces(skill, range, limit) }
+        return { success: true, data: (await fetchSkillRecentTraces(skill, range, limit)).traces }
       } catch (e) {
         console.error("[Dashboard] skillRecentTraces error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
@@ -2773,7 +2902,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
       if (!trimmedSkill) return { success: false, error: "skill is required" }
       if (import.meta.env.DEV) return { success: true, data: makeMockSkillRecentTraces(trimmedSkill, range, limit) }
       try {
-        return { success: true, data: await fetchSkillRecentTraces(trimmedSkill, range, limit) }
+        return { success: true, data: (await fetchSkillRecentTraces(trimmedSkill, range, limit)).traces }
       } catch (e) {
         console.error("[Dashboard] marketSkillRecentTraces error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
@@ -2783,10 +2912,10 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   _ipcMain.handle(
     "dashboard:skillDetail",
-    async (_, skill: string, range: TimeRange, limit?: number) => {
-      if (import.meta.env.DEV) return { success: true, data: makeMockSkillDetail(skill, range, limit) }
+    async (_, skill: string, range: TimeRange, options?: number | TracePageOptions) => {
+      if (import.meta.env.DEV) return { success: true, data: makeMockSkillDetail(skill, range, options) }
       try {
-        return { success: true, data: await fetchSkillDetail(skill, range, limit) }
+        return { success: true, data: await fetchSkillDetail(skill, range, options) }
       } catch (e) {
         console.error("[Dashboard] skillDetail error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react"
+import { useMemo, useState, type ReactNode } from "react"
 import {
   Activity,
   AlertCircle,
@@ -20,6 +20,7 @@ import {
   Wrench
 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import {
   Dialog,
   DialogContent,
@@ -494,6 +495,8 @@ export function TraceExplorer({
   loading = false,
   error = null,
   title = "最近 10 条 Trace 记录",
+  subtitle = "选择记录查看完整执行树",
+  headerRight = null,
   emptyText = "当前时间范围内没有会话历史",
   showCodeStats = true,
   className
@@ -503,6 +506,8 @@ export function TraceExplorer({
   loading?: boolean
   error?: string | null
   title?: string
+  subtitle?: string
+  headerRight?: ReactNode
   emptyText?: string
   showCodeStats?: boolean
   className?: string
@@ -544,9 +549,12 @@ export function TraceExplorer({
       <div className={cn("flex min-h-0 flex-1 flex-col", className)}>
         {showCodeStats && <SkillCodeStatsBar stats={codeStats} />}
         <section className="flex min-h-0 flex-1 flex-col bg-background">
-          <div className="shrink-0 border-b border-border px-5 py-3">
-            <h3 className="text-xs font-semibold text-foreground">{title}</h3>
-            <p className="text-[10px] text-muted-foreground">选择记录查看完整执行树</p>
+          <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-5 py-3">
+            <div>
+              <h3 className="text-xs font-semibold text-foreground">{title}</h3>
+              <p className="text-[10px] text-muted-foreground">{subtitle}</p>
+            </div>
+            {headerRight}
           </div>
           <div className="flex flex-1 items-center justify-center px-6 py-12 text-sm text-muted-foreground">
             {emptyText}
@@ -560,9 +568,12 @@ export function TraceExplorer({
     <div className={cn("flex min-h-0 flex-1 flex-col", className)}>
       {showCodeStats && <SkillCodeStatsBar stats={codeStats} />}
       <section className="flex min-h-0 flex-1 flex-col bg-background">
-        <div className="shrink-0 border-b border-border px-5 py-3">
-          <h3 className="text-xs font-semibold text-foreground">{title}</h3>
-          <p className="text-[10px] text-muted-foreground">选择记录查看完整执行树</p>
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-5 py-3">
+          <div>
+            <h3 className="text-xs font-semibold text-foreground">{title}</h3>
+            <p className="text-[10px] text-muted-foreground">{subtitle}</p>
+          </div>
+          {headerRight}
         </div>
         <div className="grid min-h-0 flex-1 grid-cols-[320px_minmax(0,1fr)]">
           <div className="min-h-0 border-r border-border">
@@ -644,6 +655,11 @@ export function TraceHistoryDialog({
   skill,
   traces,
   codeStats,
+  tracePage = 1,
+  tracePageSize = 10,
+  totalTraces = traces.length,
+  onTracePrevious,
+  onTraceNext,
   loading,
   error
 }: {
@@ -652,9 +668,18 @@ export function TraceHistoryDialog({
   skill: string | null
   traces: DashboardTraceDetail[]
   codeStats: DashboardCodeStats | null
+  tracePage?: number
+  tracePageSize?: number
+  totalTraces?: number
+  onTracePrevious?: () => void
+  onTraceNext?: () => void
   loading: boolean
   error: string | null
 }): React.JSX.Element {
+  const displayTotalTraces = Math.max(totalTraces, traces.length)
+  const canPrevious = tracePage > 1 && !loading
+  const canNext = tracePage * tracePageSize < displayTotalTraces && !loading
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex h-[80vh] max-w-[1080px] grid-rows-none flex-col gap-0 p-0">
@@ -666,6 +691,32 @@ export function TraceHistoryDialog({
           codeStats={codeStats}
           loading={loading}
           error={error}
+          title={`Trace 记录（第 ${tracePage} 页）`}
+          subtitle={`共 ${displayTotalTraces.toLocaleString("zh-CN")} 条，选择记录查看完整执行树`}
+          headerRight={
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={onTracePrevious}
+                disabled={!canPrevious}
+              >
+                上一页
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="gap-1"
+                onClick={onTraceNext}
+                disabled={!canNext}
+              >
+                下一页
+                <ChevronRight className="size-3.5" />
+              </Button>
+            </div>
+          }
           emptyText="当前时间范围内没有该 Skill 的会话历史"
         />
       </DialogContent>
