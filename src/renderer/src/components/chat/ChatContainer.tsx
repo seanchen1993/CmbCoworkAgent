@@ -3575,12 +3575,9 @@ export function ChatContainer({
                             <div className="mb-1 text-[11px] font-medium text-muted-foreground">
                               工具名称
                             </div>
-                            <input
-                              className="w-full rounded border border-border bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-primary"
-                              value={savedToolNameInput}
-                              onChange={(event) => setSavedToolNameInput(event.target.value)}
-                              placeholder="例如：list_github_issues"
-                            />
+                            <div className="font-mono break-all">
+                              {savedToolNameInput || "-"}
+                            </div>
                           </div>
                           <div className="rounded-md bg-muted/30 px-3 py-2 text-xs overflow-auto">
                             <div className="mb-1 text-[11px] font-medium text-muted-foreground">
@@ -3654,7 +3651,7 @@ export function ChatContainer({
                       </>
                     ) : (
                       <>
-                        {isPrepareSaveCodeExecToolApproval && saveToolMetadataLoading ? (
+                        {isPrepareSaveCodeExecToolApproval && showSaveToolMetadataLoading ? (
                           <div className="flex items-center gap-2 text-xs text-muted-foreground">
                             <Loader2 className="size-4 animate-spin" />
                             正在生成工具信息，请稍候...

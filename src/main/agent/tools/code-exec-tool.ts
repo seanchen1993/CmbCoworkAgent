@@ -19,6 +19,7 @@ import type { ApprovalStore } from "../approval-store"
 import type { McpCapabilityService } from "../../mcp/capability-types"
 
 const DEFAULT_TIMEOUT_MS = CODE_EXEC_DEFAULT_TIMEOUT_MS
+const MAX_SAVED_TOOL_METADATA_ERROR_LENGTH = 100
 const SAVED_TOOL_REWRITE_SYSTEM_PROMPT = `
 # ROLE
 You are an expert Node.js developer. Your task is to refactor specific JavaScript async function bodies into highly reusable, generalized function bodies.
@@ -528,7 +529,7 @@ async function generateSavedToolRewrite(
     return { rewrite }
   } catch (error) {
     console.warn("[code_exec] failed to generate saved-tool rewrite:", error)
-    return { rewrite: null, error: getErrorMessage(error) || "LLM API请求失败" }
+    return { rewrite: null, error: truncateSavedToolMetadataError(getErrorMessage(error)) || "LLM API请求失败" }
   }
 }
 
@@ -536,6 +537,12 @@ function getErrorMessage(error: unknown): string {
   if (error instanceof Error) return error.message
   if (typeof error === "string") return error
   return ""
+}
+
+function truncateSavedToolMetadataError(message: string): string {
+  const trimmed = message.trim()
+  if (trimmed.length <= MAX_SAVED_TOOL_METADATA_ERROR_LENGTH) return trimmed
+  return `${trimmed.slice(0, MAX_SAVED_TOOL_METADATA_ERROR_LENGTH - 3)}...`
 }
 
 export function createCodeExecTool(context: CodeExecToolContext) {
