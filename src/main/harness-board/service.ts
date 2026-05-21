@@ -57,12 +57,6 @@ interface HarnessHookLogEntry {
 const HARNESS_BOARD_FILE = join(getOpenworkDir(), "harness-board-projects.json")
 const HARNESS_SESSION_BINDINGS_FILE = join(getOpenworkDir(), "harness-board-session-bindings.json")
 
-const DEFAULT_CACHE = {
-  featureCount: null,
-  activeFeatureCount: null,
-  lastInspectedAt: null
-}
-
 const HARNESS_ADAPTER_TIMEOUT_MS = 15_000
 const HARNESS_ADAPTER_MAX_BUFFER = 10 * 1024 * 1024
 const CHARDET_CONFIDENCE_THRESHOLD = 0.8
@@ -903,34 +897,9 @@ function normalizeProject(value: unknown): HarnessProjectMetadata | null {
       version: normalizeText(harnessAdapter.version),
       type: "plugin"
     },
-    owner: isObject(value.owner)
-      ? {
-          id: normalizeText(value.owner.id) || undefined,
-          name: normalizeText(value.owner.name) || undefined
-        }
-      : undefined,
     lifecycle: {
-      status: value.lifecycle && lifecycle.status === "archived" ? "archived" : "active",
-      createdAt: normalizeText(lifecycle.createdAt) || new Date().toISOString(),
-      updatedAt: normalizeText(lifecycle.updatedAt) || new Date().toISOString(),
-      archivedAt: typeof lifecycle.archivedAt === "string" ? lifecycle.archivedAt : null
-    },
-    cachedRunSummary: isObject(value.cachedRunSummary)
-      ? {
-          featureCount:
-            typeof value.cachedRunSummary.featureCount === "number"
-              ? value.cachedRunSummary.featureCount
-              : null,
-          activeFeatureCount:
-            typeof value.cachedRunSummary.activeFeatureCount === "number"
-              ? value.cachedRunSummary.activeFeatureCount
-              : null,
-          lastInspectedAt:
-            typeof value.cachedRunSummary.lastInspectedAt === "string"
-              ? value.cachedRunSummary.lastInspectedAt
-              : null
-        }
-      : DEFAULT_CACHE
+      status: value.lifecycle && lifecycle.status === "archived" ? "archived" : "active"
+    }
   }
 }
 
@@ -1016,11 +985,8 @@ function toListItem(project: HarnessProjectMetadata): HarnessProjectListItem {
       type: harnessAdapter.type
     },
     lifecycle: {
-      status: project.lifecycle.status,
-      createdAt: project.lifecycle.createdAt,
-      updatedAt: project.lifecycle.updatedAt
-    },
-    cachedRunSummary: project.cachedRunSummary ?? DEFAULT_CACHE
+      status: project.lifecycle.status
+    }
   }
 }
 
@@ -1185,7 +1151,6 @@ export function listHarnessProjects(): HarnessProjectListItem[] {
 export function createHarnessProject(input: HarnessProjectCreateInput): HarnessProjectMetadata {
   validateCreateInput(input)
   const store = readProjectStore()
-  const now = new Date().toISOString()
   const harnessAdapter = resolveHarnessAdapter(input.adapterId, input.adapterType)
   const project: HarnessProjectMetadata = {
     projectId: uuid(),
@@ -1201,12 +1166,8 @@ export function createHarnessProject(input: HarnessProjectCreateInput): HarnessP
     },
     "harness-adapter": harnessAdapter,
     lifecycle: {
-      status: "active",
-      createdAt: now,
-      updatedAt: now,
-      archivedAt: null
-    },
-    cachedRunSummary: DEFAULT_CACHE
+      status: "active"
+    }
   }
 
   initializeHarnessProject(project)
@@ -1242,8 +1203,7 @@ export function updateHarnessProjectMetadata(
     },
     "harness-adapter": harnessAdapter,
     lifecycle: {
-      ...existing.lifecycle,
-      updatedAt: new Date().toISOString()
+      ...existing.lifecycle
     }
   }
 
@@ -1259,15 +1219,12 @@ export function archiveHarnessProject(projectId: string): HarnessProjectMetadata
     throw new Error("Project not found")
   }
 
-  const now = new Date().toISOString()
   const existing = store.projects[index]
   const archived: HarnessProjectMetadata = {
     ...existing,
     lifecycle: {
       ...existing.lifecycle,
-      status: "archived",
-      updatedAt: now,
-      archivedAt: existing.lifecycle.archivedAt ?? now
+      status: "archived"
     }
   }
 

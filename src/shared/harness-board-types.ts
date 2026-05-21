@@ -41,20 +41,8 @@ export interface HarnessProjectMetadata {
     path: string
   }
   "harness-adapter": HarnessAdapterSnapshot
-  owner?: {
-    id?: string
-    name?: string
-  }
   lifecycle: {
     status: "active" | "archived"
-    createdAt: string
-    updatedAt: string
-    archivedAt: string | null
-  }
-  cachedRunSummary?: {
-    featureCount: number | null
-    activeFeatureCount: number | null
-    lastInspectedAt: string | null
   }
 }
 
@@ -103,13 +91,6 @@ export interface HarnessProjectListItem {
   }
   lifecycle: {
     status: "active" | "archived"
-    createdAt: string
-    updatedAt: string
-  }
-  cachedRunSummary: {
-    featureCount: number | null
-    activeFeatureCount: number | null
-    lastInspectedAt: string | null
   }
 }
 
