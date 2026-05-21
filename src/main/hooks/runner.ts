@@ -54,6 +54,7 @@ export interface HookContext {
     toolCalls?: string[]
     usedSkills?: string[]
   }
+  pluginOutputDir?: string
 }
 
 function getCommandCwd(context: HookContext): string {
@@ -143,6 +144,7 @@ function buildHookEnv(event: HookEvent, context: HookContext): Record<string, st
     // Claude Code compatibility — the canonical env var hooks expect
     env.CLAUDE_PROJECT_DIR = context.workspacePath
   }
+  if (context.pluginOutputDir) env.PLUGIN_OUTPUT_DIR = context.pluginOutputDir
   if (context.sessionId) env.SESSION_ID = context.sessionId
   if (context.userPrompt) env.USER_PROMPT = context.userPrompt
   return env

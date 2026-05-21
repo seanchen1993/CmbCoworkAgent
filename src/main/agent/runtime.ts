@@ -447,7 +447,7 @@ function createScopedMcpCapabilityService(
     context: HookContext
   ) => ReturnType<typeof resolveEnabledHooksForRun>,
   onHookResult: HookResultCallback | undefined,
-  baseContext: { workspacePath: string; threadId: string }
+  baseContext: { workspacePath: string; threadId: string; pluginOutputDir?: string }
 ): McpCapabilityService {
   const getPluginName = (pluginId: string): string | undefined => {
     try {
@@ -488,6 +488,7 @@ function createScopedMcpCapabilityService(
         toolArgs: args,
         workspacePath: baseContext.workspacePath,
         sessionId: baseContext.threadId,
+        pluginOutputDir: baseContext.pluginOutputDir,
         pluginId,
         pluginName: pluginId ? getPluginName(pluginId) : undefined
       }
@@ -1534,6 +1535,8 @@ export interface CreateAgentRuntimeOptions {
   extraSystemPrompt?: string
   /** Extra content appended immediately after the working directory section. */
   workingDirPromptAppendix?: string
+  /** Optional plugin output directory exposed to hook commands as PLUGIN_OUTPUT_DIR. */
+  pluginOutputDir?: string
   /** Skip the manage_scheduler tool (used by scheduled task / heartbeat execution to prevent recursive scheduling) */
   noSchedulerTool?: boolean
   /** Skip the manage_skill tool (disable skill evolution for scheduled/heartbeat agents) */
@@ -1570,6 +1573,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     modelId,
     extraSystemPrompt,
     workingDirPromptAppendix,
+    pluginOutputDir,
     retryHooks,
     maxRetryAttempts,
     enableAgentsPrompt = true,
@@ -1671,6 +1675,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     hookResolver: resolveHooksForContext,
     hookScope,
     onHookResult,
+    pluginOutputDir,
     onFileMutation,
     abortSignal: options.abortSignal,
     runId: threadId,
@@ -1722,7 +1727,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         toolName: req.tool_call?.name,
         toolArgs: { command: req.command, reason: req.reason, filePath: req.filePath },
         workspacePath,
-        sessionId: threadId
+        sessionId: threadId,
+        pluginOutputDir
       }
       runHooks(
         resolveHooksForContext("Notification", notificationContext),
@@ -1859,7 +1865,7 @@ The workspace root is: ${workspacePath}`
     hookScope,
     resolveHooksForContext,
     onHookResult,
-    { workspacePath, threadId }
+    { workspacePath, threadId, pluginOutputDir }
   )
   const codeExecEnabled = isCodeExecEnabled()
   const allMcpTools = await capabilityService.listTools()

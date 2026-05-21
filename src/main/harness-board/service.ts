@@ -39,7 +39,7 @@ interface HarnessSessionBindingStoreFile {
 
 type HarnessHookLogRef = HarnessRunDetailViewModel["run"]["hookLogRefs"][number]
 type HarnessInspectCommandName = "project" | "run" | "createProject"
-type HarnessPlatformConfigKey = HarnessInspectCommandName | "plugin_dir_prompt"
+type HarnessPlatformConfigKey = HarnessInspectCommandName | "plugin_dir_prompt" | "plugin_dir"
 
 interface ConfiguredHarnessInvocation {
   cwd: string
@@ -1161,6 +1161,18 @@ export function buildHarnessFeaturePluginDirPrompt(metadata: unknown): string | 
   const project = requireProject(feature.projectId)
   const cwd = adapterPluginDir(project)
   const template = readBoardConfigPlatformText(cwd, "plugin_dir_prompt")
+  if (!template) return null
+
+  return replaceHarnessConfigPlaceholders(template, project, "run", cwd, feature.slug).trim() || null
+}
+
+export function buildHarnessFeaturePluginOutputDir(metadata: unknown): string | null {
+  const feature = readHarnessFeatureMetadata(metadata)
+  if (!feature) return null
+
+  const project = requireProject(feature.projectId)
+  const cwd = adapterPluginDir(project)
+  const template = readBoardConfigPlatformText(cwd, "plugin_dir")
   if (!template) return null
 
   return replaceHarnessConfigPlaceholders(template, project, "run", cwd, feature.slug).trim() || null

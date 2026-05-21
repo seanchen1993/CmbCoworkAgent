@@ -99,7 +99,10 @@ import {
   startAgentGitSnapshot,
   type AgentGitSnapshot
 } from "../services/agent-auto-commit"
-import { buildHarnessFeaturePluginDirPrompt } from "../harness-board/service"
+import {
+  buildHarnessFeaturePluginDirPrompt,
+  buildHarnessFeaturePluginOutputDir
+} from "../harness-board/service"
 import type { AgentAutoCommitResult } from "../types"
 import { formatAutoCommitLines } from "../../shared/auto-commit-format"
 import { makeHookResultCallback } from "../hooks/result-callback"
@@ -119,12 +122,20 @@ const STOP_HOOK_REVISION_PROMPT_PREFIX = "[[CMBDEVCLAW_STOP_HOOK_REVISION]]"
 // Track active runs for cancellation
 const activeRuns = new Map<string, AbortController>()
 
-function getHarnessWorkingDirPromptAppendix(metadata: Record<string, unknown>): string | undefined {
+interface HarnessAgentContext {
+  workingDirPromptAppendix?: string
+  pluginOutputDir?: string
+}
+
+function getHarnessAgentContext(metadata: Record<string, unknown>): HarnessAgentContext {
   try {
-    return buildHarnessFeaturePluginDirPrompt(metadata) ?? undefined
+    return {
+      workingDirPromptAppendix: buildHarnessFeaturePluginDirPrompt(metadata) ?? undefined,
+      pluginOutputDir: buildHarnessFeaturePluginOutputDir(metadata) ?? undefined
+    }
   } catch (error) {
-    console.warn("[HarnessBoard] Failed to build plugin_dir_prompt:", error)
-    return undefined
+    console.warn("[HarnessBoard] Failed to build harness agent context:", error)
+    return {}
   }
 }
 
@@ -230,6 +241,7 @@ function getAllEnabledHooksForInterrupt(workspacePath: string | undefined): Hook
 async function maybeRunSubagentStopHooksFromStreamPayload(params: {
   payload: unknown
   workspacePath?: string
+  pluginOutputDir?: string
   threadId: string
   hookScope: HookScopeController
   firedToolCallIds: Set<string>
@@ -254,6 +266,7 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
     kwargs.status === "error" || kwargs.is_error === true || additionalKwargs?.is_error === true
   const subagentStopContext: HookContext = {
     workspacePath: params.workspacePath,
+    pluginOutputDir: params.pluginOutputDir,
     sessionId: params.threadId,
     subagent: {
       id: toolCallId,
@@ -379,6 +392,7 @@ async function buildSkillLifecycleRegistryForHooks(): Promise<SkillLifecycleRegi
 async function activateExplicitSkillFromMessage({
   message,
   workspacePath,
+  pluginOutputDir,
   sessionId,
   hookScope,
   firedSkillKeys,
@@ -387,6 +401,7 @@ async function activateExplicitSkillFromMessage({
 }: {
   message: string
   workspacePath: string
+  pluginOutputDir?: string
   sessionId: string
   hookScope: HookScopeController
   firedSkillKeys: Set<string>
@@ -425,6 +440,7 @@ async function activateExplicitSkillFromMessage({
       skillPath: skill.path
     }),
     workspacePath,
+    pluginOutputDir,
     sessionId,
     hookScope,
     firedSkillKeys,
@@ -1488,7 +1504,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
       const workspacePath = metadata.workspacePath as string | undefined
       sessionWorkspacePath = workspacePath ?? undefined
-      const workingDirPromptAppendix = getHarnessWorkingDirPromptAppendix(metadata)
+      const harnessAgentContext = getHarnessAgentContext(metadata)
 
       if (!workspacePath) {
         window.webContents.send(channel, {
@@ -1504,6 +1520,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const explicitSkillActivation = await activateExplicitSkillFromMessage({
         message,
         workspacePath,
+        pluginOutputDir: harnessAgentContext.pluginOutputDir,
         sessionId: threadId,
         hookScope,
         firedSkillKeys: skillHookKeys,
@@ -1533,7 +1550,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
       // Fire SessionStart once per thread lifetime (not per turn). SessionEnd fires when the
       // thread is deleted (threads:delete) or the app is quitting.
-      fireSessionStartOnce(threadId, sessionWorkspacePath, onHookResult, hookScope)
+      fireSessionStartOnce(
+        threadId,
+        sessionWorkspacePath,
+        onHookResult,
+        hookScope,
+        harnessAgentContext.pluginOutputDir
+      )
       sendActiveHookNotice(window, channel, workspacePath)
 
       // Fire UserPromptSubmit hook — may block the message, halt the turn, rewrite the prompt,
@@ -1542,7 +1565,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         toolArgs: { message },
         userPrompt: message,
         workspacePath: workspacePath ?? undefined,
-        sessionId: threadId
+        sessionId: threadId,
+        pluginOutputDir: harnessAgentContext.pluginOutputDir
       }
       const promptSubmitResult = await runHooksEnriched(
         resolveEnabledHooksForRun(
@@ -1670,7 +1694,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             hookScope,
             skillHookKeys,
             skillUseTracker,
-            workingDirPromptAppendix,
+            ...harnessAgentContext,
             onFileMutation: autoCommit.onFileMutation
           })
           // First attempt sends the message; subsequent attempts resume from checkpoint
@@ -1893,6 +1917,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             workspacePath: sessionWorkspacePath,
             threadId,
             hookScope,
+            pluginOutputDir: harnessAgentContext.pluginOutputDir,
             firedToolCallIds: _subagentStopFired,
             onHookResult
           })
@@ -2140,6 +2165,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 workspacePath: sessionWorkspacePath,
                 threadId,
                 hookScope,
+                pluginOutputDir: harnessAgentContext.pluginOutputDir,
                 firedToolCallIds: _subagentStopFired,
                 onHookResult
               })
@@ -2273,7 +2299,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             hookScope,
             skillHookKeys,
             skillUseTracker,
-            workingDirPromptAppendix,
+            ...harnessAgentContext,
             onFileMutation: autoCommit.onFileMutation
           })
           activeStream = await agent.stream(null, streamConfig) // resume from checkpoint
@@ -2286,6 +2312,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const completionOutcome = await runCompletionHooksWithRevision({
           threadId,
           workspacePath: workspacePath ?? undefined,
+          pluginOutputDir: harnessAgentContext.pluginOutputDir,
           abortSignal: abortController.signal,
           getStopContext: () =>
             stopContextCollector.snapshot({
@@ -2535,7 +2562,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     const thread = getThread(threadId)
     const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
     const workspacePath = metadata.workspacePath as string | undefined
-    const workingDirPromptAppendix = getHarnessWorkingDirPromptAppendix(metadata)
+    const harnessAgentContext = getHarnessAgentContext(metadata)
 
     if (!workspacePath) {
       window.webContents.send(channel, {
@@ -2640,7 +2667,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             hookScope,
             skillHookKeys,
             skillUseTracker,
-            workingDirPromptAppendix,
+            ...harnessAgentContext,
             onFileMutation: autoCommit.onFileMutation
           })
           resumeStream = await resumeAgent.stream(
@@ -2739,6 +2766,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               workspacePath,
               threadId,
               hookScope,
+              pluginOutputDir: harnessAgentContext.pluginOutputDir,
               firedToolCallIds: resumeSubagentStopFired,
               onHookResult
             })
@@ -2779,7 +2807,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             hookScope,
             skillHookKeys,
             skillUseTracker,
-            workingDirPromptAppendix,
+            ...harnessAgentContext,
             onFileMutation: autoCommit.onFileMutation
           })
           activeResumeStream = await nextAgent.stream(
@@ -2796,6 +2824,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const completionOutcome = await runCompletionHooksWithRevision({
           threadId,
           workspacePath: workspacePath ?? undefined,
+          pluginOutputDir: harnessAgentContext.pluginOutputDir,
           abortSignal: abortController.signal,
           getStopContext: () => stopContextCollector.snapshot(),
           runRevision: async (revisionPrompt) => {
@@ -2883,7 +2912,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
     const workspacePath = metadata.workspacePath as string | undefined
     const modelId = metadata.model as string | undefined
-    const workingDirPromptAppendix = getHarnessWorkingDirPromptAppendix(metadata)
+    const harnessAgentContext = getHarnessAgentContext(metadata)
 
     if (!workspacePath) {
       window.webContents.send(channel, {
@@ -2979,7 +3008,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               hookScope,
               skillHookKeys,
               skillUseTracker,
-              workingDirPromptAppendix,
+              ...harnessAgentContext,
               onFileMutation: autoCommit.onFileMutation
             })
             intStream = await intAgent.stream(null, interruptStreamConfig)
@@ -3075,6 +3104,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 workspacePath,
                 threadId,
                 hookScope,
+                pluginOutputDir: harnessAgentContext.pluginOutputDir,
                 firedToolCallIds: interruptSubagentStopFired,
                 onHookResult
               })
@@ -3115,7 +3145,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               hookScope,
               skillHookKeys,
               skillUseTracker,
-              workingDirPromptAppendix,
+              ...harnessAgentContext,
               onFileMutation: autoCommit.onFileMutation
             })
             activeIntStream = await nextAgent.stream(null, interruptStreamConfig)
@@ -3129,6 +3159,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const completionOutcome = await runCompletionHooksWithRevision({
             threadId,
             workspacePath: workspacePath ?? undefined,
+            pluginOutputDir: harnessAgentContext.pluginOutputDir,
             abortSignal: abortController.signal,
             getStopContext: () => stopContextCollector.snapshot(),
             runRevision: async (revisionPrompt) => {

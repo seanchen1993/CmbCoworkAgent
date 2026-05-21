@@ -279,6 +279,8 @@ export interface LocalSandboxOptions {
   skillHookKeys?: Set<string>
   /** Records skills activated this turn so PostSkillUse can run at turn completion. */
   skillUseTracker?: SkillUseTracker
+  /** Optional plugin output directory exposed to hook commands as PLUGIN_OUTPUT_DIR. */
+  pluginOutputDir?: string
 }
 
 interface ExecuteRawOptions {
@@ -341,6 +343,7 @@ export class LocalSandbox
   private readonly env: Record<string, string>
   private readonly workingDir: string
   private readonly windowsSandbox: WindowsSandboxMode
+  private readonly pluginOutputDir?: string
   private readonly codexExePath: string
   private readonly getHooks: () => HookConfig[]
   private readonly resolveHooks: LocalSandboxHookResolver
@@ -1516,6 +1519,7 @@ export class LocalSandbox
     this.env = baseEnv
     this.workingDir = options.rootDir ?? process.cwd()
     this.windowsSandbox = options.windowsSandbox ?? "none"
+    this.pluginOutputDir = options.pluginOutputDir
     this.codexExePath = options.codexExePath ?? "codex"
     const h = options.hooks
     this.getHooks = typeof h === "function" ? h : () => h ?? []
@@ -1709,8 +1713,11 @@ export class LocalSandbox
   }
 
   private async runHooks(event: HookEvent, context: HookContext): Promise<HookResult | null> {
-    const hooks = this.resolveHooks(event, context)
-    const result = await runHooksEnriched(hooks, event, context, this._onHookResult)
+    const effectiveContext = this.pluginOutputDir && !context.pluginOutputDir
+      ? { ...context, pluginOutputDir: this.pluginOutputDir }
+      : context
+    const hooks = this.resolveHooks(event, effectiveContext)
+    const result = await runHooksEnriched(hooks, event, effectiveContext, this._onHookResult)
     if (result) {
       this._hookScope?.activatePersistentHooks(hooks)
     }

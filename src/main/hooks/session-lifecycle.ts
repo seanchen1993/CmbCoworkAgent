@@ -8,6 +8,7 @@ import { resolveEnabledHooksForRun, type HookScopeController } from "./scope"
 // As long as both call sites stay wired, this Map is bounded by live thread count.
 interface StartedSession {
   workspacePath?: string
+  pluginOutputDir?: string
   hookScope?: HookScopeController
 }
 
@@ -23,19 +24,22 @@ export function fireSessionStartOnce(
   threadId: string,
   workspacePath?: string,
   onHookResult?: HookResultCallback,
-  hookScope?: HookScopeController
+  hookScope?: HookScopeController,
+  pluginOutputDir?: string
 ): void {
   const existing = startedSessions.get(threadId)
   if (existing) {
     startedSessions.set(threadId, {
       workspacePath: workspacePath ?? existing.workspacePath,
+      pluginOutputDir: pluginOutputDir ?? existing.pluginOutputDir,
       hookScope: hookScope ?? existing.hookScope
     })
     return
   }
-  startedSessions.set(threadId, { workspacePath, hookScope })
+  startedSessions.set(threadId, { workspacePath, pluginOutputDir, hookScope })
   const context: HookContext = {
     workspacePath,
+    pluginOutputDir,
     sessionId: threadId
   }
   runHooks(
@@ -50,14 +54,17 @@ export function fireSessionStartOnce(
 export async function fireSessionEnd(
   threadId: string,
   workspacePath?: string,
-  onHookResult?: HookResultCallback
+  onHookResult?: HookResultCallback,
+  pluginOutputDir?: string
 ): Promise<void> {
   const started = startedSessions.get(threadId)
   if (!started) return
   startedSessions.delete(threadId)
   const effectiveWorkspacePath = workspacePath ?? started.workspacePath
+  const effectivePluginOutputDir = pluginOutputDir ?? started.pluginOutputDir
   const context: HookContext = {
     workspacePath: effectiveWorkspacePath,
+    pluginOutputDir: effectivePluginOutputDir,
     sessionId: threadId
   }
   await runHooks(
@@ -87,7 +94,11 @@ export async function fireSessionEndAll(
   if (entries.length === 0) return
   const all = Promise.allSettled(
     entries.map(([id, session]) => {
-      const context: HookContext = { sessionId: id, workspacePath: session.workspacePath }
+      const context: HookContext = {
+        sessionId: id,
+        workspacePath: session.workspacePath,
+        pluginOutputDir: session.pluginOutputDir
+      }
       return runHooks(
         resolveEnabledHooksForRun(session.workspacePath, "SessionEnd", context, session.hookScope),
         "SessionEnd",

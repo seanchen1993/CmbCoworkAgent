@@ -133,6 +133,7 @@ export function mergePostSkillUseResults(results: HookResult[]): HookResult | nu
 export async function runPostSkillUseHooksForActivatedSkills({
   threadId,
   workspacePath,
+  pluginOutputDir,
   getStopContext,
   hookScope,
   skillUseTracker,
@@ -142,6 +143,7 @@ export async function runPostSkillUseHooksForActivatedSkills({
 }: {
   threadId: string
   workspacePath?: string
+  pluginOutputDir?: string
   getStopContext: () => StopHookContext
   hookScope: HookScopeController
   skillUseTracker?: SkillUseTracker
@@ -162,6 +164,7 @@ export async function runPostSkillUseHooksForActivatedSkills({
         skillPath: skill.path
       },
       workspacePath,
+      pluginOutputDir,
       sessionId: threadId,
       skillName: skill.name,
       skillPath: skill.path,
@@ -192,6 +195,7 @@ export async function runPostSkillUseHooksForActivatedSkills({
 export async function runCompletionHooksWithRevision({
   threadId,
   workspacePath,
+  pluginOutputDir,
   abortSignal,
   getStopContext,
   hookScope,
@@ -207,6 +211,7 @@ export async function runCompletionHooksWithRevision({
 }: {
   threadId: string
   workspacePath?: string
+  pluginOutputDir?: string
   abortSignal: AbortSignal
   getStopContext: () => StopHookContext
   hookScope: HookScopeController
@@ -228,6 +233,7 @@ export async function runCompletionHooksWithRevision({
       : runPostSkillUseHooksForActivatedSkills({
           threadId,
           workspacePath,
+          pluginOutputDir,
           getStopContext,
           hookScope,
           skillUseTracker,
@@ -282,6 +288,7 @@ export async function runCompletionHooksWithRevision({
             "Stop",
             {
               workspacePath,
+              pluginOutputDir,
               sessionId: threadId,
               stopContext: getStopContext()
             },
@@ -290,6 +297,7 @@ export async function runCompletionHooksWithRevision({
           "Stop",
           {
             workspacePath,
+            pluginOutputDir,
             sessionId: threadId,
             stopContext: getStopContext()
           },
