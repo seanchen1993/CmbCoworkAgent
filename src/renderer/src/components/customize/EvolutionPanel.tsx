@@ -34,6 +34,7 @@ import { evolutionApi, type EvolutionCandidate } from "@/api/evolution"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
 import { buildBundleUnifiedDiff, extractTextBundleFromZip } from "@/lib/skill-bundle-diff"
@@ -1076,19 +1077,41 @@ function CloudEvolutionUpdateCard({
           onClick={(event) => event.stopPropagation()}
           onKeyDown={(event) => event.stopPropagation()}
         >
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={installing || adopted}
-            className="h-7 px-2.5 text-xs border-blue-500/40 text-blue-600 hover:bg-blue-500/10 hover:text-blue-600"
-            onClick={(event) => {
-              event.stopPropagation()
-              void onInstall(candidate)
-            }}
-          >
-            {installing ? <Loader2 className="size-3 animate-spin" /> : <CheckCircle2 className="size-3 mr-1" />}
-            {adopted ? "已采纳" : "更新安装"}
-          </Button>
+          {!adopted ? (
+            <TooltipProvider delayDuration={150}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={installing}
+                    className="h-7 px-2.5 text-xs border-blue-500/40 text-blue-600 hover:bg-blue-500/10 hover:text-blue-600"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      void onInstall(candidate)
+                    }}
+                  >
+                    {installing ? <Loader2 className="size-3 animate-spin" /> : <CheckCircle2 className="size-3 mr-1" />}
+                    更新安装
+                    <Info className="ml-1 size-3 text-blue-600/70" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="top" sideOffset={6} className="max-w-56">
+                  仅更新本地已安装的同名 Skill，不会发布或修改应用市场版本。
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          ) : (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled
+              className="h-7 px-2.5 text-xs border-blue-500/40 text-blue-600 hover:bg-blue-500/10 hover:text-blue-600"
+            >
+              <CheckCircle2 className="size-3 mr-1" />
+              已采纳
+            </Button>
+          )}
           {adopted && (
             <Button
               size="sm"
@@ -1188,6 +1211,18 @@ function EmptyState({ icon, title, desc }: { icon: React.ReactNode; title: strin
       {icon}
       <p className="text-sm text-muted-foreground">{title}</p>
       <p className="text-xs text-muted-foreground/60 mt-1 max-w-xs">{desc}</p>
+    </div>
+  )
+}
+
+function CloudEvolutionIntro(): React.JSX.Element {
+  return (
+    <div className="flex items-start gap-2 rounded-md border border-blue-500/20 bg-blue-500/5 px-3 py-2 text-xs text-muted-foreground">
+      <Info className="mt-0.5 size-3.5 shrink-0 text-blue-600 dark:text-blue-400" />
+      <p className="leading-relaxed">
+        <span className="font-medium text-foreground">云端自进化</span>
+        会从大量真实 traces 中提取高频、稳定、可复用的经验，包括成功路径和失败教训，并沉淀为 Skill 优化版本；适合将团队实践快速同步到本地已安装的同名 Skill。
+      </p>
     </div>
   )
 }
@@ -2029,13 +2064,17 @@ export function EvolutionPanel(): React.JSX.Element {
           <div className="p-4 space-y-2">
             {tab === "candidates" ? (
               candidates.length === 0 && cloudEvolutionUpdates.length === 0 ? (
-                <EmptyState
-                  icon={<Sparkles className="size-8 text-muted-foreground/40 mb-3" />}
-                  title="暂无优化候选"
-                  desc="请先切换到「执行 Traces」分析本地记录，或等待云端自进化服务推送新版本"
-                />
+                <>
+                  <CloudEvolutionIntro />
+                  <EmptyState
+                    icon={<Sparkles className="size-8 text-muted-foreground/40 mb-3" />}
+                    title="暂无优化候选"
+                    desc="请先切换到「执行 Traces」分析本地记录，或等待云端自进化服务推送新版本"
+                  />
+                </>
               ) : (
                 <>
+                  <CloudEvolutionIntro />
                   {cloudEvolutionUpdates.map((candidate) => (
                     <CloudEvolutionUpdateCard
                       key={candidate.candidate_id}
