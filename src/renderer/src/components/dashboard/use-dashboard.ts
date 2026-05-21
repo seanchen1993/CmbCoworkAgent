@@ -1243,9 +1243,6 @@ function mergeSkillEvalRecentOnly(
   return {
     ...current,
     generatedAt: next.generatedAt,
-    totalTraceHits: next.totalTraceHits,
-    evaluatedTraceCount: next.evaluatedTraceCount,
-    sampledTraceCount: next.sampledTraceCount,
     recentTotal: next.recentTotal,
     recentPage: next.recentPage,
     recentPageSize: next.recentPageSize,

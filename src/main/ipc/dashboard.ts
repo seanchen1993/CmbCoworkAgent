@@ -1696,38 +1696,18 @@ async function fetchSkillEvalSummary(
     const recentTraceHits = getTotalHits(recentRaw, recentRaw.hits?.hits?.length ?? 0)
     const recentTraces = parseSkillEvalTraceHits(recentRaw)
     const recentRuns = buildSkillEvalRuns(recentTraces, explicitRecentFilter, allowedSkillNames)
-      .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())
-    return {
-      generatedAt: new Date().toISOString(),
+    return buildSkillEvalSummaryFromTraces({
+      traces: recentTraces,
+      sampleRuns: recentRuns,
+      recentTraces,
       totalTraceHits: recentTraceHits,
-      evaluatedTraceCount: new Set(recentRuns.map((run) => run.traceId).filter(Boolean)).size,
       sampledTraceCount: recentRaw.hits?.hits?.length ?? 0,
       recentTotal: recentTraceHits,
       recentPage,
       recentPageSize,
-      totalRuns: recentRuns.length,
-      totalSkills: recentRuns.length > 0 ? 1 : 0,
-      passRate: 0,
-      resultPassRate: 0,
-      averageScore: 0,
-      averageProcessScore: 0,
-      averageOutcomeScore: 0,
-      averageResultScore: 0,
-      averageToolCalls: 0,
-      averageModelCalls: 0,
-      totalInputTokens: 0,
-      totalOutputTokens: 0,
-      totalPromptInputTokens: 0,
-      totalTokens: 0,
-      averageInputTokens: 0,
-      averageOutputTokens: 0,
-      averagePromptInputTokens: 0,
-      averageTotalTokens: 0,
-      averagePeakInputTokens: 0,
-      averageDurationMs: 0,
-      skills: [],
-      recent: recentRuns
-    }
+      recentSkillFilter: explicitRecentFilter,
+      allowedSkillNames
+    })
   }
 
   if (!explicitRecentFilter && defaultRecentToLatestSkill) {

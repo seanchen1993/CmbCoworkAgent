@@ -776,27 +776,31 @@ const SkillEvalSkillRow = memo(function SkillEvalSkillRow({
     <button
       type="button"
       onClick={handleClick}
-      className={`grid w-full grid-cols-[minmax(96px,1fr)_42px_50px_48px_48px_54px] items-center gap-2 border-b border-border px-4 py-3 text-left text-sm hover:bg-muted/35 ${
-        active ? "bg-muted/45" : ""
+      className={`grid w-full grid-cols-[4px_minmax(96px,1fr)_42px_50px_48px_48px_54px] items-center gap-2 border-b border-border px-4 py-3 text-left text-sm transition-colors hover:bg-muted/35 ${
+        active ? "bg-primary/12 text-foreground shadow-[inset_0_0_0_1px_hsl(var(--primary)/0.22)]" : ""
       }`}
+      aria-current={active ? "true" : undefined}
     >
+      <span className={`h-8 rounded-full ${active ? "bg-primary" : "bg-transparent"}`} />
       <div className="min-w-0">
-        <div className="truncate font-medium text-foreground">{skill.skillName}</div>
-        <div className="mt-0.5 text-[11px] text-muted-foreground">
+        <div className={`truncate font-medium ${active ? "text-foreground" : "text-foreground"}`}>
+          {skill.skillName}
+        </div>
+        <div className={`mt-0.5 text-[11px] ${active ? "text-foreground/70" : "text-muted-foreground"}`}>
           {skill.skillVersion ?? "未标版本"} · {formatRelativeTime(skill.lastRunAt)}
         </div>
       </div>
-      <div className="text-right text-xs tabular-nums text-muted-foreground">{formatNumber(skill.runs)}</div>
-      <div className="text-right text-xs tabular-nums text-muted-foreground">
+      <div className={`text-right text-xs tabular-nums ${active ? "font-medium text-foreground" : "text-muted-foreground"}`}>{formatNumber(skill.runs)}</div>
+      <div className={`text-right text-xs tabular-nums ${active ? "font-medium text-foreground" : "text-muted-foreground"}`}>
         {formatSkillEvalPercent(skill.passRate)}
       </div>
-      <div className="text-right text-xs tabular-nums text-muted-foreground">
+      <div className={`text-right text-xs tabular-nums ${active ? "font-medium text-foreground" : "text-muted-foreground"}`}>
         {formatSkillEvalPercent(skill.averageOutcomeScore)}
       </div>
-      <div className="text-right text-xs tabular-nums text-muted-foreground">
+      <div className={`text-right text-xs tabular-nums ${active ? "font-medium text-foreground" : "text-muted-foreground"}`}>
         {formatSkillEvalPercent(skill.averageScore)}
       </div>
-      <div className="text-right text-xs tabular-nums text-muted-foreground">
+      <div className={`text-right text-xs tabular-nums ${active ? "font-medium text-foreground" : "text-muted-foreground"}`}>
         {formatSkillEvalTokens(skill.averageTotalTokens)}
       </div>
     </button>
@@ -1185,7 +1189,8 @@ const SkillEvalDashboardPanel = memo(function SkillEvalDashboardPanel({
           <SkillEvalStatTile label="总 Token" value={formatSkillEvalTokens(selectedTotalTokens)} />
           <SkillEvalStatTile label="平均峰值输入" value={formatSkillEvalTokens(selectedSkill?.averagePeakInputTokens ?? data.averagePeakInputTokens)} />
         </div>
-        <div className="grid grid-cols-[minmax(96px,1fr)_42px_50px_48px_48px_54px] gap-2 border-b border-border px-4 py-2 text-[11px] font-medium text-muted-foreground">
+        <div className="grid grid-cols-[4px_minmax(96px,1fr)_42px_50px_48px_48px_54px] gap-2 border-b border-border px-4 py-2 text-[11px] font-medium text-muted-foreground">
+          <span />
           <span>技能</span>
           <span className="text-right">次数</span>
           <span className="text-right">通过率</span>
@@ -1232,9 +1237,12 @@ const SkillEvalDashboardPanel = memo(function SkillEvalDashboardPanel({
           <button
             type="button"
             onClick={handleAllRunsClick}
-            className={`w-full border-b border-border px-4 py-2 text-left text-xs text-muted-foreground hover:bg-muted/35 ${
-              selectedSkillKey === null ? "bg-muted/45 text-foreground" : ""
+            className={`w-full border-b border-border px-4 py-2 text-left text-xs transition-colors hover:bg-muted/35 ${
+              selectedSkillKey === null
+                ? "bg-primary/12 font-medium text-foreground shadow-[inset_0_0_0_1px_hsl(var(--primary)/0.22)]"
+                : "text-muted-foreground"
             }`}
+            aria-current={selectedSkillKey === null ? "true" : undefined}
           >
             全部运行
           </button>
@@ -1419,6 +1427,7 @@ export function DashboardView(): React.JSX.Element {
     () => myUploadedSkillNames.join("\u0001"),
     [myUploadedSkillNames]
   )
+  const skillEvalScopeKey = skillEvalMineOnly ? `mine:${myUploadedSkillNamesKey}` : "all"
   const skillEvalSkillByKey = useMemo(
     () => new Map((skillEval?.skills ?? []).map((skill) => [
       skillEvalKey(skill.skillName, skill.skillVersion),
@@ -1437,13 +1446,7 @@ export function DashboardView(): React.JSX.Element {
   useEffect(() => {
     setSkillEvalSelectedSkillKey(undefined)
     clearSkillEval()
-  }, [clearSkillEval, range.from, range.to])
-
-  useEffect(() => {
-    if (!skillEvalMineOnly) return
-    setSkillEvalSelectedSkillKey(undefined)
-    clearSkillEval()
-  }, [clearSkillEval, myUploadedSkillNamesKey, skillEvalMineOnly])
+  }, [clearSkillEval, range.from, range.to, skillEvalScopeKey])
 
   useEffect(() => {
     if (skillEvalSelectedSkillKey === undefined || skillEvalSelectedSkillKey === null || !skillEval) return
