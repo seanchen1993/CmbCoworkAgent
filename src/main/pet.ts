@@ -1202,7 +1202,7 @@ function getBubbleBounds(width: number, height: number): Electron.Rectangle | nu
 /**
  * 取消气泡的延迟隐藏。
  *
- * 鼠标从数字 tag 移向气泡窗口时会短暂离开 tag，这里用于保留气泡，避免闪烁。
+ * 任务 tag hover 会安排一个短延迟收起；重新展示气泡时先清掉旧定时器。
  */
 function cancelPetBubbleHide(): void {
   if (!petBubbleHideTimer) return
@@ -1213,7 +1213,7 @@ function cancelPetBubbleHide(): void {
 /**
  * 延迟隐藏气泡。
  *
- * 给鼠标从 tag 移动到气泡窗口留出缓冲时间，提升 hover 交互的稳定性。
+ * 鼠标离开任务 tag 后稍等一下再收起，避免边缘抖动导致气泡闪烁。
  */
 function schedulePetBubbleHide(): void {
   cancelPetBubbleHide()
@@ -1260,8 +1260,9 @@ function showPetBubble(message: string, autoHideMs = PET_BUBBLE_AUTO_HIDE_MS): v
   const bounds = getBubbleBounds(bubbleWidth, bubbleHeight)
   if (!bounds) return
 
-  if (!petBubbleWindow || petBubbleWindow.isDestroyed()) {
-    petBubbleWindow = new BrowserWindow({
+  let bubbleWindow = petBubbleWindow
+  if (!bubbleWindow || bubbleWindow.isDestroyed()) {
+    bubbleWindow = new BrowserWindow({
       ...bounds,
       transparent: true,
       frame: false,
@@ -1280,31 +1281,28 @@ function showPetBubble(message: string, autoHideMs = PET_BUBBLE_AUTO_HIDE_MS): v
         backgroundThrottling: false
       }
     })
-    petBubbleWindow.setBackgroundColor("#00000000")
-    configurePetWindowLayer(petBubbleWindow)
-    petBubbleWindow.webContents.on("page-title-updated", (event, title) => {
+    const createdBubbleWindow = bubbleWindow
+    petBubbleWindow = createdBubbleWindow
+    createdBubbleWindow.setBackgroundColor("#00000000")
+    configurePetWindowLayer(createdBubbleWindow)
+    createdBubbleWindow.webContents.on("page-title-updated", (event, title) => {
       event.preventDefault()
-      if (title.startsWith("pet-bubble-enter:")) {
-        suppressPetClick()
-        cancelPetBubbleHide()
-        return
-      }
-      if (title.startsWith("pet-bubble-leave:")) {
-        if (autoHideMs === 0) schedulePetBubbleHide()
-        return
-      }
+      if (petBubbleWindow !== createdBubbleWindow || createdBubbleWindow.isDestroyed()) return
       if (title.startsWith("pet-bubble-done:")) {
         closePetBubble()
         return
       }
     })
-    petBubbleWindow.on("closed", () => {
-      petBubbleWindow = null
+    createdBubbleWindow.on("closed", () => {
+      if (petBubbleWindow === createdBubbleWindow) {
+        petBubbleWindow = null
+      }
     })
   } else {
-    petBubbleWindow.setBounds(bounds, false)
-    configurePetWindowLayer(petBubbleWindow)
+    bubbleWindow.setBounds(bounds, false)
+    configurePetWindowLayer(bubbleWindow)
   }
+  if (!bubbleWindow) return
 
   const html = `<!doctype html>
 <html>
@@ -1367,21 +1365,16 @@ function showPetBubble(message: string, autoHideMs = PET_BUBBLE_AUTO_HIDE_MS): v
     </div>
   </div>
   <script>
-    document.body.addEventListener("pointerenter", function onEnter() {
-      document.title = "pet-bubble-enter:" + Date.now();
-    });
-    document.body.addEventListener("pointerleave", function onLeave() {
-      document.title = "pet-bubble-leave:" + Date.now();
-    });
     ${autoHideMs > 0 ? `window.setTimeout(function done() { document.title = "pet-bubble-done:" + Date.now(); }, ${autoHideMs});` : ""}
   </script>
 </body>
 </html>`
 
-  petBubbleWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
-  petBubbleWindow.once("ready-to-show", () => {
-    petBubbleWindow?.showInactive()
-    keepPetWindowOnTop(petBubbleWindow)
+  bubbleWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
+  bubbleWindow.once("ready-to-show", () => {
+    if (petBubbleWindow !== bubbleWindow || bubbleWindow.isDestroyed()) return
+    bubbleWindow.showInactive()
+    keepPetWindowOnTop(bubbleWindow)
   })
 }
 
@@ -1423,10 +1416,11 @@ function showPetHoverBubbleIfIdle(): void {
  */
 function closePetBubble(): void {
   cancelPetBubbleHide()
-  if (petBubbleWindow && !petBubbleWindow.isDestroyed()) {
-    petBubbleWindow.close()
-  }
+  const bubbleWindow = petBubbleWindow
   petBubbleWindow = null
+  if (bubbleWindow && !bubbleWindow.isDestroyed()) {
+    bubbleWindow.close()
+  }
 }
 
 function startPetHoverPolling(): void {
