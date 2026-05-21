@@ -52,6 +52,13 @@ type PetSettings = {
   selectedPetKey: string | null
 }
 
+type PetWindowLayout = {
+  petLeft: number
+  petTop: number
+  bubbleLeft: number
+  bubbleTop: number
+}
+
 const PET_STATES: PetState[] = [
   "idle",
   "busy",
@@ -80,7 +87,6 @@ const DEFAULT_PET_STATES: Record<PetState, { y: number; frames: number; fps: num
 }
 
 let petWindow: BrowserWindow | null = null
-let petBubbleWindow: BrowserWindow | null = null
 let currentPetState: PetState = "idle"
 let petMoveLastX: number | null = null
 let petDragOffset: { x: number; y: number } | null = null
@@ -89,8 +95,14 @@ let petHovering = false
 let petWindowOptions: PetWindowOptions | null = null
 const completedTaskNotices: Array<{ id: string; threadId: string; title: string }> = []
 let petBubbleHideTimer: NodeJS.Timeout | null = null
-let lastPetBubbleBounds: Electron.Rectangle | null = null
-let lastPetBubbleBoundsAt = 0
+let petBubbleVisible = false
+let petWindowLayout: PetWindowLayout = {
+  petLeft: 0,
+  petTop: 0,
+  bubbleLeft: 0,
+  bubbleTop: 0
+}
+let petWindowIgnoringMouseEvents = false
 let suppressPetClickUntil = 0
 // 拖动窗口会触发高频 move 事件，这个时间戳用于节流状态同步，避免主进程连续 executeJavaScript。
 let lastPetMoveStateAt = 0
@@ -103,6 +115,20 @@ let petSpriteDataUrlCacheBytes = 0
 const PET_SETTINGS_FILE = join(getOpenworkDir(), "pet-settings.json")
 const PET_BUBBLE_AUTO_HIDE_MS = 4200
 const PET_ALWAYS_ON_TOP_LEVEL = "screen-saver"
+const PET_BODY_WIDTH = 112
+const PET_BODY_HEIGHT = 124
+const PET_BUBBLE_WIDTH = 250
+const PET_BUBBLE_HEIGHT = 48
+const PET_BUBBLE_GAP = 2
+const PET_BUBBLE_VISUAL_OVERLAP = 10
+const PET_WINDOW_RESERVED_LAYOUT: PetWindowLayout = {
+  petLeft: Math.round((PET_BUBBLE_WIDTH - PET_BODY_WIDTH) / 2),
+  petTop: PET_BUBBLE_HEIGHT + PET_BUBBLE_GAP - PET_BUBBLE_VISUAL_OVERLAP,
+  bubbleLeft: 0,
+  bubbleTop: 0
+}
+const PET_WINDOW_RESERVED_WIDTH = PET_BUBBLE_WIDTH
+const PET_WINDOW_RESERVED_HEIGHT = PET_WINDOW_RESERVED_LAYOUT.petTop + PET_BODY_HEIGHT
 // 设置页预览走 base64 + IPC，限制单图和总缓存，防止自定义超大资源把主进程/renderer 内存撑爆。
 const MAX_PREVIEW_SPRITE_BYTES = 8 * 1024 * 1024
 const MAX_RUNTIME_SPRITE_BYTES = 16 * 1024 * 1024
@@ -168,7 +194,6 @@ function showMainWindowFromPet(): BrowserWindow | null {
   const mainWindow = petWindowOptions?.ensureMainWindowVisible() ?? null
   clearPetCompletedTaskNotices()
   keepPetWindowOnTop(petWindow)
-  keepPetWindowOnTop(petBubbleWindow)
   return mainWindow
 }
 
@@ -503,7 +528,7 @@ function getSelectedPet(): PetListItem | null {
 
 function closePetWindow(): void {
   stopPetHoverPolling()
-  destroyPetBubble("pet-window-close")
+  hidePetBubble("pet-window-close")
   if (petWindow && !petWindow.isDestroyed()) {
     petWindow.close()
   }
@@ -512,6 +537,9 @@ function closePetWindow(): void {
   petMoveLastX = null
   petDragOffset = null
   petHovering = false
+  petBubbleVisible = false
+  petWindowLayout = { ...PET_WINDOW_RESERVED_LAYOUT }
+  petWindowIgnoringMouseEvents = false
   lastPetMoveStateAt = 0
 }
 
@@ -523,24 +551,11 @@ export function getPetWindowDebugInfo(): Record<string, unknown> {
       petWindow && !petWindow.isDestroyed()
         ? { id: petWindow.id, visible: petWindow.isVisible(), bounds: petWindow.getBounds() }
         : null,
-    petBubbleWindow:
-      petBubbleWindow && !petBubbleWindow.isDestroyed()
-        ? {
-            id: petBubbleWindow.id,
-            visible: petBubbleWindow.isVisible(),
-            focused: petBubbleWindow.isFocused(),
-            bounds: petBubbleWindow.getBounds()
-          }
-        : null,
-    lastPetBubbleBounds,
-    lastPetBubbleBoundsAgeMs: lastPetBubbleBoundsAt ? Date.now() - lastPetBubbleBoundsAt : null
+    petBubbleVisible,
+    petWindowLayout,
+    petWindowIgnoringMouseEvents,
+    petBodyBounds: getPetBodyScreenBounds()
   }
-}
-
-function rememberPetBubbleBounds(bounds: Electron.Rectangle | null): void {
-  if (!bounds) return
-  lastPetBubbleBounds = { ...bounds }
-  lastPetBubbleBoundsAt = Date.now()
 }
 
 function logPetWindowDebug(message: string, extra?: Record<string, unknown>): void {
@@ -643,15 +658,6 @@ async function deleteCustomPet(directoryId: string): Promise<{ success: boolean;
   }
 }
 
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;")
-}
-
 /**
  * 规范化完成任务气泡中的任务标题。
  *
@@ -684,7 +690,7 @@ function clearPetCompletedTaskNotices(): void {
   if (completedTaskNotices.length === 0) return
   completedTaskNotices.splice(0, completedTaskNotices.length)
   updatePetTaskTag()
-  destroyPetBubble("clear-completed-tasks")
+  hidePetBubble("clear-completed-tasks")
 }
 
 /**
@@ -726,14 +732,16 @@ export function createPetWindow(): void {
     return
   }
 
-  // 宠物窗口只覆盖宠物本体大小，避免透明区域过大影响 hover/拖拽命中。
-  const petWindowWidth = 112
-  const petWindowHeight = 124
+  // 窗口常驻预留气泡空间，hover 展示时只切换 DOM，避免动态 resize 造成宠物闪烁。
+  const petWindowWidth = PET_WINDOW_RESERVED_WIDTH
+  const petWindowHeight = PET_WINDOW_RESERVED_HEIGHT
   const petWindowMargin = 150
   const display = screen.getPrimaryDisplay()
   const workArea = display.workArea
-  const initialX = Math.round(workArea.x + workArea.width - petWindowWidth - petWindowMargin)
-  const initialY = Math.round(workArea.y + workArea.height - petWindowHeight - petWindowMargin)
+  const initialPetX = Math.round(workArea.x + workArea.width - PET_BODY_WIDTH - petWindowMargin)
+  const initialPetY = Math.round(workArea.y + workArea.height - PET_BODY_HEIGHT - petWindowMargin)
+  const initialX = initialPetX - PET_WINDOW_RESERVED_LAYOUT.petLeft
+  const initialY = initialPetY - PET_WINDOW_RESERVED_LAYOUT.petTop
 
   petWindow = new BrowserWindow({
     x: initialX,
@@ -780,17 +788,31 @@ export function createPetWindow(): void {
       overflow: hidden;
       background: rgba(0, 0, 0, 0);
       /* 手动拖拽替代 -webkit-app-region: drag，确保 click/hover/pointer 事件可用。 */
-      cursor: grab;
+      cursor: default;
       user-select: none;
     }
-    body.dragging {
+    body.dragging #petLayer {
       cursor: grabbing;
     }
     body {
-      display: grid;
-      place-items: center;
       box-sizing: border-box;
       position: relative;
+    }
+    #stage {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      background: rgba(0, 0, 0, 0);
+    }
+    #petLayer {
+      position: absolute;
+      left: ${PET_WINDOW_RESERVED_LAYOUT.petLeft}px;
+      top: ${PET_WINDOW_RESERVED_LAYOUT.petTop}px;
+      width: ${PET_BODY_WIDTH}px;
+      height: ${PET_BODY_HEIGHT}px;
+      display: grid;
+      place-items: center;
+      cursor: grab;
     }
     canvas {
       width: 96px;
@@ -825,14 +847,69 @@ export function createPetWindow(): void {
     #taskTag.show {
       display: block;
     }
+    #bubbleLayer {
+      position: absolute;
+      left: 0;
+      top: 0;
+      display: none;
+      width: 236px;
+      box-sizing: border-box;
+      padding: 3px 7px 8px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      cursor: default;
+    }
+    #bubbleLayer.show {
+      display: block;
+    }
+    .bubble {
+      position: relative;
+      box-sizing: border-box;
+      width: 200px;
+      min-height: 32px;
+      padding: 5px 10px 4px;
+      border: 1px solid rgba(196, 149, 106, 0.5);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.97);
+      color: #292524;
+    }
+    .bubble::after {
+      content: "";
+      position: absolute;
+      left: 50%;
+      bottom: -5px;
+      width: 10px;
+      height: 10px;
+      border-bottom: 1px solid rgba(196, 149, 106, 0.5);
+      border-right: 1px solid rgba(196, 149, 106, 0.5);
+      background: rgba(255, 255, 255, 0.97);
+      transform: translateX(-50%) rotate(45deg);
+    }
+    .bubbleContent {
+      margin: 0;
+      font: 600 12px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      word-break: break-word;
+    }
   </style>
 </head>
 <body>
-  <div id="taskTag"></div>
-  <canvas id="pet"></canvas>
+  <div id="stage">
+    <div id="bubbleLayer">
+      <div class="bubble">
+        <div id="bubbleContent" class="bubbleContent"></div>
+      </div>
+    </div>
+    <div id="petLayer">
+      <div id="taskTag"></div>
+      <canvas id="pet"></canvas>
+    </div>
+  </div>
   <script>
     const pet = ${JSON.stringify(manifest)};
     const spriteUrl = ${JSON.stringify(pathToFileURL(spritePath).toString())};
+    const stage = document.getElementById("stage");
+    const petLayer = document.getElementById("petLayer");
+    const bubbleLayer = document.getElementById("bubbleLayer");
+    const bubbleContent = document.getElementById("bubbleContent");
     const canvas = document.getElementById("pet");
     const taskTag = document.getElementById("taskTag");
     const ctx = canvas.getContext("2d");
@@ -882,6 +959,31 @@ export function createPetWindow(): void {
       taskTag.textContent = String(safeCount);
       taskTag.classList.toggle("show", safeCount > 0);
     };
+
+    window.setPetWindowLayout = function setPetWindowLayout(layout) {
+      const safe = layout || {};
+      petLayer.style.left = (Number.isFinite(safe.petLeft) ? safe.petLeft : 0) + "px";
+      petLayer.style.top = (Number.isFinite(safe.petTop) ? safe.petTop : 0) + "px";
+      bubbleLayer.style.left = (Number.isFinite(safe.bubbleLeft) ? safe.bubbleLeft : 0) + "px";
+      bubbleLayer.style.top = (Number.isFinite(safe.bubbleTop) ? safe.bubbleTop : 0) + "px";
+    };
+
+    window.setPetBubble = function setPetBubble(message) {
+      bubbleContent.textContent = String(message || "");
+      bubbleLayer.classList.add("show");
+    };
+
+    window.clearPetBubble = function clearPetBubble() {
+      bubbleLayer.classList.remove("show");
+      bubbleContent.textContent = "";
+    };
+
+    for (const eventName of ["pointerdown", "pointermove", "pointerup", "click", "dblclick", "contextmenu"]) {
+      bubbleLayer.addEventListener(eventName, function onBubblePointerEvent(event) {
+        event.preventDefault();
+        event.stopPropagation();
+      });
+    }
 
     taskTag.addEventListener("pointerenter", function onTaskTagEnter(event) {
       event.stopPropagation();
@@ -939,14 +1041,14 @@ export function createPetWindow(): void {
       renderFrame();
     }
 
-    window.addEventListener("pointerenter", function onPointerEnter() {
+    petLayer.addEventListener("pointerenter", function onPointerEnter() {
       if (transientState === "running" || transientState === "interaction") return;
       setTransientState("hover", 0);
     });
-    window.addEventListener("pointerleave", function onPointerLeave() {
+    petLayer.addEventListener("pointerleave", function onPointerLeave() {
       clearTransientState("hover");
     });
-    window.addEventListener("pointerdown", function onPointerDown(event) {
+    petLayer.addEventListener("pointerdown", function onPointerDown(event) {
       pointerDown = true;
       pointerMoved = false;
       dragStartX = event.screenX;
@@ -955,13 +1057,13 @@ export function createPetWindow(): void {
       // 使用 document.title 作为 sandbox 页面到主进程的轻量事件通道。
       document.title = "pet-pointer-down:" + event.screenX + ":" + event.screenY + ":" + Date.now();
       try {
-        canvas.setPointerCapture(event.pointerId);
+        petLayer.setPointerCapture(event.pointerId);
       } catch {
         // Best effort only.
       }
       setTransientState("running", 0);
     });
-    window.addEventListener("pointermove", function onPointerMove(event) {
+    petLayer.addEventListener("pointermove", function onPointerMove(event) {
       if (!pointerDown) return;
       const dx = event.screenX - dragStartX;
       const dy = event.screenY - dragStartY;
@@ -979,7 +1081,7 @@ export function createPetWindow(): void {
         }
       }
     });
-    window.addEventListener("pointerup", function onPointerUp(event) {
+    petLayer.addEventListener("pointerup", function onPointerUp(event) {
       pointerDown = false;
       document.body.classList.remove("dragging");
       document.title = "pet-pointer-up:" + Date.now();
@@ -1124,7 +1226,6 @@ export function createPetWindow(): void {
     if (currentWindow && !currentWindow.isDestroyed() && !currentWindow.isVisible()) {
       currentWindow.showInactive()
       keepPetWindowOnTop(currentWindow)
-      keepPetWindowOnTop(petBubbleWindow)
     }
   }
   const currentWindow = petWindow
@@ -1135,10 +1236,10 @@ export function createPetWindow(): void {
     if (petWindow !== currentWindow) return
     event.preventDefault()
     // 宠物窗口启用 sandbox，不能直接访问 Electron API；统一通过 title 事件转发交互。
-      if (title === "pet-ready") {
-        showPetWindow()
-        updatePetTaskTag()
-        showPetGreetingBubble()
+    if (title === "pet-ready") {
+      showPetWindow()
+      updatePetTaskTag()
+      showPetGreetingBubble()
     } else if (title.startsWith("pet-load-error:")) {
       console.warn("[Pets] Pet window failed to load sprite:", title)
       closePetWindow()
@@ -1164,12 +1265,16 @@ export function createPetWindow(): void {
       const pointerX = Number(rawX)
       const pointerY = Number(rawY)
       if (petDragOffset && Number.isFinite(pointerX) && Number.isFinite(pointerY)) {
+        if (petBubbleVisible) {
+          hidePetBubble("pet-drag-start")
+          const bounds = currentWindow.getBounds()
+          petDragOffset = { x: pointerX - bounds.x, y: pointerY - bounds.y }
+        }
         currentWindow.setPosition(
           Math.round(pointerX - petDragOffset.x),
           Math.round(pointerY - petDragOffset.y),
           false
         )
-        updatePetBubblePosition()
       }
     } else if (title.startsWith("pet-pointer-up:")) {
       petDragOffset = null
@@ -1183,13 +1288,13 @@ export function createPetWindow(): void {
     ) {
       return
     }
-    const [x] = currentWindow.getPosition()
-    const direction = petMoveLastX === null || x >= petMoveLastX ? "right" : "left"
-    petMoveLastX = x
+    const petBodyBounds = getPetBodyScreenBounds()
+    const petX = petBodyBounds?.x ?? currentWindow.getBounds().x
+    const direction = petMoveLastX === null || petX >= petMoveLastX ? "right" : "left"
+    petMoveLastX = petX
     const now = Date.now()
     // move 事件在拖拽中非常密集；气泡位置需要实时跟随，但动画状态不需要每次都注入 JS。
     if (now - lastPetMoveStateAt < 120) {
-      updatePetBubblePosition()
       return
     }
     lastPetMoveStateAt = now
@@ -1199,41 +1304,67 @@ export function createPetWindow(): void {
         `window.setPetTransientState("running", 350, ${JSON.stringify(direction)})`
       )
       .catch((error) => console.warn("[Pets] Failed to update drag state:", error))
-    updatePetBubblePosition()
   })
   startPetHoverPolling()
   currentWindow.on("closed", () => {
     if (petWindow !== currentWindow) return
     stopPetHoverPolling()
-    destroyPetBubble("pet-window-closed")
+    hidePetBubble("pet-window-closed")
     petWindow = null
     petMoveLastX = null
     petDragOffset = null
     petHovering = false
+    petBubbleVisible = false
+    petWindowLayout = { ...PET_WINDOW_RESERVED_LAYOUT }
+    petWindowIgnoringMouseEvents = false
     lastPetMoveStateAt = 0
     petWindowOptions?.applyMacDockIcon()
   })
 }
 
-/**
- * 根据宠物当前位置计算气泡窗口的位置。
- *
- * 气泡优先显示在宠物上方，同时会被限制在当前屏幕工作区内，避免被屏幕边缘裁掉。
- */
-function getBubbleBounds(width: number, height: number): Electron.Rectangle | null {
+function setPetWindowMouseEventsIgnored(ignored: boolean): void {
+  if (petWindowIgnoringMouseEvents === ignored) return
+  petWindowIgnoringMouseEvents = ignored
+  if (!petWindow || petWindow.isDestroyed()) return
+  petWindow.setIgnoreMouseEvents(ignored, { forward: true })
+}
+
+function isPointInBounds(point: Electron.Point, bounds: Electron.Rectangle): boolean {
+  return (
+    point.x >= bounds.x &&
+    point.x <= bounds.x + bounds.width &&
+    point.y >= bounds.y &&
+    point.y <= bounds.y + bounds.height
+  )
+}
+
+function getPetBodyScreenBounds(): Electron.Rectangle | null {
   if (!petWindow || petWindow.isDestroyed()) return null
-  const petBounds = petWindow.getBounds()
-  const display = screen.getDisplayMatching(petBounds)
-  const workArea = display.workArea
-  const preferredX = petBounds.x + Math.round((petBounds.width - width) / 2)
-  const x = Math.min(Math.max(workArea.x, preferredX), workArea.x + workArea.width - width)
-  const preferredY = petBounds.y - height - 8
-  const fallbackY = petBounds.y + petBounds.height + 8
-  const y =
-    preferredY >= workArea.y
-      ? preferredY
-      : Math.min(Math.max(workArea.y, fallbackY), workArea.y + workArea.height - height)
-  return { x: Math.round(x), y: Math.round(y), width, height }
+  const bounds = petWindow.getBounds()
+  return {
+    x: bounds.x + petWindowLayout.petLeft,
+    y: bounds.y + petWindowLayout.petTop,
+    width: PET_BODY_WIDTH,
+    height: PET_BODY_HEIGHT
+  }
+}
+
+function getPetBubbleScreenBounds(): Electron.Rectangle | null {
+  if (!petWindow || petWindow.isDestroyed()) return null
+  const bounds = petWindow.getBounds()
+  return {
+    x: bounds.x + PET_WINDOW_RESERVED_LAYOUT.bubbleLeft,
+    y: bounds.y + PET_WINDOW_RESERVED_LAYOUT.bubbleTop,
+    width: PET_BUBBLE_WIDTH,
+    height: PET_BUBBLE_HEIGHT
+  }
+}
+
+function runPetWindowScript(script: string, action: string): void {
+  if (!petWindow || petWindow.isDestroyed() || petWindow.webContents.isDestroyed()) return
+  petWindow.webContents
+    .executeJavaScript(script)
+    .catch((error) => console.warn(`[Pets] Failed to ${action}:`, error))
 }
 
 /**
@@ -1263,206 +1394,40 @@ function schedulePetBubbleHide(): void {
 /**
  * 临时屏蔽宠物本体点击。
  *
- * 任务气泡是独立透明窗口，部分平台在气泡关闭或失焦时可能把鼠标释放事件传给后面的宠物窗口；
- * 这里用短时间窗口防止这类穿透点击误打开主应用。
+ * 任务 tag 和气泡都在同一个透明窗口内；这里用短时间窗口防止边缘交互被误判成宠物点击。
  */
 function suppressPetClick(durationMs = 700): void {
   suppressPetClickUntil = Date.now() + durationMs
 }
 
 /**
- * 宠物拖动或移动时，同步更新气泡的位置。
- *
- * 气泡是独立 BrowserWindow，因此需要在主进程里跟随宠物窗口手动重定位。
- */
-function updatePetBubblePosition(): void {
-  if (!petBubbleWindow || petBubbleWindow.isDestroyed()) return
-  const bounds = petBubbleWindow.getBounds()
-  const nextBounds = getBubbleBounds(bounds.width, bounds.height)
-  if (!nextBounds) return
-  petBubbleWindow.setBounds(nextBounds, false)
-  rememberPetBubbleBounds(nextBounds)
-}
-
-/**
  * 展示统一宠物气泡。
  *
- * pet ready 的问候和任务完成提醒都复用这一个顶部气泡窗口。
+ * pet ready 的问候、hover 文案和任务完成提醒都复用 pet 窗口内部的 bubbleLayer。
  */
 function showPetBubble(message: string, autoHideMs = PET_BUBBLE_AUTO_HIDE_MS): void {
   cancelPetBubbleHide()
-  if (!petWindow || petWindow.isDestroyed()) return
-  const escapedMessage = escapeHtml(message)
-  const bubbleWidth = 250
-  const bubbleHeight = 60
-  const bounds = getBubbleBounds(bubbleWidth, bubbleHeight)
-  if (!bounds) return
-  rememberPetBubbleBounds(bounds)
+  if (!petWindow || petWindow.isDestroyed() || petWindow.webContents.isDestroyed()) return
 
-  let bubbleWindow = petBubbleWindow
-  if (!bubbleWindow || bubbleWindow.isDestroyed()) {
-    bubbleWindow = new BrowserWindow({
-      ...bounds,
-      transparent: true,
-      frame: false,
-      resizable: false,
-      movable: false,
-      focusable: false,
-      alwaysOnTop: true,
-      skipTaskbar: true,
-      show: false,
-      hasShadow: false,
-      backgroundColor: "#00000000",
-      webPreferences: {
-        sandbox: true,
-        contextIsolation: true,
-        nodeIntegration: false,
-        backgroundThrottling: false
-      }
-    })
-    const createdBubbleWindow = bubbleWindow
-    petBubbleWindow = createdBubbleWindow
-    createdBubbleWindow.setBackgroundColor("#00000000")
-    configurePetWindowLayer(createdBubbleWindow)
-    createdBubbleWindow.webContents.on("page-title-updated", (event, title) => {
-      event.preventDefault()
-      if (petBubbleWindow !== createdBubbleWindow || createdBubbleWindow.isDestroyed()) return
-      if (title.startsWith("pet-bubble-done:")) {
-        logPetWindowDebug("[Pets] Bubble auto-hide timer fired", { title })
-        hidePetBubble("bubble-auto-hide")
-        return
-      }
-      if (title.startsWith("pet-bubble-pointer:")) {
-        const [, eventName, rawX, rawY] = title.split(":")
-        logPetWindowDebug("[Pets] Bubble pointer event", {
-          eventName,
-          pointerX: Number(rawX),
-          pointerY: Number(rawY),
-          title
-        })
-        return
-      }
-    })
-    createdBubbleWindow.webContents.on("render-process-gone", (_event, details) => {
-      logPetWindowDebug("[Pets] Bubble render process gone", { details })
-    })
-    createdBubbleWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription) => {
-      logPetWindowDebug("[Pets] Bubble failed to load", { errorCode, errorDescription })
-    })
-    createdBubbleWindow.webContents.on("unresponsive", () => {
-      logPetWindowDebug("[Pets] Bubble webContents unresponsive")
-    })
-    createdBubbleWindow.webContents.on("destroyed", () => {
-      logPetWindowDebug("[Pets] Bubble webContents destroyed")
-    })
-    createdBubbleWindow.on("closed", () => {
-      logPetWindowDebug("[Pets] Bubble window closed")
-      if (petBubbleWindow === createdBubbleWindow) {
-        petBubbleWindow = null
-      }
-    })
-    createdBubbleWindow.on("close", (event) => {
-      logPetWindowDebug("[Pets] Bubble window close requested", {
-        defaultPrevented: event.defaultPrevented
-      })
-    })
-    createdBubbleWindow.on("unresponsive", () => {
-      logPetWindowDebug("[Pets] Bubble window unresponsive")
-    })
-  } else {
-    bubbleWindow.setBounds(bounds, false)
-    configurePetWindowLayer(bubbleWindow)
-    rememberPetBubbleBounds(bounds)
-  }
-  if (!bubbleWindow) return
-
-  const html = `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <style>
-    html, body {
-      width: 100%;
-      height: 100%;
-      margin: 0;
-      overflow: hidden;
-      background: rgba(0, 0, 0, 0);
-      user-select: none;
-      cursor: default;
-    }
-    body {
-      box-sizing: border-box;
-      padding: 5px 7px 10px;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    }
-    .wrap {
-      position: relative;
-      width: 236px;
-    }
-    .bubble {
-      position: relative;
-      box-sizing: border-box;
-      width: 200px;
-      min-height: 40px;
-      padding: 7px 10px 6px;
-      border: 1px solid rgba(196, 149, 106, 0.5);
-      border-radius: 8px;
-      background: rgba(255, 255, 255, 0.97);
-      color: #292524;
-      /*box-shadow: 0 10px 24px rgba(41, 37, 36, 0.16);*/
-    }
-    .bubble::after {
-      content: "";
-      position: absolute;
-      left: 50%;
-      bottom: -5px;
-      width: 10px;
-      height: 10px;
-      border-bottom: 1px solid rgba(196, 149, 106, 0.5);
-      border-right: 1px solid rgba(196, 149, 106, 0.5);
-      background: rgba(255, 255, 255, 0.97);
-      transform: translateX(-50%) rotate(45deg);
-    }
-    .content {
-      margin: 0;
-      font: 600 12px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      word-break: break-word;
-    }
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <div class="bubble">
-      <div class="content">${escapedMessage}</div>
-    </div>
-  </div>
-  <script>
-    for (const eventName of ["pointerdown", "pointerup", "click", "dblclick", "contextmenu"]) {
-      document.body.addEventListener(eventName, function logBubblePointer(event) {
-        document.title =
-          "pet-bubble-pointer:" +
-          eventName +
-          ":" +
-          event.screenX +
-          ":" +
-          event.screenY +
-          ":" +
-          Date.now();
-      });
-    }
-    ${autoHideMs > 0 ? `window.setTimeout(function done() { document.title = "pet-bubble-done:" + Date.now(); }, ${autoHideMs});` : ""}
-  </script>
-</body>
-</html>`
-
-  bubbleWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
-  bubbleWindow.once("ready-to-show", () => {
-    if (petBubbleWindow !== bubbleWindow || bubbleWindow.isDestroyed()) return
-    rememberPetBubbleBounds(bubbleWindow.getBounds())
-    logPetWindowDebug("[Pets] Bubble ready to show", { autoHideMs })
-    bubbleWindow.showInactive()
-    keepPetWindowOnTop(bubbleWindow)
+  petBubbleVisible = true
+  petWindowLayout = { ...PET_WINDOW_RESERVED_LAYOUT }
+  setPetWindowMouseEventsIgnored(false)
+  runPetWindowScript(
+    `if (window.setPetBubble) window.setPetBubble(${JSON.stringify(message)});`,
+    "show pet bubble"
+  )
+  keepPetWindowOnTop(petWindow)
+  logPetWindowDebug("[Pets] Bubble shown in pet window", {
+    autoHideMs
   })
+
+  if (autoHideMs > 0) {
+    petBubbleHideTimer = setTimeout(() => {
+      petBubbleHideTimer = null
+      logPetWindowDebug("[Pets] Bubble auto-hide timer fired")
+      hidePetBubble("bubble-auto-hide")
+    }, autoHideMs)
+  }
 }
 
 /**
@@ -1493,46 +1458,31 @@ function showPetTaskBubble(): void {
  * 只在当前没有气泡时展示，避免覆盖问候、任务完成等更明确的消息。
  */
 function showPetHoverBubbleIfIdle(): void {
-  if (petBubbleWindow && !petBubbleWindow.isDestroyed() && petBubbleWindow.isVisible()) return
+  if (petDragOffset) return
+  if (petBubbleVisible) return
   const message = PET_HOVER_MESSAGES[Math.floor(Math.random() * PET_HOVER_MESSAGES.length)]
   showPetBubble(message)
 }
 
 /**
- * 临时隐藏当前统一宠物气泡窗口。
+ * 隐藏当前统一宠物气泡，并把同一个 BrowserWindow 恢复到宠物本体大小。
  */
 function hidePetBubble(reason = "unknown"): void {
   cancelPetBubbleHide()
-  const bubbleWindow = petBubbleWindow
   logPetWindowDebug("[Pets] hidePetBubble invoked", {
     reason,
-    hasBubbleWindow: Boolean(bubbleWindow),
-    bubbleWindowDestroyed: bubbleWindow?.isDestroyed() ?? null
+    petBubbleVisible
   })
-  if (bubbleWindow && !bubbleWindow.isDestroyed()) {
-    rememberPetBubbleBounds(bubbleWindow.getBounds())
-    bubbleWindow.hide()
-  }
-}
 
-/**
- * 销毁当前统一宠物气泡窗口。
- */
-function destroyPetBubble(reason = "unknown"): void {
-  cancelPetBubbleHide()
-  const bubbleWindow = petBubbleWindow
-  logPetWindowDebug("[Pets] destroyPetBubble invoked", {
-    reason,
-    hasBubbleWindow: Boolean(bubbleWindow),
-    bubbleWindowDestroyed: bubbleWindow?.isDestroyed() ?? null
-  })
-  if (bubbleWindow && !bubbleWindow.isDestroyed()) {
-    rememberPetBubbleBounds(bubbleWindow.getBounds())
+  petBubbleVisible = false
+  petWindowLayout = { ...PET_WINDOW_RESERVED_LAYOUT }
+  if (!petHovering) {
+    setPetWindowMouseEventsIgnored(true)
   }
-  petBubbleWindow = null
-  if (bubbleWindow && !bubbleWindow.isDestroyed()) {
-    bubbleWindow.close()
-  }
+  runPetWindowScript(
+    `if (window.clearPetBubble) window.clearPetBubble();`,
+    "hide pet bubble"
+  )
 }
 
 function startPetHoverPolling(): void {
@@ -1542,13 +1492,13 @@ function startPetHoverPolling(): void {
   petHoverPollTimer = setInterval(() => {
     if (!petWindow || petWindow.isDestroyed() || petWindow.webContents.isDestroyed()) return
     const point = screen.getCursorScreenPoint()
-    const bounds = petWindow.getBounds()
-    // 宠物窗口范围已经收窄为本体大小，这里用屏幕坐标判断 hover 更可靠。
-    const isHovering =
-      point.x >= bounds.x &&
-      point.x <= bounds.x + bounds.width &&
-      point.y >= bounds.y &&
-      point.y <= bounds.y + bounds.height
+    const petBounds = getPetBodyScreenBounds()
+    if (!petBounds) return
+    const bubbleBounds = petBubbleVisible ? getPetBubbleScreenBounds() : null
+    // 展示气泡时 BrowserWindow 会扩大；hover 仍只以宠物本体区域为准。
+    const isHovering = isPointInBounds(point, petBounds)
+    const isOnBubble = bubbleBounds ? isPointInBounds(point, bubbleBounds) : false
+    setPetWindowMouseEventsIgnored(!isHovering && !isOnBubble)
 
     if (isHovering === petHovering) return
     petHovering = isHovering
