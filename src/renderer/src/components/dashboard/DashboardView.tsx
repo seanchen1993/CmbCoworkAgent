@@ -17,12 +17,7 @@ import {
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle
-} from "@/components/ui/dialog"
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { formatRelativeTime, truncate } from "@/lib/utils"
 import {
@@ -127,13 +122,13 @@ function resolveSkillUploaderExportInfo(
 
 function isUploadedByCurrentUser(item: MarketItem, currentUserCandidates: Set<string>): boolean {
   if (!item.user_id || currentUserCandidates.size === 0) return false
-  return getUploaderIdCandidates(item.user_id).some((candidate) => currentUserCandidates.has(candidate))
+  return getUploaderIdCandidates(item.user_id).some((candidate) =>
+    currentUserCandidates.has(candidate)
+  )
 }
 
 function getMarketSkillQueryNames(item: MarketItem): string[] {
-  return [item.name, item.filename]
-    .map((value) => value?.trim() || "")
-    .filter(Boolean)
+  return [item.name, item.filename].map((value) => value?.trim() || "").filter(Boolean)
 }
 
 function TimeControlBar({
@@ -724,20 +719,12 @@ function skillEvalKey(skillName: string, skillVersion?: string): string {
   return `${skillName}:${skillVersion ?? ""}`
 }
 
-function skillEvalTimeValue(iso?: string): number {
-  if (!iso) return 0
-  const value = new Date(iso).getTime()
-  return Number.isNaN(value) ? 0 : value
-}
-
 function getLatestSkillEvalKey(data: DashboardSkillEvalSummary | null): string | null {
   if (!data) return null
 
   if (data.skills.length > 0) {
-    const latestSkill = data.skills.reduce((latest, current) =>
-      skillEvalTimeValue(current.lastRunAt) > skillEvalTimeValue(latest.lastRunAt) ? current : latest
-    )
-    return skillEvalKey(latestSkill.skillName, latestSkill.skillVersion)
+    const firstSkill = data.skills[0]
+    return skillEvalKey(firstSkill.skillName, firstSkill.skillVersion)
   }
 
   const latestRun = data.recent[0]
@@ -777,7 +764,9 @@ const SkillEvalSkillRow = memo(function SkillEvalSkillRow({
       type="button"
       onClick={handleClick}
       className={`grid w-full grid-cols-[4px_minmax(96px,1fr)_42px_50px_48px_48px_54px] items-center gap-2 border-b border-border px-4 py-3 text-left text-sm transition-colors hover:bg-muted/35 ${
-        active ? "bg-primary/12 text-foreground shadow-[inset_0_0_0_1px_hsl(var(--primary)/0.22)]" : ""
+        active
+          ? "bg-primary/12 text-foreground shadow-[inset_0_0_0_1px_hsl(var(--primary)/0.22)]"
+          : ""
       }`}
       aria-current={active ? "true" : undefined}
     >
@@ -786,21 +775,35 @@ const SkillEvalSkillRow = memo(function SkillEvalSkillRow({
         <div className={`truncate font-medium ${active ? "text-foreground" : "text-foreground"}`}>
           {skill.skillName}
         </div>
-        <div className={`mt-0.5 text-[11px] ${active ? "text-foreground/70" : "text-muted-foreground"}`}>
+        <div
+          className={`mt-0.5 text-[11px] ${active ? "text-foreground/70" : "text-muted-foreground"}`}
+        >
           {skill.skillVersion ?? "未标版本"} · {formatRelativeTime(skill.lastRunAt)}
         </div>
       </div>
-      <div className={`text-right text-xs tabular-nums ${active ? "font-medium text-foreground" : "text-muted-foreground"}`}>{formatNumber(skill.runs)}</div>
-      <div className={`text-right text-xs tabular-nums ${active ? "font-medium text-foreground" : "text-muted-foreground"}`}>
+      <div
+        className={`text-right text-xs tabular-nums ${active ? "font-medium text-foreground" : "text-muted-foreground"}`}
+      >
+        {formatNumber(skill.runs)}
+      </div>
+      <div
+        className={`text-right text-xs tabular-nums ${active ? "font-medium text-foreground" : "text-muted-foreground"}`}
+      >
         {formatSkillEvalPercent(skill.passRate)}
       </div>
-      <div className={`text-right text-xs tabular-nums ${active ? "font-medium text-foreground" : "text-muted-foreground"}`}>
+      <div
+        className={`text-right text-xs tabular-nums ${active ? "font-medium text-foreground" : "text-muted-foreground"}`}
+      >
         {formatSkillEvalPercent(skill.averageOutcomeScore)}
       </div>
-      <div className={`text-right text-xs tabular-nums ${active ? "font-medium text-foreground" : "text-muted-foreground"}`}>
+      <div
+        className={`text-right text-xs tabular-nums ${active ? "font-medium text-foreground" : "text-muted-foreground"}`}
+      >
         {formatSkillEvalPercent(skill.averageScore)}
       </div>
-      <div className={`text-right text-xs tabular-nums ${active ? "font-medium text-foreground" : "text-muted-foreground"}`}>
+      <div
+        className={`text-right text-xs tabular-nums ${active ? "font-medium text-foreground" : "text-muted-foreground"}`}
+      >
         {formatSkillEvalTokens(skill.averageTotalTokens)}
       </div>
     </button>
@@ -858,7 +861,9 @@ const SkillEvalRunRow = memo(function SkillEvalRunRow({
             <span>模型调用 {run.modelCallCount}</span>
             <span title="非缓存输入 Token">输入 {formatSkillEvalTokens(run.totalInputTokens)}</span>
             {cacheTokens > 0 && (
-              <span title="缓存读取 + 缓存写入 Token">缓存输入 {formatSkillEvalTokens(cacheTokens)}</span>
+              <span title="缓存读取 + 缓存写入 Token">
+                缓存输入 {formatSkillEvalTokens(cacheTokens)}
+              </span>
             )}
             <span title="输入 + 缓存读取 + 缓存写入">
               Prompt {formatSkillEvalTokens(run.promptInputTokens)}
@@ -997,7 +1002,9 @@ const SkillEvalRunSummary = memo(function SkillEvalRunSummary({
             <Badge variant={run.pass ? "nominal" : "critical"}>
               {formatSkillEvalPercent(run.score)}
             </Badge>
-            <span className="text-[11px] text-muted-foreground">{formatRelativeTime(run.startedAt)}</span>
+            <span className="text-[11px] text-muted-foreground">
+              {formatRelativeTime(run.startedAt)}
+            </span>
           </div>
           <div className="mt-1 truncate text-sm text-muted-foreground" title={run.userMessage}>
             {truncate(run.userMessage, 180)}
@@ -1007,11 +1014,17 @@ const SkillEvalRunSummary = memo(function SkillEvalRunSummary({
             <span>模型调用 {run.modelCallCount}</span>
             <span title="非缓存输入 Token">输入 {formatSkillEvalTokens(run.totalInputTokens)}</span>
             {cacheTokens > 0 && (
-              <span title="缓存读取 + 缓存写入 Token">缓存输入 {formatSkillEvalTokens(cacheTokens)}</span>
+              <span title="缓存读取 + 缓存写入 Token">
+                缓存输入 {formatSkillEvalTokens(cacheTokens)}
+              </span>
             )}
-            <span title="输入 + 缓存读取 + 缓存写入">Prompt {formatSkillEvalTokens(run.promptInputTokens)}</span>
+            <span title="输入 + 缓存读取 + 缓存写入">
+              Prompt {formatSkillEvalTokens(run.promptInputTokens)}
+            </span>
             <span>输出 {formatSkillEvalTokens(run.totalOutputTokens)}</span>
-            <span title="单次模型调用看到的最大输入 Token">峰值输入 {formatSkillEvalTokens(run.peakInputTokens)}</span>
+            <span title="单次模型调用看到的最大输入 Token">
+              峰值输入 {formatSkillEvalTokens(run.peakInputTokens)}
+            </span>
             <span>错误 {run.errorCount}</span>
             <span>{formatDuration(run.durationMs)}</span>
             <span>{outcomeLabel(run.outcome)}</span>
@@ -1098,6 +1111,7 @@ const SkillEvalDashboardPanel = memo(function SkillEvalDashboardPanel({
   mineSkillCount,
   mineSkillsLoading,
   onRecentPageChange,
+  onSkillPageChange,
   onMineOnlyChange,
   onOpenTrace,
   selectedSkillKey,
@@ -1110,16 +1124,20 @@ const SkillEvalDashboardPanel = memo(function SkillEvalDashboardPanel({
   mineSkillCount: number
   mineSkillsLoading: boolean
   onRecentPageChange: (page: number, key: string | null) => void
+  onSkillPageChange: (page: number) => void
   onMineOnlyChange: (mineOnly: boolean) => void
   onOpenTrace: (run: DashboardSkillEvalRun) => void
   selectedSkillKey: string | null
   onSelectedSkillKeyChange: (key: string | null) => void
 }): React.JSX.Element {
   const skillByKey = useMemo(
-    () => new Map((data?.skills ?? []).map((skill) => [
-      skillEvalKey(skill.skillName, skill.skillVersion),
-      skill
-    ])),
+    () =>
+      new Map(
+        (data?.skills ?? []).map((skill) => [
+          skillEvalKey(skill.skillName, skill.skillVersion),
+          skill
+        ])
+      ),
     [data]
   )
 
@@ -1128,10 +1146,13 @@ const SkillEvalDashboardPanel = memo(function SkillEvalDashboardPanel({
     onRecentPageChange(1, null)
   }, [onRecentPageChange, onSelectedSkillKeyChange])
 
-  const handleSkillSelect = useCallback((key: string) => {
-    onSelectedSkillKeyChange(key)
-    onRecentPageChange(1, key)
-  }, [onRecentPageChange, onSelectedSkillKeyChange])
+  const handleSkillSelect = useCallback(
+    (key: string) => {
+      onSelectedSkillKeyChange(key)
+      onRecentPageChange(1, key)
+    },
+    [onRecentPageChange, onSelectedSkillKeyChange]
+  )
 
   if ((loading || mineSkillsLoading) && !data) {
     return (
@@ -1140,7 +1161,8 @@ const SkillEvalDashboardPanel = memo(function SkillEvalDashboardPanel({
       </div>
     )
   }
-  if (!data) return <div className="py-8 text-center text-sm text-muted-foreground">暂无评估数据</div>
+  if (!data)
+    return <div className="py-8 text-center text-sm text-muted-foreground">暂无评估数据</div>
 
   const recentPage = Math.max(1, data.recentPage)
   const recentPageSize = Math.max(1, data.recentPageSize)
@@ -1148,17 +1170,21 @@ const SkillEvalDashboardPanel = memo(function SkillEvalDashboardPanel({
   const recentTotalPages = Math.max(1, Math.ceil(recentTotal / recentPageSize))
   const canGoPrevious = recentPage > 1
   const canGoNext = recentPage < recentTotalPages
-  const selectedSkill = selectedSkillKey ? skillByKey.get(selectedSkillKey) ?? null : null
+  const skillPage = Math.max(1, data.skillPage)
+  const skillPageSize = Math.max(1, data.skillPageSize)
+  const totalSkills = Math.max(0, data.totalSkills)
+  const skillTotalPages = Math.max(1, Math.ceil(totalSkills / skillPageSize))
+  const canGoPreviousSkillPage = skillPage > 1
+  const canGoNextSkillPage = skillPage < skillTotalPages
+  const selectedSkill = selectedSkillKey ? (skillByKey.get(selectedSkillKey) ?? null) : null
   const filteredRuns = data.recent
   const selectedRunTotal = selectedSkill?.runs ?? data.totalRuns
   const selectedTotalTokens = selectedSkill
     ? selectedSkill.averageTotalTokens * selectedSkill.runs
     : data.totalTokens
-  const selectedResultRecords = selectedSkill
-    ? selectedSkill.runs
-    : data.totalRuns
+  const selectedResultRecords = selectedSkill ? selectedSkill.runs : data.totalRuns
   const selectedTotalLabel = selectedSkill
-    ? `采样 ${formatNumber(selectedRunTotal)} 条`
+    ? `范围内 ${formatNumber(selectedRunTotal)} 条`
     : `实际最近 ${formatNumber(recentTotal)} 条`
   const selectedAverageToolCalls = selectedSkill?.averageToolCalls ?? data.averageToolCalls
   const selectedAverageModelCalls = selectedSkill?.averageModelCalls ?? data.averageModelCalls
@@ -1174,20 +1200,46 @@ const SkillEvalDashboardPanel = memo(function SkillEvalDashboardPanel({
             <div className="text-[10px] text-muted-foreground">当前统计口径</div>
             <div className="mt-0.5 truncate text-xs font-medium text-foreground">
               {selectedSkill
-                ? `${skillEvalVersionLabel(selectedSkill.skillName, selectedSkill.skillVersion)} · ${scopeLabel} · 采样统计`
-                : `${scopeLabel} · 采样统计`}
+                ? `${skillEvalVersionLabel(selectedSkill.skillName, selectedSkill.skillVersion)} · ${scopeLabel} · 范围统计`
+                : `${scopeLabel} · 范围统计`}
             </div>
           </div>
-          <SkillEvalStatTile label="采样运行" value={selectedRunTotal} />
-          <SkillEvalStatTile label="采样技能" value={selectedSkill ? 1 : data.totalSkills} />
-          <SkillEvalStatTile label="通过率" value={formatSkillEvalPercent(selectedSkill?.passRate ?? data.passRate)} />
-          <SkillEvalStatTile label="平均分" value={formatSkillEvalPercent(selectedSkill?.averageScore ?? data.averageScore)} />
-          <SkillEvalStatTile label="过程分" value={formatSkillEvalPercent(selectedSkill?.averageProcessScore ?? data.averageProcessScore ?? data.averageScore)} />
-          <SkillEvalStatTile label="结束分" value={formatSkillEvalPercent(selectedSkill?.averageOutcomeScore ?? data.averageOutcomeScore ?? data.averageScore)} />
-          <SkillEvalStatTile label="结果分" value={formatSkillEvalPercent(selectedSkill?.averageResultScore ?? data.averageResultScore)} />
+          <SkillEvalStatTile label="运行次数" value={selectedRunTotal} />
+          <SkillEvalStatTile label="技能数" value={selectedSkill ? 1 : data.totalSkills} />
+          <SkillEvalStatTile
+            label="通过率"
+            value={formatSkillEvalPercent(selectedSkill?.passRate ?? data.passRate)}
+          />
+          <SkillEvalStatTile
+            label="平均分"
+            value={formatSkillEvalPercent(selectedSkill?.averageScore ?? data.averageScore)}
+          />
+          <SkillEvalStatTile
+            label="过程分"
+            value={formatSkillEvalPercent(
+              selectedSkill?.averageProcessScore ?? data.averageProcessScore ?? data.averageScore
+            )}
+          />
+          <SkillEvalStatTile
+            label="结束分"
+            value={formatSkillEvalPercent(
+              selectedSkill?.averageOutcomeScore ?? data.averageOutcomeScore ?? data.averageScore
+            )}
+          />
+          <SkillEvalStatTile
+            label="结果分"
+            value={formatSkillEvalPercent(
+              selectedSkill?.averageResultScore ?? data.averageResultScore
+            )}
+          />
           <SkillEvalStatTile label="结果记录" value={selectedResultRecords} />
           <SkillEvalStatTile label="总 Token" value={formatSkillEvalTokens(selectedTotalTokens)} />
-          <SkillEvalStatTile label="平均峰值输入" value={formatSkillEvalTokens(selectedSkill?.averagePeakInputTokens ?? data.averagePeakInputTokens)} />
+          <SkillEvalStatTile
+            label="平均峰值输入"
+            value={formatSkillEvalTokens(
+              selectedSkill?.averagePeakInputTokens ?? data.averagePeakInputTokens
+            )}
+          />
         </div>
         <div className="grid grid-cols-[4px_minmax(96px,1fr)_42px_50px_48px_48px_54px] gap-2 border-b border-border px-4 py-2 text-[11px] font-medium text-muted-foreground">
           <span />
@@ -1223,6 +1275,34 @@ const SkillEvalDashboardPanel = memo(function SkillEvalDashboardPanel({
               >
                 我的技能
               </button>
+            </div>
+            <div className="mt-2 flex items-center justify-between text-[11px] text-muted-foreground">
+              <span>
+                技能 {formatNumber(totalSkills)} 个 · 第 {formatNumber(skillPage)} /{" "}
+                {formatNumber(skillTotalPages)} 页
+              </span>
+              <div className="flex items-center gap-1">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-6 px-1.5"
+                  onClick={() => onSkillPageChange(skillPage - 1)}
+                  disabled={!canGoPreviousSkillPage || loading || mineSkillsLoading}
+                  aria-label="上一页技能"
+                >
+                  <ChevronLeft className="size-3.5" />
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-6 px-1.5"
+                  onClick={() => onSkillPageChange(skillPage + 1)}
+                  disabled={!canGoNextSkillPage || loading || mineSkillsLoading}
+                  aria-label="下一页技能"
+                >
+                  <ChevronRight className="size-3.5" />
+                </Button>
+              </div>
             </div>
             {mineOnly ? (
               <div className="mt-2 truncate text-[11px] text-muted-foreground">
@@ -1270,7 +1350,8 @@ const SkillEvalDashboardPanel = memo(function SkillEvalDashboardPanel({
                 : "最近运行"}
             </div>
             <div className="text-[11px] text-muted-foreground">
-              共 {selectedTotalLabel} · 当前页 {formatNumber(filteredRuns.length)} 条 · 第 {formatNumber(recentPage)} / {formatNumber(recentTotalPages)} 页
+              共 {selectedTotalLabel} · 当前页 {formatNumber(filteredRuns.length)} 条 · 第{" "}
+              {formatNumber(recentPage)} / {formatNumber(recentTotalPages)} 页
             </div>
             <div className="mt-0.5 text-[11px] text-muted-foreground">
               查询范围：{formatDateOnly(range.from)} ~ {formatDateOnly(range.to)}
@@ -1401,26 +1482,23 @@ export function DashboardView(): React.JSX.Element {
     () => new Set(currentUserUploadCandidates),
     [currentUserUploadCandidates]
   )
-  const myUploadedSkillEvalScope = useMemo(
-    () => {
-      const names = new Set<string>()
-      let count = 0
+  const myUploadedSkillEvalScope = useMemo(() => {
+    const names = new Set<string>()
+    let count = 0
 
-      for (const item of marketSkillMap.values()) {
-        if (!isUploadedByCurrentUser(item, currentUserUploadCandidateSet)) continue
-        count += 1
-        for (const name of getMarketSkillQueryNames(item)) {
-          names.add(name)
-        }
+    for (const item of marketSkillMap.values()) {
+      if (!isUploadedByCurrentUser(item, currentUserUploadCandidateSet)) continue
+      count += 1
+      for (const name of getMarketSkillQueryNames(item)) {
+        names.add(name)
       }
+    }
 
-      return {
-        names: Array.from(names),
-        count
-      }
-    },
-    [currentUserUploadCandidateSet, marketSkillMap]
-  )
+    return {
+      names: Array.from(names),
+      count
+    }
+  }, [currentUserUploadCandidateSet, marketSkillMap])
   const myUploadedSkillNames = myUploadedSkillEvalScope.names
   const myUploadedSkillCount = myUploadedSkillEvalScope.count
   const myUploadedSkillNamesKey = useMemo(
@@ -1429,17 +1507,18 @@ export function DashboardView(): React.JSX.Element {
   )
   const skillEvalScopeKey = skillEvalMineOnly ? `mine:${myUploadedSkillNamesKey}` : "all"
   const skillEvalSkillByKey = useMemo(
-    () => new Map((skillEval?.skills ?? []).map((skill) => [
-      skillEvalKey(skill.skillName, skill.skillVersion),
-      skill
-    ])),
+    () =>
+      new Map(
+        (skillEval?.skills ?? []).map((skill) => [
+          skillEvalKey(skill.skillName, skill.skillVersion),
+          skill
+        ])
+      ),
     [skillEval]
   )
-  const latestSkillEvalKey = useMemo(
-    () => getLatestSkillEvalKey(skillEval),
-    [skillEval]
-  )
-  const mineSkillsLoading = skillEvalMineOnly && (marketSkillsLoading || currentUserUploadCandidatesLoading)
+  const latestSkillEvalKey = useMemo(() => getLatestSkillEvalKey(skillEval), [skillEval])
+  const mineSkillsLoading =
+    skillEvalMineOnly && (marketSkillsLoading || currentUserUploadCandidatesLoading)
   const effectiveSkillEvalSelectedSkillKey =
     skillEvalSelectedSkillKey === undefined ? latestSkillEvalKey : skillEvalSelectedSkillKey
 
@@ -1449,7 +1528,8 @@ export function DashboardView(): React.JSX.Element {
   }, [clearSkillEval, range.from, range.to, skillEvalScopeKey])
 
   useEffect(() => {
-    if (skillEvalSelectedSkillKey === undefined || skillEvalSelectedSkillKey === null || !skillEval) return
+    if (skillEvalSelectedSkillKey === undefined || skillEvalSelectedSkillKey === null || !skillEval)
+      return
     const selectedSkillStillExists = skillEvalSkillByKey.has(skillEvalSelectedSkillKey)
     if (!selectedSkillStillExists) {
       setSkillEvalSelectedSkillKey(undefined)
@@ -1482,12 +1562,7 @@ export function DashboardView(): React.JSX.Element {
       return
     }
     setSkillEvalSelectedSkillKey(effectiveSkillEvalSelectedSkillKey)
-  }, [
-    activeMainTab,
-    effectiveSkillEvalSelectedSkillKey,
-    skillEval,
-    skillEvalSelectedSkillKey
-  ])
+  }, [activeMainTab, effectiveSkillEvalSelectedSkillKey, skillEval, skillEvalSelectedSkillKey])
 
   useEffect(() => {
     let cancelled = false
@@ -1701,10 +1776,23 @@ export function DashboardView(): React.JSX.Element {
       const filter = getSkillEvalFilterForKey(key)
       void fetchSkillEvalPage(page, {
         ...filter,
+        skillPage: skillEval?.skillPage ?? 1,
         ...(filter.skillName ? { recentOnly: true } : {})
       })
     },
-    [fetchSkillEvalPage, getSkillEvalFilterForKey]
+    [fetchSkillEvalPage, getSkillEvalFilterForKey, skillEval?.skillPage]
+  )
+
+  const handleSkillEvalSkillPageChange = useCallback(
+    (page: number) => {
+      setSkillEvalSelectedSkillKey(undefined)
+      void fetchSkillEvalPage(1, {
+        skillPage: page,
+        defaultRecentToLatestSkill: true,
+        ...(skillEvalMineOnly ? { skillNames: myUploadedSkillNames } : {})
+      })
+    },
+    [fetchSkillEvalPage, myUploadedSkillNames, skillEvalMineOnly]
   )
 
   const handleSkillEvalMineOnlyChange = useCallback((mineOnly: boolean) => {
@@ -1733,7 +1821,9 @@ export function DashboardView(): React.JSX.Element {
         const normalizedIds = [userInfo?.sapId, userInfo?.ystId]
           .map((value) => String(value || "").trim())
           .filter(Boolean)
-        const candidates = Array.from(new Set(normalizedIds.flatMap((id) => buildUploaderIdCandidates(id))))
+        const candidates = Array.from(
+          new Set(normalizedIds.flatMap((id) => buildUploaderIdCandidates(id)))
+        )
         if (!cancelled) setCurrentUserUploadCandidates(candidates)
       } catch (error) {
         console.warn("[Dashboard] Failed to load current user upload candidates:", error)
@@ -2194,6 +2284,7 @@ export function DashboardView(): React.JSX.Element {
                 mineSkillCount={myUploadedSkillCount}
                 mineSkillsLoading={mineSkillsLoading}
                 onRecentPageChange={handleSkillEvalPageChange}
+                onSkillPageChange={handleSkillEvalSkillPageChange}
                 onMineOnlyChange={handleSkillEvalMineOnlyChange}
                 onOpenTrace={handleSkillEvalTraceOpen}
                 selectedSkillKey={effectiveSkillEvalSelectedSkillKey}
@@ -2265,16 +2356,24 @@ export function DashboardView(): React.JSX.Element {
         error={skillTracesError}
         onPageChange={handleSkillTracePageChange}
       />
-      <Dialog open={Boolean(skillEvalTraceRun)} onOpenChange={(open) => {
-        if (!open) setSkillEvalTraceRun(null)
-      }}>
+      <Dialog
+        open={Boolean(skillEvalTraceRun)}
+        onOpenChange={(open) => {
+          if (!open) setSkillEvalTraceRun(null)
+        }}
+      >
         <DialogContent className="flex h-[80vh] max-w-[1080px] grid-rows-none flex-col gap-0 p-0">
           <DialogHeader className="border-b border-border px-5 py-4">
             <DialogTitle className="truncate text-base">
-              技能评估详情 · {skillEvalTraceRun ? skillEvalVersionLabel(skillEvalTraceRun.skillName, skillEvalTraceRun.skillVersion) : "-"}
+              技能评估详情 ·{" "}
+              {skillEvalTraceRun
+                ? skillEvalVersionLabel(skillEvalTraceRun.skillName, skillEvalTraceRun.skillVersion)
+                : "-"}
             </DialogTitle>
             <p className="mt-1 text-[11px] text-muted-foreground">
-              {skillEvalTraceRun ? `${formatRelativeTime(skillEvalTraceRun.startedAt)} · 链路 ${skillEvalTraceRun.traceId}` : ""}
+              {skillEvalTraceRun
+                ? `${formatRelativeTime(skillEvalTraceRun.startedAt)} · 链路 ${skillEvalTraceRun.traceId}`
+                : ""}
             </p>
           </DialogHeader>
           {skillEvalTraceRun && <SkillEvalRunSummary run={skillEvalTraceRun} />}

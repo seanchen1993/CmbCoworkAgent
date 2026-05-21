@@ -36,7 +36,10 @@ import {
 function getEsNodes(): string[] {
   const raw = import.meta.env.VITE_ES_NODES as string | undefined
   if (!raw) return []
-  return raw.split(",").map((n) => n.trim()).filter(Boolean)
+  return raw
+    .split(",")
+    .map((n) => n.trim())
+    .filter(Boolean)
 }
 
 function getEsAuth(): { username: string; password: string } | null {
@@ -53,7 +56,9 @@ function getEsIndex(type: "trace" | "event"): string {
 
 const ALLOWED_YST_IDS_RAW = (import.meta.env.VITE_DASHBOARD_ALLOWED_YST_IDS as string) || ""
 const ALLOWED_YST_IDS = new Set(
-  ALLOWED_YST_IDS_RAW.split(",").map((s) => s.trim()).filter(Boolean)
+  ALLOWED_YST_IDS_RAW.split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
 )
 
 function isDashboardAllowedForCurrentUser(): boolean {
@@ -77,7 +82,8 @@ async function esQuery(index: string, body: Record<string, unknown>): Promise<un
   const auth = getEsAuth()
   const headers: Record<string, string> = { "Content-Type": "application/json" }
   if (auth) {
-    headers["Authorization"] = "Basic " + Buffer.from(`${auth.username}:${auth.password}`).toString("base64")
+    headers["Authorization"] =
+      "Basic " + Buffer.from(`${auth.username}:${auth.password}`).toString("base64")
   }
 
   // Round-robin with fallback
@@ -115,8 +121,8 @@ async function esQuery(index: string, body: Record<string, unknown>): Promise<un
 // ─────────────────────────────────────────────────────────
 
 interface TimeRange {
-  from: string  // ISO string
-  to: string    // ISO string
+  from: string // ISO string
+  to: string // ISO string
 }
 
 type Granularity = "day" | "week" | "month" | "custom"
@@ -288,6 +294,8 @@ interface DashboardSkillEvalSummary {
   recentTotal: number
   recentPage: number
   recentPageSize: number
+  skillPage: number
+  skillPageSize: number
   totalRuns: number
   totalSkills: number
   passRate: number
@@ -357,6 +365,7 @@ interface DashboardUserDetail {
 interface EsSearchHit {
   _id?: string
   _source?: Record<string, unknown>
+  sort?: Array<string | number>
 }
 
 interface EsAggregation {
@@ -406,6 +415,8 @@ interface DashboardSkillEvalOptions {
   limit?: number
   recentPage?: number
   recentPageSize?: number
+  skillPage?: number
+  skillPageSize?: number
   skillName?: string
   skillVersion?: string
   skillNames?: string[]
@@ -498,6 +509,8 @@ function buildSkillUsageWildcardFilter(skillName: string): Record<string, unknow
   }
 }
 
+const SKILL_EVAL_STATS_PAGE_SIZE = 500
+
 /**
  * 清洗技能名参数：
  * - 去重
@@ -508,9 +521,7 @@ function normalizeSkillQueryNames(skillNames?: string[]): string[] {
   if (!Array.isArray(skillNames)) return []
   return Array.from(
     new Set(
-      skillNames
-        .map((name) => normalizeSkillQueryName(String(name || "").trim()))
-        .filter(Boolean)
+      skillNames.map((name) => normalizeSkillQueryName(String(name || "").trim())).filter(Boolean)
     )
   ).slice(0, 1000)
 }
@@ -528,7 +539,9 @@ function clampLimit(limit: number | undefined, fallback: number, max: number): n
   return Math.max(1, Math.min(max, Math.floor(Number(limit))))
 }
 
-function normalizeCommitDetailsOptions(value?: number | CommitDetailsOptions): Required<CommitDetailsOptions> {
+function normalizeCommitDetailsOptions(
+  value?: number | CommitDetailsOptions
+): Required<CommitDetailsOptions> {
   if (typeof value === "number") {
     return {
       page: 1,
@@ -566,6 +579,8 @@ function normalizeSkillEvalOptions(value?: DashboardSkillEvalOptions): {
   sampleLimit: number
   recentPage: number
   recentPageSize: number
+  skillPage: number
+  skillPageSize: number
   skillName?: string
   skillVersion: string | undefined
   skillNames: string[]
@@ -583,6 +598,8 @@ function normalizeSkillEvalOptions(value?: DashboardSkillEvalOptions): {
     sampleLimit: clampLimit(value?.limit, 500, 2000),
     recentPage: clampLimit(value?.recentPage, 1, 10_000),
     recentPageSize: clampLimit(value?.recentPageSize, 10, 100),
+    skillPage: clampLimit(value?.skillPage, 1, 10_000),
+    skillPageSize: clampLimit(value?.skillPageSize, 10, 100),
     ...(skillName ? { skillName } : {}),
     skillVersion: skillName ? skillVersion || undefined : undefined,
     skillNames,
@@ -633,7 +650,10 @@ function skillEvalTraceQuery(
   }
 }
 
-function buildSkillEvalExactSkillFilter(skillName: string, skillVersion?: string): Record<string, unknown> {
+function buildSkillEvalExactSkillFilter(
+  skillName: string,
+  skillVersion?: string
+): Record<string, unknown> {
   const identifier = skillVersion ? `${skillName}-${skillVersion}` : skillName
   if (skillVersion) {
     return {
@@ -686,12 +706,18 @@ type SkillEvalExactFilter = { skillName: string; skillVersion: string | undefine
 type SkillEvalNamesFilter = { skillNames: string[] }
 type SkillEvalFilter = SkillEvalExactFilter | SkillEvalNamesFilter
 
+function skillSummaryToExactFilter(skill: DashboardSkillEvalSkillSummary): SkillEvalExactFilter {
+  return { skillName: skill.skillName, skillVersion: skill.skillVersion }
+}
+
 function isSkillEvalExactFilter(filter?: SkillEvalFilter): filter is SkillEvalExactFilter {
   if (!filter || !("skillName" in filter)) return false
   return typeof filter.skillName === "string" && filter.skillName.length > 0
 }
 
-function normalizeUserListOptions(value?: UserListOptions): Required<Omit<UserListOptions, "afterKey">> & {
+function normalizeUserListOptions(value?: UserListOptions): Required<
+  Omit<UserListOptions, "afterKey">
+> & {
   afterKey?: Record<string, string | number>
 } {
   const pageSize = clampLimit(value?.pageSize, 20, 100)
@@ -699,9 +725,9 @@ function normalizeUserListOptions(value?: UserListOptions): Required<Omit<UserLi
   const afterKey =
     rawAfterKey && typeof rawAfterKey === "object" && !Array.isArray(rawAfterKey)
       ? Object.fromEntries(
-          Object.entries(rawAfterKey).filter(([, item]) => (
-            typeof item === "string" || typeof item === "number"
-          ))
+          Object.entries(rawAfterKey).filter(
+            ([, item]) => typeof item === "string" || typeof item === "number"
+          )
         )
       : undefined
   return {
@@ -746,27 +772,27 @@ function getLatestSkillFilterFromRuns(
   runs: DashboardSkillEvalRun[]
 ): { skillName: string; skillVersion: string | undefined } | undefined {
   if (runs.length === 0) return undefined
-  const latest = runs.reduce((currentLatest, run) => (
-    new Date(run.startedAt).getTime() > new Date(currentLatest.startedAt).getTime() ? run : currentLatest
-  ), runs[0])
+  const latest = runs.reduce(
+    (currentLatest, run) =>
+      new Date(run.startedAt).getTime() > new Date(currentLatest.startedAt).getTime()
+        ? run
+        : currentLatest,
+    runs[0]
+  )
   return {
     skillName: latest.skillName,
     skillVersion: latest.skillVersion
   }
 }
 
-function getLatestSkillFilterFromSummaries(
+function getFirstSkillFilterFromSummaries(
   skills: DashboardSkillEvalSkillSummary[]
 ): { skillName: string; skillVersion: string | undefined } | undefined {
   if (skills.length === 0) return undefined
-  const latest = skills.reduce((currentLatest, skill) => (
-    new Date(skill.lastRunAt).getTime() > new Date(currentLatest.lastRunAt).getTime()
-      ? skill
-      : currentLatest
-  ), skills[0])
+  const skill = skills[0]
   return {
-    skillName: latest.skillName,
-    skillVersion: latest.skillVersion
+    skillName: skill.skillName,
+    skillVersion: skill.skillVersion
   }
 }
 
@@ -823,7 +849,11 @@ function parseRawTrace(raw: unknown): { trace?: AgentTrace; error?: string } {
   return { error: "_raw 字段格式不受支持" }
 }
 
-function normalizeParsedTrace(trace: AgentTrace, source: Record<string, unknown>, hit: EsSearchHit): AgentTrace {
+function normalizeParsedTrace(
+  trace: AgentTrace,
+  source: Record<string, unknown>,
+  hit: EsSearchHit
+): AgentTrace {
   const candidate = trace as Partial<AgentTrace>
   const startedAt = candidate.startedAt || asString(source.startedAt)
   const endedAt = candidate.endedAt || asString(source.endedAt, startedAt)
@@ -849,7 +879,9 @@ function normalizeParsedTrace(trace: AgentTrace, source: Record<string, unknown>
     nodes: Array.isArray(candidate.nodes) ? candidate.nodes : undefined,
     totalToolCalls: asNumber(candidate.totalToolCalls, asNumber(source.totalToolCalls)),
     outcome: safeOutcome,
-    usedSkills: Array.isArray(candidate.usedSkills) ? candidate.usedSkills : asStringArray(source.usedSkills)
+    usedSkills: Array.isArray(candidate.usedSkills)
+      ? candidate.usedSkills
+      : asStringArray(source.usedSkills)
   }
 }
 
@@ -899,10 +931,14 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
     const usage = summarizeTraceTokenUsage(trace.modelCalls)
     const fallbackInputTokens = asNumber(source.totalInputTokens)
     const fallbackOutputTokens = asNumber(source.totalOutputTokens)
-    const fallbackTotalTokens = asNumber(source.totalTokens, fallbackInputTokens + fallbackOutputTokens)
+    const fallbackTotalTokens = asNumber(
+      source.totalTokens,
+      fallbackInputTokens + fallbackOutputTokens
+    )
     const totalInputTokens = usage.totalInputTokens || fallbackInputTokens
     const totalOutputTokens = usage.totalOutputTokens || fallbackOutputTokens
-    const totalTokens = usage.totalTokens || fallbackTotalTokens || totalInputTokens + totalOutputTokens
+    const totalTokens =
+      usage.totalTokens || fallbackTotalTokens || totalInputTokens + totalOutputTokens
     let nodes: TraceNode[] | undefined
     let rawError: string | undefined
     try {
@@ -930,7 +966,9 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
       totalInputTokens,
       totalOutputTokens,
       totalTokens,
-      usedSkills: Array.isArray(trace.usedSkills) ? trace.usedSkills : asStringArray(source.usedSkills),
+      usedSkills: Array.isArray(trace.usedSkills)
+        ? trace.usedSkills
+        : asStringArray(source.usedSkills),
       ...(nodes ? { nodes } : {}),
       rawAvailable: !rawError,
       ...(rawError ? { rawError } : {})
@@ -1083,13 +1121,24 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
   const rankingSearchSize = 1000
   const filteredToolExcludes = [
     // Claude Code 内置文件 / 系统工具
-    "execute", "read_file", "write_file", "glob", "grep",
-    "list_directory", "task", "task_output",
-    "ls", "edit_file",
+    "execute",
+    "read_file",
+    "write_file",
+    "glob",
+    "grep",
+    "list_directory",
+    "task",
+    "task_output",
+    "ls",
+    "edit_file",
     // 工具搜索 / 元工具
-    "search_tool", "inspect_tool", "invoke_deferred_tool",
+    "search_tool",
+    "inspect_tool",
+    "invoke_deferred_tool",
     // 内置代码执行辅助
-    "code_exec", "prepare_save_code_exec_tool", "save_code_exec_tool",
+    "code_exec",
+    "prepare_save_code_exec_tool",
+    "save_code_exec_tool",
     // 内置任务管理
     "write_todos"
   ]
@@ -1097,15 +1146,15 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
     size: 0,
     query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
     aggs: {
-      total_calls:        { value_count: { field: "traceId" } },
-      active_users:       { cardinality: { field: "sapId" } },
-      avg_duration:       { avg: { field: "durationMs" } },
+      total_calls: { value_count: { field: "traceId" } },
+      active_users: { cardinality: { field: "sapId" } },
+      avg_duration: { avg: { field: "durationMs" } },
       total_input_tokens: { sum: { field: "totalInputTokens" } },
-      total_output_tokens:{ sum: { field: "totalOutputTokens" } },
-      total_skills:       { cardinality: { field: "usedSkills" } },
-      total_tools:        { cardinality: { field: "toolNames" } },
-      total_skill_calls:  { value_count: { field: "usedSkills" } },
-      total_tool_calls:   { value_count: { field: "toolNames" } },
+      total_output_tokens: { sum: { field: "totalOutputTokens" } },
+      total_skills: { cardinality: { field: "usedSkills" } },
+      total_tools: { cardinality: { field: "toolNames" } },
+      total_skill_calls: { value_count: { field: "usedSkills" } },
+      total_tool_calls: { value_count: { field: "toolNames" } },
       by_skill: { terms: { field: "usedSkills", size: rankingTopSize } },
       by_skill_all: { terms: { field: "usedSkills", size: rankingSearchSize } },
       by_tool: {
@@ -1129,7 +1178,11 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
         terms: { field: "toolNames", size: rankingSearchSize }
       },
       trend: {
-        date_histogram: { field: "startedAt", calendar_interval: interval, time_zone: "Asia/Shanghai" },
+        date_histogram: {
+          field: "startedAt",
+          calendar_interval: interval,
+          time_zone: "Asia/Shanghai"
+        },
         aggs: {
           users: { cardinality: { field: "sapId" } }
         }
@@ -1155,10 +1208,7 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
     size: 0,
     query: {
       bool: {
-        should: [
-          { bool: { filter: codeGenFilters } },
-          { bool: { filter: codeAdoptFilters } }
-        ],
+        should: [{ bool: { filter: codeGenFilters } }, { bool: { filter: codeAdoptFilters } }],
         minimum_should_match: 1
       }
     },
@@ -1226,7 +1276,9 @@ async function fetchOverview(range: TimeRange, granularity: Granularity): Promis
       code_effective_generated_lines: { value: codeStats.effectiveGeneratedLines },
       code_measured_generated_lines: { value: codeStats.measuredGeneratedLines },
       code_unmeasured_generated_lines: { value: codeStats.unmeasuredGeneratedLines },
-      code_inclusive_effective_generated_lines: { value: codeStats.inclusiveEffectiveGeneratedLines },
+      code_inclusive_effective_generated_lines: {
+        value: codeStats.inclusiveEffectiveGeneratedLines
+      },
       code_adopted_lines: { value: codeStats.adoptedLines },
       code_pushed_measured_generated_lines: { value: codeStats.pushedMeasuredGeneratedLines },
       code_pushed_effective_generated_lines: { value: codeStats.pushedEffectiveGeneratedLines },
@@ -1264,7 +1316,7 @@ async function fetchModelStats(range: TimeRange, granularity: Granularity): Prom
       by_model: {
         terms: { field: "modelName", size: 30 },
         aggs: {
-          total_input_tokens:  { sum: { field: "totalInputTokens" } },
+          total_input_tokens: { sum: { field: "totalInputTokens" } },
           total_output_tokens: { sum: { field: "totalOutputTokens" } }
         }
       },
@@ -1289,7 +1341,9 @@ function normalizeUpperOrgLv1Option(upperOrgLv1?: string | null): string | null 
   return normalized ? normalized : null
 }
 
-function buildNonEmptyOrgLevelFilter(field: "upperOrgLv0" | "upperOrgLv1"): Record<string, unknown> {
+function buildNonEmptyOrgLevelFilter(
+  field: "upperOrgLv0" | "upperOrgLv1"
+): Record<string, unknown> {
   return {
     bool: {
       must: [{ exists: { field } }],
@@ -1322,7 +1376,11 @@ function buildOrgDistributionAgg(
   }
 }
 
-async function fetchUserStats(range: TimeRange, granularity: Granularity, opts?: UserStatsOptions): Promise<unknown> {
+async function fetchUserStats(
+  range: TimeRange,
+  granularity: Granularity,
+  opts?: UserStatsOptions
+): Promise<unknown> {
   void granularity
   const selectedUpperOrgLv1 = normalizeUpperOrgLv1Option(opts?.upperOrgLv1)
   const queryFilters = [timeRangeFilter("startedAt", range)]
@@ -1342,7 +1400,14 @@ async function fetchUserStats(range: TimeRange, granularity: Granularity, opts?:
               size: 1,
               sort: [{ startedAt: { order: "desc" } }],
               _source: {
-                includes: ["userName", "orgName", "upperOrgLv0", "upperOrgLv1", "appVersion", "startedAt"]
+                includes: [
+                  "userName",
+                  "orgName",
+                  "upperOrgLv0",
+                  "upperOrgLv1",
+                  "appVersion",
+                  "startedAt"
+                ]
               }
             }
           }
@@ -1383,7 +1448,10 @@ async function fetchUserStats(range: TimeRange, granularity: Granularity, opts?:
   return esQuery(getEsIndex("trace"), body)
 }
 
-function getLatestHitSource(bucket: Record<string, unknown>, aggName: string): Record<string, unknown> {
+function getLatestHitSource(
+  bucket: Record<string, unknown>,
+  aggName: string
+): Record<string, unknown> {
   const agg = asRecord(bucket[aggName])
   const hitsWrapper = asRecord(agg.hits)
   const hits = hitsWrapper.hits
@@ -1418,7 +1486,10 @@ function normalizeUserListBucket(bucket: Record<string, unknown>): DashboardUser
   }
 }
 
-async function fetchUserList(range: TimeRange, options?: UserListOptions): Promise<DashboardUserListData> {
+async function fetchUserList(
+  range: TimeRange,
+  options?: UserListOptions
+): Promise<DashboardUserListData> {
   const { pageSize, afterKey } = normalizeUserListOptions(options)
   const composite: Record<string, unknown> = {
     size: pageSize,
@@ -1471,9 +1542,13 @@ async function fetchUserList(range: TimeRange, options?: UserListOptions): Promi
   const buckets = Array.isArray(usersAgg.buckets) ? usersAgg.buckets : []
   const nextAfterKey = asRecord(usersAgg.after_key)
   return {
-    items: buckets.map((bucket) => normalizeUserListBucket(asRecord(bucket))).filter((item) => item.sapId),
+    items: buckets
+      .map((bucket) => normalizeUserListBucket(asRecord(bucket)))
+      .filter((item) => item.sapId),
     pageSize,
-    ...(Object.keys(nextAfterKey).length > 0 ? { nextAfterKey: nextAfterKey as Record<string, string | number> } : {}),
+    ...(Object.keys(nextAfterKey).length > 0
+      ? { nextAfterKey: nextAfterKey as Record<string, string | number> }
+      : {}),
     totalActiveUsers: asNumber(asRecord(aggs.total_active_users).value)
   }
 }
@@ -1506,10 +1581,7 @@ async function fetchUserDetail(
     sort: [{ startedAt: { order: "desc" } }],
     query: {
       bool: {
-        filter: [
-          timeRangeFilter("startedAt", range),
-          { term: { sapId: normalizedSapId } }
-        ]
+        filter: [timeRangeFilter("startedAt", range), { term: { sapId: normalizedSapId } }]
       }
     },
     aggs: {
@@ -1557,13 +1629,16 @@ async function fetchUserDetail(
     }
   }
 
-  const raw = await esQuery(getEsIndex("trace"), body) as EsSearchResponse
+  const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
   const rawRecord = asRecord(raw)
   const aggs = asRecord(rawRecord.aggregations)
   const userInfo = getLatestHitSource(aggs, "latest_user_info")
   const totalInputTokens = asNumber(asRecord(aggs.total_input_tokens).value)
   const totalOutputTokens = asNumber(asRecord(aggs.total_output_tokens).value)
-  const totalTokens = asNumber(asRecord(aggs.total_tokens).value, totalInputTokens + totalOutputTokens)
+  const totalTokens = asNumber(
+    asRecord(aggs.total_tokens).value,
+    totalInputTokens + totalOutputTokens
+  )
 
   return {
     sapId: asString(userInfo.sapId, normalizedSapId),
@@ -1578,9 +1653,18 @@ async function fetchUserDetail(
     totalInputTokens,
     totalOutputTokens,
     totalTokens,
-    bySkill: normalizeTermsBucketList(asRecord(aggs.by_skill).buckets, "skill") as DashboardUserDetail["bySkill"],
-    byModel: normalizeTermsBucketList(asRecord(aggs.by_model).buckets, "model") as DashboardUserDetail["byModel"],
-    byOutcome: normalizeTermsBucketList(asRecord(aggs.by_outcome).buckets, "outcome") as DashboardUserDetail["byOutcome"],
+    bySkill: normalizeTermsBucketList(
+      asRecord(aggs.by_skill).buckets,
+      "skill"
+    ) as DashboardUserDetail["bySkill"],
+    byModel: normalizeTermsBucketList(
+      asRecord(aggs.by_model).buckets,
+      "model"
+    ) as DashboardUserDetail["byModel"],
+    byOutcome: normalizeTermsBucketList(
+      asRecord(aggs.by_outcome).buckets,
+      "outcome"
+    ) as DashboardUserDetail["byOutcome"],
     traces: (raw.hits?.hits ?? []).map(normalizeTraceDetail)
   }
 }
@@ -1642,6 +1726,8 @@ async function fetchSkillEvalSummary(
     sampleLimit,
     recentPage,
     recentPageSize,
+    skillPage,
+    skillPageSize,
     skillName,
     skillVersion,
     skillNames,
@@ -1650,7 +1736,8 @@ async function fetchSkillEvalSummary(
     recentOnly
   } = normalizeSkillEvalOptions(options)
   const recentFrom = (recentPage - 1) * recentPageSize
-  const skillNamesFilter: SkillEvalNamesFilter | undefined = skillNames.length > 0 ? { skillNames } : undefined
+  const skillNamesFilter: SkillEvalNamesFilter | undefined =
+    skillNames.length > 0 ? { skillNames } : undefined
   const allowedSkillNames = skillNames.length > 0 ? new Set(skillNames) : undefined
   if (skillNamesProvided && skillNames.length === 0) {
     return buildSkillEvalSummaryFromTraces({
@@ -1660,11 +1747,15 @@ async function fetchSkillEvalSummary(
       recentTotal: 0,
       recentPage,
       recentPageSize,
+      skillPage,
+      skillPageSize,
       allowedSkillNames: new Set()
     })
   }
   const source = { includes: skillEvalTraceSourceIncludes() }
-  const explicitRecentFilter: SkillEvalExactFilter | undefined = skillName ? { skillName, skillVersion } : undefined
+  const explicitRecentFilter: SkillEvalExactFilter | undefined = skillName
+    ? { skillName, skillVersion }
+    : undefined
   const buildSampleBody = (sampleQuery: Record<string, unknown>) => ({
     track_total_hits: true,
     size: sampleLimit,
@@ -1689,76 +1780,130 @@ async function fetchSkillEvalSummary(
   let recentSkillFilter = explicitRecentFilter ?? skillNamesFilter
 
   if (recentOnly && explicitRecentFilter) {
-    recentRaw = await esQuery(
-      getEsIndex("trace"),
-      buildRecentBody(skillEvalTraceQuery(range, explicitRecentFilter))
-    ) as EsSearchResponse
+    const focusedQuery = skillEvalTraceQuery(range, explicitRecentFilter)
+    const [statsResult, nextRecentRaw] = await Promise.all([
+      fetchSkillEvalStatTraces(range, explicitRecentFilter, source),
+      esQuery(getEsIndex("trace"), buildRecentBody(focusedQuery)) as Promise<EsSearchResponse>
+    ])
+    recentRaw = nextRecentRaw
     const recentTraceHits = getTotalHits(recentRaw, recentRaw.hits?.hits?.length ?? 0)
     const recentTraces = parseSkillEvalTraceHits(recentRaw)
-    const recentRuns = buildSkillEvalRuns(recentTraces, explicitRecentFilter, allowedSkillNames)
+    const statsRuns = buildSkillEvalRuns(
+      statsResult.traces,
+      explicitRecentFilter,
+      allowedSkillNames
+    )
     return buildSkillEvalSummaryFromTraces({
-      traces: recentTraces,
-      sampleRuns: recentRuns,
+      traces: statsResult.traces,
+      sampleRuns: statsRuns,
       recentTraces,
-      totalTraceHits: recentTraceHits,
-      sampledTraceCount: recentRaw.hits?.hits?.length ?? 0,
+      totalTraceHits: statsResult.totalTraceHits,
+      sampledTraceCount: statsResult.traces.length,
       recentTotal: recentTraceHits,
       recentPage,
       recentPageSize,
+      skillPage,
+      skillPageSize,
       recentSkillFilter: explicitRecentFilter,
       allowedSkillNames
     })
   }
 
   if (!explicitRecentFilter && defaultRecentToLatestSkill) {
-    const skillList = await fetchSkillEvalSkillList(range, skillNamesFilter, allowedSkillNames)
-    recentSkillFilter = getLatestSkillFilterFromSummaries(skillList.skills) ?? skillNamesFilter
+    const skillList = await fetchSkillEvalSkillList(
+      range,
+      skillNamesFilter,
+      allowedSkillNames,
+      skillPage,
+      skillPageSize
+    )
+    recentSkillFilter = getFirstSkillFilterFromSummaries(skillList.skills) ?? skillNamesFilter
     const focusedQuery = skillEvalTraceQuery(range, recentSkillFilter)
-    ;[sampleRaw, recentRaw] = await Promise.all([
-      esQuery(getEsIndex("trace"), buildSampleBody(focusedQuery)) as Promise<EsSearchResponse>,
+    const [statsResult, nextRecentRaw] = await Promise.all([
+      fetchSkillEvalStatTraces(range, recentSkillFilter, source),
       esQuery(getEsIndex("trace"), buildRecentBody(focusedQuery)) as Promise<EsSearchResponse>
     ])
-    const focusedSampleTraces = parseSkillEvalTraceHits(sampleRaw)
+    recentRaw = nextRecentRaw
+    const focusedSampleTraces = statsResult.traces
     const focusedSampleRuns = buildSkillEvalRuns(
       focusedSampleTraces,
       isSkillEvalExactFilter(recentSkillFilter) ? recentSkillFilter : undefined,
       allowedSkillNames
     )
-    const totalTraceHits = getTotalHits(sampleRaw, sampleRaw.hits?.hits?.length ?? 0)
     const recentTraceHits = getTotalHits(recentRaw, recentRaw.hits?.hits?.length ?? 0)
     const recentTraces = parseSkillEvalTraceHits(recentRaw)
+    const pageStatTraces = await fetchSkillEvalStatTracesForSkillPage(range, skillList.skills, source)
+    const pageStatSummary = buildSkillEvalSummaryFromTraces({
+      traces: pageStatTraces,
+      sampleRuns: buildSkillEvalRuns(pageStatTraces, undefined, allowedSkillNames),
+      recentTraces: [],
+      totalTraceHits: skillList.totalTraceHits,
+      sampledTraceCount: pageStatTraces.length,
+      recentTotal: 0,
+      recentPage,
+      recentPageSize,
+      skillPage,
+      skillPageSize,
+      allowedSkillNames
+    })
     const summary = buildSkillEvalSummaryFromTraces({
       traces: focusedSampleTraces,
       sampleRuns: focusedSampleRuns,
       recentTraces,
-      totalTraceHits,
-      sampledTraceCount: sampleRaw.hits?.hits?.length ?? 0,
-      recentTotal: recentSkillFilter ? recentTraceHits : getSkillRunCount(recentRaw, recentTraceHits),
+      totalTraceHits: statsResult.totalTraceHits,
+      sampledTraceCount: focusedSampleTraces.length,
+      recentTotal: recentSkillFilter
+        ? recentTraceHits
+        : getSkillRunCount(recentRaw, recentTraceHits),
       recentPage,
       recentPageSize,
+      skillPage,
+      skillPageSize,
       ...(isSkillEvalExactFilter(recentSkillFilter) ? { recentSkillFilter } : {}),
       allowedSkillNames
     })
     return {
       ...summary,
       totalTraceHits: skillList.totalTraceHits,
-      totalSkills: skillList.skills.length,
-      skills: mergeSkillListWithEvaluatedStats(skillList.skills, summary.skills)
+      totalSkills: skillList.totalSkills,
+      skills: mergeSkillListWithEvaluatedStats(skillList.skills, pageStatSummary.skills)
     }
   }
 
   const recentQuery = skillEvalTraceQuery(range, recentSkillFilter)
+  const skillListPromise = !explicitRecentFilter
+    ? fetchSkillEvalSkillList(range, skillNamesFilter, allowedSkillNames, skillPage, skillPageSize)
+    : undefined
   ;[sampleRaw, recentRaw] = await Promise.all([
     esQuery(getEsIndex("trace"), buildSampleBody(recentQuery)) as Promise<EsSearchResponse>,
     esQuery(getEsIndex("trace"), buildRecentBody(recentQuery)) as Promise<EsSearchResponse>
   ])
+  const skillList = skillListPromise ? await skillListPromise : undefined
   const totalTraceHits = getTotalHits(sampleRaw, sampleRaw.hits?.hits?.length ?? 0)
   const sampleTraces = parseSkillEvalTraceHits(sampleRaw)
   const sampleRuns = buildSkillEvalRuns(sampleTraces, undefined, allowedSkillNames)
   const recentTraceHits = getTotalHits(recentRaw, recentRaw.hits?.hits?.length ?? 0)
   const recentTraces = parseSkillEvalTraceHits(recentRaw)
+  const pageStatTraces = skillList
+    ? await fetchSkillEvalStatTracesForSkillPage(range, skillList.skills, source)
+    : sampleTraces
+  const pageStatSummary = skillList
+    ? buildSkillEvalSummaryFromTraces({
+        traces: pageStatTraces,
+        sampleRuns: buildSkillEvalRuns(pageStatTraces, undefined, allowedSkillNames),
+        recentTraces: [],
+        totalTraceHits: skillList.totalTraceHits,
+        sampledTraceCount: pageStatTraces.length,
+        recentTotal: 0,
+        recentPage,
+        recentPageSize,
+        skillPage,
+        skillPageSize,
+        allowedSkillNames
+      })
+    : undefined
 
-  return buildSkillEvalSummaryFromTraces({
+  const summary = buildSkillEvalSummaryFromTraces({
     traces: sampleTraces,
     sampleRuns,
     recentTraces,
@@ -1767,9 +1912,20 @@ async function fetchSkillEvalSummary(
     recentTotal: recentSkillFilter ? recentTraceHits : getSkillRunCount(recentRaw, recentTraceHits),
     recentPage,
     recentPageSize,
+    skillPage,
+    skillPageSize,
     ...(isSkillEvalExactFilter(recentSkillFilter) ? { recentSkillFilter } : {}),
-    allowedSkillNames
+    allowedSkillNames,
+    ...(skillList ? { skillList: skillList.skills } : {})
   })
+  return skillList
+    ? {
+        ...summary,
+        totalTraceHits: skillList.totalTraceHits,
+        totalSkills: skillList.totalSkills,
+        skills: mergeSkillListWithEvaluatedStats(skillList.skills, pageStatSummary?.skills ?? [])
+      }
+    : summary
 }
 
 function getSkillRunCount(raw: EsSearchResponse, fallback: number): number {
@@ -1840,23 +1996,34 @@ function mergeSkillListWithEvaluatedStats(
   const evaluatedByKey = new Map(
     evaluatedSkills.map((skill) => [skillVersionKey(skill.skillName, skill.skillVersion), skill])
   )
-  return skillList.map((skill) => (
-    evaluatedByKey.get(skillVersionKey(skill.skillName, skill.skillVersion)) ?? skill
-  ))
+  return skillList.map(
+    (skill) => evaluatedByKey.get(skillVersionKey(skill.skillName, skill.skillVersion)) ?? skill
+  )
 }
 
 async function fetchSkillEvalSkillList(
   range: TimeRange,
   skillFilter?: SkillEvalFilter,
-  allowedSkillNames?: Set<string>
-): Promise<{ skills: DashboardSkillEvalSkillSummary[]; totalTraceHits: number }> {
+  allowedSkillNames?: Set<string>,
+  page = 1,
+  pageSize = 10
+): Promise<{
+  skills: DashboardSkillEvalSkillSummary[]
+  totalTraceHits: number
+  totalSkills: number
+}> {
+  const normalizedPage = clampLimit(page, 1, 10_000)
+  const normalizedPageSize = clampLimit(pageSize, 10, 100)
+  const skillFrom = (normalizedPage - 1) * normalizedPageSize
+  const bucketSize = allowedSkillNames ? 10_000 : Math.min(10_000, skillFrom + normalizedPageSize)
   const body = {
     track_total_hits: true,
     size: 0,
     query: skillEvalTraceQuery(range, skillFilter),
     aggs: {
+      ...(!allowedSkillNames ? { skill_count: { cardinality: { field: "usedSkills" } } } : {}),
       by_skill: {
-        terms: { field: "usedSkills", size: 1000 },
+        terms: { field: "usedSkills", size: bucketSize, order: { _count: "desc" } },
         aggs: {
           latest_trace: {
             top_hits: {
@@ -1869,11 +2036,64 @@ async function fetchSkillEvalSkillList(
       }
     }
   }
-  const raw = await esQuery(getEsIndex("trace"), body) as EsSearchResponse
+  const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
+  const allSkills = parseSkillEvalSkillList(raw, allowedSkillNames)
   return {
-    skills: parseSkillEvalSkillList(raw, allowedSkillNames),
-    totalTraceHits: getTotalHits(raw, 0)
+    skills: allSkills.slice(skillFrom, skillFrom + normalizedPageSize),
+    totalTraceHits: getTotalHits(raw, 0),
+    totalSkills: allowedSkillNames
+      ? allSkills.length
+      : asNumber(raw.aggregations?.skill_count?.value, allSkills.length)
   }
+}
+
+async function fetchSkillEvalStatTraces(
+  range: TimeRange,
+  skillFilter: SkillEvalFilter | undefined,
+  source: { includes: string[] }
+): Promise<{ traces: AgentTrace[]; totalTraceHits: number }> {
+  const traces: AgentTrace[] = []
+  let totalTraceHits = 0
+  let loadedHits = 0
+  let searchAfter: Array<string | number> | undefined
+
+  while (true) {
+    const body: Record<string, unknown> = {
+      track_total_hits: true,
+      size: SKILL_EVAL_STATS_PAGE_SIZE,
+      sort: [{ startedAt: { order: "desc" } }, { _id: { order: "desc" } }],
+      query: skillEvalTraceQuery(range, skillFilter),
+      _source: source
+    }
+    if (searchAfter) body.search_after = searchAfter
+    const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
+    const hits = raw.hits?.hits ?? []
+    const hitCount = hits.length
+    if (loadedHits === 0) totalTraceHits = getTotalHits(raw, hitCount)
+    if (hitCount === 0) break
+
+    traces.push(...parseSkillEvalTraceHits(raw))
+    loadedHits += hitCount
+    searchAfter = hits[hitCount - 1]?.sort
+    if (loadedHits >= totalTraceHits || hitCount < SKILL_EVAL_STATS_PAGE_SIZE) break
+  }
+
+  return { traces, totalTraceHits }
+}
+
+async function fetchSkillEvalStatTracesForSkillPage(
+  range: TimeRange,
+  skills: DashboardSkillEvalSkillSummary[],
+  source: { includes: string[] }
+): Promise<AgentTrace[]> {
+  const tracesById = new Map<string, AgentTrace>()
+  for (const skill of skills) {
+    const result = await fetchSkillEvalStatTraces(range, skillSummaryToExactFilter(skill), source)
+    for (const trace of result.traces) {
+      tracesById.set(trace.traceId || `${skillVersionKey(skill.skillName, skill.skillVersion)}:${trace.startedAt}`, trace)
+    }
+  }
+  return [...tracesById.values()]
 }
 
 function parseSkillEvalTraceHits(raw: EsSearchResponse): AgentTrace[] {
@@ -1896,6 +2116,8 @@ function buildSkillEvalSummaryFromTraces({
   recentTotal = traces.length,
   recentPage = 1,
   recentPageSize = 10,
+  skillPage = 1,
+  skillPageSize = 10,
   recentSkillFilter,
   allowedSkillNames,
   skillList
@@ -1908,6 +2130,8 @@ function buildSkillEvalSummaryFromTraces({
   recentTotal?: number
   recentPage?: number
   recentPageSize?: number
+  skillPage?: number
+  skillPageSize?: number
   recentSkillFilter?: { skillName: string; skillVersion: string | undefined }
   allowedSkillNames?: Set<string>
   skillList?: DashboardSkillEvalSkillSummary[]
@@ -1926,14 +2150,19 @@ function buildSkillEvalSummaryFromTraces({
   }
   evaluatedTraceCount = evaluatedTraceIds.size
 
-  const recentRuns = buildSkillEvalRuns(recentTraces ?? traces, recentSkillFilter, allowedSkillNames)
-    .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())
+  const recentRuns = buildSkillEvalRuns(
+    recentTraces ?? traces,
+    recentSkillFilter,
+    allowedSkillNames
+  ).sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())
 
   const evaluatedSkills: DashboardSkillEvalSkillSummary[] = [...grouped.values()]
     .map((runs) => {
-      const latest = runs.reduce((max, run) => (
-        new Date(run.startedAt).getTime() > new Date(max.startedAt).getTime() ? run : max
-      ), runs[0])
+      const latest = runs.reduce(
+        (max, run) =>
+          new Date(run.startedAt).getTime() > new Date(max.startedAt).getTime() ? run : max,
+        runs[0]
+      )
       const totals = runs.reduce(
         (acc, run) => {
           acc.passCount += run.pass ? 1 : 0
@@ -2016,6 +2245,8 @@ function buildSkillEvalSummaryFromTraces({
   )
   const normalizedRecentPage = clampLimit(recentPage, 1, 10_000)
   const normalizedRecentPageSize = clampLimit(recentPageSize, 10, 100)
+  const normalizedSkillPage = clampLimit(skillPage, 1, 10_000)
+  const normalizedSkillPageSize = clampLimit(skillPageSize, 10, 100)
   const recentTotalPages = Math.max(1, Math.ceil(recentTotal / normalizedRecentPageSize))
   const effectiveRecentPage = Math.min(normalizedRecentPage, recentTotalPages)
   const groupedRuns = [...grouped.values()].flat()
@@ -2063,6 +2294,8 @@ function buildSkillEvalSummaryFromTraces({
     recentTotal,
     recentPage: effectiveRecentPage,
     recentPageSize: normalizedRecentPageSize,
+    skillPage: normalizedSkillPage,
+    skillPageSize: normalizedSkillPageSize,
     totalRuns,
     totalSkills: skills.length,
     passRate: averageValue(totals.passCount, totalRuns),
@@ -2118,7 +2351,10 @@ function isSameSkillVersion(
   record: { skillName: string; skillVersion?: string },
   filter: { skillName: string; skillVersion: string | undefined }
 ): boolean {
-  return record.skillName === filter.skillName && (record.skillVersion ?? undefined) === filter.skillVersion
+  return (
+    record.skillName === filter.skillName &&
+    (record.skillVersion ?? undefined) === filter.skillVersion
+  )
 }
 
 function skillEvalRecordToDashboardRun(
@@ -2237,13 +2473,10 @@ async function fetchSkillUserStats(
 }
 
 async function fetchUserProfilesBySapIds(sapIds: string[]): Promise<unknown> {
-  const sanitizedSapIds = Array.from(
-    new Set(
-      sapIds
-        .map((id) => id.trim())
-        .filter(Boolean)
-    )
-  ).slice(0, 500)
+  const sanitizedSapIds = Array.from(new Set(sapIds.map((id) => id.trim()).filter(Boolean))).slice(
+    0,
+    500
+  )
 
   if (sanitizedSapIds.length === 0) {
     return {
@@ -2309,15 +2542,16 @@ async function fetchProductivity(range: TimeRange, granularity: Granularity): Pr
     size: 0,
     query: {
       bool: {
-        filter: [
-          timeRangeFilter("eventTime", range),
-          { term: { "eventName": "git.commit.created" } }
-        ]
+        filter: [timeRangeFilter("eventTime", range), { term: { eventName: "git.commit.created" } }]
       }
     },
     aggs: {
       commit_trend: {
-        date_histogram: { field: "eventTime", calendar_interval: interval, time_zone: "Asia/Shanghai" }
+        date_histogram: {
+          field: "eventTime",
+          calendar_interval: interval,
+          time_zone: "Asia/Shanghai"
+        }
       },
       total_insertions: { sum: { field: "properties.insertions" } },
       total_deletions: { sum: { field: "properties.deletions" } },
@@ -2361,10 +2595,7 @@ async function fetchFeedback(range: TimeRange, granularity: Granularity): Promis
           timeRangeFilter("eventTime", range),
           {
             terms: {
-              eventName: [
-                "message.feedback.like",
-                "message.feedback.dislike.submit"
-              ]
+              eventName: ["message.feedback.like", "message.feedback.dislike.submit"]
             }
           }
         ]
@@ -2448,10 +2679,7 @@ async function fetchSkillRecentTraces(
     sort: [{ startedAt: { order: "desc" } }],
     query: {
       bool: {
-        filter: [
-          timeRangeFilter("startedAt", range),
-          buildSkillUsageWildcardFilter(skill)
-        ]
+        filter: [timeRangeFilter("startedAt", range), buildSkillUsageWildcardFilter(skill)]
       }
     },
     _source: {
@@ -2479,7 +2707,7 @@ async function fetchSkillRecentTraces(
       ]
     }
   }
-  const raw = await esQuery(getEsIndex("trace"), body) as EsSearchResponse
+  const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
   return {
     total: getTotalHits(raw, raw.hits?.hits?.length ?? 0),
     page,
@@ -2511,10 +2739,7 @@ async function fetchSkillCodeStats(skill: string, range: TimeRange): Promise<Das
     size: 0,
     query: {
       bool: {
-        should: [
-          { bool: { filter: codeGenFilters } },
-          { bool: { filter: codeAdoptFilters } }
-        ],
+        should: [{ bool: { filter: codeGenFilters } }, { bool: { filter: codeAdoptFilters } }],
         minimum_should_match: 1
       }
     },
@@ -2559,7 +2784,13 @@ async function fetchSkillDetail(
 async function fetchCommitDetails(
   range: TimeRange,
   options?: number | CommitDetailsOptions
-): Promise<{ total: number; page: number; pageSize: number; pushedOnly: boolean; items: DashboardCommitDetail[] }> {
+): Promise<{
+  total: number
+  page: number
+  pageSize: number
+  pushedOnly: boolean
+  items: DashboardCommitDetail[]
+}> {
   const { page, pageSize, pushedOnly } = normalizeCommitDetailsOptions(options)
   const filters: Record<string, unknown>[] = [
     timeRangeFilter("eventTime", range),
@@ -2607,7 +2838,7 @@ async function fetchCommitDetails(
       ]
     }
   }
-  const raw = await esQuery(getEsIndex("event"), body) as EsSearchResponse
+  const raw = (await esQuery(getEsIndex("event"), body)) as EsSearchResponse
   const hits = raw.hits?.hits ?? []
   const items = hits.map(normalizeCommitDetail)
   const adoptedSkillMap = await fetchCommitAdoptedSkillMap(
@@ -2619,7 +2850,7 @@ async function fetchCommitDetails(
     pageSize,
     pushedOnly,
     items: items.map((item) => {
-      const adoptedSkills = item.commitSha ? adoptedSkillMap.get(item.commitSha) ?? [] : []
+      const adoptedSkills = item.commitSha ? (adoptedSkillMap.get(item.commitSha) ?? []) : []
       return {
         ...item,
         usedSkills: adoptedSkills,
@@ -2697,55 +2928,55 @@ function makeMockOverview(range: TimeRange): unknown {
       code_pushed_commit_count: { value: 21 },
       by_skill: {
         buckets: [
-          { key: "代码审查",     doc_count: 312 },
-          { key: "需求分析",     doc_count: 278 },
-          { key: "文档生成",     doc_count: 245 },
-          { key: "单元测试",     doc_count: 198 },
-          { key: "SQL优化",      doc_count: 167 },
-          { key: "接口设计",     doc_count: 143 },
-          { key: "日志分析",     doc_count: 121 },
-          { key: "数据清洗",     doc_count: 98  },
-          { key: "性能诊断",     doc_count: 87  },
-          { key: "安全扫描",     doc_count: 62  },
-          { key: "代码重构",     doc_count: 54  },
-          { key: "异常排查",     doc_count: 49  },
-          { key: "接口联调",     doc_count: 44  },
-          { key: "依赖升级",     doc_count: 38  },
-          { key: "配置检查",     doc_count: 33  },
-          { key: "发布诊断",     doc_count: 29  },
-          { key: "性能优化",     doc_count: 24  },
-          { key: "埋点分析",     doc_count: 18  },
-          { key: "前端走查",     doc_count: 13  },
-          { key: "脚本生成",     doc_count: 9   }
+          { key: "代码审查", doc_count: 312 },
+          { key: "需求分析", doc_count: 278 },
+          { key: "文档生成", doc_count: 245 },
+          { key: "单元测试", doc_count: 198 },
+          { key: "SQL优化", doc_count: 167 },
+          { key: "接口设计", doc_count: 143 },
+          { key: "日志分析", doc_count: 121 },
+          { key: "数据清洗", doc_count: 98 },
+          { key: "性能诊断", doc_count: 87 },
+          { key: "安全扫描", doc_count: 62 },
+          { key: "代码重构", doc_count: 54 },
+          { key: "异常排查", doc_count: 49 },
+          { key: "接口联调", doc_count: 44 },
+          { key: "依赖升级", doc_count: 38 },
+          { key: "配置检查", doc_count: 33 },
+          { key: "发布诊断", doc_count: 29 },
+          { key: "性能优化", doc_count: 24 },
+          { key: "埋点分析", doc_count: 18 },
+          { key: "前端走查", doc_count: 13 },
+          { key: "脚本生成", doc_count: 9 }
         ]
       },
       by_skill_all: {
         buckets: [
-          { key: "代码审查",     doc_count: 312 },
-          { key: "需求分析",     doc_count: 278 },
-          { key: "文档生成",     doc_count: 245 },
-          { key: "单元测试",     doc_count: 198 },
-          { key: "SQL优化",      doc_count: 167 },
-          { key: "接口设计",     doc_count: 143 },
-          { key: "日志分析",     doc_count: 121 },
-          { key: "数据清洗",     doc_count: 98  },
-          { key: "性能诊断",     doc_count: 87  },
-          { key: "安全扫描",     doc_count: 62  },
-          { key: "代码重构",     doc_count: 54  },
-          { key: "异常排查",     doc_count: 49  },
-          { key: "接口联调",     doc_count: 44  },
-          { key: "依赖升级",     doc_count: 38  },
-          { key: "配置检查",     doc_count: 33  },
-          { key: "发布诊断",     doc_count: 29  },
-          { key: "性能优化",     doc_count: 24  },
-          { key: "埋点分析",     doc_count: 18  },
-          { key: "前端走查",     doc_count: 13  },
-          { key: "脚本生成",     doc_count: 9   },
-          { key: "冒烟测试",     doc_count: 8   },
-          { key: "链路排查",     doc_count: 7   },
-          { key: "Schema 校验",  doc_count: 6   },
-          { key: "接口 Mock",    doc_count: 5   },
-          { key: "灰度检查",     doc_count: 4   }
+          { key: "代码审查", doc_count: 312 },
+          { key: "需求分析", doc_count: 278 },
+          { key: "文档生成", doc_count: 245 },
+          { key: "单元测试", doc_count: 198 },
+          { key: "SQL优化", doc_count: 167 },
+          { key: "接口设计", doc_count: 143 },
+          { key: "日志分析", doc_count: 121 },
+          { key: "数据清洗", doc_count: 98 },
+          { key: "性能诊断", doc_count: 87 },
+          { key: "安全扫描", doc_count: 62 },
+          { key: "代码重构", doc_count: 54 },
+          { key: "异常排查", doc_count: 49 },
+          { key: "接口联调", doc_count: 44 },
+          { key: "依赖升级", doc_count: 38 },
+          { key: "配置检查", doc_count: 33 },
+          { key: "发布诊断", doc_count: 29 },
+          { key: "性能优化", doc_count: 24 },
+          { key: "埋点分析", doc_count: 18 },
+          { key: "前端走查", doc_count: 13 },
+          { key: "脚本生成", doc_count: 9 },
+          { key: "冒烟测试", doc_count: 8 },
+          { key: "链路排查", doc_count: 7 },
+          { key: "Schema 校验", doc_count: 6 },
+          { key: "接口 Mock", doc_count: 5 },
+          { key: "灰度检查", doc_count: 4 }
         ]
       },
       code_by_skill_adoption: {
@@ -2822,106 +3053,106 @@ function makeMockOverview(range: TimeRange): unknown {
       },
       by_tool: {
         buckets: [
-          { key: "git_workflow",       doc_count: 412 },
+          { key: "git_workflow", doc_count: 412 },
           { key: "browser_playwright", doc_count: 356 },
-          { key: "manage_skill",       doc_count: 298 },
-          { key: "manage_scheduler",   doc_count: 241 },
-          { key: "web_search",         doc_count: 198 },
-          { key: "db_query",           doc_count: 163 },
-          { key: "create_pr",          doc_count: 134 },
-          { key: "run_tests",          doc_count: 112 },
-          { key: "search_code",        doc_count: 98  },
-          { key: "notify",             doc_count: 76  },
-          { key: "query_logs",         doc_count: 68  },
-          { key: "schema_check",       doc_count: 59  },
-          { key: "open_preview",       doc_count: 53  },
-          { key: "analyze_diff",       doc_count: 47  },
-          { key: "format_code",        doc_count: 42  },
-          { key: "lint_fix",           doc_count: 36  },
-          { key: "dependency_audit",   doc_count: 31  },
-          { key: "deploy_check",       doc_count: 26  },
-          { key: "trace_lookup",       doc_count: 19  },
-          { key: "ticket_update",      doc_count: 12  }
+          { key: "manage_skill", doc_count: 298 },
+          { key: "manage_scheduler", doc_count: 241 },
+          { key: "web_search", doc_count: 198 },
+          { key: "db_query", doc_count: 163 },
+          { key: "create_pr", doc_count: 134 },
+          { key: "run_tests", doc_count: 112 },
+          { key: "search_code", doc_count: 98 },
+          { key: "notify", doc_count: 76 },
+          { key: "query_logs", doc_count: 68 },
+          { key: "schema_check", doc_count: 59 },
+          { key: "open_preview", doc_count: 53 },
+          { key: "analyze_diff", doc_count: 47 },
+          { key: "format_code", doc_count: 42 },
+          { key: "lint_fix", doc_count: 36 },
+          { key: "dependency_audit", doc_count: 31 },
+          { key: "deploy_check", doc_count: 26 },
+          { key: "trace_lookup", doc_count: 19 },
+          { key: "ticket_update", doc_count: 12 }
         ]
       },
       by_tool_filtered_all: {
         buckets: [
-          { key: "git_workflow",       doc_count: 412 },
+          { key: "git_workflow", doc_count: 412 },
           { key: "browser_playwright", doc_count: 356 },
-          { key: "manage_skill",       doc_count: 298 },
-          { key: "manage_scheduler",   doc_count: 241 },
-          { key: "web_search",         doc_count: 198 },
-          { key: "db_query",           doc_count: 163 },
-          { key: "create_pr",          doc_count: 134 },
-          { key: "run_tests",          doc_count: 112 },
-          { key: "search_code",        doc_count: 98  },
-          { key: "notify",             doc_count: 76  },
-          { key: "query_logs",         doc_count: 68  },
-          { key: "schema_check",       doc_count: 59  },
-          { key: "open_preview",       doc_count: 53  },
-          { key: "analyze_diff",       doc_count: 47  },
-          { key: "format_code",        doc_count: 42  },
-          { key: "lint_fix",           doc_count: 36  },
-          { key: "dependency_audit",   doc_count: 31  },
-          { key: "deploy_check",       doc_count: 26  },
-          { key: "trace_lookup",       doc_count: 19  },
-          { key: "ticket_update",      doc_count: 12  },
-          { key: "mcp_sqlQuery",       doc_count: 11  },
-          { key: "browser_visualDiff", doc_count: 9   },
-          { key: "workflow_template",  doc_count: 7   }
+          { key: "manage_skill", doc_count: 298 },
+          { key: "manage_scheduler", doc_count: 241 },
+          { key: "web_search", doc_count: 198 },
+          { key: "db_query", doc_count: 163 },
+          { key: "create_pr", doc_count: 134 },
+          { key: "run_tests", doc_count: 112 },
+          { key: "search_code", doc_count: 98 },
+          { key: "notify", doc_count: 76 },
+          { key: "query_logs", doc_count: 68 },
+          { key: "schema_check", doc_count: 59 },
+          { key: "open_preview", doc_count: 53 },
+          { key: "analyze_diff", doc_count: 47 },
+          { key: "format_code", doc_count: 42 },
+          { key: "lint_fix", doc_count: 36 },
+          { key: "dependency_audit", doc_count: 31 },
+          { key: "deploy_check", doc_count: 26 },
+          { key: "trace_lookup", doc_count: 19 },
+          { key: "ticket_update", doc_count: 12 },
+          { key: "mcp_sqlQuery", doc_count: 11 },
+          { key: "browser_visualDiff", doc_count: 9 },
+          { key: "workflow_template", doc_count: 7 }
         ]
       },
       by_tool_all: {
         buckets: [
-          { key: "read_file",          doc_count: 1823 },
-          { key: "write_file",         doc_count: 1245 },
-          { key: "execute",            doc_count: 987  },
-          { key: "grep",               doc_count: 876  },
-          { key: "glob",               doc_count: 654  },
-          { key: "git_workflow",       doc_count: 412  },
-          { key: "browser_playwright", doc_count: 356  },
-          { key: "manage_skill",       doc_count: 298  },
-          { key: "edit_file",          doc_count: 267  },
-          { key: "manage_scheduler",   doc_count: 241  },
-          { key: "web_search",         doc_count: 198  },
-          { key: "list_directory",     doc_count: 187  },
-          { key: "db_query",           doc_count: 163  },
-          { key: "task",               doc_count: 156  },
-          { key: "task_output",        doc_count: 148  },
-          { key: "create_pr",          doc_count: 134  },
-          { key: "search_tool",        doc_count: 128  },
-          { key: "run_tests",          doc_count: 112  },
-          { key: "search_code",        doc_count: 98   },
-          { key: "code_exec",          doc_count: 92   }
+          { key: "read_file", doc_count: 1823 },
+          { key: "write_file", doc_count: 1245 },
+          { key: "execute", doc_count: 987 },
+          { key: "grep", doc_count: 876 },
+          { key: "glob", doc_count: 654 },
+          { key: "git_workflow", doc_count: 412 },
+          { key: "browser_playwright", doc_count: 356 },
+          { key: "manage_skill", doc_count: 298 },
+          { key: "edit_file", doc_count: 267 },
+          { key: "manage_scheduler", doc_count: 241 },
+          { key: "web_search", doc_count: 198 },
+          { key: "list_directory", doc_count: 187 },
+          { key: "db_query", doc_count: 163 },
+          { key: "task", doc_count: 156 },
+          { key: "task_output", doc_count: 148 },
+          { key: "create_pr", doc_count: 134 },
+          { key: "search_tool", doc_count: 128 },
+          { key: "run_tests", doc_count: 112 },
+          { key: "search_code", doc_count: 98 },
+          { key: "code_exec", doc_count: 92 }
         ]
       },
       by_tool_all_full: {
         buckets: [
-          { key: "read_file",                  doc_count: 1823 },
-          { key: "write_file",                 doc_count: 1245 },
-          { key: "execute",                    doc_count: 987  },
-          { key: "grep",                       doc_count: 876  },
-          { key: "glob",                       doc_count: 654  },
-          { key: "git_workflow",               doc_count: 412  },
-          { key: "browser_playwright",         doc_count: 356  },
-          { key: "manage_skill",               doc_count: 298  },
-          { key: "edit_file",                  doc_count: 267  },
-          { key: "manage_scheduler",           doc_count: 241  },
-          { key: "web_search",                 doc_count: 198  },
-          { key: "list_directory",             doc_count: 187  },
-          { key: "db_query",                   doc_count: 163  },
-          { key: "task",                       doc_count: 156  },
-          { key: "task_output",                doc_count: 148  },
-          { key: "create_pr",                  doc_count: 134  },
-          { key: "search_tool",                doc_count: 128  },
-          { key: "run_tests",                  doc_count: 112  },
-          { key: "search_code",                doc_count: 98   },
-          { key: "code_exec",                  doc_count: 92   },
-          { key: "prepare_save_code_exec_tool",doc_count: 81   },
-          { key: "notify",                     doc_count: 76   },
-          { key: "query_logs",                 doc_count: 68   },
-          { key: "schema_check",               doc_count: 59   },
-          { key: "open_preview",               doc_count: 53   }
+          { key: "read_file", doc_count: 1823 },
+          { key: "write_file", doc_count: 1245 },
+          { key: "execute", doc_count: 987 },
+          { key: "grep", doc_count: 876 },
+          { key: "glob", doc_count: 654 },
+          { key: "git_workflow", doc_count: 412 },
+          { key: "browser_playwright", doc_count: 356 },
+          { key: "manage_skill", doc_count: 298 },
+          { key: "edit_file", doc_count: 267 },
+          { key: "manage_scheduler", doc_count: 241 },
+          { key: "web_search", doc_count: 198 },
+          { key: "list_directory", doc_count: 187 },
+          { key: "db_query", doc_count: 163 },
+          { key: "task", doc_count: 156 },
+          { key: "task_output", doc_count: 148 },
+          { key: "create_pr", doc_count: 134 },
+          { key: "search_tool", doc_count: 128 },
+          { key: "run_tests", doc_count: 112 },
+          { key: "search_code", doc_count: 98 },
+          { key: "code_exec", doc_count: 92 },
+          { key: "prepare_save_code_exec_tool", doc_count: 81 },
+          { key: "notify", doc_count: 76 },
+          { key: "query_logs", doc_count: 68 },
+          { key: "schema_check", doc_count: 59 },
+          { key: "open_preview", doc_count: 53 }
         ]
       },
       trend: { buckets: trend }
@@ -2934,23 +3165,44 @@ function makeMockModelStats(): unknown {
     aggregations: {
       by_model: {
         buckets: [
-          { key: "claude-sonnet-4-6", doc_count: 620, success_count: { doc_count: 578 }, avg_duration: { value: 3800 }, total_input_tokens: { value: 1_200_000 }, total_output_tokens: { value: 430_000 } },
-          { key: "claude-opus-4-6",   doc_count: 280, success_count: { doc_count: 265 }, avg_duration: { value: 8200 }, total_input_tokens: { value: 780_000 },  total_output_tokens: { value: 310_000 } },
-          { key: "claude-haiku-4-5",  doc_count: 347, success_count: { doc_count: 259 }, avg_duration: { value: 1100 }, total_input_tokens: { value: 360_000 },  total_output_tokens: { value: 150_000 } }
+          {
+            key: "claude-sonnet-4-6",
+            doc_count: 620,
+            success_count: { doc_count: 578 },
+            avg_duration: { value: 3800 },
+            total_input_tokens: { value: 1_200_000 },
+            total_output_tokens: { value: 430_000 }
+          },
+          {
+            key: "claude-opus-4-6",
+            doc_count: 280,
+            success_count: { doc_count: 265 },
+            avg_duration: { value: 8200 },
+            total_input_tokens: { value: 780_000 },
+            total_output_tokens: { value: 310_000 }
+          },
+          {
+            key: "claude-haiku-4-5",
+            doc_count: 347,
+            success_count: { doc_count: 259 },
+            avg_duration: { value: 1100 },
+            total_input_tokens: { value: 360_000 },
+            total_output_tokens: { value: 150_000 }
+          }
         ]
       },
       by_tier: {
         buckets: [
-          { key: "high",   doc_count: 280 },
+          { key: "high", doc_count: 280 },
           { key: "medium", doc_count: 620 },
-          { key: "low",    doc_count: 347 }
+          { key: "low", doc_count: 347 }
         ]
       },
       by_layer: {
         buckets: [
-          { key: "user_explicit",   doc_count: 210 },
-          { key: "skill_override",  doc_count: 390 },
-          { key: "auto_routing",    doc_count: 647 }
+          { key: "user_explicit", doc_count: 210 },
+          { key: "skill_override", doc_count: 390 },
+          { key: "auto_routing", doc_count: 647 }
         ]
       }
     }
@@ -2966,11 +3218,15 @@ function makeMockUserStats(range: TimeRange, opts?: UserStatsOptions): unknown {
 
   const trendBuckets: Date[] = []
   if (diffDays <= 1) {
-    const start = new Date(from); start.setMinutes(0, 0, 0)
-    for (let t = new Date(start); t <= to; t = new Date(t.getTime() + 60 * 60 * 1000)) trendBuckets.push(new Date(t))
+    const start = new Date(from)
+    start.setMinutes(0, 0, 0)
+    for (let t = new Date(start); t <= to; t = new Date(t.getTime() + 60 * 60 * 1000))
+      trendBuckets.push(new Date(t))
   } else {
-    const start = new Date(from); start.setHours(0, 0, 0, 0)
-    for (let t = new Date(start); t <= to; t = new Date(t.getTime() + 24 * 60 * 60 * 1000)) trendBuckets.push(new Date(t))
+    const start = new Date(from)
+    start.setHours(0, 0, 0, 0)
+    for (let t = new Date(start); t <= to; t = new Date(t.getTime() + 24 * 60 * 60 * 1000))
+      trendBuckets.push(new Date(t))
   }
 
   const trend = trendBuckets.map((t) => ({
@@ -2980,26 +3236,23 @@ function makeMockUserStats(range: TimeRange, opts?: UserStatsOptions): unknown {
     users: { value: Math.floor(3 + Math.random() * 15) }
   }))
 
-  const byOrgBuckets = selectedUpperOrgLv1 === null
-    ? [
-        { key: "测试 1 部", doc_count: 748, unique_users: { value: 60 } },
-        { key: "开发二部", doc_count: 245, unique_users: { value: 20 } },
-        { key: "平台三部", doc_count: 189, unique_users: { value: 15 } }
-      ]
-    : selectedUpperOrgLv1 === "测试 1 部"
+  const byOrgBuckets =
+    selectedUpperOrgLv1 === null
       ? [
-          { key: "测试 1 组", doc_count: 430, unique_users: { value: 36 } },
-          { key: "测试 2 组", doc_count: 318, unique_users: { value: 24 } }
+          { key: "测试 1 部", doc_count: 748, unique_users: { value: 60 } },
+          { key: "开发二部", doc_count: 245, unique_users: { value: 20 } },
+          { key: "平台三部", doc_count: 189, unique_users: { value: 15 } }
         ]
-      : selectedUpperOrgLv1 === "开发二部"
+      : selectedUpperOrgLv1 === "测试 1 部"
         ? [
-            { key: "开发三组", doc_count: 245, unique_users: { value: 20 } }
+            { key: "测试 1 组", doc_count: 430, unique_users: { value: 36 } },
+            { key: "测试 2 组", doc_count: 318, unique_users: { value: 24 } }
           ]
-        : selectedUpperOrgLv1 === "平台三部"
-          ? [
-              { key: "平台一组", doc_count: 189, unique_users: { value: 15 } }
-            ]
-          : []
+        : selectedUpperOrgLv1 === "开发二部"
+          ? [{ key: "开发三组", doc_count: 245, unique_users: { value: 20 } }]
+          : selectedUpperOrgLv1 === "平台三部"
+            ? [{ key: "平台一组", doc_count: 189, unique_users: { value: 15 } }]
+            : []
 
   const makeOrgAgg = (buckets: typeof byOrgBuckets): Record<string, unknown> => {
     const docCount = buckets.reduce((sum, bucket) => sum + bucket.doc_count, 0)
@@ -3009,29 +3262,159 @@ function makeMockUserStats(range: TimeRange, opts?: UserStatsOptions): unknown {
   const byOrgUv = makeOrgAgg(byOrgBuckets)
 
   const allTopUserBuckets = [
-    { key: "10010001", doc_count: 142, latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "张三", orgName: "测试 1 组", upperOrgLv1: "测试 1 部", upperOrgLv0: "测试 1 组", appVersion: "1.3.0" } }] } } },
-    { key: "10010002", doc_count: 118, latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "李四", orgName: "测试 2 组", upperOrgLv1: "测试 1 部", upperOrgLv0: "测试 2 组", appVersion: "1.2.5" } }] } } },
-    { key: "10010003", doc_count: 97,  latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "王五", orgName: "开发三组", upperOrgLv1: "开发二部", upperOrgLv0: "开发三组", appVersion: "1.3.0" } }] } } },
-    { key: "10010004", doc_count: 85,  latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "赵六", orgName: "测试 1 组", upperOrgLv1: "测试 1 部", upperOrgLv0: "测试 1 组", appVersion: "1.2.0" } }] } } },
-    { key: "10010005", doc_count: 73,  latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "钱七", orgName: "平台一组", upperOrgLv1: "平台三部", upperOrgLv0: "平台一组", appVersion: "1.3.0" } }] } } },
-    { key: "10010006", doc_count: 61,  latest_user_info: { hits: { hits: [{ sort: ["2026-04-21T10:00:00.000Z"], _source: { userName: "孙八", orgName: "开发三组", upperOrgLv1: "开发二部", upperOrgLv0: "开发三组", appVersion: "1.1.8" } }] } } }
+    {
+      key: "10010001",
+      doc_count: 142,
+      latest_user_info: {
+        hits: {
+          hits: [
+            {
+              sort: ["2026-04-21T10:00:00.000Z"],
+              _source: {
+                userName: "张三",
+                orgName: "测试 1 组",
+                upperOrgLv1: "测试 1 部",
+                upperOrgLv0: "测试 1 组",
+                appVersion: "1.3.0"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      key: "10010002",
+      doc_count: 118,
+      latest_user_info: {
+        hits: {
+          hits: [
+            {
+              sort: ["2026-04-21T10:00:00.000Z"],
+              _source: {
+                userName: "李四",
+                orgName: "测试 2 组",
+                upperOrgLv1: "测试 1 部",
+                upperOrgLv0: "测试 2 组",
+                appVersion: "1.2.5"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      key: "10010003",
+      doc_count: 97,
+      latest_user_info: {
+        hits: {
+          hits: [
+            {
+              sort: ["2026-04-21T10:00:00.000Z"],
+              _source: {
+                userName: "王五",
+                orgName: "开发三组",
+                upperOrgLv1: "开发二部",
+                upperOrgLv0: "开发三组",
+                appVersion: "1.3.0"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      key: "10010004",
+      doc_count: 85,
+      latest_user_info: {
+        hits: {
+          hits: [
+            {
+              sort: ["2026-04-21T10:00:00.000Z"],
+              _source: {
+                userName: "赵六",
+                orgName: "测试 1 组",
+                upperOrgLv1: "测试 1 部",
+                upperOrgLv0: "测试 1 组",
+                appVersion: "1.2.0"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      key: "10010005",
+      doc_count: 73,
+      latest_user_info: {
+        hits: {
+          hits: [
+            {
+              sort: ["2026-04-21T10:00:00.000Z"],
+              _source: {
+                userName: "钱七",
+                orgName: "平台一组",
+                upperOrgLv1: "平台三部",
+                upperOrgLv0: "平台一组",
+                appVersion: "1.3.0"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      key: "10010006",
+      doc_count: 61,
+      latest_user_info: {
+        hits: {
+          hits: [
+            {
+              sort: ["2026-04-21T10:00:00.000Z"],
+              _source: {
+                userName: "孙八",
+                orgName: "开发三组",
+                upperOrgLv1: "开发二部",
+                upperOrgLv0: "开发三组",
+                appVersion: "1.1.8"
+              }
+            }
+          ]
+        }
+      }
+    }
   ]
-  const topUserBuckets = selectedUpperOrgLv1 === null
-    ? allTopUserBuckets
-    : allTopUserBuckets.filter((bucket) => bucket.latest_user_info.hits.hits[0]._source.upperOrgLv1 === selectedUpperOrgLv1)
+  const topUserBuckets =
+    selectedUpperOrgLv1 === null
+      ? allTopUserBuckets
+      : allTopUserBuckets.filter(
+          (bucket) =>
+            bucket.latest_user_info.hits.hits[0]._source.upperOrgLv1 === selectedUpperOrgLv1
+        )
 
-  const byVersionBuckets = selectedUpperOrgLv1 === null
-    ? [
-        { key: "1.3.0", doc_count: 512, unique_users: { value: 98 } },
-        { key: "1.2.5", doc_count: 298, unique_users: { value: 62 } },
-        { key: "1.2.0", doc_count: 187, unique_users: { value: 41 } },
-        { key: "1.1.x", doc_count: 143, unique_users: { value: 28 } },
-        { key: "1.0.x", doc_count: 107, unique_users: { value: 19 } }
-      ]
-    : [
-        { key: "1.3.0", doc_count: Math.max(12, byOrgBuckets[0]?.doc_count ?? 0), unique_users: { value: Math.max(3, topUserBuckets.length) } },
-        { key: "1.2.5", doc_count: Math.max(6, Math.floor((byOrgBuckets[1]?.doc_count ?? byOrgBuckets[0]?.doc_count ?? 0) * 0.4)), unique_users: { value: Math.max(1, Math.ceil(topUserBuckets.length / 2)) } }
-      ]
+  const byVersionBuckets =
+    selectedUpperOrgLv1 === null
+      ? [
+          { key: "1.3.0", doc_count: 512, unique_users: { value: 98 } },
+          { key: "1.2.5", doc_count: 298, unique_users: { value: 62 } },
+          { key: "1.2.0", doc_count: 187, unique_users: { value: 41 } },
+          { key: "1.1.x", doc_count: 143, unique_users: { value: 28 } },
+          { key: "1.0.x", doc_count: 107, unique_users: { value: 19 } }
+        ]
+      : [
+          {
+            key: "1.3.0",
+            doc_count: Math.max(12, byOrgBuckets[0]?.doc_count ?? 0),
+            unique_users: { value: Math.max(3, topUserBuckets.length) }
+          },
+          {
+            key: "1.2.5",
+            doc_count: Math.max(
+              6,
+              Math.floor((byOrgBuckets[1]?.doc_count ?? byOrgBuckets[0]?.doc_count ?? 0) * 0.4)
+            ),
+            unique_users: { value: Math.max(1, Math.ceil(topUserBuckets.length / 2)) }
+          }
+        ]
 
   return {
     aggregations: {
@@ -3069,13 +3452,22 @@ function makeMockSkillEvalSummary(
   range: TimeRange,
   options?: DashboardSkillEvalOptions
 ): DashboardSkillEvalSummary {
-  const { recentPage, recentPageSize, skillName, skillVersion, skillNames, defaultRecentToLatestSkill } =
-    normalizeSkillEvalOptions(options)
+  const {
+    recentPage,
+    recentPageSize,
+    skillName,
+    skillVersion,
+    skillNames,
+    defaultRecentToLatestSkill
+  } = normalizeSkillEvalOptions(options)
   const skills = ["代码审查-v1.0.0", "单元测试-v1.1.0", "SQL优化-v2.0.0", "前端走查-v1.3.0"]
   const filteredSkills = skillName
     ? skills.filter((skill) => {
         const parsed = parseMockSkillIdentifier(skill)
-        return parsed.skillName === skillName && (skillVersion ? parsed.skillVersion === skillVersion : true)
+        return (
+          parsed.skillName === skillName &&
+          (skillVersion ? parsed.skillVersion === skillVersion : true)
+        )
       })
     : skillNames.length > 0
       ? skills.filter((skill) => skillNames.includes(parseMockSkillIdentifier(skill).skillName))
@@ -3090,18 +3482,17 @@ function makeMockSkillEvalSummary(
     undefined,
     skillNames.length > 0 ? new Set(skillNames) : undefined
   )
-  const latestFilter = !skillName && defaultRecentToLatestSkill
-    ? getLatestSkillFilterFromRuns(sampleRuns)
-    : undefined
-  const recentFilter = skillName
-    ? { skillName, skillVersion }
-    : latestFilter
+  const latestFilter =
+    !skillName && defaultRecentToLatestSkill ? getLatestSkillFilterFromRuns(sampleRuns) : undefined
+  const recentFilter = skillName ? { skillName, skillVersion } : latestFilter
   const recentTraces = recentFilter
     ? traces.filter((trace) =>
         trace.usedSkills.some((usedSkill) => {
           const parsed = parseMockSkillIdentifier(usedSkill)
-          return parsed.skillName === recentFilter.skillName &&
+          return (
+            parsed.skillName === recentFilter.skillName &&
             (parsed.skillVersion ?? undefined) === recentFilter.skillVersion
+          )
         })
       )
     : traces
@@ -3139,9 +3530,7 @@ function makeMockSkillUserStats(range: TimeRange, skillName: string): unknown {
     }
   }
   const topUsers = userStats.aggregations?.top_users?.buckets ?? []
-  const offset = Math.abs(
-    Array.from(skillName).reduce((acc, ch) => acc + ch.charCodeAt(0), 0)
-  ) % 7
+  const offset = Math.abs(Array.from(skillName).reduce((acc, ch) => acc + ch.charCodeAt(0), 0)) % 7
   const picked = topUsers.slice(0, Math.max(3, 6 - offset))
   const totalCalls = picked.reduce((sum, item) => sum + item.doc_count, 0)
   // 模拟环境下给出一个小比例空用户调用，便于前端联调空用户行展示。
@@ -3202,35 +3591,31 @@ function makeMockUserProfilesBySapIds(sapIds: string[]): unknown {
     })
   )
 
-  const buckets = Array.from(
-    new Set(
-      sapIds
-        .map((id) => id.trim())
-        .filter(Boolean)
-    )
-  ).map((sapId) => {
-    const fallback = fallbackMap.get(sapId)
-    return {
-      key: sapId,
-      doc_count: 1,
-      latest_user_info: {
-        hits: {
-          hits: [
-            {
-              _source: {
-                userName: fallback?.userName ?? `用户${sapId.slice(-4)}`,
-                orgName: fallback?.orgName ?? "未知部门",
-                upperOrgLv0: fallback?.upperOrgLv0 ?? "",
-                upperOrgLv1: fallback?.upperOrgLv1 ?? ""
+  const buckets = Array.from(new Set(sapIds.map((id) => id.trim()).filter(Boolean))).map(
+    (sapId) => {
+      const fallback = fallbackMap.get(sapId)
+      return {
+        key: sapId,
+        doc_count: 1,
+        latest_user_info: {
+          hits: {
+            hits: [
+              {
+                _source: {
+                  userName: fallback?.userName ?? `用户${sapId.slice(-4)}`,
+                  orgName: fallback?.orgName ?? "未知部门",
+                  upperOrgLv0: fallback?.upperOrgLv0 ?? "",
+                  upperOrgLv1: fallback?.upperOrgLv1 ?? ""
+                }
               }
-            }
-          ]
-        }
-      },
-      user_name: { buckets: [{ key: fallback?.userName ?? `用户${sapId.slice(-4)}` }] },
-      org_name: { buckets: [{ key: fallback?.orgName ?? "未知部门" }] }
+            ]
+          }
+        },
+        user_name: { buckets: [{ key: fallback?.userName ?? `用户${sapId.slice(-4)}` }] },
+        org_name: { buckets: [{ key: fallback?.orgName ?? "未知部门" }] }
+      }
     }
-  })
+  )
 
   return {
     aggregations: {
@@ -3284,18 +3669,24 @@ function makeMockUserList(_range: TimeRange, options?: UserListOptions): Dashboa
   }
 }
 
-function makeMockUserDetail(sapId: string, range: TimeRange, options?: UserDetailOptions): DashboardUserDetail {
+function makeMockUserDetail(
+  sapId: string,
+  range: TimeRange,
+  options?: UserDetailOptions
+): DashboardUserDetail {
   const index = Math.max(0, Number(sapId.slice(-3)) - 1)
   const user = makeMockDashboardUser(Number.isFinite(index) ? index : 0)
   const traceLimit = clampLimit(options?.traceLimit, 10, 50)
-  const traces = makeMockSkillRecentTraces("代码审查", range, traceLimit).traces.map((trace, traceIndex) => ({
-    ...trace,
-    sapId,
-    ystId: user.ystId,
-    userName: user.userName,
-    orgName: user.orgName,
-    userIp: `10.0.1.${20 + traceIndex}`
-  }))
+  const traces = makeMockSkillRecentTraces("代码审查", range, traceLimit).traces.map(
+    (trace, traceIndex) => ({
+      ...trace,
+      sapId,
+      ystId: user.ystId,
+      userName: user.userName,
+      orgName: user.orgName,
+      userIp: `10.0.1.${20 + traceIndex}`
+    })
+  )
   return {
     sapId,
     ystId: user.ystId,
@@ -3336,11 +3727,15 @@ function makeMockProductivity(range: TimeRange): unknown {
 
   const trendBuckets: Date[] = []
   if (diffDays <= 1) {
-    const start = new Date(from); start.setMinutes(0, 0, 0)
-    for (let t = new Date(start); t <= to; t = new Date(t.getTime() + 60 * 60 * 1000)) trendBuckets.push(new Date(t))
+    const start = new Date(from)
+    start.setMinutes(0, 0, 0)
+    for (let t = new Date(start); t <= to; t = new Date(t.getTime() + 60 * 60 * 1000))
+      trendBuckets.push(new Date(t))
   } else {
-    const start = new Date(from); start.setHours(0, 0, 0, 0)
-    for (let t = new Date(start); t <= to; t = new Date(t.getTime() + 24 * 60 * 60 * 1000)) trendBuckets.push(new Date(t))
+    const start = new Date(from)
+    start.setHours(0, 0, 0, 0)
+    for (let t = new Date(start); t <= to; t = new Date(t.getTime() + 24 * 60 * 60 * 1000))
+      trendBuckets.push(new Date(t))
   }
 
   const trend = trendBuckets.map((t) => ({
@@ -3352,11 +3747,11 @@ function makeMockProductivity(range: TimeRange): unknown {
   return {
     aggregations: {
       commit_trend: { buckets: trend },
-      total_insertions:   { value: 14820 },
-      total_deletions:    { value: 6430 },
-      total_files_changed:{ value: 892 },
-      total_commits:      { value: 187 },
-      active_users:       { value: 24 }
+      total_insertions: { value: 14820 },
+      total_deletions: { value: 6430 },
+      total_files_changed: { value: 892 },
+      total_commits: { value: 187 },
+      active_users: { value: 24 }
     }
   }
 }
@@ -3547,16 +3942,17 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
         index: 1,
         startedAt: new Date(startedAt.getTime() + 12_000).toISOString(),
         assistantText: `已完成 ${skill} 分析，结论包含风险点、建议修改和验证方式。`,
-        toolCalls: secondStepToolCalls.length > 0
-          ? secondStepToolCalls
-          : [
-              {
-                name: "grep",
-                args: { pattern: "TODO", path: "src" },
-                result: "匹配 3 处",
-                durationMs: 310
-              }
-            ]
+        toolCalls:
+          secondStepToolCalls.length > 0
+            ? secondStepToolCalls
+            : [
+                {
+                  name: "grep",
+                  args: { pattern: "TODO", path: "src" },
+                  result: "匹配 3 处",
+                  durationMs: 310
+                }
+              ]
       }
     ],
     modelCalls: [
@@ -3663,7 +4059,13 @@ function makeMockSkillDetail(
 function makeMockCommitDetails(
   range: TimeRange,
   options?: number | CommitDetailsOptions
-): { total: number; page: number; pageSize: number; pushedOnly: boolean; items: DashboardCommitDetail[] } {
+): {
+  total: number
+  page: number
+  pageSize: number
+  pushedOnly: boolean
+  items: DashboardCommitDetail[]
+} {
   const { page, pageSize, pushedOnly } = normalizeCommitDetailsOptions(options)
   const from = new Date(range.from)
   const to = new Date(range.to)
@@ -3686,7 +4088,9 @@ function makeMockCommitDetails(
       repositoryFullName: `demo/${repoName}`,
       repositoryWebUrl: `https://git.example.internal/demo/${repoName}`,
       commitSha,
-      commitUrl: pushed ? `https://git.example.internal/demo/${repoName}/commit/${commitSha}` : undefined,
+      commitUrl: pushed
+        ? `https://git.example.internal/demo/${repoName}/commit/${commitSha}`
+        : undefined,
       pushed,
       pushedAt: pushed ? new Date(eventTime.getTime() + 30 * 60 * 1000).toISOString() : undefined,
       branch: index % 2 === 0 ? "feature/smart-model-routing" : "fix/dashboard-detail",
@@ -3720,31 +4124,25 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     return isDashboardAllowed()
   })
 
-  _ipcMain.handle(
-    "dashboard:overview",
-    async (_, range: TimeRange, granularity: Granularity) => {
-      if (import.meta.env.DEV) return { success: true, data: makeMockOverview(range) }
-      try {
-        return { success: true, data: await fetchOverview(range, granularity) }
-      } catch (e) {
-        console.error("[Dashboard] overview error:", e)
-        return { success: false, error: e instanceof Error ? e.message : String(e) }
-      }
+  _ipcMain.handle("dashboard:overview", async (_, range: TimeRange, granularity: Granularity) => {
+    if (import.meta.env.DEV) return { success: true, data: makeMockOverview(range) }
+    try {
+      return { success: true, data: await fetchOverview(range, granularity) }
+    } catch (e) {
+      console.error("[Dashboard] overview error:", e)
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
-  )
+  })
 
-  _ipcMain.handle(
-    "dashboard:modelStats",
-    async (_, range: TimeRange, granularity: Granularity) => {
-      if (import.meta.env.DEV) return { success: true, data: makeMockModelStats() }
-      try {
-        return { success: true, data: await fetchModelStats(range, granularity) }
-      } catch (e) {
-        console.error("[Dashboard] modelStats error:", e)
-        return { success: false, error: e instanceof Error ? e.message : String(e) }
-      }
+  _ipcMain.handle("dashboard:modelStats", async (_, range: TimeRange, granularity: Granularity) => {
+    if (import.meta.env.DEV) return { success: true, data: makeMockModelStats() }
+    try {
+      return { success: true, data: await fetchModelStats(range, granularity) }
+    } catch (e) {
+      console.error("[Dashboard] modelStats error:", e)
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
-  )
+  })
 
   _ipcMain.handle(
     "dashboard:userStats",
@@ -3759,19 +4157,16 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   )
 
-  _ipcMain.handle(
-    "dashboard:userList",
-    async (_, range: TimeRange, options?: UserListOptions) => {
-      if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
-      if (import.meta.env.DEV) return { success: true, data: makeMockUserList(range, options) }
-      try {
-        return { success: true, data: await fetchUserList(range, options) }
-      } catch (e) {
-        console.error("[Dashboard] userList error:", e)
-        return { success: false, error: e instanceof Error ? e.message : String(e) }
-      }
+  _ipcMain.handle("dashboard:userList", async (_, range: TimeRange, options?: UserListOptions) => {
+    if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
+    if (import.meta.env.DEV) return { success: true, data: makeMockUserList(range, options) }
+    try {
+      return { success: true, data: await fetchUserList(range, options) }
+    } catch (e) {
+      console.error("[Dashboard] userList error:", e)
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
-  )
+  })
 
   _ipcMain.handle(
     "dashboard:userDetail",
@@ -3779,7 +4174,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
       if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
       const normalizedSapId = sapId?.trim?.() ?? ""
       if (!normalizedSapId) return { success: false, error: "sapId is required" }
-      if (import.meta.env.DEV) return { success: true, data: makeMockUserDetail(normalizedSapId, range, options) }
+      if (import.meta.env.DEV)
+        return { success: true, data: makeMockUserDetail(normalizedSapId, range, options) }
       try {
         return { success: true, data: await fetchUserDetail(normalizedSapId, range, options) }
       } catch (e) {
@@ -3807,7 +4203,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     "dashboard:skillEvalSummary",
     async (_, range: TimeRange, options?: DashboardSkillEvalOptions) => {
       if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
-      if (import.meta.env.DEV) return { success: true, data: makeMockSkillEvalSummary(range, options) }
+      if (import.meta.env.DEV)
+        return { success: true, data: makeMockSkillEvalSummary(range, options) }
       try {
         return { success: true, data: await fetchSkillEvalSummary(range, options) }
       } catch (e) {
@@ -3842,23 +4239,20 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   )
 
-  _ipcMain.handle(
-    "dashboard:userProfiles",
-    async (_, sapIds: string[]) => {
-      const sanitizedSapIds = Array.isArray(sapIds)
-        ? sapIds.filter((id): id is string => typeof id === "string")
-        : []
-      if (import.meta.env.DEV) {
-        return { success: true, data: makeMockUserProfilesBySapIds(sanitizedSapIds) }
-      }
-      try {
-        return { success: true, data: await fetchUserProfilesBySapIds(sanitizedSapIds) }
-      } catch (e) {
-        console.error("[Dashboard] userProfiles error:", e)
-        return { success: false, error: e instanceof Error ? e.message : String(e) }
-      }
+  _ipcMain.handle("dashboard:userProfiles", async (_, sapIds: string[]) => {
+    const sanitizedSapIds = Array.isArray(sapIds)
+      ? sapIds.filter((id): id is string => typeof id === "string")
+      : []
+    if (import.meta.env.DEV) {
+      return { success: true, data: makeMockUserProfilesBySapIds(sanitizedSapIds) }
     }
-  )
+    try {
+      return { success: true, data: await fetchUserProfilesBySapIds(sanitizedSapIds) }
+    } catch (e) {
+      console.error("[Dashboard] userProfiles error:", e)
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
 
   _ipcMain.handle(
     "dashboard:productivity",
@@ -3873,24 +4267,22 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   )
 
-  _ipcMain.handle(
-    "dashboard:feedback",
-    async (_, range: TimeRange, granularity: Granularity) => {
-      if (import.meta.env.DEV) return { success: true, data: makeMockFeedback(range, granularity) }
-      try {
-        return { success: true, data: await fetchFeedback(range, granularity) }
-      } catch (e) {
-        console.error("[Dashboard] feedback error:", e)
-        return { success: false, error: e instanceof Error ? e.message : String(e) }
-      }
+  _ipcMain.handle("dashboard:feedback", async (_, range: TimeRange, granularity: Granularity) => {
+    if (import.meta.env.DEV) return { success: true, data: makeMockFeedback(range, granularity) }
+    try {
+      return { success: true, data: await fetchFeedback(range, granularity) }
+    } catch (e) {
+      console.error("[Dashboard] feedback error:", e)
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
-  )
+  })
 
   _ipcMain.handle(
     "dashboard:skillRecentTraces",
     async (_, skill: string, range: TimeRange, options?: number | DashboardTracePageOptions) => {
       if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
-      if (import.meta.env.DEV) return { success: true, data: makeMockSkillRecentTraces(skill, range, options) }
+      if (import.meta.env.DEV)
+        return { success: true, data: makeMockSkillRecentTraces(skill, range, options) }
       try {
         return { success: true, data: await fetchSkillRecentTraces(skill, range, options) }
       } catch (e) {
@@ -3905,7 +4297,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     async (_, skill: string, range: TimeRange, options?: number | DashboardTracePageOptions) => {
       const trimmedSkill = skill?.trim?.() ?? ""
       if (!trimmedSkill) return { success: false, error: "skill is required" }
-      if (import.meta.env.DEV) return { success: true, data: makeMockSkillRecentTraces(trimmedSkill, range, options) }
+      if (import.meta.env.DEV)
+        return { success: true, data: makeMockSkillRecentTraces(trimmedSkill, range, options) }
       try {
         return { success: true, data: await fetchSkillRecentTraces(trimmedSkill, range, options) }
       } catch (e) {
@@ -3919,7 +4312,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     "dashboard:skillDetail",
     async (_, skill: string, range: TimeRange, options?: number | DashboardTracePageOptions) => {
       if (!isDashboardAllowed()) return { success: false, error: "无运营面板访问权限" }
-      if (import.meta.env.DEV) return { success: true, data: makeMockSkillDetail(skill, range, options) }
+      if (import.meta.env.DEV)
+        return { success: true, data: makeMockSkillDetail(skill, range, options) }
       try {
         return { success: true, data: await fetchSkillDetail(skill, range, options) }
       } catch (e) {
@@ -3945,10 +4339,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   _ipcMain.handle(
     "dashboard:exportExcel",
-    async (
-      _,
-      sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>
-    ) => {
+    async (_, sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>) => {
       try {
         // Dynamic import xlsx to avoid bundling issues
         const XLSX = await import("xlsx")
