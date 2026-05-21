@@ -75,6 +75,8 @@ import { SlashCommandPopover } from "@/features/slash-commands/SlashCommandPopov
 import {
   isBareGoalSlashCommandInput,
   isGoalSlashControlCommandInput,
+  isGoalSlashResumeCommandInput,
+  isGoalSlashTransportSensitiveControlCommandInput,
   isGoalTerminatingControlCommandInput,
   resolveGoalRuntimeComposerState,
   useSlashCommands,
@@ -584,6 +586,8 @@ const ROTATING_WORDS = [
 
 const MESSAGE_TIMES_THREAD_VALUE_KEY = "messageTimes"
 const MESSAGE_TIME_ORDER_THREAD_VALUE_KEY = "messageTimeOrder"
+const INTERNAL_GOAL_MESSAGE_TIMES_THREAD_VALUE_KEY = "internalGoalMessageTimes"
+const INTERNAL_GOAL_MESSAGE_TIME_ORDER_THREAD_VALUE_KEY = "internalGoalMessageTimeOrder"
 
 // 单条消息的起止时间，统一存为 ISO 字符串，方便写入 thread_values 并在重启后恢复。
 //
@@ -617,6 +621,24 @@ const isMessageTimeEntryArray = (value: unknown): value is MessageTimeEntry[] =>
 const getMessageTimeMap = (threadValues?: Record<string, unknown>): MessageTimeMap => {
   const value = threadValues?.[MESSAGE_TIMES_THREAD_VALUE_KEY]
   return isMessageTimeMap(value) ? value : {}
+}
+
+const getInternalGoalMessageTimeMap = (
+  threadValues?: Record<string, unknown>
+): MessageTimeMap => {
+  const value = threadValues?.[INTERNAL_GOAL_MESSAGE_TIMES_THREAD_VALUE_KEY]
+  return isMessageTimeMap(value) ? value : {}
+}
+
+const getInternalGoalMessageTimeOrder = (
+  threadValues?: Record<string, unknown>
+): MessageTimeEntry[] => {
+  const value = threadValues?.[INTERNAL_GOAL_MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]
+  if (isMessageTimeEntryArray(value)) return value
+  return Object.entries(getInternalGoalMessageTimeMap(threadValues)).map(([id, time]) => ({
+    id,
+    ...time
+  }))
 }
 
 const getMessageTimeOrder = (threadValues?: Record<string, unknown>): MessageTimeEntry[] => {
@@ -1397,7 +1419,12 @@ export function ChatContainer({
           decision === "approve_session" || decision === "approve_permanent" ? "approve" : decision
         await stream.submit(null, {
           command: {
-            resume: { decision: legacyDecision, pendingCount: pendingApproval.pendingCount }
+            resume: {
+              decision: legacyDecision,
+              pendingCount: pendingApproval.pendingCount,
+              allowRuntimeRestoredCheckpointResume:
+                pendingApproval.allowRuntimeRestoredCheckpointResume === true
+            }
           },
           config: { configurable: { thread_id: threadId, model_id: currentModel } }
         })
@@ -1483,6 +1510,7 @@ export function ChatContainer({
     if (prevLoadingRef.current && !isLoading) {
       const completedAt = new Date()
       const nextMessageTimes: MessageTimeMap = {}
+      const nextInternalGoalMessageTimes: MessageTimeMap = {}
       // 只处理本轮流式期间被记录过 start_at 的消息，避免重复 append 历史消息。
       //
       // 当前轮可能包含多条 assistant 消息和多条 tool 消息。这里不直接用全部 streamData.messages，
@@ -1526,7 +1554,13 @@ export function ChatContainer({
           start_at: trackedTime.start_at,
           end_at: trackedTime.end_at
         }
-        if (isInternalGoalPromptMessage(storeMsg)) return
+        if (isInternalGoalPromptMessage(storeMsg)) {
+          nextInternalGoalMessageTimes[streamMsg.id] = {
+            start_at: trackedTime.start_at.toISOString(),
+            end_at: trackedTime.end_at.toISOString()
+          }
+          return
+        }
 
         nextMessageTimes[streamMsg.id] = {
           start_at: trackedTime.start_at.toISOString(),
@@ -1535,13 +1569,17 @@ export function ChatContainer({
         appendMessage(storeMsg)
       })
 
-      if (Object.keys(nextMessageTimes).length > 0) {
+      if (
+        Object.keys(nextMessageTimes).length > 0 ||
+        Object.keys(nextInternalGoalMessageTimes).length > 0
+      ) {
         setMessageTimes((prev) => ({ ...prev, ...nextMessageTimes }))
         window.api.threads
           .get(threadId)
           .then((thread) => {
             if (!thread) return
             const existingTimes = getMessageTimeMap(thread.thread_values)
+            const existingInternalGoalTimes = getInternalGoalMessageTimeMap(thread.thread_values)
             return window.api.threads.update(threadId, {
               thread_values: {
                 ...(thread.thread_values ?? {}),
@@ -1553,6 +1591,17 @@ export function ChatContainer({
                   ...existingTimes,
                   ...nextMessageTimes
                 },
+                // Internal goal prompts are hidden from the transcript, so they must not
+                // enter messageTimeOrder. Keep their exact checkpoint ids only for
+                // runtime-restore approval freshness checks.
+                [INTERNAL_GOAL_MESSAGE_TIMES_THREAD_VALUE_KEY]: {
+                  ...existingInternalGoalTimes,
+                  ...nextInternalGoalMessageTimes
+                },
+                [INTERNAL_GOAL_MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]: mergeMessageTimeOrder(
+                  getInternalGoalMessageTimeOrder(thread.thread_values),
+                  nextInternalGoalMessageTimes
+                ),
                 // 顺序数组用于 app 重启后，checkpoint 恢复出的 message id 不一致时兜底匹配。
                 //
                 // 它不是用来计算 duration 的新字段，只是保存每条消息时间的展示顺序；
@@ -1963,7 +2012,8 @@ export function ChatContainer({
       return
 
     const goalControlWithPendingTransport =
-      hasPendingGoalTransportPayload && isGoalSlashControlCommandInput(trimmedInput)
+      hasPendingGoalTransportPayload &&
+      isGoalSlashTransportSensitiveControlCommandInput(trimmedInput)
     if (goalControlWithPendingTransport) {
       setError(
         "附件和显式技能不会用于 /goal 控制命令。请先移除附件/技能，或改成 /goal <目标/完成条件>。"
@@ -2005,6 +2055,16 @@ export function ChatContainer({
         setSaveToolMetadataLoading(false)
         setPendingApproval(null)
       }
+      return
+    }
+
+    const pendingApprovalRecord = pendingApproval as unknown as Record<string, unknown> | null
+    if (
+      pendingApproval &&
+      !pendingApprovalRecord?._orchestratorRequestId &&
+      isGoalSlashResumeCommandInput(trimmedInput)
+    ) {
+      setError("当前有待审批操作，请先处理审批卡片，再发送 /goal resume。")
       return
     }
 

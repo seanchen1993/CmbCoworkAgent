@@ -331,6 +331,26 @@ async function testResolveExplicitPrefersExactNestedSkillPath(): Promise<void> {
   })
 }
 
+async function testResolveExplicitRejectsMismatchedSkillPath(): Promise<void> {
+  await withTempDir("skill-explicit-mismatch", async (base) => {
+    const source = join(base, "skills")
+    await writeSkillDoc(source, "docs/SKILL.md", { name: "docs" })
+    const reg = new SkillLifecycleRegistry([source])
+
+    const missingPath = reg.resolveExplicit({
+      skillName: "docs",
+      skillPath: join(source, "not-docs", "SKILL.md")
+    })
+    const byNameOnly = reg.resolveExplicit({ skillName: "docs" })
+
+    assert(
+      missingPath === null,
+      "explicit skill marker with a mismatched path should not fall back to same-name skills"
+    )
+    assert(byNameOnly?.name === "docs", "name-only explicit resolution should keep legacy fallback")
+  })
+}
+
 async function testResolveByRootDir(): Promise<void> {
   await withTempDir("skill-rootdir", async (base) => {
     const source = join(base, "skills")
@@ -1195,6 +1215,8 @@ async function run(): Promise<void> {
   console.log("PASS A5b explicit skill marker parses trailing block")
   await testResolveExplicitPrefersExactNestedSkillPath()
   console.log("PASS A5c explicit skill selection resolves exact nested path")
+  await testResolveExplicitRejectsMismatchedSkillPath()
+  console.log("PASS A5d explicit skill selection rejects mismatched paths")
   await testResolveByRootDir()
   console.log("PASS A6 resolve by rootDir")
   await testResolveBySubFile()

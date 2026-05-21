@@ -1,5 +1,8 @@
 import type { Message } from "@/types"
-import { GOAL_USER_MESSAGE_EVENT_PREFIX } from "../../../shared/goal-events"
+import {
+  GOAL_USER_MESSAGE_EVENT_PREFIX,
+  RUNTIME_RESTORED_GOAL_PAUSE_NOTICE
+} from "../../../shared/goal-events"
 import { splitGoalTransportPayload } from "../../../shared/goal-slash"
 import { stripLegacyGoalTransportSummary } from "./goal-transport-summary"
 
@@ -8,6 +11,57 @@ export interface GoalNoticeEvent {
   goal_id?: string | null
   message: string
   created_at: Date | string | number
+}
+
+function toTime(value: Date | string | number | null | undefined): number | null {
+  if (value == null) return null
+  const time = value instanceof Date ? value.getTime() : new Date(value).getTime()
+  return Number.isFinite(time) ? time : null
+}
+
+function isStaleCheckpointBoundaryNotice(message: string): boolean {
+  if (
+    message.startsWith("Goal 已暂停：恢复处理失败：") ||
+    message.startsWith("Goal 已暂停：中断处理失败：")
+  ) {
+    return true
+  }
+
+  return (
+    message === RUNTIME_RESTORED_GOAL_PAUSE_NOTICE ||
+    message === "Goal 已暂停：已手动暂停。" ||
+    message === "Goal 已暂停：你已取消当前运行。" ||
+    message === "你发送了新消息，active goal 已暂停。需要继续时发送 /goal resume。" ||
+    message === "Goal 已暂停：恢复处理已结束。需要继续 goal 时发送 /goal resume。" ||
+    message === "Goal 已暂停：中断处理已结束。需要继续 goal 时发送 /goal resume。" ||
+    message === "Goal 已暂停：中断请求已拒绝。需要继续 goal 时发送 /goal resume。" ||
+    message === "Goal 已暂停：恢复处理被 Stop hook 阻止。需要继续时发送 /goal resume。" ||
+    message === "Goal 已暂停：中断恢复被 Stop hook 阻止。需要继续时发送 /goal resume。" ||
+    message === "Goal 已清除。当前运行已终止。"
+  )
+}
+
+export function shouldSuppressCheckpointApprovalRestore(
+  events: readonly Pick<GoalNoticeEvent, "message" | "created_at">[],
+  latestCheckpointMessageAt?: Date | string | number | null
+): boolean {
+  const latestCheckpointTime = toTime(latestCheckpointMessageAt)
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    const message = event.message.trim()
+    if (isStaleCheckpointBoundaryNotice(message)) {
+      const boundaryTime = toTime(event.created_at)
+      if (
+        latestCheckpointTime != null &&
+        boundaryTime != null &&
+        latestCheckpointTime > boundaryTime
+      ) {
+        return false
+      }
+      return true
+    }
+  }
+  return false
 }
 
 function toDate(value: Date | string | number): Date {
@@ -69,7 +123,7 @@ function isGoalUserEvent(message: string): boolean {
 
 function commandFromLegacyNotice(message: string): string | null {
   if (message.startsWith("当前没有 active goal。用 /goal ")) return "/goal"
-  if (message.startsWith("Goal 已清除。")) return "/goal clear"
+  if (message.startsWith("Goal 已清除")) return "/goal clear"
   if (message.startsWith("Goal 已继续：")) return "/goal resume"
   if (
     (message.startsWith("● Goal 进行中") ||
@@ -115,7 +169,11 @@ export function isInternalGoalPromptMessage(message: Pick<Message, "role" | "con
   const hasInternalMarker =
     content.startsWith("[Starting active goal]") || content.startsWith("[Continuing active goal]")
   if (!hasInternalMarker) return false
-  return content.includes("<untrusted_objective>") || content.includes("<completion_condition>")
+  return (
+    content.includes("<untrusted_objective>") ||
+    content.includes("<untrusted_completion_condition>") ||
+    content.includes("<completion_condition>")
+  )
 }
 
 function unescapeXmlText(text: string): string {
@@ -178,7 +236,11 @@ function goalCommandContent(message: Message): string | null {
 
 function normalizedGoalCommandContent(content: string): string {
   const { commandText } = splitGoalTransportPayload(content)
-  return stripLegacyGoalTransportSummary(commandText).text.trim()
+  const stripped = stripLegacyGoalTransportSummary(commandText, { stripGeneratedSummary: true }).text
+  return stripped
+    .replace(/(?:^|\n)\s*启动附件：[^\n]*(?=\n|$)/g, "")
+    .replace(/(?:^|\n)\s*显式技能：[^\n]*(?=\n|$)/g, "")
+    .trim()
 }
 
 function goalCommandDuplicateKey(message: Message, content: string): string {

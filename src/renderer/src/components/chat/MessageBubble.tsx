@@ -20,10 +20,7 @@ import {
   Flag
 } from "lucide-react"
 import { toast } from "sonner"
-import {
-  stripGoalTransportSummary,
-  stripLegacyGoalTransportSummary
-} from "@/lib/goal-transport-summary"
+import { stripLegacyGoalTransportSummary } from "@/lib/goal-transport-summary"
 import {
   MessageFeedbackDialog,
   type DislikeFeedbackPayload
@@ -135,7 +132,7 @@ function getSystemNoticePresentation(text: string): {
   text: string
   tone: "success" | "warning" | "info"
 } {
-  const cleanText = (stripGoalTransportSummary(text).text || text).replace(/^●\s*/, "")
+  const cleanText = text.replace(/^●\s*/, "")
   const isGoalNotice =
     cleanText.startsWith("Goal ") ||
     cleanText.startsWith("继续 Goal") ||
@@ -340,13 +337,15 @@ function parseGoalNoticeText(text: string): {
     const waitSplit = body.split("。补充信息后")
     if (waitSplit.length > 1) {
       body = waitSplit[0].trim()
-      actions.push("/goal resume 继续处理", "/goal clear 停止")
+      actions.push("/goal resume", "/goal clear")
     }
     if (body) rows.push({ text: body })
     return { title, rows, actions }
   }
 
-  if (first === "Goal 已清除。" || first === "Goal 已清除") {
+  if (first.startsWith("Goal 已清除")) {
+    const body = first.replace(/^Goal 已清除[。:：，,\s]*/, "").trim()
+    if (body) rows.push({ text: body })
     return { title: "Goal 已清除", rows, actions }
   }
 

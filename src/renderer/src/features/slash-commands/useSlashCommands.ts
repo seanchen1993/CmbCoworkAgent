@@ -52,6 +52,31 @@ export function isGoalSlashControlCommandInput(input: string): boolean {
   return arg === "" || arg === "status" || arg === "pause" || isGoalClearAlias(arg)
 }
 
+export function isGoalSlashResumeCommandInput(input: string): boolean {
+  const { commandText, payload } = splitGoalTransportPayload(input)
+  const trimmed = commandText.trim()
+  if (!/^\/goal(?:$|\s+)/i.test(trimmed)) return false
+  if (payload) return false
+
+  const arg = trimmed.slice("/goal".length).trim().toLowerCase()
+  return arg === "resume"
+}
+
+export function isGoalSlashTransportSensitiveControlCommandInput(input: string): boolean {
+  const { commandText } = splitGoalTransportPayload(input)
+  const trimmed = commandText.trim()
+  if (!/^\/goal(?:$|\s+)/i.test(trimmed)) return false
+
+  const arg = trimmed.slice("/goal".length).trim().toLowerCase()
+  return (
+    arg === "" ||
+    arg === "status" ||
+    arg === "pause" ||
+    arg === "resume" ||
+    isGoalClearAlias(arg)
+  )
+}
+
 export function isGoalTerminatingControlCommandInput(input: string): boolean {
   const { commandText, payload } = splitGoalTransportPayload(input)
   const trimmed = commandText.trim()
@@ -81,7 +106,7 @@ export function resolveGoalRuntimeComposerState(params: {
   const bareGoalWithPendingTransport =
     hasPendingTransportPayload && isBareGoalSlashCommandInput(input)
   const goalControlWithPendingTransport =
-    hasPendingTransportPayload && isGoalSlashControlCommandInput(input)
+    hasPendingTransportPayload && isGoalSlashTransportSensitiveControlCommandInput(input)
   const canSubmitGoalCommandWhileLoading =
     isLoading &&
     goalControlAllowedWhileLoading &&

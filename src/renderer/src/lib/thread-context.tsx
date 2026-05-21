@@ -30,11 +30,16 @@ import {
   createGoalNoticeMessage,
   goalEventToDisplayMessages,
   mergeGoalNoticeMessagesForRestore,
-  normalizeRestoredGoalPromptMessage
+  isInternalGoalPromptMessage,
+  normalizeRestoredGoalPromptMessage,
+  shouldSuppressCheckpointApprovalRestore,
+  type GoalNoticeEvent
 } from "./goal-notice-messages"
 
 const MESSAGE_TIMES_THREAD_VALUE_KEY = "messageTimes"
 const MESSAGE_TIME_ORDER_THREAD_VALUE_KEY = "messageTimeOrder"
+const INTERNAL_GOAL_MESSAGE_TIMES_THREAD_VALUE_KEY = "internalGoalMessageTimes"
+const INTERNAL_GOAL_MESSAGE_TIME_ORDER_THREAD_VALUE_KEY = "internalGoalMessageTimeOrder"
 
 // 历史消息耗时不单独存 duration，而是存每条消息的 start_at/end_at。
 //
@@ -62,6 +67,24 @@ const isMessageTimeEntryArray = (value: unknown): value is MessageTimeEntry[] =>
 const getMessageTimeMap = (threadValues?: Record<string, unknown>): MessageTimeMap => {
   const value = threadValues?.[MESSAGE_TIMES_THREAD_VALUE_KEY]
   return isMessageTimeMap(value) ? value : {}
+}
+
+const getInternalGoalMessageTimeMap = (
+  threadValues?: Record<string, unknown>
+): MessageTimeMap => {
+  const value = threadValues?.[INTERNAL_GOAL_MESSAGE_TIMES_THREAD_VALUE_KEY]
+  return isMessageTimeMap(value) ? value : {}
+}
+
+const getInternalGoalMessageTimeOrder = (
+  threadValues?: Record<string, unknown>
+): MessageTimeEntry[] => {
+  const value = threadValues?.[INTERNAL_GOAL_MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]
+  if (isMessageTimeEntryArray(value)) return value
+  return Object.entries(getInternalGoalMessageTimeMap(threadValues)).map(([id, time]) => ({
+    id,
+    ...time
+  }))
 }
 
 const getMessageTimeOrder = (threadValues?: Record<string, unknown>): MessageTimeEntry[] => {
@@ -155,6 +178,47 @@ const restoreVisibleMessageTimes = (
       end_at: endAt
     }
   })
+}
+
+const latestDate = (dates: Array<Date | undefined>): Date | undefined => {
+  return dates.reduce<Date | undefined>((latest, date) => {
+    if (!date) return latest
+    if (!latest || date > latest) return date
+    return latest
+  }, undefined)
+}
+
+const getLatestTrustedCheckpointMessageAt = (
+  visibleMessages: Message[],
+  persistedMessageTimes: MessageTimeMap,
+  persistedMessageTimeOrder: MessageTimeEntry[],
+  persistedInternalGoalMessageTimes: MessageTimeMap,
+  persistedInternalGoalMessageTimeOrder: MessageTimeEntry[],
+  rawMessages: Message[] = visibleMessages
+): Date | undefined => {
+  const idTimes = rawMessages.flatMap((message) => [
+    toDate(persistedMessageTimes[message.id]?.start_at),
+    toDate(persistedInternalGoalMessageTimes[message.id]?.start_at)
+  ])
+  const rawInternalGoalMessages = rawMessages.filter(isInternalGoalPromptMessage)
+  const latestInternalGoalOrderTime = latestDate(
+    rawInternalGoalMessages.map((_, index) =>
+      toDate(persistedInternalGoalMessageTimeOrder[index]?.start_at)
+    )
+  )
+  const latestExactOrInternalGoalTime = latestDate([
+    latestDate(idTimes),
+    latestInternalGoalOrderTime
+  ])
+  if (latestExactOrInternalGoalTime) return latestExactOrInternalGoalTime
+
+  // Match restoreVisibleMessageTimes(): if checkpoint message ids changed across
+  // serialization, use the post-normalization visible-message index as the only
+  // trusted fallback. Never use the synthetic "now" fallback for approval restore
+  // gating, or old checkpoints would look newer than a runtime-restore pause.
+  return latestDate(
+    visibleMessages.map((_, index) => toDate(persistedMessageTimeOrder[index]?.start_at))
+  )
 }
 
 // Open file tab type
@@ -362,6 +426,7 @@ interface CustomEventData {
   maxRetries?: number
   reason?: string
   message?: string
+  goalId?: string | null
   delayMs?: number
   // hook_executed fields
   event?: string
@@ -658,7 +723,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               threadId,
               data.request
             )
-            updateThreadState(threadId, () => ({ pendingApproval: data.request }))
+            updateThreadState(threadId, () => ({
+              pendingApproval: {
+                ...data.request!,
+                allowRuntimeRestoredCheckpointResume:
+                  data.request!.allowRuntimeRestoredCheckpointResume ?? true
+              }
+            }))
           }
           break
         case "workspace":
@@ -733,7 +804,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           if (typeof data.message === "string" && data.message.trim()) {
             const message = data.message
             updateThreadState(threadId, (state) => ({
-              messages: [...state.messages, createGoalNoticeMessage(message)]
+              messages: [
+                ...state.messages,
+                createGoalNoticeMessage(message, {
+                  goalId: typeof data.goalId === "string" ? data.goalId : null
+                })
+              ]
             }))
           }
           break
@@ -959,8 +1035,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     async (threadId: string) => {
       const actions = getThreadActions(threadId)
       let persistedMessageTimes: MessageTimeMap = {}
+      let persistedInternalGoalMessageTimes: MessageTimeMap = {}
+      let persistedInternalGoalMessageTimeOrder: MessageTimeEntry[] = []
       let persistedMessageTimeOrder: MessageTimeEntry[] = []
       let restoredMessages: Message[] = []
+      let restoredGoalEvents: GoalNoticeEvent[] = []
+      let skipCheckpointPendingApproval = false
+      let latestTrustedCheckpointMessageAt: Date | undefined
       updateThreadState(threadId, () => ({ historyLoading: true }))
 
       // Load workspace path and thread metadata
@@ -968,6 +1049,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         const thread = await window.api.threads.get(threadId)
         if (thread) {
           persistedMessageTimes = getMessageTimeMap(thread.thread_values)
+          persistedInternalGoalMessageTimes = getInternalGoalMessageTimeMap(thread.thread_values)
+          persistedInternalGoalMessageTimeOrder = getInternalGoalMessageTimeOrder(
+            thread.thread_values
+          )
           persistedMessageTimeOrder = getMessageTimeOrder(thread.thread_values)
           const metadata = thread.metadata || {}
           if (metadata.workspacePath) {
@@ -1024,6 +1109,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         }
       } catch (error) {
         console.error("[ThreadContext] Failed to load thread details:", error)
+      }
+
+      try {
+        restoredGoalEvents = await window.api.threads.getGoalEvents(threadId)
+      } catch (error) {
+        console.error("[ThreadContext] Failed to load goal events:", error)
       }
 
       // Load thread history from checkpoints
@@ -1109,7 +1200,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 // 否则 checkpoint 里不可见的 [Starting/Continuing active goal] 会挤占
                 // messageTimeOrder 的下标，导致重启后可见消息和 goal 状态卡片错位。
                 const persistedTime = persistedMessageTimes[messageId]
-                const startAt = toDate(persistedTime?.start_at) ?? fallbackTime
+                const trustedStartAt = toDate(persistedTime?.start_at)
+                const startAt = trustedStartAt ?? fallbackTime
                 const endAt = toDate(persistedTime?.end_at) ?? startAt
 
                 return {
@@ -1132,6 +1224,14 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             const visibleRestoredMessages = rawRestoredMessages
               .map(normalizeRestoredGoalPromptMessage)
               .filter((message): message is Message => Boolean(message))
+            latestTrustedCheckpointMessageAt = getLatestTrustedCheckpointMessageAt(
+              visibleRestoredMessages,
+              persistedMessageTimes,
+              persistedMessageTimeOrder,
+              persistedInternalGoalMessageTimes,
+              persistedInternalGoalMessageTimeOrder,
+              rawRestoredMessages
+            )
             restoredMessages = restoreVisibleMessageTimes(
               visibleRestoredMessages,
               persistedMessageTimes,
@@ -1149,8 +1249,17 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           }
 
           // Restore interrupt state if present
+          skipCheckpointPendingApproval = shouldSuppressCheckpointApprovalRestore(
+            restoredGoalEvents,
+            latestTrustedCheckpointMessageAt
+          )
           const interruptData = channelValues?.__interrupt__
-          if (interruptData && Array.isArray(interruptData) && interruptData.length > 0) {
+          if (
+            !skipCheckpointPendingApproval &&
+            interruptData &&
+            Array.isArray(interruptData) &&
+            interruptData.length > 0
+          ) {
             const interruptValue = interruptData[0]?.value
             const actionRequests = interruptValue?.actionRequests
             const reviewConfigs = interruptValue?.reviewConfigs
@@ -1165,7 +1274,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   name: req.action,
                   args: req.args
                 },
-                allowed_decisions: ["approve", "reject", "edit"]
+                allowed_decisions: ["approve", "reject", "edit"],
+                allowRuntimeRestoredCheckpointResume: false
               }
               actions.setPendingApproval(hitlRequest)
             } else if (reviewConfigs && reviewConfigs.length > 0) {
@@ -1178,7 +1288,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   name: config.toolName,
                   args: config.toolArgs
                 },
-                allowed_decisions: ["approve", "reject", "edit"]
+                allowed_decisions: ["approve", "reject", "edit"],
+                allowRuntimeRestoredCheckpointResume: false
               }
               actions.setPendingApproval(hitlRequest)
             }
@@ -1188,14 +1299,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         console.error("[ThreadContext] Failed to load thread history:", error)
       }
 
-      try {
-        const goalEvents = await window.api.threads.getGoalEvents(threadId)
-        const goalMessages: Message[] = goalEvents.flatMap(goalEventToDisplayMessages)
-        if (goalMessages.length > 0) {
-          restoredMessages = mergeGoalNoticeMessagesForRestore(restoredMessages, goalMessages)
-        }
-      } catch (error) {
-        console.error("[ThreadContext] Failed to load goal events:", error)
+      const goalMessages: Message[] = restoredGoalEvents.flatMap(goalEventToDisplayMessages)
+      if (goalMessages.length > 0) {
+        restoredMessages = mergeGoalNoticeMessagesForRestore(restoredMessages, goalMessages)
       }
 
       if (restoredMessages.length > 0) {

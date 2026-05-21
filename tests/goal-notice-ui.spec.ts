@@ -12,13 +12,17 @@ import {
   isInternalGoalPromptMessage,
   mergeGoalNoticeMessagesForRestore,
   normalizeRestoredGoalPromptMessage,
-  orderGoalNoticeMessagesForDisplay
+  orderGoalNoticeMessagesForDisplay,
+  shouldSuppressCheckpointApprovalRestore
 } from "../src/renderer/src/lib/goal-notice-messages.ts"
 import {
   stripGoalTransportSummary,
   stripLegacyGoalTransportSummary
 } from "../src/renderer/src/lib/goal-transport-summary.ts"
-import { GOAL_USER_MESSAGE_EVENT_PREFIX } from "../src/shared/goal-events.ts"
+import {
+  GOAL_USER_MESSAGE_EVENT_PREFIX,
+  RUNTIME_RESTORED_GOAL_PAUSE_NOTICE
+} from "../src/shared/goal-events.ts"
 import type { Message } from "../src/renderer/src/types.ts"
 
 function assert(condition: unknown, message: string): void {
@@ -34,7 +38,8 @@ function testLiveGoalNoticeCreatesSystemMessage(): void {
   const createdAt = new Date("2026-05-17T10:00:00.000Z")
   const message = createGoalNoticeMessage("  Goal 已设置  ", {
     id: "goal-notice-test",
-    createdAt
+    createdAt,
+    goalId: "goal-live"
   })
 
   assertEqual(message.id, "goal-notice-test", "explicit id should be used")
@@ -43,6 +48,7 @@ function testLiveGoalNoticeCreatesSystemMessage(): void {
   assertEqual(message.created_at, createdAt, "created_at should use supplied date")
   assertEqual(message.start_at, createdAt, "start_at should match created_at")
   assertEqual(message.end_at, createdAt, "end_at should match created_at")
+  assertEqual(message.goal_id, "goal-live", "live goal notices should carry goal_id")
 }
 
 function testPersistedGoalEventRestoresSystemMessage(): void {
@@ -88,7 +94,7 @@ function testInternalGoalPromptsAreDisplayOnlyHidden(): void {
       message(
         "g1-space",
         "user",
-        "\n\n[Starting active goal]\n\n<completion_condition>\nobjective\n</completion_condition>"
+        "\n\n[Starting active goal]\n\n<untrusted_completion_condition>\nobjective\n</untrusted_completion_condition>"
       )
     ),
     "starting active goal prompts should still be hidden when provider restore adds leading whitespace"
@@ -231,14 +237,30 @@ function testPersistedGoalUserEventRestoresSlashCommand(): void {
 }
 
 function testLegacyGoalTransportSummaryRendersAsSkillChipData(): void {
-  const stripped = stripLegacyGoalTransportSummary(
+  const userVisible = stripLegacyGoalTransportSummary(
     "/goal 两分钟后提醒我吃饭\n启动上下文摘要：显式技能：scheduler-assistant"
+  )
+
+  assertEqual(
+    userVisible.text,
+    "/goal 两分钟后提醒我吃饭\n启动上下文摘要：显式技能：scheduler-assistant",
+    "user-visible goal text should not strip launch-summary-like text by default"
+  )
+  assertEqual(
+    userVisible.skillName,
+    null,
+    "user-visible goal text should not synthesize a skill chip from plain text"
+  )
+
+  const stripped = stripLegacyGoalTransportSummary(
+    "/goal 两分钟后提醒我吃饭\n启动上下文摘要：显式技能：scheduler-assistant",
+    { stripGeneratedSummary: true }
   )
 
   assertEqual(
     stripped.text,
     "/goal 两分钟后提醒我吃饭",
-    "legacy transport summary should be hidden from restored user bubble text"
+    "legacy transport summary should still be available for restore dedupe normalization"
   )
   assertEqual(
     stripped.skillName,
@@ -255,7 +277,7 @@ function testLegacyGoalNoticeTransportSummaryIsHidden(): void {
       "",
       "目标：帮我创建一个学习rust的技能 启动上下文摘要：显式技能：skill-creator",
       "",
-      "/goal pause 暂停 · /goal clear 清除"
+      "可用命令：/goal pause · /goal clear"
     ].join("\n")
   )
 
@@ -267,7 +289,7 @@ function testLegacyGoalNoticeTransportSummaryIsHidden(): void {
       "",
       "目标：帮我创建一个学习rust的技能",
       "",
-      "/goal pause 暂停 · /goal clear 清除"
+      "可用命令：/goal pause · /goal clear"
     ].join("\n"),
     "legacy goal notice should hide internal launch context summary without truncating later lines"
   )
@@ -275,6 +297,206 @@ function testLegacyGoalNoticeTransportSummaryIsHidden(): void {
     stripped.skillName,
     "skill-creator",
     "legacy goal notice summary should still expose skill name for compatibility"
+  )
+}
+
+function testUserAuthoredTransportSummaryLikeTextIsPreserved(): void {
+  const stripped = stripGoalTransportSummary(
+    "/goal 写文档\n启动上下文摘要：这是用户要保留的标题"
+  )
+
+  assertEqual(
+    stripped.text,
+    "/goal 写文档\n启动上下文摘要：这是用户要保留的标题",
+    "transport-summary stripping should not remove arbitrary user text with the same prefix"
+  )
+  assertEqual(stripped.skillName, null, "plain user text should not synthesize a skill chip")
+}
+
+function testRuntimeRestoreGoalPauseSuppressesStaleCheckpointApproval(): void {
+  assert(
+    shouldSuppressCheckpointApprovalRestore([
+      { event_id: 1, message: RUNTIME_RESTORED_GOAL_PAUSE_NOTICE, created_at: 1 }
+    ]),
+    "runtime restore goal pause event should suppress checkpoint approval restore"
+  )
+  assert(
+    !shouldSuppressCheckpointApprovalRestore([
+      { event_id: 2, message: "Goal 已暂停：目标文件 NoSuchController.java 不存在", created_at: 2 }
+    ]),
+    "non-terminal goal pause notices should not suppress checkpoint approval restore"
+  )
+  assert(
+    shouldSuppressCheckpointApprovalRestore([
+      { event_id: 19, message: "Goal 已暂停：已手动暂停。", created_at: 19 }
+    ]),
+    "manual /goal pause should suppress stale checkpoint approval restore"
+  )
+  assert(
+    !shouldSuppressCheckpointApprovalRestore(
+      [{ event_id: 20, message: "Goal 已暂停：已手动暂停。", created_at: 20 }],
+      21
+    ),
+    "a checkpoint newer than manual /goal pause should restore its own pending approval"
+  )
+  assert(
+    shouldSuppressCheckpointApprovalRestore([
+      { event_id: 21, message: "Goal 已清除。当前运行已终止。", created_at: 21 }
+    ]),
+    "/goal clear that terminated the current run should suppress stale checkpoint approval restore"
+  )
+  assert(
+    shouldSuppressCheckpointApprovalRestore([
+      { event_id: 24, message: "Goal 已暂停：你已取消当前运行。", created_at: 24 }
+    ]),
+    "user cancel should suppress stale checkpoint approval restore"
+  )
+  assert(
+    shouldSuppressCheckpointApprovalRestore([
+      {
+        event_id: 25,
+        message: "你发送了新消息，active goal 已暂停。需要继续时发送 /goal resume。",
+        created_at: 25
+      }
+    ]),
+    "new user message preempting an active goal should suppress stale checkpoint approval restore"
+  )
+  assert(
+    shouldSuppressCheckpointApprovalRestore([
+      {
+        event_id: 26,
+        message: "Goal 已暂停：中断请求已拒绝。需要继续 goal 时发送 /goal resume。",
+        created_at: 26
+      }
+    ]),
+    "rejected interrupt should suppress stale checkpoint approval restore"
+  )
+  assert(
+    !shouldSuppressCheckpointApprovalRestore(
+      [
+        {
+          event_id: 27,
+          message: "Goal 已暂停：中断请求已拒绝。需要继续 goal 时发送 /goal resume。",
+          created_at: 27
+        }
+      ],
+      28
+    ),
+    "a checkpoint newer than rejected interrupt should restore its own pending approval"
+  )
+  assert(
+    shouldSuppressCheckpointApprovalRestore([
+      {
+        event_id: 28,
+        message: "Goal 已暂停：恢复处理失败：tool approval expired",
+        created_at: 28
+      }
+    ]),
+    "resume failure should suppress stale checkpoint approval restore"
+  )
+  assert(
+    shouldSuppressCheckpointApprovalRestore([
+      {
+        event_id: 29,
+        message: "Goal 已暂停：中断处理失败：tool approval expired",
+        created_at: 29
+      }
+    ]),
+    "interrupt failure should suppress stale checkpoint approval restore"
+  )
+  assert(
+    !shouldSuppressCheckpointApprovalRestore(
+      [
+        {
+          event_id: 30,
+          message: "Goal 已暂停：恢复处理失败：tool approval expired",
+          created_at: 30
+        }
+      ],
+      31
+    ),
+    "a checkpoint newer than resume failure should restore its own pending approval"
+  )
+  assert(
+    !shouldSuppressCheckpointApprovalRestore(
+      [{ event_id: 22, message: "Goal 已清除。当前运行已终止。", created_at: 22 }],
+      23
+    ),
+    "a checkpoint newer than terminating /goal clear should restore its own pending approval"
+  )
+  assert(
+    !shouldSuppressCheckpointApprovalRestore([
+      { event_id: 23, message: "Goal 已清除。", created_at: 23 }
+    ]),
+    "/goal clear that only cleared an inactive goal should not suppress checkpoint approval restore"
+  )
+  assert(
+    shouldSuppressCheckpointApprovalRestore([
+      { event_id: 3, message: RUNTIME_RESTORED_GOAL_PAUSE_NOTICE, created_at: 3 },
+      {
+        event_id: 4,
+        message: `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal resume`,
+        created_at: 4
+      },
+      { event_id: 5, message: "Goal 已继续：继续处理。", created_at: 5 }
+    ]),
+    "a later goal resume alone should not revive the stale checkpoint approval"
+  )
+  assert(
+    shouldSuppressCheckpointApprovalRestore([
+      { event_id: 6, message: RUNTIME_RESTORED_GOAL_PAUSE_NOTICE, created_at: 6 },
+      { event_id: 7, message: "Goal 已清除。", created_at: 7 }
+    ]),
+    "a later goal clear alone should not revive the stale checkpoint approval"
+  )
+  assert(
+    shouldSuppressCheckpointApprovalRestore([
+      { event_id: 8, message: RUNTIME_RESTORED_GOAL_PAUSE_NOTICE, created_at: 8 },
+      { event_id: 9, message: "Goal 已设置（最多 15 轮）。", created_at: 9 }
+    ]),
+    "a later new goal alone should not revive the stale checkpoint approval"
+  )
+  assert(
+    shouldSuppressCheckpointApprovalRestore([
+      { event_id: 10, message: RUNTIME_RESTORED_GOAL_PAUSE_NOTICE, created_at: 10 },
+      {
+        event_id: 11,
+        message: `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal status`,
+        created_at: 11
+      },
+      { event_id: 12, message: "Goal 已暂停：应用重启后已暂停。", created_at: 12 }
+    ]),
+    "a later /goal status should not revive stale checkpoint approvals"
+  )
+  assert(
+    shouldSuppressCheckpointApprovalRestore([
+      { event_id: 13, message: RUNTIME_RESTORED_GOAL_PAUSE_NOTICE, created_at: 13 },
+      {
+        event_id: 14,
+        message: `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal resume`,
+        created_at: 14
+      },
+      {
+        event_id: 15,
+        message: "该 /goal 命令需要在当前运行结束后发送。",
+        created_at: 15
+      }
+    ]),
+    "a later rejected /goal command should not revive stale checkpoint approvals"
+  )
+  assert(
+    !shouldSuppressCheckpointApprovalRestore(
+      [{ event_id: 16, message: RUNTIME_RESTORED_GOAL_PAUSE_NOTICE, created_at: 16 }],
+      17
+    ),
+    "a checkpoint with a newer persisted message should restore its own pending approval"
+  )
+  assert(
+    shouldSuppressCheckpointApprovalRestore(
+      [{ event_id: 18, message: RUNTIME_RESTORED_GOAL_PAUSE_NOTICE, created_at: 18 }],
+      17
+    ),
+    "an older checkpoint should still suppress stale pending approval"
   )
 }
 
@@ -301,7 +523,7 @@ function testLegacyPausedGoalStatusNoticeRestoresSlashStatusCommand(): void {
       "目标：检查 README.md",
       "暂停原因：user-paused",
       "",
-      "/goal resume 继续 · /goal clear 清除"
+      "可用命令：/goal resume · /goal clear"
     ].join("\n"),
     created_at: "2026-05-17T12:00:00.000Z"
   })
@@ -382,6 +604,73 @@ function testRestoreMergeDedupesTransportSummaryAndSkillBlockGoalCommand(): void
     merged.map((item) => item.id).join(","),
     "goal-user-event-113",
     "transport summary and persisted skill block should restore as one visible /goal command"
+  )
+}
+
+function testRestoreMergeDedupesTransportSummaryAndSanitizedSkillGoalCommand(): void {
+  const merged = mergeGoalNoticeMessagesForRestore(
+    [
+      message(
+        "goal-start-prompt-skill-sanitized",
+        "user",
+        "/goal 两分钟后提醒我吃饭\n启动上下文摘要：显式技能：scheduler-assistant",
+        new Date("2026-05-17T12:00:00.000Z")
+      )
+    ],
+    [
+      ...goalEventToDisplayMessages({
+        event_id: 114,
+        message: [
+          `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal 两分钟后提醒我吃饭`,
+          "显式技能：scheduler-assistant"
+        ].join("\n"),
+        created_at: "2026-05-17T12:00:00.100Z"
+      })
+    ]
+  )
+
+  assertEqual(
+    merged.map((item) => item.id).join(","),
+    "goal-user-event-114",
+    "sanitized persisted skill summary should restore as one visible /goal command"
+  )
+  assert(
+    !merged.map((item) => item.content).join("\n").includes("SKILL.md"),
+    "sanitized persisted skill summary should not expose local skill paths"
+  )
+}
+
+function testRestoreMergeDedupesTransportSummaryAndSanitizedLaunchContextGoalCommand(): void {
+  const merged = mergeGoalNoticeMessagesForRestore(
+    [
+      message(
+        "goal-start-prompt-launch-context-sanitized",
+        "user",
+        "/goal 根据附件检查实现\n启动上下文摘要：附件：spec.md；显式技能：docs",
+        new Date("2026-05-17T12:00:00.000Z")
+      )
+    ],
+    [
+      ...goalEventToDisplayMessages({
+        event_id: 115,
+        message: [
+          `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal 根据附件检查实现`,
+          "启动附件：spec.md",
+          "显式技能：docs"
+        ].join("\n"),
+        created_at: "2026-05-17T12:00:00.100Z"
+      })
+    ]
+  )
+
+  assertEqual(
+    merged.map((item) => item.id).join(","),
+    "goal-user-event-115",
+    "sanitized launch context summary should restore as one visible /goal command"
+  )
+  assert(
+    merged.map((item) => item.content).join("\n").includes("启动附件：spec.md"),
+    "sanitized launch context summary should preserve attachment provenance"
   )
 }
 
@@ -776,7 +1065,7 @@ function testWaitingForUserInputDoesNotDuplicateAsPausedNotice(): void {
   const waiting = message(
     "n1",
     "system",
-    "Goal 等待补充信息：Assistant is waiting for user input about skill requirements before creating the Rust learning skill。补充信息后请发送 /goal resume 继续处理；可用 /goal clear 停止。",
+    "Goal 等待补充信息：Assistant is waiting for user input about skill requirements before creating the Rust learning skill。补充信息后请发送 /goal resume；停止请发送 /goal clear。",
     new Date("2026-05-17T12:00:00.000Z")
   )
   waiting.goal_id = "goal-rust"
@@ -850,11 +1139,15 @@ function main(): void {
     testPersistedGoalUserEventRestoresSlashCommand,
     testLegacyGoalTransportSummaryRendersAsSkillChipData,
     testLegacyGoalNoticeTransportSummaryIsHidden,
+    testUserAuthoredTransportSummaryLikeTextIsPreserved,
+    testRuntimeRestoreGoalPauseSuppressesStaleCheckpointApproval,
     testLegacyGoalStatusNoticeRestoresSlashStatusCommand,
     testLegacyPausedGoalStatusNoticeRestoresSlashStatusCommand,
     testLegacyGoalClearNoticeRestoresSlashClearCommand,
     testRestoreMergeDedupesPersistedAndPromptGoalCommand,
     testRestoreMergeDedupesTransportSummaryAndSkillBlockGoalCommand,
+    testRestoreMergeDedupesTransportSummaryAndSanitizedSkillGoalCommand,
+    testRestoreMergeDedupesTransportSummaryAndSanitizedLaunchContextGoalCommand,
     testRestoreMergePrefersVisibleGoalCommandOverPersistedEvent,
     testRestoreMergeKeepsNearbySameTextPersistedCommandForDifferentGoal,
     testRestoreMergeKeepsRepeatedGoalCommandsWhenTheyAreFarApart,

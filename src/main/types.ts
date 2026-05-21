@@ -24,7 +24,13 @@ export interface AgentInvokeParams {
 
 export interface AgentResumeParams {
   threadId: string
-  command: { resume?: { decision?: string; pendingCount?: number } }
+  command: {
+    resume?: {
+      decision?: string
+      pendingCount?: number
+      allowRuntimeRestoredCheckpointResume?: boolean
+    }
+  }
   modelId?: string
 }
 
@@ -163,6 +169,7 @@ export interface HITLRequest {
   allowed_decisions: HITLDecision["type"][]
   pendingCount?: number
   pendingToolCallIds?: string[]
+  allowRuntimeRestoredCheckpointResume?: boolean
 }
 
 export interface HITLDecision {
@@ -170,6 +177,7 @@ export interface HITLDecision {
   tool_call_id: string
   edited_args?: Record<string, unknown>
   feedback?: string
+  allowRuntimeRestoredCheckpointResume?: boolean
 }
 
 // Todo types (from deepagentsjs)

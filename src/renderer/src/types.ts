@@ -178,6 +178,7 @@ export interface HITLRequest {
   allowed_decisions: HITLDecision["type"][]
   pendingCount?: number
   pendingToolCallIds?: string[]
+  allowRuntimeRestoredCheckpointResume?: boolean
 }
 
 export interface HITLDecision {
@@ -185,6 +186,7 @@ export interface HITLDecision {
   tool_call_id: string
   edited_args?: Record<string, unknown>
   feedback?: string
+  allowRuntimeRestoredCheckpointResume?: boolean
 }
 
 export interface Todo {

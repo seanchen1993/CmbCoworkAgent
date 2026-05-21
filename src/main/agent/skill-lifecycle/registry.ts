@@ -1,4 +1,5 @@
 import { normalize, resolve } from "path"
+import { normalizePathKey } from "../../hooks/path-key"
 import { discoverSkillsSync } from "../../skills/discovery"
 
 export interface SkillLifecycleMatch {
@@ -24,8 +25,7 @@ export interface SkillLifecycleSource {
 }
 
 function normalizePath(input: string): string {
-  const normalized = normalize(input).replace(/\\/g, "/").replace(/\/+$/, "")
-  return process.platform === "win32" ? normalized.toLowerCase() : normalized
+  return normalizePathKey(normalize(input))
 }
 
 function normalizeSkillName(input: string | undefined | null): string {
@@ -87,6 +87,7 @@ export class SkillLifecycleRegistry {
     skillName?: string | null
     skillPath?: string | null
   }): SkillLifecycleMatch | null {
+    const hasSkillPath = Boolean(input.skillPath?.trim())
     const pathCandidates = [
       input.skillPath ? normalizePath(resolve(input.skillPath)) : "",
       input.skillPath ? normalizePath(input.skillPath) : ""
@@ -99,6 +100,7 @@ export class SkillLifecycleRegistry {
         }
       }
     }
+    if (hasSkillPath) return null
 
     const requestedName = normalizeSkillName(input.skillName)
     if (!requestedName) return null

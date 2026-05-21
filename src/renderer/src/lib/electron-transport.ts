@@ -383,7 +383,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
                       "approve",
                       "reject",
                       "edit"
-                    ]
+                    ],
+                    allowRuntimeRestoredCheckpointResume: true
                   }
                 }
               })
@@ -397,7 +398,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
                 request: {
                   id: interrupt.id || crypto.randomUUID(),
                   tool_call: interrupt.tool_call,
-                  allowed_decisions: ["approve", "reject", "edit"]
+                  allowed_decisions: ["approve", "reject", "edit"],
+                  allowRuntimeRestoredCheckpointResume: true
                 }
               }
             })
@@ -753,7 +755,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
                 },
                 allowed_decisions: reviewConfig?.allowedDecisions || ["approve", "reject", "edit"],
                 pendingCount: actionRequests.length,
-                pendingToolCallIds
+                pendingToolCallIds,
+                allowRuntimeRestoredCheckpointResume: true
               }
             }
           })

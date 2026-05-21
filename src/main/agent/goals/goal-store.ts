@@ -1,7 +1,9 @@
 import { v4 as uuid } from "uuid"
+import { RUNTIME_RESTORED_GOAL_PAUSE_NOTICE } from "../../../shared/goal-events"
 import { getDb, saveToDisk } from "../../db"
 import {
   EMPTY_GOAL_LEDGER,
+  RUNTIME_RESTORED_ACTIVE_GOAL_REASON,
   type GoalContext,
   type GoalLedger,
   type GoalStatus,
@@ -12,6 +14,7 @@ import {
 interface GoalRow {
   thread_id: string
   goal_id: string
+  active_window_id: string | null
   objective: string
   completion_condition: string | null
   context_json: string | null
@@ -30,6 +33,7 @@ interface GoalRow {
 const MAX_LEDGER_ITEMS = 30
 const MAX_LEDGER_ITEM_CHARS = 600
 const MAX_LEDGER_SECTION_CHARS = 4_000
+const MAX_GOAL_CONTEXT_SUMMARY_CHARS = 300
 
 function truncateMiddle(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text
@@ -81,12 +85,47 @@ export function parseGoalLedger(raw: string | null | undefined): GoalLedger {
 function normalizeGoalContext(value: unknown): GoalContext {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {}
   const record = value as Record<string, unknown>
+  const context: GoalContext = {}
+
+  const transportSummary =
+    typeof record.transportSummary === "string" ? record.transportSummary.trim() : ""
+  if (transportSummary) {
+    context.transportSummary = truncateMiddle(
+      transportSummary,
+      MAX_GOAL_CONTEXT_SUMMARY_CHARS
+    )
+  }
+
   const explicitSkill = record.explicitSkill
-  if (!explicitSkill || typeof explicitSkill !== "object" || Array.isArray(explicitSkill)) return {}
-  const skillRecord = explicitSkill as Record<string, unknown>
-  const name = typeof skillRecord.name === "string" ? skillRecord.name.trim() : ""
-  const path = typeof skillRecord.path === "string" ? skillRecord.path.trim() : ""
-  return name && path ? { explicitSkill: { name, path } } : {}
+  if (explicitSkill && typeof explicitSkill === "object" && !Array.isArray(explicitSkill)) {
+    const skillRecord = explicitSkill as Record<string, unknown>
+    const name = typeof skillRecord.name === "string" ? skillRecord.name.trim() : ""
+    const path = typeof skillRecord.path === "string" ? skillRecord.path.trim() : ""
+    if (name && path) context.explicitSkill = { name, path }
+  }
+
+  const legacyMigration = record.legacyTransportSummaryMigration
+  if (
+    legacyMigration &&
+    typeof legacyMigration === "object" &&
+    !Array.isArray(legacyMigration)
+  ) {
+    const migrationRecord = legacyMigration as Record<string, unknown>
+    const objective =
+      typeof migrationRecord.objective === "string" ? migrationRecord.objective : ""
+    const completionCondition =
+      typeof migrationRecord.completionCondition === "string"
+        ? migrationRecord.completionCondition
+        : ""
+    if (objective || completionCondition) {
+      context.legacyTransportSummaryMigration = {
+        ...(objective ? { objective } : {}),
+        ...(completionCondition ? { completionCondition } : {})
+      }
+    }
+  }
+
+  return context
 }
 
 export function parseGoalContext(raw: string | null | undefined): GoalContext {
@@ -104,6 +143,7 @@ function rowToGoal(row: GoalRow): ThreadGoal {
   return {
     threadId: row.thread_id,
     goalId: row.goal_id,
+    activeWindowId: String(row.active_window_id || row.goal_id || uuid()),
     objective: row.objective,
     completionCondition: row.completion_condition || row.objective,
     context: parseGoalContext(row.context_json),
@@ -121,6 +161,38 @@ function rowToGoal(row: GoalRow): ThreadGoal {
 }
 
 export class SqlGoalStore implements GoalStore {
+  pauseActiveGoalsForRuntimeRestore(
+    reason = RUNTIME_RESTORED_ACTIVE_GOAL_REASON,
+    now = Date.now()
+  ): number {
+    const db = getDb()
+    const activeRows =
+      db.exec("SELECT thread_id, goal_id FROM thread_goals WHERE status = 'active'")?.[0]
+        ?.values ?? []
+    if (activeRows.length <= 0) return 0
+    db.run(
+      `
+        UPDATE thread_goals
+        SET status = 'paused',
+            paused_reason = ?,
+            updated_at = ?
+        WHERE status = 'active'
+      `,
+      [reason, now]
+    )
+    for (const row of activeRows) {
+      const threadId = String(row[0] ?? "").trim()
+      if (!threadId) continue
+      const goalId = row[1] == null ? null : String(row[1])
+      db.run(
+        "INSERT INTO thread_goal_events (thread_id, goal_id, message, created_at) VALUES (?, ?, ?, ?)",
+        [threadId, goalId, RUNTIME_RESTORED_GOAL_PAUSE_NOTICE, now]
+      )
+    }
+    saveToDisk()
+    return activeRows.length
+  }
+
   get(threadId: string): ThreadGoal | null {
     const db = getDb()
     const stmt = db.prepare("SELECT * FROM thread_goals WHERE thread_id = ?")
@@ -138,12 +210,13 @@ export class SqlGoalStore implements GoalStore {
     db.run(
       `
         INSERT INTO thread_goals (
-          thread_id, goal_id, objective, completion_condition, context_json, status,
+          thread_id, goal_id, active_window_id, objective, completion_condition, context_json, status,
           turns_used, max_turns, last_verdict, last_reason, paused_reason,
           consecutive_parse_failures, ledger_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(thread_id) DO UPDATE SET
           goal_id = excluded.goal_id,
+          active_window_id = excluded.active_window_id,
           objective = excluded.objective,
           completion_condition = excluded.completion_condition,
           context_json = excluded.context_json,
@@ -171,6 +244,7 @@ export class SqlGoalStore implements GoalStore {
       [
         goal.threadId,
         goal.goalId,
+        goal.activeWindowId,
         goal.objective,
         goal.completionCondition,
         JSON.stringify(normalizeGoalContext(goal.context)),
@@ -198,6 +272,27 @@ export class SqlGoalStore implements GoalStore {
 
 export class InMemoryGoalStore implements GoalStore {
   private readonly goals = new Map<string, ThreadGoal>()
+
+  pauseActiveGoalsForRuntimeRestore(
+    reason = RUNTIME_RESTORED_ACTIVE_GOAL_REASON,
+    now = Date.now()
+  ): number {
+    let count = 0
+    for (const [threadId, goal] of this.goals) {
+      if (goal.status !== "active") continue
+      count += 1
+      this.goals.set(
+        threadId,
+        cloneGoal({
+          ...goal,
+          status: "paused",
+          pausedReason: reason,
+          updatedAt: now
+        })
+      )
+    }
+    return count
+  }
 
   get(threadId: string): ThreadGoal | null {
     const goal = this.goals.get(threadId)
@@ -240,7 +335,7 @@ export function deriveCompletionCondition(text: string): string {
 
   const rest = trimmed.slice(match.index + match[0].length).trim()
   const boundary = rest.search(
-    /\n\s*(?:stop if|scope|constraints?|停止条件|停止|范围|约束|启动上下文摘要)\s*[：:]/i
+    /\n\s*(?:stop if|scope|constraints?|停止条件|停止|范围|约束)\s*[：:]/i
   )
   const condition = (boundary >= 0 ? rest.slice(0, boundary) : rest).trim()
   return condition || trimmed
@@ -258,6 +353,7 @@ export function createNewGoal(params: {
   return {
     threadId: params.threadId,
     goalId: uuid(),
+    activeWindowId: uuid(),
     objective: text,
     completionCondition: deriveCompletionCondition(text),
     context: normalizeGoalContext(params.context),

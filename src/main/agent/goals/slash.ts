@@ -1,6 +1,5 @@
 import { isGoalClearAlias, splitGoalTransportPayload } from "../../../shared/goal-slash"
 import { parseSkillUseBlock } from "../skill-lifecycle/marker"
-import { MAX_GOAL_TEXT_CHARS } from "./goal-manager"
 import type { GoalContext } from "./types"
 
 export type GoalSlashCommand =
@@ -22,15 +21,45 @@ function truncate(value: string, maxChars: number): string {
   return value.length > maxChars ? `${value.slice(0, maxChars - 1)}…` : value
 }
 
+function unescapeXmlText(value: string): string {
+  return value
+    .replace(/&#(x[0-9a-f]+|\d+);/gi, (_match, raw: string) => {
+      const codePoint = raw.toLowerCase().startsWith("x")
+        ? Number.parseInt(raw.slice(1), 16)
+        : Number.parseInt(raw, 10)
+      try {
+        return Number.isFinite(codePoint) ? String.fromCodePoint(codePoint) : ""
+      } catch {
+        return ""
+      }
+    })
+    .replace(/&apos;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&gt;/g, ">")
+    .replace(/&lt;/g, "<")
+    .replace(/&amp;/g, "&")
+}
+
+function sanitizeTransportLabel(value: string): string {
+  return unescapeXmlText(value)
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
 function extractAttachmentNames(payload: string): string[] {
   return Array.from(payload.matchAll(/<attachment\b[^>]*\bfilename="([^"]+)"/gi))
-    .map((match) => match[1]?.trim())
+    .map((match) => sanitizeTransportLabel(match[1] ?? ""))
     .filter((item): item is string => Boolean(item))
+}
+
+export function extractGoalTransportAttachmentNames(payload: string): string[] {
+  return extractAttachmentNames(payload)
 }
 
 function extractSkillName(payload: string): string | null {
   const match = payload.match(/<CMBDEVCLAW-SKILL-USE-V1>[\s\S]*?<name>\s*([^<]+?)\s*<\/name>/i)
-  return match?.[1]?.trim() || null
+  return match ? sanitizeTransportLabel(match[1] ?? "") || null : null
 }
 
 function buildTransportContextSummary(payload: string): string | null {
@@ -47,26 +76,29 @@ function buildTransportContextSummary(payload: string): string | null {
 }
 
 function buildGoalContext(payload: string): GoalContext | undefined {
+  const context: GoalContext = {}
+  const transportSummary = buildTransportContextSummary(payload)
+  if (transportSummary) {
+    context.transportSummary = transportSummary
+  }
+
   const parsed = parseSkillUseBlock(payload)
-  if (!parsed) return undefined
-  return {
-    explicitSkill: {
+  if (parsed) {
+    context.explicitSkill = {
       name: parsed.skillName,
       path: parsed.skillPath
     }
   }
-}
 
-function appendTransportContextSummary(goalText: string, payload: string): string {
-  const context = buildTransportContextSummary(payload)
-  if (!context) return goalText
-  const summary = `启动上下文摘要：${context}`
-  const withSummary = `${goalText}\n${summary}`
-  return withSummary.length <= MAX_GOAL_TEXT_CHARS ? withSummary : goalText
+  return context.explicitSkill || context.transportSummary ? context : undefined
 }
 
 export function extractGoalTransportPayload(input: string): string {
   return splitGoalTransportPayload(input).payload
+}
+
+export function sanitizeGoalSlashCommandForPersistence(input: string): string {
+  return splitGoalTransportPayload(input).commandText.trim() || "/goal"
 }
 
 export function parseGoalSlashCommand(input: string): GoalSlashCommand {
@@ -97,7 +129,7 @@ export function parseGoalSlashCommand(input: string): GoalSlashCommand {
 
   return {
     type: "set",
-    text: payload ? appendTransportContextSummary(arg, payload) : arg,
+    text: arg,
     displayText: arg,
     context
   }

@@ -10,6 +10,8 @@ import {
   isBareGoalSlashCommandInput,
   isGoalSlashCommandInput,
   isGoalSlashControlCommandInput,
+  isGoalSlashResumeCommandInput,
+  isGoalSlashTransportSensitiveControlCommandInput,
   isGoalTerminatingControlCommandInput,
   resolveGoalRuntimeComposerState
 } from "../src/renderer/src/features/slash-commands/useSlashCommands.ts"
@@ -202,6 +204,33 @@ function testGoalSlashControlCommandDetectionForValidationBypass(): void {
     "/goal resume still requires a runnable thread context"
   )
   assertEqual(
+    isGoalSlashResumeCommandInput("/goal resume"),
+    true,
+    "/goal resume should be recognized before legacy approval state is cleared"
+  )
+  assertEqual(
+    isGoalSlashResumeCommandInput("/goal pause"),
+    false,
+    "/goal pause should not be treated as a resume command"
+  )
+  assertEqual(
+    isGoalSlashResumeCommandInput(
+      '/goal resume\n\n<attachment filename="notes.txt" type="text/plain" size="4">data</attachment>'
+    ),
+    false,
+    "/goal resume with transport payload should not be treated as a plain resume command"
+  )
+  assertEqual(
+    isGoalSlashTransportSensitiveControlCommandInput("/goal resume"),
+    true,
+    "/goal resume should still reject pending attachments or skills"
+  )
+  assertEqual(
+    isGoalSlashTransportSensitiveControlCommandInput("/goal 检查 README"),
+    false,
+    "setting a new goal may carry pending attachments or skills"
+  )
+  assertEqual(
     isGoalSlashControlCommandInput("/goal 检查 README"),
     false,
     "setting a new goal should not bypass model/workspace validation"
@@ -304,6 +333,19 @@ function testRuntimeComposerStateOnlyAllowsGoalControlCommandsWhileLoading(): vo
     resumeState.canSubmitGoalCommandWhileLoading,
     false,
     "/goal resume should not be submitted through the mid-run control side-channel"
+  )
+
+  const resumeWithTransportState = resolveGoalRuntimeComposerState({
+    input: "/goal resume",
+    isLoading: false,
+    historyLoading: false,
+    slashModeKind: "closed",
+    hasPendingTransportPayload: true
+  })
+  assertEqual(
+    resumeWithTransportState.canSubmitGoalCommandWhileLoading,
+    false,
+    "/goal resume with pending transport should be recognized as transport-sensitive"
   )
 
   const setState = resolveGoalRuntimeComposerState({

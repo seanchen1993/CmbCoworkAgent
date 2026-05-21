@@ -2,6 +2,8 @@ export type GoalStatus = "active" | "paused" | "complete"
 
 export type GoalJudgeVerdict = "complete" | "continue" | "blocked"
 
+export const RUNTIME_RESTORED_ACTIVE_GOAL_REASON = "runtime restored active goal"
+
 export interface GoalLedger {
   progress: string[]
   evidence: string[]
@@ -15,11 +17,17 @@ export interface GoalExplicitSkillContext {
 
 export interface GoalContext {
   explicitSkill?: GoalExplicitSkillContext
+  transportSummary?: string
+  legacyTransportSummaryMigration?: {
+    objective?: string
+    completionCondition?: string
+  }
 }
 
 export interface ThreadGoal {
   threadId: string
   goalId: string
+  activeWindowId: string
   objective: string
   completionCondition: string
   context: GoalContext
