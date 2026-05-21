@@ -718,6 +718,10 @@ function readThreadGitContextCache(
   }
 }
 
+function pickBestWorktreeRelativePath(candidates: string[]): string | null {
+  return candidates.find((candidate) => candidate && !candidate.startsWith("../") && !path.isAbsolute(candidate)) ?? null
+}
+
 function collectChangedFileEntriesFromStatus(
   worktreePath: string,
   statusOutput: string,
@@ -735,18 +739,25 @@ function collectChangedFileEntriesFromStatus(
   const changedMap = new Map<string, GitPanelChangedFile>()
 
   for (const entry of parsePorcelainPathEntries(statusOutput)) {
-    const candidates = toWorktreeRelativePath(worktreePath, entry.path)
-    if (candidates.length === 0) continue
+    const pathCandidates = toWorktreeRelativePath(worktreePath, entry.path)
+    if (pathCandidates.length === 0) continue
+
+    const previousPathCandidates = entry.previousPath
+      ? toWorktreeRelativePath(worktreePath, entry.previousPath)
+      : []
+    const mappedPreviousPath =
+      pickBestWorktreeRelativePath(previousPathCandidates) ??
+      (entry.previousPath ? normalizeGitRelativePath(entry.previousPath) : undefined)
 
     if (filterByTracked) {
-      const matched = candidates.find((candidate) => trackedSet.has(candidate))
-      if (matched) changedMap.set(matched, { ...entry, path: matched })
+      const matched = pathCandidates.find((candidate) => trackedSet.has(candidate))
+      if (matched) changedMap.set(matched, { ...entry, path: matched, previousPath: mappedPreviousPath })
       continue
     }
 
-    const best = candidates.find((candidate) => candidate && !candidate.startsWith("../") && !path.isAbsolute(candidate))
+    const best = pickBestWorktreeRelativePath(pathCandidates)
     if (best) {
-      changedMap.set(best, { ...entry, path: best })
+      changedMap.set(best, { ...entry, path: best, previousPath: mappedPreviousPath })
     }
   }
 
