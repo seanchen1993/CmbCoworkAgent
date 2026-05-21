@@ -503,7 +503,7 @@ function getSelectedPet(): PetListItem | null {
 
 function closePetWindow(): void {
   stopPetHoverPolling()
-  closePetBubble()
+  closePetBubble("pet-window-close")
   if (petWindow && !petWindow.isDestroyed()) {
     petWindow.close()
   }
@@ -684,7 +684,7 @@ function clearPetCompletedTaskNotices(): void {
   if (completedTaskNotices.length === 0) return
   completedTaskNotices.splice(0, completedTaskNotices.length)
   updatePetTaskTag()
-  closePetBubble()
+  closePetBubble("clear-completed-tasks")
 }
 
 /**
@@ -1205,7 +1205,7 @@ export function createPetWindow(): void {
   currentWindow.on("closed", () => {
     if (petWindow !== currentWindow) return
     stopPetHoverPolling()
-    closePetBubble()
+    closePetBubble("pet-window-closed")
     petWindow = null
     petMoveLastX = null
     petDragOffset = null
@@ -1256,7 +1256,7 @@ function schedulePetBubbleHide(): void {
   cancelPetBubbleHide()
   petBubbleHideTimer = setTimeout(() => {
     petBubbleHideTimer = null
-    closePetBubble()
+    closePetBubble("task-tag-leave-delay")
   }, 260)
 }
 
@@ -1329,7 +1329,7 @@ function showPetBubble(message: string, autoHideMs = PET_BUBBLE_AUTO_HIDE_MS): v
       if (petBubbleWindow !== createdBubbleWindow || createdBubbleWindow.isDestroyed()) return
       if (title.startsWith("pet-bubble-done:")) {
         logPetWindowDebug("[Pets] Bubble auto-hide timer fired", { title })
-        closePetBubble()
+        closePetBubble("bubble-auto-hide")
         return
       }
       if (title.startsWith("pet-bubble-pointer:")) {
@@ -1343,14 +1343,31 @@ function showPetBubble(message: string, autoHideMs = PET_BUBBLE_AUTO_HIDE_MS): v
         return
       }
     })
+    createdBubbleWindow.webContents.on("render-process-gone", (_event, details) => {
+      logPetWindowDebug("[Pets] Bubble render process gone", { details })
+    })
+    createdBubbleWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription) => {
+      logPetWindowDebug("[Pets] Bubble failed to load", { errorCode, errorDescription })
+    })
+    createdBubbleWindow.webContents.on("unresponsive", () => {
+      logPetWindowDebug("[Pets] Bubble webContents unresponsive")
+    })
+    createdBubbleWindow.webContents.on("destroyed", () => {
+      logPetWindowDebug("[Pets] Bubble webContents destroyed")
+    })
     createdBubbleWindow.on("closed", () => {
       logPetWindowDebug("[Pets] Bubble window closed")
       if (petBubbleWindow === createdBubbleWindow) {
         petBubbleWindow = null
       }
     })
-    createdBubbleWindow.on("close", () => {
-      logPetWindowDebug("[Pets] Bubble window close requested")
+    createdBubbleWindow.on("close", (event) => {
+      logPetWindowDebug("[Pets] Bubble window close requested", {
+        defaultPrevented: event.defaultPrevented
+      })
+    })
+    createdBubbleWindow.on("unresponsive", () => {
+      logPetWindowDebug("[Pets] Bubble window unresponsive")
     })
   } else {
     bubbleWindow.setBounds(bounds, false)
@@ -1464,7 +1481,7 @@ function showPetGreetingBubble(): void {
  */
 function showPetTaskBubble(): void {
   if (completedTaskNotices.length === 0) {
-    closePetBubble()
+    closePetBubble("task-bubble-empty")
     return
   }
   showPetBubble(`主人，有 ${completedTaskNotices.length} 个任务已完成～`)
@@ -1484,9 +1501,14 @@ function showPetHoverBubbleIfIdle(): void {
 /**
  * 关闭当前统一宠物气泡窗口。
  */
-function closePetBubble(): void {
+function closePetBubble(reason = "unknown"): void {
   cancelPetBubbleHide()
   const bubbleWindow = petBubbleWindow
+  logPetWindowDebug("[Pets] closePetBubble invoked", {
+    reason,
+    hasBubbleWindow: Boolean(bubbleWindow),
+    bubbleWindowDestroyed: bubbleWindow?.isDestroyed() ?? null
+  })
   if (bubbleWindow && !bubbleWindow.isDestroyed()) {
     rememberPetBubbleBounds(bubbleWindow.getBounds())
   }
