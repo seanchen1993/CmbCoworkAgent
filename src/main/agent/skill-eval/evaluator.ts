@@ -57,7 +57,10 @@ const MAX_CONSECUTIVE_SAME_CALL = 3
 const AVG_PROMPT_INPUT_TOKEN_BUDGET = 48_000
 
 function parseSkill(raw: string): { skillName: string; skillVersion?: string } {
-  const text = String(raw || "").trim()
+  const text = String(raw || "")
+    .trim()
+    .replace(/^\$/, "")
+    .replace(/\.(zip|tar\.gz|tgz|md)$/i, "")
   const match = text.match(/^(.*?)-(v\d+(?:\.\d+){0,3})$/)
   if (!match) return { skillName: text || "unknown" }
   return { skillName: match[1] || text, skillVersion: match[2] }

@@ -130,6 +130,12 @@ function isUploadedByCurrentUser(item: MarketItem, currentUserCandidates: Set<st
   return getUploaderIdCandidates(item.user_id).some((candidate) => currentUserCandidates.has(candidate))
 }
 
+function getMarketSkillQueryNames(item: MarketItem): string[] {
+  return [item.name, item.filename]
+    .map((value) => value?.trim() || "")
+    .filter(Boolean)
+}
+
 function TimeControlBar({
   granularity,
   range,
@@ -1340,10 +1346,20 @@ export function DashboardView(): React.JSX.Element {
   )
   const myUploadedSkillNames = useMemo(
     () =>
+      Array.from(
+        new Set(
+          Array.from(marketSkillMap.values())
+            .filter((item) => isUploadedByCurrentUser(item, currentUserUploadCandidateSet))
+            .flatMap(getMarketSkillQueryNames)
+        )
+      ),
+    [currentUserUploadCandidateSet, marketSkillMap]
+  )
+  const myUploadedSkillCount = useMemo(
+    () =>
       Array.from(marketSkillMap.values())
         .filter((item) => isUploadedByCurrentUser(item, currentUserUploadCandidateSet))
-        .map((item) => item.name.trim())
-        .filter(Boolean),
+        .length,
     [currentUserUploadCandidateSet, marketSkillMap]
   )
   const mineSkillsLoading = skillEvalMineOnly && (marketSkillsLoading || currentUserUploadCandidatesLoading)
@@ -2086,7 +2102,7 @@ export function DashboardView(): React.JSX.Element {
                 loading={loading || skillEvalLoading}
                 range={range}
                 mineOnly={skillEvalMineOnly}
-                mineSkillCount={myUploadedSkillNames.length}
+                mineSkillCount={myUploadedSkillCount}
                 mineSkillsLoading={mineSkillsLoading}
                 onRecentPageChange={handleSkillEvalPageChange}
                 onMineOnlyChange={handleSkillEvalMineOnlyChange}

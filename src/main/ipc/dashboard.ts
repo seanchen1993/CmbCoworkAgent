@@ -471,16 +471,17 @@ function buildNonEmptySapIdFilter(): Record<string, unknown> {
 
 /**
  * 统一构建技能命中条件：
- * 使用 wildcard 兼容 `技能名-版本` 这一类上报格式。
+ * 使用 prefix 兼容 `技能名-v版本` 这一类上报格式，避免宽泛 wildcard 扫描。
  */
 function buildSkillUsageWildcardFilter(skillName: string): Record<string, unknown> {
-  const escapedSkillName = escapeWildcard(skillName)
-  const wildcardPattern = `${escapedSkillName}**`
+  const versionPrefix = `${skillName}-v`
   return {
     bool: {
       should: [
-        { wildcard: { usedSkills: wildcardPattern } },
-        { wildcard: { "usedSkills.keyword": wildcardPattern } }
+        { term: { usedSkills: skillName } },
+        { term: { "usedSkills.keyword": skillName } },
+        { prefix: { usedSkills: versionPrefix } },
+        { prefix: { "usedSkills.keyword": versionPrefix } }
       ],
       minimum_should_match: 1
     }
@@ -499,6 +500,7 @@ function normalizeSkillQueryNames(skillNames?: string[]): string[] {
     new Set(
       skillNames
         .map((name) => String(name || "").trim())
+        .map((name) => normalizeSkillQueryName(name))
         .filter(Boolean)
     )
   ).slice(0, 1000)
@@ -564,15 +566,10 @@ function normalizeSkillEvalOptions(value?: DashboardSkillEvalOptions): {
 } {
   const skillName = typeof value?.skillName === "string" ? value.skillName.trim() : ""
   const skillVersion = typeof value?.skillVersion === "string" ? value.skillVersion.trim() : ""
-  const rawSkillNames = Array.isArray(value?.skillNames) ? value.skillNames : []
-  const skillNames = Array.from(
-    new Set(
-      rawSkillNames
-        .filter((item): item is string => typeof item === "string")
-        .map((item) => item.trim())
-        .filter(Boolean)
-    )
-  ).slice(0, 100)
+  const rawSkillNames = Array.isArray(value?.skillNames)
+    ? value.skillNames.filter((item): item is string => typeof item === "string")
+    : []
+  const skillNames = normalizeSkillQueryNames(rawSkillNames).slice(0, 100)
   return {
     sampleLimit: clampLimit(value?.limit, 500, 2000),
     recentPage: clampLimit(value?.recentPage, 1, 10_000),
@@ -629,13 +626,25 @@ function skillEvalTraceQuery(
 
 function buildSkillEvalExactSkillFilter(skillName: string, skillVersion?: string): Record<string, unknown> {
   const identifier = skillVersion ? `${skillName}-${skillVersion}` : skillName
+  if (skillVersion) {
+    return {
+      bool: {
+        should: [
+          { term: { usedSkills: identifier } },
+          { term: { "usedSkills.keyword": identifier } }
+        ],
+        minimum_should_match: 1
+      }
+    }
+  }
+  const versionPrefix = `${skillName}-v`
   return {
     bool: {
       should: [
         { term: { usedSkills: identifier } },
         { term: { "usedSkills.keyword": identifier } },
-        { wildcard: { usedSkills: escapeWildcard(identifier) } },
-        { wildcard: { "usedSkills.keyword": escapeWildcard(identifier) } }
+        { prefix: { usedSkills: versionPrefix } },
+        { prefix: { "usedSkills.keyword": versionPrefix } }
       ],
       minimum_should_match: 1
     }
@@ -644,13 +653,12 @@ function buildSkillEvalExactSkillFilter(skillName: string, skillVersion?: string
 
 function buildSkillEvalSkillNamesFilter(skillNames: string[]): Record<string, unknown> {
   const should = skillNames.flatMap((skillName) => {
-    const escaped = escapeWildcard(skillName)
-    const pattern = `${escaped}*`
+    const versionPrefix = `${skillName}-v`
     return [
       { term: { usedSkills: skillName } },
       { term: { "usedSkills.keyword": skillName } },
-      { wildcard: { usedSkills: pattern } },
-      { wildcard: { "usedSkills.keyword": pattern } }
+      { prefix: { usedSkills: versionPrefix } },
+      { prefix: { "usedSkills.keyword": versionPrefix } }
     ]
   })
   return {
@@ -721,8 +729,21 @@ function skillVersionKey(skillName: string, skillVersion?: string): string {
   return `${skillName}:${skillVersion ?? ""}`
 }
 
+function normalizeSkillIdentifierText(raw: string): string {
+  return String(raw || "")
+    .trim()
+    .replace(/^\$/, "")
+    .replace(/\.(zip|tar\.gz|tgz|md)$/i, "")
+}
+
+function normalizeSkillQueryName(raw: string): string {
+  return normalizeSkillIdentifierText(raw)
+    .replace(/-v?\d+(?:\.\d+){0,3}(?:[-+][0-9A-Za-z.-]+)?$/i, "")
+    .trim()
+}
+
 function parseSkillIdentifier(raw: string): { skillName: string; skillVersion?: string } {
-  const text = String(raw || "").trim()
+  const text = normalizeSkillIdentifierText(raw)
   const match = text.match(/^(.*?)-(v\d+(?:\.\d+){0,3})$/)
   if (!match) return { skillName: text || "unknown" }
   return { skillName: match[1] || text, skillVersion: match[2] }
@@ -757,7 +778,7 @@ function getLatestSkillFilterFromSummaries(
 }
 
 function hasAllowedSkillName(skillName: string, allowedSkillNames?: Set<string>): boolean {
-  return !allowedSkillNames || allowedSkillNames.has(skillName)
+  return !allowedSkillNames || allowedSkillNames.has(normalizeSkillQueryName(skillName))
 }
 
 function averageValue(total: number, count: number): number {

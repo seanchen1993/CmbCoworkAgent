@@ -106,7 +106,10 @@ type EvidenceToolCall = TraceToolCall & {
 }
 
 function parseSkill(raw: string): { skillName: string; skillVersion?: string } {
-  const text = String(raw || "").trim()
+  const text = String(raw || "")
+    .trim()
+    .replace(/^\$/, "")
+    .replace(/\.(zip|tar\.gz|tgz|md)$/i, "")
   const match = text.match(/^(.*?)-(v\d+(?:\.\d+){0,3})$/)
   if (!match) return { skillName: text || "unknown" }
   return { skillName: match[1] || text, skillVersion: match[2] }
