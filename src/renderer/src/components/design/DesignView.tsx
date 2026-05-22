@@ -14,10 +14,16 @@ import {
   ModelSelector,
   RightTabBtn,
   ToolbarIcon,
-  TweaksBtn,
+  TweaksBtn
 } from "./DesignControls"
 import { CommentDraftInput, CommentPin } from "./DesignComments"
-import { DrawActionBar, DrawLayer, type ResolvedDraftDrawNote, type ResolvedDrawNote, type ResolvedDrawStroke } from "./DesignDraw"
+import {
+  DrawActionBar,
+  DrawLayer,
+  type ResolvedDraftDrawNote,
+  type ResolvedDrawNote,
+  type ResolvedDrawStroke
+} from "./DesignDraw"
 import { DesignGallery } from "./DesignGallery"
 import { CreateDesignModal, ExportDesignModal, LinkModal } from "./DesignModals"
 import { ElementPropsPanel } from "./ElementPropsPanel"
@@ -59,19 +65,19 @@ import type {
   SessionMeta,
   SkillInfo,
   TabState,
-  VariationItem,
+  VariationItem
 } from "./types"
-import {
-  SINGLE_DESIGN_TAB_ID,
-  SINGLE_DESIGN_TAB_LABEL,
-} from "./types"
+import { SINGLE_DESIGN_TAB_ID, SINGLE_DESIGN_TAB_LABEL } from "./types"
 
 function getPathName(filePath: string | null): string {
   if (!filePath) return ""
   return filePath.split(/[\\/]/).filter(Boolean).pop() ?? filePath
 }
 
-function groupByLabel<T>(items: T[], getLabel: (item: T) => string | null | undefined): Array<{ label: string; items: T[] }> {
+function groupByLabel<T>(
+  items: T[],
+  getLabel: (item: T) => string | null | undefined
+): Array<{ label: string; items: T[] }> {
   const groups = new Map<string, T[]>()
   for (const item of items) {
     const label = getLabel(item)?.trim() || "其他"
@@ -105,7 +111,7 @@ function groupByLabel<T>(items: T[], getLabel: (item: T) => string | null | unde
         "template",
         "design-system",
         "skills",
-        "Other",
+        "Other"
       ]
       const aIndex = order.indexOf(a.label)
       const bIndex = order.indexOf(b.label)
@@ -151,7 +157,13 @@ function getDesignSystemGroupLabel(label: string | null | undefined): string {
   }
 }
 
-function getSessionKindLabel(kind: DesignSessionKind | DesignSourceInfo["kind"] | undefined): string {
+function getDefaultDesignSystemId(systems: DesignSystemInfo[]): string | null {
+  return systems.find((system) => system.id === "neutral-modern")?.id ?? systems[0]?.id ?? null
+}
+
+function getSessionKindLabel(
+  kind: DesignSessionKind | DesignSourceInfo["kind"] | undefined
+): string {
   switch (kind) {
     case "import_url":
       return "链接还原"
@@ -177,7 +189,8 @@ function makeFileHref(filePath: string): string {
 
 const MAX_DESIGN_PROGRESS_TEXT_CHARS = 1200
 const DESIGN_HTML_PROGRESS_TEXT = "正在生成 HTML 设计稿..."
-const DESIGN_HTML_PROGRESS_PATTERN = /```html|<!doctype|<html[\s>]|<head[\s>]|<body[\s>]|<style[\s>]|<script[\s>]/i
+const DESIGN_HTML_PROGRESS_PATTERN =
+  /```html|<!doctype|<html[\s>]|<head[\s>]|<body[\s>]|<style[\s>]|<script[\s>]/i
 const DESIGN_TOOL_MARKUP_PROGRESS_PATTERN =
   /(?:[<＜]\s*[|｜]?DSML[|｜]?\s*[>＞]|tool Calls|invoke name=|parameter name=|<\/\s*[|｜]?DSML[|｜]?\s*>)/i
 const DESIGN_TOOL_PROGRESS_LINE_PATTERN = /^\s*(?:读取文件|写入文件|修改文件|编辑文件):/i
@@ -287,7 +300,7 @@ function makeTabState(): TabState {
     editModeAvailable: false,
     selectedElement: null,
     attachedImage: null,
-    selectedModelId: getLastModelId(),  // default to last-used model
+    selectedModelId: getLastModelId(), // default to last-used model
     reloadKey: 0,
     selectedSkill: null,
     selectedDesignSystemId: null,
@@ -302,17 +315,19 @@ function makeTabState(): TabState {
     artifactMetadata: null,
     variationPanelPosition: null,
     apiHistory: [],
-    pendingApproval: null,
+    pendingApproval: null
   }
 }
 
 function makeDesignAgentThreadId(designSessionId: string | null, tabId: string): string {
-  const safeSessionId = String(designSessionId || "session")
-    .replace(/[^a-zA-Z0-9_-]/g, "_")
-    .replace(/^_+|_+$/g, "") || "session"
-  const safeTabId = String(tabId || "tab")
-    .replace(/[^a-zA-Z0-9_-]/g, "_")
-    .replace(/^_+|_+$/g, "") || "tab"
+  const safeSessionId =
+    String(designSessionId || "session")
+      .replace(/[^a-zA-Z0-9_-]/g, "_")
+      .replace(/^_+|_+$/g, "") || "session"
+  const safeTabId =
+    String(tabId || "tab")
+      .replace(/[^a-zA-Z0-9_-]/g, "_")
+      .replace(/^_+|_+$/g, "") || "tab"
   return `design_${safeSessionId}_${safeTabId}`.slice(0, 120)
 }
 
@@ -345,7 +360,9 @@ type DesignIterationRollbackSnapshot = {
   apiHistory: Array<{ role: "user" | "assistant"; content: string }>
 }
 
-function makeIterationRollbackSnapshot(state: TabState | undefined): DesignIterationRollbackSnapshot | null {
+function makeIterationRollbackSnapshot(
+  state: TabState | undefined
+): DesignIterationRollbackSnapshot | null {
   if (!state) return null
   // Keep this in sync when adding user-editable TabState fields that must survive failed iterations.
   return {
@@ -361,7 +378,7 @@ function makeIterationRollbackSnapshot(state: TabState | undefined): DesignItera
     draftDrawNote: state.draftDrawNote,
     inputValue: state.inputValue,
     artifactMetadata: state.artifactMetadata,
-    apiHistory: state.apiHistory ?? [],
+    apiHistory: state.apiHistory ?? []
   }
 }
 
@@ -383,7 +400,7 @@ function restoreIterationRollbackSnapshot(
     inputValue: snapshot.inputValue,
     artifactMetadata: snapshot.artifactMetadata,
     apiHistory: snapshot.apiHistory,
-    reloadKey: prev.reloadKey + 1,
+    reloadKey: prev.reloadKey + 1
   }
 }
 
@@ -394,10 +411,11 @@ function hydrateTabStateHtml(state: TabState, html: string): TabState {
     ...state,
     html: patchedHtml,
     variations,
-    activeVariationId: state.activeVariationId && variations.some((v) => v.id === state.activeVariationId)
-      ? state.activeVariationId
-      : variations[0]?.id ?? null,
-    reloadKey: state.reloadKey + 1,
+    activeVariationId:
+      state.activeVariationId && variations.some((v) => v.id === state.activeVariationId)
+        ? state.activeVariationId
+        : (variations[0]?.id ?? null),
+    reloadKey: state.reloadKey + 1
   }
 }
 
@@ -406,11 +424,15 @@ function makeHydrationGuardFingerprint(state: TabState | undefined): string {
   return JSON.stringify({
     html: state.html,
     messages: state.messages.map((msg) => [msg.role, msg.content, msg.isStreaming ?? false]),
-    variations: state.variations.map((variation) => [variation.id, variation.label, variation.html]),
+    variations: state.variations.map((variation) => [
+      variation.id,
+      variation.label,
+      variation.html
+    ]),
     activeVariationId: state.activeVariationId,
     artifactPath: state.artifactPath ?? null,
     artifactMetadata: state.artifactMetadata ?? null,
-    generationState: state.generationState,
+    generationState: state.generationState
   })
 }
 
@@ -437,7 +459,7 @@ function promptLooksLikeFileOperation(prompt: string): boolean {
     "modify file",
     "update file",
     "read file",
-    "apply patch",
+    "apply patch"
   ]
   return patterns.some((pattern) => text.includes(pattern))
 }
@@ -495,14 +517,19 @@ function normalizeQuestionDef(raw: unknown): QuestionDef | null {
     id,
     type,
     label: typeof item.label === "string" ? item.label : id,
-    hint: typeof item.hint === "string" ? item.hint : typeof item.help === "string" ? item.help : undefined,
+    hint:
+      typeof item.hint === "string"
+        ? item.hint
+        : typeof item.help === "string"
+          ? item.help
+          : undefined,
     options: options.map((option) => option.value),
     optionLabels,
-    cards: Array.isArray(item.cards) ? item.cards as QuestionDef["cards"] : undefined,
+    cards: Array.isArray(item.cards) ? (item.cards as QuestionDef["cards"]) : undefined,
     multi: item.multi === true || rawType === "checkbox",
     required: item.required === true,
     maxSelections: typeof item.maxSelections === "number" ? item.maxSelections : undefined,
-    placeholder: typeof item.placeholder === "string" ? item.placeholder : undefined,
+    placeholder: typeof item.placeholder === "string" ? item.placeholder : undefined
   }
 }
 
@@ -511,19 +538,37 @@ function saveDesignArtifactForTab(
   html: string,
   workspacePath: string | null,
   tabId: string,
-  updateTs: (tabId: string, patch: Partial<TabState> | ((prev: TabState) => Partial<TabState>)) => void,
+  updateTs: (
+    tabId: string,
+    patch: Partial<TabState> | ((prev: TabState) => Partial<TabState>)
+  ) => void,
   existingArtifactPath?: string | null,
   metadata?: Partial<DesignArtifactMetadata>
 ): void {
   if (!html.trim()) return
   if (!workspacePath) return
   const savePromise = existingArtifactPath
-    ? window.api.design.saveArtifactFile(existingArtifactPath, html, workspacePath ?? undefined, metadata as Record<string, unknown>)
-    : window.api.design.saveArtifact(artifactId, html, workspacePath ?? undefined, metadata as Record<string, unknown>)
+    ? window.api.design.saveArtifactFile(
+        existingArtifactPath,
+        html,
+        workspacePath ?? undefined,
+        metadata as Record<string, unknown>
+      )
+    : window.api.design.saveArtifact(
+        artifactId,
+        html,
+        workspacePath ?? undefined,
+        metadata as Record<string, unknown>
+      )
   savePromise
     .then(async (result) => {
       if (!result.success && existingArtifactPath) {
-        result = await window.api.design.saveArtifact(artifactId, html, workspacePath ?? undefined, metadata as Record<string, unknown>)
+        result = await window.api.design.saveArtifact(
+          artifactId,
+          html,
+          workspacePath ?? undefined,
+          metadata as Record<string, unknown>
+        )
       }
       if (result.success && result.filePath) {
         window.api.design.storeHtml(artifactId, html).catch((err) => {
@@ -535,7 +580,13 @@ function saveDesignArtifactForTab(
     .catch((err) => {
       console.warn("[Design] saveArtifact failed", err)
       if (existingArtifactPath) {
-        window.api.design.saveArtifact(artifactId, html, workspacePath ?? undefined, metadata as Record<string, unknown>)
+        window.api.design
+          .saveArtifact(
+            artifactId,
+            html,
+            workspacePath ?? undefined,
+            metadata as Record<string, unknown>
+          )
           .then((result) => {
             if (result.success && result.filePath) {
               window.api.design.storeHtml(artifactId, html).catch((storeErr) => {
@@ -562,7 +613,10 @@ type PendingArtifactSave = {
 
 function flushPendingArtifactSave(
   pendingSave: PendingArtifactSave | null,
-  updateTs: (tabId: string, patch: Partial<TabState> | ((prev: TabState) => Partial<TabState>)) => void
+  updateTs: (
+    tabId: string,
+    patch: Partial<TabState> | ((prev: TabState) => Partial<TabState>)
+  ) => void
 ): void {
   if (!pendingSave) return
   saveDesignArtifactForTab(
@@ -610,8 +664,8 @@ function buildDesignArtifactMetadata(input: {
         .replace(/<[^>]+>/g, " ")
         .replace(/\s+/g, " ")
         .trim()
-        .slice(0, 120),
-    },
+        .slice(0, 120)
+    }
   }
 }
 
@@ -634,8 +688,8 @@ function asDesignApprovalRequest(request: unknown): DesignApprovalRequest {
     _orchestratorRequestId: typeof req.id === "string" ? req.id : undefined,
     _retryReason: typeof req.retry_reason === "string" ? req.retry_reason : undefined,
     _approvalTypes: Array.isArray(req.allowed_approval_types)
-      ? req.allowed_approval_types as DesignApprovalDecision[]
-      : undefined,
+      ? (req.allowed_approval_types as DesignApprovalDecision[])
+      : undefined
   } as DesignApprovalRequest
 }
 
@@ -648,23 +702,26 @@ function asDesignExecutionEvent(event: unknown): DesignExecutionEvent | null {
     raw.kind !== "used_skill" &&
     raw.kind !== "assistant_text" &&
     raw.kind !== "validation"
-  ) return null
+  )
+    return null
   return {
     kind: raw.kind,
     id: typeof raw.id === "string" ? raw.id : undefined,
     toolCallId: typeof raw.toolCallId === "string" ? raw.toolCallId : undefined,
     name: typeof raw.name === "string" ? raw.name : undefined,
-    args: raw.args && typeof raw.args === "object" && !Array.isArray(raw.args)
-      ? raw.args
-      : undefined,
+    args:
+      raw.args && typeof raw.args === "object" && !Array.isArray(raw.args) ? raw.args : undefined,
     content: typeof raw.content === "string" ? raw.content : undefined,
     isError: raw.isError === true,
-    status: raw.status === "success" || raw.status === "error" || raw.status === "running"
-      ? raw.status
-      : raw.kind === "tool_result"
-        ? raw.isError ? "error" : "success"
-        : "running",
-    timestamp: typeof raw.timestamp === "number" ? raw.timestamp : Date.now(),
+    status:
+      raw.status === "success" || raw.status === "error" || raw.status === "running"
+        ? raw.status
+        : raw.kind === "tool_result"
+          ? raw.isError
+            ? "error"
+            : "success"
+          : "running",
+    timestamp: typeof raw.timestamp === "number" ? raw.timestamp : Date.now()
   }
 }
 
@@ -676,14 +733,11 @@ function asDesignModelRetryState(event: unknown): DesignModelRetryState | null {
     attempt: raw.attempt,
     maxRetries: raw.maxRetries,
     reason: typeof raw.reason === "string" ? raw.reason : "模型暂时不可用",
-    delayMs: typeof raw.delayMs === "number" ? raw.delayMs : 0,
+    delayMs: typeof raw.delayMs === "number" ? raw.delayMs : 0
   }
 }
 
-function patchLastAssistantMessage(
-  messages: Message[],
-  patch: Partial<Message>
-): Message[] {
+function patchLastAssistantMessage(messages: Message[], patch: Partial<Message>): Message[] {
   const next = [...messages]
   const last = next.length - 1
   if (next[last]?.role !== "assistant") return messages
@@ -691,21 +745,28 @@ function patchLastAssistantMessage(
   return next
 }
 
-function appendDesignExecutionEvent(events: DesignExecutionEvent[], event: DesignExecutionEvent): DesignExecutionEvent[] {
+function appendDesignExecutionEvent(
+  events: DesignExecutionEvent[],
+  event: DesignExecutionEvent
+): DesignExecutionEvent[] {
   if (event.kind === "assistant_text") {
     if (!event.content?.trim()) return events
     const content = clampDesignProgressText(event.content)
     const eventId = event.id
     if (eventId && eventId !== "assistant-progress") {
-      const index = events.findIndex((item) => item.kind === "assistant_text" && item.id === eventId)
+      const index = events.findIndex(
+        (item) => item.kind === "assistant_text" && item.id === eventId
+      )
       if (index >= 0) {
         const next = [...events]
         const current = next[index]
         next[index] = {
           ...current,
           ...event,
-          content: clampDesignProgressText(eventId === "assistant-progress" ? `${current.content ?? ""}${content}` : content),
-          timestamp: current.timestamp,
+          content: clampDesignProgressText(
+            eventId === "assistant-progress" ? `${current.content ?? ""}${content}` : content
+          ),
+          timestamp: current.timestamp
         }
         return next
       }
@@ -716,7 +777,7 @@ function appendDesignExecutionEvent(events: DesignExecutionEvent[], event: Desig
       next[next.length - 1] = {
         ...last,
         content: clampDesignProgressText(`${last.content ?? ""}${content}`),
-        timestamp: event.timestamp,
+        timestamp: event.timestamp
       }
       return next
     }
@@ -731,12 +792,13 @@ function appendDesignExecutionEvent(events: DesignExecutionEvent[], event: Desig
     if (index < 0) return [...events, event]
     const next = [...events]
     const current = next[index]
-    const shouldKeepCompletedStatus = (current.status === "success" || current.status === "error") && event.status === "running"
+    const shouldKeepCompletedStatus =
+      (current.status === "success" || current.status === "error") && event.status === "running"
     next[index] = {
       ...current,
       ...event,
       status: shouldKeepCompletedStatus ? current.status : event.status,
-      isError: shouldKeepCompletedStatus ? current.isError : event.isError,
+      isError: shouldKeepCompletedStatus ? current.isError : event.isError
     }
     return next
   }
@@ -744,7 +806,9 @@ function appendDesignExecutionEvent(events: DesignExecutionEvent[], event: Desig
   if (event.kind === "tool_call") {
     const toolCallId = event.toolCallId || event.id
     const index = toolCallId
-      ? events.findIndex((item) => item.kind === "tool_call" && (item.toolCallId || item.id) === toolCallId)
+      ? events.findIndex(
+          (item) => item.kind === "tool_call" && (item.toolCallId || item.id) === toolCallId
+        )
       : -1
     if (index >= 0) {
       const next = [...events]
@@ -754,7 +818,7 @@ function appendDesignExecutionEvent(events: DesignExecutionEvent[], event: Desig
         ...event,
         args: event.args && Object.keys(event.args).length > 0 ? event.args : current.args,
         name: event.name || current.name,
-        timestamp: current.timestamp,
+        timestamp: current.timestamp
       }
       return next
     }
@@ -772,7 +836,10 @@ function appendDesignExecutionEvent(events: DesignExecutionEvent[], event: Desig
   }
 
   const resultKey = event.id || event.toolCallId
-  if (resultKey && events.some((item) => item.kind === "tool_result" && (item.id || item.toolCallId) === resultKey)) {
+  if (
+    resultKey &&
+    events.some((item) => item.kind === "tool_result" && (item.id || item.toolCallId) === resultKey)
+  ) {
     return events
   }
   const next = events.map((item) => {
@@ -807,7 +874,12 @@ function parseVariations(fullHtml: string): VariationItem[] {
       // null → TypeError → the entire JS init crashes → blank page.
       // Fix: include hidden stub divs for the OTHER variations so JS references don't throw.
       const otherIds = (["a", "b"] as const).filter((v) => v !== id)
-      const stubs = otherIds.map((v) => `<div id="variation-${v}" style="display:none!important;visibility:hidden!important;position:absolute!important;pointer-events:none!important"></div>`).join("\n")
+      const stubs = otherIds
+        .map(
+          (v) =>
+            `<div id="variation-${v}" style="display:none!important;visibility:hidden!important;position:absolute!important;pointer-events:none!important"></div>`
+        )
+        .join("\n")
 
       const rawHtml = `<!DOCTYPE html>
 <html>
@@ -840,7 +912,12 @@ function escapeCssIdent(value: string): string {
 }
 
 function getElementTextSignature(element: Element): string {
-  return (element.getAttribute("aria-label") || element.getAttribute("alt") || element.textContent || "")
+  return (
+    element.getAttribute("aria-label") ||
+    element.getAttribute("alt") ||
+    element.textContent ||
+    ""
+  )
     .trim()
     .replace(/\s+/g, " ")
     .slice(0, 48)
@@ -848,10 +925,12 @@ function getElementTextSignature(element: Element): string {
 
 function getScreenLabelForElement(element: Element): string | undefined {
   const screen = element.closest("[data-screen-label],[data-design-anchor],[data-dm-screen]")
-  return screen?.getAttribute("data-screen-label")
-    || screen?.getAttribute("data-design-anchor")
-    || screen?.getAttribute("data-dm-screen")
-    || undefined
+  return (
+    screen?.getAttribute("data-screen-label") ||
+    screen?.getAttribute("data-design-anchor") ||
+    screen?.getAttribute("data-dm-screen") ||
+    undefined
+  )
 }
 
 function attrSelector(element: Element, attr: string, value: string): string {
@@ -859,7 +938,14 @@ function attrSelector(element: Element, attr: string, value: string): string {
 }
 
 function buildElementSelector(element: Element): string {
-  const preferredAttrs = ["data-design-anchor", "data-screen-label", "data-dm-ref", "data-cc-id", "aria-label", "role"]
+  const preferredAttrs = [
+    "data-design-anchor",
+    "data-screen-label",
+    "data-dm-ref",
+    "data-cc-id",
+    "aria-label",
+    "role"
+  ]
   for (const attr of preferredAttrs) {
     const value = element.getAttribute(attr)
     if (value) {
@@ -875,7 +961,11 @@ function buildElementSelector(element: Element): string {
 
   const parts: string[] = []
   let current: Element | null = element
-  while (current && current !== current.ownerDocument.documentElement && current !== current.ownerDocument.body) {
+  while (
+    current &&
+    current !== current.ownerDocument.documentElement &&
+    current !== current.ownerDocument.body
+  ) {
     let part = current.tagName.toLowerCase()
     const anchorAttr = ["data-design-anchor", "data-screen-label", "data-dm-ref", "data-cc-id"]
       .map((attr) => ({ attr, value: current?.getAttribute(attr) || "" }))
@@ -928,11 +1018,14 @@ function getPointAnchor(doc: Document | null, point: DrawPoint): DesignElementAn
     text: getElementTextSignature(element) || undefined,
     screenLabel: getScreenLabelForElement(element),
     offsetXRatio: Math.min(1, Math.max(0, (point.x - win.scrollX - rect.left) / rect.width)),
-    offsetYRatio: Math.min(1, Math.max(0, (point.y - win.scrollY - rect.top) / rect.height)),
+    offsetYRatio: Math.min(1, Math.max(0, (point.y - win.scrollY - rect.top) / rect.height))
   }
 }
 
-function getDominantPointAnchor(doc: Document | null, points: DrawPoint[]): DesignElementAnchor | undefined {
+function getDominantPointAnchor(
+  doc: Document | null,
+  points: DrawPoint[]
+): DesignElementAnchor | undefined {
   if (!doc || points.length === 0) return undefined
   const sampleCount = Math.min(8, points.length)
   const step = Math.max(1, Math.floor(points.length / sampleCount))
@@ -953,7 +1046,10 @@ function getDominantPointAnchor(doc: Document | null, points: DrawPoint[]): Desi
   return Array.from(counts.values()).sort((left, right) => right.count - left.count)[0]?.anchor
 }
 
-function resolveAnchorElement(doc: Document | null, anchor: DesignElementAnchor | undefined): Element | null {
+function resolveAnchorElement(
+  doc: Document | null,
+  anchor: DesignElementAnchor | undefined
+): Element | null {
   if (!doc || !anchor?.selector) return null
   try {
     const direct = doc.querySelector(anchor.selector)
@@ -972,7 +1068,10 @@ function resolveAnchorElement(doc: Document | null, anchor: DesignElementAnchor 
   return byText ?? null
 }
 
-function resolveAnchorPagePoint(doc: Document | null, anchor: DesignElementAnchor | undefined): DrawPoint | null {
+function resolveAnchorPagePoint(
+  doc: Document | null,
+  anchor: DesignElementAnchor | undefined
+): DrawPoint | null {
   const element = resolveAnchorElement(doc, anchor)
   const win = doc?.defaultView
   if (!element || !win || !anchor) return null
@@ -980,11 +1079,14 @@ function resolveAnchorPagePoint(doc: Document | null, anchor: DesignElementAncho
   if (rect.width <= 0 || rect.height <= 0) return null
   return {
     x: win.scrollX + rect.left + rect.width * anchor.offsetXRatio,
-    y: win.scrollY + rect.top + rect.height * anchor.offsetYRatio,
+    y: win.scrollY + rect.top + rect.height * anchor.offsetYRatio
   }
 }
 
-function anchorPointsForStroke(doc: Document | null, stroke: DrawStroke): AnchoredDrawPoint[] | undefined {
+function anchorPointsForStroke(
+  doc: Document | null,
+  stroke: DrawStroke
+): AnchoredDrawPoint[] | undefined {
   const element = resolveAnchorElement(doc, stroke.anchor)
   const win = doc?.defaultView
   if (!element || !win) return undefined
@@ -992,7 +1094,7 @@ function anchorPointsForStroke(doc: Document | null, stroke: DrawStroke): Anchor
   if (rect.width <= 0 || rect.height <= 0) return undefined
   return stroke.points.map((point) => ({
     xRatio: (point.x - win.scrollX - rect.left) / rect.width,
-    yRatio: (point.y - win.scrollY - rect.top) / rect.height,
+    yRatio: (point.y - win.scrollY - rect.top) / rect.height
   }))
 }
 
@@ -1004,7 +1106,7 @@ function resolveAnchoredStrokePoints(doc: Document | null, stroke: DrawStroke): 
   if (rect.width <= 0 || rect.height <= 0) return stroke.points
   return stroke.anchoredPoints.map((point) => ({
     x: win.scrollX + rect.left + rect.width * point.xRatio,
-    y: win.scrollY + rect.top + rect.height * point.yRatio,
+    y: win.scrollY + rect.top + rect.height * point.yRatio
   }))
 }
 
@@ -1013,8 +1115,10 @@ function getAnchoredElementSummary(anchor: DesignElementAnchor | undefined): str
   return [
     anchor.label,
     anchor.screenLabel ? `screen:${anchor.screenLabel}` : "",
-    anchor.selector ? `selector:${anchor.selector}` : "",
-  ].filter(Boolean).join("；")
+    anchor.selector ? `selector:${anchor.selector}` : ""
+  ]
+    .filter(Boolean)
+    .join("；")
 }
 
 // File attachment limits — mirrors ChatContainer
@@ -1028,7 +1132,11 @@ function normalizeDesignModelId(modelId: string | null | undefined): string | nu
   return trimmed.startsWith("custom:") ? trimmed : `custom:${trimmed}`
 }
 function getLastModelId(): string | null {
-  try { return normalizeDesignModelId(localStorage.getItem(DESIGN_LAST_MODEL_KEY)) } catch { return null }
+  try {
+    return normalizeDesignModelId(localStorage.getItem(DESIGN_LAST_MODEL_KEY))
+  } catch {
+    return null
+  }
 }
 
 // ─────────────────────────────────────────────────────────
@@ -1077,34 +1185,38 @@ function sanitizePersistedMessages(messages: Message[]): Message[] {
       return {
         ...message,
         isStreaming: false,
-        modelRetry: null,
+        modelRetry: null
       }
     })
 }
 
 function serializeTs(ts: TabState): PersistedTabState {
   return {
-    messages:          sanitizePersistedMessages(ts.messages),
-    html:              ts.html.slice(0, MAX_HTML_BYTES),
-    sourceInfo:        ts.sourceInfo,
-    variations:        ts.variations.map((v) => ({ id: v.id, label: v.label, html: v.html.slice(0, MAX_HTML_BYTES) })),
+    messages: sanitizePersistedMessages(ts.messages),
+    html: ts.html.slice(0, MAX_HTML_BYTES),
+    sourceInfo: ts.sourceInfo,
+    variations: ts.variations.map((v) => ({
+      id: v.id,
+      label: v.label,
+      html: v.html.slice(0, MAX_HTML_BYTES)
+    })),
     activeVariationId: ts.activeVariationId,
-    selectedModelId:   ts.selectedModelId,
-    tweaksOn:          ts.tweaksOn,
-    zoom:              ts.zoom,
-    comments:          ts.comments,
-    drawStrokes:       ts.drawStrokes,
-    drawElementHints:  ts.drawElementHints,
-    drawNotes:         ts.drawNotes,
-    drawToolMode:      ts.drawToolMode,
-    codeContext:       ts.codeContext,
-    designLink:        ts.designLink,
+    selectedModelId: ts.selectedModelId,
+    tweaksOn: ts.tweaksOn,
+    zoom: ts.zoom,
+    comments: ts.comments,
+    drawStrokes: ts.drawStrokes,
+    drawElementHints: ts.drawElementHints,
+    drawNotes: ts.drawNotes,
+    drawToolMode: ts.drawToolMode,
+    codeContext: ts.codeContext,
+    designLink: ts.designLink,
     selectedDesignSystemId: ts.selectedDesignSystemId,
-    rightTab:          ts.rightTab,
-    apiHistory:        ts.apiHistory,
-    artifactPath:      ts.artifactPath,
-    artifactMetadata:  ts.artifactMetadata,
-    variationPanelPosition: ts.variationPanelPosition,
+    rightTab: ts.rightTab,
+    apiHistory: ts.apiHistory,
+    artifactPath: ts.artifactPath,
+    artifactMetadata: ts.artifactMetadata,
+    variationPanelPosition: ts.variationPanelPosition
   }
 }
 
@@ -1113,21 +1225,21 @@ function deserializeTs(p: PersistedTabState): TabState {
     ...makeTabState(),
     ...p,
     selectedModelId: normalizeDesignModelId(p.selectedModelId),
-    messages:        sanitizePersistedMessages(p.messages ?? []),
-    sourceInfo:      p.sourceInfo ?? null,
-    drawStrokes:     p.drawStrokes ?? [],
-    drawElementHints:p.drawElementHints ?? [],
-    drawNotes:       p.drawNotes ?? [],
-    drawToolMode:    p.drawToolMode ?? "draw",
+    messages: sanitizePersistedMessages(p.messages ?? []),
+    sourceInfo: p.sourceInfo ?? null,
+    drawStrokes: p.drawStrokes ?? [],
+    drawElementHints: p.drawElementHints ?? [],
+    drawNotes: p.drawNotes ?? [],
+    drawToolMode: p.drawToolMode ?? "draw",
     selectedDesignSystemId: p.selectedDesignSystemId ?? null,
-    apiHistory:      p.apiHistory ?? [],
-    artifactPath:    p.artifactPath ?? null,
-    artifactMetadata:p.artifactMetadata ?? null,
+    apiHistory: p.apiHistory ?? [],
+    artifactPath: p.artifactPath ?? null,
+    artifactMetadata: p.artifactMetadata ?? null,
     variationPanelPosition: p.variationPanelPosition ?? null,
-    generationState: "idle",  // always reset — never restore mid-stream
+    generationState: "idle", // always reset — never restore mid-stream
     activeMode: null,
     inputValue: "",
-    reloadKey: 1,             // non-zero so iframe loads on restore
+    reloadKey: 1 // non-zero so iframe loads on restore
   }
 }
 
@@ -1135,7 +1247,7 @@ function defaultSession() {
   return {
     chatTabs: [{ id: SINGLE_DESIGN_TAB_ID, label: SINGLE_DESIGN_TAB_LABEL }] as ChatTab[],
     activeTabId: SINGLE_DESIGN_TAB_ID,
-    tabStates: { [SINGLE_DESIGN_TAB_ID]: makeTabState() } as Record<string, TabState>,
+    tabStates: { [SINGLE_DESIGN_TAB_ID]: makeTabState() } as Record<string, TabState>
   }
 }
 
@@ -1151,7 +1263,7 @@ function normalizeSingleTabSession(
   return {
     chatTabs: [{ id: SINGLE_DESIGN_TAB_ID, label: SINGLE_DESIGN_TAB_LABEL }],
     activeTabId: SINGLE_DESIGN_TAB_ID,
-    tabStates: { [SINGLE_DESIGN_TAB_ID]: preferredState },
+    tabStates: { [SINGLE_DESIGN_TAB_ID]: preferredState }
   }
 }
 
@@ -1171,7 +1283,7 @@ async function prepareHtmlForSrcDoc(html: string, htmlPath?: string | null): Pro
         html,
         htmlPath,
         readTextFile: readPreviewDependencyTextFile,
-        readDataUrlFile: readPreviewDependencyDataUrlFile,
+        readDataUrlFile: readPreviewDependencyDataUrlFile
       })
     : html
   const htmlWithBase = htmlPath ? injectBaseHref(inlinedHtml, makeFileHref(htmlPath)) : inlinedHtml
@@ -1179,13 +1291,14 @@ async function prepareHtmlForSrcDoc(html: string, htmlPath?: string | null): Pro
 }
 
 // ── Per-session storage ───────────────────────────────────
-const SESSION_INDEX_KEY  = "design_index_v1"
-const SESSION_LAST_KEY   = "design_last_session"
-const sessionDataKey     = (id: string) => `design_session_v2_${id}`
+const SESSION_INDEX_KEY = "design_index_v1"
+const SESSION_LAST_KEY = "design_last_session"
+const sessionDataKey = (id: string) => `design_session_v2_${id}`
 
 function parsePersistedSession(raw: string): ReturnType<typeof defaultSession> {
   const data: PersistedSession = JSON.parse(raw)
-  if (!Array.isArray(data.chatTabs) || !data.chatTabs.length || !data.activeTabId) return defaultSession()
+  if (!Array.isArray(data.chatTabs) || !data.chatTabs.length || !data.activeTabId)
+    return defaultSession()
   const restoredStates: Record<string, TabState> = {}
   for (const [id, st] of Object.entries(data.tabStates ?? {})) {
     restoredStates[id] = deserializeTs(st)
@@ -1196,7 +1309,7 @@ function parsePersistedSession(raw: string): ReturnType<typeof defaultSession> {
   return normalizeSingleTabSession({
     chatTabs: data.chatTabs,
     activeTabId: data.activeTabId,
-    tabStates: restoredStates,
+    tabStates: restoredStates
   })
 }
 
@@ -1208,15 +1321,27 @@ async function hydrateSessionArtifacts(
   const entries = await Promise.all(
     Object.entries(session.tabStates).map(async ([tabId, state]) => {
       const artifactId = makeDesignArtifactId(sessionId, tabId)
-      let result: { success: boolean; filePath?: string; html?: string; metadata?: unknown; error?: string }
+      let result: {
+        success: boolean
+        filePath?: string
+        html?: string
+        metadata?: unknown
+        error?: string
+      }
       if (state.artifactPath) {
-        result = await window.api.design.readArtifactFile(state.artifactPath, workspacePath ?? undefined)
+        result = await window.api.design.readArtifactFile(
+          state.artifactPath,
+          workspacePath ?? undefined
+        )
       } else {
         result = await window.api.design.readArtifact(artifactId, workspacePath ?? undefined)
       }
       if (!result.success || !result.html?.trim()) return [tabId, state] as const
 
-      const previewHtml = await prepareHtmlForSrcDoc(result.html, result.filePath ?? state.artifactPath)
+      const previewHtml = await prepareHtmlForSrcDoc(
+        result.html,
+        result.filePath ?? state.artifactPath
+      )
       window.api.design.storeHtml(artifactId, previewHtml).catch((err) => {
         console.warn("[Design] storeHtml failed", err)
       })
@@ -1225,15 +1350,15 @@ async function hydrateSessionArtifacts(
         {
           ...hydrateTabStateHtml(state, previewHtml),
           artifactPath: result.filePath ?? state.artifactPath,
-          artifactMetadata: asDesignArtifactMetadata(result.metadata) ?? state.artifactMetadata,
-        },
+          artifactMetadata: asDesignArtifactMetadata(result.metadata) ?? state.artifactMetadata
+        }
       ] as const
     })
   )
 
   return {
     ...session,
-    tabStates: Object.fromEntries(entries),
+    tabStates: Object.fromEntries(entries)
   }
 }
 
@@ -1468,9 +1593,9 @@ function ensureEditMode(html: string): string {
     for (const [, name, rawVal] of rootBlock[1].matchAll(/--([a-zA-Z][\w-]+)\s*:\s*([^;]+);/g)) {
       const v = rawVal.trim()
       const key = name.replace(/-([a-z])/g, (_: string, c: string) => c.toUpperCase())
-      if (/^#[0-9a-fA-F]{3,8}$/.test(v))   cssVars[key] = v
-      else if (/^[\d.]+$/.test(v))           cssVars[key] = parseFloat(v)
-      else if (/^(true|false)$/.test(v))     cssVars[key] = v === "true"
+      if (/^#[0-9a-fA-F]{3,8}$/.test(v)) cssVars[key] = v
+      else if (/^[\d.]+$/.test(v)) cssVars[key] = parseFloat(v)
+      else if (/^(true|false)$/.test(v)) cssVars[key] = v === "true"
     }
   }
   if (Object.keys(cssVars).length > 0) return appendEditScript(html, cssVars)
@@ -1482,10 +1607,12 @@ function ensureEditMode(html: string): string {
 
 /** Append an EDITMODE script to html. vars keys are camelCase → CSS --kebab-case vars. */
 function appendEditScript(html: string, vars: Record<string, unknown>): string {
-  const setLines = Object.keys(vars).map((k) => {
-    const cv = "--" + k.replace(/([A-Z])/g, "-$1").toLowerCase()
-    return `r.style.setProperty('${cv}',String(t['${k}']));`
-  }).join("")
+  const setLines = Object.keys(vars)
+    .map((k) => {
+      const cv = "--" + k.replace(/([A-Z])/g, "-$1").toLowerCase()
+      return `r.style.setProperty('${cv}',String(t['${k}']));`
+    })
+    .join("")
   const script = `\n<script>(function(){
 var TWEAK_DEFAULTS=/*EDITMODE-BEGIN*/${JSON.stringify(vars)}/*EDITMODE-END*/;
 function applyTweaks(edits){var t=Object.assign({},TWEAK_DEFAULTS,edits||{}),r=document.documentElement;${setLines}}
@@ -1503,9 +1630,9 @@ applyTweaks({});
 function injectColorVars(html: string): string {
   // Collect 6-digit hex colors from <style> blocks AND inline style="" attributes
   const styleContent = [...html.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/gi)]
-    .map((m) => m[1]).join("\n")
-  const inlineContent = [...html.matchAll(/style="([^"]*)"/gi)]
-    .map((m) => m[1]).join("\n")
+    .map((m) => m[1])
+    .join("\n")
+  const inlineContent = [...html.matchAll(/style="([^"]*)"/gi)].map((m) => m[1]).join("\n")
   const allCssContent = styleContent + "\n" + inlineContent
 
   const freq: Map<string, number> = new Map()
@@ -1515,7 +1642,7 @@ function injectColorVars(html: string): string {
   }
   // Also try 3-digit hex from inline styles
   for (const [, h] of inlineContent.matchAll(/#([0-9a-fA-F]{3})\b/g)) {
-    const c = "#" + h[0] + h[0] + h[1] + h[1] + h[2] + h[2]  // expand to 6-digit
+    const c = "#" + h[0] + h[0] + h[1] + h[1] + h[2] + h[2] // expand to 6-digit
     freq.set(c, (freq.get(c) ?? 0) + 1)
   }
 
@@ -1535,7 +1662,9 @@ function injectColorVars(html: string): string {
     const key = colorNames[i] ?? `color${i + 1}`
     return { key, cssVar: `--${colorNames[i] ?? "color-" + (i + 1)}`, hex }
   })
-  entries.forEach(({ key, hex }) => { vars[key] = hex })
+  entries.forEach(({ key, hex }) => {
+    vars[key] = hex
+  })
 
   // Numeric tweaks extracted from CSS
   const fsMatch = styleContent.match(/\bfont-size\s*:\s*([\d.]+)px/)
@@ -1546,7 +1675,7 @@ function injectColorVars(html: string): string {
   // Fallback: if no colors at all, use sensible generic defaults
   if (entries.length === 0) {
     vars["primaryColor"] = "#3b82f6"
-    vars["fontSize"]     = vars["fontSize"] ?? 16
+    vars["fontSize"] = vars["fontSize"] ?? 16
     vars["borderRadius"] = vars["borderRadius"] ?? 8
     return appendEditScript(html, vars)
   }
@@ -1579,12 +1708,12 @@ function injectColorVars(html: string): string {
   }
 
   // Build setProperty lines: color vars + optional numeric vars
-  const colorSet = entries.map(({ key, cssVar }) =>
-    `r.style.setProperty('${cssVar}',String(t['${key}']));`
-  ).join("")
+  const colorSet = entries
+    .map(({ key, cssVar }) => `r.style.setProperty('${cssVar}',String(t['${key}']));`)
+    .join("")
   const numSet = [
-    vars["fontSize"]     ? `r.style.setProperty('--font-size',t.fontSize+'px');`     : "",
-    vars["borderRadius"] ? `r.style.setProperty('--border-radius',t.borderRadius+'px');` : "",
+    vars["fontSize"] ? `r.style.setProperty('--font-size',t.fontSize+'px');` : "",
+    vars["borderRadius"] ? `r.style.setProperty('--border-radius',t.borderRadius+'px');` : ""
   ].join("")
 
   const script = `\n<script>(function(){
@@ -1603,18 +1732,15 @@ applyTweaks({});
 
 // Merge edits into the /*EDITMODE-BEGIN*/.../*EDITMODE-END*/ JSON block in an HTML string
 function mergeEditModeKeys(html: string, edits: Record<string, unknown>): string {
-  return html.replace(
-    /\/\*EDITMODE-BEGIN\*\/([\s\S]*?)\/\*EDITMODE-END\*\//,
-    (_, existing) => {
-      try {
-        const current = JSON.parse(existing.trim()) as Record<string, unknown>
-        const merged = { ...current, ...edits }
-        return `/*EDITMODE-BEGIN*/${JSON.stringify(merged)}/*EDITMODE-END*/`
-      } catch {
-        return `/*EDITMODE-BEGIN*/${existing}/*EDITMODE-END*/`
-      }
+  return html.replace(/\/\*EDITMODE-BEGIN\*\/([\s\S]*?)\/\*EDITMODE-END\*\//, (_, existing) => {
+    try {
+      const current = JSON.parse(existing.trim()) as Record<string, unknown>
+      const merged = { ...current, ...edits }
+      return `/*EDITMODE-BEGIN*/${JSON.stringify(merged)}/*EDITMODE-END*/`
+    } catch {
+      return `/*EDITMODE-BEGIN*/${existing}/*EDITMODE-END*/`
     }
-  )
+  })
 }
 
 function injectBaseHref(html: string, baseHref: string): string {
@@ -1658,7 +1784,9 @@ function injectIntoIframe(iframe: HTMLIFrameElement | null, script: string) {
     s.textContent = script
     doc.head.appendChild(s)
     s.remove() // self-remove; the code already ran
-  } catch { /* cross-origin or not yet loaded */ }
+  } catch {
+    /* cross-origin or not yet loaded */
+  }
 }
 
 // ─────────────────────────────────────────────────────────
@@ -1677,12 +1805,13 @@ export function DesignView(): React.JSX.Element {
     return sid ? loadSessionById(sid) : defaultSession()
   })
 
-  const [tabStates, setTabStates]     = useState<Record<string, TabState>>(_init.tabStates)
+  const [tabStates, setTabStates] = useState<Record<string, TabState>>(_init.tabStates)
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([])
   const [modelDialogOpen, setModelDialogOpen] = useState(false)
   const [modelDialogSelectedId, setModelDialogSelectedId] = useState<string | undefined>(undefined)
   const [allSkills, setAllSkills] = useState<SkillInfo[]>([])
   const [designSystems, setDesignSystems] = useState<DesignSystemInfo[]>([])
+  const [createDesignSystemId, setCreateDesignSystemId] = useState<string | null>(null)
   const [activeSkillIndex, setActiveSkillIndex] = useState(0)
   const [workspacePath, setWorkspacePath] = useState<string | null>(null)
   const [workspaceLoading, setWorkspaceLoading] = useState(false)
@@ -1692,8 +1821,15 @@ export function DesignView(): React.JSX.Element {
   const [linkModalOpen, setLinkModalOpen] = useState(false)
   const [linkModalMode, setLinkModalMode] = useState<"reference" | "import">("reference")
   const [linkModalText, setLinkModalText] = useState("")
-  const [importingSource, setImportingSource] = useState<null | "url" | "html" | "prototype_zip">(null)
-  const [exportChoice, setExportChoice] = useState<{ html: string; artifactPath: string; relatedFileCount: number; includesMetadata: boolean } | null>(null)
+  const [importingSource, setImportingSource] = useState<null | "url" | "html" | "prototype_zip">(
+    null
+  )
+  const [exportChoice, setExportChoice] = useState<{
+    html: string
+    artifactPath: string
+    relatedFileCount: number
+    includesMetadata: boolean
+  } | null>(null)
   const [exportingPackage, setExportingPackage] = useState(false)
   // Toast notifications
   const [toast, setToast] = useState<{ msg: string; id: number } | null>(null)
@@ -1702,7 +1838,7 @@ export function DesignView(): React.JSX.Element {
     const id = Date.now()
     setToast({ msg, id })
     const timeout = setTimeout(() => {
-      setToast((t) => t?.id === id ? null : t)
+      setToast((t) => (t?.id === id ? null : t))
       toastTimeoutsRef.current = toastTimeoutsRef.current.filter((item) => item !== timeout)
     }, 3000)
     toastTimeoutsRef.current.push(timeout)
@@ -1715,15 +1851,15 @@ export function DesignView(): React.JSX.Element {
   const { loadModels, loadProviders } = useAppStore()
 
   // Canvas refs
-  const iframeRef         = useRef<HTMLIFrameElement>(null)
+  const iframeRef = useRef<HTMLIFrameElement>(null)
   const canvasContainerRef = useRef<HTMLDivElement>(null)
-  const previewScrollRef  = useRef<HTMLDivElement>(null)
+  const previewScrollRef = useRef<HTMLDivElement>(null)
   const activeTabId = SINGLE_DESIGN_TAB_ID
-  const activeTabIdRef    = useRef(activeTabId)
-  const tabStatesRef      = useRef(tabStates)
-  const fileInputRef      = useRef<HTMLInputElement>(null)   // images only (screenshot / 📷)
-  const messageListRef    = useRef<HTMLDivElement>(null)
-  const skillOptionRefs   = useRef<Array<HTMLDivElement | null>>([])
+  const activeTabIdRef = useRef(activeTabId)
+  const tabStatesRef = useRef(tabStates)
+  const fileInputRef = useRef<HTMLInputElement>(null) // images only (screenshot / 📷)
+  const messageListRef = useRef<HTMLDivElement>(null)
+  const skillOptionRefs = useRef<Array<HTMLDivElement | null>>([])
   const pendingArtifactSaveRef = useRef<PendingArtifactSave | null>(null)
   const artifactSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -1731,43 +1867,54 @@ export function DesignView(): React.JSX.Element {
 
   // ── Per-tab derived values (all read from ts) ────────────────
   const inputValue = ts.inputValue
-  const tweaksOn   = ts.tweaksOn
+  const tweaksOn = ts.tweaksOn
   const activeMode = ts.activeMode
-  const zoom       = ts.zoom
-  const selectedDesignSystem = designSystems.find((system) => system.id === ts.selectedDesignSystemId) ?? null
-  const designSystemGroups = groupByLabel(designSystems, (system) => getDesignSystemGroupLabel(system.category || system.source))
+  const zoom = ts.zoom
+  const selectedDesignSystem =
+    designSystems.find((system) => system.id === ts.selectedDesignSystemId) ?? null
+  const designSystemGroups = groupByLabel(designSystems, (system) =>
+    getDesignSystemGroupLabel(system.category || system.source)
+  )
 
   const setInputValue = (val: string) => updateTs(activeTabId, { inputValue: val })
-  const setTweaksOn   = (val: boolean | ((v: boolean) => boolean)) =>
-    updateTs(activeTabId, (prev) => ({ tweaksOn: typeof val === "function" ? val(prev.tweaksOn) : val }))
+  const setTweaksOn = (val: boolean | ((v: boolean) => boolean)) =>
+    updateTs(activeTabId, (prev) => ({
+      tweaksOn: typeof val === "function" ? val(prev.tweaksOn) : val
+    }))
   const setActiveMode = (val: "comment" | "edit" | "draw" | null) =>
     updateTs(activeTabId, (prev) => ({
       activeMode: val,
-      draftDrawNote: val === "draw" ? prev.draftDrawNote : null,
+      draftDrawNote: val === "draw" ? prev.draftDrawNote : null
     }))
   const setZoom = (val: number | ((v: number) => number)) =>
     updateTs(activeTabId, (prev) => ({ zoom: typeof val === "function" ? val(prev.zoom) : val }))
 
   // ── helpers ──────────────────────────────────────────────
 
-  const updateTs = useCallback((tabId: string, patch: Partial<TabState> | ((prev: TabState) => Partial<TabState>)) => {
-    setTabStates((prev) => {
-      const current = prev[tabId] ?? makeTabState()
-      const updates = typeof patch === "function" ? patch(current) : patch
-      return { ...prev, [tabId]: { ...current, ...updates } }
-    })
-  }, [])
+  const updateTs = useCallback(
+    (tabId: string, patch: Partial<TabState> | ((prev: TabState) => Partial<TabState>)) => {
+      setTabStates((prev) => {
+        const current = prev[tabId] ?? makeTabState()
+        const updates = typeof patch === "function" ? patch(current) : patch
+        return { ...prev, [tabId]: { ...current, ...updates } }
+      })
+    },
+    []
+  )
 
-  const scheduleArtifactSave = useCallback((pendingSave: PendingArtifactSave) => {
-    pendingArtifactSaveRef.current = pendingSave
-    if (artifactSaveTimerRef.current) clearTimeout(artifactSaveTimerRef.current)
-    artifactSaveTimerRef.current = setTimeout(() => {
-      const save = pendingArtifactSaveRef.current
-      pendingArtifactSaveRef.current = null
-      artifactSaveTimerRef.current = null
-      flushPendingArtifactSave(save, updateTs)
-    }, 350)
-  }, [updateTs])
+  const scheduleArtifactSave = useCallback(
+    (pendingSave: PendingArtifactSave) => {
+      pendingArtifactSaveRef.current = pendingSave
+      if (artifactSaveTimerRef.current) clearTimeout(artifactSaveTimerRef.current)
+      artifactSaveTimerRef.current = setTimeout(() => {
+        const save = pendingArtifactSaveRef.current
+        pendingArtifactSaveRef.current = null
+        artifactSaveTimerRef.current = null
+        flushPendingArtifactSave(save, updateTs)
+      }, 350)
+    },
+    [updateTs]
+  )
 
   useEffect(() => {
     return () => {
@@ -1780,32 +1927,37 @@ export function DesignView(): React.JSX.Element {
     }
   }, [])
 
-  const updatePreviewScrollState = useCallback((iframeX?: number, iframeY?: number) => {
-    const state = tabStatesRef.current[activeTabIdRef.current]
-    const scale = Math.max((state?.zoom ?? 100) / 100, 0.25)
-    const wrapperX = (previewScrollRef.current?.scrollLeft ?? 0) / scale
-    const wrapperY = (previewScrollRef.current?.scrollTop ?? 0) / scale
-    const win = iframeRef.current?.contentWindow
-    updateTs(activeTabIdRef.current, {
-      iframeScrollX: wrapperX + (iframeX ?? win?.scrollX ?? 0),
-      iframeScrollY: wrapperY + (iframeY ?? win?.scrollY ?? 0),
-    })
-  }, [updateTs])
+  const updatePreviewScrollState = useCallback(
+    (iframeX?: number, iframeY?: number) => {
+      const state = tabStatesRef.current[activeTabIdRef.current]
+      const scale = Math.max((state?.zoom ?? 100) / 100, 0.25)
+      const wrapperX = (previewScrollRef.current?.scrollLeft ?? 0) / scale
+      const wrapperY = (previewScrollRef.current?.scrollTop ?? 0) / scale
+      const win = iframeRef.current?.contentWindow
+      updateTs(activeTabIdRef.current, {
+        iframeScrollX: wrapperX + (iframeX ?? win?.scrollX ?? 0),
+        iframeScrollY: wrapperY + (iframeY ?? win?.scrollY ?? 0)
+      })
+    },
+    [updateTs]
+  )
 
   const loadAvailableSkills = useCallback(async (): Promise<void> => {
     try {
-      const pluginSkillsPromise = typeof window.api.skills.listPlugins === "function"
-        ? window.api.skills.listPlugins().catch(() => [])
-        : Promise.resolve([])
+      const pluginSkillsPromise =
+        typeof window.api.skills.listPlugins === "function"
+          ? window.api.skills.listPlugins().catch(() => [])
+          : Promise.resolve([])
 
-      const templatesPromise = typeof window.api.design.listTemplates === "function"
-        ? window.api.design.listTemplates().catch(() => [])
-        : Promise.resolve([])
+      const templatesPromise =
+        typeof window.api.design.listTemplates === "function"
+          ? window.api.design.listTemplates().catch(() => [])
+          : Promise.resolve([])
       const [skills, pluginSkills, disabledList, templates] = await Promise.all([
         window.api.skills.list(),
         pluginSkillsPromise,
         window.api.skills.getDisabled(),
-        templatesPromise,
+        templatesPromise
       ])
       const disabledSet = new Set(disabledList.map((name) => name.trim().toLowerCase()))
       const enabledSkills = skills.filter(
@@ -1814,10 +1966,7 @@ export function DesignView(): React.JSX.Element {
           !disabledSet.has(skill.name.trim().toLowerCase())
       )
       const seen = new Set(enabledSkills.map((skill) => skill.name))
-      const merged = [
-        ...enabledSkills,
-        ...pluginSkills.filter((skill) => !seen.has(skill.name)),
-      ]
+      const merged = [...enabledSkills, ...pluginSkills.filter((skill) => !seen.has(skill.name))]
       setAllSkills(
         [
           ...templates.map((template) => ({
@@ -1827,13 +1976,16 @@ export function DesignView(): React.JSX.Element {
             source: "template" as const,
             mode: template.mode,
             platform: template.platform,
-            scenario: template.scenario,
+            scenario: template.scenario
           })),
           ...merged
-            .map((skill) => ({ name: skill.name, description: skill.description, path: skill.path }))
-            .map((skill) => ({ ...skill, source: "skill" as const })),
-        ]
-          .sort((a, b) => a.name.localeCompare(b.name, "zh-CN"))
+            .map((skill) => ({
+              name: skill.name,
+              description: skill.description,
+              path: skill.path
+            }))
+            .map((skill) => ({ ...skill, source: "skill" as const }))
+        ].sort((a, b) => a.name.localeCompare(b.name, "zh-CN"))
       )
     } catch {
       setAllSkills([])
@@ -1844,14 +1996,15 @@ export function DesignView(): React.JSX.Element {
     try {
       const systems = await window.api.design.listSystems()
       setDesignSystems(systems)
-      updateTs(SINGLE_DESIGN_TAB_ID, (prev) => {
-        if (prev.selectedDesignSystemId && systems.some((system) => system.id === prev.selectedDesignSystemId)) return {}
-        return { selectedDesignSystemId: systems.find((system) => system.id === "neutral-modern")?.id ?? systems[0]?.id ?? null }
+      setCreateDesignSystemId((prev) => {
+        if (prev && systems.some((system) => system.id === prev)) return prev
+        return getDefaultDesignSystemId(systems)
       })
     } catch {
       setDesignSystems([])
+      setCreateDesignSystemId(null)
     }
-  }, [updateTs])
+  }, [])
 
   const loadDesignModels = useCallback(async (): Promise<ModelOption[]> => {
     const models = await window.api.models.list()
@@ -1859,7 +2012,7 @@ export function DesignView(): React.JSX.Element {
       id: model.id,
       name: model.name,
       model: model.model,
-      available: model.available,
+      available: model.available
     }))
     setAvailableModels(options)
     return options
@@ -1883,12 +2036,17 @@ export function DesignView(): React.JSX.Element {
 
   useEffect(() => {
     let cancelled = false
-    window.api.workspace.get().then((path) => {
-      if (!cancelled) setWorkspacePath(path)
-    }).catch(() => {
-      if (!cancelled) setWorkspacePath(null)
-    })
-    return () => { cancelled = true }
+    window.api.workspace
+      .get()
+      .then((path) => {
+        if (!cancelled) setWorkspacePath(path)
+      })
+      .catch(() => {
+        if (!cancelled) setWorkspacePath(null)
+      })
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   const handleSelectWorkspace = useCallback(async () => {
@@ -1907,8 +2065,12 @@ export function DesignView(): React.JSX.Element {
   }, [showToast])
 
   // ── Keep refs in sync ────────────────────────────────────
-  useEffect(() => { activeTabIdRef.current = activeTabId }, [activeTabId])
-  useEffect(() => { tabStatesRef.current = tabStates }, [tabStates])
+  useEffect(() => {
+    activeTabIdRef.current = activeTabId
+  }, [activeTabId])
+  useEffect(() => {
+    tabStatesRef.current = tabStates
+  }, [tabStates])
   useEffect(() => {
     const messageList = messageListRef.current
     if (!messageList) return
@@ -1920,7 +2082,9 @@ export function DesignView(): React.JSX.Element {
   // currentSessionId ref — needed inside startGeneration (which is a stable useCallback)
   // to produce a stable artifact ID without capturing a stale closure value.
   const currentSessionIdRef = useRef<string | null>(currentSessionId)
-  useEffect(() => { currentSessionIdRef.current = currentSessionId }, [currentSessionId])
+  useEffect(() => {
+    currentSessionIdRef.current = currentSessionId
+  }, [currentSessionId])
 
   const cancelDesignRunForTab = useCallback((tabId: string) => {
     const entry = tabSessionsRef.current.get(tabId)
@@ -1932,14 +2096,13 @@ export function DesignView(): React.JSX.Element {
     tabSessionsRef.current.delete(tabId)
   }, [])
 
-  const isCurrentDesignRun = useCallback((
-    tabId: string,
-    runSessionId: string,
-    designSessionId: string | null
-  ): boolean => {
-    const entry = tabSessionsRef.current.get(tabId)
-    return currentSessionIdRef.current === designSessionId && entry?.sessionId === runSessionId
-  }, [])
+  const isCurrentDesignRun = useCallback(
+    (tabId: string, runSessionId: string, designSessionId: string | null): boolean => {
+      const entry = tabSessionsRef.current.get(tabId)
+      return currentSessionIdRef.current === designSessionId && entry?.sessionId === runSessionId
+    },
+    []
+  )
 
   useEffect(() => {
     return () => {
@@ -1952,7 +2115,7 @@ export function DesignView(): React.JSX.Element {
     const session = normalizeSingleTabSession({
       chatTabs: [{ id: SINGLE_DESIGN_TAB_ID, label: SINGLE_DESIGN_TAB_LABEL }],
       activeTabId,
-      tabStates,
+      tabStates
     })
     hydrateSessionArtifacts(currentSessionId, session, workspacePath)
       .then((hydrated) => {
@@ -1974,236 +2137,304 @@ export function DesignView(): React.JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentSessionId, workspacePath])
 
-  const createSession = useCallback((metaPatch?: Partial<SessionMeta>): string => {
-    cancelDesignRunForTab(SINGLE_DESIGN_TAB_ID)
-    const id = `ds_${uuid().slice(0, 8)}`
-    const session = defaultSession()
-    setTabStates(session.tabStates)
-    setCurrentSessionId(id)
-    currentSessionIdRef.current = id
-    localStorage.setItem(SESSION_LAST_KEY, id)
-    const meta: SessionMeta = {
-      id,
-      title: metaPatch?.title ?? "新设计",
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      kind: metaPatch?.kind ?? "prompt",
-      sourceLabel: metaPatch?.sourceLabel,
-    }
-    setSessionIndex((prev) => {
-      const next = [meta, ...prev]
-      saveIndex(next)
-      return next
-    })
-    return id
-  }, [cancelDesignRunForTab])
-
-  const newSession = useCallback(() => {
-    createSession()
-  }, [createSession])
-
-  const ensureWorkspaceSelected = useCallback(async (reason: string): Promise<boolean> => {
-    if (workspacePath) return true
-    setWorkspaceLoading(true)
-    try {
-      const selectedPath = await window.api.workspace.select()
-      if (!selectedPath) {
-        showToast(`${reason}前请先选择工作目录。`)
-        return false
+  const createSession = useCallback(
+    (
+      metaPatch?: Partial<SessionMeta>,
+      options?: {
+        designSystemId?: string | null
       }
-      setWorkspacePath(selectedPath)
-      showToast(`工作目录已切换：${getPathName(selectedPath)}`)
-      return true
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : "选择工作目录失败")
-      return false
-    } finally {
-      setWorkspaceLoading(false)
-    }
-  }, [workspacePath, showToast])
-
-  const readDependencyTextFile = useCallback(async (resolvedPath: string): Promise<string | null> => {
-    const result = await window.api.file.readText(resolvedPath)
-    return result.success ? (result.content ?? null) : null
-  }, [])
-
-  const syncContextFilesToWorkspace = useCallback(async (options: {
-    codeContext: Array<{ filename: string; content: string }> | null
-    attachedFiles: FileAttachment[] | null
-  }): Promise<DesignContextSyncResult> => {
-    if (!workspacePath || !currentSessionIdRef.current) return {}
-
-    const result: DesignContextSyncResult = {}
-
-    if (options.attachedFiles && options.attachedFiles.length > 0) {
-      const synced = await window.api.design.syncContextFiles({
-        workspacePath,
-        designSessionId: currentSessionIdRef.current,
-        kind: "attachments",
-        files: options.attachedFiles.map((file) => ({
-          filename: file.filename,
-          sourcePath: file.filePath,
-        })),
+    ): string => {
+      cancelDesignRunForTab(SINGLE_DESIGN_TAB_ID)
+      const id = `ds_${uuid().slice(0, 8)}`
+      const session = defaultSession()
+      const designSystemId = options?.designSystemId ?? null
+      const selectedForSession = designSystemId
+        ? (designSystems.find((system) => system.id === designSystemId) ?? null)
+        : null
+      session.tabStates[SINGLE_DESIGN_TAB_ID] = {
+        ...session.tabStates[SINGLE_DESIGN_TAB_ID],
+        selectedDesignSystemId: selectedForSession?.id ?? null
+      }
+      setTabStates(session.tabStates)
+      setCurrentSessionId(id)
+      currentSessionIdRef.current = id
+      localStorage.setItem(SESSION_LAST_KEY, id)
+      const meta: SessionMeta = {
+        id,
+        title: metaPatch?.title ?? "新设计",
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        kind: metaPatch?.kind ?? "prompt",
+        sourceLabel: metaPatch?.sourceLabel,
+        designSystemId: selectedForSession?.id ?? null,
+        designSystemName: selectedForSession?.name ?? null,
+        designSystemCategory: selectedForSession?.category ?? null
+      }
+      setSessionIndex((prev) => {
+        const next = [meta, ...prev]
+        saveIndex(next)
+        return next
       })
-      if (!synced.success) {
-        throw new Error(synced.error || "同步附件到工作目录失败")
-      }
-      result.attachmentsDir = synced.dirPath
-      result.attachmentFiles = synced.files
-    }
+      return id
+    },
+    [cancelDesignRunForTab, designSystems]
+  )
 
-    if (options.codeContext && options.codeContext.length > 0) {
-      const synced = await window.api.design.syncContextFiles({
-        workspacePath,
-        designSessionId: currentSessionIdRef.current,
-        kind: "code",
-        files: options.codeContext.map((file) => ({
-          filename: getPathName(file.filename) || file.filename,
-          sourcePath: /[\\/]/.test(file.filename) ? file.filename : undefined,
-          content: file.content,
-        })),
-      })
-      if (!synced.success) {
-        throw new Error(synced.error || "同步代码上下文到工作目录失败")
-      }
-      result.codeDir = synced.dirPath
-      result.codeFiles = synced.files
-    }
+  const newSession = useCallback(
+    (designSystemId?: string | null) => {
+      createSession(undefined, { designSystemId: designSystemId ?? null })
+    },
+    [createSession]
+  )
 
-    return result
-  }, [workspacePath])
-
-  const applyImportedDesign = useCallback((options: {
-    sessionId: string
-    html: string
-    sourceInfo: DesignSourceInfo
-    userMessage: string
-  }) => {
-    const tabId = SINGLE_DESIGN_TAB_ID
-    const storeKey = makeDesignArtifactId(options.sessionId, tabId)
-    const importedHtml = ensureEditMode(options.html)
-    const variations = parseVariations(importedHtml)
-
-    window.api.design.storeHtml(storeKey, importedHtml).catch((err) => {
-      console.warn("[Design] storeHtml failed", err)
-    })
-    saveDesignArtifactForTab(
-      storeKey,
-      importedHtml,
-      workspacePath,
-      tabId,
-      updateTs
-    )
-
-    updateTs(tabId, (prev) => ({
-      messages: [
-        { role: "user" as const, content: options.userMessage },
-        { role: "assistant" as const, content: "✓ 页面已还原，可直接用 Tweaks 编辑，后续追问会基于当前 HTML 继续迭代。" },
-      ],
-      html: importedHtml,
-      sourceInfo: options.sourceInfo,
-      generationState: "done",
-      questions: [],
-      answers: {},
-      originalPrompt: options.userMessage,
-      rightTab: "design",
-      variations,
-      activeVariationId: variations[0]?.id ?? null,
-      tweaksOn: true,
-      activeMode: "edit",
-      zoom: prev.zoom,
-      inputValue: "",
-      comments: [],
-      draftComment: null,
-      activeCommentId: null,
-      drawStrokes: [],
-      drawElementHints: [],
-      drawNotes: [],
-      draftDrawNote: null,
-      drawToolMode: "draw",
-      iframeScrollX: 0,
-      iframeScrollY: 0,
-      editModeAvailable: false,
-      selectedElement: null,
-      attachedImage: null,
-      reloadKey: prev.reloadKey + 1,
-      selectedSkill: null,
-      codeContext: null,
-      designLink: null,
-      attachedFiles: null,
-      retryPrompt: null,
-      retryIsIteration: false,
-      retryCleanMsg: null,
-      retrySkill: null,
-      artifactPath: null,
-      artifactMetadata: null,
-      apiHistory: [
-        { role: "user" as const, content: options.userMessage },
-        { role: "assistant" as const, content: "页面已还原，可继续编辑" },
-      ],
-      pendingApproval: null,
-    }))
-
-    updateIndexMeta(options.sessionId, {
-      title: options.sourceInfo.label,
-      kind: options.sourceInfo.kind,
-      sourceLabel: options.sourceInfo.label,
-      updatedAt: Date.now(),
-    })
-    setSessionIndex(loadIndex())
-  }, [workspacePath, updateTs])
-
-  const loadImportedHtmlFromFile = useCallback(async (filePath: string): Promise<{
-    html: string
-    label: string
-    detail: string
-  }> => {
-    const readResult = await window.api.file.readText(filePath)
-    if (!readResult.success || !readResult.content) {
-      throw new Error(readResult.error || "读取 HTML 文件失败")
-    }
-
-    const inlinedHtml = await inlineHtmlSiblingAssets({
-      html: readResult.content,
-      htmlPath: filePath,
-      readTextFile: readDependencyTextFile,
-      readDataUrlFile: readPreviewDependencyDataUrlFile,
-    })
-    const htmlWithBase = injectBaseHref(inlinedHtml, makeFileHref(filePath))
-
-    return {
-      html: htmlWithBase,
-      label: readResult.filename || getPathName(filePath) || "HTML 页面",
-      detail: filePath,
-    }
-  }, [readDependencyTextFile])
-
-  const loadImportedHtmlFromUrl = useCallback(async (url: string): Promise<{
-    html: string
-    label: string
-    detail: string
-  }> => {
-    const result = await window.api.design.importFromUrl(url)
-    if (!result.success || !result.html) {
-      throw new Error(result.error || "抓取页面失败")
-    }
-
-    const displayUrl = result.finalUrl || url
-    let label = result.title?.trim() || ""
-    if (!label) {
+  const ensureWorkspaceSelected = useCallback(
+    async (reason: string): Promise<boolean> => {
+      if (workspacePath) return true
+      setWorkspaceLoading(true)
       try {
-        label = new URL(displayUrl).hostname
-      } catch {
-        label = displayUrl
+        const selectedPath = await window.api.workspace.select()
+        if (!selectedPath) {
+          showToast(`${reason}前请先选择工作目录。`)
+          return false
+        }
+        setWorkspacePath(selectedPath)
+        showToast(`工作目录已切换：${getPathName(selectedPath)}`)
+        return true
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : "选择工作目录失败")
+        return false
+      } finally {
+        setWorkspaceLoading(false)
       }
-    }
+    },
+    [workspacePath, showToast]
+  )
 
-    return {
-      html: result.html,
-      label,
-      detail: displayUrl,
-    }
-  }, [])
+  const readDependencyTextFile = useCallback(
+    async (resolvedPath: string): Promise<string | null> => {
+      const result = await window.api.file.readText(resolvedPath)
+      return result.success ? (result.content ?? null) : null
+    },
+    []
+  )
+
+  const syncContextFilesToWorkspace = useCallback(
+    async (options: {
+      codeContext: Array<{ filename: string; content: string }> | null
+      attachedFiles: FileAttachment[] | null
+    }): Promise<DesignContextSyncResult> => {
+      if (!workspacePath || !currentSessionIdRef.current) return {}
+
+      const result: DesignContextSyncResult = {}
+
+      if (options.attachedFiles && options.attachedFiles.length > 0) {
+        const synced = await window.api.design.syncContextFiles({
+          workspacePath,
+          designSessionId: currentSessionIdRef.current,
+          kind: "attachments",
+          files: options.attachedFiles.map((file) => ({
+            filename: file.filename,
+            sourcePath: file.filePath
+          }))
+        })
+        if (!synced.success) {
+          throw new Error(synced.error || "同步附件到工作目录失败")
+        }
+        result.attachmentsDir = synced.dirPath
+        result.attachmentFiles = synced.files
+      }
+
+      if (options.codeContext && options.codeContext.length > 0) {
+        const synced = await window.api.design.syncContextFiles({
+          workspacePath,
+          designSessionId: currentSessionIdRef.current,
+          kind: "code",
+          files: options.codeContext.map((file) => ({
+            filename: getPathName(file.filename) || file.filename,
+            sourcePath: /[\\/]/.test(file.filename) ? file.filename : undefined,
+            content: file.content
+          }))
+        })
+        if (!synced.success) {
+          throw new Error(synced.error || "同步代码上下文到工作目录失败")
+        }
+        result.codeDir = synced.dirPath
+        result.codeFiles = synced.files
+      }
+
+      return result
+    },
+    [workspacePath]
+  )
+
+  const applyImportedDesign = useCallback(
+    (options: {
+      sessionId: string
+      html: string
+      sourceInfo: DesignSourceInfo
+      userMessage: string
+      designSystemId?: string | null
+    }) => {
+      const tabId = SINGLE_DESIGN_TAB_ID
+      const storeKey = makeDesignArtifactId(options.sessionId, tabId)
+      const importedHtml = ensureEditMode(options.html)
+      const variations = parseVariations(importedHtml)
+      const importedDesignSystem = options.designSystemId
+        ? (designSystems.find((system) => system.id === options.designSystemId) ?? null)
+        : null
+      const artifactMetadata = buildDesignArtifactMetadata({
+        artifactId: storeKey,
+        title: options.sourceInfo.label,
+        prompt: options.userMessage,
+        modelId: null,
+        skill: null,
+        designSystem: importedDesignSystem,
+        sourceInfo: options.sourceInfo,
+        html: importedHtml,
+        variations
+      })
+
+      window.api.design.storeHtml(storeKey, importedHtml).catch((err) => {
+        console.warn("[Design] storeHtml failed", err)
+      })
+      saveDesignArtifactForTab(
+        storeKey,
+        importedHtml,
+        workspacePath,
+        tabId,
+        updateTs,
+        undefined,
+        artifactMetadata
+      )
+
+      updateTs(tabId, (prev) => ({
+        messages: [
+          { role: "user" as const, content: options.userMessage },
+          {
+            role: "assistant" as const,
+            content: "✓ 页面已还原，可直接用 Tweaks 编辑，后续追问会基于当前 HTML 继续迭代。"
+          }
+        ],
+        html: importedHtml,
+        sourceInfo: options.sourceInfo,
+        generationState: "done",
+        questions: [],
+        answers: {},
+        originalPrompt: options.userMessage,
+        rightTab: "design",
+        variations,
+        activeVariationId: variations[0]?.id ?? null,
+        tweaksOn: true,
+        activeMode: "edit",
+        zoom: prev.zoom,
+        inputValue: "",
+        comments: [],
+        draftComment: null,
+        activeCommentId: null,
+        drawStrokes: [],
+        drawElementHints: [],
+        drawNotes: [],
+        draftDrawNote: null,
+        drawToolMode: "draw",
+        iframeScrollX: 0,
+        iframeScrollY: 0,
+        editModeAvailable: false,
+        selectedElement: null,
+        attachedImage: null,
+        reloadKey: prev.reloadKey + 1,
+        selectedSkill: null,
+        selectedDesignSystemId: importedDesignSystem?.id ?? null,
+        codeContext: null,
+        designLink: null,
+        attachedFiles: null,
+        retryPrompt: null,
+        retryIsIteration: false,
+        retryCleanMsg: null,
+        retrySkill: null,
+        artifactPath: null,
+        artifactMetadata,
+        apiHistory: [
+          { role: "user" as const, content: options.userMessage },
+          { role: "assistant" as const, content: "页面已还原，可继续编辑" }
+        ],
+        pendingApproval: null
+      }))
+
+      updateIndexMeta(options.sessionId, {
+        title: options.sourceInfo.label,
+        kind: options.sourceInfo.kind,
+        sourceLabel: options.sourceInfo.label,
+        updatedAt: Date.now(),
+        designSystemId: importedDesignSystem?.id ?? null,
+        designSystemName: importedDesignSystem?.name ?? null,
+        designSystemCategory: importedDesignSystem?.category ?? null
+      })
+      setSessionIndex(loadIndex())
+    },
+    [designSystems, workspacePath, updateTs]
+  )
+
+  const loadImportedHtmlFromFile = useCallback(
+    async (
+      filePath: string
+    ): Promise<{
+      html: string
+      label: string
+      detail: string
+    }> => {
+      const readResult = await window.api.file.readText(filePath)
+      if (!readResult.success || !readResult.content) {
+        throw new Error(readResult.error || "读取 HTML 文件失败")
+      }
+
+      const inlinedHtml = await inlineHtmlSiblingAssets({
+        html: readResult.content,
+        htmlPath: filePath,
+        readTextFile: readDependencyTextFile,
+        readDataUrlFile: readPreviewDependencyDataUrlFile
+      })
+      const htmlWithBase = injectBaseHref(inlinedHtml, makeFileHref(filePath))
+
+      return {
+        html: htmlWithBase,
+        label: readResult.filename || getPathName(filePath) || "HTML 页面",
+        detail: filePath
+      }
+    },
+    [readDependencyTextFile]
+  )
+
+  const loadImportedHtmlFromUrl = useCallback(
+    async (
+      url: string
+    ): Promise<{
+      html: string
+      label: string
+      detail: string
+    }> => {
+      const result = await window.api.design.importFromUrl(url)
+      if (!result.success || !result.html) {
+        throw new Error(result.error || "抓取页面失败")
+      }
+
+      const displayUrl = result.finalUrl || url
+      let label = result.title?.trim() || ""
+      if (!label) {
+        try {
+          label = new URL(displayUrl).hostname
+        } catch {
+          label = displayUrl
+        }
+      }
+
+      return {
+        html: result.html,
+        label,
+        detail: displayUrl
+      }
+    },
+    []
+  )
 
   const openReferenceLinkModal = useCallback(() => {
     setLinkModalMode("reference")
@@ -2220,145 +2451,213 @@ export function DesignView(): React.JSX.Element {
     setLinkModalOpen(true)
   }, [ensureWorkspaceSelected])
 
-  const handleImportHtmlFile = useCallback(async (source: "gallery" | "session") => {
-    const ready = await ensureWorkspaceSelected("导入 HTML 页面")
-    if (!ready) return
+  const handleImportHtmlFile = useCallback(
+    async (source: "gallery" | "session") => {
+      const ready = await ensureWorkspaceSelected("导入 HTML 页面")
+      if (!ready) return
 
-    setImportingSource("html")
-    try {
-      const picked = await window.api.file.selectCode()
-      if (picked.canceled || picked.filePaths.length === 0) return
+      setImportingSource("html")
+      try {
+        const picked = await window.api.file.selectCode()
+        if (picked.canceled || picked.filePaths.length === 0) return
 
-      const htmlPath = picked.filePaths.find((filePath) => /\.html?$/i.test(filePath))
-      if (!htmlPath) {
-        showToast("请选择 .html 或 .htm 文件")
-        return
+        const htmlPath = picked.filePaths.find((filePath) => /\.html?$/i.test(filePath))
+        if (!htmlPath) {
+          showToast("请选择 .html 或 .htm 文件")
+          return
+        }
+
+        const imported = await loadImportedHtmlFromFile(htmlPath)
+        const sessionId =
+          source === "gallery"
+            ? createSession(
+                {
+                  title: imported.label,
+                  kind: "import_html",
+                  sourceLabel: imported.label
+                },
+                { designSystemId: createDesignSystemId }
+              )
+            : (currentSessionId ??
+              createSession(
+                {
+                  title: imported.label,
+                  kind: "import_html",
+                  sourceLabel: imported.label
+                },
+                { designSystemId: createDesignSystemId }
+              ))
+
+        applyImportedDesign({
+          sessionId,
+          html: imported.html,
+          sourceInfo: { kind: "import_html", label: imported.label, detail: imported.detail },
+          userMessage: `导入 HTML 文件：${imported.label}`,
+          designSystemId:
+            source === "gallery"
+              ? createDesignSystemId
+              : tabStatesRef.current[SINGLE_DESIGN_TAB_ID]?.selectedDesignSystemId
+        })
+        setCreateModalOpen(false)
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : "导入 HTML 页面失败")
+      } finally {
+        setImportingSource(null)
       }
+    },
+    [
+      ensureWorkspaceSelected,
+      showToast,
+      loadImportedHtmlFromFile,
+      createSession,
+      createDesignSystemId,
+      currentSessionId,
+      applyImportedDesign
+    ]
+  )
 
-      const imported = await loadImportedHtmlFromFile(htmlPath)
-      const sessionId = source === "gallery"
-        ? createSession({
-            title: imported.label,
-            kind: "import_html",
-            sourceLabel: imported.label,
-          })
-        : (currentSessionId ?? createSession({
-            title: imported.label,
-            kind: "import_html",
-            sourceLabel: imported.label,
-          }))
+  const handleImportPrototypeZip = useCallback(
+    async (source: "gallery" | "session") => {
+      const ready = await ensureWorkspaceSelected("导入原型图压缩包")
+      if (!ready) return
 
-      applyImportedDesign({
-        sessionId,
-        html: imported.html,
-        sourceInfo: { kind: "import_html", label: imported.label, detail: imported.detail },
-        userMessage: `导入 HTML 文件：${imported.label}`,
-      })
-      setCreateModalOpen(false)
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : "导入 HTML 页面失败")
-    } finally {
-      setImportingSource(null)
-    }
-  }, [ensureWorkspaceSelected, showToast, loadImportedHtmlFromFile, createSession, currentSessionId, applyImportedDesign])
+      setImportingSource("prototype_zip")
+      try {
+        const picked = await window.api.file.selectPrototypeZip()
+        if (picked.canceled || picked.filePaths.length === 0) return
 
-  const handleImportPrototypeZip = useCallback(async (source: "gallery" | "session") => {
-    const ready = await ensureWorkspaceSelected("导入原型图压缩包")
-    if (!ready) return
+        const zipPath = picked.filePaths.find((filePath) => /\.zip$/i.test(filePath))
+        if (!zipPath) {
+          showToast("请选择 .zip 压缩包")
+          return
+        }
 
-    setImportingSource("prototype_zip")
-    try {
-      const picked = await window.api.file.selectPrototypeZip()
-      if (picked.canceled || picked.filePaths.length === 0) return
+        const imported = await window.api.design.importPrototypeZip(zipPath)
+        if (!imported.success || !imported.html) {
+          throw new Error(imported.error || "解析原型图压缩包失败")
+        }
 
-      const zipPath = picked.filePaths.find((filePath) => /\.zip$/i.test(filePath))
-      if (!zipPath) {
-        showToast("请选择 .zip 压缩包")
-        return
-      }
+        const label = imported.title || getPathName(zipPath) || "Pixso 原型"
+        const sessionId =
+          source === "gallery"
+            ? createSession(
+                {
+                  title: label,
+                  kind: "prototype_zip",
+                  sourceLabel: label
+                },
+                { designSystemId: createDesignSystemId }
+              )
+            : (currentSessionId ??
+              createSession(
+                {
+                  title: label,
+                  kind: "prototype_zip",
+                  sourceLabel: label
+                },
+                { designSystemId: createDesignSystemId }
+              ))
 
-      const imported = await window.api.design.importPrototypeZip(zipPath)
-      if (!imported.success || !imported.html) {
-        throw new Error(imported.error || "解析原型图压缩包失败")
-      }
-
-      const label = imported.title || getPathName(zipPath) || "Pixso 原型"
-      const sessionId = source === "gallery"
-        ? createSession({
-            title: label,
+        applyImportedDesign({
+          sessionId,
+          html: imported.html,
+          sourceInfo: {
             kind: "prototype_zip",
-            sourceLabel: label,
-          })
-        : (currentSessionId ?? createSession({
-            title: label,
-            kind: "prototype_zip",
-            sourceLabel: label,
-          }))
+            label,
+            detail: `${zipPath}${imported.imageCount ? ` · ${imported.imageCount} 张图片` : ""}`
+          },
+          userMessage: `导入 Pixso 原型图压缩包：${label}`,
+          designSystemId:
+            source === "gallery"
+              ? createDesignSystemId
+              : tabStatesRef.current[SINGLE_DESIGN_TAB_ID]?.selectedDesignSystemId
+        })
+        setCreateModalOpen(false)
+        showToast(`已生成原型 HTML：${imported.imageCount ?? 0} 张图片`)
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : "导入原型图压缩包失败")
+      } finally {
+        setImportingSource(null)
+      }
+    },
+    [
+      ensureWorkspaceSelected,
+      showToast,
+      createSession,
+      createDesignSystemId,
+      currentSessionId,
+      applyImportedDesign
+    ]
+  )
 
-      applyImportedDesign({
-        sessionId,
-        html: imported.html,
-        sourceInfo: {
-          kind: "prototype_zip",
-          label,
-          detail: `${zipPath}${imported.imageCount ? ` · ${imported.imageCount} 张图片` : ""}`,
-        },
-        userMessage: `导入 Pixso 原型图压缩包：${label}`,
-      })
-      setCreateModalOpen(false)
-      showToast(`已生成原型 HTML：${imported.imageCount ?? 0} 张图片`)
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : "导入原型图压缩包失败")
-    } finally {
-      setImportingSource(null)
-    }
-  }, [ensureWorkspaceSelected, showToast, createSession, currentSessionId, applyImportedDesign])
+  const handleImportUrl = useCallback(
+    async (rawUrl: string, source: "gallery" | "session") => {
+      const ready = await ensureWorkspaceSelected("导入链接页面")
+      if (!ready) return false
 
-  const handleImportUrl = useCallback(async (rawUrl: string, source: "gallery" | "session") => {
-    const ready = await ensureWorkspaceSelected("导入链接页面")
-    if (!ready) return false
+      const url = rawUrl.trim()
+      if (!url) {
+        showToast("请输入有效的页面链接")
+        return false
+      }
 
-    const url = rawUrl.trim()
-    if (!url) {
-      showToast("请输入有效的页面链接")
-      return false
-    }
+      setImportingSource("url")
+      try {
+        const imported = await loadImportedHtmlFromUrl(url)
+        const sessionId =
+          source === "gallery"
+            ? createSession(
+                {
+                  title: imported.label,
+                  kind: "import_url",
+                  sourceLabel: imported.label
+                },
+                { designSystemId: createDesignSystemId }
+              )
+            : (currentSessionId ??
+              createSession(
+                {
+                  title: imported.label,
+                  kind: "import_url",
+                  sourceLabel: imported.label
+                },
+                { designSystemId: createDesignSystemId }
+              ))
 
-    setImportingSource("url")
-    try {
-      const imported = await loadImportedHtmlFromUrl(url)
-      const sessionId = source === "gallery"
-        ? createSession({
-            title: imported.label,
-            kind: "import_url",
-            sourceLabel: imported.label,
-          })
-        : (currentSessionId ?? createSession({
-            title: imported.label,
-            kind: "import_url",
-            sourceLabel: imported.label,
-          }))
-
-      applyImportedDesign({
-        sessionId,
-        html: imported.html,
-        sourceInfo: { kind: "import_url", label: imported.label, detail: imported.detail },
-        userMessage: `通过链接还原页面：${imported.detail}`,
-      })
-      setCreateModalOpen(false)
-      return true
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : "导入链接页面失败")
-      return false
-    } finally {
-      setImportingSource(null)
-    }
-  }, [ensureWorkspaceSelected, showToast, loadImportedHtmlFromUrl, createSession, currentSessionId, applyImportedDesign])
+        applyImportedDesign({
+          sessionId,
+          html: imported.html,
+          sourceInfo: { kind: "import_url", label: imported.label, detail: imported.detail },
+          userMessage: `通过链接还原页面：${imported.detail}`,
+          designSystemId:
+            source === "gallery"
+              ? createDesignSystemId
+              : tabStatesRef.current[SINGLE_DESIGN_TAB_ID]?.selectedDesignSystemId
+        })
+        setCreateModalOpen(false)
+        return true
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : "导入链接页面失败")
+        return false
+      } finally {
+        setImportingSource(null)
+      }
+    },
+    [
+      ensureWorkspaceSelected,
+      showToast,
+      loadImportedHtmlFromUrl,
+      createSession,
+      createDesignSystemId,
+      currentSessionId,
+      applyImportedDesign
+    ]
+  )
 
   // ── Persist session to localStorage (debounced 1.5s, skip during streaming) ──
   const _persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
-    if (!currentSessionId) return  // don't save while in gallery
+    if (!currentSessionId) return // don't save while in gallery
     if (_persistTimerRef.current) clearTimeout(_persistTimerRef.current)
     _persistTimerRef.current = setTimeout(() => {
       const isStreaming = Object.values(tabStates).some(
@@ -2371,57 +2670,79 @@ export function DesignView(): React.JSX.Element {
           activeTabId,
           tabStates: Object.fromEntries(
             Object.entries(tabStates).map(([id, s]) => [id, serializeTs(s)])
-          ),
+          )
         }
         localStorage.setItem(sessionDataKey(currentSessionId), JSON.stringify(payload))
         // Update index metadata (title from first message, updatedAt)
         const firstState = tabStates[SINGLE_DESIGN_TAB_ID]
         const firstUserMsg = firstState?.messages?.find((m) => m.role === "user")
-        const autoTitle = firstState?.sourceInfo?.label
-          || (firstUserMsg ? (firstUserMsg.content as string).slice(0, 24) : "新设计")
+        const autoTitle =
+          firstState?.sourceInfo?.label ||
+          (firstUserMsg ? (firstUserMsg.content as string).slice(0, 24) : "新设计")
+        const selectedMetaDesignSystem = firstState?.selectedDesignSystemId
+          ? designSystems.find((system) => system.id === firstState.selectedDesignSystemId)
+          : null
         updateIndexMeta(currentSessionId, {
           updatedAt: Date.now(),
           title: autoTitle,
           kind: firstState?.sourceInfo?.kind ?? "prompt",
           sourceLabel: firstState?.sourceInfo?.label,
           thumbnailText: firstState?.artifactMetadata?.preview?.thumbnailText,
-          designSystemId: firstState?.selectedDesignSystemId ?? firstState?.artifactMetadata?.designSystemId ?? null,
-          designSystemName: firstState?.artifactMetadata?.designSystemName ?? undefined,
-          designSystemCategory: firstState?.artifactMetadata?.designSystemCategory ?? undefined,
-          artifactPath: firstState?.artifactPath ?? undefined,
+          designSystemId:
+            firstState?.selectedDesignSystemId ??
+            firstState?.artifactMetadata?.designSystemId ??
+            null,
+          designSystemName:
+            selectedMetaDesignSystem?.name ??
+            firstState?.artifactMetadata?.designSystemName ??
+            undefined,
+          designSystemCategory:
+            selectedMetaDesignSystem?.category ??
+            firstState?.artifactMetadata?.designSystemCategory ??
+            undefined,
+          artifactPath: firstState?.artifactPath ?? undefined
         })
         setSessionIndex(loadIndex())
       } catch {
         // Ignore persistence errors and keep the current in-memory session.
       }
     }, 1500)
-    return () => { if (_persistTimerRef.current) clearTimeout(_persistTimerRef.current) }
-  }, [activeTabId, tabStates, currentSessionId])
+    return () => {
+      if (_persistTimerRef.current) clearTimeout(_persistTimerRef.current)
+    }
+  }, [activeTabId, tabStates, currentSessionId, designSystems])
 
   // ── Session navigation ─────────────────────────────────────
-  const openSession = useCallback((id: string) => {
-    cancelDesignRunForTab(SINGLE_DESIGN_TAB_ID)
-    const session = normalizeSingleTabSession(loadSessionById(id))
-    setTabStates(session.tabStates)
-    tabStatesRef.current = session.tabStates
-    setCurrentSessionId(id)
-    currentSessionIdRef.current = id
-    localStorage.setItem(SESSION_LAST_KEY, id)
-    hydrateSessionArtifacts(id, session, workspacePath)
-      .then((hydrated) => {
-        if (currentSessionIdRef.current !== id) return
-        const currentState = tabStatesRef.current[SINGLE_DESIGN_TAB_ID]
-        const snapshotState = session.tabStates[SINGLE_DESIGN_TAB_ID]
-        const snapshotFingerprint = makeHydrationGuardFingerprint(snapshotState)
-        const currentFingerprint = makeHydrationGuardFingerprint(currentState)
-        if (snapshotFingerprint && currentFingerprint !== snapshotFingerprint) return
-        if (makeHydrationGuardFingerprint(hydrated.tabStates[SINGLE_DESIGN_TAB_ID]) === currentFingerprint) return
-        setTabStates(hydrated.tabStates)
-      })
-      .catch((err) => {
-        console.warn("[Design] hydrateSessionArtifacts failed", err)
-      })
-  }, [cancelDesignRunForTab, workspacePath])
+  const openSession = useCallback(
+    (id: string) => {
+      cancelDesignRunForTab(SINGLE_DESIGN_TAB_ID)
+      const session = normalizeSingleTabSession(loadSessionById(id))
+      setTabStates(session.tabStates)
+      tabStatesRef.current = session.tabStates
+      setCurrentSessionId(id)
+      currentSessionIdRef.current = id
+      localStorage.setItem(SESSION_LAST_KEY, id)
+      hydrateSessionArtifacts(id, session, workspacePath)
+        .then((hydrated) => {
+          if (currentSessionIdRef.current !== id) return
+          const currentState = tabStatesRef.current[SINGLE_DESIGN_TAB_ID]
+          const snapshotState = session.tabStates[SINGLE_DESIGN_TAB_ID]
+          const snapshotFingerprint = makeHydrationGuardFingerprint(snapshotState)
+          const currentFingerprint = makeHydrationGuardFingerprint(currentState)
+          if (snapshotFingerprint && currentFingerprint !== snapshotFingerprint) return
+          if (
+            makeHydrationGuardFingerprint(hydrated.tabStates[SINGLE_DESIGN_TAB_ID]) ===
+            currentFingerprint
+          )
+            return
+          setTabStates(hydrated.tabStates)
+        })
+        .catch((err) => {
+          console.warn("[Design] hydrateSessionArtifacts failed", err)
+        })
+    },
+    [cancelDesignRunForTab, workspacePath]
+  )
 
   const backToGallery = useCallback(() => {
     cancelDesignRunForTab(SINGLE_DESIGN_TAB_ID)
@@ -2431,17 +2752,20 @@ export function DesignView(): React.JSX.Element {
     setSessionIndex(loadIndex())
   }, [cancelDesignRunForTab])
 
-  const deleteSession = useCallback((id: string) => {
-    if (currentSessionIdRef.current === id) {
-      cancelDesignRunForTab(SINGLE_DESIGN_TAB_ID)
-    }
-    localStorage.removeItem(sessionDataKey(id))
-    setSessionIndex((prev) => {
-      const next = prev.filter((m) => m.id !== id)
-      saveIndex(next)
-      return next
-    })
-  }, [cancelDesignRunForTab])
+  const deleteSession = useCallback(
+    (id: string) => {
+      if (currentSessionIdRef.current === id) {
+        cancelDesignRunForTab(SINGLE_DESIGN_TAB_ID)
+      }
+      localStorage.removeItem(sessionDataKey(id))
+      setSessionIndex((prev) => {
+        const next = prev.filter((m) => m.id !== id)
+        saveIndex(next)
+        return next
+      })
+    },
+    [cancelDesignRunForTab]
+  )
 
   // ── Inject / remove mode scripts when activeMode changes ─
   useEffect(() => {
@@ -2485,12 +2809,22 @@ export function DesignView(): React.JSX.Element {
       // ── Comment click ──────────────────────────────────────
       if (msg.type === "__comment_click") {
         const { pageX, pageY, elementDesc } = msg as {
-          pageX: number; pageY: number; elementDesc: string
+          pageX: number
+          pageY: number
+          elementDesc: string
         }
-        const anchor = getPointAnchor(iframeRef.current?.contentDocument ?? null, { x: pageX, y: pageY })
+        const anchor = getPointAnchor(iframeRef.current?.contentDocument ?? null, {
+          x: pageX,
+          y: pageY
+        })
         updateTs(activeTabIdRef.current, {
-          draftComment: { pageX, pageY, elementDesc: anchor?.label || elementDesc || "元素", anchor },
-          activeCommentId: null,
+          draftComment: {
+            pageX,
+            pageY,
+            elementDesc: anchor?.label || elementDesc || "元素",
+            anchor
+          },
+          activeCommentId: null
         })
         return
       }
@@ -2506,16 +2840,22 @@ export function DesignView(): React.JSX.Element {
           if (state?.activeMode === "edit") {
             // Send activation — but we can't call sendToIframe here (side-effect in setState)
             // Instead, schedule it as a microtask
-            Promise.resolve().then(() => sendToIframe(iframeRef.current, { type: "__activate_edit_mode" }))
+            Promise.resolve().then(() =>
+              sendToIframe(iframeRef.current, { type: "__activate_edit_mode" })
+            )
           }
-          return prev  // no state change needed
+          return prev // no state change needed
         })
         return
       }
 
       // ── Edit select: user clicked an element in the iframe ───
       if (msg.type === "__edit_click") {
-        const { edId, tagName, styles } = msg as { edId: string; tagName: string; styles: ElementStyles }
+        const { edId, tagName, styles } = msg as {
+          edId: string
+          tagName: string
+          styles: ElementStyles
+        }
         updateTs(activeTabIdRef.current, { selectedElement: { edId, tagName, styles } })
         return
       }
@@ -2531,7 +2871,7 @@ export function DesignView(): React.JSX.Element {
           html: patchedHtml,
           workspacePath,
           tabId,
-          existingArtifactPath: state?.artifactPath ?? null,
+          existingArtifactPath: state?.artifactPath ?? null
         })
         setTabStates((prev) => {
           const state = prev[tabId]
@@ -2543,8 +2883,8 @@ export function DesignView(): React.JSX.Element {
                 ...state,
                 variations: state.variations.map((v) =>
                   v.id === state.activeVariationId ? { ...v, html: patchedHtml } : v
-                ),
-              },
+                )
+              }
             }
           }
           return { ...prev, [tabId]: { ...state, html: patchedHtml } }
@@ -2567,7 +2907,7 @@ export function DesignView(): React.JSX.Element {
           html: updated,
           workspacePath,
           tabId,
-          existingArtifactPath: state.artifactPath,
+          existingArtifactPath: state.artifactPath
         })
         setTabStates((prev) => {
           const latest = prev[tabId]
@@ -2581,8 +2921,8 @@ export function DesignView(): React.JSX.Element {
                 ...latest,
                 variations: latest.variations.map((v) =>
                   v.id === latest.activeVariationId ? { ...v, html: updated } : v
-                ),
-              },
+                )
+              }
             }
           }
           return { ...prev, [tabId]: { ...latest, html: updated } }
@@ -2596,467 +2936,557 @@ export function DesignView(): React.JSX.Element {
 
   // ── Ask Questions ─────────────────────────────────────────
 
-  const startAskQuestions = useCallback((prompt: string, tabId: string, modelId?: string) => {
-    const sessionId = uuid()
-    const designSessionId = currentSessionIdRef.current
-    updateTs(tabId, { generationState: "asking", originalPrompt: prompt, rightTab: "questions", questions: [] })
+  const startAskQuestions = useCallback(
+    (prompt: string, tabId: string, modelId?: string) => {
+      const sessionId = uuid()
+      const designSessionId = currentSessionIdRef.current
+      updateTs(tabId, {
+        generationState: "asking",
+        originalPrompt: prompt,
+        rightTab: "questions",
+        questions: []
+      })
 
-    // Cancel any existing session for this tab before starting a new one
-    cancelDesignRunForTab(tabId)
-    tabSessionsRef.current.set(tabId, { cleanup: () => {}, sessionId })
+      // Cancel any existing session for this tab before starting a new one
+      cancelDesignRunForTab(tabId)
+      tabSessionsRef.current.set(tabId, { cleanup: () => {}, sessionId })
 
-    const cleanup = window.api.design.askQuestions(sessionId, prompt, (event) => {
-      if (!isCurrentDesignRun(tabId, sessionId, designSessionId)) return
+      const cleanup = window.api.design.askQuestions(
+        sessionId,
+        prompt,
+        (event) => {
+          if (!isCurrentDesignRun(tabId, sessionId, designSessionId)) return
 
-      if (event.type === "model_retry") {
-        const retry = asDesignModelRetryState(event)
-        if (!retry) return
-        updateTs(tabId, (prev) => {
-          const msgs = [...prev.messages]
-          const last = msgs.length - 1
-          const lastMessage = msgs[last]
-          if (lastMessage?.role === "assistant" && lastMessage.isStreaming && lastMessage.modelRetry) {
-            msgs[last] = { ...lastMessage, modelRetry: retry }
-            return { messages: msgs }
+          if (event.type === "model_retry") {
+            const retry = asDesignModelRetryState(event)
+            if (!retry) return
+            updateTs(tabId, (prev) => {
+              const msgs = [...prev.messages]
+              const last = msgs.length - 1
+              const lastMessage = msgs[last]
+              if (
+                lastMessage?.role === "assistant" &&
+                lastMessage.isStreaming &&
+                lastMessage.modelRetry
+              ) {
+                msgs[last] = { ...lastMessage, modelRetry: retry }
+                return { messages: msgs }
+              }
+              return {
+                messages: [
+                  ...prev.messages,
+                  { role: "assistant" as const, content: "", isStreaming: true, modelRetry: retry }
+                ]
+              }
+            })
+            return
           }
-          return {
-            messages: [
-              ...prev.messages,
-              { role: "assistant" as const, content: "", isStreaming: true, modelRetry: retry },
-            ],
+
+          if (event.type === "model_retry_clear") {
+            updateTs(tabId, (prev) => ({
+              messages: patchLastAssistantMessage(prev.messages, { modelRetry: null })
+            }))
+            return
           }
-        })
-        return
-      }
 
-      if (event.type === "model_retry_clear") {
-        updateTs(tabId, (prev) => ({
-          messages: patchLastAssistantMessage(prev.messages, { modelRetry: null }),
-        }))
-        return
-      }
-
-      if (event.type === "done") {
-        const qs = Array.isArray(event.questions)
-          ? event.questions.map(normalizeQuestionDef).filter((question): question is QuestionDef => Boolean(question))
-          : []
-        updateTs(tabId, (prev) => ({
-          generationState: "questions_ready",
-          questions: qs,
-          rightTab: "questions",   // re-assert — guards against any interleaved update
-          messages: [
-            ...prev.messages.filter((msg) => !(msg.role === "assistant" && msg.isStreaming && msg.modelRetry)),
-            { role: "questions-prompt" as const, content: "请补充相关问题 →" },
-          ],
-        }))
-        tabSessionsRef.current.delete(tabId)
-      } else if (event.type === "error") {
-        updateTs(tabId, (prev) => ({
-          generationState: "error",
-          messages: [
-            ...prev.messages.filter((msg) => !(msg.role === "assistant" && msg.isStreaming && msg.modelRetry)),
-            { role: "assistant" as const, content: `❌ ${event.error ?? "Failed to generate questions"}` },
-          ],
-        }))
-        tabSessionsRef.current.delete(tabId)
-      }
-    }, modelId)
-    tabSessionsRef.current.set(tabId, { cleanup, sessionId })
-  }, [cancelDesignRunForTab, isCurrentDesignRun, updateTs])
+          if (event.type === "done") {
+            const qs = Array.isArray(event.questions)
+              ? event.questions
+                  .map(normalizeQuestionDef)
+                  .filter((question): question is QuestionDef => Boolean(question))
+              : []
+            updateTs(tabId, (prev) => ({
+              generationState: "questions_ready",
+              questions: qs,
+              rightTab: "questions", // re-assert — guards against any interleaved update
+              messages: [
+                ...prev.messages.filter(
+                  (msg) => !(msg.role === "assistant" && msg.isStreaming && msg.modelRetry)
+                ),
+                { role: "questions-prompt" as const, content: "请补充相关问题 →" }
+              ]
+            }))
+            tabSessionsRef.current.delete(tabId)
+          } else if (event.type === "error") {
+            updateTs(tabId, (prev) => ({
+              generationState: "error",
+              messages: [
+                ...prev.messages.filter(
+                  (msg) => !(msg.role === "assistant" && msg.isStreaming && msg.modelRetry)
+                ),
+                {
+                  role: "assistant" as const,
+                  content: `❌ ${event.error ?? "Failed to generate questions"}`
+                }
+              ]
+            }))
+            tabSessionsRef.current.delete(tabId)
+          }
+        },
+        modelId
+      )
+      tabSessionsRef.current.set(tabId, { cleanup, sessionId })
+    },
+    [cancelDesignRunForTab, isCurrentDesignRun, updateTs]
+  )
 
   // ── Generate Design ───────────────────────────────────────
 
-  const startGeneration = useCallback((
-    prompt: string,
-    tabId: string,
-    isIteration = false,
-    modelId?: string,
-    /** Clean user message to append to apiHistory after success (no HTML/suffix) */
-    cleanUserMsg?: string,
-    image?: { base64: string; mimeType: string },
-    skill?: DesignSkillReference | null,
-    sourceArtifactPath?: string | null,
-    freshAgentThread = false,
-    rollbackSnapshot?: DesignIterationRollbackSnapshot | null,
-  ) => {
-    const sessionId = uuid()
-    updateTs(tabId, (prev) => ({
-      generationState: "generating",
-      rightTab: "design",
-      pendingApproval: null,
-      retryPrompt: prompt,
-      retryIsIteration: isIteration,
-      retryCleanMsg: cleanUserMsg ?? null,
-      retrySkill: skill ?? null,
-      messages: [
-        ...prev.messages,
-        {
-          role: "assistant" as const,
-          content: "",
-          isStreaming: true,
-          isIteration,
-          executionEvents: [],
-        },
-      ],
-    }))
+  const startGeneration = useCallback(
+    (
+      prompt: string,
+      tabId: string,
+      isIteration = false,
+      modelId?: string,
+      /** Clean user message to append to apiHistory after success (no HTML/suffix) */
+      cleanUserMsg?: string,
+      image?: { base64: string; mimeType: string },
+      skill?: DesignSkillReference | null,
+      sourceArtifactPath?: string | null,
+      freshAgentThread = false,
+      rollbackSnapshot?: DesignIterationRollbackSnapshot | null
+    ) => {
+      const sessionId = uuid()
+      updateTs(tabId, (prev) => ({
+        generationState: "generating",
+        rightTab: "design",
+        pendingApproval: null,
+        retryPrompt: prompt,
+        retryIsIteration: isIteration,
+        retryCleanMsg: cleanUserMsg ?? null,
+        retrySkill: skill ?? null,
+        messages: [
+          ...prev.messages,
+          {
+            role: "assistant" as const,
+            content: "",
+            isStreaming: true,
+            isIteration,
+            executionEvents: []
+          }
+        ]
+      }))
 
-    // Cancel any existing session for this tab before starting a new one.
-    cancelDesignRunForTab(tabId)
-    tabSessionsRef.current.set(tabId, { cleanup: () => {}, sessionId })
+      // Cancel any existing session for this tab before starting a new one.
+      cancelDesignRunForTab(tabId)
+      tabSessionsRef.current.set(tabId, { cleanup: () => {}, sessionId })
 
-    // Route through the full Agent Runtime: Skills, MCP tools, Hooks, Approvals,
-    // context summarisation. Each design session gets an isolated thread.
-    const designSessionId = currentSessionIdRef.current
-    const agentRuntimeSessionId = freshAgentThread
-      ? `retry_${sessionId}_${designSessionId ?? "session"}`
-      : designSessionId
-    const agentThreadId = makeDesignAgentThreadId(agentRuntimeSessionId, tabId)
-    const cleanupApprovalRequest = window.api.sandbox.onApprovalRequest(agentThreadId, (request) => {
-      if (!isCurrentDesignRun(tabId, sessionId, designSessionId)) return
-      updateTs(tabId, { pendingApproval: asDesignApprovalRequest(request) })
-    })
-    const cleanupApprovalTimeout = window.api.sandbox.onApprovalTimeout(agentThreadId, (data) => {
-      if (!isCurrentDesignRun(tabId, sessionId, designSessionId)) return
-      updateTs(tabId, (prev) => {
-        if (prev.pendingApproval?._orchestratorRequestId !== data.requestId) return {}
-        return { pendingApproval: null }
+      // Route through the full Agent Runtime: Skills, MCP tools, Hooks, Approvals,
+      // context summarisation. Each design session gets an isolated thread.
+      const designSessionId = currentSessionIdRef.current
+      const agentRuntimeSessionId = freshAgentThread
+        ? `retry_${sessionId}_${designSessionId ?? "session"}`
+        : designSessionId
+      const agentThreadId = makeDesignAgentThreadId(agentRuntimeSessionId, tabId)
+      const cleanupApprovalRequest = window.api.sandbox.onApprovalRequest(
+        agentThreadId,
+        (request) => {
+          if (!isCurrentDesignRun(tabId, sessionId, designSessionId)) return
+          updateTs(tabId, { pendingApproval: asDesignApprovalRequest(request) })
+        }
+      )
+      const cleanupApprovalTimeout = window.api.sandbox.onApprovalTimeout(agentThreadId, (data) => {
+        if (!isCurrentDesignRun(tabId, sessionId, designSessionId)) return
+        updateTs(tabId, (prev) => {
+          if (prev.pendingApproval?._orchestratorRequestId !== data.requestId) return {}
+          return { pendingApproval: null }
+        })
       })
-    })
 
-    let cleanupStream: (() => void) | null = null
-    let cleanedUp = false
-    const cleanup = () => {
-      if (cleanedUp) return
-      cleanedUp = true
-      cleanupStream?.()
-      cleanupApprovalRequest()
-      cleanupApprovalTimeout()
-    }
-
-    // Stable artifact ID: based on the design session + tab, NOT the streaming session UUID.
-    // Using the streaming sessionId (which changes per-call) would create a new artifact
-    // directory every generation, making the filesystem-based context chain useless.
-    const stableArtifactId = makeDesignArtifactId(currentSessionIdRef.current, tabId)
-    const normalizeProgressToken = createDesignProgressNormalizer()
-    const runStartState = tabStatesRef.current[tabId]
-
-    const onEvent = async (event: {
-      type: string
-      token?: string
-      html?: string
-      error?: string
-      event?: unknown
-      attempt?: number
-      maxRetries?: number
-      reason?: string
-      delayMs?: number
-      artifactPath?: string
-      metadata?: unknown
-    }) => {
-      if (!isCurrentDesignRun(tabId, sessionId, designSessionId)) return
-
-      if (event.type === "model_retry") {
-        const retry = asDesignModelRetryState(event)
-        if (!retry) return
-        updateTs(tabId, (prev) => {
-          const msgs = [...prev.messages]
-          const last = msgs.length - 1
-          if (msgs[last]?.role !== "assistant") return {}
-          msgs[last] = { ...msgs[last], modelRetry: retry }
-          return { messages: msgs }
-        })
-        return
+      let cleanupStream: (() => void) | null = null
+      let cleanedUp = false
+      const cleanup = () => {
+        if (cleanedUp) return
+        cleanedUp = true
+        cleanupStream?.()
+        cleanupApprovalRequest()
+        cleanupApprovalTimeout()
       }
 
-      if (event.type === "model_retry_clear") {
-        updateTs(tabId, (prev) => {
-          const msgs = [...prev.messages]
-          const last = msgs.length - 1
-          if (msgs[last]?.role !== "assistant" || !msgs[last].modelRetry) return {}
-          msgs[last] = { ...msgs[last], modelRetry: null }
-          return { messages: msgs }
-        })
-        return
-      }
+      // Stable artifact ID: based on the design session + tab, NOT the streaming session UUID.
+      // Using the streaming sessionId (which changes per-call) would create a new artifact
+      // directory every generation, making the filesystem-based context chain useless.
+      const stableArtifactId = makeDesignArtifactId(currentSessionIdRef.current, tabId)
+      const normalizeProgressToken = createDesignProgressNormalizer()
+      const runStartState = tabStatesRef.current[tabId]
 
-      if (event.type === "execution") {
-        const executionEvent = asDesignExecutionEvent(event.event)
-        if (!executionEvent) return
-        updateTs(tabId, (prev) => {
-          const msgs = [...prev.messages]
-          const last = msgs.length - 1
-          if (msgs[last]?.role !== "assistant") return {}
-          msgs[last] = {
-            ...msgs[last],
-            executionEvents: appendDesignExecutionEvent(msgs[last].executionEvents ?? [], executionEvent),
-          }
-          return { messages: msgs }
-        })
-        return
-      }
+      const onEvent = async (event: {
+        type: string
+        token?: string
+        html?: string
+        error?: string
+        event?: unknown
+        attempt?: number
+        maxRetries?: number
+        reason?: string
+        delayMs?: number
+        artifactPath?: string
+        metadata?: unknown
+      }) => {
+        if (!isCurrentDesignRun(tabId, sessionId, designSessionId)) return
 
-      if (event.type === "token" && event.token) {
-        const progressText = normalizeProgressToken(event.token)
-        if (!progressText) return
-        updateTs(tabId, (prev) => {
-          const msgs = [...prev.messages]
-          const last = msgs.length - 1
-          if (msgs[last]?.role !== "assistant") return {}
-          msgs[last] = {
-            ...msgs[last],
-            executionEvents: appendDesignExecutionEvent(msgs[last].executionEvents ?? [], {
-              kind: "assistant_text",
-              id: "assistant-progress",
-              content: progressText,
-              status: "running",
-              timestamp: Date.now(),
-            }),
-          }
-          return { messages: msgs }
-        })
-        return
-      }
-
-      if (event.type === "done" && event.html) {
-        // Guarantee every generated design has a working EDITMODE block
-        const patchedHtml = await prepareHtmlForSrcDoc(event.html, event.artifactPath ?? null)
-        const variations = parseVariations(patchedHtml)
-        const runState = tabStatesRef.current[tabId]
-        const selectedDesignSystemForRun = designSystems.find((system) => system.id === runState?.selectedDesignSystemId) ?? null
-        const artifactMetadata = asDesignArtifactMetadata(event.metadata) ?? buildDesignArtifactMetadata({
-          artifactId: stableArtifactId,
-          title: cleanUserMsg?.slice(0, 32) || runState?.sourceInfo?.label,
-          prompt: cleanUserMsg ?? prompt,
-          modelId: modelId ?? null,
-          skill: skill ?? null,
-          designSystem: selectedDesignSystemForRun,
-          sourceInfo: runState?.sourceInfo ?? null,
-          html: patchedHtml,
-          variations,
-        })
-
-        // Keep htmlStore in sync (used as fallback / reference)
-        window.api.design.storeHtml(stableArtifactId, patchedHtml).catch((err) => {
-          console.warn("[Design] storeHtml failed", err)
-        })
-        if (event.artifactPath) {
-          updateTs(tabId, { artifactPath: event.artifactPath, artifactMetadata })
-        } else {
-          saveDesignArtifactForTab(stableArtifactId, patchedHtml, workspacePath, tabId, updateTs, undefined, artifactMetadata)
-        }
-
-        updateTs(tabId, (prev) => {
-          const msgs = [...prev.messages]
-          const last = msgs.length - 1
-          const doneLabel = variations.length > 0
-            ? `✓ ${isIteration ? "设计已更新" : "设计已生成"} - ${variations.length} 个方案`
-            : isIteration ? "✓ 设计已更新" : "✓ 设计已生成"
-          if (msgs[last]?.role === "assistant") {
-            msgs[last] = { ...msgs[last], content: doneLabel, isStreaming: false, modelRetry: null }
-          }
-
-          // Keep apiHistory in sync for display / session backup
-          const prevHistory = prev.apiHistory ?? []
-          const newHistory: Array<{ role: "user" | "assistant"; content: string }> = cleanUserMsg
-            ? [
-                ...prevHistory,
-                { role: "user" as const, content: cleanUserMsg },
-                { role: "assistant" as const, content: doneLabel },
-              ]
-            : prevHistory
-
-          return {
-            generationState: "done",
-            html: patchedHtml,
-            messages: msgs,
-            variations,
-            activeVariationId: variations[0]?.id ?? null,
-            artifactMetadata,
-            apiHistory: newHistory,
-            pendingApproval: null,
-          }
-        })
-
-        if (variations.length > 0) {
-          variations.forEach((v) => {
-            window.api.design.saveVariant(v.id, v.html).catch((err) => {
-              console.warn("[Design] saveVariant failed", err)
-            })
+        if (event.type === "model_retry") {
+          const retry = asDesignModelRetryState(event)
+          if (!retry) return
+          updateTs(tabId, (prev) => {
+            const msgs = [...prev.messages]
+            const last = msgs.length - 1
+            if (msgs[last]?.role !== "assistant") return {}
+            msgs[last] = { ...msgs[last], modelRetry: retry }
+            return { messages: msgs }
           })
+          return
         }
-        cleanup()
-        tabSessionsRef.current.delete(tabId)
-      } else if (event.type === "error") {
-        updateTs(tabId, (prev) => {
-          const msgs = [...prev.messages]
-          const last = msgs.length - 1
-          if (msgs[last]?.role === "assistant") {
-            const prefix = rollbackSnapshot ? "❌ 修改失败，已回滚到修改前版本。" : "❌"
-            msgs[last] = { ...msgs[last], content: `${prefix} ${event.error ?? "Unknown error"}`, isStreaming: false, modelRetry: null }
-          }
-          return {
-            ...(rollbackSnapshot ? restoreIterationRollbackSnapshot(rollbackSnapshot, prev) : {}),
-            generationState: "error",
-            messages: msgs,
-            pendingApproval: null,
-          }
-        })
-        cleanup()
-        tabSessionsRef.current.delete(tabId)
-      } else if (event.type === "cancelled") {
-        updateTs(tabId, (prev) => {
-          const msgs = [...prev.messages]
-          const last = msgs.length - 1
-          if (msgs[last]?.isStreaming) msgs[last] = { ...msgs[last], isStreaming: false, modelRetry: null }
-          return {
-            ...(rollbackSnapshot ? restoreIterationRollbackSnapshot(rollbackSnapshot, prev) : {}),
-            generationState: "idle",
-            messages: msgs,
-            pendingApproval: null,
-          }
-        })
-        cleanup()
-        tabSessionsRef.current.delete(tabId)
-      }
-    }
 
-    cleanupStream = window.api.design.agentGenerate(
-      sessionId,
-      prompt,
-      onEvent,
-      tabId,
-      modelId,
-      image?.base64,
-      image?.mimeType,
-      isIteration ? getCurrentDesignHtml(runStartState) : undefined,
-      skill ?? undefined,
-      workspacePath ?? undefined,
-      stableArtifactId,
-      sourceArtifactPath ?? undefined,
-      agentRuntimeSessionId ?? undefined,
-      runStartState?.selectedDesignSystemId ?? undefined
-    )
-    tabSessionsRef.current.set(tabId, { cleanup, sessionId })
-  }, [cancelDesignRunForTab, designSystems, isCurrentDesignRun, updateTs, workspacePath])
+        if (event.type === "model_retry_clear") {
+          updateTs(tabId, (prev) => {
+            const msgs = [...prev.messages]
+            const last = msgs.length - 1
+            if (msgs[last]?.role !== "assistant" || !msgs[last].modelRetry) return {}
+            msgs[last] = { ...msgs[last], modelRetry: null }
+            return { messages: msgs }
+          })
+          return
+        }
+
+        if (event.type === "execution") {
+          const executionEvent = asDesignExecutionEvent(event.event)
+          if (!executionEvent) return
+          updateTs(tabId, (prev) => {
+            const msgs = [...prev.messages]
+            const last = msgs.length - 1
+            if (msgs[last]?.role !== "assistant") return {}
+            msgs[last] = {
+              ...msgs[last],
+              executionEvents: appendDesignExecutionEvent(
+                msgs[last].executionEvents ?? [],
+                executionEvent
+              )
+            }
+            return { messages: msgs }
+          })
+          return
+        }
+
+        if (event.type === "token" && event.token) {
+          const progressText = normalizeProgressToken(event.token)
+          if (!progressText) return
+          updateTs(tabId, (prev) => {
+            const msgs = [...prev.messages]
+            const last = msgs.length - 1
+            if (msgs[last]?.role !== "assistant") return {}
+            msgs[last] = {
+              ...msgs[last],
+              executionEvents: appendDesignExecutionEvent(msgs[last].executionEvents ?? [], {
+                kind: "assistant_text",
+                id: "assistant-progress",
+                content: progressText,
+                status: "running",
+                timestamp: Date.now()
+              })
+            }
+            return { messages: msgs }
+          })
+          return
+        }
+
+        if (event.type === "done" && event.html) {
+          // Guarantee every generated design has a working EDITMODE block
+          const patchedHtml = await prepareHtmlForSrcDoc(event.html, event.artifactPath ?? null)
+          const variations = parseVariations(patchedHtml)
+          const runState = tabStatesRef.current[tabId]
+          const selectedDesignSystemForRun =
+            designSystems.find((system) => system.id === runState?.selectedDesignSystemId) ?? null
+          const artifactMetadata =
+            asDesignArtifactMetadata(event.metadata) ??
+            buildDesignArtifactMetadata({
+              artifactId: stableArtifactId,
+              title: cleanUserMsg?.slice(0, 32) || runState?.sourceInfo?.label,
+              prompt: cleanUserMsg ?? prompt,
+              modelId: modelId ?? null,
+              skill: skill ?? null,
+              designSystem: selectedDesignSystemForRun,
+              sourceInfo: runState?.sourceInfo ?? null,
+              html: patchedHtml,
+              variations
+            })
+
+          // Keep htmlStore in sync (used as fallback / reference)
+          window.api.design.storeHtml(stableArtifactId, patchedHtml).catch((err) => {
+            console.warn("[Design] storeHtml failed", err)
+          })
+          if (event.artifactPath) {
+            updateTs(tabId, { artifactPath: event.artifactPath, artifactMetadata })
+          } else {
+            saveDesignArtifactForTab(
+              stableArtifactId,
+              patchedHtml,
+              workspacePath,
+              tabId,
+              updateTs,
+              undefined,
+              artifactMetadata
+            )
+          }
+
+          updateTs(tabId, (prev) => {
+            const msgs = [...prev.messages]
+            const last = msgs.length - 1
+            const doneLabel =
+              variations.length > 0
+                ? `✓ ${isIteration ? "设计已更新" : "设计已生成"} - ${variations.length} 个方案`
+                : isIteration
+                  ? "✓ 设计已更新"
+                  : "✓ 设计已生成"
+            if (msgs[last]?.role === "assistant") {
+              msgs[last] = {
+                ...msgs[last],
+                content: doneLabel,
+                isStreaming: false,
+                modelRetry: null
+              }
+            }
+
+            // Keep apiHistory in sync for display / session backup
+            const prevHistory = prev.apiHistory ?? []
+            const newHistory: Array<{ role: "user" | "assistant"; content: string }> = cleanUserMsg
+              ? [
+                  ...prevHistory,
+                  { role: "user" as const, content: cleanUserMsg },
+                  { role: "assistant" as const, content: doneLabel }
+                ]
+              : prevHistory
+
+            return {
+              generationState: "done",
+              html: patchedHtml,
+              messages: msgs,
+              variations,
+              activeVariationId: variations[0]?.id ?? null,
+              artifactMetadata,
+              apiHistory: newHistory,
+              pendingApproval: null
+            }
+          })
+
+          if (variations.length > 0) {
+            variations.forEach((v) => {
+              window.api.design.saveVariant(v.id, v.html).catch((err) => {
+                console.warn("[Design] saveVariant failed", err)
+              })
+            })
+          }
+          cleanup()
+          tabSessionsRef.current.delete(tabId)
+        } else if (event.type === "error") {
+          updateTs(tabId, (prev) => {
+            const msgs = [...prev.messages]
+            const last = msgs.length - 1
+            if (msgs[last]?.role === "assistant") {
+              const prefix = rollbackSnapshot ? "❌ 修改失败，已回滚到修改前版本。" : "❌"
+              msgs[last] = {
+                ...msgs[last],
+                content: `${prefix} ${event.error ?? "Unknown error"}`,
+                isStreaming: false,
+                modelRetry: null
+              }
+            }
+            return {
+              ...(rollbackSnapshot ? restoreIterationRollbackSnapshot(rollbackSnapshot, prev) : {}),
+              generationState: "error",
+              messages: msgs,
+              pendingApproval: null
+            }
+          })
+          cleanup()
+          tabSessionsRef.current.delete(tabId)
+        } else if (event.type === "cancelled") {
+          updateTs(tabId, (prev) => {
+            const msgs = [...prev.messages]
+            const last = msgs.length - 1
+            if (msgs[last]?.isStreaming)
+              msgs[last] = { ...msgs[last], isStreaming: false, modelRetry: null }
+            return {
+              ...(rollbackSnapshot ? restoreIterationRollbackSnapshot(rollbackSnapshot, prev) : {}),
+              generationState: "idle",
+              messages: msgs,
+              pendingApproval: null
+            }
+          })
+          cleanup()
+          tabSessionsRef.current.delete(tabId)
+        }
+      }
+
+      cleanupStream = window.api.design.agentGenerate(
+        sessionId,
+        prompt,
+        onEvent,
+        tabId,
+        modelId,
+        image?.base64,
+        image?.mimeType,
+        isIteration ? getCurrentDesignHtml(runStartState) : undefined,
+        skill ?? undefined,
+        workspacePath ?? undefined,
+        stableArtifactId,
+        sourceArtifactPath ?? undefined,
+        agentRuntimeSessionId ?? undefined,
+        runStartState?.selectedDesignSystemId ?? undefined
+      )
+      tabSessionsRef.current.set(tabId, { cleanup, sessionId })
+    },
+    [cancelDesignRunForTab, designSystems, isCurrentDesignRun, updateTs, workspacePath]
+  )
 
   // ── Generate Design from Screenshot ──────────────────────
 
-  const startGenerationFromImage = useCallback((
-    prompt: string, imageBase64: string, mimeType: string, tabId: string, modelId?: string
-  ) => {
-    const sessionId = uuid()
-    const designSessionId = currentSessionIdRef.current
-    console.log(`[Design:Image] startGenerationFromImage — sessionId=${sessionId} mimeType=${mimeType} base64Len=${imageBase64.length} prompt="${prompt.slice(0, 80)}"`)
-    updateTs(tabId, (prev) => ({
-      generationState: "generating",
-      rightTab: "design",
-      attachedImage: null,  // clear preview once generation starts
-      messages: [
-        ...prev.messages,
-        { role: "assistant" as const, content: "", isStreaming: true, isIteration: false },
-      ],
-    }))
+  const startGenerationFromImage = useCallback(
+    (prompt: string, imageBase64: string, mimeType: string, tabId: string, modelId?: string) => {
+      const sessionId = uuid()
+      const designSessionId = currentSessionIdRef.current
+      console.log(
+        `[Design:Image] startGenerationFromImage — sessionId=${sessionId} mimeType=${mimeType} base64Len=${imageBase64.length} prompt="${prompt.slice(0, 80)}"`
+      )
+      updateTs(tabId, (prev) => ({
+        generationState: "generating",
+        rightTab: "design",
+        attachedImage: null, // clear preview once generation starts
+        messages: [
+          ...prev.messages,
+          { role: "assistant" as const, content: "", isStreaming: true, isIteration: false }
+        ]
+      }))
 
-    cancelDesignRunForTab(tabId)
-    tabSessionsRef.current.set(tabId, { cleanup: () => {}, sessionId })
+      cancelDesignRunForTab(tabId)
+      tabSessionsRef.current.set(tabId, { cleanup: () => {}, sessionId })
 
-    console.log("[Design:Image] Calling window.api.design.generateFromImage…")
-    const cleanup = window.api.design.generateFromImage(sessionId, prompt, imageBase64, mimeType, (event) => {
-      if (!isCurrentDesignRun(tabId, sessionId, designSessionId)) return
+      console.log("[Design:Image] Calling window.api.design.generateFromImage…")
+      const cleanup = window.api.design.generateFromImage(
+        sessionId,
+        prompt,
+        imageBase64,
+        mimeType,
+        (event) => {
+          if (!isCurrentDesignRun(tabId, sessionId, designSessionId)) return
 
-      console.log(`[Design:Image] Renderer received event: type=${event.type}${event.error ? " error=" + event.error : ""}`)
-      if (event.type === "model_retry") {
-        const retry = asDesignModelRetryState(event)
-        if (!retry) return
-        updateTs(tabId, (prev) => ({
-          messages: patchLastAssistantMessage(prev.messages, { modelRetry: retry }),
-        }))
-        return
-      }
-
-      if (event.type === "model_retry_clear") {
-        updateTs(tabId, (prev) => ({
-          messages: patchLastAssistantMessage(prev.messages, { modelRetry: null }),
-        }))
-        return
-      }
-
-      if (event.type === "done" && event.html) {
-        const patchedHtml = ensureEditMode(event.html)
-        // Store full HTML in main process so subsequent text iterations can reference it
-        const storeKey = makeDesignArtifactId(currentSessionIdRef.current, tabId)
-        window.api.design.storeHtml(storeKey, patchedHtml).catch((err) => {
-          console.warn("[Design] storeHtml failed", err)
-        })
-        saveDesignArtifactForTab(storeKey, patchedHtml, workspacePath, tabId, updateTs)
-        updateTs(tabId, (prev) => {
-          const msgs = [...prev.messages]
-          const last = msgs.length - 1
-          if (msgs[last]?.role === "assistant") {
-            msgs[last] = { ...msgs[last], content: "✓ 设计已生成", isStreaming: false, modelRetry: null }
+          console.log(
+            `[Design:Image] Renderer received event: type=${event.type}${event.error ? " error=" + event.error : ""}`
+          )
+          if (event.type === "model_retry") {
+            const retry = asDesignModelRetryState(event)
+            if (!retry) return
+            updateTs(tabId, (prev) => ({
+              messages: patchLastAssistantMessage(prev.messages, { modelRetry: retry })
+            }))
+            return
           }
-          return {
-            generationState: "done",
-            html: patchedHtml,
-            messages: msgs,
-            variations: [],
-            activeVariationId: null,
-            // Seed history so subsequent text iterations have context
-            apiHistory: [
-              { role: "user" as const, content: (prompt || "截图设计").slice(0, 200) },
-              { role: "assistant" as const, content: "✓ 设计已生成" },
-            ],
+
+          if (event.type === "model_retry_clear") {
+            updateTs(tabId, (prev) => ({
+              messages: patchLastAssistantMessage(prev.messages, { modelRetry: null })
+            }))
+            return
           }
-        })
-        window.api.design.saveVariant("image", patchedHtml).catch((err) => {
-          console.warn("[Design] saveVariant failed", err)
-        })
-        tabSessionsRef.current.delete(tabId)
-      } else if (event.type === "error") {
-        updateTs(tabId, (prev) => {
-          const msgs = [...prev.messages]
-          const last = msgs.length - 1
-          if (msgs[last]?.role === "assistant") {
-            msgs[last] = { ...msgs[last], content: `❌ ${event.error ?? "Unknown error"}`, isStreaming: false, modelRetry: null }
+
+          if (event.type === "done" && event.html) {
+            const patchedHtml = ensureEditMode(event.html)
+            // Store full HTML in main process so subsequent text iterations can reference it
+            const storeKey = makeDesignArtifactId(currentSessionIdRef.current, tabId)
+            window.api.design.storeHtml(storeKey, patchedHtml).catch((err) => {
+              console.warn("[Design] storeHtml failed", err)
+            })
+            saveDesignArtifactForTab(storeKey, patchedHtml, workspacePath, tabId, updateTs)
+            updateTs(tabId, (prev) => {
+              const msgs = [...prev.messages]
+              const last = msgs.length - 1
+              if (msgs[last]?.role === "assistant") {
+                msgs[last] = {
+                  ...msgs[last],
+                  content: "✓ 设计已生成",
+                  isStreaming: false,
+                  modelRetry: null
+                }
+              }
+              return {
+                generationState: "done",
+                html: patchedHtml,
+                messages: msgs,
+                variations: [],
+                activeVariationId: null,
+                // Seed history so subsequent text iterations have context
+                apiHistory: [
+                  { role: "user" as const, content: (prompt || "截图设计").slice(0, 200) },
+                  { role: "assistant" as const, content: "✓ 设计已生成" }
+                ]
+              }
+            })
+            window.api.design.saveVariant("image", patchedHtml).catch((err) => {
+              console.warn("[Design] saveVariant failed", err)
+            })
+            tabSessionsRef.current.delete(tabId)
+          } else if (event.type === "error") {
+            updateTs(tabId, (prev) => {
+              const msgs = [...prev.messages]
+              const last = msgs.length - 1
+              if (msgs[last]?.role === "assistant") {
+                msgs[last] = {
+                  ...msgs[last],
+                  content: `❌ ${event.error ?? "Unknown error"}`,
+                  isStreaming: false,
+                  modelRetry: null
+                }
+              }
+              return { generationState: "error", messages: msgs }
+            })
+            tabSessionsRef.current.delete(tabId)
+          } else if (event.type === "cancelled") {
+            updateTs(tabId, (prev) => {
+              const msgs = [...prev.messages]
+              const last = msgs.length - 1
+              if (msgs[last]?.isStreaming)
+                msgs[last] = { ...msgs[last], isStreaming: false, modelRetry: null }
+              return { generationState: "idle", messages: msgs }
+            })
+            tabSessionsRef.current.delete(tabId)
           }
-          return { generationState: "error", messages: msgs }
-        })
-        tabSessionsRef.current.delete(tabId)
-      } else if (event.type === "cancelled") {
-        updateTs(tabId, (prev) => {
-          const msgs = [...prev.messages]
-          const last = msgs.length - 1
-          if (msgs[last]?.isStreaming) msgs[last] = { ...msgs[last], isStreaming: false, modelRetry: null }
-          return { generationState: "idle", messages: msgs }
-        })
-        tabSessionsRef.current.delete(tabId)
-      }
-    }, modelId)
-    tabSessionsRef.current.set(tabId, { cleanup, sessionId })
-  }, [cancelDesignRunForTab, isCurrentDesignRun, updateTs, workspacePath])
+        },
+        modelId
+      )
+      tabSessionsRef.current.set(tabId, { cleanup, sessionId })
+    },
+    [cancelDesignRunForTab, isCurrentDesignRun, updateTs, workspacePath]
+  )
 
   // ── Handle file input selection (screenshot upload) ───────
-  const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file) return
-    console.log(`[Design:Image] File selected — name="${file.name}" size=${file.size} type="${file.type}"`)
-    const reader = new FileReader()
-    reader.onload = (ev) => {
-      const dataUrl = ev.target?.result as string
-      const comma = dataUrl.indexOf(",")
-      const header = dataUrl.slice(0, comma)
-      const base64 = dataUrl.slice(comma + 1)
-      const mimeType = header.match(/data:([^;]+)/)?.[1] ?? "image/png"
-      console.log(`[Design:Image] File read as base64 — mimeType="${mimeType}" base64Len=${base64.length}`)
-      updateTs(activeTabId, { attachedImage: { base64, mimeType, previewUrl: dataUrl } })
-    }
-    reader.onerror = (err) => {
-      console.error("[Design:Image] FileReader error:", err)
-    }
-    reader.readAsDataURL(file)
-    // Reset so the same file can be re-selected
-    e.target.value = ""
-  }, [activeTabId, updateTs])
+  const handleFileSelect = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0]
+      if (!file) return
+      console.log(
+        `[Design:Image] File selected — name="${file.name}" size=${file.size} type="${file.type}"`
+      )
+      const reader = new FileReader()
+      reader.onload = (ev) => {
+        const dataUrl = ev.target?.result as string
+        const comma = dataUrl.indexOf(",")
+        const header = dataUrl.slice(0, comma)
+        const base64 = dataUrl.slice(comma + 1)
+        const mimeType = header.match(/data:([^;]+)/)?.[1] ?? "image/png"
+        console.log(
+          `[Design:Image] File read as base64 — mimeType="${mimeType}" base64Len=${base64.length}`
+        )
+        updateTs(activeTabId, { attachedImage: { base64, mimeType, previewUrl: dataUrl } })
+      }
+      reader.onerror = (err) => {
+        console.error("[Design:Image] FileReader error:", err)
+      }
+      reader.readAsDataURL(file)
+      // Reset so the same file can be re-selected
+      e.target.value = ""
+    },
+    [activeTabId, updateTs]
+  )
 
   // ── File attachment constants (same as ChatContainer) ─────
   const DESIGN_MAX_ATTACHMENTS = 3
@@ -3093,7 +3523,7 @@ export function DesignView(): React.JSX.Element {
               showToast(`"${res.attachment.filename}" 内容为空`)
             } else {
               updateTs(activeTabId, (prev) => ({
-                attachedFiles: [...(prev.attachedFiles ?? []), res.attachment!],
+                attachedFiles: [...(prev.attachedFiles ?? []), res.attachment!]
               }))
               showToast(`已附加：${res.attachment.filename}`)
               remaining -= res.attachment.content.length
@@ -3131,135 +3561,181 @@ export function DesignView(): React.JSX.Element {
       state.retrySkill ?? undefined,
       state.artifactPath,
       true,
-      state.retryIsIteration ? makeIterationRollbackSnapshot(state) : null,
+      state.retryIsIteration ? makeIterationRollbackSnapshot(state) : null
     )
   }, [activeTabId, tabStates, updateTs, startGeneration])
 
   // ── Build comment prompt helper ───────────────────────────
   // Returns both the instruction prompt (no HTML — main process injects via htmlStore)
   // and the current HTML so the caller can push it to the store.
-  const buildCommentPrompt = useCallback((
-    comments: { elementDesc: string; text: string; pageX?: number; pageY?: number; anchor?: DesignElementAnchor }[],
-    state: TabState
-  ): { prompt: string } => {
-    const activeVarId = state.activeVariationId
-    const variantNote = activeVarId ? `\n[正在迭代变体 ${activeVarId.toUpperCase()}。]` : ""
-    const commentLines = comments
-      .map((c, i) => {
-        const anchorText = getAnchoredElementSummary(c.anchor)
-        const coordText = typeof c.pageX === "number" && typeof c.pageY === "number"
-          ? `；坐标 x:${Math.round(c.pageX)}, y:${Math.round(c.pageY)}`
-          : ""
-        return `[${i + 1}] 元素 (${c.elementDesc}${anchorText ? `；${anchorText}` : ""}${coordText}): ${c.text}`
-      })
-      .join("\n")
+  const buildCommentPrompt = useCallback(
+    (
+      comments: {
+        elementDesc: string
+        text: string
+        pageX?: number
+        pageY?: number
+        anchor?: DesignElementAnchor
+      }[],
+      state: TabState
+    ): { prompt: string } => {
+      const activeVarId = state.activeVariationId
+      const variantNote = activeVarId ? `\n[正在迭代变体 ${activeVarId.toUpperCase()}。]` : ""
+      const commentLines = comments
+        .map((c, i) => {
+          const anchorText = getAnchoredElementSummary(c.anchor)
+          const coordText =
+            typeof c.pageX === "number" && typeof c.pageY === "number"
+              ? `；坐标 x:${Math.round(c.pageX)}, y:${Math.round(c.pageY)}`
+              : ""
+          return `[${i + 1}] 元素 (${c.elementDesc}${anchorText ? `；${anchorText}` : ""}${coordText}): ${c.text}`
+        })
+        .join("\n")
 
-    const prompt = `用户通过 Comment 模式在设计上标注了以下修改意见。请严格按照每条批注对对应元素进行修改，其他部分完全保持不变：
+      const prompt = `用户通过 Comment 模式在设计上标注了以下修改意见。请严格按照每条批注对对应元素进行修改，其他部分完全保持不变：
 
 ${commentLines}${variantNote}`
 
-    return { prompt }
-  }, [])
+      return { prompt }
+    },
+    []
+  )
 
   // ── Send a single comment directly (without saving to list) ─
-  const handleSendDraftComment = useCallback((text: string, elementDesc: string) => {
-    const tabId = activeTabId
-    const state = tabStates[tabId]
-    if (!state || !text.trim()) return
+  const handleSendDraftComment = useCallback(
+    (text: string, elementDesc: string) => {
+      const tabId = activeTabId
+      const state = tabStates[tabId]
+      if (!state || !text.trim()) return
 
-    const draft = state.draftComment
-    const { prompt } = buildCommentPrompt([{
-      elementDesc,
-      text,
-      pageX: draft?.pageX,
-      pageY: draft?.pageY,
-      anchor: draft?.anchor,
-    }], state)
-    const cleanMsg = `📝 ${text.trim().slice(0, 60)}`
-    const rollbackSnapshot = makeIterationRollbackSnapshot(state)
-    if (rollbackSnapshot && draft) {
-      rollbackSnapshot.comments = [
-        ...rollbackSnapshot.comments,
-        {
-          id: uuid(),
-          pageX: draft.pageX,
-          pageY: draft.pageY,
-          text: text.trim(),
-          elementDesc,
-          anchor: draft.anchor,
-          createdAt: Date.now(),
-        },
-      ]
-      rollbackSnapshot.draftComment = null
-      rollbackSnapshot.activeCommentId = null
-    }
+      const draft = state.draftComment
+      const { prompt } = buildCommentPrompt(
+        [
+          {
+            elementDesc,
+            text,
+            pageX: draft?.pageX,
+            pageY: draft?.pageY,
+            anchor: draft?.anchor
+          }
+        ],
+        state
+      )
+      const cleanMsg = `📝 ${text.trim().slice(0, 60)}`
+      const rollbackSnapshot = makeIterationRollbackSnapshot(state)
+      if (rollbackSnapshot && draft) {
+        rollbackSnapshot.comments = [
+          ...rollbackSnapshot.comments,
+          {
+            id: uuid(),
+            pageX: draft.pageX,
+            pageY: draft.pageY,
+            text: text.trim(),
+            elementDesc,
+            anchor: draft.anchor,
+            createdAt: Date.now()
+          }
+        ]
+        rollbackSnapshot.draftComment = null
+        rollbackSnapshot.activeCommentId = null
+      }
 
-    updateTs(tabId, (prev) => ({
-      draftComment: null,
-      activeCommentId: null,
-      messages: [
-        ...prev.messages,
-        { role: "user" as const, content: cleanMsg },
-      ],
-    }))
-    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined, cleanMsg, undefined, undefined, state.artifactPath, false, rollbackSnapshot)
-  }, [activeTabId, tabStates, updateTs, startGeneration, buildCommentPrompt])
+      updateTs(tabId, (prev) => ({
+        draftComment: null,
+        activeCommentId: null,
+        messages: [...prev.messages, { role: "user" as const, content: cleanMsg }]
+      }))
+      startGeneration(
+        prompt,
+        tabId,
+        true,
+        state?.selectedModelId ?? undefined,
+        cleanMsg,
+        undefined,
+        undefined,
+        state.artifactPath,
+        false,
+        rollbackSnapshot
+      )
+    },
+    [activeTabId, tabStates, updateTs, startGeneration, buildCommentPrompt]
+  )
 
   // ── Send a saved comment pin → model ─────────────────────
-  const handleSendComment = useCallback((commentId: string, overrideText?: string) => {
-    const tabId = activeTabId
-    const state = tabStates[tabId]
-    if (!state) return
+  const handleSendComment = useCallback(
+    (commentId: string, overrideText?: string) => {
+      const tabId = activeTabId
+      const state = tabStates[tabId]
+      if (!state) return
 
-    const comment = state.comments.find((c) => c.id === commentId)
-    if (!comment) return
+      const comment = state.comments.find((c) => c.id === commentId)
+      if (!comment) return
 
-    const text = overrideText ?? comment.text
-    const { prompt } = buildCommentPrompt([{
-      elementDesc: comment.elementDesc,
-      text,
-      pageX: comment.pageX,
-      pageY: comment.pageY,
-      anchor: comment.anchor,
-    }], state)
-    const cleanMsg = `📝 ${text.trim().slice(0, 60)}`
-    const rollbackSnapshot = makeIterationRollbackSnapshot(state)
+      const text = overrideText ?? comment.text
+      const { prompt } = buildCommentPrompt(
+        [
+          {
+            elementDesc: comment.elementDesc,
+            text,
+            pageX: comment.pageX,
+            pageY: comment.pageY,
+            anchor: comment.anchor
+          }
+        ],
+        state
+      )
+      const cleanMsg = `📝 ${text.trim().slice(0, 60)}`
+      const rollbackSnapshot = makeIterationRollbackSnapshot(state)
 
-    updateTs(tabId, (prev) => ({
-      comments: prev.comments.filter((c) => c.id !== commentId),
-      draftComment: null,
-      activeCommentId: null,
-      messages: [
-        ...prev.messages,
-        { role: "user" as const, content: cleanMsg },
-      ],
-    }))
-    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined, cleanMsg, undefined, undefined, state.artifactPath, false, rollbackSnapshot)
-  }, [activeTabId, tabStates, updateTs, startGeneration, buildCommentPrompt])
+      updateTs(tabId, (prev) => ({
+        comments: prev.comments.filter((c) => c.id !== commentId),
+        draftComment: null,
+        activeCommentId: null,
+        messages: [...prev.messages, { role: "user" as const, content: cleanMsg }]
+      }))
+      startGeneration(
+        prompt,
+        tabId,
+        true,
+        state?.selectedModelId ?? undefined,
+        cleanMsg,
+        undefined,
+        undefined,
+        state.artifactPath,
+        false,
+        rollbackSnapshot
+      )
+    },
+    [activeTabId, tabStates, updateTs, startGeneration, buildCommentPrompt]
+  )
 
   // ── Edit a saved comment's text ───────────────────────────
-  const handleEditComment = useCallback((commentId: string, newText: string) => {
-    updateTs(activeTabId, (prev) => ({
-      comments: prev.comments.map((c) =>
-        c.id === commentId ? { ...c, text: newText } : c
-      ),
-    }))
-  }, [activeTabId, updateTs])
+  const handleEditComment = useCallback(
+    (commentId: string, newText: string) => {
+      updateTs(activeTabId, (prev) => ({
+        comments: prev.comments.map((c) => (c.id === commentId ? { ...c, text: newText } : c))
+      }))
+    },
+    [activeTabId, updateTs]
+  )
 
   // ── Edit select: apply a style property to the selected element live ─
-  const handleEditStyleChange = useCallback((property: string, value: unknown) => {
-    sendToIframe(iframeRef.current, { type: "__edit_style", property, value })
-    // Optimistic UI: update panel immediately without waiting for __edit_click echo
-    updateTs(activeTabId, (prev) => {
-      if (!prev.selectedElement) return {}
-      return {
-        selectedElement: {
-          ...prev.selectedElement,
-          styles: { ...prev.selectedElement.styles, [property]: value } as ElementStyles,
-        },
-      }
-    })
-  }, [activeTabId, updateTs])
+  const handleEditStyleChange = useCallback(
+    (property: string, value: unknown) => {
+      sendToIframe(iframeRef.current, { type: "__edit_style", property, value })
+      // Optimistic UI: update panel immediately without waiting for __edit_click echo
+      updateTs(activeTabId, (prev) => {
+        if (!prev.selectedElement) return {}
+        return {
+          selectedElement: {
+            ...prev.selectedElement,
+            styles: { ...prev.selectedElement.styles, [property]: value } as ElementStyles
+          }
+        }
+      })
+    },
+    [activeTabId, updateTs]
+  )
 
   // ── Apply ALL saved comments → send to model ─────────────
   const handleApplyComments = useCallback(() => {
@@ -3274,7 +3750,7 @@ ${commentLines}${variantNote}`
         text: c.text,
         pageX: c.pageX,
         pageY: c.pageY,
-        anchor: c.anchor,
+        anchor: c.anchor
       })),
       state
     )
@@ -3285,13 +3761,21 @@ ${commentLines}${variantNote}`
       comments: [],
       draftComment: null,
       activeCommentId: null,
-      messages: [
-        ...prev.messages,
-        { role: "user" as const, content: cleanMsg },
-      ],
+      messages: [...prev.messages, { role: "user" as const, content: cleanMsg }]
     }))
 
-    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined, cleanMsg, undefined, undefined, state.artifactPath, false, rollbackSnapshot)
+    startGeneration(
+      prompt,
+      tabId,
+      true,
+      state?.selectedModelId ?? undefined,
+      cleanMsg,
+      undefined,
+      undefined,
+      state.artifactPath,
+      false,
+      rollbackSnapshot
+    )
   }, [activeTabId, tabStates, updateTs, startGeneration, buildCommentPrompt])
 
   const collectDrawElementLabels = useCallback((points: DrawPoint[]): string[] => {
@@ -3314,71 +3798,86 @@ ${commentLines}${variantNote}`
     return Array.from(seen).slice(0, 8)
   }, [])
 
-  const collectDrawElementHint = useCallback((stroke: DrawStroke): DrawElementHint => {
-    return { strokeId: stroke.id, elements: collectDrawElementLabels(stroke.points) }
-  }, [collectDrawElementLabels])
+  const collectDrawElementHint = useCallback(
+    (stroke: DrawStroke): DrawElementHint => {
+      return { strokeId: stroke.id, elements: collectDrawElementLabels(stroke.points) }
+    },
+    [collectDrawElementLabels]
+  )
 
-  const handleDrawNoteDraft = useCallback((point: DrawPoint) => {
-    const anchor = getPointAnchor(iframeRef.current?.contentDocument ?? null, point)
-    updateTs(activeTabId, {
-      draftDrawNote: {
-        pageX: point.x,
-        pageY: point.y,
-        anchor,
-        elements: anchor?.label ? [anchor.label] : collectDrawElementLabels([point]),
-      },
-    })
-  }, [activeTabId, updateTs, collectDrawElementLabels])
+  const handleDrawNoteDraft = useCallback(
+    (point: DrawPoint) => {
+      const anchor = getPointAnchor(iframeRef.current?.contentDocument ?? null, point)
+      updateTs(activeTabId, {
+        draftDrawNote: {
+          pageX: point.x,
+          pageY: point.y,
+          anchor,
+          elements: anchor?.label ? [anchor.label] : collectDrawElementLabels([point])
+        }
+      })
+    },
+    [activeTabId, updateTs, collectDrawElementLabels]
+  )
 
-  const handleDrawNoteSubmit = useCallback((text: string) => {
-    const value = text.trim()
-    if (!value) {
-      updateTs(activeTabId, { draftDrawNote: null })
-      return
-    }
-    updateTs(activeTabId, (prev) => {
-      if (!prev.draftDrawNote) return {}
-      const note: DrawNote = {
-        id: uuid(),
-        pageX: prev.draftDrawNote.pageX,
-        pageY: prev.draftDrawNote.pageY,
-        anchor: prev.draftDrawNote.anchor,
-        text: value,
-        elements: prev.draftDrawNote.elements,
-        createdAt: Date.now(),
+  const handleDrawNoteSubmit = useCallback(
+    (text: string) => {
+      const value = text.trim()
+      if (!value) {
+        updateTs(activeTabId, { draftDrawNote: null })
+        return
       }
-      return {
-        drawNotes: [...prev.drawNotes, note],
-        draftDrawNote: null,
-      }
-    })
-  }, [activeTabId, updateTs])
+      updateTs(activeTabId, (prev) => {
+        if (!prev.draftDrawNote) return {}
+        const note: DrawNote = {
+          id: uuid(),
+          pageX: prev.draftDrawNote.pageX,
+          pageY: prev.draftDrawNote.pageY,
+          anchor: prev.draftDrawNote.anchor,
+          text: value,
+          elements: prev.draftDrawNote.elements,
+          createdAt: Date.now()
+        }
+        return {
+          drawNotes: [...prev.drawNotes, note],
+          draftDrawNote: null
+        }
+      })
+    },
+    [activeTabId, updateTs]
+  )
 
   const handleDrawNoteCancel = useCallback(() => {
     updateTs(activeTabId, { draftDrawNote: null })
   }, [activeTabId, updateTs])
 
-  const handleDrawToolModeChange = useCallback((mode: DrawToolMode) => {
-    updateTs(activeTabId, { drawToolMode: mode, draftDrawNote: null })
-  }, [activeTabId, updateTs])
+  const handleDrawToolModeChange = useCallback(
+    (mode: DrawToolMode) => {
+      updateTs(activeTabId, { drawToolMode: mode, draftDrawNote: null })
+    },
+    [activeTabId, updateTs]
+  )
 
-  const handleDrawStrokeComplete = useCallback((stroke: DrawStroke) => {
-    const doc = iframeRef.current?.contentDocument ?? null
-    const anchor = getDominantPointAnchor(doc, stroke.points)
-    const anchoredStroke: DrawStroke = {
-      ...stroke,
-      anchor,
-      anchoredPoints: anchor ? anchorPointsForStroke(doc, { ...stroke, anchor }) : undefined,
-    }
-    const hint = collectDrawElementHint(anchoredStroke)
-    updateTs(activeTabId, (prev) => ({
-      drawStrokes: [...prev.drawStrokes, anchoredStroke],
-      drawElementHints: [
-        ...prev.drawElementHints.filter((item) => item.strokeId !== anchoredStroke.id),
-        hint,
-      ],
-    }))
-  }, [activeTabId, updateTs, collectDrawElementHint])
+  const handleDrawStrokeComplete = useCallback(
+    (stroke: DrawStroke) => {
+      const doc = iframeRef.current?.contentDocument ?? null
+      const anchor = getDominantPointAnchor(doc, stroke.points)
+      const anchoredStroke: DrawStroke = {
+        ...stroke,
+        anchor,
+        anchoredPoints: anchor ? anchorPointsForStroke(doc, { ...stroke, anchor }) : undefined
+      }
+      const hint = collectDrawElementHint(anchoredStroke)
+      updateTs(activeTabId, (prev) => ({
+        drawStrokes: [...prev.drawStrokes, anchoredStroke],
+        drawElementHints: [
+          ...prev.drawElementHints.filter((item) => item.strokeId !== anchoredStroke.id),
+          hint
+        ]
+      }))
+    },
+    [activeTabId, updateTs, collectDrawElementHint]
+  )
 
   const handleUndoDrawStroke = useCallback(() => {
     updateTs(activeTabId, (prev) => {
@@ -3387,7 +3886,7 @@ ${commentLines}${variantNote}`
       if (removedNote && (!removedStroke || removedNote.createdAt > removedStroke.createdAt)) {
         return {
           drawNotes: prev.drawNotes.slice(0, -1),
-          draftDrawNote: null,
+          draftDrawNote: null
         }
       }
       return {
@@ -3395,72 +3894,90 @@ ${commentLines}${variantNote}`
         drawElementHints: removedStroke
           ? prev.drawElementHints.filter((hint) => hint.strokeId !== removedStroke.id)
           : prev.drawElementHints,
-        draftDrawNote: null,
+        draftDrawNote: null
       }
     })
   }, [activeTabId, updateTs])
 
   const handleClearDrawStrokes = useCallback(() => {
-    updateTs(activeTabId, { drawStrokes: [], drawElementHints: [], drawNotes: [], draftDrawNote: null })
+    updateTs(activeTabId, {
+      drawStrokes: [],
+      drawElementHints: [],
+      drawNotes: [],
+      draftDrawNote: null
+    })
   }, [activeTabId, updateTs])
 
-  const handleDrawWheel = useCallback((deltaX: number, deltaY: number) => {
-    const wrapper = previewScrollRef.current
-    const beforeLeft = wrapper?.scrollLeft ?? 0
-    const beforeTop = wrapper?.scrollTop ?? 0
-    wrapper?.scrollBy({ left: deltaX, top: deltaY, behavior: "auto" })
+  const handleDrawWheel = useCallback(
+    (deltaX: number, deltaY: number) => {
+      const wrapper = previewScrollRef.current
+      const beforeLeft = wrapper?.scrollLeft ?? 0
+      const beforeTop = wrapper?.scrollTop ?? 0
+      wrapper?.scrollBy({ left: deltaX, top: deltaY, behavior: "auto" })
 
-    const usedX = wrapper ? wrapper.scrollLeft - beforeLeft : 0
-    const usedY = wrapper ? wrapper.scrollTop - beforeTop : 0
-    const state = tabStatesRef.current[activeTabIdRef.current]
-    const scale = Math.max((state?.zoom ?? 100) / 100, 0.25)
-    const remainingX = deltaX - usedX
-    const remainingY = deltaY - usedY
-    if (Math.abs(remainingX) > 0.5 || Math.abs(remainingY) > 0.5) {
-      iframeRef.current?.contentWindow?.scrollBy({
-        left: remainingX / scale,
-        top: remainingY / scale,
-        behavior: "auto",
-      })
-    } else {
-      updatePreviewScrollState()
-    }
-  }, [updatePreviewScrollState])
+      const usedX = wrapper ? wrapper.scrollLeft - beforeLeft : 0
+      const usedY = wrapper ? wrapper.scrollTop - beforeTop : 0
+      const state = tabStatesRef.current[activeTabIdRef.current]
+      const scale = Math.max((state?.zoom ?? 100) / 100, 0.25)
+      const remainingX = deltaX - usedX
+      const remainingY = deltaY - usedY
+      if (Math.abs(remainingX) > 0.5 || Math.abs(remainingY) > 0.5) {
+        iframeRef.current?.contentWindow?.scrollBy({
+          left: remainingX / scale,
+          top: remainingY / scale,
+          behavior: "auto"
+        })
+      } else {
+        updatePreviewScrollState()
+      }
+    },
+    [updatePreviewScrollState]
+  )
 
-  const buildDrawPrompt = useCallback((state: TabState, userInstruction = ""): { prompt: string } => {
-    const activeVarId = state.activeVariationId
-    const variantNote = activeVarId ? `\n[正在迭代变体 ${activeVarId.toUpperCase()}。]` : ""
-    const hintsByStroke = new Map(state.drawElementHints.map((hint) => [hint.strokeId, hint.elements]))
-    const doc = iframeRef.current?.contentDocument ?? null
-    const instruction = userInstruction.trim()
-    const instructionLine = instruction
-      ? `\n用户补充说明：${instruction}\n`
-      : "\n用户没有补充文字时，请优先遵循黄色 note 的文本，并把红色绘制区域理解为需要重点优化或修正的 UI 区域。\n"
-    const strokeLines = state.drawStrokes.filter((stroke) => stroke.points.length > 0).map((stroke, index) => {
-      const resolvedPoints = resolveAnchoredStrokePoints(doc, stroke)
-      const xs = resolvedPoints.map((point) => point.x)
-      const ys = resolvedPoints.map((point) => point.y)
-      const minX = Math.round(Math.min(...xs))
-      const maxX = Math.round(Math.max(...xs))
-      const minY = Math.round(Math.min(...ys))
-      const maxY = Math.round(Math.max(...ys))
-      const elements = hintsByStroke.get(stroke.id)?.filter(Boolean) ?? []
-      const elementText = elements.length > 0 ? `；覆盖/接近元素：${elements.join(", ")}` : ""
-      const anchorText = getAnchoredElementSummary(stroke.anchor)
-      const orphanText = stroke.anchor && resolvedPoints === stroke.points ? "；anchor 未找到，已退回旧坐标" : ""
-      return `[${index + 1}] ${stroke.color} 画笔，粗细 ${stroke.width}px，区域 x:${minX}-${maxX}, y:${minY}-${maxY}，${resolvedPoints.length} 个点${elementText}${anchorText ? `；锚点：${anchorText}` : ""}${orphanText}`
-    }).join("\n")
-    const noteLines = state.drawNotes.map((note, index) => {
-      const elementText = note.elements.length > 0 ? `；接近元素：${note.elements.join(", ")}` : ""
-      const resolvedPoint = resolveAnchorPagePoint(doc, note.anchor)
-      const pageX = resolvedPoint?.x ?? note.pageX
-      const pageY = resolvedPoint?.y ?? note.pageY
-      const anchorText = getAnchoredElementSummary(note.anchor)
-      const orphanText = note.anchor && !resolvedPoint ? "；anchor 未找到，已退回旧坐标" : ""
-      return `[${index + 1}] note 坐标 x:${Math.round(pageX)}, y:${Math.round(pageY)}${elementText}${anchorText ? `；锚点：${anchorText}` : ""}${orphanText}\n内容：${note.text}`
-    }).join("\n")
+  const buildDrawPrompt = useCallback(
+    (state: TabState, userInstruction = ""): { prompt: string } => {
+      const activeVarId = state.activeVariationId
+      const variantNote = activeVarId ? `\n[正在迭代变体 ${activeVarId.toUpperCase()}。]` : ""
+      const hintsByStroke = new Map(
+        state.drawElementHints.map((hint) => [hint.strokeId, hint.elements])
+      )
+      const doc = iframeRef.current?.contentDocument ?? null
+      const instruction = userInstruction.trim()
+      const instructionLine = instruction
+        ? `\n用户补充说明：${instruction}\n`
+        : "\n用户没有补充文字时，请优先遵循黄色 note 的文本，并把红色绘制区域理解为需要重点优化或修正的 UI 区域。\n"
+      const strokeLines = state.drawStrokes
+        .filter((stroke) => stroke.points.length > 0)
+        .map((stroke, index) => {
+          const resolvedPoints = resolveAnchoredStrokePoints(doc, stroke)
+          const xs = resolvedPoints.map((point) => point.x)
+          const ys = resolvedPoints.map((point) => point.y)
+          const minX = Math.round(Math.min(...xs))
+          const maxX = Math.round(Math.max(...xs))
+          const minY = Math.round(Math.min(...ys))
+          const maxY = Math.round(Math.max(...ys))
+          const elements = hintsByStroke.get(stroke.id)?.filter(Boolean) ?? []
+          const elementText = elements.length > 0 ? `；覆盖/接近元素：${elements.join(", ")}` : ""
+          const anchorText = getAnchoredElementSummary(stroke.anchor)
+          const orphanText =
+            stroke.anchor && resolvedPoints === stroke.points ? "；anchor 未找到，已退回旧坐标" : ""
+          return `[${index + 1}] ${stroke.color} 画笔，粗细 ${stroke.width}px，区域 x:${minX}-${maxX}, y:${minY}-${maxY}，${resolvedPoints.length} 个点${elementText}${anchorText ? `；锚点：${anchorText}` : ""}${orphanText}`
+        })
+        .join("\n")
+      const noteLines = state.drawNotes
+        .map((note, index) => {
+          const elementText =
+            note.elements.length > 0 ? `；接近元素：${note.elements.join(", ")}` : ""
+          const resolvedPoint = resolveAnchorPagePoint(doc, note.anchor)
+          const pageX = resolvedPoint?.x ?? note.pageX
+          const pageY = resolvedPoint?.y ?? note.pageY
+          const anchorText = getAnchoredElementSummary(note.anchor)
+          const orphanText = note.anchor && !resolvedPoint ? "；anchor 未找到，已退回旧坐标" : ""
+          return `[${index + 1}] note 坐标 x:${Math.round(pageX)}, y:${Math.round(pageY)}${elementText}${anchorText ? `；锚点：${anchorText}` : ""}${orphanText}\n内容：${note.text}`
+        })
+        .join("\n")
 
-    const prompt = `用户通过 Draw 模式直接在设计预览上做了标记。请把红色画线理解为视觉指向和编辑意图：线条圈出的、划过的或指向的区域是需要重点调整的区域。黄色 note 是用户在页面任意位置添加的明确文本指令，优先按 note 内容执行。不要把画线或 note 本身渲染进最终页面。请根据标记位置对当前设计做有针对性的视觉优化，保持未标记区域尽量不变。
+      const prompt = `用户通过 Draw 模式直接在设计预览上做了标记。请把红色画线理解为视觉指向和编辑意图：线条圈出的、划过的或指向的区域是需要重点调整的区域。黄色 note 是用户在页面任意位置添加的明确文本指令，优先按 note 内容执行。不要把画线或 note 本身渲染进最终页面。请根据标记位置对当前设计做有针对性的视觉优化，保持未标记区域尽量不变。
 ${instructionLine}
 
 红色绘制标记：
@@ -3469,8 +3986,10 @@ ${strokeLines || "无"}
 黄色 note：
 ${noteLines || "无"}${variantNote}`
 
-    return { prompt }
-  }, [])
+      return { prompt }
+    },
+    []
+  )
 
   const handleSendDrawStrokes = useCallback(() => {
     const tabId = activeTabId
@@ -3491,13 +4010,21 @@ ${noteLines || "无"}${variantNote}`
       drawElementHints: [],
       drawNotes: [],
       draftDrawNote: null,
-      messages: [
-        ...prev.messages,
-        { role: "user" as const, content: cleanMsg },
-      ],
+      messages: [...prev.messages, { role: "user" as const, content: cleanMsg }]
     }))
 
-    startGeneration(prompt, tabId, true, state?.selectedModelId ?? undefined, cleanMsg, undefined, undefined, state.artifactPath, false, rollbackSnapshot)
+    startGeneration(
+      prompt,
+      tabId,
+      true,
+      state?.selectedModelId ?? undefined,
+      cleanMsg,
+      undefined,
+      undefined,
+      state.artifactPath,
+      false,
+      rollbackSnapshot
+    )
   }, [activeTabId, tabStates, updateTs, startGeneration, buildDrawPrompt])
 
   // ── Send message ──────────────────────────────────────────
@@ -3507,9 +4034,9 @@ ${noteLines || "无"}${variantNote}`
     const attachedImage = tabStates[activeTabId]?.attachedImage ?? null
     const selectedModelId = tabStates[activeTabId]?.selectedModelId ?? undefined
     const selectedSkill = tabStates[activeTabId]?.selectedSkill ?? null
-    const codeContext    = tabStates[activeTabId]?.codeContext ?? null
-    const designLink     = tabStates[activeTabId]?.designLink ?? null
-    const attachedFiles  = tabStates[activeTabId]?.attachedFiles ?? null
+    const codeContext = tabStates[activeTabId]?.codeContext ?? null
+    const designLink = tabStates[activeTabId]?.designLink ?? null
+    const attachedFiles = tabStates[activeTabId]?.attachedFiles ?? null
     if (!prompt && !attachedImage) return
     const state = tabStates[activeTabId]?.generationState ?? "idle"
     if (state === "asking" || state === "generating") return
@@ -3517,7 +4044,7 @@ ${noteLines || "无"}${variantNote}`
     const workspaceRequirementReason = getWorkspaceRequirementReason({
       selectedSkill,
       codeContext,
-      prompt,
+      prompt
     })
     if (!workspacePath && workspaceRequirementReason) {
       showToast(`${workspaceRequirementReason}，请先选择工作目录。`)
@@ -3534,20 +4061,29 @@ ${noteLines || "无"}${variantNote}`
 
     // Build the list of file pills to show in the message record before clearing state
     const messageAttachments: MessageAttachment[] = [
-      ...(codeContext ?? []).map((f): MessageAttachment => ({
-        filename: f.filename,
-        kind: "code",
-        meta: `${f.content.split("\n").length.toLocaleString()} 行`,
-      })),
-      ...(attachedFiles ?? []).map((f): MessageAttachment => ({
-        filename: f.filename,
-        kind: "doc",
-        meta: `${f.content.length.toLocaleString()} 字符`,
-      })),
+      ...(codeContext ?? []).map(
+        (f): MessageAttachment => ({
+          filename: f.filename,
+          kind: "code",
+          meta: `${f.content.split("\n").length.toLocaleString()} 行`
+        })
+      ),
+      ...(attachedFiles ?? []).map(
+        (f): MessageAttachment => ({
+          filename: f.filename,
+          kind: "doc",
+          meta: `${f.content.length.toLocaleString()} 字符`
+        })
+      )
     ]
 
     // Clear transient context after send — skill, files, and code all clear per-send
-    updateTs(activeTabId, { inputValue: "", selectedSkill: null, attachedFiles: null, codeContext: null })
+    updateTs(activeTabId, {
+      inputValue: "",
+      selectedSkill: null,
+      attachedFiles: null,
+      codeContext: null
+    })
 
     const tabId = activeTabId
     const stateBeforeSend = tabStates[tabId]
@@ -3565,13 +4101,18 @@ ${noteLines || "无"}${variantNote}`
       `Apply the skill's design tokens and patterns inside that HTML file. ` +
       `始终使用中文回答。`
     const skillContext = selectedSkill ? `\n\n---\n${designOutputConstraint}` : ""
-    const inlineCodeSuffix = codeContext && codeContext.length > 0
-      ? "\n\n---\n[Code context — " + codeContext.length + " file(s)]\n" +
-        codeContext.map((f) => {
-          const ext = f.filename.split(".").pop() ?? ""
-          return "```" + ext + "\n// " + f.filename + "\n" + f.content.slice(0, 2000) + "\n```"
-        }).join("\n\n")
-      : ""
+    const inlineCodeSuffix =
+      codeContext && codeContext.length > 0
+        ? "\n\n---\n[Code context — " +
+          codeContext.length +
+          " file(s)]\n" +
+          codeContext
+            .map((f) => {
+              const ext = f.filename.split(".").pop() ?? ""
+              return "```" + ext + "\n// " + f.filename + "\n" + f.content.slice(0, 2000) + "\n```"
+            })
+            .join("\n\n")
+        : ""
     const linkSuffix = designLink
       ? `\n\n---\n[Design reference URL: ${designLink}]\nPlease use this as a visual/layout reference for the design.`
       : ""
@@ -3580,50 +4121,69 @@ ${noteLines || "无"}${variantNote}`
       if (syncedContext.attachmentsDir) {
         lines.push(`[Workspace attachment directory]\n${syncedContext.attachmentsDir}`)
         if (syncedContext.attachmentFiles && syncedContext.attachmentFiles.length > 0) {
-          lines.push(...syncedContext.attachmentFiles.map((file) => `- ${file.filename}: ${file.targetPath}`))
+          lines.push(
+            ...syncedContext.attachmentFiles.map((file) => `- ${file.filename}: ${file.targetPath}`)
+          )
         }
       }
       if (syncedContext.codeDir) {
         lines.push(`[Workspace code-context directory]\n${syncedContext.codeDir}`)
         if (syncedContext.codeFiles && syncedContext.codeFiles.length > 0) {
-          lines.push(...syncedContext.codeFiles.map((file) => `- ${file.filename}: ${file.targetPath}`))
+          lines.push(
+            ...syncedContext.codeFiles.map((file) => `- ${file.filename}: ${file.targetPath}`)
+          )
         }
       }
       if (lines.length === 0) return ""
-      return "\n\n---\n[Workspace-synced context files]\n" +
+      return (
+        "\n\n---\n[Workspace-synced context files]\n" +
         "These files were copied into the current design workspace before this request. " +
         "If you need to inspect or search the uploaded files, use these workspace paths instead of assuming the originals are present.\n" +
         lines.join("\n")
+      )
     })()
     const workspaceFileSummarySuffix = selectedSkill
       ? (() => {
           const lines: string[] = []
           if (codeContext && codeContext.length > 0) {
             lines.push(`[Code context summary — ${codeContext.length} file(s)]`)
-            lines.push(...codeContext.map((file) => `- ${getPathName(file.filename) || file.filename}`))
+            lines.push(
+              ...codeContext.map((file) => `- ${getPathName(file.filename) || file.filename}`)
+            )
           }
           if (attachedFiles && attachedFiles.length > 0) {
             lines.push(`[Attached file summary — ${attachedFiles.length} file(s)]`)
-            lines.push(...attachedFiles.map((file) => `- ${file.filename}${file.truncated ? " (truncated preview available in UI)" : ""}`))
+            lines.push(
+              ...attachedFiles.map(
+                (file) =>
+                  `- ${file.filename}${file.truncated ? " (truncated preview available in UI)" : ""}`
+              )
+            )
           }
           if (lines.length === 0) return ""
-          return "\n\n---\n[Context file summary]\n" +
+          return (
+            "\n\n---\n[Context file summary]\n" +
             "These files are available in the synced workspace paths above. Prefer reading/searching those files from the workspace instead of relying on inline prompt copies.\n" +
             lines.join("\n")
+          )
         })()
       : ""
-    const inlineFilesSuffix = attachedFiles && attachedFiles.length > 0
-      ? "\n\n---\n[Attached files — " + attachedFiles.length + " file(s)]\n" +
-        attachedFiles.map((f) =>
-          `### ${f.filename}${f.truncated ? " (truncated)" : ""}\n${f.content}`
-        ).join("\n\n")
-      : ""
-    const contextSuffix = skillContext
-      + linkSuffix
-      + workspaceFilesSuffix
-      + workspaceFileSummarySuffix
-      + (selectedSkill ? "" : inlineCodeSuffix)
-      + (selectedSkill ? "" : inlineFilesSuffix)
+    const inlineFilesSuffix =
+      attachedFiles && attachedFiles.length > 0
+        ? "\n\n---\n[Attached files — " +
+          attachedFiles.length +
+          " file(s)]\n" +
+          attachedFiles
+            .map((f) => `### ${f.filename}${f.truncated ? " (truncated)" : ""}\n${f.content}`)
+            .join("\n\n")
+        : ""
+    const contextSuffix =
+      skillContext +
+      linkSuffix +
+      workspaceFilesSuffix +
+      workspaceFileSummarySuffix +
+      (selectedSkill ? "" : inlineCodeSuffix) +
+      (selectedSkill ? "" : inlineFilesSuffix)
     const skillReference = selectedSkill
       ? { name: selectedSkill.name, path: selectedSkill.path }
       : undefined
@@ -3638,12 +4198,13 @@ ${noteLines || "无"}${variantNote}`
         messages: [
           ...prev.messages,
           {
-            role: "user" as const, content: userContent,
+            role: "user" as const,
+            content: userContent,
             skillName: selectedSkill?.name,
             attachments: messageAttachments.length > 0 ? messageAttachments : undefined,
-            imageUrl: attachedImage.previewUrl,
-          },
-        ],
+            imageUrl: attachedImage.previewUrl
+          }
+        ]
       }))
       if (selectedSkill) {
         startGeneration(
@@ -3657,7 +4218,13 @@ ${noteLines || "无"}${variantNote}`
           tabStates[tabId]?.artifactPath ?? null
         )
       } else {
-        startGenerationFromImage(prompt + contextSuffix, attachedImage.base64, attachedImage.mimeType, tabId, selectedModelId)
+        startGenerationFromImage(
+          prompt + contextSuffix,
+          attachedImage.base64,
+          attachedImage.mimeType,
+          tabId,
+          selectedModelId
+        )
       }
       return
     }
@@ -3667,11 +4234,12 @@ ${noteLines || "无"}${variantNote}`
       messages: [
         ...prev.messages,
         {
-          role: "user" as const, content: prompt,
+          role: "user" as const,
+          content: prompt,
           skillName: selectedSkill?.name,
-          attachments: messageAttachments.length > 0 ? messageAttachments : undefined,
-        },
-      ],
+          attachments: messageAttachments.length > 0 ? messageAttachments : undefined
+        }
+      ]
     }))
 
     // New design requests should use the clarifying-question flow unless a skill
@@ -3679,16 +4247,26 @@ ${noteLines || "无"}${variantNote}`
     // iteration because failed or question-only runs may leave messages without HTML.
     if (!hasExistingDesign) {
       if (selectedSkill) {
-        startGeneration(prompt + contextSuffix, tabId, false, selectedModelId, prompt, undefined, skillReference)
+        startGeneration(
+          prompt + contextSuffix,
+          tabId,
+          false,
+          selectedModelId,
+          prompt,
+          undefined,
+          skillReference
+        )
       } else {
         startAskQuestions(prompt + contextSuffix, tabId, selectedModelId)
       }
     } else {
       // Subsequent messages → iterate on existing design
       const currentState = tabStates[tabId]
-      const activeVarId  = currentState?.activeVariationId ?? null
-      const contextHtml  = activeVarId
-        ? (currentState?.variations.find((v) => v.id === activeVarId)?.html ?? currentState?.html ?? "")
+      const activeVarId = currentState?.activeVariationId ?? null
+      const contextHtml = activeVarId
+        ? (currentState?.variations.find((v) => v.id === activeVarId)?.html ??
+          currentState?.html ??
+          "")
         : (currentState?.html ?? "")
 
       // ── Multi-turn iteration ──────────────────────────────
@@ -3707,7 +4285,7 @@ ${noteLines || "无"}${variantNote}`
         tabId,
         /* isIteration */ !!contextHtml,
         selectedModelId,
-        prompt,   // clean user message for apiHistory recording
+        prompt, // clean user message for apiHistory recording
         undefined,
         skillReference,
         artifactPath ?? null,
@@ -3715,7 +4293,17 @@ ${noteLines || "无"}${variantNote}`
         rollbackSnapshot
       )
     }
-  }, [activeTabId, tabStates, updateTs, startAskQuestions, startGeneration, startGenerationFromImage, workspacePath, showToast, syncContextFilesToWorkspace])
+  }, [
+    activeTabId,
+    tabStates,
+    updateTs,
+    startAskQuestions,
+    startGeneration,
+    startGenerationFromImage,
+    workspacePath,
+    showToast,
+    syncContextFilesToWorkspace
+  ])
 
   // ── Continue (submit answers) ─────────────────────────────
 
@@ -3753,14 +4341,18 @@ ${noteLines || "无"}${variantNote}`
 
     // Update the first user message to show answer tags
     updateTs(tabId, (prev) => ({
-      messages: prev.messages.map((m, i) =>
-        i === 0 && m.role === "user" ? { ...m, tags } : m
-      ),
-      answers,
+      messages: prev.messages.map((m, i) => (i === 0 && m.role === "user" ? { ...m, tags } : m)),
+      answers
     }))
 
     // Pass originalPrompt as cleanUserMsg so it's recorded in apiHistory after generation
-    startGeneration(enrichedPrompt, tabId, false, state.selectedModelId ?? undefined, originalPrompt)
+    startGeneration(
+      enrichedPrompt,
+      tabId,
+      false,
+      state.selectedModelId ?? undefined,
+      originalPrompt
+    )
   }, [activeTabId, tabStates, updateTs, startGeneration])
 
   const handleCancel = useCallback(() => {
@@ -3768,37 +4360,40 @@ ${noteLines || "无"}${variantNote}`
     updateTs(activeTabId, { generationState: "idle", pendingApproval: null })
   }, [activeTabId, cancelDesignRunForTab, updateTs])
 
-  const handleDesignApprovalDecision = useCallback((decision: DesignApprovalDecision) => {
-    const pendingApproval = tabStates[activeTabId]?.pendingApproval
-    if (!pendingApproval) return
+  const handleDesignApprovalDecision = useCallback(
+    (decision: DesignApprovalDecision) => {
+      const pendingApproval = tabStates[activeTabId]?.pendingApproval
+      if (!pendingApproval) return
 
-    if (pendingApproval._orchestratorRequestId) {
-      window.api.sandbox.sendApprovalDecision({
-        requestId: pendingApproval._orchestratorRequestId,
-        type: decision,
-        tool_call_id: pendingApproval.tool_call?.id || "",
-      })
-    }
+      if (pendingApproval._orchestratorRequestId) {
+        window.api.sandbox.sendApprovalDecision({
+          requestId: pendingApproval._orchestratorRequestId,
+          type: decision,
+          tool_call_id: pendingApproval.tool_call?.id || ""
+        })
+      }
 
-    updateTs(activeTabId, { pendingApproval: null })
-  }, [activeTabId, tabStates, updateTs])
+      updateTs(activeTabId, { pendingApproval: null })
+    },
+    [activeTabId, tabStates, updateTs]
+  )
 
   // ── Slash-command skill picker ────────────────────────────
   // Triggered when the input value is just "/" optionally followed by a filter word
-  const slashMatch     = inputValue.match(/^\/(\S*)$/)
-  const isSlashMode    = !!slashMatch
-  const slashQuery     = (slashMatch?.[1] ?? "").toLowerCase()
+  const slashMatch = inputValue.match(/^\/(\S*)$/)
+  const isSlashMode = !!slashMatch
+  const slashQuery = (slashMatch?.[1] ?? "").toLowerCase()
   const filteredSkills = isSlashMode
-    ? allSkills.filter((s) =>
-        !slashQuery ||
-        s.name.toLowerCase().includes(slashQuery) ||
-        (s.scenario ?? "").toLowerCase().includes(slashQuery) ||
-        (s.mode ?? "").toLowerCase().includes(slashQuery)
+    ? allSkills.filter(
+        (s) =>
+          !slashQuery ||
+          s.name.toLowerCase().includes(slashQuery) ||
+          (s.scenario ?? "").toLowerCase().includes(slashQuery) ||
+          (s.mode ?? "").toLowerCase().includes(slashQuery)
       )
     : []
-  const filteredSkillGroups = groupByLabel(
-    filteredSkills,
-    (skill) => skill.source === "template" ? getTemplateModeLabel(skill.mode) : "技能"
+  const filteredSkillGroups = groupByLabel(filteredSkills, (skill) =>
+    skill.source === "template" ? getTemplateModeLabel(skill.mode) : "技能"
   )
 
   useEffect(() => {
@@ -3823,27 +4418,37 @@ ${noteLines || "无"}${variantNote}`
     skillOptionRefs.current[activeSkillIndex]?.scrollIntoView({ block: "nearest" })
   }, [activeSkillIndex, filteredSkills.length, isSlashMode])
 
-  const handleSkillSelect = useCallback(async (skill: SkillInfo) => {
-    setInputValue("")  // clear "/" from input
-    // Optimistically set skill without content first
-    updateTs(activeTabId, (prev) => ({ ...prev, selectedSkill: { ...skill } }))
-    // Try to load the SKILL.md content
-    try {
-      const result = await window.api.skills.read(skill.path)
-      if (result.success && result.content) {
-        updateTs(activeTabId, (prev) => ({
-          ...prev,
-          selectedSkill: prev.selectedSkill?.name === skill.name && prev.selectedSkill?.path === skill.path
-            ? { ...prev.selectedSkill, content: result.content }
-            : prev.selectedSkill,
-        }))
+  const handleSkillSelect = useCallback(
+    async (skill: SkillInfo) => {
+      setInputValue("") // clear "/" from input
+      // Optimistically set skill without content first
+      updateTs(activeTabId, (prev) => ({ ...prev, selectedSkill: { ...skill } }))
+      // Try to load the SKILL.md content
+      try {
+        const result = await window.api.skills.read(skill.path)
+        if (result.success && result.content) {
+          updateTs(activeTabId, (prev) => ({
+            ...prev,
+            selectedSkill:
+              prev.selectedSkill?.name === skill.name && prev.selectedSkill?.path === skill.path
+                ? { ...prev.selectedSkill, content: result.content }
+                : prev.selectedSkill
+          }))
+        }
+      } catch {
+        /* skill content optional */
       }
-    } catch { /* skill content optional */ }
-  }, [activeTabId, updateTs, setInputValue])
+    },
+    [activeTabId, updateTs, setInputValue]
+  )
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (isSlashMode) {
-      if (e.key === "Escape") { e.preventDefault(); setInputValue(""); return }
+      if (e.key === "Escape") {
+        e.preventDefault()
+        setInputValue("")
+        return
+      }
       if (e.key === "ArrowDown" && filteredSkills.length > 0) {
         e.preventDefault()
         setActiveSkillIndex((index) => (index + 1) % filteredSkills.length)
@@ -3859,18 +4464,24 @@ ${noteLines || "无"}${variantNote}`
         handleSkillSelect(filteredSkills[activeSkillIndex] ?? filteredSkills[0])
         return
       }
-      return  // let other keys type the filter query
+      return // let other keys type the filter query
     }
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend() }
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault()
+      handleSend()
+    }
   }
 
-  const setAnswer = useCallback((qId: string, value: AnswerValue) => {
-    updateTs(activeTabId, (prev) => ({ answers: { ...prev.answers, [qId]: value } }))
-  }, [activeTabId, updateTs])
+  const setAnswer = useCallback(
+    (qId: string, value: AnswerValue) => {
+      updateTs(activeTabId, (prev) => ({ answers: { ...prev.answers, [qId]: value } }))
+    },
+    [activeTabId, updateTs]
+  )
 
   const isGenerating = ts.generationState === "generating"
-  const isAsking     = ts.generationState === "asking"
-  const isBlocked    = isGenerating || isAsking || ts.generationState === "questions_ready"
+  const isAsking = ts.generationState === "asking"
+  const isBlocked = isGenerating || isAsking || ts.generationState === "questions_ready"
 
   const handleLinkModalConfirm = useCallback(async () => {
     if (linkModalMode === "reference") {
@@ -3879,63 +4490,81 @@ ${noteLines || "无"}${variantNote}`
       return
     }
 
-    const imported = await handleImportUrl(linkModalText, currentSessionId === null ? "gallery" : "session")
+    const imported = await handleImportUrl(
+      linkModalText,
+      currentSessionId === null ? "gallery" : "session"
+    )
     if (imported) {
       setLinkModalOpen(false)
       setLinkModalText("")
     }
   }, [linkModalMode, updateTs, activeTabId, linkModalText, handleImportUrl, currentSessionId])
 
-  const downloadCurrentDesignHtml = useCallback((html: string, metadata?: DesignArtifactMetadata | null) => {
-    downloadHtml(html, metadata)
-    setExportChoice(null)
-  }, [])
+  const downloadCurrentDesignHtml = useCallback(
+    (html: string, metadata?: DesignArtifactMetadata | null) => {
+      downloadHtml(html, metadata)
+      setExportChoice(null)
+    },
+    []
+  )
 
-  const downloadCurrentDesignPackage = useCallback(async (artifactPath: string) => {
-    if (exportingPackage) return
-    setExportingPackage(true)
-    try {
-      const result = await window.api.design.exportArtifactPackage(artifactPath, workspacePath ?? undefined)
-      if (!result.success || !result.buffer) {
-        showToast(result.error || "导出项目包失败")
+  const downloadCurrentDesignPackage = useCallback(
+    async (artifactPath: string) => {
+      if (exportingPackage) return
+      setExportingPackage(true)
+      try {
+        const result = await window.api.design.exportArtifactPackage(
+          artifactPath,
+          workspacePath ?? undefined
+        )
+        if (!result.success || !result.buffer) {
+          showToast(result.error || "导出项目包失败")
+          return
+        }
+        downloadBlob(result.buffer, result.fileName || "design.zip", "application/zip")
+        setExportChoice(null)
+        showToast("项目包已导出")
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : "导出项目包失败")
+      } finally {
+        setExportingPackage(false)
+      }
+    },
+    [exportingPackage, showToast, workspacePath]
+  )
+
+  const handleExportDesign = useCallback(
+    async (state: TabState) => {
+      const html = getCurrentDesignHtml(state)
+      if (!html.trim()) return
+
+      if (!state.artifactPath) {
+        downloadCurrentDesignHtml(html, state.artifactMetadata)
         return
       }
-      downloadBlob(result.buffer, result.fileName || "design.zip", "application/zip")
-      setExportChoice(null)
-      showToast("项目包已导出")
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : "导出项目包失败")
-    } finally {
-      setExportingPackage(false)
-    }
-  }, [exportingPackage, showToast, workspacePath])
 
-  const handleExportDesign = useCallback(async (state: TabState) => {
-    const html = getCurrentDesignHtml(state)
-    if (!html.trim()) return
-
-    if (!state.artifactPath) {
-      downloadCurrentDesignHtml(html, state.artifactMetadata)
-      return
-    }
-
-    try {
-      const info = await window.api.design.getArtifactPackageInfo(state.artifactPath, workspacePath ?? undefined)
-      setExportChoice({
-        html,
-        artifactPath: info.success ? info.filePath ?? state.artifactPath : state.artifactPath,
-        relatedFileCount: info.success ? info.relatedFileCount ?? 0 : 0,
-        includesMetadata: Boolean(state.artifactMetadata),
-      })
-    } catch {
-      setExportChoice({
-        html,
-        artifactPath: state.artifactPath,
-        relatedFileCount: 0,
-        includesMetadata: Boolean(state.artifactMetadata),
-      })
-    }
-  }, [downloadCurrentDesignHtml, workspacePath])
+      try {
+        const info = await window.api.design.getArtifactPackageInfo(
+          state.artifactPath,
+          workspacePath ?? undefined
+        )
+        setExportChoice({
+          html,
+          artifactPath: info.success ? (info.filePath ?? state.artifactPath) : state.artifactPath,
+          relatedFileCount: info.success ? (info.relatedFileCount ?? 0) : 0,
+          includesMetadata: Boolean(state.artifactMetadata)
+        })
+      } catch {
+        setExportChoice({
+          html,
+          artifactPath: state.artifactPath,
+          relatedFileCount: 0,
+          includesMetadata: Boolean(state.artifactMetadata)
+        })
+      }
+    },
+    [downloadCurrentDesignHtml, workspacePath]
+  )
 
   // ── Render ─────────────────────────────────────────────────
 
@@ -3950,21 +4579,34 @@ ${noteLines || "无"}${variantNote}`
           onDelete={deleteSession}
           workspacePath={workspacePath}
           workspaceLoading={workspaceLoading}
-          onSelectWorkspace={() => { void handleSelectWorkspace() }}
+          onSelectWorkspace={() => {
+            void handleSelectWorkspace()
+          }}
         />
         <CreateDesignModal
           open={createModalOpen}
           loadingKind={importingSource}
           workspacePath={workspacePath}
           workspaceLoading={workspaceLoading}
-          onSelectWorkspace={() => { void handleSelectWorkspace() }}
+          designSystemGroups={designSystemGroups}
+          selectedDesignSystemId={createDesignSystemId}
+          onSelectWorkspace={() => {
+            void handleSelectWorkspace()
+          }}
+          onDesignSystemChange={setCreateDesignSystemId}
           onCreateBlank={() => {
-            createSession()
+            createSession(undefined, { designSystemId: createDesignSystemId })
             setCreateModalOpen(false)
           }}
-          onImportUrl={() => { void openImportUrlModal() }}
-          onImportHtml={() => { void handleImportHtmlFile("gallery") }}
-          onImportPrototypeZip={() => { void handleImportPrototypeZip("gallery") }}
+          onImportUrl={() => {
+            void openImportUrlModal()
+          }}
+          onImportHtml={() => {
+            void handleImportHtmlFile("gallery")
+          }}
+          onImportPrototypeZip={() => {
+            void handleImportPrototypeZip("gallery")
+          }}
           onClose={() => setCreateModalOpen(false)}
         />
         <LinkModal
@@ -3973,18 +4615,31 @@ ${noteLines || "无"}${variantNote}`
           url={linkModalText}
           loading={importingSource === "url"}
           onUrlChange={setLinkModalText}
-          onConfirm={() => { void handleLinkModalConfirm() }}
+          onConfirm={() => {
+            void handleLinkModalConfirm()
+          }}
           onClose={() => setLinkModalOpen(false)}
         />
         {toast && (
-          <div style={{
-            position: "fixed", bottom: 120, left: "50%", transform: "translateX(-50%)",
-            background: "rgba(30,30,30,0.92)", color: "#fff", fontSize: 13, fontWeight: 500,
-            padding: "9px 18px", borderRadius: 20, zIndex: 99999,
-            pointerEvents: "none", whiteSpace: "nowrap",
-            boxShadow: "0 4px 20px rgba(0,0,0,0.3)",
-            border: "1px solid rgba(255,255,255,0.08)",
-          }}>
+          <div
+            style={{
+              position: "fixed",
+              bottom: 120,
+              left: "50%",
+              transform: "translateX(-50%)",
+              background: "rgba(30,30,30,0.92)",
+              color: "#fff",
+              fontSize: 13,
+              fontWeight: 500,
+              padding: "9px 18px",
+              borderRadius: 20,
+              zIndex: 99999,
+              pointerEvents: "none",
+              whiteSpace: "nowrap",
+              boxShadow: "0 4px 20px rgba(0,0,0,0.3)",
+              border: "1px solid rgba(255,255,255,0.08)"
+            }}
+          >
             {toast.msg}
           </div>
         )}
@@ -3999,14 +4654,25 @@ ${noteLines || "无"}${variantNote}`
         loadingKind={importingSource}
         workspacePath={workspacePath}
         workspaceLoading={workspaceLoading}
-        onSelectWorkspace={() => { void handleSelectWorkspace() }}
+        designSystemGroups={designSystemGroups}
+        selectedDesignSystemId={createDesignSystemId}
+        onSelectWorkspace={() => {
+          void handleSelectWorkspace()
+        }}
+        onDesignSystemChange={setCreateDesignSystemId}
         onCreateBlank={() => {
-          newSession()
+          newSession(createDesignSystemId)
           setCreateModalOpen(false)
         }}
-        onImportUrl={() => { void openImportUrlModal() }}
-        onImportHtml={() => { void handleImportHtmlFile("session") }}
-        onImportPrototypeZip={() => { void handleImportPrototypeZip("session") }}
+        onImportUrl={() => {
+          void openImportUrlModal()
+        }}
+        onImportHtml={() => {
+          void handleImportHtmlFile("session")
+        }}
+        onImportPrototypeZip={() => {
+          void handleImportPrototypeZip("session")
+        }}
         onClose={() => setCreateModalOpen(false)}
       />
       {/* Code & Link modals — rendered at root so they overlay everything */}
@@ -4026,7 +4692,9 @@ ${noteLines || "无"}${variantNote}`
         url={linkModalText}
         loading={importingSource === "url"}
         onUrlChange={setLinkModalText}
-        onConfirm={() => { void handleLinkModalConfirm() }}
+        onConfirm={() => {
+          void handleLinkModalConfirm()
+        }}
         onClose={() => setLinkModalOpen(false)}
       />
       <ExportDesignModal
@@ -4070,14 +4738,25 @@ ${noteLines || "无"}${variantNote}`
 
       {/* Toast notification */}
       {toast && (
-        <div style={{
-          position: "fixed", bottom: 120, left: "50%", transform: "translateX(-50%)",
-          background: "rgba(30,30,30,0.92)", color: "#fff", fontSize: 13, fontWeight: 500,
-          padding: "9px 18px", borderRadius: 20, zIndex: 99999,
-          pointerEvents: "none", whiteSpace: "nowrap",
-          boxShadow: "0 4px 20px rgba(0,0,0,0.3)",
-          border: "1px solid rgba(255,255,255,0.08)",
-        }}>
+        <div
+          style={{
+            position: "fixed",
+            bottom: 120,
+            left: "50%",
+            transform: "translateX(-50%)",
+            background: "rgba(30,30,30,0.92)",
+            color: "#fff",
+            fontSize: 13,
+            fontWeight: 500,
+            padding: "9px 18px",
+            borderRadius: 20,
+            zIndex: 99999,
+            pointerEvents: "none",
+            whiteSpace: "nowrap",
+            boxShadow: "0 4px 20px rgba(0,0,0,0.3)",
+            border: "1px solid rgba(255,255,255,0.08)"
+          }}
+        >
           {toast.msg}
         </div>
       )}
@@ -4088,12 +4767,19 @@ ${noteLines || "无"}${variantNote}`
           <button
             onClick={backToGallery}
             style={{
-              display: "flex", alignItems: "center", gap: 5,
+              display: "flex",
+              alignItems: "center",
+              gap: 5,
               padding: "4px 10px 4px 6px",
-              background: "none", border: "1px solid #d4d2cc",
-              borderRadius: 8, cursor: "pointer",
-              fontSize: 12, fontWeight: 500, color: "#6a6a6a",
-              fontFamily: "inherit", lineHeight: 1,
+              background: "none",
+              border: "1px solid #d4d2cc",
+              borderRadius: 8,
+              cursor: "pointer",
+              fontSize: 12,
+              fontWeight: 500,
+              color: "#6a6a6a",
+              fontFamily: "inherit",
+              lineHeight: 1
             }}
             title="返回历史记录"
           >
@@ -4102,51 +4788,51 @@ ${noteLines || "无"}${variantNote}`
           <div style={S.logo}>✦</div>
           <span style={S.titleText}>design</span>
           {ts.sourceInfo && (
-            <span style={{
-              display: "inline-flex",
-              alignItems: "center",
-              padding: "3px 8px",
-              borderRadius: 999,
-              fontSize: 11,
-              fontWeight: 700,
-              color: "#7a4300",
-              background: "#fff2df",
-              border: "1px solid #f0d3a6",
-            }}>
+            <span
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                padding: "3px 8px",
+                borderRadius: 999,
+                fontSize: 11,
+                fontWeight: 700,
+                color: "#7a4300",
+                background: "#fff2df",
+                border: "1px solid #f0d3a6"
+              }}
+            >
               {getSessionKindLabel(ts.sourceInfo.kind)}
             </span>
           )}
         </div>
         <div style={S.titleActions}>
-          {designSystems.length > 0 && (
-            <select
-              value={ts.selectedDesignSystemId ?? ""}
-              onChange={(event) => updateTs(activeTabId, { selectedDesignSystemId: event.target.value || null })}
-              disabled={isGenerating}
-              title={selectedDesignSystem ? `设计系统: ${selectedDesignSystem.path}` : "选择设计系统"}
+          {selectedDesignSystem && (
+            <span
+              title={`设计系统: ${selectedDesignSystem.path}`}
               style={{
-                maxWidth: 190,
+                maxWidth: 210,
                 height: 30,
-                padding: "0 8px",
-                border: "1px solid #d4d2cc",
+                padding: "0 10px",
+                border: "1px solid #b9d8cc",
                 borderRadius: 8,
-                background: "#ffffff",
-                color: "#1a1a1a",
+                background: "#eef7f3",
+                color: "#1f5f4a",
                 fontSize: 12,
-                fontWeight: 600,
+                fontWeight: 700,
                 fontFamily: "inherit",
-                outline: "none",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis"
               }}
             >
-              <option value="">无设计系统</option>
-              {designSystemGroups.map((group) => (
-                <optgroup key={group.label} label={group.label}>
-                  {group.items.map((system) => (
-                    <option key={system.id} value={system.id}>{system.name}</option>
-                  ))}
-                </optgroup>
-              ))}
-            </select>
+              <span style={{ flexShrink: 0 }}>▦</span>
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+                {selectedDesignSystem.name}
+              </span>
+            </span>
           )}
           <button
             onClick={handleSelectWorkspace}
@@ -4157,9 +4843,13 @@ ${noteLines || "无"}${variantNote}`
               cursor: workspaceLoading || isGenerating ? "default" : "pointer",
               color: workspacePath ? "#1a1a1a" : "#9a5b00",
               borderColor: workspacePath ? "#d4d2cc" : "#e7bf7a",
-              background: workspacePath ? "#ffffff" : "#fff7e6",
+              background: workspacePath ? "#ffffff" : "#fff7e6"
             }}
-            title={workspacePath ? `工作目录: ${workspacePath}（点击切换）` : "选择工作目录（用于保存设计产物）"}
+            title={
+              workspacePath
+                ? `工作目录: ${workspacePath}（点击切换）`
+                : "选择工作目录（用于保存设计产物）"
+            }
           >
             <span style={S.workspaceIcon}>📁</span>
             <span style={S.workspaceText}>
@@ -4185,8 +4875,12 @@ ${noteLines || "无"}${variantNote}`
                 onAttachCode={() => setCodeModalOpen(true)}
                 onAttachLink={openReferenceLinkModal}
                 onImportUrl={openImportUrlModal}
-                onImportHtml={() => { void handleImportHtmlFile("session") }}
-                onImportPrototypeZip={() => { void handleImportPrototypeZip("session") }}
+                onImportHtml={() => {
+                  void handleImportHtmlFile("session")
+                }}
+                onImportPrototypeZip={() => {
+                  void handleImportPrototypeZip("session")
+                }}
               />
             ) : (
               <div ref={messageListRef} style={S.messageList}>
@@ -4194,7 +4888,16 @@ ${noteLines || "无"}${variantNote}`
                   <MessageBubble key={i} message={msg} />
                 ))}
                 {isAsking && (
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0", color: "#8a8a8a", fontSize: 13 }}>
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      padding: "8px 0",
+                      color: "#8a8a8a",
+                      fontSize: 13
+                    }}
+                  >
                     <PulsingDot />
                     <span>正在生成问题…</span>
                   </div>
@@ -4216,27 +4919,46 @@ ${noteLines || "无"}${variantNote}`
           <div style={{ ...S.inputArea, position: "relative" }}>
             {/* Skill picker popup — shown when input is "/" + optional filter text */}
             {isSlashMode && filteredSkills.length > 0 && (
-              <div style={{
-                position: "absolute", bottom: "calc(100% + 4px)", left: 12, right: 12,
-                background: "#ffffff", border: "1px solid #e0ded8", borderRadius: 10,
-                boxShadow: "0 4px 16px rgba(0,0,0,0.10)",
-                maxHeight: 220, overflowY: "auto", zIndex: 200,
-              }}>
-                <div style={{ padding: "6px 8px 4px", fontSize: 11, color: "#a0a0a0", fontWeight: 500, borderBottom: "1px solid #f0eee8" }}>
+              <div
+                style={{
+                  position: "absolute",
+                  bottom: "calc(100% + 4px)",
+                  left: 12,
+                  right: 12,
+                  background: "#ffffff",
+                  border: "1px solid #e0ded8",
+                  borderRadius: 10,
+                  boxShadow: "0 4px 16px rgba(0,0,0,0.10)",
+                  maxHeight: 220,
+                  overflowY: "auto",
+                  zIndex: 200
+                }}
+              >
+                <div
+                  style={{
+                    padding: "6px 8px 4px",
+                    fontSize: 11,
+                    color: "#a0a0a0",
+                    fontWeight: 500,
+                    borderBottom: "1px solid #f0eee8"
+                  }}
+                >
                   ▣ 场景模板 / 技能 — ↑↓ 选择，↵ 确认，Esc 取消
                 </div>
                 {filteredSkillGroups.map((group) => (
                   <div key={group.label}>
-                    <div style={{
-                      padding: "7px 12px 4px",
-                      fontSize: 10,
-                      fontWeight: 800,
-                      color: "#8a8a8a",
-                      textTransform: "uppercase",
-                      letterSpacing: 0,
-                      background: "#fafaf8",
-                      borderBottom: "1px solid #f4f3f0",
-                    }}>
+                    <div
+                      style={{
+                        padding: "7px 12px 4px",
+                        fontSize: 10,
+                        fontWeight: 800,
+                        color: "#8a8a8a",
+                        textTransform: "uppercase",
+                        letterSpacing: 0,
+                        background: "#fafaf8",
+                        borderBottom: "1px solid #f4f3f0"
+                      }}
+                    >
                       {group.label}
                     </div>
                     {group.items.map((skill) => {
@@ -4245,27 +4967,54 @@ ${noteLines || "无"}${variantNote}`
                       return (
                         <div
                           key={`${skill.source ?? "skill"}:${skill.path}`}
-                          ref={(node) => { skillOptionRefs.current[i] = node }}
+                          ref={(node) => {
+                            skillOptionRefs.current[i] = node
+                          }}
                           onClick={() => handleSkillSelect(skill)}
                           onMouseEnter={() => setActiveSkillIndex(i)}
                           style={{
-                            padding: "8px 12px", cursor: "pointer",
+                            padding: "8px 12px",
+                            cursor: "pointer",
                             background: isActive ? "#f3f2ee" : "transparent",
-                            borderBottom: i < filteredSkills.length - 1 ? "1px solid #f4f3f0" : "none",
-                            transition: "background 0.1s",
+                            borderBottom:
+                              i < filteredSkills.length - 1 ? "1px solid #f4f3f0" : "none",
+                            transition: "background 0.1s"
                           }}
                         >
                           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                            <span style={{ fontSize: 14 }}>{skill.source === "template" ? "▣" : "⚡"}</span>
-                            <span style={{ fontSize: 13, fontWeight: 600, color: "#1a1a1a" }}>{skill.name}</span>
+                            <span style={{ fontSize: 14 }}>
+                              {skill.source === "template" ? "▣" : "⚡"}
+                            </span>
+                            <span style={{ fontSize: 13, fontWeight: 600, color: "#1a1a1a" }}>
+                              {skill.name}
+                            </span>
                             {skill.source === "template" && (
-                              <span style={{ fontSize: 10, fontWeight: 700, color: "#7a4300", background: "#fff2df", border: "1px solid #f0d3a6", borderRadius: 999, padding: "1px 6px" }}>
+                              <span
+                                style={{
+                                  fontSize: 10,
+                                  fontWeight: 700,
+                                  color: "#7a4300",
+                                  background: "#fff2df",
+                                  border: "1px solid #f0d3a6",
+                                  borderRadius: 999,
+                                  padding: "1px 6px"
+                                }}
+                              >
                                 {getTemplateModeLabel(skill.mode)}
                               </span>
                             )}
                           </div>
-                          <div style={{ fontSize: 11, color: "#8a8a8a", marginTop: 2, marginLeft: 20, lineHeight: 1.4 }}>
-                            {skill.description.slice(0, 80)}{skill.description.length > 80 ? "…" : ""}
+                          <div
+                            style={{
+                              fontSize: 11,
+                              color: "#8a8a8a",
+                              marginTop: 2,
+                              marginLeft: 20,
+                              lineHeight: 1.4
+                            }}
+                          >
+                            {skill.description.slice(0, 80)}
+                            {skill.description.length > 80 ? "…" : ""}
                           </div>
                         </div>
                       )
@@ -4275,42 +5024,77 @@ ${noteLines || "无"}${variantNote}`
               </div>
             )}
             {isSlashMode && filteredSkills.length === 0 && slashQuery && (
-              <div style={{
-                position: "absolute", bottom: "calc(100% + 4px)", left: 12, right: 12,
-                background: "#ffffff", border: "1px solid #e0ded8", borderRadius: 10,
-                boxShadow: "0 4px 16px rgba(0,0,0,0.10)", padding: "10px 14px",
-                fontSize: 12, color: "#a0a0a0", zIndex: 200,
-              }}>
+              <div
+                style={{
+                  position: "absolute",
+                  bottom: "calc(100% + 4px)",
+                  left: 12,
+                  right: 12,
+                  background: "#ffffff",
+                  border: "1px solid #e0ded8",
+                  borderRadius: 10,
+                  boxShadow: "0 4px 16px rgba(0,0,0,0.10)",
+                  padding: "10px 14px",
+                  fontSize: 12,
+                  color: "#a0a0a0",
+                  zIndex: 200
+                }}
+              >
                 无匹配技能 — 输入 / 不加文字可查看全部
               </div>
             )}
             <div style={S.inputBox}>
               {/* Screenshot preview strip */}
               {ts.attachedImage && (
-                <div style={{ padding: "8px 12px 0", display: "flex", alignItems: "center", gap: 8 }}>
+                <div
+                  style={{ padding: "8px 12px 0", display: "flex", alignItems: "center", gap: 8 }}
+                >
                   <div style={{ position: "relative", display: "inline-block" }}>
                     <img
                       src={ts.attachedImage.previewUrl}
-                      style={{ height: 60, maxWidth: 120, borderRadius: 8, objectFit: "cover", border: "1px solid #e8e6e0", display: "block" }}
+                      style={{
+                        height: 60,
+                        maxWidth: 120,
+                        borderRadius: 8,
+                        objectFit: "cover",
+                        border: "1px solid #e8e6e0",
+                        display: "block"
+                      }}
                       alt="截图预览"
                     />
                     <button
                       onClick={() => updateTs(activeTabId, { attachedImage: null })}
                       style={{
-                        position: "absolute", top: -6, right: -6,
-                        width: 18, height: 18, borderRadius: "50%",
-                        background: "#1a1a1a", border: "none",
-                        color: "#fff", fontSize: 11, cursor: "pointer",
-                        display: "flex", alignItems: "center", justifyContent: "center",
-                        lineHeight: 1, fontFamily: "inherit",
+                        position: "absolute",
+                        top: -6,
+                        right: -6,
+                        width: 18,
+                        height: 18,
+                        borderRadius: "50%",
+                        background: "#1a1a1a",
+                        border: "none",
+                        color: "#fff",
+                        fontSize: 11,
+                        cursor: "pointer",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        lineHeight: 1,
+                        fontFamily: "inherit"
                       }}
-                    >×</button>
+                    >
+                      ×
+                    </button>
                   </div>
                   <span style={{ fontSize: 12, color: "#8a8a8a" }}>截图已附加</span>
                 </div>
               )}
               {/* Context pills row — skill / code / design-link / attached files */}
-              {(selectedDesignSystem || ts.selectedSkill || ts.codeContext || ts.designLink || (ts.attachedFiles && ts.attachedFiles.length > 0)) && (
+              {(selectedDesignSystem ||
+                ts.selectedSkill ||
+                ts.codeContext ||
+                ts.designLink ||
+                (ts.attachedFiles && ts.attachedFiles.length > 0)) && (
                 <div style={{ padding: "8px 12px 0", display: "flex", flexWrap: "wrap", gap: 6 }}>
                   {selectedDesignSystem && (
                     <ContextPill
@@ -4318,13 +5102,19 @@ ${noteLines || "无"}${variantNote}`
                       label={selectedDesignSystem.name}
                       badge="DESIGN.md"
                       color={{ bg: "#eef7f3", border: "#b9d8cc", text: "#1f5f4a", dot: "#4b9b7a" }}
-                      onRemove={() => updateTs(activeTabId, { selectedDesignSystemId: null })}
                     />
                   )}
                   {ts.selectedSkill && (
                     <ContextPill
-                      icon={ts.selectedSkill.source === "template" ? "▣" : "⚡"} label={ts.selectedSkill.name}
-                      badge={ts.selectedSkill.source === "template" ? "模板" : ts.selectedSkill.content ? "已加载" : undefined}
+                      icon={ts.selectedSkill.source === "template" ? "▣" : "⚡"}
+                      label={ts.selectedSkill.name}
+                      badge={
+                        ts.selectedSkill.source === "template"
+                          ? "模板"
+                          : ts.selectedSkill.content
+                            ? "已加载"
+                            : undefined
+                      }
                       color={{ bg: "#eff0fb", border: "#c7c9ef", text: "#3a3a8a", dot: "#9090c0" }}
                       onRemove={() => updateTs(activeTabId, { selectedSkill: null })}
                     />
@@ -4332,8 +5122,16 @@ ${noteLines || "无"}${variantNote}`
                   {ts.codeContext && ts.codeContext.length > 0 && (
                     <ContextPill
                       icon="🗂️"
-                      label={ts.codeContext.length === 1 ? (ts.codeContext[0].filename || "代码") : `${ts.codeContext.length} 个文件`}
-                      badge={ts.codeContext.length === 1 ? `${ts.codeContext[0].content.split("\n").length} 行` : undefined}
+                      label={
+                        ts.codeContext.length === 1
+                          ? ts.codeContext[0].filename || "代码"
+                          : `${ts.codeContext.length} 个文件`
+                      }
+                      badge={
+                        ts.codeContext.length === 1
+                          ? `${ts.codeContext[0].content.split("\n").length} 行`
+                          : undefined
+                      }
                       color={{ bg: "#f0f8f0", border: "#b8d8b8", text: "#2a5a2a", dot: "#5a9a5a" }}
                       onRemove={() => updateTs(activeTabId, { codeContext: null })}
                       onClick={() => setCodeModalOpen(true)}
@@ -4341,25 +5139,46 @@ ${noteLines || "无"}${variantNote}`
                   )}
                   {ts.designLink && (
                     <ContextPill
-                      icon="🔗" label={(() => { try { return new URL(ts.designLink).hostname } catch { return ts.designLink.slice(0, 30) } })()}
+                      icon="🔗"
+                      label={(() => {
+                        try {
+                          return new URL(ts.designLink).hostname
+                        } catch {
+                          return ts.designLink.slice(0, 30)
+                        }
+                      })()}
                       color={{ bg: "#fff8f0", border: "#e8d0b0", text: "#5a3a00", dot: "#c07820" }}
                       onRemove={() => updateTs(activeTabId, { designLink: null })}
                       onClick={openReferenceLinkModal}
                     />
                   )}
-                  {ts.attachedFiles && ts.attachedFiles.map((f, idx) => (
-                    <ContextPill
-                      key={f.filePath}
-                      icon="📄"
-                      label={(f.filename.length > 28 ? f.filename.slice(0, 25) + "…" + f.filename.slice(f.filename.lastIndexOf(".")) : f.filename) + (f.truncated ? " ⚠️" : "")}
-                      badge={`${f.content.length.toLocaleString()} 字符`}
-                      color={{ bg: "#f5f5ff", border: "#d0d0ef", text: "#3a3a6a", dot: "#9090c0" }}
-                      onRemove={() => updateTs(activeTabId, (prev) => {
-                        const remaining = (prev.attachedFiles ?? []).filter((_, i) => i !== idx)
-                        return { attachedFiles: remaining.length > 0 ? remaining : null }
-                      })}
-                    />
-                  ))}
+                  {ts.attachedFiles &&
+                    ts.attachedFiles.map((f, idx) => (
+                      <ContextPill
+                        key={f.filePath}
+                        icon="📄"
+                        label={
+                          (f.filename.length > 28
+                            ? f.filename.slice(0, 25) +
+                              "…" +
+                              f.filename.slice(f.filename.lastIndexOf("."))
+                            : f.filename) + (f.truncated ? " ⚠️" : "")
+                        }
+                        badge={`${f.content.length.toLocaleString()} 字符`}
+                        color={{
+                          bg: "#f5f5ff",
+                          border: "#d0d0ef",
+                          text: "#3a3a6a",
+                          dot: "#9090c0"
+                        }}
+                        onRemove={() =>
+                          updateTs(activeTabId, (prev) => {
+                            const remaining = (prev.attachedFiles ?? []).filter((_, i) => i !== idx)
+                            return { attachedFiles: remaining.length > 0 ? remaining : null }
+                          })
+                        }
+                      />
+                    ))}
                   {ts.attachedFiles && ts.attachedFiles.length > 0 && (
                     <span style={{ fontSize: 11, color: "#aaa", alignSelf: "center" }}>
                       {ts.attachedFiles.length}/{DESIGN_MAX_ATTACHMENTS_DISPLAY} 个文件
@@ -4377,7 +5196,11 @@ ${noteLines || "无"}${variantNote}`
                 value={inputValue}
                 onChange={(e) => setInputValue(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder={ts.attachedImage ? "补充说明，如「还原这个页面」或「修改颜色为蓝色」…（可选）" : "描述你想创建的设计… (输入 / 选择技能)"}
+                placeholder={
+                  ts.attachedImage
+                    ? "补充说明，如「还原这个页面」或「修改颜色为蓝色」…（可选）"
+                    : "描述你想创建的设计… (输入 / 选择技能)"
+                }
                 rows={2}
                 style={S.textarea}
                 disabled={isBlocked}
@@ -4387,15 +5210,18 @@ ${noteLines || "无"}${variantNote}`
                   <ToolbarIcon
                     title="附加文档（txt / md / csv / docx / xlsx）"
                     onClick={handleDocAttach}
-                  >{attachmentLoading ? "⏳" : "📎"}</ToolbarIcon>
+                  >
+                    {attachmentLoading ? "⏳" : "📎"}
+                  </ToolbarIcon>
                   <ToolbarIcon
                     title="关联代码（ts / tsx / js / css / py 等）"
                     onClick={() => setCodeModalOpen(true)}
-                  >🗂️</ToolbarIcon>
-                  <ToolbarIcon
-                    title="上传截图"
-                    onClick={() => fileInputRef.current?.click()}
-                  >📷</ToolbarIcon>
+                  >
+                    🗂️
+                  </ToolbarIcon>
+                  <ToolbarIcon title="上传截图" onClick={() => fileInputRef.current?.click()}>
+                    📷
+                  </ToolbarIcon>
                   <ModelSelector
                     models={availableModels}
                     selectedId={ts.selectedModelId}
@@ -4419,22 +5245,33 @@ ${noteLines || "无"}${variantNote}`
                   />
                 </div>
                 {isGenerating ? (
-                  <button onClick={handleCancel} style={S.cancelBtn}>■ 停止</button>
+                  <button onClick={handleCancel} style={S.cancelBtn}>
+                    ■ 停止
+                  </button>
                 ) : ts.generationState === "error" && ts.retryPrompt ? (
                   <div style={{ display: "flex", gap: 6 }}>
                     <button
                       onClick={handleRetry}
-                      style={{ ...S.cancelBtn, background: "#fff3e0", color: "#c05800", border: "1px solid #f0c070" }}
-                    >🔄 重试</button>
+                      style={{
+                        ...S.cancelBtn,
+                        background: "#fff3e0",
+                        color: "#c05800",
+                        border: "1px solid #f0c070"
+                      }}
+                    >
+                      🔄 重试
+                    </button>
                     <button
                       onClick={handleSend}
                       disabled={!inputValue.trim() && !ts.attachedImage}
                       style={{
                         ...S.sendBtn,
                         background: inputValue.trim() || ts.attachedImage ? "#cc785c" : "#e8b9a8",
-                        cursor: inputValue.trim() || ts.attachedImage ? "pointer" : "default",
+                        cursor: inputValue.trim() || ts.attachedImage ? "pointer" : "default"
                       }}
-                    >▶ 发送</button>
+                    >
+                      ▶ 发送
+                    </button>
                   </div>
                 ) : (
                   <button
@@ -4442,8 +5279,14 @@ ${noteLines || "无"}${variantNote}`
                     disabled={(!inputValue.trim() && !ts.attachedImage) || isBlocked}
                     style={{
                       ...S.sendBtn,
-                      background: (inputValue.trim() || ts.attachedImage) && !isBlocked ? "#cc785c" : "#e8b9a8",
-                      cursor: (inputValue.trim() || ts.attachedImage) && !isBlocked ? "pointer" : "default",
+                      background:
+                        (inputValue.trim() || ts.attachedImage) && !isBlocked
+                          ? "#cc785c"
+                          : "#e8b9a8",
+                      cursor:
+                        (inputValue.trim() || ts.attachedImage) && !isBlocked
+                          ? "pointer"
+                          : "default"
                     }}
                   >
                     ▶ 发送
@@ -4469,7 +5312,8 @@ ${noteLines || "无"}${variantNote}`
                 const state = tabStates[activeTabId]
                 if (iframe && state) {
                   const displayHtml = state.activeVariationId
-                    ? (state.variations.find((v) => v.id === state.activeVariationId)?.html ?? state.html)
+                    ? (state.variations.find((v) => v.id === state.activeVariationId)?.html ??
+                      state.html)
                     : state.html
                   if (displayHtml) {
                     iframe.srcdoc = displayHtml
@@ -4477,7 +5321,9 @@ ${noteLines || "无"}${variantNote}`
                 }
                 updateTs(activeTabId, (prev) => ({ reloadKey: prev.reloadKey + 1 }))
               }}
-            >↻</button>
+            >
+              ↻
+            </button>
 
             {/* Right panel tabs */}
             <div style={{ display: "flex", gap: 0, marginLeft: 8 }}>
@@ -4507,34 +5353,86 @@ ${noteLines || "无"}${variantNote}`
               <div style={S.tweaksBar}>
                 {/* Tweaks toggle */}
                 <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-                  <span style={{ fontSize: 13, fontWeight: 500, color: tweaksOn ? "#1a1a1a" : "#8a8a8a" }}>微调</span>
+                  <span
+                    style={{
+                      fontSize: 13,
+                      fontWeight: 500,
+                      color: tweaksOn ? "#1a1a1a" : "#8a8a8a"
+                    }}
+                  >
+                    微调
+                  </span>
                   <button
-                    onClick={() => { setTweaksOn((v) => !v); setActiveMode(null) }}
+                    onClick={() => {
+                      setTweaksOn((v) => !v)
+                      setActiveMode(null)
+                    }}
                     style={{ ...S.toggleTrack, background: tweaksOn ? "#1a1a1a" : "#d4d2cc" }}
                     title={tweaksOn ? "关闭微调" : "开启微调"}
                   >
-                    <span style={{ ...S.toggleThumb, transform: tweaksOn ? "translateX(14px)" : "translateX(0)" }} />
+                    <span
+                      style={{
+                        ...S.toggleThumb,
+                        transform: tweaksOn ? "translateX(14px)" : "translateX(0)"
+                      }}
+                    />
                   </button>
                 </div>
 
                 {tweaksOn && (
                   <>
                     <div style={S.tweaksDivider} />
-                    <TweaksBtn label="注释" icon={<CommentIcon active={activeMode === "comment"} />} active={activeMode === "comment"} onClick={() => setActiveMode(activeMode === "comment" ? null : "comment")} />
-                    <TweaksBtn label="编辑" icon={<EditIcon    active={activeMode === "edit"}    />} active={activeMode === "edit"}    onClick={() => setActiveMode(activeMode === "edit"    ? null : "edit")}    />
-                    <TweaksBtn label="绘制" icon={<DrawIcon active={activeMode === "draw"} />} active={activeMode === "draw"} onClick={() => setActiveMode(activeMode === "draw" ? null : "draw")} />
+                    <TweaksBtn
+                      label="注释"
+                      icon={<CommentIcon active={activeMode === "comment"} />}
+                      active={activeMode === "comment"}
+                      onClick={() => setActiveMode(activeMode === "comment" ? null : "comment")}
+                    />
+                    <TweaksBtn
+                      label="编辑"
+                      icon={<EditIcon active={activeMode === "edit"} />}
+                      active={activeMode === "edit"}
+                      onClick={() => setActiveMode(activeMode === "edit" ? null : "edit")}
+                    />
+                    <TweaksBtn
+                      label="绘制"
+                      icon={<DrawIcon active={activeMode === "draw"} />}
+                      active={activeMode === "draw"}
+                      onClick={() => setActiveMode(activeMode === "draw" ? null : "draw")}
+                    />
                   </>
                 )}
 
                 <div style={S.tweaksDivider} />
                 {/* Zoom */}
                 <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                  <button onClick={() => setZoom((z) => Math.max(25, z - 25))} style={S.zoomBtn}>−</button>
-                  <span style={{ fontSize: 12, fontWeight: 500, color: "#4a4a4a", minWidth: 36, textAlign: "center" }}>{zoom}%</span>
-                  <button onClick={() => setZoom((z) => Math.min(200, z + 25))} style={S.zoomBtn}>+</button>
+                  <button onClick={() => setZoom((z) => Math.max(25, z - 25))} style={S.zoomBtn}>
+                    −
+                  </button>
+                  <span
+                    style={{
+                      fontSize: 12,
+                      fontWeight: 500,
+                      color: "#4a4a4a",
+                      minWidth: 36,
+                      textAlign: "center"
+                    }}
+                  >
+                    {zoom}%
+                  </span>
+                  <button onClick={() => setZoom((z) => Math.min(200, z + 25))} style={S.zoomBtn}>
+                    +
+                  </button>
                 </div>
                 <div style={S.tweaksDivider} />
-                <button style={S.canvasActionBtn} onClick={() => { void handleExportDesign(ts) }}>⬇ 导出</button>
+                <button
+                  style={S.canvasActionBtn}
+                  onClick={() => {
+                    void handleExportDesign(ts)
+                  }}
+                >
+                  ⬇ 导出
+                </button>
               </div>
             )}
           </div>
@@ -4568,288 +5466,385 @@ ${noteLines || "无"}${variantNote}`
                       ? (ts.variations.find((v) => v.id === ts.activeVariationId)?.html ?? ts.html)
                       : ts.html
                     const activeVar = ts.variations.find((v) => v.id === ts.activeVariationId)
-                    const varColor  = ts.activeVariationId === "a" ? "#3b82f6"
-                      : ts.activeVariationId === "b" ? "#8b5cf6"
-                      : ts.activeVariationId === "c" ? "#f59e0b" : undefined
+                    const varColor =
+                      ts.activeVariationId === "a"
+                        ? "#3b82f6"
+                        : ts.activeVariationId === "b"
+                          ? "#8b5cf6"
+                          : ts.activeVariationId === "c"
+                            ? "#f59e0b"
+                            : undefined
                     const iframeDoc = iframeRef.current?.contentDocument ?? null
-                    const resolvedDrawStrokes: ResolvedDrawStroke[] = ts.drawStrokes.map((stroke) => {
-                      const resolvedPoints = resolveAnchoredStrokePoints(iframeDoc, stroke)
-                      return {
-                        ...stroke,
-                        resolvedPoints,
-                        orphaned: Boolean(stroke.anchor && resolvedPoints === stroke.points),
+                    const resolvedDrawStrokes: ResolvedDrawStroke[] = ts.drawStrokes.map(
+                      (stroke) => {
+                        const resolvedPoints = resolveAnchoredStrokePoints(iframeDoc, stroke)
+                        return {
+                          ...stroke,
+                          resolvedPoints,
+                          orphaned: Boolean(stroke.anchor && resolvedPoints === stroke.points)
+                        }
                       }
-                    })
+                    )
                     const resolvedDrawNotes: ResolvedDrawNote[] = ts.drawNotes.map((note) => {
-                      const resolvedPoint = resolveAnchorPagePoint(iframeDoc, note.anchor) ?? undefined
+                      const resolvedPoint =
+                        resolveAnchorPagePoint(iframeDoc, note.anchor) ?? undefined
                       return {
                         ...note,
                         resolvedPoint,
-                        orphaned: Boolean(note.anchor && !resolvedPoint),
+                        orphaned: Boolean(note.anchor && !resolvedPoint)
                       }
                     })
-                    const draftDrawPoint = resolveAnchorPagePoint(iframeDoc, ts.draftDrawNote?.anchor)
+                    const draftDrawPoint = resolveAnchorPagePoint(
+                      iframeDoc,
+                      ts.draftDrawNote?.anchor
+                    )
                     const resolvedDraftDrawNote: ResolvedDraftDrawNote | null = ts.draftDrawNote
                       ? {
                           ...ts.draftDrawNote,
                           resolvedPoint: draftDrawPoint ?? undefined,
-                          orphaned: Boolean(ts.draftDrawNote.anchor && !draftDrawPoint),
+                          orphaned: Boolean(ts.draftDrawNote.anchor && !draftDrawPoint)
                         }
                       : null
 
                     return (
-                  <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "row" }}>
-                  <div
-                    ref={canvasContainerRef}
-                    style={{ position: "relative", flex: 1, minWidth: 0, height: "100%" }}
-                    onClick={() => {
-                      if (ts.activeCommentId) updateTs(activeTabId, { activeCommentId: null })
-                    }}
-                  >
-                    {/* Iteration in-progress banner */}
-                    {isGenerating && (
-                      <div style={{
-                        position: "absolute", top: 0, left: 0, right: 0, zIndex: 10,
-                        display: "flex", alignItems: "center", gap: 8,
-                        padding: "8px 16px",
-                        background: "rgba(26,26,26,0.82)",
-                        backdropFilter: "blur(6px)",
-                        color: "#ffffff", fontSize: 13, fontWeight: 500,
-                      }}>
-                        <PulsingDot />
-                        <span>正在更新设计…下方显示上一版</span>
-                        <button
-                          onClick={handleCancel}
-                          style={{ marginLeft: "auto", padding: "3px 12px", fontSize: 12, fontWeight: 600,
-                            background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.25)",
-                            borderRadius: 6, color: "#fff", cursor: "pointer" }}
+                      <div
+                        style={{
+                          position: "absolute",
+                          inset: 0,
+                          display: "flex",
+                          flexDirection: "row"
+                        }}
+                      >
+                        <div
+                          ref={canvasContainerRef}
+                          style={{ position: "relative", flex: 1, minWidth: 0, height: "100%" }}
+                          onClick={() => {
+                            if (ts.activeCommentId) updateTs(activeTabId, { activeCommentId: null })
+                          }}
                         >
-                          停止
-                        </button>
-                      </div>
-                    )}
-                    {/* Active variation label badge */}
-                    {activeVar && !isGenerating && (
-                      <div style={{
-                        position: "absolute", top: 12, right: 16, zIndex: 5,
-                        padding: "4px 12px", borderRadius: 999, fontSize: 12, fontWeight: 600,
-                        background: varColor, color: "#fff",
-                        boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
-                        pointerEvents: "none",
-                      }}>
-                        {activeVar.label}
-                      </div>
-                    )}
-                    {/* Scroll wrapper — overflow lives here so the iframe's height: 100% resolves
+                          {/* Iteration in-progress banner */}
+                          {isGenerating && (
+                            <div
+                              style={{
+                                position: "absolute",
+                                top: 0,
+                                left: 0,
+                                right: 0,
+                                zIndex: 10,
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 8,
+                                padding: "8px 16px",
+                                background: "rgba(26,26,26,0.82)",
+                                backdropFilter: "blur(6px)",
+                                color: "#ffffff",
+                                fontSize: 13,
+                                fontWeight: 500
+                              }}
+                            >
+                              <PulsingDot />
+                              <span>正在更新设计…下方显示上一版</span>
+                              <button
+                                onClick={handleCancel}
+                                style={{
+                                  marginLeft: "auto",
+                                  padding: "3px 12px",
+                                  fontSize: 12,
+                                  fontWeight: 600,
+                                  background: "rgba(255,255,255,0.15)",
+                                  border: "1px solid rgba(255,255,255,0.25)",
+                                  borderRadius: 6,
+                                  color: "#fff",
+                                  cursor: "pointer"
+                                }}
+                              >
+                                停止
+                              </button>
+                            </div>
+                          )}
+                          {/* Active variation label badge */}
+                          {activeVar && !isGenerating && (
+                            <div
+                              style={{
+                                position: "absolute",
+                                top: 12,
+                                right: 16,
+                                zIndex: 5,
+                                padding: "4px 12px",
+                                borderRadius: 999,
+                                fontSize: 12,
+                                fontWeight: 600,
+                                background: varColor,
+                                color: "#fff",
+                                boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
+                                pointerEvents: "none"
+                              }}
+                            >
+                              {activeVar.label}
+                            </div>
+                          )}
+                          {/* Scroll wrapper — overflow lives here so the iframe's height: 100% resolves
                         against canvasContainerRef (which has explicit height: "100%") rather than
                         an overflow:auto ancestor (which breaks CSS % height resolution in Chromium). */}
-                    <div
-                      ref={previewScrollRef}
-                      style={{ position: "absolute", inset: 0, overflow: "auto" }}
-                      onScroll={() => updatePreviewScrollState()}
-                    >
-                      <iframe
-                        ref={iframeRef}
-                        key={`${ts.activeVariationId ?? "all"}-${ts.reloadKey}`}
-                        srcDoc={displayHtml}
-                        style={{
-                          display: "block",
-                          border: "none",
-                          transformOrigin: "top left",
-                          transform: `scale(${zoom / 100})`,
-                          width: `${10000 / zoom}%`,
-                          height: `${10000 / zoom}%`,
-                          // Comment + Edit modes need pointer events (scripts handle clicks via postMessage)
-                          pointerEvents: (activeMode === null || activeMode === "comment" || activeMode === "edit") ? "auto" : "none",
-                        }}
-                        sandbox="allow-scripts allow-same-origin"
-                        title="Design Preview"
-                        onLoad={() => {
-                          // Block link/form navigation so clicks inside the preview
-                          // never navigate the iframe away from the design
-                          injectIntoIframe(iframeRef.current, NAV_BLOCK_INJECT)
-                          // Always inject scroll tracker so pins stay anchored to content
-                          injectIntoIframe(iframeRef.current, SCROLL_INJECT)
-                          // Reset scroll state — new iframe always starts at (0, 0)
-                          updateTs(activeTabId, { iframeScrollX: 0, iframeScrollY: 0, selectedElement: null })
-                          if (previewScrollRef.current) {
-                            previewScrollRef.current.scrollLeft = 0
-                            previewScrollRef.current.scrollTop = 0
-                          }
-                          // Re-inject mode scripts after iframe reloads (variation switch, etc.)
-                          if (activeMode === "comment") injectIntoIframe(iframeRef.current, COMMENT_INJECT)
-                          if (activeMode === "edit") injectIntoIframe(iframeRef.current, EDIT_SELECT_INJECT)
-                        }}
-                      />
-                    </div>
-                    {(activeMode === "draw" || ts.drawStrokes.length > 0 || ts.drawNotes.length > 0) && (
-                      <DrawLayer
-                        key={activeMode === "draw" ? "draw-active" : "draw-idle"}
-                        active={activeMode === "draw"}
-                        mode={ts.drawToolMode}
-                        strokes={resolvedDrawStrokes}
-                        notes={resolvedDrawNotes}
-                        draftNote={resolvedDraftDrawNote}
-                        zoom={zoom}
-                        scrollX={ts.iframeScrollX}
-                        scrollY={ts.iframeScrollY}
-                        onStrokeComplete={handleDrawStrokeComplete}
-                        onNoteDraft={handleDrawNoteDraft}
-                        onNoteSubmit={handleDrawNoteSubmit}
-                        onNoteCancel={handleDrawNoteCancel}
-                        onWheelScroll={handleDrawWheel}
-                      />
-                    )}
-
-                    {activeMode === "draw" && (
-                      <DrawActionBar
-                        mode={ts.drawToolMode}
-                        count={ts.drawStrokes.length + ts.drawNotes.length}
-                        onModeChange={handleDrawToolModeChange}
-                        onClose={() => setActiveMode(null)}
-                        onUndo={handleUndoDrawStroke}
-                        onClear={handleClearDrawStrokes}
-                        onSend={handleSendDrawStrokes}
-                      />
-                    )}
-                    {/* ── Comment layer ── */}
-                    {/* No click overlay needed — iframe script handles clicks via postMessage */}
-
-                    {/* Existing comment pins — always visible while comment mode or there are comments */}
-                    {(activeMode === "comment" || ts.comments.length > 0) && (() => {
-                      const zf = zoom / 100
-                      const cw = canvasContainerRef.current?.clientWidth || 800
-                      const ch = canvasContainerRef.current?.clientHeight || 600
-                      return ts.comments.map((c, i) => {
-                        const anchoredPoint = resolveAnchorPagePoint(iframeDoc, c.anchor)
-                        const pageX = anchoredPoint?.x ?? c.pageX
-                        const pageY = anchoredPoint?.y ?? c.pageY
-                        // Convert document-absolute coords to current canvas-relative % via scroll offset
-                        const pinLeft = ((pageX - ts.iframeScrollX) * zf / cw) * 100
-                        const pinTop  = ((pageY - ts.iframeScrollY) * zf / ch) * 100
-                        // Hide pins that have scrolled out of the visible canvas area
-                        const inView = pinLeft > -6 && pinLeft < 106 && pinTop > -6 && pinTop < 106
-                        if (!inView) return null
-                        return (
-                          <CommentPin
-                            key={c.id}
-                            comment={c}
-                            index={i + 1}
-                            pinLeft={pinLeft}
-                            pinTop={pinTop}
-                            isActive={ts.activeCommentId === c.id}
-                            onToggle={() => updateTs(activeTabId, {
-                              activeCommentId: ts.activeCommentId === c.id ? null : c.id,
-                              draftComment: null,
-                            })}
-                            onSend={(text) => handleSendComment(c.id, text)}
-                            onEdit={(newText) => handleEditComment(c.id, newText)}
-                          />
-                        )
-                      })
-                    })()}
-
-                    {/* Draft comment input — shown after clicking canvas */}
-                    {ts.draftComment && (() => {
-                      const zf = zoom / 100
-                      const cw = canvasContainerRef.current?.clientWidth || 800
-                      const ch = canvasContainerRef.current?.clientHeight || 600
-                      const anchoredPoint = resolveAnchorPagePoint(iframeDoc, ts.draftComment.anchor)
-                      const pageX = anchoredPoint?.x ?? ts.draftComment.pageX
-                      const pageY = anchoredPoint?.y ?? ts.draftComment.pageY
-                      const draftLeft = Math.min(95, Math.max(2,
-                        ((pageX - ts.iframeScrollX) * zf / cw) * 100
-                      ))
-                      const draftTop = Math.min(95, Math.max(2,
-                        ((pageY - ts.iframeScrollY) * zf / ch) * 100
-                      ))
-                      return (
-                        <CommentDraftInput
-                          x={draftLeft}
-                          y={draftTop}
-                          elementDesc={ts.draftComment.elementDesc}
-                          onSubmit={(text) => {
-                            if (!text.trim()) { updateTs(activeTabId, { draftComment: null }); return }
-                            const newComment: CommentItem = {
-                              id: uuid(),
-                              pageX: ts.draftComment!.pageX,
-                              pageY: ts.draftComment!.pageY,
-                              text: text.trim(),
-                              elementDesc: ts.draftComment!.elementDesc,
-                              anchor: ts.draftComment!.anchor,
-                              createdAt: Date.now(),
-                            }
-                            updateTs(activeTabId, (prev) => ({
-                              comments: [...prev.comments, newComment],
-                              draftComment: null,
-                              activeCommentId: newComment.id,
-                            }))
-                          }}
-                          onSend={(text) => {
-                            if (!text.trim()) return
-                            const draft = ts.draftComment!
-                            handleSendDraftComment(text, draft.elementDesc)
-                          }}
-                          onCancel={() => updateTs(activeTabId, { draftComment: null })}
-                        />
-                      )
-                    })()}
-
-                    {/* Comment bottom bar: hint when empty, Apply bar when there are comments */}
-                    {activeMode === "comment" && !ts.draftComment && (
-                      <div style={{
-                        position: "absolute", bottom: 20, left: "50%", transform: "translateX(-50%)",
-                        display: "flex", alignItems: "center", gap: 10,
-                        padding: ts.comments.length > 0 ? "8px 8px 8px 16px" : "6px 16px",
-                        borderRadius: 999,
-                        background: "rgba(26,26,26,0.82)", backdropFilter: "blur(8px)",
-                        boxShadow: "0 4px 16px rgba(0,0,0,0.2)",
-                        whiteSpace: "nowrap",
-                      }}>
-                        <span style={{ fontSize: 12, fontWeight: 500, color: ts.comments.length > 0 ? "#d1d5db" : "#fff" }}>
-                          {ts.comments.length === 0
-                            ? "点击元素添加批注"
-                            : ts.comments.length === 1
-                              ? "1 条批注已保存"
-                              : `${ts.comments.length} 条批注已保存`}
-                        </span>
-                        {ts.comments.length > 1 && (
-                          <button
-                            onClick={(e) => { e.stopPropagation(); handleApplyComments() }}
-                            style={{
-                              padding: "5px 14px", borderRadius: 999,
-                              background: "#cc785c", border: "none",
-                              fontSize: 12, fontWeight: 700, color: "#fff",
-                              cursor: "pointer", fontFamily: "inherit",
-                            }}
+                          <div
+                            ref={previewScrollRef}
+                            style={{ position: "absolute", inset: 0, overflow: "auto" }}
+                            onScroll={() => updatePreviewScrollState()}
                           >
-                            发送全部 →
-                          </button>
+                            <iframe
+                              ref={iframeRef}
+                              key={`${ts.activeVariationId ?? "all"}-${ts.reloadKey}`}
+                              srcDoc={displayHtml}
+                              style={{
+                                display: "block",
+                                border: "none",
+                                transformOrigin: "top left",
+                                transform: `scale(${zoom / 100})`,
+                                width: `${10000 / zoom}%`,
+                                height: `${10000 / zoom}%`,
+                                // Comment + Edit modes need pointer events (scripts handle clicks via postMessage)
+                                pointerEvents:
+                                  activeMode === null ||
+                                  activeMode === "comment" ||
+                                  activeMode === "edit"
+                                    ? "auto"
+                                    : "none"
+                              }}
+                              sandbox="allow-scripts allow-same-origin"
+                              title="Design Preview"
+                              onLoad={() => {
+                                // Block link/form navigation so clicks inside the preview
+                                // never navigate the iframe away from the design
+                                injectIntoIframe(iframeRef.current, NAV_BLOCK_INJECT)
+                                // Always inject scroll tracker so pins stay anchored to content
+                                injectIntoIframe(iframeRef.current, SCROLL_INJECT)
+                                // Reset scroll state — new iframe always starts at (0, 0)
+                                updateTs(activeTabId, {
+                                  iframeScrollX: 0,
+                                  iframeScrollY: 0,
+                                  selectedElement: null
+                                })
+                                if (previewScrollRef.current) {
+                                  previewScrollRef.current.scrollLeft = 0
+                                  previewScrollRef.current.scrollTop = 0
+                                }
+                                // Re-inject mode scripts after iframe reloads (variation switch, etc.)
+                                if (activeMode === "comment")
+                                  injectIntoIframe(iframeRef.current, COMMENT_INJECT)
+                                if (activeMode === "edit")
+                                  injectIntoIframe(iframeRef.current, EDIT_SELECT_INJECT)
+                              }}
+                            />
+                          </div>
+                          {(activeMode === "draw" ||
+                            ts.drawStrokes.length > 0 ||
+                            ts.drawNotes.length > 0) && (
+                            <DrawLayer
+                              key={activeMode === "draw" ? "draw-active" : "draw-idle"}
+                              active={activeMode === "draw"}
+                              mode={ts.drawToolMode}
+                              strokes={resolvedDrawStrokes}
+                              notes={resolvedDrawNotes}
+                              draftNote={resolvedDraftDrawNote}
+                              zoom={zoom}
+                              scrollX={ts.iframeScrollX}
+                              scrollY={ts.iframeScrollY}
+                              onStrokeComplete={handleDrawStrokeComplete}
+                              onNoteDraft={handleDrawNoteDraft}
+                              onNoteSubmit={handleDrawNoteSubmit}
+                              onNoteCancel={handleDrawNoteCancel}
+                              onWheelScroll={handleDrawWheel}
+                            />
+                          )}
+
+                          {activeMode === "draw" && (
+                            <DrawActionBar
+                              mode={ts.drawToolMode}
+                              count={ts.drawStrokes.length + ts.drawNotes.length}
+                              onModeChange={handleDrawToolModeChange}
+                              onClose={() => setActiveMode(null)}
+                              onUndo={handleUndoDrawStroke}
+                              onClear={handleClearDrawStrokes}
+                              onSend={handleSendDrawStrokes}
+                            />
+                          )}
+                          {/* ── Comment layer ── */}
+                          {/* No click overlay needed — iframe script handles clicks via postMessage */}
+
+                          {/* Existing comment pins — always visible while comment mode or there are comments */}
+                          {(activeMode === "comment" || ts.comments.length > 0) &&
+                            (() => {
+                              const zf = zoom / 100
+                              const cw = canvasContainerRef.current?.clientWidth || 800
+                              const ch = canvasContainerRef.current?.clientHeight || 600
+                              return ts.comments.map((c, i) => {
+                                const anchoredPoint = resolveAnchorPagePoint(iframeDoc, c.anchor)
+                                const pageX = anchoredPoint?.x ?? c.pageX
+                                const pageY = anchoredPoint?.y ?? c.pageY
+                                // Convert document-absolute coords to current canvas-relative % via scroll offset
+                                const pinLeft = (((pageX - ts.iframeScrollX) * zf) / cw) * 100
+                                const pinTop = (((pageY - ts.iframeScrollY) * zf) / ch) * 100
+                                // Hide pins that have scrolled out of the visible canvas area
+                                const inView =
+                                  pinLeft > -6 && pinLeft < 106 && pinTop > -6 && pinTop < 106
+                                if (!inView) return null
+                                return (
+                                  <CommentPin
+                                    key={c.id}
+                                    comment={c}
+                                    index={i + 1}
+                                    pinLeft={pinLeft}
+                                    pinTop={pinTop}
+                                    isActive={ts.activeCommentId === c.id}
+                                    onToggle={() =>
+                                      updateTs(activeTabId, {
+                                        activeCommentId: ts.activeCommentId === c.id ? null : c.id,
+                                        draftComment: null
+                                      })
+                                    }
+                                    onSend={(text) => handleSendComment(c.id, text)}
+                                    onEdit={(newText) => handleEditComment(c.id, newText)}
+                                  />
+                                )
+                              })
+                            })()}
+
+                          {/* Draft comment input — shown after clicking canvas */}
+                          {ts.draftComment &&
+                            (() => {
+                              const zf = zoom / 100
+                              const cw = canvasContainerRef.current?.clientWidth || 800
+                              const ch = canvasContainerRef.current?.clientHeight || 600
+                              const anchoredPoint = resolveAnchorPagePoint(
+                                iframeDoc,
+                                ts.draftComment.anchor
+                              )
+                              const pageX = anchoredPoint?.x ?? ts.draftComment.pageX
+                              const pageY = anchoredPoint?.y ?? ts.draftComment.pageY
+                              const draftLeft = Math.min(
+                                95,
+                                Math.max(2, (((pageX - ts.iframeScrollX) * zf) / cw) * 100)
+                              )
+                              const draftTop = Math.min(
+                                95,
+                                Math.max(2, (((pageY - ts.iframeScrollY) * zf) / ch) * 100)
+                              )
+                              return (
+                                <CommentDraftInput
+                                  x={draftLeft}
+                                  y={draftTop}
+                                  elementDesc={ts.draftComment.elementDesc}
+                                  onSubmit={(text) => {
+                                    if (!text.trim()) {
+                                      updateTs(activeTabId, { draftComment: null })
+                                      return
+                                    }
+                                    const newComment: CommentItem = {
+                                      id: uuid(),
+                                      pageX: ts.draftComment!.pageX,
+                                      pageY: ts.draftComment!.pageY,
+                                      text: text.trim(),
+                                      elementDesc: ts.draftComment!.elementDesc,
+                                      anchor: ts.draftComment!.anchor,
+                                      createdAt: Date.now()
+                                    }
+                                    updateTs(activeTabId, (prev) => ({
+                                      comments: [...prev.comments, newComment],
+                                      draftComment: null,
+                                      activeCommentId: newComment.id
+                                    }))
+                                  }}
+                                  onSend={(text) => {
+                                    if (!text.trim()) return
+                                    const draft = ts.draftComment!
+                                    handleSendDraftComment(text, draft.elementDesc)
+                                  }}
+                                  onCancel={() => updateTs(activeTabId, { draftComment: null })}
+                                />
+                              )
+                            })()}
+
+                          {/* Comment bottom bar: hint when empty, Apply bar when there are comments */}
+                          {activeMode === "comment" && !ts.draftComment && (
+                            <div
+                              style={{
+                                position: "absolute",
+                                bottom: 20,
+                                left: "50%",
+                                transform: "translateX(-50%)",
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 10,
+                                padding: ts.comments.length > 0 ? "8px 8px 8px 16px" : "6px 16px",
+                                borderRadius: 999,
+                                background: "rgba(26,26,26,0.82)",
+                                backdropFilter: "blur(8px)",
+                                boxShadow: "0 4px 16px rgba(0,0,0,0.2)",
+                                whiteSpace: "nowrap"
+                              }}
+                            >
+                              <span
+                                style={{
+                                  fontSize: 12,
+                                  fontWeight: 500,
+                                  color: ts.comments.length > 0 ? "#d1d5db" : "#fff"
+                                }}
+                              >
+                                {ts.comments.length === 0
+                                  ? "点击元素添加批注"
+                                  : ts.comments.length === 1
+                                    ? "1 条批注已保存"
+                                    : `${ts.comments.length} 条批注已保存`}
+                              </span>
+                              {ts.comments.length > 1 && (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    handleApplyComments()
+                                  }}
+                                  style={{
+                                    padding: "5px 14px",
+                                    borderRadius: 999,
+                                    background: "#cc785c",
+                                    border: "none",
+                                    fontSize: 12,
+                                    fontWeight: 700,
+                                    color: "#fff",
+                                    cursor: "pointer",
+                                    fontFamily: "inherit"
+                                  }}
+                                >
+                                  发送全部 →
+                                </button>
+                              )}
+                            </div>
+                          )}
+
+                          {/* Floating Tweaks Panel — bottom-right variation switcher */}
+                          {ts.variations.length > 0 && !isGenerating && (
+                            <TweaksFloatingPanel
+                              variations={ts.variations}
+                              activeId={ts.activeVariationId}
+                              position={ts.variationPanelPosition}
+                              onPositionChange={(position) =>
+                                updateTs(activeTabId, { variationPanelPosition: position })
+                              }
+                              onSelect={(id) =>
+                                updateTs(activeTabId, { activeVariationId: id, rightTab: "design" })
+                              }
+                            />
+                          )}
+                        </div>
+
+                        {/* ── Right Properties Panel (Edit mode) ── */}
+                        {activeMode === "edit" && (
+                          <ElementPropsPanel
+                            key={ts.selectedElement?.edId ?? "none"}
+                            selectedElement={ts.selectedElement}
+                            onStyleChange={handleEditStyleChange}
+                          />
                         )}
                       </div>
-                    )}
-
-                    {/* Floating Tweaks Panel — bottom-right variation switcher */}
-                    {ts.variations.length > 0 && !isGenerating && (
-                      <TweaksFloatingPanel
-                        variations={ts.variations}
-                        activeId={ts.activeVariationId}
-                        position={ts.variationPanelPosition}
-                        onPositionChange={(position) => updateTs(activeTabId, { variationPanelPosition: position })}
-                        onSelect={(id) => updateTs(activeTabId, { activeVariationId: id, rightTab: "design" })}
-                      />
-                    )}
-                  </div>
-
-                  {/* ── Right Properties Panel (Edit mode) ── */}
-                  {activeMode === "edit" && (
-                    <ElementPropsPanel
-                      key={ts.selectedElement?.edId ?? "none"}
-                      selectedElement={ts.selectedElement}
-                      onStyleChange={handleEditStyleChange}
-                    />
-                  )}
-                  </div>
                     )
                   })()
                 ) : (
@@ -4885,8 +5880,10 @@ function downloadHtml(html: string, metadata?: DesignArtifactMetadata | null) {
 
 function downloadBlob(data: BlobPart, filename: string, type: string) {
   const blob = data instanceof Blob ? data : new Blob([data], { type })
-  const url  = URL.createObjectURL(blob)
-  const a    = document.createElement("a")
-  a.href = url; a.download = filename; a.click()
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement("a")
+  a.href = url
+  a.download = filename
+  a.click()
   URL.revokeObjectURL(url)
 }

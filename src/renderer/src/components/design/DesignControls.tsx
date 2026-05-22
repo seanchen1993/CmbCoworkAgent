@@ -10,7 +10,7 @@ export function EmptyState({
   onAttachLink,
   onImportUrl,
   onImportHtml,
-  onImportPrototypeZip,
+  onImportPrototypeZip
 }: {
   onUploadScreenshot: () => void
   onAttachCode: () => void
@@ -37,7 +37,7 @@ export function EmptyState({
 
 export function DesignApprovalBar({
   approval,
-  onDecision,
+  onDecision
 }: {
   approval: DesignApprovalRequest
   onDecision: (decision: DesignApprovalDecision) => void
@@ -48,16 +48,20 @@ export function DesignApprovalBar({
     operation === "code_exec" ||
     operation === "prepare_save_code_exec_tool" ||
     operation === "save_code_exec_tool"
-  const approvalTypes = approval._approvalTypes ?? ["approve", "approve_session", "approve_permanent", "reject"]
+  const approvalTypes = approval._approvalTypes ?? [
+    "approve",
+    "approve_session",
+    "approve_permanent",
+    "reject"
+  ]
   const args = approval.tool_call?.args ?? {}
-  const detail =
-    isFileApproval
-      ? `${operation === "write_file" ? "写入" : "编辑"}: ${String(approval.filePath || args.filePath || "unknown")}`
-      : approval.command
-        ? approval.command
-        : isCodeApproval
-          ? String(approval.code || args.code || "")
-          : String(args.command || "unknown command")
+  const detail = isFileApproval
+    ? `${operation === "write_file" ? "写入" : "编辑"}: ${String(approval.filePath || args.filePath || "unknown")}`
+    : approval.command
+      ? approval.command
+      : isCodeApproval
+        ? String(approval.code || args.code || "")
+        : String(args.command || "unknown command")
 
   return (
     <div
@@ -66,7 +70,7 @@ export function DesignApprovalBar({
         padding: 12,
         borderRadius: 10,
         border: `1px solid ${isFileApproval ? "#9bbcf0" : isCodeApproval ? "#9fd3b2" : "#efcf8b"}`,
-        background: isFileApproval ? "#f2f7ff" : isCodeApproval ? "#f0faf4" : "#fff8e8",
+        background: isFileApproval ? "#f2f7ff" : isCodeApproval ? "#f0faf4" : "#fff8e8"
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
@@ -94,7 +98,7 @@ export function DesignApprovalBar({
           fontSize: 12,
           lineHeight: 1.45,
           whiteSpace: "pre-wrap",
-          wordBreak: "break-word",
+          wordBreak: "break-word"
         }}
       >
         {detail}
@@ -116,7 +120,10 @@ export function DesignApprovalBar({
           </button>
         )}
         {approvalTypes.includes("approve_permanent") && (
-          <button onClick={() => onDecision("approve_permanent")} style={{ ...S.approvalPermanentBtn }}>
+          <button
+            onClick={() => onDecision("approve_permanent")}
+            style={{ ...S.approvalPermanentBtn }}
+          >
             始终允许
           </button>
         )}
@@ -134,7 +141,7 @@ export function RightTabBtn({
   label,
   active,
   onClick,
-  closable,
+  closable
 }: {
   label: string
   active: boolean
@@ -161,25 +168,71 @@ export function RightTabBtn({
         cursor: "pointer",
         fontFamily: "inherit",
         position: "relative",
-        top: 1,
+        top: 1
       }}
     >
-      {!active && closable && <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#cc785c", flexShrink: 0 }} />}
+      {!active && closable && (
+        <span
+          style={{ width: 6, height: 6, borderRadius: "50%", background: "#cc785c", flexShrink: 0 }}
+        />
+      )}
       {label}
       {closable && active && <span style={{ fontSize: 12, color: "#aaa", marginLeft: 2 }}>×</span>}
     </button>
   )
 }
 
-function ContextCard({ icon, label, hint, onClick }: { icon: string; label: string; hint?: boolean; onClick: () => void }) {
+function ContextCard({
+  icon,
+  label,
+  hint,
+  onClick
+}: {
+  icon: string
+  label: string
+  hint?: boolean
+  onClick: () => void
+}) {
   return (
     <button
       onClick={onClick}
-      style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", background: "#ffffff", border: "1px solid #e8e6e0", borderRadius: 24, cursor: "pointer", fontFamily: "inherit", fontSize: 14, fontWeight: 500, color: "#1a1a1a", textAlign: "left", width: "100%" }}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+        padding: "12px 16px",
+        background: "#ffffff",
+        border: "1px solid #e8e6e0",
+        borderRadius: 24,
+        cursor: "pointer",
+        fontFamily: "inherit",
+        fontSize: 14,
+        fontWeight: 500,
+        color: "#1a1a1a",
+        textAlign: "left",
+        width: "100%"
+      }}
     >
       <span style={{ fontSize: 16 }}>{icon}</span>
       <span style={{ flex: 1 }}>{label}</span>
-      {hint && <span style={{ width: 18, height: 18, borderRadius: "50%", border: "1px solid #c0beb8", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: "#8a8a8a", flexShrink: 0 }}>?</span>}
+      {hint && (
+        <span
+          style={{
+            width: 18,
+            height: 18,
+            borderRadius: "50%",
+            border: "1px solid #c0beb8",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: 11,
+            color: "#8a8a8a",
+            flexShrink: 0
+          }}
+        >
+          ?
+        </span>
+      )}
     </button>
   )
 }
@@ -190,13 +243,13 @@ export function ContextPill({
   badge,
   color,
   onRemove,
-  onClick,
+  onClick
 }: {
   icon: string
   label: string
   badge?: string
   color: { bg: string; border: string; text: string; dot: string }
-  onRemove: () => void
+  onRemove?: () => void
   onClick?: () => void
 }) {
   return (
@@ -209,35 +262,40 @@ export function ContextPill({
         border: `1px solid ${color.border}`,
         borderRadius: 6,
         padding: "3px 6px 3px 8px",
-        cursor: onClick ? "pointer" : "default",
+        cursor: onClick ? "pointer" : "default"
       }}
       onClick={onClick}
     >
       <span style={{ fontSize: 12 }}>{icon}</span>
       <span style={{ fontSize: 12, fontWeight: 600, color: color.text }}>{label}</span>
       {badge && <span style={{ fontSize: 10, color: color.text, opacity: 0.6 }}>{badge}</span>}
-      <button
-        onClick={(e) => { e.stopPropagation(); onRemove() }}
-        style={{
-          width: 14,
-          height: 14,
-          borderRadius: "50%",
-          background: color.dot,
-          border: "none",
-          color: "#fff",
-          fontSize: 9,
-          cursor: "pointer",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          lineHeight: 1,
-          fontFamily: "inherit",
-          padding: 0,
-          marginLeft: 2,
-        }}
-      >
-        ×
-      </button>
+      {onRemove && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation()
+            onRemove()
+          }}
+          style={{
+            width: 14,
+            height: 14,
+            borderRadius: "50%",
+            background: color.dot,
+            border: "none",
+            color: "#fff",
+            fontSize: 9,
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            lineHeight: 1,
+            fontFamily: "inherit",
+            padding: 0,
+            marginLeft: 2
+          }}
+        >
+          ×
+        </button>
+      )}
     </div>
   )
 }
@@ -247,7 +305,7 @@ export function ModelSelector({
   selectedId,
   onChange,
   onEdit,
-  onAdd,
+  onAdd
 }: {
   models: ModelOption[]
   selectedId: string | null
@@ -283,10 +341,17 @@ export function ModelSelector({
             cursor: "pointer",
             fontFamily: "inherit",
             outline: "none",
-            maxWidth: 170,
+            maxWidth: 170
           }}
         >
-          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 130 }}>
+          <span
+            style={{
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              maxWidth: 130
+            }}
+          >
             {selectedLabel}
           </span>
           <ChevronDown size={12} />
@@ -310,12 +375,15 @@ export function ModelSelector({
                   disabled={!available}
                   title={available ? model.model : "请先在模型配置中填写 API 密钥"}
                   className={`flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs font-mono transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
-                    active ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+                    active
+                      ? "bg-muted text-foreground"
+                      : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"
                   }`}
                 >
                   <Key className="size-3.5 shrink-0" />
                   <span className="min-w-0 flex-1 truncate">
-                    {model.name || model.model}{!available ? "（未配置密钥）" : ""}
+                    {model.name || model.model}
+                    {!available ? "（未配置密钥）" : ""}
                   </span>
                   {active && <Check className="size-3.5 shrink-0" />}
                 </button>
@@ -355,9 +423,32 @@ export function ModelSelector({
   )
 }
 
-export function ToolbarIcon({ children, title, onClick }: { children: React.ReactNode; title?: string; onClick?: () => void }) {
+export function ToolbarIcon({
+  children,
+  title,
+  onClick
+}: {
+  children: React.ReactNode
+  title?: string
+  onClick?: () => void
+}) {
   return (
-    <button onClick={onClick} title={title} style={{ width: 30, height: 30, display: "flex", alignItems: "center", justifyContent: "center", background: "none", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 15 }}>
+    <button
+      onClick={onClick}
+      title={title}
+      style={{
+        width: 30,
+        height: 30,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        background: "none",
+        border: "none",
+        borderRadius: 6,
+        cursor: "pointer",
+        fontSize: 15
+      }}
+    >
       {children}
     </button>
   )
@@ -367,7 +458,7 @@ export function TweaksBtn({
   label,
   icon,
   active,
-  onClick,
+  onClick
 }: {
   label: string
   icon: React.ReactNode
@@ -392,7 +483,7 @@ export function TweaksBtn({
         borderRadius: 7,
         cursor: "pointer",
         fontFamily: "inherit",
-        transition: "all 0.12s ease",
+        transition: "all 0.12s ease"
       }}
     >
       {icon}
@@ -431,11 +522,5 @@ export function EditIcon({ active }: { active: boolean }) {
 }
 
 export function DrawIcon({ active }: { active: boolean }) {
-  return (
-    <PenLine
-      size={13}
-      strokeWidth={1.8}
-      color={active ? "#cc785c" : "#6a6a6a"}
-    />
-  )
+  return <PenLine size={13} strokeWidth={1.8} color={active ? "#cc785c" : "#6a6a6a"} />
 }
